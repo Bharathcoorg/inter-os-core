@@ -4200,6 +4200,19 @@ pub extern "C" fn _start() -> ! {
                             ) {
                                 settings.open_wallpapers();
                             }
+                        } else if (110..=170).contains(&input.y) {
+                            let section = if input.x < 300 {
+                                Section::Power
+                            } else {
+                                Section::System
+                            };
+                            settings.current_section = Some(section);
+                            settings.refresh_wallpaper_values();
+                            std::log(
+                                0,
+                                "[SETTINGS APP] Category / tab switched.",
+                            )
+                            .ok();
                         } else if let Some(section) = settings.current_section {
                             // Detail-screen controls (hit cells match the drawn
                             // geometry exactly).
@@ -4254,7 +4267,7 @@ pub extern "C" fn _start() -> ! {
                             settings.refresh_wallpaper_values();
                             std::log(
                                 0,
-                                "[SETTINGS APP] System Space category opened.",
+                                "[SETTINGS APP] System Space category opened; tab switched.",
                             )
                             .ok();
                         }

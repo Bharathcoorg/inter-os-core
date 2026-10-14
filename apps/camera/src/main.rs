@@ -98,6 +98,8 @@ pub struct CameraApp {
     /// `total_photos` as text, pre-rendered for the same reason as above.
     pub shots_label: [u8; 16],
     pub shots_label_len: usize,
+    pub head_x: usize,
+    pub sub_x: usize,
 }
 
 /// Label shown before any capture has succeeded: a real answer ("the HAL has not
@@ -163,7 +165,17 @@ impl CameraApp {
             frame_label_len: 8,
             shots_label: ZERO_SHOTS_LABEL,
             shots_label_len: 7,
+            head_x: 0,
+            sub_x: 0,
         }
+    }
+
+    /// Precomputes text positions for static labels to prevent per-pixel recalculation.
+    pub fn init(&mut self) {
+        let head = b"No camera sensor bound";
+        let sub = b"Viewfinder inactive - no frames from the camera HAL";
+        self.head_x = centred_x(head, 2, 20, VIEWFINDER_W);
+        self.sub_x = centred_x(sub, 1, 20, VIEWFINDER_W);
     }
 
     /// Asks the kernel whether this task holds camera authority, and records the
@@ -544,6 +556,14 @@ fn test_text(
     max_w: usize,
     color: u32,
 ) -> Option<u32> {
+    if scale < 2 {
+        let w = std::design::font::measure(text, scale);
+        let h = std::design::font::line_height(scale);
+        if x < x0 || x - x0 >= w || y < y0 || y - y0 >= h {
+            return None;
+        }
+        return std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, BG_DARK, false);
+    }
     let (bx, bt, bw, bh) = outline_text::run_box(x0, y0, scale, text);
     if x < bx || x - bx >= bw || y < bt || y - bt >= bh {
         return None;
@@ -823,40 +843,38 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
         // advances when the frame call succeeds, so a bound sensor brings the
         // live chrome back on its own.
         if camera.total_video_frames == 0 {
-            // The absence, stated in the space the feed would have occupied.
-            // Centred by measured width, not a hand-typed offset.
-            let head = b"No camera sensor bound";
-            let sub = b"Viewfinder inactive - no frames from the camera HAL";
-            // WHY `centred_x` and not `360 - measure/2`: the headline is drawn on
-            // the outline face, whose advance table is not the bitmap cell's, so
-            // a box measured with the latter put the run 5px left of the
-            // viewfinder's centre. Measured in a capture before this fix: ink
-            // x 164..547 for an intended centre of 360.
-            if let Some(c) = test_text(
-                x,
-                y,
-                centred_x(head, 2, 20, VIEWFINDER_W),
-                470,
-                2,
-                head,
-                VIEWFINDER_W,
-                TEXT_PRIMARY,
-            ) {
-                return c;
-            }
-            if let Some(c) = test_text(
-                x,
-                y,
-                // WHY `centred_x` for this one too: it is also an outline run, so
-                // `font::measure` is the wrong table for it as well.
-                centred_x(sub, 1, 20, VIEWFINDER_W),
-                530,
-                1,
-                sub,
-                VIEWFINDER_W,
-                TEXT_MUTED,
-            ) {
-                return c;
+            // Fast bounds check: head sits at y=470 (scale 2, height <= 48), sub sits at y=530 (scale 1, height <= 24).
+            // Outside y in 465..560, the viewfinder canvas has no text ink.
+            if y >= 465 && y < 560 {
+                let head = b"No camera sensor bound";
+                let sub = b"Viewfinder inactive - no frames from the camera HAL";
+                if y < 525 {
+                    if let Some(c) = test_text(
+                        x,
+                        y,
+                        camera.head_x,
+                        470,
+                        2,
+                        head,
+                        VIEWFINDER_W,
+                        TEXT_PRIMARY,
+                    ) {
+                        return c;
+                    }
+                } else if y >= 528 {
+                    if let Some(c) = test_text(
+                        x,
+                        y,
+                        camera.sub_x,
+                        530,
+                        1,
+                        sub,
+                        VIEWFINDER_W,
+                        TEXT_MUTED,
+                    ) {
+                        return c;
+                    }
+                }
             }
             return 0xFF080D1A;
         }
@@ -966,31 +984,33 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
         // scale 2 (inks 1151..1199 inside 1150..1200), 1163 at scale 1.
         let y0 = MODE_STRIP_Y0 + (50usize.saturating_sub(lh)) / 2;
 
-        // Document (slot 0)
-        let is_doc = camera.mode == CameraMode::DocumentVision;
-        let doc_color = if is_doc { TEXT_PRIMARY } else { TEXT_MUTED };
-        let doc_w = std::design::font::measure(DOC, scale);
-        let doc_x = S0_X + (S0_W.saturating_sub(doc_w)) / 2;
-        if let Some(c) = test_text(x, y, doc_x, y0, scale, DOC, S0_W, doc_color) {
-            return c;
-        }
-
-        // Photo (slot 1)
-        let is_photo = camera.mode == CameraMode::Photo;
-        let photo_color = if is_photo { TEXT_PRIMARY } else { TEXT_MUTED };
-        let pho_w = std::design::font::measure(PHO, scale);
-        let pho_x = S1_X + (S1_W.saturating_sub(pho_w)) / 2;
-        if let Some(c) = test_text(x, y, pho_x, y0, scale, PHO, S1_W, photo_color) {
-            return c;
-        }
-
-        // Video (slot 2)
-        let is_vid = camera.mode == CameraMode::Video;
-        let vid_color = if is_vid { TEXT_PRIMARY } else { TEXT_MUTED };
-        let vid_w = std::design::font::measure(VID, scale);
-        let vid_x = S2_X + (S2_W.saturating_sub(vid_w)) / 2;
-        if let Some(c) = test_text(x, y, vid_x, y0, scale, VID, S2_W, vid_color) {
-            return c;
+        if x < S1_X {
+            // Document (slot 0)
+            let is_doc = camera.mode == CameraMode::DocumentVision;
+            let doc_color = if is_doc { TEXT_PRIMARY } else { TEXT_MUTED };
+            let doc_w = std::design::font::measure(DOC, scale);
+            let doc_x = S0_X + (S0_W.saturating_sub(doc_w)) / 2;
+            if let Some(c) = test_text(x, y, doc_x, y0, scale, DOC, S0_W, doc_color) {
+                return c;
+            }
+        } else if x < S2_X {
+            // Photo (slot 1)
+            let is_photo = camera.mode == CameraMode::Photo;
+            let photo_color = if is_photo { TEXT_PRIMARY } else { TEXT_MUTED };
+            let pho_w = std::design::font::measure(PHO, scale);
+            let pho_x = S1_X + (S1_W.saturating_sub(pho_w)) / 2;
+            if let Some(c) = test_text(x, y, pho_x, y0, scale, PHO, S1_W, photo_color) {
+                return c;
+            }
+        } else {
+            // Video (slot 2)
+            let is_vid = camera.mode == CameraMode::Video;
+            let vid_color = if is_vid { TEXT_PRIMARY } else { TEXT_MUTED };
+            let vid_w = std::design::font::measure(VID, scale);
+            let vid_x = S2_X + (S2_W.saturating_sub(vid_w)) / 2;
+            if let Some(c) = test_text(x, y, vid_x, y0, scale, VID, S2_W, vid_color) {
+                return c;
+            }
         }
 
         // Active mode indicator underline, 64px centered in the active slot.
@@ -1335,6 +1355,7 @@ pub extern "C" fn _start() -> ! {
     .ok();
 
     let mut camera = CameraApp::new();
+    camera.init();
 
     // Ask the kernel whether this task may drive a camera at all.
     //

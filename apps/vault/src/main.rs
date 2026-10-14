@@ -334,20 +334,34 @@ impl VaultApp {
         let copy_len = payload_tag.len().min(64);
         sector_buf[..copy_len].copy_from_slice(&payload_tag[..copy_len]);
 
-        if std::vault_encrypt_sector(sector_id, &mut sector_buf, &iv).is_ok() {
-            self.total_encryptions += 1;
-            if &sector_buf[..copy_len] != &payload_tag[..copy_len] {
-                if std::vault_decrypt_sector(sector_id, &mut sector_buf, &iv).is_ok() {
-                    self.total_decryptions += 1;
-                    if &sector_buf[..copy_len] == &payload_tag[..copy_len] {
-                        for slot in self.sectors.iter_mut().flatten() {
-                            if slot.sector_id == sector_id {
-                                slot.authenticated = true;
+        match std::vault_encrypt_sector(sector_id, &mut sector_buf, &iv) {
+            Ok(()) => {
+                self.total_encryptions += 1;
+                if &sector_buf[..copy_len] != &payload_tag[..copy_len] {
+                    match std::vault_decrypt_sector(sector_id, &mut sector_buf, &iv) {
+                        Ok(()) => {
+                            self.total_decryptions += 1;
+                            if &sector_buf[..copy_len] == &payload_tag[..copy_len] {
+                                for slot in self.sectors.iter_mut().flatten() {
+                                    if slot.sector_id == sector_id {
+                                        slot.authenticated = true;
+                                    }
+                                }
+                                return true;
+                            } else {
+                                std::log(0, "[VAULT APP] Sector decrypted but payload mismatch!").ok();
                             }
                         }
-                        return true;
+                        Err(_) => {
+                            std::log(0, "[VAULT APP] Sector decrypt returned Err.").ok();
+                        }
                     }
+                } else {
+                    std::log(0, "[VAULT APP] Encrypted buffer identical to plaintext!").ok();
                 }
+            }
+            Err(_) => {
+                std::log(0, "[VAULT APP] Sector encrypt returned Err.").ok();
             }
         }
         false
@@ -1336,6 +1350,23 @@ fn handle_vault_touch(vault: &mut VaultApp, x: u32, y: u32) -> Tap {
             }
             return Tap::Redraw(Dirty::Sector(index));
         }
+    }
+
+    // Keystore Card A: re-run sector 0 verification when tapped (e.g. during integration testing)
+    if in_round(x, y, MARGIN, CARD_A_Y, CARD_W, CARD_A_H, CARD_R) {
+        let ok = vault.verify_sector(0);
+        if ok {
+            status(vault, b"sector round-trip verified");
+            std::log(0, "[VAULT] Sector card touched. Round-trip re-verified.").ok();
+        } else {
+            status(vault, b"sector round-trip FAILED (see log)");
+            std::log(
+                0,
+                "[VAULT] Sector card touched. Round-trip verification FAILED (see reason above).",
+            )
+            .ok();
+        }
+        return Tap::Redraw(Dirty::Sector(0));
     }
 
     // Action buttons, at exactly the rectangles they are drawn in.
