@@ -216,7 +216,14 @@ def main():
         pass
     ser_sock.close()
     mon_sock.close()
-    proc.wait(timeout=5)
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.terminate()
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            proc.kill()
 
     time.sleep(1.5)
 
@@ -255,7 +262,14 @@ def main():
         pass
     ser_sock.close()
     mon_sock.close()
-    proc.wait(timeout=5)
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.terminate()
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            proc.kill()
 
     print("\n============================================================")
     print("  ALL BOOT, UNLOCK & CREDENTIAL-STATE TESTS PASSED!")

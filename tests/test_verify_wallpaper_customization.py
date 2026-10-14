@@ -277,7 +277,14 @@ def main():
         pass
     ser_sock.close()
     mon_sock.close()
-    proc.wait(timeout=5)
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.terminate()
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            proc.kill()
 
     print("[TEST] Starting Session 2 (Reboot) with persisted disk...")
     proc2, ser2, mon2 = launch_qemu(boot_img, data_img, ser_port, mon_port)
@@ -317,7 +324,14 @@ def main():
         pass
     ser2.close()
     mon2.close()
-    proc2.wait(timeout=5)
+    try:
+        proc2.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc2.terminate()
+        try:
+            proc2.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            proc2.kill()
 
     print("\n============================================================")
     print("  HOME-ONLY WALLPAPER CUSTOMISATION & PERSISTENCE VERIFIED!")
