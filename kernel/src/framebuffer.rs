@@ -2474,7 +2474,7 @@ mod present_band_tests {
     }
 
     /// The deterministic pattern `FakeFb::poison` writes, rebuilt per row.
-    fn poison_row(fb_w: usize, fb_h: usize, bpp: usize, y: usize) -> Vec<u8> {
+    fn poison_row(fb_w: usize, _fb_h: usize, bpp: usize, y: usize) -> Vec<u8> {
         let start = y * fb_w * bpp;
         (0..fb_w * bpp).map(|i| ((start + i) % 251) as u8).collect()
     }
