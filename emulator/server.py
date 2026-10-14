@@ -1659,13 +1659,15 @@ def launch_qemu_profile(profile_key="x86_64", ram_mb=None, smp=1):
     except Exception:
         pass
 
+    display_backend = os.environ.get("INTEROS_DISPLAY", "sdl")
     cmd = [
         exe,
         "-m", f"{ram}M",
         "-smp", str(smp),
+        "-name", "InterOS Core — Native Full HD (1080×2160)",
         "-monitor", "tcp:127.0.0.1:44445,server,nowait",
         "-serial", "tcp:127.0.0.1:4301,server,nowait",
-        "-display", "none",
+        "-display", display_backend,
         "-vnc", "127.0.0.1:1"
     ]
     if arch == "x86_64":
@@ -1749,7 +1751,8 @@ def launch_qemu_profile(profile_key="x86_64", ram_mb=None, smp=1):
             if accel:
                 attempt.extend(["-accel", accel])
             try:
-                proc = subprocess.Popen(attempt, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                creation_flags = subprocess.CREATE_NEW_CONSOLE if sys.platform == "win32" else 0
+                proc = subprocess.Popen(attempt, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=creation_flags)
             except Exception as e:
                 last_error = e
                 continue

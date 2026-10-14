@@ -2435,10 +2435,26 @@ body[data-theme="cyberdeck_hud"] .device-screen {
   cursor: pointer;
   user-select: none;
   -webkit-user-drag: none;
+  image-rendering: auto;
   image-rendering: -webkit-optimize-contrast;
-  image-rendering: crisp-edges;
-  image-rendering: pixelated;
   transform: translateZ(0);
+}
+
+/* 1:1 Pixel-Exact FHD Inspection Mode inside Device Studio */
+.screen-live-scanout.fhd-pixel-exact {
+  overflow: auto !important;
+  display: block !important;
+  background: #000000;
+}
+
+.screen-live-scanout.fhd-pixel-exact #live-scanout-canvas {
+  width: 1080px !important;
+  height: 2160px !important;
+  max-width: none !important;
+  max-height: none !important;
+  object-fit: none !important;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
 }
 
 /* Honest Studio-owned standby card: shown instead of the live canvas only

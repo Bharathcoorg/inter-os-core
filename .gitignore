@@ -50,3 +50,9 @@ aragon.md
 packages/*.rapp
 emulator/data/apps/*.rapp
 emulator/installed_apps/*
+
+# Standalone Full HD experimental viewer & launch screen tools
+emulator/fhd.html
+tools/launch_screen.py
+tools/launch_screen.ps1
+
