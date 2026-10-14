@@ -397,10 +397,10 @@ impl TerminalApp {
         match cmd_line {
             "help" => {
                 self.push_line("interos@sovereign:~$ help", SUCCESS_EMERALD);
-                self.push_line("Commands: help, status, ps, mem, caps, share, dma, ping, ls, services", TEXT_PRIMARY);
+                self.push_line("Commands: help, status, ps, mem, caps, share, dma, ping, ls, services, cat", TEXT_PRIMARY);
                 std::log(
                     0,
-                    "[TERMINAL] Commands: help, status, ps, mem, caps, share, dma, ping, ls, services",
+                    "[TERMINAL] Commands: help, status, ps, mem, caps, share, dma, ping, ls, services, cat",
                 )
                 .ok();
                 self.record_history("help", 0);
@@ -579,6 +579,44 @@ impl TerminalApp {
                     Err(code) => {
                         self.push_line("vfs: fs_list(/data) query refused or unavailable.", TEXT_MUTED);
                         self.record_history("ls", code);
+                    }
+                }
+            }
+            "cat" => {
+                self.push_line("interos@sovereign:~$ cat", SUCCESS_EMERALD);
+                let path = "/data/manifest.json";
+                match std::fs_open(3, path, std::FS_READ) {
+                    Ok(fd) => {
+                        let mut buf = [0u8; 512];
+                        match std::fs_read(3, fd, &mut buf) {
+                            Ok(n) if n > 0 => {
+                                self.push_counted("cat(/data/manifest.json): ", n as u64, " bytes read.", SUCCESS_EMERALD);
+                                let mut start = 0;
+                                while start < n {
+                                    let end = buf[start..n].iter().position(|&b| b == b'\n').map(|p| start + p).unwrap_or(n);
+                                    if let Ok(line_str) = core::str::from_utf8(&buf[start..end]) {
+                                        if !line_str.is_empty() {
+                                            self.push_line(line_str, TEXT_PRIMARY);
+                                        }
+                                    }
+                                    start = end.saturating_add(1);
+                                }
+                                self.record_history("cat", 0);
+                            }
+                            Ok(_) => {
+                                self.push_line("cat(/data/manifest.json): file empty.", TEXT_MUTED);
+                                self.record_history("cat", 0);
+                            }
+                            Err(code) => {
+                                self.push_line("cat: fs_read refused or error.", TEXT_MUTED);
+                                self.record_history("cat", code);
+                            }
+                        }
+                        let _ = std::fs_close(fd);
+                    }
+                    Err(code) => {
+                        self.push_line("cat: fs_open(/data/manifest.json) refused or file not found.", TEXT_MUTED);
+                        self.record_history("cat", code);
                     }
                 }
             }
