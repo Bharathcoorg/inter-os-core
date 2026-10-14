@@ -2435,9 +2435,9 @@ body[data-theme="cyberdeck_hud"] .device-screen {
   cursor: pointer;
   user-select: none;
   -webkit-user-drag: none;
-  touch-action: none;
-  image-rendering: pixelated;
+  image-rendering: -webkit-optimize-contrast;
   image-rendering: crisp-edges;
+  image-rendering: pixelated;
   transform: translateZ(0);
 }
 

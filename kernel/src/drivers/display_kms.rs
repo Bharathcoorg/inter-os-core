@@ -901,7 +901,8 @@ impl DrmKmsController {
                             let fy = dy * src_last_y * 256 / dst_last_y;
                             let sy0 = (fy >> 8).min(src_last_y);
                             let sy1 = (sy0 + 1).min(src_last_y);
-                            let wy = (fy & 0xFF) as u32;
+                            let wy_raw = (fy & 0xFF) as u32;
+                            let wy = (wy_raw * wy_raw * (3 * 256 - 2 * wy_raw)) >> 16;
                             let (r0, r1) = if sy1 * src_pitch + src_last_x < surface.pixels.len() {
                                 (sy0 * src_pitch, sy1 * src_pitch)
                             } else {
@@ -912,7 +913,8 @@ impl DrmKmsController {
                                 let fx = dx * src_last_x * 256 / dst_last_x;
                                 let sx0 = (fx >> 8).min(src_last_x);
                                 let sx1 = (sx0 + 1).min(src_last_x);
-                                let wx = (fx & 0xFF) as u32;
+                                let wx_raw = (fx & 0xFF) as u32;
+                                let wx = (wx_raw * wx_raw * (3 * 256 - 2 * wx_raw)) >> 16;
                                 // Out-of-surface samples skip rather than read
                                 // past the row. Both taps are already clamped to
                                 // the surface's own last column/row, so this

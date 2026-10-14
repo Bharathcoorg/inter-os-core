@@ -779,7 +779,7 @@ document.addEventListener('DOMContentLoaded', () => {
   function fallbackRefreshFrame() {
     return new Promise((resolve) => {
       const orientParam = (state.isLandscape || cropMode === 'full') ? '&orientation=landscape&full=1' : '';
-      const url = `/api/screen/frame?t=${Date.now()}${orientParam}`;
+      const url = `/api/screen/frame?t=${Date.now()}${orientParam}&format=png`;
       const img = new Image();
       img.onload = () => {
         // The canvas is the single visible surface; the hidden legacy <img>
