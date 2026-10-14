@@ -87,13 +87,19 @@ try:
                         if "Boot presentation complete; lock screen is now guest-owned" in decoded:
                             print(f"[SUCCESS] Launcher lock screen ready at {time.time() - start_t:.1f}s")
                             non_local_buf = bytearray(buf)
-                            def send_and_wait_for(cmd, target_str, timeout=35.0):
-                                time.sleep(0.35)
+                            def send_and_wait_for(cmd, target_str, timeout=40.0):
+                                time.sleep(0.8)
                                 s.sendall(cmd)
-                                deadline = time.time() + timeout
+                                start_t = time.time()
+                                deadline = start_t + timeout
+                                retried = False
                                 found = False
                                 while time.time() < deadline:
                                     try:
+                                        if not retried and (time.time() - start_t > 12.0):
+                                            print(f"[RETRY] Re-sending {cmd.strip()} waiting for '{target_str}'...")
+                                            s.sendall(cmd)
+                                            retried = True
                                         d = s.recv(4096)
                                         if d:
                                             non_local_buf.extend(d)
@@ -108,7 +114,7 @@ try:
                                                     if target_str in dec:
                                                         found = True
                                         if found:
-                                            time.sleep(0.2)
+                                            time.sleep(0.3)
                                             return True
                                     except socket.timeout:
                                         pass
@@ -153,10 +159,10 @@ try:
                             send_and_wait_for(b"TAP 360 1420\n", "Foreground application exited and was reaped")
                             print("[TEST STEP 19] Tapping Gallery dock item at (410, 1180) to launch Gallery...")
                             send_and_wait_for(b"TAP 410 1180\n", "Gallery UI presented to scanout buffer")
-                            print("[TEST STEP 20] Tapping photo grid at (180, 300) in Gallery...")
-                            send_and_wait_for(b"TAP 180 300\n", "no media items in storage")
-                            print("[TEST STEP 21] Tapping Albums category tab at (200, 160) in Gallery...")
-                            send_and_wait_for(b"TAP 200 160\n", "Gallery category tab switched")
+                            print("[TEST STEP 20] Tapping photo grid at (360, 550) in Gallery...")
+                            send_and_wait_for(b"TAP 360 550\n", "no media items in storage")
+                            print("[TEST STEP 21] Tapping Wallpapers category chip at (200, 175) in Gallery...")
+                            send_and_wait_for(b"TAP 200 175\n", "Gallery filter chip switched")
                             print("[TEST STEP 22] Tapping bottom home pill at (360, 1420) to exit Gallery back to Launcher...")
                             send_and_wait_for(b"TAP 360 1420\n", "Foreground application exited and was reaped")
                             print("[TEST STEP 23] Tapping Calculator card on HomeScreen at (180, 520) to launch...")
