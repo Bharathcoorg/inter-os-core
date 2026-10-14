@@ -127,8 +127,8 @@ InterOS Core features a native smartphone UI architecture designed for bare-meta
 ### Coordinate Spaces & Scanout Transform
 - **Logical Portrait Resolution**: `720 × 1440` (1:2 aspect ratio).
 - **Safe Area Insets**: Status bar height: 48px; Navigation pill height: 64px.
-- **Physical Display**: `1280 × 720` display scanout in QEMU.
-- **SSAA Downsampler**: The kernel presents the 720×1440 logical canvas mapped to a 360×720 viewport horizontally centered in the 1280×720 scanout (460px black letterbox padding). The downsampler uses **2×2 SSAA (Super-Sample Anti-Aliasing) box filtering** in integer arithmetic, eliminating decimation artifacts and stepped diagonals.
+- **Physical Display**: `720 × 1440` native portrait ARGB8888 scanout in QEMU (`virtio-vga,edid=on,xres=720,yres=1440`).
+- **Direct Scanout**: The kernel engages native 720×1440×32bpp mode through Bochs/VBE DISPI registers (`kernel/src/framebuffer.rs`, `engage_native_mode`). The 720×1440 logical canvas maps 1:1 pixel-exact to the scanout buffer without downsampling or letterboxing.
 
 ### Typography Engine (`interos-std::design::font`)
 - Proportional 16×24 master typeface (`FONT`, `FONT_BOLD`) with 17-row cap height, 12-row x-height, and 4-row descender depth.
@@ -222,7 +222,7 @@ The developer emulator backend (`emulator/server.py`) operates under strict isol
 | **Syscall Pointer Safety** | Full per-task page-table validation | Bounded user-copy helpers | Bounded user-copy helpers |
 | **Per-Task Kernel Stack** | TSS RSP0 / IST Double Fault | SP_EL1 per-thread | `sscratch` saved frame |
 | **Capability Model** | 100% Enforced | 100% Enforced | 100% Enforced |
-| **Framebuffer GUI** | 1280x720 Linear Framebuffer (SSAA) | SimpleFB Framebuffer | NS16550A Serial |
+| **Framebuffer GUI** | 720x1440 Native Framebuffer (DISPI) | SimpleFB Framebuffer | NS16550A Serial |
 | **ACR Container** | Shared crate ready | Shared crate ready | Shared crate ready |
 | **Verification State** | **QEMU-verified** | **Unit-tested / QEMU virt** | **Unit-tested / QEMU virt** |
 
