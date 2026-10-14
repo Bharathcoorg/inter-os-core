@@ -38,7 +38,7 @@ No commit may be pushed to `origin/master` without passing:
 2. `cargo test --manifest-path kernel/Cargo.toml` (all 234 kernel unit tests must pass).
 3. `cargo test -p interos-std` (all 77 SDK unit tests must pass).
 4. `cargo test -p launcher` (all 64 launcher unit tests must pass).
-5. Application host test suites (`cargo test -p messages`, `cargo test -p calculator`, `cargo test -p file_manager`, `cargo test -p dialer`, `cargo test -p terminal`, `cargo test -p browser`, `cargo test -p calendar`, `cargo test -p music`, `cargo test -p gallery`, `cargo test -p camera`, `cargo test -p sensor_dashboard`, `cargo test -p vault`, `cargo test -p settings`, `cargo test -p card_demo`).
+5. Application host test suites (`cargo test -p messages`, `cargo test -p calculator`, `cargo test -p file_manager`, `cargo test -p dialer`, `cargo test -p terminal`, `cargo test -p browser`, `cargo test -p calendar`, `cargo test -p music`, `cargo test -p gallery`, `cargo test -p camera`, `cargo test -p sensor_dashboard`, `cargo test -p vault`, `cargo test -p settings`, `cargo test -p card_demo`, `cargo test -p compositor`).
 6. `cargo check --workspace` (all 19 workspace crates compile cleanly).
 7. Multi-architecture QEMU suites: `tests/test_aarch64.ps1` and `tests/test_riscv64.ps1` exit 0.
 

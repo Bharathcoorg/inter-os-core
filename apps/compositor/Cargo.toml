@@ -6,6 +6,11 @@ edition = "2021"
 [dependencies]
 interos-std = { path = "../../sdk/rust/interos-std" }
 
+[lib]
+name = "compositor"
+path = "src/lib.rs"
+crate-type = ["lib"]
+
 [[bin]]
 name = "compositor"
 path = "src/main.rs"
