@@ -70,7 +70,7 @@ def static_gate():
         must(syscall, needle, label)
 
     for needle, label in (
-        ("const SERVICES: [u8; 11]", "complete PID1 service set"),
+        ("fn declared_service_ids", "registry-driven service discovery"),
         ("registry_has_all_running_services", "complete service bootstrap validation"),
         ("std::service_recover_failed(service_id)", "PID1 recovery exercise"),
     ):
