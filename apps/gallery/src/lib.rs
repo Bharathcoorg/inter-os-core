@@ -2,8 +2,8 @@
 
 pub use interos_std as std;
 
-pub const IMAGE_SUFFIXES: [&[u8]; 6] = [
-    b".jpg", b".jpeg", b".png", b".bmp", b".gif", b".webp",
+pub const IMAGE_SUFFIXES: [&[u8]; 7] = [
+    b".jpg", b".jpeg", b".png", b".bmp", b".gif", b".webp", b".qoi",
 ];
 
 /// Whether an entry name carries a recognised image extension (case-insensitive).
@@ -107,6 +107,125 @@ pub fn media_at(index: usize, wallpaper_count: usize, photo_count: usize) -> Opt
     None
 }
 
+/// Hashes an RGBA color tuple into the 64-entry running color cache.
+#[inline(always)]
+pub fn qoi_color_hash(r: u8, g: u8, b: u8, a: u8) -> usize {
+    (r as usize * 3 + g as usize * 5 + b as usize * 7 + a as usize * 11) % 64
+}
+
+/// Reads and validates the 14-byte QOI header.
+/// Returns (width, height, channels, colorspace).
+pub fn decode_qoi_header(data: &[u8]) -> Result<(u32, u32, u8, u8), ()> {
+    if data.len() < 14 || &data[0..4] != b"qoif" {
+        return Err(());
+    }
+    let width = u32::from_be_bytes(data[4..8].try_into().map_err(|_| ())?);
+    let height = u32::from_be_bytes(data[8..12].try_into().map_err(|_| ())?);
+    let channels = data[12];
+    let colorspace = data[13];
+    if width == 0 || height == 0 || (channels != 3 && channels != 4) {
+        return Err(());
+    }
+    Ok((width, height, channels, colorspace))
+}
+
+/// Decodes a Quite OK Image (QOI) stream into an RGBA (4 bytes per pixel) destination buffer.
+/// Returns the number of RGBA bytes written to `out_rgba`.
+pub fn decode_qoi(data: &[u8], out_rgba: &mut [u8]) -> Result<usize, ()> {
+    let (width, height, _, _) = decode_qoi_header(data)?;
+    let pixel_count = (width as usize).checked_mul(height as usize).ok_or(())?;
+    let required_bytes = pixel_count.checked_mul(4).ok_or(())?;
+    if out_rgba.len() < required_bytes {
+        return Err(());
+    }
+
+    let mut index = [[0u8; 4]; 64];
+    let mut prev = [0u8, 0u8, 0u8, 255u8];
+    let mut in_pos = 14usize;
+    let mut out_pos = 0usize;
+    let end = data.len().saturating_sub(8);
+
+    while in_pos < end && out_pos < required_bytes {
+        let b1 = data[in_pos];
+        in_pos += 1;
+
+        if b1 == 0xFF {
+            // QOI_OP_RGBA
+            if in_pos + 4 > end {
+                return Err(());
+            }
+            prev = [data[in_pos], data[in_pos + 1], data[in_pos + 2], data[in_pos + 3]];
+            in_pos += 4;
+            index[qoi_color_hash(prev[0], prev[1], prev[2], prev[3])] = prev;
+            out_rgba[out_pos..out_pos + 4].copy_from_slice(&prev);
+            out_pos += 4;
+        } else if b1 == 0xFE {
+            // QOI_OP_RGB
+            if in_pos + 3 > end {
+                return Err(());
+            }
+            prev = [data[in_pos], data[in_pos + 1], data[in_pos + 2], prev[3]];
+            in_pos += 3;
+            index[qoi_color_hash(prev[0], prev[1], prev[2], prev[3])] = prev;
+            out_rgba[out_pos..out_pos + 4].copy_from_slice(&prev);
+            out_pos += 4;
+        } else {
+            match b1 & 0b1100_0000 {
+                0b0000_0000 => {
+                    // QOI_OP_INDEX
+                    let idx = (b1 & 0x3F) as usize;
+                    prev = index[idx];
+                    out_rgba[out_pos..out_pos + 4].copy_from_slice(&prev);
+                    out_pos += 4;
+                }
+                0b0100_0000 => {
+                    // QOI_OP_DIFF
+                    let dr = (((b1 >> 4) & 0x03) as i8) - 2;
+                    let dg = (((b1 >> 2) & 0x03) as i8) - 2;
+                    let db = ((b1 & 0x03) as i8) - 2;
+                    prev[0] = prev[0].wrapping_add(dr as u8);
+                    prev[1] = prev[1].wrapping_add(dg as u8);
+                    prev[2] = prev[2].wrapping_add(db as u8);
+                    index[qoi_color_hash(prev[0], prev[1], prev[2], prev[3])] = prev;
+                    out_rgba[out_pos..out_pos + 4].copy_from_slice(&prev);
+                    out_pos += 4;
+                }
+                0b1000_0000 => {
+                    // QOI_OP_LUMA
+                    if in_pos >= end {
+                        return Err(());
+                    }
+                    let b2 = data[in_pos];
+                    in_pos += 1;
+                    let dg = ((b1 & 0x3F) as i8) - 32;
+                    let dr = dg + (((b2 >> 4) & 0x0F) as i8) - 8;
+                    let db = dg + ((b2 & 0x0F) as i8) - 8;
+                    prev[0] = prev[0].wrapping_add(dr as u8);
+                    prev[1] = prev[1].wrapping_add(dg as u8);
+                    prev[2] = prev[2].wrapping_add(db as u8);
+                    index[qoi_color_hash(prev[0], prev[1], prev[2], prev[3])] = prev;
+                    out_rgba[out_pos..out_pos + 4].copy_from_slice(&prev);
+                    out_pos += 4;
+                }
+                0b1100_0000 => {
+                    // QOI_OP_RUN
+                    let count = ((b1 & 0x3F) as usize) + 1;
+                    for _ in 0..count {
+                        if out_pos + 4 > out_rgba.len() {
+                            return Err(());
+                        }
+                        out_rgba[out_pos..out_pos + 4].copy_from_slice(&prev);
+                        out_pos += 4;
+                    }
+                }
+                _ => return Err(()),
+            }
+        }
+    }
+
+    Ok(out_pos)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,4 +287,38 @@ mod tests {
         assert_eq!(media_at(4, 3, 2), Some(Media::Photo(1)));
         assert_eq!(media_at(5, 3, 2), None);
     }
+
+    #[test]
+    fn test_qoi_suffix_and_decode() {
+        assert!(has_image_suffix(b"photo.qoi"));
+        assert!(has_image_suffix(b"CAPTURE.QOI"));
+
+        // Minimal valid 1x1 red QOI image (RGBA: 255, 0, 0, 255)
+        // 14-byte header: 'q','o','i','f', 0,0,0,1, 0,0,0,1, 4, 0
+        // Data: 0xFE, 255, 0, 0 (QOI_OP_RGB)
+        // End: 0, 0, 0, 0, 0, 0, 0, 1
+        let mut qoi_data = [
+            b'q', b'o', b'i', b'f',
+            0, 0, 0, 1, // width = 1
+            0, 0, 0, 1, // height = 1
+            4, 0,       // channels = 4, colorspace = 0
+            0xFE, 255, 0, 0, // QOI_OP_RGB
+            0, 0, 0, 0, 0, 0, 0, 1, // end marker
+        ];
+
+        let (w, h, ch, _) = decode_qoi_header(&qoi_data).expect("header decode");
+        assert_eq!(w, 1);
+        assert_eq!(h, 1);
+        assert_eq!(ch, 4);
+
+        let mut out_rgba = [0u8; 4];
+        let bytes_written = decode_qoi(&qoi_data, &mut out_rgba).expect("pixel decode");
+        assert_eq!(bytes_written, 4);
+        assert_eq!(out_rgba, [255, 0, 0, 255]);
+
+        // Corrupt magic
+        qoi_data[0] = b'x';
+        assert_eq!(decode_qoi_header(&qoi_data), Err(()));
+    }
 }
+

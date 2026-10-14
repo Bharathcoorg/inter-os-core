@@ -119,6 +119,143 @@ pub fn compute_histogram(buf: &[u8]) -> (u8, u8, u8) {
     )
 }
 
+/// Hashes an RGBA color tuple into the 64-entry running color cache.
+#[inline(always)]
+pub fn qoi_color_hash(r: u8, g: u8, b: u8, a: u8) -> usize {
+    (r as usize * 3 + g as usize * 5 + b as usize * 7 + a as usize * 11) % 64
+}
+
+/// Zero-allocation, streaming QOI image encoder.
+///
+/// Encodes raw RGBA (32-bit, 4 bytes per pixel) into Quite OK Image (QOI)
+/// format directly into `out`. Returns the number of bytes written to `out`,
+/// or `Err(())` if `out` lacks sufficient capacity or input length is invalid.
+pub fn encode_qoi(width: u32, height: u32, rgba_pixels: &[u8], out: &mut [u8]) -> Result<usize, ()> {
+    let expected_len = (width as usize)
+        .checked_mul(height as usize)
+        .ok_or(())?
+        .checked_mul(4)
+        .ok_or(())?;
+    if rgba_pixels.len() < expected_len {
+        return Err(());
+    }
+
+    if out.len() < 22 {
+        return Err(());
+    }
+
+    // 14-byte QOI Header
+    out[0..4].copy_from_slice(b"qoif");
+    out[4..8].copy_from_slice(&width.to_be_bytes());
+    out[8..12].copy_from_slice(&height.to_be_bytes());
+    out[12] = 4; // RGBA channels
+    out[13] = 0; // sRGB colorspace
+
+    let mut out_pos = 14usize;
+    let mut index = [[0u8; 4]; 64];
+    let mut prev = [0u8, 0u8, 0u8, 255u8];
+    let mut run = 0u8;
+
+    for chunk in rgba_pixels[..expected_len].chunks_exact(4) {
+        let px = [chunk[0], chunk[1], chunk[2], chunk[3]];
+
+        if px == prev {
+            run += 1;
+            if run == 62 {
+                if out_pos >= out.len() {
+                    return Err(());
+                }
+                out[out_pos] = 0b1100_0000 | (run - 1);
+                out_pos += 1;
+                run = 0;
+            }
+        } else {
+            if run > 0 {
+                if out_pos >= out.len() {
+                    return Err(());
+                }
+                out[out_pos] = 0b1100_0000 | (run - 1);
+                out_pos += 1;
+                run = 0;
+            }
+
+            let idx = qoi_color_hash(px[0], px[1], px[2], px[3]);
+            if index[idx] == px {
+                if out_pos >= out.len() {
+                    return Err(());
+                }
+                out[out_pos] = 0b0000_0000 | (idx as u8);
+                out_pos += 1;
+            } else {
+                index[idx] = px;
+
+                if px[3] == prev[3] {
+                    let vr = px[0].wrapping_sub(prev[0]) as i8;
+                    let vg = px[1].wrapping_sub(prev[1]) as i8;
+                    let vb = px[2].wrapping_sub(prev[2]) as i8;
+
+                    let vg_r = vr.wrapping_sub(vg);
+                    let vg_b = vb.wrapping_sub(vg);
+
+                    if vr >= -2 && vr <= 1 && vg >= -2 && vg <= 1 && vb >= -2 && vb <= 1 {
+                        if out_pos >= out.len() {
+                            return Err(());
+                        }
+                        out[out_pos] = 0b0100_0000
+                            | (((vr + 2) as u8) << 4)
+                            | (((vg + 2) as u8) << 2)
+                            | ((vb + 2) as u8);
+                        out_pos += 1;
+                    } else if vg >= -32 && vg <= 31 && vg_r >= -8 && vg_r <= 7 && vg_b >= -8 && vg_b <= 7 {
+                        if out_pos + 2 > out.len() {
+                            return Err(());
+                        }
+                        out[out_pos] = 0b1000_0000 | ((vg + 32) as u8);
+                        out[out_pos + 1] = (((vg_r + 8) as u8) << 4) | ((vg_b + 8) as u8);
+                        out_pos += 2;
+                    } else {
+                        if out_pos + 4 > out.len() {
+                            return Err(());
+                        }
+                        out[out_pos] = 0xFE;
+                        out[out_pos + 1] = px[0];
+                        out[out_pos + 2] = px[1];
+                        out[out_pos + 3] = px[2];
+                        out_pos += 4;
+                    }
+                } else {
+                    if out_pos + 5 > out.len() {
+                        return Err(());
+                    }
+                    out[out_pos] = 0xFF;
+                    out[out_pos + 1] = px[0];
+                    out[out_pos + 2] = px[1];
+                    out[out_pos + 3] = px[2];
+                    out[out_pos + 4] = px[3];
+                    out_pos += 5;
+                }
+            }
+            prev = px;
+        }
+    }
+
+    if run > 0 {
+        if out_pos >= out.len() {
+            return Err(());
+        }
+        out[out_pos] = 0b1100_0000 | (run - 1);
+        out_pos += 1;
+    }
+
+    if out_pos + 8 > out.len() {
+        return Err(());
+    }
+    out[out_pos..out_pos + 8].copy_from_slice(&[0, 0, 0, 0, 0, 0, 0, 1]);
+    out_pos += 8;
+
+    Ok(out_pos)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -166,4 +303,25 @@ mod tests {
         let n0 = fmt_u32(0, &mut buf);
         assert_eq!(&buf[..n0], b"0");
     }
+
+    #[test]
+    fn test_qoi_encode_solid_color() {
+        let pixels = [255u8, 0, 0, 255].repeat(16); // 4x4 red
+        let mut out = [0u8; 128];
+        let bytes_written = encode_qoi(4, 4, &pixels, &mut out).expect("QOI encode failed");
+        assert!(bytes_written >= 22);
+        assert_eq!(&out[0..4], b"qoif");
+        assert_eq!(&out[4..8], &4u32.to_be_bytes());
+        assert_eq!(&out[8..12], &4u32.to_be_bytes());
+        assert_eq!(out[12], 4); // RGBA
+        assert_eq!(&out[bytes_written - 8..bytes_written], &[0, 0, 0, 0, 0, 0, 0, 1]);
+    }
+
+    #[test]
+    fn test_qoi_encode_capacity_overflow() {
+        let pixels = [0u8; 16];
+        let mut out = [0u8; 10]; // Smaller than 22-byte minimum
+        assert_eq!(encode_qoi(2, 2, &pixels, &mut out), Err(()));
+    }
 }
+
