@@ -103,6 +103,67 @@ pub fn physical_to_virtual(physical: PhysAddr) -> VirtAddr {
     phys_mem_offset() + physical.as_u64()
 }
 
+/// Maps a physical linear framebuffer range into the kernel address space with
+/// Write-Combining (WC) page attributes via PAT (x86_64), enabling accelerated
+/// 64-byte burst writes for scanout presentation.
+pub fn map_framebuffer_region(
+    physical_base: PhysAddr,
+    size: usize,
+    virtual_base: VirtAddr,
+) -> Result<VirtAddr, &'static str> {
+    if size == 0 { return Err("Framebuffer mapping size is zero"); }
+
+    let pages = size.checked_add(4095).ok_or("Framebuffer size overflow")? / 4096;
+    let span = pages.checked_mul(4096).ok_or("Framebuffer span overflow")?;
+    let virt_end = virtual_base.as_u64().checked_add(span as u64).ok_or("Framebuffer virtual range overflow")?;
+    let phys_end = physical_base.as_u64().checked_add(span as u64).ok_or("Framebuffer physical range overflow")?;
+    if virt_end == 0 || phys_end == 0 {
+        return Err("Framebuffer address range overflow");
+    }
+
+    let mut mapper_lock = MEMORY_MAPPER.lock();
+    let mapper = mapper_lock.as_mut().ok_or("Memory mapper not initialized")?;
+    let mut mapped_pages: alloc::vec::Vec<Page<Size4KiB>> = alloc::vec::Vec::new();
+    let mut frame_allocator = FRAME_ALLOCATOR.lock();
+    let frame_allocator = frame_allocator.as_mut().ok_or("Frame allocator not initialized")?;
+
+    // PageTableFlags::WRITE_THROUGH routes through PAT entry 1 (WC = Write-Combining)
+    let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::WRITE_THROUGH;
+
+    for index in 0..pages {
+        let virt = virtual_base.as_u64()
+            .checked_add((index as u64).checked_mul(4096).ok_or("Framebuffer virtual offset overflow")?)
+            .ok_or("Framebuffer virtual address overflow")?;
+        let phys = physical_base.as_u64()
+            .checked_add((index as u64).checked_mul(4096).ok_or("Framebuffer physical offset overflow")?)
+            .ok_or("Framebuffer physical address overflow")?;
+
+        let page = Page::<Size4KiB>::containing_address(VirtAddr::new(virt));
+        let phys_frame = PhysFrame::containing_address(PhysAddr::new(phys));
+
+        match unsafe { mapper.map_to(page, phys_frame, flags, frame_allocator) } {
+            Ok(flush) => {
+                flush.flush();
+                mapped_pages.push(page);
+            }
+            Err(MapToError::PageAlreadyMapped(_)) => {
+                for mapped in mapped_pages.drain(..).rev() {
+                    let _ = mapper.unmap(mapped).map(|(_, flush)| flush.flush());
+                }
+                return Err("Framebuffer virtual range already mapped");
+            }
+            Err(_) => {
+                for mapped in mapped_pages.drain(..).rev() {
+                    let _ = mapper.unmap(mapped).map(|(_, flush)| flush.flush());
+                }
+                return Err("Framebuffer page mapping failed");
+            }
+        }
+    }
+
+    Ok(virtual_base)
+}
+
 /// Maps a physical MMIO range into the kernel address space with cache-disabled
 /// page attributes. The caller supplies a dedicated virtual base.
 pub fn map_mmio_region(

@@ -1833,11 +1833,13 @@ pub fn engage_native_mode() {
             "[DISPLAY_HAL] extending framebuffer mapping: tail virt={:#x} phys={:#x} size={:#x} ({} pages)",
             tail_virt.as_u64(), tail_phys.as_u64(), tail_size, tail_size / 4096
         );
-        match crate::memory::map_mmio_region(tail_phys, tail_size, tail_virt) {
+        match crate::memory::map_framebuffer_region(tail_phys, tail_size, tail_virt) {
             Ok(_) => covered = required_rounded,
             // The mapper rolled the whole tail back and reports it already
             // mapped: the scanout range is covered either way (safe).
-            Err("MMIO virtual range already mapped") => covered = required_rounded,
+            Err("Framebuffer virtual range already mapped") | Err("MMIO virtual range already mapped") => {
+                covered = required_rounded;
+            }
             Err(err) => {
                 crate::serial_println!(
                     "[DISPLAY_HAL] DISPI native scanout unavailable (tail map failed: {}); keeping firmware mode",

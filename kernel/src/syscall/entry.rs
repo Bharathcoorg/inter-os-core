@@ -15,7 +15,21 @@ pub mod msr {
     pub const IA32_LSTAR: u32 = 0xC000_0082;
     /// RFLAGS mask applied during SYSCALL entry (clears specified flags).
     pub const IA32_FMASK: u32 = 0xC000_0084;
+    /// Page Attribute Table (PAT) Model-Specific Register.
+    pub const IA32_PAT: u32 = 0x0000_0277;
 }
+
+/// IA32_PAT MSR value enabling Write-Combining (WC, 0x01) at index 1 and 5.
+/// Layout:
+/// - Entry 0: WB  (0x06) - PCD=0, PWT=0, PAT=0 (Normal RAM)
+/// - Entry 1: WC  (0x01) - PCD=0, PWT=1, PAT=0 (Write-Combining Framebuffer)
+/// - Entry 2: UC- (0x07) - PCD=1, PWT=0, PAT=0 (Uncacheable MMIO Device)
+/// - Entry 3: UC  (0x00) - PCD=1, PWT=1, PAT=0 (Uncacheable Strict MMIO)
+/// - Entry 4: WB  (0x06) - PCD=0, PWT=0, PAT=1
+/// - Entry 5: WC  (0x01) - PCD=0, PWT=1, PAT=1
+/// - Entry 6: UC- (0x07) - PCD=1, PWT=0, PAT=1
+/// - Entry 7: UC  (0x00) - PCD=1, PWT=1, PAT=1
+pub const PAT_VALUE_WRITE_COMBINING: u64 = 0x0007_0106_0007_0106;
 
 /// Bitmask in `IA32_EFER` enabling the `syscall` and `sysretq` instructions.
 pub const EFER_SCE_BIT: u64 = 1 << 0;
@@ -103,19 +117,24 @@ pub fn init() {
         // 4. Configure IA32_FMASK to clear IF, DF, and TF
         wrmsr(msr::IA32_FMASK, FMASK_SYSCALL);
 
-        // 5. Hardware MSR read-back verification
+        // 5. Configure IA32_PAT with Write-Combining at index 1 & 5
+        wrmsr(msr::IA32_PAT, PAT_VALUE_WRITE_COMBINING);
+
+        // 6. Hardware MSR read-back verification
         let read_lstar = rdmsr(msr::IA32_LSTAR);
         let read_star = rdmsr(msr::IA32_STAR);
         let read_fmask = rdmsr(msr::IA32_FMASK);
         let read_efer = rdmsr(msr::IA32_EFER);
+        let read_pat = rdmsr(msr::IA32_PAT);
 
         assert_eq!(read_lstar, entry_addr, "LSTAR MSR mismatch");
         assert_eq!(read_star, star_value, "STAR MSR mismatch");
         assert_eq!(read_fmask, FMASK_SYSCALL, "FMASK MSR mismatch");
         assert_ne!(read_efer & EFER_SCE_BIT, 0, "EFER SCE bit not set");
+        assert_eq!(read_pat, PAT_VALUE_WRITE_COMBINING, "IA32_PAT MSR mismatch");
     }
 
-    serial_println!("[OK] Hardware MSR fast system call extensions enabled and verified (SCE, STAR, LSTAR, FMASK).");
+    serial_println!("[OK] Hardware MSR fast system call and PAT write-combining extensions enabled and verified (SCE, STAR, LSTAR, FMASK, PAT).");
 }
 
 /// Low-level naked hardware entry stub invoked by CPU on `syscall`.
