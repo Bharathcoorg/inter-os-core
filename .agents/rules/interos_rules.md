@@ -35,11 +35,12 @@ These rules govern all engineering work on `inter-os-core`. Every autonomous age
 ## 5. Continuous Verification Gate Before Pushing
 No commit may be pushed to `origin/master` without passing:
 1. `python tests/run_all_contracts.py` (all 317 contract test cases must pass).
-2. `cargo test --manifest-path kernel/Cargo.toml` (all 229 kernel unit tests must pass).
+2. `cargo test --manifest-path kernel/Cargo.toml` (all 230 kernel unit tests must pass).
 3. `cargo test -p interos-std` (all 77 SDK unit tests must pass).
 4. `cargo test -p launcher` (all 64 launcher unit tests must pass).
-5. `cargo check --workspace` (all 19 workspace crates compile cleanly).
-6. Multi-architecture QEMU suites: `tests/test_aarch64.ps1` and `tests/test_riscv64.ps1` exit 0.
+5. Application host test suites (`cargo test -p messages`, `cargo test -p calculator`, `cargo test -p file_manager`).
+6. `cargo check --workspace` (all 19 workspace crates compile cleanly).
+7. Multi-architecture QEMU suites: `tests/test_aarch64.ps1` and `tests/test_riscv64.ps1` exit 0.
 
 ---
 
