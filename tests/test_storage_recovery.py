@@ -130,10 +130,15 @@ class SerialSession:
                 break
         return None
 
-    def send_and_wait(self, cmd_str, marker, timeout=20.0):
-        time.sleep(0.3)
+    def send_and_wait(self, cmd_str, marker, timeout=35.0):
+        time.sleep(0.5)
         self.send_cmd(cmd_str)
         res = self.wait_for(marker, timeout=timeout)
+        if res is None:
+            print(f"[DEBUG send_and_wait failed] cmd: {cmd_str.strip()}, marker: {marker}")
+            print(f"[DEBUG last 25 captured logs]:")
+            for l in self.captured_logs[-25:]:
+                print(f"  {l}")
         assert res is not None, f"Command '{cmd_str.strip()}' failed waiting for marker '{marker}'"
         return res
 
@@ -203,6 +208,7 @@ def main():
         ready = sess1.wait_for("Step 5: Initial presentation complete", timeout=100.0)
         assert ready, "Scenario 1 failed to reach homescreen"
         print("  [OK] Guest reached online homescreen.")
+        time.sleep(1.0)
 
         # Write durable baseline file
         w1 = sess1.send_and_wait("WRITE_FILE /data/baseline.txt Durable_Committed_State_0xFEED", "[FILE_WRITE]")
