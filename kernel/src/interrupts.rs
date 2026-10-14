@@ -527,9 +527,22 @@ define_pic_eoi_handler!(irq11_handler, 43);
 #[cfg(not(target_os = "windows"))]
 define_pic_eoi_handler!(irq13_coproc_handler, 45);
 #[cfg(not(target_os = "windows"))]
-define_pic_eoi_handler!(irq14_ata_primary_handler, 46);
+extern "x86-interrupt" fn irq14_ata_primary_handler(_stack_frame: InterruptStackFrame) {
+    unsafe {
+        let mut status_port = x86_64::instructions::port::PortReadOnly::<u8>::new(0x1F7);
+        let _ = status_port.read();
+        PICS.lock().notify_end_of_interrupt(46);
+    }
+}
+
 #[cfg(not(target_os = "windows"))]
-define_pic_eoi_handler!(irq15_ata_secondary_handler, 47);
+extern "x86-interrupt" fn irq15_ata_secondary_handler(_stack_frame: InterruptStackFrame) {
+    unsafe {
+        let mut status_port = x86_64::instructions::port::PortReadOnly::<u8>::new(0x177);
+        let _ = status_port.read();
+        PICS.lock().notify_end_of_interrupt(47);
+    }
+}
 
 // -----------------------------------------------------------------------------
 // Fault banner formatting tests

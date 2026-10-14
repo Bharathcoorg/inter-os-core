@@ -2605,6 +2605,7 @@ pub fn sys_devfs_io(action: u32, path: &str, buf: &mut [u8]) -> Result<usize, Sy
     let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
     let allowed = if action == 0 {
         task.cap_table.authorize_capability(CapabilityType::FileSystemRead, Rights::READ)
+            || task.cap_table.authorize_capability(CapabilityType::FileSystemWrite, Rights::READ)
     } else {
         task.cap_table.authorize_capability(CapabilityType::FileSystemWrite, Rights::WRITE)
     };
@@ -3889,10 +3890,7 @@ pub fn sys_audio_control(action: u32, param: u32) -> Result<u32, SyscallResult> 
         // the honest answer is the existing audio-specific error.
         8 => match audio.volume_percent {
             Some(requested) => Ok(requested as u32),
-            None => {
-                crate::serial_println!("[AUDIO] volume_percent=UNBOUND state=unbound applied_to_hardware=no source=audio_control_query");
-                Err(SyscallResult::AudioError)
-            }
+            None => Err(SyscallResult::AudioError),
         },
         _ => Err(SyscallResult::InvalidArguments),
     }
@@ -4054,21 +4052,30 @@ pub fn sys_vault_crypt(
     // which is object-blind. `StorageRawBlock` is also granted to the storage
     // service for whole-device block IO, so that broad grant satisfied the vault
     // check and let the holder encrypt or decrypt any account's sectors.
-    let caller_uid = caller_user_id().ok_or(SyscallResult::PermissionDenied)?;
-    {
+    let caller_uid = match caller_user_id() {
+        Some(u) => u,
+        None => {
+            crate::serial_println!("[VAULT_CRYPT] caller_user_id is None!");
+            return Err(SyscallResult::PermissionDenied);
+        }
+    };
+    let has_cap = {
         let sched = SCHEDULER.lock();
         let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
-        if !task.cap_table.authorize_object(
+        task.cap_table.authorize_object(
             CapabilityType::StorageRawBlock,
             Rights::INVOKE,
             vault_object_for_user(caller_uid),
-        ) {
-            return Err(SyscallResult::PermissionDenied);
-        }
+        )
+    };
+    if !has_cap {
+        crate::serial_println!("[VAULT_CRYPT] Task has no StorageRawBlock cap for obj 0x{:X}!", vault_object_for_user(caller_uid));
+        return Err(SyscallResult::PermissionDenied);
     }
     // Defence in depth: the dispatcher validates this too, but `sys_vault_crypt`
     // is reachable from other kernel paths, so the bound is enforced here as well.
     if block_index >= VAULT_MAX_BLOCK_INDEX {
+        crate::serial_println!("[VAULT_CRYPT] block_index {} exceeds max {}", block_index, VAULT_MAX_BLOCK_INDEX);
         return Err(SyscallResult::InvalidArguments);
     }
 
@@ -4081,12 +4088,16 @@ pub fn sys_vault_crypt(
             Ok(enc_block) => {
                 buf.copy_from_slice(&enc_block.ciphertext);
                 iv.copy_from_slice(&enc_block.iv);
+                crate::serial_println!("[VAULT_CRYPT] seal_sector {} OK", block_index);
                 Ok(())
             }
-            Err(crate::storage::VaultError::InvalidBlockIndex) => {
-                Err(SyscallResult::InvalidArguments)
+            Err(e) => {
+                crate::serial_println!("[VAULT_CRYPT] seal_sector {} err: {:?}", block_index, e);
+                match e {
+                    crate::storage::VaultError::InvalidBlockIndex => Err(SyscallResult::InvalidArguments),
+                    _ => Err(SyscallResult::DeviceError),
+                }
             }
-            Err(_) => Err(SyscallResult::DeviceError),
         }
     } else {
         // Open. The envelope is read back from storage, so the ciphertext and
@@ -4095,17 +4106,19 @@ pub fn sys_vault_crypt(
         // value with itself, which made IntegrityViolation unreachable and let
         // any ciphertext decrypt to attacker-chosen bytes.
         match vault.open_sector(block_index, buf) {
-            Ok(()) => Ok(()),
-            Err(crate::storage::VaultError::IntegrityViolation) => {
-                Err(SyscallResult::IntegrityViolation)
+            Ok(()) => {
+                crate::serial_println!("[VAULT_CRYPT] open_sector {} OK", block_index);
+                Ok(())
             }
-            Err(crate::storage::VaultError::KeystoreUninitialized) => {
-                Err(SyscallResult::PermissionDenied)
+            Err(e) => {
+                crate::serial_println!("[VAULT_CRYPT] open_sector {} err: {:?}", block_index, e);
+                match e {
+                    crate::storage::VaultError::IntegrityViolation => Err(SyscallResult::IntegrityViolation),
+                    crate::storage::VaultError::KeystoreUninitialized => Err(SyscallResult::PermissionDenied),
+                    crate::storage::VaultError::InvalidBlockIndex => Err(SyscallResult::InvalidArguments),
+                    _ => Err(SyscallResult::DeviceError),
+                }
             }
-            Err(crate::storage::VaultError::InvalidBlockIndex) => {
-                Err(SyscallResult::InvalidArguments)
-            }
-            Err(_) => Err(SyscallResult::DeviceError),
         }
     }
 }

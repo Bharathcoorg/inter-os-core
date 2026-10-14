@@ -271,9 +271,13 @@ def main():
     qemu_exe = find_qemu("qemu-system-x86_64.exe")
     kernel_img = os.path.abspath(r"target\inter-os-bios.img")
 
-    k1 = os.path.abspath(r"target\kernel-boot.elf")
-    k2 = os.path.abspath(r"kernel\target\x86_64-unknown-none\debug\kernel")
-    kernel_elf = k1 if os.path.exists(k1) else k2
+    candidates = [
+        os.path.abspath(r"kernel\target\x86_64-unknown-none\release\kernel"),
+        os.path.abspath(r"target\kernel-boot.elf"),
+        os.path.abspath(r"kernel\target\x86_64-unknown-none\debug\kernel"),
+    ]
+    existing = [c for c in candidates if os.path.exists(c)]
+    kernel_elf = max(existing, key=os.path.getmtime) if existing else candidates[0]
     if os.path.exists(kernel_elf):
         if not os.path.exists(kernel_img) or os.path.getmtime(kernel_elf) > os.path.getmtime(kernel_img):
             print("[TEST SETUP] Updating bootable disk image with latest kernel ELF...")
@@ -296,8 +300,11 @@ def main():
         qemu_exe,
         "-machine", "q35",
         "-cpu", "qemu64",
-        "-drive", f"format=raw,file={kernel_img},index=0",
-        "-drive", f"format=raw,file={data_disk},index=1",
+        "-device", "piix3-ide,id=ide",
+        "-drive", f"file={kernel_img},format=raw,if=none,id=bootd,snapshot=on",
+        "-device", "ide-hd,bus=ide.0,unit=0,drive=bootd,bootindex=1",
+        "-drive", f"file={data_disk},format=raw,if=none,id=datad",
+        "-device", "ide-hd,bus=ide.0,unit=1,drive=datad",
         "-m", "1024M",
         "-display", "none",
         "-chardev", f"socket,id=ser0,host=127.0.0.1,port={ser_port},server=on,wait=off",

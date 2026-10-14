@@ -249,6 +249,7 @@ impl BlockDevice for AtaDrive {
                 buf[i * 2] = (word & 0xFF) as u8;
                 buf[i * 2 + 1] = (word >> 8) as u8;
             }
+            let _ = self.status_port.read();
 
             Ok(())
         }
@@ -292,6 +293,7 @@ impl BlockDevice for AtaDrive {
 
             self.delay_400ns();
             self.wait_not_busy().map_err(map_block_error)?;
+            let _ = self.status_port.read();
 
             Ok(())
         }
@@ -307,6 +309,7 @@ impl BlockDevice for AtaDrive {
                 self.cmd_port.write(CMD_CACHE_FLUSH);
                 self.delay_400ns();
                 let _ = self.wait_not_busy();
+                let _ = self.status_port.read();
             }
             Ok(())
         }

@@ -1006,7 +1006,7 @@ pub extern "C" fn app_vault_trampoline() -> ! {
 
 /// Spawns the native Sovereign Vault & Storage App in Ring 3.
 pub fn spawn_app_vault(id_security: TaskId) -> TaskId {
-    let mut caps = CapabilityTable::new(8);
+    let mut caps = CapabilityTable::new(16);
     caps.insert(Capability {
         id: CapabilityId(2001),
         cap_type: CapabilityType::SerialOutput,
@@ -1032,6 +1032,12 @@ pub fn spawn_app_vault(id_security: TaskId) -> TaskId {
         object_id: 0,
     }).ok();
     caps.insert(Capability {
+        id: CapabilityId(2008),
+        cap_type: CapabilityType::FileSystemRead,
+        rights: Rights::READ,
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
         id: CapabilityId(2005),
         cap_type: CapabilityType::EventPoll,
         rights: Rights::READ.union(Rights::INVOKE),
@@ -1048,6 +1054,13 @@ pub fn spawn_app_vault(id_security: TaskId) -> TaskId {
         cap_type: CapabilityType::FrameBufferDirect,
         rights: Rights::WRITE,
         object_id: 1,
+    }).ok();
+    let active_uid = crate::user::USER_MANAGER.lock().active_user().0;
+    caps.insert(Capability {
+        id: CapabilityId(2009),
+        cap_type: CapabilityType::StorageRawBlock,
+        rights: Rights::INVOKE,
+        object_id: crate::syscall::vault_object_for_user(active_uid),
     }).ok();
 
     let id = spawn_user_process_with_parent(
@@ -1068,7 +1081,7 @@ pub extern "C" fn app_camera_trampoline() -> ! {
 
 /// Spawns the native Sovereign Camera & Neural Vision App in Ring 3.
 pub fn spawn_app_camera(id_security: TaskId) -> TaskId {
-    let mut caps = CapabilityTable::new(8);
+    let mut caps = CapabilityTable::new(12);
     caps.insert(Capability {
         id: CapabilityId(2101),
         cap_type: CapabilityType::SerialOutput,
@@ -1110,6 +1123,13 @@ pub fn spawn_app_camera(id_security: TaskId) -> TaskId {
         cap_type: CapabilityType::FrameBufferDirect,
         rights: Rights::WRITE,
         object_id: 1,
+    }).ok();
+    let active_uid = crate::user::USER_MANAGER.lock().active_user().0;
+    caps.insert(Capability {
+        id: CapabilityId(2108),
+        cap_type: CapabilityType::StorageRawBlock,
+        rights: Rights::INVOKE,
+        object_id: crate::syscall::vault_object_for_user(active_uid),
     }).ok();
 
     let id = spawn_user_process_with_parent(
@@ -1283,7 +1303,7 @@ pub extern "C" fn app_messages_trampoline() -> ! {
 
 /// Spawns the native Sovereign Messages & E2E Encrypted Wire Client in Ring 3.
 pub fn spawn_app_messages(id_security: TaskId) -> TaskId {
-    let mut caps = CapabilityTable::new(10);
+    let mut caps = CapabilityTable::new(12);
     caps.insert(Capability {
         id: CapabilityId(2401),
         cap_type: CapabilityType::SerialOutput,
@@ -1332,6 +1352,13 @@ pub fn spawn_app_messages(id_security: TaskId) -> TaskId {
         rights: Rights::READ.union(Rights::INVOKE),
         object_id: 0,
     }).ok();
+    let active_uid = crate::user::USER_MANAGER.lock().active_user().0;
+    caps.insert(Capability {
+        id: CapabilityId(2409),
+        cap_type: CapabilityType::StorageRawBlock,
+        rights: Rights::INVOKE,
+        object_id: crate::syscall::vault_object_for_user(active_uid),
+    }).ok();
 
     let id = spawn_user_process_with_parent(
         "app_messages",
@@ -1351,7 +1378,7 @@ pub extern "C" fn app_calendar_trampoline() -> ! {
 
 /// Spawns the native Sovereign Calendar & Chrono-Planner in Ring 3.
 pub fn spawn_app_calendar(id_security: TaskId) -> TaskId {
-    let mut caps = CapabilityTable::new(10);
+    let mut caps = CapabilityTable::new(12);
     caps.insert(Capability {
         id: CapabilityId(2501),
         cap_type: CapabilityType::SerialOutput,
@@ -1405,6 +1432,13 @@ pub fn spawn_app_calendar(id_security: TaskId) -> TaskId {
         cap_type: CapabilityType::RealtimeClockRead,
         rights: Rights::READ,
         object_id: 0,
+    }).ok();
+    let active_uid = crate::user::USER_MANAGER.lock().active_user().0;
+    caps.insert(Capability {
+        id: CapabilityId(2510),
+        cap_type: CapabilityType::StorageRawBlock,
+        rights: Rights::INVOKE,
+        object_id: crate::syscall::vault_object_for_user(active_uid),
     }).ok();
 
     let id = spawn_user_process_with_parent(
