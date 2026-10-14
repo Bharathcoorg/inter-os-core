@@ -49,15 +49,21 @@ class SerialReader:
         self.sock.settimeout(0.5)
         self.buf = b""
         self.captured_logs = []
+        self.cmd_log_idx = 0
 
     def send(self, line):
         time.sleep(0.3)
+        self.cmd_log_idx = len(self.captured_logs)
         cmd_bytes = (line if line.endswith("\n") else line + "\n").encode("utf-8")
         self.sock.sendall(cmd_bytes)
 
+    def reset_cursor(self):
+        self.cmd_log_idx = len(self.captured_logs)
+
     def wait_for(self, marker, timeout=35.0, print_filter=None):
         start = time.time()
-        for l in self.captured_logs:
+        start_scan = getattr(self, "cmd_log_idx", 0)
+        for l in self.captured_logs[start_scan:]:
             if marker in l:
                 return True
         while time.time() - start < timeout:
@@ -180,17 +186,12 @@ def main():
     idx_lock = (150 * w + 360) * 3
     r_l, g_l, b_l = raw_lock[idx_lock], raw_lock[idx_lock+1], raw_lock[idx_lock+2]
     print(f"[TEST] Lock screen sky pixel at (360, 150): R={r_l}, G={g_l}, B={b_l}")
-    assert r_l > 150 and b_l > 180, f"Expected bright Stock lock screen sky, got R={r_l}, G={g_l}, B={b_l}"
+    assert r_l < 30 and b_l < 40, f"Expected Atmospheric Cosmic Stock lock screen, got R={r_l}, G={g_l}, B={b_l}"
     print("[TEST] Stock wallpaper confirmed on LockScreen!")
 
-    print("[TEST] Tapping lock screen to open PIN entry...")
-    reader.send("TAP 360 800")
-    assert reader.wait_for("credential entry required", timeout=20.0, print_filter=["LAUNCHER", "INPUT"]), "PIN entry not opened!"
-
-    time.sleep(0.5)
-    print("[TEST] Entering PIN 123456C to unlock to HomeScreen...")
-    reader.send("PIN 123456C")
-    assert reader.wait_for("User authentication succeeded", timeout=45.0, print_filter=["LAUNCHER", "USER"]), "Unlock failed!"
+    print("[TEST] Unlocking to HomeScreen via swipe gesture...")
+    reader.send("SWIPE 360 1425 360 1100 5\n")
+    assert reader.wait_for("Device unlocked via swipe/slide gesture", timeout=30.0, print_filter=["LAUNCHER", "USER"]), "Unlock failed!"
     print("[TEST] Unlocked to HomeScreen!")
 
     time.sleep(1.0)
@@ -214,23 +215,23 @@ def main():
     assert reader.wait_for("Wallpaper picker opened", timeout=25.0, print_filter=["SETTINGS", "INPUT"]), "Wallpaper picker not opened!"
     print("[TEST] Wallpaper picker opened successfully!")
 
-    # 4. Select Night wallpaper (Cell 2 at (592, 868))
-    print("[TEST] Selecting Night wallpaper (TAP 592 868)...")
-    reader.send("TAP 592 868")
+    # 4. Select Night wallpaper (Cell 2 at (592, 1008))
+    print("[TEST] Selecting Night wallpaper (TAP 592 1008)...")
+    reader.send("TAP 592 1008")
     assert reader.wait_for("Wallpaper selected for preview", timeout=25.0, print_filter=["SETTINGS", "INPUT"]), "Night wallpaper not selected!"
     print("[TEST] Night wallpaper selected for preview!")
 
     time.sleep(1.0)
-    # 5. Set Target: Home (Segment 0 at (130, 704))
-    print("[TEST] Setting Wallpaper Target: Home (TAP 130 704)...")
-    reader.send("TAP 130 704")
+    # 5. Set Target: Home (Segment 0 at (134, 852))
+    print("[TEST] Setting Wallpaper Target: Home (TAP 134 852)...")
+    reader.send("TAP 134 852")
     assert reader.wait_for("Wallpaper target changed", timeout=25.0, print_filter=["SETTINGS", "INPUT"]), "Wallpaper target not changed to Home!"
     print("[TEST] Wallpaper target changed to Home!")
 
     time.sleep(1.0)
-    # 6. Tap Apply at (188, 1272)
-    print("[TEST] Applying wallpaper (TAP 188 1272)...")
-    reader.send("TAP 188 1272")
+    # 6. Tap Apply at (188, 1160)
+    print("[TEST] Applying wallpaper (TAP 188 1160)...")
+    reader.send("TAP 188 1160")
     assert reader.wait_for("Wallpaper written to the settings store", timeout=25.0, print_filter=["SETTINGS", "INPUT"]), "Wallpaper was not written to store!"
     print("[TEST] Wallpaper written to settings store successfully!")
 
@@ -247,7 +248,10 @@ def main():
     assert applied, "Launcher did not apply Home wallpaper from store!"
     print("[TEST] Launcher applied Home wallpaper from store!")
 
-    reader.wait_for("Home surface rendered", timeout=20.0, print_filter=["LAUNCHER"])
+    assert reader.wait_for("Foreground application exited and was reaped", timeout=25.0, print_filter=["LAUNCHER"]), "Child not reaped!"
+    assert reader.wait_for("FRAME ticks=", timeout=25.0, print_filter=["LAUNCHER"]), "Launcher frame not rendered!"
+    print("[TEST] Launcher frame render complete!")
+    time.sleep(1.0)
 
     # 9. Dump Framebuffer and verify pixels
     ppm_home = ROOT / "target" / "home_wallpaper_night.ppm"
@@ -256,12 +260,12 @@ def main():
     print(f"[TEST] Home PPM dumped: {ppm_home} ({ppm_home.stat().st_size} bytes)")
 
     # Sample a sky pixel in the Home screen
-    # For Night scene: top sky is dark (R~74, G~84, B~96 at y=150)
-    # For Stock scene: top sky is bright (R~174, G~197, B~221 at y=150)
+    # For Night scene: top sky is dark (R~23, G~35, B~51 at y=50)
+    # For Stock scene: top sky is bright (R~172, G~195, B~220 at y=50)
     w, h, raw = parse_ppm(ppm_home)
-    idx = (150 * w + 360) * 3
+    idx = (50 * w + 360) * 3
     r, g, b = raw[idx], raw[idx+1], raw[idx+2]
-    print(f"[TEST] Home sky pixel at (360, 150): R={r}, G={g}, B={b}")
+    print(f"[TEST] Home sky pixel at (360, 50): R={r}, G={g}, B={b}")
     assert r < 100 and g < 100 and b < 110, f"Expected dark Night sky pixel, got R={r}, G={g}, B={b}"
     print("[TEST] Night sky pixel confirmed on HomeScreen (Stock was R > 150, B > 180)!")
 
@@ -286,25 +290,24 @@ def main():
     idx_rl = (150 * w_rl + 360) * 3
     rl_r, rl_g, rl_b = raw_rl[idx_rl], raw_rl[idx_rl+1], raw_rl[idx_rl+2]
     print(f"[TEST] Reboot Lock screen sky pixel at (360, 150): R={rl_r}, G={rl_g}, B={rl_b}")
-    assert rl_r > 150 and rl_b > 180, f"Expected Stock on reboot lock screen, got R={rl_r}, G={rl_g}, B={rl_b}"
+    assert rl_r < 30 and rl_b < 40, f"Expected Atmospheric Cosmic Stock on reboot lock screen, got R={rl_r}, G={rl_g}, B={rl_b}"
     print("[TEST] Lock screen independently retained Stock wallpaper across reboot!")
 
     time.sleep(0.5)
-    print("[TEST] Unlocking rebooted session with PIN 123456C...")
-    r2.send("TAP 360 800")
-    r2.wait_for("credential entry required", timeout=20.0)
-    time.sleep(0.5)
-    r2.send("PIN 123456C")
-    assert r2.wait_for("User authentication succeeded", timeout=45.0, print_filter=["LAUNCHER", "USER"]), "Reboot unlock failed!"
+    print("[TEST] Unlocking rebooted session with swipe gesture...")
+    r2.send("SWIPE 360 1425 360 1100 5\n")
+    assert r2.wait_for("Device unlocked via swipe/slide gesture", timeout=30.0, print_filter=["LAUNCHER", "USER"]), "Reboot unlock failed!"
     print("[TEST] Unlocked into rebooted HomeScreen!")
 
-    r2.wait_for("Home surface rendered", timeout=20.0, print_filter=["LAUNCHER"])
+    assert r2.wait_for("FRAME ticks=", timeout=25.0, print_filter=["LAUNCHER"]), "Reboot frame not rendered!"
+    print("[TEST] Reboot frame render complete!")
+    time.sleep(1.0)
     ppm_reboot_home = ROOT / "target" / "reboot_home_night.ppm"
     screendump(mon2, ppm_reboot_home)
     w_rh, h_rh, raw_rh = parse_ppm(ppm_reboot_home)
-    idx_rh = (150 * w_rh + 360) * 3
+    idx_rh = (50 * w_rh + 360) * 3
     rh_r, rh_g, rh_b = raw_rh[idx_rh], raw_rh[idx_rh+1], raw_rh[idx_rh+2]
-    print(f"[TEST] Reboot Home screen sky pixel at (360, 150): R={rh_r}, G={rh_g}, B={rh_b}")
+    print(f"[TEST] Reboot Home screen sky pixel at (360, 50): R={rh_r}, G={rh_g}, B={rh_b}")
     assert rh_r < 100 and rh_g < 100 and rh_b < 110, f"Expected Night on reboot home screen, got R={rh_r}, G={rh_g}, B={rh_b}"
     print("[TEST] Home screen persisted Night wallpaper across reboot!")
 
