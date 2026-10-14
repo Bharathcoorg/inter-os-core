@@ -103,6 +103,21 @@ impl PciDevice {
     pub fn is_ac97(&self) -> bool {
         self.class_code == 0x04 && (self.subclass == 0x01 || self.device_id == 0x2415 || self.device_id == 0x2445)
     }
+
+    /// Returns true if this device is a Display / VGA Controller (Class 0x03).
+    pub fn is_display_controller(&self) -> bool {
+        self.class_code == 0x03
+    }
+
+    /// Returns true if this is a VirtIO-GPU display adapter (Vendor 0x1AF4, Device 0x1050 or 0x1010).
+    pub fn is_virtio_gpu(&self) -> bool {
+        self.vendor_id == 0x1AF4 && (self.device_id == 0x1050 || self.device_id == 0x1010)
+    }
+
+    /// Returns true if this is a VirtIO device (Vendor 0x1AF4).
+    pub fn is_virtio(&self) -> bool {
+        self.vendor_id == 0x1AF4
+    }
 }
 
 /// Reads a 32-bit register from PCI configuration space.
@@ -203,6 +218,11 @@ pub fn scan_pci_bus() -> Vec<PciDevice> {
 /// Returns the first discovered Intel E1000-compatible PCI controller.
 pub fn find_e1000() -> Option<PciDevice> {
     scan_pci_bus().into_iter().find(|d| d.is_intel_e1000())
+}
+
+/// Returns the first discovered VirtIO-GPU PCI display controller if present.
+pub fn find_virtio_gpu() -> Option<PciDevice> {
+    scan_pci_bus().into_iter().find(|d| d.is_virtio_gpu())
 }
 
 

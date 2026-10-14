@@ -21,6 +21,7 @@ pub mod ps2_mouse;
 pub mod sdhci;
 pub mod touch_gestures;
 pub mod touch_i2c;
+pub mod virtio_gpu;
 
 pub use ata::{AtaDrive, AtaError, BlockDevice, ATA_BOOT, ATA_PRIMARY, SECTOR_SIZE};
 pub use audio::{PciAudioController, PciAudioDevice};
@@ -34,6 +35,7 @@ pub use pmic::{BatteryTelemetry, ChargingState, DvfsGovernor, DvfsProfile, PmicF
 pub use sdhci::{SdhciController, test_sdhci_controller};
 pub use touch_gestures::{ContactSlot, RecognizedGesture, TouchGestureEngine, TOUCH_ENGINE, test_touch_gestures};
 pub use touch_i2c::{GoodixGt911Driver, I2cBusAdapter, MemoryI2cAdapter, test_gt911_pipeline};
+pub use virtio_gpu::{VirtioGpuCtrlHdr, VirtioGpuDriver, VirtioGpuRect, VIRTIO_GPU};
 
 /// Runs comprehensive self-tests on all modular hardware drivers.
 pub fn init_and_test_drivers() {
@@ -44,6 +46,7 @@ pub fn init_and_test_drivers() {
     test_touch_gestures();
     test_gt911_pipeline();
     test_sdhci_controller();
+    virtio_gpu::test_virtio_gpu_structures();
     crate::serial_println!(
         "--- [Hardware driver register models exercised; no physical controller is bound] ---"
     );
