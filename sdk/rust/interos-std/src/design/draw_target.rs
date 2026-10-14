@@ -100,7 +100,8 @@ impl<'a> Surface<'a> {
         if width == 0 || height == 0 {
             return Err("a surface cannot be zero-sized");
         }
-        if pixels.len() < width * height {
+        let total_pixels = width.checked_mul(height).ok_or("surface dimensions overflow usize")?;
+        if pixels.len() < total_pixels {
             return Err("buffer is smaller than the surface it is asked to be");
         }
         Ok(Self {
@@ -182,13 +183,23 @@ impl<'a> DrawTarget for Surface<'a> {
         let w = self.width as i64;
         let h = self.height as i64;
 
+        // If the rectangle is entirely outside the canvas bounds on any side,
+        // no pixels can ever land on the surface. Return early.
+        if ry >= h || rx >= w || ry.saturating_add(rh as i64) <= 0 || rx.saturating_add(rw as i64) <= 0 {
+            return Ok(());
+        }
+
         let mut iter = colors.into_iter();
         for dy in 0..rh as i64 {
             let y = ry.saturating_add(dy);
+            if y >= h {
+                // All subsequent rows are strictly beyond the bottom edge.
+                return Ok(());
+            }
             for dx in 0..rw as i64 {
                 let Some(color) = iter.next() else { return Ok(()); };
                 let x = rx.saturating_add(dx);
-                if x >= 0 && x < w && y >= 0 && y < h {
+                if x >= 0 && x < w && y >= 0 {
                     self.pixels[y as usize * self.width + x as usize] = color.to_argb();
                 }
             }
@@ -205,6 +216,10 @@ impl<'a> DrawTarget for Surface<'a> {
         let ry = rectangle.top_left.y as i64;
         let rw = rectangle.size.width as i64;
         let rh = rectangle.size.height as i64;
+
+        if rw <= 0 || rh <= 0 {
+            return Ok(());
+        }
 
         let x0 = rx.clamp(0, w) as usize;
         let y0 = ry.clamp(0, h) as usize;
@@ -223,9 +238,10 @@ impl<'a> DrawTarget for Surface<'a> {
 
     /// Clears the whole surface.
     fn clear(&mut self, color: Self::Color) -> Result<(), Self::Error> {
-        let len = self.width * self.height;
-        if len <= self.pixels.len() {
-            self.pixels[..len].fill(color.to_argb());
+        if let Some(len) = self.width.checked_mul(self.height) {
+            if len <= self.pixels.len() {
+                self.pixels[..len].fill(color.to_argb());
+            }
         }
         Ok(())
     }
@@ -422,5 +438,85 @@ mod tests {
             drop(surface);
             assert_eq!(buf.iter().filter(|p| **p == WHITE.to_argb()).count(), 100);
         }
+    }
+
+    #[test]
+    fn surface_new_rejects_multiplication_overflow() {
+        let mut buf = [0u32; 16];
+        // usize::MAX / 2 * 4 overflows usize
+        let overflow_w = usize::MAX / 2;
+        let overflow_h = 4;
+        assert!(Surface::new(&mut buf, overflow_w, overflow_h).is_err());
+    }
+
+    #[test]
+    fn fill_contiguous_multicolor_multi_row_with_clipping_all_boundaries() {
+        // 4x4 multicolor grid:
+        // C00 C01 C02 C03
+        // C10 C11 C12 C13
+        // C20 C21 C22 C23
+        // C30 C31 C32 C33
+        // Placed at Point::new(-1, -1) on a 2x2 surface.
+        // Surface visible pixels:
+        // (0,0) -> C11
+        // (1,0) -> C12
+        // (0,1) -> C21
+        // (1,1) -> C22
+        let colors = [
+            SurfaceColor(0x10), SurfaceColor(0x11), SurfaceColor(0x12), SurfaceColor(0x13),
+            SurfaceColor(0x20), SurfaceColor(0x21), SurfaceColor(0x22), SurfaceColor(0x23),
+            SurfaceColor(0x30), SurfaceColor(0x31), SurfaceColor(0x32), SurfaceColor(0x33),
+            SurfaceColor(0x40), SurfaceColor(0x41), SurfaceColor(0x42), SurfaceColor(0x43),
+        ];
+
+        let mut buf = [0u32; 2 * 2];
+        let mut surface = Surface::new(&mut buf, 2, 2).expect("surface");
+        let rect = Rectangle::new(Point::new(-1, -1), Size::new(4, 4));
+        surface.fill_contiguous(&rect, colors).unwrap();
+
+        assert_eq!(surface.get(0, 0), Some(0x21));
+        assert_eq!(surface.get(1, 0), Some(0x22));
+        assert_eq!(surface.get(0, 1), Some(0x31));
+        assert_eq!(surface.get(1, 1), Some(0x32));
+    }
+
+    #[test]
+    fn fill_contiguous_offscreen_terminates_immediately_without_consuming_infinite_iter() {
+        let mut buf = [0u32; 10 * 10];
+        let mut surface = Surface::new(&mut buf, 10, 10).expect("surface");
+
+        // Below the screen: Point(0, 50), Size(100, 100_000)
+        let rect_below = Rectangle::new(Point::new(0, 50), Size::new(100, 100_000));
+        let infinite_colors = core::iter::repeat(WHITE);
+        assert!(surface.fill_contiguous(&rect_below, infinite_colors).is_ok());
+
+        // Above the screen: Point(0, -200), Size(100, 50) -> ry + rh = -150 <= 0
+        let rect_above = Rectangle::new(Point::new(0, -200), Size::new(100, 50));
+        let infinite_colors_above = core::iter::repeat(WHITE);
+        assert!(surface.fill_contiguous(&rect_above, infinite_colors_above).is_ok());
+
+        // To the right: Point(50, 0), Size(100, 100) -> rx >= w
+        let rect_right = Rectangle::new(Point::new(50, 0), Size::new(100, 100));
+        let infinite_colors_right = core::iter::repeat(WHITE);
+        assert!(surface.fill_contiguous(&rect_right, infinite_colors_right).is_ok());
+
+        // To the left: Point(-200, 0), Size(50, 100) -> rx + rw <= 0
+        let rect_left = Rectangle::new(Point::new(-200, 0), Size::new(50, 100));
+        let infinite_colors_left = core::iter::repeat(WHITE);
+        assert!(surface.fill_contiguous(&rect_left, infinite_colors_left).is_ok());
+
+        // Buffer remains completely untouched
+        assert_eq!(buf.iter().filter(|p| **p != 0).count(), 0);
+    }
+
+    #[test]
+    fn fill_solid_zero_dimensions_is_safe_noop() {
+        let mut buf = [0u32; 10 * 10];
+        let mut surface = Surface::new(&mut buf, 10, 10).expect("surface");
+        let rect_zero_w = Rectangle::new(Point::new(0, 0), Size::new(0, 10));
+        let rect_zero_h = Rectangle::new(Point::new(0, 0), Size::new(10, 0));
+        assert!(surface.fill_solid(&rect_zero_w, WHITE).is_ok());
+        assert!(surface.fill_solid(&rect_zero_h, WHITE).is_ok());
+        assert_eq!(buf.iter().filter(|p| **p != 0).count(), 0);
     }
 }
