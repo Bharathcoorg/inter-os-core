@@ -71,6 +71,57 @@ pub enum CapabilityType {
     RealtimeClockRead,
 }
 
+impl CapabilityType {
+    pub const fn to_raw(self) -> u64 {
+        match self {
+            CapabilityType::SerialOutput => 1,
+            CapabilityType::FrameBufferDirect => 2,
+            CapabilityType::TimerTickRead => 3,
+            CapabilityType::HardwarePortIo => 4,
+            CapabilityType::IpcSend => 5,
+            CapabilityType::IpcReceive => 6,
+            CapabilityType::ProcessSpawn => 7,
+            CapabilityType::ProcessKill => 8,
+            CapabilityType::FileSystemRead => 9,
+            CapabilityType::FileSystemWrite => 10,
+            CapabilityType::StorageRawBlock => 11,
+            CapabilityType::NetworkSocket => 12,
+            CapabilityType::NetworkSend => 13,
+            CapabilityType::NetworkReceive => 14,
+            CapabilityType::ShmProducer => 15,
+            CapabilityType::ShmConsumer => 16,
+            CapabilityType::EventPoll => 17,
+            CapabilityType::SystemControl => 18,
+            CapabilityType::RealtimeClockRead => 24,
+        }
+    }
+
+    pub const fn from_raw(val: u64) -> Option<Self> {
+        match val {
+            1 => Some(CapabilityType::SerialOutput),
+            2 => Some(CapabilityType::FrameBufferDirect),
+            3 => Some(CapabilityType::TimerTickRead),
+            4 => Some(CapabilityType::HardwarePortIo),
+            5 => Some(CapabilityType::IpcSend),
+            6 => Some(CapabilityType::IpcReceive),
+            7 => Some(CapabilityType::ProcessSpawn),
+            8 => Some(CapabilityType::ProcessKill),
+            9 => Some(CapabilityType::FileSystemRead),
+            10 => Some(CapabilityType::FileSystemWrite),
+            11 => Some(CapabilityType::StorageRawBlock),
+            12 => Some(CapabilityType::NetworkSocket),
+            13 => Some(CapabilityType::NetworkSend),
+            14 => Some(CapabilityType::NetworkReceive),
+            15 => Some(CapabilityType::ShmProducer),
+            16 => Some(CapabilityType::ShmConsumer),
+            17 => Some(CapabilityType::EventPoll),
+            18 => Some(CapabilityType::SystemControl),
+            24 => Some(CapabilityType::RealtimeClockRead),
+            _ => None,
+        }
+    }
+}
+
 /// Bitmask representing granular rights held on a capability.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Rights(pub u32);
@@ -677,6 +728,30 @@ impl CapabilityTable {
         })
     }
 
+    /// Finds the first slot containing an unrevoked capability matching type, rights, and optional object ID.
+    /// If `expected_object_id == 0`, any matching capability satisfies the search.
+    pub fn find_slot_object(
+        &self,
+        expected_type: CapabilityType,
+        required_rights: Rights,
+        expected_object_id: u64,
+    ) -> Option<usize> {
+        self.slots.iter().enumerate().find_map(|(idx, slot)| {
+            slot.cap.as_ref().and_then(|cap| {
+                if cap.cap_type == expected_type
+                    && cap.rights.contains(required_rights)
+                    && (expected_object_id == 0 || cap.object_id == expected_object_id)
+                    && !revocation::is_revoked(cap.id)
+                {
+                    slot.record_access();
+                    Some(idx)
+                } else {
+                    None
+                }
+            })
+        })
+    }
+
     /// Returns the total number of capabilities in this table that can still
     /// authorize something.
     pub fn count(&self) -> usize {
@@ -1057,7 +1132,74 @@ pub fn run_adversarial_tests() {
     }
     crate::serial_println!("[TEST] Capability Adversarial: Per-Capability Access Accounting Verified [PASSED]");
 
+    // 16. Adversarial Test 15: Deterministic Capability Slot Discovery
+    {
+        let lookup_task = crate::task::TaskId(128);
+        let mut table = CapabilityTable::new_for_task(lookup_task, 4);
+        let slot_fs = table.insert(Capability {
+            id: CapabilityId(0x00C0_FFEE_0010),
+            cap_type: CapabilityType::FileSystemRead,
+            rights: Rights::READ,
+            object_id: 0,
+        }).expect("insert fs");
+        let slot_ipc = table.insert(Capability {
+            id: CapabilityId(0x00C0_FFEE_0011),
+            cap_type: CapabilityType::IpcSend,
+            rights: Rights::WRITE,
+            object_id: 0x5555,
+        }).expect("insert ipc");
+
+        assert_eq!(table.find_slot_object(CapabilityType::FileSystemRead, Rights::NONE, 0), Some(slot_fs));
+        assert_eq!(table.find_slot_object(CapabilityType::IpcSend, Rights::NONE, 0x5555), Some(slot_ipc));
+        assert_eq!(table.find_slot_object(CapabilityType::IpcSend, Rights::NONE, 0x9999), None);
+        assert_eq!(table.find_slot_object(CapabilityType::NetworkSocket, Rights::NONE, 0), None);
+    }
+    crate::serial_println!("[TEST] Capability Adversarial: Deterministic Slot Discovery Verified [PASSED]");
+
     crate::serial_println!("[TEST] Zero-Trust Capability Invariants: 100% Attested & Enforced.");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capability_type_raw_encoding_roundtrips() {
+        for val in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 24] {
+            let cap_type = CapabilityType::from_raw(val).expect("valid capability type");
+            assert_eq!(cap_type.to_raw(), val);
+        }
+        assert_eq!(CapabilityType::from_raw(0), None);
+        assert_eq!(CapabilityType::from_raw(999), None);
+    }
+
+    #[test]
+    fn find_slot_object_discovers_unrevoked_capabilities_and_records_telemetry() {
+        let task_id = crate::task::TaskId(42);
+        let mut table = CapabilityTable::new_for_task(task_id, 4);
+        let s0 = table.insert(Capability {
+            id: CapabilityId(0x1000),
+            cap_type: CapabilityType::SerialOutput,
+            rights: Rights::WRITE,
+            object_id: 0,
+        }).unwrap();
+        let s1 = table.insert(Capability {
+            id: CapabilityId(0x1001),
+            cap_type: CapabilityType::FileSystemRead,
+            rights: Rights::READ,
+            object_id: 0x1234,
+        }).unwrap();
+
+        assert_eq!(table.find_slot_object(CapabilityType::SerialOutput, Rights::NONE, 0), Some(s0));
+        assert_eq!(table.find_slot_object(CapabilityType::FileSystemRead, Rights::NONE, 0x1234), Some(s1));
+        assert_eq!(table.find_slot_object(CapabilityType::FileSystemRead, Rights::NONE, 0), Some(s1)); // 0 matches any object
+        assert_eq!(table.find_slot_object(CapabilityType::FileSystemRead, Rights::NONE, 0x9999), None); // Mismatched object
+        assert_eq!(table.find_slot_object(CapabilityType::NetworkSocket, Rights::NONE, 0), None);
+
+        // Access telemetry incremented on discovery
+        let (count, _) = table.access_stats(s0).unwrap();
+        assert_eq!(count, 1);
+    }
 }
 
 

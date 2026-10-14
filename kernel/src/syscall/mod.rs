@@ -197,6 +197,7 @@ pub enum SyscallNumber {
     // so no existing ABI number moves.
     DisplaySetMode = 130,
     DisplaySetOrientation = 131,
+    CapLookup = 132,
 }
 
 /// System call result status codes.
@@ -1856,6 +1857,13 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
              // (0 = Portrait, 1 = LandscapeRight, 2 = PortraitInverted, 3 = LandscapeLeft)
              match sys_display_set_orientation(a1 as usize, a2 as u32) {
                  Ok(()) => SyscallResult::Success as i64,
+                 Err(e) => e as i64,
+             }
+         }
+         132 => {
+             // CapLookup: a1 = cap_type, a2 = object_id
+             match sys_cap_lookup(a1, a2) {
+                 Ok(slot) => slot as i64,
                  Err(e) => e as i64,
              }
          }
@@ -3677,6 +3685,18 @@ pub fn sys_display_set_orientation(cap_slot: usize, orientation: u32) -> Result<
         );
     }
     Ok(())
+}
+
+/// Dispatches a capability slot lookup for the current task.
+/// Returns the slot index (as a non-negative usize) if found, or SyscallResult error.
+pub fn sys_cap_lookup(cap_type_raw: u64, object_id: u64) -> Result<usize, SyscallResult> {
+    let cap_type = CapabilityType::from_raw(cap_type_raw)
+        .ok_or(SyscallResult::InvalidArguments)?;
+    let sched = SCHEDULER.lock();
+    let current_task = sched.current_task()
+        .ok_or(SyscallResult::PermissionDenied)?;
+    current_task.cap_table.find_slot_object(cap_type, Rights::NONE, object_id)
+        .ok_or(SyscallResult::TargetNotFound)
 }
 
 /// Polls the normalized userspace input event pipeline.

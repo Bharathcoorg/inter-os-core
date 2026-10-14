@@ -193,6 +193,7 @@ pub enum SyscallNumber {
     // so no existing ABI number moves.
     DisplaySetMode = 130,
     DisplaySetOrientation = 131,
+    CapLookup = 132,
 }
 
 // -----------------------------------------------------------------------------
@@ -1241,6 +1242,46 @@ pub fn thermal_query(out_buf: &mut [u8]) -> Result<usize, i64> {
             SyscallNumber::ThermalQuery,
             out_buf.as_mut_ptr() as u64,
             out_buf.len() as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as usize)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Canonical Capability Types for deterministic discovery via `cap_lookup`.
+pub mod cap_type {
+    pub const SERIAL_OUTPUT: u64 = 1;
+    pub const FRAMEBUFFER_DIRECT: u64 = 2;
+    pub const TIMER_TICK_READ: u64 = 3;
+    pub const HARDWARE_PORT_IO: u64 = 4;
+    pub const IPC_SEND: u64 = 5;
+    pub const IPC_RECEIVE: u64 = 6;
+    pub const PROCESS_SPAWN: u64 = 7;
+    pub const PROCESS_KILL: u64 = 8;
+    pub const FILE_SYSTEM_READ: u64 = 9;
+    pub const FILE_SYSTEM_WRITE: u64 = 10;
+    pub const STORAGE_RAW_BLOCK: u64 = 11;
+    pub const NETWORK_SOCKET: u64 = 12;
+    pub const NETWORK_SEND: u64 = 13;
+    pub const NETWORK_RECEIVE: u64 = 14;
+    pub const SHM_PRODUCER: u64 = 15;
+    pub const SHM_CONSUMER: u64 = 16;
+    pub const EVENT_POLL: u64 = 17;
+    pub const SYSTEM_CONTROL: u64 = 18;
+    pub const REALTIME_CLOCK_READ: u64 = 24;
+}
+
+/// Dynamically discovers the slot index of an active capability matching `cap_type`
+/// and optional `object_id`. If `object_id == 0`, any capability of that type matches.
+pub fn cap_lookup(cap_type: u64, object_id: u64) -> Result<usize, i64> {
+    let ret = unsafe {
+        syscall2(
+            SyscallNumber::CapLookup,
+            cap_type,
+            object_id,
         )
     };
     if ret >= 0 {
@@ -2845,5 +2886,28 @@ mod abi_tests {
     fn a_short_stat_record_is_refused() {
         assert!(FileStatRecord::parse(&[0u8; FILE_STAT_BYTES - 1]).is_none());
         assert!(FileStatRecord::parse(&[]).is_none());
+    }
+
+    #[test]
+    fn cap_type_constants_match_kernel_encoding() {
+        assert_eq!(cap_type::SERIAL_OUTPUT, 1);
+        assert_eq!(cap_type::FRAMEBUFFER_DIRECT, 2);
+        assert_eq!(cap_type::TIMER_TICK_READ, 3);
+        assert_eq!(cap_type::HARDWARE_PORT_IO, 4);
+        assert_eq!(cap_type::IPC_SEND, 5);
+        assert_eq!(cap_type::IPC_RECEIVE, 6);
+        assert_eq!(cap_type::PROCESS_SPAWN, 7);
+        assert_eq!(cap_type::PROCESS_KILL, 8);
+        assert_eq!(cap_type::FILE_SYSTEM_READ, 9);
+        assert_eq!(cap_type::FILE_SYSTEM_WRITE, 10);
+        assert_eq!(cap_type::STORAGE_RAW_BLOCK, 11);
+        assert_eq!(cap_type::NETWORK_SOCKET, 12);
+        assert_eq!(cap_type::NETWORK_SEND, 13);
+        assert_eq!(cap_type::NETWORK_RECEIVE, 14);
+        assert_eq!(cap_type::SHM_PRODUCER, 15);
+        assert_eq!(cap_type::SHM_CONSUMER, 16);
+        assert_eq!(cap_type::EVENT_POLL, 17);
+        assert_eq!(cap_type::SYSTEM_CONTROL, 18);
+        assert_eq!(cap_type::REALTIME_CLOCK_READ, 24);
     }
 }
