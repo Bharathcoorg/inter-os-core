@@ -150,6 +150,87 @@ impl PinBuffer {
     }
 }
 
+/// Detailed network interface telemetry model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NetworkInterfaceRecord {
+    pub name: [u8; 16],
+    pub name_len: usize,
+    pub ip_addr: [u8; 4],
+    pub mac_addr: [u8; 6],
+    pub mtu: u16,
+    pub is_up: bool,
+    pub is_wireless: bool,
+}
+
+impl NetworkInterfaceRecord {
+    pub const EMPTY: Self = Self {
+        name: [0u8; 16],
+        name_len: 0,
+        ip_addr: [0u8; 4],
+        mac_addr: [0u8; 6],
+        mtu: 1500,
+        is_up: false,
+        is_wireless: false,
+    };
+}
+
+/// Standard discrete permission bits granted to Sovereign applications.
+pub const PERM_VFS_READ: u32 = 1 << 0;
+pub const PERM_VFS_WRITE: u32 = 1 << 1;
+pub const PERM_NETWORK: u32 = 1 << 2;
+pub const PERM_CAMERA: u32 = 1 << 3;
+pub const PERM_AUDIO: u32 = 1 << 4;
+pub const PERM_TELEPHONY: u32 = 1 << 5;
+pub const PERM_LOCATION: u32 = 1 << 6;
+
+/// Bounded per-app permission record supporting dynamic revocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AppPermissionState {
+    pub app_name: [u8; 24],
+    pub app_name_len: usize,
+    pub granted_mask: u32,
+    pub revoked_mask: u32,
+}
+
+impl AppPermissionState {
+    pub const fn new(name: &[u8], granted: u32) -> Self {
+        let mut app_name = [0u8; 24];
+        let mut n = 0;
+        while n < name.len() && n < 24 {
+            app_name[n] = name[n];
+            n += 1;
+        }
+        Self {
+            app_name,
+            app_name_len: n,
+            granted_mask: granted,
+            revoked_mask: 0,
+        }
+    }
+
+    /// Effective active permissions: granted AND NOT revoked.
+    #[inline(always)]
+    pub fn effective_mask(&self) -> u32 {
+        self.granted_mask & !self.revoked_mask
+    }
+
+    /// Checks if a specific permission is currently active.
+    #[inline(always)]
+    pub fn is_allowed(&self, perm_bit: u32) -> bool {
+        (self.effective_mask() & perm_bit) == perm_bit
+    }
+
+    /// Revokes a permission bit.
+    pub fn revoke(&mut self, perm_bit: u32) {
+        self.revoked_mask |= perm_bit;
+    }
+
+    /// Restores a previously revoked permission bit.
+    pub fn restore(&mut self, perm_bit: u32) {
+        self.revoked_mask &= !perm_bit;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -204,4 +285,41 @@ mod tests {
         assert_eq!(pin.len(), 0);
         assert!(pin.is_empty());
     }
+
+    #[test]
+    fn test_app_permissions_and_revocation() {
+        let mut app = AppPermissionState::new(b"org.interos.camera", PERM_CAMERA | PERM_VFS_WRITE);
+        assert_eq!(&app.app_name[..app.app_name_len], b"org.interos.camera");
+        assert!(app.is_allowed(PERM_CAMERA));
+        assert!(app.is_allowed(PERM_VFS_WRITE));
+        assert!(!app.is_allowed(PERM_LOCATION));
+
+        // Dynamically revoke camera permission
+        app.revoke(PERM_CAMERA);
+        assert!(!app.is_allowed(PERM_CAMERA));
+        assert!(app.is_allowed(PERM_VFS_WRITE));
+        assert_eq!(app.effective_mask(), PERM_VFS_WRITE);
+
+        // Restore camera permission
+        app.restore(PERM_CAMERA);
+        assert!(app.is_allowed(PERM_CAMERA));
+        assert_eq!(app.effective_mask(), PERM_CAMERA | PERM_VFS_WRITE);
+    }
+
+    #[test]
+    fn test_network_interface_record() {
+        let mut iface = NetworkInterfaceRecord::EMPTY;
+        assert_eq!(iface.is_up, false);
+        assert_eq!(iface.mtu, 1500);
+
+        iface.name[..4].copy_from_slice(b"eth0");
+        iface.name_len = 4;
+        iface.ip_addr = [10, 0, 2, 15];
+        iface.is_up = true;
+
+        assert_eq!(&iface.name[..iface.name_len], b"eth0");
+        assert_eq!(iface.ip_addr, [10, 0, 2, 15]);
+        assert!(iface.is_up);
+    }
 }
+
