@@ -762,7 +762,10 @@ impl CalendarApp {
         let mut agenda_sector = [0u8; 512];
         let copy_len = event_name.len().min(128);
         agenda_sector[..copy_len].copy_from_slice(&event_name.as_bytes()[..copy_len]);
-        let iv = [0x77u8; 16];
+        let mut iv = [0u8; 16];
+        if std::get_random(&mut iv).is_err() {
+            iv.copy_from_slice(b"INTEROS_CAL_EVT_");
+        }
         // WHY: report the vault outcome. The old code stayed silent on refusal,
         // leaving the event looking scheduled when nothing was stored.
         match std::vault_encrypt_sector(203, &mut agenda_sector, &iv) {

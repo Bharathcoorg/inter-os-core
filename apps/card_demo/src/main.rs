@@ -69,14 +69,14 @@ fn draw_text_target<T: DrawTarget<Color = SurfaceColor>>(
     }
 }
 
-fn render_frame(surface_id: u32) {
+fn render_frame(surface_id: u32, scroll_y: i32) {
     let card_x: i32 = 48;
-    let card_y: i32 = 260;
+    let card_y: i32 = 260 + scroll_y;
     let card_w: u32 = 624;
     let card_h: u32 = 560;
 
     let inner_x: i32 = 80;
-    let inner_y: i32 = 500;
+    let inner_y: i32 = 500 + scroll_y;
     let inner_w: u32 = 560;
     let inner_h: u32 = 180;
 
@@ -139,14 +139,19 @@ fn render_frame(surface_id: u32) {
         );
 
         // 6. Typography via DrawTarget::draw_iter
+        let t1 = (310 + scroll_y).max(0) as usize;
+        let t2 = (400 + scroll_y).max(0) as usize;
+        let t3 = (530 + scroll_y).max(0) as usize;
+        let t4 = (580 + scroll_y).max(0) as usize;
+        let t5 = (630 + scroll_y).max(0) as usize;
         // Card title
-        draw_text_target(&mut target, band_y0, 80, 310, 3, b"DrawTarget Card", 0xFFF5_F6F7, true);
+        draw_text_target(&mut target, band_y0, 80, t1, 3, b"DrawTarget Card", 0xFFF5_F6F7, true);
         // Subtitle
-        draw_text_target(&mut target, band_y0, 80, 400, 2, b"Standard Surface Adapter", 0xFF9A_A0A6, false);
+        draw_text_target(&mut target, band_y0, 80, t2, 2, b"Standard Surface Adapter", 0xFF9A_A0A6, false);
         // Feature tags inside inner badge
-        draw_text_target(&mut target, band_y0, 108, 530, 2, b"Zero Allocations Verified", 0xFF2E_8B57, true);
-        draw_text_target(&mut target, band_y0, 108, 580, 2, b"ET_EXEC Static Relocation", 0xFF25_63EB, false);
-        draw_text_target(&mut target, band_y0, 108, 630, 2, b"Span Fills & Row Bounds", 0xFFF5_F6F7, false);
+        draw_text_target(&mut target, band_y0, 108, t3, 2, b"Zero Allocations Verified", 0xFF2E_8B57, true);
+        draw_text_target(&mut target, band_y0, 108, t4, 2, b"ET_EXEC Static Relocation", 0xFF25_63EB, false);
+        draw_text_target(&mut target, band_y0, 108, t5, 2, b"Span Fills & Row Bounds", 0xFFF5_F6F7, false);
 
         // 7. Navigation pill at bottom of screen
         let rel_pill_y = 1418 - band_y0;
@@ -192,13 +197,15 @@ pub extern "C" fn _start() -> ! {
     };
 
     // 2. Render initial frame using DrawTarget and flip
-    render_frame(surface);
+    let mut scroller = card_demo::SpringScroller::new(-200, 200);
+    render_frame(surface, scroller.position);
     let _ = std::surface_flip(5);
     std::log(0, "[CARD_DEMO] Initial frame presented via hardware scanout.").ok();
 
     // 3. Event Loop: wait for gesture or exit
     loop {
-        if let Ok(_events) = std::event_poll(std::EVENT_TOUCH_INPUT, 100) {
+        let mut needs_redraw = false;
+        if let Ok(_events) = std::event_poll(std::EVENT_TOUCH_INPUT | std::EVENT_TIMER_TICK, 50) {
             let mut input = std::InputEvent {
                 kind: 0,
                 x: 0,
@@ -220,7 +227,19 @@ pub extern "C" fn _start() -> ! {
                     let _ = std::surface_destroy(5, surface);
                     std::exit_with_code(0);
                 }
+                // Drag touch interaction
+                if input.kind == 2 && input.dy != 0 {
+                    scroller.on_drag(input.dy);
+                    needs_redraw = true;
+                }
             }
+        }
+        if scroller.tick() {
+            needs_redraw = true;
+        }
+        if needs_redraw {
+            render_frame(surface, scroller.position);
+            let _ = std::surface_flip(5);
         }
         std::yield_now();
     }

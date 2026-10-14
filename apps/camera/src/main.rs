@@ -341,7 +341,10 @@ impl CameraApp {
         container[50] = b;
         container[51] = self.mode as u8;
 
-        let iv = [0x42u8; 16];
+        let mut iv = [0u8; 16];
+        if std::get_random(&mut iv).is_err() {
+            iv.copy_from_slice(b"INTEROS_CAM_IMG_");
+        }
         std::vault_encrypt_sector(self.current_sector, &mut container, &iv)?;
 
         self.total_photos += 1;

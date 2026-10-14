@@ -28,6 +28,44 @@ pub fn band_overlaps_rect(band: usize, rect_y: usize, rect_h: usize) -> bool {
     rect_y < by1 && ry1 > by0
 }
 
+/// A bounded integer spring scroller for touch physics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpringScroller {
+    pub position: i32,
+    pub velocity: i32,
+    pub min_position: i32,
+    pub max_position: i32,
+}
+
+impl SpringScroller {
+    pub const fn new(min_pos: i32, max_pos: i32) -> Self {
+        Self {
+            position: 0,
+            velocity: 0,
+            min_position: min_pos,
+            max_position: max_pos,
+        }
+    }
+
+    /// Handles a touch drag displacement delta.
+    pub fn on_drag(&mut self, dy: i32) {
+        self.position = (self.position + dy).clamp(self.min_position, self.max_position);
+        self.velocity = dy;
+    }
+
+    /// Steps one tick of spring / inertia relaxation.
+    pub fn tick(&mut self) -> bool {
+        if self.velocity != 0 {
+            self.position = (self.position + self.velocity).clamp(self.min_position, self.max_position);
+            // Integer decay friction: 85% velocity retention per tick
+            self.velocity = (self.velocity * 85) / 100;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -59,5 +97,24 @@ mod tests {
     fn test_surface_colors() {
         assert_eq!(SCREEN_BG.0, 0xFF111214);
         assert_eq!(ACCENT_BLUE.0, 0xFF2563EB);
+    }
+
+    #[test]
+    fn test_spring_scroller_drag_and_tick() {
+        let mut scroller = SpringScroller::new(-200, 200);
+        assert_eq!(scroller.position, 0);
+
+        scroller.on_drag(50);
+        assert_eq!(scroller.position, 50);
+        assert_eq!(scroller.velocity, 50);
+
+        // Clamping to bounds
+        scroller.on_drag(300);
+        assert_eq!(scroller.position, 200);
+
+        // Tick decay
+        let moved = scroller.tick();
+        assert!(moved);
+        assert!(scroller.velocity < 300);
     }
 }

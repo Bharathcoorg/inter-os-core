@@ -501,10 +501,7 @@ fn handle_keyboard_key(calc: &mut CalculatorState, code: u32) -> bool {
             calc.current_operand /= 100;
             calc.result_mode = false;
         }
-        94 => {
-            calc.current_operand = calc.current_operand.saturating_mul(calc.current_operand);
-            calc.result_mode = true;
-        }
+        94 => calc.set_operation('^'),
         _ => return false,
     }
     true
@@ -547,7 +544,7 @@ fn handle_touch_point(calc: &mut CalculatorState, x: u32, y: u32) -> Tap {
                                 calc.push_digit(digit);
                                 std::log(0, "[CALCULATOR] Keypad digit pressed.").ok();
                             }
-                            '+' | '-' | '*' | '/' => {
+                            '+' | '-' | '*' | '/' | '^' => {
                                 calc.set_operation(action);
                                 std::log(0, "[CALCULATOR] Keypad operator selected.").ok();
                             }
@@ -572,11 +569,6 @@ fn handle_touch_point(calc: &mut CalculatorState, x: u32, y: u32) -> Tap {
                                 calc.current_operand /= 100;
                                 calc.result_mode = false;
                                 std::log(0, "[CALCULATOR] Integer percent applied.").ok();
-                            }
-                            '^' => {
-                                calc.current_operand = calc.current_operand.saturating_mul(calc.current_operand);
-                                calc.result_mode = true;
-                                std::log(0, "[CALCULATOR] Square applied.").ok();
                             }
                             _ => {}
                         }
