@@ -122,6 +122,52 @@ impl ImuSensor {
     pub fn roll_degrees(&self) -> i32 {
         (self.accel.x * 90 / 980).clamp(-90, 90)
     }
+
+    /// Computes compass heading (0..=359 degrees) from magnetometer X (East) and Y (North) readings.
+    pub fn compass_heading(&self, mag_x: i32, mag_y: i32) -> u16 {
+        compass_heading_degrees(mag_x, mag_y)
+    }
+}
+
+/// Computes integer degree arctangent approximation (-180..=180) using fixed-point octant reduction.
+pub fn atan2_degrees_approx(y: i32, x: i32) -> i32 {
+    if x == 0 && y == 0 {
+        return 0;
+    }
+    if x == 0 {
+        return if y > 0 { 90 } else { -90 };
+    }
+    if y == 0 {
+        return if x > 0 { 0 } else { 180 };
+    }
+
+    let abs_y = y.abs() as i64;
+    let abs_x = x.abs() as i64;
+
+    let base_deg = if abs_y <= abs_x {
+        let r_1000 = abs_y * 1000 / abs_x;
+        (45 * r_1000 - r_1000 * (1000 - r_1000) * 14 / 1000) / 1000
+    } else {
+        let r_1000 = abs_x * 1000 / abs_y;
+        90 - (45 * r_1000 - r_1000 * (1000 - r_1000) * 14 / 1000) / 1000
+    } as i32;
+
+    if x > 0 && y > 0 {
+        base_deg
+    } else if x < 0 && y > 0 {
+        180 - base_deg
+    } else if x < 0 && y < 0 {
+        -180 + base_deg
+    } else {
+        -base_deg
+    }
+}
+
+/// Computes compass heading (0..359 degrees, clockwise from North) from horizontal magnetic flux vectors (X=East, Y=North).
+pub fn compass_heading_degrees(mag_x: i32, mag_y: i32) -> u16 {
+    let deg = atan2_degrees_approx(mag_x, mag_y);
+    let normalized = (deg + 360) % 360;
+    normalized as u16
 }
 
 #[cfg(test)]
@@ -154,4 +200,21 @@ mod tests {
         imu.update_accel(Vector3D::new(2000, 2000, 0));
         assert!(imu.detect_shake());
     }
+
+    #[test]
+    fn test_compass_cardinal_headings() {
+        // North: mag_x = 0, mag_y = 100 -> 0 degrees
+        assert_eq!(compass_heading_degrees(0, 100), 0);
+        // East: mag_x = 100, mag_y = 0 -> 90 degrees
+        assert_eq!(compass_heading_degrees(100, 0), 90);
+        // South: mag_x = 0, mag_y = -100 -> 180 degrees
+        assert_eq!(compass_heading_degrees(0, -100), 180);
+        // West: mag_x = -100, mag_y = 0 -> 270 degrees
+        assert_eq!(compass_heading_degrees(-100, 0), 270);
+
+        // Northeast: mag_x = 100, mag_y = 100 -> ~45 degrees
+        let ne = compass_heading_degrees(100, 100);
+        assert!((44..=46).contains(&ne));
+    }
 }
+

@@ -182,6 +182,109 @@ impl ContactRecord {
     }
 }
 
+/// Standard ITU-T Q.23 Dual-Tone Multi-Frequency (DTMF) acoustic frequency pairs (Hz).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DtmfPair {
+    pub low_freq_hz: u16,
+    pub high_freq_hz: u16,
+}
+
+impl DtmfPair {
+    pub const fn from_key(key: char) -> Option<Self> {
+        match key {
+            '1' => Some(Self { low_freq_hz: 697, high_freq_hz: 1209 }),
+            '2' => Some(Self { low_freq_hz: 697, high_freq_hz: 1336 }),
+            '3' => Some(Self { low_freq_hz: 697, high_freq_hz: 1477 }),
+            '4' => Some(Self { low_freq_hz: 770, high_freq_hz: 1209 }),
+            '5' => Some(Self { low_freq_hz: 770, high_freq_hz: 1336 }),
+            '6' => Some(Self { low_freq_hz: 770, high_freq_hz: 1477 }),
+            '7' => Some(Self { low_freq_hz: 852, high_freq_hz: 1209 }),
+            '8' => Some(Self { low_freq_hz: 852, high_freq_hz: 1336 }),
+            '9' => Some(Self { low_freq_hz: 852, high_freq_hz: 1477 }),
+            '*' => Some(Self { low_freq_hz: 941, high_freq_hz: 1209 }),
+            '0' => Some(Self { low_freq_hz: 941, high_freq_hz: 1336 }),
+            '#' => Some(Self { low_freq_hz: 941, high_freq_hz: 1477 }),
+            _ => None,
+        }
+    }
+}
+
+/// Call type classification for call records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallType {
+    Outgoing = 0,
+    Incoming = 1,
+    Missed = 2,
+}
+
+pub const MAX_CALL_LOGS: usize = 16;
+
+/// Bounded call history record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CallLogEntry {
+    pub number: [u8; CONTACT_NUM_MAX],
+    pub number_len: usize,
+    pub call_type: CallType,
+    pub duration_secs: u32,
+    pub timestamp_epoch_secs: u64,
+}
+
+impl CallLogEntry {
+    pub const EMPTY: Self = Self {
+        number: [0; CONTACT_NUM_MAX],
+        number_len: 0,
+        call_type: CallType::Outgoing,
+        duration_secs: 0,
+        timestamp_epoch_secs: 0,
+    };
+
+    pub fn new(number_bytes: &[u8], call_type: CallType, duration_secs: u32, timestamp: u64) -> Self {
+        let mut entry = Self::EMPTY;
+        let n = number_bytes.len().min(CONTACT_NUM_MAX);
+        entry.number[..n].copy_from_slice(&number_bytes[..n]);
+        entry.number_len = n;
+        entry.call_type = call_type;
+        entry.duration_secs = duration_secs;
+        entry.timestamp_epoch_secs = timestamp;
+        entry
+    }
+}
+
+/// Bounded, zero-heap call history circular ledger.
+#[derive(Debug, Clone, Copy)]
+pub struct CallHistoryLedger {
+    pub entries: [CallLogEntry; MAX_CALL_LOGS],
+    pub count: usize,
+    pub head: usize,
+}
+
+impl CallHistoryLedger {
+    pub const fn new() -> Self {
+        Self {
+            entries: [CallLogEntry::EMPTY; MAX_CALL_LOGS],
+            count: 0,
+            head: 0,
+        }
+    }
+
+    pub fn push(&mut self, entry: CallLogEntry) {
+        self.entries[self.head] = entry;
+        self.head = (self.head + 1) % MAX_CALL_LOGS;
+        if self.count < MAX_CALL_LOGS {
+            self.count += 1;
+        }
+    }
+
+    pub fn get(&self, idx: usize) -> Option<&CallLogEntry> {
+        if idx >= self.count {
+            return None;
+        }
+        // Most recent first: index 0 is (head - 1 + MAX_CALL_LOGS) % MAX_CALL_LOGS
+        let slot = (self.head + MAX_CALL_LOGS - 1 - idx) % MAX_CALL_LOGS;
+        Some(&self.entries[slot])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -240,4 +343,36 @@ mod tests {
         let dec_len = unescape_store_blob(&legacy, &mut dec).expect("unescape legacy");
         assert_eq!(&dec[..dec_len], &legacy[..]);
     }
+
+    #[test]
+    fn test_dtmf_frequencies() {
+        assert_eq!(DtmfPair::from_key('1'), Some(DtmfPair { low_freq_hz: 697, high_freq_hz: 1209 }));
+        assert_eq!(DtmfPair::from_key('5'), Some(DtmfPair { low_freq_hz: 770, high_freq_hz: 1336 }));
+        assert_eq!(DtmfPair::from_key('#'), Some(DtmfPair { low_freq_hz: 941, high_freq_hz: 1477 }));
+        assert_eq!(DtmfPair::from_key('X'), None);
+    }
+
+    #[test]
+    fn test_call_history_ledger() {
+        let mut ledger = CallHistoryLedger::new();
+        assert_eq!(ledger.count, 0);
+
+        ledger.push(CallLogEntry::new(b"+15551234", CallType::Outgoing, 45, 1000));
+        assert_eq!(ledger.count, 1);
+        let first = ledger.get(0).unwrap();
+        assert_eq!(&first.number[..first.number_len], b"+15551234");
+        assert_eq!(first.call_type, CallType::Outgoing);
+        assert_eq!(first.duration_secs, 45);
+
+        // Push 20 calls to verify circular overwrite at capacity 16
+        for i in 2..=20 {
+            ledger.push(CallLogEntry::new(b"+15550000", CallType::Incoming, i as u32, 1000 + i as u64));
+        }
+        assert_eq!(ledger.count, MAX_CALL_LOGS);
+        // Latest pushed call has duration_secs = 20
+        assert_eq!(ledger.get(0).unwrap().duration_secs, 20);
+        assert_eq!(ledger.get(15).unwrap().duration_secs, 5);
+        assert_eq!(ledger.get(16), None);
+    }
 }
+

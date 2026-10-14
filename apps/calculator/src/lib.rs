@@ -99,6 +99,163 @@ impl CalculatorState {
     }
 }
 
+/// 64-bit decimal fixed-point number with 4 decimal fractional places (scaling factor 10,000).
+/// Bounded, zero-heap decimal math providing exact banking/financial calculation without floating-point inaccuracies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct FixedDecimal {
+    pub raw: i64,
+}
+
+impl FixedDecimal {
+    pub const SCALE: i64 = 10_000;
+    pub const ZERO: Self = Self { raw: 0 };
+    pub const ONE: Self = Self { raw: Self::SCALE };
+
+    pub const fn from_raw(raw: i64) -> Self {
+        Self { raw }
+    }
+
+    pub const fn from_int(val: i64) -> Self {
+        Self { raw: val.saturating_mul(Self::SCALE) }
+    }
+
+    pub const fn from_parts(whole: i64, frac_10000: i64) -> Self {
+        let sign = if whole < 0 { -1 } else { 1 };
+        Self {
+            raw: whole.saturating_mul(Self::SCALE).saturating_add(sign * frac_10000.abs()),
+        }
+    }
+
+    pub const fn whole_part(&self) -> i64 {
+        self.raw / Self::SCALE
+    }
+
+    pub const fn frac_part(&self) -> i64 {
+        (self.raw % Self::SCALE).abs()
+    }
+
+    pub const fn saturating_add(self, other: Self) -> Self {
+        Self { raw: self.raw.saturating_add(other.raw) }
+    }
+
+    pub const fn saturating_sub(self, other: Self) -> Self {
+        Self { raw: self.raw.saturating_sub(other.raw) }
+    }
+
+    pub fn saturating_mul(self, other: Self) -> Self {
+        let prod = (self.raw as i128) * (other.raw as i128);
+        let scaled = prod / (Self::SCALE as i128);
+        let clamped = scaled.clamp(i64::MIN as i128, i64::MAX as i128) as i64;
+        Self { raw: clamped }
+    }
+
+    pub fn saturating_div(self, other: Self) -> Option<Self> {
+        if other.raw == 0 {
+            return None;
+        }
+        let numer = (self.raw as i128) * (Self::SCALE as i128);
+        let quot = numer / (other.raw as i128);
+        let clamped = quot.clamp(i64::MIN as i128, i64::MAX as i128) as i64;
+        Some(Self { raw: clamped })
+    }
+
+    pub fn format_ascii(&self, out: &mut [u8]) -> usize {
+        if out.is_empty() {
+            return 0;
+        }
+        let is_neg = self.raw < 0;
+        let whole = self.whole_part().abs();
+        let frac = self.frac_part();
+
+        let mut pos = 0;
+        if is_neg && pos < out.len() {
+            out[pos] = b'-';
+            pos += 1;
+        }
+
+        let mut whole_buf = [0u8; 20];
+        let mut wn = 0;
+        let mut w = whole;
+        if w == 0 {
+            whole_buf[0] = b'0';
+            wn = 1;
+        } else {
+            while w > 0 && wn < 20 {
+                whole_buf[wn] = b'0' + (w % 10) as u8;
+                w /= 10;
+                wn += 1;
+            }
+        }
+        for i in 0..wn {
+            if pos < out.len() {
+                out[pos] = whole_buf[wn - 1 - i];
+                pos += 1;
+            }
+        }
+
+        if pos < out.len() {
+            out[pos] = b'.';
+            pos += 1;
+        }
+        let d1 = ((frac / 1000) % 10) as u8;
+        let d2 = ((frac / 100) % 10) as u8;
+        let d3 = ((frac / 10) % 10) as u8;
+        let d4 = (frac % 10) as u8;
+
+        for &d in &[d1, d2, d3, d4] {
+            if pos < out.len() {
+                out[pos] = b'0' + d;
+                pos += 1;
+            }
+        }
+        pos
+    }
+
+    pub fn parse_ascii(bytes: &[u8]) -> Option<Self> {
+        if bytes.is_empty() {
+            return None;
+        }
+        let is_neg = bytes[0] == b'-';
+        let start = if is_neg || bytes[0] == b'+' { 1 } else { 0 };
+        if start >= bytes.len() {
+            return None;
+        }
+
+        let mut whole: i64 = 0;
+        let mut idx = start;
+        while idx < bytes.len() && bytes[idx] != b'.' {
+            let b = bytes[idx];
+            if !b.is_ascii_digit() {
+                return None;
+            }
+            whole = whole.checked_mul(10)?.checked_add((b - b'0') as i64)?;
+            idx += 1;
+        }
+
+        let mut frac: i64 = 0;
+        if idx < bytes.len() && bytes[idx] == b'.' {
+            idx += 1;
+            let mut weight = 1000i64;
+            while idx < bytes.len() {
+                let b = bytes[idx];
+                if !b.is_ascii_digit() {
+                    return None;
+                }
+                if weight > 0 {
+                    frac += ((b - b'0') as i64) * weight;
+                    weight /= 10;
+                }
+                idx += 1;
+            }
+        }
+
+        let raw = whole.checked_mul(Self::SCALE)?.checked_add(frac)?;
+        Some(Self {
+            raw: if is_neg { -raw } else { raw },
+        })
+    }
+}
+
 #[cfg(test)]
 extern crate std;
 
@@ -163,4 +320,39 @@ mod tests {
         calc.toggle_sign(); // -3
         assert_eq!(calc.evaluate(), -1);
     }
+
+    #[test]
+    fn test_fixed_decimal_arithmetic_and_formatting() {
+        let a = FixedDecimal::from_parts(12, 3450); // 12.3450
+        let b = FixedDecimal::from_parts(3, 1550);  // 3.1550
+        let sum = a.saturating_add(b);
+        assert_eq!(sum.whole_part(), 15);
+        assert_eq!(sum.frac_part(), 5000);
+
+        let diff = a.saturating_sub(b);
+        assert_eq!(diff.whole_part(), 9);
+        assert_eq!(diff.frac_part(), 1900);
+
+        let mul = FixedDecimal::from_int(2).saturating_mul(FixedDecimal::from_parts(1, 5000));
+        assert_eq!(mul.whole_part(), 3);
+        assert_eq!(mul.frac_part(), 0);
+
+        let div = FixedDecimal::from_int(10).saturating_div(FixedDecimal::from_int(4)).unwrap();
+        assert_eq!(div.whole_part(), 2);
+        assert_eq!(div.frac_part(), 5000);
+
+        // ASCII formatting test
+        let mut buf = [0u8; 16];
+        let len = sum.format_ascii(&mut buf);
+        assert_eq!(&buf[..len], b"15.5000");
+
+        // ASCII parsing test
+        let parsed = FixedDecimal::parse_ascii(b"15.5000").expect("parse");
+        assert_eq!(parsed, sum);
+
+        let parsed_neg = FixedDecimal::parse_ascii(b"-42.0125").expect("parse neg");
+        assert_eq!(parsed_neg.whole_part(), -42);
+        assert_eq!(parsed_neg.frac_part(), 125);
+    }
 }
+

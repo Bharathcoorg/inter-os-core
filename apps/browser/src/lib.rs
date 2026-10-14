@@ -138,6 +138,116 @@ pub fn classify_line(line: &[u8]) -> LineKind {
     }
 }
 
+pub const MAX_URL_LEN: usize = 128;
+pub const MAX_TITLE_LEN: usize = 64;
+pub const MAX_HISTORY_ENTRIES: usize = 8;
+pub const MAX_BOOKMARKS: usize = 8;
+
+/// Bounded browser navigation history record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HistoryRecord {
+    pub url: [u8; MAX_URL_LEN],
+    pub url_len: usize,
+    pub title: [u8; MAX_TITLE_LEN],
+    pub title_len: usize,
+    pub visited_at_epoch_secs: u64,
+}
+
+impl HistoryRecord {
+    pub const EMPTY: Self = Self {
+        url: [0; MAX_URL_LEN],
+        url_len: 0,
+        title: [0; MAX_TITLE_LEN],
+        title_len: 0,
+        visited_at_epoch_secs: 0,
+    };
+
+    pub fn new(url_bytes: &[u8], title_bytes: &[u8], timestamp: u64) -> Self {
+        let mut rec = Self::EMPTY;
+        let u = url_bytes.len().min(MAX_URL_LEN);
+        rec.url[..u].copy_from_slice(&url_bytes[..u]);
+        rec.url_len = u;
+        let t = title_bytes.len().min(MAX_TITLE_LEN);
+        rec.title[..t].copy_from_slice(&title_bytes[..t]);
+        rec.title_len = t;
+        rec.visited_at_epoch_secs = timestamp;
+        rec
+    }
+}
+
+/// Bounded bookmark record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BookmarkRecord {
+    pub url: [u8; MAX_URL_LEN],
+    pub url_len: usize,
+    pub title: [u8; MAX_TITLE_LEN],
+    pub title_len: usize,
+    pub is_pinned: bool,
+}
+
+impl BookmarkRecord {
+    pub const EMPTY: Self = Self {
+        url: [0; MAX_URL_LEN],
+        url_len: 0,
+        title: [0; MAX_TITLE_LEN],
+        title_len: 0,
+        is_pinned: false,
+    };
+
+    pub fn new(url_bytes: &[u8], title_bytes: &[u8], is_pinned: bool) -> Self {
+        let mut rec = Self::EMPTY;
+        let u = url_bytes.len().min(MAX_URL_LEN);
+        rec.url[..u].copy_from_slice(&url_bytes[..u]);
+        rec.url_len = u;
+        let t = title_bytes.len().min(MAX_TITLE_LEN);
+        rec.title[..t].copy_from_slice(&title_bytes[..t]);
+        rec.title_len = t;
+        rec.is_pinned = is_pinned;
+        rec
+    }
+}
+
+/// Zero-heap bounded browser history and bookmark store.
+#[derive(Debug, Clone, Copy)]
+pub struct BrowserDataStore {
+    pub history: [HistoryRecord; MAX_HISTORY_ENTRIES],
+    pub history_count: usize,
+    pub bookmarks: [BookmarkRecord; MAX_BOOKMARKS],
+    pub bookmark_count: usize,
+}
+
+impl BrowserDataStore {
+    pub const fn new() -> Self {
+        Self {
+            history: [HistoryRecord::EMPTY; MAX_HISTORY_ENTRIES],
+            history_count: 0,
+            bookmarks: [BookmarkRecord::EMPTY; MAX_BOOKMARKS],
+            bookmark_count: 0,
+        }
+    }
+
+    pub fn push_history(&mut self, rec: HistoryRecord) {
+        if self.history_count < MAX_HISTORY_ENTRIES {
+            self.history[self.history_count] = rec;
+            self.history_count += 1;
+        } else {
+            for i in 1..MAX_HISTORY_ENTRIES {
+                self.history[i - 1] = self.history[i];
+            }
+            self.history[MAX_HISTORY_ENTRIES - 1] = rec;
+        }
+    }
+
+    pub fn add_bookmark(&mut self, b: BookmarkRecord) -> bool {
+        if self.bookmark_count >= MAX_BOOKMARKS {
+            return false;
+        }
+        self.bookmarks[self.bookmark_count] = b;
+        self.bookmark_count += 1;
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,4 +301,29 @@ mod tests {
         assert_eq!(classify_line(b"=> https://example.com Link Text"), LineKind::GemtextLink);
         assert_eq!(classify_line(b"Regular paragraph prose."), LineKind::Paragraph);
     }
+
+    #[test]
+    fn test_browser_data_store() {
+        let mut store = BrowserDataStore::new();
+        assert_eq!(store.history_count, 0);
+        assert_eq!(store.bookmark_count, 0);
+
+        store.push_history(HistoryRecord::new(b"https://interos.org", b"InterOS Home", 100));
+        assert_eq!(store.history_count, 1);
+        assert_eq!(&store.history[0].url[..store.history[0].url_len], b"https://interos.org");
+
+        // Push 10 entries to verify sliding window of 8 entries
+        for i in 2..=10 {
+            store.push_history(HistoryRecord::new(b"https://site.org", b"Site", i as u64));
+        }
+        assert_eq!(store.history_count, MAX_HISTORY_ENTRIES);
+        assert_eq!(store.history[MAX_HISTORY_ENTRIES - 1].visited_at_epoch_secs, 10);
+        assert_eq!(store.history[0].visited_at_epoch_secs, 3);
+
+        // Bookmarks
+        assert!(store.add_bookmark(BookmarkRecord::new(b"gemini://docs", b"Documentation", true)));
+        assert_eq!(store.bookmark_count, 1);
+        assert!(store.bookmarks[0].is_pinned);
+    }
 }
+
