@@ -2158,6 +2158,7 @@ fn row_head(
     let bw = badge_w(badge);
     let bx0 = DETAIL_X + DETAIL_W - ROW_PAD - bw;
     let cap_fit = DETAIL_W - 2 * ROW_PAD - bw - BADGE_GAP;
+    let title_fit = if bw > 0 { cap_fit } else { DETAIL_W - 2 * ROW_PAD };
     if let Some(c) = run_ink(
         x,
         y,
@@ -2165,7 +2166,7 @@ fn row_head(
         cy + ROW_TITLE_DY,
         TYPE_H3,
         title,
-        DETAIL_W - 2 * ROW_PAD,
+        title_fit,
         TEXT,
         SURFACE,
         true,
