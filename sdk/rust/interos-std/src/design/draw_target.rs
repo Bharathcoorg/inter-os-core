@@ -111,12 +111,42 @@ impl<'a> Surface<'a> {
         })
     }
 
+    /// Returns the width of the surface in pixels.
+    pub const fn width(&self) -> usize {
+        self.width
+    }
+
+    /// Returns the height of the surface in pixels.
+    pub const fn height(&self) -> usize {
+        self.height
+    }
+
     /// The packed pixel already at a surface coordinate.
     pub fn get(&self, x: usize, y: usize) -> Option<u32> {
         if x >= self.width || y >= self.height {
             return None;
         }
         Some(self.pixels[y * self.width + x])
+    }
+
+    /// Sets the packed pixel at a surface coordinate.
+    /// Returns `true` if the coordinate was in bounds, `false` otherwise.
+    pub fn set(&mut self, x: usize, y: usize, color: u32) -> bool {
+        if x >= self.width || y >= self.height {
+            return false;
+        }
+        self.pixels[y * self.width + x] = color;
+        true
+    }
+
+    /// Returns the underlying pixel buffer as an immutable slice.
+    pub fn pixels(&self) -> &[u32] {
+        self.pixels
+    }
+
+    /// Returns the underlying pixel buffer as a mutable slice.
+    pub fn pixels_mut(&mut self) -> &mut [u32] {
+        self.pixels
     }
 }
 
@@ -518,5 +548,28 @@ mod tests {
         assert!(surface.fill_solid(&rect_zero_w, WHITE).is_ok());
         assert!(surface.fill_solid(&rect_zero_h, WHITE).is_ok());
         assert_eq!(buf.iter().filter(|p| **p != 0).count(), 0);
+    }
+
+    #[test]
+    fn surface_accessors_and_pixel_manipulation() {
+        let mut buf = [0u32; 20 * 10];
+        let mut surface = Surface::new(&mut buf, 20, 10).expect("surface");
+        assert_eq!(surface.width(), 20);
+        assert_eq!(surface.height(), 10);
+        assert_eq!(surface.pixels().len(), 200);
+
+        assert!(surface.set(5, 5, 0xFF123456));
+        assert_eq!(surface.get(5, 5), Some(0xFF123456));
+        assert_eq!(surface.pixels()[5 * 20 + 5], 0xFF123456);
+
+        // Out of bounds get and set
+        assert!(!surface.set(20, 5, 0xFFFFFFFF));
+        assert!(!surface.set(5, 10, 0xFFFFFFFF));
+        assert_eq!(surface.get(20, 5), None);
+        assert_eq!(surface.get(5, 10), None);
+
+        // Mutable slice manipulation
+        surface.pixels_mut()[0] = 0xFFAABBCC;
+        assert_eq!(surface.get(0, 0), Some(0xFFAABBCC));
     }
 }
