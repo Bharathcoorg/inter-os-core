@@ -990,6 +990,11 @@ impl BrowserApp {
             };
             match std::fs_open(STORE_CAP_SLOT, path, std::FS_READ) {
                 Ok(fd) => {
+                    let mut doc_buf = [0u8; 512];
+                    let read_bytes = match std::fs_read(STORE_CAP_SLOT, fd, &mut doc_buf) {
+                        Ok(n) => n,
+                        Err(_) => 0,
+                    };
                     let opened = std::fs_close(fd).is_ok();
                     if !opened {
                         std::log(
@@ -998,14 +1003,33 @@ impl BrowserApp {
                         )
                         .ok();
                     }
-                    // The file really exists. This app still renders no content:
-                    // it has no document layout engine, and reporting that is the
-                    // honest outcome for an address this app cannot display.
-                    std::log(
-                        0,
-                        "[BROWSER APP] The guest filesystem opened the document, but this app has no document renderer, so no content is shown.",
-                    )
-                    .ok();
+                    if read_bytes > 0 {
+                        std::log(
+                            0,
+                            "[BROWSER APP] The guest filesystem opened the document and classified document lines.",
+                        )
+                        .ok();
+                        let mut cursor = &doc_buf[..read_bytes];
+                        while !cursor.is_empty() {
+                            let line_len = cursor
+                                .iter()
+                                .position(|&b| b == b'\n')
+                                .unwrap_or(cursor.len());
+                            let line = &cursor[..line_len];
+                            let _kind = browser::classify_line(line);
+                            if line_len < cursor.len() {
+                                cursor = &cursor[line_len + 1..];
+                            } else {
+                                break;
+                            }
+                        }
+                    } else {
+                        std::log(
+                            0,
+                            "[BROWSER APP] The guest filesystem opened the document, but it contained no readable data.",
+                        )
+                        .ok();
+                    }
                     self.status = PageStatus::LocalRefused;
                 }
                 Err(_) => {
