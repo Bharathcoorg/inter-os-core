@@ -13,9 +13,10 @@ use spin::Mutex;
 /// Standard IEEE 802.3 CRC-32 polynomial (Ethernet / ZIP / PNG).
 const CRC32_POLYNOMIAL: u32 = 0xEDB8_8320;
 
-/// Compile-time precomputed 256-entry IEEE 802.3 CRC-32 table.
-const CRC32_TABLE: [u32; 256] = {
-    let mut table = [0u32; 256];
+/// Compile-time precomputed Slicing-by-4 IEEE 802.3 CRC-32 lookup tables.
+/// Table 0 is the classical 256-entry table; tables 1..3 enable 4-byte chunk processing.
+const CRC32_TABLES: [[u32; 256]; 4] = {
+    let mut tables = [[0u32; 256]; 4];
     let mut i = 0;
     while i < 256 {
         let mut crc = i as u32;
@@ -28,18 +29,40 @@ const CRC32_TABLE: [u32; 256] = {
             }
             j += 1;
         }
-        table[i] = crc;
+        tables[0][i] = crc;
         i += 1;
     }
-    table
+    let mut slice = 1;
+    while slice < 4 {
+        let mut i = 0;
+        while i < 256 {
+            let prev = tables[slice - 1][i];
+            tables[slice][i] = (prev >> 8) ^ tables[0][(prev & 0xFF) as usize];
+            i += 1;
+        }
+        slice += 1;
+    }
+    tables
 };
 
-/// Computes an authentic IEEE 802.3 32-bit Cyclic Redundancy Check.
+/// 256-entry IEEE 802.3 CRC-32 table (alias for Table 0).
+pub const CRC32_TABLE: [u32; 256] = CRC32_TABLES[0];
+
+/// Computes an authentic IEEE 802.3 32-bit Cyclic Redundancy Check using Slicing-by-4.
 pub fn compute_crc32(data: &[u8]) -> u32 {
     let mut crc = 0xFFFF_FFFFu32;
-    for &b in data {
+    let mut chunks = data.chunks_exact(4);
+    for chunk in chunks.by_ref() {
+        let word = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        let term = crc ^ word;
+        crc = CRC32_TABLES[3][(term & 0xFF) as usize]
+            ^ CRC32_TABLES[2][((term >> 8) & 0xFF) as usize]
+            ^ CRC32_TABLES[1][((term >> 16) & 0xFF) as usize]
+            ^ CRC32_TABLES[0][(term >> 24) as usize];
+    }
+    for &b in chunks.remainder() {
         let idx = ((crc ^ (b as u32)) & 0xFF) as usize;
-        crc = (crc >> 8) ^ CRC32_TABLE[idx];
+        crc = (crc >> 8) ^ CRC32_TABLES[0][idx];
     }
     !crc
 }
@@ -437,6 +460,24 @@ mod tests {
         assert_eq!(compute_crc32(b""), 0);
         assert_eq!(compute_crc32(b"123456789"), 0xCBF4_3926);
         assert_eq!(compute_crc32(b"The quick brown fox jumps over the lazy dog"), 0x414F_A339);
+    }
+
+    #[test]
+    fn crc32_sliced_matches_byte_by_byte_for_all_lengths() {
+        for len in 0..128 {
+            let mut buf = [0u8; 128];
+            for i in 0..len {
+                buf[i] = ((i * 31 + 7) & 0xFF) as u8;
+            }
+            let sliced = compute_crc32(&buf[..len]);
+            let mut ref_crc = 0xFFFF_FFFFu32;
+            for &b in &buf[..len] {
+                let idx = ((ref_crc ^ (b as u32)) & 0xFF) as usize;
+                ref_crc = (ref_crc >> 8) ^ CRC32_TABLE[idx];
+            }
+            let expected = !ref_crc;
+            assert_eq!(sliced, expected, "CRC mismatch at length {}", len);
+        }
     }
 }
 

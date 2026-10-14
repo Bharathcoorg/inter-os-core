@@ -299,10 +299,13 @@ impl TaskPageTable {
     }
 
     /// Activates this task's page table by loading its physical frame into CR3.
+    /// Skips reloading CR3 if already active, preventing redundant TLB flushes.
     pub fn switch_to(&self) {
-        let (_, flags) = Cr3::read();
-        unsafe {
-            Cr3::write(self.pml4_frame, flags);
+        let (current_frame, flags) = Cr3::read();
+        if current_frame != self.pml4_frame {
+            unsafe {
+                Cr3::write(self.pml4_frame, flags);
+            }
         }
     }
 
