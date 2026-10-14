@@ -1918,6 +1918,11 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
                 None
             };
             surface.dirty = true;
+            if end == surface.pixels.len() {
+                surface.frame_ready = true;
+            } else if offset == 0 {
+                surface.frame_ready = false;
+            }
             if let Some(band) = band {
                 crate::drivers::display_kms::union_rows(&mut surface.dirty_rows, band.0, band.1);
             }
@@ -3596,8 +3601,9 @@ pub fn sys_surface_destroy(cap_slot: usize, surface_id: u32) -> Result<(), Sysca
 
 /// Composites display surfaces and atomically flips the scanout buffer.
 pub fn sys_surface_flip(cap_slot: usize) -> Result<u64, SyscallResult> {
-    let _owner = require_display_service(cap_slot)?;
+    let owner = require_display_service(cap_slot)?;
     let mut kms = crate::drivers::display_kms::DRM_KMS.lock();
+    kms.commit_surfaces(Some(owner.0));
     let mut display = crate::drivers::KmsDisplayDriver::new(&mut kms);
     display.composite_and_flip().map_err(|_| SyscallResult::DeviceError)
 }
@@ -5333,7 +5339,7 @@ pub fn sys_window_list(out_buf:&mut [u8])->Result<usize,SyscallResult>{
         }
     }
     use core::fmt::Write;
-    let mut snaps=[crate::drivers::display_kms::SurfaceSnapshot{id:0,owner_task:0,x:0,y:0,width:0,height:0,z_order:0,opacity:0,visible:false,dirty:false,input_enabled:false};32];
+    let mut snaps = [crate::drivers::display_kms::EMPTY_SURFACE_SNAPSHOT; 32];
     // WHY a bounded acquisition instead of `lock()`: this syscall runs inside the
     // compositor service's polling loop, and both locks it takes are also held
     // across full-surface composites by foreground tasks. A blocking `lock()`

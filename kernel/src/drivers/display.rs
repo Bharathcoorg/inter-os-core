@@ -10,6 +10,7 @@ use crate::drivers::display_kms::{DrmKmsController, SurfaceSnapshot};
 pub trait DisplayDriver {
     fn create_surface(&mut self, width: u32, height: u32, z_order: u32, owner_task: u64) -> Result<u32, &'static str>;
     fn write_surface_pixels(&mut self, id: u32, owner_task: u64, offset: usize, pixels: &[u32]) -> Result<usize, &'static str>;
+    fn commit_surface(&mut self, id: u32, owner_task: u64) -> Result<(), &'static str>;
     fn destroy_surface(&mut self, id: u32, owner_task: u64) -> Result<(), &'static str>;
     fn composite_and_flip(&mut self) -> Result<u64, &'static str>;
     fn snapshot(&self, out: &mut [SurfaceSnapshot]) -> usize;
@@ -41,6 +42,14 @@ impl DisplayDriver for KmsDisplayDriver<'_> {
 
     fn write_surface_pixels(&mut self, id: u32, owner_task: u64, offset: usize, pixels: &[u32]) -> Result<usize, &'static str> {
         self.controller.write_surface_pixels(id, owner_task, offset, pixels)
+    }
+
+    fn commit_surface(&mut self, id: u32, owner_task: u64) -> Result<(), &'static str> {
+        if self.controller.commit_surface(id, Some(owner_task)) {
+            Ok(())
+        } else {
+            Err("display surface ownership denied")
+        }
     }
 
     fn destroy_surface(&mut self, id: u32, owner_task: u64) -> Result<(), &'static str> {
@@ -119,5 +128,14 @@ mod tests {
         assert!(display.write_surface_pixels(id, 11, 0, &[0xFFFF0000]).is_err());
         assert_eq!(display.write_surface_pixels(id, 10, 0, &[0xFFFF0000]), Ok(1));
         assert_eq!(display.composite_and_flip(), Ok(1));
+    }
+
+    #[test]
+    fn kms_adapter_commits_surface_frame() {
+        let mut kms = DrmKmsController::new(64, 64);
+        let mut display = KmsDisplayDriver::new(&mut kms);
+        let id = display.create_surface(2, 2, 0, 10).unwrap();
+        assert!(display.commit_surface(id, 11).is_err());
+        assert!(display.commit_surface(id, 10).is_ok());
     }
 }

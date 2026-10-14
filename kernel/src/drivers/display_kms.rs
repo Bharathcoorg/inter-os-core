@@ -77,6 +77,10 @@ pub struct DrmSurface {
     pub dirty_rows: (usize, usize),
     /// Owning userspace task. Surface mutation is restricted to the creator.
     pub owner_task: u64,
+    /// Whether this surface has reached a completed frame commit. When false (during
+    /// in-progress multi-chunk surface writes), `composite()` skips blending this surface
+    /// to prevent tearing.
+    pub frame_ready: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -92,7 +96,23 @@ pub struct SurfaceSnapshot {
     pub visible: bool,
     pub dirty: bool,
     pub input_enabled: bool,
+    pub frame_ready: bool,
 }
+
+pub const EMPTY_SURFACE_SNAPSHOT: SurfaceSnapshot = SurfaceSnapshot {
+    id: 0,
+    owner_task: 0,
+    x: 0,
+    y: 0,
+    width: 0,
+    height: 0,
+    z_order: 0,
+    opacity: 0,
+    visible: false,
+    dirty: false,
+    input_enabled: false,
+    frame_ready: true,
+};
 
 impl DrmSurface {
     pub fn new(id: u32, width: u32, height: u32, z_order: u32, owner_task: u64) -> Self {
@@ -111,7 +131,18 @@ impl DrmSurface {
             dirty: true,
             dirty_rows: (0, 0),
             owner_task,
+            frame_ready: true,
         }
+    }
+
+    /// Returns whether this surface has a completed, latched frame ready for composition.
+    pub fn is_frame_ready(&self) -> bool {
+        self.frame_ready
+    }
+
+    /// Sets the frame readiness latch.
+    pub fn set_frame_ready(&mut self, ready: bool) {
+        self.frame_ready = ready;
     }
 
     /// Updates surface pixels from an input buffer.
@@ -121,6 +152,7 @@ impl DrmSurface {
         }
         self.pixels.copy_from_slice(src);
         self.dirty = true;
+        self.frame_ready = true;
         Ok(())
     }
 }
@@ -289,6 +321,11 @@ impl DrmKmsController {
         if end > surface.pixels.len() { return Err("surface write out of bounds"); }
         surface.pixels[offset..end].copy_from_slice(src);
         surface.dirty = true;
+        if end == surface.pixels.len() {
+            surface.frame_ready = true;
+        } else if offset == 0 {
+            surface.frame_ready = false;
+        }
         self.frame_dirty = true;
         // Record which surface rows moved so `composite` can narrow the present
         // band instead of re-copying the whole scanout. `offset..end` is a
@@ -301,6 +338,29 @@ impl DrmKmsController {
             union_rows(&mut surface.dirty_rows, r0, r1.min(surface.height as usize));
         }
         Ok(src.len())
+    }
+
+    /// Marks all surfaces owned by `owner_task` as committed and ready for composition.
+    /// If `owner_task` is `None`, marks all surfaces as frame-ready.
+    pub fn commit_surfaces(&mut self, owner_task: Option<u64>) {
+        for s in self.surfaces.iter_mut() {
+            if owner_task.map(|owner| s.owner_task == owner).unwrap_or(true) {
+                s.frame_ready = true;
+            }
+        }
+    }
+
+    /// Commits a specific surface by ID if owned by `owner_task` (or if kernel).
+    pub fn commit_surface(&mut self, id: u32, owner_task: Option<u64>) -> bool {
+        if let Some(s) = self.surfaces.iter_mut().find(|s| {
+            s.id == id && owner_task.map(|owner| s.owner_task == owner).unwrap_or(true)
+        }) {
+            s.frame_ready = true;
+            self.frame_dirty = true;
+            true
+        } else {
+            false
+        }
     }
 
     /// Destroys a surface by ID.
@@ -385,6 +445,7 @@ impl DrmKmsController {
                 visible: src.visible,
                 dirty: src.dirty,
                 input_enabled: src.input_enabled,
+                frame_ready: src.frame_ready,
             };
         }
         count
@@ -513,6 +574,7 @@ impl DrmKmsController {
         }
         self.surfaces.iter().any(|s| {
             s.visible
+                && s.frame_ready
                 && s.opacity != 0
                 && s.width == self.scanout_width
                 && s.height == self.scanout_height
@@ -542,6 +604,7 @@ impl DrmKmsController {
         let sh = self.scanout_height as i64;
         self.surfaces.iter().any(|s| {
             s.visible
+                && s.frame_ready
                 && s.opacity == 255
                 && s.width == 720
                 && s.height == 1440
@@ -596,7 +659,7 @@ impl DrmKmsController {
         let sw = self.scanout_width as i32;
         let sh = self.scanout_height as i32;
 
-        let has_mobile_portrait = self.surfaces.iter().any(|s| s.visible && s.width == 720 && s.height == 1440);
+        let has_mobile_portrait = self.surfaces.iter().any(|s| s.visible && s.frame_ready && s.width == 720 && s.height == 1440);
 
         // Scanout rows the flip will have to re-present. Seeded with whatever
         // the callers already declared dirty; the surface loop narrows it to
@@ -605,7 +668,7 @@ impl DrmKmsController {
         let mut present_band = self.present_dirty_rows;
 
         for surface in self.surfaces.iter_mut() {
-            if !surface.visible || surface.opacity == 0 {
+            if !surface.visible || surface.opacity == 0 || !surface.frame_ready {
                 continue;
             }
 
@@ -1280,6 +1343,77 @@ mod tests {
         assert!(r1 >= 295 && r1 <= 305, "r1 should map to ~300, got {r1}");
         assert!(r1 - r0 < 200, "present band should be narrow, got {r0}..{r1}");
         assert!(kms.destroy_surface(id));
+    }
+
+    #[test]
+    fn atomic_frame_commit_latch_prevents_uncommitted_surface_composition() {
+        let mut kms = DrmKmsController::new(100, 100);
+        kms.set_display_mode(100, 100, 60).expect("mode");
+
+        let id = kms.create_surface(10, 10, 1, 42);
+        assert_ne!(id, 0);
+
+        // Initially surface is frame_ready = true
+        assert!(kms.surfaces[0].is_frame_ready());
+
+        // Partial write starting at offset 0 unlatches frame_ready
+        let chunk1 = [0xFFFF0000; 20];
+        kms.write_surface_pixels(id, 42, 0, &chunk1).expect("write chunk 1");
+        assert!(!kms.surfaces[0].is_frame_ready());
+
+        // Composite while unlatched must skip blending the uncommitted surface
+        kms.composite();
+        // Since id was skipped, back buffer remains background color (0xFF0B0F19)
+        assert_eq!(kms.back_buffer[0], 0xFF0B0F19);
+
+        // Explicit commit latches frame_ready = true
+        assert!(kms.commit_surface(id, Some(42)));
+        assert!(kms.surfaces[0].is_frame_ready());
+
+        // Composite now blends the committed surface
+        kms.composite();
+        assert_eq!(kms.back_buffer[0], 0xFFFF0000);
+    }
+
+    #[test]
+    fn completing_surface_write_to_end_automatically_latches_frame_ready() {
+        let mut kms = DrmKmsController::new(100, 100);
+        let id = kms.create_surface(2, 2, 1, 42);
+        assert_ne!(id, 0);
+
+        // Write first half: offset 0..2
+        kms.write_surface_pixels(id, 42, 0, &[0xFF112233; 2]).unwrap();
+        assert!(!kms.surfaces[0].is_frame_ready());
+
+        // Write second half to reach end: offset 2..4 (total 4 pixels)
+        kms.write_surface_pixels(id, 42, 2, &[0xFF445566; 2]).unwrap();
+        assert!(kms.surfaces[0].is_frame_ready());
+
+        kms.composite();
+        assert_eq!(kms.back_buffer[0], 0xFF112233);
+    }
+
+    #[test]
+    fn commit_surfaces_for_owner_latches_only_owner_surfaces() {
+        let mut kms = DrmKmsController::new(100, 100);
+        let s1 = kms.create_surface(4, 4, 1, 10);
+        let s2 = kms.create_surface(4, 4, 2, 20);
+
+        // Unlatch both surfaces with partial writes at offset 0
+        kms.write_surface_pixels(s1, 10, 0, &[0xFFAAAAAA; 4]).unwrap();
+        kms.write_surface_pixels(s2, 20, 0, &[0xFFBBBBBB; 4]).unwrap();
+        assert!(!kms.surfaces[0].is_frame_ready());
+        assert!(!kms.surfaces[1].is_frame_ready());
+
+        // Commit only owner 10
+        kms.commit_surfaces(Some(10));
+        assert!(kms.surfaces[0].is_frame_ready());
+        assert!(!kms.surfaces[1].is_frame_ready());
+
+        // Commit all (None)
+        kms.commit_surfaces(None);
+        assert!(kms.surfaces[0].is_frame_ready());
+        assert!(kms.surfaces[1].is_frame_ready());
     }
 }
 
