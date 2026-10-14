@@ -237,14 +237,89 @@ const CONTACT_NUM_MAX: usize = 16;
 ///
 /// WHY 8: a record is `CONTACT_RECORD_BYTES` wide, the settings value cap is 512
 /// bytes, and the contacts list only has room for eight 66px rows on a 1440px
-/// surface, so 8 is what both the storage cap and the screen allow. The store
+/// surface, so 12 is what both the storage cap and the screen allow. The store
 /// reports that it is full instead of dropping a contact on the floor.
 ///
-/// WHY it must stay below 10: the blob's count byte and each record's id byte are
-/// raw values, and the settings store rejects any value containing a 0x0A byte
-/// (`kernel/src/settings.rs`, `set`). A count or id of 10 would encode to 0x0A
-/// and the write would fail for a reason that has nothing to do with the data.
-const MAX_CONTACTS: usize = 8;
+/// Binary escaping for 0x0A: settings store rejects values with 0x0A ('\n').
+/// With `escape_store_blob`, any 0x0A (or 0xFE) byte is escaped so the < 10
+/// contact count ceiling is completely lifted.
+pub const MAX_CONTACTS: usize = 12;
+
+pub const ESCAPE_BYTE: u8 = 0xFE;
+pub const ESCAPED_NEWLINE: u8 = 0x8A;
+pub const ESCAPED_ESCAPE: u8 = 0xEE;
+
+/// Escapes any 0x0A ('\n') or 0xFE bytes in a raw store blob so the serialized
+/// settings value never contains a newline.
+pub fn escape_store_blob(raw: &[u8], out: &mut [u8]) -> Result<usize, ()> {
+    let mut pos = 0usize;
+    for &b in raw {
+        if b == b'\n' {
+            if pos + 2 > out.len() {
+                return Err(());
+            }
+            out[pos] = ESCAPE_BYTE;
+            out[pos + 1] = ESCAPED_NEWLINE;
+            pos += 2;
+        } else if b == ESCAPE_BYTE {
+            if pos + 2 > out.len() {
+                return Err(());
+            }
+            out[pos] = ESCAPE_BYTE;
+            out[pos + 1] = ESCAPED_ESCAPE;
+            pos += 2;
+        } else {
+            if pos + 1 > out.len() {
+                return Err(());
+            }
+            out[pos] = b;
+            pos += 1;
+        }
+    }
+    Ok(pos)
+}
+
+/// Unescapes a store blob read from the settings store. Handles both escaped
+/// modern payloads and legacy unescaped blobs transparently.
+pub fn unescape_store_blob(encoded: &[u8], out: &mut [u8]) -> Result<usize, ()> {
+    let mut in_pos = 0usize;
+    let mut out_pos = 0usize;
+    while in_pos < encoded.len() {
+        let b = encoded[in_pos];
+        if b == ESCAPE_BYTE {
+            in_pos += 1;
+            if in_pos >= encoded.len() {
+                return Err(());
+            }
+            match encoded[in_pos] {
+                ESCAPED_NEWLINE => {
+                    if out_pos >= out.len() {
+                        return Err(());
+                    }
+                    out[out_pos] = b'\n';
+                    out_pos += 1;
+                }
+                ESCAPED_ESCAPE => {
+                    if out_pos >= out.len() {
+                        return Err(());
+                    }
+                    out[out_pos] = ESCAPE_BYTE;
+                    out_pos += 1;
+                }
+                _ => return Err(()),
+            }
+            in_pos += 1;
+        } else {
+            if out_pos >= out.len() {
+                return Err(());
+            }
+            out[out_pos] = b;
+            out_pos += 1;
+            in_pos += 1;
+        }
+    }
+    Ok(out_pos)
+}
 
 /// Record width, pinned: 1 id + 1 flags + `CONTACT_NAME_MAX` name bytes
 /// (0x00-padded) + `CONTACT_NUM_MAX` number bytes (0x00-padded) = 36 bytes.
@@ -492,19 +567,27 @@ impl ContactStore {
     /// the stored one, so the load reports what it actually has instead.
     fn load() -> Self {
         let mut store = ContactStore::EMPTY;
-        let mut blob = [0u8; STORE_BLOB_BYTES];
-        match std::settings_get(STORE_CAP_READ, STORE_KEY, &mut blob) {
+        let mut encoded = [0u8; STORE_BLOB_BYTES + 32];
+        match std::settings_get(STORE_CAP_READ, STORE_KEY, &mut encoded) {
             Ok(0) => store.state = ContactStoreState::Empty,
             Ok(n) => {
+                let mut blob = [0u8; STORE_BLOB_BYTES];
+                let decoded_len = match unescape_store_blob(&encoded[..n], &mut blob) {
+                    Ok(len) => len,
+                    Err(_) => {
+                        store.state = ContactStoreState::Invalid;
+                        return store;
+                    }
+                };
                 let mut records = [ContactRecord::EMPTY; MAX_CONTACTS];
                 let mut count = 0usize;
                 let mut rejected = false;
-                if n > STORE_BLOB_BYTES || blob[0] != STORE_VERSION {
+                if decoded_len > STORE_BLOB_BYTES || blob[0] != STORE_VERSION {
                     rejected = true;
                 } else {
                     let header_count = blob[1] as usize;
                     if header_count > MAX_CONTACTS
-                        || n != 2 + header_count * CONTACT_RECORD_BYTES
+                        || decoded_len != 2 + header_count * CONTACT_RECORD_BYTES
                     {
                         rejected = true;
                     } else {
@@ -559,25 +642,26 @@ impl ContactStore {
     /// a record-at-a-time append would need a cursor the settings store does not
     /// have, and a whole-value write leaves no half-updated record behind.
     ///
-    /// WHY the 0x0A pre-check: the settings store rejects any value containing a
-    /// newline, and a value built from user text is not guaranteed to avoid one
-    /// by luck. Refusing here turns a `DeviceError` from deep in the storage layer
-    /// into a reason the store can name.
+    /// `escape_store_blob` encodes any 0x0A bytes so the settings store never
+    /// sees a newline, lifting the previous 8-contact limit and allowing full
+    /// capacity up to `MAX_CONTACTS`.
     fn persist(&mut self) -> Result<(), i64> {
-        let mut blob = [0u8; STORE_BLOB_BYTES];
-        blob[0] = STORE_VERSION;
-        blob[1] = self.len;
+        let mut raw_blob = [0u8; STORE_BLOB_BYTES];
+        raw_blob[0] = STORE_VERSION;
+        raw_blob[1] = self.len;
         for i in 0..self.len as usize {
             let start = 2 + i * CONTACT_RECORD_BYTES;
-            self.records[i].encode(&mut blob[start..start + CONTACT_RECORD_BYTES]);
+            self.records[i].encode(&mut raw_blob[start..start + CONTACT_RECORD_BYTES]);
         }
-        let used = 2 + self.len as usize * CONTACT_RECORD_BYTES;
-        if blob[..used].iter().any(|&b| b == b'\n') {
+        let raw_used = 2 + self.len as usize * CONTACT_RECORD_BYTES;
+        let mut encoded = [0u8; STORE_BLOB_BYTES + 32];
+        let encoded_len = escape_store_blob(&raw_blob[..raw_used], &mut encoded).map_err(|_| -22)?;
+        if encoded[..encoded_len].iter().any(|&b| b == b'\n') {
             self.state = ContactStoreState::WriteRefused;
             self.last_error = -22;
             return Err(-22);
         }
-        match std::settings_set(STORE_CAP_WRITE, STORE_KEY, &blob[..used]) {
+        match std::settings_set(STORE_CAP_WRITE, STORE_KEY, &encoded[..encoded_len]) {
             Ok(()) => {
                 self.state = ContactStoreState::Written;
                 self.last_error = 0;
