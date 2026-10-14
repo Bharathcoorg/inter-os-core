@@ -22,6 +22,13 @@ impl Vector3D {
             + (self.y as i64) * (self.y as i64)
             + (self.z as i64) * (self.z as i64)) as u64
     }
+
+    /// Computes scalar dot product with another 3D vector.
+    pub fn dot(&self, other: Vector3D) -> i64 {
+        (self.x as i64) * (other.x as i64)
+            + (self.y as i64) * (other.y as i64)
+            + (self.z as i64) * (other.z as i64)
+    }
 }
 
 /// Mobile Screen Orientation
@@ -104,5 +111,47 @@ impl ImuSensor {
         let dy = (self.accel.y - self.last_accel.y).abs();
         let dz = (self.accel.z - self.last_accel.z).abs();
         dx + dy + dz > 1500
+    }
+
+    /// Computes approximate pitch tilt angle in degrees (-90..=90).
+    pub fn pitch_degrees(&self) -> i32 {
+        (self.accel.y * 90 / 980).clamp(-90, 90)
+    }
+
+    /// Computes approximate roll tilt angle in degrees (-90..=90).
+    pub fn roll_degrees(&self) -> i32 {
+        (self.accel.x * 90 / 980).clamp(-90, 90)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_vector3d_operations() {
+        let v1 = Vector3D::new(0, 980, 0);
+        let v2 = Vector3D::new(0, 980, 0);
+        assert_eq!(v1.magnitude_sq(), 980 * 980);
+        assert_eq!(v1.dot(v2), 980 * 980);
+
+        let v3 = Vector3D::new(100, 0, 0);
+        assert_eq!(v1.dot(v3), 0); // orthogonal
+    }
+
+    #[test]
+    fn test_imu_tilt_angles_and_shake() {
+        let mut imu = ImuSensor::new();
+        assert_eq!(imu.pitch_degrees(), 90);
+        assert_eq!(imu.roll_degrees(), 0);
+
+        imu.update_accel(Vector3D::new(490, 0, 0));
+        assert_eq!(imu.pitch_degrees(), 0);
+        assert_eq!(imu.roll_degrees(), 45);
+
+        // Shake detection test
+        assert!(!imu.detect_shake());
+        imu.update_accel(Vector3D::new(2000, 2000, 0));
+        assert!(imu.detect_shake());
     }
 }

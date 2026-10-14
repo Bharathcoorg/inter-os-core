@@ -163,7 +163,7 @@ impl SerialRilDriver {
             return true;
         }
 
-        if line.starts_with("+CREG:") {
+        if line.starts_with("+CREG:") || line.starts_with("+CGREG:") || line.starts_with("+CEREG:") {
             // Format: +CREG: <n>,<stat> or +CREG: <stat>
             let status = if let Some(comma_pos) = line.find(',') {
                 let after_comma = &line[comma_pos + 1..].trim();
@@ -195,8 +195,8 @@ impl SerialRilDriver {
             return true;
         }
 
-        if line.starts_with("+CMTI:") {
-            // Format: +CMTI: "SM",<index>
+        if line.starts_with("+CMTI:") || line.starts_with("+CMT:") {
+            // Format: +CMTI: "SM",<index> or +CMT: ...
             let idx = if let Some(comma_pos) = line.find(',') {
                 let after = line[comma_pos + 1..].trim();
                 after.parse::<u32>().unwrap_or(0)
@@ -269,6 +269,12 @@ pub fn test_serial_ril() {
     ril.feed_rx_bytes(ring_stream);
     let ring_urc = ril.pop_urc().expect("Ring URC must be present");
     assert_eq!(ring_urc, UrcEvent::IncomingCall { caller_id: None });
+
+    // 4. Test LTE/5G Network Registration URC
+    let reg_stream = b"\r\n+CEREG: 1,1\r\n";
+    ril.feed_rx_bytes(reg_stream);
+    let reg_urc = ril.pop_urc().expect("CEREG URC must be present");
+    assert_eq!(reg_urc, UrcEvent::NetworkRegistration { status: 1 });
 
     crate::serial_println!(
         "[TEST] Streaming Serial RIL: UART chunked AT framing, +CSQ signal parse, and +CRING URC dispatch PASSED."
