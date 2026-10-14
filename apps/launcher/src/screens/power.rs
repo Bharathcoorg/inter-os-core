@@ -89,8 +89,10 @@ fn text_pixel(
     // a pure function of the run's origin, em and bytes, so every pixel of this
     // run reaches the same face. A per-pixel fallback would draw the glyph from
     // both faces at once -- an outline glyph under a hard-edged bitmap ghost.
-    if let Some(run) = launcher::outline_text::OutlineRun::place(x0, baseline, em, bytes) {
-        return run.pixel(x, y, ink, bg);
+    if scale >= 2 && bytes.len() <= 24 {
+        if let Some(run) = launcher::outline_text::OutlineRun::place(x0, baseline, em, bytes) {
+            return run.pixel(x, y, ink, bg);
+        }
     }
     // The bitmap face is the refusal path, not the baseline: a run the rasteriser
     // declines still has to draw as text.

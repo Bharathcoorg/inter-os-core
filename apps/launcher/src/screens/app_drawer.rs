@@ -444,6 +444,7 @@ struct Run {
     /// `17 * scale * 2048 / 1456`. `outline_text::em_for_scale` is that
     /// derivation, kept in one place so every screen that migrates a run
     /// derives it the same way.
+    #[allow(dead_code)]
     em: u32,
     /// Top row of the box that covers BOTH renderers.
     ///
@@ -457,6 +458,7 @@ struct Run {
     /// Height of that union box.
     box_h: usize,
     bytes: [u8; RUN_CAP],
+    outline: Option<launcher::outline_text::OutlineRun>,
 }
 
 impl Run {
@@ -472,6 +474,7 @@ impl Run {
         top: 0,
         box_h: 0,
         bytes: [0u8; RUN_CAP],
+        outline: None,
     };
 
     /// `bytes` at (`x`, `y`), truncated with an ellipsis if wider than `fit` --
@@ -552,6 +555,7 @@ impl Run {
         let (asc, desc) = interos_std::design::typeface::line_metrics(em);
         let outline_advance = interos_std::design::typeface::text_advance_px(text, em) as usize;
         let top = baseline.saturating_sub(asc as usize);
+        let outline = launcher::outline_text::OutlineRun::place(x, baseline, em, text);
         Run {
             x,
             y,
@@ -563,6 +567,7 @@ impl Run {
             top,
             box_h: (baseline + desc as usize).saturating_sub(top),
             bytes: buf,
+            outline,
         }
     }
 
@@ -579,20 +584,7 @@ impl Run {
         if px < self.x || px - self.x >= self.w || py < self.top || py - self.top >= self.box_h {
             return None;
         }
-        // Choose the renderer ONCE for the run, not once per pixel.
-        //
-        // WHY: a per-pixel fallback draws the glyph from both faces at once --
-        // an outline glyph under a hard-edged bitmap ghost, offset by a pixel,
-        // on every string. The placement is a pure function of the run's own
-        // origin, em and bytes, so every pixel of this run reaches the same
-        // answer: one face or the other, never both.
-        let outline = launcher::outline_text::OutlineRun::place(
-            self.x,
-            self.y + launcher::font::BASELINE * self.scale,
-            self.em,
-            &self.bytes[..self.len],
-        );
-        if let Some(run) = outline {
+        if let Some(ref run) = self.outline {
             return run.pixel(px, py, self.ink, bg);
         }
         // The bitmap face is the fallback, not the baseline: a refusal here -- a

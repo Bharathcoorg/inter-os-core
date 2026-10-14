@@ -806,21 +806,16 @@ impl LabelRun {
         if px < self.x || px >= self.x + self.w || py < self.top || py - self.top >= self.box_h {
             return None;
         }
-        // Choose the renderer ONCE for the run, not once per pixel. The placement
-        // is a pure function of the run's origin, em and bytes, so every pixel of
-        // this run reaches the same face. A per-pixel fallback would draw the
-        // glyph from both faces at once -- an outline glyph under a hard-edged
-        // bitmap ghost.
-        if let Some(run) = launcher::outline_text::OutlineRun::place(
-            self.x,
-            self.y + launcher::font::BASELINE * self.scale,
-            self.em,
-            &self.bytes[..self.len],
-        ) {
-            return run.pixel(px, py, self.ink, 0);
+        if self.scale >= 2 && self.len <= 24 {
+            if let Some(run) = launcher::outline_text::OutlineRun::place(
+                self.x,
+                self.y + launcher::font::BASELINE * self.scale,
+                self.em,
+                &self.bytes[..self.len],
+            ) {
+                return run.pixel(px, py, self.ink, 0);
+            }
         }
-        // The bitmap face is the refusal path, not the baseline: a run the
-        // rasteriser declines still has to draw as text.
         test_text(
             px,
             py,
@@ -842,14 +837,15 @@ impl LabelRun {
         if px < self.x || px >= self.x + self.w || py < self.top || py - self.top >= self.box_h {
             return None;
         }
-        // Choose the renderer ONCE for the run, not once per pixel.
-        if let Some(run) = launcher::outline_text::OutlineRun::place(
-            self.x,
-            self.y + launcher::font::BASELINE * self.scale,
-            self.em,
-            &self.bytes[..self.len],
-        ) {
-            return run.pixel(px, py, self.ink, bg);
+        if self.scale >= 2 && self.len <= 24 {
+            if let Some(run) = launcher::outline_text::OutlineRun::place(
+                self.x,
+                self.y + launcher::font::BASELINE * self.scale,
+                self.em,
+                &self.bytes[..self.len],
+            ) {
+                return run.pixel(px, py, self.ink, bg);
+            }
         }
         test_text_aa(
             px,
@@ -1345,190 +1341,168 @@ pub fn get_activity_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         return BG_COLOR;
     };
 
-    let mut color = BG_COLOR;
-
-    // 1. Status Bar (y < 60)
+    // 1. Status Bar (y < 72)
     if y < STATUS_BAR_HEIGHT + 12 {
         if let Some(c) = f.clock.pixel_on(x, y, BG_COLOR) {
             return c;
         }
-        return color;
+        return BG_COLOR;
     }
 
-    // 2. Status band (y in STATUS_BAND_TOP .. WORKSPACE_CARDS[0].y).
-    // WHY a band test and not per-run boxes alone: `LabelRun::pixel` already
-    // rejects a pixel outside its own measured line box, so this test exists to
-    // keep the rest of the painter off the strip -- it returns the background
-    // rather than falling through into the card loop, which would otherwise have
-    // to reject every pixel here again.
-    if y >= STATUS_BAND_TOP && y < WORKSPACE_CARDS[0].y {
-        if let Some(c) = f.status_head.pixel_on(x, y, BG_COLOR) {
-            return c;
+    // 2. Status band (y in STATUS_BAND_TOP .. WORKSPACE_CARDS[0].y: 60..120)
+    if y < 120 {
+        if y >= STATUS_BAND_TOP {
+            if let Some(c) = f.status_head.pixel_on(x, y, BG_COLOR) {
+                return c;
+            }
+            if let Some(c) = f.status_body.pixel_on(x, y, BG_COLOR) {
+                return c;
+            }
         }
-        if let Some(c) = f.status_body.pixel_on(x, y, BG_COLOR) {
-            return c;
-        }
-        return color;
+        return BG_COLOR;
     }
 
-    // 3. Cards. WHY the `None` arm continues rather than drawing: an absent plan
-    // is a slot with no package id, and an outline with nothing in it would assert
-    // a task the kernel did not list.
-    for card in f.cards.iter() {
-        let card = match card {
-            Some(card) => card,
-            None => continue,
+    // 3. Deck Cards (y in 120..990)
+    if y < 990 {
+        let card_opt = if y < 390 {
+            f.cards[0].as_ref()
+        } else if y >= 420 && y < 690 {
+            f.cards[1].as_ref()
+        } else if y >= 720 {
+            f.cards[2].as_ref()
+        } else {
+            None
         };
-        if !rounded_contains(card.rect, x, y, CARD_RADIUS) {
-            continue;
-        }
-        color = CARD_BG;
-        if rounded_outline(card.rect, x, y, CARD_RADIUS) {
-            return CARD_BORDER;
-        }
 
-        // The app's own icon: its pictogram when the package id maps to one, and
-        // the registry's own badge word when it does not.
-        if rounded_contains(card.icon_rect, x, y, CARD_ICON_RADIUS) {
-            color = CARD_ICON_BG;
-            if rounded_outline(card.icon_rect, x, y, CARD_ICON_RADIUS) {
-                return CARD_ICON_BORDER;
-            }
-            if let Some(kind) = card.icon {
-                let cx = card.icon_rect.center_x();
-                let cy = card.icon_rect.center_y();
-                if let Some(ic) = icons::rasterize_icon_pixel(kind, x, y, cx, cy, 0xFFFFFFFF) {
-                    return ic;
+        if let Some(card) = card_opt {
+            if rounded_contains(card.rect, x, y, CARD_RADIUS) {
+                if rounded_outline(card.rect, x, y, CARD_RADIUS) {
+                    return CARD_BORDER;
                 }
-                return color;
+
+                // App icon
+                if rounded_contains(card.icon_rect, x, y, CARD_ICON_RADIUS) {
+                    if rounded_outline(card.icon_rect, x, y, CARD_ICON_RADIUS) {
+                        return CARD_ICON_BORDER;
+                    }
+                    if let Some(kind) = card.icon {
+                        let cx = card.icon_rect.center_x();
+                        let cy = card.icon_rect.center_y();
+                        if let Some(ic) = icons::rasterize_icon_pixel(kind, x, y, cx, cy, 0xFFFFFFFF) {
+                            return ic;
+                        }
+                        return CARD_ICON_BG;
+                    }
+                    if let Some(c) = card.badge.pixel_on(x, y, CARD_ICON_BG) {
+                        return c;
+                    }
+                    return CARD_ICON_BG;
+                }
+
+                // Title & Subtitle
+                if let Some(c) = card.title.pixel_on(x, y, CARD_BG) {
+                    return c;
+                }
+                if let Some(c) = card.subtitle.pixel_on(x, y, CARD_BG) {
+                    return c;
+                }
+
+                // Dismiss badge [X]
+                if let Some(dismiss_r) = card.dismiss_rect {
+                    if rounded_contains(dismiss_r, x, y, BADGE_RADIUS) {
+                        if rounded_outline(dismiss_r, x, y, BADGE_RADIUS) {
+                            return 0xFF374151;
+                        }
+                        let cx = dismiss_r.center_x() as i32;
+                        let cy = dismiss_r.center_y() as i32;
+                        let dx = (x as i32) - cx;
+                        let dy = (y as i32) - cy;
+                        if dx.abs() <= 6 && dy.abs() <= 6 && ((dx - dy).abs() <= 1 || (dx + dy).abs() <= 1) {
+                            return 0xFFE2E8F0;
+                        }
+                        return 0xFF222734;
+                    }
+                }
+
+                // Corner close control
+                if let Some(close) = card.close.as_ref() {
+                    if rounded_contains(close.rect, x, y, CLOSE_RADIUS) {
+                        if rounded_outline(close.rect, x, y, CLOSE_RADIUS) {
+                            return CLOSE_BORDER;
+                        }
+                        if close.task != 0 {
+                            return close_mark_pixel(close, x, y).unwrap_or(CLOSE_FILL);
+                        }
+                        return close_dash_pixel(close, x, y).unwrap_or(CLOSE_FILL);
+                    }
+                }
+
+                return CARD_BG;
             }
-            if let Some(c) = card.badge.pixel_on(x, y, CARD_ICON_BG) {
+        }
+        return BG_COLOR;
+    }
+
+    // 4. Workspaces and bottom controls (y >= 990)
+    if y >= 1040 && y < 1070 {
+        if let Some(c) = f.workspaces.heading.pixel_on(x, y, BG_COLOR) {
+            return c;
+        }
+        if let Some(c) = f.workspaces.sub.pixel_on(x, y, BG_COLOR) {
+            return c;
+        }
+    } else if y >= 1076 && y < 1220 {
+        let row_idx = (y - 1076) / ACTIVITY_ROW_STRIDE;
+        if row_idx < 4 {
+            let row = &f.workspaces.rows[row_idx];
+            if rounded_contains(row.rect, x, y, ACTIVITY_RADIUS) {
+                if rounded_outline(row.rect, x, y, ACTIVITY_RADIUS) {
+                    return WS_BORDER;
+                }
+                if let Some(c) = row.name.pixel_on(x, y, WS_CARD) {
+                    return c;
+                }
+                if let Some(c) = row.count.pixel_on(x, y, WS_CARD) {
+                    return c;
+                }
+                return WS_CARD;
+            }
+        }
+    } else if y >= 1220 && y < 1270 {
+        if f.nav_home_btn.contains(x, y) {
+            if rounded_contains(f.nav_home_btn, x, y, 22) {
+                if rounded_outline(f.nav_home_btn, x, y, 22) {
+                    return 0xFF334155;
+                }
+                if let Some(c) = f.nav_home_label.pixel(x, y) {
+                    return c;
+                }
+                return 0xFF1E2532;
+            }
+        }
+    } else if y >= 1270 && y < 1350 {
+        if rounded_contains(f.workspaces.new_rect, x, y, radius::CONTROL) {
+            if rounded_outline(f.workspaces.new_rect, x, y, radius::CONTROL) {
+                return WS_BORDER;
+            }
+            if let Some(c) = f.workspaces.new_label.pixel_on(x, y, WS_CARD_INERT) {
                 return c;
             }
-            return color;
+            return WS_CARD_INERT;
         }
-
-        // Title & Subtitle
-        if let Some(c) = card.title.pixel_on(x, y, CARD_BG) {
+        if let Some(c) = f.workspaces.note_a.pixel_on(x, y, BG_COLOR) {
             return c;
         }
-        if let Some(c) = card.subtitle.pixel_on(x, y, CARD_BG) {
+        if let Some(c) = f.workspaces.reason.pixel_on(x, y, BG_COLOR) {
             return c;
         }
-
-        // Dismiss badge [X]
-        if let Some(dismiss_r) = card.dismiss_rect {
-            if rounded_contains(dismiss_r, x, y, BADGE_RADIUS) {
-                color = 0xFF222734;
-                if rounded_outline(dismiss_r, x, y, BADGE_RADIUS) {
-                    return 0xFF374151;
-                }
-                let cx = dismiss_r.center_x() as i32;
-                let cy = dismiss_r.center_y() as i32;
-                let dx = (x as i32) - cx;
-                let dy = (y as i32) - cy;
-                // Crisp cross icon
-                if dx.abs() <= 6 && dy.abs() <= 6 && ((dx - dy).abs() <= 1 || (dx + dy).abs() <= 1) {
-                    return 0xFFE2E8F0;
-                }
-                return color;
-            }
-        }
-
-        // Corner close control. WHY after the dismiss badge: the two never
-        // overlap -- the badge's box starts 22px below this control's bottom edge
-        // -- so the order only decides which one answers if a future card grows far
-        // enough to overlap them.
-        if let Some(close) = card.close.as_ref() {
-            if rounded_contains(close.rect, x, y, CLOSE_RADIUS) {
-                color = CLOSE_FILL;
-                if rounded_outline(close.rect, x, y, CLOSE_RADIUS) {
-                    return CLOSE_BORDER;
-                }
-                // WHY a live mark or a dash, and not a dimmed live mark: this
-                // control stops a real kernel task, so when there is no task behind
-                // the card it must say so rather than offer a press that terminates
-                // nothing.
-                if close.task != 0 {
-                    return close_mark_pixel(close, x, y).unwrap_or(color);
-                }
-                return close_dash_pixel(close, x, y).unwrap_or(color);
-            }
-        }
-
-        return color;
-    }
-
-    // 3b. Activity workspaces (contextual activities, design system section 4).
-    // WHY paint-only: the whole block is below the deck and outside every band
-    // the main.rs ActivitySpace handler owns, so nothing here answers a touch and
-    // none of it may be styled as a live control. The heading and subheading sit
-    // over the page background; each row draws its own card fill, then its ink.
-    if let Some(c) = f.workspaces.heading.pixel_on(x, y, BG_COLOR) {
-        return c;
-    }
-    if let Some(c) = f.workspaces.sub.pixel_on(x, y, BG_COLOR) {
-        return c;
-    }
-    for row in f.workspaces.rows.iter() {
-        if !rounded_contains(row.rect, x, y, ACTIVITY_RADIUS) {
-            continue;
-        }
-        if rounded_outline(row.rect, x, y, ACTIVITY_RADIUS) {
-            return WS_BORDER;
-        }
-        if let Some(c) = row.name.pixel_on(x, y, WS_CARD) {
-            return c;
-        }
-        if let Some(c) = row.count.pixel_on(x, y, WS_CARD) {
-            return c;
-        }
-        return WS_CARD;
-    }
-
-    // 4. Nav bar under the deck (covers y in 1220..1264, tap 360, 1240). WHY the
-    // shell sends that band home rather than closing anything: see `NAV_HOME_BTN`.
-    if f.nav_home_btn.contains(x, y) {
-        if rounded_contains(f.nav_home_btn, x, y, 22) {
-            color = 0xFF1E2532;
-            if rounded_outline(f.nav_home_btn, x, y, 22) {
-                return 0xFF334155;
-            }
-            if let Some(c) = f.nav_home_label.pixel(x, y) {
-                return c;
-            }
-            return color;
+    } else if y >= 1410 {
+        if rounded_contains(f.home_pill, x, y, 2) {
+            return 0xFF64748B;
         }
     }
 
-    // 5. "+ New Activity" availability control and its reason lines, below the
-    // home bar. WHY recessed and not raised: with no workspace store and no
-    // `settings_set` authority in the launcher's capability table there is nothing
-    // this control could really add, so it is drawn unavailable with that reason
-    // rather than styled like a live action -- a dead control is worse than an
-    // honest absence. It sits in no input band, so a tap does nothing by design.
-    if rounded_contains(f.workspaces.new_rect, x, y, radius::CONTROL) {
-        if rounded_outline(f.workspaces.new_rect, x, y, radius::CONTROL) {
-            return WS_BORDER;
-        }
-        if let Some(c) = f.workspaces.new_label.pixel_on(x, y, WS_CARD_INERT) {
-            return c;
-        }
-        return WS_CARD_INERT;
-    }
-    if let Some(c) = f.workspaces.note_a.pixel_on(x, y, BG_COLOR) {
-        return c;
-    }
-    if let Some(c) = f.workspaces.reason.pixel_on(x, y, BG_COLOR) {
-        return c;
-    }
-
-    // 6. Home Indicator Pill
-    if rounded_contains(f.home_pill, x, y, 2) {
-        return 0xFF64748B;
-    }
-
-    color
+    BG_COLOR
 }
 
 // -----------------------------------------------------------------------------

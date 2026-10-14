@@ -205,6 +205,7 @@ struct LabelRun {
     /// Height of that union box.
     box_h: usize,
     bytes: [u8; RUN_CAP],
+    outline: Option<launcher::outline_text::OutlineRun>,
 }
 
 impl LabelRun {
@@ -220,6 +221,7 @@ impl LabelRun {
         top: 0,
         box_h: 0,
         bytes: [0u8; RUN_CAP],
+        outline: None,
     };
 
     fn new(x: usize, y: usize, scale: usize, bytes: &[u8], ink: u32) -> Self {
@@ -234,6 +236,16 @@ impl LabelRun {
         // it rather than assume which way it goes.
         let w = text::measure(&buf[..len], scale)
             .max(interos_std::design::typeface::text_advance_px(&buf[..len], em) as usize);
+        let outline = if scale >= 2 && len <= 24 {
+            launcher::outline_text::OutlineRun::place(
+                x,
+                y + launcher::font::BASELINE * scale,
+                em,
+                &buf[..len],
+            )
+        } else {
+            None
+        };
         LabelRun {
             x,
             y,
@@ -246,6 +258,7 @@ impl LabelRun {
             top,
             box_h,
             bytes: buf,
+            outline,
         }
     }
 
@@ -256,8 +269,19 @@ impl LabelRun {
         let measured = text::measure(&buf[..len], scale);
         let inset = text::center_x(&buf[..len], scale, w);
         let (em, top, box_h) = run_metrics(y, scale);
+        let rx = x + inset;
+        let outline = if scale >= 2 && len <= 24 {
+            launcher::outline_text::OutlineRun::place(
+                rx,
+                y + launcher::font::BASELINE * scale,
+                em,
+                &buf[..len],
+            )
+        } else {
+            None
+        };
         LabelRun {
-            x: x + inset,
+            x: rx,
             y,
             w: measured
                 .max(interos_std::design::typeface::text_advance_px(&buf[..len], em) as usize),
@@ -269,6 +293,7 @@ impl LabelRun {
             top,
             box_h,
             bytes: buf,
+            outline,
         }
     }
 
@@ -282,8 +307,19 @@ impl LabelRun {
         let (em, top, box_h) = run_metrics(y, scale);
         let w = text::measure(&buf[..len], scale)
             .max(interos_std::design::typeface::text_advance_px(&buf[..len], em) as usize);
+        let rx = x_right.saturating_sub(w);
+        let outline = if scale >= 2 && len <= 24 {
+            launcher::outline_text::OutlineRun::place(
+                rx,
+                y + launcher::font::BASELINE * scale,
+                em,
+                &buf[..len],
+            )
+        } else {
+            None
+        };
         LabelRun {
-            x: x_right.saturating_sub(w),
+            x: rx,
             y,
             w,
             h: text::line_height(scale),
@@ -294,6 +330,7 @@ impl LabelRun {
             top,
             box_h,
             bytes: buf,
+            outline,
         }
     }
 
@@ -346,6 +383,16 @@ impl LabelRun {
         };
         let mut bytes_buf = [0u8; RUN_CAP];
         bytes_buf[..n].copy_from_slice(&held[..n]);
+        let outline = if scale >= 2 && n <= 24 {
+            launcher::outline_text::OutlineRun::place(
+                x,
+                y + launcher::font::BASELINE * scale,
+                em,
+                &held[..n],
+            )
+        } else {
+            None
+        };
         LabelRun {
             x,
             y,
@@ -359,6 +406,7 @@ impl LabelRun {
             top,
             box_h,
             bytes: bytes_buf,
+            outline,
         }
     }
 
@@ -370,17 +418,7 @@ impl LabelRun {
         if px < self.x || px >= self.x + self.w || py < self.top || py - self.top >= self.box_h {
             return None;
         }
-        // Choose the renderer ONCE for the run, not once per pixel. The placement
-        // is a pure function of the run's origin, em and bytes, so every pixel of
-        // this run reaches the same face. A per-pixel fallback draws the glyph
-        // from both faces at once -- an outline glyph under a hard-edged bitmap
-        // ghost.
-        if let Some(run) = launcher::outline_text::OutlineRun::place(
-            self.x,
-            self.y + launcher::font::BASELINE * self.scale,
-            self.em,
-            &self.bytes[..self.len],
-        ) {
+        if let Some(ref run) = self.outline {
             return run.pixel(px, py, self.ink, 0);
         }
         // The bitmap face is the refusal path, not the baseline: a run the
@@ -409,13 +447,7 @@ impl LabelRun {
         if px < self.x || px >= self.x + self.w || py < self.top || py - self.top >= self.box_h {
             return None;
         }
-        // Choose the renderer ONCE for the run, not once per pixel.
-        if let Some(run) = launcher::outline_text::OutlineRun::place(
-            self.x,
-            self.y + launcher::font::BASELINE * self.scale,
-            self.em,
-            &self.bytes[..self.len],
-        ) {
+        if let Some(ref run) = self.outline {
             return run.pixel(px, py, self.ink, bg);
         }
         test_text_aa(

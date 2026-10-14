@@ -616,6 +616,7 @@ struct LabelRun {
     top: usize,
     /// Height of that union box.
     box_h: usize,
+    outline: Option<launcher::outline_text::OutlineRun>,
 }
 
 /// Where a run sits inside its rect.
@@ -638,6 +639,7 @@ impl LabelRun {
         w: 0,
         top: 0,
         box_h: 0,
+        outline: None,
     };
 
     /// Measures `run` and left-aligns it inside `rect`, vertically centred in
@@ -662,6 +664,11 @@ impl LabelRun {
         // is taken rather than assuming which way it goes.
         let w = text::measure(&buf[..len], scale)
             .max(interos_std::design::typeface::text_advance_px(&buf[..len], em) as usize);
+        let outline = if scale >= 2 && len <= 24 {
+            launcher::outline_text::OutlineRun::place(rect.x, baseline, em, &buf[..len])
+        } else {
+            None
+        };
         LabelRun {
             align: Align::Left,
             rect,
@@ -674,6 +681,7 @@ impl LabelRun {
             w,
             top,
             box_h: (baseline + desc as usize).saturating_sub(top),
+            outline,
         }
     }
 
@@ -689,6 +697,12 @@ impl LabelRun {
         let top = baseline.saturating_sub(asc as usize);
         let w = text::measure(&buf[..len], scale)
             .max(interos_std::design::typeface::text_advance_px(&buf[..len], em) as usize);
+        let x0 = rect.x + rect.w.saturating_sub(w);
+        let outline = if scale >= 2 && len <= 24 {
+            launcher::outline_text::OutlineRun::place(x0, baseline, em, &buf[..len])
+        } else {
+            None
+        };
         LabelRun {
             align: Align::Right,
             rect,
@@ -701,6 +715,7 @@ impl LabelRun {
             w,
             top,
             box_h: (baseline + desc as usize).saturating_sub(top),
+            outline,
         }
     }
 
@@ -732,25 +747,16 @@ impl LabelRun {
     /// grounds for the same glyphs.
     fn pixel_aa(&self, x: usize, y: usize, ink: u32, bg: u32) -> Option<u32> {
         let y0 = self.y0();
-        if x < self.x0() || x - self.x0() >= self.w || y < self.top || y - self.top >= self.box_h {
+        let x0 = self.x0();
+        if x < x0 || x - x0 >= self.w || y < self.top || y - self.top >= self.box_h {
             return None;
         }
-        // Choose the renderer ONCE for the run, not once per pixel. The placement
-        // is a pure function of the run's origin, em and bytes, so every pixel of
-        // this run reaches the same face. A per-pixel fallback draws the glyph
-        // from both faces at once -- an outline glyph under a hard-edged bitmap
-        // ghost -- on every string in the shade.
-        if let Some(run) = launcher::outline_text::OutlineRun::place(
-            self.x0(),
-            y0 + launcher::font::BASELINE * self.scale,
-            self.em,
-            &self.buf[..self.len],
-        ) {
+        if let Some(ref run) = self.outline {
             return run.pixel(x, y, ink, bg);
         }
         // The bitmap face is the refusal path, not the baseline: a run the
         // rasteriser declines still has to draw as text.
-        crate::test_text_aa(x, y, self.x0(), y0, self.scale, &self.buf[..self.len], ink, bg)
+        crate::test_text_aa(x, y, x0, y0, self.scale, &self.buf[..self.len], ink, bg)
     }
 
     /// Ink for `(x, y)`, anti-aliased against `bg`.
@@ -1208,43 +1214,83 @@ pub fn get_quick_controls_color(x: usize, y: usize, state: &LauncherState) -> u3
 /// The pixel path of the shade.
 fn quick_controls_pixel(x: usize, y: usize, frame: &QuickControlsFrame, theme: &Theme) -> u32 {
     if y < STATUS_BAR_HEIGHT {
-        return status_bar_pixel(x, y, theme);
+        return status_bar_pixel(x, y, frame, theme);
     }
     if y >= LIST_BOTTOM {
         return home_indicator_pixel(x, y, theme);
     }
-    if let Some(c) = frame.clock.pixel_on(x, y, theme.bg) {
-        return c;
+    if y < HEADING_Y {
+        return theme.bg;
     }
-    if let Some(c) = frame.heading.pixel_on(x, y, theme.bg) {
-        return c;
-    }
-    if let Some(c) = frame.summary.pixel_on(x, y, theme.bg) {
-        return c;
-    }
-    for label in &frame.sections {
-        if let Some(c) = label.pixel_on(x, y, theme.bg) {
+    if y < SUMMARY_Y {
+        if let Some(c) = frame.heading.pixel_on(x, y, theme.bg) {
             return c;
         }
+        return theme.bg;
     }
-    for tile in &frame.radios {
-        if tile.rect.contains(x, y) {
-            return tile_pixel(x, y, tile, theme);
+    if y < CONNECTIVITY_LABEL_Y {
+        if let Some(c) = frame.summary.pixel_on(x, y, theme.bg) {
+            return c;
         }
+        return theme.bg;
     }
-    if frame.brightness.rect.contains(x, y) {
-        return row_pixel(x, y, &frame.brightness, theme);
-    }
-    if frame.volume.rect.contains(x, y) {
-        return row_pixel(x, y, &frame.volume, theme);
-    }
-    for row in &frame.controls {
-        if row.rect.contains(x, y) {
-            return row_pixel(x, y, row, theme);
+    if y < CONNECTIVITY_TOP {
+        if let Some(c) = frame.sections[0].pixel_on(x, y, theme.bg) {
+            return c;
         }
+        return theme.bg;
     }
-    if frame.lock.rect.contains(x, y) {
-        return row_pixel(x, y, &frame.lock, theme);
+    if y < LEVEL_LABEL_Y {
+        for tile in &frame.radios {
+            if tile.rect.contains(x, y) {
+                return tile_pixel(x, y, tile, theme);
+            }
+        }
+        return theme.bg;
+    }
+    if y < LEVEL_TOP {
+        if let Some(c) = frame.sections[1].pixel_on(x, y, theme.bg) {
+            return c;
+        }
+        return theme.bg;
+    }
+    if y < VOLUME_SLIDER.y {
+        if frame.brightness.rect.contains(x, y) {
+            return row_pixel(x, y, &frame.brightness, theme);
+        }
+        return theme.bg;
+    }
+    if y < SYSTEM_LABEL_Y {
+        if frame.volume.rect.contains(x, y) {
+            return row_pixel(x, y, &frame.volume, theme);
+        }
+        return theme.bg;
+    }
+    if y < SYSTEM_TOP {
+        if let Some(c) = frame.sections[2].pixel_on(x, y, theme.bg) {
+            return c;
+        }
+        return theme.bg;
+    }
+    if y < FOOTER_LABEL_Y {
+        for row in &frame.controls {
+            if row.rect.contains(x, y) {
+                return row_pixel(x, y, row, theme);
+            }
+        }
+        return theme.bg;
+    }
+    if y < FOOTER_Y {
+        if let Some(c) = frame.sections[3].pixel_on(x, y, theme.bg) {
+            return c;
+        }
+        return theme.bg;
+    }
+    if y < POWER_Y {
+        if frame.lock.rect.contains(x, y) {
+            return row_pixel(x, y, &frame.lock, theme);
+        }
+        return theme.bg;
     }
     if POWER_BTN.contains(x, y) {
         return power_pixel(x, y, frame, theme);
@@ -1353,7 +1399,10 @@ fn power_pixel(x: usize, y: usize, frame: &QuickControlsFrame, theme: &Theme) ->
 /// WHY nothing else lives here: the reference's strip carries system indicators,
 /// and this guest has no radio, no battery gauge and no signal to show. A blank
 /// strip with a clock and a rule is the honest version of that bar.
-fn status_bar_pixel(x: usize, y: usize, theme: &Theme) -> u32 {
+fn status_bar_pixel(x: usize, y: usize, frame: &QuickControlsFrame, theme: &Theme) -> u32 {
+    if let Some(c) = frame.clock.pixel_on(x, y, theme.bg) {
+        return c;
+    }
     if y == STATUS_BAR_H - 1 && x >= PANEL_X && x < PANEL_X + PANEL_W {
         return theme.border;
     }

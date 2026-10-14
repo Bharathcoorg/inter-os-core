@@ -347,6 +347,7 @@ struct Run {
     /// em, so the em that matches the same cap height is
     /// `17 * scale * 2048 / 1456`. Carrying it means the two faces can be
     /// compared instead of guessed at.
+    #[allow(dead_code)]
     em: u32,
     /// Top row of the box that covers BOTH renderers.
     ///
@@ -359,6 +360,7 @@ struct Run {
     /// Height of that union box.
     box_h: usize,
     bytes: [u8; RUN_CAP],
+    outline: Option<launcher::outline_text::OutlineRun>,
 }
 
 impl Run {
@@ -374,6 +376,7 @@ impl Run {
         top: 0,
         box_h: 0,
         bytes: [0; RUN_CAP],
+        outline: None,
     };
 
     /// `bytes` at (`x`, `y`), truncated with an ellipsis if wider than `fit`.
@@ -439,6 +442,7 @@ impl Run {
         let w = bitmap_measure.max(outline_advance);
         let top = baseline.saturating_sub(asc as usize);
         let box_h = (baseline + desc as usize).saturating_sub(top);
+        let outline = launcher::outline_text::OutlineRun::place(x, baseline, em, text);
 
         Run {
             x,
@@ -452,6 +456,7 @@ impl Run {
             top,
             box_h,
             bytes: buf,
+            outline,
         }
     }
 
@@ -480,16 +485,7 @@ impl Run {
         if px < self.x || px - self.x >= self.w || py < self.top || py - self.top >= self.box_h {
             return None;
         }
-        // Choose the renderer ONCE for the run, not once per pixel -- the same
-        // reason as `pixel_inked_aa`: a per-pixel fallback draws the glyph from
-        // both faces at once.
-        let outline = launcher::outline_text::OutlineRun::place(
-            self.x,
-            self.y + launcher::font::BASELINE * self.scale,
-            self.em,
-            &self.bytes[..self.len],
-        );
-        if let Some(run) = outline {
+        if let Some(ref run) = self.outline {
             return run.pixel(px, py, ink, bg);
         }
         test_text(px, py, self.x, self.y, self.scale, &self.bytes[..self.len], ink)
@@ -515,21 +511,7 @@ impl Run {
         if px < self.x || px - self.x >= self.w || py < self.top || py - self.top >= self.box_h {
             return None;
         }
-        // Choose the renderer ONCE for the run, not once per pixel.
-        //
-        // WHY: the fallback used to be per-pixel, so a pixel the outline did not
-        // ink fell through to the bitmap face, which drew its own copy of the
-        // glyph at its own advance. The result was the text drawn twice at a
-        // one-pixel offset -- an outline glyph under a hard-edged bitmap ghost,
-        // on every label on the surface. A run is rendered by one face or the
-        // other, never both.
-        let outline = launcher::outline_text::OutlineRun::place(
-            self.x,
-            self.y + launcher::font::BASELINE * self.scale,
-            self.em,
-            &self.bytes[..self.len],
-        );
-        if let Some(run) = outline {
+        if let Some(ref run) = self.outline {
             return run.pixel(px, py, ink, bg);
         }
         // The bitmap face is the fallback, not the baseline: a refusal here --
