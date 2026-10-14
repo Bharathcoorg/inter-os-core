@@ -860,11 +860,41 @@ impl DrmKmsController {
                             }
                         }
                     } else if dst_w * 2 == s_w as usize * 3 && dst_h * 2 == s_h as usize * 3 {
-                        // Canonical 1.5x Full HD mobile scanout upscaler (720x1440 -> 1080x2160).
-                        // Solves the bilinear smearing and fractional phase drift of the 4-tap Hermite S-curve:
-                        // 1. Aligned coordinates (dx % 3 == 0 && dy % 3 == 0) preserve 100% bitwise fidelity.
-                        // 2. Uniform regions (p00 == p01 == p10 == p11) copy directly with zero arithmetic drift.
-                        // 3. Intermediate subpixels use exact 3x3 integer weights (sum = 9) for razor-sharp edge contrast.
+                        // Exact 1.5x scanout upscaler (720x1440 -> 1080x2160).
+                        //
+                        // WHY a dedicated branch at all: at exactly 1.5 the scale is
+                        // rational, so destination pixels fall on a repeating
+                        // 3-phase grid against the source grid instead of the
+                        // aperiodic fractional phase the general path has to chase.
+                        // That makes an exact integer reconstruction possible here
+                        // with no fixed-point error and no drift.
+                        //
+                        // WHY these weights: source pixel i covers the half-open
+                        // destination span [1.5i, 1.5i + 1.5), so for one
+                        // destination triple the pair (2k, 2k+1) is covered as
+                        //     dx % 3 == 0 -> source pixel 2k only, full weight
+                        //     dx % 3 == 1 -> half of 2k, half of 2k+1
+                        //     dx % 3 == 2 -> source pixel 2k+1 only, full weight
+                        // Each source pixel therefore receives a total weight of
+                        // exactly 1.5 on both axes: 1 + 1/2 horizontally and the
+                        // same vertically, which is precisely the area a 1.5x
+                        // upscale has to reproduce. Weight sum per destination
+                        // pixel is 2 on each axis, so the normaliser is 4.
+                        //
+                        // WHY the weights must stay symmetric (this is measured,
+                        // not argued): a one-sided ramp such as (2,0),(1,1),(2,0)
+                        // / (3,0),(2,1),(1,2) renormalises fine per destination
+                        // pixel and still looks correct on a flat field, but it
+                        // hands the first tap of every pair 2/3 of the pair's mass
+                        // and the second only 1/3. Every source pixel then gets a
+                        // gain of 2.0 or 1.0 instead of 1.5 depending on whether
+                        // its index is even or odd, which is a +-33% luminance
+                        // comb locked to the source grid: thin features on odd
+                        // rows/columns lose a third of their amplitude and the
+                        // whole scanout carries a 1px cross-hatch. The
+                        // `fhd_upscale_is_energy_preserving_across_parity` test
+                        // pins that a full-width impulse lands at gain 1.5 from
+                        // both an even and an odd source column.
                         let src_pitch = s_w as usize;
                         let s_w_usize = s_w as usize;
                         let s_h_usize = s_h as usize;
@@ -874,9 +904,9 @@ impl DrmKmsController {
                             let sy0 = (dy / 3) * 2;
                             let sy1 = (sy0 + 1).min(s_h_usize - 1);
                             let (wy0, wy1) = match ry {
-                                0 => (3u32, 0u32),
-                                1 => (2u32, 1u32),
-                                _ => (1u32, 2u32),
+                                0 => (2u32, 0u32),
+                                1 => (1u32, 1u32),
+                                _ => (0u32, 2u32),
                             };
                             let r0 = sy0 * src_pitch;
                             let r1 = sy1 * src_pitch;
@@ -887,9 +917,9 @@ impl DrmKmsController {
                                 let sx0 = (dx / 3) * 2;
                                 let sx1 = (sx0 + 1).min(s_w_usize - 1);
                                 let (wx0, wx1) = match rx {
-                                    0 => (3u32, 0u32),
-                                    1 => (2u32, 1u32),
-                                    _ => (1u32, 2u32),
+                                    0 => (2u32, 0u32),
+                                    1 => (1u32, 1u32),
+                                    _ => (0u32, 2u32),
                                 };
 
                                 let dst_idx = dst_row_start + dx;
@@ -897,7 +927,11 @@ impl DrmKmsController {
                                     continue;
                                 }
 
-                                // 1. Exactly aligned pixel (1 out of every 9 pixels): bit-exact copy
+                                // 1. Exactly aligned pixel (1 out of every 9): bit-exact
+                                //    copy. Phase 0 of both axes resolves to the single
+                                //    source pixel 2k, so this is not an approximation
+                                //    of the blend below -- it is the same value, kept
+                                //    as a direct read so no rounding can touch it.
                                 if rx == 0 && ry == 0 {
                                     let idx = r0 + sx0;
                                     if idx < surface.pixels.len() {
@@ -920,13 +954,17 @@ impl DrmKmsController {
                                 let p10 = surface.pixels[i10];
                                 let p11 = surface.pixels[i11];
 
-                                // 2. Flat region optimization: zero rounding error
+                                // 2. Flat region fast path: a uniform neighbourhood is
+                                //    copied rather than blended four times, so flat
+                                //    colour survives the upscale bit-for-bit.
                                 if p00 == p01 && p00 == p10 && p00 == p11 {
                                     self.back_buffer[dst_idx] = p00;
                                     continue;
                                 }
 
-                                // 3. Subpixel 3x3 weight blend (sum = 9)
+                                // 3. 2x2 separable area reconstruction, integer only:
+                                //    no float, no fixed-point fraction, weights sum to
+                                //    (wy0 + wy1) * (wx0 + wx1) == 4.
                                 let w00 = wy0 * wx0;
                                 let w01 = wy0 * wx1;
                                 let w10 = wy1 * wx0;
@@ -937,7 +975,7 @@ impl DrmKmsController {
                                     let c01 = (p01 >> shift) & 0xFF;
                                     let c10 = (p10 >> shift) & 0xFF;
                                     let c11 = (p11 >> shift) & 0xFF;
-                                    (c00 * w00 + c01 * w01 + c10 * w10 + c11 * w11 + 4) / 9
+                                    (c00 * w00 + c01 * w01 + c10 * w10 + c11 * w11 + 2) / 4
                                 };
 
                                 let a = blend_ch(24);
@@ -1312,6 +1350,105 @@ mod tests {
             .filter(|&&p| p == 0xFF0B0F19)
             .count();
         assert_eq!(untouched, 0, "scaled blit left {untouched} pixels unwritten");
+    }
+
+    /// Total energy a 720x1440 source column contributes to the 1080-wide
+    /// destination, expressed in units of the source column's own brightness.
+    fn fhd_impulse_column_gain(col: usize) -> u32 {
+        let mut kms = DrmKmsController::new(1080, 2160);
+        kms.set_display_mode(1080, 2160, 60).expect("mode");
+        let id = kms.create_surface(720, 1440, 0, 1);
+        assert_ne!(id, 0);
+        for y in 0..1440usize {
+            kms.surfaces[0].pixels[y * 720 + col] = 0xFFFFFFFF;
+        }
+        kms.frame_dirty = true;
+        kms.surfaces[0].dirty = true;
+        kms.composite();
+
+        // Source column `col` lives inside the destination triple that starts at
+        // 3 * (col / 2): an even column is sampled as the first tap of its pair,
+        // an odd one as the second tap of the same pair.
+        let base = 3 * (col / 2);
+        let row = 1080usize; // a middle scanout row, well away from both edges
+        let total: u32 = (base..base + 3)
+            .map(|dx| (kms.back_buffer[row * 1080 + dx] >> 16) & 0xFF)
+            .sum();
+        assert!(kms.destroy_surface(id));
+        total
+    }
+
+    #[test]
+    fn fhd_upscale_is_energy_preserving_across_parity() {
+        // WHY this test exists: the 1.5x branch's phase weights are the one thing
+        // that can be wrong without the image looking wrong. Any per-destination
+        // normaliser passes a flat-field check, and the grayscale-ramp fixture
+        // above is smooth enough that a parity-dependent gain shows up as a
+        // barely-visible slope change. An impulse does not forgive it: source
+        // pixel i covers 1.5 destination pixels, so a single lit source column
+        // must deposit exactly 1.5x its brightness into the destination, from
+        // every column index.
+        //
+        // The failure this pins is concrete. Weights of (3,0),(2,1),(1,2) also
+        // sum to 3 per destination pixel, so every per-pixel normalisation is
+        // satisfied, but they give the first tap of each pair 2/3 of the mass:
+        // an even-indexed source column then lands at gain 2.0 and an odd one at
+        // gain 1.0. That is a +-33% luminance comb locked to the source grid --
+        // a 1px cross-hatch over the entire FHD scanout, and a third of the
+        // amplitude missing from every thin feature that happens to fall on an
+        // odd row or column.
+        let even = fhd_impulse_column_gain(200);
+        let odd = fhd_impulse_column_gain(201);
+        let ideal = 255 * 3 / 2; // 382
+
+        for (label, got) in [("even", even), ("odd", odd)] {
+            assert!(
+                (got as i64 - ideal as i64).abs() <= 3,
+                "{label} source column deposited {got} of brightness; \
+                 an area-preserving 1.5x upscale deposits {ideal}"
+            );
+        }
+        assert_eq!(
+            even, odd,
+            "even and odd source columns must deposit the same energy; \
+             a mismatch is a parity-locked luminance comb"
+        );
+    }
+
+    #[test]
+    fn fhd_upscale_keeps_aligned_pixels_bit_exact() {
+        // WHY this test exists: the branch promises that phase 0 of both axes is
+        // a copy rather than a blend, which is the property that makes a raised
+        // scanout worth having -- the compositor's own antialiased text survives
+        // on nine scanout pixels in every nine. Blending phase 0 instead still
+        // produces a plausible picture, so only an exact comparison pins it.
+        let mut kms = DrmKmsController::new(1080, 2160);
+        kms.set_display_mode(1080, 2160, 60).expect("mode");
+        let id = kms.create_surface(720, 1440, 0, 1);
+        assert_ne!(id, 0);
+        for y in 0..1440usize {
+            for x in 0..720usize {
+                // A value no blend could manufacture by accident.
+                kms.surfaces[0].pixels[y * 720 + x] = 0xFF000000 | ((x * 31 + y * 17) as u32 & 0xFFFFFF);
+            }
+        }
+        kms.frame_dirty = true;
+        kms.surfaces[0].dirty = true;
+        kms.composite();
+
+        for sy in (0..1440usize).step_by(2) {
+            for sx in (0..720usize).step_by(2) {
+                let want = kms.surfaces[0].pixels[sy * 720 + sx];
+                let got = kms.back_buffer[(sy * 3 / 2) * 1080 + (sx * 3 / 2)];
+                assert_eq!(
+                    got, want,
+                    "source ({sx},{sy}) must survive bit-exact at aligned destination \
+                     ({},{sy}), got {got:#x} want {want:#x}",
+                    sx * 3 / 2
+                );
+            }
+        }
+        assert!(kms.destroy_surface(id));
     }
 
     #[test]
