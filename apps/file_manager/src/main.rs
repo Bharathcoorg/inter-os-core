@@ -23,6 +23,7 @@ use core::panic::PanicInfo;
 use interos_std as std;
 use std::design::font;
 use std::design::primitives::{draw_pill, Rect};
+pub use file_manager::{fmt_u64, parse_vfs_entries, RuntimeFileEntry, MAX_ENTRY_NAME_LEN, MAX_PARSED_ENTRIES};
 
 mod outline_text;
 
@@ -191,28 +192,6 @@ fn test_text(
 // Counted Log Assembly (no allocator in this no_std app)
 // -----------------------------------------------------------------------------
 
-/// Formats `v` as decimal ASCII into `out`; returns the bytes written.
-fn fmt_u64(mut v: u64, out: &mut [u8]) -> usize {
-    if out.is_empty() {
-        return 0;
-    }
-    if v == 0 {
-        out[0] = b'0';
-        return 1;
-    }
-    let mut digits = [0u8; 20];
-    let mut n = 0usize;
-    while v > 0 && n < 20 {
-        digits[n] = b'0' + (v % 10) as u8;
-        v /= 10;
-        n += 1;
-    }
-    let n = n.min(out.len());
-    for i in 0..n {
-        out[i] = digits[n - 1 - i];
-    }
-    n
-}
 
 /// Builds `prefix ++ decimal(value) ++ suffix` into `buf` and returns its length.
 /// WHY: measured values only exist at runtime, so they are assembled into a
@@ -259,26 +238,6 @@ const ITEMS_ALL: [VfsItem; 0] = [];
 const PROBE_DEFAULT: [u8; 40] =
     *b"not queried\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
 
-pub const MAX_PARSED_ENTRIES: usize = 8;
-pub const MAX_ENTRY_NAME_LEN: usize = 32;
-
-/// A bounded, zero-heap directory entry parsed from kernel VFS `fs_list`.
-#[derive(Clone, Copy)]
-pub struct RuntimeFileEntry {
-    pub name: [u8; MAX_ENTRY_NAME_LEN],
-    pub name_len: usize,
-    pub size: u64,
-    pub is_dir: bool,
-}
-
-impl RuntimeFileEntry {
-    pub const EMPTY: Self = Self {
-        name: [0u8; MAX_ENTRY_NAME_LEN],
-        name_len: 0,
-        size: 0,
-        is_dir: false,
-    };
-}
 
 pub struct FileManagerApp {
     pub selected_shortcut: usize,
@@ -311,38 +270,7 @@ impl FileManagerApp {
 
     /// Parses newline-delimited VFS entries in `<name>|<size>|<dir|dev|file>` format.
     pub fn parse_entries(&mut self, data: &[u8]) {
-        self.entry_count = 0;
-        let mut start = 0;
-        while start < data.len() && self.entry_count < MAX_PARSED_ENTRIES {
-            let end = data[start..]
-                .iter()
-                .position(|&b| b == b'\n')
-                .map(|p| start + p)
-                .unwrap_or(data.len());
-            let line = &data[start..end];
-            if !line.is_empty() {
-                let mut parts = line.split(|&b| b == b'|');
-                if let (Some(name_bytes), Some(size_bytes), Some(type_bytes)) =
-                    (parts.next(), parts.next(), parts.next())
-                {
-                    let mut entry = RuntimeFileEntry::EMPTY;
-                    let n = name_bytes.len().min(MAX_ENTRY_NAME_LEN);
-                    entry.name[..n].copy_from_slice(&name_bytes[..n]);
-                    entry.name_len = n;
-                    let mut size: u64 = 0;
-                    for &b in size_bytes {
-                        if b.is_ascii_digit() {
-                            size = size.saturating_mul(10).saturating_add((b - b'0') as u64);
-                        }
-                    }
-                    entry.size = size;
-                    entry.is_dir = type_bytes == b"dir";
-                    self.entries[self.entry_count] = entry;
-                    self.entry_count += 1;
-                }
-            }
-            start = end.saturating_add(1);
-        }
+        self.entry_count = parse_vfs_entries(data, &mut self.entries);
     }
 
     /// Records the real answer from `fs_list`.
@@ -649,7 +577,135 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
         return row_bg;
     }
 
-    // 3. Home Gesture Pill, drawn from the same rectangle the tap handler tests.
+    // 3. VFS Directory Explorer Section (y: 840..1380)
+    if (840..1380).contains(&y) {
+        // Section Header: "Directory Explorer" at y: 842, path at y: 842
+        if (840..880).contains(&y) {
+            if let Some(c) = test_text(x, y, 48, 842, 1, b"Directory Explorer", TEXT_PRIMARY, BG_DARK) {
+                return c;
+            }
+            let path_bytes = app.current_path.as_bytes();
+            if let Some(c) = test_text(x, y, 220, 842, 1, path_bytes, TEXT_MUTED, BG_DARK) {
+                return c;
+            }
+            return BG_DARK;
+        }
+
+        // Entries container card: x: 36..684
+        if x >= 36 && x < 684 {
+            let container_h = if app.entry_count == 0 {
+                72
+            } else {
+                app.entry_count * 56
+            };
+            let card_y0 = 880;
+            let card_y1 = card_y0 + container_h;
+
+            if y >= card_y0 && y < card_y1 {
+                let rx = (x - 36).min(683 - x);
+                let ry = (y - card_y0).min(card_y1 - 1 - y);
+
+                // Rounded corners
+                if rx < 16 && ry < 16 {
+                    let cdx = (16 - rx) as isize;
+                    let cdy = (16 - ry) as isize;
+                    if cdx * cdx + cdy * cdy >= 256 {
+                        return BG_DARK;
+                    }
+                }
+
+                // Border
+                if rx < 2 || ry < 2 {
+                    return BORDER_SUBTLE;
+                }
+
+                if app.entry_count == 0 {
+                    if let Some(c) = test_text(
+                        x,
+                        y,
+                        56,
+                        card_y0 + 24,
+                        1,
+                        b"Directory empty or unread",
+                        TEXT_MUTED,
+                        SURFACE_DARK,
+                    ) {
+                        return c;
+                    }
+                    return SURFACE_DARK;
+                }
+
+                // Render specific entry row
+                let entry_idx = (y - card_y0) / 56;
+                let row_offset_y = (y - card_y0) % 56;
+
+                if entry_idx < app.entry_count {
+                    let entry = &app.entries[entry_idx];
+
+                    // Row divider (except last row)
+                    if row_offset_y == 55 && entry_idx + 1 < app.entry_count {
+                        return BORDER_SUBTLE;
+                    }
+
+                    // Icon glyph / indicator at x: 56..80
+                    let icon_cx = 64isize;
+                    let icon_cy = (card_y0 + entry_idx * 56 + 28) as isize;
+                    let idx = x as isize - icon_cx;
+                    let idy = y as isize - icon_cy;
+
+                    if entry.is_dir {
+                        // Folder vector glyph
+                        if (idx.abs() <= 12 && idy.abs() <= 8 && (idy >= -4 || idx <= 0))
+                            || (idx >= -12 && idx <= 12 && idy == 8)
+                        {
+                            return ACCENT_SKY;
+                        }
+                    } else {
+                        // File document glyph
+                        if (idx.abs() <= 8 && idy.abs() <= 10) && (idx.abs() >= 7 || idy.abs() >= 9 || idy == 0) {
+                            return TEXT_MUTED;
+                        }
+                    }
+
+                    // Entry name at x: 96, y0 + 16 (scale 1)
+                    let text_y0 = card_y0 + entry_idx * 56 + 16;
+                    if let Some(c) = test_text(
+                        x,
+                        y,
+                        96,
+                        text_y0,
+                        1,
+                        &entry.name[..entry.name_len],
+                        TEXT_PRIMARY,
+                        SURFACE_DARK,
+                    ) {
+                        return c;
+                    }
+
+                    // Size / Type label right-aligned
+                    let sw = font::measure(&entry.size_label[..entry.size_label_len], 1);
+                    let sx = 660usize.saturating_sub(sw);
+                    if let Some(c) = test_text(
+                        x,
+                        y,
+                        sx,
+                        text_y0,
+                        1,
+                        &entry.size_label[..entry.size_label_len],
+                        if entry.is_dir { ACCENT_SKY } else { TEXT_MUTED },
+                        SURFACE_DARK,
+                    ) {
+                        return c;
+                    }
+
+                    return SURFACE_DARK;
+                }
+            }
+        }
+        return BG_DARK;
+    }
+
+    // 4. Home Gesture Pill, drawn from the same rectangle the tap handler tests.
     if HOME_PILL.contains(x, y) {
         return TEXT_MUTED;
     }
