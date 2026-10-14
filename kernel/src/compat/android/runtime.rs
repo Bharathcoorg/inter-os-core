@@ -63,6 +63,8 @@ pub struct DalvikVmState {
     pub instructions_executed: u64,
     /// Last value returned by a return opcode or method invocation.
     pub last_return_value: u32,
+    /// Shadow return string for methods returning String objects.
+    pub last_return_string: Option<String>,
     /// Intercepted Android framework logging calls.
     pub captured_logs: Vec<String>,
     /// Nested DEX calls are bounded to prevent recursive bytecode exhaustion.
@@ -80,6 +82,7 @@ impl DalvikVmState {
             string_registers: [INIT_STR; 32],
             instructions_executed: 0,
             last_return_value: 0,
+            last_return_string: None,
             captured_logs: Vec::new(),
             call_depth: 0,
             objects: Vec::new(),
@@ -204,7 +207,7 @@ impl DalvikVmState {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
                     self.registers[v_dest] = self.last_return_value;
-                    self.string_registers[v_dest] = None;
+                    self.string_registers[v_dest] = self.last_return_string.clone();
                     pc += 2;
                 }
                 OP_MOVE_EXCEPTION => {
@@ -435,14 +438,23 @@ impl DalvikVmState {
                     let target_method = target.method_name.clone();
                     let target_registers_size = target.registers_size as usize;
                     let target_ins_size = target.ins_size as usize;
-                    let is_framework = target_class.starts_with("Landroid/") || target_class.starts_with("Landroidx/");
+                    let is_framework = target_class.starts_with("Landroid/")
+                        || target_class.starts_with("Landroidx/")
+                        || target_class.starts_with("Lcom/google/android/gms/");
                     let string_args = [
                         if arg_count > 0 { self.string_registers[arg_registers[0]].as_deref() } else { None },
                         if arg_count > 1 { self.string_registers[arg_registers[1]].as_deref() } else { None },
                     ];
                     if is_framework {
                         match super::framework::dispatch(&target_class, &target_method, &string_args, &mut self.captured_logs) {
-                            Ok(super::framework::AndroidFrameworkResult::Return(value)) => self.last_return_value = value,
+                            Ok(super::framework::AndroidFrameworkResult::Return(value)) => {
+                                self.last_return_value = value;
+                                self.last_return_string = None;
+                            }
+                            Ok(super::framework::AndroidFrameworkResult::ReturnString(s)) => {
+                                self.last_return_value = 0;
+                                self.last_return_string = Some(alloc::string::String::from(s));
+                            }
                             Ok(super::framework::AndroidFrameworkResult::Service(_)) => return Err(DalvikVmError::UnsupportedFrameworkApi),
                             Err(super::framework::AndroidFrameworkError::UnsupportedApi) => return Err(DalvikVmError::UnsupportedFrameworkApi),
                             Err(_) => return Err(DalvikVmError::SecurityViolationForbiddenApi),
@@ -464,6 +476,7 @@ impl DalvikVmState {
                         self.registers = caller_registers;
                         self.string_registers = caller_strings;
                         self.last_return_value = result?;
+                        self.last_return_string = None;
                     }
                     pc += 6;
                 }
@@ -508,6 +521,7 @@ impl DalvikVmState {
                 }
                 OP_RETURN_VOID => {
                     self.last_return_value = 0;
+                    self.last_return_string = None;
                     return Ok(0);
                 }
                 OP_RETURN | OP_RETURN_WIDE => {
@@ -520,6 +534,7 @@ impl DalvikVmState {
                     }
                     let ret_val = self.registers[v_src];
                     self.last_return_value = ret_val;
+                    self.last_return_string = self.string_registers[v_src].clone();
                     return Ok(ret_val);
                 }
                 unknown_op => {
@@ -583,5 +598,43 @@ mod tests {
             vm.invoke_method(&dex, "Lorg/interos/Test;", "onCreate"),
             Err(DalvikVmError::ExecutionStepLimit)
         );
+    }
+
+    #[test]
+    fn microg_framework_dispatch_updates_vm_return_state() {
+        let mut vm = DalvikVmState::new();
+        // Invoke GoogleApiAvailability: isGooglePlayServicesAvailable
+        let res = super::super::framework::dispatch(
+            "Lcom/google/android/gms/common/GoogleApiAvailability;",
+            "isGooglePlayServicesAvailable",
+            &[],
+            &mut vm.captured_logs,
+        ).unwrap();
+        match res {
+            super::super::framework::AndroidFrameworkResult::Return(v) => {
+                vm.last_return_value = v;
+                vm.last_return_string = None;
+            }
+            _ => panic!("Expected Return(0)"),
+        }
+        assert_eq!(vm.last_return_value, 0);
+        assert_eq!(vm.last_return_string, None);
+
+        // Invoke AdvertisingIdClient$Info: getId
+        let res = super::super::framework::dispatch(
+            "Lcom/google/android/gms/ads/identifier/AdvertisingIdClient$Info;",
+            "getId",
+            &[],
+            &mut vm.captured_logs,
+        ).unwrap();
+        match res {
+            super::super::framework::AndroidFrameworkResult::ReturnString(s) => {
+                vm.last_return_value = 0;
+                vm.last_return_string = Some(alloc::string::String::from(s));
+            }
+            _ => panic!("Expected ReturnString"),
+        }
+        assert_eq!(vm.last_return_value, 0);
+        assert_eq!(vm.last_return_string.as_deref(), Some("00000000-0000-0000-0000-000000000000"));
     }
 }

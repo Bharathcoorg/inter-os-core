@@ -146,3 +146,128 @@ impl BinderMediator {
 
 /// Global system-wide Android Binder mediator.
 pub static BINDER_MEDIATOR: Mutex<BinderMediator> = Mutex::new(BinderMediator::new());
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::capability::Capability;
+
+    #[test]
+    fn test_service_manager_enumeration_contract() {
+        let mut mediator = BinderMediator::new();
+        let empty_caps = CapabilityTable::new(4);
+
+        // Valid ServiceManager getService query (handle 0, code 1, empty data)
+        let valid_sm_tx = BinderTransaction {
+            target_handle: 0,
+            code: 1,
+            flags: 0,
+            data: Vec::new(),
+        };
+        assert_eq!(
+            mediator.dispatch_transaction(TaskId(10), &empty_caps, 0, &valid_sm_tx),
+            Ok(BinderReturn::BrTransactionComplete)
+        );
+
+        // Disallowed ServiceManager query (code != 1)
+        let bad_code_tx = BinderTransaction {
+            target_handle: 0,
+            code: 2,
+            flags: 0,
+            data: Vec::new(),
+        };
+        assert_eq!(
+            mediator.dispatch_transaction(TaskId(10), &empty_caps, 0, &bad_code_tx),
+            Err(BinderReturn::BrSecurityDenied)
+        );
+
+        // Disallowed ServiceManager query with payload
+        let bad_payload_tx = BinderTransaction {
+            target_handle: 0,
+            code: 1,
+            flags: 0,
+            data: alloc::vec![1, 2, 3],
+        };
+        assert_eq!(
+            mediator.dispatch_transaction(TaskId(10), &empty_caps, 0, &bad_payload_tx),
+            Err(BinderReturn::BrSecurityDenied)
+        );
+    }
+
+    #[test]
+    fn test_microg_handles_capability_gating() {
+        let mut mediator = BinderMediator::new();
+        let empty_caps = CapabilityTable::new(4);
+
+        let microg_handles = [
+            HANDLE_MICROG_GMS_BROKER,
+            HANDLE_MICROG_LOCATION,
+            HANDLE_MICROG_GCM_PUSH,
+            HANDLE_MICROG_ADS_ID,
+        ];
+
+        // 1. Without capability, all microG handles fail closed
+        for &handle in &microg_handles {
+            let tx = BinderTransaction {
+                target_handle: handle,
+                code: 1,
+                flags: 0,
+                data: Vec::new(),
+            };
+            assert_eq!(
+                mediator.dispatch_transaction(TaskId(20), &empty_caps, 0, &tx),
+                Err(BinderReturn::BrSecurityDenied)
+            );
+        }
+        assert_eq!(mediator.violation_count(), 4);
+
+        // 2. Grant capability only for HANDLE_MICROG_LOCATION
+        let mut location_caps = CapabilityTable::new(4);
+        location_caps.insert(Capability {
+            id: crate::capability::CapabilityId(1),
+            cap_type: CapabilityType::IpcSend,
+            rights: Rights::WRITE,
+            object_id: binder_service_object(HANDLE_MICROG_LOCATION),
+        }).unwrap();
+
+        let location_tx = BinderTransaction {
+            target_handle: HANDLE_MICROG_LOCATION,
+            code: 1,
+            flags: 0,
+            data: Vec::new(),
+        };
+        assert_eq!(
+            mediator.dispatch_transaction(TaskId(21), &location_caps, 0, &location_tx),
+            Ok(BinderReturn::BrReply)
+        );
+
+        // 3. HANDLE_MICROG_LOCATION capability must NOT authorize HANDLE_MICROG_GCM_PUSH
+        let push_tx = BinderTransaction {
+            target_handle: HANDLE_MICROG_GCM_PUSH,
+            code: 1,
+            flags: 0,
+            data: Vec::new(),
+        };
+        assert_eq!(
+            mediator.dispatch_transaction(TaskId(21), &location_caps, 0, &push_tx),
+            Err(BinderReturn::BrSecurityDenied)
+        );
+    }
+
+    #[test]
+    fn test_oversized_transaction_rejected() {
+        let mut mediator = BinderMediator::new();
+        let empty_caps = CapabilityTable::new(4);
+
+        let oversized_tx = BinderTransaction {
+            target_handle: 0,
+            code: 1,
+            flags: 0,
+            data: alloc::vec![0u8; 64 * 1024 + 1],
+        };
+        assert_eq!(
+            mediator.dispatch_transaction(TaskId(30), &empty_caps, 0, &oversized_tx),
+            Err(BinderReturn::BrSecurityDenied)
+        );
+    }
+}

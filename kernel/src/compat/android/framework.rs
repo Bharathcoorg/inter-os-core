@@ -29,6 +29,7 @@ pub enum AndroidFrameworkService {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AndroidFrameworkResult {
     Return(u32),
+    ReturnString(&'static str),
     Service(AndroidFrameworkService),
 }
 
@@ -56,6 +57,28 @@ pub fn dispatch(
             if logs.len() >= MAX_LOG_ENTRIES { logs.remove(0); }
             logs.push(line);
             Ok(AndroidFrameworkResult::Return(0))
+        }
+        // Sovereign native microG shims: pure Rust, fail-closed, zero-heap
+        "com/google/android/gms/common/GoogleApiAvailability" => {
+            match method_name {
+                // ConnectionResult.SUCCESS = 0
+                "isGooglePlayServicesAvailable" => Ok(AndroidFrameworkResult::Return(0)),
+                _ => Err(AndroidFrameworkError::UnsupportedApi),
+            }
+        }
+        "com/google/android/gms/ads/identifier/AdvertisingIdClient$Info" => {
+            match method_name {
+                // Enforce limit ad tracking enabled (true = 1) and zeroed UUID to prevent cross-app tracking
+                "isLimitAdTrackingEnabled" => Ok(AndroidFrameworkResult::Return(1)),
+                "getId" => Ok(AndroidFrameworkResult::ReturnString("00000000-0000-0000-0000-000000000000")),
+                _ => Err(AndroidFrameworkError::UnsupportedApi),
+            }
+        }
+        "com/google/android/gms/ads/identifier/AdvertisingIdClient" => {
+            match method_name {
+                "getAdvertisingIdInfo" => Ok(AndroidFrameworkResult::Return(1)),
+                _ => Err(AndroidFrameworkError::UnsupportedApi),
+            }
         }
         // Only APIs with an implemented effect are acknowledged. Lifecycle callbacks,
         // widget mutations, handlers, notifications and service lookups require real
@@ -134,18 +157,52 @@ mod tests {
     }
 
     #[test]
-    fn unbacked_microg_calls_fail_closed() {
+    fn microg_native_shims_and_fail_closed_boundaries() {
         let mut logs = Vec::new();
+
+        // 1. GoogleApiAvailability: isGooglePlayServicesAvailable returns SUCCESS (0)
         assert_eq!(
             dispatch("Lcom/google/android/gms/common/GoogleApiAvailability;", "isGooglePlayServicesAvailable", &[], &mut logs),
-            Err(AndroidFrameworkError::UnsupportedApi)
+            Ok(AndroidFrameworkResult::Return(0))
         );
+
+        // 2. AdvertisingIdClient$Info: isLimitAdTrackingEnabled returns true (1), getId returns zeroed UUID
         assert_eq!(
             dispatch("Lcom/google/android/gms/ads/identifier/AdvertisingIdClient$Info;", "isLimitAdTrackingEnabled", &[], &mut logs),
-            Err(AndroidFrameworkError::UnsupportedApi)
+            Ok(AndroidFrameworkResult::Return(1))
         );
         assert_eq!(
             dispatch("Lcom/google/android/gms/ads/identifier/AdvertisingIdClient$Info;", "getId", &[], &mut logs),
+            Ok(AndroidFrameworkResult::ReturnString("00000000-0000-0000-0000-000000000000"))
+        );
+
+        // 3. AdvertisingIdClient: getAdvertisingIdInfo returns instance (1)
+        assert_eq!(
+            dispatch("Lcom/google/android/gms/ads/identifier/AdvertisingIdClient;", "getAdvertisingIdInfo", &[], &mut logs),
+            Ok(AndroidFrameworkResult::Return(1))
+        );
+
+        // 4. Unbacked methods on microG classes MUST fail closed
+        assert_eq!(
+            dispatch("Lcom/google/android/gms/common/GoogleApiAvailability;", "makeGooglePlayServicesAvailable", &[], &mut logs),
+            Err(AndroidFrameworkError::UnsupportedApi)
+        );
+        assert_eq!(
+            dispatch("Lcom/google/android/gms/common/GoogleApiAvailability;", "showErrorDialogFragment", &[], &mut logs),
+            Err(AndroidFrameworkError::UnsupportedApi)
+        );
+        assert_eq!(
+            dispatch("Lcom/google/android/gms/ads/identifier/AdvertisingIdClient$Info;", "unsupportedMethod", &[], &mut logs),
+            Err(AndroidFrameworkError::UnsupportedApi)
+        );
+
+        // 5. Unbacked microG / Play Services classes MUST fail closed
+        assert_eq!(
+            dispatch("Lcom/google/android/gms/location/LocationServices;", "getFusedLocationProviderClient", &[], &mut logs),
+            Err(AndroidFrameworkError::UnsupportedApi)
+        );
+        assert_eq!(
+            dispatch("Lcom/google/android/gms/auth/api/signin/GoogleSignIn;", "getClient", &[], &mut logs),
             Err(AndroidFrameworkError::UnsupportedApi)
         );
     }
