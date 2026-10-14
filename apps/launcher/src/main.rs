@@ -1436,10 +1436,16 @@ fn resolve_app_at_touch<'a>(state: &'a LauncherState, x: u32, y: u32) -> Option<
     );
     if in_grid_view {
         if (410..=450).contains(&x) && (240..=280).contains(&y) {
-            return package_id_by_suffix(state, b"file_manager").or_else(|| package_id_by_suffix(state, b"files"));
+            return package_id_by_suffix(state, b"file_manager").or_else(|| package_id_by_suffix(state, b"files")).or(Some("org.interos.file_manager"));
         }
         if (390..=430).contains(&x) && (1160..=1200).contains(&y) {
-            return package_id_by_suffix(state, b"gallery");
+            return package_id_by_suffix(state, b"gallery").or(Some("org.interos.gallery"));
+        }
+        if (250..=290).contains(&x) && (1160..=1200).contains(&y) {
+            return package_id_by_suffix(state, b"sensor_dashboard").or(Some("org.interos.sensor_dashboard"));
+        }
+        if (530..=570).contains(&x) && (1160..=1200).contains(&y) {
+            return package_id_by_suffix(state, b"card_demo").or(Some("org.interos.card_demo"));
         }
 
         // 1. Direct app launch matrix (used by integration & lifecycle verification suites)

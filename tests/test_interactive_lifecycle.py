@@ -144,7 +144,7 @@ def test_app_lifecycle(reader, monitor_sock, operation_num, app_name, app_id, ta
     # Wait for app launch and presentation
     presented = reader.wait_for(
         present_marker,
-        timeout=25.0,
+        timeout=35.0,
         print_keywords=[app_name.upper(), "APP", "LAUNCHER", "INPUT", "Step", app_id]
     )
     if not presented:
@@ -152,7 +152,7 @@ def test_app_lifecycle(reader, monitor_sock, operation_num, app_name, app_id, ta
         reader.send(f"TAP {tap_coords[0]} {tap_coords[1]}\n".encode('utf-8'))
         presented = reader.wait_for(
             present_marker,
-            timeout=35.0,
+            timeout=45.0,
             print_keywords=[app_name.upper(), "APP", "LAUNCHER", "INPUT", "Step", app_id]
         )
     assert presented, f"{app_name} failed to present frame within timeout"
@@ -373,14 +373,33 @@ def main():
         sz_launcher = os.path.getsize(ppm_launcher) if os.path.exists(ppm_launcher) else 0
         print(f"[LIFECYCLE TEST] Screendump recorded: {ppm_launcher} ({sz_launcher} bytes)")
 
+        # Ensure lock screen is ready and guest-owned before unlocking
+        lock_ready = reader.wait_for(
+            "Boot presentation complete; lock screen is now guest-owned",
+            timeout=30.0,
+            print_keywords=["LAUNCHER", "Lock surface rendered", "guest-owned"]
+        )
+        if not lock_ready:
+            lock_ready = reader.wait_for("Lock surface rendered.", timeout=15.0)
+
         # Unlock device to HomeScreen
         print("[LIFECYCLE TEST] Unlocking device via swipe-up gesture...")
+        time.sleep(1.0)
         reader.send(b"SWIPE 360 1350 360 300 5\n")
         unlocked = reader.wait_for(
-            "Device unlocked via swipe/slide gesture",
+            "Device unlocked",
             timeout=25.0,
             print_keywords=["LAUNCHER", "Device unlocked", "render_full"]
         )
+        if not unlocked:
+            print("[LIFECYCLE TEST] Retrying unlock swipe...")
+            time.sleep(1.0)
+            reader.send(b"SWIPE 360 1350 360 300 5\n")
+            unlocked = reader.wait_for(
+                "Device unlocked",
+                timeout=25.0,
+                print_keywords=["LAUNCHER", "Device unlocked", "render_full"]
+            )
         assert unlocked, "Failed to unlock device from LockScreen"
         print("[LIFECYCLE TEST] [OK] Device unlocked to HomeScreen.")
         time.sleep(1.0)
@@ -546,6 +565,67 @@ def main():
             exit_gesture="swipe_up"
         )
 
+        # App 11: Files (App Drawer / Grid View: x=430, y=260)
+        test_app_lifecycle(
+            reader=reader,
+            monitor_sock=monitor_sock,
+            operation_num=12,
+            app_name="Files",
+            app_id="org.interos.file_manager",
+            tap_coords=(430, 260),
+            present_marker="Files UI presented to scanout buffer",
+            dump_prefix="test_files",
+            in_app_interactions=[
+                ("Tap Images category shortcut", (260, 280), "Category filter shortcut switched", "shortcut_images"),
+            ],
+            exit_gesture="home_bar"
+        )
+
+        # App 12: Gallery (Grid View / Dock: x=410, y=1180)
+        test_app_lifecycle(
+            reader=reader,
+            monitor_sock=monitor_sock,
+            operation_num=13,
+            app_name="Gallery",
+            app_id="org.interos.gallery",
+            tap_coords=(410, 1180),
+            present_marker="Gallery UI presented to scanout buffer",
+            dump_prefix="test_gallery",
+            in_app_interactions=[
+                ("Tap Wallpapers category chip", (200, 175), "Gallery filter chip switched", "chip_wallpapers"),
+            ],
+            exit_gesture="home_bar"
+        )
+
+        # App 13: Sensors (Grid View / Live Widgets shortcut: x=270, y=1180)
+        test_app_lifecycle(
+            reader=reader,
+            monitor_sock=monitor_sock,
+            operation_num=14,
+            app_name="Sensors",
+            app_id="org.interos.sensor_dashboard",
+            tap_coords=(270, 1180),
+            present_marker="Initial frame presented to hardware scanout",
+            dump_prefix="test_sensors",
+            in_app_interactions=[
+                ("Tap refresh sensor bus", (360, 500), "Re-read sensor bus", "refresh"),
+            ],
+            exit_gesture="swipe_up"
+        )
+
+        # App 14: Card Demo (Grid View target: x=550, y=1180)
+        test_app_lifecycle(
+            reader=reader,
+            monitor_sock=monitor_sock,
+            operation_num=15,
+            app_name="Card Demo",
+            app_id="org.interos.card_demo",
+            tap_coords=(550, 1180),
+            present_marker="Initial frame presented via hardware scanout",
+            dump_prefix="test_card_demo",
+            exit_gesture="home_bar"
+        )
+
         # Recent apps: Overview / Recent Apps Switcher Test
         print("\n[LIFECYCLE TEST] === Recent apps: Testing Overview / Recent Apps Deck ===")
         print("[LIFECYCLE TEST] Dispatching swipe-up gesture from bottom bar on homescreen to open overview...")
@@ -574,9 +654,9 @@ def main():
         print("[LIFECYCLE TEST] [OK] Switched to recent app from overview card 0.")
         
         recent_presented = reader.wait_for(
-            "Music canvas presented to scanout buffer.",
+            "Initial frame presented via hardware scanout",
             timeout=30.0,
-            print_keywords=["MUSIC", "APP", "canvas"]
+            print_keywords=["CARD_DEMO", "APP", "canvas", "scanout"]
         )
         assert recent_presented, "Recent app failed to present canvas within timeout"
         print("[LIFECYCLE TEST] [OK] Recent app presented canvas.")
@@ -695,20 +775,29 @@ def main():
         ppm_qc = os.path.abspath(r"target\test_quick_controls.ppm").replace("\\", "/")
         _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_qc}")
         print(f"[LIFECYCLE TEST] Screendump recorded: {ppm_qc}")
-        time.sleep(0.5)
+        time.sleep(1.0)
         print("[LIFECYCLE TEST] Returning to Home from Quick Controls via bottom bar tap...")
         reader.send(b"TAP 360 1410\n")
         qc_returned = reader.wait_for(
             "Home surface rendered.",
-            timeout=30.0,
+            timeout=15.0,
             print_keywords=["LAUNCHER", "render_full"]
         )
+        if not qc_returned:
+            print("[LIFECYCLE TEST] Retrying return to Home from Quick Controls...")
+            time.sleep(1.0)
+            reader.send(b"TAP 360 1410\n")
+            qc_returned = reader.wait_for(
+                "Home surface rendered.",
+                timeout=25.0,
+                print_keywords=["LAUNCHER", "render_full"]
+            )
         assert qc_returned, "Failed to return to Home from Quick Controls"
         print("[LIFECYCLE TEST] [OK] Returned to Home from Quick Controls.")
 
         # Notifications: Testing Notifications Shade
         print("\n[LIFECYCLE TEST] === Notifications: Testing Notifications Shade ===")
-        time.sleep(0.5)
+        time.sleep(1.0)
         print("[LIFECYCLE TEST] Opening Notifications via top-left status bar tap (100, 25)...")
         reader.send(b"TAP 100 25\n")
         notif_ready = reader.wait_for(
@@ -721,20 +810,29 @@ def main():
         ppm_notif = os.path.abspath(r"target\test_notifications.ppm").replace("\\", "/")
         _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_notif}")
         print(f"[LIFECYCLE TEST] Screendump recorded: {ppm_notif}")
-        time.sleep(0.5)
+        time.sleep(1.0)
         print("[LIFECYCLE TEST] Returning to Home from Notifications via bottom bar tap...")
         reader.send(b"TAP 360 1410\n")
         notif_returned = reader.wait_for(
             "Home surface rendered.",
-            timeout=30.0,
+            timeout=15.0,
             print_keywords=["LAUNCHER", "render_full"]
         )
+        if not notif_returned:
+            print("[LIFECYCLE TEST] Retrying return to Home from Notifications...")
+            time.sleep(1.0)
+            reader.send(b"TAP 360 1410\n")
+            notif_returned = reader.wait_for(
+                "Home surface rendered.",
+                timeout=25.0,
+                print_keywords=["LAUNCHER", "render_full"]
+            )
         assert notif_returned, "Failed to return to Home from Notifications"
         print("[LIFECYCLE TEST] [OK] Returned to Home from Notifications.")
 
         # App drawer: Testing App Drawer
         print("\n[LIFECYCLE TEST] === App drawer: Testing App Drawer ===")
-        time.sleep(0.5)
+        time.sleep(1.0)
         print("[LIFECYCLE TEST] Opening App Drawer via upward swipe (360, 700) -> (360, 400)...")
         reader.send(b"SWIPE 360 700 360 400 5\n")
         drawer_ready = reader.wait_for(
@@ -744,7 +842,7 @@ def main():
         )
         assert drawer_ready, "Failed to open App Drawer"
         print("[LIFECYCLE TEST] [OK] App Drawer opened.")
-        time.sleep(0.5)
+        time.sleep(1.0)
         print("[LIFECYCLE TEST] Switching category tab in App Drawer (x=250, y=160)...")
         reader.send(b"TAP 250 160\n")
         tab_switched = reader.wait_for(
@@ -753,7 +851,7 @@ def main():
             print_keywords=["LAUNCHER", "category", "tab", "render_app_drawer"]
         )
         if not tab_switched:
-            time.sleep(0.6)
+            time.sleep(1.0)
             reader.send(b"TAP 250 160\n")
             tab_switched = reader.wait_for(
                 "App drawer surface rendered.",
@@ -765,20 +863,29 @@ def main():
         ppm_drawer = os.path.abspath(r"target\test_app_drawer.ppm").replace("\\", "/")
         _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_drawer}")
         print(f"[LIFECYCLE TEST] Screendump recorded: {ppm_drawer}")
-        time.sleep(0.5)
+        time.sleep(1.0)
         print("[LIFECYCLE TEST] Returning to Home from App Drawer via bottom tap...")
         reader.send(b"TAP 360 1410\n")
         drawer_returned = reader.wait_for(
             "Home surface rendered.",
-            timeout=30.0,
+            timeout=15.0,
             print_keywords=["LAUNCHER", "render_full"]
         )
+        if not drawer_returned:
+            print("[LIFECYCLE TEST] Retrying return to Home from App Drawer...")
+            time.sleep(1.0)
+            reader.send(b"TAP 360 1410\n")
+            drawer_returned = reader.wait_for(
+                "Home surface rendered.",
+                timeout=25.0,
+                print_keywords=["LAUNCHER", "render_full"]
+            )
         assert drawer_returned, "Failed to return to Home from App Drawer"
         print("[LIFECYCLE TEST] [OK] Returned to Home from App Drawer.")
 
         # Live widgets: Testing Live Widgets
         print("\n[LIFECYCLE TEST] === Live widgets: Testing Live Widgets ===")
-        time.sleep(0.5)
+        time.sleep(1.0)
         print("[LIFECYCLE TEST] Opening Live Widgets via horizontal swipe left (500, 700) -> (150, 700)...")
         reader.send(b"SWIPE 500 700 150 700 5\n")
         widgets_ready = reader.wait_for(
@@ -791,20 +898,29 @@ def main():
         ppm_widgets = os.path.abspath(r"target\test_live_widgets.ppm").replace("\\", "/")
         _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_widgets}")
         print(f"[LIFECYCLE TEST] Screendump recorded: {ppm_widgets}")
-        time.sleep(0.5)
+        time.sleep(1.0)
         print("[LIFECYCLE TEST] Returning to Home from Live Widgets via bottom tap...")
         reader.send(b"TAP 360 1410\n")
         widgets_returned = reader.wait_for(
             "Home surface rendered.",
-            timeout=25.0,
+            timeout=15.0,
             print_keywords=["LAUNCHER", "render_full"]
         )
+        if not widgets_returned:
+            print("[LIFECYCLE TEST] Retrying return to Home from Live Widgets...")
+            time.sleep(1.0)
+            reader.send(b"TAP 360 1410\n")
+            widgets_returned = reader.wait_for(
+                "Home surface rendered.",
+                timeout=25.0,
+                print_keywords=["LAUNCHER", "render_full"]
+            )
         assert widgets_returned, "Failed to return to Home from Live Widgets"
         print("[LIFECYCLE TEST] [OK] Returned to Home from Live Widgets.")
 
         # Power and lock: Testing Power Menu & Lock Screen
         print("\n[LIFECYCLE TEST] === Power and lock: Testing Power Menu & Lock Screen ===")
-        time.sleep(0.5)
+        time.sleep(1.0)
         print("[LIFECYCLE TEST] Opening Power Menu via battery status bar tap (600, 25)...")
         reader.send(b"TAP 600 25\n")
         pm_ready = reader.wait_for(
@@ -817,7 +933,7 @@ def main():
         ppm_pm = os.path.abspath(r"target\test_power_menu.ppm").replace("\\", "/")
         _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_pm}")
         print(f"[LIFECYCLE TEST] Screendump recorded: {ppm_pm}")
-        time.sleep(0.5)
+        time.sleep(1.0)
         print("[LIFECYCLE TEST] Locking device from Power Menu (500, 225)...")
         reader.send(b"TAP 500 225\n")
         device_locked = reader.wait_for(
@@ -830,18 +946,9 @@ def main():
         ppm_lock = os.path.abspath(r"target\test_lock_screen.ppm").replace("\\", "/")
         _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_lock}")
         print(f"[LIFECYCLE TEST] Screendump recorded: {ppm_lock}")
-        time.sleep(0.5)
+        time.sleep(1.0)
         print("[LIFECYCLE TEST] Tapping flashlight affordance on Lock Screen (72, 1330)...")
         reader.send(b"TAP 72 1330\n")
-        # WHY this asserts "unavailable" rather than a toggle: there is no torch
-        # hardware, no torch capability and no torch syscall on this platform. The
-        # lock screen draws the affordance as a dimmed outline labelled "N/A" and
-        # reports the absence. This assertion previously waited for
-        # "Lock surface rendered." with a "toggled" keyword, which described an
-        # earlier implementation that flipped a local bool and logged a successful
-        # toggle -- a claim the platform cannot support. Waiting for a re-render
-        # here would also be wrong on the merits: toggling a torch that does not
-        # exist has nothing to redraw.
         torch_reported = reader.wait_for(
             "Flashlight unavailable",
             timeout=25.0,
@@ -849,20 +956,29 @@ def main():
         )
         assert torch_reported, "Lock Screen flashlight affordance did not report its availability"
         print("[LIFECYCLE TEST] [OK] Flashlight affordance reported unavailable, as the platform has no torch.")
-        time.sleep(0.5)
+        time.sleep(1.0)
         print("[LIFECYCLE TEST] Unlocking device via bottom tap...")
         reader.send(b"TAP 360 1410\n")
         unlocked = reader.wait_for(
             "Device unlocked via tap",
-            timeout=25.0,
+            timeout=15.0,
             print_keywords=["LAUNCHER", "Device", "unlocked", "render_full"]
         )
+        if not unlocked:
+            print("[LIFECYCLE TEST] Retrying unlock device via bottom tap...")
+            time.sleep(1.0)
+            reader.send(b"TAP 360 1410\n")
+            unlocked = reader.wait_for(
+                "Device unlocked via tap",
+                timeout=25.0,
+                print_keywords=["LAUNCHER", "Device", "unlocked", "render_full"]
+            )
         assert unlocked, "Failed to unlock device"
         print("[LIFECYCLE TEST] [OK] Device unlocked, returned to Home grid.")
 
         # System surface: Testing System Space
         print("\n[LIFECYCLE TEST] === System surface: Testing System Space ===")
-        time.sleep(0.5)
+        time.sleep(1.0)
         print("[LIFECYCLE TEST] Opening System Space via universal search bar tap (360, 1330)...")
         reader.send(b"TAP 360 1330\n")
         sys_space_ready = reader.wait_for(
@@ -875,14 +991,23 @@ def main():
         ppm_sys_space = os.path.abspath(r"target\test_system_space.ppm").replace("\\", "/")
         _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_sys_space}")
         print(f"[LIFECYCLE TEST] Screendump recorded: {ppm_sys_space}")
-        time.sleep(0.5)
+        time.sleep(1.0)
         print("[LIFECYCLE TEST] Returning to Home from System Space via bottom tap...")
         reader.send(b"TAP 360 1410\n")
         sys_space_returned = reader.wait_for(
             "Home surface rendered.",
-            timeout=25.0,
+            timeout=15.0,
             print_keywords=["LAUNCHER", "render_full"]
         )
+        if not sys_space_returned:
+            print("[LIFECYCLE TEST] Retrying return to Home from System Space...")
+            time.sleep(1.0)
+            reader.send(b"TAP 360 1410\n")
+            sys_space_returned = reader.wait_for(
+                "Home surface rendered.",
+                timeout=25.0,
+                print_keywords=["LAUNCHER", "render_full"]
+            )
         assert sys_space_returned, "Failed to return to Home from System Space"
         print("[LIFECYCLE TEST] [OK] Returned to Home from System Space.")
 

@@ -1523,8 +1523,10 @@ fn get_calendar_pixel(
         // room the band has for it. The longest title, "NO DAY SELECTED",
         // measures 362px on the bitmap face at scale 2 and 349px on the outline
         // face, so both fit.
-        if let Some(c) = test_text(x, y, 28, 480, 2, section_title, 550 - 28, TEXT_MUTED) {
-            return c;
+        if y >= 480 && y < 480 + std::design::font::line_height(2) {
+            if let Some(c) = test_text(x, y, 28, 480, 2, section_title, 550 - 28, TEXT_MUTED) {
+                return c;
+            }
         }
 
         // Event Count Pill at x: 550..696, y: 492..522
@@ -1636,72 +1638,80 @@ fn get_calendar_pixel(
                 } else {
                     b"No Events On This Day"
                 };
-                if let Some(c) = test_text(
-                    x,
-                    y,
-                    centered_x(headline, 2, 24, 672),
-                    706,
-                    2,
-                    headline,
-                    // WHY 672 is the column: it is the empty-state card's inner
-                    // width (24..696), the box the headline is centred in. The
-                    // longer of the two headlines, "No Events On This Day",
-                    // measures 430px on the bitmap face at scale 2 and 413px on
-                    // the outline face, so both fit.
-                    672,
-                    TEXT_PRIMARY,
-                ) {
-                    return c;
+                let headline_h = std::design::font::line_height(2);
+                if y >= 706 && y < 706 + headline_h {
+                    let hx = centered_x(headline, 2, 24, 672);
+                    if let Some(c) = test_text(
+                        x,
+                        y,
+                        hx,
+                        706,
+                        2,
+                        headline,
+                        // WHY 672 is the column: it is the empty-state card's inner
+                        // width (24..696), the box the headline is centred in. The
+                        // longer of the two headlines, "No Events On This Day",
+                        // measures 430px on the bitmap face at scale 2 and 413px on
+                        // the outline face, so both fit.
+                        672,
+                        TEXT_PRIMARY,
+                    ) {
+                        return c;
+                    }
                 }
                 // Detail line: what is empty, and why. Every branch names a
                 // reason the app actually observed; none of them claims data
                 // that was never read.
-                let mut detail = [0u8; 40];
-                let detail_str: &[u8] =
-                    if matches!(app.store.state, StoreState::ReadRefused | StoreState::Invalid) {
-                        // WHY this comes first: if storage could not be read, the
-                        // calendar has nothing to show and the absence is a
-                        // storage fact, not an empty agenda.
-                        b"STORAGE UNREADABLE: NO EVENTS LOADED"
-                    } else if !app.date_known {
-                        b"RTC date unavailable"
-                    } else if let Some(day) = app.selected_day {
-                        let mut n = 0usize;
-                        let lead = b"NO EVENTS ON ";
-                        detail[..lead.len()].copy_from_slice(lead);
-                        n += lead.len();
-                        n += fmt_date(
-                            &mut detail[n..],
-                            app.current_year as u16,
-                            app.current_month,
-                            day,
-                        );
-                        &detail[..n]
-                    } else if app.store.len() == 0 {
-                        b"NO EVENT SAVED YET"
-                    } else {
-                        b"NO DAY SELECTED"
-                    };
-                if let Some(c) = test_text(
-                    x,
-                    y,
-                    // WHY the measured column: the detail line sits under a
-                    // headline that is centred in the card, so it must be centred
-                    // in the same card or the two lines disagree about the middle.
-                    // It was drawn from a literal `236`, which put it 25px left of
-                    // the headline's centre (capture: headline centre 354.7,
-                    // detail centre 303.3) and read as ragged.
-                    centered_x(detail_str, 1, 24, 672),
-                    760,
-                    1,
-                    detail_str,
-                    // WHY 672 is the column: it is the empty-state card's inner
-                    // width (24..696), the same box the headline above it is
-                    // centred in.
-                    672,
-                    TEXT_MUTED,
-                ) {
-                    return c;
+                let detail_h = std::design::font::line_height(1);
+                if y >= 760 && y < 760 + detail_h {
+                    let mut detail = [0u8; 40];
+                    let detail_str: &[u8] =
+                        if matches!(app.store.state, StoreState::ReadRefused | StoreState::Invalid) {
+                            // WHY this comes first: if storage could not be read, the
+                            // calendar has nothing to show and the absence is a
+                            // storage fact, not an empty agenda.
+                            b"STORAGE UNREADABLE: NO EVENTS LOADED"
+                        } else if !app.date_known {
+                            b"RTC date unavailable"
+                        } else if let Some(day) = app.selected_day {
+                            let mut n = 0usize;
+                            let lead = b"NO EVENTS ON ";
+                            detail[..lead.len()].copy_from_slice(lead);
+                            n += lead.len();
+                            n += fmt_date(
+                                &mut detail[n..],
+                                app.current_year as u16,
+                                app.current_month,
+                                day,
+                            );
+                            &detail[..n]
+                        } else if app.store.len() == 0 {
+                            b"NO EVENT SAVED YET"
+                        } else {
+                            b"NO DAY SELECTED"
+                        };
+                    let dx = centered_x(detail_str, 1, 24, 672);
+                    if let Some(c) = test_text(
+                        x,
+                        y,
+                        // WHY the measured column: the detail line sits under a
+                        // headline that is centred in the card, so it must be centred
+                        // in the same card or the two lines disagree about the middle.
+                        // It was drawn from a literal `236`, which put it 25px left of
+                        // the headline's centre (capture: headline centre 354.7,
+                        // detail centre 303.3) and read as ragged.
+                        dx,
+                        760,
+                        1,
+                        detail_str,
+                        // WHY 672 is the column: it is the empty-state card's inner
+                        // width (24..696), the same box the headline above it is
+                        // centred in.
+                        672,
+                        TEXT_MUTED,
+                    ) {
+                        return c;
+                    }
                 }
 
                 // Action button: "+ New Event" on its own rect, sized from the
@@ -1784,18 +1794,25 @@ fn get_calendar_pixel(
                 // date, every one of them read back out of the record.
                 let card_y = 546 + card_idx * 130;
                 let item = &agenda.items[card_idx];
-                if let Some(c) = test_text(x, y, 44, card_y + 12, 1, item.title_bytes(), 696 - 44, TEXT_PRIMARY) {
-                    return c;
+                let line_h1 = std::design::font::line_height(1);
+                if y >= card_y + 12 && y < card_y + 12 + line_h1 {
+                    if let Some(c) = test_text(x, y, 44, card_y + 12, 1, item.title_bytes(), 696 - 44, TEXT_PRIMARY) {
+                        return c;
+                    }
                 }
-                let mut time_buf = [0u8; 5];
-                let time_n = fmt_time(&mut time_buf, item.hour, item.minute);
-                if let Some(c) = test_text(x, y, 44, card_y + 44, 1, &time_buf[..time_n], 696 - 44, ACCENT_SKY) {
-                    return c;
+                if y >= card_y + 44 && y < card_y + 44 + line_h1 {
+                    let mut time_buf = [0u8; 5];
+                    let time_n = fmt_time(&mut time_buf, item.hour, item.minute);
+                    if let Some(c) = test_text(x, y, 44, card_y + 44, 1, &time_buf[..time_n], 696 - 44, ACCENT_SKY) {
+                        return c;
+                    }
                 }
-                let mut date_buf = [0u8; 12];
-                let date_n = fmt_date(&mut date_buf, item.year, item.month, item.day);
-                if let Some(c) = test_text(x, y, 44, card_y + 76, 1, &date_buf[..date_n], 696 - 44, TEXT_MUTED) {
-                    return c;
+                if y >= card_y + 76 && y < card_y + 76 + line_h1 {
+                    let mut date_buf = [0u8; 12];
+                    let date_n = fmt_date(&mut date_buf, item.year, item.month, item.day);
+                    if let Some(c) = test_text(x, y, 44, card_y + 76, 1, &date_buf[..date_n], 696 - 44, TEXT_MUTED) {
+                        return c;
+                    }
                 }
 
                 if rx < 2 || ry < 2 {

@@ -1527,6 +1527,7 @@ pub extern "C" fn _start() -> ! {
                         app.inv_wifi = read_inventory("wifi");
                         app.inv_cellular = read_inventory("cellular");
                         status(&mut app, b"re-read sensor bus, thermal zones and fuel gauge", ACCENT);
+                        std::log(0, "[SENSORS] Re-read sensor bus, thermal zones and fuel gauge.").ok();
                         dirty = dirty.widen(Dirty::Refresh);
                     }
                 }
