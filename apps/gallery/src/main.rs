@@ -77,6 +77,11 @@ const INVERSE: u32 = color::SURFACE;
 /// `fs_list` does.
 const FS_READ_CAP_SLOT: usize = 4;
 
+#[inline]
+fn fs_read_slot() -> usize {
+    std::cap_lookup(std::cap_type::FILE_SYSTEM_READ, 0).unwrap_or(FS_READ_CAP_SLOT)
+}
+
 // -----------------------------------------------------------------------------
 // Layout constants - single source of truth for rendering *and* hit-testing
 // -----------------------------------------------------------------------------
@@ -571,7 +576,7 @@ fn probe_media_path(path: &str, scan: &mut MediaScan, out: &mut [u8; 4096]) {
     let mut line = [0u8; 256];
     let mut n = append(&mut line, 0, b"[GALLERY] media scan '");
     n = append(&mut line, n, path.as_bytes());
-    match std::fs_list(FS_READ_CAP_SLOT, path, out) {
+    match std::fs_list(fs_read_slot(), path, out) {
         Ok(bytes) => {
             scan.listed += 1;
             let (entries, images) = count_listing(&out[..bytes]);
@@ -696,7 +701,7 @@ fn build_catalogue_note(buf: &mut [u8; 72]) -> usize {
 /// reported as "not chosen" rather than defaulted silently.
 fn stored_scene_key(key: &str) -> Option<&'static walls::Scene> {
     let mut buf = [0u8; 16];
-    match std::settings_get(FS_READ_CAP_SLOT, key, &mut buf) {
+    match std::settings_get(fs_read_slot(), key, &mut buf) {
         Ok(n) if n > 0 && n <= buf.len() => {
             let raw = &buf[..n];
             let start = raw.iter().position(|b| !b.is_ascii_whitespace())?;

@@ -45,6 +45,11 @@ const CHUNK: usize = 4096;
 /// the listing never did.
 const FS_READ_CAP_SLOT: usize = 4;
 
+#[inline]
+fn fs_read_slot() -> usize {
+    std::cap_lookup(std::cap_type::FILE_SYSTEM_READ, 0).unwrap_or(FS_READ_CAP_SLOT)
+}
+
 // -----------------------------------------------------------------------------
 // 32-bit ARGB8888 Design Color Tokens (Screen 11 Light Theme)
 // -----------------------------------------------------------------------------
@@ -831,7 +836,7 @@ pub extern "C" fn _start() -> ! {
     // actually been entitled to receive. The result is recorded on screen too,
     // so the header says what this app can actually see of the filesystem.
     let mut entries = [0u8; 1024];
-    let probe = std::fs_list(FS_READ_CAP_SLOT, app.current_path, &mut entries);
+    let probe = std::fs_list(fs_read_slot(), app.current_path, &mut entries);
     app.record_probe(probe);
     match probe {
         Ok(n) => {
