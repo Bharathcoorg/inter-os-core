@@ -96,6 +96,61 @@ impl WallpaperTarget {
     }
 }
 
+/// System color themes backed by the settings store (`ui.theme`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThemeMode {
+    Default = 0,
+    Light = 1,
+    Dark = 2,
+    HighContrast = 3,
+}
+
+impl ThemeMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            ThemeMode::Default => "interos-default",
+            ThemeMode::Light => "interos-light",
+            ThemeMode::Dark => "interos-dark",
+            ThemeMode::HighContrast => "interos-high-contrast",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<ThemeMode> {
+        match s {
+            "interos-default" => Some(ThemeMode::Default),
+            "interos-light" => Some(ThemeMode::Light),
+            "interos-dark" => Some(ThemeMode::Dark),
+            "interos-high-contrast" => Some(ThemeMode::HighContrast),
+            _ => None,
+        }
+    }
+}
+
+/// Bounded display brightness percent (10%..100%).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DisplayBrightness(u8);
+
+impl DisplayBrightness {
+    pub const MIN: u8 = 10;
+    pub const MAX: u8 = 100;
+    pub const DEFAULT: u8 = 75;
+
+    pub const fn new(percent: u8) -> Self {
+        let clamped = if percent < Self::MIN {
+            Self::MIN
+        } else if percent > Self::MAX {
+            Self::MAX
+        } else {
+            percent
+        };
+        Self(clamped)
+    }
+
+    pub const fn percent(self) -> u8 {
+        self.0
+    }
+}
+
 /// Bounded PIN buffer helper with zero heap allocations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PinBuffer {
@@ -259,6 +314,22 @@ mod tests {
         assert_eq!(WallpaperTarget::from_index(1), WallpaperTarget::Lock);
         assert_eq!(WallpaperTarget::from_index(2), WallpaperTarget::Both);
         assert_eq!(WallpaperTarget::Home.label(), b"Home");
+    }
+
+    #[test]
+    fn test_theme_mode() {
+        assert_eq!(ThemeMode::Default.as_str(), "interos-default");
+        assert_eq!(ThemeMode::Dark.as_str(), "interos-dark");
+        assert_eq!(ThemeMode::from_str("interos-default"), Some(ThemeMode::Default));
+        assert_eq!(ThemeMode::from_str("interos-dark"), Some(ThemeMode::Dark));
+        assert_eq!(ThemeMode::from_str("unknown"), None);
+    }
+
+    #[test]
+    fn test_display_brightness_clamping() {
+        assert_eq!(DisplayBrightness::new(0).percent(), 10);
+        assert_eq!(DisplayBrightness::new(75).percent(), 75);
+        assert_eq!(DisplayBrightness::new(120).percent(), 100);
     }
 
     #[test]
