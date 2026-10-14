@@ -36,7 +36,7 @@ These rules govern all engineering work on `inter-os-core`. Every autonomous age
 No commit may be pushed to `origin/master` without passing:
 1. `python tests/run_all_contracts.py` (all 317 contract test cases must pass).
 2. `cargo test --manifest-path kernel/Cargo.toml` (all 234 kernel unit tests must pass).
-3. `cargo test --workspace` (all 190 userspace tests across `interos-std`, `launcher`, and all 15 applications pass).
+3. `cargo test --workspace` (all 195 userspace tests across `interos-std`, `launcher`, and all 15 applications pass).
 4. `cargo check --workspace` (all 19 workspace crates compile cleanly with zero warnings).
 5. Multi-architecture QEMU suites: `tests/test_aarch64.ps1` and `tests/test_riscv64.ps1` exit 0.
 
