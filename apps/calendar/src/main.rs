@@ -764,7 +764,12 @@ impl CalendarApp {
         agenda_sector[..copy_len].copy_from_slice(&event_name.as_bytes()[..copy_len]);
         let mut iv = [0u8; 16];
         if std::get_random(&mut iv).is_err() {
-            iv.copy_from_slice(b"INTEROS_CAL_EVT_");
+            std::log(
+                0,
+                "[CALENDAR APP] Refusing to encrypt agenda event without cryptographic TRNG entropy.",
+            )
+            .ok();
+            return false;
         }
         // WHY: report the vault outcome. The old code stayed silent on refusal,
         // leaving the event looking scheduled when nothing was stored.

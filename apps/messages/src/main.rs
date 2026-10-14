@@ -219,7 +219,12 @@ impl MessagesApp {
         sector_buf[..copy_len].copy_from_slice(&body[..copy_len]);
         let mut iv = [0u8; 16];
         if std::get_random(&mut iv).is_err() {
-            iv.copy_from_slice(b"INTEROS_SEC_MSG_");
+            std::log(
+                0,
+                "[MESSAGES APP] Refusing to seal message without cryptographic TRNG entropy.",
+            )
+            .ok();
+            return false;
         }
         let badge = crate::gsm::inspect_message_heuristics(body);
         if badge != crate::gsm::SecurityBadge::VerifiedSafe {

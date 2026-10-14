@@ -343,7 +343,12 @@ impl CameraApp {
 
         let mut iv = [0u8; 16];
         if std::get_random(&mut iv).is_err() {
-            iv.copy_from_slice(b"INTEROS_CAM_IMG_");
+            std::log(
+                0,
+                "[CAMERA APP] Refusing to encrypt frame without cryptographic TRNG entropy.",
+            )
+            .ok();
+            return Err(-1);
         }
         std::vault_encrypt_sector(self.current_sector, &mut container, &iv)?;
 
