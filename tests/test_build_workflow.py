@@ -166,6 +166,167 @@ Set-Location '{ROOT_DIR}'
             if os.path.exists(bios_path):
                 os.remove(bios_path)
 
+    @staticmethod
+    def _synthetic_kernel(payload_len=4096, marker=0x42):
+        """Builds a minimal but structurally valid 64-bit x86_64 ET_DYN ELF.
+
+        One PT_LOAD segment covers the whole file, which is the shape
+        `Get-ElfLoadSegmentGeometry` and `Test-BiosImageEmbedsKernel` read.
+        Built here rather than reusing a build artifact so this test needs no
+        cargo build and no prebuilt image on disk.
+        """
+        import struct
+
+        payload = bytearray([marker]) * payload_len
+        # Pad the file so e_phoff(0x40) + phnum*phentsize leaves room for payload.
+        header_size = 0x40 + 56
+        total = header_size + len(payload)
+        blob = bytearray(b"\x00" * total)
+
+        blob[0:4] = b"\x7fELF"
+        blob[4] = 2          # EI_CLASS: 64-bit
+        blob[5] = 1          # EI_DATA: little-endian
+        blob[6] = 1          # EI_VERSION
+        struct.pack_into("<H", blob, 16, 3)       # e_type = ET_DYN
+        struct.pack_into("<H", blob, 18, 0x3E)    # e_machine = x86_64
+        struct.pack_into("<I", blob, 20, 1)       # e_version
+        struct.pack_into("<Q", blob, 32, 0x40)    # e_phoff
+        struct.pack_into("<H", blob, 52, 64)      # e_ehsize
+        struct.pack_into("<H", blob, 54, 56)      # e_phentsize
+        struct.pack_into("<H", blob, 56, 1)       # e_phnum
+
+        ph = 0x40
+        struct.pack_into("<I", blob, ph + 0, 1)          # PT_LOAD
+        struct.pack_into("<Q", blob, ph + 8, 0)           # p_offset
+        struct.pack_into("<Q", blob, ph + 16, 0x100000)   # p_vaddr
+        struct.pack_into("<Q", blob, ph + 24, 0x100000)   # p_paddr
+        struct.pack_into("<Q", blob, ph + 32, total)      # p_filesz
+        struct.pack_into("<Q", blob, ph + 40, total)      # p_memsz
+        struct.pack_into("<Q", blob, ph + 48, 0x1000)     # p_align
+
+        blob[header_size:total] = payload
+        return bytes(blob)
+
+    @classmethod
+    def _synthetic_image(cls, kernel_bytes, kernel_offset=1536, filler=0x11):
+        """Builds a BIOS-shaped raw image with a kernel ELF at a sector offset."""
+        mbr = bytearray(512)
+        mbr[510] = 0x55
+        mbr[511] = 0xAA
+        assert kernel_offset % 512 == 0, "the bootloader writes the payload sector aligned"
+        image = bytearray(filler * max(kernel_offset + len(kernel_bytes) + 512, 4096))
+        image[0:512] = mbr
+        image[kernel_offset:kernel_offset + len(kernel_bytes)] = kernel_bytes
+        return bytes(image)
+
+    def test_bios_image_must_embed_the_intended_kernel(self):
+        """Proves the content check accepts an image holding the intended kernel."""
+        kernel = self._synthetic_kernel()
+        image = self._synthetic_image(kernel)
+        with tempfile.NamedTemporaryFile("wb", prefix="embed_ok_", delete=False) as kf:
+            kf.write(kernel)
+            kernel_path = kf.name
+        with tempfile.NamedTemporaryFile("wb", prefix="embed_img_", delete=False) as bf:
+            bf.write(image)
+            bios_path = bf.name
+        try:
+            ps = f"Verify-BiosImageArtifact -ImagePath '{bios_path}' -KernelBinaryPath '{kernel_path}'"
+            r = self.run_ps(ps)
+            self.assertEqual(r.returncode, 0, f"expected acceptance: {r.stderr}\n{r.stdout}")
+            self.assertIn("embeds the intended kernel", r.stdout)
+        finally:
+            for p in (kernel_path, bios_path):
+                if os.path.exists(p):
+                    os.remove(p)
+
+    def test_bios_image_rejects_a_substituted_kernel_of_the_same_size(self):
+        """A same-size, same-architecture, newer-timestamped different kernel must be rejected.
+
+        This is the case the size and modification-time proxies cannot catch: the
+        substitute kernel has identical geometry and the image is larger and
+        newer, so only comparing the embedded loadable bytes rejects it.
+        """
+        kernel = self._synthetic_kernel(marker=0x42)
+        image = self._synthetic_image(kernel)
+
+        # Same total length, same architecture, same program header geometry;
+        # only the payload bytes differ, well past the header and phdr table.
+        substitute = bytearray(kernel)
+        substitute[0x200] ^= 0xFF
+        self.assertEqual(len(substitute), len(kernel))
+        self.assertNotEqual(bytes(substitute), kernel)
+
+        with tempfile.NamedTemporaryFile("wb", prefix="subs_kernel_", delete=False) as kf:
+            kf.write(bytes(substitute))
+            kernel_path = kf.name
+        with tempfile.NamedTemporaryFile("wb", prefix="subs_img_", delete=False) as bf:
+            bf.write(image)
+            bios_path = bf.name
+        try:
+            # Prove the proxies would have been satisfied, so the rejection below
+            # is attributable to the content check alone.
+            self.assertGreater(len(image), len(substitute), "image must be larger than the kernel")
+            newer = time.time() - 60
+            os.utime(kernel_path, (newer, newer))
+            self.assertGreaterEqual(os.path.getmtime(bios_path), os.path.getmtime(kernel_path))
+
+            ps = f"Verify-BiosImageArtifact -ImagePath '{bios_path}' -KernelBinaryPath '{kernel_path}'"
+            r = self.run_ps(ps)
+            self.assertNotEqual(r.returncode, 0, "a substituted kernel must be rejected")
+            self.assertIn("no sector-aligned ELF", r.stderr)
+            self.assertIn("different kernel", r.stderr)
+        finally:
+            for p in (kernel_path, bios_path):
+                if os.path.exists(p):
+                    os.remove(p)
+
+    def test_bios_image_rejects_an_image_with_no_kernel_payload(self):
+        """An image that is larger and newer but holds no ELF payload must be rejected."""
+        with tempfile.NamedTemporaryFile("wb", prefix="noelf_img_", delete=False) as bf:
+            sector = bytearray(16384)
+            sector[510] = 0x55
+            sector[511] = 0xAA
+            bf.write(bytes(sector))
+            bios_path = bf.name
+        kernel = self._synthetic_kernel()
+        with tempfile.NamedTemporaryFile("wb", prefix="noelf_kbin_", delete=False) as kf:
+            kf.write(kernel)
+            kernel_path = kf.name
+        try:
+            # Make the image unambiguously newer so the cheap staleness guard
+            # passes and the content check is what has to reject this.
+            os.utime(kernel_path, (time.time() - 60, time.time() - 60))
+            ps = f"Verify-BiosImageArtifact -ImagePath '{bios_path}' -KernelBinaryPath '{kernel_path}'"
+            r = self.run_ps(ps)
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn("no sector-aligned ELF", r.stderr)
+        finally:
+            for p in (kernel_path, bios_path):
+                if os.path.exists(p):
+                    os.remove(p)
+
+    def test_bios_image_content_check_rejects_a_non_elf_kernel_reference(self):
+        """A reference that is not a 64-bit little-endian ELF must fail closed."""
+        with tempfile.NamedTemporaryFile("wb", prefix="badref_img_", delete=False) as bf:
+            sector = bytearray(8192)
+            sector[510] = 0x55
+            sector[511] = 0xAA
+            bf.write(bytes(sector))
+            bios_path = bf.name
+        with tempfile.NamedTemporaryFile("wb", prefix="badref_kbin_", delete=False) as kf:
+            kf.write(b"\x00" * 4096)
+            kernel_path = kf.name
+        try:
+            os.utime(kernel_path, (time.time() - 60, time.time() - 60))
+            ps = f"Verify-BiosImageArtifact -ImagePath '{bios_path}' -KernelBinaryPath '{kernel_path}'"
+            r = self.run_ps(ps)
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn("ELF magic", r.stderr)
+        finally:
+            for p in (kernel_path, bios_path):
+                if os.path.exists(p):
+                    os.remove(p)
+
     def test_bios_verification_rejects_stale_image(self):
         """Proves Verify-BiosImageArtifact rejects BIOS image older than its referenced kernel binary."""
         with tempfile.NamedTemporaryFile("wb", prefix="bios_stale_", delete=False) as bf:
@@ -201,11 +362,39 @@ Set-Location '{ROOT_DIR}'
         """Proves dev.ps1, qemu/build.ps1, and test_aarch64.ps1 use structured verification and not mtime comparisons."""
         for rel_path in ["dev.ps1", "qemu/build.ps1", "tests/test_aarch64.ps1"]:
             path = os.path.join(ROOT_DIR, rel_path.replace("/", os.sep))
-            with open(path, "r", encoding="utf-8") as f:
+            with open(path, "r", encoding="utf-8-sig") as f:
                 content = f.read()
             self.assertNotIn("LastWriteTimeUtc -ge $buildStartTime", content, f"{rel_path} has stale mtime check")
             self.assertNotIn(".LastWriteTime -ge (Get-Item", content, f"{rel_path} has stale mtime check")
             self.assertNotIn(".LastWriteTime -gt (Get-Item", content, f"{rel_path} has stale mtime check")
+
+        # WHY these positive assertions are here and were restored: without them
+        # the checks above only prove the old pattern is absent, which a file
+        # that had deleted its verification entirely would also satisfy.
+        with open(os.path.join(ROOT_DIR, "dev.ps1"), "r", encoding="utf-8-sig") as f:
+            dev = f.read()
+        self.assertIn("Invoke-CargoBuildArtifact", dev, "dev.ps1 must build through the structured artifact helper")
+        self.assertIn("Verify-BiosImageArtifact", dev, "dev.ps1 must verify the BIOS image")
+        self.assertIn("-KernelBinaryPath", dev, "dev.ps1 must pass the kernel binary to the BIOS image verification")
+
+        with open(os.path.join(ROOT_DIR, "qemu", "build.ps1"), "r", encoding="utf-8-sig") as f:
+            qemu_build = f.read()
+        self.assertIn("Invoke-CargoBuildArtifact", qemu_build, "qemu/build.ps1 must build through the structured artifact helper")
+        self.assertIn("Verify-BiosImageArtifact", qemu_build, "qemu/build.ps1 must verify the BIOS image")
+        for target in ("x86_64-unknown-none", "aarch64-unknown-none", "riscv64gc-unknown-none-elf"):
+            self.assertIn(target, qemu_build, f"qemu/build.ps1 must build the {target} target explicitly")
+
+        with open(os.path.join(ROOT_DIR, "tests", "test_aarch64.ps1"), "r", encoding="utf-8-sig") as f:
+            aarch64_test = f.read()
+        self.assertIn("Verify-KernelBinaryArtifact", aarch64_test, "test_aarch64.ps1 must verify the AArch64 binary")
+
+        # The BIOS check must be a content check, not a size and timestamp proxy.
+        with open(os.path.join(ROOT_DIR, "tools", "build_env.ps1"), "r", encoding="utf-8-sig") as f:
+            build_env = f.read()
+        self.assertIn("Test-BiosImageEmbedsKernel", build_env,
+                      "build_env.ps1 must verify the image embeds the intended kernel")
+        self.assertIn("Get-ElfLoadSegmentGeometry", build_env,
+                      "build_env.ps1 must locate the kernel by its ELF load extents")
 
     def test_cross_platform_path_normalization(self):
         """Proves build_env.ps1 normalizes mixed slash path representations."""

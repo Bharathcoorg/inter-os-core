@@ -207,6 +207,175 @@ function Verify-KernelBinaryArtifact {
     return $resolved
 }
 
+function Get-ElfLoadSegmentGeometry {
+    <#
+    .SYNOPSIS
+    Reads the PT_LOAD file extents an ELF declares for itself.
+
+    .DESCRIPTION
+    This mirrors the geometry walk in kernel/src/storage/boot_guard.rs: bounds
+    e_phnum, e_phentsize and the program-header table span so corrupt values
+    cannot turn the parse into a wild read. Returning the segments is what lets
+    the caller compare the bytes a bootloader actually embedded rather than
+    trusting a file size.
+    #>
+    param(
+        [Parameter(Mandatory=$true)][System.IO.FileStream]$Stream,
+        [Parameter(Mandatory=$true)][string]$Label
+    )
+
+    $header = New-Object byte[] 64
+    if ($Stream.Read($header, 0, 64) -lt 64) { throw "$Label is too short to contain a 64-byte ELF header" }
+    if ($header[0] -ne 0x7F -or $header[1] -ne 0x45 -or $header[2] -ne 0x4C -or $header[3] -ne 0x46) {
+        throw "$Label does not begin with the ELF magic"
+    }
+    if ($header[4] -ne 2) { throw "$Label is not a 64-bit ELF (EI_CLASS=$($header[4]))" }
+    if ($header[5] -ne 1) { throw "$Label is not a little-endian ELF (EI_DATA=$($header[5]))" }
+
+    $eMachine = [BitConverter]::ToUInt16($header, 18)
+    $phOff = [BitConverter]::ToUInt64($header, 32)
+    $phEntSize = [BitConverter]::ToUInt16($header, 54)
+    $phNum = [BitConverter]::ToUInt16($header, 56)
+
+    # Bounds matching kernel/src/storage/boot_guard.rs.
+    if ($phNum -lt 1 -or $phNum -gt 64) { throw "$Label declares $phNum program headers, outside the accepted range 1..64" }
+    if ($phEntSize -lt 56 -or $phEntSize -gt 512) { throw "$Label declares a $phEntSize-byte program header entry, outside the accepted range 56..512" }
+    if ($phOff -gt 0x10000) { throw "$Label places its program header table at $phOff, beyond the accepted bound" }
+
+    $entry = New-Object byte[] $phEntSize
+    $segments = @()
+    for ($i = 0; $i -lt $phNum; $i++) {
+        $offset = [int64]$phOff + [int64]$i * [int64]$phEntSize
+        if ($offset + $phEntSize -gt $Stream.Length) { throw "$Label has a program header table extending past its own end" }
+        $null = $Stream.Seek($offset, [System.IO.SeekOrigin]::Begin)
+        if ($Stream.Read($entry, 0, $phEntSize) -lt $phEntSize) { throw "$Label truncated while reading program header $i" }
+        $pType = [BitConverter]::ToUInt32($entry, 0)
+        if ($pType -ne 1) { continue }   # PT_LOAD
+        $pOffset = [BitConverter]::ToUInt64($entry, 8)
+        $pFileSize = [BitConverter]::ToUInt64($entry, 32)
+        $pMemSize = [BitConverter]::ToUInt64($entry, 40)
+        if ($pFileSize -eq 0) { continue }
+        if (($pOffset + $pFileSize) -gt [uint64]$Stream.Length) { throw "$Label declares a PT_LOAD segment that extends past its own end" }
+        $segments += [pscustomobject]@{ Offset = $pOffset; FileSize = $pFileSize; MemSize = $pMemSize }
+    }
+    if ($segments.Count -eq 0) { throw "$Label declares no PT_LOAD segment, so it has no loadable contents to embed" }
+
+    return [pscustomobject]@{ Machine = $eMachine; Segments = $segments }
+}
+
+function Get-StreamRegionSha256 {
+    <#
+    .SYNOPSIS
+    SHA-256 of a byte range of an open stream, read in bounded chunks.
+
+    .DESCRIPTION
+    Comparing digests rather than bytes keeps a multi-megabyte kernel cheap to
+    verify in PowerShell, and reading in 1 MiB chunks avoids materialising a
+    second copy of the payload. A short read is an error rather than a partial
+    hash, so a truncated region can never compare equal to anything.
+    #>
+    param(
+        [Parameter(Mandatory=$true)][System.IO.FileStream]$Stream,
+        [Parameter(Mandatory=$true)][int64]$Offset,
+        [Parameter(Mandatory=$true)][int64]$Length
+    )
+
+    if ($Length -le 0) { return "empty" }
+    $null = $Stream.Seek($Offset, [System.IO.SeekOrigin]::Begin)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    $buffer = New-Object byte[] 1048576
+    $remaining = $Length
+    while ($remaining -gt 0) {
+        $want = [int][Math]::Min([int64]$buffer.Length, $remaining)
+        $read = $Stream.Read($buffer, 0, $want)
+        if ($read -le 0) { $sha.Dispose(); throw "unexpected end of stream while hashing $Length bytes at offset $Offset" }
+        $null = $sha.TransformBlock($buffer, 0, $read, $null, 0)
+        $remaining -= $read
+    }
+    $null = $sha.TransformFinalBlock((New-Object byte[] 0), 0, 0)
+    $digest = $sha.Hash
+    $sha.Dispose()
+    return [System.BitConverter]::ToString($digest)
+}
+
+function Test-BiosImageEmbedsKernel {
+    <#
+    .SYNOPSIS
+    Proves the bootable image contains the exact loadable bytes of a given kernel.
+
+    .DESCRIPTION
+    The previous check compared the image's size against the kernel's size and
+    compared modification times. Neither says which kernel is inside: an image
+    holding a different kernel that is larger and newer passes both.
+
+    The bootloader crate writes the payload on sector boundaries after its boot
+    code, so this scans 512-byte-aligned offsets for a 64-bit little-endian ELF
+    header, checks the architecture matches the kernel it was given, and then
+    compares every PT_LOAD file extent byte-for-byte by digest.
+
+    The scan is deliberately restricted to sector-aligned offsets, which is the
+    layout the bootloader actually produces. If a future bootloader changes
+    that, this fails loudly with the offsets it examined rather than reporting a
+    pass it cannot justify.
+    #>
+    param(
+        [Parameter(Mandatory=$true)][string]$ImagePath,
+        [Parameter(Mandatory=$true)][string]$KernelBinaryPath
+    )
+
+    $imageStream = [System.IO.File]::OpenRead($ImagePath)
+    $kernelStream = [System.IO.File]::OpenRead($KernelBinaryPath)
+    try {
+        $kernel = Get-ElfLoadSegmentGeometry -Stream $kernelStream -Label "kernel binary $KernelBinaryPath"
+        $imageLength = $imageStream.Length
+
+        # Digest the kernel's own segments once.
+        $expected = @()
+        foreach ($seg in $kernel.Segments) {
+            $expected += (Get-StreamRegionSha256 -Stream $kernelStream -Offset ([int64]$seg.Offset) -Length ([int64]$seg.FileSize))
+        }
+        # A cheap discriminator so a wrong candidate is rejected without
+        # hashing its whole payload. This never decides a match on its own.
+        $probeLength = [int64][Math]::Min(4096, [int64]$kernel.Segments[0].FileSize)
+        $kernelProbe = Get-StreamRegionSha256 -Stream $kernelStream -Offset 0 -Length $probeLength
+
+        $imageHeader = New-Object byte[] 64
+        $magic = [byte[]]@(0x7F, 0x45, 0x4C, 0x46)
+        $examined = 0
+        for ($base = 0L; $base -lt $imageLength; $base += 512) {
+            $examined++
+            $null = $imageStream.Seek($base, [System.IO.SeekOrigin]::Begin)
+            if ($imageStream.Read($imageHeader, 0, 64) -lt 64) { continue }
+            if ($imageHeader[0] -ne $magic[0] -or $imageHeader[1] -ne $magic[1] -or
+                $imageHeader[2] -ne $magic[2] -or $imageHeader[3] -ne $magic[3]) { continue }
+            if ($imageHeader[4] -ne 2 -or $imageHeader[5] -ne 1) { continue }
+            if ([BitConverter]::ToUInt16($imageHeader, 18) -ne $kernel.Machine) { continue }
+
+            $imageProbe = Get-StreamRegionSha256 -Stream $imageStream -Offset $base -Length $probeLength
+            if ($imageProbe -ne $kernelProbe) { continue }
+
+            # Full comparison of every PT_LOAD extent.
+            $allMatch = $true
+            for ($i = 0; $i -lt $kernel.Segments.Count; $i++) {
+                $seg = $kernel.Segments[$i]
+                $end = $base + [int64]$seg.Offset + [int64]$seg.FileSize
+                if ($end -gt $imageLength) { $allMatch = $false; break }
+                $actual = Get-StreamRegionSha256 -Stream $imageStream -Offset ($base + [int64]$seg.Offset) -Length ([int64]$seg.FileSize)
+                if ($actual -ne $expected[$i]) { $allMatch = $false; break }
+            }
+            if ($allMatch) {
+                Write-Host "[OK] BIOS image embeds the intended kernel at sector offset $base ($($kernel.Segments.Count) PT_LOAD segments verified)." -ForegroundColor Green
+                return $base
+            }
+        }
+        throw ("Build artifact verification failed: no sector-aligned ELF in $ImagePath embeds the loadable bytes of $KernelBinaryPath " +
+               "(examined $examined sector-aligned offsets). The image holds a different kernel, or its payload is not sector aligned.")
+    } finally {
+        $imageStream.Close()
+        $kernelStream.Close()
+    }
+}
+
 function Verify-BiosImageArtifact {
     param(
         [Parameter(Mandatory=$true)]
@@ -236,7 +405,7 @@ function Verify-BiosImageArtifact {
         $fs.Close()
     }
 
-    # Verify kernel binary encapsulation and freshness when KernelBinaryPath is supplied
+    # Verify kernel binary encapsulation when KernelBinaryPath is supplied.
     if ($KernelBinaryPath) {
         $resolvedKernel = [System.IO.Path]::GetFullPath($KernelBinaryPath)
         if (-not (Test-Path -LiteralPath $resolvedKernel)) {
@@ -246,9 +415,14 @@ function Verify-BiosImageArtifact {
         if ($item.Length -le $kernelItem.Length) {
             throw "Build artifact verification failed: BIOS image ($($item.Length) bytes) is smaller than or equal to kernel binary ($($kernelItem.Length) bytes); cannot encapsulate bootloader and kernel"
         }
+        # Cheap staleness guard first, so the common "forgot to repackage" case
+        # gets a precise diagnostic instead of a content mismatch. It cannot
+        # establish correctness on its own; the content check below does that.
         if ($item.LastWriteTimeUtc -lt $kernelItem.LastWriteTimeUtc) {
-            throw "Build artifact verification failed: BIOS image ($($item.LastWriteTimeUtc.ToString('o'))) is older than kernel binary ($($kernelItem.LastWriteTimeUtc.ToString('o'))); stale image would boot mismatched kernel"
+            throw "Build artifact verification failed: BIOS image ($($item.LastWriteTimeUtc.ToString('o'))) is older than kernel binary ($($kernelItem.LastWriteTimeUtc.ToString('o'))); stale image would boot a mismatched kernel"
         }
+        # The real relationship: the image must actually contain this kernel.
+        $null = Test-BiosImageEmbedsKernel -ImagePath $resolved -KernelBinaryPath $resolvedKernel
     }
 
     if ($MinFreshnessUtc -ne $null -and $item.LastWriteTimeUtc -lt $MinFreshnessUtc) {
