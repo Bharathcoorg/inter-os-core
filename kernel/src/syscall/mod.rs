@@ -416,19 +416,25 @@ pub fn sys_app_wake() -> SyscallResult {
     }
 }
 
+pub const GLOBAL_SYSTEM_CONTROL_OBJECT: u64 = 0;
+
 /// Enforces an explicit capability for privileged kernel controls.
 pub fn require_system_control_object(object_id: u64) -> Result<(), SyscallResult> {
     let sched = SCHEDULER.lock();
     let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
-    task.cap_table.authorize_object(CapabilityType::SystemControl, Rights::INVOKE, object_id)
-        .then_some(()).ok_or(SyscallResult::PermissionDenied)
+    if task.cap_table.authorize_object(CapabilityType::SystemControl, Rights::INVOKE, object_id) {
+        return Ok(());
+    }
+    if object_id != GLOBAL_SYSTEM_CONTROL_OBJECT
+        && task.cap_table.authorize_object(CapabilityType::SystemControl, Rights::INVOKE, GLOBAL_SYSTEM_CONTROL_OBJECT)
+    {
+        return Ok(());
+    }
+    Err(SyscallResult::PermissionDenied)
 }
 
 fn require_system_control() -> Result<(), SyscallResult> {
-    let sched = SCHEDULER.lock();
-    let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
-    task.cap_table.authorize_capability(CapabilityType::SystemControl, Rights::INVOKE)
-        .then_some(()).ok_or(SyscallResult::PermissionDenied)
+    require_system_control_object(GLOBAL_SYSTEM_CONTROL_OBJECT)
 }
 
 /// Requires `SystemControl|INVOKE` bound to the administration object of the
@@ -504,14 +510,12 @@ fn caller_is_package(pkg: &str) -> bool {
 /// grant (which is what lets a system daemon post for other packages).
 fn require_package_or_delegated(pkg: &str) -> Result<(), SyscallResult> {
     if pkg.is_empty() {
-        return require_system_control_object(NOTIFICATION_CONTROL_OBJECT)
-            .or_else(|_| require_system_control());
+        return require_system_control_object(NOTIFICATION_CONTROL_OBJECT);
     }
     if caller_is_package(pkg) {
         return Ok(());
     }
     require_system_control_object(NOTIFICATION_CONTROL_OBJECT)
-        .or_else(|_| require_system_control())
 }
 
 /// Sends an IPC message to a destination task.
@@ -2532,7 +2536,7 @@ pub fn sys_resource_query(
     out_temp: &mut u8,
     out_throttling: &mut bool,
  ) -> SyscallResult {
-    if require_system_control_object(crate::services::SERVICE_POWER_CONTROL_OBJECT).is_err() && require_system_control().is_err() {
+    if require_system_control_object(crate::services::SERVICE_POWER_CONTROL_OBJECT).is_err() {
         return SyscallResult::PermissionDenied;
     }
     let rm = crate::resource::RESOURCE_MANAGER.lock();
@@ -2549,7 +2553,7 @@ pub fn sys_resource_query(
 
 /// Queries the dynamic multi-zone thermal governor into `out_buf` JSON string.
 pub fn sys_thermal_query(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
-    if require_system_control_object(crate::services::SERVICE_POWER_CONTROL_OBJECT).is_err() { require_system_control()?; }
+    require_system_control_object(crate::services::SERVICE_POWER_CONTROL_OBJECT)?;
     if out_buf.len() < crate::resource::THERMAL_JSON_MAX { return Err(SyscallResult::InvalidArguments); }
     let tm = crate::resource::THERMAL_MANAGER.lock();
     // An unbound sensor has nothing to report; the serialised form carries an
@@ -3454,7 +3458,7 @@ pub fn sys_hal_query_platform(out_buf: &mut [u8]) -> Result<usize, SyscallResult
 
 /// Queries or configures the mobile CPU DVFS power governor.
 pub fn sys_power_governor(action: u32, governor_id: u8) -> Result<u32, SyscallResult> {
-    if require_system_control_object(crate::services::SERVICE_POWER_CONTROL_OBJECT).is_err() { require_system_control()?; }
+    require_system_control_object(crate::services::SERVICE_POWER_CONTROL_OBJECT)?;
     let mut pm = crate::resource::POWER_MANAGER.lock();
     if action == 0 {
         // Query current governor
@@ -3479,7 +3483,7 @@ pub fn sys_power_governor(action: u32, governor_id: u8) -> Result<u32, SyscallRe
 /// In standard QEMU / development emulator targets without a physical baseband modem,
 /// this reports honestly that no hardware modem is detected.
 pub fn sys_telephony_query(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
-    if require_system_control_object(crate::services::SERVICE_TELEPHONY_CONTROL_OBJECT).is_err() { require_system_control()?; }
+    require_system_control_object(crate::services::SERVICE_TELEPHONY_CONTROL_OBJECT)?;
     use core::fmt::Write;
     struct SliceWriter<'a> {
         buf: &'a mut [u8],
@@ -3519,7 +3523,7 @@ pub fn sys_telephony_query(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
 
 /// Initiates an outgoing cellular call.
 pub fn sys_telephony_dial(dest: &str) -> Result<(), SyscallResult> {
-    if require_system_control_object(crate::services::SERVICE_TELEPHONY_CONTROL_OBJECT).is_err() { require_system_control()?; }
+    require_system_control_object(crate::services::SERVICE_TELEPHONY_CONTROL_OBJECT)?;
     if !crate::telephony::CELLULAR_MODEM.lock().hardware_present {
         return Err(SyscallResult::DeviceError);
     }
@@ -3531,7 +3535,7 @@ pub fn sys_telephony_dial(dest: &str) -> Result<(), SyscallResult> {
 
 /// Terminates an active cellular call.
 pub fn sys_telephony_hangup() -> Result<(), SyscallResult> {
-    if require_system_control_object(crate::services::SERVICE_TELEPHONY_CONTROL_OBJECT).is_err() { require_system_control()?; }
+    require_system_control_object(crate::services::SERVICE_TELEPHONY_CONTROL_OBJECT)?;
     crate::telephony::CELLULAR_MODEM.lock()
         .hangup()
         .map_err(|_| SyscallResult::DeviceError)
@@ -3539,7 +3543,7 @@ pub fn sys_telephony_hangup() -> Result<(), SyscallResult> {
 
 /// Transmits an SMS message to a destination phone number.
 pub fn sys_telephony_send_sms(dest: &str, body: &str) -> Result<u32, SyscallResult> {
-    if require_system_control_object(crate::services::SERVICE_TELEPHONY_CONTROL_OBJECT).is_err() { require_system_control()?; }
+    require_system_control_object(crate::services::SERVICE_TELEPHONY_CONTROL_OBJECT)?;
     if !crate::telephony::CELLULAR_MODEM.lock().hardware_present {
         return Err(SyscallResult::DeviceError);
     }
@@ -3551,7 +3555,7 @@ pub fn sys_telephony_send_sms(dest: &str, body: &str) -> Result<u32, SyscallResu
 
 /// Toggles cellular packet data (PDP context).
 pub fn sys_telephony_set_data(enabled: bool) -> Result<bool, SyscallResult> {
-    if require_system_control_object(crate::services::SERVICE_TELEPHONY_CONTROL_OBJECT).is_err() { require_system_control()?; }
+    require_system_control_object(crate::services::SERVICE_TELEPHONY_CONTROL_OBJECT)?;
     if !crate::telephony::CELLULAR_MODEM.lock().hardware_present {
         return Err(SyscallResult::DeviceError);
     }
@@ -3768,7 +3772,7 @@ pub fn sys_touch_poll() -> Result<u32, SyscallResult> {
 
 /// Sets the DVFS operational performance profile.
 pub fn sys_power_set_profile(profile_idx: u32) -> Result<u32, SyscallResult> {
-    if require_system_control_object(crate::services::SERVICE_POWER_CONTROL_OBJECT).is_err() { require_system_control()?; }
+    require_system_control_object(crate::services::SERVICE_POWER_CONTROL_OBJECT)?;
     let profile = match profile_idx {
         0 => crate::drivers::pmic::DvfsProfile::PowerSave,
         1 => crate::drivers::pmic::DvfsProfile::Balanced,
@@ -3853,7 +3857,7 @@ pub fn sys_get_random(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
 
 /// Dispatches audio feedback actions to the mobile audio subsystem.
 pub fn sys_audio_control(action: u32, param: u32) -> Result<u32, SyscallResult> {
-    if require_system_control_object(crate::services::SERVICE_AUDIO_CONTROL_OBJECT).is_err() { require_system_control()?; }
+    require_system_control_object(crate::services::SERVICE_AUDIO_CONTROL_OBJECT)?;
     let mut audio = crate::audio::AUDIO_MANAGER.lock();
     match action {
         0 => {
@@ -3916,7 +3920,7 @@ pub fn sys_keystore_derive(_slot_idx: u32, _out_buf: &mut [u8; 32]) -> Result<us
 /// Reports honestly if hardware sensors are not physically present on the board.
 pub fn sys_sensor_read(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
     if out_buf.len() < 32 || out_buf.len() > 512 { return Err(SyscallResult::InvalidArguments); }
-    if require_system_control_object(crate::services::SERVICE_SENSOR_CONTROL_OBJECT).is_err() { require_system_control()?; }
+    require_system_control_object(crate::services::SERVICE_SENSOR_CONTROL_OBJECT)?;
     use core::fmt::Write;
     struct SliceWriter<'a> {
         buf: &'a mut [u8],
@@ -3953,7 +3957,7 @@ pub fn sys_sensor_read(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
 /// Queries battery fuel gauge telemetry (voltage, SoC %, capacity, charging status).
 /// In standard QEMU development targets without an ACPI/I2C fuel gauge, reports honestly.
 pub fn sys_battery_query(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
-    if require_system_control_object(crate::services::SERVICE_POWER_CONTROL_OBJECT).is_err() { require_system_control()?; }
+    require_system_control_object(crate::services::SERVICE_POWER_CONTROL_OBJECT)?;
     if out_buf.len() < crate::resource::BATTERY_JSON_MAX { return Err(SyscallResult::InvalidArguments); }
     use core::fmt::Write;
     struct SliceWriter<'a> {
@@ -4508,8 +4512,7 @@ pub fn sys_share_sheet_dispatch(
         // authorize it against the share-bus control object rather than dropping
         // the check. Without this, any ring3 task could raise a system share
         // drawer over the foreground app.
-        require_system_control_object(NOTIFICATION_CONTROL_OBJECT)
-            .or_else(|_| require_system_control())?;
+        require_system_control_object(NOTIFICATION_CONTROL_OBJECT)?;
         let drawer = ShareSheetDrawer::new(
             current_ticks,
             "text/uri-list",
@@ -5485,5 +5488,42 @@ mod tests {
         assert_eq!(file_type_tag(FileType::Directory), 1);
         assert_eq!(file_type_tag(FileType::ReadOnlySystem), 2);
         assert_eq!(file_type_tag(FileType::DeviceNode), 3);
+    }
+
+    #[test]
+    fn system_control_object_scoping_and_cross_subsystem_denial() {
+        use crate::capability::{Capability, CapabilityId, CapabilityType, Rights};
+        use crate::services::{
+            SERVICE_AUDIO_CONTROL_OBJECT, SERVICE_POWER_CONTROL_OBJECT,
+            SERVICE_TELEPHONY_CONTROL_OBJECT, SERVICE_SENSOR_CONTROL_OBJECT,
+        };
+
+        let task_id = TaskId(999);
+        let mut audio_only_table = crate::capability::CapabilityTable::new_for_task(task_id, 4);
+        audio_only_table.insert(Capability {
+            id: CapabilityId(7001),
+            cap_type: CapabilityType::SystemControl,
+            rights: Rights::INVOKE,
+            object_id: SERVICE_AUDIO_CONTROL_OBJECT,
+        }).unwrap();
+
+        // Audio capability satisfies audio object
+        assert!(audio_only_table.authorize_object(CapabilityType::SystemControl, Rights::INVOKE, SERVICE_AUDIO_CONTROL_OBJECT));
+        // Audio capability strictly FAILS power, telephony, sensor, and global admin objects
+        assert!(!audio_only_table.authorize_object(CapabilityType::SystemControl, Rights::INVOKE, SERVICE_POWER_CONTROL_OBJECT));
+        assert!(!audio_only_table.authorize_object(CapabilityType::SystemControl, Rights::INVOKE, SERVICE_TELEPHONY_CONTROL_OBJECT));
+        assert!(!audio_only_table.authorize_object(CapabilityType::SystemControl, Rights::INVOKE, SERVICE_SENSOR_CONTROL_OBJECT));
+        assert!(!audio_only_table.authorize_object(CapabilityType::SystemControl, Rights::INVOKE, GLOBAL_SYSTEM_CONTROL_OBJECT));
+
+        let mut global_admin_table = crate::capability::CapabilityTable::new_for_task(task_id, 4);
+        global_admin_table.insert(Capability {
+            id: CapabilityId(7002),
+            cap_type: CapabilityType::SystemControl,
+            rights: Rights::INVOKE,
+            object_id: GLOBAL_SYSTEM_CONTROL_OBJECT,
+        }).unwrap();
+
+        // Global admin (object_id: 0) satisfies global admin
+        assert!(global_admin_table.authorize_object(CapabilityType::SystemControl, Rights::INVOKE, GLOBAL_SYSTEM_CONTROL_OBJECT));
     }
 }
