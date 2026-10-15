@@ -23,7 +23,7 @@ pub enum VersionRequirement { Exact(PackageVersion), Minimum(PackageVersion), Ma
 pub struct Dependency { pub package_id:String, pub requirement:VersionRequirement }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Permission { FileRead, FileWrite, Network, Camera, Microphone, Location, Notifications, Bluetooth, Telephony, Sensors }
+pub enum Permission { FileRead, FileWrite, Network, Camera, Microphone, Location, Notifications, Bluetooth, Telephony, Sensors, SystemAdmin }
 
 #[derive(Debug, Clone)]
 pub struct PackagePolicy { pub dependencies:Vec<Dependency>, pub permissions:Vec<Permission> }
@@ -53,6 +53,7 @@ impl PackagePolicy {
                 9 => Some(Permission::FileRead),
                 10 => Some(Permission::FileWrite),
                 12 | 13 | 14 => Some(Permission::Network),
+                18 => Some(Permission::SystemAdmin),
                 20 => Some(Permission::Telephony),
                 21 => Some(Permission::Microphone),
                 22 => Some(Permission::Camera),
@@ -95,7 +96,7 @@ mod tests {
             (15, None),                           // ShmProducer
             (16, None),                           // ShmConsumer
             (17, None),                           // EventPoll
-            (18, None),                           // SystemControl (Global)
+            (18, Some(Permission::SystemAdmin)),  // SystemControl (Global)
             (19, None),                           // SystemControl (Power)
             (20, Some(Permission::Telephony)),    // SystemControl (Telephony)
             (21, Some(Permission::Microphone)),   // SystemControl (Audio)

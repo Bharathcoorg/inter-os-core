@@ -281,8 +281,15 @@ mod tests {
         use crate::services::*;
 
         let all_ids: alloc::vec::Vec<u16> = (1..=24).collect();
-        let table = crate::task::user::capabilities_from_rapp(&all_ids, 0x1234)
-            .expect("capabilities_from_rapp for 1..=24 must succeed");
+        // Negative test: Untrusted app requesting capability 18 must be strictly denied
+        assert!(
+            crate::task::user::capabilities_from_rapp(&[18], 0x1234).is_err(),
+            "Untrusted app requesting capability 18 must be strictly rejected"
+        );
+
+        // System authority requesting capabilities succeeds
+        let table = crate::task::user::capabilities_from_rapp_with_trust(&all_ids, 0x1234, true)
+            .expect("capabilities_from_rapp_with_trust for 1..=24 must succeed with system authority");
 
         // Verify ID 18 (Global SystemControl)
         let cap18 = table.get(17).expect("slot 17 for ID 18");

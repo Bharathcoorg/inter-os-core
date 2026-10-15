@@ -548,8 +548,19 @@ pub fn load_user_elf(elf_data: &[u8]) -> Result<(usize, usize), &'static str> {
 
 /// Maps canonical RAPP v2 capability identifiers into kernel capabilities.
 pub(crate) fn capabilities_from_rapp(ids: &[u16], ipc_target: u64) -> Result<CapabilityTable, &'static str> {
+    capabilities_from_rapp_with_trust(ids, ipc_target, false)
+}
+
+pub(crate) fn capabilities_from_rapp_with_trust(
+    ids: &[u16],
+    ipc_target: u64,
+    is_system_authority: bool,
+) -> Result<CapabilityTable, &'static str> {
     let mut caps = CapabilityTable::new(ids.len().max(1));
     for (slot, id) in ids.iter().copied().enumerate() {
+        if id == 18 && !is_system_authority {
+            return Err("Capability 18 (SystemControl) requires system platform trust authority");
+        }
         let (cap_type, rights, object_id) = match id {
             1 => (CapabilityType::SerialOutput, Rights::WRITE, 0),
             2 => (CapabilityType::FrameBufferDirect, Rights::WRITE, 0),
@@ -608,7 +619,8 @@ pub fn spawn_verified_rapp_process(
     if manifest.payload_len != elf_payload.len() {
         return Err("RAPP payload length mismatch");
     }
-    let caps = capabilities_from_rapp(&manifest.capabilities, parent_id.0)?;
+    let is_system = crate::package::REVOCATION_REGISTRY.lock().is_system_publisher(&manifest.publisher_key);
+    let caps = capabilities_from_rapp_with_trust(&manifest.capabilities, parent_id.0, is_system)?;
     let process_name: &'static str = alloc::boxed::Box::leak(
         manifest.package_id.clone().into_boxed_str()
     );

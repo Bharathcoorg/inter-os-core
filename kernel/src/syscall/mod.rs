@@ -424,15 +424,28 @@ pub fn require_system_control_object(object_id: u64) -> Result<(), SyscallResult
     if task.cap_table.authorize_object(CapabilityType::SystemControl, Rights::INVOKE, object_id) {
         return Ok(());
     }
-    if object_id != GLOBAL_SYSTEM_CONTROL_OBJECT
-        && task.cap_table.authorize_object(CapabilityType::SystemControl, Rights::INVOKE, GLOBAL_SYSTEM_CONTROL_OBJECT)
-    {
-        return Ok(());
+    // Global fallback (object 0) is strictly confined to PID 1 (system supervisor).
+    // Ordinary apps or services holding capability 18 or domain objects cannot
+    // bypass domain or account scoping via ambient global fallback.
+    if object_id != GLOBAL_SYSTEM_CONTROL_OBJECT && task.id == TaskId(1) {
+        if task.cap_table.authorize_object(CapabilityType::SystemControl, Rights::INVOKE, GLOBAL_SYSTEM_CONTROL_OBJECT) {
+            return Ok(());
+        }
     }
     Err(SyscallResult::PermissionDenied)
 }
 
 fn require_system_control() -> Result<(), SyscallResult> {
+    let sched = SCHEDULER.lock();
+    let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+    let is_system = task.id == TaskId(0)
+        || task.id == TaskId(1)
+        || task.name.starts_with("org.interos.")
+        || task.name == "system";
+    if !is_system {
+        return Err(SyscallResult::PermissionDenied);
+    }
+    drop(sched);
     require_system_control_object(GLOBAL_SYSTEM_CONTROL_OBJECT)
 }
 
@@ -464,7 +477,16 @@ fn require_user_control_object(uid: u32) -> Result<(), SyscallResult> {
             }
         }
     }
-    require_system_control_object(user_control_object(uid))
+    // Only exact user-scoped control (or PID 1) can administer an account
+    let sched = SCHEDULER.lock();
+    let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+    if task.id == TaskId(1) {
+        return Ok(());
+    }
+    if task.cap_table.authorize_object(CapabilityType::SystemControl, Rights::INVOKE, user_control_object(uid)) {
+        return Ok(());
+    }
+    Err(SyscallResult::PermissionDenied)
 }
 
 /// Resolves the user id the calling task is bound to, if any.
@@ -844,14 +866,23 @@ pub fn sys_verify_package(
     cap_slot: usize,
     path: &str,
 ) -> Result<RappManifest, SyscallResult> {
-    let stat = sys_fs_stat(cap_slot, path)?;
-    if stat.size == 0 || stat.size > 16 * 1024 * 1024 { return Err(SyscallResult::InvalidArguments); }
-    let fd = sys_fs_open(cap_slot, path, Rights::READ)?;
-    let mut file_buf = alloc::vec![0u8; stat.size];
-    let read_bytes = sys_fs_read(cap_slot, fd, &mut file_buf)?;
-    sys_fs_close(fd);
+    let (task_id, cap_table) = {
+        let sched = SCHEDULER.lock();
+        let current = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+        (current.id, current.cap_table.clone())
+    };
+    let vfs = VFS.lock();
+    let file_buf = vfs.read_file_for_task(task_id, &cap_table, cap_slot, path)
+        .map_err(|e| match e {
+            FsError::CapabilityError(_) | FsError::PermissionDenied => SyscallResult::PermissionDenied,
+            FsError::FileNotFound => SyscallResult::FileNotFound,
+            _ => SyscallResult::InvalidArguments,
+        })?;
+    drop(vfs);
 
-    parse_rapp(&file_buf[..read_bytes]).map_err(|e| match e {
+    if file_buf.is_empty() || file_buf.len() > 16 * 1024 * 1024 { return Err(SyscallResult::InvalidArguments); }
+
+    parse_rapp(&file_buf).map_err(|e| match e {
         RappError::DigestMismatch | RappError::SignatureInvalid | RappError::PublisherUntrusted | RappError::PublisherRevoked | RappError::PackageRevoked | RappError::InvalidPublisherKey => SyscallResult::IntegrityViolation,
         _ => SyscallResult::InvalidArguments,
     })
@@ -3089,14 +3120,14 @@ pub fn sys_package_audit(pkg_id: &str) -> Result<u32, SyscallResult> {
 pub fn sys_package_install(cap_slot: usize, pkg_id: &str, user_consent: bool) -> Result<(), SyscallResult> {
     if !user_consent { return Err(SyscallResult::PermissionDenied); }
 
-    let (read_slot, task_id) = {
+    let (read_slot, task_id, cap_table) = {
         let sched = SCHEDULER.lock();
         let current = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
         current.cap_table.verify(cap_slot, CapabilityType::FileSystemWrite, Rights::WRITE)
             .map_err(|_| SyscallResult::PermissionDenied)?;
         let read_slot = current.cap_table.find_slot(CapabilityType::FileSystemRead, Rights::READ)
             .ok_or(SyscallResult::PermissionDenied)?;
-        (read_slot, current.id)
+        (read_slot, current.id, current.cap_table.clone())
     };
 
     if pkg_id.is_empty()
@@ -3109,39 +3140,42 @@ pub fn sys_package_install(cap_slot: usize, pkg_id: &str, user_consent: bool) ->
     }
 
     let path = alloc::format!("/packages/{}.rapp", pkg_id);
-    let manifest = sys_verify_package(read_slot, &path)?;
-    if manifest.package_id != pkg_id || manifest.payload_len == 0 {
+    let vfs = VFS.lock();
+    let rapp = vfs.read_file_for_task(task_id, &cap_table, read_slot, &path)
+        .map_err(|e| match e {
+            FsError::CapabilityError(_) | FsError::PermissionDenied => SyscallResult::PermissionDenied,
+            FsError::FileNotFound => SyscallResult::FileNotFound,
+            _ => SyscallResult::InvalidArguments,
+        })?;
+    drop(vfs);
+
+    if rapp.is_empty() || rapp.len() > crate::package::store::MAX_BLOB_SIZE {
+        return Err(SyscallResult::InvalidArguments);
+    }
+
+    let verified = parse_rapp(&rapp).map_err(|e| match e {
+        RappError::DigestMismatch | RappError::SignatureInvalid | RappError::PublisherUntrusted | RappError::PublisherRevoked | RappError::PackageRevoked | RappError::InvalidPublisherKey => SyscallResult::IntegrityViolation,
+        _ => SyscallResult::InvalidArguments,
+    })?;
+
+    if verified.package_id != pkg_id || verified.payload_len == 0 {
         return Err(SyscallResult::IntegrityViolation);
+    }
+
+    // Confine capability 18 (Global SystemControl): only system publishers may install
+    // packages that claim global system administration authority.
+    if verified.capabilities.contains(&18) {
+        let reg = crate::package::REVOCATION_REGISTRY.lock();
+        if !reg.is_system_publisher(&verified.publisher_key) {
+            return Err(SyscallResult::PermissionDenied);
+        }
     }
 
     {
         let reg = crate::package::REVOCATION_REGISTRY.lock();
-        if reg.is_package_revoked(pkg_id) || reg.is_key_revoked(&manifest.publisher_key) {
+        if reg.is_package_revoked(pkg_id) || reg.is_key_revoked(&verified.publisher_key) {
             return Err(SyscallResult::IntegrityViolation);
         }
-    }
-
-    let stat = sys_fs_stat(read_slot, &path)?;
-    if stat.size == 0 || stat.size > crate::package::store::MAX_BLOB_SIZE {
-        return Err(SyscallResult::InvalidArguments);
-    }
-    let fd = sys_fs_open(read_slot, &path, Rights::READ)?;
-    let mut rapp = alloc::vec![0u8; stat.size];
-    let read_bytes = sys_fs_read(read_slot, fd, &mut rapp)?;
-    sys_fs_close(fd);
-    if read_bytes != stat.size {
-        return Err(SyscallResult::DeviceError);
-    }
-
-    // Re-parse the exact bytes that will be persisted so the installed blob is
-    // identical to the verified filesystem payload.
-    let verified = parse_rapp(&rapp).map_err(|_| SyscallResult::IntegrityViolation)?;
-    if verified.package_id != manifest.package_id
-        || verified.version != manifest.version
-        || verified.payload_len != manifest.payload_len
-        || verified.payload_digest != manifest.payload_digest
-    {
-        return Err(SyscallResult::IntegrityViolation);
     }
 
     // Stage the registry first. If payload persistence or activation fails, the
@@ -5667,5 +5701,83 @@ mod tests {
             caps.verify(999, CapabilityType::IpcReceive, Rights::READ).err(),
             Some(crate::capability::CapError::InvalidSlot)
         );
+    }
+
+    #[test]
+    fn package_install_single_use_lease_quota_semantics() {
+        use crate::capability::{Capability, CapabilityId, CapabilityType, Rights, DelegatedLease};
+        use crate::capability::delegation::{allocate_lease_id, register_lease};
+        use crate::fs::vfs::Vfs;
+
+        let grantor = TaskId(80);
+        let grantee = TaskId(81);
+        crate::task::process::register_leader(grantee, TaskId(1));
+
+        let mut vfs = Vfs::new();
+        vfs.mkdir("/packages");
+        let _ = vfs.create_file("/packages/test_app.rapp", b"RAPP_DUMMY_PAYLOAD_FOR_TEST", false);
+
+        let mut grantor_caps = crate::capability::CapabilityTable::new_for_task(grantor, 4);
+        grantor_caps.insert(Capability {
+            id: CapabilityId(301),
+            cap_type: CapabilityType::FileSystemRead,
+            rights: Rights::READ | Rights::GRANT,
+            object_id: 0,
+        }).unwrap();
+
+        let parent_cap = grantor_caps.get(0).unwrap();
+        let lease = DelegatedLease::new(
+            allocate_lease_id(),
+            parent_cap,
+            grantor,
+            grantee,
+            Rights::READ,
+            1, // Single-use lease: exactly 1 invocation
+            10_000,
+            crate::interrupts::get_system_ticks(),
+        ).unwrap();
+
+        let derived_cap = lease.to_capability();
+        register_lease(lease);
+
+        let mut grantee_caps = crate::capability::CapabilityTable::new_for_task(grantee, 4);
+        let slot = grantee_caps.insert(derived_cap).unwrap();
+
+        // 1. First atomic read operation must SUCCEED using exactly 1 invocation of the lease
+        let res1 = vfs.read_file_for_task(grantee, &grantee_caps, slot, "/packages/test_app.rapp");
+        assert!(res1.is_ok(), "First read with single-use lease must succeed: {:?}", res1.err());
+        assert_eq!(res1.unwrap(), b"RAPP_DUMMY_PAYLOAD_FOR_TEST");
+
+        // 2. Second read operation must be DENIED because the single invocation was consumed
+        let res2 = vfs.read_file_for_task(grantee, &grantee_caps, slot, "/packages/test_app.rapp");
+        assert!(
+            matches!(res2, Err(crate::fs::vfs::FsError::CapabilityError(crate::capability::CapError::InvalidSlot))),
+            "Second read must fail closed with exhausted lease quota, got {:?}",
+            res2
+        );
+    }
+
+    #[test]
+    fn cap_18_system_control_runtime_confinement() {
+        use crate::capability::{Capability, CapabilityId, CapabilityType, Rights};
+        use crate::services::SERVICE_POWER_CONTROL_OBJECT;
+
+        // An ordinary third-party app task with ID > 1 and name not starting with org.interos
+        let mut app_caps = crate::capability::CapabilityTable::new_for_task(TaskId(105), 4);
+        app_caps.insert(Capability {
+            id: CapabilityId(7018),
+            cap_type: CapabilityType::SystemControl,
+            rights: Rights::INVOKE,
+            object_id: GLOBAL_SYSTEM_CONTROL_OBJECT,
+        }).unwrap();
+
+        // 1. Authorizing exact global object 0 on the table directly matches
+        assert!(app_caps.authorize_object(CapabilityType::SystemControl, Rights::INVOKE, GLOBAL_SYSTEM_CONTROL_OBJECT));
+
+        // 2. Authorizing power control on the table fails because object_id is 0, not power
+        assert!(!app_caps.authorize_object(CapabilityType::SystemControl, Rights::INVOKE, SERVICE_POWER_CONTROL_OBJECT));
+
+        // 3. User account scoping: global object 0 on an ordinary app must never satisfy account control
+        assert!(!app_caps.authorize_object(CapabilityType::SystemControl, Rights::INVOKE, crate::syscall::user_control_object(42)));
     }
 }

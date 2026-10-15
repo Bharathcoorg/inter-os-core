@@ -878,6 +878,49 @@ impl Vfs {
         }
     }
 
+    /// Reads an entire file into memory for a task using exactly one capability verification.
+    ///
+    /// Logical operation quota semantics: an entire atomic file read operation consumes
+    /// exactly one invocation from a delegated FileSystemRead lease.
+    pub fn read_file_for_task(
+        &self,
+        task_id: TaskId,
+        task_caps: &CapabilityTable,
+        cap_slot: usize,
+        path: &str,
+    ) -> Result<Vec<u8>, FsError> {
+        let (eff_slot, cap_type) = if task_caps.inspect_slot(cap_slot, CapabilityType::FileSystemRead, Rights::READ).is_ok() {
+            (cap_slot, CapabilityType::FileSystemRead)
+        } else if task_caps.inspect_slot(cap_slot, CapabilityType::FileSystemWrite, Rights::READ).is_ok() {
+            (cap_slot, CapabilityType::FileSystemWrite)
+        } else {
+            (cap_slot, CapabilityType::FileSystemRead)
+        };
+        let cap = task_caps
+            .verify(eff_slot, cap_type, Rights::READ)
+            .map_err(FsError::CapabilityError)?;
+
+        let inode_id = self.lookup(path).ok_or(FsError::FileNotFound)?;
+        let inode = self.inodes.get(&inode_id).ok_or(FsError::FileNotFound)?;
+
+        if inode.file_type == FileType::Directory {
+            return Err(FsError::IsADirectory);
+        }
+
+        if cap.object_id != 0 && cap.object_id != inode_id.0 {
+            return Err(FsError::PermissionDenied);
+        }
+
+        if inode.file_type == FileType::DeviceNode {
+            let mut buf = alloc::vec![0u8; 4096];
+            let n = crate::fs::devfs::device_read(&inode.path, &mut buf)?;
+            buf.truncate(n);
+            return Ok(buf);
+        }
+
+        Ok(inode.data.as_slice().to_vec())
+    }
+
     /// Allocates an open file descriptor in the task's file table.
     fn allocate_fd(
         &mut self,

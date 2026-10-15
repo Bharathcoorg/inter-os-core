@@ -55,7 +55,7 @@ RAPP_CAPABILITY_IDS = {
     "CAP_SHM_PRODUCER": 15, "CAP_SHM_CONSUMER": 16, "CAP_EVENT_POLL": 17, "CAP_SYSTEM_CONTROL": 18,
     # High-level template and manifest permission aliases
     "CAP_WINDOW_FOCUS": 17,
-    "CAP_HARDWARE_KEYSTORE": 18,
+    "CAP_HARDWARE_KEYSTORE": 5,
     "CAP_SECURE_STORAGE": 10,
     "CAP_SENSOR_ACCEL": 4,
     "CAP_SENSOR_GYRO": 3,

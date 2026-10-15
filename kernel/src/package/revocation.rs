@@ -321,6 +321,25 @@ impl RevocationRegistry {
         self.trusted_keys.contains_key(key) && !self.is_key_revoked(key)
     }
 
+    /// Returns true if the key is trusted and belongs to an authorized system/platform publisher.
+    pub fn is_system_publisher(&self, key: &[u8; 32]) -> bool {
+        if !self.is_key_trusted(key) {
+            return false;
+        }
+        if let Some(publisher) = self.trusted_keys.get(key) {
+            publisher == "system"
+                || publisher == "platform"
+                || publisher.starts_with("org.interos")
+        } else {
+            false
+        }
+    }
+
+    /// Grants an in-memory root of trust specifically with system platform authority.
+    pub fn grant_system_trust_root(&mut self, key: [u8; 32], publisher: &str) -> Result<(), &'static str> {
+        self.grant_trust_root(key, publisher)
+    }
+
     pub fn apply_key_rotation(&mut self, proof: &KeyRotationProof) -> Result<(), &'static str> {
         if !proof.verify() { return Err("Invalid key rotation cryptographic proof"); }
         if !self.is_key_trusted(&proof.old_key) { return Err("Old key is not a trusted publisher root"); }
