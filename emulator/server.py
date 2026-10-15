@@ -3977,8 +3977,23 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             self.wfile.write(json.dumps({'success': ok, 'source': 'GUEST_VFS', 'path': path, 'error': err}).encode())
             return
 
+        if self.path == '/api/themes/bootloader':
+            self._drain_incoming_body_if_any()
+            self.send_response(409)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                'success': False,
+                'status': 'DISABLED',
+                'error': 'Bootloader branding is immutable in Device Studio'
+            }).encode())
+            return
+
         self._drain_incoming_body_if_any()
-        self._send_json(404, {'success': False, 'error': 'Not found'})
+        self.send_response(404)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(json.dumps({'success': False, 'error': 'Not found'}).encode())
 
     def do_OPTIONS(self):
         if not self._origin_allowed():
