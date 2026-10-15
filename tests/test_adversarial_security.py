@@ -253,6 +253,48 @@ class AdversarialSecurityTests(unittest.TestCase):
                     self.assertFalse(data.get("success", False), f"Upload path traversal '{name}' was accepted!")
             except urllib.error.HTTPError as e:
                 self.assertEqual(e.code, 400)
+    def test_09_upload_manifest_json_preservation(self):
+        """Verify uploading package with manifest.json preserves package ID, name, version, and capabilities."""
+        manifest = {
+            "id": "org.interos.custom_tool",
+            "name": "Custom Tool",
+            "version": "2.4.1",
+            "requested_capabilities": ["CAP_STORAGE", "CAP_DISPLAY", "CAP_NETWORK"]
+        }
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("manifest.json", json.dumps(manifest))
+            zf.writestr("bin/main.elf", b"\x7fELF_DUMMY")
+        zip_bytes = buf.getvalue()
+
+        url = f"{STUDIO_URL}/api/apps/upload?filename=custom_tool.zip"
+        req = urllib.request.Request(
+            url,
+            data=zip_bytes,
+            headers={"Content-Type": "application/octet-stream"},
+            method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            self.assertTrue(data.get("success", False), "Upload of valid zip package failed")
+            pkg = data.get("package", {})
+            self.assertEqual(pkg.get("id"), "org.interos.custom_tool", "Manifest id was not preserved")
+            self.assertEqual(pkg.get("name"), "Custom Tool", "Manifest name was not preserved")
+            self.assertEqual(pkg.get("version"), "2.4.1", "Manifest version was not preserved")
+            self.assertEqual(pkg.get("capabilities"), ["CAP_STORAGE", "CAP_DISPLAY", "CAP_NETWORK"])
+
+    def test_10_websockify_localhost_binding(self):
+        """Verify websockify invocation binds explicitly to loopback 127.0.0.1."""
+        server_path = os.path.join(WORKSPACE_ROOT, "emulator", "server.py")
+        with open(server_path, "r", encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn('f"127.0.0.1:{WS_PORT}"', src, "websockify in server.py must bind to loopback")
+        self.assertNotIn('str(WS_PORT), "127.0.0.1:5901"', src, "websockify in server.py must not bind wildcard")
+
+        ps1_path = os.path.join(WORKSPACE_ROOT, "qemu", "launch_studio.ps1")
+        with open(ps1_path, "r", encoding="utf-8") as f:
+            ps1_src = f.read()
+        self.assertIn('"127.0.0.1:$wsPort"', ps1_src, "websockify in launch_studio.ps1 must bind to loopback")
 
 
 if __name__ == "__main__":

@@ -620,7 +620,7 @@ def start_websockify_if_needed():
     try:
         ws_subproc = subprocess.Popen([
             sys.executable, "-m", "websockify",
-            str(WS_PORT), "127.0.0.1:5901"
+            f"127.0.0.1:{WS_PORT}", "127.0.0.1:5901"
         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         time.sleep(0.3)
         latest_telemetry["websockify_alive"] = True
@@ -2902,22 +2902,34 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             query_fname = os.path.basename(raw_query_fname)
             query_name = params.get('name', [''])[0]
 
-            # Detect format via binary magic bytes or extension
+            sha256 = hashlib.sha256(body).hexdigest()
             fmt_str = "Raw Binary (.bin)"
             ext = ".app"
             app_type = "Generic"
             capabilities = ["DisplayScanout", "AudioPlayback", "SandboxedVFS"]
             is_apk = False
             apk_meta = None
+            filename = query_fname or (f"app_{sha256[:8]}{ext}")
+            app_name = query_name or filename.split('.')[0].replace('_', ' ').replace('-', ' ').title()
+            app_id = f"sideloaded.{sha256[:8]}"
+            version = "1.0.0"
+            dex_classes = 0
+            dex_size = 0
+            signature = "None"
+            entrypoint = ""
 
             if body.startswith(b"\x7fELF"):
                 fmt_str = "Native Rust App (.app / .rap)"
                 ext = ".app"
                 app_type = "Native Ring 3"
+                if not query_fname:
+                    filename = f"app_{sha256[:8]}{ext}"
             elif body.startswith(b"\x00asm"):
                 fmt_str = "WebAssembly (.wasm)"
                 ext = ".wasm"
                 app_type = "WASM Sandboxed"
+                if not query_fname:
+                    filename = f"app_{sha256[:8]}{ext}"
             elif query_fname.endswith(".rapp"):
                 # RAPP v2 has a dedicated signed-binary installation endpoint.
                 # Do not silently reinterpret a ZIP/JSON package as executable.
@@ -2936,6 +2948,8 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 app_type = "Android ACR Sandbox"
                 is_apk = True
                 apk_meta = inspect_apk(body)
+                if not query_fname:
+                    filename = f"app_{sha256[:8]}{ext}"
             elif body.startswith(b"PK\x03\x04"):
                 try:
                     with zipfile.ZipFile(io.BytesIO(body), "r") as zf:
@@ -2946,28 +2960,22 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                             app_type = "Android ACR Sandbox"
                             is_apk = True
                             apk_meta = inspect_apk(body)
+                            if not query_fname:
+                                filename = f"app_{sha256[:8]}{ext}"
                         else:
                             fmt_str = "Rust App Package (.rapp)"
                             ext = ".rapp"
                             app_type = "Sovereign RAPP"
+                            if not query_fname:
+                                filename = f"app_{sha256[:8]}{ext}"
                             if "manifest.json" in names:
                                 m_data = json.loads(zf.read("manifest.json").decode('utf-8'))
                                 app_id = m_data.get("id", f"org.interos.{filename.split('.')[0]}")
                                 app_name = m_data.get("name", query_name or filename.split('.')[0].title())
-                                version = m_data.get("version", "1.0.0")
+                                version = m_data.get("version", version)
                                 capabilities = m_data.get("requested_capabilities", capabilities)
                 except Exception:
                     pass
-
-            sha256 = hashlib.sha256(body).hexdigest()
-            filename = query_fname or (f"app_{sha256[:8]}{ext}")
-            app_name = query_name or filename.split('.')[0].replace('_', ' ').replace('-', ' ').title()
-            app_id = f"sideloaded.{sha256[:8]}"
-            version = "1.0.0"
-            dex_classes = 0
-            dex_size = 0
-            signature = "None"
-            entrypoint = ""
 
             if is_apk and apk_meta and apk_meta.get("is_valid_apk"):
                 app_id = apk_meta.get("package_id", app_id)
@@ -3000,16 +3008,15 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             }
 
             # Guest package registry remains the only installed-app authority.
-            # Log strict security audit to live UART telemetry console
-            serial_lines.append(f"[APP_SIDELOAD] Ingested package '{filename}' (Format: {fmt_str}, Size: {len(body)} bytes).")
-            serial_lines.append(f"[SECURITY_AUDIT] SHA-256 digest computed: [{sha256[:16]}...]; guest trust verification remains authoritative.")
+            # Log studio inspection telemetry
+            serial_lines.append(f"[STUDIO_SIDELOAD] Ingested package '{filename}' (Format: {fmt_str}, Size: {len(body)} bytes).")
+            serial_lines.append(f"[STUDIO_AUDIT] SHA-256 digest computed: [{sha256[:16]}...]; guest trust verification remains authoritative.")
             if is_apk:
-                serial_lines.append(f"[ACR_AUDIT] DEX header parsed: {dex_classes} classes, {dex_size} bytes; execution has not been started.")
-                serial_lines.append(f"[ACR_AUDIT] APK signature metadata: {signature}. Cryptographic signature verification is not performed by this inspection endpoint.")
-                serial_lines.append(f"[ACR_SECURITY] Declared Android permissions recorded for '{app_id}'; enforcement occurs only in the guest ACR runtime.")
-                serial_lines.append(f"[ACR_SECURITY] Bound {len(capabilities)} declared permissions to Ring 3 Micro-HAL isolated sandbox.")
+                serial_lines.append(f"[STUDIO_ACR_AUDIT] DEX header parsed: {dex_classes} classes, {dex_size} bytes; execution has not been started.")
+                serial_lines.append(f"[STUDIO_ACR_AUDIT] APK signature metadata: {signature}. Cryptographic signature verification is not performed by this inspection endpoint.")
+                serial_lines.append(f"[STUDIO_ACR] Declared Android permissions recorded for '{app_id}'; enforcement occurs only in the guest ACR runtime.")
             else:
-                serial_lines.append(f"[SECURITY_AUDIT] Uploaded artifact '{app_name}' analyzed; guest installation remains authoritative.")
+                serial_lines.append(f"[STUDIO_AUDIT] Uploaded artifact '{app_name}' analyzed; guest installation remains authoritative.")
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
