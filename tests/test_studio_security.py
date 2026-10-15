@@ -563,5 +563,135 @@ class StudioSecurityTests(unittest.TestCase):
         finally:
             s_over.close()
 
+    def test_17_launch_studio_powershell_websockify_execution(self):
+        """Verify qemu/launch_studio.ps1 parses cleanly and starts websockify with hardened origin."""
+        studio_ps1 = os.path.join(WORKSPACE_ROOT, "qemu", "launch_studio.ps1")
+        self.assertTrue(os.path.exists(studio_ps1), "launch_studio.ps1 must exist")
+
+        # 1. Parse check: verify PowerShell 5.1 reports 0 syntax errors on launch_studio.ps1
+        parse_cmd = [
+            "powershell", "-NoProfile", "-Command",
+            f"& {{ $errs = $null; [System.Management.Automation.Language.Parser]::ParseFile('{studio_ps1}', [ref]$null, [ref]$errs); if ($errs) {{ exit $errs.Count }} else {{ exit 0 }} }}"
+        ]
+        res = subprocess.run(parse_cmd, capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, f"launch_studio.ps1 has PowerShell syntax errors:\n{res.stdout}\n{res.stderr}")
+
+        # 2. Argument validation: verify that --auth-source in launch_studio.ps1 preserves quotes across Start-Process
+        with open(studio_ps1, "r", encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn('"`"--auth-source=$allowedOrigins`""', src,
+                      "launch_studio.ps1 must quote --auth-source to prevent Start-Process space splitting")
+
+        # 3. Child process argv test: confirm child process receives a single --auth-source token
+        probe_py = os.path.join(WORKSPACE_ROOT, "tests", "_probe_argv.py")
+        out_txt = os.path.join(WORKSPACE_ROOT, "tests", "_probe_out.txt")
+        try:
+            with open(probe_py, "w", encoding="utf-8") as f:
+                f.write("import sys, json\nwith open(sys.argv[1], 'w') as out:\n    json.dump(sys.argv[2:], out)\n")
+
+            test_argv_ps = f"""
+            $httpPort = {self.port}
+            $allowedOrigins = "http://127.0.0.1:$httpPort http://localhost:$httpPort http://[::1]:$httpPort"
+            $wsArgs = @(
+                "-m", "websockify",
+                "--auth-plugin=ExpectOrigin",
+                "`"--auth-source=$allowedOrigins`"",
+                "127.0.0.1:6081",
+                "127.0.0.1:5901"
+            )
+            $p = Start-Process -FilePath "python" -ArgumentList @("{probe_py}", "{out_txt}", $wsArgs[3]) -PassThru -NoNewWindow -Wait
+            """
+            subprocess.run(["powershell", "-NoProfile", "-Command", test_argv_ps], check=True)
+            with open(out_txt, "r", encoding="utf-8") as f:
+                passed_args = json.load(f)
+            expected_auth_source = f"--auth-source=http://127.0.0.1:{self.port} http://localhost:{self.port} http://[::1]:{self.port}"
+            self.assertEqual(passed_args, [expected_auth_source],
+                             f"Child process received split arguments instead of single token: {passed_args}")
+        finally:
+            for temp_f in [probe_py, out_txt]:
+                if os.path.exists(temp_f):
+                    try:
+                        os.remove(temp_f)
+                    except OSError:
+                        pass
+
+        # 4. Execution check: execute websockify with the launch_studio arguments and verify hardened Origin handshake
+        with socket.socket() as s_ws:
+            s_ws.bind(('127.0.0.1', 0))
+            ws_test_port = s_ws.getsockname()[1]
+        with socket.socket() as s_vnc:
+            s_vnc.bind(('127.0.0.1', 0))
+            vnc_test_port = s_vnc.getsockname()[1]
+
+        pid_file = os.path.join(WORKSPACE_ROOT, "tests", "_ws_test_pid.txt")
+        ps_launch = f"""
+        $httpPort = {self.port}
+        $wsPort = {ws_test_port}
+        $vncPort = {vnc_test_port}
+        $allowedOrigins = "http://127.0.0.1:$httpPort http://localhost:$httpPort http://[::1]:$httpPort"
+        $wsArgs = @(
+            "-m", "websockify",
+            "--auth-plugin=ExpectOrigin",
+            "`"--auth-source=$allowedOrigins`"",
+            "127.0.0.1:$wsPort",
+            "127.0.0.1:$vncPort"
+        )
+        $proc = Start-Process -FilePath "python" -ArgumentList $wsArgs -PassThru -NoNewWindow
+        $proc.Id | Out-File "{pid_file}" -Encoding ascii
+        """
+        try:
+            subprocess.run(["powershell", "-NoProfile", "-Command", ps_launch],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+            with open(pid_file, "r", encoding="utf-8") as f:
+                ws_pid = int(f.read().strip())
+
+            # Wait for websockify to listen
+            ready = False
+            for _ in range(30):
+                try:
+                    with socket.create_connection(('127.0.0.1', ws_test_port), timeout=0.1):
+                        ready = True
+                        break
+                except Exception:
+                    time.sleep(0.1)
+            self.assertTrue(ready, f"Websockify started by PowerShell (PID {ws_pid}) failed to listen on port {ws_test_port}")
+
+            def probe_ws(origin_header):
+                s = socket.create_connection(('127.0.0.1', ws_test_port), timeout=2)
+                try:
+                    hdr = f"Origin: {origin_header}\r\n" if origin_header is not None else ""
+                    req = (f"GET / HTTP/1.1\r\n"
+                           f"Host: 127.0.0.1:{ws_test_port}\r\n"
+                           f"Upgrade: websocket\r\n"
+                           f"Connection: Upgrade\r\n"
+                           f"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+                           f"Sec-WebSocket-Version: 13\r\n"
+                           f"{hdr}\r\n").encode("utf-8")
+                    s.sendall(req)
+                    resp = s.recv(4096).decode("utf-8", errors="replace")
+                    return resp.split("\r\n")[0]
+                finally:
+                    s.close()
+
+            # Hostile origin -> 403
+            self.assertIn("403", probe_ws("http://attacker.com"))
+            # Legitimate origin -> 101
+            self.assertIn("101", probe_ws(f"http://127.0.0.1:{self.port}"))
+        finally:
+            if os.path.exists(pid_file):
+                try:
+                    with open(pid_file, "r", encoding="utf-8") as f:
+                        ws_pid = int(f.read().strip())
+                    subprocess.run(["taskkill", "/F", "/PID", str(ws_pid)],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                except Exception:
+                    pass
+                try:
+                    os.remove(pid_file)
+                except OSError:
+                    pass
+
+
 if __name__ == "__main__":
     unittest.main()
+

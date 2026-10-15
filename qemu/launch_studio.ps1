@@ -1,4 +1,4 @@
-$ErrorActionPreference = "Stop"
+﻿$ErrorActionPreference = "Stop"
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $rootDir = Split-Path -Parent $scriptDir
@@ -13,7 +13,7 @@ $wsPort = 6081
 $httpPort = 4300
 
 Write-Host "============================================================" -ForegroundColor Cyan
-Write-Host "  INTER OS — Live Device Studio Launcher" -ForegroundColor Cyan
+Write-Host "  INTER OS -- Live Device Studio Launcher" -ForegroundColor Cyan
 Write-Host "============================================================" -ForegroundColor Cyan
 Write-Host ""
 
@@ -58,10 +58,17 @@ Write-Host "[QEMU] Started (PID: $($qemuProcess.Id))" -ForegroundColor Green
 # 4. Wait a moment for QEMU VNC to be ready
 Start-Sleep -Milliseconds 800
 
-# 5. Launch websockify (VNC TCP → WebSocket bridge)
+# 5. Launch websockify (VNC TCP -> WebSocket bridge)
 Write-Host "[WEBSOCKIFY] Bridging VNC:$vncPort -> WebSocket:$wsPort..." -ForegroundColor Cyan
 $allowedOrigins = "http://127.0.0.1:$httpPort http://localhost:$httpPort http://[::1]:$httpPort"
-$wsProcess = Start-Process -FilePath "python" -ArgumentList "-m", "websockify", "--auth-plugin=ExpectOrigin", "--auth-source=$allowedOrigins", "127.0.0.1:$wsPort", "127.0.0.1:$vncPort" -PassThru -NoNewWindow
+$wsArgs = @(
+    "-m", "websockify",
+    "--auth-plugin=ExpectOrigin",
+    "`"--auth-source=$allowedOrigins`"",
+    "127.0.0.1:$wsPort",
+    "127.0.0.1:$vncPort"
+)
+$wsProcess = Start-Process -FilePath "python" -ArgumentList $wsArgs -PassThru -NoNewWindow
 Write-Host "[WEBSOCKIFY] Started (PID: $($wsProcess.Id))" -ForegroundColor Green
 
 # 6. Launch the studio HTTP server
