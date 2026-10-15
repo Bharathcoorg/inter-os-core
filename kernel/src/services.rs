@@ -514,10 +514,11 @@ pub fn supervise() {
         None => return,
     };
     let now = crate::interrupts::get_system_ticks();
-    let sched = match SCHEDULER.try_lock() {
+    let mut sched = match SCHEDULER.try_lock() {
         Some(guard) => guard,
         None => return,
     };
+    sched.reap_orphans();
     let mut states = [None; 12];
     let records = match SERVICE_RECORDS.try_lock() {
         Some(guard) => *guard,

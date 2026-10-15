@@ -5087,6 +5087,7 @@ pub fn dev_launch_app(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
     if app_id.is_empty() || app_id.len() > 128 || app_id.contains('/') || app_id.contains('\\') || app_id.contains("..") {
         return Err(SyscallResult::InvalidArguments);
     }
+    SCHEDULER.lock().reap_orphans();
     // External verified `.rapp` blobs take precedence when present.
     if let Some(blob) = crate::package::PACKAGE_BLOB_STORE.lock().get(app_id).cloned() {
         let verified = crate::package::parse_rapp(&blob.bytes)

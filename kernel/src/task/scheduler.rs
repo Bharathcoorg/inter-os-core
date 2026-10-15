@@ -244,23 +244,61 @@ impl Scheduler {
     /// Reclaims terminated TCB resources that are no longer the current task.
     fn reap_terminated(&mut self) {
         if self.tasks.len() <= 1 { return; }
-        let current_id = self.tasks[self.current_idx].id;
+        let current_id = self.tasks.get(self.current_idx).map(|t| t.id).unwrap_or(TaskId(0));
         let mut i = self.tasks.len();
         while i > 0 {
             i -= 1;
             if self.tasks[i].id != current_id && self.tasks[i].state == TaskState::Terminated {
+                let tid = self.tasks[i].id;
+                let _ = crate::task::process::reap(tid);
                 self.tasks.remove(i);
                 if i < self.current_idx { self.current_idx -= 1; }
             }
         }
-        if self.current_idx >= self.tasks.len() {
-            self.current_idx = self.tasks.len().saturating_sub(1);
+        if self.current_idx >= self.tasks.len() && !self.tasks.is_empty() {
+            self.current_idx = self.tasks.len() - 1;
         }
+    }
+
+    /// Reclaims orphaned zombies whose parent is TaskId(0) and are not the current task.
+    ///
+    /// When a parent process terminates before its children, live children are reparented
+    /// to TaskId(0). When those orphaned children (or development-bridge tasks launched
+    /// directly under TaskId(0)) exit, they transition to Zombie. Because TaskId(0) is the
+    /// primordial kernel task and never executes sys_waitpid, the kernel must reclaim
+    /// their process records, kernel stacks, page tables, and capability tables.
+    pub fn reap_orphans(&mut self) -> usize {
+        if self.tasks.len() <= 1 { return 0; }
+        let current_id = self.tasks.get(self.current_idx).map(|t| t.id).unwrap_or(TaskId(0));
+        let mut reaped = 0;
+        let mut i = self.tasks.len();
+        while i > 0 {
+            i -= 1;
+            let task = &self.tasks[i];
+            if task.id != TaskId(0)
+                && task.id != current_id
+                && task.parent_id == TaskId(0)
+                && matches!(task.state, TaskState::Zombie | TaskState::Terminated)
+            {
+                let tid = task.id;
+                let _ = crate::task::process::reap(tid);
+                self.tasks.remove(i);
+                reaped += 1;
+                if i < self.current_idx {
+                    self.current_idx -= 1;
+                }
+            }
+        }
+        if self.current_idx >= self.tasks.len() && !self.tasks.is_empty() {
+            self.current_idx = self.tasks.len() - 1;
+        }
+        reaped
     }
 
     /// Prepares context pointers for switching to the next ready task in round-robin order.
     pub fn prepare_switch(&mut self) -> (Option<*mut TaskContext>, Option<*const TaskContext>) {
         self.reap_terminated();
+        self.reap_orphans();
         if self.tasks.len() <= 1 {
             return (None, None);
         }
@@ -497,7 +535,7 @@ impl Scheduler {
                 && matches!(task.state, TaskState::Zombie | TaskState::Terminated)
         }).ok_or("child not ready or not owned by caller")?;
         let exit_code = self.tasks[index].exit_code;
-        crate::task::process::reap(child_id)?;
+        let _ = crate::task::process::reap(child_id);
         self.tasks.remove(index);
         if index < self.current_idx {
             self.current_idx -= 1;
@@ -628,3 +666,182 @@ pub fn terminate_current() -> ! {
         x86_64::instructions::hlt();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::capability::CapabilityTable;
+    use crate::task::{TaskId, TaskState};
+
+    extern "C" fn dummy_test_entry() -> ! {
+        loop {
+            core::hint::spin_loop();
+        }
+    }
+
+    #[test]
+    fn normal_child_exit_and_wait_reap() {
+        let mut sched = Scheduler::new();
+        sched.init(CapabilityTable::new_for_task(TaskId(0), 16));
+
+        let parent_id = sched.spawn("parent_task", dummy_test_entry, CapabilityTable::new_for_task(TaskId::new(), 16), 1);
+        assert_ne!(parent_id, TaskId(0));
+        let child_id = sched.spawn_with_parent("child_task", dummy_test_entry, CapabilityTable::new_for_task(TaskId::new(), 16), 1, parent_id);
+        assert_ne!(child_id, TaskId(0));
+
+        let initial_tasks = sched.task_count();
+        assert_eq!(sched.get_task(child_id).unwrap().state, TaskState::Ready);
+        assert_eq!(sched.get_task(child_id).unwrap().parent_id, parent_id);
+
+        // Child terminates
+        sched.terminate_child(parent_id, child_id, 42).expect("child termination");
+        assert_eq!(sched.get_task(child_id).unwrap().state, TaskState::Zombie);
+        assert_eq!(sched.get_task(child_id).unwrap().exit_code, 42);
+
+        // Active task count excludes zombies, but task count preserves TCB for parent reaping
+        assert_eq!(sched.task_count(), initial_tasks);
+
+        // Wrong parent cannot reap child
+        let wrong_parent = TaskId(999);
+        assert!(sched.reap_child(wrong_parent, child_id).is_err());
+
+        // Correct parent reaps child
+        let exit_code = sched.reap_child(parent_id, child_id).expect("parent reaps child");
+        assert_eq!(exit_code, 42);
+
+        // Child is removed from scheduler tasks
+        assert_eq!(sched.task_count(), initial_tasks - 1);
+        assert!(sched.get_task(child_id).is_none());
+
+        // Process table record for child is reaped
+        assert!(crate::task::process::process_for_task(child_id).is_none());
+
+        // Clean up parent
+        let _ = sched.reap_child(TaskId(0), parent_id);
+    }
+
+    #[test]
+    fn repeated_exit_reap_returns_error_and_does_not_double_free() {
+        let mut sched = Scheduler::new();
+        sched.init(CapabilityTable::new_for_task(TaskId(0), 16));
+
+        let parent_id = sched.spawn("parent_task2", dummy_test_entry, CapabilityTable::new_for_task(TaskId::new(), 16), 1);
+        let child_id = sched.spawn_with_parent("child_task2", dummy_test_entry, CapabilityTable::new_for_task(TaskId::new(), 16), 1, parent_id);
+
+        sched.terminate_child(parent_id, child_id, 7).expect("terminate child");
+        assert_eq!(sched.reap_child(parent_id, child_id).expect("first reap"), 7);
+
+        // Repeated reap MUST fail cleanly without panic or corruption
+        let second_reap = sched.reap_child(parent_id, child_id);
+        assert!(second_reap.is_err(), "second reap must return error");
+
+        // Process reap directly on already reaped task must fail cleanly
+        assert!(crate::task::process::reap(child_id).is_err());
+
+        // Clean up parent
+        let _ = sched.reap_child(TaskId(0), parent_id);
+    }
+
+    #[test]
+    fn parent_exit_before_child_reparents_and_reaps_orphans() {
+        let mut sched = Scheduler::new();
+        sched.init(CapabilityTable::new_for_task(TaskId(0), 16));
+
+        let parent_id = sched.spawn("parent_task3", dummy_test_entry, CapabilityTable::new_for_task(TaskId::new(), 16), 1);
+        let child_id = sched.spawn_with_parent("child_task3", dummy_test_entry, CapabilityTable::new_for_task(TaskId::new(), 16), 1, parent_id);
+
+        // Parent exits before child
+        sched.terminate_task(parent_id, 0).expect("parent exit");
+
+        // Child must be reparented to TaskId(0)
+        assert_eq!(sched.get_task(child_id).unwrap().parent_id, TaskId(0));
+
+        // While child is still running (Ready), reap_orphans must NOT touch it
+        let reaped = sched.reap_orphans();
+        assert_eq!(reaped, 1); // Only the dead parent (whose parent is TaskId(0)) is reaped
+        assert!(sched.get_task(child_id).is_some());
+        assert_eq!(sched.get_task(child_id).unwrap().state, TaskState::Ready);
+
+        // Now child exits
+        sched.terminate_task(child_id, 99).expect("child exit");
+        assert_eq!(sched.get_task(child_id).unwrap().state, TaskState::Zombie);
+        assert_eq!(sched.get_task(child_id).unwrap().parent_id, TaskId(0));
+
+        // Kernel orphan reaper must reclaim child
+        let reaped_child = sched.reap_orphans();
+        assert_eq!(reaped_child, 1);
+        assert!(sched.get_task(child_id).is_none());
+        assert!(crate::task::process::process_for_task(child_id).is_none());
+    }
+
+    #[test]
+    fn child_exit_before_parent_reparents_and_reaps_when_parent_dies() {
+        let mut sched = Scheduler::new();
+        sched.init(CapabilityTable::new_for_task(TaskId(0), 16));
+
+        let parent_id = sched.spawn("parent_task4", dummy_test_entry, CapabilityTable::new_for_task(TaskId::new(), 16), 1);
+        let child_id = sched.spawn_with_parent("child_task4", dummy_test_entry, CapabilityTable::new_for_task(TaskId::new(), 16), 1, parent_id);
+
+        // Child exits first and becomes Zombie
+        sched.terminate_child(parent_id, child_id, 15).expect("child exit");
+        assert_eq!(sched.get_task(child_id).unwrap().state, TaskState::Zombie);
+        assert_eq!(sched.get_task(child_id).unwrap().parent_id, parent_id);
+
+        // Parent dies without calling waitpid
+        sched.terminate_task(parent_id, 1).expect("parent exit");
+
+        // Child is reparented to TaskId(0)
+        assert_eq!(sched.get_task(child_id).unwrap().parent_id, TaskId(0));
+
+        // reap_orphans must reclaim both parent and child
+        let reaped = sched.reap_orphans();
+        assert_eq!(reaped, 2);
+        assert!(sched.get_task(child_id).is_none());
+        assert!(sched.get_task(parent_id).is_none());
+        assert!(crate::task::process::process_for_task(child_id).is_none());
+        assert!(crate::task::process::process_for_task(parent_id).is_none());
+    }
+
+    #[test]
+    fn development_bridge_task_exit_reaped_by_kernel() {
+        let mut sched = Scheduler::new();
+        sched.init(CapabilityTable::new_for_task(TaskId(0), 16));
+
+        // Development bridge launches apps with parent = TaskId(0)
+        let dev_task = sched.spawn_with_parent("dev_app", dummy_test_entry, CapabilityTable::new_for_task(TaskId::new(), 16), 1, TaskId(0));
+        assert_eq!(sched.get_task(dev_task).unwrap().parent_id, TaskId(0));
+        assert!(crate::task::process::process_for_task(dev_task).is_some());
+
+        // Dev app exits
+        sched.terminate_task(dev_task, 0).expect("dev task exit");
+        assert_eq!(sched.get_task(dev_task).unwrap().state, TaskState::Zombie);
+
+        // reap_orphans reclaims it
+        let reaped = sched.reap_orphans();
+        assert_eq!(reaped, 1);
+        assert!(sched.get_task(dev_task).is_none());
+        assert!(crate::task::process::process_for_task(dev_task).is_none());
+    }
+
+    #[test]
+    fn resource_reclamation_cycle_preserves_limits_and_no_leak() {
+        let mut sched = Scheduler::new();
+        sched.init(CapabilityTable::new_for_task(TaskId(0), 16));
+
+        let initial_task_count = sched.task_count();
+
+        for _ in 0..5 {
+            let parent_id = sched.spawn("cycle_parent", dummy_test_entry, CapabilityTable::new_for_task(TaskId::new(), 16), 1);
+            let child_id = sched.spawn_with_parent("cycle_child", dummy_test_entry, CapabilityTable::new_for_task(TaskId::new(), 16), 1, parent_id);
+
+            sched.terminate_child(parent_id, child_id, 0).expect("terminate child");
+            let _ = sched.reap_child(parent_id, child_id).expect("reap child");
+
+            sched.terminate_task(parent_id, 0).expect("terminate parent");
+            let _ = sched.reap_orphans();
+        }
+
+        assert_eq!(sched.task_count(), initial_task_count);
+    }
+}
+
