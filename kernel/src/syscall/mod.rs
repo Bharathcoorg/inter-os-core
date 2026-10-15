@@ -2672,8 +2672,15 @@ pub fn sys_tcp_send(connection_id: u32, payload: &[u8]) -> SyscallResult {
 }
 
 pub fn sys_tcp_recv(connection_id: u32, out: &mut [u8]) -> Result<usize, SyscallResult> {
-    let owner = SCHEDULER.lock().current_task_id().ok_or(SyscallResult::PermissionDenied)?.0 as u32;
-    let n = crate::net::TCP_TABLE.lock().recv_owned(connection_id, owner, out).map_err(|e| match e {
+    let (owner, caps) = {
+        let sched = SCHEDULER.lock();
+        let current = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+        if !current.cap_table.has_capability(CapabilityType::NetworkReceive, Rights::READ) {
+            return Err(SyscallResult::PermissionDenied);
+        }
+        (current.id.0 as u32, current.cap_table.clone())
+    };
+    let n = crate::net::TCP_TABLE.lock().recv_owned(connection_id, owner, out, &caps).map_err(|e| match e {
         NetError::CapabilityDenied => SyscallResult::PermissionDenied,
         NetError::NoPacketAvailable => SyscallResult::NotReady,
         _ => SyscallResult::NetworkError,

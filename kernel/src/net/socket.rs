@@ -676,10 +676,32 @@ impl TcpConnectionTable {
         self.get(id).filter(|c| c.tx_pending).map(|c| &c.tx[..c.tx_len])
     }
 
-    pub fn recv_owned(&mut self, id: u32, owner_task_id: u32, out: &mut [u8]) -> Result<usize, NetError> {
+    pub fn recv_owned(
+        &mut self,
+        id: u32,
+        owner_task_id: u32,
+        out: &mut [u8],
+        caps: &CapabilityTable,
+    ) -> Result<usize, NetError> {
         let conn = self.get_mut(id).ok_or(NetError::NoPacketAvailable)?;
-        if conn.owner_task_id != owner_task_id { return Err(NetError::CapabilityDenied); }
-        if conn.rx_len == 0 { return Err(NetError::NoPacketAvailable); }
+        if conn.owner_task_id != owner_task_id {
+            return Err(NetError::CapabilityDenied);
+        }
+
+        // Caller must possess NetworkReceive capability with READ rights
+        if !caps.has_capability(CapabilityType::NetworkReceive, Rights::READ) {
+            return Err(NetError::CapabilityDenied);
+        }
+
+        if conn.rx_len == 0 {
+            return Err(NetError::NoPacketAvailable);
+        }
+
+        // Consume exactly one invocation of the NetworkReceive lease upon actual reception
+        if !caps.authorize_capability(CapabilityType::NetworkReceive, Rights::READ) {
+            return Err(NetError::CapabilityDenied);
+        }
+
         let n = out.len().min(conn.rx_len);
         out[..n].copy_from_slice(&conn.rx[..n]);
         conn.rx.copy_within(n..conn.rx_len, 0);
@@ -870,6 +892,7 @@ mod tcp_reliability_tests {
         delegation::register_lease(exp_recv.clone());
 
         // Advance system ticks past the 10-tick duration to expire the leases
+        let prev_ticks = crate::interrupts::SYSTEM_TICKS.load(core::sync::atomic::Ordering::SeqCst);
         crate::interrupts::SYSTEM_TICKS.store(lease_start + 50, core::sync::atomic::Ordering::SeqCst);
 
         let mut exp_caps = CapabilityTable::new_for_task(task_id, 4);
@@ -884,6 +907,9 @@ mod tcp_reliability_tests {
         assert_eq!(sock_table.create_socket(task_id.0 as u32, 45002, &exp_caps).err(), Some(NetError::CapabilityDenied));
         assert_eq!(crate::net::send_udp_datagram(Ipv4Address::LOCALHOST, 45000, Ipv4Address::LOCALHOST, 45000, b"X", &exp_caps).err(), Some(NetError::CapabilityDenied));
         assert_eq!(sock_table.get_mut(sock_id).unwrap().recv_from(&mut rx_buf, &exp_caps).err(), Some(NetError::CapabilityDenied));
+
+        // Restore system ticks to avoid inter-test side effects
+        crate::interrupts::SYSTEM_TICKS.store(prev_ticks, core::sync::atomic::Ordering::SeqCst);
 
         // 3. Revoked delegated leases across create_socket, send_udp_datagram, recv_from
         let current_now = crate::interrupts::get_system_ticks();
@@ -950,6 +976,187 @@ mod tcp_reliability_tests {
         assert_eq!(sock_table.create_socket(task_id.0 as u32, 45004, &exh_caps).err(), Some(NetError::CapabilityDenied));
         assert_eq!(crate::net::send_udp_datagram(Ipv4Address::LOCALHOST, 45000, Ipv4Address::LOCALHOST, 45000, b"X", &exh_caps).err(), Some(NetError::CapabilityDenied));
         assert_eq!(sock_table.get_mut(sock_id).unwrap().recv_from(&mut rx_buf, &exh_caps).err(), Some(NetError::CapabilityDenied));
+    }
+
+    #[test]
+    fn tcp_receive_capability_and_lease_enforcement() {
+        use crate::capability::{delegation, Capability, CapabilityId};
+        use crate::task::TaskId;
+
+        let task_id = TaskId(999);
+
+        let parent_recv = Capability {
+            id: CapabilityId(301),
+            cap_type: CapabilityType::NetworkReceive,
+            rights: Rights::READ.union(Rights::GRANT),
+            object_id: 0,
+        };
+
+        let mut table = TcpConnectionTable::new();
+        let conn_id = table.open(task_id.0 as u32, 52000, Ipv4Address::LOCALHOST, 52001, 1000)
+            .expect("open connection");
+        table.get_mut(conn_id).expect("connection exists").state = crate::net::TcpState::Established;
+
+        let mut out = [0u8; 64];
+
+        // 1. No capability: empty capability table must be denied
+        {
+            let empty_caps = CapabilityTable::new_for_task(task_id, 4);
+            table.enqueue_rx(conn_id, task_id.0 as u32, b"TEST_PAYLOAD").expect("enqueue");
+            let res = table.recv_owned(conn_id, task_id.0 as u32, &mut out, &empty_caps);
+            assert_eq!(res.err(), Some(NetError::CapabilityDenied), "No capability must be denied");
+        }
+
+        // 2. Wrong capability: table holding only NetworkSend/NetworkSocket must be denied
+        {
+            let wrong_cap = Capability {
+                id: CapabilityId(302),
+                cap_type: CapabilityType::NetworkSend,
+                rights: Rights::WRITE.union(Rights::READ),
+                object_id: 0,
+            };
+            let mut wrong_caps = CapabilityTable::new_for_task(task_id, 4);
+            wrong_caps.insert(wrong_cap).unwrap();
+            let res = table.recv_owned(conn_id, task_id.0 as u32, &mut out, &wrong_caps);
+            assert_eq!(res.err(), Some(NetError::CapabilityDenied), "Wrong capability must be denied");
+        }
+
+        // 3. Insufficient rights: NetworkReceive with only WRITE rights (missing READ) must be denied
+        {
+            let no_read_cap = Capability {
+                id: CapabilityId(303),
+                cap_type: CapabilityType::NetworkReceive,
+                rights: Rights::WRITE,
+                object_id: 0,
+            };
+            let mut no_read_caps = CapabilityTable::new_for_task(task_id, 4);
+            no_read_caps.insert(no_read_cap).unwrap();
+            let res = table.recv_owned(conn_id, task_id.0 as u32, &mut out, &no_read_caps);
+            assert_eq!(res.err(), Some(NetError::CapabilityDenied), "Insufficient rights must be denied");
+        }
+
+        // 4. Expired delegated lease: lease whose ticks expired must be denied
+        {
+            let lease_start = crate::interrupts::get_system_ticks();
+            let exp_lease = delegation::DelegatedLease::new(
+                9011, &parent_recv, TaskId(1), task_id, Rights::READ, 5, 10, lease_start,
+            ).expect("exp_lease");
+            delegation::register_lease(exp_lease.clone());
+
+            let prev_ticks = crate::interrupts::SYSTEM_TICKS.load(core::sync::atomic::Ordering::SeqCst);
+            crate::interrupts::SYSTEM_TICKS.store(lease_start + 50, core::sync::atomic::Ordering::SeqCst);
+
+            let mut exp_caps = CapabilityTable::new_for_task(task_id, 4);
+            exp_caps.insert(exp_lease.to_capability()).unwrap();
+
+            assert!(!exp_caps.has_capability(CapabilityType::NetworkReceive, Rights::READ));
+            let res = table.recv_owned(conn_id, task_id.0 as u32, &mut out, &exp_caps);
+            assert_eq!(res.err(), Some(NetError::CapabilityDenied), "Expired lease must be denied");
+
+            crate::interrupts::SYSTEM_TICKS.store(prev_ticks, core::sync::atomic::Ordering::SeqCst);
+        }
+
+        // 5. Revoked delegated lease: revoked lease must be denied
+        {
+            let rev_now = crate::interrupts::get_system_ticks();
+            let rev_lease = delegation::DelegatedLease::new(
+                9021, &parent_recv, TaskId(1), task_id, Rights::READ, 5, 100_000, rev_now,
+            ).expect("rev_lease");
+            delegation::register_lease(rev_lease.clone());
+            delegation::revoke_lease(9021);
+
+            let mut rev_caps = CapabilityTable::new_for_task(task_id, 4);
+            rev_caps.insert(rev_lease.to_capability()).unwrap();
+
+            assert!(!rev_caps.has_capability(CapabilityType::NetworkReceive, Rights::READ));
+            let res = table.recv_owned(conn_id, task_id.0 as u32, &mut out, &rev_caps);
+            assert_eq!(res.err(), Some(NetError::CapabilityDenied), "Revoked lease must be denied");
+        }
+
+        // 6. Exhausted delegated lease: lease with 0 remaining invocations must be denied
+        {
+            let exh_now = crate::interrupts::get_system_ticks();
+            let exh_lease = delegation::DelegatedLease::new(
+                9031, &parent_recv, TaskId(1), task_id, Rights::READ, 1, 100_000, exh_now,
+            ).expect("exh_lease");
+            delegation::register_lease(exh_lease.clone());
+            delegation::consume_invocation(9031, Some(task_id), exh_now, Rights::READ).unwrap();
+
+            let mut exh_caps = CapabilityTable::new_for_task(task_id, 4);
+            exh_caps.insert(exh_lease.to_capability()).unwrap();
+
+            assert!(!exh_caps.has_capability(CapabilityType::NetworkReceive, Rights::READ));
+            let res = table.recv_owned(conn_id, task_id.0 as u32, &mut out, &exh_caps);
+            assert_eq!(res.err(), Some(NetError::CapabilityDenied), "Exhausted lease must be denied");
+        }
+
+        // 7. Wrong grantee: lease granted to TaskId(555) cannot be authorized by TaskId(999)
+        {
+            let wg_now = crate::interrupts::get_system_ticks();
+            let wg_lease = delegation::DelegatedLease::new(
+                9041, &parent_recv, TaskId(1), TaskId(555), Rights::READ, 5, 100_000, wg_now,
+            ).expect("wg_lease");
+            delegation::register_lease(wg_lease.clone());
+
+            let mut wg_caps = CapabilityTable::new_for_task(task_id, 4);
+            wg_caps.insert(wg_lease.to_capability()).unwrap();
+
+            assert!(!wg_caps.has_capability(CapabilityType::NetworkReceive, Rights::READ));
+            let res = table.recv_owned(conn_id, task_id.0 as u32, &mut out, &wg_caps);
+            assert_eq!(res.err(), Some(NetError::CapabilityDenied), "Wrong grantee must be denied");
+        }
+
+        // 8. Connection ownership check: caller task ID mismatch must be denied
+        {
+            let valid_now = crate::interrupts::get_system_ticks();
+            let valid_lease = delegation::DelegatedLease::new(
+                9051, &parent_recv, TaskId(1), task_id, Rights::READ, 2, 100_000, valid_now,
+            ).expect("valid_lease");
+            delegation::register_lease(valid_lease.clone());
+
+            let mut valid_caps = CapabilityTable::new_for_task(task_id, 4);
+            valid_caps.insert(valid_lease.to_capability()).unwrap();
+
+            let other_task = (task_id.0 + 1) as u32;
+            let res = table.recv_owned(conn_id, other_task, &mut out, &valid_caps);
+            assert_eq!(res.err(), Some(NetError::CapabilityDenied), "Wrong connection owner must be denied");
+        }
+
+        // 9. Empty rx queue: does not consume quota on NoPacketAvailable
+        {
+            // Drain current rx queue first
+            table.get_mut(conn_id).unwrap().rx_len = 0;
+
+            let single_now = crate::interrupts::get_system_ticks();
+            let single_lease = delegation::DelegatedLease::new(
+                9061, &parent_recv, TaskId(1), task_id, Rights::READ, 1, 100_000, single_now,
+            ).expect("single_lease");
+            delegation::register_lease(single_lease.clone());
+
+            let mut single_caps = CapabilityTable::new_for_task(task_id, 4);
+            single_caps.insert(single_lease.to_capability()).unwrap();
+
+            assert!(single_caps.has_capability(CapabilityType::NetworkReceive, Rights::READ));
+            let empty_res = table.recv_owned(conn_id, task_id.0 as u32, &mut out, &single_caps);
+            assert_eq!(empty_res.err(), Some(NetError::NoPacketAvailable));
+            // Quota must NOT be consumed
+            assert!(single_caps.has_capability(CapabilityType::NetworkReceive, Rights::READ));
+
+            // 10. Valid single-use receive: succeeds and consumes the single invocation
+            table.enqueue_rx(conn_id, task_id.0 as u32, b"HELLO_TCP").expect("enqueue");
+            let recv_res1 = table.recv_owned(conn_id, task_id.0 as u32, &mut out, &single_caps);
+            assert!(recv_res1.is_ok(), "First receive must succeed: {:?}", recv_res1.err());
+            let n = recv_res1.unwrap();
+            assert_eq!(&out[..n], b"HELLO_TCP");
+
+            // Lease is now exhausted
+            assert!(!single_caps.has_capability(CapabilityType::NetworkReceive, Rights::READ));
+
+            // 11. Second receive is denied after single-use lease consumed
+            table.enqueue_rx(conn_id, task_id.0 as u32, b"EXTRA_TCP").expect("enqueue");
+            let recv_res2 = table.recv_owned(conn_id, task_id.0 as u32, &mut out, &single_caps);
+            assert_eq!(recv_res2.err(), Some(NetError::CapabilityDenied), "Second receive must be denied after single-use lease exhaustion");
+        }
     }
 }
 
