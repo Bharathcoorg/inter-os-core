@@ -501,11 +501,22 @@ impl CapabilityTable {
     /// answering "yes, you hold it" for a capability whose authority has been
     /// taken back would be a stale-copy answer.
     pub fn has_capability(&self, expected_type: CapabilityType, required_rights: Rights) -> bool {
+        let now = crate::interrupts::get_system_ticks();
         self.slots.iter().any(|slot| {
             slot.cap.as_ref().is_some_and(|cap| {
-                cap.cap_type == expected_type
-                    && cap.rights.contains(required_rights)
-                    && !revocation::is_revoked(cap.id)
+                if cap.cap_type != expected_type || !cap.rights.contains(required_rights) {
+                    return false;
+                }
+                if revocation::is_revoked(cap.id) {
+                    return false;
+                }
+                if cap.id.0 & 0x8000_0000_0000_0000 != 0 {
+                    let lease_id = cap.id.0 & 0x7FFF_FFFF_FFFF_FFFF;
+                    if !delegation::is_lease_valid(lease_id, self.owner_task, now, required_rights) {
+                        return false;
+                    }
+                }
+                true
             })
         })
     }
@@ -1199,6 +1210,75 @@ mod tests {
         // Access telemetry incremented on discovery
         let (count, _) = table.access_stats(s0).unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn delegated_lease_has_capability_and_quota_enforcement() {
+        let task_id = crate::task::TaskId(10);
+        let parent_cap = Capability {
+            id: CapabilityId(500),
+            cap_type: CapabilityType::NetworkSend,
+            rights: Rights::WRITE.union(Rights::GRANT),
+            object_id: 0,
+        };
+        let current_ticks = crate::interrupts::get_system_ticks();
+
+        // 1. Valid lease with 2 invocations for 100 ticks
+        let lease = delegation::DelegatedLease::new(
+            5001,
+            &parent_cap,
+            crate::task::TaskId(1),
+            task_id,
+            Rights::WRITE,
+            2,
+            100,
+            current_ticks,
+        ).expect("create lease");
+        delegation::register_lease(lease.clone());
+
+        let mut table = CapabilityTable::new_for_task(task_id, 2);
+        table.insert(lease.to_capability()).expect("insert lease");
+
+        // Inspecting capability returns true
+        assert!(table.has_capability(CapabilityType::NetworkSend, Rights::WRITE));
+        // Wrong rights or type returns false
+        assert!(!table.has_capability(CapabilityType::NetworkSend, Rights::READ));
+        assert!(!table.has_capability(CapabilityType::NetworkReceive, Rights::WRITE));
+
+        // Unauthorized caller task returns false
+        let mut rogue_table = CapabilityTable::new_for_task(crate::task::TaskId(99), 2);
+        rogue_table.insert(lease.to_capability()).expect("insert rogue");
+        assert!(!rogue_table.has_capability(CapabilityType::NetworkSend, Rights::WRITE));
+
+        // Authorize invocation 1 consumes 1 quota
+        assert!(table.authorize_capability(CapabilityType::NetworkSend, Rights::WRITE));
+        // Inspection still succeeds while quota / lease is active
+        assert!(table.has_capability(CapabilityType::NetworkSend, Rights::WRITE));
+
+        // Authorize invocation 2 consumes remaining quota
+        assert!(table.authorize_capability(CapabilityType::NetworkSend, Rights::WRITE));
+
+        // Quota is exhausted (0 remaining), so further authorization must fail
+        assert!(!table.authorize_capability(CapabilityType::NetworkSend, Rights::WRITE));
+
+        // Revoking lease makes has_capability fail
+        let lease2 = delegation::DelegatedLease::new(
+            5002,
+            &parent_cap,
+            crate::task::TaskId(1),
+            task_id,
+            Rights::WRITE,
+            5,
+            100,
+            current_ticks,
+        ).expect("create lease 2");
+        delegation::register_lease(lease2.clone());
+        let mut table2 = CapabilityTable::new_for_task(task_id, 2);
+        table2.insert(lease2.to_capability()).expect("insert lease 2");
+        assert!(table2.has_capability(CapabilityType::NetworkSend, Rights::WRITE));
+        delegation::revoke_lease(5002);
+        assert!(!table2.has_capability(CapabilityType::NetworkSend, Rights::WRITE));
+        assert!(!table2.authorize_capability(CapabilityType::NetworkSend, Rights::WRITE));
     }
 }
 

@@ -2914,6 +2914,9 @@ pub fn sys_net_socket(port: u16) -> Result<u32, SyscallResult> {
         Some(t) => t,
         None => return Err(SyscallResult::PermissionDenied),
     };
+    if !current.cap_table.authorize_capability(CapabilityType::NetworkSocket, Rights::WRITE) {
+        return Err(SyscallResult::PermissionDenied);
+    }
     let task_id = current.id.0 as u32;
     let caps = current.cap_table.clone();
     drop(sched);
@@ -2991,6 +2994,9 @@ pub fn sys_net_sendto(dst_ip: crate::net::Ipv4Address, dst_port: u16, payload: &
         Some(t) => t,
         None => return SyscallResult::PermissionDenied,
     };
+    if !current.cap_table.authorize_capability(CapabilityType::NetworkSend, Rights::WRITE) {
+        return SyscallResult::PermissionDenied;
+    }
     let caps = current.cap_table.clone();
     drop(sched);
 
@@ -3033,6 +3039,9 @@ pub fn sys_net_recvfrom(sock_id: crate::net::SocketId, out_buf: &mut [u8]) -> Re
         Some(t) => t,
         None => return Err(SyscallResult::PermissionDenied),
     };
+    if !current.cap_table.authorize_capability(CapabilityType::NetworkReceive, Rights::READ) {
+        return Err(SyscallResult::PermissionDenied);
+    }
     let caps = current.cap_table.clone();
     let current_id = current.id;
     drop(sched);

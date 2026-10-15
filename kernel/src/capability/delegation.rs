@@ -345,6 +345,33 @@ pub fn is_lease_active(lease_id: u64, current_ticks: u64) -> bool {
     })
 }
 
+/// Inspects whether a registered delegated lease is valid for an operation without
+/// consuming an invocation quota.
+///
+/// Verifies lease existence, revocation status, expiration ticks, grantee task match, and rights.
+pub fn is_lease_valid(
+    lease_id: u64,
+    caller: Option<TaskId>,
+    current_ticks: u64,
+    required_rights: Rights,
+) -> bool {
+    let registry = DELEGATION_REGISTRY.lock();
+    registry.iter().any(|lease| {
+        if lease.lease_id != lease_id || lease.revoked {
+            return false;
+        }
+        if let Some(caller_task) = caller {
+            if caller_task != lease.grantee_task {
+                return false;
+            }
+        }
+        if current_ticks >= lease.expiry_ticks {
+            return false;
+        }
+        lease.attenuated_rights.contains(required_rights)
+    })
+}
+
 /// Validates and consumes one invocation from a delegated lease.
 pub fn consume_invocation(
     lease_id: u64,
