@@ -46,29 +46,72 @@ function Invoke-Check {
 function Invoke-Build {
     Write-Banner "Building x86_64 kernel + bootloader"
 
-    # WHY the userspace binaries are built first, and not left to a previous
-    # run: the kernel embeds them with include_bytes! from
+    # WHY userspace is built before the kernel, but only when it is not already
+    # correct: the kernel embeds these binaries with include_bytes! from
     # target/x86_64-unknown-none/debug, and the guest ELF loader accepts only
     # ET_EXEC. A plain `cargo build` of those crates writes an ET_DYN binary to
     # that same path, because the *-unknown-none targets default to
-    # position-independent executables. Packaging the kernel without rebuilding
-    # userspace therefore embeds whatever happens to be sitting there, and the
-    # device panics at boot with "ELF must be ET_EXEC". build_userspace.ps1
-    # passes -no-pie and asserts ET_EXEC after every binary, so calling it here
-    # makes the packaged image bootable instead of order-dependent.
-    $userspaceBuilder = Join-Path $rootDir "tools\build_userspace.ps1"
-    if (-not (Test-Path $userspaceBuilder)) {
-        throw "Missing build tool: userspace builder not found at $userspaceBuilder"
-    }
-    Write-Host "Building Ring-3 userspace (ET_EXEC required by the guest ELF loader)..." -ForegroundColor Yellow
-    $savedDir = $PWD.Path
-    try {
-        & $userspaceBuilder
-        if ($LASTEXITCODE -ne 0) {
-            throw "Userspace build failed with exit code $LASTEXITCODE"
+    # position-independent executables. Packaging without checking therefore
+    # embeds whatever happens to be sitting there, and the device halts at boot
+    # with "ELF must be ET_EXEC". tools/build_userspace.ps1 passes -no-pie and
+    # asserts ET_EXEC after every binary.
+    #
+    # WHY it is conditional: rebuilding unconditionally rewrites all 26 binaries
+    # on every run, which changes the kernel's embedded inputs and forces a full
+    # kernel recompile. That defeats the no-op rebuild property a second
+    # consecutive build is supposed to have. The guard below skips the rebuild
+    # only when every embedded image is already present and already ET_EXEC,
+    # which is the exact condition that made the previous image bootable.
+    $embeddedDir = Join-Path $targetDir "x86_64-unknown-none\debug"
+    $embeddedImages = @(
+        "init", "displayd", "inputd", "storaged", "netd", "powerd", "modemd",
+        "audiod", "camerad", "sensord", "compositor", "launcher", "settings",
+        "terminal", "dialer", "vault", "camera", "calculator", "browser",
+        "messages", "calendar", "music", "file_manager", "gallery",
+        "sensor_dashboard", "card_demo"
+    )
+
+    $needsUserspaceBuild = $false
+    $badImages = @()
+    foreach ($image in $embeddedImages) {
+        $imagePath = Join-Path $embeddedDir $image
+        if (-not (Test-Path -LiteralPath $imagePath)) {
+            $badImages += "$image (missing)"
+            continue
         }
-    } finally {
-        Set-Location $savedDir
+        $header = [System.IO.File]::ReadAllBytes($imagePath)
+        if ($header.Length -lt 18 -or $header[0] -ne 0x7F -or $header[1] -ne 0x45 -or
+            $header[2] -ne 0x4C -or $header[3] -ne 0x46) {
+            $badImages += "$image (not an ELF)"
+            continue
+        }
+        $eType = [BitConverter]::ToUInt16($header, 16)
+        if ($eType -ne 2) {
+            $badImages += "$image (ET_DYN, the guest loader requires ET_EXEC)"
+        }
+    }
+    if ($badImages.Count -gt 0) {
+        $needsUserspaceBuild = $true
+        Write-Host "Ring-3 userspace needs rebuilding:" -ForegroundColor Yellow
+        $badImages | ForEach-Object { Write-Host "  - $_" -ForegroundColor Yellow }
+    }
+
+    if ($needsUserspaceBuild) {
+        $userspaceBuilder = Join-Path $rootDir "tools\build_userspace.ps1"
+        if (-not (Test-Path $userspaceBuilder)) {
+            throw "Missing build tool: userspace builder not found at $userspaceBuilder"
+        }
+        $savedDir = $PWD.Path
+        try {
+            & $userspaceBuilder
+            if ($LASTEXITCODE -ne 0) {
+                throw "Userspace build failed with exit code $LASTEXITCODE"
+            }
+        } finally {
+            Set-Location $savedDir
+        }
+    } else {
+        Write-Host "[OK] Ring-3 userspace already present and ET_EXEC; skipping rebuild." -ForegroundColor Green
     }
 
     $kernelManifest = Join-Path $kernelDir "Cargo.toml"
