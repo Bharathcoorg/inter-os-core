@@ -491,5 +491,77 @@ class StudioSecurityTests(unittest.TestCase):
             except Exception:
                 proc.kill()
 
+    def test_16_early_rejection_body_draining_and_keepalive(self):
+        """Verify early 403/405 rejections reliably drain request bodies and preserve HTTP streams."""
+        # 1. Repeated rejection test: execute 20 sequential POST requests to a GET-only route with payload
+        for i in range(20):
+            payload = {"iteration": i, "padding": "A" * 128}
+            status, data, headers = self._request("POST", "/api/screen/raw", data=payload)
+            self.assertEqual(status, 405, f"Iteration {i} expected 405 Method Not Allowed, got {status}")
+            self.assertIn("Allow", headers, f"Iteration {i} response must include Allow header")
+            self.assertIn("GET", headers.get("Allow", ""))
+
+        # 2. Raw socket keep-alive / stream synchronization test
+        s = socket.create_connection(("127.0.0.1", self.port), timeout=5)
+        try:
+            body = b'{"test_key": "test_value_padding"}'
+            req1 = (
+                f"POST /api/screen/raw HTTP/1.1\r\n"
+                f"Host: 127.0.0.1:{self.port}\r\n"
+                f"Content-Type: application/json\r\n"
+                f"Content-Length: {len(body)}\r\n\r\n"
+            ).encode("utf-8") + body
+            s.sendall(req1)
+
+            # Read full response 1
+            buf = b""
+            while b"\r\n\r\n" not in buf:
+                chunk = s.recv(1024)
+                if not chunk:
+                    break
+                buf += chunk
+            self.assertIn(b"405", buf.split(b"\r\n")[0], "Expected 405 Method Not Allowed for POST to GET route")
+
+            # Extract Content-Length to read exact body
+            cl = 0
+            for line in buf.split(b"\r\n"):
+                if line.lower().startswith(b"content-length:"):
+                    cl = int(line.split(b":")[1].strip())
+            header_part, rest = buf.split(b"\r\n\r\n", 1)
+            while len(rest) < cl:
+                chunk = s.recv(cl - len(rest))
+                if not chunk:
+                    break
+                rest += chunk
+            self.assertEqual(len(rest), cl)
+            res_data = json.loads(rest.decode("utf-8"))
+            self.assertFalse(res_data.get("success"))
+        finally:
+            s.close()
+
+        # 3. Bounded drain on oversized rejected payload
+        s_over = socket.create_connection(("127.0.0.1", self.port), timeout=5)
+        try:
+            oversized_len = server.StudioAPIHandler.MAX_DRAIN_BYTES + 4096
+            oversized_body = b"X" * oversized_len
+            req_over = (
+                f"POST /api/screen/raw HTTP/1.1\r\n"
+                f"Host: 127.0.0.1:{self.port}\r\n"
+                f"Content-Type: application/json\r\n"
+                f"Content-Length: {oversized_len}\r\n\r\n"
+            ).encode("utf-8") + oversized_body
+            s_over.sendall(req_over)
+
+            resp_over = b""
+            while b"\r\n\r\n" not in resp_over:
+                chunk = s_over.recv(1024)
+                if not chunk:
+                    break
+                resp_over += chunk
+            self.assertIn(b"405", resp_over.split(b"\r\n")[0])
+            self.assertIn(b"connection: close", resp_over.lower())
+        finally:
+            s_over.close()
+
 if __name__ == "__main__":
     unittest.main()

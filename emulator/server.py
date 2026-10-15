@@ -2351,6 +2351,7 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
     # multi-gigabyte payload and exhaust memory before a single payload byte
     # is inspected.
     MAX_POST_BYTES = 64 * 1024 * 1024
+    MAX_DRAIN_BYTES = 64 * 1024
 
     def _send_json(self, status, payload, headers=None):
         """Writes a JSON response so rejections match regular replies."""
@@ -2358,6 +2359,8 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
         self.send_response(status)
         self.send_header('Content-Type', 'application/json')
         self.send_header('Content-Length', str(len(body)))
+        if getattr(self, 'close_connection', False):
+            self.send_header('Connection', 'close')
         if headers:
             for k, v in headers.items():
                 self.send_header(k, v)
@@ -2365,15 +2368,29 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
         self.wfile.write(body)
 
     def _drain_incoming_body_if_any(self):
-        """Reads and discards incoming body up to 1 MiB so early rejections don't RST."""
+        """Reads and discards incoming body up to MAX_DRAIN_BYTES so early rejections don't RST.
+
+        If Content-Length exceeds MAX_DRAIN_BYTES or is missing/malformed, the body cannot
+        be safely consumed without unbounded overhead. In that case, drains up to
+        MAX_DRAIN_BYTES and closes the connection to prevent smuggling or desynchronization.
+        """
         raw = self.headers.get('Content-Length')
-        if raw:
-            try:
-                cl = int(raw)
-                if cl > 0:
-                    self._drain_body(min(cl, 1024 * 1024))
-            except (TypeError, ValueError):
-                pass
+        if not raw:
+            if self.headers.get('Transfer-Encoding', '').lower() == 'chunked':
+                self.close_connection = True
+            return
+        try:
+            cl = int(raw)
+            if cl < 0:
+                self.close_connection = True
+                return
+            if cl <= self.MAX_DRAIN_BYTES:
+                self._drain_body(cl)
+            else:
+                self._drain_body(self.MAX_DRAIN_BYTES)
+                self.close_connection = True
+        except (TypeError, ValueError):
+            self.close_connection = True
 
     def _send_method_not_allowed(self, allowed='GET, POST, OPTIONS'):
         self._drain_incoming_body_if_any()
@@ -3960,8 +3977,8 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             self.wfile.write(json.dumps({'success': ok, 'source': 'GUEST_VFS', 'path': path, 'error': err}).encode())
             return
 
-        self.send_response(404)
-        self.end_headers()
+        self._drain_incoming_body_if_any()
+        self._send_json(404, {'success': False, 'error': 'Not found'})
 
     def do_OPTIONS(self):
         if not self._origin_allowed():
