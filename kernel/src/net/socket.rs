@@ -683,13 +683,13 @@ impl TcpConnectionTable {
         out: &mut [u8],
         caps: &CapabilityTable,
     ) -> Result<usize, NetError> {
-        let conn = self.get_mut(id).ok_or(NetError::NoPacketAvailable)?;
-        if conn.owner_task_id != owner_task_id {
+        // Enforce capability authorization upfront to eliminate connection-ID enumeration oracles
+        if !caps.has_capability_object(CapabilityType::NetworkReceive, Rights::READ, id as u64) {
             return Err(NetError::CapabilityDenied);
         }
 
-        // Caller must possess NetworkReceive capability with READ rights
-        if !caps.has_capability(CapabilityType::NetworkReceive, Rights::READ) {
+        let conn = self.get_mut(id).ok_or(NetError::NoPacketAvailable)?;
+        if conn.owner_task_id != owner_task_id {
             return Err(NetError::CapabilityDenied);
         }
 
@@ -697,8 +697,8 @@ impl TcpConnectionTable {
             return Err(NetError::NoPacketAvailable);
         }
 
-        // Consume exactly one invocation of the NetworkReceive lease upon actual reception
-        if !caps.authorize_capability(CapabilityType::NetworkReceive, Rights::READ) {
+        // Consume exactly one invocation of the connection-matching NetworkReceive lease upon actual reception
+        if !caps.authorize_capability_object(CapabilityType::NetworkReceive, Rights::READ, id as u64) {
             return Err(NetError::CapabilityDenied);
         }
 
@@ -1157,6 +1157,56 @@ mod tcp_reliability_tests {
             let recv_res2 = table.recv_owned(conn_id, task_id.0 as u32, &mut out, &single_caps);
             assert_eq!(recv_res2.err(), Some(NetError::CapabilityDenied), "Second receive must be denied after single-use lease exhaustion");
         }
+    }
+
+    #[test]
+    fn tcp_recv_connection_object_scoping() {
+        use crate::capability::{delegation, Capability, CapabilityId};
+        use crate::task::TaskId;
+
+        let task_id = TaskId(998);
+        let mut table = TcpConnectionTable::new();
+
+        let conn_a = table.open(task_id.0 as u32, 53000, Ipv4Address::LOCALHOST, 53001, 1000)
+            .expect("open conn_a");
+        table.get_mut(conn_a).unwrap().state = crate::net::TcpState::Established;
+
+        let conn_b = table.open(task_id.0 as u32, 54000, Ipv4Address::LOCALHOST, 54001, 1000)
+            .expect("open conn_b");
+        table.get_mut(conn_b).unwrap().state = crate::net::TcpState::Established;
+
+        table.enqueue_rx(conn_a, task_id.0 as u32, b"PAYLOAD_A").expect("enqueue conn_a");
+        table.enqueue_rx(conn_b, task_id.0 as u32, b"PAYLOAD_B").expect("enqueue conn_b");
+
+        // Mint a parent capability scoped specifically to connection A (object_id = conn_a as u64)
+        let parent_recv_a = Capability {
+            id: CapabilityId(551),
+            cap_type: CapabilityType::NetworkReceive,
+            rights: Rights::READ.union(Rights::GRANT),
+            object_id: conn_a as u64,
+        };
+
+        let now = crate::interrupts::get_system_ticks();
+        let lease_a = delegation::DelegatedLease::new(
+            9091, &parent_recv_a, TaskId(1), task_id, Rights::READ, 10, 10_000, now,
+        ).expect("create lease for conn_a");
+        delegation::register_lease(lease_a.clone());
+
+        let mut caps = CapabilityTable::new_for_task(task_id, 4);
+        caps.insert(lease_a.to_capability()).expect("insert delegated lease");
+
+        let mut out = [0u8; 64];
+
+        // 1. Attempting to receive from connection B using lease scoped to connection A must be DENIED
+        let res_b = table.recv_owned(conn_b, task_id.0 as u32, &mut out, &caps);
+        assert_eq!(res_b.err(), Some(NetError::CapabilityDenied),
+                   "Lease scoped to connection A must not authorize receive from connection B");
+
+        // 2. Receiving from connection A using lease scoped to connection A must SUCCEED
+        let res_a = table.recv_owned(conn_a, task_id.0 as u32, &mut out, &caps);
+        assert!(res_a.is_ok(), "Lease scoped to connection A must authorize receive from connection A, got: {:?}", res_a.err());
+        let n = res_a.unwrap();
+        assert_eq!(&out[..n], b"PAYLOAD_A");
     }
 }
 

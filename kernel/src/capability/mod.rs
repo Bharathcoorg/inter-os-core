@@ -587,6 +587,72 @@ impl CapabilityTable {
         false
     }
 
+    /// Checks whether an object-matching capability (exact object_id or global 0) is held
+    /// without consuming invocation quota.
+    pub fn has_capability_object(
+        &self,
+        expected_type: CapabilityType,
+        required_rights: Rights,
+        expected_object_id: u64,
+    ) -> bool {
+        let now = crate::interrupts::get_system_ticks();
+        self.slots.iter().any(|slot| {
+            slot.cap.as_ref().map_or(false, |cap| {
+                if cap.cap_type != expected_type || !cap.rights.contains(required_rights) {
+                    return false;
+                }
+                if cap.object_id != 0 && cap.object_id != expected_object_id {
+                    return false;
+                }
+                if revocation::is_revoked(cap.id) {
+                    return false;
+                }
+                if cap.id.0 & 0x8000_0000_0000_0000 != 0 {
+                    let lease_id = cap.id.0 & 0x7FFF_FFFF_FFFF_FFFF;
+                    if !delegation::is_lease_valid(lease_id, self.owner_task, now, required_rights) {
+                        return false;
+                    }
+                }
+                true
+            })
+        })
+    }
+
+    /// Authorizes one operation against an object-matching capability (exact object_id or global 0).
+    /// Delegated capabilities consume exactly one invocation here.
+    pub fn authorize_capability_object(
+        &self,
+        expected_type: CapabilityType,
+        required_rights: Rights,
+        expected_object_id: u64,
+    ) -> bool {
+        for slot in &self.slots {
+            let Some(cap) = slot.cap.as_ref() else { continue; };
+            if cap.cap_type != expected_type || !cap.rights.contains(required_rights) {
+                continue;
+            }
+            if cap.object_id != 0 && cap.object_id != expected_object_id {
+                continue;
+            }
+            if revocation::is_revoked(cap.id) {
+                continue;
+            }
+            if cap.id.0 & 0x8000_0000_0000_0000 != 0 {
+                if delegation::consume_invocation(
+                    cap.id.0 & 0x7FFF_FFFF_FFFF_FFFF,
+                    self.owner_task,
+                    crate::interrupts::get_system_ticks(),
+                    required_rights,
+                ).is_err() {
+                    continue;
+                }
+            }
+            slot.record_access();
+            return true;
+        }
+        false
+    }
+
     /// Authorizes a capability against type, rights, and object target. Delegated
     /// capabilities consume one invocation only after every predicate matches.
     pub fn authorize_object(

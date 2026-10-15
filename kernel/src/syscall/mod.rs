@@ -2676,7 +2676,7 @@ pub fn sys_tcp_recv(connection_id: u32, out: &mut [u8]) -> Result<usize, Syscall
     let (owner, caps) = {
         let sched = SCHEDULER.lock();
         let current = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
-        if !current.cap_table.has_capability(CapabilityType::NetworkReceive, Rights::READ) {
+        if !current.cap_table.has_capability_object(CapabilityType::NetworkReceive, Rights::READ, connection_id as u64) {
             return Err(SyscallResult::PermissionDenied);
         }
         (current.id.0 as u32, current.cap_table.clone())
