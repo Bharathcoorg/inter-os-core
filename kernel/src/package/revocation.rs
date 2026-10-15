@@ -322,22 +322,22 @@ impl RevocationRegistry {
     }
 
     /// Returns true if the key is trusted and belongs to an authorized system/platform publisher.
+    ///
+    /// Until a trust root is provisioned for one of those identities this returns
+    /// false for every key, so capability 18 cannot be minted and any package
+    /// declaring it is refused at both install and launch. That is deliberate
+    /// fail-closed behaviour: `trust_key` is deliberately unreachable from
+    /// userspace, so nothing in this tree can grant platform authority, and the
+    /// absence of a provisioning path must not be papered over with a
+    /// permissive default.
     pub fn is_system_publisher(&self, key: &[u8; 32]) -> bool {
         if !self.is_key_trusted(key) {
             return false;
         }
-        if let Some(publisher) = self.trusted_keys.get(key) {
-            publisher == "system"
-                || publisher == "platform"
-                || publisher.starts_with("org.interos")
-        } else {
-            false
+        match self.trusted_keys.get(key) {
+            Some(publisher) => is_system_publisher_identity(publisher),
+            None => false,
         }
-    }
-
-    /// Grants an in-memory root of trust specifically with system platform authority.
-    pub fn grant_system_trust_root(&mut self, key: [u8; 32], publisher: &str) -> Result<(), &'static str> {
-        self.grant_trust_root(key, publisher)
     }
 
     pub fn apply_key_rotation(&mut self, proof: &KeyRotationProof) -> Result<(), &'static str> {
@@ -383,6 +383,29 @@ impl RevocationRegistry {
 }
 
 pub static REVOCATION_REGISTRY: Mutex<RevocationRegistry> = Mutex::new(RevocationRegistry::new());
+
+/// Publisher identities that may hold system platform authority.
+///
+/// WHY an explicit allowlist and a delimited namespace rather than a bare
+/// prefix: `org.interos` as a prefix also matches `org.interos-evil` and
+/// `org.interosX`, so a publisher record naming itself after the namespace
+/// without belonging to it would have been granted platform authority. The two
+/// fixed identities are matched exactly and the namespace test carries the
+/// separating dot.
+///
+/// These strings are written when a trust root is provisioned. They are never
+/// supplied by a package, so this list cannot be widened by anyone who merely
+/// installs software.
+pub const SYSTEM_PUBLISHER_IDENTITIES: [&str; 2] = ["system", "platform"];
+
+/// The delimited namespace reserved for first-party InterOS publishers.
+pub const SYSTEM_PUBLISHER_NAMESPACE: &str = "org.interos.";
+
+/// Returns true if `publisher` names a platform publisher.
+pub fn is_system_publisher_identity(publisher: &str) -> bool {
+    SYSTEM_PUBLISHER_IDENTITIES.contains(&publisher)
+        || publisher.starts_with(SYSTEM_PUBLISHER_NAMESPACE)
+}
 
 
 #[cfg(test)]
@@ -467,5 +490,95 @@ mod tests {
         r.grant_trust_root(key, "test-publisher").expect("re-granting an existing key must not need a free slot");
         assert!(!r.is_key_trusted(&key),
             "a CRL entry must outrank a trust record written after it");
+    }
+
+    /// The exact set of publisher identities that may hold platform authority,
+    /// and the lookalikes that must not.
+    ///
+    /// Pinning assertion: `org.interos-evil` is rejected. The previous check was
+    /// `starts_with("org.interos")`, which accepted it along with
+    /// `org.interosX`, so any publisher record naming itself after the namespace
+    /// without belonging to it would have been granted platform authority --
+    /// and platform authority is what gates capability 18.
+    #[test]
+    fn system_publisher_identity_accepts_only_delimited_namespace_members() {
+        // Accepted: the two fixed identities and the delimited namespace.
+        for accepted in [
+            "system",
+            "platform",
+            "org.interos.",
+            "org.interos.settings",
+            "org.interos.compositor",
+            "org.interos.service.powerd",
+            "org.interos.a",
+        ] {
+            assert!(
+                is_system_publisher_identity(accepted),
+                "{:?} is a platform publisher identity", accepted
+            );
+        }
+
+        // Rejected: lookalikes that a bare prefix test would have accepted.
+        for rejected in [
+            "org.interos-evil",
+            "org.interosX",
+            "org.interosomething",
+            "org.interos",
+            "org.Interos.settings",
+            "ORG.INTEROS.settings",
+            "system2",
+            "platformx",
+            " system",
+            "system ",
+            "System",
+            "com.example.system",
+            "not-system",
+            "",
+        ] {
+            assert!(
+                !is_system_publisher_identity(rejected),
+                "{:?} must not be a platform publisher identity", rejected
+            );
+        }
+    }
+
+    /// `is_system_publisher` is the gate capability 18 depends on, and with no
+    /// provisioning path reachable it must fail closed for every key.
+    ///
+    /// Pinning assertions: an unprovisioned key is never a system publisher, a
+    /// trusted non-platform publisher is still refused, a revoked key is refused
+    /// even when its publisher record is a platform identity, and only a trusted,
+    /// unrevoked key recorded under a platform identity passes.
+    #[test]
+    fn capability_18_fails_closed_without_a_platform_trust_root() {
+        let mut r = RevocationRegistry::new();
+
+        let unprovisioned = [21u8; 32];
+        assert!(!r.is_system_publisher(&unprovisioned),
+            "an unprovisioned key must never be a system publisher");
+
+        // A trusted publisher outside the platform namespace.
+        let third_party = [22u8; 32];
+        r.grant_trust_root(third_party, "com.example.vendor").expect("trust store has room");
+        assert!(r.is_key_trusted(&third_party), "the key itself is trusted");
+        assert!(!r.is_system_publisher(&third_party),
+            "a trusted third-party publisher must not gain platform authority");
+
+        // A trusted publisher that only looks like it is in the namespace.
+        let lookalike = [23u8; 32];
+        r.grant_trust_root(lookalike, "org.interos-evil").expect("trust store has room");
+        assert!(!r.is_system_publisher(&lookalike),
+            "a lookalike publisher must not gain platform authority");
+
+        // A genuine platform publisher passes.
+        let platform = [24u8; 32];
+        r.grant_trust_root(platform, "org.interos.platform").expect("trust store has room");
+        assert!(r.is_system_publisher(&platform),
+            "a provisioned platform publisher must be recognised");
+
+        // Revocation outranks the publisher record.
+        r.place_key_on_crl(&platform, RevocationReason::KeyCompromised, 30, "root").expect("the CRL has room");
+        assert!(!r.is_system_publisher(&platform),
+            "a revoked key must not remain a system publisher");
     }
 }

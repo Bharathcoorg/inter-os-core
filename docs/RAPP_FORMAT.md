@@ -139,5 +139,21 @@ Values outside `1..=24` (such as `0` or `25+`) are strictly unknown and rejected
 1. **Scaffolding & Packaging**: Developers scaffold projects via `interos new` and bundle binaries via `interos package <name>`.
 2. **Signing**: Packages are signed with the publisher's Ed25519 private key via `interos sign <package> --key <key_file>`.
 3. **Trust Provisioning**: Trust roots are established via firmware-anchored keys or authenticated provisioning. Unauthenticated serial interfaces (COM1) explicitly reject dynamic root-of-trust injection (`RAPP_TRUST`) to prevent unauthorized UART privilege escalation.
+
+   Platform-authority publisher identities are an explicit allowlist: the exact
+   strings `system` and `platform`, plus the delimited namespace `org.interos.`.
+   The trailing dot is part of the namespace, so `org.interos-evil` and
+   `org.interosX` are not platform publishers.
+
+   **Current state of provisioning.** `RevocationRegistry::trust_key` is the
+   intended provisioning entry point and it journals the record, but nothing in
+   this tree calls it: there is no firmware-anchored provisioning path, and no
+   userspace syscall exists to grant a publisher root. The trust store is
+   therefore populated only by `restore_trusted_keys` from a persistent record
+   written previously. On a device with no such record, **no publisher is a
+   platform publisher and capability 18 cannot be granted**. This is deliberate
+   fail-closed behaviour and it is the current state, not a pending detail:
+   until a trusted provisioning path is implemented, capability 18 must be
+   treated as reserved rather than unavailable.
 4. **Installation & Storage**: `interos install <package>` transfers the signed bytes to the guest over QEMU COM1, verifies integrity and signatures inside Ring 0 against the active trust store, and commits the package blob into persistent storage.
 5. **Execution**: The launcher or PID 1 spawns an isolated Ring-3 child process with dedicated page tables (`W^X` enforced) and passes minted capability tokens.
