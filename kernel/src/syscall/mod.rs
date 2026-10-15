@@ -511,25 +511,18 @@ fn require_system_control() -> Result<(), SyscallResult> {
 /// is a full identity takeover. Binding to `user_control_object(uid)` makes
 /// authority attenuate to a single account.
 fn require_user_control_object(uid: u32) -> Result<(), SyscallResult> {
-    // The launcher is a system UI rather than an account-owned app. Give it a
-    // narrowly attenuated "active user only" authority so a user switch does
-    // not require rebuilding the service capability table. It still cannot
-    // administer an arbitrary UID supplied by an attacker.
-    if crate::user::USER_MANAGER.lock().active_user().0 == uid {
-        let sched = SCHEDULER.lock();
-        if let Some(task) = sched.current_task() {
-            if task.name == "org.interos.launcher"
-                && task.cap_table.authorize_object(
-                    CapabilityType::SystemControl,
-                    Rights::INVOKE,
-                    USER_CONTROL_OBJECT_BASE,
-                )
-            {
-                return Ok(());
-            }
-        }
-    }
-    // Only exact user-scoped control (or PID 1) can administer an account
+    // Authority must attenuate to a single account. PID 1 is the system
+    // supervisor and administers every account; anything else needs a
+    // SystemControl grant naming the account it acts on.
+    //
+    // WHY there is no launcher special case: one used to grant "active user
+    // only" authority to a task named `org.interos.launcher` holding
+    // USER_CONTROL_OBJECT_BASE. It was unreachable. Built-in services are named
+    // `launcher`, not `org.interos.launcher`, so the name test missed them, and
+    // no capability policy grants USER_CONTROL_OBJECT_BASE at all: the launcher
+    // holds `user_control_object(OWNER)` and `user_control_object(GUEST)`, which
+    // are BASE|1000 and BASE|1001, not BASE|0. The launcher therefore falls
+    // through to the exact-account check below, which its real grants satisfy.
     let sched = SCHEDULER.lock();
     let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
     if task.id == TaskId(1) {
@@ -6181,5 +6174,79 @@ fn built_in_service_domain_control_survives_the_confined_gate() {
     assert!(authorize_system_control_object(&launcher_caps, launcher, user_control_object(crate::user::UserId::OWNER.0)));
     assert!(!authorize_system_control_object(&launcher_caps, launcher, user_control_object(9999)));
     assert!(!authorize_device_wide_system_control(&launcher_caps, launcher, "launcher"));
+}
+
+/// The removed launcher special case in `require_user_control_object` was
+/// unreachable, so removing it must change nothing for the real launcher.
+///
+/// Pinning assertions: the launcher still administers the two accounts its
+/// capability policy actually grants, it cannot reach any other account, and
+/// `USER_CONTROL_OBJECT_BASE` -- the object that dead branch required -- is not
+/// granted by any built-in service policy, which is why the branch could never
+/// have fired.
+#[test]
+fn the_launcher_administrates_exactly_the_accounts_its_policy_grants() {
+    use crate::capability::{Capability, CapabilityId};
+    use crate::services::capability_policy;
+    use crate::services::ServiceId;
+
+    let launcher = TaskId(211);
+    let policy = capability_policy(ServiceId::Launcher, TaskId(1))
+        .expect("the launcher must have a capability policy");
+
+    let mut caps = crate::capability::CapabilityTable::new_for_task(launcher, 16);
+    for (slot, spec) in policy.iter().enumerate() {
+        caps.insert(Capability {
+            id: CapabilityId(7300 + slot as u64),
+            cap_type: spec.cap_type,
+            rights: spec.rights,
+            object_id: spec.object_id,
+        }).unwrap();
+    }
+
+    let owner = user_control_object(crate::user::UserId::OWNER.0);
+    let guest = user_control_object(crate::user::UserId::GUEST.0);
+
+    // The launcher's real grants resolve for the two accounts it holds.
+    assert!(authorize_system_control_object(&caps, launcher, owner),
+        "the launcher must still administer the device owner account");
+    assert!(authorize_system_control_object(&caps, launcher, guest),
+        "the launcher must still administer the guest account");
+
+    // Every other account is refused.
+    for uid in [0u32, 1, 999, 1002, 4242] {
+        assert!(
+            !authorize_system_control_object(&caps, launcher, user_control_object(uid)),
+            "the launcher must not administer account {} it holds no grant for", uid
+        );
+    }
+
+    // The object the dead branch required is granted by no service policy.
+    assert_ne!(owner, USER_CONTROL_OBJECT_BASE);
+    assert_ne!(guest, USER_CONTROL_OBJECT_BASE);
+    for service in 1..=11u8 {
+        let policy = capability_policy(
+            match service {
+                1 => ServiceId::Display,
+                2 => ServiceId::Input,
+                3 => ServiceId::Storage,
+                4 => ServiceId::Network,
+                5 => ServiceId::Power,
+                6 => ServiceId::Modem,
+                7 => ServiceId::Audio,
+                8 => ServiceId::Camera,
+                9 => ServiceId::Compositor,
+                10 => ServiceId::Launcher,
+                _ => ServiceId::Sensor,
+            },
+            TaskId(1),
+        ).expect("every built-in service must have a policy");
+        for spec in policy.iter() {
+            assert_ne!(
+                spec.object_id, USER_CONTROL_OBJECT_BASE,
+                "service {} must not be granted the bare user-control base object", service
+            );
+        }
+    }
 }
 }
