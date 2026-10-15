@@ -1,12 +1,14 @@
 $log = "$PSScriptRoot\..\target\test_aarch64_v6_1.log"
 if (Test-Path $log) { Remove-Item -Force $log }
-$k1 = "$PSScriptRoot\..\target\aarch64-unknown-none\debug\kernel-aarch64"
-$k2 = "$PSScriptRoot\..\kernel-aarch64\target\aarch64-unknown-none\debug\kernel-aarch64"
-$kernel = if ((Test-Path $k1) -and (Test-Path $k2)) {
-    if ((Get-Item $k1).LastWriteTime -ge (Get-Item $k2).LastWriteTime) { $k1 } else { $k2 }
-} elseif (Test-Path $k1) { $k1 } else { $k2 }
 $rootDir = (Resolve-Path "$PSScriptRoot\..").Path
+. (Join-Path $rootDir "tools\build_env.ps1")
 . (Join-Path $rootDir "tools\qemu_env.ps1")
+$k1 = "$rootDir\target\aarch64-unknown-none\debug\kernel-aarch64"
+$k2 = "$rootDir\kernel-aarch64\target\aarch64-unknown-none\debug\kernel-aarch64"
+$candidate = if (Test-Path $k2) { $k2 } elseif (Test-Path $k1) { $k1 } else {
+    throw "AArch64 kernel binary not found at $k2 or $k1"
+}
+$kernel = Verify-KernelBinaryArtifact -BinaryPath $candidate -ExpectedArch "aarch64"
 $qemuBin = Resolve-QemuPath "qemu-system-aarch64.exe"
 $p = Start-Process -FilePath $qemuBin -ArgumentList "-M virt -cpu cortex-a53 -m 1024M -kernel `"$kernel`" -serial file:`"$log`" -display none" -PassThru
 Start-Sleep -Seconds 15

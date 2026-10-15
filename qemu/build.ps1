@@ -26,7 +26,15 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 cargo +nightly check --manifest-path "$rootDir\apps\dialer\Cargo.toml" --target aarch64-unknown-none
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "AArch64 dialer cross-compilation check failed!"
+    exit 1
+}
 cargo +nightly check --manifest-path "$rootDir\apps\camera\Cargo.toml" --target aarch64-unknown-none
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "AArch64 camera cross-compilation check failed!"
+    exit 1
+}
 Write-Host "[OK] AArch64 userspace SDK and 2 apps cross-check for aarch64-unknown-none." -ForegroundColor Green
 Write-Host "[NOTE] This is a compile check only. It is NOT verification for physical smartphone flashing: no AArch64 build has been booted on real hardware, and no display, touch, or storage driver exists for a physical device." -ForegroundColor Yellow
 

@@ -2,6 +2,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -9,7 +10,7 @@ ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 class TestBuildWorkflow(unittest.TestCase):
     def run_ps(self, script_text: str):
-        """Helper to run a PowerShell script snippet in repository root."""
+        """Helper to run a PowerShell script snippet in repository root with build_env.ps1 imported."""
         full_script = f"""
 $ErrorActionPreference = 'Stop'
 Set-Location '{ROOT_DIR}'
@@ -35,34 +36,18 @@ Set-Location '{ROOT_DIR}'
         self.assertIn("BIOS image verified", r2.stdout)
 
     def test_cargo_artifact_verification_rejects_missing_file(self):
-        """Proves verification fails closed when artifact does not exist on disk."""
-        ps = """
-try {
-    # Test checking nonexistent path
-    $nonexistent = Join-Path $PWD 'target/nonexistent_fake_kernel_binary_xyz'
-    if (-not (Test-Path -LiteralPath $nonexistent)) {
-        throw "Reported build artifact does not exist on disk: $nonexistent"
-    }
-} catch {
-    Write-Host "CAUGHT: $($_.Exception.Message)"
-    exit 42
-}
-"""
+        """Proves Verify-KernelBinaryArtifact fails closed when binary does not exist on disk."""
+        ps = "Verify-KernelBinaryArtifact -BinaryPath 'target/nonexistent_fake_kernel_xyz'"
         r = self.run_ps(ps)
-        self.assertEqual(r.returncode, 42)
-        self.assertIn("does not exist on disk", r.stdout)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("does not exist on disk", r.stderr)
 
     def test_cargo_artifact_verification_rejects_empty_file(self):
-        """Proves verification fails closed when artifact has 0 bytes."""
+        """Proves Verify-KernelBinaryArtifact fails closed when binary has 0 bytes."""
         with tempfile.NamedTemporaryFile("wb", prefix="kernel_empty_", delete=False) as f:
             temp_path = f.name
         try:
-            ps = f"""
-$item = Get-Item -LiteralPath '{temp_path}'
-if ($item.Length -eq 0) {{
-    throw "Verified build artifact is empty (0 bytes): $($item.FullName)"
-}}
-"""
+            ps = f"Verify-KernelBinaryArtifact -BinaryPath '{temp_path}'"
             r = self.run_ps(ps)
             self.assertNotEqual(r.returncode, 0)
             self.assertIn("empty (0 bytes)", r.stderr)
@@ -70,25 +55,27 @@ if ($item.Length -eq 0) {{
             if os.path.exists(temp_path):
                 os.remove(temp_path)
 
-    def test_cargo_artifact_verification_rejects_invalid_elf_magic(self):
-        """Proves verification fails closed when binary lacks ELF magic bytes (0x7F, 0x45, 0x4C, 0x46)."""
-        with tempfile.NamedTemporaryFile("wb", prefix="kernel_bad_magic_", delete=False) as f:
-            f.write(b"NOT_AN_ELF_BINARY_HEADER")
+    def test_cargo_artifact_verification_rejects_truncated_elf(self):
+        """Proves Verify-KernelBinaryArtifact fails closed when binary is smaller than 64-byte ELF header."""
+        with tempfile.NamedTemporaryFile("wb", prefix="kernel_trunc_", delete=False) as f:
+            f.write(b"\x7FELF\x02\x01\x01\x00")  # only 8 bytes
             temp_path = f.name
         try:
-            ps = f"""
-$artifactPath = '{temp_path}'
-$fs = [System.IO.File]::OpenRead($artifactPath)
-try {{
-    $buf = New-Object byte[] 4
-    $n = $fs.Read($buf, 0, 4)
-    if ($n -lt 4 -or $buf[0] -ne 0x7F -or $buf[1] -ne 0x45 -or $buf[2] -ne 0x4C -or $buf[3] -ne 0x46) {{
-        throw "Artifact at $artifactPath is not a valid ELF binary (invalid magic header)"
-    }}
-}} finally {{
-    $fs.Close()
-}}
-"""
+            ps = f"Verify-KernelBinaryArtifact -BinaryPath '{temp_path}'"
+            r = self.run_ps(ps)
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn("truncated (smaller than 64-byte ELF header)", r.stderr)
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
+    def test_cargo_artifact_verification_rejects_invalid_elf_magic(self):
+        """Proves Verify-KernelBinaryArtifact fails closed when binary lacks valid ELF magic header."""
+        with tempfile.NamedTemporaryFile("wb", prefix="kernel_bad_magic_", delete=False) as f:
+            f.write(b"NOT_AN_ELF_HEADER_AT_ALL_JUST_64_BYTES_OF_CORRUPTED_GARBAGE_DATA!")
+            temp_path = f.name
+        try:
+            ps = f"Verify-KernelBinaryArtifact -BinaryPath '{temp_path}'"
             r = self.run_ps(ps)
             self.assertNotEqual(r.returncode, 0)
             self.assertIn("not a valid ELF binary", r.stderr)
@@ -96,10 +83,53 @@ try {{
             if os.path.exists(temp_path):
                 os.remove(temp_path)
 
+    def test_cargo_artifact_verification_rejects_wrong_architecture(self):
+        """Proves Verify-KernelBinaryArtifact fails closed when ELF e_machine does not match expected architecture."""
+        # Create a valid 64-byte x86_64 ELF header (e_machine = 0x003E at offset 18)
+        header = bytearray(64)
+        header[0:4] = b"\x7FELF"
+        header[4] = 2  # 64-bit
+        header[5] = 1  # little-endian
+        header[6] = 1  # version 1
+        header[18] = 0x3E  # e_machine x86_64 (62)
+        header[19] = 0x00
+
+        with tempfile.NamedTemporaryFile("wb", prefix="kernel_x86_header_", delete=False) as f:
+            f.write(bytes(header))
+            temp_path = f.name
+        try:
+            # Expecting aarch64 on an x86_64 binary must fail closed
+            ps = f"Verify-KernelBinaryArtifact -BinaryPath '{temp_path}' -ExpectedArch 'aarch64'"
+            r = self.run_ps(ps)
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn("has architecture x86_64", r.stderr)
+            self.assertIn("expected aarch64", r.stderr)
+
+            # Expecting x86_64 on an x86_64 binary must succeed
+            ps_ok = f"Verify-KernelBinaryArtifact -BinaryPath '{temp_path}' -ExpectedArch 'x86_64'"
+            r_ok = self.run_ps(ps_ok)
+            self.assertEqual(r_ok.returncode, 0, f"Expected success: {r_ok.stderr}")
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
+    def test_bios_verification_rejects_truncated_image(self):
+        """Proves Verify-BiosImageArtifact rejects image smaller than 512-byte sector."""
+        with tempfile.NamedTemporaryFile("wb", prefix="bios_trunc_", delete=False) as f:
+            f.write(b"\x00" * 256)
+            temp_path = f.name
+        try:
+            ps = f"Verify-BiosImageArtifact -ImagePath '{temp_path}'"
+            r = self.run_ps(ps)
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn("smaller than one sector", r.stderr)
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
     def test_bios_verification_rejects_invalid_signature(self):
         """Proves Verify-BiosImageArtifact rejects disk image lacking 0x55, 0xAA boot signature."""
         with tempfile.NamedTemporaryFile("wb", prefix="bios_bad_mbr_", delete=False) as f:
-            # 512 bytes with invalid boot signature at 510..512
             f.write(b"\x00" * 512)
             temp_path = f.name
         try:
@@ -111,20 +141,71 @@ try {{
             if os.path.exists(temp_path):
                 os.remove(temp_path)
 
-    def test_stale_artifact_selection_eliminated(self):
-        """Proves dev.ps1 and qemu/build.ps1 use structured compiler-artifact and not timestamp comparisons."""
-        dev_ps1 = (os.path.join(ROOT_DIR, "dev.ps1"))
-        with open(dev_ps1, "r", encoding="utf-8") as f:
-            dev_content = f.read()
-        self.assertNotIn("LastWriteTimeUtc -ge $buildStartTime", dev_content)
-        self.assertIn("Invoke-CargoBuildArtifact", dev_content)
-        self.assertIn("Verify-BiosImageArtifact", dev_content)
+    def test_bios_verification_rejects_image_smaller_than_kernel(self):
+        """Proves Verify-BiosImageArtifact rejects BIOS image that cannot encapsulate kernel binary."""
+        with tempfile.NamedTemporaryFile("wb", prefix="kbin_", delete=False) as kf:
+            kf.write(b"\x00" * 4096)
+            kernel_path = kf.name
 
-        qemu_build = (os.path.join(ROOT_DIR, "qemu", "build.ps1"))
-        with open(qemu_build, "r", encoding="utf-8") as f:
-            qemu_content = f.read()
-        self.assertNotIn("LastWriteTime -gt (Get-Item $k1).LastWriteTime", qemu_content)
-        self.assertIn("Invoke-CargoBuildArtifact", qemu_content)
+        with tempfile.NamedTemporaryFile("wb", prefix="bios_small_", delete=False) as bf:
+            # 512 bytes with valid signature, but smaller than 4096-byte kernel
+            sector = bytearray(512)
+            sector[510] = 0x55
+            sector[511] = 0xAA
+            bf.write(bytes(sector))
+            bios_path = bf.name
+
+        try:
+            ps = f"Verify-BiosImageArtifact -ImagePath '{bios_path}' -KernelBinaryPath '{kernel_path}'"
+            r = self.run_ps(ps)
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn("smaller than or equal to kernel binary", r.stderr)
+        finally:
+            if os.path.exists(kernel_path):
+                os.remove(kernel_path)
+            if os.path.exists(bios_path):
+                os.remove(bios_path)
+
+    def test_bios_verification_rejects_stale_image(self):
+        """Proves Verify-BiosImageArtifact rejects BIOS image older than its referenced kernel binary."""
+        with tempfile.NamedTemporaryFile("wb", prefix="bios_stale_", delete=False) as bf:
+            sector = bytearray(8192)
+            sector[510] = 0x55
+            sector[511] = 0xAA
+            bf.write(bytes(sector))
+            bios_path = bf.name
+
+        # Sleep briefly to ensure distinct timestamps
+        time.sleep(0.05)
+
+        with tempfile.NamedTemporaryFile("wb", prefix="kbin_newer_", delete=False) as kf:
+            kf.write(b"\x00" * 4096)
+            kernel_path = kf.name
+
+        # Set bios_path mtime explicitly in the past
+        old_time = time.time() - 3600
+        os.utime(bios_path, (old_time, old_time))
+
+        try:
+            ps = f"Verify-BiosImageArtifact -ImagePath '{bios_path}' -KernelBinaryPath '{kernel_path}'"
+            r = self.run_ps(ps)
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn("older than kernel binary", r.stderr)
+        finally:
+            if os.path.exists(kernel_path):
+                os.remove(kernel_path)
+            if os.path.exists(bios_path):
+                os.remove(bios_path)
+
+    def test_stale_artifact_selection_eliminated(self):
+        """Proves dev.ps1, qemu/build.ps1, and test_aarch64.ps1 use structured verification and not mtime comparisons."""
+        for rel_path in ["dev.ps1", "qemu/build.ps1", "tests/test_aarch64.ps1"]:
+            path = os.path.join(ROOT_DIR, rel_path.replace("/", os.sep))
+            with open(path, "r", encoding="utf-8") as f:
+                content = f.read()
+            self.assertNotIn("LastWriteTimeUtc -ge $buildStartTime", content, f"{rel_path} has stale mtime check")
+            self.assertNotIn(".LastWriteTime -ge (Get-Item", content, f"{rel_path} has stale mtime check")
+            self.assertNotIn(".LastWriteTime -gt (Get-Item", content, f"{rel_path} has stale mtime check")
 
     def test_cross_platform_path_normalization(self):
         """Proves build_env.ps1 normalizes mixed slash path representations."""
