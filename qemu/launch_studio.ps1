@@ -47,7 +47,7 @@ $qemuArgs = @(
     # No -device pointer flag: q35 already exposes the i8042 PS/2 controller
     # the guest driver uses, and this QEMU build rejects a PS/2 mouse device
     # flag.
-    "-display", "vnc=:1",
+    "-display", "vnc=127.0.0.1:1",
     "-serial", "tcp:127.0.0.1:4301,server,nowait",
     "-monitor", "tcp:127.0.0.1:44445,server,nowait",
     "-name", "Inter OS v0.1"

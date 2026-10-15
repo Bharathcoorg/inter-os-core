@@ -51,7 +51,7 @@ $arguments = @(
     "-device", "virtio-net-pci,netdev=android-net",
     "-serial", "tcp:127.0.0.1:44447,server=on,wait=off",
     "-monitor", "tcp:127.0.0.1:$MonitorPort,server=on,wait=off",
-    "-display", "vnc=:$VncDisplay",
+    "-display", "vnc=127.0.0.1:$VncDisplay",
     "-no-reboot"
 )
 
