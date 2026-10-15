@@ -24,10 +24,12 @@ emulator/data/apps/*
 !emulator/data/apps/.gitkeep
 emulator/data/themes/custom_*.theme
 
-# Agent & IDE caches
+# Agent & IDE caches and rules
 .kilo/
 scratch/
 .worktrees/
+.agents/
+.agent/
 # Cryptographic Private Keys
 *.key
 packages/*.key
@@ -44,6 +46,11 @@ docs/SCANOUT_RESOLUTION.md
 docs/BUILD_EMBEDDING.md
 aragon4.md
 aragon.md
+target/audit/
+*AUDIT*.md
+*REPORT*.md
+*ROADMAP*.md
+*.audit.md
 
 # Packaged guest apps are build artefacts, never sources: a .rapp committed here
 # resurrects an app whose source was removed, on every clone.
