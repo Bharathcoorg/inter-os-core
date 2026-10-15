@@ -364,8 +364,7 @@ pub fn sys_get_ticks(cap_slot: usize) -> Result<u64, SyscallResult> {
         None => return Err(SyscallResult::PermissionDenied),
     };
 
-    if current.cap_table.verify(cap_slot, CapabilityType::TimerTickRead, Rights::READ).is_err()
-        && !current.cap_table.authorize_capability(CapabilityType::TimerTickRead, Rights::READ) {
+    if current.cap_table.verify(cap_slot, CapabilityType::TimerTickRead, Rights::READ).is_err() {
         return Err(SyscallResult::PermissionDenied);
     }
     drop(sched);
@@ -555,6 +554,9 @@ pub fn sys_ipc_send(
 }
 
 /// Receives an IPC message from the caller's mailbox.
+///
+/// Requires an `IpcReceive` capability with `Rights::READ` in the explicitly specified `cap_slot`.
+/// Does not fall back to ambiently searching the capability table if `cap_slot` is invalid or exhausted.
 pub fn sys_ipc_recv(cap_slot: usize) -> Result<IpcMessage, SyscallResult> {
     let (receiver_id, is_valid) = {
         let sched = SCHEDULER.lock();
@@ -562,8 +564,7 @@ pub fn sys_ipc_recv(cap_slot: usize) -> Result<IpcMessage, SyscallResult> {
             Some(t) => t,
             None => return Err(SyscallResult::PermissionDenied),
         };
-        let valid = current.cap_table.verify(cap_slot, CapabilityType::IpcReceive, Rights::READ).is_ok()
-            || current.cap_table.authorize_capability(CapabilityType::IpcReceive, Rights::READ);
+        let valid = current.cap_table.verify(cap_slot, CapabilityType::IpcReceive, Rights::READ).is_ok();
         (current.id, valid)
     };
 
@@ -2706,25 +2707,32 @@ pub fn sys_tcp_recv(connection_id: u32, out: &mut [u8]) -> Result<usize, Syscall
     Ok(n)
 }
 
-/// Sends a DNS UDP query while allowing the network stack to resolve ARP.
+/// Sends a UDP datagram to the DNS server, handling ARP resolution delays.
 ///
 /// The first UDP transmission can legitimately return NoPacketAvailable when
 /// the destination MAC is not cached yet. Polling between bounded retries lets
 /// an ARP reply arrive instead of turning first-contact DNS into a hard failure.
+///
+/// When `is_retransmit` is false, consumes one invocation quota from delegated leases.
+/// When `is_retransmit` is true, verifies that the capability is still held and valid
+/// without consuming additional invocation quotas for internal kernel retries of the same
+/// logical DNS operation (per-logical-operation quota policy).
 fn send_dns_datagram_with_arp_retry(
     src_port: u16,
     payload: &[u8],
     caps: &crate::capability::CapabilityTable,
     deadline: u64,
+    is_retransmit: bool,
 ) -> Result<(), NetError> {
     loop {
-        match crate::net::send_udp_datagram(
+        match crate::net::send_udp_datagram_authorized(
             crate::net::DEFAULT_HOST_IP,
             src_port,
             crate::net::DNS_SERVER,
             53,
             payload,
             caps,
+            !is_retransmit,
         ) {
             Ok(()) => return Ok(()),
             Err(NetError::NoPacketAvailable) => {
@@ -2788,6 +2796,7 @@ pub fn sys_dns_resolve(name: &str) -> Result<crate::net::Ipv4Address, SyscallRes
         &packet[..packet_len],
         &caps,
         first_send_deadline,
+        false, // initial transmission consumes 1 invocation quota for this logical DNS query
     ).is_err() {
         let _ = crate::net::DNS_RESOLVER.lock().abort(query_id);
         let _ = crate::net::SOCKET_TABLE.lock().close_owned(socket, owner);
@@ -2848,6 +2857,7 @@ pub fn sys_dns_resolve(name: &str) -> Result<crate::net::Ipv4Address, SyscallRes
                 &packet[..retry_len],
                 &caps,
                 current_tick.saturating_add(crate::net::dns::DNS_RETRY_TICKS),
+                true, // internal retransmission verifies validity but does not double-consume lease
             ).is_err() {
                 let _ = crate::net::DNS_RESOLVER.lock().abort(query_id);
                 let _ = crate::net::SOCKET_TABLE.lock().close_owned(socket, owner);
@@ -4815,11 +4825,6 @@ pub fn sys_window_focus(cap_slot: usize, x: u32, y: u32) -> SyscallResult {
 }
 pub fn sys_fs_list(cap_slot: usize, path_ptr: u64, path_len: usize, out: &mut [u8]) -> Result<usize, SyscallResult> {
     if path_len == 0 || path_len > 256 || out.len() > 4096 { return Err(SyscallResult::InvalidArguments); }
-    {
-        let sched = SCHEDULER.lock();
-        let current = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
-        current.cap_table.verify(cap_slot, CapabilityType::FileSystemRead, Rights::READ).map_err(|_| SyscallResult::PermissionDenied)?;
-    }
     let mut path = [0u8; 256];
     copy_from_user(&mut path[..path_len], path_ptr, path_len).map_err(|_| SyscallResult::InvalidArguments)?;
     let path = core::str::from_utf8(&path[..path_len]).map_err(|_| SyscallResult::InvalidArguments)?;
@@ -4829,6 +4834,8 @@ pub fn sys_fs_list(cap_slot: usize, path_ptr: u64, path_len: usize, out: &mut [u
     // holding this lock across `VFS.lock()` below self-deadlocks the first
     // caller -- the file manager never presented. Every sibling takes the
     // same snapshot-and-release shape; this one now does too.
+    // Capability authorization is delegated directly to VFS `list_dir_for_task`,
+    // ensuring single-use leases are consumed exactly once per logical directory listing.
     let (task_id, cap_table) = {
         let sched = SCHEDULER.lock();
         let current = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
@@ -5533,5 +5540,132 @@ mod tests {
 
         // Global admin (object_id: 0) satisfies global admin
         assert!(global_admin_table.authorize_object(CapabilityType::SystemControl, Rights::INVOKE, GLOBAL_SYSTEM_CONTROL_OBJECT));
+    }
+
+    #[test]
+    fn service_capability_policy_forbids_global_system_control() {
+        use crate::service_abi::service_capability_allowed;
+
+        // Services 1..=11 are Ring-3 isolated system daemons. None of them may ever
+        // receive global administrative capability ID 18 (SystemControl Global).
+        for service_id in 1..=11 {
+            assert!(
+                !service_capability_allowed(service_id, 18),
+                "service {} must strictly be denied global SystemControl capability ID 18",
+                service_id
+            );
+        }
+
+        // Verify that services only receive their explicitly attenuated scoped control IDs:
+        // Service 5 (powerd) gets 19 (Power control)
+        assert!(service_capability_allowed(5, 19));
+        assert!(!service_capability_allowed(5, 20));
+
+        // Service 6 (modemd) gets 20 (Telephony control)
+        assert!(service_capability_allowed(6, 20));
+        assert!(!service_capability_allowed(6, 19));
+
+        // Service 7 (audiod) gets 21 (Audio control)
+        assert!(service_capability_allowed(7, 21));
+        assert!(!service_capability_allowed(7, 22));
+
+        // Service 8 (camerad) gets 22 (Camera control)
+        assert!(service_capability_allowed(8, 22));
+        assert!(!service_capability_allowed(8, 21));
+
+        // Service 11 (sensord) gets 23 (Sensor control)
+        assert!(service_capability_allowed(11, 23));
+        assert!(!service_capability_allowed(11, 22));
+    }
+
+    #[test]
+    fn vfs_list_dir_single_use_lease_delegated_consumption() {
+        use crate::capability::{Capability, CapabilityId, CapabilityType, Rights, DelegatedLease};
+        use crate::capability::delegation::{allocate_lease_id, register_lease};
+        use crate::fs::vfs::Vfs;
+
+        let grantor = TaskId(50);
+        let grantee = TaskId(51);
+        crate::task::process::register_leader(grantee, TaskId(1));
+
+        let mut vfs = Vfs::new();
+        vfs.mkdir("/test_dir");
+
+        let mut grantor_caps = crate::capability::CapabilityTable::new_for_task(grantor, 4);
+        grantor_caps.insert(Capability {
+            id: CapabilityId(101),
+            cap_type: CapabilityType::FileSystemRead,
+            rights: Rights::READ | Rights::GRANT,
+            object_id: 0,
+        }).unwrap();
+
+        let parent_cap = grantor_caps.get(0).unwrap();
+        let lease = DelegatedLease::new(
+            allocate_lease_id(),
+            parent_cap,
+            grantor,
+            grantee,
+            Rights::READ,
+            1, // single-use lease
+            1000,
+            0,
+        ).unwrap();
+
+        let derived_cap = lease.to_capability();
+        register_lease(lease);
+
+        let mut grantee_caps = crate::capability::CapabilityTable::new_for_task(grantee, 4);
+        let slot = grantee_caps.insert(derived_cap).unwrap();
+
+        let mut out = [0u8; 128];
+        // 1. First invocation must succeed, consuming the single use
+        let res1 = vfs.list_dir(&grantee_caps, slot, "/test_dir", &mut out);
+        assert!(res1.is_ok(), "First listing with single-use lease must succeed");
+
+        // 2. Second invocation must fail closed because quota is exhausted
+        let res2 = vfs.list_dir(&grantee_caps, slot, "/test_dir", &mut out);
+        assert!(
+            matches!(res2, Err(crate::fs::vfs::FsError::CapabilityError(crate::capability::CapError::InvalidSlot))),
+            "Second listing must fail closed with exhausted lease quota, got {:?}",
+            res2
+        );
+    }
+
+    #[test]
+    fn slot_handle_verification_prevents_ambient_table_fallback() {
+        use crate::capability::{Capability, CapabilityId, CapabilityType, Rights};
+
+        let task_id = TaskId(60);
+        let mut caps = crate::capability::CapabilityTable::new_for_task(task_id, 4);
+        // Valid capability inserted in slot 0
+        caps.insert(Capability {
+            id: CapabilityId(201),
+            cap_type: CapabilityType::IpcReceive,
+            rights: Rights::READ,
+            object_id: 0,
+        }).unwrap();
+        caps.insert(Capability {
+            id: CapabilityId(202),
+            cap_type: CapabilityType::TimerTickRead,
+            rights: Rights::READ,
+            object_id: 0,
+        }).unwrap();
+
+        // Verifying slot 0 succeeds
+        assert!(caps.verify(0, CapabilityType::IpcReceive, Rights::READ).is_ok());
+        assert!(caps.verify(1, CapabilityType::TimerTickRead, Rights::READ).is_ok());
+
+        // Verifying invalid slot 999 fails with InvalidSlot
+        assert!(caps.verify(999, CapabilityType::IpcReceive, Rights::READ).is_err());
+        assert!(caps.verify(999, CapabilityType::TimerTickRead, Rights::READ).is_err());
+
+        // The previous bug in sys_ipc_recv and sys_get_ticks did:
+        // verify(slot).is_ok() || authorize_capability(...)
+        // which allowed slot 999 to succeed because slot 0 had the capability.
+        // Verifying that verify(999, ...) fails ensures slot-handle semantics are preserved.
+        assert_eq!(
+            caps.verify(999, CapabilityType::IpcReceive, Rights::READ).err(),
+            Some(crate::capability::CapError::InvalidSlot)
+        );
     }
 }
