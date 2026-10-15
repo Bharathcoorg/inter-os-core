@@ -253,6 +253,86 @@ mod tests {
     }
 
     #[test]
+    fn parse_rapp_accepts_all_capabilities_1_through_24() {
+        let all_caps: alloc::vec::Vec<u16> = (1..=24).collect();
+        let (pkg, pub_key, _) = create_signed_test_package(&all_caps, 20);
+        REVOCATION_REGISTRY.lock().grant_trust_root(pub_key, "all_caps_test").unwrap();
+
+        let manifest = parse_rapp(&pkg).expect("package requesting IDs 1..=24 must parse");
+        assert_eq!(manifest.capabilities, all_caps);
+    }
+
+    #[test]
+    fn parse_rapp_rejects_out_of_bounds_capability_ids() {
+        // Negative test: 0 is rejected
+        let (pkg0, pub0, _) = create_signed_test_package(&[0], 21);
+        REVOCATION_REGISTRY.lock().grant_trust_root(pub0, "cap_zero").unwrap();
+        assert_eq!(parse_rapp(&pkg0).unwrap_err(), RappError::UnknownCapability);
+
+        // Negative test: 25 is rejected
+        let (pkg25, pub25, _) = create_signed_test_package(&[25], 22);
+        REVOCATION_REGISTRY.lock().grant_trust_root(pub25, "cap_25").unwrap();
+        assert_eq!(parse_rapp(&pkg25).unwrap_err(), RappError::UnknownCapability);
+    }
+
+    #[test]
+    fn capabilities_from_rapp_least_privilege_and_scoping() {
+        use crate::capability::{CapabilityType, Rights};
+        use crate::services::*;
+
+        let all_ids: alloc::vec::Vec<u16> = (1..=24).collect();
+        let table = crate::task::user::capabilities_from_rapp(&all_ids, 0x1234)
+            .expect("capabilities_from_rapp for 1..=24 must succeed");
+
+        // Verify ID 18 (Global SystemControl)
+        let cap18 = table.get(17).expect("slot 17 for ID 18");
+        assert_eq!(cap18.cap_type, CapabilityType::SystemControl);
+        assert_eq!(cap18.rights, Rights::INVOKE);
+        assert_eq!(cap18.object_id, 0);
+
+        // Verify ID 19 (Power SystemControl)
+        let cap19 = table.get(18).expect("slot 18 for ID 19");
+        assert_eq!(cap19.cap_type, CapabilityType::SystemControl);
+        assert_eq!(cap19.rights, Rights::INVOKE);
+        assert_eq!(cap19.object_id, SERVICE_POWER_CONTROL_OBJECT);
+
+        // Verify ID 20 (Telephony SystemControl)
+        let cap20 = table.get(19).expect("slot 19 for ID 20");
+        assert_eq!(cap20.cap_type, CapabilityType::SystemControl);
+        assert_eq!(cap20.rights, Rights::INVOKE);
+        assert_eq!(cap20.object_id, SERVICE_TELEPHONY_CONTROL_OBJECT);
+
+        // Verify ID 21 (Audio SystemControl)
+        let cap21 = table.get(20).expect("slot 20 for ID 21");
+        assert_eq!(cap21.cap_type, CapabilityType::SystemControl);
+        assert_eq!(cap21.rights, Rights::INVOKE);
+        assert_eq!(cap21.object_id, SERVICE_AUDIO_CONTROL_OBJECT);
+
+        // Verify ID 22 (Camera SystemControl)
+        let cap22 = table.get(21).expect("slot 21 for ID 22");
+        assert_eq!(cap22.cap_type, CapabilityType::SystemControl);
+        assert_eq!(cap22.rights, Rights::INVOKE);
+        assert_eq!(cap22.object_id, SERVICE_CAMERA_CONTROL_OBJECT);
+
+        // Verify ID 23 (Sensor SystemControl)
+        let cap23 = table.get(22).expect("slot 22 for ID 23");
+        assert_eq!(cap23.cap_type, CapabilityType::SystemControl);
+        assert_eq!(cap23.rights, Rights::INVOKE);
+        assert_eq!(cap23.object_id, SERVICE_SENSOR_CONTROL_OBJECT);
+
+        // Verify ID 24 (RealtimeClockRead)
+        let cap24 = table.get(23).expect("slot 23 for ID 24");
+        assert_eq!(cap24.cap_type, CapabilityType::RealtimeClockRead);
+        assert_eq!(cap24.rights, Rights::READ);
+        assert_eq!(cap24.object_id, 0);
+
+        // Negative tests: unknown IDs fail closed
+        assert!(crate::task::user::capabilities_from_rapp(&[0], 0).is_err());
+        assert!(crate::task::user::capabilities_from_rapp(&[25], 0).is_err());
+        assert!(crate::task::user::capabilities_from_rapp(&[999], 0).is_err());
+    }
+
+    #[test]
     fn parse_rapp_rejects_untrusted_publisher() {
         let (pkg, _pub_key, _) = create_signed_test_package(&[1], 12);
         let res = parse_rapp(&pkg);

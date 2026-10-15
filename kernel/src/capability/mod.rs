@@ -116,6 +116,7 @@ impl CapabilityType {
             16 => Some(CapabilityType::ShmConsumer),
             17 => Some(CapabilityType::EventPoll),
             18 => Some(CapabilityType::SystemControl),
+            19..=23 => Some(CapabilityType::SystemControl),
             24 => Some(CapabilityType::RealtimeClockRead),
             _ => None,
         }

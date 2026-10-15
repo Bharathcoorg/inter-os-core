@@ -77,20 +77,36 @@ When `parse_rapp(data: &[u8])` executes in the microkernel:
 
 ## 3. Standard Capability Identifiers
 
-Declared capability IDs map into per-process capability token table rights:
+Declared capability IDs map into per-process capability token table rights and object scoping:
 
-| Capability ID | Name | Permission Granted |
-| :--- | :--- | :--- |
-| `1` | `VFS_READ` | Read access within application-sandboxed storage |
-| `2` | `VFS_WRITE` | Write and persist data in application-sandboxed storage |
-| `3` | `DISPLAY` | Surface creation and framebuffer presentation |
-| `4` | `TOUCH_INPUT` | Receive touch digitizer and gesture events |
-| `5` | `AUDIO_OUT` | PCM audio stream playback access |
-| `6` | `AUDIO_IN` | Microphone audio stream capture access |
-| `7` | `NETWORK` | Socket creation and network operations |
-| `8` | `CELLULAR` | Telephony dialer and SMS messaging service |
-| `9` | `IPC_CHANNEL` | Dedicated bidirectional IPC channel |
-| `10 - 18` | `EXTENDED_*` | Subsystem-specific hardware resources |
+| Capability ID | Capability Type | Default Rights | Object Scope / Target | Description |
+| :--- | :--- | :--- | :--- | :--- |
+| `1` | `SerialOutput` | `WRITE` | `0` (Global) | Serial logging and COM port character output |
+| `2` | `FrameBufferDirect` | `WRITE` | `0` (Global) | Direct framebuffer pixel drawing and display hardware presentation |
+| `3` | `TimerTickRead` | `READ` | `0` (Global) | High-precision system timer tick polling |
+| `4` | `HardwarePortIo` | `READ \| WRITE` | `0` (Global) | Direct port I/O hardware bus access |
+| `5` | `IpcSend` | `WRITE` | IPC Target Endpoint | Send messages through dedicated IPC channel |
+| `6` | `IpcReceive` | `READ` | IPC Target Endpoint | Receive messages through dedicated IPC channel |
+| `7` | `ProcessSpawn` | `INVOKE` | `0` (Global) | Spawn child user processes and containers |
+| `8` | `ProcessKill` | `INVOKE` | `0` (Global) | Terminate owned child processes |
+| `9` | `FileSystemRead` | `READ` | `0` (Sandboxed) | Read files within sandboxed VFS mount |
+| `10` | `FileSystemWrite` | `WRITE` | `0` (Sandboxed) | Write/persist files within sandboxed VFS mount |
+| `11` | `StorageRawBlock` | `READ \| WRITE` | `0` (Global) | Direct block-level ATA/NVMe storage operations |
+| `12` | `NetworkSocket` | `WRITE` | `0` (Global) | Create UDP/TCP transport sockets |
+| `13` | `NetworkSend` | `WRITE` | `0` (Global) | Transmit network packets |
+| `14` | `NetworkReceive` | `READ` | `0` (Global) | Receive network packets |
+| `15` | `ShmProducer` | `WRITE` | `0` (Global) | Shared memory ring-buffer producer |
+| `16` | `ShmConsumer` | `READ` | `0` (Global) | Shared memory ring-buffer consumer |
+| `17` | `EventPoll` | `READ \| INVOKE` | `0` (Global) | Poll input and event queues |
+| `18` | `SystemControl` | `INVOKE` | `0` (Global) | Global system administration and power management |
+| `19` | `SystemControl` | `INVOKE` | `SERVICE_POWER_CONTROL_OBJECT` | Scoped power governor and battery telemetry |
+| `20` | `SystemControl` | `INVOKE` | `SERVICE_TELEPHONY_CONTROL_OBJECT` | Scoped cellular modem, SMS, and dialer control |
+| `21` | `SystemControl` | `INVOKE` | `SERVICE_AUDIO_CONTROL_OBJECT` | Scoped hardware audio synthesis and playback control |
+| `22` | `SystemControl` | `INVOKE` | `SERVICE_CAMERA_CONTROL_OBJECT` | Scoped camera sensor frame capture |
+| `23` | `SystemControl` | `INVOKE` | `SERVICE_SENSOR_CONTROL_OBJECT` | Scoped IMU, accelerometer, and sensor reading |
+| `24` | `RealtimeClockRead` | `READ` | `0` (Global) | Read wall-clock hardware real-time clock (RTC) |
+
+Values outside `1..=24` (such as `0` or `25+`) are strictly unknown and rejected during package verification (`RappError::UnknownCapability`).
 
 ---
 

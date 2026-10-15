@@ -547,7 +547,7 @@ pub fn load_user_elf(elf_data: &[u8]) -> Result<(usize, usize), &'static str> {
 }
 
 /// Maps canonical RAPP v2 capability identifiers into kernel capabilities.
-fn capabilities_from_rapp(ids: &[u16], ipc_target: u64) -> Result<CapabilityTable, &'static str> {
+pub(crate) fn capabilities_from_rapp(ids: &[u16], ipc_target: u64) -> Result<CapabilityTable, &'static str> {
     let mut caps = CapabilityTable::new(ids.len().max(1));
     for (slot, id) in ids.iter().copied().enumerate() {
         let (cap_type, rights, object_id) = match id {
@@ -574,6 +574,7 @@ fn capabilities_from_rapp(ids: &[u16], ipc_target: u64) -> Result<CapabilityTabl
             21 => (CapabilityType::SystemControl, Rights::INVOKE, crate::services::SERVICE_AUDIO_CONTROL_OBJECT),
             22 => (CapabilityType::SystemControl, Rights::INVOKE, crate::services::SERVICE_CAMERA_CONTROL_OBJECT),
             23 => (CapabilityType::SystemControl, Rights::INVOKE, crate::services::SERVICE_SENSOR_CONTROL_OBJECT),
+            24 => (CapabilityType::RealtimeClockRead, Rights::READ, 0),
             _ => return Err("Unknown RAPP v2 capability"),
         };
         caps.insert(Capability {
