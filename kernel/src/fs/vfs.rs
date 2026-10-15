@@ -494,8 +494,19 @@ impl Vfs {
     }
 
     /// Lists immediate children of a directory into a newline-delimited buffer.
-    pub fn list_dir(&self, task_caps:&CapabilityTable, cap_slot:usize, path:&str, out:&mut [u8]) -> Result<usize,FsError>{
-        task_caps.verify(cap_slot,CapabilityType::FileSystemRead,Rights::READ).map_err(FsError::CapabilityError)?;
+    pub fn list_dir(&self, task_caps: &CapabilityTable, cap_slot: usize, path: &str, out: &mut [u8]) -> Result<usize, FsError> {
+        let (eff_slot, cap_type) = if task_caps.inspect_slot(cap_slot, CapabilityType::FileSystemRead, Rights::READ).is_ok() {
+            (cap_slot, CapabilityType::FileSystemRead)
+        } else if task_caps.inspect_slot(cap_slot, CapabilityType::FileSystemWrite, Rights::READ).is_ok() {
+            (cap_slot, CapabilityType::FileSystemWrite)
+        } else if let Some(s) = task_caps.find_slot(CapabilityType::FileSystemRead, Rights::READ) {
+            (s, CapabilityType::FileSystemRead)
+        } else if let Some(s) = task_caps.find_slot(CapabilityType::FileSystemWrite, Rights::READ) {
+            (s, CapabilityType::FileSystemWrite)
+        } else {
+            (cap_slot, CapabilityType::FileSystemRead)
+        };
+        task_caps.verify(eff_slot, cap_type, Rights::READ).map_err(FsError::CapabilityError)?;
         let dir=self.lookup(path).ok_or(FsError::FileNotFound)?;
         let inode=self.inodes.get(&dir).ok_or(FsError::FileNotFound)?;
         if inode.file_type!=FileType::Directory{return Err(FsError::NotADirectory);}
@@ -529,9 +540,19 @@ impl Vfs {
         cap_slot: usize,
         path: &str,
     ) -> Result<FileStat, FsError> {
-        // Enforce FileSystemRead capability
+        let (eff_slot, cap_type) = if task_caps.inspect_slot(cap_slot, CapabilityType::FileSystemRead, Rights::READ).is_ok() {
+            (cap_slot, CapabilityType::FileSystemRead)
+        } else if task_caps.inspect_slot(cap_slot, CapabilityType::FileSystemWrite, Rights::READ).is_ok() {
+            (cap_slot, CapabilityType::FileSystemWrite)
+        } else if let Some(s) = task_caps.find_slot(CapabilityType::FileSystemRead, Rights::READ) {
+            (s, CapabilityType::FileSystemRead)
+        } else if let Some(s) = task_caps.find_slot(CapabilityType::FileSystemWrite, Rights::READ) {
+            (s, CapabilityType::FileSystemWrite)
+        } else {
+            (cap_slot, CapabilityType::FileSystemRead)
+        };
         task_caps
-            .verify(cap_slot, CapabilityType::FileSystemRead, Rights::READ)
+            .verify(eff_slot, cap_type, Rights::READ)
             .map_err(FsError::CapabilityError)?;
 
         let inode_id = self.lookup(path).ok_or(FsError::FileNotFound)?;
@@ -773,23 +794,20 @@ impl Vfs {
 
         // Enforce capability validation based on requested access
         if requested_rights.contains(Rights::WRITE) {
-            let eff_slot = if task_caps.verify(cap_slot, CapabilityType::FileSystemWrite, Rights::WRITE).is_ok()
-                || task_caps.verify(cap_slot, CapabilityType::FileSystemRead, Rights::WRITE).is_ok() {
-                cap_slot
+            let (eff_slot, cap_type) = if task_caps.inspect_slot(cap_slot, CapabilityType::FileSystemWrite, Rights::WRITE).is_ok() {
+                (cap_slot, CapabilityType::FileSystemWrite)
+            } else if task_caps.inspect_slot(cap_slot, CapabilityType::FileSystemRead, Rights::WRITE).is_ok() {
+                (cap_slot, CapabilityType::FileSystemRead)
             } else if let Some(s) = task_caps.find_slot(CapabilityType::FileSystemWrite, Rights::WRITE) {
-                s
+                (s, CapabilityType::FileSystemWrite)
             } else if let Some(s) = task_caps.find_slot(CapabilityType::FileSystemRead, Rights::WRITE) {
-                s
+                (s, CapabilityType::FileSystemRead)
             } else {
-                cap_slot
+                (cap_slot, CapabilityType::FileSystemWrite)
             };
-            let cap = if let Ok(c) = task_caps.verify(eff_slot, CapabilityType::FileSystemWrite, Rights::WRITE) {
-                c
-            } else {
-                task_caps
-                    .verify(eff_slot, CapabilityType::FileSystemRead, Rights::WRITE)
-                    .map_err(FsError::CapabilityError)?
-            };
+            let cap = task_caps
+                .verify(eff_slot, cap_type, Rights::WRITE)
+                .map_err(FsError::CapabilityError)?;
 
             let inode_id = if let Some(existing) = self.lookup(path) {
                 existing
@@ -831,23 +849,20 @@ impl Vfs {
             }
         }
         } else {
-            let eff_slot = if task_caps.verify(cap_slot, CapabilityType::FileSystemRead, Rights::READ).is_ok()
-                || task_caps.verify(cap_slot, CapabilityType::FileSystemWrite, Rights::READ).is_ok() {
-                cap_slot
+            let (eff_slot, cap_type) = if task_caps.inspect_slot(cap_slot, CapabilityType::FileSystemRead, Rights::READ).is_ok() {
+                (cap_slot, CapabilityType::FileSystemRead)
+            } else if task_caps.inspect_slot(cap_slot, CapabilityType::FileSystemWrite, Rights::READ).is_ok() {
+                (cap_slot, CapabilityType::FileSystemWrite)
             } else if let Some(s) = task_caps.find_slot(CapabilityType::FileSystemRead, Rights::READ) {
-                s
+                (s, CapabilityType::FileSystemRead)
             } else if let Some(s) = task_caps.find_slot(CapabilityType::FileSystemWrite, Rights::READ) {
-                s
+                (s, CapabilityType::FileSystemWrite)
             } else {
-                cap_slot
+                (cap_slot, CapabilityType::FileSystemRead)
             };
-            let cap = if let Ok(c) = task_caps.verify(eff_slot, CapabilityType::FileSystemRead, Rights::READ) {
-                c
-            } else {
-                task_caps
-                    .verify(eff_slot, CapabilityType::FileSystemWrite, Rights::READ)
-                    .map_err(FsError::CapabilityError)?
-            };
+            let cap = task_caps
+                .verify(eff_slot, cap_type, Rights::READ)
+                .map_err(FsError::CapabilityError)?;
 
             let inode_id = self.lookup(path).ok_or(FsError::FileNotFound)?;
             let inode = self.inodes.get(&inode_id).ok_or(FsError::FileNotFound)?;
@@ -912,23 +927,20 @@ impl Vfs {
         fd: FileDescriptor,
         buf: &mut [u8],
     ) -> Result<usize, FsError> {
-        let eff_slot = if task_caps.verify(cap_slot, CapabilityType::FileSystemRead, Rights::READ).is_ok()
-            || task_caps.verify(cap_slot, CapabilityType::FileSystemWrite, Rights::READ).is_ok() {
-            cap_slot
+        let (eff_slot, cap_type) = if task_caps.inspect_slot(cap_slot, CapabilityType::FileSystemRead, Rights::READ).is_ok() {
+            (cap_slot, CapabilityType::FileSystemRead)
+        } else if task_caps.inspect_slot(cap_slot, CapabilityType::FileSystemWrite, Rights::READ).is_ok() {
+            (cap_slot, CapabilityType::FileSystemWrite)
         } else if let Some(s) = task_caps.find_slot(CapabilityType::FileSystemRead, Rights::READ) {
-            s
+            (s, CapabilityType::FileSystemRead)
         } else if let Some(s) = task_caps.find_slot(CapabilityType::FileSystemWrite, Rights::READ) {
-            s
+            (s, CapabilityType::FileSystemWrite)
         } else {
-            cap_slot
+            (cap_slot, CapabilityType::FileSystemRead)
         };
-        let _cap = if let Ok(c) = task_caps.verify(eff_slot, CapabilityType::FileSystemRead, Rights::READ) {
-            c
-        } else {
-            task_caps
-                .verify(eff_slot, CapabilityType::FileSystemWrite, Rights::READ)
-                .map_err(FsError::CapabilityError)?
-        };
+        let _cap = task_caps
+            .verify(eff_slot, cap_type, Rights::READ)
+            .map_err(FsError::CapabilityError)?;
 
         let table = self.task_file_tables.get_mut(&task_id).ok_or(FsError::InvalidFd)?;
         let handle = table
@@ -970,23 +982,20 @@ impl Vfs {
         buf: &[u8],
     ) -> Result<usize, FsError> {
         if buf.len() > MAX_FILE_SIZE { return Err(FsError::FileTooLarge); }
-        let eff_slot = if task_caps.verify(cap_slot, CapabilityType::FileSystemWrite, Rights::WRITE).is_ok()
-            || task_caps.verify(cap_slot, CapabilityType::FileSystemRead, Rights::WRITE).is_ok() {
-            cap_slot
+        let (eff_slot, cap_type) = if task_caps.inspect_slot(cap_slot, CapabilityType::FileSystemWrite, Rights::WRITE).is_ok() {
+            (cap_slot, CapabilityType::FileSystemWrite)
+        } else if task_caps.inspect_slot(cap_slot, CapabilityType::FileSystemRead, Rights::WRITE).is_ok() {
+            (cap_slot, CapabilityType::FileSystemRead)
         } else if let Some(s) = task_caps.find_slot(CapabilityType::FileSystemWrite, Rights::WRITE) {
-            s
+            (s, CapabilityType::FileSystemWrite)
         } else if let Some(s) = task_caps.find_slot(CapabilityType::FileSystemRead, Rights::WRITE) {
-            s
+            (s, CapabilityType::FileSystemRead)
         } else {
-            cap_slot
+            (cap_slot, CapabilityType::FileSystemWrite)
         };
-        let _ = if let Ok(c) = task_caps.verify(eff_slot, CapabilityType::FileSystemWrite, Rights::WRITE) {
-            c
-        } else {
-            task_caps
-                .verify(eff_slot, CapabilityType::FileSystemRead, Rights::WRITE)
-                .map_err(FsError::CapabilityError)?
-        };
+        let _ = task_caps
+            .verify(eff_slot, cap_type, Rights::WRITE)
+            .map_err(FsError::CapabilityError)?;
 
         let table = self.task_file_tables.get_mut(&task_id).ok_or(FsError::InvalidFd)?;
         let handle = table
@@ -1443,3 +1452,104 @@ pub fn init() {
     let _ = vfs.persist_metadata_snapshot();
     *VFS.lock() = vfs;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::capability::{delegation, Capability, CapabilityId};
+
+    #[test]
+    fn delegated_lease_single_invocation_vfs_open_read_stat() {
+        let mut vfs = Vfs::new();
+        vfs.create_file("/test.txt", b"vfs payload", false);
+
+        let task_id = TaskId(888);
+        crate::task::process::register_leader(task_id, TaskId(1));
+
+        let current_ticks = crate::interrupts::get_system_ticks();
+        let parent_cap = Capability {
+            id: CapabilityId(200),
+            cap_type: CapabilityType::FileSystemRead,
+            rights: Rights::READ.union(Rights::GRANT),
+            object_id: 0,
+        };
+
+        // 1. Single-use lease for open
+        let lease_open = delegation::DelegatedLease::new(
+            9100,
+            &parent_cap,
+            TaskId(1),
+            task_id,
+            Rights::READ,
+            1, // max_invocations = 1
+            100_000,
+            current_ticks,
+        ).expect("create lease_open");
+        delegation::register_lease(lease_open.clone());
+
+        // 2. Single-use lease for read
+        let lease_read = delegation::DelegatedLease::new(
+            9101,
+            &parent_cap,
+            TaskId(1),
+            task_id,
+            Rights::READ,
+            1, // max_invocations = 1
+            100_000,
+            current_ticks,
+        ).expect("create lease_read");
+        delegation::register_lease(lease_read.clone());
+
+        // 3. Single-use lease for stat
+        let lease_stat = delegation::DelegatedLease::new(
+            9102,
+            &parent_cap,
+            TaskId(1),
+            task_id,
+            Rights::READ,
+            1, // max_invocations = 1
+            100_000,
+            current_ticks,
+        ).expect("create lease_stat");
+        delegation::register_lease(lease_stat.clone());
+
+        let mut cap_table = CapabilityTable::new_for_task(task_id, 8);
+        cap_table.insert(lease_open.to_capability()).expect("insert lease_open");
+        cap_table.insert(lease_read.to_capability()).expect("insert lease_read");
+        cap_table.insert(lease_stat.to_capability()).expect("insert lease_stat");
+
+        // Inspecting does not consume invocations
+        assert!(cap_table.inspect_slot(0, CapabilityType::FileSystemRead, Rights::READ).is_ok());
+        assert!(cap_table.inspect_slot(1, CapabilityType::FileSystemRead, Rights::READ).is_ok());
+        assert!(cap_table.inspect_slot(2, CapabilityType::FileSystemRead, Rights::READ).is_ok());
+
+        // Test open: must succeed on first try
+        let fd_res = vfs.open(task_id, &cap_table, 0, "/test.txt", Rights::READ);
+        assert!(fd_res.is_ok(), "vfs.open with single-use lease failed: {:?}", fd_res.err());
+        let fd = fd_res.unwrap();
+
+        // Second open with slot 0 must fail (quota exhausted)
+        let fd_res2 = vfs.open(task_id, &cap_table, 0, "/test.txt", Rights::READ);
+        assert!(fd_res2.is_err(), "second vfs.open must fail after quota exhausted");
+
+        // Test read: must succeed on first try with slot 1
+        let mut buf = [0u8; 32];
+        let read_res = vfs.read(task_id, &cap_table, 1, fd, &mut buf);
+        assert!(read_res.is_ok(), "vfs.read with single-use lease failed: {:?}", read_res.err());
+        assert_eq!(&buf[..read_res.unwrap()], b"vfs payload");
+
+        // Second read with slot 1 must fail (quota exhausted)
+        let read_res2 = vfs.read(task_id, &cap_table, 1, fd, &mut buf);
+        assert!(read_res2.is_err(), "second vfs.read must fail after quota exhausted");
+
+        // Test stat: must succeed on first try with slot 2
+        let stat_res = vfs.stat(&cap_table, 2, "/test.txt");
+        assert!(stat_res.is_ok(), "vfs.stat with single-use lease failed: {:?}", stat_res.err());
+        assert_eq!(stat_res.unwrap().size, 11);
+
+        // Second stat with slot 2 must fail (quota exhausted)
+        let stat_res2 = vfs.stat(&cap_table, 2, "/test.txt");
+        assert!(stat_res2.is_err(), "second vfs.stat must fail after quota exhausted");
+    }
+}
+

@@ -468,6 +468,38 @@ impl CapabilityTable {
         Ok(cap)
     }
 
+    /// Inspects whether the capability at `slot_idx` satisfies the expected type and rights
+    /// without consuming an invocation quota on delegated leases.
+    pub fn inspect_slot(
+        &self,
+        slot_idx: usize,
+        expected_type: CapabilityType,
+        required_rights: Rights,
+    ) -> Result<&Capability, CapError> {
+        let cap = self.get(slot_idx)?;
+        if revocation::is_revoked(cap.id) {
+            return Err(CapError::RevokedHandle);
+        }
+        if cap.cap_type != expected_type {
+            return Err(CapError::TypeMismatch);
+        }
+        if !cap.rights.contains(required_rights) {
+            return Err(CapError::InsufficientRights);
+        }
+        if cap.id.0 & 0x8000_0000_0000_0000 != 0 {
+            let lease_id = cap.id.0 & 0x7FFF_FFFF_FFFF_FFFF;
+            if !delegation::is_lease_valid(
+                lease_id,
+                self.owner_task,
+                crate::interrupts::get_system_ticks(),
+                required_rights,
+            ) {
+                return Err(CapError::InvalidSlot);
+            }
+        }
+        Ok(cap)
+    }
+
     /// Verifies an opaque `CapHandle` against expected type and required rights.
     pub fn verify_handle(
         &self,
@@ -725,16 +757,22 @@ impl CapabilityTable {
     /// authorize, rather than a revoked slot that would make a later `verify*`
     /// fail and mask a valid capability further along the table.
     pub fn find_slot(&self, expected_type: CapabilityType, required_rights: Rights) -> Option<usize> {
+        let now = crate::interrupts::get_system_ticks();
         self.slots.iter().enumerate().find_map(|(idx, slot)| {
             slot.cap.as_ref().and_then(|cap| {
-                if cap.cap_type == expected_type
-                    && cap.rights.contains(required_rights)
-                    && !revocation::is_revoked(cap.id)
+                if cap.cap_type != expected_type
+                    || !cap.rights.contains(required_rights)
+                    || revocation::is_revoked(cap.id)
                 {
-                    Some(idx)
-                } else {
-                    None
+                    return None;
                 }
+                if cap.id.0 & 0x8000_0000_0000_0000 != 0 {
+                    let lease_id = cap.id.0 & 0x7FFF_FFFF_FFFF_FFFF;
+                    if !delegation::is_lease_valid(lease_id, self.owner_task, now, required_rights) {
+                        return None;
+                    }
+                }
+                Some(idx)
             })
         })
     }
@@ -747,18 +785,24 @@ impl CapabilityTable {
         required_rights: Rights,
         expected_object_id: u64,
     ) -> Option<usize> {
+        let now = crate::interrupts::get_system_ticks();
         self.slots.iter().enumerate().find_map(|(idx, slot)| {
             slot.cap.as_ref().and_then(|cap| {
-                if cap.cap_type == expected_type
-                    && cap.rights.contains(required_rights)
-                    && (expected_object_id == 0 || cap.object_id == expected_object_id)
-                    && !revocation::is_revoked(cap.id)
+                if cap.cap_type != expected_type
+                    || !cap.rights.contains(required_rights)
+                    || (expected_object_id != 0 && cap.object_id != expected_object_id)
+                    || revocation::is_revoked(cap.id)
                 {
-                    slot.record_access();
-                    Some(idx)
-                } else {
-                    None
+                    return None;
                 }
+                if cap.id.0 & 0x8000_0000_0000_0000 != 0 {
+                    let lease_id = cap.id.0 & 0x7FFF_FFFF_FFFF_FFFF;
+                    if !delegation::is_lease_valid(lease_id, self.owner_task, now, required_rights) {
+                        return None;
+                    }
+                }
+                slot.record_access();
+                Some(idx)
             })
         })
     }
