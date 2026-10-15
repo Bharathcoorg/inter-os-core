@@ -30,6 +30,7 @@ scratch/
 .worktrees/
 .agents/
 .agent/
+AGENTS.md
 # Cryptographic Private Keys
 *.key
 packages/*.key
