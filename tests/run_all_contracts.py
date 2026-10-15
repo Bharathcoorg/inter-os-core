@@ -9,6 +9,9 @@ import sys
 # Explicit, auditable skip list for genuinely runtime-dependent tests
 # that require live QEMU or external device environments.
 RUNTIME_DEPENDENT_SKIPPED_FILES = frozenset({
+    "tests/qemu/test_boot_image_immutable.py",
+    "tests/qemu/test_qemu_boot.py",
+    "tests/qemu/test_vault_persistence.py",
     "tests/test_crash_watchdog.py",
     "tests/test_interactive_lifecycle.py",
     "tests/test_lifecycle_stress.py",
@@ -76,10 +79,10 @@ def has_verifiable_assertions(path: str) -> bool:
 
 
 def run_contracts(target_files=None):
-    all_test_files = sorted(normalize_path(p) for p in glob.glob("tests/test_*.py"))
+    all_test_files = sorted(normalize_path(p) for p in glob.glob("tests/**/test_*.py", recursive=True))
 
-    # If invoked directly on target files, use them
-    if target_files:
+    is_subset_run = bool(target_files)
+    if is_subset_run:
         tests = sorted(normalize_path(p) for p in target_files)
         skipped = []
     else:
@@ -110,14 +113,20 @@ def run_contracts(target_files=None):
     framework_tests = [p for p in tests if is_framework_test(p)]
     script_tests = [p for p in tests if not is_framework_test(p)]
 
-    print(f"Discovered {len(tests) + len(skipped)} contract test suites:")
-    print(f"  - Active suites to execute:     {len(tests)} ({len(framework_tests)} framework, {len(script_tests)} script)")
-    print(f"  - Intentionally skipped suites: {len(skipped)} (runtime/QEMU-dependent)")
-    if skipped:
-        for p in skipped:
-            print(f"    SKIP: {p}")
+    if is_subset_run:
+        print(f"[PARTIAL SUBSET RUN: {len(tests)} of {len(all_test_files)} test suites selected]")
+        print(f"  - Active suites to execute:     {len(tests)} ({len(framework_tests)} framework, {len(script_tests)} script)")
+        print(f"  - Repository suites unselected: {len(all_test_files) - len(tests)}")
+    else:
+        print(f"Discovered {len(all_test_files)} contract test suites across repository:")
+        print(f"  - Active suites to execute:     {len(tests)} ({len(framework_tests)} framework, {len(script_tests)} script)")
+        print(f"  - Intentionally skipped suites: {len(skipped)} (runtime/QEMU-dependent)")
+        if skipped:
+            for p in skipped:
+                print(f"    SKIP: {p}")
 
-    total_executed = 0
+    framework_cases_passed = 0
+    script_contracts_passed = 0
     failures = []
     file_reports = {}
 
@@ -154,7 +163,7 @@ def run_contracts(target_files=None):
                     failures.append(p)
                     file_reports[p] = (False, "FAILED: 0 test cases executed")
                 else:
-                    total_executed += stats["passed"]
+                    framework_cases_passed += stats["passed"]
                     file_reports[p] = (True, f"Ran {stats['passed']} cases")
 
             if r.returncode != 0 and not any(p in failures for p in framework_tests):
@@ -191,7 +200,7 @@ def run_contracts(target_files=None):
                 if r.stderr:
                     print(r.stderr)
             else:
-                total_executed += 1
+                script_contracts_passed += 1
                 file_reports[p] = (True, "Ran 1 script contract")
         except subprocess.TimeoutExpired:
             failures.append(p)
@@ -204,16 +213,24 @@ def run_contracts(target_files=None):
         status = "PASS" if passed else "FAIL"
         print(f"{status}: {p} -> {detail}")
 
+    total_passed = framework_cases_passed + script_contracts_passed
+
     if failures:
         print(f"\n{len(failures)} test files failed!")
         return 1
-    elif total_executed == 0:
+    elif total_passed == 0:
         print("\nERROR: 0 total test cases executed across all discovered files!", file=sys.stderr)
         return 1
+    elif is_subset_run:
+        print(f"\n[PARTIAL SUBSET RUN PASSED]")
+        print(f"Executed: {len(tests)} selected suites ({len(all_test_files) - len(tests)} suites in repository unexecuted).")
+        print(f"Passed:   {framework_cases_passed} framework test cases + {script_contracts_passed} script contracts (total {total_passed} test cases/contracts).")
+        return 0
     else:
-        print(f"\nALL {total_executed} LOCAL CONTRACT TEST CASES PASSED.")
+        print(f"\nALL LOCAL CONTRACT TEST CASES PASSED.")
+        print(f"Passed:   {framework_cases_passed} framework test cases across {len(framework_tests)} suites + {script_contracts_passed} standalone script contracts (total {total_passed} across {len(tests)} active suites).")
         if skipped:
-            print("Runtime/externally-dependent tests remain unexecuted; run them separately on the local QEMU/Device Studio environment.")
+            print(f"Notice:   {len(skipped)} runtime/externally-dependent test suites remain unexecuted; run them separately on the local QEMU/Device Studio environment.")
         return 0
 
 

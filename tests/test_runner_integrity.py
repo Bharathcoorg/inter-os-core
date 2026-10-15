@@ -83,8 +83,34 @@ class TestRunnerIntegrity(unittest.TestCase):
         probe_path = "tests/test_storage_recovery_probe.py"
         self.assertNotIn(probe_path, runner_mod.RUNTIME_DEPENDENT_SKIPPED_FILES)
         for p in runner_mod.RUNTIME_DEPENDENT_SKIPPED_FILES:
-            self.assertTrue(p.startswith("tests/test_"), f"Skip entry {p} must be explicit path")
+            self.assertTrue(p.startswith("tests/"), f"Skip entry {p} must be explicit path")
             self.assertTrue(p.endswith(".py"), f"Skip entry {p} must end with .py")
+
+    def test_runner_discovers_nested_qemu_tests(self):
+        """Proves runner recursively discovers nested tests (including tests/qemu/) and accounts for them."""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("run_all_contracts", self.runner_path)
+        runner_mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runner_mod)
+
+        self.assertIn("tests/qemu/test_boot_image_immutable.py", runner_mod.RUNTIME_DEPENDENT_SKIPPED_FILES)
+        self.assertIn("tests/qemu/test_qemu_boot.py", runner_mod.RUNTIME_DEPENDENT_SKIPPED_FILES)
+        self.assertIn("tests/qemu/test_vault_persistence.py", runner_mod.RUNTIME_DEPENDENT_SKIPPED_FILES)
+
+    def test_runner_labels_subset_run(self):
+        """Proves runner explicitly labels subset execution and does not claim full suite passed."""
+        with tempfile.NamedTemporaryFile("w", prefix="test_tmp_", suffix=".py", dir="tests", delete=False) as f:
+            f.write("def test_one(): pass\n")
+            temp_path = f.name
+        try:
+            r = subprocess.run([sys.executable, self.runner_path, temp_path], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0)
+            self.assertIn("[PARTIAL SUBSET RUN:", r.stdout)
+            self.assertIn("[PARTIAL SUBSET RUN PASSED]", r.stdout)
+            self.assertNotIn("ALL LOCAL CONTRACT TEST CASES PASSED", r.stdout)
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
 
     def test_runner_fails_on_framework_test_failure(self):
         """Proves runner exits nonzero and records failure when a framework test fails."""
@@ -150,7 +176,8 @@ class TestRunnerIntegrity(unittest.TestCase):
             r = subprocess.run([sys.executable, self.runner_path, temp_path], capture_output=True, text=True)
             self.assertEqual(r.returncode, 0)
             self.assertIn("Ran 3 cases", r.stdout)
-            self.assertIn("ALL 3 LOCAL CONTRACT TEST CASES PASSED.", r.stdout)
+            self.assertIn("[PARTIAL SUBSET RUN PASSED]", r.stdout)
+            self.assertIn("3 framework test cases", r.stdout)
         finally:
             if os.path.exists(temp_path):
                 os.remove(temp_path)
