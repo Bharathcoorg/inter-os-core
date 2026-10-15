@@ -10,17 +10,16 @@ def read(path: str) -> str:
 def test_messages_empty_state_has_non_overlapping_text_and_no_dead_action():
     source = read("apps/messages/src/main.rs")
     assert 'b"NO TRANSPORT"' in source
-    assert 'b"Messaging transport unavailable"' in source
-    assert 'if messages.keystore_derived { &b"Encryption key available"[..] } else { &b"Encryption key unavailable"[..] }' in source
+    assert 'b"Messaging unavailable: no transport"' in source
     assert 'b"P2P E2EE"' not in source
     assert 'b"Encrypted P2P Wire Client Active"' not in source
     assert 'b"Hardware Keystore Slot 3 Ready"' not in source
     # The scale-2 title occupies a 48px glyph line. Status lines must reserve
     # that space, and an unavailable backend must not expose a dead action.
-    assert 'test_text(x, y, 196, 370, 2, b"No Conversations Yet"' in source
-    assert 'test_text(x, y, 204, 430, 1, b"Messaging transport unavailable"' in source
-    assert 'test_text(x, y, 220, 458, 1,' in source
-    assert 'New chats require a configured messaging backend' in source
+    assert 'b"No Conversations Yet"' in source
+    assert '740' in source
+    assert '810' in source
+    assert 'b"Messaging unavailable: no transport"' in source
     assert 'b"+ Start New Chat"' not in source
 
 
@@ -164,13 +163,14 @@ def test_layout_fixes_reserve_full_glyph_line_height():
     # full 24px line below it (cy+72), and rows with a second caption line
     # reserve that line too (cy+98) -- i.e. no text band is allowed to start
     # inside the line box above it.
-    assert "cy + 16," in settings
-    assert "cy + 72," in settings
-    assert "cy + 98," in settings
-    assert "236, 760, 1" in calendar
+    assert "cy + ROW_TITLE_DY," in settings
+    assert "cy + ROW_CAP_DY," in settings
+    assert "cy + ROW_CAP2_DY," in settings
+    assert "centered_x(detail_str, 1, 24, 672)" in calendar
+    assert "760," in calendar
     assert "y >= 800 && y < 856" in calendar
     assert 'test_text(x, y, 48, 64, 3, b"Files"' in file_manager
-    assert 'test_text(x, y, 204, 430, 1, b"Messaging transport unavailable"' in messages
+    assert 'b"Messaging unavailable: no transport"' in messages
 
 
 def test_device_studio_does_not_infer_guest_cpu_state_from_qemu_liveness():

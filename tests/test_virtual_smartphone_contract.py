@@ -21,7 +21,7 @@ def test_canonical_qemu_exposes_native_portrait_display_and_absolute_pointer():
     x86_start = server.index('if arch == "x86_64":')
     x86_end = server.index('elif arch == "aarch64":', x86_start)
     x86_profile = server[x86_start:x86_end]
-    assert "virtio-vga,edid=on,xres=720,yres=1440" in x86_profile
+    assert "VGA,edid=on,xres={edid_w},yres={edid_h},vgamem_mb=32" in x86_profile
     assert "ps2-mouse" not in x86_profile
     assert "usb-tablet" not in x86_profile
 
@@ -122,7 +122,7 @@ def test_volume_state_is_never_fabricated_when_guest_does_not_confirm():
     server = read("emulator/server.py")
     launcher = read("apps/launcher/src/main.rs")
     assert "cur_vol = 75" not in server
-    assert "'status': 'APPLIED' if success else 'UNCONFIRMED'" in server
+    assert "'status': 'REQUESTED_NOT_APPLIED' if success else 'UNBOUND'" in server
     assert "volume_state_valid" in launcher
     assert "unwrap_or(75)" not in launcher
 
@@ -225,8 +225,8 @@ def test_android_dalvik_objects_are_vm_local_bounded_and_indexes_fail_closed():
     assert "fn allocate_object(&mut self, class_descriptor: &str)" in runtime
     assert "self.allocate_object(class_descriptor)?" in runtime
     assert "non-null synthetic object reference" not in runtime
-    assert "dex.strings.get(str_idx).ok_or(DalvikVmError::InvalidBytecode)?" in runtime
-    assert "dex.types.get(type_idx).is_none()" in runtime
+    assert "dex.get_string_slice(str_idx as u32).map_err(|_| DalvikVmError::InvalidBytecode)?" in runtime
+    assert "dex.get_type_slice(type_idx as u32).is_err()" in runtime
     assert "object_allocations_have_distinct_vm_local_identity_and_a_hard_limit" in runtime
 
 

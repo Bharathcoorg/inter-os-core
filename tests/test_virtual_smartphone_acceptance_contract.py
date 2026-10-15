@@ -10,8 +10,9 @@ def read(path: str) -> str:
 def test_canonical_qemu_uses_portrait_scanout_and_guest_supported_pointer_hardware():
     launcher = read("qemu/launch_studio.ps1")
     backend = read("emulator/server.py")
+    assert "virtio-vga,edid=on,xres=720,yres=1440" in launcher
+    assert "VGA,edid=on,xres={edid_w},yres={edid_h},vgamem_mb=32" in backend
     for source in (launcher, backend):
-        assert "virtio-vga,edid=on,xres=720,yres=1440" in source
         # WHY no `ps2-mouse` device flag: no such QEMU device exists (QEMU
         # 11.1.0 `-device help` lists only ISA `i8042`, which q35 already
         # includes), and passing it aborts the VM instantly ("expects a
