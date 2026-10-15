@@ -22,6 +22,7 @@ $rootDir = $scriptDir
 $kernelDir = Join-Path $rootDir "kernel"
 $targetDir = Join-Path $rootDir "target"
 . (Join-Path $rootDir "tools\qemu_env.ps1")
+. (Join-Path $rootDir "tools\build_env.ps1")
 $qemu_x86 = Resolve-QemuPath "qemu-system-x86_64.exe"
 $qemu_riscv = Resolve-QemuPath "qemu-system-riscv64.exe"
 $qemu_aarch64 = Resolve-QemuPath "qemu-system-aarch64.exe"
@@ -44,45 +45,8 @@ function Invoke-Check {
 
 function Invoke-Build {
     Write-Banner "Building x86_64 kernel + bootloader"
-    $buildStartTime = (Get-Date).ToUniversalTime()
-    Push-Location $kernelDir
-    cargo build --target x86_64-unknown-none
-    $buildExitCode = $LASTEXITCODE
-    Pop-Location
-    if ($buildExitCode -ne 0) {
-        throw "Kernel cargo build failed with exit code $buildExitCode"
-    }
-
-    # Locate the fresh kernel binary produced by the current build.
-    # Cargo outputs to kernel/target when run inside kernel/, or root target/ if configured.
-    $candidates = @(
-        (Join-Path $kernelDir "target\x86_64-unknown-none\debug\kernel"),
-        (Join-Path $targetDir "x86_64-unknown-none\debug\kernel")
-    )
-
-    $freshKernels = @()
-    foreach ($cand in $candidates) {
-        if (Test-Path $cand) {
-            $item = Get-Item $cand
-            if ($item.LastWriteTimeUtc -ge $buildStartTime.AddSeconds(-2)) {
-                $freshKernels += $item
-            }
-        }
-    }
-
-    if ($freshKernels.Count -eq 0) {
-        $candidatePaths = $candidates -join ", "
-        $stale = $candidates | Where-Object { Test-Path $_ }
-        if ($stale) {
-            throw "Build artifact verification failed: Kernel binary was not updated by current build. Checked paths: $candidatePaths"
-        } else {
-            throw "Missing build artifact: Kernel binary not found after build. Checked paths: $candidatePaths"
-        }
-    }
-
-    # Select freshest kernel binary
-    $kernelBin = ($freshKernels | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1).FullName
-    Write-Host "[OK] Kernel binary verified: $kernelBin" -ForegroundColor Green
+    $kernelManifest = Join-Path $kernelDir "Cargo.toml"
+    $kernelBin = Invoke-CargoBuildArtifact -CargoArgs @("build", "--manifest-path", $kernelManifest, "--target", "x86_64-unknown-none") -TargetName "kernel" -ExpectedKind "bin"
 
     # Package bootloader disk image
     if (-not (Test-Path $targetDir)) {
@@ -94,23 +58,14 @@ function Invoke-Build {
         throw "Missing build tool: Bootloader runner manifest not found at $bootManifest"
     }
 
-    $bootStartTime = (Get-Date).ToUniversalTime()
     Write-Host "Packaging bootloader image: $biosImg" -ForegroundColor Yellow
     cargo run --manifest-path $bootManifest -- "$kernelBin" "$biosImg"
     if ($LASTEXITCODE -ne 0) {
         throw "BIOS image creation failed with exit code $LASTEXITCODE"
     }
 
-    if (-not (Test-Path $biosImg)) {
-        throw "Missing build artifact: BIOS image was not produced at $biosImg"
-    }
-    $biosItem = Get-Item $biosImg
-    if ($biosItem.LastWriteTimeUtc -lt $bootStartTime.AddSeconds(-2)) {
-        throw "Build artifact verification failed: BIOS image was not updated by current build ($biosImg)"
-    }
-    $sz = $biosItem.Length
-    Write-Host "[OK] BIOS image verified: $biosImg ($sz bytes)" -ForegroundColor Green
-    return $biosImg
+    $verifiedBios = Verify-BiosImageArtifact -ImagePath $biosImg
+    return $verifiedBios
 }
 
 function Invoke-Run {

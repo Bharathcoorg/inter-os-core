@@ -2,6 +2,7 @@ $ErrorActionPreference = "Stop"
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $rootDir = Split-Path -Parent $scriptDir
+. "$rootDir\tools\build_env.ps1"
 
 Write-Host "============================================================" -ForegroundColor Cyan
 Write-Host "  Building InterOS Core (x86_64)" -ForegroundColor Cyan
@@ -31,33 +32,18 @@ Write-Host "[NOTE] This is a compile check only. It is NOT verification for phys
 
 # 3. Compile x86_64 Microkernel ELF with nightly
 Write-Host "[12/13] Compiling Microkernel for x86_64-unknown-none..." -ForegroundColor Yellow
-cargo +nightly build --manifest-path "$rootDir\kernel\Cargo.toml" --target x86_64-unknown-none
-if ($LASTEXITCODE -ne 0) {
-    Write-Error "Kernel compilation failed!"
-    exit 1
-}
+$kernelElf = Invoke-CargoBuildArtifact -CargoArgs @("+nightly", "build", "--manifest-path", "$rootDir\kernel\Cargo.toml", "--target", "x86_64-unknown-none") -TargetName "kernel" -ExpectedKind "bin"
 
 # 4. Compile Standalone AArch64 Smartphone Microkernel
 Write-Host "[13/14] Compiling Standalone Smartphone Microkernel for aarch64-unknown-none..." -ForegroundColor Yellow
-cargo +nightly build --manifest-path "$rootDir\kernel-aarch64\Cargo.toml" --target aarch64-unknown-none
-if ($LASTEXITCODE -ne 0) {
-    Write-Error "AArch64 kernel compilation failed!"
-    exit 1
-}
+$aarch64KernelElf = Invoke-CargoBuildArtifact -CargoArgs @("+nightly", "build", "--manifest-path", "$rootDir\kernel-aarch64\Cargo.toml", "--target", "aarch64-unknown-none") -TargetName "kernel-aarch64" -ExpectedKind "bin"
 
 # 5. Compile Standalone RISC-V 64 Smartphone Microkernel
 Write-Host "[14/14] Compiling Standalone Smartphone Microkernel for riscv64gc-unknown-none-elf..." -ForegroundColor Yellow
-cargo +nightly build --manifest-path "$rootDir\kernel-riscv64\Cargo.toml" --target riscv64gc-unknown-none-elf
-if ($LASTEXITCODE -ne 0) {
-    Write-Error "RISC-V 64 kernel compilation failed!"
-    exit 1
-}
+$riscvKernelElf = Invoke-CargoBuildArtifact -CargoArgs @("+nightly", "build", "--manifest-path", "$rootDir\kernel-riscv64\Cargo.toml", "--target", "riscv64gc-unknown-none-elf") -TargetName "kernel-riscv64" -ExpectedKind "bin"
 
 # 5. Package bootable disk image for QEMU bare-metal x86_64
 Write-Host "[Packaging] Packaging bootable disk image with bootloader..." -ForegroundColor Yellow
-$k1 = "$rootDir\target\x86_64-unknown-none\debug\kernel"
-$k2 = "$rootDir\kernel\target\x86_64-unknown-none\debug\kernel"
-$kernelElf = if ((Test-Path $k2) -and (-not (Test-Path $k1) -or (Get-Item $k2).LastWriteTime -gt (Get-Item $k1).LastWriteTime)) { $k2 } else { $k1 }
 $outputImg = "$rootDir\target\inter-os-bios.img"
 
 # Strip DWARF from the kernel before packaging it.
@@ -94,6 +80,7 @@ if ($LASTEXITCODE -ne 0) {
     Write-Error "Disk image creation failed!"
     exit 1
 }
+Verify-BiosImageArtifact -ImagePath $outputImg | Out-Null
 
 Write-Host "Build complete! Bootable image ready at: $outputImg" -ForegroundColor Green
 
@@ -110,9 +97,6 @@ Write-Host "Build complete! Bootable image ready at: $outputImg" -ForegroundColo
 # yet, so the tool refuses to synthesise placeholders. That is an accurate
 # statement of an unfinished platform, not a build break.
 Write-Host "[Packaging] Packaging AArch64 Android boot.img for phone hardware..." -ForegroundColor Yellow
-$k_aarch64_1 = "$rootDir\target\aarch64-unknown-none\debug\kernel-aarch64"
-$k_aarch64_2 = "$rootDir\kernel-aarch64\target\aarch64-unknown-none\debug\kernel-aarch64"
-$aarch64KernelElf = if ((Test-Path $k_aarch64_2) -and (-not (Test-Path $k_aarch64_1) -or (Get-Item $k_aarch64_2).LastWriteTime -gt (Get-Item $k_aarch64_1).LastWriteTime)) { $k_aarch64_2 } else { $k_aarch64_1 }
 $fastbootImg = "$rootDir\target\boot.img"
 
 cargo +nightly run --manifest-path "$rootDir\tools\mkbootimg\Cargo.toml" -- --kernel "$aarch64KernelElf" --output "$fastbootImg"
