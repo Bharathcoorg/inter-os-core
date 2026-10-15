@@ -178,12 +178,51 @@ pub fn send_udp_datagram(
     send_udp_datagram_authorized(src_ip, src_port, dst_ip, dst_port, payload, caps, true)
 }
 
+/// Authorizes one UDP transmission and then debits the caller's background
+/// network budget, in exactly that order.
+///
+/// WHY this order is a security property rather than a style choice: the
+/// background budget is an allowance for bytes that actually went on the wire.
+/// If the debit ran first, a send that capability authorization refuses would
+/// still have consumed budget for traffic that never existed, which lets a
+/// quota-exhausted or unprivileged caller starve its own process allowance with
+/// frames the kernel rejected.
+///
+/// `consume_quota` is `false` only for internal retransmissions of an
+/// already-authorized logical query. Those must still prove the capability is
+/// held and unrevoked, but must not spend a second invocation of a
+/// single-invocation lease.
+///
+/// `caller_task` is the scheduler's current task; it is `None` outside a
+/// scheduled context, where no process budget exists to debit.
+pub(crate) fn authorize_and_debit_network_send(
+    caps: &CapabilityTable,
+    caller_task: Option<TaskId>,
+    frame_len: usize,
+    consume_quota: bool,
+) -> Result<(), NetError> {
+    if consume_quota {
+        if !caps.authorize_capability(CapabilityType::NetworkSend, Rights::WRITE) {
+            return Err(NetError::CapabilityDenied);
+        }
+    } else if !caps.has_authorized_or_retransmit_capability(CapabilityType::NetworkSend, Rights::WRITE) {
+        return Err(NetError::CapabilityDenied);
+    }
+
+    if let Some(task) = caller_task {
+        crate::task::process::consume_background_network(task, frame_len)
+            .map_err(|_| NetError::QueueFull)?;
+    }
+    Ok(())
+}
+
 /// Sends a UDP datagram over the network stack with explicit control over lease quota consumption.
 ///
-/// When `consume_quota` is `true`, `authorize_capability` is invoked, consuming one invocation
-/// on a delegated lease. When `false` (e.g. for internal resolver retransmissions of an already
-/// authorized logical query), `has_capability` is verified to ensure the authority remains valid
-/// and unrevoked without double-consuming invocation quota.
+/// When `consume_quota` is `true`, one invocation of a delegated `NetworkSend`
+/// lease is spent on the transmission. When `false` the caller is retransmitting
+/// an already-authorized logical query: authority is still verified and must be
+/// unrevoked and unexpired, but a lease that has already spent its invocation
+/// authorizes the retransmission rather than losing the retry.
 pub fn send_udp_datagram_authorized(
     src_ip: Ipv4Address,
     src_port: u16,
@@ -193,8 +232,20 @@ pub fn send_udp_datagram_authorized(
     caps: &CapabilityTable,
     consume_quota: bool,
 ) -> Result<(), NetError> {
-    // 1. Enforce Zero-Trust Capability Invariant
-    if !caps.has_capability(CapabilityType::NetworkSend, Rights::WRITE) {
+    // 1. Enforce Zero-Trust Capability Invariant before any work is done.
+    //
+    // WHY the retransmission arm is relaxation rather than bypass: this gate and
+    // the one in `authorize_and_debit_network_send` MUST use the same predicate.
+    // When this gate used the strict per-logical-operation check, a lease whose
+    // single invocation was spent by the initial query was already refused here,
+    // which made every DNS retransmission fail closed and left the relaxed check
+    // downstream unreachable.
+    let holds_authority = if consume_quota {
+        caps.has_capability(CapabilityType::NetworkSend, Rights::WRITE)
+    } else {
+        caps.has_authorized_or_retransmit_capability(CapabilityType::NetworkSend, Rights::WRITE)
+    };
+    if !holds_authority {
         return Err(NetError::CapabilityDenied);
     }
 
@@ -221,24 +272,12 @@ pub fn send_udp_datagram_authorized(
     };
     let eth_len = frame.serialize(&mut eth_buf).map_err(|_| NetError::BufferTooSmall)?;
 
-    // 6. Enforce capability authorization BEFORE debiting background process budget
-    if consume_quota {
-        if !caps.authorize_capability(CapabilityType::NetworkSend, Rights::WRITE) {
-            return Err(NetError::CapabilityDenied);
-        }
-    } else {
-        if !caps.has_authorized_or_retransmit_capability(CapabilityType::NetworkSend, Rights::WRITE) {
-            return Err(NetError::CapabilityDenied);
-        }
-    }
+    // 6. Authorize capability FIRST, then debit the process-scoped background
+    //    network budget. A refused send must never consume byte allowance.
+    let caller_task = crate::task::SCHEDULER.lock().current_task_id();
+    authorize_and_debit_network_send(caps, caller_task, eth_len, consume_quota)?;
 
-    // 7. Enforce the process-scoped background network budget only after capability authorization succeeds
-    if let Some(task) = crate::task::SCHEDULER.lock().current_task_id() {
-        crate::task::process::consume_background_network(task, eth_len)
-            .map_err(|_| NetError::QueueFull)?;
-    }
-
-    // 8. Transmit into Loopback / Virtual NIC
+    // 7. Transmit into Loopback / Virtual NIC
     NETWORK_DEVICE.lock().transmit(&eth_buf[0..eth_len])
 }
 
@@ -754,6 +793,145 @@ mod tests {
             false,
         );
         assert_eq!(unauth_res.err(), Some(NetError::CapabilityDenied));
+    }
+
+    /// Builds a single-invocation `NetworkSend` lease for `grantee` and returns its table.
+    fn single_use_send_lease(grantee: TaskId) -> CapabilityTable {
+        let grantor = TaskId(grantee.0 + 500);
+        let mut grantor_caps = CapabilityTable::new_for_task(grantor, 4);
+        grantor_caps.insert(Capability {
+            id: CapabilityId(grantor.0 as u64 + 4_000),
+            cap_type: CapabilityType::NetworkSend,
+            rights: Rights::WRITE | Rights::GRANT,
+            object_id: 0,
+        }).unwrap();
+
+        let lease = DelegatedLease::new(
+            allocate_lease_id(),
+            grantor_caps.get(0).unwrap(),
+            grantor,
+            grantee,
+            Rights::WRITE,
+            1,
+            10_000,
+            0,
+        ).unwrap();
+        register_lease(lease.clone());
+
+        let mut grantee_caps = CapabilityTable::new_for_task(grantee, 4);
+        grantee_caps.insert(lease.to_capability()).unwrap();
+        grantee_caps
+    }
+
+    fn background_bytes(task: TaskId) -> u32 {
+        crate::task::process::record_for_process(crate::task::process::process_for_task(task).unwrap())
+            .unwrap()
+            .background_network_bytes
+    }
+
+    /// WHY this exists: a DNS resolver retransmits an already-authorized logical
+    /// query under one delegated lease, so the lease's single invocation is spent
+    /// by the initial transmission. The retransmission must still be authorized
+    /// on that same logical operation, otherwise the per-logical-operation quota
+    /// policy is void and every retry fails closed.
+    #[test]
+    fn dns_retransmission_is_authorized_after_the_logical_lease_is_spent() {
+        let grantee = TaskId(72);
+        crate::task::process::register_leader(grantee, TaskId(1));
+        let caps = single_use_send_lease(grantee);
+
+        // Initial transmission spends the single invocation.
+        let initial = send_udp_datagram_authorized(
+            Ipv4Address::LOCALHOST, 5000, Ipv4Address::LOCALHOST, 4242,
+            b"DNS_INITIAL", &caps, true,
+        );
+        assert!(initial.is_ok(), "initial transmission must be authorized: {:?}", initial.err());
+
+        // Retransmission of the same in-flight logical query must still be authorized
+        // even though the lease now reports zero remaining invocations.
+        let retransmit = send_udp_datagram_authorized(
+            Ipv4Address::LOCALHOST, 5000, Ipv4Address::LOCALHOST, 4242,
+            b"DNS_RETRANSMIT", &caps, false,
+        );
+        assert!(
+            retransmit.is_ok(),
+            "DNS retransmission of an in-flight logical query must be authorized after the lease quota is spent: {:?}",
+            retransmit.err()
+        );
+
+        // A retransmission never becomes a general quota bypass: a *new* logical
+        // operation (consume_quota = true) is still refused at zero invocations.
+        let new_operation = send_udp_datagram_authorized(
+            Ipv4Address::LOCALHOST, 5000, Ipv4Address::LOCALHOST, 4242,
+            b"DNS_SECOND_LOGICAL_OP", &caps, true,
+        );
+        assert_eq!(
+            new_operation.err(),
+            Some(NetError::CapabilityDenied),
+            "the retransmit path must not become a general bypass of single-use lease enforcement"
+        );
+    }
+
+    /// A send that capability authorization refuses must not debit the caller's
+    /// background network budget. The budget is an allowance for traffic that was
+    /// actually put on the wire, so a refused send must leave it untouched.
+    ///
+    /// This drives `authorize_and_debit_network_send` directly, passing an
+    /// explicit caller task, because the budget debit is keyed to the scheduler's
+    /// current task and that is `None` outside a scheduled context. Driving the
+    /// helper is what makes the ordering observable at all: it is the ordering
+    /// this test pins, not the frame serialization around it.
+    #[test]
+    fn denied_send_does_not_debit_background_network_budget() {
+        let grantee = TaskId(73);
+        crate::task::process::register_leader(grantee, TaskId(1));
+        // Background state is what makes the byte budget actually accounted.
+        crate::task::process::set_background(grantee, 0).unwrap();
+        let caps = single_use_send_lease(grantee);
+
+        // Denied at the capability gate: no NetworkSend capability at all.
+        let empty = CapabilityTable::new_for_task(grantee, 4);
+        let denied = authorize_and_debit_network_send(&empty, Some(grantee), 512, false);
+        assert_eq!(denied.err(), Some(NetError::CapabilityDenied));
+        assert_eq!(
+            background_bytes(grantee), 0,
+            "a capability-denied send must not debit the background network budget"
+        );
+
+        // The one authorized send spends the single lease invocation and debits
+        // exactly the frame it accounted for.
+        let authorized = authorize_and_debit_network_send(&caps, Some(grantee), 512, true);
+        assert!(authorized.is_ok(), "authorized send must be allowed: {:?}", authorized.err());
+        assert_eq!(
+            background_bytes(grantee), 512,
+            "an authorized send must debit exactly the frame length it reported"
+        );
+
+        // Denied because the single-use lease is exhausted: still no further debit.
+        let spent = authorize_and_debit_network_send(&caps, Some(grantee), 512, true);
+        assert_eq!(spent.err(), Some(NetError::CapabilityDenied));
+        assert_eq!(
+            background_bytes(grantee), 512,
+            "an over-quota send must not debit the background network budget"
+        );
+
+        // The retransmission of the same in-flight logical query stays authorized
+        // after the invocation is spent, and does debit: the bytes go on the wire.
+        let retransmit = authorize_and_debit_network_send(&caps, Some(grantee), 256, false);
+        assert!(
+            retransmit.is_ok(),
+            "DNS retransmission must stay authorized after the lease invocation is spent: {:?}",
+            retransmit.err()
+        );
+        assert_eq!(
+            background_bytes(grantee), 768,
+            "an authorized retransmission must still debit the bytes it actually sent"
+        );
+
+        // A budget refusal is reported as QueueFull, distinct from CapabilityDenied,
+        // so a caller can tell "no authority" from "no allowance left".
+        let exhausted = authorize_and_debit_network_send(&caps, Some(grantee), usize::MAX, false);
+        assert_eq!(exhausted.err(), Some(NetError::QueueFull));
     }
 }
 
