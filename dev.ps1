@@ -45,6 +45,32 @@ function Invoke-Check {
 
 function Invoke-Build {
     Write-Banner "Building x86_64 kernel + bootloader"
+
+    # WHY the userspace binaries are built first, and not left to a previous
+    # run: the kernel embeds them with include_bytes! from
+    # target/x86_64-unknown-none/debug, and the guest ELF loader accepts only
+    # ET_EXEC. A plain `cargo build` of those crates writes an ET_DYN binary to
+    # that same path, because the *-unknown-none targets default to
+    # position-independent executables. Packaging the kernel without rebuilding
+    # userspace therefore embeds whatever happens to be sitting there, and the
+    # device panics at boot with "ELF must be ET_EXEC". build_userspace.ps1
+    # passes -no-pie and asserts ET_EXEC after every binary, so calling it here
+    # makes the packaged image bootable instead of order-dependent.
+    $userspaceBuilder = Join-Path $rootDir "tools\build_userspace.ps1"
+    if (-not (Test-Path $userspaceBuilder)) {
+        throw "Missing build tool: userspace builder not found at $userspaceBuilder"
+    }
+    Write-Host "Building Ring-3 userspace (ET_EXEC required by the guest ELF loader)..." -ForegroundColor Yellow
+    $savedDir = $PWD.Path
+    try {
+        & $userspaceBuilder
+        if ($LASTEXITCODE -ne 0) {
+            throw "Userspace build failed with exit code $LASTEXITCODE"
+        }
+    } finally {
+        Set-Location $savedDir
+    }
+
     $kernelManifest = Join-Path $kernelDir "Cargo.toml"
     $kernelBin = Invoke-CargoBuildArtifact -CargoArgs @("build", "--manifest-path", $kernelManifest, "--target", "x86_64-unknown-none") -TargetName "kernel" -ExpectedKind "bin"
 
