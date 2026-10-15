@@ -499,10 +499,14 @@ impl Vfs {
             (cap_slot, CapabilityType::FileSystemRead)
         } else if task_caps.inspect_slot(cap_slot, CapabilityType::FileSystemWrite, Rights::READ).is_ok() {
             (cap_slot, CapabilityType::FileSystemWrite)
-        } else if let Some(s) = task_caps.find_slot(CapabilityType::FileSystemRead, Rights::READ) {
-            (s, CapabilityType::FileSystemRead)
-        } else if let Some(s) = task_caps.find_slot(CapabilityType::FileSystemWrite, Rights::READ) {
-            (s, CapabilityType::FileSystemWrite)
+        } else if task_caps.get(cap_slot).is_err() {
+            if let Some(s) = task_caps.find_slot(CapabilityType::FileSystemRead, Rights::READ) {
+                (s, CapabilityType::FileSystemRead)
+            } else if let Some(s) = task_caps.find_slot(CapabilityType::FileSystemWrite, Rights::READ) {
+                (s, CapabilityType::FileSystemWrite)
+            } else {
+                (cap_slot, CapabilityType::FileSystemRead)
+            }
         } else {
             (cap_slot, CapabilityType::FileSystemRead)
         };
@@ -544,10 +548,14 @@ impl Vfs {
             (cap_slot, CapabilityType::FileSystemRead)
         } else if task_caps.inspect_slot(cap_slot, CapabilityType::FileSystemWrite, Rights::READ).is_ok() {
             (cap_slot, CapabilityType::FileSystemWrite)
-        } else if let Some(s) = task_caps.find_slot(CapabilityType::FileSystemRead, Rights::READ) {
-            (s, CapabilityType::FileSystemRead)
-        } else if let Some(s) = task_caps.find_slot(CapabilityType::FileSystemWrite, Rights::READ) {
-            (s, CapabilityType::FileSystemWrite)
+        } else if task_caps.get(cap_slot).is_err() {
+            if let Some(s) = task_caps.find_slot(CapabilityType::FileSystemRead, Rights::READ) {
+                (s, CapabilityType::FileSystemRead)
+            } else if let Some(s) = task_caps.find_slot(CapabilityType::FileSystemWrite, Rights::READ) {
+                (s, CapabilityType::FileSystemWrite)
+            } else {
+                (cap_slot, CapabilityType::FileSystemRead)
+            }
         } else {
             (cap_slot, CapabilityType::FileSystemRead)
         };
@@ -798,10 +806,14 @@ impl Vfs {
                 (cap_slot, CapabilityType::FileSystemWrite)
             } else if task_caps.inspect_slot(cap_slot, CapabilityType::FileSystemRead, Rights::WRITE).is_ok() {
                 (cap_slot, CapabilityType::FileSystemRead)
-            } else if let Some(s) = task_caps.find_slot(CapabilityType::FileSystemWrite, Rights::WRITE) {
-                (s, CapabilityType::FileSystemWrite)
-            } else if let Some(s) = task_caps.find_slot(CapabilityType::FileSystemRead, Rights::WRITE) {
-                (s, CapabilityType::FileSystemRead)
+            } else if task_caps.get(cap_slot).is_err() {
+                if let Some(s) = task_caps.find_slot(CapabilityType::FileSystemWrite, Rights::WRITE) {
+                    (s, CapabilityType::FileSystemWrite)
+                } else if let Some(s) = task_caps.find_slot(CapabilityType::FileSystemRead, Rights::WRITE) {
+                    (s, CapabilityType::FileSystemRead)
+                } else {
+                    (cap_slot, CapabilityType::FileSystemWrite)
+                }
             } else {
                 (cap_slot, CapabilityType::FileSystemWrite)
             };
@@ -853,10 +865,14 @@ impl Vfs {
                 (cap_slot, CapabilityType::FileSystemRead)
             } else if task_caps.inspect_slot(cap_slot, CapabilityType::FileSystemWrite, Rights::READ).is_ok() {
                 (cap_slot, CapabilityType::FileSystemWrite)
-            } else if let Some(s) = task_caps.find_slot(CapabilityType::FileSystemRead, Rights::READ) {
-                (s, CapabilityType::FileSystemRead)
-            } else if let Some(s) = task_caps.find_slot(CapabilityType::FileSystemWrite, Rights::READ) {
-                (s, CapabilityType::FileSystemWrite)
+            } else if task_caps.get(cap_slot).is_err() {
+                if let Some(s) = task_caps.find_slot(CapabilityType::FileSystemRead, Rights::READ) {
+                    (s, CapabilityType::FileSystemRead)
+                } else if let Some(s) = task_caps.find_slot(CapabilityType::FileSystemWrite, Rights::READ) {
+                    (s, CapabilityType::FileSystemWrite)
+                } else {
+                    (cap_slot, CapabilityType::FileSystemRead)
+                }
             } else {
                 (cap_slot, CapabilityType::FileSystemRead)
             };
@@ -931,10 +947,14 @@ impl Vfs {
             (cap_slot, CapabilityType::FileSystemRead)
         } else if task_caps.inspect_slot(cap_slot, CapabilityType::FileSystemWrite, Rights::READ).is_ok() {
             (cap_slot, CapabilityType::FileSystemWrite)
-        } else if let Some(s) = task_caps.find_slot(CapabilityType::FileSystemRead, Rights::READ) {
-            (s, CapabilityType::FileSystemRead)
-        } else if let Some(s) = task_caps.find_slot(CapabilityType::FileSystemWrite, Rights::READ) {
-            (s, CapabilityType::FileSystemWrite)
+        } else if task_caps.get(cap_slot).is_err() {
+            if let Some(s) = task_caps.find_slot(CapabilityType::FileSystemRead, Rights::READ) {
+                (s, CapabilityType::FileSystemRead)
+            } else if let Some(s) = task_caps.find_slot(CapabilityType::FileSystemWrite, Rights::READ) {
+                (s, CapabilityType::FileSystemWrite)
+            } else {
+                (cap_slot, CapabilityType::FileSystemRead)
+            }
         } else {
             (cap_slot, CapabilityType::FileSystemRead)
         };
@@ -986,10 +1006,14 @@ impl Vfs {
             (cap_slot, CapabilityType::FileSystemWrite)
         } else if task_caps.inspect_slot(cap_slot, CapabilityType::FileSystemRead, Rights::WRITE).is_ok() {
             (cap_slot, CapabilityType::FileSystemRead)
-        } else if let Some(s) = task_caps.find_slot(CapabilityType::FileSystemWrite, Rights::WRITE) {
-            (s, CapabilityType::FileSystemWrite)
-        } else if let Some(s) = task_caps.find_slot(CapabilityType::FileSystemRead, Rights::WRITE) {
-            (s, CapabilityType::FileSystemRead)
+        } else if task_caps.get(cap_slot).is_err() {
+            if let Some(s) = task_caps.find_slot(CapabilityType::FileSystemWrite, Rights::WRITE) {
+                (s, CapabilityType::FileSystemWrite)
+            } else if let Some(s) = task_caps.find_slot(CapabilityType::FileSystemRead, Rights::WRITE) {
+                (s, CapabilityType::FileSystemRead)
+            } else {
+                (cap_slot, CapabilityType::FileSystemWrite)
+            }
         } else {
             (cap_slot, CapabilityType::FileSystemWrite)
         };
@@ -1550,6 +1574,38 @@ mod tests {
         // Second stat with slot 2 must fail (quota exhausted)
         let stat_res2 = vfs.stat(&cap_table, 2, "/test.txt");
         assert!(stat_res2.is_err(), "second vfs.stat must fail after quota exhausted");
+
+        // 4. Single-use lease for write
+        let parent_cap_write = Capability {
+            id: CapabilityId(201),
+            cap_type: CapabilityType::FileSystemWrite,
+            rights: Rights::WRITE.union(Rights::GRANT),
+            object_id: 0,
+        };
+        let lease_write = delegation::DelegatedLease::new(
+            9103,
+            &parent_cap_write,
+            TaskId(1),
+            task_id,
+            Rights::WRITE,
+            1, // max_invocations = 1
+            100_000,
+            current_ticks,
+        ).expect("create lease_write");
+        delegation::register_lease(lease_write.clone());
+        cap_table.insert(lease_write.to_capability()).expect("insert lease_write");
+
+        vfs.create_device_node("/dev/null");
+        let null_inode = vfs.lookup("/dev/null").expect("lookup /dev/null");
+        let fd_write = vfs.allocate_fd(task_id, null_inode, Rights::WRITE).expect("allocate write fd");
+
+        // First write succeeds
+        let write_res1 = vfs.write(task_id, &cap_table, 3, fd_write, b"!!");
+        assert!(write_res1.is_ok(), "vfs.write with single-use lease failed: {:?}", write_res1.err());
+
+        // Second write fails (quota exhausted)
+        let write_res2 = vfs.write(task_id, &cap_table, 3, fd_write, b"!!");
+        assert!(write_res2.is_err(), "second vfs.write must fail after quota exhausted");
     }
 }
 
