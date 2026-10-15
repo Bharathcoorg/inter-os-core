@@ -88,7 +88,7 @@ if ($LASTEXITCODE -ne 0) {
     Write-Error "Disk image creation failed!"
     exit 1
 }
-Verify-BiosImageArtifact -ImagePath $outputImg | Out-Null
+Verify-BiosImageArtifact -ImagePath $outputImg -KernelBinaryPath $kernelElf | Out-Null
 
 Write-Host "Build complete! Bootable image ready at: $outputImg" -ForegroundColor Green
 

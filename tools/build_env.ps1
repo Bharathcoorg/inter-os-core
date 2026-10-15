@@ -105,7 +105,7 @@ function Invoke-CargoBuildArtifact {
                 elseif ($arg -like "*aarch64*") { $expectedArch = "aarch64" }
                 elseif ($arg -like "*riscv64*") { $expectedArch = "riscv64" }
             }
-            Verify-KernelBinaryArtifact -BinaryPath $artifactPath -ExpectedArch $expectedArch
+            Verify-KernelBinaryArtifact -BinaryPath $artifactPath -ExpectedArch $expectedArch | Out-Null
         } else {
             if (-not (Test-Path -LiteralPath $artifactPath)) {
                 throw "Verified build artifact path does not exist on disk: $artifactPath"

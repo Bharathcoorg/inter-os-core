@@ -64,7 +64,7 @@ function Invoke-Build {
         throw "BIOS image creation failed with exit code $LASTEXITCODE"
     }
 
-    $verifiedBios = Verify-BiosImageArtifact -ImagePath $biosImg
+    $verifiedBios = Verify-BiosImageArtifact -ImagePath $biosImg -KernelBinaryPath $kernelBin
     return $verifiedBios
 }
 
