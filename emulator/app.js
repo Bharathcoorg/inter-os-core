@@ -1409,7 +1409,11 @@ document.addEventListener('DOMContentLoaded', () => {
     state.volume = nextVol;
     triggerScreenVolumeHud(nextVol);
     try {
-      const res = await fetch('/api/audio/volume?action=' + action);
+      const res = await fetch('/api/audio/volume', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: action })
+      });
       const data = await res.json();
       if (res.ok && data.success && Number.isFinite(data.volume_percent)) {
         state.volume = data.volume_percent;

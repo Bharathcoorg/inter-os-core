@@ -2189,6 +2189,100 @@ def guest_package_catalog():
         })
     return True, None, packages
 
+
+ALLOWED_LOCAL_HOSTS = frozenset({'127.0.0.1', 'localhost', '::1'})
+
+def is_permitted_local_host(hostname):
+    """Validate that hostname is strictly an explicitly permitted local loopback identifier.
+
+    Accepts:
+      - 'localhost'
+      - IPv4 loopback ('127.0.0.1' and any address in 127.0.0.0/8)
+      - IPv6 loopback ('::1' and '::ffff:127.0.0.1')
+    Rejects:
+      - Any external domain (e.g. attacker.com, localhost.attacker.com)
+      - Non-loopback IPs (0.0.0.0, 192.168.x.x, 10.x.x.x, 169.254.x.x, etc.)
+      - Malformed or empty strings
+    """
+    if not hostname or not isinstance(hostname, str):
+        return False
+    h = hostname.strip().lower()
+    if h == 'localhost':
+        return True
+    try:
+        ip = ipaddress.ip_address(h)
+        return ip.is_loopback
+    except ValueError:
+        return False
+
+
+def _parse_authority(authority):
+    """Parses a host[:port] authority string, supporting IPv6 bracket notation.
+
+    Returns (hostname, port) or (None, None) if malformed.
+    """
+    if not authority or not isinstance(authority, str):
+        return None, None
+    s = authority.strip()
+    try:
+        parsed = urllib.parse.urlsplit(f'//{s}')
+        return parsed.hostname, parsed.port
+    except (ValueError, IndexError):
+        return None, None
+
+
+POST_ONLY_ROUTES = frozenset({
+    '/api/qemu/launch',
+    '/api/qemu/stop',
+    '/api/qemu/reboot',
+    '/api/qemu/reset',
+    '/api/qemu/cmd',
+    '/api/serial/write',
+    '/api/rapp/trust',
+    '/api/rapp/install',
+    '/api/rapp/uninstall',
+    '/api/apps/uninstall',
+    '/api/apps/launch',
+    '/api/rapp/launch',
+    '/api/rapp/ipc',
+    '/api/hardware/orientation',
+    '/api/orientation',
+    '/api/hardware/sensor_inject',
+    '/api/touch/event',
+    '/api/input/key',
+    '/api/themes/apply',
+    '/api/themes/save',
+    '/api/themes/bootloader',
+    '/api/fs/read',
+    '/api/fs/write',
+    '/api/telephony/dial',
+    '/api/telephony/hangup',
+    '/api/telephony/data/toggle',
+    '/api/telephony/sms/send',
+    '/api/telephony/at_cmd',
+})
+
+GET_ONLY_ROUTES = frozenset({
+    '/api/status',
+    '/api/qemu/status',
+    '/api/qemu/telemetry',
+    '/api/screen/raw',
+    '/api/screen/binary_stream',
+    '/api/screen/metrics',
+    '/api/screen/frame',
+    '/api/browser/proxy',
+    '/api/themes',
+    '/api/apps/list',
+    '/api/rapp/list',
+    '/api/telephony/status',
+    '/api/telephony/sms/list',
+    '/api/pmic/status',
+    '/api/kernel/processes',
+    '/api/kernel/ipc',
+    '/api/device/profiles',
+})
+
+
 class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
     """Extended handler with API endpoints for QEMU control, serial logs, and live telemetry."""
 
@@ -2220,14 +2314,23 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
     # is inspected.
     MAX_POST_BYTES = 64 * 1024 * 1024
 
-    def _send_json(self, status, payload):
+    def _send_json(self, status, payload, headers=None):
         """Writes a JSON response so rejections match regular replies."""
         body = json.dumps(payload).encode()
         self.send_response(status)
         self.send_header('Content-Type', 'application/json')
         self.send_header('Content-Length', str(len(body)))
+        if headers:
+            for k, v in headers.items():
+                self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body)
+
+    def _send_method_not_allowed(self, allowed='GET, POST, OPTIONS'):
+        self._send_json(405, {
+            'success': False,
+            'error': f'Method {self.command} not allowed'
+        }, headers={'Allow': allowed})
 
     def _bounded_content_length(self):
         """Validates Content-Length before any body is buffered.
@@ -2256,31 +2359,97 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             return None
         return length
 
-    def _origin_allowed(self):
-        """Same-host enforcement for every Studio API request.
-
-        The Studio API is a local control surface (QEMU monitor, serial,
-        guest filesystem). A page on another origin that declares its Origin
-        must not be able to drive those endpoints or read guest telemetry, so
-        requests are only accepted when the Origin matches the Host they were
-        sent to. Requests without an Origin (curl, the Python tools, asset
-        loads) remain allowed.
-        """
-        origin = self.headers.get('Origin')
-        if origin is None:
-            return True
+    def _get_server_port(self):
         try:
-            netloc = urllib.parse.urlparse(origin).netloc
-        except ValueError:
+            return int(self.server.server_address[1])
+        except (AttributeError, IndexError, TypeError, ValueError):
+            return PORT
+
+    def _origin_allowed(self):
+        """Strict local-only enforcement for Device Studio API and control routes.
+
+        Defends against DNS rebinding, cross-origin drive-by attacks, and
+        forged requests:
+        1. Host authority: must have a valid Host header whose hostname resolves
+           to a permitted local loopback host ('localhost', '127.0.0.1', '::1').
+           If a port is specified, it must match the server's listening port.
+        2. Client address: connection must originate from a loopback address.
+        3. Origin header (if present): scheme must be http/https, hostname must be
+           a permitted local loopback host, and port (if present) must match the server.
+        4. Referer header (if present): scheme must be http/https, hostname must be
+           a permitted local loopback host.
+        5. Sec-Fetch-Site (if present): requests declaring 'cross-site' are rejected.
+        6. Missing Origin policy: requests without Origin are only authorized if
+           Host, client address, and Referer all pass local verification, and the
+           request does not indicate cross-site browser navigation/document submission.
+        """
+        # 1. Host authority verification
+        host_hdr = self.headers.get('Host')
+        if not host_hdr:
             return False
-        host = self.headers.get('Host') or ''
-        return bool(netloc) and netloc.lower() == host.lower()
+        host_name, host_port = _parse_authority(host_hdr)
+        if not host_name or not is_permitted_local_host(host_name):
+            return False
+        server_port = self._get_server_port()
+        if host_port is not None and host_port != server_port:
+            return False
+
+        # 2. Client address verification (must be loopback)
+        client_ip = self.client_address[0] if hasattr(self, 'client_address') and self.client_address else None
+        if client_ip and not is_permitted_local_host(client_ip):
+            return False
+
+        # 3. Origin header verification (when present)
+        origin = self.headers.get('Origin')
+        if origin is not None:
+            try:
+                parsed_origin = urllib.parse.urlsplit(origin)
+            except ValueError:
+                return False
+            if parsed_origin.scheme not in ('http', 'https'):
+                return False
+            origin_host = parsed_origin.hostname
+            if not origin_host or not is_permitted_local_host(origin_host):
+                return False
+            origin_port = parsed_origin.port
+            if origin_port is not None and origin_port != server_port:
+                return False
+
+        # 4. Referer header verification (when present)
+        referer = self.headers.get('Referer')
+        if referer:
+            try:
+                parsed_ref = urllib.parse.urlsplit(referer)
+                if parsed_ref.scheme in ('http', 'https'):
+                    ref_host = parsed_ref.hostname
+                    if ref_host and not is_permitted_local_host(ref_host):
+                        return False
+            except ValueError:
+                return False
+
+        # 5. Fetch metadata cross-site defense
+        sec_fetch_site = self.headers.get('Sec-Fetch-Site', '').strip().lower()
+        if sec_fetch_site == 'cross-site':
+            return False
+
+        # 6. Deliberate missing-origin policy
+        if origin is None:
+            sec_fetch_mode = self.headers.get('Sec-Fetch-Mode', '').strip().lower()
+            sec_fetch_dest = self.headers.get('Sec-Fetch-Dest', '').strip().lower()
+            if (sec_fetch_mode == 'navigate' or sec_fetch_dest in ('document', 'iframe')) and self.command in ('POST', 'PUT', 'DELETE', 'PATCH'):
+                return False
+
+        return True
 
     def do_GET(self):
         if not self._origin_allowed():
             self._send_json(403, {'success': False, 'error': 'Cross-origin request rejected'})
             return
         parsed_path = urllib.parse.urlparse(self.path)
+
+        if parsed_path.path in POST_ONLY_ROUTES or parsed_path.path.startswith('/api/apps/upload'):
+            self._send_method_not_allowed(allowed='POST')
+            return
 
         # Device profiles (AVD-Manager equivalent). Pure data from DEVICE_PROFILES;
         # it lists the declarative profiles and the active one. It reports the
@@ -2497,10 +2666,9 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
 
         if parsed_path.path == '/api/audio/volume':
             query = urllib.parse.parse_qs(parsed_path.query)
-            action = query.get('action', ['get'])[0].upper()
-            val = query.get('value', [''])[0]
-            cmd = f"VOLUME {val}" if val else f"VOLUME {action}"
-            ok, msg = send_guest_serial_command(cmd, '[AUDIO]', timeout=3)
+            if 'action' in query or 'value' in query:
+                self._send_method_not_allowed(allowed='POST')
+                return
             cur_vol = None
             with telemetry_lock:
                 for line in reversed(serial_lines):
@@ -2509,19 +2677,15 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                         if m:
                             cur_vol = int(m.group(1))
                             break
-            # A missing guest report is unknown, not a synthetic 75% reading.
-            #
-            # WHY the status is `REQUESTED_NOT_APPLIED` and not `APPLIED`: nothing
-            # in the guest's audio path scales output by this value. `play` drives a
-            # PIT tone generator with no amplitude parameter, `pcm.rs` never reads
-            # the manager, and the PCI audio driver writes no mixer register. The
-            # guest echoes back the level that was *stored*, so reporting it as
-            # applied would assert a hardware effect that does not exist.
-            success = bool(ok and cur_vol is not None)
+            success = cur_vol is not None
             self.send_response(200 if success else 503)
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
-            self.wfile.write(json.dumps({'success': success, 'volume_percent': cur_vol, 'status': 'REQUESTED_NOT_APPLIED' if success else 'UNBOUND', 'message': msg}).encode())
+            self.wfile.write(json.dumps({
+                'success': success,
+                'volume_percent': cur_vol,
+                'status': 'REPORTED' if success else 'UNBOUND'
+            }).encode())
             return
 
         if parsed_path.path == '/api/browser/proxy':
@@ -2703,10 +2867,77 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
         if not self._origin_allowed():
             self._send_json(403, {'success': False, 'error': 'Cross-origin request rejected'})
             return
+        parsed_path = urllib.parse.urlparse(self.path)
+        if parsed_path.path in GET_ONLY_ROUTES or parsed_path.path == '/api/serial':
+            self._send_method_not_allowed(allowed='GET')
+            return
         # Orientation state is module-level; without this declaration the
         # assignment below would make the name function-local and every touch
         # payload that consults the orientation would raise UnboundLocalError.
         global serial_lines, current_device_orientation
+
+        if parsed_path.path == '/api/audio/volume':
+            content_length = self._bounded_content_length()
+            if content_length is None:
+                return
+            body = self.rfile.read(content_length) if content_length > 0 else b'{}'
+            try:
+                data = json.loads(body.decode('utf-8'))
+            except Exception:
+                data = {}
+            action = str(data.get('action', '')).strip().upper()
+            val = str(data.get('value', '')).strip()
+            if not action and not val:
+                self._send_json(400, {'success': False, 'error': 'Missing action or value parameter'})
+                return
+            if action and action not in ('UP', 'DOWN', 'MUTE', 'GET'):
+                self._send_json(400, {'success': False, 'error': f'Invalid action {action}'})
+                return
+            if val:
+                try:
+                    ival = int(val)
+                    if ival < 0 or ival > 100:
+                        raise ValueError()
+                except ValueError:
+                    self._send_json(400, {'success': False, 'error': 'Volume value must be an integer between 0 and 100'})
+                    return
+                cmd = f"VOLUME {val}"
+            else:
+                cmd = f"VOLUME {action}"
+            with serial_socket_lock:
+                has_conn = serial_socket_conn is not None
+            if not has_conn:
+                self.send_response(503)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    'success': False,
+                    'status': 'UNAVAILABLE',
+                    'volume_percent': None,
+                    'error': 'QEMU COM1 serial input socket is offline or not connected'
+                }).encode())
+                return
+
+            ok, msg = send_guest_serial_command(cmd, '[AUDIO]', timeout=3)
+            cur_vol = None
+            with telemetry_lock:
+                for line in reversed(serial_lines):
+                    if "[AUDIO]" in line and "volume_percent=" in line:
+                        m = re.search(r'volume_percent=(\d+)', line)
+                        if m:
+                            cur_vol = int(m.group(1))
+                            break
+            success = bool(ok and cur_vol is not None)
+            self.send_response(200 if success else 503)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                'success': success,
+                'volume_percent': cur_vol,
+                'status': 'REQUESTED_NOT_APPLIED' if success else 'UNBOUND',
+                'message': msg
+            }).encode())
+            return
 
         if self.path == '/api/device/profile':
             # Select the device profile applied on the next cold boot. Selection
@@ -3687,6 +3918,30 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
         self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
         self.send_header('Access-Control-Allow-Headers', 'Content-Type')
         self.end_headers()
+
+    def do_HEAD(self):
+        if not self._origin_allowed():
+            self._send_json(403, {'success': False, 'error': 'Cross-origin request rejected'})
+            return
+        super().do_HEAD()
+
+    def do_PUT(self):
+        if not self._origin_allowed():
+            self._send_json(403, {'success': False, 'error': 'Cross-origin request rejected'})
+            return
+        self._send_method_not_allowed()
+
+    def do_DELETE(self):
+        if not self._origin_allowed():
+            self._send_json(403, {'success': False, 'error': 'Cross-origin request rejected'})
+            return
+        self._send_method_not_allowed()
+
+    def do_PATCH(self):
+        if not self._origin_allowed():
+            self._send_json(403, {'success': False, 'error': 'Cross-origin request rejected'})
+            return
+        self._send_method_not_allowed()
 
 
 class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
