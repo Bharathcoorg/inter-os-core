@@ -605,8 +605,48 @@ def init_default_serial_logs():
     """Start with an empty UART history; only guest-emitted lines are shown."""
     return
 
+
+def get_permitted_ws_origins(port=None):
+    """Returns the set of legitimate local Studio origins permitted to connect to websockify."""
+    if port is None:
+        port = PORT
+    origins = [
+        f"http://127.0.0.1:{port}",
+        f"http://localhost:{port}",
+        f"http://[::1]:{port}",
+        f"https://127.0.0.1:{port}",
+        f"https://localhost:{port}",
+        f"https://[::1]:{port}",
+    ]
+    if port == 80:
+        origins.extend(["http://127.0.0.1", "http://localhost", "http://[::1]"])
+    elif port == 443:
+        origins.extend(["https://127.0.0.1", "https://localhost", "https://[::1]"])
+    return origins
+
+
+def build_websockify_cmd(ws_port=None, vnc_port=None, studio_port=None):
+    """Constructs the hardened websockify invocation enforcing strict origin validation."""
+    if ws_port is None:
+        target_ws = f"127.0.0.1:{WS_PORT}"
+    else:
+        target_ws = f"127.0.0.1:{ws_port}"
+    if vnc_port is None:
+        target_vnc = "127.0.0.1:5901"
+    else:
+        target_vnc = f"127.0.0.1:{vnc_port}"
+    origins = get_permitted_ws_origins(studio_port)
+    auth_source = " ".join(origins)
+    return [
+        sys.executable, "-m", "websockify",
+        "--auth-plugin=ExpectOrigin",
+        f"--auth-source={auth_source}",
+        target_ws, target_vnc
+    ]
+
+
 def start_websockify_if_needed():
-    """Starts websockify on WS_PORT (6081) bridging to QEMU VNC (5900) if not already listening."""
+    """Starts websockify on WS_PORT (6081) bridging to QEMU VNC (5901) with strict Origin checking."""
     global ws_subproc
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -618,13 +658,11 @@ def start_websockify_if_needed():
         pass
 
     try:
-        ws_subproc = subprocess.Popen([
-            sys.executable, "-m", "websockify",
-            f"127.0.0.1:{WS_PORT}", "127.0.0.1:5901"
-        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        cmd = build_websockify_cmd()
+        ws_subproc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         time.sleep(0.3)
         latest_telemetry["websockify_alive"] = True
-        print(f"[*] Live Bare-Metal VBE bridge active on ws://127.0.0.1:{WS_PORT} -> VNC :5900")
+        print(f"[*] Live Bare-Metal VBE bridge active on ws://127.0.0.1:{WS_PORT} -> VNC :{VNC_PORT}")
     except Exception as e:
         print(f"[*] Notice: websockify auto-start: {e}")
         latest_telemetry["websockify_alive"] = False
@@ -2326,7 +2364,19 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _drain_incoming_body_if_any(self):
+        """Reads and discards incoming body up to 1 MiB so early rejections don't RST."""
+        raw = self.headers.get('Content-Length')
+        if raw:
+            try:
+                cl = int(raw)
+                if cl > 0:
+                    self._drain_body(min(cl, 1024 * 1024))
+            except (TypeError, ValueError):
+                pass
+
     def _send_method_not_allowed(self, allowed='GET, POST, OPTIONS'):
+        self._drain_incoming_body_if_any()
         self._send_json(405, {
             'success': False,
             'error': f'Method {self.command} not allowed'
@@ -2412,7 +2462,9 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             if not origin_host or not is_permitted_local_host(origin_host):
                 return False
             origin_port = parsed_origin.port
-            if origin_port is not None and origin_port != server_port:
+            if origin_port is None:
+                origin_port = 443 if parsed_origin.scheme == 'https' else 80
+            if origin_port != server_port:
                 return False
 
         # 4. Referer header verification (when present)
@@ -2865,6 +2917,7 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
 
     def do_POST(self):
         if not self._origin_allowed():
+            self._drain_incoming_body_if_any()
             self._send_json(403, {'success': False, 'error': 'Cross-origin request rejected'})
             return
         parsed_path = urllib.parse.urlparse(self.path)
@@ -3927,18 +3980,21 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
 
     def do_PUT(self):
         if not self._origin_allowed():
+            self._drain_incoming_body_if_any()
             self._send_json(403, {'success': False, 'error': 'Cross-origin request rejected'})
             return
         self._send_method_not_allowed()
 
     def do_DELETE(self):
         if not self._origin_allowed():
+            self._drain_incoming_body_if_any()
             self._send_json(403, {'success': False, 'error': 'Cross-origin request rejected'})
             return
         self._send_method_not_allowed()
 
     def do_PATCH(self):
         if not self._origin_allowed():
+            self._drain_incoming_body_if_any()
             self._send_json(403, {'success': False, 'error': 'Cross-origin request rejected'})
             return
         self._send_method_not_allowed()

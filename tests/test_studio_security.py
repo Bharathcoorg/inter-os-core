@@ -16,6 +16,7 @@ import time
 import json
 import socket
 import socketserver
+import subprocess
 import threading
 import unittest
 import urllib.request
@@ -277,6 +278,13 @@ class StudioSecurityTests(unittest.TestCase):
         self.assertEqual(status, 200, f"Expected 200 for [::1] IPv6 Host and Origin, got {status}")
         self.assertIn("status", data)
 
+        # 8. Origin without port (implicit :80) against non-80 server must be blocked (403)
+        status, _, _ = self._get("/api/status", headers={
+            "Host": f"127.0.0.1:{self.port}",
+            "Origin": "http://localhost",
+        })
+        self.assertEqual(status, 403, f"Expected 403 for Origin without port matching non-80 server, got {status}")
+
     def test_11_missing_origin_trust_policy(self):
         """Verify requests with missing Origin headers enforce a deliberate local-only trust policy."""
         # 1. Missing Origin but cross-site fetch indicator must be blocked (403)
@@ -399,6 +407,89 @@ class StudioSecurityTests(unittest.TestCase):
                             f"Expected 403 Forbidden for request missing Host header, got: {response[:50]}")
         finally:
             s.close()
+
+    def test_15_websockify_origin_verification(self):
+        """Verify websockify WebSocket bridge enforces strict Origin verification at handshake."""
+        # Find ephemeral loopback ports for test websockify and mock backend
+        with socket.socket() as s_ws:
+            s_ws.bind(('127.0.0.1', 0))
+            ws_test_port = s_ws.getsockname()[1]
+        with socket.socket() as s_vnc:
+            s_vnc.bind(('127.0.0.1', 0))
+            vnc_test_port = s_vnc.getsockname()[1]
+
+        cmd = server.build_websockify_cmd(
+            ws_port=ws_test_port,
+            vnc_port=vnc_test_port,
+            studio_port=self.port
+        )
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            # Wait for websockify to start listening
+            ready = False
+            for _ in range(30):
+                try:
+                    with socket.create_connection(('127.0.0.1', ws_test_port), timeout=0.1):
+                        ready = True
+                        break
+                except Exception:
+                    time.sleep(0.1)
+            self.assertTrue(ready, "Websockify test instance failed to start")
+
+            def probe(origin_header):
+                s = socket.create_connection(('127.0.0.1', ws_test_port), timeout=2)
+                try:
+                    hdr = f"Origin: {origin_header}\r\n" if origin_header is not None else ""
+                    req = (f"GET / HTTP/1.1\r\n"
+                           f"Host: 127.0.0.1:{ws_test_port}\r\n"
+                           f"Upgrade: websocket\r\n"
+                           f"Connection: Upgrade\r\n"
+                           f"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+                           f"Sec-WebSocket-Version: 13\r\n"
+                           f"{hdr}\r\n").encode("utf-8")
+                    s.sendall(req)
+                    resp = s.recv(4096).decode("utf-8", errors="replace")
+                    status_line = resp.split("\r\n")[0]
+                    return status_line
+                finally:
+                    s.close()
+
+            # 1. Hostile origins must be rejected with 403 Forbidden and NEVER receive 101
+            hostile_origins = [
+                "https://evil.example",
+                "http://attacker.com",
+                f"http://evil.com:{self.port}",
+                "null",
+            ]
+            for hostile in hostile_origins:
+                status = probe(hostile)
+                self.assertNotIn("101", status, f"Hostile origin {hostile} must not receive 101 Switching Protocols")
+                self.assertIn("403", status, f"Hostile origin {hostile} must be rejected with 403 Forbidden, got: {status}")
+
+            # 2. Missing Origin header must be rejected with 403
+            status = probe(None)
+            self.assertNotIn("101", status, "Request without Origin header must not receive 101 Switching Protocols")
+            self.assertIn("403", status, f"Request without Origin header must be rejected with 403 Forbidden, got: {status}")
+
+            # 3. Wrong port (e.g. 8080) must be rejected with 403
+            status = probe("http://localhost:8080")
+            self.assertNotIn("101", status, "Origin with wrong port must not receive 101 Switching Protocols")
+            self.assertIn("403", status, f"Origin with wrong port must be rejected with 403, got: {status}")
+
+            # 4. Legitimate local Studio origins must succeed with 101 Switching Protocols
+            allowed_origins = [
+                f"http://127.0.0.1:{self.port}",
+                f"http://localhost:{self.port}",
+            ]
+            for allowed in allowed_origins:
+                status = probe(allowed)
+                self.assertIn("101", status, f"Legitimate local origin {allowed} must receive 101 Switching Protocols, got: {status}")
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except Exception:
+                proc.kill()
 
 if __name__ == "__main__":
     unittest.main()

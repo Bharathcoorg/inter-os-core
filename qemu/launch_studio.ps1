@@ -60,7 +60,8 @@ Start-Sleep -Milliseconds 800
 
 # 5. Launch websockify (VNC TCP → WebSocket bridge)
 Write-Host "[WEBSOCKIFY] Bridging VNC:$vncPort -> WebSocket:$wsPort..." -ForegroundColor Cyan
-$wsProcess = Start-Process -FilePath "python" -ArgumentList "-m", "websockify", "127.0.0.1:$wsPort", "localhost:$vncPort" -PassThru -NoNewWindow
+$allowedOrigins = "http://127.0.0.1:$httpPort http://localhost:$httpPort http://[::1]:$httpPort"
+$wsProcess = Start-Process -FilePath "python" -ArgumentList "-m", "websockify", "--auth-plugin=ExpectOrigin", "--auth-source=$allowedOrigins", "127.0.0.1:$wsPort", "127.0.0.1:$vncPort" -PassThru -NoNewWindow
 Write-Host "[WEBSOCKIFY] Started (PID: $($wsProcess.Id))" -ForegroundColor Green
 
 # 6. Launch the studio HTTP server
