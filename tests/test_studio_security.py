@@ -28,6 +28,23 @@ sys.path.insert(0, os.path.join(WORKSPACE_ROOT, "emulator"))
 
 import server
 
+def _extract_ws_args_block(script_source):
+    """Returns the `$wsArgs = @( ... )` block verbatim from the launcher.
+
+    WHY extract rather than restate: the point of this test is what the launcher
+    passes to Start-Process. Rebuilding the array inside the test would let the
+    launcher and the test disagree silently, which is exactly the gap that let a
+    broken launcher pass a test built from a restated copy of its arguments.
+    """
+    start = script_source.find("$wsArgs = @(")
+    if start < 0:
+        raise AssertionError("launch_studio.ps1 must define a $wsArgs array")
+    end = script_source.find("\n)", start)
+    if end < 0:
+        raise AssertionError("launch_studio.ps1 $wsArgs array is not terminated")
+    return script_source[start:end + 2]
+
+
 class StudioSecurityTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -564,7 +581,13 @@ class StudioSecurityTests(unittest.TestCase):
             s_over.close()
 
     def test_17_launch_studio_powershell_websockify_execution(self):
-        """Verify qemu/launch_studio.ps1 parses cleanly and starts websockify with hardened origin."""
+        """Verify the real launch_studio.ps1 parses cleanly and starts websockify with hardened origins.
+
+        Every assertion here is driven by the launcher's own argument list, which
+        is extracted from qemu/launch_studio.ps1 and evaluated, so this test
+        fails if the launcher's arguments change rather than only if the quoting
+        idiom it happens to use today still works.
+        """
         studio_ps1 = os.path.join(WORKSPACE_ROOT, "qemu", "launch_studio.ps1")
         self.assertTrue(os.path.exists(studio_ps1), "launch_studio.ps1 must exist")
 
@@ -582,40 +605,52 @@ class StudioSecurityTests(unittest.TestCase):
         self.assertIn('"`"--auth-source=$allowedOrigins`""', src,
                       "launch_studio.ps1 must quote --auth-source to prevent Start-Process space splitting")
 
-        # 3. Child process argv test: confirm child process receives a single --auth-source token
-        probe_py = os.path.join(WORKSPACE_ROOT, "tests", "_probe_argv.py")
-        out_txt = os.path.join(WORKSPACE_ROOT, "tests", "_probe_out.txt")
-        try:
-            with open(probe_py, "w", encoding="utf-8") as f:
-                f.write("import sys, json\nwith open(sys.argv[1], 'w') as out:\n    json.dump(sys.argv[2:], out)\n")
+        # 3. The argument list is taken from launch_studio.ps1 itself, not restated here.
+        #
+        # WHY this matters: the previous version of this test rebuilt $wsArgs
+        # inline, so it proved that the quoting idiom works while proving nothing
+        # about what the launcher actually passes. Extracting the block means an
+        # edit to the launcher's argument list is what this test observes.
+        ws_args_block = _extract_ws_args_block(src)
+        self.assertIn("--auth-source", ws_args_block,
+                      "the extracted websockify argument list must configure an origin source")
 
-            test_argv_ps = f"""
-            $httpPort = {self.port}
-            $allowedOrigins = "http://127.0.0.1:$httpPort http://localhost:$httpPort http://[::1]:$httpPort"
-            $wsArgs = @(
-                "-m", "websockify",
-                "--auth-plugin=ExpectOrigin",
-                "`"--auth-source=$allowedOrigins`"",
-                "127.0.0.1:6081",
-                "127.0.0.1:5901"
-            )
-            $p = Start-Process -FilePath "python" -ArgumentList @("{probe_py}", "{out_txt}", $wsArgs[3]) -PassThru -NoNewWindow -Wait
-            """
-            subprocess.run(["powershell", "-NoProfile", "-Command", test_argv_ps], check=True)
-            with open(out_txt, "r", encoding="utf-8") as f:
-                passed_args = json.load(f)
-            expected_auth_source = f"--auth-source=http://127.0.0.1:{self.port} http://localhost:{self.port} http://[::1]:{self.port}"
-            self.assertEqual(passed_args, [expected_auth_source],
-                             f"Child process received split arguments instead of single token: {passed_args}")
-        finally:
-            for temp_f in [probe_py, out_txt]:
-                if os.path.exists(temp_f):
-                    try:
-                        os.remove(temp_f)
-                    except OSError:
-                        pass
+        expected_origins = (
+            f"http://127.0.0.1:{self.port} "
+            f"http://localhost:{self.port} "
+            f"http://[::1]:{self.port}"
+        )
+        inspect_ps = f"""
+        $httpPort = {self.port}
+        $wsPort = 6081
+        $vncPort = 5901
+        $allowedOrigins = "http://127.0.0.1:$httpPort http://localhost:$httpPort http://[::1]:$httpPort"
+        {ws_args_block}
+        # Report the array the launcher would hand to Start-Process.
+        ConvertTo-Json @($wsArgs) -Compress | Write-Output
+        """
+        r = subprocess.run(["powershell", "-NoProfile", "-Command", inspect_ps],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, f"evaluating the launcher argument block failed:\n{r.stderr}")
+        ws_args = json.loads(r.stdout.strip().splitlines()[-1])
 
-        # 4. Execution check: execute websockify with the launch_studio arguments and verify hardened Origin handshake
+        # The launcher must pass exactly these arguments, in this order, with the
+        # origin list as ONE element carrying the quotes Start-Process forwards.
+        self.assertEqual(len(ws_args), 6, f"unexpected websockify argument count: {ws_args}")
+        self.assertEqual(ws_args[0], "-m")
+        self.assertEqual(ws_args[1], "websockify")
+        self.assertEqual(ws_args[2], "--auth-plugin=ExpectOrigin")
+        self.assertEqual(
+            ws_args[3], f'"--auth-source={expected_origins}"',
+            "the origin allowlist must be one quoted argument; an unquoted value "
+            "would be split by Start-Process into four separate argv entries"
+        )
+        # The bridge must stay bound to loopback on both ends.
+        self.assertTrue(ws_args[4].startswith("127.0.0.1:"), f"websocket endpoint must be loopback: {ws_args[4]}")
+        self.assertTrue(ws_args[5].startswith("127.0.0.1:"), f"vnc endpoint must be loopback: {ws_args[5]}")
+
+        # 4. Execution check: run the launcher's own argument list against real
+        #    websockify and verify the hardened Origin handshake.
         with socket.socket() as s_ws:
             s_ws.bind(('127.0.0.1', 0))
             ws_test_port = s_ws.getsockname()[1]
@@ -629,13 +664,7 @@ class StudioSecurityTests(unittest.TestCase):
         $wsPort = {ws_test_port}
         $vncPort = {vnc_test_port}
         $allowedOrigins = "http://127.0.0.1:$httpPort http://localhost:$httpPort http://[::1]:$httpPort"
-        $wsArgs = @(
-            "-m", "websockify",
-            "--auth-plugin=ExpectOrigin",
-            "`"--auth-source=$allowedOrigins`"",
-            "127.0.0.1:$wsPort",
-            "127.0.0.1:$vncPort"
-        )
+        {ws_args_block}
         $proc = Start-Process -FilePath "python" -ArgumentList $wsArgs -PassThru -NoNewWindow
         $proc.Id | Out-File "{pid_file}" -Encoding ascii
         """
