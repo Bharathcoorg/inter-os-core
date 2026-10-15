@@ -375,6 +375,31 @@ pub fn is_lease_valid(
     })
 }
 
+/// Returns true if a lease exists, is unrevoked, unexpired, and held by grantee,
+/// regardless of remaining invocation count (for authorized retransmission of in-flight operations).
+pub fn is_lease_unrevoked_and_unexpired(
+    lease_id: u64,
+    caller: Option<TaskId>,
+    current_ticks: u64,
+    required_rights: Rights,
+) -> bool {
+    let registry = DELEGATION_REGISTRY.lock();
+    registry.iter().any(|lease| {
+        if lease.lease_id != lease_id || lease.revoked {
+            return false;
+        }
+        if let Some(caller_task) = caller {
+            if caller_task != lease.grantee_task {
+                return false;
+            }
+        }
+        if current_ticks >= lease.expiry_ticks {
+            return false;
+        }
+        lease.attenuated_rights.contains(required_rights)
+    })
+}
+
 /// Validates and consumes one invocation from a delegated lease.
 pub fn consume_invocation(
     lease_id: u64,

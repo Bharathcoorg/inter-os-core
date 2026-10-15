@@ -554,6 +554,34 @@ impl CapabilityTable {
         })
     }
 
+    /// Checks whether the table contains an unrevoked capability matching the requested
+    /// type and rights, or an unrevoked/unexpired lease (even if remaining quota is 0,
+    /// authorizing retransmission of an in-flight operation without burning quota).
+    pub fn has_authorized_or_retransmit_capability(
+        &self,
+        expected_type: CapabilityType,
+        required_rights: Rights,
+    ) -> bool {
+        let now = crate::interrupts::get_system_ticks();
+        self.slots.iter().any(|slot| {
+            slot.cap.as_ref().map_or(false, |cap| {
+                if cap.cap_type != expected_type || !cap.rights.contains(required_rights) {
+                    return false;
+                }
+                if revocation::is_revoked(cap.id) {
+                    return false;
+                }
+                if cap.id.0 & 0x8000_0000_0000_0000 != 0 {
+                    let lease_id = cap.id.0 & 0x7FFF_FFFF_FFFF_FFFF;
+                    if !delegation::is_lease_unrevoked_and_unexpired(lease_id, self.owner_task, now, required_rights) {
+                        return false;
+                    }
+                }
+                true
+            })
+        })
+    }
+
     /// Authorizes one operation against a matching capability. Delegated
     /// capabilities consume exactly one invocation here; ordinary capabilities
     /// are only inspected. Callers must use this method for security decisions

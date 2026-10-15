@@ -250,9 +250,30 @@ impl Scheduler {
             i -= 1;
             if self.tasks[i].id != current_id && self.tasks[i].state == TaskState::Terminated {
                 let tid = self.tasks[i].id;
-                let _ = crate::task::process::reap(tid);
-                self.tasks.remove(i);
-                if i < self.current_idx { self.current_idx -= 1; }
+                let mut reap_res = crate::task::process::try_reap(tid);
+                if reap_res == Err("process table busy") || reap_res == Err("thread table busy") {
+                    for _ in 0..100 {
+                        core::hint::spin_loop();
+                        reap_res = crate::task::process::try_reap(tid);
+                        if reap_res != Err("process table busy") && reap_res != Err("thread table busy") {
+                            break;
+                        }
+                    }
+                }
+                match reap_res {
+                    Ok(()) | Err("thread not registered") | Err("process record missing") => {
+                        self.tasks.remove(i);
+                        if i < self.current_idx { self.current_idx -= 1; }
+                    }
+                    Err("process table busy") | Err("thread table busy") => {
+                        // Skip this tick to avoid blocking on IRQ path; will retry next tick
+                    }
+                    Err(_) => {
+                        // Unrecoverable state; clean up TCB to avoid silent zombie leak
+                        self.tasks.remove(i);
+                        if i < self.current_idx { self.current_idx -= 1; }
+                    }
+                }
             }
         }
         if self.current_idx >= self.tasks.len() && !self.tasks.is_empty() {
@@ -281,14 +302,34 @@ impl Scheduler {
                 && matches!(task.state, TaskState::Zombie | TaskState::Terminated)
             {
                 let tid = task.id;
-                // Use try_reap so orphan reaping in interrupt/scheduler context
-                // never takes blocking locks or deadlocks when THREAD_TABLE or PROCESS_TABLE
-                // is held by an interrupted thread.
-                if crate::task::process::try_reap(tid).is_ok() {
-                    self.tasks.remove(i);
-                    reaped += 1;
-                    if i < self.current_idx {
-                        self.current_idx -= 1;
+                let mut reap_res = crate::task::process::try_reap(tid);
+                if reap_res == Err("process table busy") || reap_res == Err("thread table busy") {
+                    for _ in 0..100 {
+                        core::hint::spin_loop();
+                        reap_res = crate::task::process::try_reap(tid);
+                        if reap_res != Err("process table busy") && reap_res != Err("thread table busy") {
+                            break;
+                        }
+                    }
+                }
+                match reap_res {
+                    Ok(()) | Err("thread not registered") | Err("process record missing") => {
+                        self.tasks.remove(i);
+                        reaped += 1;
+                        if i < self.current_idx {
+                            self.current_idx -= 1;
+                        }
+                    }
+                    Err("process table busy") | Err("thread table busy") => {
+                        // Skip this tick to avoid blocking on IRQ path; will retry next tick
+                    }
+                    Err(_) => {
+                        // Unrecoverable state; clean up TCB to avoid silent zombie leak
+                        self.tasks.remove(i);
+                        reaped += 1;
+                        if i < self.current_idx {
+                            self.current_idx -= 1;
+                        }
                     }
                 }
             }

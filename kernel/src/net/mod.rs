@@ -221,22 +221,24 @@ pub fn send_udp_datagram_authorized(
     };
     let eth_len = frame.serialize(&mut eth_buf).map_err(|_| NetError::BufferTooSmall)?;
 
-    // 6. Enforce the process-scoped background network budget before
-    // handing the frame to the virtual/physical network backend.
-    if let Some(task) = crate::task::SCHEDULER.lock().current_task_id() {
-        crate::task::process::consume_background_network(task, eth_len)
-            .map_err(|_| NetError::QueueFull)?;
-    }
+    // 6. Enforce capability authorization BEFORE debiting background process budget
     if consume_quota {
         if !caps.authorize_capability(CapabilityType::NetworkSend, Rights::WRITE) {
             return Err(NetError::CapabilityDenied);
         }
     } else {
-        if !caps.has_capability(CapabilityType::NetworkSend, Rights::WRITE) {
+        if !caps.has_authorized_or_retransmit_capability(CapabilityType::NetworkSend, Rights::WRITE) {
             return Err(NetError::CapabilityDenied);
         }
     }
-    // 7. Transmit into Loopback / Virtual NIC
+
+    // 7. Enforce the process-scoped background network budget only after capability authorization succeeds
+    if let Some(task) = crate::task::SCHEDULER.lock().current_task_id() {
+        crate::task::process::consume_background_network(task, eth_len)
+            .map_err(|_| NetError::QueueFull)?;
+    }
+
+    // 8. Transmit into Loopback / Virtual NIC
     NETWORK_DEVICE.lock().transmit(&eth_buf[0..eth_len])
 }
 
