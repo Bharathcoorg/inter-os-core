@@ -281,11 +281,15 @@ impl Scheduler {
                 && matches!(task.state, TaskState::Zombie | TaskState::Terminated)
             {
                 let tid = task.id;
-                let _ = crate::task::process::reap(tid);
-                self.tasks.remove(i);
-                reaped += 1;
-                if i < self.current_idx {
-                    self.current_idx -= 1;
+                // Use try_reap so orphan reaping in interrupt/scheduler context
+                // never takes blocking locks or deadlocks when THREAD_TABLE or PROCESS_TABLE
+                // is held by an interrupted thread.
+                if crate::task::process::try_reap(tid).is_ok() {
+                    self.tasks.remove(i);
+                    reaped += 1;
+                    if i < self.current_idx {
+                        self.current_idx -= 1;
+                    }
                 }
             }
         }
@@ -842,6 +846,46 @@ mod tests {
         }
 
         assert_eq!(sched.task_count(), initial_task_count);
+    }
+
+    #[test]
+    fn reap_orphans_lock_safety_when_tables_busy() {
+        let mut sched = Scheduler::new();
+        sched.init(CapabilityTable::new_for_task(TaskId(0), 16));
+
+        // Spawn orphan task with parent TaskId(0)
+        let orphan = sched.spawn_with_parent(
+            "orphan_lock_test",
+            dummy_test_entry,
+            CapabilityTable::new_for_task(TaskId::new(), 16),
+            1,
+            TaskId(0),
+        );
+        sched.terminate_task(orphan, 0).expect("terminate orphan");
+        assert_eq!(sched.get_task(orphan).unwrap().state, TaskState::Zombie);
+
+        // When PROCESS_TABLE is locked (e.g. by an interrupted thread on this CPU),
+        // try_reap must return Err("process table busy") and reap_orphans must NOT deadlock or panic.
+        {
+            let _busy_processes = crate::task::process::PROCESS_TABLE.lock();
+            let reaped = sched.reap_orphans();
+            assert_eq!(reaped, 0, "must skip task when process table is locked");
+            assert!(sched.get_task(orphan).is_some(), "task must remain in table for later reaping");
+        }
+
+        // When THREAD_TABLE is locked, try_reap must similarly skip without deadlocking.
+        {
+            let _busy_threads = crate::task::process::THREAD_TABLE.lock();
+            let reaped = sched.reap_orphans();
+            assert_eq!(reaped, 0, "must skip task when thread table is locked");
+            assert!(sched.get_task(orphan).is_some());
+        }
+
+        // Once both tables are unlocked, reap_orphans succeeds cleanly.
+        let reaped = sched.reap_orphans();
+        assert_eq!(reaped, 1, "must reap task when tables are unlocked");
+        assert!(sched.get_task(orphan).is_none());
+        assert!(crate::task::process::process_for_task(orphan).is_none());
     }
 }
 

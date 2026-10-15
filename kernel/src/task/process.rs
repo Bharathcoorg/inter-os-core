@@ -412,23 +412,26 @@ pub fn mark_zombie(task: TaskId, exit_code: i32) {
     }
 }
 
-pub fn reap(task: TaskId) -> Result<(), &'static str> {
-    let process = process_for_task(task).ok_or("thread not registered")?;
-    let is_leader = record_for_process(process).map(|r| r.leader_task == task).unwrap_or(false);
+pub fn try_reap(task: TaskId) -> Result<(), &'static str> {
+    // Preserve global lock order: PROCESS_TABLE then THREAD_TABLE
+    let mut table = PROCESS_TABLE.try_lock().ok_or("process table busy")?;
+    let mut threads = THREAD_TABLE.try_lock().ok_or("thread table busy")?;
 
-    let mut threads = THREAD_TABLE.lock();
-    if let Some(slot) = threads.iter_mut().find(|slot| slot.as_ref().map(|r| r.task == task).unwrap_or(false)) {
-        *slot = None;
-    } else {
-        return Err("thread not registered");
-    }
-    let remaining = threads.iter().flatten().filter(|r| r.process == process).count();
-    drop(threads);
+    let thread_idx = threads
+        .iter()
+        .position(|slot| slot.as_ref().map(|r| r.task == task).unwrap_or(false))
+        .ok_or("thread not registered")?;
+    let process = threads[thread_idx].as_ref().unwrap().process;
 
-    let mut table = PROCESS_TABLE.lock();
     let Some(slot) = table.iter_mut().find(|slot| slot.as_ref().map(|r| r.id == process).unwrap_or(false)) else {
         return Err("process record missing");
     };
+
+    let is_leader = slot.as_ref().map(|r| r.leader_task == task).unwrap_or(false);
+
+    threads[thread_idx] = None;
+    let remaining = threads.iter().flatten().filter(|r| r.process == process).count();
+    drop(threads);
 
     if is_leader {
         if remaining == 0 {
@@ -450,6 +453,19 @@ pub fn reap(task: TaskId) -> Result<(), &'static str> {
         }
     }
     Ok(())
+}
+
+pub fn reap(task: TaskId) -> Result<(), &'static str> {
+    for _ in 0..10_000 {
+        match try_reap(task) {
+            Ok(()) => return Ok(()),
+            Err("thread table busy") | Err("process table busy") => {
+                core::hint::spin_loop();
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err("reap timed out acquiring table locks")
 }
 
 pub fn is_leader(task: TaskId) -> bool {
