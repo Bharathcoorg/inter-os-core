@@ -417,36 +417,88 @@ pub fn sys_app_wake() -> SyscallResult {
 
 pub const GLOBAL_SYSTEM_CONTROL_OBJECT: u64 = 0;
 
+/// Whether a calling task's identity is allowed to seek device-wide system
+/// administration at all.
+///
+/// WHY this exists as a separate predicate: holding capability 18 proves only
+/// that the kernel minted a global `SystemControl` token for that process. It
+/// does not by itself make the process the supervisor. Keeping the identity
+/// decision in one named, testable predicate is what lets the runtime gate be
+/// exercised without a live scheduler.
+///
+/// Authority comes from the kernel-assigned PID: TaskId(0) is the primordial
+/// kernel task and TaskId(1) is the system supervisor. The namespace test
+/// additionally admits first-party RAPP packages, whose task name is the
+/// manifest's `package_id`.
+///
+/// WHY there is no bare `name == "system"` clause: no production path produces
+/// a task with that name -- built-in services are `displayd`, `powerd`,
+/// `launcher` and so on, and the primordial task is `kernel_main` -- so the
+/// clause matched nothing while being the weakest link in the predicate. A task
+/// spawned from a RAPP is named after the publisher's `package_id`, so that
+/// clause would have let any publisher pick the privileged name.
+///
+/// The namespace test is defence in depth and never grants authority by itself:
+/// the caller must still hold a global `SystemControl` capability, and
+/// capability 18 is minted only for a key the trust store recognises as a
+/// system publisher.
+pub(crate) fn is_privileged_system_identity(task_id: TaskId, name: &str) -> bool {
+    task_id == TaskId(0)
+        || task_id == TaskId(1)
+        || name.starts_with("org.interos.")
+}
+
+/// Authorizes a `SystemControl|INVOKE` against a specific administration object.
+///
+/// The global fallback from a domain object to `GLOBAL_SYSTEM_CONTROL_OBJECT`
+/// is confined to PID 1. Without that confinement, any holder of capability 18
+/// could reach every domain object, and any holder of a domain object scoped
+/// capability could be talked into acting outside its own domain.
+pub(crate) fn authorize_system_control_object(
+    caps: &crate::capability::CapabilityTable,
+    task_id: TaskId,
+    object_id: u64,
+) -> bool {
+    if caps.authorize_object(CapabilityType::SystemControl, Rights::INVOKE, object_id) {
+        return true;
+    }
+    if object_id != GLOBAL_SYSTEM_CONTROL_OBJECT && task_id == TaskId(1) {
+        return caps.authorize_object(CapabilityType::SystemControl, Rights::INVOKE, GLOBAL_SYSTEM_CONTROL_OBJECT);
+    }
+    false
+}
+
+/// The complete device-wide administration gate: the identity check AND the
+/// capability check. A process must pass both.
+pub(crate) fn authorize_device_wide_system_control(
+    caps: &crate::capability::CapabilityTable,
+    task_id: TaskId,
+    name: &str,
+) -> bool {
+    is_privileged_system_identity(task_id, name)
+        && authorize_system_control_object(caps, task_id, GLOBAL_SYSTEM_CONTROL_OBJECT)
+}
+
 /// Enforces an explicit capability for privileged kernel controls.
 pub fn require_system_control_object(object_id: u64) -> Result<(), SyscallResult> {
     let sched = SCHEDULER.lock();
     let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
-    if task.cap_table.authorize_object(CapabilityType::SystemControl, Rights::INVOKE, object_id) {
+    if authorize_system_control_object(&task.cap_table, task.id, object_id) {
         return Ok(());
-    }
-    // Global fallback (object 0) is strictly confined to PID 1 (system supervisor).
-    // Ordinary apps or services holding capability 18 or domain objects cannot
-    // bypass domain or account scoping via ambient global fallback.
-    if object_id != GLOBAL_SYSTEM_CONTROL_OBJECT && task.id == TaskId(1) {
-        if task.cap_table.authorize_object(CapabilityType::SystemControl, Rights::INVOKE, GLOBAL_SYSTEM_CONTROL_OBJECT) {
-            return Ok(());
-        }
     }
     Err(SyscallResult::PermissionDenied)
 }
 
 fn require_system_control() -> Result<(), SyscallResult> {
-    let sched = SCHEDULER.lock();
-    let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
-    let is_system = task.id == TaskId(0)
-        || task.id == TaskId(1)
-        || task.name.starts_with("org.interos.")
-        || task.name == "system";
-    if !is_system {
-        return Err(SyscallResult::PermissionDenied);
+    let (task_id, name, caps) = {
+        let sched = SCHEDULER.lock();
+        let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+        (task.id, task.name, task.cap_table.clone())
+    };
+    if authorize_device_wide_system_control(&caps, task_id, name) {
+        return Ok(());
     }
-    drop(sched);
-    require_system_control_object(GLOBAL_SYSTEM_CONTROL_OBJECT)
+    Err(SyscallResult::PermissionDenied)
 }
 
 /// Requires `SystemControl|INVOKE` bound to the administration object of the
@@ -5758,26 +5810,158 @@ mod tests {
     }
 
     #[test]
-    fn cap_18_system_control_runtime_confinement() {
-        use crate::capability::{Capability, CapabilityId, CapabilityType, Rights};
-        use crate::services::SERVICE_POWER_CONTROL_OBJECT;
+    /// Exercises the real privileged-authorization gate for capability 18.
+///
+/// WHY this replaces a table-only test: asserting that a capability table
+/// holding an object-0 `SystemControl` token authorizes object 0 only proves
+/// `CapabilityTable::authorize_object` works. It passed unchanged against the
+/// code that let any holder of capability 18 reach device-wide administration.
+/// The confinement lives in `authorize_device_wide_system_control` and
+/// `authorize_system_control_object`, so those are what this drives.
+#[test]
+fn capability_18_is_confined_to_the_system_supervisor_gate() {
+    use crate::capability::{Capability, CapabilityId, CapabilityType, Rights};
+    use crate::services::SERVICE_POWER_CONTROL_OBJECT;
 
-        // An ordinary third-party app task with ID > 1 and name not starting with org.interos
-        let mut app_caps = crate::capability::CapabilityTable::new_for_task(TaskId(105), 4);
-        app_caps.insert(Capability {
-            id: CapabilityId(7018),
+    // An ordinary third-party app that somehow holds capability 18.
+    let mut app_caps = crate::capability::CapabilityTable::new_for_task(TaskId(105), 4);
+    app_caps.insert(Capability {
+        id: CapabilityId(7018),
+        cap_type: CapabilityType::SystemControl,
+        rights: Rights::INVOKE,
+        object_id: GLOBAL_SYSTEM_CONTROL_OBJECT,
+    }).unwrap();
+
+    // 1. The token alone matches the global object at the table level. This is
+    //    the premise the confinement exists to contain, so it must stay true.
+    assert!(app_caps.authorize_object(CapabilityType::SystemControl, Rights::INVOKE, GLOBAL_SYSTEM_CONTROL_OBJECT));
+
+    // 2. Only a kernel-assigned system PID or the first-party namespace is a
+    //    privileged identity. A task cannot acquire one by choosing a name:
+    //    a RAPP is named after the publisher's `package_id`, so any name-based
+    //    clause broad enough to be matched by a self-chosen name is unsafe.
+    assert!(!is_privileged_system_identity(TaskId(105), "com.example.tracker"));
+    assert!(!is_privileged_system_identity(TaskId(105), "system"));
+    assert!(!is_privileged_system_identity(TaskId(105), "kernel_main"));
+    assert!(!is_privileged_system_identity(TaskId(105), "org.interosX.lookalike"));
+    assert!(!is_privileged_system_identity(TaskId(105), ""));
+    // 3. ...so capability 18 alone does not produce device-wide administration.
+    assert!(
+        !authorize_device_wide_system_control(&app_caps, TaskId(105), "com.example.tracker"),
+        "capability 18 must not by itself confer device-wide system administration"
+    );
+
+    // 4. The same table held by the system supervisor is authorized.
+    assert!(is_privileged_system_identity(TaskId(1), "system"));
+    assert!(
+        authorize_device_wide_system_control(&app_caps, TaskId(1), "system"),
+        "the system supervisor must retain device-wide administration"
+    );
+    assert!(
+        authorize_device_wide_system_control(&app_caps, TaskId(0), "kernel_main"),
+        "the primordial kernel task must retain device-wide administration"
+    );
+    // First-party RAPP packages keep working through the namespace test.
+    assert!(is_privileged_system_identity(TaskId(300), "org.interos.settings"));
+
+    // 5. The global fallback from a domain object is confined to PID 1, so a
+    //    capability-18 holder outside PID 1 cannot administer another domain.
+    assert!(
+        !authorize_system_control_object(&app_caps, TaskId(105), SERVICE_POWER_CONTROL_OBJECT),
+        "an ordinary task must not reach a domain object through an ambient global fallback"
+    );
+    assert!(
+        authorize_system_control_object(&app_caps, TaskId(1), SERVICE_POWER_CONTROL_OBJECT),
+        "PID 1 may administer any domain object"
+    );
+
+    // 6. A domain-scoped capability never confers the global object, for anyone.
+    let mut power_only = crate::capability::CapabilityTable::new_for_task(TaskId(106), 4);
+    power_only.insert(Capability {
+        id: CapabilityId(7019),
+        cap_type: CapabilityType::SystemControl,
+        rights: Rights::INVOKE,
+        object_id: SERVICE_POWER_CONTROL_OBJECT,
+    }).unwrap();
+    assert!(authorize_system_control_object(&power_only, TaskId(106), SERVICE_POWER_CONTROL_OBJECT));
+    assert!(!authorize_system_control_object(&power_only, TaskId(106), GLOBAL_SYSTEM_CONTROL_OBJECT));
+    assert!(!authorize_system_control_object(&power_only, TaskId(1), GLOBAL_SYSTEM_CONTROL_OBJECT));
+    assert!(
+        !authorize_device_wide_system_control(&power_only, TaskId(106), "com.example.pmeter"),
+        "a domain-scoped capability must not become device-wide administration"
+    );
+
+    // 7. Missing capability is refused even for the system identity: the gate
+    //    requires both halves, so identity alone is not authority.
+    let empty = crate::capability::CapabilityTable::new_for_task(TaskId(1), 4);
+    assert!(!authorize_device_wide_system_control(&empty, TaskId(1), "system"));
+    assert!(!authorize_system_control_object(&empty, TaskId(1), SERVICE_POWER_CONTROL_OBJECT));
+}
+
+/// The built-in services must keep working under the confinement: each holds
+/// exactly its own domain object and nothing else.
+#[test]
+fn built_in_service_domain_control_survives_the_confined_gate() {
+    use crate::capability::{Capability, CapabilityId, CapabilityType, Rights};
+    use crate::services::{
+        SERVICE_AUDIO_CONTROL_OBJECT, SERVICE_CAMERA_CONTROL_OBJECT,
+        SERVICE_POWER_CONTROL_OBJECT, SERVICE_SENSOR_CONTROL_OBJECT,
+        SERVICE_TELEPHONY_CONTROL_OBJECT,
+    };
+
+    // Each service is spawned as its own task, none of them PID 1, and each is
+    // granted exactly one domain object by `capability_policy`.
+    let domains = [
+        (5u8, "powerd", SERVICE_POWER_CONTROL_OBJECT),
+        (6, "modemd", SERVICE_TELEPHONY_CONTROL_OBJECT),
+        (7, "audiod", SERVICE_AUDIO_CONTROL_OBJECT),
+        (8, "camerad", SERVICE_CAMERA_CONTROL_OBJECT),
+        (11, "sensord", SERVICE_SENSOR_CONTROL_OBJECT),
+    ];
+
+    for (index, (service_id, name, domain)) in domains.iter().enumerate() {
+        let task_id = TaskId(200 + index as u64);
+        let mut caps = crate::capability::CapabilityTable::new_for_task(task_id, 4);
+        caps.insert(Capability {
+            id: CapabilityId(7100 + index as u64),
             cap_type: CapabilityType::SystemControl,
             rights: Rights::INVOKE,
-            object_id: GLOBAL_SYSTEM_CONTROL_OBJECT,
+            object_id: *domain,
         }).unwrap();
 
-        // 1. Authorizing exact global object 0 on the table directly matches
-        assert!(app_caps.authorize_object(CapabilityType::SystemControl, Rights::INVOKE, GLOBAL_SYSTEM_CONTROL_OBJECT));
-
-        // 2. Authorizing power control on the table fails because object_id is 0, not power
-        assert!(!app_caps.authorize_object(CapabilityType::SystemControl, Rights::INVOKE, SERVICE_POWER_CONTROL_OBJECT));
-
-        // 3. User account scoping: global object 0 on an ordinary app must never satisfy account control
-        assert!(!app_caps.authorize_object(CapabilityType::SystemControl, Rights::INVOKE, crate::syscall::user_control_object(42)));
+        assert!(
+            authorize_system_control_object(&caps, task_id, *domain),
+            "service {} ({}) must still control its own domain object", service_id, name
+        );
+        assert!(
+            !authorize_system_control_object(&caps, task_id, GLOBAL_SYSTEM_CONTROL_OBJECT),
+            "service {} ({}) must not reach global administration", service_id, name
+        );
+        assert!(
+            !authorize_device_wide_system_control(&caps, task_id, name),
+            "service {} ({}) must not be a device-wide administrator", service_id, name
+        );
+        for (_, _, other) in domains.iter() {
+            if other != domain {
+                assert!(
+                    !authorize_system_control_object(&caps, task_id, *other),
+                    "service {} ({}) must not reach another service's domain object", service_id, name
+                );
+            }
+        }
     }
+
+    // The launcher holds user-scoped SystemControl objects, not the global one.
+    let launcher = TaskId(210);
+    let mut launcher_caps = crate::capability::CapabilityTable::new_for_task(launcher, 4);
+    launcher_caps.insert(Capability {
+        id: CapabilityId(7200),
+        cap_type: CapabilityType::SystemControl,
+        rights: Rights::INVOKE,
+        object_id: user_control_object(crate::user::UserId::OWNER.0),
+    }).unwrap();
+    assert!(authorize_system_control_object(&launcher_caps, launcher, user_control_object(crate::user::UserId::OWNER.0)));
+    assert!(!authorize_system_control_object(&launcher_caps, launcher, user_control_object(9999)));
+    assert!(!authorize_device_wide_system_control(&launcher_caps, launcher, "launcher"));
+}
 }

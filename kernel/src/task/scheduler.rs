@@ -778,6 +778,29 @@ mod tests {
         let _ = sched.reap_child(TaskId(0), parent_id);
     }
 
+    /// Drives `reap_orphans` until it stops making progress, bounded.
+    ///
+    /// WHY this exists: losing the process or thread table race defers a reap to
+    /// a later tick by design, and every test in this binary shares those tables
+    /// while running in parallel. Asserting that one particular call reaps a
+    /// fixed count was therefore only ever true when nothing else happened to
+    /// hold a table at that instant.
+    ///
+    /// The property under test is that orphans are eventually reclaimed and each
+    /// is counted exactly once, so this accumulates until the reaper goes quiet
+    /// and keeps the bound finite so a failure cannot hang the suite.
+    fn reap_orphans_until_quiet(sched: &mut Scheduler) -> usize {
+        let mut total = 0;
+        for _ in 0..64 {
+            let n = sched.reap_orphans();
+            if n == 0 {
+                break;
+            }
+            total += n;
+        }
+        total
+    }
+
     #[test]
     fn repeated_exit_reap_returns_error_and_does_not_double_free() {
         let mut sched = Scheduler::new();
@@ -815,7 +838,7 @@ mod tests {
         assert_eq!(sched.get_task(child_id).unwrap().parent_id, TaskId(0));
 
         // While child is still running (Ready), reap_orphans must NOT touch it
-        let reaped = sched.reap_orphans();
+        let reaped = reap_orphans_until_quiet(&mut sched);
         assert_eq!(reaped, 1); // Only the dead parent (whose parent is TaskId(0)) is reaped
         assert!(sched.get_task(child_id).is_some());
         assert_eq!(sched.get_task(child_id).unwrap().state, TaskState::Ready);
@@ -826,7 +849,7 @@ mod tests {
         assert_eq!(sched.get_task(child_id).unwrap().parent_id, TaskId(0));
 
         // Kernel orphan reaper must reclaim child
-        let reaped_child = sched.reap_orphans();
+        let reaped_child = reap_orphans_until_quiet(&mut sched);
         assert_eq!(reaped_child, 1);
         assert!(sched.get_task(child_id).is_none());
         assert!(crate::task::process::process_for_task(child_id).is_none());
@@ -852,7 +875,7 @@ mod tests {
         assert_eq!(sched.get_task(child_id).unwrap().parent_id, TaskId(0));
 
         // reap_orphans must reclaim both parent and child
-        let reaped = sched.reap_orphans();
+        let reaped = reap_orphans_until_quiet(&mut sched);
         assert_eq!(reaped, 2);
         assert!(sched.get_task(child_id).is_none());
         assert!(sched.get_task(parent_id).is_none());
@@ -875,7 +898,7 @@ mod tests {
         assert_eq!(sched.get_task(dev_task).unwrap().state, TaskState::Zombie);
 
         // reap_orphans reclaims it
-        let reaped = sched.reap_orphans();
+        let reaped = reap_orphans_until_quiet(&mut sched);
         assert_eq!(reaped, 1);
         assert!(sched.get_task(dev_task).is_none());
         assert!(crate::task::process::process_for_task(dev_task).is_none());
@@ -936,7 +959,7 @@ mod tests {
         }
 
         // Once both tables are unlocked, reap_orphans succeeds cleanly.
-        let reaped = sched.reap_orphans();
+        let reaped = reap_orphans_until_quiet(&mut sched);
         assert_eq!(reaped, 1, "must reap task when tables are unlocked");
         assert!(sched.get_task(orphan).is_none());
         assert!(crate::task::process::process_for_task(orphan).is_none());
@@ -990,7 +1013,10 @@ mod tests {
         );
 
         // The tick after contention ends reclaims it, and reclaims it once.
-        assert_eq!(sched.reap_orphans(), 1, "the deferred zombie must be reclaimed once released");
+        assert_eq!(
+            reap_orphans_until_quiet(&mut sched), 1,
+            "the deferred zombie must be reclaimed once released"
+        );
         assert!(sched.get_task(orphan).is_none(), "the task control block must be dropped");
         assert!(
             crate::task::process::process_for_task(orphan).is_none(),
