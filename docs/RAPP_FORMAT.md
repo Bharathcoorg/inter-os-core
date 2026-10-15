@@ -104,6 +104,30 @@ Declared capability IDs map into per-process capability token table rights and o
 | `21` | `SystemControl` | `INVOKE` | `SERVICE_AUDIO_CONTROL_OBJECT` | Scoped hardware audio synthesis and playback control |
 | `22` | `SystemControl` | `INVOKE` | `SERVICE_CAMERA_CONTROL_OBJECT` | Scoped camera sensor frame capture |
 | `23` | `SystemControl` | `INVOKE` | `SERVICE_SENSOR_CONTROL_OBJECT` | Scoped IMU, accelerometer, and sensor reading |
+
+### Capabilities that RAPP v2 does not define
+
+These are called out explicitly so a publisher does not assume an ABI entry is
+merely undocumented:
+
+- **No hardware keystore, enclave, or secure-element capability exists.** Secret
+  material for a package is persisted in that package's sandboxed VFS mount,
+  which the kernel's storage vault encrypts at rest. That is ordinary
+  `FileSystemWrite` (id `10`) to the package, not a separate authority, so a
+  manifest cannot request enclave access and must not claim to have it.
+- **No device-wide administration is grantable to a package.** Id `18` is
+  reserved for the system supervisor: the kernel mints it only for a publisher
+  key the trust store records as a system publisher, and the runtime gate
+  additionally requires a kernel-assigned privileged process identity. Until a
+  trusted provisioning path can install such a publisher key, no package can
+  obtain id `18`, and any manifest that declares it is refused at install and at
+  launch.
+
+An alias or template in the tooling that resolves a name to one of these
+capabilities must resolve it to the identifier that actually delivers what the
+name promises. `tools/interos.py` enforces this with
+`ALIAS_FORBIDDEN_CAPABILITY_IDS`, and `tests/test_rapp_capability_abi.py` pins
+it against this table.
 | `24` | `RealtimeClockRead` | `READ` | `0` (Global) | Read wall-clock hardware real-time clock (RTC) |
 
 Values outside `1..=24` (such as `0` or `25+`) are strictly unknown and rejected during package verification (`RappError::UnknownCapability`).

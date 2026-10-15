@@ -53,16 +53,34 @@ RAPP_CAPABILITY_IDS = {
     "CAP_FILESYSTEM_READ": 9, "CAP_FILESYSTEM_WRITE": 10, "CAP_STORAGE_RAW": 11,
     "CAP_NETWORK_SOCKET": 12, "CAP_NETWORK_SEND": 13, "CAP_NETWORK_RECEIVE": 14,
     "CAP_SHM_PRODUCER": 15, "CAP_SHM_CONSUMER": 16, "CAP_EVENT_POLL": 17, "CAP_SYSTEM_CONTROL": 18,
-    # High-level template and manifest permission aliases
-    "CAP_WINDOW_FOCUS": 17,
-    "CAP_HARDWARE_KEYSTORE": 5,
-    "CAP_SECURE_STORAGE": 10,
-    "CAP_SENSOR_ACCEL": 4,
-    "CAP_SENSOR_GYRO": 3,
-    "CAP_SENSOR_HR": 17,
-    "CAP_MESH_RADIO": 12,
-    "CAP_P2P_SOCKET": 13,
+    # Domain-scoped SystemControl identifiers from the same ABI table.
+    "CAP_SYSTEM_CONTROL_POWER": 19,
+    "CAP_SYSTEM_CONTROL_TELEPHONY": 20,
+    "CAP_SYSTEM_CONTROL_AUDIO": 21,
+    "CAP_SYSTEM_CONTROL_CAMERA": 22,
+    "CAP_SYSTEM_CONTROL_SENSOR": 23,
+    "CAP_REALTIME_CLOCK": 24,
+
+    # Template-facing aliases.
+    #
+    # WHY every alias here must resolve to a capability whose documented type
+    # actually delivers what the name promises: an alias is how a template ends
+    # up holding authority nobody intended to hand it. An alias may only
+    # restate an identifier above or narrow it to a documented sub-domain.
+    "CAP_WINDOW_FOCUS": 17,          # EventPoll: input and event queues.
+    "CAP_SECURE_STORAGE": 10,        # FileSystemWrite: sandboxed VFS persistence.
+    "CAP_SENSOR_ACCEL": 23,          # SystemControl scoped to the sensor domain.
+    "CAP_SENSOR_GYRO": 23,
+    "CAP_SENSOR_HR": 23,
+    "CAP_MESH_RADIO": 12,            # NetworkSocket: create UDP/TCP transports.
+    "CAP_P2P_SOCKET": 13,            # NetworkSend: transmit packets.
 }
+
+# Identifiers a template-facing alias must never resolve to, because handing one
+# to a generated app would grant authority unrelated to what the template does:
+# raw hardware bus access, raw block storage, IPC to a chosen endpoint, process
+# control, or device-wide administration.
+ALIAS_FORBIDDEN_CAPABILITY_IDS = frozenset({4, 5, 6, 7, 8, 11, 18})
 
 TEMPLATES = {
     "basic": {
@@ -71,13 +89,29 @@ TEMPLATES = {
         "permissions": ["CAP_LOGGING", "CAP_WINDOW_FOCUS"],
     },
     "authenticator": {
-        "title": "Keystore Authenticator",
-        "description": "Cryptographic TOTP authenticator backed by Ring 0 hardware enclave",
-        "permissions": ["CAP_HARDWARE_KEYSTORE", "CAP_SECURE_STORAGE"],
+        "title": "TOTP Authenticator",
+        # WHY this description does not mention a hardware enclave: RAPP v2
+        # defines no keystore or enclave capability, so there is nothing to
+        # request. Secrets are persisted in the app's sandboxed VFS mount, which
+        # is encrypted-at-rest by the kernel's storage vault but is ordinary
+        # file storage as far as the app is concerned.
+        "description": (
+            "Cryptographic TOTP authenticator. Seeds are persisted in the app's "
+            "sandboxed VFS mount (encrypted at rest by the kernel vault). RAPP v2 "
+            "defines no hardware keystore or enclave capability, so none is claimed."
+        ),
+        "permissions": ["CAP_SECURE_STORAGE"],
     },
     "sensor": {
         "title": "Sensor Telemetry Hub",
-        "description": "Real-time IMU, accelerometer, and biometrics monitor",
+        # WHY the sensor permissions are the sensor domain of SystemControl:
+        # sys_sensor_read is gated on SERVICE_SENSOR_CONTROL_OBJECT, which is
+        # capability 23. Mapping these to raw port I/O or to the timer would have
+        # granted a telemetry app hardware bus access it cannot use.
+        "description": (
+            "Reads the IMU, accelerometer and biometric sensors through the "
+            "sensor domain of SystemControl (capability 23)"
+        ),
         "permissions": ["CAP_SENSOR_ACCEL", "CAP_SENSOR_GYRO", "CAP_SENSOR_HR"],
     },
     "meshchat": {
@@ -737,9 +771,9 @@ def cmd_pack(args):
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_bytes(package_bytes)
     log_success(f"RAPP v2 package created: {output} ({len(package_bytes)} bytes)")
-    log(f"  • Publisher key: {pub.hex()}")
-    log(f"  • Ed25519 signature: {signature.hex()[:24]}...")
-    log(f"  • Architecture: {manifest_data.get('architecture', 'x86_64')}")
+    log(f"  Ã¢â‚¬Â¢ Publisher key: {pub.hex()}")
+    log(f"  Ã¢â‚¬Â¢ Ed25519 signature: {signature.hex()[:24]}...")
+    log(f"  Ã¢â‚¬Â¢ Architecture: {manifest_data.get('architecture', 'x86_64')}")
     return 0
 
 
@@ -777,10 +811,10 @@ def cmd_verify(args):
     pkg_id = data[8:40].split(b"\0", 1)[0].decode("utf-8", errors="strict")
     version = (int.from_bytes(data[0x48:0x4A], "little"), int.from_bytes(data[0x4A:0x4C], "little"), int.from_bytes(data[0x4C:0x4E], "little"))
     log_success(f"RAPP v2 '{pkg_id}' cryptographically verified")
-    log(f"  • Publisher key: {pub.hex()}")
-    log(f"  • Version: {version[0]}.{version[1]}.{version[2]}")
-    log(f"  • Payload: {payload_len} bytes")
-    log("  • Device trust: must be provisioned by the kernel trust store")
+    log(f"  Ã¢â‚¬Â¢ Publisher key: {pub.hex()}")
+    log(f"  Ã¢â‚¬Â¢ Version: {version[0]}.{version[1]}.{version[2]}")
+    log(f"  Ã¢â‚¬Â¢ Payload: {payload_len} bytes")
+    log("  Ã¢â‚¬Â¢ Device trust: must be provisioned by the kernel trust store")
     return 0
 
 
@@ -1148,7 +1182,7 @@ def cmd_list(args):
             apps = data.get("apps", [])
             print(f"\nFound {len(apps)} installed packages:")
             for a in apps:
-                print(f"  • {a.get('name', 'Unknown')} ({a.get('id')}) v{a.get('version')} [{a.get('category')}]")
+                print(f"  Ã¢â‚¬Â¢ {a.get('name', 'Unknown')} ({a.get('id')}) v{a.get('version')} [{a.get('category')}]")
                 print(f"    Permissions: {', '.join(a.get('permissions', []))}")
             print()
     except Exception as e:
@@ -1291,8 +1325,8 @@ def cmd_sign(args):
     }
     sig_out.write_text(json.dumps(sig_doc, indent=2), encoding="utf-8")
     log_success(f"Signature written to {sig_out}")
-    log(f"  • SHA-256: {file_sha}")
-    log(f"  • Ed25519: {sig_bytes.hex()[:24]}...")
+    log(f"  Ã¢â‚¬Â¢ SHA-256: {file_sha}")
+    log(f"  Ã¢â‚¬Â¢ Ed25519: {sig_bytes.hex()[:24]}...")
     return 0
 
 
