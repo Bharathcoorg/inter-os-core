@@ -209,6 +209,9 @@ pub fn send_udp_datagram(
         crate::task::process::consume_background_network(task, eth_len)
             .map_err(|_| NetError::QueueFull)?;
     }
+    if !caps.authorize_capability(CapabilityType::NetworkSend, Rights::WRITE) {
+        return Err(NetError::CapabilityDenied);
+    }
     // 7. Transmit into Loopback / Virtual NIC
     NETWORK_DEVICE.lock().transmit(&eth_buf[0..eth_len])
 }
@@ -264,7 +267,7 @@ pub fn send_tcp_payload(src_ip: Ipv4Address, src_port: u16, dst_ip: Ipv4Address,
 }
 
 pub fn send_tcp_payload_with_window(src_ip: Ipv4Address, src_port: u16, dst_ip: Ipv4Address, dst_port: u16, seq: u32, ack: u32, payload: &[u8], window: u16, caps: &CapabilityTable) -> Result<usize, NetError> {
-    if !caps.has_capability(CapabilityType::NetworkSend, Rights::WRITE) { return Err(NetError::CapabilityDenied); }
+    if !caps.authorize_capability(CapabilityType::NetworkSend, Rights::WRITE) { return Err(NetError::CapabilityDenied); }
     transmit_tcp_payload_with_window(src_ip, src_port, dst_ip, dst_port, seq, ack, payload, window)
 }
 
@@ -303,7 +306,7 @@ pub fn send_tcp_syn(src_ip: Ipv4Address, src_port: u16, dst_ip: Ipv4Address, dst
 }
 
 pub fn send_tcp_syn_with_window(src_ip: Ipv4Address, src_port: u16, dst_ip: Ipv4Address, dst_port: u16, seq: u32, window: u16, caps: &CapabilityTable) -> Result<(), NetError> {
-    if !caps.has_capability(CapabilityType::NetworkSend, Rights::WRITE) { return Err(NetError::CapabilityDenied); }
+    if !caps.authorize_capability(CapabilityType::NetworkSend, Rights::WRITE) { return Err(NetError::CapabilityDenied); }
     transmit_tcp_syn_with_window(src_ip, src_port, dst_ip, dst_port, seq, window)
 }
 

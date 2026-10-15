@@ -2639,7 +2639,7 @@ pub fn sys_tcp_send(connection_id: u32, payload: &[u8]) -> SyscallResult {
         Some(t) => t,
         None => return SyscallResult::PermissionDenied,
     };
-    if !current.cap_table.authorize_capability(CapabilityType::NetworkSend, Rights::WRITE) {
+    if !current.cap_table.has_capability(CapabilityType::NetworkSend, Rights::WRITE) {
         return SyscallResult::PermissionDenied;
     }
     let owner = current.id.0 as u32;
@@ -2739,9 +2739,9 @@ pub fn sys_dns_resolve(name: &str) -> Result<crate::net::Ipv4Address, SyscallRes
     }
     let sched = SCHEDULER.lock();
     let current = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
-    if !current.cap_table.authorize_capability(CapabilityType::NetworkSocket, Rights::WRITE)
-        || !current.cap_table.authorize_capability(CapabilityType::NetworkSend, Rights::WRITE)
-        || !current.cap_table.authorize_capability(CapabilityType::NetworkReceive, Rights::READ) {
+    if !current.cap_table.has_capability(CapabilityType::NetworkSocket, Rights::WRITE)
+        || !current.cap_table.has_capability(CapabilityType::NetworkSend, Rights::WRITE)
+        || !current.cap_table.has_capability(CapabilityType::NetworkReceive, Rights::READ) {
         return Err(SyscallResult::PermissionDenied);
     }
     let owner = current.id.0 as u32;
@@ -2892,7 +2892,7 @@ pub fn sys_tcp_connect(dst_ip: crate::net::Ipv4Address, dst_port: u16, local_por
     let sched = SCHEDULER.lock();
     let current = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
     if !current.cap_table.authorize_capability(CapabilityType::NetworkSocket, Rights::WRITE)
-        || !current.cap_table.authorize_capability(CapabilityType::NetworkSend, Rights::WRITE) {
+        || !current.cap_table.has_capability(CapabilityType::NetworkSend, Rights::WRITE) {
         return Err(SyscallResult::PermissionDenied);
     }
     let owner = current.id.0 as u32;
@@ -2918,7 +2918,7 @@ pub fn sys_net_socket(port: u16) -> Result<u32, SyscallResult> {
         Some(t) => t,
         None => return Err(SyscallResult::PermissionDenied),
     };
-    if !current.cap_table.authorize_capability(CapabilityType::NetworkSocket, Rights::WRITE) {
+    if !current.cap_table.has_capability(CapabilityType::NetworkSocket, Rights::WRITE) {
         return Err(SyscallResult::PermissionDenied);
     }
     let task_id = current.id.0 as u32;
@@ -2959,7 +2959,7 @@ pub fn sys_net_send_socket(
         Some(t) => t,
         None => return SyscallResult::PermissionDenied,
     };
-    if !current.cap_table.authorize_capability(CapabilityType::NetworkSend, Rights::WRITE) {
+    if !current.cap_table.has_capability(CapabilityType::NetworkSend, Rights::WRITE) {
         return SyscallResult::PermissionDenied;
     }
     let owner = current.id.0 as u32;
@@ -2998,7 +2998,7 @@ pub fn sys_net_sendto(dst_ip: crate::net::Ipv4Address, dst_port: u16, payload: &
         Some(t) => t,
         None => return SyscallResult::PermissionDenied,
     };
-    if !current.cap_table.authorize_capability(CapabilityType::NetworkSend, Rights::WRITE) {
+    if !current.cap_table.has_capability(CapabilityType::NetworkSend, Rights::WRITE) {
         return SyscallResult::PermissionDenied;
     }
     let caps = current.cap_table.clone();
@@ -3043,7 +3043,7 @@ pub fn sys_net_recvfrom(sock_id: crate::net::SocketId, out_buf: &mut [u8]) -> Re
         Some(t) => t,
         None => return Err(SyscallResult::PermissionDenied),
     };
-    if !current.cap_table.authorize_capability(CapabilityType::NetworkReceive, Rights::READ) {
+    if !current.cap_table.has_capability(CapabilityType::NetworkReceive, Rights::READ) {
         return Err(SyscallResult::PermissionDenied);
     }
     let caps = current.cap_table.clone();

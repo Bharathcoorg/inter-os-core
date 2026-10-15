@@ -368,6 +368,9 @@ pub fn is_lease_valid(
         if current_ticks >= lease.expiry_ticks {
             return false;
         }
+        if lease.remaining_invocations == 0 {
+            return false;
+        }
         lease.attenuated_rights.contains(required_rights)
     })
 }

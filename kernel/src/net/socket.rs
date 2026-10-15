@@ -102,6 +102,10 @@ impl UdpSocket {
             return Err(NetError::NoPacketAvailable);
         }
 
+        if !caps.authorize_capability(CapabilityType::NetworkReceive, Rights::READ) {
+            return Err(NetError::CapabilityDenied);
+        }
+
         let copy_len = if out.len() < slot.len { out.len() } else { slot.len };
         out[0..copy_len].copy_from_slice(&slot.data[0..copy_len]);
         let src_ip = slot.src_ip;
@@ -157,6 +161,10 @@ impl SocketTable {
         }
         for slot in self.sockets.iter_mut() {
             if slot.is_none() {
+                if !caps.authorize_capability(CapabilityType::NetworkSocket, Rights::WRITE) {
+                    if let Some(process) = process { crate::task::process::release_network_socket(process); }
+                    return Err(NetError::CapabilityDenied);
+                }
                 let id = SocketId(self.next_id);
                 self.next_id += 1;
                 let mut sock = UdpSocket::new(id, owner_task_id);
@@ -745,6 +753,203 @@ mod tcp_reliability_tests {
 
         assert_eq!(table.reap_closed(), 1);
         assert!(table.get(id).is_none());
+    }
+
+    #[test]
+    fn delegated_leases_network_paths_expiry_revocation_exhaustion_and_valid() {
+        use crate::capability::{delegation, Capability, CapabilityId};
+        use crate::task::TaskId;
+
+        let task_id = TaskId(999);
+        let now = crate::interrupts::get_system_ticks();
+
+        let parent_sock = Capability {
+            id: CapabilityId(101),
+            cap_type: CapabilityType::NetworkSocket,
+            rights: Rights::WRITE.union(Rights::GRANT),
+            object_id: 0,
+        };
+        let parent_send = Capability {
+            id: CapabilityId(102),
+            cap_type: CapabilityType::NetworkSend,
+            rights: Rights::WRITE.union(Rights::GRANT),
+            object_id: 0,
+        };
+        let parent_recv = Capability {
+            id: CapabilityId(103),
+            cap_type: CapabilityType::NetworkReceive,
+            rights: Rights::READ.union(Rights::GRANT),
+            object_id: 0,
+        };
+
+        // 1. Single-use valid leases
+        let lease_sock = delegation::DelegatedLease::new(
+            8001, &parent_sock, TaskId(1), task_id, Rights::WRITE, 1, 100_000, now,
+        ).expect("create lease_sock");
+        delegation::register_lease(lease_sock.clone());
+
+        let lease_send = delegation::DelegatedLease::new(
+            8002, &parent_send, TaskId(1), task_id, Rights::WRITE, 1, 100_000, now,
+        ).expect("create lease_send");
+        delegation::register_lease(lease_send.clone());
+
+        let lease_recv = delegation::DelegatedLease::new(
+            8003, &parent_recv, TaskId(1), task_id, Rights::READ, 1, 100_000, now,
+        ).expect("create lease_recv");
+        delegation::register_lease(lease_recv.clone());
+
+        let mut caps = CapabilityTable::new_for_task(task_id, 8);
+        caps.insert(lease_sock.to_capability()).expect("insert lease_sock");
+        caps.insert(lease_send.to_capability()).expect("insert lease_send");
+        caps.insert(lease_recv.to_capability()).expect("insert lease_recv");
+
+        // has_capability returns true without consuming
+        assert!(caps.has_capability(CapabilityType::NetworkSocket, Rights::WRITE));
+        assert!(caps.has_capability(CapabilityType::NetworkSend, Rights::WRITE));
+        assert!(caps.has_capability(CapabilityType::NetworkReceive, Rights::READ));
+
+        // Test create_socket single-use
+        let mut sock_table = SocketTable::new();
+        let sock_id = sock_table.create_socket(task_id.0 as u32, 45000, &caps)
+            .expect("first create_socket must succeed");
+        // Quota is now consumed (0 remaining) -> has_capability and second create_socket must fail
+        assert!(!caps.has_capability(CapabilityType::NetworkSocket, Rights::WRITE));
+        let second_sock = sock_table.create_socket(task_id.0 as u32, 45001, &caps);
+        assert_eq!(second_sock.err(), Some(NetError::CapabilityDenied));
+
+        // Test recv_from when empty does not consume
+        let mut rx_buf = [0u8; 64];
+        {
+            let sock = sock_table.get_mut(sock_id).expect("sock exists");
+            let empty_recv = sock.recv_from(&mut rx_buf, &caps);
+            assert_eq!(empty_recv.err(), Some(NetError::NoPacketAvailable));
+            assert!(caps.has_capability(CapabilityType::NetworkReceive, Rights::READ)); // Still unexhausted
+        }
+
+        // Test send_udp_datagram single-use
+        let send_res1 = crate::net::send_udp_datagram(
+            Ipv4Address::LOCALHOST, 45000, Ipv4Address::LOCALHOST, 45000, b"TEST", &caps,
+        );
+        assert!(send_res1.is_ok(), "first send_udp_datagram must succeed: {:?}", send_res1.err());
+        assert!(!caps.has_capability(CapabilityType::NetworkSend, Rights::WRITE));
+        let send_res2 = crate::net::send_udp_datagram(
+            Ipv4Address::LOCALHOST, 45000, Ipv4Address::LOCALHOST, 45000, b"TEST", &caps,
+        );
+        assert_eq!(send_res2.err(), Some(NetError::CapabilityDenied));
+
+        // Enqueue packet into socket for recv_from verification
+        sock_table.get_mut(sock_id).unwrap().enqueue_rx(Ipv4Address::LOCALHOST, 45000, b"TEST").expect("enqueue");
+
+        // Test recv_from single-use on queued packet
+        {
+            let sock = sock_table.get_mut(sock_id).expect("sock exists");
+            let recv_res1 = sock.recv_from(&mut rx_buf, &caps);
+            assert!(recv_res1.is_ok(), "first recv_from must succeed: {:?}", recv_res1.err());
+            assert_eq!(&rx_buf[..recv_res1.unwrap().0], b"TEST");
+            assert!(!caps.has_capability(CapabilityType::NetworkReceive, Rights::READ));
+
+            // Second recv_from must fail with CapabilityDenied
+            sock.enqueue_rx(Ipv4Address::LOCALHOST, 45000, b"EXTRA").expect("enqueue");
+            let recv_res2 = sock.recv_from(&mut rx_buf, &caps);
+            assert_eq!(recv_res2.err(), Some(NetError::CapabilityDenied));
+        }
+
+        // 2. Expired delegated leases across create_socket, send_udp_datagram, recv_from
+        let lease_start = crate::interrupts::get_system_ticks();
+        let exp_sock = delegation::DelegatedLease::new(
+            8011, &parent_sock, TaskId(1), task_id, Rights::WRITE, 5, 10, lease_start,
+        ).expect("exp_sock");
+        delegation::register_lease(exp_sock.clone());
+        let exp_send = delegation::DelegatedLease::new(
+            8012, &parent_send, TaskId(1), task_id, Rights::WRITE, 5, 10, lease_start,
+        ).expect("exp_send");
+        delegation::register_lease(exp_send.clone());
+        let exp_recv = delegation::DelegatedLease::new(
+            8013, &parent_recv, TaskId(1), task_id, Rights::READ, 5, 10, lease_start,
+        ).expect("exp_recv");
+        delegation::register_lease(exp_recv.clone());
+
+        // Advance system ticks past the 10-tick duration to expire the leases
+        crate::interrupts::SYSTEM_TICKS.store(lease_start + 50, core::sync::atomic::Ordering::SeqCst);
+
+        let mut exp_caps = CapabilityTable::new_for_task(task_id, 4);
+        exp_caps.insert(exp_sock.to_capability()).unwrap();
+        exp_caps.insert(exp_send.to_capability()).unwrap();
+        exp_caps.insert(exp_recv.to_capability()).unwrap();
+
+        assert!(!exp_caps.has_capability(CapabilityType::NetworkSocket, Rights::WRITE));
+        assert!(!exp_caps.has_capability(CapabilityType::NetworkSend, Rights::WRITE));
+        assert!(!exp_caps.has_capability(CapabilityType::NetworkReceive, Rights::READ));
+
+        assert_eq!(sock_table.create_socket(task_id.0 as u32, 45002, &exp_caps).err(), Some(NetError::CapabilityDenied));
+        assert_eq!(crate::net::send_udp_datagram(Ipv4Address::LOCALHOST, 45000, Ipv4Address::LOCALHOST, 45000, b"X", &exp_caps).err(), Some(NetError::CapabilityDenied));
+        assert_eq!(sock_table.get_mut(sock_id).unwrap().recv_from(&mut rx_buf, &exp_caps).err(), Some(NetError::CapabilityDenied));
+
+        // 3. Revoked delegated leases across create_socket, send_udp_datagram, recv_from
+        let current_now = crate::interrupts::get_system_ticks();
+        let rev_sock = delegation::DelegatedLease::new(
+            8021, &parent_sock, TaskId(1), task_id, Rights::WRITE, 5, 100_000, current_now,
+        ).expect("rev_sock");
+        delegation::register_lease(rev_sock.clone());
+        delegation::revoke_lease(8021);
+
+        let rev_send = delegation::DelegatedLease::new(
+            8022, &parent_send, TaskId(1), task_id, Rights::WRITE, 5, 100_000, current_now,
+        ).expect("rev_send");
+        delegation::register_lease(rev_send.clone());
+        delegation::revoke_lease(8022);
+
+        let rev_recv = delegation::DelegatedLease::new(
+            8023, &parent_recv, TaskId(1), task_id, Rights::READ, 5, 100_000, current_now,
+        ).expect("rev_recv");
+        delegation::register_lease(rev_recv.clone());
+        delegation::revoke_lease(8023);
+
+        let mut rev_caps = CapabilityTable::new_for_task(task_id, 4);
+        rev_caps.insert(rev_sock.to_capability()).unwrap();
+        rev_caps.insert(rev_send.to_capability()).unwrap();
+        rev_caps.insert(rev_recv.to_capability()).unwrap();
+
+        assert!(!rev_caps.has_capability(CapabilityType::NetworkSocket, Rights::WRITE));
+        assert!(!rev_caps.has_capability(CapabilityType::NetworkSend, Rights::WRITE));
+        assert!(!rev_caps.has_capability(CapabilityType::NetworkReceive, Rights::READ));
+
+        assert_eq!(sock_table.create_socket(task_id.0 as u32, 45003, &rev_caps).err(), Some(NetError::CapabilityDenied));
+        assert_eq!(crate::net::send_udp_datagram(Ipv4Address::LOCALHOST, 45000, Ipv4Address::LOCALHOST, 45000, b"X", &rev_caps).err(), Some(NetError::CapabilityDenied));
+        assert_eq!(sock_table.get_mut(sock_id).unwrap().recv_from(&mut rx_buf, &rev_caps).err(), Some(NetError::CapabilityDenied));
+
+        // 4. Exhausted delegated leases across create_socket, send_udp_datagram, recv_from
+        let exh_now = crate::interrupts::get_system_ticks();
+        let exh_sock = delegation::DelegatedLease::new(
+            8031, &parent_sock, TaskId(1), task_id, Rights::WRITE, 1, 100_000, exh_now,
+        ).expect("exh_sock");
+        delegation::register_lease(exh_sock.clone());
+        delegation::consume_invocation(8031, Some(task_id), exh_now, Rights::WRITE).unwrap();
+
+        let exh_send = delegation::DelegatedLease::new(
+            8032, &parent_send, TaskId(1), task_id, Rights::WRITE, 1, 100_000, exh_now,
+        ).expect("exh_send");
+        delegation::register_lease(exh_send.clone());
+        delegation::consume_invocation(8032, Some(task_id), exh_now, Rights::WRITE).unwrap();
+
+        let exh_recv = delegation::DelegatedLease::new(
+            8033, &parent_recv, TaskId(1), task_id, Rights::READ, 1, 100_000, exh_now,
+        ).expect("exh_recv");
+        delegation::register_lease(exh_recv.clone());
+        delegation::consume_invocation(8033, Some(task_id), exh_now, Rights::READ).unwrap();
+
+        let mut exh_caps = CapabilityTable::new_for_task(task_id, 4);
+        exh_caps.insert(exh_sock.to_capability()).unwrap();
+        exh_caps.insert(exh_send.to_capability()).unwrap();
+        exh_caps.insert(exh_recv.to_capability()).unwrap();
+
+        assert!(!exh_caps.has_capability(CapabilityType::NetworkSocket, Rights::WRITE));
+        assert!(!exh_caps.has_capability(CapabilityType::NetworkSend, Rights::WRITE));
+        assert!(!exh_caps.has_capability(CapabilityType::NetworkReceive, Rights::READ));
+
+        assert_eq!(sock_table.create_socket(task_id.0 as u32, 45004, &exh_caps).err(), Some(NetError::CapabilityDenied));
+        assert_eq!(crate::net::send_udp_datagram(Ipv4Address::LOCALHOST, 45000, Ipv4Address::LOCALHOST, 45000, b"X", &exh_caps).err(), Some(NetError::CapabilityDenied));
+        assert_eq!(sock_table.get_mut(sock_id).unwrap().recv_from(&mut rx_buf, &exh_caps).err(), Some(NetError::CapabilityDenied));
     }
 }
 
