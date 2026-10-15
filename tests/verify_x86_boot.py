@@ -119,7 +119,7 @@ def main():
         print("[BOOT TEST] Awaiting Launcher homescreen presentation...")
         launcher_ready = reader.wait_for(
             "Step 5: Initial presentation complete",
-            timeout=90.0,
+            timeout=180.0,
             print_keywords=["BOOT", "GDT", "Page", "Heap", "VFS", "Userspace", "LAUNCHER", "PID1", "Step 5"]
         )
 

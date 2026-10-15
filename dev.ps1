@@ -36,7 +36,7 @@ function Write-Banner {
 function Invoke-Check {
     Write-Banner "cargo check (fast compile verification)"
     Push-Location $kernelDir
-    cargo check
+    cargo check --target x86_64-unknown-none
     if ($LASTEXITCODE -ne 0) { throw "cargo check failed" }
     Pop-Location
     Write-Host "[OK] Kernel compiles cleanly." -ForegroundColor Green
@@ -45,13 +45,13 @@ function Invoke-Check {
 function Invoke-Build {
     Write-Banner "Building x86_64 kernel + bootloader"
     Push-Location $kernelDir
-    cargo build
+    cargo build --target x86_64-unknown-none
     if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
     Pop-Location
 
     # Build bootloader image
     $biosImg = Join-Path $targetDir "inter-os-bios.img"
-    $kernelBin = Join-Path $targetDir "x86_64-interos\debug\kernel"
+    $kernelBin = Join-Path $targetDir "x86_64-unknown-none\debug\kernel"
     if (Test-Path $kernelBin) {
         Write-Host "[OK] Kernel binary: $kernelBin" -ForegroundColor Green
     }

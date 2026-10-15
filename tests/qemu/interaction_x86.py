@@ -33,11 +33,19 @@ DATA_DISK_BYTES = 512 * 1024 * 1024
 MONITOR_PORT = 44551
 SERIAL_PORT = 43551
 
-# The guest letterboxes its 720x1440 phone surface into the centre of the
-# landscape framebuffer. These must match kernel::framebuffer::present_argb8888.
-FRAMEBUFFER_W, FRAMEBUFFER_H = 1280, 720
-PHONE_X0 = (FRAMEBUFFER_W - (FRAMEBUFFER_H // 2)) // 2
-PHONE_W = FRAMEBUFFER_H // 2
+# The x86_64 guest engages a native 1080x2160 portrait DISPI scanout once paging
+# is live (kernel::framebuffer::engage_native_mode). The screendump is that
+# scanout, so the phone surface is the whole frame. The legacy 1280x720
+# letterboxed landscape mode is no longer produced by the current kernel.
+FRAMEBUFFER_W, FRAMEBUFFER_H = 1080, 2160
+PHONE_X0 = 0
+PHONE_W = FRAMEBUFFER_W
+
+# Phone dock tile centre. The launcher authors at 720x1440 with the Phone tile at
+# x 48..238, y 700..980 (apps/launcher/src/main.rs HomeScreen dock). The guest
+# scales authoring space by 1.5 onto the 1080x2160 scanout (framebuffer.rs).
+PHONE_TILE_X = int((48 + 238) / 2 * 1.5)   # 215
+PHONE_TILE_Y = int((700 + 980) / 2 * 1.5)  # 1260
 
 BOOT_TIMEOUT = 240.0
 SETTLE = 2.5
@@ -326,7 +334,8 @@ def main():
             # 2. Unlock gesture must move to the home surface.
             before_mean = lock_mean
             serial.swipe_up()
-            time.sleep(1.0)
+            serial.wait_for(r"Device unlocked via (tap|swipe)", timeout=30.0)
+            time.sleep(2.0)
             _, home_phone = capture(monitor, workdir, "02_home", args.out)
             home_mean, home_bright = luminance_stats(home_phone)
             results.check(
@@ -340,7 +349,7 @@ def main():
             # renders in a similar palette would defeat a luminance comparison
             # without indicating any real failure.
             before_log = len(serial.text())
-            serial.tap(145, 597)   # Phone tile, first row of the home grid
+            serial.tap(130, 840)   # Phone (dialer) dock tile, row 0 col 0
             _, app_phone = capture(monitor, workdir, "03_app", args.out)
             app_mean, app_bright = luminance_stats(app_phone)
             new_log = serial.text()[before_log:]

@@ -3,9 +3,10 @@
     Inter OS — Sovereign Smartphone Hardware Flashing Tool (AArch64 Fastboot Automator)
 
 .DESCRIPTION
-    Flashes or tether-boots Inter OS onto physical smartphone hardware (PinePhone,
-    Qualcomm Snapdragon, Google Pixel, MediaTek Dimensity) using the standard
-    Android Fastboot protocol (AOSP Boot Image v2).
+    Flashes or tether-boots experimental AArch64 builds onto compatible Fastboot/development
+    hardware (PinePhone bring-up targets) using the standard Android Fastboot protocol
+    (AOSP Boot Image v2). Retail Qualcomm/Pixel/MediaTek devices require explicit device trees
+    and proprietary vendor firmware not verified in this core repository.
 
 .PARAMETER Mode
     'Boot' for tethered RAM boot (safe, non-persistent), or 'Flash' for persistent NAND flashing.
@@ -76,6 +77,11 @@ if (-not $fastbootPath) {
 if (-not (Test-Path $TargetImg)) {
     Write-Host "[BUILDING] Image not found at '$TargetImg'. Running automated build..." -ForegroundColor Yellow
     & "$rootDir\qemu\build.ps1"
+}
+
+if (-not (Test-Path $TargetImg)) {
+    Write-Error "Target boot image '$TargetImg' was not found and could not be built. Verify build prerequisites and run qemu/build.ps1."
+    exit 1
 }
 $resolvedImg = (Resolve-Path $TargetImg).Path
 
