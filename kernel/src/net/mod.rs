@@ -175,6 +175,24 @@ pub fn send_udp_datagram(
     payload: &[u8],
     caps: &CapabilityTable,
 ) -> Result<(), NetError> {
+    send_udp_datagram_authorized(src_ip, src_port, dst_ip, dst_port, payload, caps, true)
+}
+
+/// Sends a UDP datagram over the network stack with explicit control over lease quota consumption.
+///
+/// When `consume_quota` is `true`, `authorize_capability` is invoked, consuming one invocation
+/// on a delegated lease. When `false` (e.g. for internal resolver retransmissions of an already
+/// authorized logical query), `has_capability` is verified to ensure the authority remains valid
+/// and unrevoked without double-consuming invocation quota.
+pub fn send_udp_datagram_authorized(
+    src_ip: Ipv4Address,
+    src_port: u16,
+    dst_ip: Ipv4Address,
+    dst_port: u16,
+    payload: &[u8],
+    caps: &CapabilityTable,
+    consume_quota: bool,
+) -> Result<(), NetError> {
     // 1. Enforce Zero-Trust Capability Invariant
     if !caps.has_capability(CapabilityType::NetworkSend, Rights::WRITE) {
         return Err(NetError::CapabilityDenied);
@@ -209,8 +227,14 @@ pub fn send_udp_datagram(
         crate::task::process::consume_background_network(task, eth_len)
             .map_err(|_| NetError::QueueFull)?;
     }
-    if !caps.authorize_capability(CapabilityType::NetworkSend, Rights::WRITE) {
-        return Err(NetError::CapabilityDenied);
+    if consume_quota {
+        if !caps.authorize_capability(CapabilityType::NetworkSend, Rights::WRITE) {
+            return Err(NetError::CapabilityDenied);
+        }
+    } else {
+        if !caps.has_capability(CapabilityType::NetworkSend, Rights::WRITE) {
+            return Err(NetError::CapabilityDenied);
+        }
     }
     // 7. Transmit into Loopback / Virtual NIC
     NETWORK_DEVICE.lock().transmit(&eth_buf[0..eth_len])
@@ -639,3 +663,95 @@ pub fn init() {
 
     serial_println!("--- [Network Subsystem 100% Attested & Enforced] ---");
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::capability::{Capability, CapabilityId, CapabilityType, Rights, CapabilityTable, DelegatedLease};
+    use crate::capability::delegation::{allocate_lease_id, register_lease};
+    use crate::task::TaskId;
+
+    #[test]
+    fn test_send_udp_datagram_authorized_quota_policy() {
+        let grantor = TaskId(70);
+        let grantee = TaskId(71);
+        crate::task::process::register_leader(grantee, TaskId(1));
+
+        let mut grantor_caps = CapabilityTable::new_for_task(grantor, 4);
+        grantor_caps.insert(Capability {
+            id: CapabilityId(301),
+            cap_type: CapabilityType::NetworkSend,
+            rights: Rights::WRITE | Rights::GRANT,
+            object_id: 0,
+        }).unwrap();
+
+        // Create a single-use delegated lease for NetworkSend
+        let parent_cap = grantor_caps.get(0).unwrap();
+        let lease = DelegatedLease::new(
+            allocate_lease_id(),
+            parent_cap,
+            grantor,
+            grantee,
+            Rights::WRITE,
+            1, // 1 invocation quota
+            10_000,
+            0,
+        ).unwrap();
+        let lease_cap = lease.to_capability();
+        register_lease(lease);
+
+        let mut grantee_caps = CapabilityTable::new_for_task(grantee, 4);
+        grantee_caps.insert(lease_cap).unwrap();
+
+        // 1. When consume_quota is false (e.g. DNS resolver retransmission of already-authorized query),
+        // authority must be verified without consuming the single invocation quota!
+        let check_res = send_udp_datagram_authorized(
+            Ipv4Address::LOCALHOST,
+            5000,
+            Ipv4Address::LOCALHOST,
+            4242,
+            b"DNS_RETRY",
+            &grantee_caps,
+            false, // do not consume quota
+        );
+        assert!(check_res.is_ok(), "Non-consuming datagram authorization must succeed");
+
+        // 2. Now perform an authorized send with consume_quota: true (initial transmission)
+        let send_res1 = send_udp_datagram_authorized(
+            Ipv4Address::LOCALHOST,
+            5000,
+            Ipv4Address::LOCALHOST,
+            4242,
+            b"DNS_INITIAL",
+            &grantee_caps,
+            true, // consume quota
+        );
+        assert!(send_res1.is_ok(), "First consuming send must succeed");
+
+        // 3. Second consuming send must fail closed because lease quota is exhausted
+        let send_res2 = send_udp_datagram_authorized(
+            Ipv4Address::LOCALHOST,
+            5000,
+            Ipv4Address::LOCALHOST,
+            4242,
+            b"DNS_OVER_QUOTA",
+            &grantee_caps,
+            true, // consume quota
+        );
+        assert_eq!(send_res2.err(), Some(NetError::CapabilityDenied));
+
+        // 4. Unauthorized capabilities (missing NetworkSend) fail immediately
+        let empty_caps = CapabilityTable::new_for_task(grantee, 4);
+        let unauth_res = send_udp_datagram_authorized(
+            Ipv4Address::LOCALHOST,
+            5000,
+            Ipv4Address::LOCALHOST,
+            4242,
+            b"ATTACK",
+            &empty_caps,
+            false,
+        );
+        assert_eq!(unauth_res.err(), Some(NetError::CapabilityDenied));
+    }
+}
+
