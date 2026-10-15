@@ -263,7 +263,7 @@ impl RevocationRegistry {
     /// block device bound, including every host unit test. Keeping the state
     /// transition here lets the decision rule in `is_key_trusted` be checked
     /// directly instead of only through an unreachable durability path.
-    fn place_key_on_crl(&mut self, key: &[u8; 32], reason: RevocationReason, epoch: u64, issuer: &str) -> Result<(), &'static str> {
+    pub(crate) fn place_key_on_crl(&mut self, key: &[u8; 32], reason: RevocationReason, epoch: u64, issuer: &str) -> Result<(), &'static str> {
         if !self.revoked_keys.contains_key(key) && self.revoked_keys.len() >= MAX_PERSISTED_RECORDS {
             return Err("key revocation registry is full");
         }
@@ -308,7 +308,7 @@ impl RevocationRegistry {
     /// machine with no block device bound. The state transition therefore lives
     /// here, where the invariant test can reach it, and no caller outside this
     /// module can grant trust without journalling it.
-    fn grant_trust_root(&mut self, key: [u8; 32], publisher: &str) -> Result<(), &'static str> {
+    pub(crate) fn grant_trust_root(&mut self, key: [u8; 32], publisher: &str) -> Result<(), &'static str> {
         if !self.trusted_keys.contains_key(&key) && self.trusted_keys.len() >= MAX_PERSISTED_RECORDS {
             return Err("publisher trust store is full");
         }

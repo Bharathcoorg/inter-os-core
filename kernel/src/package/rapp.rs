@@ -96,7 +96,9 @@ pub fn parse_rapp(data:&[u8])->Result<RappManifest,RappError>{
     for i in 0..cap_count{
         let o=header_end+i*2;
         let cap=u16::from_le_bytes([data[o],data[o+1]]);
-        if !(1..=18).contains(&cap){return Err(RappError::UnknownCapability)}
+        if crate::capability::CapabilityType::from_raw(cap as u64).is_none() {
+            return Err(RappError::UnknownCapability);
+        }
         capabilities.push(cap);
     }
     let dependency_start=caps_end;
@@ -198,4 +200,72 @@ pub fn build_rapp(package_id:&str,publisher_key:&[u8;32],version:(u16,u16,u16),a
     b.extend_from_slice(publisher_key); b.extend_from_slice(&version.0.to_le_bytes()); b.extend_from_slice(&version.1.to_le_bytes()); b.extend_from_slice(&version.2.to_le_bytes()); b.extend_from_slice(&(capabilities.len() as u16).to_le_bytes());
     b.extend_from_slice(&digest); b.extend_from_slice(signature); b.extend_from_slice(&(elf_payload.len() as u32).to_le_bytes());
     for &cap in capabilities{b.extend_from_slice(&cap.to_le_bytes())} b.extend_from_slice(elf_payload); b
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ed25519_dalek::{Signer, SigningKey};
+    use crate::package::revocation::{REVOCATION_REGISTRY, RevocationReason};
+
+    fn create_signed_test_package(caps: &[u16], seed: u8) -> (Vec<u8>, [u8; 32], SigningKey) {
+        let signing_key = SigningKey::from_bytes(&[seed; 32]);
+        let pub_key = signing_key.verifying_key().to_bytes();
+        let payload = b"\x7fELF_USER_BINARY_SAMPLE";
+        let placeholder_sig = [0u8; 64];
+
+        let mut pkg = build_rapp(
+            "org.interos.clock",
+            &pub_key,
+            (1, 0, 0),
+            RappArch::X86_64,
+            caps,
+            payload,
+            &placeholder_sig,
+        );
+
+        let payload_offset = RAPP_HEADER_SIZE + caps.len() * 2;
+        let msg = signed_message(&pkg, payload_offset, payload.len());
+        let sig = signing_key.sign(&msg);
+        pkg[RAPP_SIGNATURE_OFFSET..RAPP_SIGNATURE_OFFSET + RAPP_SIGNATURE_SIZE]
+            .copy_from_slice(&sig.to_bytes());
+
+        (pkg, pub_key, signing_key)
+    }
+
+    #[test]
+    fn parse_rapp_accepts_realtime_clock_read_capability() {
+        let (pkg, pub_key, _) = create_signed_test_package(&[1, 24], 10);
+        REVOCATION_REGISTRY.lock().grant_trust_root(pub_key, "clock_test").unwrap();
+
+        let manifest = parse_rapp(&pkg).expect("package requesting RealtimeClockRead (24) must parse");
+        assert_eq!(manifest.package_id, "org.interos.clock");
+        assert_eq!(manifest.capabilities, alloc::vec![1, 24]);
+    }
+
+    #[test]
+    fn parse_rapp_rejects_unknown_capability_id() {
+        let (pkg, pub_key, _) = create_signed_test_package(&[999], 11);
+        REVOCATION_REGISTRY.lock().grant_trust_root(pub_key, "unknown_cap_test").unwrap();
+
+        let res = parse_rapp(&pkg);
+        assert_eq!(res.unwrap_err(), RappError::UnknownCapability);
+    }
+
+    #[test]
+    fn parse_rapp_rejects_untrusted_publisher() {
+        let (pkg, _pub_key, _) = create_signed_test_package(&[1], 12);
+        let res = parse_rapp(&pkg);
+        assert_eq!(res.unwrap_err(), RappError::PublisherUntrusted);
+    }
+
+    #[test]
+    fn parse_rapp_rejects_revoked_key() {
+        let (pkg, pub_key, _) = create_signed_test_package(&[1], 13);
+        REVOCATION_REGISTRY.lock().grant_trust_root(pub_key, "revoked_pub").unwrap();
+        REVOCATION_REGISTRY.lock().place_key_on_crl(&pub_key, RevocationReason::KeyCompromised, 1, "root").unwrap();
+
+        let res = parse_rapp(&pkg);
+        assert_eq!(res.unwrap_err(), RappError::PublisherRevoked);
+    }
 }
