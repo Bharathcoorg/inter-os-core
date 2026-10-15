@@ -878,48 +878,69 @@ impl Vfs {
         }
     }
 
-    /// Reads an entire file into memory for a task using exactly one capability verification.
-    ///
-    /// Logical operation quota semantics: an entire atomic file read operation consumes
-    /// exactly one invocation from a delegated FileSystemRead lease.
-    pub fn read_file_for_task(
-        &self,
-        task_id: TaskId,
-        task_caps: &CapabilityTable,
-        cap_slot: usize,
-        path: &str,
-    ) -> Result<Vec<u8>, FsError> {
-        let (eff_slot, cap_type) = if task_caps.inspect_slot(cap_slot, CapabilityType::FileSystemRead, Rights::READ).is_ok() {
-            (cap_slot, CapabilityType::FileSystemRead)
-        } else if task_caps.inspect_slot(cap_slot, CapabilityType::FileSystemWrite, Rights::READ).is_ok() {
-            (cap_slot, CapabilityType::FileSystemWrite)
-        } else {
-            (cap_slot, CapabilityType::FileSystemRead)
-        };
-        let cap = task_caps
-            .verify(eff_slot, cap_type, Rights::READ)
-            .map_err(FsError::CapabilityError)?;
+    /// Reads an entire file into memory using exactly one capability verification.
+///
+/// Logical operation quota semantics: an entire atomic file read operation consumes
+/// exactly one invocation from a delegated FileSystemRead lease.
+///
+/// WHY `max_len` is a parameter and not an internal constant: the callers here
+/// read attacker-supplied package blobs, and the bound that matters is the one
+/// the caller's protocol imposes. When the check lived in the caller, after
+/// this function returned, the copy had already happened, so an oversized file
+/// was allocated in full before being rejected. The bound is therefore applied
+/// to the inode contents before any copy is made.
+///
+/// WHY there is no `task_id`: authorization here is decided entirely by the
+/// capability table and the object scope check below. The caller's identity is
+/// read from the scheduler by the syscall layer, which passes the capability
+/// table it took from that same scheduler, so threading the id through added a
+/// parameter that nothing could enforce.
+pub fn read_file_for_task(
+    &self,
+    task_caps: &CapabilityTable,
+    cap_slot: usize,
+    path: &str,
+    max_len: usize,
+) -> Result<Vec<u8>, FsError> {
+    let (eff_slot, cap_type) = if task_caps.inspect_slot(cap_slot, CapabilityType::FileSystemRead, Rights::READ).is_ok() {
+        (cap_slot, CapabilityType::FileSystemRead)
+    } else if task_caps.inspect_slot(cap_slot, CapabilityType::FileSystemWrite, Rights::READ).is_ok() {
+        (cap_slot, CapabilityType::FileSystemWrite)
+    } else {
+        (cap_slot, CapabilityType::FileSystemRead)
+    };
+    let cap = task_caps
+        .verify(eff_slot, cap_type, Rights::READ)
+        .map_err(FsError::CapabilityError)?;
 
-        let inode_id = self.lookup(path).ok_or(FsError::FileNotFound)?;
-        let inode = self.inodes.get(&inode_id).ok_or(FsError::FileNotFound)?;
+    let inode_id = self.lookup(path).ok_or(FsError::FileNotFound)?;
+    let inode = self.inodes.get(&inode_id).ok_or(FsError::FileNotFound)?;
 
-        if inode.file_type == FileType::Directory {
-            return Err(FsError::IsADirectory);
-        }
-
-        if cap.object_id != 0 && cap.object_id != inode_id.0 {
-            return Err(FsError::PermissionDenied);
-        }
-
-        if inode.file_type == FileType::DeviceNode {
-            let mut buf = alloc::vec![0u8; 4096];
-            let n = crate::fs::devfs::device_read(&inode.path, &mut buf)?;
-            buf.truncate(n);
-            return Ok(buf);
-        }
-
-        Ok(inode.data.as_slice().to_vec())
+    if inode.file_type == FileType::Directory {
+        return Err(FsError::IsADirectory);
     }
+
+    if cap.object_id != 0 && cap.object_id != inode_id.0 {
+        return Err(FsError::PermissionDenied);
+    }
+
+    if inode.file_type == FileType::DeviceNode {
+        if max_len < 1 {
+            return Err(FsError::FileTooLarge);
+        }
+        let mut buf = alloc::vec![0u8; core::cmp::min(4096, max_len)];
+        let n = crate::fs::devfs::device_read(&inode.path, &mut buf)?;
+        buf.truncate(n);
+        return Ok(buf);
+    }
+
+    // Bound the copy, not the allocation that follows it.
+    if inode.data.len() > max_len {
+        return Err(FsError::FileTooLarge);
+    }
+
+    Ok(inode.data.as_slice().to_vec())
+}
 
     /// Allocates an open file descriptor in the task's file table.
     fn allocate_fd(

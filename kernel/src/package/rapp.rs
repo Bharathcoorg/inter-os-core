@@ -53,13 +53,48 @@ fn fixed_utf8(data:&[u8])->Result<String,RappError>{
     core::str::from_utf8(&data[..end]).map(|s|s.to_string()).map_err(|_|RappError::InvalidPackageId)
 }
 
-fn signed_message(data:&[u8], payload_offset:usize, payload_len:usize)->Vec<u8>{
+pub(crate) fn signed_message(data:&[u8], payload_offset:usize, payload_len:usize)->Vec<u8>{
     let mut msg=Vec::with_capacity(0xA4 + data.len().saturating_sub(payload_offset));
     msg.extend_from_slice(&data[..RAPP_SIGNATURE_OFFSET]);
     msg.extend_from_slice(&[0u8;RAPP_SIGNATURE_SIZE]);
     msg.extend_from_slice(&data[RAPP_SIGNATURE_OFFSET+RAPP_SIGNATURE_SIZE..payload_offset]);
     msg.extend_from_slice(&data[payload_offset..payload_offset+payload_len]);
     msg
+}
+
+/// Builds a genuinely signed RAPP for tests.
+///
+/// WHY this is shared rather than duplicated per test module: a test that
+/// verifies a package must present bytes `parse_rapp` actually accepts, and a
+/// hand-rolled copy in each module drifts from the real signing rule.
+#[cfg(test)]
+pub(crate) fn build_signed_test_package(
+    package_id: &str,
+    capabilities: &[u16],
+    payload: &[u8],
+    seed: u8,
+) -> (Vec<u8>, [u8; 32]) {
+    use ed25519_dalek::{Signer, SigningKey};
+    let signing_key = SigningKey::from_bytes(&[seed; 32]);
+    let pub_key = signing_key.verifying_key().to_bytes();
+
+    let mut pkg = build_rapp(
+        package_id,
+        &pub_key,
+        (1, 0, 0),
+        RappArch::X86_64,
+        capabilities,
+        payload,
+        &[0u8; 64],
+    );
+
+    let payload_offset = RAPP_HEADER_SIZE + capabilities.len() * 2;
+    let msg = signed_message(&pkg, payload_offset, payload.len());
+    let sig = signing_key.sign(&msg);
+    pkg[RAPP_SIGNATURE_OFFSET..RAPP_SIGNATURE_OFFSET + RAPP_SIGNATURE_SIZE]
+        .copy_from_slice(&sig.to_bytes());
+
+    (pkg, pub_key)
 }
 
 pub fn verify_rapp_signature(data:&[u8], publisher_key:&[u8;32], signature:&[u8;64], payload_offset:usize, payload_len:usize)->Result<(),RappError>{

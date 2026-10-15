@@ -911,6 +911,36 @@ pub fn sys_block_read(
     }
 }
 
+/// The verification body of [`sys_verify_package`], with the scheduler read and
+/// the global filesystem handle hoisted out so the verification path itself is
+/// reachable from a test without either.
+fn verify_package_in(
+    vfs: &crate::fs::vfs::Vfs,
+    cap_table: &crate::capability::CapabilityTable,
+    cap_slot: usize,
+    path: &str,
+) -> Result<RappManifest, SyscallResult> {
+    // The read bound is applied inside the VFS before the contents are copied,
+    // so an oversized blob is refused rather than allocated and then refused.
+    let file_buf = vfs.read_file_for_task(cap_table, cap_slot, path, MAX_VERIFY_PACKAGE_SIZE)
+        .map_err(|e| match e {
+            FsError::CapabilityError(_) | FsError::PermissionDenied => SyscallResult::PermissionDenied,
+            FsError::FileNotFound => SyscallResult::FileNotFound,
+            FsError::FileTooLarge => SyscallResult::InvalidArguments,
+            _ => SyscallResult::InvalidArguments,
+        })?;
+
+    if file_buf.is_empty() { return Err(SyscallResult::InvalidArguments); }
+
+    parse_rapp(&file_buf).map_err(|e| match e {
+        RappError::DigestMismatch | RappError::SignatureInvalid | RappError::PublisherUntrusted | RappError::PublisherRevoked | RappError::PackageRevoked | RappError::InvalidPublisherKey => SyscallResult::IntegrityViolation,
+        _ => SyscallResult::InvalidArguments,
+    })
+}
+
+/// Largest package blob the verification path will read.
+const MAX_VERIFY_PACKAGE_SIZE: usize = 16 * 1024 * 1024;
+
 /// Loads and cryptographically validates a `.rapp` application package from the VFS.
 ///
 /// Requires `FileSystemRead` capability in `cap_slot`.
@@ -918,26 +948,13 @@ pub fn sys_verify_package(
     cap_slot: usize,
     path: &str,
 ) -> Result<RappManifest, SyscallResult> {
-    let (task_id, cap_table) = {
+    let cap_table = {
         let sched = SCHEDULER.lock();
         let current = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
-        (current.id, current.cap_table.clone())
+        current.cap_table.clone()
     };
     let vfs = VFS.lock();
-    let file_buf = vfs.read_file_for_task(task_id, &cap_table, cap_slot, path)
-        .map_err(|e| match e {
-            FsError::CapabilityError(_) | FsError::PermissionDenied => SyscallResult::PermissionDenied,
-            FsError::FileNotFound => SyscallResult::FileNotFound,
-            _ => SyscallResult::InvalidArguments,
-        })?;
-    drop(vfs);
-
-    if file_buf.is_empty() || file_buf.len() > 16 * 1024 * 1024 { return Err(SyscallResult::InvalidArguments); }
-
-    parse_rapp(&file_buf).map_err(|e| match e {
-        RappError::DigestMismatch | RappError::SignatureInvalid | RappError::PublisherUntrusted | RappError::PublisherRevoked | RappError::PackageRevoked | RappError::InvalidPublisherKey => SyscallResult::IntegrityViolation,
-        _ => SyscallResult::InvalidArguments,
-    })
+    verify_package_in(&vfs, &cap_table, cap_slot, path)
 }
 
 /// Verifies a signed `.rapp` file and writes its manifest summary into `out_buf`.
@@ -3169,6 +3186,28 @@ pub fn sys_package_audit(pkg_id: &str) -> Result<u32, SyscallResult> {
 
 /// Installs a verified package onto persistent VFS storage.
 /// Requires the caller to hold a `FileSystemWrite` capability in `cap_slot`.
+/// Refuses to install a package that claims device-wide administration unless
+/// its publisher key is a platform publisher.
+///
+/// WHY this is separate and named: capability 18 is the one identifier that
+/// escalates a package out of its own domain, so the decision deserves its own
+/// testable unit rather than living inline in a function whose other steps need
+/// the global scheduler and the package registry to be set up.
+///
+/// Note the ordering this caller uses: it runs after `parse_rapp` has already
+/// verified the signature, so `publisher_key` is authenticated at this point and
+/// cannot have been chosen by the installer.
+fn authorize_capability_18_for_install(manifest: &RappManifest) -> Result<(), SyscallResult> {
+    if !manifest.capabilities.contains(&18) {
+        return Ok(());
+    }
+    let reg = crate::package::REVOCATION_REGISTRY.lock();
+    if !reg.is_system_publisher(&manifest.publisher_key) {
+        return Err(SyscallResult::PermissionDenied);
+    }
+    Ok(())
+}
+
 pub fn sys_package_install(cap_slot: usize, pkg_id: &str, user_consent: bool) -> Result<(), SyscallResult> {
     if !user_consent { return Err(SyscallResult::PermissionDenied); }
 
@@ -3193,17 +3232,19 @@ pub fn sys_package_install(cap_slot: usize, pkg_id: &str, user_consent: bool) ->
 
     let path = alloc::format!("/packages/{}.rapp", pkg_id);
     let vfs = VFS.lock();
-    let rapp = vfs.read_file_for_task(task_id, &cap_table, read_slot, &path)
+    // The blob bound is applied inside the VFS before the copy, and it is the
+    // same bound the store will later accept, so verification and installation
+    // cannot disagree about what a storable package is.
+    let rapp = vfs.read_file_for_task(&cap_table, read_slot, &path, crate::package::store::MAX_BLOB_SIZE)
         .map_err(|e| match e {
             FsError::CapabilityError(_) | FsError::PermissionDenied => SyscallResult::PermissionDenied,
             FsError::FileNotFound => SyscallResult::FileNotFound,
+            FsError::FileTooLarge => SyscallResult::InvalidArguments,
             _ => SyscallResult::InvalidArguments,
         })?;
     drop(vfs);
 
-    if rapp.is_empty() || rapp.len() > crate::package::store::MAX_BLOB_SIZE {
-        return Err(SyscallResult::InvalidArguments);
-    }
+    if rapp.is_empty() { return Err(SyscallResult::InvalidArguments); }
 
     let verified = parse_rapp(&rapp).map_err(|e| match e {
         RappError::DigestMismatch | RappError::SignatureInvalid | RappError::PublisherUntrusted | RappError::PublisherRevoked | RappError::PackageRevoked | RappError::InvalidPublisherKey => SyscallResult::IntegrityViolation,
@@ -3214,14 +3255,7 @@ pub fn sys_package_install(cap_slot: usize, pkg_id: &str, user_consent: bool) ->
         return Err(SyscallResult::IntegrityViolation);
     }
 
-    // Confine capability 18 (Global SystemControl): only system publishers may install
-    // packages that claim global system administration authority.
-    if verified.capabilities.contains(&18) {
-        let reg = crate::package::REVOCATION_REGISTRY.lock();
-        if !reg.is_system_publisher(&verified.publisher_key) {
-            return Err(SyscallResult::PermissionDenied);
-        }
-    }
+    authorize_capability_18_for_install(&verified)?;
 
     {
         let reg = crate::package::REVOCATION_REGISTRY.lock();
@@ -5796,16 +5830,200 @@ mod tests {
         let slot = grantee_caps.insert(derived_cap).unwrap();
 
         // 1. First atomic read operation must SUCCEED using exactly 1 invocation of the lease
-        let res1 = vfs.read_file_for_task(grantee, &grantee_caps, slot, "/packages/test_app.rapp");
+        let res1 = vfs.read_file_for_task(&grantee_caps, slot, "/packages/test_app.rapp", 4096);
         assert!(res1.is_ok(), "First read with single-use lease must succeed: {:?}", res1.err());
         assert_eq!(res1.unwrap(), b"RAPP_DUMMY_PAYLOAD_FOR_TEST");
 
         // 2. Second read operation must be DENIED because the single invocation was consumed
-        let res2 = vfs.read_file_for_task(grantee, &grantee_caps, slot, "/packages/test_app.rapp");
+        let res2 = vfs.read_file_for_task(&grantee_caps, slot, "/packages/test_app.rapp", 4096);
         assert!(
             matches!(res2, Err(crate::fs::vfs::FsError::CapabilityError(crate::capability::CapError::InvalidSlot))),
             "Second read must fail closed with exhausted lease quota, got {:?}",
             res2
+        );
+    }
+
+    /// The read bound must be applied to the inode contents before they are
+    /// copied, not by the caller after the copy has already happened.
+    ///
+    /// Pinning assertion: a file larger than the bound is refused with
+    /// `FileTooLarge`, and a file at exactly the bound still reads. When the
+    /// bound lived in the syscall after `read_file_for_task` returned, the copy
+    /// had already been made, so an oversized blob was allocated in full and
+    /// only then discarded.
+    #[test]
+    fn package_read_is_bounded_before_the_inode_is_copied() {
+        use crate::capability::{Capability, CapabilityId, CapabilityType, Rights};
+        use crate::fs::vfs::{FsError, Vfs};
+
+        let owner = TaskId(82);
+        let mut vfs = Vfs::new();
+        vfs.mkdir("/packages");
+        let body = alloc::vec![0x5Au8; 8192];
+        vfs.create_file("/packages/big.rapp", &body, false);
+
+        let mut caps = crate::capability::CapabilityTable::new_for_task(owner, 4);
+        caps.insert(Capability {
+            id: CapabilityId(4110),
+            cap_type: CapabilityType::FileSystemRead,
+            rights: Rights::READ,
+            object_id: 0,
+        }).unwrap();
+
+        // Under the bound: the whole file comes back.
+        assert_eq!(
+            vfs.read_file_for_task(&caps, 0, "/packages/big.rapp", 8192).map(|b| b.len()),
+            Ok(8192),
+            "a file at exactly the bound must read in full"
+        );
+
+        // Over the bound: refused, and refused by the bound rather than by a
+        // parse failure downstream.
+        assert!(
+            matches!(vfs.read_file_for_task(&caps, 0, "/packages/big.rapp", 8191), Err(FsError::FileTooLarge)),
+            "a file larger than the bound must be refused as too large"
+        );
+        assert!(
+            matches!(vfs.read_file_for_task(&caps, 0, "/packages/big.rapp", 0), Err(FsError::FileTooLarge)),
+            "a non-empty file must be refused when no allowance is given"
+        );
+
+        // A capability that cannot read is still refused, and the bound does not
+        // become a way to learn whether a path exists.
+        let mut no_read = crate::capability::CapabilityTable::new_for_task(owner, 4);
+        no_read.insert(Capability {
+            id: CapabilityId(4111),
+            cap_type: CapabilityType::FileSystemRead,
+            rights: Rights::WRITE,
+            object_id: 0,
+        }).unwrap();
+        assert!(vfs.read_file_for_task(&no_read, 0, "/packages/big.rapp", 8192).is_err());
+        assert!(vfs.read_file_for_task(&caps, 0, "/packages/absent.rapp", 8192).is_err());
+    }
+
+    /// Drives the verification body of `sys_verify_package` with a genuinely
+    /// signed package, exercising the same read, bound and parse sequence the
+    /// syscall runs once it has taken a capability table from the scheduler.
+    ///
+    /// This is verification-path coverage, not whole-syscall coverage: the
+    /// scheduler read that supplies the capability table cannot run in a host
+    /// test, so the entry point itself is not exercised here.
+    #[test]
+    fn package_verification_reads_bounds_and_parses_the_same_bytes() {
+        use crate::capability::{Capability, CapabilityId, CapabilityType, Rights};
+        use crate::fs::vfs::Vfs;
+        use crate::package::revocation::REVOCATION_REGISTRY;
+
+        let owner = TaskId(83);
+        let (pkg, pub_key) = crate::package::rapp::build_signed_test_package(
+            "com.example.verifiable",
+            &[1, 3, 9],
+            b"\x7fELF_USER_BINARY_SAMPLE",
+            77,
+        );
+        REVOCATION_REGISTRY.lock().grant_trust_root(pub_key, "com.example.vendor").unwrap();
+
+        let mut vfs = Vfs::new();
+        vfs.mkdir("/packages");
+        vfs.create_file("/packages/com.example.verifiable.rapp", &pkg, false);
+
+        let mut caps = crate::capability::CapabilityTable::new_for_task(owner, 4);
+        caps.insert(Capability {
+            id: CapabilityId(4120),
+            cap_type: CapabilityType::FileSystemRead,
+            rights: Rights::READ,
+            object_id: 0,
+        }).unwrap();
+
+        // The real verification path accepts the signed package.
+        let manifest = verify_package_in(
+            &vfs,
+            &caps,
+            0,
+            "/packages/com.example.verifiable.rapp",
+        ).expect("a correctly signed package from a trusted publisher must verify");
+        assert_eq!(manifest.package_id, "com.example.verifiable");
+        assert_eq!(manifest.capabilities, alloc::vec![1, 3, 9]);
+
+        // A bound below the package size is refused by the read, before parsing.
+        assert!(
+            vfs.read_file_for_task(&caps, 0, "/packages/com.example.verifiable.rapp", 16).is_err(),
+            "a package larger than the caller bound must be refused by the read"
+        );
+
+        // Tampering with the stored bytes is detected, which is what proves the
+        // path verifies the bytes it actually read rather than a cached copy.
+        let mut tampered = pkg.clone();
+        let last = tampered.len() - 1;
+        tampered[last] ^= 0xFF;
+        vfs.create_file("/packages/com.example.verifiable.rapp", &tampered, false);
+        let manifest = verify_package_in(&vfs, &caps, 0, "/packages/com.example.verifiable.rapp");
+        assert!(
+            manifest.is_err(),
+            "a tampered package must not verify, got {:?}",
+            manifest.map(|m| m.package_id)
+        );
+    }
+
+    /// The install-time capability-18 gate: a package claiming device-wide
+    /// administration is refused unless its publisher is a platform publisher.
+    ///
+    /// Pinning assertion: a correctly signed package from an ordinary trusted
+    /// publisher is refused with `PermissionDenied`, and the same package signed
+    /// by a platform publisher is accepted. A package that does not claim 18 is
+    /// unaffected either way.
+    #[test]
+    fn install_refuses_capability_18_from_an_ordinary_publisher() {
+        use crate::package::revocation::{REVOCATION_REGISTRY, is_system_publisher_identity};
+        assert!(
+            is_system_publisher_identity("org.interos.platform"),
+            "the test must use a platform publisher identity"
+        );
+
+        let (third_party, third_key) = crate::package::rapp::build_signed_test_package(
+            "com.example.admin",
+            &[1, 18],
+            b"\x7fELF_USER_BINARY_SAMPLE",
+            78,
+        );
+        REVOCATION_REGISTRY.lock().grant_trust_root(third_key, "com.example.vendor").unwrap();
+
+        let manifest = crate::package::parse_rapp(&third_party)
+            .expect("an ordinary trusted publisher's signature must still verify");
+        assert_eq!(manifest.capabilities, alloc::vec![1, 18]);
+        assert_eq!(
+            authorize_capability_18_for_install(&manifest),
+            Err(SyscallResult::PermissionDenied),
+            "capability 18 from an ordinary trusted publisher must be refused at install"
+        );
+
+        let (platform, platform_key) = crate::package::rapp::build_signed_test_package(
+            "org.interos.admin",
+            &[1, 18],
+            b"\x7fELF_USER_BINARY_SAMPLE",
+            79,
+        );
+        REVOCATION_REGISTRY.lock().grant_trust_root(platform_key, "org.interos.platform").unwrap();
+        let manifest = crate::package::parse_rapp(&platform)
+            .expect("a platform publisher's signature must verify");
+        assert_eq!(
+            authorize_capability_18_for_install(&manifest),
+            Ok(()),
+            "capability 18 from a platform publisher must be accepted"
+        );
+
+        let (plain, plain_key) = crate::package::rapp::build_signed_test_package(
+            "com.example.plain",
+            &[1, 3],
+            b"\x7fELF_USER_BINARY_SAMPLE",
+            80,
+        );
+        REVOCATION_REGISTRY.lock().grant_trust_root(plain_key, "com.example.vendor").unwrap();
+        let manifest = crate::package::parse_rapp(&plain).expect("a plain package must verify");
+        assert_eq!(
+            authorize_capability_18_for_install(&manifest),
+            Ok(()),
+            "a package that does not claim capability 18 must install normally"
         );
     }
 
