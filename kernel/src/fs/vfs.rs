@@ -499,21 +499,16 @@ impl Vfs {
             (cap_slot, CapabilityType::FileSystemRead)
         } else if task_caps.inspect_slot(cap_slot, CapabilityType::FileSystemWrite, Rights::READ).is_ok() {
             (cap_slot, CapabilityType::FileSystemWrite)
-        } else if task_caps.get(cap_slot).is_err() {
-            if let Some(s) = task_caps.find_slot(CapabilityType::FileSystemRead, Rights::READ) {
-                (s, CapabilityType::FileSystemRead)
-            } else if let Some(s) = task_caps.find_slot(CapabilityType::FileSystemWrite, Rights::READ) {
-                (s, CapabilityType::FileSystemWrite)
-            } else {
-                (cap_slot, CapabilityType::FileSystemRead)
-            }
         } else {
             (cap_slot, CapabilityType::FileSystemRead)
         };
-        task_caps.verify(eff_slot, cap_type, Rights::READ).map_err(FsError::CapabilityError)?;
+        let cap = task_caps.verify(eff_slot, cap_type, Rights::READ).map_err(FsError::CapabilityError)?;
         let dir=self.lookup(path).ok_or(FsError::FileNotFound)?;
         let inode=self.inodes.get(&dir).ok_or(FsError::FileNotFound)?;
         if inode.file_type!=FileType::Directory{return Err(FsError::NotADirectory);}
+        if cap.object_id != 0 && cap.object_id != dir.0 {
+            return Err(FsError::PermissionDenied);
+        }
         use core::fmt::Write;
         struct W<'a>{b:&'a mut[u8],n:usize}
         impl<'a> Write for W<'a>{fn write_str(&mut self,s:&str)->core::fmt::Result{let k=s.len().min(self.b.len().saturating_sub(self.n));self.b[self.n..self.n+k].copy_from_slice(&s.as_bytes()[..k]);self.n+=k;Ok(())}}
@@ -548,23 +543,19 @@ impl Vfs {
             (cap_slot, CapabilityType::FileSystemRead)
         } else if task_caps.inspect_slot(cap_slot, CapabilityType::FileSystemWrite, Rights::READ).is_ok() {
             (cap_slot, CapabilityType::FileSystemWrite)
-        } else if task_caps.get(cap_slot).is_err() {
-            if let Some(s) = task_caps.find_slot(CapabilityType::FileSystemRead, Rights::READ) {
-                (s, CapabilityType::FileSystemRead)
-            } else if let Some(s) = task_caps.find_slot(CapabilityType::FileSystemWrite, Rights::READ) {
-                (s, CapabilityType::FileSystemWrite)
-            } else {
-                (cap_slot, CapabilityType::FileSystemRead)
-            }
         } else {
             (cap_slot, CapabilityType::FileSystemRead)
         };
-        task_caps
+        let cap = task_caps
             .verify(eff_slot, cap_type, Rights::READ)
             .map_err(FsError::CapabilityError)?;
 
         let inode_id = self.lookup(path).ok_or(FsError::FileNotFound)?;
         let inode = self.inodes.get(&inode_id).ok_or(FsError::FileNotFound)?;
+
+        if cap.object_id != 0 && cap.object_id != inode_id.0 {
+            return Err(FsError::PermissionDenied);
+        }
 
         Ok(FileStat {
             inode: inode.id,
@@ -806,14 +797,6 @@ impl Vfs {
                 (cap_slot, CapabilityType::FileSystemWrite)
             } else if task_caps.inspect_slot(cap_slot, CapabilityType::FileSystemRead, Rights::WRITE).is_ok() {
                 (cap_slot, CapabilityType::FileSystemRead)
-            } else if task_caps.get(cap_slot).is_err() {
-                if let Some(s) = task_caps.find_slot(CapabilityType::FileSystemWrite, Rights::WRITE) {
-                    (s, CapabilityType::FileSystemWrite)
-                } else if let Some(s) = task_caps.find_slot(CapabilityType::FileSystemRead, Rights::WRITE) {
-                    (s, CapabilityType::FileSystemRead)
-                } else {
-                    (cap_slot, CapabilityType::FileSystemWrite)
-                }
             } else {
                 (cap_slot, CapabilityType::FileSystemWrite)
             };
@@ -865,14 +848,6 @@ impl Vfs {
                 (cap_slot, CapabilityType::FileSystemRead)
             } else if task_caps.inspect_slot(cap_slot, CapabilityType::FileSystemWrite, Rights::READ).is_ok() {
                 (cap_slot, CapabilityType::FileSystemWrite)
-            } else if task_caps.get(cap_slot).is_err() {
-                if let Some(s) = task_caps.find_slot(CapabilityType::FileSystemRead, Rights::READ) {
-                    (s, CapabilityType::FileSystemRead)
-                } else if let Some(s) = task_caps.find_slot(CapabilityType::FileSystemWrite, Rights::READ) {
-                    (s, CapabilityType::FileSystemWrite)
-                } else {
-                    (cap_slot, CapabilityType::FileSystemRead)
-                }
             } else {
                 (cap_slot, CapabilityType::FileSystemRead)
             };
@@ -947,18 +922,10 @@ impl Vfs {
             (cap_slot, CapabilityType::FileSystemRead)
         } else if task_caps.inspect_slot(cap_slot, CapabilityType::FileSystemWrite, Rights::READ).is_ok() {
             (cap_slot, CapabilityType::FileSystemWrite)
-        } else if task_caps.get(cap_slot).is_err() {
-            if let Some(s) = task_caps.find_slot(CapabilityType::FileSystemRead, Rights::READ) {
-                (s, CapabilityType::FileSystemRead)
-            } else if let Some(s) = task_caps.find_slot(CapabilityType::FileSystemWrite, Rights::READ) {
-                (s, CapabilityType::FileSystemWrite)
-            } else {
-                (cap_slot, CapabilityType::FileSystemRead)
-            }
         } else {
             (cap_slot, CapabilityType::FileSystemRead)
         };
-        let _cap = task_caps
+        let cap = task_caps
             .verify(eff_slot, cap_type, Rights::READ)
             .map_err(FsError::CapabilityError)?;
 
@@ -969,6 +936,10 @@ impl Vfs {
             .ok_or(FsError::InvalidFd)?;
 
         if !handle.rights.contains(Rights::READ) {
+            return Err(FsError::PermissionDenied);
+        }
+
+        if cap.object_id != 0 && cap.object_id != handle.inode_id.0 {
             return Err(FsError::PermissionDenied);
         }
 
@@ -1006,18 +977,10 @@ impl Vfs {
             (cap_slot, CapabilityType::FileSystemWrite)
         } else if task_caps.inspect_slot(cap_slot, CapabilityType::FileSystemRead, Rights::WRITE).is_ok() {
             (cap_slot, CapabilityType::FileSystemRead)
-        } else if task_caps.get(cap_slot).is_err() {
-            if let Some(s) = task_caps.find_slot(CapabilityType::FileSystemWrite, Rights::WRITE) {
-                (s, CapabilityType::FileSystemWrite)
-            } else if let Some(s) = task_caps.find_slot(CapabilityType::FileSystemRead, Rights::WRITE) {
-                (s, CapabilityType::FileSystemRead)
-            } else {
-                (cap_slot, CapabilityType::FileSystemWrite)
-            }
         } else {
             (cap_slot, CapabilityType::FileSystemWrite)
         };
-        let _ = task_caps
+        let cap = task_caps
             .verify(eff_slot, cap_type, Rights::WRITE)
             .map_err(FsError::CapabilityError)?;
 
@@ -1028,6 +991,10 @@ impl Vfs {
             .ok_or(FsError::InvalidFd)?;
 
         if !handle.rights.contains(Rights::WRITE) {
+            return Err(FsError::PermissionDenied);
+        }
+
+        if cap.object_id != 0 && cap.object_id != handle.inode_id.0 {
             return Err(FsError::PermissionDenied);
         }
 
@@ -1607,5 +1574,68 @@ mod tests {
         let write_res2 = vfs.write(task_id, &cap_table, 3, fd_write, b"!!");
         assert!(write_res2.is_err(), "second vfs.write must fail after quota exhausted");
     }
+
+    #[test]
+    fn vfs_object_scoping_and_slot_fallback_prevention() {
+        let mut vfs = Vfs::new();
+        let task_id = TaskId(88);
+        crate::task::process::register_leader(task_id, TaskId(1));
+
+        vfs.create_file("/scoped_a.txt", b"secret a", false);
+        vfs.create_file("/scoped_b.txt", b"secret b", false);
+        let _inode_dir = vfs.mkdir("/scoped_dir");
+
+        let inode_a = vfs.lookup("/scoped_a.txt").expect("lookup a");
+        let inode_b = vfs.lookup("/scoped_b.txt").expect("lookup b");
+        let inode_dir = vfs.lookup("/scoped_dir").expect("lookup dir");
+        assert_ne!(inode_a, inode_b);
+        assert_ne!(inode_a, inode_dir);
+
+        let mut cap_table = CapabilityTable::new_for_task(task_id, 8);
+        // Slot 0: FileSystemRead scoped strictly to Inode A
+        cap_table.insert(Capability {
+            id: CapabilityId(501),
+            cap_type: CapabilityType::FileSystemRead,
+            rights: Rights::READ,
+            object_id: inode_a.0,
+        }).expect("insert scoped read");
+        // Slot 1: FileSystemWrite scoped strictly to Inode A
+        cap_table.insert(Capability {
+            id: CapabilityId(502),
+            cap_type: CapabilityType::FileSystemWrite,
+            rights: Rights::WRITE | Rights::READ,
+            object_id: inode_a.0,
+        }).expect("insert scoped write");
+
+        // 1. Inode A operations succeed with matching scoped capability
+        let fd_a = vfs.open(task_id, &cap_table, 0, "/scoped_a.txt", Rights::READ).expect("open a with cap scoped to a");
+        let mut buf = [0u8; 16];
+        let read_a = vfs.read(task_id, &cap_table, 0, fd_a, &mut buf).expect("read a with cap scoped to a");
+        assert_eq!(&buf[..read_a], b"secret a");
+        let stat_a = vfs.stat(&cap_table, 0, "/scoped_a.txt").expect("stat a with cap scoped to a");
+        assert_eq!(stat_a.size, 8);
+
+        // 2. Operations on Inode B MUST fail closed with PermissionDenied when using capability scoped to Inode A
+        assert_eq!(vfs.open(task_id, &cap_table, 0, "/scoped_b.txt", Rights::READ).err(), Some(FsError::PermissionDenied));
+        assert_eq!(vfs.stat(&cap_table, 0, "/scoped_b.txt").err(), Some(FsError::PermissionDenied));
+
+        // Read/Write on fd for Inode B using capability scoped to Inode A must fail with PermissionDenied
+        let fd_b = vfs.allocate_fd(task_id, inode_b, Rights::READ | Rights::WRITE).expect("allocate fd_b");
+        assert_eq!(vfs.read(task_id, &cap_table, 0, fd_b, &mut buf).err(), Some(FsError::PermissionDenied));
+        assert_eq!(vfs.write(task_id, &cap_table, 1, fd_b, b"hack").err(), Some(FsError::PermissionDenied));
+
+        // Directory listing on /scoped_dir using capability scoped to Inode A must fail with PermissionDenied
+        let mut list_buf = [0u8; 64];
+        assert_eq!(vfs.list_dir(&cap_table, 0, "/scoped_dir", &mut list_buf).err(), Some(FsError::PermissionDenied));
+
+        // 3. Fallback prevention: requesting an invalid slot (999) must fail closed with CapabilityError,
+        // and must NEVER silently fall back to slot 0 or slot 1!
+        assert!(matches!(vfs.open(task_id, &cap_table, 999, "/scoped_a.txt", Rights::READ).err(), Some(FsError::CapabilityError(_))));
+        assert!(matches!(vfs.stat(&cap_table, 999, "/scoped_a.txt").err(), Some(FsError::CapabilityError(_))));
+        assert!(matches!(vfs.read(task_id, &cap_table, 999, fd_a, &mut buf).err(), Some(FsError::CapabilityError(_))));
+        assert!(matches!(vfs.write(task_id, &cap_table, 999, fd_a, b"data").err(), Some(FsError::CapabilityError(_))));
+        assert!(matches!(vfs.list_dir(&cap_table, 999, "/scoped_dir", &mut list_buf).err(), Some(FsError::CapabilityError(_))));
+    }
 }
+
 
