@@ -11,6 +11,7 @@ use spin::Mutex;
 
 use super::{switch_context, TaskContext, TaskControlBlock, TaskId, TaskState};
 use crate::capability::CapabilityTable;
+use crate::task::process::ReapError;
 
 /// Default time slice allotted to a task before preemption (in timer ticks, e.g. 5 = 50ms at 100Hz).
 pub const TIME_SLICE_TICKS: u64 = 5;
@@ -24,6 +25,55 @@ pub struct Scheduler {
     current_idx: usize,
     ticks_in_slice: u64,
     initialized: bool,
+}
+
+/// Whether a terminated task's process and thread records are now releasable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReapOutcome {
+    /// The records are gone (or were never there). The task table entry is
+    /// stale and the task control block may be dropped.
+    Released,
+    /// A required table was still held after a bounded retry. The task table
+    /// entry is kept and retried on a later tick.
+    Deferred,
+}
+
+/// Bounded spin budget for a reap that lost a race on the process or thread
+/// table. This is a fixed count of `spin_loop()` hints, never a blocking lock
+/// and never an unbounded wait, so it stays safe in interrupt context.
+const REAP_SPIN_BUDGET: usize = 100;
+
+/// Attempts to release a terminated task's records, retrying a fixed number of
+/// times if the process or thread table is momentarily held elsewhere.
+///
+/// WHY bounded and then deferred rather than retried forever: on this
+/// uniprocessor port the holder may be a task that is not going to run until
+/// this one yields, so spinning past this budget only delays the tick that
+/// would let it finish. Deferring keeps the reaping attempt in the tick loop
+/// where it is observable and bounded.
+///
+/// WHY the match is exhaustive over [`ReapError`]: the only safe action for
+/// `TablesBusy` is to keep the task table entry. An unhandled arm here would
+/// have to guess, and guessing "release it" leaks the process and thread table
+/// entries -- the silent zombie leak this path exists to prevent.
+fn reap_task_now_or_defer(task: TaskId) -> ReapOutcome {
+    let mut outcome = match crate::task::process::try_reap(task) {
+        Ok(()) => return ReapOutcome::Released,
+        Err(ReapError::ThreadNotRegistered) | Err(ReapError::ProcessRecordMissing) => ReapOutcome::Released,
+        Err(ReapError::TablesBusy) => ReapOutcome::Deferred,
+    };
+    for _ in 0..REAP_SPIN_BUDGET {
+        core::hint::spin_loop();
+        outcome = match crate::task::process::try_reap(task) {
+            Ok(()) => ReapOutcome::Released,
+            Err(ReapError::ThreadNotRegistered) | Err(ReapError::ProcessRecordMissing) => ReapOutcome::Released,
+            Err(ReapError::TablesBusy) => ReapOutcome::Deferred,
+        };
+        if outcome == ReapOutcome::Released {
+            break;
+        }
+    }
+    outcome
 }
 
 impl Scheduler {
@@ -250,29 +300,12 @@ impl Scheduler {
             i -= 1;
             if self.tasks[i].id != current_id && self.tasks[i].state == TaskState::Terminated {
                 let tid = self.tasks[i].id;
-                let mut reap_res = crate::task::process::try_reap(tid);
-                if reap_res == Err("process table busy") || reap_res == Err("thread table busy") {
-                    for _ in 0..100 {
-                        core::hint::spin_loop();
-                        reap_res = crate::task::process::try_reap(tid);
-                        if reap_res != Err("process table busy") && reap_res != Err("thread table busy") {
-                            break;
-                        }
-                    }
-                }
-                match reap_res {
-                    Ok(()) | Err("thread not registered") | Err("process record missing") => {
+                match reap_task_now_or_defer(tid) {
+                    ReapOutcome::Released => {
                         self.tasks.remove(i);
                         if i < self.current_idx { self.current_idx -= 1; }
                     }
-                    Err("process table busy") | Err("thread table busy") => {
-                        // Skip this tick to avoid blocking on IRQ path; will retry next tick
-                    }
-                    Err(_) => {
-                        // Unrecoverable state; clean up TCB to avoid silent zombie leak
-                        self.tasks.remove(i);
-                        if i < self.current_idx { self.current_idx -= 1; }
-                    }
+                    ReapOutcome::Deferred => { /* retried on a later tick */ }
                 }
             }
         }
@@ -302,35 +335,15 @@ impl Scheduler {
                 && matches!(task.state, TaskState::Zombie | TaskState::Terminated)
             {
                 let tid = task.id;
-                let mut reap_res = crate::task::process::try_reap(tid);
-                if reap_res == Err("process table busy") || reap_res == Err("thread table busy") {
-                    for _ in 0..100 {
-                        core::hint::spin_loop();
-                        reap_res = crate::task::process::try_reap(tid);
-                        if reap_res != Err("process table busy") && reap_res != Err("thread table busy") {
-                            break;
-                        }
-                    }
-                }
-                match reap_res {
-                    Ok(()) | Err("thread not registered") | Err("process record missing") => {
+                match reap_task_now_or_defer(tid) {
+                    ReapOutcome::Released => {
                         self.tasks.remove(i);
                         reaped += 1;
                         if i < self.current_idx {
                             self.current_idx -= 1;
                         }
                     }
-                    Err("process table busy") | Err("thread table busy") => {
-                        // Skip this tick to avoid blocking on IRQ path; will retry next tick
-                    }
-                    Err(_) => {
-                        // Unrecoverable state; clean up TCB to avoid silent zombie leak
-                        self.tasks.remove(i);
-                        reaped += 1;
-                        if i < self.current_idx {
-                            self.current_idx -= 1;
-                        }
-                    }
+                    ReapOutcome::Deferred => { /* retried on a later tick */ }
                 }
             }
         }
@@ -906,7 +919,7 @@ mod tests {
         assert_eq!(sched.get_task(orphan).unwrap().state, TaskState::Zombie);
 
         // When PROCESS_TABLE is locked (e.g. by an interrupted thread on this CPU),
-        // try_reap must return Err("process table busy") and reap_orphans must NOT deadlock or panic.
+        // try_reap must report ReapError::TablesBusy and reap_orphans must NOT deadlock or panic.
         {
             let _busy_processes = crate::task::process::PROCESS_TABLE.lock();
             let reaped = sched.reap_orphans();
@@ -927,6 +940,67 @@ mod tests {
         assert_eq!(reaped, 1, "must reap task when tables are unlocked");
         assert!(sched.get_task(orphan).is_none());
         assert!(crate::task::process::process_for_task(orphan).is_none());
+    }
+
+    /// A zombie that loses several races on the process and thread tables must
+    /// survive every deferral and still be reclaimed exactly once.
+    ///
+    /// WHY this matters: the reaping attempt is made from the tick loop, where
+    /// losing the table race is normal rather than exceptional. If a deferral
+    /// dropped the zombie instead of retrying, the task control block would be
+    /// freed while its process and thread table entries survived, which is the
+    /// silent leak the bounded retry exists to avoid. If a second pass double
+    /// counted it, the accounting would overstate how much was reclaimed.
+    #[test]
+    fn a_zombie_deferred_by_busy_tables_is_reaped_exactly_once() {
+        let mut sched = Scheduler::new();
+        sched.init(CapabilityTable::new_for_task(TaskId(0), 16));
+
+        let baseline = sched.task_count();
+        let orphan = sched.spawn_with_parent(
+            "orphan_deferred_reap",
+            dummy_test_entry,
+            CapabilityTable::new_for_task(TaskId::new(), 16),
+            1,
+            TaskId(0),
+        );
+        sched.terminate_task(orphan, 7).expect("terminate orphan");
+        assert_eq!(sched.get_task(orphan).unwrap().state, TaskState::Zombie);
+        assert_eq!(sched.task_count(), baseline + 1);
+
+        // Several ticks in which the orphan loses the table race. Each one must
+        // defer: report nothing reaped and keep the task table entry intact.
+        // The two contention sources are exercised separately because they are
+        // guarded by different lock types.
+        for _ in 0..3 {
+            let held = crate::task::process::PROCESS_TABLE.lock();
+            assert_eq!(sched.reap_orphans(), 0, "must report nothing reaped while PROCESS_TABLE is held");
+            assert!(sched.get_task(orphan).is_some(), "a deferred zombie must keep its task table entry");
+            drop(held);
+
+            let held = crate::task::process::THREAD_TABLE.lock();
+            assert_eq!(sched.reap_orphans(), 0, "must report nothing reaped while THREAD_TABLE is held");
+            assert!(sched.get_task(orphan).is_some(), "a deferred zombie must keep its task table entry");
+            drop(held);
+        }
+        assert_eq!(
+            sched.task_count(),
+            baseline + 1,
+            "a deferred zombie must remain counted in the task table"
+        );
+
+        // The tick after contention ends reclaims it, and reclaims it once.
+        assert_eq!(sched.reap_orphans(), 1, "the deferred zombie must be reclaimed once released");
+        assert!(sched.get_task(orphan).is_none(), "the task control block must be dropped");
+        assert!(
+            crate::task::process::process_for_task(orphan).is_none(),
+            "the process record must be released, not leaked"
+        );
+        assert_eq!(sched.task_count(), baseline, "task table must return to its baseline size");
+
+        // Further ticks must not re-count a zombie that is already gone.
+        assert_eq!(sched.reap_orphans(), 0, "a reclaimed zombie must not be counted twice");
+        assert_eq!(sched.reap_orphans(), 0, "a reclaimed zombie must not be counted twice");
     }
 }
 

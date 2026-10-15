@@ -412,19 +412,45 @@ pub fn mark_zombie(task: TaskId, exit_code: i32) {
     }
 }
 
-pub fn try_reap(task: TaskId) -> Result<(), &'static str> {
+/// Why a reap attempt did not complete.
+///
+/// WHY an enum rather than `&'static str`: the scheduler has to decide whether a
+/// terminated task may be dropped from the task table, and that decision turns
+/// on the difference between "a table was momentarily held, try again next tick"
+/// and "this task has no binding left to release". Comparing free-form strings
+/// left an unhandled `Err(_)` arm in the scheduler, and that arm would have
+/// removed the task control block without releasing its process and thread
+/// table entries -- the exact silent leak this path exists to prevent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReapError {
+    /// A required table was held elsewhere. The attempt made no progress and
+    /// must be retried; the task table entry must be kept.
+    TablesBusy,
+    /// The task has no thread-table binding left, so its entry is already gone
+    /// and the task table entry is stale.
+    ThreadNotRegistered,
+    /// The owning process record has already been released, so the task table
+    /// entry is stale.
+    ProcessRecordMissing,
+}
+
+/// Removes a terminated task's thread and process records without ever taking a
+/// blocking lock, so it is safe to call from interrupt and scheduler context.
+///
+/// Lock order is always `PROCESS_TABLE` then `THREAD_TABLE`.
+pub fn try_reap(task: TaskId) -> Result<(), ReapError> {
     // Preserve global lock order: PROCESS_TABLE then THREAD_TABLE
-    let mut table = PROCESS_TABLE.try_lock().ok_or("process table busy")?;
-    let mut threads = THREAD_TABLE.try_lock().ok_or("thread table busy")?;
+    let mut table = PROCESS_TABLE.try_lock().ok_or(ReapError::TablesBusy)?;
+    let mut threads = THREAD_TABLE.try_lock().ok_or(ReapError::TablesBusy)?;
 
     let thread_idx = threads
         .iter()
         .position(|slot| slot.as_ref().map(|r| r.task == task).unwrap_or(false))
-        .ok_or("thread not registered")?;
+        .ok_or(ReapError::ThreadNotRegistered)?;
     let process = threads[thread_idx].as_ref().unwrap().process;
 
     let Some(slot) = table.iter_mut().find(|slot| slot.as_ref().map(|r| r.id == process).unwrap_or(false)) else {
-        return Err("process record missing");
+        return Err(ReapError::ProcessRecordMissing);
     };
 
     let is_leader = slot.as_ref().map(|r| r.leader_task == task).unwrap_or(false);
@@ -455,17 +481,21 @@ pub fn try_reap(task: TaskId) -> Result<(), &'static str> {
     Ok(())
 }
 
-pub fn reap(task: TaskId) -> Result<(), &'static str> {
+/// Bounded spin wrapper over [`try_reap`] for callers in thread context.
+///
+/// The bound is finite on purpose: a caller in interrupt context must use
+/// [`try_reap`] directly so it never spins at all.
+pub fn reap(task: TaskId) -> Result<(), ReapError> {
     for _ in 0..10_000 {
         match try_reap(task) {
             Ok(()) => return Ok(()),
-            Err("thread table busy") | Err("process table busy") => {
+            Err(ReapError::TablesBusy) => {
                 core::hint::spin_loop();
             }
             Err(e) => return Err(e),
         }
     }
-    Err("reap timed out acquiring table locks")
+    Err(ReapError::TablesBusy)
 }
 
 pub fn is_leader(task: TaskId) -> bool {
