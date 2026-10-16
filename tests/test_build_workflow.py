@@ -1,4 +1,5 @@
 import os
+import struct
 import subprocess
 import sys
 import tempfile
@@ -6,6 +7,54 @@ import time
 import unittest
 
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+
+def synthetic_elf_with_sections(section_names):
+    """Build a minimal 64-bit ET_EXEC whose section table holds the named sections.
+
+    Only what Assert-NoSymbolTable reads is populated: e_ident, e_type, e_shoff,
+    e_shentsize, e_shnum, e_shstrndx, the section name table and sh_name per
+    section. Every header field is written little-endian so the bytes match what
+    the PowerShell reader expects on this platform.
+    """
+    shstrtab = b"\x00" + b"".join(n.encode("ascii") + b"\x00" for n in section_names)
+    name_offsets = {}
+    cursor = 1
+    for n in section_names:
+        name_offsets[n] = cursor
+        cursor += len(n) + 1
+
+    # Index 0 is the mandatory null section; index 1 is the name table itself.
+    sections = [("", 0, 0), (".shstrtab", 64, len(shstrtab))]
+    for n in section_names:
+        if n == ".shstrtab":
+            continue
+        sections.append((n, 0, 0))
+
+    e_shoff = 64 + len(shstrtab)
+    e_shnum = len(sections)
+    e_shstrndx = 1
+
+    header = bytearray(64)
+    header[0:4] = b"\x7fELF"
+    header[4] = 2          # ELFCLASS64
+    header[5] = 1          # ELFDATA2LSB
+    header[6] = 1          # EV_CURRENT
+    struct.pack_into("<H", header, 16, 2)      # e_type = ET_EXEC
+    struct.pack_into("<Q", header, 40, e_shoff)
+    struct.pack_into("<H", header, 58, 64)     # e_shentsize
+    struct.pack_into("<H", header, 60, e_shnum)
+    struct.pack_into("<H", header, 62, e_shstrndx)
+
+    table = bytearray()
+    for name, off, size in sections:
+        entry = bytearray(64)
+        struct.pack_into("<I", entry, 0, name_offsets.get(name, 0))
+        struct.pack_into("<Q", entry, 24, off)   # sh_offset
+        struct.pack_into("<Q", entry, 32, size)  # sh_size
+        table += entry
+
+    return bytes(header) + shstrtab + bytes(table)
 
 
 class TestBuildWorkflow(unittest.TestCase):
@@ -54,6 +103,106 @@ Set-Location '{ROOT_DIR}'
         finally:
             if os.path.exists(temp_path):
                 os.remove(temp_path)
+
+    def test_symbol_table_assertion_rejects_elf_carrying_symtab(self):
+        """Proves a stripped ELF that still carries .symtab is rejected, not accepted.
+
+        .symtab/.strtab hold LLVM internal-linkage names of the form
+        "<name>.llvm.<hash>" where the hash comes from the absolute source path.
+        Leaving them in makes the same revision produce different bytes in every
+        directory, so the build must fail closed rather than silently ship them.
+        """
+        blob = synthetic_elf_with_sections([".shstrtab", ".text", ".symtab", ".strtab"])
+        with tempfile.NamedTemporaryFile("wb", prefix="elf_symtab_", delete=False) as f:
+            f.write(blob)
+            temp_path = f.name
+        try:
+            r = self.run_ps(f"Assert-NoSymbolTable -Path '{temp_path}'")
+            self.assertNotEqual(r.returncode, 0, "an ELF carrying .symtab must be rejected")
+            self.assertIn(".symtab", r.stderr)
+            self.assertIn("different image", r.stderr)
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
+    def test_symbol_table_assertion_rejects_elf_carrying_only_strtab(self):
+        """Proves a .strtab alone is enough to fail: the name table carries the hashed symbols."""
+        blob = synthetic_elf_with_sections([".shstrtab", ".text", ".strtab"])
+        with tempfile.NamedTemporaryFile("wb", prefix="elf_strtab_", delete=False) as f:
+            f.write(blob)
+            temp_path = f.name
+        try:
+            r = self.run_ps(f"Assert-NoSymbolTable -Path '{temp_path}'")
+            self.assertNotEqual(r.returncode, 0, "an ELF carrying .strtab must be rejected")
+            self.assertIn(".strtab", r.stderr)
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
+    def test_symbol_table_assertion_accepts_elf_without_symbols(self):
+        """Proves the assertion accepts a properly stripped ELF, so it is not a blanket failure."""
+        blob = synthetic_elf_with_sections([".shstrtab", ".text", ".rodata", ".data", ".bss"])
+        with tempfile.NamedTemporaryFile("wb", prefix="elf_nosym_", delete=False) as f:
+            f.write(blob)
+            temp_path = f.name
+        try:
+            r = self.run_ps(f"Assert-NoSymbolTable -Path '{temp_path}'")
+            self.assertEqual(r.returncode, 0, f"a stripped ELF must be accepted: {r.stderr}\n{r.stdout}")
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
+    def test_symbol_table_assertion_rejects_non_elf_and_truncated_input(self):
+        """Proves the reader fails closed on junk instead of walking off the buffer."""
+        with tempfile.NamedTemporaryFile("wb", prefix="elf_junk_", delete=False) as f:
+            f.write(b"NOT_AN_ELF_AT_ALL_XXXX" * 8)
+            junk = f.name
+        with tempfile.NamedTemporaryFile("wb", prefix="elf_short_", delete=False) as f:
+            f.write(b"\x7fELF\x02\x01\x01\x00")
+            short = f.name
+        try:
+            r1 = self.run_ps(f"Assert-NoSymbolTable -Path '{junk}'")
+            self.assertNotEqual(r1.returncode, 0)
+            self.assertIn("ELF magic", r1.stderr)
+            r2 = self.run_ps(f"Assert-NoSymbolTable -Path '{short}'")
+            self.assertNotEqual(r2.returncode, 0)
+            self.assertIn("too short", r2.stderr)
+        finally:
+            for p in (junk, short):
+                if os.path.exists(p):
+                    os.remove(p)
+
+    def test_userspace_build_strips_symbols_and_asserts_the_result(self):
+        """Proves build_userspace.ps1 both strips the table and verifies it was removed.
+
+        This is the wiring check: the behavioural tests above prove the assertion
+        works, and this proves the build actually relies on it, so removing
+        --strip-unneeded can no longer pass unnoticed. The flag is checked on the
+        llvm-strip invocation itself rather than anywhere in the file, because the
+        explanatory comment also names the flag.
+        """
+        script = os.path.join(ROOT_DIR, "tools", "build_userspace.ps1")
+        with open(script, "r", encoding="utf-8-sig") as f:
+            build_userspace = f.read()
+
+        strip_calls = [ln for ln in build_userspace.splitlines()
+                       if "-Exe $StripTool" in ln and "Invoke-Native" in ln]
+        self.assertEqual(len(strip_calls), 1,
+                         f"expected exactly one llvm-strip invocation, found {len(strip_calls)}")
+        self.assertIn("--strip-unneeded", strip_calls[0],
+                      "the llvm-strip invocation must strip the symbol table that breaks reproducibility")
+        self.assertIn("--strip-debug", strip_calls[0],
+                      "the llvm-strip invocation must keep removing DWARF from the shipped image")
+        self.assertIn("Assert-NoSymbolTable", build_userspace,
+                      "build_userspace.ps1 must assert the symbol table is gone, not assume it")
+        assert_calls = [ln for ln in build_userspace.splitlines()
+                        if ln.strip().startswith("Assert-NoSymbolTable -Path $targetPath")]
+        self.assertEqual(len(assert_calls), 1,
+                         f"the strip must be followed by exactly one assertion on the artifact, found {len(assert_calls)}")
+        strip_index = build_userspace.index(strip_calls[0])
+        assert_index = build_userspace.index(assert_calls[0])
+        self.assertGreater(assert_index, strip_index,
+                           "the assertion must run after llvm-strip, or it checks the unstripped file")
 
     def test_cargo_artifact_verification_rejects_truncated_elf(self):
         """Proves Verify-KernelBinaryArtifact fails closed when binary is smaller than 64-byte ELF header."""

@@ -10,6 +10,8 @@
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $WorkspaceRoot = Split-Path -Parent $ScriptDir
+# Assert-NoSymbolTable lives with the other ELF helpers in build_env.ps1.
+. (Join-Path $ScriptDir "build_env.ps1")
 Set-Location $WorkspaceRoot
 
 # The kernel's ELF loader only accepts ET_EXEC. The `*-unknown-none` targets
@@ -95,17 +97,30 @@ function Invoke-GuestBuild {
     }
     Assert-ExecutableElf -Path $targetPath
 
-    # WHY --strip-debug: bare `llvm-strip` removes the symbol table but KEEPS the
-    # DWARF sections. Measured on the authenticator app, .debug_str alone was
-    # 302 KB, .debug_info 231 KB and .debug_line 137 KB -- 813 KB of DWARF around
-    # 11 KB of actual code, in an 834 KB file. The kernel embeds these binaries, so
-    # twelve such apps put roughly 10 MB of debug information into the image, and
-    # the signed RAPP artifacts built from them came out at ~878 KB each, far above
-    # the 60000-byte transfer limit, so no package could ever be installed.
-    # `--strip-debug` keeps the loadable segments the kernel's ELF loader needs.
-    Invoke-Native -Exe $StripTool -Arguments @("--strip-debug", $targetPath) -What "llvm-strip ($Artifact)"
+    # WHY --strip-debug: the shipped image must not carry DWARF. Measured on the
+    # authenticator app, .debug_str alone was 302 KB, .debug_info 231 KB and
+    # .debug_line 137 KB -- 813 KB of DWARF around 11 KB of actual code, in an 834 KB
+    # file. The kernel embeds these binaries, so twelve such apps put roughly 10 MB of
+    # debug information into the image, and the signed RAPP artifacts built from them
+    # came out at ~878 KB each, far above the 60000-byte transfer limit, so no package
+    # could ever be installed.
+    #
+    # WHY --strip-unneeded: --strip-debug on its own leaves .symtab and .strtab, and
+    # those are the only part of the image that is not a function of the source. LLVM
+    # uniquifies internal-linkage symbols as "<name>.llvm.<hash>", where the hash is
+    # derived from the module identifier -- the absolute source path -- so one revision
+    # built from two different directories yields two different byte images. Measured:
+    # launcher, messages, sensor_dashboard and card_demo differed between two builds of
+    # the same revision in two directories while every loadable section was byte
+    # identical; rebuilding twice inside a single directory was bit-for-bit stable, and
+    # music/init/settings carry no such symbols and matched everywhere.
+    # --strip-unneeded drops the symbol table and keeps the loadable segments the
+    # kernel's ELF loader needs; with it, all four matched exactly across directories.
+    Invoke-Native -Exe $StripTool -Arguments @("--strip-debug", "--strip-unneeded", $targetPath) -What "llvm-strip ($Artifact)"
     # Stripping must not change the executable type the kernel loader sees.
     Assert-ExecutableElf -Path $targetPath
+    # Stripping must actually remove the non-reproducible tables, not merely appear to.
+    Assert-NoSymbolTable -Path $targetPath
     Write-Host "  -> ET_EXEC verified and stripped: $Artifact" -ForegroundColor Green
 }
 

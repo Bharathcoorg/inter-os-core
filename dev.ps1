@@ -88,6 +88,17 @@ function Invoke-Build {
         $eType = [BitConverter]::ToUInt16($header, 16)
         if ($eType -ne 2) {
             $badImages += "$image (ET_DYN, the guest loader requires ET_EXEC)"
+            continue
+        }
+        # A binary that still carries .symtab is not acceptable either, even
+        # though it is loadable: LLVM's internal-linkage symbol names embed a
+        # hash of the absolute source path, so those tables make the packaged
+        # image differ per build directory. Treat them the same as a wrong ELF
+        # type so a stale symbol-carrying artifact cannot survive a rebuild.
+        try {
+            Assert-NoSymbolTable -Path $imagePath -Label $image
+        } catch {
+            $badImages += "$image (still carries a symbol table, so the image would not be reproducible)"
         }
     }
     if ($badImages.Count -gt 0) {
@@ -111,7 +122,7 @@ function Invoke-Build {
             Set-Location $savedDir
         }
     } else {
-        Write-Host "[OK] Ring-3 userspace already present and ET_EXEC; skipping rebuild." -ForegroundColor Green
+        Write-Host "[OK] Ring-3 userspace already present, ET_EXEC and symbol-free; skipping rebuild." -ForegroundColor Green
     }
 
     $kernelManifest = Join-Path $kernelDir "Cargo.toml"

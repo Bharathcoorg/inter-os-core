@@ -263,6 +263,71 @@ function Get-ElfLoadSegmentGeometry {
     return [pscustomobject]@{ Machine = $eMachine; Segments = $segments }
 }
 
+function Assert-NoSymbolTable {
+    <#
+    .SYNOPSIS
+    Fails when an ELF still carries .symtab or .strtab.
+
+    .DESCRIPTION
+    The symbol table is the one part of a userspace image that is not a function of
+    the source. LLVM uniquifies internal-linkage symbols as "<name>.llvm.<hash>",
+    where the hash is derived from the module identifier -- the absolute source path
+    -- so the same revision built from two different directories produces two
+    different byte images even though every loadable section matches. Stripping the
+    table is therefore what makes the artifact reproducible, and this asserts the
+    strip actually happened instead of trusting the exit code.
+
+    Walks the section header table the same defensive way as
+    Get-ElfLoadSegmentGeometry: bounds e_shentsize, e_shnum and the name lookup so
+    corrupt values cannot turn the parse into a wild read.
+    #>
+    param(
+        [Parameter(Mandatory=$true)][string]$Path,
+        [string]$Label
+    )
+    if (-not $Label) { $Label = $Path }
+
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    if ($bytes.Length -lt 64) { throw "[FAILED] $Label is too short to hold an ELF header" }
+    if ($bytes[0] -ne 0x7F -or $bytes[1] -ne 0x45 -or $bytes[2] -ne 0x4C -or $bytes[3] -ne 0x46) {
+        throw "[FAILED] $Label does not begin with the ELF magic"
+    }
+    if ($bytes[4] -ne 2) { throw "[FAILED] $Label is not a 64-bit ELF, so the section table layout below does not apply" }
+
+    $eShoff = [BitConverter]::ToUInt64($bytes, 40)
+    $eShEntSize = [int][BitConverter]::ToUInt16($bytes, 58)
+    $eShNum = [int][BitConverter]::ToUInt16($bytes, 60)
+    $eShStrNdx = [int][BitConverter]::ToUInt16($bytes, 62)
+    if ($eShoff -eq 0 -or $eShNum -eq 0) { throw "[FAILED] $Label declares no section header table" }
+    if ($eShEntSize -lt 64) { throw "[FAILED] $Label declares an implausible e_shentsize ($eShEntSize)" }
+    if (($eShoff + ([uint64]$eShNum * $eShEntSize)) -gt [uint64]$bytes.Length) {
+        throw "[FAILED] $Label declares a section header table that extends past its own end"
+    }
+    if ($eShStrNdx -ge $eShNum) { throw "[FAILED] $Label declares e_shstrndx $eShStrNdx outside its $eShNum sections" }
+
+    $strHdr = [int]$eShoff + ($eShStrNdx * $eShEntSize)
+    $strOffset = [int][BitConverter]::ToUInt64($bytes, $strHdr + 24)
+    $strSize = [int][BitConverter]::ToUInt64($bytes, $strHdr + 32)
+    if ($strSize -lt 0 -or ($strOffset + $strSize) -gt $bytes.Length) {
+        throw "[FAILED] $Label declares a section name table that extends past its own end"
+    }
+
+    $found = @()
+    for ($i = 0; $i -lt $eShNum; $i++) {
+        $hdr = [int]$eShoff + ($i * $eShEntSize)
+        $nameOffset = [int][BitConverter]::ToUInt32($bytes, $hdr)
+        if ($nameOffset -lt 0 -or $nameOffset -ge $strSize) { continue }
+        $end = $nameOffset
+        while ($end -lt $strSize -and $bytes[$strOffset + $end] -ne 0) { $end++ }
+        $name = [System.Text.Encoding]::ASCII.GetString($bytes, $strOffset + $nameOffset, $end - $nameOffset)
+        if ($name -eq ".symtab" -or $name -eq ".strtab") { $found += $name }
+    }
+
+    if ($found.Count -gt 0) {
+        throw ("[FAILED] $Label still carries $($found -join ' and '); rebuilding elsewhere would produce a different image")
+    }
+}
+
 function Get-StreamRegionSha256 {
     <#
     .SYNOPSIS
