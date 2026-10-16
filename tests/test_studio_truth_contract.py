@@ -104,6 +104,36 @@ class StudioServerTruthTests(unittest.TestCase):
                       "'/api/hardware/power'"):
             self.assertNotIn(route, self.server, f"alias returned: {route}")
 
+    def test_frame_timing_endpoint_reports_cycles_and_refuses_to_invent_hz(self):
+        # WHY: the Studio needs to say what a flip actually cost, and must not
+        # convert cycles into a frequency. Cycles have no time base on their own;
+        # dividing by a nominal 16.67 ms would print a confident number that no
+        # measurement supports. The endpoint therefore returns `refresh_rate_hz:
+        # None` explicitly rather than omitting the field or guessing.
+        self.assertIn("def extract_frame_timing()", self.server)
+        self.assertIn('"refresh_rate_hz": None', self.server)
+        self.assertIn("'/api/kernel/frame-timing'", self.server)
+        self.assertIn("last_flip_compose_cycles", self.server)
+        self.assertIn("last_flip_present_cycles", self.server)
+        # An older guest publishes no flip fields; that must read as unknown
+        # rather than as a free frame.
+        self.assertIn("this is 'unknown', not a zero-cost frame", self.server)
+
+    def test_package_catalog_marks_where_a_real_digest_can_come_from(self):
+        # WHY: the Packages tab had a file column and a digest cell that were
+        # empty for all 16 packages, including ones the Studio had just written
+        # and hashed, because the guest registry line carries neither field.
+        # Entries now declare their origin and expose null -- not "" -- so the
+        # row can distinguish "embedded, so no host file exists" from "a field
+        # failed to arrive".
+        self.assertIn("SIDELOAD_LEDGER", self.server)
+        self.assertIn('entry["origin"] = "KERNEL_EMBEDDED"', self.server)
+        self.assertIn('entry["origin"] = "SIDELOADED_VIA_STUDIO"', self.server)
+        # Null, not empty string: the row has to be able to tell "embedded, so
+        # no host file exists" from "a field failed to arrive".
+        self.assertIn('entry["filename"] = None', self.server)
+        self.assertIn('entry["sha256"] = None', self.server)
+
     def test_guest_vfs_endpoints_declare_guest_authority(self):
         # fs/read and fs/write are the live guest-VFS surface and must state
         # that authority (the old marker lived only on a removed dead route).
@@ -143,8 +173,42 @@ class StudioClientTruthTests(unittest.TestCase):
     def test_package_table_reports_real_counts_and_neutral_fallbacks(self):
         self.assertIn("pkg-count-badge", self.js)
         self.assertIn("'Status unavailable'", self.js)
-        self.assertIn("'SHA-256 unavailable'", self.js)
         self.assertNotIn("'Verified (Ed25519)'", self.js)
+        # WHY the digest fallback is no longer the bare string "SHA-256
+        # unavailable": that cell was saying the same thing for all 16 packages,
+        # including ones this Studio had just written to disk and hashed. A
+        # kernel-embedded package has no host file to digest, which is a
+        # different fact from "a digest was expected and did not arrive", and a
+        # package this Studio sideloaded has a real one. The row now says which.
+        self.assertIn("'No host file to digest'", self.js)
+        self.assertIn("'Digest not reported'", self.js)
+        self.assertIn("'Embedded in the guest image'", self.js)
+        self.assertNotIn("'SHA-256 unavailable'", self.js)
+
+    def test_package_table_merges_guest_rows_instead_of_overwriting_them(self):
+        # WHY: `state.installedPackages = data.apps` replaced the whole array
+        # with the guest registry, which carries no filename and no digest. A
+        # package sideloaded seconds earlier lost both fields and rendered as
+        # "SHA-256 unavailable" on the next 4-second refresh.
+        self.assertNotIn("state.installedPackages = data.apps;", self.js)
+        self.assertIn("byId.set(incoming.id, prior ? { ...prior, ...incoming } : incoming)", self.js)
+
+    def test_studio_reports_measured_flip_cost_separately_from_the_display_mode(self):
+        # WHY the client half of the DRM/KMS correction: the panel showed only
+        # the programmed mode's 60 Hz, which read as achieved frame rate. It now
+        # also reports what a flip actually cost, and says explicitly that it is
+        # not a frame rate -- the guest exports no per-frame wall-clock interval,
+        # so one cannot be derived without inventing it.
+        self.assertIn("/api/kernel/frame-timing", self.js)
+        self.assertIn("Not a frame rate", self.js)
+        self.assertIn("'Not measured'", self.js)
+
+    def test_sideload_log_does_not_overstate_what_was_verified(self):
+        # WHY: "SHA-256 Verified" after a sideload read as "the guest trusts
+        # this publisher". What happened is that the Studio hashed the bytes it
+        # received. The server says "guest trust remains authoritative".
+        self.assertNotIn("(SHA-256 Verified)", self.js)
+        self.assertIn("guest trust verification is the guest's decision", self.js)
 
     def test_process_stats_are_driven_by_live_data(self):
         self.assertIn("statActiveTasks", self.js)
@@ -156,6 +220,24 @@ class StudioMarkupTruthTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.html = (ROOT / "emulator/index.html").read_text(encoding="utf-8")
+
+    def test_drm_tab_separates_the_display_mode_from_the_measured_flip_cost(self):
+        # WHY two cards. `display_kms.rs` programs the scanout at refresh_hz = 60
+        # and derives ticks_per_frame from it, so 60 Hz is a real parameter of
+        # the emulated mode. It is not a claim about achieved frame rate, and
+        # the guest does not achieve it. The panel used to show only the mode,
+        # which read as a performance claim; it now shows the mode AND what a
+        # flip actually costs, as two different facts.
+        self.assertIn("DISPLAY MODE REFRESH", self.html)
+        self.assertIn("60 Hz VSYNC", self.html)
+        self.assertIn("refresh_hz = 60", self.html)
+        self.assertIn("MEASURED FLIP COST", self.html)
+        self.assertIn('id="kms-refresh"', self.html)
+        self.assertIn('id="kms-refresh-note"', self.html)
+        # LTPO/VRR were never a mode parameter and stay gone.
+        self.assertNotIn("LTPO 120Hz VRR", self.html)
+        self.assertIn("No live compositor-plane telemetry is currently exposed by the guest.",
+                      self.html)
 
     def test_fabricated_telemetry_is_gone(self):
         for lie in (

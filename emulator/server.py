@@ -2116,6 +2116,14 @@ def verify_and_install_rapp(body, pkg_name):
         "arch": arch_names[arch_id],
         "payload_size": payload_len,
     }
+    # Record what this host actually wrote, so a later Packages-table read can
+    # report the real file and the real digest instead of "SHA-256 unavailable"
+    # for a package the Studio itself just ingested.
+    SIDELOAD_LEDGER[app_id] = {
+        "filename": filename,
+        "sha256": sha256[:16] + "...",
+        "format": "Rust App Package (RAPP v2 binary)",
+    }
     return True, "RAPP v2 signature and integrity verified; guest trust remains authoritative", app_entry
 
 
@@ -2134,6 +2142,67 @@ def guest_command_lines(command, end_marker, timeout=8):
             return True, lines
         time.sleep(0.05)
     return False, lines
+
+def extract_frame_timing():
+    """Ask the guest for its most recent flip and report what it actually cost.
+
+    WHY this exists rather than a displayed constant: the DRM/KMS tab used to
+    read "60 Hz VSYNC" from a literal in index.html. Nothing in this Studio ever
+    measured a refresh rate, and nothing in it can -- the guest publishes a flip
+    count and the cycle cost of each flip through `[DIAG_STATE]`, and a refresh
+    rate is a property of hardware the emulated scanout does not have. Printing
+    60 next to a panel whose own table says "no live compositor-plane telemetry
+    is currently exposed by the guest" put a specific number on the one claim
+    the panel had already admitted it could not support.
+
+    The two cycle counts are real. They are the cost of compositing one flip and
+    of presenting it, in TSC cycles, as measured by the display path. Converting
+    them to a refresh rate needs a wall-clock interval the guest does not
+    currently export, so this reports cycles and says so, rather than dividing
+    by a made-up frame budget to manufacture a frequency.
+
+    The flip number is returned alongside the cost for the reason
+    `performance::last_frame` gives: two reads showing the same flip number mean
+    the second sampled the same frame again, not a cheaper one.
+    """
+    ok, lines = guest_command_lines("DIAG_STATE", "[DIAG_STATE]", timeout=8)
+    latest = None
+    for line in lines:
+        if "[DIAG_STATE]" not in line:
+            continue
+        values = parse_key_values(line.split("]", 1)[1].strip())
+        if "last_flip" in values:
+            latest = values
+    if latest is None:
+        return {
+            "status": "UNAVAILABLE",
+            "source": "GUEST_TELEMETRY",
+            "detail": "The guest reported no flip telemetry. Older guests do not "
+                      "publish it; this is 'unknown', not a zero-cost frame.",
+        }
+    try:
+        flip = int(latest.get("last_flip", 0))
+        compose = int(latest.get("last_flip_compose_cycles", 0))
+        present = int(latest.get("last_flip_present_cycles", 0))
+    except (TypeError, ValueError):
+        return {
+            "status": "UNAVAILABLE",
+            "source": "GUEST_TELEMETRY",
+            "detail": "The guest published a flip record this build could not parse.",
+        }
+    return {
+        "status": "AVAILABLE",
+        "source": "GUEST_TELEMETRY",
+        "last_flip": flip,
+        "compose_cycles": compose,
+        "present_cycles": present,
+        "total_cycles": compose + present,
+        "refresh_rate_hz": None,
+        "detail": "Cycle counts for the most recent scanout flip. The guest "
+                  "exports no wall-clock interval per frame, so these cannot be "
+                  "converted to a refresh rate without inventing one.",
+    }
+
 
 def is_safe_guest_path(path, writable=False):
     if not isinstance(path, str) or len(path) == 0 or len(path) > 192:
@@ -2207,6 +2276,23 @@ def guest_fs_write(path, content):
     ok, lines = guest_command_lines("STUDIO_FS_COMMIT", "WRITE_OK", timeout=8)
     return ok, None if ok else (lines[-1] if lines else "guest filesystem commit failed")
 
+# What this Studio actually put on the host disk, keyed by package id.
+#
+# WHY this exists: the guest's package registry line carries id, version, state,
+# process, name and icon. It does not carry the file the package was loaded from
+# and it does not carry a digest. The Packages tab nonetheless had a PACKAGE FILE
+# column and a digest cell, so every row rendered an empty cell and the literal
+# text "SHA-256 unavailable" -- for all 16 packages, including ones the Studio
+# had itself just written to /data/apps/ and hashed.
+#
+# For a package in this ledger the digest below is the real SHA-256 of the file
+# this host wrote. It is not the guest's trust decision, and it is not offered as
+# one -- `verify_and_load_sideloaded_package` returns "guest trust remains
+# authoritative" for exactly that reason. For every other package there is no
+# host file to describe, and the row says so rather than showing a blank.
+SIDELOAD_LEDGER = {}
+
+
 def guest_package_catalog():
     ok, lines = guest_command_lines("STUDIO_PKG_LIST", "[STUDIO_PKG] END", timeout=8)
     if not ok:
@@ -2216,15 +2302,32 @@ def guest_package_catalog():
         if not line.startswith("[STUDIO_PKG] id="):
             continue
         fields = dict(part.split("=", 1) for part in line[len("[STUDIO_PKG] "):].split() if "=" in part)
-        packages.append({
-            "id": fields.get("id", ""),
+        pkg_id = fields.get("id", "")
+        entry = {
+            "id": pkg_id,
             "version": fields.get("version", ""),
             "status": fields.get("state", "unknown"),
             "process": fields.get("process", ""),
             "name": fields.get("name", fields.get("id", "")).replace("_", " "),
             "icon": fields.get("icon", "APP"),
             "source": "GUEST_REGISTRY",
-        })
+        }
+        # WHY these are null rather than an empty string: the tab has to be able
+        # to tell "this package has no host file, and that is expected" from "a
+        # field failed to arrive". An empty string renders as a blank cell in
+        # both cases, which is the bug.
+        known = SIDELOAD_LEDGER.get(pkg_id)
+        if known:
+            entry["filename"] = known.get("filename")
+            entry["sha256"] = known.get("sha256")
+            entry["format"] = known.get("format")
+            entry["origin"] = "SIDELOADED_VIA_STUDIO"
+        else:
+            entry["filename"] = None
+            entry["sha256"] = None
+            entry["format"] = None
+            entry["origin"] = "KERNEL_EMBEDDED"
+        packages.append(entry)
     return True, None, packages
 
 
@@ -2311,6 +2414,7 @@ GET_ONLY_ROUTES = frozenset({
     '/api/browser/proxy',
     '/api/themes',
     '/api/apps/list',
+    '/api/kernel/frame-timing',
     '/api/rapp/list',
     '/api/telephony/status',
     '/api/telephony/sms/list',
@@ -2829,6 +2933,13 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 'themes': [active],
                 'active_id': active['theme_id']
             }).encode())
+            return
+
+        if self.path == '/api/kernel/frame-timing':
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps(extract_frame_timing()).encode())
             return
 
         if self.path == '/api/apps/list':

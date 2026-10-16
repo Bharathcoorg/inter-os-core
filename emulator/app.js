@@ -1582,7 +1582,14 @@ document.addEventListener('DOMContentLoaded', () => {
             status: 'Installed'
           });
           populatePackagesTable();
-          logConsole('ok', `[SIDELOAD] Package '${data.package.name}' installed into /data/apps/ (SHA-256 Verified)`);
+          // WHY not "SHA-256 Verified": what happened is that this Studio computed a
+          // digest of the bytes it received and wrote them to disk. That is an
+          // integrity check against transit corruption, not a statement that the
+          // guest accepted the package's publisher -- the server returns
+          // "guest trust remains authoritative" for exactly that reason, and a
+          // green "Verified" here read as the latter.
+          logConsole('ok', `[SIDELOAD] Package '${data.package.name}' written to /data/apps/ `
+            + `(digest computed by Studio; guest trust verification is the guest's decision)`);
           showToast(`Installed ${data.package.name}`);
           playBeep(880, 0.06, 'sine');
         } else {
@@ -1602,7 +1609,17 @@ document.addEventListener('DOMContentLoaded', () => {
       .then(r => r.json())
       .then(data => {
         if (data && data.apps && data.apps.length > 0) {
-          state.installedPackages = data.apps;
+          // WHY merge rather than assign: a row that was just sideloaded knows
+          // its filename and digest locally. Replacing the whole array with the
+          // guest registry -- which carries neither field -- erased those and
+          // turned every row into "SHA-256 unavailable", including the package
+          // the user had installed seconds earlier.
+          const byId = new Map(state.installedPackages.map(p => [p.id, p]));
+          data.apps.forEach(incoming => {
+            const prior = byId.get(incoming.id);
+            byId.set(incoming.id, prior ? { ...prior, ...incoming } : incoming);
+          });
+          state.installedPackages = Array.from(byId.values());
         }
         renderPackagesRows();
       })
@@ -1621,8 +1638,18 @@ document.addEventListener('DOMContentLoaded', () => {
         tr.innerHTML = `
           <td><strong>${escapeHtml(pkg.name)}</strong></td>
           <td><span class="pkg-badge" style="background: rgba(16, 185, 129, 0.15); color: #10B981; border: 1px solid rgba(16, 185, 129, 0.3);">${escapeHtml(pkg.format || 'Rust App Package (.rapp)')}</span></td>
-          <td><code>${escapeHtml(pkg.filename)}</code></td>
-          <td><span style="color: #10B981; font-size: 11px;">${escapeHtml(pkg.status || 'Status unavailable')}</span><br><code style="font-size: 10px; color: var(--text-secondary);">${escapeHtml(pkg.sha256 || 'SHA-256 unavailable')}</code></td>
+          <td>${pkg.filename
+            ? `<code>${escapeHtml(pkg.filename)}</code>`
+            : `<span style="font-size: 10px; color: var(--text-secondary);">${escapeHtml(
+                pkg.origin === 'KERNEL_EMBEDDED'
+                  ? 'Embedded in the guest image'
+                  : 'Not reported by the guest')}</span>`}</td>
+          <td><span style="color: #10B981; font-size: 11px;">${escapeHtml(pkg.status || 'Status unavailable')}</span><br>${pkg.sha256
+            ? `<code style="font-size: 10px; color: var(--text-secondary);" title="SHA-256 of the file this Studio wrote to disk">${escapeHtml(pkg.sha256)}</code>`
+            : `<span style="font-size: 10px; color: var(--text-secondary);">${escapeHtml(
+                pkg.origin === 'KERNEL_EMBEDDED'
+                  ? 'No host file to digest'
+                  : 'Digest not reported')}</span>`}</td>
           <td><span style="font-size: 11px; color: var(--text-secondary);">${escapeHtml(capsList)}</span></td>
           <td><button class="btn-launch-pkg btn-console-act" data-pkg-id="${escapeHtml(pkg.id)}" style="padding: 2px 8px;">Launch</button></td>
         `;
@@ -1714,6 +1741,61 @@ document.addEventListener('DOMContentLoaded', () => {
   btnRefreshProcs?.addEventListener('click', populateProcessesTable);
   populateProcessesTable();
   setInterval(populateProcessesTable, 4000);
+
+  // --- Scanout Frame Timing (DRM/KMS tab) ---
+  //
+  // WHY this exists: the DRM/KMS tab used to display a hardcoded refresh
+  // frequency, while the plane table immediately below it said no live
+  // compositor-plane telemetry is exposed by the guest. This reads what the
+  // guest actually publishes instead -- the cycle cost of its most recent
+  // scanout flip.
+  //
+  // WHY this is a separate card from the display mode's 60 Hz: that number is the
+  // refresh the scanout is programmed for (`display_kms.rs` sets refresh_hz = 60
+  // and derives ticks_per_frame from it). This is what a flip actually cost.
+  // They are different facts and the panel used to show only the first, which
+  // read as a claim about achieved frame rate.
+  //
+  // WHY no frame rate is computed from the cycles: cycles alone cannot produce a
+  // frequency without a wall-clock interval per frame, which the guest does not
+  // export. Dividing by a nominal 16.67 ms would manufacture a number that
+  // means nothing.
+  const kmsRefresh = document.getElementById('kms-refresh');
+  const kmsRefreshNote = document.getElementById('kms-refresh-note');
+
+  function populateFrameTiming() {
+    if (!kmsRefresh) return;
+    fetch('/api/kernel/frame-timing')
+      .then(r => r.json())
+      .then(data => {
+        if (data && data.status === 'AVAILABLE') {
+          kmsRefresh.textContent = `${Number(data.compose_cycles).toLocaleString()} cy compose`;
+          kmsRefresh.style.color = '#10B981';
+          if (kmsRefreshNote) {
+            kmsRefreshNote.textContent =
+              `Flip #${data.last_flip}: ${Number(data.present_cycles).toLocaleString()} cy to present. `
+              + 'Not a frame rate -- the guest exports no per-frame wall-clock interval.';
+          }
+        } else {
+          kmsRefresh.textContent = 'Not measured';
+          kmsRefresh.style.color = '#94A3B8';
+          if (kmsRefreshNote) {
+            kmsRefreshNote.textContent = (data && data.detail)
+              ? data.detail
+              : 'The guest reported no flip telemetry.';
+          }
+        }
+      })
+      .catch(() => {
+        kmsRefresh.textContent = 'Unavailable';
+        kmsRefresh.style.color = '#94A3B8';
+        if (kmsRefreshNote) {
+          kmsRefreshNote.textContent = 'Device Studio could not reach the guest.';
+        }
+      });
+  }
+  populateFrameTiming();
+  setInterval(populateFrameTiming, 4000);
 
   // --- Real IPC Table Population ---
   const ipcTableBody = document.getElementById('ipc-table-body');

@@ -1976,6 +1976,16 @@ html, body.dark-theme {
   margin-top: 3px;
   display: block;
 }
+/* WHY this exists: a stat card that can only hold a value has nowhere to put
+   the reason a value is absent, so "not measured" and "measured as zero" look
+   identical on screen. The note line is where a card says which one it is. */
+.appdev-stat-card .stat-note {
+  display: block;
+  margin-top: 3px;
+  font-size: 0.5rem;
+  line-height: 1.35;
+  color: #64748B;
+}
 /* ==========================================================================
    STRICT APK PACKAGE MANAGER & SECURITY AUDIT STYLING
    ========================================================================== */

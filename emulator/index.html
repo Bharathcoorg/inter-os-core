@@ -792,8 +792,23 @@
               <strong class="stat-val" style="color: #10B981;">Double-Buffered (Page Flip)</strong>
             </div>
             <div class="appdev-stat-card">
-              <span class="stat-lbl">REFRESH RATE</span>
+              <span class="stat-lbl">DISPLAY MODE REFRESH</span>
+              <!-- WHY this is labelled "mode" and not "refresh rate":
+                   `display_kms.rs` programs the scanout at refresh_hz = 60 and
+                   derives `ticks_per_frame` from it, so 60 Hz is a real
+                   parameter of the emulated display mode. It is NOT a statement
+                   that the guest achieves 60 frames per second -- it does not,
+                   and the measured figure below is why. Conflating the mode with
+                   the achieved rate is what made this card read as a performance
+                   claim. The two are now shown as the two different things they
+                   are. -->
               <strong class="stat-val" style="color: #3B82F6;">60 Hz VSYNC</strong>
+              <span class="stat-note">Programmed scanout mode (display_kms.rs refresh_hz = 60).</span>
+            </div>
+            <div class="appdev-stat-card">
+              <span class="stat-lbl">MEASURED FLIP COST</span>
+              <strong class="stat-val" id="kms-refresh" style="color: #3B82F6;">Not measured</strong>
+              <span class="stat-note" id="kms-refresh-note">The guest publishes per-flip cycle cost, not a frame rate.</span>
             </div>
           </div>
 
