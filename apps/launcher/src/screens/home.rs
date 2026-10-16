@@ -1363,10 +1363,15 @@ fn push_decimal(out: &mut [u8], at: usize, value: usize) -> usize {
 /// The card's detail line for a row, read from real state.
 fn card_row_text(state: &LauncherState, row: usize, out: &mut [u8; CARD_DETAIL_CAP]) -> usize {
     match row {
-        // WHY unavailable and not "active": there is no calendar store and no
-        // sync service behind this shell, so claiming an up-to-date sync would be
-        // a fabricated status on the surface the user reads as device state.
-        0 => put(out, 0, b"Calendar sync unavailable - no event data"),
+        // WHY this and not an "active" claim: there is no calendar store and no
+        // sync service behind this shell, so a row that said it was up to date
+        // would be fabricating status on the surface the user reads as device
+        // state. WHY it is phrased as the missing thing rather than as an
+        // error: the earlier text was "Calendar sync unavailable - no event
+        // data", which reports a subsystem failure for what is simply an empty
+        // calendar on a phone that has not been given one. `live_widgets.rs`
+        // states the same absence as "no event data"; this matches it.
+        0 => put(out, 0, b"No events on this device"),
         1 => {
             // WHY notifications and not messages: this count is the system-wide
             // notification query, not a per-app message count, so labelling it
@@ -1391,9 +1396,15 @@ fn card_row_text(state: &LauncherState, row: usize, out: &mut [u8; CARD_DETAIL_C
                 at = put(out, at, &label[..len]);
                 at
             } else if state.recent_app_lens[0] > 0 {
-                let len = (state.recent_app_lens[0] as usize).min(20);
+                // WHY this fallback is still a name and not the id: the branch is
+                // reached exactly when `recent_label` failed, which means the
+                // registry does not describe this package. Printing the id here
+                // is what put `org.interos.messages` on the home screen.
+                let len = (state.recent_app_lens[0] as usize).min(24);
                 let mut at = put(out, 0, b"Recent: ");
-                at = put(out, at, &state.recent_apps[0][..len]);
+                let mut name = [0u8; CARD_DETAIL_CAP];
+                let readable = text::humanise_package_id(&state.recent_apps[0][..len], &mut name);
+                at = put(out, at, readable);
                 at
             } else {
                 let mut at = push_decimal(out, 0, state.app_count);

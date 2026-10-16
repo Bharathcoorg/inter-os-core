@@ -72,6 +72,68 @@ pub fn center_x(text: &[u8], scale: usize, available: usize) -> usize {
     }
 }
 
+/// Turns a reverse-DNS package id into a title a person can read.
+///
+/// WHY this is a fallback and not a name: the package registry carries a display
+/// label for every package the shell has catalogued, and that label is always
+/// preferred. This exists for the case where it is not available -- a task
+/// restored from the window list for a package the registry no longer describes.
+/// That case used to render the id itself, so a card read `org.interos.card_demo`
+/// where a person expects `Card Demo`.
+///
+/// WHY this is not fabrication: nothing is looked up or guessed. The vendor
+/// segments are dropped, `_`, `-` and `.` become word breaks, and each word is
+/// capitalised. The bytes are the same bytes the id already had.
+///
+/// WHY the LAST segment and not the first: a reverse-DNS id is
+/// `<vendor>...<app>`, and the app name is the final segment. `org.interos` is a
+/// vendor, `card_demo` is the app. Stripping only the first segment leaves
+/// `interos.card_demo`, which reads as a product line nobody ships.
+pub fn humanise_package_id<'a>(id: &[u8], buf: &'a mut [u8]) -> &'a [u8] {
+    let mut start = 0usize;
+    if let Some(last) = id.iter().rposition(|b| *b == b'.') {
+        // Only take the tail when there IS one: `org` is an app called "org",
+        // and rendering it as an empty label would be worse than showing it.
+        if last + 1 < id.len() {
+            start = last + 1;
+        }
+    }
+
+    let mut at = 0usize;
+    let mut capitalise = true;
+    for &b in &id[start..] {
+        if b == b'_' || b == b'-' || b == b'.' {
+            if at > 0 && buf[at - 1] != b' ' {
+                if at >= buf.len() {
+                    break;
+                }
+                buf[at] = b' ';
+                at += 1;
+            }
+            capitalise = true;
+            continue;
+        }
+        // A digit ends the word, so `card2demo` reads "Card2demo" and not
+        // "Card2D..." -- there is no word to capitalise after a figure.
+        let c = if capitalise {
+            capitalise = false;
+            b.to_ascii_uppercase()
+        } else {
+            b
+        };
+        if at >= buf.len() {
+            break;
+        }
+        buf[at] = c;
+        at += 1;
+    }
+
+    while at > 0 && buf[at - 1] == b' ' {
+        at -= 1;
+    }
+    &buf[..at]
+}
+
 /// Splits `text` into at most `max_lines` lines no wider than `max_width`.
 ///
 /// Returns the byte length of each line; the caller slices with them.

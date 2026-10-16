@@ -475,6 +475,53 @@ fn ellipsize_refuses_rather_than_panicking_when_no_room_exists() {
 }
 
 #[test]
+fn a_package_id_humanises_into_a_readable_title() {
+    let mut buf = [0u8; 64];
+    assert_eq!(
+        tm::humanise_package_id(b"org.interos.card_demo", &mut buf),
+        b"Card Demo"
+    );
+}
+
+#[test]
+fn a_package_id_without_a_vendor_prefix_is_left_alone() {
+    let mut buf = [0u8; 64];
+    // WHY this case: `org` with nothing after the dot is an app named "org",
+    // not a vendor segment. Dropping it would render a blank label, which is
+    // worse than showing it.
+    assert_eq!(tm::humanise_package_id(b"org", &mut buf), b"Org");
+}
+
+#[test]
+fn a_package_id_keeps_only_its_final_segment() {
+    let mut buf = [0u8; 64];
+    // WHY the final segment and not the first: `org.interos` is the vendor and
+    // `card_demo` is the app. Stripping only the first segment leaves
+    // `interos.card_demo`, which reads as a product line nobody ships.
+    assert_eq!(
+        tm::humanise_package_id(b"org.interos.card_demo", &mut buf),
+        b"Card Demo"
+    );
+}
+
+#[test]
+fn a_humanised_package_id_never_carries_a_trailing_separator() {
+    let mut buf = [0u8; 64];
+    let out = tm::humanise_package_id(b"org.interos.", &mut buf);
+    assert!(
+        !out.ends_with(b" "),
+        "a trailing separator must not survive as a trailing space"
+    );
+}
+
+#[test]
+fn a_humanised_package_id_stops_at_the_buffer_it_was_given() {
+    let mut buf = [0u8; 6];
+    let out = tm::humanise_package_id(b"org.interos.calculator", &mut buf);
+    assert_eq!(out.len(), 6, "the result is bounded by the buffer, not by the id");
+}
+
+#[test]
 fn glyph_lookup_rejects_unprintable_bytes() {
     assert!(tm::glyph_index(b'A').is_some());
     assert!(tm::glyph_index(b' ').is_some());

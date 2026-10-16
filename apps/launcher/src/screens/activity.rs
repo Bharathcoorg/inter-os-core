@@ -49,12 +49,45 @@ pub fn recents_band() -> (usize, usize) {
 
 const CARD_TEXT_X: usize = 96;
 const CARD_TITLE_Y: usize = 26;
-const CARD_SUBTITLE_Y: usize = 54;
+const CARD_SUBTITLE_Y: usize = 76;
+
+/// Where the preview well sits inside a card, and how tall it is.
+///
+/// WHY these three numbers are stated together: the title is drawn at
+/// `type_scale::BODY`, which is a 48px cell, so a title at offset 26 occupies
+/// 26..=74. The subtitle used to start at 54, which put it *inside* the title's
+/// descenders and is what made every card render its title through its own
+/// subtitle. The preview well then started at 86, which is why the three bands
+/// cannot simply be nudged independently -- they have to tile 26..=246 inside a
+/// 270px card.
+const CARD_PREVIEW_Y: usize = 104;
+const CARD_PREVIEW_H: usize = 142;
+const CARD_PREVIEW_R: usize = 14;
+
+/// Where the "no live preview" note sits inside the well, measured from the
+/// well's own top edge, and how far the icon is lifted above the well's centre.
+const CARD_PREVIEW_NOTE_DY: usize = 102;
+const CARD_PREVIEW_ICON_DY: i32 = -18;
 
 const CARD_ICON_SIZE: usize = 56;
 const CARD_ICON_RADIUS: usize = 14;
 
 const CARD_ICON_BG: u32 = 0xFF334155;
+
+/// The recessed well a card's preview area is painted into, and the ink used on
+/// it.
+///
+/// WHY these are declared here rather than reused from the theme's surface
+/// ramp: the deck is a dark overlay that sits above whatever was on screen, so
+/// its wells are one step below the card fill the same way a sunken field is on
+/// a light surface. They are still drawn from the same neutral family -- the
+/// previous stand-ins used saturated blues, purples and pinks that appear in no
+/// design token file in this repository.
+const CARD_PREVIEW_BG: u32 = 0xFF171B22;
+const CARD_PREVIEW_INK: u32 = 0xFF9AA3B2;
+
+/// Shown in place of a thumbnail, because the platform cannot supply one.
+const PREVIEW_NOTE: &[u8] = b"No live preview";
 const CARD_ICON_BORDER: u32 = 0xFF475569;
 
 // Dismiss badges: 48x48 rounded circles centered at test coordinates
@@ -378,8 +411,7 @@ struct CardPlan {
     title: LabelRun,
     subtitle: LabelRun,
     dismiss_rect: Option<Rect>,
-    pkg_id: [u8; 32],
-    pkg_len: usize,
+    preview_note: LabelRun,
 }
 
 struct ActivityFrame {
@@ -393,6 +425,11 @@ struct ActivityFrame {
 }
 
 const SUB_CAP: usize = 32;
+
+/// Scratch width for a card title produced from a package id. `RUN_CAP` is the
+/// ceiling a `LabelRun` will hold, so the humanised form gets the same budget
+/// rather than being truncated sooner for being a fallback.
+const TITLE_CAP: usize = RUN_CAP;
 const SUB_RUNNING: &[u8] = b"Running \xb7 task ";
 const SUB_ACTIVE: &[u8] = b"Running \xb7 active";
 const SUB_NOT_RUNNING: &[u8] = b"Recent \xb7 ready";
@@ -431,17 +468,21 @@ fn registry_badge(state: &LauncherState, index: usize) -> &[u8] {
     &state.app_icons[index][..len]
 }
 
-fn card_title_bytes<'a>(state: &'a LauncherState, id: &'a [u8]) -> &'a [u8] {
+fn card_title_bytes<'a>(
+    state: &'a LauncherState,
+    id: &'a [u8],
+    scratch: &'a mut [u8; TITLE_CAP],
+) -> &'a [u8] {
     match registry_index(state, id) {
         Some(index) => {
             let len = (state.app_label_lens[index] as usize).min(state.app_labels[index].len());
             if len > 0 {
                 &state.app_labels[index][..len]
             } else {
-                id
+                text::humanise_package_id(id, scratch)
             }
         }
-        None => id,
+        None => text::humanise_package_id(id, scratch),
     }
 }
 
@@ -503,8 +544,16 @@ fn build_card(state: &LauncherState, slot: usize) -> Option<CardPlan> {
         )
     };
 
-    let mut pkg_id = [0u8; 32];
-    pkg_id[..len].copy_from_slice(id);
+    let mut title_scratch = [0u8; TITLE_CAP];
+    let preview_note = LabelRun::fitted_centred(
+        rect.x + 20,
+        rect.y + CARD_PREVIEW_Y + CARD_PREVIEW_NOTE_DY,
+        type_scale::CAPTION,
+        rect.w - 40,
+        rect.w - 40,
+        PREVIEW_NOTE,
+        CARD_PREVIEW_INK,
+    );
 
     Some(CardPlan {
         rect,
@@ -516,334 +565,61 @@ fn build_card(state: &LauncherState, slot: usize) -> Option<CardPlan> {
             rect.y + CARD_TITLE_Y,
             type_scale::BODY,
             title_fit,
-            card_title_bytes(state, id),
+            card_title_bytes(state, id, &mut title_scratch),
             TEXT_WHITE,
         ),
         subtitle,
         dismiss_rect: dismiss_rect_for(slot),
-        pkg_id,
-        pkg_len: len,
+        preview_note,
     })
 }
 
 // -----------------------------------------------------------------------------
-// Miniature Screen Preview Renderer
+// Card Preview Renderer
 // -----------------------------------------------------------------------------
 
+/// Draws the card's preview area.
+///
+/// WHY this no longer paints a picture of the app: the platform has no path from
+/// a live surface back to the launcher. `surface_snapshot` in
+/// `drivers/display_kms.rs` copies window *metadata* only and documents that it
+/// does "not expose client pixel memory", and the Studio's DRM/KMS panel
+/// independently reports that "no live compositor-plane telemetry is currently
+/// exposed by the guest". A previously drawn stand-in per app id was therefore a
+/// picture the system had never seen, in colours from no design system, wearing
+/// another platform's window chrome. A recent-apps card that invents its own
+/// contents is worse than one that admits it has none, so this draws the app's
+/// real icon and a plain note instead. When surface capture does exist, this is
+/// the single function that swaps its body for a real thumbnail.
 fn render_mini_preview(card: &CardPlan, px: usize, py: usize) -> Option<u32> {
-    let preview_rect = Rect::new(card.rect.x + 20, card.rect.y + 86, card.rect.w - 40, 166);
-    if !rounded_contains(preview_rect, px, py, 14) {
+    let preview_rect = Rect::new(
+        card.rect.x + 20,
+        card.rect.y + CARD_PREVIEW_Y,
+        card.rect.w - 40,
+        CARD_PREVIEW_H,
+    );
+    if !rounded_contains(preview_rect, px, py, CARD_PREVIEW_R) {
         return None;
     }
-    if rounded_outline(preview_rect, px, py, 14) {
-        return Some(0xFF333842);
+    if rounded_outline(preview_rect, px, py, CARD_PREVIEW_R) {
+        return Some(CARD_BORDER);
     }
 
-    let rx = px - preview_rect.x;
-    let ry = py - preview_rect.y;
+    let cx = preview_rect.center_x();
+    let cy = preview_rect.center_y();
 
-    // Window top title bar
-    if ry < 24 {
-        if ry == 23 {
-            return Some(0xFF2E3440);
-        }
-        // Window dots on top left
-        if rx >= 12 && rx < 44 && ry >= 8 && ry < 16 {
-            let dot_idx = (rx - 12) / 12;
-            let dot_x = 12 + dot_idx * 12 + 4;
-            let dot_y = 12;
-            let d2 = (px as i32 - (preview_rect.x + dot_x) as i32).pow(2)
-                + (py as i32 - (preview_rect.y + dot_y) as i32).pow(2);
-            if d2 <= 9 {
-                return match dot_idx {
-                    0 => Some(0xFFEF4444),
-                    1 => Some(0xFFF59E0B),
-                    _ => Some(0xFF10B981),
-                };
-            }
-        }
-        return Some(0xFF1E222A);
+    // The note sits under the icon, so reserve the upper half for the glyph.
+    if let Some(c) = card.preview_note.pixel_on(px, py, CARD_PREVIEW_BG) {
+        return Some(c);
     }
 
-    let pkg = &card.pkg_id[..card.pkg_len];
-
-    // 1. Browser
-    if pkg == b"org.interos.browser" || pkg == b"browser" {
-        // Omnibox URL bar
-        if ry >= 28 && ry < 48 && rx >= 16 && rx < 600 {
-            if rx == 16 || rx == 599 || ry == 28 || ry == 47 {
-                return Some(0xFF334155);
-            }
-            // Lock icon dot
-            if rx >= 26 && rx <= 32 && ry >= 35 && ry <= 41 {
-                return Some(0xFF10B981);
-            }
-            return Some(0xFF1E293B);
+    let icon_cy = (cy as i32 + CARD_PREVIEW_ICON_DY) as usize;
+    if let Some(kind) = card.icon {
+        if let Some(ic) = icons::rasterize_icon_pixel(kind, px, py, cx, icon_cy, CARD_PREVIEW_INK) {
+            return Some(ic);
         }
-        // Web page content body
-        if ry >= 56 {
-            // Search result card 1
-            if ry >= 60 && ry < 104 && rx >= 16 && rx < 600 {
-                if ry >= 66 && ry < 74 && rx >= 24 && rx < 320 {
-                    return Some(0xFF38BDF8); // Result title
-                }
-                if ry >= 80 && ry < 86 && rx >= 24 && rx < 480 {
-                    return Some(0xFF64748B); // Snippet line 1
-                }
-                if ry >= 90 && ry < 96 && rx >= 24 && rx < 380 {
-                    return Some(0xFF475569); // Snippet line 2
-                }
-                return Some(0xFF151922);
-            }
-            // Search result card 2
-            if ry >= 110 && ry < 156 && rx >= 16 && rx < 600 {
-                if ry >= 116 && ry < 124 && rx >= 24 && rx < 280 {
-                    return Some(0xFF38BDF8);
-                }
-                if ry >= 130 && ry < 136 && rx >= 24 && rx < 450 {
-                    return Some(0xFF64748B);
-                }
-                if ry >= 140 && ry < 146 && rx >= 24 && rx < 340 {
-                    return Some(0xFF475569);
-                }
-                return Some(0xFF151922);
-            }
-        }
-        return Some(0xFF0F1218);
     }
-
-    // 2. Camera
-    if pkg == b"org.interos.camera" || pkg == b"camera" {
-        // Viewfinder dark matrix
-        if ry >= 30 && ry < 130 && rx >= 16 && rx < 600 {
-            let cx = 308i32;
-            let cy = 80i32;
-            let dx = (rx as i32 - cx).abs();
-            let dy = (ry as i32 - cy).abs();
-            if (dx == 40 && dy <= 40) || (dy == 40 && dx <= 40) {
-                if dx >= 28 || dy >= 28 {
-                    return Some(0xFF38BDF8);
-                }
-            }
-            return Some(0xFF07080B);
-        }
-        // Camera bottom controls (shutter pill)
-        if ry >= 134 && ry < 160 {
-            let scx = 308i32;
-            let scy = 146i32;
-            let d2 = (rx as i32 - scx).pow(2) + (ry as i32 - scy).pow(2);
-            if d2 <= 81 {
-                if d2 <= 36 {
-                    return Some(0xFFEF4444);
-                }
-                return Some(0xFFFFFFFF);
-            }
-        }
-        return Some(0xFF0A0C10);
-    }
-
-    // 3. Settings
-    if pkg == b"org.interos.settings" || pkg == b"settings" {
-        if ry >= 28 && ry < 66 && rx >= 16 && rx < 600 {
-            if rx == 16 || rx == 599 || ry == 28 || ry == 65 {
-                return Some(0xFF2E3544);
-            }
-            if rx >= 540 && rx <= 576 && ry >= 40 && ry <= 54 {
-                if rx >= 558 {
-                    return Some(0xFF38BDF8);
-                }
-                return Some(0xFF0284C7);
-            }
-            if ry >= 44 && ry < 50 && rx >= 32 && rx < 260 {
-                return Some(0xFFE2E8F0);
-            }
-            return Some(0xFF1E232C);
-        }
-        if ry >= 72 && ry < 110 && rx >= 16 && rx < 600 {
-            if rx == 16 || rx == 599 || ry == 72 || ry == 109 {
-                return Some(0xFF2E3544);
-            }
-            if rx >= 520 && rx <= 576 && ry >= 84 && ry <= 98 {
-                return Some(0xFF334155);
-            }
-            if ry >= 88 && ry < 94 && rx >= 32 && rx < 300 {
-                return Some(0xFFE2E8F0);
-            }
-            return Some(0xFF1E232C);
-        }
-        if ry >= 116 && ry < 154 && rx >= 16 && rx < 600 {
-            if rx == 16 || rx == 599 || ry == 116 || ry == 153 {
-                return Some(0xFF2E3544);
-            }
-            if ry >= 132 && ry < 138 && rx >= 32 && rx < 280 {
-                return Some(0xFFE2E8F0);
-            }
-            return Some(0xFF1E232C);
-        }
-        return Some(0xFF14171E);
-    }
-
-    // 4. File Manager
-    if pkg == b"org.interos.file_manager" || pkg == b"files" {
-        if ry >= 30 && ry < 42 && rx >= 16 && rx < 600 {
-            if rx < 260 {
-                return Some(0xFF38BDF8);
-            }
-            return Some(0xFF242A36);
-        }
-        if ry >= 50 && ry < 152 {
-            let col = (rx.saturating_sub(16)) / 148;
-            let col_rx = (rx.saturating_sub(16)) % 148;
-            if col < 4 && col_rx < 136 {
-                if col_rx == 0 || col_rx == 135 || ry == 50 || ry == 151 {
-                    return Some(0xFF2D3545);
-                }
-                if ry >= 60 && ry < 84 && col_rx >= 16 && col_rx < 56 {
-                    return match col {
-                        0 => Some(0xFF38BDF8),
-                        1 => Some(0xFF10B981),
-                        2 => Some(0xFFA855F7),
-                        _ => Some(0xFFF59E0B),
-                    };
-                }
-                if ry >= 120 && ry < 126 && col_rx >= 16 && col_rx < 100 {
-                    return Some(0xFFCBD5E1);
-                }
-                return Some(0xFF1B202A);
-            }
-        }
-        return Some(0xFF12151B);
-    }
-
-    // 5. Dialer
-    if pkg == b"org.interos.dialer" || pkg == b"dialer" {
-        if ry >= 28 && ry < 50 && rx >= 24 && rx < 592 {
-            if ry >= 36 && ry < 44 && rx >= 180 && rx < 436 {
-                return Some(0xFFF8FAFC);
-            }
-            return Some(0xFF181C24);
-        }
-        if ry >= 56 && ry < 128 {
-            let kcol = (rx.saturating_sub(160)) / 100;
-            let krow = (ry - 56) / 36;
-            let krx = (rx.saturating_sub(160)) % 100;
-            let kry = (ry - 56) % 36;
-            if kcol < 3 && krow < 2 && krx < 80 && kry < 30 {
-                return Some(0xFF222938);
-            }
-        }
-        if ry >= 134 && ry < 158 && rx >= 250 && rx < 366 {
-            return Some(0xFF10B981);
-        }
-        return Some(0xFF101319);
-    }
-
-    // 6. Messages
-    if pkg == b"org.interos.messages" || pkg == b"messages" {
-        if ry >= 30 && ry < 62 && rx >= 20 && rx < 340 {
-            if rx == 20 || rx == 339 || ry == 30 || ry == 61 {
-                return Some(0xFF334155);
-            }
-            if ry >= 42 && ry < 48 && rx >= 36 && rx < 300 {
-                return Some(0xFFE2E8F0);
-            }
-            return Some(0xFF1E293B);
-        }
-        if ry >= 70 && ry < 102 && rx >= 280 && rx < 596 {
-            if rx == 280 || rx == 595 || ry == 70 || ry == 101 {
-                return Some(0xFF0284C7);
-            }
-            if ry >= 82 && ry < 88 && rx >= 300 && rx < 550 {
-                return Some(0xFFFFFFFF);
-            }
-            return Some(0xFF0369A1);
-        }
-        if ry >= 120 && ry < 154 && rx >= 20 && rx < 596 {
-            return Some(0xFF1A1F29);
-        }
-        return Some(0xFF0F1217);
-    }
-
-    // 7. Music
-    if pkg == b"org.interos.music" || pkg == b"music" {
-        if ry >= 32 && ry < 132 && rx >= 24 && rx < 124 {
-            let cx = 74i32;
-            let cy = 82i32;
-            let d2 = (rx as i32 - cx).pow(2) + (ry as i32 - cy).pow(2);
-            if d2 <= 400 {
-                return Some(0xFFEC4899);
-            }
-            return Some(0xFF8B5CF6);
-        }
-        if ry >= 44 && ry < 52 && rx >= 144 && rx < 380 {
-            return Some(0xFFF8FAFC);
-        }
-        if ry >= 58 && ry < 64 && rx >= 144 && rx < 300 {
-            return Some(0xFF94A3B8);
-        }
-        if ry >= 80 && ry < 124 && rx >= 144 && rx < 580 {
-            let bar_idx = (rx - 144) / 28;
-            let bar_rx = (rx - 144) % 28;
-            if bar_rx < 14 {
-                let h_val = 14 + ((bar_idx * 7) % 28);
-                if ry >= (124 - h_val) {
-                    return Some(0xFF38BDF8);
-                }
-            }
-        }
-        if ry >= 138 && ry < 144 && rx >= 24 && rx < 592 {
-            if rx < 280 {
-                return Some(0xFF38BDF8);
-            }
-            return Some(0xFF334155);
-        }
-        return Some(0xFF111319);
-    }
-
-    // 8. Calculator
-    if pkg == b"org.interos.calculator" || pkg == b"calculator" {
-        if ry >= 30 && ry < 64 && rx >= 20 && rx < 596 {
-            if ry >= 42 && ry < 52 && rx >= 460 && rx < 580 {
-                return Some(0xFF38BDF8);
-            }
-            return Some(0xFF0F172A);
-        }
-        if ry >= 72 && ry < 156 {
-            let ccol = (rx.saturating_sub(20)) / 144;
-            let crow = (ry - 72) / 28;
-            let crx = (rx.saturating_sub(20)) % 144;
-            let cry = (ry - 72) % 28;
-            if ccol < 4 && crow < 3 && crx < 136 && cry < 24 {
-                if ccol == 3 {
-                    return Some(0xFFF97316);
-                }
-                return Some(0xFF1E293B);
-            }
-        }
-        return Some(0xFF0F131C);
-    }
-
-    // Default application card
-    if ry >= 32 && ry < 84 && rx >= 24 && rx < 592 {
-        if rx == 24 || rx == 591 || ry == 32 || ry == 83 {
-            return Some(0xFF334155);
-        }
-        if ry >= 52 && ry < 60 && rx >= 40 && rx < 340 {
-            return Some(0xFFE2E8F0);
-        }
-        return Some(0xFF1E2430);
-    }
-    if ry >= 94 && ry < 146 && rx >= 24 && rx < 592 {
-        if rx == 24 || rx == 591 || ry == 94 || ry == 145 {
-            return Some(0xFF334155);
-        }
-        if ry >= 114 && ry < 122 && rx >= 40 && rx < 300 {
-            return Some(0xFFE2E8F0);
-        }
-        return Some(0xFF1E2430);
-    }
-
-    Some(0xFF151821)
+    Some(CARD_PREVIEW_BG)
 }
 
 fn build_activity_frame(state: &LauncherState) -> ActivityFrame {

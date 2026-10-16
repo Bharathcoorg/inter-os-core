@@ -22,12 +22,18 @@
 //!   ids and task ids and no timestamps either, so it contributes nothing.
 //!
 //! So the feed is notification records, relabelled and SAID SO on the surface
-//! itself: the subtitle, three derivation lines and the filter note under the
-//! pill row all state what the feed is derived from, that ages are elapsed
-//! guest timer ticks rather than wall clock, and that the kernel keeps no
-//! calendar so there are no Today/Yesterday day groups. Source names are the
-//! record's own package id and channel, so every row is traceable to the record
-//! it came from.
+//! itself: the subtitle and the single source note under it say where the rows
+//! come from, and the filter note under the pill row says the pills are not
+//! operable. Ages are rendered as elapsed guest timer ticks rather than wall
+//! clock, which is why no row claims a date, and the kernel keeps no calendar,
+//! so there are no Today/Yesterday day groups. Source names are the record's
+//! own package id and channel, so every row is traceable to the record it came
+//! from.
+//!
+//! WHY the platform explanation lives here and not on the screen: the earlier
+//! header printed three lines naming the tick counter, the missing calendar and
+//! the two stores that contribute nothing. Those sentences are true and useful
+//! to someone reading this file, and useless to someone holding the phone.
 //!
 //! The filter pills are a legend with real counts over the records, not live
 //! controls: `main.rs`'s Notifications input arm hit-tests only the clear-all
@@ -51,12 +57,35 @@ use launcher::theme::{space, type_scale, radius, Theme, SCREEN_HEIGHT, SCREEN_WI
 const ROW_X: usize = 32;
 const ROW_W: usize = SCREEN_WIDTH - 64; // 656
 
+/// Left edge of the header block.
+///
+/// WHY it is not `ROW_X`: the header is a screen title, and every other launcher
+/// surface (Home, App View, System Space) sets its header from this same left
+/// edge rather than from the feed's content inset. Using `ROW_X` here drew the
+/// "Events" title four pixels left of the title on the screen you return to.
+const HEADER_X: usize = 36;
+
+/// Baselines of the header block, in order. The header owns the band from the
+/// status bar down to the pill row, and every line is placed from the one above
+/// it so a change to any single line cannot land a run on top of the next.
+///
+/// The source note sits at `SUBTITLE_Y + CAPTION_PITCH`, immediately under the
+/// subtitle. It used to be three lines at 132/156/180 with the pill row at 210,
+/// which left the note block running into the chips -- three prose lines are
+/// roughly 72px of text plus the gap, and the pills had 78px to fit in.
+const TITLE_Y: usize = 56;
+const SUBTITLE_Y: usize = 108;
+const SOURCE_NOTE_Y: usize = 132;
+
+/// Baseline pitch between two consecutive caption lines.
+const CAPTION_PITCH: usize = 24;
+
 /// Height of one feed row, and the pitch its stack advances by.
 const ROW_H: usize = 88;
 const ROW_PITCH: usize = 92;
 
 /// First row of the first section's stack. Everything above it is the header
-/// block: title, subtitle, three derivation lines, the pill row and the filter
+/// block: title, subtitle, the one-line source note, the pill row and the filter
 /// note.
 const SECTION_HEAD_Y: usize = 300;
 
@@ -80,8 +109,9 @@ const ROW_TEXT_X: usize = ROW_X + 56;
 /// divisor `1193182 / 1000` (`kernel/src/interrupts.rs`, `SYSTEM_TICK_HZ`), so
 /// one tick is one millisecond of GUEST time. A notification's
 /// `timestamp_ticks` is a reading of that same counter, so the difference is an
-/// elapsed duration the guest itself measured -- not a wall-clock claim, and
-/// the derivation line on the surface says so.
+/// elapsed duration the guest itself measured -- not a wall-clock claim. That is
+/// why a row's age is rendered as "3m ago" from elapsed time and never as a
+/// date, and why this screen has no day sections: the kernel keeps no calendar.
 const TICKS_PER_SEC: u64 = 1000;
 
 /// The one category filter this surface can be in.
@@ -703,7 +733,7 @@ struct EventsFrame {
     title: LabelRun,
     subtitle: LabelRun,
     /// What the feed is derived from, stated on the surface itself.
-    derivation: [LabelRun; 3],
+    source_note: LabelRun,
     filter_note: LabelRun,
     pills: [PillPlan; 4],
     sections: [SectionPlan; 4],
@@ -833,44 +863,32 @@ fn build_events_frame(state: &LauncherState) -> EventsFrame {
         b""
     };
     let clock = LabelRun::new(48, 14, type_scale::CAPTION, clock_slice, theme.text);
-    let title = LabelRun::new(36, 56, type_scale::BODY, b"Events", theme.text);
+    let title = LabelRun::new(HEADER_X, TITLE_Y, type_scale::BODY, b"Events", theme.text);
     let subtitle = LabelRun::new(
-        36,
-        108,
+        HEADER_X,
+        SUBTITLE_Y,
         type_scale::CAPTION,
         b"Everything in one feed",
         theme.text_muted,
     );
-    // The surface says what it is made of. WHY on the surface and not only in
-    // this file: a feed the user reads as "everything that happened on my
-    // device" is a claim about the platform, and the platform can only back the
-    // notification records.
-    let derivation = [
-        LabelRun::new(
-            36,
-            132,
-            type_scale::CAPTION,
-            b"One feed assembled from the kernel's notification records.",
-            theme.text_muted,
-        ),
-        LabelRun::new(
-            36,
-            156,
-            type_scale::CAPTION,
-            b"Ages are guest ticks since posting. No calendar, so no day groups.",
-            theme.text_muted,
-        ),
-        LabelRun::new(
-            36,
-            180,
-            type_scale::CAPTION,
-            b"Registry and recents carry no timestamps, so they add no entries.",
-            theme.text_muted,
-        ),
-    ];
+    // WHY one line here and not the three this used to print: the earlier lines
+    // read "Ages are guest ticks since posting. No calendar, so no day groups."
+    // and "Registry and recents carry no timestamps, so they add no entries."
+    // Those are notes to a reviewer of this file, not to the person reading the
+    // screen -- they name the counter, the missing calendar and the two stores
+    // that contribute nothing. The platform details belong in this module's
+    // header, where they already are, and the screen owes the reader one plain
+    // statement of where the rows come from.
+    let source_note = LabelRun::new(
+        HEADER_X,
+        SOURCE_NOTE_Y,
+        type_scale::CAPTION,
+        b"Recent activity from your apps and system.",
+        theme.text_muted,
+    );
     let filter_note = LabelRun::new(
-        36,
-        272,
+        HEADER_X,
+        PILLS_Y + PILL_H + CAPTION_PITCH,
         type_scale::CAPTION,
         b"Filter the feed by its real source.",
         theme.text_muted,
@@ -1059,7 +1077,7 @@ fn build_events_frame(state: &LauncherState) -> EventsFrame {
         clock,
         title,
         subtitle,
-        derivation,
+        source_note,
         filter_note,
         pills,
         sections,
@@ -1146,10 +1164,8 @@ pub fn get_notifications_color(x: usize, y: usize, state: &LauncherState) -> u32
     if let Some(c) = f.subtitle.pixel_on(x, y, theme.bg) {
         return c;
     }
-    for line in &f.derivation {
-        if let Some(c) = line.pixel_on(x, y, theme.bg) {
-            return c;
-        }
+    if let Some(c) = f.source_note.pixel_on(x, y, theme.bg) {
+        return c;
     }
     if let Some(c) = f.filter_note.pixel_on(x, y, theme.bg) {
         return c;
