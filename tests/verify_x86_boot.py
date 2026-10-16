@@ -12,8 +12,125 @@ import time
 import socket
 import subprocess
 import re
+import collections
 
 from test_interactive_lifecycle import find_qemu, SerialReader, send_monitor_cmd
+
+# The canonical portrait scanout the KMS declares (kernel/src/drivers/display_kms.rs).
+# A screendump that is not this geometry did not come from this display path.
+EXPECTED_SCANOUT = (1080, 2160)
+
+# Sample every Nth pixel. A full 2,3 M-pixel pass in Python costs seconds per
+# boot for statistics that a 7x sample resolves just as well.
+PPM_SAMPLE_STRIDE = 7
+
+# A real launcher frame measured 98.30% one background colour and 48 distinct
+# colours. These thresholds sit well clear of that on both sides so they
+# describe a rendered screen rather than today's exact artwork: a blank or
+# single-colour frame scores 0.0% non-dominant and 1 colour, while uninitialised
+# memory scores a colour count in the tens of thousands.
+MIN_NON_DOMINANT_FRACTION = 0.005   # 0.5%; measured 1.70%
+MIN_DISTINCT_COLOURS = 8            # measured 48
+MAX_DISTINCT_COLOURS = 20000        # noise / uninitialised memory
+
+
+def read_ppm(path):
+    """Parse a binary P6 PPM. Returns (width, height, pixel_bytes) or raises."""
+    with open(path, "rb") as fh:
+        raw = fh.read()
+
+    fields = []
+    i = 0
+    while len(fields) < 4:
+        while i < len(raw) and raw[i:i + 1].isspace():
+            i += 1
+        if raw[i:i + 1] == b"#":
+            while i < len(raw) and raw[i:i + 1] != b"\n":
+                i += 1
+            continue
+        if i >= len(raw):
+            raise ValueError("PPM header ended early")
+        j = i
+        while j < len(raw) and not raw[j:j + 1].isspace():
+            j += 1
+        fields.append(raw[i:j])
+        i = j
+    i += 1  # single whitespace byte after maxval
+
+    magic, width, height, maxval = fields[0], int(fields[1]), int(fields[2]), int(fields[3])
+    if magic != b"P6":
+        raise ValueError("expected a binary P6 PPM, got %r" % magic)
+    if maxval != 255:
+        raise ValueError("expected maxval 255, got %d" % maxval)
+    return width, height, raw[i:]
+
+
+def inspect_framebuffer(ppm_path):
+    """Look at the screendump's pixels. Returns (ok, stats, problems).
+
+    WHY this exists: the previous check only proved the file was fresh and
+    larger than a megabyte. A black screen, a one-colour fill or a buffer of
+    uninitialised memory all satisfy that, so the display path could regress
+    with every test still green. The numbers this reports come from a real
+    launcher frame measured on this host.
+    """
+    problems = []
+    try:
+        width, height, pixels = read_ppm(ppm_path)
+    except (OSError, ValueError) as exc:
+        return False, {}, ["could not parse the screendump: %s" % exc]
+
+    if (width, height) != EXPECTED_SCANOUT:
+        problems.append("geometry is %dx%d, expected the %dx%d scanout"
+                        % (width, height, EXPECTED_SCANOUT[0], EXPECTED_SCANOUT[1]))
+
+    expected_bytes = width * height * 3
+    if len(pixels) < expected_bytes:
+        problems.append("truncated: %d pixel bytes for %dx%d, expected %d"
+                        % (len(pixels), width, height, expected_bytes))
+        return False, {"width": width, "height": height}, problems
+
+    step = PPM_SAMPLE_STRIDE * 3
+    sample = pixels[:expected_bytes:step]
+    red, green, blue = sample[0::3], sample[1::3], sample[2::3]
+    counts = collections.Counter(zip(red, green, blue))
+    sampled = len(red)
+    if sampled == 0:
+        return False, {"width": width, "height": height}, ["no pixels could be sampled"]
+
+    distinct = len(counts)
+    dominant_rgb, dominant_n = counts.most_common(1)[0]
+    non_dominant = sampled - dominant_n
+    non_dominant_fraction = non_dominant / sampled
+    black = sum(n for c, n in counts.items() if c == (0, 0, 0))
+
+    stats = {
+        "width": width,
+        "height": height,
+        "sampled": sampled,
+        "distinct_colours": distinct,
+        "dominant_rgb": "#%02X%02X%02X" % dominant_rgb,
+        "dominant_fraction": round(dominant_n / sampled, 4),
+        "non_dominant_fraction": round(non_dominant_fraction, 4),
+        "black_fraction": round(black / sampled, 4),
+    }
+
+    if distinct < MIN_DISTINCT_COLOURS:
+        problems.append("only %d distinct colours; a rendered launcher frame has at least %d "
+                        "(a blank or single-colour screen would pass every other check)"
+                        % (distinct, MIN_DISTINCT_COLOURS))
+    if distinct > MAX_DISTINCT_COLOURS:
+        problems.append("%d distinct colours looks like uninitialised memory, not a rendered frame"
+                        % distinct)
+    if non_dominant_fraction < MIN_NON_DOMINANT_FRACTION:
+        problems.append("only %.2f%% of sampled pixels differ from the dominant colour; "
+                        "a filled or blank screen would look like this"
+                        % (100.0 * non_dominant_fraction))
+    if black == sampled:
+        problems.append("every sampled pixel is pure black")
+
+    return (not problems), stats, problems
+
 
 def kill_proc_on_port(p):
     try:
@@ -160,10 +277,29 @@ def main():
                 all_passed = False
             else:
                 sz = os.path.getsize(ppm_path)
-                print(f"  [OK] Framebuffer PPM verified for current run: {ppm_path} ({sz} bytes, mtime={mtime})")
                 if sz < 1000000:
                     print(f"  [FAIL] Framebuffer PPM is abnormally small ({sz} bytes)")
                     all_passed = False
+                else:
+                    # WHY pixels are inspected and not just the file size: a black
+                    # screen, a single-colour fill and a buffer of uninitialised
+                    # memory all satisfy a freshness-and-size check. The display
+                    # path could regress with every other test still green, which
+                    # is exactly the hole this closes.
+                    fb_ok, fb_stats, fb_problems = inspect_framebuffer(ppm_path)
+                    if fb_ok:
+                        print("  [OK] Framebuffer pixels verified: %dx%d, %d distinct colours, "
+                              "dominant %s at %.1f%%, %.2f%% non-dominant (sampled %d px)"
+                              % (fb_stats["width"], fb_stats["height"],
+                                 fb_stats["distinct_colours"], fb_stats["dominant_rgb"],
+                                 100.0 * fb_stats["dominant_fraction"],
+                                 100.0 * fb_stats["non_dominant_fraction"],
+                                 fb_stats["sampled"]))
+                    else:
+                        print(f"  [FAIL] Framebuffer is not a rendered frame ({sz} bytes):")
+                        for problem in fb_problems:
+                            print(f"         - {problem}")
+                        all_passed = False
         else:
             print(f"  [FAIL] Framebuffer PPM not found at {ppm_path}")
             all_passed = False

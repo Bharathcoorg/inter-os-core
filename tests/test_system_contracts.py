@@ -100,7 +100,14 @@ class SystemContractTests(unittest.TestCase):
         qemu = (ROOT / "tests/verify_x86_boot.py").read_text(encoding="utf-8")
         self.assertIn("verify_x86_boot.py", cli)
         self.assertIn("test_interactive_lifecycle.py", cli)
-        self.assertIn("Framebuffer PPM verified for current run", qemu)
+        # WHY the phrase changed: this used to pin "Framebuffer PPM verified for
+        # current run", which was printed after checking only that the file was
+        # fresh and over a megabyte. The gate now inspects pixels and reports what
+        # it found, so the message names the evidence instead of the file size.
+        self.assertIn("Framebuffer pixels verified", qemu)
+        # Pin the call as well as the message: a message can be printed without
+        # anything ever inspecting the framebuffer.
+        self.assertIn("inspect_framebuffer(ppm_path)", qemu)
 
     def test_reliability_modules_exist(self):
         for rel in (
