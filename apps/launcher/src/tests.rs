@@ -1,4 +1,4 @@
-﻿//! Host-side tests for the launcher's geometry, theme and text metrics.
+//! Host-side tests for the launcher's geometry, theme and text metrics.
 //!
 //! WHY these assert behaviour rather than golden images: an off-by-one in grid
 //! addressing or an over-wide label is invisible in a screenshot but breaks every
@@ -528,3 +528,25 @@ fn glyph_lookup_rejects_unprintable_bytes() {
     assert!(tm::glyph_index(31).is_none(), "control bytes have no glyph");
     assert!(tm::glyph_index(127).is_none());
 }
+
+#[test]
+fn boot_typography_and_tagline_metrics() {
+    let width = 720usize;
+    let wordmark_text = b"InterOS";
+    let wordmark_em = 52u32;
+    let wordmark_adv = interos_std::design::typeface::text_advance_px(wordmark_text, wordmark_em) as usize;
+    assert!(wordmark_adv > 100 && wordmark_adv < 200);
+    let wordmark_x = (width - wordmark_adv) / 2;
+    assert!((wordmark_x + wordmark_adv / 2).abs_diff(width / 2) <= 1);
+
+    let tag1 = b"SMARTER";
+    let tag2 = b"PRIVATE";
+    let tag3 = b"OPEN";
+    let w1 = interos_std::design::font::measure(tag1, 1);
+    let w2 = interos_std::design::font::measure(tag2, 1);
+    let w3 = interos_std::design::font::measure(tag3, 1);
+    let gap = 24usize;
+    let total_tag_w = w1 + gap + w2 + gap + w3;
+    assert!(total_tag_w < width);
+}
+
