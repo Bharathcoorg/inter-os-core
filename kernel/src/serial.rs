@@ -613,6 +613,10 @@ fn handle_serial_command(cmd: &[u8]) {
             }
         };
         let (heap_used, heap_free) = crate::allocator::heap_stats();
+        // Published on every flip by the compositor, unlike the sampled
+        // `[KMS PERF]` line. Reporting it here is what lets a latency run tell
+        // an expensive frame apart from a host that simply stopped scheduling.
+        let (comp_cyc, pres_cyc, last_flip) = crate::performance::last_frame();
         let (mailboxes, endpoints, shm_pipes) = {
             let (mb, ep) = if let Some(r) = crate::ipc::IPC_ROUTER.try_lock() {
                 (r.mailbox_count(), r.endpoint_count())
@@ -627,8 +631,9 @@ fn handle_serial_command(cmd: &[u8]) {
             (mb, ep, shm)
         };
         crate::serial_println!(
-            "[DIAG_STATE] tasks_total={} tasks_active={} surfaces={} mailboxes={} endpoints={} shm_pipes={} heap_used={} heap_free={}",
-            tasks_tot, tasks_act, surfaces, mailboxes, endpoints, shm_pipes, heap_used, heap_free
+            "[DIAG_STATE] tasks_total={} tasks_active={} surfaces={} mailboxes={} endpoints={} shm_pipes={} heap_used={} heap_free={} last_flip={} last_flip_compose_cycles={} last_flip_present_cycles={}",
+            tasks_tot, tasks_act, surfaces, mailboxes, endpoints, shm_pipes, heap_used, heap_free,
+            last_flip, comp_cyc, pres_cyc
         );
         return;
     }

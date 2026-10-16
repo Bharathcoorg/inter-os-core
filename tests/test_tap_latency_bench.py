@@ -297,6 +297,81 @@ def test_summary_of_all_failures_has_no_samples_rather_than_zero():
     assert s[btl.METRIC_NAME]["median_ms"] is None
 
 
+# --------------------------------------------------------------------------
+# Outlier attribution: guest work vs host scheduling.
+# --------------------------------------------------------------------------
+
+def test_attribution_is_unknown_when_the_guest_reported_nothing():
+    assert "unknown" in btl.attribute_outlier({}, 1000)
+
+
+def test_attribution_is_unknown_without_a_baseline():
+    assert "unknown" in btl.attribute_outlier({"guest_frame_cycles": 10}, 0)
+
+
+def test_a_costlier_frame_is_attributed_to_guest_work():
+    verdict = btl.attribute_outlier({"guest_frame_cycles": 900}, 500)
+    assert verdict.startswith("guest work")
+    assert "900" in verdict and "500" in verdict, "the comparison must stay auditable"
+
+
+def test_a_cheap_frame_on_a_slow_trial_is_attributed_to_host_scheduling():
+    verdict = btl.attribute_outlier({"guest_frame_cycles": 400}, 500)
+    assert verdict.startswith("host scheduling")
+
+
+def test_guest_frame_cost_is_summarised_over_valid_trials_only():
+    records = [
+        dict(_rec("ok", 200.0), guest_frame_cycles=400),
+        dict(_rec("ok", 700.0), guest_frame_cycles=450),
+        dict(_rec("post_flip_timeout", None), guest_frame_cycles=99999),
+    ]
+    s = btl.summarize_trials(records)
+    assert s["guest_frame_cycles"]["count"] == 2
+    assert s["guest_frame_cycles"]["max_ms"] == 450, \
+        "a failed trial's reading must not enter the baseline"
+
+
+def test_trials_without_a_cost_do_not_enter_the_cost_baseline():
+    records = [dict(_rec("ok", 200.0), guest_frame_cycles=None),
+               dict(_rec("ok", 300.0), guest_frame_cycles=250)]
+    s = btl.summarize_trials(records)
+    assert s["guest_frame_cycles"]["count"] == 1
+    assert s["guest_frame_cycles"]["min_ms"] == 250
+
+
+def test_guest_frame_cost_is_read_from_the_diag_state_channel():
+    """The attribution must come from the guest, not from a host-side guess."""
+    session = bal.LaunchSession(FakeSocket([
+        b"[DIAG_STATE] tasks_total=14 heap_used=100 heap_free=200 last_flip=91 "
+        b"last_flip_compose_cycles=300000000 last_flip_present_cycles=40000000\n"
+    ]))
+    cost = btl.read_guest_frame_cost(session)
+    assert cost == {"flip": 91, "compose_cycles": 300000000, "present_cycles": 40000000}
+    assert session.sock.sent == [b"DIAG_STATE\n"], "exactly one diagnostic request per trial"
+
+
+def test_cost_reading_is_none_when_the_guest_never_answers():
+    session = bal.LaunchSession(FakeSocket([]))
+    assert btl.read_guest_frame_cost(session, timeout_s=0.05) is None
+
+
+def test_a_diag_state_without_flip_fields_yields_no_cost():
+    """An older kernel must read as unknown, not as a free frame."""
+    session = bal.LaunchSession(FakeSocket([
+        b"[DIAG_STATE] tasks_total=14 heap_used=100 heap_free=200\n"
+    ]))
+    assert btl.read_guest_frame_cost(session, timeout_s=0.05) is None
+
+
+def test_the_flip_number_is_reported_so_repeated_reads_are_detectable():
+    session = bal.LaunchSession(FakeSocket([
+        b"[DIAG_STATE] heap_used=100 heap_free=200 last_flip=91 "
+        b"last_flip_compose_cycles=5 last_flip_present_cycles=5\n"
+    ]))
+    assert btl.read_guest_frame_cost(session)["flip"] == 91
+
+
 def test_failure_reasons_are_surfaced():
     s = btl.summarize_trials([_rec("no_state_change", None, detail="tap missed the keypad")])
     assert s["failure_reasons"] == ["tap missed the keypad"]

@@ -56,6 +56,7 @@ from bench_app_launch import (  # noqa: E402
     newest_source_mtime,
 )
 from bench_boot import _find_qemu, _kill_port_owner, describe_artifact, summarize  # noqa: E402
+from bench_heap import parse_diag_state  # noqa: E402
 
 # Digit '7' is keypad row 1, column 0. COL_X[0]=28 + BTN_W/2=72 -> x=100;
 # ROW_Y[1]=610 + BTN_H/2=70 -> y=680. Derived from the app's own geometry
@@ -68,6 +69,7 @@ APP_READY_MARKER = "[CALCULATOR] Initial frame presented to hardware scanout."
 INPUT_ACCEPTED_MARKER = "[COM1 INPUT] Hardware touch tap received at (%d, %d)."
 STATE_CHANGED_MARKER = "[CALCULATOR] Keypad digit pressed."
 POST_FLIP_MARKER = "[CALCULATOR] Post-input frame presented."
+DIAG_STATE_MARKER = "[DIAG_STATE]"
 
 METRIC_NAME = "tap_to_post_surface_flip_ms"
 ENDPOINT = (
@@ -114,6 +116,8 @@ def summarize_trials(records):
     for key, field in PHASES:
         samples = [r.get(field) for r in valid if r.get(field) is not None]
         out[key] = summarize(samples)
+    costs = [r["guest_frame_cycles"] for r in valid if r.get("guest_frame_cycles")]
+    out["guest_frame_cycles"] = summarize(costs)
     out["failure_reasons"] = sorted({r.get("detail", "unspecified")[:100] for r in failed})
     return out
 
@@ -134,6 +138,10 @@ def run_trial(trial_index, root, results_dir, timeout_s, boot_timeout_s):
         "input_accepted_ms": None,
         "state_changed_ms": None,
         "tap_to_post_surface_flip_ms": None,
+        "guest_flip": None,
+        "guest_compose_cycles": None,
+        "guest_present_cycles": None,
+        "guest_frame_cycles": None,
         "post_flip_markers_before": None,
         "post_flip_markers_after": None,
     }
@@ -239,6 +247,14 @@ def run_trial(trial_index, root, results_dir, timeout_s, boot_timeout_s):
             return record
 
         record["outcome"] = "ok"
+        # Asked only after the endpoint, so the DIAG_STATE round trip cannot
+        # lengthen the measured interval.
+        frame = read_guest_frame_cost(session)
+        if frame:
+            record["guest_flip"] = frame["flip"]
+            record["guest_compose_cycles"] = frame["compose_cycles"]
+            record["guest_present_cycles"] = frame["present_cycles"]
+            record["guest_frame_cycles"] = frame["compose_cycles"] + frame["present_cycles"]
         return record
     finally:
         if session is not None:
@@ -261,6 +277,60 @@ def _delta(start, end):
     if start is None or end is None:
         return None
     return round((end - start) * 1000.0, 1)
+
+
+def read_guest_frame_cost(session, timeout_s=5.0):
+    """Ask the guest what its last flip cost, in CPU cycles.
+
+    WHY this exists: the wall-clock interval mixes two very different things --
+    work the guest did rendering the frame, and the host not scheduling QEMU.
+    Without the guest's own numbers an outlier cannot be told apart, and the
+    only printed source, `[KMS PERF]`, samples the first 15 flips and every 30th
+    after that, so the flip carrying the input is almost never in it. The kernel
+    publishes every flip's cost and answers on the existing `DIAG_STATE`
+    channel, so this is one command and one reply.
+
+    Returns None when the guest does not answer, which is reported as unknown
+    rather than guessed at. The flip number comes back too, because two reads
+    showing the same flip would mean the second sampled the same frame again
+    rather than a cheaper one.
+    """
+    session.send_once("DIAG_STATE")
+    at = session.await_marker(DIAG_STATE_MARKER, timeout_s=timeout_s)
+    if at is None:
+        return None
+    for _ts, text in reversed(session.lines):
+        reading = parse_diag_state(text)
+        if not reading:
+            continue
+        # -1 is the parser's "field absent" marker. Accepting it would report a
+        # free frame for a guest that never measured one.
+        if reading["last_flip_compose_cycles"] < 0 or reading["last_flip"] < 0:
+            return None
+        return {
+            "flip": reading["last_flip"],
+            "compose_cycles": reading["last_flip_compose_cycles"],
+            "present_cycles": reading["last_flip_present_cycles"],
+        }
+    return None
+
+
+def attribute_outlier(record, fast_cycles):
+    """Decide whether a trial's frame was expensive or the host merely stalled.
+
+    WHY a threshold: the guest reports one flip's cost in its own cycles. A
+    trial whose flip cost is near the typical value cannot have spent its extra
+    time rendering, so the time went somewhere the guest did not account for --
+    host scheduling. A trial whose flip cost is proportionally higher did do
+    proportionally more work. Stating the comparison rather than a bare verdict
+    keeps the conclusion auditable.
+    """
+    cost = record.get("guest_frame_cycles")
+    if cost is None or not fast_cycles:
+        return "unknown (guest did not report a flip cost)"
+    if cost > fast_cycles:
+        return "guest work: flip cost %d cycles exceeds the typical %d" % (cost, fast_cycles)
+    return "host scheduling: flip cost %d cycles is not above the typical %d" % (cost, fast_cycles)
 
 
 def preflight(artifact, root):
@@ -359,6 +429,24 @@ def main():
             print("%-28s no valid samples" % label)
     if summary["failure_reasons"]:
         print("failures : %s" % "; ".join(summary["failure_reasons"]))
+
+    cost_stats = summary["guest_frame_cycles"]
+    print("\n=== outlier attribution (guest work vs host scheduling) ===")
+    if not cost_stats["count"]:
+        print("The guest did not report a flip cost, so no trial can be attributed.")
+    else:
+        typical = cost_stats["median_ms"] if cost_stats["median_ms"] else cost_stats["min_ms"]
+        print("guest flip cost: median=%s cycles, range %s..%s (n=%d)"
+              % (cost_stats["median_ms"], cost_stats["min_ms"], cost_stats["max_ms"],
+                 cost_stats["count"]))
+        print("%-6s %-10s %-14s %s" % ("trial", "interval", "flip cycles", "attribution"))
+        for rec in records:
+            if not is_valid_sample(rec):
+                continue
+            cost = rec.get("guest_frame_cycles")
+            verdict = attribute_outlier(rec, typical)
+            print("%-6d %-10s %-14s %s"
+                  % (rec["trial"], rec[METRIC_NAME], cost if cost else "unknown", verdict))
 
     if summary["valid_samples"] == 0:
         return 1

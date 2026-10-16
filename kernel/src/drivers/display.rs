@@ -87,12 +87,23 @@ impl DisplayDriver for KmsDisplayDriver<'_> {
         #[cfg(target_arch = "x86_64")]
         let t2 = unsafe { core::arch::x86_64::_rdtsc() };
 
-        if flip <= 15 || flip % 30 == 0 {
-            #[cfg(target_arch = "x86_64")]
-            let (comp_cyc, pres_cyc) = (t1.saturating_sub(t0), t2.saturating_sub(t1));
-            #[cfg(not(target_arch = "x86_64"))]
-            let (comp_cyc, pres_cyc) = (0u64, 0u64);
+        // WHY computed outside the sampling branch below: the compose and
+        // present costs have to exist for every flip, not only the ones that
+        // get printed. `[KMS PERF]` samples the first 15 flips and every 30th
+        // after that, so the flip carrying an arbitrary input is almost never
+        // logged -- and it is exactly that flip a latency benchmark needs.
+        #[cfg(target_arch = "x86_64")]
+        let (comp_cyc, pres_cyc) = (t1.saturating_sub(t0), t2.saturating_sub(t1));
+        #[cfg(not(target_arch = "x86_64"))]
+        let (comp_cyc, pres_cyc) = (0u64, 0u64);
 
+        // Published through atomics rather than the PERFORMANCE mutex: the KMS
+        // lock is held here, and taking a second lock on the display path to
+        // record telemetry would add contention and an inversion risk for no
+        // measurement benefit.
+        crate::performance::record_frame(comp_cyc, pres_cyc, flip);
+
+        if flip <= 15 || flip % 30 == 0 {
             crate::serial_println!(
                 "[KMS PERF] flip={} compose_cycles={} present_cycles={} total_cycles={} scanout={}x{}",
                 flip,

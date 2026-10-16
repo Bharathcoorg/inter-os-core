@@ -66,6 +66,13 @@ def parse_diag_state(line):
             "tasks_total": int(fields.get("tasks_total", -1)),
             "tasks_active": int(fields.get("tasks_active", -1)),
             "surfaces": int(fields.get("surfaces", -1)),
+            # Compositor cost of the most recent flip, published by every flip
+            # rather than only the sampled ones. -1 means the kernel did not
+            # report them, so an older guest stays readable without a field
+            # silently defaulting to zero and looking like a free frame.
+            "last_flip": int(fields.get("last_flip", -1)),
+            "last_flip_compose_cycles": int(fields.get("last_flip_compose_cycles", -1)),
+            "last_flip_present_cycles": int(fields.get("last_flip_present_cycles", -1)),
         }
     except (KeyError, ValueError):
         return None
