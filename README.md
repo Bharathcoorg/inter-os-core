@@ -2,7 +2,7 @@
 
 <div align="center">
 
-![License: MIT / Apache-2.0](https://img.shields.io/badge/License-MIT%20%2F%20Apache--2.0-blue.svg)
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPLv3-blue.svg)](LICENSE)
 ![Language: Pure Rust](https://img.shields.io/badge/Language-Pure%20Rust%20%23!%5Bno__std%5D-orange.svg)
 ![Architectures: x86_64 / AArch64 / RISC-V 64](https://img.shields.io/badge/Architectures-x86__64%20%7C%20AArch64%20%7C%20RISC--V%2064-success.svg)
 ![Build: Reproducible](https://img.shields.io/badge/Build-Reproducible-blue.svg)
@@ -278,6 +278,7 @@ For experimental hardware bring-up documentation, see [docs/PHYSICAL_HARDWARE_FL
 
 ## 📄 License
 
-InterOS Core is dual-licensed under:
-* **MIT License** ([LICENSE-MIT](LICENSE-MIT))
-* **Apache License, Version 2.0** ([LICENSE-APACHE](LICENSE-APACHE))
+InterOS Core is free and open-source software licensed under the **GNU Affero General Public License v3.0 (AGPLv3)**. See [LICENSE](LICENSE) for the full license text.
+
+### 💼 Commercial & OEM Dual-Licensing
+For hardware manufacturers, enterprise smartphone deployments, or defense contractors requiring proprietary closed-source driver integration, custom board support packages (BSPs), or compliance terms exempt from AGPLv3 copyleft requirements, commercial licensing is available. Contact the maintainers for commercial terms.
