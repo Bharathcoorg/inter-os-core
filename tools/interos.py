@@ -8,7 +8,7 @@ InterOS Core kernels and sovereign Rust Mobile Application Packages (.rapp).
 Usage:
   python tools/interos.py doctor
   python tools/interos.py build [--target x86_64|aarch64|riscv64|all|<app_name>]
-  python tools/interos.py test [--target unit|x86_64|aarch64|riscv64|security|adversarial|qemu|lifecycle|contracts|stress|recovery|persistence|storage_recovery|crash|watchdog|panic|all]
+  python tools/interos.py test [--target unit|kernel|x86_64|aarch64|riscv64|security|adversarial|qemu|lifecycle|contracts|stress|recovery|persistence|storage_recovery|crash|watchdog|panic|all]
   python tools/interos.py new <app_name> [--template basic|authenticator|sensor|meshchat]
   python tools/interos.py package <app_name> [--output dist/<app_name>.rapp]
   python tools/interos.py sign <package_or_file> [--key <key_path>]
@@ -30,6 +30,7 @@ import argparse
 import hashlib
 import json
 import os
+import platform
 import shutil
 import subprocess
 import socket
@@ -517,12 +518,179 @@ def cmd_build(args):
 # =============================================================================
 # COMMAND: test
 # =============================================================================
+# WHY this exists: `cargo test --manifest-path kernel/Cargo.toml` is the command
+# AGENTS.md requires before every commit, but nothing in the tree ran it. A run
+# that failed therefore left no record of which test failed -- a single
+# "288 passed; 1 failed" with no test name is not diagnosable. This wrapper keeps
+# the full output, names the failing tests and classifies the failure, so a
+# future failure is actionable instead of anecdotal.
+KERNEL_TEST_CMD = ["cargo", "test", "--manifest-path", "kernel/Cargo.toml", "--no-fail-fast"]
+TEST_LOG_DIR = WORKSPACE_ROOT / "target" / "test-logs"
+
+# Ordered most-specific first: the first pattern that matches names the category.
+_FAILURE_PATTERNS = (
+    ("process launch error", ("could not execute", "no such file or directory", "is not recognized")),
+    ("compile error", ("error[E", "error: could not compile", "error: aborting")),
+    ("timeout", ("timed out", "timeout", "deadline exceeded")),
+    ("panic", ("panicked at", "thread '", "RUST_BACKTRACE")),
+    ("assertion failure", ("assertion failed", "assert `left == right` failed", "assertion `")),
+)
+
+
+def classify_test_failure(output):
+    """Classify a failed cargo test run from its own output.
+
+    WHY this reads the log rather than the exit code: cargo reports 101 for an
+    assertion, a panic and a compile error alike, so the exit code alone cannot
+    tell a real regression from a broken toolchain. Returns the categories that
+    matched, in the order above, and an empty list when nothing matched -- an
+    unclassified failure is still reported, never silently dropped.
+    """
+    lowered = output.lower()
+    found = [name for name, needles in _FAILURE_PATTERNS if any(n in lowered for n in needles)]
+    return found
+
+
+def failing_test_names(output):
+    """Extract the names of failing tests from libtest output.
+
+    Covers both the per-test `test <name> ... FAILED` lines and the `failures:`
+    block, which lists the same names again. Names are returned in first-seen
+    order and de-duplicated so one failure is not reported twice.
+    """
+    names = []
+    in_failures = False
+    for raw in output.splitlines():
+        line = raw.strip()
+        if line == "failures:":
+            in_failures = True
+            continue
+        if in_failures and line and not line.startswith(" ") and not line.startswith("\t"):
+            in_failures = False
+        if line.startswith("test ") and line.endswith("FAILED"):
+            candidate = line[len("test "):-len(" FAILED")].strip()
+            candidate = candidate.split(" ...")[0].strip()
+            if candidate and candidate not in names:
+                names.append(candidate)
+            continue
+        if in_failures and line.startswith("    ") and not line.startswith("     "):
+            candidate = line.strip()
+            if candidate and candidate not in names:
+                names.append(candidate)
+    return names
+
+
+def test_count_summary(output):
+    """Pull the `N passed; M failed` totals out of libtest output, or None.
+
+    WHY the first result with any tests in it rather than the last match:
+    `cargo test` runs more than one test binary (here the 289 unit tests, then a
+    second binary that reports none), and the trailing one is routinely "0 passed".
+    Taking the last match reports "0 passed" for a suite that really ran 289 --
+    which is exactly the kind of wrong-but-plausible number this exists to stop.
+    """
+    import re
+    matches = re.findall(r"(\d+) passed; (\d+) failed", output)
+    for passed, failed in matches:
+        if int(passed) + int(failed) > 0:
+            return (int(passed), int(failed))
+    if matches:
+        return (0, 0)
+    passed = re.search(r"(\d+) passed", output)
+    if passed:
+        return (int(passed.group(1)), 0)
+    return None
+
+
+def _diagnostic_environment():
+    """Environment facts that explain a kernel test failure, with no secrets.
+
+    WHY this list: a `no_std` kernel suite fails differently under a different
+    toolchain or with a different test-threads setting, and both are worth seeing.
+    Anything that could carry a credential is deliberately excluded.
+    """
+    return {
+        "cwd": str(WORKSPACE_ROOT),
+        "os": f"{sys.platform} {platform.release()}",
+        "python": sys.version.split()[0],
+        "RUSTUP_TOOLCHAIN": os.environ.get("RUSTUP_TOOLCHAIN", "<unset>"),
+        "RUSTFLAGS": os.environ.get("RUSTFLAGS", "<unset>"),
+        "CARGO_TARGET_DIR": os.environ.get("CARGO_TARGET_DIR", "<unset>"),
+        "RUST_TEST_THREADS": os.environ.get("RUST_TEST_THREADS", "<unset>"),
+        "num_cpus": str(os.cpu_count()),
+    }
+
+
+def run_kernel_tests():
+    """Run the mandated kernel unit suite, preserving full diagnostics on failure.
+
+    Returns the cargo exit code. Output is written to a timestamped log under
+    target/test-logs/ on every run, so a failure that only appears once still has
+    its evidence on disk afterwards.
+    """
+    command = " ".join(KERNEL_TEST_CMD)
+    log(f"Running kernel unit tests: {command}")
+
+    try:
+        completed = subprocess.run(
+            KERNEL_TEST_CMD,
+            cwd=str(WORKSPACE_ROOT),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            errors="replace",
+        )
+        returncode = completed.returncode
+        output = completed.stdout or ""
+    except OSError as exc:
+        # A missing toolchain must be reported as itself, not as a test failure.
+        returncode = 127
+        output = f"failed to execute the test command: {exc}\n"
+
+    TEST_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+    log_path = TEST_LOG_DIR / f"kernel-tests-{stamp}.log"
+    log_path.write_text(output, encoding="utf-8", errors="replace")
+
+    counts = test_count_summary(output)
+    if returncode == 0:
+        log_success(f"Kernel tests passed ({counts[0]} passed)." if counts else "Kernel tests passed.")
+        log(f"Full output: {log_path}")
+        return 0
+
+    log_error(f"Kernel tests FAILED (exit code {returncode}).")
+    log_error(f"Command: {command}")
+    log_error(f"Working directory: {WORKSPACE_ROOT}")
+    if counts:
+        log_error(f"Result: {counts[0]} passed; {counts[1]} failed")
+    categories = classify_test_failure(output)
+    log_error(f"Failure classification: {', '.join(categories) if categories else 'unclassified (see log)'}")
+    names = failing_test_names(output)
+    if names:
+        log_error(f"Failing test{'s' if len(names) != 1 else ''} ({len(names)}):")
+        for name in names:
+            log_error(f"  - {name}")
+    else:
+        log_error("No individual test name was reported; the run failed before or outside libtest.")
+    log_error(f"Complete stdout+stderr: {log_path}")
+    for key, value in _diagnostic_environment().items():
+        log(f"  {key}={value}")
+    return returncode
+
+
 def cmd_test(args):
     test_target = getattr(args, "target", "all").lower()
-    valid_targets = ["unit", "x86_64", "x86", "aarch64", "riscv64", "security", "adversarial", "qemu", "lifecycle", "contracts", "m10_m12", "stress", "recovery", "persistence", "storage_recovery", "crash", "watchdog", "panic", "all"]
+    valid_targets = ["unit", "kernel", "x86_64", "x86", "aarch64", "riscv64", "security", "adversarial", "qemu", "lifecycle", "contracts", "m10_m12", "stress", "recovery", "persistence", "storage_recovery", "crash", "watchdog", "panic", "all"]
     if test_target not in valid_targets:
         log_error(f"Unknown test target: '{test_target}'. Valid targets: {', '.join(valid_targets)}")
         return 1
+
+    if test_target in ["kernel", "all"]:
+        rc = run_kernel_tests()
+        if rc != 0:
+            overall_rc = rc
+            if test_target == "kernel":
+                return rc
 
     log(f"Executing InterOS test suite (Target: {test_target})...")
     overall_rc = 0
@@ -1488,7 +1656,7 @@ def main():
 
     # test
     p_tst = subparsers.add_parser("test", help="Execute automated test suite across targets")
-    p_tst.add_argument("--target", choices=["unit", "x86_64", "x86", "aarch64", "riscv64", "security", "adversarial", "qemu", "lifecycle", "contracts", "m10_m12", "stress", "recovery", "persistence", "storage_recovery", "crash", "watchdog", "panic", "all"], default="all", help="Select a specific local test suite")
+    p_tst.add_argument("--target", choices=["unit", "kernel", "x86_64", "x86", "aarch64", "riscv64", "security", "adversarial", "qemu", "lifecycle", "contracts", "m10_m12", "stress", "recovery", "persistence", "storage_recovery", "crash", "watchdog", "panic", "all"], default="all", help="Select a specific local test suite")
     p_tst.set_defaults(func=cmd_test)
 
     # new
