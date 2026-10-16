@@ -211,7 +211,7 @@ def test_recents_cards_do_not_draw_a_stand_in_for_a_thumbnail():
         "0xFF10B981",
         "org.interos.browser",
     ):
-        assert fabricated not in source, f"recents still draws fabricated preview art: {fabricated}"
+        assert fabricated not in _code_only(source), f"recents still draws fabricated preview art: {fabricated}"
     assert 'b"No live preview"' in source
 
 
@@ -229,11 +229,82 @@ def test_browser_start_page_does_not_render_a_hardcoded_news_feed_or_ranking():
         "Sovereign Computing: W3C Standards on Native Microkernels",
         'b"Most Visited"',
     ):
-        assert fabricated not in source, f"start page still renders fabricated content: {fabricated}"
+        assert fabricated not in _code_only(source), f"start page still renders fabricated content: {fabricated}"
     assert 'b"Your pages"' in source
     # The real sources of rows must stay wired to real state.
     assert "app.bookmarks.record(index)" in source
     assert "app.history.entry(" in source
+
+
+def _code_only(source: str) -> str:
+    """Strips `//` line comments and doc comments from Rust source.
+
+    WHY this exists, and why it is not optional: these contracts assert that a
+    fabricated string does not appear in a file, and the natural way to write a
+    comment explaining why the string went away is to quote it. Three separate
+    times that re-introduced the exact literal the contract forbids -- once in
+    the launcher browser, once in the kernel panel, once here. A truth contract
+    that scans comments is not testing the program; it is testing the author's
+    prose. Stripping comments makes the assertion mean what it says, and lets a
+    comment explain the change without fighting it.
+    """
+    import re
+
+    without_block = re.sub(r"/\*.*?\*/", " ", source, flags=re.S)
+    return re.sub(r"//[^\n]*", " ", without_block)
+
+
+def test_the_kernel_boot_settings_panel_invents_no_readings():
+    """The kernel's own settings panel must not state telemetry it cannot read.
+
+    WHY: `framebuffer.rs` draws a five-tab settings panel reachable from the
+    boot shell. Every value on it was a literal, and several were not merely
+    invented but self-refuting -- a Wi-Fi row advertising an enabled 6E radio
+    with a named SSID sat three lines above "no wireless hardware discovered",
+    and "120Hz ProMotion [ACTIVE]" contradicted the refresh_hz = 60 the same
+    kernel programs in `drivers/display_kms.rs`.
+
+    Nothing in that module can read a backlight, an audio mixer, a radio, a fuel
+    gauge, a thermal sensor, a keystore slot, or a clock rate. Each row now says
+    what is actually available. The 'w' binding was removed rather than left
+    editing a label no hardware reads.
+    """
+    source = read("kernel/src/framebuffer.rs")
+    code = _code_only(source)
+
+    # No cipher is implemented anywhere in this tree, so any screen naming one
+    # asserts a capability the device does not have.
+    assert "AES-256-XTS" not in code, "a screen names a cipher the device does not implement"
+    vault = read("apps/vault/src/main.rs")
+    assert "fletcher32" in vault, "the vault's real integrity check is Fletcher-32"
+
+    for fabricated in (
+        "Screen Brightness: 85%",
+        "Media Audio Volume: 70%",
+        "120Hz ProMotion",
+        "OLED TrueBlack",
+        "Wi-Fi 6E: [ENABLED]",
+        "InterSovereignMesh-5G",
+        "2400 MHz",
+        "1200 MHz",
+        "4200 mAh",
+        "3850 mV",
+        "2990 mW",
+        "State of Charge: 94%",
+        "SoC Temperature: 42 C",
+        "did:inter:sovereign:node01",
+        "Attestation Verified",
+    ):
+        assert fabricated not in code, f"kernel settings panel invents: {fabricated}"
+
+    # The one real fact on that tab is the scanout mode, and it must be the
+    # mode the kernel actually programs.
+    assert "Display mode refresh: 60 Hz (programmed)" in source
+    assert "refresh_hz: 60" in read("kernel/src/drivers/display_kms.rs")
+
+    # The dead wifi toggle must not come back with its key binding.
+    assert "'w' => {" not in code
+    assert "pub wifi_on: bool" not in code
 
 
 def test_a_corner_radius_scale_has_exactly_one_spelling_per_value():

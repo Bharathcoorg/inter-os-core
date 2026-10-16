@@ -166,7 +166,6 @@ pub struct FramebufferWriter {
     pub shutter_count: u32,
     pub settings_tab: u8,
     pub dvfs_governor: u8,
-    pub wifi_on: bool,
     pub term_lines: [[char; 42]; 10],
     pub term_line_lens: [usize; 10],
     pub term_line_count: usize,
@@ -197,7 +196,6 @@ impl FramebufferWriter {
             shutter_count: 0,
             settings_tab: 0,
             dvfs_governor: 0,
-            wifi_on: true,
             term_lines: [['\0'; 42]; 10],
             term_line_lens: [0; 10],
             term_line_count: 0,
@@ -802,81 +800,121 @@ impl FramebufferWriter {
         let mut py = y + 16;
         match self.settings_tab {
             0 => {
-                self.draw_string(x + 14, py, "[ 1. DISPLAY & AUDIO PREFERENCES ]", 1, COLOR_CYAN, Some(COLOR_DARK_SLATE));
+                self.draw_string(x + 14, py, "[ 1. DISPLAY & AUDIO ]", 1, COLOR_CYAN, Some(COLOR_DARK_SLATE));
                 py += 26;
-                self.draw_string(x + 14, py, "Screen Brightness: 85%", 1, COLOR_WHITE, Some(COLOR_DARK_SLATE));
-                py += 18;
-                self.draw_string(x + 14, py, "[=============================---]", 1, COLOR_CYAN, Some(COLOR_DARK_SLATE));
-                py += 26;
-                self.draw_string(x + 14, py, "Media Audio Volume: 70%", 1, COLOR_WHITE, Some(COLOR_DARK_SLATE));
-                py += 18;
-                self.draw_string(x + 14, py, "[========================--------]", 1, COLOR_GREEN, Some(COLOR_DARK_SLATE));
-                py += 26;
-                self.draw_string(x + 14, py, "* Refresh Rate: 120Hz ProMotion [ACTIVE]", 1, COLOR_GREEN, Some(COLOR_DARK_SLATE));
+                // WHY these used to carry numbers and no longer do: every value
+                // on this tab was a literal. The brightness and volume rows
+                // described no state this device holds -- there is no backlight
+                // control bound and no audio mixer reading reaches this module.
+                // The refresh row was worse than invented: it named a refresh
+                // rate and a display technology, while the scanout is
+                // programmed at refresh_hz = 60 in drivers/display_kms.rs, so
+                // the panel contradicted the mode its own compositor uses.
+                //
+                // WHAT IS REAL: the scanout geometry, which this module owns.
+                // Everything else is now stated as absent rather than invented.
+                self.draw_string(x + 14, py, "Scanout: 720x1440 logical, 1080x2160 native", 1, COLOR_WHITE, Some(COLOR_DARK_SLATE));
                 py += 20;
-                self.draw_string(x + 14, py, "* Color Profile: OLED TrueBlack Native", 1, COLOR_MUTED, Some(COLOR_DARK_SLATE));
+                self.draw_string(x + 14, py, "Display mode refresh: 60 Hz (programmed)", 1, COLOR_WHITE, Some(COLOR_DARK_SLATE));
                 py += 20;
-                self.draw_string(x + 14, py, "* Auto-Rotate: Portrait Locked", 1, COLOR_MUTED, Some(COLOR_DARK_SLATE));
+                self.draw_string(x + 14, py, "Backlight control: not bound", 1, COLOR_MUTED, Some(COLOR_DARK_SLATE));
+                py += 20;
+                self.draw_string(x + 14, py, "Audio mixer reading: not bound", 1, COLOR_MUTED, Some(COLOR_DARK_SLATE));
+                py += 20;
+                self.draw_string(x + 14, py, "Auto-rotate: no orientation sensor attached", 1, COLOR_MUTED, Some(COLOR_DARK_SLATE));
             }
             1 => {
                 self.draw_string(x + 14, py, "[ 2. WIRELESS & CONNECTIVITY ]", 1, COLOR_CYAN, Some(COLOR_DARK_SLATE));
                 py += 26;
-                self.draw_string(x + 14, py, if self.wifi_on { "Wi-Fi 6E: [ENABLED]" } else { "Wi-Fi 6E: [DISABLED]" }, 1, if self.wifi_on { COLOR_GREEN } else { COLOR_AMBER }, Some(COLOR_DARK_SLATE));
-                py += 20;
-                self.draw_string(x + 14, py, "  SSID: InterSovereignMesh-5G", 1, COLOR_WHITE, Some(COLOR_DARK_SLATE));
-                py += 18;
+                // WHY no ENABLED/DISABLED toggle: the flag behind the old switch
+                // was a field on this struct. Pressing its key flipped it and
+                // nothing else happened -- no radio is bound, no interface
+                // changes, no packet moves. The row offered a switch that could
+                // only change a label, directly above the line admitting there is
+                // no wireless hardware. Two rows on the same screen contradicted
+                // each other: an enabled radio with a named network, and "no
+                // wireless hardware discovered" three lines down. The honest
+                // panel says there is no radio, once.
                 self.draw_string(x + 14, py, "Wi-Fi: no wireless hardware discovered", 1, COLOR_MUTED, Some(COLOR_DARK_SLATE));
-                py += 26;
-                self.draw_string(x + 14, py, "Bluetooth: no controller discovered", 1, COLOR_WHITE, Some(COLOR_DARK_SLATE));
                 py += 20;
-                self.draw_string(x + 14, py, "Cellular: no modem discovered", 1, COLOR_WHITE, Some(COLOR_DARK_SLATE));
+                self.draw_string(x + 14, py, "  'w' toggle removed: it drove no interface", 1, COLOR_MUTED, Some(COLOR_DARK_SLATE));
+                py += 26;
+                self.draw_string(x + 14, py, "Bluetooth: no controller discovered", 1, COLOR_MUTED, Some(COLOR_DARK_SLATE));
+                py += 20;
+                self.draw_string(x + 14, py, "Cellular: no modem discovered", 1, COLOR_MUTED, Some(COLOR_DARK_SLATE));
                 py += 18;
-                self.draw_string(x + 14, py, "  Signal: unavailable", 1, COLOR_GREEN, Some(COLOR_DARK_SLATE));
+                self.draw_string(x + 14, py, "  Signal: unavailable", 1, COLOR_MUTED, Some(COLOR_DARK_SLATE));
             }
             2 => {
-                self.draw_string(x + 14, py, "[ 3. MOBILE DVFS POWER GOVERNOR ]", 1, COLOR_CYAN, Some(COLOR_DARK_SLATE));
+                self.draw_string(x + 14, py, "[ 3. DVFS GOVERNOR SELECTION ]", 1, COLOR_CYAN, Some(COLOR_DARK_SLATE));
                 py += 26;
+                // WHY the clock figures are gone: each governor row named a
+                // frequency this device never runs at and cannot report. There is
+                // no P-state readout reaching this module, so the "P-States
+                // Active" claim underneath them had nothing behind it either.
+                //
+                // WHAT IS REAL: `dvfs_governor` is a genuine selection this
+                // module owns and 'g' genuinely cycles it. It is labelled as the
+                // selection it is -- a request, not an achieved frequency.
                 let g0 = self.dvfs_governor == 0;
                 let g1 = self.dvfs_governor == 1;
                 let g2 = self.dvfs_governor == 2;
-                self.draw_string(x + 14, py, if g0 { "[*] Performance Mode: 2400 MHz (Max Compute)" } else { "[ ] Performance Mode: 2400 MHz (Max Compute)" }, 1, if g0 { COLOR_GREEN } else { COLOR_MUTED }, Some(COLOR_DARK_SLATE));
+                self.draw_string(x + 14, py, if g0 { "[*] Performance" } else { "[ ] Performance" }, 1, if g0 { COLOR_GREEN } else { COLOR_MUTED }, Some(COLOR_DARK_SLATE));
                 py += 24;
-                self.draw_string(x + 14, py, if g1 { "[*] Balanced Mode:    1200 MHz (Dynamic Clock)" } else { "[ ] Balanced Mode:    1200 MHz (Dynamic Clock)" }, 1, if g1 { COLOR_GREEN } else { COLOR_MUTED }, Some(COLOR_DARK_SLATE));
+                self.draw_string(x + 14, py, if g1 { "[*] Balanced" } else { "[ ] Balanced" }, 1, if g1 { COLOR_GREEN } else { COLOR_MUTED }, Some(COLOR_DARK_SLATE));
                 py += 24;
-                self.draw_string(x + 14, py, if g2 { "[*] Power Saver Mode:  600 MHz (Extended Battery)" } else { "[ ] Power Saver Mode:  600 MHz (Extended Battery)" }, 1, if g2 { COLOR_GREEN } else { COLOR_MUTED }, Some(COLOR_DARK_SLATE));
+                self.draw_string(x + 14, py, if g2 { "[*] Power Saver" } else { "[ ] Power Saver" }, 1, if g2 { COLOR_GREEN } else { COLOR_MUTED }, Some(COLOR_DARK_SLATE));
                 py += 28;
-                self.draw_string(x + 14, py, "Dynamic Frequency Scaling: Hardware P-States Active", 1, COLOR_MUTED, Some(COLOR_DARK_SLATE));
+                self.draw_string(x + 14, py, "Achieved clock rate: not reported by the guest", 1, COLOR_MUTED, Some(COLOR_DARK_SLATE));
+                py += 20;
+                self.draw_string(x + 14, py, "Hardware P-State telemetry: not exposed", 1, COLOR_MUTED, Some(COLOR_DARK_SLATE));
             }
             3 => {
                 self.draw_string(x + 14, py, "[ 4. BATTERY FUEL GAUGE & THERMALS ]", 1, COLOR_CYAN, Some(COLOR_DARK_SLATE));
                 py += 26;
-                self.draw_string(x + 14, py, "State of Charge: 94% (4200 mAh Capacity)", 1, COLOR_GREEN, Some(COLOR_DARK_SLATE));
+                // WHY every number is gone: the charge, capacity, voltage, drain,
+                // health, temperature and thermal-headroom rows were all
+                // literals. No fuel gauge or thermal sensor is attached to this
+                // profile, and nothing in this module holds a reading. The
+                // "throttling inactive" row was the most dangerous of the set,
+                // because "inactive" reads as a measurement that came back fine.
+                self.draw_string(x + 14, py, "State of Charge: telemetry unavailable", 1, COLOR_MUTED, Some(COLOR_DARK_SLATE));
                 py += 20;
-                self.draw_string(x + 14, py, "Battery Voltage: 3850 mV | Drain: 2990 mW", 1, COLOR_WHITE, Some(COLOR_DARK_SLATE));
+                self.draw_string(x + 14, py, "Battery voltage / current: telemetry unavailable", 1, COLOR_MUTED, Some(COLOR_DARK_SLATE));
                 py += 20;
-                self.draw_string(x + 14, py, "Health: Excellent (100% Nominal Cycles)", 1, COLOR_MUTED, Some(COLOR_DARK_SLATE));
+                self.draw_string(x + 14, py, "Cycle health: telemetry unavailable", 1, COLOR_MUTED, Some(COLOR_DARK_SLATE));
                 py += 26;
-                self.draw_string(x + 14, py, "SoC Temperature: 42 C (Zone: Normal)", 1, COLOR_WHITE, Some(COLOR_DARK_SLATE));
+                self.draw_string(x + 14, py, "SoC temperature: telemetry unavailable", 1, COLOR_MUTED, Some(COLOR_DARK_SLATE));
                 py += 20;
-                self.draw_string(x + 14, py, "Thermal Throttling: Inactive (Headroom: 38C)", 1, COLOR_GREEN, Some(COLOR_DARK_SLATE));
+                self.draw_string(x + 14, py, "Thermal throttling: telemetry unavailable", 1, COLOR_MUTED, Some(COLOR_DARK_SLATE));
             }
             _ => {
-                self.draw_string(x + 14, py, "[ 5. HARDWARE ROOT OF TRUST & KEYSTORE ]", 1, COLOR_CYAN, Some(COLOR_DARK_SLATE));
+                self.draw_string(x + 14, py, "[ 5. ROOT OF TRUST & KEYSTORE ]", 1, COLOR_CYAN, Some(COLOR_DARK_SLATE));
                 py += 26;
-                self.draw_string(x + 14, py, "* Keystore Slot 0: Root Master Key [ONLINE]", 1, COLOR_GREEN, Some(COLOR_DARK_SLATE));
+                // WHY these stopped claiming to be online: this module can reach
+                // no keystore. It cannot see a slot, cannot tell whether a key is
+                // resident, and cannot run an attestation. The slot rows, the key
+                // algorithm, a named decentralised identifier and an attestation
+                // result were all assertions about a subsystem this panel has no
+                // interface to -- presented in green, beside an amber identity
+                // string, which made the invented parts look measured.
+                //
+                // WHAT IS REAL: nothing below is, so every row says so. The DID is
+                // dropped rather than restyled because there is no identity to
+                // name, and a real-looking identifier is the most reusable kind
+                // of invented string here.
+                self.draw_string(x + 14, py, "Keystore slot state: not reachable from this panel", 1, COLOR_MUTED, Some(COLOR_DARK_SLATE));
                 py += 20;
-                self.draw_string(x + 14, py, "* Keystore Slot 1: Storage Key (AES-256-XTS)", 1, COLOR_GREEN, Some(COLOR_DARK_SLATE));
+                self.draw_string(x + 14, py, "Key algorithm in use: not reported", 1, COLOR_MUTED, Some(COLOR_DARK_SLATE));
                 py += 20;
-                self.draw_string(x + 14, py, "* Keystore Slot 3: Wire P2P Session Key", 1, COLOR_GREEN, Some(COLOR_DARK_SLATE));
+                self.draw_string(x + 14, py, "Device identity (DID): none provisioned", 1, COLOR_MUTED, Some(COLOR_DARK_SLATE));
                 py += 24;
-                self.draw_string(x + 14, py, "W3C DID: did:inter:sovereign:node01", 1, COLOR_AMBER, Some(COLOR_DARK_SLATE));
-                py += 20;
-                self.draw_string(x + 14, py, "Merkle State Root: Attestation Verified", 1, COLOR_GREEN, Some(COLOR_DARK_SLATE));
+                self.draw_string(x + 14, py, "Remote attestation: not supported on this profile", 1, COLOR_MUTED, Some(COLOR_DARK_SLATE));
             }
         }
 
         let fy = y + 400;
-        self.draw_string(x + 14, fy, "Press 1-5 to switch tabs | 'w' wifi | 'g' dvfs", 1, COLOR_MUTED, Some(COLOR_DARK_SLATE));
+        self.draw_string(x + 14, fy, "Press 1-5 to switch tabs | 'g' cycles the governor selection", 1, COLOR_MUTED, Some(COLOR_DARK_SLATE));
     }
 
     fn draw_terminal_contents(&mut self) {
@@ -1032,7 +1070,12 @@ impl FramebufferWriter {
         by += 18;
         self.draw_string(x + 14, by, "Fletcher-32 Integrity Checksum: VALID [OK]", 1, COLOR_GREEN, Some(COLOR_DARK_SLATE));
         by += 18;
-        self.draw_string(x + 14, by, "Encryption: ChaCha20 + AES-256-XTS", 1, COLOR_MUTED, Some(COLOR_DARK_SLATE));
+        // WHY the cipher names are gone: `export_backup` in apps/vault writes the
+                // frame with a Fletcher-32 checksum and reads it back to validate.
+                // There is no ChaCha20 and no AES-256-XTS anywhere in the tree --
+                // the row named two ciphers the device does not implement, which
+                // is a materially different claim from "checksummed".
+                self.draw_string(x + 14, by, "Cipher: none - export is checksummed, not encrypted", 1, COLOR_AMBER, Some(COLOR_DARK_SLATE));
     }
 
     fn draw_calculator_contents(&mut self) {
@@ -1376,10 +1419,12 @@ impl FramebufferWriter {
                         self.settings_tab = c as u8 - b'1';
                         self.redraw_phone();
                     }
-                    'w' => {
-                        self.wifi_on = !self.wifi_on;
-                        self.redraw_phone();
-                    }
+                    // WHY 'w' is gone: it flipped `wifi_on`, a field on this
+                    // struct, and nothing read it. The keypress changed one label
+                    // on a panel that two rows below admitted it had no wireless
+                    // hardware. A binding that only edits its own display is the
+                    // same dishonesty as a drawn-but-dead control: both offer a
+                    // capability the system does not have.
                     'g' => {
                         self.dvfs_governor = (self.dvfs_governor + 1) % 3;
                         self.redraw_phone();
