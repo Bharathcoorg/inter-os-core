@@ -36,8 +36,14 @@ const BORDER_SUBTLE: u32 = 0xFFE1E0DB;
 const TEXT_PRIMARY: u32 = 0xFF111214;
 const TEXT_MUTED: u32 = 0xFF777773;
 const ACCENT_SKY: u32 = 0xFF2563EB;
-#[allow(dead_code)]
-const SUCCESS_EMERALD: u32 = 0xFF10B981;
+
+// WHY this is the SDK's success token and not a literal: `SUCCESS_EMERALD` was
+// 0xFF10B981, which is Tailwind's emerald-500 and appears in no token file in
+// this repository. `interos_std::design::color::SUCCESS` (sdk/rust/interos-std/
+// src/design/mod.rs) is 0xFF2E8B57 and is the value every other surface
+// resolves against, so the "=" key was rendering a fifth green while the rest
+// of the device rendered the fourth.
+const SUCCESS_EMERALD: u32 = interos_std::design::color::SUCCESS;
 #[allow(dead_code)]
 const DANGER_CRIMSON: u32 = 0xFFEF4444;
 
@@ -298,8 +304,11 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                         // Arithmetic operators: Royal Blue tactile surface with white text
                         (ACCENT_SKY, 0xFF1D4ED8, 0xFFFFFFFF)
                     } else if is_equals {
-                        // Equals: Emerald Accent with high-contrast white text
-                        (0xFF10B981, 0xFF059669, 0xFFFFFFFF)
+                        // Equals: the success accent with high-contrast white
+                        // text. The fill is the SDK's `design::SUCCESS`; the
+                        // border is that colour stepped down, so the key reads
+                        // as pressed-in rather than as a second colour.
+                        (SUCCESS_EMERALD, 0xFF256045, 0xFFFFFFFF)
                     } else if is_clear {
                         // Clear: soft slate surface with semantic crimson accent text
                         (0xFFF0EFEB, 0xFFDBD9D3, 0xFFDC2626)

@@ -967,12 +967,18 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
             let ink = if active { TEXT } else { FAINT };
             let dx = (x as isize) - PREV_CX as isize;
             let dy = (y as isize) - TRANSPORT_CY as isize;
-            // Bar at -14..-10 and a left-pointing triangle.
-            if (-18..=-14).contains(&dx) && dy.abs() <= 10 {
+            // WHY this glyph points left with its bar on the right: that is what
+            // "previous track" looks like. The two transport glyphs were drawn as
+            // mirror images of each other and then bound to the wrong centres --
+            // the glyph that points forward, with its bar behind it on the left,
+            // was sitting under `PREV_CX`, so the previous button skipped ahead
+            // and the next button went back. The geometry is unchanged; what
+            // moved is which button each shape is drawn under.
+            if (14..=18).contains(&dx) && dy.abs() <= 10 {
                 return ink;
             }
-            if (-8..=12).contains(&dx) {
-                let allow = (12 - dx) * 12 / 20;
+            if (-12..=8).contains(&dx) {
+                let allow = (dx + 12) * 12 / 20;
                 if dy.abs() <= allow {
                     return ink;
                 }
@@ -1014,11 +1020,14 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
             let ink = if active { TEXT } else { FAINT };
             let dx = (x as isize) - NEXT_CX as isize;
             let dy = (y as isize) - TRANSPORT_CY as isize;
-            if (14..=18).contains(&dx) && dy.abs() <= 10 {
+            // Points right with its bar behind it on the left: the next-track
+            // glyph. See the note on the previous button for why these two were
+            // bound to each other's centres.
+            if (-18..=-14).contains(&dx) && dy.abs() <= 10 {
                 return ink;
             }
-            if (-12..=8).contains(&dx) {
-                let allow = (dx + 12) * 12 / 20;
+            if (-8..=12).contains(&dx) {
+                let allow = (12 - dx) * 12 / 20;
                 if dy.abs() <= allow {
                     return ink;
                 }
