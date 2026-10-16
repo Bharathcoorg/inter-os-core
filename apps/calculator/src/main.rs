@@ -685,6 +685,21 @@ pub extern "C" fn _start() -> ! {
             if dirty != Dirty::None {
                 repaint(surface, &calc, dirty);
                 let _ = std::surface_flip(6);
+                // WHY this marker exists: everything logged above happens before
+                // the redraw, so nothing in this file could show that the frame
+                // carrying the new state was actually handed to the display path.
+                // It sits inside the `dirty != Dirty::None` branch because that
+                // branch is the only place a repaint runs: an inert tap leaves
+                // `dirty` at None and emits nothing, so this line cannot be
+                // produced by a tap that changed nothing, and the app has no
+                // periodic redraw that could emit it either.
+                //
+                // WHAT IT PROVES: `surface_flip` has returned, which means the
+                // surfaces were committed, composited, the front/back buffers
+                // swapped and the composited image written into the guest boot
+                // framebuffer. It does NOT prove that a display controller
+                // fetched those pixels or that anything was emitted as light.
+                std::log(0, "[CALCULATOR] Post-input frame presented.").ok();
             }
         }
 

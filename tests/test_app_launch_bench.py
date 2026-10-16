@@ -142,12 +142,23 @@ def test_phase_offsets_are_relative_to_the_send_instant():
 # Task F: old readiness markers cannot leak into a new trial.
 # --------------------------------------------------------------------------
 
-def test_a_marker_present_before_the_wait_is_not_matched_by_a_later_wait():
-    """A boot-time readiness line must not satisfy the trial that follows it."""
+def test_a_marker_already_read_is_still_matchable_once():
+    """Lines a previous await read must remain visible to the next one.
+
+    This replaced an assertion that such a line must NOT match. That assertion
+    described a real bug rather than a real guarantee: `await_marker` returned as
+    soon as its own marker matched and never re-examined the batch it had just
+    consumed, so a second marker that arrived in the same batch was invisible and
+    the wait timed out against a guest that had already answered.
+
+    Staleness is still refused, but by draining before the send and counting
+    occurrences (`marker_count` / `await_nth_marker`), not by hiding data.
+    """
     session = transcript_session(["[CALCULATOR] Initial frame presented to hardware scanout."])
-    # The line is already in the buffer before the wait begins.
     session.await_marker("__never__", timeout_s=0.05)  # forces a read of the buffer
     assert len(session.lines) == 1
+    assert session.await_marker("[CALCULATOR] Initial frame", timeout_s=0.05) is not None
+    # Matched once, so it cannot satisfy a second wait.
     assert session.await_marker("[CALCULATOR] Initial frame", timeout_s=0.05) is None
 
 

@@ -204,6 +204,8 @@ class LaunchSession:
         self.timeout_s = timeout_s
         self.buf = b""
         self.lines = []
+        # Index of the first line no await_marker call has matched yet.
+        self._consumed = 0
 
     def send_once(self, command):
         """Write one command line and stamp the instant. Never retries."""
@@ -211,6 +213,49 @@ class LaunchSession:
         sent_at = time.perf_counter()
         self.sock.sendall(payload)
         return sent_at
+
+    def marker_count(self, marker):
+        """How many times `marker` has been read in this session so far."""
+        return sum(1 for _at, text in self.lines if marker in text)
+
+    def await_nth_marker(self, marker, n, timeout_s):
+        """Timestamp of the n-th (1-based) occurrence of `marker`, or None.
+
+        WHY count occurrences instead of waiting for the first match: a readiness
+        marker that the guest prints on every frame cannot be told apart by its
+        text alone, so a match left over from boot -- or from the previous trial --
+        would satisfy the wait immediately and be reported as this trial's
+        response. Counting is what ties the match to an event that happened after
+        the trial started, without changing the guest protocol to carry a token.
+
+        Only bytes read during this call (or earlier in the session, which the
+        caller's `n` accounts for) are considered, so nothing is invented.
+        """
+        deadline = time.monotonic() + timeout_s
+        while True:
+            seen = 0
+            for at, text in self.lines:
+                if marker in text:
+                    seen += 1
+                    if seen == n:
+                        return at
+            if time.monotonic() >= deadline:
+                return None
+            try:
+                data = self.sock.recv(4096)
+            except socket.timeout:
+                continue
+            except OSError:
+                return None
+            if not data:
+                return None
+            batch_at = time.perf_counter()
+            self.buf += data
+            while b"\n" in self.buf:
+                raw, self.buf = self.buf.split(b"\n", 1)
+                text = raw.decode("utf-8", errors="replace").strip()
+                if text:
+                    self.lines.append((batch_at, text))
 
     def drain(self, quiet_s=0.4, max_s=3.0):
         """Read pending guest output until it goes quiet.
@@ -245,18 +290,33 @@ class LaunchSession:
         """Wait for one marker, stamping when it was read. Never retries.
 
         Returns the read instant in monotonic seconds, or None on timeout.
+
+        WHY the consumption cursor. Sequential awaits must be able to see lines
+        that a previous await already read. The kernel accepts a tap, routes it
+        and the application answers all within one serial batch, so the first
+        await consumed that batch and an earlier version returned as soon as its
+        own marker matched -- leaving the second marker already in `lines` and
+        invisible to the next call, which then timed out and reported a guest
+        that had in fact responded. Ten of twelve trials failed that way. Each
+        call now resumes from the first unconsumed line, so a marker read early
+        is still matchable exactly once.
         """
         deadline = time.monotonic() + timeout_s
-        seen_at = None
-        while time.monotonic() < deadline:
+        while True:
+            for idx in range(self._consumed, len(self.lines)):
+                if marker in self.lines[idx][1]:
+                    self._consumed = idx + 1
+                    return self.lines[idx][0]
+            if time.monotonic() >= deadline:
+                return None
             try:
                 data = self.sock.recv(4096)
             except socket.timeout:
                 continue
             except OSError:
-                return seen_at
+                return None
             if not data:
-                return seen_at
+                return None
             self.buf += data
             # WHY one timestamp for the whole batch: these lines became visible
             # to the host at the same instant. Stamping each line separately
@@ -267,14 +327,8 @@ class LaunchSession:
             while b"\n" in self.buf:
                 raw, self.buf = self.buf.split(b"\n", 1)
                 text = raw.decode("utf-8", errors="replace").strip()
-                if not text:
-                    continue
-                self.lines.append((batch_at, text))
-                if seen_at is None and marker in text:
-                    seen_at = batch_at
-            if seen_at is not None:
-                return seen_at
-        return seen_at
+                if text:
+                    self.lines.append((batch_at, text))
 
     def first_mark_time_after(self, marker, after_time):
         """Timestamp of the first `marker` read at or after `after_time`.
