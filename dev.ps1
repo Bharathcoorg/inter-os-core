@@ -60,8 +60,15 @@ function Invoke-Build {
     # on every run, which changes the kernel's embedded inputs and forces a full
     # kernel recompile. That defeats the no-op rebuild property a second
     # consecutive build is supposed to have. The guard below skips the rebuild
-    # only when every embedded image is already present and already ET_EXEC,
-    # which is the exact condition that made the previous image bootable.
+    # only when every embedded image is already present, already ET_EXEC, free of
+    # the symbol table that makes an image non-reproducible, and no older than the
+    # sources it is built from.
+    #
+    # WHY freshness is part of the guard: being a valid ET_EXEC says nothing about
+    # which source an image was built from. Editing an app and rebuilding used to
+    # leave the previous binary sitting in target/, package it into the image, and
+    # report success, so a benchmark could measure code that was no longer in the
+    # tree. Compare against the newest userspace source instead of assuming.
     $embeddedDir = Join-Path $targetDir "x86_64-unknown-none\debug"
     $embeddedImages = @(
         "init", "displayd", "inputd", "storaged", "netd", "powerd", "modemd",
@@ -73,6 +80,9 @@ function Invoke-Build {
 
     $needsUserspaceBuild = $false
     $badImages = @()
+    # Resolved once, not per image: the walk touches every source file and the
+    # answer is the same for all 26 images.
+    $newestSourceUtc = Get-NewestUserspaceSourceUtc -Root $rootDir
     foreach ($image in $embeddedImages) {
         $imagePath = Join-Path $embeddedDir $image
         if (-not (Test-Path -LiteralPath $imagePath)) {
@@ -99,6 +109,13 @@ function Invoke-Build {
             Assert-NoSymbolTable -Path $imagePath -Label $image
         } catch {
             $badImages += "$image (still carries a symbol table, so the image would not be reproducible)"
+            continue
+        }
+        if ($newestSourceUtc -ne $null) {
+            $item = Get-Item -LiteralPath $imagePath
+            if ($item.LastWriteTimeUtc -lt $newestSourceUtc) {
+                $badImages += "$image (older than the newest userspace source at $($newestSourceUtc.ToString('o')); the image predates an edit and would package the previous build)"
+            }
         }
     }
     if ($badImages.Count -gt 0) {
@@ -122,7 +139,7 @@ function Invoke-Build {
             Set-Location $savedDir
         }
     } else {
-        Write-Host "[OK] Ring-3 userspace already present, ET_EXEC and symbol-free; skipping rebuild." -ForegroundColor Green
+        Write-Host "[OK] Ring-3 userspace already present, ET_EXEC, symbol-free and no older than its sources; skipping rebuild." -ForegroundColor Green
     }
 
     $kernelManifest = Join-Path $kernelDir "Cargo.toml"

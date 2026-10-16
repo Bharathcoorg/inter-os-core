@@ -328,6 +328,47 @@ function Assert-NoSymbolTable {
     }
 }
 
+function Get-NewestUserspaceSourceUtc {
+    <#
+    .SYNOPSIS
+    Newest modification time among the sources that produce the Ring-3 images.
+
+    .DESCRIPTION
+    Returns a UTC DateTime, or $null when no source could be found.
+
+    Scopes are exactly the trees that build the images the kernel embeds with
+    include_bytes!: `userspace` (init and the system services), `apps`, and the
+    `sdk` crate they all link against. The kernel tree is deliberately excluded --
+    kernel source does not change what a Ring-3 image contains, and including it
+    would force all 26 binaries to be rebuilt and the kernel recompiled every
+    time kernel code was touched.
+
+    `tools` and the build scripts are excluded for the same reason, plus one
+    more: they are not embedded, so editing this file must not invalidate an
+    image that does not contain it.
+    #>
+    param([string]$Root)
+
+    if (-not $Root) { $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path) }
+
+    $newest = $null
+    foreach ($scope in @("userspace", "apps", "sdk")) {
+        $base = Join-Path $Root $scope
+        if (-not (Test-Path -LiteralPath $base)) { continue }
+        $files = Get-ChildItem -LiteralPath $base -Recurse -File -ErrorAction SilentlyContinue |
+            Where-Object {
+                $_.Extension -in @(".rs", ".toml", ".ld") -and
+                $_.FullName -notmatch '\\target\\' -and
+                $_.FullName -notmatch '\\node_modules\\'
+            }
+        foreach ($file in $files) {
+            $stamp = $file.LastWriteTimeUtc
+            if ($newest -eq $null -or $stamp -gt $newest) { $newest = $stamp }
+        }
+    }
+    return $newest
+}
+
 function Get-StreamRegionSha256 {
     <#
     .SYNOPSIS

@@ -204,6 +204,91 @@ Set-Location '{ROOT_DIR}'
         self.assertGreater(assert_index, strip_index,
                            "the assertion must run after llvm-strip, or it checks the unstripped file")
 
+    def test_newest_userspace_source_ignores_the_kernel_and_tools(self):
+        """Only the trees that produce the embedded images may trigger a rebuild.
+
+        Editing kernel code does not change what a Ring-3 image contains, and
+        editing a build script does not either -- but both would force all 26
+        binaries and the kernel to recompile, destroying the no-op rebuild.
+        """
+        r = self.run_ps("""
+$root = Join-Path ([System.IO.Path]::GetTempPath()) ('interos_scope_' + [guid]::NewGuid())
+$app = Join-Path (Join-Path $root 'apps') 'demo'
+$ker = Join-Path (Join-Path $root 'kernel') 'src'
+$tool = Join-Path (Join-Path $root 'tools') 'build_userspace.ps1'
+New-Item -ItemType Directory -Path $app | Out-Null
+New-Item -ItemType Directory -Path $ker | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $root 'tools') | Out-Null
+Set-Content -Path (Join-Path $app 'main.rs') -Value 'fn main() {}'
+$baseline = Get-NewestUserspaceSourceUtc -Root $root
+Start-Sleep -Milliseconds 1100
+Set-Content -Path (Join-Path $ker 'main.rs') -Value '// kernel edit'
+$afterKernel = Get-NewestUserspaceSourceUtc -Root $root
+Start-Sleep -Milliseconds 1100
+Set-Content -Path $tool -Value '# build script edit'
+$afterTools = Get-NewestUserspaceSourceUtc -Root $root
+Remove-Item -Recurse -Force $root
+if ($afterKernel -eq $baseline -and $afterTools -eq $baseline) { 'IGNORED' }
+else { "baseline=$baseline afterKernel=$afterKernel afterTools=$afterTools" }
+""")
+        self.assertEqual(r.returncode, 0, f"helper failed: {r.stderr}")
+        self.assertIn("IGNORED", r.stdout)
+
+    def test_newest_userspace_source_returns_null_for_an_empty_tree(self):
+        r = self.run_ps(
+            "$empty = Join-Path ([System.IO.Path]::GetTempPath()) ('interos_empty_' + [guid]::NewGuid()); "
+            "New-Item -ItemType Directory -Path $empty | Out-Null; "
+            "$v = Get-NewestUserspaceSourceUtc -Root $empty; "
+            "Remove-Item -Recurse -Force $empty; "
+            "if ($v -eq $null) { 'NONE' } else { $v.ToString('o') }"
+        )
+        self.assertEqual(r.returncode, 0, f"helper failed: {r.stderr}")
+        self.assertIn("NONE", r.stdout)
+
+    def test_newest_userspace_source_tracks_an_edited_app(self):
+        """The property the guard depends on: a newer app source must be seen."""
+        r = self.run_ps("""
+$root = Join-Path ([System.IO.Path]::GetTempPath()) ('interos_src_' + [guid]::NewGuid())
+$app = Join-Path (Join-Path $root 'apps') 'demo'
+New-Item -ItemType Directory -Path $app | Out-Null
+Set-Content -Path (Join-Path $app 'main.rs') -Value 'fn main() {}'
+$before = Get-NewestUserspaceSourceUtc -Root $root
+Start-Sleep -Milliseconds 1100
+Set-Content -Path (Join-Path $app 'main.rs') -Value 'fn main() { let _ = 1; }'
+$after = Get-NewestUserspaceSourceUtc -Root $root
+Remove-Item -Recurse -Force $root
+if ($before -ne $null -and $after -gt $before) { 'ADVANCED' } else { "before=$before after=$after" }
+""")
+        self.assertEqual(r.returncode, 0, f"helper failed: {r.stderr}")
+        self.assertIn("ADVANCED", r.stdout)
+
+    def test_newest_userspace_source_skips_target_and_node_modules(self):
+        r = self.run_ps("""
+$root = Join-Path ([System.IO.Path]::GetTempPath()) ('interos_skip_' + [guid]::NewGuid())
+$app = Join-Path (Join-Path $root 'apps') 'demo'
+New-Item -ItemType Directory -Path $app | Out-Null
+Set-Content -Path (Join-Path $app 'main.rs') -Value 'fn main() {}'
+$srcTime = (Get-Item (Join-Path $app 'main.rs')).LastWriteTimeUtc
+Start-Sleep -Milliseconds 1100
+$noise = Join-Path $app 'target'
+New-Item -ItemType Directory -Path $noise | Out-Null
+Set-Content -Path (Join-Path $noise 'generated.rs') -Value '// generated'
+$reused = Get-NewestUserspaceSourceUtc -Root $root
+Remove-Item -Recurse -Force $root
+if ($reused -eq $srcTime) { 'IGNORED' } else { "picked=$reused src=$srcTime" }
+""")
+        self.assertEqual(r.returncode, 0, f"helper failed: {r.stderr}")
+        self.assertIn("IGNORED", r.stdout)
+
+    def test_dev_ps1_guard_checks_freshness_not_only_elf_type(self):
+        """Proves the stale-image gap is closed in the guard itself."""
+        with open(os.path.join(ROOT_DIR, "dev.ps1"), "r", encoding="utf-8-sig") as f:
+            dev = f.read()
+        self.assertIn("Get-NewestUserspaceSourceUtc", dev,
+                      "dev.ps1 must compare embedded images against their sources")
+        self.assertIn("LastWriteTimeUtc -lt $newestSourceUtc", dev,
+                      "dev.ps1 must reject an image older than the sources it embeds")
+
     def test_cargo_artifact_verification_rejects_truncated_elf(self):
         """Proves Verify-KernelBinaryArtifact fails closed when binary is smaller than 64-byte ELF header."""
         with tempfile.NamedTemporaryFile("wb", prefix="kernel_trunc_", delete=False) as f:
