@@ -58,6 +58,184 @@ def test_browser_has_guest_pointer_and_keyboard_bridges():
     assert "fetch('/api/touch/event'" in source
 
 
+def _const_usize(source: str, name: str) -> int:
+    """Reads a `const NAME: usize = ...;` binding out of a Rust source file.
+
+    WHY parse rather than assert on literals: these contracts exist to catch a
+    layout that puts two runs on top of each other. Asserting that a literal
+    like "76" is still present would pass just as happily when the run moved
+    somewhere worse. Reading the constants back and comparing the resulting
+    geometry is the only form of this assertion that means anything.
+
+    A binding written as an expression of other bindings -- `PILLS_Y + PILL_H`,
+    which is how the filter note is positioned so it cannot drift from the pill
+    row -- is resolved by looking those names up in turn.
+    """
+    import re
+
+    match = re.search(
+        rf"^\s*(?:pub )?const {name}\s*:\s*usize\s*=\s*([^;]+);", source, re.M
+    )
+    assert match, f"could not find `const {name}: usize` in the source"
+    expr = match.group(1).strip()
+
+    resolved = _resolve_usize(source, expr, depth=0)
+    assert resolved is not None, f"`const {name}` = {expr!r} is not a resolvable usize expression"
+    return resolved
+
+
+def _resolve_usize(source: str, expr: str, depth: int) -> int | None:
+    """Evaluates a const expression made of ints, names, `+`, `-` and `*`."""
+    assert depth < 8, "const expression nests too deeply to resolve"
+
+    import re
+
+    expr = expr.strip()
+    if expr.isdigit():
+        return int(expr)
+
+    # A single `+` at the top level, resolved left then right.
+    for operator in ("+", "-", "*"):
+        parts = _split_top_level(expr, operator)
+        if len(parts) == 2:
+            left = _resolve_usize(source, parts[0], depth + 1)
+            right = _resolve_usize(source, parts[1], depth + 1)
+            if left is None or right is None:
+                return None
+            if operator == "+":
+                return left + right
+            if operator == "-":
+                return left - right
+            return left * right
+
+    match = re.match(r"^([A-Z_][A-Z0-9_]*)$", expr)
+    if match:
+        nested = re.search(
+            rf"^\s*(?:pub )?const {match.group(1)}\s*:\s*usize\s*=\s*([^;]+);", source, re.M
+        )
+        if not nested:
+            return None
+        return _resolve_usize(source, nested.group(1), depth + 1)
+    return None
+
+
+def _split_top_level(expr: str, operator: str) -> list[str]:
+    """Splits on `operator` only where it is not inside a parenthesis pair."""
+    depth = 0
+    parts, start = [], 0
+    for i, ch in enumerate(expr):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif ch == operator and depth == 0:
+            parts.append(expr[start:i])
+            start = i + 1
+    parts.append(expr[start:])
+    return [p for p in parts if p.strip()]
+
+
+def test_events_header_bands_cannot_overlap_each_other_or_the_feed():
+    """The Events header is four runs stacked above the first section head.
+
+    WHY this needs asserting mechanically: the header owns a fixed band, and
+    every line is placed from a literal. Moving any one of them down by a few
+    pixels is invisible in review and prints two runs over each other on the
+    device. This has already happened twice -- once when three prose lines were
+    added to the header and ran into the pill row, and once when the filter note
+    was nudged down and landed on the first section head.
+    """
+    source = read("apps/launcher/src/screens/notifications.rs")
+
+    title_y = _const_usize(source, "TITLE_Y")
+    subtitle_y = _const_usize(source, "SUBTITLE_Y")
+    source_note_y = _const_usize(source, "SOURCE_NOTE_Y")
+    pills_y = _const_usize(source, "PILLS_Y")
+    pill_h = _const_usize(source, "PILL_H")
+    filter_note_y = _const_usize(source, "FILTER_NOTE_Y")
+    section_head_y = _const_usize(source, "SECTION_HEAD_Y")
+
+    # A caption run inks GLYPH_H (24) rows from its baseline; a body run is
+    # scaled 2, so 48. These are `launcher::font`'s own numbers.
+    caption_h, body_h = 24, 48
+
+    assert title_y + body_h <= subtitle_y, "title runs into the subtitle"
+    assert subtitle_y + caption_h <= source_note_y, "subtitle runs into the source note"
+    assert source_note_y + caption_h <= pills_y, "source note runs into the pill row"
+    assert filter_note_y >= pills_y + pill_h, "filter note starts inside the pill row"
+    assert filter_note_y + caption_h <= section_head_y, "filter note runs into the first section head"
+
+
+def test_events_header_does_not_print_platform_diagnostics_to_the_reader():
+    """The header may state where the rows come from, in plain language.
+
+    WHY: the three lines it used to print named the tick counter, the missing
+    calendar and the two stores that contribute nothing. Those are notes to a
+    reviewer of the file. The platform detail stays in the module header.
+    """
+    source = read("apps/launcher/src/screens/notifications.rs")
+    # The prose may not be in a byte-string literal: a `b"..."` is what the
+    # surface actually draws. The module header is allowed to explain the
+    # platform, and does.
+    import re
+
+    drawn = re.findall(r'b"([^"]*)"', source)
+    joined = " | ".join(drawn)
+    for diagnostic in (
+        "guest ticks",
+        "no calendar",
+        "no day groups",
+        "Registry and recents",
+    ):
+        assert diagnostic not in joined, f"the screen still prints {diagnostic!r}"
+    # The feed's own empty state is allowed to name what it is empty of -- that
+    # is the user reading their own device, not a note to a reviewer. Only the
+    # header prose was the problem.
+    assert "Recent activity from your apps and system." in joined
+
+
+def test_recents_cards_do_not_draw_a_stand_in_for_a_thumbnail():
+    """Recents must not paint a picture it never received.
+
+    WHY: `surface_snapshot` copies window metadata only and documents that it
+    does not expose client pixel memory, and the Studio's DRM/KMS panel reports
+    that no live compositor-plane telemetry is exposed by the guest. The old
+    renderer drew a per-app fake screen -- traffic-light window chrome and
+    saturated fills from no design token file -- which is worse than admitting
+    there is no preview.
+    """
+    source = read("apps/launcher/src/screens/activity.rs")
+    for fabricated in (
+        "0xFFEF4444",
+        "0xFFF59E0B",
+        "0xFF10B981",
+        "org.interos.browser",
+    ):
+        assert fabricated not in source, f"recents still draws fabricated preview art: {fabricated}"
+    assert 'b"No live preview"' in source
+
+
+def test_browser_start_page_does_not_render_a_hardcoded_news_feed_or_ranking():
+    """The start page may not present invented pages as if the device knew them.
+
+    WHY: both lists it used to draw were literals. "Most Visited" named eight
+    sites on a browser with no visit counter, and "Discover" named four
+    publications that do not exist with ages measured against nothing.
+    """
+    source = read("apps/browser/src/main.rs")
+    for fabricated in (
+        "InterOS 8.2 Sovereign Microkernel Boots in 140ms",
+        "Rust Foundation",
+        "Sovereign Computing: W3C Standards on Native Microkernels",
+        'b"Most Visited"',
+    ):
+        assert fabricated not in source, f"start page still renders fabricated content: {fabricated}"
+    assert 'b"Your pages"' in source
+    # The real sources of rows must stay wired to real state.
+    assert "app.bookmarks.record(index)" in source
+    assert "app.history.entry(" in source
+
+
 def test_settings_never_advertises_unobserved_hardware_or_governor_state():
     source = read("apps/settings/src/main.rs")
     for fabricated in (

@@ -80,6 +80,16 @@ const SOURCE_NOTE_Y: usize = 132;
 /// Baseline pitch between two consecutive caption lines.
 const CAPTION_PITCH: usize = 24;
 
+/// Top of the band the filter note occupies: immediately below the pill row and
+/// no lower.
+///
+/// WHY it cannot sit further down: the first section head ("Last minute") is
+/// drawn at `SECTION_HEAD_Y`, and a caption run's box is `line_height` tall
+/// downward from its baseline. Placing the note at `PILLS_Y + PILL_H +
+/// CAPTION_PITCH` put its box across that baseline, and the two runs printed on
+/// top of each other.
+const FILTER_NOTE_Y: usize = PILLS_Y + PILL_H;
+
 /// Height of one feed row, and the pitch its stack advances by.
 const ROW_H: usize = 88;
 const ROW_PITCH: usize = 92;
@@ -888,7 +898,7 @@ fn build_events_frame(state: &LauncherState) -> EventsFrame {
     );
     let filter_note = LabelRun::new(
         HEADER_X,
-        PILLS_Y + PILL_H + CAPTION_PITCH,
+        FILTER_NOTE_Y,
         type_scale::CAPTION,
         b"Filter the feed by its real source.",
         theme.text_muted,
