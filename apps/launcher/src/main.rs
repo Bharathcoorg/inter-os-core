@@ -1074,11 +1074,23 @@ fn render_band(surface: u32, state: &LauncherState, min_y: usize, max_y: usize) 
     let start_offset = min_y * W;
     let end_offset = max_y * W;
     let mut offset = start_offset;
+    // WHY these three counters: a frame that takes seconds cannot be reasoned
+    // about as one number. The three things a repaint does -- call the pixel
+    // function, hand the result to the kernel, and tell the kernel we are still
+    // alive -- cost wildly different amounts and only two of them are the
+    // renderer's fault. Attributing them is the difference between knowing that
+    // the pixel path needs rewriting and guessing that it does.
+    let mut draw_ticks = 0u64;
+    let mut write_ticks = 0u64;
+    let mut beat_ticks = 0u64;
     while offset < end_offset {
+        let t_beat = std::get_ticks(1).ok();
         let _ = std::service_heartbeat(10);
+        beat_ticks += tick_delta(t_beat, std::get_ticks(1).ok());
         let count = (end_offset - offset).min(CHUNK);
         let mut x = offset % W;
         let mut y = offset / W;
+        let t_draw = std::get_ticks(1).ok();
         unsafe {
             for i in 0..count {
                 CHUNK_BUF[i] = draw(x, y, state);
@@ -1088,10 +1100,38 @@ fn render_band(surface: u32, state: &LauncherState, min_y: usize, max_y: usize) 
                     y += 1;
                 }
             }
+        }
+        let t_write = std::get_ticks(1).ok();
+        draw_ticks += tick_delta(t_draw, t_write);
+        unsafe {
             let _ = std::surface_write(4, surface, offset, &CHUNK_BUF[..count]);
         }
+        write_ticks += tick_delta(t_write, std::get_ticks(1).ok());
         offset += count;
     }
+    log_frame_breakdown(draw_ticks, write_ticks, beat_ticks);
+}
+
+/// Emits `[LAUNCHER] FRAMEBREAK draw= write= beat= px=`.
+///
+/// WHY a separate line from `FRAME ticks=`: the lifecycle harness keys on that
+/// exact substring and must keep working, and the breakdown is a different fact
+/// about the same frame. Splitting them lets a run attribute a slow frame
+/// without touching the contract the existing harness depends on.
+fn log_frame_breakdown(draw: u64, write: u64, beat: u64) {
+    let mut line = LineBuf::<96>::new();
+    {
+        use core::fmt::Write;
+        let _ = write!(
+            line,
+            "[LAUNCHER] FRAMEBREAK draw={} write={} beat={} px={}",
+            draw,
+            write,
+            beat,
+            W * H
+        );
+    }
+    std::log(0, line.as_str()).ok();
 }
 
 #[inline(never)]
