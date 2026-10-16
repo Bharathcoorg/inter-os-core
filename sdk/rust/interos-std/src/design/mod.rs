@@ -56,16 +56,20 @@ pub mod spacing {
 }
 
 pub mod radius {
+    // WHY these are the only names: this module also carried `SM`/`MD`/`LG`,
+    // which were the same three numbers as `CONTROL`/`CARD`/`SHEET` under
+    // different names and a different type. Two spellings of one value is how a
+    // scale stops being a scale -- a reader cannot tell whether `radius::SM`
+    // means something distinct from `radius::CONTROL`, and cannot tell which one
+    // a screen meant. Nothing referenced the short names; they are gone rather
+    // than deprecated, because a deprecation here would leave the ambiguity in
+    // place for every reader who greps for either spelling.
     pub const SMALL: usize = 8;
     pub const CONTROL: usize = 12;
     pub const CARD: usize = 18;
     pub const SHEET: usize = 24;
     pub const MAJOR: usize = 32;
     pub const PILL: usize = 999;
-
-    pub const SM: u32 = 12;
-    pub const MD: u32 = 18;
-    pub const LG: u32 = 24;
 }
 
 pub mod touch {

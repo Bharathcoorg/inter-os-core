@@ -484,7 +484,13 @@ pub const BACK_X: usize = 48;
 /// inside the content area where every other control on this surface lives.
 pub const BACK_Y: usize = 56;
 pub const BACK_S: usize = 48;
-pub const BACK_R: usize = interos_std::design::radius::CONTROL;
+/// WHY the launcher's own `radius::CONTROL` and not the SDK's: the SDK scale and
+/// the launcher's scale carry the same names at different values -- the SDK's
+/// `CONTROL` is 12 and the launcher's is 18 -- and this was the only launcher
+/// screen reaching across for the SDK one. The result was that this back pill was
+/// drawn with visibly tighter corners than every control beside it. One app
+/// should resolve its radius against one scale.
+pub const BACK_R: usize = radius::CONTROL;
 
 /// True when (`x`, `y`) is inside a rounded rectangle of `r` corner radius.
 #[inline]

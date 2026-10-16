@@ -236,6 +236,38 @@ def test_browser_start_page_does_not_render_a_hardcoded_news_feed_or_ranking():
     assert "app.history.entry(" in source
 
 
+def test_a_corner_radius_scale_has_exactly_one_spelling_per_value():
+    """Two scales that carry the same names at different values is a trap.
+
+    WHY: `interos_std::design::radius` and `launcher::theme::radius` both define
+    `CONTROL`, `CARD` and `SHEET`, at 12/18/24 and 18/24/32 respectively. A
+    screen that reaches for the wrong one renders a control with visibly
+    different corners from its siblings, and nothing in the type system objects.
+    `system_space.rs` was doing exactly that for its back pill.
+
+    The SDK module also shipped `SM`/`MD`/`LG` as second spellings of
+    `CONTROL`/`CARD`/`SHEET` under a different type. Those are removed; this
+    asserts they stay removed.
+    """
+    from pathlib import Path
+
+    sdk = read("sdk/rust/interos-std/src/design/mod.rs")
+    for alias in ("pub const SM: u32", "pub const MD: u32", "pub const LG: u32"):
+        assert alias not in sdk, f"radius re-grows a second spelling: {alias}"
+
+    # No launcher screen may reach past its own theme for a radius.
+    screens = Path(ROOT / "apps/launcher/src/screens")
+    offenders = [
+        path.name
+        for path in sorted(screens.glob("*.rs"))
+        if "design::radius" in path.read_text(encoding="utf-8")
+    ]
+    assert not offenders, (
+        "launcher screens must resolve radii from launcher::theme::radius, "
+        f"not the SDK scale: {offenders}"
+    )
+
+
 def test_settings_never_advertises_unobserved_hardware_or_governor_state():
     source = read("apps/settings/src/main.rs")
     for fabricated in (
