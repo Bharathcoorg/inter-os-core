@@ -138,6 +138,52 @@ pub fn classify_line(line: &[u8]) -> LineKind {
     }
 }
 
+/// Width of the URL the start page's page list shows one row at.
+///
+/// WHY 64 when a stored bookmark may be 128 bytes: the row is a caption, and a
+/// longer address is truncated rather than wrapped onto a second line. What
+/// matters is that the field is a fixed width, so a row is `Copy` and the
+/// per-pixel painter can read it without borrowing the app state through every
+/// `if let` between the loop and the draw call.
+pub const URL_FIELD: usize = 64;
+
+/// Copies a URL into the start page's fixed-width field, dropping one trailing
+/// `/` so a bare origin does not render as `host./`.
+///
+/// Returns the field and the number of bytes written into it.
+pub fn into_url_field(url: &[u8]) -> ([u8; URL_FIELD], usize) {
+    let mut end = url.len();
+    if end > 1 && url[end - 1] == b'/' {
+        end -= 1;
+    }
+    let end = end.min(URL_FIELD);
+    let mut out = [0u8; URL_FIELD];
+    out[..end].copy_from_slice(&url[..end]);
+    (out, end)
+}
+
+/// A one-character mark for the scheme a page was opened under.
+///
+/// WHY this exists: the start page's row used to carry a decorative tile
+/// labelled "WEB", standing in for a favicon. No favicon service is bound to
+/// this shell, so it stood for an image the browser had never loaded. This
+/// stands for something that can be read off the URL itself.
+pub fn scheme_mark(url: &[u8]) -> &'static [u8] {
+    if url.starts_with(b"https://") {
+        b"S"
+    } else if url.starts_with(b"http://") {
+        b"H"
+    } else if url.starts_with(b"gemini://") {
+        b"G"
+    } else if url.starts_with(b"interos://") || url.starts_with(b"interlayer://") {
+        b"I"
+    } else if url.starts_with(b"file://") {
+        b"F"
+    } else {
+        b"?"
+    }
+}
+
 pub const MAX_URL_LEN: usize = 128;
 pub const MAX_TITLE_LEN: usize = 64;
 pub const MAX_HISTORY_ENTRIES: usize = 8;
@@ -300,6 +346,43 @@ mod tests {
         assert_eq!(classify_line(b"> Blockquote text"), LineKind::Blockquote);
         assert_eq!(classify_line(b"=> https://example.com Link Text"), LineKind::GemtextLink);
         assert_eq!(classify_line(b"Regular paragraph prose."), LineKind::Paragraph);
+    }
+
+    #[test]
+    fn a_scheme_mark_reflects_the_url_it_was_given() {
+        assert_eq!(scheme_mark(b"https://example.org/x"), b"S");
+        assert_eq!(scheme_mark(b"http://example.org"), b"H");
+        assert_eq!(scheme_mark(b"gemini://capsule"), b"G");
+        assert_eq!(scheme_mark(b"interos://manifest.json"), b"I");
+        assert_eq!(scheme_mark(b"file:///data/notes.txt"), b"F");
+        assert_eq!(scheme_mark(b"about:blank"), b"?");
+    }
+
+    #[test]
+    fn a_url_field_drops_a_trailing_slash_from_a_bare_origin() {
+        let (field, len) = into_url_field(b"https://example.org/");
+        assert_eq!(&field[..len], b"https://example.org");
+    }
+
+    #[test]
+    fn a_url_field_keeps_a_lone_slash_as_a_path() {
+        // WHY: trimming must not be "drop a trailing slash" applied blindly. A
+        // single `/` is a path, and collapsing it to an empty field would render
+        // as no address at all.
+        let (_, len) = into_url_field(b"/");
+        assert_eq!(len, 1);
+    }
+
+    #[test]
+    fn a_url_field_is_truncated_to_the_row_width() {
+        let long = b"https://example.org/a/very/long/path/that/keeps/going/and/going/beyond/the/field";
+        assert!(
+            long.len() > URL_FIELD,
+            "the fixture must exceed the field or the truncation is untested"
+        );
+        let (field, len) = into_url_field(long);
+        assert_eq!(len, URL_FIELD);
+        assert_eq!(&field[..len], &long[..URL_FIELD]);
     }
 
     #[test]

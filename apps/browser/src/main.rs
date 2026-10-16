@@ -7,8 +7,10 @@
 //! - Chrome Start Page / New Tab:
 //!   - Google multi-color brand logo (Blue, Red, Yellow, Blue, Green, Red)
 //!   - Quick Search Pill with voice/lens affordance
-//!   - Most Visited Shortcuts Grid (Google, Wikipedia, GitHub, Rust, InterOS, News, Reddit, Docs)
-//!   - Discover / Trending News Feed with sovereign engineering updates
+//!   - "Your pages": saved bookmarks from the settings store, then this
+//!     session's visits from the navigation stack. This replaced a hardcoded
+//!     "Most Visited" grid of eight named sites and a four-card "Discover"
+//!     news feed; see `home_page_pixel` for why neither could be kept.
 //! - Web Page Rendering Engine:
 //!   - Connected via QEMU e1000/slirp network stack with active `net_socket(80)`
 //!   - Authentic Google Search Results layout with categories, link titles, green breadcrumbs,
@@ -436,6 +438,18 @@ impl History {
 
     pub fn can_back(&self) -> bool { self.pos > 0 }
     pub fn can_forward(&self) -> bool { self.pos + 1 < self.len }
+
+    /// The URL visited at `index`, oldest first, with trailing NULs trimmed.
+    ///
+    /// WHY this exists: the start page's "Recent" section lists where this
+    /// browser has actually been. That list can only be real, so it has to be
+    /// read off the navigation stack rather than assembled from a literal.
+    pub fn entry(&self, index: usize) -> Option<&[u8]> {
+        if index >= self.len { return None; }
+        let raw = &self.entries[index];
+        let n = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+        if n == 0 { None } else { Some(&raw[..n]) }
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -1038,7 +1052,7 @@ fn google_letter_color(letter_idx: usize) -> u32 {
     }
 }
 
-fn home_page_pixel(x: usize, y: usize, _app: &BrowserApp) -> u32 {
+fn home_page_pixel(x: usize, y: usize, app: &BrowserApp) -> u32 {
     // 1. Google Brand Wordmark (y 160..210, scale 2)
     if y >= 160 && y < 210 {
         let letters: [&[u8]; 6] = [b"G", b"o", b"o", b"g", b"l", b"e"];
@@ -1076,114 +1090,63 @@ fn home_page_pixel(x: usize, y: usize, _app: &BrowserApp) -> u32 {
         return c;
     }
 
-    // 3. Most Visited Shortcuts Grid (2 rows x 4 columns, y 304..480)
-    if y >= 304 && y < 480 {
-        let shortcuts: [(&[u8], &[u8], u32, u32); 8] = [
-            (b"G", b"Google", CHROME_BLUE, 0xFFE8F0FE),
-            (b"W", b"Wikipedia", CHROME_TEXT, CHROME_SURFACE),
-            (b"GH", b"GitHub", CHROME_BG, 0xFF24292E),
-            (b"R", b"Rust", 0xFFFFFFFF, 0xFFDEA584),
-            (b"IO", b"InterOS", CHROME_BLUE, 0xFFE8F0FE),
-            (b"N", b"News", CHROME_GREEN, 0xFFE6F4EA),
-            (b"r/", b"Reddit", 0xFFFFFFFF, 0xFFFF5722),
-            (b"D", b"Docs", CHROME_TEXT, CHROME_SURFACE),
-        ];
-
-        let col_w = (W - 48) / 4;
-        let row_idx = if y < 392 { 0 } else { 1 };
-        let rel_y = if row_idx == 0 { y - 304 } else { y - 392 };
-        let circle_cy = if row_idx == 0 { 334 } else { 422 };
-
-        if x >= 24 && x < W - 24 {
-            let col_idx = (x - 24) / col_w;
-            if col_idx < 4 {
-                let item_idx = row_idx * 4 + col_idx;
-                let circle_cx = 24 + col_idx * col_w + col_w / 2;
-                let dx = x as isize - circle_cx as isize;
-                let dy = y as isize - circle_cy as isize;
-                let d2 = dx * dx + dy * dy;
-
-                // 52px Circular Icon Container
-                if d2 <= 26 * 26 {
-                    let (_, _, text_col, bg_col) = shortcuts[item_idx];
-                    let (icon_text, _, _, _) = shortcuts[item_idx];
-                    let tw = font::measure_bold(icon_text, 1);
-                    if let Some(px) = text_px(x, y, circle_cx - tw / 2, circle_cy - 10, 1, icon_text, text_col, bg_col, true) {
-                        return px;
-                    }
-                    return bg_col;
-                }
-
-                // Label Underneath (rel_y 64..84)
-                if rel_y >= 60 && rel_y < 84 {
-                    let (_, label, _, _) = shortcuts[item_idx];
-                    let lw = font::measure(label, 1);
-                    let label_x = circle_cx.saturating_sub(lw / 2);
-                    let label_y = if row_idx == 0 { 366 } else { 454 };
-                    if let Some(px) = text_px(x, y, label_x, label_y, 1, label, CHROME_TEXT, CHROME_BG, false) {
-                        return px;
-                    }
-                }
-            }
-        }
-        return CHROME_BG;
-    }
-
-    // 4. Discover Feed Section Header (y 496..530)
+    // 3. Your pages: saved bookmarks, then this session's visits (y 496..1340)
+    //
+    // WHY the two bands above this list no longer exist, and what they were:
+    //
+    // A 'Most Visited' grid of eight hardcoded sites -- Google, Wikipedia,
+    // GitHub, Rust, InterOS, News, Reddit, Docs. Nothing in this shell counts
+    // visits per site: there is no counter, no ranking and no persisted history
+    // keyed by origin. 'History' is a back/forward stack, not a visit log. So the
+    // eight tiles were a fixed set presented as a personal ranking, and on a
+    // browser that had visited nothing they still appeared, ordered as though
+    // the device knew the user's habits.
+    //
+    // A 'Discover' feed of four hardcoded tuples -- headline, snippet, and a
+    // publisher with an age -- naming publications that do not exist and quoting
+    // times measured against nothing. No news source, feed reader or fetch result
+    // is bound to this shell, so every word on those cards was invented.
+    //
+    // What replaces both is the one thing this browser genuinely knows: the
+    // pages the user saved, and the pages this browser has actually visited.
+    // Both are read from real state -- 'bookmarks' from the settings store and
+    // 'history' from the navigation stack -- so a device with neither shows an
+    // empty band, which is the truth.
     if y >= 496 && y < 530 {
-        if let Some(px) = text_px(x, y, 28, 504, 1, b"Discover", CHROME_TEXT, CHROME_BG, true) {
+        if let Some(px) = text_px(x, y, 28, 504, 1, b"Your pages", CHROME_TEXT, CHROME_BG, true) {
             return px;
         }
         return CHROME_BG;
     }
 
-    // 5. Discover Article Cards (y 530..1340)
-    let cards: [(&[u8], &[u8], &[u8]); 4] = [
-        (
-            b"InterOS 8.2 Sovereign Microkernel Boots in 140ms on Bare-Metal",
-            b"Memory safety at scale with zero ambient authority and hardware KMS.",
-            b"InterOS Engineering \xc2\xb7 2h ago",
-        ),
-        (
-            b"Rust in Modern Operating Systems: Deterministic Real-Time UI",
-            b"Zero-heap rendering loops eliminate stutter in mobile scanout.",
-            b"Rust Foundation \xc2\xb7 4h ago",
-        ),
-        (
-            b"Chrome Mobile Web Engine & QEMU e1000 Hardware Acceleration",
-            b"Full networking stack with socket multiplexing and slirp connectivity.",
-            b"Web Platform Standards \xc2\xb7 6h ago",
-        ),
-        (
-            b"Sovereign Computing: W3C Standards on Native Microkernels",
-            b"Decentralized secure browsing without proprietary telemetry buses.",
-            b"Tech Sovereign \xc2\xb7 8h ago",
-        ),
-    ];
-
+    // 5. Saved pages and recent visits (y 536..1340)
     let card_h = 180;
     let card_gap = 16;
     for i in 0..4 {
         let card_y = 536 + i * (card_h + card_gap);
         let card_rect = Rect::new(24, card_y, W - 48, card_h);
+        let Some(row) = home_row(app, i) else { continue };
+
         if let Some(c) = draw_rounded_rect(x, y, card_rect, 16, CHROME_CARD, Some(CHROME_CARD_BORDER), 1) {
-            let (title, desc, meta) = cards[i];
-            // Title (Bold 16px)
-            if let Some(px) = text_px(x, y, 44, card_y + 16, 1, title, CHROME_TEXT, CHROME_CARD, true) {
+            if let Some(px) = text_px(x, y, 44, card_y + 24, 1, row.title, CHROME_TEXT, CHROME_CARD, true) {
                 return px;
             }
-            // Snippet Description
-            if let Some(px) = text_px(x, y, 44, card_y + 48, 1, desc, CHROME_MUTED, CHROME_CARD, false) {
+            let url = &row.url[..row.url_len];
+            if let Some(px) = text_px(x, y, 44, card_y + 56, 1, url, CHROME_MUTED, CHROME_CARD, false) {
                 return px;
             }
-            // Source & Timestamp Meta
-            if let Some(px) = text_px(x, y, 44, card_y + card_h - 32, 1, meta, CHROME_BLUE, CHROME_CARD, false) {
+            if let Some(px) = text_px(x, y, 44, card_y + card_h - 32, 1, row.meta, CHROME_BLUE, CHROME_CARD, false) {
                 return px;
             }
-            // Right Thumbnail Illustration Card (64x64)
+            // The right-hand tile used to be a decorative "WEB" thumbnail. There
+            // is no favicon service bound to this shell, so it becomes the
+            // source's initial in the scheme colour -- a mark that means
+            // "this is the scheme you opened it under", not a picture of a
+            // site the browser has never seen.
             let thumb = Rect::new(W - 48 - 84, card_y + card_h - 96, 72, 72);
             if let Some(tc) = draw_rounded_rect(x, y, thumb, 10, CHROME_SURFACE, None, 0) {
-                if let Some(px) = text_px(x, y, thumb.x + 16, thumb.y + 26, 1, b"WEB", CHROME_MUTED, tc, true) {
+                let tw = font::measure_bold(row.scheme_mark, 1);
+                if let Some(px) = text_px(x, y, thumb.x + 36 - tw / 2, thumb.y + 26, 1, row.scheme_mark, CHROME_MUTED, tc, true) {
                     return px;
                 }
                 return tc;
@@ -1194,6 +1157,84 @@ fn home_page_pixel(x: usize, y: usize, _app: &BrowserApp) -> u32 {
 
     CHROME_BG
 }
+
+/// One row of the start page's page list: where it came from and what to call
+/// it.
+///
+/// WHY the URL is an owned array and not a borrow: this row is built inside a
+/// per-pixel painter, so a borrow would have to be threaded through every `if
+/// let` between the loop and the draw call. Copying into a fixed array keeps
+/// `HomeRow` `Copy` and costs 64 bytes of stack per row, which is the trade this
+/// shell makes everywhere else. It also keeps the painter free of `unsafe`.
+struct HomeRow {
+    /// "Saved" or "Visited" -- where the row came from, not a page title.
+    title: &'static [u8],
+    url: [u8; URL_FIELD],
+    url_len: usize,
+    meta: &'static [u8],
+    scheme_mark: &'static [u8],
+}
+
+/// Reads the `index`-th real entry for the start page's page list.
+///
+/// WHY bookmarks first and history second: a saved page is a thing the user
+/// chose and a visit is a thing that happened, and every start page this design
+/// system was drawn against puts the chosen thing first.
+///
+/// WHY the labels are fixed strings and only the URL is real data: there is no
+/// network fetch and no favicon service behind this shell that could give a
+/// stored entry a real title. "Saved" and "Visited" describe where the row came
+/// from and are true whatever the entry happens to be. Inventing a headline for
+/// a URL the shell has merely stored would put the fabricated-article problem
+/// back under a different heading.
+///
+/// WHY this returns `None` rather than a placeholder: on a device with no saved
+/// pages and no history the list is genuinely empty, and the painter leaves that
+/// band blank instead of drawing four rows of "nothing here".
+fn home_row(app: &BrowserApp, index: usize) -> Option<HomeRow> {
+    let saved = app.bookmarks.len();
+    if index < saved {
+        let rec = app.bookmarks.record(index)?;
+        // WHY `url_bytes` and not a slice over `url`: the record's own accessor is
+        // what already knows where the stored string ends, and re-deriving that
+        // here is a second answer to a question the type already answered.
+        let url = rec.url_bytes();
+        let (field, shown) = into_url_field(url);
+        return Some(HomeRow {
+            title: b"Saved",
+            url_len: shown,
+            meta: b"Bookmark",
+            scheme_mark: scheme_mark(url),
+            url: field,
+        });
+    }
+
+    let visited = app.history.len();
+    let from_history = index - saved;
+    if from_history >= visited {
+        return None;
+    }
+    // Newest visit first, and the browser's own start page is skipped so the
+    // list does not open with `about:blank`.
+    let entry = app.history.entry(visited - 1 - from_history)?;
+    if entry == b"about:blank" {
+        return None;
+    }
+    let (field, shown) = into_url_field(entry);
+    Some(HomeRow {
+        title: b"Visited",
+        url_len: shown,
+        meta: b"From this session",
+        scheme_mark: scheme_mark(entry),
+        url: field,
+    })
+}
+
+/// The row's URL field and scheme mark are pure helpers over a byte string, so
+/// they live in the library where the host test harness can reach them: this
+/// binary is `#![no_main]` with `test = false`, and a test module here would
+/// never be compiled.
+use browser::{into_url_field, scheme_mark, URL_FIELD};
 
 // -----------------------------------------------------------------------------
 // Web Page & Search Results Viewport Renderer
