@@ -373,7 +373,10 @@ impl ThreadStore {
         } else {
             let idx = self.len as usize;
             let id = self.next_id.max(1);
-            if id >= u32::MAX {
+            // WHY `==` rather than `>=`: u32::MAX is the largest value of the
+            // type, so `>=` can only ever be true when the two are equal. The
+            // guard exists because the next id is `id + 1`, which would wrap.
+            if id == u32::MAX {
                 self.state = StoreState::Full;
                 return false;
             }
