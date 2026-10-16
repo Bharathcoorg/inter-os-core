@@ -382,6 +382,41 @@ def test_touchpad_uses_valid_guest_contact_actions_and_reports_real_request_resu
     assert "coords: 'guest_framebuffer'" in source
 
 
+def test_the_wallpaper_refactor_cannot_change_a_colour():
+    """Hoisting the scene's derived tones out of the per-pixel path must be a
+    pure speed change.
+
+    WHY this needs pinning: the wallpaper is full-bleed, so a one-unit drift in
+    any stop is visible across the whole screen. `SceneRef::new` and
+    `scene_pixel` have to agree exactly, and the near-skyline clamp has to
+    resolve identically -- it is per column, so a refactor that hoisted it
+    wrongly would pass every other test and still render a wrong ridge.
+    """
+    source = read("sdk/rust/interos-std/src/design/walls.rs")
+    code = _code_only(source)
+
+    assert "pub struct SceneRef" in code
+    assert "pub fn scene_pixel_ref" in code
+
+    # The clamp is the subtle part: `near` must still be floored to `far + 3`,
+    # per column. Resolving it once is the whole point; resolving it wrongly is
+    # invisible until a ridge inverts.
+    assert "near[i] = if n < far + 3 { far + 3 } else { n };" in code
+
+    # The resolved path must read the resolved tones rather than re-derive them,
+    # which is the entire saving.
+    ref_body = source.split("pub fn scene_pixel_ref", 1)[-1].split("\n}\n", 1)[0]
+    for rederived in ("scene.horizon()", "scene.shadow()", "scene.mist()"):
+        assert rederived not in ref_body, (
+            f"scene_pixel_ref re-derives {rederived} on the per-pixel path again"
+        )
+
+    # And the home surface must actually be on the resolved path.
+    home = _code_only(read("apps/launcher/src/screens/home.rs"))
+    assert "backdrop_ref(&p.scene_ref, x, y)" in home
+    assert "SceneRef::new(state.home_wallpaper)" in home
+
+
 def test_calculator_and_vault_do_not_paint_fabricated_status_or_success():
     calculator = read("apps/calculator/src/main.rs")
     vault = read("apps/vault/src/main.rs")

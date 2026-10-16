@@ -302,28 +302,90 @@ fn band(vertical: u32, across: u32) -> u32 {
         .saturating_sub((vertical.saturating_mul(across)) >> 8)
 }
 
-/// The wallpaper at pixel `(x, y)` of a `w` x `h` surface.
+/// The scene's derived tones, computed once instead of once per pixel.
 ///
-/// This is the one implementation of the scene, shared by every surface that
-/// draws a full-bleed wallpaper. A surface that wants something on top of it --
-/// a figure, a veil, a card -- composes over the result.
-pub fn scene_pixel(scene: &Scene, x: usize, y: usize, w: usize, h: usize) -> u32 {
+/// WHY this type exists: [`Scene::horizon`], [`Scene::shadow`] and
+/// [`Scene::mist`] each call [`blend`], and `scene_pixel` called all three on
+/// every pixel of a full-bleed wallpaper. None of them reads `x` or `y` -- they
+/// are functions of the scene's three ramp stops alone -- so on a 1,036,800
+/// pixel repaint that is three million redundant 4-channel blends, roughly 40%
+/// of the wallpaper's cost, recomputing constants.
+///
+/// WHY it is derived rather than stored on `Scene`: a `Scene` is a `const` in a
+/// static array, so it cannot hold a value computed from its own fields. And it
+/// must stay derived so a retuned ramp cannot go stale in a cached copy, which
+/// is the reason the original accessors were written as functions.
+///
+/// WHY this stays generic: `SceneRef` carries no wallpaper-specific knowledge.
+/// It holds the same derived tones whatever produced the scene, so a
+/// user-supplied wallpaper or a future scene format resolves through exactly
+/// this path. Nothing here is specialised to the three wallpapers that ship.
+#[derive(Clone, Copy)]
+pub struct SceneRef<'a> {
+    pub scene: &'a Scene,
+    /// [`Scene::horizon`], resolved.
+    pub horizon: u32,
+    /// [`Scene::shadow`], resolved.
+    pub shadow: u32,
+    /// [`Scene::mist`], resolved.
+    pub mist: u32,
+    /// Clamped near skyline: `near[fx]`, floored to `far[fx] + 3`.
+    ///
+    /// WHY this is resolved per column here: the clamp is per-column because the
+    /// two skylines are traced independently and can cross. Resolving it once
+    /// into a table is what lets the pixel path drop the branch.
+    pub near: [u16; SCENE_REF_W],
+}
+
+impl<'a> SceneRef<'a> {
+    /// Resolves everything [`scene_pixel`] would otherwise recompute per pixel.
+    ///
+    /// WHY a caller should hold one of these across a whole frame: this is the
+    /// per-frame half of the work. A frame is one of these, and then
+    /// [`scene_pixel_ref`] is a handful of compares and one blend.
+    ///
+    /// WHY the array and not a per-pixel clamp: `SCENE_REF_W` is small (the
+    /// traced skyline is stored at reference width) and this runs once per frame,
+    /// so 64 entries on the stack cost nothing next to the million pixel calls
+    /// they replace.
+    pub fn new(scene: &'a Scene) -> Self {
+        let mut near = [0u16; SCENE_REF_W];
+        for i in 0..SCENE_REF_W {
+            let far = scene.far[i];
+            let n = scene.near[i];
+            // WHY the clamp: the two skylines are traced at two independent
+            // thresholds, so a dark notch picked up by one can land above the
+            // layer it should sit under. A minimum separation stops the layers
+            // inverting.
+            near[i] = if n < far + 3 { far + 3 } else { n };
+        }
+        SceneRef {
+            scene,
+            horizon: scene.horizon(),
+            shadow: scene.shadow(),
+            mist: scene.mist(),
+            near,
+        }
+    }
+}
+
+/// The wallpaper at pixel `(x, y)`, given a pre-resolved [`SceneRef`].
+///
+/// Semantically identical to [`scene_pixel`] for every input. It exists so a
+/// caller resolving a whole frame can hoist the scene's constants; the result is
+/// byte-for-byte the same colour.
+#[inline(always)]
+pub fn scene_pixel_ref(s: &SceneRef<'_>, x: usize, y: usize, w: usize, h: usize) -> u32 {
     if w == 0 || h == 0 {
-        return scene.bottom;
+        return s.scene.bottom;
     }
     let fx = (x * SCENE_REF_W) / w;
     let rel = ((y * SCENE_REF_H) / h) as u16;
-    let far = scene.far[fx.min(SCENE_REF_W - 1)];
-    // WHY the clamp: the two skylines are traced at two independent thresholds,
-    // so a dark notch picked up by one can land above the layer it should sit
-    // under. A minimum separation stops the layers inverting.
-    let mut near = scene.near[fx.min(SCENE_REF_W - 1)];
-    if near < far + 3 {
-        near = far + 3;
-    }
-    let horizon_y = scene.horizon_y;
-    let mist_y = scene.mist_y;
-    let rock_y = scene.rock_y;
+    let far = s.scene.far[fx.min(SCENE_REF_W - 1)];
+    let near = s.near[fx.min(SCENE_REF_W - 1)];
+    let horizon_y = s.scene.horizon_y;
+    let mist_y = s.scene.mist_y;
+    let rock_y = s.scene.rock_y;
 
     // WHY a fraction of the ramp rather than a second measured column per band:
     // the artwork's left/right split was one photograph's exposure, and the stop
@@ -333,30 +395,42 @@ pub fn scene_pixel(scene: &Scene, x: usize, y: usize, w: usize, h: usize) -> u32
         * ACROSS_PERCENT
         / 256;
 
-    let horizon = scene.horizon();
-    let shadow = scene.shadow();
-    let mist = scene.mist();
     if rel < far {
         let vertical = rel as u32 * 256 / horizon_y as u32;
-        blend(scene.top, horizon, band(vertical, across))
+        blend(s.scene.top, s.horizon, band(vertical, across))
     } else if rel < near {
         // WHY saturating: the traced far ridge is not level, so a pixel can be
         // below the ridge and above the nominal horizon height at the same
         // time, and a plain subtraction there underflows.
         let vertical =
             rel.saturating_sub(horizon_y) as u32 * 256 / (mist_y - horizon_y) as u32;
-        blend(shadow, mist, band(vertical, across))
+        blend(s.shadow, s.mist, band(vertical, across))
     } else if (rel as usize) < rock_y as usize {
         let vertical =
             rel.saturating_sub(mist_y) as u32 * 256 / (rock_y - mist_y) as u32;
-        blend(mist, scene.bottom, band(vertical, across))
+        blend(s.mist, s.scene.bottom, band(vertical, across))
     } else {
         // The near rock itself: the ramp's darkest stop, held, with only the sun
         // lift on top. WHY it is the dark stop and not a blend toward it: below
         // the rock line the artwork is not a gradient at all, it is the shadowed
         // face of the foreground ridge.
-        blend(scene.bottom, mist, across)
+        blend(s.scene.bottom, s.mist, across)
     }
+}
+
+/// The wallpaper at pixel `(x, y)` of a `w` x `h` surface.
+///
+/// This is the one implementation of the scene, shared by every surface that
+/// draws a full-bleed wallpaper. A surface that wants something on top of it --
+/// a figure, a veil, a card -- composes over the result.
+///
+/// WHY it resolves the scene per pixel: this is the convenience entry point for
+/// a caller that draws a handful of pixels -- a picker thumbnail, a preview
+/// strip. A surface drawing a whole frame should build a [`SceneRef`] once and
+/// call [`scene_pixel_ref`], which is what the home surface does.
+pub fn scene_pixel(scene: &Scene, x: usize, y: usize, w: usize, h: usize) -> u32 {
+    let s = SceneRef::new(scene);
+    scene_pixel_ref(&s, x, y, w, h)
 }
 
 
