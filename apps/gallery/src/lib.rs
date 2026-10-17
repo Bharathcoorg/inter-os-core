@@ -173,6 +173,26 @@ impl VideoCodec {
     }
 }
 
+/// Modern media gallery tabs
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum GalleryTab {
+    Photos = 0,
+    Videos = 1,
+    Albums = 2,
+    Screenshots = 3,
+}
+
+impl GalleryTab {
+    pub fn from_index(index: usize) -> Self {
+        match index {
+            1 => GalleryTab::Videos,
+            2 => GalleryTab::Albums,
+            3 => GalleryTab::Screenshots,
+            _ => GalleryTab::Photos,
+        }
+    }
+}
+
 /// Video player runtime state with playback controls.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct VideoPlayerState {
@@ -180,6 +200,7 @@ pub struct VideoPlayerState {
     pub position_ms: u32,
     pub duration_ms: u32,
     pub is_fullscreen: bool,
+    pub is_fill: bool,
     pub codec: VideoCodec,
     pub width: u32,
     pub height: u32,
@@ -192,6 +213,7 @@ impl VideoPlayerState {
             position_ms: 0,
             duration_ms,
             is_fullscreen: false,
+            is_fill: false,
             codec,
             width: 720,
             height: 1280,
@@ -200,6 +222,10 @@ impl VideoPlayerState {
 
     pub fn toggle_play(&mut self) {
         self.is_playing = !self.is_playing;
+    }
+
+    pub fn toggle_aspect(&mut self) {
+        self.is_fill = !self.is_fill;
     }
 
     pub fn advance_ticks(&mut self, ticks: u32) {

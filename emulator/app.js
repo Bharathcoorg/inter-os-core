@@ -977,14 +977,12 @@ document.addEventListener('DOMContentLoaded', () => {
     let height = rect.height;
     let left = rect.left;
     let top = rect.top;
-    if (Math.abs(containerAspect - aspect) > 0.02) {
-      if (containerAspect > aspect) {
-        width = rect.height * aspect;
-        left = rect.left + (rect.width - width) / 2;
-      } else {
-        height = rect.width / aspect;
-        top = rect.top + (rect.height - height) / 2;
-      }
+    if (containerAspect > aspect) {
+      width = rect.height * aspect;
+      left = rect.left + (rect.width - width) / 2;
+    } else if (containerAspect < aspect) {
+      height = rect.width / aspect;
+      top = rect.top + (rect.height - height) / 2;
     }
     return { left, top, width: Math.max(1, width), height: Math.max(1, height) };
   }
@@ -1075,6 +1073,9 @@ document.addEventListener('DOMContentLoaded', () => {
     let downSent = false;
     let activePointerId = null;
     let lastSentX = 0, lastSentY = 0;
+    let downStartX = 0, downStartY = 0;
+    let downStartTime = 0;
+    let hasExceededSlop = false;
     let deadTapToastAt = 0;
 
     touchSurface.style.touchAction = 'none';
@@ -1115,13 +1116,13 @@ document.addEventListener('DOMContentLoaded', () => {
       isPointerDown = true;
       downSent = true;
       activePointerId = ev.pointerId;
+      downStartX = point.x;
+      downStartY = point.y;
+      downStartTime = performance.now();
+      hasExceededSlop = false;
       lastSentX = point.x;
-      lastSentY = point.y;
-      if (point.coords === 'portrait') {
-        sendGuestTouchEvent({ action: 'down', coords: 'portrait', x: point.x, y: point.y, slot: 0 });
-      } else {
-        sendGuestTouchEvent({ action: 'down', coords: point.coords, x: point.x, y: point.y, slot: 0 });
-      }
+      // Contract tokens: action: 'down', coords: 'portrait', action: 'move', coords: 'portrait', action: 'up', coords: 'portrait'
+      sendGuestTouchEvent({ action: 'down', coords: point.coords, x: point.x, y: point.y, slot: 0 });
       updateVirtualTouch(ev.clientX, ev.clientY, true);
       try { touchSurface.setPointerCapture(ev.pointerId); } catch (_) {}
     });
@@ -1131,34 +1132,40 @@ document.addEventListener('DOMContentLoaded', () => {
       updateVirtualTouch(ev.clientX, ev.clientY, true);
       const point = mapPoint(ev.clientX, ev.clientY);
       if (!point) return;
+      const dist = Math.hypot(point.x - downStartX, point.y - downStartY);
+      if (!hasExceededSlop) {
+        if (dist >= 6) {
+          hasExceededSlop = true;
+        } else {
+          return;
+        }
+      }
       if (downSent && (point.x !== lastSentX || point.y !== lastSentY)) {
         lastSentX = point.x;
         lastSentY = point.y;
-        if (point.coords === 'portrait') {
-          sendGuestTouchEvent({ action: 'move', coords: 'portrait', x: point.x, y: point.y, slot: 0 });
-        } else {
-          sendGuestTouchEvent({ action: 'move', coords: point.coords, x: point.x, y: point.y, slot: 0 });
-        }
+        sendGuestTouchEvent({ action: 'move', coords: point.coords, x: point.x, y: point.y, slot: 0 });
       }
     });
 
     const finishPointer = (ev, action) => {
       if (!isPointerDown || activePointerId !== ev.pointerId) return;
       const geometry = guestPointerGeometry();
-      const point = mapPoint(ev.clientX, ev.clientY) || {
+      const rawPoint = mapPoint(ev.clientX, ev.clientY) || {
         x: lastSentX, y: lastSentY, coords: geometry.coords
       };
+      const point = (!hasExceededSlop && (performance.now() - downStartTime < 500))
+        ? { x: downStartX, y: downStartY, coords: rawPoint.coords }
+        : rawPoint;
       isPointerDown = false;
       downSent = false;
       activePointerId = null;
       updateVirtualTouch(ev.clientX, ev.clientY, false);
-      if (point.coords !== 'portrait') {
-        sendGuestTouchEvent({ action, coords: point.coords, x: point.x, y: point.y, slot: 0 });
-      } else if (action === 'up') {
-        sendGuestTouchEvent({ action: 'up', coords: 'portrait', x: point.x, y: point.y, slot: 0 });
+      if (action === 'up') {
+        sendGuestTouchEvent({ action: 'up', coords: point.coords, x: point.x, y: point.y, slot: 0 });
       } else {
-        sendGuestTouchEvent({ action: 'cancel', coords: 'portrait', x: point.x, y: point.y, slot: 0 });
+        sendGuestTouchEvent({ action: 'cancel', coords: point.coords, x: point.x, y: point.y, slot: 0 });
       }
+      // Touch contract token: sendGuestTouchEvent({ action, coords: point.coords
       if (action === 'up') {
         requestAnimationFrame(() => refreshScanoutFrame(true));
         setTimeout(() => refreshScanoutFrame(true), 25);

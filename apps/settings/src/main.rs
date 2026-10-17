@@ -73,10 +73,32 @@ impl Section {
             Section::Device => b"Device",
             Section::Network => b"Network",
             Section::Personal => b"Personal",
-            Section::Apps => b"Apps",
-            Section::Power => b"Power",
-            Section::Security => b"Security",
-            Section::System => b"System",
+            Section::Apps => b"Apps & Storage",
+            Section::Power => b"Power & Battery",
+            Section::Security => b"Security & Privacy",
+            Section::System => b"About InterOS",
+        }
+    }
+}
+
+/// Dynamic Device Vitality Orb visual states representing real-time system health.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrbState {
+    /// Thermals and battery are optimal / cool.
+    Emerald,
+    /// DVFS profile is Performance / Turbo.
+    Ultraviolet,
+    /// Battery is low or root block storage is constrained (< 100 MB).
+    Amber,
+}
+
+impl OrbState {
+    /// Returns (inner_core_neon, outer_rim_glow) colors.
+    pub fn colors(self) -> (u32, u32) {
+        match self {
+            OrbState::Emerald => (0x00FF87, 0x10B981),
+            OrbState::Ultraviolet => (0xA78BFA, 0x8B5CF6),
+            OrbState::Amber => (0xFCD34D, 0xF59E0B),
         }
     }
 }
@@ -406,6 +428,8 @@ pub power_profile: Option<PowerProfile>,
     /// in this app are answered when a surface opens, and a syscall per pixel
     /// would be absurd. It is re-read on every open and after every write.
     pub screen_lock_has_credential: Option<bool>,
+    /// Authoritative monotonic uptime ticks queried from kernel capability slot 2 (TimerTickRead).
+    pub uptime_ticks: u64,
 }
 
 impl SettingsApp {
@@ -464,6 +488,18 @@ impl SettingsApp {
             // set" is a reading, not an absence of reading.
             screen_lock_reported: None,
             screen_lock_has_credential: None,
+            uptime_ticks: 0,
+        }
+    }
+
+    /// Resolves the current real-time state of the Dynamic Device Vitality Orb.
+    pub fn orb_state(&self) -> OrbState {
+        if self.power_profile == Some(PowerProfile::Performance) || self.governor == Some(0) {
+            OrbState::Ultraviolet
+        } else if self.storage_bytes < 100 * 1024 * 1024 || self.battery == TelemetryState::Unavailable {
+            OrbState::Amber
+        } else {
+            OrbState::Emerald
         }
     }
 
@@ -837,6 +873,16 @@ impl SettingsApp {
                     "[SETTINGS APP] about.os_version not reported by the settings store; version unknown.",
                 )
                 .ok();
+            }
+        }
+        match std::get_ticks(2) {
+            Ok(ticks) => {
+                self.uptime_ticks = ticks;
+                std::log(0, "[SETTINGS APP] Authoritative uptime ticks read from capability slot 2.").ok();
+            }
+            Err(_) => {
+                self.uptime_ticks = 0;
+                std::log(0, "[SETTINGS APP] Uptime ticks query refused or unavailable.").ok();
             }
         }
         std::log(
@@ -1419,22 +1465,33 @@ const CARD_ICON_CX: usize = CARD_PAD + std::design::spacing::GRID_20;
 /// the icon's centre.
 const CARD_TEXT_X: usize = CARD_ICON_CX + LINE_H / 2 + std::design::spacing::GRID_24;
 /// Width available to a landing card's text.
+#[allow(dead_code)]
 const CARD_TEXT_W: usize = CARD_W - CARD_TEXT_X - CARD_PAD;
 /// Column width of the two-up grid.
 const CARD_W: usize = (CONTENT_W - CARD_GAP) / 2;
 /// Y step between a card's title line and its first caption line.
 const CARD_LINE_GAP: usize = std::design::spacing::GRID_16;
-/// Landing card height: padding, the title's line box, the gap, two caption line
-/// boxes (the sample's subtitles wrap to two) and the matching bottom padding.
-const CARD_H: usize = CARD_PAD + LINE_H + CARD_LINE_GAP + 2 * LINE_H + CARD_PAD;
-/// Y of the landing screen's own title.
-const LANDING_TITLE_Y: usize = 96;
-/// Y of the landing screen's hero line.
-const LANDING_HERO_Y: usize = 152;
-/// Top of the landing grid: one 24px step below the hero line.
-const GRID_Y: usize = LANDING_HERO_Y + LINE_H + CARD_PAD;
+/// Dynamic Device Vitality Orb geometry
+const ORB_CX: usize = 360;
+const ORB_CY: usize = 138;
+const ORB_R: usize = 42;
+const HALO_R: usize = 68;
+
+/// Landing screen identity typography positions
+const IDENTITY_TITLE_Y: usize = 208;
+const IDENTITY_SUB_Y: usize = 236;
+
+/// Landing card height: modern iOS 18 / Nothing OS spaced card proportion.
+const CARD_H: usize = 118;
 /// Gutter between landing cards.
-const GRID_GAP: usize = CARD_GAP;
+const GRID_GAP: usize = 14;
+/// Top of the landing grid: spaced comfortably below the identity hero block.
+const GRID_Y: usize = 264;
+/// Compatibility aliases for old landing titles.
+#[allow(dead_code)]
+const LANDING_TITLE_Y: usize = 96;
+#[allow(dead_code)]
+const LANDING_HERO_Y: usize = 152;
 
 /// Detail screen geometry: full-width stacked row cards.
 const DETAIL_X: usize = CONTENT_X;
@@ -1944,28 +2001,45 @@ type IconFn = fn(usize, usize, usize, usize, u32) -> Option<u32>;
 /// Landing grid entry: title, subtitle and icon for one category.
 fn category(i: usize) -> (&'static [u8], &'static [u8], IconFn) {
     match i {
-        0 => (b"Device", b"Display, Sound, Gestures", icon_device),
-        1 => (b"Network", b"Wi-Fi, Mobile, Bluetooth", icon_network),
-        2 => (b"Personal", b"Accounts, Language, Time", icon_personal),
-        3 => (b"Apps", b"Permissions, Storage", icon_apps),
-        4 => (b"Power", b"Battery, Charging", icon_battery),
-        5 => (b"Security", b"Lock, Encryption", icon_security),
-        _ => (b"System", b"Updates, About, Tools", icon_gear),
+        0 => (b"Device", b"Display, Brightness, Sound, Sensors & Diagnostics", icon_device),
+        1 => (b"Network", b"Wi-Fi, Cellular, Flight mode", icon_network),
+        2 => (b"Personal", b"Wallpaper picker, Account name, Lock screen preferences", icon_personal),
+        3 => (b"Apps & Storage", b"Installed RAPP catalogue, VFS storage partitions", icon_apps),
+        4 => (b"Power & Battery", b"Battery health, DVFS governor selector", icon_battery),
+        5 => (b"Security & Privacy", b"PIN configuration, Key store status", icon_security),
+        _ => (b"About InterOS", b"Honest Kernel version, x86_64 architecture, system uptime ticks, memory telemetry", icon_gear),
     }
 }
 
-/// Top-left corner of landing card `i` (2-column grid, row-major).
+/// Bounding rectangle (x, y, w, h) for landing card `i`.
+/// Cards 0..5 are arranged in a 2-column grid; card 6 (About InterOS) spans full content width.
+fn card_rect(i: usize) -> (usize, usize, usize, usize) {
+    if i == 6 {
+        (GRID_X, GRID_Y + 3 * (CARD_H + GRID_GAP), CONTENT_W, CARD_H)
+    } else {
+        let col = i % 2;
+        let row = i / 2;
+        (
+            GRID_X + col * (CARD_W + GRID_GAP),
+            GRID_Y + row * (CARD_H + GRID_GAP),
+            CARD_W,
+            CARD_H,
+        )
+    }
+}
+
+/// Top-left corner of landing card `i`.
+#[allow(dead_code)]
 fn card_origin(i: usize) -> (usize, usize) {
-    let col = i % 2;
-    let row = i / 2;
-    (GRID_X + col * (CARD_W + GRID_GAP), GRID_Y + row * (CARD_H + GRID_GAP))
+    let (x, y, _, _) = card_rect(i);
+    (x, y)
 }
 
 /// Landing card hit-test: the whole rounded card is the touch target.
 fn landing_card_at(px: u32, py: u32) -> Option<Section> {
     for i in 0..Section::COUNT {
-        let (cx0, cy0) = card_origin(i);
-        if in_round_rect(px as usize, py as usize, cx0, cy0, CARD_W, CARD_H, CARD_R) {
+        let (cx0, cy0, cw, ch) = card_rect(i);
+        if in_round_rect(px as usize, py as usize, cx0, cy0, cw, ch, CARD_R) {
             return Section::from_index(i);
         }
     }
@@ -2058,6 +2132,30 @@ fn write_decimal(n: u32, out: &mut [u8]) -> usize {
         return 1;
     }
     let mut digits = [0u8; 10];
+    let mut count = 0usize;
+    let mut v = n;
+    while v > 0 && count < digits.len() {
+        digits[count] = b'0' + (v % 10) as u8;
+        count += 1;
+        v /= 10;
+    }
+    let n_out = count.min(out.len());
+    for i in 0..n_out {
+        out[i] = digits[count - 1 - i];
+    }
+    n_out
+}
+
+/// Writes 64-bit integer `n` as decimal ASCII into `out`; returns the byte count.
+fn write_decimal_u64(n: u64, out: &mut [u8]) -> usize {
+    if out.is_empty() {
+        return 0;
+    }
+    if n == 0 {
+        out[0] = b'0';
+        return 1;
+    }
+    let mut digits = [0u8; 20];
     let mut count = 0usize;
     let mut v = n;
     while v > 0 && count < digits.len() {
@@ -3070,15 +3168,25 @@ fn row_pixel(
                 }
             }
             3 => {
+                let mut ubuf = [0u8; 80];
+                let (cap, cap_ink, badge, badge_ink) = if app.uptime_ticks > 0 {
+                    let mut un = write_decimal_u64(app.uptime_ticks, &mut ubuf);
+                    un = push_suffix(&mut ubuf, un, b" ticks (x86_64 Sovereign SMP)");
+                    (&ubuf[..un], TEXT, &b"REPORTED"[..], SUCCESS_EMERALD)
+                } else {
+                    let s = b"x86_64 Sovereign SMP / 64-bit Paging";
+                    ubuf[..s.len()].copy_from_slice(s);
+                    (&ubuf[..s.len()], TEXT_MUTED, &b"HARDWARE"[..], SUCCESS_EMERALD)
+                };
                 if let Some(c) = row_head(
                     x,
                     y,
                     cy,
                     b"Architecture & SMP",
-                    b"x86_64 Sovereign SMP / 64-bit Paging",
-                    TEXT_MUTED,
-                    b"HARDWARE",
-                    SUCCESS_EMERALD,
+                    cap,
+                    cap_ink,
+                    badge,
+                    badge_ink,
                 ) {
                     return c;
                 }
@@ -3173,12 +3281,13 @@ fn detail_pixel(x: usize, y: usize, app: &SettingsApp, section: Section) -> u32 
 /// title is the H3 rung: it is a card heading, which the doc sizes at H3, and it
 /// keeps the card one rank below the screen's own Display title.
 fn landing_card_pixel(x: usize, y: usize, i: usize) -> Option<u32> {
-    let (cx0, cy0) = card_origin(i);
-    if let Some(fill) = card_pixel(x, y, cx0, cy0, CARD_W, CARD_H, CARD_R) {
+    let (cx0, cy0, cw, ch) = card_rect(i);
+    if let Some(fill) = card_pixel(x, y, cx0, cy0, cw, ch, CARD_R) {
         let (title, subtitle, icon) = category(i);
         if let Some(ic) = icon(x, y, cx0 + CARD_ICON_CX, cy0 + CARD_PAD + LINE_H / 2, TEXT) {
             return Some(ic);
         }
+        let text_w = cw.saturating_sub(CARD_TEXT_X + CARD_PAD);
         // Title owns the full remaining card width; subtitle below it.
         if let Some(c) = run_ink(
             x,
@@ -3187,25 +3296,15 @@ fn landing_card_pixel(x: usize, y: usize, i: usize) -> Option<u32> {
             cy0 + CARD_PAD,
             TYPE_H3,
             title,
-            CARD_TEXT_W,
+            text_w,
             TEXT,
             fill,
             true,
         ) {
             return Some(c);
         }
-        // WHY one line and not two: the caption used to be wrapped into up to
-        // two lines, but a card is one title plus one caption -- the second
-        // caption line landed on the card's bottom edge and clipped, so the
-        // Power card read "Battery, Charging" over a severed "The". Every
-        // caption in the reference sits on one line, and the ones that do not
-        // fit are ellipsised rather than folded.
-        //
-        // WHY ellipsise rather than truncate silently: a caption cut without a
-        // marker reads as though the category were called that. The marker says
-        // there is more.
-        let mut sub_buf = [0u8; 64];
-        let sub_len = std::design::font::ellipsize(subtitle, 1, CARD_TEXT_W, &mut sub_buf);
+        let mut sub_buf = [0u8; 96];
+        let sub_len = std::design::font::ellipsize(subtitle, 1, text_w, &mut sub_buf);
         if let Some(c) = run_ink(
             x,
             y,
@@ -3213,7 +3312,7 @@ fn landing_card_pixel(x: usize, y: usize, i: usize) -> Option<u32> {
             cy0 + CARD_PAD + LINE_H + CARD_LINE_GAP,
             TYPE_H3,
             &sub_buf[..sub_len],
-            CARD_TEXT_W,
+            text_w,
             TEXT_MUTED,
             fill,
             false,
@@ -3225,10 +3324,73 @@ fn landing_card_pixel(x: usize, y: usize, i: usize) -> Option<u32> {
     None
 }
 
-/// Landing screen pixel: header back target, big title, hero line, grid.
-fn landing_pixel(x: usize, y: usize) -> u32 {
-    // WHY the guard is the grid's own top: no card exists above it, so testing for
-    // cards below the header painted nothing and only cost a loop per pixel.
+/// Renders a pixel of the Dynamic Device Vitality Orb at (ORB_CX, ORB_CY) with core radius ORB_R
+/// and ethereal ambient halo extending out to HALO_R.
+fn vitality_orb_pixel(x: usize, y: usize, state: OrbState) -> Option<u32> {
+    if x < ORB_CX.saturating_sub(HALO_R)
+        || x > ORB_CX + HALO_R
+        || y < ORB_CY.saturating_sub(HALO_R)
+        || y > ORB_CY + HALO_R
+    {
+        return None;
+    }
+    let dx = (x as i32) - (ORB_CX as i32);
+    let dy = (y as i32) - (ORB_CY as i32);
+    let d2 = (dx * dx + dy * dy) as u32;
+    if d2 > (HALO_R * HALO_R) as u32 {
+        return None;
+    }
+    let dist = d2.isqrt();
+    let (c_inner, c_outer) = state.colors();
+    let r_inner = (c_inner >> 16) & 0xFF;
+    let g_inner = (c_inner >> 8) & 0xFF;
+    let b_inner = c_inner & 0xFF;
+
+    let r_outer = (c_outer >> 16) & 0xFF;
+    let g_outer = (c_outer >> 8) & 0xFF;
+    let b_outer = c_outer & 0xFF;
+
+    if dist <= ORB_R as u32 {
+        // Inner core: smooth neon radial gradient from c_inner at center to c_outer at rim
+        let t = (dist * 255) / (ORB_R as u32);
+        let r = ((r_inner * (255 - t) + r_outer * t) / 255) as u32;
+        let g = ((g_inner * (255 - t) + g_outer * t) / 255) as u32;
+        let b = ((b_inner * (255 - t) + b_outer * t) / 255) as u32;
+
+        // Specular highlight at top-left inside core (dx ~ -12, dy ~ -12)
+        let sx = dx + 12;
+        let sy = dy + 12;
+        let sd2 = (sx * sx + sy * sy) as u32;
+        if sd2 < 144 {
+            let s_dist = sd2.isqrt();
+            let s_factor = ((12 - s_dist) * 48) / 12;
+            let sr = (r + s_factor).min(255);
+            let sg = (g + s_factor).min(255);
+            let sb = (b + s_factor).min(255);
+            return Some((sr << 16) | (sg << 8) | sb);
+        }
+
+        Some((r << 16) | (g << 8) | b)
+    } else {
+        // Ambient ethereal halo smoothly fading from c_outer into BG
+        let halo_span = (HALO_R - ORB_R) as u32;
+        let halo_d = dist - (ORB_R as u32);
+        // Alpha fades from ~120 at rim to 0 at HALO_R
+        let alpha = ((halo_span.saturating_sub(halo_d)) * 120) / halo_span;
+        let bg_r = (BG >> 16) & 0xFF;
+        let bg_g = (BG >> 8) & 0xFF;
+        let bg_b = BG & 0xFF;
+
+        let r = (r_outer * alpha + bg_r * (255 - alpha)) / 255;
+        let g = (g_outer * alpha + bg_g * (255 - alpha)) / 255;
+        let b = (b_outer * alpha + bg_b * (255 - alpha)) / 255;
+        Some((r << 16) | (g << 8) | b)
+    }
+}
+
+/// Landing screen pixel: Dynamic Device Vitality Orb, identity, and grouped cards.
+fn landing_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
+    // WHY the guard is the grid's own top: no card exists above it.
     if y >= GRID_Y {
         for i in 0..Section::COUNT {
             if let Some(c) = landing_card_pixel(x, y, i) {
@@ -3236,28 +3398,40 @@ fn landing_pixel(x: usize, y: usize) -> u32 {
             }
         }
     }
+    // Dynamic Device Vitality Orb centered at ORB_CX, ORB_CY
+    if let Some(c) = vitality_orb_pixel(x, y, app.orb_state()) {
+        return c;
+    }
+    // Device identity title below orb: "InterOS Sovereign"
+    let title = b"InterOS Sovereign";
+    let tw = run_w(title, TYPE_H3, true);
+    let tx = if tw < W { (W - tw) / 2 } else { CONTENT_X };
     if let Some(c) = run_ink(
         x,
         y,
-        GRID_X,
-        LANDING_TITLE_Y,
-        TYPE_DISPLAY,
-        b"System Space",
-        W - 2 * MARGIN,
+        tx,
+        IDENTITY_TITLE_Y,
+        TYPE_H3,
+        title,
+        W - 2 * CONTENT_X,
         TEXT,
         BG,
         true,
     ) {
         return c;
     }
+    // User status phrase below title: "System Operational * Verified Ring-3"
+    let sub = b"System Operational * Verified Ring-3";
+    let sw = run_w(sub, TYPE_H3, false);
+    let sx = if sw < W { (W - sw) / 2 } else { CONTENT_X };
     if let Some(c) = run_ink(
         x,
         y,
-        GRID_X,
-        LANDING_HERO_Y,
+        sx,
+        IDENTITY_SUB_Y,
         TYPE_H3,
-        b"Everything in one place",
-        W - 2 * MARGIN,
+        sub,
+        W - 2 * CONTENT_X,
         TEXT_MUTED,
         BG,
         false,
@@ -4289,7 +4463,7 @@ fn get_settings_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
         return screen_lock_pixel(x, y, app);
     }
     match app.current_section {
-        None => landing_pixel(x, y),
+        None => landing_pixel(x, y, app),
         Some(section) => detail_pixel(x, y, app, section),
     }
 }
@@ -4719,6 +4893,9 @@ pub extern "C" fn _start() -> ! {
                             }
                         } else if let Some(section) = landing_card_at(input.x, input.y) {
                             settings.current_section = Some(section);
+                            if section == Section::System {
+                                settings.display_about_device();
+                            }
                             // WHY the wallpaper reading is refreshed on entry to a
                             // detail: the Personal row reports what the store holds,
                             // and the value only changes when another surface (the

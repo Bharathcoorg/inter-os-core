@@ -1686,12 +1686,12 @@ html, body.dark-theme {
   max-width: 380px !important;
   width: auto !important;
   height: min(740px, calc(100vh - 110px)) !important;
-  border-radius: 44px !important;
-  padding: 10px !important;
+  border-radius: 8px !important;
+  padding: 6px !important;
 }
 
 .emulator-stage-wrapper.landscape .device-screen {
-  border-radius: 38px !important;
+  border-radius: 2px !important;
   aspect-ratio: 1 / 2 !important;
 }
 
@@ -2696,7 +2696,7 @@ body[data-theme="cyberdeck_hud"] .device-screen {
   max-width: min(440px, calc((100vh - 84px) / 2));
   background: #18181B;
   border: 3px solid #27272A;
-  border-radius: 40px;
+  border-radius: 8px;
   padding: 6px;
   position: relative;
   box-shadow:
@@ -2784,7 +2784,7 @@ body.studio-focus-mode .emulator-side-toolbar {
   height: 100%;
   aspect-ratio: 1 / 2;
   background: #000000;
-  border-radius: 34px;
+  border-radius: 2px;
   overflow: hidden;
   position: relative;
   display: flex;

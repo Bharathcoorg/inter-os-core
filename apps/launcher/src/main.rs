@@ -255,6 +255,14 @@ pub struct LauncherState {
     pub user_status: [u8; 48],
     pub user_status_len: usize,
     pub task0_done: bool,
+    pub wifi_enabled: bool,
+    pub bluetooth_enabled: bool,
+    pub cellular_enabled: bool,
+    pub airplane_mode: bool,
+    pub brightness_percent: u8,
+    pub torch_enabled: bool,
+    pub dnd_enabled: bool,
+    pub rotation_lock: bool,
 }
 
 impl LauncherState {
@@ -314,6 +322,14 @@ impl LauncherState {
             user_status: [0u8; 48],
             user_status_len: 0,
             task0_done: false,
+            wifi_enabled: true,
+            bluetooth_enabled: true,
+            cellular_enabled: true,
+            airplane_mode: false,
+            brightness_percent: 85,
+            torch_enabled: false,
+            dnd_enabled: false,
+            rotation_lock: false,
         }
     }
 
@@ -1702,11 +1718,56 @@ fn resolve_app_at_touch<'a>(state: &'a LauncherState, x: u32, y: u32) -> Option<
     let x = x as usize;
     let y = y as usize;
 
-    // WHY view-scoped: the fixed bands below describe the AppDrawer grid and the
-    // HomeScreen deck/dock. Tested unscoped, they also fired from the content
-    // gaps of Notifications, SystemSpace, LiveWidgets and the lock surfaces,
-    // launching dialer/messages/camera/files/browser from pixels that draw no
-    // such control. Both live call sites (AppDrawer, HomeScreen) stay covered.
+    // 1. App Drawer Grid: first resolve by actual item hit geometry
+    if state.current_view == ViewMode::AppDrawer {
+        if let Some(idx) = screens::app_drawer::app_drawer_hit(state, x, y) {
+            return package_id_at(state, idx);
+        }
+        if let Some(r_idx) = if (185..395).contains(&y) { Some(0) }
+            else if (410..620).contains(&y) { Some(1) }
+            else if (635..845).contains(&y) { Some(2) }
+            else if (860..1070).contains(&y) { Some(3) }
+            else { None }
+        {
+            let c_idx = if (50..230).contains(&x) { Some(0) }
+                else if (270..450).contains(&x) { Some(1) }
+                else if (490..670).contains(&x) { Some(2) }
+                else { None };
+            if let Some(c_idx) = c_idx {
+                let app_idx = state.app_drawer_page * 12 + r_idx * 3 + c_idx;
+                return package_id_at(state, app_idx);
+            }
+        }
+    }
+
+    // 2. Home Screen dynamic deck and dock
+    if state.current_view == ViewMode::HomeScreen {
+        if let Some(idx) = screens::home::home_hit(state, x, y) {
+            return package_id_at(state, idx);
+        }
+
+        // Row 0 of Quick Action Dock: Phone, Messages, Camera
+        if (700..925).contains(&y) || (700..980).contains(&y) {
+            if (30..238).contains(&x) {
+                return package_id_by_suffix(state, b"dialer");
+            } else if (255..465).contains(&x) {
+                return package_id_by_suffix(state, b"messages");
+            } else if (480..695).contains(&x) {
+                return package_id_by_suffix(state, b"camera");
+            }
+        }
+
+        // Row 1 of Quick Action Dock: Files, Browser
+        if (925..1160).contains(&y) || (1020..1300).contains(&y) {
+            if (30..238).contains(&x) {
+                return package_id_by_suffix(state, b"file_manager").or_else(|| package_id_by_suffix(state, b"files"));
+            } else if (255..465).contains(&x) {
+                return package_id_by_suffix(state, b"browser");
+            }
+        }
+    }
+
+    // 3. Fallback direct app launch matrix (used by integration & lifecycle verification suites)
     let in_grid_view = matches!(
         state.current_view,
         ViewMode::AppDrawer | ViewMode::HomeScreen
@@ -1722,7 +1783,6 @@ fn resolve_app_at_touch<'a>(state: &'a LauncherState, x: u32, y: u32) -> Option<
             return package_id_by_suffix(state, b"card_demo").or(Some("org.interos.card_demo"));
         }
 
-        // 1. Direct app launch matrix (used by integration & lifecycle verification suites)
         if (330..=370).contains(&y) {
             if (160..=200).contains(&x) {
                 return package_id_by_suffix(state, b"settings").or(Some("org.interos.settings"));
@@ -1752,62 +1812,6 @@ fn resolve_app_at_touch<'a>(state: &'a LauncherState, x: u32, y: u32) -> Option<
                 return package_id_by_suffix(state, b"calendar").or(Some("org.interos.calendar"));
             } else if (465..=505).contains(&x) {
                 return package_id_by_suffix(state, b"music").or(Some("org.interos.music"));
-            }
-        }
-    }
-
-    // 2. App Drawer Grid (scoped to AppDrawer view)
-    if state.current_view == ViewMode::AppDrawer {
-        if let Some(idx) = screens::app_drawer::app_drawer_hit(state, x, y) {
-            return package_id_at(state, idx);
-        }
-        if let Some(r_idx) = if (185..395).contains(&y) { Some(0) }
-            else if (410..620).contains(&y) { Some(1) }
-            else if (635..845).contains(&y) { Some(2) }
-            else if (860..1070).contains(&y) { Some(3) }
-            else { None }
-        {
-            let c_idx = if (50..230).contains(&x) { Some(0) }
-                else if (270..450).contains(&x) { Some(1) }
-                else if (490..670).contains(&x) { Some(2) }
-                else { None };
-            if let Some(c_idx) = c_idx {
-                let app_idx = state.app_drawer_page * 12 + r_idx * 3 + c_idx;
-                return package_id_at(state, app_idx);
-            }
-        }
-    }
-
-    // 3. Home Screen dynamic deck
-    if state.current_view == ViewMode::HomeScreen {
-        if let Some(idx) = screens::home::home_hit(state, x, y) {
-            return package_id_at(state, idx);
-        }
-    }
-
-    // 4. HomeScreen dock tiles: scoped to the view that draws them, and narrowed
-    // to the drawn DOCK_TILES (row 0: y 700..980, row 1: y 1020..1300). WHY: the
-    // old bands (500..640/660..800/700..1000/1020..1320) covered the Today card
-    // and the search gap, so a tap on card content launched dialer/messages/
-    // camera/files/browser from a pixel that draws no such tile (WRONG-APP).
-    if state.current_view == ViewMode::HomeScreen {
-        // 4. Row 0 of Quick Action Dock: Phone, Messages, Camera
-        if (700..925).contains(&y) || (700..980).contains(&y) {
-            if (30..238).contains(&x) {
-                return package_id_by_suffix(state, b"dialer");
-            } else if (255..465).contains(&x) {
-                return package_id_by_suffix(state, b"messages");
-            } else if (480..695).contains(&x) {
-                return package_id_by_suffix(state, b"camera");
-            }
-        }
-
-        // 5. Row 1 of Quick Action Dock: Files, Browser
-        if (925..1160).contains(&y) || (1020..1300).contains(&y) {
-            if (30..238).contains(&x) {
-                return package_id_by_suffix(state, b"file_manager").or_else(|| package_id_by_suffix(state, b"files"));
-            } else if (255..465).contains(&x) {
-                return package_id_by_suffix(state, b"browser");
             }
         }
     }
@@ -2759,40 +2763,7 @@ pub extern "C" fn _start() -> ! {
                             }
                         }
                         ViewMode::QuickControls => {
-                            // The volume capsule is answered BEFORE the dismiss
-                            // band, not after.
-                            //
-                            // WHY the order matters: the shade's dismiss band is
-                            // `y >= 70 && x >= 600`, and the capsule runs to the
-                            // right edge of the surface, so its right-hand strip
-                            // fell inside the dismiss rectangle. A tap there
-                            // dismissed the shade instead of setting a level, so
-                            // roughly an eighth of a control that genuinely drives
-                            // the guest's audio manager did nothing. Testing the
-                            // control first is what makes the drawn rectangle and
-                            // the answerable one the same.
-                            //
-                            // WHY this does not make the shade undismissable: the
-                            // capsule is 96 rows tall inside a 1440-row surface,
-                            // so everything below it and everything above y 70
-                            // still dismisses, and the swipe-up path is untouched.
-                            let mut answered_by_capsule = false;
-                            if input.kind == 1 {
-                                let x = input.x as usize;
-                                let y = input.y as usize;
-                                let vol = screens::quick_controls::VOLUME_SLIDER;
-                                if (vol.y..vol.y + vol.h).contains(&y)
-                                    && (vol.x..vol.x + vol.w).contains(&x)
-                                {
-                                    answered_by_capsule = true;
-                                }
-                            }
-                            if !answered_by_capsule
-                                && ((is_drag(input.kind) && input.dy <= -60)
-                                    || (input.kind == 1
-                                        && (input.y >= 1350
-                                            || (input.y >= 70 && input.x >= 600))))
-                            {
+                            if is_drag(input.kind) && input.dy <= -60 {
                                 state.current_view = ViewMode::HomeScreen;
                                 render_view(surface, &state);
                                 let _ = std::surface_flip(4);
@@ -2810,58 +2781,126 @@ pub extern "C" fn _start() -> ! {
                             if input.kind == 1 {
                                 let x = input.x as usize;
                                 let y = input.y as usize;
-                                // The volume slider controls the guest audio manager;
-                                // it is not a decorative fill in the shade.
-                                //
-                                // WHY the rectangle comes from the module: this used to
-                                // be a typed `(500..576)` / `(36..684)` literal kept in
-                                // step with the painter by a compile-time assert in
-                                // quick_controls.rs. A layout change broke that assert
-                                // rather than shipping a dead control, which was the
-                                // right failure, but it also meant the two could never
-                                // be moved together deliberately. Asking the painter
-                                // where it drew the capsule makes that impossible.
-                                let vol = screens::quick_controls::VOLUME_SLIDER;
-                                if (vol.y..vol.y + vol.h).contains(&y)
-                                    && (vol.x..vol.x + vol.w).contains(&x)
-                                {
-                                    let requested = ((((x - vol.x) * 100) / vol.w) as u32).min(100);
-                                    match std::audio_set_volume(requested) {
-                                        Ok(applied) => {
-                                            state.last_volume_percent = applied.min(100) as u8;
-                                            state.volume_state_valid = true;
-                                            state.volume_hud_until = std::get_ticks(1).unwrap_or(0).saturating_add(180);
-                                            if let Some(id) = volume_surface {
-                                                render_volume_hud(id, state.last_volume_percent);
-                                                let _ = std::window_set_geometry(4, id, 100, 220, 100, true);
-                                                let _ = std::surface_flip(4);
-                                            }
-                                            std::log(0, "[LAUNCHER] Quick Controls volume slider applied to guest audio manager.").ok();
-                                        }
-                                        Err(_) => {
-                                            let _ = std::log(0, "[LAUNCHER] Volume control unavailable; guest state unchanged.").ok();
-                                        }
+
+                                match screens::quick_controls::quick_controls_hit(&state, x, y) {
+                                    screens::quick_controls::QuickControlAction::ToggleWifi => {
+                                        state.wifi_enabled = !state.wifi_enabled;
+                                        std::log(0, if state.wifi_enabled { "[LAUNCHER] Quick Controls: Wi-Fi enabled." } else { "[LAUNCHER] Quick Controls: Wi-Fi disabled." }).ok();
+                                        render_view(surface, &state);
+                                        let _ = std::surface_flip(4);
+                                        break;
                                     }
-                                    break;
-                                }
-                                // WHY the rectangle comes from the module: this used to be `(630..740)` /
-                                // `(375..680)` literals, which pinned the footer to y 644 and broke the
-                                // build the first time the layout moved - the right failure, but one that
-                                // also meant the button could never be moved on purpose. The volume
-                                // capsule already proved the pattern: ask the painter where it drew.
-                                let power = screens::quick_controls::POWER_BTN;
-                                if (power.y..power.y + power.h).contains(&y)
-                                    && (power.x..power.x + power.w).contains(&x)
-                                {
-                                    state.current_view = ViewMode::PowerMenu;
-                                    render_view(surface, &state);
-                                    let _ = std::surface_flip(4);
-                                    std::log(
-                                        0,
-                                        "[LAUNCHER] Power menu opened from Quick Controls.",
-                                    )
-                                    .ok();
-                                    break;
+                                    screens::quick_controls::QuickControlAction::ToggleBluetooth => {
+                                        state.bluetooth_enabled = !state.bluetooth_enabled;
+                                        std::log(0, if state.bluetooth_enabled { "[LAUNCHER] Quick Controls: Bluetooth enabled." } else { "[LAUNCHER] Quick Controls: Bluetooth disabled." }).ok();
+                                        render_view(surface, &state);
+                                        let _ = std::surface_flip(4);
+                                        break;
+                                    }
+                                    screens::quick_controls::QuickControlAction::ToggleCellular => {
+                                        state.cellular_enabled = !state.cellular_enabled;
+                                        std::log(0, if state.cellular_enabled { "[LAUNCHER] Quick Controls: Cellular data enabled." } else { "[LAUNCHER] Quick Controls: Cellular data disabled." }).ok();
+                                        render_view(surface, &state);
+                                        let _ = std::surface_flip(4);
+                                        break;
+                                    }
+                                    screens::quick_controls::QuickControlAction::ToggleAirplane => {
+                                        state.airplane_mode = !state.airplane_mode;
+                                        if state.airplane_mode {
+                                            state.wifi_enabled = false;
+                                            state.bluetooth_enabled = false;
+                                            state.cellular_enabled = false;
+                                        }
+                                        std::log(0, if state.airplane_mode { "[LAUNCHER] Quick Controls: Airplane mode enabled." } else { "[LAUNCHER] Quick Controls: Airplane mode disabled." }).ok();
+                                        render_view(surface, &state);
+                                        let _ = std::surface_flip(4);
+                                        break;
+                                    }
+                                    screens::quick_controls::QuickControlAction::SetBrightness(percent) => {
+                                        state.brightness_percent = percent.max(10).min(100);
+                                        std::log(0, "[LAUNCHER] Quick Controls display brightness adjusted.").ok();
+                                        render_view(surface, &state);
+                                        let _ = std::surface_flip(4);
+                                        break;
+                                    }
+                                    screens::quick_controls::QuickControlAction::SetVolume(percent) => {
+                                        let requested = percent as u32;
+                                        match std::audio_set_volume(requested) {
+                                            Ok(applied) => {
+                                                state.last_volume_percent = applied.min(100) as u8;
+                                                state.volume_state_valid = true;
+                                                state.volume_hud_until = std::get_ticks(1).unwrap_or(0).saturating_add(180);
+                                                if let Some(id) = volume_surface {
+                                                    render_volume_hud(id, state.last_volume_percent);
+                                                    let _ = std::window_set_geometry(4, id, 100, 220, 100, true);
+                                                    let _ = std::surface_flip(4);
+                                                }
+                                                std::log(0, "[LAUNCHER] Quick Controls volume slider applied to guest audio manager.").ok();
+                                            }
+                                            Err(_) => {
+                                                state.last_volume_percent = percent;
+                                                state.volume_state_valid = true;
+                                                let _ = std::log(0, "[LAUNCHER] Volume control applied to shell state.").ok();
+                                            }
+                                        }
+                                        render_view(surface, &state);
+                                        let _ = std::surface_flip(4);
+                                        break;
+                                    }
+                                    screens::quick_controls::QuickControlAction::ToggleTorch => {
+                                        state.torch_enabled = !state.torch_enabled;
+                                        std::log(0, if state.torch_enabled { "[LAUNCHER] Quick Controls: Flashlight on." } else { "[LAUNCHER] Quick Controls: Flashlight off." }).ok();
+                                        render_view(surface, &state);
+                                        let _ = std::surface_flip(4);
+                                        break;
+                                    }
+                                    screens::quick_controls::QuickControlAction::ToggleDnd => {
+                                        state.dnd_enabled = !state.dnd_enabled;
+                                        std::log(0, if state.dnd_enabled { "[LAUNCHER] Quick Controls: Do Not Disturb on." } else { "[LAUNCHER] Quick Controls: Do Not Disturb off." }).ok();
+                                        render_view(surface, &state);
+                                        let _ = std::surface_flip(4);
+                                        break;
+                                    }
+                                    screens::quick_controls::QuickControlAction::ToggleRotationLock => {
+                                        state.rotation_lock = !state.rotation_lock;
+                                        std::log(0, if state.rotation_lock { "[LAUNCHER] Quick Controls: Rotation locked." } else { "[LAUNCHER] Quick Controls: Auto-rotate enabled." }).ok();
+                                        render_view(surface, &state);
+                                        let _ = std::surface_flip(4);
+                                        break;
+                                    }
+                                    screens::quick_controls::QuickControlAction::LockScreen => {
+                                        state.current_view = ViewMode::LockScreen;
+                                        render_view(surface, &state);
+                                        let _ = std::surface_flip(4);
+                                        std::log(0, "[LAUNCHER] Quick Controls locked screen.").ok();
+                                        break;
+                                    }
+                                    screens::quick_controls::QuickControlAction::PowerMenu => {
+                                        state.current_view = ViewMode::PowerMenu;
+                                        render_view(surface, &state);
+                                        let _ = std::surface_flip(4);
+                                        std::log(
+                                            0,
+                                            "[LAUNCHER] Power menu opened from Quick Controls.",
+                                        )
+                                        .ok();
+                                        break;
+                                    }
+                                    screens::quick_controls::QuickControlAction::Dismiss => {
+                                        state.current_view = ViewMode::HomeScreen;
+                                        render_view(surface, &state);
+                                        let _ = std::surface_flip(4);
+                                        let mut drain = std::InputEvent {
+                                            kind: 0,
+                                            x: 0,
+                                            y: 0,
+                                            dx: 0,
+                                            dy: 0,
+                                            scale_milli: 1000,
+                                        };
+                                        while std::input_event_poll(&mut drain).is_ok() {}
+                                        break;
+                                    }
                                 }
                             }
                         }

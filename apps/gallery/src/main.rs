@@ -27,6 +27,7 @@
 
 #![no_std]
 #![no_main]
+#![allow(dead_code)]
 
 mod outline_text;
 
@@ -43,7 +44,7 @@ use std::design::walls;
 pub use gallery::{
     decode_bmp, decode_image, decode_ppm, decode_qoi, decode_raw, encode_ppm,
     has_image_suffix, has_video_suffix, is_media_file, media_at_with_storage,
-    Filter, Media, StorageMediaItem, VideoCodec, VideoPlayerState,
+    Filter, GalleryTab, Media, StorageMediaItem, VideoCodec, VideoPlayerState,
     MAX_STORAGE_ITEMS,
 };
 
@@ -64,6 +65,8 @@ const INVERSE: u32 = color::SURFACE;
 const ACCENT_SKY: u32 = 0xFF2563EB;
 const ACCENT_AMBER: u32 = 0xFFF59E0B;
 const DANGER_CRIMSON: u32 = 0xFFEF4444;
+const NEON_CYAN: u32 = 0xFF00E5FF;
+const NEON_BLUE: u32 = 0xFF38BDF8;
 
 /// Capability slot that holds `FileSystemRead` for the `app_gallery` task.
 ///
@@ -148,8 +151,20 @@ const DETAIL_DEL: Rect = Rect::new(W - 80, 32, 48, 48);
 const PLAY_PAUSE_BTN: Rect = Rect::new(W / 2 - 28, DETAIL_VIEW_Y1 + 16, 56, 56);
 const SCRUB_BAR: Rect = Rect::new(MARGIN, DETAIL_VIEW_Y1 + 84, W - 2 * MARGIN, 20);
 const FULLSCREEN_BTN: Rect = Rect::new(W - MARGIN - 100, DETAIL_VIEW_Y1 + 114, 100, 36);
+const ASPECT_BTN: Rect = Rect::new(W - 80, 32, 60, 40);
+const DETAIL_INFO: Rect = Rect::new(W / 2 - 40, H - 100, 80, 48);
+const PHOTO_FAV_BTN: Rect = Rect::new(MARGIN + 40, H - 100, 80, 48);
+const PHOTO_DEL_BTN: Rect = Rect::new(W - MARGIN - 120, H - 100, 80, 48);
 
-const PILL_LABELS: [&[u8]; 4] = [b"All", b"Wallpapers", b"Photos", b"Videos"];
+const TAB_LABELS: [&[u8]; 4] = [b"Photos", b"Videos", b"Albums", b"Screenshots"];
+const TAB_Y: usize = 144;
+const TAB_H: usize = 48;
+
+const VIDEO_COL_W: usize = (W - 2 * MARGIN - 16) / 2;
+const VIDEO_COL_X: [usize; 2] = [MARGIN, MARGIN + VIDEO_COL_W + 16];
+const VIDEO_ROW_H: usize = 230;
+
+const PILL_LABELS: [&[u8]; 4] = [b"Photos", b"Videos", b"Albums", b"Screenshots"];
 const NAV_LABELS: [&[u8]; 3] = [b"Photos", b"Albums", b"Places"];
 
 // -----------------------------------------------------------------------------
@@ -683,6 +698,10 @@ pub struct GalleryApp {
     pub storage_count: usize,
     /// Native video player state when playing a video.
     pub video_player: Option<VideoPlayerState>,
+    /// Modern flagship tab selection.
+    pub tab: GalleryTab,
+    /// Whether info overlay sheet is visible in photo viewer.
+    pub show_info_overlay: bool,
     /// Decoded image buffer for detailed viewing.
     pub detail_rgba: [u8; 36 * 72 * 4],
     pub detail_rgba_len: usize,
@@ -693,8 +712,10 @@ pub struct GalleryApp {
 impl GalleryApp {
     pub const fn new() -> Self {
         Self {
+            tab: GalleryTab::Photos,
             filter: Filter::All,
             open: None,
+            show_info_overlay: false,
             detail_title: b"",
             detail_title_buf: [0u8; 48],
             detail_title_len: 0,
@@ -828,6 +849,114 @@ impl GalleryApp {
                 }
                 let _ = std::fs_close(fd);
             }
+        }
+    }
+
+    pub fn photos_count(&self) -> usize {
+        let mut count = walls::SCENES.len() + PHOTOS.len();
+        for i in 0..self.storage_count {
+            if !self.storage_items[i].is_video {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    pub fn photo_at(&self, mut index: usize) -> Option<Media> {
+        if index < walls::SCENES.len() {
+            return Some(Media::Wallpaper(index));
+        }
+        index -= walls::SCENES.len();
+        if index < PHOTOS.len() {
+            return Some(Media::Photo(index));
+        }
+        index -= PHOTOS.len();
+        let mut photo_seen = 0;
+        for i in 0..self.storage_count {
+            if !self.storage_items[i].is_video {
+                if photo_seen == index {
+                    return Some(Media::StorageItem(i));
+                }
+                photo_seen += 1;
+            }
+        }
+        None
+    }
+
+    pub fn videos_count(&self) -> usize {
+        let mut count = 0;
+        for i in 0..self.storage_count {
+            if self.storage_items[i].is_video {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    pub fn video_at(&self, index: usize) -> Option<usize> {
+        let mut video_seen = 0;
+        for i in 0..self.storage_count {
+            if self.storage_items[i].is_video {
+                if video_seen == index {
+                    return Some(i);
+                }
+                video_seen += 1;
+            }
+        }
+        None
+    }
+
+    pub fn screenshots_count(&self) -> usize {
+        let mut count = 0;
+        for i in 0..self.storage_count {
+            let item = &self.storage_items[i];
+            if item.name[..item.name_len].starts_with(b"screenshot_") {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    pub fn screenshot_at(&self, index: usize) -> Option<usize> {
+        let mut seen = 0;
+        for i in 0..self.storage_count {
+            let item = &self.storage_items[i];
+            if item.name[..item.name_len].starts_with(b"screenshot_") {
+                if seen == index {
+                    return Some(i);
+                }
+                seen += 1;
+            }
+        }
+        None
+    }
+
+    pub fn album_count(&self, album_idx: usize) -> usize {
+        match album_idx {
+            0 => {
+                let mut c = 0;
+                for i in 0..self.storage_count {
+                    let it = &self.storage_items[i];
+                    if !it.is_video && !it.name[..it.name_len].starts_with(b"screenshot_") {
+                        c += 1;
+                    }
+                }
+                c
+            }
+            1 => self.screenshots_count(),
+            2 => {
+                let mut c = 0;
+                for i in 0..self.storage_count {
+                    let it = &self.storage_items[i];
+                    let p = &it.path[..it.path_len];
+                    if p.starts_with(b"/storage/pictures") || p.starts_with(b"/storage/videos") {
+                        c += 1;
+                    }
+                }
+                c
+            }
+            3 => walls::SCENES.len(),
+            _ => 0,
         }
     }
 }
@@ -1178,6 +1307,41 @@ fn pill_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
     None
 }
 
+/// Modern flagship media suite tab bar with neon cyan active underline indicator.
+fn tab_bar_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
+    if y < TAB_Y || y >= TAB_Y + TAB_H {
+        return None;
+    }
+
+    let tab_w = W / 4;
+    let tab_idx = (x / tab_w).min(3);
+    let x0 = tab_idx * tab_w;
+    let is_active = (app.tab as usize) == tab_idx;
+
+    // Active Neon Cyan Underline Indicator (height 4px at bottom)
+    if is_active && y >= TAB_Y + TAB_H - 4 && y < TAB_Y + TAB_H {
+        let line_w = 90;
+        let lx0 = x0 + (tab_w - line_w) / 2;
+        if x >= lx0 && x < lx0 + line_w {
+            return Some(NEON_CYAN);
+        }
+    }
+
+    if y == TAB_Y + TAB_H - 1 {
+        return Some(BORDER);
+    }
+
+    // Tab Label Text
+    let label = TAB_LABELS[tab_idx];
+    let text_color = if is_active { TEXT } else { MUTED };
+    let text_y = TAB_Y + (TAB_H.saturating_sub(font::line_height(2))) / 2;
+    if let Some(c) = text_centered(x, y, x0, text_y, tab_w, 2, label, text_color, SURFACE) {
+        return Some(c);
+    }
+
+    Some(SURFACE)
+}
+
 // -----------------------------------------------------------------------------
 // Grid band
 // -----------------------------------------------------------------------------
@@ -1351,31 +1515,258 @@ fn catalogue_pixel(x: usize, y: usize, app: &GalleryApp) -> u32 {
     BG
 }
 
+fn video_col_of(x: usize) -> Option<usize> {
+    for (i, x0) in VIDEO_COL_X.iter().enumerate() {
+        if x >= *x0 && x < *x0 + VIDEO_COL_W {
+            return Some(i);
+        }
+    }
+    None
+}
+
+fn video_row_of(y: usize) -> Option<usize> {
+    if y < GRID_TOP || y >= GRID_BOTTOM {
+        return None;
+    }
+    let rel = y - GRID_TOP;
+    let row = rel / VIDEO_ROW_H;
+    if rel % VIDEO_ROW_H >= 210 {
+        return None;
+    }
+    Some(row)
+}
+
+fn video_card_pixel(x: usize, y: usize, app: &GalleryApp, storage_idx: usize, col: usize, row: usize) -> u32 {
+    let x0 = VIDEO_COL_X[col];
+    let y0 = GRID_TOP + row * VIDEO_ROW_H;
+    let card_rect = Rect::new(x0, y0, VIDEO_COL_W, 210);
+
+    let Some(shape) = draw_rounded_rect(x, y, card_rect, radius::SMALL, SURFACE, Some(BORDER), 1) else {
+        return BG;
+    };
+    if shape == BORDER {
+        return BORDER;
+    }
+
+    let item = &app.storage_items[storage_idx];
+    let thumb_h = 140;
+
+    if y < y0 + thumb_h {
+        let t = ((y - y0) * 255 / thumb_h).min(255);
+        let grad = blend_argb(item.primary_color, item.secondary_color, t);
+
+        // Center play button overlay
+        let cx = x0 + VIDEO_COL_W / 2;
+        let cy = y0 + thumb_h / 2;
+        let dx = x as isize - cx as isize;
+        let dy = y as isize - cy as isize;
+        if dx * dx + dy * dy <= 400 {
+            if dx >= -4 && dx <= 8 && dy.abs() <= (dx + 4) {
+                return 0xFFFFFFFF;
+            }
+            return 0xCC0F172A;
+        }
+
+        // Duration badge in bottom-right corner: e.g. "02:45"
+        let badge_rect = Rect::new(x0 + VIDEO_COL_W - 68, y0 + thumb_h - 30, 56, 22);
+        if badge_rect.contains(x, y) {
+            let b_shape = draw_rounded_rect(x, y, badge_rect, radius::SMALL, 0xCC000000, Some(BORDER), 1);
+            if let Some(bc) = b_shape {
+                if bc != 0xCC000000 { return bc; }
+                let dur_str = b"02:45";
+                let dw = font::measure(dur_str, 1);
+                let dx_pos = badge_rect.x + (badge_rect.w.saturating_sub(dw)) / 2;
+                let dy_pos = badge_rect.y + (badge_rect.h.saturating_sub(font::line_height(1))) / 2;
+                if let Some(tc) = text(x, y, dx_pos, dy_pos, 1, dur_str, 0xFFFFFFFF, 0xCC000000) {
+                    return tc;
+                }
+                return 0xCC000000;
+            }
+        }
+
+        return grad;
+    }
+
+    if y == y0 + thumb_h {
+        return BORDER;
+    }
+
+    // Title line
+    let mut name_buf = [0u8; 32];
+    let n = font::ellipsize(&item.name[..item.name_len], 1, VIDEO_COL_W - 24, &mut name_buf);
+    if let Some(c) = text(x, y, x0 + 12, y0 + thumb_h + 12, 1, &name_buf[..n], TEXT, SURFACE) {
+        return c;
+    }
+
+    // Subtitle line (Codec / HD)
+    let meta_str: &[u8] = if item.name[..item.name_len].ends_with(b".webm") {
+        b"VP9 - 1080p HD"
+    } else if item.name[..item.name_len].ends_with(b".mkv") {
+        b"AV1 - 720p HD"
+    } else {
+        b"H.264 - 1080p HD"
+    };
+    if let Some(c) = text(x, y, x0 + 12, y0 + thumb_h + 36, 1, meta_str, MUTED, SURFACE) {
+        return c;
+    }
+
+    SURFACE
+}
+
+fn photos_grid_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
+    if let (Some(col), Some(row)) = (col_of(x), row_of(y)) {
+        let index = row * 3 + col;
+        if app.filter == Filter::Wallpapers {
+            if index < walls::SCENES.len() {
+                return Some(wallpaper_cell_pixel(x, y, index));
+            }
+        } else if let Some(media) = app.photo_at(index) {
+            return Some(item_pixel(x, y, app, media));
+        }
+    }
+
+    if app.filter == Filter::Wallpapers {
+        return Some(catalogue_pixel(x, y, app));
+    }
+
+    if app.photos_count() == 0 {
+        return Some(ledger_pixel(x, y, app));
+    }
+
+    Some(BG)
+}
+
+fn videos_grid_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
+    let count = app.videos_count();
+    if count == 0 {
+        let y0 = GRID_TOP + 120;
+        if let Some(c) = text_centered(x, y, MARGIN, y0, W - 2 * MARGIN, 2, b"No videos found", TEXT, BG) {
+            return Some(c);
+        }
+        let note = b"Saved videos in /storage/videos will appear here.";
+        if let Some(c) = text_centered(x, y, MARGIN, y0 + 40, W - 2 * MARGIN, 1, note, MUTED, BG) {
+            return Some(c);
+        }
+        return Some(BG);
+    }
+
+    if let (Some(col), Some(row)) = (video_col_of(x), video_row_of(y)) {
+        let index = row * 2 + col;
+        if let Some(storage_idx) = app.video_at(index) {
+            return Some(video_card_pixel(x, y, app, storage_idx, col, row));
+        }
+    }
+
+    Some(BG)
+}
+
+fn albums_grid_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
+    let col = if x >= VIDEO_COL_X[0] && x < VIDEO_COL_X[0] + VIDEO_COL_W {
+        0
+    } else if x >= VIDEO_COL_X[1] && x < VIDEO_COL_X[1] + VIDEO_COL_W {
+        1
+    } else {
+        return Some(BG);
+    };
+
+    let rel_y = y - GRID_TOP;
+    let row = rel_y / 200;
+    if row >= 2 || rel_y % 200 >= 180 {
+        return Some(BG);
+    }
+
+    let album_idx = row * 2 + col;
+    let x0 = VIDEO_COL_X[col];
+    let y0 = GRID_TOP + row * 200;
+    let card_rect = Rect::new(x0, y0, VIDEO_COL_W, 180);
+
+    let Some(shape) = draw_rounded_rect(x, y, card_rect, radius::SMALL, SURFACE, Some(BORDER), 1) else {
+        return Some(BG);
+    };
+    if shape == BORDER {
+        return Some(BORDER);
+    }
+
+    let banner_h = 100;
+    if y < y0 + banner_h {
+        let t = ((y - y0) * 255 / banner_h).min(255);
+        let grad = match album_idx {
+            0 => blend_argb(0xFF1E3A8A, 0xFF2563EB, t),
+            1 => blend_argb(0xFF047857, 0xFF10B981, t),
+            2 => blend_argb(0xFF7C2D12, 0xFFEA580C, t),
+            _ => {
+                if !walls::SCENES.is_empty() {
+                    let scene = &walls::SCENES[0];
+                    let rect = Rect::new(x0, y0, VIDEO_COL_W, banner_h);
+                    scene_pixel_in(scene, x, y, rect, crop_origin_y(scene))
+                } else {
+                    blend_argb(0xFF4C1D95, 0xFF7C3AED, t)
+                }
+            }
+        };
+        return Some(grad);
+    }
+
+    if y == y0 + banner_h {
+        return Some(BORDER);
+    }
+
+    let (title, count): (&[u8], usize) = match album_idx {
+        0 => (b"Camera", app.album_count(0)),
+        1 => (b"Screenshots", app.screenshots_count()),
+        2 => (b"Downloads", app.album_count(2)),
+        _ => (b"Sovereign Media", walls::SCENES.len()),
+    };
+
+    if let Some(c) = text(x, y, x0 + 16, y0 + banner_h + 12, 2, title, TEXT, SURFACE) {
+        return Some(c);
+    }
+
+    let mut count_buf = [0u8; 32];
+    let mut cn = append_u64(&mut count_buf, 0, count as u64);
+    cn = append(&mut count_buf, cn, b" items");
+    if let Some(c) = text(x, y, x0 + 16, y0 + banner_h + 46, 1, &count_buf[..cn], MUTED, SURFACE) {
+        return Some(c);
+    }
+
+    Some(SURFACE)
+}
+
+fn screenshots_grid_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
+    let count = app.screenshots_count();
+    if count == 0 {
+        let y0 = GRID_TOP + 120;
+        if let Some(c) = text_centered(x, y, MARGIN, y0, W - 2 * MARGIN, 2, b"No screenshots yet", TEXT, BG) {
+            return Some(c);
+        }
+        let note = b"Capture screen with + Shot or by pressing 'S'.";
+        if let Some(c) = text_centered(x, y, MARGIN, y0 + 40, W - 2 * MARGIN, 1, note, MUTED, BG) {
+            return Some(c);
+        }
+        return Some(BG);
+    }
+
+    if let (Some(col), Some(row)) = (col_of(x), row_of(y)) {
+        let index = row * 3 + col;
+        if let Some(storage_idx) = app.screenshot_at(index) {
+            return Some(storage_cell_pixel(x, y, app, storage_idx));
+        }
+    }
+
+    Some(BG)
+}
+
 fn grid_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
     if y < GRID_TOP || y >= GRID_BOTTOM {
         return None;
     }
 
-    // 1. A cell the current filter fills holds a real image.
-    if let (Some(col), Some(row)) = (col_of(x), row_of(y)) {
-        if let Some(media) = cell_media(app, row, col) {
-            return Some(item_pixel(x, y, app, media));
-        }
+    match app.tab {
+        GalleryTab::Photos => photos_grid_pixel(x, y, app),
+        GalleryTab::Videos => videos_grid_pixel(x, y, app),
+        GalleryTab::Albums => albums_grid_pixel(x, y, app),
+        GalleryTab::Screenshots => screenshots_grid_pixel(x, y, app),
     }
-
-    // 2. What fills the rest of the band depends on which sets the filter
-    //    admits: the honest ledger note when the ledger is on screen and holds
-    //    no record, and the catalogue's provenance note when only the wallpapers
-    //    are.
-    if app.filter.shows_ledger() {
-        if ledger_is_empty() && app.storage_count == 0 {
-            return Some(ledger_pixel(x, y, app));
-        }
-    } else {
-        return Some(catalogue_pixel(x, y, app));
-    }
-
-    Some(BG)
 }
 
 // -----------------------------------------------------------------------------
@@ -1501,7 +1892,7 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
         }
     }
 
-    // App bar: back control + CRUD buttons + title/meta
+    // App bar: back control + CRUD / Aspect buttons + title/meta
     if y < DETAIL_BAR_H {
         if y == DETAIL_BAR_H - 1 {
             return BORDER;
@@ -1518,33 +1909,22 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
             return SOFT;
         }
 
-        if let Media::StorageItem(idx) = media {
-            let is_fav = app.storage_items.get(idx).map(|it| it.is_favourite).unwrap_or(false);
-            let fav_bg = if is_fav { ACCENT_AMBER } else { SOFT };
-            if let Some(c) = draw_pill(x, y, DETAIL_FAV, fav_bg, Some(BORDER)) {
-                if c != fav_bg { return c; }
-                let fav_lbl = b"Fav";
-                let lw = font::measure(fav_lbl, 1);
-                let lx = DETAIL_FAV.x + (DETAIL_FAV.w.saturating_sub(lw)) / 2;
-                let ly = DETAIL_FAV.y + (DETAIL_FAV.h.saturating_sub(font::line_height(1))) / 2;
-                let tc_color = if is_fav { 0xFFFFFFFF } else { TEXT };
-                if let Some(tc) = text(x, y, lx, ly, 1, fav_lbl, tc_color, fav_bg) { return tc; }
-                return fav_bg;
-            }
-
-            if let Some(c) = draw_pill(x, y, DETAIL_DEL, SOFT, Some(DANGER_CRIMSON)) {
+        // Aspect toggle button for video player (Fit vs Fill)
+        if let Some(ref player) = app.video_player {
+            let aspect_lbl: &[u8] = if player.is_fill { b"Fill" } else { b"Fit" };
+            let aspect_color = if player.is_fill { NEON_CYAN } else { TEXT };
+            if let Some(c) = draw_pill(x, y, ASPECT_BTN, SOFT, Some(BORDER)) {
                 if c != SOFT { return c; }
-                let del_lbl = b"Del";
-                let lw = font::measure(del_lbl, 1);
-                let lx = DETAIL_DEL.x + (DETAIL_DEL.w.saturating_sub(lw)) / 2;
-                let ly = DETAIL_DEL.y + (DETAIL_DEL.h.saturating_sub(font::line_height(1))) / 2;
-                if let Some(tc) = text(x, y, lx, ly, 1, del_lbl, DANGER_CRIMSON, SOFT) { return tc; }
+                let lw = font::measure(aspect_lbl, 1);
+                let lx = ASPECT_BTN.x + (ASPECT_BTN.w.saturating_sub(lw)) / 2;
+                let ly = ASPECT_BTN.y + (ASPECT_BTN.h.saturating_sub(font::line_height(1))) / 2;
+                if let Some(tc) = text(x, y, lx, ly, 1, aspect_lbl, aspect_color, SOFT) { return tc; }
                 return SOFT;
             }
         }
 
         let text_x = DETAIL_BACK.x + DETAIL_BACK.w + spacing::GRID_16;
-        let text_w = W.saturating_sub(text_x + 160);
+        let text_w = W.saturating_sub(text_x + 100);
         let title_bytes = app.detail_title();
         if y >= 28 && y < 28 + font::line_height(2) {
             let mut buf = [0u8; 48];
@@ -1563,6 +1943,134 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
         return SURFACE;
     }
 
+    // Floating Info Sheet Overlay (for photos/wallpapers)
+    if app.show_info_overlay && app.video_player.is_none() {
+        let sheet = Rect::new(MARGIN, H - 470, W - 2 * MARGIN, 350);
+        if sheet.contains(x, y) {
+            if let Some(shape) = draw_rounded_rect(x, y, sheet, radius::CARD, SURFACE, Some(NEON_CYAN), 2) {
+                if shape == NEON_CYAN { return NEON_CYAN; }
+
+                // Title
+                if let Some(c) = text(x, y, sheet.x + 20, sheet.y + 20, 2, b"Media Information", TEXT, SURFACE) {
+                    return c;
+                }
+
+                // Divider
+                if y == sheet.y + 56 {
+                    return BORDER;
+                }
+
+                // Line 1: File Name
+                let name_lbl = b"File: ";
+                let nw = font::measure(name_lbl, 1);
+                if let Some(c) = text(x, y, sheet.x + 20, sheet.y + 72, 1, name_lbl, MUTED, SURFACE) {
+                    return c;
+                }
+                let title_bytes = app.detail_title();
+                let mut nb = [0u8; 48];
+                let nlen = font::ellipsize(title_bytes, 1, sheet.w.saturating_sub(40 + nw), &mut nb);
+                if let Some(c) = text(x, y, sheet.x + 20 + nw, sheet.y + 72, 1, &nb[..nlen], TEXT, SURFACE) {
+                    return c;
+                }
+
+                // Line 2: Resolution
+                let res_lbl = b"Resolution: ";
+                let rw = font::measure(res_lbl, 1);
+                if let Some(c) = text(x, y, sheet.x + 20, sheet.y + 104, 1, res_lbl, MUTED, SURFACE) {
+                    return c;
+                }
+                let mut res_buf = [0u8; 32];
+                let rn = if app.detail_w > 0 && app.detail_h > 0 {
+                    let mut n = append_u64(&mut res_buf, 0, app.detail_w as u64);
+                    n = append(&mut res_buf, n, b" x ");
+                    n = append_u64(&mut res_buf, n, app.detail_h as u64);
+                    append(&mut res_buf, n, b" px")
+                } else {
+                    append(&mut res_buf, 0, b"720 x 1440 (Native Display)")
+                };
+                if let Some(c) = text(x, y, sheet.x + 20 + rw, sheet.y + 104, 1, &res_buf[..rn], TEXT, SURFACE) {
+                    return c;
+                }
+
+                // Line 3: File Size
+                let size_lbl = b"Size: ";
+                let sw = font::measure(size_lbl, 1);
+                if let Some(c) = text(x, y, sheet.x + 20, sheet.y + 136, 1, size_lbl, MUTED, SURFACE) {
+                    return c;
+                }
+                let mut sz_buf = [0u8; 32];
+                let sn = if let Media::StorageItem(idx) = media {
+                    if idx < app.storage_count {
+                        let n = append_u64(&mut sz_buf, 0, app.storage_items[idx].size);
+                        append(&mut sz_buf, n, b" bytes")
+                    } else {
+                        append(&mut sz_buf, 0, b"0 bytes")
+                    }
+                } else {
+                    append(&mut sz_buf, 0, b"Internal System Asset")
+                };
+                if let Some(c) = text(x, y, sheet.x + 20 + sw, sheet.y + 136, 1, &sz_buf[..sn], TEXT, SURFACE) {
+                    return c;
+                }
+
+                // Line 4: Path
+                let path_lbl = b"Location: ";
+                let pw = font::measure(path_lbl, 1);
+                if let Some(c) = text(x, y, sheet.x + 20, sheet.y + 168, 1, path_lbl, MUTED, SURFACE) {
+                    return c;
+                }
+                let path_bytes = if let Media::StorageItem(idx) = media {
+                    if idx < app.storage_count {
+                        &app.storage_items[idx].path[..app.storage_items[idx].path_len]
+                    } else {
+                        b"/storage"
+                    }
+                } else {
+                    b"/system/wallpaper"
+                };
+                let mut pb = [0u8; 48];
+                let pn = font::ellipsize(path_bytes, 1, sheet.w.saturating_sub(40 + pw), &mut pb);
+                if let Some(c) = text(x, y, sheet.x + 20 + pw, sheet.y + 168, 1, &pb[..pn], TEXT, SURFACE) {
+                    return c;
+                }
+
+                // Line 5: Format
+                let fmt_lbl = b"Format: ";
+                let fw = font::measure(fmt_lbl, 1);
+                if let Some(c) = text(x, y, sheet.x + 20, sheet.y + 200, 1, fmt_lbl, MUTED, SURFACE) {
+                    return c;
+                }
+                let fmt_str: &[u8] = if let Media::StorageItem(idx) = media {
+                    let name = &app.storage_items[idx].name[..app.storage_items[idx].name_len];
+                    if name.ends_with(b".ppm") { b"PPM / Direct Scanout RGB24" }
+                    else if name.ends_with(b".bmp") { b"BMP / Bitmap Raster" }
+                    else if name.ends_with(b".qoi") { b"QOI / Quite OK Image Format" }
+                    else if name.ends_with(b".mp4") { b"MP4 Video Container" }
+                    else { b"Binary Media Stream" }
+                } else {
+                    b"Vector Silhouette Wall Reference"
+                };
+                if let Some(c) = text(x, y, sheet.x + 20 + fw, sheet.y + 200, 1, fmt_str, TEXT, SURFACE) {
+                    return c;
+                }
+
+                // Dismiss Button
+                let dismiss_btn = Rect::new(sheet.x + (sheet.w - 140) / 2, sheet.y + 270, 140, 44);
+                if let Some(dc) = draw_pill(x, y, dismiss_btn, SOFT, Some(BORDER)) {
+                    if dc != SOFT { return dc; }
+                    let d_lbl = b"Dismiss";
+                    let dw = font::measure(d_lbl, 1);
+                    let dx_pos = dismiss_btn.x + (dismiss_btn.w.saturating_sub(dw)) / 2;
+                    let dy_pos = dismiss_btn.y + (dismiss_btn.h.saturating_sub(font::line_height(1))) / 2;
+                    if let Some(tc) = text(x, y, dx_pos, dy_pos, 1, d_lbl, TEXT, SOFT) { return tc; }
+                    return SOFT;
+                }
+
+                return SURFACE;
+            }
+        }
+    }
+
     // Viewport: Image or Video canvas
     if y >= DETAIL_VIEW_Y0 && y < DETAIL_VIEW_Y1 && x >= MARGIN && x < W - MARGIN {
         let view = Rect::new(DETAIL_VIEW_X, DETAIL_VIEW_Y0, DETAIL_VIEW_W, DETAIL_VIEW_H);
@@ -1575,16 +2083,43 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
         }
 
         if let Some(ref player) = app.video_player {
-            // Render video canvas inside viewport
+            // Video surface: handle Fit vs Fill
+            let video_rect = if player.is_fill {
+                view
+            } else {
+                let fit_h = view.w * 9 / 16;
+                let fit_y = view.y + (view.h.saturating_sub(fit_h)) / 2;
+                Rect::new(view.x, fit_y, view.w, fit_h)
+            };
+
+            if !video_rect.contains(x, y) {
+                return 0xFF000000; // Letterbox black bars
+            }
+
+            // DRM/KMS direct scanout animated frame pattern
             let t = (player.position_ms * 255 / player.duration_ms.max(1)).min(255) as usize;
-            let v_bg = blend_argb(0xFF0F172A, 0xFF1E293B, t);
-            // Draw codec badge watermark at top of viewport
-            if y >= DETAIL_VIEW_Y0 + 16 && y < DETAIL_VIEW_Y0 + 16 + font::line_height(1) {
+            let scan_phase = ((player.position_ms / 30) + y as u32) % 32;
+            let scan_tint = if scan_phase < 2 { 0x18 } else { 0x00 };
+            let v_bg = blend_argb(0xFF0F172A + (scan_tint << 16) + (scan_tint << 8) + scan_tint, 0xFF1E293B, t);
+
+            // Codec watermark badge
+            if y >= video_rect.y + 12 && y < video_rect.y + 12 + font::line_height(1) {
                 let badge = player.codec.as_str().as_bytes();
-                if let Some(c) = text(x, y, view.x + 16, DETAIL_VIEW_Y0 + 16, 1, badge, ACCENT_SKY, v_bg) {
+                if let Some(c) = text(x, y, video_rect.x + 16, video_rect.y + 12, 1, badge, NEON_CYAN, v_bg) {
                     return c;
                 }
             }
+
+            // DRM Direct Scanout indicator label
+            let scanout_str = b"DRM Direct Scanout";
+            let sw = font::measure(scanout_str, 1);
+            if y >= video_rect.y + 12 && y < video_rect.y + 12 + font::line_height(1) {
+                let sx = video_rect.x + video_rect.w.saturating_sub(sw + 16);
+                if let Some(c) = text(x, y, sx, video_rect.y + 12, 1, scanout_str, MUTED, v_bg) {
+                    return c;
+                }
+            }
+
             return v_bg;
         }
 
@@ -1634,11 +2169,21 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
             return SOFT;
         }
 
-        // Scrub track
+        // Scrub track with Neon Cyan progress and circular seek head thumb
         if SCRUB_BAR.contains(x, y) {
             let progress_w = (player.position_ms as usize * SCRUB_BAR.w / player.duration_ms.max(1) as usize).min(SCRUB_BAR.w);
-            if x < SCRUB_BAR.x + progress_w {
-                return ACCENT_SKY;
+            let thumb_x = SCRUB_BAR.x + progress_w;
+            let thumb_cy = SCRUB_BAR.y + SCRUB_BAR.h / 2;
+            let dx = x as isize - thumb_x as isize;
+            let dy = y as isize - thumb_cy as isize;
+            if dx * dx + dy * dy <= 49 {
+                if dx * dx + dy * dy >= 25 {
+                    return NEON_CYAN;
+                }
+                return 0xFFFFFFFF;
+            }
+            if x < thumb_x {
+                return NEON_CYAN;
             }
             return BORDER;
         }
@@ -1647,7 +2192,7 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
         if y >= DETAIL_VIEW_Y1 + 114 && y < DETAIL_VIEW_Y1 + 114 + font::line_height(1) {
             let mut time_buf = [0u8; 32];
             let tn = format_video_time(player.position_ms, player.duration_ms, &mut time_buf);
-            if let Some(c) = text(x, y, MARGIN, DETAIL_VIEW_Y1 + 114, 1, &time_buf[..tn], MUTED, BG) {
+            if let Some(c) = text(x, y, MARGIN, DETAIL_VIEW_Y1 + 114, 1, &time_buf[..tn], TEXT, BG) {
                 return c;
             }
         }
@@ -1660,6 +2205,48 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
             let lx = FULLSCREEN_BTN.x + (FULLSCREEN_BTN.w.saturating_sub(lw)) / 2;
             let ly = FULLSCREEN_BTN.y + (FULLSCREEN_BTN.h.saturating_sub(font::line_height(1))) / 2;
             if let Some(tc) = text(x, y, lx, ly, 1, lbl, TEXT, SOFT) { return tc; }
+            return SOFT;
+        }
+    }
+
+    // Photo Viewer Bottom Action Bar (Favorite, Info, Delete)
+    if app.video_player.is_none() {
+        let is_fav = if let Media::StorageItem(idx) = media {
+            app.storage_items.get(idx).map(|it| it.is_favourite).unwrap_or(false)
+        } else {
+            false
+        };
+        let fav_bg = if is_fav { ACCENT_AMBER } else { SOFT };
+        if let Some(c) = draw_pill(x, y, PHOTO_FAV_BTN, fav_bg, Some(BORDER)) {
+            if c != fav_bg { return c; }
+            let fav_lbl = b"Fav";
+            let lw = font::measure(fav_lbl, 1);
+            let lx = PHOTO_FAV_BTN.x + (PHOTO_FAV_BTN.w.saturating_sub(lw)) / 2;
+            let ly = PHOTO_FAV_BTN.y + (PHOTO_FAV_BTN.h.saturating_sub(font::line_height(1))) / 2;
+            let tc_color = if is_fav { 0xFFFFFFFF } else { TEXT };
+            if let Some(tc) = text(x, y, lx, ly, 1, fav_lbl, tc_color, fav_bg) { return tc; }
+            return fav_bg;
+        }
+
+        let info_bg = if app.show_info_overlay { ACCENT_SKY } else { SOFT };
+        if let Some(c) = draw_pill(x, y, DETAIL_INFO, info_bg, Some(BORDER)) {
+            if c != info_bg { return c; }
+            let info_lbl = b"Info";
+            let lw = font::measure(info_lbl, 1);
+            let lx = DETAIL_INFO.x + (DETAIL_INFO.w.saturating_sub(lw)) / 2;
+            let ly = DETAIL_INFO.y + (DETAIL_INFO.h.saturating_sub(font::line_height(1))) / 2;
+            let tc_color = if app.show_info_overlay { 0xFFFFFFFF } else { TEXT };
+            if let Some(tc) = text(x, y, lx, ly, 1, info_lbl, tc_color, info_bg) { return tc; }
+            return info_bg;
+        }
+
+        if let Some(c) = draw_pill(x, y, PHOTO_DEL_BTN, SOFT, Some(DANGER_CRIMSON)) {
+            if c != SOFT { return c; }
+            let del_lbl = b"Del";
+            let lw = font::measure(del_lbl, 1);
+            let lx = PHOTO_DEL_BTN.x + (PHOTO_DEL_BTN.w.saturating_sub(lw)) / 2;
+            let ly = PHOTO_DEL_BTN.y + (PHOTO_DEL_BTN.h.saturating_sub(font::line_height(1))) / 2;
+            if let Some(tc) = text(x, y, lx, ly, 1, del_lbl, DANGER_CRIMSON, SOFT) { return tc; }
             return SOFT;
         }
     }
@@ -1729,8 +2316,8 @@ fn gallery_pixel(x: usize, y: usize, app: &GalleryApp) -> u32 {
         return BG;
     }
 
-    // 2. Segmented filter chips.
-    if let Some(c) = pill_pixel(x, y, app) {
+    // 2. Top Modern Tab Navigation Bar
+    if let Some(c) = tab_bar_pixel(x, y, app) {
         return c;
     }
 
@@ -1847,6 +2434,7 @@ fn exit_to_launcher(surface: u32) -> ! {
 /// line describes.
 fn open_media(app: &mut GalleryApp, media: Media) -> Tap {
     app.open = Some(media);
+    app.show_info_overlay = false;
     match media {
         Media::Wallpaper(idx) => {
             app.video_player = None;
@@ -1886,7 +2474,9 @@ fn open_media(app: &mut GalleryApp, media: Media) -> Tap {
                     } else {
                         VideoCodec::H264Avc
                     };
-                    app.video_player = Some(VideoPlayerState::new(30000, codec));
+                    let mut player = VideoPlayerState::new(30000, codec);
+                    player.is_playing = true;
+                    app.video_player = Some(player);
                     let mut n = append(&mut app.detail_meta, 0, b"Video, ");
                     n = append(&mut app.detail_meta, n, codec.as_str().as_bytes());
                     app.detail_meta_len = n;
@@ -1951,9 +2541,14 @@ fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
                 return Tap::Redraw(Dirty::All);
             }
         }
+        if app.show_info_overlay {
+            app.show_info_overlay = false;
+            return Tap::Redraw(Dirty::All);
+        }
         if app.open.is_some() {
             app.open = None;
             app.video_player = None;
+            app.show_info_overlay = false;
             std::log(0, "[GALLERY] Exited photo inspection view.").ok();
             return Tap::Redraw(Dirty::All);
         }
@@ -1973,6 +2568,10 @@ fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
                     return Tap::Redraw(Dirty::All);
                 }
             } else {
+                if ASPECT_BTN.contains(x, y) {
+                    player.toggle_aspect();
+                    return Tap::Redraw(Dirty::All);
+                }
                 if PLAY_PAUSE_BTN.contains(x, y) {
                     player.toggle_play();
                     return Tap::Redraw(Dirty::All);
@@ -1988,49 +2587,68 @@ fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
                     return Tap::Redraw(Dirty::All);
                 }
             }
-        }
+            if DETAIL_BACK.contains(x, y) || CLOSE.contains(x, y) {
+                app.open = None;
+                app.video_player = None;
+                std::log(0, "[GALLERY] Closed video player view.").ok();
+                return Tap::Redraw(Dirty::All);
+            }
+        } else {
+            // Photo inspection controls
+            if app.show_info_overlay {
+                app.show_info_overlay = false;
+                return Tap::Redraw(Dirty::All);
+            }
 
-        if DETAIL_DEL.contains(x, y) {
-            if let Some(Media::StorageItem(idx)) = app.open {
-                if idx < app.storage_count {
-                    let path_slice = &app.storage_items[idx].path[..app.storage_items[idx].path_len];
-                    if let Ok(path_str) = core::str::from_utf8(path_slice) {
-                        let _ = std::fs_unlink(fs_write_slot(), path_str);
+            if DETAIL_INFO.contains(x, y) {
+                app.show_info_overlay = true;
+                return Tap::Redraw(Dirty::All);
+            }
+
+            if PHOTO_DEL_BTN.contains(x, y) || DETAIL_DEL.contains(x, y) {
+                if let Some(Media::StorageItem(idx)) = app.open {
+                    if idx < app.storage_count {
+                        let path_slice = &app.storage_items[idx].path[..app.storage_items[idx].path_len];
+                        if let Ok(path_str) = core::str::from_utf8(path_slice) {
+                            let _ = std::fs_unlink(fs_write_slot(), path_str);
+                        }
+                        for i in idx..(app.storage_count - 1) {
+                            app.storage_items[i] = app.storage_items[i + 1];
+                        }
+                        app.storage_count -= 1;
+                        app.storage_items[app.storage_count] = StorageMediaItem::EMPTY;
+                        app.open = None;
+                        app.video_player = None;
+                        app.show_info_overlay = false;
+                        std::log(0, "[GALLERY] Media deleted via fs_unlink.").ok();
+                        return Tap::Redraw(Dirty::All);
                     }
-                    for i in idx..(app.storage_count - 1) {
-                        app.storage_items[i] = app.storage_items[i + 1];
-                    }
-                    app.storage_count -= 1;
-                    app.storage_items[app.storage_count] = StorageMediaItem::EMPTY;
-                    app.open = None;
-                    app.video_player = None;
-                    std::log(0, "[GALLERY] Media deleted via fs_unlink.").ok();
-                    return Tap::Redraw(Dirty::All);
                 }
             }
-        }
 
-        if DETAIL_FAV.contains(x, y) {
-            if let Some(Media::StorageItem(idx)) = app.open {
-                if idx < app.storage_count {
-                    app.storage_items[idx].is_favourite = !app.storage_items[idx].is_favourite;
-                    let mut fav_key = [0u8; 64];
-                    let mut kn = append(&mut fav_key, 0, b"gallery.fav.");
-                    kn = append(&mut fav_key, kn, &app.storage_items[idx].name[..app.storage_items[idx].name_len]);
-                    if let Ok(key_str) = core::str::from_utf8(&fav_key[..kn]) {
-                        let val = if app.storage_items[idx].is_favourite { b"1" } else { b"0" };
-                        let _ = std::settings_set(fs_write_slot(), key_str, val);
+            if PHOTO_FAV_BTN.contains(x, y) || DETAIL_FAV.contains(x, y) {
+                if let Some(Media::StorageItem(idx)) = app.open {
+                    if idx < app.storage_count {
+                        app.storage_items[idx].is_favourite = !app.storage_items[idx].is_favourite;
+                        let mut fav_key = [0u8; 64];
+                        let mut kn = append(&mut fav_key, 0, b"gallery.fav.");
+                        kn = append(&mut fav_key, kn, &app.storage_items[idx].name[..app.storage_items[idx].name_len]);
+                        if let Ok(key_str) = core::str::from_utf8(&fav_key[..kn]) {
+                            let val = if app.storage_items[idx].is_favourite { b"1" } else { b"0" };
+                            let _ = std::settings_set(fs_write_slot(), key_str, val);
+                        }
+                        return Tap::Redraw(Dirty::All);
                     }
-                    return Tap::Redraw(Dirty::All);
                 }
             }
-        }
 
-        if DETAIL_BACK.contains(x, y) || CLOSE.contains(x, y) {
-            app.open = None;
-            app.video_player = None;
-            std::log(0, "[GALLERY] Closed photo inspection view.").ok();
-            return Tap::Redraw(Dirty::All);
+            if DETAIL_BACK.contains(x, y) || CLOSE.contains(x, y) {
+                app.open = None;
+                app.video_player = None;
+                app.show_info_overlay = false;
+                std::log(0, "[GALLERY] Closed photo inspection view.").ok();
+                return Tap::Redraw(Dirty::All);
+            }
         }
         return Tap::None;
     }
@@ -2041,35 +2659,65 @@ fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
         return Tap::Redraw(Dirty::All);
     }
 
-    // Segmented filter chips - hit-tested only when they are drawn live.
-    if filters_available(app) && y >= FILTER_BAND_Y0 && y < FILTER_BAND_Y1 {
-        for i in 0..PILL_LABELS.len() {
-            if pill_rect(i).contains(x, y) {
-                let filter = Filter::from_index(i);
-                if filter != app.filter {
-                    app.filter = filter;
-                    std::log(0, "[GALLERY] Gallery filter chip switched.").ok();
-                    return Tap::Redraw(Dirty::FilterRow);
-                }
-                return Tap::None;
-            }
+    // Modern Top Tab Navigation Bar
+    if y >= TAB_Y && y < TAB_Y + TAB_H {
+        let tab_idx = (x * 4 / W).min(3);
+        let new_tab = GalleryTab::from_index(tab_idx);
+        if new_tab != app.tab {
+            app.tab = new_tab;
+            std::log(0, "[GALLERY] Tab switched.").ok();
+            return Tap::Redraw(Dirty::All);
         }
         return Tap::None;
     }
 
-    // Thumbnail grid taps.
+    // Thumbnail grid taps based on active tab
     if y >= GRID_TOP && y < GRID_BOTTOM {
-        if let (Some(col), Some(row)) = (col_of(x), row_of(y)) {
-            if let Some(media) = cell_media(app, row, col) {
-                return open_media(app, media);
+        match app.tab {
+            GalleryTab::Photos => {
+                if let (Some(col), Some(row)) = (col_of(x), row_of(y)) {
+                    let index = row * 3 + col;
+                    if let Some(media) = app.photo_at(index) {
+                        return open_media(app, media);
+                    }
+                }
             }
-        }
-        if ledger_is_empty() && app.storage_count == 0 {
-            std::log(
-                0,
-                "[GALLERY] Photo grid tapped: no media items in storage.",
-            )
-            .ok();
+            GalleryTab::Videos => {
+                if let (Some(col), Some(row)) = (video_col_of(x), video_row_of(y)) {
+                    let index = row * 2 + col;
+                    if let Some(storage_idx) = app.video_at(index) {
+                        return open_media(app, Media::StorageItem(storage_idx));
+                    }
+                }
+            }
+            GalleryTab::Albums => {
+                if let Some(col) = video_col_of(x) {
+                    let rel_y = y - GRID_TOP;
+                    let row = rel_y / 200;
+                    if row < 2 && rel_y % 200 < 180 {
+                        let album_idx = row * 2 + col;
+                        match album_idx {
+                            0 => app.tab = GalleryTab::Photos,
+                            1 => app.tab = GalleryTab::Screenshots,
+                            2 => app.tab = GalleryTab::Photos,
+                            3 => {
+                                app.tab = GalleryTab::Photos;
+                                app.filter = Filter::Wallpapers;
+                            }
+                            _ => {}
+                        }
+                        return Tap::Redraw(Dirty::All);
+                    }
+                }
+            }
+            GalleryTab::Screenshots => {
+                if let (Some(col), Some(row)) = (col_of(x), row_of(y)) {
+                    let index = row * 3 + col;
+                    if let Some(storage_idx) = app.screenshot_at(index) {
+                        return open_media(app, Media::StorageItem(storage_idx));
+                    }
+                }
+            }
         }
         return Tap::None;
     }
