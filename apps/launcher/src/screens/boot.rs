@@ -1,14 +1,13 @@
 //! Guest-owned startup presentation rendered into the native portrait surface.
 //!
-//! Canonical InterOS boot sequence inspired by the sovereign UI reference design:
-//!   * Deep sovereign slate background (0xFF111417)
-//!   * Sovereign Emblem: Two-tone squircle tile:
-//!       - Left half: Sage Green / Mineral (0xFF546B58)
-//!       - Right half: Dark Charcoal / Slate (0xFF202326)
-//!       - Centered "IL" Monogram in Warm Ivory (0xFFFAF8F4) with traveling light shimmer
+//! Sovereign InterOS boot sequence inspired by modern sovereign mobile design:
+//!   * Deep obsidian black background (0xFF050608)
+//!   * Fluid, continuous breathing luminescence aura pulsating at 60 Hz
+//!   * Sovereign Emblem: Frosted glass obsidian monolith squircle with traveling specular shimmer
+//!   * Centered "IL" Monogram in Warm Ivory (0xFFFAF8F4) with radiant light wave
 //!   * Sovereign Brand: "InterOS" in crisp Warm Ivory scalable vector outline typeface
-//!   * Brand Tagline: "SMARTER • PRIVATE • OPEN" in luminous sage with antialiased typography
-//!   * Minimal progress capsule with honest hardware/software verification status
+//!   * Brand Tagline: "SMARTER • PRIVATE • OPEN" in luminous silver typography
+//!   * Minimalist progress capsule with glowing electric cyan gradient fill
 //!   * High-contrast, strictly `#![no_std]` integer math without floating point.
 
 use core::cell::UnsafeCell;
@@ -37,7 +36,7 @@ const BAND_ROWS: usize = 350;
 const ICON_SIZE: usize = 120;
 const ICON_X0: usize = (W - ICON_SIZE) / 2; // (720 - 120) / 2 = 300
 const ICON_Y0: usize = 598;
-const ICON_R: i32 = 22;
+const ICON_R: i32 = 24;
 
 /// 'I' Pill Geometry inside the 120x120 box:
 const I_X0: usize = 24;
@@ -72,10 +71,10 @@ const TAG_GAP: usize = 24;
 
 /// Progress Capsule Bar:
 const BAR_W: usize = 240;
-const BAR_H: usize = 8;
+const BAR_H: usize = 6;
 const BAR_X0: usize = (W - BAR_W) / 2; // (720 - 240) / 2 = 240
-const BAR_Y0: usize = 836;
-const BAR_R: i32 = 4;
+const BAR_Y0: usize = 838;
+const BAR_R: i32 = 3;
 
 /// System Status Phase subtitle:
 const STATUS_Y: usize = 862;
@@ -83,17 +82,19 @@ const STATUS_Y: usize = 862;
 // -----------------------------------------------------------------------------
 // Color Palettes
 // -----------------------------------------------------------------------------
-const COLOR_BG: u32 = 0xFF111417;          // Sovereign Deep Slate
-const COLOR_IVORY: u32 = 0xFFFAF8F4;       // Warm Ivory (Letters & Wordmark)
-const COLOR_WHITE: u32 = 0xFFFFFFFF;       // Shimmer Peak
-const COLOR_SAGE: u32 = 0xFF546B58;        // Sage Green / Mineral (Left Tile Half)
-const COLOR_SAGE_LIGHT: u32 = 0xFF7D8F80;  // Tagline Sage
-const COLOR_SAGE_BRIGHT: u32 = 0xFF88A88E; // Progress Fill Leading Bead
-const COLOR_CHARCOAL: u32 = 0xFF202326;    // Dark Charcoal / Slate (Right Tile Half)
-const COLOR_BORDER: u32 = 0xFF3E4744;      // Hairline Border
-const COLOR_TRACK_BG: u32 = 0xFF1A1D20;    // Progress Bar Track
-const COLOR_TRACK_BORDER: u32 = 0xFF2D3338;// Progress Bar Track Border
-const COLOR_MUTED_TEXT: u32 = 0xFF6C7C70;  // Phase Status Text
+const COLOR_BG: u32 = 0xFF050608;              // Obsidian True Black (OLED depth)
+const COLOR_IVORY: u32 = 0xFFFAF8F4;           // Warm Ivory (Letters & Wordmark)
+const COLOR_WHITE: u32 = 0xFFFFFFFF;           // Shimmer Peak Specular Crest
+const COLOR_GLASS_TOP: u32 = 0xFF161B26;       // Monolith Top Stop
+const COLOR_GLASS_BOTTOM: u32 = 0xFF0A0D14;    // Monolith Bottom Stop
+const COLOR_GLASS_BORDER: u32 = 0xFF263042;    // Frosted Beveled Border
+const COLOR_GLASS_HIGHLIGHT: u32 = 0xFF3A4860; // Top Rim Light Bevel
+const COLOR_TAGLINE: u32 = 0xFF8E9BAE;         // Refined Silver Tagline
+const COLOR_CYAN_GLOW: u32 = 0xFF00D2FF;       // Electric Cyan Progress Leading Edge
+const COLOR_CYAN_CORE: u32 = 0xFF8AE8FF;       // Brilliant Cyan/White Progress Head
+const COLOR_TRACK_BG: u32 = 0xFF10141C;        // Progress Bar Track
+const COLOR_TRACK_BORDER: u32 = 0xFF1C2230;    // Progress Bar Track Border
+const COLOR_MUTED_TEXT: u32 = 0xFF728094;      // Minimalist Phase Status Text
 
 // -----------------------------------------------------------------------------
 // The Main Boot Screen Painter
@@ -101,44 +102,65 @@ const COLOR_MUTED_TEXT: u32 = 0xFF6C7C70;  // Phase Status Text
 
 /// Computes the colour of one pixel `(x, y)` of the boot presentation.
 pub fn get_boot_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
-    // Outside the active band: sovereign deep slate void.
+    // Outside the active band: sovereign obsidian black void.
     if y < BAND_TOP || y >= BAND_TOP + BAND_ROWS {
         return COLOR_BG;
     }
 
-    // 1. Sovereign Emblem: Split Monogram Tile (y = 598..718)
+    // Dynamic aura background calculation:
+    // Continuous breathing luminescence pulse centered around the emblem (360, 658)
+    let cx = x as i32 - 360;
+    let cy = y as i32 - 658;
+    let dist_sq = (cx * cx + cy * cy) as u32;
+
+    let cycle = (state.boot_frame % 120) as i32;
+    let phase = if cycle < 60 { cycle } else { 120 - cycle };
+    let pulse = (phase * 255 / 60) as u32; // 0..=255 smooth breathing wave
+
+    let mut bg = COLOR_BG;
+    const AURA_R_SQ: u32 = 220 * 220;
+    if dist_sq < AURA_R_SQ {
+        let falloff = ((AURA_R_SQ - dist_sq) * 256 / AURA_R_SQ) as u32;
+        let weight = (falloff * falloff) >> 8;
+        let breath = 110 + (pulse * 145 / 255);
+        let alpha = (weight * breath) >> 8;
+        let aura_color = 0xFF121E36;
+        bg = Theme::blend(COLOR_BG, aura_color, alpha.min(255));
+    }
+
+    // 1. Sovereign Emblem: Frosted Obsidian Monolith (y = 598..718)
     if let Some(c) = emblem_pixel(x, y, state) {
         return c;
     }
 
     // 2. Sovereign "InterOS" Brand (y ≈ 725..775)
-    if let Some(c) = wordmark_pixel(x, y, state) {
+    if let Some(c) = wordmark_pixel(x, y, state, bg) {
         return c;
     }
 
     // 3. Official Brand Tagline (y ≈ 794..818)
-    if let Some(c) = tagline_pixel(x, y) {
+    if let Some(c) = tagline_pixel(x, y, bg, pulse) {
         return c;
     }
 
-    // 4. Progress Capsule Bar (y ≈ 836..844)
+    // 4. Progress Capsule Bar (y ≈ 838..844)
     if let Some(c) = progress_capsule_pixel(x, y, state) {
         return c;
     }
 
     // 5. System Status Phase Subtitle (y ≈ 862..886)
-    if let Some(c) = status_subtitle_pixel(x, y, state) {
+    if let Some(c) = status_subtitle_pixel(x, y, state, bg) {
         return c;
     }
 
-    COLOR_BG
+    bg
 }
 
 // -----------------------------------------------------------------------------
 // Element Renderers
 // -----------------------------------------------------------------------------
 
-/// Sovereign Emblem: Split Monogram Tile (120x120)
+/// Sovereign Emblem: Frosted Obsidian Monolith Tile (120x120)
 fn emblem_pixel(x: usize, y: usize, state: &LauncherState) -> Option<u32> {
     if x < ICON_X0 || x >= ICON_X0 + ICON_SIZE || y < ICON_Y0 || y >= ICON_Y0 + ICON_SIZE {
         return None;
@@ -168,15 +190,23 @@ fn emblem_pixel(x: usize, y: usize, state: &LauncherState) -> Option<u32> {
         return None;
     }
 
-    // 1px Border
+    // 1px Border with top specular highlight
     if distance_sq >= ((r - 2) * (r - 2)) as u32
         || bx == 0
         || bx == ICON_SIZE - 1
         || by == 0
         || by == ICON_SIZE - 1
     {
-        return Some(COLOR_BORDER);
+        if by <= 2 {
+            return Some(COLOR_GLASS_HIGHLIGHT);
+        }
+        return Some(COLOR_GLASS_BORDER);
     }
+
+    // Traveling diagonal specular light wave across the monolith
+    let diag = bx as i32 + by as i32;
+    let sweep_phase = ((state.boot_frame * 5) % 360) as i32 - 60;
+    let sweep_dist = (diag - sweep_phase).abs();
 
     // Check 'I' Pill
     let mut in_letter = false;
@@ -240,13 +270,10 @@ fn emblem_pixel(x: usize, y: usize, state: &LauncherState) -> Option<u32> {
         }
     }
 
-    // Monogram Pixels
+    // Monogram Pixels: Warm Ivory with radiant specular wave
     if in_letter {
-        // Traveling light shimmer pulse
-        let shimmer_bx = ((state.boot_frame * 4) % 200) as i32 - 40;
-        let dist = (bx as i32 - shimmer_bx).abs();
-        let letter_color = if dist < 18 {
-            let t = (18 - dist) as u32 * 14;
+        let letter_color = if sweep_dist < 24 {
+            let t = ((24 - sweep_dist) * 255 / 24) as u32;
             mix(COLOR_IVORY, COLOR_WHITE, t)
         } else {
             COLOR_IVORY
@@ -254,18 +281,20 @@ fn emblem_pixel(x: usize, y: usize, state: &LauncherState) -> Option<u32> {
         return Some(letter_color);
     }
 
-    // Container Background: Split at bx < 60
-    let tile_bg = if bx < 60 {
-        COLOR_SAGE
-    } else {
-        COLOR_CHARCOAL
-    };
+    // Monolith Glass Surface: subtle top-to-bottom depth gradient + specular reflection
+    let t_y = (by * 256 / ICON_SIZE) as u32;
+    let mut tile_bg = Theme::blend(COLOR_GLASS_TOP, COLOR_GLASS_BOTTOM, t_y);
+
+    if sweep_dist < 32 {
+        let s_alpha = ((32 - sweep_dist) * 95 / 32) as u32;
+        tile_bg = Theme::blend(tile_bg, 0xFF354664, s_alpha);
+    }
 
     Some(tile_bg)
 }
 
 /// Sovereign "InterOS" Brand
-fn wordmark_pixel(x: usize, y: usize, state: &LauncherState) -> Option<u32> {
+fn wordmark_pixel(x: usize, y: usize, state: &LauncherState, bg: u32) -> Option<u32> {
     let mark = wordmark_frame();
     let run = mark.run.as_ref()?;
 
@@ -277,20 +306,20 @@ fn wordmark_pixel(x: usize, y: usize, state: &LauncherState) -> Option<u32> {
     }
 
     // Subtle specular traveling shimmer across the wordmark
-    let shimmer_x = ((state.boot_frame * 5) % (W as u32 + 100)) as i32 - 50;
+    let shimmer_x = ((state.boot_frame * 6) % ((W + 160) as u32)) as i32 - 80;
     let dist = (x as i32 - shimmer_x).abs();
-    let ink = if dist < 24 {
-        let t = (24 - dist) as u32 * 10;
+    let ink = if dist < 28 {
+        let t = ((28 - dist) * 255 / 28) as u32;
         mix(COLOR_IVORY, COLOR_WHITE, t)
     } else {
         COLOR_IVORY
     };
 
-    run.pixel(x, y, ink, COLOR_BG)
+    run.pixel(x, y, ink, bg)
 }
 
 /// Official Brand Tagline: "SMARTER • PRIVATE • OPEN"
-fn tagline_pixel(x: usize, y: usize) -> Option<u32> {
+fn tagline_pixel(x: usize, y: usize, bg: u32, pulse: u32) -> Option<u32> {
     if y < TAGLINE_Y.saturating_sub(8) || y >= TAGLINE_Y + 24 {
         return None;
     }
@@ -307,14 +336,16 @@ fn tagline_pixel(x: usize, y: usize) -> Option<u32> {
     let dot2_x = x_tag2 + w2 + TAG_GAP / 2;
     let x_tag3 = x_tag2 + w2 + TAG_GAP;
 
+    let tag_color = Theme::blend(COLOR_TAGLINE, COLOR_WHITE, pulse / 6);
+
     // Render words
-    if let Some(c) = crate::test_text_aa(x, y, x_tag1, TAGLINE_Y, 1, TAG1, COLOR_SAGE_LIGHT, COLOR_BG) {
+    if let Some(c) = crate::test_text_aa(x, y, x_tag1, TAGLINE_Y, 1, TAG1, tag_color, bg) {
         return Some(c);
     }
-    if let Some(c) = crate::test_text_aa(x, y, x_tag2, TAGLINE_Y, 1, TAG2, COLOR_SAGE_LIGHT, COLOR_BG) {
+    if let Some(c) = crate::test_text_aa(x, y, x_tag2, TAGLINE_Y, 1, TAG2, tag_color, bg) {
         return Some(c);
     }
-    if let Some(c) = crate::test_text_aa(x, y, x_tag3, TAGLINE_Y, 1, TAG3, COLOR_SAGE_LIGHT, COLOR_BG) {
+    if let Some(c) = crate::test_text_aa(x, y, x_tag3, TAGLINE_Y, 1, TAG3, tag_color, bg) {
         return Some(c);
     }
 
@@ -325,9 +356,9 @@ fn tagline_pixel(x: usize, y: usize) -> Option<u32> {
         let dx = (x as i32 - dot_cx as i32).abs();
         let d2 = dx * dx + dy * dy;
         if d2 <= 2 {
-            return Some(COLOR_SAGE_LIGHT);
+            return Some(tag_color);
         } else if d2 <= 4 {
-            return Some(Theme::blend(COLOR_BG, COLOR_SAGE_LIGHT, 128));
+            return Some(Theme::blend(bg, tag_color, 128));
         }
     }
 
@@ -371,29 +402,30 @@ fn progress_capsule_pixel(x: usize, y: usize, state: &LauncherState) -> Option<u
     let inner_x = x.saturating_sub(BAR_X0 + 2);
 
     // Dynamic scanning comet bead driven by boot_frame
-    let pulse_head = ((state.boot_frame * 3) as usize) % fill_max;
+    let pulse_head = ((state.boot_frame * 4) as usize) % fill_max;
     let p_dist = (inner_x as i32 - pulse_head as i32).abs();
 
     if inner_x < fill_w {
-        // Glowing Sage fill
-        let base_fill = COLOR_SAGE;
+        // Vibrant electric cyan gradient along the fill
+        let fill_t = (inner_x * 256 / fill_max.max(1)) as u32;
+        let base_fill = Theme::blend(0xFF007ACC, COLOR_CYAN_GLOW, fill_t);
 
         // Leading edge glow bead
         let head_dist = (inner_x as i32 - fill_w as i32).abs();
         if head_dist <= 3 {
-            let bead = mix(base_fill, COLOR_SAGE_BRIGHT, ((3 - head_dist) * 80).min(255) as u32);
+            let bead = mix(base_fill, COLOR_WHITE, ((3 - head_dist) * 80).min(255) as u32);
             return Some(bead);
         }
         if p_dist <= 6 {
-            let shimmer = mix(base_fill, COLOR_WHITE, ((6 - p_dist) * 40).min(255) as u32);
+            let shimmer = mix(base_fill, COLOR_CYAN_CORE, ((6 - p_dist) * 40).min(255) as u32);
             return Some(shimmer);
         }
         return Some(base_fill);
     }
 
-    // Unfilled track
-    if p_dist <= 4 {
-        let trace = mix(COLOR_TRACK_BG, COLOR_SAGE_LIGHT, ((4 - p_dist) * 50).min(255) as u32);
+    // Unfilled track with scanning comet trace
+    if p_dist <= 5 {
+        let trace = mix(COLOR_TRACK_BG, COLOR_CYAN_GLOW, ((5 - p_dist) * 35).min(255) as u32);
         return Some(trace);
     }
 
@@ -401,7 +433,7 @@ fn progress_capsule_pixel(x: usize, y: usize, state: &LauncherState) -> Option<u
 }
 
 /// Dynamic System Status Phase text
-fn status_subtitle_pixel(x: usize, y: usize, state: &LauncherState) -> Option<u32> {
+fn status_subtitle_pixel(x: usize, y: usize, state: &LauncherState, bg: u32) -> Option<u32> {
     if y < STATUS_Y.saturating_sub(8) || y >= STATUS_Y + 24 {
         return None;
     }
@@ -419,7 +451,7 @@ fn status_subtitle_pixel(x: usize, y: usize, state: &LauncherState) -> Option<u3
     let text_w = interos_std::design::typeface::text_advance_px(phase_text, 24) as usize;
     let x0 = (W.saturating_sub(text_w)) / 2;
 
-    crate::test_text_aa(x, y, x0, STATUS_Y, 1, phase_text, COLOR_MUTED_TEXT, COLOR_BG)
+    crate::test_text_aa(x, y, x0, STATUS_Y, 1, phase_text, COLOR_MUTED_TEXT, bg)
 }
 
 // -----------------------------------------------------------------------------

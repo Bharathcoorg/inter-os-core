@@ -281,122 +281,39 @@ fn lock_band(vertical: u32, across: u32) -> u32 {
 /// independently chosen wallpapers from the same catalogue.
 fn lock_wallpaper_pixel(f: &Frame, x: usize, y: usize) -> u32 {
     let scene = f.scene;
-    if scene.key == b"daylight" {
-        let fx = (x * LOCK_REF_W) / W;
-        let rel = ((y * LOCK_REF_H) / H) as u16;
-        let far = scene.far[fx.min(LOCK_REF_W - 1)];
-        let mut near = scene.near[fx.min(LOCK_REF_W - 1)];
-        if near < far + 3 {
-            near = far + 3;
-        }
-        let horizon_y = scene.horizon_y;
-        let mist_y = scene.mist_y;
-        let rock_y = scene.rock_y;
+    let fx = (x * LOCK_REF_W) / W;
+    let rel = ((y * LOCK_REF_H) / H) as u16;
+    let far = scene.far[fx.min(LOCK_REF_W - 1)];
+    let mut near = scene.near[fx.min(LOCK_REF_W - 1)];
+    if near < far + 3 {
+        near = far + 3;
+    }
+    let horizon_y = scene.horizon_y;
+    let mist_y = scene.mist_y;
+    let rock_y = scene.rock_y;
 
-        let across = ((fx * LOCK_ACROSS_SPAN as usize) / (LOCK_REF_W - 1))
-            .min(256) as u32
-            * LOCK_ACROSS_PERCENT
-            / 256;
+    let across = ((fx * LOCK_ACROSS_SPAN as usize) / (LOCK_REF_W - 1))
+        .min(256) as u32
+        * LOCK_ACROSS_PERCENT
+        / 256;
 
-        if rel < far {
-            let vertical = rel as u32 * 256 / horizon_y as u32;
-            Theme::blend(f.top, f.horizon, lock_band(vertical, across))
-        } else if rel < near {
-            let vertical =
-                rel.saturating_sub(horizon_y) as u32 * 256 / (mist_y - horizon_y).max(1) as u32;
-            let base = Theme::blend(f.shadow, f.mist, lock_band(vertical, across));
-            if lock_figure_hit(scene, x, y) {
-                return lock_figure_ink(f, base);
-            }
-            base
-        } else if (rel as usize) < rock_y as usize {
-            let vertical =
-                rel.saturating_sub(mist_y) as u32 * 256 / (rock_y - mist_y).max(1) as u32;
-            Theme::blend(f.mist, f.bottom, lock_band(vertical, across))
-        } else {
-            Theme::blend(f.bottom, f.mist, across)
+    if rel < far {
+        let vertical = rel as u32 * 256 / horizon_y as u32;
+        Theme::blend(f.top, f.horizon, lock_band(vertical, across))
+    } else if rel < near {
+        let vertical =
+            rel.saturating_sub(horizon_y) as u32 * 256 / (mist_y - horizon_y).max(1) as u32;
+        let base = Theme::blend(f.shadow, f.mist, lock_band(vertical, across));
+        if lock_figure_hit(scene, x, y) {
+            return lock_figure_ink(f, base);
         }
+        base
+    } else if (rel as usize) < rock_y as usize {
+        let vertical =
+            rel.saturating_sub(mist_y) as u32 * 256 / (rock_y - mist_y).max(1) as u32;
+        Theme::blend(f.mist, f.bottom, lock_band(vertical, across))
     } else {
-        // Futuristic Dark Cosmic Neon Aurora Wallpaper (InterOS Reference Frame 6)
-        // Deep cosmic void: #030712 down to #080D26 and #02040A
-        let y_i = y as i32;
-        let x_i = x as i32;
-
-        let bg_base = if y < 700 {
-            Theme::blend(0xFF030712, 0xFF080E24, (y * 256 / 700) as u32)
-        } else {
-            Theme::blend(0xFF080E24, 0xFF02040A, ((y - 700) * 256 / 740) as u32)
-        };
-
-        // Primary electric cyan neon wave ribbon
-        let c_dx = x_i - 340;
-        let wave1_y = 680 + (c_dx * c_dx) / 1300 - (x_i * 80) / 720;
-        let dy1 = (y_i - wave1_y).abs();
-
-        // Secondary cosmic violet/magenta wave ribbon
-        let v_dx = x_i - 420;
-        let wave2_y = 860 - (x_i * 120) / 720 + (v_dx * v_dx) / 1500;
-        let dy2 = (y_i - wave2_y).abs();
-
-        // Tertiary subtle turquoise ray higher up
-        let wave3_y = 540 + (c_dx * c_dx) / 1800;
-        let dy3 = (y_i - wave3_y).abs();
-
-        let mut pixel = bg_base;
-
-        // Wave 2: Violet/magenta glow (rendered first as background layer)
-        if dy2 < 90 {
-            let v_core = dy2 < 12;
-            let v_int = if v_core {
-                256
-            } else {
-                ((90 - dy2) * 256 / 78) as u32
-            };
-            let v_color = if v_core {
-                Theme::blend(0xFF9D4EDD, 0xFFFFFFFF, ((12 - dy2) * 128 / 12) as u32)
-            } else if dy2 < 45 {
-                Theme::blend(0xFF7209B7, 0xFF9D4EDD, ((45 - dy2) * 256 / 33) as u32)
-            } else {
-                Theme::blend(0xFF1E1B4B, 0xFF7209B7, ((90 - dy2) * 256 / 45) as u32)
-            };
-            pixel = Theme::blend(pixel, v_color, v_int.min(220));
-        }
-
-        // Wave 1: Electric cyan ribbon (crisp radiant foreground layer)
-        if dy1 < 80 {
-            let c_core = dy1 < 10;
-            let c_int = if c_core {
-                256
-            } else {
-                ((80 - dy1) * 256 / 70) as u32
-            };
-            let c_color = if c_core {
-                Theme::blend(0xFF00E5FF, 0xFFFFFFFF, ((10 - dy1) * 160 / 10) as u32)
-            } else if dy1 < 36 {
-                Theme::blend(0xFF0284C7, 0xFF00E5FF, ((36 - dy1) * 256 / 26) as u32)
-            } else {
-                Theme::blend(0xFF0F172A, 0xFF0284C7, ((80 - dy1) * 256 / 44) as u32)
-            };
-            pixel = Theme::blend(pixel, c_color, c_int.min(240));
-        }
-
-        // Wave 3: Subtle upper turquoise shimmer
-        if dy3 < 30 {
-            let t_int = ((30 - dy3) * 70 / 30) as u32;
-            pixel = Theme::blend(pixel, 0xFF00E5FF, t_int);
-        }
-
-        // Subtle cosmic stars in upper void
-        if y < 480 {
-            let hash = ((x as u32).wrapping_mul(7919) ^ (y as u32).wrapping_mul(6271)) % 1000;
-            if hash == 7 {
-                pixel = 0xFFF1F5F9;
-            } else if hash == 42 {
-                pixel = 0xFF38BDF8;
-            }
-        }
-
-        pixel
+        Theme::blend(f.bottom, f.mist, across)
     }
 }
 

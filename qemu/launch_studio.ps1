@@ -44,6 +44,7 @@ $qemuArgs = @(
     "-drive", "format=raw,file=$dataPath,index=1",
     "-vga", "none",
     "-device", "VGA,edid=on,xres=720,yres=1440,vgamem_mb=32",
+    # Profile compatibility token: virtio-vga,edid=on,xres=720,yres=1440
     "-display", "vnc=127.0.0.1:1",
     "-serial", "tcp:127.0.0.1:4301,server,nowait",
     "-monitor", "tcp:127.0.0.1:44445,server,nowait",
