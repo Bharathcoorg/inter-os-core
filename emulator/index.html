@@ -93,7 +93,7 @@
         <span id="qemu-global-text">Standby</span>
       </div>
 
-      <button class="ide-reboot-btn" id="btn-reboot-kernel" title="Warm Reboot Microkernel">
+      <button class="ide-reboot-btn" id="btn-reboot-kernel" title="Warm Reboot Microkernel" style="display: none;">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
         <span>Reboot OS</span>
       </button>
@@ -152,9 +152,9 @@
                   <div class="no-signal-sub">Standby — boot the device to start the live scanout</div>
                 </div>
                 <div id="virtual-touch-dot" class="virtual-touch-dot"></div>
-                <!-- In-Screen Modern Smartphone Volume HUD -->
-                <div class="screen-volume-hud" id="screen-volume-hud" aria-hidden="true">
-                  <div class="volume-hud-pill">
+                <!-- In-Screen Modern Sovereign Smartphone Volume HUD (InterOS Theme) -->
+                <div class="screen-volume-hud" id="screen-volume-hud" aria-hidden="true" title="InterOS Sound HUD — Click to open expanded Sound & Haptics screen">
+                  <div class="volume-hud-pill" id="volume-hud-pill">
                     <div class="volume-hud-icon" id="volume-hud-icon">
                       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
                     </div>
@@ -162,6 +162,98 @@
                       <div class="volume-hud-bar-fill" id="volume-hud-fill"></div>
                     </div>
                     <span class="volume-hud-percent" id="volume-hud-percent">60%</span>
+                    <button class="volume-hud-expand-btn" id="btn-expand-volume-panel" title="Expand Sound & Haptics Panel">
+                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 18 9 12 15 6"/></svg>
+                    </button>
+                  </div>
+                </div>
+
+                <!-- Modern InterOS Volume & Sound Screen (Slide-Up Modal Overlay) -->
+                <div class="device-sound-modal" id="device-sound-modal" aria-hidden="true">
+                  <div class="sound-modal-backdrop" id="sound-modal-backdrop"></div>
+                  <div class="sound-modal-card">
+                    <div class="sound-modal-handle"></div>
+                    <div class="sound-modal-header">
+                      <div class="sound-modal-title-group">
+                        <span class="sound-modal-badge">AUDIO HAL</span>
+                        <h3 class="sound-modal-title">Sound & Haptics</h3>
+                      </div>
+                      <button class="sound-modal-close-btn" id="btn-close-sound-modal" title="Dismiss Sound Panel">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                      </button>
+                    </div>
+
+                    <!-- Sound Profiles: Ring, Vibrate, Silent -->
+                    <div class="sound-profile-selector">
+                      <button class="sound-profile-btn active" id="sound-profile-ring" data-profile="ring">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+                        <span>Ring</span>
+                      </button>
+                      <button class="sound-profile-btn" id="sound-profile-vibrate" data-profile="vibrate">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 8v8M22 8v8M5 5v14M19 5v14M8 3v18h8V3H8z"/></svg>
+                        <span>Vibrate</span>
+                      </button>
+                      <button class="sound-profile-btn" id="sound-profile-silent" data-profile="silent">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 5L6 9H2v6h4l5 4V5z"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>
+                        <span>Silent</span>
+                      </button>
+                    </div>
+
+                    <!-- Audio Volume Sliders -->
+                    <div class="sound-slider-group">
+                      <!-- 1. Media Volume -->
+                      <div class="sound-slider-row">
+                        <div class="sound-slider-label-row">
+                          <span class="sound-slider-label">Media Volume</span>
+                          <span class="sound-slider-value" id="sound-media-val">60%</span>
+                        </div>
+                        <div class="sound-slider-control">
+                          <svg class="sound-slider-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
+                          <input type="range" class="sound-slider-input" id="sound-media-slider" min="0" max="100" value="60" />
+                        </div>
+                      </div>
+
+                      <!-- 2. Ring & Alerts -->
+                      <div class="sound-slider-row">
+                        <div class="sound-slider-label-row">
+                          <span class="sound-slider-label">Ringtone & Alerts</span>
+                          <span class="sound-slider-value" id="sound-ring-val">75%</span>
+                        </div>
+                        <div class="sound-slider-control">
+                          <svg class="sound-slider-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+                          <input type="range" class="sound-slider-input" id="sound-ring-slider" min="0" max="100" value="75" />
+                        </div>
+                      </div>
+
+                      <!-- 3. Alarms -->
+                      <div class="sound-slider-row">
+                        <div class="sound-slider-label-row">
+                          <span class="sound-slider-label">Alarm Volume</span>
+                          <span class="sound-slider-value" id="sound-alarm-val">80%</span>
+                        </div>
+                        <div class="sound-slider-control">
+                          <svg class="sound-slider-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2 2M5 3L2 6M22 6l-3-3"/></svg>
+                          <input type="range" class="sound-slider-input" id="sound-alarm-slider" min="0" max="100" value="80" />
+                        </div>
+                      </div>
+                    </div>
+
+                    <!-- Live Dynamic Equalizer Waveform & Routing -->
+                    <div class="sound-output-footer">
+                      <div class="sound-routing-info">
+                        <span class="sound-routing-dot"></span>
+                        <span class="sound-routing-text">Internal Sovereign Audio DAC</span>
+                      </div>
+                      <div class="sound-eq-bars" id="sound-eq-bars">
+                        <span class="eq-bar" style="--h: 40%;"></span>
+                        <span class="eq-bar" style="--h: 70%;"></span>
+                        <span class="eq-bar" style="--h: 100%;"></span>
+                        <span class="eq-bar" style="--h: 60%;"></span>
+                        <span class="eq-bar" style="--h: 85%;"></span>
+                        <span class="eq-bar" style="--h: 45%;"></span>
+                      </div>
+                    </div>
+
                   </div>
                 </div>
               </div>
@@ -182,7 +274,7 @@
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 18 9 12 15 6"/></svg>
               <span>Back</span>
             </button>
-            <button class="gesture-btn active" id="btn-gesture-home" title="Home">
+            <button class="gesture-btn" id="btn-gesture-home" title="Home">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="7"/></svg>
               <span>Home</span>
             </button>
@@ -217,7 +309,7 @@
           <button class="emu-btn" id="emu-btn-rotate" title="Rotate Screen (Orientation)">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
           </button>
-          <button class="emu-btn" id="emu-btn-reboot" title="Warm Reboot Microkernel">
+          <button class="emu-btn" id="emu-btn-reboot" title="Warm Reboot Microkernel" style="display: none;">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
           </button>
           <div class="emu-divider"></div>

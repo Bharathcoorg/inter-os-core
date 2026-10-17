@@ -1388,19 +1388,47 @@ document.addEventListener('DOMContentLoaded', () => {
   // Hardware Volume Buttons Action
   // Volume Controls (Real QEMU / Audio Sync)
   let volumeHudTimeout = null;
+  let volumePulseTimeout = null;
+
+  function updateVolumeIcon(clamped) {
+    const iconEl = document.getElementById('volume-hud-icon');
+    if (!iconEl) return;
+    if (clamped === 0) {
+      iconEl.innerHTML = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#FF453A" stroke-width="2.2"><path d="M11 5L6 9H2v6h4l5 4V5z"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>`;
+    } else if (clamped <= 33) {
+      iconEl.innerHTML = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>`;
+    } else if (clamped <= 66) {
+      iconEl.innerHTML = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>`;
+    } else {
+      iconEl.innerHTML = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/><line x1="23" y1="12" x2="23" y2="12"/></svg>`;
+    }
+  }
+
   function triggerScreenVolumeHud(vol) {
     const hud = document.getElementById('screen-volume-hud');
     const fill = document.getElementById('volume-hud-fill');
     const pct = document.getElementById('volume-hud-percent');
+    const mediaSlider = document.getElementById('sound-media-slider');
+    const mediaVal = document.getElementById('sound-media-val');
     if (!hud) return;
     const clamped = Math.max(0, Math.min(100, Math.round(vol)));
     if (fill) fill.style.height = `${clamped}%`;
-    if (pct) pct.textContent = `${clamped}%`;
+    if (pct) pct.textContent = clamped === 0 ? 'MUTE' : `${clamped}%`;
+    if (mediaSlider && Number(mediaSlider.value) !== clamped) mediaSlider.value = clamped;
+    if (mediaVal) mediaVal.textContent = `${clamped}%`;
+    updateVolumeIcon(clamped);
+
     hud.classList.add('active');
+    hud.classList.add('pulse');
+    if (volumePulseTimeout) clearTimeout(volumePulseTimeout);
+    volumePulseTimeout = setTimeout(() => {
+      hud.classList.remove('pulse');
+    }, 140);
+
     if (volumeHudTimeout) clearTimeout(volumeHudTimeout);
     volumeHudTimeout = setTimeout(() => {
       hud.classList.remove('active');
-    }, 2200);
+    }, 2500);
   }
 
   async function adjustVolume(delta) {
@@ -1426,6 +1454,105 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     if (Number.isFinite(state.volume)) playBeep(380 + state.volume * 5, 0.03, 'sine');
   }
+
+  async function setVolumeDirect(val) {
+    const clamped = Math.max(0, Math.min(100, Math.round(val)));
+    state.volume = clamped;
+    triggerScreenVolumeHud(clamped);
+    try {
+      const res = await fetch('/api/audio/volume', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ value: clamped.toString() })
+      });
+      const data = await res.json();
+      if (res.ok && data.success && Number.isFinite(data.volume_percent)) {
+        state.volume = data.volume_percent;
+        triggerScreenVolumeHud(state.volume);
+      }
+    } catch (e) {
+      logConsole('err', '[AUDIO_HAL] Set volume failed: ' + e.message);
+    }
+  }
+
+  // Modern InterOS Sound & Haptics Screen / Modal Controls
+  const soundModal = document.getElementById('device-sound-modal');
+  const btnCloseSoundModal = document.getElementById('btn-close-sound-modal');
+  const soundModalBackdrop = document.getElementById('sound-modal-backdrop');
+  const btnExpandVolumePanel = document.getElementById('btn-expand-volume-panel');
+  const volumeHudPill = document.getElementById('volume-hud-pill');
+  const soundMediaSlider = document.getElementById('sound-media-slider');
+  const soundRingSlider = document.getElementById('sound-ring-slider');
+  const soundRingVal = document.getElementById('sound-ring-val');
+  const soundAlarmSlider = document.getElementById('sound-alarm-slider');
+  const soundAlarmVal = document.getElementById('sound-alarm-val');
+
+  function openSoundModal() {
+    if (!soundModal) return;
+    soundModal.classList.add('active');
+    const hud = document.getElementById('screen-volume-hud');
+    if (hud) hud.classList.remove('active');
+  }
+
+  function closeSoundModal() {
+    if (!soundModal) return;
+    soundModal.classList.remove('active');
+  }
+
+  volumeHudPill?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    openSoundModal();
+  });
+
+  btnExpandVolumePanel?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    openSoundModal();
+  });
+
+  btnCloseSoundModal?.addEventListener('click', closeSoundModal);
+  soundModalBackdrop?.addEventListener('click', closeSoundModal);
+
+  soundMediaSlider?.addEventListener('input', (e) => {
+    const val = Number(e.target.value);
+    setVolumeDirect(val);
+  });
+
+  soundRingSlider?.addEventListener('input', (e) => {
+    const val = Number(e.target.value);
+    if (soundRingVal) soundRingVal.textContent = `${val}%`;
+    playBeep(640, 0.04, 'triangle');
+  });
+
+  soundAlarmSlider?.addEventListener('input', (e) => {
+    const val = Number(e.target.value);
+    if (soundAlarmVal) soundAlarmVal.textContent = `${val}%`;
+    playBeep(880, 0.04, 'sine');
+  });
+
+  // Sound Profile Selectors (Ring, Vibrate, Silent)
+  const profileBtns = [
+    document.getElementById('sound-profile-ring'),
+    document.getElementById('sound-profile-vibrate'),
+    document.getElementById('sound-profile-silent')
+  ];
+
+  profileBtns.forEach(btn => {
+    btn?.addEventListener('click', () => {
+      profileBtns.forEach(b => b?.classList.remove('active'));
+      btn.classList.add('active');
+      const profile = btn.getAttribute('data-profile') || 'ring';
+      const label = profile.charAt(0).toUpperCase() + profile.slice(1);
+      showToast(`Sound Profile: ${label}`);
+      logConsole('info', `[AUDIO_HAL] Sound mode profile switched to: ${label}`);
+      if (profile === 'silent') {
+        playBeep(220, 0.05, 'sawtooth');
+      } else if (profile === 'vibrate') {
+        playBeep(330, 0.08, 'square');
+      } else {
+        playBeep(780, 0.06, 'sine');
+      }
+    });
+  });
 
   emuBtnVolup?.addEventListener('click', () => adjustVolume(5));
   hwBtnVolup?.addEventListener('click', () => adjustVolume(5));

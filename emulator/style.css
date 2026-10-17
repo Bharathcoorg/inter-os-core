@@ -2914,7 +2914,7 @@ body[data-theme="cyberdeck_hud"] .device-screen {
    ========================================================================= */
 .screen-volume-hud {
   position: absolute;
-  top: 90px;
+  top: 240px;
   right: 14px;
   z-index: 100;
   pointer-events: none;
@@ -2926,40 +2926,54 @@ body[data-theme="cyberdeck_hud"] .device-screen {
 .screen-volume-hud.active {
   opacity: 1;
   transform: translateX(0) scale(1);
+  pointer-events: auto;
 }
 
 .volume-hud-pill {
-  width: 44px;
-  height: 148px;
-  background: rgba(15, 23, 42, 0.90);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
+  width: 48px;
+  height: 168px;
+  background: rgba(8, 11, 16, 0.94);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
   border: 1px solid rgba(255, 255, 255, 0.16);
-  border-radius: 22px;
-  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.55), 0 0 16px rgba(56, 132, 255, 0.25);
+  border-radius: 24px;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.65), 0 0 20px rgba(0, 229, 255, 0.16);
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: space-between;
   padding: 10px 0 8px;
   box-sizing: border-box;
+  cursor: pointer;
+  transition: transform 0.15s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.15s ease;
+}
+
+.volume-hud-pill:hover {
+  border-color: rgba(0, 229, 255, 0.38);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.7), 0 0 26px rgba(0, 229, 255, 0.28);
+}
+
+.screen-volume-hud.pulse .volume-hud-pill {
+  transform: scale(1.06);
+  box-shadow: 0 20px 48px rgba(0, 0, 0, 0.8), 0 0 32px rgba(0, 229, 255, 0.45);
 }
 
 .volume-hud-icon {
-  color: #F8FAFC;
+  color: #FAF8F4;
   display: flex;
   align-items: center;
   justify-content: center;
   height: 20px;
-  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.4));
+  filter: drop-shadow(0 2px 6px rgba(0, 229, 255, 0.3));
+  transition: color 0.15s ease;
 }
 
 .volume-hud-bar-track {
-  width: 8px;
+  width: 10px;
   flex: 1;
   margin: 8px 0;
-  background: rgba(255, 255, 255, 0.18);
-  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 5px;
   position: relative;
   overflow: hidden;
   display: flex;
@@ -2970,18 +2984,305 @@ body[data-theme="cyberdeck_hud"] .device-screen {
 .volume-hud-bar-fill {
   width: 100%;
   height: 60%;
-  background: linear-gradient(180deg, #00E5FF, #3884FF);
-  border-radius: 4px;
-  box-shadow: 0 0 8px rgba(0, 229, 255, 0.6);
-  transition: height 0.14s ease-out;
+  background: linear-gradient(180deg, #00E5FF 0%, #007ACC 100%);
+  border-radius: 5px;
+  box-shadow: 0 0 12px rgba(0, 229, 255, 0.7);
+  transition: height 0.12s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .volume-hud-percent {
   font-family: var(--font-mono, monospace);
   font-size: 10px;
   font-weight: 700;
-  color: #94A3B8;
+  color: #FAF8F4;
   letter-spacing: -0.5px;
+}
+
+.volume-hud-expand-btn {
+  background: none;
+  border: none;
+  padding: 2px 0 0;
+  color: #64748B;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  outline: none;
+  transition: color 0.15s ease, transform 0.15s ease;
+}
+
+.volume-hud-expand-btn:hover {
+  color: #00E5FF;
+  transform: translateY(-1px);
+}
+
+/* =========================================================================
+   Modern Sovereign Sound & Haptics Control Screen / Modal Overlay
+   ========================================================================= */
+.device-sound-modal {
+  position: absolute;
+  inset: 0;
+  z-index: 150;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.24s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.device-sound-modal.active {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.sound-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.65);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
+.sound-modal-card {
+  position: relative;
+  z-index: 10;
+  background: rgba(8, 12, 18, 0.96);
+  backdrop-filter: blur(28px);
+  -webkit-backdrop-filter: blur(28px);
+  border-top: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 28px 28px 0 0;
+  padding: 12px 18px 24px;
+  box-shadow: 0 -12px 40px rgba(0, 0, 0, 0.8), 0 0 30px rgba(0, 229, 255, 0.12);
+  transform: translateY(100%);
+  transition: transform 0.28s cubic-bezier(0.16, 1, 0.3, 1);
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.device-sound-modal.active .sound-modal-card {
+  transform: translateY(0);
+}
+
+.sound-modal-handle {
+  width: 36px;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.24);
+  border-radius: 2px;
+  align-self: center;
+  margin-bottom: 2px;
+}
+
+.sound-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.sound-modal-title-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sound-modal-badge {
+  font-size: 0.58rem;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  color: #00E5FF;
+  text-transform: uppercase;
+}
+
+.sound-modal-title {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: #FFFFFF;
+  letter-spacing: -0.2px;
+}
+
+.sound-modal-close-btn {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: #94A3B8;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  outline: none;
+}
+
+.sound-modal-close-btn:hover {
+  background: rgba(255, 255, 255, 0.18);
+  color: #FFFFFF;
+}
+
+.sound-profile-selector {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+
+.sound-profile-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 10px 8px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  color: #94A3B8;
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  outline: none;
+}
+
+.sound-profile-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #FFFFFF;
+}
+
+.sound-profile-btn.active {
+  background: rgba(0, 229, 255, 0.12);
+  border-color: rgba(0, 229, 255, 0.45);
+  color: #00E5FF;
+  box-shadow: 0 0 16px rgba(0, 229, 255, 0.2);
+}
+
+.sound-slider-group {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.sound-slider-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 14px;
+  padding: 10px 12px;
+}
+
+.sound-slider-label-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.sound-slider-label {
+  font-size: 0.74rem;
+  font-weight: 500;
+  color: #94A3B8;
+}
+
+.sound-slider-value {
+  font-family: var(--font-mono, monospace);
+  font-size: 0.74rem;
+  font-weight: 700;
+  color: #00E5FF;
+}
+
+.sound-slider-control {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.sound-slider-icon {
+  color: #64748B;
+  flex-shrink: 0;
+}
+
+.sound-slider-input {
+  flex: 1;
+  -webkit-appearance: none;
+  appearance: none;
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.12);
+  outline: none;
+  cursor: pointer;
+}
+
+.sound-slider-input::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #00E5FF;
+  box-shadow: 0 0 10px rgba(0, 229, 255, 0.7);
+  cursor: pointer;
+  transition: transform 0.1s ease;
+}
+
+.sound-slider-input::-webkit-slider-thumb:hover {
+  transform: scale(1.18);
+}
+
+.sound-output-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-top: 4px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.sound-routing-info {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sound-routing-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #00E5FF;
+  box-shadow: 0 0 8px #00E5FF;
+}
+
+.sound-routing-text {
+  font-size: 0.68rem;
+  color: #64748B;
+  font-weight: 500;
+}
+
+.sound-eq-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 16px;
+}
+
+.sound-eq-bars .eq-bar {
+  width: 3px;
+  height: var(--h, 50%);
+  background: linear-gradient(180deg, #00E5FF, #007ACC);
+  border-radius: 2px;
+  animation: eqBounce 1.2s ease-in-out infinite alternate;
+}
+
+.sound-eq-bars .eq-bar:nth-child(1) { animation-delay: 0.0s; }
+.sound-eq-bars .eq-bar:nth-child(2) { animation-delay: 0.2s; }
+.sound-eq-bars .eq-bar:nth-child(3) { animation-delay: 0.4s; }
+.sound-eq-bars .eq-bar:nth-child(4) { animation-delay: 0.1s; }
+.sound-eq-bars .eq-bar:nth-child(5) { animation-delay: 0.3s; }
+.sound-eq-bars .eq-bar:nth-child(6) { animation-delay: 0.5s; }
+
+@keyframes eqBounce {
+  0% { height: 20%; opacity: 0.5; }
+  100% { height: 100%; opacity: 1; }
 }
 
 /* =========================================================================

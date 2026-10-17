@@ -1158,27 +1158,143 @@ fn log_frame_breakdown(draw: u64, write: u64, beat: u64) {
 fn volume_hud_pixel(x: usize, y: usize, volume: u8) -> u32 {
     const W_HUD: usize = 520;
     const H_HUD: usize = 160;
-    let bg = 0xF01A1B1E;
-    let accent = 0xFFFFFFFF;
-    let track = 0xFF4A4D52;
-    let px = x;
-    let py = y;
-    if px >= W_HUD || py >= H_HUD { return 0; }
-    let dx = if px < 24 { 24 - px } else if px >= W_HUD - 24 { px - (W_HUD - 25) } else { 0 };
-    let dy = if py < 24 { 24 - py } else if py >= H_HUD - 24 { py - (H_HUD - 25) } else { 0 };
-    if dx * dx + dy * dy > 24 * 24 { return 0; }
-    if py >= 68 && py < 92 {
-        let start = 72usize;
-        let end = 448usize;
-        if px >= start && px < end {
-            let filled = start + ((end - start) * volume as usize / 100);
-            return if px < filled { accent } else { track };
+    if x >= W_HUD || y >= H_HUD { return 0; }
+
+    // Capsule dimensions: 460 wide, 96 high, centered in 520x160
+    const X0: usize = 30;
+    const X1: usize = 490;
+    const Y0: usize = 32;
+    const Y1: usize = 128;
+    const R: usize = 48;
+
+    if x < X0 || x >= X1 || y < Y0 || y >= Y1 { return 0; }
+
+    // Check circular ends of the stadium capsule
+    let cy = (Y0 + Y1) / 2; // 80
+    let dy = if y < cy { cy - y } else { y - cy };
+    if x < X0 + R {
+        let dx = (X0 + R) - x;
+        if dx * dx + dy * dy > R * R { return 0; }
+    } else if x >= X1 - R {
+        let dx = x - (X1 - R - 1);
+        if dx * dx + dy * dy > R * R { return 0; }
+    }
+
+    // 1. Vector Speaker Icon (centered at x = 84, y = 80)
+    // Body / magnet box: x in 66..76, y in 73..87
+    if x >= 66 && x < 76 && y >= 73 && y < 87 {
+        return 0xFFFAF8F4;
+    }
+    // Speaker expanding cone: x in 76..92
+    if x >= 76 && x < 92 {
+        let half_h = 7 + (x - 76) * 12 / 16;
+        if y >= 80 - half_h && y <= 80 + half_h {
+            return 0xFFFAF8F4;
         }
     }
-    // Simple vector speaker glyph; no bitmap font and no Studio-side rendering.
-    let speaker = (x >= 70 && x < 105 && y >= 45 && y < 115)
-        || (x >= 52 && x < 70 && y >= 62 && y < 98);
-    if speaker { accent } else { bg }
+    // Dynamic Sound Waves or Mute Slash
+    if volume == 0 {
+        // Red diagonal strike-through cutting across speaker
+        if x >= 62 && x <= 96 && y >= 64 && y <= 96 {
+            let diff = (x as i32 - 62) - (y as i32 - 64);
+            if diff.abs() <= 2 {
+                return 0xFFFF453A; // Vivid red mute slash
+            }
+        }
+    } else {
+        // Sound wave arcs radiating from cone mouth (90, 80)
+        let w_dx = x as i32 - 90;
+        let w_dy = if y >= 80 { (y - 80) as i32 } else { (80 - y) as i32 };
+        if w_dx > 0 && w_dy <= w_dx * 9 / 10 {
+            let dist_sq = w_dx * w_dx + w_dy * w_dy;
+            // Wave 1: Always when volume > 0 (radius ~14)
+            if dist_sq >= 12 * 12 && dist_sq <= 15 * 15 {
+                return 0xFF00E5FF;
+            }
+            // Wave 2: When volume >= 34 (radius ~22)
+            if volume >= 34 && dist_sq >= 20 * 20 && dist_sq <= 23 * 23 {
+                return 0xFF00D2FF;
+            }
+            // Wave 3: When volume >= 67 (radius ~30)
+            if volume >= 67 && dist_sq >= 28 * 28 && dist_sq <= 31 * 31 {
+                return 0xFF3884FF;
+            }
+        }
+    }
+
+    // 2. Volume Level Track (x in 130..360, y in 72..88, 16px high)
+    const TRACK_X0: usize = 130;
+    const TRACK_X1: usize = 360;
+    const TRACK_Y0: usize = 72;
+    const TRACK_Y1: usize = 88;
+    const TRACK_R: usize = 8;
+    if x >= TRACK_X0 && x < TRACK_X1 && y >= TRACK_Y0 && y < TRACK_Y1 {
+        let t_cy = (TRACK_Y0 + TRACK_Y1) / 2; // 80
+        let t_dy = if y < t_cy { t_cy - y } else { y - t_cy };
+        let mut inside_track = true;
+        if x < TRACK_X0 + TRACK_R {
+            let t_dx = (TRACK_X0 + TRACK_R) - x;
+            if t_dx * t_dx + t_dy * t_dy > TRACK_R * TRACK_R { inside_track = false; }
+        } else if x >= TRACK_X1 - TRACK_R {
+            let t_dx = x - (TRACK_X1 - TRACK_R - 1);
+            if t_dx * t_dx + t_dy * t_dy > TRACK_R * TRACK_R { inside_track = false; }
+        }
+
+        if inside_track {
+            let filled = TRACK_X0 + ((TRACK_X1 - TRACK_X0) * volume as usize) / 100;
+            if x < filled {
+                if x >= filled.saturating_sub(4) {
+                    return 0xFFFFFFFF; // Radiant specular leading bead
+                }
+                // Gradient from deep electric cyan (0x007ACC) to bright radiant cyan (0x00E5FF)
+                let t = ((x - TRACK_X0) * 255) / (TRACK_X1 - TRACK_X0);
+                let g = 0x7A + ((0xE5 - 0x7A) * t / 255);
+                let b = 0xCC + ((0xFF - 0xCC) * t / 255);
+                return 0xFF000000 | ((g as u32) << 8) | (b as u32);
+            } else {
+                return 0xFF161C26; // Dark obsidian trough
+            }
+        }
+    }
+
+    // 3. Crisp Numeric Readout (x in 376..450, y in 70..90)
+    let mut num_buf = [0u8; 6];
+    let num_len = if volume == 0 {
+        num_buf[..4].copy_from_slice(b"MUTE");
+        4
+    } else if volume == 100 {
+        num_buf[..4].copy_from_slice(b"100%");
+        4
+    } else if volume >= 10 {
+        num_buf[0] = b'0' + (volume / 10);
+        num_buf[1] = b'0' + (volume % 10);
+        num_buf[2] = b'%';
+        3
+    } else {
+        num_buf[0] = b'0' + volume;
+        num_buf[1] = b'%';
+        2
+    };
+
+    if let Some(text_color) = test_text(x, y, 382, 71, 1, &num_buf[..num_len], 0xFFFAF8F4) {
+        return text_color;
+    }
+
+    // 4. Obsidian Ceramic Glass Monolith Backdrop & Beveled Perimeter Rim
+    // Top specular highlight edge
+    if y == Y0 || (x < X0 + R && (y - Y0) <= 2) || (x >= X1 - R && (y - Y0) <= 2) {
+        return 0x705A6E8C;
+    }
+    // Bottom border reflection
+    if y == Y1 - 1 {
+        return 0x30263042;
+    }
+    // Glass gradient body
+    let py = y - Y0;
+    let t = (py * 255) / (Y1 - Y0);
+    let luma = 14 - (t * 6 / 255); // Subtle vertical glass lighting
+    let alpha = 0xF0;
+    (alpha << 24) | ((luma as u32) << 16) | (((luma * 12 / 10) as u32) << 8) | ((luma * 16 / 10) as u32)
 }
 
 fn render_volume_hud(surface: u32, volume: u8) {
