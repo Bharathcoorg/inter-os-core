@@ -2463,7 +2463,6 @@ body[data-theme="cyberdeck_hud"] .device-screen {
   user-select: none;
   -webkit-user-drag: none;
   image-rendering: auto;
-  image-rendering: -webkit-optimize-contrast;
   transform: translateZ(0);
 }
 
@@ -2565,9 +2564,16 @@ body[data-theme="cyberdeck_hud"] .device-screen {
 }
 
 .studio-workspace.smartphone-mode .device-chassis {
-  height: min(720px, calc(100vh - 110px)) !important;
-  max-height: calc(100vh - 110px) !important;
-  max-width: 400px !important;
+  height: min(840px, calc(100vh - 75px)) !important;
+  max-height: calc(100vh - 75px) !important;
+  max-width: 420px !important;
+}
+
+.studio-workspace.smartphone-mode .device-chassis.large-mode,
+.device-chassis.large-mode {
+  height: min(940px, calc(100vh - 50px)) !important;
+  max-height: calc(100vh - 50px) !important;
+  max-width: 470px !important;
 }
 
 /* --------------------------------------------------------------------------

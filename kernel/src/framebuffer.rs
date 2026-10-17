@@ -1974,6 +1974,22 @@ pub(crate) fn present_dst_row_band(band: (usize, usize), src_h: usize, dst_h: us
     (d0, d1.max(d0))
 }
 
+#[inline(always)]
+fn blend_1_2(c0: u32, c1: u32) -> u32 {
+    let r = (((c0 >> 16) & 0xFF) + 2 * ((c1 >> 16) & 0xFF) + 1) / 3;
+    let g = (((c0 >> 8) & 0xFF) + 2 * ((c1 >> 8) & 0xFF) + 1) / 3;
+    let b = ((c0 & 0xFF) + 2 * (c1 & 0xFF) + 1) / 3;
+    0xFF000000 | (r << 16) | (g << 8) | b
+}
+
+#[inline(always)]
+fn blend_2_1(c0: u32, c1: u32) -> u32 {
+    let r = (2 * ((c0 >> 16) & 0xFF) + ((c1 >> 16) & 0xFF) + 1) / 3;
+    let g = (2 * ((c0 >> 8) & 0xFF) + ((c1 >> 8) & 0xFF) + 1) / 3;
+    let b = (2 * (c0 & 0xFF) + (c1 & 0xFF) + 1) / 3;
+    0xFF000000 | (r << 16) | (g << 8) | b
+}
+
 /// Presents an ARGB8888 scanout buffer to the bootloader-provided physical framebuffer.
 /// This is the hardware-backed handoff used by the display driver on platforms where
 /// the bootloader exposes a linear framebuffer. No userspace pointer is retained.
@@ -2024,7 +2040,20 @@ pub fn present_argb8888(pixels: &[u32], width: u32, height: u32, dirty_rows: (us
     // degenerates to the identity `[s0, s1)` it needs to be. Both loops below
     // therefore share one mapping.
     let is_2x = (src_w == dst_w * 2) && (src_h == dst_h * 2);
-    let (dy0, dy1) = present_dst_row_band(dirty_rows, src_h, dst_h, is_2x);
+    let is_3_2 = (src_w * 3 == dst_w * 2) && (src_h * 3 == dst_h * 2) && (src_w <= 720) && (src_w % 2 == 0);
+    let (dy0, dy1) = if is_3_2 {
+        let s0 = dirty_rows.0.min(src_h);
+        let s1 = dirty_rows.1.min(src_h).max(s0);
+        if s1 <= s0 {
+            (0, 0)
+        } else {
+            let d0 = if s0 == 0 { 0 } else { (s0.saturating_sub(1) * 3) / 2 };
+            let d1 = ((s1 * 3) / 2 + 1).min(dst_h);
+            (d0, d1.max(d0))
+        }
+    } else {
+        present_dst_row_band(dirty_rows, src_h, dst_h, is_2x)
+    };
 
         if src_w == info.width && src_h == info.height && off_x == 0 && off_y == 0 {
             if let Some(ptr) = fb.buffer_ptr {
@@ -2097,18 +2126,38 @@ pub fn present_argb8888(pixels: &[u32], width: u32, height: u32, dirty_rows: (us
             let bpp = info.bytes_per_pixel;
             let stride_bytes = info.stride * bpp;
             let fmt = info.pixel_format;
-            // WHY exact-integer ratios get their own path: an exact 2x shrink
-            // averages each 2x2 source quad (one filtered tap per destination
-            // pixel, bounded by the destination size), which keeps diagonal
-            // text strokes intact. Fractional ratios stay nearest-neighbor:
-            // a full fixed-point bilinear over up to ~1M destination pixels
-            // per flip is outside the QEMU-TCG CPU budget already noted by
-            // the launcher, so the bounded point sample is the deliberate
-            // tradeoff there, not an oversight.
+            let mut scratch = [0u32; 720];
             unsafe {
                 for dy in dy0..dy1 {
                     let target_y = off_y + dy;
                     let row_start_ptr = ptr.add(target_y * stride_bytes + off_x * bpp);
+                    let row_src_3_2: Option<&[u32]> = if is_3_2 {
+                        let j = dy / 3;
+                        let m = dy % 3;
+                        let sy0 = 2 * j;
+                        let sy1 = (sy0 + 1).min(src_h - 1);
+                        let sy2 = (sy0 + 2).min(src_h - 1);
+                        if m == 0 {
+                            Some(&pixels[sy0 * src_w..(sy0 + 1) * src_w])
+                        } else if m == 1 {
+                            let r0 = sy0 * src_w;
+                            let r1 = sy1 * src_w;
+                            for x in 0..src_w {
+                                scratch[x] = blend_1_2(pixels[r0 + x], pixels[r1 + x]);
+                            }
+                            Some(&scratch[..src_w])
+                        } else {
+                            let r1 = sy1 * src_w;
+                            let r2 = sy2 * src_w;
+                            for x in 0..src_w {
+                                scratch[x] = blend_2_1(pixels[r1 + x], pixels[r2 + x]);
+                            }
+                            Some(&scratch[..src_w])
+                        }
+                    } else {
+                        None
+                    };
+
                     match fmt {
                         PixelFormat::Bgr if bpp == 4 => {
                             let mut dst_ptr = row_start_ptr;
@@ -2133,6 +2182,25 @@ pub fn present_argb8888(pixels: &[u32], width: u32, height: u32, dirty_rows: (us
                                     *dst_ptr.add(2) = (argb >> 16) as u8;
                                     *dst_ptr.add(3) = 0xFF;
                                     dst_ptr = dst_ptr.add(4);
+                                }
+                            } else if let Some(row_src) = row_src_3_2 {
+                                let num_groups = src_w / 2;
+                                for k in 0..num_groups {
+                                    let sx0 = 2 * k;
+                                    let sx1 = sx0 + 1;
+                                    let sx2 = (sx0 + 2).min(src_w - 1);
+                                    let p0 = row_src[sx0];
+                                    let p1 = row_src[sx1];
+                                    let p2 = row_src[sx2];
+
+                                    let out0 = p0;
+                                    let out1 = blend_1_2(p0, p1);
+                                    let out2 = blend_2_1(p1, p2);
+
+                                    core::ptr::write_unaligned(dst_ptr as *mut u32, out0);
+                                    core::ptr::write_unaligned(dst_ptr.add(4) as *mut u32, out1);
+                                    core::ptr::write_unaligned(dst_ptr.add(8) as *mut u32, out2);
+                                    dst_ptr = dst_ptr.add(12);
                                 }
                             } else {
                                 let sy = dy * src_h / dst_h;
@@ -2171,6 +2239,33 @@ pub fn present_argb8888(pixels: &[u32], width: u32, height: u32, dirty_rows: (us
                                     *dst_ptr.add(2) = (argb >> 16) as u8;
                                     dst_ptr = dst_ptr.add(3);
                                 }
+                            } else if let Some(row_src) = row_src_3_2 {
+                                let num_groups = src_w / 2;
+                                for k in 0..num_groups {
+                                    let sx0 = 2 * k;
+                                    let sx1 = sx0 + 1;
+                                    let sx2 = (sx0 + 2).min(src_w - 1);
+                                    let p0 = row_src[sx0];
+                                    let p1 = row_src[sx1];
+                                    let p2 = row_src[sx2];
+
+                                    let out0 = p0;
+                                    let out1 = blend_1_2(p0, p1);
+                                    let out2 = blend_2_1(p1, p2);
+
+                                    *dst_ptr = out0 as u8;
+                                    *dst_ptr.add(1) = (out0 >> 8) as u8;
+                                    *dst_ptr.add(2) = (out0 >> 16) as u8;
+
+                                    *dst_ptr.add(3) = out1 as u8;
+                                    *dst_ptr.add(4) = (out1 >> 8) as u8;
+                                    *dst_ptr.add(5) = (out1 >> 16) as u8;
+
+                                    *dst_ptr.add(6) = out2 as u8;
+                                    *dst_ptr.add(7) = (out2 >> 8) as u8;
+                                    *dst_ptr.add(8) = (out2 >> 16) as u8;
+                                    dst_ptr = dst_ptr.add(9);
+                                }
                             } else {
                                 let sy = dy * src_h / dst_h;
                                 let src_row = sy * src_w;
@@ -2207,6 +2302,36 @@ pub fn present_argb8888(pixels: &[u32], width: u32, height: u32, dirty_rows: (us
                                     *dst_ptr.add(2) = argb as u8;
                                     *dst_ptr.add(3) = 0xFF;
                                     dst_ptr = dst_ptr.add(4);
+                                }
+                            } else if let Some(row_src) = row_src_3_2 {
+                                let num_groups = src_w / 2;
+                                for k in 0..num_groups {
+                                    let sx0 = 2 * k;
+                                    let sx1 = sx0 + 1;
+                                    let sx2 = (sx0 + 2).min(src_w - 1);
+                                    let p0 = row_src[sx0];
+                                    let p1 = row_src[sx1];
+                                    let p2 = row_src[sx2];
+
+                                    let out0 = p0;
+                                    let out1 = blend_1_2(p0, p1);
+                                    let out2 = blend_2_1(p1, p2);
+
+                                    *dst_ptr = (out0 >> 16) as u8;
+                                    *dst_ptr.add(1) = (out0 >> 8) as u8;
+                                    *dst_ptr.add(2) = out0 as u8;
+                                    *dst_ptr.add(3) = 0xFF;
+
+                                    *dst_ptr.add(4) = (out1 >> 16) as u8;
+                                    *dst_ptr.add(5) = (out1 >> 8) as u8;
+                                    *dst_ptr.add(6) = out1 as u8;
+                                    *dst_ptr.add(7) = 0xFF;
+
+                                    *dst_ptr.add(8) = (out2 >> 16) as u8;
+                                    *dst_ptr.add(9) = (out2 >> 8) as u8;
+                                    *dst_ptr.add(10) = out2 as u8;
+                                    *dst_ptr.add(11) = 0xFF;
+                                    dst_ptr = dst_ptr.add(12);
                                 }
                             } else {
                                 let sy = dy * src_h / dst_h;
@@ -2245,6 +2370,33 @@ pub fn present_argb8888(pixels: &[u32], width: u32, height: u32, dirty_rows: (us
                                     *dst_ptr.add(2) = argb as u8;
                                     dst_ptr = dst_ptr.add(3);
                                 }
+                            } else if let Some(row_src) = row_src_3_2 {
+                                let num_groups = src_w / 2;
+                                for k in 0..num_groups {
+                                    let sx0 = 2 * k;
+                                    let sx1 = sx0 + 1;
+                                    let sx2 = (sx0 + 2).min(src_w - 1);
+                                    let p0 = row_src[sx0];
+                                    let p1 = row_src[sx1];
+                                    let p2 = row_src[sx2];
+
+                                    let out0 = p0;
+                                    let out1 = blend_1_2(p0, p1);
+                                    let out2 = blend_2_1(p1, p2);
+
+                                    *dst_ptr = (out0 >> 16) as u8;
+                                    *dst_ptr.add(1) = (out0 >> 8) as u8;
+                                    *dst_ptr.add(2) = out0 as u8;
+
+                                    *dst_ptr.add(3) = (out1 >> 16) as u8;
+                                    *dst_ptr.add(4) = (out1 >> 8) as u8;
+                                    *dst_ptr.add(5) = out1 as u8;
+
+                                    *dst_ptr.add(6) = (out2 >> 16) as u8;
+                                    *dst_ptr.add(7) = (out2 >> 8) as u8;
+                                    *dst_ptr.add(8) = out2 as u8;
+                                    dst_ptr = dst_ptr.add(9);
+                                }
                             } else {
                                 let sy = dy * src_h / dst_h;
                                 let src_row = sy * src_w;
@@ -2259,24 +2411,89 @@ pub fn present_argb8888(pixels: &[u32], width: u32, height: u32, dirty_rows: (us
                             }
                         }
                         _ => {
-                            let sy = dy * src_h / dst_h;
-                            let src_row = sy * src_w;
-                            for dx in 0..dst_w {
-                                let sx = dx * src_w / dst_w;
-                                let argb = pixels[src_row + sx];
-                                fb.set_pixel(off_x + dx, target_y, ((argb >> 16) as u8, (argb >> 8) as u8, argb as u8));
+                            if let Some(row_src) = row_src_3_2 {
+                                let num_groups = src_w / 2;
+                                for k in 0..num_groups {
+                                    let sx0 = 2 * k;
+                                    let sx1 = sx0 + 1;
+                                    let sx2 = (sx0 + 2).min(src_w - 1);
+                                    let p0 = row_src[sx0];
+                                    let p1 = row_src[sx1];
+                                    let p2 = row_src[sx2];
+
+                                    let out0 = p0;
+                                    let out1 = blend_1_2(p0, p1);
+                                    let out2 = blend_2_1(p1, p2);
+
+                                    let dx0 = k * 3;
+                                    fb.set_pixel(off_x + dx0, target_y, ((out0 >> 16) as u8, (out0 >> 8) as u8, out0 as u8));
+                                    fb.set_pixel(off_x + dx0 + 1, target_y, ((out1 >> 16) as u8, (out1 >> 8) as u8, out1 as u8));
+                                    fb.set_pixel(off_x + dx0 + 2, target_y, ((out2 >> 16) as u8, (out2 >> 8) as u8, out2 as u8));
+                                }
+                            } else {
+                                let sy = dy * src_h / dst_h;
+                                let src_row = sy * src_w;
+                                for dx in 0..dst_w {
+                                    let sx = dx * src_w / dst_w;
+                                    let argb = pixels[src_row + sx];
+                                    fb.set_pixel(off_x + dx, target_y, ((argb >> 16) as u8, (argb >> 8) as u8, argb as u8));
+                                }
                             }
                         }
                     }
                 }
             }
         } else {
+            let mut scratch = [0u32; 720];
             for dy in dy0..dy1 {
-                let sy = dy * src_h / dst_h;
-                for dx in 0..dst_w {
-                    let sx = dx * src_w / dst_w;
-                    let argb = pixels[sy * src_w + sx];
-                    fb.set_pixel(off_x + dx, off_y + dy, ((argb >> 16) as u8, (argb >> 8) as u8, argb as u8));
+                if is_3_2 {
+                    let j = dy / 3;
+                    let m = dy % 3;
+                    let sy0 = 2 * j;
+                    let sy1 = (sy0 + 1).min(src_h - 1);
+                    let sy2 = (sy0 + 2).min(src_h - 1);
+                    let row_src: &[u32] = if m == 0 {
+                        &pixels[sy0 * src_w..(sy0 + 1) * src_w]
+                    } else if m == 1 {
+                        let r0 = sy0 * src_w;
+                        let r1 = sy1 * src_w;
+                        for x in 0..src_w {
+                            scratch[x] = blend_1_2(pixels[r0 + x], pixels[r1 + x]);
+                        }
+                        &scratch[..src_w]
+                    } else {
+                        let r1 = sy1 * src_w;
+                        let r2 = sy2 * src_w;
+                        for x in 0..src_w {
+                            scratch[x] = blend_2_1(pixels[r1 + x], pixels[r2 + x]);
+                        }
+                        &scratch[..src_w]
+                    };
+                    let num_groups = src_w / 2;
+                    for k in 0..num_groups {
+                        let sx0 = 2 * k;
+                        let sx1 = sx0 + 1;
+                        let sx2 = (sx0 + 2).min(src_w - 1);
+                        let p0 = row_src[sx0];
+                        let p1 = row_src[sx1];
+                        let p2 = row_src[sx2];
+
+                        let out0 = p0;
+                        let out1 = blend_1_2(p0, p1);
+                        let out2 = blend_2_1(p1, p2);
+
+                        let dx0 = k * 3;
+                        fb.set_pixel(off_x + dx0, off_y + dy, ((out0 >> 16) as u8, (out0 >> 8) as u8, out0 as u8));
+                        fb.set_pixel(off_x + dx0 + 1, off_y + dy, ((out1 >> 16) as u8, (out1 >> 8) as u8, out1 as u8));
+                        fb.set_pixel(off_x + dx0 + 2, off_y + dy, ((out2 >> 16) as u8, (out2 >> 8) as u8, out2 as u8));
+                    }
+                } else {
+                    let sy = dy * src_h / dst_h;
+                    for dx in 0..dst_w {
+                        let sx = dx * src_w / dst_w;
+                        let argb = pixels[sy * src_w + sx];
+                        fb.set_pixel(off_x + dx, off_y + dy, ((argb >> 16) as u8, (argb >> 8) as u8, argb as u8));
+                    }
                 }
             }
         }

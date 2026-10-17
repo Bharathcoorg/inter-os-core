@@ -640,15 +640,8 @@ document.addEventListener('DOMContentLoaded', () => {
     if (liveScanoutImg) liveScanoutImg.style.display = 'none';
     scanoutCtx = liveScanoutCanvas.getContext('2d', { alpha: false, desynchronized: true });
     if (scanoutCtx) {
-      // WHY smoothing is OFF here: the canvas is already 1:1 with the guest's
-      // framebuffer, so putImageData never scales anything, and the CSS that
-      // presents the element at chassis size is the only place a resample
-      // happens. Leaving smoothing enabled only mattered for the drawImage
-      // paths, and switching it off guarantees that if a future path does
-      // scale here it shows the guest's own anti-aliased edges rather than a
-      // second, smoothed interpolation of them. The frame is the guest's
-      // pixels exactly; nothing on this side should re-filter them.
-      scanoutCtx.imageSmoothingEnabled = false;
+      scanoutCtx.imageSmoothingEnabled = true;
+      scanoutCtx.imageSmoothingQuality = 'high';
     }
   }
   setSurfaceState('no-signal');
@@ -722,11 +715,14 @@ document.addEventListener('DOMContentLoaded', () => {
       if (liveScanoutCanvas.width !== width || liveScanoutCanvas.height !== height) {
         liveScanoutCanvas.width = width;
         liveScanoutCanvas.height = height;
+        scanoutCtx.imageSmoothingEnabled = true;
+        scanoutCtx.imageSmoothingQuality = 'high';
       }
       const imgData = new ImageData(new Uint8ClampedArray(pixels.buffer, pixels.byteOffset, width * height * 4), width, height);
       scanoutCtx.putImageData(imgData, 0, 0);
       displayedFrameW = width;
       displayedFrameH = height;
+      updateDisplaySpecBadge();
       setSurfaceState('live');
       return true;
     }
@@ -864,7 +860,8 @@ document.addEventListener('DOMContentLoaded', () => {
       img.onload = () => {
         // The canvas is the single visible surface; the hidden legacy <img>
         // element is never fed so it cannot show broken-image alt text.
-        if (!((img.naturalWidth === 720 && img.naturalHeight === 1440)
+        if (!((img.naturalWidth === 1080 && img.naturalHeight === 2160)
+          || (img.naturalWidth === 720 && img.naturalHeight === 1440)
           || (img.naturalWidth === 360 && img.naturalHeight === 720)
           || (img.naturalWidth === 1280 && img.naturalHeight === 720))) {
           resolve();
@@ -874,10 +871,13 @@ document.addEventListener('DOMContentLoaded', () => {
           if (liveScanoutCanvas.width !== img.naturalWidth || liveScanoutCanvas.height !== img.naturalHeight) {
             liveScanoutCanvas.width = img.naturalWidth;
             liveScanoutCanvas.height = img.naturalHeight;
+            scanoutCtx.imageSmoothingEnabled = true;
+            scanoutCtx.imageSmoothingQuality = 'high';
           }
           scanoutCtx.drawImage(img, 0, 0);
           displayedFrameW = img.naturalWidth;
           displayedFrameH = img.naturalHeight;
+          updateDisplaySpecBadge();
           setSurfaceState('live');
         }
         resolve();
@@ -1297,6 +1297,16 @@ document.addEventListener('DOMContentLoaded', () => {
   // Report what was observed and say plainly that it is virtualised. When the
   // guest cannot be reached, leave the badges undetermined rather than inventing
   // a specification.
+  function updateDisplaySpecBadge() {
+    const el = document.getElementById('spec-display');
+    if (!el) return;
+    if (displayedFrameW === 1080 && displayedFrameH === 2160) {
+      el.textContent = '1080x2160 Full HD+ (Authoring 720x1440)';
+    } else if (displayedFrameW && displayedFrameH) {
+      el.textContent = `${displayedFrameW}x${displayedFrameH} virtual framebuffer`;
+    }
+  }
+
   function describeObservedTarget(data) {
     const set = (id, value) => {
       const el = document.getElementById(id);
@@ -1305,9 +1315,15 @@ document.addEventListener('DOMContentLoaded', () => {
     const profile = (data && data.active_profile) || 'unknown';
     set('spec-arch', profile === 'unknown' ? 'Undetermined' : profile + ' (virtualised)');
     set('spec-memory', (data && data.ram_mb) ? data.ram_mb + ' MiB emulated' : 'Undetermined');
-    const w = data && (data.guest_width || data.display_width);
-    const h = data && (data.guest_height || data.display_height);
-    set('spec-display', (w && h) ? w + 'x' + h + ' virtual framebuffer' : 'Undetermined');
+    const w = (displayedFrameW === 1080 && displayedFrameH === 2160) ? 1080 : (data && (data.guest_width || data.display_width));
+    const h = (displayedFrameW === 1080 && displayedFrameH === 2160) ? 2160 : (data && (data.guest_height || data.display_height));
+    if (w === 1080 && h === 2160) {
+      set('spec-display', '1080x2160 Full HD+ (Authoring 720x1440)');
+    } else if (w && h) {
+      set('spec-display', w + 'x' + h + ' virtual framebuffer');
+    } else {
+      set('spec-display', 'Undetermined');
+    }
     set('spec-security', 'Ring 3 capability sandbox (emulated)');
   }
 
@@ -1712,6 +1728,35 @@ document.addEventListener('DOMContentLoaded', () => {
     logConsole('warn', '[SCREENSHOT] QEMU scanout buffer offline; live capture unavailable.');
     showToast('QEMU scanout offline (Standby)');
   });
+
+  // Display Sizing & 1:1 Pixel-Exact FHD Mode Toggle
+  const emuBtnScale = document.getElementById('emu-btn-scale');
+  let currentDisplayScale = 'fit';
+  function cycleDisplayScale() {
+    const chassis = document.getElementById('device-chassis');
+    const scanout = document.getElementById('screen-live-scanout');
+    if (!chassis) return;
+    if (currentDisplayScale === 'fit') {
+      currentDisplayScale = 'large';
+      chassis.classList.add('large-mode');
+      scanout?.classList.remove('fhd-pixel-exact');
+      showToast('Display Sizing: Large (Flagship View)');
+      logConsole('info', '[DISPLAY] Sizing set to Large (immersive).');
+    } else if (currentDisplayScale === 'large') {
+      currentDisplayScale = 'exact';
+      chassis.classList.remove('large-mode');
+      scanout?.classList.add('fhd-pixel-exact');
+      showToast('Display Mode: 1:1 Pixel-Exact FHD (1080x2160)');
+      logConsole('info', '[DISPLAY] Sizing set to 1:1 Pixel-Exact FHD (1080x2160).');
+    } else {
+      currentDisplayScale = 'fit';
+      chassis.classList.remove('large-mode');
+      scanout?.classList.remove('fhd-pixel-exact');
+      showToast('Display Sizing: Responsive Fit');
+      logConsole('info', '[DISPLAY] Sizing set to Responsive Fit.');
+    }
+  }
+  emuBtnScale?.addEventListener('click', cycleDisplayScale);
 
   // Orientation is locked strictly to portrait (720x1440 canvas, CSS 360x720).
   state.isLandscape = false;
