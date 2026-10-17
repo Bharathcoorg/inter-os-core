@@ -2174,15 +2174,7 @@ pub extern "C" fn _start() -> ! {
                     if input.kind == 7 {
                         match state.current_view {
                             ViewMode::BootScreen | ViewMode::PowerTransition => {}
-                            ViewMode::HomeScreen => {
-                                refresh_runtime_recents(&mut state);
-                                state.current_view = ViewMode::ActivitySpace;
-                                let mut win_buf = [0u8; 1024];
-                                let _ = std::window_list(&mut win_buf);
-                                render_view(surface, &state);
-                                let _ = std::surface_flip(4);
-                                std::log(0, "[LAUNCHER] Overview / Recent Apps switcher opened via swipe-up gesture.").ok();
-                            }
+                            ViewMode::HomeScreen => {}
                             ViewMode::LockScreen => {
                                 if state.lock_state == std::UserLockState::Unlocked || std::user_unlock(1000, b"").is_ok() {
                                     state.lock_state = std::UserLockState::Unlocked;
