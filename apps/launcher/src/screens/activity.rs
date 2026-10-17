@@ -1047,6 +1047,224 @@ fn render_mini_preview(card: &CardPlan, px: usize, py: usize) -> Option<u32> {
 
             Some(bg)
         }
+        Some(IconKind::Calculator) => {
+            // Authentic Calculator UI: Display at top with result, 4x3 keypad grid with amber accents
+            let bg = 0xFF0D1117;
+            let amber = rgb(0xF5, 0x9E, 0x0B);
+            let slate_btn = 0xFF1E293B;
+            let num_btn = 0xFF161F2E;
+
+            // Display readout card at top
+            let disp = Rect::new(x0 + 16, y0 + 10, w - 32, 34);
+            if rounded_contains(disp, px, py, 8) {
+                if rounded_outline(disp, px, py, 8) {
+                    return Some(0xFF223044);
+                }
+                // Simulated calculation result text block aligned right
+                if px >= disp.x + disp.w - 110 && px < disp.x + disp.w - 16 && py >= disp.y + 10 && py < disp.y + 24 {
+                    return Some(0xFFFFFFFF);
+                }
+                return Some(0xFF0F172A);
+            }
+
+            // Keypad grid: 4 columns x 3 rows
+            let kw = (w - 44) / 4;
+            let kh = 32;
+            for r in 0..3 {
+                let ky = y0 + 52 + r * (kh + 6);
+                for c in 0..4 {
+                    let kx = x0 + 16 + c * (kw + 4);
+                    let btn = Rect::new(kx, ky, kw, kh);
+                    if rounded_contains(btn, px, py, 8) {
+                        if rounded_outline(btn, px, py, 8) {
+                            return Some(if c == 3 { amber } else { 0xFF2A384C });
+                        }
+                        if c == 3 {
+                            return Some(amber);
+                        } else if r == 0 {
+                            return Some(slate_btn);
+                        } else {
+                            return Some(num_btn);
+                        }
+                    }
+                }
+            }
+
+            Some(bg)
+        }
+        Some(IconKind::Phone) => {
+            // Authentic Phone / Dialer UI: Number display capsule, 3-col dial pad, green call button
+            let bg = 0xFF0B1017;
+            let emerald = rgb(0x10, 0xB9, 0x81);
+
+            // Top dialed number capsule
+            let num_capsule = Rect::new(x0 + 20, y0 + 10, w - 40, 28);
+            if rounded_contains(num_capsule, px, py, 8) {
+                if rounded_outline(num_capsule, px, py, 8) {
+                    return Some(0xFF1E2B3E);
+                }
+                if px >= num_capsule.x + 20 && px < num_capsule.x + 140 && py >= num_capsule.y + 8 && py < num_capsule.y + 20 {
+                    return Some(0xFFE2E8F0);
+                }
+                return Some(0xFF131D2B);
+            }
+
+            // 3-column keypad circles
+            let col_w = (w - 40) / 3;
+            for r in 0..2 {
+                let row_cy = y0 + 58 + r * 38;
+                for c in 0..3 {
+                    let col_cx = x0 + 20 + c * col_w + col_w / 2;
+                    let dx = (px as i32) - col_cx as i32;
+                    let dy = (py as i32) - row_cy as i32;
+                    let dist2 = dx * dx + dy * dy;
+                    if dist2 <= 16 * 16 {
+                        if dist2 >= 14 * 14 {
+                            return Some(0xFF26354A);
+                        }
+                        return Some(0xFF172233);
+                    }
+                }
+            }
+
+            // Bottom call pill
+            let call_pill = Rect::new(x0 + w / 2 - 40, y0 + 138, 80, 26);
+            if rounded_contains(call_pill, px, py, 13) {
+                return Some(emerald);
+            }
+
+            Some(bg)
+        }
+        Some(IconKind::Files) => {
+            // Authentic File Manager UI: Storage usage gauge, category folder chips, directory items
+            let bg = 0xFF0C121D;
+            let cyan = 0xFF06B6D4;
+
+            // Storage bar at top
+            let sbar = Rect::new(x0 + 16, y0 + 12, w - 32, 16);
+            if rounded_contains(sbar, px, py, 6) {
+                if px < sbar.x + sbar.w * 3 / 8 {
+                    return Some(cyan);
+                }
+                return Some(0xFF1E2B3D);
+            }
+
+            // Category folder cards
+            let cw = (w - 44) / 4;
+            for c in 0..4 {
+                let cx = x0 + 16 + c * (cw + 4);
+                let cr = Rect::new(cx, y0 + 38, cw, 38);
+                if rounded_contains(cr, px, py, 8) {
+                    if rounded_outline(cr, px, py, 8) {
+                        return Some(0xFF24344B);
+                    }
+                    if px >= cr.x + 8 && px < cr.x + 24 && py >= cr.y + 10 && py < cr.y + 24 {
+                        return Some(cyan);
+                    }
+                    return Some(0xFF141F30);
+                }
+            }
+
+            // File items list
+            for r in 0..2 {
+                let ry = y0 + 88 + r * 38;
+                let rr = Rect::new(x0 + 16, ry, w - 32, 32);
+                if rounded_contains(rr, px, py, 8) {
+                    if rounded_outline(rr, px, py, 8) {
+                        return Some(0xFF1E2C3F);
+                    }
+                    if px >= rr.x + 12 && px < rr.x + 28 && py >= rr.y + 8 && py < rr.y + 24 {
+                        return Some(0xFF38BDF8);
+                    }
+                    if px >= rr.x + 36 && px < rr.x + 180 && py >= rr.y + 11 && py < rr.y + 21 {
+                        return Some(0xFFE2E8F0);
+                    }
+                    return Some(0xFF131D2D);
+                }
+            }
+
+            Some(bg)
+        }
+        Some(IconKind::Calendar) => {
+            // Authentic Calendar UI: Month header, day of week indicators, highlighted date badge
+            let bg = 0xFF0D0F18;
+            let purple = 0xFF8B5CF6;
+
+            // Month header capsule
+            if px >= x0 + 20 && px < x0 + 140 && py >= y0 + 12 && py < y0 + 26 {
+                return Some(purple);
+            }
+
+            // Day circles row
+            let cw = (w - 40) / 7;
+            let row_y = y0 + 38;
+            for d in 0..7 {
+                let dcx = x0 + 20 + d * cw + cw / 2;
+                let dx = (px as i32) - dcx as i32;
+                let dy = (py as i32) - (row_y + 14) as i32;
+                if dx * dx + dy * dy <= 12 * 12 {
+                    if d == 3 {
+                        return Some(purple);
+                    }
+                    return Some(0xFF1B2234);
+                }
+            }
+
+            // Event schedule card
+            let ev = Rect::new(x0 + 16, y0 + 78, w - 32, 44);
+            if rounded_contains(ev, px, py, 10) {
+                if px < ev.x + 6 {
+                    return Some(purple);
+                }
+                if px >= ev.x + 16 && px < ev.x + 160 && py >= ev.y + 10 && py < ev.y + 22 {
+                    return Some(0xFFFFFFFF);
+                }
+                if px >= ev.x + 16 && px < ev.x + 120 && py >= ev.y + 26 && py < ev.y + 36 {
+                    return Some(0xFF94A3B8);
+                }
+                return Some(0xFF161B28);
+            }
+
+            Some(bg)
+        }
+        Some(IconKind::Vault) => {
+            // Authentic Sovereign Vault UI: Shield badge, encrypted key slots, zero-knowledge lock
+            let bg = 0xFF0A0F14;
+            let emerald = rgb(0x10, 0xB9, 0x81);
+
+            let sh = Rect::new(x0 + w / 2 - 20, y0 + 14, 40, 40);
+            if rounded_contains(sh, px, py, 12) {
+                if rounded_outline(sh, px, py, 12) {
+                    return Some(emerald);
+                }
+                return Some(0xFF0F261F);
+            }
+
+            // Status label
+            if px >= x0 + 40 && px < x0 + w - 40 && py >= y0 + 64 && py < y0 + 74 {
+                return Some(emerald);
+            }
+
+            // Key credential slots
+            for r in 0..2 {
+                let ky = y0 + 86 + r * 36;
+                let kr = Rect::new(x0 + 20, ky, w - 40, 28);
+                if rounded_contains(kr, px, py, 8) {
+                    if rounded_outline(kr, px, py, 8) {
+                        return Some(0xFF1A332B);
+                    }
+                    if px >= kr.x + 10 && px < kr.x + 22 && py >= kr.y + 8 && py < kr.y + 20 {
+                        return Some(emerald);
+                    }
+                    if px >= kr.x + 30 && px < kr.x + 160 && py >= kr.y + 10 && py < kr.y + 18 {
+                        return Some(0xFFE2E8F0);
+                    }
+                    return Some(0xFF101F1A);
+                }
+            }
+
+            Some(bg)
+        }
         _ => {
             // Default clean application canvas with surface header and watermark icon
             let bg = PREVIEW_BG;

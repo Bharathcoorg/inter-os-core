@@ -276,19 +276,21 @@ pub fn app_drawer_dot_at(state: &LauncherState, x: usize, y: usize) -> Option<us
     None
 }
 
-/// Grid slot under a point, computed from the grid's own pitch rather than by
-/// testing cells one at a time.
+/// Grid slot under a point, computed with touch slop across the entire drawer grid band
+/// so taps near cell borders or margins resolve accurately to the nearest tile.
 fn slot_at(g: &layout::Grid, x: usize, y: usize) -> Option<usize> {
     let pitch_x = g.cell.w + g.gutter;
     let pitch_y = g.cell.h + g.gutter;
-    if pitch_x == 0 || pitch_y == 0 || x < g.origin_x || y < g.origin_y {
+    if pitch_x == 0 || pitch_y == 0 {
         return None;
     }
-    let col = (x - g.origin_x) / pitch_x;
-    let row = (y - g.origin_y) / pitch_y;
-    if col >= g.columns || row >= g.rows {
+    if y < 170 || y > 1085 {
         return None;
     }
+    let eff_x = x.saturating_sub(g.origin_x.saturating_sub(space::MD));
+    let eff_y = y.saturating_sub(g.origin_y.saturating_sub(space::SM));
+    let col = (eff_x / pitch_x).min(g.columns.saturating_sub(1));
+    let row = (eff_y / pitch_y).min(g.rows.saturating_sub(1));
     Some(row * g.columns + col)
 }
 

@@ -1718,26 +1718,24 @@ fn resolve_app_at_touch<'a>(state: &'a LauncherState, x: u32, y: u32) -> Option<
     let x = x as usize;
     let y = y as usize;
 
-    // 1. App Drawer Grid: first resolve by actual item hit geometry
+    // 1. App Drawer Grid: strictly resolve by actual item hit geometry
     if state.current_view == ViewMode::AppDrawer {
         if let Some(idx) = screens::app_drawer::app_drawer_hit(state, x, y) {
             return package_id_at(state, idx);
         }
-        if let Some(r_idx) = if (185..395).contains(&y) { Some(0) }
-            else if (410..620).contains(&y) { Some(1) }
-            else if (635..845).contains(&y) { Some(2) }
-            else if (860..1070).contains(&y) { Some(3) }
-            else { None }
-        {
-            let c_idx = if (50..230).contains(&x) { Some(0) }
-                else if (270..450).contains(&x) { Some(1) }
-                else if (490..670).contains(&x) { Some(2) }
-                else { None };
-            if let Some(c_idx) = c_idx {
-                let app_idx = state.app_drawer_page * 12 + r_idx * 3 + c_idx;
-                return package_id_at(state, app_idx);
-            }
+        let r_idx = if (180..=398).contains(&y) { 0 }
+            else if (399..=624).contains(&y) { 1 }
+            else if (625..=850).contains(&y) { 2 }
+            else if (851..=1080).contains(&y) { 3 }
+            else { 4 };
+        let c_idx = if (0..=252).contains(&x) { 0 }
+            else if (253..=467).contains(&x) { 1 }
+            else { 2 };
+        if r_idx < 4 {
+            let app_idx = state.app_drawer_page * 12 + r_idx * 3 + c_idx;
+            return package_id_at(state, app_idx);
         }
+        return None;
     }
 
     // 2. Home Screen dynamic deck and dock
@@ -1747,22 +1745,25 @@ fn resolve_app_at_touch<'a>(state: &'a LauncherState, x: u32, y: u32) -> Option<
         }
 
         // Row 0 of Quick Action Dock: Phone, Messages, Camera
-        if (700..925).contains(&y) || (700..980).contains(&y) {
-            if (30..238).contains(&x) {
+        if (700..925).contains(&y) {
+            if (30..250).contains(&x) {
                 return package_id_by_suffix(state, b"dialer");
-            } else if (255..465).contains(&x) {
+            } else if (250..475).contains(&x) {
                 return package_id_by_suffix(state, b"messages");
-            } else if (480..695).contains(&x) {
+            } else if (475..695).contains(&x) {
                 return package_id_by_suffix(state, b"camera");
             }
         }
 
-        // Row 1 of Quick Action Dock: Files, Browser
-        if (925..1160).contains(&y) || (1020..1300).contains(&y) {
-            if (30..238).contains(&x) {
+        // Row 1 of Quick Action Dock: Files, Browser (Slot 5: Apps is a view transition, not an app)
+        if (925..1160).contains(&y) {
+            if (30..250).contains(&x) {
                 return package_id_by_suffix(state, b"file_manager").or_else(|| package_id_by_suffix(state, b"files"));
-            } else if (255..465).contains(&x) {
+            } else if (250..475).contains(&x) {
                 return package_id_by_suffix(state, b"browser");
+            } else if (475..695).contains(&x) {
+                // Apps tile opens drawer
+                return None;
             }
         }
     }
@@ -4225,11 +4226,7 @@ pub extern "C" fn _start() -> ! {
                                 }
 
                                 // Tapping dock 6th item (Apps) opens App Drawer
-                                if ((660..800).contains(&y) && (482..672).contains(&x))
-                                    || ((1020..1320).contains(&y) && (482..672).contains(&x))
-                                    || ((1120..1400).contains(&y) && (490..645).contains(&x))
-                                    || ((925..1160).contains(&y) && (480..695).contains(&x))
-                                {
+                                if (925..1160).contains(&y) && (475..695).contains(&x) {
                                     state.current_view = ViewMode::AppDrawer;
                                     render_view(surface, &state);
                                     let _ = std::surface_flip(4);
