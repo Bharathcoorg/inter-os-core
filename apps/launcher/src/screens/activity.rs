@@ -531,16 +531,13 @@ fn build_card(state: &LauncherState, slot: usize) -> Option<CardPlan> {
     // First-party HD vector icon inside a 48x48 squircle badge (radius 14px)
     let icon_rect = Rect::new(rect.x + 20, rect.y + 16, SQUIRCLE_SIZE, SQUIRCLE_SIZE);
     let title_x = rect.x + 80;
-    let title_fit = rect.w.saturating_sub(80 + 120);
 
     let task = state.recent_task_ids.get(slot).copied().unwrap_or(0);
     let focused = task != 0 && state.active_child == Some(task);
     let icon = icons::match_icon_kind(id);
     let theme_color = app_signature_color(icon);
 
-    // State badge pill ("Active", "Background", or "Recent")
-    let state_x = title_x;
-    let state_y = rect.y + 44;
+    // State badge pill ("Active", "Background", or "Recent") cleanly positioned on the right of the header
     let (state_text, dot_color, text_color, badge_w): (&[u8], u32, u32, usize) = if task != 0 && focused {
         (b"Active", STATE_ACTIVE_DOT, STATE_ACTIVE_TEXT, 70)
     } else if task != 0 {
@@ -548,14 +545,17 @@ fn build_card(state: &LauncherState, slot: usize) -> Option<CardPlan> {
     } else {
         (b"Recent", STATE_RECENT_DOT, STATE_RECENT_TEXT, 72)
     };
-    let state_pill_rect = Rect::new(state_x, state_y, badge_w, 20);
+    let state_x = rect.x + rect.w - badge_w - 24;
+    let state_y = rect.y + 28;
+    let state_pill_rect = Rect::new(state_x, state_y, badge_w, 24);
     let state_label = LabelRun::new(
         state_x + 18,
-        state_y + 3,
+        state_y + 5,
         type_scale::CAPTION,
         state_text,
         text_color,
     );
+    let title_fit = state_x.saturating_sub(title_x + 12);
 
     let index = registry_index(state, id);
     let badge_bytes: &[u8] = match index {
@@ -601,7 +601,7 @@ fn build_card(state: &LauncherState, slot: usize) -> Option<CardPlan> {
         badge,
         title: LabelRun::fitted(
             title_x,
-            rect.y + 18,
+            rect.y + 24,
             type_scale::BODY,
             title_fit,
             card_title_bytes(state, id, &mut title_scratch),
