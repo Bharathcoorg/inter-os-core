@@ -429,8 +429,8 @@ function Test-BiosImageEmbedsKernel {
         [Parameter(Mandatory=$true)][string]$KernelBinaryPath
     )
 
-    $imageStream = [System.IO.File]::OpenRead($ImagePath)
-    $kernelStream = [System.IO.File]::OpenRead($KernelBinaryPath)
+    $imageStream = [System.IO.File]::Open($ImagePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+    $kernelStream = [System.IO.File]::Open($KernelBinaryPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
     try {
         $kernel = Get-ElfLoadSegmentGeometry -Stream $kernelStream -Label "kernel binary $KernelBinaryPath"
         $imageLength = $imageStream.Length
@@ -500,7 +500,18 @@ function Verify-BiosImageArtifact {
         throw "Build artifact verification failed: BIOS image is smaller than one sector ($($item.Length) bytes) at $resolved"
     }
 
-    $fs = [System.IO.File]::OpenRead($resolved)
+    $fs = $null
+    for ($attempt = 0; $attempt -lt 10; $attempt++) {
+        try {
+            $fs = [System.IO.File]::Open($resolved, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+            break
+        } catch [System.IO.IOException] {
+            Start-Sleep -Milliseconds 50
+        }
+    }
+    if ($fs -eq $null) {
+        $fs = [System.IO.File]::Open($resolved, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+    }
     try {
         $sector = New-Object byte[] 512
         $readBytes = $fs.Read($sector, 0, 512)

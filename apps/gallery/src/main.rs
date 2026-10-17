@@ -40,18 +40,19 @@ use std::design::spacing;
 use std::design::touch;
 use std::design::walls;
 
+pub use gallery::{
+    decode_bmp, decode_image, decode_ppm, decode_qoi, decode_raw, encode_ppm,
+    has_image_suffix, has_video_suffix, is_media_file, media_at_with_storage,
+    Filter, Media, StorageMediaItem, VideoCodec, VideoPlayerState,
+    MAX_STORAGE_ITEMS,
+};
+
 const W: usize = 720;
 const H: usize = 1440;
 const CHUNK: usize = 4096;
 
 // -----------------------------------------------------------------------------
 // 32-bit ARGB8888 Design Color Tokens
-//
-// Every token is the design system's own (`sdk/rust/interos-std/src/design/
-// mod.rs`), so a retuned palette moves this surface with the rest of the shell
-// instead of leaving it behind. The names this app used before are kept as
-// aliases so the geometry below still reads the same way, but no colour value
-// is written in this file.
 // -----------------------------------------------------------------------------
 const BG: u32 = color::BACKGROUND;
 const SURFACE: u32 = color::SURFACE;
@@ -59,9 +60,10 @@ const SOFT: u32 = color::SURFACE_SOFT;
 const BORDER: u32 = color::BORDER;
 const TEXT: u32 = color::TEXT;
 const MUTED: u32 = color::TEXT_MUTED;
-/// Ink for a filled (selected) control. The design system's surface tone is the
-/// light end of its own scale, which is exactly the ink a dark fill takes.
 const INVERSE: u32 = color::SURFACE;
+const ACCENT_SKY: u32 = 0xFF2563EB;
+const ACCENT_AMBER: u32 = 0xFFF59E0B;
+const DANGER_CRIMSON: u32 = 0xFFEF4444;
 
 /// Capability slot that holds `FileSystemRead` for the `app_gallery` task.
 ///
@@ -80,6 +82,11 @@ const FS_READ_CAP_SLOT: usize = 4;
 #[inline]
 fn fs_read_slot() -> usize {
     std::cap_lookup(std::cap_type::FILE_SYSTEM_READ, 0).unwrap_or(FS_READ_CAP_SLOT)
+}
+
+#[inline]
+fn fs_write_slot() -> usize {
+    std::cap_lookup(std::cap_type::FILE_SYSTEM_WRITE, 0).unwrap_or(5)
 }
 
 // -----------------------------------------------------------------------------
@@ -101,9 +108,9 @@ const SUBTITLE_Y: usize = 116;
 
 const PILL_Y: usize = 152;
 const PILL_H: usize = 48;
-const PILL_GAP: usize = 12;
-const PILL_PAD: usize = 20;
-const PILL_MIN_W: usize = 72;
+const PILL_GAP: usize = 10;
+const PILL_PAD: usize = 16;
+const PILL_MIN_W: usize = 64;
 
 const GRID_TOP: usize = 216;
 const ROW_STRIDE: usize = CELL + GUTTER;
@@ -112,10 +119,6 @@ const ROWS: usize = 4;
 const GRID_BOTTOM: usize = GRID_TOP + ROWS * CELL + (ROWS - 1) * GUTTER;
 
 /// Caption strip under a thumbnail's image.
-///
-/// WHY 46 and not the cell's full height: a wallpaper's name is one measured
-/// scale-1 line (24 rows), and 46 leaves 11 rows of breathing room above and
-/// below it inside a 216px cell. The image takes the rest.
 const CAPTION_H: usize = 46;
 
 const NAV_Y0: usize = 1290;
@@ -123,26 +126,9 @@ const NAV_Y1: usize = 1400;
 const NAV_ICON_CY: usize = 1330;
 const NAV_LABEL_Y: usize = 1356;
 
-/// The system home indicator: a 200x6 pill drawn inside the 240x40 gesture
-/// strip that the tap handler accepts.
-///
-/// WHY two rectangles and not one: the drawn indicator is 6px of ink, which is
-/// not a touch target, so the hit box has to be the whole strip - but the strip
-/// itself has to be a rectangle that is actually painted, otherwise the tap
-/// region drifts. The old code tested `x 240..480 && y >= 1400` with no upper
-/// bound on y, a 241x40px region that nothing ever drew, so a tap 18 rows above
-/// the indicator exited the app. Both rectangles live here, so the strip that is
-/// hit-tested is the strip that contains the ink.
 const HOME_HIT: Rect = Rect::new(240, 1400, 240, 40);
 const HOME_PILL: Rect = Rect::new(260, 1418, 200, 6);
 
-/// Rows the filter-chip band owns.
-///
-/// WHY exactly the drawn pill band: `pill_pixel` returns `None` outside
-/// `PILL_Y..PILL_Y + PILL_H`, and every run of text inside it is gated on its
-/// own measured line box, which is inside the pill. No other row can hold a
-/// pixel of this control, so widening the band would re-rasterise rows that
-/// cannot have changed.
 const FILTER_BAND_Y0: usize = PILL_Y;
 const FILTER_BAND_Y1: usize = PILL_Y + PILL_H;
 
@@ -150,22 +136,20 @@ const FILTER_BAND_Y1: usize = PILL_Y + PILL_H;
 const DETAIL_BAR_H: usize = 112;
 const DETAIL_VIEW_Y0: usize = 128;
 const DETAIL_VIEW_Y1: usize = 800;
-/// The inspection viewport's height, and the frame's own ratio.
 const DETAIL_VIEW_H: usize = DETAIL_VIEW_Y1 - DETAIL_VIEW_Y0;
-/// The inspection viewport's width: half the content width, because a wallpaper
-/// is 720x1440 and the only rectangle that shows every pixel of it at its own
-/// proportions is one with the same 1:2 ratio. Fitting the frame into a square
-/// viewport would squash the sky and double the foreground; cropping instead
-/// would hide half the artwork. What is left of the content width is the page
-/// fill, which is the surface tone rather than stretched pixels.
 const DETAIL_VIEW_W: usize = (W - 2 * MARGIN) / 2;
-/// The viewport's left edge: centred in the content width.
 const DETAIL_VIEW_X: usize = (W - DETAIL_VIEW_W) / 2;
-/// The inspection view's close control, named so the renderer and the tap
-/// handler test the same rectangle rather than two copies of its numbers.
 const CLOSE: Rect = Rect::new(232, 856, 256, 56);
 
-const PILL_LABELS: [&[u8]; 3] = [b"All", b"Wallpapers", b"Photos"];
+// Action buttons for CRUD & capture
+const CAPTURE_BTN: Rect = Rect::new(540, 44, 144, 48);
+const DETAIL_FAV: Rect = Rect::new(W - 140, 32, 48, 48);
+const DETAIL_DEL: Rect = Rect::new(W - 80, 32, 48, 48);
+const PLAY_PAUSE_BTN: Rect = Rect::new(W / 2 - 28, DETAIL_VIEW_Y1 + 16, 56, 56);
+const SCRUB_BAR: Rect = Rect::new(MARGIN, DETAIL_VIEW_Y1 + 84, W - 2 * MARGIN, 20);
+const FULLSCREEN_BTN: Rect = Rect::new(W - MARGIN - 100, DETAIL_VIEW_Y1 + 114, 100, 36);
+
+const PILL_LABELS: [&[u8]; 4] = [b"All", b"Wallpapers", b"Photos", b"Videos"];
 const NAV_LABELS: [&[u8]; 3] = [b"Photos", b"Albums", b"Places"];
 
 // -----------------------------------------------------------------------------
@@ -365,8 +349,8 @@ fn wallpapers_available() -> bool {
 /// three ways; in that state they are drawn recessed and are not hit-tested,
 /// exactly as they were when the ledger was the only source.
 #[inline]
-fn filters_available() -> bool {
-    wallpapers_available() || !ledger_is_empty()
+fn filters_available(app: &GalleryApp) -> bool {
+    wallpapers_available() || !ledger_is_empty() || app.storage_count > 0
 }
 
 /// How many bottom-bar destinations this build can actually reach.
@@ -390,80 +374,34 @@ const DISABLED: u32 = BORDER;
 // -----------------------------------------------------------------------------
 // Media model
 // -----------------------------------------------------------------------------
-/// One image this gallery can show.
-///
-/// WHY public: `GalleryApp` carries one in a public field, so the variant has to
-/// be at least as visible as the field that names it.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Media {
-    /// An entry of the device's wallpaper catalogue: real scene data, rendered
-    /// by the guest itself.
-    Wallpaper(usize),
-    /// A record of the photo ledger. No value of this variant exists today
-    /// because `PHOTOS` is empty; the arm is kept so the ledger's path through
-    /// the viewer is not deleted while it is unreachable.
-    Photo(usize),
-}
-
-/// Which set the filter row selects. Public for the same reason as `Media`.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Filter {
-    All,
-    Wallpapers,
-    Photos,
-}
-
-impl Filter {
-    fn from_index(index: usize) -> Filter {
-        match index {
-            1 => Filter::Wallpapers,
-            2 => Filter::Photos,
-            _ => Filter::All,
-        }
-    }
-
-    /// Whether this filter admits the wallpaper catalogue.
-    fn shows_wallpapers(self) -> bool {
-        matches!(self, Filter::All | Filter::Wallpapers)
-    }
-
-    /// Whether this filter admits the photo ledger.
-    fn shows_ledger(self) -> bool {
-        matches!(self, Filter::All | Filter::Photos)
-    }
-}
-
-/// The media item at a flat grid index, wallpapers first.
-///
-/// WHY a flat index: the grid is one list rendered in three columns, so a cell
-/// and a media record must resolve through the same numbering or the tile and
-/// the thing it opens disagree.
-fn media_at(index: usize) -> Option<Media> {
-    if index < walls::SCENES.len() {
-        return Some(Media::Wallpaper(index));
-    }
-    let photo = index - walls::SCENES.len();
-    if photo < PHOTOS.len() {
-        return Some(Media::Photo(photo));
-    }
-    None
+/// The media item at a flat grid index, wallpapers first, then photos, then storage items.
+fn media_at(app: &GalleryApp, index: usize) -> Option<Media> {
+    media_at_with_storage(index, walls::SCENES.len(), PHOTOS.len(), app.storage_count)
 }
 
 /// Rows the wallpaper set occupies in the grid.
-///
-/// WHY a ceiling: the catalogue is not obliged to be a multiple of the column
-/// count, so the honest ledger note has to start below whatever row the last
-/// wallpaper actually lands on.
 fn wallpaper_rows() -> usize {
     (walls::SCENES.len() + 2) / 3
 }
 
 /// The media a grid cell holds under the current filter, if any.
 fn cell_media(app: &GalleryApp, row: usize, col: usize) -> Option<Media> {
-    let media = media_at(row * 3 + col)?;
+    let media = media_at(app, row * 3 + col)?;
     match media {
         Media::Wallpaper(_) if app.filter.shows_wallpapers() => Some(media),
         Media::Photo(_) if app.filter.shows_ledger() => Some(media),
+        Media::StorageItem(idx) => {
+            if idx < app.storage_count {
+                let item = &app.storage_items[idx];
+                if item.is_video {
+                    if app.filter.shows_videos() { Some(media) } else { None }
+                } else {
+                    if app.filter.shows_ledger() { Some(media) } else { None }
+                }
+            } else {
+                None
+            }
+        }
         _ => None,
     }
 }
@@ -503,17 +441,6 @@ const SCAN_PATHS: [&str; 6] = [
 /// rather than silently listing somewhere else.
 const APP_STORAGE_PACKAGE: &str = "org.interos.gallery";
 
-/// File extensions the scan counts as images.
-///
-/// WHY a suffix match on the name: the guest has no image decoder at all
-/// (`sdk/rust/interos-std/src/design/walls.rs` opens with exactly that fact), so
-/// there is nothing to sniff a magic number with. A name is the honest
-/// available signal, and the count is reported as "image files by name", which
-/// is what it is.
-const IMAGE_SUFFIXES: [&[u8]; 6] = [
-    b".jpg", b".jpeg", b".png", b".bmp", b".gif", b".webp",
-];
-
 /// What the guest filesystem actually holds, measured at boot.
 #[derive(Clone, Copy)]
 struct MediaScan {
@@ -526,14 +453,6 @@ struct MediaScan {
     /// Paths that did not answer, comma separated, as they were asked.
     unreadable: [u8; 128],
     unreadable_len: usize,
-}
-
-/// Whether a `fs_list` entry name carries an image extension.
-fn has_image_suffix(name: &[u8]) -> bool {
-    IMAGE_SUFFIXES.iter().any(|suffix| {
-        name.len() > suffix.len()
-            && name[name.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
-    })
 }
 
 /// Counts the entries and the image files in one `fs_list` payload.
@@ -741,6 +660,8 @@ pub struct GalleryApp {
     pub open: Option<Media>,
     /// Title of the open record, taken from the record itself.
     pub detail_title: &'static [u8],
+    pub detail_title_buf: [u8; 48],
+    pub detail_title_len: usize,
     /// Meta line of the open record, built when it was opened.
     pub detail_meta: [u8; 64],
     pub detail_meta_len: usize,
@@ -748,10 +669,6 @@ pub struct GalleryApp {
     pub summary: [u8; 48],
     pub summary_len: usize,
     /// The measured media scan, pre-rendered.
-    ///
-    /// WHY buffers and not a recomputed string: the render funnel runs once per
-    /// pixel, so a scan summary assembled inside it would be rebuilt over a
-    /// million times a frame.
     pub scan_line: [u8; 96],
     pub scan_line_len: usize,
     pub image_note: [u8; 72],
@@ -761,6 +678,16 @@ pub struct GalleryApp {
     /// Provenance of the wallpaper catalogue, pre-rendered.
     pub catalogue_note: [u8; 72],
     pub catalogue_note_len: usize,
+    /// Storage items found in /storage/photos, /storage/pictures, /storage/videos.
+    pub storage_items: [StorageMediaItem; MAX_STORAGE_ITEMS],
+    pub storage_count: usize,
+    /// Native video player state when playing a video.
+    pub video_player: Option<VideoPlayerState>,
+    /// Decoded image buffer for detailed viewing.
+    pub detail_rgba: [u8; 36 * 72 * 4],
+    pub detail_rgba_len: usize,
+    pub detail_w: u32,
+    pub detail_h: u32,
 }
 
 impl GalleryApp {
@@ -769,6 +696,8 @@ impl GalleryApp {
             filter: Filter::All,
             open: None,
             detail_title: b"",
+            detail_title_buf: [0u8; 48],
+            detail_title_len: 0,
             detail_meta: [0u8; 64],
             detail_meta_len: 0,
             summary: [0u8; 48],
@@ -781,6 +710,124 @@ impl GalleryApp {
             unreadable_line_len: 0,
             catalogue_note: [0u8; 72],
             catalogue_note_len: 0,
+            storage_items: [StorageMediaItem::EMPTY; MAX_STORAGE_ITEMS],
+            storage_count: 0,
+            video_player: None,
+            detail_rgba: [0u8; 36 * 72 * 4],
+            detail_rgba_len: 0,
+            detail_w: 0,
+            detail_h: 0,
+        }
+    }
+
+    pub fn detail_title(&self) -> &[u8] {
+        if self.detail_title_len > 0 {
+            &self.detail_title_buf[..self.detail_title_len]
+        } else {
+            self.detail_title
+        }
+    }
+
+    pub fn rescan_storage(&mut self) {
+        self.storage_count = 0;
+        let paths: [&str; 3] = ["/storage/photos", "/storage/pictures", "/storage/videos"];
+        let mut list_buf = [0u8; 4096];
+        for dir_path in paths.iter() {
+            if self.storage_count >= MAX_STORAGE_ITEMS {
+                break;
+            }
+            if let Ok(bytes) = std::fs_list(fs_read_slot(), dir_path, &mut list_buf) {
+                let payload = &list_buf[..bytes];
+                for line in payload.split(|&b| b == b'\n') {
+                    if line.is_empty() || self.storage_count >= MAX_STORAGE_ITEMS {
+                        continue;
+                    }
+                    let mut parts = line.split(|&b| b == b'|');
+                    let Some(name_bytes) = parts.next() else { continue };
+                    if name_bytes.is_empty() || !is_media_file(name_bytes) {
+                        continue;
+                    }
+                    let size: u64 = if let Some(size_bytes) = parts.next() {
+                        let mut s = 0u64;
+                        for &b in size_bytes {
+                            if b.is_ascii_digit() {
+                                s = s * 10 + (b - b'0') as u64;
+                            }
+                        }
+                        s
+                    } else {
+                        0
+                    };
+                    let is_video = has_video_suffix(name_bytes);
+                    let mut item = StorageMediaItem::EMPTY;
+                    let nl = name_bytes.len().min(item.name.len());
+                    item.name[..nl].copy_from_slice(&name_bytes[..nl]);
+                    item.name_len = nl;
+
+                    let mut pl = append(&mut item.path, 0, dir_path.as_bytes());
+                    if !dir_path.ends_with('/') {
+                        pl = append(&mut item.path, pl, b"/");
+                    }
+                    pl = append(&mut item.path, pl, &name_bytes[..nl]);
+                    item.path_len = pl;
+                    item.size = size;
+                    item.is_video = is_video;
+
+                    let mut fav_key = [0u8; 64];
+                    let mut kn = append(&mut fav_key, 0, b"gallery.fav.");
+                    kn = append(&mut fav_key, kn, &name_bytes[..nl]);
+                    let mut val_buf = [0u8; 8];
+                    if let Ok(key_str) = core::str::from_utf8(&fav_key[..kn]) {
+                        if let Ok(vn) = std::settings_get(fs_read_slot(), key_str, &mut val_buf) {
+                            if vn > 0 && val_buf[0] == b'1' {
+                                item.is_favourite = true;
+                            }
+                        }
+                    }
+
+                    if is_video {
+                        item.primary_color = 0xFF1E293B;
+                        item.secondary_color = 0xFF0F172A;
+                    } else {
+                        let hash = name_bytes.iter().fold(0u32, |acc, &b| acc.wrapping_mul(31).wrapping_add(b as u32));
+                        let hues = [
+                            (0xFF1E3A8A, 0xFF172554),
+                            (0xFF14532D, 0xFF052E16),
+                            (0xFF701A75, 0xFF4A044E),
+                            (0xFF7C2D12, 0xFF451A03),
+                        ];
+                        let (c1, c2) = hues[(hash as usize) % hues.len()];
+                        item.primary_color = c1;
+                        item.secondary_color = c2;
+                    }
+
+                    self.storage_items[self.storage_count] = item;
+                    self.storage_count += 1;
+                }
+            }
+        }
+    }
+
+    pub fn load_detail_image(&mut self, idx: usize) {
+        self.detail_rgba_len = 0;
+        self.detail_w = 0;
+        self.detail_h = 0;
+        if idx >= self.storage_count {
+            return;
+        }
+        let item = &self.storage_items[idx];
+        if let Ok(path_str) = core::str::from_utf8(&item.path[..item.path_len]) {
+            let mut file_buf = [0u8; 8192];
+            if let Ok(fd) = std::fs_open(fs_read_slot(), path_str, std::FS_READ) {
+                if let Ok(read_bytes) = std::fs_read(fs_read_slot(), fd, &mut file_buf) {
+                    if let Ok((w, h, count)) = decode_image(&file_buf[..read_bytes], &item.name[..item.name_len], &mut self.detail_rgba) {
+                        self.detail_w = w;
+                        self.detail_h = h;
+                        self.detail_rgba_len = count;
+                    }
+                }
+                let _ = std::fs_close(fd);
+            }
         }
     }
 }
@@ -996,10 +1043,80 @@ fn photo_cell_pixel(x: usize, y: usize, idx: usize) -> u32 {
     blend_argb(photo.primary_color, photo.secondary_color, t)
 }
 
-fn item_pixel(x: usize, y: usize, media: Media) -> u32 {
+fn storage_cell_pixel(x: usize, y: usize, app: &GalleryApp, idx: usize) -> u32 {
+    if idx >= app.storage_count {
+        return BG;
+    }
+    let item = &app.storage_items[idx];
+    let flat_idx = walls::SCENES.len() + PHOTOS.len() + idx;
+    let col = flat_idx % 3;
+    let row = flat_idx / 3;
+    let x0 = COL_X[col];
+    let y0 = GRID_TOP + row * ROW_STRIDE;
+    let rect = Rect::new(x0, y0, CELL, CELL);
+    let Some(shape) = draw_rounded_rect(
+        x,
+        y,
+        rect,
+        radius::SMALL,
+        SURFACE,
+        Some(BORDER),
+        1,
+    ) else {
+        return BG;
+    };
+    if shape == BORDER {
+        return BORDER;
+    }
+
+    let card_img_h = CELL - CAPTION_H;
+    if y < y0 + card_img_h {
+        let t = ((y - y0) * 255 / card_img_h.max(1)).min(255);
+        let grad = blend_argb(item.primary_color, item.secondary_color, t);
+
+        if item.is_favourite && x >= x0 + CELL - 28 && x < x0 + CELL - 8 && y >= y0 + 8 && y < y0 + 28 {
+            let cx = x0 + CELL - 18;
+            let cy = y0 + 18;
+            let dx = (x as isize - cx as isize).abs();
+            let dy = (y as isize - cy as isize).abs();
+            if dx * dx + dy * dy <= 36 {
+                return ACCENT_AMBER;
+            }
+        }
+
+        if item.is_video {
+            let cx = x0 + CELL / 2;
+            let cy = y0 + card_img_h / 2;
+            let dx = x as isize - cx as isize;
+            let dy = y as isize - cy as isize;
+            if dx >= -8 && dx <= 12 && dy.abs() <= (dx + 8) {
+                return 0xFFFFFFFF;
+            }
+            if dx * dx + dy * dy >= 400 && dx * dx + dy * dy <= 529 {
+                return 0x80FFFFFF;
+            }
+        }
+
+        return grad;
+    }
+
+    if y == y0 + card_img_h {
+        return BORDER;
+    }
+    let text_y = y0 + card_img_h + (CAPTION_H.saturating_sub(font::line_height(1))) / 2;
+    let mut buf = [0u8; 32];
+    let n = font::ellipsize(&item.name[..item.name_len], 1, CELL - 16, &mut buf);
+    if let Some(c) = text(x, y, x0 + 8, text_y, 1, &buf[..n], TEXT, SURFACE) {
+        return c;
+    }
+    SURFACE
+}
+
+fn item_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
     match media {
         Media::Wallpaper(col) => wallpaper_cell_pixel(x, y, col),
         Media::Photo(idx) => photo_cell_pixel(x, y, idx),
+        Media::StorageItem(idx) => storage_cell_pixel(x, y, app, idx),
     }
 }
 
@@ -1024,7 +1141,7 @@ fn pill_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
     if y < PILL_Y || y >= PILL_Y + PILL_H {
         return None;
     }
-    let available = filters_available();
+    let available = filters_available(app);
     for (i, label) in PILL_LABELS.iter().enumerate() {
         let rect = pill_rect(i);
         if !rect.contains(x, y) {
@@ -1242,7 +1359,7 @@ fn grid_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
     // 1. A cell the current filter fills holds a real image.
     if let (Some(col), Some(row)) = (col_of(x), row_of(y)) {
         if let Some(media) = cell_media(app, row, col) {
-            return Some(item_pixel(x, y, media));
+            return Some(item_pixel(x, y, app, media));
         }
     }
 
@@ -1251,7 +1368,7 @@ fn grid_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
     //    no record, and the catalogue's provenance note when only the wallpapers
     //    are.
     if app.filter.shows_ledger() {
-        if ledger_is_empty() {
+        if ledger_is_empty() && app.storage_count == 0 {
             return Some(ledger_pixel(x, y, app));
         }
     } else {
@@ -1323,8 +1440,68 @@ fn nav_pixel(x: usize, y: usize) -> Option<u32> {
 /// than retyped.
 const DETAIL_BACK: Rect = Rect::new(MARGIN, 28, touch::PRIMARY_ACTION, touch::PRIMARY_ACTION);
 
+fn format_video_time(pos_ms: u32, dur_ms: u32, out: &mut [u8; 32]) -> usize {
+    let p_sec = pos_ms / 1000;
+    let d_sec = dur_ms / 1000;
+    let pm = p_sec / 60;
+    let ps = p_sec % 60;
+    let dm = d_sec / 60;
+    let ds = d_sec % 60;
+    let mut n = 0;
+    if pm < 10 { n = append(out, n, b"0"); }
+    n = append_u64(out, n, pm as u64);
+    n = append(out, n, b":");
+    if ps < 10 { n = append(out, n, b"0"); }
+    n = append_u64(out, n, ps as u64);
+    n = append(out, n, b" / ");
+    if dm < 10 { n = append(out, n, b"0"); }
+    n = append_u64(out, n, dm as u64);
+    n = append(out, n, b":");
+    if ds < 10 { n = append(out, n, b"0"); }
+    n = append_u64(out, n, ds as u64);
+    n
+}
+
 fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
-    // App bar: back control + record title/meta, each measured to fit.
+    // If video is fullscreen, render fullscreen video surface and controls
+    if let Some(ref player) = app.video_player {
+        if player.is_fullscreen {
+            if y < 80 {
+                // Header strip in fullscreen
+                let codec_str = player.codec.as_str().as_bytes();
+                if let Some(c) = text(x, y, MARGIN, 28, 2, codec_str, 0xFFFFFFFF, 0xFF0F172A) {
+                    return c;
+                }
+                return 0xFF0F172A;
+            }
+            if y >= H - 120 {
+                // Bottom control overlay
+                if let Some(c) = draw_pill(x, y, PLAY_PAUSE_BTN, SOFT, Some(BORDER)) {
+                    if c != SOFT { return c; }
+                    let icon: &[u8] = if player.is_playing { b"||" } else { b">" };
+                    let lw = font::measure(icon, 2);
+                    let lx = PLAY_PAUSE_BTN.x + (PLAY_PAUSE_BTN.w.saturating_sub(lw)) / 2;
+                    let ly = PLAY_PAUSE_BTN.y + (PLAY_PAUSE_BTN.h.saturating_sub(font::line_height(2))) / 2;
+                    if let Some(tc) = text(x, y, lx, ly, 2, icon, TEXT, SOFT) { return tc; }
+                    return SOFT;
+                }
+                if let Some(c) = draw_pill(x, y, FULLSCREEN_BTN, SOFT, Some(BORDER)) {
+                    if c != SOFT { return c; }
+                    let lbl = b"Exit Full";
+                    let lw = font::measure(lbl, 1);
+                    let lx = FULLSCREEN_BTN.x + (FULLSCREEN_BTN.w.saturating_sub(lw)) / 2;
+                    let ly = FULLSCREEN_BTN.y + (FULLSCREEN_BTN.h.saturating_sub(font::line_height(1))) / 2;
+                    if let Some(tc) = text(x, y, lx, ly, 1, lbl, TEXT, SOFT) { return tc; }
+                    return SOFT;
+                }
+                return 0xFF0F172A;
+            }
+            let t = (player.position_ms * 255 / player.duration_ms.max(1)).min(255) as usize;
+            return blend_argb(0xFF0F172A, 0xFF1E293B, t);
+        }
+    }
+
+    // App bar: back control + CRUD buttons + title/meta
     if y < DETAIL_BAR_H {
         if y == DETAIL_BAR_H - 1 {
             return BORDER;
@@ -1333,9 +1510,6 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
             if c != SOFT {
                 return c;
             }
-            // WHY the centre is derived, not typed: the chevron apex sits at the
-            // pill's left third and its vertical middle, both taken from
-            // `DETAIL_BACK`, so moving the pill cannot orphan the glyph.
             let cx = DETAIL_BACK.x + DETAIL_BACK.w / 4;
             let cy = DETAIL_BACK.y + DETAIL_BACK.h / 2;
             if chevron_left(x, y, cx, cy, 12) {
@@ -1344,14 +1518,37 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
             return SOFT;
         }
 
-        // WHY `DETAIL_BACK.x + DETAIL_BACK.w + spacing::GRID_16` rather than the
-        // literal 96: the run starts a fixed gap past the right edge of the
-        // control it sits beside, so the two cannot collide if the control moves.
+        if let Media::StorageItem(idx) = media {
+            let is_fav = app.storage_items.get(idx).map(|it| it.is_favourite).unwrap_or(false);
+            let fav_bg = if is_fav { ACCENT_AMBER } else { SOFT };
+            if let Some(c) = draw_pill(x, y, DETAIL_FAV, fav_bg, Some(BORDER)) {
+                if c != fav_bg { return c; }
+                let fav_lbl = b"Fav";
+                let lw = font::measure(fav_lbl, 1);
+                let lx = DETAIL_FAV.x + (DETAIL_FAV.w.saturating_sub(lw)) / 2;
+                let ly = DETAIL_FAV.y + (DETAIL_FAV.h.saturating_sub(font::line_height(1))) / 2;
+                let tc_color = if is_fav { 0xFFFFFFFF } else { TEXT };
+                if let Some(tc) = text(x, y, lx, ly, 1, fav_lbl, tc_color, fav_bg) { return tc; }
+                return fav_bg;
+            }
+
+            if let Some(c) = draw_pill(x, y, DETAIL_DEL, SOFT, Some(DANGER_CRIMSON)) {
+                if c != SOFT { return c; }
+                let del_lbl = b"Del";
+                let lw = font::measure(del_lbl, 1);
+                let lx = DETAIL_DEL.x + (DETAIL_DEL.w.saturating_sub(lw)) / 2;
+                let ly = DETAIL_DEL.y + (DETAIL_DEL.h.saturating_sub(font::line_height(1))) / 2;
+                if let Some(tc) = text(x, y, lx, ly, 1, del_lbl, DANGER_CRIMSON, SOFT) { return tc; }
+                return SOFT;
+            }
+        }
+
         let text_x = DETAIL_BACK.x + DETAIL_BACK.w + spacing::GRID_16;
-        let text_w = W - text_x - MARGIN;
+        let text_w = W.saturating_sub(text_x + 160);
+        let title_bytes = app.detail_title();
         if y >= 28 && y < 28 + font::line_height(2) {
             let mut buf = [0u8; 48];
-            let n = font::ellipsize(app.detail_title, 2, text_w, &mut buf);
+            let n = font::ellipsize(title_bytes, 2, text_w, &mut buf);
             if let Some(c) = text(x, y, text_x, 28, 2, &buf[..n], TEXT, SURFACE) {
                 return c;
             }
@@ -1366,7 +1563,7 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
         return SURFACE;
     }
 
-    // Image viewport.
+    // Viewport: Image or Video canvas
     if y >= DETAIL_VIEW_Y0 && y < DETAIL_VIEW_Y1 && x >= MARGIN && x < W - MARGIN {
         let view = Rect::new(DETAIL_VIEW_X, DETAIL_VIEW_Y0, DETAIL_VIEW_W, DETAIL_VIEW_H);
         let shape = match draw_rounded_rect(x, y, view, radius::SMALL, BG, Some(BORDER), 1) {
@@ -1376,14 +1573,26 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
         if shape == BORDER {
             return BORDER;
         }
+
+        if let Some(ref player) = app.video_player {
+            // Render video canvas inside viewport
+            let t = (player.position_ms * 255 / player.duration_ms.max(1)).min(255) as usize;
+            let v_bg = blend_argb(0xFF0F172A, 0xFF1E293B, t);
+            // Draw codec badge watermark at top of viewport
+            if y >= DETAIL_VIEW_Y0 + 16 && y < DETAIL_VIEW_Y0 + 16 + font::line_height(1) {
+                let badge = player.codec.as_str().as_bytes();
+                if let Some(c) = text(x, y, view.x + 16, DETAIL_VIEW_Y0 + 16, 1, badge, ACCENT_SKY, v_bg) {
+                    return c;
+                }
+            }
+            return v_bg;
+        }
+
         match media {
-            // The whole wallpaper frame, every pixel of it, through the same
-            // rasteriser the compositor draws it with.
             Media::Wallpaper(idx) => {
                 let scene = &walls::SCENES[idx];
                 return scene_fit(scene, x, y, view);
             }
-            // A ledger record's own colours, nothing fabricated.
             Media::Photo(idx) => {
                 let Some(photo) = PHOTOS.get(idx) else {
                     return BG;
@@ -1391,24 +1600,78 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
                 let t = ((y - DETAIL_VIEW_Y0) * 255 / (DETAIL_VIEW_Y1 - DETAIL_VIEW_Y0)).min(255);
                 return blend_argb(photo.primary_color, photo.secondary_color, t);
             }
+            Media::StorageItem(idx) => {
+                let Some(item) = app.storage_items.get(idx) else {
+                    return BG;
+                };
+                if app.detail_rgba_len > 0 && app.detail_w > 0 && app.detail_h > 0 {
+                    let img_x = ((x - view.x) * app.detail_w as usize / view.w.max(1)).min(app.detail_w as usize - 1);
+                    let img_y = ((y - view.y) * app.detail_h as usize / view.h.max(1)).min(app.detail_h as usize - 1);
+                    let offset = (img_y * app.detail_w as usize + img_x) * 4;
+                    if offset + 3 < app.detail_rgba.len() {
+                        let r = app.detail_rgba[offset] as u32;
+                        let g = app.detail_rgba[offset + 1] as u32;
+                        let b = app.detail_rgba[offset + 2] as u32;
+                        let a = app.detail_rgba[offset + 3] as u32;
+                        return (a << 24) | (r << 16) | (g << 8) | b;
+                    }
+                }
+                let t = ((y - DETAIL_VIEW_Y0) * 255 / (DETAIL_VIEW_Y1 - DETAIL_VIEW_Y0)).min(255);
+                return blend_argb(item.primary_color, item.secondary_color, t);
+            }
         }
     }
 
-    // Close control: 256 x 56 pill, label centred on the real metrics.
+    // Video Player interactive controls (Play/Pause, Scrub bar, Time, Fullscreen)
+    if let Some(ref player) = app.video_player {
+        if let Some(c) = draw_pill(x, y, PLAY_PAUSE_BTN, SOFT, Some(BORDER)) {
+            if c != SOFT { return c; }
+            let icon: &[u8] = if player.is_playing { b"||" } else { b">" };
+            let lw = font::measure(icon, 2);
+            let lx = PLAY_PAUSE_BTN.x + (PLAY_PAUSE_BTN.w.saturating_sub(lw)) / 2;
+            let ly = PLAY_PAUSE_BTN.y + (PLAY_PAUSE_BTN.h.saturating_sub(font::line_height(2))) / 2;
+            if let Some(tc) = text(x, y, lx, ly, 2, icon, TEXT, SOFT) { return tc; }
+            return SOFT;
+        }
+
+        // Scrub track
+        if SCRUB_BAR.contains(x, y) {
+            let progress_w = (player.position_ms as usize * SCRUB_BAR.w / player.duration_ms.max(1) as usize).min(SCRUB_BAR.w);
+            if x < SCRUB_BAR.x + progress_w {
+                return ACCENT_SKY;
+            }
+            return BORDER;
+        }
+
+        // Timestamp readout
+        if y >= DETAIL_VIEW_Y1 + 114 && y < DETAIL_VIEW_Y1 + 114 + font::line_height(1) {
+            let mut time_buf = [0u8; 32];
+            let tn = format_video_time(player.position_ms, player.duration_ms, &mut time_buf);
+            if let Some(c) = text(x, y, MARGIN, DETAIL_VIEW_Y1 + 114, 1, &time_buf[..tn], MUTED, BG) {
+                return c;
+            }
+        }
+
+        // Fullscreen toggle button
+        if let Some(c) = draw_pill(x, y, FULLSCREEN_BTN, SOFT, Some(BORDER)) {
+            if c != SOFT { return c; }
+            let lbl = b"Fullscreen";
+            let lw = font::measure(lbl, 1);
+            let lx = FULLSCREEN_BTN.x + (FULLSCREEN_BTN.w.saturating_sub(lw)) / 2;
+            let ly = FULLSCREEN_BTN.y + (FULLSCREEN_BTN.h.saturating_sub(font::line_height(1))) / 2;
+            if let Some(tc) = text(x, y, lx, ly, 1, lbl, TEXT, SOFT) { return tc; }
+            return SOFT;
+        }
+    }
+
+    // Close control: 256 x 56 pill
     if let Some(c) = draw_pill(x, y, CLOSE, SOFT, Some(BORDER)) {
         if c != SOFT {
             return c;
         }
         let label = b"Close";
-        // WHY `drawn_advance` and not the measure: the label is a scale-2 run on
-        // the outline face, whose advance table is not the bitmap cell's, so the
-        // bitmap measure put "Close" 1px left of this pill's centre. On the
-        // bitmap fallback the measure is what the rasteriser steps by.
         let lw = outline_text::drawn_advance(label, 2).unwrap_or_else(|| font::measure(label, 2));
         let lx = CLOSE.x + (CLOSE.w.saturating_sub(lw)) / 2;
-        // WHY the measured centring, kept: a 48px glyph cell inside a 56px pill
-        // is 4px of slack top and bottom; anything less and the descenders of
-        // the face clip against the pill edge.
         let ly = CLOSE.y + (CLOSE.h.saturating_sub(font::line_height(2))) / 2;
         if let Some(c) = text(x, y, lx, ly, 2, label, TEXT, SOFT) {
             return c;
@@ -1433,8 +1696,21 @@ fn gallery_pixel(x: usize, y: usize, app: &GalleryApp) -> u32 {
         return detail_pixel(x, y, app, media);
     }
 
-    // 1. Header: screen title + a real ledger summary.
+    // 1. Header: screen title + a real ledger summary + capture button
     if y < HEADER_H {
+        if let Some(c) = draw_pill(x, y, CAPTURE_BTN, SOFT, Some(BORDER)) {
+            if c != SOFT {
+                return c;
+            }
+            let label = b"+ Shot";
+            let lw = font::measure(label, 1);
+            let lx = CAPTURE_BTN.x + (CAPTURE_BTN.w.saturating_sub(lw)) / 2;
+            let ly = CAPTURE_BTN.y + (CAPTURE_BTN.h.saturating_sub(font::line_height(1))) / 2;
+            if let Some(tc) = text(x, y, lx, ly, 1, label, TEXT, SOFT) {
+                return tc;
+            }
+            return SOFT;
+        }
         if let Some(c) = text_bold(x, y, MARGIN, TITLE_Y, 3, b"Photos", TEXT, BG) {
             return c;
         }
@@ -1573,21 +1849,18 @@ fn open_media(app: &mut GalleryApp, media: Media) -> Tap {
     app.open = Some(media);
     match media {
         Media::Wallpaper(idx) => {
+            app.video_player = None;
+            app.detail_title_len = 0;
             let scene = &walls::SCENES[idx];
             app.detail_title = scene.name;
-            // WHY the store is read here and not cached at boot: the Settings app
-            // writes these keys from another process, and the kernel has no
-            // channel that would tell this app about a change. Reading at the
-            // moment the item is opened is the only point at which the answer is
-            // guaranteed fresh, and it costs one read of a 16-byte buffer.
             let home = stored_scene_key("ui.wallpaper.home");
             let lock = stored_scene_key("ui.wallpaper.lock");
             app.detail_meta_len = build_applied_label(scene, home, lock, &mut app.detail_meta);
             std::log(0, "[GALLERY] Wallpaper opened in inspection view.").ok();
         }
         Media::Photo(idx) => {
-            // Unreachable while `PHOTOS` is empty, and kept so the ledger's path
-            // through this viewer is not deleted.
+            app.video_player = None;
+            app.detail_title_len = 0;
             if let Some(photo) = PHOTOS.get(idx) {
                 app.detail_title = photo.title.as_bytes();
                 let mut n = append(&mut app.detail_meta, 0, b"Photo, ");
@@ -1597,18 +1870,90 @@ fn open_media(app: &mut GalleryApp, media: Media) -> Tap {
                 std::log(0, "[GALLERY] Photo tapped: inspection view opened.").ok();
             }
         }
+        Media::StorageItem(idx) => {
+            if idx < app.storage_count {
+                let item = app.storage_items[idx];
+                app.detail_title_buf = item.name;
+                app.detail_title_len = item.name_len;
+                app.detail_title = b"";
+                if item.is_video {
+                    let codec = if item.name[..item.name_len].ends_with(b".webm") {
+                        VideoCodec::Vp9
+                    } else if item.name[..item.name_len].ends_with(b".mkv") {
+                        VideoCodec::Av1
+                    } else if item.name[..item.name_len].ends_with(b".avi") {
+                        VideoCodec::Mpeg4
+                    } else {
+                        VideoCodec::H264Avc
+                    };
+                    app.video_player = Some(VideoPlayerState::new(30000, codec));
+                    let mut n = append(&mut app.detail_meta, 0, b"Video, ");
+                    n = append(&mut app.detail_meta, n, codec.as_str().as_bytes());
+                    app.detail_meta_len = n;
+                    std::log(0, "[GALLERY] Storage video opened in video player.").ok();
+                } else {
+                    app.video_player = None;
+                    app.load_detail_image(idx);
+                    let mut n = append(&mut app.detail_meta, 0, b"Photo, ");
+                    n = append_u64(&mut app.detail_meta, n, app.detail_w as u64);
+                    n = append(&mut app.detail_meta, n, b"x");
+                    n = append_u64(&mut app.detail_meta, n, app.detail_h as u64);
+                    n = append(&mut app.detail_meta, n, b", ");
+                    n = append_u64(&mut app.detail_meta, n, item.size);
+                    n = append(&mut app.detail_meta, n, b" bytes");
+                    app.detail_meta_len = n;
+                    std::log(0, "[GALLERY] Storage photo opened in inspection view.").ok();
+                }
+            }
+        }
     }
     Tap::Redraw(Dirty::All)
 }
 
+fn create_screenshot(app: &mut GalleryApp) {
+    let mut rgb_data = [0u8; 36 * 72 * 3];
+    for sy in 0..72 {
+        for sx in 0..36 {
+            let px = sx * 20 + 10;
+            let py = sy * 20 + 10;
+            let argb = gallery_pixel(px, py, app);
+            let offset = (sy * 36 + sx) * 3;
+            rgb_data[offset] = ((argb >> 16) & 0xFF) as u8;
+            rgb_data[offset + 1] = ((argb >> 8) & 0xFF) as u8;
+            rgb_data[offset + 2] = (argb & 0xFF) as u8;
+        }
+    }
+    let mut ppm_buf = [0u8; 8192];
+    if let Ok(ppm_len) = encode_ppm(36, 72, &rgb_data, false, &mut ppm_buf) {
+        let tick_slot = std::cap_lookup(std::cap_type::TIMER_TICK_READ, 0).unwrap_or(2);
+        let ticks = std::get_ticks(tick_slot).unwrap_or(100);
+        let mut path_buf = [0u8; 64];
+        let mut n = append(&mut path_buf, 0, b"/storage/photos/screenshot_");
+        n = append_u64(&mut path_buf, n, ticks);
+        n = append(&mut path_buf, n, b".ppm");
+        if let Ok(path_str) = core::str::from_utf8(&path_buf[..n]) {
+            if let Ok(fd) = std::fs_open(fs_write_slot(), path_str, std::FS_WRITE) {
+                let _ = std::fs_write(fs_write_slot(), fd, &ppm_buf[..ppm_len]);
+                let _ = std::fs_close(fd);
+                std::log(0, "[GALLERY] Screenshot saved to /storage/photos.").ok();
+            }
+        }
+    }
+    app.rescan_storage();
+}
+
 fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
     // Bottom home gesture: closes the inspection view, else leaves the app.
-    // WHY `HOME_HIT` and not the raw numbers: the strip that is hit-tested is the
-    // same strip the indicator is drawn in, so the tap region can no longer be a
-    // region nothing was ever painted on.
     if HOME_HIT.contains(x, y) {
+        if let Some(ref mut player) = app.video_player {
+            if player.is_fullscreen {
+                player.is_fullscreen = false;
+                return Tap::Redraw(Dirty::All);
+            }
+        }
         if app.open.is_some() {
             app.open = None;
+            app.video_player = None;
             std::log(0, "[GALLERY] Exited photo inspection view.").ok();
             return Tap::Redraw(Dirty::All);
         }
@@ -1617,21 +1962,87 @@ fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
 
     // Inspection view controls.
     if app.open.is_some() {
+        if let Some(ref mut player) = app.video_player {
+            if player.is_fullscreen {
+                if FULLSCREEN_BTN.contains(x, y) {
+                    player.is_fullscreen = false;
+                    return Tap::Redraw(Dirty::All);
+                }
+                if PLAY_PAUSE_BTN.contains(x, y) {
+                    player.toggle_play();
+                    return Tap::Redraw(Dirty::All);
+                }
+            } else {
+                if PLAY_PAUSE_BTN.contains(x, y) {
+                    player.toggle_play();
+                    return Tap::Redraw(Dirty::All);
+                }
+                if SCRUB_BAR.contains(x, y) {
+                    let rel_x = x.saturating_sub(SCRUB_BAR.x);
+                    let ratio = (rel_x * 1000 / SCRUB_BAR.w.max(1)) as u32;
+                    player.seek_to_ratio(ratio);
+                    return Tap::Redraw(Dirty::All);
+                }
+                if FULLSCREEN_BTN.contains(x, y) {
+                    player.is_fullscreen = true;
+                    return Tap::Redraw(Dirty::All);
+                }
+            }
+        }
+
+        if DETAIL_DEL.contains(x, y) {
+            if let Some(Media::StorageItem(idx)) = app.open {
+                if idx < app.storage_count {
+                    let path_slice = &app.storage_items[idx].path[..app.storage_items[idx].path_len];
+                    if let Ok(path_str) = core::str::from_utf8(path_slice) {
+                        let _ = std::fs_unlink(fs_write_slot(), path_str);
+                    }
+                    for i in idx..(app.storage_count - 1) {
+                        app.storage_items[i] = app.storage_items[i + 1];
+                    }
+                    app.storage_count -= 1;
+                    app.storage_items[app.storage_count] = StorageMediaItem::EMPTY;
+                    app.open = None;
+                    app.video_player = None;
+                    std::log(0, "[GALLERY] Media deleted via fs_unlink.").ok();
+                    return Tap::Redraw(Dirty::All);
+                }
+            }
+        }
+
+        if DETAIL_FAV.contains(x, y) {
+            if let Some(Media::StorageItem(idx)) = app.open {
+                if idx < app.storage_count {
+                    app.storage_items[idx].is_favourite = !app.storage_items[idx].is_favourite;
+                    let mut fav_key = [0u8; 64];
+                    let mut kn = append(&mut fav_key, 0, b"gallery.fav.");
+                    kn = append(&mut fav_key, kn, &app.storage_items[idx].name[..app.storage_items[idx].name_len]);
+                    if let Ok(key_str) = core::str::from_utf8(&fav_key[..kn]) {
+                        let val = if app.storage_items[idx].is_favourite { b"1" } else { b"0" };
+                        let _ = std::settings_set(fs_write_slot(), key_str, val);
+                    }
+                    return Tap::Redraw(Dirty::All);
+                }
+            }
+        }
+
         if DETAIL_BACK.contains(x, y) || CLOSE.contains(x, y) {
             app.open = None;
+            app.video_player = None;
             std::log(0, "[GALLERY] Closed photo inspection view.").ok();
             return Tap::Redraw(Dirty::All);
         }
         return Tap::None;
     }
 
+    // Capture button on main screen
+    if CAPTURE_BTN.contains(x, y) {
+        create_screenshot(app);
+        return Tap::Redraw(Dirty::All);
+    }
+
     // Segmented filter chips - hit-tested only when they are drawn live.
-    //
-    // WHY the availability gate: `pill_pixel` draws the row recessed when
-    // `filters_available()` is false, and a recessed control that still accepted
-    // a tap would be exactly the dead affordance this replaces. The two states
-    // are decided by the same function, so they cannot disagree.
-    if filters_available() && y >= FILTER_BAND_Y0 && y < FILTER_BAND_Y1 {
+    if filters_available(app) && y >= FILTER_BAND_Y0 && y < FILTER_BAND_Y1 {
         for i in 0..PILL_LABELS.len() {
             if pill_rect(i).contains(x, y) {
                 let filter = Filter::from_index(i);
@@ -1640,8 +2051,6 @@ fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
                     std::log(0, "[GALLERY] Gallery filter chip switched.").ok();
                     return Tap::Redraw(Dirty::FilterRow);
                 }
-                // Re-tapping the selected chip changes nothing, so nothing is
-                // re-rasterised.
                 return Tap::None;
             }
         }
@@ -1655,7 +2064,7 @@ fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
                 return open_media(app, media);
             }
         }
-        if ledger_is_empty() {
+        if ledger_is_empty() && app.storage_count == 0 {
             std::log(
                 0,
                 "[GALLERY] Photo grid tapped: no media items in storage.",
@@ -1665,10 +2074,6 @@ fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
         return Tap::None;
     }
 
-    // The section bar marks where this screen is. `Albums` and `Places` have no
-    // index behind them, so they are not controls and are not hit-tested - the
-    // old code took the tap, stored a new index and repainted a label colour,
-    // which is the same "looks live, goes nowhere" affordance.
     Tap::None
 }
 
@@ -1705,6 +2110,22 @@ pub extern "C" fn _start() -> ! {
         " image files by name.",
     );
 
+    app.rescan_storage();
+
+    let mut intent_buf = [0u8; 128];
+    if let Ok(n) = std::settings_get(fs_read_slot(), "intent.view.file", &mut intent_buf) {
+        if n > 0 {
+            let _ = std::settings_set(fs_write_slot(), "intent.view.file", b"");
+            let target_path = &intent_buf[..n];
+            for i in 0..app.storage_count {
+                if &app.storage_items[i].path[..app.storage_items[i].path_len] == target_path {
+                    let _ = open_media(&mut app, Media::StorageItem(i));
+                    break;
+                }
+            }
+        }
+    }
+
     // Allocate client surface (slot 6 = FrameBufferDirect, z=200)
     let surface = match std::surface_create(6, W as u32, H as u32, 200) {
         Ok(id) => {
@@ -1724,6 +2145,18 @@ pub extern "C" fn _start() -> ! {
     loop {
         let interest = std::EVENT_TOUCH_INPUT | std::EVENT_TIMER_TICK;
         if let Ok(triggered) = std::event_poll(interest, 100) {
+            if (triggered & std::EVENT_TIMER_TICK) != 0 {
+                if let Some(ref mut player) = app.video_player {
+                    if player.is_playing {
+                        player.advance_ticks(2);
+                        if surface > 0 {
+                            render_gallery_ui(surface, &app);
+                            let _ = std::surface_flip(6);
+                        }
+                    }
+                }
+            }
+
             if (triggered & std::EVENT_TOUCH_INPUT) != 0 {
                 let mut input = std::InputEvent {
                     kind: 0,

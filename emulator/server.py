@@ -2391,6 +2391,7 @@ POST_ONLY_ROUTES = frozenset({
     '/api/hardware/sensor_inject',
     '/api/touch/event',
     '/api/input/key',
+    '/api/power/state',
     '/api/themes/apply',
     '/api/themes/save',
     '/api/themes/bootloader',
@@ -3697,6 +3698,21 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 'error': 'Hardware sensor injection is disabled; Device Studio only displays guest-reported telemetry'
             }).encode())
             return
+
+        if self.path == '/api/power/state':
+            ok, msg = send_guest_serial_command("POWER_KEY", timeout=2)
+            with telemetry_lock:
+                serial_lines.append("[STUDIO_POWER] POWER_KEY toggle dispatched")
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                'success': True,
+                'status': 'DISPATCHED',
+                'action': 'power_toggle',
+                'detail': msg
+            }).encode())
+            return
         if self.path == '/api/touch/event':
             content_length = self._bounded_content_length()
             if content_length is None:
@@ -3761,6 +3777,8 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                     ok, msg = send_guest_serial_command(f'SWIPE {gx} {gy} {gx2} {gy2} {steps}')
                 elif action in ('home', 'back', 'recents'):
                     ok, msg = send_guest_serial_command(f'NAV {action.upper()}')
+                elif action in ('power', 'lock'):
+                    ok, msg = send_guest_serial_command('POWER_KEY', timeout=2)
                 elif action == 'nav':
                     target = str(data.get('target', 'HOME')).upper()
                     ok, msg = send_guest_serial_command(f'NAV {target}')
@@ -3789,9 +3807,13 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 navigation = {
                     'Enter', 'Escape', 'Backspace', 'Tab',
                     'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
-                    'Home', 'End', 'PageUp', 'PageDown'
+                    'Home', 'End', 'PageUp', 'PageDown',
+                    'Power', 'Lock'
                 }
-                if len(key) == 1:
+                if key in ('Power', 'Lock'):
+                    command = "POWER_KEY"
+                    response_key = {'key': key, 'action': 'power_toggle'}
+                elif len(key) == 1:
                     command = f"INPUT_KEY {ord(key)}"
                     response_key = {'key': key, 'codepoint': ord(key)}
                 elif key in navigation:

@@ -793,7 +793,7 @@ pub extern "C" fn app_settings_trampoline() -> ! {
 
 /// Spawns the native Sovereign Settings App in Ring 3.
 pub fn spawn_app_settings(id_security: TaskId) -> TaskId {
-    let mut caps = CapabilityTable::new(8);
+    let mut caps = CapabilityTable::new(12);
     caps.insert(Capability {
         id: CapabilityId(1701),
         cap_type: CapabilityType::SerialOutput,
@@ -837,24 +837,25 @@ pub fn spawn_app_settings(id_security: TaskId) -> TaskId {
         object_id: 1,
     }).ok();
     // Credential authority, attenuated to the ACTIVE account only.
-    //
-    // WHY Settings has it: this shell no longer forces a PIN at boot, so the
-    // screen lock is set, changed and removed from Settings > Security. The
-    // account layer gates every credential syscall behind
-    // `user_control_object(uid)`, and without this Settings could only report
-    // "the account layer refused" -- the panel would have been a control that
-    // cannot do what it says.
-    //
-    // WHY this object id and not a blanket SystemControl: it names one account.
-    // Settings can administer the credential of the signed-in owner and no other,
-    // so this cannot lock, unlock or switch to an arbitrary uid, and it grants
-    // no filesystem, network or hardware authority over anything else.
     let active_uid = crate::user::USER_MANAGER.lock().active_user().0;
     caps.insert(Capability {
         id: CapabilityId(1708),
         cap_type: CapabilityType::SystemControl,
         rights: Rights::INVOKE,
         object_id: crate::syscall::user_control_object(active_uid),
+    }).ok();
+    // Settings is the sovereign System Space component: grant sensor and power diagnostics authority
+    caps.insert(Capability {
+        id: CapabilityId(1709),
+        cap_type: CapabilityType::SystemControl,
+        rights: Rights::INVOKE,
+        object_id: crate::services::SERVICE_SENSOR_CONTROL_OBJECT,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(1710),
+        cap_type: CapabilityType::SystemControl,
+        rights: Rights::INVOKE,
+        object_id: crate::services::SERVICE_POWER_CONTROL_OBJECT,
     }).ok();
 
     let id = spawn_user_process_with_parent(
@@ -1587,6 +1588,12 @@ pub fn spawn_app_file_manager(id_security: TaskId) -> TaskId {
         id: CapabilityId(2708),
         cap_type: CapabilityType::EventPoll,
         rights: Rights::READ.union(Rights::INVOKE),
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2709),
+        cap_type: CapabilityType::ProcessSpawn,
+        rights: Rights::INVOKE,
         object_id: 0,
     }).ok();
 

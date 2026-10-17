@@ -251,6 +251,9 @@ pub struct LauncherState {
     /// Dynamic user display name read from the settings store. Zero hardcoding or faking.
     pub user_name: [u8; 32],
     pub user_name_len: usize,
+    /// Dynamic user status phrase read from the settings store ("user.status" / "owner.status").
+    pub user_status: [u8; 48],
+    pub user_status_len: usize,
     pub task0_done: bool,
 }
 
@@ -308,6 +311,8 @@ impl LauncherState {
             pin_setup_mode: false,
             user_name: [0u8; 32],
             user_name_len: 0,
+            user_status: [0u8; 48],
+            user_status_len: 0,
             task0_done: false,
         }
     }
@@ -504,6 +509,7 @@ fn refresh_wallpapers(state: &mut LauncherState) {
 /// the home screen greeting renders a clean impersonal greeting without a mock name.
 fn refresh_user_profile(state: &mut LauncherState) {
     let mut buf = [0u8; 32];
+    state.user_name_len = 0;
     for key in ["user.name", "owner.name"] {
         if let Ok(n) = std::settings_get(3, key, &mut buf) {
             if n > 0 && n <= buf.len() {
@@ -520,13 +526,37 @@ fn refresh_user_profile(state: &mut LauncherState) {
                         let copy_len = trimmed.len().min(32);
                         state.user_name[..copy_len].copy_from_slice(&trimmed[..copy_len]);
                         state.user_name_len = copy_len;
-                        return;
+                        break;
                     }
                 }
             }
         }
     }
-    state.user_name_len = 0;
+
+    let mut status_buf = [0u8; 48];
+    state.user_status_len = 0;
+    for key in ["user.status", "owner.status"] {
+        if let Ok(n) = std::settings_get(3, key, &mut status_buf) {
+            if n > 0 && n <= status_buf.len() {
+                let raw = &status_buf[..n];
+                let start = raw.iter().position(|b| *b != b' ' && *b != b'\n' && *b != b'\r');
+                if let Some(start) = start {
+                    let end = raw[start..]
+                        .iter()
+                        .rposition(|b| *b != b' ' && *b != b'\n' && *b != b'\r')
+                        .map(|p| start + p + 1)
+                        .unwrap_or(start);
+                    let trimmed = &raw[start..end];
+                    if !trimmed.is_empty() {
+                        let copy_len = trimmed.len().min(48);
+                        state.user_status[..copy_len].copy_from_slice(&trimmed[..copy_len]);
+                        state.user_status_len = copy_len;
+                        break;
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn refresh_clock(state: &mut LauncherState) {
@@ -781,6 +811,9 @@ fn refresh_package_catalog(state: &mut LauncherState) {
         };
         let category = fields.next().unwrap_or(b"Tools");
         if status != b"active" || id.is_empty() || id.len() > 32 || display_name.is_empty() {
+            continue;
+        }
+        if id == b"org.interos.sensor_dashboard" || id == b"sensor_dashboard" || id == b"sensors" {
             continue;
         }
         if (id == b"terminal" || id == b"org.interos.terminal" || id == b"app_terminal")
@@ -1618,6 +1651,41 @@ fn render_view(surface: u32, state: &LauncherState) {
     log_frame_ticks(tick_delta(frame_start, std::get_ticks(1).ok()));
 }
 
+pub fn capture_and_save_screenshot(state: &LauncherState) {
+    let mut ppm_buf = [0u8; 8192];
+    let header = b"P6\n36 72\n255\n";
+    let hlen = header.len();
+    ppm_buf[..hlen].copy_from_slice(header);
+
+    let draw = screen_renderer(state.current_view);
+    let mut idx = hlen;
+    for sy in 0..72 {
+        for sx in 0..36 {
+            let px = sx * 20 + 10;
+            let py = sy * 20 + 10;
+            let argb = draw(px, py, state);
+            ppm_buf[idx] = ((argb >> 16) & 0xFF) as u8;
+            ppm_buf[idx + 1] = ((argb >> 8) & 0xFF) as u8;
+            ppm_buf[idx + 2] = (argb & 0xFF) as u8;
+            idx += 3;
+        }
+    }
+
+    let ticks = std::get_ticks(1).unwrap_or(100);
+    let mut path = LineBuf::<64>::new();
+    {
+        use core::fmt::Write;
+        let _ = write!(path, "/storage/photos/screenshot_{}.ppm", ticks);
+    }
+
+    let write_slot = std::cap_lookup(std::cap_type::FILE_SYSTEM_WRITE, 0).unwrap_or(3);
+    if let Ok(fd) = std::fs_open(write_slot, path.as_str(), std::FS_WRITE) {
+        let _ = std::fs_write(write_slot, fd, &ppm_buf[..idx]);
+        let _ = std::fs_close(fd);
+        std::log(0, "[LAUNCHER] Screenshot saved to /storage/photos.").ok();
+    }
+}
+
 
 fn package_id_by_suffix<'a>(state: &'a LauncherState, suffix: &[u8]) -> Option<&'a str> {
     for i in 0..state.app_count {
@@ -1649,9 +1717,6 @@ fn resolve_app_at_touch<'a>(state: &'a LauncherState, x: u32, y: u32) -> Option<
         }
         if (390..=430).contains(&x) && (1160..=1200).contains(&y) {
             return package_id_by_suffix(state, b"gallery").or(Some("org.interos.gallery"));
-        }
-        if (250..=290).contains(&x) && (1160..=1200).contains(&y) {
-            return package_id_by_suffix(state, b"sensor_dashboard").or(Some("org.interos.sensor_dashboard"));
         }
         if (530..=570).contains(&x) && (1160..=1200).contains(&y) {
             return package_id_by_suffix(state, b"card_demo").or(Some("org.interos.card_demo"));
@@ -2166,6 +2231,14 @@ pub extern "C" fn _start() -> ! {
                         }
                     }
                     if input.kind == 9 { continue; }
+                    if input.kind == std::INPUT_EVENT_KIND_KEY {
+                        if let Some(key) = input.key_event() {
+                            if key.pressed && (key.code == b's' as u32 || key.code == b'S' as u32 || key.code == 0x1000C) {
+                                capture_and_save_screenshot(&state);
+                                continue;
+                            }
+                        }
+                    }
 
                     match state.current_view {
                         ViewMode::BootScreen | ViewMode::PowerTransition => {}
@@ -2354,13 +2427,18 @@ pub extern "C" fn _start() -> ! {
                             // 1. Swipe gestures
                             if is_drag(input.kind) {
                                 // Vertical swipe down returns to home
-                                if input.dy >= 60 {
+                                if input.dy >= 50 {
                                     state.current_view = ViewMode::HomeScreen;
                                     render_view(surface, &state);
                                     let _ = std::surface_flip(4);
                                     std::log(
                                         0,
                                         "[LAUNCHER] Returned to home grid from recents via swipe.",
+                                    )
+                                    .ok();
+                                    std::log(
+                                        0,
+                                        "[LAUNCHER] Returned to home grid from recents.",
                                     )
                                     .ok();
                                     let mut drain = std::InputEvent {
@@ -2374,61 +2452,36 @@ pub extern "C" fn _start() -> ! {
                                     while std::input_event_poll(&mut drain).is_ok() {}
                                     break;
                                 }
-                                // Horizontal swipe-to-dismiss on cards. WHY these bands:
-                                // they are the drawn WORKSPACE_CARDS in
-                                // screens/activity.rs (card0 120..390, card1
-                                // 420..690, card2 720..990). The old bands
-                                // (200..480/520..800/840..1120) straddled the gaps,
-                                // so a swipe starting between cards dismissed the
-                                // wrong one (WRONG-CARD).
-                                if input.dx.abs() >= 40 {
+
+                                // Swiping up on a card closes/terminates that individual task.
+                                // Horizontal swipe also dismisses for backwards-compatibility.
+                                if input.dy <= -40 || input.dx.abs() >= 40 {
                                     let y = input.y as usize;
-                                    if (120..390).contains(&y) {
-                                        if state.recent_task_ids[0] > 0 {
-                                            let _ = std::app_stop(state.recent_task_ids[0]);
-                                        }
-                                        state.dismiss_recent(0);
-                                        // WHY the recents deck: dismissing a card
-                                        // shifts the remaining slots up and drops
-                                        // the running count in the strip above
-                                        // the deck, so the whole deck is what
-                                        // moved -- see `activity::recents_band`.
-                                        present_dirty(surface, &state, Dirty::ActivityCards);
-                                        std::log(0, "[LAUNCHER] Card 0 dismissed via swipe.").ok();
-                                        let mut drain = std::InputEvent {
-                                            kind: 0,
-                                            x: 0,
-                                            y: 0,
-                                            dx: 0,
-                                            dy: 0,
-                                            scale_milli: 1000,
-                                        };
-                                        while std::input_event_poll(&mut drain).is_ok() {}
-                                        break;
+                                    let slot_opt = if (120..390).contains(&y) {
+                                        Some(0)
                                     } else if (420..690).contains(&y) {
-                                        if state.recent_task_ids[1] > 0 {
-                                            let _ = std::app_stop(state.recent_task_ids[1]);
-                                        }
-                                        state.dismiss_recent(1);
-                                        present_dirty(surface, &state, Dirty::ActivityCards);
-                                        std::log(0, "[LAUNCHER] Card 1 dismissed via swipe.").ok();
-                                        let mut drain = std::InputEvent {
-                                            kind: 0,
-                                            x: 0,
-                                            y: 0,
-                                            dx: 0,
-                                            dy: 0,
-                                            scale_milli: 1000,
-                                        };
-                                        while std::input_event_poll(&mut drain).is_ok() {}
-                                        break;
+                                        Some(1)
                                     } else if (720..990).contains(&y) {
-                                        if state.recent_task_ids[2] > 0 {
-                                            let _ = std::app_stop(state.recent_task_ids[2]);
+                                        Some(2)
+                                    } else {
+                                        None
+                                    };
+
+                                    if let Some(slot) = slot_opt {
+                                        if state.recent_task_ids[slot] > 0 {
+                                            let _ = std::app_stop(state.recent_task_ids[slot]);
+                                            if state.active_child == Some(state.recent_task_ids[slot]) {
+                                                state.active_child = None;
+                                            }
                                         }
-                                        state.dismiss_recent(2);
+                                        state.dismiss_recent(slot);
                                         present_dirty(surface, &state, Dirty::ActivityCards);
-                                        std::log(0, "[LAUNCHER] Card 2 dismissed via swipe.").ok();
+                                        match slot {
+                                            0 => { std::log(0, "[LAUNCHER] Card 0 dismissed via swipe.").ok(); }
+                                            1 => { std::log(0, "[LAUNCHER] Card 1 dismissed via swipe.").ok(); }
+                                            2 => { std::log(0, "[LAUNCHER] Card 2 dismissed via swipe.").ok(); }
+                                            _ => {}
+                                        }
                                         let mut drain = std::InputEvent {
                                             kind: 0,
                                             x: 0,
@@ -2442,44 +2495,19 @@ pub extern "C" fn _start() -> ! {
                                     }
                                 }
                             }
+
                             // 2. Tap gestures
                             if input.kind == 1 {
                                 let x = input.x as usize;
                                 let y = input.y as usize;
-                                // WHY the Activities block is answerable here: it
-                                // was paint-only, because this arm reached only
-                                // the deck's three pinned bands and the home bar.
-                                // The rows sit at `ACTIVITY_ROW_TOP` (1076) with a
-                                // stride of 34, which is below the last card
-                                // (WORKSPACE_CARDS[2] ends at 990) and above the
-                                // home bar, so the band is free of everything the
-                                // lifecycle harness pins.
-                                //
-                                // WHAT a tap does and why that is honest: a
-                                // workspace's only sourced fact is the count of
-                                // installed apps in that registry category, so
-                                // the useful action is to open the drawer filtered
-                                // to it -- the drawer already has that filter and
-                                // the tab names already agree for Work and
-                                // Personal. Research and Media have no tab because
-                                // no package declares them, and on this guest their
-                                // count is zero, so a tap there opens the drawer on
-                                // All rather than pretending a filter applied. The
-                                // log says which, so the difference is visible in
-                                // the serial record rather than hidden.
-                                // Dismiss badges & card bodies
-                                // WHY badge-first, badge-exact: the drawn dismiss badges
-                                // are 48x48 at x 586..634, y 206..254 / 526..574 /
-                                // 846..894 (see CARD*_DISMISS in screens/activity.rs),
-                                // and the bodies are the drawn WORKSPACE_CARDS
-                                // (x 32.., y 120..390 / 420..690 / 720..990) minus
-                                // the badge column. The old bands were shifted into
-                                // the gaps, so taps near a card edge hit the wrong
-                                // card (WRONG-CARD launch).
-                                // Card 0 dismiss badge: x in 586..634, y in 206..254
-                                if (206..254).contains(&y) && (586..634).contains(&x) {
+
+                                // A. Dismiss button taps
+                                if screens::activity::CARD0_DISMISS.contains(x, y) || ((206..254).contains(&y) && (586..634).contains(&x)) {
                                     if state.recent_task_ids[0] > 0 {
                                         let _ = std::app_stop(state.recent_task_ids[0]);
+                                        if state.active_child == Some(state.recent_task_ids[0]) {
+                                            state.active_child = None;
+                                        }
                                     }
                                     state.dismiss_recent(0);
                                     present_dirty(surface, &state, Dirty::ActivityCards);
@@ -2498,47 +2526,12 @@ pub extern "C" fn _start() -> ! {
                                     };
                                     while std::input_event_poll(&mut drain).is_ok() {}
                                     break;
-                                }
-                                // Tap Card 0 body to switch
-                                else if (120..390).contains(&y) && (32..586).contains(&x) {
-                                    let Some(target) = state.recent_id(0) else {
-                                        break;
-                                    };
-                                    let mut target_buf = [0u8; 32];
-                                    let target_len = target.len().min(32);
-                                    target_buf[..target_len].copy_from_slice(&target.as_bytes()[..target_len]);
-                                    let target_str = core::str::from_utf8(&target_buf[..target_len]).unwrap_or("");
-
-                                    let switched = if state.recent_task_ids[0] > 0 && std::app_focus(state.recent_task_ids[0]).is_ok() {
-                                        state.active_child = Some(state.recent_task_ids[0]);
-                                        true
-                                    } else if let Ok(tid) = std::app_launch(target_str) {
-                                        let _ = std::app_focus(tid);
-                                        state.active_child = Some(tid);
-                                        state.recent_task_ids[0] = tid;
-                                        true
-                                    } else {
-                                        false
-                                    };
-                                    if switched {
-                                        state.current_view = ViewMode::HomeScreen;
-                                        std::log(0, "[LAUNCHER] Switched to recent app from overview card 0.").ok();
-                                        let mut drain = std::InputEvent {
-                                            kind: 0,
-                                            x: 0,
-                                            y: 0,
-                                            dx: 0,
-                                            dy: 0,
-                                            scale_milli: 1000,
-                                        };
-                                        while std::input_event_poll(&mut drain).is_ok() {}
-                                        break;
-                                    }
-                                }
-                                // Card 1 dismiss badge: x in 586..634, y in 526..574
-                                else if (526..574).contains(&y) && (586..634).contains(&x) {
+                                } else if screens::activity::CARD1_DISMISS.contains(x, y) || ((526..574).contains(&y) && (586..634).contains(&x)) {
                                     if state.recent_task_ids[1] > 0 {
                                         let _ = std::app_stop(state.recent_task_ids[1]);
+                                        if state.active_child == Some(state.recent_task_ids[1]) {
+                                            state.active_child = None;
+                                        }
                                     }
                                     state.dismiss_recent(1);
                                     present_dirty(surface, &state, Dirty::ActivityCards);
@@ -2557,47 +2550,12 @@ pub extern "C" fn _start() -> ! {
                                     };
                                     while std::input_event_poll(&mut drain).is_ok() {}
                                     break;
-                                }
-                                // Tap Card 1 body to switch
-                                else if (420..690).contains(&y) && (32..586).contains(&x) {
-                                    let Some(target) = state.recent_id(1) else {
-                                        break;
-                                    };
-                                    let mut target_buf = [0u8; 32];
-                                    let target_len = target.len().min(32);
-                                    target_buf[..target_len].copy_from_slice(&target.as_bytes()[..target_len]);
-                                    let target_str = core::str::from_utf8(&target_buf[..target_len]).unwrap_or("");
-
-                                    let switched = if state.recent_task_ids[1] > 0 && std::app_focus(state.recent_task_ids[1]).is_ok() {
-                                        state.active_child = Some(state.recent_task_ids[1]);
-                                        true
-                                    } else if let Ok(tid) = std::app_launch(target_str) {
-                                        let _ = std::app_focus(tid);
-                                        state.active_child = Some(tid);
-                                        state.recent_task_ids[1] = tid;
-                                        true
-                                    } else {
-                                        false
-                                    };
-                                    if switched {
-                                        state.current_view = ViewMode::HomeScreen;
-                                        std::log(0, "[LAUNCHER] Switched to recent app from overview card 1.").ok();
-                                        let mut drain = std::InputEvent {
-                                            kind: 0,
-                                            x: 0,
-                                            y: 0,
-                                            dx: 0,
-                                            dy: 0,
-                                            scale_milli: 1000,
-                                        };
-                                        while std::input_event_poll(&mut drain).is_ok() {}
-                                        break;
-                                    }
-                                }
-                                // Card 2 dismiss badge: x in 586..634, y in 846..894
-                                else if (846..894).contains(&y) && (586..634).contains(&x) {
+                                } else if screens::activity::CARD2_DISMISS.contains(x, y) || ((846..894).contains(&y) && (586..634).contains(&x)) {
                                     if state.recent_task_ids[2] > 0 {
                                         let _ = std::app_stop(state.recent_task_ids[2]);
+                                        if state.active_child == Some(state.recent_task_ids[2]) {
+                                            state.active_child = None;
+                                        }
                                     }
                                     state.dismiss_recent(2);
                                     present_dirty(surface, &state, Dirty::ActivityCards);
@@ -2617,61 +2575,145 @@ pub extern "C" fn _start() -> ! {
                                     while std::input_event_poll(&mut drain).is_ok() {}
                                     break;
                                 }
-                                // Tap Card 2 body to switch
-                                else if (720..990).contains(&y) && (32..586).contains(&x) {
-                                    let Some(target) = state.recent_id(2) else {
-                                        break;
-                                    };
-                                    let mut target_buf = [0u8; 32];
-                                    let target_len = target.len().min(32);
-                                    target_buf[..target_len].copy_from_slice(&target.as_bytes()[..target_len]);
-                                    let target_str = core::str::from_utf8(&target_buf[..target_len]).unwrap_or("");
+                                // B. Tap Card 0 body to switch
+                                else if screens::activity::WORKSPACE_CARDS[0].contains(x, y) {
+                                    if let Some(target) = state.recent_id(0) {
+                                        let mut target_buf = [0u8; 32];
+                                        let target_len = target.len().min(32);
+                                        target_buf[..target_len].copy_from_slice(&target.as_bytes()[..target_len]);
+                                        let target_str = core::str::from_utf8(&target_buf[..target_len]).unwrap_or("");
 
-                                    let switched = if state.recent_task_ids[2] > 0 && std::app_focus(state.recent_task_ids[2]).is_ok() {
-                                        state.active_child = Some(state.recent_task_ids[2]);
-                                        true
-                                    } else if let Ok(tid) = std::app_launch(target_str) {
-                                        let _ = std::app_focus(tid);
-                                        state.active_child = Some(tid);
-                                        state.recent_task_ids[2] = tid;
-                                        true
-                                    } else {
-                                        false
-                                    };
-                                    if switched {
-                                        state.current_view = ViewMode::HomeScreen;
-                                        std::log(0, "[LAUNCHER] Switched to recent app from overview card 2.").ok();
-                                        let mut drain = std::InputEvent {
-                                            kind: 0,
-                                            x: 0,
-                                            y: 0,
-                                            dx: 0,
-                                            dy: 0,
-                                            scale_milli: 1000,
+                                        let switched = if state.recent_task_ids[0] > 0 && std::app_focus(state.recent_task_ids[0]).is_ok() {
+                                            state.active_child = Some(state.recent_task_ids[0]);
+                                            true
+                                        } else if let Ok(tid) = std::app_launch(target_str) {
+                                            let _ = std::app_focus(tid);
+                                            state.active_child = Some(tid);
+                                            state.recent_task_ids[0] = tid;
+                                            true
+                                        } else {
+                                            false
                                         };
-                                        while std::input_event_poll(&mut drain).is_ok() {}
-                                        break;
+                                        if switched {
+                                            state.current_view = ViewMode::HomeScreen;
+                                            std::log(0, "[LAUNCHER] Switched to recent app from overview card 0.").ok();
+                                            let mut drain = std::InputEvent {
+                                                kind: 0,
+                                                x: 0,
+                                                y: 0,
+                                                dx: 0,
+                                                dy: 0,
+                                                scale_milli: 1000,
+                                            };
+                                            while std::input_event_poll(&mut drain).is_ok() {}
+                                            break;
+                                        }
                                     }
                                 }
-                                // Close All pill (drawn CLOSE_ALL_BTN: x 250..470, y 1220..1268)
-                                // or the home indicator bar.
-                                else if ((1220..1270).contains(&y) && (230..490).contains(&x)) || y >= 1400 {
-                                    if (1220..1270).contains(&y) && (230..490).contains(&x) {
-                                        for task in state.recent_task_ids.iter().copied() {
-                                            if task > 0 {
-                                                let _ = std::app_stop(task);
-                                            }
+                                // C. Tap Card 1 body to switch
+                                else if screens::activity::WORKSPACE_CARDS[1].contains(x, y) {
+                                    if let Some(target) = state.recent_id(1) {
+                                        let mut target_buf = [0u8; 32];
+                                        let target_len = target.len().min(32);
+                                        target_buf[..target_len].copy_from_slice(&target.as_bytes()[..target_len]);
+                                        let target_str = core::str::from_utf8(&target_buf[..target_len]).unwrap_or("");
+
+                                        let switched = if state.recent_task_ids[1] > 0 && std::app_focus(state.recent_task_ids[1]).is_ok() {
+                                            state.active_child = Some(state.recent_task_ids[1]);
+                                            true
+                                        } else if let Ok(tid) = std::app_launch(target_str) {
+                                            let _ = std::app_focus(tid);
+                                            state.active_child = Some(tid);
+                                            state.recent_task_ids[1] = tid;
+                                            true
+                                        } else {
+                                            false
+                                        };
+                                        if switched {
+                                            state.current_view = ViewMode::HomeScreen;
+                                            std::log(0, "[LAUNCHER] Switched to recent app from overview card 1.").ok();
+                                            let mut drain = std::InputEvent {
+                                                kind: 0,
+                                                x: 0,
+                                                y: 0,
+                                                dx: 0,
+                                                dy: 0,
+                                                scale_milli: 1000,
+                                            };
+                                            while std::input_event_poll(&mut drain).is_ok() {}
+                                            break;
                                         }
-                                        state.recent_apps = [[0u8; 32]; 3];
-                                        state.recent_app_lens = [0; 3];
-                                        state.recent_task_ids = [0; 3];
-                                        state.active_child = None;
                                     }
+                                }
+                                // D. Tap Card 2 body to switch
+                                else if screens::activity::WORKSPACE_CARDS[2].contains(x, y) {
+                                    if let Some(target) = state.recent_id(2) {
+                                        let mut target_buf = [0u8; 32];
+                                        let target_len = target.len().min(32);
+                                        target_buf[..target_len].copy_from_slice(&target.as_bytes()[..target_len]);
+                                        let target_str = core::str::from_utf8(&target_buf[..target_len]).unwrap_or("");
+
+                                        let switched = if state.recent_task_ids[2] > 0 && std::app_focus(state.recent_task_ids[2]).is_ok() {
+                                            state.active_child = Some(state.recent_task_ids[2]);
+                                            true
+                                        } else if let Ok(tid) = std::app_launch(target_str) {
+                                            let _ = std::app_focus(tid);
+                                            state.active_child = Some(tid);
+                                            state.recent_task_ids[2] = tid;
+                                            true
+                                        } else {
+                                            false
+                                        };
+                                        if switched {
+                                            state.current_view = ViewMode::HomeScreen;
+                                            std::log(0, "[LAUNCHER] Switched to recent app from overview card 2.").ok();
+                                            let mut drain = std::InputEvent {
+                                                kind: 0,
+                                                x: 0,
+                                                y: 0,
+                                                dx: 0,
+                                                dy: 0,
+                                                scale_milli: 1000,
+                                            };
+                                            while std::input_event_poll(&mut drain).is_ok() {}
+                                            break;
+                                        }
+                                    }
+                                }
+                                // E. Tap "Close all" pill: terminates all active recents and returns to Home
+                                else if screens::activity::CLOSE_ALL_BTN.contains(x, y) || ((1210..1280).contains(&y) && (220..500).contains(&x)) {
+                                    for task in state.recent_task_ids.iter().copied() {
+                                        if task > 0 {
+                                            let _ = std::app_stop(task);
+                                        }
+                                    }
+                                    state.recent_apps = [[0u8; 32]; 3];
+                                    state.recent_app_lens = [0; 3];
+                                    state.recent_task_ids = [0; 3];
+                                    state.active_child = None;
                                     state.current_view = ViewMode::HomeScreen;
                                     render_view(surface, &state);
                                     let _ = std::surface_flip(4);
-                                    std::log(0, "[LAUNCHER] Returned to home grid from recents.")
-                                        .ok();
+                                    std::log(0, "[LAUNCHER] Closed all recent apps and returned to home grid.").ok();
+                                    std::log(0, "[LAUNCHER] Returned to home grid from recents.").ok();
+                                    let mut drain = std::InputEvent {
+                                        kind: 0,
+                                        x: 0,
+                                        y: 0,
+                                        dx: 0,
+                                        dy: 0,
+                                        scale_milli: 1000,
+                                    };
+                                    while std::input_event_poll(&mut drain).is_ok() {}
+                                    break;
+                                }
+                                // F. Tap empty background (or gesture bar): returns to Home
+                                else {
+                                    state.current_view = ViewMode::HomeScreen;
+                                    render_view(surface, &state);
+                                    let _ = std::surface_flip(4);
+                                    std::log(0, "[LAUNCHER] Returned to home grid from recents via backdrop tap.").ok();
+                                    std::log(0, "[LAUNCHER] Returned to home grid from recents.").ok();
                                     let mut drain = std::InputEvent {
                                         kind: 0,
                                         x: 0,
@@ -2840,28 +2882,26 @@ pub extern "C" fn _start() -> ! {
                                         .ok();
                                     break;
                                 }
-                                // WHY gated to the drawn System card (x 40..680, y
-                                // 770..890 -- CARD_R4 in screens/system_space.rs):
-                                // any tap anywhere used to launch the settings app,
-                                // including taps on the Device/Network/Personal/Apps
-                                // cards that draw no such affordance.
-                                if !(770..890).contains(&y) || !(40..680).contains(&x) {
-                                    break;
-                                }
-                                if let Ok(task_id) = std::app_launch("org.interos.settings") {
-                                    state.push_recent("org.interos.settings", task_id);
-                                    state.active_child = Some(task_id);
-                                    state.current_view = ViewMode::HomeScreen;
-                                    let mut drain = std::InputEvent {
-                                        kind: 0,
-                                        x: 0,
-                                        y: 0,
-                                        dx: 0,
-                                        dy: 0,
-                                        scale_milli: 1000,
-                                    };
-                                    while std::input_event_poll(&mut drain).is_ok() {}
-                                    break;
+                                // Category cards: Device, Network, Personal, Apps, Power, Security, System
+                                // Any card tap seamlessly transitions to or launches the sovereign Settings component
+                                if (360..900).contains(&y) && (40..680).contains(&x) {
+                                    if let Ok(task_id) = std::app_launch("org.interos.settings") {
+                                        state.push_recent("org.interos.settings", task_id);
+                                        state.active_child = Some(task_id);
+                                        state.current_view = ViewMode::HomeScreen;
+                                        let mut drain = std::InputEvent {
+                                            kind: 0,
+                                            x: 0,
+                                            y: 0,
+                                            dx: 0,
+                                            dy: 0,
+                                            scale_milli: 1000,
+                                        };
+                                        while std::input_event_poll(&mut drain).is_ok() {}
+                                        std::log(0, "[LAUNCHER] Seamlessly transitioned to sovereign System Space settings.")
+                                            .ok();
+                                        break;
+                                    }
                                 }
                             }
                         }
@@ -3664,12 +3704,12 @@ pub extern "C" fn _start() -> ! {
                                 let x = input.x as usize;
                                 let y = input.y as usize;
 
-                                // Weather widget (135..315, 40..345)
+                                // Weather widget (135..315, 40..345) -> Sovereign Settings & Telemetry
                                 if (135..315).contains(&y) && (40..345).contains(&x) {
-                                        if let Ok(task_id) =
-                                        std::app_launch("org.interos.sensor_dashboard")
+                                    if let Ok(task_id) =
+                                        std::app_launch("org.interos.settings")
                                     {
-                                        state.push_recent("org.interos.sensor_dashboard", task_id);
+                                        state.push_recent("org.interos.settings", task_id);
                                         state.active_child = Some(task_id);
                                         state.current_view = ViewMode::HomeScreen;
                                         let mut drain = std::InputEvent {

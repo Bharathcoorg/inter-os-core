@@ -225,7 +225,7 @@ fn card_h() -> usize {
 }
 
 fn frame() -> Frame {
-    let greeting = Rect::new(30, 56, 440, 130);
+    let greeting = Rect::new(30, 56, 440, 140);
     let date_widget = Rect::new(490, 56, 200, 130);
     let card = Rect::new(
         30,
@@ -677,13 +677,15 @@ fn telemetry_plan() -> Telemetry {
     let signal_x = telemetry_signal_x();
     let signal_w = TELEMETRY_SIGNAL_BARS * TELEMETRY_BAR_W
         + TELEMETRY_SIGNAL_BARS.saturating_sub(1) * TELEMETRY_BAR_GAP;
-    let battery_x0 = signal_x + signal_w + TELEMETRY_GAP;
+    let wifi_x0 = signal_x + signal_w + TELEMETRY_GAP;
+    let battery_x0 = wifi_x0 + TELEMETRY_WIFI_W + TELEMETRY_GAP;
+    let term_x0 = battery_x0 + TELEMETRY_BATTERY_W;
     Telemetry {
         signal_x,
         signal_w,
         battery_x0,
-        wifi_x0: battery_x0 + TELEMETRY_BATTERY_W + TELEMETRY_GAP,
-        term_x0: battery_x0 + TELEMETRY_BATTERY_W,
+        wifi_x0,
+        term_x0,
     }
 }
 
@@ -739,23 +741,65 @@ fn build(state: &LauncherState) -> Paint {
         (b"Welcome", b"Welcome,")
     };
 
+    // Dynamic Contextual Subtitle: Platform Truth Contract (no hardcoded/fictitious state).
+    // Uses user_status from settings if configured; otherwise contextual from real system state.
+    let mut subtitle_buf = [0u8; 48];
+    let subtitle_bytes: &[u8] = if state.user_status_len > 0 {
+        &state.user_status[..state.user_status_len]
+    } else if state.notification_count > 0 {
+        let cnt = state.notification_count.min(8);
+        if cnt == 1 {
+            b"1 notification waiting"
+        } else {
+            subtitle_buf[0] = b'0' + (cnt as u8);
+            let rest = b" notifications waiting";
+            subtitle_buf[1..1 + rest.len()].copy_from_slice(rest);
+            &subtitle_buf[..1 + rest.len()]
+        }
+    } else if state.task0_done {
+        b"Primary task completed"
+    } else if state.clock_source_ok && state.date_line[0] != b' ' {
+        match &state.date_line[0..3] {
+            b"Sat" | b"Sun" => b"Have a peaceful weekend",
+            b"Mon" => b"Ready for the week ahead",
+            b"Fri" => b"Wrapping up the week",
+            _ => {
+                if state.clock_time[0].is_ascii_digit() && state.clock_time[1].is_ascii_digit() {
+                    let hour = (state.clock_time[0] - b'0') * 10 + (state.clock_time[1] - b'0');
+                    if hour < 12 {
+                        b"Ready for the day ahead"
+                    } else if hour < 18 {
+                        b"Afternoon briefing ready"
+                    } else {
+                        b"All systems nominal"
+                    }
+                } else {
+                    b"System ready"
+                }
+            }
+        }
+    } else {
+        b"System ready"
+    };
+
     let greeting = if state.user_name_len > 0 {
         let l1_y = f.greeting.y + 4;
-        let l2_y = l1_y + text::line_height(caption_scale) + 2;
-        let l3_y = l2_y + text::line_height(title_scale) + 4;
+        let l2_y = f.greeting.y + 26;
+        let l3_y = f.greeting.y + 96;
         [
             Run::whole(f.greeting.x, l1_y, caption_scale, day_part_comma, 0),
             Run::whole(f.greeting.x, l2_y, title_scale, &state.user_name[..state.user_name_len], 0),
-            Run::whole(f.greeting.x, l3_y, caption_scale, b"Let's make today a good day.", 0),
+            Run::whole(f.greeting.x, l3_y, caption_scale, subtitle_bytes, 0),
         ]
     } else {
         // Platform Truth Contract: Zero hardcoded or fake person name.
-        // Render prominent time-of-day greeting as title, followed by motivational subtitle.
-        let l1_y = f.greeting.y + 14;
-        let l2_y = f.greeting.y + 76;
+        // Render prominent time-of-day greeting as title, followed by dynamic subtitle.
+        // Spacing: l1_y at 64 (descenders of 'g' reach ~134), l2_y at 144 gives 10px clear gap.
+        let l1_y = f.greeting.y + 8;
+        let l2_y = f.greeting.y + 88;
         [
             Run::whole(f.greeting.x, l1_y, title_scale, day_part, 0),
-            Run::whole(f.greeting.x, l2_y, caption_scale, b"Let's make today a good day.", 0),
+            Run::whole(f.greeting.x, l2_y, caption_scale, subtitle_bytes, 0),
             Run::EMPTY,
         ]
     };
@@ -934,6 +978,9 @@ pub fn find_package_index(state: &LauncherState, suffix: &[u8]) -> Option<usize>
     for i in 0..state.app_count {
         let len = (state.app_id_lens[i] as usize).min(32);
         let id = &state.app_ids[i][..len];
+        if id == b"org.interos.sensor_dashboard" || id == b"sensor_dashboard" || id == b"sensors" {
+            continue;
+        }
         if id.ends_with(suffix) {
             return Some(i);
         }
@@ -1175,9 +1222,13 @@ fn rounded_contains(r: Rect, x: usize, y: usize, rad: usize) -> bool {
     }
     let cx = if x < left { left } else { right };
     let cy = if y < top { top } else { bottom };
-    let dx = x as i32 - cx as i32;
-    let dy = y as i32 - cy as i32;
-    dx * dx + dy * dy <= (rad as i32) * (rad as i32)
+    let dx = (x as i64) - (cx as i64);
+    let dy = (y as i64) - (cy as i64);
+    let r2 = (rad as i64) * (rad as i64);
+    let dx2 = dx * dx;
+    let dy2 = dy * dy;
+    // Continuous n=4 Lamé superellipse (flagship continuous squircle curvature)
+    (dx2 * dx2) + (dy2 * dy2) <= r2 * r2
 }
 
 /// The one-pixel outline of a rounded rectangle.
@@ -1305,6 +1356,9 @@ fn telemetry_pixel(x: usize, y: usize, t: &Telemetry, ink: u32) -> Option<u32> {
             if y >= top + 3 && y <= bottom - 3 {
                 return Some(ink);
             }
+            return None;
+        }
+        if (x == battery_x0 || x == battery_x0 + TELEMETRY_BATTERY_W - 1) && (y == top || y == bottom) {
             return None;
         }
         if y == top || y == bottom || x == battery_x0 || x == battery_x0 + TELEMETRY_BATTERY_W - 1

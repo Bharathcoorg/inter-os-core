@@ -198,6 +198,7 @@ pub enum SyscallNumber {
     DisplaySetMode = 130,
     DisplaySetOrientation = 131,
     CapLookup = 132,
+    FsUnlink = 133,
 }
 
 /// System call result status codes.
@@ -873,6 +874,30 @@ pub fn sys_fs_stat(cap_slot: usize, path: &str) -> Result<FileStat, SyscallResul
             FsError::FileNotFound => SyscallResult::FileNotFound,
             _ => SyscallResult::InvalidArguments,
         })
+}
+
+/// Unlinks (deletes) a file from the VFS.
+pub fn sys_fs_unlink(cap_slot: usize, path: &str) -> Result<(), SyscallResult> {
+    let sched = SCHEDULER.lock();
+    let current = match sched.current_task() {
+        Some(t) => t,
+        None => return Err(SyscallResult::PermissionDenied),
+    };
+    let task_id = current.id;
+    let cap_table = current.cap_table.clone();
+    drop(sched);
+
+    let mut vfs = VFS.lock();
+    vfs.unlink_for_task(task_id, &cap_table, cap_slot, path)
+        .map_err(|e| match e {
+            FsError::CapabilityError(_) | FsError::PermissionDenied => SyscallResult::PermissionDenied,
+            FsError::FileNotFound => SyscallResult::FileNotFound,
+            FsError::ReadOnlyFileSystem => SyscallResult::ReadOnlyFs,
+            FsError::IntegrityViolation => SyscallResult::IntegrityViolation,
+            _ => SyscallResult::InvalidArguments,
+        })?;
+    let _ = vfs.sync();
+    Ok(())
 }
 
 /// Reads a 512-byte physical disk sector by LBA from the primary ATA drive.
@@ -1962,6 +1987,27 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
              // CapLookup: a1 = cap_type, a2 = object_id
              match sys_cap_lookup(a1, a2) {
                  Ok(slot) => slot as i64,
+                 Err(e) => e as i64,
+             }
+         }
+         133 => {
+             // FsUnlink: a1 = cap_slot, a2 = path_ptr, a3 = path_len
+             let cap_slot = a1 as usize;
+             let path_ptr = a2;
+             let path_len = a3 as usize;
+             if path_len == 0 || path_len > 256 {
+                 return SyscallResult::InvalidArguments as i64;
+             }
+             let mut kpath = [0u8; 256];
+             if copy_from_user(&mut kpath[..path_len], path_ptr, path_len).is_err() {
+                 return SyscallResult::InvalidArguments as i64;
+             }
+             let path = match core::str::from_utf8(&kpath[..path_len]) {
+                 Ok(s) => s,
+                 Err(_) => return SyscallResult::InvalidArguments as i64,
+             };
+             match sys_fs_unlink(cap_slot, path) {
+                 Ok(()) => SyscallResult::Success as i64,
                  Err(e) => e as i64,
              }
          }

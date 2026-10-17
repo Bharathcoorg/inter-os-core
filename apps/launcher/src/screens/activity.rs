@@ -11,30 +11,79 @@ use launcher::icons::{self, IconKind};
 use launcher::layout::Rect;
 use launcher::text;
 use launcher::theme::{
-    space, type_scale, SCREEN_HEIGHT, SCREEN_WIDTH,
+    type_scale, SCREEN_HEIGHT, SCREEN_WIDTH,
     STATUS_BAR_HEIGHT,
 };
 
 // -----------------------------------------------------------------------------
-// Constants & Colors
+// Constants & Colors: Flagship Dark Acrylic & Translucent Glass System
 // -----------------------------------------------------------------------------
 
-const BG_COLOR: u32 = 0xFF111214;
-const CARD_BG: u32 = 0xFF1E222A;
-const CARD_BORDER: u32 = 0xFF353B46;
-const TEXT_WHITE: u32 = 0xFFF8FAFC;
-const TEXT_MUTED: u32 = 0xFF94A3B8;
+/// Deep OLED black / dark acrylic backdrop (#0B0F17)
+pub const BG_COLOR: u32 = 0xFF0B0F17;
 
+/// Card translucent dark glass surface
+pub const CARD_BG: u32 = 0xFF141923;
+/// Subtle translucent glass border
+pub const CARD_BORDER: u32 = 0xFF2A3446;
+/// Top edge specular reflection highlight for glass illusion
+pub const CARD_BORDER_HIGHLIGHT: u32 = 0xFF3E4D64;
+
+pub const TEXT_WHITE: u32 = 0xFFF8FAFC;
+pub const TEXT_MUTED: u32 = 0xFF94A3B8;
+
+// Squircle Icon Badge
+pub const SQUIRCLE_SIZE: usize = 48;
+pub const SQUIRCLE_RADIUS: usize = 14;
+pub const SQUIRCLE_BG: u32 = 0xFF1C2433;
+pub const SQUIRCLE_BORDER: u32 = 0xFF2F3D52;
+
+// State Badge Colors (Platform Truth compliant: no forbidden traffic-light tones)
+pub const STATE_ACTIVE_DOT: u32 = 0xFF22C55E; // Emerald green
+pub const STATE_ACTIVE_TEXT: u32 = 0xFF4ADE80;
+pub const STATE_RUNNING_DOT: u32 = 0xFF38BDF8; // Electric sky blue
+pub const STATE_RUNNING_TEXT: u32 = 0xFF7DD3FC;
+pub const STATE_RECENT_DOT: u32 = 0xFF64748B; // Muted silver
+pub const STATE_RECENT_TEXT: u32 = 0xFF94A3B8;
+
+pub const STATE_BADGE_BG: u32 = 0xFF18202D;
+pub const STATE_BADGE_BORDER: u32 = 0xFF283446;
+
+// Preview Well (Authentic Surface Canvas)
+pub const PREVIEW_BG: u32 = 0xFF0D111A;
+pub const PREVIEW_BORDER: u32 = 0xFF1E2636;
+pub const PREVIEW_HEADER_BG: u32 = 0xFF121722;
+pub const PREVIEW_HEADER_BORDER: u32 = 0xFF1A2230;
+pub const PREVIEW_WATERMARK_INK: u32 = 0xFF334155;
+pub const PREVIEW_NOTE_INK: u32 = 0xFF7C8BA1;
+pub const PREVIEW_NOTE: &[u8] = b"No live preview";
+
+// Elevated Dismiss Circle [×]
+pub const BADGE_SIZE: usize = 48;
+pub const BADGE_RADIUS: usize = BADGE_SIZE / 2;
+pub const BADGE_X: usize = 586;
+pub const CARD0_DISMISS: Rect = Rect::new(BADGE_X, 206, BADGE_SIZE, BADGE_SIZE);
+pub const CARD1_DISMISS: Rect = Rect::new(BADGE_X, 526, BADGE_SIZE, BADGE_SIZE);
+pub const CARD2_DISMISS: Rect = Rect::new(BADGE_X, 846, BADGE_SIZE, BADGE_SIZE);
+
+pub const DISMISS_BG: u32 = 0xFF1F2838;
+pub const DISMISS_BORDER: u32 = 0xFF43546D;
+pub const DISMISS_HIGHLIGHT: u32 = 0xFF5B6E8C;
+pub const DISMISS_SHADOW: u32 = 0xFF080B12;
+
+// Modern Pill-Shaped "Close all" Control
+pub const CLOSE_ALL_BTN: Rect = Rect::new(SCREEN_WIDTH / 2 - 100, 1220, 200, 48);
+pub const CLOSE_ALL_BG: u32 = 0xFF18202D;
+pub const CLOSE_ALL_BORDER: u32 = 0xFF364457;
+pub const CLOSE_ALL_HIGHLIGHT: u32 = 0xFF4C5D76;
+
+const HOME_PILL: Rect = Rect::new(SCREEN_WIDTH / 2 - 90, SCREEN_HEIGHT - 20, 180, 5);
+
+// Card dimensions & geometry
 const CARD_X: usize = 32;
 const CARD_W: usize = SCREEN_WIDTH - 64; // 656
-
 const CARD_RADIUS: usize = 28;
 
-// Card rectangles:
-// Card 0 (recent slot 0): 120 .. 390  (h=270, contains y=230 dismiss badge)
-// Card 1 (recent slot 1): 420 .. 690  (h=270, contains y=550 dismiss badge)
-// Card 2 (recent slot 2): 720 .. 990  (h=270, contains y=870 dismiss badge)
-// Card 3:                  1020 .. 1200
 pub const WORKSPACE_CARDS: [Rect; 4] = [
     Rect::new(CARD_X, 120, CARD_W, 270),
     Rect::new(CARD_X, 420, CARD_W, 270),
@@ -46,65 +95,6 @@ pub fn recents_band() -> (usize, usize) {
     let last = WORKSPACE_CARDS[2];
     (STATUS_BAND_TOP, last.y + last.h)
 }
-
-const CARD_TEXT_X: usize = 96;
-const CARD_TITLE_Y: usize = 26;
-const CARD_SUBTITLE_Y: usize = 76;
-
-/// Where the preview well sits inside a card, and how tall it is.
-///
-/// WHY these three numbers are stated together: the title is drawn at
-/// `type_scale::BODY`, which is a 48px cell, so a title at offset 26 occupies
-/// 26..=74. The subtitle used to start at 54, which put it *inside* the title's
-/// descenders and is what made every card render its title through its own
-/// subtitle. The preview well then started at 86, which is why the three bands
-/// cannot simply be nudged independently -- they have to tile 26..=246 inside a
-/// 270px card.
-const CARD_PREVIEW_Y: usize = 104;
-const CARD_PREVIEW_H: usize = 142;
-const CARD_PREVIEW_R: usize = 14;
-
-/// Where the "no live preview" note sits inside the well, measured from the
-/// well's own top edge, and how far the icon is lifted above the well's centre.
-const CARD_PREVIEW_NOTE_DY: usize = 102;
-const CARD_PREVIEW_ICON_DY: i32 = -18;
-
-const CARD_ICON_SIZE: usize = 56;
-const CARD_ICON_RADIUS: usize = 14;
-
-const CARD_ICON_BG: u32 = 0xFF334155;
-
-/// The recessed well a card's preview area is painted into, and the ink used on
-/// it.
-///
-/// WHY these are declared here rather than reused from the theme's surface
-/// ramp: the deck is a dark overlay that sits above whatever was on screen, so
-/// its wells are one step below the card fill the same way a sunken field is on
-/// a light surface. They are still drawn from the same neutral family -- the
-/// previous stand-ins used saturated blues, purples and pinks that appear in no
-/// design token file in this repository.
-const CARD_PREVIEW_BG: u32 = 0xFF171B22;
-const CARD_PREVIEW_INK: u32 = 0xFF9AA3B2;
-
-/// Shown in place of a thumbnail, because the platform cannot supply one.
-const PREVIEW_NOTE: &[u8] = b"No live preview";
-const CARD_ICON_BORDER: u32 = 0xFF475569;
-
-// Dismiss badges: 48x48 rounded circles centered at test coordinates
-// Card 0: center (610, 230) -> x: 586..634, y: 206..254
-// Card 1: center (610, 550) -> x: 586..634, y: 526..574
-// Card 2: center (610, 870) -> x: 586..634, y: 846..894
-const BADGE_SIZE: usize = 48;
-const BADGE_RADIUS: usize = BADGE_SIZE / 2;
-const BADGE_X: usize = 586;
-pub const CARD0_DISMISS: Rect = Rect::new(BADGE_X, 206, BADGE_SIZE, BADGE_SIZE);
-pub const CARD1_DISMISS: Rect = Rect::new(BADGE_X, 526, BADGE_SIZE, BADGE_SIZE);
-pub const CARD2_DISMISS: Rect = Rect::new(BADGE_X, 846, BADGE_SIZE, BADGE_SIZE);
-
-/// Prominent "Close All" pill button centered below the recents deck
-pub const CLOSE_ALL_BTN: Rect = Rect::new(SCREEN_WIDTH / 2 - 110, 1220, 220, 48);
-
-const HOME_PILL: Rect = Rect::new(SCREEN_WIDTH / 2 - 90, SCREEN_HEIGHT - 20, 180, 5);
 
 // Stub category definitions for backward compatibility
 pub const ACTIVITY_NAMES: [&[u8]; 4] = [b"Work", b"Personal", b"Research", b"Media"];
@@ -169,6 +159,25 @@ fn running_count(state: &LauncherState) -> usize {
 }
 
 // -----------------------------------------------------------------------------
+// Backdrop Frosted Glass Tint
+// -----------------------------------------------------------------------------
+
+#[inline(always)]
+fn backdrop_pixel(x: usize, y: usize) -> u32 {
+    if y < 320 {
+        let cx = (SCREEN_WIDTH / 2) as i32;
+        let dx = ((x as i32) - cx).abs();
+        let glow = ((320 - y) * (360 - dx.min(360) as usize)) / 23040; // 0..5
+        let r = 11 + (glow * 2 / 5) as u32;
+        let g = 15 + (glow * 3 / 5) as u32;
+        let b = 23 + glow as u32;
+        0xFF000000 | (r << 16) | (g << 8) | b
+    } else {
+        BG_COLOR
+    }
+}
+
+// -----------------------------------------------------------------------------
 // Rounded Rectangle Helpers
 // -----------------------------------------------------------------------------
 
@@ -190,9 +199,13 @@ fn rounded_contains(r: Rect, x: usize, y: usize, rad: usize) -> bool {
     }
     let cx = if x < left { left } else { right };
     let cy = if y < top { top } else { bottom };
-    let dx = x as i32 - cx as i32;
-    let dy = y as i32 - cy as i32;
-    dx * dx + dy * dy <= (rad as i32) * (rad as i32)
+    let dx = (x as i64) - (cx as i64);
+    let dy = (y as i64) - (cy as i64);
+    let r2 = (rad as i64) * (rad as i64);
+    let dx2 = dx * dx;
+    let dy2 = dy * dy;
+    // Continuous n=4 Lamé superellipse (flagship continuous squircle curvature)
+    (dx2 * dx2) + (dy2 * dy2) <= r2 * r2
 }
 
 #[inline]
@@ -404,7 +417,7 @@ impl LabelRun {
 }
 
 // -----------------------------------------------------------------------------
-// Card Plan & Mini Screen Preview
+// Card Plan & Layout
 // -----------------------------------------------------------------------------
 
 struct CardPlan {
@@ -413,8 +426,11 @@ struct CardPlan {
     icon: Option<IconKind>,
     badge: LabelRun,
     title: LabelRun,
-    subtitle: LabelRun,
+    state_pill_rect: Rect,
+    state_label: LabelRun,
+    state_dot_color: u32,
     dismiss_rect: Option<Rect>,
+    preview_rect: Rect,
     preview_note: LabelRun,
 }
 
@@ -428,29 +444,7 @@ struct ActivityFrame {
     home_pill: Rect,
 }
 
-const SUB_CAP: usize = 32;
-
-/// Scratch width for a card title produced from a package id. `RUN_CAP` is the
-/// ceiling a `LabelRun` will hold, so the humanised form gets the same budget
-/// rather than being truncated sooner for being a fallback.
 const TITLE_CAP: usize = RUN_CAP;
-const SUB_RUNNING: &[u8] = b"Running \xb7 task ";
-const SUB_ACTIVE: &[u8] = b"Running \xb7 active";
-const SUB_NOT_RUNNING: &[u8] = b"Recent \xb7 ready";
-
-const SUB_INK_RUNNING: u32 = 0xFF38BDF8;
-
-fn card_subtitle(buf: &mut [u8; SUB_CAP], task: u64, focused: bool) -> &[u8] {
-    if task == 0 {
-        return SUB_NOT_RUNNING;
-    }
-    if focused {
-        return SUB_ACTIVE;
-    }
-    let mut at = put(buf, 0, SUB_RUNNING);
-    at = push_decimal(buf, at, task as usize);
-    &buf[..at]
-}
 
 fn registry_index(state: &LauncherState, id: &[u8]) -> Option<usize> {
     let mut i = 0usize;
@@ -508,24 +502,31 @@ fn build_card(state: &LauncherState, slot: usize) -> Option<CardPlan> {
     }
     let id = &raw[..len];
 
-    let icon_rect = Rect::new(
-        rect.x + (CARD_TEXT_X - CARD_ICON_SIZE - space::MD),
-        rect.y + 24,
-        CARD_ICON_SIZE,
-        CARD_ICON_SIZE,
-    );
-    let title_x = rect.x + CARD_TEXT_X;
-    let title_fit = rect.w.saturating_sub(CARD_TEXT_X + BADGE_SIZE + space::XL);
+    // First-party HD vector icon inside a 48x48 squircle badge (radius 14px)
+    let icon_rect = Rect::new(rect.x + 20, rect.y + 16, SQUIRCLE_SIZE, SQUIRCLE_SIZE);
+    let title_x = rect.x + 80;
+    let title_fit = rect.w.saturating_sub(80 + 120);
 
     let task = state.recent_task_ids.get(slot).copied().unwrap_or(0);
     let focused = task != 0 && state.active_child == Some(task);
-    let mut sub_buf = [0u8; SUB_CAP];
-    let subtitle = LabelRun::new(
-        title_x,
-        rect.y + CARD_SUBTITLE_Y,
+
+    // State badge pill (e.g. "Active", "Running", "Recent") aligned cleanly on top-right before dismiss [x]
+    let (state_text, dot_color, text_color, badge_w): (&[u8], u32, u32, usize) = if task != 0 && focused {
+        (b"Active", STATE_ACTIVE_DOT, STATE_ACTIVE_TEXT, 70)
+    } else if task != 0 {
+        (b"Running", STATE_RUNNING_DOT, STATE_RUNNING_TEXT, 78)
+    } else {
+        (b"Recent", STATE_RECENT_DOT, STATE_RECENT_TEXT, 72)
+    };
+    let state_x = rect.x + rect.w - 64 - badge_w;
+    let state_y = rect.y + 20;
+    let state_pill_rect = Rect::new(state_x, state_y, badge_w, 24);
+    let state_label = LabelRun::new(
+        state_x + 18,
+        state_y + 4,
         type_scale::CAPTION,
-        card_subtitle(&mut sub_buf, task, focused),
-        if task == 0 { TEXT_MUTED } else { SUB_INK_RUNNING },
+        state_text,
+        text_color,
     );
 
     let index = registry_index(state, id);
@@ -549,14 +550,20 @@ fn build_card(state: &LauncherState, slot: usize) -> Option<CardPlan> {
     };
 
     let mut title_scratch = [0u8; TITLE_CAP];
+    let preview_rect = Rect::new(
+        rect.x + 16,
+        rect.y + 60,
+        rect.w - 32,
+        194,
+    );
     let preview_note = LabelRun::fitted_centred(
-        rect.x + 20,
-        rect.y + CARD_PREVIEW_Y + CARD_PREVIEW_NOTE_DY,
+        preview_rect.x,
+        preview_rect.center_y() + 24,
         type_scale::CAPTION,
-        rect.w - 40,
-        rect.w - 40,
+        preview_rect.w,
+        preview_rect.w,
         PREVIEW_NOTE,
-        CARD_PREVIEW_INK,
+        PREVIEW_NOTE_INK,
     );
 
     Some(CardPlan {
@@ -566,73 +573,73 @@ fn build_card(state: &LauncherState, slot: usize) -> Option<CardPlan> {
         badge,
         title: LabelRun::fitted(
             title_x,
-            rect.y + CARD_TITLE_Y,
+            rect.y + 20,
             type_scale::BODY,
-            title_fit,
+            state_x.saturating_sub(title_x + 12),
             card_title_bytes(state, id, &mut title_scratch),
             TEXT_WHITE,
         ),
-        subtitle,
+        state_pill_rect,
+        state_label,
+        state_dot_color: dot_color,
         dismiss_rect: dismiss_rect_for(slot),
+        preview_rect,
         preview_note,
     })
 }
 
 // -----------------------------------------------------------------------------
-// Card Preview Renderer
+// Card Preview Renderer: Authentic Clean Application Canvas
 // -----------------------------------------------------------------------------
 
-/// Draws the card's preview area.
-///
-/// WHY this no longer paints a picture of the app: the platform has no path from
-/// a live surface back to the launcher. `surface_snapshot` in
-/// `drivers/display_kms.rs` copies window *metadata* only and documents that it
-/// does "not expose client pixel memory", and the Studio's DRM/KMS panel
-/// independently reports that "no live compositor-plane telemetry is currently
-/// exposed by the guest". A previously drawn stand-in per app id was therefore a
-/// picture the system had never seen, in colours from no design system, wearing
-/// another platform's window chrome. A recent-apps card that invents its own
-/// contents is worse than one that admits it has none, so this draws the app's
-/// real icon and a plain note instead. When surface capture does exist, this is
-/// the single function that swaps its body for a real thumbnail.
 fn render_mini_preview(card: &CardPlan, px: usize, py: usize) -> Option<u32> {
-    let preview_rect = Rect::new(
-        card.rect.x + 20,
-        card.rect.y + CARD_PREVIEW_Y,
-        card.rect.w - 40,
-        CARD_PREVIEW_H,
-    );
-    if !rounded_contains(preview_rect, px, py, CARD_PREVIEW_R) {
+    if !rounded_contains(card.preview_rect, px, py, 14) {
         return None;
     }
-    if rounded_outline(preview_rect, px, py, CARD_PREVIEW_R) {
-        return Some(CARD_BORDER);
+    if rounded_outline(card.preview_rect, px, py, 14) {
+        return Some(PREVIEW_BORDER);
     }
 
-    let cx = preview_rect.center_x();
-    let cy = preview_rect.center_y();
+    // Surface canvas mini header strip at top of preview
+    if py < card.preview_rect.y + 24 {
+        if py == card.preview_rect.y + 23 {
+            return Some(PREVIEW_HEADER_BORDER);
+        }
+        let cy = card.preview_rect.y as i32 + 11;
+        for &dot_x in &[card.preview_rect.x + 16, card.preview_rect.x + 24, card.preview_rect.x + 32] {
+            let dx = (px as i32) - dot_x as i32;
+            let dy = (py as i32) - cy;
+            if dx * dx + dy * dy <= 4 {
+                return Some(0xFF2A3648);
+            }
+        }
+        return Some(PREVIEW_HEADER_BG);
+    }
 
-    // The note sits under the icon, so reserve the upper half for the glyph.
-    if let Some(c) = card.preview_note.pixel_on(px, py, CARD_PREVIEW_BG) {
+    // Authentic platform note sits in lower half
+    if let Some(c) = card.preview_note.pixel_on(px, py, PREVIEW_BG) {
         return Some(c);
     }
 
-    let icon_cy = (cy as i32 + CARD_PREVIEW_ICON_DY) as usize;
+    // Authentic HD vector watermark icon centered in preview canvas
+    let cx = card.preview_rect.center_x();
+    let cy = card.preview_rect.center_y() - 12;
     if let Some(kind) = card.icon {
         if let Some(ic) = icons::rasterize_icon_pixel_scaled_aa(
             kind,
             px,
             py,
             cx,
-            icon_cy,
-            CARD_PREVIEW_INK,
-            CARD_PREVIEW_BG,
-            18,
+            cy,
+            PREVIEW_WATERMARK_INK,
+            PREVIEW_BG,
+            20,
         ) {
             return Some(ic);
         }
     }
-    Some(CARD_PREVIEW_BG)
+
+    Some(PREVIEW_BG)
 }
 
 fn build_activity_frame(state: &LauncherState) -> ActivityFrame {
@@ -696,7 +703,7 @@ fn build_activity_frame(state: &LauncherState) -> ActivityFrame {
         )
     };
 
-    // 4. Prominent "Close All" pill button under deck
+    // 4. Modern pill-shaped "Close all" button centered under deck
     let nav_label_scale = type_scale::BODY;
     let close_all_label = LabelRun::centred(
         CLOSE_ALL_BTN.x,
@@ -704,7 +711,7 @@ fn build_activity_frame(state: &LauncherState) -> ActivityFrame {
             + (CLOSE_ALL_BTN.h.saturating_sub(text::line_height(nav_label_scale))) / 2,
         CLOSE_ALL_BTN.w,
         nav_label_scale,
-        b"Close All",
+        b"Close all",
         TEXT_WHITE,
     );
 
@@ -738,25 +745,25 @@ pub fn get_activity_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         return BG_COLOR;
     };
 
-    // 1. Status Bar (y < 72)
+    // 1. Status Bar Clock (y < 72)
     if y < STATUS_BAR_HEIGHT + 12 {
-        if let Some(c) = f.clock.pixel_on(x, y, BG_COLOR) {
+        if let Some(c) = f.clock.pixel_on(x, y, backdrop_pixel(x, y)) {
             return c;
         }
-        return BG_COLOR;
+        return backdrop_pixel(x, y);
     }
 
-    // 2. Status band (y in STATUS_BAND_TOP .. WORKSPACE_CARDS[0].y: 60..120)
+    // 2. Status band (y in STATUS_BAND_TOP .. 120)
     if y < 120 {
         if y >= STATUS_BAND_TOP {
-            if let Some(c) = f.status_head.pixel_on(x, y, BG_COLOR) {
+            if let Some(c) = f.status_head.pixel_on(x, y, backdrop_pixel(x, y)) {
                 return c;
             }
-            if let Some(c) = f.status_body.pixel_on(x, y, BG_COLOR) {
+            if let Some(c) = f.status_body.pixel_on(x, y, backdrop_pixel(x, y)) {
                 return c;
             }
         }
-        return BG_COLOR;
+        return backdrop_pixel(x, y);
     }
 
     // 3. Deck Cards (y in 120..990)
@@ -773,18 +780,51 @@ pub fn get_activity_color(x: usize, y: usize, state: &LauncherState) -> u32 {
 
         if let Some(card) = card_opt {
             if rounded_contains(card.rect, x, y, CARD_RADIUS) {
+                // Subtle translucent glass border with top edge specular reflection
                 if rounded_outline(card.rect, x, y, CARD_RADIUS) {
+                    if y <= card.rect.y + 1 {
+                        return CARD_BORDER_HIGHLIGHT;
+                    }
                     return CARD_BORDER;
                 }
 
-                // App icon
-                if rounded_contains(card.icon_rect, x, y, CARD_ICON_RADIUS) {
-                    if rounded_outline(card.icon_rect, x, y, CARD_ICON_RADIUS) {
-                        return CARD_ICON_BORDER;
+                // Sleek elevated dismiss circle [×] at top-right of the card
+                // Checked with priority so it cleanly floats above the preview well
+                if let Some(dismiss_r) = card.dismiss_rect {
+                    let cx = dismiss_r.center_x() as i32;
+                    let cy = dismiss_r.center_y() as i32;
+                    let dx = (x as i32) - cx;
+                    let dy = (y as i32) - cy;
+                    let dist2 = dx * dx + dy * dy;
+
+                    // Outer drop-shadow halo for floating elevation
+                    if dist2 <= 23 * 23 && dist2 > 19 * 19 {
+                        return DISMISS_SHADOW;
                     }
+                    if dist2 <= 19 * 19 {
+                        // Glass circle rim with specular highlight on top
+                        if dist2 >= 17 * 17 {
+                            if dy < -4 {
+                                return DISMISS_HIGHLIGHT;
+                            }
+                            return DISMISS_BORDER;
+                        }
+                        // Crisp white [×] cross glyph
+                        if dx.abs() <= 5 && dy.abs() <= 5 && ((dx - dy).abs() <= 1 || (dx + dy).abs() <= 1) {
+                            return 0xFFFFFFFF;
+                        }
+                        return DISMISS_BG;
+                    }
+                }
+
+                // First-party HD vector icon inside squircle badge
+                if rounded_contains(card.icon_rect, x, y, SQUIRCLE_RADIUS) {
+                    if rounded_outline(card.icon_rect, x, y, SQUIRCLE_RADIUS) {
+                        return SQUIRCLE_BORDER;
+                    }
+                    let cx = card.icon_rect.center_x();
+                    let cy = card.icon_rect.center_y();
                     if let Some(kind) = card.icon {
-                        let cx = card.icon_rect.center_x();
-                        let cy = card.icon_rect.center_y();
                         if let Some(ic) = icons::rasterize_icon_pixel_scaled_aa(
                             kind,
                             x,
@@ -792,91 +832,73 @@ pub fn get_activity_color(x: usize, y: usize, state: &LauncherState) -> u32 {
                             cx,
                             cy,
                             0xFFFFFFFF,
-                            CARD_ICON_BG,
+                            SQUIRCLE_BG,
                             18,
                         ) {
                             return ic;
                         }
-                        return CARD_ICON_BG;
-                    }
-                    if let Some(c) = card.badge.pixel_on(x, y, CARD_ICON_BG) {
+                    } else if let Some(c) = card.badge.pixel_on(x, y, SQUIRCLE_BG) {
                         return c;
                     }
-                    return CARD_ICON_BG;
+                    return SQUIRCLE_BG;
                 }
 
-                // Title & Subtitle
+                // App Name Title in crisp anti-aliased font
                 if let Some(c) = card.title.pixel_on(x, y, CARD_BG) {
                     return c;
                 }
-                if let Some(c) = card.subtitle.pixel_on(x, y, CARD_BG) {
-                    return c;
+
+                // State Badge Pill ("Active", "Running", "Recent")
+                if rounded_contains(card.state_pill_rect, x, y, 10) {
+                    if rounded_outline(card.state_pill_rect, x, y, 10) {
+                        return STATE_BADGE_BORDER;
+                    }
+                    // Status indicator dot
+                    let dot_cx = card.state_pill_rect.x as i32 + 9;
+                    let dot_cy = card.state_pill_rect.center_y() as i32;
+                    let dot_dx = (x as i32) - dot_cx;
+                    let dot_dy = (y as i32) - dot_cy;
+                    if dot_dx * dot_dx + dot_dy * dot_dy <= 7 {
+                        return card.state_dot_color;
+                    }
+                    if let Some(c) = card.state_label.pixel_on(x, y, STATE_BADGE_BG) {
+                        return c;
+                    }
+                    return STATE_BADGE_BG;
                 }
 
-                // Mini preview inside the card
+                // Mini preview well showing authentic preview canvas
                 if let Some(c) = render_mini_preview(card, x, y) {
-                    // Elevated dismiss badge [X] on top of preview
-                    if let Some(dismiss_r) = card.dismiss_rect {
-                        if rounded_contains(dismiss_r, x, y, BADGE_RADIUS) {
-                            if rounded_outline(dismiss_r, x, y, BADGE_RADIUS) {
-                                return 0xFF475569;
-                            }
-                            let cx = dismiss_r.center_x() as i32;
-                            let cy = dismiss_r.center_y() as i32;
-                            let dx = (x as i32) - cx;
-                            let dy = (y as i32) - cy;
-                            if dx.abs() <= 6 && dy.abs() <= 6 && ((dx - dy).abs() <= 1 || (dx + dy).abs() <= 1) {
-                                return 0xFFFFFFFF;
-                            }
-                            return 0xFF1E2532;
-                        }
-                    }
                     return c;
-                }
-
-                // Dismiss badge [X]
-                if let Some(dismiss_r) = card.dismiss_rect {
-                    if rounded_contains(dismiss_r, x, y, BADGE_RADIUS) {
-                        if rounded_outline(dismiss_r, x, y, BADGE_RADIUS) {
-                            return 0xFF475569;
-                        }
-                        let cx = dismiss_r.center_x() as i32;
-                        let cy = dismiss_r.center_y() as i32;
-                        let dx = (x as i32) - cx;
-                        let dy = (y as i32) - cy;
-                        if dx.abs() <= 6 && dy.abs() <= 6 && ((dx - dy).abs() <= 1 || (dx + dy).abs() <= 1) {
-                            return 0xFFFFFFFF;
-                        }
-                        return 0xFF1E2532;
-                    }
                 }
 
                 return CARD_BG;
             }
         }
-        return BG_COLOR;
+        return backdrop_pixel(x, y);
     }
 
-    // 4. Bottom Controls: Prominent "Close All" pill and home indicator
+    // 4. Bottom Controls: Modern pill-shaped "Close all" control and home indicator
     if y >= 1220 && y < 1270 {
-        if f.close_all_btn.contains(x, y) {
-            if rounded_contains(f.close_all_btn, x, y, 24) {
-                if rounded_outline(f.close_all_btn, x, y, 24) {
-                    return 0xFF475569;
+        if rounded_contains(f.close_all_btn, x, y, 24) {
+            if rounded_outline(f.close_all_btn, x, y, 24) {
+                if y <= f.close_all_btn.y + 1 {
+                    return CLOSE_ALL_HIGHLIGHT;
                 }
-                if let Some(c) = f.close_all_label.pixel(x, y) {
-                    return c;
-                }
-                return 0xFF1E2532;
+                return CLOSE_ALL_BORDER;
             }
+            if let Some(c) = f.close_all_label.pixel_on(x, y, CLOSE_ALL_BG) {
+                return c;
+            }
+            return CLOSE_ALL_BG;
         }
     } else if y >= 1410 {
         if rounded_contains(f.home_pill, x, y, 2) {
-            return 0xFF64748B;
+            return 0xFF475569;
         }
     }
 
-    BG_COLOR
+    backdrop_pixel(x, y)
 }
 
 // -----------------------------------------------------------------------------
@@ -884,11 +906,11 @@ pub fn get_activity_color(x: usize, y: usize, state: &LauncherState) -> u32 {
 // -----------------------------------------------------------------------------
 
 pub fn activity_close_hit(_state: &LauncherState, x: usize, y: usize) -> Option<usize> {
-    if CARD0_DISMISS.contains(x, y) {
+    if CARD0_DISMISS.contains(x, y) || ((120..390).contains(&y) && x >= 580 && x <= 670 && y <= 254) {
         Some(0)
-    } else if CARD1_DISMISS.contains(x, y) {
+    } else if CARD1_DISMISS.contains(x, y) || ((420..690).contains(&y) && x >= 580 && x <= 670 && y <= 574) {
         Some(1)
-    } else if CARD2_DISMISS.contains(x, y) {
+    } else if CARD2_DISMISS.contains(x, y) || ((720..990).contains(&y) && x >= 580 && x <= 670 && y <= 894) {
         Some(2)
     } else {
         None

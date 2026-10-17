@@ -60,7 +60,7 @@ struct Entry {
 }
 
 const ENTRIES: [Entry; 5] = [
-    Entry { rect: Rect::new(40, 135, 305, 180), package: "org.interos.sensor_dashboard" },
+    Entry { rect: Rect::new(40, 135, 305, 180), package: "org.interos.settings" },
     Entry { rect: Rect::new(375, 135, 305, 180), package: "org.interos.calculator" },
     Entry { rect: Rect::new(40, 335, 640, 150), package: "org.interos.music" },
     Entry { rect: Rect::new(40, 505, 305, 180), package: "org.interos.calendar" },

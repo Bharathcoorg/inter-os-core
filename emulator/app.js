@@ -144,6 +144,86 @@ document.addEventListener('DOMContentLoaded', () => {
     setTimeout(() => playBeep(800, 0.04, 'sine'), 40);
   }
 
+  // Crisp Web Audio API Screen Locking / Unlocking Acoustic Sound
+  let lastLockSoundTime = 0;
+  function playLockSound() {
+    try {
+      if (!state.audioCtx) {
+        const AudioContext = window.AudioContext || window.webkitAudioContext;
+        if (AudioContext) state.audioCtx = new AudioContext();
+      }
+      if (state.audioCtx && state.audioCtx.state === 'suspended') {
+        state.audioCtx.resume();
+      }
+      const ctx = state.audioCtx;
+      if (!ctx) return;
+      const t = ctx.currentTime;
+
+      // 1. High-frequency tactile mechanical snap (bandpassed noise click)
+      const bufferSize = Math.floor(ctx.sampleRate * 0.02);
+      const noiseBuffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+      const data = noiseBuffer.getChannelData(0);
+      for (let i = 0; i < bufferSize; i++) {
+        data[i] = (Math.random() * 2 - 1) * Math.exp(-i / (ctx.sampleRate * 0.005));
+      }
+      const noise = ctx.createBufferSource();
+      noise.buffer = noiseBuffer;
+
+      const filter = ctx.createBiquadFilter();
+      filter.type = 'bandpass';
+      filter.frequency.setValueAtTime(2600, t);
+      filter.Q.setValueAtTime(4.0, t);
+
+      const noiseGain = ctx.createGain();
+      noiseGain.gain.setValueAtTime(0.24, t);
+      noiseGain.gain.exponentialRampToValueAtTime(0.0001, t + 0.018);
+
+      noise.connect(filter);
+      filter.connect(noiseGain);
+      noiseGain.connect(ctx.destination);
+      noise.start(t);
+
+      // 2. Resonant acoustic lock chirp body (modern flagship lock sweep)
+      const chirp = ctx.createOscillator();
+      const chirpGain = ctx.createGain();
+      chirp.type = 'sine';
+      chirp.frequency.setValueAtTime(490, t);
+      chirp.frequency.exponentialRampToValueAtTime(115, t + 0.036);
+
+      chirpGain.gain.setValueAtTime(0.26, t);
+      chirpGain.gain.exponentialRampToValueAtTime(0.0001, t + 0.036);
+
+      chirp.connect(chirpGain);
+      chirpGain.connect(ctx.destination);
+      chirp.start(t);
+      chirp.stop(t + 0.038);
+
+      // 3. Subtle trailing latch pop (+14ms)
+      const latch = ctx.createOscillator();
+      const latchGain = ctx.createGain();
+      latch.type = 'triangle';
+      latch.frequency.setValueAtTime(740, t + 0.014);
+      latch.frequency.exponentialRampToValueAtTime(210, t + 0.028);
+
+      latchGain.gain.setValueAtTime(0.0001, t);
+      latchGain.gain.setValueAtTime(0.12, t + 0.014);
+      latchGain.gain.exponentialRampToValueAtTime(0.0001, t + 0.028);
+
+      latch.connect(latchGain);
+      latchGain.connect(ctx.destination);
+      latch.start(t + 0.014);
+      latch.stop(t + 0.030);
+    } catch (_) {}
+  }
+
+  function playLockSoundThrottled() {
+    const now = performance.now();
+    if (now - lastLockSoundTime > 300) {
+      lastLockSoundTime = now;
+      playLockSound();
+    }
+  }
+
   // =========================================================================
   // 2. DOM ELEMENTS
   // =========================================================================
@@ -778,8 +858,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function fallbackRefreshFrame() {
     return new Promise((resolve) => {
-      const orientParam = (state.isLandscape || cropMode === 'full') ? '&orientation=landscape&full=1' : '';
-      const url = `/api/screen/frame?t=${Date.now()}${orientParam}&format=png`;
+      const orientParam = '';
+      const url = `/api/screen/frame?t=${Date.now()}&format=png`;
       const img = new Image();
       img.onload = () => {
         // The canvas is the single visible surface; the hidden legacy <img>
@@ -936,19 +1016,40 @@ document.addEventListener('DOMContentLoaded', () => {
   // POST, so a fast drag sends the latest position instead of a stale backlog.
   // Only waiting moves are ever skipped, so DOWN/MOVE/UP/CANCEL order is kept.
   let guestTouchQueue = Promise.resolve();
-  let guestTouchSequence = 0;
-  const latestMoveSequenceBySlot = {};
-  function sendGuestTouchEvent(payload) {
-    let moveSequence = 0;
-    if (payload.action === 'move') {
-      guestTouchSequence += 1;
-      moveSequence = guestTouchSequence;
-      latestMoveSequenceBySlot[payload.slot || 0] = moveSequence;
-    }
-    const request = guestTouchQueue.then(async () => {
-      if (payload.action === 'move' && latestMoveSequenceBySlot[payload.slot || 0] !== moveSequence) {
-        return { success: true, coalesced: true };
+  let moveInFlight = false;
+  let pendingMovePayload = null;
+
+  async function flushPendingMove() {
+    if (moveInFlight || !pendingMovePayload) return;
+    const payload = pendingMovePayload;
+    pendingMovePayload = null;
+    moveInFlight = true;
+    try {
+      await fetch('/api/touch/event', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+    } catch (_) {}
+    finally {
+      moveInFlight = false;
+      if (pendingMovePayload) {
+        flushPendingMove();
       }
+    }
+  }
+
+  function sendGuestTouchEvent(payload) {
+    if (payload.action === 'move') {
+      pendingMovePayload = payload;
+      if (!moveInFlight) {
+        flushPendingMove();
+      }
+      return Promise.resolve({ success: true });
+    }
+
+    pendingMovePayload = null;
+    const request = guestTouchQueue.then(async () => {
       const response = await fetch('/api/touch/event', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -964,8 +1065,6 @@ document.addEventListener('DOMContentLoaded', () => {
       }
       return response.json();
     });
-    // Keep the queue usable after a failed request, while returning the actual
-    // request promise to the caller so failures are never reported as success.
     guestTouchQueue = guestTouchQueue.then(() => request).catch((error) => {
       if (state && state.debugInput) console.warn(error);
     });
@@ -976,7 +1075,6 @@ document.addEventListener('DOMContentLoaded', () => {
     let downSent = false;
     let activePointerId = null;
     let lastSentX = 0, lastSentY = 0;
-    let lastMoveTime = 0;
     let deadTapToastAt = 0;
     touchSurface.style.touchAction = 'none';
     touchSurface.style.userSelect = 'none';
@@ -985,21 +1083,18 @@ document.addEventListener('DOMContentLoaded', () => {
       // A tap on a dead surface must never silently inject: mapping is
       // disabled until a real guest frame is displayed on the live canvas.
       if (!hasLiveFrame || !liveScanoutCanvas || liveScanoutCanvas.style.display === 'none') return null;
-      if (!displayedFrameW || !displayedFrameH) return null;
       const rect = getGuestPointerRect();
       if (!rect || clientX < rect.left || clientX >= rect.left + rect.width
         || clientY < rect.top || clientY >= rect.top + rect.height) return null;
       const geometry = guestPointerGeometry();
-      // The wire keeps the guest's logical spaces (portrait 720x1440,
-      // landscape framebuffer 1280x720), but the canvas may show a smaller
-      // guest-derived slice (the 360x720 phone crop). Map the client point
-      // into displayed pixels first, then scale to the wire space: assuming
-      // 1:1 here sent every touch to twice its intended position.
-      const sx = ((clientX - rect.left) / rect.width) * (displayedFrameW - 1);
-      const sy = ((clientY - rect.top) / rect.height) * (displayedFrameH - 1);
+      // 1:1 mapping from CSS 360x720 to canvas 720x1440
+      const normX = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+      const normY = Math.max(0, Math.min(1, (clientY - rect.top) / rect.height));
+      const x = Math.max(0, Math.min(geometry.width - 1, Math.round(normX * geometry.width)));
+      const y = Math.max(0, Math.min(geometry.height - 1, Math.round(normY * geometry.height)));
       return {
-        x: Math.max(0, Math.min(geometry.width - 1, Math.round(sx * (geometry.width - 1) / (displayedFrameW - 1)))),
-        y: Math.max(0, Math.min(geometry.height - 1, Math.round(sy * (geometry.height - 1) / (displayedFrameH - 1)))),
+        x,
+        y,
         coords: geometry.coords
       };
     };
@@ -1024,7 +1119,6 @@ document.addEventListener('DOMContentLoaded', () => {
       activePointerId = ev.pointerId;
       lastSentX = point.x;
       lastSentY = point.y;
-      lastMoveTime = performance.now();
       // Every contact declares its coordinate space on the wire: the canonical
       // portrait logical space, or the mapped guest framebuffer in landscape.
       if (point.coords === 'portrait') {
@@ -1041,10 +1135,7 @@ document.addEventListener('DOMContentLoaded', () => {
       updateVirtualTouch(ev.clientX, ev.clientY, true);
       const point = mapPoint(ev.clientX, ev.clientY);
       if (!point) return;
-      const now = performance.now();
-      if (downSent && now - lastMoveTime >= 16
-        && (Math.abs(point.x - lastSentX) > 3 || Math.abs(point.y - lastSentY) > 3)) {
-        lastMoveTime = now;
+      if (downSent && (point.x !== lastSentX || point.y !== lastSentY)) {
         lastSentX = point.x;
         lastSentY = point.y;
         if (point.coords === 'portrait') {
@@ -1368,22 +1459,48 @@ document.addEventListener('DOMContentLoaded', () => {
     }, 45000);
   }
 
-  // Hardware Power Button Action
-  function handlePowerAction() {
+  // Hardware Power Button Action (Lock / Unlock screen immediately)
+  async function handlePowerAction() {
+    playLockSoundThrottled();
     const isAlive = qemuGlobalStatus?.classList.contains('online');
     if (!isAlive) {
       bootMicrokernel();
-    } else {
-      dispatchHardwareGesture('Power / Lock Screen', {
-        action: 'tap',
-        x: 640,
-        y: 15
-      });
+      return;
     }
+    try {
+      const res = await fetch('/api/power/state', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'toggle' })
+      });
+      if (!res.ok) {
+        await fetch('/api/input/key', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ key: 'Power' })
+        });
+      }
+    } catch (_) {
+      try {
+        await fetch('/api/touch/event', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'power' })
+        });
+      } catch (_) {}
+    }
+    requestAnimationFrame(() => refreshScanoutFrame(true));
+    setTimeout(() => refreshScanoutFrame(true), 25);
+    setTimeout(() => refreshScanoutFrame(true), 75);
   }
 
-  hwBtnPower?.addEventListener('click', handlePowerAction);
-  emuBtnPower?.addEventListener('click', handlePowerAction);
+  // Wire up physical .btn-power on the right chassis and floating toolbar button
+  document.querySelectorAll('.btn-power, #hw-btn-power, #emu-btn-power').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      handlePowerAction();
+    });
+  });
 
   // Hardware Volume Buttons Action
   // Volume Controls (Real QEMU / Audio Sync)
@@ -1447,7 +1564,6 @@ document.addEventListener('DOMContentLoaded', () => {
         state.volume = data.volume_percent;
         triggerScreenVolumeHud(state.volume);
       }
-      showToast(`Volume: ${state.volume}%`);
       logConsole('info', `[AUDIO_HAL] Guest master volume: ${state.volume}%`);
     } catch (e) {
       logConsole('err', '[AUDIO_HAL] Guest volume command failed: ' + e.message);
@@ -1597,38 +1713,22 @@ document.addEventListener('DOMContentLoaded', () => {
     showToast('QEMU scanout offline (Standby)');
   });
 
-  // Orientation is changed only after the guest acknowledges the request.
+  // Orientation is locked strictly to portrait (720x1440 canvas, CSS 360x720).
+  state.isLandscape = false;
+  stageWrapper?.classList.remove('landscape');
   emuBtnRotate?.addEventListener('click', async () => {
-    const requestedLandscape = !state.isLandscape;
-    const orient = requestedLandscape ? 'landscape' : 'portrait';
+    state.isLandscape = false;
+    cropMode = 'portrait';
+    stageWrapper?.classList.remove('landscape');
     try {
-      const response = await fetch('/api/hardware/orientation', {
+      await fetch('/api/hardware/orientation', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ orientation: orient })
+        body: JSON.stringify({ orientation: 'portrait' })
       });
-      const result = await response.json();
-      if (!response.ok || result.success === false) {
-        throw new Error(result.error || result.message || 'guest rejected orientation change');
-      }
-      state.isLandscape = requestedLandscape;
-      cropMode = state.isLandscape ? 'full' : 'portrait';
-      if (state.isLandscape) {
-        stageWrapper.classList.add('landscape');
-        logConsole('info', '[DISPLAY_HAL] Guest confirmed landscape orientation.');
-        showToast('Screen: Landscape');
-      } else {
-        stageWrapper.classList.remove('landscape');
-        logConsole('info', '[DISPLAY_HAL] Guest confirmed portrait orientation.');
-        showToast('Screen: Portrait');
-      }
-      refreshScanoutFrame();
-      setTimeout(refreshScanoutFrame, 60);
-      setTimeout(refreshScanoutFrame, 180);
-    } catch (error) {
-      logConsole('err', '[DISPLAY_HAL] Orientation unchanged: ' + error.message);
-      showToast('Orientation change unavailable');
-    }
+      logConsole('info', '[DISPLAY_HAL] Device orientation locked to Portrait.');
+    } catch (_) {}
+    refreshScanoutFrame(true);
   });
   // Warm reboot requested through the studio's hardware control. WHY: the previous
   // version drove a staged "teardown -> boot splash -> reveal homescreen"
@@ -2547,8 +2647,11 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!terminal) return;
     const MAX_BACKFILL_LINES = 150;
     let cursor = null;
-    const appendSerial = (text) => {
+    const appendSerial = (text, isLive = false) => {
       noteBootMilestone(text);
+      if (isLive && (String(text).includes('[LAUNCHER] Device locked') || String(text).includes('[LAUNCHER] Device unlocked') || String(text).includes('[POWER] display_on='))) {
+        playLockSoundThrottled();
+      }
       try {
         const line = document.createElement('div');
         line.className = 'console-line console-serial';
@@ -2568,12 +2671,12 @@ document.addEventListener('DOMContentLoaded', () => {
         const lines = Array.isArray(data.lines) ? data.lines : [];
         if (cursor === null) {
           const skip = Math.max(0, lines.length - MAX_BACKFILL_LINES);
-          for (let i = skip; i < lines.length; i++) appendSerial(lines[i]);
+          for (let i = skip; i < lines.length; i++) appendSerial(lines[i], false);
           cursor = total;
         } else if (total < cursor) {
           cursor = total;
         } else {
-          for (const l of lines) appendSerial(l);
+          for (const l of lines) appendSerial(l, true);
           cursor = total;
         }
       } catch (_) {}

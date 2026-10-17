@@ -194,6 +194,7 @@ pub enum SyscallNumber {
     DisplaySetMode = 130,
     DisplaySetOrientation = 131,
     CapLookup = 132,
+    FsUnlink = 133,
 }
 
 // -----------------------------------------------------------------------------
@@ -1924,6 +1925,24 @@ pub fn fs_close(fd: u32) -> Result<(), i64> {
 /// claim a durability the device does not have.
 pub fn fs_fsync(fd: u32) -> Result<(), i64> {
     let ret = unsafe { syscall1(SyscallNumber::FsSync, fd as u64) };
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(ret)
+    }
+}
+
+/// Unlinks (deletes) a file from the Virtual Filesystem.
+pub fn fs_unlink(cap_slot: usize, path: &str) -> Result<(), i64> {
+    let ret = unsafe {
+        syscall4(
+            SyscallNumber::FsUnlink,
+            cap_slot as u64,
+            path.as_ptr() as u64,
+            path.len() as u64,
+            0,
+        )
+    };
     if ret == 0 {
         Ok(())
     } else {

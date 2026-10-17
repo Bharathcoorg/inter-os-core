@@ -23,7 +23,10 @@ use core::panic::PanicInfo;
 use interos_std as std;
 use std::design::font;
 use std::design::primitives::{draw_pill, Rect};
-pub use file_manager::{fmt_u64, parse_vfs_entries, RuntimeFileEntry, MAX_ENTRY_NAME_LEN, MAX_PARSED_ENTRIES};
+pub use file_manager::{
+    detect_mime, fmt_u64, get_app_for_mime, parse_vfs_entries, FileMime, RuntimeFileEntry,
+    MAX_ENTRY_NAME_LEN, MAX_PARSED_ENTRIES,
+};
 
 mod outline_text;
 
@@ -314,6 +317,24 @@ impl FileManagerApp {
         self.probe_label[..n].copy_from_slice(&buf[..n]);
         self.probe_label_len = n;
     }
+
+    /// Refreshes entries by querying fs_list for current_path.
+    pub fn refresh_directory(&mut self) {
+        let mut entries = [0u8; 1024];
+        let probe = std::fs_list(fs_read_slot(), self.current_path, &mut entries);
+        self.record_probe(probe);
+        if let Ok(n) = probe {
+            self.parse_entries(&entries[..n]);
+        } else {
+            self.entry_count = 0;
+        }
+    }
+}
+
+fn append(buf: &mut [u8], n: usize, bytes: &[u8]) -> usize {
+    let take = bytes.len().min(buf.len().saturating_sub(n));
+    buf[n..n + take].copy_from_slice(&bytes[..take]);
+    n + take
 }
 
 // -----------------------------------------------------------------------------
@@ -776,6 +797,7 @@ enum Dirty {
     /// Nothing moved; the surface is already correct, so do not render at all.
     None,
     /// A different category row is selected: the list band only.
+    #[allow(dead_code)]
     Rows,
     /// Anything that can move pixels in more than one band at once.
     All,
@@ -989,10 +1011,18 @@ fn handle_tap(app: &mut FileManagerApp, x: usize, y: usize) -> Tap {
             return Tap::None;
         }
         app.selected_shortcut = shortcut;
-        // `current_path` keeps the directory that was really queried ("/data"):
-        // no navigation happens, so no new path is claimed.
+        app.selected_entry = None;
+        app.current_path = match shortcut {
+            1 => "/storage/photos",
+            2 => "/storage/videos",
+            3 => "/data",
+            4 => "/data",
+            5 => "/storage",
+            _ => "/data",
+        };
+        app.refresh_directory();
         std::log(0, "[FILE_MANAGER] Category filter shortcut switched.").ok();
-        return Tap::Redraw(Dirty::Rows);
+        return Tap::Redraw(Dirty::All);
     }
 
     // Directory Explorer entries card hit-test: x: 36..684, y: 880..
@@ -1002,12 +1032,30 @@ fn handle_tap(app: &mut FileManagerApp, x: usize, y: usize) -> Tap {
     if (card_y0..card_y1).contains(&y) && (36..684).contains(&x) && app.entry_count > 0 {
         let entry_idx = (y - card_y0) / 56;
         if entry_idx < app.entry_count {
-            if app.selected_entry == Some(entry_idx) {
-                app.selected_entry = None;
+            app.selected_entry = Some(entry_idx);
+            let entry = &app.entries[entry_idx];
+            let mime = detect_mime(&entry.name[..entry.name_len], entry.is_dir);
+            if matches!(mime, FileMime::Image | FileMime::Video) {
+                let mut path_buf = [0u8; 128];
+                let cp = app.current_path.as_bytes();
+                let mut n = append(&mut path_buf, 0, cp);
+                if !cp.ends_with(b"/") {
+                    n = append(&mut path_buf, n, b"/");
+                }
+                n = append(&mut path_buf, n, &entry.name[..entry.name_len]);
+                if let Ok(full_path) = core::str::from_utf8(&path_buf[..n]) {
+                    let write_slot = std::cap_lookup(std::cap_type::FILE_SYSTEM_WRITE, 0).unwrap_or(5);
+                    let _ = std::settings_set(write_slot, "intent.view.file", full_path.as_bytes());
+                    let mut app_id_buf = [0u8; 64];
+                    let an = get_app_for_mime(fs_read_slot(), mime, &mut app_id_buf);
+                    if let Ok(app_id) = core::str::from_utf8(&app_id_buf[..an]) {
+                        std::log(0, "[FILE_MANAGER] Launching associated media viewer.").ok();
+                        let _ = std::app_launch(app_id);
+                    }
+                }
             } else {
-                app.selected_entry = Some(entry_idx);
+                std::log(0, "[FILE_MANAGER] Directory entry selected.").ok();
             }
-            std::log(0, "[FILE_MANAGER] Directory entry selected.").ok();
             return Tap::Redraw(Dirty::All);
         }
     }

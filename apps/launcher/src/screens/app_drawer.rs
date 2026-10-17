@@ -161,6 +161,11 @@ pub const APP_DRAWER_TAB_NAMES: [&[u8]; 4] = [b"All", b"Work", b"Personal", b"To
 pub fn filtered_indices(state: &LauncherState, tab: usize, out: &mut [usize; 32]) -> usize {
     let mut count = 0;
     for i in 0..state.app_count.min(32) {
+        let id_len = (state.app_id_lens[i] as usize).min(state.app_ids[i].len());
+        let id = &state.app_ids[i][..id_len];
+        if id == b"org.interos.sensor_dashboard" || id == b"sensor_dashboard" || id == b"sensors" {
+            continue;
+        }
         let matches = if tab == 0 {
             true
         } else {

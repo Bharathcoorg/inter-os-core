@@ -647,6 +647,23 @@ impl Vfs {
         Ok(())
     }
 
+    pub fn unlink_for_task(
+        &mut self,
+        task_id: TaskId,
+        task_caps: &CapabilityTable,
+        cap_slot: usize,
+        path: &str,
+    ) -> Result<(), FsError> {
+        self.enforce_app_path(task_id, path, true)?;
+        let _cap = task_caps
+            .verify(cap_slot, CapabilityType::FileSystemWrite, Rights::WRITE)
+            .map_err(FsError::CapabilityError)?;
+        self.unlink(path)?;
+        let _ = self.persist_metadata_snapshot();
+        let _ = self.persist_data_snapshot();
+        Ok(())
+    }
+
     pub fn chmod(&mut self, task_caps: &CapabilityTable, cap_slot: usize, path: &str, mode: u16) -> Result<(), FsError> {
         task_caps.verify(cap_slot, CapabilityType::FileSystemWrite, Rights::WRITE).map_err(FsError::CapabilityError)?;
         let id = self.lookup(path).ok_or(FsError::FileNotFound)?;
@@ -706,6 +723,9 @@ impl Vfs {
         };
         let normalized = normalize_path(path);
         if normalized == root || normalized.starts_with(&(root.clone() + "/")) {
+            return Ok(());
+        }
+        if normalized == "/storage" || normalized.starts_with("/storage/") {
             return Ok(());
         }
         if !write && (normalized == "/system" || normalized.starts_with("/system/") || normalized == "/packages" || normalized.starts_with("/packages/")) {
@@ -807,12 +827,15 @@ impl Vfs {
             let inode_id = if let Some(existing) = self.lookup(path) {
                 existing
             } else {
-                let Some(root) = Self::app_storage_root(task_id) else {
-                    return Err(FsError::FileNotFound);
-                };
                 let normalized = normalize_path(path);
-                if normalized == root || !normalized.starts_with(&(root.clone() + "/")) {
-                    return Err(FsError::PermissionDenied);
+                let is_storage = normalized.starts_with("/storage/");
+                if !is_storage {
+                    let Some(root) = Self::app_storage_root(task_id) else {
+                        return Err(FsError::FileNotFound);
+                    };
+                    if normalized == root || !normalized.starts_with(&(root.clone() + "/")) {
+                        return Err(FsError::PermissionDenied);
+                    }
                 }
                 let parent = parent_path(&normalized);
                 let parent_inode = self.lookup(parent).ok_or(FsError::FileNotFound)?;
@@ -1251,7 +1274,7 @@ pub fn read_file_for_task(
                 let ctime = match buf[pos..pos+8].try_into() { Ok(b) => u64::from_le_bytes(b), Err(_) => break }; pos += 8;
                 (uid,gid,mode,nlink,atime,mtime,ctime)
             } else { (ROOT_UID,ROOT_UID,if kind==1 {DEFAULT_DIR_MODE} else {DEFAULT_FILE_MODE},1,0,0,0) };
-            if !(path.starts_with("/data/") || path.starts_with("/user/")) && path != "/data" && path != "/user" { continue; }
+            if !(path.starts_with("/data/") || path.starts_with("/user/") || path.starts_with("/storage/")) && path != "/data" && path != "/user" && path != "/storage" { continue; }
             if kind == 1 {
                 let created=self.mkdir(path);
                 if let Some(inode)=self.inodes.get_mut(&created) { inode.id=InodeId(id); inode.uid=uid; inode.gid=gid; inode.mode=mode; inode.nlink=nlink; inode.atime=atime; inode.mtime=mtime; inode.ctime=ctime; }
@@ -1453,6 +1476,10 @@ pub fn init() {
     vfs.mkdir("/packages");
     vfs.mkdir("/data");
     vfs.mkdir("/user");
+    vfs.mkdir("/storage");
+    vfs.mkdir("/storage/photos");
+    vfs.mkdir("/storage/pictures");
+    vfs.mkdir("/storage/videos");
 
     // 1. System Policy Configuration (Read-Only)
     let policy_content = br#"{

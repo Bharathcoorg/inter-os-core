@@ -100,6 +100,83 @@ pub fn parse_vfs_entries(data: &[u8], entries: &mut [RuntimeFileEntry; MAX_PARSE
     entry_count
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FileMime {
+    Directory,
+    Image,
+    Video,
+    Audio,
+    Document,
+    Other,
+}
+
+pub const IMAGE_SUFFIXES: [&[u8]; 9] = [
+    b".jpg", b".jpeg", b".png", b".bmp", b".gif", b".webp", b".qoi", b".ppm", b".raw",
+];
+
+pub const VIDEO_SUFFIXES: [&[u8]; 5] = [
+    b".mp4", b".webm", b".mkv", b".avi", b".mov",
+];
+
+pub const AUDIO_SUFFIXES: [&[u8]; 6] = [
+    b".mp3", b".wav", b".ogg", b".flac", b".aac", b".m4a",
+];
+
+pub const DOC_SUFFIXES: [&[u8]; 7] = [
+    b".txt", b".pdf", b".md", b".doc", b".json", b".log", b".csv",
+];
+
+pub fn has_suffix(name: &[u8], suffix: &[u8]) -> bool {
+    name.len() > suffix.len() && name[name.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
+}
+
+pub fn detect_mime(name: &[u8], is_dir: bool) -> FileMime {
+    if is_dir {
+        return FileMime::Directory;
+    }
+    if IMAGE_SUFFIXES.iter().any(|s| has_suffix(name, s)) {
+        return FileMime::Image;
+    }
+    if VIDEO_SUFFIXES.iter().any(|s| has_suffix(name, s)) {
+        return FileMime::Video;
+    }
+    if AUDIO_SUFFIXES.iter().any(|s| has_suffix(name, s)) {
+        return FileMime::Audio;
+    }
+    if DOC_SUFFIXES.iter().any(|s| has_suffix(name, s)) {
+        return FileMime::Document;
+    }
+    FileMime::Other
+}
+
+pub fn default_app_for_mime(mime: FileMime) -> &'static str {
+    match mime {
+        FileMime::Image | FileMime::Video => "org.interos.gallery",
+        FileMime::Audio => "org.interos.music",
+        FileMime::Document => "org.interos.terminal",
+        _ => "",
+    }
+}
+
+pub fn get_app_for_mime(read_slot: usize, mime: FileMime, out: &mut [u8]) -> usize {
+    let key = match mime {
+        FileMime::Image => "mime.image",
+        FileMime::Video => "mime.video",
+        FileMime::Audio => "mime.audio",
+        FileMime::Document => "mime.document",
+        _ => return 0,
+    };
+    if let Ok(n) = interos_std::settings_get(read_slot, key, out) {
+        if n > 0 {
+            return n;
+        }
+    }
+    let def = default_app_for_mime(mime).as_bytes();
+    let n = def.len().min(out.len());
+    out[..n].copy_from_slice(&def[..n]);
+    n
+}
+
 #[cfg(test)]
 extern crate std;
 
@@ -122,5 +199,24 @@ mod tests {
         assert!(!entries[2].is_dir);
         assert_eq!(entries[2].size, 512);
         assert_eq!(&entries[2].size_label[..entries[2].size_label_len], b"512 B");
+    }
+
+    #[test]
+    fn test_detect_mime() {
+        assert_eq!(detect_mime(b"folder", true), FileMime::Directory);
+        assert_eq!(detect_mime(b"photo.jpg", false), FileMime::Image);
+        assert_eq!(detect_mime(b"screenshot.ppm", false), FileMime::Image);
+        assert_eq!(detect_mime(b"clip.mp4", false), FileMime::Video);
+        assert_eq!(detect_mime(b"song.mp3", false), FileMime::Audio);
+        assert_eq!(detect_mime(b"notes.txt", false), FileMime::Document);
+        assert_eq!(detect_mime(b"archive.tar", false), FileMime::Other);
+    }
+
+    #[test]
+    fn test_default_app_for_mime() {
+        assert_eq!(default_app_for_mime(FileMime::Image), "org.interos.gallery");
+        assert_eq!(default_app_for_mime(FileMime::Video), "org.interos.gallery");
+        assert_eq!(default_app_for_mime(FileMime::Audio), "org.interos.music");
+        assert_eq!(default_app_for_mime(FileMime::Document), "org.interos.terminal");
     }
 }

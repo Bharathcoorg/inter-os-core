@@ -286,6 +286,150 @@ impl AppPermissionState {
     }
 }
 
+// -----------------------------------------------------------------------------
+// Real Hardware Sensor & Telemetry Decoding (Zero Heap, Pure Flat-JSON)
+// -----------------------------------------------------------------------------
+
+/// Individual hardware sensor status on the sovereign platform.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SensorStatus {
+    /// Sensor is unbound or absent on this physical/virtual board.
+    Unbound,
+    /// Sensor query refused by capability check.
+    Denied,
+    /// Real hardware sensor is bound and reporting live telemetry.
+    Live,
+}
+
+/// Decoded sensor subsystem telemetry. Zero mock/fake values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SensorTelemetry {
+    pub is_present: bool,
+    pub lux: i64,
+    pub accel_y: i64,
+    pub is_near: bool,
+    pub orientation: [u8; 24],
+    pub orientation_len: usize,
+    pub error_msg: [u8; 64],
+    pub error_msg_len: usize,
+}
+
+impl SensorTelemetry {
+    pub const EMPTY: Self = Self {
+        is_present: false,
+        lux: 0,
+        accel_y: 0,
+        is_near: false,
+        orientation: [0u8; 24],
+        orientation_len: 0,
+        error_msg: [0u8; 64],
+        error_msg_len: 0,
+    };
+}
+
+/// Finds the starting byte index of a value following `"key":` in flat JSON.
+pub fn json_value(buf: &[u8], key: &[u8]) -> Option<usize> {
+    let mut i = 0usize;
+    while i + key.len() + 2 < buf.len() {
+        if buf[i] == b'"'
+            && &buf[i + 1..i + 1 + key.len()] == key
+            && buf[i + 1 + key.len()] == b'"'
+            && (i == 0 || buf[i - 1] == b'{' || buf[i - 1] == b',' || buf[i - 1] == b' ')
+        {
+            let mut after = i + key.len() + 2;
+            while after < buf.len() && buf[after] == b' ' {
+                after += 1;
+            }
+            if after < buf.len() && buf[after] == b':' {
+                let mut v = after + 1;
+                while v < buf.len() && buf[v] == b' ' {
+                    v += 1;
+                }
+                return Some(v);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Parses a boolean (`true`/`false`) value for `key`.
+pub fn json_bool(buf: &[u8], key: &[u8]) -> Option<bool> {
+    let i = json_value(buf, key)?;
+    if i >= buf.len() {
+        return None;
+    }
+    match buf[i] {
+        b't' if buf[i..].starts_with(b"true") => Some(true),
+        b'f' if buf[i..].starts_with(b"false") => Some(false),
+        _ => None,
+    }
+}
+
+/// Parses an integer value for `key`.
+pub fn json_i64(buf: &[u8], key: &[u8]) -> Option<i64> {
+    let mut i = json_value(buf, key)?;
+    let negative = i < buf.len() && buf[i] == b'-';
+    if negative {
+        i += 1;
+    }
+    let mut v: i64 = 0;
+    let mut digits = 0;
+    while i < buf.len() && buf[i].is_ascii_digit() {
+        v = v.saturating_mul(10).saturating_add((buf[i] - b'0') as i64);
+        digits += 1;
+        i += 1;
+    }
+    if digits == 0 {
+        return None;
+    }
+    Some(if negative { -v } else { v })
+}
+
+/// Parses a quoted string value for `key` into `out`.
+pub fn json_str(buf: &[u8], key: &[u8], out: &mut [u8]) -> Option<usize> {
+    let mut i = json_value(buf, key)?;
+    if i >= buf.len() || buf[i] != b'"' {
+        return None;
+    }
+    i += 1;
+    let mut n = 0usize;
+    while i < buf.len() && buf[i] != b'"' {
+        if n < out.len() {
+            out[n] = buf[i];
+        }
+        n += 1;
+        i += 1;
+    }
+    Some(n.min(out.len()))
+}
+
+/// Decodes a real `sensor_read()` JSON payload from the kernel.
+pub fn parse_sensor_payload(payload: &[u8]) -> SensorTelemetry {
+    let mut result = SensorTelemetry::EMPTY;
+    match json_bool(payload, b"present") {
+        Some(true) => {
+            result.is_present = true;
+            result.lux = json_i64(payload, b"lux").unwrap_or(0);
+            result.accel_y = json_i64(payload, b"accel").unwrap_or(0);
+            result.is_near = json_bool(payload, b"near").unwrap_or(false);
+            if let Some(n) = json_str(payload, b"orientation", &mut result.orientation) {
+                result.orientation_len = n;
+            }
+        }
+        Some(false) => {
+            result.is_present = false;
+            if let Some(n) = json_str(payload, b"error", &mut result.error_msg) {
+                result.error_msg_len = n;
+            }
+        }
+        None => {
+            result.is_present = false;
+        }
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -391,6 +535,25 @@ mod tests {
         assert_eq!(&iface.name[..iface.name_len], b"eth0");
         assert_eq!(iface.ip_addr, [10, 0, 2, 15]);
         assert!(iface.is_up);
+    }
+
+    #[test]
+    fn test_sensor_payload_present() {
+        let payload = br#"{"present":true,"orientation":"Portrait","accel":980,"lux":450,"near":false}"#;
+        let t = parse_sensor_payload(payload);
+        assert!(t.is_present);
+        assert_eq!(t.lux, 450);
+        assert_eq!(t.accel_y, 980);
+        assert_eq!(t.is_near, false);
+        assert_eq!(&t.orientation[..t.orientation_len], b"Portrait");
+    }
+
+    #[test]
+    fn test_sensor_payload_unbound() {
+        let payload = br#"{"present":false,"status":"NOT_IMPLEMENTED","error":"No physical IMU or ambient sensor detected"}"#;
+        let t = parse_sensor_payload(payload);
+        assert!(!t.is_present);
+        assert_eq!(&t.error_msg[..t.error_msg_len], b"No physical IMU or ambient sensor detected");
     }
 }
 

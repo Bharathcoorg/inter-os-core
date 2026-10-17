@@ -4286,11 +4286,17 @@ pub fn blend(fg: u32, bg: u32, alpha: u8) -> u32 {
     let bg_c = (bg >> 8) & 0xFF;
     let bb = bg & 0xFF;
 
-    let r = (fr * a + br * inv_a) / 255;
-    let g = (fg_c * a + bg_c * inv_a) / 255;
-    let b = (fb * a + bb * inv_a) / 255;
+    // Optical gamma-correct blending (gamma ≈ 2.0 luminous square curve)
+    // Eliminates dark fringes and crushed midtones on OLED and high-DPI panels
+    let r2 = (fr * fr * a + br * br * inv_a) / 255;
+    let g2 = (fg_c * fg_c * a + bg_c * bg_c * inv_a) / 255;
+    let b2 = (fb * fb * a + bb * bb * inv_a) / 255;
 
-    0xFF00_0000 | (r << 16) | (g << 8) | b
+    let r = r2.isqrt() as u8;
+    let g = g2.isqrt() as u8;
+    let b = b2.isqrt() as u8;
+
+    0xFF00_0000 | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
 }
 
 #[inline(always)]
