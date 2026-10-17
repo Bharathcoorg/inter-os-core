@@ -1648,6 +1648,10 @@ pub mod input_key_code {
     pub const END: u32 = 0x10009;
     pub const PAGE_UP: u32 = 0x1000A;
     pub const PAGE_DOWN: u32 = 0x1000B;
+    pub const SCREENSHOT: u32 = 0x1000C;
+    pub const VOLUME_UP: u32 = 0x1000D;
+    pub const VOLUME_DOWN: u32 = 0x1000E;
+    pub const POWER: u32 = 0x1000F;
 }
 
 /// Keyboard event decoded from the normalized 24-byte input record.

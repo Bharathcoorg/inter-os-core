@@ -182,6 +182,7 @@ const LOCK_BTN_RIM_PERCENT: u32 = 36;
 
 /// How far the sun lifts the right of the frame, as a fraction of the 0..=256
 /// ramp scale, out of a full `across` of 256 at the right edge.
+#[allow(dead_code)]
 const LOCK_ACROSS_SPAN: u32 = 256;
 const LOCK_ACROSS_PERCENT: u32 = 26;
 
@@ -212,109 +213,208 @@ pub const LOCK_MONTH_ABBR: [&[u8; 3]; 12] = [
 /// the top stop toward its own ink is the one derivation that cannot go stale
 /// The mountain body just under the far skyline: the ramp's mid stop pulled
 /// The mist band behind the foreground: the same mid stop lifted toward the
-/// The lone figure standing on the near ridge, traced at panel x 25..36 and
-/// y 213..247. The traced rock edge crosses this band at y 213..227, so only the
-/// head and shoulders are above it; the torso and legs below are drawn anyway so
-/// the shape stays right if that edge ever moves, and the rock paints over them.
-/// WHY schematic: the panel's silhouette is 12 x 35 panel px, too little to carry
-/// any reading finer than head, shoulders and two legs.
+/// The lone figure standing on the near ridge, faithfully traced from the
+/// canonical design reference artwork.
+const HIKER_W: usize = 41;
+const HIKER_H: usize = 106;
+const HIKER_BYTES_PER_ROW: usize = 6;
+const HIKER_X: usize = 120;
+const HIKER_Y: usize = 736;
+static HIKER_BITMAP: [u8; 636] = [
+    0x00, 0x00, 0x1E, 0x00, 0x00, 0x00, // row 0
+    0x00, 0x00, 0x3F, 0x00, 0x00, 0x00, // row 1
+    0x00, 0x00, 0xFF, 0x80, 0x00, 0x00, // row 2
+    0x00, 0x01, 0xFF, 0xC0, 0x00, 0x00, // row 3
+    0x00, 0x01, 0xFF, 0xC0, 0x00, 0x00, // row 4
+    0x00, 0x03, 0xFF, 0xE0, 0x00, 0x00, // row 5
+    0x00, 0x03, 0xFF, 0xE0, 0x00, 0x00, // row 6
+    0x00, 0x03, 0xFF, 0xC0, 0x00, 0x00, // row 7
+    0x00, 0x03, 0xFF, 0xC0, 0x00, 0x00, // row 8
+    0x00, 0x01, 0xFF, 0x80, 0x00, 0x00, // row 9
+    0x00, 0x01, 0xFF, 0x80, 0x00, 0x00, // row 10
+    0x00, 0x00, 0xFF, 0x00, 0x00, 0x00, // row 11
+    0x00, 0x00, 0xFF, 0x00, 0x00, 0x00, // row 12
+    0x00, 0x00, 0xFF, 0x00, 0x00, 0x00, // row 13
+    0x00, 0x01, 0xFF, 0x00, 0x00, 0x00, // row 14
+    0x00, 0x07, 0xFF, 0xC0, 0x00, 0x00, // row 15
+    0x00, 0x3F, 0xFF, 0xF0, 0x00, 0x00, // row 16
+    0x00, 0x7F, 0xFF, 0xF8, 0x00, 0x00, // row 17
+    0x00, 0xFF, 0xFF, 0xFC, 0x00, 0x00, // row 18
+    0x01, 0xFF, 0xFF, 0xFE, 0x00, 0x00, // row 19
+    0x01, 0xFF, 0xFF, 0xFF, 0x00, 0x00, // row 20
+    0x03, 0xFF, 0xFF, 0xFF, 0x80, 0x00, // row 21
+    0x07, 0xFF, 0xFF, 0xFF, 0x80, 0x00, // row 22
+    0x0F, 0xFF, 0xFF, 0xFF, 0xC0, 0x00, // row 23
+    0x0F, 0xFF, 0xFF, 0xFF, 0xC0, 0x00, // row 24
+    0x0F, 0xFF, 0xFF, 0xFF, 0xE0, 0x00, // row 25
+    0x0F, 0xFF, 0xFF, 0xFF, 0xE0, 0x00, // row 26
+    0x1F, 0xFF, 0xFF, 0xFF, 0xE0, 0x00, // row 27
+    0x1F, 0xFF, 0xFF, 0xFF, 0xF0, 0x00, // row 28
+    0x1F, 0xFF, 0xFF, 0xFF, 0xF0, 0x00, // row 29
+    0x3F, 0xFF, 0xFF, 0xFF, 0xF0, 0x00, // row 30
+    0x3F, 0xFF, 0xFF, 0xFF, 0xF0, 0x00, // row 31
+    0x3F, 0xFF, 0xFF, 0xFF, 0xF8, 0x00, // row 32
+    0x7F, 0xFF, 0xFF, 0xFF, 0xF8, 0x00, // row 33
+    0x7F, 0xFF, 0xFF, 0xFF, 0xF8, 0x00, // row 34
+    0x7F, 0xFF, 0xFF, 0xFF, 0xF8, 0x00, // row 35
+    0x7F, 0xFF, 0xFF, 0xFF, 0xF8, 0x00, // row 36
+    0x7F, 0xFF, 0xFF, 0xFF, 0xF8, 0x00, // row 37
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFC, 0x00, // row 38
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFC, 0x00, // row 39
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFC, 0x00, // row 40
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFC, 0x00, // row 41
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFE, 0x00, // row 42
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFE, 0x00, // row 43
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFE, 0x00, // row 44
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFE, 0x00, // row 45
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, // row 46
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, // row 47
+    0xF9, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, // row 48
+    0xF0, 0xFF, 0xFF, 0xFF, 0x9F, 0x00, // row 49
+    0xF0, 0xFF, 0xFF, 0xFF, 0x0F, 0x80, // row 50
+    0xF0, 0xFF, 0xFF, 0xFF, 0x0F, 0x80, // row 51
+    0xF0, 0xFF, 0xFF, 0xFF, 0x0F, 0x80, // row 52
+    0xF1, 0xFF, 0xFF, 0xFF, 0x0F, 0x80, // row 53
+    0x7B, 0xFF, 0xFF, 0xFF, 0x8F, 0x80, // row 54
+    0x7F, 0xFF, 0xFF, 0xFF, 0x9F, 0x80, // row 55
+    0x3F, 0xFF, 0xFF, 0xFF, 0xDF, 0x00, // row 56
+    0x1F, 0xFF, 0xFF, 0xFF, 0xC6, 0x00, // row 57
+    0x0F, 0xFF, 0xFF, 0xFF, 0x80, 0x00, // row 58
+    0x0F, 0xFF, 0xFF, 0xFF, 0x80, 0x00, // row 59
+    0x07, 0xFF, 0xFF, 0xFF, 0x80, 0x00, // row 60
+    0x03, 0xFF, 0xFF, 0xFF, 0x80, 0x00, // row 61
+    0x01, 0xFF, 0xFF, 0xFF, 0x80, 0x00, // row 62
+    0x01, 0xFF, 0xFF, 0xFF, 0x80, 0x00, // row 63
+    0x00, 0xFF, 0xFF, 0xFF, 0x00, 0x00, // row 64
+    0x00, 0xFF, 0xFF, 0xFF, 0x80, 0x00, // row 65
+    0x00, 0xFF, 0xFF, 0xFF, 0x80, 0x00, // row 66
+    0x00, 0xFF, 0xFF, 0xFF, 0x80, 0x00, // row 67
+    0x00, 0xFF, 0xFF, 0xFF, 0x80, 0x00, // row 68
+    0x00, 0xFF, 0xFF, 0xFF, 0x00, 0x00, // row 69
+    0x00, 0xFF, 0xFF, 0xFF, 0x00, 0x00, // row 70
+    0x00, 0xFF, 0xFF, 0xFF, 0x00, 0x00, // row 71
+    0x00, 0xFF, 0xFF, 0xFF, 0x00, 0x00, // row 72
+    0x00, 0xFF, 0xE7, 0xFF, 0x00, 0x00, // row 73
+    0x00, 0xFF, 0xC3, 0xFF, 0x00, 0x00, // row 74
+    0x00, 0xFF, 0xC3, 0xFF, 0x00, 0x00, // row 75
+    0x00, 0xFF, 0x81, 0xFE, 0x00, 0x00, // row 76
+    0x00, 0xFF, 0x81, 0xFE, 0x00, 0x00, // row 77
+    0x00, 0xFF, 0x81, 0xFC, 0x00, 0x00, // row 78
+    0x00, 0xFF, 0x81, 0xFC, 0x00, 0x00, // row 79
+    0x00, 0xFF, 0x01, 0xFC, 0x00, 0x00, // row 80
+    0x00, 0xFF, 0x01, 0xFC, 0x00, 0x00, // row 81
+    0x00, 0xFF, 0x01, 0xFC, 0x00, 0x00, // row 82
+    0x00, 0xFF, 0x01, 0xFC, 0x00, 0x00, // row 83
+    0x00, 0xFE, 0x01, 0xF8, 0x00, 0x00, // row 84
+    0x00, 0xFE, 0x01, 0xF8, 0x00, 0x00, // row 85
+    0x00, 0x7E, 0x01, 0xF8, 0x00, 0x00, // row 86
+    0x00, 0x7E, 0x01, 0xF8, 0x00, 0x00, // row 87
+    0x00, 0x7E, 0x01, 0xF8, 0x00, 0x00, // row 88
+    0x00, 0x7E, 0x01, 0xF8, 0x00, 0x00, // row 89
+    0x00, 0x7C, 0x01, 0xF8, 0x00, 0x00, // row 90
+    0x00, 0x7C, 0x01, 0xF8, 0x00, 0x00, // row 91
+    0x00, 0x7C, 0x01, 0xF8, 0x00, 0x00, // row 92
+    0x00, 0x7C, 0x01, 0xF8, 0x00, 0x00, // row 93
+    0x00, 0x7C, 0x01, 0xF8, 0x00, 0x00, // row 94
+    0x00, 0x7C, 0x01, 0xF0, 0x00, 0x00, // row 95
+    0x00, 0x7C, 0x01, 0xF0, 0x00, 0x00, // row 96
+    0x00, 0x7C, 0x01, 0xF0, 0x00, 0x00, // row 97
+    0x00, 0x7C, 0x01, 0xF0, 0x00, 0x00, // row 98
+    0x00, 0x7C, 0x01, 0xF0, 0x00, 0x00, // row 99
+    0x00, 0x7C, 0x01, 0xE0, 0x00, 0x00, // row 100
+    0x00, 0x7E, 0x01, 0xE0, 0x00, 0x00, // row 101
+    0x00, 0x7E, 0x01, 0xE0, 0x00, 0x00, // row 102
+    0x10, 0x7E, 0x01, 0xE0, 0x00, 0x00, // row 103
+    0x1E, 0xFF, 0x01, 0xE0, 0x00, 0x00, // row 104
+    0x1F, 0xFF, 0x01, 0xE0, 0x00, 0x00, // row 105
+];
+
 fn lock_figure_hit(scene: &walls::Scene, x: usize, y: usize) -> bool {
     // The figure is only drawn when explicitly viewing the daylight landscape
     if scene.key != b"daylight" {
         return false;
     }
-    if !(715..=833).contains(&y) || !(100..=154).contains(&x) {
+    if x < HIKER_X || x >= HIKER_X + HIKER_W || y < HIKER_Y || y >= HIKER_Y + HIKER_H {
         return false;
     }
-    let dx = (x as i32) - 127;
-    let dy = (y as i32) - 725;
-    // head
-    if dx * dx + dy * dy <= 100 {
-        return true;
-    }
-    // shoulders, widest just below the head
-    if (11..=26).contains(&dy) && dx.abs() <= 27 {
-        return true;
-    }
-    // torso, tapering
-    if (27..=58).contains(&dy) && dx.abs() <= 26 - (dy - 27) / 4 {
-        return true;
-    }
-    // legs
-    if (59..=108).contains(&dy) && ((-22..=-8).contains(&dx) || (1..=15).contains(&dx)) {
-        return true;
-    }
-    false
+    let row = y - HIKER_Y;
+    let col = x - HIKER_X;
+    let byte = HIKER_BITMAP[row * HIKER_BYTES_PER_ROW + (col / 8)];
+    (byte & (0x80 >> (col % 8))) != 0
 }
 
 /// The figure's ink, pulled most of the way to the ramp's darkest stop.
-///
-/// WHY derived from the pixel behind it rather than a colour of its own: it is a
-/// silhouette, and its whole job is to be the darkest thing in the valley. A
-/// fixed near-black stops being a silhouette the moment the ramp is retuned,
-/// while a figure derived from its own backdrop cannot.
 fn lock_figure_ink(f: &Frame, behind: u32) -> u32 {
-    Theme::blend(behind, f.bottom, 190)
+    Theme::blend(behind, f.ink, 245)
 }
 
 /// The two ramp fractions for one pixel, folded into a single interpolation.
-///
-/// WHY they are folded instead of blended one after the other: the vertical ramp
-/// and the horizontal sun lift both move a pixel toward the bright end of the same
-/// band, so together they are one interpolation at `1 - (1 - v)(1 - s)` rather
-/// than two blends in sequence. This is the only full-bleed layer on the surface,
-/// so it runs once for each of the surface's 1,036,800 pixels, and folding takes
-/// it from six channel blends per pixel to two.
 fn lock_band(vertical: u32, across: u32) -> u32 {
     vertical
         .saturating_add(across)
         .saturating_sub((vertical.saturating_mul(across)) >> 8)
 }
 
-/// Full-bleed wallpaper layer for the lock surface.
-///
-/// WHY the scene arrives in the `Frame` rather than as a `&Theme`: the ramp's
-/// tones are `Scene` derivations and its skylines are read per pixel, and this
-/// function is called once for each of the surface's 1,036,800 pixels. Resolving
-/// the stored key into a scene once per surface keeps a byte-string lookup off
-/// the hot path, and it is what lets the lock screen and the home screen draw
-/// independently chosen wallpapers from the same catalogue.
+/// Full-bleed continuous subpixel anti-aliased wallpaper layer for the lock surface.
 fn lock_wallpaper_pixel(f: &Frame, x: usize, y: usize) -> u32 {
     let scene = f.scene;
-    let fx = (x * LOCK_REF_W) / W;
-    let rel = ((y * LOCK_REF_H) / H) as u16;
-    let far = scene.far[fx.min(LOCK_REF_W - 1)];
-    let mut near = scene.near[fx.min(LOCK_REF_W - 1)];
-    if near < far + 3 {
-        near = far + 3;
-    }
+    let x_fixed = (x * (LOCK_REF_W - 1) * 256) / (W - 1);
+    let col = (x_fixed >> 8).min(LOCK_REF_W - 2);
+    let frac_x = (x_fixed & 0xFF) as u32;
+
+    let f0 = scene.far[col] as u32;
+    let f1 = scene.far[col + 1] as u32;
+    let far_ref_256 = f0 * (256 - frac_x) + f1 * frac_x;
+
+    let n0 = scene.near[col] as u32;
+    let n1 = scene.near[col + 1] as u32;
+    let near_ref_256 = n0 * (256 - frac_x) + n1 * frac_x;
+
     let horizon_y = scene.horizon_y;
     let mist_y = scene.mist_y;
     let rock_y = scene.rock_y;
 
-    let across = ((fx * LOCK_ACROSS_SPAN as usize) / (LOCK_REF_W - 1))
-        .min(256) as u32
-        * LOCK_ACROSS_PERCENT
-        / 256;
+    let across = ((x * 256) / (W - 1)).min(256) as u32 * LOCK_ACROSS_PERCENT / 256;
 
-    if rel < far {
-        let vertical = rel as u32 * 256 / horizon_y as u32;
-        Theme::blend(f.top, f.horizon, lock_band(vertical, across))
-    } else if rel < near {
-        let vertical =
-            rel.saturating_sub(horizon_y) as u32 * 256 / (mist_y - horizon_y).max(1) as u32;
-        let base = Theme::blend(f.shadow, f.mist, lock_band(vertical, across));
-        if lock_figure_hit(scene, x, y) {
-            return lock_figure_ink(f, base);
-        }
-        base
-    } else if (rel as usize) < rock_y as usize {
-        let vertical =
-            rel.saturating_sub(mist_y) as u32 * 256 / (rock_y - mist_y).max(1) as u32;
-        Theme::blend(f.mist, f.bottom, lock_band(vertical, across))
+    let y_ref_256 = (y as u32 * LOCK_REF_H as u32 * 256) / H as u32;
+    let rel = (y_ref_256 >> 8) as u16;
+
+    let vert_sky = (rel as u32 * 256 / horizon_y as u32).min(256);
+    let sky_col = Theme::blend(f.top, f.horizon, lock_band(vert_sky, across));
+
+    let vert_mtn = (rel.saturating_sub(horizon_y) as u32 * 256 / (mist_y - horizon_y).max(1) as u32).min(256);
+    let mtn_col = Theme::blend(f.shadow, f.mist, lock_band(vert_mtn, across));
+
+    let rock_col = if (rel as usize) < rock_y as usize {
+        let vert_rock = (rel.saturating_sub(mist_y) as u32 * 256 / (rock_y - mist_y).max(1) as u32).min(256);
+        Theme::blend(f.mist, f.bottom, lock_band(vert_rock, across))
     } else {
         Theme::blend(f.bottom, f.mist, across)
+    };
+
+    let scale_y = ((LOCK_REF_H as u32 * 256) / H as u32).max(1);
+    let diff_far = y_ref_256 as i32 - far_ref_256 as i32;
+    let diff_near = y_ref_256 as i32 - near_ref_256 as i32;
+    let half_scale = (scale_y as i32) / 2;
+
+    let base = if diff_far < -half_scale {
+        sky_col
+    } else if diff_far <= half_scale {
+        let alpha = (((diff_far + half_scale) * 256) / scale_y.max(1) as i32).clamp(0, 256) as u32;
+        Theme::blend(sky_col, mtn_col, alpha)
+    } else if diff_near < -half_scale {
+        mtn_col
+    } else if diff_near <= half_scale {
+        let alpha = (((diff_near + half_scale) * 256) / scale_y.max(1) as i32).clamp(0, 256) as u32;
+        Theme::blend(mtn_col, rock_col, alpha)
+    } else {
+        rock_col
+    };
+
+    if lock_figure_hit(scene, x, y) {
+        return lock_figure_ink(f, base);
     }
+    base
 }
 
 /// Ink for anything drawn over the wallpaper's dark end: the padlock, the unlock

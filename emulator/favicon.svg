@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" fill="none">
+  <defs>
+    <linearGradient id="monolithGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#181E2B"/>
+      <stop offset="100%" stop-color="#0A0D14"/>
+    </linearGradient>
+    <linearGradient id="ivoryShimmer" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FFFFFF"/>
+      <stop offset="50%" stop-color="#FAF8F4"/>
+      <stop offset="100%" stop-color="#E8E4DC"/>
+    </linearGradient>
+  </defs>
+  <!-- Obsidian Monolith Squircle -->
+  <rect x="2" y="2" width="116" height="116" rx="26" fill="url(#monolithGrad)" stroke="#263042" stroke-width="3"/>
+  <!-- Inner Highlight Rim -->
+  <rect x="5" y="5" width="110" height="110" rx="23" fill="none" stroke="#3A4860" stroke-width="1.2" opacity="0.6"/>
+  <!-- 'I' Pill Glyph -->
+  <rect x="24" y="24" width="20" height="72" rx="10" fill="url(#ivoryShimmer)"/>
+  <!-- 'L' Monogram Glyph -->
+  <path d="M 50 34 A 10 10 0 0 1 70 34 V 76 H 92 A 10 10 0 0 1 92 96 H 60 A 10 10 0 0 1 50 86 Z" fill="url(#ivoryShimmer)"/>
+</svg>

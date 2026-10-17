@@ -8,12 +8,28 @@ use spin::Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use uart_16550::backend::PioBackend;
-use uart_16550::{Config, Uart16550Tty};
+use uart_16550::{Config, Uart16550};
 use crate::drivers::display::DisplayDriver;
 use crate::storage::block::BlockDevice;
 
+/// Serial port wrapper implementing `core::fmt::Write` with terminal newline normalization.
+pub struct SerialPort(Uart16550<PioBackend>);
+
+impl fmt::Write for SerialPort {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        for &byte in s.as_bytes() {
+            if byte == b'\n' {
+                self.0.send_bytes_exact(b"\r\n");
+            } else {
+                self.0.send_bytes_exact(&[byte]);
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Global spinlock-protected COM1 serial port interface.
-pub static SERIAL1: Mutex<Option<Uart16550Tty<PioBackend>>> = Mutex::new(None);
+pub static SERIAL1: Mutex<Option<SerialPort>> = Mutex::new(None);
 
 struct RappTransfer {
     package_id: String,
@@ -25,12 +41,16 @@ struct RappTransfer {
 static RAPP_TRANSFER: Mutex<Option<RappTransfer>> = Mutex::new(None);
 
 /// Initializes the primary COM1 serial port (I/O port 0x3F8).
+///
+/// Avoids `test_loopback()` which panics if external TCP or terminal clients
+/// transmit bytes into COM1 during machine startup or reset.
 pub fn init() {
-    let serial = unsafe {
-        Uart16550Tty::new_port(0x3F8, Config::default())
-            .expect("Failed to initialize COM1 UART port")
+    let mut port = match unsafe { Uart16550::new_port(0x3F8) } {
+        Ok(p) => p,
+        Err(_) => return,
     };
-    *SERIAL1.lock() = Some(serial);
+    let _ = port.init(Config::default());
+    *SERIAL1.lock() = Some(SerialPort(port));
 }
 
 #[doc(hidden)]
@@ -855,6 +875,24 @@ fn handle_serial_command(cmd: &[u8]) {
         let on = kms.toggle_powered();
         let mut display = crate::drivers::KmsDisplayDriver::new(&mut kms);
         let _ = display.composite_and_flip();
+        crate::input::post_key_event(crate::input::KeyEvent {
+            source: crate::input::InputSource::DeviceStudio,
+            action: crate::input::KeyAction::Down,
+            code: crate::input::KeyCode::Unknown(0x1000F),
+            shift: false,
+            ctrl: false,
+            alt: false,
+            meta: false,
+        });
+        crate::input::post_key_event(crate::input::KeyEvent {
+            source: crate::input::InputSource::DeviceStudio,
+            action: crate::input::KeyAction::Up,
+            code: crate::input::KeyCode::Unknown(0x1000F),
+            shift: false,
+            ctrl: false,
+            alt: false,
+            meta: false,
+        });
         crate::serial_println!("[POWER] display_on={} source=device_studio", on);
         return;
     }

@@ -5,10 +5,20 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Inter OS — Universal Rust Mobile Platform &amp; Device Studio</title>
   <meta name="description" content="Device Studio for the InterOS Universal Rust Mobile Platform: a live monitor for the guest kernel's own framebuffer UI, multi-format package sideloading (.app, .rap, .wasm, .apk), and live hardware telemetry.">
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
+  <link rel="icon" type="image/png" sizes="16x16" href="favicon-16.png">
+  <link rel="shortcut icon" href="favicon.ico">
+  <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png">
+  <link rel="manifest" href="manifest.json">
+  <meta name="theme-color" content="#0B0F17">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="InterOS">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="style.css?v=13">
+  <link rel="stylesheet" href="style.css?v=14">
 </head>
 <body class="dark-theme">
   <!-- Mobile / Small Viewport Desktop Recommendation Banner -->
@@ -44,59 +54,70 @@
 
   <!-- Developer IDE Studio Header -->
   <header class="studio-header">
-    <div class="brand-group">
-      <div class="brand-logo-wrap">
-        <svg class="brand-logo-svg" viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <!-- Outer isometric layer / hardware microkernel boundary -->
-          <path d="M14 2.5L3.5 8.5V20.5L14 26.5L24.5 20.5V8.5L14 2.5Z" stroke="#FFFFFF" stroke-width="1.8" stroke-linejoin="round"/>
-          <!-- Inner concentric sovereign layer -->
-          <path d="M14 7.5L8 11V18L14 21.5L20 18V11L14 7.5Z" stroke="rgba(255, 255, 255, 0.45)" stroke-width="1.3" stroke-linejoin="round"/>
-          <!-- Central zero-overhead microkernel core -->
-          <circle cx="14" cy="14.5" r="2.5" fill="#FFFFFF"/>
-          <!-- Interconnecting kernel pipeline bridges -->
-          <path d="M14 2.5V7.5M14 21.5V26.5" stroke="rgba(255, 255, 255, 0.6)" stroke-width="1.5" stroke-linecap="round"/>
-        </svg>
-      </div>
-      <div class="brand-title-wrap">
-        <span class="brand-title">InterOS</span>
-      </div>
-
-      <div class="ide-v-sep"></div>
-
-      <!-- Target Device Hardware Specs -->
-      <div class="ide-target-device">
-        <div class="target-chip">
-          <svg class="chip-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="2" width="14" height="20" rx="3"/><circle cx="12" cy="18" r="1"/></svg>
-          <span class="target-name">InterOS - QEMU Virtual Device</span>
+    <div class="studio-header-inner">
+      <!-- Left: InterOS Brand with New Squircle IL Logo -->
+      <div class="brand-group">
+        <div class="brand-logo-wrap" title="InterOS Sovereign Mobile">
+          <svg class="brand-logo-svg" viewBox="0 0 120 120" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <rect x="2" y="2" width="116" height="116" rx="26" fill="#121620" stroke="#263042" stroke-width="4"/>
+            <rect x="5" y="5" width="110" height="110" rx="23" fill="none" stroke="#3A4860" stroke-width="2" opacity="0.6"/>
+            <rect x="24" y="24" width="20" height="72" rx="10" fill="#FAF8F4"/>
+            <path d="M 50 34 A 10 10 0 0 1 70 34 V 76 H 92 A 10 10 0 0 1 92 96 H 60 A 10 10 0 0 1 50 86 Z" fill="#FAF8F4"/>
+          </svg>
         </div>
-        <div class="target-specs-list">
-          <span class="spec-node"><span class="spec-lbl">Architecture</span><span class="spec-val" id="spec-arch">Undetermined</span></span>
-          <span class="spec-node"><span class="spec-lbl">Memory</span><span class="spec-val" id="spec-memory">Undetermined</span></span>
-          <span class="spec-node"><span class="spec-lbl">Display</span><span class="spec-val" id="spec-display">Undetermined</span></span>
-          <span class="spec-node"><span class="spec-lbl">Security</span><span class="spec-val" id="spec-security">Undetermined</span></span>
+        <div class="brand-title-wrap">
+          <span class="brand-title">InterOS</span>
         </div>
 
+        <div class="ide-v-sep"></div>
+
+        <!-- Target Device Hardware Specs -->
+        <div class="ide-target-device">
+          <div class="target-chip">
+            <svg class="chip-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="2" width="14" height="20" rx="3"/><circle cx="12" cy="18" r="1"/></svg>
+            <span class="target-name">InterOS &mdash; QEMU Virtual Device</span>
+          </div>
+          <div class="target-specs-list">
+            <span class="spec-node"><span class="spec-lbl">Arch:</span> <span class="spec-val" id="spec-arch">x86_64</span></span>
+            <span class="spec-node"><span class="spec-lbl">Memory:</span> <span class="spec-val" id="spec-memory">1024 MB</span></span>
+            <span class="spec-node"><span class="spec-lbl">Display:</span> <span class="spec-val" id="spec-display">720&times;1440</span></span>
+            <span class="spec-node"><span class="spec-lbl">Security:</span> <span class="spec-val" id="spec-security">Zero-Trust</span></span>
+          </div>
+        </div>
       </div>
-    </div>
 
-    <!-- Right Controls: View Switcher, Kernel Status & Reboot Button -->
-    <div class="studio-controls">
-      <div class="mobile-pane-switcher" id="mobile-pane-switcher">
-        <button class="mobile-switch-btn" id="btn-show-phone" title="Smartphone View">Smartphone</button>
-        <button class="mobile-switch-btn active" id="btn-show-telemetry" title="Developer Telemetry Deck">Studio Deck</button>
+      <!-- Center: Action Controls (Focus Mode, Fullscreen WebApp, Screenshot, Reboot) -->
+      <div class="header-center-actions">
+        <button class="header-action-pill" id="btn-focus-mode" title="Toggle Immersive Smartphone Focus Mode (Hotkey: F)">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="5" y="2" width="14" height="20" rx="3"/><circle cx="12" cy="18" r="1"/></svg>
+          <span>Focus Mode</span>
+        </button>
+        <button class="header-action-pill" id="btn-fullscreen-mode" title="Fullscreen WebApp: Hide Browser Tab/URL Bar">
+          <svg id="fullscreen-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>
+          <span id="fullscreen-text">Fullscreen</span>
+        </button>
+        <button class="header-action-pill" id="btn-header-screenshot" title="Capture High-Res Screenshot">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+          <span>Screenshot</span>
+        </button>
+        <button class="header-action-pill danger" id="btn-reboot-kernel" title="Warm Reboot Sovereign Microkernel" style="display: none;">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+          <span>Reboot OS</span>
+        </button>
       </div>
 
-      <div class="ide-v-sep"></div>
+      <!-- Right: Liveness Status & Mobile Switcher -->
+      <div class="studio-controls">
+        <div class="mobile-pane-switcher" id="mobile-pane-switcher">
+          <button class="mobile-switch-btn" id="btn-show-phone" title="Smartphone View">Smartphone</button>
+          <button class="mobile-switch-btn active" id="btn-show-telemetry" title="Developer Telemetry Deck">Deck</button>
+        </div>
 
-      <div class="status-indicator" id="qemu-global-status" title="Microkernel Hardware Execution State: Standby">
-        <span class="status-dot" id="qemu-global-dot"></span>
-        <span id="qemu-global-text">Standby</span>
+        <div class="status-indicator" id="qemu-global-status" title="Microkernel Execution State: Standby">
+          <span class="status-dot" id="qemu-global-dot"></span>
+          <span id="qemu-global-text">Standby</span>
+        </div>
       </div>
-
-      <button class="ide-reboot-btn" id="btn-reboot-kernel" title="Warm Reboot Microkernel" style="display: none;">
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
-        <span>Reboot OS</span>
-      </button>
     </div>
   </header>
 
@@ -306,8 +327,14 @@
           <button class="emu-btn" id="emu-btn-screenshot" title="Take Screenshot (Download PNG)">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
           </button>
-          <button class="emu-btn" id="emu-btn-scale" title="Toggle Display Sizing (Fit / Large / 1:1 FHD)">
+          <button class="emu-btn" id="emu-btn-scale" title="Toggle Display Sizing (Fit / Large / 1:1 FHD)" style="display: none !important;">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>
+          </button>
+          <button class="emu-btn" id="emu-btn-focus" title="Toggle Immersive Smartphone Focus Mode (Key: F)">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="2" width="14" height="20" rx="3"/><circle cx="12" cy="18" r="1"/></svg>
+          </button>
+          <button class="emu-btn" id="emu-btn-fullscreen" title="Toggle Fullscreen WebApp (Hide Browser UI) [Key: F11]">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>
           </button>
           <button class="emu-btn" id="emu-btn-rotate" title="Rotate Screen (Orientation)" style="display: none !important;">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
@@ -765,7 +792,7 @@
             </div>
             <div class="appdev-stat-card">
               <span class="stat-lbl">VAULT SECTORS</span>
-              <strong class="stat-val" style="color: #3B82F6;">ChaCha20 Encrypted</strong>
+              <strong class="stat-val" style="color: #10B981;">ChaCha20 Encrypted</strong>
             </div>
           </div>
         </div>
@@ -866,7 +893,7 @@
             </div>
             <div class="appdev-stat-card">
               <span class="stat-lbl">CPU CLOCK FREQUENCY</span>
-              <strong class="stat-val" id="pmic-freq-val" style="color: #3B82F6;">Unavailable</strong>
+              <strong class="stat-val" id="pmic-freq-val" style="color: #EDEDED;">Unavailable</strong>
             </div>
             <div class="appdev-stat-card">
               <span class="stat-lbl">CURRENT DRAW</span>
@@ -897,12 +924,12 @@
                    the achieved rate is what made this card read as a performance
                    claim. The two are now shown as the two different things they
                    are. -->
-              <strong class="stat-val" style="color: #3B82F6;">60 Hz VSYNC</strong>
+              <strong class="stat-val" style="color: #EDEDED;">60 Hz VSYNC</strong>
               <span class="stat-note">Programmed scanout mode (display_kms.rs refresh_hz = 60).</span>
             </div>
             <div class="appdev-stat-card">
               <span class="stat-lbl">MEASURED FLIP COST</span>
-              <strong class="stat-val" id="kms-refresh" style="color: #3B82F6;">Not measured</strong>
+              <strong class="stat-val" id="kms-refresh" style="color: #A1A1AA;">Not measured</strong>
               <span class="stat-note" id="kms-refresh-note">The guest publishes per-flip cycle cost, not a frame rate.</span>
             </div>
           </div>

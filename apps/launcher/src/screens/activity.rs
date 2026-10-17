@@ -505,7 +505,7 @@ fn build_card(state: &LauncherState, slot: usize) -> Option<CardPlan> {
     // First-party HD vector icon inside a 48x48 squircle badge (radius 14px)
     let icon_rect = Rect::new(rect.x + 20, rect.y + 16, SQUIRCLE_SIZE, SQUIRCLE_SIZE);
     let title_x = rect.x + 80;
-    let title_fit = rect.w.saturating_sub(80 + 120);
+    let _title_fit = rect.w.saturating_sub(80 + 120);
 
     let task = state.recent_task_ids.get(slot).copied().unwrap_or(0);
     let focused = task != 0 && state.active_child == Some(task);

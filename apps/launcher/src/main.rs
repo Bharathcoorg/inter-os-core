@@ -297,8 +297,8 @@ impl LauncherState {
             // WHY the stock scene rather than the theme's own ramp: the home and
             // lock wallpapers are read from the settings store, and until that
             // read answers the shell must draw the wallpaper it shipped with.
-            home_wallpaper: &walls::SCENES[0],
-            lock_wallpaper: &walls::SCENES[0],
+            home_wallpaper: &walls::SCENES[1],
+            lock_wallpaper: &walls::SCENES[1],
             wallpaper_store_answered: false,
             pin_pad_visible: false,
             pin_buffer: [0u8; 8],
@@ -1973,7 +1973,7 @@ pub extern "C" fn _start() -> ! {
                 }
             }
 
-            if state.active_child.is_none() && (events & std::EVENT_TIMER_TICK) != 0 {
+            if (events & std::EVENT_TIMER_TICK) != 0 {
                 refresh_ticks += 1;
                 if let Ok(power_state) = std::device_power(5) {
                     let powered = power_state != 0;
@@ -1990,6 +1990,13 @@ pub extern "C" fn _start() -> ! {
                             render_view(surface, &state);
                             let _ = std::surface_flip(4);
                             std::log(0, "[LAUNCHER] Display wake observed; presenting real lock screen.").ok();
+                        } else {
+                            let _ = std::user_lock(1000);
+                            state.lock_state = std::UserLockState::Locked;
+                            state.current_view = ViewMode::LockScreen;
+                            state.pin_pad_visible = false;
+                            state.pin_len = 0;
+                            std::log(0, "[LAUNCHER] Display sleep observed; locked to lock screen.").ok();
                         }
                     }
                 }
@@ -2233,8 +2240,32 @@ pub extern "C" fn _start() -> ! {
                     if input.kind == 9 { continue; }
                     if input.kind == std::INPUT_EVENT_KIND_KEY {
                         if let Some(key) = input.key_event() {
-                            if key.pressed && (key.code == b's' as u32 || key.code == b'S' as u32 || key.code == 0x1000C) {
+                            if key.pressed && (key.code == b's' as u32 || key.code == b'S' as u32 || key.code == 0x1000C || key.code == std::input_key_code::SCREENSHOT) {
                                 capture_and_save_screenshot(&state);
+                                continue;
+                            }
+                            if key.pressed && (key.code == 0x1000F || key.code == std::input_key_code::POWER) {
+                                match state.current_view {
+                                    ViewMode::BootScreen | ViewMode::PowerTransition => {}
+                                    ViewMode::LockScreen => {
+                                        state.pin_pad_visible = false;
+                                        state.pin_len = 0;
+                                        state.auth_error = false;
+                                        render_view(surface, &state);
+                                        let _ = std::surface_flip(4);
+                                    }
+                                    _ => {
+                                        let _ = std::user_lock(1000);
+                                        state.lock_state = std::UserLockState::Locked;
+                                        state.current_view = ViewMode::LockScreen;
+                                        state.pin_pad_visible = false;
+                                        state.pin_len = 0;
+                                        state.auth_error = false;
+                                        render_view(surface, &state);
+                                        let _ = std::surface_flip(4);
+                                        std::log(0, "[LAUNCHER] Power key pressed; locked to lock screen.").ok();
+                                    }
+                                }
                                 continue;
                             }
                         }

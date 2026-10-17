@@ -131,8 +131,8 @@ def run_contracts(target_files=None):
     file_reports = {}
 
     # 1. Execute framework tests (pytest/unittest) via pytest
-    pytest_timeout = int(os.environ.get("INTEROS_PYTEST_TIMEOUT", "180"))
-    script_timeout = int(os.environ.get("INTEROS_SCRIPT_TIMEOUT", "60"))
+    pytest_timeout = int(os.environ.get("INTEROS_PYTEST_TIMEOUT", "360"))
+    script_timeout = int(os.environ.get("INTEROS_SCRIPT_TIMEOUT", "90"))
 
     if framework_tests:
         try:

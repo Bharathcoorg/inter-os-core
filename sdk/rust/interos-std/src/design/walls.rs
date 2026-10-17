@@ -63,40 +63,40 @@ pub const SCENE_STOCK_NEAR: [u16; SCENE_REF_W] = [
 
 
 pub const SCENE_DAYLIGHT_FAR: [u16; SCENE_REF_W] = [
-    213, 214, 213, 213, 213, 212, 215, 223, 229, 234, 229, 229,
-    229, 229, 229, 232, 226, 229, 231, 235, 229, 229, 229, 229,
-    229, 229, 229, 229, 229, 233, 229, 230, 227, 226, 226, 226,
-    226, 225, 225, 229, 232, 229, 229, 229, 229, 229, 229, 229,
-    229, 229, 229, 229, 229, 229, 229, 229, 232, 227, 220, 216,
-    216, 223, 231, 229, 229, 229, 229, 229, 229, 229, 229, 229,
-    229, 229, 229, 229, 229, 229, 229, 229, 229, 233, 229, 227,
-    225, 222, 219, 220, 225, 230, 231, 233, 233, 234, 234, 234,
-    234, 233, 233, 233, 231, 229, 228, 227, 230, 232, 235, 236,
-    240, 235, 231, 226, 218, 215, 213, 217, 219, 223, 226, 228,
-    233, 236, 238, 238, 238, 239, 239, 240, 240, 240, 238, 242,
-    233, 224, 217, 209, 213, 219, 225, 232, 236, 243, 237, 236,
-    236, 236, 236, 236, 236, 236, 236, 236, 236, 236, 235, 233,
-    234, 237, 233, 233, 231, 229, 228, 227, 226, 225, 225, 224,
-    225, 229, 232, 239, 231,
+    143, 143, 143, 143, 143, 142, 140, 137, 147, 147, 146, 145,
+    146, 145, 145, 144, 144, 144, 143, 142, 140, 139, 139, 140,
+    139, 139, 138, 138, 136, 135, 134, 134, 134, 133, 133, 132,
+    132, 132, 133, 134, 134, 136, 136, 136, 138, 139, 140, 141,
+    142, 142, 143, 143, 144, 144, 144, 144, 144, 144, 144, 143,
+    144, 144, 145, 145, 146, 147, 148, 149, 149, 150, 150, 151,
+    152, 152, 151, 151, 150, 150, 150, 150, 150, 149, 149, 148,
+    147, 147, 148, 149, 149, 150, 150, 150, 150, 150, 151, 151,
+    152, 151, 151, 150, 150, 150, 150, 149, 149, 149, 147, 147,
+    146, 145, 144, 144, 143, 142, 140, 139, 139, 139, 139, 138,
+    139, 139, 138, 138, 138, 137, 137, 136, 135, 133, 133, 134,
+    134, 135, 135, 136, 137, 138, 138, 138, 138, 139, 140, 141,
+    142, 142, 142, 141, 141, 140, 141, 141, 142, 143, 143, 144,
+    144, 145, 145, 145, 145, 144, 143, 143, 143, 143, 143, 143,
+    143, 143, 143, 143, 143,
 ];
 
 
 pub const SCENE_DAYLIGHT_NEAR: [u16; SCENE_REF_W] = [
-    295, 294, 297, 299, 300, 296, 295, 298, 327, 290, 287, 286,
-    289, 327, 320, 308, 304, 302, 299, 294, 287, 284, 287, 292,
-    298, 303, 310, 305, 297, 290, 285, 288, 292, 295, 300, 302,
-    305, 310, 314, 314, 315, 318, 321, 306, 302, 300, 300, 303,
-    306, 316, 338, 336, 330, 329, 332, 336, 353, 353, 347, 296,
-    291, 289, 289, 292, 296, 385, 365, 306, 301, 299, 302, 306,
-    362, 336, 330, 336, 365, 336, 315, 309, 307, 296, 293, 291,
-    288, 285, 283, 286, 284, 283, 281, 284, 286, 292, 318, 317,
-    317, 320, 323, 328, 335, 339, 368, 371, 347, 341, 348, 303,
-    300, 302, 306, 351, 305, 302, 297, 290, 285, 283, 282, 282,
-    284, 287, 290, 286, 288, 290, 293, 302, 306, 332, 292, 288,
-    283, 290, 293, 299, 300, 305, 327, 328, 332, 302, 302, 319,
-    313, 305, 301, 298, 296, 299, 302, 307, 308, 304, 297, 293,
-    291, 294, 298, 299, 297, 297, 287, 288, 331, 307, 303, 290,
-    287, 287, 290, 304, 324,
+    210, 210, 211, 211, 211, 211, 211, 211, 211, 211, 211, 212,
+    211, 211, 213, 213, 214, 214, 214, 215, 215, 216, 219, 220,
+    219, 220, 220, 220, 220, 220, 220, 220, 219, 220, 220, 219,
+    221, 222, 222, 222, 223, 224, 223, 224, 223, 223, 223, 223,
+    223, 223, 223, 223, 223, 224, 224, 225, 225, 226, 226, 227,
+    229, 230, 231, 233, 237, 235, 235, 237, 238, 238, 238, 238,
+    238, 239, 239, 240, 247, 241, 240, 241, 242, 242, 243, 242,
+    242, 242, 242, 242, 242, 241, 242, 242, 243, 243, 244, 244,
+    244, 245, 247, 246, 249, 252, 250, 250, 250, 250, 250, 250,
+    250, 250, 251, 251, 252, 253, 252, 252, 253, 256, 257, 259,
+    257, 256, 256, 255, 255, 256, 256, 256, 256, 257, 258, 259,
+    260, 260, 261, 261, 262, 267, 267, 267, 267, 268, 270, 272,
+    273, 273, 274, 274, 275, 275, 275, 275, 274, 273, 274, 274,
+    275, 276, 276, 277, 277, 275, 275, 275, 275, 275, 275, 275,
+    276, 276, 277, 277, 278,
 ];
 
 
@@ -196,19 +196,31 @@ impl Scene {
     /// Sky tone just above the far ridge, lifted from the sky stop toward the
     /// light. Derived rather than measured so a retuned ramp cannot go stale.
     pub fn horizon(&self) -> u32 {
-        blend(self.top, 0xFFFFFFFF, 150)
+        if self.key == SCENE_KEY_DAYLIGHT {
+            0xFFF2E4DC
+        } else {
+            blend(self.top, 0xFFFFFFFF, 150)
+        }
     }
 
     /// Ridge body just below the far skyline: the ridge stop pulled toward the
     /// foreground stop, because rock in shadow is darker than the sky on it.
     pub fn shadow(&self) -> u32 {
-        blend(self.mid, self.bottom, 80)
+        if self.key == SCENE_KEY_DAYLIGHT {
+            0xFF4E5866
+        } else {
+            blend(self.mid, self.bottom, 80)
+        }
     }
 
     /// The mist band behind the foreground: the ridge stop lifted toward the
     /// light, because mist scatters it.
     pub fn mist(&self) -> u32 {
-        blend(self.mid, 0xFFFFFFFF, 150)
+        if self.key == SCENE_KEY_DAYLIGHT {
+            0xFF707680
+        } else {
+            blend(self.mid, 0xFFFFFFFF, 150)
+        }
     }
 }
 
@@ -230,13 +242,13 @@ pub const SCENES: [Scene; 3] = [
     Scene {
         key: SCENE_KEY_DAYLIGHT,
         name: b"InterOS Daylight",
-        top: 0xFFE8E6E3,
-        mid: 0xFF4E5858,
-        bottom: 0xFF324141,
+        top: 0xFFC0C8D0,
+        mid: 0xFF8C95A3,
+        bottom: 0xFF0E0C0B,
         ink: 0xFF111214,
-        horizon_y: 229,
-        mist_y: 307,
-        rock_y: 391,
+        horizon_y: 138,
+        mist_y: 195,
+        rock_y: 260,
         far: &SCENE_DAYLIGHT_FAR,
         near: &SCENE_DAYLIGHT_NEAR,
     },
@@ -286,6 +298,7 @@ pub fn ramp3(scene: &Scene, t: u32) -> u32 {
 /// ramp scale out of a full `across` of 256 at the right edge.
 pub const ACROSS_SPAN: u32 = 256;
 const ACROSS_PERCENT: u32 = 26;
+#[allow(dead_code)]
 const ACROSS_REF_W: usize = SCENE_REF_W - 1;
 
 /// The two ramp fractions for one pixel, folded into a single interpolation.
@@ -376,45 +389,62 @@ impl<'a> SceneRef<'a> {
 /// byte-for-byte the same colour.
 #[inline(always)]
 pub fn scene_pixel_ref(s: &SceneRef<'_>, x: usize, y: usize, w: usize, h: usize) -> u32 {
-    if w == 0 || h == 0 {
+    if w <= 1 || h <= 1 {
         return s.scene.bottom;
     }
-    let fx = (x * SCENE_REF_W) / w;
-    let rel = ((y * SCENE_REF_H) / h) as u16;
-    let far = s.scene.far[fx.min(SCENE_REF_W - 1)];
-    let near = s.near[fx.min(SCENE_REF_W - 1)];
+
+    // Continuous fixed-point column sampling in 8-bit precision (scale 256)
+    let x_fixed = (x * (SCENE_REF_W - 1) * 256) / (w - 1);
+    let col = (x_fixed >> 8).min(SCENE_REF_W - 2);
+    let frac_x = (x_fixed & 0xFF) as u32;
+
+    let f0 = s.scene.far[col] as u32;
+    let f1 = s.scene.far[col + 1] as u32;
+    let far_ref_256 = f0 * (256 - frac_x) + f1 * frac_x;
+
+    let n0 = s.near[col] as u32;
+    let n1 = s.near[col + 1] as u32;
+    let near_ref_256 = n0 * (256 - frac_x) + n1 * frac_x;
+
     let horizon_y = s.scene.horizon_y;
     let mist_y = s.scene.mist_y;
     let rock_y = s.scene.rock_y;
 
-    // WHY a fraction of the ramp rather than a second measured column per band:
-    // the artwork's left/right split was one photograph's exposure, and the stop
-    // owns the exposure now. The sun is behind the far ridge on the right, so
-    // every band is lifted toward its own bright end as the frame goes right.
-    let across = ((fx * ACROSS_SPAN as usize) / ACROSS_REF_W.min(w.max(1) - 1)).min(256) as u32
-        * ACROSS_PERCENT
-        / 256;
+    let across = ((x * 256) / (w - 1)).min(256) as u32 * ACROSS_PERCENT / 256;
 
-    if rel < far {
-        let vertical = rel as u32 * 256 / horizon_y as u32;
-        blend(s.scene.top, s.horizon, band(vertical, across))
-    } else if rel < near {
-        // WHY saturating: the traced far ridge is not level, so a pixel can be
-        // below the ridge and above the nominal horizon height at the same
-        // time, and a plain subtraction there underflows.
-        let vertical =
-            rel.saturating_sub(horizon_y) as u32 * 256 / (mist_y - horizon_y) as u32;
-        blend(s.shadow, s.mist, band(vertical, across))
-    } else if (rel as usize) < rock_y as usize {
-        let vertical =
-            rel.saturating_sub(mist_y) as u32 * 256 / (rock_y - mist_y) as u32;
-        blend(s.mist, s.scene.bottom, band(vertical, across))
+    let y_ref_256 = (y as u32 * SCENE_REF_H as u32 * 256) / h as u32;
+    let rel = (y_ref_256 >> 8) as u16;
+
+    let vert_sky = (rel as u32 * 256 / horizon_y as u32).min(256);
+    let sky_col = blend(s.scene.top, s.horizon, band(vert_sky, across));
+
+    let vert_mtn = (rel.saturating_sub(horizon_y) as u32 * 256 / (mist_y - horizon_y).max(1) as u32).min(256);
+    let mtn_col = blend(s.shadow, s.mist, band(vert_mtn, across));
+
+    let rock_col = if (rel as usize) < rock_y as usize {
+        let vert_rock = (rel.saturating_sub(mist_y) as u32 * 256 / (rock_y - mist_y).max(1) as u32).min(256);
+        blend(s.mist, s.scene.bottom, band(vert_rock, across))
     } else {
-        // The near rock itself: the ramp's darkest stop, held, with only the sun
-        // lift on top. WHY it is the dark stop and not a blend toward it: below
-        // the rock line the artwork is not a gradient at all, it is the shadowed
-        // face of the foreground ridge.
         blend(s.scene.bottom, s.mist, across)
+    };
+
+    let scale_y = ((SCENE_REF_H as u32 * 256) / h as u32).max(1);
+    let diff_far = y_ref_256 as i32 - far_ref_256 as i32;
+    let diff_near = y_ref_256 as i32 - near_ref_256 as i32;
+    let half_scale = (scale_y as i32) / 2;
+
+    if diff_far < -half_scale {
+        sky_col
+    } else if diff_far <= half_scale {
+        let alpha = (((diff_far + half_scale) * 256) / scale_y.max(1) as i32).clamp(0, 256) as u32;
+        blend(sky_col, mtn_col, alpha)
+    } else if diff_near < -half_scale {
+        mtn_col
+    } else if diff_near <= half_scale {
+        let alpha = (((diff_near + half_scale) * 256) / scale_y.max(1) as i32).clamp(0, 256) as u32;
+        blend(mtn_col, rock_col, alpha)
+    } else {
+        rock_col
     }
 }
 

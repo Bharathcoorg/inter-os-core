@@ -66,22 +66,11 @@ $outputImg = "$rootDir\target\inter-os-bios.img"
 # WHY a copy rather than in place: the unstripped ELF is the only artifact that can
 # still be symbolised when a panic has to be diagnosed. Destroying it to save boot
 # time would trade a debugging capability for speed without saying so.
-$stripExe = Get-ChildItem -Path "$((rustc --print sysroot).Trim())\lib\rustlib" -Filter "llvm-strip.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-if ($stripExe) {
-    $packagedKernel = "$rootDir\target\kernel-boot.elf"
-    Copy-Item -LiteralPath $kernelElf -Destination $packagedKernel -Force
-    & $stripExe.FullName --strip-debug $packagedKernel
-    if ($LASTEXITCODE -ne 0) {
-        Write-Error "Stripping the kernel failed; packaging the unstripped ELF."
-        exit 1
-    }
-    $beforeKb = [math]::Round((Get-Item $kernelElf).Length / 1KB)
-    $afterKb = [math]::Round((Get-Item $packagedKernel).Length / 1KB)
-    Write-Host "[OK] Kernel stripped for boot: $beforeKb KB -> $afterKb KB (debug copy kept at target\kernel-boot.elf)" -ForegroundColor Green
-    $kernelElf = $packagedKernel
-} else {
-    Write-Host "[WARN] llvm-strip not found; packaging the kernel with its debug info, which makes boot slower." -ForegroundColor Yellow
-}
+# Do not run llvm-strip on the kernel ELF: bootloader 0.9.x relies on the relocation
+# table and section headers in the ELF to establish page mappings and jump to entry point.
+# Stripping with llvm-strip corrupts these tables, freezing QEMU at entry point.
+Write-Host "[Info] Packaging full kernel ELF directly with bootloader..." -ForegroundColor Green
+
 
 cargo +nightly run --manifest-path "$rootDir\boot\Cargo.toml" -- "$kernelElf" "$outputImg"
 if ($LASTEXITCODE -ne 0) {

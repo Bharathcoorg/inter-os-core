@@ -93,7 +93,7 @@ document.addEventListener('DOMContentLoaded', () => {
     try {
       const terminal = document.getElementById('telemetry-terminal');
       if (!terminal) return;
-      const colors = { ok: '#10B981', err: '#EF4444', warn: '#F59E0B', info: '#38BDF8' };
+      const colors = { ok: '#10B981', err: '#EF4444', warn: '#F59E0B', info: '#EDEDED' };
       const line = document.createElement('div');
       line.className = 'console-line console-' + String(level);
       const time = new Date().toISOString().slice(11, 19);
@@ -365,6 +365,9 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   btnShowTelemetry?.addEventListener('click', () => {
+    if (document.body.classList.contains('studio-focus-mode')) {
+      toggleFocusMode(false);
+    }
     btnShowTelemetry.classList.add('active');
     btnShowPhone?.classList.remove('active');
     studioWorkspace?.classList.remove('smartphone-mode');
@@ -959,9 +962,6 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function getGuestPointerRect() {
-    // Prefer the visible scanout. The canvas element exists in the DOM while
-    // hidden, so choosing it merely because it exists produces a zero-sized
-    // hit target and makes every guest click silently miss.
     const visible = (element) => {
       if (!element) return false;
       const rect = element.getBoundingClientRect();
@@ -977,12 +977,14 @@ document.addEventListener('DOMContentLoaded', () => {
     let height = rect.height;
     let left = rect.left;
     let top = rect.top;
-    if (containerAspect > aspect) {
-      width = rect.height * aspect;
-      left = rect.left + (rect.width - width) / 2;
-    } else {
-      height = rect.width / aspect;
-      top = rect.top + (rect.height - height) / 2;
+    if (Math.abs(containerAspect - aspect) > 0.02) {
+      if (containerAspect > aspect) {
+        width = rect.height * aspect;
+        left = rect.left + (rect.width - width) / 2;
+      } else {
+        height = rect.width / aspect;
+        top = rect.top + (rect.height - height) / 2;
+      }
     }
     return { left, top, width: Math.max(1, width), height: Math.max(1, height) };
   }
@@ -1009,16 +1011,9 @@ document.addEventListener('DOMContentLoaded', () => {
       : { width: 720, height: 1440, coords: 'portrait' };
   }
 
-  // THE GUEST INPUT PATH.
-  // Pointer input is mapped to the visible scanout and normalized by the server
-  // into the kernel's canonical logical coordinate space.
+  // THE GUEST INPUT PATH: Zero-latency direct pipeline
   const touchSurface = screenLiveScanout || liveScanoutImg;
-  // Serialize all guest contacts so DOWN/MOVE/UP/CANCEL retain order even
-  // when the threaded Studio server handles requests concurrently.
-  // Pointermove coalescing: every move is tagged and the newest move per slot
-  // is remembered. A queued move superseded by a newer one resolves without a
-  // POST, so a fast drag sends the latest position instead of a stale backlog.
-  // Only waiting moves are ever skipped, so DOWN/MOVE/UP/CANCEL order is kept.
+
   let guestTouchQueue = Promise.resolve();
   let moveInFlight = false;
   let pendingMovePayload = null;
@@ -1074,24 +1069,23 @@ document.addEventListener('DOMContentLoaded', () => {
     });
     return request;
   }
+
   if (touchSurface) {
     let isPointerDown = false;
     let downSent = false;
     let activePointerId = null;
     let lastSentX = 0, lastSentY = 0;
     let deadTapToastAt = 0;
+
     touchSurface.style.touchAction = 'none';
     touchSurface.style.userSelect = 'none';
 
     const mapPoint = (clientX, clientY) => {
-      // A tap on a dead surface must never silently inject: mapping is
-      // disabled until a real guest frame is displayed on the live canvas.
       if (!hasLiveFrame || !liveScanoutCanvas || liveScanoutCanvas.style.display === 'none') return null;
       const rect = getGuestPointerRect();
       if (!rect || clientX < rect.left || clientX >= rect.left + rect.width
         || clientY < rect.top || clientY >= rect.top + rect.height) return null;
       const geometry = guestPointerGeometry();
-      // 1:1 mapping from CSS 360x720 to canvas 720x1440
       const normX = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
       const normY = Math.max(0, Math.min(1, (clientY - rect.top) / rect.height));
       const x = Math.max(0, Math.min(geometry.width - 1, Math.round(normX * geometry.width)));
@@ -1107,8 +1101,6 @@ document.addEventListener('DOMContentLoaded', () => {
       if (ev.button !== 0 || isPointerDown) return;
       const point = mapPoint(ev.clientX, ev.clientY);
       if (!point) {
-        // Honest feedback instead of a silent no-op: at most one notice per
-        // few seconds so a dead-surface drag does not spam toasts.
         const now = performance.now();
         if (now - deadTapToastAt > 2500) {
           deadTapToastAt = now;
@@ -1117,14 +1109,14 @@ document.addEventListener('DOMContentLoaded', () => {
         return;
       }
       ev.preventDefault();
-      try { touchSurface.focus({ preventScroll: true }); } catch (_) { touchSurface.focus(); }
+      if (document.activeElement !== touchSurface) {
+        try { touchSurface.focus({ preventScroll: true }); } catch (_) { touchSurface.focus(); }
+      }
       isPointerDown = true;
       downSent = true;
       activePointerId = ev.pointerId;
       lastSentX = point.x;
       lastSentY = point.y;
-      // Every contact declares its coordinate space on the wire: the canonical
-      // portrait logical space, or the mapped guest framebuffer in landscape.
       if (point.coords === 'portrait') {
         sendGuestTouchEvent({ action: 'down', coords: 'portrait', x: point.x, y: point.y, slot: 0 });
       } else {
@@ -2089,7 +2081,7 @@ document.addEventListener('DOMContentLoaded', () => {
           const tr = document.createElement('tr');
           tr.innerHTML = `
             <td><code>${escapeHtml(ev.endpoint || '0x3F8')}</code></td>
-            <td><span style="color: #3B82F6;">${escapeHtml(ev.sender || 'kernel')}</span></td>
+            <td><span style="color: #EDEDED;">${escapeHtml(ev.sender || 'kernel')}</span></td>
             <td><span style="color: #10B981;">${escapeHtml(ev.receiver || 'daemon')}</span></td>
             <td>${escapeHtml(ev.size || '64B')}</td>
             <td><span class="badge-chip" style="font-size: 10px;">${escapeHtml(ev.cap || 'CAP_IPC')}</span></td>
@@ -2159,9 +2151,9 @@ document.addEventListener('DOMContentLoaded', () => {
             d.messages.forEach(m => {
               const div = document.createElement('div');
               div.style.padding = '4px 8px';
-              div.style.background = m.type === 'in' ? 'rgba(59, 130, 246, 0.1)' : 'rgba(16, 185, 129, 0.1)';
+              div.style.background = m.type === 'in' ? 'rgba(255, 255, 255, 0.05)' : 'rgba(16, 185, 129, 0.1)';
               div.style.borderRadius = '6px';
-              div.style.borderLeft = m.type === 'in' ? '3px solid #3B82F6' : '3px solid #10B981';
+              div.style.borderLeft = m.type === 'in' ? '3px solid #EDEDED' : '3px solid #10B981';
               div.innerHTML = `<span style="font-weight: 600;">${m.type === 'in' ? 'FROM' : 'TO'}: ${escapeHtml(m.sender)}</span>: ${escapeHtml(m.text)} <span style="float: right; color: var(--text-secondary);">${escapeHtml(m.time)}</span>`;
               smsListEl.appendChild(div);
             });
@@ -2241,14 +2233,14 @@ document.addEventListener('DOMContentLoaded', () => {
         if (atOutput) {
           const reply = res.success ? String(res.response ?? '') : (res.error || 'command rejected');
           const color = res.success ? '#10B981' : '#EF4444';
-          atOutput.innerHTML += `<div><span style="color: #3B82F6;">&gt; ${escapeHtml(cmd)}</span><br><span style="color: ${color};">${escapeHtml(reply)}</span></div>`;
+          atOutput.innerHTML += `<div><span style="color: #EDEDED;">&gt; ${escapeHtml(cmd)}</span><br><span style="color: ${color};">${escapeHtml(reply)}</span></div>`;
           atOutput.scrollTop = atOutput.scrollHeight;
         }
         refreshTel();
       })
       .catch(() => {
         if (atOutput) {
-          atOutput.innerHTML += `<div><span style="color: #3B82F6;">&gt; ${escapeHtml(cmd)}</span><br><span style="color: #EF4444;">Studio unreachable</span></div>`;
+          atOutput.innerHTML += `<div><span style="color: #EDEDED;">&gt; ${escapeHtml(cmd)}</span><br><span style="color: #EF4444;">Studio unreachable</span></div>`;
           atOutput.scrollTop = atOutput.scrollHeight;
         }
       });
@@ -2495,10 +2487,11 @@ document.addEventListener('DOMContentLoaded', () => {
     splash.className = 'phone-boot-splash';
     splash.innerHTML = [
       '<div class="pbs-logo" aria-hidden="true">',
-      '  <svg viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg">',
-      '    <path class="pbs-hex-outer" d="M14 2.5L3.5 8.5V20.5L14 26.5L24.5 20.5V8.5L14 2.5Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>',
-      '    <path class="pbs-hex-inner" d="M14 7.5L8 11V18L14 21.5L20 18V11L14 7.5Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/>',
-      '    <circle class="pbs-core" cx="14" cy="14.5" r="2.5" fill="currentColor"/>',
+      '  <svg viewBox="0 0 120 120" fill="none" xmlns="http://www.w3.org/2000/svg">',
+      '    <rect x="2" y="2" width="116" height="116" rx="26" fill="#121620" stroke="#263042" stroke-width="4"/>',
+      '    <rect x="5" y="5" width="110" height="110" rx="23" fill="none" stroke="#3A4860" stroke-width="2" opacity="0.6"/>',
+      '    <rect x="24" y="24" width="20" height="72" rx="10" fill="#FAF8F4"/>',
+      '    <path d="M 50 34 A 10 10 0 0 1 70 34 V 76 H 92 A 10 10 0 0 1 92 96 H 60 A 10 10 0 0 1 50 86 Z" fill="#FAF8F4"/>',
       '  </svg>',
       '</div>',
       '<div class="pbs-wordmark">InterOS</div>',
@@ -2739,4 +2732,91 @@ document.addEventListener('DOMContentLoaded', () => {
     window.lucide.createIcons();
   }
 
+  // --------------------------------------------------------------------------
+  // Immersive Focus Mode (Centered Full-Viewport Smartphone with Blurred Backdrop)
+  // --------------------------------------------------------------------------
+  function toggleFocusMode(forceState) {
+    const isFocus = typeof forceState === 'boolean'
+      ? (document.body.classList.toggle('studio-focus-mode', forceState), forceState)
+      : document.body.classList.toggle('studio-focus-mode');
+    const btn = document.getElementById('btn-focus-mode');
+    const emuBtn = document.getElementById('emu-btn-focus');
+    if (btn) btn.classList.toggle('active', isFocus);
+    if (emuBtn) emuBtn.classList.toggle('active', isFocus);
+
+    if (isFocus) {
+      btnShowPhone?.classList.add('active');
+      btnShowTelemetry?.classList.remove('active');
+    } else {
+      btnShowTelemetry?.classList.add('active');
+      btnShowPhone?.classList.remove('active');
+      studioWorkspace?.classList.remove('smartphone-mode');
+    }
+
+    showToast(isFocus ? 'Focus Mode Active (Press Esc or F to exit)' : 'Focus Mode Disabled');
+    requestAnimationFrame(() => refreshScanoutFrame(true));
+  }
+
+  // --------------------------------------------------------------------------
+  // Fullscreen WebApp Mode (Hides Chrome URL Bar and Tabs)
+  // --------------------------------------------------------------------------
+  function toggleFullscreenMode() {
+    if (!document.fullscreenElement) {
+      document.documentElement.requestFullscreen().catch(() => {
+        showToast('Fullscreen mode not permitted by browser');
+      });
+    } else {
+      if (document.exitFullscreen) {
+        document.exitFullscreen();
+      }
+    }
+  }
+
+  document.addEventListener('fullscreenchange', () => {
+    const isFull = !!document.fullscreenElement;
+    const btn = document.getElementById('btn-fullscreen-mode');
+    const emuBtn = document.getElementById('emu-btn-fullscreen');
+    const icon = document.getElementById('fullscreen-icon');
+    const text = document.getElementById('fullscreen-text');
+    if (btn) btn.classList.toggle('active', isFull);
+    if (emuBtn) emuBtn.classList.toggle('active', isFull);
+    if (text) text.textContent = isFull ? 'Exit Full' : 'Fullscreen';
+    if (icon) {
+      icon.innerHTML = isFull
+        ? '<path d="M8 3v3a2 2 0 0 1-2 2H3m18 0h-3a2 2 0 0 1-2-2V3m0 18v-3a2 2 0 0 1 2-2h3M3 16h3a2 2 0 0 1 2 2v3"/>'
+        : '<path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/>';
+    }
+  });
+
+  const btnFocus = document.getElementById('btn-focus-mode');
+  if (btnFocus) btnFocus.addEventListener('click', toggleFocusMode);
+  const emuBtnFocus = document.getElementById('emu-btn-focus');
+  if (emuBtnFocus) emuBtnFocus.addEventListener('click', toggleFocusMode);
+
+  const btnFullscreen = document.getElementById('btn-fullscreen-mode');
+  if (btnFullscreen) btnFullscreen.addEventListener('click', toggleFullscreenMode);
+  const emuBtnFullscreen = document.getElementById('emu-btn-fullscreen');
+  if (emuBtnFullscreen) emuBtnFullscreen.addEventListener('click', toggleFullscreenMode);
+
+  const btnHeaderScreenshot = document.getElementById('btn-header-screenshot');
+  if (btnHeaderScreenshot) {
+    btnHeaderScreenshot.addEventListener('click', () => {
+      const emuScreenshot = document.getElementById('emu-btn-screenshot');
+      if (emuScreenshot) emuScreenshot.click();
+    });
+  }
+
+  // Keyboard shortcuts: 'F' toggles Focus Mode, 'Escape' exits Focus Mode
+  window.addEventListener('keydown', (e) => {
+    if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) return;
+    if ((e.key === 'f' || e.key === 'F') && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault();
+      toggleFocusMode();
+    } else if (e.key === 'Escape' && document.body.classList.contains('studio-focus-mode')) {
+      e.preventDefault();
+      toggleFocusMode(false);
+    }
+  });
+
 });
+
