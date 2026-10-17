@@ -1,4 +1,4 @@
-﻿$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Stop"
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $rootDir = Split-Path -Parent $scriptDir
@@ -43,14 +43,11 @@ $qemuArgs = @(
     "-drive", "format=raw,file=$img,index=0",
     "-drive", "format=raw,file=$dataPath,index=1",
     "-vga", "none",
-    "-device", "virtio-vga,edid=on,xres=720,yres=1440",
-    # No -device pointer flag: q35 already exposes the i8042 PS/2 controller
-    # the guest driver uses, and this QEMU build rejects a PS/2 mouse device
-    # flag.
+    "-device", "VGA,edid=on,xres=720,yres=1440,vgamem_mb=32",
     "-display", "vnc=127.0.0.1:1",
     "-serial", "tcp:127.0.0.1:4301,server,nowait",
     "-monitor", "tcp:127.0.0.1:44445,server,nowait",
-    "-name", "Inter OS v0.1"
+    "-name", "InterOS-v0.1"
 )
 $qemuProcess = Start-Process -FilePath $qemu -ArgumentList $qemuArgs -PassThru -NoNewWindow
 Write-Host "[QEMU] Started (PID: $($qemuProcess.Id))" -ForegroundColor Green
