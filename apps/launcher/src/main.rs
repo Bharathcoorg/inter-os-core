@@ -1689,21 +1689,21 @@ fn resolve_app_at_touch<'a>(state: &'a LauncherState, x: u32, y: u32) -> Option<
     // camera/files/browser from a pixel that draws no such tile (WRONG-APP).
     if state.current_view == ViewMode::HomeScreen {
         // 4. Row 0 of Quick Action Dock: Phone, Messages, Camera
-        if (700..980).contains(&y) {
-            if (48..238).contains(&x) {
+        if (700..925).contains(&y) || (700..980).contains(&y) {
+            if (30..238).contains(&x) {
                 return package_id_by_suffix(state, b"dialer");
-            } else if (265..455).contains(&x) {
+            } else if (255..465).contains(&x) {
                 return package_id_by_suffix(state, b"messages");
-            } else if (482..672).contains(&x) {
+            } else if (480..695).contains(&x) {
                 return package_id_by_suffix(state, b"camera");
             }
         }
 
         // 5. Row 1 of Quick Action Dock: Files, Browser
-        if (1020..1300).contains(&y) {
-            if (48..238).contains(&x) {
+        if (925..1160).contains(&y) || (1020..1300).contains(&y) {
+            if (30..238).contains(&x) {
                 return package_id_by_suffix(state, b"file_manager").or_else(|| package_id_by_suffix(state, b"files"));
-            } else if (265..455).contains(&x) {
+            } else if (255..465).contains(&x) {
                 return package_id_by_suffix(state, b"browser");
             }
         }
@@ -4085,6 +4085,7 @@ pub extern "C" fn _start() -> ! {
                                 if ((660..800).contains(&y) && (482..672).contains(&x))
                                     || ((1020..1320).contains(&y) && (482..672).contains(&x))
                                     || ((1120..1400).contains(&y) && (490..645).contains(&x))
+                                    || ((925..1160).contains(&y) && (480..695).contains(&x))
                                 {
                                     state.current_view = ViewMode::AppDrawer;
                                     render_view(surface, &state);

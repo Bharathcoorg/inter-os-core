@@ -43,7 +43,7 @@ use crate::{test_text_aa, LauncherState};
 use launcher::layout::{self, Rect};
 use launcher::text;
 use launcher::theme::{
-    radius, space, type_scale, Theme, CONTENT_PADDING, MIN_TOUCH_TARGET, NAV_BAR_HEIGHT,
+    space, type_scale, Theme, CONTENT_PADDING, MIN_TOUCH_TARGET, NAV_BAR_HEIGHT,
     SCREEN_HEIGHT, SCREEN_WIDTH, STATUS_BAR_HEIGHT,
 };
 
@@ -177,6 +177,7 @@ const TILE_MAX: usize = space::XXL * 4;
 const TILE_GUTTER: usize = space::XL;
 
 /// Height of the home gesture pill, and the gap above the bottom of the surface.
+#[allow(dead_code)]
 const GESTURE_PILL_H: usize = space::SM;
 
 /// Telemetry glyph metrics in the 48 px status bar.
@@ -204,6 +205,7 @@ const LOG_TAIL: &[u8] = b"Home surface rendered.";
 #[derive(Clone, Copy)]
 struct Frame {
     greeting: Rect,
+    date_widget: Rect,
     card: Rect,
     card_title: Rect,
     card_rows: Rect,
@@ -214,21 +216,21 @@ struct Frame {
 
 /// Height of one system-status row: a name band, a detail band and a gap.
 fn card_row_h() -> usize {
-    100
+    110
 }
 
 /// Height of the system card: its title band, its rows and the gaps between them.
 fn card_h() -> usize {
-    490
+    460
 }
 
 fn frame() -> Frame {
-    let content = layout::content_area(CONTENT_PADDING);
-    let greeting = Rect::new(content.x, 56, content.w, 96);
+    let greeting = Rect::new(30, 56, 440, 130);
+    let date_widget = Rect::new(490, 56, 200, 124);
     let card = Rect::new(
-        content.x,
-        168,
-        content.w,
+        30,
+        205,
+        660,
         card_h(),
     );
     let card_title = Rect::new(
@@ -243,23 +245,17 @@ fn frame() -> Frame {
         card.w - space::LG * 2,
         card.h - space::MD - space::XXL - space::SM,
     );
-    // WHY x 30 and 660 wide: the band must cover the drawn tiles (`DOCK_TILES`
-    // run 30..690 with 30px gutters, the reference's own gutter), or the outer
-    // 18px of both edge columns falls through to the wallpaper. It used to be
-    // 48..672, which clipped exactly that.
     let deck = Rect::new(
         30,
-        700,
+        695,
         660,
-        620,
+        450,
     );
-    // WHY directly below the deck: the deck ends at 1320 and the nav bar starts
-    // at 1392, so 1320..1384 is the only band that touches neither. The shell
-    // hit-tests this exact rect for the System Space tap.
-    let search = Rect::new(40, SEARCH_TOP, 640, SEARCH_H);
+    let search = Rect::new(30, 1320, 660, 56);
     let nav = Rect::new(0, SCREEN_HEIGHT - NAV_BAR_HEIGHT, SCREEN_WIDTH, NAV_BAR_HEIGHT);
     Frame {
         greeting,
+        date_widget,
         card,
         card_title,
         card_rows,
@@ -555,6 +551,7 @@ struct DeckTilePlan {
     /// the deck showed a grid of unlabelled tiles; the resolution work was already
     /// here, so painting it costs one bounds test per pixel inside a tile.
     label: Run,
+    #[allow(dead_code)]
     fill: u32,
 }
 
@@ -644,6 +641,9 @@ struct Paint {
     scene_ref: interos_std::design::walls::SceneRef<'static>,
     clock: Option<Run>,
     greeting: [Run; 3],
+    date_day: Run,
+    date_month: Run,
+    date_weekday: Run,
     weather: Run,
     card_title: Run,
     card_stack: Option<Rect>,
@@ -651,7 +651,9 @@ struct Paint {
     deck: DeckPlan,
     search_magnifier: (usize, usize, i32),
     search: Run,
+    #[allow(dead_code)]
     nav_back: Run,
+    #[allow(dead_code)]
     nav_recents: Run,
     nav_pill: Rect,
     telemetry: Telemetry,
@@ -718,33 +720,75 @@ fn build(state: &LauncherState) -> Paint {
     };
 
     // Greeting: the day-part comes from the real RTC hour when the kernel
-    // answered, and says nothing time-specific when it did not. WHY not a fixed
-    // "Good morning": with no reading that string claims a time of day the shell
-    // never measured.
-    let title_scale = type_scale::BODY;
+    // answered, and says nothing time-specific when it did not.
+    let title_scale = type_scale::TITLE;
     let caption_scale = type_scale::CAPTION;
-    let l1_y = f.greeting.y;
-    let l2_y = l1_y + text::line_height(title_scale) + space::SM;
+    let l1_y = f.greeting.y + 4;
+    let l2_y = l1_y + text::line_height(caption_scale) + 2;
+    let l3_y = l2_y + text::line_height(title_scale) + 4;
+
     let day_part: &[u8] = if !state.clock_source_ok {
-        b"Welcome"
+        b"Welcome,"
     } else if state.clock_time[0].is_ascii_digit() && state.clock_time[1].is_ascii_digit() {
         let hour = (state.clock_time[0] - b'0') * 10 + (state.clock_time[1] - b'0');
         if hour < 12 {
-            b"Good morning"
+            b"Good morning,"
         } else if hour < 18 {
-            b"Good afternoon"
+            b"Good afternoon,"
         } else {
-            b"Good evening"
+            b"Good evening,"
         }
     } else {
-        b"Welcome"
+        b"Welcome,"
     };
+
     let greeting = [
-        Run::whole(f.greeting.x, l1_y, title_scale, day_part, 0),
-        Run::whole(f.greeting.x, l2_y, caption_scale, b"Let's make a good day.", 0),
-        Run::EMPTY,
+        Run::whole(f.greeting.x, l1_y, caption_scale, day_part, 0),
+        Run::whole(f.greeting.x, l2_y, title_scale, b"Bharath", 0),
+        Run::whole(f.greeting.x, l3_y, caption_scale, b"Let's make today a good day.", 0),
     ];
-    // Weather remains empty until a real weather capability is bound.
+
+    // Date widget: real RTC calendar date & weekday
+    let (full_weekday, day_slice, full_month): (&[u8], &[u8], &[u8]) =
+        if state.clock_source_ok && state.date_line[0] != b' ' {
+            let weekday = match &state.date_line[0..3] {
+                b"Mon" => &b"MONDAY"[..],
+                b"Tue" => &b"TUESDAY"[..],
+                b"Wed" => &b"WEDNESDAY"[..],
+                b"Thu" => &b"THURSDAY"[..],
+                b"Fri" => &b"FRIDAY"[..],
+                b"Sat" => &b"SATURDAY"[..],
+                b"Sun" => &b"SUNDAY"[..],
+                _ => &b"TODAY"[..],
+            };
+            let day_start = if state.date_line[5] == b'0' { 6 } else { 5 };
+            let day = &state.date_line[day_start..7];
+            let month = match &state.date_line[8..11] {
+                b"Jan" => &b"JANUARY"[..],
+                b"Feb" => &b"FEBRUARY"[..],
+                b"Mar" => &b"MARCH"[..],
+                b"Apr" => &b"APRIL"[..],
+                b"May" => &b"MAY"[..],
+                b"Jun" => &b"JUNE"[..],
+                b"Jul" => &b"JULY"[..],
+                b"Aug" => &b"AUGUST"[..],
+                b"Sep" => &b"SEPTEMBER"[..],
+                b"Oct" => &b"OCTOBER"[..],
+                b"Nov" => &b"NOVEMBER"[..],
+                b"Dec" => &b"DECEMBER"[..],
+                _ => &b"CALENDAR"[..],
+            };
+            (weekday, day, month)
+        } else {
+            (&b"CALENDAR"[..], &b"--"[..], &b"OFFLINE"[..])
+        };
+
+    let dw = f.date_widget;
+    let dw_w = dw.w;
+    let date_weekday = Run::centred(dw.x, dw.y + 12, caption_scale, dw_w.saturating_sub(16), dw_w, full_weekday, theme.accent);
+    let date_day = Run::centred(dw.x, dw.y + 38, type_scale::TITLE, dw_w.saturating_sub(16), dw_w, day_slice, theme.text);
+    let date_month = Run::centred(dw.x, dw.y + 92, caption_scale, dw_w.saturating_sub(16), dw_w, full_month, theme.text_muted);
+
     let weather = Run::EMPTY;
 
     let card_title = Run::whole(
@@ -755,11 +799,11 @@ fn build(state: &LauncherState) -> Paint {
         theme.text,
     );
     let card_row_h = card_row_h();
-    let card_stack = layout::list(f.card_rows, CARD_ROWS, card_row_h, space::LG);
+    let card_stack = layout::list(f.card_rows, CARD_ROWS, card_row_h, space::MD);
     let mut card_rows = [CardRowPlan::EMPTY; CARD_ROWS];
     if let Some(stack) = card_stack {
         for row in 0..CARD_ROWS {
-            let Some(rect) = layout::list_row(stack, row, CARD_ROWS, card_row_h, space::LG) else {
+            let Some(rect) = layout::list_row(stack, row, CARD_ROWS, card_row_h, space::MD) else {
                 continue;
             };
             let mut buf = [0u8; CARD_DETAIL_CAP];
@@ -767,15 +811,15 @@ fn build(state: &LauncherState) -> Paint {
             card_rows[row] = CardRowPlan {
                 rect,
                 name: Run::whole(
-                    rect.x + space::XXL,
-                    rect.y + 12,
+                    rect.x + 80,
+                    rect.y + 16,
                     CARD_ROW_LABEL,
                     card_row_name(row),
                     theme.text,
                 ),
                 detail: Run::whole(
-                    rect.x + space::XXL,
-                    rect.y + 12 + text::line_height(CARD_ROW_LABEL) + space::SM,
+                    rect.x + 80,
+                    rect.y + 16 + text::line_height(CARD_ROW_LABEL) + space::SM,
                     CARD_ROW_DETAIL,
                     &buf[..len],
                     theme.text_muted,
@@ -799,7 +843,7 @@ fn build(state: &LauncherState) -> Paint {
             search_y,
             LABEL_SCALE,
             search_room,
-            b"Search apps and files",
+            b"Search apps, settings & files",
             theme.text_muted,
         )
     } else {
@@ -808,9 +852,6 @@ fn build(state: &LauncherState) -> Paint {
 
     let nav_scale = type_scale::CAPTION;
     let nav_cy = f.nav.y + f.nav.h.saturating_sub(text::line_height(nav_scale)) / 2;
-    // WHY the two navigation glyphs are placed here: their origins came from
-    // `text::measure` of a one- and two-byte literal, once per pixel, and they sit
-    // on the wallpaper ramp, so their ink is supplied per row rather than baked in.
     let nav_back = Run::whole(
         (f.nav.w / 6).saturating_sub(text::measure(b"<", nav_scale) / 2),
         nav_cy,
@@ -825,12 +866,15 @@ fn build(state: &LauncherState) -> Paint {
         b"[]",
         0,
     );
-    let pill_w = space::XXL * 5;
+    let pill_w = 140;
 
     Paint {
         frame: f,
         clock,
         greeting,
+        date_day,
+        date_month,
+        date_weekday,
         weather,
         card_title,
         card_stack,
@@ -842,9 +886,9 @@ fn build(state: &LauncherState) -> Paint {
         nav_recents,
         nav_pill: Rect::new(
             (SCREEN_WIDTH - pill_w) / 2,
-            f.nav.y + f.nav.h - space::MD - GESTURE_PILL_H,
+            1418,
             pill_w,
-            GESTURE_PILL_H,
+            5,
         ),
         telemetry: telemetry_plan(),
         scene: state.home_wallpaper,
@@ -863,16 +907,16 @@ fn build(state: &LauncherState) -> Paint {
 /// render), so even the widest name fits with room on either side, and the
 /// padding stays XS so short names keep breathing room.
 pub const DOCK_TILES: [Rect; 6] = [
-    Rect::new(30, 700, 200, 280),
-    Rect::new(260, 700, 200, 280),
-    Rect::new(490, 700, 200, 280),
-    Rect::new(30, 1020, 200, 280),
-    Rect::new(260, 1020, 200, 280),
-    Rect::new(490, 1020, 200, 280),
+    Rect::new(30, 700, 200, 200),
+    Rect::new(260, 700, 200, 200),
+    Rect::new(490, 700, 200, 200),
+    Rect::new(30, 930, 200, 200),
+    Rect::new(260, 930, 200, 200),
+    Rect::new(490, 930, 200, 200),
 ];
 
-/// Half-size of a deck tile's pictogram, in pixels: a 72x72 box for high legibility.
-pub const DOCK_ICON_EXTENT: i32 = 36;
+/// Half-size of a deck tile's pictogram, in pixels: 52x52 box.
+pub const DOCK_ICON_EXTENT: i32 = 26;
 
 pub fn find_package_index(state: &LauncherState, suffix: &[u8]) -> Option<usize> {
     for i in 0..state.app_count {
@@ -892,15 +936,10 @@ fn deck_plan(state: &LauncherState, theme: &Theme, _deck: Rect) -> DeckPlan {
         slots: 6,
         columns: 3,
         rows: 2,
-        // WHY 30 and 230: the origin and pitch must name the drawn grid
-        // (`DOCK_TILES` at x 30/260/490, 200 wide with 30px gutters), or
-        // `slot_at` resolves taps and pixels against a grid the painter never
-        // drew. The pitch used to be 217 from a 48 origin, a third grid that
-        // matched neither the tiles nor the tap ranges.
         origin_x: 30,
         origin_y: 700,
         pitch_x: 230,
-        pitch_y: 320,
+        pitch_y: 230,
         app_count: 6,
         empty: None,
     };
@@ -952,16 +991,8 @@ fn deck_plan(state: &LauncherState, theme: &Theme, _deck: Rect) -> DeckPlan {
         let label_bytes = label_bytes[slot];
 
         let icon_cx = cell.x + cell.w / 2;
-        // WHY the block is centred rather than at fixed offsets: the tile is 280
-        // tall and its content is a 48px pictogram, a 20px gap and a 24px name
-        // cell, which is 92 -- leaving 94px above and below. The offsets are
-        // derived from `DOCK_ICON_EXTENT` so changing the icon size moves the
-        // name with it instead of leaving the block lopsided.
-        let block_h = DOCK_ICON_EXTENT as usize * 2 + space::MD + space::XS
-            + text::line_height(label_scale);
-        let block_y = cell.y + (cell.h.saturating_sub(block_h)) / 2;
-        let icon_cy = block_y + DOCK_ICON_EXTENT as usize;
-        let label_y = block_y + DOCK_ICON_EXTENT as usize * 2 + space::MD + space::XS;
+        let icon_cy = cell.y + 72;
+        let label_y = cell.y + 144;
 
         plan.cells[slot] = DeckTilePlan {
             cell,
@@ -1046,18 +1077,18 @@ pub fn home_hit(state: &LauncherState, x: usize, y: usize) -> Option<usize> {
     // WHY these ranges are the tile rects and not the old 48-based ones: the tap
     // must answer for exactly what the painter draws (`DOCK_TILES`), or the
     // outer 18px of both edge columns would launch nothing while showing tile.
-    let col = if (30..230).contains(&x) {
+    let col = if (30..235).contains(&x) {
         0
-    } else if (260..460).contains(&x) {
+    } else if (255..465).contains(&x) {
         1
-    } else if (490..690).contains(&x) {
+    } else if (485..695).contains(&x) {
         2
     } else {
         return None;
     };
-    let row = if (700..980).contains(&y) {
+    let row = if (700..925).contains(&y) {
         0
-    } else if (1020..1300).contains(&y) {
+    } else if (925..1160).contains(&y) {
         1
     } else {
         return None;
@@ -1303,17 +1334,34 @@ fn telemetry_pixel(x: usize, y: usize, t: &Telemetry, ink: u32) -> Option<u32> {
 /// weather sensor, no weather capability and no weather syscall here, so the line
 /// states the absence instead of showing a plausible number.
 fn greeting_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option<u32> {
+    // Check right date widget first
+    if f.date_widget.contains(x, y) {
+        if !rounded_contains(f.date_widget, x, y, 24) {
+            return None;
+        }
+        if rounded_outline(f.date_widget, x, y, 24) {
+            return Some(theme.border);
+        }
+        let bg = backdrop_ref(&p.scene_ref, x, y);
+        let card_fill = Theme::veil(bg, 90, true);
+        if let Some(c) = p.date_weekday.pixel_aa(x, y, p.date_weekday.ink, card_fill) {
+            return Some(c);
+        }
+        if let Some(c) = p.date_day.pixel_aa(x, y, p.date_day.ink, card_fill) {
+            return Some(c);
+        }
+        if let Some(c) = p.date_month.pixel_aa(x, y, p.date_month.ink, card_fill) {
+            return Some(c);
+        }
+        return Some(card_fill);
+    }
+
     let band = Rect::new(0, f.greeting.y, SCREEN_WIDTH, f.greeting.h);
     if !band.contains(x, y) {
         return None;
     }
-    // WHY no weather glyph here: there is no location source, no weather sensor
-    // and no weather syscall on this platform, so a sun disc and temperature
-    // would be fabricated readings. The weather run stays empty (see `build`) and
-    // the absence is stated, not painted over.
 
-    // WHY the ink is taken per row and not baked into the runs: these four lines are
-    // drawn straight onto the wallpaper ramp, whose colour is a function of `y`.
+    // Ink is taken per row against the wallpaper ramp
     let ink = layout::ink_on(theme, backdrop_ref(&p.scene_ref, x, y));
     for run in p.greeting.iter() {
         if let Some(c) = run.pixel_inked_aa(x, y, ink, backdrop_ref(&p.scene_ref, x, y)) {
@@ -1370,15 +1418,13 @@ fn push_decimal(out: &mut [u8], at: usize, value: usize) -> usize {
 /// The card's detail line for a row, read from real state.
 fn card_row_text(state: &LauncherState, row: usize, out: &mut [u8; CARD_DETAIL_CAP]) -> usize {
     match row {
-        // WHY this and not an "active" claim: there is no calendar store and no
-        // sync service behind this shell, so a row that said it was up to date
-        // would be fabricating status on the surface the user reads as device
-        // state. WHY it is phrased as the missing thing rather than as an
-        // error: the earlier text was "Calendar sync unavailable - no event
-        // data", which reports a subsystem failure for what is simply an empty
-        // calendar on a phone that has not been given one. `live_widgets.rs`
-        // states the same absence as "no event data"; this matches it.
-        0 => put(out, 0, b"No events on this device"),
+        0 => {
+            if state.task0_done {
+                put(out, 0, b"All tasks completed")
+            } else {
+                put(out, 0, b"No events on this device")
+            }
+        }
         1 => {
             // WHY notifications and not messages: this count is the system-wide
             // notification query, not a per-app message count, so labelling it
@@ -1437,40 +1483,48 @@ fn card_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option
     if !f.card.contains(x, y) {
         return None;
     }
-    if !rounded_contains(f.card, x, y, radius::CARD) {
+    if !rounded_contains(f.card, x, y, 28) {
         return None;
     }
-    if rounded_outline(f.card, x, y, radius::CARD) {
+    if rounded_outline(f.card, x, y, 28) {
         return Some(theme.border);
     }
-    if let Some(c) = p.card_title.pixel_aa(x, y, p.card_title.ink, theme.surface) {
+    let bg = backdrop_ref(&p.scene_ref, x, y);
+    let card_fill = Theme::veil(bg, 92, true);
+
+    // Dividers between rows
+    if (y == 373 || y == 495) && x >= f.card.x + 24 && x <= f.card.x + f.card.w - 24 {
+        return Some(Theme::veil(card_fill, 15, false));
+    }
+
+    if let Some(c) = p.card_title.pixel_aa(x, y, p.card_title.ink, card_fill) {
         return Some(c);
     }
 
     if p.card_stack.is_none() {
-        return None;
+        return Some(card_fill);
     }
+
     for (row_idx, row) in p.card_rows.iter().enumerate() {
         if !row.rect.contains(x, y) {
             continue;
         }
-        let icon_cx = (row.rect.x + space::MD) as i32;
-        let icon_cy = (row.rect.y + 12 + text::line_height(CARD_ROW_LABEL) / 2) as i32;
+
+        // Right chevron '>' at x: 645
+        let row_cy = row.rect.y + row.rect.h / 2;
+        let cdx = x as i32 - 645;
+        let cdy = (y as i32 - row_cy as i32).abs();
+        if cdx >= -3 && cdx <= 3 && (cdy == cdx + 3 || cdy == cdx + 2) {
+            return Some(theme.text_muted);
+        }
+
+        let icon_cx = 78i32;
+        let icon_cy = (row.rect.y + 16 + text::line_height(CARD_ROW_LABEL) / 2) as i32;
         let idx = x as i32 - icon_cx;
         let idy = y as i32 - icon_cy;
 
         match row_idx {
             0 => {
-                // Schedule: vector mini calendar icon with loops, header bar, and date dot
-                if idx.abs() <= 6 && idy >= -7 && idy <= 7 {
-                    let loops = (idx == -3 || idx == 3) && (idy >= -7 && idy <= -5);
-                    let top_bar = (idx.abs() <= 5) && (idy >= -5 && idy <= -3);
-                    let rim = (idx.abs() == 5 && (idy >= -5 && idy <= 5)) || (idy == 5 && idx.abs() <= 5);
-                    let date_dot = (idx.abs() <= 1) && (idy >= 0 && idy <= 1);
-                    if loops || top_bar || rim || date_dot {
-                        return Some(theme.accent);
-                    }
-                }
                 // Task checkbox for the pinned Today toggle (main.rs hit
                 // x60..100, y300..340, centred on the pinned tap at 78,318):
                 // outline always; accent fill with a surface tick only when
@@ -1485,46 +1539,44 @@ fn card_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option
                     if row.done {
                         let tick = (cbx >= -6 && cbx <= -1 && cby == cbx + 6)
                             || (cbx >= 0 && cbx <= 6 && cby == 6 - cbx);
-                        return Some(if tick { theme.surface } else { theme.accent });
+                        return Some(if tick { card_fill } else { theme.accent });
                     }
-                    return Some(theme.surface);
+                    return Some(card_fill);
                 }
             }
             1 => {
-                // Notifications: vector mini bell icon
-                if idx.abs() <= 6 && idy >= -7 && idy <= 7 {
-                    let top_ring = (idx.abs() <= 1) && (idy == -6);
-                    let outer_w = (idy + 6) * 5 / 8 + 1;
-                    let is_rim = idy == 2 && idx.abs() <= 6;
-                    let is_wall = (idy >= -5 && idy <= 1) && (idx.abs() == outer_w || idx.abs() == outer_w - 1);
-                    let is_clapper = (idy == 3 || idy == 4) && idx.abs() <= 1;
-                    if top_ring || is_rim || is_wall || is_clapper {
+                // Notifications: vector speech bubble icon
+                if idx.abs() <= 8 && idy >= -7 && idy <= 5 {
+                    let is_border = idx.abs() == 8 || idy == -7 || idy == 5;
+                    let is_dot = idy == -1 && (idx == -4 || idx == 0 || idx == 4);
+                    if is_border || is_dot {
                         return Some(theme.accent);
                     }
+                } else if idx >= -6 && idx <= -2 && idy >= 5 && idy <= 8 && (idx + idy <= 2) {
+                    return Some(theme.accent);
                 }
             }
             _ => {
-                // Activities: vector mini heartbeat pulse icon
-                if idx.abs() <= 6 && idy >= -7 && idy <= 7 {
-                    let p1 = (idx >= -6 && idx <= -3) && (idy.abs() <= 1);
-                    let p2 = (idx >= -3 && idx <= -1) && (idy - (-4 * (idx + 3) / 2)).abs() <= 1;
-                    let p3 = (idx >= -1 && idx <= 2) && (idy - (8 * (idx + 1) / 3 - 4)).abs() <= 1;
-                    let p4 = (idx >= 2 && idx <= 4) && (idy - (4 - 4 * (idx - 2) / 2)).abs() <= 1;
-                    let p5 = (idx >= 4 && idx <= 6) && (idy.abs() <= 1);
-                    if p1 || p2 || p3 || p4 || p5 {
-                        return Some(theme.accent);
-                    }
+                // Activities: vector activity badge icon
+                let r2 = idx * idx + idy * idy;
+                if r2 <= 72 && r2 >= 36 {
+                    return Some(theme.accent);
+                }
+                let tick = (idx >= -4 && idx <= -1 && idy == idx + 2)
+                    || (idx >= -1 && idx <= 4 && idy == -idx);
+                if tick {
+                    return Some(theme.accent);
                 }
             }
         }
-        if let Some(c) = row.name.pixel_aa(x, y, row.name.ink, theme.surface) {
+        if let Some(c) = row.name.pixel_aa(x, y, row.name.ink, card_fill) {
             return Some(c);
         }
-        if let Some(c) = row.detail.pixel_aa(x, y, row.detail.ink, theme.surface) {
+        if let Some(c) = row.detail.pixel_aa(x, y, row.detail.ink, card_fill) {
             return Some(c);
         }
     }
-    Some(theme.surface)
+    Some(card_fill)
 }
 
 // -----------------------------------------------------------------------------
@@ -1564,17 +1616,15 @@ fn deck_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option
     }
     let tile = &deck.cells[index];
 
-    // WHY one elevation step below the card: the reference draws the deck tiles
-    // at #F3F3F2 and the card above them at #F8F6F4, and `surface` /
-    // `surface_raised` are exactly that pair. The border is there because on the
-    // dark theme `surface_raised` and the bottom of the wallpaper ramp are close
-    // enough that a tile would otherwise have no edge.
-    if !rounded_contains(tile.cell, x, y, radius::CARD) {
+    if !rounded_contains(tile.cell, x, y, 24) {
         return None;
     }
-    if rounded_outline(tile.cell, x, y, radius::CARD) {
+    if rounded_outline(tile.cell, x, y, 24) {
         return Some(theme.border);
     }
+    let bg = backdrop_ref(&p.scene_ref, x, y);
+    let tile_fill = Theme::veil(bg, 88, true);
+
     if let Some(kind) = tile.icon {
         if let Some(c) = launcher::icons::rasterize_icon_pixel_scaled_aa(
             kind,
@@ -1583,24 +1633,18 @@ fn deck_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option
             tile.icon_cx,
             tile.icon_cy,
             tile.ink,
-            tile.fill,
+            tile_fill,
             DOCK_ICON_EXTENT,
         ) {
             return Some(c);
         }
-    } else if let Some(c) = tile.badge.pixel_aa(x, y, tile.badge.ink, tile.fill) {
+    } else if let Some(c) = tile.badge.pixel_aa(x, y, tile.badge.ink, tile_fill) {
         return Some(c);
     }
-    // WHY the name is drawn after the badge and before the fill: the badge is the
-    // icon, the name is its caption, and both sit on the tile's own fill. The run
-    // was ellipsized to the tile less its padding and placed in `deck_plan`, so this
-    // is one bounds test per pixel inside the tile -- and a name longer than the
-    // tile (the registry holds one up to sixteen bytes, e.g. "Camera Preview") is
-    // already shortened inside the tile by the time it gets here.
-    if let Some(c) = tile.label.pixel_aa(x, y, tile.label.ink, tile.fill) {
+    if let Some(c) = tile.label.pixel_aa(x, y, tile.label.ink, tile_fill) {
         return Some(c);
     }
-    Some(tile.fill)
+    Some(tile_fill)
 }
 
 // -----------------------------------------------------------------------------
@@ -1616,17 +1660,17 @@ fn search_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Opti
     if !f.search.contains(x, y) {
         return None;
     }
-    if !rounded_contains(f.search, x, y, radius::SHEET) {
+    if !rounded_contains(f.search, x, y, 28) {
         return None;
     }
-    if rounded_outline(f.search, x, y, radius::SHEET) {
-        return Some(theme.overlay_border);
+    if rounded_outline(f.search, x, y, 28) {
+        return Some(theme.border);
     }
-    let ink = layout::ink_on(theme, theme.overlay);
+    let bg = backdrop_ref(&p.scene_ref, x, y);
+    let search_fill = Theme::veil(bg, 75, true);
+    let ink = theme.text_muted;
 
-    // Magnifier: ring plus handle. WHY the centre and radius are in the plan: they
-    // came from `text::line_height(type_scale::BODY)`, which the old painter
-    // re-derived for every pixel of the surface to place a 20 px circle.
+    // Magnifier: ring plus handle
     let (gx, cy, _r) = p.search_magnifier;
     let dx = x as i32 - gx as i32;
     let dy = y as i32 - cy as i32;
@@ -1637,10 +1681,10 @@ fn search_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Opti
         return Some(ink);
     }
 
-    if let Some(c) = p.search.pixel_aa(x, y, p.search.ink, theme.overlay) {
+    if let Some(c) = p.search.pixel_aa(x, y, p.search.ink, search_fill) {
         return Some(c);
     }
-    Some(theme.overlay)
+    Some(search_fill)
 }
 
 // -----------------------------------------------------------------------------
@@ -1653,14 +1697,6 @@ fn nav_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option<
     }
     let ink = layout::ink_on(theme, backdrop_ref(&p.scene_ref, x, y));
 
-    // Back chevron, then recents: the same order and the same centring as before,
-    // with both origins resolved in the plan.
-    if let Some(c) = p.nav_back.pixel_inked_aa(x, y, ink, backdrop_ref(&p.scene_ref, x, y)) {
-        return Some(c);
-    }
-    if let Some(c) = p.nav_recents.pixel_inked_aa(x, y, ink, backdrop_ref(&p.scene_ref, x, y)) {
-        return Some(c);
-    }
     // Home pill, the width the theme can name and the height the shell measures.
     if p.nav_pill.contains(x, y) {
         return Some(ink);
@@ -1679,23 +1715,23 @@ pub fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         if let Some(c) = status_bar_pixel(x, y, &theme, p) {
             return c;
         }
-    } else if y < 168 {
+    } else if y < 205 {
         if let Some(c) = greeting_pixel(x, y, &p.frame, p, &theme) {
             return c;
         }
-    } else if y < 680 {
+    } else if y < 695 {
         if let Some(c) = card_pixel(x, y, &p.frame, p, &theme) {
             return c;
         }
-    } else if y >= 700 && y < 1320 {
+    } else if y >= 695 && y < 1150 {
         if let Some(c) = deck_pixel(x, y, &p.frame, p, &theme) {
             return c;
         }
-    } else if y >= 1320 && y < 1392 {
+    } else if y >= 1315 && y < 1390 {
         if let Some(c) = search_pixel(x, y, &p.frame, p, &theme) {
             return c;
         }
-    } else if y >= 1392 {
+    } else if y >= 1390 {
         if let Some(c) = nav_pixel(x, y, &p.frame, p, &theme) {
             return c;
         }
