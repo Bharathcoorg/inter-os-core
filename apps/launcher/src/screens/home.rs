@@ -216,7 +216,7 @@ struct Frame {
 
 /// Height of one system-status row: a name band, a detail band and a gap.
 fn card_row_h() -> usize {
-    110
+    120
 }
 
 /// Height of the system card: its title band, its rows and the gaps between them.
@@ -226,7 +226,7 @@ fn card_h() -> usize {
 
 fn frame() -> Frame {
     let greeting = Rect::new(30, 56, 440, 130);
-    let date_widget = Rect::new(490, 56, 200, 124);
+    let date_widget = Rect::new(490, 56, 200, 130);
     let card = Rect::new(
         30,
         205,
@@ -237,13 +237,13 @@ fn frame() -> Frame {
         card.x + space::LG,
         card.y + space::MD,
         card.w - space::LG * 2,
-        space::XXL,
+        36,
     );
     let card_rows = Rect::new(
         card.x + space::LG,
-        card.y + space::MD + space::XXL + space::SM,
+        card.y + 60,
         card.w - space::LG * 2,
-        card.h - space::MD - space::XXL - space::SM,
+        card_row_h() * CARD_ROWS,
     );
     let deck = Rect::new(
         30,
@@ -723,30 +723,42 @@ fn build(state: &LauncherState) -> Paint {
     // answered, and says nothing time-specific when it did not.
     let title_scale = type_scale::TITLE;
     let caption_scale = type_scale::CAPTION;
-    let l1_y = f.greeting.y + 4;
-    let l2_y = l1_y + text::line_height(caption_scale) + 2;
-    let l3_y = l2_y + text::line_height(title_scale) + 4;
 
-    let day_part: &[u8] = if !state.clock_source_ok {
-        b"Welcome,"
+    let (day_part, day_part_comma): (&[u8], &[u8]) = if !state.clock_source_ok {
+        (b"Welcome", b"Welcome,")
     } else if state.clock_time[0].is_ascii_digit() && state.clock_time[1].is_ascii_digit() {
         let hour = (state.clock_time[0] - b'0') * 10 + (state.clock_time[1] - b'0');
         if hour < 12 {
-            b"Good morning,"
+            (b"Good morning", b"Good morning,")
         } else if hour < 18 {
-            b"Good afternoon,"
+            (b"Good afternoon", b"Good afternoon,")
         } else {
-            b"Good evening,"
+            (b"Good evening", b"Good evening,")
         }
     } else {
-        b"Welcome,"
+        (b"Welcome", b"Welcome,")
     };
 
-    let greeting = [
-        Run::whole(f.greeting.x, l1_y, caption_scale, day_part, 0),
-        Run::whole(f.greeting.x, l2_y, title_scale, b"Bharath", 0),
-        Run::whole(f.greeting.x, l3_y, caption_scale, b"Let's make today a good day.", 0),
-    ];
+    let greeting = if state.user_name_len > 0 {
+        let l1_y = f.greeting.y + 4;
+        let l2_y = l1_y + text::line_height(caption_scale) + 2;
+        let l3_y = l2_y + text::line_height(title_scale) + 4;
+        [
+            Run::whole(f.greeting.x, l1_y, caption_scale, day_part_comma, 0),
+            Run::whole(f.greeting.x, l2_y, title_scale, &state.user_name[..state.user_name_len], 0),
+            Run::whole(f.greeting.x, l3_y, caption_scale, b"Let's make today a good day.", 0),
+        ]
+    } else {
+        // Platform Truth Contract: Zero hardcoded or fake person name.
+        // Render prominent time-of-day greeting as title, followed by motivational subtitle.
+        let l1_y = f.greeting.y + 14;
+        let l2_y = f.greeting.y + 76;
+        [
+            Run::whole(f.greeting.x, l1_y, title_scale, day_part, 0),
+            Run::whole(f.greeting.x, l2_y, caption_scale, b"Let's make today a good day.", 0),
+            Run::EMPTY,
+        ]
+    };
 
     // Date widget: real RTC calendar date & weekday
     let (full_weekday, day_slice, full_month): (&[u8], &[u8], &[u8]) =
@@ -785,9 +797,9 @@ fn build(state: &LauncherState) -> Paint {
 
     let dw = f.date_widget;
     let dw_w = dw.w;
-    let date_weekday = Run::centred(dw.x, dw.y + 12, caption_scale, dw_w.saturating_sub(16), dw_w, full_weekday, theme.accent);
-    let date_day = Run::centred(dw.x, dw.y + 38, type_scale::TITLE, dw_w.saturating_sub(16), dw_w, day_slice, theme.text);
-    let date_month = Run::centred(dw.x, dw.y + 92, caption_scale, dw_w.saturating_sub(16), dw_w, full_month, theme.text_muted);
+    let date_weekday = Run::centred(dw.x, dw.y + 14, caption_scale, dw_w.saturating_sub(16), dw_w, full_weekday, theme.accent);
+    let date_day = Run::centred(dw.x, dw.y + 44, type_scale::BODY, dw_w.saturating_sub(16), dw_w, day_slice, theme.text);
+    let date_month = Run::centred(dw.x, dw.y + 94, caption_scale, dw_w.saturating_sub(16), dw_w, full_month, theme.text_muted);
 
     let weather = Run::EMPTY;
 
@@ -799,11 +811,11 @@ fn build(state: &LauncherState) -> Paint {
         theme.text,
     );
     let card_row_h = card_row_h();
-    let card_stack = layout::list(f.card_rows, CARD_ROWS, card_row_h, space::MD);
+    let card_stack = layout::list(f.card_rows, CARD_ROWS, card_row_h, 0);
     let mut card_rows = [CardRowPlan::EMPTY; CARD_ROWS];
     if let Some(stack) = card_stack {
         for row in 0..CARD_ROWS {
-            let Some(rect) = layout::list_row(stack, row, CARD_ROWS, card_row_h, space::MD) else {
+            let Some(rect) = layout::list_row(stack, row, CARD_ROWS, card_row_h, 0) else {
                 continue;
             };
             let mut buf = [0u8; CARD_DETAIL_CAP];
@@ -812,14 +824,14 @@ fn build(state: &LauncherState) -> Paint {
                 rect,
                 name: Run::whole(
                     rect.x + 80,
-                    rect.y + 16,
+                    rect.y + 18,
                     CARD_ROW_LABEL,
                     card_row_name(row),
                     theme.text,
                 ),
                 detail: Run::whole(
                     rect.x + 80,
-                    rect.y + 16 + text::line_height(CARD_ROW_LABEL) + space::SM,
+                    rect.y + 68,
                     CARD_ROW_DETAIL,
                     &buf[..len],
                     theme.text_muted,
@@ -991,8 +1003,8 @@ fn deck_plan(state: &LauncherState, theme: &Theme, _deck: Rect) -> DeckPlan {
         let label_bytes = label_bytes[slot];
 
         let icon_cx = cell.x + cell.w / 2;
-        let icon_cy = cell.y + 72;
-        let label_y = cell.y + 144;
+        let icon_cy = cell.y + 76;
+        let label_y = cell.y + 114;
 
         plan.cells[slot] = DeckTilePlan {
             cell,
@@ -1493,7 +1505,7 @@ fn card_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option
     let card_fill = Theme::veil(bg, 92, true);
 
     // Dividers between rows
-    if (y == 373 || y == 495) && x >= f.card.x + 24 && x <= f.card.x + f.card.w - 24 {
+    if (y == 385 || y == 505) && x >= f.card.x + 24 && x <= f.card.x + f.card.w - 24 {
         return Some(Theme::veil(card_fill, 15, false));
     }
 
@@ -1514,12 +1526,12 @@ fn card_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option
         let row_cy = row.rect.y + row.rect.h / 2;
         let cdx = x as i32 - 645;
         let cdy = (y as i32 - row_cy as i32).abs();
-        if cdx >= -3 && cdx <= 3 && (cdy == cdx + 3 || cdy == cdx + 2) {
+        if cdx >= -3 && cdx <= 3 && (cdy == 3 - cdx || cdy == 2 - cdx) {
             return Some(theme.text_muted);
         }
 
         let icon_cx = 78i32;
-        let icon_cy = (row.rect.y + 16 + text::line_height(CARD_ROW_LABEL) / 2) as i32;
+        let icon_cy = (row.rect.y + row.rect.h / 2) as i32;
         let idx = x as i32 - icon_cx;
         let idy = y as i32 - icon_cy;
 
@@ -1531,7 +1543,7 @@ fn card_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option
                 // the toggle's state bit is set, so the control on screen
                 // visibly reports what the toggle log claims.
                 let cbx = x as i32 - 78;
-                let cby = y as i32 - 318;
+                let cby = y as i32 - 322;
                 if cbx.abs() <= 12 && cby.abs() <= 12 {
                     if cbx.abs() == 12 || cby.abs() == 12 {
                         return Some(theme.text_muted);

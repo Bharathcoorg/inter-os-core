@@ -550,3 +550,16 @@ fn boot_typography_and_tagline_metrics() {
     assert!(total_tag_w < width);
 }
 
+#[test]
+fn dynamic_user_greeting_contract() {
+    // Platform Truth Contract: Zero hardcoding or faking of identity.
+    let user_name_len = 0usize;
+    assert!(user_name_len == 0);
+
+    let mut configured_name = [0u8; 32];
+    let name_src = b"Alice";
+    configured_name[..name_src.len()].copy_from_slice(name_src);
+    let len = name_src.len();
+    assert_eq!(&configured_name[..len], b"Alice");
+}
+

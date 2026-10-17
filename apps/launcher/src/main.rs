@@ -248,6 +248,9 @@ pub struct LauncherState {
     /// tap handler used to log "toggled" without flipping anything, so the log
     /// described a change that never happened. The log below fires only because
     /// this bit actually moved.
+    /// Dynamic user display name read from the settings store. Zero hardcoding or faking.
+    pub user_name: [u8; 32],
+    pub user_name_len: usize,
     pub task0_done: bool,
 }
 
@@ -303,6 +306,8 @@ impl LauncherState {
             auth_error: false,
             pin_error: 0,
             pin_setup_mode: false,
+            user_name: [0u8; 32],
+            user_name_len: 0,
             task0_done: false,
         }
     }
@@ -489,6 +494,39 @@ fn refresh_wallpapers(state: &mut LauncherState) {
         )
         .ok();
     }
+}
+
+/// Reads the owner/user display name dynamically from the settings store.
+///
+/// WHY: The Platform Truth Contract. Zero hardcoding or faking of user identity.
+/// If the owner configured "user.name" or "owner.name", it is loaded dynamically
+/// through capability slot 3. When empty or unset, `user_name_len` remains 0 so
+/// the home screen greeting renders a clean impersonal greeting without a mock name.
+fn refresh_user_profile(state: &mut LauncherState) {
+    let mut buf = [0u8; 32];
+    for key in ["user.name", "owner.name"] {
+        if let Ok(n) = std::settings_get(3, key, &mut buf) {
+            if n > 0 && n <= buf.len() {
+                let raw = &buf[..n];
+                let start = raw.iter().position(|b| *b != b' ' && *b != b'\n' && *b != b'\r');
+                if let Some(start) = start {
+                    let end = raw[start..]
+                        .iter()
+                        .rposition(|b| *b != b' ' && *b != b'\n' && *b != b'\r')
+                        .map(|p| start + p + 1)
+                        .unwrap_or(start);
+                    let trimmed = &raw[start..end];
+                    if !trimmed.is_empty() {
+                        let copy_len = trimmed.len().min(32);
+                        state.user_name[..copy_len].copy_from_slice(&trimmed[..copy_len]);
+                        state.user_name_len = copy_len;
+                        return;
+                    }
+                }
+            }
+        }
+    }
+    state.user_name_len = 0;
 }
 
 fn refresh_clock(state: &mut LauncherState) {
@@ -1755,6 +1793,7 @@ pub extern "C" fn _start() -> ! {
     // resolved before the first frame is drawn. A preference stored by the Settings
     // app on a previous boot is therefore on the very first lock screen.
     refresh_wallpapers(&mut state);
+    refresh_user_profile(&mut state);
     // WHY the count is reported: an empty catalogue is indistinguishable from a
     // refused read at the call site, because `refresh_package_catalog` maps a
     // permission error to `app_count = 0` and returns. That made a kernel-side
@@ -1813,6 +1852,7 @@ pub extern "C" fn _start() -> ! {
                         // is the only point at which the store can have changed,
                         // and it costs nothing in the steady state.
                         refresh_wallpapers(&mut state);
+                        refresh_user_profile(&mut state);
                         if let Ok(lock_st) = std::user_get_lock_state(1000) {
                             state.lock_state = lock_st;
                         }
@@ -1848,6 +1888,7 @@ pub extern "C" fn _start() -> ! {
                         state.active_child = None;
                         refresh_runtime_recents(&mut state);
                         refresh_wallpapers(&mut state);
+                        refresh_user_profile(&mut state);
                         let mut discard = std::InputEvent {
                             kind: 0,
                             x: 0,
