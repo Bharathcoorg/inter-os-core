@@ -28,23 +28,20 @@ use interos_std::design::font;
 use interos_std::design::primitives::{draw_rounded_rect, Rect};
 
 // -----------------------------------------------------------------------------
-// Google Chrome & Material Design Tokens
+// Sovereign InterOS Browser Design Tokens (Warm Ivory & Sage Palette)
 // -----------------------------------------------------------------------------
-const CHROME_BG: u32 = 0xFFFFFFFF;          // Pure White
-const CHROME_SURFACE: u32 = 0xFFF1F3F4;     // Google Grey 100
+const CHROME_BG: u32 = 0xFFFAF8F4;          // Warm Ivory Background
+const CHROME_SURFACE: u32 = 0xFFFFFFFF;     // Pure White Surface
 #[allow(dead_code)]
-const CHROME_SURFACE_HOVER: u32 = 0xFFE8EAED; // Google Grey 200
-const CHROME_BORDER: u32 = 0xFFDADCE0;      // Google Grey 300
-const CHROME_DIVIDER: u32 = 0xFFE8EAED;     // Google Divider
-const CHROME_BLUE: u32 = 0xFF1A73E8;        // Google Blue 600
-const CHROME_BLUE_DARK: u32 = 0xFF174EA6;   // Google Blue 800
-const CHROME_TEXT: u32 = 0xFF202124;        // Google Grey 900
-const CHROME_MUTED: u32 = 0xFF5F6368;       // Google Grey 700
-const CHROME_RED: u32 = 0xFFD93025;         // Google Red 600
-const CHROME_YELLOW: u32 = 0xFFF9AB00;      // Google Yellow 600
-const CHROME_GREEN: u32 = 0xFF1E8E3E;       // Google Green 600
+const CHROME_SURFACE_HOVER: u32 = 0xFFF2EFEB; // Ivory Hover
+const CHROME_BORDER: u32 = 0xFFE5E1DB;      // Warm Hairline Border
+const CHROME_DIVIDER: u32 = 0xFFECE8E1;     // Warm Divider
+const CHROME_BLUE: u32 = 0xFF546B58;        // Sovereign Sage Green
+const CHROME_BLUE_DARK: u32 = 0xFF3E5042;   // Deep Mineral Slate
+const CHROME_TEXT: u32 = 0xFF1F1E1B;        // Sovereign Charcoal
+const CHROME_MUTED: u32 = 0xFF7A7670;       // Warm Muted Grey
 const CHROME_CARD: u32 = 0xFFFFFFFF;        // Card Background
-const CHROME_CARD_BORDER: u32 = 0xFFE8EAED; // Card Stroke
+const CHROME_CARD_BORDER: u32 = 0xFFE5E1DB; // Card Stroke
 
 // -----------------------------------------------------------------------------
 // Viewport & Layout Geometry (720x1440, 8pt Grid)
@@ -56,12 +53,12 @@ const CHUNK: usize = 4096;
 /// y 0..48: System Status Bar
 const STATUS_H: usize = 48;
 
-/// y 48..116: Chrome Mobile Top Omnibox App Bar
+/// y 48..116: Sovereign Top Omnibox App Bar
 #[allow(dead_code)]
 const TOOLBAR_Y0: usize = STATUS_H;
 const TOOLBAR_Y1: usize = 116;
 
-/// Chrome Omnibox URL Capsule
+/// Sovereign Omnibox URL Capsule
 const PILL: Rect = Rect::new(16, 56, 480, 52);
 const PILL_R: usize = 26;
 const PILL_TEXT_X: usize = 56;
@@ -75,10 +72,10 @@ const CLOSE_BTN: Rect = Rect::new(606, 60, 44, 44);
 const TABS_TOP_BTN: Rect = Rect::new(656, 60, 48, 44);
 const BTN_R: usize = 12;
 
-/// Chrome Start Page Search Box (Centered)
+/// Sovereign Start Page Search Box (Centered)
 const SEARCH_BOX: Rect = Rect::new(32, 226, 656, 56);
 
-/// Chrome Bottom Navigation Bar (y 1350..1410)
+/// Sovereign Bottom Navigation Bar (y 1350..1410)
 const NAV_BAR_Y0: usize = 1350;
 const NAV_BAR_Y1: usize = 1410;
 const BACK_BTN: Rect = Rect::new(24, 1356, 110, 48);
@@ -94,7 +91,7 @@ const HOME_Y0: usize = 1410;
 const PLACEHOLDER: &[u8] = b"Search or type URL";
 
 // Contract strings pinned for test suites
-const BODY_BLANK: &[u8] = b"Google Chrome Mobile on InterOS Sovereign Microkernel.";
+const BODY_BLANK: &[u8] = b"Sovereign Decentralized Web Client on InterOS Microkernel.";
 const BODY_NO_TRANSPORT: &[u8] = b"The address was parsed and a navigation was attempted, \
 but no network transport is bound to this app: no request was sent and no page was loaded.";
 const BODY_INVALID: &[u8] = b"Supported schemes are http, https, interlayer, file and gemini \
@@ -618,7 +615,7 @@ impl BrowserApp {
                 self.active_socket_id = Some(sock_id);
                 std::log(0, "[BROWSER APP] Connected to network socket 80 via QEMU e1000/slirp.").ok();
                 // Dispatch real HTTP probe to QEMU default gateway 10.0.2.2
-                let _ = std::net_sendto([10, 0, 2, 2], 80, b"GET / HTTP/1.1\r\nHost: google.com\r\n\r\n");
+                let _ = std::net_sendto([10, 0, 2, 2], 80, b"GET / HTTP/1.1\r\nHost: interos.org\r\n\r\n");
                 self.status = PageStatus::Loaded;
                 self.pages_loaded += 1;
                 self.loading_progress = 100;
@@ -800,8 +797,8 @@ impl Frame {
 
         // Honest state block content pinned for test suites
         let (head_src, body_src): (&[u8], &[u8]) = match app.status {
-            PageStatus::Blank => (b"Google Chrome Mobile", BODY_BLANK),
-            PageStatus::Loaded => (b"Google Search Results", b"Web documents retrieved and rendered via QEMU e1000 slirp connection."),
+            PageStatus::Blank => (b"InterOS Browser", BODY_BLANK),
+            PageStatus::Loaded => (b"Search Results", b"Web documents retrieved and rendered via QEMU e1000 slirp connection."),
             PageStatus::NoTransport => (b"Navigation unavailable", BODY_NO_TRANSPORT),
             PageStatus::InvalidAddress => (b"Address cannot be opened", BODY_INVALID),
             PageStatus::LocalRefused => (b"Local document unavailable", BODY_LOCAL_REFUSED),
@@ -937,29 +934,25 @@ fn tab_badge_pixel(x: usize, y: usize, cx: usize, cy: usize) -> Option<u32> {
     Some(CHROME_SURFACE)
 }
 
-/// Chrome Dinosaur T-Rex Glyph for Offline / No Transport State
-fn dino_glyph(x: usize, y: usize, cx: usize, cy: usize) -> bool {
-    let dx = x as isize - cx as isize;
-    let dy = y as isize - cy as isize;
-    if dx.abs() > 24 || dy.abs() > 28 { return false; }
-    // Head: dx 2..18, dy -24..-10
-    if dx >= 2 && dx <= 18 && dy >= -24 && dy <= -10 {
-        // Eye gap
-        if dx >= 6 && dx <= 9 && dy >= -22 && dy <= -19 { return false; }
-        // Mouth gap
-        if dx >= 10 && dy >= -13 && dy <= -12 { return false; }
+/// Sovereign Offline Beacon & Disconnected Glyph
+fn offline_glyph(x: usize, y: usize, cx: usize, cy: usize) -> bool {
+    let dx = (x as isize - cx as isize).abs();
+    let dy = (y as isize - cy as isize).abs();
+    if dx > 24 || dy > 24 { return false; }
+    let d2 = dx * dx + dy * dy;
+    // Concentric signal rings in top half
+    if ((d2 >= 320 && d2 <= 440) || (d2 >= 120 && d2 <= 200)) && (y as isize) <= (cy as isize + 2) {
         return true;
     }
-    // Neck / Torso: dx -8..10, dy -10..12
-    if dx >= -8 && dx <= 10 && dy >= -10 && dy <= 12 { return true; }
-    // Tiny Arms: dx 10..16, dy -2..2
-    if dx >= 10 && dx <= 16 && dy >= -2 && dy <= 2 { return true; }
-    // Tail: dx -22..-8, dy 0..12
-    if dx >= -22 && dx <= -8 && dy >= 0 && dy <= 12 && (dy - dx / 2) <= 12 { return true; }
-    // Left Leg: dx -4..0, dy 12..24
-    if dx >= -4 && dx <= 0 && dy >= 12 && dy <= 24 { return true; }
-    // Right Leg: dx 4..8, dy 12..24
-    if dx >= 4 && dx <= 8 && dy >= 12 && dy <= 24 { return true; }
+    // Center emitter beacon dot
+    if d2 <= 16 {
+        return true;
+    }
+    // Diagonal slash across signal
+    let slash = (x as isize - cx as isize) - (y as isize - cy as isize);
+    if slash.abs() <= 2 && dx <= 20 && dy <= 20 {
+        return true;
+    }
     false
 }
 
@@ -1039,31 +1032,37 @@ fn toolbar_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
 }
 
 // -----------------------------------------------------------------------------
-// Chrome Mobile Start Page (Google Mobile Experience)
+// Sovereign InterOS Browser Start Page
 // -----------------------------------------------------------------------------
-fn google_letter_color(letter_idx: usize) -> u32 {
-    match letter_idx {
-        0 => CHROME_BLUE,   // G
-        1 => CHROME_RED,    // o
-        2 => CHROME_YELLOW, // o
-        3 => CHROME_BLUE,   // g
-        4 => CHROME_GREEN,  // l
-        _ => CHROME_RED,    // e
-    }
-}
-
 fn home_page_pixel(x: usize, y: usize, app: &BrowserApp) -> u32 {
-    // 1. Google Brand Wordmark (y 160..210, scale 2)
-    if y >= 160 && y < 210 {
-        let letters: [&[u8]; 6] = [b"G", b"o", b"o", b"g", b"l", b"e"];
-        let widths: [usize; 6] = [28, 24, 24, 24, 12, 24];
-        let total_w = 28 + 24 + 24 + 24 + 12 + 24 + 10;
-        let mut cur_x = (W - total_w) / 2;
-        for i in 0..6 {
-            if let Some(px) = text_px(x, y, cur_x, 166, 2, letters[i], google_letter_color(i), CHROME_BG, true) {
-                return px;
+    // 1. Sovereign Browser Brand Header (y 130..215)
+    if y >= 130 && y < 215 {
+        // Centered Sovereign Emblem Squircle Tile (44x44 at X=338, Y=134, R=10)
+        let tile = Rect::new(338, 134, 44, 44);
+        if let Some(c) = draw_rounded_rect(x, y, tile, 10, CHROME_BLUE, Some(CHROME_BORDER), 1) {
+            let bx = x - 338;
+            let by = y - 134;
+            // 'I' Pill (bx 11..16, by 12..32)
+            if bx >= 11 && bx <= 16 && by >= 12 && by <= 32 {
+                return 0xFFFAF8F4;
             }
-            cur_x += widths[i] + 2;
+            // 'L' Stem (bx 22..27, by 12..32)
+            if bx >= 22 && bx <= 27 && by >= 12 && by <= 32 {
+                return 0xFFFAF8F4;
+            }
+            // 'L' Foot (bx 22..33, by 27..32)
+            if bx >= 22 && bx <= 33 && by >= 27 && by <= 32 {
+                return 0xFFFAF8F4;
+            }
+            return c;
+        }
+
+        // Sovereign Brand Title: "InterOS Browser" (scale 1 bold, centered at Y=188)
+        let brand_text = b"InterOS Browser";
+        let bw = font::measure_bold(brand_text, 1);
+        let bx0 = (W.saturating_sub(bw)) / 2;
+        if let Some(px) = text_px(x, y, bx0, 188, 1, brand_text, CHROME_TEXT, CHROME_BG, true) {
+            return px;
         }
         return CHROME_BG;
     }
@@ -1081,11 +1080,14 @@ fn home_page_pixel(x: usize, y: usize, app: &BrowserApp) -> u32 {
         if let Some(px) = text_px(x, y, 76, 244, 1, b"Search or type URL", CHROME_MUTED, CHROME_SURFACE, false) {
             return px;
         }
-        // Google Voice Search Mic Glyph (x 640, y 254)
-        let mdx = (x as isize - 640).abs();
-        let mdy = (y as isize - 254).abs();
-        if (mdx <= 3 && mdy <= 6) || (mdx <= 6 && mdy >= 4 && mdy <= 6) || (mdx <= 1 && mdy >= 6 && mdy <= 9) {
-            return CHROME_BLUE;
+        // Sovereign Security Shield Glyph (x 640, y 254)
+        let sdx = (x as isize - 640).abs();
+        let sdy = y as isize - 254;
+        if sdy >= -8 && sdy <= 8 && sdx <= 7 {
+            let limit = if sdy <= 2 { 7 } else { 7 - (sdy - 2) };
+            if sdx == limit || (sdy == -8 && sdx <= 7) {
+                return CHROME_BLUE;
+            }
         }
         return c;
     }
@@ -1244,7 +1246,7 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
     if app.status == PageStatus::NoTransport || app.status == PageStatus::InvalidAddress || app.status == PageStatus::LocalRefused {
         let cx = W / 2;
         let cy = 300;
-        if dino_glyph(x, y, cx, cy) {
+        if offline_glyph(x, y, cx, cy) {
             return CHROME_MUTED;
         }
         if f.head_len > 0 {
@@ -1260,7 +1262,7 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
         return CHROME_BG;
     }
 
-    // Google Search Categories Bar (y 120..164)
+    // Sovereign Search Categories Bar (y 120..164)
     if y >= 120 && y < 164 {
         let tabs: [&[u8]; 5] = [b"All", b"Images", b"News", b"Videos", b"Maps"];
         let mut tx = 32;
@@ -1548,7 +1550,7 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
         app.current_url_len = start.len();
         app.status = PageStatus::Blank;
         app.address_focused = false;
-        std::log(0, "[BROWSER APP] Returned to Chrome Mobile New Tab start page.").ok();
+        std::log(0, "[BROWSER APP] Returned to Sovereign Browser New Tab start page.").ok();
         return Tap::Redraw;
     }
 
@@ -1557,24 +1559,24 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
         let _ = std::audio_haptic_click();
         app.address_focused = true;
         app.select_all = false;
-        app.navigate(b"https://google.com/search?q=InterOS");
+        app.navigate(b"https://interos.org/search?q=sovereign");
         return Tap::Redraw;
     }
 
-    // Start Page Most Visited Shortcuts Grid Tap (y 304..480)
+    // Start Page Sovereign Shortcuts Grid Tap (y 304..480)
     if app.status == PageStatus::Blank && y >= 304 && y < 480 && x >= 24 && x < W - 24 {
         let col_w = (W - 48) / 4;
         let col_idx = (x - 24) / col_w;
         let row_idx = if y < 392 { 0 } else { 1 };
         let item_idx = row_idx * 4 + col_idx;
         let targets: [&[u8]; 8] = [
-            b"https://google.com",
+            b"https://interos.org",
             b"https://wikipedia.org",
             b"https://github.com",
             b"https://rust-lang.org",
-            b"https://interos.org",
-            b"https://news.google.com",
-            b"https://reddit.com",
+            b"https://kernel.org",
+            b"https://archive.org",
+            b"https://w3.org",
             b"https://docs.interos.org",
         ];
         if item_idx < 8 {
@@ -1666,7 +1668,7 @@ fn destroy_and_exit(surface: u32) -> ! {
 pub extern "C" fn _start() -> ! {
     std::log(
         0,
-        "[BROWSER APP (Ring 3)] Sovereign Decentralized Web & Chrome Mobile Client online.",
+        "[BROWSER APP (Ring 3)] Sovereign Decentralized Web Client online.",
     )
     .ok();
 

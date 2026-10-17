@@ -25,38 +25,28 @@ use interos_std::design::{font, typeface};
 
 /// Widest run of outline type this module will rasterise, in pixels.
 ///
-/// WHY 256: measured from the reference, the widest display run on the lock
-/// surface (the date line, twelve glyphs at an 18px em) is a 108px ink advance,
-/// so a 256px bound holds it with room for a longer line, while keeping the
-/// scratch array at a size the guest can afford as BSS.
-const RUN_W_MAX: usize = 256;
+/// WHY 680: The design canvas is 720px wide with 20px padding (680px content area).
+/// Expanding to 680 ensures that full-width headlines, card subtitles, and
+/// long metadata strings are rendered as vector outlines without falling back to
+/// blocky bitmap faces.
+const RUN_W_MAX: usize = 680;
 
 /// Tallest run, in pixels: ascent plus descent at the largest useful em.
 ///
-/// WHY 96 rather than 128: the clock at a 48px em is a 63-row line box, and 96
-/// covers an em up to about 72 — past the display rung this guest's 720-wide
-/// surface can use — while halving the BSS the buffer costs for headroom no
-/// caller has.
+/// Covers display headings, lock clocks, and scaled typography up to em 96.
 const RUN_H_MAX: usize = 96;
 
 /// How many runs may be resident at once.
 ///
-/// WHY expanded to 24: screens like the home panel, app drawer, and notifications
-/// place multiple distinct runs in a single frame. With only 2 slots, multiple
-/// labels on the same scanline or in the same view constantly evicted each other
-/// and re-rasterized outline glyphs per pixel, causing massive rasterization overhead.
-/// With 24 slots, all runs across any view remain resident in their own slots.
-pub const SLOTS: usize = 24;
+/// 32 slots comfortably holds all distinct text runs across any single view frame
+/// (Home screen, App Drawer, System Space, Quick Controls) with round-robin eviction.
+pub const SLOTS: usize = 32;
 
 /// The longest text a placement key can hold. Longer runs are refused rather
 /// than hashed, because a hash would collide and draw the wrong glyphs.
-const KEY_MAX: usize = 24;
+pub const KEY_MAX: usize = 48;
 
 /// Ink coverage for the placed runs: 255 is fully inked, 0 is untouched.
-///
-/// WHY `addr_of_mut!` rather than a bare `static mut` reference: the current
-/// toolchain warns on taking a reference to a `static mut`, and this array is
-/// large enough that copying it is not an option.
 static mut COVERAGE: [[u8; RUN_W_MAX * RUN_H_MAX]; SLOTS] =
     [[0; RUN_W_MAX * RUN_H_MAX]; SLOTS];
 
@@ -79,24 +69,24 @@ struct Loaded {
 }
 
 static mut LOADED: [Option<Loaded>; SLOTS] = [None; SLOTS];
+static mut NEXT_VICTIM: usize = 0;
+
+/// Resets all slots in the outline cache pool. Call upon view mode transitions.
+pub fn reset_slot_pool() {
+    unsafe {
+        for slot in (*core::ptr::addr_of_mut!(LOADED)).iter_mut() {
+            *slot = None;
+        }
+        NEXT_VICTIM = 0;
+    }
+}
 
 /// Which slot a placement lands in.
 ///
-/// WHY this is a search rather than a hash: a hash spreads two runs across two
-/// slots only by luck, and two runs that collide silently erase each other --
-/// which is exactly what happened when the lock date and clock both landed in
-/// slot 0 and the date's letters vanished, leaving only its comma. A hash
-/// cannot promise what this needs, so it does not get the job.
-///
 /// The rule, in order: a slot already holding this exact key is reused, so a
 /// repeated placement hits the cache; otherwise an empty slot is taken; and
-/// only when every slot holds a different live run is one reused, in which case
-/// the caller has asked for more resident runs than exist and one of them must
-/// give way.
+/// only when every slot holds a different live run is one reused round-robin.
 fn slot_for(em: u32, x: usize, y: usize, text: &[u8]) -> usize {
-    // SAFETY: the read of the cache array, taken and released inside this
-    // function. The lock surface's painter is the only caller, it is single
-    // threaded, and nothing reached from here re-enters it.
     let loaded = unsafe { &*core::ptr::addr_of!(LOADED) };
     let same = |l: &Loaded| {
         l.em == em && l.x == x && l.y == y && l.len == text.len() && l.key[..text.len()] == *text
@@ -113,7 +103,15 @@ fn slot_for(em: u32, x: usize, y: usize, text: &[u8]) -> usize {
             }
         }
     }
-    first_free.unwrap_or(0)
+    if let Some(free) = first_free {
+        free
+    } else {
+        unsafe {
+            let v = NEXT_VICTIM;
+            NEXT_VICTIM = (NEXT_VICTIM + 1) % SLOTS;
+            v
+        }
+    }
 }
 
 /// Cap height of the bitmap face in cell rows at scale 1.
@@ -336,6 +334,25 @@ impl OutlineRun {
             return None;
         }
         Some(font::blend(ink, bg, c))
+    }
+
+    /// Evaluates binary ink for callers without a known background color.
+    #[allow(dead_code)]
+    pub fn pixel_binary(&self, px: usize, py: usize, ink: u32) -> Option<u32> {
+        if self.w == 0 {
+            return None;
+        }
+        let top = self.y.saturating_sub(self.ascent);
+        if px < self.x || px - self.x >= self.w || py < top || py - top >= self.h {
+            return None;
+        }
+        let cov = unsafe { &*core::ptr::addr_of!(COVERAGE) };
+        let c = cov[self.slot][(py - top) * self.w + (px - self.x)];
+        if c >= 64 {
+            Some(ink)
+        } else {
+            None
+        }
     }
 }
 
@@ -611,11 +628,12 @@ mod tests {
     #[test]
     fn a_longer_run_is_refused_rather_than_truncated() {
         let _pool: Option<_> = Some(reset_slots());
-        // 24 bytes is the placement key's bound. Refusing is the honest
+        // KEY_MAX is the placement key's bound. Refusing is the honest
         // outcome: the caller keeps the bitmap face, which never truncates.
-        let long = b"abcdefghijklmnopqrstuvwx";
-        assert!(OutlineRun::place(0, 200, 12, long).is_some());
-        assert!(OutlineRun::place(0, 200, 12, b"abcdefghijklmnopqrstuvwxy").is_none());
+        let long = [b'a'; KEY_MAX];
+        assert!(OutlineRun::place(0, 200, 12, &long).is_some());
+        let too_long = [b'a'; KEY_MAX + 1];
+        assert!(OutlineRun::place(0, 200, 12, &too_long).is_none());
     }
 
     #[test]

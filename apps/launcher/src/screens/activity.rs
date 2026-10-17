@@ -210,7 +210,7 @@ const RUN_CAP: usize = 96;
 fn activity_run_metrics(y: usize, scale: usize) -> (u32, usize, usize) {
     let em = launcher::outline_text::em_for_scale(scale);
     let (asc, desc) = interos_std::design::typeface::line_metrics(em);
-    let baseline = y + launcher::font::BASELINE * scale;
+    let baseline = (y + launcher::font::BASELINE * scale).max(asc as usize);
     let top = baseline.saturating_sub(asc as usize);
     (em, top, (baseline + desc as usize).saturating_sub(top))
 }
@@ -347,10 +347,12 @@ impl LabelRun {
         if px < self.x || px >= self.x + self.w || py < self.top || py - self.top >= self.box_h {
             return None;
         }
-        if self.scale >= 2 && self.len <= 24 {
+        if self.scale >= 1 && self.len <= launcher::outline_text::KEY_MAX {
+            let (asc, _) = interos_std::design::typeface::line_metrics(self.em);
+            let baseline = (self.y + launcher::font::BASELINE * self.scale).max(asc as usize);
             if let Some(run) = launcher::outline_text::OutlineRun::place(
                 self.x,
-                self.y + launcher::font::BASELINE * self.scale,
+                baseline,
                 self.em,
                 &self.bytes[..self.len],
             ) {
@@ -376,10 +378,12 @@ impl LabelRun {
         if px < self.x || px >= self.x + self.w || py < self.top || py - self.top >= self.box_h {
             return None;
         }
-        if self.scale >= 2 && self.len <= 24 {
+        if self.scale >= 1 && self.len <= launcher::outline_text::KEY_MAX {
+            let (asc, _) = interos_std::design::typeface::line_metrics(self.em);
+            let baseline = (self.y + launcher::font::BASELINE * self.scale).max(asc as usize);
             if let Some(run) = launcher::outline_text::OutlineRun::place(
                 self.x,
-                self.y + launcher::font::BASELINE * self.scale,
+                baseline,
                 self.em,
                 &self.bytes[..self.len],
             ) {
@@ -615,7 +619,16 @@ fn render_mini_preview(card: &CardPlan, px: usize, py: usize) -> Option<u32> {
 
     let icon_cy = (cy as i32 + CARD_PREVIEW_ICON_DY) as usize;
     if let Some(kind) = card.icon {
-        if let Some(ic) = icons::rasterize_icon_pixel(kind, px, py, cx, icon_cy, CARD_PREVIEW_INK) {
+        if let Some(ic) = icons::rasterize_icon_pixel_scaled_aa(
+            kind,
+            px,
+            py,
+            cx,
+            icon_cy,
+            CARD_PREVIEW_INK,
+            CARD_PREVIEW_BG,
+            18,
+        ) {
             return Some(ic);
         }
     }
@@ -772,7 +785,16 @@ pub fn get_activity_color(x: usize, y: usize, state: &LauncherState) -> u32 {
                     if let Some(kind) = card.icon {
                         let cx = card.icon_rect.center_x();
                         let cy = card.icon_rect.center_y();
-                        if let Some(ic) = icons::rasterize_icon_pixel(kind, x, y, cx, cy, 0xFFFFFFFF) {
+                        if let Some(ic) = icons::rasterize_icon_pixel_scaled_aa(
+                            kind,
+                            x,
+                            y,
+                            cx,
+                            cy,
+                            0xFFFFFFFF,
+                            CARD_ICON_BG,
+                            18,
+                        ) {
                             return ic;
                         }
                         return CARD_ICON_BG;

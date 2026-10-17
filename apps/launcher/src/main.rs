@@ -50,13 +50,23 @@ fn test_text(
     text: &[u8],
     color: u32,
 ) -> Option<u32> {
+    if scale >= 1 && text.len() <= launcher::outline_text::KEY_MAX {
+        let em = launcher::outline_text::em_for_scale(scale);
+        let (ascent, _) = interos_std::design::typeface::line_metrics(em);
+        let baseline = (y0 + launcher::font::BASELINE * scale).max(ascent as usize);
+        if let Some(run) = launcher::outline_text::OutlineRun::place(x0, baseline, em, text) {
+            let (bx, by, bw, bh) = run.bounds();
+            if x >= bx && x < bx + bw && y >= by && y < by + bh {
+                return run.pixel_binary(x, y, color);
+            }
+            return None;
+        }
+    }
     if scale == 0 || text.is_empty() {
         return None;
     }
     // WHY these two rejects come first, in this order: the row band is a single
-    // compare and turns away most of a full screen's worth of calls immediately,
-    // and neither test touches the pen. Walking the advances is the expensive
-    // part and must happen only for a pixel already inside the run's line box.
+    // reject row band and pen walk
     let dy = y.checked_sub(y0)?;
     let row = dy / scale;
     if row >= launcher::font::GLYPH_H {
@@ -67,8 +77,6 @@ fn test_text(
     for &c in text {
         let adv = launcher::font::advance_of(c, false) * scale;
         if dx < pen + adv {
-            // WHY `col` needs no bounds test: `dx - pen < adv <= GLYPH_W * scale`,
-            // so `col < GLYPH_W`, and `row < GLYPH_H` was checked above.
             let col = (dx - pen) / scale;
             return if launcher::font::pixel(c, col, row, false) {
                 Some(color)
@@ -92,6 +100,18 @@ pub fn test_text_aa(
     color: u32,
     bg: u32,
 ) -> Option<u32> {
+    if scale >= 1 && text.len() <= launcher::outline_text::KEY_MAX {
+        let em = launcher::outline_text::em_for_scale(scale);
+        let (ascent, _) = interos_std::design::typeface::line_metrics(em);
+        let baseline = (y0 + launcher::font::BASELINE * scale).max(ascent as usize);
+        if let Some(run) = launcher::outline_text::OutlineRun::place(x0, baseline, em, text) {
+            let (bx, by, bw, bh) = run.bounds();
+            if x >= bx && x < bx + bw && y >= by && y < by + bh {
+                return run.pixel(x, y, color, bg);
+            }
+            return None;
+        }
+    }
     interos_std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, bg, false)
 }
 
@@ -1325,13 +1345,9 @@ fn present_dirty(surface: u32, state: &LauncherState, dirty: Dirty) {
     }
     let frame_start = std::get_ticks(1).ok();
     render_band(surface, state, y0, y1);
-    // WHY the same line the full path emits: a banded repaint is still a render
-    // of the current view, and the lifecycle harness keys on these substrings.
-    // Dropping them would make a correct band look like a screen that never
-    // rendered.
+    let _ = std::surface_flip(4);
     log_view_rendered(state);
     log_frame_ticks(tick_delta(frame_start, std::get_ticks(1).ok()));
-    let _ = std::surface_flip(4);
 }
 
 /// Emits the current view's render-complete line.
@@ -1440,12 +1456,11 @@ fn log_view_rendered(state: &LauncherState) {
 /// for them would claim a precision they do not have. Callers that know better
 /// go through [`present_dirty`].
 fn render_view(surface: u32, state: &LauncherState) {
+    launcher::outline_text::reset_slot_pool();
     let frame_start = std::get_ticks(1).ok();
     render_band(surface, state, 0, H);
+    let _ = std::surface_flip(4);
     log_view_rendered(state);
-    // WHY here and not earlier: the substrings above are what the lifecycle
-    // harness matches, and a diagnostic emitted before them could only ever make
-    // a slow frame look like a fast one.
     log_frame_ticks(tick_delta(frame_start, std::get_ticks(1).ok()));
 }
 

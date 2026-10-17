@@ -347,6 +347,7 @@ fn icon_color(kind: Option<launcher::icons::IconKind>, index: usize, theme: &The
         Some(IconKind::Maps) => 0xFF34C759,
         Some(IconKind::Apps) => 0xFF5856D6,
         Some(IconKind::Briefcase) => 0xFFD97706,
+        Some(IconKind::CardDemo) => 0xFF5856D6,
         None => hue_for(theme, index),
     }
 }
@@ -549,11 +550,9 @@ impl Run {
     /// vocabulary and a bitmap-only box would clip it.
     fn placed(x: usize, y: usize, scale: usize, buf: [u8; RUN_CAP], len: usize, ink: u32) -> Run {
         let text = &buf[..len];
-        // The outline's baseline lands where the cell puts its own, so the two
-        // faces agree on where the text sits rather than merely how tall it is.
         let em = launcher::outline_text::em_for_scale(scale);
-        let baseline = y + launcher::font::BASELINE * scale;
         let (asc, desc) = interos_std::design::typeface::line_metrics(em);
+        let baseline = (y + launcher::font::BASELINE * scale).max(asc as usize);
         let outline_advance = interos_std::design::typeface::text_advance_px(text, em) as usize;
         let top = baseline.saturating_sub(asc as usize);
         let outline = launcher::outline_text::OutlineRun::place(x, baseline, em, text);
@@ -581,6 +580,9 @@ impl Run {
     fn pixel_on(&self, px: usize, py: usize, bg: u32) -> Option<u32> {
         if self.len == 0 {
             return None;
+        }
+        if let Some(ref outline) = self.outline {
+            return outline.pixel(px, py, self.ink, bg);
         }
         test_text_aa(px, py, self.x, self.y, self.scale, &self.bytes[..self.len], self.ink, bg)
     }
@@ -1119,7 +1121,7 @@ fn app_tile(x: usize, y: usize, theme: &Theme, t: &TilePlan) -> u32 {
         }
         if let Some(kind) = t.icon {
             let ink = 0xFFFFFFFF; // Pure crisp white icon on vibrant colored squircle
-            if let Some(c) = launcher::icons::rasterize_icon_pixel(kind, x, y, t.disc.center_x(), t.disc.center_y(), ink) {
+            if let Some(c) = launcher::icons::rasterize_icon_pixel_scaled_aa(kind, x, y, t.disc.center_x(), t.disc.center_y(), ink, t.hue, 22) {
                 return c;
             }
         } else if let Some(c) = t.badge.pixel_on(x, y, t.hue) {

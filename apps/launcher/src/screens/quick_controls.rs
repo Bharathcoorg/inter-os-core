@@ -653,9 +653,9 @@ impl LabelRun {
         let mut buf = [0u8; 128];
         buf[..len].copy_from_slice(&run[..len]);
         let em = launcher::outline_text::em_for_scale(scale);
-        let baseline = rect.y + (rect.h.saturating_sub(text::line_height(scale))) / 2
-            + launcher::font::BASELINE * scale;
         let (asc, desc) = interos_std::design::typeface::line_metrics(em);
+        let baseline = (rect.y + (rect.h.saturating_sub(text::line_height(scale))) / 2
+            + launcher::font::BASELINE * scale).max(asc as usize);
         let top = baseline.saturating_sub(asc as usize);
         // WHY the width is the wider of the two measures: the outline face is
         // condensed but is not always the narrower one. "Do not disturb"
@@ -664,7 +664,7 @@ impl LabelRun {
         // is taken rather than assuming which way it goes.
         let w = text::measure(&buf[..len], scale)
             .max(interos_std::design::typeface::text_advance_px(&buf[..len], em) as usize);
-        let outline = if scale >= 2 && len <= 24 {
+        let outline = if scale >= 1 && len <= launcher::outline_text::KEY_MAX {
             launcher::outline_text::OutlineRun::place(rect.x, baseline, em, &buf[..len])
         } else {
             None
@@ -691,14 +691,14 @@ impl LabelRun {
         let mut buf = [0u8; 128];
         buf[..len].copy_from_slice(&run[..len]);
         let em = launcher::outline_text::em_for_scale(scale);
-        let baseline = rect.y + (rect.h.saturating_sub(text::line_height(scale))) / 2
-            + launcher::font::BASELINE * scale;
         let (asc, desc) = interos_std::design::typeface::line_metrics(em);
+        let baseline = (rect.y + (rect.h.saturating_sub(text::line_height(scale))) / 2
+            + launcher::font::BASELINE * scale).max(asc as usize);
         let top = baseline.saturating_sub(asc as usize);
         let w = text::measure(&buf[..len], scale)
             .max(interos_std::design::typeface::text_advance_px(&buf[..len], em) as usize);
         let x0 = rect.x + rect.w.saturating_sub(w);
-        let outline = if scale >= 2 && len <= 24 {
+        let outline = if scale >= 1 && len <= launcher::outline_text::KEY_MAX {
             launcher::outline_text::OutlineRun::place(x0, baseline, em, &buf[..len])
         } else {
             None

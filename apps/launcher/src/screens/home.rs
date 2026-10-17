@@ -445,10 +445,8 @@ impl Run {
         // face's cap height is 1456 of 2048 em, so this em reproduces the same
         // cap height the cell multiple produced.
         let em = launcher::outline_text::em_for_scale(scale);
-        // The outline's baseline lands where the cell puts its own, so the two
-        // agree on where the text sits rather than merely how tall it is.
-        let baseline = y + launcher::font::BASELINE * scale;
         let (asc, desc) = interos_std::design::typeface::line_metrics(em);
+        let baseline = (y + launcher::font::BASELINE * scale).max(asc as usize);
         let outline_advance = interos_std::design::typeface::text_advance_px(text, em) as usize;
         let bitmap_measure = text::measure(text, scale);
 
@@ -492,19 +490,7 @@ impl Run {
     /// straight onto the wallpaper ramp, whose colour is a function of `y`, so their
     /// ink cannot be settled until the pixel's row is known.
     fn pixel_inked(&self, px: usize, py: usize, ink: u32, bg: u32) -> Option<u32> {
-        if self.len == 0 {
-            return None;
-        }
-        test_text_aa(
-            px,
-            py,
-            self.x,
-            self.y,
-            self.scale,
-            &self.bytes[..self.len],
-            ink,
-            bg,
-        )
+        self.pixel_inked_aa(px, py, ink, bg)
     }
 
     /// Anti-aliased render of this run with caller-chosen ink and background.
@@ -515,6 +501,9 @@ impl Run {
     fn pixel_inked_aa(&self, px: usize, py: usize, ink: u32, bg: u32) -> Option<u32> {
         if self.len == 0 {
             return None;
+        }
+        if let Some(ref outline) = self.outline {
+            return outline.pixel(px, py, ink, bg);
         }
         test_text_aa(
             px,
@@ -798,18 +787,11 @@ fn build(state: &LauncherState) -> Paint {
 
     let deck = deck_plan(state, &theme, f.deck);
 
-    let search_scale = type_scale::BODY;
-    let magnifier_r = (text::line_height(search_scale) / 2).max(4) as i32;
-    // WHY the glyph is measured as a whole, not just its ring: the ring plus
-    // its handle is a square of side 2 * (r + handle) anchored top-left at the
-    // centre, so the centre has to sit at least that far inside the pill's left
-    // rounded edge or the handle falls outside the bar. `space::XL` alone put
-    // the ring's left edge on the border and the handle below the pill.
-    let magnifier_span = magnifier_r + TELEMETRY_BAR_W as i32 + 1;
-    let magnifier_x = (f.search.x + space::LG).saturating_add(magnifier_span as usize);
+    let magnifier_r = 10i32;
+    let magnifier_x = f.search.x + 36;
     let search_magnifier = (magnifier_x, f.search.center_y(), magnifier_r);
-    let search_text_x = magnifier_x + magnifier_span as usize + space::SM;
-    let search_room = (f.search.x + f.search.w).saturating_sub(search_text_x).saturating_sub(space::XXL);
+    let search_text_x = f.search.x + 64;
+    let search_room = (f.search.x + f.search.w).saturating_sub(search_text_x).saturating_sub(space::LG);
     let search_y = f.search.y + f.search.h.saturating_sub(text::line_height(LABEL_SCALE)) / 2;
     let search = if f.search.w > 0 && f.search.h > 0 {
         Run::fitted(
@@ -889,8 +871,8 @@ pub const DOCK_TILES: [Rect; 6] = [
     Rect::new(490, 1020, 200, 280),
 ];
 
-/// Half-size of a deck tile's pictogram, in pixels: a 52x52 box for high legibility.
-pub const DOCK_ICON_EXTENT: i32 = 26;
+/// Half-size of a deck tile's pictogram, in pixels: a 72x72 box for high legibility.
+pub const DOCK_ICON_EXTENT: i32 = 36;
 
 pub fn find_package_index(state: &LauncherState, suffix: &[u8]) -> Option<usize> {
     for i in 0..state.app_count {
@@ -1479,9 +1461,13 @@ fn card_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option
 
         match row_idx {
             0 => {
-                // Schedule: calendar icon (square outline with top hooks)
-                if idx.abs() <= 5 && idy.abs() <= 5 {
-                    if idx.abs() == 5 || idy == -5 || idy == 5 || idy == -2 {
+                // Schedule: vector mini calendar icon with loops, header bar, and date dot
+                if idx.abs() <= 6 && idy >= -7 && idy <= 7 {
+                    let loops = (idx == -3 || idx == 3) && (idy >= -7 && idy <= -5);
+                    let top_bar = (idx.abs() <= 5) && (idy >= -5 && idy <= -3);
+                    let rim = (idx.abs() == 5 && (idy >= -5 && idy <= 5)) || (idy == 5 && idx.abs() <= 5);
+                    let date_dot = (idx.abs() <= 1) && (idy >= 0 && idy <= 1);
+                    if loops || top_bar || rim || date_dot {
                         return Some(theme.accent);
                     }
                 }
@@ -1505,18 +1491,27 @@ fn card_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option
                 }
             }
             1 => {
-                // Notifications: circular indicator dot
-                if idx * idx + idy * idy <= 4 * 4 {
-                    return Some(theme.accent);
+                // Notifications: vector mini bell icon
+                if idx.abs() <= 6 && idy >= -7 && idy <= 7 {
+                    let top_ring = (idx.abs() <= 1) && (idy == -6);
+                    let outer_w = (idy + 6) * 5 / 8 + 1;
+                    let is_rim = idy == 2 && idx.abs() <= 6;
+                    let is_wall = (idy >= -5 && idy <= 1) && (idx.abs() == outer_w || idx.abs() == outer_w - 1);
+                    let is_clapper = (idy == 3 || idy == 4) && idx.abs() <= 1;
+                    if top_ring || is_rim || is_wall || is_clapper {
+                        return Some(theme.accent);
+                    }
                 }
             }
             _ => {
-                // Activities: checkmark icon
-                if idx.abs() <= 5 && idy.abs() <= 5 {
-                    if idx.abs() == 5 || idy.abs() == 5 {
-                        return Some(theme.accent);
-                    }
-                    if (idx == -1 && idy == 1) || (idx == 0 && idy == 2) || (idx == 2 && idy == 0) {
+                // Activities: vector mini heartbeat pulse icon
+                if idx.abs() <= 6 && idy >= -7 && idy <= 7 {
+                    let p1 = (idx >= -6 && idx <= -3) && (idy.abs() <= 1);
+                    let p2 = (idx >= -3 && idx <= -1) && (idy - (-4 * (idx + 3) / 2)).abs() <= 1;
+                    let p3 = (idx >= -1 && idx <= 2) && (idy - (8 * (idx + 1) / 3 - 4)).abs() <= 1;
+                    let p4 = (idx >= 2 && idx <= 4) && (idy - (4 - 4 * (idx - 2) / 2)).abs() <= 1;
+                    let p5 = (idx >= 4 && idx <= 6) && (idy.abs() <= 1);
+                    if p1 || p2 || p3 || p4 || p5 {
                         return Some(theme.accent);
                     }
                 }
@@ -1581,13 +1576,14 @@ fn deck_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option
         return Some(theme.border);
     }
     if let Some(kind) = tile.icon {
-        if let Some(c) = launcher::icons::rasterize_icon_pixel_scaled(
+        if let Some(c) = launcher::icons::rasterize_icon_pixel_scaled_aa(
             kind,
             x,
             y,
             tile.icon_cx,
             tile.icon_cy,
             tile.ink,
+            tile.fill,
             DOCK_ICON_EXTENT,
         ) {
             return Some(c);
@@ -1631,27 +1627,14 @@ fn search_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Opti
     // Magnifier: ring plus handle. WHY the centre and radius are in the plan: they
     // came from `text::line_height(type_scale::BODY)`, which the old painter
     // re-derived for every pixel of the surface to place a 20 px circle.
-    let (gx, cy, r) = p.search_magnifier;
+    let (gx, cy, _r) = p.search_magnifier;
     let dx = x as i32 - gx as i32;
     let dy = y as i32 - cy as i32;
     let d2 = dx * dx + dy * dy;
-    let ring = (r * r)..=((r + 1) * (r + 1));
-    if ring.contains(&d2) {
+    let ring = (36..=81).contains(&d2);
+    let handle = (5..=12).contains(&dx) && (dx - dy).abs() <= 2 && dy >= 5;
+    if ring || handle {
         return Some(ink);
-    }
-    // WHY a ray instead of the old `dx - dy <= 2 && dx - r <= handle` test:
-    // that test drew the handle in the band where dx > r, which starts at the
-    // ring's right *edge*, so most of it sat under the ring or outside the pill
-    // and only a stray few pixels below the bar ever showed. The handle is the
-    // diagonal ray leaving the ring at 45 degrees, measured along it from the
-    // centre: t is the distance out (r .. r + handle), w the distance across.
-    let handle = TELEMETRY_BAR_W as i32;
-    if dx > 0 && dy > 0 {
-        let along = (dx + dy) / 2;
-        let across = (dx - dy).abs();
-        if along >= r + 1 && along <= r + handle && across <= 1 {
-            return Some(ink);
-        }
     }
 
     if let Some(c) = p.search.pixel_aa(x, y, p.search.ink, theme.overlay) {

@@ -107,7 +107,7 @@ pub fn entry_band() -> (usize, usize) {
 ) -> Option<u32> {
     let em = launcher::outline_text::em_for_scale(scale);
     let (asc, desc) = interos_std::design::typeface::line_metrics(em);
-    let baseline = y0 + launcher::font::BASELINE * scale;
+    let baseline = (y0 + launcher::font::BASELINE * scale).max(asc as usize);
     let top = baseline.saturating_sub(asc as usize);
     if x < x0 || y < top || y >= baseline + desc as usize {
         return None;
@@ -116,7 +116,7 @@ pub fn entry_band() -> (usize, usize) {
     // a pure function of the run's origin, em and bytes, so every pixel of this
     // run reaches the same face. A per-pixel fallback would draw the glyph from
     // both faces at once -- an outline glyph under a hard-edged bitmap ghost.
-    if scale >= 2 && bytes.len() <= 24 {
+    if scale >= 1 && bytes.len() <= launcher::outline_text::KEY_MAX {
         if let Some(run) = launcher::outline_text::OutlineRun::place(x0, baseline, em, bytes) {
             return run.pixel(x, y, ink, bg);
         }

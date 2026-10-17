@@ -162,16 +162,16 @@ const LOCK_PADLOCK_CX: i32 = 362;
 const LOCK_PADLOCK_CY: i32 = 1106;
 /// Circular controls. Reference centres are (28, 385.5) and (146.5, 385.5) with
 /// radius 17.5, i.e. inset 16.2% / 15.3% of the width.
-pub const LOCK_BTN_CY: i32 = 1300;
-pub const LOCK_BTN_L_CX: i32 = 117;
-pub const LOCK_BTN_R_CX: i32 = 610;
-pub const LOCK_BTN_R: i32 = 73;
+pub const LOCK_BTN_CY: i32 = 1330;
+pub const LOCK_BTN_L_CX: i32 = 96;
+pub const LOCK_BTN_R_CX: i32 = 624;
+pub const LOCK_BTN_R: i32 = 36;
 /// Home indicator: reference width 58, height 3, bottom inset 3 panel px.
 pub const LOCK_PILL_W: usize = 241;
 pub const LOCK_PILL_H: usize = 9;
 pub const LOCK_PILL_Y: usize = 1421;
 /// What the torch control says about itself.
-const LOCK_NA_TEXT: &[u8] = b"N/A";
+const LOCK_NA_TEXT: &[u8] = b"";
 
 /// WHY the two veils are percentages and not channel arithmetic: the panel's
 /// translucent control solves to a 27% and a 36% white veil, and those two

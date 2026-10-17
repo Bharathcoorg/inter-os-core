@@ -29,6 +29,7 @@ pub enum IconKind {
     Contacts,
     Maps,
     Briefcase,
+    CardDemo,
 }
 
 /// Identifies if a package ID or process name maps to a first-party vector pictogram.
@@ -38,7 +39,7 @@ pub fn match_icon_kind(id: &[u8]) -> Option<IconKind> {
     }
     // Match package IDs, short process names, or badge acronyms
     if id == b"org.interos.dialer" || id == b"dialer" || id == b"app_dialer" || id == b"CALL" || id == b"TEL"
-        || id == b"Phone" || id == b"phone"
+        || id == b"Phone" || id == b"phone" || id == b"Dialer"
     {
         Some(IconKind::Phone)
     } else if id == b"org.interos.messages" || id == b"messages" || id == b"app_messages" || id == b"MSG" || id == b"SMS"
@@ -59,7 +60,7 @@ pub fn match_icon_kind(id: &[u8]) -> Option<IconKind> {
     {
         Some(IconKind::Files)
     } else if id == b"org.interos.gallery" || id == b"gallery" || id == b"photos" || id == b"app_gallery" || id == b"GAL" || id == b"PHO"
-        || id == b"Gallery" || id == b"Photos"
+        || id == b"PIC" || id == b"Gallery" || id == b"Photos"
     {
         Some(IconKind::Gallery)
     } else if id == b"org.interos.settings" || id == b"settings" || id == b"app_settings" || id == b"SET" || id == b"CFG"
@@ -79,7 +80,7 @@ pub fn match_icon_kind(id: &[u8]) -> Option<IconKind> {
     {
         Some(IconKind::Terminal)
     } else if id == b"org.interos.vault" || id == b"vault" || id == b"app_vault"
-        || id == b"VAUL" || id == b"PASS"
+        || id == b"VAUL" || id == b"VAULT" || id == b"PASS"
         || id == b"Vault"
     {
         Some(IconKind::Vault)
@@ -99,7 +100,7 @@ pub fn match_icon_kind(id: &[u8]) -> Option<IconKind> {
         || id == b"Apps"
     {
         Some(IconKind::Apps)
-    } else if id == b"org.interos.calendar" || id == b"calendar" || id == b"Calendar" || id == b"CAL" {
+    } else if id == b"org.interos.calendar" || id == b"calendar" || id == b"app_calendar" || id == b"Calendar" || id == b"CAL" {
         Some(IconKind::Calendar)
     } else if id == b"org.interos.notes" || id == b"notes" || id == b"Notes" || id == b"NOTE" {
         Some(IconKind::Notes)
@@ -109,6 +110,10 @@ pub fn match_icon_kind(id: &[u8]) -> Option<IconKind> {
         Some(IconKind::Maps)
     } else if id == b"briefcase" || id == b"work" || id == b"Work" || id == b"WORK" {
         Some(IconKind::Briefcase)
+    } else if id == b"org.interos.card_demo" || id == b"card_demo" || id == b"app_card_demo"
+        || id == b"Card Demo" || id == b"CARD" || id == b"Card"
+    {
+        Some(IconKind::CardDemo)
     } else {
         None
     }
@@ -118,15 +123,6 @@ pub fn match_icon_kind(id: &[u8]) -> Option<IconKind> {
 ///
 /// `extent` is the half-size of the output box in pixels, so `16` reproduces
 /// [`rasterize_icon_pixel`] exactly and anything larger magnifies the glyph.
-/// WHY this exists: the standard glyph is a 33 px box, which is small beside a
-/// 190 px deck tile, and growing it per call site would mean a second copy of
-/// every pictogram. Instead the output pixel is mapped back into the unit box
-/// and a `step x step` neighbourhood is OR-ed, because magnification otherwise
-/// leaves holes where several output pixels share one source pixel.
-///
-/// The glyph is sampled, not re-derived at the new size: strokes keep the same
-/// proportion, so a magnified icon is the same drawing at a larger size rather
-/// than a different, heavier one.
 pub fn rasterize_icon_pixel_scaled(
     kind: IconKind,
     px: usize,
@@ -137,23 +133,60 @@ pub fn rasterize_icon_pixel_scaled(
     extent: i32,
 ) -> Option<u32> {
     let extent = extent.max(16);
-    if (px as i32 - cx as i32).abs() > extent || (py as i32 - cy as i32).abs() > extent {
+    let dx = px as i32 - cx as i32;
+    let dy = py as i32 - cy as i32;
+    if dx.abs() > extent || dy.abs() > extent {
         return None;
     }
-    // How many output pixels share one source pixel at this magnification.
-    let step = ((extent + 15) / 16).max(1);
-    let ox = (px as i32 - cx as i32) * 16 / extent;
-    let oy = (py as i32 - cy as i32) * 16 / extent;
-    for dy in 0..step {
-        for dx in 0..step {
-            let sx = (cx as i32 + ox + dx) as usize;
-            let sy = (cy as i32 + oy + dy) as usize;
-            if let Some(c) = rasterize_icon_pixel(kind, sx, sy, cx, cy, color) {
-                return Some(c);
-            }
+    // Map output (px, py) to canonical 32x32 space [-16..=16] with round-to-nearest
+    let rx = (dx * 32 + (if dx >= 0 { extent } else { -extent })) / (2 * extent);
+    let ry = (dy * 32 + (if dy >= 0 { extent } else { -extent })) / (2 * extent);
+    let sx = (cx as i32 + rx) as usize;
+    let sy = (cy as i32 + ry) as usize;
+    rasterize_icon_pixel(kind, sx, sy, cx, cy, color)
+}
+
+/// Anti-aliased scaled rasteriser using 4x subpixel supersampling.
+///
+/// Smooths curves, diagonal edges, and fine details over the given background color.
+pub fn rasterize_icon_pixel_scaled_aa(
+    kind: IconKind,
+    px: usize,
+    py: usize,
+    cx: usize,
+    cy: usize,
+    color: u32,
+    bg: u32,
+    extent: i32,
+) -> Option<u32> {
+    let extent = extent.max(16);
+    let dx = px as i32 - cx as i32;
+    let dy = py as i32 - cy as i32;
+    if dx.abs() > extent || dy.abs() > extent {
+        return None;
+    }
+    // 4 subpixel sample positions at (±0.25, ±0.25)
+    let mut hits = 0u32;
+    const OFFSETS: [(i32, i32); 4] = [(-1, -1), (1, -1), (-1, 1), (1, 1)];
+    for &(ox, oy) in &OFFSETS {
+        let sub_dx = dx * 4 + ox;
+        let sub_dy = dy * 4 + oy;
+        let rx = (sub_dx * 32 + (if sub_dx >= 0 { extent * 4 } else { -extent * 4 })) / (8 * extent);
+        let ry = (sub_dy * 32 + (if sub_dy >= 0 { extent * 4 } else { -extent * 4 })) / (8 * extent);
+        let sx = (cx as i32 + rx) as usize;
+        let sy = (cy as i32 + ry) as usize;
+        if rasterize_icon_pixel(kind, sx, sy, cx, cy, color).is_some() {
+            hits += 1;
         }
     }
-    None
+    match hits {
+        0 => None,
+        4 => Some(color),
+        h => {
+            let cov = (h * 255) / 4;
+            Some(interos_std::design::font::blend(color, bg, cov as u8))
+        }
+    }
 }
 
 /// Evaluates whether the pixel at `(px, py)` falls inside the vector pictogram
@@ -177,91 +210,101 @@ pub fn rasterize_icon_pixel(
 
     let inked = match kind {
         IconKind::Phone => {
-            // WHY a hook and not a bar: two attempts at "two pads on a straight
-            // grip" both read as a dumbbell, because a straight axis with two
-            // blobs is a dumbbell no matter how the blobs taper. The telephone
-            // mark on every modern phone is a single curved hook - one continuous
-            // body sweeping from the earpiece through ~270 degrees to the
-            // mouthpiece, concave side facing the upper-right corner. So this is
-            // drawn as a ring arc, not as parts: everything between r=8 and
-            // r=13 about (1,-1) except a wedge around the north-east diagonal,
-            // with a round pad at each lip of the wedge for the ear and mouth.
-            // The shape was prototyped offline as ASCII art at 1x before landing;
-            // the two previous versions were judged on-device instead, which is
-            // why they shipped looking wrong.
-            let r2 = rx * rx + ry * ry;
-            let in_ring = (81..=225).contains(&r2);
-            // Excluded wedge: within ~40 degrees of the NE diagonal. `s` is
-            // twice the projection onto (1,-1); the wedge test is
-            // `s > |perp| * cot(40deg)` with cot40 ~= 1.19, all in integers so
-            // the freestanding hot path stays free of floats and trig.
-            let s = rx - ry;
-            let in_wedge = s > 0 && 100 * s > 119 * (rx + ry).abs();
-            let arc = in_ring && !in_wedge;
-            // WHY the ring is r=9..15 and not smaller: two hook versions at
-            // r=8..13 read as a small "C" on the 48px deck tile - correct in
-            // outline but too small for the ear and mouth to survive as more
-            // than round caps. Filling the box (512 of 1089 pixels) is what
-            // lets the asymmetry below stay legible at deck size.
-            //
-            // WHY the pads differ: a receiver's earpiece is visibly larger than
-            // its mouthpiece, and that asymmetry is most of what separates a
-            // handset from a symmetric ring at small sizes. Equal pads were
-            // tried and read as a ring with two blobs.
-            let ear = (rx - 1) * (rx - 1) + (ry + 10) * (ry + 10) <= 49;
-            let mouth = (rx - 10) * (rx - 10) + ry * ry <= 25;
-            arc || ear || mouth
+            // Earpiece bulb at upper right (5, -6)
+            let ear = (rx - 5) * (rx - 5) + (ry + 6) * (ry + 6) <= 16;
+            // Mouthpiece bulb at lower left (-6, 5)
+            let mouth = (rx + 6) * (rx + 6) + (ry - 5) * (ry - 5) <= 16;
+            // Sweeping handset handle connecting them, bowing toward (-4, -4)
+            let dx = rx - 5;
+            let dy = ry - 5;
+            let d2 = dx * dx + dy * dy;
+            let handle = (d2 >= 70 && d2 <= 145) && (rx <= 5 && ry <= 5) && (rx + ry <= 1);
+            ear || mouth || handle
         }
         IconKind::Messages => {
-            // Rounded speech bubble with bottom-left tail
-            let bubble = rx >= -11 && rx <= 11 && ry >= -10 && ry <= 5;
-            let tail = (ry >= 5 && ry <= 11) && (rx >= -11 && rx <= -5) && (ry - rx <= 17);
-            let not_corner = (rx == -11 || rx == 11) && (ry == -10 || ry == 5);
-            // 3 small dots inside
-            let is_dot = (ry >= -3 && ry <= -1) && (
-                (rx >= -6 && rx <= -4) || (rx >= -1 && rx <= 1) || (rx >= 4 && rx <= 6)
-            );
-            (bubble || tail) && !not_corner && !is_dot
+            // Bubble body in rx in -11..11, ry in -9..4, rounded corners r=3
+            let in_box = rx.abs() <= 11 && ry >= -9 && ry <= 4;
+            let cx = if rx.abs() > 8 { rx.abs() - 8 } else { 0 };
+            let cy = if ry < -6 { -6 - ry } else if ry > 1 { ry - 1 } else { 0 };
+            let in_bubble = in_box && (cx * cx + cy * cy <= 9);
+            let in_inner = (rx.abs() <= 9 && ry >= -7 && ry <= 2)
+                && ((if rx.abs() > 7 { rx.abs() - 7 } else { 0 }) * (if rx.abs() > 7 { rx.abs() - 7 } else { 0 })
+                    + (if ry < -5 { -5 - ry } else if ry > 0 { ry } else { 0 }) * (if ry < -5 { -5 - ry } else if ry > 0 { ry } else { 0 }) <= 4);
+            let bubble_rim = in_bubble && !in_inner;
+            // Tail pointing bottom-left
+            let tail = (ry >= 3 && ry <= 9)
+                && (rx >= -10 && rx <= -3)
+                && (rx <= -3 - (ry - 3))
+                && (rx >= -10 + (ry - 3) / 2);
+            let tail_inner = (ry >= 4 && ry <= 7)
+                && (rx >= -8 && rx <= -5)
+                && (rx <= -5 - (ry - 4));
+            // Two text lines inside bubble
+            let line1 = (ry >= -5 && ry <= -4) && (rx >= -6 && rx <= 6);
+            let line2 = (ry >= -1 && ry <= 0) && (rx >= -6 && rx <= 3);
+            (bubble_rim || (tail && !tail_inner)) || line1 || line2
         }
         IconKind::Camera => {
-            // Viewfinder body, lens ring, top shutter bump
-            let body = rx >= -12 && rx <= 12 && ry >= -7 && ry <= 10;
-            let shutter = rx >= -9 && rx <= -4 && ry >= -10 && ry <= -7;
-            let lens_r2 = rx * rx + ry * ry;
-            let lens_cutout = lens_r2 <= 20; // 4.5^2
-            let lens_pupil = lens_r2 <= 4;
-            (body || shutter) && (!lens_cutout || lens_pupil)
+            let in_box = rx.abs() <= 11 && ry >= -6 && ry <= 9;
+            let cx = if rx.abs() > 8 { rx.abs() - 8 } else { 0 };
+            let cy = if ry < -3 { -3 - ry } else if ry > 6 { ry - 6 } else { 0 };
+            let in_body = in_box && (cx * cx + cy * cy <= 9);
+            let in_inner = (rx.abs() <= 9 && ry >= -4 && ry <= 7)
+                && ((if rx.abs() > 7 { rx.abs() - 7 } else { 0 }) * (if rx.abs() > 7 { rx.abs() - 7 } else { 0 })
+                    + (if ry < -2 { -2 - ry } else if ry > 5 { ry - 5 } else { 0 }) * (if ry < -2 { -2 - ry } else if ry > 5 { ry - 5 } else { 0 }) <= 4);
+            let body_rim = in_body && !in_inner;
+            let prism = (rx.abs() <= 5 && ry >= -9 && ry <= -6) && (ry >= -9 + rx.abs() - 3);
+            let prism_inner = rx.abs() <= 3 && ry >= -7 && ry <= -6;
+            let prism_rim = prism && !prism_inner;
+            let lx = rx;
+            let ly = ry - 2;
+            let lr2 = lx * lx + ly * ly;
+            let lens_rim = lr2 >= 9 && lr2 <= 25;
+            let flash = (rx - 6) * (rx - 6) + (ry + 2) * (ry + 2) <= 2;
+            body_rim || prism_rim || lens_rim || flash
         }
         IconKind::Browser => {
-            // Globe with circular rim, equator, and central meridian
             let r2 = rx * rx + ry * ry;
-            let in_circle = r2 <= 121; // 11^2
-            let rim = r2 >= 81 && in_circle; // 9^2 .. 11^2
-            let equator = in_circle && (ry >= -1 && ry <= 1);
-            let meridian = in_circle && ((rx * 2) * (rx * 2) + ry * ry <= 121) && ((rx * 2) * (rx * 2) + ry * ry >= 49);
-            rim || equator || meridian
+            // Outer circular rim: radius ~10
+            let rim = r2 >= 75 && r2 <= 115;
+            // Equator
+            let eq = ry.abs() <= 1 && rx.abs() <= 9;
+            // Prime meridian
+            let prime = rx.abs() <= 1 && ry.abs() <= 9;
+            // Latitude parallels
+            let lat = ((ry.abs() - 5).abs() <= 1) && (r2 <= 100);
+            // Elliptical meridian: (rx * 2)^2 + ry^2
+            let mr2 = (rx * 2) * (rx * 2) + ry * ry;
+            let meridian = (mr2 >= 75 && mr2 <= 125) && (r2 <= 105);
+            rim || eq || prime || lat || meridian
         }
         IconKind::Files => {
-            // Folder with top tab and main body
-            let tab = rx >= -12 && rx <= -3 && ry >= -10 && ry <= -6;
-            let body = rx >= -12 && rx <= 12 && ry >= -6 && ry <= 9;
-            let fold_line = (ry == -2) && (rx >= -10 && rx <= 10);
-            (tab || body) && !fold_line
+            let tab = rx >= -11 && rx <= -2 && ry >= -9 && ry <= -6;
+            let in_box = rx.abs() <= 11 && ry >= -6 && ry <= 9;
+            let cx = if rx.abs() > 8 { rx.abs() - 8 } else { 0 };
+            let cy = if ry > 6 { ry - 6 } else { 0 };
+            let in_body = in_box && (cx * cx + cy * cy <= 9);
+            let in_inner = (rx.abs() <= 9 && ry >= -4 && ry <= 7)
+                && ((if rx.abs() > 7 { rx.abs() - 7 } else { 0 }) * (if rx.abs() > 7 { rx.abs() - 7 } else { 0 })
+                    + (if ry > 5 { ry - 5 } else { 0 }) * (if ry > 5 { ry - 5 } else { 0 }) <= 4);
+            let body_rim = (in_body || tab) && !in_inner;
+            let flap = (ry == -3) && rx.abs() <= 9;
+            body_rim || flap
         }
         IconKind::Gallery => {
-            // Frame with sun circle and mountain slopes
-            let rim = (rx >= -11 && rx <= 11 && ry >= -9 && ry <= 9)
-                && !(rx >= -9 && rx <= 9 && ry >= -7 && ry <= 7);
+            let frame = if rx.abs() <= 11 && ry.abs() <= 9 {
+                !(rx.abs() <= 9 && ry.abs() <= 7)
+            } else {
+                false
+            };
             let sun = (rx - 5) * (rx - 5) + (ry + 3) * (ry + 3) <= 4;
-            // Mountain peak slopes
-            let peak1 = (ry >= 1 && ry <= 7) && (rx >= -8 && rx <= 2) && (7 - ry >= (rx + 3).abs());
-            let peak2 = (ry >= 3 && ry <= 7) && (rx >= 0 && rx <= 8) && (7 - ry >= (rx - 4).abs());
-            rim || sun || peak1 || peak2
+            let peak1 = (ry >= 0 && ry <= 7) && ((rx + 3).abs() <= (ry - 0));
+            let peak2 = (ry >= 3 && ry <= 7) && ((rx - 4).abs() <= (ry - 3));
+            frame || sun || peak1 || peak2
         }
         IconKind::Settings => {
-            // Gear: outer ring with 8 teeth and central circular cutout
             let r2 = rx * rx + ry * ry;
-            let rim = r2 >= 16 && r2 <= 64; // r in 4..8
+            let rim = r2 >= 20 && r2 <= 64;
             let tooth_h = (rx.abs() <= 11 && ry.abs() <= 2) && r2 >= 36;
             let tooth_v = (rx.abs() <= 2 && ry.abs() <= 11) && r2 >= 36;
             let tooth_d1 = ((rx - ry).abs() <= 2 && (rx + ry).abs() <= 12) && r2 >= 36;
@@ -269,35 +312,53 @@ pub fn rasterize_icon_pixel(
             (rim || tooth_h || tooth_v || tooth_d1 || tooth_d2) && r2 >= 9
         }
         IconKind::Music => {
-            // Beamed pair of eighth notes
-            let note1 = (rx + 5) * (rx + 5) + (ry - 5) * (ry - 5) <= 9;
-            let note2 = (rx - 4) * (rx - 4) + (ry - 3) * (ry - 3) <= 9;
-            let stem1 = (rx >= -3 && rx <= -2) && (ry >= -9 && ry <= 5);
-            let stem2 = (rx >= 6 && rx <= 7) && (ry >= -11 && ry <= 3);
-            let beam = (rx >= -3 && rx <= 7) && (ry >= -11 && ry <= -8);
-            note1 || note2 || stem1 || stem2 || beam
+            let head1 = (rx + 5) * (rx + 5) * 3 + (ry - 4) * (ry - 4) * 2 <= 20;
+            let head2 = (rx - 4) * (rx - 4) * 3 + (ry - 2) * (ry - 2) * 2 <= 20;
+            let stem1 = (rx >= -3 && rx <= -2) && (ry >= -8 && ry <= 4);
+            let stem2 = (rx >= 6 && rx <= 7) && (ry >= -10 && ry <= 2);
+            let beam = (rx >= -3 && rx <= 7)
+                && (ry >= -10 - (rx - 7) * 2 / 10 && ry <= -8 - (rx - 7) * 2 / 10);
+            head1 || head2 || stem1 || stem2 || beam
         }
         IconKind::Calculator => {
-            // Minimal 2x2 grid representing +, -, ×, =
-            let plus = ((rx >= -8 && rx <= -2) && ry == -5) || (rx == -5 && (ry >= -8 && ry <= -2));
-            let minus = (rx >= 2 && rx <= 8) && (ry >= -6 && ry <= -4);
-            let mul = (rx + 5).abs() == (ry - 5).abs() && (rx + 5).abs() <= 3;
-            let eq = (rx >= 2 && rx <= 8) && (ry == 3 || ry == 6);
-            plus || minus || mul || eq
+            // Rounded calculator body
+            let in_body = if rx.abs() <= 9 && ry.abs() <= 11 {
+                let cx = if rx.abs() > 6 { rx.abs() - 6 } else { 0 };
+                let cy = if ry.abs() > 8 { ry.abs() - 8 } else { 0 };
+                cx * cx + cy * cy <= 9
+            } else {
+                false
+            };
+            // LCD display screen bar at top
+            let in_lcd = rx.abs() <= 6 && (ry >= -8 && ry <= -5);
+            // 6 keypad buttons in 3x2 grid
+            let btn = (rx.abs() >= 2 && rx.abs() <= 6)
+                && ((ry >= -1 && ry <= 0) || (ry >= 3 && ry <= 4) || (ry >= 7 && ry <= 8));
+            in_body && !(in_lcd || btn)
         }
         IconKind::Terminal => {
-            // Prompt chevron `>` and cursor `_`
-            let chevron = (rx >= -9 && rx <= -3) && (ry.abs() <= (rx + 9) && (rx + 9) - ry.abs() <= 1);
-            let cursor = (rx >= 0 && rx <= 8) && (ry >= 4 && ry <= 6);
+            let d = rx - (-2 - ry.abs());
+            let chevron = (ry >= -7 && ry <= 7) && (d >= 0 && d <= 1) && rx <= -2;
+            let cursor = (rx >= 1 && rx <= 9) && (ry >= 5 && ry <= 7);
             chevron || cursor
         }
         IconKind::Vault => {
-            // Shield outline with center keyhole
-            let in_shield = (rx >= -10 && rx <= 10 && ry >= -10 && ry <= 0)
-                || ((ry > 0 && ry <= 11) && ry <= 11 - rx.abs());
-            let key_circle = rx * rx + (ry + 2) * (ry + 2) <= 4;
-            let key_slot = rx.abs() <= 1 && (ry >= 0 && ry <= 4);
-            in_shield && !(key_circle || key_slot)
+            // Shackle arch and straight legs
+            let arch_r2 = rx * rx + (ry + 2) * (ry + 2);
+            let shackle_arch = arch_r2 <= 36 && arch_r2 >= 16 && ry <= -2;
+            let shackle_legs = (rx.abs() >= 4 && rx.abs() <= 6) && (ry >= -2 && ry <= 0);
+            // Padlock body
+            let body = if rx.abs() <= 9 && ry >= 0 && ry <= 11 {
+                let cx = if rx.abs() > 7 { rx.abs() - 7 } else { 0 };
+                let cy = if ry > 9 { ry - 9 } else { 0 };
+                cx * cx + cy * cy <= 4
+            } else {
+                false
+            };
+            // Keyhole cutout
+            let key_circle = rx * rx + (ry - 4) * (ry - 4) <= 3;
+            let key_slot = rx.abs() <= 1 && (ry >= 4 && ry <= 8);
+            (shackle_arch || shackle_legs || body) && !(key_circle || key_slot)
         }
         IconKind::Health => {
             // Heartbeat ECG pulse wave
@@ -318,27 +379,42 @@ pub fn rasterize_icon_pixel(
             node1 || node2 || node3 || link1 || link2
         }
         IconKind::Sensors => {
-            // Radar arcs radiating from bottom center
-            let r2 = rx * rx + (ry - 8) * (ry - 8);
-            let arc1 = r2 >= 36 && r2 <= 49 && ry <= 8;
-            let arc2 = r2 >= 100 && r2 <= 121 && ry <= 8;
-            let arc3 = r2 >= 196 && r2 <= 225 && ry <= 8;
-            arc1 || arc2 || arc3
+            let dx = rx;
+            let dy = ry - 7;
+            let r2 = dx * dx + dy * dy;
+            let core = r2 <= 4;
+            let arc1 = r2 >= 25 && r2 <= 42 && dy <= 0;
+            let arc2 = r2 >= 81 && r2 <= 110 && dy <= 0;
+            let arc3 = r2 >= 169 && r2 <= 210 && dy <= 0;
+            let in_wedge = dx.abs() * 10 <= (-dy) * 13;
+            core || ((arc1 || arc2 || arc3) && in_wedge)
         }
         IconKind::Apps => {
-            // 4 rounded square tiles (2x2 grid) matching reference Screen 2 Apps tile
             let in_tile_x = (rx >= -9 && rx <= -2) || (rx >= 2 && rx <= 9);
             let in_tile_y = (ry >= -9 && ry <= -2) || (ry >= 2 && ry <= 9);
             in_tile_x && in_tile_y
         }
         IconKind::Calendar => {
-            // Calendar with top header bar, hanger loops, and date body
-            let body = rx >= -10 && rx <= 10 && ry >= -7 && ry <= 10;
-            let loops = (rx == -5 || rx == 5) && (ry >= -10 && ry <= -7);
-            let header_bar = rx >= -10 && rx <= 10 && (ry >= -7 && ry <= -3);
-            let date_line1 = (rx >= -6 && rx <= 6) && (ry == 1);
-            let date_line2 = (rx >= -6 && rx <= 2) && (ry == 5);
-            (body || loops) && (!header_bar || ry >= -5) && (header_bar || date_line1 || date_line2)
+            let loop_binder = (rx == -4 || rx == 4) && (ry >= -11 && ry <= -6);
+            let body = if rx.abs() <= 9 && ry >= -7 && ry <= 10 {
+                let cx = if rx.abs() > 7 { rx.abs() - 7 } else { 0 };
+                let cy = if ry > 8 { ry - 8 } else { 0 };
+                cx * cx + cy * cy <= 4
+            } else {
+                false
+            };
+            let header = body && (ry >= -7 && ry <= -3);
+            let rim = body && (rx.abs() == 9 || ry == 10);
+            // Digit 1
+            let one_stem = (rx == -4 || rx == -3) && (ry >= 1 && ry <= 7);
+            let one_serif = (rx == -5) && (ry >= 2 && ry <= 3);
+            let one_base = (rx >= -6 && rx <= -2) && (ry == 7);
+            let digit_one = one_stem || one_serif || one_base;
+            // Digit 7
+            let seven_top = (rx >= 0 && rx <= 5) && (ry >= 1 && ry <= 2);
+            let seven_diag = (ry >= 2 && ry <= 7) && ((5 - (ry - 2)) == rx);
+            let digit_seven = seven_top || seven_diag;
+            loop_binder || header || rim || digit_one || digit_seven
         }
         IconKind::Notes => {
             // Document outline with 3 horizontal writing lines
@@ -370,6 +446,39 @@ pub fn rasterize_icon_pixel(
             // Center latch
             let latch = rx.abs() <= 2 && ry >= -1 && ry <= 2;
             handle || body || latch
+        }
+        IconKind::CardDemo => {
+            // Credit / smart card body: rx in -11..11, ry in -7..7
+            let in_body = if rx.abs() <= 11 && ry.abs() <= 7 {
+                let cx = if rx.abs() > 9 { rx.abs() - 9 } else { 0 };
+                let cy = if ry.abs() > 5 { ry.abs() - 5 } else { 0 };
+                cx * cx + cy * cy <= 4
+            } else {
+                false
+            };
+            // Outer card border
+            let is_border = if in_body {
+                let inner = if rx.abs() <= 10 && ry.abs() <= 6 {
+                    let cx = if rx.abs() > 8 { rx.abs() - 8 } else { 0 };
+                    let cy = if ry.abs() > 4 { ry.abs() - 4 } else { 0 };
+                    cx * cx + cy * cy <= 4
+                } else {
+                    false
+                };
+                !inner
+            } else {
+                false
+            };
+            // Magnetic stripe
+            let stripe = in_body && (ry >= -4 && ry <= -2);
+            // EMV Smart Chip
+            let chip = (rx >= -8 && rx <= -4) && (ry >= 1 && ry <= 4);
+            // Contactless waves
+            let dx = rx - 3;
+            let dy = ry - 2;
+            let r2 = dx * dx + dy * dy;
+            let nfc = (dx > 0) && ((r2 >= 9 && r2 <= 16) || (r2 >= 25 && r2 <= 36)) && dy.abs() <= dx;
+            is_border || stripe || chip || nfc
         }
     };
 
@@ -405,6 +514,7 @@ mod tests {
         assert_eq!(match_icon_kind(b"org.interos.contacts"), Some(IconKind::Contacts));
         assert_eq!(match_icon_kind(b"org.interos.maps"), Some(IconKind::Maps));
         assert_eq!(match_icon_kind(b"work"), Some(IconKind::Briefcase));
+        assert_eq!(match_icon_kind(b"org.interos.card_demo"), Some(IconKind::CardDemo));
         assert_eq!(match_icon_kind(b"org.custom.unknown"), None);
     }
 
@@ -431,6 +541,7 @@ mod tests {
             IconKind::Contacts,
             IconKind::Maps,
             IconKind::Briefcase,
+            IconKind::CardDemo,
         ];
 
         for &kind in &kinds {

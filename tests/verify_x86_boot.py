@@ -180,8 +180,6 @@ def main():
 
     args = [
         qemu_exe,
-        "-machine", "q35",
-        "-cpu", "qemu64",
         "-drive", f"format=raw,file={kernel_img}",
         "-snapshot",
         "-m", "1024M",

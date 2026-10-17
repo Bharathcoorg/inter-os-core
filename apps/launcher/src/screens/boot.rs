@@ -291,13 +291,13 @@ fn wordmark_pixel(x: usize, y: usize, state: &LauncherState) -> Option<u32> {
 
 /// Official Brand Tagline: "SMARTER • PRIVATE • OPEN"
 fn tagline_pixel(x: usize, y: usize) -> Option<u32> {
-    if y < TAGLINE_Y || y >= TAGLINE_Y + launcher::font::GLYPH_H {
+    if y < TAGLINE_Y.saturating_sub(8) || y >= TAGLINE_Y + 24 {
         return None;
     }
 
-    let w1 = launcher::text::measure(TAG1, 1);
-    let w2 = launcher::text::measure(TAG2, 1);
-    let w3 = launcher::text::measure(TAG3, 1);
+    let w1 = interos_std::design::typeface::text_advance_px(TAG1, 24) as usize;
+    let w2 = interos_std::design::typeface::text_advance_px(TAG2, 24) as usize;
+    let w3 = interos_std::design::typeface::text_advance_px(TAG3, 24) as usize;
     let total_tag_w = w1 + TAG_GAP + w2 + TAG_GAP + w3;
     let tag_x0 = (W.saturating_sub(total_tag_w)) / 2;
 
@@ -319,7 +319,7 @@ fn tagline_pixel(x: usize, y: usize) -> Option<u32> {
     }
 
     // Render smooth circular bullet dots
-    let dot_cy = TAGLINE_Y + 11;
+    let dot_cy = TAGLINE_Y + 7;
     let dy = (y as i32 - dot_cy as i32).abs();
     for &dot_cx in &[dot1_x, dot2_x] {
         let dx = (x as i32 - dot_cx as i32).abs();
@@ -402,7 +402,7 @@ fn progress_capsule_pixel(x: usize, y: usize, state: &LauncherState) -> Option<u
 
 /// Dynamic System Status Phase text
 fn status_subtitle_pixel(x: usize, y: usize, state: &LauncherState) -> Option<u32> {
-    if y < STATUS_Y || y >= STATUS_Y + launcher::font::GLYPH_H {
+    if y < STATUS_Y.saturating_sub(8) || y >= STATUS_Y + 24 {
         return None;
     }
 
@@ -416,7 +416,7 @@ fn status_subtitle_pixel(x: usize, y: usize, state: &LauncherState) -> Option<u3
         b"SOVEREIGN PLATFORM READY"
     };
 
-    let text_w = launcher::text::measure(phase_text, 1);
+    let text_w = interos_std::design::typeface::text_advance_px(phase_text, 24) as usize;
     let x0 = (W.saturating_sub(text_w)) / 2;
 
     crate::test_text_aa(x, y, x0, STATUS_Y, 1, phase_text, COLOR_MUTED_TEXT, COLOR_BG)

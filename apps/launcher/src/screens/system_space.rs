@@ -69,7 +69,8 @@ pub(super) fn run_left(
     if y < y0 || y >= y0 + h || x < rect.x {
         return None;
     }
-    let w = text::measure(run, scale);
+    let em = if scale == 1 { 24u32 } else { (scale * 24) as u32 };
+    let w = interos_std::design::typeface::text_advance_px(run, em) as usize;
     if x >= rect.x + w {
         return None;
     }
@@ -90,7 +91,8 @@ pub(super) fn run_right(
     if y < y0 || y >= y0 + h {
         return None;
     }
-    let w = text::measure(run, scale);
+    let em = if scale == 1 { 24u32 } else { (scale * 24) as u32 };
+    let w = interos_std::design::typeface::text_advance_px(run, em) as usize;
     if w > rect.w {
         return None;
     }
@@ -112,11 +114,13 @@ pub(super) fn run_center(
     if y < y0 || y >= y0 + h {
         return None;
     }
-    let w = text::measure(run, scale);
+    let em = if scale == 1 { 24u32 } else { (scale * 24) as u32 };
+    let w = interos_std::design::typeface::text_advance_px(run, em) as usize;
     if w > rect.w {
         return None;
     }
-    let placed = Rect::new(rect.x + text::center_x(run, scale, rect.w), rect.y, w, rect.h);
+    let cx = (rect.w.saturating_sub(w)) / 2;
+    let placed = Rect::new(rect.x + cx, rect.y, w, rect.h);
     run_left(x, y, &placed, scale, run, color)
 }
 
@@ -753,7 +757,7 @@ pub fn get_system_space_color(x: usize, y: usize, state: &LauncherState) -> u32 
     // 1. Status Bar
     if y < STATUS_BAR_HEIGHT {
         if state.clock_source_ok {
-            if let Some(c) = test_text_aa(x, y, 48, 14, 1, &state.clock_time, TEXT_DARK, 0xFFFFFFFF) {
+            if let Some(c) = test_text_aa(x, y, 48, 14, 1, &state.clock_time, TEXT_DARK, BG_COLOR) {
                 return c;
             }
         }
@@ -787,29 +791,8 @@ pub fn get_system_space_color(x: usize, y: usize, state: &LauncherState) -> u32 
     }
 
     // 3. Large Bold Title: "System Space"
-    // WHY y0 = 52 and a 72-row gate: a scale-3 run needs GLYPH_H * scale rows, and
-    // the old `y >= 56 && y < 96` window threw away the bottom 36 of 72, so the
-    // title rendered as its own severed upper halves. The run now sits high enough
-    // that its ink (61..109) clears both the status rule at y=48 and the sphere
-    // band that starts at y=115. The x window was 240 while the word measures
-    // ~261px at this scale, so the final `m` was being cut as well.
-    //
-    // WHY the word is "System Space" and not "System": the Settings app titles
-    // this same surface "System Space", so a title of "System" read as a
-    // different screen to a user who had arrived from Settings -- and the name is
-    // the design system's own.
-    //
-    // WHY the window is 576 wide: measured with the face's own advance table,
-    // `text::measure(b"System Space", 3)` is 480px, and the run starts at x 48,
-    // so it ends at 528. 576 leaves 48px of slack on the right at the surface's
-    // own margin, and admits the whole word. The old 320-wide window was cut for
-    // "System" and would have clipped this at "Spac".
-    //
-    // WHY the title still clears the orb band: its ink ends at row 109 and the
-    // band the orb occupies starts at 115, so widening the word horizontally
-    // costs nothing vertically.
-    if y >= ORB_BAND_Y0 - 88 && y < ORB_BAND_Y1 - 126 && x >= 48 && x < 576 {
-        if let Some(c) = test_text_aa(x, y, 48, 112, 3, b"System Space", TEXT_DARK, 0xFFFFFFFF) {
+    if y >= 100 && y < 195 && x >= 48 && x < 620 {
+        if let Some(c) = test_text_aa(x, y, 48, 112, 3, b"System Space", TEXT_DARK, BG_COLOR) {
             return c;
         }
     }
@@ -822,9 +805,13 @@ pub fn get_system_space_color(x: usize, y: usize, state: &LauncherState) -> u32 
     }
 
     // Subtitle under sphere: "Everything in one place"
-    if y >= 324 && y < 348 && x >= 240 && x < 480 {
-        if let Some(c) = test_text_aa(x, y, 252, 324, 1, b"Everything in one place", TEXT_MUTED, 0xFFFFFFFF) {
-            return c;
+    if (320..356).contains(&y) {
+        let adv = interos_std::design::typeface::text_advance_px(b"Everything in one place", 24) as usize;
+        let st_x = (720usize.saturating_sub(adv)) / 2;
+        if x >= st_x && x < st_x + adv + 8 {
+            if let Some(c) = test_text_aa(x, y, st_x, 324, 1, b"Everything in one place", TEXT_MUTED, BG_COLOR) {
+                return c;
+            }
         }
     }
 

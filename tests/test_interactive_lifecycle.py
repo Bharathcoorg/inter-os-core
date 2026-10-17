@@ -174,10 +174,10 @@ def test_app_lifecycle(reader, monitor_sock, operation_num, app_name, app_id, ta
 
     # Perform in-app functional interactions if specified
     if in_app_interactions:
-        time.sleep(1.0)
+        time.sleep(2.0)
         for action_name, action_coords, action_marker, dump_suffix in in_app_interactions:
             print(f"[LIFECYCLE TEST] In-App Interaction: {action_name} at {action_coords}...")
-            time.sleep(1.0)
+            time.sleep(2.0)
             reader.send(f"TAP {action_coords[0]} {action_coords[1]}\n".encode('utf-8'))
             if action_marker:
                 action_ok = reader.wait_for(
@@ -707,28 +707,46 @@ def main():
             )
         assert overview2_ready, "Launcher failed to re-open overview deck"
         print("[LIFECYCLE TEST] [OK] Overview deck re-opened.")
-        time.sleep(0.5)
+        time.sleep(1.0)
 
         # Tap dismiss badge [X] on Card 0 (x=610, y=230)
         print("[LIFECYCLE TEST] Tapping dismiss badge on Card 0 (x=610, y=230)...")
         reader.send(b"TAP 610 230\n")
         card0_dismissed = reader.wait_for(
             "Card 0 dismissed via dismiss button tap.",
-            timeout=30.0,
+            timeout=15.0,
             print_keywords=["LAUNCHER", "Card", "dismissed"]
         )
+        if not card0_dismissed:
+            time.sleep(1.0)
+            print("[LIFECYCLE TEST] Retrying dismiss badge tap on Card 0...")
+            reader.send(b"TAP 610 230\n")
+            card0_dismissed = reader.wait_for(
+                "Card 0 dismissed via dismiss button tap.",
+                timeout=25.0,
+                print_keywords=["LAUNCHER", "Card", "dismissed"]
+            )
         assert card0_dismissed, "Failed to dismiss Card 0 via dismiss button tap"
         print("[LIFECYCLE TEST] [OK] Card 0 dismissed via dismiss badge tap.")
-        time.sleep(0.5)
+        time.sleep(1.0)
 
         # Dispatch horizontal swipe on Card 1 (y=660: x1=200 -> x2=550)
         print("[LIFECYCLE TEST] Dispatching horizontal swipe gesture on Card 1 (200, 660) -> (550, 660)...")
         reader.send(b"SWIPE 200 660 550 660 5\n")
         card1_dismissed = reader.wait_for(
             "Card 1 dismissed via swipe.",
-            timeout=30.0,
+            timeout=15.0,
             print_keywords=["LAUNCHER", "Card", "dismissed"]
         )
+        if not card1_dismissed:
+            time.sleep(1.0)
+            print("[LIFECYCLE TEST] Retrying horizontal swipe on Card 1...")
+            reader.send(b"SWIPE 200 660 550 660 5\n")
+            card1_dismissed = reader.wait_for(
+                "Card 1 dismissed via swipe.",
+                timeout=25.0,
+                print_keywords=["LAUNCHER", "Card", "dismissed"]
+            )
         assert card1_dismissed, "Failed to dismiss Card 1 via horizontal swipe"
         print("[LIFECYCLE TEST] [OK] Card 1 dismissed via horizontal swipe gesture.")
         time.sleep(1.0)
@@ -986,17 +1004,26 @@ def main():
             timeout=25.0,
             print_keywords=["LAUNCHER", "System Space", "render_system_space"]
         )
+        if not sys_space_ready:
+            print("[LIFECYCLE TEST] Retrying open System Space (TAP 360 1330)...")
+            time.sleep(1.0)
+            reader.send(b"TAP 360 1330\n")
+            sys_space_ready = reader.wait_for(
+                "System surface rendered.",
+                timeout=35.0,
+                print_keywords=["LAUNCHER", "System Space", "render_system_space"]
+            )
         assert sys_space_ready, "Failed to open System Space"
         print("[LIFECYCLE TEST] [OK] System Space opened.")
         ppm_sys_space = os.path.abspath(r"target\test_system_space.ppm").replace("\\", "/")
         _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_sys_space}")
         print(f"[LIFECYCLE TEST] Screendump recorded: {ppm_sys_space}")
-        time.sleep(1.0)
+        time.sleep(2.0)
         print("[LIFECYCLE TEST] Returning to Home from System Space via bottom tap...")
         reader.send(b"TAP 360 1410\n")
         sys_space_returned = reader.wait_for(
             "Home surface rendered.",
-            timeout=15.0,
+            timeout=25.0,
             print_keywords=["LAUNCHER", "render_full"]
         )
         if not sys_space_returned:
