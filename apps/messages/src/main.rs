@@ -340,19 +340,18 @@ fn put_u8(out: &mut [u8; 4], v: u8) -> usize {
 // -----------------------------------------------------------------------------
 // Visual Design Tokens (Screen 10 Clean Conversation View)
 // -----------------------------------------------------------------------------
-const BG_DARK: u32 = 0xFFF7F6F2;
-const SURFACE_DARK: u32 = 0xFFFFFFFF;
-const SURFACE_RAISED: u32 = 0xFFEFEEE9;
-const BORDER_SUBTLE: u32 = 0xFFE1E0DB;
-const ACCENT_SKY: u32 = 0xFF2563EB;
+const BG_DARK: u32 = 0xFF000000;
+const SURFACE_DARK: u32 = 0xFF0E1117;
+const SURFACE_RAISED: u32 = 0xFF181C22;
+const BORDER_SUBTLE: u32 = 0xFF262C36;
+const ACCENT_SKY: u32 = 0xFF10B981;
 #[allow(dead_code)]
-const SUCCESS_EMERALD: u32 = 0xFF2E8B57;
-const TEXT_PRIMARY: u32 = 0xFF111214;
-const TEXT_MUTED: u32 = 0xFF777773;
+const SUCCESS_EMERALD: u32 = 0xFF10B981;
+const TEXT_PRIMARY: u32 = 0xFFFFFFFF;
+const TEXT_MUTED: u32 = 0xFF8B949E;
 
-/// Recessed fill for a control that cannot act. One below `SURFACE_RAISED` so a
-/// disabled control reads as pushed in rather than merely tinted.
-const DISABLED_FILL: u32 = 0xFFE6E5E0;
+/// Recessed fill for a control that cannot act.
+const DISABLED_FILL: u32 = 0xFF161B22;
 
 // -----------------------------------------------------------------------------
 // Canonical InterOS Typography
@@ -733,6 +732,12 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
         }
 
         // Header Title: "Messages" (full 24*scale line box inside header band).
+        let dot_dx = x as i32 - 96;
+        let dot_dy = y as i32 - 48;
+        if dot_dx * dot_dx + dot_dy * dot_dy <= 16 {
+            return 0xFFEF4444; // Nothing OS signature electric red dot accent
+        }
+
         if y >= TITLE_Y && y < TITLE_Y + std::design::font::line_height(TITLE_SCALE) {
             if let Some(c) = test_text(
                 x,

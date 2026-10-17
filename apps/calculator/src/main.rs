@@ -26,24 +26,20 @@ pub use calculator::CalculatorState;
 // -----------------------------------------------------------------------------
 // 32-bit ARGB8888 Design Color Tokens (Screen 16 Minimal Light Theme)
 // -----------------------------------------------------------------------------
-const BG_DARK: u32 = 0xFFF7F6F2;
+const BG_DARK: u32 = 0xFF000000;
 #[allow(dead_code)]
-const SURFACE_DARK: u32 = 0xFFFFFFFF;
+const SURFACE_DARK: u32 = 0xFF0E1117;
 #[allow(dead_code)]
-const SURFACE_RAISED: u32 = 0xFFEFEEE9;
+const SURFACE_RAISED: u32 = 0xFF181C22;
 #[allow(dead_code)]
-const BORDER_SUBTLE: u32 = 0xFFE1E0DB;
-const TEXT_PRIMARY: u32 = 0xFF111214;
-const TEXT_MUTED: u32 = 0xFF777773;
-const ACCENT_SKY: u32 = 0xFF2563EB;
+const BORDER_SUBTLE: u32 = 0xFF262C36;
+const TEXT_PRIMARY: u32 = 0xFFFFFFFF;
+const TEXT_MUTED: u32 = 0xFF8B949E;
+#[allow(dead_code)]
+const ACCENT_SKY: u32 = 0xFFFFFFFF;
 
-// WHY this is the SDK's success token and not a literal: `SUCCESS_EMERALD` was
-// 0xFF10B981, which is Tailwind's emerald-500 and appears in no token file in
-// this repository. `interos_std::design::color::SUCCESS` (sdk/rust/interos-std/
-// src/design/mod.rs) is 0xFF2E8B57 and is the value every other surface
-// resolves against, so the "=" key was rendering a fifth green while the rest
-// of the device rendered the fourth.
-const SUCCESS_EMERALD: u32 = interos_std::design::color::SUCCESS;
+#[allow(dead_code)]
+const SUCCESS_EMERALD: u32 = 0xFFEF4444; // Electric Red Nothing OS accent
 #[allow(dead_code)]
 const DANGER_CRIMSON: u32 = 0xFFEF4444;
 
@@ -148,7 +144,7 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                     return TEXT_PRIMARY;
                 }
             }
-            return 0xFFFFFFFF;
+            return SURFACE_RAISED;
         }
 
         // Canonical App Title: "Calculator" at display weight
@@ -176,6 +172,52 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
             }
         }
 
+        // Nothing OS subtle Electric Red signature accent dot at (52, 142)
+        let dot_dx = x as i32 - 52;
+        let dot_dy = y as i32 - 142;
+        if dot_dx * dot_dx + dot_dy * dot_dy <= 16 {
+            return 0xFFEF4444;
+        }
+
+        // Formula Tape (Line 1: Accumulator & active operation if set)
+        if let Some(op) = calc.active_operation {
+            let mut tape = [0u8; 32];
+            let mut tlen = 0usize;
+            let acc_val = calc.accumulator;
+            let is_neg_acc = acc_val < 0;
+            let mut uacc = acc_val.unsigned_abs();
+            if is_neg_acc {
+                tape[0] = b'-';
+                tlen = 1;
+            }
+            if uacc == 0 {
+                tape[tlen] = b'0';
+                tlen += 1;
+            } else {
+                let mut rev_acc = [0u8; 20];
+                let mut r_acc_count = 0usize;
+                while uacc > 0 && r_acc_count < 18 {
+                    rev_acc[r_acc_count] = b'0' + (uacc % 10) as u8;
+                    uacc /= 10;
+                    r_acc_count += 1;
+                }
+                for j in 0..r_acc_count {
+                    tape[tlen + j] = rev_acc[r_acc_count - 1 - j];
+                }
+                tlen += r_acc_count;
+            }
+            tape[tlen] = b' ';
+            tlen += 1;
+            tape[tlen] = op as u8;
+            tlen += 1;
+
+            let tape_w = std::design::font::measure_bold(&tape[..tlen], 2);
+            let tape_x = (DISPLAY_X1 - DISPLAY_PAD).saturating_sub(tape_w);
+            if let Some(c) = std::design::font::test_text_aa(x, y, tape_x, 190, 2, &tape[..tlen], TEXT_MUTED, SURFACE_DARK, false) {
+                return c;
+            }
+        }
+
         // Active operation badge at top-left
         if let Some(op) = calc.active_operation {
             let op_sym: &[u8] = match op {
@@ -187,31 +229,30 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                 '^' => b"^",
                 _ => b"?",
             };
-            // Badge pill: x: 48..104, y: 136..184 (radius 14)
-            if (136..184).contains(&y) && (48..104).contains(&x) {
-                let prx = (x - 48).min(103 - x);
-                let pry = (y - 136).min(183 - y);
-                if prx < 14 && pry < 14 {
-                    let cdx = (14 - prx) as isize;
-                    let cdy = (14 - pry) as isize;
-                    if cdx * cdx + cdy * cdy > 196 {
-                        // outside badge pill, fallback to card surface
-                    } else if prx < 2 || pry < 2 {
-                        return 0xFFBFDBFE; // badge border
-                    } else {
-                        // badge text
-                        if let Some(c) = std::design::font::test_text_aa(x, y, 68, 146, 2, op_sym, ACCENT_SKY, 0xFFEFF6FF, true) {
+            // Badge pill: x: 72..124, y: 128..156 (radius 12)
+            if (128..156).contains(&y) && (72..124).contains(&x) {
+                let prx = (x - 72).min(123 - x);
+                let pry = (y - 128).min(155 - y);
+                if prx < 12 && pry < 12 {
+                    let cdx = (12 - prx) as isize;
+                    let cdy = (12 - pry) as isize;
+                    if cdx * cdx + cdy * cdy <= 144 {
+                        if prx < 2 || pry < 2 {
+                            return BORDER_SUBTLE;
+                        }
+                        if let Some(c) = std::design::font::test_text_aa(x, y, 92, 134, 1, op_sym, TEXT_PRIMARY, SURFACE_RAISED, true) {
                             return c;
                         }
-                        return 0xFFEFF6FF; // soft blue fill
+                        return SURFACE_RAISED;
                     }
-                } else if prx < 2 || pry < 2 {
-                    return 0xFFBFDBFE;
                 } else {
-                    if let Some(c) = std::design::font::test_text_aa(x, y, 68, 146, 2, op_sym, ACCENT_SKY, 0xFFEFF6FF, true) {
+                    if prx < 2 || pry < 2 {
+                        return BORDER_SUBTLE;
+                    }
+                    if let Some(c) = std::design::font::test_text_aa(x, y, 92, 134, 1, op_sym, TEXT_PRIMARY, SURFACE_RAISED, true) {
                         return c;
                     }
-                    return 0xFFEFF6FF;
+                    return SURFACE_RAISED;
                 }
             }
         }
@@ -248,7 +289,7 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
         let x0: usize = (DISPLAY_X1 - DISPLAY_PAD).saturating_sub(total_w);
         let y0: usize = VALUE_Y0;
 
-        if let Some(c) = std::design::font::test_text_aa(x, y, x0, y0, scale, &digits[..count], TEXT_PRIMARY, 0xFFFFFFFF, true) {
+        if let Some(c) = std::design::font::test_text_aa(x, y, x0, y0, scale, &digits[..count], TEXT_PRIMARY, SURFACE_DARK, true) {
             return c;
         }
 
@@ -257,8 +298,8 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
             return BORDER_SUBTLE;
         }
 
-        // Clean white card background
-        return 0xFFFFFFFF;
+        // Clean dark card background
+        return SURFACE_DARK;
     }
 
     // 3. Keypad Matrix (5 rows, 4 cols)
@@ -296,28 +337,25 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                     let is_clear = action == Some('C');
                     let is_fn = matches!(action, Some('B') | Some('%') | Some('~') | Some('^'));
 
-                    // Elevated Semantic Design Palette:
+                    // Minimal Bauhaus / Nothing OS Keycap Palette
                     let (btn_bg, btn_border, text_color) = if is_active_op {
-                        // Active operator glows in white surface with primary accent border & text
-                        (0xFFFFFFFF, ACCENT_SKY, ACCENT_SKY)
+                        // Active operator glows in Electric Red
+                        (0xFFEF4444, 0xFFDC2626, 0xFFFFFFFF)
                     } else if is_op {
-                        // Arithmetic operators: Royal Blue tactile surface with white text
-                        (ACCENT_SKY, 0xFF1D4ED8, 0xFFFFFFFF)
+                        // Arithmetic operators: Stark Milk White with deep dark text
+                        (0xFFFFFFFF, 0xFFE2E8F0, 0xFF000000)
                     } else if is_equals {
-                        // Equals: the success accent with high-contrast white
-                        // text. The fill is the SDK's `design::SUCCESS`; the
-                        // border is that colour stepped down, so the key reads
-                        // as pressed-in rather than as a second colour.
-                        (SUCCESS_EMERALD, 0xFF256045, 0xFFFFFFFF)
+                        // Equals: Electric Red signature Nothing OS accent with pure white text
+                        (0xFFEF4444, 0xFFDC2626, 0xFFFFFFFF)
                     } else if is_clear {
-                        // Clear: soft slate surface with semantic crimson accent text
-                        (0xFFF0EFEB, 0xFFDBD9D3, 0xFFDC2626)
+                        // Clear: Slate surface with semantic Electric Red accent text
+                        (SURFACE_RAISED, BORDER_SUBTLE, 0xFFEF4444)
                     } else if is_fn {
-                        // Functions: soft slate surface with dark slate text
-                        (0xFFF0EFEB, 0xFFDBD9D3, 0xFF374151)
+                        // Functions: Slate surface with clean light text
+                        (SURFACE_RAISED, BORDER_SUBTLE, 0xFFE6EDF3)
                     } else {
-                        // Digits 0..9: tactile white surface with deep dark text
-                        (0xFFFFFFFF, 0xFFE2E1DC, TEXT_PRIMARY)
+                        // Digits 0..9: Slate surface with crisp white text
+                        (SURFACE_RAISED, BORDER_SUBTLE, TEXT_PRIMARY)
                     };
 
                     // Tactile 2px border outline

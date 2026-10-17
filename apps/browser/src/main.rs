@@ -30,18 +30,18 @@ use interos_std::design::primitives::{draw_rounded_rect, Rect};
 // -----------------------------------------------------------------------------
 // Sovereign InterOS Browser Design Tokens (Warm Ivory & Sage Palette)
 // -----------------------------------------------------------------------------
-const CHROME_BG: u32 = 0xFFFAF8F4;          // Warm Ivory Background
-const CHROME_SURFACE: u32 = 0xFFFFFFFF;     // Pure White Surface
+const CHROME_BG: u32 = 0xFF000000;          // Pitch Black OLED
+const CHROME_SURFACE: u32 = 0xFF0E1117;     // Obsidian Glass Surface
 #[allow(dead_code)]
-const CHROME_SURFACE_HOVER: u32 = 0xFFF2EFEB; // Ivory Hover
-const CHROME_BORDER: u32 = 0xFFE5E1DB;      // Warm Hairline Border
-const CHROME_DIVIDER: u32 = 0xFFECE8E1;     // Warm Divider
-const CHROME_BLUE: u32 = 0xFF546B58;        // Sovereign Sage Green
-const CHROME_BLUE_DARK: u32 = 0xFF3E5042;   // Deep Mineral Slate
-const CHROME_TEXT: u32 = 0xFF1F1E1B;        // Sovereign Charcoal
-const CHROME_MUTED: u32 = 0xFF7A7670;       // Warm Muted Grey
-const CHROME_CARD: u32 = 0xFFFFFFFF;        // Card Background
-const CHROME_CARD_BORDER: u32 = 0xFFE5E1DB; // Card Stroke
+const CHROME_SURFACE_HOVER: u32 = 0xFF181C22; // Slate Hover
+const CHROME_BORDER: u32 = 0xFF262C36;      // Fine Hairline Border
+const CHROME_DIVIDER: u32 = 0xFF1A1F26;     // Hairline Divider
+const CHROME_BLUE: u32 = 0xFFFFFFFF;        // Milk White Accent
+const CHROME_BLUE_DARK: u32 = 0xFF21262D;   // Slate Dark
+const CHROME_TEXT: u32 = 0xFFFFFFFF;        // Pure White Text
+const CHROME_MUTED: u32 = 0xFF8B949E;       // Muted Slate Text
+const CHROME_CARD: u32 = 0xFF12161D;        // Card Background
+const CHROME_CARD_BORDER: u32 = 0xFF262C36; // Card Stroke
 
 // -----------------------------------------------------------------------------
 // Viewport & Layout Geometry (720x1440, 8pt Grid)
@@ -1052,7 +1052,7 @@ fn home_page_pixel(x: usize, y: usize, app: &BrowserApp) -> u32 {
             }
             // 'L' Foot (bx 22..33, by 27..32)
             if bx >= 22 && bx <= 33 && by >= 27 && by <= 32 {
-                return 0xFFFAF8F4;
+                return 0xFFFFFFFF;
             }
             return c;
         }
@@ -1061,6 +1061,11 @@ fn home_page_pixel(x: usize, y: usize, app: &BrowserApp) -> u32 {
         let brand_text = b"InterOS Browser";
         let bw = font::measure_bold(brand_text, 1);
         let bx0 = (W.saturating_sub(bw)) / 2;
+        let rdx = x as isize - (bx0 as isize - 14);
+        let rdy = y as isize - 196;
+        if rdx * rdx + rdy * rdy <= 9 {
+            return 0xFFEF4444; // Nothing OS signature red accent dot
+        }
         if let Some(px) = text_px(x, y, bx0, 188, 1, brand_text, CHROME_TEXT, CHROME_BG, true) {
             return px;
         }

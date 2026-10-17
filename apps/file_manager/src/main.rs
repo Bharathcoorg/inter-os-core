@@ -56,20 +56,20 @@ fn fs_read_slot() -> usize {
 // -----------------------------------------------------------------------------
 // 32-bit ARGB8888 Design Color Tokens (Screen 11 Light Theme)
 // -----------------------------------------------------------------------------
-const BG_DARK: u32 = 0xFFF7F6F2;
+const BG_DARK: u32 = 0xFF000000;
 #[allow(dead_code)]
-const SURFACE_DARK: u32 = 0xFFFFFFFF;
+const SURFACE_DARK: u32 = 0xFF0E1117;
 #[allow(dead_code)]
-const SURFACE_RAISED: u32 = 0xFFEFEEE9;
-const BORDER_SUBTLE: u32 = 0xFFE1E0DB;
-const TEXT_PRIMARY: u32 = 0xFF111214;
-const TEXT_MUTED: u32 = 0xFF777773;
+const SURFACE_RAISED: u32 = 0xFF181C22;
+const BORDER_SUBTLE: u32 = 0xFF262C36;
+const TEXT_PRIMARY: u32 = 0xFFFFFFFF;
+const TEXT_MUTED: u32 = 0xFF8B949E;
 #[allow(dead_code)]
-const ACCENT_SKY: u32 = 0xFF2563EB;
+const ACCENT_SKY: u32 = 0xFFFFFFFF;
 #[allow(dead_code)]
 const ACCENT_AMBER: u32 = 0xFFF59E0B;
 #[allow(dead_code)]
-const SUCCESS_EMERALD: u32 = 0xFF2E8B57;
+const SUCCESS_EMERALD: u32 = 0xFF10B981;
 #[allow(dead_code)]
 const DANGER_CRIMSON: u32 = 0xFFEF4444;
 
@@ -376,6 +376,12 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
         // that regression, so the literal stays the single source of truth.
         if let Some(c) = test_text(x, y, 48, 64, 3, b"Files", TEXT_PRIMARY, BG_DARK) {
             return c;
+        }
+
+        let dot_dx = x as i32 - 192;
+        let dot_dy = y as i32 - 96;
+        if dot_dx * dot_dx + dot_dy * dot_dy <= 9 {
+            return 0xFFEF4444; // Nothing OS signature electric red dot accent
         }
 
         // Storage readout, right-aligned, two measured lines.

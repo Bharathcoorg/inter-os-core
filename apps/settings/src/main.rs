@@ -1473,20 +1473,20 @@ const CARD_W: usize = (CONTENT_W - CARD_GAP) / 2;
 const CARD_LINE_GAP: usize = std::design::spacing::GRID_16;
 /// Dynamic Device Vitality Orb geometry
 const ORB_CX: usize = 360;
-const ORB_CY: usize = 138;
-const ORB_R: usize = 42;
-const HALO_R: usize = 68;
+const ORB_CY: usize = 166;
+const ORB_R: usize = 48;
+const HALO_R: usize = 78;
 
 /// Landing screen identity typography positions
-const IDENTITY_TITLE_Y: usize = 208;
-const IDENTITY_SUB_Y: usize = 236;
+const IDENTITY_TITLE_Y: usize = 264;
+const IDENTITY_SUB_Y: usize = 296;
 
 /// Landing card height: modern iOS 18 / Nothing OS spaced card proportion.
-const CARD_H: usize = 118;
+const CARD_H: usize = 126;
 /// Gutter between landing cards.
 const GRID_GAP: usize = 14;
 /// Top of the landing grid: spaced comfortably below the identity hero block.
-const GRID_Y: usize = 264;
+const GRID_Y: usize = 348;
 /// Compatibility aliases for old landing titles.
 #[allow(dead_code)]
 const LANDING_TITLE_Y: usize = 96;
