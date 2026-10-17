@@ -634,6 +634,10 @@ document.addEventListener('DOMContentLoaded', () => {
     if (liveScanoutCanvas) liveScanoutCanvas.style.display = live ? 'block' : 'none';
     if (liveScanoutImg) liveScanoutImg.style.display = 'none';
     if (scanoutNoSignal) scanoutNoSignal.style.display = live ? 'none' : 'flex';
+    const splash = document.getElementById('phone-boot-splash');
+    if (splash && live) {
+      splash.classList.remove('is-visible');
+    }
   }
   let scanoutCtx = null;
   if (liveScanoutCanvas) {
@@ -2572,7 +2576,7 @@ document.addEventListener('DOMContentLoaded', () => {
   function renderBootSplash() {
     const surface = ensurePhoneFrameSurface();
     if (!surface || !surface.built || !surface.stageList) return;
-    const show = bootFacts.qemuAlive && !bootFacts.launcherReady;
+    const show = bootFacts.qemuAlive && !bootFacts.launcherReady && !hasLiveFrame;
     surface.splash.classList.toggle('is-visible', show);
     if (!show) return;
 
