@@ -539,17 +539,17 @@ fn build_card(state: &LauncherState, slot: usize) -> Option<CardPlan> {
 
     // State badge pill ("Active", "Background", or "Recent") cleanly positioned on the right of the header
     let (state_text, dot_color, text_color, badge_w): (&[u8], u32, u32, usize) = if task != 0 && focused {
-        (b"Active", STATE_ACTIVE_DOT, STATE_ACTIVE_TEXT, 70)
+        (b"Active", STATE_ACTIVE_DOT, STATE_ACTIVE_TEXT, 76)
     } else if task != 0 {
-        (b"Background", STATE_RUNNING_DOT, STATE_RUNNING_TEXT, 96)
+        (b"Background", STATE_RUNNING_DOT, STATE_RUNNING_TEXT, 126)
     } else {
-        (b"Recent", STATE_RECENT_DOT, STATE_RECENT_TEXT, 72)
+        (b"Recent", STATE_RECENT_DOT, STATE_RECENT_TEXT, 86)
     };
     let state_x = rect.x + rect.w - badge_w - 24;
     let state_y = rect.y + 28;
     let state_pill_rect = Rect::new(state_x, state_y, badge_w, 24);
     let state_label = LabelRun::new(
-        state_x + 18,
+        state_x + 16,
         state_y + 5,
         type_scale::CAPTION,
         state_text,
