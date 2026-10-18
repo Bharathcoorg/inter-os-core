@@ -1279,23 +1279,9 @@ fn get_calendar_pixel(
             return BORDER_SUBTLE;
         }
 
-        // Circular back button disc (cx: 62, cy: 48, radius: 22)
-        let dx = x as isize - 62;
-        let dy = y as isize - 48;
-        let dsq = dx * dx + dy * dy;
-        if dsq <= 22 * 22 {
-            // Anti-aliased disc border rim
-            if dsq >= 20 * 20 {
-                return BORDER_SUBTLE;
-            }
-            // Crisp vector chevron: apex at (58, 48), arms pointing up-right and down-right
-            if dx <= 2 && dx >= -6 {
-                let arm_dy = (dx - (-6)).abs();
-                if (dy.abs() - arm_dy).abs() <= 1 {
-                    return TEXT_PRIMARY;
-                }
-            }
-            return SURFACE_RAISED;
+        // Standardized back button squircle (24..72, 24..72)
+        if let Some(c) = std::design::back_button::pixel(x, y, TEXT_PRIMARY, BORDER_SUBTLE, SURFACE_RAISED) {
+            return c;
         }
 
         // Header Title: "Calendar"
@@ -2673,7 +2659,7 @@ fn stepper_button_at(x: usize, y: usize, boxes: &[(usize, usize)]) -> Option<(us
 fn handle_flow_tap(app: &mut CalendarApp, x: usize, y: usize) -> Dirty {
     // Back control: cancel the flow rather than leave the app, because the flow
     // is the thing the user is in the middle of.
-    if x >= 24 && x < 100 && y >= 28 && y < 68 {
+    if std::design::back_button::contains(x, y) || (x >= 24 && x < 100 && y >= 28 && y < 68) {
         app.flow = Flow::None;
         app.commit_status = "CREATE CANCELLED: NO EVENT WRITTEN";
         return Dirty::AGENDA;
@@ -2745,15 +2731,16 @@ fn handle_tap(app: &mut CalendarApp, x: usize, y: usize) -> Tap {
     // WHY the back control behaves differently while a flow is open: an
     // in-progress entry is what the user is in the middle of, so the same pill
     // cancels it and says so instead of exiting the app and losing the entry.
+    let is_back = std::design::back_button::contains(x, y) || (x >= 24 && x < 100 && y >= 28 && y < 68);
     if app.flow != Flow::None {
-        if x >= 24 && x < 100 && y >= 28 && y < 68 {
+        if is_back {
             app.flow = Flow::None;
             app.commit_status = "CREATE CANCELLED: NO EVENT WRITTEN";
             return Tap::Redraw(Dirty::AGENDA);
         }
         return Tap::Redraw(handle_flow_tap(app, x, y));
     }
-    if x >= 24 && x < 100 && y >= 28 && y < 68 {
+    if is_back {
         return Tap::Leave("[CALENDAR APP] Back button or home gesture pressed. Exiting to launcher.");
     }
 

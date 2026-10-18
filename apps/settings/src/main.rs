@@ -1431,8 +1431,10 @@ const CONTENT_W: usize = W - 2 * MARGIN;
 /// Shared header geometry: a 48x48 back control at the top-left of every screen
 /// with the screen's title on the same line to its right.
 const BACK_X: usize = CONTENT_X;
+#[allow(dead_code)]
 const BACK_Y: usize = MARGIN;
 const BACK_S: usize = std::design::touch::PREFERRED_TARGET;
+#[allow(dead_code)]
 const BACK_R: usize = CONTROL_R;
 /// X of the header's text: one 16px step right of the back control.
 const HEADER_X: usize = BACK_X + BACK_S + std::design::spacing::GRID_16;
@@ -1472,22 +1474,24 @@ const CARD_W: usize = CONTENT_W;
 /// Y step between a card's title line and its caption line.
 #[allow(dead_code)]
 const CARD_LINE_GAP: usize = std::design::spacing::GRID_8;
-/// Dynamic Device Vitality Orb geometry
-const ORB_CX: usize = 360;
-const ORB_CY: usize = 52;
-const ORB_R: usize = 18;
-const HALO_R: usize = 30;
+/// Dynamic Device Vitality Orb geometry: placed at top right as a live hardware health beacon
+const ORB_CX: usize = 648;
+const ORB_CY: usize = 48;
+const ORB_R: usize = 16;
+const HALO_R: usize = 24;
 
 /// Landing screen identity typography positions
-const IDENTITY_TITLE_Y: usize = 90;
-const IDENTITY_SUB_Y: usize = 128;
+#[allow(dead_code)]
+const IDENTITY_TITLE_Y: usize = HEADER_Y;
+#[allow(dead_code)]
+const IDENTITY_SUB_Y: usize = HEADER_SUB_Y;
 
 /// Landing card height: single-column full-width card with icon, title, subtitle & status chip
 const CARD_H: usize = 86;
 /// Gutter between landing cards.
 const GRID_GAP: usize = 12;
 /// Top of the landing grid: spaced comfortably below the identity hero block.
-const GRID_Y: usize = 168;
+const GRID_Y: usize = 124;
 /// Compatibility aliases for old landing titles.
 #[allow(dead_code)]
 const LANDING_TITLE_Y: usize = 96;
@@ -1818,37 +1822,6 @@ fn card_pixel(x: usize, y: usize, x0: usize, y0: usize, w: usize, h: usize, r: u
     Some(SURFACE)
 }
 
-/// Squared distance from `(x, y)` to the segment `a -> b`.
-fn dist2_to_seg(x: usize, y: usize, ax: i64, ay: i64, bx: i64, by: i64) -> i64 {
-    let px = x as i64;
-    let py = y as i64;
-    let abx = bx - ax;
-    let aby = by - ay;
-    let len2 = (abx * abx + aby * aby).max(1);
-    let mut t = (px - ax) * abx + (py - ay) * aby;
-    if t < 0 {
-        t = 0;
-    } else if t > len2 {
-        t = len2;
-    }
-    let qx = ax + (t * abx) / len2;
-    let qy = ay + (t * aby) / len2;
-    (px - qx) * (px - qx) + (py - qy) * (py - qy)
-}
-
-/// Back chevron: one coherent 2px rounded stroke family, matching the header
-/// control it lives in.
-#[inline]
-fn chevron_ink(x: usize, y: usize, cx: usize, cy: usize, color: u32) -> Option<u32> {
-    let (cx, cy) = (cx as i64, cy as i64);
-    if dist2_to_seg(x, y, cx + 6, cy - 10, cx - 6, cy) <= 4
-        || dist2_to_seg(x, y, cx - 6, cy, cx + 6, cy + 10) <= 4
-    {
-        Some(color)
-    } else {
-        None
-    }
-}
 
 /// 48x48 back control: soft pill with the chevron centred.
 ///
@@ -1857,16 +1830,7 @@ fn chevron_ink(x: usize, y: usize, cx: usize, cy: usize, color: u32) -> Option<u
 /// no token expresses it), and the control, the segmented-control segments and
 /// the keypad keys are all the same class of object.
 fn back_button_pixel(x: usize, y: usize) -> Option<u32> {
-    if !in_round_rect(x, y, BACK_X, BACK_Y, BACK_S, BACK_S, BACK_R) {
-        return None;
-    }
-    if !in_round_rect(x, y, BACK_X + 1, BACK_Y + 1, BACK_S - 2, BACK_S - 2, BACK_R - 1) {
-        return Some(BORDER);
-    }
-    if let Some(c) = chevron_ink(x, y, BACK_X + BACK_S / 2, BACK_Y + BACK_S / 2, TEXT) {
-        return Some(c);
-    }
-    Some(SOFT)
+    std::design::back_button::pixel(x, y, TEXT, BORDER, SOFT)
 }
 
 // Category icon family: rounded geometric marks on a ~24px grid, 2px strokes,
@@ -2876,7 +2840,7 @@ fn row_pixel(
                     y,
                     cy,
                     b"Sandboxing & Isolation",
-                    b"Zero ambient authority & capability tables enforced",
+                    b"Zero ambient authority & capabilities enforced",
                     TEXT_MUTED,
                     b"ENFORCED",
                     SUCCESS_EMERALD,
@@ -3434,7 +3398,7 @@ fn landing_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
             }
         }
         // Sovereign System Status Card below cards
-        let stat_y = 868;
+        let stat_y = 816;
         let stat_h = 160;
         if let Some(fill) = card_pixel(x, y, CONTENT_X, stat_y, CONTENT_W, stat_h, CARD_R) {
             let title = b"Sovereign Architecture Guarantee";
@@ -3460,22 +3424,20 @@ fn landing_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
             return fill;
         }
     }
-    // Dynamic Device Vitality Orb centered at ORB_CX, ORB_CY
+    // Dynamic Device Vitality Orb at top right (ORB_CX, ORB_CY)
     if let Some(c) = vitality_orb_pixel(x, y, app.orb_state()) {
         return c;
     }
-    // Device identity title below orb: "Settings"
+    // Device identity title left-aligned with back button: "Settings"
     let title = b"Settings";
-    let tw = run_w(title, TYPE_DISPLAY, true);
-    let tx = if tw < W { (W - tw) / 2 } else { CONTENT_X };
     if let Some(c) = run_ink(
         x,
         y,
-        tx,
-        IDENTITY_TITLE_Y,
+        HEADER_X,
+        HEADER_Y,
         TYPE_DISPLAY,
         title,
-        W - 2 * CONTENT_X,
+        W - HEADER_X - 80,
         TEXT,
         BG,
         true,
@@ -3484,16 +3446,14 @@ fn landing_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
     }
     // User status phrase below title: "InterOS Sovereign * Verified Ring-3"
     let sub = b"InterOS Sovereign * Verified Ring-3";
-    let sw = run_w(sub, TYPE_H3, false);
-    let sx = if sw < W { (W - sw) / 2 } else { CONTENT_X };
     if let Some(c) = run_ink(
         x,
         y,
-        sx,
-        IDENTITY_SUB_Y,
+        HEADER_X,
+        HEADER_SUB_Y,
         TYPE_H3,
         sub,
-        W - 2 * CONTENT_X,
+        W - HEADER_X - 80,
         TEXT_MUTED,
         BG,
         false,
@@ -4506,12 +4466,9 @@ fn get_settings_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
     {
         return GESTURE_BAR;
     }
-    // Shared 48x48 back control: only rendered when inside a subpage or section detail
-    let is_subpage = app.sensors_open || app.wallpaper_open || app.screen_lock_open || app.current_section.is_some();
-    if is_subpage {
-        if let Some(c) = back_button_pixel(x, y) {
-            return c;
-        }
+    // Shared 48x48 back control: rendered on all screens for uniform OS navigation
+    if let Some(c) = back_button_pixel(x, y) {
+        return c;
     }
     if app.sensors_open {
         return sensors_pixel(x, y, app);
@@ -4672,15 +4629,7 @@ pub extern "C" fn _start() -> ! {
                         // Back control: pop to the landing grid, or exit the
                         // app when already on the landing grid. Home gesture
                         // bar always exits to the launcher.
-                        if in_round_rect(
-                            input.x as usize,
-                            input.y as usize,
-                            BACK_X,
-                            BACK_Y,
-                            BACK_S,
-                            BACK_S,
-                            BACK_R,
-                        ) {
+                        if std::design::back_button::contains(input.x as usize, input.y as usize) {
                             // WHY the panels pop first: Back from one must return to the
                             // detail it was opened from, and a Back that jumped
                             // straight to the landing grid would lose the section
@@ -4713,19 +4662,27 @@ pub extern "C" fn _start() -> ! {
                                 )
                                 .ok();
                             } else {
-                            match settings.current_section {
-                                Some(_) => {
-                                    settings.current_section = None;
-                                    std::log(
-                                        0,
-                                        "[SETTINGS APP] Back navigation: returned to the System Space landing grid.",
-                                    )
-                                    .ok();
+                                match settings.current_section {
+                                    Some(_) => {
+                                        settings.current_section = None;
+                                        std::log(
+                                            0,
+                                            "[SETTINGS APP] Back navigation: returned to the System Space landing grid.",
+                                        )
+                                        .ok();
+                                    }
+                                    None => {
+                                        std::log(
+                                            0,
+                                            "[SETTINGS APP] Back control pressed on landing screen. Exiting to launcher.",
+                                        )
+                                        .ok();
+                                        if surface > 0 {
+                                            let _ = std::surface_destroy(6, surface);
+                                        }
+                                        std::exit_with_code(0);
+                                    }
                                 }
-                                None => {
-                                    // On root landing screen there is no back button; home gesture bar handles exit.
-                                }
-                            }
                             }
                         } else if input.x >= 240 && input.x <= 480 && input.y >= 1400 {
                             std::log(

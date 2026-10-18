@@ -773,23 +773,9 @@ fn get_terminal_pixel(x: usize, y: usize, term: &TerminalApp) -> u32 {
             return BORDER_SUBTLE;
         }
 
-        // Circular back button disc (cx: 62, cy: 48, radius: 22)
-        let dx = x as isize - 62;
-        let dy = y as isize - 48;
-        let dsq = dx * dx + dy * dy;
-        if dsq <= 22 * 22 {
-            // Anti-aliased disc border rim
-            if dsq >= 20 * 20 {
-                return BORDER_SUBTLE;
-            }
-            // Crisp vector chevron: apex at (58, 48), arms pointing up-right and down-right
-            if dx <= 2 && dx >= -6 {
-                let arm_dy = (dx - (-6)).abs();
-                if (dy.abs() - arm_dy).abs() <= 1 {
-                    return TEXT_PRIMARY;
-                }
-            }
-            return SURFACE_RAISED;
+        // Standardized back button squircle (24..72, 24..72)
+        if let Some(c) = std::design::back_button::pixel(x, y, TEXT_PRIMARY, BORDER_SUBTLE, SURFACE_RAISED) {
+            return c;
         }
 
         // Header Title: "Terminal". The run is scale 3 and needs
@@ -1162,7 +1148,8 @@ pub extern "C" fn _start() -> ! {
                     }
                     if input.kind == 1 {
                         // Check if Back button or Home gesture bar was tapped: exit cleanly to launcher
-                        if (input.x >= 24 && input.x < 100 && input.y >= 28 && input.y < 68)
+                        if std::design::back_button::contains(input.x as usize, input.y as usize)
+                            || (input.x >= 24 && input.x < 100 && input.y >= 28 && input.y < 68)
                             || (input.x >= 240 && input.x <= 480 && input.y >= 1400)
                         {
                             std::log(0, "[TERMINAL APP] Back button or home gesture pressed. Exiting to launcher.").ok();

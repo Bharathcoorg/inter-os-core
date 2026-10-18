@@ -1794,25 +1794,9 @@ fn header_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         return BORDER_SUBTLE;
     }
 
-    // Circular back button (cx: 62, cy: 48, radius: 22)
-    let back_cx = 62i32;
-    let back_cy = 48i32;
-    let b_dx = x as i32 - back_cx;
-    let b_dy = y as i32 - back_cy;
-    let b_d2 = b_dx * b_dx + b_dy * b_dy;
-    if b_d2 <= 22 * 22 {
-        if b_d2 >= 20 * 20 {
-            return BORDER_SUBTLE;
-        }
-        // Left-pointing chevron: tip at (58, 48), wings to (64, 42) and (64, 54)
-        if y >= 42 && y <= 54 {
-            let arm = (y as i32 - 48).abs();
-            let target_x = 58 + arm;
-            if x as i32 >= target_x && x as i32 <= target_x + 2 {
-                return TEXT_PRIMARY;
-            }
-        }
-        return SURFACE_RAISED;
+    // Standardized back button squircle (24..72, 24..72)
+    if let Some(c) = std::design::back_button::pixel(x, y, TEXT_PRIMARY, BORDER_SUBTLE, SURFACE_RAISED) {
+        return c;
     }
 
     // Header Title: "Phone". The run is scale 3, so it needs
@@ -3155,7 +3139,7 @@ fn handle_tap(dialer: &mut DialerApp, px: u32, py: u32) -> Tap<'static> {
     let y = py as usize;
 
     // 1. Back control in the header, or the home gesture bar: exit to launcher.
-    if (x >= 24 && x < 100 && y >= 28 && y < 68) || (x >= 240 && x <= 480 && y >= 1400) {
+    if std::design::back_button::contains(x, y) || (x >= 24 && x < 100 && y >= 28 && y < 68) || (x >= 240 && x <= 480 && y >= 1400) {
         return Tap::Leave("[DIALER APP] Back control or home gesture pressed. Exiting to launcher.");
     }
 

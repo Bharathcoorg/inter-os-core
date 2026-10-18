@@ -650,49 +650,10 @@ fn card_pixel(x: usize, y: usize, x0: usize, y0: usize, w: usize, h: usize) -> O
     Some(SURFACE)
 }
 
-/// Squared distance from `(x, y)` to the segment `a -> b`.
-fn dist2_to_seg(x: usize, y: usize, ax: i64, ay: i64, bx: i64, by: i64) -> i64 {
-    let px = x as i64;
-    let py = y as i64;
-    let abx = bx - ax;
-    let aby = by - ay;
-    let len2 = (abx * abx + aby * aby).max(1);
-    let mut t = (px - ax) * abx + (py - ay) * aby;
-    if t < 0 {
-        t = 0;
-    } else if t > len2 {
-        t = len2;
-    }
-    let qx = ax + (t * abx) / len2;
-    let qy = ay + (t * aby) / len2;
-    (px - qx) * (px - qx) + (py - qy) * (py - qy)
-}
 
-/// Back chevron: one coherent 2px rounded stroke family.
-#[inline]
-fn chevron_ink(x: usize, y: usize, cx: usize, cy: usize, color: u32) -> Option<u32> {
-    let (cx, cy) = (cx as i64, cy as i64);
-    if dist2_to_seg(x, y, cx + 7, cy - 11, cx - 7, cy) <= 4
-        || dist2_to_seg(x, y, cx - 7, cy, cx + 7, cy + 11) <= 4
-    {
-        Some(color)
-    } else {
-        None
-    }
-}
-
-/// 48x48 back control: soft pill with the chevron centred.
+/// 48x48 back control: canonical squircle with the chevron centred.
 fn back_button_pixel(x: usize, y: usize) -> Option<u32> {
-    if !in_round(x, y, BACK_X, BACK_Y, BACK_S, BACK_S, 14) {
-        return None;
-    }
-    if !in_round(x, y, BACK_X + 1, BACK_Y + 1, BACK_S - 2, BACK_S - 2, 13) {
-        return Some(BORDER);
-    }
-    if let Some(c) = chevron_ink(x, y, BACK_X + BACK_S / 2, BACK_Y + BACK_S / 2, TEXT) {
-        return Some(c);
-    }
-    Some(SOFT)
+    std::design::back_button::pixel(x, y, TEXT, BORDER, SOFT)
 }
 
 /// Width of the header action pill for a given label.
@@ -1337,7 +1298,7 @@ fn handle_vault_touch(vault: &mut VaultApp, x: u32, y: u32) -> Tap {
     let y = y as usize;
 
     // Back button, or the home gesture strip: exit to the launcher.
-    if in_round(x, y, BACK_X, BACK_Y, BACK_S, BACK_S, 14) || y >= GESTURE_Y0 {
+    if std::design::back_button::contains(x, y) || in_round(x, y, BACK_X, BACK_Y, BACK_S, BACK_S, 14) || y >= GESTURE_Y0 {
         return Tap::Leave("[VAULT] Back button or home gesture pressed. Exiting to launcher.");
     }
 

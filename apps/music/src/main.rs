@@ -726,17 +726,6 @@ fn build_frame(app: &MusicApp) -> Frame {
 // Vector pictograms (one rounded, ~2px stroke family)
 // -----------------------------------------------------------------------------
 
-/// Dismiss chevron: a "v" stroke whose ends sit at (cx +/- half, cy) and whose
-/// apex sits at (cx, cy + half).
-fn chevron_down(x: usize, y: usize, cx: usize, cy: usize, half: isize) -> bool {
-    let dx = (x as isize) - (cx as isize);
-    let dy = (y as isize) - (cy as isize);
-    if dy < 0 || dy > half || dx.abs() > half {
-        return false;
-    }
-    let s = dx.abs() + dy;
-    (half - 2..=half + 2).contains(&s)
-}
 
 /// Minus / plus glyphs for the volume step controls (14 px strokes).
 fn step_glyph(x: usize, y: usize, r: Rect, plus: bool) -> bool {
@@ -838,14 +827,9 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
         if y == BAR_H - 1 {
             return BORDER;
         }
-        if let Some(c) = draw_pill(x, y, BACK, RECESSED, Some(BORDER)) {
-            if c != RECESSED {
-                return c;
-            }
-            if chevron_down(x, y, 60, 54, 12) {
-                return TEXT;
-            }
-            return RECESSED;
+        // Standardized back button squircle (24..72, 24..72)
+        if let Some(c) = std::design::back_button::pixel(x, y, TEXT, BORDER, RECESSED) {
+            return c;
         }
         if let Some(c) = text_centered(x, y, 48, 1, b"Media player", MUTED, BG) {
             return c;
@@ -1316,7 +1300,7 @@ fn handle_tap(app: &mut MusicApp, px: u32, py: u32) -> Tap<'static> {
     let y = py as usize;
 
     // Dismiss control in the top bar, or the home gesture band.
-    if BACK.contains(x, y) || (x >= HOME_X0 && x < HOME_X1 && y >= 1400) {
+    if std::design::back_button::contains(x, y) || BACK.contains(x, y) || (x >= HOME_X0 && x < HOME_X1 && y >= 1400) {
         return Tap::Leave("[MUSIC APP] Dismiss control or home gesture pressed. Exiting to launcher.");
     }
 

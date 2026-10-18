@@ -711,26 +711,9 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
         // 22px right of the button's centre, so the glyph was not centred in the
         // thing it labelled. The chevron is now centred on `BACK_RECT`, and the
         // box is inset by one pixel so it is never clipped by `contains`.
-        // Back control circular disc (cx: 50, cy: 48, radius: 20)
-        if BACK_RECT.contains(x, y) {
-            let cx = BACK_RECT.x + BACK_RECT.w / 2;
-            let cy = BACK_RECT.y + BACK_RECT.h / 2;
-            let dx = x as isize - cx as isize;
-            let dy = y as isize - cy as isize;
-            let dsq = dx * dx + dy * dy;
-            if dsq <= 20 * 20 {
-                if dsq >= 18 * 18 {
-                    return BORDER_SUBTLE;
-                }
-                if dx <= 2 && dx >= -5 {
-                    let arm_dy = (dx - (-5)).abs();
-                    if (dy.abs() - arm_dy).abs() <= 1 {
-                        return TEXT_PRIMARY;
-                    }
-                }
-                return SURFACE_RAISED;
-            }
-            return BG_DARK;
+        // Standardized back button squircle (24..72, 24..72)
+        if let Some(c) = std::design::back_button::pixel(x, y, TEXT_PRIMARY, BORDER_SUBTLE, SURFACE_RAISED) {
+            return c;
         }
 
         // Flash / torch pill. This is a real control: it issues
@@ -1213,7 +1196,7 @@ fn handle_camera_touch(camera: &mut CameraApp, x: u32, y: u32) -> Tap {
     // WHY the named rectangles: the old test was `x 24..100 && y 28..68 ||
     // x 240..480 && y >= 1400`, a second transcription of the header's geometry
     // with no upper bound on y.
-    if BACK_RECT.contains(x, y) || HOME_HIT.contains(x, y) {
+    if std::design::back_button::contains(x, y) || BACK_RECT.contains(x, y) || HOME_HIT.contains(x, y) {
         return Tap::Leave("[CAMERA] Back control or home gesture pressed. Exiting to launcher.");
     }
 

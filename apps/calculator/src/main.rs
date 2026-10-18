@@ -126,25 +126,9 @@ fn get_button_action(row: usize, col: usize) -> Option<char> {
 fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
     // 1. Status Bar & Header Title with Back Chevron Disc (y: 0..110)
     if y < HEADER_H {
-        // Circular back button at center (62, 55), radius 22
-        let back_cx = 62i32;
-        let back_cy = 55i32;
-        let b_dx = x as i32 - back_cx;
-        let b_dy = y as i32 - back_cy;
-        let b_d2 = b_dx * b_dx + b_dy * b_dy;
-        if b_d2 <= 22 * 22 {
-            if b_d2 >= 20 * 20 {
-                return BORDER_SUBTLE;
-            }
-            // Crisp left-pointing chevron: tip at (58, 55), wings to (64, 49) and (64, 61)
-            if y >= 49 && y <= 61 {
-                let arm = (y as i32 - 55).abs();
-                let target_x = 58 + arm;
-                if x as i32 >= target_x && x as i32 <= target_x + 2 {
-                    return TEXT_PRIMARY;
-                }
-            }
-            return SURFACE_RAISED;
+        // Standardized back button squircle (24..72, 24..72)
+        if let Some(c) = std::design::back_button::pixel(x, y, TEXT_PRIMARY, BORDER_SUBTLE, SURFACE_RAISED) {
+            return c;
         }
 
         // Canonical App Title: "Calculator" at display weight
@@ -571,10 +555,13 @@ fn handle_keyboard_key(calc: &mut CalculatorState, code: u32) -> bool {
 /// touch that lands on no key at all changes nothing and reports `Tap::None`,
 /// which is what stops an inert tap from costing a full repaint.
 fn handle_touch_point(calc: &mut CalculatorState, x: u32, y: u32) -> Tap {
-    // Back button circular touch disc (center: 62, 55, radius: 24)
-    let dx = x as i32 - 62;
-    let dy = y as i32 - 55;
-    if dx * dx + dy * dy <= 24 * 24 {
+    // Back button: canonical back button bounds (24..72, 24..72) or legacy circular disc (62, 55, r: 24)
+    let is_back = std::design::back_button::contains(x as usize, y as usize) || {
+        let dx = x as i32 - 62;
+        let dy = y as i32 - 55;
+        dx * dx + dy * dy <= 24 * 24
+    };
+    if is_back {
         return Tap::Leave("[CALCULATOR] Back button tapped. Returning to launcher.");
     }
 

@@ -135,17 +135,6 @@ const ROW_BAND_Y1: usize = 820;
 #[allow(dead_code)]
 const DISABLED: u32 = BORDER_SUBTLE;
 
-/// Back-chevron stroke, apex pointing left, centred on `(cx, cy)`.
-///
-/// WHY it exists rather than a bitmap: the shell draws its back controls from
-/// one rounded-stroke family, and a vector stroke stays inside the pill it is
-/// centred in when the pill is moved.
-fn chevron_left(x: usize, y: usize, cx: usize, cy: usize, half: isize) -> bool {
-    let dx = (x as isize) - (cx as isize);
-    let dy = (y as isize) - (cy as isize);
-    let d = dy.abs();
-    dx <= 0 && d <= half && (dx + d).abs() <= 2
-}
 
 /// Rasterises one text run into the pixel at `(x, y)`.
 ///
@@ -352,10 +341,14 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
             if c != SURFACE_RAISED {
                 return c;
             }
-            let cx = BACK.x + BACK.w / 2;
-            let cy = BACK.y + BACK.h / 2;
-            if chevron_left(x, y, cx, cy, 12) {
-                return TEXT_PRIMARY;
+            if let Some(ink) = std::design::back_button::chevron_ink(
+                x,
+                y,
+                BACK.x + BACK.w / 2,
+                BACK.y + BACK.h / 2,
+                TEXT_PRIMARY,
+            ) {
+                return ink;
             }
             return SURFACE_RAISED;
         }

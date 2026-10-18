@@ -1896,10 +1896,14 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
             if c != SOFT {
                 return c;
             }
-            let cx = DETAIL_BACK.x + DETAIL_BACK.w / 4;
-            let cy = DETAIL_BACK.y + DETAIL_BACK.h / 2;
-            if chevron_left(x, y, cx, cy, 12) {
-                return TEXT;
+            if let Some(ink) = std::design::back_button::chevron_ink(
+                x,
+                y,
+                DETAIL_BACK.x + DETAIL_BACK.w / 2,
+                DETAIL_BACK.y + DETAIL_BACK.h / 2,
+                TEXT,
+            ) {
+                return ink;
             }
             return SOFT;
         }

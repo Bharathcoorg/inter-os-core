@@ -712,23 +712,9 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
             return BORDER_SUBTLE;
         }
 
-        // Circular back button disc (cx: 62, cy: 48, radius: 22)
-        let dx = x as isize - 62;
-        let dy = y as isize - 48;
-        let dsq = dx * dx + dy * dy;
-        if dsq <= 22 * 22 {
-            // Anti-aliased disc border rim
-            if dsq >= 20 * 20 {
-                return BORDER_SUBTLE;
-            }
-            // Crisp vector chevron: apex at (58, 48), arms pointing up-right and down-right
-            if dx <= 2 && dx >= -6 {
-                let arm_dy = (dx - (-6)).abs();
-                if (dy.abs() - arm_dy).abs() <= 1 {
-                    return TEXT_PRIMARY;
-                }
-            }
-            return SURFACE_RAISED;
+        // Standardized back button squircle (24..72, 24..72)
+        if let Some(c) = std::design::back_button::pixel(x, y, TEXT_PRIMARY, BORDER_SUBTLE, SURFACE_RAISED) {
+            return c;
         }
 
         // Header Title: "Messages" (full 24*scale line box inside header band).
@@ -1434,7 +1420,7 @@ fn handle_tap(app: &mut MessagesApp, px: u32, py: u32) -> Tap<'static> {
     }
 
     // Back control in the header: the only real "leave" action this app has.
-    if x >= 24 && x < 100 && y >= 28 && y < 68 {
+    if std::design::back_button::contains(x, y) || (x >= 24 && x < 100 && y >= 28 && y < 68) {
         return Tap::Leave("[MESSAGES APP] Back control pressed. Exiting to launcher.");
     }
 
