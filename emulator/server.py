@@ -853,7 +853,7 @@ SUPPORTED_PROFILES = {
         "arch": "x86_64",
         "machine": "q35",
         "cpu": "qemu64",
-        "ram": 512,
+        "ram": 2048,
         "boot_type": "BIOS/MBR Bootloader",
         "image": os.path.join(WORKSPACE_ROOT, "target", "inter-os-bios.img"),
         "status": "Primary QEMU Phone contract",

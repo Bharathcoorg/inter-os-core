@@ -689,6 +689,8 @@ document.addEventListener('DOMContentLoaded', () => {
   // state made the first startScanoutStream() return early, so a page loaded
   // while the guest was already running never fetched a single frame.
   let isStreamActive = false;
+  let binaryStreamActive = false;
+  let binaryStreamAbort = null;
 
   async function queryMetrics() {
     try {
