@@ -1622,9 +1622,10 @@ const WP_CELL_LABEL_GAP: usize = std::design::spacing::GRID_8;
 const WP_THUMB_H: usize = 144;
 /// Cell height: padding, thumbnail, gap, one name line box, matching padding.
 const WP_CELL_H: usize = WP_CELL_PAD + WP_THUMB_H + WP_CELL_LABEL_GAP + LINE_H + WP_CELL_PAD;
-
+const WP_ROWS: usize = (std::design::walls::SCENES.len() + 2) / 3;
+const WP_GALLERY_H: usize = WP_ROWS * WP_CELL_H + (WP_ROWS.saturating_sub(1)) * WP_CELL_GAP;
 /// Top of the action row: one 32px step below the gallery.
-const WP_ACTION_Y: usize = WP_GALLERY_Y + WP_CELL_H + std::design::spacing::GRID_32;
+const WP_ACTION_Y: usize = WP_GALLERY_Y + WP_GALLERY_H + std::design::spacing::GRID_32;
 /// Height of the action row.
 const WP_ACTION_H: usize = BUTTON_H;
 /// Top of the outcome line: one 16px step below the actions.
@@ -4559,6 +4560,7 @@ pub extern "C" fn _start() -> ! {
 
     // 6. Audit Security & Hardware Keystore (Security detail)
     settings.audit_security();
+    settings.refresh_screen_lock();
 
     // 7. Query About Device & Hardware RTC (System detail)
     settings.display_about_device();
@@ -4814,19 +4816,6 @@ pub extern "C" fn _start() -> ! {
                             ) {
                                 settings.open_wallpapers();
                             }
-                        } else if (110..=170).contains(&input.y) {
-                            let section = if input.x < 300 {
-                                Section::Power
-                            } else {
-                                Section::System
-                            };
-                            settings.current_section = Some(section);
-                            settings.refresh_wallpaper_values();
-                            std::log(
-                                0,
-                                "[SETTINGS APP] Category / tab switched.",
-                            )
-                            .ok();
                         } else if let Some(section) = settings.current_section {
                             // Detail-screen controls (hit cells match the drawn
                             // geometry exactly).

@@ -512,7 +512,7 @@ impl BrowserApp {
             current_url_len: 0,
             scroll_offset_px: 0,
             pages_loaded: 0,
-            trackers_blocked: 4,
+            trackers_blocked: 0,
             active_socket_id: None,
             address: [0; 64],
             address_len: 0,
@@ -1568,26 +1568,20 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
         return Tap::Redraw;
     }
 
-    // Start Page Sovereign Shortcuts Grid Tap (y 304..480)
-    if app.status == PageStatus::Blank && y >= 304 && y < 480 && x >= 24 && x < W - 24 {
-        let col_w = (W - 48) / 4;
-        let col_idx = (x - 24) / col_w;
-        let row_idx = if y < 392 { 0 } else { 1 };
-        let item_idx = row_idx * 4 + col_idx;
-        let targets: [&[u8]; 8] = [
-            b"https://interos.org",
-            b"https://wikipedia.org",
-            b"https://github.com",
-            b"https://rust-lang.org",
-            b"https://kernel.org",
-            b"https://archive.org",
-            b"https://w3.org",
-            b"https://docs.interos.org",
-        ];
-        if item_idx < 8 {
-            let _ = std::audio_haptic_click();
-            app.navigate(targets[item_idx]);
-            return Tap::Redraw;
+    // Start Page "Your pages" Cards Tap (y 536..1340)
+    if app.status == PageStatus::Blank && x >= 24 && x < W - 24 {
+        let card_h = 180;
+        let card_gap = 16;
+        for i in 0..4 {
+            let card_y = 536 + i * (card_h + card_gap);
+            if y >= card_y && y < card_y + card_h {
+                if let Some(row) = home_row(app, i) {
+                    let _ = std::audio_haptic_click();
+                    let url = &row.url[..row.url_len];
+                    app.navigate(url);
+                    return Tap::Redraw;
+                }
+            }
         }
     }
 

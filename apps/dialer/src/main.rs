@@ -2456,11 +2456,6 @@ fn contacts_list_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         } else {
             ContactEditor::UNSAVED_BASE + (row - dialer.contacts.len())
         };
-        if !(cursor..cursor + CONTACT_ROW_H).contains(&y) {
-            cursor += CONTACT_ROW_H;
-            row += 1;
-            continue;
-        }
         let rec = if sel >= ContactEditor::UNSAVED_BASE {
             dialer
                 .contacts
@@ -2469,12 +2464,17 @@ fn contacts_list_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
             dialer.contacts.record(sel)
         };
         let Some(rec) = rec else {
-            return BG_DARK;
+            row += 1;
+            continue;
         };
         // WHY the favourites filter hides rows instead of greying them: a row the
         // user asked not to see is not a row at all, and the notice below states
         // the filter so the shorter list is never mistaken for a lost contact.
         if dialer.contacts_fav_only && !rec.is_favourite() {
+            row += 1;
+            continue;
+        }
+        if !(cursor..cursor + CONTACT_ROW_H).contains(&y) {
             cursor += CONTACT_ROW_H;
             row += 1;
             continue;
@@ -2599,23 +2599,42 @@ fn contacts_notice_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     let mut line = [0u8; 96];
     let mut n = 0usize;
     if dialer.contacts_fav_only {
+        let mut fav_count = 0usize;
+        for i in 0..dialer.contacts.len() {
+            if let Some(r) = dialer.contacts.record(i) {
+                if r.is_favourite() { fav_count += 1; }
+            }
+        }
+        for i in 0..dialer.contacts.unsaved_len() {
+            if let Some(r) = dialer.contacts.unsaved_record(i) {
+                if r.is_favourite() { fav_count += 1; }
+            }
+        }
         let head = b"Favorites only: ";
         line[..head.len()].copy_from_slice(head);
         n += head.len();
+        line[n] = b'0' + (fav_count as u8).min(9);
+        n += 1;
+        let mid = b" of ";
+        line[n..n + mid.len()].copy_from_slice(mid);
+        n += mid.len();
+        line[n] = b'0' + (used as u8).min(9);
+        n += 1;
+    } else {
+        let head = b"Saved ";
+        line[n..n + head.len()].copy_from_slice(head);
+        n += head.len();
+        line[n] = b'0' + (used as u8).min(9);
+        n += 1;
+        let mid = b" of 8";
+        line[n..n + mid.len()].copy_from_slice(mid);
+        n += mid.len();
     }
-    let head = b"Saved ";
-    line[n..n + head.len()].copy_from_slice(head);
-    n += head.len();
-    line[n] = b'0' + used as u8;
-    n += 1;
-    let mid = b" of 8";
-    line[n..n + mid.len()].copy_from_slice(mid);
-    n += mid.len();
     if unsaved > 0 {
         let tail = b" | unsaved ";
         line[n..n + tail.len()].copy_from_slice(tail);
         n += tail.len();
-        line[n] = b'0' + unsaved as u8;
+        line[n] = b'0' + (unsaved as u8).min(9);
         n += 1;
     }
     if used >= MAX_CONTACTS && !dialer.contacts_fav_only {
@@ -2730,7 +2749,12 @@ fn contacts_action_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
             let lw = std::design::font::measure(&lbuf[..ln], 1);
             let lx = (cx as i32 - lw as i32 / 2).max(0) as usize;
             let ly = C_ACTION_Y - run_rows(1) / 2;
-            if let Some(c) = test_text(x, y, lx, ly, 1, &lbuf[..ln], color::SURFACE, fill) {
+            let text_color = if fill == color::SURFACE_RAISED {
+                color::TEXT
+            } else {
+                color::SURFACE
+            };
+            if let Some(c) = test_text(x, y, lx, ly, 1, &lbuf[..ln], text_color, fill) {
                 return c;
             }
         }
@@ -3439,16 +3463,31 @@ fn handle_contacts_tap(dialer: &mut DialerApp, x: usize, y: usize) -> Tap<'stati
         let mut row = 0usize;
         let mut cursor = LIST_Y0;
         while row < total {
-            if y < cursor || y >= cursor + CONTACT_ROW_H {
-                cursor += CONTACT_ROW_H;
-                row += 1;
-                continue;
-            }
             let sel = if row < dialer.contacts.len() {
                 row
             } else {
                 ContactEditor::UNSAVED_BASE + (row - dialer.contacts.len())
             };
+            let rec = if sel >= ContactEditor::UNSAVED_BASE {
+                dialer
+                    .contacts
+                    .unsaved_record(sel - ContactEditor::UNSAVED_BASE)
+            } else {
+                dialer.contacts.record(sel)
+            };
+            let Some(rec) = rec else {
+                row += 1;
+                continue;
+            };
+            if dialer.contacts_fav_only && !rec.is_favourite() {
+                row += 1;
+                continue;
+            }
+            if y < cursor || y >= cursor + CONTACT_ROW_H {
+                cursor += CONTACT_ROW_H;
+                row += 1;
+                continue;
+            }
             if in_circle(x, y, STAR_CX, cursor + CONTACT_ROW_H / 2, STAR_R) {
                 dialer.contact_sel = Some(sel);
                 dialer.toggle_selected_favourite();
