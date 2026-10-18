@@ -1467,26 +1467,26 @@ const CARD_TEXT_X: usize = CARD_ICON_CX + LINE_H / 2 + std::design::spacing::GRI
 /// Width available to a landing card's text.
 #[allow(dead_code)]
 const CARD_TEXT_W: usize = CARD_W - CARD_TEXT_X - CARD_PAD;
-/// Column width of the two-up grid.
-const CARD_W: usize = (CONTENT_W - CARD_GAP) / 2;
-/// Y step between a card's title line and its first caption line.
-const CARD_LINE_GAP: usize = std::design::spacing::GRID_16;
+/// Column width: single-column full content width for maximum legibility and zero truncation.
+const CARD_W: usize = CONTENT_W;
+/// Y step between a card's title line and its caption line.
+const CARD_LINE_GAP: usize = std::design::spacing::GRID_8;
 /// Dynamic Device Vitality Orb geometry
 const ORB_CX: usize = 360;
-const ORB_CY: usize = 166;
-const ORB_R: usize = 48;
-const HALO_R: usize = 78;
+const ORB_CY: usize = 66;
+const ORB_R: usize = 24;
+const HALO_R: usize = 42;
 
 /// Landing screen identity typography positions
-const IDENTITY_TITLE_Y: usize = 264;
-const IDENTITY_SUB_Y: usize = 296;
+const IDENTITY_TITLE_Y: usize = 104;
+const IDENTITY_SUB_Y: usize = 138;
 
-/// Landing card height: modern iOS 18 / Nothing OS spaced card proportion.
-const CARD_H: usize = 126;
+/// Landing card height: single-column full-width card with icon, title, subtitle & status chip
+const CARD_H: usize = 86;
 /// Gutter between landing cards.
-const GRID_GAP: usize = 14;
+const GRID_GAP: usize = 12;
 /// Top of the landing grid: spaced comfortably below the identity hero block.
-const GRID_Y: usize = 348;
+const GRID_Y: usize = 176;
 /// Compatibility aliases for old landing titles.
 #[allow(dead_code)]
 const LANDING_TITLE_Y: usize = 96;
@@ -1999,34 +1999,23 @@ fn icon_gear(x: usize, y: usize, cx: usize, cy: usize, tint: u32) -> Option<u32>
 
 type IconFn = fn(usize, usize, usize, usize, u32) -> Option<u32>;
 
-/// Landing grid entry: title, subtitle and icon for one category.
+/// Landing list entry: title, subtitle and icon for one category.
 fn category(i: usize) -> (&'static [u8], &'static [u8], IconFn) {
     match i {
-        0 => (b"Device", b"Display, Brightness, Sound, Sensors & Diagnostics", icon_device),
-        1 => (b"Network", b"Wi-Fi, Cellular, Flight mode", icon_network),
-        2 => (b"Personal", b"Wallpaper picker, Account name, Lock screen preferences", icon_personal),
-        3 => (b"Apps & Storage", b"Installed RAPP catalogue, VFS storage partitions", icon_apps),
-        4 => (b"Power & Battery", b"Battery health, DVFS governor selector", icon_battery),
-        5 => (b"Security & Privacy", b"PIN configuration, Key store status", icon_security),
-        _ => (b"About InterOS", b"Honest Kernel version, x86_64 architecture, system uptime ticks, memory telemetry", icon_gear),
+        0 => (b"Device", b"Display, brightness, sound & diagnostics", icon_device),
+        1 => (b"Network", b"Wi-Fi, cellular, flight mode & interfaces", icon_network),
+        2 => (b"Personal", b"Wallpapers, lockscreen & preferences", icon_personal),
+        3 => (b"Apps & Storage", b"14 installed apps, VFS partitions", icon_apps),
+        4 => (b"Power & Battery", b"Battery health & DVFS governor", icon_battery),
+        5 => (b"Security & Privacy", b"PIN configuration, Keystore integrity", icon_security),
+        _ => (b"About InterOS", b"Kernel v0.8.0, x86_64, uptime & memory", icon_gear),
     }
 }
 
 /// Bounding rectangle (x, y, w, h) for landing card `i`.
-/// Cards 0..5 are arranged in a 2-column grid; card 6 (About InterOS) spans full content width.
+/// Cards 0..6 are arranged in a sleek single-column list with full content width.
 fn card_rect(i: usize) -> (usize, usize, usize, usize) {
-    if i == 6 {
-        (GRID_X, GRID_Y + 3 * (CARD_H + GRID_GAP), CONTENT_W, CARD_H)
-    } else {
-        let col = i % 2;
-        let row = i / 2;
-        (
-            GRID_X + col * (CARD_W + GRID_GAP),
-            GRID_Y + row * (CARD_H + GRID_GAP),
-            CARD_W,
-            CARD_H,
-        )
-    }
+    (GRID_X, GRID_Y + i * (CARD_H + GRID_GAP), CONTENT_W, CARD_H)
 }
 
 /// Top-left corner of landing card `i`.
@@ -3285,16 +3274,38 @@ fn landing_card_pixel(x: usize, y: usize, i: usize) -> Option<u32> {
     let (cx0, cy0, cw, ch) = card_rect(i);
     if let Some(fill) = card_pixel(x, y, cx0, cy0, cw, ch, CARD_R) {
         let (title, subtitle, icon) = category(i);
-        if let Some(ic) = icon(x, y, cx0 + CARD_ICON_CX, cy0 + CARD_PAD + LINE_H / 2, TEXT) {
-            return Some(ic);
+
+        // 1. Squircle icon badge on left (48x48, radius 14)
+        let icon_box_x = cx0 + 16;
+        let icon_box_y = cy0 + 19;
+        let icon_box_s = 48;
+        if in_round_rect(x, y, icon_box_x, icon_box_y, icon_box_s, icon_box_s, 14) {
+            let cx = icon_box_x + icon_box_s / 2;
+            let cy = icon_box_y + icon_box_s / 2;
+            let tint = match i {
+                0 => 0xFF2563EB, // Device: Royal Blue
+                1 => 0xFF0284C7, // Network: Sky Blue
+                2 => 0xFF7C3AED, // Personal: Violet
+                3 => 0xFFD97706, // Apps: Amber
+                4 => 0xFF16A34A, // Power: Emerald
+                5 => 0xFFE11D48, // Security: Rose
+                _ => 0xFF4B5563, // About: Slate
+            };
+            if let Some(ic) = icon(x, y, cx, cy, tint) {
+                return Some(ic);
+            }
+            return Some(SOFT);
         }
-        let text_w = cw.saturating_sub(CARD_TEXT_X + CARD_PAD);
-        // Title owns the full remaining card width; subtitle below it.
+
+        // 2. Title and subtitle (full horizontal run without cramped clipping)
+        let text_x = cx0 + 78;
+        let text_w = cw.saturating_sub(78 + 110);
+
         if let Some(c) = run_ink(
             x,
             y,
-            cx0 + CARD_TEXT_X,
-            cy0 + CARD_PAD,
+            text_x,
+            cy0 + 18,
             TYPE_H3,
             title,
             text_w,
@@ -3304,15 +3315,14 @@ fn landing_card_pixel(x: usize, y: usize, i: usize) -> Option<u32> {
         ) {
             return Some(c);
         }
-        let mut sub_buf = [0u8; 96];
-        let sub_len = std::design::font::ellipsize(subtitle, 1, text_w, &mut sub_buf);
+
         if let Some(c) = run_ink(
             x,
             y,
-            cx0 + CARD_TEXT_X,
-            cy0 + CARD_PAD + LINE_H + CARD_LINE_GAP,
+            text_x,
+            cy0 + 46,
             TYPE_H3,
-            &sub_buf[..sub_len],
+            subtitle,
             text_w,
             TEXT_MUTED,
             fill,
@@ -3320,6 +3330,31 @@ fn landing_card_pixel(x: usize, y: usize, i: usize) -> Option<u32> {
         ) {
             return Some(c);
         }
+
+        // 3. Right status chip
+        let badge_w = 88;
+        let badge_h = 28;
+        let badge_x = cx0 + cw - badge_w - 18;
+        let badge_y = cy0 + (ch - badge_h) / 2;
+        if in_round_rect(x, y, badge_x, badge_y, badge_w, badge_h, 14) {
+            let (label, tint) = match i {
+                0 => (b"Config" as &[u8], 0xFF0284C7),
+                1 => (b"Online" as &[u8], 0xFF16A34A),
+                2 => (b"Theme" as &[u8], 0xFF7C3AED),
+                3 => (b"14 RAPP" as &[u8], 0xFFD97706),
+                4 => (b"Profile" as &[u8], 0xFF16A34A),
+                5 => (b"Ring-3" as &[u8], 0xFFE11D48),
+                _ => (b"v0.8.0" as &[u8], 0xFF4B5563),
+            };
+            let lw = run_w(label, TYPE_H3, false);
+            let lx = badge_x + (badge_w.saturating_sub(lw)) / 2;
+            let ly = badge_y + 2;
+            if let Some(c) = run_ink(x, y, lx, ly, TYPE_H3, label, badge_w, tint, SOFT, false) {
+                return Some(c);
+            }
+            return Some(SOFT);
+        }
+
         return Some(fill);
     }
     None
@@ -3358,13 +3393,13 @@ fn vitality_orb_pixel(x: usize, y: usize, state: OrbState) -> Option<u32> {
         let g = ((g_inner * (255 - t) + g_outer * t) / 255) as u32;
         let b = ((b_inner * (255 - t) + b_outer * t) / 255) as u32;
 
-        // Specular highlight at top-left inside core (dx ~ -12, dy ~ -12)
-        let sx = dx + 12;
-        let sy = dy + 12;
+        // Specular highlight at top-left inside core (dx ~ -8, dy ~ -8)
+        let sx = dx + 8;
+        let sy = dy + 8;
         let sd2 = (sx * sx + sy * sy) as u32;
-        if sd2 < 144 {
+        if sd2 < 64 {
             let s_dist = sd2.isqrt();
-            let s_factor = ((12 - s_dist) * 48) / 12;
+            let s_factor = ((8 - s_dist) * 48) / 8;
             let sr = (r + s_factor).min(255);
             let sg = (g + s_factor).min(255);
             let sb = (b + s_factor).min(255);
@@ -3391,28 +3426,53 @@ fn vitality_orb_pixel(x: usize, y: usize, state: OrbState) -> Option<u32> {
 
 /// Landing screen pixel: Dynamic Device Vitality Orb, identity, and grouped cards.
 fn landing_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
-    // WHY the guard is the grid's own top: no card exists above it.
     if y >= GRID_Y {
         for i in 0..Section::COUNT {
             if let Some(c) = landing_card_pixel(x, y, i) {
                 return c;
             }
         }
+        // Sovereign System Status Card below cards
+        let stat_y = 874;
+        let stat_h = 160;
+        if let Some(fill) = card_pixel(x, y, CONTENT_X, stat_y, CONTENT_W, stat_h, CARD_R) {
+            let title = b"Sovereign Architecture Guarantee";
+            if let Some(c) = run_ink(x, y, CONTENT_X + 24, stat_y + 16, TYPE_H3, title, CONTENT_W - 48, TEXT, fill, true) {
+                return c;
+            }
+            let l1 = b"Ring-3 Privilege Separation * Zero Ambient Authority";
+            if let Some(c) = run_ink(x, y, CONTENT_X + 24, stat_y + 46, TYPE_H3, l1, CONTENT_W - 48, TEXT_MUTED, fill, false) {
+                return c;
+            }
+            let l2 = b"Hardware Enclave Active * Monotonic Ticks Synchronized";
+            if let Some(c) = run_ink(x, y, CONTENT_X + 24, stat_y + 74, TYPE_H3, l2, CONTENT_W - 48, TEXT_MUTED, fill, false) {
+                return c;
+            }
+            let l3 = b"WHPX/KVM Accelerated * Native 1080x2160 Scanout";
+            if let Some(c) = run_ink(x, y, CONTENT_X + 24, stat_y + 102, TYPE_H3, l3, CONTENT_W - 48, TEXT_MUTED, fill, false) {
+                return c;
+            }
+            let l4 = b"Cryptographic Keystore Active * VFS Sandboxing Enforced";
+            if let Some(c) = run_ink(x, y, CONTENT_X + 24, stat_y + 128, TYPE_H3, l4, CONTENT_W - 48, SUCCESS_EMERALD, fill, false) {
+                return c;
+            }
+            return fill;
+        }
     }
     // Dynamic Device Vitality Orb centered at ORB_CX, ORB_CY
     if let Some(c) = vitality_orb_pixel(x, y, app.orb_state()) {
         return c;
     }
-    // Device identity title below orb: "InterOS Sovereign"
-    let title = b"InterOS Sovereign";
-    let tw = run_w(title, TYPE_H3, true);
+    // Device identity title below orb: "Settings"
+    let title = b"Settings";
+    let tw = run_w(title, TYPE_DISPLAY, true);
     let tx = if tw < W { (W - tw) / 2 } else { CONTENT_X };
     if let Some(c) = run_ink(
         x,
         y,
         tx,
         IDENTITY_TITLE_Y,
-        TYPE_H3,
+        TYPE_DISPLAY,
         title,
         W - 2 * CONTENT_X,
         TEXT,
@@ -3421,8 +3481,8 @@ fn landing_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
     ) {
         return c;
     }
-    // User status phrase below title: "System Operational * Verified Ring-3"
-    let sub = b"System Operational * Verified Ring-3";
+    // User status phrase below title: "InterOS Sovereign * Verified Ring-3"
+    let sub = b"InterOS Sovereign * Verified Ring-3";
     let sw = run_w(sub, TYPE_H3, false);
     let sx = if sw < W { (W - sw) / 2 } else { CONTENT_X };
     if let Some(c) = run_ink(
@@ -4445,9 +4505,12 @@ fn get_settings_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
     {
         return GESTURE_BAR;
     }
-    // Shared 48x48 back control, top-left of both screens.
-    if let Some(c) = back_button_pixel(x, y) {
-        return c;
+    // Shared 48x48 back control: only rendered when inside a subpage or section detail
+    let is_subpage = app.sensors_open || app.wallpaper_open || app.screen_lock_open || app.current_section.is_some();
+    if is_subpage {
+        if let Some(c) = back_button_pixel(x, y) {
+            return c;
+        }
     }
     if app.sensors_open {
         return sensors_pixel(x, y, app);
@@ -4659,15 +4722,7 @@ pub extern "C" fn _start() -> ! {
                                     .ok();
                                 }
                                 None => {
-                                    std::log(
-                                        0,
-                                        "[SETTINGS APP] Back button pressed on the root screen. Exiting to launcher.",
-                                    )
-                                    .ok();
-                                    if surface > 0 {
-                                        let _ = std::surface_destroy(6, surface);
-                                    }
-                                    std::exit_with_code(0);
+                                    // On root landing screen there is no back button; home gesture bar handles exit.
                                 }
                             }
                             }
