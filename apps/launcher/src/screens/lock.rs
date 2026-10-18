@@ -355,7 +355,7 @@ fn lock_band(vertical: u32, across: u32) -> u32 {
         .saturating_sub((vertical.saturating_mul(across)) >> 8)
 }
 
-/// Full-bleed continuous subpixel anti-aliased wallpaper layer for the lock surface.
+/// Full-bleed continuous fixed-point coverage anti-aliased wallpaper layer for the lock surface.
 fn lock_wallpaper_pixel(f: &Frame, x: usize, y: usize) -> u32 {
     let scene = f.scene;
     let x_fixed = (x * (LOCK_REF_W - 1) * 256) / (W - 1);

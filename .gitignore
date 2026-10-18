@@ -31,6 +31,10 @@ scratch/
 .agents/
 .agent/
 AGENTS.md
+opencode.json
+opencode,json
+.opencode/
+*.opencode.*
 # Cryptographic Private Keys
 *.key
 packages/*.key
