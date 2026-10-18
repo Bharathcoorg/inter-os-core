@@ -975,6 +975,13 @@ pub fn activity_close_hit(_state: &LauncherState, x: usize, y: usize) -> Option<
     }
 }
 
+pub fn invalidate_activity_frame() {
+    unsafe {
+        let slot: *mut Option<ActivityFrame> = core::ptr::addr_of_mut!(FRAME_CACHE);
+        *slot = None;
+    }
+}
+
 pub fn activity_close_slot(state: &mut LauncherState, slot: usize) -> Option<u64> {
     let task = *state.recent_task_ids.get(slot)?;
     if task != 0 {
@@ -984,6 +991,7 @@ pub fn activity_close_slot(state: &mut LauncherState, slot: usize) -> Option<u64
         }
     }
     state.dismiss_recent(slot);
+    invalidate_activity_frame();
     Some(task)
 }
 

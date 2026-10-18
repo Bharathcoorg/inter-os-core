@@ -1537,6 +1537,9 @@ fn present_dirty(surface: u32, state: &LauncherState, dirty: Dirty) {
     if dirty == Dirty::None {
         return;
     }
+    if dirty == Dirty::ActivityCards {
+        screens::activity::invalidate_activity_frame();
+    }
     if dirty == Dirty::All {
         render_view(surface, state);
         let _ = std::surface_flip(4);
@@ -1660,6 +1663,9 @@ fn log_view_rendered(state: &LauncherState) {
 /// go through [`present_dirty`].
 fn render_view(surface: u32, state: &LauncherState) {
     launcher::outline_text::reset_slot_pool();
+    if state.current_view == ViewMode::ActivitySpace {
+        screens::activity::invalidate_activity_frame();
+    }
     let frame_start = std::get_ticks(1).ok();
     render_band(surface, state, 0, H);
     let _ = std::surface_flip(4);

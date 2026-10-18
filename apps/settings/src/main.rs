@@ -1470,23 +1470,24 @@ const CARD_TEXT_W: usize = CARD_W - CARD_TEXT_X - CARD_PAD;
 /// Column width: single-column full content width for maximum legibility and zero truncation.
 const CARD_W: usize = CONTENT_W;
 /// Y step between a card's title line and its caption line.
+#[allow(dead_code)]
 const CARD_LINE_GAP: usize = std::design::spacing::GRID_8;
 /// Dynamic Device Vitality Orb geometry
 const ORB_CX: usize = 360;
-const ORB_CY: usize = 66;
-const ORB_R: usize = 24;
-const HALO_R: usize = 42;
+const ORB_CY: usize = 52;
+const ORB_R: usize = 18;
+const HALO_R: usize = 30;
 
 /// Landing screen identity typography positions
-const IDENTITY_TITLE_Y: usize = 104;
-const IDENTITY_SUB_Y: usize = 138;
+const IDENTITY_TITLE_Y: usize = 90;
+const IDENTITY_SUB_Y: usize = 128;
 
 /// Landing card height: single-column full-width card with icon, title, subtitle & status chip
 const CARD_H: usize = 86;
 /// Gutter between landing cards.
 const GRID_GAP: usize = 12;
 /// Top of the landing grid: spaced comfortably below the identity hero block.
-const GRID_Y: usize = 176;
+const GRID_Y: usize = 168;
 /// Compatibility aliases for old landing titles.
 #[allow(dead_code)]
 const LANDING_TITLE_Y: usize = 96;
@@ -3433,7 +3434,7 @@ fn landing_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
             }
         }
         // Sovereign System Status Card below cards
-        let stat_y = 874;
+        let stat_y = 868;
         let stat_h = 160;
         if let Some(fill) = card_pixel(x, y, CONTENT_X, stat_y, CONTENT_W, stat_h, CARD_R) {
             let title = b"Sovereign Architecture Guarantee";
