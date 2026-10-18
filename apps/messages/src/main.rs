@@ -468,7 +468,7 @@ const RECIPIENT_BAND_Y0: usize = 1288;
 const RECIPIENT_BAND_Y1: usize = 1330;
 /// The drawn field: x 24..610, y 1292..1328 (corner radius 18).
 const RECIPIENT_FIELD: (usize, usize, usize, usize) = (24, 1292, 586, 36);
-const RECIPIENT_TEXT_X: usize = 64;
+const RECIPIENT_TEXT_X: usize = 76;
 const RECIPIENT_TEXT_MAX_W: usize = 610 - 24 - RECIPIENT_TEXT_X;
 const RECIPIENT_PLACEHOLDER: &[u8] = b"Recipient (name or handle)";
 const RECIPIENT_TEXT_SCALE: usize = 1;
@@ -1017,6 +1017,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
             // by the search field. Each card shows the recipient, the last stored
             // message, its local-store count, and a delete affordance.
             let idx = (y - CARD_Y0) / CARD_H;
+            let card_top = CARD_Y0 + idx * CARD_H;
             let card_offset_y = (y - CARD_Y0) % CARD_H;
             if card_offset_y < CARD_BODY_H && x >= CARD_X0 && x < CARD_X1 {
                 if let Some(rec) = messages.store.get(idx) {
@@ -1038,7 +1039,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                             x,
                             y,
                             name_x,
-                            card_offset_y + 16,
+                            card_top + 16,
                             2,
                             name,
                             TEXT_PRIMARY,
@@ -1052,7 +1053,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
 
                         // Security indicator badge dot (radius 4) reflecting threat heuristic inspection
                         let s_dx = x as isize - (CARD_X0 + 16) as isize;
-                        let s_dy = y as isize - (card_offset_y + 24) as isize;
+                        let s_dy = y as isize - (card_top + 24) as isize;
                         if s_dx * s_dx + s_dy * s_dy <= 16 {
                             return badge.color();
                         }
@@ -1092,7 +1093,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                             x,
                             y,
                             CARD_X0 + 24,
-                            card_offset_y + 68,
+                            card_top + 68,
                             1,
                             &sub[..sl],
                             TEXT_MUTED,
@@ -1102,7 +1103,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                         }
                         // Delete affordance: a small x glyph on the card's right.
                         let dxc = CARD_X1 - 44;
-                        let dyc = card_offset_y + 32;
+                        let dyc = card_top + 32;
                         let gx = x as isize - dxc as isize;
                         let gy = y as isize - dyc as isize;
                         if gx.abs() <= 6 && gy.abs() <= 6 && (gx - gy).abs() <= 2 {

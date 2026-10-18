@@ -60,6 +60,78 @@ const RECORD_BYTES: usize = 4 + 1 + 1 + 1 + 1 + RECIP_MAX + RECENT_HISTORY * (1 
 /// Blob width = version(1) + count(1) + up to `MAX_THREADS` records.
 const STORE_BLOB_BYTES: usize = 2 + MAX_THREADS * RECORD_BYTES;
 
+pub const ESCAPE_BYTE: u8 = 0xFE;
+pub const ESCAPED_NEWLINE: u8 = 0x8A;
+pub const ESCAPED_ESCAPE: u8 = 0xEE;
+
+pub fn escape_store_blob(raw: &[u8], out: &mut [u8]) -> Result<usize, ()> {
+    let mut pos = 0usize;
+    for &b in raw {
+        if b == b'\n' {
+            if pos + 2 > out.len() {
+                return Err(());
+            }
+            out[pos] = ESCAPE_BYTE;
+            out[pos + 1] = ESCAPED_NEWLINE;
+            pos += 2;
+        } else if b == ESCAPE_BYTE {
+            if pos + 2 > out.len() {
+                return Err(());
+            }
+            out[pos] = ESCAPE_BYTE;
+            out[pos + 1] = ESCAPED_ESCAPE;
+            pos += 2;
+        } else {
+            if pos + 1 > out.len() {
+                return Err(());
+            }
+            out[pos] = b;
+            pos += 1;
+        }
+    }
+    Ok(pos)
+}
+
+pub fn unescape_store_blob(encoded: &[u8], out: &mut [u8]) -> Result<usize, ()> {
+    let mut in_pos = 0usize;
+    let mut out_pos = 0usize;
+    while in_pos < encoded.len() {
+        let b = encoded[in_pos];
+        if b == ESCAPE_BYTE {
+            in_pos += 1;
+            if in_pos >= encoded.len() {
+                return Err(());
+            }
+            match encoded[in_pos] {
+                ESCAPED_NEWLINE => {
+                    if out_pos >= out.len() {
+                        return Err(());
+                    }
+                    out[out_pos] = b'\n';
+                    out_pos += 1;
+                }
+                ESCAPED_ESCAPE => {
+                    if out_pos >= out.len() {
+                        return Err(());
+                    }
+                    out[out_pos] = ESCAPE_BYTE;
+                    out_pos += 1;
+                }
+                _ => return Err(()),
+            }
+            in_pos += 1;
+        } else {
+            if out_pos >= out.len() {
+                return Err(());
+            }
+            out[out_pos] = b;
+            out_pos += 1;
+            in_pos += 1;
+        }
+    }
+    Ok(out_pos)
+}
+
 /// One message thread: a recipient, its stored message count, and the most
 /// recent messages, bounded. No allocation; a record is a plain value.
 #[derive(Clone, Copy)]
@@ -250,22 +322,36 @@ impl ThreadStore {
 
     fn write(&mut self) -> bool {
         let (blob, used) = self.encode();
-        std::settings_set(STORE_CAP_WRITE, STORE_KEY, &blob[..used]).is_ok()
+        let mut escaped = [0u8; 512];
+        if let Ok(esc_len) = escape_store_blob(&blob[..used], &mut escaped) {
+            std::settings_set(STORE_CAP_WRITE, STORE_KEY, &escaped[..esc_len]).is_ok()
+        } else {
+            std::settings_set(STORE_CAP_WRITE, STORE_KEY, &blob[..used]).is_ok()
+        }
     }
 
     /// Reads the table back out of the settings store, validating the whole blob.
     pub fn load() -> Self {
         let mut store = ThreadStore::EMPTY;
-        let mut blob = [0u8; STORE_BLOB_BYTES];
-        match std::settings_get(STORE_CAP_READ, STORE_KEY, &mut blob) {
+        let mut raw = [0u8; 512];
+        match std::settings_get(STORE_CAP_READ, STORE_KEY, &mut raw) {
             Ok(0) => store.state = StoreState::Empty,
             Ok(n) => {
-                let header_count = blob[1] as usize;
-                let bad = n < 2
-                    || n > STORE_BLOB_BYTES
+                let mut blob = [0u8; STORE_BLOB_BYTES];
+                let decoded_len = if let Ok(u_len) = unescape_store_blob(&raw[..n], &mut blob) {
+                    u_len
+                } else if n <= STORE_BLOB_BYTES {
+                    blob[..n].copy_from_slice(&raw[..n]);
+                    n
+                } else {
+                    0
+                };
+                let header_count = if decoded_len >= 2 { blob[1] as usize } else { 0 };
+                let bad = decoded_len < 2
+                    || decoded_len > STORE_BLOB_BYTES
                     || blob[0] != STORE_VERSION
                     || header_count > MAX_THREADS
-                    || n != 2 + header_count * RECORD_BYTES;
+                    || decoded_len != 2 + header_count * RECORD_BYTES;
                 if bad {
                     store.state = StoreState::Invalid;
                 } else {

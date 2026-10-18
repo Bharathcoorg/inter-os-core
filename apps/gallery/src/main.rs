@@ -603,10 +603,10 @@ fn build_image_note(scan: &MediaScan, buf: &mut [u8; 72]) -> usize {
 }
 
 /// Renders the device's real media summary into `buf`.
-fn build_summary(buf: &mut [u8; 48]) -> usize {
+fn build_summary(buf: &mut [u8; 48], photos_count: usize) -> usize {
     let mut n = append_u64(buf, 0, walls::SCENES.len() as u64);
     n = append(buf, n, b" wallpapers, ");
-    n = append_u64(buf, n, PHOTOS.len() as u64);
+    n = append_u64(buf, n, photos_count as u64);
     append(buf, n, b" photos on device")
 }
 
@@ -1146,12 +1146,10 @@ fn wallpaper_cell_pixel(x: usize, y: usize, col: usize) -> u32 {
 }
 
 /// One grid cell holding a photo-ledger record.
-fn photo_cell_pixel(x: usize, y: usize, idx: usize) -> u32 {
+fn photo_cell_pixel(x: usize, y: usize, idx: usize, col: usize, row: usize) -> u32 {
     let Some(photo) = PHOTOS.get(idx) else {
         return BG;
     };
-    let col = idx % 3;
-    let row = idx / 3;
     let x0 = COL_X[col];
     let y0 = GRID_TOP + row * ROW_STRIDE;
     let Some(shape) = draw_rounded_rect(
@@ -1172,14 +1170,11 @@ fn photo_cell_pixel(x: usize, y: usize, idx: usize) -> u32 {
     blend_argb(photo.primary_color, photo.secondary_color, t)
 }
 
-fn storage_cell_pixel(x: usize, y: usize, app: &GalleryApp, idx: usize) -> u32 {
+fn storage_cell_pixel(x: usize, y: usize, app: &GalleryApp, idx: usize, col: usize, row: usize) -> u32 {
     if idx >= app.storage_count {
         return BG;
     }
     let item = &app.storage_items[idx];
-    let flat_idx = walls::SCENES.len() + PHOTOS.len() + idx;
-    let col = flat_idx % 3;
-    let row = flat_idx / 3;
     let x0 = COL_X[col];
     let y0 = GRID_TOP + row * ROW_STRIDE;
     let rect = Rect::new(x0, y0, CELL, CELL);
@@ -1222,7 +1217,7 @@ fn storage_cell_pixel(x: usize, y: usize, app: &GalleryApp, idx: usize) -> u32 {
                 return 0xFFFFFFFF;
             }
             if dx * dx + dy * dy >= 400 && dx * dx + dy * dy <= 529 {
-                return 0x80FFFFFF;
+                return blend_argb(grad, 0xFFFFFFFF, 128);
             }
         }
 
@@ -1241,11 +1236,11 @@ fn storage_cell_pixel(x: usize, y: usize, app: &GalleryApp, idx: usize) -> u32 {
     SURFACE
 }
 
-fn item_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
+fn item_pixel(x: usize, y: usize, app: &GalleryApp, media: Media, col: usize, row: usize) -> u32 {
     match media {
-        Media::Wallpaper(col) => wallpaper_cell_pixel(x, y, col),
-        Media::Photo(idx) => photo_cell_pixel(x, y, idx),
-        Media::StorageItem(idx) => storage_cell_pixel(x, y, app, idx),
+        Media::Wallpaper(_) => wallpaper_cell_pixel(x, y, col),
+        Media::Photo(idx) => photo_cell_pixel(x, y, idx, col, row),
+        Media::StorageItem(idx) => storage_cell_pixel(x, y, app, idx, col, row),
     }
 }
 
@@ -1621,7 +1616,7 @@ fn photos_grid_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
                 return Some(wallpaper_cell_pixel(x, y, index));
             }
         } else if let Some(media) = app.photo_at(index) {
-            return Some(item_pixel(x, y, app, media));
+            return Some(item_pixel(x, y, app, media, col, row));
         }
     }
 
@@ -1749,7 +1744,7 @@ fn screenshots_grid_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
     if let (Some(col), Some(row)) = (col_of(x), row_of(y)) {
         let index = row * 3 + col;
         if let Some(storage_idx) = app.screenshot_at(index) {
-            return Some(storage_cell_pixel(x, y, app, storage_idx));
+            return Some(storage_cell_pixel(x, y, app, storage_idx, col, row));
         }
     }
 
@@ -2665,6 +2660,7 @@ fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
         let new_tab = GalleryTab::from_index(tab_idx);
         if new_tab != app.tab {
             app.tab = new_tab;
+            app.filter = Filter::All;
             std::log(0, "[GALLERY] Tab switched.").ok();
             return Tap::Redraw(Dirty::All);
         }
@@ -2733,7 +2729,9 @@ pub extern "C" fn _start() -> ! {
     std::log(0, "[GALLERY (Ring 3)] Gallery online.").ok();
 
     let mut app = GalleryApp::new();
-    app.summary_len = build_summary(&mut app.summary);
+    app.rescan_storage();
+    let photos_count = app.photos_count();
+    app.summary_len = build_summary(&mut app.summary, photos_count);
     app.catalogue_note_len = build_catalogue_note(&mut app.catalogue_note);
 
     // Measure what this device actually holds before anything is drawn, so the
@@ -2757,8 +2755,6 @@ pub extern "C" fn _start() -> ! {
         scan.images as u64,
         " image files by name.",
     );
-
-    app.rescan_storage();
 
     let mut intent_buf = [0u8; 128];
     if let Ok(n) = std::settings_get(fs_read_slot(), "intent.view.file", &mut intent_buf) {

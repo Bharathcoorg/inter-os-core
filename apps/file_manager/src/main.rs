@@ -65,7 +65,7 @@ const BORDER_SUBTLE: u32 = 0xFF262C36;
 const TEXT_PRIMARY: u32 = 0xFFFFFFFF;
 const TEXT_MUTED: u32 = 0xFF8B949E;
 #[allow(dead_code)]
-const ACCENT_SKY: u32 = 0xFFFFFFFF;
+const ACCENT_SKY: u32 = 0xFF38BDF8;
 #[allow(dead_code)]
 const ACCENT_AMBER: u32 = 0xFFF59E0B;
 #[allow(dead_code)]
@@ -438,8 +438,8 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
         return BG_DARK;
     }
 
-    // 2. Vertical Category Rows (y: 150..820)
-    if (150..820).contains(&y) && x >= 36 && x < 684 {
+    // 2. Vertical Category Rows (y: 150..800)
+    if (150..800).contains(&y) && x >= 36 && x < 684 {
         let (row_idx, row_start_y, row_h) = if y < 240 {
             (0, 150, 90)
         } else if y < 330 {
@@ -475,17 +475,13 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
             return BORDER_SUBTLE;
         }
 
-        // WHY: this highlight is what makes the tap handler's selection visible —
-        // the selected row gets a raised background and a left accent bar, so the
-        // control reports a real state change instead of an invisible one.
-        // It is applied only inside the selected row's own band, so no tint
-        // bleeds into the padding below the last row.
+        // Selected row gets a raised background and a left accent bar.
         let row_selected =
             app.selected_shortcut == row_idx && y >= row_start_y && y < row_start_y + row_h;
         if row_selected && x < 44 {
             return ACCENT_SKY;
         }
-        let row_bg = if row_selected { 0xFFEFF6FF } else { SURFACE_DARK };
+        let row_bg = if row_selected { SURFACE_RAISED } else { SURFACE_DARK };
 
         let center_y = row_start_y + (if row_idx == 5 { 40 } else { 45 });
         let icon_cx = 64i32;
@@ -591,9 +587,6 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
 
                 // Tactile capacity track bar (x: 108..640, y: 700..706)
                 if y >= 700 && y < 706 && x >= 108 && x < 640 {
-                    if app.storage_capacity_bytes > 0 && x < 108 + 160 {
-                        return ACCENT_SKY;
-                    }
                     return BORDER_SUBTLE;
                 }
             }
@@ -619,7 +612,7 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                 return c;
             }
             let path_bytes = app.current_path.as_bytes();
-            if let Some(c) = test_text(x, y, 220, 842, 1, path_bytes, TEXT_MUTED, BG_DARK) {
+            if let Some(c) = test_text(x, y, 260, 842, 1, path_bytes, TEXT_MUTED, BG_DARK) {
                 return c;
             }
             return BG_DARK;
@@ -685,7 +678,7 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                     if is_selected && x < 44 {
                         return ACCENT_SKY;
                     }
-                    let entry_bg = if is_selected { 0xFFEFF6FF } else { SURFACE_DARK };
+                    let entry_bg = if is_selected { SURFACE_RAISED } else { SURFACE_DARK };
 
                     // Icon glyph / indicator at x: 56..80
                     let icon_cx = 64isize;

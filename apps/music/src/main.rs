@@ -581,6 +581,22 @@ fn text_centered(
     text(x, y, (W - w) / 2, y0, scale, s, color, bg)
 }
 
+#[inline(always)]
+fn text_in_rect_centered(
+    x: usize,
+    y: usize,
+    rect: Rect,
+    scale: usize,
+    s: &[u8],
+    color: u32,
+    bg: u32,
+) -> Option<u32> {
+    let w = font::measure(s, scale);
+    let x0 = rect.x + rect.w.saturating_sub(w) / 2;
+    let y0 = rect.y + rect.h.saturating_sub(font::line_height(scale)) / 2;
+    text(x, y, x0, y0, scale, s, color, bg)
+}
+
 /// Decimal `v` into `out`, no leading zeros. Returns the byte count.
 fn put_u8(out: &mut [u8; 4], v: u8) -> usize {
     let mut tmp = [0u8; 4];
@@ -1045,10 +1061,10 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
         }
     }
     if let Some(c) = draw_pill(x, y, ADD_BTN, SURFACE, Some(BORDER)) {
-        if let Some(c) = text_centered(
+        if let Some(c) = text_in_rect_centered(
             x,
             y,
-            ADD_BTN.y + (ADD_BTN.h.saturating_sub(font::line_height(1))) / 2,
+            ADD_BTN,
             1,
             b"ADD TRACK",
             TEXT,
@@ -1093,10 +1109,10 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
             return SURFACE;
         }
         if let Some(c) = draw_pill(x, y, ADD_SAVE_BTN, SURFACE, Some(BORDER)) {
-            if let Some(c) = text_centered(
+            if let Some(c) = text_in_rect_centered(
                 x,
                 y,
-                ADD_SAVE_BTN.y + (ADD_SAVE_BTN.h.saturating_sub(font::line_height(1))) / 2,
+                ADD_SAVE_BTN,
                 1,
                 b"ADD",
                 TEXT,
@@ -1107,10 +1123,10 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
             return c;
         }
         if let Some(c) = draw_pill(x, y, ADD_CANCEL_BTN, RECESSED, Some(BORDER)) {
-            if let Some(c) = text_centered(
+            if let Some(c) = text_in_rect_centered(
                 x,
                 y,
-                ADD_CANCEL_BTN.y + (ADD_CANCEL_BTN.h.saturating_sub(font::line_height(1))) / 2,
+                ADD_CANCEL_BTN,
                 1,
                 b"CANCEL",
                 FAINT,
