@@ -50,6 +50,33 @@ pub fn union_rows(band: &mut (usize, usize), y0: usize, y1: usize) {
     band.1 = band.1.max(y1);
 }
 
+/// Porter-Duff source-over alpha blending (`out = src * a + dst * (1 - a)`).
+/// Respects both per-pixel alpha channel and surface-level opacity.
+#[inline(always)]
+pub fn blend_pixel(src_pixel: u32, dst_pixel: u32, opacity: u8) -> u32 {
+    let mut sa = (src_pixel >> 24) & 0xFF;
+    if opacity != 255 {
+        sa = (sa * opacity as u32) / 255;
+    }
+    if sa == 255 {
+        src_pixel | 0xFF000000
+    } else if sa > 0 {
+        let inv_sa = 255 - sa;
+        let sr = (src_pixel >> 16) & 0xFF;
+        let sg = (src_pixel >> 8) & 0xFF;
+        let sb = src_pixel & 0xFF;
+        let dr = (dst_pixel >> 16) & 0xFF;
+        let dg = (dst_pixel >> 8) & 0xFF;
+        let db = dst_pixel & 0xFF;
+        let out_r = ((sr * sa + dr * inv_sa) / 255) & 0xFF;
+        let out_g = ((sg * sa + dg * inv_sa) / 255) & 0xFF;
+        let out_b = ((sb * sa + db * inv_sa) / 255) & 0xFF;
+        (0xFF << 24) | (out_r << 16) | (out_g << 8) | out_b
+    } else {
+        dst_pixel
+    }
+}
+
 pub struct DrmSurface {
     pub id: u32,
     pub x: i32,
@@ -145,13 +172,19 @@ impl DrmSurface {
         self.frame_ready = ready;
     }
 
+    /// Marks a half-open band of rows `[y0, y1)` as dirty on this surface.
+    pub fn mark_dirty_rows(&mut self, y0: usize, y1: usize) {
+        union_rows(&mut self.dirty_rows, y0, y1.min(self.height as usize));
+        self.dirty = true;
+    }
+
     /// Updates surface pixels from an input buffer.
     pub fn update_pixels(&mut self, src: &[u32]) -> Result<(), &'static str> {
         if src.len() != self.pixels.len() {
             return Err("Pixel buffer length mismatch");
         }
         self.pixels.copy_from_slice(src);
-        self.dirty = true;
+        self.mark_dirty_rows(0, self.height as usize);
         self.frame_ready = true;
         Ok(())
     }
@@ -335,7 +368,9 @@ impl DrmKmsController {
         if row_pitch > 0 && src.len() > 0 {
             let r0 = offset / row_pitch;
             let r1 = (end - 1) / row_pitch + 1;
-            union_rows(&mut surface.dirty_rows, r0, r1.min(surface.height as usize));
+            surface.mark_dirty_rows(r0, r1);
+        } else {
+            surface.mark_dirty_rows(0, surface.height as usize);
         }
         Ok(src.len())
     }
@@ -810,7 +845,7 @@ impl DrmKmsController {
                                 let src_idx = src_y * 720 + src_x;
                                 let dst_idx = dst_y_offset + dst_x + dx;
                                 if src_idx < surface.pixels.len() && dst_idx < self.back_buffer.len() {
-                                    self.back_buffer[dst_idx] = surface.pixels[src_idx];
+                                    self.back_buffer[dst_idx] = blend_pixel(surface.pixels[src_idx], self.back_buffer[dst_idx], surface.opacity);
                                 }
                             }
                         }
@@ -823,7 +858,7 @@ impl DrmKmsController {
                                 let src_idx = src_y * 720 + src_x;
                                 let dst_idx = dst_y_offset + dst_x + dx;
                                 if src_idx < surface.pixels.len() && dst_idx < self.back_buffer.len() {
-                                    self.back_buffer[dst_idx] = surface.pixels[src_idx];
+                                    self.back_buffer[dst_idx] = blend_pixel(surface.pixels[src_idx], self.back_buffer[dst_idx], surface.opacity);
                                 }
                             }
                         }
@@ -843,7 +878,8 @@ impl DrmKmsController {
                         // QEMU-TCG per-flip budget. Fractional ratios below
                         // keep the cheaper point sample for the same reason.
                         for dy in 0..dst_h {
-                            let r0 = (dy * 2) * 720;                            let r1 = r0 + 720;
+                            let r0 = (dy * 2) * 720;
+                            let r1 = r0 + 720;
                             let dst_row_start = (dst_y + dy) * scanout_w + dst_x;
                             let dst_slice = &mut self.back_buffer[dst_row_start..dst_row_start + dst_w];
                             for dx in 0..dst_w {
@@ -856,7 +892,8 @@ impl DrmKmsController {
                                 let r = ((((p00 >> 16) & 0xFF) + ((p01 >> 16) & 0xFF) + ((p10 >> 16) & 0xFF) + ((p11 >> 16) & 0xFF)) / 4) & 0xFF;
                                 let g = ((((p00 >> 8) & 0xFF) + ((p01 >> 8) & 0xFF) + ((p10 >> 8) & 0xFF) + ((p11 >> 8) & 0xFF)) / 4) & 0xFF;
                                 let b = (((p00 & 0xFF) + (p01 & 0xFF) + (p10 & 0xFF) + (p11 & 0xFF)) / 4) & 0xFF;
-                                dst_slice[dx] = (a << 24) | (r << 16) | (g << 8) | b;
+                                let blended = (a << 24) | (r << 16) | (g << 8) | b;
+                                dst_slice[dx] = blend_pixel(blended, dst_slice[dx], surface.opacity);
                             }
                         }
                     } else if dst_w * 2 == s_w as usize * 3 && dst_h * 2 == s_h as usize * 3 {
@@ -935,7 +972,7 @@ impl DrmKmsController {
                                 if rx == 0 && ry == 0 {
                                     let idx = r0 + sx0;
                                     if idx < surface.pixels.len() {
-                                        self.back_buffer[dst_idx] = surface.pixels[idx];
+                                        self.back_buffer[dst_idx] = blend_pixel(surface.pixels[idx], self.back_buffer[dst_idx], surface.opacity);
                                     }
                                     continue;
                                 }
@@ -958,7 +995,7 @@ impl DrmKmsController {
                                 //    copied rather than blended four times, so flat
                                 //    colour survives the upscale bit-for-bit.
                                 if p00 == p01 && p00 == p10 && p00 == p11 {
-                                    self.back_buffer[dst_idx] = p00;
+                                    self.back_buffer[dst_idx] = blend_pixel(p00, self.back_buffer[dst_idx], surface.opacity);
                                     continue;
                                 }
 
@@ -983,7 +1020,8 @@ impl DrmKmsController {
                                 let g = blend_ch(8);
                                 let b = blend_ch(0);
 
-                                self.back_buffer[dst_idx] = (a << 24) | (r << 16) | (g << 8) | b;
+                                let blended_src = (a << 24) | (r << 16) | (g << 8) | b;
+                                self.back_buffer[dst_idx] = blend_pixel(blended_src, self.back_buffer[dst_idx], surface.opacity);
                             }
                         }
                     } else {
@@ -1040,8 +1078,8 @@ impl DrmKmsController {
                                 let r = ch(16);
                                 let g = ch(8);
                                 let b = ch(0);
-                                self.back_buffer[dst_row_start + dx] =
-                                    (a << 24) | (r << 16) | (g << 8) | b;
+                                let blended_src = (a << 24) | (r << 16) | (g << 8) | b;
+                                self.back_buffer[dst_row_start + dx] = blend_pixel(blended_src, self.back_buffer[dst_row_start + dx], surface.opacity);
                             }
                         }
                     }
@@ -1606,6 +1644,58 @@ mod tests {
         kms.commit_surfaces(None);
         assert!(kms.surfaces[0].is_frame_ready());
         assert!(kms.surfaces[1].is_frame_ready());
+    }
+
+    #[test]
+    fn surface_mark_dirty_rows_accumulates_bounds() {
+        let mut surface = DrmSurface::new(1, 100, 200, 0, 1);
+        surface.dirty_rows = (0, 0);
+        surface.dirty = false;
+
+        surface.mark_dirty_rows(20, 50);
+        assert!(surface.dirty);
+        assert_eq!(surface.dirty_rows, (20, 50));
+
+        surface.mark_dirty_rows(40, 80);
+        assert_eq!(surface.dirty_rows, (20, 80));
+
+        surface.mark_dirty_rows(10, 30);
+        assert_eq!(surface.dirty_rows, (10, 80));
+    }
+
+    #[test]
+    fn bilinear_upscaling_does_not_bypass_alpha_blending() {
+        let mut kms = DrmKmsController::new(1080, 2160);
+        kms.set_display_mode(1080, 2160, 60).expect("mode");
+
+        // Surface 1: background wallpaper (opaque green 0xFF00FF00)
+        let s1 = kms.create_surface(720, 1440, 0, 1);
+        kms.surfaces[0].pixels.fill(0xFF00FF00);
+        kms.composite();
+
+        // Surface 2: semi-transparent white (0x80FFFFFF) over the wallpaper
+        let s2 = kms.create_surface(720, 1440, 10, 2);
+        let s2_idx = kms.surfaces.iter().position(|s| s.id == s2).unwrap();
+        kms.surfaces[s2_idx].pixels.fill(0x80FFFFFF);
+
+        kms.composite();
+
+        // Bilinear 1.5x upscaling must blend 0x80FFFFFF over 0xFF00FF00.
+        // Opaque white would be 0xFFFFFFFF (if alpha was bypassed).
+        // 50% white (128/255) over green: R = ~128, G = 255, B = ~128.
+        let pixel = kms.back_buffer[1080 * 100 + 100];
+        let r = (pixel >> 16) & 0xFF;
+        let g = (pixel >> 8) & 0xFF;
+        let b = pixel & 0xFF;
+        let a = (pixel >> 24) & 0xFF;
+
+        assert_eq!(a, 0xFF, "Destination alpha should remain fully opaque");
+        assert!(r >= 120 && r <= 136, "Red should be ~128 from alpha blend, got {r}");
+        assert_eq!(g, 0xFF, "Green should be 255");
+        assert!(b >= 120 && b <= 136, "Blue should be ~128 from alpha blend, got {b}");
+
+        assert!(kms.destroy_surface(s1));
+        assert!(kms.destroy_surface(s2));
     }
 }
 

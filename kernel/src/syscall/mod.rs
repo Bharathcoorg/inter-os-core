@@ -2069,14 +2069,15 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             } else {
                 None
             };
-            surface.dirty = true;
             if end == surface.pixels.len() {
                 surface.frame_ready = true;
             } else if offset == 0 {
                 surface.frame_ready = false;
             }
             if let Some(band) = band {
-                crate::drivers::display_kms::union_rows(&mut surface.dirty_rows, band.0, band.1);
+                surface.mark_dirty_rows(band.0, band.1);
+            } else {
+                surface.mark_dirty_rows(0, surface.height as usize);
             }
             kms.frame_dirty = true;
             count as i64
