@@ -2720,10 +2720,7 @@ body[data-theme="cyberdeck_hud"] .device-screen {
    Immersive Smartphone Focus Mode (Centered Full-Viewport with Blurred Background)
    -------------------------------------------------------------------------- */
 body.studio-focus-mode #ide-right-pane {
-  filter: blur(28px) brightness(0.25);
-  pointer-events: none;
-  opacity: 0.2;
-  transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+  display: none !important;
 }
 
 body.studio-focus-mode .device-stage.ide-device-pane {
@@ -2735,19 +2732,11 @@ body.studio-focus-mode .device-stage.ide-device-pane {
   height: calc(100vh - 42px) !important;
   max-height: calc(100vh - 42px) !important;
   z-index: 500 !important;
-  background: rgba(8, 9, 12, 0.92) !important;
-  backdrop-filter: blur(36px) !important;
-  -webkit-backdrop-filter: blur(36px) !important;
+  background: #08090C !important;
   display: flex !important;
   align-items: center !important;
   justify-content: center !important;
   padding: 8px 16px !important;
-  animation: focusFadeIn 0.2s cubic-bezier(0.16, 1, 0.3, 1);
-}
-
-@keyframes focusFadeIn {
-  from { opacity: 0; transform: scale(0.97); }
-  to { opacity: 1; transform: scale(1); }
 }
 
 body.studio-focus-mode .emulator-stage-wrapper {
