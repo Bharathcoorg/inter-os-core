@@ -20,7 +20,7 @@
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="style.css?v=14">
 </head>
-<body class="dark-theme">
+<body class="dark-theme studio-focus-mode">
   <!-- Mobile / Small Viewport Desktop Recommendation Banner -->
   <div id="mobile-warning-banner" class="mobile-warning-banner" style="display: none;">
     <div class="mobile-warning-content">
@@ -88,7 +88,7 @@
 
       <!-- Center: Action Controls (Focus Mode, Fullscreen WebApp, Screenshot, Reboot) -->
       <div class="header-center-actions">
-        <button class="header-action-pill" id="btn-focus-mode" title="Toggle Immersive Smartphone Focus Mode (Hotkey: F)">
+        <button class="header-action-pill active" id="btn-focus-mode" title="Toggle Immersive Smartphone Focus Mode (Hotkey: F, Esc to exit)">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="5" y="2" width="14" height="20" rx="3"/><circle cx="12" cy="18" r="1"/></svg>
           <span>Focus Mode</span>
         </button>
@@ -109,8 +109,8 @@
       <!-- Right: Liveness Status & Mobile Switcher -->
       <div class="studio-controls">
         <div class="mobile-pane-switcher" id="mobile-pane-switcher">
-          <button class="mobile-switch-btn" id="btn-show-phone" title="Smartphone View">Smartphone</button>
-          <button class="mobile-switch-btn active" id="btn-show-telemetry" title="Developer Telemetry Deck">Deck</button>
+          <button class="mobile-switch-btn active" id="btn-show-phone" title="Smartphone View">Smartphone</button>
+          <button class="mobile-switch-btn" id="btn-show-telemetry" title="Developer Telemetry Deck (Hotkey: D)">Deck</button>
         </div>
 
         <div class="status-indicator" id="qemu-global-status" title="Microkernel Execution State: Standby">

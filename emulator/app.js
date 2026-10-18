@@ -755,52 +755,76 @@ document.addEventListener('DOMContentLoaded', () => {
         throw new Error(`Binary stream HTTP ${resp.status}`);
       }
       const reader = resp.body.getReader();
-      let accumulated = new Uint8Array(0);
+      let chunks = [];
+      let totalLength = 0;
 
       while (isStreamActive && !signal.aborted) {
         const { done, value } = await reader.read();
         if (done) break;
 
-        const newBuf = new Uint8Array(accumulated.length + value.length);
-        newBuf.set(accumulated);
-        newBuf.set(value, accumulated.length);
-        accumulated = newBuf;
+        chunks.push(value);
+        totalLength += value.length;
+        if (totalLength < 16) continue;
 
-        while (accumulated.length >= 16) {
-          if (accumulated[0] !== 0x49 || accumulated[1] !== 0x4F || accumulated[2] !== 0x53 || accumulated[3] !== 0x46) {
-            let sync = 1;
-            while (sync < accumulated.length && accumulated[sync] !== 0x49) sync++;
-            accumulated = accumulated.subarray(sync);
+        let accumulated;
+        if (chunks.length === 1) {
+          accumulated = chunks[0];
+        } else {
+          accumulated = new Uint8Array(totalLength);
+          let offset = 0;
+          for (let i = 0; i < chunks.length; i++) {
+            accumulated.set(chunks[i], offset);
+            offset += chunks[i].length;
+          }
+        }
+
+        let processedOffset = 0;
+        while (totalLength - processedOffset >= 16) {
+          if (accumulated[processedOffset] !== 0x49 || accumulated[processedOffset + 1] !== 0x4F || accumulated[processedOffset + 2] !== 0x53 || accumulated[processedOffset + 3] !== 0x46) {
+            let sync = processedOffset + 1;
+            while (sync < totalLength && accumulated[sync] !== 0x49) sync++;
+            processedOffset = sync;
             continue;
           }
 
-          const view = new DataView(accumulated.buffer, accumulated.byteOffset, 16);
+          const view = new DataView(accumulated.buffer, accumulated.byteOffset + processedOffset, 16);
           const width = view.getUint16(4);
           const height = view.getUint16(6);
           const seq = view.getUint32(8);
-          // Sanity-bound untrusted frame dimensions before framing: a corrupt
-          // stream must resync, not grow the buffer without bound.
           if (width < 1 || height < 1 || width > 4096 || height > 4096) {
-            accumulated = accumulated.subarray(16);
+            processedOffset += 16;
             continue;
           }
           const frameBytes = 16 + width * height * 4;
           if (frameBytes > 32 * 1024 * 1024) {
-            accumulated = accumulated.subarray(16);
+            processedOffset += 16;
             continue;
           }
 
-          if (accumulated.length < frameBytes) {
+          if (totalLength - processedOffset < frameBytes) {
             break;
           }
 
-          const pixelBytes = accumulated.subarray(16, frameBytes);
-          accumulated = accumulated.subarray(frameBytes);
+          const pixelBytes = accumulated.subarray(processedOffset + 16, processedOffset + frameBytes);
+          processedOffset += frameBytes;
 
           if (seq > lastFrameSeq) {
             lastFrameSeq = seq;
             if (renderScanoutPixels(pixelBytes, width, height)) updateFpsCounter();
           }
+        }
+
+        if (processedOffset > 0) {
+          const remaining = totalLength - processedOffset;
+          if (remaining > 0) {
+            chunks = [accumulated.slice(processedOffset)];
+            totalLength = remaining;
+          } else {
+            chunks = [];
+            totalLength = 0;
+          }
+        } else if (chunks.length > 1) {
+          chunks = [accumulated];
         }
       }
     } catch (_) {
@@ -1013,54 +1037,22 @@ document.addEventListener('DOMContentLoaded', () => {
   const touchSurface = screenLiveScanout || liveScanoutImg;
 
   let guestTouchQueue = Promise.resolve();
-  let moveInFlight = false;
-  let pendingMovePayload = null;
-
-  async function flushPendingMove() {
-    if (moveInFlight || !pendingMovePayload) return;
-    const payload = pendingMovePayload;
-    pendingMovePayload = null;
-    moveInFlight = true;
-    try {
-      await fetch('/api/touch/event', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-    } catch (_) {}
-    finally {
-      moveInFlight = false;
-      if (pendingMovePayload) {
-        flushPendingMove();
-      }
-    }
-  }
 
   function sendGuestTouchEvent(payload) {
-    if (payload.action === 'move') {
-      pendingMovePayload = payload;
-      if (!moveInFlight) {
-        flushPendingMove();
-      }
-      return Promise.resolve({ success: true });
-    }
-
-    pendingMovePayload = null;
     const request = guestTouchQueue.then(async () => {
-      const response = await fetch('/api/touch/event', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-      if (!response.ok) {
-        let detail = '';
-        try {
-          const body = await response.json();
-          detail = body && body.error ? ': ' + body.error : '';
-        } catch (_) {}
-        throw new Error('Guest input rejected: ' + response.status + detail);
+      try {
+        const response = await fetch('/api/touch/event', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        if (!response.ok) {
+          return { success: false };
+        }
+        return await response.json();
+      } catch (err) {
+        return { success: false };
       }
-      return response.json();
     });
     guestTouchQueue = guestTouchQueue.then(() => request).catch((error) => {
       if (state && state.debugInput) console.warn(error);
@@ -1140,7 +1132,7 @@ document.addEventListener('DOMContentLoaded', () => {
           return;
         }
       }
-      if (downSent && (point.x !== lastSentX || point.y !== lastSentY)) {
+      if (point.x !== lastSentX || point.y !== lastSentY) {
         lastSentX = point.x;
         lastSentY = point.y;
         sendGuestTouchEvent({ action: 'move', coords: point.coords, x: point.x, y: point.y, slot: 0 });
@@ -1153,6 +1145,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const rawPoint = mapPoint(ev.clientX, ev.clientY) || {
         x: lastSentX, y: lastSentY, coords: geometry.coords
       };
+      const totalDist = Math.hypot(rawPoint.x - downStartX, rawPoint.y - downStartY);
       const point = (!hasExceededSlop && (performance.now() - downStartTime < 500))
         ? { x: downStartX, y: downStartY, coords: rawPoint.coords }
         : rawPoint;
@@ -1161,7 +1154,20 @@ document.addEventListener('DOMContentLoaded', () => {
       activePointerId = null;
       updateVirtualTouch(ev.clientX, ev.clientY, false);
       if (action === 'up') {
-        sendGuestTouchEvent({ action: 'up', coords: point.coords, x: point.x, y: point.y, slot: 0 });
+        if (hasExceededSlop && totalDist >= 28) {
+          const steps = Math.max(4, Math.min(10, Math.round(totalDist / 40)));
+          sendGuestTouchEvent({
+            action: 'swipe',
+            coords: geometry.coords,
+            x: downStartX,
+            y: downStartY,
+            x2: rawPoint.x,
+            y2: rawPoint.y,
+            steps: steps
+          });
+        } else {
+          sendGuestTouchEvent({ action: 'up', coords: point.coords, x: point.x, y: point.y, slot: 0 });
+        }
       } else {
         sendGuestTouchEvent({ action: 'cancel', coords: point.coords, x: point.x, y: point.y, slot: 0 });
       }
@@ -1169,6 +1175,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (action === 'up') {
         requestAnimationFrame(() => refreshScanoutFrame(true));
         setTimeout(() => refreshScanoutFrame(true), 25);
+        setTimeout(() => refreshScanoutFrame(true), 75);
       }
     };
 
@@ -2813,17 +2820,36 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
-  // Keyboard shortcuts: 'F' toggles Focus Mode, 'Escape' exits Focus Mode
+  // Keyboard shortcuts: 'F' toggles Focus Mode, 'D' switches to Deck, 'Escape' exits Focus Mode
   window.addEventListener('keydown', (e) => {
     if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) return;
     if ((e.key === 'f' || e.key === 'F') && !e.ctrlKey && !e.metaKey && !e.altKey) {
       e.preventDefault();
       toggleFocusMode();
+    } else if ((e.key === 'd' || e.key === 'D') && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault();
+      if (document.body.classList.contains('studio-focus-mode')) {
+        toggleFocusMode(false);
+      } else {
+        const btnDeck = document.getElementById('btn-show-telemetry');
+        if (btnDeck) btnDeck.click();
+      }
     } else if (e.key === 'Escape' && document.body.classList.contains('studio-focus-mode')) {
       e.preventDefault();
       toggleFocusMode(false);
     }
   });
+
+  // Default to Smartphone Focus Mode out-of-the-box
+  if (!document.body.classList.contains('studio-focus-mode')) {
+    document.body.classList.add('studio-focus-mode');
+  }
+  const btnFocusInit = document.getElementById('btn-focus-mode');
+  if (btnFocusInit) btnFocusInit.classList.add('active');
+  const btnPhoneInit = document.getElementById('btn-show-phone');
+  if (btnPhoneInit) btnPhoneInit.classList.add('active');
+  const btnDeckInit = document.getElementById('btn-show-telemetry');
+  if (btnDeckInit) btnDeckInit.classList.remove('active');
 
 });
 

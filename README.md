@@ -105,6 +105,9 @@ python tools/interos.py run qemu
 python tools/interos.py logs -f
 ```
 Device Studio web console is accessible at `http://localhost:4300`.
+- **Focus Mode (Default)**: Clean, immersive mobile testing with instant 1:1 touch response.
+- **Developer Telemetry Deck**: Press **`D`** or click **`Deck`** in the header to inspect real QEMU CPU registers, block I/O, IPC pipelines, and packages. Press **`F`** or **`Esc`** to return to Focus Mode.
+- See [DEVELOPERS.md](DEVELOPERS.md) for full developer instructions.
 
 ### 4. Execute Test Suites
 ```bash

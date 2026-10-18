@@ -2862,10 +2862,24 @@ pub extern "C" fn _start() -> ! {
                                         break;
                                     }
                                     screens::quick_controls::QuickControlAction::LockScreen => {
+                                        let _ = std::user_lock(1000);
+                                        state.lock_state = std::user_get_lock_state(1000).unwrap_or(std::UserLockState::Locked);
+                                        state.pin_pad_visible = false;
+                                        state.pin_len = 0;
+                                        state.auth_error = false;
                                         state.current_view = ViewMode::LockScreen;
                                         render_view(surface, &state);
                                         let _ = std::surface_flip(4);
                                         std::log(0, "[LAUNCHER] Quick Controls locked screen.").ok();
+                                        let mut drain = std::InputEvent {
+                                            kind: 0,
+                                            x: 0,
+                                            y: 0,
+                                            dx: 0,
+                                            dy: 0,
+                                            scale_milli: 1000,
+                                        };
+                                        while std::input_event_poll(&mut drain).is_ok() {}
                                         break;
                                     }
                                     screens::quick_controls::QuickControlAction::PowerMenu => {
@@ -3396,13 +3410,11 @@ pub extern "C" fn _start() -> ! {
                                     break;
                                 }
 
-                                if state.lock_state == std::UserLockState::Unlocked || std::user_unlock(1000, b"").is_ok() {
-                                    state.lock_state = std::UserLockState::Unlocked;
-                                    state.pin_pad_visible = false;
+                                if state.lock_state == std::UserLockState::Unlocked {
                                     state.current_view = ViewMode::HomeScreen;
                                     render_view(surface, &state);
                                     let _ = std::surface_flip(4);
-                                    std::log(0, "[LAUNCHER] Device unlocked via tap. Home surface rendered.").ok();
+                                    std::log(0, "[LAUNCHER] Lock screen dismissed. Home surface rendered.").ok();
                                     let mut drain = std::InputEvent {
                                         kind: 0,
                                         x: 0,
@@ -3414,14 +3426,20 @@ pub extern "C" fn _start() -> ! {
                                     while std::input_event_poll(&mut drain).is_ok() {}
                                     break;
                                 } else {
-                                    state.pin_buffer = [0; 8];
-                                    state.pin_len = 0;
-                                    state.pin_error = 0;
-                                    state.pin_setup_mode = std::user_get_lock_state(std::user_get_current()).ok() == Some(std::UserLockState::Uninitialized);
-                                    state.current_view = ViewMode::PinEntry;
-                                    render_view(surface, &state);
-                                    let _ = std::surface_flip(4);
-                                    std::log(0, "[LAUNCHER] Unlock tap accepted; credential entry required.").ok();
+                                    let has_cred = std::user_has_credential(1000).unwrap_or(false);
+                                    if has_cred {
+                                        state.pin_buffer = [0; 8];
+                                        state.pin_len = 0;
+                                        state.pin_error = 0;
+                                        state.pin_setup_mode = false;
+                                        state.current_view = ViewMode::PinEntry;
+                                        render_view(surface, &state);
+                                        let _ = std::surface_flip(4);
+                                        std::log(0, "[LAUNCHER] Lock screen tapped; credential entry required.").ok();
+                                    } else {
+                                        // Uncredentialed device remains locked on tap; swipe up is required to unlock.
+                                        std::log(0, "[LAUNCHER] Lock screen tapped; swipe up to unlock.").ok();
+                                    }
                                     let mut drain = std::InputEvent {
                                         kind: 0,
                                         x: 0,

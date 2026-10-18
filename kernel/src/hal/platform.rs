@@ -89,9 +89,18 @@ impl PowerController for X86PowerController {
 
     fn shutdown(&self) -> ! {
         unsafe {
-            // QEMU debug power-off port (ACPI shutdown in microkernel)
+            // 1. QEMU ACPI power-off port for PIIX4 (pc)
             let mut p604 = Port::<u16>::new(0x604);
             p604.write(0x2000);
+            // 2. QEMU ACPI power-off port for ICH9 (q35)
+            let mut pb004 = Port::<u16>::new(0xB004);
+            pb004.write(0x2000);
+            // 3. QEMU debug-exit fallback (0x501)
+            let mut p501 = Port::<u8>::new(0x501);
+            p501.write(0x00);
+            // 4. ISA debug-exit fallback (0xF4)
+            let mut pf4 = Port::<u8>::new(0xF4);
+            pf4.write(0x00);
         }
         loop {
             x86_64::instructions::hlt();
