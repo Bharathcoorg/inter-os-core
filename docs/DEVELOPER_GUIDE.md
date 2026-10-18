@@ -76,6 +76,22 @@ Runs fast static assertions checking syscall pointer boundaries, service ABI lim
 python tools/interos.py contracts
 ```
 
+### Empirical Benchmarks
+Runs reproducible benchmark suites measuring image footprints, RAM overhead, boot latency, and heap invariants:
+```bash
+# Run full system footprint and latency benchmark scorecard:
+python tools/bench_interos.py
+
+# Run boot time latency harness:
+python tools/bench_boot.py
+
+# Verify zero-heap-allocation render and interactive event invariants:
+python -m pytest tests/test_heap_bench.py
+
+# Verify tap latency and correlation harness:
+python -m pytest tests/test_tap_latency_bench.py
+```
+
 ---
 
 ## 4. Application Packaging & Cryptography

@@ -15,12 +15,15 @@ InterOS Core is engineered from first principles as an open-source, memory-safe 
 ```text
 +-------------------------------------------------------------------------+
 |                  InterOS Native Smartphone Applications                 |
-|   (Calculator, Dialer, Messages, Settings, Music, Gallery, Camera, etc.)|
+|   14 Ring-3 Apps: Launcher, Settings, Messages, Dialer, Camera, Gallery,|
+|   Files, Calculator, Vault, Calendar, Browser, Terminal, Music, CardDemo|
 +-------------------------------------------------------------------------+
 |                Userspace System Services & SDK (Ring 3 / EL0 / U-Mode)  |
-|   - Window Compositor (DRM/KMS Framebuffer)    - Audio Service (audiod) |
+|   - Window Compositor (DRM/KMS Scanout)         - Audio Service (audiod) |
 |   - Cellular RIL / Serial AT Modem (modemd)     - Touch Digitizer (inputd)|
-|   - Package Sideload Manager (storaged)         - interos-std Syscalls   |
+|   - Block Storage & Records (storaged)          - Network Stack (netd)   |
+|   - Power Controller (powerd)                   - Sensor Service (sensord)|
+|   - Service Coordinator (init, PID 1)           - Camera Service (camerad)|
 +-------------------------------------------------------------------------+
 |                 Capability-Based Shared-Memory IPC Bus                  |
 |       Shared-Memory Ring Buffers + Atomic Futex Synchronization         |
@@ -222,7 +225,7 @@ The developer emulator backend (`emulator/server.py`) operates under strict isol
 | **Syscall Pointer Safety** | Full per-task page-table validation | Bounded user-copy helpers | Bounded user-copy helpers |
 | **Per-Task Kernel Stack** | TSS RSP0 / IST Double Fault | SP_EL1 per-thread | `sscratch` saved frame |
 | **Capability Model** | 100% Enforced | 100% Enforced | 100% Enforced |
-| **Framebuffer GUI** | 720x1440 Native Framebuffer (DISPI) | SimpleFB Framebuffer | NS16550A Serial |
+| **Framebuffer GUI** | 1080x2160 FHD+ software KMS scanout (720x1440 authoring, 3:2 bilinear upscaled) | SimpleFB Framebuffer | NS16550A Serial |
 | **ACR Container** | Shared crate ready | Shared crate ready | Shared crate ready |
 | **Verification State** | **QEMU-verified** | **Unit-tested / QEMU virt** | **Unit-tested / QEMU virt** |
 

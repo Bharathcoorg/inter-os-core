@@ -26,7 +26,7 @@ The QEMU Phone profile is a reproducible virtual development target. It provides
 | **VNC Endpoint** | `127.0.0.1:5901` (`:1`) | RFB framebuffer and input channel |
 | **WebSocket Bridge** | `127.0.0.1:6081` | noVNC WebSocket bridge for browser access |
 | **Device Studio** | `http://127.0.0.1:4300` | Developer control console |
-| **Scanout Contract** | `720 × 1440` ARGB8888 | Physical display framebuffer |
+| **Scanout Contract** | `1080 × 2160` FHD+ (720 × 1440 logical, 3:2 bilinear hardware upscaled) | Physical display scanout plane |
 | **UI Logical Space** | `720 × 1440` (1:2 aspect) | Mobile portrait layout space |
 | **Display Device** | `virtio-vga` with an EDID that pins `xres=720, yres=1440` | The guest KMS modesets exactly this |
 

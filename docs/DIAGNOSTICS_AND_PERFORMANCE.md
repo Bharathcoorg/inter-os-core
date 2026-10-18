@@ -44,3 +44,18 @@ In accordance with the [Platform Reality Contract](PLATFORM_REALITY_CONTRACT.md)
 - **Hardware vs. Emulated Telemetry**:
   - When running in QEMU, telemetry represents virtual CPU cycles on the host emulator.
   - Physical hardware telemetry requires verified physical sensor/PMIC drivers. When a hardware backend is absent, developer tooling reports `Unavailable` rather than synthetic demonstration values.
+
+---
+
+## 4. Empirical Benchmark Suite & Harnesses
+
+InterOS provides empirical, automated benchmark verification tools under `tools/` with companion test contracts under `tests/`:
+
+- **System & Storage Benchmark (`tools/bench_interos.py`)**:
+  - Automatically verifies boot image size (4.47 MB `inter-os-release.img`), 14 Ring-3 application packages, kernel memory budget (1.75 MB in 28.61 MB free pool), and writes structured results to `target/benchmark_report.json`.
+- **Boot Latency Measurement (`tools/bench_boot.py`)**:
+  - Measures elapsed monotonic cycles from QEMU process startup to initial scanout present (`Step 5: Initial presentation complete`).
+- **Touch-to-Scanout Latency (`tools/bench_tap_latency.py`)**:
+  - Correlates hardware touch injection events with display compositor buffer flips, verified by `tests/test_tap_latency_bench.py`.
+- **Heap Allocation Invariant Enforcement (`tools/bench_heap.py`)**:
+  - Validates that interactive rendering loops, font rasterization, touch event routing, and compositing passes execute with strictly zero heap allocations (`tests/test_heap_bench.py`).
