@@ -2532,66 +2532,18 @@ pub extern "C" fn _start() -> ! {
                                 let y = input.y as usize;
 
                                 // A. Dismiss button taps
-                                if screens::activity::CARD0_DISMISS.contains(x, y) || ((206..254).contains(&y) && (586..634).contains(&x)) {
-                                    if state.recent_task_ids[0] > 0 {
-                                        let _ = std::app_stop(state.recent_task_ids[0]);
-                                        if state.active_child == Some(state.recent_task_ids[0]) {
+                                if let Some(slot) = screens::activity::activity_close_hit(&state, x, y) {
+                                    if state.recent_task_ids[slot] > 0 {
+                                        let _ = std::app_stop(state.recent_task_ids[slot]);
+                                        if state.active_child == Some(state.recent_task_ids[slot]) {
                                             state.active_child = None;
                                         }
                                     }
-                                    state.dismiss_recent(0);
+                                    state.dismiss_recent(slot);
                                     present_dirty(surface, &state, Dirty::ActivityCards);
                                     std::log(
                                         0,
-                                        "[LAUNCHER] Card 0 dismissed via dismiss button tap.",
-                                    )
-                                    .ok();
-                                    let mut drain = std::InputEvent {
-                                        kind: 0,
-                                        x: 0,
-                                        y: 0,
-                                        dx: 0,
-                                        dy: 0,
-                                        scale_milli: 1000,
-                                    };
-                                    while std::input_event_poll(&mut drain).is_ok() {}
-                                    break;
-                                } else if screens::activity::CARD1_DISMISS.contains(x, y) || ((526..574).contains(&y) && (586..634).contains(&x)) {
-                                    if state.recent_task_ids[1] > 0 {
-                                        let _ = std::app_stop(state.recent_task_ids[1]);
-                                        if state.active_child == Some(state.recent_task_ids[1]) {
-                                            state.active_child = None;
-                                        }
-                                    }
-                                    state.dismiss_recent(1);
-                                    present_dirty(surface, &state, Dirty::ActivityCards);
-                                    std::log(
-                                        0,
-                                        "[LAUNCHER] Card 1 dismissed via dismiss button tap.",
-                                    )
-                                    .ok();
-                                    let mut drain = std::InputEvent {
-                                        kind: 0,
-                                        x: 0,
-                                        y: 0,
-                                        dx: 0,
-                                        dy: 0,
-                                        scale_milli: 1000,
-                                    };
-                                    while std::input_event_poll(&mut drain).is_ok() {}
-                                    break;
-                                } else if screens::activity::CARD2_DISMISS.contains(x, y) || ((846..894).contains(&y) && (586..634).contains(&x)) {
-                                    if state.recent_task_ids[2] > 0 {
-                                        let _ = std::app_stop(state.recent_task_ids[2]);
-                                        if state.active_child == Some(state.recent_task_ids[2]) {
-                                            state.active_child = None;
-                                        }
-                                    }
-                                    state.dismiss_recent(2);
-                                    present_dirty(surface, &state, Dirty::ActivityCards);
-                                    std::log(
-                                        0,
-                                        "[LAUNCHER] Card 2 dismissed via dismiss button tap.",
+                                        "[LAUNCHER] Card dismissed via dismiss button tap.",
                                     )
                                     .ok();
                                     let mut drain = std::InputEvent {
@@ -2715,6 +2667,19 @@ pub extern "C" fn _start() -> ! {
                                     for task in state.recent_task_ids.iter().copied() {
                                         if task > 0 {
                                             let _ = std::app_stop(task);
+                                        }
+                                    }
+                                    let mut r_buf = [0u8; 4096];
+                                    if let Ok(n) = std::app_runtime_list(&mut r_buf) {
+                                        for line in r_buf[..n].split(|b| *b == b'\n') {
+                                            let mut fields = line.split(|b| *b == b'|');
+                                            if let Some(task_raw) = fields.next() {
+                                                if let Ok(task_id) = core::str::from_utf8(task_raw).unwrap_or("").parse::<u64>() {
+                                                    if task_id > 1 {
+                                                        let _ = std::app_stop(task_id);
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                     state.recent_apps = [[0u8; 32]; 3];
@@ -4139,12 +4104,12 @@ pub extern "C" fn _start() -> ! {
                                     }
                                 }
 
-                                // Universal search bar tap: opens System Space
+                                // Universal search bar tap: opens App Drawer for application search
                                 if (1320..1384).contains(&y) && (40..680).contains(&x) {
-                                    state.current_view = ViewMode::SystemSpace;
+                                    state.current_view = ViewMode::AppDrawer;
                                     render_view(surface, &state);
                                     let _ = std::surface_flip(4);
-                                    std::log(0, "[LAUNCHER] System space opened via universal search bar tap.").ok();
+                                    std::log(0, "[LAUNCHER] App Drawer opened via universal search bar tap.").ok();
                                     let mut drain = std::InputEvent {
                                         kind: 0,
                                         x: 0,

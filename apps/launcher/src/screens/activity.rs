@@ -66,12 +66,12 @@ pub const PREVIEW_NOTE_INK: u32 = 0xFF7C8BA1;
 pub const PREVIEW_NOTE: &[u8] = b"No live preview";
 
 // Elevated Dismiss Circle [×]
-pub const BADGE_SIZE: usize = 48;
+pub const BADGE_SIZE: usize = 40;
 pub const BADGE_RADIUS: usize = BADGE_SIZE / 2;
-pub const BADGE_X: usize = 586;
-pub const CARD0_DISMISS: Rect = Rect::new(BADGE_X, 206, BADGE_SIZE, BADGE_SIZE);
-pub const CARD1_DISMISS: Rect = Rect::new(BADGE_X, 526, BADGE_SIZE, BADGE_SIZE);
-pub const CARD2_DISMISS: Rect = Rect::new(BADGE_X, 846, BADGE_SIZE, BADGE_SIZE);
+pub const BADGE_X: usize = 628;
+pub const CARD0_DISMISS: Rect = Rect::new(BADGE_X, 137, BADGE_SIZE, BADGE_SIZE);
+pub const CARD1_DISMISS: Rect = Rect::new(BADGE_X, 437, BADGE_SIZE, BADGE_SIZE);
+pub const CARD2_DISMISS: Rect = Rect::new(BADGE_X, 737, BADGE_SIZE, BADGE_SIZE);
 
 pub const DISMISS_BG: u32 = 0xFF1F2838;
 pub const DISMISS_BORDER: u32 = 0xFF43546D;
@@ -545,8 +545,8 @@ fn build_card(state: &LauncherState, slot: usize) -> Option<CardPlan> {
     } else {
         (b"Recent", STATE_RECENT_DOT, STATE_RECENT_TEXT, 86)
     };
-    let state_x = rect.x + rect.w - badge_w - 24;
-    let state_y = rect.y + 28;
+    let state_x = BADGE_X - 12 - badge_w;
+    let state_y = rect.y + 25;
     let state_pill_rect = Rect::new(state_x, state_y, badge_w, 24);
     let state_label = LabelRun::new(
         state_x + 16,
@@ -586,12 +586,12 @@ fn build_card(state: &LauncherState, slot: usize) -> Option<CardPlan> {
     );
     let preview_note = LabelRun::fitted_centred(
         preview_rect.x,
-        preview_rect.center_y() + 24,
-        type_scale::CAPTION,
+        preview_rect.y + 88,
+        type_scale::BODY,
         preview_rect.w,
         preview_rect.w,
         PREVIEW_NOTE,
-        PREVIEW_NOTE_INK,
+        TEXT_WHITE,
     );
 
     Some(CardPlan {
@@ -629,687 +629,74 @@ fn render_mini_preview(card: &CardPlan, px: usize, py: usize) -> Option<u32> {
         return Some(PREVIEW_BORDER);
     }
 
-    let x0 = card.preview_rect.x;
-    let y0 = card.preview_rect.y;
-    let w = card.preview_rect.w;
+    let bg = PREVIEW_BG;
+    let cx = card.preview_rect.center_x();
+    let cy = card.preview_rect.y + 48;
 
-    match card.icon {
-        Some(IconKind::Settings) => {
-            // Authentic Settings UI: search pill, grouped settings cells with toggles
-            let bg = 0xFF0E131E;
-
-            // Search pill at top
-            let s_pill = Rect::new(x0 + 16, y0 + 10, w - 32, 24);
-            if rounded_contains(s_pill, px, py, 8) {
-                if rounded_outline(s_pill, px, py, 8) {
-                    return Some(0xFF243044);
-                }
-                if (px as i32 - (s_pill.x as i32 + 12)).abs() <= 2 && (py as i32 - s_pill.center_y() as i32).abs() <= 2 {
-                    return Some(0xFF8B5CF6);
-                }
-                return Some(0xFF161F2E);
-            }
-
-            // Grouped Row 1: Wi-Fi / Connectivity
-            let row1 = Rect::new(x0 + 16, y0 + 42, w - 32, 36);
-            if rounded_contains(row1, px, py, 10) {
-                if rounded_outline(row1, px, py, 10) {
-                    return Some(0xFF222C3C);
-                }
-                let chip = Rect::new(row1.x + 8, row1.y + 7, 22, 22);
-                if rounded_contains(chip, px, py, 6) {
-                    return Some(0xFF8B5CF6);
-                }
-                if px >= row1.x + 38 && px < row1.x + 160 && py >= row1.y + 14 && py < row1.y + 22 {
-                    return Some(0xFFCBD5E1);
-                }
-                let toggle = Rect::new(row1.x + row1.w - 44, row1.y + 10, 34, 16);
-                if rounded_contains(toggle, px, py, 8) {
-                    let knob_cx = toggle.x + toggle.w - 9;
-                    let dx = (px as i32) - knob_cx as i32;
-                    let dy = (py as i32) - toggle.center_y() as i32;
-                    if dx * dx + dy * dy <= 20 {
-                        return Some(0xFFFFFFFF);
-                    }
-                    return Some(0xFF8B5CF6);
-                }
-                return Some(0xFF151C28);
-            }
-
-            // Grouped Row 2: Display / Appearance
-            let row2 = Rect::new(x0 + 16, y0 + 86, w - 32, 36);
-            if rounded_contains(row2, px, py, 10) {
-                if rounded_outline(row2, px, py, 10) {
-                    return Some(0xFF222C3C);
-                }
-                let chip = Rect::new(row2.x + 8, row2.y + 7, 22, 22);
-                if rounded_contains(chip, px, py, 6) {
-                    return Some(0xFF0EA5E9);
-                }
-                if px >= row2.x + 38 && px < row2.x + 140 && py >= row2.y + 14 && py < row2.y + 22 {
-                    return Some(0xFFCBD5E1);
-                }
-                if px >= row2.x + row2.w - 24 && px < row2.x + row2.w - 14 && (py as i32 - row2.center_y() as i32).abs() <= 4 {
-                    return Some(0xFF64748B);
-                }
-                return Some(0xFF151C28);
-            }
-
-            // Grouped Row 3: Security & Accounts
-            let row3 = Rect::new(x0 + 16, y0 + 130, w - 32, 36);
-            if rounded_contains(row3, px, py, 10) {
-                if rounded_outline(row3, px, py, 10) {
-                    return Some(0xFF222C3C);
-                }
-                let chip = Rect::new(row3.x + 8, row3.y + 7, 22, 22);
-                if rounded_contains(chip, px, py, 6) {
-                    return Some(rgb(0x10, 0xB9, 0x81));
-                }
-                if px >= row3.x + 38 && px < row3.x + 180 && py >= row3.y + 14 && py < row3.y + 22 {
-                    return Some(0xFFCBD5E1);
-                }
-                return Some(0xFF151C28);
-            }
-
-            Some(bg)
-        }
-        Some(IconKind::Camera) => {
-            // Authentic Camera Viewfinder: Reticles, brackets, shutter deck
-            let bg = 0xFF05070A;
-            let amber = rgb(0xF5, 0x9E, 0x0B);
-
-            // Viewfinder Corner Alignment Brackets
-            let bx1 = x0 + 36;
-            let bx2 = x0 + w - 36;
-            let by1 = y0 + 20;
-            let by2 = y0 + 120;
-            if (px >= bx1 && px <= bx1 + 16 && py == by1) || (px == bx1 && py >= by1 && py <= by1 + 16) {
-                return Some(amber);
-            }
-            if (px >= bx2 - 16 && px <= bx2 && py == by1) || (px == bx2 && py >= by1 && py <= by1 + 16) {
-                return Some(amber);
-            }
-            if (px >= bx1 && px <= bx1 + 16 && py == by2) || (px == bx1 && py >= by2 - 16 && py <= by2) {
-                return Some(amber);
-            }
-            if (px >= bx2 - 16 && px <= bx2 && py == by2) || (px == bx2 && py >= by2 - 16 && py <= by2) {
-                return Some(amber);
-            }
-
-            // Center focus reticle [+]
-            let cx = x0 + w / 2;
-            let cy = y0 + 70;
-            let dx = (px as i32) - cx as i32;
-            let dy = (py as i32) - cy as i32;
-            if (dx.abs() <= 10 && dy.abs() <= 1) || (dy.abs() <= 10 && dx.abs() <= 1) {
-                if dx.abs() >= 3 || dy.abs() >= 3 {
-                    return Some(amber);
-                }
-            }
-
-            // Bottom camera deck with circular shutter button
-            if py >= y0 + 130 {
-                let deck_bg = 0xFF0D1118;
-                let scx = cx as i32;
-                let scy = (y0 + 154) as i32;
-                let sdx = (px as i32) - scx;
-                let sdy = (py as i32) - scy;
-                let sdist2 = sdx * sdx + sdy * sdy;
-                if sdist2 <= 18 * 18 {
-                    if sdist2 >= 15 * 15 {
-                        return Some(0xFFFFFFFF);
-                    }
-                    if sdist2 <= 12 * 12 {
-                        return Some(amber);
-                    }
-                    return Some(0xFF1E2838);
-                }
-                return Some(deck_bg);
-            }
-
-            Some(bg)
-        }
-        Some(IconKind::Browser) => {
-            // Authentic Browser UI: URL bar pill, hero section, card grid
-            let bg = 0xFF0A0F17;
-            let sky = 0xFF0EA5E9;
-
-            let url_bar = Rect::new(x0 + 16, y0 + 10, w - 32, 26);
-            if rounded_contains(url_bar, px, py, 10) {
-                if rounded_outline(url_bar, px, py, 10) {
-                    return Some(0xFF223044);
-                }
-                if (px as i32 - (url_bar.x as i32 + 14)).abs() <= 3 && (py as i32 - url_bar.center_y() as i32).abs() <= 3 {
-                    return Some(sky);
-                }
-                if px >= url_bar.x + 28 && px < url_bar.x + 180 && py >= url_bar.y + 9 && py < url_bar.y + 17 {
-                    return Some(0xFF7DD3FC);
-                }
-                return Some(0xFF141D2C);
-            }
-
-            let hero = Rect::new(x0 + 16, y0 + 44, w - 32, 54);
-            if rounded_contains(hero, px, py, 10) {
-                if rounded_outline(hero, px, py, 10) {
-                    return Some(0xFF1E293B);
-                }
-                if py == hero.y + 1 {
-                    return Some(sky);
-                }
-                if px >= hero.x + 14 && px < hero.x + 160 && py >= hero.y + 12 && py < hero.y + 22 {
-                    return Some(0xFFF8FAFC);
-                }
-                if px >= hero.x + 14 && px < hero.x + hero.w - 30 && py >= hero.y + 28 && py < hero.y + 34 {
-                    return Some(0xFF94A3B8);
-                }
-                if px >= hero.x + 14 && px < hero.x + hero.w - 80 && py >= hero.y + 38 && py < hero.y + 44 {
-                    return Some(0xFF64748B);
-                }
-                return Some(0xFF121824);
-            }
-
-            let card_w = (w - 40) / 2;
-            let c1 = Rect::new(x0 + 16, y0 + 106, card_w, 62);
-            let c2 = Rect::new(x0 + 24 + card_w, y0 + 106, card_w, 62);
-            if rounded_contains(c1, px, py, 8) {
-                if rounded_outline(c1, px, py, 8) {
-                    return Some(0xFF1C2534);
-                }
-                if px >= c1.x + 10 && px < c1.x + 70 && py >= c1.y + 12 && py < c1.y + 20 {
-                    return Some(sky);
-                }
-                return Some(0xFF101620);
-            }
-            if rounded_contains(c2, px, py, 8) {
-                if rounded_outline(c2, px, py, 8) {
-                    return Some(0xFF1C2534);
-                }
-                if px >= c2.x + 10 && px < c2.x + 70 && py >= c2.y + 12 && py < c2.y + 20 {
-                    return Some(sky);
-                }
-                return Some(0xFF101620);
-            }
-
-            Some(bg)
-        }
-        Some(IconKind::Terminal) => {
-            // Authentic Phosphor Green Terminal: Console prompt, system logs, cursor block
-            let bg = 0xFF080C08;
-            let green = 0xFF22C55E;
-
-            if py < y0 + 20 {
-                if py == y0 + 19 {
-                    return Some(0xFF192619);
-                }
-                let cy = y0 as i32 + 10;
-                for &dot_x in &[x0 + 16, x0 + 26, x0 + 36] {
-                    let dx = (px as i32) - dot_x as i32;
-                    let dy = (py as i32) - cy;
-                    if dx * dx + dy * dy <= 4 {
-                        return Some(green);
-                    }
-                }
-                return Some(0xFF0F160F);
-            }
-
-            if py >= y0 + 28 && py < y0 + 36 {
-                if px >= x0 + 16 && px < x0 + 110 {
-                    return Some(green);
-                }
-                if px >= x0 + 116 && px < x0 + 190 {
-                    return Some(0xFFE2E8F0);
-                }
-            }
-
-            if py >= y0 + 44 && py < y0 + 51 && px >= x0 + 16 && px < x0 + 260 {
-                return Some(0xFF86EFAC);
-            }
-            if py >= y0 + 58 && py < y0 + 65 && px >= x0 + 16 && px < x0 + 310 {
-                return Some(0xFF4ADE80);
-            }
-            if py >= y0 + 72 && py < y0 + 79 && px >= x0 + 16 && px < x0 + 220 {
-                return Some(0xFF86EFAC);
-            }
-            if py >= y0 + 86 && py < y0 + 93 && px >= x0 + 16 && px < x0 + 280 {
-                return Some(0xFF4ADE80);
-            }
-
-            if py >= y0 + 104 && py < y0 + 112 && px >= x0 + 16 && px < x0 + 110 {
-                return Some(green);
-            }
-            let cursor = Rect::new(x0 + 116, y0 + 102, 7, 12);
-            if cursor.contains(px, py) {
-                return Some(green);
-            }
-
-            Some(bg)
-        }
-        Some(IconKind::Messages) => {
-            // Authentic Messages UI: Inbound/outbound bubbles, emerald accent, compose bar
-            let bg = 0xFF0B111A;
-            let emerald = rgb(0x10, 0xB9, 0x81);
-            let emerald_dark = rgb(0x06, 0x5F, 0x46);
-
-            let b1 = Rect::new(x0 + 16, y0 + 14, 210, 38);
-            if rounded_contains(b1, px, py, 12) {
-                if rounded_outline(b1, px, py, 12) {
-                    return Some(0xFF243244);
-                }
-                if px >= b1.x + 12 && px < b1.x + 160 && py >= b1.y + 10 && py < b1.y + 17 {
-                    return Some(0xFFE2E8F0);
-                }
-                if px >= b1.x + 12 && px < b1.x + 110 && py >= b1.y + 22 && py < b1.y + 28 {
-                    return Some(0xFF94A3B8);
-                }
-                return Some(0xFF16202C);
-            }
-
-            let b2 = Rect::new(x0 + w - 240, y0 + 60, 224, 38);
-            if rounded_contains(b2, px, py, 12) {
-                if rounded_outline(b2, px, py, 12) {
-                    return Some(emerald);
-                }
-                if px >= b2.x + 14 && px < b2.x + 180 && py >= b2.y + 10 && py < b2.y + 17 {
-                    return Some(0xFFFFFFFF);
-                }
-                if px >= b2.x + 14 && px < b2.x + 130 && py >= b2.y + 22 && py < b2.y + 28 {
-                    return Some(0xFFD1FAE5);
-                }
-                return Some(emerald_dark);
-            }
-
-            let b3 = Rect::new(x0 + 16, y0 + 106, 170, 32);
-            if rounded_contains(b3, px, py, 10) {
-                if rounded_outline(b3, px, py, 10) {
-                    return Some(0xFF243244);
-                }
-                if px >= b3.x + 12 && px < b3.x + 130 && py >= b3.y + 12 && py < b3.y + 20 {
-                    return Some(0xFFE2E8F0);
-                }
-                return Some(0xFF16202C);
-            }
-
-            let comp = Rect::new(x0 + 16, y0 + 148, w - 32, 22);
-            if rounded_contains(comp, px, py, 10) {
-                if rounded_outline(comp, px, py, 10) {
-                    return Some(0xFF1E2A3A);
-                }
-                return Some(0xFF121A26);
-            }
-
-            Some(bg)
-        }
-        Some(IconKind::Music) => {
-            // Authentic Music Player: Album art, track info, scrubber progress bar
-            let bg = 0xFF0D0C16;
-            let violet = 0xFFA855F7;
-
-            let art = Rect::new(x0 + 20, y0 + 18, 76, 76);
-            if rounded_contains(art, px, py, 10) {
-                if rounded_outline(art, px, py, 10) {
-                    return Some(violet);
-                }
-                let acx = art.center_x() as i32;
-                let acy = art.center_y() as i32;
-                let adx = (px as i32) - acx;
-                let ady = (py as i32) - acy;
-                let adist2 = adx * adx + ady * ady;
-                if adist2 <= 7 * 7 {
-                    return Some(0xFFFFFFFF);
-                }
-                if adist2 >= 18 * 18 && adist2 <= 21 * 21 {
-                    return Some(0xFFD8B4FE);
-                }
-                return Some(0xFF7E22CE);
-            }
-
-            if px >= x0 + 110 && px < x0 + 260 && py >= y0 + 32 && py < y0 + 44 {
-                return Some(0xFFF3E8FF);
-            }
-            if px >= x0 + 110 && px < x0 + 200 && py >= y0 + 52 && py < y0 + 62 {
-                return Some(violet);
-            }
-
-            let bar = Rect::new(x0 + 20, y0 + 112, w - 40, 6);
-            if rounded_contains(bar, px, py, 3) {
-                let fill_w = (bar.w * 3) / 5;
-                if px < bar.x + fill_w {
-                    return Some(violet);
-                }
-                return Some(0xFF261F36);
-            }
-            let kx = (x0 + 20 + (w - 40) * 3 / 5) as i32;
-            let ky = (y0 + 115) as i32;
-            let kdx = (px as i32) - kx;
-            let kdy = (py as i32) - ky;
-            if kdx * kdx + kdy * kdy <= 16 {
-                return Some(0xFFFFFFFF);
-            }
-
-            let pcx = (x0 + w / 2) as i32;
-            let pcy = (y0 + 148) as i32;
-            let pdx = (px as i32) - pcx;
-            let pdy = (py as i32) - pcy;
-            if pdx * pdx + pdy * pdy <= 14 * 14 {
-                return Some(violet);
-            }
-
-            Some(bg)
-        }
-        Some(IconKind::Gallery) => {
-            // Authentic Gallery Grid: Photo tiles with vivid tonal fills
-            let bg = 0xFF090E16;
-            let tile_w = (w - 44) / 4;
-            let tile_h = 44;
-
-            for col in 0..4 {
-                let tx = x0 + 16 + col * (tile_w + 4);
-                let ty = y0 + 16;
-                let tr = Rect::new(tx, ty, tile_w, tile_h);
-                if rounded_contains(tr, px, py, 6) {
-                    if rounded_outline(tr, px, py, 6) {
-                        return Some(0xFF1E2C3C);
-                    }
-                    let col_color = match col {
-                        0 => 0xFF0E7490,
-                        1 => 0xFF1D4ED8,
-                        2 => rgb(0x04, 0x78, 0x57),
-                        _ => 0xFF7E22CE,
-                    };
-                    return Some(col_color);
-                }
-            }
-
-            for col in 0..4 {
-                let tx = x0 + 16 + col * (tile_w + 4);
-                let ty = y0 + 68;
-                let tr = Rect::new(tx, ty, tile_w, tile_h);
-                if rounded_contains(tr, px, py, 6) {
-                    if rounded_outline(tr, px, py, 6) {
-                        return Some(0xFF1E2C3C);
-                    }
-                    let col_color = match col {
-                        0 => 0xFFB45309,
-                        1 => 0xFF0369A1,
-                        2 => 0xFF4338CA,
-                        _ => 0xFF0F766E,
-                    };
-                    return Some(col_color);
-                }
-            }
-
-            if px >= x0 + 16 && px < x0 + 140 && py >= y0 + 128 && py < y0 + 138 {
-                return Some(0xFF06B6D4);
-            }
-            if px >= x0 + 16 && px < x0 + 200 && py >= y0 + 146 && py < y0 + 154 {
-                return Some(0xFF64748B);
-            }
-
-            Some(bg)
-        }
-        Some(IconKind::Calculator) => {
-            // Authentic Calculator UI: Display at top with result, 4x3 keypad grid with amber accents
-            let bg = 0xFF0D1117;
-            let amber = rgb(0xF5, 0x9E, 0x0B);
-            let slate_btn = 0xFF1E293B;
-            let num_btn = 0xFF161F2E;
-
-            // Display readout card at top
-            let disp = Rect::new(x0 + 16, y0 + 10, w - 32, 34);
-            if rounded_contains(disp, px, py, 8) {
-                if rounded_outline(disp, px, py, 8) {
-                    return Some(0xFF223044);
-                }
-                // Simulated calculation result text block aligned right
-                if px >= disp.x + disp.w - 110 && px < disp.x + disp.w - 16 && py >= disp.y + 10 && py < disp.y + 24 {
-                    return Some(0xFFFFFFFF);
-                }
-                return Some(0xFF0F172A);
-            }
-
-            // Keypad grid: 4 columns x 3 rows
-            let kw = (w - 44) / 4;
-            let kh = 32;
-            for r in 0..3 {
-                let ky = y0 + 52 + r * (kh + 6);
-                for c in 0..4 {
-                    let kx = x0 + 16 + c * (kw + 4);
-                    let btn = Rect::new(kx, ky, kw, kh);
-                    if rounded_contains(btn, px, py, 8) {
-                        if rounded_outline(btn, px, py, 8) {
-                            return Some(if c == 3 { amber } else { 0xFF2A384C });
-                        }
-                        if c == 3 {
-                            return Some(amber);
-                        } else if r == 0 {
-                            return Some(slate_btn);
-                        } else {
-                            return Some(num_btn);
-                        }
-                    }
-                }
-            }
-
-            Some(bg)
-        }
-        Some(IconKind::Phone) => {
-            // Authentic Phone / Dialer UI: Number display capsule, 3-col dial pad, green call button
-            let bg = 0xFF0B1017;
-            let emerald = rgb(0x10, 0xB9, 0x81);
-
-            // Top dialed number capsule
-            let num_capsule = Rect::new(x0 + 20, y0 + 10, w - 40, 28);
-            if rounded_contains(num_capsule, px, py, 8) {
-                if rounded_outline(num_capsule, px, py, 8) {
-                    return Some(0xFF1E2B3E);
-                }
-                if px >= num_capsule.x + 20 && px < num_capsule.x + 140 && py >= num_capsule.y + 8 && py < num_capsule.y + 20 {
-                    return Some(0xFFE2E8F0);
-                }
-                return Some(0xFF131D2B);
-            }
-
-            // 3-column keypad circles
-            let col_w = (w - 40) / 3;
-            for r in 0..2 {
-                let row_cy = y0 + 58 + r * 38;
-                for c in 0..3 {
-                    let col_cx = x0 + 20 + c * col_w + col_w / 2;
-                    let dx = (px as i32) - col_cx as i32;
-                    let dy = (py as i32) - row_cy as i32;
-                    let dist2 = dx * dx + dy * dy;
-                    if dist2 <= 16 * 16 {
-                        if dist2 >= 14 * 14 {
-                            return Some(0xFF26354A);
-                        }
-                        return Some(0xFF172233);
-                    }
-                }
-            }
-
-            // Bottom call pill
-            let call_pill = Rect::new(x0 + w / 2 - 40, y0 + 138, 80, 26);
-            if rounded_contains(call_pill, px, py, 13) {
-                return Some(emerald);
-            }
-
-            Some(bg)
-        }
-        Some(IconKind::Files) => {
-            // Authentic File Manager UI: Storage usage gauge, category folder chips, directory items
-            let bg = 0xFF0C121D;
-            let cyan = 0xFF06B6D4;
-
-            // Storage bar at top
-            let sbar = Rect::new(x0 + 16, y0 + 12, w - 32, 16);
-            if rounded_contains(sbar, px, py, 6) {
-                if px < sbar.x + sbar.w * 3 / 8 {
-                    return Some(cyan);
-                }
-                return Some(0xFF1E2B3D);
-            }
-
-            // Category folder cards
-            let cw = (w - 44) / 4;
-            for c in 0..4 {
-                let cx = x0 + 16 + c * (cw + 4);
-                let cr = Rect::new(cx, y0 + 38, cw, 38);
-                if rounded_contains(cr, px, py, 8) {
-                    if rounded_outline(cr, px, py, 8) {
-                        return Some(0xFF24344B);
-                    }
-                    if px >= cr.x + 8 && px < cr.x + 24 && py >= cr.y + 10 && py < cr.y + 24 {
-                        return Some(cyan);
-                    }
-                    return Some(0xFF141F30);
-                }
-            }
-
-            // File items list
-            for r in 0..2 {
-                let ry = y0 + 88 + r * 38;
-                let rr = Rect::new(x0 + 16, ry, w - 32, 32);
-                if rounded_contains(rr, px, py, 8) {
-                    if rounded_outline(rr, px, py, 8) {
-                        return Some(0xFF1E2C3F);
-                    }
-                    if px >= rr.x + 12 && px < rr.x + 28 && py >= rr.y + 8 && py < rr.y + 24 {
-                        return Some(0xFF38BDF8);
-                    }
-                    if px >= rr.x + 36 && px < rr.x + 180 && py >= rr.y + 11 && py < rr.y + 21 {
-                        return Some(0xFFE2E8F0);
-                    }
-                    return Some(0xFF131D2D);
-                }
-            }
-
-            Some(bg)
-        }
-        Some(IconKind::Calendar) => {
-            // Authentic Calendar UI: Month header, day of week indicators, highlighted date badge
-            let bg = 0xFF0D0F18;
-            let purple = 0xFF8B5CF6;
-
-            // Month header capsule
-            if px >= x0 + 20 && px < x0 + 140 && py >= y0 + 12 && py < y0 + 26 {
-                return Some(purple);
-            }
-
-            // Day circles row
-            let cw = (w - 40) / 7;
-            let row_y = y0 + 38;
-            for d in 0..7 {
-                let dcx = x0 + 20 + d * cw + cw / 2;
-                let dx = (px as i32) - dcx as i32;
-                let dy = (py as i32) - (row_y + 14) as i32;
-                if dx * dx + dy * dy <= 12 * 12 {
-                    if d == 3 {
-                        return Some(purple);
-                    }
-                    return Some(0xFF1B2234);
-                }
-            }
-
-            // Event schedule card
-            let ev = Rect::new(x0 + 16, y0 + 78, w - 32, 44);
-            if rounded_contains(ev, px, py, 10) {
-                if px < ev.x + 6 {
-                    return Some(purple);
-                }
-                if px >= ev.x + 16 && px < ev.x + 160 && py >= ev.y + 10 && py < ev.y + 22 {
-                    return Some(0xFFFFFFFF);
-                }
-                if px >= ev.x + 16 && px < ev.x + 120 && py >= ev.y + 26 && py < ev.y + 36 {
-                    return Some(0xFF94A3B8);
-                }
-                return Some(0xFF161B28);
-            }
-
-            Some(bg)
-        }
-        Some(IconKind::Vault) => {
-            // Authentic Sovereign Vault UI: Shield badge, encrypted key slots, zero-knowledge lock
-            let bg = 0xFF0A0F14;
-            let emerald = rgb(0x10, 0xB9, 0x81);
-
-            let sh = Rect::new(x0 + w / 2 - 20, y0 + 14, 40, 40);
-            if rounded_contains(sh, px, py, 12) {
-                if rounded_outline(sh, px, py, 12) {
-                    return Some(emerald);
-                }
-                return Some(0xFF0F261F);
-            }
-
-            // Status label
-            if px >= x0 + 40 && px < x0 + w - 40 && py >= y0 + 64 && py < y0 + 74 {
-                return Some(emerald);
-            }
-
-            // Key credential slots
-            for r in 0..2 {
-                let ky = y0 + 86 + r * 36;
-                let kr = Rect::new(x0 + 20, ky, w - 40, 28);
-                if rounded_contains(kr, px, py, 8) {
-                    if rounded_outline(kr, px, py, 8) {
-                        return Some(0xFF1A332B);
-                    }
-                    if px >= kr.x + 10 && px < kr.x + 22 && py >= kr.y + 8 && py < kr.y + 20 {
-                        return Some(emerald);
-                    }
-                    if px >= kr.x + 30 && px < kr.x + 160 && py >= kr.y + 10 && py < kr.y + 18 {
-                        return Some(0xFFE2E8F0);
-                    }
-                    return Some(0xFF101F1A);
-                }
-            }
-
-            Some(bg)
-        }
-        _ => {
-            // Default clean application canvas with surface header and watermark icon
-            let bg = PREVIEW_BG;
-
-            if py < y0 + 24 {
-                if py == y0 + 23 {
-                    return Some(PREVIEW_HEADER_BORDER);
-                }
-                let cy = y0 as i32 + 11;
-                for &dot_x in &[x0 + 16, x0 + 24, x0 + 32] {
-                    let dx = (px as i32) - dot_x as i32;
-                    let dy = (py as i32) - cy;
-                    if dx * dx + dy * dy <= 4 {
-                        return Some(0xFF2A3648);
-                    }
-                }
-                return Some(PREVIEW_HEADER_BG);
-            }
-
-            if let Some(c) = card.preview_note.pixel_on(px, py, bg) {
-                return Some(c);
-            }
-
-            let cx = card.preview_rect.center_x();
-            let cy = card.preview_rect.center_y() - 12;
-            if let Some(kind) = card.icon {
-                if let Some(ic) = icons::rasterize_icon_pixel_scaled_aa(
-                    kind,
-                    px,
-                    py,
-                    cx,
-                    cy,
-                    PREVIEW_WATERMARK_INK,
-                    bg,
-                    20,
-                ) {
-                    return Some(ic);
-                }
-            }
-
-            Some(bg)
+    // 1. Embossed app signature vector icon watermark in upper center
+    if let Some(kind) = card.icon {
+        if let Some(ic) = icons::rasterize_icon_pixel_scaled_aa(
+            kind,
+            px,
+            py,
+            cx,
+            cy,
+            PREVIEW_WATERMARK_INK,
+            bg,
+            24,
+        ) {
+            return Some(ic);
         }
     }
-}
 
+    // 2. Primary native UI notice: "No live preview"
+    if let Some(c) = card.preview_note.pixel_on(px, py, bg) {
+        return Some(c);
+    }
+
+    // 3. Security context line: "Surface memory sandboxed * Verified Ring-3"
+    let sub_run = LabelRun::fitted_centred(
+        card.preview_rect.x,
+        card.preview_rect.y + 116,
+        type_scale::CAPTION,
+        card.preview_rect.w,
+        card.preview_rect.w,
+        b"Surface memory sandboxed * Verified Ring-3",
+        0xFF64748B,
+    );
+    if let Some(c) = sub_run.pixel_on(px, py, bg) {
+        return Some(c);
+    }
+
+    // 4. Subtle bottom telemetry bar
+    let bar_y = card.preview_rect.y + card.preview_rect.h - 28;
+    if py >= bar_y && py < bar_y + 20 {
+        let chip_l = Rect::new(card.preview_rect.x + 16, bar_y, 110, 20);
+        let chip_r = Rect::new(card.preview_rect.x + card.preview_rect.w - 156, bar_y, 140, 20);
+        if rounded_contains(chip_l, px, py, 6) {
+            if rounded_outline(chip_l, px, py, 6) {
+                return Some(0xFF1E2838);
+            }
+            let lbl = LabelRun::new(chip_l.x + 8, chip_l.y + 3, type_scale::CAPTION, b"Ring-3 Sandbox", 0xFF94A3B8);
+            if let Some(c) = lbl.pixel_on(px, py, 0xFF121722) {
+                return Some(c);
+            }
+            return Some(0xFF121722);
+        }
+        if rounded_contains(chip_r, px, py, 6) {
+            if rounded_outline(chip_r, px, py, 6) {
+                return Some(0xFF1E2838);
+            }
+            let lbl = LabelRun::new(chip_r.x + 8, chip_r.y + 3, type_scale::CAPTION, b"CapHandle: Verified", 0xFF38BDF8);
+            if let Some(c) = lbl.pixel_on(px, py, 0xFF121722) {
+                return Some(c);
+            }
+            return Some(0xFF121722);
+        }
+    }
+
+    Some(bg)
+}
 fn build_activity_frame(state: &LauncherState) -> ActivityFrame {
     // 1. Status Bar Clock
     let clock_slice: &[u8] = if state.clock_time[0] != b' ' {
@@ -1577,11 +964,11 @@ pub fn get_activity_color(x: usize, y: usize, state: &LauncherState) -> u32 {
 // -----------------------------------------------------------------------------
 
 pub fn activity_close_hit(_state: &LauncherState, x: usize, y: usize) -> Option<usize> {
-    if CARD0_DISMISS.contains(x, y) || ((120..390).contains(&y) && x >= 580 && x <= 670 && y <= 254) {
+    if CARD0_DISMISS.contains(x, y) || ((120..190).contains(&y) && (600..688).contains(&x)) {
         Some(0)
-    } else if CARD1_DISMISS.contains(x, y) || ((420..690).contains(&y) && x >= 580 && x <= 670 && y <= 574) {
+    } else if CARD1_DISMISS.contains(x, y) || ((420..490).contains(&y) && (600..688).contains(&x)) {
         Some(1)
-    } else if CARD2_DISMISS.contains(x, y) || ((720..990).contains(&y) && x >= 580 && x <= 670 && y <= 894) {
+    } else if CARD2_DISMISS.contains(x, y) || ((720..790).contains(&y) && (600..688).contains(&x)) {
         Some(2)
     } else {
         None
