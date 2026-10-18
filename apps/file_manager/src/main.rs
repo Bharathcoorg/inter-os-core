@@ -1034,7 +1034,7 @@ fn handle_tap(app: &mut FileManagerApp, x: usize, y: usize) -> Tap {
             app.selected_entry = Some(entry_idx);
             let entry = &app.entries[entry_idx];
             let mime = detect_mime(&entry.name[..entry.name_len], entry.is_dir);
-            if matches!(mime, FileMime::Image | FileMime::Video) {
+            if matches!(mime, FileMime::Image | FileMime::Video | FileMime::Audio | FileMime::Document) {
                 let mut path_buf = [0u8; 128];
                 let cp = app.current_path.as_bytes();
                 let mut n = append(&mut path_buf, 0, cp);

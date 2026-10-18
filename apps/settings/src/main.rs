@@ -4156,8 +4156,8 @@ fn screen_lock_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
         }
     }
 
-    // Keypad.
-    if y >= SL_KEYS_Y && y < SL_KEYS_BOTTOM {
+    // Keypad: only rendered when a PIN entry or change step is active.
+    if app.screen_lock_mode != ScreenLockMode::Idle && y >= SL_KEYS_Y && y < SL_KEYS_BOTTOM {
         for row in 0..4usize {
             for col in 0..3usize {
                 let (kx, ky) = sl_key_origin(row, col);

@@ -166,6 +166,8 @@ pub struct VaultApp {
     pub backup: BackupState,
     pub total_encryptions: u32,
     pub total_decryptions: u32,
+    pub counter_buf: [u8; 32],
+    pub counter_len: usize,
     /// Last thing the platform actually said, shown verbatim in the status line.
     pub status: [u8; 64],
     pub status_len: usize,
@@ -224,9 +226,26 @@ impl VaultApp {
             backup: BackupState::NotAttempted,
             total_encryptions: 0,
             total_decryptions: 0,
+            counter_buf: *b"0 enc, 0 dec\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0",
+            counter_len: 12,
             status: [0u8; 64],
             status_len: 0,
         }
+    }
+
+    pub fn update_counter_buf(&mut self) {
+        let mut buf = [0u8; 32];
+        let mut n = write_u64(self.total_encryptions as u64, &mut buf);
+        let mid = b" enc, ";
+        let m = mid.len().min(buf.len().saturating_sub(n));
+        buf[n..n + m].copy_from_slice(&mid[..m]);
+        n += m;
+        n += write_u64(self.total_decryptions as u64, &mut buf[n..]);
+        let end = b" dec";
+        let e = end.len().min(buf.len().saturating_sub(n));
+        buf[n..n + e].copy_from_slice(&end[..e]);
+        self.counter_buf = buf;
+        self.counter_len = n + e;
     }
 
     /// True when both hardware key slots actually produced a 32-byte key.
@@ -347,6 +366,7 @@ impl VaultApp {
                                         slot.authenticated = true;
                                     }
                                 }
+                                self.update_counter_buf();
                                 return true;
                             } else {
                                 std::log(0, "[VAULT APP] Sector decrypted but payload mismatch!").ok();
@@ -364,6 +384,7 @@ impl VaultApp {
                 std::log(0, "[VAULT APP] Sector encrypt returned Err.").ok();
             }
         }
+        self.update_counter_buf();
         false
     }
 
@@ -963,7 +984,7 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
         ) {
             return c;
         }
-        let counters = counter_word(vault.total_encryptions, vault.total_decryptions);
+        let counters = &vault.counter_buf[..vault.counter_len];
         if let Some(c) = metric_row(
             x,
             y,
@@ -1103,6 +1124,7 @@ fn write_u64(mut v: u64, out: &mut [u8]) -> usize {
 }
 
 /// "N enc, M dec" straight from the two counters.
+#[allow(dead_code)]
 fn counter_word(enc: u32, dec: u32) -> &'static [u8] {
     // The counters start at zero and only ever move when a real syscall ran,
     // so the only values this can ever report are the live ones.

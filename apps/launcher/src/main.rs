@@ -2486,11 +2486,12 @@ pub extern "C" fn _start() -> ! {
                                 // Horizontal swipe also dismisses for backwards-compatibility.
                                 if input.dy <= -40 || input.dx.abs() >= 40 {
                                     let y = input.y as usize;
-                                    let slot_opt = if (120..390).contains(&y) {
+                                    let origin_y = (input.y as i32 - input.dy as i32).max(0) as usize;
+                                    let slot_opt = if (120..390).contains(&origin_y) || (120..390).contains(&y) {
                                         Some(0)
-                                    } else if (420..690).contains(&y) {
+                                    } else if (420..690).contains(&origin_y) || (420..690).contains(&y) {
                                         Some(1)
-                                    } else if (720..990).contains(&y) {
+                                    } else if (720..990).contains(&origin_y) || (720..990).contains(&y) {
                                         Some(2)
                                     } else {
                                         None

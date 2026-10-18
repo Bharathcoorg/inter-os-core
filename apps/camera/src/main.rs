@@ -1263,10 +1263,9 @@ fn handle_camera_touch(camera: &mut CameraApp, x: u32, y: u32) -> Tap {
         return Tap::Redraw(Dirty::TopRow);
     }
 
-    // 4. Zoom toggle pill in viewfinder. WHY the shared rectangle: the old test
-    //    re-spelled the pill's coordinates in surface space while the renderer
-    //    spelled them in viewfinder-relative space, so the two could disagree.
-    if ZOOM_PILL.contains(x, y) {
+    // 4. Zoom toggle pill in viewfinder. Guarded by active video frames so an
+    //    inactive/unbound camera HAL cannot register touch events on invisible chrome.
+    if camera.total_video_frames > 0 && ZOOM_PILL.contains(x, y) {
         camera.zoom_x10 = match camera.zoom_x10 {
             10 => 20,
             20 => 50,

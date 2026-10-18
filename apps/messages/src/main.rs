@@ -1515,7 +1515,15 @@ fn handle_tap(app: &mut MessagesApp, px: u32, py: u32) -> Tap<'static> {
                 }
                 return Tap::Redraw(Dirty::All);
             }
-            app.active_thread_idx = idx.min(app.store.len().saturating_sub(1));
+            let tidx = idx.min(app.store.len().saturating_sub(1));
+            app.active_thread_idx = tidx;
+            if let Some(t) = app.store.get(tidx) {
+                app.recip = [0u8; RECIP_CAP];
+                let r = t.recipient();
+                let n = r.len().min(RECIP_CAP);
+                app.recip[..n].copy_from_slice(&r[..n]);
+                app.recip_len = n;
+            }
             let _ = std::audio_haptic_click();
             return Tap::Redraw(Dirty::All);
         }

@@ -2600,7 +2600,7 @@ fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
                 return Tap::Redraw(Dirty::All);
             }
 
-            if PHOTO_DEL_BTN.contains(x, y) || DETAIL_DEL.contains(x, y) {
+            if PHOTO_DEL_BTN.contains(x, y) {
                 if let Some(Media::StorageItem(idx)) = app.open {
                     if idx < app.storage_count {
                         let path_slice = &app.storage_items[idx].path[..app.storage_items[idx].path_len];
@@ -2621,7 +2621,7 @@ fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
                 }
             }
 
-            if PHOTO_FAV_BTN.contains(x, y) || DETAIL_FAV.contains(x, y) {
+            if PHOTO_FAV_BTN.contains(x, y) {
                 if let Some(Media::StorageItem(idx)) = app.open {
                     if idx < app.storage_count {
                         app.storage_items[idx].is_favourite = !app.storage_items[idx].is_favourite;
@@ -2693,9 +2693,15 @@ fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
                     if row < 2 && rel_y % 200 < 180 {
                         let album_idx = row * 2 + col;
                         match album_idx {
-                            0 => app.tab = GalleryTab::Photos,
+                            0 => {
+                                app.tab = GalleryTab::Photos;
+                                app.filter = Filter::All;
+                            }
                             1 => app.tab = GalleryTab::Screenshots,
-                            2 => app.tab = GalleryTab::Photos,
+                            2 => {
+                                app.tab = GalleryTab::Photos;
+                                app.filter = Filter::All;
+                            }
                             3 => {
                                 app.tab = GalleryTab::Photos;
                                 app.filter = Filter::Wallpapers;

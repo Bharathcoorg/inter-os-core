@@ -624,9 +624,8 @@ fn handle_touch_point(calc: &mut CalculatorState, x: u32, y: u32) -> Tap {
                                 std::log(0, "[CALCULATOR] Backspace applied.").ok();
                             }
                             '%' => {
-                                calc.current_operand /= 100;
-                                calc.result_mode = false;
-                                std::log(0, "[CALCULATOR] Integer percent applied.").ok();
+                                calc.set_operation('%');
+                                std::log(0, "[CALCULATOR] Modulo operation queued.").ok();
                             }
                             _ => {}
                         }

@@ -3218,7 +3218,24 @@ fn handle_tap(dialer: &mut DialerApp, px: u32, py: u32) -> Tap<'static> {
     }
 
     // 5. Section content: the keypad and action row in the Keypad section, the
-    //    call ledger in Recents, and the contact store in Contacts.
+    if dialer.section == DialerSection::Recents {
+        if y >= RECENTS_Y0 && y < RECENTS_Y0 + dialer.recents_len * RECENTS_ROW_H {
+            let row_idx = (y - RECENTS_Y0) / RECENTS_ROW_H;
+            if row_idx < dialer.recents_len {
+                let rec = &dialer.recents[row_idx];
+                dialer.active_number = [0u8; 32];
+                let n = rec.len.min(32);
+                dialer.active_number[..n].copy_from_slice(&rec.number[..n]);
+                dialer.active_len = n;
+                dialer.section = DialerSection::Keypad;
+                std::log(0, "[DIALER APP] Loaded number from recents.").ok();
+                let _ = std::audio_haptic_click();
+                return Tap::Redraw(Dirty::All);
+            }
+        }
+        return Tap::None;
+    }
+
     if dialer.section == DialerSection::Contacts {
         return handle_contacts_tap(dialer, x, y);
     }
