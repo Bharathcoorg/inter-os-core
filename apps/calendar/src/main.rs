@@ -898,15 +898,16 @@ fn test_text(
     text: &[u8],
     max_w: usize,
     color: u32,
+    bg: u32,
 ) -> Option<u32> {
     let (bx, bt, bw, bh) = outline_text::run_box(x0, y0, scale, text);
     if x < bx || x - bx >= bw || y < bt || y - bt >= bh {
         return None;
     }
     if let Some(run) = outline_text::place_run(x0, y0, scale, text, Some(max_w), false) {
-        return run.pixel(x, y, color, BG_DARK);
+        return run.pixel(x, y, color, bg);
     }
-    std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, BG_DARK, false)
+    std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, bg, false)
 }
 
 /// Left x that centres `text` at `scale` inside `[x0, x0 + available)`.
@@ -1309,7 +1310,7 @@ fn get_calendar_pixel(
             // month pill begins at x 480, so that is the room the header has
             // for it. "Calendar" measures 249px on the bitmap face at scale 3
             // and 247px on the outline face, so both clear it by 117px.
-            if let Some(c) = test_text(x, y, 116, 12, 3, b"Calendar", 480 - 116, TEXT_PRIMARY) {
+            if let Some(c) = test_text(x, y, 116, 12, 3, b"Calendar", 480 - 116, TEXT_PRIMARY, SURFACE_DARK) {
                 return c;
             }
         }
@@ -1357,7 +1358,7 @@ fn get_calendar_pixel(
             // both fit.
             let pill_x = centered_x(pill_text, 2, 480, 216);
             let pill_y0 = 20 + (56 - std::design::font::line_height(2)) / 2;
-            if let Some(c) = test_text(x, y, pill_x, pill_y0, 2, pill_text, 216, ACCENT_SKY) {
+            if let Some(c) = test_text(x, y, pill_x, pill_y0, 2, pill_text, 216, ACCENT_SKY, SURFACE_RAISED) {
                 return c;
             }
 
@@ -1392,7 +1393,7 @@ fn get_calendar_pixel(
                 // measures 32px on the bitmap face at scale 2 and 36px on the
                 // outline face, so both fit an 88px column.
                 if let Some(color) =
-                    test_text(x, y, text_x, WEEKDAY_Y0, WEEKDAY_SCALE, HEADERS[c], COL_W, TEXT_MUTED)
+                    test_text(x, y, text_x, WEEKDAY_Y0, WEEKDAY_SCALE, HEADERS[c], COL_W, TEXT_MUTED, BG_DARK)
                 {
                     return color;
                 }
@@ -1405,7 +1406,7 @@ fn get_calendar_pixel(
             // WHY W is the column: this headline replaces the seven letters and
             // is centred across the whole surface. It measures 286px on the
             // bitmap face at scale 2 and 277px on the outline face.
-            if let Some(c) = test_text(x, y, text_x, WEEKDAY_Y0, WEEKDAY_SCALE, NO_DATE_HEADLINE, W, TEXT_MUTED) {
+            if let Some(c) = test_text(x, y, text_x, WEEKDAY_Y0, WEEKDAY_SCALE, NO_DATE_HEADLINE, W, TEXT_MUTED, BG_DARK) {
                 return c;
             }
         }
@@ -1430,6 +1431,7 @@ fn get_calendar_pixel(
                 NO_DATE_DETAIL,
                 W,
                 TEXT_MUTED,
+                BG_DARK,
             ) {
                 return c;
             }
@@ -1487,7 +1489,8 @@ fn get_calendar_pixel(
                         // cell it falls in, and the widest, "31", measures 44px
                         // on the bitmap face at scale 2 and 46px on the outline
                         // face, so both fit.
-                        if let Some(color) = test_text(x, y, text_x, text_y, 2, &text[..n], COL_W, text_color) {
+                        let cell_bg = if is_current { 0xFF173552 } else { SURFACE_DARK };
+                        if let Some(color) = test_text(x, y, text_x, text_y, 2, &text[..n], COL_W, text_color, cell_bg) {
                             return color;
                         }
 
@@ -1496,7 +1499,7 @@ fn get_calendar_pixel(
                             return if is_current { ACCENT_SKY } else { BORDER_SUBTLE };
                         }
 
-                        return if is_current { 0xFF173552 } else { SURFACE_DARK };
+                        return cell_bg;
                     }
                 }
             }
@@ -1524,7 +1527,7 @@ fn get_calendar_pixel(
         // measures 362px on the bitmap face at scale 2 and 349px on the outline
         // face, so both fit.
         if y >= 480 && y < 480 + std::design::font::line_height(2) {
-            if let Some(c) = test_text(x, y, 28, 480, 2, section_title, 550 - 28, TEXT_MUTED) {
+            if let Some(c) = test_text(x, y, 28, 480, 2, section_title, 550 - 28, TEXT_MUTED, BG_DARK) {
                 return c;
             }
         }
@@ -1557,7 +1560,7 @@ fn get_calendar_pixel(
             let badge_x = centered_x(badge_str, 1, 550, 146);
             let badge_y = 492 + (30 - std::design::font::line_height(1)) / 2;
             // WHY 146 is the column: it is the count pill's own width (550..696).
-            if let Some(c) = test_text(x, y, badge_x, badge_y, 1, badge_str, 146, ACCENT_SKY) {
+            if let Some(c) = test_text(x, y, badge_x, badge_y, 1, badge_str, 146, ACCENT_SKY, SURFACE_RAISED) {
                 return c;
             }
 
@@ -1655,6 +1658,7 @@ fn get_calendar_pixel(
                         // the outline face, so both fit.
                         672,
                         TEXT_PRIMARY,
+                        SURFACE_DARK,
                     ) {
                         return c;
                     }
@@ -1709,6 +1713,7 @@ fn get_calendar_pixel(
                         // centred in.
                         672,
                         TEXT_MUTED,
+                        SURFACE_DARK,
                     ) {
                         return c;
                     }
@@ -1754,6 +1759,7 @@ fn get_calendar_pixel(
                         // face, so both fit the 308px button.
                         ACTION_BTN_W,
                         ACCENT_SKY,
+                        0xFF132338,
                     ) {
                         return c;
                     }
@@ -1796,21 +1802,21 @@ fn get_calendar_pixel(
                 let item = &agenda.items[card_idx];
                 let line_h1 = std::design::font::line_height(1);
                 if y >= card_y + 12 && y < card_y + 12 + line_h1 {
-                    if let Some(c) = test_text(x, y, 44, card_y + 12, 1, item.title_bytes(), 696 - 44, TEXT_PRIMARY) {
+                    if let Some(c) = test_text(x, y, 44, card_y + 12, 1, item.title_bytes(), 696 - 44, TEXT_PRIMARY, SURFACE_DARK) {
                         return c;
                     }
                 }
                 if y >= card_y + 44 && y < card_y + 44 + line_h1 {
                     let mut time_buf = [0u8; 5];
                     let time_n = fmt_time(&mut time_buf, item.hour, item.minute);
-                    if let Some(c) = test_text(x, y, 44, card_y + 44, 1, &time_buf[..time_n], 696 - 44, ACCENT_SKY) {
+                    if let Some(c) = test_text(x, y, 44, card_y + 44, 1, &time_buf[..time_n], 696 - 44, ACCENT_SKY, SURFACE_DARK) {
                         return c;
                     }
                 }
                 if y >= card_y + 76 && y < card_y + 76 + line_h1 {
                     let mut date_buf = [0u8; 12];
                     let date_n = fmt_date(&mut date_buf, item.year, item.month, item.day);
-                    if let Some(c) = test_text(x, y, 44, card_y + 76, 1, &date_buf[..date_n], 696 - 44, TEXT_MUTED) {
+                    if let Some(c) = test_text(x, y, 44, card_y + 76, 1, &date_buf[..date_n], 696 - 44, TEXT_MUTED, SURFACE_DARK) {
                         return c;
                     }
                 }
@@ -1896,6 +1902,7 @@ fn flow_pixel(x: usize, y: usize, app: &CalendarApp) -> u32 {
         // the outline face.
         SHEET_X1 - SHEET_X0 - 40,
         TEXT_PRIMARY,
+        SURFACE_DARK,
     ) {
         return c;
     }
@@ -1908,6 +1915,7 @@ fn flow_pixel(x: usize, y: usize, app: &CalendarApp) -> u32 {
         step_str,
         SHEET_X1 - SHEET_X0 - 40,
         TEXT_MUTED,
+        SURFACE_DARK,
     ) {
         return c;
     }
@@ -1952,6 +1960,7 @@ fn title_step_pixel(x: usize, y: usize, app: &CalendarApp) -> u32 {
             // inside the field and the field ends at TITLE_FIELD_X1.
             TITLE_FIELD_X1 - (TITLE_FIELD_X0 + 12),
             color,
+            SURFACE_RAISED,
         ) {
             return c;
         }
@@ -2018,6 +2027,7 @@ fn key_pixel(x: usize, y: usize, row: usize, col: usize) -> u32 {
         // against 180px, so every key fits on either face.
         x1 - x0,
         if accent { ACCENT_SKY } else { TEXT_PRIMARY },
+        SURFACE_RAISED,
     ) {
         return c;
     }
@@ -2062,6 +2072,7 @@ fn stepper_box_pixel(
         // The steppers' labels are scale 1; the column is the box's inner width.
         x1 - x0,
         TEXT_MUTED,
+        SURFACE_RAISED,
     ) {
         return Some(c);
     }
@@ -2078,6 +2089,7 @@ fn stepper_box_pixel(
         // date boxes' 192px and the time boxes' 300px.
         x1 - x0,
         value_color,
+        SURFACE_RAISED,
     ) {
         return Some(c);
     }
@@ -2108,6 +2120,7 @@ fn stepper_box_pixel(
                 // scale 2 and 11px on the outline, "+" 24 and 23px.
                 kx1 - kx0,
                 ACCENT_SKY,
+                SURFACE_RAISED,
             ) {
                 return Some(c);
             }
@@ -2202,6 +2215,7 @@ fn flow_status_pixel(x: usize, y: usize, app: &CalendarApp) -> u32 {
         status,
         SHEET_X1 - SHEET_X0 - 40,
         if ok { SUCCESS_EMERALD } else { TEXT_MUTED },
+        SURFACE_DARK,
     ) {
         return c;
     }
@@ -2294,6 +2308,7 @@ fn flow_buttons_pixel(x: usize, y: usize, forward_label: &[u8]) -> Option<u32> {
             // every label fits on either face.
             bx1 - bx0,
             if accent { ACCENT_SKY } else { TEXT_MUTED },
+            SURFACE_RAISED,
         ) {
             return Some(c);
         }

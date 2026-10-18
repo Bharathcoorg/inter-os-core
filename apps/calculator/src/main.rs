@@ -240,7 +240,7 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                         if prx < 2 || pry < 2 {
                             return BORDER_SUBTLE;
                         }
-                        if let Some(c) = std::design::font::test_text_aa(x, y, 92, 134, 1, op_sym, TEXT_PRIMARY, SURFACE_RAISED, true) {
+                        if let Some(c) = std::design::font::test_text_aa(x, y, 92, 130, 1, op_sym, TEXT_PRIMARY, SURFACE_RAISED, true) {
                             return c;
                         }
                         return SURFACE_RAISED;
@@ -249,7 +249,7 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                     if prx < 2 || pry < 2 {
                         return BORDER_SUBTLE;
                     }
-                    if let Some(c) = std::design::font::test_text_aa(x, y, 92, 134, 1, op_sym, TEXT_PRIMARY, SURFACE_RAISED, true) {
+                    if let Some(c) = std::design::font::test_text_aa(x, y, 92, 130, 1, op_sym, TEXT_PRIMARY, SURFACE_RAISED, true) {
                         return c;
                     }
                     return SURFACE_RAISED;
@@ -257,40 +257,49 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
             }
         }
 
-        // Format displayed value
-        let val = calc.displayed_value();
-        let is_neg = val < 0;
-        let mut uval = val.unsigned_abs();
-        let mut digits = [0u8; 20];
-        let mut count = 0usize;
-        if uval == 0 {
-            digits[0] = b'0';
-            count = 1;
+        if calc.error {
+            let err_text = b"Error";
+            let err_w = std::design::font::measure_bold(err_text, 4);
+            let x0 = (DISPLAY_X1 - DISPLAY_PAD).saturating_sub(err_w);
+            if let Some(c) = std::design::font::test_text_aa(x, y, x0, VALUE_Y0, 4, err_text, 0xFFEF4444, SURFACE_DARK, true) {
+                return c;
+            }
         } else {
-            let mut rev = [0u8; 20];
-            let mut rcount = 0usize;
-            while uval > 0 && rcount < 18 {
-                rev[rcount] = b'0' + (uval % 10) as u8;
-                uval /= 10;
-                rcount += 1;
-            }
-            if is_neg {
-                digits[0] = b'-';
+            // Format displayed value
+            let val = calc.displayed_value();
+            let is_neg = val < 0;
+            let mut uval = val.unsigned_abs();
+            let mut digits = [0u8; 20];
+            let mut count = 0usize;
+            if uval == 0 {
+                digits[0] = b'0';
                 count = 1;
+            } else {
+                let mut rev = [0u8; 20];
+                let mut rcount = 0usize;
+                while uval > 0 && rcount < 18 {
+                    rev[rcount] = b'0' + (uval % 10) as u8;
+                    uval /= 10;
+                    rcount += 1;
+                }
+                if is_neg {
+                    digits[0] = b'-';
+                    count = 1;
+                }
+                for j in 0..rcount {
+                    digits[count + j] = rev[rcount - 1 - j];
+                }
+                count += rcount;
             }
-            for j in 0..rcount {
-                digits[count + j] = rev[rcount - 1 - j];
+
+            let scale: usize = if count <= 7 { 4 } else if count <= 10 { 3 } else { 2 };
+            let total_w: usize = std::design::font::measure_bold(&digits[..count], scale);
+            let x0: usize = (DISPLAY_X1 - DISPLAY_PAD).saturating_sub(total_w);
+            let y0: usize = VALUE_Y0;
+
+            if let Some(c) = std::design::font::test_text_aa(x, y, x0, y0, scale, &digits[..count], TEXT_PRIMARY, SURFACE_DARK, true) {
+                return c;
             }
-            count += rcount;
-        }
-
-        let scale: usize = if count <= 7 { 4 } else if count <= 10 { 3 } else { 2 };
-        let total_w: usize = std::design::font::measure_bold(&digits[..count], scale);
-        let x0: usize = (DISPLAY_X1 - DISPLAY_PAD).saturating_sub(total_w);
-        let y0: usize = VALUE_Y0;
-
-        if let Some(c) = std::design::font::test_text_aa(x, y, x0, y0, scale, &digits[..count], TEXT_PRIMARY, SURFACE_DARK, true) {
-            return c;
         }
 
         // Subtle card border
@@ -377,7 +386,7 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                                 return c;
                             }
                         } else if act == '^' {
-                            let sym = b"x^2";
+                            let sym = b"x^y";
                             let w = std::design::font::measure_bold(sym, 1);
                             let x0 = center_x.saturating_sub(w / 2);
                             let y0 = center_y.saturating_sub(12);

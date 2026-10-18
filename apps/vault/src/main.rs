@@ -698,8 +698,8 @@ fn action_pixel(x: usize, y: usize, label: &[u8]) -> Option<u32> {
     // subtracting another 16 centred the text in a box inset 16 from the right
     // alone and sat the run 8px left of the pill's true centre. Measured on the
     // guest: label ink 570..669 against a 560..696 pill, centre 619.5 vs 628.
-    if font::ink_center(x, y, x0, y0 + (h - 24) / 2, 1, label, w, TEXT, SOFT, true) {
-        return Some(TEXT);
+    if let Some(c) = font::ink_center(x, y, x0, y0 + (h - 24) / 2, 1, label, w, TEXT, SOFT, true) {
+        return Some(c);
     }
     Some(SOFT)
 }
@@ -714,8 +714,8 @@ fn caption_pixel(
     text: &[u8],
     max_w: usize,
 ) -> Option<u32> {
-    if font::ink(x, y, x0, y0, 1, text, max_w, ACCENT, SURFACE, true) {
-        return Some(ACCENT);
+    if let Some(c) = font::ink(x, y, x0, y0, 1, text, max_w, ACCENT, SURFACE, true) {
+        return Some(c);
     }
     None
 }
@@ -737,14 +737,14 @@ fn metric_row(
 ) -> Option<u32> {
     let ix = x0 + PAD;
     let half = w / 2 - PAD - 16;
-    if font::ink(x, y, ix, y0, 1, label, half, MUTED, SURFACE, false) {
-        return Some(MUTED);
+    if let Some(c) = font::ink(x, y, ix, y0, 1, label, half, MUTED, SURFACE, false) {
+        return Some(c);
     }
-    if font::ink_right(x, y, x0 + w - PAD, y0, 1, value, half, value_ink, SURFACE, true) {
-        return Some(value_ink);
+    if let Some(c) = font::ink_right(x, y, x0 + w - PAD, y0, 1, value, half, value_ink, SURFACE, true) {
+        return Some(c);
     }
-    if font::ink(x, y, ix, y0 + 32, 1, source, w - PAD * 2, MUTED, SURFACE, false) {
-        return Some(MUTED);
+    if let Some(c) = font::ink(x, y, ix, y0 + 32, 1, source, w - PAD * 2, MUTED, SURFACE, false) {
+        return Some(c);
     }
     None
 }
@@ -768,14 +768,14 @@ fn tile_pixel(
         return Some(BORDER);
     }
     let iw = TILE_W - 32;
-    if font::ink(x, y, tx + 16, ty + 16, 1, title, iw, TEXT, SOFT, true) {
-        return Some(TEXT);
+    if let Some(c) = font::ink(x, y, tx + 16, ty + 16, 1, title, iw, TEXT, SOFT, true) {
+        return Some(c);
     }
-    if font::ink(x, y, tx + 16, ty + 48, 1, verdict, iw, verdict_ink, SOFT, true) {
-        return Some(verdict_ink);
+    if let Some(c) = font::ink(x, y, tx + 16, ty + 48, 1, verdict, iw, verdict_ink, SOFT, true) {
+        return Some(c);
     }
-    if font::ink(x, y, tx + 16, ty + 80, 1, hint, iw, MUTED, SOFT, false) {
-        return Some(MUTED);
+    if let Some(c) = font::ink(x, y, tx + 16, ty + 80, 1, hint, iw, MUTED, SOFT, false) {
+        return Some(c);
     }
     Some(SOFT)
 }
@@ -806,8 +806,8 @@ fn button_pixel(
     // Measured on the guest before this fix: "Verify all sectors" ink 85..255
     // against a 24..352 button - centre 170 vs 188, i.e. 18px off. Both labels
     // now centre on the button they are drawn in.
-    if font::ink_center(x, y, bx, by + (bh - 24) / 2, 1, label, bw, ink_c, fill, true) {
-        return Some(ink_c);
+    if let Some(c) = font::ink_center(x, y, bx, by + (bh - 24) / 2, 1, label, bw, ink_c, fill, true) {
+        return Some(c);
     }
     Some(fill)
 }
@@ -825,16 +825,16 @@ fn header_pixel(x: usize, y: usize) -> u32 {
     }
     let (pill_x, _, _, _) = action_rect(ACTION);
     let text_max = pill_x.saturating_sub(TITLE_X + 16);
-    if font::ink(x, y, TITLE_X, 20, 2, TITLE, text_max, TEXT, BG, true) {
-        return TEXT;
+    if let Some(c) = font::ink(x, y, TITLE_X, 20, 2, TITLE, text_max, TEXT, BG, true) {
+        return c;
     }
     // WHY y=76: the title runs at scale 2 (a 48 px line, ink 20..68), so the
     // subtitle starts a full line below it and still ends at row 100, inside
     // the 104 px header band. The old y=52 assumed the previous 8x8 face at
     // scale 2 (16 px); with the design face it printed the caption straight
     // through the title's descenders.
-    if font::ink(x, y, TITLE_X, 76, 1, SUBTITLE, text_max, MUTED, BG, false) {
-        return MUTED;
+    if let Some(c) = font::ink(x, y, TITLE_X, 76, 1, SUBTITLE, text_max, MUTED, BG, false) {
+        return c;
     }
     BG
 }
@@ -1041,7 +1041,7 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
     }
 
     // ---- Status line ------------------------------------------------------
-    if font::ink(
+    if let Some(c) = font::ink(
         x,
         y,
         MARGIN,
@@ -1053,7 +1053,7 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
         BG,
         false,
     ) {
-        return MUTED;
+        return c;
     }
 
     BG

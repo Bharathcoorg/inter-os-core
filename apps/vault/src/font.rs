@@ -102,23 +102,23 @@ pub fn ink(
     color: u32,
     bg: u32,
     bold: bool,
-) -> bool {
+) -> Option<u32> {
     if scale == 0 {
-        return false;
+        return None;
     }
     let h = face::line_height(scale);
     if y < y0 || y >= y0 + h || x < x0 || x >= x0 + max_w {
-        return false;
+        return None;
     }
     let mut buf = [0u8; RUN_CAP];
     let n = fit(text, scale, max_w, bold, &mut buf);
     if n == 0 {
-        return false;
+        return None;
     }
     if let Some(run) = crate::outline_text::place_run(x0, y0, scale, &buf[..n], Some(max_w), bold) {
-        return run.pixel(x, y, color, bg).is_some();
+        return run.pixel(x, y, color, bg);
     }
-    face::test_text_aa(x, y, x0, y0, scale, &buf[..n], color, bg, bold).is_some()
+    face::test_text_aa(x, y, x0, y0, scale, &buf[..n], color, bg, bold)
 }
 
 /// Right-aligned variant of `ink`: identical guarantees, the run ends at `x1`.
@@ -134,7 +134,7 @@ pub fn ink_right(
     color: u32,
     bg: u32,
     bold: bool,
-) -> bool {
+) -> Option<u32> {
     let w = fit_width(text, scale, max_w, bold);
     let x0 = x1.saturating_sub(w);
     ink(x, y, x0, y0, scale, text, max_w, color, bg, bold)
@@ -153,7 +153,7 @@ pub fn ink_center(
     color: u32,
     bg: u32,
     bold: bool,
-) -> bool {
+) -> Option<u32> {
     let w = fit_width(text, scale, max_w, bold);
     let cx = x0 + max_w.saturating_sub(w) / 2;
     ink(x, y, cx, y0, scale, text, max_w, color, bg, bold)

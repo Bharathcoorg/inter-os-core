@@ -9,6 +9,7 @@ pub struct CalculatorState {
     pub current_operand: i64,
     pub active_operation: Option<char>,
     pub result_mode: bool,
+    pub error: bool,
 }
 
 impl CalculatorState {
@@ -18,10 +19,14 @@ impl CalculatorState {
             current_operand: 0,
             active_operation: None,
             result_mode: false,
+            error: false,
         }
     }
 
     pub fn push_digit(&mut self, digit: i64) {
+        if self.error {
+            self.clear();
+        }
         if self.result_mode {
             self.current_operand = 0;
             self.result_mode = false;
@@ -32,6 +37,9 @@ impl CalculatorState {
     }
 
     pub fn set_operation(&mut self, op: char) {
+        if self.error {
+            self.clear();
+        }
         if self.active_operation.is_some() && !self.result_mode {
             self.evaluate();
         } else {
@@ -43,6 +51,9 @@ impl CalculatorState {
     }
 
     pub fn evaluate(&mut self) -> i64 {
+        if self.error {
+            return 0;
+        }
         if let Some(op) = self.active_operation {
             match op {
                 '+' => self.accumulator = self.accumulator.saturating_add(self.current_operand),
@@ -51,11 +62,21 @@ impl CalculatorState {
                 '/' => {
                     if self.current_operand != 0 {
                         self.accumulator /= self.current_operand;
+                    } else {
+                        self.error = true;
+                        self.active_operation = None;
+                        self.result_mode = true;
+                        return 0;
                     }
                 }
                 '%' => {
                     if self.current_operand != 0 {
                         self.accumulator %= self.current_operand;
+                    } else {
+                        self.error = true;
+                        self.active_operation = None;
+                        self.result_mode = true;
+                        return 0;
                     }
                 }
                 '^' => {
@@ -88,6 +109,7 @@ impl CalculatorState {
         self.current_operand = 0;
         self.active_operation = None;
         self.result_mode = false;
+        self.error = false;
     }
 
     pub fn toggle_sign(&mut self) {
@@ -287,6 +309,11 @@ mod tests {
         calc.set_operation('%');
         calc.push_digit(3);
         assert_eq!(calc.evaluate(), 2);
+
+        calc.set_operation('/');
+        calc.push_digit(0);
+        assert_eq!(calc.evaluate(), 0);
+        assert!(calc.error);
     }
 
     #[test]
