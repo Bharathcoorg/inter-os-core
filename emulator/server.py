@@ -853,7 +853,7 @@ SUPPORTED_PROFILES = {
         "arch": "x86_64",
         "machine": "q35",
         "cpu": "qemu64",
-        "ram": 1024,
+        "ram": 512,
         "boot_type": "BIOS/MBR Bootloader",
         "image": os.path.join(WORKSPACE_ROOT, "target", "inter-os-bios.img"),
         "status": "Primary QEMU Phone contract",
@@ -1411,6 +1411,8 @@ class VncScanoutClient:
         # monitor for zero changed pixels. Only real damage advances the
         # stream, so transport fps means visible changes per second.
         if rgba == self._last_published_rgba:
+            return
+        if now - self.latest_raw_time < 0.033:
             return
         self._last_published_rgba = rgba
 
@@ -3482,29 +3484,19 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             monitor_alive = bool(query_qemu_monitor(force=True).get('qemu_alive'))
             was_running = process_alive or monitor_alive
             if was_running and proc is None:
-                # A guest is alive but was launched by an earlier Studio
-                # process. stop_qemu_backend() must never kill a QEMU it does
-                # not own, so answer with that truth instead of reporting a
-                # stop that did not happen.
-                self._send_json(409, {
-                    'success': False,
-                    'was_running': True,
-                    'stopped': False,
-                    'owned': False,
-                    'error': ('QEMU is running but was not launched by this Studio '
-                              'server process; it was left untouched. The Reboot OS '
-                              'control resets it through the QEMU monitor instead.'),
-                })
-                return
+                # The guest was attached from an earlier session; instruct QEMU
+                # monitor directly to quit cleanly so all sockets and file locks are released.
+                send_qemu_monitor_cmd('quit')
+                time.sleep(0.5)
             stop_qemu_backend()
             if proc is not None:
                 try:
                     proc.wait(timeout=2)
                 except Exception:
                     pass
-            still_running = bool(proc and proc.poll() is None)
+            still_running = bool((proc and proc.poll() is None) or query_qemu_monitor(force=True).get('qemu_alive'))
             if still_running:
-                message = f"QEMU (PID {proc.pid}) did not exit after the stop request"
+                message = f"QEMU did not exit after the stop request"
             elif was_running:
                 message = f"QEMU stopped (PID {proc.pid})" if proc is not None else "QEMU stopped"
             else:
@@ -3565,6 +3557,9 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 _last_frame_cache.pop('portrait_jpeg', None)
                 _last_frame_cache.pop('portrait', None)
                 if data.get('cold') or action in ('cold_reboot', 'relaunch'):
+                    if qemu_subproc is None and query_qemu_monitor(force=True).get('qemu_alive'):
+                        send_qemu_monitor_cmd('quit')
+                        time.sleep(0.5)
                     stop_qemu_backend()
                     ok, resp = launch_qemu_profile(active_profile_key)
                     restart_method = 'backend_relaunch'
@@ -3572,6 +3567,9 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                     ok, resp = send_qemu_monitor_cmd('system_reset')
                     restart_method = 'monitor_system_reset'
                     if not ok:
+                        if qemu_subproc is None and query_qemu_monitor(force=True).get('qemu_alive'):
+                            send_qemu_monitor_cmd('quit')
+                            time.sleep(0.5)
                         stop_qemu_backend()
                         ok, resp = launch_qemu_profile(active_profile_key)
                         restart_method = 'backend_relaunch'

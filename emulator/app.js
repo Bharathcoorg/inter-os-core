@@ -419,7 +419,6 @@ document.addEventListener('DOMContentLoaded', () => {
   function updateHardwareProfilerUI(data) {
     if (!data) return;
     const isAlive = !!data.qemu_alive;
-    updateDeviceDisplay(isAlive, !!data.launcher_ready);
 
     // 1. Header Global Status (Simple & Clean: Online vs Standby)
     if (qemuGlobalText) {
@@ -445,6 +444,12 @@ document.addEventListener('DOMContentLoaded', () => {
       qemuGlobalStatus.title = isAlive
         ? `QEMU Microkernel: ${data.status ?? 'status unavailable'} (Mode: ${data.mode ?? 'mode unavailable'})`
         : 'QEMU Microkernel: Standby';
+    }
+
+    try {
+      updateDeviceDisplay(isAlive, !!data.launcher_ready);
+    } catch (err) {
+      console.error('[STUDIO] Error in updateDeviceDisplay:', err);
     }
 
     // 2. Hardware Profiler Top Badge
@@ -714,9 +719,16 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
+  let lastFallbackPollTime = 0;
   function runHighRefreshLoop() {
     if (!isStreamActive) return;
-    refreshScanoutFrame();
+    const now = performance.now();
+    if (now - lastFallbackPollTime >= 33) {
+      lastFallbackPollTime = now;
+      refreshScanoutFrame();
+    } else if (!binaryStreamActive) {
+      streamRafId = requestAnimationFrame(runHighRefreshLoop);
+    }
   }
 
   let scanoutImageData = null;
@@ -995,7 +1007,10 @@ document.addEventListener('DOMContentLoaded', () => {
       // expose its real scanout; boot/lock/off pixels are guest-owned. Until the
       // first real frame arrives the honest Studio-owned standby card is shown.
       if (screenLiveScanout) screenLiveScanout.style.display = 'flex';
-      if (!hasLiveFrame) setSurfaceState('no-signal');
+      if (!hasLiveFrame) {
+        setSurfaceState('no-signal');
+        refreshScanoutFrame(true);
+      }
       startScanoutStream();
     } else {
       stopScanoutStream();
