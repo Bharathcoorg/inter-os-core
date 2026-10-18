@@ -645,7 +645,14 @@ document.addEventListener('DOMContentLoaded', () => {
   let scanoutCtx = null;
   if (liveScanoutCanvas) {
     if (liveScanoutImg) liveScanoutImg.style.display = 'none';
-    scanoutCtx = liveScanoutCanvas.getContext('2d', { alpha: false, desynchronized: true });
+    try {
+      scanoutCtx = liveScanoutCanvas.getContext('2d', { alpha: false, desynchronized: true });
+    } catch (_) {
+      scanoutCtx = null;
+    }
+    if (!scanoutCtx) {
+      scanoutCtx = liveScanoutCanvas.getContext('2d');
+    }
     if (scanoutCtx) {
       scanoutCtx.imageSmoothingEnabled = true;
       scanoutCtx.imageSmoothingQuality = 'high';
@@ -712,6 +719,8 @@ document.addEventListener('DOMContentLoaded', () => {
     refreshScanoutFrame();
   }
 
+  let scanoutImageData = null;
+
   function renderScanoutPixels(pixels, width, height) {
     // Never resize the phone surface to a wrong geometry: only guest-derived
     // frames are displayed (native portrait 720x1440, the 360x720 phone slice
@@ -724,9 +733,15 @@ document.addEventListener('DOMContentLoaded', () => {
         liveScanoutCanvas.height = height;
         scanoutCtx.imageSmoothingEnabled = true;
         scanoutCtx.imageSmoothingQuality = 'high';
+        scanoutImageData = null;
       }
-      const imgData = new ImageData(new Uint8ClampedArray(pixels.buffer, pixels.byteOffset, width * height * 4), width, height);
-      scanoutCtx.putImageData(imgData, 0, 0);
+      if (!scanoutImageData || scanoutImageData.width !== width || scanoutImageData.height !== height) {
+        scanoutImageData = scanoutCtx.createImageData(width, height);
+      }
+      const neededBytes = width * height * 4;
+      const sourceBytes = pixels.subarray ? pixels.subarray(0, neededBytes) : pixels;
+      scanoutImageData.data.set(sourceBytes);
+      scanoutCtx.putImageData(scanoutImageData, 0, 0);
       displayedFrameW = width;
       displayedFrameH = height;
       updateDisplaySpecBadge();
@@ -842,7 +857,7 @@ document.addEventListener('DOMContentLoaded', () => {
           // When complete frame is received, present it and reset write offset
           if (streamWriteOffset >= currentFrameBytes) {
             const pixelBytes = streamFrameBuffer.subarray(16, currentFrameBytes);
-            if (currentSeq > lastFrameSeq) {
+            if (!hasLiveFrame || currentSeq !== lastFrameSeq) {
               lastFrameSeq = currentSeq;
               if (renderScanoutPixels(pixelBytes, currentWidth, currentHeight)) {
                 updateFpsCounter();
@@ -853,9 +868,8 @@ document.addEventListener('DOMContentLoaded', () => {
           }
         }
       }
-    } catch (_) {
-      // Failures take the shared termination path in the finally block, which
-      // restores polling and schedules the reconnect.
+    } catch (err) {
+      console.warn('[SCANOUT_STREAM] Binary stream read notice:', err);
     } finally {
       binaryStreamActive = false;
       // Every termination other than an explicit stopScanoutStream() (which
@@ -890,9 +904,11 @@ document.addEventListener('DOMContentLoaded', () => {
             const width = view.getUint16(4);
             const height = view.getUint16(6);
             const seq = view.getUint32(8);
-            lastFrameSeq = seq;
-            const pixels = new Uint8ClampedArray(buffer, 16);
-            renderScanoutPixels(pixels, width, height);
+            if (!hasLiveFrame || seq !== lastFrameSeq) {
+              lastFrameSeq = seq;
+              const pixels = new Uint8ClampedArray(buffer, 16, width * height * 4);
+              renderScanoutPixels(pixels, width, height);
+            }
           }
         }
       } else if (resp.status === 304) {
@@ -949,9 +965,9 @@ document.addEventListener('DOMContentLoaded', () => {
   function startScanoutStream() {
     if (isStreamActive) return;
     isStreamActive = true;
+    refreshScanoutFrame(true);
     startPersistentBinaryStream();
     if (!binaryStreamActive) {
-      refreshScanoutFrame(true);
       streamRafId = requestAnimationFrame(runHighRefreshLoop);
     }
   }
