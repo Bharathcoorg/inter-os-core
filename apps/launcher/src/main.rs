@@ -2120,6 +2120,7 @@ pub extern "C" fn _start() -> ! {
                     && refresh_ticks % ORB_FRAME_TICKS == 0
                 {
                     render_band(surface, &state, ORB_BAND_Y0, ORB_BAND_Y1);
+                    let _ = std::surface_flip(4);
                 }
                 if state.current_view == ViewMode::HomeScreen {
                     if refresh_ticks % 10 == 0 {
@@ -2983,19 +2984,41 @@ pub extern "C" fn _start() -> ! {
                             }
                         }
                         ViewMode::LockScreen => {
-                            // 1. Vertical swipe up or horizontal slide to unlock.
-                            let swipe_up = (is_drag(input.kind) && (input.dy < 0 || input.dx > 25))
-                                || input.kind == DRAG_FLING
-                                || input.kind == 7;
-                            if swipe_up {
-                                if state.lock_state == std::UserLockState::Unlocked || std::user_unlock(1000, b"").is_ok() {
-                                    state.lock_state = std::UserLockState::Unlocked;
-                                    state.pin_pad_visible = false;
-                                    state.current_view = ViewMode::HomeScreen;
-                                    render_view(surface, &state);
-                                    let _ = std::surface_flip(4);
-                                    std::log(0, "[LAUNCHER] Device unlocked via swipe/slide gesture. Home surface rendered.")
-                                        .ok();
+                            // 1. Vertical swipe up to unlock requires a vertical fling <= -28 px.
+                            if is_drag(input.kind) {
+                                if input.dy <= -28 {
+                                    if state.lock_state == std::UserLockState::Unlocked || std::user_unlock(1000, b"").is_ok() {
+                                        state.lock_state = std::UserLockState::Unlocked;
+                                        state.pin_pad_visible = false;
+                                        state.current_view = ViewMode::HomeScreen;
+                                        render_view(surface, &state);
+                                        let _ = std::surface_flip(4);
+                                        std::log(0, "[LAUNCHER] Device unlocked via swipe/slide gesture. Home surface rendered.")
+                                            .ok();
+                                        let mut drain = std::InputEvent {
+                                            kind: 0,
+                                            x: 0,
+                                            y: 0,
+                                            dx: 0,
+                                            dy: 0,
+                                            scale_milli: 1000,
+                                        };
+                                        while std::input_event_poll(&mut drain).is_ok() {}
+                                        break;
+                                    } else {
+                                        state.pin_buffer = [0; 8];
+                                        state.pin_len = 0;
+                                        state.pin_error = 0;
+                                        state.pin_setup_mode = std::user_get_lock_state(std::user_get_current()).ok() == Some(std::UserLockState::Uninitialized);
+                                        state.current_view = ViewMode::PinEntry;
+                                        render_view(surface, &state);
+                                        let _ = std::surface_flip(4);
+                                        std::log(0, "[LAUNCHER] Unlock gesture accepted; credential entry required.")
+                                            .ok();
+                                    }
+                                } else {
+                                    // Smaller flings must display informational prompt without bypassing locked state.
+                                    std::log(0, "[LAUNCHER] Lock screen tapped; swipe up to unlock.").ok();
                                     let mut drain = std::InputEvent {
                                         kind: 0,
                                         x: 0,
@@ -3006,16 +3029,6 @@ pub extern "C" fn _start() -> ! {
                                     };
                                     while std::input_event_poll(&mut drain).is_ok() {}
                                     break;
-                                } else {
-                                    state.pin_buffer = [0; 8];
-                                    state.pin_len = 0;
-                                    state.pin_error = 0;
-                                    state.pin_setup_mode = std::user_get_lock_state(std::user_get_current()).ok() == Some(std::UserLockState::Uninitialized);
-                                    state.current_view = ViewMode::PinEntry;
-                                    render_view(surface, &state);
-                                    let _ = std::surface_flip(4);
-                                    std::log(0, "[LAUNCHER] Unlock gesture accepted; credential entry required.")
-                                        .ok();
                                 }
                             }
                             // 2. Touch tap. WHY kind 2 as well as kind 1: the
@@ -3410,47 +3423,18 @@ pub extern "C" fn _start() -> ! {
                                     break;
                                 }
 
-                                if state.lock_state == std::UserLockState::Unlocked {
-                                    state.current_view = ViewMode::HomeScreen;
-                                    render_view(surface, &state);
-                                    let _ = std::surface_flip(4);
-                                    std::log(0, "[LAUNCHER] Lock screen dismissed. Home surface rendered.").ok();
-                                    let mut drain = std::InputEvent {
-                                        kind: 0,
-                                        x: 0,
-                                        y: 0,
-                                        dx: 0,
-                                        dy: 0,
-                                        scale_milli: 1000,
-                                    };
-                                    while std::input_event_poll(&mut drain).is_ok() {}
-                                    break;
-                                } else {
-                                    let has_cred = std::user_has_credential(1000).unwrap_or(false);
-                                    if has_cred {
-                                        state.pin_buffer = [0; 8];
-                                        state.pin_len = 0;
-                                        state.pin_error = 0;
-                                        state.pin_setup_mode = false;
-                                        state.current_view = ViewMode::PinEntry;
-                                        render_view(surface, &state);
-                                        let _ = std::surface_flip(4);
-                                        std::log(0, "[LAUNCHER] Lock screen tapped; credential entry required.").ok();
-                                    } else {
-                                        // Uncredentialed device remains locked on tap; swipe up is required to unlock.
-                                        std::log(0, "[LAUNCHER] Lock screen tapped; swipe up to unlock.").ok();
-                                    }
-                                    let mut drain = std::InputEvent {
-                                        kind: 0,
-                                        x: 0,
-                                        y: 0,
-                                        dx: 0,
-                                        dy: 0,
-                                        scale_milli: 1000,
-                                    };
-                                    while std::input_event_poll(&mut drain).is_ok() {}
-                                    break;
-                                }
+                                // Tap on lock screen displays informational prompt without bypassing locked state.
+                                std::log(0, "[LAUNCHER] Lock screen tapped; swipe up to unlock.").ok();
+                                let mut drain = std::InputEvent {
+                                    kind: 0,
+                                    x: 0,
+                                    y: 0,
+                                    dx: 0,
+                                    dy: 0,
+                                    scale_milli: 1000,
+                                };
+                                while std::input_event_poll(&mut drain).is_ok() {}
+                                break;
                             }
                         }
                         ViewMode::PowerMenu => {

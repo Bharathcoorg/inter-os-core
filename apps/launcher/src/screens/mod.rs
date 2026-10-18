@@ -35,7 +35,7 @@ pub use lock::{LOCK_DATE_TEXT_LEN, LOCK_MONTH_ABBR, LOCK_WEEKDAY_ABBR};
 pub use lock::{LOCK_BTN_CY, LOCK_BTN_L_CX, LOCK_BTN_R, LOCK_BTN_R_CX};
 pub use lock::hit_test_pin_pad;
 pub use notifications::get_notifications_color;
-pub use pin::{get_pin_color, key_at};
+pub use pin::get_pin_color;
 pub use power::get_power_menu_color;
 pub use quick_controls::get_quick_controls_color;
 pub use system_space::get_system_space_color;

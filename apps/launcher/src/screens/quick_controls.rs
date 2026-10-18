@@ -437,42 +437,30 @@ impl PanelRow {
     /// cannot produce, and the only reliable place to enforce that is the line
     /// that decides whether the value exists.
     fn reading(self, state: &LauncherState) -> Value {
-        // Contract tokens preservation for verification suite:
-        // let brightness_available = false;
-        // b"Unavailable"
-        // b"N/A"
         match self {
-            PanelRow::Wifi => if state.wifi_enabled {
-                Value::of(b"Connected")
-            } else {
+            PanelRow::Wifi => if !state.wifi_enabled {
                 Value::absent(b"Disabled")
+            } else {
+                hardware("wifi")
             },
-            PanelRow::Bluetooth => if state.bluetooth_enabled {
-                Value::of(b"Active")
-            } else {
+            PanelRow::Bluetooth => if !state.bluetooth_enabled {
                 Value::absent(b"Disabled")
+            } else {
+                hardware("bluetooth")
             },
-            PanelRow::Cellular => if state.cellular_enabled {
-                Value::of(b"LTE 4G")
-            } else {
+            PanelRow::Cellular => if !state.cellular_enabled {
                 Value::absent(b"Disabled")
+            } else {
+                hardware("cellular")
             },
             PanelRow::Airplane => if state.airplane_mode {
                 Value::of(b"Active")
             } else {
                 Value::absent(b"Off")
             },
-            PanelRow::Brightness => {
-                Value::of(b"Adaptive")
-            },
-            PanelRow::Volume => {
-                Value::of(b"Media")
-            },
-            PanelRow::Torch => if state.torch_enabled {
-                Value::of(b"On")
-            } else {
-                Value::absent(b"Off")
-            },
+            PanelRow::Brightness => Value::absent(b"Unavailable"),
+            PanelRow::Volume => Value::absent(b"Tap to set level"),
+            PanelRow::Torch => Value::absent(b"N/A"),
             PanelRow::DoNotDisturb => if state.dnd_enabled {
                 Value::of(b"On")
             } else {
@@ -504,15 +492,24 @@ impl Value {
     }
 }
 
-fn brightness_level(state: &LauncherState) -> Option<u32> {
-    Some(state.brightness_percent as u32)
+fn hardware(category: &str) -> Value {
+    match interos_std::settings_hardware_status(category) {
+        Ok(0) => Value::of(b"Available"),
+        Ok(1) => Value::of(b"Simulated"),
+        Ok(_) => Value::absent(b"Unavailable"),
+        Err(_) => Value::absent(b"Unavailable"),
+    }
+}
+
+fn brightness_level(_state: &LauncherState) -> Option<u32> {
+    None
 }
 
 fn volume_level(state: &LauncherState) -> Option<u32> {
     if state.volume_state_valid {
         Some(state.last_volume_percent as u32)
     } else {
-        Some(75)
+        None
     }
 }
 
@@ -912,17 +909,25 @@ impl QuickControlsFrame {
         // a flat reading while it is false, a level control with a track the
         // moment it is true. `brightness_level()` returning `None` is today's
         // answer to the second half of that; the flag is the rule.
-        // Contract tokens preservation for verification suite:
         let brightness_available = false;
-        let _ = brightness_available;
-        let brightness = build_level(
-            BRIGHTNESS_ROW,
-            LEVEL_LIST[0],
-            &values[item_index(LEVEL_LIST[0])],
-            brightness_level(state),
-            Some(BRIGHTNESS_TRACK),
-            theme,
-        );
+        let brightness = if brightness_available {
+            build_level(
+                BRIGHTNESS_ROW,
+                LEVEL_LIST[0],
+                &values[item_index(LEVEL_LIST[0])],
+                brightness_level(state),
+                Some(BRIGHTNESS_TRACK),
+                theme,
+            )
+        } else {
+            build_row(
+                BRIGHTNESS_ROW,
+                LEVEL_LIST[0],
+                &values[item_index(LEVEL_LIST[0])],
+                None,
+                theme,
+            )
+        };
         let volume = build_level(
             VOLUME_SLIDER,
             LEVEL_LIST[1],

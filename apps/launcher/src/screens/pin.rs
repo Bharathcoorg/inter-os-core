@@ -266,6 +266,7 @@ pub fn get_pin_color(x: usize, y: usize, state: &LauncherState) -> u32 {
 ///
 /// `'E'` is the UNLOCK action and `'D'` the DEL action, matching the two buttons
 /// this surface draws beneath the keys.
+#[allow(dead_code)]
 pub fn key_at(x: usize, y: usize) -> Option<char> {
     for row in 0..3 {
         for col in 0..3 {
