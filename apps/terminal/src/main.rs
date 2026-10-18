@@ -280,6 +280,8 @@ pub struct TerminalApp {
     pub total_commands_executed: u32,
     pub lines: [Option<ConsoleLine>; CONSOLE_LINES],
     pub line_count: usize,
+    pub input_buf: [u8; 64],
+    pub input_len: usize,
 }
 
 impl TerminalApp {
@@ -318,6 +320,8 @@ impl TerminalApp {
             total_commands_executed: 0,
             lines,
             line_count: 7,
+            input_buf: [0; 64],
+            input_len: 0,
         }
     }
 
@@ -386,15 +390,125 @@ impl TerminalApp {
         self.total_commands_executed += 1;
     }
 
+    /// Updates the terminal prompt line to display the current input buffer contents with cursor.
+    fn sync_prompt_line(&mut self) {
+        let mut buf = [0u8; LINE_CAP];
+        let prefix = b"interos@sovereign:~$ ";
+        buf[..prefix.len()].copy_from_slice(prefix);
+        let n = self.input_len.min(LINE_CAP - prefix.len() - 1);
+        buf[prefix.len()..prefix.len() + n].copy_from_slice(&self.input_buf[..n]);
+        buf[prefix.len() + n] = b'_';
+        let total_len = prefix.len() + n + 1;
+
+        let mut line = ConsoleLine {
+            text: [0; LINE_CAP],
+            len: total_len,
+            color: SUCCESS_EMERALD,
+        };
+        line.text[..total_len].copy_from_slice(&buf[..total_len]);
+
+        if self.line_count > 0
+            && self.lines[self.line_count - 1].map_or(false, |l| l.as_bytes().starts_with(b"interos@"))
+        {
+            self.lines[self.line_count - 1] = Some(line);
+        } else if self.line_count < CONSOLE_LINES {
+            self.lines[self.line_count] = Some(line);
+            self.line_count += 1;
+        } else {
+            for i in 0..CONSOLE_LINES - 1 {
+                self.lines[i] = self.lines[i + 1];
+            }
+            self.lines[CONSOLE_LINES - 1] = Some(line);
+        }
+    }
+
+    /// Handles keyboard input events routed to this terminal.
+    pub fn handle_key(&mut self, key: std::InputKeyEvent) -> bool {
+        use std::input_key_code;
+        if !key.pressed {
+            return false;
+        }
+
+        if key.ctrl {
+            if key.code == b'c' as u32 || key.code == b'C' as u32 || key.code == 3 {
+                self.input_len = 0;
+                if self.line_count > 0
+                    && self.lines[self.line_count - 1].map_or(false, |l| l.as_bytes().starts_with(b"interos@"))
+                {
+                    self.line_count -= 1;
+                }
+                self.push_line("interos@sovereign:~$ ^C", SUCCESS_EMERALD);
+                self.push_line("interos@sovereign:~$ _", SUCCESS_EMERALD);
+                return true;
+            }
+            if key.code == b'l' as u32 || key.code == b'L' as u32 || key.code == 12 {
+                self.lines = [None; CONSOLE_LINES];
+                self.line_count = 0;
+                self.sync_prompt_line();
+                return true;
+            }
+            if key.code == b'u' as u32 || key.code == b'U' as u32 || key.code == 21 {
+                self.input_len = 0;
+                self.sync_prompt_line();
+                return true;
+            }
+        }
+
+        match key.code {
+            input_key_code::ENTER | 10 | 13 => {
+                let mut cmd_buf = [0u8; 64];
+                let len = self.input_len.min(64);
+                cmd_buf[..len].copy_from_slice(&self.input_buf[..len]);
+                self.input_len = 0;
+                if let Ok(cmd_str) = core::str::from_utf8(&cmd_buf[..len]) {
+                    self.execute_command(cmd_str);
+                } else {
+                    self.execute_command("");
+                }
+                true
+            }
+            input_key_code::BACKSPACE | 8 | 127 => {
+                if self.input_len > 0 {
+                    self.input_len -= 1;
+                    self.sync_prompt_line();
+                    true
+                } else {
+                    false
+                }
+            }
+            input_key_code::ESCAPE | 27 => {
+                if self.input_len > 0 {
+                    self.input_len = 0;
+                    self.sync_prompt_line();
+                    true
+                } else {
+                    false
+                }
+            }
+            code if (32..=126).contains(&code) => {
+                if self.input_len < self.input_buf.len() {
+                    self.input_buf[self.input_len] = code as u8;
+                    self.input_len += 1;
+                    self.sync_prompt_line();
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
     /// Executes a built-in terminal command and renders to console.
-    pub fn execute_command(&mut self, cmd_line: &'static str) {
+    pub fn execute_command(&mut self, cmd_line: &str) {
         if self.line_count > 0
             && self.lines[self.line_count - 1].map_or(false, |l| l.as_bytes().starts_with(b"interos@"))
         {
             self.line_count -= 1;
         }
 
-        match cmd_line {
+        let cmd = cmd_line.trim();
+        match cmd {
             "help" => {
                 self.push_line("interos@sovereign:~$ help", SUCCESS_EMERALD);
                 self.push_line("Commands: help, status, ps, mem, caps, share, dma, ping, ls, services, cat", TEXT_PRIMARY);
@@ -620,7 +734,32 @@ impl TerminalApp {
                     }
                 }
             }
-            _ => {}
+            "clear" => {
+                self.lines = [None; CONSOLE_LINES];
+                self.line_count = 0;
+                self.record_history("clear", 0);
+            }
+            "" => {
+                self.push_line("interos@sovereign:~$", SUCCESS_EMERALD);
+            }
+            unknown => {
+                let mut pbuf = [0u8; LINE_CAP];
+                let prefix = b"interos@sovereign:~$ ";
+                pbuf[..prefix.len()].copy_from_slice(prefix);
+                let ubytes = unknown.as_bytes();
+                let un = ubytes.len().min(LINE_CAP - prefix.len());
+                pbuf[prefix.len()..prefix.len() + un].copy_from_slice(&ubytes[..un]);
+                self.push_line_bytes(&pbuf[..prefix.len() + un], SUCCESS_EMERALD);
+
+                let mut err_buf = [0u8; LINE_CAP];
+                let err_pre = b"terminal: command not found: ";
+                err_buf[..err_pre.len()].copy_from_slice(err_pre);
+                let en = ubytes.len().min(LINE_CAP - err_pre.len());
+                err_buf[err_pre.len()..err_pre.len() + en].copy_from_slice(&ubytes[..en]);
+                self.push_line_bytes(&err_buf[..err_pre.len() + en], TEXT_MUTED);
+
+                self.record_history("unknown", -1);
+            }
         }
         self.push_line("interos@sovereign:~$ _", SUCCESS_EMERALD);
     }
@@ -1001,6 +1140,15 @@ pub extern "C" fn _start() -> ! {
                 };
                 let mut dirty = Dirty::None;
                 while std::input_event_poll(&mut input).is_ok() {
+                    // Keyboard first: the normalized pipeline multiplexes
+                    // keys and touches through the same poll, so a key must be
+                    // recognised before the touch branch below sees kind != 1.
+                    if let Some(key) = input.key_event() {
+                        if term.handle_key(key) {
+                            dirty = dirty.widen(Dirty::Console);
+                        }
+                        continue;
+                    }
                     if input.kind == 4 || input.kind == 6 || input.kind == 7 || input.kind == 8 || input.kind == 10 {
                         std::log(
                             0,
@@ -1054,6 +1202,7 @@ pub extern "C" fn _start() -> ! {
                         };
 
                         if let Some(cmd) = qcmd {
+                            term.input_len = 0;
                             term.execute_command(cmd);
                             dirty = dirty.widen(Dirty::Console);
                         }
