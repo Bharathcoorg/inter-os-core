@@ -124,6 +124,9 @@ impl ShareSheetManager {
             delegated_lease_id,
         };
 
+        if self.history.len() >= 64 {
+            self.history.remove(0);
+        }
         self.history.push(tx);
         tx_id
     }
