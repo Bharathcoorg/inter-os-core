@@ -248,7 +248,7 @@ pub const SCENES: [Scene; 3] = [
         ink: 0xFF111214,
         horizon_y: 138,
         mist_y: 195,
-        rock_y: 260,
+        rock_y: 290,
         far: &SCENE_DAYLIGHT_FAR,
         near: &SCENE_DAYLIGHT_NEAR,
     },

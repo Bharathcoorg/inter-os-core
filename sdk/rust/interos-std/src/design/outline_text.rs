@@ -75,6 +75,7 @@ struct Loaded {
     len: usize,
     w: usize,
     h: usize,
+    bold: bool,
 }
 
 static mut LOADED: [Option<Loaded>; SLOTS] = [None; SLOTS];
@@ -92,13 +93,18 @@ static mut LOADED: [Option<Loaded>; SLOTS] = [None; SLOTS];
 /// only when every slot holds a different live run is one reused, in which case
 /// the caller has asked for more resident runs than exist and one of them must
 /// give way.
-fn slot_for(em: u32, x: usize, y: usize, text: &[u8]) -> usize {
+fn slot_for(em: u32, x: usize, y: usize, text: &[u8], bold: bool) -> usize {
     // SAFETY: the read of the cache array, taken and released inside this
     // function. The lock surface's painter is the only caller, it is single
     // threaded, and nothing reached from here re-enters it.
     let loaded = unsafe { &*core::ptr::addr_of!(LOADED) };
     let same = |l: &Loaded| {
-        l.em == em && l.x == x && l.y == y && l.len == text.len() && l.key[..text.len()] == *text
+        l.em == em
+            && l.x == x
+            && l.y == y
+            && l.bold == bold
+            && l.len == text.len()
+            && l.key[..text.len()] == *text
     };
     let mut first_free = None;
     for (i, slot) in loaded.iter().enumerate() {
@@ -208,6 +214,11 @@ impl OutlineRun {
     /// buffer, or a baseline too close to the top of the surface for the
     /// ascender to fit.
     pub fn place(x: usize, y: usize, em: u32, text: &[u8]) -> Option<OutlineRun> {
+        Self::place_styled(x, y, em, text, false)
+    }
+
+    /// Places `text` with optional faux-bold stroke dilation.
+    pub fn place_styled(x: usize, y: usize, em: u32, text: &[u8], bold: bool) -> Option<OutlineRun> {
         if em == 0 || text.is_empty() || text.len() > KEY_MAX {
             return None;
         }
@@ -219,7 +230,7 @@ impl OutlineRun {
 
         let (ascent, descent) = typeface::line_metrics(em);
         let line_h = (ascent + descent) as usize;
-        let w = typeface::text_advance_px(text, em) as usize;
+        let w = typeface::text_advance_px(text, em) as usize + if bold { 1 } else { 0 };
         if w == 0 || w > RUN_W_MAX || line_h > RUN_H_MAX {
             return None;
         }
@@ -231,7 +242,7 @@ impl OutlineRun {
 
         let mut key = [0u8; KEY_MAX];
         key[..text.len()].copy_from_slice(text);
-        let slot = slot_for(em, x, y, text);
+        let slot = slot_for(em, x, y, text, bold);
 
         // SAFETY: the mutable access to this slot's cache entry and its buffer,
         // taken and released inside this function. The lock surface's painter is
@@ -241,6 +252,7 @@ impl OutlineRun {
             if loaded.em == em
                 && loaded.x == x
                 && loaded.y == y
+                && loaded.bold == bold
                 && loaded.len == text.len()
                 && loaded.key[..text.len()] == *text
             {
@@ -283,6 +295,18 @@ impl OutlineRun {
             pen += typeface::advance_px(c, em) as i32;
         }
 
+        if bold {
+            for row in 0..line_h {
+                let row_start = row * w;
+                for col in (1..w).rev() {
+                    let prev = cov[row_start + col - 1];
+                    if prev > cov[row_start + col] {
+                        cov[row_start + col] = prev;
+                    }
+                }
+            }
+        }
+
         let run = OutlineRun {
             x,
             y,
@@ -302,6 +326,7 @@ impl OutlineRun {
                 len: text.len(),
                 w,
                 h: line_h,
+                bold,
             });
         }
         Some(run)
@@ -338,7 +363,7 @@ impl OutlineRun {
     }
 }
 
-pub const WINDOW_OVERFLOW: &[u8] = b"$()@[]jy";
+pub const WINDOW_OVERFLOW: &[u8] = b"";
 
 pub fn place_run(
     x0: usize,
@@ -348,19 +373,13 @@ pub fn place_run(
     max_w: Option<usize>,
     bold: bool,
 ) -> Option<OutlineRun> {
-    if scale < 2 {
+    if scale < 1 || text.is_empty() || text.len() > KEY_MAX {
         return None;
     }
     let em = em_for_scale(scale);
-    if bold || text.is_empty() || text.len() > KEY_MAX {
-        return None;
-    }
-    if text.iter().any(|&c| WINDOW_OVERFLOW.contains(&c)) {
-        return None;
-    }
     let (ascent, _) = typeface::line_metrics(em);
     let baseline = (y0 + font::BASELINE * scale).max(ascent as usize);
-    let run = OutlineRun::place(x0, baseline, em, text)?;
+    let run = OutlineRun::place_styled(x0, baseline, em, text, bold)?;
     if let Some(mw) = max_w {
         if run.w > mw {
             return None;
@@ -377,14 +396,11 @@ impl OutlineRun {
         text: &[u8],
         bold: bool,
     ) -> Option<OutlineRun> {
-        if scale < 2 || bold || text.is_empty() || text.len() > KEY_MAX {
-            return None;
-        }
-        if text.iter().any(|&c| WINDOW_OVERFLOW.contains(&c)) {
+        if scale < 1 || text.is_empty() || text.len() > KEY_MAX {
             return None;
         }
         let em = em_for_scale(scale);
-        OutlineRun::place(x0, baseline, em, text)
+        OutlineRun::place_styled(x0, baseline, em, text, bold)
     }
 }
 
@@ -408,17 +424,11 @@ pub fn run_box(x0: usize, y0: usize, scale: usize, text: &[u8]) -> (usize, usize
 }
 
 pub fn drawn_advance(text: &[u8], scale: usize, max_w: Option<usize>) -> Option<usize> {
-    if scale < 2 {
+    if scale < 1 || text.is_empty() || text.len() > KEY_MAX {
         return None;
     }
     let em = em_for_scale(scale);
-    if text.is_empty() || text.len() > KEY_MAX {
-        return None;
-    }
     if text.iter().any(|&c| typeface::advance_px(c, em) == 0) {
-        return None;
-    }
-    if text.iter().any(|&c| WINDOW_OVERFLOW.contains(&c)) {
         return None;
     }
     let w = typeface::text_advance_px(text, em) as usize;
@@ -771,5 +781,19 @@ mod tests {
             );
         }
         assert_eq!(em_for_scale(0), 0, "a zero scale has no size");
+    }
+
+    #[test]
+    fn place_run_supports_scale_1_and_bold_and_descenders() {
+        let _pool: Option<_> = Some(reset_slots());
+        // Scale 1 run with descenders ("Battery")
+        let run_regular = place_run(10, 50, 1, b"Battery", None, false).expect("scale 1 placed");
+        assert!(run_regular.w > 0);
+        assert!(run_regular.h > 0);
+
+        // Bold run
+        let run_bold = place_run(10, 100, 2, b"Settings", None, true).expect("bold placed");
+        assert!(run_bold.w > 0);
+        assert!(run_bold.h > 0);
     }
 }

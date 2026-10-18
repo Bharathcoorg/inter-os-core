@@ -528,7 +528,66 @@ pub mod primitives {
 
 pub use crate::font;
 
+pub mod back_button {
+    use super::radius::*;
 
+    pub const X: usize = 24;
+    pub const Y: usize = 24;
+    pub const SIZE: usize = 48;
+    pub const RADIUS: usize = CONTROL;
+
+    #[inline]
+    pub fn chevron_ink(x: usize, y: usize, cx: usize, cy: usize, color: u32) -> Option<u32> {
+        let dx = (x as i32) - (cx as i32);
+        let dy = (y as i32) - (cy as i32);
+        if dx >= -4 && dx <= 4 && dy >= -8 && dy <= 8 {
+            let arm_top = dx == -dy - 4 || dx == -dy - 3;
+            let arm_bot = dx == dy - 4 || dx == dy - 3;
+            if arm_top || arm_bot {
+                return Some(color);
+            }
+        }
+        None
+    }
+
+    #[inline]
+    pub fn pixel(x: usize, y: usize, text_color: u32, border_color: u32, bg_color: u32) -> Option<u32> {
+        if x < X || x >= X + SIZE || y < Y || y >= Y + SIZE {
+            return None;
+        }
+        let rad = RADIUS;
+        let left = X + rad;
+        let right = X + SIZE - 1 - rad;
+        let top = Y + rad;
+        let bottom = Y + SIZE - 1 - rad;
+        let in_box = (x >= left && x <= right) || (y >= top && y <= bottom);
+        let in_corners = {
+            let cx = if x < left { left } else { right };
+            let cy = if y < top { top } else { bottom };
+            let dx = x as i32 - cx as i32;
+            let dy = y as i32 - cy as i32;
+            dx * dx + dy * dy <= (rad as i32) * (rad as i32)
+        };
+        if !in_box && !in_corners {
+            return None;
+        }
+
+        let is_border = x == X || x == X + SIZE - 1 || y == Y || y == Y + SIZE - 1;
+        if is_border {
+            return Some(border_color);
+        }
+
+        if let Some(c) = chevron_ink(x, y, X + SIZE / 2, Y + SIZE / 2, text_color) {
+            return Some(c);
+        }
+        Some(bg_color)
+    }
+
+    #[inline]
+    pub fn contains(x: usize, y: usize) -> bool {
+        x >= X && x < X + SIZE && y >= Y && y < Y + SIZE
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -696,5 +755,15 @@ mod tests {
         }
         let (direct_sx, _) = logical_to_surface(logical_total, 0);
         assert_eq!(physical_total_snapped, direct_sx, "snapped glyph run must match total logical run");
+    }
+
+    #[test]
+    fn back_button_geometry_and_ink() {
+        use super::back_button;
+        assert!(back_button::contains(24, 24));
+        assert!(back_button::contains(71, 71));
+        assert!(!back_button::contains(23, 24));
+        assert!(!back_button::contains(72, 72));
+        assert!(back_button::pixel(48, 48, 0xFF000000, 0xFF888888, 0xFFFFFFFF).is_some());
     }
 }
