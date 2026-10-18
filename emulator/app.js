@@ -736,8 +736,11 @@ document.addEventListener('DOMContentLoaded', () => {
     return false;
   }
 
-  let binaryStreamActive = false;
-  let binaryStreamAbort = null;
+  // Single fixed reusable buffer for FHD+ (1080 * 2160 * 4 + 16 header bytes = 9331216 bytes).
+  // Pre-allocated once so chunked stream processing never reallocates per TCP chunk (O(N) vs O(N^2)).
+  const FIXED_FRAME_BUFFER_BYTES = 9331216;
+  let streamFrameBuffer = new Uint8Array(FIXED_FRAME_BUFFER_BYTES);
+  let streamWriteOffset = 0;
 
   async function startPersistentBinaryStream() {
     // A reconnect timer from an earlier session must not resurrect the stream
@@ -755,76 +758,99 @@ document.addEventListener('DOMContentLoaded', () => {
         throw new Error(`Binary stream HTTP ${resp.status}`);
       }
       const reader = resp.body.getReader();
-      let chunks = [];
-      let totalLength = 0;
+      streamWriteOffset = 0;
+      let currentFrameBytes = 0;
+      let currentWidth = 0;
+      let currentHeight = 0;
+      let currentSeq = 0;
 
       while (isStreamActive && !signal.aborted) {
         const { done, value } = await reader.read();
         if (done) break;
 
-        chunks.push(value);
-        totalLength += value.length;
-        if (totalLength < 16) continue;
+        let valOffset = 0;
+        while (valOffset < value.length) {
+          // If we haven't determined the frame size yet, read at least 16 bytes for the header
+          if (currentFrameBytes === 0) {
+            const neededHdr = 16 - streamWriteOffset;
+            const toCopyHdr = Math.min(value.length - valOffset, neededHdr);
+            streamFrameBuffer.set(value.subarray(valOffset, valOffset + toCopyHdr), streamWriteOffset);
+            streamWriteOffset += toCopyHdr;
+            valOffset += toCopyHdr;
 
-        let accumulated;
-        if (chunks.length === 1) {
-          accumulated = chunks[0];
-        } else {
-          accumulated = new Uint8Array(totalLength);
-          let offset = 0;
-          for (let i = 0; i < chunks.length; i++) {
-            accumulated.set(chunks[i], offset);
-            offset += chunks[i].length;
-          }
-        }
+            if (streamWriteOffset < 16) {
+              // Wait for more bytes to complete the 16-byte header
+              break;
+            }
 
-        let processedOffset = 0;
-        while (totalLength - processedOffset >= 16) {
-          if (accumulated[processedOffset] !== 0x49 || accumulated[processedOffset + 1] !== 0x4F || accumulated[processedOffset + 2] !== 0x53 || accumulated[processedOffset + 3] !== 0x46) {
-            let sync = processedOffset + 1;
-            while (sync < totalLength && accumulated[sync] !== 0x49) sync++;
-            processedOffset = sync;
-            continue;
+            // Verify 'IOSF' magic header (0x49, 0x4F, 0x53, 0x46)
+            if (
+              streamFrameBuffer[0] !== 0x49 ||
+              streamFrameBuffer[1] !== 0x4F ||
+              streamFrameBuffer[2] !== 0x53 ||
+              streamFrameBuffer[3] !== 0x46
+            ) {
+              // Resync: search for next 0x49
+              let sync = 1;
+              while (sync < streamWriteOffset && streamFrameBuffer[sync] !== 0x49) sync++;
+              streamFrameBuffer.copyWithin(0, sync, streamWriteOffset);
+              streamWriteOffset -= sync;
+              continue;
+            }
+
+            const view = new DataView(streamFrameBuffer.buffer, streamFrameBuffer.byteOffset, 16);
+            const width = view.getUint16(4);
+            const height = view.getUint16(6);
+            const seq = view.getUint32(8);
+
+            if (width < 1 || height < 1 || width > 4096 || height > 4096) {
+              // Invalid dimensions, skip header
+              streamFrameBuffer.copyWithin(0, 16, streamWriteOffset);
+              streamWriteOffset -= 16;
+              continue;
+            }
+
+            const frameBytes = 16 + width * height * 4;
+            if (frameBytes > 32 * 1024 * 1024) {
+              // Excessively large frame, skip header
+              streamFrameBuffer.copyWithin(0, 16, streamWriteOffset);
+              streamWriteOffset -= 16;
+              continue;
+            }
+
+            currentFrameBytes = frameBytes;
+            currentWidth = width;
+            currentHeight = height;
+            currentSeq = seq;
+
+            if (currentFrameBytes > streamFrameBuffer.length) {
+              const larger = new Uint8Array(currentFrameBytes);
+              larger.set(streamFrameBuffer.subarray(0, streamWriteOffset));
+              streamFrameBuffer = larger;
+            }
           }
 
-          const view = new DataView(accumulated.buffer, accumulated.byteOffset + processedOffset, 16);
-          const width = view.getUint16(4);
-          const height = view.getUint16(6);
-          const seq = view.getUint32(8);
-          if (width < 1 || height < 1 || width > 4096 || height > 4096) {
-            processedOffset += 16;
-            continue;
-          }
-          const frameBytes = 16 + width * height * 4;
-          if (frameBytes > 32 * 1024 * 1024) {
-            processedOffset += 16;
-            continue;
+          // Write remaining frame data by offset into pre-allocated reusable buffer
+          const needed = currentFrameBytes - streamWriteOffset;
+          const toCopy = Math.min(value.length - valOffset, needed);
+          if (toCopy > 0) {
+            streamFrameBuffer.set(value.subarray(valOffset, valOffset + toCopy), streamWriteOffset);
+            streamWriteOffset += toCopy;
+            valOffset += toCopy;
           }
 
-          if (totalLength - processedOffset < frameBytes) {
-            break;
+          // When complete frame is received, present it and reset write offset
+          if (streamWriteOffset >= currentFrameBytes) {
+            const pixelBytes = streamFrameBuffer.subarray(16, currentFrameBytes);
+            if (currentSeq > lastFrameSeq) {
+              lastFrameSeq = currentSeq;
+              if (renderScanoutPixels(pixelBytes, currentWidth, currentHeight)) {
+                updateFpsCounter();
+              }
+            }
+            streamWriteOffset = 0;
+            currentFrameBytes = 0;
           }
-
-          const pixelBytes = accumulated.subarray(processedOffset + 16, processedOffset + frameBytes);
-          processedOffset += frameBytes;
-
-          if (seq > lastFrameSeq) {
-            lastFrameSeq = seq;
-            if (renderScanoutPixels(pixelBytes, width, height)) updateFpsCounter();
-          }
-        }
-
-        if (processedOffset > 0) {
-          const remaining = totalLength - processedOffset;
-          if (remaining > 0) {
-            chunks = [accumulated.slice(processedOffset)];
-            totalLength = remaining;
-          } else {
-            chunks = [];
-            totalLength = 0;
-          }
-        } else if (chunks.length > 1) {
-          chunks = [accumulated];
         }
       }
     } catch (_) {
@@ -841,6 +867,8 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     }
   }
+
+  const startBinaryFrameStream = startPersistentBinaryStream;
 
   async function refreshScanoutFrame(forceImmediate = false) {
     if (binaryStreamActive && !forceImmediate) return;
@@ -1701,13 +1729,24 @@ document.addEventListener('DOMContentLoaded', () => {
   emuBtnVoldown?.addEventListener('click', () => adjustVolume(-5));
   hwBtnVoldown?.addEventListener('click', () => adjustVolume(-5));
 
+  // Helper: check if activeElement or target is touchSurface, an input element, or inside the phone chassis
+  function isInteractiveOrChassisActive(target) {
+    const active = document.activeElement;
+    const isInput = (el) => el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable);
+    if (isInput(target) || isInput(active)) return true;
+    if (touchSurface && (active === touchSurface || target === touchSurface)) return true;
+    const chassis = document.getElementById('device-chassis');
+    if (chassis && ((active && chassis.contains(active)) || (target && chassis.contains(target)))) return true;
+    return false;
+  }
+
   // Global Keyboard Shortcuts (Studio volume keys only)
   // WHY: the Escape branches that closed the gravity shade and the Studio power
   // modal were removed with those surfaces; Escape is now forwarded to the guest
   // by the keyboard bridge further down.
   window.addEventListener('keydown', (e) => {
-    // Avoid interfering with inputs
-    if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) return;
+    // Avoid interfering with inputs, the guest touchSurface, or inside the phone chassis
+    if (isInteractiveOrChassisActive(e.target)) return;
     if (e.key === '=' || e.key === '+') {
       e.preventDefault();
       adjustVolume(5);
@@ -2822,7 +2861,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Keyboard shortcuts: 'F' toggles Focus Mode, 'D' switches to Deck, 'Escape' exits Focus Mode
   window.addEventListener('keydown', (e) => {
-    if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) return;
+    if (isInteractiveOrChassisActive(e.target)) return;
     if ((e.key === 'f' || e.key === 'F') && !e.ctrlKey && !e.metaKey && !e.altKey) {
       e.preventDefault();
       toggleFocusMode();
