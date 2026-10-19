@@ -223,6 +223,8 @@ pub struct LauncherState {
     pub app_category_lens: [u8; 32],
     pub app_count: usize,
     pub app_drawer_page: usize,
+    pub search_query: [u8; 32],
+    pub search_query_len: usize,
     pub active_child: Option<u64>,
     pub lock_state: std::UserLockState,
     /// The wallpaper the home surface renders.
@@ -300,6 +302,8 @@ impl LauncherState {
             app_category_lens: [0u8; 32],
             app_count: 0,
             app_drawer_page: 0,
+            search_query: [0u8; 32],
+            search_query_len: 0,
             active_child: None,
             lock_state: std::UserLockState::Uninitialized,
             // WHY the stock scene rather than the theme's own ramp: the home and
@@ -2539,13 +2543,7 @@ pub extern "C" fn _start() -> ! {
 
                                 // A. Dismiss button taps
                                 if let Some(slot) = screens::activity::activity_close_hit(&state, x, y) {
-                                    if state.recent_task_ids[slot] > 0 {
-                                        let _ = std::app_stop(state.recent_task_ids[slot]);
-                                        if state.active_child == Some(state.recent_task_ids[slot]) {
-                                            state.active_child = None;
-                                        }
-                                    }
-                                    state.dismiss_recent(slot);
+                                    screens::activity::activity_close_slot(&mut state, slot);
                                     present_dirty(surface, &state, Dirty::ActivityCards);
                                     std::log(
                                         0,
@@ -2692,6 +2690,7 @@ pub extern "C" fn _start() -> ! {
                                     state.recent_app_lens = [0; 3];
                                     state.recent_task_ids = [0; 3];
                                     state.active_child = None;
+                                    screens::activity::invalidate_activity_frame();
                                     state.current_view = ViewMode::HomeScreen;
                                     render_view(surface, &state);
                                     let _ = std::surface_flip(4);
@@ -3527,6 +3526,58 @@ pub extern "C" fn _start() -> ! {
                             }
                         }
                         ViewMode::AppDrawer => {
+                            // 0. Keyboard event handling for interactive search input
+                            if let Some(key) = input.key_event() {
+                                if key.pressed {
+                                    if key.code == std::input_key_code::BACKSPACE || key.code == 8 {
+                                        if state.search_query_len > 0 {
+                                            state.search_query_len -= 1;
+                                            state.app_drawer_page = 0;
+                                            render_view(surface, &state);
+                                            let _ = std::surface_flip(4);
+                                        }
+                                    } else if key.code == std::input_key_code::ESCAPE {
+                                        if state.search_query_len > 0 {
+                                            state.search_query_len = 0;
+                                            state.app_drawer_page = 0;
+                                            render_view(surface, &state);
+                                            let _ = std::surface_flip(4);
+                                        } else {
+                                            state.current_view = ViewMode::HomeScreen;
+                                            render_view(surface, &state);
+                                            let _ = std::surface_flip(4);
+                                        }
+                                    } else if key.code == std::input_key_code::ENTER || key.code == 13 || key.code == 10 {
+                                        let mut filtered = [0usize; 32];
+                                        let count = screens::app_drawer::filtered_indices(&state, state.app_drawer_tab, &mut filtered);
+                                        if count > 0 {
+                                            let i = filtered[0];
+                                            let id_len = (state.app_id_lens[i] as usize).min(state.app_ids[i].len()).min(32);
+                                            let mut app_buf = [0u8; 32];
+                                            app_buf[..id_len].copy_from_slice(&state.app_ids[i][..id_len]);
+                                            if let Ok(target_app) = core::str::from_utf8(&app_buf[..id_len]) {
+                                                if let Ok(task_id) = std::app_launch(target_app) {
+                                                    state.push_recent(target_app, task_id);
+                                                    state.active_child = Some(task_id);
+                                                    state.current_view = ViewMode::HomeScreen;
+                                                    render_view(surface, &state);
+                                                    let _ = std::surface_flip(4);
+                                                }
+                                            }
+                                        }
+                                    } else if (32..=126).contains(&key.code) {
+                                        if state.search_query_len < 32 {
+                                            state.search_query[state.search_query_len] = key.code as u8;
+                                            state.search_query_len += 1;
+                                            state.app_drawer_page = 0;
+                                            render_view(surface, &state);
+                                            let _ = std::surface_flip(4);
+                                        }
+                                    }
+                                }
+                                break;
+                            }
+
                             // 1. Gesture navigation and real registry pagination.
                             if is_drag(input.kind) && input.dy >= 60 {
                                 state.current_view = ViewMode::HomeScreen;
@@ -4113,6 +4164,8 @@ pub extern "C" fn _start() -> ! {
                                 // Universal search bar tap: opens App Drawer for application search
                                 if (1320..1384).contains(&y) && (40..680).contains(&x) {
                                     state.current_view = ViewMode::AppDrawer;
+                                    state.search_query_len = 0;
+                                    state.app_drawer_page = 0;
                                     render_view(surface, &state);
                                     let _ = std::surface_flip(4);
                                     std::log(0, "[LAUNCHER] App Drawer opened via universal search bar tap.").ok();

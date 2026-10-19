@@ -33,18 +33,18 @@ const RUN_W_MAX: usize = 680;
 
 /// Tallest run, in pixels: ascent plus descent at the largest useful em.
 ///
-/// Covers display headings, lock clocks, and scaled typography up to em 96.
-const RUN_H_MAX: usize = 96;
+/// Covers display headings, lock clocks, and scaled typography up to em 105 (scale 4).
+const RUN_H_MAX: usize = 144;
 
 /// How many runs may be resident at once.
 ///
-/// 32 slots comfortably holds all distinct text runs across any single view frame
-/// (Home screen, App Drawer, System Space, Quick Controls) with round-robin eviction.
+/// 32 slots comfortably holds all 22 distinct text runs across Home screen,
+/// App Drawer, System Space, and Quick Controls without thrashing slot 0.
 pub const SLOTS: usize = 32;
 
 /// The longest text a placement key can hold. Longer runs are refused rather
 /// than hashed, because a hash would collide and draw the wrong glyphs.
-pub const KEY_MAX: usize = 48;
+pub const KEY_MAX: usize = 64;
 
 /// Ink coverage for the placed runs: 255 is fully inked, 0 is untouched.
 static mut COVERAGE: [[u8; RUN_W_MAX * RUN_H_MAX]; SLOTS] =

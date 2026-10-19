@@ -1382,22 +1382,27 @@ fn bottom_bar_pixel(x: usize, y: usize, app: &BrowserApp) -> u32 {
     if let Some(_) = draw_rounded_rect(x, y, BACK_BTN, BTN_R, CHROME_BG, None, 0) {
         let cx = BACK_BTN.x + BACK_BTN.w / 2;
         let cy = BACK_BTN.y + BACK_BTN.h / 2;
-        let dx = x as isize - cx as isize;
-        let dy = (y as isize - cy as isize).abs();
         let active = app.history.can_back();
         let col = if active { CHROME_TEXT } else { CHROME_BORDER };
-        if dx >= -6 && dx <= 6 && dy <= 6 && (dx + 6).abs() == dy { return col; }
+        if let Some(c) = std::design::back_button::chevron_ink(x, y, cx, cy, col) {
+            return c;
+        }
     }
 
     // 2. Forward Button `>`
     if let Some(_) = draw_rounded_rect(x, y, FWD_BTN, BTN_R, CHROME_BG, None, 0) {
         let cx = FWD_BTN.x + FWD_BTN.w / 2;
         let cy = FWD_BTN.y + FWD_BTN.h / 2;
-        let dx = x as isize - cx as isize;
-        let dy = (y as isize - cy as isize).abs();
         let active = app.history.can_forward();
         let col = if active { CHROME_TEXT } else { CHROME_BORDER };
-        if dx >= -6 && dx <= 6 && dy <= 6 && (6 - dx).abs() == dy { return col; }
+        let mirrored_x = if (x as isize) <= cx as isize {
+            cx + (cx - x)
+        } else {
+            cx.saturating_sub(x - cx)
+        };
+        if let Some(c) = std::design::back_button::chevron_ink(mirrored_x, y, cx, cy, col) {
+            return c;
+        }
     }
 
     // 3. Home / New Tab `+` Button

@@ -730,12 +730,14 @@ fn build(state: &LauncherState) -> Paint {
         (b"Welcome", b"Welcome,")
     } else if state.clock_time[0].is_ascii_digit() && state.clock_time[1].is_ascii_digit() {
         let hour = (state.clock_time[0] - b'0') * 10 + (state.clock_time[1] - b'0');
-        if hour < 12 {
+        if (5..12).contains(&hour) {
             (b"Good morning", b"Good morning,")
-        } else if hour < 18 {
+        } else if (12..17).contains(&hour) {
             (b"Good afternoon", b"Good afternoon,")
-        } else {
+        } else if (17..22).contains(&hour) {
             (b"Good evening", b"Good evening,")
+        } else {
+            (b"Good night", b"Good night,")
         }
     } else {
         (b"Welcome", b"Welcome,")
@@ -766,12 +768,14 @@ fn build(state: &LauncherState) -> Paint {
             _ => {
                 if state.clock_time[0].is_ascii_digit() && state.clock_time[1].is_ascii_digit() {
                     let hour = (state.clock_time[0] - b'0') * 10 + (state.clock_time[1] - b'0');
-                    if hour < 12 {
+                    if (5..12).contains(&hour) {
                         b"Ready for the day ahead"
-                    } else if hour < 18 {
+                    } else if (12..17).contains(&hour) {
                         b"Afternoon briefing ready"
+                    } else if (17..22).contains(&hour) {
+                        b"Wrapping up your day"
                     } else {
-                        b"All systems nominal"
+                        b"Night mode active"
                     }
                 } else {
                     b"System ready"

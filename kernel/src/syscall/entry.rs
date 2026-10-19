@@ -158,7 +158,7 @@ pub unsafe extern "C" fn syscall_entry() {
         "lea rsp, [rip + {kernel_stack} + 131072]",
         "2:",
 
-        // 3. Push user execution context onto kernel stack
+        // 3. Push user execution context onto kernel stack (16 qwords = 128 bytes for 16-byte ABI alignment)
         "push qword ptr [rip + {user_rsp}]", // User RSP
         "push r11",                          // User RFLAGS
         "push rcx",                          // User RIP
@@ -168,6 +168,13 @@ pub unsafe extern "C" fn syscall_entry() {
         "push r13",                          // Callee-saved R13
         "push r14",                          // Callee-saved R14
         "push r15",                          // Callee-saved R15
+        "push rdi",                          // User RDI (preserved across syscall)
+        "push rsi",                          // User RSI (preserved across syscall)
+        "push rdx",                          // User RDX (preserved across syscall)
+        "push r8",                           // User R8  (preserved across syscall)
+        "push r9",                           // User R9  (preserved across syscall)
+        "push r10",                          // User R10 (preserved across syscall)
+        "sub rsp, 8",                        // Align RSP to 16-byte boundary before call
 
         // 4. Map user syscall register calling convention to Rust dispatch function:
         // User registers:
@@ -198,7 +205,14 @@ pub unsafe extern "C" fn syscall_entry() {
 
         // Return value is in RAX (preserved as syscall return code)
 
-        // 6. Restore callee-saved registers from kernel stack
+        // 6. Restore user registers from kernel stack
+        "add rsp, 8",
+        "pop r10",
+        "pop r9",
+        "pop r8",
+        "pop rdx",
+        "pop rsi",
+        "pop rdi",
         "pop r15",
         "pop r14",
         "pop r13",

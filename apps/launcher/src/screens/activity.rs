@@ -630,68 +630,117 @@ fn render_mini_preview(card: &CardPlan, px: usize, py: usize) -> Option<u32> {
     }
 
     let bg = PREVIEW_BG;
-    let cx = card.preview_rect.center_x();
-    let cy = card.preview_rect.y + 48;
+    let x0 = card.preview_rect.x;
+    let y0 = card.preview_rect.y;
+    let w = card.preview_rect.w;
 
-    // 1. Embossed app signature vector icon watermark in upper center
-    if let Some(kind) = card.icon {
-        if let Some(ic) = icons::rasterize_icon_pixel_scaled_aa(
-            kind,
-            px,
-            py,
-            cx,
-            cy,
-            PREVIEW_WATERMARK_INK,
-            bg,
-            24,
-        ) {
-            return Some(ic);
+    // Archetype rendering based on card.icon
+    match card.icon {
+        Some(IconKind::Phone) | Some(IconKind::Calculator) => {
+            // Keypad archetype: 3x3 circular keys + call/action pill
+            let grid_cx = x0 + w / 2;
+            let start_y = y0 + 26;
+            for row in 0..3 {
+                let cy = start_y + row * 38;
+                for col in 0..3 {
+                    let cx = grid_cx - 70 + col * 70;
+                    let dx = (px as i32) - (cx as i32);
+                    let dy = (py as i32) - (cy as i32);
+                    let dist_sq = dx * dx + dy * dy;
+                    if dist_sq <= 15 * 15 {
+                        if dist_sq >= 13 * 13 {
+                            return Some(0xFF28364A);
+                        }
+                        return Some(0xFF1E2838);
+                    }
+                }
+            }
+            let bot_pill = Rect::new(grid_cx - 50, start_y + 118, 100, 24);
+            if rounded_contains(bot_pill, px, py, 12) {
+                if rounded_outline(bot_pill, px, py, 12) {
+                    return Some(0xFF38BDF8);
+                }
+                return Some(0xFF225277);
+            }
         }
-    }
+        Some(IconKind::Messages) => {
+            // Chat conversation archetype: alternating message bubbles + input bar
+            let b0 = Rect::new(x0 + 32, y0 + 20, 220, 32);
+            let b1 = Rect::new(x0 + w - 260, y0 + 60, 228, 32);
+            let b2 = Rect::new(x0 + 32, y0 + 100, 300, 32);
+            let input_bar = Rect::new(x0 + 24, y0 + 144, w - 48, 22);
 
-    // 2. Primary native UI notice: "No live preview"
-    if let Some(c) = card.preview_note.pixel_on(px, py, bg) {
-        return Some(c);
-    }
-
-    // 3. Security context line: "Surface memory sandboxed * Verified Ring-3"
-    let sub_run = LabelRun::fitted_centred(
-        card.preview_rect.x,
-        card.preview_rect.y + 116,
-        type_scale::CAPTION,
-        card.preview_rect.w,
-        card.preview_rect.w,
-        b"Surface memory sandboxed * Verified Ring-3",
-        0xFF64748B,
-    );
-    if let Some(c) = sub_run.pixel_on(px, py, bg) {
-        return Some(c);
-    }
-
-    // 4. Subtle bottom telemetry bar
-    let bar_y = card.preview_rect.y + card.preview_rect.h - 28;
-    if py >= bar_y && py < bar_y + 20 {
-        let chip_l = Rect::new(card.preview_rect.x + 16, bar_y, 110, 20);
-        let chip_r = Rect::new(card.preview_rect.x + card.preview_rect.w - 156, bar_y, 140, 20);
-        if rounded_contains(chip_l, px, py, 6) {
-            if rounded_outline(chip_l, px, py, 6) {
+            if rounded_contains(b0, px, py, 10) {
+                return Some(if rounded_outline(b0, px, py, 10) { 0xFF283446 } else { 0xFF1C2534 });
+            }
+            if rounded_contains(b1, px, py, 10) {
+                return Some(if rounded_outline(b1, px, py, 10) { 0xFF38BDF8 } else { 0xFF1E3A5F });
+            }
+            if rounded_contains(b2, px, py, 10) {
+                return Some(if rounded_outline(b2, px, py, 10) { 0xFF283446 } else { 0xFF1C2534 });
+            }
+            if rounded_contains(input_bar, px, py, 11) {
+                return Some(if rounded_outline(input_bar, px, py, 11) { 0xFF2A3446 } else { 0xFF161C26 });
+            }
+        }
+        Some(IconKind::Gallery) | Some(IconKind::Camera) => {
+            // Photo gallery grid archetype: 4x2 thumbnails
+            let thumb_w = (w - 64) / 4;
+            let thumb_h = 62;
+            for row in 0..2 {
+                let ty = y0 + 24 + row * 72;
+                for col in 0..4 {
+                    let tx = x0 + 24 + col * (thumb_w + 5);
+                    let thumb = Rect::new(tx, ty, thumb_w, thumb_h);
+                    if rounded_contains(thumb, px, py, 8) {
+                        return Some(if rounded_outline(thumb, px, py, 8) { 0xFF2F3D52 } else { 0xFF1A2330 });
+                    }
+                }
+            }
+        }
+        Some(IconKind::Settings) => {
+            // Settings detail rows archetype: 3 structured cards
+            for r in 0..3 {
+                let ry = y0 + 22 + r * 46;
+                let row_rect = Rect::new(x0 + 24, ry, w - 48, 38);
+                if rounded_contains(row_rect, px, py, 10) {
+                    if rounded_outline(row_rect, px, py, 10) {
+                        return Some(0xFF283446);
+                    }
+                    let ic = Rect::new(row_rect.x + 8, ry + 6, 26, 26);
+                    if rounded_contains(ic, px, py, 6) {
+                        return Some(0xFF2D3B4E);
+                    }
+                    let tog = Rect::new(row_rect.x + row_rect.w - 42, ry + 10, 32, 18);
+                    if rounded_contains(tog, px, py, 9) {
+                        return Some(if r == 0 { 0xFF38BDF8 } else { 0xFF242E3E });
+                    }
+                    return Some(0xFF161C26);
+                }
+            }
+        }
+        _ => {
+            // General archetype: embossed vector icon watermark + clean subtle card divider lines
+            let cx = card.preview_rect.center_x();
+            let cy = card.preview_rect.y + 72;
+            if let Some(kind) = card.icon {
+                if let Some(ic) = icons::rasterize_icon_pixel_scaled_aa(
+                    kind,
+                    px,
+                    py,
+                    cx,
+                    cy,
+                    PREVIEW_WATERMARK_INK,
+                    bg,
+                    32,
+                ) {
+                    return Some(ic);
+                }
+            }
+            let line_y = y0 + 130;
+            if py == line_y && px >= x0 + 40 && px < x0 + w - 40 {
                 return Some(0xFF1E2838);
             }
-            let lbl = LabelRun::new(chip_l.x + 8, chip_l.y + 3, type_scale::CAPTION, b"Ring-3 Sandbox", 0xFF94A3B8);
-            if let Some(c) = lbl.pixel_on(px, py, 0xFF121722) {
-                return Some(c);
-            }
-            return Some(0xFF121722);
-        }
-        if rounded_contains(chip_r, px, py, 6) {
-            if rounded_outline(chip_r, px, py, 6) {
-                return Some(0xFF1E2838);
-            }
-            let lbl = LabelRun::new(chip_r.x + 8, chip_r.y + 3, type_scale::CAPTION, b"CapHandle: Verified", 0xFF38BDF8);
-            if let Some(c) = lbl.pixel_on(px, py, 0xFF121722) {
-                return Some(c);
-            }
-            return Some(0xFF121722);
         }
     }
 
@@ -963,12 +1012,18 @@ pub fn get_activity_color(x: usize, y: usize, state: &LauncherState) -> u32 {
 // Close control: hit test and termination
 // -----------------------------------------------------------------------------
 
-pub fn activity_close_hit(_state: &LauncherState, x: usize, y: usize) -> Option<usize> {
-    if CARD0_DISMISS.contains(x, y) || ((120..190).contains(&y) && (600..688).contains(&x)) {
+pub fn activity_close_hit(state: &LauncherState, x: usize, y: usize) -> Option<usize> {
+    if (CARD0_DISMISS.contains(x, y) || ((120..190).contains(&y) && (600..688).contains(&x)))
+        && state.recent_app_lens.get(0).copied().unwrap_or(0) > 0
+    {
         Some(0)
-    } else if CARD1_DISMISS.contains(x, y) || ((420..490).contains(&y) && (600..688).contains(&x)) {
+    } else if (CARD1_DISMISS.contains(x, y) || ((420..490).contains(&y) && (600..688).contains(&x)))
+        && state.recent_app_lens.get(1).copied().unwrap_or(0) > 0
+    {
         Some(1)
-    } else if CARD2_DISMISS.contains(x, y) || ((720..790).contains(&y) && (600..688).contains(&x)) {
+    } else if (CARD2_DISMISS.contains(x, y) || ((720..790).contains(&y) && (600..688).contains(&x)))
+        && state.recent_app_lens.get(2).copied().unwrap_or(0) > 0
+    {
         Some(2)
     } else {
         None

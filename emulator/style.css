@@ -2529,12 +2529,11 @@ body[data-theme="cyberdeck_hud"] .device-screen {
   cursor: pointer;
   user-select: none;
   -webkit-user-drag: none;
-  image-rendering: -webkit-optimize-contrast;
-  image-rendering: crisp-edges;
+  image-rendering: auto;
   transform: translateZ(0);
 }
 
-/* 1:1 Pixel-Exact FHD Inspection Mode inside Device Studio */
+/* 1:1 Pixel-Exact Full HD Inspection Mode inside Device Studio */
 .screen-live-scanout.fhd-pixel-exact {
   overflow: auto !important;
   display: block !important;
@@ -2547,8 +2546,7 @@ body[data-theme="cyberdeck_hud"] .device-screen {
   max-width: none !important;
   max-height: none !important;
   object-fit: none !important;
-  image-rendering: pixelated;
-  image-rendering: crisp-edges;
+  image-rendering: auto;
 }
 
 /* Honest Studio-owned standby card: shown instead of the live canvas only
@@ -2766,6 +2764,14 @@ body.studio-focus-mode .emulator-side-toolbar {
   background: rgba(16, 17, 22, 0.94) !important;
   border-color: rgba(255, 255, 255, 0.14) !important;
   box-shadow: 0 20px 50px rgba(0, 0, 0, 0.85), 0 0 0 1px rgba(255, 255, 255, 0.1) !important;
+}
+
+.device-stage.ide-device-pane,
+.device-chassis,
+.device-screen,
+.phone-and-nav-container {
+  transform: translateZ(0);
+  backface-visibility: hidden;
 }
 
 .device-screen {

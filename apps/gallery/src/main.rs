@@ -155,6 +155,13 @@ const ASPECT_BTN: Rect = Rect::new(W - 80, 32, 60, 40);
 const DETAIL_INFO: Rect = Rect::new(W / 2 - 40, H - 100, 80, 48);
 const PHOTO_FAV_BTN: Rect = Rect::new(MARGIN + 40, H - 100, 80, 48);
 const PHOTO_DEL_BTN: Rect = Rect::new(W - MARGIN - 120, H - 100, 80, 48);
+const SET_WALLPAPER_BTN: Rect = Rect::new(MARGIN + 20, H - 164, W - 2 * MARGIN - 40, 48);
+const WP_SHEET_RECT: Rect = Rect::new(MARGIN + 10, H - 340, W - 2 * MARGIN - 20, 260);
+const WP_SHEET_TITLE_Y: usize = H - 324;
+const WP_TARGET_HOME_BTN: Rect = Rect::new(MARGIN + 30, H - 280, W - 2 * MARGIN - 60, 44);
+const WP_TARGET_LOCK_BTN: Rect = Rect::new(MARGIN + 30, H - 228, W - 2 * MARGIN - 60, 44);
+const WP_TARGET_BOTH_BTN: Rect = Rect::new(MARGIN + 30, H - 176, W - 2 * MARGIN - 60, 44);
+const WP_TARGET_CANCEL_BTN: Rect = Rect::new(MARGIN + 30, H - 124, W - 2 * MARGIN - 60, 36);
 
 const TAB_LABELS: [&[u8]; 4] = [b"Photos", b"Videos", b"Albums", b"Screenshots"];
 const TAB_Y: usize = 144;
@@ -702,6 +709,8 @@ pub struct GalleryApp {
     pub tab: GalleryTab,
     /// Whether info overlay sheet is visible in photo viewer.
     pub show_info_overlay: bool,
+    /// Whether target selector sheet is visible in photo viewer.
+    pub show_wallpaper_sheet: bool,
     /// Decoded image buffer for detailed viewing.
     pub detail_rgba: [u8; 36 * 72 * 4],
     pub detail_rgba_len: usize,
@@ -716,6 +725,7 @@ impl GalleryApp {
             filter: Filter::All,
             open: None,
             show_info_overlay: false,
+            show_wallpaper_sheet: false,
             detail_title: b"",
             detail_title_buf: [0u8; 48],
             detail_title_len: 0,
@@ -738,6 +748,53 @@ impl GalleryApp {
             detail_rgba_len: 0,
             detail_w: 0,
             detail_h: 0,
+        }
+    }
+
+    pub fn apply_wallpaper_target(&self, lock: bool, home: bool) {
+        let Some(media) = self.open else { return };
+        let mut val = [0u8; 64];
+        let val_len: usize = match media {
+            Media::Wallpaper(idx) => {
+                if idx < std::design::walls::SCENES.len() {
+                    let k = std::design::walls::SCENES[idx].key;
+                    let len = k.len().min(64);
+                    val[..len].copy_from_slice(&k[..len]);
+                    len
+                } else {
+                    0
+                }
+            }
+            Media::StorageItem(idx) => {
+                if idx < self.storage_count {
+                    let item = &self.storage_items[idx];
+                    let len = item.path_len.min(64);
+                    val[..len].copy_from_slice(&item.path[..len]);
+                    len
+                } else {
+                    0
+                }
+            }
+            Media::Photo(idx) => {
+                if idx < std::design::walls::SCENES.len() {
+                    let k = std::design::walls::SCENES[idx].key;
+                    let len = k.len().min(64);
+                    val[..len].copy_from_slice(&k[..len]);
+                    len
+                } else {
+                    0
+                }
+            }
+        };
+
+        if val_len > 0 {
+            if home {
+                let _ = std::settings_set(fs_write_slot(), "ui.wallpaper.home", &val[..val_len]);
+            }
+            if lock {
+                let _ = std::settings_set(fs_write_slot(), "ui.wallpaper.lock", &val[..val_len]);
+            }
+            std::log(0, "[GALLERY] Set wallpaper applied to target.").ok();
         }
     }
 
@@ -1892,20 +1949,8 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
         if y == DETAIL_BAR_H - 1 {
             return BORDER;
         }
-        if let Some(c) = draw_pill(x, y, DETAIL_BACK, SOFT, Some(BORDER)) {
-            if c != SOFT {
-                return c;
-            }
-            if let Some(ink) = std::design::back_button::chevron_ink(
-                x,
-                y,
-                DETAIL_BACK.x + DETAIL_BACK.w / 2,
-                DETAIL_BACK.y + DETAIL_BACK.h / 2,
-                TEXT,
-            ) {
-                return ink;
-            }
-            return SOFT;
+        if let Some(c) = std::design::back_button::pixel(x, y, TEXT, BORDER, SOFT) {
+            return c;
         }
 
         // Aspect toggle button for video player (Fit vs Fill)
@@ -1922,7 +1967,7 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
             }
         }
 
-        let text_x = DETAIL_BACK.x + DETAIL_BACK.w + spacing::GRID_16;
+        let text_x = std::design::back_button::X + std::design::back_button::SIZE + spacing::GRID_16;
         let text_w = W.saturating_sub(text_x + 100);
         let title_bytes = app.detail_title();
         if y >= 28 && y < 28 + font::line_height(2) {
@@ -2247,6 +2292,74 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
             let ly = PHOTO_DEL_BTN.y + (PHOTO_DEL_BTN.h.saturating_sub(font::line_height(1))) / 2;
             if let Some(tc) = text(x, y, lx, ly, 1, del_lbl, DANGER_CRIMSON, SOFT) { return tc; }
             return SOFT;
+        }
+
+        if !app.show_wallpaper_sheet {
+            if let Some(c) = draw_pill(x, y, SET_WALLPAPER_BTN, SOFT, Some(BORDER)) {
+                if c != SOFT { return c; }
+                let lbl = b"Set as Wallpaper";
+                let lw = outline_text::drawn_advance(lbl, 2).unwrap_or_else(|| font::measure(lbl, 2));
+                let lx = SET_WALLPAPER_BTN.x + (SET_WALLPAPER_BTN.w.saturating_sub(lw)) / 2;
+                let ly = SET_WALLPAPER_BTN.y + (SET_WALLPAPER_BTN.h.saturating_sub(font::line_height(2))) / 2;
+                if let Some(tc) = text(x, y, lx, ly, 2, lbl, TEXT, SOFT) { return tc; }
+                return SOFT;
+            }
+        } else {
+            // Target selector sheet modal (elevated surface with crisp border)
+            if let Some(c) = draw_rounded_rect(x, y, WP_SHEET_RECT, radius::CARD, SURFACE, Some(BORDER), 2) {
+                if c != SURFACE { return c; }
+                // Title
+                let title = b"Set as Wallpaper";
+                let tw = outline_text::drawn_advance(title, 2).unwrap_or_else(|| font::measure(title, 2));
+                let tx = WP_SHEET_RECT.x + (WP_SHEET_RECT.w.saturating_sub(tw)) / 2;
+                if let Some(tc) = text_bold(x, y, tx, WP_SHEET_TITLE_Y, 2, title, TEXT, SURFACE) { return tc; }
+
+                // Home button
+                if let Some(bc) = draw_pill(x, y, WP_TARGET_HOME_BTN, SOFT, Some(BORDER)) {
+                    if bc != SOFT { return bc; }
+                    let lbl = b"Home Screen";
+                    let lw = font::measure(lbl, 1);
+                    let lx = WP_TARGET_HOME_BTN.x + (WP_TARGET_HOME_BTN.w.saturating_sub(lw)) / 2;
+                    let ly = WP_TARGET_HOME_BTN.y + (WP_TARGET_HOME_BTN.h.saturating_sub(font::line_height(1))) / 2;
+                    if let Some(tc) = text(x, y, lx, ly, 1, lbl, TEXT, SOFT) { return tc; }
+                    return SOFT;
+                }
+
+                // Lock button
+                if let Some(bc) = draw_pill(x, y, WP_TARGET_LOCK_BTN, SOFT, Some(BORDER)) {
+                    if bc != SOFT { return bc; }
+                    let lbl = b"Lock Screen";
+                    let lw = font::measure(lbl, 1);
+                    let lx = WP_TARGET_LOCK_BTN.x + (WP_TARGET_LOCK_BTN.w.saturating_sub(lw)) / 2;
+                    let ly = WP_TARGET_LOCK_BTN.y + (WP_TARGET_LOCK_BTN.h.saturating_sub(font::line_height(1))) / 2;
+                    if let Some(tc) = text(x, y, lx, ly, 1, lbl, TEXT, SOFT) { return tc; }
+                    return SOFT;
+                }
+
+                // Both button
+                if let Some(bc) = draw_pill(x, y, WP_TARGET_BOTH_BTN, ACCENT_SKY, None) {
+                    if bc != ACCENT_SKY { return bc; }
+                    let lbl = b"Both Screens";
+                    let lw = font::measure(lbl, 1);
+                    let lx = WP_TARGET_BOTH_BTN.x + (WP_TARGET_BOTH_BTN.w.saturating_sub(lw)) / 2;
+                    let ly = WP_TARGET_BOTH_BTN.y + (WP_TARGET_BOTH_BTN.h.saturating_sub(font::line_height(1))) / 2;
+                    if let Some(tc) = text(x, y, lx, ly, 1, lbl, 0xFFFFFFFF, ACCENT_SKY) { return tc; }
+                    return ACCENT_SKY;
+                }
+
+                // Cancel button
+                if let Some(bc) = draw_pill(x, y, WP_TARGET_CANCEL_BTN, SOFT, Some(BORDER)) {
+                    if bc != SOFT { return bc; }
+                    let lbl = b"Cancel";
+                    let lw = font::measure(lbl, 1);
+                    let lx = WP_TARGET_CANCEL_BTN.x + (WP_TARGET_CANCEL_BTN.w.saturating_sub(lw)) / 2;
+                    let ly = WP_TARGET_CANCEL_BTN.y + (WP_TARGET_CANCEL_BTN.h.saturating_sub(font::line_height(1))) / 2;
+                    if let Some(tc) = text(x, y, lx, ly, 1, lbl, MUTED, SOFT) { return tc; }
+                    return SOFT;
+                }
+
+                return SURFACE;
+            }
         }
     }
 
@@ -2586,13 +2699,43 @@ fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
                     return Tap::Redraw(Dirty::All);
                 }
             }
-            if DETAIL_BACK.contains(x, y) || CLOSE.contains(x, y) {
+            if std::design::back_button::contains(x, y) || CLOSE.contains(x, y) {
                 app.open = None;
                 app.video_player = None;
+                app.show_wallpaper_sheet = false;
                 std::log(0, "[GALLERY] Closed video player view.").ok();
                 return Tap::Redraw(Dirty::All);
             }
         } else {
+            // Target selection modal sheet
+            if app.show_wallpaper_sheet {
+                if WP_TARGET_HOME_BTN.contains(x, y) {
+                    app.apply_wallpaper_target(false, true);
+                    app.show_wallpaper_sheet = false;
+                    return Tap::Redraw(Dirty::All);
+                }
+                if WP_TARGET_LOCK_BTN.contains(x, y) {
+                    app.apply_wallpaper_target(true, false);
+                    app.show_wallpaper_sheet = false;
+                    return Tap::Redraw(Dirty::All);
+                }
+                if WP_TARGET_BOTH_BTN.contains(x, y) {
+                    app.apply_wallpaper_target(true, true);
+                    app.show_wallpaper_sheet = false;
+                    return Tap::Redraw(Dirty::All);
+                }
+                if WP_TARGET_CANCEL_BTN.contains(x, y) || !WP_SHEET_RECT.contains(x, y) {
+                    app.show_wallpaper_sheet = false;
+                    return Tap::Redraw(Dirty::All);
+                }
+                return Tap::None;
+            }
+
+            if SET_WALLPAPER_BTN.contains(x, y) {
+                app.show_wallpaper_sheet = true;
+                return Tap::Redraw(Dirty::All);
+            }
+
             // Photo inspection controls
             if app.show_info_overlay {
                 app.show_info_overlay = false;
@@ -2619,6 +2762,7 @@ fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
                         app.open = None;
                         app.video_player = None;
                         app.show_info_overlay = false;
+                        app.show_wallpaper_sheet = false;
                         std::log(0, "[GALLERY] Media deleted via fs_unlink.").ok();
                         return Tap::Redraw(Dirty::All);
                     }
@@ -2641,10 +2785,11 @@ fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
                 }
             }
 
-            if DETAIL_BACK.contains(x, y) || CLOSE.contains(x, y) {
+            if std::design::back_button::contains(x, y) || CLOSE.contains(x, y) {
                 app.open = None;
                 app.video_player = None;
                 app.show_info_overlay = false;
+                app.show_wallpaper_sheet = false;
                 std::log(0, "[GALLERY] Closed photo inspection view.").ok();
                 return Tap::Redraw(Dirty::All);
             }

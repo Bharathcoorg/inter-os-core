@@ -121,6 +121,55 @@ pub fn calculate_unix_epoch(dt: &DateTime) -> u64 {
         + (dt.second as u64)
 }
 
+/// System default timezone offset in seconds: India Standard Time (IST, UTC+05:30) = +19,800 seconds.
+pub const TZ_OFFSET_SECONDS: u64 = 19800;
+
+/// Converts Unix epoch seconds into a Gregorian calendar DateTime.
+pub fn epoch_to_datetime(epoch: u64) -> DateTime {
+    let sec = (epoch % 60) as u8;
+    let total_min = epoch / 60;
+    let min = (total_min % 60) as u8;
+    let total_hours = total_min / 60;
+    let hour = (total_hours % 24) as u8;
+    let mut total_days = total_hours / 24;
+
+    let mut year = 1970u16;
+    loop {
+        let leap = is_leap_year(year);
+        let days_in_year = if leap { 366 } else { 365 };
+        if total_days < days_in_year {
+            break;
+        }
+        total_days -= days_in_year;
+        year += 1;
+    }
+
+    let leap = is_leap_year(year);
+    let mut month = 1u8;
+    for m in 0..12 {
+        let mut d = DAYS_IN_MONTH[m] as u64;
+        if m == 1 && leap {
+            d += 1;
+        }
+        if total_days < d {
+            month = (m + 1) as u8;
+            break;
+        }
+        total_days -= d;
+    }
+    let day = (total_days + 1) as u8;
+
+    DateTime {
+        year,
+        month,
+        day,
+        hour,
+        minute: min,
+        second: sec,
+        unix_epoch_secs: epoch,
+    }
+}
+
 /// Decodes a 2-digit Binary Coded Decimal (BCD) byte into binary integer representation.
 #[inline]
 pub const fn bcd_to_binary(bcd: u8) -> u8 {
@@ -227,9 +276,14 @@ impl RtcManager {
         dt
     }
 
-    /// Returns the cached or current wall-clock date-time.
+    /// Returns the cached or current wall-clock date-time in UTC.
     pub fn now(&self) -> DateTime {
         self.last_time
+    }
+
+    /// Returns the wall-clock date-time adjusted for system default timezone (India Standard Time UTC+05:30).
+    pub fn local_now(&self) -> DateTime {
+        epoch_to_datetime(self.last_time.unix_epoch_secs + TZ_OFFSET_SECONDS)
     }
 
     /// Returns the boot timestamp in Unix epoch seconds.
@@ -258,6 +312,11 @@ pub fn init() {
     };
     let epoch = calculate_unix_epoch(&ref_dt);
     assert_eq!(epoch, 1789776000, "Unix epoch calculation for reference date must match expected 1789776000");
+    let roundtrip = epoch_to_datetime(epoch);
+    assert_eq!(roundtrip.year, 2026);
+    assert_eq!(roundtrip.month, 9);
+    assert_eq!(roundtrip.day, 19);
+    assert_eq!(roundtrip.hour, 0);
 
     let mut buf = [0u8; 32];
     let len = current_dt.format_iso(&mut buf);

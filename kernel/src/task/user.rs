@@ -793,7 +793,7 @@ pub extern "C" fn app_settings_trampoline() -> ! {
 
 /// Spawns the native Sovereign Settings App in Ring 3.
 pub fn spawn_app_settings(id_security: TaskId) -> TaskId {
-    let mut caps = CapabilityTable::new(12);
+    let mut caps = CapabilityTable::new(14);
     caps.insert(Capability {
         id: CapabilityId(1701),
         cap_type: CapabilityType::SerialOutput,
@@ -856,6 +856,12 @@ pub fn spawn_app_settings(id_security: TaskId) -> TaskId {
         cap_type: CapabilityType::SystemControl,
         rights: Rights::INVOKE,
         object_id: crate::services::SERVICE_POWER_CONTROL_OBJECT,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(1711),
+        cap_type: CapabilityType::ProcessSpawn,
+        rights: Rights::INVOKE,
+        object_id: 0,
     }).ok();
 
     let id = spawn_user_process_with_parent(

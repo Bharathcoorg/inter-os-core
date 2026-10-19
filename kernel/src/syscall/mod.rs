@@ -4205,6 +4205,7 @@ pub fn sys_rtc_get_time(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
 
     let mut rtc = crate::hal::RTC.lock();
     let dt = rtc.read_hardware();
+    let local_dt = rtc.local_now();
     use core::fmt::Write;
     struct SliceWriter<'a> {
         buf: &'a mut [u8],
@@ -4223,8 +4224,8 @@ pub fn sys_rtc_get_time(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
     let mut writer = SliceWriter { buf: out_buf, pos: 0 };
     let _ = write!(
         writer,
-        r#"{{"year":{},"month":{},"day":{},"hour":{},"minute":{},"second":{},"unix_epoch":{}}}"#,
-        dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second, dt.unix_epoch_secs
+        r#"{{"year":{},"month":{},"day":{},"hour":{},"minute":{},"second":{},"unix_epoch":{},"tz_offset_min":330,"tz":"Asia/Kolkata"}}"#,
+        local_dt.year, local_dt.month, local_dt.day, local_dt.hour, local_dt.minute, local_dt.second, dt.unix_epoch_secs
     );
     Ok(writer.pos)
 }

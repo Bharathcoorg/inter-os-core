@@ -26,30 +26,29 @@ use crate::design::typeface;
 
 /// Widest run of outline type this module will rasterise, in pixels.
 ///
-/// WHY 256: measured from the reference, the widest display run on the lock
-/// surface (the date line, twelve glyphs at an 18px em) is a 108px ink advance,
-/// so a 256px bound holds it with room for a longer line, while keeping the
-/// scratch array at a size the guest can afford as BSS.
-const RUN_W_MAX: usize = 256;
+/// WHY 680: The design canvas is 720px wide with 20px padding (680px content area).
+/// Expanding to 680 ensures that full-width headlines, card subtitles, and
+/// long metadata strings are rendered as vector outlines without falling back to
+/// blocky bitmap faces.
+const RUN_W_MAX: usize = 680;
 
 /// Tallest run, in pixels: ascent plus descent at the largest useful em.
 ///
-/// WHY 96 rather than 128: the clock at a 48px em is a 63-row line box, and 96
-/// covers an em up to about 72 — past the display rung this guest's 720-wide
-/// surface can use — while halving the BSS the buffer costs for headroom no
-/// caller has.
-const RUN_H_MAX: usize = 96;
+/// WHY 144: Scale 4 displays (dialer dialed numbers, hero titles) at em 101 have
+/// a 132-row line box; 144 covers up to scale 4 with headroom while keeping
+/// the 24-slot BSS buffer compact across Ring-3 tasks.
+const RUN_H_MAX: usize = 144;
 
 /// How many runs may be resident at once.
 ///
-/// WHY eight slots: multi-heading screens and status surfaces draw multiple
-/// distinct headings, badges, and clocks in a single frame without thrashing
-/// the outline coverage cache.
-const SLOTS: usize = 8;
+/// WHY 24 slots: multi-heading screens, 2-column card grids, and detail surfaces
+/// draw 10–18 distinct headings, subtitles, badges, and status runs in a single
+/// band; 24 slots with round-robin eviction eliminates scanline cache thrashing.
+const SLOTS: usize = 24;
 
 /// The longest text a placement key can hold. Longer runs are refused rather
 /// than hashed, because a hash would collide and draw the wrong glyphs.
-const KEY_MAX: usize = 24;
+const KEY_MAX: usize = 64;
 
 /// Ink coverage for the placed runs: 255 is fully inked, 0 is untouched.
 ///
@@ -79,6 +78,17 @@ struct Loaded {
 }
 
 static mut LOADED: [Option<Loaded>; SLOTS] = [None; SLOTS];
+static mut NEXT_VICTIM: usize = 0;
+
+/// Resets all slots in the outline cache pool.
+pub fn reset_slot_pool() {
+    unsafe {
+        for slot in (*core::ptr::addr_of_mut!(LOADED)).iter_mut() {
+            *slot = None;
+        }
+        *core::ptr::addr_of_mut!(NEXT_VICTIM) = 0;
+    }
+}
 
 /// Which slot a placement lands in.
 ///
@@ -90,13 +100,13 @@ static mut LOADED: [Option<Loaded>; SLOTS] = [None; SLOTS];
 ///
 /// The rule, in order: a slot already holding this exact key is reused, so a
 /// repeated placement hits the cache; otherwise an empty slot is taken; and
-/// only when every slot holds a different live run is one reused, in which case
-/// the caller has asked for more resident runs than exist and one of them must
-/// give way.
+/// only when every slot holds a different live run is one reused round-robin, in
+/// which case the caller has asked for more resident runs than exist and one of
+/// them must give way without thrashing slot 0.
 fn slot_for(em: u32, x: usize, y: usize, text: &[u8], bold: bool) -> usize {
     // SAFETY: the read of the cache array, taken and released inside this
-    // function. The lock surface's painter is the only caller, it is single
-    // threaded, and nothing reached from here re-enters it.
+    // function. The surface's painter is single threaded, and nothing reached
+    // from here re-enters it.
     let loaded = unsafe { &*core::ptr::addr_of!(LOADED) };
     let same = |l: &Loaded| {
         l.em == em
@@ -118,7 +128,15 @@ fn slot_for(em: u32, x: usize, y: usize, text: &[u8], bold: bool) -> usize {
             }
         }
     }
-    first_free.unwrap_or(0)
+    if let Some(free) = first_free {
+        free
+    } else {
+        unsafe {
+            let v = *core::ptr::addr_of!(NEXT_VICTIM) % SLOTS;
+            *core::ptr::addr_of_mut!(NEXT_VICTIM) = (v + 1) % SLOTS;
+            v
+        }
+    }
 }
 
 /// Cap height of the bitmap face in cell rows at scale 1.
@@ -468,10 +486,9 @@ mod tests {
     /// order the harness happened to pick. Reasoning about a pool that the test
     /// itself emptied is deterministic; reasoning about one another test left
     /// behind is not.
-    fn reset_slots() -> std::sync::MutexGuard<'static, ()> {        let guard = POOL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        for slot in unsafe { &mut *core::ptr::addr_of_mut!(LOADED) }.iter_mut() {
-            *slot = None;
-        }
+    fn reset_slots() -> std::sync::MutexGuard<'static, ()> {
+        let guard = POOL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_slot_pool();
         guard
     }
 
@@ -576,7 +593,7 @@ mod tests {
 
     #[test]
     fn a_run_wider_or_taller_than_the_buffer_is_refused() {
-        // 256px is the buffer's width; a longer run at a large em exceeds it.
+        // 680px is the buffer's width; a longer run at a large em exceeds it.
         let long = b"abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG";
         assert!(OutlineRun::place(0, 2000, 96, long).is_none());
     }
@@ -633,16 +650,16 @@ mod tests {
     #[test]
     fn a_ninth_distinct_run_cannot_have_a_private_slot() {
         let _pool: Option<_> = Some(reset_slots());
-        // Only eight slots exist. A ninth live run reclaims one, and the honest
-        // consequence is that one of the earlier runs is no longer readable --
-        // which the caller must not rely on. Pin the reclaim path so it is
-        // chosen deliberately rather than corrupting silently.
+        // Only SLOTS exist. An overflow live run reclaims one round-robin, and
+        // the honest consequence is that one of the earlier runs is no longer
+        // readable -- which the caller must not rely on. Pin the reclaim path
+        // so it is chosen deliberately rather than corrupting silently.
         for i in 0..SLOTS {
-            let ch = [b'A' + i as u8];
+            let ch = [b'A' + (i % 26) as u8];
             let r = OutlineRun::place(75, 200 + i * 10, 18, &ch).expect("placed");
             assert!(r.slot < SLOTS);
         }
-        let overflow = OutlineRun::place(75, 400, 24, b"Z").expect("placed");
+        let overflow = OutlineRun::place(75, 600, 24, b"Z").expect("placed");
         assert!(overflow.slot < SLOTS);
         // And it must actually hold its own glyphs.
         assert!(count_ink(&overflow) > 0, "the reclaimed slot holds no ink");
@@ -724,11 +741,12 @@ mod tests {
     #[test]
     fn a_longer_run_is_refused_rather_than_truncated() {
         let _pool: Option<_> = Some(reset_slots());
-        // 24 bytes is the placement key's bound. Refusing is the honest
+        // 64 bytes is the placement key's bound. Refusing is the honest
         // outcome: the caller keeps the bitmap face, which never truncates.
-        let long = b"abcdefghijklmnopqrstuvwx";
-        assert!(OutlineRun::place(0, 200, 12, long).is_some());
-        assert!(OutlineRun::place(0, 200, 12, b"abcdefghijklmnopqrstuvwxy").is_none());
+        let long_64 = b"abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz01";
+        let long_65 = b"abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz012";
+        assert!(OutlineRun::place(0, 200, 12, long_64).is_some());
+        assert!(OutlineRun::place(0, 200, 12, long_65).is_none());
     }
 
     #[test]

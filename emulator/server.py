@@ -857,7 +857,7 @@ SUPPORTED_PROFILES = {
         "boot_type": "BIOS/MBR Bootloader",
         "image": os.path.join(WORKSPACE_ROOT, "target", "inter-os-bios.img"),
         "status": "Primary QEMU Phone contract",
-        "display": {"backend": "vnc", "host": "127.0.0.1", "port": 5901, "websocket_port": 6081, "guest_width": 720, "guest_height": 1440},
+        "display": {"backend": "vnc", "host": "127.0.0.1", "port": 5901, "websocket_port": 6081, "guest_width": 1080, "guest_height": 2160},
         "serial": {"host": "127.0.0.1", "port": 4301},
         "monitor": {"host": "127.0.0.1", "port": 44445},
     },

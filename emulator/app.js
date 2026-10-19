@@ -1372,7 +1372,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const el = document.getElementById('spec-display');
     if (!el) return;
     if (displayedFrameW === 1080 && displayedFrameH === 2160) {
-      el.textContent = '1080x2160 Full HD+ (Authoring 720x1440)';
+      el.textContent = '1080x2160';
     } else if (displayedFrameW && displayedFrameH) {
       el.textContent = `${displayedFrameW}x${displayedFrameH} virtual framebuffer`;
     }
@@ -1389,7 +1389,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const w = (displayedFrameW === 1080 && displayedFrameH === 2160) ? 1080 : (data && (data.guest_width || data.display_width));
     const h = (displayedFrameW === 1080 && displayedFrameH === 2160) ? 2160 : (data && (data.guest_height || data.display_height));
     if (w === 1080 && h === 2160) {
-      set('spec-display', '1080x2160 Full HD+ (Authoring 720x1440)');
+      set('spec-display', '1080x2160');
     } else if (w && h) {
       set('spec-display', w + 'x' + h + ' virtual framebuffer');
     } else {
@@ -1813,6 +1813,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Display Sizing & 1:1 Pixel-Exact FHD Mode Toggle
   const emuBtnScale = document.getElementById('emu-btn-scale');
+  const btnHeaderScale = document.getElementById('btn-header-scale');
+  const headerScaleText = document.getElementById('header-scale-text');
   let currentDisplayScale = 'fit';
   function cycleDisplayScale() {
     const chassis = document.getElementById('device-chassis');
@@ -1822,23 +1824,30 @@ document.addEventListener('DOMContentLoaded', () => {
       currentDisplayScale = 'large';
       chassis.classList.add('large-mode');
       scanout?.classList.remove('fhd-pixel-exact');
+      if (headerScaleText) headerScaleText.textContent = 'Flagship';
+      btnHeaderScale?.classList.add('active');
       showToast('Display Sizing: Large (Flagship View)');
       logConsole('info', '[DISPLAY] Sizing set to Large (immersive).');
     } else if (currentDisplayScale === 'large') {
       currentDisplayScale = 'exact';
       chassis.classList.remove('large-mode');
       scanout?.classList.add('fhd-pixel-exact');
-      showToast('Display Mode: 1:1 Pixel-Exact FHD (1080x2160)');
-      logConsole('info', '[DISPLAY] Sizing set to 1:1 Pixel-Exact FHD (1080x2160).');
+      if (headerScaleText) headerScaleText.textContent = '1:1 FHD';
+      btnHeaderScale?.classList.add('active');
+      showToast('Display Mode: 1:1 Pixel-Exact Full HD (1080x2160)');
+      logConsole('info', '[DISPLAY] Sizing set to 1:1 Pixel-Exact Full HD (1080x2160).');
     } else {
       currentDisplayScale = 'fit';
       chassis.classList.remove('large-mode');
       scanout?.classList.remove('fhd-pixel-exact');
+      if (headerScaleText) headerScaleText.textContent = 'Fit';
+      btnHeaderScale?.classList.remove('active');
       showToast('Display Sizing: Responsive Fit');
       logConsole('info', '[DISPLAY] Sizing set to Responsive Fit.');
     }
   }
   emuBtnScale?.addEventListener('click', cycleDisplayScale);
+  btnHeaderScale?.addEventListener('click', cycleDisplayScale);
 
   // Orientation is locked strictly to portrait (720x1440 canvas, CSS 360x720).
   state.isLandscape = false;
@@ -2840,7 +2849,9 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     showToast(isFocus ? 'Focus Mode Active (Press Esc or F to exit)' : 'Focus Mode Disabled');
-    requestAnimationFrame(() => refreshScanoutFrame(true));
+    if (!binaryStreamActive) {
+      requestAnimationFrame(() => refreshScanoutFrame(false));
+    }
   }
 
   // --------------------------------------------------------------------------

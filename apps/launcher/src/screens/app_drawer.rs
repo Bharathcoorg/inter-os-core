@@ -157,7 +157,21 @@ pub fn app_drawer_per_page(state: &LauncherState) -> usize {
 /// Category tabs: All, Work, Personal, Tools.
 pub const APP_DRAWER_TAB_NAMES: [&[u8]; 4] = [b"All", b"Work", b"Personal", b"Tools"];
 
-/// Filters installed application indices matching the specified category tab.
+fn contains_ignore_case(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    if needle.len() > haystack.len() {
+        return false;
+    }
+    haystack.windows(needle.len()).any(|w| {
+        w.iter().zip(needle.iter()).all(|(&h, &n)| {
+            h.to_ascii_lowercase() == n.to_ascii_lowercase()
+        })
+    })
+}
+
+/// Filters installed application indices matching the specified category tab and search query.
 pub fn filtered_indices(state: &LauncherState, tab: usize, out: &mut [usize; 32]) -> usize {
     let mut count = 0;
     for i in 0..state.app_count.min(32) {
@@ -166,7 +180,7 @@ pub fn filtered_indices(state: &LauncherState, tab: usize, out: &mut [usize; 32]
         if id == b"org.interos.sensor_dashboard" || id == b"sensor_dashboard" || id == b"sensors" {
             continue;
         }
-        let matches = if tab == 0 {
+        let matches_tab = if tab == 0 {
             true
         } else {
             let cat_len = state.app_category_lens[i] as usize;
@@ -178,7 +192,15 @@ pub fn filtered_indices(state: &LauncherState, tab: usize, out: &mut [usize; 32]
                 _ => true,
             }
         };
-        if matches {
+        let matches_search = if state.search_query_len == 0 {
+            true
+        } else {
+            let q = &state.search_query[..state.search_query_len];
+            let label_len = (state.app_label_lens[i] as usize).min(state.app_labels[i].len());
+            let label = &state.app_labels[i][..label_len];
+            contains_ignore_case(label, q) || contains_ignore_case(id, q)
+        };
+        if matches_tab && matches_search {
             out[count] = i;
             count += 1;
         }
@@ -712,8 +734,20 @@ fn build(state: &LauncherState) -> Paint {
         bars,
     };
 
-    // Search field: the placeholder counts the catalogue, so it is formatted here.
-    let (raw, raw_len) = search_placeholder(state);
+    // Search field: shows active query or catalogue placeholder
+    let (search_text, search_text_len, search_color) = if state.search_query_len > 0 {
+        let mut q_buf = [0u8; 36];
+        let q_len = state.search_query_len.min(32);
+        q_buf[..q_len].copy_from_slice(&state.search_query[..q_len]);
+        q_buf[q_len] = b'|';
+        (q_buf, q_len + 1, theme.text)
+    } else {
+        let (raw, raw_len) = search_placeholder(state);
+        let mut p_buf = [0u8; 36];
+        let p_len = raw_len.min(36);
+        p_buf[..p_len].copy_from_slice(&raw[..p_len]);
+        (p_buf, p_len, theme.text_muted)
+    };
     let search_x = f.search.x + space::XXL + space::MD;
     let search_room = f
         .search
@@ -724,8 +758,8 @@ fn build(state: &LauncherState) -> Paint {
         f.search.center_y() - text::line_height(LABEL_SCALE) / 2,
         LABEL_SCALE,
         search_room,
-        &raw[..raw_len],
-        theme.text_muted,
+        &search_text[..search_text_len],
+        search_color,
     );
 
     // 4 Category Filter Chips: All, Work, Personal, Tools

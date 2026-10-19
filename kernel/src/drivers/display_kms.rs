@@ -696,15 +696,44 @@ impl DrmKmsController {
 
         let has_mobile_portrait = self.surfaces.iter().any(|s| s.visible && s.frame_ready && s.width == 720 && s.height == 1440);
 
+        // Occlusion culling: if a higher-z visible, frame-ready surface covers the
+        // entire mobile/scanout viewport at (0, 0) with opacity 255 and opaque
+        // pixel alpha (0xFF), every lower-z surface beneath it is 100% occluded
+        // and does not need to be upscaled or composited.
+        let top_opaque_idx = self.surfaces.iter().enumerate().rev().find(|(_, s)| {
+            if !s.visible || !s.frame_ready || s.opacity != 255 || s.x != 0 || s.y != 0 {
+                return false;
+            }
+            if has_mobile_portrait && s.height == 96 {
+                return false;
+            }
+            let covers = (s.width == 720 && s.height == 1440 && 720i64 * sh as i64 == 1440i64 * sw as i64)
+                || (s.width == 1080 && s.height == 2160 && 1080i64 * sh as i64 == 2160i64 * sw as i64)
+                || (s.width == self.scanout_width && s.height == self.scanout_height);
+            covers && !s.pixels.is_empty() && s.pixels.iter().step_by(997).all(|&p| (p >> 24) == 0xFF)
+        }).map(|(idx, _)| idx);
+
+        let can_incremental_band = self.present_dirty_rows.1 <= self.present_dirty_rows.0
+            && self.front_buffer.len() == self.back_buffer.len()
+            && !self.front_buffer.is_empty();
+
         // Scanout rows the flip will have to re-present. Seeded with whatever
         // the callers already declared dirty; the surface loop narrows it to
         // exactly the rows each dirty surface actually rewrote, and
         // `diff_present_rows` below makes the result fail-safe.
         let mut present_band = self.present_dirty_rows;
 
-        for surface in self.surfaces.iter_mut() {
+        for (surf_idx, surface) in self.surfaces.iter_mut().enumerate() {
             if !surface.visible || surface.opacity == 0 || !surface.frame_ready {
                 continue;
+            }
+
+            if let Some(top_idx) = top_opaque_idx {
+                if surf_idx < top_idx {
+                    surface.dirty = false;
+                    surface.dirty_rows = (0, 0);
+                    continue;
+                }
             }
 
             if has_mobile_portrait && surface.height == 96 {
@@ -812,6 +841,7 @@ impl DrmKmsController {
                 // samplers here, widen to the destination rect the surface
                 // covers: still bounded by this surface, and never wider than
                 // the pre-banding code ever presented.
+                let mut scaled_dirty_band: Option<(usize, usize)> = None;
                 if surface.dirty_rows.1 > surface.dirty_rows.0 {
                     if landscape {
                         // Rotation swaps horizontal/vertical axes; changes span destination height.
@@ -830,6 +860,7 @@ impl DrmKmsController {
                         let r1 = (dst_y + ((surface.dirty_rows.1 + 1) * dst_h + s_h as usize - 1) / s_h as usize).min(dst_y + dst_h);
                         if r1 > r0 {
                             union_rows(&mut present_band, r0, r1);
+                            scaled_dirty_band = Some((r0.saturating_sub(dst_y), (r1 - dst_y).min(dst_h)));
                         }
                     }
                 }
@@ -917,26 +948,32 @@ impl DrmKmsController {
                         // same vertically, which is precisely the area a 1.5x
                         // upscale has to reproduce. Weight sum per destination
                         // pixel is 2 on each axis, so the normaliser is 4.
-                        //
-                        // WHY the weights must stay symmetric (this is measured,
-                        // not argued): a one-sided ramp such as (2,0),(1,1),(2,0)
-                        // / (3,0),(2,1),(1,2) renormalises fine per destination
-                        // pixel and still looks correct on a flat field, but it
-                        // hands the first tap of every pair 2/3 of the pair's mass
-                        // and the second only 1/3. Every source pixel then gets a
-                        // gain of 2.0 or 1.0 instead of 1.5 depending on whether
-                        // its index is even or odd, which is a +-33% luminance
-                        // comb locked to the source grid: thin features on odd
-                        // rows/columns lose a third of their amplitude and the
-                        // whole scanout carries a 1px cross-hatch. The
-                        // `fhd_upscale_is_energy_preserving_across_parity` test
-                        // pins that a full-width impulse lands at gain 1.5 from
-                        // both an even and an odd source column.
                         let src_pitch = s_w as usize;
                         let s_w_usize = s_w as usize;
                         let s_h_usize = s_h as usize;
 
-                        for dy in 0..dst_h {
+                        let (dy_lo, dy_hi) = if can_incremental_band && top_opaque_idx == Some(surf_idx) && dst_x == 0 && dst_y == 0 && dst_w == scanout_w {
+                            if let Some((b0, b1)) = scaled_dirty_band {
+                                if b0 > 0 {
+                                    let end0 = b0 * scanout_w;
+                                    self.back_buffer[..end0].copy_from_slice(&self.front_buffer[..end0]);
+                                }
+                                if b1 < dst_h {
+                                    let start1 = b1 * scanout_w;
+                                    let end1 = (dst_h * scanout_w).min(self.back_buffer.len());
+                                    if start1 < end1 {
+                                        self.back_buffer[start1..end1].copy_from_slice(&self.front_buffer[start1..end1]);
+                                    }
+                                }
+                                (b0, b1)
+                            } else {
+                                (0, dst_h)
+                            }
+                        } else {
+                            (0, dst_h)
+                        };
+
+                        for dy in dy_lo..dy_hi {
                             let ry = dy % 3;
                             let sy0 = (dy / 3) * 2;
                             let sy1 = (sy0 + 1).min(s_h_usize - 1);
@@ -972,7 +1009,12 @@ impl DrmKmsController {
                                 if rx == 0 && ry == 0 {
                                     let idx = r0 + sx0;
                                     if idx < surface.pixels.len() {
-                                        self.back_buffer[dst_idx] = blend_pixel(surface.pixels[idx], self.back_buffer[dst_idx], surface.opacity);
+                                        let p = surface.pixels[idx];
+                                        if (p >> 24) == 0xFF && surface.opacity == 255 {
+                                            self.back_buffer[dst_idx] = p;
+                                        } else {
+                                            self.back_buffer[dst_idx] = blend_pixel(p, self.back_buffer[dst_idx], surface.opacity);
+                                        }
                                     }
                                     continue;
                                 }
@@ -995,7 +1037,11 @@ impl DrmKmsController {
                                 //    copied rather than blended four times, so flat
                                 //    colour survives the upscale bit-for-bit.
                                 if p00 == p01 && p00 == p10 && p00 == p11 {
-                                    self.back_buffer[dst_idx] = blend_pixel(p00, self.back_buffer[dst_idx], surface.opacity);
+                                    if (p00 >> 24) == 0xFF && surface.opacity == 255 {
+                                        self.back_buffer[dst_idx] = p00;
+                                    } else {
+                                        self.back_buffer[dst_idx] = blend_pixel(p00, self.back_buffer[dst_idx], surface.opacity);
+                                    }
                                     continue;
                                 }
 
@@ -1006,6 +1052,14 @@ impl DrmKmsController {
                                 let w01 = wy0 * wx1;
                                 let w10 = wy1 * wx0;
                                 let w11 = wy1 * wx1;
+
+                                if (p00 & p01 & p10 & p11) >= 0xFF00_0000 && surface.opacity == 255 {
+                                    let r = (((p00 >> 16) & 0xFF) * w00 + ((p01 >> 16) & 0xFF) * w01 + ((p10 >> 16) & 0xFF) * w10 + ((p11 >> 16) & 0xFF) * w11 + 2) >> 2;
+                                    let g = (((p00 >> 8) & 0xFF) * w00 + ((p01 >> 8) & 0xFF) * w01 + ((p10 >> 8) & 0xFF) * w10 + ((p11 >> 8) & 0xFF) * w11 + 2) >> 2;
+                                    let b = ((p00 & 0xFF) * w00 + (p01 & 0xFF) * w01 + (p10 & 0xFF) * w10 + (p11 & 0xFF) * w11 + 2) >> 2;
+                                    self.back_buffer[dst_idx] = 0xFF00_0000 | (r << 16) | (g << 8) | b;
+                                    continue;
+                                }
 
                                 let blend_ch = |shift: u32| -> u32 {
                                     let c00 = (p00 >> shift) & 0xFF;
