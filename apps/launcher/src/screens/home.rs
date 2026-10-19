@@ -1033,7 +1033,7 @@ fn deck_plan(state: &LauncherState, theme: &Theme, _deck: Rect) -> DeckPlan {
     // longer than the tile is still ellipsized to the fit by `Run::centred`.
     let label_bytes: [&[u8]; 6] = core::array::from_fn(|slot| {
         let (_, suffix, default_label, _) = dock_defs[slot];
-        if slot == 5 {
+        if slot == 0 || slot == 5 {
             default_label
         } else if let Some(pkg_idx) = find_package_index(state, suffix).or_else(|| {
             if suffix == b"file_manager" {
