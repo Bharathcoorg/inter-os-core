@@ -1794,7 +1794,7 @@ fn resolve_app_at_touch<'a>(state: &'a LauncherState, x: u32, y: u32) -> Option<
         }
 
         // Row 0 of Quick Action Dock: Phone, Messages, Camera
-        if (700..925).contains(&y) {
+        if (730..950).contains(&y) {
             if (30..250).contains(&x) {
                 return package_id_by_suffix(state, b"dialer");
             } else if (250..475).contains(&x) {
@@ -1805,7 +1805,7 @@ fn resolve_app_at_touch<'a>(state: &'a LauncherState, x: u32, y: u32) -> Option<
         }
 
         // Row 1 of Quick Action Dock: Files, Browser (Slot 5: Apps is a view transition, not an app)
-        if (925..1160).contains(&y) {
+        if (950..1180).contains(&y) {
             if (30..250).contains(&x) {
                 return package_id_by_suffix(state, b"file_manager").or_else(|| package_id_by_suffix(state, b"files"));
             } else if (250..475).contains(&x) {
@@ -4212,7 +4212,7 @@ pub extern "C" fn _start() -> ! {
                                 }
 
                                 // Apps dock tile tap (Slot 5: row 1, col 2): opens App Drawer
-                                if (925..1160).contains(&y) && (475..695).contains(&x) {
+                                if (950..1180).contains(&y) && (475..695).contains(&x) {
                                     state.current_view = ViewMode::AppDrawer;
                                     state.search_query_len = 0;
                                     state.app_drawer_page = 0;
