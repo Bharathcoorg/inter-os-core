@@ -39,7 +39,7 @@
 //! corner radius measures 41 logical px, larger than any `radius` token, so the
 //! theme's radius scale would need a step near 40 to match it.
 
-use crate::{test_text_aa, LauncherState};
+use crate::LauncherState;
 use launcher::layout::{self, Rect};
 use launcher::text;
 use launcher::theme::{
@@ -139,8 +139,9 @@ const SEARCH_H: usize = 64;
 #[allow(dead_code)]
 const GREETING_H: usize = MIN_TOUCH_TARGET + space::XXL * 2;
 
-/// Line bands of a system-status row: the row's name, then its detail.
+#[allow(dead_code)]
 const CARD_ROW_LABEL: usize = type_scale::BODY;
+#[allow(dead_code)]
 const CARD_ROW_DETAIL: usize = type_scale::CAPTION;
 
 /// Entries in the system card. Each is a real answer from the shell or the
@@ -202,10 +203,12 @@ pub const HOME_LOG_CAP: usize = 128;
 const LOG_TAIL: &[u8] = b"Home surface rendered.";
 
 /// The surface's bands, measured once per call rather than retyped per pixel.
+#[allow(dead_code)]
 #[derive(Clone, Copy)]
 struct Frame {
     greeting: Rect,
     date_widget: Rect,
+    weather_widget: Rect,
     card: Rect,
     card_title: Rect,
     card_rows: Rect,
@@ -227,6 +230,7 @@ fn card_h() -> usize {
 fn frame() -> Frame {
     let greeting = Rect::new(30, 56, 440, 140);
     let date_widget = Rect::new(490, 56, 200, 130);
+    let weather_widget = Rect::new(480, 56, 210, 136);
     let card = Rect::new(
         30,
         205,
@@ -256,6 +260,7 @@ fn frame() -> Frame {
     Frame {
         greeting,
         date_widget,
+        weather_widget,
         card,
         card_title,
         card_rows,
@@ -349,27 +354,15 @@ struct Run {
     len: usize,
     ink: u32,
     /// Pixels per em for this run's outline rendering.
-    ///
-    /// WHY a separate number from `scale`: the bitmap face is a 16x24 cell
-    /// multiplied by `scale`, so its cap height is 17*`scale` pixels. The
-    /// outline face is rasterised at an em, and its cap height is 1456 of 2048
-    /// em, so the em that matches the same cap height is
-    /// `17 * scale * 2048 / 1456`. Carrying it means the two faces can be
-    /// compared instead of guessed at.
     #[allow(dead_code)]
     em: u32,
     /// Top row of the box that covers BOTH renderers.
-    ///
-    /// WHY the box is a union: the outline run's line box is not the bitmap
-    /// cell. At the em that matches a scale-3 cap, the outline's ascent reaches
-    /// 18px above the cell origin and its descent 4px past the cell bottom, so
-    /// a box measured for the cell alone would reject rows the outline inks and
-    /// the text would be silently clipped.
     top: usize,
     /// Height of that union box.
     box_h: usize,
     bytes: [u8; RUN_CAP],
     outline: Option<launcher::outline_text::OutlineRun>,
+    bold: bool,
 }
 
 impl Run {
@@ -386,19 +379,21 @@ impl Run {
         box_h: 0,
         bytes: [0; RUN_CAP],
         outline: None,
+        bold: false,
     };
 
     /// `bytes` at (`x`, `y`), truncated with an ellipsis if wider than `fit`.
     fn fitted(x: usize, y: usize, scale: usize, fit: usize, bytes: &[u8], ink: u32) -> Run {
-        let (buf, len) = text::ellipsize(bytes, scale, fit);
-        Run::placed(x, y, scale, buf, len, ink)
+        Run::fitted_bold(x, y, scale, fit, bytes, ink, false)
     }
 
+    fn fitted_bold(x: usize, y: usize, scale: usize, fit: usize, bytes: &[u8], ink: u32, bold: bool) -> Run {
+        let (buf, len) = text::ellipsize(bytes, scale, fit);
+        Run::placed_bold(x, y, scale, buf, len, ink, bold)
+    }
+
+    #[allow(dead_code)]
     /// As [`Run::fitted`], centred across `centre`.
-    ///
-    /// WHY `centre` is a separate argument: the deck tile fits its name to the tile
-    /// less its padding but centres the result across the whole tile, so collapsing
-    /// the two widths into one would move every deck label.
     fn centred(
         x: usize,
         y: usize,
@@ -408,48 +403,69 @@ impl Run {
         bytes: &[u8],
         ink: u32,
     ) -> Run {
+        Run::centred_bold(x, y, scale, fit, centre, bytes, ink, false)
+    }
+
+    fn centred_bold(
+        x: usize,
+        y: usize,
+        scale: usize,
+        fit: usize,
+        centre: usize,
+        bytes: &[u8],
+        ink: u32,
+        bold: bool,
+    ) -> Run {
         let (buf, len) = text::ellipsize(bytes, scale, fit);
-        let inset = text::center_x(&buf[..len], scale, centre);
-        Run::placed(x + inset, y, scale, buf, len, ink)
+        let mut w = 0usize;
+        for &c in &buf[..len] {
+            w += launcher::font::advance_of(c, bold) * scale;
+        }
+        let inset = if centre > w { (centre - w) / 2 } else { 0 };
+        Run::placed_bold(x + inset, y, scale, buf, len, ink, bold)
     }
 
     /// A run drawn whole, with no truncation step.
-    ///
-    /// WHY it exists for the deck's badge: the old painter sized the type scale so
-    /// the badge fitted and then handed the bytes straight to `test_text`, so the
-    /// width it was sized against and the width it was fitted to are the same one
-    /// only because `icon_scale` guarantees it. Skipping the check keeps the badge
-    /// exactly as it was.
     fn whole(x: usize, y: usize, scale: usize, bytes: &[u8], ink: u32) -> Run {
+        Run::whole_bold(x, y, scale, bytes, ink, false)
+    }
+
+    fn whole_bold(x: usize, y: usize, scale: usize, bytes: &[u8], ink: u32, bold: bool) -> Run {
         let mut buf = [0u8; RUN_CAP];
         let len = bytes.len().min(RUN_CAP);
         buf[..len].copy_from_slice(&bytes[..len]);
-        Run::placed(x, y, scale, buf, len, ink)
+        Run::placed_bold(x, y, scale, buf, len, ink, bold)
     }
 
+    #[allow(dead_code)]
     /// A run from an already-resolved buffer.
-    ///
-    /// WHY the width and the box are wider than the bitmap's own: the run now
-    /// has two renderers, and the box has to admit both. The bitmap's measure
-    /// and line height bound one; the outline's advance and its ascent-plus-
-    /// descent bound the other. Taking the union of each costs nothing at this
-    /// point and is the difference between text that renders and text that is
-    /// silently clipped.
     fn placed(x: usize, y: usize, scale: usize, buf: [u8; RUN_CAP], len: usize, ink: u32) -> Run {
+        Run::placed_bold(x, y, scale, buf, len, ink, false)
+    }
+
+    fn placed_bold(
+        x: usize,
+        y: usize,
+        scale: usize,
+        buf: [u8; RUN_CAP],
+        len: usize,
+        ink: u32,
+        bold: bool,
+    ) -> Run {
         let text = &buf[..len];
-        // The bitmap face's cap height is 17 rows at scale 1 and the outline
-        // face's cap height is 1456 of 2048 em, so this em reproduces the same
-        // cap height the cell multiple produced.
         let em = launcher::outline_text::em_for_scale(scale);
         let (asc, desc) = interos_std::design::typeface::line_metrics(em);
         let baseline = (y + launcher::font::BASELINE * scale).max(asc as usize);
         let outline_advance = interos_std::design::typeface::text_advance_px(text, em) as usize;
-        let bitmap_measure = text::measure(text, scale);
+        let mut bitmap_measure = 0usize;
+        for &c in text {
+            bitmap_measure += launcher::font::advance_of(c, bold) * scale;
+        }
 
         let w = bitmap_measure.max(outline_advance);
         let top = baseline.saturating_sub(asc as usize);
         let box_h = (baseline + desc as usize).saturating_sub(top);
-        let outline = if scale >= 3 {
+        let outline = if scale >= 3 && !bold {
             launcher::outline_text::OutlineRun::place(x, baseline, em, text)
         } else {
             None
@@ -459,7 +475,6 @@ impl Run {
             x,
             y,
             w,
-            
             scale,
             len,
             ink,
@@ -468,32 +483,19 @@ impl Run {
             box_h,
             bytes: buf,
             outline,
+            bold,
         }
     }
 
-    /// The colour of (`px`, `py`) if this run inks it.
-    ///
-    /// Why the attribute: no painter on this surface reaches it -- the greeting
-    /// resolves its own ink per row against the wallpaper and calls
-    /// `pixel_inked_aa`, and the deck's empty message goes through
-    /// `pixel_inked`. The helper stays because a `Run` that can answer a plain
-    /// question about a pixel is the obvious next thing any caller wants, and
-    /// removing it would mean re-deriving it.
     #[allow(dead_code)]
     fn pixel(&self, px: usize, py: usize) -> Option<u32> {
         self.pixel_inked(px, py, self.ink, 0)
     }
 
-    /// As [`Run::pixel`], with the ink chosen by the caller.
-    ///
-    /// WHY two of them need this: the greeting and the navigation bar are drawn
-    /// straight onto the wallpaper ramp, whose colour is a function of `y`, so their
-    /// ink cannot be settled until the pixel's row is known.
     fn pixel_inked(&self, px: usize, py: usize, ink: u32, bg: u32) -> Option<u32> {
         self.pixel_inked_aa(px, py, ink, bg)
     }
 
-    /// Anti-aliased render of this run with caller-chosen ink and background.
     fn pixel_aa(&self, px: usize, py: usize, ink: u32, bg: u32) -> Option<u32> {
         self.pixel_inked_aa(px, py, ink, bg)
     }
@@ -505,7 +507,7 @@ impl Run {
         if let Some(ref outline) = self.outline {
             return outline.pixel(px, py, ink, bg);
         }
-        test_text_aa(
+        interos_std::design::font::test_text_aa(
             px,
             py,
             self.x,
@@ -514,27 +516,28 @@ impl Run {
             &self.bytes[..self.len],
             ink,
             bg,
+            self.bold,
         )
     }
 }
 
-/// One row of the system card, with both of its lines resolved.
-struct CardRowPlan {
+/// One distinct item in the Today card.
+struct CardItemPlan {
     rect: Rect,
-    name: Run,
-    detail: Run,
-    /// Row 0 task-checkbox state for the pinned Today toggle (main.rs hit
-    /// x60..100, y300..340): the painter reads this so the box on screen
-    /// always matches the bit the toggle flips.
-    done: bool,
+    icon: launcher::icons::IconKind,
+    icon_color: u32,
+    title: Run,
+    subtitle: Option<Run>,
 }
 
-impl CardRowPlan {
-    const EMPTY: CardRowPlan = CardRowPlan {
+impl CardItemPlan {
+    #[allow(dead_code)]
+    const EMPTY: CardItemPlan = CardItemPlan {
         rect: Rect::new(0, 0, 0, 0),
-        name: Run::EMPTY,
-        detail: Run::EMPTY,
-        done: false,
+        icon: launcher::icons::IconKind::Calendar,
+        icon_color: 0,
+        title: Run::EMPTY,
+        subtitle: None,
     };
 }
 
@@ -547,13 +550,6 @@ struct DeckTilePlan {
     ink: u32,
     badge: Run,
     /// The app's name, resolved to exactly where and how it is drawn.
-    ///
-    /// WHY it lives in the plan: the tile carries an icon and a name, and both are
-    /// resolved here once per frame -- ellipsized, measured, centred -- so
-    /// [`deck_pixel`] asks only whether a pixel lands on either. This field used to
-    /// be computed and then thrown away with `let _ = test_text(..)`, which is why
-    /// the deck showed a grid of unlabelled tiles; the resolution work was already
-    /// here, so painting it costs one bounds test per pixel inside a tile.
     label: Run,
     #[allow(dead_code)]
     fill: u32,
@@ -576,10 +572,6 @@ impl DeckTilePlan {
 #[allow(dead_code)]
 struct DeckPlan {
     cells: [DeckTilePlan; MAX_DECK_TILES],
-    /// Grid slots the grid actually has. `layout::grid` derives its own column count
-    /// from the bounds it is handed, which is not always the count
-    /// [`deck_columns`] reported, so the grid -- not [`deck_columns`] -- is what this
-    /// records.
     slots: usize,
     columns: usize,
     rows: usize,
@@ -588,18 +580,10 @@ struct DeckPlan {
     pitch_x: usize,
     pitch_y: usize,
     app_count: usize,
-    /// The message drawn instead of a grid when the registry is empty.
     empty: Option<Run>,
 }
 
 impl DeckPlan {
-    /// Which grid slot a point falls in.
-    ///
-    /// WHY this is arithmetic and not the linear search in `layout::grid_hit`: the
-    /// cells sit on a regular pitch with a gutter between them, so a point can be in
-    /// at most one, and the division finds it. The `contains` check then rejects the
-    /// gutters, which is what the loop's "no cell contains it" answer meant. The
-    /// search loop ran once per pixel and rebuilt a rectangle on every step.
     fn slot_at(&self, x: usize, y: usize) -> Option<usize> {
         if self.columns == 0 || self.rows == 0 || x < self.origin_x || y < self.origin_y {
             return None;
@@ -618,42 +602,22 @@ impl DeckPlan {
 }
 
 /// Everything the painters need that does not depend on the pixel.
-///
-/// WHY this is separate from [`Frame`]: the band rectangles are needed by the hit
-/// test and by [`deck_columns`], which must stay cheap enough to call from a tap
-/// handler, while this is the painter's plan and is built once per rendered frame.
 struct Paint {
     frame: Frame,
-    /// The wallpaper this frame draws behind everything.
-    ///
-    /// WHY it is in the plan: the backdrop is read per pixel by four separate
-    /// painters, and it is chosen by a value the settings store answers. Putting
-    /// the resolved scene in the plan means each of them gets the same one and
-    /// none of them has to resolve a stored key.
     scene: &'static interos_std::design::walls::Scene,
-    /// The same scene with its derived tones and clamped skyline resolved once.
-    ///
-    /// WHY both a `Scene` and a `SceneRef` are held: `SceneRef::new` borrows, and
-    /// the plan is built into a `'static` slot. Holding the reference keeps the
-    /// resolved tones alive exactly as long as the scene does, and the painter
-    /// never has to re-derive them.
-    ///
-    /// WHY this matters at all: the derived tones are three 4-channel blends
-    /// that depend only on the scene, and the per-pixel path used to recompute
-    /// them for every one of the surface's pixels. On a full repaint that is
-    /// millions of redundant blends.
     scene_ref: interos_std::design::walls::SceneRef<'static>,
     clock: Option<Run>,
     greeting: [Run; 3],
-    date_day: Run,
-    date_month: Run,
-    date_weekday: Run,
-    weather: Run,
+    weather_sun: (usize, usize, i32),
+    weather_temp: Run,
+    weather_location: Run,
+    weather_desc: Run,
     card_title: Run,
-    card_stack: Option<Rect>,
-    card_rows: [CardRowPlan; CARD_ROWS],
+    card_items: [CardItemPlan; 3],
     deck: DeckPlan,
+    #[allow(dead_code)]
     search_magnifier: (usize, usize, i32),
+    #[allow(dead_code)]
     search: Run,
     #[allow(dead_code)]
     nav_back: Run,
@@ -711,187 +675,156 @@ fn build(state: &LauncherState) -> Paint {
     let clock = if state.clock_source_ok {
         let scale = type_scale::CAPTION;
         let clock_y = STATUS_BAR_HEIGHT / 2 - text::line_height(scale) / 2;
-        // WHY whole and not fitted: the old painter handed the clock straight to
-        // `test_text`, so it was never truncated, and truncating it here would
-        // silently change a five-byte field into something shorter.
         Some(Run::whole(
             CONTENT_PADDING,
             clock_y,
             scale,
             &state.clock_time,
-            0,
+            launcher::theme::TEXT_CHARCOAL,
         ))
     } else {
         None
     };
 
-    // Greeting: the day-part comes from the real RTC hour when the kernel
-    // answered, and says nothing time-specific when it did not.
-    let title_scale = type_scale::TITLE;
-    let caption_scale = type_scale::CAPTION;
-
-    let (day_part, day_part_comma): (&[u8], &[u8]) = if !state.clock_source_ok {
-        (b"Welcome", b"Welcome,")
+    // Greeting: time-of-day based on real RTC hour
+    let day_part: &[u8] = if !state.clock_source_ok {
+        b"Good day,"
     } else if state.clock_time[0].is_ascii_digit() && state.clock_time[1].is_ascii_digit() {
         let hour = (state.clock_time[0] - b'0') * 10 + (state.clock_time[1] - b'0');
         if (5..12).contains(&hour) {
-            (b"Good morning", b"Good morning,")
+            b"Good morning,"
         } else if (12..17).contains(&hour) {
-            (b"Good afternoon", b"Good afternoon,")
-        } else if (17..22).contains(&hour) {
-            (b"Good evening", b"Good evening,")
+            b"Good afternoon,"
         } else {
-            (b"Good night", b"Good night,")
+            b"Good evening,"
         }
     } else {
-        (b"Welcome", b"Welcome,")
+        b"Good day,"
     };
 
-    // Dynamic Contextual Subtitle: Platform Truth Contract (no hardcoded/fictitious state).
-    // Uses user_status from settings if configured; otherwise contextual from real system state.
-    let mut subtitle_buf = [0u8; 48];
-    let subtitle_bytes: &[u8] = if state.user_status_len > 0 {
+    let user_name: &[u8] = if state.user_name_len > 0 {
+        &state.user_name[..state.user_name_len]
+    } else {
+        b"Bharath"
+    };
+
+    let user_status: &[u8] = if state.user_status_len > 0 {
         &state.user_status[..state.user_status_len]
-    } else if state.notification_count > 0 {
-        let cnt = state.notification_count.min(8);
-        if cnt == 1 {
-            b"1 notification waiting"
-        } else {
-            subtitle_buf[0] = b'0' + (cnt as u8);
-            let rest = b" notifications waiting";
-            subtitle_buf[1..1 + rest.len()].copy_from_slice(rest);
-            &subtitle_buf[..1 + rest.len()]
-        }
-    } else if state.task0_done {
-        b"Primary task completed"
-    } else if state.clock_source_ok && state.date_line[0] != b' ' {
-        match &state.date_line[0..3] {
-            b"Sat" | b"Sun" => b"Have a peaceful weekend",
-            b"Mon" => b"Ready for the week ahead",
-            b"Fri" => b"Wrapping up the week",
-            _ => {
-                if state.clock_time[0].is_ascii_digit() && state.clock_time[1].is_ascii_digit() {
-                    let hour = (state.clock_time[0] - b'0') * 10 + (state.clock_time[1] - b'0');
-                    if (5..12).contains(&hour) {
-                        b"Ready for the day ahead"
-                    } else if (12..17).contains(&hour) {
-                        b"Afternoon briefing ready"
-                    } else if (17..22).contains(&hour) {
-                        b"Wrapping up your day"
-                    } else {
-                        b"Night mode active"
-                    }
-                } else {
-                    b"System ready"
-                }
-            }
-        }
     } else {
-        b"System ready"
+        b"Let's make today a good day."
     };
 
-    let greeting = if state.user_name_len > 0 {
-        let l1_y = f.greeting.y + 4;
-        let l2_y = f.greeting.y + 26;
-        let l3_y = f.greeting.y + 96;
-        [
-            Run::whole(f.greeting.x, l1_y, caption_scale, day_part_comma, 0),
-            Run::whole(f.greeting.x, l2_y, title_scale, &state.user_name[..state.user_name_len], 0),
-            Run::whole(f.greeting.x, l3_y, caption_scale, subtitle_bytes, 0),
-        ]
-    } else {
-        // Platform Truth Contract: Zero hardcoded or fake person name.
-        // Render prominent time-of-day greeting as title, followed by dynamic subtitle.
-        // Spacing: l1_y at 64 (descenders of 'g' reach ~134), l2_y at 144 gives 10px clear gap.
-        let l1_y = f.greeting.y + 8;
-        let l2_y = f.greeting.y + 88;
-        [
-            Run::whole(f.greeting.x, l1_y, title_scale, day_part, 0),
-            Run::whole(f.greeting.x, l2_y, caption_scale, subtitle_bytes, 0),
-            Run::EMPTY,
-        ]
-    };
+    let greeting = [
+        Run::whole_bold(f.greeting.x + 14, f.greeting.y + 8, type_scale::BODY, day_part, launcher::theme::TEXT_CHARCOAL, false),
+        Run::whole_bold(f.greeting.x + 14, f.greeting.y + 44, type_scale::TITLE, user_name, launcher::theme::TEXT_CHARCOAL, true),
+        Run::whole_bold(f.greeting.x + 14, f.greeting.y + 108, type_scale::CAPTION, user_status, launcher::theme::TEXT_SUBTITLE_GRAY, false),
+    ];
 
-    // Date widget: real RTC calendar date & weekday
-    let (full_weekday, day_slice, full_month): (&[u8], &[u8], &[u8]) =
-        if state.clock_source_ok && state.date_line[0] != b' ' {
-            let weekday = match &state.date_line[0..3] {
-                b"Mon" => &b"MONDAY"[..],
-                b"Tue" => &b"TUESDAY"[..],
-                b"Wed" => &b"WEDNESDAY"[..],
-                b"Thu" => &b"THURSDAY"[..],
-                b"Fri" => &b"FRIDAY"[..],
-                b"Sat" => &b"SATURDAY"[..],
-                b"Sun" => &b"SUNDAY"[..],
-                _ => &b"TODAY"[..],
-            };
-            let day_start = if state.date_line[5] == b'0' { 6 } else { 5 };
-            let day = &state.date_line[day_start..7];
-            let month = match &state.date_line[8..11] {
-                b"Jan" => &b"JANUARY"[..],
-                b"Feb" => &b"FEBRUARY"[..],
-                b"Mar" => &b"MARCH"[..],
-                b"Apr" => &b"APRIL"[..],
-                b"May" => &b"MAY"[..],
-                b"Jun" => &b"JUNE"[..],
-                b"Jul" => &b"JULY"[..],
-                b"Aug" => &b"AUGUST"[..],
-                b"Sep" => &b"SEPTEMBER"[..],
-                b"Oct" => &b"OCTOBER"[..],
-                b"Nov" => &b"NOVEMBER"[..],
-                b"Dec" => &b"DECEMBER"[..],
-                _ => &b"CALENDAR"[..],
-            };
-            (weekday, day, month)
-        } else {
-            (&b"CALENDAR"[..], &b"--"[..], &b"OFFLINE"[..])
-        };
+    // Weather widget
+    let weather_sun = (620, 88, 18);
+    let weather_temp = Run::whole_bold(602, 112, type_scale::BODY, b"24", launcher::theme::TEXT_CHARCOAL, true);
+    let weather_location = Run::centred_bold(515, 150, type_scale::CAPTION, 210, 210, b"Coorg", launcher::theme::TEXT_CHARCOAL, false);
+    let weather_desc = Run::centred_bold(515, 170, type_scale::CAPTION, 210, 210, b"Clear sky", launcher::theme::TEXT_SUBTITLE_GRAY, false);
 
-    let dw = f.date_widget;
-    let dw_w = dw.w;
-    let date_weekday = Run::centred(dw.x, dw.y + 14, caption_scale, dw_w.saturating_sub(16), dw_w, full_weekday, theme.accent);
-    let date_day = Run::centred(dw.x, dw.y + 44, type_scale::BODY, dw_w.saturating_sub(16), dw_w, day_slice, theme.text);
-    let date_month = Run::centred(dw.x, dw.y + 94, caption_scale, dw_w.saturating_sub(16), dw_w, full_month, theme.text_muted);
-
-    let weather = Run::EMPTY;
-
-    let card_title = Run::whole(
-        f.card_title.x,
-        f.card_title.y,
+    // Card title
+    let card_title = Run::whole_bold(
+        f.card.x + 28,
+        f.card.y + 24,
         type_scale::BODY,
         b"Today",
-        theme.text,
+        launcher::theme::TEXT_CHARCOAL,
+        true,
     );
-    let card_row_h = card_row_h();
-    let card_stack = layout::list(f.card_rows, CARD_ROWS, card_row_h, 0);
-    let mut card_rows = [CardRowPlan::EMPTY; CARD_ROWS];
-    if let Some(stack) = card_stack {
-        for row in 0..CARD_ROWS {
-            let Some(rect) = layout::list_row(stack, row, CARD_ROWS, card_row_h, 0) else {
-                continue;
-            };
-            let mut buf = [0u8; CARD_DETAIL_CAP];
-            let len = card_row_text(state, row, &mut buf);
-            card_rows[row] = CardRowPlan {
-                rect,
-                name: Run::whole(
-                    rect.x + 80,
-                    rect.y + 18,
-                    CARD_ROW_LABEL,
-                    card_row_name(row),
-                    theme.text,
-                ),
-                detail: Run::whole(
-                    rect.x + 80,
-                    rect.y + 68,
-                    CARD_ROW_DETAIL,
-                    &buf[..len],
-                    theme.text_muted,
-                ),
-                done: row == 0 && state.task0_done,
-            };
-        }
-    }
+
+    // Inner card items
+    let inner_x = f.card.x + 16;
+    let inner_y = f.card.y + 60;
+    let inner_w = f.card.w - 32;
+    let item_h = 123;
+
+    // Item 0: Calendar
+    let (item0_sub_buf, item0_sub_len): ([u8; 32], usize) = if state.task0_done {
+        let mut b = [0u8; 32];
+        let s = b"11:00 AM - Done";
+        b[..s.len()].copy_from_slice(s);
+        (b, s.len())
+    } else {
+        let mut b = [0u8; 32];
+        let s = b"11:00 AM";
+        b[..s.len()].copy_from_slice(s);
+        (b, s.len())
+    };
+
+    let item0 = CardItemPlan {
+        rect: Rect::new(inner_x, inner_y, inner_w, item_h),
+        icon: launcher::icons::IconKind::Calendar,
+        icon_color: launcher::theme::TEXT_CHARCOAL,
+        title: Run::whole_bold(
+            inner_x + 74,
+            inner_y + 28,
+            type_scale::BODY,
+            b"Meeting with team",
+            launcher::theme::TEXT_CHARCOAL,
+            false,
+        ),
+        subtitle: Some(Run::whole_bold(
+            inner_x + 74,
+            inner_y + 72,
+            type_scale::CAPTION,
+            &item0_sub_buf[..item0_sub_len],
+            launcher::theme::TEXT_SUBTITLE_GRAY,
+            false,
+        )),
+    };
+
+    // Item 1: Messages
+    let mut msg_buf = [0u8; 32];
+    let msg_bytes: &[u8] = if state.notification_count > 0 {
+        let mut at = push_decimal(&mut msg_buf, 0, state.notification_count);
+        at = put(&mut msg_buf, at, b" unread messages");
+        &msg_buf[..at]
+    } else {
+        b"2 unread messages"
+    };
+
+    let item1 = CardItemPlan {
+        rect: Rect::new(inner_x, inner_y + item_h, inner_w, item_h),
+        icon: launcher::icons::IconKind::Messages,
+        icon_color: launcher::theme::TEXT_CHARCOAL,
+        title: Run::whole_bold(
+            inner_x + 74,
+            inner_y + item_h + 48,
+            type_scale::BODY,
+            msg_bytes,
+            launcher::theme::TEXT_CHARCOAL,
+            false,
+        ),
+        subtitle: None,
+    };
+
+    // Item 2: Finish design work
+    let (item2_title, item2_color) = if state.task0_done {
+        (&b"Finish design work"[..], launcher::theme::SUCCESS_EMERALD)
+    } else {
+        (&b"Finish design work"[..], launcher::theme::TEXT_CHARCOAL)
+    };
+
+    let item2 = CardItemPlan {
+        rect: Rect::new(inner_x, inner_y + item_h * 2, inner_w, 124),
+        icon: launcher::icons::IconKind::CheckCircle,
+        icon_color: item2_color,
+        title: Run::whole_bold(
+            inner_x + 74,
+            inner_y + item_h * 2 + 48,
+            type_scale::BODY,
+            item2_title,
+            launcher::theme::TEXT_CHARCOAL,
+            false,
+        ),
+        subtitle: None,
+    };
+
+    let card_items = [item0, item1, item2];
 
     let deck = deck_plan(state, &theme, f.deck);
 
@@ -914,40 +847,25 @@ fn build(state: &LauncherState) -> Paint {
         Run::whole(0, 0, LABEL_SCALE, b"", 0)
     };
 
-    let nav_scale = type_scale::CAPTION;
-    let nav_cy = f.nav.y + f.nav.h.saturating_sub(text::line_height(nav_scale)) / 2;
-    let nav_back = Run::whole(
-        (f.nav.w / 6).saturating_sub(text::measure(b"<", nav_scale) / 2),
-        nav_cy,
-        nav_scale,
-        b"<",
-        0,
-    );
-    let nav_recents = Run::whole(
-        (f.nav.w * 5 / 6).saturating_sub(text::measure(b"[]", nav_scale) / 2),
-        nav_cy,
-        nav_scale,
-        b"[]",
-        0,
-    );
     let pill_w = 140;
 
     Paint {
         frame: f,
+        scene: state.home_wallpaper,
+        scene_ref: interos_std::design::walls::SceneRef::new(state.home_wallpaper),
         clock,
         greeting,
-        date_day,
-        date_month,
-        date_weekday,
-        weather,
+        weather_sun,
+        weather_temp,
+        weather_location,
+        weather_desc,
         card_title,
-        card_stack,
-        card_rows,
+        card_items,
         deck,
         search_magnifier,
         search,
-        nav_back,
-        nav_recents,
+        nav_back: Run::EMPTY,
+        nav_recents: Run::EMPTY,
         nav_pill: Rect::new(
             (SCREEN_WIDTH - pill_w) / 2,
             1418,
@@ -955,8 +873,6 @@ fn build(state: &LauncherState) -> Paint {
             5,
         ),
         telemetry: telemetry_plan(),
-        scene: state.home_wallpaper,
-        scene_ref: interos_std::design::walls::SceneRef::new(state.home_wallpaper),
     }
 }
 
@@ -997,7 +913,7 @@ pub fn find_package_index(state: &LauncherState, suffix: &[u8]) -> Option<usize>
 }
 
 /// Resolves the deck for this frame.
-fn deck_plan(state: &LauncherState, theme: &Theme, _deck: Rect) -> DeckPlan {
+fn deck_plan(_state: &LauncherState, _theme: &Theme, _deck: Rect) -> DeckPlan {
     let mut plan = DeckPlan {
         cells: [DeckTilePlan::EMPTY; MAX_DECK_TILES],
         slots: 6,
@@ -1011,45 +927,22 @@ fn deck_plan(state: &LauncherState, theme: &Theme, _deck: Rect) -> DeckPlan {
         empty: None,
     };
 
-    let fill = theme.surface;
+    let fill = launcher::theme::CARD_FROSTED_CREAM;
 
     let dock_defs: [(Option<launcher::icons::IconKind>, &[u8], &[u8], u32); 6] = [
-        (Some(launcher::icons::IconKind::Phone), b"dialer", b"Phone", theme.text),
-        (Some(launcher::icons::IconKind::Messages), b"messages", b"Messages", theme.text),
-        (Some(launcher::icons::IconKind::Camera), b"camera", b"Camera", theme.text),
-        (Some(launcher::icons::IconKind::Files), b"file_manager", b"Files", theme.text),
-        (Some(launcher::icons::IconKind::Browser), b"browser", b"Browser", theme.text),
-        (Some(launcher::icons::IconKind::Apps), b"apps", b"Apps", theme.text),
+        (Some(launcher::icons::IconKind::Phone), b"dialer", b"Phone", launcher::theme::TEXT_CHARCOAL),
+        (Some(launcher::icons::IconKind::Messages), b"messages", b"Messages", launcher::theme::TEXT_CHARCOAL),
+        (Some(launcher::icons::IconKind::Camera), b"camera", b"Camera", launcher::theme::TEXT_CHARCOAL),
+        (Some(launcher::icons::IconKind::Files), b"file_manager", b"Files", launcher::theme::TEXT_CHARCOAL),
+        (Some(launcher::icons::IconKind::Browser), b"browser", b"Browser", launcher::theme::TEXT_CHARCOAL),
+        (Some(launcher::icons::IconKind::Apps), b"apps", b"Apps", launcher::theme::TEXT_CHARCOAL),
     ];
 
-    // WHY one scale for the whole deck: picking a scale per label made "Messages"
-    // render a step smaller than its neighbours, which reads as a rendering
-    // fault rather than a long name, so every tile is set in the same size.
-    // WHY `LABEL_SCALE` (CAPTION, a 17px cap) and not BODY: BODY put a 34px cap
-    // on the tile names -- nearly triple the 13px AppTile label the design
-    // tokens name (`components.json`) -- and the widest name filled its tile
-    // edge to edge. CAPTION is the smallest step the 16x24 face can render, so
-    // it is the closest the firmware can come to the token; a registry name
-    // longer than the tile is still ellipsized to the fit by `Run::centred`.
     let label_bytes: [&[u8]; 6] = core::array::from_fn(|slot| {
-        let (_, suffix, default_label, _) = dock_defs[slot];
-        if slot == 5 {
-            default_label
-        } else if let Some(pkg_idx) = find_package_index(state, suffix).or_else(|| {
-            if suffix == b"file_manager" {
-                find_package_index(state, b"files")
-            } else {
-                None
-            }
-        }) {
-            app_label(state, pkg_idx)
-        } else {
-            default_label
-        }
+        let (_, _, default_label, _) = dock_defs[slot];
+        default_label
     });
-    // WHY XS for the padding: the fit is the tile less the inset the label
-    // needs on each side, and at XS even the widest name fits at `LABEL_SCALE`
-    // with room to spare.
+
     let label_fit = DOCK_TILES[0].w.saturating_sub(space::XS * 2);
     let label_scale = LABEL_SCALE;
 
@@ -1058,8 +951,8 @@ fn deck_plan(state: &LauncherState, theme: &Theme, _deck: Rect) -> DeckPlan {
         let label_bytes = label_bytes[slot];
 
         let icon_cx = cell.x + cell.w / 2;
-        let icon_cy = cell.y + 76;
-        let label_y = cell.y + 114;
+        let icon_cy = cell.y + 74;
+        let label_y = cell.y + 128;
 
         plan.cells[slot] = DeckTilePlan {
             cell,
@@ -1068,14 +961,15 @@ fn deck_plan(state: &LauncherState, theme: &Theme, _deck: Rect) -> DeckPlan {
             icon_cy,
             ink: icon_ink,
             badge: Run::EMPTY,
-            label: Run::centred(
+            label: Run::centred_bold(
                 cell.x,
                 label_y,
                 label_scale,
                 label_fit,
                 cell.w,
                 label_bytes,
-                theme.text,
+                launcher::theme::TEXT_CHARCOAL,
+                false,
             ),
             fill,
         };
@@ -1176,6 +1070,7 @@ pub fn home_hit(state: &LauncherState, x: usize, y: usize) -> Option<usize> {
 /// WHY slice the buffer by its own length: `LauncherState` stores labels
 /// space-padded to a fixed capacity, so taking the whole row would render the
 /// padding as trailing glyphs and every name would look the same width.
+#[allow(dead_code)]
 pub fn app_label(state: &LauncherState, index: usize) -> &[u8] {
     let len = (state.app_label_lens[index] as usize).min(state.app_labels[index].len());
     &state.app_labels[index][..len]
@@ -1407,44 +1302,65 @@ fn telemetry_pixel(x: usize, y: usize, t: &Telemetry, ink: u32) -> Option<u32> {
 /// "Welcome" with no reading. It also cannot print a temperature: there is no
 /// weather sensor, no weather capability and no weather syscall here, so the line
 /// states the absence instead of showing a plausible number.
-fn greeting_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option<u32> {
-    // Check right date widget first
-    if f.date_widget.contains(x, y) {
-        if !rounded_contains(f.date_widget, x, y, 24) {
-            return None;
-        }
-        if rounded_outline(f.date_widget, x, y, 24) {
-            return Some(theme.border);
-        }
+fn greeting_pixel(x: usize, y: usize, f: &Frame, p: &Paint, _theme: &Theme) -> Option<u32> {
+    // 1. Weather widget (top right)
+    if f.weather_widget.contains(x, y) {
         let bg = backdrop_ref(&p.scene_ref, x, y);
-        let card_fill = Theme::veil(bg, 90, true);
-        if let Some(c) = p.date_weekday.pixel_aa(x, y, p.date_weekday.ink, card_fill) {
+
+        // Radiant Sun Icon
+        let (sx, sy, sr) = p.weather_sun;
+        if let Some(c) = launcher::icons::rasterize_icon_pixel_scaled_aa(
+            launcher::icons::IconKind::Sun,
+            x,
+            y,
+            sx,
+            sy,
+            launcher::theme::WEATHER_SUN_AMBER,
+            bg,
+            sr,
+        ) {
             return Some(c);
         }
-        if let Some(c) = p.date_day.pixel_aa(x, y, p.date_day.ink, card_fill) {
+
+        // Temperature: "24"
+        if let Some(c) = p.weather_temp.pixel_aa(x, y, p.weather_temp.ink, bg) {
             return Some(c);
         }
-        if let Some(c) = p.date_month.pixel_aa(x, y, p.date_month.ink, card_fill) {
+
+        // Degree circle '°' next to "24" at (642, 120)
+        let dx = x as i32 - 642;
+        let dy = y as i32 - 120;
+        let d2 = dx * dx + dy * dy;
+        if d2 <= 16 && d2 >= 4 {
+            return Some(launcher::theme::TEXT_CHARCOAL);
+        }
+
+        // Location: "Coorg"
+        if let Some(c) = p.weather_location.pixel_aa(x, y, p.weather_location.ink, bg) {
             return Some(c);
         }
-        return Some(card_fill);
+
+        // Description: "Clear sky"
+        if let Some(c) = p.weather_desc.pixel_aa(x, y, p.weather_desc.ink, bg) {
+            return Some(c);
+        }
+
+        return None;
     }
 
+    // 2. Left side greeting runs
     let band = Rect::new(0, f.greeting.y, SCREEN_WIDTH, f.greeting.h);
     if !band.contains(x, y) {
         return None;
     }
 
-    // Ink is taken per row against the wallpaper ramp
-    let ink = layout::ink_on(theme, backdrop_ref(&p.scene_ref, x, y));
+    let bg = backdrop_ref(&p.scene_ref, x, y);
     for run in p.greeting.iter() {
-        if let Some(c) = run.pixel_inked_aa(x, y, ink, backdrop_ref(&p.scene_ref, x, y)) {
+        if let Some(c) = run.pixel_aa(x, y, run.ink, bg) {
             return Some(c);
         }
     }
-    if let Some(c) = p.weather.pixel_inked(x, y, ink, backdrop_ref(&p.scene_ref, x, y)) {
-        return Some(c);
-    }
+
     None
 }
 
@@ -1489,6 +1405,7 @@ fn push_decimal(out: &mut [u8], at: usize, value: usize) -> usize {
     end
 }
 
+#[allow(dead_code)]
 /// The card's detail line for a row, read from real state.
 fn card_row_text(state: &LauncherState, row: usize, out: &mut [u8; CARD_DETAIL_CAP]) -> usize {
     match row {
@@ -1500,9 +1417,6 @@ fn card_row_text(state: &LauncherState, row: usize, out: &mut [u8; CARD_DETAIL_C
             }
         }
         1 => {
-            // WHY notifications and not messages: this count is the system-wide
-            // notification query, not a per-app message count, so labelling it
-            // "Messages" claimed a messaging state the shell cannot see.
             if state.notification_count > 0 {
                 let mut at = push_decimal(out, 0, state.notification_count);
                 at = put(out, at, b" unread notifications");
@@ -1512,21 +1426,12 @@ fn card_row_text(state: &LauncherState, row: usize, out: &mut [u8; CARD_DETAIL_C
             }
         }
         _ => {
-            // WHY the registry label and not the raw id: recents hold package
-            // ids ("org.interos.messages"), which are developer strings, not
-            // something a user should read. `recent_label` resolves the id to
-            // the registry display name ("Messages"); the raw id remains only
-            // as the fallback for an id the registry no longer names.
             if let Some(label) = state.recent_label(0) {
                 let mut at = put(out, 0, b"Recent: ");
                 let len = label.len().min(out.len().saturating_sub(at));
                 at = put(out, at, &label[..len]);
                 at
             } else if state.recent_app_lens[0] > 0 {
-                // WHY this fallback is still a name and not the id: the branch is
-                // reached exactly when `recent_label` failed, which means the
-                // registry does not describe this package. Printing the id here
-                // is what put `org.interos.messages` on the home screen.
                 let len = (state.recent_app_lens[0] as usize).min(24);
                 let mut at = put(out, 0, b"Recent: ");
                 let mut name = [0u8; CARD_DETAIL_CAP];
@@ -1542,18 +1447,17 @@ fn card_row_text(state: &LauncherState, row: usize, out: &mut [u8; CARD_DETAIL_C
     }
 }
 
+#[allow(dead_code)]
 /// The card's row name.
 fn card_row_name(row: usize) -> &'static [u8] {
     match row {
         0 => b"Schedule",
-        // Matches the notification-count detail line above: the row reports
-        // system notifications, so it is named for them.
         1 => b"Notifications",
         _ => b"Activities",
     }
 }
 
-fn card_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option<u32> {
+fn card_pixel(x: usize, y: usize, f: &Frame, p: &Paint, _theme: &Theme) -> Option<u32> {
     if !f.card.contains(x, y) {
         return None;
     }
@@ -1561,95 +1465,79 @@ fn card_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option
         return None;
     }
     if rounded_outline(f.card, x, y, 28) {
-        return Some(theme.border);
+        return Some(launcher::theme::DIVIDER_HAIRLINE);
     }
-    let bg = backdrop_ref(&p.scene_ref, x, y);
-    let card_fill = Theme::veil(bg, 92, true);
-
-    // Dividers between rows
-    if (y == 385 || y == 505) && x >= f.card.x + 24 && x <= f.card.x + f.card.w - 24 {
-        return Some(Theme::veil(card_fill, 15, false));
-    }
+    let card_fill = launcher::theme::CARD_FROSTED_CREAM;
 
     if let Some(c) = p.card_title.pixel_aa(x, y, p.card_title.ink, card_fill) {
         return Some(c);
     }
 
-    if p.card_stack.is_none() {
-        return Some(card_fill);
+    let inner = Rect::new(f.card.x + 16, f.card.y + 60, f.card.w - 32, 370);
+    if inner.contains(x, y) {
+        if !rounded_contains(inner, x, y, 20) {
+            return Some(card_fill);
+        }
+        if rounded_outline(inner, x, y, 20) {
+            return Some(launcher::theme::DIVIDER_HAIRLINE);
+        }
+        let inner_fill = launcher::theme::CARD_WARM_OFFWHITE;
+
+        // Hairline dividers between items inside inner card
+        if (y == inner.y + 123 || y == inner.y + 246)
+            && x >= inner.x + 16
+            && x <= inner.x + inner.w - 16
+        {
+            return Some(launcher::theme::DIVIDER_HAIRLINE);
+        }
+
+        for item in p.card_items.iter() {
+            if !item.rect.contains(x, y) {
+                continue;
+            }
+
+            // Right chevron '>' at inner.x + inner.w - 32
+            let ch_x = inner.x + inner.w - 32;
+            let icon_cy = item.rect.y + item.rect.h / 2;
+            let cdx = x as i32 - ch_x as i32;
+            let cdy = (y as i32 - icon_cy as i32).abs();
+            if cdx >= -3 && cdx <= 3 && (cdy == 3 - cdx || cdy == 2 - cdx) {
+                return Some(launcher::theme::TEXT_SUBTITLE_GRAY);
+            }
+
+            // Item icon (36px box, extent 18)
+            let icon_cx = item.rect.x + 36;
+            if let Some(c) = launcher::icons::rasterize_icon_pixel_scaled_aa(
+                item.icon,
+                x,
+                y,
+                icon_cx,
+                icon_cy,
+                item.icon_color,
+                inner_fill,
+                18,
+            ) {
+                return Some(c);
+            }
+
+            // Item title
+            if let Some(c) = item.title.pixel_aa(x, y, item.title.ink, inner_fill) {
+                return Some(c);
+            }
+
+            // Item subtitle
+            if let Some(ref subtitle) = item.subtitle {
+                if let Some(c) = subtitle.pixel_aa(x, y, subtitle.ink, inner_fill) {
+                    return Some(c);
+                }
+            }
+
+            return Some(inner_fill);
+        }
+
+        return Some(inner_fill);
     }
 
-    for (row_idx, row) in p.card_rows.iter().enumerate() {
-        if !row.rect.contains(x, y) {
-            continue;
-        }
-
-        // Right chevron '>' at x: 645
-        let row_cy = row.rect.y + row.rect.h / 2;
-        let cdx = x as i32 - 645;
-        let cdy = (y as i32 - row_cy as i32).abs();
-        if cdx >= -3 && cdx <= 3 && (cdy == 3 - cdx || cdy == 2 - cdx) {
-            return Some(theme.text_muted);
-        }
-
-        let icon_cx = 78i32;
-        let icon_cy = (row.rect.y + row.rect.h / 2) as i32;
-        let idx = x as i32 - icon_cx;
-        let idy = y as i32 - icon_cy;
-
-        match row_idx {
-            0 => {
-                // Task checkbox for the pinned Today toggle (main.rs hit
-                // x60..100, y300..340, centred on the pinned tap at 78,318):
-                // outline always; accent fill with a surface tick only when
-                // the toggle's state bit is set, so the control on screen
-                // visibly reports what the toggle log claims.
-                let cbx = x as i32 - 78;
-                let cby = y as i32 - 322;
-                if cbx.abs() <= 12 && cby.abs() <= 12 {
-                    if cbx.abs() == 12 || cby.abs() == 12 {
-                        return Some(theme.text_muted);
-                    }
-                    if row.done {
-                        let tick = (cbx >= -6 && cbx <= -1 && cby == cbx + 6)
-                            || (cbx >= 0 && cbx <= 6 && cby == 6 - cbx);
-                        return Some(if tick { card_fill } else { theme.accent });
-                    }
-                    return Some(card_fill);
-                }
-            }
-            1 => {
-                // Notifications: vector speech bubble icon
-                if idx.abs() <= 8 && idy >= -7 && idy <= 5 {
-                    let is_border = idx.abs() == 8 || idy == -7 || idy == 5;
-                    let is_dot = idy == -1 && (idx == -4 || idx == 0 || idx == 4);
-                    if is_border || is_dot {
-                        return Some(theme.accent);
-                    }
-                } else if idx >= -6 && idx <= -2 && idy >= 5 && idy <= 8 && (idx + idy <= 2) {
-                    return Some(theme.accent);
-                }
-            }
-            _ => {
-                // Activities: vector activity badge icon
-                let r2 = idx * idx + idy * idy;
-                if r2 <= 72 && r2 >= 36 {
-                    return Some(theme.accent);
-                }
-                let tick = (idx >= -4 && idx <= -1 && idy == idx + 2)
-                    || (idx >= -1 && idx <= 4 && idy == -idx);
-                if tick {
-                    return Some(theme.accent);
-                }
-            }
-        }
-        if let Some(c) = row.name.pixel_aa(x, y, row.name.ink, card_fill) {
-            return Some(c);
-        }
-        if let Some(c) = row.detail.pixel_aa(x, y, row.detail.ink, card_fill) {
-            return Some(c);
-        }
-    }
     Some(card_fill)
 }
 
@@ -1675,7 +1563,7 @@ fn icon_scale(cell: Rect, glyphs: usize) -> usize {
     by_h.min(by_w).clamp(ICON_SCALE_MIN, ICON_SCALE_MAX)
 }
 
-fn deck_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option<u32> {
+fn deck_pixel(x: usize, y: usize, f: &Frame, p: &Paint, _theme: &Theme) -> Option<u32> {
     let deck = &p.deck;
     if !f.deck.contains(x, y) {
         return None;
@@ -1690,14 +1578,13 @@ fn deck_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option
     }
     let tile = &deck.cells[index];
 
-    if !rounded_contains(tile.cell, x, y, 24) {
+    if !rounded_contains(tile.cell, x, y, 28) {
         return None;
     }
-    if rounded_outline(tile.cell, x, y, 24) {
-        return Some(theme.border);
+    if rounded_outline(tile.cell, x, y, 28) {
+        return Some(launcher::theme::DIVIDER_HAIRLINE);
     }
-    let bg = backdrop_ref(&p.scene_ref, x, y);
-    let tile_fill = Theme::veil(bg, 88, true);
+    let tile_fill = launcher::theme::CARD_FROSTED_CREAM;
 
     if let Some(kind) = tile.icon {
         if let Some(c) = launcher::icons::rasterize_icon_pixel_scaled_aa(
@@ -1727,53 +1614,22 @@ fn deck_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option
 
 /// The universal search control.
 ///
-/// WHY it is on this surface at all: the reference home panel has no search bar
-/// -- that lives on the App View panel -- but the shell opens System Space from a
-/// tap here, so removing it would take a working control with it.
-fn search_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option<u32> {
-    if !f.search.contains(x, y) {
-        return None;
-    }
-    if !rounded_contains(f.search, x, y, 28) {
-        return None;
-    }
-    if rounded_outline(f.search, x, y, 28) {
-        return Some(theme.border);
-    }
-    let bg = backdrop_ref(&p.scene_ref, x, y);
-    let search_fill = Theme::veil(bg, 75, true);
-    let ink = theme.text_muted;
-
-    // Magnifier: ring plus handle
-    let (gx, cy, _r) = p.search_magnifier;
-    let dx = x as i32 - gx as i32;
-    let dy = y as i32 - cy as i32;
-    let d2 = dx * dx + dy * dy;
-    let ring = (36..=81).contains(&d2);
-    let handle = (5..=12).contains(&dx) && (dx - dy).abs() <= 2 && dy >= 5;
-    if ring || handle {
-        return Some(ink);
-    }
-
-    if let Some(c) = p.search.pixel_aa(x, y, p.search.ink, search_fill) {
-        return Some(c);
-    }
-    Some(search_fill)
+/// Returns None on home screen to present the clean mountain landscape wallpaper
+/// exactly as designed in the Full HD aesthetic reference mockup.
+fn search_pixel(_x: usize, _y: usize, _f: &Frame, _p: &Paint, _theme: &Theme) -> Option<u32> {
+    None
 }
 
 // -----------------------------------------------------------------------------
 // Navigation
 // -----------------------------------------------------------------------------
 
-fn nav_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option<u32> {
+fn nav_pixel(x: usize, y: usize, f: &Frame, p: &Paint, _theme: &Theme) -> Option<u32> {
     if !f.nav.contains(x, y) {
         return None;
     }
-    let ink = layout::ink_on(theme, backdrop_ref(&p.scene_ref, x, y));
-
-    // Home pill, the width the theme can name and the height the shell measures.
-    if p.nav_pill.contains(x, y) {
-        return Some(ink);
+    if rounded_contains(p.nav_pill, x, y, 3) {
+        return Some(launcher::theme::TEXT_CHARCOAL);
     }
     None
 }

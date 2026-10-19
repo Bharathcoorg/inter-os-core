@@ -377,6 +377,8 @@ fn icon_color(kind: Option<launcher::icons::IconKind>, index: usize, theme: &The
         Some(IconKind::Apps) => 0xFF5856D6,
         Some(IconKind::Briefcase) => 0xFFD97706,
         Some(IconKind::CardDemo) => 0xFF5856D6,
+        Some(IconKind::Sun) => 0xFFFF9500,
+        Some(IconKind::CheckCircle) => 0xFF34C759,
         None => hue_for(theme, index),
     }
 }

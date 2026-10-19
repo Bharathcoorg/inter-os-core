@@ -1558,13 +1558,13 @@ document.addEventListener('DOMContentLoaded', () => {
       const res = await fetch('/api/power/state', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'toggle' })
+        body: JSON.stringify({ action: 'lock' })
       });
       if (!res.ok) {
         await fetch('/api/input/key', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ key: 'Power' })
+          body: JSON.stringify({ key: 'Lock' })
         });
       }
     } catch (_) {

@@ -288,3 +288,21 @@ pub const ACCENT_CYAN: u32 = Theme::LIGHT.accent;
 pub const ACCENT_VIOLET: u32 = 0xFF7C3AED;
 pub const LOCK_BACKDROP_TOP: u32 = Theme::LIGHT.wallpaper_top;
 pub const LOCK_BACKDROP_BOTTOM: u32 = Theme::LIGHT.wallpaper_bottom;
+
+/// High-contrast charcoal ink for headlines and primary icons.
+pub const TEXT_CHARCOAL: u32 = 0xFF1C1C1E;
+
+/// Subtle neutral gray ink for subtitles and secondary captions.
+pub const TEXT_SUBTITLE_GRAY: u32 = 0xFF6B7280;
+
+/// Warm frosted cream fill for cards and tiles matching reference mockup.
+pub const CARD_FROSTED_CREAM: u32 = 0xFFF5F5F0;
+
+/// Warm off-white surface fill.
+pub const CARD_WARM_OFFWHITE: u32 = 0xFFFAF9F6;
+
+/// Radiant amber tone for weather sun glyph.
+pub const WEATHER_SUN_AMBER: u32 = 0xFFF59E0B;
+
+/// Subtle hairline divider tone.
+pub const DIVIDER_HAIRLINE: u32 = 0xFFE5E5DF;

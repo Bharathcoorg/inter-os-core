@@ -870,6 +870,33 @@ fn handle_serial_command(cmd: &[u8]) {
         panic!("Controlled diagnostic fault: {}", reason);
     }
 
+    if verb.eq_ignore_ascii_case("LOCK_KEY") {
+        let mut kms = crate::drivers::display_kms::DRM_KMS.lock();
+        kms.set_powered(true);
+        let mut display = crate::drivers::KmsDisplayDriver::new(&mut kms);
+        let _ = display.composite_and_flip();
+        crate::input::post_key_event(crate::input::KeyEvent {
+            source: crate::input::InputSource::DeviceStudio,
+            action: crate::input::KeyAction::Down,
+            code: crate::input::KeyCode::Unknown(0x1000F),
+            shift: false,
+            ctrl: false,
+            alt: false,
+            meta: false,
+        });
+        crate::input::post_key_event(crate::input::KeyEvent {
+            source: crate::input::InputSource::DeviceStudio,
+            action: crate::input::KeyAction::Up,
+            code: crate::input::KeyCode::Unknown(0x1000F),
+            shift: false,
+            ctrl: false,
+            alt: false,
+            meta: false,
+        });
+        crate::serial_println!("[LOCK] locked source=device_studio");
+        return;
+    }
+
     if verb.eq_ignore_ascii_case("POWER_KEY") {
         let mut kms = crate::drivers::display_kms::DRM_KMS.lock();
         let on = kms.toggle_powered();

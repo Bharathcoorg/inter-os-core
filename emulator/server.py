@@ -3699,16 +3699,24 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             return
 
         if self.path == '/api/power/state':
-            ok, msg = send_guest_serial_command("POWER_KEY", timeout=2)
+            content_length = self._bounded_content_length()
+            body = self.rfile.read(content_length) if (content_length and content_length > 0) else b'{}'
+            try:
+                data = json.loads(body.decode('utf-8'))
+            except Exception:
+                data = {}
+            action = str(data.get('action', 'lock')).strip().lower()
+            cmd = "LOCK_KEY" if action in ('lock', 'power', 'toggle') else "POWER_KEY"
+            ok, msg = send_guest_serial_command(cmd, timeout=2)
             with telemetry_lock:
-                serial_lines.append("[STUDIO_POWER] POWER_KEY toggle dispatched")
+                serial_lines.append(f"[STUDIO_POWER] {cmd} toggle dispatched")
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
             self.wfile.write(json.dumps({
                 'success': True,
                 'status': 'DISPATCHED',
-                'action': 'power_toggle',
+                'action': action,
                 'detail': msg
             }).encode())
             return
@@ -3814,8 +3822,8 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                     'Power', 'Lock'
                 }
                 if key in ('Power', 'Lock'):
-                    command = "POWER_KEY"
-                    response_key = {'key': key, 'action': 'power_toggle'}
+                    command = "LOCK_KEY"
+                    response_key = {'key': key, 'action': 'lock' if key == 'Lock' else 'power_toggle'}
                 elif len(key) == 1:
                     command = f"INPUT_KEY {ord(key)}"
                     response_key = {'key': key, 'codepoint': ord(key)}

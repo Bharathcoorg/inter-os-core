@@ -139,7 +139,7 @@ def run_contracts(target_files=None):
             cmd = [sys.executable, "-m", "pytest", "-v", "--tb=short"] + framework_tests
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=pytest_timeout)
 
-            pt_results = {p: {"passed": 0, "failed": 0, "errors": 0} for p in framework_tests}
+            pt_results = {p: {"passed": 0, "failed": 0, "errors": 0, "skipped": 0} for p in framework_tests}
             for line in r.stdout.splitlines():
                 m = re.match(r"^([^\s:]+\.py)::([^\s]+)\s+([A-Z]+)", line)
                 if m:
@@ -148,6 +148,8 @@ def run_contracts(target_files=None):
                     if fpath in pt_results:
                         if status == "PASSED":
                             pt_results[fpath]["passed"] += 1
+                        elif status == "SKIPPED":
+                            pt_results[fpath]["skipped"] += 1
                         elif status == "FAILED":
                             pt_results[fpath]["failed"] += 1
                         else:

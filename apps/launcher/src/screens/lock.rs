@@ -64,121 +64,44 @@ const LOCK_STATUS_BAND: usize = 56;
 /// claimed the edge was "shared by the date line and the clock"; the status clock
 /// now derives its origin from the same constant so they cannot drift apart
 /// again.
-const LOCK_CONTENT_X: usize = 75;
+pub const LOCK_CONTENT_X: usize = 40;
 
-/// Status-bar clock. Reference origin x 13 / y 9, cap height measured at 7 px on
-/// the panel.
-///
-/// WHY scale 1: 7 px measured cap over this face's 17-row cap is 7 / 17 = 0.41,
-/// which rounds to 0 -- and a zero scale rasterises nothing at all. The panel's
-/// reference rows are not device pixels, so the measurement is carried across at
-/// the surface's own vertical ratio, 1440 / 427 = 3.372: 7 x 3.372 = 23.6 device
-/// px, and 23.6 / 17 = 1.39, which is scale 1. Scale 2 would be 34 px, 44% over.
-/// WHY derived from `LOCK_CONTENT_X`: the status clock and the content block
-/// below it are one clock shown twice, so they start on the same left edge.
 const LOCK_STATUS_TIME_X: usize = LOCK_CONTENT_X;
 const LOCK_STATUS_TIME_Y: usize = 27;
 const LOCK_STATUS_TIME_SCALE: usize = 1;
-/// Left edge shared by the date line and the clock, reference x 18.
-/// Date line. Reference cap top y 47, cap height measured at 9 px.
-///
-/// WHY scale 2: 9 x 3.372 = 30.3 device px, and 30.3 / 17 = 1.78, which rounds to
-/// 2. Scale 1 is 17 px (44% under), scale 3 is 51 px (68% over).
-///
-/// WHY `_Y` is 6 px above the old 158: the reference position is a *cap top*, and
-/// this face puts cap ink `font::CAP_TOP * scale` below the cell origin, so
-/// 3 x 2 = 6. Under the previous fixed 8 px cell the ink began on the cell's first
-/// row, which is why the same number used to work.
-const LOCK_DATE_Y: usize = 152;
-const LOCK_DATE_SCALE: usize = 2;
-/// Em size of the date line's outline run, in pixels per em.
-///
-/// WHY the date moved to the outline face when the clock did: while the clock was
-/// a bitmap cell at scale 6 (a 102px cap), a scale-2 date read as clearly
-/// subordinate. Once the clock is a 48px em with a 34px cap, a scale-2 date has
-/// the same cap height as the clock, which inverts the hierarchy -- the date
-/// would be the equal or larger of the two, on a surface whose whole point is
-/// that the clock dominates.
-///
-/// WHY 18: measured from `Ui Samples/01_lock_screen.png`, the date's ink is 16
-/// guest px tall (cap plus the comma's descender), and Roboto Condensed inks
-/// about 0.86 of the em over that span, so 16 / 0.86 = 18.6, which rounds to 18.
-const LOCK_DATE_EM: u32 = 18;
-/// Baseline of the date's outline run.
-///
-/// WHY measured rather than wheeled from `LOCK_DATE_Y`: the two are no longer on
-/// the same face, so the old cell offset does not transfer. The reference puts
-/// the date's ink 35 guest px above the clock's cap top; the clock's baseline is
-/// `LOCK_CLOCK_Y + font::BASELINE * LOCK_CLOCK_SCALE` with a 34px cap, so its cap
-/// top is 291, and the date's ink bottom belongs at 256. Roboto Condensed sends a
-/// comma about 5px below the baseline at this em, which puts the baseline at 251.
-const LOCK_DATE_BASELINE: usize = 251;
-/// The clock. Reference cap top y 68, cap height measured at 32 px: the single
-/// largest type element on the surface.
-///
-/// WHY scale 6: 32 x 3.372 = 107.9 device px, and 107.9 / 17 = 6.35, which rounds
-/// to 6. Scale 5 is 85 px (21% under), scale 7 is 119 px (10% over).
-///
-/// WHY this is a local constant and not `type_scale::DISPLAY`: the panel's clock
-/// is 107.9 px of cap on this surface, while `DISPLAY` has to serve every screen
-/// in the shell, and the two do not agree. See the note on `type_scale` below.
-const LOCK_CLOCK_Y: usize = 211;
-const LOCK_CLOCK_SCALE: usize = 6;
-/// Em size of the outline clock, in pixels per em.
-///
-/// WHY a second constant rather than replacing `LOCK_CLOCK_SCALE`: the bitmap
-/// scale stays the fallback for any run the rasteriser refuses, so it has to
-/// keep existing. This one is derived from the outline face instead of from a
-/// cell multiple.
-///
-/// WHY 48: measured from `Ui Samples/01_lock_screen.png`, the reference clock's
-/// digits are a 60px ink height on a 1080-wide canvas, which is a 36px digit in
-/// this guest's 1440-tall space (the reference is 9:20 and this guest is 9:18,
-/// so the two axes scale by different ratios, 0.667 across and 0.6 down).
-/// Roboto Condensed's digits carry overshoot, so they ink 0.745 of the em, and
-/// 36 / 0.745 = 48.
-///
-/// WHY the run is narrower than the reference rather than the same width: the
-/// reference samples were set in the InterOS Sans files under
-/// `Ui Samples/reference/fonts`, which are DejaVu Sans derived, and that face is
-/// much wider than the condensed one this guest ships. The cap height is the
-/// property that can be matched while keeping a repo-owned font, so that is
-/// what this constant pins; the width difference is a consequence of the face
-/// and is not a defect to chase.
-const LOCK_CLOCK_EM: u32 = 48;
-/// Unlock hint. Reference cap top y 341, horizontally centred.
-///
-/// WHY scale 1: the panel sets the hint at the same size as the status-bar clock,
-/// and preserving that relationship preserves both cap heights, so the hint takes
-/// the clock's answer -- 23.6 device px of cap, 23.6 / 17 = 1.39, scale 1.
-///
-/// WHY `_Y` is 3 px above the old 1150: same cap-top correction as the date line,
-/// 3 x 1 = 3.
-const LOCK_HINT_Y: usize = 1147;
-const LOCK_HINT_SCALE: usize = 1;
-const LOCK_HINT_TEXT: &[u8] = b"Swipe up to unlock";
-/// Padlock glyph centre, reference x 87 / y 328; body 7 x 13 panel px.
+
+pub const LOCK_DATE_Y: usize = 78;
+pub const LOCK_DATE_SCALE: usize = 2;
+pub const LOCK_DATE_EM: u32 = 20;
+pub const LOCK_DATE_BASELINE: usize = 100;
+
+pub const LOCK_CLOCK_Y: usize = 118;
+pub const LOCK_CLOCK_SCALE: usize = 3;
+pub const LOCK_CLOCK_EM: u32 = 56;
+pub const LOCK_CLOCK_BASELINE: usize = 175;
+
+pub const LOCK_HINT_Y: usize = 1275;
+pub const LOCK_HINT_SCALE: usize = 1;
+pub const LOCK_HINT_TEXT: &[u8] = b"Swipe up to unlock";
+
+#[allow(dead_code)]
 const LOCK_PADLOCK_CX: i32 = 362;
+#[allow(dead_code)]
 const LOCK_PADLOCK_CY: i32 = 1106;
-/// Circular controls. Reference centres are (28, 385.5) and (146.5, 385.5) with
-/// radius 17.5, i.e. inset 16.2% / 15.3% of the width.
-pub const LOCK_BTN_CY: i32 = 1330;
-pub const LOCK_BTN_L_CX: i32 = 96;
-pub const LOCK_BTN_R_CX: i32 = 624;
+
+pub const LOCK_BTN_CY: i32 = 1350;
+pub const LOCK_BTN_L_CX: i32 = 72;
+pub const LOCK_BTN_R_CX: i32 = 648;
 pub const LOCK_BTN_R: i32 = 36;
-/// Home indicator: reference width 58, height 3, bottom inset 3 panel px.
+
 pub const LOCK_PILL_W: usize = 241;
 pub const LOCK_PILL_H: usize = 9;
 pub const LOCK_PILL_Y: usize = 1421;
-/// What the torch control says about itself.
+
 const LOCK_NA_TEXT: &[u8] = b"";
 
-/// WHY the two veils are percentages and not channel arithmetic: the panel's
-/// translucent control solves to a 27% and a 36% white veil, and those two
-/// numbers were written out by hand in three places, which is how one of them
-/// drifted to 30%. `Theme::veil` is the helper that exists for exactly this.
-const LOCK_BTN_FILL_PERCENT: u32 = 27;
-const LOCK_BTN_RIM_PERCENT: u32 = 36;
+const LOCK_BTN_FILL_PERCENT: u32 = 20;
+const LOCK_BTN_RIM_PERCENT: u32 = 32;
 
 /// How far the sun lifts the right of the frame, as a fraction of the 0..=256
 /// ramp scale, out of a full `across` of 256 at the right edge.
@@ -355,9 +278,69 @@ fn lock_band(vertical: u32, across: u32) -> u32 {
         .saturating_sub((vertical.saturating_mul(across)) >> 8)
 }
 
+fn geometric_mountain_mid_y(x: usize) -> usize {
+    if x <= 119 {
+        899 - (x * 148) / 119
+    } else if x <= 226 {
+        751 + ((x - 119) * 124) / 107
+    } else if x <= 346 {
+        875 - ((x - 226) * 201) / 120
+    } else if x <= 480 {
+        674 + ((x - 346) * 212) / 134
+    } else if x <= 602 {
+        886 - ((x - 480) * 177) / 122
+    } else {
+        let dx = (x.min(719) - 602) * 129;
+        709 + dx / 117
+    }
+}
+
+fn geometric_mountain_fore_y(x: usize) -> usize {
+    if x <= 119 {
+        991 - (x * 119) / 119
+    } else if x <= 232 {
+        872 + ((x - 119) * 100) / 113
+    } else if x <= 360 {
+        972 - ((x - 232) * 148) / 128
+    } else if x <= 487 {
+        824 + ((x - 360) * 124) / 127
+    } else if x <= 600 {
+        948 - ((x - 487) * 107) / 113
+    } else {
+        let dx = (x.min(719) - 600) * 101;
+        841 + dx / 119
+    }
+}
+
+fn geometric_mountain_sky(y: usize) -> u32 {
+    let t = ((y * 256) / 900).min(256) as u32;
+    Theme::blend(0xFFBDCCD6, 0xFF717E88, t)
+}
+
+fn lock_geometric_mountain_pixel(x: usize, y: usize) -> u32 {
+    let mid_y = geometric_mountain_mid_y(x);
+    let fore_y = geometric_mountain_fore_y(x);
+    let sky = geometric_mountain_sky(y);
+
+    if y + 1 < mid_y {
+        sky
+    } else if y < mid_y {
+        Theme::blend(sky, 0xFF465765, 128)
+    } else if y + 1 < fore_y {
+        0xFF465765
+    } else if y < fore_y {
+        Theme::blend(0xFF465765, 0xFF1A2229, 128)
+    } else {
+        0xFF1A2229
+    }
+}
+
 /// Full-bleed continuous fixed-point coverage anti-aliased wallpaper layer for the lock surface.
 fn lock_wallpaper_pixel(f: &Frame, x: usize, y: usize) -> u32 {
     let scene = f.scene;
+    if scene.key == b"stock" || scene.key == b"" {
+        return lock_geometric_mountain_pixel(x, y);
+    }
     let x_fixed = (x * (LOCK_REF_W - 1) * 256) / (W - 1);
     let col = (x_fixed >> 8).min(LOCK_REF_W - 2);
     let frac_x = (x_fixed & 0xFF) as u32;
@@ -436,6 +419,7 @@ fn lock_glyph_dim(theme: &Theme, disc: u32) -> u32 {
     Theme::blend(lock_paper(theme, disc), disc, 90)
 }
 
+#[allow(dead_code)]
 fn lock_padlock_pixel(theme: &Theme, backdrop: u32, x: usize, y: usize) -> Option<u32> {
     if !(1080..=1130).contains(&y) || !(345..=380).contains(&x) {
         return None;
@@ -697,8 +681,10 @@ struct Frame {
     /// centring rule.
     pin_subheading: Rect,
     /// The torch's "N/A" label: an origin *and* an extent, see [`lock_na_box`].
+    #[allow(dead_code)]
     na: Rect,
     /// The camera disc's "N/A" label, on the same baseline: [`lock_na_r_box`].
+    #[allow(dead_code)]
     na_r: Rect,
     /// Ink for the status bar, the date line and the clock: the scene's own sky
     /// ink.
@@ -756,7 +742,7 @@ impl Frame {
         );
         let clock_outline = launcher::outline_text::OutlineRun::place(
             LOCK_CONTENT_X,
-            LOCK_CLOCK_Y + launcher::font::BASELINE * LOCK_CLOCK_SCALE,
+            LOCK_CLOCK_BASELINE,
             LOCK_CLOCK_EM,
             &state.clock_time,
         );
@@ -1553,80 +1539,34 @@ fn lock_pin_pad_pixel(
 }
 
 pub fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
-    let theme = THEME;
+    let _theme = THEME;
     let f = frame_for(x, y, state);
 
     // 1. Full-bleed wallpaper.
     let color = lock_wallpaper_pixel(f, x, y);
 
     // The PIN pad is drawn only when the unlock gesture found a credential and asked
-    // for it (`pin_pad_visible`). It used to also appear whenever the account was
-    // Uninitialized, which existed for the forced first-boot setup; now that boot
-    // presents the plain lock screen, that clause would put a setup pad in front
-    // of an owner who never asked to set a PIN.
+    // for it (`pin_pad_visible`).
     let pin_active = state.pin_pad_visible;
     if pin_active {
         if let Some(pin_color) = lock_pin_pad_pixel(color, x, y, state, f) {
             return pin_color;
         }
-    } else if y >= 360 && y < 1080 {
-        // Fast path: between the clock/date band (y <= 360) and the padlock/hint (y >= 1080),
+    } else if y >= 250 && y < 1200 {
+        // Fast path: between the clock/date band (y < 250) and hint/buttons (y >= 1200),
         // there are NO UI elements on the lock screen when PIN pad is inactive.
         return color;
     }
 
-    // 2. Status bar. The panel draws its status glyphs in near-black because
-    //    they sit on the bright upper sky.
-    //
-    //    WHY the clock and nothing else: the panel also draws four signal bars, a
-    //    wifi arc and a filled battery, and this shell can measure none of the
-    //    three. The kernel's wireless manager starts with `hardware_present:
-    //    false`, there is no SIM, and the fuel gauge reports
-    //    `telemetry_valid: false`, so four filled bars and a solid battery are
-    //    three claims the platform cannot support -- and they are on the surface
-    //    a user reads as the state of their device, before they have touched
-    //    anything. The rest of the shell already draws its status bars this way.
-    if y < LOCK_STATUS_BAND {
-        if state.clock_source_ok
-            && y >= LOCK_STATUS_TIME_Y
-            && y < LOCK_STATUS_TIME_Y + f.status_h
-        {
-            if let Some(c) = test_text_aa(
-                x,
-                y,
-                LOCK_STATUS_TIME_X,
-                LOCK_STATUS_TIME_Y,
-                LOCK_STATUS_TIME_SCALE,
-                &state.clock_time,
-                f.ink,
-                color,
-            ) {
-                return c;
-            }
-        }
-    }
+    // 2. Status bar: Mockup does not show a duplicate status bar clock on the lock screen.
 
     // 3. Date line above the clock, both left-aligned on LOCK_CONTENT_X.
-    //    WHY both are conditional on a live reading: the panel's date line and
-    //    clock are the two largest pieces of type on the surface, so a
-    //    placeholder there would read as a real time. With no source they are
-    //    simply absent, and the layout they occupy is unchanged.
-    //
-    //    WHY every one of these is inside an explicit box. `test_text` already
-    //    rejects a pixel outside the run's own extent, but it does that *after*
-    //    measuring the run, and this function runs for all 1,036,800 pixels of the
-    //    surface. Testing `x >= LOCK_CONTENT_X && y >= LOCK_CLOCK_Y` with no upper
-    //    bound -- which is what this file used to do -- hands four fifths of the
-    //    screen to the text path on every frame, which is most of why a full
-    //    render of this surface costs what it does on the emulated build.
     if state.clock_source_ok {
         if f.date.contains(x, y) {
             if let Some(run) = &f.date_outline {
-                if let Some(c) = run.pixel(x, y, f.ink, color) {
+                if let Some(c) = run.pixel(x, y, 0xFFFFFFFF, color) {
                     return c;
                 }
-                // Inside the line box but not inked: the scene shows through,
-                // exactly as an uncovered bitmap pixel would.
                 return color;
             }
             if let Some(c) = test_text_aa(
@@ -1636,7 +1576,7 @@ pub fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
                 f.date.y,
                 LOCK_DATE_SCALE,
                 &state.date_line,
-                f.ink,
+                0xFFFFFFFF,
                 color,
             ) {
                 return c;
@@ -1644,19 +1584,11 @@ pub fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         }
 
         // 4. The clock itself.
-        //
-        //    WHY the outline run is tried first and the bitmap face second: the
-        //    rasteriser is refused for a run that does not fit its coverage
-        //    buffer, and a clock that cannot be rasterised must still be drawn.
-        //    The bitmap path is therefore the fallback and not the baseline, so
-        //    the two are interchangeable and either alone is correct.
         if f.clock.contains(x, y) {
             if let Some(run) = &f.clock_outline {
-                if let Some(c) = run.pixel(x, y, f.ink, color) {
+                if let Some(c) = run.pixel(x, y, 0xFFFFFFFF, color) {
                     return c;
                 }
-                // Covered by the run's line box but not inked: the scene shows
-                // through, exactly as an uncovered bitmap pixel would.
                 return color;
             }
             if let Some(c) = test_text_aa(
@@ -1666,7 +1598,7 @@ pub fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
                 f.clock.y,
                 LOCK_CLOCK_SCALE,
                 &state.clock_time,
-                f.ink,
+                0xFFFFFFFF,
                 color,
             ) {
                 return c;
@@ -1674,21 +1606,7 @@ pub fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         }
     }
 
-    // 5. Closed padlock above the centred unlock hint, both on the near-black
-    //    foreground where the panel draws them in paper white.
-    //
-    //    WHY only when a credential exists: this shell no longer forces first-boot
-    //    setup, so a device can legitimately reach the lock screen with no PIN at
-    //    all. A closed padlock there would advertise a lock the account does not
-    //    have, and the hint below it already says the true thing - "Swipe up to
-    //    unlock", which is what actually happens.
-    if state.lock_state != interos_std::UserLockState::Uninitialized {
-        if let Some(c) = lock_padlock_pixel(&theme, color, x, y) {
-            return c;
-        }
-    }
-    // WHY the origin is derived from the measured string: the panel centres the
-    // hint on the surface, so the x origin must follow the measured text.
+    // 5. Centred unlock hint: "Swipe up to unlock" in crisp white 4-bit AA font.
     if f.hint.contains(x, y) {
         if let Some(c) = test_text_aa(
             x,
@@ -1697,76 +1615,37 @@ pub fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             f.hint.y,
             LOCK_HINT_SCALE,
             LOCK_HINT_TEXT,
-            lock_paper(&theme, color),
+            0xFFFFFFFF,
             color,
         ) {
             return c;
         }
     }
 
-    // 6. Torch control on the left. Rendered in crisp paper ink matching camera.
+    // 6. Flashlight / torch control on the left (cx = 72, cy = 1350).
     if let Some(disc) = lock_button_disc(x, y, LOCK_BTN_L_CX, color) {
         if lock_torch_glyph_pixel(x, y) {
-            return lock_paper(&theme, disc);
+            return 0xFFFFFFFF;
         }
         return disc;
     }
 
-    // 7. Camera control on the right.
+    // 7. Camera control on the right (cx = 648, cy = 1350).
     if let Some(disc) = lock_button_disc(x, y, LOCK_BTN_R_CX, color) {
         if lock_camera_glyph_pixel(x, y) {
-            return lock_paper(&theme, disc);
+            return 0xFFFFFFFF;
         }
         return disc;
     }
 
-    // 8. "N/A" under the torch disc, stating the absence rather than implying a
-    //    control that does nothing. WHY the box test first: the label's extent is
-    //    in the frame, so the ~99% of the surface that is nowhere near it is
-    //    turned away by four comparisons instead of a call and a pen walk.
-    if f.na.contains(x, y) {
-        if let Some(c) = test_text_aa(
-            x,
-            y,
-            f.na.x,
-            f.na.y,
-            type_scale::CAPTION,
-            LOCK_NA_TEXT,
-            lock_paper(&theme, color),
-            color,
-        ) {
-            return c;
-        }
-    }
-
-    // 8b. The camera disc gets the same absence caption as the torch disc.
-    //     WHY it needs one: the two discs are a matched pair, but only the left
-    //     one was labelled, so the right read as a live control while the left
-    //     stated it was not. Neither hardware is bound here - the camera app
-    //     reports no sensor - so both state it, symmetrically.
-    if f.na_r.contains(x, y) {
-        if let Some(c) = test_text_aa(
-            x,
-            y,
-            f.na_r.x,
-            f.na_r.y,
-            type_scale::CAPTION,
-            LOCK_NA_TEXT,
-            lock_paper(&theme, color),
-            color,
-        ) {
-            return c;
-        }
-    }
-
-    // 9. Home indicator, centred.
+    // 8. Home indicator, centred.
     let pill_x = (W - LOCK_PILL_W) / 2;
     if y >= LOCK_PILL_Y
         && y < LOCK_PILL_Y + LOCK_PILL_H
         && x >= pill_x
         && x < pill_x + LOCK_PILL_W
     {
-        return lock_paper(&theme, color);
+        return 0xFFFFFFFF;
     }
 
     // 10. Wallpaper.

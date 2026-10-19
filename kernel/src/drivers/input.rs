@@ -163,19 +163,27 @@ pub static INPUT_PIPELINE: Mutex<InputPipeline> = Mutex::new(InputPipeline::new(
 /// Routes normalized input events to the currently focused surface owner.
 pub fn dispatch_to_focused_window(event: InputEvent) {
     let owner = {
+        let is_system_power_lock = event.kind == InputEventKind::Key && (event.x == 0x1000F || event.x == 0x10005);
         let top_kms_owner = {
-            let mut top = None;
+            let mut target_owner = None;
             for _ in 0..1000 {
                 if let Some(kms) = crate::drivers::display_kms::DRM_KMS.try_lock() {
-                    top = kms.surfaces.iter()
-                        .filter(|s| s.visible && s.input_enabled)
-                        .max_by_key(|s| s.z_order)
-                        .map(|s| s.owner_task);
+                    if is_system_power_lock {
+                        target_owner = kms.surfaces.iter()
+                            .find(|s| s.z_order == 0)
+                            .or_else(|| kms.surfaces.iter().min_by_key(|s| s.z_order))
+                            .map(|s| s.owner_task);
+                    } else {
+                        target_owner = kms.surfaces.iter()
+                            .filter(|s| s.visible && s.input_enabled)
+                            .max_by_key(|s| s.z_order)
+                            .map(|s| s.owner_task);
+                    }
                     break;
                 }
                 core::hint::spin_loop();
             }
-            top
+            target_owner
         };
 
         let resolved = if let Some(top_task) = top_kms_owner {

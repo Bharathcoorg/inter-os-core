@@ -30,6 +30,8 @@ pub enum IconKind {
     Maps,
     Briefcase,
     CardDemo,
+    Sun,
+    CheckCircle,
 }
 
 /// Identifies if a package ID or process name maps to a first-party vector pictogram.
@@ -114,6 +116,10 @@ pub fn match_icon_kind(id: &[u8]) -> Option<IconKind> {
         || id == b"Card Demo" || id == b"CARD" || id == b"Card"
     {
         Some(IconKind::CardDemo)
+    } else if id == b"sun" || id == b"weather" || id == b"SUN" {
+        Some(IconKind::Sun)
+    } else if id == b"check" || id == b"check_circle" || id == b"DONE" {
+        Some(IconKind::CheckCircle)
     } else {
         None
     }
@@ -246,14 +252,7 @@ pub fn eval_icon_subpixel(kind: IconKind, fx: i32, fy: i32) -> bool {
             let cy = if fy < -75 { -75 - fy } else if fy > 35 { fy - 35 } else { 0 };
             let in_bubble = fx.abs() <= 165 && fy >= -145 && fy <= 105 && (cx * cx + cy * cy <= 4900);
             let tail = fy >= 50 && fy <= 165 && fx >= -165 && fx <= -45 && (fx <= -45 - (fy - 50)) && (fx >= -165 + (fy - 50) * 2 / 3);
-            if !(in_bubble || tail) {
-                return false;
-            }
-            // 3 clean typing indicator dot cutouts inside the bubble
-            let d1 = (fx + 65) * (fx + 65) + (fy + 20) * (fy + 20) <= 289;
-            let d2 = fx * fx + (fy + 20) * (fy + 20) <= 289;
-            let d3 = (fx - 65) * (fx - 65) + (fy + 20) * (fy + 20) <= 289;
-            !(d1 || d2 || d3)
+            in_bubble || tail
         }
         IconKind::Camera => {
             // Viewfinder prism on top
@@ -272,15 +271,35 @@ pub fn eval_icon_subpixel(kind: IconKind, fx: i32, fy: i32) -> bool {
             hump || (in_body && !lens_cutout_ring) || flash
         }
         IconKind::Browser => {
+            // Globe / planet with tilted orbital ring
             let r2 = fx * fx + fy * fy;
-            // Outer precision compass ring
-            let ring = r2 >= 22500 && r2 <= 34225;
-            // Center hub disc
-            let hub = r2 <= 784;
-            // 45-degree angled navigator needle
-            let ne_needle = (fx + fy).abs() <= 32 && (fx - fy) >= 0 && (fx - fy) <= 180 && (fx > -15 && fy < 15);
-            let sw_needle = (fx + fy).abs() <= 32 && (fy - fx) >= 0 && (fy - fx) <= 180 && (fx < 15 && fy > -15);
-            ring || hub || ne_needle || sw_needle
+            let in_planet = r2 <= 8100; // radius 90
+
+            // 35-degree tilted ring coordinate frame
+            // cos(35) ~= 210/256, sin(35) ~= 147/256
+            let u = (210 * fx + 147 * fy) / 256;
+            let v = (-147 * fx + 210 * fy) / 256;
+
+            let u2 = (u * u) as i64;
+            let v2 = (v * v) as i64;
+            // Outer ring: semi-major 180, semi-minor 55
+            let is_outer = 3025 * u2 + 32400 * v2 <= 98_010_000;
+            // Inner ring: semi-major 130, semi-minor 35
+            let is_inner = 1225 * u2 + 16900 * v2 >= 20_702_500;
+            let is_ring = is_outer && is_inner;
+
+            // Halo cutout around front ring where it passes in front of the planet
+            let is_cutout_outer = 4225 * u2 + 32400 * v2 <= 136_890_000;
+            let is_cutout_inner = 900 * u2 + 16900 * v2 >= 15_210_000;
+            let is_cutout = is_cutout_outer && is_cutout_inner && v > 0;
+
+            if is_ring && (v > 0 || !in_planet) {
+                true
+            } else if in_planet && !is_cutout {
+                true
+            } else {
+                false
+            }
         }
         IconKind::Files => {
             // Folder top tab at upper left
@@ -382,14 +401,20 @@ pub fn eval_icon_subpixel(kind: IconKind, fx: i32, fy: i32) -> bool {
             in_box && (cx * cx + cy * cy <= 676)
         }
         IconKind::Calendar => {
-            let binders = (fx == -60 || fx == 60) && fy >= -160 && fy <= -100;
-            let in_sheet = fx.abs() <= 135 && fy >= -115 && fy <= 150;
-            let banner = in_sheet && fy <= -50;
-            let stem = fx >= -50 && fx <= -30 && fy >= -20 && fy <= 100;
-            let serif = fx >= -65 && fx <= -50 && fy >= -20 && fy <= 0;
-            let seven_top = fx >= 0 && fx <= 75 && fy >= -20 && fy <= 0;
-            let seven_diag = fx >= 10 && fx <= 75 && (fy - (100 - (75 - fx) * 120 / 65)).abs() <= 12;
-            binders || banner || (in_sheet && (stem || serif || seven_top || seven_diag))
+            // 2 top binder rings with proper width
+            let binder_left = (fx + 55).abs() <= 12 && fy >= -160 && fy <= -90;
+            let binder_right = (fx - 55).abs() <= 12 && fy >= -160 && fy <= -90;
+            // Rounded calendar sheet body
+            let cx = if fx.abs() > 105 { fx.abs() - 105 } else { 0 };
+            let cy = if fy < -90 { -90 - fy } else if fy > 120 { fy - 120 } else { 0 };
+            let in_sheet = fx.abs() <= 130 && fy >= -115 && fy <= 145 && (cx * cx + cy * cy <= 625);
+            // Inner cutout (hollow sheet outline with 20px thickness)
+            let icx = if fx.abs() > 85 { fx.abs() - 85 } else { 0 };
+            let icy = if fy < -70 { -70 - fy } else if fy > 100 { fy - 100 } else { 0 };
+            let in_cutout = fx.abs() <= 110 && fy >= -95 && fy <= 125 && (icx * icx + icy * icy <= 576);
+            // Top header bar divider
+            let divider = fy >= -42 && fy <= -24 && fx.abs() <= 110;
+            binder_left || binder_right || (in_sheet && !in_cutout) || divider
         }
         IconKind::Notes => {
             let in_sheet = fx.abs() <= 135 && fy.abs() <= 165;
@@ -421,6 +446,32 @@ pub fn eval_icon_subpixel(kind: IconKind, fx: i32, fy: i32) -> bool {
             let stripe = body && (fy >= -60 && fy <= -25);
             let chip = fx >= -120 && fx <= -60 && fy >= 10 && fy <= 60;
             stripe || chip || (body && (fx.abs() >= 150 || fy.abs() >= 95))
+        }
+        IconKind::Sun => {
+            let r2 = fx * fx + fy * fy;
+            // Central solar disc
+            if r2 <= 4900 {
+                return true;
+            }
+            // 8 radiant rays
+            let cardinal_v = fx.abs() <= 12 && fy.abs() >= 95 && fy.abs() <= 165;
+            let cardinal_h = fy.abs() <= 12 && fx.abs() >= 95 && fx.abs() <= 165;
+            if cardinal_v || cardinal_h {
+                return true;
+            }
+            let diag1 = (fx - fy).abs() <= 17 && (fx + fy).abs() >= 134 && (fx + fy).abs() <= 233;
+            let diag2 = (fx + fy).abs() <= 17 && (fx - fy).abs() >= 134 && (fx - fy).abs() <= 233;
+            diag1 || diag2
+        }
+        IconKind::CheckCircle => {
+            let r2 = fx * fx + fy * fy;
+            // Outer circular ring
+            let is_ring = r2 >= 12544 && r2 <= 20164;
+            // Checkmark inside circle
+            let short_leg = fx >= -64 && fx <= -12 && (fy - (fx + 67)).abs() <= 15;
+            let long_leg = fx >= -18 && fx <= 72 && (fy - (37 - fx)).abs() <= 15;
+            let vertex = (fx + 15) * (fx + 15) + (fy - 52) * (fy - 52) <= 225;
+            is_ring || short_leg || long_leg || vertex
         }
     }
 }
@@ -478,6 +529,8 @@ mod tests {
             IconKind::Maps,
             IconKind::Briefcase,
             IconKind::CardDemo,
+            IconKind::Sun,
+            IconKind::CheckCircle,
         ];
 
         for &kind in &kinds {

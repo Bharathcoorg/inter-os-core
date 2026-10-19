@@ -2217,8 +2217,7 @@ pub extern "C" fn _start() -> ! {
                 dy: 0,
                 scale_milli: 1000,
             };
-            while (state.active_child.is_none() || state.current_view == ViewMode::LockScreen)
-                && std::input_event_poll(&mut input).is_ok()
+            while std::input_event_poll(&mut input).is_ok()
             {
                     let mut log_line = LineBuf::<128>::new();
                     {
@@ -2297,6 +2296,9 @@ pub extern "C" fn _start() -> ! {
                                 continue;
                             }
                             if key.pressed && (key.code == 0x1000F || key.code == std::input_key_code::POWER) {
+                                if let Some(child_id) = state.active_child.take() {
+                                    let _ = std::app_stop(child_id);
+                                }
                                 match state.current_view {
                                     ViewMode::BootScreen | ViewMode::PowerTransition => {}
                                     ViewMode::LockScreen => {
@@ -2321,6 +2323,10 @@ pub extern "C" fn _start() -> ! {
                                 continue;
                             }
                         }
+                    }
+
+                    if state.active_child.is_some() {
+                        continue;
                     }
 
                     match state.current_view {
@@ -4203,6 +4209,26 @@ pub extern "C" fn _start() -> ! {
                                             }
                                         }
                                     }
+                                }
+
+                                // Apps dock tile tap (Slot 5: row 1, col 2): opens App Drawer
+                                if (925..1160).contains(&y) && (475..695).contains(&x) {
+                                    state.current_view = ViewMode::AppDrawer;
+                                    state.search_query_len = 0;
+                                    state.app_drawer_page = 0;
+                                    render_view(surface, &state);
+                                    surface_flip_display();
+                                    std::log(0, "[LAUNCHER] App Drawer opened via Apps dock tile tap.").ok();
+                                    let mut drain = std::InputEvent {
+                                        kind: 0,
+                                        x: 0,
+                                        y: 0,
+                                        dx: 0,
+                                        dy: 0,
+                                        scale_milli: 1000,
+                                    };
+                                    while std::input_event_poll(&mut drain).is_ok() {}
+                                    break;
                                 }
 
                                 // Universal search bar tap: opens App Drawer for application search
