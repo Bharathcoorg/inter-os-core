@@ -6,7 +6,7 @@
 
 use crate::framebuffer::{PHONE_H, PHONE_W, PHONE_X, PHONE_Y};
 
-pub const MAX_TOUCH_SLOTS: usize = 5;
+pub const MAX_TOUCH_SLOTS: usize = 10;
 
 /// State phase of a touch contact point.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]

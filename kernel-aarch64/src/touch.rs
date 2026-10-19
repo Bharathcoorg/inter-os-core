@@ -4,7 +4,7 @@
 //! Decodes up to 5 concurrent capacitive touch contacts, tracking IDs,
 //! and coordinates with zero heap allocation.
 
-pub const MAX_TOUCH_SLOTS: usize = 5;
+pub const MAX_TOUCH_SLOTS: usize = 10;
 pub const BYTES_PER_POINT: usize = 8;
 
 pub const GT911_I2C_ADDR_PRIMARY: u8 = 0x5D;
