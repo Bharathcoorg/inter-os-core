@@ -7,6 +7,10 @@ pub mod memory;
 pub mod types;
 pub mod vm;
 
-pub use memory::{WasmMemory, WASM_PAGE_SIZE};
+pub use memory::{WasmMemory, WASM_MAX_MEMORY_BYTES, WASM_MAX_PAGES_LIMIT, WASM_PAGE_SIZE};
 pub use types::{opcodes, Value, WasmError};
-pub use vm::{HostFn, HostFunction, WasmFunction, WasmModule, WasmVm};
+pub use vm::{
+    designate_execution_domain, is_ring0_execution_permitted, HostFn, HostFunction,
+    WasmExecutionDomain, WasmFunction, WasmModule, WasmVm, WASMD_SERVICE_ID,
+};
+

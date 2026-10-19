@@ -69,4 +69,7 @@ pub mod opcodes {
     pub const I32_AND: u8 = 0x71;
     pub const I32_OR: u8 = 0x72;
     pub const I32_XOR: u8 = 0x73;
+    pub const MEMORY_SIZE: u8 = 0x3F;
+    pub const MEMORY_GROW: u8 = 0x40;
 }
+

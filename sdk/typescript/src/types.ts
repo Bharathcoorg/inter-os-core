@@ -6,6 +6,8 @@ export const RappArch = {
   X86_64: 0,
   Aarch64: 1,
   Riscv64: 2,
+  Wasm: 3,
+  Web: 3,
 } as const;
 
 export type RappArch = (typeof RappArch)[keyof typeof RappArch];

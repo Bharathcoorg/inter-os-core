@@ -12,9 +12,24 @@ from pathlib import Path
 
 def main():
     parser = argparse.ArgumentParser(description="Scaffold a new sovereign InterOS mobile application.")
-    parser.add_argument("app_name", help="Name of the application (snake_case, e.g. podcast_player)")
+    parser.add_argument("app_name", nargs="?", default=None, help="Name of the application (snake_case, e.g. podcast_player)")
     parser.add_argument("--template", choices=["basic", "audio", "sensor"], default="basic", help="App template type")
+    parser.add_argument("--from-web", dest="from_web", default=None, help="Port an existing web application or PWA URL to InterOS RAPP")
+    parser.add_argument("--output", "-o", default=None, help="Destination .rapp file path when using --from-web")
     args = parser.parse_args()
+
+    if args.from_web:
+        import subprocess
+        port_script = Path(__file__).resolve().parent / "port_web.py"
+        cmd = [sys.executable, str(port_script), args.from_web]
+        if args.app_name:
+            cmd.extend(["--name", args.app_name])
+        if args.output:
+            cmd.extend(["--output", args.output])
+        sys.exit(subprocess.call(cmd))
+
+    if not args.app_name:
+        parser.error("the following arguments are required: app_name")
 
     app_name = args.app_name.lower().replace("-", "_")
     root_dir = Path(__file__).resolve().parent.parent

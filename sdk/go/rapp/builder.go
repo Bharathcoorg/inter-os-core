@@ -5,10 +5,35 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"strings"
 )
 
 var RappMagic = []byte{'R', 'A', 'P', 'P'}
 const RappVersion uint16 = 2
+
+// MapWebPermission maps standard web permission identifiers to canonical RAPP capabilities.
+func MapWebPermission(perm string) []CapabilityType {
+	switch strings.ToLower(strings.TrimSpace(perm)) {
+	case "camera", "cameracapture":
+		return []CapabilityType{4} // CameraCapture
+	case "microphone", "mic":
+		return []CapabilityType{7} // Microphone
+	case "geolocation", "location":
+		return []CapabilityType{8} // Location
+	case "storage", "persistent-storage", "files":
+		return []CapabilityType{CapFileSystemRead, CapFileSystemWrite}
+	case "filesystemread", "vfs.read":
+		return []CapabilityType{CapFileSystemRead}
+	case "filesystemwrite", "vfs.write":
+		return []CapabilityType{CapFileSystemWrite}
+	case "notifications", "notification":
+		return []CapabilityType{14} // Notifications
+	case "sensor", "sensors", "accelerometer", "gyroscope":
+		return []CapabilityType{12} // Sensors
+	default:
+		return []CapabilityType{CapNetworkSocket, CapNetworkSend, CapNetworkReceive}
+	}
+}
 
 // Builder assembles canonical RAPP v2 packages.
 type Builder struct {

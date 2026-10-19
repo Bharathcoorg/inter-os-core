@@ -2917,9 +2917,16 @@ document.addEventListener('DOMContentLoaded', () => {
         const btnDeck = document.getElementById('btn-show-telemetry');
         if (btnDeck) btnDeck.click();
       }
-    } else if (e.key === 'Escape' && document.body.classList.contains('studio-focus-mode')) {
-      e.preventDefault();
-      toggleFocusMode(false);
+    } else if (e.key === 'Escape') {
+      const modalImport = document.getElementById('modal-import-webapp');
+      if (modalImport && modalImport.style.display !== 'none') {
+        e.preventDefault();
+        modalImport.style.display = 'none';
+        modalImport.setAttribute('aria-hidden', 'true');
+      } else if (document.body.classList.contains('studio-focus-mode')) {
+        e.preventDefault();
+        toggleFocusMode(false);
+      }
     }
   });
 
@@ -2933,6 +2940,253 @@ document.addEventListener('DOMContentLoaded', () => {
   if (btnPhoneInit) btnPhoneInit.classList.add('active');
   const btnDeckInit = document.getElementById('btn-show-telemetry');
   if (btnDeckInit) btnDeckInit.classList.remove('active');
+
+  // =========================================================================
+  // 1-Click WebApp-to-.rapp Porting Engine & Live HMR Controller
+  // =========================================================================
+  const modalImportWebApp = document.getElementById('modal-import-webapp');
+  const btnOpenImportModal = document.getElementById('btn-import-webapp');
+  const btnCloseImportModal = document.getElementById('btn-close-import-webapp');
+  const btnCancelImport = document.getElementById('btn-cancel-import');
+  const backdropImport = document.getElementById('backdrop-import-webapp');
+  const btnSubmitImport = document.getElementById('btn-submit-import');
+  const btnSubmitImportText = document.getElementById('btn-submit-import-text');
+  const importTerminalWrap = document.getElementById('import-terminal-wrap');
+  const importTerminalLogs = document.getElementById('import-terminal-logs');
+  const importStatusTag = document.getElementById('import-status-tag');
+
+  function openImportModal() {
+    if (!modalImportWebApp) return;
+    modalImportWebApp.style.display = 'flex';
+    modalImportWebApp.setAttribute('aria-hidden', 'false');
+  }
+
+  function closeImportModal() {
+    if (!modalImportWebApp) return;
+    modalImportWebApp.style.display = 'none';
+    modalImportWebApp.setAttribute('aria-hidden', 'true');
+  }
+
+  if (btnOpenImportModal) btnOpenImportModal.addEventListener('click', openImportModal);
+  if (btnCloseImportModal) btnCloseImportModal.addEventListener('click', closeImportModal);
+  if (btnCancelImport) btnCancelImport.addEventListener('click', closeImportModal);
+  if (backdropImport) backdropImport.addEventListener('click', closeImportModal);
+
+  // Tab switching inside Import modal
+  const tabBtns = document.querySelectorAll('.import-tab-btn');
+  const tabPanes = {
+    local: document.getElementById('pane-local'),
+    url: document.getElementById('pane-url'),
+    template: document.getElementById('pane-template')
+  };
+  let activeImportTab = 'local';
+
+  tabBtns.forEach(btn => {
+    btn.addEventListener('click', () => {
+      tabBtns.forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      activeImportTab = btn.getAttribute('data-tab');
+      Object.keys(tabPanes).forEach(k => {
+        if (tabPanes[k]) {
+          tabPanes[k].style.display = (k === activeImportTab) ? 'flex' : 'none';
+        }
+      });
+    });
+  });
+
+  // Template cards selection
+  const templateCards = document.querySelectorAll('.template-card');
+  let selectedTemplatePath = 'templates/web_app_template';
+  templateCards.forEach(card => {
+    card.addEventListener('click', () => {
+      templateCards.forEach(c => c.classList.remove('active'));
+      card.classList.add('active');
+      selectedTemplatePath = card.getAttribute('data-template-path') || 'templates/web_app_template';
+    });
+  });
+
+  function appendImportLog(msg, color = '#D1D5DB') {
+    if (!importTerminalLogs) return;
+    const line = document.createElement('div');
+    line.style.color = color;
+    const time = new Date().toISOString().slice(11, 19);
+    line.textContent = `[${time}] ${msg}`;
+    importTerminalLogs.appendChild(line);
+    importTerminalLogs.scrollTop = importTerminalLogs.scrollHeight;
+  }
+
+  // Handle Form Submission -> /api/web/import
+  if (btnSubmitImport) {
+    btnSubmitImport.addEventListener('click', async () => {
+      let targetSource = '';
+      if (activeImportTab === 'local') {
+        targetSource = (document.getElementById('input-local-path')?.value || '').trim();
+        if (!targetSource) {
+          showToast('Please specify a local web app directory path');
+          return;
+        }
+      } else if (activeImportTab === 'url') {
+        targetSource = (document.getElementById('input-web-url')?.value || '').trim();
+        if (!targetSource) {
+          showToast('Please specify a remote web app or PWA URL');
+          return;
+        }
+      } else if (activeImportTab === 'template') {
+        targetSource = selectedTemplatePath;
+      }
+
+      const appName = (document.getElementById('input-import-name')?.value || '').trim();
+      const appId = (document.getElementById('input-import-id')?.value || '').trim();
+      const enableHmr = !!document.getElementById('toggle-live-hmr')?.checked;
+
+      // Collect permissions
+      const permissions = [];
+      document.querySelectorAll('.permission-chips-container input[type="checkbox"]:checked').forEach(cb => {
+        permissions.push(cb.value);
+      });
+
+      // Prepare UI for execution
+      if (importTerminalWrap) importTerminalWrap.style.display = 'flex';
+      if (importTerminalLogs) importTerminalLogs.innerHTML = '';
+      if (importStatusTag) {
+        importStatusTag.textContent = 'PORTING & SIGNING';
+        importStatusTag.style.background = 'rgba(59, 130, 246, 0.2)';
+        importStatusTag.style.color = '#60A5FA';
+      }
+      btnSubmitImport.disabled = true;
+      if (btnSubmitImportText) btnSubmitImportText.textContent = 'Porting WebApp...';
+
+      appendImportLog(`Target: ${targetSource} (Mode: ${activeImportTab})`, '#93C5FD');
+      appendImportLog(`Selected permissions: [${permissions.join(', ')}]`);
+      appendImportLog('Calling InterOS Web-to-RAPP Porting Engine & Ed25519 signer...');
+
+      try {
+        const resp = await fetch('/api/web/import', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            source: targetSource,
+            name: appName || undefined,
+            id: appId || undefined,
+            permissions: permissions.length > 0 ? permissions : undefined,
+            hmr: enableHmr
+          })
+        });
+
+        const data = await resp.json();
+        if (resp.ok && data.success) {
+          if (importStatusTag) {
+            importStatusTag.textContent = 'INSTALLED';
+            importStatusTag.style.background = 'rgba(16, 185, 129, 0.2)';
+            importStatusTag.style.color = '#34D399';
+          }
+          appendImportLog(`[OK] Package ID: ${data.package_id}`, '#34D399');
+          appendImportLog(`[OK] Arch: ${data.arch} (RAPP v2 signed with Ed25519)`, '#34D399');
+          appendImportLog(`[OK] Sideload status: ${data.sideload_status}`, '#34D399');
+          if (data.guest_install) {
+            appendImportLog(`[OK] Guest installation: ${JSON.stringify(data.guest_install)}`, '#34D399');
+          }
+          appendImportLog('[OK] Sideload complete. Untrusted bytecode isolated in Ring 3 wasmd sandbox.', '#10B981');
+          showToast(`WebApp Ported: ${data.package_id} installed successfully!`);
+
+          if (typeof loadInstalledPackages === 'function') {
+            loadInstalledPackages();
+          }
+          if (typeof fetchInstalledRapps === 'function') {
+            fetchInstalledRapps();
+          }
+        } else {
+          if (importStatusTag) {
+            importStatusTag.textContent = 'FAILED';
+            importStatusTag.style.background = 'rgba(239, 68, 68, 0.2)';
+            importStatusTag.style.color = '#F87171';
+          }
+          appendImportLog(`[ERROR] ${data.error || 'Porting failed'}`, '#F87171');
+          showToast(`Porting error: ${data.error || 'Unknown failure'}`);
+        }
+      } catch (err) {
+        if (importStatusTag) {
+          importStatusTag.textContent = 'FAILED';
+          importStatusTag.style.background = 'rgba(239, 68, 68, 0.2)';
+          importStatusTag.style.color = '#F87171';
+        }
+        appendImportLog(`[NETWORK ERROR] ${err}`, '#F87171');
+        showToast(`Request failed: ${err}`);
+      } finally {
+        btnSubmitImport.disabled = false;
+        if (btnSubmitImportText) btnSubmitImportText.textContent = 'Port & Sideload into InterOS';
+      }
+    });
+  }
+
+  // =========================================================================
+  // Live HMR Background Polling Listener
+  // =========================================================================
+  let lastHmrEventId = 0;
+  async function pollHmrEvents() {
+    while (true) {
+      try {
+        const res = await fetch(`/api/web/hmr?since=${lastHmrEventId}&timeout=25`);
+        if (res.ok) {
+          const body = await res.json();
+          if (body.events && body.events.length > 0) {
+            for (const evt of body.events) {
+              lastHmrEventId = Math.max(lastHmrEventId, evt.id || 0);
+              const timeStr = new Date(evt.timestamp * 1000).toLocaleTimeString();
+              if (window.logConsole) {
+                window.logConsole('ok', `[HMR] Live hot reload triggered for ${evt.app_id} (${evt.event}) at ${timeStr}`);
+              }
+              showToast(`[Live HMR] ${evt.app_id} hot-reloaded`);
+              if (!binaryStreamActive && typeof refreshScanoutFrame === 'function') {
+                requestAnimationFrame(() => refreshScanoutFrame(false));
+              }
+            }
+          }
+        }
+      } catch (_) {
+        await new Promise(r => setTimeout(r, 2000));
+      }
+    }
+  }
+  setTimeout(pollHmrEvents, 1000);
+
+  // =========================================================================
+  // Runtime Interactive Permission Consent Dialog Handler
+  // =========================================================================
+  const modalPermPrompt = document.getElementById('modal-permission-prompt');
+  let activePermissionResolver = null;
+
+  window.showRuntimePermissionDialog = function(appName, permName, description) {
+    if (!modalPermPrompt) return Promise.resolve(false);
+    const titleEl = document.getElementById('perm-prompt-title');
+    const appEl = document.getElementById('perm-prompt-app');
+    const descEl = document.getElementById('perm-prompt-desc');
+
+    if (titleEl) titleEl.textContent = `Allow access to ${permName}?`;
+    if (appEl) appEl.textContent = appName || 'Sovereign Application';
+    if (descEl) descEl.textContent = description || `This application requires ${permName} capability.`;
+
+    modalPermPrompt.style.display = 'flex';
+    modalPermPrompt.setAttribute('aria-hidden', 'false');
+
+    return new Promise(resolve => {
+      activePermissionResolver = resolve;
+    });
+  };
+
+  function resolvePermissionPrompt(decision) {
+    if (!modalPermPrompt) return;
+    modalPermPrompt.style.display = 'none';
+    modalPermPrompt.setAttribute('aria-hidden', 'true');
+    if (activePermissionResolver) {
+      activePermissionResolver(decision);
+      activePermissionResolver = null;
+    }
+  }
+
+  document.getElementById('btn-perm-allow-always')?.addEventListener('click', () => resolvePermissionPrompt(1));
+  document.getElementById('btn-perm-allow-once')?.addEventListener('click', () => resolvePermissionPrompt(3));
+  document.getElementById('btn-perm-deny')?.addEventListener('click', () => resolvePermissionPrompt(2));
 
 });
 

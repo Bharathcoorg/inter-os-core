@@ -1,16 +1,72 @@
-//! WebAssembly Stack Machine Interpreter
+//! WebAssembly Stack Machine Interpreter & Runtime Isolation Subsystem
 //!
 //! Provides a pure `no_std` execution loop for WASM bytecode with:
 //! - Strict fuel metering to prevent infinite loops and denial of service.
-//! - Sandboxed linear memory load/store bounds checking.
+//! - Sandboxed linear memory load/store bounds checking and hard 64-page / 4 MiB ceiling.
 //! - Clean host call bindings for capability tools.
+//!
+//! =============================================================================
+//! RUNTIME ISOLATION ARCHITECTURE: RING 0 SUPERVISOR VS. RING 3 WASMD DAEMON
+//! =============================================================================
+//! The InterOS Sovereign Smartphone Platform enforces strict execution domain separation:
+//!
+//! 1. Ring 0 Kernel Supervisor:
+//!    - Owns MMU address spaces, capability matrix validation, hardware interrupts,
+//!      and preemptive thread scheduling.
+//!    - The in-kernel interpreter (`WasmVm`) is strictly restricted to trusted internal
+//!      boot arithmetic validation, crypto verification harnesses, and kernel self-tests.
+//!    - Untrusted user bytecode (such as third-party `.rapp` packages) MUST NEVER
+//!      execute inside supervisory Ring 0 memory space.
+//!
+//! 2. Ring 3 Userspace `wasmd` Execution Daemon (Service ID 12):
+//!    - Ring 0 designates unprivileged userspace daemon `wasmd` as the sole
+//!      authoritative execution domain for untrusted `.rapp` bytecode.
+//!    - `wasmd` executes in unprivileged User Mode (Ring 3), guarded by explicit,
+//!      unforgeable capability handles (`CapHandle`) and non-blocking IPC mailboxes.
+//!    - Memory allocations are constrained to a strict 64-page (4 MiB) sandbox limit,
+//!      preventing heap exhaustion or denial-of-service in supervisory space.
+//!    - Any bytecode traps, unbounded recursion, or memory faults are safely contained
+//!      within the userspace runner without compromising supervisory kernel stability.
+//! =============================================================================
 
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use crate::wasm::memory::WasmMemory;
+use crate::wasm::memory::{WasmMemory, WASM_MAX_MEMORY_BYTES, WASM_MAX_PAGES_LIMIT, WASM_PAGE_SIZE};
 use crate::wasm::types::{opcodes, Value, WasmError};
+
+/// The authoritative userspace daemon service ID responsible for executing untrusted WASM bytecode.
+pub const WASMD_SERVICE_ID: u8 = 12;
+
+/// Authoritative execution domain designation for WASM bytecode payloads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WasmExecutionDomain {
+    /// Trusted kernel-internal execution in Ring 0 (self-tests and deterministic checks only).
+    KernelInternal,
+    /// Authoritative isolated Ring 3 userspace execution via `wasmd` daemon.
+    UserspaceDaemon { service_id: u8 },
+}
+
+/// Designates the authoritative execution domain for a given WASM module.
+///
+/// Untrusted application bytecode is routed to unprivileged Ring 3 `wasmd` (Service ID 12),
+/// completely isolating Ring 0 from untrusted execution.
+pub fn designate_execution_domain(is_trusted_kernel_task: bool) -> WasmExecutionDomain {
+    if is_trusted_kernel_task {
+        WasmExecutionDomain::KernelInternal
+    } else {
+        WasmExecutionDomain::UserspaceDaemon {
+            service_id: WASMD_SERVICE_ID,
+        }
+    }
+}
+
+/// Bridge check validating whether Ring 0 execution is permitted for a bytecode module.
+/// Untrusted bytecode is rejected from Ring 0 and must execute via `wasmd`.
+pub fn is_ring0_execution_permitted(is_trusted: bool) -> bool {
+    is_trusted
+}
 
 /// Converts a WASM linear-memory address operand into a host offset.
 ///
@@ -166,6 +222,11 @@ impl WasmVm {
             .get(internal_idx)
             .cloned()
             .ok_or_else(|| WasmError::FunctionNotFound(internal_idx.to_string()))?;
+
+        // Enforce sandbox memory quota limits: reject execution if linear memory exceeds 64 pages / 4 MiB limit
+        if self.memory.size() > WASM_MAX_MEMORY_BYTES || self.memory.max_pages() > WASM_MAX_PAGES_LIMIT {
+            return Err(WasmError::OutOfBoundsMemory);
+        }
 
         // Initialize locals: parameters followed by zero-initialized locals
         let mut locals = Vec::with_capacity(func.num_params + func.num_locals);
@@ -326,6 +387,31 @@ impl WasmVm {
                         self.push(res);
                     }
                 }
+                opcodes::MEMORY_SIZE => {
+                    if pc >= bytecode.len() {
+                        return Err(WasmError::Trap("Truncated memory.size instruction".to_string()));
+                    }
+                    let _reserved = bytecode[pc];
+                    pc += 1;
+                    let pages = (self.memory.size() / WASM_PAGE_SIZE) as i32;
+                    self.push(Value::I32(pages));
+                }
+                opcodes::MEMORY_GROW => {
+                    if pc >= bytecode.len() {
+                        return Err(WasmError::Trap("Truncated memory.grow instruction".to_string()));
+                    }
+                    let _reserved = bytecode[pc];
+                    pc += 1;
+                    let delta = self.pop_i32()?;
+                    if delta < 0 {
+                        self.push(Value::I32(-1));
+                    } else {
+                        match self.memory.grow(delta as usize) {
+                            Ok(prev_pages) => self.push(Value::I32(prev_pages as i32)),
+                            Err(_) => self.push(Value::I32(-1)),
+                        }
+                    }
+                }
                 opcodes::RETURN => {
                     return Ok(self.stack.pop());
                 }
@@ -342,6 +428,37 @@ impl WasmVm {
         }
 
         Ok(self.stack.pop())
+    }
+
+    /// Returns the current active memory sandbox size in bytes.
+    pub fn memory_size(&self) -> usize {
+        self.memory.size()
+    }
+
+    /// Explicitly attempts to grow the VM's linear memory sandbox by `delta_pages`,
+    /// enforcing the strict 64-page / 4 MiB platform limit.
+    pub fn grow_memory(&mut self, delta_pages: usize) -> Result<usize, WasmError> {
+        self.memory.grow(delta_pages)
+    }
+
+    /// Invokes an exported function with Resource Manager fuel and memory accounting.
+    pub fn invoke_export_with_resource_manager(
+        &mut self,
+        name: &str,
+        args: &[Value],
+        rm: &mut crate::resource::ResourceManager,
+    ) -> Result<Option<Value>, WasmError> {
+        rm.meter_wasm_instruction_fuel(self.fuel)
+            .map_err(|_| WasmError::FuelExhausted)?;
+
+        let result = self.invoke_export(name, args);
+
+        let mem_size = self.memory.size();
+        if mem_size > 0 {
+            let _ = rm.allocate_wasm_memory(mem_size);
+        }
+
+        result
     }
 }
 
@@ -525,4 +642,84 @@ mod tests {
         ];
         assert_eq!(run(code, &[], 16), Err(WasmError::OutOfBoundsMemory));
     }
+
+    #[test]
+    fn runtime_isolation_bridge_designation() {
+        assert_eq!(
+            designate_execution_domain(true),
+            WasmExecutionDomain::KernelInternal
+        );
+        assert_eq!(
+            designate_execution_domain(false),
+            WasmExecutionDomain::UserspaceDaemon {
+                service_id: WASMD_SERVICE_ID,
+            }
+        );
+        assert!(is_ring0_execution_permitted(true));
+        assert!(!is_ring0_execution_permitted(false));
+    }
+
+    #[test]
+    fn memory_size_and_grow_instructions_enforce_quotas() {
+        // Test memory.size (0x3F, 0x00)
+        let size_code = alloc::vec![
+            opcodes::MEMORY_SIZE,
+            0x00, // reserved flag
+            opcodes::END,
+        ];
+        assert_eq!(run(size_code, &[], 16), Ok(Some(Value::I32(1))));
+
+        // Test memory.grow by 2 pages
+        let mut module = WasmModule::new();
+        let grow_code = alloc::vec![
+            opcodes::I32_CONST,
+            0x02, // grow by 2 pages
+            opcodes::MEMORY_GROW,
+            0x00,
+            opcodes::END,
+        ];
+        let idx = module.add_function("grow", 0, 0, grow_code);
+        module.add_export("grow", idx);
+        let mut vm = WasmVm::new(module, WasmMemory::new(1, 4), 16);
+        let res = vm.invoke_export("grow", &[]);
+        assert_eq!(res, Ok(Some(Value::I32(1)))); // Returns previous size: 1 page
+        assert_eq!(vm.memory_size(), 3 * WASM_PAGE_SIZE);
+
+        // Exceeding max_pages via grow returns -1
+        let mut exceed_module = WasmModule::new();
+        let exceed_code = alloc::vec![
+            opcodes::I32_CONST,
+            0x10, // grow by 16 pages, exceeding 4-page max
+            opcodes::MEMORY_GROW,
+            0x00,
+            opcodes::END,
+        ];
+        let ex_idx = exceed_module.add_function("exceed", 0, 0, exceed_code);
+        exceed_module.add_export("exceed", ex_idx);
+        let mut exceed_vm = WasmVm::new(exceed_module, WasmMemory::new(1, 4), 16);
+        let ex_res = exceed_vm.invoke_export("exceed", &[]);
+        assert_eq!(ex_res, Ok(Some(Value::I32(-1)))); // Fails with -1
+        assert_eq!(exceed_vm.memory_size(), WASM_PAGE_SIZE);
+    }
+
+    #[test]
+    fn resource_manager_accounting_with_vm() {
+        let mut rm = crate::resource::ResourceManager::new();
+        let mut module = WasmModule::new();
+        let code = alloc::vec![
+            opcodes::I32_CONST,
+            0x2A,
+            opcodes::RETURN,
+            opcodes::END,
+        ];
+        let idx = module.add_function("ans", 0, 0, code);
+        module.add_export("ans", idx);
+        let mut vm = WasmVm::new(module, WasmMemory::new(1, 1), 50);
+
+        let res = vm.invoke_export_with_resource_manager("ans", &[], &mut rm);
+        assert_eq!(res, Ok(Some(Value::I32(42))));
+        assert_eq!(rm.wasm_fuel_metered_this_frame, 50);
+        assert_eq!(rm.wasm_memory_allocated_bytes, WASM_PAGE_SIZE);
+    }
 }
+

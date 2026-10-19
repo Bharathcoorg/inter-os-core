@@ -79,7 +79,10 @@ def has_verifiable_assertions(path: str) -> bool:
 
 
 def run_contracts(target_files=None):
-    all_test_files = sorted(normalize_path(p) for p in glob.glob("tests/**/test_*.py", recursive=True))
+    all_test_files = sorted(
+        normalize_path(p) for p in glob.glob("tests/**/test_*.py", recursive=True)
+        if not os.path.basename(p).startswith("test_tmp_")
+    )
 
     is_subset_run = bool(target_files)
     if is_subset_run:

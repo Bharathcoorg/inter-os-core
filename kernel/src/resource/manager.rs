@@ -52,6 +52,10 @@ pub struct ResourceManager {
     pub ram_allocated_bytes: usize,
     pub ram_foreground_bytes: usize,
     pub active_foreground_task: bool,
+    pub wasm_fuel_limit_per_frame: u64,
+    pub wasm_memory_quota_bytes: usize,
+    pub wasm_fuel_metered_this_frame: u64,
+    pub wasm_memory_allocated_bytes: usize,
 }
 
 impl ResourceManager {
@@ -76,6 +80,10 @@ impl ResourceManager {
             ram_allocated_bytes: 0,
             ram_foreground_bytes: 0,
             active_foreground_task: false,
+            wasm_fuel_limit_per_frame: 500_000,
+            wasm_memory_quota_bytes: 1024 * 1024,
+            wasm_fuel_metered_this_frame: 0,
+            wasm_memory_allocated_bytes: 0,
         }
     }
 
@@ -138,4 +146,87 @@ impl ResourceManager {
         self.thermal.temp_celsius = temp_celsius;
         self.thermal.throttling = temp_celsius >= 75;
     }
+
+    /// Meters WASM instruction fuel against the per-frame execution limit.
+    pub fn meter_wasm_instruction_fuel(&mut self, fuel: u64) -> Result<(), &'static str> {
+        let new_fuel = match self.wasm_fuel_metered_this_frame.checked_add(fuel) {
+            Some(val) if val <= self.wasm_fuel_limit_per_frame => val,
+            _ => return Err("WasmFuelQuotaExceeded"),
+        };
+        self.wasm_fuel_metered_this_frame = new_fuel;
+        Ok(())
+    }
+
+    /// Allocates WASM linear memory bytes against the configured quota.
+    pub fn allocate_wasm_memory(&mut self, bytes: usize) -> Result<(), &'static str> {
+        let new_alloc = match self.wasm_memory_allocated_bytes.checked_add(bytes) {
+            Some(val) if val <= self.wasm_memory_quota_bytes => val,
+            _ => return Err("WasmMemoryQuotaExceeded"),
+        };
+        self.wasm_memory_allocated_bytes = new_alloc;
+        Ok(())
+    }
+
+    /// Releases previously allocated WASM linear memory bytes.
+    pub fn free_wasm_memory(&mut self, bytes: usize) {
+        self.wasm_memory_allocated_bytes = self.wasm_memory_allocated_bytes.saturating_sub(bytes);
+    }
+
+    /// Resets WASM per-frame instruction fuel metering.
+    pub fn reset_wasm_frame_metering(&mut self) {
+        self.wasm_fuel_metered_this_frame = 0;
+    }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wasm_resource_accounting_metering_and_quotas() {
+        let mut rm = ResourceManager::new();
+        assert_eq!(rm.wasm_fuel_limit_per_frame, 500_000);
+        assert_eq!(rm.wasm_memory_quota_bytes, 1024 * 1024);
+        assert_eq!(rm.wasm_fuel_metered_this_frame, 0);
+        assert_eq!(rm.wasm_memory_allocated_bytes, 0);
+
+        // Metering within limits
+        assert_eq!(rm.meter_wasm_instruction_fuel(200_000), Ok(()));
+        assert_eq!(rm.wasm_fuel_metered_this_frame, 200_000);
+        assert_eq!(rm.meter_wasm_instruction_fuel(300_000), Ok(()));
+        assert_eq!(rm.wasm_fuel_metered_this_frame, 500_000);
+
+        // Exceeding fuel quota
+        assert_eq!(
+            rm.meter_wasm_instruction_fuel(1),
+            Err("WasmFuelQuotaExceeded")
+        );
+        assert_eq!(rm.wasm_fuel_metered_this_frame, 500_000);
+
+        // Frame reset
+        rm.reset_wasm_frame_metering();
+        assert_eq!(rm.wasm_fuel_metered_this_frame, 0);
+        assert_eq!(rm.meter_wasm_instruction_fuel(100), Ok(()));
+        assert_eq!(rm.wasm_fuel_metered_this_frame, 100);
+
+        // Memory quota allocations
+        assert_eq!(rm.allocate_wasm_memory(512 * 1024), Ok(()));
+        assert_eq!(rm.wasm_memory_allocated_bytes, 512 * 1024);
+        assert_eq!(rm.allocate_wasm_memory(512 * 1024), Ok(()));
+        assert_eq!(rm.wasm_memory_allocated_bytes, 1024 * 1024);
+
+        // Exceeding memory quota
+        assert_eq!(
+            rm.allocate_wasm_memory(1),
+            Err("WasmMemoryQuotaExceeded")
+        );
+        assert_eq!(rm.wasm_memory_allocated_bytes, 1024 * 1024);
+
+        // Freeing memory
+        rm.free_wasm_memory(512 * 1024);
+        assert_eq!(rm.wasm_memory_allocated_bytes, 512 * 1024);
+        rm.free_wasm_memory(1024 * 1024); // Saturating subtraction
+        assert_eq!(rm.wasm_memory_allocated_bytes, 0);
+    }
+}
+

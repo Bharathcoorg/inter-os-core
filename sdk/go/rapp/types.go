@@ -7,6 +7,8 @@ const (
 	ArchX86_64  Arch = 0
 	ArchAarch64 Arch = 1
 	ArchRiscv64 Arch = 2
+	ArchWasm    Arch = 3
+	ArchWeb     Arch = 3
 )
 
 // CapabilityType represents a kernel RAPP v2 capability identifier.

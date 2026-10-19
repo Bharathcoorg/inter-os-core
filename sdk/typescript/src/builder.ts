@@ -4,6 +4,47 @@
 import { CapabilityType, RappArch, type ResourceLimits } from "./types.ts";
 import { sha256, signRappV2 } from "./crypto.ts";
 
+export const ArchWasm = 3;
+export const ArchWeb = 3;
+
+/**
+ * Maps standard web permission identifiers to canonical RAPP CapabilityType constants.
+ */
+export function mapWebPermissionToCapabilities(perm: string): CapabilityType[] {
+  switch (perm.toLowerCase().trim()) {
+    case "camera":
+    case "cameracapture":
+      return [4 as CapabilityType]; // CameraCapture
+    case "microphone":
+    case "mic":
+      return [7 as CapabilityType]; // Microphone
+    case "geolocation":
+    case "location":
+      return [8 as CapabilityType]; // Location
+    case "storage":
+    case "persistent-storage":
+    case "files":
+      return [CapabilityType.FileSystemRead, CapabilityType.FileSystemWrite];
+    case "filesystemread":
+    case "vfs.read":
+      return [CapabilityType.FileSystemRead];
+    case "filesystemwrite":
+    case "vfs.write":
+      return [CapabilityType.FileSystemWrite];
+    case "notifications":
+    case "notification":
+      return [14 as CapabilityType]; // Notifications
+    case "sensor":
+    case "sensors":
+    case "accelerometer":
+    case "gyroscope":
+      return [12 as CapabilityType]; // Sensors
+    case "network":
+    default:
+      return [CapabilityType.NetworkSocket, CapabilityType.NetworkSend, CapabilityType.NetworkReceive];
+  }
+}
+
 export class RappBuilder {
   private packageId = "";
   private publisherKey: Uint8Array | null = null;

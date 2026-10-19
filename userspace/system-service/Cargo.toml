@@ -71,3 +71,10 @@ name = "sensord"
 path = "src/bin/sensord.rs"
 test = false
 bench = false
+
+[[bin]]
+name = "wasmd"
+path = "src/bin/wasmd.rs"
+test = false
+bench = false
+

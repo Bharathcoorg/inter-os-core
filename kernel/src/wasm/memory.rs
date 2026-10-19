@@ -11,6 +11,12 @@ use crate::wasm::types::WasmError;
 /// WASM standard page size: 64 KiB.
 pub const WASM_PAGE_SIZE: usize = 65536;
 
+/// Maximum linear memory pages permitted by InterOS WASM sandbox (64 pages = 4 MiB).
+pub const WASM_MAX_PAGES_LIMIT: usize = 64;
+
+/// Maximum linear memory bytes permitted by InterOS WASM sandbox (4 MiB).
+pub const WASM_MAX_MEMORY_BYTES: usize = WASM_MAX_PAGES_LIMIT * WASM_PAGE_SIZE;
+
 /// Sandboxed linear memory buffer.
 #[derive(Debug, Clone)]
 pub struct WasmMemory {
@@ -19,8 +25,11 @@ pub struct WasmMemory {
 }
 
 impl WasmMemory {
-    /// Creates a new linear memory space with the specified initial pages and maximum limit.
+    /// Creates a new linear memory space with the specified initial pages and maximum limit,
+    /// enforcing the strict platform ceiling of 64 pages / 4 MiB.
     pub fn new(initial_pages: usize, max_pages: usize) -> Self {
+        let max_pages = max_pages.min(WASM_MAX_PAGES_LIMIT);
+        let initial_pages = initial_pages.min(max_pages);
         let size = initial_pages.saturating_mul(WASM_PAGE_SIZE);
         Self {
             data: vec![0u8; size],
@@ -28,21 +37,34 @@ impl WasmMemory {
         }
     }
 
-    /// Creates linear memory bounded to an explicit maximum byte capacity.
+    /// Creates linear memory bounded to an explicit maximum byte capacity,
+    /// enforcing the strict platform ceiling of 64 pages / 4 MiB.
     pub fn with_byte_limit(initial_bytes: usize, max_bytes: usize) -> Self {
         let max_pages = max_bytes
             .saturating_add(WASM_PAGE_SIZE - 1)
             .checked_div(WASM_PAGE_SIZE)
             .unwrap_or(0);
+        let max_pages = core::cmp::max(1, max_pages).min(WASM_MAX_PAGES_LIMIT);
+        let initial_bytes = initial_bytes.min(max_pages.saturating_mul(WASM_PAGE_SIZE));
         Self {
             data: vec![0u8; initial_bytes],
-            max_pages: core::cmp::max(1, max_pages),
+            max_pages,
         }
     }
 
     /// Returns the active size in bytes.
     pub fn size(&self) -> usize {
         self.data.len()
+    }
+
+    /// Returns the maximum allowed page count for this linear memory space.
+    pub fn max_pages(&self) -> usize {
+        self.max_pages
+    }
+
+    /// Returns the maximum allowable capacity in bytes.
+    pub fn max_capacity_bytes(&self) -> usize {
+        self.max_pages.saturating_mul(WASM_PAGE_SIZE)
     }
 
     /// Reads a single byte at the specified linear address.
@@ -117,14 +139,17 @@ impl WasmMemory {
         Ok(())
     }
 
-    /// Grows memory by `delta_pages`.
+    /// Grows memory by `delta_pages`, strictly enforcing the configured quota and the 64-page / 4 MiB limit.
     pub fn grow(&mut self, delta_pages: usize) -> Result<usize, WasmError> {
         let current_pages = self.data.len() / WASM_PAGE_SIZE;
         let new_pages = current_pages.checked_add(delta_pages).ok_or(WasmError::OutOfBoundsMemory)?;
-        if new_pages > self.max_pages {
+        if new_pages > self.max_pages || new_pages > WASM_MAX_PAGES_LIMIT {
             return Err(WasmError::OutOfBoundsMemory);
         }
         let new_bytes = new_pages.checked_mul(WASM_PAGE_SIZE).ok_or(WasmError::OutOfBoundsMemory)?;
+        if new_bytes > WASM_MAX_MEMORY_BYTES {
+            return Err(WasmError::OutOfBoundsMemory);
+        }
         self.data.resize(new_bytes, 0);
         Ok(current_pages)
     }
@@ -221,5 +246,21 @@ mod tests {
 
         let capped = WasmMemory::with_byte_limit(16, usize::MAX);
         assert!(capped.max_pages >= 1);
+        assert!(capped.max_pages <= WASM_MAX_PAGES_LIMIT);
+    }
+
+    #[test]
+    fn memory_quota_strictly_enforces_64_pages_limit() {
+        let mut memory = WasmMemory::new(1, 100);
+        assert_eq!(memory.max_pages(), WASM_MAX_PAGES_LIMIT);
+        assert_eq!(memory.max_capacity_bytes(), 64 * WASM_PAGE_SIZE);
+
+        // Can grow up to 64 pages (63 additional pages)
+        assert_eq!(memory.grow(63), Ok(1));
+        assert_eq!(memory.size(), 64 * WASM_PAGE_SIZE);
+
+        // Cannot grow beyond 64 pages
+        assert_eq!(memory.grow(1), Err(WasmError::OutOfBoundsMemory));
     }
 }
+

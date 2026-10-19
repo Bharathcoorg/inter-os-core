@@ -2035,15 +2035,15 @@ def verify_and_install_rapp(body, pkg_name):
 
     if len(body) < HEADER_SIZE:
         return False, "RAPP v2 package is shorter than the canonical header.", None
-    if int.from_bytes(body[6:8], "little") != 0:
+    arch_id = int.from_bytes(body[6:8], "little")
+    if arch_id not in (0, 3):
         return False, "The current guest transport accepts x86_64 RAPP packages only.", None
     if body[:4] != b"RAPP":
         return False, "Invalid RAPP magic.", None
     if int.from_bytes(body[4:6], "little") != 2:
         return False, "Unsupported RAPP format version; expected v2.", None
 
-    arch_id = int.from_bytes(body[6:8], "little")
-    arch_names = {0: "x86_64", 1: "aarch64", 2: "riscv64"}
+    arch_names = {0: "x86_64", 1: "aarch64", 2: "riscv64", 3: "web"}
     if arch_id not in arch_names:
         return False, "Unsupported RAPP architecture.", None
 
@@ -2105,8 +2105,8 @@ def verify_and_install_rapp(body, pkg_name):
         "id": app_id,
         "name": app_id,
         "filename": filename,
-        "format": "Rust App Package (RAPP v2 binary)",
-        "type": "Sovereign Ring 3",
+        "format": "Rust App Package (RAPP v2 web/wasm)" if arch_id == 3 else "Rust App Package (RAPP v2 binary)",
+        "type": "Web / WASM Sandbox (Ring 3)" if arch_id == 3 else "Sovereign Ring 3",
         "size": len(body),
         "sha256": sha256[:16] + "...",
         "status": "Signature verified; guest trust required",
@@ -2125,7 +2125,7 @@ def verify_and_install_rapp(body, pkg_name):
     SIDELOAD_LEDGER[app_id] = {
         "filename": filename,
         "sha256": sha256[:16] + "...",
-        "format": "Rust App Package (RAPP v2 binary)",
+        "format": "Rust App Package (RAPP v2 web/wasm)" if arch_id == 3 else "Rust App Package (RAPP v2 binary)",
     }
     return True, "RAPP v2 signature and integrity verified; guest trust remains authoritative", app_entry
 
@@ -2223,6 +2223,13 @@ def is_safe_package_id(value):
 
 def is_safe_publisher(value):
     return isinstance(value, str) and 1 <= len(value) <= 32 and re.fullmatch(r"[A-Za-z0-9._-]+", value) is not None
+
+# -----------------------------------------------------------------------------
+# WebApp Porting Engine & Live HMR State
+# -----------------------------------------------------------------------------
+web_hmr_events = []
+web_hmr_cond = threading.Condition()
+runtime_permission_grants = {}  # key: (app_id, permission) -> bool
 
 def guest_fs_list(path):
     if not is_safe_guest_path(path):
@@ -2405,6 +2412,9 @@ POST_ONLY_ROUTES = frozenset({
     '/api/telephony/data/toggle',
     '/api/telephony/sms/send',
     '/api/telephony/at_cmd',
+    '/api/web/import',
+    '/api/web/hmr/notify',
+    '/api/permission/request',
 })
 
 GET_ONLY_ROUTES = frozenset({
@@ -2426,6 +2436,7 @@ GET_ONLY_ROUTES = frozenset({
     '/api/kernel/processes',
     '/api/kernel/ipc',
     '/api/device/profiles',
+    '/api/web/hmr',
 })
 
 
@@ -3023,6 +3034,32 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             self.end_headers()
             ipc_events = extract_real_ipc()
             self.wfile.write(json.dumps({'success': True, 'events': ipc_events, 'total': len(ipc_events)}).encode())
+            return
+
+        if parsed_path.path == '/api/web/hmr':
+            query = urllib.parse.parse_qs(parsed_path.query)
+            app_id = query.get('app_id', [''])[0]
+            try:
+                since = int(query.get('since', ['0'])[0])
+            except (ValueError, TypeError):
+                since = 0
+            try:
+                timeout = min(max(float(query.get('timeout', ['10'])[0]), 0.0), 30.0)
+            except (ValueError, TypeError):
+                timeout = 10.0
+
+            with web_hmr_cond:
+                matching = [e for e in web_hmr_events if e['id'] > since and (not app_id or e['app_id'] == app_id)]
+                if not matching and timeout > 0:
+                    web_hmr_cond.wait(timeout=timeout)
+                    matching = [e for e in web_hmr_events if e['id'] > since and (not app_id or e['app_id'] == app_id)]
+
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
+            self.end_headers()
+            latest_id = web_hmr_events[-1]['id'] if web_hmr_events else 0
+            self.wfile.write(json.dumps({'success': True, 'events': matching, 'latest_id': latest_id}).encode())
             return
 
         super().do_GET()
@@ -4131,6 +4168,146 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 'status': 'DISABLED',
                 'error': 'Bootloader branding is immutable in Device Studio'
             }).encode())
+            return
+
+        if self.path == '/api/permission/request':
+            content_length = self._bounded_content_length()
+            if content_length is None:
+                return
+            body = self.rfile.read(content_length) if content_length > 0 else b'{}'
+            try:
+                data = json.loads(body.decode('utf-8'))
+                app_id = str(data.get('app_id', '')).strip()
+                perm = str(data.get('permission', '')).strip()
+                grant = bool(data.get('grant', True))
+                if not app_id or not perm:
+                    raise ValueError('Missing app_id or permission')
+                runtime_permission_grants[(app_id, perm)] = grant
+                serial_lines.append(f"[PERMISSION] {app_id} requested {perm} -> {'GRANTED' if grant else 'DENIED'}")
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': True, 'app_id': app_id, 'permission': perm, 'granted': grant}).encode())
+            except Exception as e:
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': str(e)}).encode())
+            return
+
+        if self.path == '/api/web/hmr/notify':
+            content_length = self._bounded_content_length()
+            if content_length is None:
+                return
+            body = self.rfile.read(content_length) if content_length > 0 else b'{}'
+            try:
+                data = json.loads(body.decode('utf-8'))
+                app_id = str(data.get('app_id', 'org.interos.webapp')).strip()
+                file_name = str(data.get('file', 'index.html')).strip()
+                event_type = str(data.get('event', 'update')).strip()
+                with web_hmr_cond:
+                    new_id = (web_hmr_events[-1]['id'] + 1) if web_hmr_events else 1
+                    evt = {
+                        'id': new_id,
+                        'app_id': app_id,
+                        'file': file_name,
+                        'event': event_type,
+                        'time': time.time(),
+                    }
+                    web_hmr_events.append(evt)
+                    if len(web_hmr_events) > 500:
+                        del web_hmr_events[:100]
+                    web_hmr_cond.notify_all()
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': True, 'event': evt}).encode())
+            except Exception as e:
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': str(e)}).encode())
+            return
+
+        if self.path == '/api/web/import':
+            content_length = self._bounded_content_length()
+            if content_length is None:
+                return
+            body = self.rfile.read(content_length) if content_length > 0 else b'{}'
+            try:
+                data = json.loads(body.decode('utf-8'))
+                src = str(data.get('folder') or data.get('url') or data.get('source') or '').strip()
+                app_name = str(data.get('name') or '').strip()
+                pkg_id = str(data.get('package_id') or '').strip()
+                is_hmr = bool(data.get('hmr', True))
+
+                if not src or src == 'template':
+                    src = os.path.join(WORKSPACE_ROOT, 'templates', 'web_app_template')
+
+                port_script = os.path.join(WORKSPACE_ROOT, 'tools', 'port_web.py')
+                dist_dir = os.path.join(WORKSPACE_ROOT, 'dist')
+                os.makedirs(dist_dir, exist_ok=True)
+
+                clean_name = re.sub(r'[^a-zA-Z0-9_-]', '_', app_name or os.path.basename(src) or 'webapp')
+                out_rapp = os.path.join(dist_dir, f"{clean_name}.rapp")
+
+                cmd = [sys.executable, port_script, src, '--output', out_rapp]
+                if app_name:
+                    cmd.extend(['--name', app_name])
+                if pkg_id:
+                    cmd.extend(['--id', pkg_id])
+
+                res = subprocess.run(cmd, capture_output=True, text=True, cwd=WORKSPACE_ROOT)
+                if res.returncode != 0:
+                    raise RuntimeError(f"port_web.py failed: {res.stderr or res.stdout}")
+
+                if not os.path.exists(out_rapp):
+                    raise RuntimeError(f"Output .rapp bundle not found at {out_rapp}")
+
+                with open(out_rapp, 'rb') as f:
+                    rapp_bytes = f.read()
+
+                ok, msg, app_entry = verify_and_install_rapp(rapp_bytes, os.path.basename(out_rapp))
+                if not ok:
+                    raise RuntimeError(f"Verification of generated .rapp failed: {msg}")
+
+                guest_ok = False
+                if latest_telemetry.get("qemu_running"):
+                    guest_ok, guest_msg = transfer_rapp_to_guest(rapp_bytes, app_entry["id"])
+                    if guest_ok:
+                        serial_lines.append(f"[WEB_IMPORT] Installed '{app_entry['name']}' ({app_entry['id']}) into guest.")
+
+                if is_hmr:
+                    with web_hmr_cond:
+                        new_id = (web_hmr_events[-1]['id'] + 1) if web_hmr_events else 1
+                        web_hmr_events.append({
+                            'id': new_id,
+                            'app_id': app_entry['id'],
+                            'file': 'index.html',
+                            'event': 'import',
+                            'time': time.time(),
+                        })
+                        web_hmr_cond.notify_all()
+
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    'success': True,
+                    'package_id': app_entry['id'],
+                    'arch': app_entry.get('arch', 'web'),
+                    'sideload_status': 'verified',
+                    'package': app_entry,
+                    'rapp_path': out_rapp,
+                    'guest_installed': guest_ok,
+                    'hmr_enabled': is_hmr,
+                    'output': res.stdout
+                }).encode())
+            except Exception as e:
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': str(e)}).encode())
             return
 
         self._drain_incoming_body_if_any()
