@@ -124,13 +124,13 @@ const STORE_VERSION: u8 = 1;
 const STORE_KEY: &str = "browser.bookmarks.v1";
 
 #[inline]
-fn fs_write_slot() -> usize {
-    std::cap_lookup(std::cap_type::FILE_SYSTEM_WRITE, 0).unwrap_or(9)
+fn fs_write_slot() -> Option<usize> {
+    std::cap_lookup(std::cap_type::FILE_SYSTEM_WRITE, 0).ok()
 }
 
 #[inline]
-fn fs_read_slot() -> usize {
-    std::cap_lookup(std::cap_type::FILE_SYSTEM_READ, 0).unwrap_or(8)
+fn fs_read_slot() -> Option<usize> {
+    std::cap_lookup(std::cap_type::FILE_SYSTEM_READ, 0).ok()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -248,8 +248,12 @@ impl BookmarkStore {
 
     pub fn load() -> Self {
         let mut store = BookmarkStore::EMPTY;
+        let Some(slot) = fs_read_slot() else {
+            store.state = BookmarkStoreState::ReadRefused;
+            return store;
+        };
         let mut blob = [0u8; STORE_BLOB_BYTES];
-        match std::settings_get(fs_read_slot(), STORE_KEY, &mut blob) {
+        match std::settings_get(slot, STORE_KEY, &mut blob) {
             Ok(0) => store.state = BookmarkStoreState::Empty,
             Ok(n) => {
                 let mut records = [BookmarkRecord::EMPTY; MAX_BOOKMARKS];
@@ -306,7 +310,11 @@ impl BookmarkStore {
             self.state = BookmarkStoreState::WriteRefused;
             return Err(-22);
         }
-        match std::settings_set(fs_write_slot(), STORE_KEY, &blob[..used]) {
+        let Some(slot) = fs_write_slot() else {
+            self.state = BookmarkStoreState::WriteRefused;
+            return Err(-1);
+        };
+        match std::settings_set(slot, STORE_KEY, &blob[..used]) {
             Ok(()) => {
                 self.state = BookmarkStoreState::Written;
                 Ok(())
@@ -1719,7 +1727,11 @@ pub extern "C" fn _start() -> ! {
     .ok();
 
     // Allocate DRM/KMS Client Surface (z=200)
-    let surface = match std::surface_create(6, W as u32, H as u32, 200) {
+    let Ok(fb_slot) = std::cap_lookup(std::cap_type::FRAMEBUFFER_DIRECT, 0) else {
+        std::log(0, "[BROWSER APP] Framebuffer capability not found.").ok();
+        loop { std::yield_now(); }
+    };
+    let surface = match std::surface_create(fb_slot, W as u32, H as u32, 200) {
         Ok(id) => {
             std::log(0, "[BROWSER APP] DRM/KMS Client Surface allocated (z=200).").ok();
             id
@@ -1729,7 +1741,7 @@ pub extern "C" fn _start() -> ! {
 
     if surface > 0 {
         render_browser_ui(surface, &browser);
-        let _ = std::surface_flip(6);
+        let _ = std::surface_flip(fb_slot);
         std::log(0, "[BROWSER APP] Browser canvas presented to scanout buffer.").ok();
     }
 
@@ -1783,7 +1795,7 @@ pub extern "C" fn _start() -> ! {
                             }
                             Dirty::All => render_browser_ui(surface, &browser),
                         }
-                        let _ = std::surface_flip(6);
+                        let _ = std::surface_flip(fb_slot);
                     }
                 }
                 if events & std::EVENT_IPC_MSG != 0 {

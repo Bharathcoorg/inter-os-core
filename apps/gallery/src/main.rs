@@ -80,16 +80,19 @@ const NEON_BLUE: u32 = 0xFF38BDF8;
 /// serves `fs_list` and `settings_get`, because the settings gate
 /// (`sys_settings_get`) accepts `FileSystemRead` with READ rights exactly as
 /// `fs_list` does.
-const FS_READ_CAP_SLOT: usize = 4;
-
 #[inline]
-fn fs_read_slot() -> usize {
-    std::cap_lookup(std::cap_type::FILE_SYSTEM_READ, 0).unwrap_or(FS_READ_CAP_SLOT)
+fn fs_read_slot() -> Option<usize> {
+    std::cap_lookup(std::cap_type::FILE_SYSTEM_READ, 0).ok()
 }
 
 #[inline]
-fn fs_write_slot() -> usize {
-    std::cap_lookup(std::cap_type::FILE_SYSTEM_WRITE, 0).unwrap_or(5)
+fn fs_write_slot() -> Option<usize> {
+    std::cap_lookup(std::cap_type::FILE_SYSTEM_WRITE, 0).ok()
+}
+
+#[inline]
+fn tick_slot() -> Option<usize> {
+    std::cap_lookup(std::cap_type::TIMER_TICK_READ, 0).ok()
 }
 
 // -----------------------------------------------------------------------------
@@ -517,7 +520,11 @@ fn probe_media_path(path: &str, scan: &mut MediaScan, out: &mut [u8; 4096]) {
     let mut line = [0u8; 256];
     let mut n = append(&mut line, 0, b"[GALLERY] media scan '");
     n = append(&mut line, n, path.as_bytes());
-    match std::fs_list(fs_read_slot(), path, out) {
+    let res = match fs_read_slot() {
+        Some(slot) => std::fs_list(slot, path, out),
+        None => Err(-1),
+    };
+    match res {
         Ok(bytes) => {
             scan.listed += 1;
             let (entries, images) = count_listing(&out[..bytes]);
@@ -642,7 +649,8 @@ fn build_catalogue_note(buf: &mut [u8; 72]) -> usize {
 /// reported as "not chosen" rather than defaulted silently.
 fn stored_scene_key(key: &str) -> Option<&'static walls::Scene> {
     let mut buf = [0u8; 16];
-    match std::settings_get(fs_read_slot(), key, &mut buf) {
+    let slot = fs_read_slot()?;
+    match std::settings_get(slot, key, &mut buf) {
         Ok(n) if n > 0 && n <= buf.len() => {
             let raw = &buf[..n];
             let start = raw.iter().position(|b| !b.is_ascii_whitespace())?;
@@ -788,13 +796,15 @@ impl GalleryApp {
         };
 
         if val_len > 0 {
-            if home {
-                let _ = std::settings_set(fs_write_slot(), "ui.wallpaper.home", &val[..val_len]);
+            if let Some(write_slot) = fs_write_slot() {
+                if home {
+                    let _ = std::settings_set(write_slot, "ui.wallpaper.home", &val[..val_len]);
+                }
+                if lock {
+                    let _ = std::settings_set(write_slot, "ui.wallpaper.lock", &val[..val_len]);
+                }
+                std::log(0, "[GALLERY] Set wallpaper applied to target.").ok();
             }
-            if lock {
-                let _ = std::settings_set(fs_write_slot(), "ui.wallpaper.lock", &val[..val_len]);
-            }
-            std::log(0, "[GALLERY] Set wallpaper applied to target.").ok();
         }
     }
 
@@ -810,11 +820,14 @@ impl GalleryApp {
         self.storage_count = 0;
         let paths: [&str; 3] = ["/storage/photos", "/storage/pictures", "/storage/videos"];
         let mut list_buf = [0u8; 4096];
+        let Some(read_slot) = fs_read_slot() else {
+            return;
+        };
         for dir_path in paths.iter() {
             if self.storage_count >= MAX_STORAGE_ITEMS {
                 break;
             }
-            if let Ok(bytes) = std::fs_list(fs_read_slot(), dir_path, &mut list_buf) {
+            if let Ok(bytes) = std::fs_list(read_slot, dir_path, &mut list_buf) {
                 let payload = &list_buf[..bytes];
                 for line in payload.split(|&b| b == b'\n') {
                     if line.is_empty() || self.storage_count >= MAX_STORAGE_ITEMS {
@@ -856,7 +869,7 @@ impl GalleryApp {
                     kn = append(&mut fav_key, kn, &name_bytes[..nl]);
                     let mut val_buf = [0u8; 8];
                     if let Ok(key_str) = core::str::from_utf8(&fav_key[..kn]) {
-                        if let Ok(vn) = std::settings_get(fs_read_slot(), key_str, &mut val_buf) {
+                        if let Ok(vn) = std::settings_get(read_slot, key_str, &mut val_buf) {
                             if vn > 0 && val_buf[0] == b'1' {
                                 item.is_favourite = true;
                             }
@@ -894,17 +907,19 @@ impl GalleryApp {
             return;
         }
         let item = &self.storage_items[idx];
-        if let Ok(path_str) = core::str::from_utf8(&item.path[..item.path_len]) {
-            let mut file_buf = [0u8; 8192];
-            if let Ok(fd) = std::fs_open(fs_read_slot(), path_str, std::FS_READ) {
-                if let Ok(read_bytes) = std::fs_read(fs_read_slot(), fd, &mut file_buf) {
-                    if let Ok((w, h, count)) = decode_image(&file_buf[..read_bytes], &item.name[..item.name_len], &mut self.detail_rgba) {
-                        self.detail_w = w;
-                        self.detail_h = h;
-                        self.detail_rgba_len = count;
+        if let Some(read_slot) = fs_read_slot() {
+            if let Ok(path_str) = core::str::from_utf8(&item.path[..item.path_len]) {
+                let mut file_buf = [0u8; 8192];
+                if let Ok(fd) = std::fs_open(read_slot, path_str, std::FS_READ) {
+                    if let Ok(read_bytes) = std::fs_read(read_slot, fd, &mut file_buf) {
+                        if let Ok((w, h, count)) = decode_image(&file_buf[..read_bytes], &item.name[..item.name_len], &mut self.detail_rgba) {
+                            self.detail_w = w;
+                            self.detail_h = h;
+                            self.detail_rgba_len = count;
+                        }
                     }
+                    let _ = std::fs_close(fd);
                 }
-                let _ = std::fs_close(fd);
             }
         }
     }
@@ -2625,17 +2640,19 @@ fn create_screenshot(app: &mut GalleryApp) {
             rgb_data[offset + 2] = (argb & 0xFF) as u8;
         }
     }
+    let (Some(t_slot), Some(w_slot)) = (tick_slot(), fs_write_slot()) else {
+        return;
+    };
     let mut ppm_buf = [0u8; 8192];
     if let Ok(ppm_len) = encode_ppm(36, 72, &rgb_data, false, &mut ppm_buf) {
-        let tick_slot = std::cap_lookup(std::cap_type::TIMER_TICK_READ, 0).unwrap_or(2);
-        let ticks = std::get_ticks(tick_slot).unwrap_or(100);
+        let ticks = std::get_ticks(t_slot).unwrap_or(0);
         let mut path_buf = [0u8; 64];
         let mut n = append(&mut path_buf, 0, b"/storage/photos/screenshot_");
         n = append_u64(&mut path_buf, n, ticks);
         n = append(&mut path_buf, n, b".ppm");
         if let Ok(path_str) = core::str::from_utf8(&path_buf[..n]) {
-            if let Ok(fd) = std::fs_open(fs_write_slot(), path_str, std::FS_WRITE) {
-                let _ = std::fs_write(fs_write_slot(), fd, &ppm_buf[..ppm_len]);
+            if let Ok(fd) = std::fs_open(w_slot, path_str, std::FS_WRITE) {
+                let _ = std::fs_write(w_slot, fd, &ppm_buf[..ppm_len]);
                 let _ = std::fs_close(fd);
                 std::log(0, "[GALLERY] Screenshot saved to /storage/photos.").ok();
             }
@@ -2752,7 +2769,9 @@ fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
                     if idx < app.storage_count {
                         let path_slice = &app.storage_items[idx].path[..app.storage_items[idx].path_len];
                         if let Ok(path_str) = core::str::from_utf8(path_slice) {
-                            let _ = std::fs_unlink(fs_write_slot(), path_str);
+                            if let Some(write_slot) = fs_write_slot() {
+                                let _ = std::fs_unlink(write_slot, path_str);
+                            }
                         }
                         for i in idx..(app.storage_count - 1) {
                             app.storage_items[i] = app.storage_items[i + 1];
@@ -2778,7 +2797,9 @@ fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
                         kn = append(&mut fav_key, kn, &app.storage_items[idx].name[..app.storage_items[idx].name_len]);
                         if let Ok(key_str) = core::str::from_utf8(&fav_key[..kn]) {
                             let val = if app.storage_items[idx].is_favourite { b"1" } else { b"0" };
-                            let _ = std::settings_set(fs_write_slot(), key_str, val);
+                            if let Some(write_slot) = fs_write_slot() {
+                                let _ = std::settings_set(write_slot, key_str, val);
+                            }
                         }
                         return Tap::Redraw(Dirty::All);
                     }
@@ -2912,21 +2933,31 @@ pub extern "C" fn _start() -> ! {
     );
 
     let mut intent_buf = [0u8; 128];
-    if let Ok(n) = std::settings_get(fs_read_slot(), "intent.view.file", &mut intent_buf) {
-        if n > 0 {
-            let _ = std::settings_set(fs_write_slot(), "intent.view.file", b"");
-            let target_path = &intent_buf[..n];
-            for i in 0..app.storage_count {
-                if &app.storage_items[i].path[..app.storage_items[i].path_len] == target_path {
-                    let _ = open_media(&mut app, Media::StorageItem(i));
-                    break;
+    if let Some(r_slot) = fs_read_slot() {
+        if let Ok(n) = std::settings_get(r_slot, "intent.view.file", &mut intent_buf) {
+            if n > 0 {
+                if let Some(w_slot) = fs_write_slot() {
+                    let _ = std::settings_set(w_slot, "intent.view.file", b"");
+                }
+                let target_path = &intent_buf[..n];
+                for i in 0..app.storage_count {
+                    if &app.storage_items[i].path[..app.storage_items[i].path_len] == target_path {
+                        let _ = open_media(&mut app, Media::StorageItem(i));
+                        break;
+                    }
                 }
             }
         }
     }
 
-    // Allocate client surface (slot 6 = FrameBufferDirect, z=200)
-    let surface = match std::surface_create(6, W as u32, H as u32, 200) {
+    // Allocate client surface (z=200)
+    let Ok(fb_slot) = std::cap_lookup(std::cap_type::FRAMEBUFFER_DIRECT, 0) else {
+        std::log(0, "[GALLERY] Framebuffer capability not found.").ok();
+        loop {
+            std::yield_now();
+        }
+    };
+    let surface = match std::surface_create(fb_slot, W as u32, H as u32, 200) {
         Ok(id) => {
             std::log(0, "[GALLERY] DRM/KMS Client Surface allocated (z=200).").ok();
             id
@@ -2936,7 +2967,7 @@ pub extern "C" fn _start() -> ! {
 
     if surface > 0 {
         render_gallery_ui(surface, &app);
-        let _ = std::surface_flip(6);
+        let _ = std::surface_flip(fb_slot);
         std::log(0, "[GALLERY] Gallery UI presented to scanout buffer.").ok();
     }
 
@@ -2950,7 +2981,7 @@ pub extern "C" fn _start() -> ! {
                         player.advance_ticks(2);
                         if surface > 0 {
                             render_gallery_ui(surface, &app);
-                            let _ = std::surface_flip(6);
+                            let _ = std::surface_flip(fb_slot);
                         }
                     }
                 }
@@ -3007,7 +3038,7 @@ pub extern "C" fn _start() -> ! {
                         Dirty::All => render_gallery_ui(surface, &app),
                         Dirty::None => {}
                     }
-                    let _ = std::surface_flip(6);
+                    let _ = std::surface_flip(fb_slot);
                 }
             }
         }

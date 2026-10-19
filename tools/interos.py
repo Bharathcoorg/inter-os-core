@@ -183,9 +183,12 @@ def find_binary(name):
         return p
     common_dirs = [
         Path.home() / "qemu",
-        Path("C:/Users/bhara/qemu"),
-        Path("C:/Program Files/qemu"),
+        Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "qemu",
     ]
+    if "QEMU_PATH" in os.environ:
+        common_dirs.insert(0, Path(os.environ["QEMU_PATH"]))
+    if "QEMU_DIR" in os.environ:
+        common_dirs.insert(0, Path(os.environ["QEMU_DIR"]))
     for d in common_dirs:
         candidate = d / f"{name}.exe" if sys.platform == "win32" else d / name
         if candidate.exists():

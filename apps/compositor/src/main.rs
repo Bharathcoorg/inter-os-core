@@ -60,9 +60,9 @@ const BAR_PERIOD: u64 = 600;
 // surface id. Neither is reachable from this file.
 
 /// One chunk of the system line.
-fn chunk(surface: u32, offset: usize, count: usize, _ticks: u64, _windows: usize, _services: usize) {
+fn chunk(fb_slot: usize, surface: u32, offset: usize, count: usize, _ticks: u64, _windows: usize, _services: usize) {
     let pixels = [0u32; CHUNK];
-    let _ = std::surface_write(4, surface, offset, &pixels[..count]);
+    let _ = std::surface_write(fb_slot, surface, offset, &pixels[..count]);
 }
 
 /// Rewrites the whole system line into the surface.
@@ -70,12 +70,12 @@ fn chunk(surface: u32, offset: usize, count: usize, _ticks: u64, _windows: usize
 /// WHY this is still worth doing even though nothing presents it: `composite()`
 /// reads the surface on every flip, so its contents have to be right by the time
 /// the next client publishes, and a client publishes on its own schedule.
-fn draw_system_line(surface: u32, ticks: u64, windows: usize, services: usize) {
+fn draw_system_line(fb_slot: usize, surface: u32, ticks: u64, windows: usize, services: usize) {
     let total = (W * H) as usize;
     let mut offset = 0;
     while offset < total {
         let count = (total - offset).min(CHUNK);
-        chunk(surface, offset, count, ticks, windows, services);
+        chunk(fb_slot, surface, offset, count, ticks, windows, services);
         offset += count;
     }
 }
@@ -87,14 +87,30 @@ pub extern "C" fn _start() -> ! {
         "[COMPOSITOR USERSPACE] Ring-3 system-line compositor online.",
     )
     .ok();
-    match std::surface_create(4, W, H, 100) {
+    let fb_slot = match std::cap_lookup(std::cap_type::FRAMEBUFFER_DIRECT, 0) {
+        Ok(slot) => slot,
+        Err(_) => {
+            std::log(
+                0,
+                "[COMPOSITOR USERSPACE] Surface allocation unavailable; service remains alive.",
+            )
+            .ok();
+            loop {
+                std::yield_now();
+            }
+        }
+    };
+    let timer_slot = std::cap_lookup(std::cap_type::TIMER_TICK_READ, 0).ok();
+    let has_epoll = std::cap_lookup(std::cap_type::EVENT_POLL, 0).is_ok();
+
+    match std::surface_create(fb_slot, W, H, 100) {
         Ok(surface) => {
             // WHY this starts as "nothing drawn" rather than 0: tick 0 is a real
             // tick, and treating it as already drawn would skip the first paint.
             let mut drawn: Option<(u64, usize, usize)> = None;
             loop {
                 let _ = std::service_heartbeat(9);
-                let ticks = std::get_ticks(2).unwrap_or(0);
+                let ticks = timer_slot.and_then(|s| std::get_ticks(s).ok()).unwrap_or(0);
                 let mut windows = [0u8; 4096];
                 let mut services = [0u8; 1024];
                 let wc = std::window_list(&mut windows)
@@ -113,14 +129,16 @@ pub extern "C" fn _start() -> ! {
                 // expensive thing in the shell and bought nothing.
                 let key = (ticks % BAR_PERIOD, wc, sc);
                 if drawn != Some(key) {
-                    draw_system_line(surface, ticks, wc, sc);
+                    draw_system_line(fb_slot, surface, ticks, wc, sc);
                     drawn = Some(key);
                 }
 
-                let _ = std::event_poll(
-                    std::EVENT_TOUCH_INPUT | std::EVENT_TIMER_TICK | std::EVENT_IPC_MSG,
-                    100,
-                );
+                if has_epoll {
+                    let _ = std::event_poll(
+                        std::EVENT_TOUCH_INPUT | std::EVENT_TIMER_TICK | std::EVENT_IPC_MSG,
+                        100,
+                    );
+                }
                 std::yield_now();
             }
         }

@@ -41,16 +41,17 @@ import statistics
 import subprocess
 import sys
 import time
+import shutil
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO_ROOT, "tests"))
 
-QEMU_DIR = os.environ.get("QEMU_DIR", r"C:\Users\bhara\qemu")
+QEMU_DIR = os.environ.get("QEMU_DIR") or os.environ.get("QEMU_PATH")
 
 
 ARCHES = {
     "x86_64": {
-        "qemu_bin": "qemu-system-x86_64.exe",
+        "qemu_bin": "qemu-system-x86_64",
         "artifact": os.path.join("target", "inter-os-bios.img"),
         "artifact_kind": "bootable BIOS raw disk image",
         "extra_args": ["-machine", "q35", "-cpu", "qemu64"],
@@ -66,7 +67,7 @@ ARCHES = {
         "bootable": True,
     },
     "aarch64": {
-        "qemu_bin": "qemu-system-aarch64.exe",
+        "qemu_bin": "qemu-system-aarch64",
         "artifact": os.path.join(
             "kernel-aarch64", "target", "aarch64-unknown-none", "debug",
             "kernel-aarch64",
@@ -85,7 +86,7 @@ ARCHES = {
         "bootable": False,
     },
     "riscv64": {
-        "qemu_bin": "qemu-system-riscv64.exe",
+        "qemu_bin": "qemu-system-riscv64",
         "artifact": os.path.join(
             "kernel-riscv64", "target", "riscv64gc-unknown-none-elf", "debug",
             "kernel-riscv64",
@@ -268,11 +269,30 @@ def describe_artifact(root, rel):
 # --------------------------------------------------------------------------
 
 def _find_qemu(binary):
-    for candidate in (os.path.join(QEMU_DIR, binary), binary):
-        if os.path.exists(candidate) and os.path.isfile(candidate):
-            return candidate
-    from test_interactive_lifecycle import find_qemu
-    return find_qemu(binary)
+    names = [binary]
+    if sys.platform == "win32" and not binary.endswith(".exe"):
+        names.insert(0, binary + ".exe")
+    elif sys.platform != "win32" and binary.endswith(".exe"):
+        names.insert(0, binary[:-4])
+
+    for name in names:
+        if QEMU_DIR:
+            cand = os.path.join(QEMU_DIR, name)
+            if os.path.isfile(cand):
+                return cand
+        cand = shutil.which(name)
+        if cand:
+            return cand
+
+    try:
+        from test_interactive_lifecycle import find_qemu
+        for name in names:
+            res = find_qemu(name)
+            if res and os.path.exists(res):
+                return res
+    except Exception:
+        pass
+    return names[0]
 
 
 def _kill_port_owner(port):

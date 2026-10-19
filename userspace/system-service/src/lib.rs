@@ -4,18 +4,28 @@ use interos_std as std;
 
 pub fn run(service_id: u8, name: &str) -> ! {
     let _ = std::log(0, name);
+    let timer_slot = std::cap_lookup(std::cap_type::TIMER_TICK_READ, 0).ok();
+    let has_epoll = std::cap_lookup(std::cap_type::EVENT_POLL, 0).is_ok();
     loop {
         let _ = std::service_heartbeat(service_id);
         #[cfg(feature = "ci-fault-injection")]
         if service_id == 8 {
-            if let Ok(ticks) = std::get_ticks(1) {
-                if (150..=250).contains(&ticks) {
-                    std::exit_with_code(42);
+            if let Some(slot) = timer_slot {
+                if let Ok(ticks) = std::get_ticks(slot) {
+                    if (150..=250).contains(&ticks) {
+                        std::exit_with_code(42);
+                    }
                 }
             }
         }
-        let _ = std::event_poll(std::EVENT_IPC_MSG | std::EVENT_TIMER_TICK, 20);
-        let _ = std::get_ticks(1);
+        if has_epoll {
+            let _ = std::event_poll(std::EVENT_IPC_MSG | std::EVENT_TIMER_TICK, 20);
+        } else {
+            std::yield_now();
+        }
+        if let Some(slot) = timer_slot {
+            let _ = std::get_ticks(slot);
+        }
     }
 }
 
@@ -33,14 +43,20 @@ pub fn run_display() -> ! {
     let pixels = [0xFF202830u32, 0xFF202830, 0xFF202830, 0xFF202830];
     let _ = std::surface_write(4, surface, 0, &pixels);
     let _ = std::surface_flip(4);
+    let timer_slot = std::cap_lookup(std::cap_type::TIMER_TICK_READ, 0).ok();
+    let has_epoll = std::cap_lookup(std::cap_type::EVENT_POLL, 0).is_ok();
     let mut last_tick = 0u64;
     loop {
         let _ = std::service_heartbeat(1);
-        let now = std::get_ticks(1).unwrap_or(last_tick);
+        let now = timer_slot.and_then(|s| std::get_ticks(s).ok()).unwrap_or(last_tick);
         if now.saturating_sub(last_tick) >= 100 || last_tick == 0 {
             last_tick = now;
         }
-        let _ = std::event_poll(std::EVENT_TIMER_TICK, 20);
+        if has_epoll {
+            let _ = std::event_poll(std::EVENT_TIMER_TICK, 20);
+        } else {
+            std::yield_now();
+        }
     }
 }
 
@@ -48,6 +64,7 @@ pub fn run_display() -> ! {
 /// by the kernel into a bounded event ABI before reaching userspace.
 pub fn run_input() -> ! {
     let _ = std::log(0, "[inputd] userspace input manager online.");
+    let has_epoll = std::cap_lookup(std::cap_type::EVENT_POLL, 0).is_ok();
     let mut event = std::InputEvent {
         kind: 0,
         x: 0,
@@ -61,13 +78,14 @@ pub fn run_input() -> ! {
         if std::input_event_poll(&mut event).is_ok() {
             let _ = std::log(0, "[inputd] normalized input event received.");
         }
-        let _ = std::event_poll(std::EVENT_TIMER_TICK, 20);
+        if has_epoll {
+            let _ = std::event_poll(std::EVENT_TIMER_TICK, 20);
+        } else {
+            std::yield_now();
+        }
     }
 }
 
-/// Storage-service execution path. The filesystem is no longer only a kernel
-/// bootstrap facility: storaged owns the userspace storage heartbeat and uses
-/// its dedicated FileSystem capability to perform bounded persistent I/O.
 /// Network-service execution path. netd owns the userspace network data
 /// plane: it drives device RX polling and exercises the capability-guarded
 /// UDP socket ABI against the local endpoint.
@@ -80,9 +98,8 @@ pub fn run_network() -> ! {
             std::exit_with_code(1);
         }
     };
-    // Keep netd's long-running loop limited to resources it can deterministically
-    // own and close. TCP connection lifecycle is exercised by dedicated callers;
-    // an unmanaged startup probe could otherwise occupy one of the fixed slots.
+    let timer_slot = std::cap_lookup(std::cap_type::TIMER_TICK_READ, 0).ok();
+    let has_epoll = std::cap_lookup(std::cap_type::EVENT_POLL, 0).is_ok();
     let mut last_tick = 0u64;
     let mut rx = [0u8; 512];
 
@@ -90,13 +107,8 @@ pub fn run_network() -> ! {
         let _ = std::service_heartbeat(4);
         let _ = std::network_poll();
 
-        let now = std::get_ticks(1).unwrap_or(last_tick);
+        let now = timer_slot.and_then(|s| std::get_ticks(s).ok()).unwrap_or(last_tick);
         if now.saturating_sub(last_tick) >= 100 || last_tick == 0 {
-            // A loopback self-send is not network traffic. This block used to
-            // transmit a datagram to its own bound socket, read the same datagram
-            // back out of the loopback ring and log it as an "External UDP
-            // packet received". No NIC is bound on this platform, so the
-            // datapath is drained and nothing is claimed to have arrived.
             let mut drained = 0usize;
             if let Ok(len) = std::net_recvfrom(socket, &mut rx) {
                 drained += len;
@@ -107,84 +119,124 @@ pub fn run_network() -> ! {
             last_tick = now;
         }
 
-        let _ = std::event_poll(
-            std::EVENT_TIMER_TICK | std::EVENT_NETWORK_PACKET,
-            20,
-        );
+        if has_epoll {
+            let _ = std::event_poll(
+                std::EVENT_TIMER_TICK | std::EVENT_NETWORK_PACKET,
+                20,
+            );
+        } else {
+            std::yield_now();
+        }
     }
 }
 
 pub fn run_power() -> ! {
     let _ = std::log(0, "[powerd] userspace power manager online.");
+    let has_epoll = std::cap_lookup(std::cap_type::EVENT_POLL, 0).is_ok();
     let mut telemetry = [0u8; 256];
     loop {
         let _ = std::service_heartbeat(5);
         let _ = std::battery_query(&mut telemetry);
-        let _ = std::event_poll(std::EVENT_TIMER_TICK, 20);
+        if has_epoll {
+            let _ = std::event_poll(std::EVENT_TIMER_TICK, 20);
+        } else {
+            std::yield_now();
+        }
     }
 }
 
 pub fn run_modem() -> ! {
     let _ = std::log(0, "[modemd] userspace telephony manager online.");
+    let has_epoll = std::cap_lookup(std::cap_type::EVENT_POLL, 0).is_ok();
     let mut status = [0u8; 256];
     loop {
         let _ = std::service_heartbeat(6);
         let _ = std::telephony_query(&mut status);
-        let _ = std::event_poll(
-            std::EVENT_TIMER_TICK | std::EVENT_MODEM_URC,
-            20,
-        );
+        if has_epoll {
+            let _ = std::event_poll(
+                std::EVENT_TIMER_TICK | std::EVENT_MODEM_URC,
+                20,
+            );
+        } else {
+            std::yield_now();
+        }
     }
 }
 
 pub fn run_camera() -> ! {
     let _ = std::log(0, "[camerad] userspace camera manager online.");
+    let has_epoll = std::cap_lookup(std::cap_type::EVENT_POLL, 0).is_ok();
     loop {
         let _ = std::service_heartbeat(8);
         let _ = std::camera_autofocus_state();
-        let _ = std::event_poll(std::EVENT_TIMER_TICK, 20);
+        if has_epoll {
+            let _ = std::event_poll(std::EVENT_TIMER_TICK, 20);
+        } else {
+            std::yield_now();
+        }
     }
 }
 
 pub fn run_audio() -> ! {
     let _ = std::log(0, "[audiod] userspace audio manager online.");
+    let has_epoll = std::cap_lookup(std::cap_type::EVENT_POLL, 0).is_ok();
     loop {
         let _ = std::service_heartbeat(7);
         let _ = std::audio_query_volume();
-        let _ = std::event_poll(std::EVENT_TIMER_TICK, 20);
+        if has_epoll {
+            let _ = std::event_poll(std::EVENT_TIMER_TICK, 20);
+        } else {
+            std::yield_now();
+        }
     }
 }
 
 pub fn run_sensor() -> ! {
     let _ = std::log(0, "[sensord] userspace sensor manager online.");
+    let has_epoll = std::cap_lookup(std::cap_type::EVENT_POLL, 0).is_ok();
     let mut status = [0u8; 128];
     loop {
         let _ = std::service_heartbeat(11);
         let _ = std::sensor_read(&mut status);
-        let _ = std::event_poll(std::EVENT_TIMER_TICK, 20);
+        if has_epoll {
+            let _ = std::event_poll(std::EVENT_TIMER_TICK, 20);
+        } else {
+            std::yield_now();
+        }
     }
 }
 
 pub fn run_storage() -> ! {
     let _ = std::log(0, "[storaged] userspace storage manager online.");
+    let timer_slot = std::cap_lookup(std::cap_type::TIMER_TICK_READ, 0).ok();
+    let write_slot = std::cap_lookup(std::cap_type::FILE_SYSTEM_WRITE, 0).ok();
+    let has_epoll = std::cap_lookup(std::cap_type::EVENT_POLL, 0).is_ok();
     let mut last_tick = 0u64;
     let mut health = [0u8; 48];
 
     loop {
         let _ = std::service_heartbeat(3);
-        let now = std::get_ticks(1).unwrap_or(last_tick);
+        let now = timer_slot.and_then(|s| std::get_ticks(s).ok()).unwrap_or(last_tick);
         if now.saturating_sub(last_tick) >= 100 || last_tick == 0 {
             let msg = b"storaged: userspace storage service heartbeat\n";
             health[..msg.len()].copy_from_slice(msg);
-            if let Ok(fd) = std::fs_open(2, "/data/audit.log", std::FS_WRITE) {
-                let _ = std::fs_write(2, fd, &health[..msg.len()]);
-                let _ = std::fs_close(fd);
+            if let Some(w_slot) = write_slot {
+                if let Ok(fd) = std::fs_open(w_slot, "/data/audit.log", std::FS_WRITE) {
+                    let _ = std::fs_write(w_slot, fd, &health[..msg.len()]);
+                    let _ = std::fs_close(fd);
+                } else {
+                    let _ = std::log(0, "[storaged] filesystem request rejected.");
+                }
             } else {
-                let _ = std::log(0, "[storaged] filesystem request rejected.");
+                let _ = std::log(0, "[storaged] filesystem write capability missing.");
             }
             last_tick = now;
         }
-        let _ = std::event_poll(std::EVENT_TIMER_TICK, 20);
+        if has_epoll {
+            let _ = std::event_poll(std::EVENT_TIMER_TICK, 20);
+        } else {
+            std::yield_now();
+        }
     }
 }
 

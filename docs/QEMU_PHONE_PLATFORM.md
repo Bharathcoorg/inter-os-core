@@ -28,18 +28,16 @@ The QEMU Phone profile is a reproducible virtual development target. It provides
 | **Device Studio** | `http://127.0.0.1:4300` | Developer control console |
 | **Scanout Contract** | `1080 × 2160` FHD+ (720 × 1440 logical, 3:2 bilinear hardware upscaled) | Physical display scanout plane |
 | **UI Logical Space** | `720 × 1440` (1:2 aspect) | Mobile portrait layout space |
-| **Display Device** | `virtio-vga` with an EDID that pins `xres=720, yres=1440` | The guest KMS modesets exactly this |
+| **Display Device** | `virtio-vga` / stdvga with 1080×2160 native scanout | The guest KMS modesets the physical scanout |
 
 > [!NOTE]
-> The scanout and the logical space are the same 720×1440. This document used to
-> describe a 1280×720 landscape scanout downsampled by 2×2 box filtering into a
-> centred 360×720 viewport. That path no longer exists: the kernel now engages
-> native 720×1440×32bpp through the Bochs/VBE DISPI registers that `virtio-vga`
-> exposes (`kernel/src/framebuffer.rs`, `engage_native_mode`), and the launch
-> scripts pin the geometry with `-device virtio-vga,edid=on,xres=720,yres=1440`.
-> A machine-checked contract asserts it (`tests/test_qemu_phone_profile_contract.py`),
-> and five further contract tests assert the same 720×1440 geometry, so the
-> numbers above cannot drift from the launch line without a suite going red.
+> InterOS operates on a physical `1080 × 2160` FHD+ scanout buffer with a `720 × 1440`
+> logical authoring space, utilizing hardware-accelerated 3:2 bilinear upscaling
+> within the DRM/KMS pipeline (`kernel/src/drivers/display_kms.rs`). Applications
+> render `#![no_std]` UI into the 720×1440 authoring coordinate space, which the
+> compositor upsamples to retina Full HD+ during hardware presentation flips.
+> Physical and logical display parameters are pinned in `platform/x86_64/qemu-phone.json`
+> and verified by machine-checked contract tests (`tests/test_qemu_phone_profile_contract.py`).
 
 ---
 
@@ -60,8 +58,8 @@ The QEMU Phone profile is a reproducible virtual development target. It provides
 
 The canonical QEMU input and display coordinate mapping is defined as:
 
-- **Display Scanout**: 720×1440 pixels, origin `(0, 0)` at top-left.
-- **Physical Touch Coordinates**: Unsigned display pixels (`X: 0..=719`, `Y: 0..=1439`).
+- **Display Scanout**: 1080×2160 pixels (physical FHD+ scanout), 720×1440 logical layout space, origin `(0, 0)` at top-left.
+- **Physical Touch Coordinates**: Logical display pixels (`X: 0..=719`, `Y: 0..=1439`).
 - **Touch Transport**:
   ```text
   INPUT_TOUCH <DOWN|MOVE|UP|CANCEL> <x> <y> <slot>

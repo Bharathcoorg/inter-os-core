@@ -2,7 +2,9 @@ import time
 import os
 from playwright.sync_api import sync_playwright
 
-artifact_dir = r"C:\Users\bhara\.gemini\antigravity\brain\95736171-dd40-43de-83e2-c8ea35a6a239"
+import tempfile
+
+artifact_dir = os.environ.get("ARTIFACT_DIR", tempfile.gettempdir())
 
 def run_test():
     with sync_playwright() as p:

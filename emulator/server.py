@@ -60,13 +60,13 @@ SCANOUT_W, SCANOUT_H = 1080, 2160
 LOGICAL_SURFACE_W, LOGICAL_SURFACE_H = 720, 1440
 guest_framebuffer_size = (SCANOUT_W, SCANOUT_H)
 
-# Canonical guest scanout geometries. The x86_64 phone profile requests a
-# native 720x1440 portrait scanout via EDID; landscape presents 1280x720. A VNC
-# session reporting any other desktop size is stale or transitional (e.g. a
-# 200x400 shadow while the live desktop is 1280x720): publishing it would crop
-# the phone surface to the wrong geometry, so the session is resynchronised
-# instead of streaming stale pixels.
-CANONICAL_SCANOUT_SIZES = frozenset(((SCANOUT_W, SCANOUT_H), (1088, 2160), (LOGICAL_SURFACE_W, LOGICAL_SURFACE_H), (1280, 720)))
+# Canonical guest scanout geometries. The x86_64 phone profile engages a
+# native 1080x2160 FHD+ portrait scanout once paging is online; landscape
+# presents 2160x1080 (or 1280x720 during early boot / legacy modes). A VNC
+# session reporting any other desktop size is stale or transitional: publishing
+# it would crop the phone surface to the wrong geometry, so the session is
+# resynchronised instead of streaming stale pixels.
+CANONICAL_SCANOUT_SIZES = frozenset(((SCANOUT_W, SCANOUT_H), (SCANOUT_H, SCANOUT_W), (1088, 2160), (LOGICAL_SURFACE_W, LOGICAL_SURFACE_H), (1280, 720)))
 MAX_SCANOUT_DIM = 4096
 
 
@@ -75,13 +75,13 @@ def is_canonical_scanout(w, h):
 
 
 # Published phone-frame sizes. The VNC desktop is validated above, but the
-# published crop differs by orientation: a native 720x1440 portrait desktop
+# published crop differs by orientation: a native 1080x2160 portrait desktop
 # publishes whole, a 1280x720 landscape desktop in portrait orientation
 # publishes its centred 360x720 phone slice, and landscape orientation
-# publishes the whole 1280x720 desktop. All three are guest-derived crops,
+# publishes the whole 2160x1080 (or 1280x720) desktop. All are guest-derived crops,
 # never invented pixels; the browser scales the slice to the phone chassis
 # with smoothing, exactly like a hardware emulator viewport.
-PHONE_FRAME_SIZES = frozenset(((SCANOUT_W, SCANOUT_H), (720, 1440), (360, 720), (1280, 720)))
+PHONE_FRAME_SIZES = frozenset(((SCANOUT_W, SCANOUT_H), (SCANOUT_H, SCANOUT_W), (720, 1440), (360, 720), (1280, 720)))
 
 # How long a monitor-confirmed non-native geometry keeps suppressing the resync.
 # WHY bounded: during boot the guest really does present 1280x720 until it engages
@@ -3730,7 +3730,7 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 if space in ('landscape', 'logical_landscape') or (space in ('guest', 'guest_framebuffer', 'qemu', 'qemu_framebuffer') and current_device_orientation == 'landscape'):
                     x = int(data.get('x', 0)); y = int(data.get('y', 0))
                     fb_w, fb_h = current_framebuffer_size()
-                    if not (0 <= x < fb_w and 0 <= y < fb_h) or not (0 <= x < 1280 and 0 <= y < 720): raise ValueError('landscape coordinates out of bounds')
+                    if not (0 <= x < fb_w and 0 <= y < fb_h): raise ValueError('landscape coordinates out of bounds')
                     # KMS LandscapeRight maps (x, y) in scanout to mobile surface:
                     # src_x = (y * 719) / (fb_h - 1)
                     # src_y = 1439 - (x * 1439) / (fb_w - 1)

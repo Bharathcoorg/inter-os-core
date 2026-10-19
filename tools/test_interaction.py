@@ -36,8 +36,11 @@ def main():
         print("Waiting 2s for unlock animation / frame...")
         time.sleep(2.0)
         
-        page.screenshot(path=r"C:\Users\bhara\.gemini\antigravity\brain\95736171-dd40-43de-83e2-c8ea35a6a239\playwright_studio_unlocked.png")
-        print("Unlocked screenshot saved.")
+        import os, tempfile
+        out_dir = os.environ.get("ARTIFACT_DIR", tempfile.gettempdir())
+        out_path = os.path.join(out_dir, "playwright_studio_unlocked.png")
+        page.screenshot(path=out_path)
+        print(f"Unlocked screenshot saved to: {out_path}")
         browser.close()
 
 if __name__ == "__main__":

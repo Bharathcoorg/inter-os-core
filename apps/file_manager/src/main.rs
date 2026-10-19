@@ -46,11 +46,14 @@ const CHUNK: usize = 4096;
 /// refused with PermissionDenied before the path was even looked at. Slot 6 is
 /// the framebuffer, which is why `surface_create(6, ...)` always worked while
 /// the listing never did.
-const FS_READ_CAP_SLOT: usize = 4;
+#[inline]
+fn fs_read_slot() -> Option<usize> {
+    std::cap_lookup(std::cap_type::FILE_SYSTEM_READ, 0).ok()
+}
 
 #[inline]
-fn fs_read_slot() -> usize {
-    std::cap_lookup(std::cap_type::FILE_SYSTEM_READ, 0).unwrap_or(FS_READ_CAP_SLOT)
+fn fs_write_slot() -> Option<usize> {
+    std::cap_lookup(std::cap_type::FILE_SYSTEM_WRITE, 0).ok()
 }
 
 // -----------------------------------------------------------------------------
@@ -373,7 +376,10 @@ impl FileManagerApp {
     /// Refreshes entries by querying fs_list for current_path.
     pub fn refresh_directory(&mut self) {
         let mut entries = [0u8; 1024];
-        let probe = std::fs_list(fs_read_slot(), self.current_path_str(), &mut entries);
+        let probe = match fs_read_slot() {
+            Some(slot) => std::fs_list(slot, self.current_path_str(), &mut entries),
+            None => Err(-1),
+        };
         self.record_probe(probe);
         if let Ok(n) = probe {
             self.parse_entries(&entries[..n]);
@@ -921,7 +927,10 @@ pub extern "C" fn _start() -> ! {
     // actually been entitled to receive. The result is recorded on screen too,
     // so the header says what this app can actually see of the filesystem.
     let mut entries = [0u8; 1024];
-    let probe = std::fs_list(fs_read_slot(), app.current_path_str(), &mut entries);
+    let probe = match fs_read_slot() {
+        Some(slot) => std::fs_list(slot, app.current_path_str(), &mut entries),
+        None => Err(-1),
+    };
     app.record_probe(probe);
     match probe {
         Ok(n) => {
@@ -946,8 +955,18 @@ pub extern "C" fn _start() -> ! {
         }
     }
 
-    // Allocate client surface (slot 6 = FrameBufferDirect, z=200)
-    let surface = match std::surface_create(6, W as u32, H as u32, 200) {
+    // Allocate client surface (z=200)
+    let Ok(fb_slot) = std::cap_lookup(std::cap_type::FRAMEBUFFER_DIRECT, 0) else {
+        std::log(
+            0,
+            "[FILE_MANAGER] Framebuffer capability not found.",
+        )
+        .ok();
+        loop {
+            std::yield_now();
+        }
+    };
+    let surface = match std::surface_create(fb_slot, W as u32, H as u32, 200) {
         Ok(id) => {
             std::log(
                 0,
@@ -961,7 +980,7 @@ pub extern "C" fn _start() -> ! {
 
     if surface > 0 {
         render_file_manager_ui(surface, &app);
-        let _ = std::surface_flip(6);
+        let _ = std::surface_flip(fb_slot);
         std::log(0, "[FILE_MANAGER] Files UI presented to scanout buffer.").ok();
     }
 
@@ -1010,7 +1029,7 @@ pub extern "C" fn _start() -> ! {
                         Dirty::All => render_file_manager_ui(surface, &app),
                         Dirty::None => {}
                     }
-                    let _ = std::surface_flip(6);
+                    let _ = std::surface_flip(fb_slot);
                 }
             }
         }
@@ -1114,13 +1133,16 @@ fn handle_tap(app: &mut FileManagerApp, x: usize, y: usize) -> Tap {
                 }
                 n = append(&mut path_buf, n, &entry.name[..entry.name_len]);
                 if let Ok(full_path) = core::str::from_utf8(&path_buf[..n]) {
-                    let write_slot = std::cap_lookup(std::cap_type::FILE_SYSTEM_WRITE, 0).unwrap_or(5);
-                    let _ = std::settings_set(write_slot, "intent.view.file", full_path.as_bytes());
-                    let mut app_id_buf = [0u8; 64];
-                    let an = get_app_for_mime(fs_read_slot(), mime, &mut app_id_buf);
-                    if let Ok(app_id) = core::str::from_utf8(&app_id_buf[..an]) {
-                        std::log(0, "[FILE_MANAGER] Launching associated media viewer.").ok();
-                        let _ = std::app_launch(app_id);
+                    if let Some(write_slot) = fs_write_slot() {
+                        let _ = std::settings_set(write_slot, "intent.view.file", full_path.as_bytes());
+                    }
+                    if let Some(read_slot) = fs_read_slot() {
+                        let mut app_id_buf = [0u8; 64];
+                        let an = get_app_for_mime(read_slot, mime, &mut app_id_buf);
+                        if let Ok(app_id) = core::str::from_utf8(&app_id_buf[..an]) {
+                            std::log(0, "[FILE_MANAGER] Launching associated media viewer.").ok();
+                            let _ = std::app_launch(app_id);
+                        }
                     }
                 }
             } else {
