@@ -449,7 +449,11 @@ impl Run {
         let w = bitmap_measure.max(outline_advance);
         let top = baseline.saturating_sub(asc as usize);
         let box_h = (baseline + desc as usize).saturating_sub(top);
-        let outline = launcher::outline_text::OutlineRun::place(x, baseline, em, text);
+        let outline = if scale >= 3 {
+            launcher::outline_text::OutlineRun::place(x, baseline, em, text)
+        } else {
+            None
+        };
 
         Run {
             x,

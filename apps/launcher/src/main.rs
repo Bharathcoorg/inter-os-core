@@ -140,7 +140,7 @@ pub fn test_text_aa(
     color: u32,
     bg: u32,
 ) -> Option<u32> {
-    if scale >= 1 && text.len() <= launcher::outline_text::KEY_MAX {
+    if scale >= 3 && text.len() <= launcher::outline_text::KEY_MAX {
         let em = launcher::outline_text::em_for_scale(scale);
         let (ascent, _) = interos_std::design::typeface::line_metrics(em);
         let baseline = (y0 + launcher::font::BASELINE * scale).max(ascent as usize);
