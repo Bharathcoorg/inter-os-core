@@ -877,6 +877,15 @@ impl ContactEditor {
         ContactEditor::BLANK
     }
 
+    fn open_with_number(number: &[u8]) -> Self {
+        let mut ed = ContactEditor::BLANK;
+        let m = number.len().min(CONTACT_NUM_MAX);
+        ed.number[..m].copy_from_slice(&number[..m]);
+        ed.number_len = m;
+        ed.field = ContactField::Name;
+        ed
+    }
+
     fn open_record(rec: &ContactRecord, target: Option<usize>) -> Self {
         let mut ed = ContactEditor::BLANK;
         ed.target = target;
@@ -1201,6 +1210,13 @@ impl DialerApp {
     /// Opens the editor for a new contact.
     pub fn start_add_contact(&mut self) {
         self.contact_edit = Some(ContactEditor::open_new());
+        self.editor_last_cell = None;
+    }
+
+    /// Opens the editor for a new contact with pre-filled dialed phone number.
+    pub fn start_add_contact_with_number(&mut self, number: &[u8]) {
+        self.section = DialerSection::Contacts;
+        self.contact_edit = Some(ContactEditor::open_with_number(number));
         self.editor_last_cell = None;
     }
 
@@ -1561,6 +1577,58 @@ fn test_text(
     None
 }
 
+#[inline(always)]
+fn test_text_bold(
+    x: usize,
+    y: usize,
+    x0: usize,
+    y0: usize,
+    scale: usize,
+    text: &[u8],
+    color: u32,
+    bg: u32,
+) -> Option<u32> {
+    if scale == 0 || text.is_empty() {
+        return None;
+    }
+    if let Some(run) = outline_text::OutlineRun::place_run(
+        x0,
+        y0 + std::design::font::BASELINE * scale,
+        scale,
+        text,
+        true,
+    ) {
+        let (rx, rtop, rw, rh) = run.bounds();
+        if x >= rx && x - rx < rw && y >= rtop && y - rtop < rh {
+            return run.pixel(x, y, color, bg);
+        }
+        return None;
+    }
+    if x >= x0 && y >= y0 && y < y0 + run_rows(scale) {
+        return std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, bg, true);
+    }
+    None
+}
+
+/// Deterministic vibrant palette for contact profile avatars.
+fn contact_avatar_color(name: &[u8]) -> u32 {
+    const PALETTE: [u32; 8] = [
+        0xFF4F46E5, // Indigo
+        0xFF059669, // Emerald
+        0xFFE11D48, // Rose
+        0xFFD97706, // Amber
+        0xFF0891B2, // Cyan
+        0xFF7C3AED, // Violet
+        0xFF0D9488, // Teal
+        0xFF2563EB, // Blue
+    ];
+    let mut hash = 0u32;
+    for &b in name {
+        hash = hash.wrapping_mul(31).wrapping_add(b as u32);
+    }
+    PALETTE[(hash as usize) % PALETTE.len()]
+}
+
 /// Rows a `scale`-high text run occupies on the shared bitmap face.
 /// WHY a local `const fn`: this is exactly `font::line_height(scale)`, but that
 /// helper is not `const`, and every run box below is derived from a
@@ -1600,24 +1668,23 @@ const PLACEHOLDER_Y0: usize = 250;
 /// Real call-outcome caption under the dialed number. A scale-1 run owns
 /// run_rows(1) = 24 rows, so 340..364 clears the 96-row scale-4 digit box at
 /// 236..332 and stays inside the card's 380-row bottom edge.
-const OUTCOME_Y0: usize = 340;
+const OUTCOME_Y0: usize = 350;
 
-// Backspace control in the display card. Hit-tested against exactly the disc
-// that is drawn (the old hit box was a 75x70 rectangle around a 48 px circle).
-const BACKSPACE_CX: usize = 627;
-const BACKSPACE_CY: usize = 260;
-const BACKSPACE_R: i32 = 24;
+// Backspace control in the action row (to the right of Call button, active when active_len > 0).
+const BACKSPACE_CX: usize = 582;
+const BACKSPACE_CY: usize = 1065;
+const BACKSPACE_R: i32 = 42;
 
 // Keypad layout metrics: scale 2 digit, scale 1 sublabel, 48px radius circular discs.
 const KEY_DIGIT_SCALE: usize = 2;
 const KEY_SUB_SCALE: usize = 1;
 const KEY_RADIUS: usize = 48;
 
-// SOS emergency disc.
-const SOS_CX: usize = 134;
+// SOS emergency disc (radius 42px with scale 1 bold vector text comfortably centered inside).
+const SOS_CX: usize = 138;
 const SOS_CY: usize = 1065;
-const SOS_R: i32 = 40;
-const SOS_SCALE: usize = 2;
+const SOS_R: i32 = 42;
+const SOS_SCALE: usize = 1;
 const SOS_FILL: u32 = 0xFF2A1518;
 
 // Central call control.
@@ -1625,11 +1692,10 @@ const CALL_CX: usize = 360;
 const CALL_CY: usize = 1065;
 const CALL_R: i32 = 52;
 
-// Contacts shortcut control. The platform exposes no contact store, so this is
-// drawn recessed and says so on tap.
-const CONTACTS_CX: usize = 586;
+// Contacts action row editing shortcut (for contacts section edit/delete).
+const CONTACTS_CX: usize = 582;
 const CONTACTS_CY: usize = 1065;
-const CONTACTS_R: i32 = 40;
+const CONTACTS_R: i32 = 42;
 
 // Action bar band (the three discs above live in it).
 const ACTION_Y0: usize = 990;
@@ -1928,14 +1994,61 @@ fn display_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         }
 
         let scale = if dialer.active_len <= 10 { 4 } else { 3 };
-        let y0 = 236;
+        let y0 = 215;
         let digits = &dialer.active_number[..dialer.active_len];
         let mut buf = [0u8; 32];
-        let n = std::design::font::ellipsize(digits, scale, DISPLAY_W - 120, &mut buf);
+        let n = std::design::font::ellipsize(digits, scale, DISPLAY_W - 48, &mut buf);
         let total_w = std::design::font::measure(&buf[..n], scale);
         let x0 = DISPLAY_X0 + (DISPLAY_W.saturating_sub(total_w)) / 2;
         if let Some(c) = test_text(x, y, x0, y0, scale, &buf[..n], TEXT_PRIMARY, SURFACE_DARK) {
             return c;
+        }
+
+        // Action Pills: [+ Add Contact] and [Send Message]
+        let p1_x0 = 80usize;
+        let p1_w = 250usize;
+        let p1_y0 = 295usize;
+        let p1_h = 44usize;
+        if x >= p1_x0 && x < p1_x0 + p1_w && y >= p1_y0 && y < p1_y0 + p1_h {
+            if let Some(fill) = std::design::primitives::draw_pill(
+                x,
+                y,
+                std::design::primitives::Rect::new(p1_x0, p1_y0, p1_w, p1_h),
+                0xFF27272A,
+                Some(BORDER_SUBTLE),
+            ) {
+                let label = b"+ Add Contact";
+                let lw = std::design::font::measure(label, 1);
+                let lx = p1_x0 + (p1_w.saturating_sub(lw)) / 2;
+                let ly = p1_y0 + (p1_h.saturating_sub(run_rows(1))) / 2;
+                if let Some(c) = test_text(x, y, lx, ly, 1, label, ACCENT_SKY, fill) {
+                    return c;
+                }
+                return fill;
+            }
+        }
+
+        let p2_x0 = 390usize;
+        let p2_w = 250usize;
+        let p2_y0 = 295usize;
+        let p2_h = 44usize;
+        if x >= p2_x0 && x < p2_x0 + p2_w && y >= p2_y0 && y < p2_y0 + p2_h {
+            if let Some(fill) = std::design::primitives::draw_pill(
+                x,
+                y,
+                std::design::primitives::Rect::new(p2_x0, p2_y0, p2_w, p2_h),
+                0xFF27272A,
+                Some(BORDER_SUBTLE),
+            ) {
+                let label = b"Send Message";
+                let lw = std::design::font::measure(label, 1);
+                let lx = p2_x0 + (p2_w.saturating_sub(lw)) / 2;
+                let ly = p2_y0 + (p2_h.saturating_sub(run_rows(1))) / 2;
+                if let Some(c) = test_text(x, y, lx, ly, 1, label, SUCCESS_EMERALD, fill) {
+                    return c;
+                }
+                return fill;
+            }
         }
     } else if y >= PLACEHOLDER_Y0 && y < PLACEHOLDER_Y0 + run_rows(PLACEHOLDER_SCALE) {
         let x0 = DISPLAY_X0
@@ -1973,24 +2086,6 @@ fn display_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
             if let Some(c) = test_text(x, y, cx, OUTCOME_Y0, 1, &buf[..n], ink, SURFACE_DARK) {
                 return c;
             }
-        }
-    }
-
-    // Backspace circular disc
-    if dialer.active_len > 0 {
-        let dx = (x as i32) - BACKSPACE_CX as i32;
-        let dy = (y as i32) - BACKSPACE_CY as i32;
-        let d2 = dx * dx + dy * dy;
-        let r = 22i32;
-        if d2 <= r * r {
-            if d2 >= (r - 2) * (r - 2) {
-                return 0xFFFCA5A5;
-            }
-            // Backspace icon 'X' inside
-            if dx.abs() <= 6 && dy.abs() <= 6 && (dx == dy || dx == -dy) {
-                return DANGER_CRIMSON;
-            }
-            return 0xFFFEE2E2;
         }
     }
 
@@ -2465,21 +2560,26 @@ fn contacts_list_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         {
             return BG_DARK;
         }
-        // Avatar disc with the contact's initial.
+        // Vibrant avatar disc with the contact's initial.
         let av_cx = DISPLAY_X0 + 30;
         let av_cy = cursor + CONTACT_ROW_H / 2;
         let dx = x as i32 - av_cx as i32;
         let dy = y as i32 - av_cy as i32;
-    if dx * dx + dy * dy <= 20 * 20 {
-            let initial = [rec.initial()];
-                let iw = std::design::font::measure(&initial, 1);
-                let ix = (av_cx as i32 - iw as i32 / 2).max(0) as usize;
-                let iy = (av_cy as i32 - run_rows(1) as i32 / 2).max(0) as usize;
-                if let Some(t) = test_text(x, y, ix, iy, 1, &initial, color::TEXT_MUTED, plate) {
-                    return t;
-                }
-                return plate;
+        let d2 = dx * dx + dy * dy;
+        if d2 <= 20 * 20 {
+            let av_bg = contact_avatar_color(rec.name_bytes());
+            if d2 >= 18 * 18 {
+                return std::design::font::blend(av_bg, 0xFFFFFFFF, 48);
             }
+            let initial = [rec.initial()];
+            let iw = std::design::font::measure(&initial, 1);
+            let ix = (av_cx as i32 - iw as i32 / 2).max(0) as usize;
+            let iy = (av_cy as i32 - run_rows(1) as i32 / 2).max(0) as usize;
+            if let Some(t) = test_text_bold(x, y, ix, iy, 1, &initial, 0xFFFFFFFF, av_bg) {
+                return t;
+            }
+            return av_bg;
+        }
             let tx = DISPLAY_X0 + 68;
             let mut nbuf = [0u8; CONTACT_NAME_MAX];
             let nn = std::design::font::ellipsize(rec.name_bytes(), 1, DISPLAY_W - 150, &mut nbuf);
@@ -2642,16 +2742,16 @@ fn emergency_dial_pixel(x: usize, y: usize, dialer: &DialerApp) -> Option<u32> {
     if s_d2 > SOS_R * SOS_R {
         return None;
     }
-    if s_d2 >= 1444 {
+    if s_d2 >= (SOS_R - 2) * (SOS_R - 2) {
         return Some(0xFFE11D48);
     }
-    // "SOS" is scale 2, so it needs run_rows(2) = 48 rows and its measured 76px
-    // width must fit the 80px disc. Both are centred on the disc.
+    // "SOS" is scale 1 bold vector outline, comfortably centered in the disc with clean margins.
     let sos_rows = run_rows(SOS_SCALE);
-    let sos_x0 = SOS_CX.saturating_sub(std::design::font::measure(b"SOS", SOS_SCALE) / 2);
+    let sos_w = std::design::font::measure(b"SOS", SOS_SCALE);
+    let sos_x0 = SOS_CX.saturating_sub(sos_w / 2);
     let sos_y0 = SOS_CY.saturating_sub(sos_rows / 2);
     if y >= sos_y0 && y < sos_y0 + sos_rows {
-        if let Some(c) = test_text(x, y, sos_x0, sos_y0, SOS_SCALE, b"SOS", 0xFFF43F5E, SOS_FILL) {
+        if let Some(c) = test_text_bold(x, y, sos_x0, sos_y0, SOS_SCALE, b"SOS", 0xFFF43F5E, SOS_FILL) {
             return Some(c);
         }
     }
@@ -2787,22 +2887,41 @@ fn action_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         return bg_color;
     }
 
-    // Contacts shortcut (centre 586, 1065, r 40)
-    let ct_dx = (x as i32) - CONTACTS_CX as i32;
-    let ct_dy = (y as i32) - CONTACTS_CY as i32;
-    let ct_d2 = ct_dx * ct_dx + ct_dy * ct_dy;
-    if ct_d2 <= CONTACTS_R * CONTACTS_R {
-        if ct_d2 >= (CONTACTS_R - 2) * (CONTACTS_R - 2) {
-            return BORDER_SUBTLE;
+    // Backspace button (centre 582, 1065, r 42). Active only when dialed number has digits.
+    if dialer.active_len > 0 {
+        let b_dx = (x as i32) - BACKSPACE_CX as i32;
+        let b_dy = (y as i32) - BACKSPACE_CY as i32;
+        let b_d2 = b_dx * b_dx + b_dy * b_dy;
+        if b_d2 <= BACKSPACE_R * BACKSPACE_R {
+            if b_d2 >= (BACKSPACE_R - 2) * (BACKSPACE_R - 2) {
+                return BORDER_SUBTLE;
+            }
+            // Crisp vector backspace tag glyph
+            let in_tag = if b_dx >= -15 && b_dx <= -4 {
+                b_dy.abs() <= (b_dx + 15)
+            } else if b_dx > -4 && b_dx <= 15 {
+                b_dy.abs() <= 11
+            } else {
+                false
+            };
+            if in_tag {
+                let on_rim = if b_dx == -15 || b_dx == 15 || (b_dx > -4 && b_dy.abs() >= 10) {
+                    true
+                } else if b_dx >= -15 && b_dx <= -4 {
+                    let diff = b_dy.abs() - (b_dx + 15);
+                    diff == 0 || diff == -1
+                } else {
+                    false
+                };
+                let cx = b_dx - 5;
+                let cy = b_dy;
+                let on_x = cx.abs() <= 4 && cy.abs() <= 4 && (cx == cy || cx == -cy || cx == cy + 1 || cx == cy - 1);
+                if on_rim || on_x {
+                    return TEXT_PRIMARY;
+                }
+            }
+            return SURFACE_DARK;
         }
-        // Person silhouette
-        if ct_dx * ct_dx + (ct_dy + 8) * (ct_dy + 8) <= 49 {
-            return TEXT_PRIMARY;
-        }
-        if ct_dy >= 2 && ct_dy <= 14 && ct_dx.abs() <= (ct_dy - 2) + 6 {
-            return TEXT_PRIMARY;
-        }
-        return SURFACE_DARK;
     }
 
     BG_DARK
@@ -3208,6 +3327,23 @@ fn handle_tap(dialer: &mut DialerApp, px: u32, py: u32) -> Tap<'static> {
     }
 
     if dialer.section == DialerSection::Keypad {
+        // Action pills in display card when active_len > 0
+        if dialer.active_len > 0 && y >= 295 && y < 345 {
+            if x >= 80 && x < 330 {
+                let mut num_buf = [0u8; 32];
+                let len = dialer.active_len.min(32);
+                num_buf[..len].copy_from_slice(&dialer.active_number[..len]);
+                dialer.start_add_contact_with_number(&num_buf[..len]);
+                let _ = std::audio_haptic_click();
+                return Tap::Redraw(Dirty::All);
+            }
+            if x >= 390 && x < 640 {
+                std::log(0, "[DIALER APP] Dispatched messaging intent with active number.").ok();
+                let _ = std::audio_haptic_click();
+                return Tap::Redraw(Dirty::Display);
+            }
+        }
+
         // Keypad Matrix
         for row in 0..4 {
             let by = ROW_Y[row];
@@ -3225,7 +3361,7 @@ fn handle_tap(dialer: &mut DialerApp, px: u32, py: u32) -> Tap<'static> {
             }
         }
 
-        // Action Bar: three discs, each hit-tested against its drawn circle.
+        // Action Bar: SOS, Call, and Backspace discs
         if (ACTION_Y0..ACTION_Y1).contains(&y) {
             if in_circle(x, y, SOS_CX, SOS_CY, SOS_R) {
                 let _ = dialer.dial_emergency();
@@ -3247,8 +3383,8 @@ fn handle_tap(dialer: &mut DialerApp, px: u32, py: u32) -> Tap<'static> {
             if in_circle(x, y, CALL_CX, CALL_CY, CALL_R) {
                 return Tap::Redraw(toggle_call(dialer));
             }
-            if in_circle(x, y, CONTACTS_CX, CONTACTS_CY, CONTACTS_R) {
-                dialer.open_contacts(false);
+            if dialer.active_len > 0 && in_circle(x, y, BACKSPACE_CX, BACKSPACE_CY, BACKSPACE_R) {
+                dialer.backspace();
                 let _ = std::audio_haptic_click();
                 return Tap::Redraw(Dirty::All);
             }
@@ -3848,7 +3984,10 @@ pub extern "C" fn _start() -> ! {
                 if dirty != Dirty::None {
                     match dirty {
                         Dirty::None => {}
-                        Dirty::Display => render_dialer_band(surface, &dialer, DISPLAY_Y0, DISPLAY_Y1),
+                        Dirty::Display => {
+                            render_dialer_band(surface, &dialer, DISPLAY_Y0, DISPLAY_Y1);
+                            render_dialer_band(surface, &dialer, ACTION_Y0, ACTION_Y1);
+                        }
                         // The editor's fields live in the display-card band, so
                         // typing into them repaints exactly that band.
                         Dirty::Fields => render_dialer_band(surface, &dialer, DISPLAY_Y0, DISPLAY_Y1),

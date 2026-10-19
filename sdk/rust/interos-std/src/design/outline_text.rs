@@ -252,8 +252,6 @@ impl OutlineRun {
         if w == 0 || w > RUN_W_MAX || line_h > RUN_H_MAX {
             return None;
         }
-        // The baseline sits `ascent` rows below the top of the line box, so a
-        // run near the top of the surface would be clipped, not drawn.
         if y < ascent as usize {
             return None;
         }
@@ -351,29 +349,28 @@ impl OutlineRun {
     }
 
     /// The run's line box in surface coordinates, as `(x, top, width, height)`.
-    ///
-    /// WHY a caller needs this: the shell gates its painter on a box, and the
-    /// box has to be the one the run actually occupies. Gating on a box measured
-    /// for the other face would either clip the run's ink or, when the run has
-    /// moved, draw nothing at all -- which is exactly what happened when the
-    /// date line moved to a baseline derived from the reference while its gate
-    /// stayed on the bitmap face's cell.
+    /// Handles runs near or at top edge (y < ascent) safely with non-negative bounds.
     pub fn bounds(&self) -> (usize, usize, usize, usize) {
-        (self.x, self.y.saturating_sub(self.ascent), self.w, self.h)
+        let top = self.y.saturating_sub(self.ascent);
+        let bottom = self.y + (self.h.saturating_sub(self.ascent));
+        (self.x, top, self.w, bottom.saturating_sub(top))
     }
 
     /// The colour of (`px`, `py`) if this run inks it, blended over `bg`.
     #[allow(dead_code)]
     pub fn pixel(&self, px: usize, py: usize, ink: u32, bg: u32) -> Option<u32> {
-        if self.w == 0 {
+        if self.w == 0 || self.h == 0 {
             return None;
         }
-        let top = self.y.saturating_sub(self.ascent);
-        if px < self.x || px - self.x >= self.w || py < top || py - top >= self.h {
+        if px < self.x || px - self.x >= self.w {
+            return None;
+        }
+        let cov_row = (py as isize) - (self.y as isize) + (self.ascent as isize);
+        if cov_row < 0 || cov_row >= self.h as isize {
             return None;
         }
         let cov = unsafe { &*core::ptr::addr_of!(COVERAGE) };
-        let c = cov[self.slot][(py - top) * self.w + (px - self.x)];
+        let c = cov[self.slot][(cov_row as usize) * self.w + (px - self.x)];
         if c == 0 {
             return None;
         }
@@ -418,7 +415,9 @@ impl OutlineRun {
             return None;
         }
         let em = em_for_scale(scale);
-        OutlineRun::place_styled(x0, baseline, em, text, bold)
+        let (ascent, _) = typeface::line_metrics(em);
+        let safe_baseline = baseline.max(ascent as usize);
+        OutlineRun::place_styled(x0, safe_baseline, em, text, bold)
     }
 }
 
