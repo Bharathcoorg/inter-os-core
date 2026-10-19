@@ -611,7 +611,7 @@ pub fn spawn_verified_rapp_process(
 ) -> Result<TaskId, &'static str> {
     let expected_arch = match manifest.arch {
         crate::package::RappArch::X86_64 => true,
-        crate::package::RappArch::Aarch64 | crate::package::RappArch::Riscv64 => false,
+        crate::package::RappArch::Aarch64 | crate::package::RappArch::Riscv64 | crate::package::RappArch::Wasm => false,
     };
     if !expected_arch {
         return Err("RAPP architecture does not match x86_64 kernel");

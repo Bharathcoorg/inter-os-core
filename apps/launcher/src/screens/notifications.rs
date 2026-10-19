@@ -278,7 +278,7 @@ impl LabelRun {
             .max(interos_std::design::typeface::text_advance_px(&buf[..len], em) as usize);
         let (asc, _) = interos_std::design::typeface::line_metrics(em);
         let baseline = (y + launcher::font::BASELINE * scale).max(asc as usize);
-        let outline = if scale >= 1 && len <= launcher::outline_text::KEY_MAX {
+        let outline = if scale >= 3 && len <= launcher::outline_text::KEY_MAX {
             launcher::outline_text::OutlineRun::place(
                 x,
                 baseline,
@@ -314,7 +314,7 @@ impl LabelRun {
         let rx = x + inset;
         let (asc, _) = interos_std::design::typeface::line_metrics(em);
         let baseline = (y + launcher::font::BASELINE * scale).max(asc as usize);
-        let outline = if scale >= 1 && len <= launcher::outline_text::KEY_MAX {
+        let outline = if scale >= 3 && len <= launcher::outline_text::KEY_MAX {
             launcher::outline_text::OutlineRun::place(
                 rx,
                 baseline,
@@ -354,7 +354,7 @@ impl LabelRun {
         let rx = x_right.saturating_sub(w);
         let (asc, _) = interos_std::design::typeface::line_metrics(em);
         let baseline = (y + launcher::font::BASELINE * scale).max(asc as usize);
-        let outline = if scale >= 1 && len <= launcher::outline_text::KEY_MAX {
+        let outline = if scale >= 3 && len <= launcher::outline_text::KEY_MAX {
             launcher::outline_text::OutlineRun::place(
                 rx,
                 baseline,
@@ -431,7 +431,7 @@ impl LabelRun {
         bytes_buf[..n].copy_from_slice(&held[..n]);
         let (asc, _) = interos_std::design::typeface::line_metrics(em);
         let baseline = (y + launcher::font::BASELINE * scale).max(asc as usize);
-        let outline = if scale >= 1 && n <= launcher::outline_text::KEY_MAX {
+        let outline = if scale >= 3 && n <= launcher::outline_text::KEY_MAX {
             launcher::outline_text::OutlineRun::place(
                 x,
                 baseline,

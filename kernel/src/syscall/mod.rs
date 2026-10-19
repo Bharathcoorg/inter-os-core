@@ -4925,6 +4925,7 @@ fn native_first_party_app_available(package_id: &str) -> bool {
             // into the registry, but a package missing from this match was filtered straight
             // back out, so the drawer never saw it and the launch arm was unreachable.
             | "org.interos.sensor_dashboard"
+            | "org.interos.notes"
     )
 }
 
@@ -4944,7 +4945,8 @@ pub fn sys_package_registry(out_buf:&mut [u8])->Result<usize,SyscallResult>{
     let mut w=W{b:out_buf,n:0};
     for e in &entries{
         let launchable = native_first_party_app_available(&e.package_id)
-            || crate::package::PACKAGE_BLOB_STORE.lock().get(&e.package_id).is_some();
+            || crate::package::PACKAGE_BLOB_STORE.lock().get(&e.package_id).is_some()
+            || crate::package::first_party_package(&e.package_id).is_some();
         if !launchable { continue; }
         let descriptor=crate::package::first_party_package(&e.package_id);
         let process=descriptor.map(|p|p.process_name).unwrap_or(&e.package_id);
@@ -4954,10 +4956,30 @@ pub fn sys_package_registry(out_buf:&mut [u8])->Result<usize,SyscallResult>{
             crate::package::PackageState::Active=>"active",
             crate::package::PackageState::RolledBack=>"rolled-back",
         };
-        let display_name = descriptor.map(|p| p.display_name).unwrap_or(&e.package_id);
-        let icon = descriptor.map(|p| p.icon).unwrap_or("APP");
-        let category = descriptor.map(|p| p.category).unwrap_or("Tools");
-        let _=writeln!(w,"{}|{}|{}.{}.{}|{}|{}|{}|{}|{}\n",
+        let display_name = descriptor.map(|p| p.display_name).unwrap_or_else(|| {
+            if e.package_id == "org.interos.notes" || e.package_id.ends_with(".notes") {
+                "Notes"
+            } else if let Some(pos) = e.package_id.rfind('.') {
+                &e.package_id[pos + 1..]
+            } else {
+                &e.package_id
+            }
+        });
+        let icon = descriptor.map(|p| p.icon).unwrap_or_else(|| {
+            if e.package_id == "org.interos.notes" || e.package_id.ends_with(".notes") {
+                "NOTE"
+            } else {
+                "APP"
+            }
+        });
+        let category = descriptor.map(|p| p.category).unwrap_or_else(|| {
+            if e.package_id == "org.interos.notes" || e.package_id.ends_with(".notes") {
+                "Personal"
+            } else {
+                "Tools"
+            }
+        });
+        let _=writeln!(w,"{}|{}|{}.{}.{}|{}|{}|{}|{}|{}",
             e.package_id,process,e.version.0,e.version.1,e.version.2,state,path,display_name,icon,category);
         if w.n >= w.b.len() { break; }
     }
@@ -5446,6 +5468,13 @@ pub fn sys_app_launch(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
             let payload_end = verified.payload_offset.checked_add(verified.payload_len)
                 .ok_or(SyscallResult::InvalidArguments)?;
             let payload = &blob.bytes[verified.payload_offset..payload_end];
+            if verified.arch == crate::package::RappArch::Wasm {
+                let tid = crate::task::user::spawn_app_browser(parent_id);
+                register_spawned_task_ipc(tid, parent_id)?;
+                crate::drivers::display_kms::DRM_KMS.lock().raise_surfaces_for_task(tid.0);
+                serial_println!("[APP] Launched web/wasm RAPP '{}' as Task {}", verified.package_id, tid.0);
+                return Ok(tid);
+            }
             let tid = crate::task::user::spawn_verified_rapp_process(&verified, payload, parent_id)
                 .map_err(|_| SyscallResult::DeviceError)?;
             register_spawned_task_ipc(tid, parent_id)?;
@@ -5553,6 +5582,9 @@ pub fn sys_app_launch(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
         }
         "org.interos.card_demo" | "card_demo" => {
             crate::task::user::spawn_app_card_demo(parent_id)
+        }
+        "org.interos.notes" | "notes" | "app_notes" => {
+            crate::task::user::spawn_app_browser(parent_id)
         }
         _ => {
             crate::serial_println!("[APP_LAUNCH DEBUG] unknown app_id: '{}'", app_id);

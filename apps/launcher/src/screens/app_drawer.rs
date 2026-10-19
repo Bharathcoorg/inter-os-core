@@ -586,7 +586,11 @@ impl Run {
         let baseline = (y + launcher::font::BASELINE * scale).max(asc as usize);
         let outline_advance = interos_std::design::typeface::text_advance_px(text, em) as usize;
         let top = baseline.saturating_sub(asc as usize);
-        let outline = launcher::outline_text::OutlineRun::place(x, baseline, em, text);
+        let outline = if scale >= 3 {
+            launcher::outline_text::OutlineRun::place(x, baseline, em, text)
+        } else {
+            None
+        };
         Run {
             x,
             y,
@@ -693,6 +697,10 @@ struct Paint {
     /// How many of `tiles` this page fills; slots at or past it are background.
     shown: usize,
     empty: Option<EmptyPlan>,
+    cached_tab: usize,
+    cached_page: usize,
+    cached_app_count: usize,
+    cached_query_len: usize,
 }
 
 /// Builds this frame's plan.
@@ -891,30 +899,43 @@ fn build(state: &LauncherState) -> Paint {
         tiles,
         shown,
         empty,
+        cached_tab: state.app_drawer_tab,
+        cached_page: page,
+        cached_app_count: state.app_count,
+        cached_query_len: state.search_query_len,
     }
 }
 
 /// This frame's plan.
-///
-/// WHY `(0, 0)` is the frame boundary: `render_view` walks the surface in raster
-/// order from the top-left pixel, so `(0, 0)` is the first pixel of every frame and
-/// the only pixel within a frame that repeats it. `LauncherState` is borrowed
-/// immutably for the whole of a frame, so rebuilding there is once per frame -- and
-/// once per frame is the only cadence at which the page, the column count or the
-/// catalogue can have moved underneath the cache.
 static mut PAINT: Option<Paint> = None;
+
+/// Invalidates the App Drawer paint cache so dynamic app additions, tab changes,
+/// and pagination updates immediately re-plan and redraw.
+pub fn invalidate_app_drawer_frame() {
+    unsafe {
+        let slot: *mut Option<Paint> = core::ptr::addr_of_mut!(PAINT);
+        *slot = None;
+    }
+}
 
 fn paint(x: usize, y: usize, state: &LauncherState) -> &'static Paint {
     let slot: *mut Option<Paint> = core::ptr::addr_of_mut!(PAINT);
-    // SAFETY: the launcher is one bare-metal task and the paint loop is neither
-    // preemptible nor reentrant, so this is the only reference to the slot at any
-    // moment, and the reference returned cannot outlive the call that made it.
-    let empty = unsafe { (*slot).is_none() };
-    if empty || (x == 0 && y == 0) {
-        // SAFETY: as above; this is the one mutation of the slot.
+    let page = app_drawer_page(state);
+    let should_rebuild = unsafe {
+        match (*slot).as_ref() {
+            None => true,
+            Some(p) => {
+                (x == 0 && y == 0)
+                    || p.cached_page != page
+                    || p.cached_tab != state.app_drawer_tab
+                    || p.cached_app_count != state.app_count
+                    || p.cached_query_len != state.search_query_len
+            }
+        }
+    };
+    if should_rebuild {
         unsafe { *slot = Some(build(state)) };
     }
-    // SAFETY: the slot is `Some` here -- it was just filled when it was empty.
     unsafe { (*slot).as_ref() }.expect("WHY: the slot is filled when it is empty")
 }
 

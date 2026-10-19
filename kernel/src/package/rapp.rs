@@ -21,8 +21,8 @@ pub const RAPP_SIGNATURE_SIZE: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
-pub enum RappArch { X86_64=0, Aarch64=1, Riscv64=2 }
-impl RappArch { pub fn from_u16(v:u16)->Option<Self>{match v{0=>Some(Self::X86_64),1=>Some(Self::Aarch64),2=>Some(Self::Riscv64),_=>None}} }
+pub enum RappArch { X86_64=0, Aarch64=1, Riscv64=2, Wasm=3 }
+impl RappArch { pub fn from_u16(v:u16)->Option<Self>{match v{0=>Some(Self::X86_64),1=>Some(Self::Aarch64),2=>Some(Self::Riscv64),3=>Some(Self::Wasm),_=>None}} }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RappError {

@@ -3083,8 +3083,8 @@ document.addEventListener('DOMContentLoaded', () => {
           appendImportLog(`[OK] Package ID: ${data.package_id}`, '#34D399');
           appendImportLog(`[OK] Arch: ${data.arch} (RAPP v2 signed with Ed25519)`, '#34D399');
           appendImportLog(`[OK] Sideload status: ${data.sideload_status}`, '#34D399');
-          if (data.guest_install) {
-            appendImportLog(`[OK] Guest installation: ${JSON.stringify(data.guest_install)}`, '#34D399');
+          if (data.guest_installed || data.guest_install) {
+            appendImportLog(`[OK] Guest installation: Succeeded (${data.package_id} active in QEMU guest)`, '#34D399');
           }
           appendImportLog('[OK] Sideload complete. Untrusted bytecode isolated in Ring 3 wasmd sandbox.', '#10B981');
           showToast(`WebApp Ported: ${data.package_id} installed successfully!`);

@@ -544,6 +544,7 @@ struct DeckTilePlan {
     icon: Option<launcher::icons::IconKind>,
     icon_cx: usize,
     icon_cy: usize,
+    #[allow(dead_code)]
     ink: u32,
     badge: Run,
     /// The app's name, resolved to exactly where and how it is drawn.
@@ -978,6 +979,9 @@ pub const DOCK_TILES: [Rect; 6] = [
     Rect::new(260, 960, 200, 200),
     Rect::new(490, 960, 200, 200),
 ];
+
+/// Smooth pill / continuous squircle corner radius for the 6 home screen app tiles.
+pub const TILE_RADIUS: usize = 48;
 
 /// Half-size of a deck tile's pictogram, in pixels: 52x52 box.
 pub const DOCK_ICON_EXTENT: i32 = 26;
@@ -1675,7 +1679,7 @@ fn icon_scale(cell: Rect, glyphs: usize) -> usize {
     by_h.min(by_w).clamp(ICON_SCALE_MIN, ICON_SCALE_MAX)
 }
 
-fn deck_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option<u32> {
+fn deck_pixel(x: usize, y: usize, f: &Frame, p: &Paint, _theme: &Theme) -> Option<u32> {
     let deck = &p.deck;
     if !f.deck.contains(x, y) {
         return None;
@@ -1690,14 +1694,14 @@ fn deck_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option
     }
     let tile = &deck.cells[index];
 
-    if !rounded_contains(tile.cell, x, y, 24) {
+    if !rounded_contains(tile.cell, x, y, TILE_RADIUS) {
         return None;
     }
-    if rounded_outline(tile.cell, x, y, 24) {
-        return Some(theme.border);
+    if rounded_outline(tile.cell, x, y, TILE_RADIUS) {
+        return Some(launcher::theme::DIVIDER_HAIRLINE);
     }
     let bg = backdrop_ref(&p.scene_ref, x, y);
-    let tile_fill = Theme::veil(bg, 88, true);
+    let tile_fill = Theme::veil(bg, 92, true);
 
     if let Some(kind) = tile.icon {
         if let Some(c) = launcher::icons::rasterize_icon_pixel_scaled_aa(
@@ -1706,16 +1710,16 @@ fn deck_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option
             y,
             tile.icon_cx,
             tile.icon_cy,
-            tile.ink,
+            launcher::theme::TEXT_CHARCOAL,
             tile_fill,
             DOCK_ICON_EXTENT,
         ) {
             return Some(c);
         }
-    } else if let Some(c) = tile.badge.pixel_aa(x, y, tile.badge.ink, tile_fill) {
+    } else if let Some(c) = tile.badge.pixel_aa(x, y, launcher::theme::TEXT_CHARCOAL, tile_fill) {
         return Some(c);
     }
-    if let Some(c) = tile.label.pixel_aa(x, y, tile.label.ink, tile_fill) {
+    if let Some(c) = tile.label.pixel_aa(x, y, launcher::theme::TEXT_CHARCOAL, tile_fill) {
         return Some(c);
     }
     Some(tile_fill)

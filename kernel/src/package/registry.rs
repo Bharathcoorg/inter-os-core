@@ -135,6 +135,17 @@ impl PackageRegistry {
                     migrated = true;
                 }
             }
+            for pkg in crate::package::FIRST_PARTY_PACKAGES {
+                if !self.entries.iter().any(|e| e.package_id == pkg.package_id) {
+                    self.entries.push(PackageEntry {
+                        package_id: String::from(pkg.package_id),
+                        generation: 0,
+                        state: PackageState::Active,
+                        version: (1, 0, 0),
+                    });
+                    migrated = true;
+                }
+            }
             if migrated {
                 let _ = self.persist();
                 crate::serial_println!("[PACKAGE] migrated first-party registry entries to active state.");

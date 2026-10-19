@@ -844,7 +844,6 @@ fn refresh_package_catalog(state: &mut LauncherState) {
     };
 
     state.app_count = 0;
-    state.app_drawer_page = 0;
     for line in buf[..n].split(|b| *b == b'\n') {
         if state.app_count >= state.app_ids.len() {
             break;
@@ -899,6 +898,11 @@ fn refresh_package_catalog(state: &mut LauncherState) {
         state.app_category_lens[idx] = cat_len as u8;
 
         state.app_count += 1;
+    }
+
+    let pages = if state.app_count == 0 { 1 } else { (state.app_count + 11) / 12 };
+    if state.app_drawer_page >= pages {
+        state.app_drawer_page = pages.saturating_sub(1);
     }
 }
 
@@ -1582,6 +1586,9 @@ fn present_dirty(surface: u32, state: &LauncherState, dirty: Dirty) {
     if dirty == Dirty::ActivityCards {
         screens::activity::invalidate_activity_frame();
     }
+    if dirty == Dirty::DrawerChips || dirty == Dirty::DrawerPages {
+        screens::app_drawer::invalidate_app_drawer_frame();
+    }
     if dirty == Dirty::All {
         render_view(surface, state);
         surface_flip_display();
@@ -1814,6 +1821,9 @@ fn resolve_app_at_touch<'a>(state: &'a LauncherState, x: u32, y: u32) -> Option<
                 // Apps tile opens drawer
                 return None;
             }
+        }
+        if (720..1190).contains(&y) {
+            return None;
         }
     }
 
@@ -2176,33 +2186,33 @@ pub extern "C" fn _start() -> ! {
                     render_band(surface, &state, ORB_BAND_Y0, ORB_BAND_Y1);
                     surface_flip_display();
                 }
-                if state.current_view == ViewMode::HomeScreen {
-                    if refresh_ticks % 10 == 0 {
-                        let previous_count = state.app_count;
-                        refresh_package_catalog(&mut state);
-                        refresh_runtime_recents(&mut state);
-                        if previous_count != state.app_count {
-                            // WHY the card and the deck and not the whole
-                            // surface: a catalogue refresh can retitle a deck
-                            // tile (a tile shows the registry's display name once
-                            // its package is installed and a default label until
-                            // then) and can change the card's "N apps installed"
-                            // detail line. Nothing else on this surface reads
-                            // `app_count` -- the status bar and the greeting are
-                            // clock-driven, the search bar and the nav bar are
-                            // static -- so re-rasterising those rows would
-                            // repaint 288 rows that cannot have moved.
-                            present_dirty(
-                                surface,
-                                &state,
-                                Dirty::HomeCard.widen(Dirty::HomeDeck),
-                            );
+                if refresh_ticks % 10 == 0 {
+                    let previous_count = state.app_count;
+                    refresh_package_catalog(&mut state);
+                    refresh_runtime_recents(&mut state);
+                    if previous_count != state.app_count {
+                        let _ = std::log(0, "[LAUNCHER] Package catalogue count updated dynamically.");
+                        match state.current_view {
+                            ViewMode::HomeScreen => {
+                                present_dirty(
+                                    surface,
+                                    &state,
+                                    Dirty::HomeCard.widen(Dirty::HomeDeck),
+                                );
+                            }
+                            ViewMode::AppDrawer => {
+                                render_view(surface, &state);
+                                surface_flip_display();
+                            }
+                            _ => {}
                         }
-                    } else if state.clock_time != old_clock {
-                        render_band(surface, &state, 0, 48);
-                        surface_flip_display();
                     }
-                } else if state.current_view == ViewMode::LockScreen && state.clock_time != old_clock {
+                }
+                if state.current_view == ViewMode::HomeScreen && state.clock_time != old_clock {
+                    render_band(surface, &state, 0, 48);
+                    surface_flip_display();
+                }
+ else if state.current_view == ViewMode::LockScreen && state.clock_time != old_clock {
                     render_band(surface, &state, 0, 360);
                     surface_flip_display();
                 }
@@ -3639,15 +3649,9 @@ pub extern "C" fn _start() -> ! {
                             if is_drag(input.kind) && input.dx >= 60 {
                                 if state.app_drawer_page > 0 {
                                     state.app_drawer_page -= 1;
-                                    // WHY the page band and not the whole surface:
-                                    // a page turn inside the drawer changes the
-                                    // grid and the pagination dots, not the
-                                    // status bar, the search field, or the nav
-                                    // bar above and below them. `pages_band`
-                                    // is derived from the drawn frame, so it is
-                                    // the same extent the painter already gates
-                                    // the grid on.
-                                    present_dirty(surface, &state, Dirty::DrawerPages);
+                                    screens::app_drawer::invalidate_app_drawer_frame();
+                                    render_view(surface, &state);
+                                    surface_flip_display();
                                 } else {
                                     state.current_view = ViewMode::HomeScreen;
                                     render_view(surface, &state);
@@ -3660,12 +3664,9 @@ pub extern "C" fn _start() -> ! {
                                 let pages = (state.app_count + 11) / 12;
                                 if state.app_drawer_page + 1 < pages {
                                     state.app_drawer_page += 1;
-                                    // WHY the pages band: a page turn redraws every
-                                    // tile in the grid and moves the
-                                    // current-page dot. The chips above are the
-                                    // active tab, which a page turn does not
-                                    // touch -- see `app_drawer::pages_band`.
-                                    present_dirty(surface, &state, Dirty::DrawerPages);
+                                    screens::app_drawer::invalidate_app_drawer_frame();
+                                    render_view(surface, &state);
+                                    surface_flip_display();
                                 }
                                 break;
                             }
@@ -3683,17 +3684,9 @@ pub extern "C" fn _start() -> ! {
                                 if let Some(tab) = screens::app_drawer::app_drawer_chip_at(input.x as usize, input.y as usize) {
                                     state.app_drawer_tab = tab;
                                     state.app_drawer_page = 0;
-                                    // WHY two bands: a tab switch moves the chip
-                                    // row's active chip AND, because it resets the
-                                    // page to zero, the grid and the dots. One
-                                    // `widen` renders the union of both rather
-                                    // than whichever was named last, which is
-                                    // the whole reason the combinator exists.
-                                    present_dirty(
-                                        surface,
-                                        &state,
-                                        Dirty::DrawerChips.widen(Dirty::DrawerPages),
-                                    );
+                                    screens::app_drawer::invalidate_app_drawer_frame();
+                                    render_view(surface, &state);
+                                    surface_flip_display();
                                     std::log(0, "[LAUNCHER] App drawer category tab switched.").ok();
                                     let mut drain = std::InputEvent {
                                         kind: 0,
@@ -3708,9 +3701,9 @@ pub extern "C" fn _start() -> ! {
                                 }
                                 if let Some(page) = screens::app_drawer::app_drawer_dot_at(&state, input.x as usize, input.y as usize) {
                                     state.app_drawer_page = page;
-                                    // A dot tap is a page turn, so it moves the
-                                    // same two things the swipe does.
-                                    present_dirty(surface, &state, Dirty::DrawerPages);
+                                    screens::app_drawer::invalidate_app_drawer_frame();
+                                    render_view(surface, &state);
+                                    surface_flip_display();
                                     let mut drain = std::InputEvent {
                                         kind: 0,
                                         x: 0,
@@ -3991,6 +3984,9 @@ pub extern "C" fn _start() -> ! {
                                     surface_flip_display();
                                     std::log(0, "[LAUNCHER] Overview / Recent Apps switcher opened via swipe-up gesture.").ok();
                                 } else {
+                                    refresh_package_catalog(&mut state);
+                                    refresh_runtime_recents(&mut state);
+                                    screens::app_drawer::invalidate_app_drawer_frame();
                                     state.current_view = ViewMode::AppDrawer;
                                     render_view(surface, &state);
                                     surface_flip_display();
@@ -4213,6 +4209,9 @@ pub extern "C" fn _start() -> ! {
 
                                 // Apps dock tile tap (Slot 5: row 1, col 2): opens App Drawer
                                 if (950..1180).contains(&y) && (475..695).contains(&x) {
+                                    refresh_package_catalog(&mut state);
+                                    refresh_runtime_recents(&mut state);
+                                    screens::app_drawer::invalidate_app_drawer_frame();
                                     state.current_view = ViewMode::AppDrawer;
                                     state.search_query_len = 0;
                                     state.app_drawer_page = 0;
@@ -4233,6 +4232,9 @@ pub extern "C" fn _start() -> ! {
 
                                 // Universal search bar tap: opens App Drawer for application search
                                 if (1320..1384).contains(&y) && (40..680).contains(&x) {
+                                    refresh_package_catalog(&mut state);
+                                    refresh_runtime_recents(&mut state);
+                                    screens::app_drawer::invalidate_app_drawer_frame();
                                     state.current_view = ViewMode::AppDrawer;
                                     state.search_query_len = 0;
                                     state.app_drawer_page = 0;
@@ -4324,6 +4326,8 @@ pub extern "C" fn _start() -> ! {
 
                                 // Tapping dock 6th item (Apps) opens App Drawer
                                 if (925..1160).contains(&y) && (475..695).contains(&x) {
+                                    refresh_package_catalog(&mut state);
+                                    refresh_runtime_recents(&mut state);
                                     state.current_view = ViewMode::AppDrawer;
                                     render_view(surface, &state);
                                     surface_flip_display();
