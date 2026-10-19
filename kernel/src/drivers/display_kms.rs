@@ -322,7 +322,17 @@ impl DrmKmsController {
             || owner_task == crate::services::task_id(crate::services::ServiceId::Display).map(|t| t.0).unwrap_or(u64::MAX)
             || owner_task == crate::services::task_id(crate::services::ServiceId::Compositor).map(|t| t.0).unwrap_or(u64::MAX);
         let kind = if is_overlay { crate::gui::WindowKind::SystemOverlay } else { crate::gui::WindowKind::Application };
-        let mut surface = DrmSurface::new(id, width, height, z_order, owner_task);
+        let actual_z = if z_order >= 200 && z_order < 1000 {
+            let max_z = self.surfaces.iter()
+                .filter(|s| s.z_order < 1000)
+                .map(|s| s.z_order)
+                .max()
+                .unwrap_or(200);
+            max_z.max(200).saturating_add(1)
+        } else {
+            z_order
+        };
+        let mut surface = DrmSurface::new(id, width, height, actual_z, owner_task);
         surface.input_enabled = !is_overlay;
         self.surfaces.push(surface);
         self.frame_dirty = true;
@@ -562,6 +572,54 @@ impl DrmKmsController {
             return true;
         }
         false
+    }
+
+    /// Raises all application surfaces owned by `owner_task` above all other application surfaces.
+    pub fn raise_surfaces_for_task(&mut self, owner_task: u64) {
+        let max_app_z = self.surfaces.iter()
+            .filter(|s| s.z_order < 1000)
+            .map(|s| s.z_order)
+            .max()
+            .unwrap_or(200);
+        let new_z = max_app_z.max(200).saturating_add(1);
+        let mut raised_any = false;
+        for s in self.surfaces.iter_mut() {
+            if s.owner_task == owner_task && s.z_order < 1000 {
+                s.z_order = new_z;
+                s.visible = true;
+                s.dirty = true;
+                self.focused_surface = Some(s.id);
+                raised_any = true;
+            }
+        }
+        if raised_any {
+            self.frame_dirty = true;
+            self.mark_present_full();
+        }
+    }
+
+    /// Sets the visibility of all surfaces owned by `owner_task`.
+    pub fn set_surfaces_visibility_for_task(&mut self, owner_task: u64, visible: bool) {
+        let mut changed = false;
+        for s in self.surfaces.iter_mut() {
+            if s.owner_task == owner_task {
+                if s.visible != visible {
+                    s.visible = visible;
+                    s.dirty = true;
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            if !visible && self.focused_surface.map(|f| self.surfaces.iter().any(|s| s.id == f && s.owner_task == owner_task)).unwrap_or(false) {
+                self.focused_surface = self.surfaces.iter()
+                    .filter(|s| s.visible && s.input_enabled)
+                    .max_by_key(|s| s.z_order)
+                    .map(|s| s.id);
+            }
+            self.frame_dirty = true;
+            self.mark_present_full();
+        }
     }
 
     /// Ensures that front and back scanout buffers are allocated to match scanout dimensions.

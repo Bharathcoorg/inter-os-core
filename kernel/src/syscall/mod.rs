@@ -382,6 +382,7 @@ pub fn sys_app_background() -> SyscallResult {
     let task = sys_get_task_id();
     if task == TaskId(0) { return SyscallResult::PermissionDenied; }
     SCHEDULER.lock().set_task_priority(task, 1);
+    crate::drivers::display_kms::DRM_KMS.lock().set_surfaces_visibility_for_task(task.0, false);
     crate::task::process::set_background(task, crate::interrupts::get_system_ticks())
         .map(|_| SyscallResult::Success).unwrap_or(SyscallResult::InvalidArgument)
 }
@@ -394,6 +395,7 @@ pub fn sys_app_foreground() -> SyscallResult {
         sched.set_task_priority(task, 6);
         sched.unblock_task(task);
     }
+    crate::drivers::display_kms::DRM_KMS.lock().raise_surfaces_for_task(task.0);
     match crate::task::process::set_foreground(task) {
         Ok(()) => SyscallResult::Success,
         Err(_) => SyscallResult::InvalidArgument,
@@ -5277,6 +5279,7 @@ pub fn dev_launch_app(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
         let tid = crate::task::user::spawn_verified_rapp_process(&verified, payload, parent)
             .map_err(|_| SyscallResult::DeviceError)?;
         register_spawned_task_ipc(tid, parent)?;
+        crate::drivers::display_kms::DRM_KMS.lock().raise_surfaces_for_task(tid.0);
         serial_println!("[APP] QEMU dev bridge launched persistent RAPP '{}' as Task {}", verified.package_id, tid.0);
         serial_println!("[PROCESS] Guest application launched id={} task={}", verified.package_id, tid.0);
         return Ok(tid);
@@ -5305,6 +5308,7 @@ pub fn dev_launch_app(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
         _ => return Err(SyscallResult::FileNotFound),
     };
     register_spawned_task_ipc(tid, parent)?;
+    crate::drivers::display_kms::DRM_KMS.lock().raise_surfaces_for_task(tid.0);
     serial_println!("[APP] QEMU dev bridge launched application '{}' as Task {}", app_id, tid.0);
     serial_println!("[PROCESS] Guest application launched id={} task={}", app_id, tid.0);
     Ok(tid)
@@ -5411,6 +5415,7 @@ pub fn sys_app_launch(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
     // keeps repeated home-screen taps from creating duplicate processes and
     // surfaces; explicit restart/force-stop remains the lifecycle escape hatch.
     if let Some(existing) = SCHEDULER.lock().find_child_by_name(parent_id, app_id) {
+        crate::drivers::display_kms::DRM_KMS.lock().raise_surfaces_for_task(existing.0);
         return Ok(existing);
     }
 
@@ -5437,6 +5442,7 @@ pub fn sys_app_launch(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
             let tid = crate::task::user::spawn_verified_rapp_process(&verified, payload, parent_id)
                 .map_err(|_| SyscallResult::DeviceError)?;
             register_spawned_task_ipc(tid, parent_id)?;
+            crate::drivers::display_kms::DRM_KMS.lock().raise_surfaces_for_task(tid.0);
             serial_println!("[APP] Launched persistent RAPP '{}' as Task {}", verified.package_id, tid.0);
             return Ok(tid);
         }
@@ -5547,6 +5553,7 @@ pub fn sys_app_launch(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
         }
     };
     register_spawned_task_ipc(tid, parent_id)?;
+    crate::drivers::display_kms::DRM_KMS.lock().raise_surfaces_for_task(tid.0);
     serial_println!("[APP] Launched application '{}' as Task {}", app_id, tid.0);
     Ok(tid)
 }
