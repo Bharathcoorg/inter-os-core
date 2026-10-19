@@ -12,6 +12,11 @@ def test_phone_profile_is_native_portrait():
     assert profile["display"]["backend"] == "std-vga-vnc"
     assert profile["display"]["authoring_space"]["width"] == 720
     assert profile["display"]["authoring_space"]["height"] == 1440
+    assert profile["display"]["density_dpi"] == 480
+    assert profile["display"]["scale_factor_permille"] == 1500
+    assert profile["display"]["refresh_rate_hz"] == 60
+    assert profile["display"]["safe_insets_px"]["top"] == 72
+    assert profile["display"]["safe_insets_px"]["bottom"] == 72
     assert profile["input"]["coordinate_space"] == "portrait-logical-pixels"
 
 

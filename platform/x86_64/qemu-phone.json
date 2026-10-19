@@ -11,9 +11,19 @@
     "pixel_format": "ARGB8888",
     "backend": "std-vga-vnc",
     "vgamem_mb": 32,
+    "density_dpi": 480,
+    "scale_factor_permille": 1500,
+    "refresh_rate_hz": 60,
+    "safe_insets_px": {
+      "top": 72,
+      "bottom": 72,
+      "left": 0,
+      "right": 0
+    },
     "authoring_space": {
       "width": 720,
-      "height": 1440
+      "height": 1440,
+      "density_dpi": 320
     }
   },
   "input": {

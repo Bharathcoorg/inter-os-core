@@ -71,7 +71,36 @@ def main() -> None:
     must(drivers, "crate::framebuffer::present_argb8888", "KMS-to-hardware scanout handoff")
     must(displayd, "interos_system_service::run_display()", "displayd uses dedicated implementation")
 
-    print("display driver boundary contract: PASS")
+    # Canonical DisplayMetrics Contract
+    design_mod = (ROOT / "sdk/rust/interos-std/src/design/mod.rs").read_text(encoding="utf-8")
+    kernel_display_hal = (ROOT / "kernel/src/display_hal.rs").read_text(encoding="utf-8")
+    aarch64_display_hal = (ROOT / "kernel-aarch64/src/display_hal.rs").read_text(encoding="utf-8")
+
+    for marker in (
+        "pub struct DisplayMetrics",
+        "pub struct Dp(",
+        "pub struct Px(",
+        "pub enum Orientation",
+        "pub struct SafeAreaInsetsPx",
+        "pub const fn dp_to_px",
+        "pub const fn px_to_dp",
+        "pub const fn hairline_px",
+        "pub const fn frame_budget_ns",
+        "pub fn with_orientation",
+    ):
+        must(design_mod, marker, f"SDK DisplayMetrics {marker}")
+
+    for marker in (
+        "pub struct DisplayMetrics",
+        "pub struct Dp(",
+        "pub struct Px(",
+        "pub enum Orientation",
+        "pub struct SafeAreaInsetsPx",
+    ):
+        must(kernel_display_hal, marker, f"x86_64 display_hal {marker}")
+        must(aarch64_display_hal, marker, f"aarch64 display_hal {marker}")
+
+    print("display driver boundary and DisplayMetrics contract: PASS")
 
 if __name__ == "__main__":
     main()
