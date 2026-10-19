@@ -24,7 +24,7 @@ use core::panic::PanicInfo;
 use interos_std as std;
 use std::design::primitives::Rect;
 
-mod outline_text;
+use interos_std::design::outline_text;
 
 const W: usize = 720;
 const H: usize = 1440;

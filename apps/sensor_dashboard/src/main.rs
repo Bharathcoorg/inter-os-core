@@ -44,8 +44,7 @@
 #![no_std]
 #![no_main]
 
-mod font;
-mod outline_text;
+use interos_std::font;
 
 use core::panic::PanicInfo;
 use interos_std as std;

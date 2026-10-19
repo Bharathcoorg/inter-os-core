@@ -40,6 +40,7 @@ static mut CHUNK_BUF: [u32; CHUNK] = [0; CHUNK];
 /// `char_w = GLYPH_W * scale` does not hold and the pen has to be walked. The old
 /// body computed the character index as `(x - x0) / char_w`, which silently
 /// mis-renders every string once advances differ per glyph.
+#[allow(dead_code)]
 #[inline(always)]
 fn test_text(
     x: usize,
@@ -140,7 +141,7 @@ pub fn test_text_aa(
     color: u32,
     bg: u32,
 ) -> Option<u32> {
-    if scale >= 3 && text.len() <= launcher::outline_text::KEY_MAX {
+    if scale >= 2 && text.len() <= launcher::outline_text::KEY_MAX {
         let em = launcher::outline_text::em_for_scale(scale);
         let (ascent, _) = interos_std::design::typeface::line_metrics(em);
         let baseline = (y0 + launcher::font::BASELINE * scale).max(ascent as usize);
@@ -872,7 +873,12 @@ fn refresh_package_catalog(state: &mut LauncherState) {
         if status != b"active" || id.is_empty() || id.len() > 32 || display_name.is_empty() {
             continue;
         }
-        if id == b"org.interos.sensor_dashboard" || id == b"sensor_dashboard" || id == b"sensors" {
+        if id == b"org.interos.launcher" || id == b"launcher"
+            || id == b"org.interos.compositor" || id == b"compositor"
+            || id == b"org.interos.init" || id == b"init" || id == b"user_init"
+            || id == b"org.interos.sensor_dashboard" || id == b"sensor_dashboard" || id == b"sensors"
+            || id == b"org.interos.card_demo" || id == b"card_demo" || id == b"app_card_demo"
+        {
             continue;
         }
         if (id == b"terminal" || id == b"org.interos.terminal" || id == b"app_terminal")
@@ -1409,7 +1415,11 @@ fn volume_hud_pixel(x: usize, y: usize, volume: u8) -> u32 {
         2
     };
 
-    if let Some(text_color) = test_text(x, y, 382, 71, 1, &num_buf[..num_len], 0xFFFAF8F4) {
+    let py = y - Y0;
+    let t = (py * 255) / (Y1 - Y0);
+    let luma = 14 - (t * 6 / 255);
+    let bg = 0xFF000000 | ((luma as u32) << 16) | (((luma * 12 / 10) as u32) << 8) | ((luma * 16 / 10) as u32);
+    if let Some(text_color) = test_text_aa(x, y, 382, 71, 1, &num_buf[..num_len], 0xFFFAF8F4, bg) {
         return text_color;
     }
 
@@ -1801,7 +1811,7 @@ fn resolve_app_at_touch<'a>(state: &'a LauncherState, x: u32, y: u32) -> Option<
         }
 
         // Row 0 of Quick Action Dock: Phone, Messages, Camera
-        if (730..950).contains(&y) {
+        if (750..895).contains(&y) {
             if (30..250).contains(&x) {
                 return package_id_by_suffix(state, b"dialer");
             } else if (250..475).contains(&x) {
@@ -1812,7 +1822,7 @@ fn resolve_app_at_touch<'a>(state: &'a LauncherState, x: u32, y: u32) -> Option<
         }
 
         // Row 1 of Quick Action Dock: Files, Browser (Slot 5: Apps is a view transition, not an app)
-        if (950..1180).contains(&y) {
+        if (895..1050).contains(&y) {
             if (30..250).contains(&x) {
                 return package_id_by_suffix(state, b"file_manager").or_else(|| package_id_by_suffix(state, b"files"));
             } else if (250..475).contains(&x) {
@@ -1822,7 +1832,7 @@ fn resolve_app_at_touch<'a>(state: &'a LauncherState, x: u32, y: u32) -> Option<
                 return None;
             }
         }
-        if (720..1190).contains(&y) {
+        if (745..1050).contains(&y) {
             return None;
         }
     }
@@ -1840,7 +1850,7 @@ fn resolve_app_at_touch<'a>(state: &'a LauncherState, x: u32, y: u32) -> Option<
             return package_id_by_suffix(state, b"gallery").or(Some("org.interos.gallery"));
         }
         if (530..=570).contains(&x) && (1160..=1200).contains(&y) {
-            return package_id_by_suffix(state, b"card_demo").or(Some("org.interos.card_demo"));
+            return package_id_by_suffix(state, b"notes").or(Some("org.interos.notes"));
         }
 
         if (330..=370).contains(&y) {
@@ -4208,7 +4218,7 @@ pub extern "C" fn _start() -> ! {
                                 }
 
                                 // Apps dock tile tap (Slot 5: row 1, col 2): opens App Drawer
-                                if (950..1180).contains(&y) && (475..695).contains(&x) {
+                                if (895..1050).contains(&y) && (475..695).contains(&x) {
                                     refresh_package_catalog(&mut state);
                                     refresh_runtime_recents(&mut state);
                                     screens::app_drawer::invalidate_app_drawer_frame();
@@ -4231,7 +4241,7 @@ pub extern "C" fn _start() -> ! {
                                 }
 
                                 // Universal search bar tap: opens App Drawer for application search
-                                if (1320..1384).contains(&y) && (40..680).contains(&x) {
+                                if (665..735).contains(&y) && (30..690).contains(&x) {
                                     refresh_package_catalog(&mut state);
                                     refresh_runtime_recents(&mut state);
                                     screens::app_drawer::invalidate_app_drawer_frame();
@@ -4325,7 +4335,7 @@ pub extern "C" fn _start() -> ! {
                                 }
 
                                 // Tapping dock 6th item (Apps) opens App Drawer
-                                if (925..1160).contains(&y) && (475..695).contains(&x) {
+                                if (865..1015).contains(&y) && (475..695).contains(&x) {
                                     refresh_package_catalog(&mut state);
                                     refresh_runtime_recents(&mut state);
                                     state.current_view = ViewMode::AppDrawer;

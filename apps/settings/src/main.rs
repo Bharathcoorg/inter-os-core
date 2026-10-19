@@ -29,7 +29,7 @@ use core::panic::PanicInfo;
 use interos_std as std;
 use settings::{parse_sensor_payload, SensorTelemetry};
 
-mod outline_text;
+use interos_std::design::outline_text;
 
 const W: usize = 720;
 const H: usize = 1440;
@@ -765,12 +765,23 @@ impl SettingsApp {
             let mut count = 0;
             for line in p_buf[..n].split(|b| *b == b'\n') {
                 if !line.is_empty() {
+                    let mut fields = line.split(|b| *b == b'|');
+                    if let Some(id) = fields.next() {
+                        if id == b"org.interos.launcher" || id == b"launcher"
+                            || id == b"org.interos.compositor" || id == b"compositor"
+                            || id == b"org.interos.init" || id == b"init" || id == b"user_init"
+                            || id == b"org.interos.sensor_dashboard" || id == b"sensor_dashboard" || id == b"sensors"
+                            || id == b"org.interos.card_demo" || id == b"card_demo"
+                        {
+                            continue;
+                        }
+                    }
                     count += 1;
                 }
             }
-            self.app_count = count.max(14);
+            self.app_count = count.max(12);
         } else {
-            self.app_count = 14;
+            self.app_count = 12;
         }
 
         if let Ok(bytes) = std::storage_query() {

@@ -29,7 +29,7 @@
 #![no_main]
 #![allow(dead_code)]
 
-mod outline_text;
+use interos_std::design::outline_text;
 
 use core::panic::PanicInfo;
 use interos_std as std;
@@ -272,7 +272,7 @@ fn text_centered(
     if w > max_w {
         return None;
     }
-    let drawn = outline_text::drawn_advance(s, scale).unwrap_or(w);
+    let drawn = outline_text::drawn_advance(s, scale, None).unwrap_or(w);
     text(x, y, x0 + (max_w.saturating_sub(drawn)) / 2, y0, scale, s, color, bg)
 }
 
@@ -1364,7 +1364,7 @@ fn pill_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
         // outline face and centring on the bitmap measure would leave it off
         // the pill's centre by the same 1-4% of its width. On the bitmap
         // fallback the answer is the measure the rasteriser steps by.
-        let lw = outline_text::drawn_advance(label, 2).unwrap_or_else(|| font::measure(label, 2));
+        let lw = outline_text::drawn_advance(label, 2, None).unwrap_or_else(|| font::measure(label, 2));
         let lx = rect.x + rect.w.saturating_sub(lw) / 2;
         if let Some(c) = text(x, y, lx, PILL_Y, 2, label, ink, fill) {
             return Some(c);
@@ -2313,7 +2313,7 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
             if let Some(c) = draw_pill(x, y, SET_WALLPAPER_BTN, SOFT, Some(BORDER)) {
                 if c != SOFT { return c; }
                 let lbl = b"Set as Wallpaper";
-                let lw = outline_text::drawn_advance(lbl, 2).unwrap_or_else(|| font::measure(lbl, 2));
+                let lw = outline_text::drawn_advance(lbl, 2, None).unwrap_or_else(|| font::measure(lbl, 2));
                 let lx = SET_WALLPAPER_BTN.x + (SET_WALLPAPER_BTN.w.saturating_sub(lw)) / 2;
                 let ly = SET_WALLPAPER_BTN.y + (SET_WALLPAPER_BTN.h.saturating_sub(font::line_height(2))) / 2;
                 if let Some(tc) = text(x, y, lx, ly, 2, lbl, TEXT, SOFT) { return tc; }
@@ -2325,7 +2325,7 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
                 if c != SURFACE { return c; }
                 // Title
                 let title = b"Set as Wallpaper";
-                let tw = outline_text::drawn_advance(title, 2).unwrap_or_else(|| font::measure(title, 2));
+                let tw = outline_text::drawn_advance(title, 2, None).unwrap_or_else(|| font::measure(title, 2));
                 let tx = WP_SHEET_RECT.x + (WP_SHEET_RECT.w.saturating_sub(tw)) / 2;
                 if let Some(tc) = text_bold(x, y, tx, WP_SHEET_TITLE_Y, 2, title, TEXT, SURFACE) { return tc; }
 
@@ -2384,7 +2384,7 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
             return c;
         }
         let label = b"Close";
-        let lw = outline_text::drawn_advance(label, 2).unwrap_or_else(|| font::measure(label, 2));
+        let lw = outline_text::drawn_advance(label, 2, None).unwrap_or_else(|| font::measure(label, 2));
         let lx = CLOSE.x + (CLOSE.w.saturating_sub(lw)) / 2;
         let ly = CLOSE.y + (CLOSE.h.saturating_sub(font::line_height(2))) / 2;
         if let Some(c) = text(x, y, lx, ly, 2, label, TEXT, SOFT) {

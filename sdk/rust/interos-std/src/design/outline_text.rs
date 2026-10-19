@@ -47,7 +47,7 @@ const SLOTS: usize = 8;
 
 /// The longest text a placement key can hold. Longer runs are refused rather
 /// than hashed, because a hash would collide and draw the wrong glyphs.
-const KEY_MAX: usize = 64;
+pub const KEY_MAX: usize = 64;
 
 /// Ink coverage for the placed runs: 255 is fully inked, 0 is untouched.
 ///
@@ -333,6 +333,28 @@ impl OutlineRun {
             return None;
         }
         Some(font::blend(ink, bg, c))
+    }
+
+    /// The colour of (`px`, `py`) if this run inks it with binary thresholding (c >= 64).
+    #[allow(dead_code)]
+    pub fn pixel_binary(&self, px: usize, py: usize, ink: u32) -> Option<u32> {
+        if self.w == 0 || self.h == 0 {
+            return None;
+        }
+        if px < self.x || px - self.x >= self.w {
+            return None;
+        }
+        let cov_row = (py as isize) - (self.y as isize) + (self.ascent as isize);
+        if cov_row < 0 || cov_row >= self.h as isize {
+            return None;
+        }
+        let cov = unsafe { &*core::ptr::addr_of!(COVERAGE) };
+        let c = cov[self.slot][(cov_row as usize) * self.w + (px - self.x)];
+        if c >= 64 {
+            Some(ink)
+        } else {
+            None
+        }
     }
 }
 

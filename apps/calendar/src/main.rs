@@ -19,7 +19,7 @@
 use interos_std as std;
 use core::panic::PanicInfo;
 
-mod outline_text;
+use interos_std::design::outline_text;
 
 /// Calendar event status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -21,10 +21,10 @@
 
 extern crate interos_std;
 
-pub mod font;
+pub use interos_std::font;
 pub mod icons;
 pub mod layout;
-pub mod outline_text;
+pub use interos_std::design::outline_text;
 pub mod text;
 pub mod theme;
 

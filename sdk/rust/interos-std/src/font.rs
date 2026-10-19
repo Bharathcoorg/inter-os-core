@@ -16,6 +16,7 @@ pub const GLYPH_W: usize = 16;
 pub const GLYPH_H: usize = 24;
 pub const CAP_TOP: usize = 3;
 pub const BASELINE: usize = 19;
+pub const CAP_HEIGHT: usize = BASELINE - CAP_TOP;
 pub const ASCENDER: usize = 4;
 pub const DESCENDER: usize = 23;
 pub const FIRST_CHAR: u8 = 32;
@@ -1931,6 +1932,245 @@ pub fn test_text_clipped(
         }
     }
     test_text(x, y, x0, y0, scale, text, color)
+}
+
+/// Returns `Some((character, col, row))` if the pixel at (x, y) contains ink
+/// from `text` placed at (x0, y0) with scale and weight, or `None` otherwise.
+#[inline]
+pub fn run_pixel(
+    x: usize,
+    y: usize,
+    x0: usize,
+    y0: usize,
+    scale: usize,
+    text: &[u8],
+    bold: bool,
+) -> Option<(u8, usize, usize)> {
+    if scale == 0 || text.is_empty() {
+        return None;
+    }
+    let row = (y.checked_sub(y0)?) / scale;
+    if row >= GLYPH_H {
+        return None;
+    }
+    let dx = x.checked_sub(x0)?;
+    let mut pen = 0usize;
+    for &c in text {
+        let adv = advance_of(c, bold) * scale;
+        if dx < pen + adv {
+            let col = (dx - pen) / scale;
+            return if pixel(c, col, row, bold) {
+                Some((c, col, row))
+            } else {
+                None
+            };
+        }
+        pen += adv;
+    }
+    None
+}
+
+/// Maximum buffer capacity for fitted text runs.
+pub const RUN_CAP: usize = 96;
+
+/// Truncates `text` with ellipsis "..." to fit within `max_w` pixels at `scale`.
+pub fn fit(text: &[u8], scale: usize, max_w: usize, out: &mut [u8]) -> usize {
+    if text.is_empty() || out.is_empty() || scale == 0 {
+        return 0;
+    }
+    if measure(text, scale) <= max_w {
+        let n = text.len().min(out.len());
+        out[..n].copy_from_slice(&text[..n]);
+        return n;
+    }
+    const DOTS: &[u8] = b"...";
+    let dots = measure(DOTS, scale);
+    if dots > max_w || out.len() < 3 {
+        return 0;
+    }
+    let budget = max_w - dots;
+    let mut used = 0usize;
+    let mut taken = 0usize;
+    for (i, &c) in text.iter().enumerate() {
+        let adv = advance_of(c, false) * scale;
+        if used + adv > budget || taken + 3 > out.len() {
+            break;
+        }
+        used += adv;
+        taken = i + 1;
+    }
+    out[..taken].copy_from_slice(&text[..taken]);
+    out[taken..taken + 3].copy_from_slice(DOTS);
+    taken + 3
+}
+
+/// Measures fitted width of `text` after applying ellipsis truncation to `max_w`.
+#[inline]
+pub fn fit_width(text: &[u8], scale: usize, max_w: usize) -> usize {
+    let mut buf = [0u8; RUN_CAP];
+    let n = fit(text, scale, max_w, &mut buf);
+    measure(&buf[..n], scale)
+}
+
+/// Tests whether pixel (x, y) contains ink from text run placed at (x0, y0),
+/// using outline typography when available, falling back to antialiased bitmap font.
+#[inline]
+pub fn ink(
+    x: usize,
+    y: usize,
+    x0: usize,
+    y0: usize,
+    scale: usize,
+    text: &[u8],
+    max_w: usize,
+    color: u32,
+    bg: u32,
+) -> bool {
+    if scale == 0 {
+        return false;
+    }
+    let h = line_height(scale);
+    if y < y0 || y >= y0 + h || x < x0 || x >= x0 + max_w {
+        return false;
+    }
+    let mut buf = [0u8; RUN_CAP];
+    let n = fit(text, scale, max_w, &mut buf);
+    if n == 0 {
+        return false;
+    }
+    let fitted = &buf[..n];
+
+    let em = crate::design::outline_text::em_for_scale(scale);
+    let (asc, _) = crate::design::typeface::line_metrics(em);
+    let baseline = (y0 + BASELINE * scale).max(asc as usize);
+    if let Some(run) = crate::design::outline_text::OutlineRun::place(x0, baseline, em, fitted) {
+        if run.pixel(x, y, color, bg).is_some() {
+            return true;
+        }
+    }
+
+    test_text_aa(x, y, x0, y0, scale, fitted, color, bg, false).is_some()
+}
+
+/// Measured width of `text` at `scale` in the given weight.
+#[inline]
+pub fn width(text: &[u8], scale: usize, bold: bool) -> usize {
+    if bold {
+        measure_bold(text, scale)
+    } else {
+        measure(text, scale)
+    }
+}
+
+/// Truncates `text` with ellipsis "..." to fit within `max_w` pixels at `scale` with optional bold.
+pub fn fit_weighted(text: &[u8], scale: usize, max_w: usize, bold: bool, out: &mut [u8]) -> usize {
+    if text.is_empty() || out.is_empty() || scale == 0 {
+        return 0;
+    }
+    if width(text, scale, bold) <= max_w {
+        let n = text.len().min(out.len());
+        out[..n].copy_from_slice(&text[..n]);
+        return n;
+    }
+    const DOTS: &[u8] = b"...";
+    let dots = width(DOTS, scale, bold);
+    if dots > max_w || out.len() < 3 {
+        return 0;
+    }
+    let budget = max_w - dots;
+    let mut used = 0usize;
+    let mut taken = 0usize;
+    for (i, &c) in text.iter().enumerate() {
+        let adv = advance_of(c, bold) * scale;
+        if used + adv > budget || taken + 3 > out.len() {
+            break;
+        }
+        used += adv;
+        taken = i + 1;
+    }
+    out[..taken].copy_from_slice(&text[..taken]);
+    out[taken..taken + 3].copy_from_slice(DOTS);
+    taken + 3
+}
+
+/// Measures fitted width of `text` after applying ellipsis truncation to `max_w` with optional bold.
+#[inline]
+pub fn fit_width_weighted(text: &[u8], scale: usize, max_w: usize, bold: bool) -> usize {
+    let mut buf = [0u8; RUN_CAP];
+    let n = fit_weighted(text, scale, max_w, bold, &mut buf);
+    width(&buf[..n], scale, bold)
+}
+
+/// Returns Some(color) if pixel (x, y) contains ink from text run placed at (x0, y0).
+#[inline]
+pub fn ink_option(
+    x: usize,
+    y: usize,
+    x0: usize,
+    y0: usize,
+    scale: usize,
+    text: &[u8],
+    max_w: usize,
+    color: u32,
+    bg: u32,
+    bold: bool,
+) -> Option<u32> {
+    if scale == 0 {
+        return None;
+    }
+    let h = line_height(scale);
+    if y < y0 || y >= y0 + h || x < x0 || x >= x0 + max_w {
+        return None;
+    }
+    let mut buf = [0u8; RUN_CAP];
+    let n = fit_weighted(text, scale, max_w, bold, &mut buf);
+    if n == 0 {
+        return None;
+    }
+    if let Some(run) = crate::design::outline_text::place_run(x0, y0, scale, &buf[..n], Some(max_w), bold) {
+        if let Some(c) = run.pixel(x, y, color, bg) {
+            return Some(c);
+        }
+    }
+    test_text_aa(x, y, x0, y0, scale, &buf[..n], color, bg, bold)
+}
+
+/// Centered text ink inside [x0, x0 + max_w).
+#[inline]
+pub fn ink_center(
+    x: usize,
+    y: usize,
+    x0: usize,
+    y0: usize,
+    scale: usize,
+    text: &[u8],
+    max_w: usize,
+    color: u32,
+    bg: u32,
+    bold: bool,
+) -> Option<u32> {
+    let w = fit_width_weighted(text, scale, max_w, bold);
+    let cx = x0 + max_w.saturating_sub(w) / 2;
+    ink_option(x, y, cx, y0, scale, text, max_w, color, bg, bold)
+}
+
+/// Right-aligned text ink ending at x1.
+#[inline]
+pub fn ink_right(
+    x: usize,
+    y: usize,
+    x1: usize,
+    y0: usize,
+    scale: usize,
+    text: &[u8],
+    max_w: usize,
+    color: u32,
+    bg: u32,
+    bold: bool,
+) -> Option<u32> {
+    let w = fit_width_weighted(text, scale, max_w, bold);
+    let x0 = x1.saturating_sub(w);
+    ink_option(x, y, x0, y0, scale, text, max_w, color, bg, bold)
 }
 
 #[cfg(test)]

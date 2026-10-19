@@ -61,7 +61,7 @@
 #![no_std]
 #![no_main]
 
-mod outline_text;
+use interos_std::design::outline_text;
 
 use core::panic::PanicInfo;
 use interos_std as std;

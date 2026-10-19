@@ -148,7 +148,7 @@ const CARD_ROW_DETAIL: usize = type_scale::CAPTION;
 const CARD_ROWS: usize = 3;
 
 /// Type scale for a deck tile's name: scale 2 (BODY) with outline anti-aliasing for readability.
-const LABEL_SCALE: usize = type_scale::BODY;
+const LABEL_SCALE: usize = type_scale::CAPTION;
 
 /// Largest and smallest icon scale a deck tile will draw its badge word at.
 ///
@@ -220,6 +220,7 @@ fn card_row_h() -> usize {
 }
 
 /// Height of the system card: its title band, its rows and the gaps between them.
+#[allow(dead_code)]
 fn card_h() -> usize {
     460
 }
@@ -231,7 +232,7 @@ fn frame() -> Frame {
         30,
         205,
         660,
-        card_h(),
+        440,
     );
     let card_title = Rect::new(
         card.x + space::LG,
@@ -245,13 +246,13 @@ fn frame() -> Frame {
         card.w - space::LG * 2,
         card_row_h() * CARD_ROWS,
     );
+    let search = Rect::new(30, 668, 660, 58);
     let deck = Rect::new(
         30,
-        725,
+        750,
         660,
-        440,
+        285,
     );
-    let search = Rect::new(30, 1320, 660, 56);
     let nav = Rect::new(0, SCREEN_HEIGHT - NAV_BAR_HEIGHT, SCREEN_WIDTH, NAV_BAR_HEIGHT);
     Frame {
         greeting,
@@ -449,7 +450,7 @@ impl Run {
         let w = bitmap_measure.max(outline_advance);
         let top = baseline.saturating_sub(asc as usize);
         let box_h = (baseline + desc as usize).saturating_sub(top);
-        let outline = if scale >= 3 {
+        let outline = if scale >= 2 {
             launcher::outline_text::OutlineRun::place(x, baseline, em, text)
         } else {
             None
@@ -972,19 +973,19 @@ fn build(state: &LauncherState) -> Paint {
 /// render), so even the widest name fits with room on either side, and the
 /// padding stays XS so short names keep breathing room.
 pub const DOCK_TILES: [Rect; 6] = [
-    Rect::new(30, 730, 200, 200),
-    Rect::new(260, 730, 200, 200),
-    Rect::new(490, 730, 200, 200),
-    Rect::new(30, 960, 200, 200),
-    Rect::new(260, 960, 200, 200),
-    Rect::new(490, 960, 200, 200),
+    Rect::new(30, 755, 200, 130),
+    Rect::new(260, 755, 200, 130),
+    Rect::new(490, 755, 200, 130),
+    Rect::new(30, 905, 200, 130),
+    Rect::new(260, 905, 200, 130),
+    Rect::new(490, 905, 200, 130),
 ];
 
-/// Smooth pill / continuous squircle corner radius for the 6 home screen app tiles.
-pub const TILE_RADIUS: usize = 48;
+/// Smooth rounded pill corner radius for the 6 home screen app pills.
+pub const TILE_RADIUS: usize = 32;
 
-/// Half-size of a deck tile's pictogram, in pixels: 52x52 box.
-pub const DOCK_ICON_EXTENT: i32 = 26;
+/// Half-size of a deck tile's pictogram, in pixels: 40x40 box.
+pub const DOCK_ICON_EXTENT: i32 = 20;
 
 pub fn find_package_index(state: &LauncherState, suffix: &[u8]) -> Option<usize> {
     for i in 0..state.app_count {
@@ -1008,9 +1009,9 @@ fn deck_plan(state: &LauncherState, theme: &Theme, _deck: Rect) -> DeckPlan {
         columns: 3,
         rows: 2,
         origin_x: 30,
-        origin_y: 730,
+        origin_y: 755,
         pitch_x: 230,
-        pitch_y: 230,
+        pitch_y: 150,
         app_count: 6,
         empty: None,
     };
@@ -1026,15 +1027,6 @@ fn deck_plan(state: &LauncherState, theme: &Theme, _deck: Rect) -> DeckPlan {
         (Some(launcher::icons::IconKind::Apps), b"apps", b"Apps", theme.text),
     ];
 
-    // WHY one scale for the whole deck: picking a scale per label made "Messages"
-    // render a step smaller than its neighbours, which reads as a rendering
-    // fault rather than a long name, so every tile is set in the same size.
-    // WHY `LABEL_SCALE` (CAPTION, a 17px cap) and not BODY: BODY put a 34px cap
-    // on the tile names -- nearly triple the 13px AppTile label the design
-    // tokens name (`components.json`) -- and the widest name filled its tile
-    // edge to edge. CAPTION is the smallest step the 16x24 face can render, so
-    // it is the closest the firmware can come to the token; a registry name
-    // longer than the tile is still ellipsized to the fit by `Run::centred`.
     let label_bytes: [&[u8]; 6] = core::array::from_fn(|slot| {
         let (_, suffix, default_label, _) = dock_defs[slot];
         if slot == 0 || slot == 5 {
@@ -1051,19 +1043,16 @@ fn deck_plan(state: &LauncherState, theme: &Theme, _deck: Rect) -> DeckPlan {
             default_label
         }
     });
-    // WHY XS for the padding: the fit is the tile less the inset the label
-    // needs on each side, and at XS even the widest name fits at `LABEL_SCALE`
-    // with room to spare.
     let label_fit = DOCK_TILES[0].w.saturating_sub(space::XS * 2);
-    let label_scale = LABEL_SCALE;
+    let label_scale = type_scale::CAPTION;
 
     for (slot, &(icon_kind, _, _, icon_ink)) in dock_defs.iter().enumerate() {
         let cell = DOCK_TILES[slot];
         let label_bytes = label_bytes[slot];
 
         let icon_cx = cell.x + cell.w / 2;
-        let icon_cy = cell.y + 76;
-        let label_y = cell.y + 114;
+        let icon_cy = cell.y + 42;
+        let label_y = cell.y + 78;
 
         plan.cells[slot] = DeckTilePlan {
             cell,
@@ -1148,18 +1137,18 @@ pub fn home_hit(state: &LauncherState, x: usize, y: usize) -> Option<usize> {
     // WHY these ranges are the tile rects and not the old 48-based ones: the tap
     // must answer for exactly what the painter draws (`DOCK_TILES`), or the
     // outer 18px of both edge columns would launch nothing while showing tile.
-    let col = if (30..235).contains(&x) {
+    let col = if (30..245).contains(&x) {
         0
-    } else if (255..465).contains(&x) {
+    } else if (245..475).contains(&x) {
         1
-    } else if (485..695).contains(&x) {
+    } else if (475..695).contains(&x) {
         2
     } else {
         return None;
     };
-    let row = if (730..950).contains(&y) {
+    let row = if (750..895).contains(&y) {
         0
-    } else if (950..1180).contains(&y) {
+    } else if (895..1050).contains(&y) {
         1
     } else {
         return None;
@@ -1418,10 +1407,10 @@ fn greeting_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Op
             return None;
         }
         if rounded_outline(f.date_widget, x, y, 24) {
-            return Some(theme.border);
+            return Some(launcher::theme::DIVIDER_HAIRLINE);
         }
         let bg = backdrop_ref(&p.scene_ref, x, y);
-        let card_fill = Theme::veil(bg, 90, true);
+        let card_fill = interos_std::font::blend(launcher::theme::CARD_FROSTED_CREAM, bg, 240);
         if let Some(c) = p.date_weekday.pixel_aa(x, y, p.date_weekday.ink, card_fill) {
             return Some(c);
         }
@@ -1565,14 +1554,14 @@ fn card_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option
         return None;
     }
     if rounded_outline(f.card, x, y, 28) {
-        return Some(theme.border);
+        return Some(launcher::theme::DIVIDER_HAIRLINE);
     }
     let bg = backdrop_ref(&p.scene_ref, x, y);
-    let card_fill = Theme::veil(bg, 92, true);
+    let card_fill = interos_std::font::blend(launcher::theme::CARD_FROSTED_CREAM, bg, 245);
 
     // Dividers between rows
     if (y == 385 || y == 505) && x >= f.card.x + 24 && x <= f.card.x + f.card.w - 24 {
-        return Some(Theme::veil(card_fill, 15, false));
+        return Some(launcher::theme::DIVIDER_HAIRLINE);
     }
 
     if let Some(c) = p.card_title.pixel_aa(x, y, p.card_title.ink, card_fill) {
@@ -1701,7 +1690,7 @@ fn deck_pixel(x: usize, y: usize, f: &Frame, p: &Paint, _theme: &Theme) -> Optio
         return Some(launcher::theme::DIVIDER_HAIRLINE);
     }
     let bg = backdrop_ref(&p.scene_ref, x, y);
-    let tile_fill = Theme::veil(bg, 92, true);
+    let tile_fill = interos_std::font::blend(launcher::theme::CARD_FROSTED_CREAM, bg, 240);
 
     if let Some(kind) = tile.icon {
         if let Some(c) = launcher::icons::rasterize_icon_pixel_scaled_aa(
@@ -1742,10 +1731,10 @@ fn search_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Opti
         return None;
     }
     if rounded_outline(f.search, x, y, 28) {
-        return Some(theme.border);
+        return Some(launcher::theme::DIVIDER_HAIRLINE);
     }
     let bg = backdrop_ref(&p.scene_ref, x, y);
-    let search_fill = Theme::veil(bg, 75, true);
+    let search_fill = interos_std::font::blend(launcher::theme::CARD_FROSTED_CREAM, bg, 240);
     let ink = theme.text_muted;
 
     // Magnifier: ring plus handle
@@ -1797,16 +1786,16 @@ pub fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         if let Some(c) = greeting_pixel(x, y, &p.frame, p, &theme) {
             return c;
         }
-    } else if y < 695 {
+    } else if y < 665 {
         if let Some(c) = card_pixel(x, y, &p.frame, p, &theme) {
             return c;
         }
-    } else if y >= 720 && y < 1180 {
-        if let Some(c) = deck_pixel(x, y, &p.frame, p, &theme) {
+    } else if y >= 665 && y < 735 {
+        if let Some(c) = search_pixel(x, y, &p.frame, p, &theme) {
             return c;
         }
-    } else if y >= 1315 && y < 1390 {
-        if let Some(c) = search_pixel(x, y, &p.frame, p, &theme) {
+    } else if y >= 745 && y < 1050 {
+        if let Some(c) = deck_pixel(x, y, &p.frame, p, &theme) {
             return c;
         }
     } else if y >= 1390 {

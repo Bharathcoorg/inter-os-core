@@ -139,6 +139,43 @@ impl<'a> Surface<'a> {
         true
     }
 
+    /// Creates a Surface targeting the canonical native physical scanout (1080x2160).
+    pub fn new_scanout(pixels: &'a mut [u32]) -> Result<Self, &'static str> {
+        Self::new(
+            pixels,
+            super::viewport::SCANOUT_WIDTH,
+            super::viewport::SCANOUT_HEIGHT,
+        )
+    }
+
+    /// Draws an anti-aliased rounded rectangle with optional 1px/multi-px border.
+    pub fn draw_aa_rounded_rect(
+        &mut self,
+        rect_x: usize,
+        rect_y: usize,
+        rect_w: usize,
+        rect_h: usize,
+        radius_px: usize,
+        fill_argb: u32,
+        border_argb: Option<u32>,
+        border_width_px: usize,
+    ) {
+        draw_aa_rounded_rect_px(
+            self.pixels,
+            self.width,
+            self.width,
+            self.height,
+            rect_x,
+            rect_y,
+            rect_w,
+            rect_h,
+            radius_px,
+            fill_argb,
+            border_argb,
+            border_width_px,
+        );
+    }
+
     /// Returns the underlying pixel buffer as an immutable slice.
     pub fn pixels(&self) -> &[u32] {
         self.pixels
@@ -148,6 +185,169 @@ impl<'a> Surface<'a> {
     pub fn pixels_mut(&mut self) -> &mut [u32] {
         self.pixels
     }
+}
+
+/// Blends foreground ARGB color over background ARGB color using 8-bit coverage (0..=255).
+#[inline]
+pub fn blend_coverage_argb(fg: u32, bg: u32, coverage: u8) -> u32 {
+    if coverage == 0 {
+        return bg;
+    }
+    if coverage == 255 && (fg >> 24) == 0xFF {
+        return fg;
+    }
+    let a_fg = (fg >> 24) & 0xFF;
+    let r_fg = (fg >> 16) & 0xFF;
+    let g_fg = (fg >> 8) & 0xFF;
+    let b_fg = fg & 0xFF;
+
+    let a_bg = (bg >> 24) & 0xFF;
+    let r_bg = (bg >> 16) & 0xFF;
+    let g_bg = (bg >> 8) & 0xFF;
+    let b_bg = bg & 0xFF;
+
+    let eff_a = (a_fg * coverage as u32 + 127) / 255;
+    let inv_a = 255 - eff_a;
+
+    let out_r = (r_fg * eff_a + r_bg * inv_a + 127) / 255;
+    let out_g = (g_fg * eff_a + g_bg * inv_a + 127) / 255;
+    let out_b = (b_fg * eff_a + b_bg * inv_a + 127) / 255;
+    let out_a = (a_fg * eff_a + a_bg * inv_a + 127) / 255;
+
+    (out_a << 24) | (out_r << 16) | (out_g << 8) | out_b
+}
+
+/// Renders a rectangle with 8-bit coverage-antialiased rounded corners and optional 1px border.
+pub fn draw_aa_rounded_rect_px(
+    target: &mut [u32],
+    stride: usize,
+    target_w: usize,
+    target_h: usize,
+    rect_x: usize,
+    rect_y: usize,
+    rect_w: usize,
+    rect_h: usize,
+    radius_px: usize,
+    fill_argb: u32,
+    border_argb: Option<u32>,
+    border_width_px: usize,
+) {
+    if rect_w == 0 || rect_h == 0 || stride == 0 {
+        return;
+    }
+    let r = radius_px.min(rect_w / 2).min(rect_h / 2);
+    let r_i32 = r as i32;
+    let y_max = (rect_y + rect_h).min(target_h);
+    let x_max = (rect_x + rect_w).min(target_w);
+    let border_w_i32 = border_width_px as i32;
+
+    for y in rect_y..y_max {
+        let row_idx = y * stride;
+        let in_top = r > 0 && y < rect_y + r;
+        let in_bottom = r > 0 && y >= rect_y + rect_h - r;
+        let cy = if in_top {
+            (rect_y + r) as i32
+        } else if in_bottom {
+            (rect_y + rect_h - r - 1) as i32
+        } else {
+            0
+        };
+
+        for x in rect_x..x_max {
+            let idx = row_idx + x;
+            if idx >= target.len() {
+                continue;
+            }
+            let in_left = r > 0 && x < rect_x + r;
+            let in_right = r > 0 && x >= rect_x + rect_w - r;
+
+            if (in_left || in_right) && (in_top || in_bottom) {
+                let cx = if in_left {
+                    (rect_x + r) as i32
+                } else {
+                    (rect_x + rect_w - r - 1) as i32
+                };
+                let dx = (x as i32) - cx;
+                let dy = (y as i32) - cy;
+                let dist_sq = dx * dx + dy * dy;
+
+                if dist_sq > (r_i32 + 1) * (r_i32 + 1) {
+                    continue;
+                }
+
+                // Sub-pixel 8-bit coverage calculation along corner arc
+                let coverage = if dist_sq <= (r_i32.saturating_sub(1)) * (r_i32.saturating_sub(1)) {
+                    255u8
+                } else {
+                    let dist_approx = isqrt_approx(dist_sq);
+                    let edge_lo = (r_i32 * 256) - 128;
+                    let edge_hi = (r_i32 * 256) + 128;
+                    if dist_approx <= edge_lo {
+                        255u8
+                    } else if dist_approx >= edge_hi {
+                        0u8
+                    } else {
+                        let cov = 255 - ((dist_approx - edge_lo) * 255 / (edge_hi - edge_lo));
+                        cov.clamp(0, 255) as u8
+                    }
+                };
+
+                if coverage == 0 {
+                    continue;
+                }
+
+                if let Some(b_color) = border_argb {
+                    if border_width_px > 0 {
+                        let inner_r = r_i32.saturating_sub(border_w_i32);
+                        if dist_sq >= inner_r * inner_r {
+                            target[idx] = blend_coverage_argb(b_color, target[idx], coverage);
+                            continue;
+                        }
+                    }
+                }
+                target[idx] = blend_coverage_argb(fill_argb, target[idx], coverage);
+                continue;
+            }
+
+            // Straight edges
+            if let Some(b_color) = border_argb {
+                if border_width_px > 0
+                    && (x < rect_x + border_width_px
+                        || x >= rect_x + rect_w - border_width_px
+                        || y < rect_y + border_width_px
+                        || y >= rect_y + rect_h - border_width_px)
+                {
+                    target[idx] = blend_coverage_argb(b_color, target[idx], 255);
+                    continue;
+                }
+            }
+            target[idx] = blend_coverage_argb(fill_argb, target[idx], 255);
+        }
+    }
+}
+
+#[inline]
+fn isqrt_approx(n: i32) -> i32 {
+    if n <= 0 {
+        return 0;
+    }
+    let n_shifted = (n as u64) << 16;
+    let mut root = 0u64;
+    let mut bit = 1u64 << 46;
+    while bit > n_shifted {
+        bit >>= 2;
+    }
+    let mut remainder = n_shifted;
+    while bit != 0 {
+        if remainder >= root + bit {
+            remainder -= root + bit;
+            root = (root >> 1) + bit;
+        } else {
+            root >>= 1;
+        }
+        bit >>= 2;
+    }
+    root as i32
 }
 
 // `Dimensions` comes from the blanket impl over `OriginDimensions` below, so it
@@ -571,5 +771,41 @@ mod tests {
         // Mutable slice manipulation
         surface.pixels_mut()[0] = 0xFFAABBCC;
         assert_eq!(surface.get(0, 0), Some(0xFFAABBCC));
+    }
+
+    #[test]
+    fn test_blend_coverage_argb_ramp() {
+        let fg = 0xFFFFFFFF;
+        let bg = 0xFF000000;
+        assert_eq!(blend_coverage_argb(fg, bg, 0), bg);
+        assert_eq!(blend_coverage_argb(fg, bg, 255), fg);
+        let mid = blend_coverage_argb(fg, bg, 128);
+        let r = (mid >> 16) & 0xFF;
+        assert!(r >= 127 && r <= 129);
+    }
+
+    #[test]
+    fn test_draw_aa_rounded_rect_px_rendering() {
+        let mut target = [0xFF000000u32; 50 * 50];
+        draw_aa_rounded_rect_px(
+            &mut target,
+            50,
+            50,
+            50,
+            5,
+            5,
+            40,
+            40,
+            8,
+            0xFFFFFFFF,
+            Some(0xFF888888),
+            1,
+        );
+        // Center of rect should be white fill
+        assert_eq!(target[25 * 50 + 25], 0xFFFFFFFF);
+        // Outside rect should be black background
+        assert_eq!(target[0], 0xFF000000);
+        // Top-left corner outside arc should be untouched
+        assert_eq!(target[5 * 50 + 5], 0xFF000000);
     }
 }

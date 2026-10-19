@@ -28,7 +28,7 @@ pub use file_manager::{
     MAX_ENTRY_NAME_LEN, MAX_PARSED_ENTRIES,
 };
 
-mod outline_text;
+use interos_std::design::outline_text;
 
 const W: usize = 720;
 const H: usize = 1440;
