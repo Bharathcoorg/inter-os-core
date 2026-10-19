@@ -1363,6 +1363,7 @@ const PLATE_ALPHA: u32 = 0xCC;
 /// `design::color` keeps the plate inside the palette; the alpha belongs to the
 /// plate rather than to the ink, so it is passed in instead of baked into a
 /// literal pair.
+#[allow(dead_code)]
 #[inline]
 const fn with_alpha(color: u32, alpha: u32) -> u32 {
     (color & 0x00FF_FFFF) | (alpha << 24)
@@ -4516,6 +4517,256 @@ fn profile_segment_at(px: u32, py: u32) -> Option<usize> {
     None
 }
 
+/// Handles a capacitive tap input event on the Settings application surface.
+fn handle_tap(
+    settings: &mut SettingsApp,
+    input: &std::InputEvent,
+    surface: u32,
+    repainted_band: &mut bool,
+) {
+    let is_subpage = settings.sensors_open
+        || settings.wallpaper_open
+        || settings.screen_lock_open
+        || settings.current_section.is_some();
+    if is_subpage && std::design::back_button::contains(input.x as usize, input.y as usize) {
+        if settings.sensors_open {
+            settings.sensors_open = false;
+            std::log(
+                0,
+                "[SETTINGS APP] Sensors & Diagnostics sub-page dismissed.",
+            )
+            .ok();
+        } else if settings.screen_lock_open {
+            if !settings.screen_lock_cancel_step() {
+                settings.screen_lock_open = false;
+                std::log(
+                    0,
+                    "[SETTINGS APP] Screen lock panel dismissed.",
+                )
+                .ok();
+            }
+        } else if settings.wallpaper_open {
+            settings.wallpaper_open = false;
+            std::log(
+                0,
+                "[SETTINGS APP] Wallpaper picker dismissed without applying a change.",
+            )
+            .ok();
+        } else {
+            match settings.current_section {
+                Some(_) => {
+                    settings.current_section = None;
+                    std::log(
+                        0,
+                        "[SETTINGS APP] Back navigation: returned to the System Space landing grid.",
+                    )
+                    .ok();
+                }
+                None => {}
+            }
+        }
+    } else if input.x >= 240 && input.x <= 480 && input.y >= 1400 {
+        std::log(
+            0,
+            "[SETTINGS APP] Home gesture pressed. Exiting to launcher.",
+        )
+        .ok();
+        if surface > 0 {
+            let _ = std::surface_destroy(6, surface);
+        }
+        std::exit_with_code(0);
+    } else if settings.sensors_open {
+        // Any tap on Sensors surface refreshes live sensor telemetry
+        settings.refresh_thermals_and_sensors();
+    } else if settings.screen_lock_open {
+        match screen_lock_at(input.x, input.y, settings) {
+            Some(ScreenLockHit::Digit(d)) => {
+                settings.screen_lock_push(d);
+                if surface > 0 {
+                    render_settings_band(
+                        surface,
+                        settings,
+                        SL_PROMPT_Y - 24,
+                        SL_KEYS_Y,
+                    );
+                    let _ = std::surface_flip(6);
+                    *repainted_band = true;
+                }
+            }
+            Some(ScreenLockHit::Clear) => {
+                settings.screen_lock_pop();
+                if surface > 0 {
+                    render_settings_band(
+                        surface,
+                        settings,
+                        SL_PROMPT_Y - 24,
+                        SL_KEYS_Y,
+                    );
+                    let _ = std::surface_flip(6);
+                    *repainted_band = true;
+                }
+            }
+            Some(ScreenLockHit::Submit) => {
+                let was_typing = settings.screen_lock_mode
+                    != ScreenLockMode::Idle;
+                settings.screen_lock_submit();
+                let still_typing =
+                    settings.screen_lock_mode != ScreenLockMode::Idle;
+                if surface > 0 && was_typing && still_typing {
+                    render_settings_band(
+                        surface,
+                        settings,
+                        SL_PROMPT_Y - 24,
+                        SL_KEYS_Y,
+                    );
+                    let _ = std::surface_flip(6);
+                    *repainted_band = true;
+                }
+            }
+            Some(ScreenLockHit::Primary) => {
+                let action = if settings.screen_lock_has_pin() {
+                    ScreenLockAction::Change
+                } else {
+                    ScreenLockAction::Establish
+                };
+                settings.screen_lock_begin(action);
+            }
+            Some(ScreenLockHit::Remove) => {
+                settings.screen_lock_begin(ScreenLockAction::Remove)
+            }
+            None => {}
+        }
+    } else if settings.wallpaper_open {
+        match wallpaper_at(input.x, input.y) {
+            Some(WallpaperHit::Target(i)) => {
+                settings.wallpaper_target = WallpaperTarget::from_index(i);
+                std::log(0, "[SETTINGS APP] Wallpaper target changed.").ok();
+            }
+            Some(WallpaperHit::Cell(i)) => {
+                if i < std::design::walls::SCENES.len() {
+                    let scene = &std::design::walls::SCENES[i];
+                    settings.wallpaper_pending = Some(scene);
+                    std::log(
+                        0,
+                        "[SETTINGS APP] Wallpaper selected for preview; nothing written yet.",
+                    )
+                    .ok();
+                }
+            }
+            Some(WallpaperHit::Apply) => settings.apply_wallpaper(),
+            Some(WallpaperHit::Reset) => settings.reset_wallpaper(),
+            Some(WallpaperHit::ChooseGallery) => {
+                std::log(0, "[SETTINGS APP] Launching Gallery for wallpaper selection.").ok();
+                let _ = std::app_launch("org.interos.gallery");
+            }
+            None => {}
+        }
+    } else if settings.current_section == Some(Section::Personal) {
+        let (cy, ch) = detail_row_rect(Section::Personal, 2);
+        if in_round_rect(
+            input.x as usize,
+            input.y as usize,
+            DETAIL_X,
+            cy,
+            DETAIL_W,
+            ch,
+            CARD_R,
+        ) {
+            settings.open_wallpapers();
+        }
+    } else if let Some(section) = settings.current_section {
+        match section {
+            Section::Device => {
+                let (cy, ch) = detail_row_rect(Section::Device, 4);
+                if in_round_rect(
+                    input.x as usize,
+                    input.y as usize,
+                    DETAIL_X,
+                    cy,
+                    DETAIL_W,
+                    ch,
+                    CARD_R,
+                ) {
+                    settings.sensors_open = true;
+                    settings.refresh_thermals_and_sensors();
+                    std::log(
+                        0,
+                        "[SETTINGS APP] Sensors & Diagnostics sub-page opened.",
+                    )
+                    .ok();
+                }
+            }
+            Section::Power => {
+                if let Some(i) = profile_segment_at(input.x, input.y) {
+                    let profile = match i {
+                        0 => PowerProfile::Performance,
+                        1 => PowerProfile::Balanced,
+                        _ => PowerProfile::PowerSaver,
+                    };
+                    settings.apply_power_profile(profile);
+                }
+            }
+            Section::System => {
+                let (cy, ch) = detail_row_rect(Section::System, 4);
+                if in_round_rect(
+                    input.x as usize,
+                    input.y as usize,
+                    DETAIL_X,
+                    cy,
+                    DETAIL_W,
+                    ch,
+                    CARD_R,
+                ) {
+                    settings.toggle_terminal();
+                }
+            }
+            Section::Security => {
+                let (cy, ch) = detail_row_rect(Section::Security, 0);
+                if in_round_rect(
+                    input.x as usize,
+                    input.y as usize,
+                    DETAIL_X,
+                    cy,
+                    DETAIL_W,
+                    ch,
+                    CARD_R,
+                ) {
+                    settings.open_screen_lock();
+                }
+            }
+            _ => {}
+        }
+    } else if settings.current_section.is_none() && (110..=170).contains(&input.y) {
+        // Gated hero/search tap region: route taps to power/thermals when on landing screen only
+        let section = if input.x < 300 {
+            Section::Power
+        } else {
+            Section::Device
+        };
+        settings.current_section = Some(section);
+        if section == Section::System {
+            settings.display_about_device();
+        }
+        settings.refresh_wallpaper_values();
+        std::log(
+            0,
+            "[SETTINGS APP] System Space category opened; tab switched.",
+        )
+        .ok();
+    } else if let Some(section) = landing_card_at(input.x, input.y) {
+        settings.current_section = Some(section);
+        if section == Section::System {
+            settings.display_about_device();
+        }
+        settings.refresh_wallpaper_values();
+        std::log(
+            0,
+            "[SETTINGS APP] System Space category opened; tab switched.",
+        )
+        .ok();
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     std::log(
@@ -4595,293 +4846,8 @@ pub extern "C" fn _start() -> ! {
                         std::exit_with_code(0);
                     }
                     if input.kind == 1 {
-                        // WHY this flag: the repaint at the end of this block runs
-                        // for EVERY tap, so a branch that has already repainted
-                        // the only band it changed would be immediately followed
-                        // by a full 1,036,800-pixel repaint -- which is what
-                        // dropped the taps that followed a PIN digit.
                         let mut repainted_band = false;
-                        // Back control: pop sub-page to landing grid or parent detail.
-                        // Home gesture bar always exits to the launcher.
-                        let is_subpage = settings.sensors_open
-                            || settings.wallpaper_open
-                            || settings.screen_lock_open
-                            || settings.current_section.is_some();
-                        if is_subpage && std::design::back_button::contains(input.x as usize, input.y as usize) {
-                            // WHY the panels pop first: Back from one must return to the
-                            // detail it was opened from, and a Back that jumped
-                            // straight to the landing grid would lose the section
-                            // the user was in. Neither panel writes on the way
-                            // out, so leaving one is always the cancel path.
-                            if settings.sensors_open {
-                                settings.sensors_open = false;
-                                std::log(
-                                    0,
-                                    "[SETTINGS APP] Sensors & Diagnostics sub-page dismissed.",
-                                )
-                                .ok();
-                            } else if settings.screen_lock_open {
-                                // A step in progress is abandoned before the
-                                // panel itself: Back must not leave a half-typed
-                                // PIN behind for the next visit to find.
-                                if !settings.screen_lock_cancel_step() {
-                                    settings.screen_lock_open = false;
-                                    std::log(
-                                        0,
-                                        "[SETTINGS APP] Screen lock panel dismissed.",
-                                    )
-                                    .ok();
-                                }
-                            } else if settings.wallpaper_open {
-                                settings.wallpaper_open = false;
-                                std::log(
-                                    0,
-                                    "[SETTINGS APP] Wallpaper picker dismissed without applying a change.",
-                                )
-                                .ok();
-                            } else {
-                                match settings.current_section {
-                                    Some(_) => {
-                                        settings.current_section = None;
-                                        std::log(
-                                            0,
-                                            "[SETTINGS APP] Back navigation: returned to the System Space landing grid.",
-                                        )
-                                        .ok();
-                                    }
-                                    None => {}
-                                }
-                            }
-                        } else if input.x >= 240 && input.x <= 480 && input.y >= 1400 {
-                            std::log(
-                                0,
-                                "[SETTINGS APP] Home gesture pressed. Exiting to launcher.",
-                            )
-                            .ok();
-                            if surface > 0 {
-                                let _ = std::surface_destroy(6, surface);
-                            }
-                            std::exit_with_code(0);
-                        } else if settings.sensors_open {
-                            // Any tap on Sensors surface refreshes live sensor telemetry
-                            settings.refresh_thermals_and_sensors();
-                        } else if settings.screen_lock_open {
-                            // WHY the panel is matched before the section controls:
-                            // while it is open it owns the whole surface, so a tap on
-                            // a keypad key must not also reach the detail row
-                            // underneath it -- that is how a PIN digit would once
-                            // toggle a setting on a screen the owner is not looking
-                            // at.
-                            match screen_lock_at(input.x, input.y, &settings) {
-                                Some(ScreenLockHit::Digit(d)) => {
-                                    settings.screen_lock_push(d);
-                                    // WHY only the prompt band: a digit changes the
-                                    // dots and nothing else, and a full repaint
-                                    // here is what made taps get dropped.
-                                    if surface > 0 {
-                                        render_settings_band(
-                                            surface,
-                                            &settings,
-                                            SL_PROMPT_Y - 24,
-                                            SL_KEYS_Y,
-                                        );
-                                        let _ = std::surface_flip(6);
-                                        repainted_band = true;
-                                    }
-                                }
-                                Some(ScreenLockHit::Clear) => {
-                                    settings.screen_lock_pop();
-                                    if surface > 0 {
-                                        render_settings_band(
-                                            surface,
-                                            &settings,
-                                            SL_PROMPT_Y - 24,
-                                            SL_KEYS_Y,
-                                        );
-                                        let _ = std::surface_flip(6);
-                                        repainted_band = true;
-                                    }
-                                }
-                                Some(ScreenLockHit::Submit) => {
-                                    // WHY the mode is compared across the submit:
-                                    // OK between two entry steps changes the
-                                    // prompt and the dots and leaves the keypad on
-                                    // screen, so it repaints that band only. OK
-                                    // that finishes a write returns to the
-                                    // overview, hides the keypad and re-reads the
-                                    // account layer, which needs the full surface.
-                                    let was_typing = settings.screen_lock_mode
-                                        != ScreenLockMode::Idle;
-                                    settings.screen_lock_submit();
-                                    let still_typing =
-                                        settings.screen_lock_mode != ScreenLockMode::Idle;
-                                    if surface > 0 && was_typing && still_typing {
-                                        render_settings_band(
-                                            surface,
-                                            &settings,
-                                            SL_PROMPT_Y - 24,
-                                            SL_KEYS_Y,
-                                        );
-                                        let _ = std::surface_flip(6);
-                                        repainted_band = true;
-                                    }
-                                }
-                                Some(ScreenLockHit::Primary) => {
-                                    // WHY the action follows the reported state
-                                    // rather than being fixed at paint time: the
-                                    // same button is "set" for an account with no
-                                    // PIN and "change" for one that has it, and the
-                                    // state is re-read after every write.
-                                    let action = if settings.screen_lock_has_pin() {
-                                        ScreenLockAction::Change
-                                    } else {
-                                        ScreenLockAction::Establish
-                                    };
-                                    settings.screen_lock_begin(action);
-                                }
-                                Some(ScreenLockHit::Remove) => {
-                                    settings.screen_lock_begin(ScreenLockAction::Remove)
-                                }
-                                None => {}
-                            }
-                        } else if settings.wallpaper_open {
-                            // WHY this is checked before the section controls: the
-                            // picker owns the whole surface while it is open, so a
-                            // tap must not fall through to a detail row underneath
-                            // it -- that is how a wallpaper tap would once toggle a
-                            // setting two screens away.
-                            match wallpaper_at(input.x, input.y) {
-                                Some(WallpaperHit::Target(i)) => {
-                                    settings.wallpaper_target = WallpaperTarget::from_index(i);
-                                    std::log(0, "[SETTINGS APP] Wallpaper target changed.").ok();
-                                }
-                                Some(WallpaperHit::Cell(i)) => {
-                                    // WHY browsing past the catalogue is impossible:
-                                    // the gallery is generated from
-                                    // `walls::SCENES`, so its hit-test cannot name
-                                    // an index the catalogue does not hold.
-                                    if i < std::design::walls::SCENES.len() {
-                                        // WHY the reference is taken straight out
-                                        // of the catalogue: the gallery's cells are
-                                        // the catalogue's scenes, so a selection is
-                                        // a `&'static` scene and no copy of it is
-                                        // ever made into the app's state.
-                                        let scene = &std::design::walls::SCENES[i];
-                                        settings.wallpaper_pending = Some(scene);
-                                        std::log(
-                                            0,
-                                            "[SETTINGS APP] Wallpaper selected for preview; nothing written yet.",
-                                        )
-                                        .ok();
-                                    }
-                                }
-                                Some(WallpaperHit::Apply) => settings.apply_wallpaper(),
-                                Some(WallpaperHit::Reset) => settings.reset_wallpaper(),
-                                Some(WallpaperHit::ChooseGallery) => {
-                                    std::log(0, "[SETTINGS APP] Launching Gallery for wallpaper selection.").ok();
-                                    let _ = std::app_launch("org.interos.gallery");
-                                }
-                                None => {}
-                            }
-                        } else if settings.current_section == Some(Section::Personal) {
-                            // WHY the wallpaper row is opened after the picker
-                            // branch: while the picker is open it owns the whole
-                            // surface, and a tap in the panel must not also reach a
-                            // detail row underneath it. With the picker closed this
-                            // branch is the only route into it.
-                            let (cy, ch) = detail_row_rect(Section::Personal, 2);
-                            if in_round_rect(
-                                input.x as usize,
-                                input.y as usize,
-                                DETAIL_X,
-                                cy,
-                                DETAIL_W,
-                                ch,
-                                CARD_R,
-                            ) {
-                                settings.open_wallpapers();
-                            }
-                        } else if let Some(section) = settings.current_section {
-                            // Detail-screen controls (hit cells match the drawn
-                            // geometry exactly).
-                            match section {
-                                Section::Device => {
-                                    let (cy, ch) = detail_row_rect(Section::Device, 4);
-                                    if in_round_rect(
-                                        input.x as usize,
-                                        input.y as usize,
-                                        DETAIL_X,
-                                        cy,
-                                        DETAIL_W,
-                                        ch,
-                                        CARD_R,
-                                    ) {
-                                        settings.sensors_open = true;
-                                        settings.refresh_thermals_and_sensors();
-                                        std::log(
-                                            0,
-                                            "[SETTINGS APP] Sensors & Diagnostics sub-page opened.",
-                                        )
-                                        .ok();
-                                    }
-                                }
-                                Section::Power => {
-                                    if let Some(i) = profile_segment_at(input.x, input.y) {
-                                        let profile = match i {
-                                            0 => PowerProfile::Performance,
-                                            1 => PowerProfile::Balanced,
-                                            _ => PowerProfile::PowerSaver,
-                                        };
-                                        settings.apply_power_profile(profile);
-                                    }
-                                }
-                                Section::System => {
-                                    let (cy, ch) = detail_row_rect(Section::System, 4);
-                                    if in_round_rect(
-                                        input.x as usize,
-                                        input.y as usize,
-                                        DETAIL_X,
-                                        cy,
-                                        DETAIL_W,
-                                        ch,
-                                        CARD_R,
-                                    ) {
-                                        settings.toggle_terminal();
-                                    }
-                                }
-                                Section::Security => {
-                                    let (cy, ch) = detail_row_rect(Section::Security, 0);
-                                    if in_round_rect(
-                                        input.x as usize,
-                                        input.y as usize,
-                                        DETAIL_X,
-                                        cy,
-                                        DETAIL_W,
-                                        ch,
-                                        CARD_R,
-                                    ) {
-                                        settings.open_screen_lock();
-                                    }
-                                }
-                                _ => {}
-                            }
-                        } else if let Some(section) = landing_card_at(input.x, input.y) {
-                            settings.current_section = Some(section);
-                            if section == Section::System {
-                                settings.display_about_device();
-                            }
-                            // WHY the wallpaper reading is refreshed on entry to a
-                            // detail: the Personal row reports what the store holds,
-                            // and the value only changes when another surface (the
-                            // picker, a previous visit) wrote it. Reading it once
-                            // when the detail opens is the whole cost.
-                            settings.refresh_wallpaper_values();
-                            std::log(
-                                0,
-                                "[SETTINGS APP] System Space category opened; tab switched.",
-                            )
-                            .ok();
-                        }
+                        handle_tap(&mut settings, &input, surface, &mut repainted_band);
                         if surface > 0 && !repainted_band {
                             render_settings_ui(surface, &settings);
                             let _ = std::surface_flip(6);

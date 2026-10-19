@@ -328,7 +328,7 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                     let is_op = matches!(action, Some('/') | Some('*') | Some('-') | Some('+'));
                     let is_equals = action == Some('=');
                     let is_clear = action == Some('C');
-                    let is_fn = matches!(action, Some('B') | Some('%') | Some('~') | Some('^'));
+                    let is_fn = matches!(action, Some('B') | Some('%') | Some('~') | Some('^') | Some('S'));
 
                     // Minimal Bauhaus / Nothing OS Keycap Palette
                     let (btn_bg, btn_border, text_color) = if is_active_op {
@@ -369,8 +369,8 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                             if let Some(c) = std::design::font::test_text_aa(x, y, x0, y0, 1, sym, text_color, btn_bg, true) {
                                 return c;
                             }
-                        } else if act == '^' {
-                            let sym = b"x^y";
+                        } else if act == '^' || act == 'S' {
+                            let sym = b"x^2";
                             let w = std::design::font::measure_bold(sym, 1);
                             let x0 = center_x.saturating_sub(w / 2);
                             let y0 = center_y.saturating_sub(12);
@@ -538,10 +538,11 @@ fn handle_keyboard_key(calc: &mut CalculatorState, code: u32) -> bool {
             calc.result_mode = false;
         }
         37 => {
-            calc.current_operand /= 100;
-            calc.result_mode = false;
+            calc.set_operation('%');
         }
-        94 => calc.set_operation('^'),
+        94 | 115 | 83 => {
+            calc.square();
+        }
         95 | 126 => calc.toggle_sign(),
         _ => return false,
     }
@@ -588,9 +589,13 @@ fn handle_touch_point(calc: &mut CalculatorState, x: u32, y: u32) -> Tap {
                                 calc.push_digit(digit);
                                 std::log(0, "[CALCULATOR] Keypad digit pressed.").ok();
                             }
-                            '+' | '-' | '*' | '/' | '^' => {
+                            '+' | '-' | '*' | '/' => {
                                 calc.set_operation(action);
                                 std::log(0, "[CALCULATOR] Keypad operator selected.").ok();
+                            }
+                            '^' | 'S' => {
+                                calc.square();
+                                std::log(0, "[CALCULATOR] Square evaluated.").ok();
                             }
                             '=' => {
                                 let res = calc.evaluate();

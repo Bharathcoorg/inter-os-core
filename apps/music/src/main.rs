@@ -514,9 +514,9 @@ const TRACKLIST_ROW_H: usize = 96;
 const ADD_BTN: Rect = Rect { x: 24 + 672 - 168, y: 1072, w: 168, h: 40 };
 /// Add-track editor fields, shown while `add_open` in the track-list band.
 const ADD_TITLE_FIELD: Rect = Rect { x: 24, y: 1140, w: 672, h: 48 };
-const ADD_DUR_FIELD: Rect = Rect { x: 24, y: 1196, w: 400, h: 48 };
-const ADD_SAVE_BTN: Rect = Rect { x: 436, y: 1196, w: 128, h: 48 };
-const ADD_CANCEL_BTN: Rect = Rect { x: 576, y: 1196, w: 120, h: 48 };
+const ADD_DUR_FIELD: Rect = Rect { x: 24, y: 1196, w: 264, h: 48 };
+const ADD_SAVE_BTN: Rect = Rect { x: 300, y: 1196, w: 200, h: 48 };
+const ADD_CANCEL_BTN: Rect = Rect { x: 512, y: 1196, w: 184, h: 48 };
 /// Title bytes the add editor holds. Matches the store's per-record title width.
 const ADD_TITLE_CAP: usize = 40;
 /// Duration digits the add editor holds (whole seconds, up to 5 digits).
@@ -593,7 +593,11 @@ fn text_in_rect_centered(
 ) -> Option<u32> {
     let w = font::measure(s, scale);
     let x0 = rect.x + rect.w.saturating_sub(w) / 2;
-    let y0 = rect.y + rect.h.saturating_sub(font::line_height(scale)) / 2;
+    let y0 = if rect.h >= 16 * scale {
+        rect.y + (rect.h - 16 * scale) / 2 - 3 * scale
+    } else {
+        rect.y + rect.h.saturating_sub(font::line_height(scale)) / 2
+    };
     text(x, y, x0, y0, scale, s, color, bg)
 }
 
@@ -1098,7 +1102,7 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
                 y,
                 ADD_SAVE_BTN,
                 1,
-                b"ADD",
+                b"ADD TRACK",
                 TEXT,
                 SURFACE,
             ) {
@@ -1282,7 +1286,7 @@ fn repaint(surface: u32, app: &MusicApp, dirty: Dirty) {
             render_music_band(surface, app, TRANSPORT_Y0, TRANSPORT_Y1);
         }
         Dirty::Tracklist => {
-            render_music_band(surface, app, LIST_LABEL_Y, LIST_HIT_Y1);
+            render_music_band(surface, app, ADD_BTN.y, LIST_HIT_Y1);
         }
         Dirty::All => render_music_ui(surface, app),
     }

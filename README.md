@@ -57,9 +57,9 @@ See [Platform Reality Contract](docs/PLATFORM_REALITY_CONTRACT.md) and run `pyth
 | **Shared-Memory IPC** | Present | **Unit-tested / QEMU-verified** | Bounded ring buffers, atomic futex-like synchronization, capability endpoints |
 | **Cryptographic `.rapp` Packages** | Present | **Unit-tested / QEMU-verified** | `kernel/src/package/rapp.rs`; Ed25519 signatures, SHA-256 digests, RAPP v2/v3 parser |
 | **Process Lifecycle & Multitasking** | Present | **Unit-tested / QEMU-verified** | Ring-3 preemptive scheduler, PID tracking, `WaitPid` & `ExitWithCode` syscalls |
-| **DRM/KMS Multi-Surface Compositor** | Present | **QEMU-verified** | FHD+ (1080×2160) portrait scanout, 3:2 bilinear hardware upscaling from 720×1440 logical, double-buffered scanout with sub-band dirty present (`present_sub_band`), and 4-bit grayscale coverage anti-aliasing |
+| **DRM/KMS Multi-Surface Compositor** | Present | **QEMU-verified** | FHD+ (1080×2160) portrait scanout, 3:2 bilinear hardware upscaling from 720×1440 logical, double-buffered scanout with dirty row band present (`present_dst_row_band`), and 4-bit grayscale coverage anti-aliasing |
 | **Native Typography & UI Primitives** | Present | **Unit-tested / QEMU-verified** | Proportional 16×24 anti-aliased font (`test_text_aa`), tabular digits, squircle cards |
-| **Native Smartphone Applications** | Present | **Unit-tested / QEMU-verified** | 14 first-party applications in `apps/` (`launcher`, `settings`, `messages`, `dialer`, `camera`, `gallery`, `file_manager`, `calculator`, `vault`, `calendar`, `browser`, `terminal`, `music`, `card_demo`), all `#![no_std]` and `#![no_main]` with zero runtime heap allocations in render loops |
+| **Native Smartphone Applications** | Present | **Unit-tested / QEMU-verified** | 16 application crates in `apps/` (`launcher`, `settings`, `messages`, `dialer`, `camera`, `gallery`, `file_manager`, `calculator`, `vault`, `calendar`, `browser`, `terminal`, `music`, `sensor_dashboard`, `card_demo`, `compositor`), all `#![no_std]` and `#![no_main]` with zero runtime heap allocations in render loops |
 | **Android Compatibility Boundary (ACR)** | Experimental / Sandboxed | **Source-only / Unit-tested** | Fail-closed APK signature boundary, APK structure/manifest parsing, bounded DEX opcode subset, sandbox VFS and framework bridge; full Android app launch is not supported yet |
 | **Universal Device Studio** | Present | **QEMU-verified** | `emulator/server.py`; Web-based smartphone studio (`http://localhost:4300`) with persistent binary frame streaming (`/api/screen/binary_stream`), zero-overhead `ImageData` caching, live telemetry deck, and 1:1 touch/gesture pipeline |
 | **Unified Developer CLI (`interos`)** | Present | **Unit-tested** | `tools/interos.py`; `doctor`, `build`, `test`, `package`, `sign`, `verify`, `install`, `run` |
@@ -70,17 +70,16 @@ See [Platform Reality Contract](docs/PLATFORM_REALITY_CONTRACT.md) and run `pyth
 
 ## 📈 Empirical Sovereign Benchmarks
 
-Reproducible empirical measurements generated via `python tools/bench_interos.py`:
+Authentic empirical measurements captured via `python tools/bench_boot.py` and `python tools/bench_interos.py`:
 
 | Metric | Android 15 (AOSP) | iOS 18 | Ubuntu Touch | InterOS Sovereign |
 | :--- | :--- | :--- | :--- | :--- |
-| **Idle OS RAM** | ~2,600 MB | ~1,900 MB | ~850 MB | **18.3 MB** |
-| **OS Install / Storage Size** | ~18.5 GB | ~13.0 GB | ~4.2 GB | **4.47 MB** (`inter-os-release.img`) |
-| **Cold Boot Latency** | ~28.0 s | ~21.0 s | ~19.0 s | **< 0.50 s** |
-| **Per-App RAM Floor** | ~45 MB (JVM/ART) | ~35 MB | ~60 MB | **< 1.0 MB** |
+| **Active Kernel Heap** | ~2,600 MB (OS RAM) | ~1,900 MB | ~850 MB | **~30 MB** (64 MiB total pool) |
+| **OS Install / Image Size** | ~18.5 GB | ~13.0 GB | ~4.2 GB | **6.47 MB** (`inter-os-bios.img`) |
+| **Cold Boot Latency** | ~28.0 s | ~21.0 s | ~19.0 s | **~20–23 s** (QEMU TCG full launcher boot) |
 | **Interactive Render Allocations** | Dynamic GC Pauses | Dynamic ARC Heap | GObject / Heap | **0 bytes** (`#![no_std]` stack/static buffers) |
 | **Authority Model** | Ambient Linux Root | Mach Ports / Daemons | Ambient systemd | **Zero Ambient Authority** (`CapHandle`) |
-| **Kernel Implementation** | C / Linux kernel | C / XNU Mach-BSD | C / Linux kernel | **100% Pure Safe Rust** (`#![no_std]`) |
+| **Kernel Implementation** | C / Linux kernel | C / XNU Mach-BSD | C / Linux kernel | **Rust Microkernel** (`#![no_std]`, bounded `unsafe`) |
 
 ---
 
@@ -196,7 +195,7 @@ InterOS Core features a native smartphone UI pipeline engineered for `#![no_std]
 
 - **Logical vs. Physical Coordinate Space**:
   - **Logical Coordinate Space**: `720 × 1440` (1:2 aspect ratio) with defined safe area insets (Status bar: 48px, Nav pill: 64px).
-  - **Physical FHD+ Portrait Scanout**: Native `1080 × 2160` scanout plane. The display compositor performs double-buffered scanout with 3:2 bilinear hardware upscaling, full-bleed gamma-correct alpha blending, and dirty sub-band scanout (`present_sub_band`) that blits only modified row bands across the host scanout plane.
+  - **Physical FHD+ Portrait Scanout**: Native `1080 × 2160` scanout plane. The display compositor performs double-buffered scanout with 3:2 bilinear hardware upscaling, full-bleed gamma-correct alpha blending, and dirty sub-band scanout (`present_dst_row_band`) that blits only modified row bands across the host scanout plane.
   - **Zero Runtime Allocations**: All rasterization walks, shape drawing, and font coverage passes execute with strictly zero heap allocations (`alloc::vec::Vec`, `alloc::string::String`, `alloc::boxed::Box`), utilizing static/stack buffers (`LineBuf`, `[u32; N]`, fixed ring buffers).
 - **Typography Engine (`interos-std::design::font`)**:
   - Proportional 16×24 condensed typeface (`FONT`, `FONT_BOLD`).

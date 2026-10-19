@@ -72,8 +72,8 @@ pub fn fit_width(text: &[u8], scale: usize, max_w: usize, bold: bool) -> usize {
 /// Anti-aliased run draw. Only tests pixels inside the run's own line box and
 /// fits the bytes to `max_w` before touching the glyph table, so a run can
 /// never paint outside the box the layout reserved for it. `bg` is the surface
-/// under the text so the AA blend is correct. Returns true when `(x, y)`
-/// took ink from this run.
+/// under the text so the AA blend is correct. Returns `Some(color)` with 4-bit
+/// grayscale coverage AA blending when `(x, y)` took ink from this run, or `None`.
 ///
 /// WHY the outline face comes first: the header title is scale 2, so on the
 /// bitmap face it is a 16x24 cell magnified by an integer -- a soft ramp where

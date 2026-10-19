@@ -35,6 +35,9 @@ pub const DESC_AP_RW_EL0: u64 = 1 << 6;    // User EL0 accessible
 pub const DESC_SH_OUTER: u64 = 2 << 8;     // Outer Shareable
 pub const DESC_SH_INNER: u64 = 3 << 8;     // Inner Shareable
 pub const DESC_AF: u64 = 1 << 10;          // Access Flag (must be 1 to avoid fault)
+pub const DESC_PXN: u64 = 1 << 53;         // Privileged Execute-Never (EL1 execution forbidden)
+pub const DESC_UXN: u64 = 1 << 54;         // Unprivileged Execute-Never (EL0 execution forbidden)
+pub const DESC_XN: u64 = DESC_UXN;         // General Execute-Never for EL1 block entries
 
 // Static primordial page tables
 static mut L1_TABLE: PageTable = PageTable::empty();
@@ -73,49 +76,57 @@ impl ArmMmu {
             // 2. Level 1 Entry 0: Point to L2 Table for lower 1 GB (0x0000_0000 .. 0x3FFF_FFFF)
             L1_TABLE.entries[0] = l2_phys | DESC_TABLE | DESC_VALID;
 
-            // 3. Level 1 Entry 1: Map 1 GB DRAM (0x4000_0000 .. 0x7FFF_FFFF) as Normal Cacheable Memory
+            // 3. Level 1 Entry 1: Map 1 GB DRAM (0x4000_0000 .. 0x7FFF_FFFF) as Normal Cacheable Memory (Kernel)
             L1_TABLE.entries[1] = 0x4000_0000
                 | DESC_AF
                 | DESC_SH_INNER
                 | DESC_AP_RW_EL1
                 | DESC_ATTR_NORMAL
+                | DESC_UXN
                 | DESC_BLOCK
                 | DESC_VALID;
 
             // 4. Level 2 Table: Populate 2MB blocks for peripheral MMIO & EL0 Userspace
-            // Block 2 (0x0040_0000): EL0 Userspace Code Region (2MB)
+            // Block 2 (0x0040_0000): EL0 Userspace Code Region (2MB) - Executable at EL0, PXN at EL1
             L2_TABLE.entries[2] = 0x4400_0000
                 | DESC_AF
                 | DESC_SH_INNER
                 | DESC_AP_RW_ALL
                 | DESC_ATTR_NORMAL
+                | DESC_PXN
                 | DESC_BLOCK
                 | DESC_VALID;
 
-            // Block 4 (0x0080_0000): EL0 Userspace Stack Region (2MB)
+            // Block 4 (0x0080_0000): EL0 Userspace Stack Region (2MB) - Non-executable (PXN + UXN)
             L2_TABLE.entries[4] = 0x4420_0000
                 | DESC_AF
                 | DESC_SH_INNER
                 | DESC_AP_RW_ALL
                 | DESC_ATTR_NORMAL
+                | DESC_PXN
+                | DESC_UXN
                 | DESC_BLOCK
                 | DESC_VALID;
 
-            // Block 64 (0x0800_0000): GICv2 Distributor & CPU Interface (2MB)
+            // Block 64 (0x0800_0000): GICv2 Distributor & CPU Interface (2MB) - Device MMIO (PXN + UXN)
             L2_TABLE.entries[64] = 0x0800_0000
                 | DESC_AF
                 | DESC_SH_OUTER
                 | DESC_AP_RW_EL1
                 | DESC_ATTR_DEVICE
+                | DESC_PXN
+                | DESC_UXN
                 | DESC_BLOCK
                 | DESC_VALID;
 
-            // Block 72 (0x0900_0000): PrimeCell PL011 UART (2MB)
+            // Block 72 (0x0900_0000): PrimeCell PL011 UART (2MB) - Device MMIO (PXN + UXN)
             L2_TABLE.entries[72] = 0x0900_0000
                 | DESC_AF
                 | DESC_SH_OUTER
                 | DESC_AP_RW_EL1
                 | DESC_ATTR_DEVICE
+                | DESC_PXN
+                | DESC_UXN
                 | DESC_BLOCK
                 | DESC_VALID;
 
@@ -210,6 +221,8 @@ impl ArmMmu {
                     | DESC_SH_OUTER
                     | DESC_AP_RW_EL1
                     | DESC_ATTR_DEVICE
+                    | DESC_PXN
+                    | DESC_UXN
                     | DESC_BLOCK
                     | DESC_VALID;
             }
@@ -254,6 +267,8 @@ impl ArmMmu {
                         | DESC_SH_OUTER
                         | DESC_AP_RW_EL1
                         | DESC_ATTR_DEVICE
+                        | DESC_PXN
+                        | DESC_UXN
                         | DESC_BLOCK
                         | DESC_VALID;
                 }
@@ -283,6 +298,8 @@ impl ArmMmu {
                     | DESC_SH_OUTER
                     | DESC_AP_RW_EL1
                     | DESC_ATTR_DEVICE
+                    | DESC_PXN
+                    | DESC_UXN
                     | DESC_BLOCK
                     | DESC_VALID;
             }
@@ -334,6 +351,8 @@ impl ArmMmu {
                         | DESC_SH_OUTER
                         | DESC_AP_RW_EL1
                         | DESC_ATTR_DEVICE
+                        | DESC_PXN
+                        | DESC_UXN
                         | DESC_BLOCK
                         | DESC_VALID;
             }
@@ -408,6 +427,8 @@ impl ArmMmu {
                         | DESC_SH_OUTER
                         | DESC_AP_RW_EL1
                         | DESC_ATTR_DEVICE
+                        | DESC_PXN
+                        | DESC_UXN
                         | DESC_BLOCK
                         | DESC_VALID;
                 }

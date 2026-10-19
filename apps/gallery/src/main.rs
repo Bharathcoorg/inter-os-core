@@ -2807,7 +2807,7 @@ fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
     if y >= TAB_Y && y < TAB_Y + TAB_H {
         let tab_idx = (x * 4 / W).min(3);
         let new_tab = GalleryTab::from_index(tab_idx);
-        if new_tab != app.tab {
+        if new_tab != app.tab || app.filter != Filter::All {
             app.tab = new_tab;
             app.filter = Filter::All;
             std::log(0, "[GALLERY] Tab switched.").ok();

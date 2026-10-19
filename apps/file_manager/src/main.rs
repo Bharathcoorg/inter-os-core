@@ -123,7 +123,7 @@ const READOUT_LINE2_Y0: usize = READOUT_LINE1_Y0 + font::GLYPH_H + 8;
 /// nothing a touch can reach writes to the header - the storage readout is
 /// filled once, before the first present - so a band for it would never run.
 const ROW_BAND_Y0: usize = 150;
-const ROW_BAND_Y1: usize = 820;
+const ROW_BAND_Y1: usize = 800;
 
 /// Ink for an affordance that is painted but has nothing behind it.
 ///
@@ -240,7 +240,8 @@ pub struct FileManagerApp {
     pub selected_shortcut: usize,
     pub selected_entry: Option<usize>,
     pub storage_capacity_bytes: u64,
-    pub current_path: &'static str,
+    pub current_path: [u8; 128],
+    pub current_path_len: usize,
     /// What `fs_list` actually answered, pre-rendered.
     ///
     /// WHY a fixed buffer instead of formatting per pixel: `get_file_manager_color`
@@ -255,16 +256,78 @@ pub struct FileManagerApp {
 
 impl FileManagerApp {
     pub const fn new() -> Self {
+        let mut path = [0u8; 128];
+        let init = b"/data";
+        let mut i = 0;
+        while i < init.len() {
+            path[i] = init[i];
+            i += 1;
+        }
         Self {
             selected_shortcut: 0,
             selected_entry: None,
             storage_capacity_bytes: 0,
-            current_path: "/data",
+            current_path: path,
+            current_path_len: init.len(),
             probe_label: PROBE_DEFAULT,
             probe_label_len: 10,
             entries: [RuntimeFileEntry::EMPTY; MAX_PARSED_ENTRIES],
             entry_count: 0,
         }
+    }
+
+    #[inline]
+    pub fn current_path_str(&self) -> &str {
+        core::str::from_utf8(&self.current_path[..self.current_path_len]).unwrap_or("/data")
+    }
+
+    pub fn set_path(&mut self, path: &str) {
+        let bytes = path.as_bytes();
+        let len = bytes.len().min(self.current_path.len());
+        self.current_path[..len].copy_from_slice(&bytes[..len]);
+        self.current_path_len = len;
+    }
+
+    pub fn navigate_into(&mut self, entry_idx: usize) {
+        if entry_idx >= self.entry_count {
+            return;
+        }
+        let entry = self.entries[entry_idx];
+        if !entry.is_dir {
+            return;
+        }
+        let mut n = self.current_path_len;
+        if !self.current_path[..n].ends_with(b"/") && n < self.current_path.len() {
+            self.current_path[n] = b'/';
+            n += 1;
+        }
+        let name_slice = &entry.name[..entry.name_len];
+        let copy_len = name_slice.len().min(self.current_path.len().saturating_sub(n));
+        self.current_path[n..n + copy_len].copy_from_slice(&name_slice[..copy_len]);
+        self.current_path_len = n + copy_len;
+        self.selected_entry = None;
+        self.refresh_directory();
+    }
+
+    pub fn navigate_parent(&mut self) -> bool {
+        if &self.current_path[..self.current_path_len] == b"/data" {
+            return false;
+        }
+        let slice = &self.current_path[..self.current_path_len];
+        let last_slash = slice.iter().rposition(|&b| b == b'/');
+        match last_slash {
+            Some(0) | None => {
+                let init = b"/data";
+                self.current_path[..init.len()].copy_from_slice(init);
+                self.current_path_len = init.len();
+            }
+            Some(pos) => {
+                self.current_path_len = pos;
+            }
+        }
+        self.selected_entry = None;
+        self.refresh_directory();
+        true
     }
 
     /// Parses newline-delimited VFS entries in `<name>|<size>|<dir|dev|file>` format.
@@ -310,7 +373,7 @@ impl FileManagerApp {
     /// Refreshes entries by querying fs_list for current_path.
     pub fn refresh_directory(&mut self) {
         let mut entries = [0u8; 1024];
-        let probe = std::fs_list(fs_read_slot(), self.current_path, &mut entries);
+        let probe = std::fs_list(fs_read_slot(), self.current_path_str(), &mut entries);
         self.record_probe(probe);
         if let Ok(n) = probe {
             self.parse_entries(&entries[..n]);
@@ -388,7 +451,7 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
         // path that was really passed to `fs_list`; line 2 is the real outcome,
         // including a refusal, which is what this platform actually returns for
         // a path outside the task's storage root.
-        let path = app.current_path.as_bytes();
+        let path = &app.current_path[..app.current_path_len];
         let pw = font::measure(path, 1);
         if pw <= READOUT_MAX_W {
             if let Some(c) = test_text(
@@ -474,7 +537,7 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
         if row_selected && x < 44 {
             return ACCENT_SKY;
         }
-        let row_bg = if row_selected { SURFACE_RAISED } else { SURFACE_DARK };
+        let row_bg = if row_selected { 0xFF1D4ED8 } else { SURFACE_DARK };
 
         let center_y = row_start_y + (if row_idx == 5 { 40 } else { 45 });
         let icon_cx = 64i32;
@@ -604,7 +667,7 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
             if let Some(c) = test_text(x, y, 48, 842, 1, b"Directory Explorer", TEXT_PRIMARY, BG_DARK) {
                 return c;
             }
-            let path_bytes = app.current_path.as_bytes();
+            let path_bytes = &app.current_path[..app.current_path_len];
             if let Some(c) = test_text(x, y, 260, 842, 1, path_bytes, TEXT_MUTED, BG_DARK) {
                 return c;
             }
@@ -671,7 +734,7 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                     if is_selected && x < 44 {
                         return ACCENT_SKY;
                     }
-                    let entry_bg = if is_selected { SURFACE_RAISED } else { SURFACE_DARK };
+                    let entry_bg = if is_selected { 0xFF1D4ED8 } else { SURFACE_DARK };
 
                     // Icon glyph / indicator at x: 56..80
                     let icon_cx = 64isize;
@@ -858,7 +921,7 @@ pub extern "C" fn _start() -> ! {
     // actually been entitled to receive. The result is recorded on screen too,
     // so the header says what this app can actually see of the filesystem.
     let mut entries = [0u8; 1024];
-    let probe = std::fs_list(fs_read_slot(), app.current_path, &mut entries);
+    let probe = std::fs_list(fs_read_slot(), app.current_path_str(), &mut entries);
     app.record_probe(probe);
     match probe {
         Ok(n) => {
@@ -966,9 +1029,18 @@ fn handle_tap(app: &mut FileManagerApp, x: usize, y: usize) -> Tap {
     // exit the app while drawing nothing there - an invisible hotspot a user
     // could not find and could land on by accident. `BACK` is the same 52x52
     // pill the renderer paints, so the region is visible.
-    if BACK.contains(x, y) || HOME_HIT.contains(x, y) {
+    if HOME_HIT.contains(x, y) {
         return Tap::Leave(
-            "[FILE_MANAGER] Back control or home gesture pressed. Exiting to launcher.",
+            "[FILE_MANAGER] Home gesture pressed. Exiting to launcher.",
+        );
+    }
+    if BACK.contains(x, y) {
+        if app.navigate_parent() {
+            std::log(0, "[FILE_MANAGER] Navigated to parent directory.").ok();
+            return Tap::Redraw(Dirty::All);
+        }
+        return Tap::Leave(
+            "[FILE_MANAGER] Back control pressed at root. Exiting to launcher.",
         );
     }
 
@@ -1004,7 +1076,7 @@ fn handle_tap(app: &mut FileManagerApp, x: usize, y: usize) -> Tap {
         }
         app.selected_shortcut = shortcut;
         app.selected_entry = None;
-        app.current_path = match shortcut {
+        let new_path = match shortcut {
             1 => "/storage/photos",
             2 => "/storage/videos",
             3 => "/data",
@@ -1012,6 +1084,7 @@ fn handle_tap(app: &mut FileManagerApp, x: usize, y: usize) -> Tap {
             5 => "/storage",
             _ => "/data",
         };
+        app.set_path(new_path);
         app.refresh_directory();
         std::log(0, "[FILE_MANAGER] Category filter shortcut switched.").ok();
         return Tap::Redraw(Dirty::All);
@@ -1024,12 +1097,17 @@ fn handle_tap(app: &mut FileManagerApp, x: usize, y: usize) -> Tap {
     if (card_y0..card_y1).contains(&y) && (36..684).contains(&x) && app.entry_count > 0 {
         let entry_idx = (y - card_y0) / 56;
         if entry_idx < app.entry_count {
+            let entry = app.entries[entry_idx];
+            if entry.is_dir {
+                app.navigate_into(entry_idx);
+                std::log(0, "[FILE_MANAGER] Navigated into directory.").ok();
+                return Tap::Redraw(Dirty::All);
+            }
             app.selected_entry = Some(entry_idx);
-            let entry = &app.entries[entry_idx];
             let mime = detect_mime(&entry.name[..entry.name_len], entry.is_dir);
             if matches!(mime, FileMime::Image | FileMime::Video | FileMime::Audio | FileMime::Document) {
                 let mut path_buf = [0u8; 128];
-                let cp = app.current_path.as_bytes();
+                let cp = &app.current_path[..app.current_path_len];
                 let mut n = append(&mut path_buf, 0, cp);
                 if !cp.ends_with(b"/") {
                     n = append(&mut path_buf, n, b"/");

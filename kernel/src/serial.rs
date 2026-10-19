@@ -521,7 +521,7 @@ fn handle_rapp_command(s: &str) -> bool {
             }
             // Keep the physical scanout in lockstep with the KMS logical
             // scanout: present_argb8888 then blits 1:1 in both orientations
-            // (720x1440 portrait, 1280x720 landscape) with no downscale.
+            // (1080x2160 portrait, 2160x1080 landscape) with no downscale.
             // Called after the KMS guard is dropped so the two locks are
             // never held together.
             if !crate::framebuffer::set_physical_mode(phys_w, phys_h) {
@@ -535,34 +535,34 @@ fn handle_rapp_command(s: &str) -> bool {
         };
         match opt.as_deref() {
             Some("LANDSCAPE") | Some("LANDSCAPE_RIGHT") | Some("LANDSCAPERIGHT") => {
-                if !set_kms_orientation(crate::drivers::display_kms::DisplayOrientation::LandscapeRight, 1280, 720) {
+                if !set_kms_orientation(crate::drivers::display_kms::DisplayOrientation::LandscapeRight, 2160, 1080) {
                     serial_println!("[DISPLAY_HAL] REJECT orientation controller busy");
                     return true;
                 }
                 if let Some(mut sm) = crate::sensor::SENSOR_MANAGER.try_lock() {
                     sm.imu.accel = crate::sensor::Vector3D { x: 980, y: 0, z: 0 };
                 }
-                serial_println!("[DISPLAY_HAL] Orientation changed to LandscapeRight. KMS scanout updated to 1280x720 full landscape.");
+                serial_println!("[DISPLAY_HAL] Orientation changed to LandscapeRight. KMS scanout updated to 2160x1080 full landscape.");
             }
             Some("LANDSCAPE_LEFT") | Some("LANDSCAPELEFT") => {
-                if !set_kms_orientation(crate::drivers::display_kms::DisplayOrientation::LandscapeLeft, 1280, 720) {
+                if !set_kms_orientation(crate::drivers::display_kms::DisplayOrientation::LandscapeLeft, 2160, 1080) {
                     serial_println!("[DISPLAY_HAL] REJECT orientation controller busy");
                     return true;
                 }
                 if let Some(mut sm) = crate::sensor::SENSOR_MANAGER.try_lock() {
                     sm.imu.accel = crate::sensor::Vector3D { x: -980, y: 0, z: 0 };
                 }
-                serial_println!("[DISPLAY_HAL] Orientation changed to LandscapeLeft. KMS scanout updated to 1280x720 full landscape.");
+                serial_println!("[DISPLAY_HAL] Orientation changed to LandscapeLeft. KMS scanout updated to 2160x1080 full landscape.");
             }
             Some("PORTRAIT") => {
-                if !set_kms_orientation(crate::drivers::display_kms::DisplayOrientation::Portrait, 720, 1440) {
+                if !set_kms_orientation(crate::drivers::display_kms::DisplayOrientation::Portrait, 1080, 2160) {
                     serial_println!("[DISPLAY_HAL] REJECT orientation controller busy");
                     return true;
                 }
                 if let Some(mut sm) = crate::sensor::SENSOR_MANAGER.try_lock() {
                     sm.imu.accel = crate::sensor::Vector3D { x: 0, y: 980, z: 0 };
                 }
-                serial_println!("[DISPLAY_HAL] Orientation changed to Portrait. KMS scanout updated to 720x1440 centered scanout.");
+                serial_println!("[DISPLAY_HAL] Orientation changed to Portrait. KMS scanout updated to 1080x2160 centered scanout.");
             }
             _ => {
                 serial_println!("[DISPLAY_HAL] REJECT invalid orientation option");

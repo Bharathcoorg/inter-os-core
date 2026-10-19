@@ -300,6 +300,26 @@ impl DrmKmsController {
         next
     }
 
+    /// Re-indexes application surface z-orders (z < 1000) starting from 200 while preserving relative ordering.
+    pub fn rebase_app_z_orders(&mut self) {
+        let mut app_indices: Vec<usize> = (0..self.surfaces.len())
+            .filter(|&i| self.surfaces[i].z_order < 1000)
+            .collect();
+        app_indices.sort_by_key(|&i| (self.surfaces[i].z_order, self.surfaces[i].id));
+        let mut cur_z = 200u32;
+        let mut prev_old_z: Option<u32> = None;
+        for idx in app_indices {
+            let old_z = self.surfaces[idx].z_order;
+            if let Some(pz) = prev_old_z {
+                if old_z > pz {
+                    cur_z = cur_z.saturating_add(1);
+                }
+            }
+            prev_old_z = Some(old_z);
+            self.surfaces[idx].z_order = cur_z;
+        }
+    }
+
     /// Allocates a new client surface for application rendering.
     pub fn create_surface(&mut self, width: u32, height: u32, z_order: u32, owner_task: u64) -> u32 {
         let pixels = match (width as usize).checked_mul(height as usize) {
@@ -323,12 +343,31 @@ impl DrmKmsController {
             || owner_task == crate::services::task_id(crate::services::ServiceId::Compositor).map(|t| t.0).unwrap_or(u64::MAX);
         let kind = if is_overlay { crate::gui::WindowKind::SystemOverlay } else { crate::gui::WindowKind::Application };
         let actual_z = if z_order >= 200 && z_order < 1000 {
-            let max_z = self.surfaces.iter()
-                .filter(|s| s.z_order < 1000)
+            let offset = z_order.saturating_sub(200);
+            let task_base = self.surfaces.iter()
+                .filter(|s| s.owner_task == owner_task && s.z_order < 1000)
                 .map(|s| s.z_order)
-                .max()
-                .unwrap_or(200);
-            max_z.max(200).saturating_add(1)
+                .min();
+            if let Some(tb) = task_base {
+                tb.saturating_add(offset).min(900)
+            } else {
+                let max_z = self.surfaces.iter()
+                    .filter(|s| s.z_order < 1000)
+                    .map(|s| s.z_order)
+                    .max()
+                    .unwrap_or(200);
+                if max_z >= 900 {
+                    self.rebase_app_z_orders();
+                    let new_max = self.surfaces.iter()
+                        .filter(|s| s.z_order < 1000)
+                        .map(|s| s.z_order)
+                        .max()
+                        .unwrap_or(200);
+                    new_max.max(200).saturating_add(1).saturating_add(offset).min(900)
+                } else {
+                    max_z.max(200).saturating_add(1).saturating_add(offset).min(900)
+                }
+            }
         } else {
             z_order
         };
@@ -574,23 +613,51 @@ impl DrmKmsController {
         false
     }
 
-    /// Raises all application surfaces owned by `owner_task` above all other application surfaces.
+    /// Raises all application surfaces owned by `owner_task` above all other application surfaces,
+    /// preserving distinct relative z-order among task surfaces and clamping below overlay boundary (z < 1000).
     pub fn raise_surfaces_for_task(&mut self, owner_task: u64) {
         let max_app_z = self.surfaces.iter()
             .filter(|s| s.z_order < 1000)
             .map(|s| s.z_order)
             .max()
             .unwrap_or(200);
-        let new_z = max_app_z.max(200).saturating_add(1);
+        if max_app_z >= 900 {
+            self.rebase_app_z_orders();
+        }
+
+        let min_task_z = self.surfaces.iter()
+            .filter(|s| s.owner_task == owner_task && s.z_order < 1000)
+            .map(|s| s.z_order)
+            .min();
+
+        let Some(min_z) = min_task_z else { return; };
+
+        let max_other_z = self.surfaces.iter()
+            .filter(|s| s.owner_task != owner_task && s.z_order < 1000)
+            .map(|s| s.z_order)
+            .max()
+            .unwrap_or(200);
+
+        let base_z = max_other_z.max(200).saturating_add(1);
         let mut raised_any = false;
+        let mut top_id = None;
+        let mut top_z = 0;
+
         for s in self.surfaces.iter_mut() {
             if s.owner_task == owner_task && s.z_order < 1000 {
-                s.z_order = new_z;
+                let offset = s.z_order.saturating_sub(min_z);
+                s.z_order = base_z.saturating_add(offset).min(999);
                 s.visible = true;
                 s.dirty = true;
-                self.focused_surface = Some(s.id);
+                if s.z_order >= top_z {
+                    top_z = s.z_order;
+                    top_id = Some(s.id);
+                }
                 raised_any = true;
             }
+        }
+        if let Some(id) = top_id {
+            self.focused_surface = Some(id);
         }
         if raised_any {
             self.frame_dirty = true;
@@ -1808,6 +1875,73 @@ mod tests {
 
         assert!(kms.destroy_surface(s1));
         assert!(kms.destroy_surface(s2));
+    }
+
+    #[test]
+    fn raise_surfaces_for_task_elevates_and_preserves_intra_task_order() {
+        let mut kms = DrmKmsController::new(720, 1440);
+
+        // Task 1: Main window at z=200, Dialog at z=250
+        let t1_s1 = kms.create_surface(720, 1440, 200, 1);
+        let t1_s2 = kms.create_surface(400, 300, 250, 1);
+
+        // System overlay: status bar at z=1000
+        let overlay = kms.create_surface(720, 48, 1000, 999);
+
+        // Task 2: Background app at z=300
+        let t2_s1 = kms.create_surface(720, 1440, 300, 2);
+
+        // Foregrounding Task 1 should raise its surfaces above Task 2 (base_z > 300)
+        kms.raise_surfaces_for_task(1);
+
+        let z1 = kms.surfaces.iter().find(|s| s.id == t1_s1).unwrap().z_order;
+        let z2 = kms.surfaces.iter().find(|s| s.id == t1_s2).unwrap().z_order;
+        let z_t2 = kms.surfaces.iter().find(|s| s.id == t2_s1).unwrap().z_order;
+        let z_overlay = kms.surfaces.iter().find(|s| s.id == overlay).unwrap().z_order;
+
+        assert!(z1 > z_t2, "Task 1 base surface ({z1}) must be elevated above Task 2 ({z_t2})");
+        assert_eq!(z2 - z1, 50, "Intra-task relative z delta must be preserved (250 - 200 = 50)");
+        assert!(z2 < 1000, "Elevated app surface ({z2}) must not breach system overlay boundary (1000)");
+        assert_eq!(z_overlay, 1000, "System overlay z-order must remain unmodified");
+    }
+
+    #[test]
+    fn set_surfaces_visibility_for_task_toggles_visibility() {
+        let mut kms = DrmKmsController::new(720, 1440);
+
+        let t1_s1 = kms.create_surface(720, 1440, 200, 1);
+        let t1_s2 = kms.create_surface(400, 300, 250, 1);
+        let t2_s1 = kms.create_surface(720, 1440, 200, 2);
+
+        kms.set_surfaces_visibility_for_task(1, false);
+
+        assert!(!kms.surfaces.iter().find(|s| s.id == t1_s1).unwrap().visible);
+        assert!(!kms.surfaces.iter().find(|s| s.id == t1_s2).unwrap().visible);
+        assert!(kms.surfaces.iter().find(|s| s.id == t2_s1).unwrap().visible);
+
+        kms.set_surfaces_visibility_for_task(1, true);
+
+        assert!(kms.surfaces.iter().find(|s| s.id == t1_s1).unwrap().visible);
+        assert!(kms.surfaces.iter().find(|s| s.id == t1_s2).unwrap().visible);
+    }
+
+    #[test]
+    fn z_order_rebase_prevents_threshold_overflow() {
+        let mut kms = DrmKmsController::new(720, 1440);
+
+        // Simulate multiple surface creations pushing z-order near threshold
+        let s1 = kms.create_surface(720, 1440, 890, 1);
+        let s2 = kms.create_surface(720, 1440, 895, 2);
+
+        // Next surface creation pushes actual_z >= 900, triggering rebase
+        let s3 = kms.create_surface(720, 1440, 200, 3);
+
+        let z1 = kms.surfaces.iter().find(|s| s.id == s1).unwrap().z_order;
+        let z2 = kms.surfaces.iter().find(|s| s.id == s2).unwrap().z_order;
+        let z3 = kms.surfaces.iter().find(|s| s.id == s3).unwrap().z_order;
+
+        assert!(z1 < 900 && z2 < 900 && z3 < 900, "All app surfaces must be clamped/rebased below 900");
+        assert!(z1 < z2, "Rebase must preserve monotonic order of surfaces");
     }
 }
 

@@ -474,6 +474,9 @@ fn flatten_contour(
     mut n_seg: usize,
 ) -> Option<usize> {
     let count = last - first + 1;
+    if count >= MAX_POINTS || count + 2 > MAX_POINTS {
+        return None;
+    }
 
     // Start from an on-curve point. A contour whose first point is a control
     // point has an implied start: the midpoint between its last and first
@@ -494,6 +497,9 @@ fn flatten_contour(
     let mut pon = [false; MAX_POINTS];
     let mut m = 0usize;
     if on_curve_start.is_none() {
+        if m >= MAX_POINTS {
+            return None;
+        }
         px[m] = (x[first] + x[last]) / 2;
         py[m] = (y[first] + y[last]) / 2;
         pon[m] = true;
@@ -501,6 +507,9 @@ fn flatten_contour(
     }
     let begin_at = on_curve_start.unwrap_or(first);
     for i in 0..count {
+        if m >= MAX_POINTS {
+            return None;
+        }
         let p = begin_at + i;
         if p > last {
             // Wrap: only needed because `begin_at` may be inside the contour.
@@ -516,6 +525,9 @@ fn flatten_contour(
         m += 1;
     }
     // Repeat the first point to close the contour.
+    if m >= MAX_POINTS {
+        return None;
+    }
     px[m] = px[0];
     py[m] = py[0];
     pon[m] = pon[0];
@@ -695,5 +707,18 @@ mod tests {
             m.width <= w && m.width > 0,
             "extent {m:?} does not fit a {w}-wide surface"
         );
+    }
+
+    #[test]
+    fn flatten_contour_rejects_oversized_contour_safely() {
+        let x = [0i32; MAX_POINTS];
+        let y = [0i32; MAX_POINTS];
+        let on_curve = [true; MAX_POINTS];
+        let mut sx0 = [0i32; MAX_SEGMENTS];
+        let mut sy0 = [0i32; MAX_SEGMENTS];
+        let mut sx1 = [0i32; MAX_SEGMENTS];
+        let mut sy1 = [0i32; MAX_SEGMENTS];
+        let res = flatten_contour(&x, &y, &on_curve, 0, 127, &mut sx0, &mut sy0, &mut sx1, &mut sy1, 0);
+        assert!(res.is_none());
     }
 }

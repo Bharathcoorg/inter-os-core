@@ -38,9 +38,9 @@ const RUN_H_MAX: usize = 144;
 
 /// How many runs may be resident at once.
 ///
-/// 32 slots comfortably holds all 22 distinct text runs across Home screen,
-/// App Drawer, System Space, and Quick Controls without thrashing slot 0.
-pub const SLOTS: usize = 32;
+/// 8 slots comfortably holds active text runs in a frame in static BSS (~765 KiB)
+/// without multi-megabyte cache bloat.
+pub const SLOTS: usize = 8;
 
 /// The longest text a placement key can hold. Longer runs are refused rather
 /// than hashed, because a hash would collide and draw the wrong glyphs.
@@ -69,7 +69,6 @@ struct Loaded {
 }
 
 static mut LOADED: [Option<Loaded>; SLOTS] = [None; SLOTS];
-static mut NEXT_VICTIM: usize = 0;
 
 /// Resets all slots in the outline cache pool. Call upon view mode transitions.
 pub fn reset_slot_pool() {
@@ -77,41 +76,17 @@ pub fn reset_slot_pool() {
         for slot in (*core::ptr::addr_of_mut!(LOADED)).iter_mut() {
             *slot = None;
         }
-        NEXT_VICTIM = 0;
     }
 }
 
 /// Which slot a placement lands in.
 ///
-/// The rule, in order: a slot already holding this exact key is reused, so a
-/// repeated placement hits the cache; otherwise an empty slot is taken; and
-/// only when every slot holds a different live run is one reused round-robin.
+/// Uses a direct-mapped hash on `(x, y, em, text_len)` to select a slot
+/// in O(1) time without linear scanning or memcmps inside per-pixel probe loops.
 fn slot_for(em: u32, x: usize, y: usize, text: &[u8]) -> usize {
-    let loaded = unsafe { &*core::ptr::addr_of!(LOADED) };
-    let same = |l: &Loaded| {
-        l.em == em && l.x == x && l.y == y && l.len == text.len() && l.key[..text.len()] == *text
-    };
-    let mut first_free = None;
-    for (i, slot) in loaded.iter().enumerate() {
-        match slot {
-            Some(l) if same(l) => return i,
-            Some(_) => {}
-            None => {
-                if first_free.is_none() {
-                    first_free = Some(i);
-                }
-            }
-        }
-    }
-    if let Some(free) = first_free {
-        free
-    } else {
-        unsafe {
-            let v = NEXT_VICTIM;
-            NEXT_VICTIM = (NEXT_VICTIM + 1) % SLOTS;
-            v
-        }
-    }
+    let mut h = (x ^ (y << 4) ^ ((em as usize) << 8) ^ text.len()) as usize;
+    h ^= (h >> 4) ^ (h >> 8) ^ (h >> 12);
+    h % SLOTS
 }
 
 /// Cap height of the bitmap face in cell rows at scale 1.

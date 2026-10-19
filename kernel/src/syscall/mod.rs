@@ -3864,12 +3864,12 @@ pub fn sys_display_set_orientation(cap_slot: usize, orientation: u32) -> Result<
         let mut kms = crate::drivers::display_kms::DRM_KMS.lock();
         kms.set_orientation(requested);
     }
-    // Portrait and its inversion present 720x1440; the two landscape
-    // orientations present 1280x720. The guard is dropped first so the display
+    // Portrait and its inversion present 1080x2160 native Full HD+; the two landscape
+    // orientations present 2160x1080. The guard is dropped first so the display
     // driver and framebuffer locks are never held together.
     let (phys_w, phys_h) = match requested {
-        DisplayOrientation::Portrait | DisplayOrientation::PortraitInverted => (720u16, 1440u16),
-        DisplayOrientation::LandscapeRight | DisplayOrientation::LandscapeLeft => (1280u16, 720u16),
+        DisplayOrientation::Portrait | DisplayOrientation::PortraitInverted => (1080u16, 2160u16),
+        DisplayOrientation::LandscapeRight | DisplayOrientation::LandscapeLeft => (2160u16, 1080u16),
     };
     if !crate::framebuffer::set_physical_mode(phys_w, phys_h) {
         crate::serial_println!(
@@ -4383,7 +4383,10 @@ pub fn sys_cap_delegate(
     let target = sched.get_task_mut(target_task).ok_or(SyscallResult::TargetNotFound)?;
     let derived_cap = lease.to_capability();
     let slot = target.cap_table.insert(derived_cap).map_err(|_| SyscallResult::InvalidSlot)?;
-    crate::capability::delegation::register_lease(lease);
+    if !crate::capability::delegation::register_lease(lease) {
+        let _ = target.cap_table.revoke(slot);
+        return Err(SyscallResult::InvalidArguments);
+    }
     Ok(slot)
 }
 
@@ -4978,7 +4981,11 @@ pub fn sys_window_set_input(cap_slot: usize, id: u32, enabled: bool) -> SyscallR
 
 pub fn sys_window_focus(cap_slot: usize, x: u32, y: u32) -> SyscallResult {
     let _owner = match require_display_service(cap_slot) { Ok(id) => id, Err(e) => return e };
-    match crate::drivers::display_kms::DRM_KMS.lock().focus_at(x, y) {
+    let focused = {
+        let mut kms = crate::drivers::display_kms::DRM_KMS.lock();
+        kms.focus_at(x, y)
+    };
+    match focused {
         Some((_surface, owner)) => {
             let _ = IPC_ROUTER.lock().send_direct(TaskId(0), TaskId(owner), 0x7001, &[x as u8, (x >> 8) as u8, y as u8, (y >> 8) as u8]);
             SyscallResult::Success

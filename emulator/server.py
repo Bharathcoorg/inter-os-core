@@ -1377,6 +1377,9 @@ class VncScanoutClient:
         if not box:
             return
 
+        if now - self.latest_raw_time < 0.033:
+            return
+
         off_x, off_y, x2, y2 = box
         crop_w = x2 - off_x
         crop_h = y2 - off_y
@@ -1411,8 +1414,6 @@ class VncScanoutClient:
         # monitor for zero changed pixels. Only real damage advances the
         # stream, so transport fps means visible changes per second.
         if rgba == self._last_published_rgba:
-            return
-        if now - self.latest_raw_time < 0.033:
             return
         self._last_published_rgba = rgba
 
@@ -3730,13 +3731,17 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                     x = int(data.get('x', 0)); y = int(data.get('y', 0))
                     fb_w, fb_h = current_framebuffer_size()
                     if not (0 <= x < fb_w and 0 <= y < fb_h) or not (0 <= x < 1280 and 0 <= y < 720): raise ValueError('landscape coordinates out of bounds')
-                    # KMS LandscapeRight maps (x, y) in 1280x720 scanout to mobile surface (719 - y, (x * 1440) // 1280)
-                    gx = max(0, min(LOGICAL_SURFACE_W - 1, LOGICAL_SURFACE_W - 1 - (y * LOGICAL_SURFACE_W) // max(1, fb_h)))
-                    gy = max(0, min(LOGICAL_SURFACE_H - 1, (x * LOGICAL_SURFACE_H) // max(1, fb_w)))
+                    # KMS LandscapeRight maps (x, y) in scanout to mobile surface:
+                    # src_x = (y * 719) / (fb_h - 1)
+                    # src_y = 1439 - (x * 1439) / (fb_w - 1)
+                    denom_h = max(1, fb_h - 1)
+                    denom_w = max(1, fb_w - 1)
+                    gx = max(0, min(LOGICAL_SURFACE_W - 1, (y * (LOGICAL_SURFACE_W - 1) + denom_h // 2) // denom_h))
+                    gy = max(0, min(LOGICAL_SURFACE_H - 1, (LOGICAL_SURFACE_H - 1) - (x * (LOGICAL_SURFACE_H - 1) + denom_w // 2) // denom_w))
                     x2 = int(data.get('x2', x)); y2 = int(data.get('y2', y))
                     if not (0 <= x2 < fb_w and 0 <= y2 < fb_h): raise ValueError('landscape end coordinates out of bounds')
-                    gx2 = max(0, min(LOGICAL_SURFACE_W - 1, LOGICAL_SURFACE_W - 1 - (y2 * LOGICAL_SURFACE_W) // max(1, fb_h)))
-                    gy2 = max(0, min(LOGICAL_SURFACE_H - 1, (x2 * LOGICAL_SURFACE_H) // max(1, fb_w)))
+                    gx2 = max(0, min(LOGICAL_SURFACE_W - 1, (y2 * (LOGICAL_SURFACE_W - 1) + denom_h // 2) // denom_h))
+                    gy2 = max(0, min(LOGICAL_SURFACE_H - 1, (LOGICAL_SURFACE_H - 1) - (x2 * (LOGICAL_SURFACE_H - 1) + denom_w // 2) // denom_w))
                 elif space in ('portrait', 'logical_portrait', 'studio_display'):
                     x = int(data.get('x', 0)); y = int(data.get('y', 0))
                     if not (0 <= x < LOGICAL_W and 0 <= y < LOGICAL_H): raise ValueError('portrait coordinates out of bounds')

@@ -41,10 +41,9 @@ const RUN_H_MAX: usize = 144;
 
 /// How many runs may be resident at once.
 ///
-/// WHY 24 slots: multi-heading screens, 2-column card grids, and detail surfaces
-/// draw 10–18 distinct headings, subtitles, badges, and status runs in a single
-/// band; 24 slots with round-robin eviction eliminates scanline cache thrashing.
-const SLOTS: usize = 24;
+/// WHY 8 slots: 8 slots comfortably holds active text runs in a frame in static
+/// BSS (~765 KiB) without multi-megabyte cache bloat.
+const SLOTS: usize = 8;
 
 /// The longest text a placement key can hold. Longer runs are refused rather
 /// than hashed, because a hash would collide and draw the wrong glyphs.
@@ -78,7 +77,6 @@ struct Loaded {
 }
 
 static mut LOADED: [Option<Loaded>; SLOTS] = [None; SLOTS];
-static mut NEXT_VICTIM: usize = 0;
 
 /// Resets all slots in the outline cache pool.
 pub fn reset_slot_pool() {
@@ -86,57 +84,17 @@ pub fn reset_slot_pool() {
         for slot in (*core::ptr::addr_of_mut!(LOADED)).iter_mut() {
             *slot = None;
         }
-        *core::ptr::addr_of_mut!(NEXT_VICTIM) = 0;
     }
 }
 
 /// Which slot a placement lands in.
 ///
-/// WHY this is a search rather than a hash: a hash spreads two runs across two
-/// slots only by luck, and two runs that collide silently erase each other --
-/// which is exactly what happened when the lock date and clock both landed in
-/// slot 0 and the date's letters vanished, leaving only its comma. A hash
-/// cannot promise what this needs, so it does not get the job.
-///
-/// The rule, in order: a slot already holding this exact key is reused, so a
-/// repeated placement hits the cache; otherwise an empty slot is taken; and
-/// only when every slot holds a different live run is one reused round-robin, in
-/// which case the caller has asked for more resident runs than exist and one of
-/// them must give way without thrashing slot 0.
+/// Uses a direct-mapped hash on `(x, y, em, text_len, bold)` to select a slot
+/// in O(1) time without linear scanning or memcmps inside per-pixel probe loops.
 fn slot_for(em: u32, x: usize, y: usize, text: &[u8], bold: bool) -> usize {
-    // SAFETY: the read of the cache array, taken and released inside this
-    // function. The surface's painter is single threaded, and nothing reached
-    // from here re-enters it.
-    let loaded = unsafe { &*core::ptr::addr_of!(LOADED) };
-    let same = |l: &Loaded| {
-        l.em == em
-            && l.x == x
-            && l.y == y
-            && l.bold == bold
-            && l.len == text.len()
-            && l.key[..text.len()] == *text
-    };
-    let mut first_free = None;
-    for (i, slot) in loaded.iter().enumerate() {
-        match slot {
-            Some(l) if same(l) => return i,
-            Some(_) => {}
-            None => {
-                if first_free.is_none() {
-                    first_free = Some(i);
-                }
-            }
-        }
-    }
-    if let Some(free) = first_free {
-        free
-    } else {
-        unsafe {
-            let v = *core::ptr::addr_of!(NEXT_VICTIM) % SLOTS;
-            *core::ptr::addr_of_mut!(NEXT_VICTIM) = (v + 1) % SLOTS;
-            v
-        }
-    }
+    let mut h = (x ^ (y << 4) ^ ((em as usize) << 8) ^ text.len() ^ (if bold { 0x55 } else { 0 })) as usize;
+    h ^= (h >> 4) ^ (h >> 8) ^ (h >> 12);
+    h % SLOTS
 }
 
 /// Cap height of the bitmap face in cell rows at scale 1.

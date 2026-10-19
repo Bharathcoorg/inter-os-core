@@ -116,7 +116,6 @@ impl CapabilityType {
             16 => Some(CapabilityType::ShmConsumer),
             17 => Some(CapabilityType::EventPoll),
             18 => Some(CapabilityType::SystemControl),
-            19..=23 => Some(CapabilityType::SystemControl),
             24 => Some(CapabilityType::RealtimeClockRead),
             _ => None,
         }
@@ -1320,7 +1319,9 @@ mod tests {
             assert_eq!(cap_type.to_raw(), val);
         }
         assert_eq!(CapabilityType::from_raw(0), None);
-        assert_eq!(CapabilityType::from_raw(999), None);
+        for invalid in [19, 20, 21, 22, 23, 25, 26, 999] {
+            assert_eq!(CapabilityType::from_raw(invalid), None);
+        }
     }
 
     #[test]

@@ -173,4 +173,32 @@ mod tests {
         assert_eq!(VaultSectorType::MusicTracks.sector_id(), 204);
         assert!(VaultSectorType::RootKeystore.description().contains("Keystore"));
     }
+
+    #[test]
+    fn test_text_aa() {
+        let text = b"A";
+        let color = 0xFFFFFFFF;
+        let bg = 0xFF000000;
+        let mut has_solid = false;
+        let mut has_blended = false;
+        let mut has_none = false;
+
+        for y in 0..24 {
+            for x in 0..16 {
+                match std::design::font::test_text_aa(x, y, 0, 0, 1, text, color, bg, false) {
+                    Some(c) if c == color => has_solid = true,
+                    Some(c) if c == bg => panic!("test_text_aa should never return bare background"),
+                    Some(c) => {
+                        assert_ne!(c, color);
+                        assert_ne!(c, bg);
+                        has_blended = true;
+                    }
+                    None => has_none = true,
+                }
+            }
+        }
+        assert!(has_solid, "should contain solid foreground pixels");
+        assert!(has_blended, "should contain anti-aliased 4-bit blended edge pixels");
+        assert!(has_none, "should contain transparent (None) pixels");
+    }
 }

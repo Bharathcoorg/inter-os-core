@@ -122,7 +122,16 @@ const BM_RECORD_BYTES: usize = 1 + BM_TITLE_MAX + BM_URL_MAX;
 const STORE_BLOB_BYTES: usize = 2 + MAX_BOOKMARKS * BM_RECORD_BYTES;
 const STORE_VERSION: u8 = 1;
 const STORE_KEY: &str = "browser.bookmarks.v1";
-const STORE_CAP_SLOT: usize = 0;
+
+#[inline]
+fn fs_write_slot() -> usize {
+    std::cap_lookup(std::cap_type::FILE_SYSTEM_WRITE, 0).unwrap_or(9)
+}
+
+#[inline]
+fn fs_read_slot() -> usize {
+    std::cap_lookup(std::cap_type::FILE_SYSTEM_READ, 0).unwrap_or(8)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BookmarkStoreState {
@@ -240,7 +249,7 @@ impl BookmarkStore {
     pub fn load() -> Self {
         let mut store = BookmarkStore::EMPTY;
         let mut blob = [0u8; STORE_BLOB_BYTES];
-        match std::settings_get(STORE_CAP_SLOT, STORE_KEY, &mut blob) {
+        match std::settings_get(fs_read_slot(), STORE_KEY, &mut blob) {
             Ok(0) => store.state = BookmarkStoreState::Empty,
             Ok(n) => {
                 let mut records = [BookmarkRecord::EMPTY; MAX_BOOKMARKS];
@@ -297,7 +306,7 @@ impl BookmarkStore {
             self.state = BookmarkStoreState::WriteRefused;
             return Err(-22);
         }
-        match std::settings_set(STORE_CAP_SLOT, STORE_KEY, &blob[..used]) {
+        match std::settings_set(fs_write_slot(), STORE_KEY, &blob[..used]) {
             Ok(()) => {
                 self.state = BookmarkStoreState::Written;
                 Ok(())
@@ -1582,6 +1591,9 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
             if y >= card_y && y < card_y + card_h {
                 if let Some(row) = home_row(app, i) {
                     let _ = std::audio_haptic_click();
+                    app.address_focused = false;
+                    app.select_all = false;
+                    app.address_len = 0;
                     let url = &row.url[..row.url_len];
                     app.navigate(url);
                     return Tap::Redraw;

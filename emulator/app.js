@@ -1142,8 +1142,8 @@ document.addEventListener('DOMContentLoaded', () => {
       const geometry = guestPointerGeometry();
       const normX = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
       const normY = Math.max(0, Math.min(1, (clientY - rect.top) / rect.height));
-      const x = Math.max(0, Math.min(geometry.width - 1, Math.round(normX * geometry.width)));
-      const y = Math.max(0, Math.min(geometry.height - 1, Math.round(normY * geometry.height)));
+      const x = Math.max(0, Math.min(geometry.width - 1, Math.floor(normX * geometry.width)));
+      const y = Math.max(0, Math.min(geometry.height - 1, Math.floor(normY * geometry.height)));
       return {
         x,
         y,

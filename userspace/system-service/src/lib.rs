@@ -40,7 +40,7 @@ pub fn run_display() -> ! {
         if now.saturating_sub(last_tick) >= 100 || last_tick == 0 {
             last_tick = now;
         }
-        let _ = std::event_poll(std::EVENT_IPC_MSG | std::EVENT_TIMER_TICK, 20);
+        let _ = std::event_poll(std::EVENT_TIMER_TICK, 20);
     }
 }
 
@@ -61,7 +61,7 @@ pub fn run_input() -> ! {
         if std::input_event_poll(&mut event).is_ok() {
             let _ = std::log(0, "[inputd] normalized input event received.");
         }
-        let _ = std::event_poll(std::EVENT_IPC_MSG | std::EVENT_TIMER_TICK, 20);
+        let _ = std::event_poll(std::EVENT_TIMER_TICK, 20);
     }
 }
 
@@ -108,7 +108,7 @@ pub fn run_network() -> ! {
         }
 
         let _ = std::event_poll(
-            std::EVENT_IPC_MSG | std::EVENT_TIMER_TICK | std::EVENT_NETWORK_PACKET,
+            std::EVENT_TIMER_TICK | std::EVENT_NETWORK_PACKET,
             20,
         );
     }
@@ -120,7 +120,7 @@ pub fn run_power() -> ! {
     loop {
         let _ = std::service_heartbeat(5);
         let _ = std::battery_query(&mut telemetry);
-        let _ = std::event_poll(std::EVENT_IPC_MSG | std::EVENT_TIMER_TICK, 20);
+        let _ = std::event_poll(std::EVENT_TIMER_TICK, 20);
     }
 }
 
@@ -131,7 +131,7 @@ pub fn run_modem() -> ! {
         let _ = std::service_heartbeat(6);
         let _ = std::telephony_query(&mut status);
         let _ = std::event_poll(
-            std::EVENT_IPC_MSG | std::EVENT_TIMER_TICK | std::EVENT_MODEM_URC,
+            std::EVENT_TIMER_TICK | std::EVENT_MODEM_URC,
             20,
         );
     }
@@ -142,7 +142,7 @@ pub fn run_camera() -> ! {
     loop {
         let _ = std::service_heartbeat(8);
         let _ = std::camera_autofocus_state();
-        let _ = std::event_poll(std::EVENT_IPC_MSG | std::EVENT_TIMER_TICK, 20);
+        let _ = std::event_poll(std::EVENT_TIMER_TICK, 20);
     }
 }
 
@@ -151,7 +151,7 @@ pub fn run_audio() -> ! {
     loop {
         let _ = std::service_heartbeat(7);
         let _ = std::audio_query_volume();
-        let _ = std::event_poll(std::EVENT_IPC_MSG | std::EVENT_TIMER_TICK, 20);
+        let _ = std::event_poll(std::EVENT_TIMER_TICK, 20);
     }
 }
 
@@ -161,7 +161,7 @@ pub fn run_sensor() -> ! {
     loop {
         let _ = std::service_heartbeat(11);
         let _ = std::sensor_read(&mut status);
-        let _ = std::event_poll(std::EVENT_IPC_MSG | std::EVENT_TIMER_TICK, 20);
+        let _ = std::event_poll(std::EVENT_TIMER_TICK, 20);
     }
 }
 
@@ -176,15 +176,15 @@ pub fn run_storage() -> ! {
         if now.saturating_sub(last_tick) >= 100 || last_tick == 0 {
             let msg = b"storaged: userspace storage service heartbeat\n";
             health[..msg.len()].copy_from_slice(msg);
-            if let Ok(fd) = std::fs_open(4, "/data/audit.log", std::FS_WRITE) {
-                let _ = std::fs_write(4, fd, &health[..msg.len()]);
+            if let Ok(fd) = std::fs_open(2, "/data/audit.log", std::FS_WRITE) {
+                let _ = std::fs_write(2, fd, &health[..msg.len()]);
                 let _ = std::fs_close(fd);
             } else {
                 let _ = std::log(0, "[storaged] filesystem request rejected.");
             }
             last_tick = now;
         }
-        let _ = std::event_poll(std::EVENT_IPC_MSG | std::EVENT_TIMER_TICK, 20);
+        let _ = std::event_poll(std::EVENT_TIMER_TICK, 20);
     }
 }
 

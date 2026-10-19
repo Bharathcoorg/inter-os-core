@@ -131,7 +131,7 @@ pub fn parse_rapp(data:&[u8])->Result<RappManifest,RappError>{
     for i in 0..cap_count{
         let o=header_end+i*2;
         let cap=u16::from_le_bytes([data[o],data[o+1]]);
-        if crate::capability::CapabilityType::from_raw(cap as u64).is_none() {
+        if !(1..=24).contains(&cap) {
             return Err(RappError::UnknownCapability);
         }
         capabilities.push(cap);

@@ -52,6 +52,10 @@ pub struct DelegatedLease {
     pub revoked: bool,
 }
 
+pub const MAX_GLOBAL_DELEGATIONS: usize = 1024;
+pub const MAX_DELEGATION_INVOCATIONS: u32 = 100_000;
+pub const MAX_DELEGATION_DURATION_TICKS: u64 = 1_000_000;
+
 impl DelegatedLease {
     /// Creates a new attenuated delegation lease from a parent capability.
     pub fn new(
@@ -67,6 +71,10 @@ impl DelegatedLease {
         if max_invocations == 0 || duration_ticks == 0 {
             return Err(CapError::InvalidSlot);
         }
+
+        // Clamp duration and invocations to prevent integer overflow and heap exhaustion
+        let safe_invocations = max_invocations.min(MAX_DELEGATION_INVOCATIONS);
+        let safe_duration = duration_ticks.min(MAX_DELEGATION_DURATION_TICKS);
 
         // 1. Parent must hold GRANT rights
         if !parent.rights.contains(Rights::GRANT) {
@@ -89,10 +97,10 @@ impl DelegatedLease {
             cap_type: parent.cap_type,
             object_id: parent.object_id,
             attenuated_rights: safe_rights,
-            max_invocations,
-            remaining_invocations: max_invocations,
+            max_invocations: safe_invocations,
+            remaining_invocations: safe_invocations,
             created_at_ticks: current_ticks,
-            expiry_ticks: current_ticks.saturating_add(duration_ticks),
+            expiry_ticks: current_ticks.saturating_add(safe_duration),
             revoked: false,
         })
     }
@@ -266,7 +274,7 @@ pub fn init() {
 
 
 /// Registers a lease only after its derived capability has been installed.
-pub fn register_lease(lease: DelegatedLease) {
+pub fn register_lease(lease: DelegatedLease) -> bool {
     let mut registry = DELEGATION_REGISTRY.lock();
     // WHY prune here rather than only on expiry: a lease with no invocations
     // left, or one that has been revoked, can never authorize again, so keeping
@@ -274,7 +282,11 @@ pub fn register_lease(lease: DelegatedLease) {
     // state about authority that nothing can use, and it must not grow without
     // bound.
     prune_locked(&mut registry, crate::interrupts::get_system_ticks());
+    if registry.len() >= MAX_GLOBAL_DELEGATIONS {
+        return false;
+    }
     registry.push(lease);
+    true
 }
 
 /// Drops every lease that can no longer authorize anything.

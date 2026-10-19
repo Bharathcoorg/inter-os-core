@@ -50,6 +50,20 @@ impl CalculatorState {
         self.result_mode = false;
     }
 
+    pub fn square(&mut self) {
+        if self.error {
+            return;
+        }
+        if let Some(sq) = self.current_operand.checked_mul(self.current_operand) {
+            self.current_operand = sq;
+            self.result_mode = true;
+        } else {
+            self.error = true;
+            self.active_operation = None;
+            self.result_mode = true;
+        }
+    }
+
     pub fn evaluate(&mut self) -> i64 {
         if self.error {
             return 0;
@@ -60,8 +74,8 @@ impl CalculatorState {
                 '-' => self.accumulator = self.accumulator.saturating_sub(self.current_operand),
                 '*' => self.accumulator = self.accumulator.saturating_mul(self.current_operand),
                 '/' => {
-                    if self.current_operand != 0 {
-                        self.accumulator /= self.current_operand;
+                    if let Some(res) = self.accumulator.checked_div(self.current_operand) {
+                        self.accumulator = res;
                     } else {
                         self.error = true;
                         self.active_operation = None;
@@ -70,8 +84,8 @@ impl CalculatorState {
                     }
                 }
                 '%' => {
-                    if self.current_operand != 0 {
-                        self.accumulator %= self.current_operand;
+                    if let Some(res) = self.accumulator.checked_rem(self.current_operand) {
+                        self.accumulator = res;
                     } else {
                         self.error = true;
                         self.active_operation = None;
@@ -346,6 +360,71 @@ mod tests {
         calc.push_digit(3);
         calc.toggle_sign(); // -3
         assert_eq!(calc.evaluate(), -1);
+    }
+
+    #[test]
+    fn test_calculator_square() {
+        let mut calc = CalculatorState::new();
+        calc.push_digit(5);
+        calc.square();
+        assert_eq!(calc.displayed_value(), 25);
+        assert!(!calc.error);
+
+        // Chained square
+        calc.square();
+        assert_eq!(calc.displayed_value(), 625);
+
+        // Negative operand squared yields positive
+        calc.clear();
+        calc.push_digit(7);
+        calc.toggle_sign();
+        assert_eq!(calc.displayed_value(), -7);
+        calc.square();
+        assert_eq!(calc.displayed_value(), 49);
+
+        // Overflow on square triggers error
+        calc.clear();
+        calc.current_operand = 4_000_000_000;
+        calc.square();
+        assert!(calc.error);
+    }
+
+    #[test]
+    fn test_calculator_division_and_modulo_by_zero() {
+        let mut calc = CalculatorState::new();
+        calc.push_digit(4);
+        calc.push_digit(2);
+        calc.set_operation('/');
+        calc.push_digit(0);
+        assert_eq!(calc.evaluate(), 0);
+        assert!(calc.error);
+
+        calc.clear();
+        calc.push_digit(4);
+        calc.push_digit(2);
+        calc.set_operation('%');
+        calc.push_digit(0);
+        assert_eq!(calc.evaluate(), 0);
+        assert!(calc.error);
+    }
+
+    #[test]
+    fn test_calculator_overflow_resilience() {
+        let mut calc = CalculatorState::new();
+        calc.current_operand = i64::MIN;
+        calc.set_operation('/');
+        calc.push_digit(1);
+        calc.toggle_sign(); // -1
+        assert_eq!(calc.evaluate(), 0);
+        assert!(calc.error);
+
+        calc.clear();
+        calc.current_operand = i64::MIN;
+        calc.set_operation('%');
+        calc.push_digit(1);
+        calc.toggle_sign(); // -1
+        assert_eq!(calc.evaluate(), 0);
+        assert!(calc.error);
     }
 
     #[test]
