@@ -141,4 +141,63 @@ pub fn init() {
     serial_println!(
         "[TEST] Fluid Inertial Physics: 60Hz momentum scrolling, friction decay, and elastic spring-back VERIFIED."
     );
+
+    let mut spring = InterruptibleSpring::new(0, 180, 200);
+    spring.retarget(100);
+    for _ in 0..10 {
+        spring.step();
+    }
+    assert!(spring.velocity > 0);
+    // Retarget mid-flight
+    let v_mid = spring.velocity;
+    spring.retarget(50);
+    assert_eq!(spring.velocity, v_mid, "Instantaneous velocity must be preserved on mid-flight retarget");
 }
+
+/// Smooth interruptible spring physics simulation.
+/// Retargets mid-flight while preserving instantaneous velocity.
+#[derive(Debug, Clone, Copy)]
+pub struct InterruptibleSpring {
+    pub current: i32,
+    pub target: i32,
+    pub velocity: i32,
+    pub stiffness: i32,
+    pub damping: i32,
+}
+
+impl InterruptibleSpring {
+    pub const fn new(initial: i32, stiffness: i32, damping: i32) -> Self {
+        Self {
+            current: initial,
+            target: initial,
+            velocity: 0,
+            stiffness,
+            damping,
+        }
+    }
+
+    /// Retargets the spring mid-flight while preserving current velocity.
+    pub fn retarget(&mut self, new_target: i32) {
+        self.target = new_target;
+    }
+
+    /// Advances the spring simulation by one step. Returns true if settled.
+    pub fn step(&mut self) -> bool {
+        let displacement = self.current - self.target;
+        if displacement == 0 && self.velocity.abs() <= 1 {
+            self.current = self.target;
+            self.velocity = 0;
+            return true;
+        }
+
+        let spring_force = -(displacement * self.stiffness) / 1000;
+        let damping_force = -(self.velocity * self.damping) / 1000;
+        let acceleration = spring_force + damping_force;
+
+        self.velocity += acceleration;
+        self.current += self.velocity / 60;
+
+        self.current == self.target && self.velocity.abs() <= 1
+    }
+}
+

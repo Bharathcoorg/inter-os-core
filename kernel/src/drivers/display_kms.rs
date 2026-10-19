@@ -27,6 +27,101 @@ pub const MAX_CLIENT_SURFACES: usize = 32;
 pub const MAX_SURFACE_PIXELS: usize = 1280 * 720;
 pub const MAX_SCANOUT_PIXELS: usize = 3840 * 2160;
 
+/// Two-dimensional damage rectangle for region invalidation and clipping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DamageRect {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl DamageRect {
+    pub const fn empty() -> Self {
+        Self { x: 0, y: 0, width: 0, height: 0 }
+    }
+
+    pub fn new(x: i32, y: i32, width: u32, height: u32) -> Self {
+        Self { x, y, width, height }
+    }
+
+    pub fn union(&self, other: &Self) -> Self {
+        if self.width == 0 || self.height == 0 {
+            return *other;
+        }
+        if other.width == 0 || other.height == 0 {
+            return *self;
+        }
+        let x0 = self.x.min(other.x);
+        let y0 = self.y.min(other.y);
+        let x1 = (self.x + self.width as i32).max(other.x + other.width as i32);
+        let y1 = (self.y + self.height as i32).max(other.y + other.height as i32);
+        Self {
+            x: x0,
+            y: y0,
+            width: (x1 - x0).max(0) as u32,
+            height: (y1 - y0).max(0) as u32,
+        }
+    }
+
+    pub fn to_row_band(&self, max_height: usize) -> (usize, usize) {
+        if self.width == 0 || self.height == 0 || self.y < 0 {
+            (0, 0)
+        } else {
+            let y0 = (self.y as usize).min(max_height);
+            let y1 = ((self.y + self.height as i32) as usize).min(max_height);
+            (y0, y1)
+        }
+    }
+}
+
+/// Refresh-aware frame pacing and deadline scheduler.
+/// Supports 60 Hz, 120 Hz, and 144 Hz deadlines with missed-frame tracking.
+#[derive(Debug, Clone)]
+pub struct FrameScheduler {
+    pub refresh_hz: u16,
+    pub missed_frames: u64,
+    pub total_frames: u64,
+    pub history_idx: usize,
+    pub frame_times_ns: [u64; 256],
+    pub last_frame_tick: u64,
+}
+
+impl FrameScheduler {
+    pub const fn new(refresh_hz: u16) -> Self {
+        Self {
+            refresh_hz,
+            missed_frames: 0,
+            total_frames: 0,
+            history_idx: 0,
+            frame_times_ns: [0; 256],
+            last_frame_tick: 0,
+        }
+    }
+
+    pub fn record_frame(&mut self, now_ticks: u64, deadline_ticks: u64) {
+        self.total_frames += 1;
+        if deadline_ticks > 0 && now_ticks > deadline_ticks {
+            self.missed_frames += 1;
+        }
+        if self.last_frame_tick > 0 && now_ticks >= self.last_frame_tick {
+            let elapsed_ticks = now_ticks - self.last_frame_tick;
+            let elapsed_ns = elapsed_ticks.saturating_mul(10_000_000);
+            self.frame_times_ns[self.history_idx] = elapsed_ns;
+            self.history_idx = (self.history_idx + 1) % 256;
+        }
+        self.last_frame_tick = now_ticks;
+    }
+
+    pub fn frame_budget_ns(&self) -> u64 {
+        match self.refresh_hz {
+            120 => 8_333_333,
+            144 => 6_944_444,
+            _ => 16_666_666,
+        }
+    }
+}
+
 /// Grows a half-open row band `band` so that it also covers `[y0, y1)`.
 ///
 /// WHY a single growing band rather than a rectangle list: the present path
@@ -223,6 +318,7 @@ pub struct DrmKmsController {
     /// write actually established, so behaviour is byte-identical to the old
     /// full-scanout present whenever no narrower band was genuinely earned.
     pub present_dirty_rows: (usize, usize),
+    pub scheduler: FrameScheduler,
 }
 
 impl DrmKmsController {
@@ -245,6 +341,7 @@ impl DrmKmsController {
             frame_dirty: true,
             powered: true,
             present_dirty_rows: (0, height as usize),
+            scheduler: FrameScheduler::new(60),
         }
     }
 
@@ -1443,14 +1540,38 @@ impl DrmKmsController {
 
     pub fn next_frame_deadline(&self) -> u64 { self.frame_deadline_ticks }
 
+    /// Fast slice copy for full-screen identity surfaces respecting dirty row bounds.
+    pub fn blit_opaque_identity_damaged(&mut self, surface: &mut DrmSurface) {
+        if surface.pixels.len() == self.back_buffer.len() {
+            if surface.dirty_rows.1 > surface.dirty_rows.0 {
+                let y0 = surface.dirty_rows.0.min(self.scanout_height as usize);
+                let y1 = surface.dirty_rows.1.min(self.scanout_height as usize);
+                let w = self.scanout_width as usize;
+                let start = y0 * w;
+                let end = y1 * w;
+                if end <= surface.pixels.len() && end <= self.back_buffer.len() {
+                    self.back_buffer[start..end].copy_from_slice(&surface.pixels[start..end]);
+                    union_rows(&mut self.present_dirty_rows, y0, y1);
+                }
+            } else {
+                self.back_buffer.copy_from_slice(&surface.pixels);
+                self.mark_present_full();
+            }
+            surface.dirty = false;
+            surface.dirty_rows = (0, 0);
+        }
+    }
+
     /// Performs an atomic page flip: swaps back buffer to front scanout buffer.
     pub fn page_flip(&mut self) -> u64 {
         self.ensure_buffers();
         core::mem::swap(&mut self.front_buffer, &mut self.back_buffer);
         self.vsync_counter += 1;
         self.page_flips_completed += 1;
+        let now = crate::interrupts::get_system_ticks();
+        self.scheduler.record_frame(now, self.frame_deadline_ticks);
         let ticks_per_frame = ((100u64 + self.refresh_hz.max(1) as u64 - 1) / self.refresh_hz.max(1) as u64).max(1);
-        self.frame_deadline_ticks = crate::interrupts::get_system_ticks().saturating_add(ticks_per_frame);
+        self.frame_deadline_ticks = now.saturating_add(ticks_per_frame);
         self.page_flips_completed
     }
 }
@@ -1477,6 +1598,7 @@ pub static DRM_KMS: Mutex<DrmKmsController> = Mutex::new(DrmKmsController {
     frame_dirty: true,
     powered: true,
     present_dirty_rows: (0, 2160),
+    scheduler: FrameScheduler::new(60),
 });
 
 #[cfg(test)]
@@ -1942,6 +2064,40 @@ mod tests {
 
         assert!(z1 < 900 && z2 < 900 && z3 < 900, "All app surfaces must be clamped/rebased below 900");
         assert!(z1 < z2, "Rebase must preserve monotonic order of surfaces");
+    }
+
+    #[test]
+    fn damage_rect_union_and_row_band_semantics() {
+        let r1 = DamageRect::new(10, 20, 100, 50);
+        let r2 = DamageRect::new(50, 40, 120, 60);
+        let u = r1.union(&r2);
+        assert_eq!(u.x, 10);
+        assert_eq!(u.y, 20);
+        assert_eq!(u.width, 160);
+        assert_eq!(u.height, 80);
+
+        let band = u.to_row_band(1000);
+        assert_eq!(band, (20, 100));
+
+        let empty = DamageRect::empty();
+        assert_eq!(empty.union(&r1), r1);
+        assert_eq!(r1.union(&empty), r1);
+    }
+
+    #[test]
+    fn frame_scheduler_budget_and_deadline_tracking() {
+        let mut sched = FrameScheduler::new(60);
+        assert_eq!(sched.frame_budget_ns(), 16_666_666);
+        let mut sched120 = FrameScheduler::new(120);
+        assert_eq!(sched120.frame_budget_ns(), 8_333_333);
+
+        sched.record_frame(100, 95); // Missed deadline (now 100 > deadline 95)
+        assert_eq!(sched.total_frames, 1);
+        assert_eq!(sched.missed_frames, 1);
+
+        sched.record_frame(105, 110); // Met deadline
+        assert_eq!(sched.total_frames, 2);
+        assert_eq!(sched.missed_frames, 1);
     }
 }
 
