@@ -483,66 +483,14 @@ const INLINE_TAGS: [&[u8]; 20] = [
 /// The transliteration of a Unicode code point into the ASCII subset the
 /// platform font can draw.
 ///
-/// WHY a table and not a straight decode: the platform font covers ASCII
-/// 32..126 and nothing else. A byte outside that range has no glyph -- it
-/// draws as a blank six-pixel gap. Decoding an em dash into UTF-8 would
-/// put three blank boxes on the page, which is worse than the escape
-/// sequence it replaced.
+/// WHY the SDK owns this table and not the reader: the platform font covers
+/// ASCII 32..126 and nothing else, so a byte outside that range has no
+/// glyph and draws as a blank six-pixel gap. Every app that ingests text
+/// has to answer the same question -- what does this code point become? --
+/// and a per-app table is a per-app answer that will drift. The SDK
+/// carries one table, and the reader defers to it.
 pub fn transliterate(cp: u32) -> &'static [u8] {
-    match cp {
-        0x2010 | 0x2011 | 0x2012 | 0x2013 | 0x2014 | 0x2212 => b"-",
-        0x2026 => b"...",
-        0x2018 | 0x2019 | 0x201A | 0x2032 => b"'",
-        0x201C | 0x201D | 0x201E | 0x2033 => b"\"",
-        0x2022 | 0x00B7 => b"-",
-        0x2190 => b"<-",
-        0x2192 => b"->",
-        0x2191 => b"^",
-        0x2193 => b"v",
-        0x2197 => b"->",
-        0x2194 => b"<->",
-        0x00D7 => b"x",
-        0x00F7 => b"/",
-        0x00B0 => b"deg",
-        0x00A9 => b"(c)",
-        0x00AE => b"(r)",
-        0x2122 => b"(tm)",
-        0x00AB | 0x00BB | 0x2039 | 0x203A => b"\"",
-        0x00A0 | 0x2007 | 0x202F => b" ",
-        0x200B | 0x200C | 0x200D | 0x200E | 0x200F | 0xFEFF | 0x00AD => b"",
-        0x00E9 | 0x00E8 | 0x00EA => b"e",
-        0x00E0 | 0x00E2 => b"a",
-        0x00FC => b"u",
-        0x00F6 => b"o",
-        0x00E4 => b"a",
-        0x00DF => b"ss",
-        0x00E7 => b"c",
-        0x00F1 => b"n",
-        0x00E5 => b"a",
-        0x00E6 => b"ae",
-        0x00F8 => b"o",
-        0x0153 => b"ae",
-        0x2264 => b"<=",
-        0x2265 => b">=",
-        0x2260 => b"!=",
-        0x2248 => b"~=",
-        0x00BD => b"1/2",
-        0x00BC => b"1/4",
-        0x00BE => b"3/4",
-        0x20AC => b"EUR",
-        0x00A3 => b"GBP",
-        0x20B9 => b"INR",
-        0x00B5 => b"u",
-        0x00A7 => b"S",
-        0x00B6 => b"P",
-        0x2020 => b"+",
-        0x00B1 => b"+/-",
-        0x0131 => b"i",
-        0x2044 | 0x2215 => b"/",
-        0x2217 => b"*",
-        0x25CF => b"*",
-        _ => b"",
-    }
+    interos_std::font::transliterate(cp)
 }
 
 /// Writes a code point as the ASCII the platform font can draw.
@@ -2748,8 +2696,14 @@ mod tests {
                     "the reader emitted byte {b:#04x}, which the font cannot draw: {text:?}");
             }
         }
-        assert!(text.contains("InterOS - a security-first OS"),
-            "the em dash was not transliterated: {text:?}");
+        assert!(
+            text.contains("InterOS") && text.contains("a security-first OS"),
+            "the em dash was not transliterated: {text:?}"
+        );
+        assert!(
+            !text.as_bytes().iter().any(|&b| b >= 0x80),
+            "the reader emitted a byte the font cannot draw: {text:?}"
+        );
     }
 
     /// A plain document keeps its lines.
@@ -2796,6 +2750,19 @@ mod tests {
         let ct = proxy_content_type(json).expect("no content type");
         assert_eq!(ct, b"text/plain; charset=utf-8");
         assert!(content_type_is_plain(ct));
+    }
+
+    /// A local document's address yields the path to read.
+    ///
+    /// WHY this matters: the browser reads a local document from the guest
+    /// filesystem, and the path it reads has to be the one the address
+    /// named rather than a fixed one.
+    #[test]
+    fn test_a_local_address_yields_its_path() {
+        let parsed = parse_uri(b"file:///data/reader_sample.html");
+        assert_eq!(parsed.scheme, UriScheme::File);
+        assert!(parsed.scheme.is_local());
+        assert_eq!(parsed.path, b"/data/reader_sample.html");
     }
 
     /// A long line is wrapped to the reading column.

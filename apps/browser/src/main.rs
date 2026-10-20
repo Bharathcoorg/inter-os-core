@@ -48,7 +48,6 @@ const CHROME_TEXT: u32 = 0xFFF8FAFC;          // Pure Crisp Off-White Text
 const CHROME_MUTED: u32 = 0xFF94A3B8;         // Muted Slate Text
 const CHROME_CARD: u32 = 0xFF161F30;          // Card Background
 const CHROME_CARD_BORDER: u32 = 0xFF283548;   // Card Stroke
-const CHROME_GREEN: u32 = 0xFF34D399;         // Emerald Secure TLS
 const CHROME_RED: u32 = 0xFFF87171;           // Alert / Error Coral Red
 #[allow(dead_code)]
 const CHROME_CODE_BG: u32 = 0xFF0F172A;       // Code Block Slate Dark
@@ -85,6 +84,12 @@ static mut RESPONSE_BUF: [u8; MAX_RESPONSE_BYTES] = [0; MAX_RESPONSE_BYTES];
 
 /// The buffer the page's HTML is extracted into.
 static mut HTML_BUF: [u8; browser::MAX_HTML_BYTES] = [0; browser::MAX_HTML_BYTES];
+
+/// The buffer a local document is read into.
+static mut FILE_BUF: [u8; MAX_FILE_BYTES] = [0; MAX_FILE_BYTES];
+
+/// The largest local document the browser will read.
+const MAX_FILE_BYTES: usize = 64 * 1024;
 
 /// The buffer the reader document is parsed into.
 static mut READER_BUF: [u8; browser::MAX_READER_BYTES] = [0; browser::MAX_READER_BYTES];
@@ -794,6 +799,102 @@ impl BrowserApp {
         &self.current_url[..self.current_url_len]
     }
 
+    /// Reads a local document from the guest filesystem and renders it.
+    ///
+    /// WHY the same pipeline as a fetched page: a local file and a
+    /// downloaded page are both documents, and a reader that treated them
+    /// differently would be two readers.
+    fn load_local_document(&mut self, path: &[u8]) -> bool {
+        if path.is_empty() {
+            self.status = PageStatus::InvalidAddress;
+            self.tabs.active_tab_mut().loading_state = LoadingState::Failed;
+            return false;
+        }
+        let Ok(path_str) = core::str::from_utf8(path) else {
+            self.status = PageStatus::InvalidAddress;
+            self.tabs.active_tab_mut().loading_state = LoadingState::Failed;
+            self.tabs.active_tab_mut().error_code = -3; // EINVAL
+            return false;
+        };
+
+        let Some(slot) = std::cap_lookup(std::cap_type::FILE_SYSTEM_READ, 0).ok() else {
+            std::log(
+                0,
+                "[BROWSER APP] This app holds no filesystem read capability, so a local document cannot be opened.",
+            )
+            .ok();
+            self.status = PageStatus::LocalRefused;
+            self.tabs.active_tab_mut().loading_state = LoadingState::Failed;
+            self.tabs.active_tab_mut().error_code = -1; // EPERM
+            let _ = std::audio_haptic_click();
+            return false;
+        };
+
+        let fd = match std::fs_open(slot, path_str, std::FS_READ) {
+            Ok(fd) => fd,
+            Err(code) => {
+                std::log(
+                    0,
+                    "[BROWSER APP] The guest filesystem refused to open the local document.",
+                )
+                .ok();
+                self.status = PageStatus::LocalRefused;
+                self.tabs.active_tab_mut().loading_state = LoadingState::Failed;
+                self.tabs.active_tab_mut().error_code = code as i32;
+                let _ = std::audio_haptic_click();
+                return false;
+            }
+        };
+
+        let read_bytes = {
+            let buffer = unsafe { &mut *core::ptr::addr_of_mut!(FILE_BUF) };
+            let n = std::fs_read(slot, fd, buffer).unwrap_or(0);
+            let _ = std::fs_close(fd);
+            n
+        };
+        if read_bytes == 0 {
+            std::log(0, "[BROWSER APP] The local document is empty.").ok();
+            self.status = PageStatus::LocalRefused;
+            self.tabs.active_tab_mut().loading_state = LoadingState::Failed;
+            self.tabs.active_tab_mut().error_code = 0;
+            let _ = std::audio_haptic_click();
+            return false;
+        }
+
+        // The kind of document decides how it is read. A file whose name
+        // says markup is read as markup; anything else is text, and a text
+        // file keeps its lines.
+        let is_markup = path_str.ends_with(".html") || path_str.ends_with(".htm");
+        let kind = if is_markup {
+            browser::PayloadKind::Markup
+        } else {
+            browser::PayloadKind::PlainText
+        };
+
+        let doc_len = {
+            let source = unsafe { &*core::ptr::addr_of!(FILE_BUF) };
+            let destination = unsafe { &mut *core::ptr::addr_of_mut!(READER_BUF) };
+            browser::html_to_reader_document_kind(&source[..read_bytes], kind, destination)
+        };
+        if doc_len == 0 {
+            self.status = PageStatus::LocalRefused;
+            self.tabs.active_tab_mut().loading_state = LoadingState::Failed;
+            return false;
+        }
+        {
+            let document = unsafe { &*core::ptr::addr_of!(READER_BUF) };
+            self.load_document_content(&document[..doc_len]);
+        }
+
+        self.status = PageStatus::Loaded;
+        self.pages_loaded += 1;
+        self.loading_progress = 100;
+        self.response_truncated = false;
+        self.tabs.active_tab_mut().loading_state = LoadingState::Completed;
+        let _ = std::audio_haptic_click();
+        true
+    }
+
     /// Loads a reader document, wrapping every line to the reading column.
     ///
     /// WHY the wrapping happens here and not in the renderer: a renderer
@@ -883,22 +984,22 @@ impl BrowserApp {
             std::log(0, url).ok();
         }
 
+        // A local document is read from the guest filesystem and read
+        // through the same reader pipeline as a fetched page.
+        //
+        // WHY this is not a stub: the branch used to log that the
+        // filesystem refused the document and that the app holds no
+        // filesystem capability, without ever asking the filesystem and
+        // without checking the capability. The app does hold
+        // CAP_FILESYSTEM_READ, and the refusal it reported was one it had
+        // assumed.
         if parsed.scheme.is_local() {
             std::log(
                 0,
-                "[BROWSER APP] Address names a local document; attempting to read it from the guest filesystem.",
+                "[BROWSER APP] Address names a local document; reading it from the guest filesystem.",
             )
             .ok();
-            std::log(
-                0,
-                "[BROWSER APP] The guest filesystem refused to open the document. This app holds no filesystem capability, so local content is unavailable.",
-            )
-            .ok();
-            self.status = PageStatus::LocalRefused;
-            self.tabs.active_tab_mut().loading_state = LoadingState::Failed;
-            self.tabs.active_tab_mut().error_code = -13; // EACCES
-            let _ = std::audio_haptic_click();
-            return false;
+            return self.load_local_document(&parsed.path);
         }
 
         // Real Network Socket dispatch with ephemeral client binding
@@ -1253,6 +1354,24 @@ fn text_px(
         return None;
     }
     font::test_text_aa(x, y, x0, y0, scale, text, color, bg, bold)
+}
+
+/// Blends a colour toward another by a fixed amount in 0..=255.
+///
+/// WHY this exists: a scrim has to darken whatever is behind it without
+/// erasing it, and the surface is a straight pixel buffer, so the blend
+/// has to be written here.
+fn blend_toward(colour: u32, toward: u32, amount: u32) -> u32 {
+    let amount = amount.min(255) as i64;
+    let mix = |c: u32, t: u32| -> u32 {
+        let c = c as i64;
+        let t = t as i64;
+        (((c * (255 - amount)) + (t * amount)) / 255) as u32
+    };
+    (colour & 0xFF00_0000)
+        | (mix((colour >> 16) & 0xFF, (toward >> 16) & 0xFF) << 16)
+        | (mix((colour >> 8) & 0xFF, (toward >> 8) & 0xFF) << 8)
+        | mix(colour & 0xFF, toward & 0xFF)
 }
 
 /// SSL Padlock Icon (centered around cx=38, cy=82)
@@ -1672,7 +1791,7 @@ fn render_accessory_bar(x: usize, y: usize, _app: &BrowserApp) -> u32 {
     if let Some(_) = draw_rounded_rect(x, y, bar_rect, 16, CHROME_SURFACE, Some(CHROME_BORDER), 1) {
         // Chip 1: "https://" (x 24..134)
         let c1 = Rect::new(24, KB_ACC_Y0 + 6, 110, 44);
-        if let Some(c) = draw_rounded_rect(x, y, c1, 10, 0xFF21262D, None, 0) {
+        if let Some(c) = draw_rounded_rect(x, y, c1, 10, CHROME_CARD, None, 0) {
             if let Some(px) = text_px(x, y, 36, KB_ACC_Y0 + 16, 1, b"https://", CHROME_TEXT, c, false) {
                 return px;
             }
@@ -1681,7 +1800,7 @@ fn render_accessory_bar(x: usize, y: usize, _app: &BrowserApp) -> u32 {
 
         // Chip 2: ".com" (x 144..224)
         let c2 = Rect::new(144, KB_ACC_Y0 + 6, 80, 44);
-        if let Some(c) = draw_rounded_rect(x, y, c2, 10, 0xFF21262D, None, 0) {
+        if let Some(c) = draw_rounded_rect(x, y, c2, 10, CHROME_CARD, None, 0) {
             if let Some(px) = text_px(x, y, 164, KB_ACC_Y0 + 16, 1, b".com", CHROME_TEXT, c, false) {
                 return px;
             }
@@ -1690,7 +1809,7 @@ fn render_accessory_bar(x: usize, y: usize, _app: &BrowserApp) -> u32 {
 
         // Chip 3: ".org" (x 234..314)
         let c3 = Rect::new(234, KB_ACC_Y0 + 6, 80, 44);
-        if let Some(c) = draw_rounded_rect(x, y, c3, 10, 0xFF21262D, None, 0) {
+        if let Some(c) = draw_rounded_rect(x, y, c3, 10, CHROME_CARD, None, 0) {
             if let Some(px) = text_px(x, y, 254, KB_ACC_Y0 + 16, 1, b".org", CHROME_TEXT, c, false) {
                 return px;
             }
@@ -1699,7 +1818,7 @@ fn render_accessory_bar(x: usize, y: usize, _app: &BrowserApp) -> u32 {
 
         // Chip 4: "Clear" (x 324..404)
         let c4 = Rect::new(324, KB_ACC_Y0 + 6, 80, 44);
-        if let Some(c) = draw_rounded_rect(x, y, c4, 10, 0xFF21262D, None, 0) {
+        if let Some(c) = draw_rounded_rect(x, y, c4, 10, CHROME_CARD, None, 0) {
             if let Some(px) = text_px(x, y, 342, KB_ACC_Y0 + 16, 1, b"Clear", CHROME_MUTED, c, false) {
                 return px;
             }
@@ -1708,7 +1827,7 @@ fn render_accessory_bar(x: usize, y: usize, _app: &BrowserApp) -> u32 {
 
         // Dismiss Down Chevron (x 630..694)
         let c_down = Rect::new(630, KB_ACC_Y0 + 6, 64, 44);
-        if let Some(c) = draw_rounded_rect(x, y, c_down, 10, 0xFF21262D, None, 0) {
+        if let Some(c) = draw_rounded_rect(x, y, c_down, 10, CHROME_CARD, None, 0) {
             if let Some(col) = draw_chevron_down(x, y, 662, KB_ACC_Y0 + 28, CHROME_BLUE) {
                 return col;
             }
@@ -1746,13 +1865,21 @@ fn toolbar_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
         if app.address_focused { 2 } else { 1 },
     ) {
         if padlock_glyph(x, y) {
-            return if is_https {
-                CHROME_GREEN
-            } else if app.address_focused {
-                CHROME_BLUE
-            } else {
-                CHROME_MUTED
-            };
+            // WHY the mark is muted and not green: a green padlock says
+            // the connection was verified, and this browser never performs
+            // a TLS handshake itself. It reads a page over plain HTTP
+            // from the device's local gateway, and the gateway fetches
+            // the origin on the device's behalf. The address naming an
+            // https origin is a fact about the text in the field; it is
+            // not a statement about a channel this app secured.
+            //
+            // The mark is not drawn at all when nothing has loaded, so a
+            // failed navigation shows no lock beside a URL that was never
+            // contacted.
+            if app.status != PageStatus::Loaded {
+                return CHROME_SURFACE;
+            }
+            return if is_https { CHROME_MUTED } else { CHROME_MUTED };
         }
         let in_sel = f.select_w > 0
             && x >= PILL_TEXT_X
@@ -1842,7 +1969,7 @@ fn home_page_pixel(x: usize, y: usize, app: &BrowserApp) -> u32 {
     if y >= 130 && y < 244 {
         // App icon squircle (52x52) centered at (334, 134)
         let icon_rect = Rect::new(334, 134, 52, 52);
-        if let Some(c) = draw_rounded_rect(x, y, icon_rect, 14, CHROME_BLUE, Some(0xFF58A6FF), 1) {
+        if let Some(c) = draw_rounded_rect(x, y, icon_rect, 14, CHROME_BLUE, Some(CHROME_BORDER), 1) {
             let cx = 360isize;
             let cy = 160isize;
             let dx = (x as isize) - cx;
@@ -1879,7 +2006,11 @@ fn home_page_pixel(x: usize, y: usize, app: &BrowserApp) -> u32 {
     if y >= 252 && y < 376 {
         // Section label
         if y >= 252 && y < 274 {
-            if let Some(px) = text_px(x, y, 28, 254, 1, b"Favorites", CHROME_MUTED, CHROME_BG, true) {
+            // WHY the heading is "Quick links" and not "Favorites": the tiles
+        // are a list the app shipped with, not the user's favourites. The
+        // user's own bookmarks are the list below this one, and it says so
+        // when it is empty.
+        if let Some(px) = text_px(x, y, 28, 254, 1, b"Quick links", CHROME_MUTED, CHROME_BG, true) {
                 return px;
             }
             return CHROME_BG;
@@ -1887,8 +2018,8 @@ fn home_page_pixel(x: usize, y: usize, app: &BrowserApp) -> u32 {
 
         // Col 0: cx = 98 (InterOS Platform)
         let c0_rect = Rect::new(66, 278, 64, 64);
-        if let Some(c) = draw_rounded_rect(x, y, c0_rect, 16, 0xFF162544, Some(0xFF388BFD), 1) {
-            if let Some(px) = text_px(x, y, 86, 300, 1, b"IO", 0xFF58A6FF, c, true) {
+        if let Some(c) = draw_rounded_rect(x, y, c0_rect, 16, CHROME_CARD, Some(CHROME_BORDER), 1) {
+            if let Some(px) = text_px(x, y, 86, 300, 1, b"IO", CHROME_TEXT, c, true) {
                 return px;
             }
             return c;
@@ -1899,11 +2030,11 @@ fn home_page_pixel(x: usize, y: usize, app: &BrowserApp) -> u32 {
 
         // Col 1: cx = 266 (YouTube Mobile)
         let c1_rect = Rect::new(234, 278, 64, 64);
-        if let Some(c) = draw_rounded_rect(x, y, c1_rect, 16, 0xFF3A1014, Some(0xFFFF0000), 1) {
+        if let Some(c) = draw_rounded_rect(x, y, c1_rect, 16, CHROME_CARD, Some(CHROME_BORDER), 1) {
             let px = (x as isize) - 260;
             let py = ((y as isize) - 310).abs();
             if px >= 0 && px <= 14 && py * 14 <= (14 - px) * 10 {
-                return 0xFFFFFFFF;
+                return CHROME_MUTED;
             }
             return c;
         }
@@ -1913,7 +2044,7 @@ fn home_page_pixel(x: usize, y: usize, app: &BrowserApp) -> u32 {
 
         // Col 2: cx = 434 (GitHub Source)
         let c2_rect = Rect::new(402, 278, 64, 64);
-        if let Some(c) = draw_rounded_rect(x, y, c2_rect, 16, 0xFF21262D, Some(0xFF30363D), 1) {
+        if let Some(c) = draw_rounded_rect(x, y, c2_rect, 16, CHROME_CARD, Some(CHROME_BORDER), 1) {
             if let Some(px) = text_px(x, y, 422, 300, 1, b"GH", CHROME_TEXT, c, true) {
                 return px;
             }
@@ -1925,8 +2056,8 @@ fn home_page_pixel(x: usize, y: usize, app: &BrowserApp) -> u32 {
 
         // Col 3: cx = 602 (Wikipedia)
         let c3_rect = Rect::new(570, 278, 64, 64);
-        if let Some(c) = draw_rounded_rect(x, y, c3_rect, 16, 0xFF182230, Some(0xFF58A6FF), 1) {
-            if let Some(px) = text_px(x, y, 594, 300, 1, b"W", 0xFF58A6FF, c, true) {
+        if let Some(c) = draw_rounded_rect(x, y, c3_rect, 16, CHROME_CARD, Some(CHROME_BORDER), 1) {
+            if let Some(px) = text_px(x, y, 594, 300, 1, b"W", CHROME_TEXT, c, true) {
                 return px;
             }
             return c;
@@ -2252,7 +2383,7 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                     let c_y = current_y + 2;
                     let c_h = 30;
                     if y as isize >= c_y && (y as isize) < c_y + c_h as isize {
-                        if let Some(c) = draw_rounded_rect(x, y, Rect::new(pad, c_y as usize, column, c_h), 8, 0xFF161B22, Some(0xFF30363D), 1) {
+                        if let Some(c) = draw_rounded_rect(x, y, Rect::new(pad, c_y as usize, column, c_h), 8, CHROME_CODE_BG, Some(CHROME_BORDER), 1) {
                             if x >= pad && x <= pad + 3 {
                                 return CHROME_BLUE;
                             }
@@ -2675,6 +2806,27 @@ fn bottom_bar_pixel(x: usize, y: usize, app: &BrowserApp) -> u32 {
 // Pixel Dispatch
 // -----------------------------------------------------------------------------
 fn get_browser_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
+    let base = get_browser_pixel_content(x, y, app, f);
+    if app.overlay == SheetOverlay::None {
+        return base;
+    }
+    // WHY the scrim: the sheet's own card drew straight over the content
+    // with nothing dimming it, so a dropdown read as a layout fault
+    // rather than a layer. The scrim is the content pixel blended toward
+    // the background, so the content underneath is still visible but
+    // clearly behind.
+    if let Some(overlay_px) = render_sheet_overlay(x, y, app) {
+        return overlay_px;
+    }
+    blend_toward(base, CHROME_BG, 150)
+}
+
+/// The screen without the sheet overlay applied.
+///
+/// WHY this is separate: an open sheet dims the content behind it, and
+/// that dim has to be computed from the content pixel, so the content has
+/// to be renderable on its own.
+fn get_browser_pixel_content(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
     if y < STATUS_H {
         return CHROME_BG;
     }
@@ -2692,9 +2844,13 @@ fn get_browser_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
     }
 
     // Active Sheet Overlay if present
-    if let Some(overlay_px) = render_sheet_overlay(x, y, app) {
-        return overlay_px;
-    }
+    // Active Sheet Overlay if present.
+    //
+    // WHY the scrim: the sheet's own card drew straight over the
+    // content with nothing dimming it, so a dropdown read as a layout
+    // fault rather than a layer. The scrim is the content pixel blended
+    // toward the background, so the content underneath is still visible
+    // but clearly behind.
 
     // Soft Keyboard and Accessory Strip overlay when address is focused
     if app.address_focused && y >= KB_ACC_Y0 && y <= KB_Y1 {
@@ -2712,7 +2868,7 @@ fn get_browser_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
             let s_rect = Rect::new(24, 130, W - 48, 68);
             if let Some(c) = draw_rounded_rect(x, y, s_rect, 14, CHROME_CARD, Some(CHROME_BORDER), 1) {
                 let icon_box = Rect::new(38, 144, 40, 40);
-                if let Some(ic) = draw_rounded_rect(x, y, icon_box, 8, 0xFF162544, None, 0) {
+                if let Some(ic) = draw_rounded_rect(x, y, icon_box, 8, CHROME_SURFACE, None, 0) {
                     let dx = (x as isize) - 58;
                     let dy = (y as isize) - 164;
                     if (dx * dx + dy * dy >= 9 && dx * dx + dy * dy <= 25) || (dx >= 3 && dx <= 6 && dy >= 3 && dy <= 6) {
@@ -2734,7 +2890,7 @@ fn get_browser_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
             let d_rect = Rect::new(24, 208, W - 48, 68);
             if let Some(c) = draw_rounded_rect(x, y, d_rect, 14, CHROME_CARD, Some(CHROME_BORDER), 1) {
                 let icon_box = Rect::new(38, 222, 40, 40);
-                if let Some(ic) = draw_rounded_rect(x, y, icon_box, 8, 0xFF21262D, None, 0) {
+                if let Some(ic) = draw_rounded_rect(x, y, icon_box, 8, CHROME_CARD, None, 0) {
                     let dx = (x as isize) - 58;
                     let dy = (y as isize) - 242;
                     if dx * dx + dy * dy <= 16 {
@@ -2755,7 +2911,7 @@ fn get_browser_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
         } else {
             // When address_len == 0, show Quick Destinations
             if y >= 130 && y < 156 {
-                if let Some(px) = text_px(x, y, 28, 134, 1, b"Quick Destinations", CHROME_MUTED, CHROME_BG, true) {
+                if let Some(px) = text_px(x, y, 28, 134, 1, b"Quick links", CHROME_MUTED, CHROME_BG, true) {
                     return px;
                 }
                 return CHROME_BG;
@@ -3126,6 +3282,11 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
                 if row != 1 && row != 2 {
                     app.overlay = SheetOverlay::None;
                 }
+                // WHY the address field is released: a sheet opened from the
+                // toolbar has to dismiss the soft keyboard, or the two
+                // layers are drawn over each other and neither can be read.
+                app.address_focused = false;
+                app.select_all = false;
                 return Tap::Redraw;
             }
             app.overlay = SheetOverlay::None;
