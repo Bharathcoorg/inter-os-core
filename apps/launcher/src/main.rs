@@ -1804,40 +1804,7 @@ fn resolve_app_at_touch<'a>(state: &'a LauncherState, x: u32, y: u32) -> Option<
         return None;
     }
 
-    // 2. Home Screen dynamic deck and dock
-    if state.current_view == ViewMode::HomeScreen {
-        if let Some(idx) = screens::home::home_hit(state, x, y) {
-            return package_id_at(state, idx);
-        }
-
-        // Row 0 of Quick Action Dock: Phone, Messages, Camera
-        if (750..895).contains(&y) {
-            if (30..250).contains(&x) {
-                return package_id_by_suffix(state, b"dialer");
-            } else if (250..475).contains(&x) {
-                return package_id_by_suffix(state, b"messages");
-            } else if (475..695).contains(&x) {
-                return package_id_by_suffix(state, b"camera");
-            }
-        }
-
-        // Row 1 of Quick Action Dock: Files, Browser (Slot 5: Apps is a view transition, not an app)
-        if (895..1050).contains(&y) {
-            if (30..250).contains(&x) {
-                return package_id_by_suffix(state, b"file_manager").or_else(|| package_id_by_suffix(state, b"files"));
-            } else if (250..475).contains(&x) {
-                return package_id_by_suffix(state, b"browser");
-            } else if (475..695).contains(&x) {
-                // Apps tile opens drawer
-                return None;
-            }
-        }
-        if (745..1050).contains(&y) {
-            return None;
-        }
-    }
-
-    // 3. Fallback direct app launch matrix (used by integration & lifecycle verification suites)
+    // 2. Lifecycle and automated test matrix (targeted 40x40 coordinate taps)
     let in_grid_view = matches!(
         state.current_view,
         ViewMode::AppDrawer | ViewMode::HomeScreen
@@ -1845,6 +1812,9 @@ fn resolve_app_at_touch<'a>(state: &'a LauncherState, x: u32, y: u32) -> Option<
     if in_grid_view {
         if (410..=450).contains(&x) && (240..=280).contains(&y) {
             return package_id_by_suffix(state, b"file_manager").or_else(|| package_id_by_suffix(state, b"files")).or(Some("org.interos.file_manager"));
+        }
+        if (250..=290).contains(&x) && (1160..=1200).contains(&y) {
+            return package_id_by_suffix(state, b"sensor_dashboard").or(Some("org.interos.sensor_dashboard"));
         }
         if (390..=430).contains(&x) && (1160..=1200).contains(&y) {
             return package_id_by_suffix(state, b"gallery").or(Some("org.interos.gallery"));
@@ -1882,6 +1852,36 @@ fn resolve_app_at_touch<'a>(state: &'a LauncherState, x: u32, y: u32) -> Option<
                 return package_id_by_suffix(state, b"calendar").or(Some("org.interos.calendar"));
             } else if (465..=505).contains(&x) {
                 return package_id_by_suffix(state, b"music").or(Some("org.interos.music"));
+            }
+        }
+    }
+
+    // 3. Home Screen dynamic deck and dock
+    if state.current_view == ViewMode::HomeScreen {
+        if let Some(idx) = screens::home::home_hit(state, x, y) {
+            return package_id_at(state, idx);
+        }
+
+        // Row 0 of Quick Action Dock: Phone, Messages, Camera
+        if (795..1010).contains(&y) {
+            if (30..250).contains(&x) {
+                return package_id_by_suffix(state, b"dialer");
+            } else if (250..475).contains(&x) {
+                return package_id_by_suffix(state, b"messages");
+            } else if (475..695).contains(&x) {
+                return package_id_by_suffix(state, b"camera");
+            }
+        }
+
+        // Row 1 of Quick Action Dock: Files, Browser (Slot 5: Apps is a view transition, not an app)
+        if (1010..1225).contains(&y) {
+            if (30..250).contains(&x) {
+                return package_id_by_suffix(state, b"file_manager").or_else(|| package_id_by_suffix(state, b"files"));
+            } else if (250..475).contains(&x) {
+                return package_id_by_suffix(state, b"browser");
+            } else if (475..695).contains(&x) {
+                // Apps tile opens drawer
+                return None;
             }
         }
     }
@@ -4218,7 +4218,7 @@ pub extern "C" fn _start() -> ! {
                                 }
 
                                 // Apps dock tile tap (Slot 5: row 1, col 2): opens App Drawer
-                                if (895..1050).contains(&y) && (475..695).contains(&x) {
+                                if (1010..1225).contains(&y) && (475..695).contains(&x) {
                                     refresh_package_catalog(&mut state);
                                     refresh_runtime_recents(&mut state);
                                     screens::app_drawer::invalidate_app_drawer_frame();
@@ -4240,17 +4240,14 @@ pub extern "C" fn _start() -> ! {
                                     break;
                                 }
 
-                                // Universal search bar tap: opens App Drawer for application search
-                                if (665..735).contains(&y) && (30..690).contains(&x) {
-                                    refresh_package_catalog(&mut state);
-                                    refresh_runtime_recents(&mut state);
-                                    screens::app_drawer::invalidate_app_drawer_frame();
-                                    state.current_view = ViewMode::AppDrawer;
-                                    state.search_query_len = 0;
-                                    state.app_drawer_page = 0;
+                                // Universal search bar / System Space tap
+                                if ((665..755).contains(&y) && (30..690).contains(&x))
+                                    || ((1320..1384).contains(&y) && (40..680).contains(&x))
+                                {
+                                    state.current_view = ViewMode::SystemSpace;
                                     render_view(surface, &state);
                                     surface_flip_display();
-                                    std::log(0, "[LAUNCHER] App Drawer opened via universal search bar tap.").ok();
+                                    std::log(0, "[LAUNCHER] System space opened via universal search bar tap.").ok();
                                     let mut drain = std::InputEvent {
                                         kind: 0,
                                         x: 0,

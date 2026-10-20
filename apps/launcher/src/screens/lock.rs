@@ -26,7 +26,7 @@
 
 use core::cell::UnsafeCell;
 
-use crate::{test_text, test_text_aa, LauncherState, H, W};
+use crate::{test_text_aa, LauncherState, H, W};
 use launcher::layout::{self, Rect};
 use launcher::text;
 use interos_std::design::walls;
@@ -1437,7 +1437,7 @@ fn lock_pin_pad_pixel(
         }
     }
     if f.pin_subheading.contains(x, y) {
-        if let Some(c) = test_text(
+        if let Some(c) = test_text_aa(
             x,
             y,
             f.pin_subheading.x,
@@ -1445,6 +1445,7 @@ fn lock_pin_pad_pixel(
             PIN_SUBHEADING_SCALE,
             subheader,
             PIN_SUBHEADING_INK,
+            backdrop,
         ) {
             return Some(c);
         }

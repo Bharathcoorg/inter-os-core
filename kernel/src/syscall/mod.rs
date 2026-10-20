@@ -4924,7 +4924,6 @@ fn native_first_party_app_available(package_id: &str) -> bool {
             // packages were already described in `FIRST_PARTY_PACKAGES` and seeded active
             // into the registry, but a package missing from this match was filtered straight
             // back out, so the drawer never saw it and the launch arm was unreachable.
-            | "org.interos.sensor_dashboard"
             | "org.interos.notes"
     )
 }
@@ -4944,11 +4943,16 @@ pub fn sys_package_registry(out_buf:&mut [u8])->Result<usize,SyscallResult>{
     }
     let mut w=W{b:out_buf,n:0};
     for e in &entries{
+        let descriptor=crate::package::first_party_package(&e.package_id);
+        if let Some(desc) = descriptor {
+            if desc.is_system {
+                continue;
+            }
+        }
         let launchable = native_first_party_app_available(&e.package_id)
             || crate::package::PACKAGE_BLOB_STORE.lock().get(&e.package_id).is_some()
-            || crate::package::first_party_package(&e.package_id).is_some();
+            || descriptor.is_some();
         if !launchable { continue; }
-        let descriptor=crate::package::first_party_package(&e.package_id);
         let process=descriptor.map(|p|p.process_name).unwrap_or(&e.package_id);
         let path=descriptor.map(|p|p.path).unwrap_or("");
         let state=match e.state{
@@ -5330,7 +5334,7 @@ pub fn dev_launch_app(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
         "org.interos.file_manager" | "file_manager" | "files" | "app_file_manager" => crate::task::user::spawn_app_file_manager(parent),
         "org.interos.gallery" | "gallery" | "photos" | "app_gallery" => crate::task::user::spawn_app_gallery(parent),
         "org.interos.sensor_dashboard" | "sensor_dashboard" => spawn_app_sensor_dashboard(parent),
-        "org.interos.card_demo" | "card_demo" | "app_card_demo" => crate::task::user::spawn_app_card_demo(parent),
+        "org.interos.notes" | "notes" | "app_notes" => crate::task::user::spawn_app_notes(parent),
         "org.interos.compositor" | "compositor" | "org.interos.launcher" | "launcher" => {
             return Err(SyscallResult::PermissionDenied);
         }
@@ -5580,11 +5584,8 @@ pub fn sys_app_launch(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
         "org.interos.sensor_dashboard" | "sensor_dashboard" => {
             spawn_app_sensor_dashboard(parent_id)
         }
-        "org.interos.card_demo" | "card_demo" => {
-            crate::task::user::spawn_app_card_demo(parent_id)
-        }
         "org.interos.notes" | "notes" | "app_notes" => {
-            crate::task::user::spawn_app_browser(parent_id)
+            crate::task::user::spawn_app_notes(parent_id)
         }
         _ => {
             crate::serial_println!("[APP_LAUNCH DEBUG] unknown app_id: '{}'", app_id);

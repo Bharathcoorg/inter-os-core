@@ -31,6 +31,8 @@ scratch/
 .agents/
 .agent/
 AGENTS.md
+.agents.md
+.repo_rules.md
 opencode.json
 opencode,json
 .opencode/

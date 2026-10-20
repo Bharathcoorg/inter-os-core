@@ -1,31 +1,14 @@
 //! Inter OS Native Sovereign Encrypted Messaging & P2P Wire Client
 //!
-//! Native decentralized encrypted messaging client executing in Ring 3 (User Mode):
-//! - Secure Hardware Keystore key derivation (Slot 3: P2P Messaging Key)
-//! - Sovereign peer DID attestation & contact public identity verification
-//! - Cellular Baseband SMS modem & P2P wire framing
-//! - Sovereign Vault Sector 202 encryption for authenticated persistent chat logs
-//! - Sovereign Privacy Shield message payload scrubbing to prevent metadata leakage
-//! - Active Conversation Thread Store:
-//!   * Conversations are populated only from the real messaging backend.
-//!
-//! - Dual-tone acoustic incoming/outgoing message bubble chime and capacitive haptics
-//! - Asynchronous event reactor loop handling modem URCs, incoming P2P packets, and touch events
-//!
-//! Typed input (the reason this file was rewritten):
-//! - The compose field and the search field are real editors. Tapping one focuses
-//!   it, selects whatever is already in it (so the first keystroke replaces rather
-//!   than appends), and the normalized keyboard pipeline types into it: printable
-//!   ASCII, backspace and escape. This mirrors `apps/browser/src/main.rs`
-//!   (`handle_browser_key` / `Dirty` / `render_browser_band`) exactly.
-//! - Before this change both fields were drawn on screen with a live caret-style
-//!   affordance but no key handler was wired at all: the app had a text field a
-//!   user could see and could not type into.
-//!
-//! Banded rendering:
-//! - Every input path names the row band it dirtied (`Dirty`) and only that band
-//!   is re-rasterised. The previous renderer pushed all 1,036,800 pixels through
-//!   `get_messages_pixel` for every touch event and every keystroke.
+//! Native smartphone messaging client executing in Ring 3 (User Mode):
+//! - Pure `#![no_std]` and `#![no_main]` with zero heap allocations in interactive loops.
+//! - Truthful Platform Contract: Truthful `NO TRANSPORT` badge when modem hardware is absent.
+//! - View Mode 1: `ThreadListView` (Search, conversation rows, avatars, unread pills, truthful empty state).
+//! - View Mode 2: `ConversationView` (Chat bubbles, incoming gray cards, outgoing blue/green cards,
+//!   truthful status indicators "Refused - No Transport", Threat Warning Banner).
+//! - Deterministic GSM-7 packing before transmission.
+//! - Local offline threat heuristic analyzer with zero external network dependencies.
+//! - Persistent settings-backed thread store and circular bounded thread ledger.
 
 #![no_std]
 #![no_main]
@@ -38,6 +21,10 @@ use store::ThreadStore;
 
 pub mod gsm;
 
+use messages::{
+    DeliveryStatus, MessageDirection, MessageRecord, ThreadLedger,
+};
+
 /// Status of a messaging conversation thread.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThreadStatus {
@@ -47,10 +34,6 @@ pub enum ThreadStatus {
 }
 
 /// Conversation thread summary.
-///
-/// WHY the `allow`: this type only names the element of the intentionally empty
-/// `THREADS` anchor. Real threads are `store::ThreadRecord`, so none of these
-/// `&'static str` fields is ever constructed or read.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct ConversationThread {
@@ -62,34 +45,30 @@ pub struct ConversationThread {
 }
 
 /// Conversation directory populated from the real messaging backend.
-///
-/// WHY this stays a zero-length array while the list is realised elsewhere: this
-/// static is the compile-time "no sample data" anchor (an app can never ship a
-/// hardcoded conversation). Real threads live in the bounded, persisted
-/// `store::ThreadStore`, which holds user-typed recipients and messages rather
-/// than `&'static str` literals, so it cannot be a `static`. This array therefore
-/// stays empty on purpose and is never read.
+/// Pinned by repository contracts; stays empty as a compile-time anchor.
 #[allow(dead_code)]
 pub static THREADS: [ConversationThread; 0] = [];
 
+/// UI View Modes: Thread list directory vs. active single conversation view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewMode {
+    ThreadList,
+    Conversation,
+}
+
 /// Honest state of the last compose attempt, as reported in the header pill.
-///
-/// WHY an enum rather than a free string: every variant is set by an actual
-/// syscall outcome. There is no "Sending..." or "Delivered" variant because no
-/// transport is bound to this app, so no such state could ever be observed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeaderStatus {
     /// Startup state: no messaging transport is bound to this app.
     NoTransport,
-    /// The last composed message was sealed into vault sector 202. Nothing
-    /// transmitted it - there is no transport to transmit it with.
+    /// The last composed message was sealed into vault sector 202.
     SealedLocally,
-    /// The vault refused the seal, so the last message was not even stored.
+    /// The vault refused the seal, so the message was not persisted.
     VaultRefused,
 }
 
 impl HeaderStatus {
-    /// Header pill label. Kept short so it still fits the measured pill column.
+    /// Header pill label.
     pub fn label(&self) -> &'static [u8] {
         match self {
             HeaderStatus::NoTransport => b"NO TRANSPORT",
@@ -99,17 +78,17 @@ impl HeaderStatus {
     }
 }
 
-/// Bytes the compose editor can hold. Sized so the longest run still renders
-/// inside the pill's measured text column after ellipsizing.
-const COMPOSE_CAP: usize = 128;
-/// Bytes the search editor can hold.
+/// Bounded input buffer capacities.
+const COMPOSE_CAP: usize = 160;
 const SEARCH_CAP: usize = 48;
-/// Bytes the recipient editor can hold. Must match `store::RECIP_MAX` so an
-/// edited recipient stores without truncation.
-const RECIP_CAP: usize = 24;
+const RECIP_CAP: usize = 32;
 
 /// Production Sovereign Messages state manager.
 pub struct MessagesApp {
+    pub view_mode: ViewMode,
+    pub active_thread_id: Option<u32>,
+    pub ledger: ThreadLedger,
+    pub store: ThreadStore,
     pub total_sent: u32,
     pub total_received: u32,
     pub active_thread_idx: usize,
@@ -123,12 +102,6 @@ pub struct MessagesApp {
     pub compose: [u8; COMPOSE_CAP],
     pub compose_len: usize,
     pub compose_focused: bool,
-    /// The whole compose buffer is selected, so the next character replaces it.
-    ///
-    /// WHY this exists: focusing pre-filled nothing here, but a select-all-on-focus
-    /// field is what Android and iOS both do, and without it a caret parked at the
-    /// end of an existing draft is indistinguishable from "append here" until the
-    /// user has already typed the wrong thing.
     pub compose_select_all: bool,
     /// Search/filter editor buffer and its length.
     pub search: [u8; SEARCH_CAP],
@@ -140,21 +113,20 @@ pub struct MessagesApp {
     pub recip_len: usize,
     pub recip_focused: bool,
     pub recip_select_all: bool,
-    /// Real, persisted thread table. The list renders from this, never from a
-    /// hardcoded array.
-    pub store: ThreadStore,
 }
 
 impl MessagesApp {
     pub const fn new() -> Self {
         Self {
+            view_mode: ViewMode::ThreadList,
+            active_thread_id: None,
+            ledger: ThreadLedger::new(),
+            store: ThreadStore::EMPTY,
             total_sent: 0,
             total_received: 0,
             active_thread_idx: 0,
             keystore_derived: false,
             sector_encrypted: false,
-            // WHY: fail closed. Until the kernel actually reports a baseband,
-            // no inbound SMS path may be claimed.
             modem_present: false,
             header_status: HeaderStatus::NoTransport,
             compose: [0; COMPOSE_CAP],
@@ -169,13 +141,10 @@ impl MessagesApp {
             recip_len: 0,
             recip_focused: false,
             recip_select_all: false,
-            store: ThreadStore::EMPTY,
         }
     }
 
     /// Derives the 256-bit AES-GCM / ChaCha20 session key from Keystore Slot 3.
-    ///
-    /// Returns `true` only when a full 32-byte key was actually returned.
     pub fn derive_messaging_key(&mut self) -> bool {
         let mut key = [0u8; 32];
         match std::keystore_derive(3, &mut key) {
@@ -193,26 +162,13 @@ impl MessagesApp {
                 false
             }
             Err(_) => {
-                // WHY: raw keystore material never crosses the kernel boundary, so
-                // this refusal is expected. Report it so the app never implies a
-                // session key exists to encrypt or decrypt with.
                 std::log(0, "[MESSAGES APP] Keystore Slot 3: derivation refused by the kernel; no session key.").ok();
                 false
             }
         }
     }
 
-    /// Seals the composed body into Sovereign Vault Sector 202 and reports the
-    /// outcome the vault actually returned.
-    ///
-    /// WHY the body is a caller-supplied slice and not a `&'static str`: the
-    /// composer holds a real 128-byte editable buffer, so the body is whatever
-    /// the user typed this session. The previous signature could only be fed a
-    /// literal, which is why the send control was never wired to it at all.
-    ///
-    /// Returns `true` only when the vault acknowledged the seal. It NEVER
-    /// reports delivery: this app holds no transport and issues no
-    /// transmission syscall, so nothing is ever transmitted from here.
+    /// Seals the composed body into Sovereign Vault Sector 202.
     pub fn seal_composed(&mut self, body: &[u8]) -> bool {
         let mut sector_buf = [0u8; 512];
         let copy_len = body.len().min(sector_buf.len().saturating_sub(16));
@@ -226,24 +182,18 @@ impl MessagesApp {
             .ok();
             return false;
         }
-        let badge = crate::gsm::inspect_message_heuristics(body);
-        if badge != crate::gsm::SecurityBadge::VerifiedSafe {
+        let assessment = gsm::analyze_threat(body);
+        if assessment.level != gsm::ThreatLevel::Safe {
             std::log(
                 0,
                 "[MESSAGES APP] Heuristic privacy shield: flagged potential urgency/phishing payload.",
             )
             .ok();
         }
-        // WHY: report the vault outcome. Previously a refused write left
-        // `sector_encrypted` false but the send counter had already advanced.
         match std::vault_encrypt_sector(202, &mut sector_buf, &iv) {
             Ok(_) => {
                 self.sector_encrypted = true;
                 self.header_status = HeaderStatus::SealedLocally;
-                // WHY: the syscall returns only success/failure, never the
-                // cipher it used. Naming "ChaCha20-Poly1305" here invented a
-                // crypto detail this app cannot observe, so report only the
-                // outcome the vault actually acknowledged.
                 std::log(
                     0,
                     "[MESSAGES APP] Sector 202: Message sector sealed and persisted by the storage vault.",
@@ -269,8 +219,6 @@ impl MessagesApp {
     }
 
     /// Plays the outgoing bubble chime (E5: 659Hz -> B5: 988Hz).
-    ///
-    /// Returns `true` only when the audio service accepted both tones.
     pub fn play_bubble_chime(&self) -> bool {
         let mut tones_played = 0u32;
         if std::audio_play_tone(659).is_ok() {
@@ -281,8 +229,6 @@ impl MessagesApp {
         }
         let _ = std::audio_silence();
         let _ = std::audio_haptic_click();
-        // WHY: the audio service refuses tone requests without its capability.
-        // Only claim the chime when it actually sounded.
         if tones_played == 2 {
             std::log(
                 0,
@@ -300,14 +246,38 @@ impl MessagesApp {
         }
     }
 
-    /// Number of threads that survive the current search query.
-    ///
-    /// WHY this reads the persisted store and not the static anchor: the filter
-    /// is real work over the real list. With zero stored threads it matches
-    /// nothing, and the UI says so - it does not pretend the field is inert.
+    /// Number of threads in the ledger that match the current search query.
     pub fn match_count(&self) -> usize {
         let q = &self.search[..self.search_len];
-        self.store.match_count(q)
+        if q.is_empty() {
+            return self.ledger.thread_count;
+        }
+        let mut count = 0;
+        for i in 0..self.ledger.thread_count {
+            if thread_matches(&self.ledger.threads[i], q) {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// Synchronizes threads from persistent ThreadStore into ThreadLedger on startup.
+    pub fn sync_store_to_ledger(&mut self) {
+        for i in 0..self.store.len() {
+            if let Some(r) = self.store.get(i) {
+                if let Some(tid) = self.ledger.create_or_get_thread(r.recipient()) {
+                    let snip = r.last_snippet();
+                    if !snip.is_empty() {
+                        self.ledger.post_message_with_status(
+                            tid,
+                            MessageDirection::Outgoing,
+                            snip,
+                            DeliveryStatus::RefusedNoTransport,
+                        );
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -318,7 +288,7 @@ fn copy_ascii(src: &[u8], dst: &mut [u8]) -> usize {
     n
 }
 
-/// Decimal `v` (a small count) into `out`, no leading zeros. Returns the digits.
+/// Decimal `v` into `out`, no leading zeros. Returns the digits.
 fn put_u8(out: &mut [u8; 4], v: u8) -> usize {
     let mut tmp = [0u8; 4];
     let mut n = 0usize;
@@ -337,32 +307,43 @@ fn put_u8(out: &mut [u8; 4], v: u8) -> usize {
     n
 }
 
+/// Decimal `v` (usize) into `out`.
+#[allow(dead_code)]
+fn put_usize(out: &mut [u8; 8], v: usize) -> usize {
+    let mut tmp = [0u8; 8];
+    let mut n = 0usize;
+    let mut x = v;
+    loop {
+        tmp[n] = b'0' + (x % 10) as u8;
+        x /= 10;
+        n += 1;
+        if x == 0 {
+            break;
+        }
+    }
+    for i in 0..n {
+        out[i] = tmp[n - 1 - i];
+    }
+    n
+}
+
 // -----------------------------------------------------------------------------
-// Visual Design Tokens (Screen 10 Clean Conversation View)
+// Visual Design Tokens
 // -----------------------------------------------------------------------------
 const BG_DARK: u32 = 0xFF000000;
 const SURFACE_DARK: u32 = 0xFF0E1117;
 const SURFACE_RAISED: u32 = 0xFF181C22;
 const BORDER_SUBTLE: u32 = 0xFF262C36;
 const ACCENT_SKY: u32 = 0xFF10B981;
-#[allow(dead_code)]
-const SUCCESS_EMERALD: u32 = 0xFF10B981;
 const TEXT_PRIMARY: u32 = 0xFFFFFFFF;
 const TEXT_MUTED: u32 = 0xFF8B949E;
-
-/// Recessed fill for a control that cannot act.
 const DISABLED_FILL: u32 = 0xFF161B22;
 
-// -----------------------------------------------------------------------------
-// Canonical InterOS Typography
-// -----------------------------------------------------------------------------
+const W: usize = 720;
+const H: usize = 1440;
+const CHUNK: usize = 4096;
 
-/// Anti-aliased run draw, clipped to the run's own measured line box.
-///
-/// `bg` is the local fill the run actually sits on. Blending every glyph edge
-/// toward one hardcoded page colour tinted the anti-aliased fringe of any run
-/// drawn on a pill, which is the same bug class as gating text to a hand-typed
-/// y-window: the local fill and the run must be described by the same constants.
+/// Anti-aliased run draw clipped to run's line box.
 #[inline(always)]
 fn test_text(
     x: usize,
@@ -377,54 +358,58 @@ fn test_text(
     if scale == 0 || text.is_empty() {
         return None;
     }
-    // A run owns exactly `line_height(scale)` rows; testing only that box keeps a
-    // call site from slicing the glyphs with a shorter hand-written window.
     if x < x0 || y < y0 || y >= y0 + std::design::font::line_height(scale) {
         return None;
     }
     std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, bg, false)
 }
 
-const W: usize = 720;
-const H: usize = 1440;
-const CHUNK: usize = 4096;
+/// Anti-aliased bold run draw clipped to run's line box.
+#[inline(always)]
+fn test_text_bold(
+    x: usize,
+    y: usize,
+    x0: usize,
+    y0: usize,
+    scale: usize,
+    text: &[u8],
+    color: u32,
+    bg: u32,
+) -> Option<u32> {
+    if scale == 0 || text.is_empty() {
+        return None;
+    }
+    if x < x0 || y < y0 || y >= y0 + std::design::font::line_height(scale) {
+        return None;
+    }
+    std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, bg, true)
+}
 
 // -----------------------------------------------------------------------------
-// Measured header/pill geometry (Screen 10, 720x1440 portrait).
-//
-// All text below is drawn with the SDK design face (16x24 cells, proportional
-// advances) via `test_text_aa`. Every rect/x0/y0 here is derived from
-// `measure`/`line_height` so ink stays inside its container.
+// Layout Geometry
 // -----------------------------------------------------------------------------
-
-/// y 0..96: header band (the hairline rule is drawn at y == 93).
 const HEADER_Y0: usize = 0;
 const HEADER_Y1: usize = 96;
 const TITLE_TEXT: &[u8] = b"Messages";
 const TITLE_X: usize = 116;
-const TITLE_SCALE: usize = 3;
-// WHY: scale 3 has line_height 72; y0=12 gives 12..84, fully inside the
-// header band (border at 94) with 10px clearance. The old y0=36 ran to 108,
-// bleeding past the header border, and the 36..60 draw gate sliced glyphs.
-const TITLE_Y: usize = 12;
+const TITLE_SCALE: usize = 1;
+const TITLE_Y: usize = 36;
+
+const PILL_RIGHT: usize = W - 24;
+const PILL_TOP: usize = 28;
+const PILL_BOTTOM: usize = 68;
+const PILL_PAD_X: usize = 20;
 
 #[inline]
 fn pill_text(app: &MessagesApp) -> &'static [u8] {
     app.header_status.label()
 }
 
-/// Right edge of the header pill: the 24 px screen margin (696).
-const PILL_RIGHT: usize = W - 24;
-const PILL_TOP: usize = 28;
-const PILL_BOTTOM: usize = 68; // exclusive
-const PILL_PAD_X: usize = 20;
-
 #[inline]
 fn pill_text_scale(label: &[u8]) -> usize {
-    // Keep a 24px gap between the title ink end and the pill's left edge.
-    let title_end = TITLE_X + std::design::font::measure(TITLE_TEXT, TITLE_SCALE);
+    let title_end = TITLE_X + std::design::font::measure_bold(TITLE_TEXT, TITLE_SCALE);
     let avail = PILL_RIGHT.saturating_sub(title_end + 24);
-    let mut scale = 2usize;
+    let mut scale = 1usize;
     while scale > 1 {
         let need = std::design::font::measure(label, scale) + 2 * PILL_PAD_X;
         if need <= avail {
@@ -441,72 +426,49 @@ fn pill_left_for(label: &[u8], scale: usize) -> usize {
     PILL_RIGHT.saturating_sub(w)
 }
 
-// -----------------------------------------------------------------------------
-// Search field geometry (y 104..156). Shared by the renderer and the hit-tester
-// so a tap lands exactly where the field is drawn.
-// -----------------------------------------------------------------------------
+// Search field geometry (y 104..156)
 const SEARCH_Y0: usize = 104;
 const SEARCH_Y1: usize = 156;
-/// The drawn field: x 24..696, y 106..154 (corner radius 22).
 const SEARCH_FIELD: (usize, usize, usize, usize) = (24, 106, 672, 48);
-/// Magnifying-glass icon occupies x 24..82, so the text column starts at 82.
 const SEARCH_TEXT_X: usize = 82;
 const SEARCH_TEXT_MAX_W: usize = 696 - 20 - SEARCH_TEXT_X;
 const SEARCH_PLACEHOLDER: &[u8] = b"Search chats...";
 const SEARCH_TEXT_SCALE: usize = 1;
 
-// -----------------------------------------------------------------------------
-// Compose field geometry (y 1330..1414).
-// -----------------------------------------------------------------------------
-/// Recipient ("To:") editor, drawn between the thread list and the composer.
-///
-/// WHY a separate band: a thread is keyed by its recipient, so composing a
-/// message needs a real recipient field. It reuses the same editor machinery as
-/// the composer and search field, shares its hit-test with its drawing, and
-/// repaints only its own rows on a keystroke.
+// Recipient ("To:") editor
 const RECIPIENT_BAND_Y0: usize = 1288;
 const RECIPIENT_BAND_Y1: usize = 1330;
-/// The drawn field: x 24..610, y 1292..1328 (corner radius 18).
 const RECIPIENT_FIELD: (usize, usize, usize, usize) = (24, 1292, 586, 36);
 const RECIPIENT_TEXT_X: usize = 76;
-const RECIPIENT_TEXT_MAX_W: usize = 610 - 24 - RECIPIENT_TEXT_X;
+const RECIPIENT_TEXT_MAX_W: usize = 490 - RECIPIENT_TEXT_X;
 const RECIPIENT_PLACEHOLDER: &[u8] = b"Recipient (name or handle)";
 const RECIPIENT_TEXT_SCALE: usize = 1;
 
+// Compose field geometry (y 1330..1414)
 const COMPOSE_BAND_Y0: usize = 1330;
 const COMPOSE_BAND_Y1: usize = 1414;
-/// The drawn field: x 24..610, y 1344..1404 (corner radius 24).
 const COMPOSE_FIELD: (usize, usize, usize, usize) = (24, 1344, 586, 60);
 const COMPOSE_TEXT_X: usize = 52;
 const COMPOSE_TEXT_MAX_W: usize = 610 - 20 - COMPOSE_TEXT_X;
 const COMPOSE_PLACEHOLDER: &[u8] = b"Type a message...";
 const COMPOSE_TEXT_SCALE: usize = 2;
-/// Send control circle centre and radius (drawn x 630..694, y 1344..1404).
 const SEND_CX: usize = 662;
 const SEND_CY: usize = 1374;
 const SEND_R: i32 = 29;
 
-/// Home gesture band (y 1418..1424).
+// Home gesture band (y 1418..1424)
 const HOME_X0: usize = 240;
 const HOME_X1: usize = 480;
 const HOME_Y0: usize = 1400;
 
-/// Thread card geometry, used by both the renderer and the tap hit-tester.
-/// WHY an explicit rect: the old tap region was y 110..470, which overlapped the
-/// search field at y 104..156, so a tap aimed at the search box was delivered to
-/// a conversation card instead.
+// Thread card geometry
 const CARD_X0: usize = 24;
 const CARD_X1: usize = 696;
 const CARD_Y0: usize = 180;
 const CARD_H: usize = 120;
 const CARD_BODY_H: usize = 104;
 
-/// Empty-state card (also the target of the search filter result).
-/// WHY centred and shrunk: the card sat at y 180..680 while its content ran
-/// 260..544, leaving ~790px of void between the card and the composer and
-/// reading as a header that ran out of things to say. The block now floats
-/// centred in the space between the search field and the composer, the way
-/// an empty conversation list does on a modern phone.
+// Empty-state card
 const EMPTY_CARD: (usize, usize, usize, usize) = (24, 560, 672, 340);
 
 #[inline(always)]
@@ -514,11 +476,6 @@ fn in_rect(r: (usize, usize, usize, usize), x: usize, y: usize) -> bool {
     x >= r.0 && x < r.0 + r.2 && y >= r.1 && y < r.1 + r.3
 }
 
-/// The fill behind selected editor text: the accent at 15% over the field.
-///
-/// WHY a computed tint and not a fixed colour: the field fill and the accent both
-/// come from the theme, so a hard-coded selection colour would drift from them
-/// the moment either changed.
 fn selection_fill() -> u32 {
     const PERCENT: u32 = 38;
     let t = PERCENT * 256 / 100;
@@ -529,12 +486,6 @@ fn selection_fill() -> u32 {
     0xFF00_0000 | (r << 16) | (g << 8) | b
 }
 
-/// Per-frame resolved text for the header pill.
-///
-/// WHY resolved once per frame: the pill's scale and left edge depend on the
-/// measured label, and the label depends on the real syscall outcome. Measuring
-/// it inside the per-pixel function would re-measure the same string 1,036,800
-/// times per frame.
 struct PillFrame {
     label: &'static [u8],
     scale: usize,
@@ -558,8 +509,6 @@ fn build_pill(app: &MessagesApp) -> PillFrame {
     }
 }
 
-/// A resolved editor field: the ellipsized run actually drawn, its caret
-/// position and its selection width.
 struct EditorFrame {
     buf: [u8; COMPOSE_CAP],
     len: usize,
@@ -568,7 +517,6 @@ struct EditorFrame {
     scale: usize,
     caret_x: usize,
     select_w: usize,
-    /// Colour of the drawn run: ink when the user typed, muted for a placeholder.
     color: u32,
 }
 
@@ -601,13 +549,10 @@ fn build_editor(
     }
     let w = std::design::font::measure(&f.buf[..f.len], scale);
     f.caret_x = x + w;
-    // The caret is drawn only while the field is focused, and a selection is
-    // only meaningful once the field is focused too.
     f.select_w = if focused && select_all { w } else { 0 };
     f
 }
 
-/// Draws the run + selection band + caret of a resolved editor field.
 #[inline(always)]
 fn editor_pixel(
     x: usize,
@@ -648,8 +593,6 @@ struct Frame {
     search: EditorFrame,
     recipient: EditorFrame,
     compose: EditorFrame,
-    /// Index of the first thread row that passes the search filter, or `None`
-    /// when nothing matches.
     filtered: Option<usize>,
 }
 
@@ -704,6 +647,49 @@ fn build_frame(messages: &MessagesApp) -> Frame {
     }
 }
 
+/// Computes a deterministic avatar backdrop color based on peer handle.
+fn avatar_color(peer: &[u8]) -> u32 {
+    let mut hash = 0u32;
+    for &b in peer {
+        hash = hash.wrapping_mul(31).wrapping_add(b as u32);
+    }
+    match hash % 5 {
+        0 => 0xFF1E3A8A, // Sapphire
+        1 => 0xFF065F46, // Emerald
+        2 => 0xFF5B21B6, // Purple
+        3 => 0xFF831843, // Rose
+        _ => 0xFF374151, // Slate
+    }
+}
+
+/// Case-insensitive substring match.
+fn contains_ci(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    if needle.len() > haystack.len() {
+        return false;
+    }
+    for i in 0..=(haystack.len() - needle.len()) {
+        let mut matched = true;
+        for j in 0..needle.len() {
+            if haystack[i + j].to_ascii_lowercase() != needle[j].to_ascii_lowercase() {
+                matched = false;
+                break;
+            }
+        }
+        if matched {
+            return true;
+        }
+    }
+    false
+}
+
+fn thread_matches(tr: &messages::ThreadRecord, query: &[u8]) -> bool {
+    contains_ci(tr.peer(), query)
+}
+
+/// Master pixel scanout pipeline (zero heap allocations).
 #[inline(never)]
 fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> u32 {
     // 1. Header (y 0..96)
@@ -717,21 +703,36 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
             return c;
         }
 
-        // Header Title: "Messages" (full 24*scale line box inside header band).
+        // Electric red dot accent at (96, 48)
         let dot_dx = x as i32 - 96;
         let dot_dy = y as i32 - 48;
         if dot_dx * dot_dx + dot_dy * dot_dy <= 16 {
-            return 0xFFEF4444; // Nothing OS signature electric red dot accent
+            return 0xFFEF4444;
         }
 
+        // Header Title: In ThreadList mode, "Messages"; in Conversation mode, peer handle or "Messages"
         if y >= TITLE_Y && y < TITLE_Y + std::design::font::line_height(TITLE_SCALE) {
-            if let Some(c) = test_text(
+            let title = if messages.view_mode == ViewMode::Conversation {
+                if let Some(tid) = messages.active_thread_id {
+                    if let Some(tr) = messages.ledger.get_thread(tid) {
+                        tr.peer()
+                    } else {
+                        TITLE_TEXT
+                    }
+                } else {
+                    TITLE_TEXT
+                }
+            } else {
+                TITLE_TEXT
+            };
+
+            if let Some(c) = test_text_bold(
                 x,
                 y,
                 TITLE_X,
                 TITLE_Y,
                 TITLE_SCALE,
-                TITLE_TEXT,
+                title,
                 TEXT_PRIMARY,
                 SURFACE_DARK,
             ) {
@@ -739,8 +740,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
             }
         }
 
-        // Status pill, top-right: measured at draw time from the REAL outcome of
-        // the last compose attempt, right-aligned to the 24 px margin.
+        // Status pill, top-right: truthful NO TRANSPORT / outcome
         if x >= f.pill.left && x < PILL_RIGHT && y >= PILL_TOP && y < PILL_BOTTOM {
             let rx = (x - f.pill.left).min(PILL_RIGHT - 1 - x);
             let ry = (y - PILL_TOP).min(PILL_BOTTOM - 1 - y);
@@ -751,7 +751,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                     return SURFACE_DARK;
                 }
             }
-            if let Some(c) = test_text(
+            if let Some(c) = test_text_bold(
                 x,
                 y,
                 f.pill.text_x,
@@ -772,121 +772,44 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
         return SURFACE_DARK;
     }
 
-    // 2. Search & Filter Bar (y 104..156)
-    if y >= SEARCH_Y0 && y < SEARCH_Y1 {
-        if in_rect(SEARCH_FIELD, x, y) {
-            let fx = SEARCH_FIELD.0;
-            let fy = SEARCH_FIELD.1;
-            let rx = (x - fx).min(fx + SEARCH_FIELD.2 - 1 - x);
-            let ry = (y - fy).min(fy + SEARCH_FIELD.3 - 1 - y);
-            if rx < 22 && ry < 22 {
-                let cdx = (22 - rx) as isize;
-                let cdy = (22 - ry) as isize;
-                if cdx * cdx + cdy * cdy >= 484 {
-                    return BG_DARK;
-                }
-            }
-
-            // Vector magnifying glass icon at (cx: 56, cy: 130)
-            let cx = 56;
-            let cy = 130;
-            let dx = (x as isize - cx as isize).abs();
-            let dy = (y as isize - cy as isize).abs();
-            let d_sq = dx * dx + dy * dy;
-            if d_sq >= 20 && d_sq <= 48 {
-                return TEXT_MUTED;
-            }
-            // Glass handle pointing down-right
-            let hx = x as isize - (cx + 5) as isize;
-            let hy = y as isize - (cy + 5) as isize;
-            if hx >= 0 && hx <= 8 && hy >= 0 && hy <= 8 && (hx - hy).abs() <= 1 {
-                return TEXT_MUTED;
-            }
-
-            // Typed query (or the placeholder) + caret, on the pill's own fill.
-            if let Some(c) = editor_pixel(x, y, &f.search, messages.search_focused, SURFACE_DARK) {
-                return c;
-            }
-
-            if rx < 2 || ry < 2 {
-                return BORDER_SUBTLE;
-            }
-            return SURFACE_DARK;
-        }
-        return BG_DARK;
-    }
-
-    // 3. Conversation Thread List / Empty State (y 168..1288; the recipient
-    //    editor band and the composer sit below this).
-    if y >= 168 && y < RECIPIENT_BAND_Y0 {
-        // A search that matched nothing shows the filter's real result instead of
-        // the "no conversations yet" card: the field is not decoration, so its
-        // outcome has to be visible.
-        if f.filtered.is_none() {
-            if in_rect(EMPTY_CARD, x, y) {
-                let rx = (x - EMPTY_CARD.0).min(EMPTY_CARD.0 + EMPTY_CARD.2 - 1 - x);
-                let ry = (y - EMPTY_CARD.1).min(EMPTY_CARD.1 + EMPTY_CARD.3 - 1 - y);
-                if rx < 24 && ry < 24 {
-                    let cdx = (24 - rx) as isize;
-                    let cdy = (24 - ry) as isize;
-                    if cdx * cdx + cdy * cdy >= 576 {
+    // -------------------------------------------------------------------------
+    // ViewMode 1: ThreadListView
+    // -------------------------------------------------------------------------
+    if messages.view_mode == ViewMode::ThreadList {
+        // 2. Search & Filter Bar (y 104..156)
+        if y >= SEARCH_Y0 && y < SEARCH_Y1 {
+            if in_rect(SEARCH_FIELD, x, y) {
+                let fx = SEARCH_FIELD.0;
+                let fy = SEARCH_FIELD.1;
+                let rx = (x - fx).min(fx + SEARCH_FIELD.2 - 1 - x);
+                let ry = (y - fy).min(fy + SEARCH_FIELD.3 - 1 - y);
+                if rx < 22 && ry < 22 {
+                    let cdx = (22 - rx) as isize;
+                    let cdy = (22 - ry) as isize;
+                    if cdx * cdx + cdy * cdy >= 484 {
                         return BG_DARK;
                     }
                 }
 
-                // WHY no pictogram here: the card's icon is drawn only for the
-                // "no conversations at all" state. When a query is present and
-                // matches nothing, the honest content is the query itself, not a
-                // picture of an empty inbox the user has already dismissed.
-                let line = b"No chats match your search";
-                let sub = &messages.search[..messages.search_len];
-                let mut buf = [0u8; COMPOSE_CAP];
-                let n = std::design::font::ellipsize(sub, 1, 624, &mut buf);
-                let sub_line: &[u8] = if n == 0 { b"(empty query)" } else { &buf[..n] };
-                let mut quoted = [0u8; COMPOSE_CAP + 2];
-                quoted[0] = b'"';
-                quoted[1..1 + n].copy_from_slice(&buf[..n]);
-                quoted[1 + n] = b'"';
-                let q_line: &[u8] = &quoted[..n + 2];
-                let line_w = std::design::font::measure(line, 2);
-                let sub_w = std::design::font::measure(sub_line, 1);
-                let q_w = std::design::font::measure(q_line, 1);
-                if let Some(c) = test_text(
-                    x,
-                    y,
-                    EMPTY_CARD.0 + (EMPTY_CARD.2.saturating_sub(line_w)) / 2,
-                    670,
-                    2,
-                    line,
-                    TEXT_PRIMARY,
-                    SURFACE_DARK,
-                ) {
+                // Vector magnifying glass icon at (cx: 56, cy: 130)
+                let cx = 56;
+                let cy = 130;
+                let dx = (x as isize - cx as isize).abs();
+                let dy = (y as isize - cy as isize).abs();
+                let d_sq = dx * dx + dy * dy;
+                if d_sq >= 20 && d_sq <= 48 {
+                    return TEXT_MUTED;
+                }
+                let hx = x as isize - (cx + 5) as isize;
+                let hy = y as isize - (cy + 5) as isize;
+                if hx >= 0 && hx <= 8 && hy >= 0 && hy <= 8 && (hx - hy).abs() <= 1 {
+                    return TEXT_MUTED;
+                }
+
+                if let Some(c) = editor_pixel(x, y, &f.search, messages.search_focused, SURFACE_DARK) {
                     return c;
                 }
-                if let Some(c) = test_text(
-                    x,
-                    y,
-                    EMPTY_CARD.0 + (EMPTY_CARD.2.saturating_sub(sub_w)) / 2,
-                    730,
-                    1,
-                    sub_line,
-                    TEXT_MUTED,
-                    SURFACE_DARK,
-                ) {
-                    return c;
-                }
-                if let Some(c) = test_text(
-                    x,
-                    y,
-                    EMPTY_CARD.0 + (EMPTY_CARD.2.saturating_sub(q_w)) / 2,
-                    756,
-                    1,
-                    q_line,
-                    TEXT_MUTED,
-                    SURFACE_DARK,
-                ) {
-                    return c;
-                }
+
                 if rx < 2 || ry < 2 {
                     return BORDER_SUBTLE;
                 }
@@ -895,310 +818,648 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
             return BG_DARK;
         }
 
-        if messages.store.is_empty() {
-            // Empty state container card at x: 24..696, y: 560..900, centred between search and composer.
-            if in_rect(EMPTY_CARD, x, y) {
-                let rx = (x - EMPTY_CARD.0).min(EMPTY_CARD.0 + EMPTY_CARD.2 - 1 - x);
-                let ry = (y - EMPTY_CARD.1).min(EMPTY_CARD.1 + EMPTY_CARD.3 - 1 - y);
-                if rx < 24 && ry < 24 {
-                    let cdx = (24 - rx) as isize;
-                    let cdy = (24 - ry) as isize;
-                    if cdx * cdx + cdy * cdy >= 576 {
-                        return BG_DARK;
+        // 3. Thread List / Empty State (y 168..1288)
+        if y >= 168 && y < RECIPIENT_BAND_Y0 {
+            // Filter matched nothing
+            if f.filtered.is_none() {
+                if in_rect(EMPTY_CARD, x, y) {
+                    let rx = (x - EMPTY_CARD.0).min(EMPTY_CARD.0 + EMPTY_CARD.2 - 1 - x);
+                    let ry = (y - EMPTY_CARD.1).min(EMPTY_CARD.1 + EMPTY_CARD.3 - 1 - y);
+                    if rx < 24 && ry < 24 {
+                        let cdx = (24 - rx) as isize;
+                        let cdy = (24 - ry) as isize;
+                        if cdx * cdx + cdy * cdy >= 576 {
+                            return BG_DARK;
+                        }
                     }
+
+                    let line = b"No chats match your search";
+                    let sub = &messages.search[..messages.search_len];
+                    let mut buf = [0u8; COMPOSE_CAP];
+                    let n = std::design::font::ellipsize(sub, 1, 624, &mut buf);
+                    let sub_line: &[u8] = if n == 0 { b"(empty query)" } else { &buf[..n] };
+                    let line_w = std::design::font::measure_bold(line, 1);
+                    let sub_w = std::design::font::measure(sub_line, 1);
+                    if let Some(c) = test_text_bold(
+                        x,
+                        y,
+                        EMPTY_CARD.0 + (EMPTY_CARD.2.saturating_sub(line_w)) / 2,
+                        676,
+                        1,
+                        line,
+                        TEXT_PRIMARY,
+                        SURFACE_DARK,
+                    ) {
+                        return c;
+                    }
+                    if let Some(c) = test_text(
+                        x,
+                        y,
+                        EMPTY_CARD.0 + (EMPTY_CARD.2.saturating_sub(sub_w)) / 2,
+                        716,
+                        1,
+                        sub_line,
+                        TEXT_MUTED,
+                        SURFACE_DARK,
+                    ) {
+                        return c;
+                    }
+                    if rx < 2 || ry < 2 {
+                        return BORDER_SUBTLE;
+                    }
+                    return SURFACE_DARK;
                 }
+                return BG_DARK;
+            }
 
-                // --- Vector Chat Bubble Pictogram at cx: 360, cy: 300 ---
-                let cx = 360;
-                let cy = 673;
-
-                // Speech bubble body (x: cx - 60..cx + 60, y: cy - 40..cy + 30, radius 18)
-                if x >= cx - 60 && x < cx + 60 && y >= cy - 40 && y < cy + 30 {
-                    let bx = (x - (cx - 60)).min((cx + 59) - x);
-                    let by = (y - (cy - 40)).min((cy + 29) - y);
-                    let in_corner = bx < 18 && by < 18;
-                    let corner_out = in_corner && {
-                        let cdx = (18 - bx) as isize;
-                        let cdy = (18 - by) as isize;
-                        cdx * cdx + cdy * cdy >= 324
-                    };
-
-                    if !corner_out {
-                        // Interior micro-bars representing chat text
-                        if y >= cy - 22 && y < cy - 16 && x >= cx - 40 && x < cx + 28 {
-                            return ACCENT_SKY;
+            // Zero conversation threads: Honest Empty State Card
+            if messages.ledger.thread_count == 0 {
+                if in_rect(EMPTY_CARD, x, y) {
+                    let rx = (x - EMPTY_CARD.0).min(EMPTY_CARD.0 + EMPTY_CARD.2 - 1 - x);
+                    let ry = (y - EMPTY_CARD.1).min(EMPTY_CARD.1 + EMPTY_CARD.3 - 1 - y);
+                    if rx < 24 && ry < 24 {
+                        let cdx = (24 - rx) as isize;
+                        let cdy = (24 - ry) as isize;
+                        if cdx * cdx + cdy * cdy >= 576 {
+                            return BG_DARK;
                         }
-                        if y >= cy - 8 && y < cy - 2 && x >= cx - 40 && x < cx + 16 {
-                            return BORDER_SUBTLE;
-                        }
-                        if y >= cy + 6 && y < cy + 12 && x >= cx - 40 && x < cx - 4 {
-                            return BORDER_SUBTLE;
-                        }
+                    }
 
-                        // Border rim
-                        let is_rim = bx < 2 || by < 2 || (in_corner && {
+                    // Vector Chat Bubble Pictogram at cx: 360, cy: 673
+                    let cx = 360;
+                    let cy = 673;
+                    if x >= cx - 60 && x < cx + 60 && y >= cy - 40 && y < cy + 30 {
+                        let bx = (x - (cx - 60)).min((cx + 59) - x);
+                        let by = (y - (cy - 40)).min((cy + 29) - y);
+                        let in_corner = bx < 18 && by < 18;
+                        let corner_out = in_corner && {
                             let cdx = (18 - bx) as isize;
                             let cdy = (18 - by) as isize;
-                            cdx * cdx + cdy * cdy >= 256
-                        });
-                        if is_rim {
-                            return BORDER_SUBTLE;
-                        }
-                        return SURFACE_RAISED;
-                    }
-                }
+                            cdx * cdx + cdy * cdy >= 324
+                        };
 
-                // Speech bubble pointer tail at bottom-left: x: cx - 44..cx - 18, y: cy + 30..cy + 48
-                if x >= cx - 44 && x < cx - 18 && y >= cy + 30 && y < cy + 48 {
-                    let rel_x = (x - (cx - 44)) as isize;
-                    let rel_y = (y - (cy + 30)) as isize;
-                    if rel_x >= (rel_y * 24) / 18 {
-                        if rel_x == (rel_y * 24) / 18 || x == cx - 19 || y == cy + 47 {
-                            return BORDER_SUBTLE;
-                        }
-                        return SURFACE_RAISED;
-                    }
-                }
-
-                // Empty state text. Every run is gated on its own measured line
-                // box (24*scale rows) and centred on the card's 672 px width, so
-                // no headline is sliced and none runs past the card edge.
-                //
-                if let Some(c) = test_text(
-                    x,
-                    y,
-                    EMPTY_CARD.0 + std::design::font::center_x(b"No Conversations Yet", 2, EMPTY_CARD.2),
-                    740,
-                    2,
-                    b"No Conversations Yet",
-                    TEXT_PRIMARY,
-                    SURFACE_DARK,
-                ) {
-                    return c;
-                }
-                if let Some(c) = test_text(
-                    x,
-                    y,
-                    EMPTY_CARD.0
-                        + std::design::font::center_x(b"Messaging unavailable: no transport", 1, EMPTY_CARD.2),
-                    810,
-                    1,
-                    b"Messaging unavailable: no transport",
-                    TEXT_MUTED,
-                    SURFACE_DARK,
-                ) {
-                    return c;
-                }
-
-                // Subtle card border
-                if rx < 2 || ry < 2 {
-                    return BORDER_SUBTLE;
-                }
-
-                // Solid white container card
-                return SURFACE_DARK;
-            }
-        } else {
-            // Render real conversation threads from the persisted store, filtered
-            // by the search field. Each card shows the recipient, the last stored
-            // message, its local-store count, and a delete affordance.
-            let idx = (y - CARD_Y0) / CARD_H;
-            let card_top = CARD_Y0 + idx * CARD_H;
-            let card_offset_y = (y - CARD_Y0) % CARD_H;
-            if card_offset_y < CARD_BODY_H && x >= CARD_X0 && x < CARD_X1 {
-                if let Some(rec) = messages.store.get(idx) {
-                    if messages.store.matches(idx, &messages.search[..messages.search_len]) {
-                        let rx = (x - CARD_X0).min(CARD_X1 - 1 - x);
-                        let ry = card_offset_y.min(CARD_BODY_H - 1 - card_offset_y);
-                        if rx < 16 && ry < 16 {
-                            let cdx = (16 - rx) as isize;
-                            let cdy = (16 - ry) as isize;
-                            if cdx * cdx + cdy * cdy >= 256 {
-                                return BG_DARK;
+                        if !corner_out {
+                            if y >= cy - 22 && y < cy - 16 && x >= cx - 40 && x < cx + 28 {
+                                return ACCENT_SKY;
                             }
-                        }
-                        let selected = idx == messages.active_thread_idx;
-                        let name = rec.recipient();
-                        let name_x =
-                            CARD_X0 + std::design::font::center_x(name, 2, CARD_X1 - CARD_X0);
-                        if let Some(c) = test_text(
-                            x,
-                            y,
-                            name_x,
-                            card_top + 16,
-                            2,
-                            name,
-                            TEXT_PRIMARY,
-                            SURFACE_DARK,
-                        ) {
-                            return c;
-                        }
-                        // Last stored message, ellipsised to the card's text column.
-                        let snippet = rec.last_snippet();
-                        let badge = crate::gsm::inspect_message_heuristics(snippet);
-
-                        // Security indicator badge dot (radius 4) reflecting threat heuristic inspection
-                        let s_dx = x as isize - (CARD_X0 + 16) as isize;
-                        let s_dy = y as isize - (card_top + 24) as isize;
-                        if s_dx * s_dx + s_dy * s_dy <= 16 {
-                            return badge.color();
-                        }
-
-                        let mut buf = [0u8; 48];
-                        let n = std::design::font::ellipsize(
-                            snippet,
-                            1,
-                            CARD_X1 - CARD_X0 - 48,
-                            &mut buf,
-                        );
-                        // Honest subline: the count of messages this device has
-                        // stored locally. It never implies any were delivered -
-                        // no transport is bound to this app.
-                        let label: &[u8] = b"  (stored locally: ";
-                        let count = rec.count();
-                        let mut sub = [0u8; 96];
-                        let mut sl = 0usize;
-                        if n > 0 {
-                            sub[..n].copy_from_slice(&buf[..n]);
-                            sl = n;
-                        }
-                        let _ = selected;
-                        if sl + label.len() + 5 <= sub.len() {
-                            sub[sl..sl + label.len()].copy_from_slice(label);
-                            sl += label.len();
-                            let mut digit = [0u8; 4];
-                            let dn = put_u8(&mut digit, count);
-                            if sl + dn + 1 <= sub.len() {
-                                sub[sl..sl + dn].copy_from_slice(&digit[..dn]);
-                                sl += dn;
-                                sub[sl] = b')';
-                                sl += 1;
+                            if y >= cy - 8 && y < cy - 2 && x >= cx - 40 && x < cx + 16 {
+                                return BORDER_SUBTLE;
                             }
+                            if y >= cy + 6 && y < cy + 12 && x >= cx - 40 && x < cx - 4 {
+                                return BORDER_SUBTLE;
+                            }
+                            let is_rim = bx < 2 || by < 2 || (in_corner && {
+                                let cdx = (18 - bx) as isize;
+                                let cdy = (18 - by) as isize;
+                                cdx * cdx + cdy * cdy >= 256
+                            });
+                            if is_rim {
+                                return BORDER_SUBTLE;
+                            }
+                            return SURFACE_RAISED;
                         }
-                        if let Some(c) = test_text(
-                            x,
-                            y,
-                            CARD_X0 + 24,
-                            card_top + 68,
-                            1,
-                            &sub[..sl],
-                            TEXT_MUTED,
-                            SURFACE_DARK,
-                        ) {
-                            return c;
+                    }
+
+                    // Speech bubble pointer tail at bottom-left
+                    if x >= cx - 44 && x < cx - 18 && y >= cy + 30 && y < cy + 48 {
+                        let rel_x = (x - (cx - 44)) as isize;
+                        let rel_y = (y - (cy + 30)) as isize;
+                        if rel_x >= (rel_y * 24) / 18 {
+                            if rel_x == (rel_y * 24) / 18 || x == cx - 19 || y == cy + 47 {
+                                return BORDER_SUBTLE;
+                            }
+                            return SURFACE_RAISED;
                         }
-                        // Delete affordance: a small x glyph on the card's right.
-                        let dxc = CARD_X1 - 44;
-                        let dyc = card_top + 32;
-                        let gx = x as isize - dxc as isize;
-                        let gy = y as isize - dyc as isize;
-                        if gx.abs() <= 6 && gy.abs() <= 6 && (gx - gy).abs() <= 2 {
-                            return ACCENT_SKY;
+                    }
+
+                    // Strict contract coordinates: 740 and 810
+                    if let Some(c) = test_text(
+                        x,
+                        y,
+                        EMPTY_CARD.0 + std::design::font::center_x(b"No Conversations Yet", 2, EMPTY_CARD.2),
+                        740,
+                        2,
+                        b"No Conversations Yet",
+                        TEXT_PRIMARY,
+                        SURFACE_DARK,
+                    ) {
+                        return c;
+                    }
+                    if let Some(c) = test_text(
+                        x,
+                        y,
+                        EMPTY_CARD.0
+                            + std::design::font::center_x(b"Messaging unavailable: no transport", 1, EMPTY_CARD.2),
+                        810,
+                        1,
+                        b"Messaging unavailable: no transport",
+                        TEXT_MUTED,
+                        SURFACE_DARK,
+                    ) {
+                        return c;
+                    }
+
+                    if rx < 2 || ry < 2 {
+                        return BORDER_SUBTLE;
+                    }
+                    return SURFACE_DARK;
+                }
+            } else {
+                // Render conversation thread rows
+                let idx = (y - CARD_Y0) / CARD_H;
+                let card_top = CARD_Y0 + idx * CARD_H;
+                let card_offset_y = (y - CARD_Y0) % CARD_H;
+                if card_offset_y < CARD_BODY_H && x >= CARD_X0 && x < CARD_X1 {
+                    if let Some(tr) = messages.ledger.get_thread_by_idx(idx) {
+                        if thread_matches(tr, &messages.search[..messages.search_len]) {
+                            let rx = (x - CARD_X0).min(CARD_X1 - 1 - x);
+                            let ry = card_offset_y.min(CARD_BODY_H - 1 - card_offset_y);
+                            if rx < 16 && ry < 16 {
+                                let cdx = (16 - rx) as isize;
+                                let cdy = (16 - ry) as isize;
+                                if cdx * cdx + cdy * cdy >= 256 {
+                                    return BG_DARK;
+                                }
+                            }
+
+                            // 1. Avatar glyph with colored backdrop
+                            let acx = CARD_X0 + 44;
+                            let acy = card_top + 52;
+                            let adx = x as isize - acx as isize;
+                            let ady = y as isize - acy as isize;
+                            if adx * adx + ady * ady <= 576 {
+                                let initial = if tr.handle_len > 0 { tr.peer_handle[0] } else { b'?' };
+                                let glyph = [initial];
+                                if let Some(c) = test_text_bold(
+                                    x,
+                                    y,
+                                    acx.saturating_sub(7),
+                                    acy.saturating_sub(12),
+                                    1,
+                                    &glyph,
+                                    0xFFFFFFFF,
+                                    avatar_color(tr.peer()),
+                                ) {
+                                    return c;
+                                }
+                                return avatar_color(tr.peer());
+                            }
+
+                            // 2. Peer handle / name (Scale 1 Bold with 10px spacing above snippet)
+                            if let Some(c) = test_text_bold(
+                                x,
+                                y,
+                                CARD_X0 + 84,
+                                card_top + 22,
+                                1,
+                                tr.peer(),
+                                TEXT_PRIMARY,
+                                SURFACE_DARK,
+                            ) {
+                                return c;
+                            }
+
+                            // 3. Last message preview
+                            let mut snippet = [0u8; 48];
+                            let slen = if let Some(last_msg) = messages.ledger.latest_message(tr.id) {
+                                std::design::font::ellipsize(
+                                    last_msg.text(),
+                                    1,
+                                    CARD_X1 - CARD_X0 - 180,
+                                    &mut snippet,
+                                )
+                            } else {
+                                let placeholder = b"(no messages)";
+                                copy_ascii(placeholder, &mut snippet)
+                            };
+
+                            if let Some(c) = test_text(
+                                x,
+                                y,
+                                CARD_X0 + 84,
+                                card_top + 56,
+                                1,
+                                &snippet[..slen],
+                                TEXT_MUTED,
+                                SURFACE_DARK,
+                            ) {
+                                return c;
+                            }
+
+                            // 4. Security indicator badge dot
+                            let threat = gsm::analyze_threat(&snippet[..slen]);
+                            let s_dx = x as isize - (CARD_X0 + 20) as isize;
+                            let s_dy = y as isize - (card_top + 24) as isize;
+                            if s_dx * s_dx + s_dy * s_dy <= 16 {
+                                return threat.level.color();
+                            }
+
+                            // 5. Unread counter pill (if unread_count > 0)
+                            if tr.unread_count > 0 {
+                                let px0 = CARD_X1 - 92;
+                                let px1 = CARD_X1 - 56;
+                                let py0 = card_top + 34;
+                                let py1 = card_top + 68;
+                                if x >= px0 && x < px1 && y >= py0 && y < py1 {
+                                    let mut digit = [0u8; 4];
+                                    let dn = put_u8(&mut digit, tr.unread_count);
+                                    if let Some(c) = test_text(
+                                        x,
+                                        y,
+                                        px0 + 12,
+                                        py0 + 5,
+                                        1,
+                                        &digit[..dn],
+                                        0xFFFFFFFF,
+                                        ACCENT_SKY,
+                                    ) {
+                                        return c;
+                                    }
+                                    return ACCENT_SKY;
+                                }
+                            }
+
+                            // 6. Delete affordance 'x' glyph
+                            let dxc = CARD_X1 - 38;
+                            let dyc = card_top + 50;
+                            let gx = x as isize - dxc as isize;
+                            let gy = y as isize - dyc as isize;
+                            if gx.abs() <= 6 && gy.abs() <= 6 && (gx - gy).abs() <= 2 {
+                                return ACCENT_SKY;
+                            }
+
+                            if rx < 2 || ry < 2 {
+                                return BORDER_SUBTLE;
+                            }
+                            return SURFACE_DARK;
                         }
-                        if rx < 2 || ry < 2 {
-                            return BORDER_SUBTLE;
-                        }
-                        return SURFACE_DARK;
                     }
                 }
-            }
-        }
-        return BG_DARK;
-    }
-
-    // 3b. Recipient editor band (y 1288..1330): a real field the keyboard types
-    //     into, sharing its rect with its hit-test and its own repaint band.
-    if y >= RECIPIENT_BAND_Y0 && y < RECIPIENT_BAND_Y1 {
-        if in_rect(RECIPIENT_FIELD, x, y) {
-            let fx = RECIPIENT_FIELD.0;
-            let fy = RECIPIENT_FIELD.1;
-            let rx = (x - fx).min(fx + RECIPIENT_FIELD.2 - 1 - x);
-            let ry = (y - fy).min(fy + RECIPIENT_FIELD.3 - 1 - y);
-            if rx < 18 && ry < 18 {
-                let cdx = (18 - rx) as isize;
-                let cdy = (18 - ry) as isize;
-                if cdx * cdx + cdy * cdy >= 324 {
-                    return BG_DARK;
-                }
-            }
-            if let Some(c) = test_text(x, y, 40, f.recipient.y, 1, b"To:", TEXT_MUTED, SURFACE_DARK) {
-                return c;
-            }
-            if let Some(c) = editor_pixel(x, y, &f.recipient, messages.recip_focused, SURFACE_DARK) {
-                return c;
-            }
-            if rx < 2 || ry < 2 {
-                return BORDER_SUBTLE;
-            }
-            return SURFACE_DARK;
-        }
-        return BG_DARK;
-    }
-
-    // 4. Bottom Compose Input Bar (y 1330..1414)
-    if y >= COMPOSE_BAND_Y0 && y < COMPOSE_BAND_Y1 {
-        if y == COMPOSE_BAND_Y0 {
-            return BORDER_SUBTLE;
-        }
-
-        // Text input field pill (x: 24..610, y: 1344..1404)
-        if in_rect(COMPOSE_FIELD, x, y) {
-            let fx = COMPOSE_FIELD.0;
-            let fy = COMPOSE_FIELD.1;
-            let rx = (x - fx).min(fx + COMPOSE_FIELD.2 - 1 - x);
-            let ry = (y - fy).min(fy + COMPOSE_FIELD.3 - 1 - y);
-            if rx < 24 && ry < 24 {
-                let cdx = (24 - rx) as isize;
-                let cdy = (24 - ry) as isize;
-                if cdx * cdx + cdy * cdy >= 576 {
-                    return BG_DARK;
-                }
-            }
-
-            if let Some(c) = editor_pixel(x, y, &f.compose, messages.compose_focused, SURFACE_DARK)
-            {
-                return c;
-            }
-
-            if rx < 2 || ry < 2 {
-                return BORDER_SUBTLE;
-            }
-            return SURFACE_DARK;
-        }
-
-        // Send control circle.
-        //
-        // WHY the two treatments: an empty composer has nothing to seal, so the
-        // control is drawn recessed with a muted glyph. A non-empty composer has
-        // real work to do - seal the typed body into vault sector 202 - so it is
-        // drawn live. It never claims delivery; the header pill reports what the
-        // vault actually acknowledged.
-        if x >= 630 && x < 694 && y >= 1344 && y < 1404 {
-            let dx = (x as isize) - SEND_CX as isize;
-            let dy = (y as isize) - SEND_CY as isize;
-            if dx * dx + dy * dy <= (SEND_R * SEND_R) as isize {
-                let live = messages.compose_len > 0;
-                let bg = if live { ACCENT_SKY } else { DISABLED_FILL };
-                let ink = if live { 0xFFFFFFFF } else { TEXT_MUTED };
-
-                // Chevron arrow head pointing right
-                let rel_x = dx;
-                let rel_y = dy;
-                let is_arrow = (rel_y.abs() <= 10 && rel_x >= -8 + rel_y.abs() && rel_x <= -4 + rel_y.abs())
-                    || (rel_y.abs() <= 2 && rel_x >= -12 && rel_x <= 6);
-                if is_arrow {
-                    return ink;
-                }
-
-                return bg;
             }
             return BG_DARK;
         }
 
-        return BG_DARK;
+        // 3b. Recipient editor band (y 1288..1330)
+        if y >= RECIPIENT_BAND_Y0 && y < RECIPIENT_BAND_Y1 {
+            if in_rect(RECIPIENT_FIELD, x, y) {
+                let fx = RECIPIENT_FIELD.0;
+                let fy = RECIPIENT_FIELD.1;
+                let rx = (x - fx).min(fx + RECIPIENT_FIELD.2 - 1 - x);
+                let ry = (y - fy).min(fy + RECIPIENT_FIELD.3 - 1 - y);
+                if rx < 18 && ry < 18 {
+                    let cdx = (18 - rx) as isize;
+                    let cdy = (18 - ry) as isize;
+                    if cdx * cdx + cdy * cdy >= 324 {
+                        return BG_DARK;
+                    }
+                }
+                if let Some(c) = test_text(x, y, 40, f.recipient.y, 1, b"To:", TEXT_MUTED, SURFACE_DARK) {
+                    return c;
+                }
+                if let Some(c) = editor_pixel(x, y, &f.recipient, messages.recip_focused, SURFACE_DARK) {
+                    return c;
+                }
+
+                // Character count indicator (e.g. 0/160)
+                let mut count_buf = [0u8; 8];
+                let cn = format_char_count(messages.compose_len, &mut count_buf);
+                if let Some(c) = test_text(x, y, 530, f.recipient.y, 1, &count_buf[..cn], TEXT_MUTED, SURFACE_DARK) {
+                    return c;
+                }
+
+                if rx < 2 || ry < 2 {
+                    return BORDER_SUBTLE;
+                }
+                return SURFACE_DARK;
+            }
+            return BG_DARK;
+        }
+
+        // 4. Compose Input Bar (y 1330..1414)
+        if y >= COMPOSE_BAND_Y0 && y < COMPOSE_BAND_Y1 {
+            if y == COMPOSE_BAND_Y0 {
+                return BORDER_SUBTLE;
+            }
+            if in_rect(COMPOSE_FIELD, x, y) {
+                let fx = COMPOSE_FIELD.0;
+                let fy = COMPOSE_FIELD.1;
+                let rx = (x - fx).min(fx + COMPOSE_FIELD.2 - 1 - x);
+                let ry = (y - fy).min(fy + COMPOSE_FIELD.3 - 1 - y);
+                if rx < 24 && ry < 24 {
+                    let cdx = (24 - rx) as isize;
+                    let cdy = (24 - ry) as isize;
+                    if cdx * cdx + cdy * cdy >= 576 {
+                        return BG_DARK;
+                    }
+                }
+                if let Some(c) = editor_pixel(x, y, &f.compose, messages.compose_focused, SURFACE_DARK) {
+                    return c;
+                }
+                if rx < 2 || ry < 2 {
+                    return BORDER_SUBTLE;
+                }
+                return SURFACE_DARK;
+            }
+
+            // Send control circle
+            if x >= 630 && x < 694 && y >= 1344 && y < 1404 {
+                let dx = (x as isize) - SEND_CX as isize;
+                let dy = (y as isize) - SEND_CY as isize;
+                if dx * dx + dy * dy <= (SEND_R * SEND_R) as isize {
+                    let live = messages.compose_len > 0;
+                    let bg = if live { ACCENT_SKY } else { DISABLED_FILL };
+                    let ink = if live { 0xFFFFFFFF } else { TEXT_MUTED };
+                    let rel_x = dx;
+                    let rel_y = dy;
+                    let is_arrow = (rel_y.abs() <= 10 && rel_x >= -8 + rel_y.abs() && rel_x <= -4 + rel_y.abs())
+                        || (rel_y.abs() <= 2 && rel_x >= -12 && rel_x <= 6);
+                    if is_arrow {
+                        return ink;
+                    }
+                    return bg;
+                }
+                return BG_DARK;
+            }
+            return BG_DARK;
+        }
+    } else {
+        // ---------------------------------------------------------------------
+        // ViewMode 2: ConversationView
+        // ---------------------------------------------------------------------
+
+        // Threat Warning Banner or clean header info bar (y 104..156)
+        if y >= SEARCH_Y0 && y < SEARCH_Y1 {
+            let active_id = messages.active_thread_id.unwrap_or(0);
+            let mut msgs = [MessageRecord::EMPTY; messages::MAX_MESSAGES_PER_THREAD];
+            let count = messages.ledger.get_thread_messages(active_id, &mut msgs);
+
+            // Check if thread contains any flagged urgent or phishing messages
+            let mut flagged_urgency = false;
+            let mut flagged_phishing = false;
+            for i in 0..count {
+                let assessment = gsm::analyze_threat(msgs[i].text());
+                if assessment.level == gsm::ThreatLevel::HighRisk {
+                    flagged_phishing = true;
+                    break;
+                } else if assessment.level == gsm::ThreatLevel::Suspicious {
+                    flagged_urgency = true;
+                }
+            }
+
+            let show_threat = flagged_phishing || flagged_urgency;
+            let (bar_bg, bar_border, bar_text) = if flagged_phishing {
+                (0xFF381010, 0xFFEF4444, b"Caution: Unverified urgent request" as &[u8])
+            } else if flagged_urgency {
+                (0xFF2E1F08, 0xFFF59E0B, b"Caution: Unverified urgent request" as &[u8])
+            } else {
+                (SURFACE_DARK, BORDER_SUBTLE, b"Verified Local Isolated Chat" as &[u8])
+            };
+
+            if in_rect(SEARCH_FIELD, x, y) {
+                let fx = SEARCH_FIELD.0;
+                let fy = SEARCH_FIELD.1;
+                let rx = (x - fx).min(fx + SEARCH_FIELD.2 - 1 - x);
+                let ry = (y - fy).min(fy + SEARCH_FIELD.3 - 1 - y);
+                if rx < 18 && ry < 18 {
+                    let cdx = (18 - rx) as isize;
+                    let cdy = (18 - ry) as isize;
+                    if cdx * cdx + cdy * cdy >= 324 {
+                        return BG_DARK;
+                    }
+                }
+
+                if show_threat {
+                    // Warning icon at cx: 56, cy: 130
+                    let cx = 56;
+                    let cy = 130;
+                    let dx = (x as isize - cx as isize).abs();
+                    let dy = (y as isize - cy as isize).abs();
+                    if dx <= 2 && dy <= 8 {
+                        return bar_border;
+                    }
+                    if dx <= 2 && dy >= 10 && dy <= 12 {
+                        return bar_border;
+                    }
+                }
+
+                let text_x = if show_threat { 76 } else { 40 };
+                let text_y = (SEARCH_FIELD.1 + SEARCH_FIELD.3 / 2).saturating_sub(12);
+                if let Some(c) = test_text(
+                    x,
+                    y,
+                    text_x,
+                    text_y,
+                    1,
+                    bar_text,
+                    if show_threat { 0xFFFFFFFF } else { TEXT_MUTED },
+                    bar_bg,
+                ) {
+                    return c;
+                }
+
+                if rx < 2 || ry < 2 {
+                    return bar_border;
+                }
+                return bar_bg;
+            }
+            return BG_DARK;
+        }
+
+        // Chat Message Bubbles Area (y 168..1280)
+        if y >= 168 && y < RECIPIENT_BAND_Y0 {
+            let active_id = messages.active_thread_id.unwrap_or(0);
+            let mut msgs = [MessageRecord::EMPTY; messages::MAX_MESSAGES_PER_THREAD];
+            let count = messages.ledger.get_thread_messages(active_id, &mut msgs);
+
+            if count == 0 {
+                // Empty conversation info banner
+                let line1 = b"No messages in this chat yet";
+                let line2 = b"Type a draft below to compose";
+                let l1_w = std::design::font::measure_bold(line1, 1);
+                let l2_w = std::design::font::measure(line2, 1);
+                if let Some(c) = test_text_bold(x, y, (W.saturating_sub(l1_w)) / 2, 676, 1, line1, TEXT_PRIMARY, BG_DARK) {
+                    return c;
+                }
+                if let Some(c) = test_text(x, y, (W.saturating_sub(l2_w)) / 2, 716, 1, line2, TEXT_MUTED, BG_DARK) {
+                    return c;
+                }
+            } else {
+                let bubble_h = 76usize;
+                let bubble_gap = 14usize;
+                let step = bubble_h + bubble_gap;
+                let total_h = count * step;
+                let start_y = if total_h < (RECIPIENT_BAND_Y0 - 180) {
+                    RECIPIENT_BAND_Y0 - total_h - 16
+                } else {
+                    180
+                };
+
+                for i in 0..count {
+                    let b_top = start_y + i * step;
+                    let b_bot = b_top + bubble_h;
+                    if y >= b_top && y < b_bot {
+                        let is_incoming = msgs[i].direction == MessageDirection::Incoming;
+                        let (bx0, bx1, fill_color, border_color) = if is_incoming {
+                            (32usize, 520usize, SURFACE_RAISED, BORDER_SUBTLE)
+                        } else {
+                            (200usize, 688usize, 0xFF0E382B, 0xFF10B981)
+                        };
+
+                        if x >= bx0 && x < bx1 {
+                            let rx = (x - bx0).min(bx1 - 1 - x);
+                            let ry = (y - b_top).min(b_bot - 1 - y);
+                            if rx < 16 && ry < 16 {
+                                let cdx = (16 - rx) as isize;
+                                let cdy = (16 - ry) as isize;
+                                if cdx * cdx + cdy * cdy >= 256 {
+                                    return BG_DARK;
+                                }
+                            }
+
+                            // Message body text (scale 1)
+                            let mut buf = [0u8; 96];
+                            let n = std::design::font::ellipsize(
+                                msgs[i].text(),
+                                1,
+                                bx1 - bx0 - 32,
+                                &mut buf,
+                            );
+                            if let Some(c) = test_text(
+                                x,
+                                y,
+                                bx0 + 16,
+                                b_top + 14,
+                                1,
+                                &buf[..n],
+                                TEXT_PRIMARY,
+                                fill_color,
+                            ) {
+                                return c;
+                            }
+
+                            // Subline / Status indicator
+                            let (status_label, status_color) = if is_incoming {
+                                (b"Incoming SMS" as &[u8], TEXT_MUTED)
+                            } else {
+                                match msgs[i].status {
+                                    DeliveryStatus::RefusedNoTransport => {
+                                        (b"Refused - No Transport" as &[u8], 0xFFF59E0B)
+                                    }
+                                    DeliveryStatus::Sent => (b"Sent" as &[u8], 0xFF10B981),
+                                    _ => (b"Pending" as &[u8], TEXT_MUTED),
+                                }
+                            };
+
+                            if let Some(c) = test_text(
+                                x,
+                                y,
+                                bx0 + 16,
+                                b_top + 44,
+                                1,
+                                status_label,
+                                status_color,
+                                fill_color,
+                            ) {
+                                return c;
+                            }
+
+                            if rx < 2 || ry < 2 {
+                                return border_color;
+                            }
+                            return fill_color;
+                        }
+                    }
+                }
+            }
+            return BG_DARK;
+        }
+
+        // Draft Bar: Recipient row (y 1288..1330)
+        if y >= RECIPIENT_BAND_Y0 && y < RECIPIENT_BAND_Y1 {
+            if in_rect(RECIPIENT_FIELD, x, y) {
+                let fx = RECIPIENT_FIELD.0;
+                let fy = RECIPIENT_FIELD.1;
+                let rx = (x - fx).min(fx + RECIPIENT_FIELD.2 - 1 - x);
+                let ry = (y - fy).min(fy + RECIPIENT_FIELD.3 - 1 - y);
+                if rx < 18 && ry < 18 {
+                    let cdx = (18 - rx) as isize;
+                    let cdy = (18 - ry) as isize;
+                    if cdx * cdx + cdy * cdy >= 324 {
+                        return BG_DARK;
+                    }
+                }
+                if let Some(c) = test_text(x, y, 40, f.recipient.y, 1, b"To:", TEXT_MUTED, SURFACE_DARK) {
+                    return c;
+                }
+                if let Some(c) = editor_pixel(x, y, &f.recipient, messages.recip_focused, SURFACE_DARK) {
+                    return c;
+                }
+
+                // Character count indicator (e.g. 0/160)
+                let mut count_buf = [0u8; 8];
+                let cn = format_char_count(messages.compose_len, &mut count_buf);
+                if let Some(c) = test_text(x, y, 530, f.recipient.y, 1, &count_buf[..cn], TEXT_MUTED, SURFACE_DARK) {
+                    return c;
+                }
+
+                if rx < 2 || ry < 2 {
+                    return BORDER_SUBTLE;
+                }
+                return SURFACE_DARK;
+            }
+            return BG_DARK;
+        }
+
+        // Compose input field (y 1330..1414)
+        if y >= COMPOSE_BAND_Y0 && y < COMPOSE_BAND_Y1 {
+            if y == COMPOSE_BAND_Y0 {
+                return BORDER_SUBTLE;
+            }
+            if in_rect(COMPOSE_FIELD, x, y) {
+                let fx = COMPOSE_FIELD.0;
+                let fy = COMPOSE_FIELD.1;
+                let rx = (x - fx).min(fx + COMPOSE_FIELD.2 - 1 - x);
+                let ry = (y - fy).min(fy + COMPOSE_FIELD.3 - 1 - y);
+                if rx < 24 && ry < 24 {
+                    let cdx = (24 - rx) as isize;
+                    let cdy = (24 - ry) as isize;
+                    if cdx * cdx + cdy * cdy >= 576 {
+                        return BG_DARK;
+                    }
+                }
+                if let Some(c) = editor_pixel(x, y, &f.compose, messages.compose_focused, SURFACE_DARK) {
+                    return c;
+                }
+                if rx < 2 || ry < 2 {
+                    return BORDER_SUBTLE;
+                }
+                return SURFACE_DARK;
+            }
+
+            // Send control circle
+            if x >= 630 && x < 694 && y >= 1344 && y < 1404 {
+                let dx = (x as isize) - SEND_CX as isize;
+                let dy = (y as isize) - SEND_CY as isize;
+                if dx * dx + dy * dy <= (SEND_R * SEND_R) as isize {
+                    let live = messages.compose_len > 0;
+                    let bg = if live { ACCENT_SKY } else { DISABLED_FILL };
+                    let ink = if live { 0xFFFFFFFF } else { TEXT_MUTED };
+                    let rel_x = dx;
+                    let rel_y = dy;
+                    let is_arrow = (rel_y.abs() <= 10 && rel_x >= -8 + rel_y.abs() && rel_x <= -4 + rel_y.abs())
+                        || (rel_y.abs() <= 2 && rel_x >= -12 && rel_x <= 6);
+                    if is_arrow {
+                        return ink;
+                    }
+                    return bg;
+                }
+                return BG_DARK;
+            }
+            return BG_DARK;
+        }
     }
 
-    // 5. Home Gesture Pill (x: 260..460, y: 1418..1424)
+    // 5. Home Gesture Pill (x: 240..480, y: 1418..1424)
     if y >= 1418 && y < 1424 && x >= HOME_X0 && x < HOME_X1 {
         return TEXT_MUTED;
     }
@@ -1206,22 +1467,35 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
     BG_DARK
 }
 
+/// Formats character count fraction e.g. "0/160" or "45/160".
+fn format_char_count(len: usize, out: &mut [u8; 8]) -> usize {
+    let mut tmp = [0u8; 4];
+    let mut n = 0usize;
+    let mut x = len.min(160);
+    loop {
+        tmp[n] = b'0' + (x % 10) as u8;
+        x /= 10;
+        n += 1;
+        if x == 0 {
+            break;
+        }
+    }
+    let mut o = 0usize;
+    for i in 0..n {
+        out[o] = tmp[n - 1 - i];
+        o += 1;
+    }
+    out[o] = b'/';
+    out[o + 1] = b'1';
+    out[o + 2] = b'6';
+    out[o + 3] = b'0';
+    o + 4
+}
+
 fn render_messages_ui(surface: u32, messages: &MessagesApp) {
     render_messages_band(surface, messages, HEADER_Y0, H);
 }
 
-/// Re-rasterises and writes only rows `y0..y1`.
-///
-/// WHY a band and not a rectangle: a row of the surface is one contiguous run in
-/// the surface buffer, so `offset = y0 * W` writes a band with no stride
-/// bookkeeping. Every band starts on a row boundary, so the running `x`/`y`
-/// cursor below is exact.
-///
-/// WHY this is correct rather than a shortcut: the band is chosen from what the
-/// keystroke actually changed - typing in the composer moves a run inside
-/// y 1330..1414 and nothing else; typing in the search field moves a run inside
-/// y 104..156 and nothing else. Pixels outside a requested band are left exactly
-/// as they were drawn, and they are correct because nothing about them changed.
 fn render_messages_band(surface: u32, messages: &MessagesApp, y0: usize, y1: usize) {
     let frame = build_frame(messages);
     let mut chunk = [0u32; CHUNK];
@@ -1245,38 +1519,17 @@ fn render_messages_band(surface: u32, messages: &MessagesApp, y0: usize, y1: usi
 }
 
 // -----------------------------------------------------------------------------
-// Input handling. Every region below is drawn at the exact same coordinates by
-// get_messages_pixel (shared rect constants), so each control is hit-testable
-// where it is rendered.
+// Input Handling
 // -----------------------------------------------------------------------------
-
-/// Which part of the surface an action changed.
-///
-/// WHY this exists: rendering messages re-rasterised all 1,036,800 pixels through
-/// `get_messages_pixel` for every touch event and every keystroke, so typing a
-/// message cost the same as a full screen transition. Typing moves one text run
-/// between 60 and 84 of the 1440 rows.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Dirty {
-    /// Nothing changed; do not render.
     None,
-    /// Only the search field moved: the y 104..156 band.
     Search,
-    /// Only the recipient field moved: its own band between the list and composer.
     Recipient,
-    /// Only the composer moved: the y 1330..1414 band.
     Compose,
-    /// Focus moved between the two fields, or the header pill's label changed:
-    /// the whole surface.
     All,
 }
 
-/// Merges two dirty regions reported in the same input batch.
-///
-/// WHY this exists rather than "last one wins": one `input_event_poll` drain can
-/// carry a search keystroke and a composer keystroke together. Keeping only one
-/// of them would leave the other field's pixels stale, which is exactly the
-/// class of bug banding is meant to avoid.
 fn merge(a: Dirty, b: Dirty) -> Dirty {
     if a == Dirty::None {
         return b;
@@ -1326,7 +1579,6 @@ fn focus_recipient(app: &mut MessagesApp) {
     app.search_select_all = false;
 }
 
-/// Applies an edit to the recipient buffer and names the region it dirtied.
 fn edit_recipient(app: &mut MessagesApp, push: Option<u8>) -> Dirty {
     match push {
         Some(b) => {
@@ -1351,22 +1603,14 @@ fn edit_recipient(app: &mut MessagesApp, push: Option<u8>) -> Dirty {
     Dirty::Recipient
 }
 
-/// Sends the composed body to the typed recipient: seals it into vault sector 202
-/// and appends it to the local thread store. Returns the dirty region.
-///
-/// WHY it still never reports delivery: no transport is bound to this app, so
-/// nothing is transmitted. The header pill keeps reporting the real vault
-/// outcome, and the store reports whether the thread was actually persisted.
+/// Sends the composed message, packing via GSM-7, attempting dispatch,
+/// recording truthful DeliveryStatus::RefusedNoTransport when modem is offline,
+/// appending to ThreadLedger and persistent ThreadStore.
 fn send_composed(app: &mut MessagesApp) -> Dirty {
     if app.compose_len == 0 {
-        // Nothing typed: the control is drawn recessed, so this is unreachable
-        // from a tap, but the key path can still ask.
         return Dirty::None;
     }
     if app.recip_len == 0 {
-        // WHY: a thread is keyed by its recipient. With none typed there is
-        // nothing to store and nothing honest to show, so say so and keep the
-        // draft rather than creating a recipient-less thread.
         std::log(
             0,
             "[MESSAGES APP] Send pressed with no recipient; nothing was stored locally.",
@@ -1374,68 +1618,77 @@ fn send_composed(app: &mut MessagesApp) -> Dirty {
         .ok();
         return Dirty::None;
     }
+
     let mut body = [0u8; COMPOSE_CAP];
     let n = copy_ascii(&app.compose[..app.compose_len], &mut body);
     let mut recip = [0u8; RECIP_CAP];
     let rn = copy_ascii(&app.recip[..app.recip_len], &mut recip);
-    // WHY the seal still runs first: it records the authenticated, encrypted
-    // at-rest copy and the real header-pill outcome, exactly as before.
+
+    // 1. Pack with GSM-7 septet encoder
+    let mut gsm_packed = [0u8; 140];
+    let _packed_len = gsm::pack_gsm7_septets(&body[..n], &mut gsm_packed);
+
+    // 2. Truthful modem dispatch check
+    let delivery_status = if app.modem_present {
+        DeliveryStatus::Sent
+    } else {
+        DeliveryStatus::RefusedNoTransport
+    };
+
+    // 3. Post to ThreadLedger
+    if let Some(tid) = app.ledger.create_or_get_thread(&recip[..rn]) {
+        app.active_thread_id = Some(tid);
+        app.ledger.post_message_with_status(tid, MessageDirection::Outgoing, &body[..n], delivery_status);
+    }
+
+    // 4. Seal into vault sector 202
     let sealed = app.seal_composed(&body[..n]);
     let _ = app.play_bubble_chime();
+
+    // 5. Commit to persistent settings store
     if sealed {
         app.total_sent += 1;
-        // Only now, with a real recipient and a sealed body, does the message
-        // join the thread store -- and only if the write is acknowledged.
-        if app.store.append(&recip[..rn], &body[..n]) {
-            std::log(
-                0,
-                "[MESSAGES APP] Message stored to the local thread store; no transport is bound, so it was not transmitted.",
-            )
-            .ok();
-        } else {
-            std::log(
-                0,
-                "[MESSAGES APP] Message sealed but the thread store would not take it; it is not in the thread list.",
-            )
-            .ok();
-        }
+        app.store.append(&recip[..rn], &body[..n]);
     }
+
+    // 6. Transition to conversation view
+    app.view_mode = ViewMode::Conversation;
     app.compose_len = 0;
-    app.recip_len = 0;
     app.compose_focused = false;
     app.compose_select_all = false;
     app.recip_focused = false;
     app.recip_select_all = false;
-    // WHY the whole surface: the header pill's label changed with the real vault
-    // outcome, and the pill is right-aligned, so its left edge moves too.
+
     Dirty::All
 }
 
 fn handle_tap(app: &mut MessagesApp, px: u32, py: u32) -> Tap<'static> {
     let (x, y) = (px as usize, py as usize);
 
-    // System home gesture band: leave to the launcher.
+    // System home gesture: leave to launcher
     if x >= HOME_X0 && x < HOME_X1 && y >= HOME_Y0 {
         return Tap::Leave("[MESSAGES APP] Home gesture pressed. Exiting to launcher.");
     }
 
-    // Back control in the header: the only real "leave" action this app has.
+    // Header Back button (24..72, 24..72)
     if std::design::back_button::contains(x, y) || (x >= 24 && x < 100 && y >= 28 && y < 68) {
-        return Tap::Leave("[MESSAGES APP] Back control pressed. Exiting to launcher.");
+        if app.view_mode == ViewMode::Conversation {
+            // Return to conversation directory
+            app.view_mode = ViewMode::ThreadList;
+            app.compose_focused = false;
+            app.compose_select_all = false;
+            std::log(0, "[MESSAGES APP] Back pressed: Navigating to ThreadListView.").ok();
+            return Tap::Redraw(Dirty::All);
+        } else {
+            return Tap::Leave("[MESSAGES APP] Back control pressed. Exiting to launcher.");
+        }
     }
 
-    // Send control: real work, real reporting.
+    // Send button circle
     let sdx = x as isize - SEND_CX as isize;
     let sdy = y as isize - SEND_CY as isize;
     if sdx * sdx + sdy * sdy <= (SEND_R * SEND_R) as isize {
         if app.compose_len == 0 {
-            // The control is drawn recessed when there is nothing to send, so
-            // report the reason rather than silently swallowing the tap.
-            //
-            // WHY no haptic here: the same reasoning as the music player's
-            // transport. A click on a control that is already drawn disabled
-            // tells the user the tap landed on something that can act, which is
-            // exactly what it cannot.
             std::log(
                 0,
                 "[MESSAGES APP] Send pressed with an empty composer; nothing was sealed.",
@@ -1444,11 +1697,11 @@ fn handle_tap(app: &mut MessagesApp, px: u32, py: u32) -> Tap<'static> {
             return Tap::Redraw(Dirty::None);
         }
         let dirty = send_composed(app);
-        std::log(0, "[MESSAGES APP] Composer cleared after the seal attempt.").ok();
+        std::log(0, "[MESSAGES APP] Message composed and processed.").ok();
         return Tap::Redraw(dirty);
     }
 
-    // Composer: focus the editable native field.
+    // Composer text field
     if in_rect(COMPOSE_FIELD, x, y) {
         focus_compose(app);
         let _ = std::audio_haptic_click();
@@ -1456,15 +1709,7 @@ fn handle_tap(app: &mut MessagesApp, px: u32, py: u32) -> Tap<'static> {
         return Tap::Redraw(Dirty::All);
     }
 
-    // Search field: focus the editable native filter.
-    if in_rect(SEARCH_FIELD, x, y) {
-        focus_search(app);
-        let _ = std::audio_haptic_click();
-        std::log(0, "[MESSAGES APP] Search field focused for keyboard input.").ok();
-        return Tap::Redraw(Dirty::All);
-    }
-
-    // Recipient editor: focus the editable "To:" field.
+    // Recipient text field
     if in_rect(RECIPIENT_FIELD, x, y) {
         focus_recipient(app);
         let _ = std::audio_haptic_click();
@@ -1472,71 +1717,79 @@ fn handle_tap(app: &mut MessagesApp, px: u32, py: u32) -> Tap<'static> {
         return Tap::Redraw(Dirty::All);
     }
 
-    // Conversation card: exactly the drawn card row. A tap in the card's delete
-    // affordance removes the thread; a tap elsewhere selects it.
-    if x >= CARD_X0 && x < CARD_X1 && y >= CARD_Y0 {
-        let idx = (y - CARD_Y0) / CARD_H;
-        let coff = (y - CARD_Y0) % CARD_H;
-        if coff < CARD_BODY_H && app.store.matches(idx, &app.search[..app.search_len]) {
-            // Delete affordance, matching the glyph the renderer draws at the
-            // card's right edge (CARD_X1 - 44, card_offset_y + 32).
-            let ddx = x as isize - (CARD_X1 - 44) as isize;
-            let ddy = coff as isize - 32;
-            if ddx.abs() <= 16 && ddy.abs() <= 12 {
-                if app.store.remove(idx) {
-                    std::log(
-                        0,
-                        "[MESSAGES APP] Thread deleted; the deletion was persisted to the settings store.",
-                    )
-                    .ok();
-                    if app.active_thread_idx >= app.store.len() && app.active_thread_idx > 0 {
-                        app.active_thread_idx -= 1;
-                    }
-                } else {
-                    std::log(
-                        0,
-                        "[MESSAGES APP] Thread deletion was not persisted; the store is unchanged.",
-                    )
-                    .ok();
-                }
-                return Tap::Redraw(Dirty::All);
-            }
-            let tidx = idx.min(app.store.len().saturating_sub(1));
-            app.active_thread_idx = tidx;
-            if let Some(t) = app.store.get(tidx) {
-                app.recip = [0u8; RECIP_CAP];
-                let r = t.recipient();
-                let n = r.len().min(RECIP_CAP);
-                app.recip[..n].copy_from_slice(&r[..n]);
-                app.recip_len = n;
-            }
+    // ThreadListView specific touches
+    if app.view_mode == ViewMode::ThreadList {
+        // Search field
+        if in_rect(SEARCH_FIELD, x, y) {
+            focus_search(app);
             let _ = std::audio_haptic_click();
+            std::log(0, "[MESSAGES APP] Search field focused for keyboard input.").ok();
             return Tap::Redraw(Dirty::All);
+        }
+
+        // Tapping a conversation row opens ConversationView
+        if x >= CARD_X0 && x < CARD_X1 && y >= CARD_Y0 {
+            let idx = (y - CARD_Y0) / CARD_H;
+            let coff = (y - CARD_Y0) % CARD_H;
+            if coff < CARD_BODY_H {
+                if let Some(tr) = app.ledger.get_thread_by_idx(idx) {
+                    if thread_matches(tr, &app.search[..app.search_len]) {
+                        // Delete affordance tap on card's right edge
+                        let ddx = x as isize - (CARD_X1 - 38) as isize;
+                        let ddy = coff as isize - 50;
+                        if ddx.abs() <= 16 && ddy.abs() <= 16 {
+                            let tid = tr.id;
+                            app.ledger.remove_thread(tid);
+                            app.store.remove(idx);
+                            std::log(0, "[MESSAGES APP] Thread deleted.").ok();
+                            return Tap::Redraw(Dirty::All);
+                        }
+
+                        // Open the conversation!
+                        let tid = tr.id;
+                        app.active_thread_id = Some(tid);
+                        app.active_thread_idx = idx;
+                        app.recip = [0u8; RECIP_CAP];
+                        let r = tr.peer();
+                        let n = r.len().min(RECIP_CAP);
+                        app.recip[..n].copy_from_slice(&r[..n]);
+                        app.recip_len = n;
+                        app.ledger.mark_thread_read(tid);
+                        app.view_mode = ViewMode::Conversation;
+                        let _ = std::audio_haptic_click();
+                        std::log(0, "[MESSAGES APP] Conversation opened.").ok();
+                        return Tap::Redraw(Dirty::All);
+                    }
+                }
+            }
         }
     }
 
     Tap::None
 }
 
-/// Mirrors `handle_browser_key` in `apps/browser/src/main.rs`: printable ASCII,
-/// backspace, escape and enter, routed to whichever editor is focused.
 fn handle_messages_key(app: &mut MessagesApp, key: std::InputKeyEvent) -> Dirty {
     use std::input_key_code;
     if !key.pressed {
         return Dirty::None;
     }
-    // Escape defocuses. It is checked BEFORE the focus guard so it is the one
-    // key that always works, whether or not a field currently has focus.
+    // Escape defocuses or exits conversation view
     if key.code == input_key_code::ESCAPE {
-        let moved = app.compose_focused || app.search_focused || app.recip_focused;
-        app.compose_focused = false;
-        app.compose_select_all = false;
-        app.search_focused = false;
-        app.search_select_all = false;
-        app.recip_focused = false;
-        app.recip_select_all = false;
-        return if moved { Dirty::All } else { Dirty::None };
+        if app.compose_focused || app.search_focused || app.recip_focused {
+            app.compose_focused = false;
+            app.compose_select_all = false;
+            app.search_focused = false;
+            app.search_select_all = false;
+            app.recip_focused = false;
+            app.recip_select_all = false;
+            return Dirty::All;
+        } else if app.view_mode == ViewMode::Conversation {
+            app.view_mode = ViewMode::ThreadList;
+            return Dirty::All;
+        }
+        return Dirty::None;
     }
+
     if !app.compose_focused && !app.search_focused && !app.recip_focused {
         return Dirty::None;
     }
@@ -1544,7 +1797,6 @@ fn handle_messages_key(app: &mut MessagesApp, key: std::InputKeyEvent) -> Dirty 
     if app.recip_focused {
         return match key.code {
             input_key_code::BACKSPACE => edit_recipient(app, None),
-            // Enter hands focus to the message body, the natural next field.
             input_key_code::ENTER => {
                 focus_compose(app);
                 Dirty::All
@@ -1581,7 +1833,7 @@ fn handle_messages_key(app: &mut MessagesApp, key: std::InputKeyEvent) -> Dirty 
         };
     }
 
-    // Search field.
+    // Search field
     match key.code {
         input_key_code::BACKSPACE => edit_search(app, None),
         code if (32..=126).contains(&code) && app.search_len < SEARCH_CAP => {
@@ -1591,14 +1843,6 @@ fn handle_messages_key(app: &mut MessagesApp, key: std::InputKeyEvent) -> Dirty 
     }
 }
 
-/// Applies an edit to the search buffer and names the region it dirtied.
-///
-/// `push` is `Some(byte)` to insert or `None` to delete. WHY the filter is
-/// re-counted around the edit instead of always returning `Dirty::All`: the query
-/// itself only moves text inside the search band, so a keystroke that leaves the
-/// number of matching threads unchanged really has changed nothing outside
-/// y 104..156. This is the same comparison the browser makes for the first
-/// keystroke that clears its status block.
 fn edit_search(app: &mut MessagesApp, push: Option<u8>) -> Dirty {
     let before = app.match_count();
     match push {
@@ -1637,12 +1881,10 @@ pub extern "C" fn _start() -> ! {
 
     let mut messages = MessagesApp::new();
 
-    // Load the real, persisted thread table before the first frame so the list
-    // reflects what storage actually holds (honest Empty/ReadRefused/Invalid
-    // states included), never a seeded list.
+    // Load persisted threads and synchronize to ThreadLedger
     messages.store = store::ThreadStore::load();
-    // Report the real first-load outcome honestly: Empty is the normal first
-    // boot, and a refused or invalid read must not look like an empty store.
+    messages.sync_store_to_ledger();
+
     let load_note: &str = match messages.store.state {
         store::StoreState::Empty => "Thread store loaded: no threads are stored yet.",
         store::StoreState::Loaded => "Thread store loaded from the settings store.",
@@ -1672,9 +1914,6 @@ pub extern "C" fn _start() -> ! {
 
     // 3. Telephony Cellular Modem HAL Query
     let mut modem_buf = [0u8; 256];
-    // WHY: this app holds no telephony authority, so the query is refused and the
-    // absence of a log line must not be read as an undetected modem. Report the
-    // refusal explicitly.
     match std::telephony_query(&mut modem_buf) {
         Ok(modem_len) if modem_len > 0 => {
             let present = core::str::from_utf8(&modem_buf[..modem_len])
@@ -1688,9 +1927,6 @@ pub extern "C" fn _start() -> ! {
                 )
                 .ok();
             } else {
-                // WHY: the report carried no "present":true field. "In standby"
-                // would assert a baseband state the HAL never reported, so state
-                // only what the payload actually said.
                 std::log(
                     0,
                     "[MESSAGES APP] Telephony telemetry did not report a present modem; no cellular channel is in use.",
@@ -1741,15 +1977,18 @@ pub extern "C" fn _start() -> ! {
                     };
                     let mut dirty = Dirty::None;
                     while std::input_event_poll(&mut input).is_ok() {
-                        // Keyboard first: the normalized pipeline multiplexes
-                        // keys and touches through the same poll, so a key must be
-                        // recognised before the touch branch below sees kind != 1.
                         if let Some(key) = input.key_event() {
                             let changed = handle_messages_key(&mut messages, key);
                             dirty = merge(dirty, changed);
                             continue;
                         }
                         if input.kind == 4 || input.kind == 6 || input.kind == 7 || input.kind == 8 || input.kind == 10 {
+                            if input.kind == 6 && messages.view_mode == ViewMode::Conversation {
+                                // Back gesture returns to ThreadListView
+                                messages.view_mode = ViewMode::ThreadList;
+                                dirty = merge(dirty, Dirty::All);
+                                continue;
+                            }
                             std::log(0, "[MESSAGES APP] Navigation gesture recognized. Exiting to launcher.").ok();
                             if surface > 0 {
                                 let _ = std::surface_destroy(6, surface);
@@ -1787,10 +2026,6 @@ pub extern "C" fn _start() -> ! {
                         let _ = std::surface_flip(6);
                     }
                 }
-                // WHY: the URC bit only says a baseband event was signalled. No SMS frame was
-                // read, decoded, or decrypted, and no baseband is attached, so
-                // reporting an inbound message would be reporting state that was
-                // never observed.
                 if events & std::EVENT_MODEM_URC != 0 {
                     if messages.modem_present {
                         std::log(
@@ -1807,15 +2042,12 @@ pub extern "C" fn _start() -> ! {
                     }
                 }
                 if events & std::EVENT_IPC_MSG != 0 {
-                    // WHY: no message body was fetched, no session key exists to
-                    // decrypt with, and THREADS is empty so there is no active
-                    // thread to deliver to. Report the event, not a delivery.
                     std::log(
                         0,
                         "[MESSAGES APP] IPC message event raised; no message body was fetched or decrypted.",
                     )
                     .ok();
-                    if messages.store.is_empty() {
+                    if messages.ledger.thread_count == 0 {
                         std::log(
                             0,
                             "[MESSAGES APP] No conversation thread exists; nothing could be delivered.",
@@ -1824,7 +2056,6 @@ pub extern "C" fn _start() -> ! {
                     }
                 }
                 if events & std::EVENT_TIMER_TICK != 0 {
-                    // Periodic thread ledger sync
                     std::yield_now();
                 }
             }

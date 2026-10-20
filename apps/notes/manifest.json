@@ -1,0 +1,17 @@
+{
+  "id": "org.interos.notes",
+  "name": "Notes",
+  "version": "1.0.0",
+  "category": "personal",
+  "description": "Sovereign native notepad with persistent local storage",
+  "icon": "NOTE",
+  "entrypoint": {
+    "backend": "bin/notes.elf"
+  },
+  "permissions": [
+    "CAP_EVENT_POLL",
+    "CAP_FILE_SYSTEM_READ",
+    "CAP_FILE_SYSTEM_WRITE"
+  ],
+  "min_sdk_version": "0.8.0"
+}

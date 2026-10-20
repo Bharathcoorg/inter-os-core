@@ -36,7 +36,7 @@ APP_SAMPLE_MAP = {
     "file_manager": "11_files.png",
     "calculator": "16_calculator.png",
     "sensor_dashboard": "08_power_menu.png",
-    "card_demo": "interos_contact_sheet.png",
+    "notes": "interos_contact_sheet.png",
 }
 
 def audit_app(app_path):

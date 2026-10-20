@@ -109,8 +109,8 @@ const CELL: usize = 216;
 const COL_X: [usize; 3] = [MARGIN, MARGIN + CELL + GUTTER, MARGIN + 2 * (CELL + GUTTER)];
 
 const HEADER_H: usize = 144;
-const TITLE_Y: usize = 44;
-const SUBTITLE_Y: usize = 116;
+const TITLE_Y: usize = 40;
+const SUBTITLE_Y: usize = 78;
 
 const PILL_Y: usize = 152;
 const PILL_H: usize = 48;
@@ -148,7 +148,7 @@ const DETAIL_VIEW_X: usize = (W - DETAIL_VIEW_W) / 2;
 const CLOSE: Rect = Rect::new(232, 856, 256, 56);
 
 // Action buttons for CRUD & capture
-const CAPTURE_BTN: Rect = Rect::new(540, 44, 144, 48);
+const CAPTURE_BTN: Rect = Rect::new(540, 36, 144, 44);
 const DETAIL_FAV: Rect = Rect::new(W - 140, 32, 48, 48);
 const DETAIL_DEL: Rect = Rect::new(W - 80, 32, 48, 48);
 const PLAY_PAUSE_BTN: Rect = Rect::new(W / 2 - 28, DETAIL_VIEW_Y1 + 16, 56, 56);
@@ -274,6 +274,26 @@ fn text_centered(
     }
     let drawn = outline_text::drawn_advance(s, scale, None).unwrap_or(w);
     text(x, y, x0 + (max_w.saturating_sub(drawn)) / 2, y0, scale, s, color, bg)
+}
+
+#[inline(always)]
+fn text_centered_bold(
+    x: usize,
+    y: usize,
+    x0: usize,
+    y0: usize,
+    max_w: usize,
+    scale: usize,
+    s: &[u8],
+    color: u32,
+    bg: u32,
+) -> Option<u32> {
+    let w = font::measure_bold(s, scale);
+    if w > max_w {
+        return None;
+    }
+    let drawn = outline_text::drawn_advance(s, scale, None).unwrap_or(w);
+    text_bold(x, y, x0 + (max_w.saturating_sub(drawn)) / 2, y0, scale, s, color, bg)
 }
 
 // -----------------------------------------------------------------------------
@@ -1387,7 +1407,7 @@ fn tab_bar_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
 
     // Active Neon Cyan Underline Indicator (height 4px at bottom)
     if is_active && y >= TAB_Y + TAB_H - 4 && y < TAB_Y + TAB_H {
-        let line_w = 90;
+        let line_w = 72;
         let lx0 = x0 + (tab_w - line_w) / 2;
         if x >= lx0 && x < lx0 + line_w {
             return Some(NEON_CYAN);
@@ -1398,12 +1418,18 @@ fn tab_bar_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
         return Some(BORDER);
     }
 
-    // Tab Label Text
+    // Tab Label Text (Scale 1 with bold active state)
     let label = TAB_LABELS[tab_idx];
     let text_color = if is_active { TEXT } else { MUTED };
-    let text_y = TAB_Y + (TAB_H.saturating_sub(font::line_height(2))) / 2;
-    if let Some(c) = text_centered(x, y, x0, text_y, tab_w, 2, label, text_color, SURFACE) {
-        return Some(c);
+    let text_y = TAB_Y + (TAB_H.saturating_sub(font::line_height(1))) / 2;
+    if is_active {
+        if let Some(c) = text_centered_bold(x, y, x0, text_y, tab_w, 1, label, text_color, SURFACE) {
+            return Some(c);
+        }
+    } else {
+        if let Some(c) = text_centered(x, y, x0, text_y, tab_w, 1, label, text_color, SURFACE) {
+            return Some(c);
+        }
     }
 
     Some(SURFACE)
@@ -2425,7 +2451,7 @@ fn gallery_pixel(x: usize, y: usize, app: &GalleryApp) -> u32 {
             }
             return SOFT;
         }
-        if let Some(c) = text_bold(x, y, MARGIN, TITLE_Y, 3, b"Photos", TEXT, BG) {
+        if let Some(c) = text_bold(x, y, MARGIN, TITLE_Y, 1, b"Photos", TEXT, BG) {
             return c;
         }
         if let Some(c) = text(
@@ -2832,6 +2858,7 @@ fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
             app.tab = new_tab;
             app.filter = Filter::All;
             std::log(0, "[GALLERY] Tab switched.").ok();
+            std::log(0, "[GALLERY] Gallery filter chip switched.").ok();
             return Tap::Redraw(Dirty::All);
         }
         return Tap::None;

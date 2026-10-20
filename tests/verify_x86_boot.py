@@ -238,6 +238,14 @@ def main():
             print_keywords=["BOOT", "GDT", "Page", "Heap", "VFS", "Userspace", "LAUNCHER", "PID1", "Step 5"]
         )
 
+        # Wait for boot animation to finish and unlock to HomeScreen
+        lock_ready = reader.wait_for("Boot presentation complete; lock screen is now guest-owned", timeout=20.0)
+        if lock_ready:
+            time.sleep(0.5)
+            reader.send(b"SWIPE 360 1350 360 300 5\n")
+            _ = reader.wait_for("Home surface rendered", timeout=15.0)
+            time.sleep(0.5)
+
         with open(log_path, "w", encoding="utf-8") as f:
             for l in reader.captured_logs:
                 f.write(l + "\n")

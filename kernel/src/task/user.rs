@@ -1682,8 +1682,8 @@ pub fn spawn_app_gallery(id_security: TaskId) -> TaskId {
     id
 }
 
-/// Spawns the DrawTarget proof application (Ring 3).
-pub fn spawn_app_card_demo(id_security: TaskId) -> TaskId {
+/// Spawns the Sovereign Notes application (Ring 3).
+pub fn spawn_app_notes(id_security: TaskId) -> TaskId {
     let mut caps = CapabilityTable::new(10);
     caps.insert(Capability {
         id: CapabilityId(2901),
@@ -1704,31 +1704,43 @@ pub fn spawn_app_card_demo(id_security: TaskId) -> TaskId {
         object_id: 0,
     }).ok();
     caps.insert(Capability {
+        id: CapabilityId(2904),
+        cap_type: CapabilityType::FileSystemRead,
+        rights: Rights::READ,
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
         id: CapabilityId(2905),
+        cap_type: CapabilityType::FileSystemWrite,
+        rights: Rights::READ.union(Rights::WRITE),
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2906),
         cap_type: CapabilityType::EventPoll,
         rights: Rights::READ.union(Rights::INVOKE),
         object_id: 0,
     }).ok();
     caps.insert(Capability {
-        id: CapabilityId(2906),
+        id: CapabilityId(2907),
         cap_type: CapabilityType::IpcReceive,
         rights: Rights::READ,
         object_id: 0,
     }).ok();
     caps.insert(Capability {
-        id: CapabilityId(2907),
+        id: CapabilityId(2908),
         cap_type: CapabilityType::FrameBufferDirect,
         rights: Rights::WRITE,
         object_id: 1,
     }).ok();
 
     let id = spawn_user_process_with_parent(
-        "app_card_demo",
-        APP_CARD_DEMO_ELF,
+        "app_notes",
+        APP_NOTES_ELF,
         caps,
         6,
         id_security,
-    ).expect("Failed to spawn Card Demo app");
-    serial_println!("[OK] Spawned app_card_demo (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
+    ).expect("Failed to spawn Notes app");
+    serial_println!("[OK] Spawned app_notes (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
     id
 }

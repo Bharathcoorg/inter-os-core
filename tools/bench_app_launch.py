@@ -62,11 +62,11 @@ APP_TARGETS = {
             "framebuffer"
         ),
     },
-    "card_demo": {
-        "launch_id": "card_demo",
-        "launch_ack": "[PROCESS] Guest application launched id=card_demo",
+    "notes": {
+        "launch_id": "notes",
+        "launch_ack": "[PROCESS] Guest application launched id=notes",
         "process_entry": "[PROCESS ENTRY]",
-        "ready": "[CARD_DEMO] Initial frame presented via hardware scanout.",
+        "ready": "[NOTES] Initial frame presented via hardware scanout.",
         "endpoint": (
             "host wrote the launch command to the guest serial socket -> the "
             "application returned from surface_flip, which composited its "

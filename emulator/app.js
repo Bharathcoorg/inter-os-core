@@ -961,7 +961,7 @@ document.addEventListener('DOMContentLoaded', () => {
             liveScanoutCanvas.width = img.naturalWidth;
             liveScanoutCanvas.height = img.naturalHeight;
             scanoutCtx.imageSmoothingEnabled = true;
-            scanoutCtx.imageSmoothingQuality = 'high';
+        scanoutCtx.imageSmoothingQuality = 'high';
           }
           scanoutCtx.drawImage(img, 0, 0);
           displayedFrameW = img.naturalWidth;
@@ -1180,6 +1180,23 @@ document.addEventListener('DOMContentLoaded', () => {
       try { touchSurface.setPointerCapture(ev.pointerId); } catch (_) {}
     });
 
+    let lastMoveDispatchTime = 0;
+    let pendingMovePayload = null;
+    let moveInFlight = false;
+
+    function flushPendingMove() {
+      if (!pendingMovePayload || moveInFlight || !isPointerDown) return;
+      const payload = pendingMovePayload;
+      pendingMovePayload = null;
+      moveInFlight = true;
+      sendGuestTouchEvent({ action: 'move', coords: payload.coords, x: payload.x, y: payload.y, slot: payload.slot || 0 }).finally(() => {
+        moveInFlight = false;
+        if (pendingMovePayload && isPointerDown) {
+          flushPendingMove();
+        }
+      });
+    }
+
     touchSurface.addEventListener('pointermove', (ev) => {
       if (!isPointerDown || activePointerId !== ev.pointerId) return;
       updateVirtualTouch(ev.clientX, ev.clientY, true);
@@ -1193,15 +1210,21 @@ document.addEventListener('DOMContentLoaded', () => {
           return;
         }
       }
+      const now = performance.now();
       if (point.x !== lastSentX || point.y !== lastSentY) {
         lastSentX = point.x;
         lastSentY = point.y;
-        sendGuestTouchEvent({ action: 'move', coords: point.coords, x: point.x, y: point.y, slot: 0 });
+        pendingMovePayload = { action: 'move', coords: point.coords, x: point.x, y: point.y, slot: 0 };
+        if (now - lastMoveDispatchTime >= 16) {
+          lastMoveDispatchTime = now;
+          flushPendingMove();
+        }
       }
     });
 
     const finishPointer = (ev, action) => {
       if (!isPointerDown || activePointerId !== ev.pointerId) return;
+      pendingMovePayload = null;
       const geometry = guestPointerGeometry();
       const rawPoint = mapPoint(ev.clientX, ev.clientY) || {
         x: lastSentX, y: lastSentY, coords: geometry.coords
@@ -3126,12 +3149,13 @@ document.addEventListener('DOMContentLoaded', () => {
   async function pollHmrEvents() {
     while (true) {
       try {
-        const res = await fetch(`/api/web/hmr?since=${lastHmrEventId}&timeout=25`);
+        const res = await fetch(`/api/web/hmr?since=${lastHmrEventId}&timeout=0`);
         if (res.ok) {
           const body = await res.json();
           if (body.events && body.events.length > 0) {
             for (const evt of body.events) {
               lastHmrEventId = Math.max(lastHmrEventId, evt.id || 0);
+              if (evt.app_id === 'org.interos.notes') continue;
               const timeStr = new Date(evt.timestamp * 1000).toLocaleTimeString();
               if (window.logConsole) {
                 window.logConsole('ok', `[HMR] Live hot reload triggered for ${evt.app_id} (${evt.event}) at ${timeStr}`);
@@ -3144,8 +3168,8 @@ document.addEventListener('DOMContentLoaded', () => {
           }
         }
       } catch (_) {
-        await new Promise(r => setTimeout(r, 2000));
       }
+      await new Promise(r => setTimeout(r, 2000));
     }
   }
   setTimeout(pollHmrEvents, 1000);

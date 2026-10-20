@@ -1640,11 +1640,11 @@ const fn run_rows(scale: usize) -> usize {
 /// Header band height: y >= HEADER_H draws the hairline rule, so a header run
 /// has to fit inside 0..HEADER_H.
 const HEADER_H: usize = 94;
-const TITLE_SCALE: usize = 3;
+const TITLE_SCALE: usize = 1;
 
 // Segmented navigation tabs (y: 104..156). Symmetrically balanced 200px pills
 // across the 720px viewport (48px margins, 12px gaps).
-const TAB_SCALE: usize = 2;
+const TAB_SCALE: usize = 1;
 const TAB_BAND_Y0: usize = 104;
 const TAB_BAND_H: usize = 52;
 const TAB_W: usize = 200;
@@ -1857,7 +1857,7 @@ fn header_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     let title_rows = run_rows(TITLE_SCALE);
     let title_y0 = (HEADER_H - title_rows) / 2;
     if y >= title_y0 && y < title_y0 + title_rows {
-        if let Some(c) = test_text(x, y, 120, title_y0, TITLE_SCALE, b"Phone", TEXT_PRIMARY, SURFACE_DARK) {
+        if let Some(c) = test_text_bold(x, y, 120, title_y0, TITLE_SCALE, b"Phone", TEXT_PRIMARY, SURFACE_DARK) {
             return c;
         }
     }
@@ -1940,7 +1940,12 @@ fn tabs_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
             continue;
         }
         let label_x0 = *x0 + std::design::font::center_x(TAB_LABELS[i], TAB_SCALE, w);
-        if let Some(c) = test_text(x, y, label_x0, label_y0, TAB_SCALE, TAB_LABELS[i], ink, fill) {
+        let label_px = if active {
+            test_text_bold(x, y, label_x0, label_y0, TAB_SCALE, TAB_LABELS[i], ink, fill)
+        } else {
+            test_text(x, y, label_x0, label_y0, TAB_SCALE, TAB_LABELS[i], ink, fill)
+        };
+        if let Some(c) = label_px {
             return c;
         }
         return fill;
@@ -2236,8 +2241,8 @@ fn recents_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     if dialer.recents_len == 0 {
         // Headline: a scale-2 run owns 48 rows (620..668).
         let head: &[u8] = b"No calls yet";
-        let head_x = DISPLAY_X0 + std::design::font::center_x(head, 2, DISPLAY_W);
-        if let Some(c) = test_text(x, y, head_x, 620, 2, head, TEXT_PRIMARY, BG_DARK) {
+        let head_x = DISPLAY_X0 + std::design::font::center_x(head, 1, DISPLAY_W);
+        if let Some(c) = test_text_bold(x, y, head_x, 620, 1, head, TEXT_PRIMARY, BG_DARK) {
             return c;
         }
         // Body: a scale-1 run owns 24 rows (680..704).
@@ -2264,14 +2269,14 @@ fn recents_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         // were tested would paint every row's number out of existence.
         // Number, scale 2: run_rows(2) = 48 rows at row_y + 8.
         let mut nbuf = [0u8; 32];
-        let nn = std::design::font::ellipsize(&rec.number[..rec.len], 2, DISPLAY_W - 96, &mut nbuf);
+        let nn = std::design::font::ellipsize(&rec.number[..rec.len], 1, DISPLAY_W - 96, &mut nbuf);
         let nx = DISPLAY_X0 + 24;
-        if let Some(c) = test_text(
+        if let Some(c) = test_text_bold(
             x,
             y,
             nx,
-            row_y + 8,
-            2,
+            row_y + 14,
+            1,
             &nbuf[..nn],
             TEXT_PRIMARY,
             SURFACE_DARK,
@@ -2286,7 +2291,7 @@ fn recents_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
             (false, false) => b"Refused by telephony",
         };
         let ox = DISPLAY_X0 + 24;
-        if let Some(c) = test_text(x, y, ox, row_y + 56, 1, out, TEXT_MUTED, SURFACE_DARK) {
+        if let Some(c) = test_text(x, y, ox, row_y + 46, 1, out, TEXT_MUTED, SURFACE_DARK) {
             return c;
         }
         // Row plate and divider.
@@ -2383,7 +2388,7 @@ fn contacts_card_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
                     y,
                     DISPLAY_X0 + 24,
                     vy,
-                    2,
+                    1,
                     &vbuf[..vn],
                     color::TEXT,
                     fill,

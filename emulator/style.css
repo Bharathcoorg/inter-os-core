@@ -2753,6 +2753,8 @@ body.studio-focus-mode .device-chassis {
   height: calc(100% - 44px) !important;
   max-height: calc(100vh - 104px) !important;
   max-width: 480px !important;
+  width: auto !important;
+  aspect-ratio: 1 / 2 !important;
   border-color: #3F3F46 !important;
   box-shadow:
     0 30px 100px -10px rgba(0, 0, 0, 0.98),

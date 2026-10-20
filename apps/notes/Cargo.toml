@@ -1,5 +1,5 @@
 [package]
-name = "card_demo"
+name = "notes"
 version = "0.1.0"
 edition = "2021"
 
@@ -7,12 +7,12 @@ edition = "2021"
 interos-std = { path = "../../sdk/rust/interos-std" }
 
 [lib]
-name = "card_demo"
+name = "notes"
 path = "src/lib.rs"
 crate-type = ["lib"]
 
 [[bin]]
-name = "card_demo"
+name = "notes"
 path = "src/main.rs"
 test = false
 bench = false

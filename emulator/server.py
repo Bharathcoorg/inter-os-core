@@ -2303,6 +2303,15 @@ def guest_fs_write(path, content):
 SIDELOAD_LEDGER = {}
 
 
+FIRST_PARTY_APP_IDS = frozenset({
+    "org.interos.launcher", "org.interos.compositor", "org.interos.init",
+    "org.interos.settings", "org.interos.calculator", "org.interos.dialer",
+    "org.interos.vault", "org.interos.camera", "org.interos.browser",
+    "org.interos.messages", "org.interos.calendar", "org.interos.music",
+    "org.interos.file_manager", "org.interos.gallery", "org.interos.sensor_dashboard",
+    "org.interos.terminal", "org.interos.notes"
+})
+
 def guest_package_catalog():
     ok, lines = guest_command_lines("STUDIO_PKG_LIST", "[STUDIO_PKG] END", timeout=8)
     if not ok:
@@ -2322,11 +2331,9 @@ def guest_package_catalog():
             "icon": fields.get("icon", "APP"),
             "source": "GUEST_REGISTRY",
         }
-        # WHY these are null rather than an empty string: the tab has to be able
-        # to tell "this package has no host file, and that is expected" from "a
-        # field failed to arrive". An empty string renders as a blank cell in
-        # both cases, which is the bug.
-        known = SIDELOAD_LEDGER.get(pkg_id)
+        # First-party apps embedded in kernel image are always KERNEL_EMBEDDED.
+        # Studio never misclassifies first-party native apps (such as Notes) as sideloaded/web.
+        known = SIDELOAD_LEDGER.get(pkg_id) if pkg_id not in FIRST_PARTY_APP_IDS else None
         if known:
             entry["filename"] = known.get("filename")
             entry["sha256"] = known.get("sha256")
@@ -2819,8 +2826,7 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             # (native portrait 720x1440, portrait phone slice 360x720, or full
             # landscape 1280x720); anything else is an honest 503 so the phone
             # never shows a broken image.
-            query = urllib.parse.parse_qs(parsed_path.query)
-            prefer_jpeg = query.get('format', ['jpeg'])[0].lower() != 'png'
+            prefer_jpeg = query.get('format', ['png'])[0].lower() == 'jpeg'
             img_bytes, mime_or_reason = None, 'No guest frame available'
             with vnc_client.frame_cond:
                 live_canonical = (

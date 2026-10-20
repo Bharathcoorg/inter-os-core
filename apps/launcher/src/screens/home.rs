@@ -230,9 +230,9 @@ fn frame() -> Frame {
     let date_widget = Rect::new(490, 56, 200, 130);
     let card = Rect::new(
         30,
-        205,
+        215,
         660,
-        440,
+        425,
     );
     let card_title = Rect::new(
         card.x + space::LG,
@@ -246,12 +246,12 @@ fn frame() -> Frame {
         card.w - space::LG * 2,
         card_row_h() * CARD_ROWS,
     );
-    let search = Rect::new(30, 668, 660, 58);
+    let search = Rect::new(30, 675, 660, 62);
     let deck = Rect::new(
         30,
-        750,
+        805,
         660,
-        285,
+        415,
     );
     let nav = Rect::new(0, SCREEN_HEIGHT - NAV_BAR_HEIGHT, SCREEN_WIDTH, NAV_BAR_HEIGHT);
     Frame {
@@ -973,12 +973,12 @@ fn build(state: &LauncherState) -> Paint {
 /// render), so even the widest name fits with room on either side, and the
 /// padding stays XS so short names keep breathing room.
 pub const DOCK_TILES: [Rect; 6] = [
-    Rect::new(30, 755, 200, 130),
-    Rect::new(260, 755, 200, 130),
-    Rect::new(490, 755, 200, 130),
-    Rect::new(30, 905, 200, 130),
-    Rect::new(260, 905, 200, 130),
-    Rect::new(490, 905, 200, 130),
+    Rect::new(30, 805, 200, 180),
+    Rect::new(260, 805, 200, 180),
+    Rect::new(490, 805, 200, 180),
+    Rect::new(30, 1020, 200, 180),
+    Rect::new(260, 1020, 200, 180),
+    Rect::new(490, 1020, 200, 180),
 ];
 
 /// Smooth rounded pill corner radius for the 6 home screen app pills.
@@ -1009,9 +1009,9 @@ fn deck_plan(state: &LauncherState, theme: &Theme, _deck: Rect) -> DeckPlan {
         columns: 3,
         rows: 2,
         origin_x: 30,
-        origin_y: 755,
+        origin_y: 805,
         pitch_x: 230,
-        pitch_y: 150,
+        pitch_y: 215,
         app_count: 6,
         empty: None,
     };
@@ -1051,8 +1051,8 @@ fn deck_plan(state: &LauncherState, theme: &Theme, _deck: Rect) -> DeckPlan {
         let label_bytes = label_bytes[slot];
 
         let icon_cx = cell.x + cell.w / 2;
-        let icon_cy = cell.y + 42;
-        let label_y = cell.y + 78;
+        let icon_cy = cell.y + 60;
+        let label_y = cell.y + 120;
 
         plan.cells[slot] = DeckTilePlan {
             cell,
@@ -1146,9 +1146,9 @@ pub fn home_hit(state: &LauncherState, x: usize, y: usize) -> Option<usize> {
     } else {
         return None;
     };
-    let row = if (750..895).contains(&y) {
+    let row = if (795..1010).contains(&y) {
         0
-    } else if (895..1050).contains(&y) {
+    } else if (1010..1225).contains(&y) {
         1
     } else {
         return None;
@@ -1782,19 +1782,19 @@ pub fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         if let Some(c) = status_bar_pixel(x, y, &theme, p) {
             return c;
         }
-    } else if y < 205 {
+    } else if y < 210 {
         if let Some(c) = greeting_pixel(x, y, &p.frame, p, &theme) {
             return c;
         }
-    } else if y < 665 {
+    } else if y < 655 {
         if let Some(c) = card_pixel(x, y, &p.frame, p, &theme) {
             return c;
         }
-    } else if y >= 665 && y < 735 {
+    } else if y >= 665 && y < 755 {
         if let Some(c) = search_pixel(x, y, &p.frame, p, &theme) {
             return c;
         }
-    } else if y >= 745 && y < 1050 {
+    } else if y >= 795 && y < 1225 {
         if let Some(c) = deck_pixel(x, y, &p.frame, p, &theme) {
             return c;
         }

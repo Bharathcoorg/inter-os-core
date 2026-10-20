@@ -177,7 +177,12 @@ pub fn filtered_indices(state: &LauncherState, tab: usize, out: &mut [usize; 32]
     for i in 0..state.app_count.min(32) {
         let id_len = (state.app_id_lens[i] as usize).min(state.app_ids[i].len());
         let id = &state.app_ids[i][..id_len];
-        if id == b"org.interos.sensor_dashboard" || id == b"sensor_dashboard" || id == b"sensors" {
+        if id == b"org.interos.launcher" || id == b"launcher"
+            || id == b"org.interos.compositor" || id == b"compositor"
+            || id == b"org.interos.init" || id == b"init" || id == b"user_init"
+            || id == b"org.interos.sensor_dashboard" || id == b"sensor_dashboard" || id == b"sensors"
+            || id == b"org.interos.card_demo" || id == b"card_demo" || id == b"app_card_demo"
+        {
             continue;
         }
         let matches_tab = if tab == 0 {
@@ -586,7 +591,7 @@ impl Run {
         let baseline = (y + launcher::font::BASELINE * scale).max(asc as usize);
         let outline_advance = interos_std::design::typeface::text_advance_px(text, em) as usize;
         let top = baseline.saturating_sub(asc as usize);
-        let outline = if scale >= 3 {
+        let outline = if scale >= 2 {
             launcher::outline_text::OutlineRun::place(x, baseline, em, text)
         } else {
             None

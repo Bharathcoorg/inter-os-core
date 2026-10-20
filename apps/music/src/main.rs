@@ -459,11 +459,11 @@ const ART_H: usize = 448;
 const ART_GLYPH_CY: usize = 300;
 const ART_CAPTION_Y: usize = 400;
 
-const TITLE_Y: usize = 620;
-const ARTIST_Y: usize = 684;
-const STATE_Y: usize = 716;
-const TIMES_Y: usize = 756;
-const TRACK_Y: usize = 796;
+const TITLE_Y: usize = 636;
+const ARTIST_Y: usize = 676;
+const STATE_Y: usize = 712;
+const TIMES_Y: usize = 752;
+const TRACK_Y: usize = 788;
 const TRACK_H: usize = 4;
 const SCRUB_NOTE_Y: usize = 816;
 
@@ -505,8 +505,8 @@ const TRANSPORT_Y1: usize = TRANSPORT_CY + PLAY_R;
 const LIST_LABEL_Y: usize = 1080;
 const LIST_DIVIDER_Y: usize = 1116;
 const LIST_HIT_Y1: usize = 1400;
-const LIST_TITLE_Y: usize = 1160;
-const LIST_SUB_Y: usize = 1224;
+const LIST_TITLE_Y: usize = 1170;
+const LIST_SUB_Y: usize = 1210;
 
 /// Track-list row pitch and the pitch body of each row.
 const TRACKLIST_ROW_H: usize = 96;
@@ -579,6 +579,23 @@ fn text_centered(
         return None;
     }
     text(x, y, (W - w) / 2, y0, scale, s, color, bg)
+}
+
+#[inline(always)]
+fn text_centered_bold(
+    x: usize,
+    y: usize,
+    y0: usize,
+    scale: usize,
+    s: &[u8],
+    color: u32,
+    bg: u32,
+) -> Option<u32> {
+    let w = font::measure_bold(s, scale);
+    if w > CONTENT_W {
+        return None;
+    }
+    text_bold(x, y, (W - w) / 2, y0, scale, s, color, bg)
 }
 
 #[inline(always)]
@@ -875,8 +892,9 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
         // Ellipsise to the content column so a long real title truncates instead
         // of vanishing (the old code drew nothing when the title overflowed).
         let mut tbuf = [0u8; 40];
-        let tn = font::ellipsize(title, 2, CONTENT_W, &mut tbuf);
-        if let Some(c) = text_bold(x, y, (W - font::measure(&tbuf[..tn], 2)) / 2, TITLE_Y, 2, &tbuf[..tn], TEXT, BG) {
+        let tn = font::ellipsize(title, 1, CONTENT_W, &mut tbuf);
+        let tw = font::measure_bold(&tbuf[..tn], 1);
+        if let Some(c) = text_bold(x, y, (W.saturating_sub(tw)) / 2, TITLE_Y, 1, &tbuf[..tn], TEXT, BG) {
             return c;
         }
     }
@@ -1128,7 +1146,7 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
     }
 
     if app.store.is_empty() {
-        if let Some(c) = text_centered(x, y, LIST_TITLE_Y, 2, b"No tracks", TEXT, BG) {
+        if let Some(c) = text_centered_bold(x, y, LIST_TITLE_Y, 1, b"No tracks", TEXT, BG) {
             return c;
         }
         if let Some(c) = text_centered(
@@ -1153,7 +1171,7 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
         let t = app.store.get(i).unwrap();
         if y >= row_y && y < row_y + 80 {
             let selected = i == app.current_track_idx;
-            let title_y = row_y + 4;
+            let title_y = row_y + 12;
             // Delete affordance, matching its hit region in the tap handler.
             let del_x = MARGIN + CONTENT_W - 40;
             let ddx = x as isize - del_x as isize;
@@ -1162,13 +1180,13 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
                 return FAINT;
             }
             let mut buf = [0u8; 48];
-            let n = font::ellipsize(t.title(), 2, CONTENT_W - 96, &mut buf);
-            if let Some(c) = text(
+            let n = font::ellipsize(t.title(), 1, CONTENT_W - 96, &mut buf);
+            if let Some(c) = text_bold(
                 x,
                 y,
                 MARGIN + 8,
                 title_y,
-                2,
+                1,
                 &buf[..n],
                 if selected { TEXT } else { MUTED },
                 BG,
@@ -1178,7 +1196,7 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
             // Duration caption from the stored length (never a fake position).
             let mut db = [0u8; 12];
             let dn = fmt_mmss(&mut db, t.duration_sec());
-            if let Some(c) = text(x, y, MARGIN + 8, title_y + 52, 1, &db[..dn], FAINT, BG) {
+            if let Some(c) = text(x, y, MARGIN + 8, row_y + 44, 1, &db[..dn], FAINT, BG) {
                 return c;
             }
             return BG;

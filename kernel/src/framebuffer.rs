@@ -1975,18 +1975,39 @@ pub(crate) fn present_dst_row_band(band: (usize, usize), src_h: usize, dst_h: us
 }
 
 #[inline(always)]
-fn blend_1_2(c0: u32, c1: u32) -> u32 {
-    let r = (((c0 >> 16) & 0xFF) + 2 * ((c1 >> 16) & 0xFF) + 1) / 3;
-    let g = (((c0 >> 8) & 0xFF) + 2 * ((c1 >> 8) & 0xFF) + 1) / 3;
-    let b = ((c0 & 0xFF) + 2 * (c1 & 0xFF) + 1) / 3;
-    0xFF000000 | (r << 16) | (g << 8) | b
+fn isqrt_byte(n: u32) -> u32 {
+    let mut res = 0u32;
+    let mut bit = 1u32 << 16;
+    let mut num = n;
+    while bit > 0 {
+        if num >= res + bit {
+            num -= res + bit;
+            res = (res >> 1) + bit;
+        } else {
+            res >>= 1;
+        }
+        bit >>= 2;
+    }
+    res
 }
 
 #[inline(always)]
-fn blend_2_1(c0: u32, c1: u32) -> u32 {
-    let r = (2 * ((c0 >> 16) & 0xFF) + ((c1 >> 16) & 0xFF) + 1) / 3;
-    let g = (2 * ((c0 >> 8) & 0xFF) + ((c1 >> 8) & 0xFF) + 1) / 3;
-    let b = (2 * (c0 & 0xFF) + (c1 & 0xFF) + 1) / 3;
+fn blend_half(c0: u32, c1: u32) -> u32 {
+    if c0 == c1 {
+        return c0;
+    }
+    let r0 = ((c0 >> 16) & 0xFF) as u32;
+    let g0 = ((c0 >> 8) & 0xFF) as u32;
+    let b0 = (c0 & 0xFF) as u32;
+
+    let r1 = ((c1 >> 16) & 0xFF) as u32;
+    let g1 = ((c1 >> 8) & 0xFF) as u32;
+    let b1 = (c1 & 0xFF) as u32;
+
+    let r = isqrt_byte((r0 * r0 + r1 * r1 + 1) >> 1);
+    let g = isqrt_byte((g0 * g0 + g1 * g1 + 1) >> 1);
+    let b = isqrt_byte((b0 * b0 + b1 * b1 + 1) >> 1);
+
     0xFF000000 | (r << 16) | (g << 8) | b
 }
 
@@ -2136,23 +2157,17 @@ pub fn present_argb8888(pixels: &[u32], width: u32, height: u32, dirty_rows: (us
                         let m = dy % 3;
                         let sy0 = 2 * j;
                         let sy1 = (sy0 + 1).min(src_h - 1);
-                        let sy2 = (sy0 + 2).min(src_h - 1);
                         if m == 0 {
                             Some(&pixels[sy0 * src_w..(sy0 + 1) * src_w])
                         } else if m == 1 {
                             let r0 = sy0 * src_w;
                             let r1 = sy1 * src_w;
                             for x in 0..src_w {
-                                scratch[x] = blend_1_2(pixels[r0 + x], pixels[r1 + x]);
+                                scratch[x] = blend_half(pixels[r0 + x], pixels[r1 + x]);
                             }
                             Some(&scratch[..src_w])
                         } else {
-                            let r1 = sy1 * src_w;
-                            let r2 = sy2 * src_w;
-                            for x in 0..src_w {
-                                scratch[x] = blend_2_1(pixels[r1 + x], pixels[r2 + x]);
-                            }
-                            Some(&scratch[..src_w])
+                            Some(&pixels[sy1 * src_w..(sy1 + 1) * src_w])
                         }
                     } else {
                         None
@@ -2188,14 +2203,12 @@ pub fn present_argb8888(pixels: &[u32], width: u32, height: u32, dirty_rows: (us
                                 for k in 0..num_groups {
                                     let sx0 = 2 * k;
                                     let sx1 = sx0 + 1;
-                                    let sx2 = (sx0 + 2).min(src_w - 1);
                                     let p0 = row_src[sx0];
                                     let p1 = row_src[sx1];
-                                    let p2 = row_src[sx2];
 
                                     let out0 = p0;
-                                    let out1 = blend_1_2(p0, p1);
-                                    let out2 = blend_2_1(p1, p2);
+                                    let out1 = blend_half(p0, p1);
+                                    let out2 = p1;
 
                                     core::ptr::write_unaligned(dst_ptr as *mut u32, out0);
                                     core::ptr::write_unaligned(dst_ptr.add(4) as *mut u32, out1);
@@ -2244,14 +2257,12 @@ pub fn present_argb8888(pixels: &[u32], width: u32, height: u32, dirty_rows: (us
                                 for k in 0..num_groups {
                                     let sx0 = 2 * k;
                                     let sx1 = sx0 + 1;
-                                    let sx2 = (sx0 + 2).min(src_w - 1);
                                     let p0 = row_src[sx0];
                                     let p1 = row_src[sx1];
-                                    let p2 = row_src[sx2];
 
                                     let out0 = p0;
-                                    let out1 = blend_1_2(p0, p1);
-                                    let out2 = blend_2_1(p1, p2);
+                                    let out1 = blend_half(p0, p1);
+                                    let out2 = p1;
 
                                     *dst_ptr = out0 as u8;
                                     *dst_ptr.add(1) = (out0 >> 8) as u8;
@@ -2308,14 +2319,12 @@ pub fn present_argb8888(pixels: &[u32], width: u32, height: u32, dirty_rows: (us
                                 for k in 0..num_groups {
                                     let sx0 = 2 * k;
                                     let sx1 = sx0 + 1;
-                                    let sx2 = (sx0 + 2).min(src_w - 1);
                                     let p0 = row_src[sx0];
                                     let p1 = row_src[sx1];
-                                    let p2 = row_src[sx2];
 
                                     let out0 = p0;
-                                    let out1 = blend_1_2(p0, p1);
-                                    let out2 = blend_2_1(p1, p2);
+                                    let out1 = blend_half(p0, p1);
+                                    let out2 = p1;
 
                                     *dst_ptr = (out0 >> 16) as u8;
                                     *dst_ptr.add(1) = (out0 >> 8) as u8;
@@ -2375,14 +2384,12 @@ pub fn present_argb8888(pixels: &[u32], width: u32, height: u32, dirty_rows: (us
                                 for k in 0..num_groups {
                                     let sx0 = 2 * k;
                                     let sx1 = sx0 + 1;
-                                    let sx2 = (sx0 + 2).min(src_w - 1);
                                     let p0 = row_src[sx0];
                                     let p1 = row_src[sx1];
-                                    let p2 = row_src[sx2];
 
                                     let out0 = p0;
-                                    let out1 = blend_1_2(p0, p1);
-                                    let out2 = blend_2_1(p1, p2);
+                                    let out1 = blend_half(p0, p1);
+                                    let out2 = p1;
 
                                     *dst_ptr = (out0 >> 16) as u8;
                                     *dst_ptr.add(1) = (out0 >> 8) as u8;
@@ -2416,14 +2423,12 @@ pub fn present_argb8888(pixels: &[u32], width: u32, height: u32, dirty_rows: (us
                                 for k in 0..num_groups {
                                     let sx0 = 2 * k;
                                     let sx1 = sx0 + 1;
-                                    let sx2 = (sx0 + 2).min(src_w - 1);
                                     let p0 = row_src[sx0];
                                     let p1 = row_src[sx1];
-                                    let p2 = row_src[sx2];
 
                                     let out0 = p0;
-                                    let out1 = blend_1_2(p0, p1);
-                                    let out2 = blend_2_1(p1, p2);
+                                    let out1 = blend_half(p0, p1);
+                                    let out2 = p1;
 
                                     let dx0 = k * 3;
                                     fb.set_pixel(off_x + dx0, target_y, ((out0 >> 16) as u8, (out0 >> 8) as u8, out0 as u8));
@@ -2451,36 +2456,28 @@ pub fn present_argb8888(pixels: &[u32], width: u32, height: u32, dirty_rows: (us
                     let m = dy % 3;
                     let sy0 = 2 * j;
                     let sy1 = (sy0 + 1).min(src_h - 1);
-                    let sy2 = (sy0 + 2).min(src_h - 1);
                     let row_src: &[u32] = if m == 0 {
                         &pixels[sy0 * src_w..(sy0 + 1) * src_w]
                     } else if m == 1 {
                         let r0 = sy0 * src_w;
                         let r1 = sy1 * src_w;
                         for x in 0..src_w {
-                            scratch[x] = blend_1_2(pixels[r0 + x], pixels[r1 + x]);
+                            scratch[x] = blend_half(pixels[r0 + x], pixels[r1 + x]);
                         }
                         &scratch[..src_w]
                     } else {
-                        let r1 = sy1 * src_w;
-                        let r2 = sy2 * src_w;
-                        for x in 0..src_w {
-                            scratch[x] = blend_2_1(pixels[r1 + x], pixels[r2 + x]);
-                        }
-                        &scratch[..src_w]
+                        &pixels[sy1 * src_w..(sy1 + 1) * src_w]
                     };
                     let num_groups = src_w / 2;
                     for k in 0..num_groups {
                         let sx0 = 2 * k;
                         let sx1 = sx0 + 1;
-                        let sx2 = (sx0 + 2).min(src_w - 1);
                         let p0 = row_src[sx0];
                         let p1 = row_src[sx1];
-                        let p2 = row_src[sx2];
 
                         let out0 = p0;
-                        let out1 = blend_1_2(p0, p1);
-                        let out2 = blend_2_1(p1, p2);
+                        let out1 = blend_half(p0, p1);
+                        let out2 = p1;
 
                         let dx0 = k * 3;
                         fb.set_pixel(off_x + dx0, off_y + dy, ((out0 >> 16) as u8, (out0 >> 8) as u8, out0 as u8));

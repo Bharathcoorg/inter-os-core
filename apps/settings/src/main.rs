@@ -4685,6 +4685,23 @@ fn handle_tap(
         ) {
             settings.open_wallpapers();
         }
+    } else if (110..=170).contains(&input.y) {
+        // Gated hero/search tap region: route taps to power/thermals
+        let section = if input.x < 300 {
+            Section::Power
+        } else {
+            Section::Device
+        };
+        settings.current_section = Some(section);
+        if section == Section::System {
+            settings.display_about_device();
+        }
+        settings.refresh_wallpaper_values();
+        std::log(
+            0,
+            "[SETTINGS APP] System Space category opened; tab switched.",
+        )
+        .ok();
     } else if let Some(section) = settings.current_section {
         match section {
             Section::Device => {
@@ -4747,23 +4764,6 @@ fn handle_tap(
             }
             _ => {}
         }
-    } else if settings.current_section.is_none() && (110..=170).contains(&input.y) {
-        // Gated hero/search tap region: route taps to power/thermals when on landing screen only
-        let section = if input.x < 300 {
-            Section::Power
-        } else {
-            Section::Device
-        };
-        settings.current_section = Some(section);
-        if section == Section::System {
-            settings.display_about_device();
-        }
-        settings.refresh_wallpaper_values();
-        std::log(
-            0,
-            "[SETTINGS APP] System Space category opened; tab switched.",
-        )
-        .ok();
     } else if let Some(section) = landing_card_at(input.x, input.y) {
         settings.current_section = Some(section);
         if section == Section::System {

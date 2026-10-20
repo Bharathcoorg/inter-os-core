@@ -6,7 +6,7 @@
 
 #![allow(dead_code)]
 
-use crate::{test_text, test_text_aa, LauncherState};
+use crate::{test_text_aa, LauncherState};
 use launcher::icons::{self, IconKind};
 use launcher::layout::Rect;
 use launcher::text;
@@ -385,7 +385,7 @@ impl LabelRun {
         if px < self.x || px >= self.x + self.w || py < self.top || py - self.top >= self.box_h {
             return None;
         }
-        if self.scale >= 3 && self.len <= launcher::outline_text::KEY_MAX {
+        if self.scale >= 2 && self.len <= launcher::outline_text::KEY_MAX {
             let (asc, _) = interos_std::design::typeface::line_metrics(self.em);
             let baseline = (self.y + launcher::font::BASELINE * self.scale).max(asc as usize);
             if let Some(run) = launcher::outline_text::OutlineRun::place(
@@ -397,7 +397,7 @@ impl LabelRun {
                 return run.pixel(px, py, self.ink, 0);
             }
         }
-        test_text(
+        test_text_aa(
             px,
             py,
             self.x,
@@ -405,6 +405,7 @@ impl LabelRun {
             self.scale,
             &self.bytes[..self.len],
             self.ink,
+            0,
         )
     }
 
@@ -416,7 +417,7 @@ impl LabelRun {
         if px < self.x || px >= self.x + self.w || py < self.top || py - self.top >= self.box_h {
             return None;
         }
-        if self.scale >= 3 && self.len <= launcher::outline_text::KEY_MAX {
+        if self.scale >= 2 && self.len <= launcher::outline_text::KEY_MAX {
             let (asc, _) = interos_std::design::typeface::line_metrics(self.em);
             let baseline = (self.y + launcher::font::BASELINE * self.scale).max(asc as usize);
             if let Some(run) = launcher::outline_text::OutlineRun::place(

@@ -260,7 +260,7 @@ def test_launch_ids_are_distinct_per_app():
     assert len(set(ids)) == len(ids)
 
 
-@pytest.mark.parametrize("name", ["calculator", "card_demo"])
+@pytest.mark.parametrize("name", ["calculator", "notes"])
 def test_targets_named_in_the_cli_exist(name):
     assert name in bal.APP_TARGETS
 

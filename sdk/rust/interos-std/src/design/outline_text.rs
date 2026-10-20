@@ -30,20 +30,13 @@ use crate::design::typeface;
 /// Expanding to 680 ensures that full-width headlines, card subtitles, and
 /// long metadata strings are rendered as vector outlines without falling back to
 /// blocky bitmap faces.
-const RUN_W_MAX: usize = 680;
+const RUN_W_MAX: usize = 640;
 
 /// Tallest run, in pixels: ascent plus descent at the largest useful em.
-///
-/// WHY 144: Scale 4 displays (dialer dialed numbers, hero titles) at em 101 have
-/// a 132-row line box; 144 covers up to scale 4 with headroom while keeping
-/// the 24-slot BSS buffer compact across Ring-3 tasks.
-const RUN_H_MAX: usize = 144;
+const RUN_H_MAX: usize = 100;
 
 /// How many runs may be resident at once.
-///
-/// WHY 8 slots: 8 slots comfortably holds active text runs in a frame in static
-/// BSS (~765 KiB) without multi-megabyte cache bloat.
-const SLOTS: usize = 8;
+const SLOTS: usize = 16;
 
 /// The longest text a placement key can hold. Longer runs are refused rather
 /// than hashed, because a hash would collide and draw the wrong glyphs.
@@ -327,6 +320,15 @@ impl OutlineRun {
         if cov_row < 0 || cov_row >= self.h as isize {
             return None;
         }
+        unsafe {
+            if let Some(ref loaded) = (*core::ptr::addr_of!(LOADED))[self.slot] {
+                if loaded.w != self.w || loaded.h != self.h || loaded.x != self.x || loaded.y != self.y {
+                    return None;
+                }
+            } else {
+                return None;
+            }
+        }
         let cov = unsafe { &*core::ptr::addr_of!(COVERAGE) };
         let c = cov[self.slot][(cov_row as usize) * self.w + (px - self.x)];
         if c == 0 {
@@ -347,6 +349,15 @@ impl OutlineRun {
         let cov_row = (py as isize) - (self.y as isize) + (self.ascent as isize);
         if cov_row < 0 || cov_row >= self.h as isize {
             return None;
+        }
+        unsafe {
+            if let Some(ref loaded) = (*core::ptr::addr_of!(LOADED))[self.slot] {
+                if loaded.w != self.w || loaded.h != self.h || loaded.x != self.x || loaded.y != self.y {
+                    return None;
+                }
+            } else {
+                return None;
+            }
         }
         let cov = unsafe { &*core::ptr::addr_of!(COVERAGE) };
         let c = cov[self.slot][(cov_row as usize) * self.w + (px - self.x)];

@@ -478,8 +478,8 @@ fn ellipsize_refuses_rather_than_panicking_when_no_room_exists() {
 fn a_package_id_humanises_into_a_readable_title() {
     let mut buf = [0u8; 64];
     assert_eq!(
-        tm::humanise_package_id(b"org.interos.card_demo", &mut buf),
-        b"Card Demo"
+        tm::humanise_package_id(b"org.interos.notes", &mut buf),
+        b"Notes"
     );
 }
 
@@ -496,11 +496,11 @@ fn a_package_id_without_a_vendor_prefix_is_left_alone() {
 fn a_package_id_keeps_only_its_final_segment() {
     let mut buf = [0u8; 64];
     // WHY the final segment and not the first: `org.interos` is the vendor and
-    // `card_demo` is the app. Stripping only the first segment leaves
-    // `interos.card_demo`, which reads as a product line nobody ships.
+    // `notes` is the app. Stripping only the first segment leaves
+    // `interos.notes`, which reads as a product line nobody ships.
     assert_eq!(
-        tm::humanise_package_id(b"org.interos.card_demo", &mut buf),
-        b"Card Demo"
+        tm::humanise_package_id(b"org.interos.notes", &mut buf),
+        b"Notes"
     );
 }
 

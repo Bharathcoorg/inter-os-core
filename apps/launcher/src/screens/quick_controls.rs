@@ -622,7 +622,7 @@ impl LabelRun {
         // is taken rather than assuming which way it goes.
         let w = text::measure(&buf[..len], scale)
             .max(interos_std::design::typeface::text_advance_px(&buf[..len], em) as usize);
-        let outline = if scale >= 3 && len <= launcher::outline_text::KEY_MAX {
+        let outline = if scale >= 2 && len <= launcher::outline_text::KEY_MAX {
             launcher::outline_text::OutlineRun::place(rect.x, baseline, em, &buf[..len])
         } else {
             None
@@ -656,7 +656,7 @@ impl LabelRun {
         let w = text::measure(&buf[..len], scale)
             .max(interos_std::design::typeface::text_advance_px(&buf[..len], em) as usize);
         let x0 = rect.x + rect.w.saturating_sub(w);
-        let outline = if scale >= 3 && len <= launcher::outline_text::KEY_MAX {
+        let outline = if scale >= 2 && len <= launcher::outline_text::KEY_MAX {
             launcher::outline_text::OutlineRun::place(x0, baseline, em, &buf[..len])
         } else {
             None

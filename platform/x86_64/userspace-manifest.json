@@ -126,9 +126,9 @@
       "manifest": "apps/gallery/Cargo.toml"
     },
     {
-      "name": "card_demo",
+      "name": "notes",
       "kind": "application",
-      "manifest": "apps/card_demo/Cargo.toml"
+      "manifest": "apps/notes/Cargo.toml"
     }
   ],
   "kernel": {

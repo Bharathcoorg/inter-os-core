@@ -1,8 +1,8 @@
 {
-  "id": "org.interos.notes",
-  "name": "Sovereign Notes",
+  "id": "org.interos.sampleweb",
+  "name": "Sample Web App",
   "version": "1.0.0",
-  "description": "Minimalist encrypted scratchpad built with HTML, CSS & JavaScript for Inter OS",
+  "description": "Minimalist sample web app demonstrating HTML, CSS & JavaScript for Inter OS",
   "author": "InterOS Community Developer",
   "entry": "index.html",
   "icon": "📝",

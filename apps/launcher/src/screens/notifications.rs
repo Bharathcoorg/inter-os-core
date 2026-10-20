@@ -44,7 +44,7 @@
 
 #![allow(dead_code)]
 
-use crate::{test_text, test_text_aa, LauncherState, NotificationRecord};
+use crate::{test_text_aa, LauncherState, NotificationRecord};
 use launcher::layout::Rect;
 use launcher::text;
 use launcher::theme::{space, type_scale, radius, Theme, SCREEN_HEIGHT, SCREEN_WIDTH, STATUS_BAR_HEIGHT};
@@ -278,7 +278,7 @@ impl LabelRun {
             .max(interos_std::design::typeface::text_advance_px(&buf[..len], em) as usize);
         let (asc, _) = interos_std::design::typeface::line_metrics(em);
         let baseline = (y + launcher::font::BASELINE * scale).max(asc as usize);
-        let outline = if scale >= 3 && len <= launcher::outline_text::KEY_MAX {
+        let outline = if scale >= 2 && len <= launcher::outline_text::KEY_MAX {
             launcher::outline_text::OutlineRun::place(
                 x,
                 baseline,
@@ -314,7 +314,7 @@ impl LabelRun {
         let rx = x + inset;
         let (asc, _) = interos_std::design::typeface::line_metrics(em);
         let baseline = (y + launcher::font::BASELINE * scale).max(asc as usize);
-        let outline = if scale >= 3 && len <= launcher::outline_text::KEY_MAX {
+        let outline = if scale >= 2 && len <= launcher::outline_text::KEY_MAX {
             launcher::outline_text::OutlineRun::place(
                 rx,
                 baseline,
@@ -354,7 +354,7 @@ impl LabelRun {
         let rx = x_right.saturating_sub(w);
         let (asc, _) = interos_std::design::typeface::line_metrics(em);
         let baseline = (y + launcher::font::BASELINE * scale).max(asc as usize);
-        let outline = if scale >= 3 && len <= launcher::outline_text::KEY_MAX {
+        let outline = if scale >= 2 && len <= launcher::outline_text::KEY_MAX {
             launcher::outline_text::OutlineRun::place(
                 rx,
                 baseline,
@@ -431,7 +431,7 @@ impl LabelRun {
         bytes_buf[..n].copy_from_slice(&held[..n]);
         let (asc, _) = interos_std::design::typeface::line_metrics(em);
         let baseline = (y + launcher::font::BASELINE * scale).max(asc as usize);
-        let outline = if scale >= 3 && n <= launcher::outline_text::KEY_MAX {
+        let outline = if scale >= 2 && n <= launcher::outline_text::KEY_MAX {
             launcher::outline_text::OutlineRun::place(
                 x,
                 baseline,
@@ -475,7 +475,7 @@ impl LabelRun {
         // has to draw as text. (The rasteriser also refuses any run longer than
         // its 24-byte placement key, which is why this fallback is the common
         // path for titles and bodies rather than the exceptional one.)
-        test_text(
+        test_text_aa(
             px,
             py,
             self.x,
@@ -483,6 +483,7 @@ impl LabelRun {
             self.scale,
             &self.bytes[..self.len],
             self.ink,
+            0,
         )
     }
 

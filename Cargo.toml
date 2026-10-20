@@ -18,7 +18,7 @@ members = [
     "apps/compositor",
     "apps/launcher",
     "apps/gallery",
-    "apps/card_demo",
+    "apps/notes",
 ]
 exclude = [
     "boot",

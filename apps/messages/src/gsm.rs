@@ -3,14 +3,76 @@
 
 use interos_std::ai::{cosine_similarity_q7, MatryoshkaDim};
 
-/// Result of on-device heuristic inspection for unsolicited or urgent messages.
+/// Standard GSM 03.38 / 23.040 SMS character bounds.
+pub const SINGLE_SMS_MAX_CHARS: usize = 160;
+pub const MULTIPART_SMS_SEGMENT_MAX_CHARS: usize = 153;
+
+/// Computes the number of SMS concatenated parts required for a given character length.
+pub const fn sms_parts_required(char_len: usize) -> usize {
+    if char_len == 0 {
+        0
+    } else if char_len <= SINGLE_SMS_MAX_CHARS {
+        1
+    } else {
+        (char_len + MULTIPART_SMS_SEGMENT_MAX_CHARS - 1) / MULTIPART_SMS_SEGMENT_MAX_CHARS
+    }
+}
+
+/// Returns true if a text of length `char_len` exceeds a single SMS boundary.
+pub const fn is_multipart_sms(char_len: usize) -> bool {
+    char_len > SINGLE_SMS_MAX_CHARS
+}
+
+/// Threat severity level evaluated by the local offline heuristic engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThreatLevel {
+    /// Normal message with no detected urgency, phishing, or suspicious links.
+    Safe,
+    /// High-urgency trigger words or unverified external links detected.
+    Suspicious,
+    /// Credential theft, bank transfer, suspicious IP address or high-risk phishing detected.
+    HighRisk,
+}
+
+impl ThreatLevel {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Safe => "VERIFIED CLEAN",
+            Self::Suspicious => "SUSPICIOUS URGENCY",
+            Self::HighRisk => "POTENTIAL PHISHING",
+        }
+    }
+
+    pub const fn color(&self) -> u32 {
+        match self {
+            Self::Safe => 0xFF2E8B57,       // Emerald Green
+            Self::Suspicious => 0xFFF59E0B, // Amber Warning
+            Self::HighRisk => 0xFFEF4444,   // Crimson Threat
+        }
+    }
+}
+
+/// Reason flags identified during offline threat analysis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ThreatFlags {
+    pub phishing_keyword: bool,
+    pub urgency_social_eng: bool,
+    pub suspicious_link: bool,
+    pub ip_address: bool,
+}
+
+/// Full threat assessment outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThreatAssessment {
+    pub level: ThreatLevel,
+    pub flags: ThreatFlags,
+}
+
+/// Legacy / badge representation for compatibility with earlier UI hooks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SecurityBadge {
-    /// Normal message with no detected urgency or credential triggers.
     VerifiedSafe,
-    /// High-urgency trigger words detected ("urgent", "immediately", "action required").
     SuspiciousUrgency,
-    /// Credential or financial transfer trigger detected ("password", "pin", "verify account", "otp").
     PotentialPhishing,
 }
 
@@ -25,9 +87,29 @@ impl SecurityBadge {
 
     pub const fn color(&self) -> u32 {
         match self {
-            Self::VerifiedSafe => 0xFF2E8B57,      // Emerald Green
-            Self::SuspiciousUrgency => 0xFFF59E0B,  // Amber Warning
-            Self::PotentialPhishing => 0xFFEF4444,  // Crimson Threat
+            Self::VerifiedSafe => 0xFF2E8B57,
+            Self::SuspiciousUrgency => 0xFFF59E0B,
+            Self::PotentialPhishing => 0xFFEF4444,
+        }
+    }
+}
+
+impl From<ThreatLevel> for SecurityBadge {
+    fn from(level: ThreatLevel) -> Self {
+        match level {
+            ThreatLevel::Safe => SecurityBadge::VerifiedSafe,
+            ThreatLevel::Suspicious => SecurityBadge::SuspiciousUrgency,
+            ThreatLevel::HighRisk => SecurityBadge::PotentialPhishing,
+        }
+    }
+}
+
+impl From<SecurityBadge> for ThreatLevel {
+    fn from(badge: SecurityBadge) -> Self {
+        match badge {
+            SecurityBadge::VerifiedSafe => ThreatLevel::Safe,
+            SecurityBadge::SuspiciousUrgency => ThreatLevel::Suspicious,
+            SecurityBadge::PotentialPhishing => ThreatLevel::HighRisk,
         }
     }
 }
@@ -104,72 +186,194 @@ pub fn unpack_gsm7_septets(octets: &[u8], num_septets: usize, out: &mut [u8]) ->
     out_idx
 }
 
-/// Evaluates a raw message text buffer for phishing or deceptive urgency triggers.
-/// Operates with `#![no_std]`, zero allocation, and bounded execution time.
-pub fn inspect_message_heuristics(msg: &[u8]) -> SecurityBadge {
-    if msg.is_empty() {
-        return SecurityBadge::VerifiedSafe;
+/// Case-insensitive substring matching helper without heap allocation.
+fn contains_ci(msg: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() || needle.len() > msg.len() {
+        return false;
     }
-
-    // High risk phishing/credential theft patterns
-    const PHISHING_TRIGGERS: [&[u8]; 8] = [
-        b"password",
-        b"passcode",
-        b"pin code",
-        b"otp",
-        b"verify account",
-        b"wire transfer",
-        b"bank account",
-        b"wallet seed",
-    ];
-
-    // Artificial urgency triggers
-    const URGENCY_TRIGGERS: [&[u8]; 7] = [
-        b"urgent",
-        b"immediately",
-        b"action required",
-        b"suspended",
-        b"blocked",
-        b"final notice",
-        b"act now",
-    ];
-
-    // Case-insensitive substring matching helper without heap allocation
-    let contains_ci = |needle: &[u8]| -> bool {
-        if needle.is_empty() || needle.len() > msg.len() {
-            return false;
+    for i in 0..=(msg.len() - needle.len()) {
+        let mut matched = true;
+        for j in 0..needle.len() {
+            let m = msg[i + j].to_ascii_lowercase();
+            let n = needle[j].to_ascii_lowercase();
+            if m != n {
+                matched = false;
+                break;
+            }
         }
-        for i in 0..=(msg.len() - needle.len()) {
-            let mut matched = true;
-            for j in 0..needle.len() {
-                let m = msg[i + j].to_ascii_lowercase();
-                let n = needle[j].to_ascii_lowercase();
-                if m != n {
-                    matched = false;
+        if matched {
+            return true;
+        }
+    }
+    false
+}
+
+/// Checks if the message contains an IPv4 address pattern (e.g. "192.168.1.1").
+fn contains_ipv4_address(msg: &[u8]) -> bool {
+    if msg.len() < 7 {
+        return false;
+    }
+    for i in 0..msg.len().saturating_sub(6) {
+        if i > 0 && msg[i - 1].is_ascii_digit() {
+            continue;
+        }
+        let mut idx = i;
+        let mut octets = 0;
+        let mut valid = true;
+        while octets < 4 && idx < msg.len() {
+            let start_num = idx;
+            let mut val = 0u32;
+            while idx < msg.len() && msg[idx].is_ascii_digit() {
+                val = val * 10 + (msg[idx] - b'0') as u32;
+                idx += 1;
+            }
+            let digits = idx - start_num;
+            if digits == 0 || digits > 3 || val > 255 {
+                valid = false;
+                break;
+            }
+            octets += 1;
+            if octets < 4 {
+                if idx < msg.len() && msg[idx] == b'.' {
+                    idx += 1;
+                } else {
+                    valid = false;
                     break;
                 }
             }
-            if matched {
+        }
+        if valid && octets == 4 {
+            if idx == msg.len() || !msg[idx].is_ascii_digit() {
                 return true;
             }
         }
-        false
-    };
+    }
+    false
+}
 
-    for trigger in PHISHING_TRIGGERS.iter() {
-        if contains_ci(trigger) {
-            return SecurityBadge::PotentialPhishing;
+/// High-risk phishing and credential theft patterns.
+const PHISHING_PATTERNS: [&[u8]; 14] = [
+    b"account suspended",
+    b"verify password",
+    b"urgent wire",
+    b"bank transfer",
+    b"login immediately",
+    b"password",
+    b"passcode",
+    b"pin code",
+    b"otp",
+    b"verify account",
+    b"wire transfer",
+    b"bank account",
+    b"wallet seed",
+    b"credit card",
+];
+
+/// Artificial urgency and social engineering triggers.
+const URGENCY_PATTERNS: [&[u8]; 9] = [
+    b"urgent",
+    b"immediately",
+    b"action required",
+    b"suspended",
+    b"blocked",
+    b"final notice",
+    b"act now",
+    b"immediate action",
+    b"account locked",
+];
+
+/// Suspicious external links and URL shorteners.
+const SUSPICIOUS_LINK_PATTERNS: [&[u8]; 8] = [
+    b"http://",
+    b"https://",
+    b"bit.ly/",
+    b"tinyurl.com/",
+    b"t.co/",
+    b".xyz/",
+    b".top/",
+    b"www.",
+];
+
+/// Comprehensive offline threat analysis evaluating urgent social engineering,
+/// phishing keywords, external URL links, and raw IP addresses.
+///
+/// Operates with `#![no_std]`, zero allocation, and bounded execution time.
+pub fn analyze_threat(msg: &[u8]) -> ThreatAssessment {
+    let mut flags = ThreatFlags::default();
+    if msg.is_empty() {
+        return ThreatAssessment {
+            level: ThreatLevel::Safe,
+            flags,
+        };
+    }
+
+    // 1. Phishing keywords
+    for pattern in PHISHING_PATTERNS.iter() {
+        if contains_ci(msg, pattern) {
+            flags.phishing_keyword = true;
+            break;
         }
     }
 
-    for trigger in URGENCY_TRIGGERS.iter() {
-        if contains_ci(trigger) {
-            return SecurityBadge::SuspiciousUrgency;
+    // 2. Urgent social engineering triggers
+    for pattern in URGENCY_PATTERNS.iter() {
+        if contains_ci(msg, pattern) {
+            flags.urgency_social_eng = true;
+            break;
         }
+    }
+
+    // 3. Suspicious external URL links
+    for pattern in SUSPICIOUS_LINK_PATTERNS.iter() {
+        if contains_ci(msg, pattern) {
+            flags.suspicious_link = true;
+            break;
+        }
+    }
+
+    // 4. Raw IPv4 addresses
+    if contains_ipv4_address(msg) {
+        flags.ip_address = true;
+    }
+
+    // Determine threat level:
+    // HighRisk: Explicit phishing keywords, or IP address, or link combined with urgency
+    if flags.phishing_keyword || flags.ip_address || (flags.suspicious_link && flags.urgency_social_eng) {
+        return ThreatAssessment {
+            level: ThreatLevel::HighRisk,
+            flags,
+        };
+    }
+
+    // Suspicious: Urgency or suspicious link present
+    if flags.urgency_social_eng || flags.suspicious_link {
+        return ThreatAssessment {
+            level: ThreatLevel::Suspicious,
+            flags,
+        };
     }
 
     // Secondary semantic layer: evaluate text embedding projection against threat centroids
-    evaluate_embedding_threat(msg, MatryoshkaDim::Dim128)
+    let sem_badge = evaluate_embedding_threat(msg, MatryoshkaDim::Dim128);
+    let level = match sem_badge {
+        SecurityBadge::PotentialPhishing => {
+            flags.phishing_keyword = true;
+            ThreatLevel::HighRisk
+        }
+        SecurityBadge::SuspiciousUrgency => {
+            flags.urgency_social_eng = true;
+            ThreatLevel::Suspicious
+        }
+        SecurityBadge::VerifiedSafe => ThreatLevel::Safe,
+    };
+
+    ThreatAssessment { level, flags }
+}
+
+/// Evaluates a raw message text buffer for phishing or deceptive urgency triggers.
+/// Operates with `#![no_std]`, zero allocation, and bounded execution time.
+pub fn inspect_message_heuristics(msg: &[u8]) -> SecurityBadge {
+    analyze_threat(msg).level.into()
 }
 
 /// Projects a text message into a Q7 fixed-point embedding vector of dimension `dim`.
@@ -297,6 +501,35 @@ mod tests {
     }
 
     #[test]
+    fn test_gsm7_alphabet_punctuation_roundtrip() {
+        let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyz 0123456789 .,!?:;@#";
+        let mut packed = [0u8; 128];
+        let packed_len = pack_gsm7_septets(alphabet, &mut packed);
+
+        let mut unpacked = [0u8; 128];
+        let unpacked_len = unpack_gsm7_septets(&packed[..packed_len], alphabet.len(), &mut unpacked);
+        assert_eq!(unpacked_len, alphabet.len());
+        assert_eq!(&unpacked[..unpacked_len], alphabet);
+    }
+
+    #[test]
+    fn test_gsm7_multipart_length_boundaries() {
+        assert_eq!(sms_parts_required(0), 0);
+        assert_eq!(sms_parts_required(1), 1);
+        assert_eq!(sms_parts_required(160), 1);
+        assert!(!is_multipart_sms(160));
+
+        // 161 chars requires 2 parts
+        assert_eq!(sms_parts_required(161), 2);
+        assert!(is_multipart_sms(161));
+
+        // 153 * 2 = 306 chars requires 2 parts
+        assert_eq!(sms_parts_required(306), 2);
+        // 307 chars requires 3 parts
+        assert_eq!(sms_parts_required(307), 3);
+    }
+
+    #[test]
     fn test_heuristics_detect_phishing_and_urgency() {
         assert_eq!(
             inspect_message_heuristics(b"Please send your OTP to restore access"),
@@ -310,6 +543,44 @@ mod tests {
             inspect_message_heuristics(b"Meeting at 3pm in room B"),
             SecurityBadge::VerifiedSafe
         );
+    }
+
+    #[test]
+    fn test_threat_analysis_specific_flags() {
+        // Phishing keywords
+        let t1 = analyze_threat(b"Account suspended: please verify password immediately");
+        assert_eq!(t1.level, ThreatLevel::HighRisk);
+        assert!(t1.flags.phishing_keyword);
+        assert!(t1.flags.urgency_social_eng);
+
+        // Bank transfer / urgent wire
+        let t2 = analyze_threat(b"Urgent wire needed for bank transfer");
+        assert_eq!(t2.level, ThreatLevel::HighRisk);
+        assert!(t2.flags.phishing_keyword);
+
+        // Suspicious IP address
+        let t3 = analyze_threat(b"Login at http://192.168.1.100 now");
+        assert_eq!(t3.level, ThreatLevel::HighRisk);
+        assert!(t3.flags.ip_address);
+
+        // Suspicious external link with urgency
+        let t4 = analyze_threat(b"Urgent action: visit bit.ly/test3");
+        assert_eq!(t4.level, ThreatLevel::HighRisk);
+        assert!(t4.flags.suspicious_link);
+        assert!(t4.flags.urgency_social_eng);
+
+        // Suspicious external link alone
+        let t5 = analyze_threat(b"Check out https://example.com for photos");
+        assert_eq!(t5.level, ThreatLevel::Suspicious);
+        assert!(t5.flags.suspicious_link);
+
+        // Legitimate clean message
+        let t6 = analyze_threat(b"Hey Sarah, are we still meeting for lunch tomorrow?");
+        assert_eq!(t6.level, ThreatLevel::Safe);
+        assert!(!t6.flags.phishing_keyword);
+        assert!(!t6.flags.urgency_social_eng);
+        assert!(!t6.flags.suspicious_link);
+        assert!(!t6.flags.ip_address);
     }
 
     #[test]

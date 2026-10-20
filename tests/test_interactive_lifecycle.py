@@ -613,16 +613,16 @@ def main():
             exit_gesture="swipe_up"
         )
 
-        # App 14: Card Demo (Grid View target: x=550, y=1180)
+        # App 14: Notes (Grid View target: x=550, y=1180)
         test_app_lifecycle(
             reader=reader,
             monitor_sock=monitor_sock,
             operation_num=15,
-            app_name="Card Demo",
-            app_id="org.interos.card_demo",
+            app_name="Notes",
+            app_id="org.interos.notes",
             tap_coords=(550, 1180),
             present_marker="Initial frame presented via hardware scanout",
-            dump_prefix="test_card_demo",
+            dump_prefix="test_notes",
             exit_gesture="home_bar"
         )
 

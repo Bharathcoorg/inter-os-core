@@ -1308,14 +1308,21 @@ fn get_calendar_pixel(
         // same centre (y=48) as the back button.
         if x >= 480 && x < 696 && y >= 20 && y < 76 {
             // Pill border (radius 20)
+            let mut on_pill_border = false;
             let rx = (x - 480).min(695 - x);
             let ry = (y - 20).min(75 - y);
             if rx < 20 && ry < 20 {
                 let cdx = (20 - rx) as isize;
                 let cdy = (20 - ry) as isize;
-                if cdx * cdx + cdy * cdy >= 400 {
+                let d2 = cdx * cdx + cdy * cdy;
+                if d2 >= 400 {
                     return SURFACE_DARK;
                 }
+                if d2 >= 324 {
+                    on_pill_border = true;
+                }
+            } else if rx < 2 || ry < 2 {
+                on_pill_border = true;
             }
 
             // Month text: e.g. "OCT 2026"
@@ -1348,7 +1355,7 @@ fn get_calendar_pixel(
                 return c;
             }
 
-            if rx < 2 || ry < 2 {
+            if on_pill_border {
                 return BORDER_SUBTLE;
             }
             return SURFACE_RAISED;
@@ -1441,14 +1448,21 @@ fn get_calendar_pixel(
                         let is_current = app.selected_day == Some(day_num as u8);
 
                         // Rounded squircle (radius 10)
+                        let mut on_cell_border = false;
                         let rx = (x - col_x).min(col_x + COL_W - 1 - x);
                         let ry = (y - cell_y).min(cell_y + ROW_H - 1 - y);
                         if rx < 10 && ry < 10 {
                             let cdx = (10 - rx) as isize;
                             let cdy = (10 - ry) as isize;
-                            if cdx * cdx + cdy * cdy >= 100 {
+                            let d2 = cdx * cdx + cdy * cdy;
+                            if d2 >= 100 {
                                 return BG_DARK;
                             }
+                            if d2 >= 64 {
+                                on_cell_border = true;
+                            }
+                        } else if rx < 2 || ry < 2 {
+                            on_cell_border = true;
                         }
 
                         // Day numeral text. WHY: the face is proportional, so a
@@ -1481,7 +1495,7 @@ fn get_calendar_pixel(
                         }
 
                         // Border rim
-                        if rx < 2 || ry < 2 {
+                        if on_cell_border {
                             return if is_current { ACCENT_SKY } else { BORDER_SUBTLE };
                         }
 
@@ -1520,14 +1534,21 @@ fn get_calendar_pixel(
 
         // Event Count Pill at x: 550..696, y: 492..522
         if x >= 550 && x < 696 && y >= 492 && y < 522 {
+            let mut on_badge_border = false;
             let rx = (x - 550).min(695 - x);
             let ry = (y - 492).min(521 - y);
             if rx < 14 && ry < 14 {
                 let cdx = (14 - rx) as isize;
                 let cdy = (14 - ry) as isize;
-                if cdx * cdx + cdy * cdy >= 196 {
+                let d2 = cdx * cdx + cdy * cdy;
+                if d2 >= 196 {
                     return BG_DARK;
                 }
+                if d2 >= 144 {
+                    on_badge_border = true;
+                }
+            } else if rx < 2 || ry < 2 {
+                on_badge_border = true;
             }
 
             // WHY the count is formatted from the day that is actually selected:
@@ -1550,7 +1571,7 @@ fn get_calendar_pixel(
                 return c;
             }
 
-            if rx < 2 || ry < 2 {
+            if on_badge_border {
                 return BORDER_SUBTLE;
             }
             return SURFACE_RAISED;
@@ -1571,14 +1592,21 @@ fn get_calendar_pixel(
         if agenda.len == 0 {
             // Empty State Card at x: 24..696, y: 546..870 (width: 672, height: 324)
             if x >= 24 && x < 696 && y >= 546 && y < 870 {
+                let mut on_card_border = false;
                 let rx = (x - 24).min(695 - x);
                 let ry = (y - 546).min(869 - y);
                 if rx < 20 && ry < 20 {
                     let cdx = (20 - rx) as isize;
                     let cdy = (20 - ry) as isize;
-                    if cdx * cdx + cdy * cdy >= 400 {
+                    let d2 = cdx * cdx + cdy * cdy;
+                    if d2 >= 400 {
                         return BG_DARK;
                     }
+                    if d2 >= 324 {
+                        on_card_border = true;
+                    }
+                } else if rx < 2 || ry < 2 {
+                    on_card_border = true;
                 }
 
                 // --- Vector Calendar Tear-Sheet Pictogram at cx: 360, cy: 636 ---
@@ -1714,14 +1742,21 @@ fn get_calendar_pixel(
                 // margin on each side, and the label is centred on it, so the
                 // text and the hit box can never disagree again.
                 if x >= ACTION_BTN_X0 && x < ACTION_BTN_X1 && y >= ACTION_BTN_Y0 && y < ACTION_BTN_Y1 {
+                    let mut on_btn_border = false;
                     let bx = (x - ACTION_BTN_X0).min(ACTION_BTN_X1 - 1 - x);
                     let by = (y - ACTION_BTN_Y0).min(ACTION_BTN_Y1 - 1 - y);
                     if bx < 24 && by < 24 {
                         let cdx = (24 - bx) as isize;
                         let cdy = (24 - by) as isize;
-                        if cdx * cdx + cdy * cdy >= 576 {
+                        let d2 = cdx * cdx + cdy * cdy;
+                        if d2 >= 576 {
                             return SURFACE_DARK;
                         }
+                        if d2 >= 484 {
+                            on_btn_border = true;
+                        }
+                    } else if bx < 2 || by < 2 {
+                        on_btn_border = true;
                     }
 
                     let label_w = std::design::font::measure(ACTION_BTN_LABEL, ACTION_BTN_SCALE);
@@ -1750,14 +1785,14 @@ fn get_calendar_pixel(
                         return c;
                     }
 
-                    if bx < 2 || by < 2 {
+                    if on_btn_border {
                         return ACCENT_SKY;
                     }
                     return 0xFF132338;
                 }
 
                 // Card border
-                if rx < 2 || ry < 2 {
+                if on_card_border {
                     return BORDER_SUBTLE;
                 }
                 return SURFACE_DARK;
@@ -2271,14 +2306,21 @@ fn flow_buttons_pixel(x: usize, y: usize, forward_label: &[u8]) -> Option<u32> {
         if x < bx0 || x >= bx1 {
             continue;
         }
+        let mut on_btn_border = false;
         let rx = (x - bx0).min(bx1 - 1 - x);
         let ry = (y - FLOW_BTN_Y0).min(FLOW_BTN_Y1 - 1 - y);
         if rx < 12 && ry < 12 {
             let cdx = (12 - rx) as isize;
             let cdy = (12 - ry) as isize;
-            if cdx * cdx + cdy * cdy >= 144 {
+            let d2 = cdx * cdx + cdy * cdy;
+            if d2 >= 144 {
                 return Some(SURFACE_DARK);
             }
+            if d2 >= 100 {
+                on_btn_border = true;
+            }
+        } else if rx < 2 || ry < 2 {
+            on_btn_border = true;
         }
         if let Some(c) = test_text(
             x,
@@ -2298,7 +2340,7 @@ fn flow_buttons_pixel(x: usize, y: usize, forward_label: &[u8]) -> Option<u32> {
         ) {
             return Some(c);
         }
-        if rx < 2 || ry < 2 {
+        if on_btn_border {
             return Some(if accent { ACCENT_SKY } else { BORDER_SUBTLE });
         }
         return Some(SURFACE_RAISED);

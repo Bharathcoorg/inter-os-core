@@ -75,7 +75,7 @@ function Invoke-Build {
         "audiod", "camerad", "sensord", "compositor", "launcher", "settings",
         "terminal", "dialer", "vault", "camera", "calculator", "browser",
         "messages", "calendar", "music", "file_manager", "gallery",
-        "sensor_dashboard", "card_demo"
+        "sensor_dashboard", "notes"
     )
 
     $needsUserspaceBuild = $false
