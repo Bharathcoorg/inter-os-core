@@ -22,11 +22,9 @@ use super::face;
 
 /// Sub-scanlines sampled per pixel row.
 ///
-/// WHY 5 and not 16: each sub-scanline walks every segment in the glyph, so the
-/// cost is linear in this constant. At the sizes a phone UI uses, 5 gives
-/// smooth edges for a few thousand iterations per glyph; higher values buy
-/// little visible quality for a proportionally slower keystroke.
-const SUBSAMPLES: i32 = 5;
+/// 16 sub-scanlines provide 17 vertical coverage levels (0..=16), eliminating
+/// horizontal edge quantization and matching or exceeding 4-bit 16-level bitmap AA.
+const SUBSAMPLES: i32 = 16;
 
 /// Fixed-point one.
 const ONE: i32 = 1 << 16;
@@ -112,7 +110,7 @@ impl<'a> Coverage<'a> {
         let w = self.w;
         let row = &mut self.buf[y * w..y * w + w];
         for (i, px) in row.iter_mut().enumerate().take(x0 + acc.len()).skip(x0) {
-            let c = acc[i - x0] / SUBSAMPLES;
+            let c = (acc[i - x0] + (SUBSAMPLES / 2)) / SUBSAMPLES;
             *px = if c > 255 { 255 } else { c as u8 };
         }
     }
@@ -377,8 +375,8 @@ pub fn raster(
             *v = 0;
         }
         for s in 0..SUBSAMPLES {
-            // Sample line through this row, in 16.16.
-            let sy = (row as i32) * ONE + (s * ONE) / SUBSAMPLES;
+            // Sample line through this row, in 16.16 centered at (s + 0.5) / SUBSAMPLES.
+            let sy = (row as i32) * ONE + ((s * 2 + 1) * ONE) / (2 * SUBSAMPLES);
             let mut n_cross = 0usize;
             for k in 0..n_seg {
                 let (x0, y0, x1, y1) = (sx0[k], sy0[k], sx1[k], sy1[k]);

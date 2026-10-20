@@ -1613,7 +1613,15 @@ pub fn pixel(c: u8, col: usize, row: usize, bold: bool) -> bool {
     }
     match glyph_rows(c, bold) {
         Some(rows) => (rows[row] >> (GLYPH_W - 1 - col)) & 1 == 1,
-        None => false,
+        None => {
+            if c != b' ' && c != 0 && c != b'\n' && c != b'\r' && c != b'\t' {
+                let w = FALLBACK_ADVANCE;
+                if col < w && row >= CAP_TOP && row <= BASELINE {
+                    return col == 0 || col == w - 1 || row == CAP_TOP || row == BASELINE;
+                }
+            }
+            false
+        }
     }
 }
 
@@ -1633,7 +1641,17 @@ pub fn coverage(c: u8, col: usize, row: usize, bold: bool) -> u32 {
     let table: &[u64] = if bold { &FONT_COV_BOLD } else { &FONT_COV };
     match glyph_index(c) {
         Some(i) => ((table[i * GLYPH_H + row] >> (4 * (GLYPH_W - 1 - col))) & 0xF) as u32,
-        None => 0,
+        None => {
+            if c != b' ' && c != 0 && c != b'\n' && c != b'\r' && c != b'\t' {
+                let w = FALLBACK_ADVANCE;
+                if col < w && row >= CAP_TOP && row <= BASELINE {
+                    if col == 0 || col == w - 1 || row == CAP_TOP || row == BASELINE {
+                        return 15;
+                    }
+                }
+            }
+            0
+        }
     }
 }
 
@@ -1670,6 +1688,92 @@ pub fn center_x(text: &[u8], scale: usize, available: usize) -> usize {
     }
 }
 
+pub const SRGB_TO_LIN: [u16; 256] = [
+    0, 0, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5,
+    5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 11, 11, 12, 13, 13, 14,
+    15, 16, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29,
+    30, 31, 33, 34, 35, 36, 38, 39, 40, 42, 43, 45, 46, 48, 49, 51,
+    52, 54, 56, 57, 59, 61, 63, 64, 66, 68, 70, 72, 74, 76, 78, 80,
+    82, 84, 86, 88, 91, 93, 95, 97, 100, 102, 105, 107, 109, 112, 115, 117,
+    120, 122, 125, 128, 130, 133, 136, 139, 142, 145, 147, 150, 153, 156, 160, 163,
+    166, 169, 172, 175, 179, 182, 185, 189, 192, 196, 199, 203, 206, 210, 213, 217,
+    221, 225, 228, 232, 236, 240, 244, 248, 252, 256, 260, 264, 268, 272, 277, 281,
+    285, 290, 294, 298, 303, 307, 312, 317, 321, 326, 331, 335, 340, 345, 350, 355,
+    360, 365, 370, 375, 380, 385, 390, 395, 401, 406, 411, 417, 422, 427, 433, 439,
+    444, 450, 455, 461, 467, 473, 479, 484, 490, 496, 502, 508, 514, 521, 527, 533,
+    539, 546, 552, 558, 565, 571, 578, 584, 591, 598, 604, 611, 618, 625, 631, 638,
+    645, 652, 659, 666, 674, 681, 688, 695, 702, 710, 717, 725, 732, 740, 747, 755,
+    763, 770, 778, 786, 794, 802, 809, 817, 826, 834, 842, 850, 858, 866, 875, 883,
+    891, 900, 908, 917, 925, 934, 943, 952, 960, 969, 978, 987, 996, 1005, 1014, 1023,
+];
+
+pub const LIN_TO_SRGB: [u8; 1024] = [
+    0, 3, 6, 10, 13, 15, 18, 20, 22, 23, 25, 27, 28, 30, 31, 32,
+    34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49,
+    49, 50, 51, 52, 53, 53, 54, 55, 56, 56, 57, 58, 58, 59, 60, 61,
+    61, 62, 62, 63, 64, 64, 65, 66, 66, 67, 67, 68, 68, 69, 70, 70,
+    71, 71, 72, 72, 73, 73, 74, 74, 75, 76, 76, 77, 77, 78, 78, 79,
+    79, 79, 80, 80, 81, 81, 82, 82, 83, 83, 84, 84, 85, 85, 85, 86,
+    86, 87, 87, 88, 88, 88, 89, 89, 90, 90, 91, 91, 91, 92, 92, 93,
+    93, 93, 94, 94, 95, 95, 95, 96, 96, 97, 97, 97, 98, 98, 98, 99,
+    99, 99, 100, 100, 101, 101, 101, 102, 102, 102, 103, 103, 103, 104, 104, 104,
+    105, 105, 106, 106, 106, 107, 107, 107, 108, 108, 108, 109, 109, 109, 110, 110,
+    110, 110, 111, 111, 111, 112, 112, 112, 113, 113, 113, 114, 114, 114, 115, 115,
+    115, 115, 116, 116, 116, 117, 117, 117, 118, 118, 118, 118, 119, 119, 119, 120,
+    120, 120, 121, 121, 121, 121, 122, 122, 122, 123, 123, 123, 123, 124, 124, 124,
+    125, 125, 125, 125, 126, 126, 126, 126, 127, 127, 127, 128, 128, 128, 128, 129,
+    129, 129, 129, 130, 130, 130, 130, 131, 131, 131, 131, 132, 132, 132, 133, 133,
+    133, 133, 134, 134, 134, 134, 135, 135, 135, 135, 136, 136, 136, 136, 137, 137,
+    137, 137, 138, 138, 138, 138, 138, 139, 139, 139, 139, 140, 140, 140, 140, 141,
+    141, 141, 141, 142, 142, 142, 142, 143, 143, 143, 143, 143, 144, 144, 144, 144,
+    145, 145, 145, 145, 146, 146, 146, 146, 146, 147, 147, 147, 147, 148, 148, 148,
+    148, 148, 149, 149, 149, 149, 150, 150, 150, 150, 150, 151, 151, 151, 151, 152,
+    152, 152, 152, 152, 153, 153, 153, 153, 153, 154, 154, 154, 154, 155, 155, 155,
+    155, 155, 156, 156, 156, 156, 156, 157, 157, 157, 157, 157, 158, 158, 158, 158,
+    158, 159, 159, 159, 159, 159, 160, 160, 160, 160, 160, 161, 161, 161, 161, 161,
+    162, 162, 162, 162, 162, 163, 163, 163, 163, 163, 164, 164, 164, 164, 164, 165,
+    165, 165, 165, 165, 166, 166, 166, 166, 166, 167, 167, 167, 167, 167, 168, 168,
+    168, 168, 168, 168, 169, 169, 169, 169, 169, 170, 170, 170, 170, 170, 171, 171,
+    171, 171, 171, 171, 172, 172, 172, 172, 172, 173, 173, 173, 173, 173, 173, 174,
+    174, 174, 174, 174, 175, 175, 175, 175, 175, 175, 176, 176, 176, 176, 176, 177,
+    177, 177, 177, 177, 177, 178, 178, 178, 178, 178, 178, 179, 179, 179, 179, 179,
+    179, 180, 180, 180, 180, 180, 181, 181, 181, 181, 181, 181, 182, 182, 182, 182,
+    182, 182, 183, 183, 183, 183, 183, 183, 184, 184, 184, 184, 184, 184, 185, 185,
+    185, 185, 185, 185, 186, 186, 186, 186, 186, 186, 187, 187, 187, 187, 187, 187,
+    188, 188, 188, 188, 188, 188, 189, 189, 189, 189, 189, 189, 190, 190, 190, 190,
+    190, 190, 191, 191, 191, 191, 191, 191, 191, 192, 192, 192, 192, 192, 192, 193,
+    193, 193, 193, 193, 193, 194, 194, 194, 194, 194, 194, 194, 195, 195, 195, 195,
+    195, 195, 196, 196, 196, 196, 196, 196, 197, 197, 197, 197, 197, 197, 197, 198,
+    198, 198, 198, 198, 198, 199, 199, 199, 199, 199, 199, 199, 200, 200, 200, 200,
+    200, 200, 200, 201, 201, 201, 201, 201, 201, 202, 202, 202, 202, 202, 202, 202,
+    203, 203, 203, 203, 203, 203, 203, 204, 204, 204, 204, 204, 204, 204, 205, 205,
+    205, 205, 205, 205, 206, 206, 206, 206, 206, 206, 206, 207, 207, 207, 207, 207,
+    207, 207, 208, 208, 208, 208, 208, 208, 208, 209, 209, 209, 209, 209, 209, 209,
+    210, 210, 210, 210, 210, 210, 210, 211, 211, 211, 211, 211, 211, 211, 212, 212,
+    212, 212, 212, 212, 212, 212, 213, 213, 213, 213, 213, 213, 213, 214, 214, 214,
+    214, 214, 214, 214, 215, 215, 215, 215, 215, 215, 215, 216, 216, 216, 216, 216,
+    216, 216, 216, 217, 217, 217, 217, 217, 217, 217, 218, 218, 218, 218, 218, 218,
+    218, 219, 219, 219, 219, 219, 219, 219, 219, 220, 220, 220, 220, 220, 220, 220,
+    221, 221, 221, 221, 221, 221, 221, 221, 222, 222, 222, 222, 222, 222, 222, 222,
+    223, 223, 223, 223, 223, 223, 223, 224, 224, 224, 224, 224, 224, 224, 224, 225,
+    225, 225, 225, 225, 225, 225, 225, 226, 226, 226, 226, 226, 226, 226, 227, 227,
+    227, 227, 227, 227, 227, 227, 228, 228, 228, 228, 228, 228, 228, 228, 229, 229,
+    229, 229, 229, 229, 229, 229, 230, 230, 230, 230, 230, 230, 230, 230, 231, 231,
+    231, 231, 231, 231, 231, 231, 232, 232, 232, 232, 232, 232, 232, 232, 233, 233,
+    233, 233, 233, 233, 233, 233, 234, 234, 234, 234, 234, 234, 234, 234, 235, 235,
+    235, 235, 235, 235, 235, 235, 236, 236, 236, 236, 236, 236, 236, 236, 236, 237,
+    237, 237, 237, 237, 237, 237, 237, 238, 238, 238, 238, 238, 238, 238, 238, 239,
+    239, 239, 239, 239, 239, 239, 239, 239, 240, 240, 240, 240, 240, 240, 240, 240,
+    241, 241, 241, 241, 241, 241, 241, 241, 241, 242, 242, 242, 242, 242, 242, 242,
+    242, 243, 243, 243, 243, 243, 243, 243, 243, 243, 244, 244, 244, 244, 244, 244,
+    244, 244, 245, 245, 245, 245, 245, 245, 245, 245, 245, 246, 246, 246, 246, 246,
+    246, 246, 246, 246, 247, 247, 247, 247, 247, 247, 247, 247, 248, 248, 248, 248,
+    248, 248, 248, 248, 248, 249, 249, 249, 249, 249, 249, 249, 249, 249, 250, 250,
+    250, 250, 250, 250, 250, 250, 250, 251, 251, 251, 251, 251, 251, 251, 251, 251,
+    252, 252, 252, 252, 252, 252, 252, 252, 252, 253, 253, 253, 253, 253, 253, 253,
+    253, 253, 254, 254, 254, 254, 254, 254, 254, 254, 254, 255, 255, 255, 255, 255,
+];
+
 #[inline(always)]
 pub fn blend(fg: u32, bg: u32, alpha: u8) -> u32 {
     if alpha == 255 {
@@ -1680,23 +1784,29 @@ pub fn blend(fg: u32, bg: u32, alpha: u8) -> u32 {
     }
     let a = alpha as u32;
     let inv_a = 255 - a;
-    let fr = (fg >> 16) & 0xFF;
-    let fg_c = (fg >> 8) & 0xFF;
-    let fb = fg & 0xFF;
+    let fr = ((fg >> 16) & 0xFF) as usize;
+    let fg_c = ((fg >> 8) & 0xFF) as usize;
+    let fb = (fg & 0xFF) as usize;
 
-    let br = (bg >> 16) & 0xFF;
-    let bg_c = (bg >> 8) & 0xFF;
-    let bb = bg & 0xFF;
+    let br = ((bg >> 16) & 0xFF) as usize;
+    let bg_c = ((bg >> 8) & 0xFF) as usize;
+    let bb = (bg & 0xFF) as usize;
 
-    // Optical gamma-correct blending (gamma ≈ 2.0 luminous square curve)
-    // Eliminates dark fringes and crushed midtones on OLED and high-DPI panels
-    let r2 = (fr * fr * a + br * br * inv_a) / 255;
-    let g2 = (fg_c * fg_c * a + bg_c * bg_c * inv_a) / 255;
-    let b2 = (fb * fb * a + bb * bb * inv_a) / 255;
+    let fr_lin = SRGB_TO_LIN[fr] as u32;
+    let fg_lin = SRGB_TO_LIN[fg_c] as u32;
+    let fb_lin = SRGB_TO_LIN[fb] as u32;
 
-    let r = r2.isqrt() as u8;
-    let g = g2.isqrt() as u8;
-    let b = b2.isqrt() as u8;
+    let br_lin = SRGB_TO_LIN[br] as u32;
+    let bg_lin = SRGB_TO_LIN[bg_c] as u32;
+    let bb_lin = SRGB_TO_LIN[bb] as u32;
+
+    let r_lin = (fr_lin * a + br_lin * inv_a + 127) / 255;
+    let g_lin = (fg_lin * a + bg_lin * inv_a + 127) / 255;
+    let b_lin = (fb_lin * a + bb_lin * inv_a + 127) / 255;
+
+    let r = LIN_TO_SRGB[r_lin.min(1023) as usize];
+    let g = LIN_TO_SRGB[g_lin.min(1023) as usize];
+    let b = LIN_TO_SRGB[b_lin.min(1023) as usize];
 
     0xFF00_0000 | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
 }
@@ -2062,6 +2172,12 @@ pub fn width(text: &[u8], scale: usize, bold: bool) -> usize {
     }
 }
 
+/// Measures the advance width of `text` at `scale` with given weight.
+#[inline]
+pub fn measure_weighted(text: &[u8], scale: usize, bold: bool) -> usize {
+    width(text, scale, bold)
+}
+
 /// Truncates `text` with ellipsis "..." to fit within `max_w` pixels at `scale` with optional bold.
 pub fn fit_weighted(text: &[u8], scale: usize, max_w: usize, bold: bool, out: &mut [u8]) -> usize {
     if text.is_empty() || out.is_empty() || scale == 0 {
@@ -2128,9 +2244,7 @@ pub fn ink_option(
         return None;
     }
     if let Some(run) = crate::design::outline_text::place_run(x0, y0, scale, &buf[..n], Some(max_w), bold) {
-        if let Some(c) = run.pixel(x, y, color, bg) {
-            return Some(c);
-        }
+        return run.pixel(x, y, color, bg);
     }
     test_text_aa(x, y, x0, y0, scale, &buf[..n], color, bg, bold)
 }
@@ -2171,6 +2285,163 @@ pub fn ink_right(
     let w = fit_width_weighted(text, scale, max_w, bold);
     let x0 = x1.saturating_sub(w);
     ink_option(x, y, x0, y0, scale, text, max_w, color, bg, bold)
+}
+
+/// Measures text width using the native Full HD (24x36) condensed sans-serif face.
+#[inline]
+pub fn measure_fhd(text: &[u8]) -> usize {
+    let mut w = 0usize;
+    for &c in text {
+        w += fhd::advance_of(c);
+    }
+    w
+}
+
+/// Standard hit-test and anti-aliased blend using the native Full HD (24x36) face.
+#[inline]
+pub fn test_text_fhd_aa(
+    x: usize,
+    y: usize,
+    x0: usize,
+    y0: usize,
+    text: &[u8],
+    color: u32,
+    bg: u32,
+) -> Option<u32> {
+    fhd::test_text_aa(x, y, x0, y0, text, color, bg)
+}
+
+/// Returns true if the byte can be directly rendered by the font face (ASCII 32..=126).
+#[inline]
+pub fn is_drawable(b: u8) -> bool {
+    b >= FIRST_CHAR && b <= LAST_CHAR
+}
+
+/// Transliterates common Unicode codepoints (Latin-1, typographic quotes, dashes,
+/// arrows, symbols) into authoritative ASCII equivalents supported by InterOS typography.
+pub fn transliterate(cp: u32) -> &'static [u8] {
+    match cp {
+        // Typographic quotes
+        0x2018 | 0x2019 | 0x201B => b"'",
+        0x201C | 0x201D | 0x201F => b"\"",
+        0x201A => b",",
+        0x201E => b",,",
+        0x00AB | 0x00BB => b"\"",
+
+        // Dashes & hyphens
+        0x2010 | 0x2011 | 0x2012 | 0x2013 => b"-",
+        0x2014 | 0x2015 => b"--",
+        0x2212 => b"-", // minus sign
+
+        // Ellipsis & bullets
+        0x2026 => b"...",
+        0x2022 | 0x00B7 => b".",
+
+        // Arrows
+        0x2190 => b"<-",
+        0x2192 => b"->",
+        0x2194 => b"<->",
+        0x21D2 => b"=>",
+
+        // Symbols & currency
+        0x00D7 => b"x",
+        0x00F7 => b"/",
+        0x00B0 => b"deg",
+        0x00A9 => b"(c)",
+        0x00AE => b"(r)",
+        0x2122 => b"(tm)",
+        0x00B1 => b"+/-",
+        0x2264 => b"<=",
+        0x2265 => b">=",
+        0x2260 => b"!=",
+        0x00A3 => b"GBP",
+        0x20AC => b"EUR",
+        0x00A5 => b"JPY",
+        0x00A2 => b"c",
+
+        // Whitespace variants
+        0x00A0 | 0x2002 | 0x2003 | 0x2009 | 0x202F => b" ",
+
+        // Latin-1 Uppercase Accents
+        0x00C0..=0x00C5 => b"A",
+        0x00C6 => b"AE",
+        0x00C7 => b"C",
+        0x00C8..=0x00CB => b"E",
+        0x00CC..=0x00CF => b"I",
+        0x00D0 => b"D",
+        0x00D1 => b"N",
+        0x00D2..=0x00D6 | 0x00D8 => b"O",
+        0x00D9..=0x00DC => b"U",
+        0x00DD => b"Y",
+        0x00DE => b"TH",
+
+        // Latin-1 Lowercase Accents
+        0x00DF => b"ss",
+        0x00E0..=0x00E5 => b"a",
+        0x00E6 => b"ae",
+        0x00E7 => b"c",
+        0x00E8..=0x00EB => b"e",
+        0x00EC..=0x00EF => b"i",
+        0x00F0 => b"d",
+        0x00F1 => b"n",
+        0x00F2..=0x00F6 | 0x00F8 => b"o",
+        0x00F9..=0x00FC => b"u",
+        0x00FD | 0x00FF => b"y",
+        0x00FE => b"th",
+
+        _ => b"",
+    }
+}
+
+/// Renders an anti-aliased text pixel with horizontal budget clipping at `x0 + max_w`.
+#[inline(always)]
+pub fn test_text_aa_clipped(
+    x: usize,
+    y: usize,
+    x0: usize,
+    y0: usize,
+    scale: usize,
+    text: &[u8],
+    color: u32,
+    bg: u32,
+    bold: bool,
+    max_w: usize,
+) -> Option<u32> {
+    if x >= x0.saturating_add(max_w) {
+        return None;
+    }
+    test_text_aa(x, y, x0, y0, scale, text, color, bg, bold)
+}
+
+/// Measures the combined horizontal advance of a slice of styled runs `(text, bold)`.
+pub fn measure_runs(runs: &[(&[u8], bool)], scale: usize) -> usize {
+    let mut total_w = 0usize;
+    for &(text, bold) in runs {
+        total_w += measure_weighted(text, scale, bold);
+    }
+    total_w
+}
+
+/// Renders a sequence of styled runs `(text, bold)` along a shared horizontal baseline.
+pub fn test_text_aa_runs(
+    x: usize,
+    y: usize,
+    x0: usize,
+    y0: usize,
+    scale: usize,
+    runs: &[(&[u8], bool)],
+    color: u32,
+    bg: u32,
+) -> Option<u32> {
+    let mut pen = x0;
+    for &(text, bold) in runs {
+        let run_w = measure_weighted(text, scale, bold);
+        if x >= pen && x < pen + run_w {
+            return test_text_aa(x, y, pen, y0, scale, text, color, bg, bold);
+        }
+        pen += run_w;
+    }
+    None
 }
 
 #[cfg(test)]
@@ -2339,6 +2610,64 @@ mod tests {
         // Far outside should be None
         assert_eq!(test_text(1000, 1000, 0, 0, 1, text, 0xFFFFFFFF), None);
         assert_eq!(test_text(0, 30, 0, 0, 1, text, 0xFFFFFFFF), None);
+    }
+
+    #[test]
+    fn test_transliteration_and_drawable() {
+        assert!(is_drawable(b'A'));
+        assert!(is_drawable(b' '));
+        assert!(!is_drawable(0x80));
+        assert_eq!(transliterate(0x2018), b"'");
+        assert_eq!(transliterate(0x2014), b"--");
+        assert_eq!(transliterate(0x2026), b"...");
+        assert_eq!(transliterate(0x2192), b"->");
+        assert_eq!(transliterate(0x00E9), b"e");
+        assert_eq!(transliterate(0x00A9), b"(c)");
+    }
+
+    #[test]
+    fn test_text_aa_clipped_budget() {
+        let text = b"Long test string exceeding budget";
+        let x0 = 10usize;
+        let max_w = 40usize;
+        // Pixel at or beyond x0 + max_w must be None
+        for py in 0..24 {
+            for px in (x0 + max_w)..(x0 + max_w + 100) {
+                assert_eq!(
+                    test_text_aa_clipped(px, py, x0, 0, 1, text, 0xFFFFFFFF, 0xFF000000, false, max_w),
+                    None
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_wrap_text_contract() {
+        let text = b"The InterOS Core kernel is a capability-secure microkernel designed for mobile devices. It provides high performance without heap allocation in render paths and event loops, ensuring zero-latency interactivity.";
+        assert!(text.len() >= 200, "Text length must be >= 200 bytes for contract");
+        let mut lines = [&b""[..]; 8];
+        let count = wrap_text(text, 1, 600, 8, &mut lines);
+        assert!(count >= 2, "Expected multiple wrapped lines");
+        for line in &lines[..count] {
+            let line_w = measure(line, 1);
+            assert!(line_w <= 600, "Wrapped line exceeds 600px: {line_w}px");
+        }
+    }
+
+    #[test]
+    fn test_measure_and_render_mixed_runs() {
+        let runs: &[(&[u8], bool)] = &[
+            (b"Hello ", false),
+            (b"World", true),
+            (b"!", false),
+        ];
+        let total_w = measure_runs(runs, 1);
+        let expected = measure(b"Hello ", 1) + measure_bold(b"World", 1) + measure(b"!", 1);
+        assert_eq!(total_w, expected);
+
+        // Spot test rendering within the run
+        let hit = test_text_aa_runs(10, 10, 0, 0, 1, runs, 0xFFFFFFFF, 0xFF000000);
+        let _ = hit;
     }
 }
 

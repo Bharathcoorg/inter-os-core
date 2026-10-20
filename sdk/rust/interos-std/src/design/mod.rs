@@ -9,6 +9,45 @@ pub mod face;
 pub mod typeface;
 pub mod draw_target;
 pub mod outline_text;
+pub mod display_list;
+pub mod scroll;
+
+pub mod typography {
+    use crate::font;
+
+    pub const BASELINE_GRID_DP: usize = 8;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct TextStyle {
+        pub scale: usize,
+        pub line_height_px: usize,
+        pub baseline_offset_px: usize,
+    }
+
+    pub const CAPTION: TextStyle = TextStyle {
+        scale: 1,
+        line_height_px: 24,
+        baseline_offset_px: font::BASELINE,
+    };
+
+    pub const BODY: TextStyle = TextStyle {
+        scale: 2,
+        line_height_px: 48,
+        baseline_offset_px: font::BASELINE * 2,
+    };
+
+    pub const TITLE: TextStyle = TextStyle {
+        scale: 3,
+        line_height_px: 72,
+        baseline_offset_px: font::BASELINE * 3,
+    };
+
+    pub const DISPLAY: TextStyle = TextStyle {
+        scale: 6,
+        line_height_px: 144,
+        baseline_offset_px: font::BASELINE * 6,
+    };
+}
 
 /// Canonical display unit: Logical Density-independent Pixels (dp).
 #[repr(transparent)]
@@ -295,7 +334,7 @@ pub mod color {
     pub const SURFACE_RAISED: u32 = 0xFFEFEEE9;
     pub const BORDER: u32 = 0xFFE1E0DB;
     pub const TEXT: u32 = 0xFF111214;
-    pub const TEXT_MUTED: u32 = 0xFF777773;
+    pub const TEXT_MUTED: u32 = 0xFF525458;
 
     // Canonical dark surfaces
     pub const DARK_BACKGROUND: u32 = 0xFF111214;
@@ -310,6 +349,25 @@ pub mod color {
     pub const WARNING: u32 = 0xFFD97706;
     pub const DANGER: u32 = 0xFFDC2626;
     pub const EMERGENCY: u32 = 0xFFFF5555;
+
+    /// Color gamut profiles supported by the display compositor.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum ColorSpace {
+        SrgbStandard,
+        DisplayP3WideGamut,
+    }
+
+    /// Wide-gamut Display P3 semantic tokens for flagship OLED/Mini-LED displays.
+    /// P3 expands the color volume by ~25% compared to standard sRGB, rendering
+    /// deeper greens, vibrant reds, and rich cinematic tones.
+    pub mod p3 {
+        pub const ACCENT: u32 = 0xFF1D5DE8;
+        pub const SUCCESS: u32 = 0xFF27995A;
+        pub const WARNING: u32 = 0xFFE07300;
+        pub const DANGER: u32 = 0xFFE81B1B;
+        pub const VIBRANT_CYAN: u32 = 0xFF00B4D8;
+        pub const VIBRANT_PURPLE: u32 = 0xFF7B2CBF;
+    }
 }
 
 pub mod spacing {

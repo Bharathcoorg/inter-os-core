@@ -36,7 +36,7 @@ const RUN_W_MAX: usize = 640;
 const RUN_H_MAX: usize = 100;
 
 /// How many runs may be resident at once.
-const SLOTS: usize = 16;
+const SLOTS: usize = 32;
 
 /// The longest text a placement key can hold. Longer runs are refused rather
 /// than hashed, because a hash would collide and draw the wrong glyphs.
@@ -384,7 +384,7 @@ pub fn place_run(
     }
     let em = em_for_scale(scale);
     let (ascent, _) = typeface::line_metrics(em);
-    let baseline = (y0 + font::BASELINE * scale).max(ascent as usize);
+    let baseline = (y0 + ascent as usize).max(y0 + font::BASELINE * scale);
     let run = OutlineRun::place_styled(x0, baseline, em, text, bold)?;
     if let Some(mw) = max_w {
         if run.w > mw {
@@ -413,7 +413,7 @@ impl OutlineRun {
 }
 
 pub fn baseline_row(y0: usize, scale: usize, ascent: u32) -> usize {
-    (y0 + font::BASELINE * scale).max(ascent as usize)
+    (y0 + ascent as usize).max(y0 + font::BASELINE * scale)
 }
 
 pub fn run_box(x0: usize, y0: usize, scale: usize, text: &[u8]) -> (usize, usize, usize, usize) {
