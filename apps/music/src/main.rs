@@ -37,6 +37,7 @@ use std::design::color::{
     DARK_TEXT_MUTED as MUTED, TEXT as INK_ON_LIGHT, TEXT_MUTED as FAINT,
 };
 use std::design::font;
+use std::design::outline_text;
 use std::design::primitives::{draw_circle, draw_pill, draw_rounded_rect, Rect};
 
 /// Synthesizer audio waveform.
@@ -109,6 +110,13 @@ pub struct MusicApp {
     pub add_dur_len: usize,
     pub add_open: bool,
     pub add_focus: u8,
+    /// Scroll position of the track list.
+    ///
+    /// WHY the list scrolls: the store holds up to eight tracks and the
+    /// visible band holds three, so without a scroll the lower five could
+    /// not be reached at all. The shared model is used so the thumb and the
+    /// offset cannot disagree with each other.
+    pub list_scroll: std::design::scroll::ScrollState,
 }
 
 impl MusicApp {
@@ -128,7 +136,22 @@ impl MusicApp {
             add_dur_len: 0,
             add_open: false,
             add_focus: 0,
+            list_scroll: std::design::scroll::ScrollState::new(0, LIST_VIEWPORT_H, 0),
         }
+    }
+
+    /// Re-derives the track list's scroll extent from the library's length.
+    ///
+    /// WHY this runs after every change to the library: the content height
+    /// is the library's length times the row height, and a stale extent
+    /// would let the list scroll past its last row.
+    pub fn sync_list_extent(&mut self) {
+        let content_h = self.store.len() * TRACKLIST_ROW_H;
+        self.list_scroll = std::design::scroll::ScrollState::new(
+            content_h,
+            LIST_VIEWPORT_H,
+            self.list_scroll.offset,
+        );
     }
 
     /// Asks the audio manager for the real master volume.
@@ -212,12 +235,12 @@ impl MusicApp {
         }
     }
 
-    /// Derives the media storage key from Hardware Keystore Slot 1.
+    /// Derives the media storage key from the hardware keystore.
     ///
     /// Returns `true` only when a full 32-byte key was actually returned.
     pub fn derive_keystore_key(&mut self) -> bool {
         let mut media_key = [0u8; 32];
-        match std::keystore_derive(1, &mut media_key) {
+        match std::keystore_derive(MEDIA_KEY_SLOT, &mut media_key) {
             Ok(32) => {
                 self.keystore_derived = true;
                 std::log(0, "[MUSIC APP] Hardware keystore: Ingested media decryption key for local audio streaming.").ok();
@@ -395,6 +418,7 @@ impl MusicApp {
         let n = self.add_title_len.min(ADD_TITLE_CAP);
         title[..n].copy_from_slice(&self.add_title[..n]);
         if self.store.add(&title[..n], secs) {
+            self.sync_list_extent();
             std::log(
                 0,
                 "[MUSIC APP] Track stored to the local library by title and duration; no audio file is claimed.",
@@ -423,6 +447,13 @@ impl MusicApp {
 }
 
 const W: usize = 720;
+
+/// The hardware keystore slot this app asks for its media key from.
+///
+/// WHY it is named: the argument is a keystore slot, not a capability
+/// slot, and the two are not interchangeable. Naming it keeps the
+/// difference visible at the call site.
+const MEDIA_KEY_SLOT: u32 = 1;
 const H: usize = 1440;
 const CHUNK: usize = 4096;
 
@@ -505,6 +536,10 @@ const TRANSPORT_Y1: usize = TRANSPORT_CY + PLAY_R;
 const LIST_LABEL_Y: usize = 1080;
 const LIST_DIVIDER_Y: usize = 1116;
 const LIST_HIT_Y1: usize = 1400;
+/// The top of the visible track-list band.
+const LIST_TOP: usize = 1140;
+/// The height of the visible track-list band.
+const LIST_VIEWPORT_H: usize = LIST_HIT_Y1 - LIST_TOP;
 const LIST_TITLE_Y: usize = 1170;
 const LIST_SUB_Y: usize = 1210;
 
@@ -530,6 +565,17 @@ const HOME_Y1: usize = 1424;
 // -----------------------------------------------------------------------------
 // Text helpers - the gate is the glyph line box, so ink is never clipped.
 // -----------------------------------------------------------------------------
+/// Draws a run of text with the sharp outline face, falling back to the
+/// bitmap face when the outline face refuses the run.
+///
+/// WHY the outline face is tried first: the panel is 1080x2160 and this app
+/// paints at 720x1440, so the compositor magnifies a bitmap run 3:2 and the
+/// glyph edges read as soft. The outline face rasterises the real outline
+/// and reads as sharp at the panel's own resolution.
+///
+/// WHY the box is the union of the two faces' boxes: the outline face's box
+/// sits one or two rows inside the bitmap cell's, and a bitmap fallback
+/// that lost its top row would draw a clipped glyph.
 #[inline(always)]
 fn text(
     x: usize,
@@ -541,12 +587,25 @@ fn text(
     color: u32,
     bg: u32,
 ) -> Option<u32> {
-    if y < y0 || y >= y0 + font::line_height(scale) {
+    if scale == 0 || s.is_empty() {
         return None;
+    }
+    let (bx, bt, bw, bh) = outline_text::run_box(x0, y0, scale, s);
+    let bitmap_h = font::line_height(scale);
+    let bitmap_w = font::measure(s, scale);
+    let top = bt.min(y0);
+    let height = bh.max(bitmap_h);
+    let width = bw.max(bitmap_w);
+    if x < bx || x - bx >= width || y < top || y - top >= height {
+        return None;
+    }
+    if let Some(run) = outline_text::place_run(x0, y0, scale, s, None, false) {
+        return run.pixel(x, y, color, bg);
     }
     font::test_text_aa(x, y, x0, y0, scale, s, color, bg, false)
 }
 
+/// Draws a bold run of text with the sharp outline face.
 #[inline(always)]
 fn text_bold(
     x: usize,
@@ -558,8 +617,22 @@ fn text_bold(
     color: u32,
     bg: u32,
 ) -> Option<u32> {
-    if y < y0 || y >= y0 + font::line_height(scale) {
+    if scale == 0 || s.is_empty() {
         return None;
+    }
+    let (bx, bt, bw, bh) = outline_text::run_box(x0, y0, scale, s);
+    let bitmap_h = font::line_height(scale);
+    let bitmap_w = font::measure_bold(s, scale);
+    let top = bt.min(y0);
+    let height = bh.max(bitmap_h);
+    // A bold outline run is one pixel wider than the run the box was
+    // measured from, so the box has to carry that pixel.
+    let width = bw.max(bitmap_w) + 1;
+    if x < bx || x - bx >= width || y < top || y - top >= height {
+        return None;
+    }
+    if let Some(run) = outline_text::place_run(x0, y0, scale, s, None, true) {
+        return run.pixel(x, y, color, bg);
     }
     font::test_text_aa(x, y, x0, y0, scale, s, color, bg, true)
 }
@@ -958,12 +1031,29 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
             return c;
         }
     }
-    let scrub_note: &[u8] = if sel.is_some() {
-        b"No audio backend reports a playback position; the scrubber stays at 0:00"
+    // The scrub note.
+    //
+    // WHY it is drawn on two lines: the sentence is 69 characters, which is
+    // 783 pixels at this face, and the content band is 672 pixels wide. The
+    // centred helper refuses a run that does not fit, so the note was
+    // silently dropped exactly when a track was selected -- which is the
+    // moment the note mattered most. Two lines of at most 42 characters fit
+    // in 505 pixels.
+    let (note_a, note_b): (&[u8], &[u8]) = if sel.is_some() {
+        (
+            b"No audio backend reports a playback position;",
+            b"the scrubber stays at 0:00",
+        )
     } else {
-        b"No media backend reports a playback position"
+        (
+            b"No media backend reports a",
+            b"playback position",
+        )
     };
-    if let Some(c) = text_centered(x, y, SCRUB_NOTE_Y, 1, scrub_note, FAINT, BG) {
+    if let Some(c) = text_centered(x, y, SCRUB_NOTE_Y, 1, note_a, FAINT, BG) {
+        return c;
+    }
+    if let Some(c) = text_centered(x, y, SCRUB_NOTE_Y + font::line_height(1), 1, note_b, FAINT, BG) {
         return c;
     }
 
@@ -1146,27 +1236,46 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
     }
 
     if app.store.is_empty() {
-        if let Some(c) = text_centered_bold(x, y, LIST_TITLE_Y, 1, b"No tracks", TEXT, BG) {
+        // WHY the empty state follows the store's own state: the old copy
+        // said the search had found no audio files in local storage, which
+        // is a claim about a filesystem the app never searched. A refused
+        // read, a store that failed validation and a store that is simply
+        // empty are three different facts.
+        let (title, subline): (&[u8], &[u8]) = match app.store.state {
+            store::StoreState::ReadRefused => (
+                b"Track store unreadable",
+                b"The device refused to read the track store",
+            ),
+            store::StoreState::Invalid => (
+                b"Track store invalid",
+                b"The stored tracks failed validation and were not loaded",
+            ),
+            store::StoreState::Untouched => (
+                b"Track store not read",
+                b"The track store has not been read yet",
+            ),
+            _ => (
+                b"No tracks",
+                b"No audio files were found in local storage",
+            ),
+        };
+        if let Some(c) = text_centered_bold(x, y, LIST_TITLE_Y, 1, title, TEXT, BG) {
             return c;
         }
-        if let Some(c) = text_centered(
-            x,
-            y,
-            LIST_SUB_Y,
-            1,
-            b"No audio files were found in local storage",
-            MUTED,
-            BG,
-        ) {
+        if let Some(c) = text_centered(x, y, LIST_SUB_Y, 1, subline, MUTED, BG) {
             return c;
         }
         return BG;
     }
 
+    let scroll = app.list_scroll.offset;
     for i in 0..app.store.len() {
-        let row_y = 1140 + i * TRACKLIST_ROW_H;
+        let row_y = LIST_TOP + i * TRACKLIST_ROW_H - scroll;
         if row_y >= LIST_HIT_Y1 {
             break;
+        }
+        if row_y + TRACKLIST_ROW_H <= LIST_TOP {
+            continue;
         }
         let t = app.store.get(i).unwrap();
         if y >= row_y && y < row_y + 80 {
@@ -1204,6 +1313,18 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
         // Row-gap divider at +88 (see the gate note above the text runs).
         if y == row_y + 88 && x >= MARGIN && x < MARGIN + CONTENT_W {
             return BORDER;
+        }
+    }
+
+    // Scroll indicator, drawn from the shared scroll model so the thumb
+    // cannot disagree with the offset the rows were drawn at.
+    if let Some((thumb_y, thumb_h)) = app
+        .list_scroll
+        .thumb_rect(LIST_TOP, LIST_VIEWPORT_H, 24)
+    {
+        let track_x = MARGIN + CONTENT_W - 4;
+        if x == track_x && y >= thumb_y && y < thumb_y + thumb_h {
+            return FAINT;
         }
     }
     return BG;
@@ -1413,7 +1534,12 @@ fn handle_tap(app: &mut MusicApp, px: u32, py: u32) -> Tap<'static> {
     } else {
         // A real row: tap its delete affordance to remove it, tap elsewhere in
         // the row to select it as now-playing.
-        let ry = y.saturating_sub(1140);
+        //
+        // WHY the scroll offset is added back: the rows are drawn at their
+        // scrolled position, so the row under the finger is the one whose
+        // index is the offset-adjusted position divided by the row height.
+        // Without it, a tap on a scrolled row selected the wrong track.
+        let ry = y.saturating_sub(LIST_TOP) + app.list_scroll.offset;
         let idx = ry / TRACKLIST_ROW_H;
         let coff = ry % TRACKLIST_ROW_H;
         if idx < app.store.len() && coff < 80 && x >= MARGIN && x < MARGIN + CONTENT_W {
@@ -1421,6 +1547,7 @@ fn handle_tap(app: &mut MusicApp, px: u32, py: u32) -> Tap<'static> {
             let ddy = coff as isize - 24;
             if ddx.abs() <= 16 && ddy.abs() <= 12 {
                 if app.store.remove(idx) {
+                    app.sync_list_extent();
                     std::log(
                         0,
                         "[MUSIC APP] Track removed; the deletion was persisted to the settings store.",
@@ -1556,6 +1683,7 @@ pub extern "C" fn _start() -> ! {
     // Load the real, persisted local library before the first frame so the
     // playlist and the now-playing row reflect what storage actually holds.
     music.store = store::TrackStore::load();
+    music.sync_list_extent();
     let load_note: &str = match music.store.state {
         store::StoreState::Empty => "Track store loaded: no tracks are stored yet.",
         store::StoreState::Loaded => "Track store loaded from the settings store.",
@@ -1574,7 +1702,25 @@ pub extern "C" fn _start() -> ! {
     music.encrypt_track_record();
 
     // 3. Allocate DRM/KMS Client Surface (z=200)
-    let surface = match std::surface_create(6, W as u32, H as u32, 200) {
+    //
+    // WHY the slot is resolved by type: a slot number is a position in the
+    // capability table, and the position depends on the order the kernel
+    // inserted this app's capabilities in. The literal 6 happens to hold the
+    // framebuffer in this app's table today.
+    let fb_slot = match std::cap::framebuffer_slot() {
+        Some(slot) => slot,
+        None => {
+            std::log(
+                0,
+                "[MUSIC APP] No framebuffer capability; the player cannot draw.",
+            )
+            .ok();
+            loop {
+                std::yield_now();
+            }
+        }
+    };
+    let surface = match std::surface_create(fb_slot, W as u32, H as u32, 200) {
         Ok(id) => {
             std::log(0, "[MUSIC APP] DRM/KMS Client Surface allocated (z=200).").ok();
             id
@@ -1594,7 +1740,7 @@ pub extern "C" fn _start() -> ! {
 
     if surface > 0 {
         render_music_ui(surface, &music);
-        let _ = std::surface_flip(6);
+        let _ = std::surface_flip(fb_slot);
         std::log(0, "[MUSIC APP] Music canvas presented to scanout buffer.").ok();
     }
 
@@ -1622,7 +1768,7 @@ pub extern "C" fn _start() -> ! {
                                 Tap::Leave(msg) => {
                                     std::log(0, msg).ok();
                                     if surface > 0 {
-                                        let _ = std::surface_destroy(6, surface);
+                                        let _ = std::surface_destroy(fb_slot, surface);
                                     }
                                     std::exit_with_code(0);
                                 }
@@ -1632,13 +1778,32 @@ pub extern "C" fn _start() -> ! {
                             continue;
                         }
                         if input.kind == 4 || input.kind == 6 || input.kind == 7 || input.kind == 8 || input.kind == 10 {
+                            // A drag that ends over the track list is a list
+                            // gesture; anything else is the system's
+                            // navigation gesture.
+                            //
+                            // WHY the list needed the gesture: the library
+                            // holds up to eight tracks and the visible band
+                            // holds three, so the lower five could not be
+                            // reached at all. The scroll model owns the
+                            // offset and the thumb, so they cannot disagree.
+                            let over_list = input.y >= LIST_TOP as u32
+                                && (input.y as usize) < LIST_HIT_Y1
+                                && !music.add_open;
+                            if (input.kind == 4 || input.kind == 10) && over_list {
+                                music.list_scroll.apply_drag(input.dy);
+                                dirty = merge(dirty, Dirty::All);
+                                continue;
+                            }
                             std::log(
                                 0,
                                 "[MUSIC APP] Navigation gesture recognized. Exiting to launcher.",
                             )
                             .ok();
                             if surface > 0 {
-                                let _ = std::surface_destroy(6, surface);
+                                if let Some(fb_slot) = std::cap::framebuffer_slot() {
+                                    let _ = std::surface_destroy(fb_slot, surface);
+                                }
                             }
                             std::exit_with_code(0);
                         }
@@ -1647,7 +1812,7 @@ pub extern "C" fn _start() -> ! {
                                 Tap::Leave(msg) => {
                                     std::log(0, msg).ok();
                                     if surface > 0 {
-                                        let _ = std::surface_destroy(6, surface);
+                                        let _ = std::surface_destroy(fb_slot, surface);
                                     }
                                     std::exit_with_code(0);
                                 }
@@ -1658,7 +1823,7 @@ pub extern "C" fn _start() -> ! {
                     }
                     if dirty != Dirty::None && surface > 0 {
                         repaint(surface, &music, dirty);
-                        let _ = std::surface_flip(6);
+                        let _ = std::surface_flip(fb_slot);
                     }
                 }
                 if events & std::EVENT_IPC_MSG != 0 {
