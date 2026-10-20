@@ -2465,7 +2465,7 @@ fn repaint(surface: u32, app: &CalendarApp, dirty: Dirty) {
             render_calendar_band(surface, app, y0, y1);
         }
     }
-    let _ = std::surface_flip(6);
+    let _ = std::cap::framebuffer_slot().map(|slot| std::surface_flip(slot));
 }
 
 /// What one resolved touch did.
@@ -2480,7 +2480,7 @@ enum Tap {
 
 fn exit_to_launcher(surface: u32) -> ! {
     if surface > 0 {
-        let _ = std::surface_destroy(6, surface);
+        let _ = std::cap::framebuffer_slot().map(|slot| std::surface_destroy(slot, surface));
     }
     std::exit_with_code(0);
 }
@@ -2834,7 +2834,19 @@ pub extern "C" fn _start() {
     calendar.sync_rtc();
 
     // 2. Allocate DRM/KMS Client Surface (z=200)
-    let surface = match std::surface_create(6, W as u32, H as u32, 200) {
+    // WHY the slot is resolved by type: a slot number is a position in a
+    // table, and the position depends on the order this task's
+    // capabilities were inserted in. Six happened to hold the framebuffer
+    // here, and would not in an app with one more capability.
+    let Some(fb_slot) = std::cap::framebuffer_slot() else {
+        std::log(
+            0,
+            "[CALENDAR APP] This app holds no framebuffer capability, so it cannot draw.",
+        )
+        .ok();
+        return;
+    };
+    let surface = match std::surface_create(fb_slot, W as u32, H as u32, 200) {
         Ok(id) => {
             std::log(
                 0,
@@ -2898,7 +2910,7 @@ pub extern "C" fn _start() {
 
     if surface > 0 {
         render_calendar_ui(surface, &calendar);
-        let _ = std::surface_flip(6);
+        let _ = std::cap::framebuffer_slot().map(|slot| std::surface_flip(slot));
         std::log(
             0,
             "[CALENDAR APP] Calendar canvas presented to scanout buffer.",

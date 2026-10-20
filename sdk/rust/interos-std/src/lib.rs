@@ -1634,6 +1634,77 @@ pub struct InputEvent {
 /// Kind value used by the kernel's normalized input pipeline for keyboard events.
 pub const INPUT_EVENT_KIND_KEY: u8 = 11;
 
+/// Resolves a capability slot by the capability's type.
+///
+/// WHY this exists: a slot number is a position in a table, and the
+/// position depends on the order the task's capabilities were inserted
+/// in. Two apps with the same capabilities can number them differently,
+/// and a number that is right in one app is wrong in the next. The
+/// consequences were not subtle -- an app reading a file through the
+/// slot that held its write capability, and a keystore call addressed
+/// to the slot that held the serial port.
+///
+/// Every capability-taking syscall wants one of these. None of them
+/// wants a number.
+pub mod cap {
+    use super::cap_lookup;
+    use super::cap_type;
+
+    /// The slot holding a filesystem read capability.
+    #[inline]
+    pub fn fs_read_slot() -> Option<usize> {
+        cap_lookup(cap_type::FILE_SYSTEM_READ, 0).ok()
+    }
+
+    /// The slot holding a filesystem write capability.
+    #[inline]
+    pub fn fs_write_slot() -> Option<usize> {
+        cap_lookup(cap_type::FILE_SYSTEM_WRITE, 0).ok()
+    }
+
+    /// The slot holding a direct framebuffer capability.
+    #[inline]
+    pub fn framebuffer_slot() -> Option<usize> {
+        cap_lookup(cap_type::FRAMEBUFFER_DIRECT, 0).ok()
+    }
+
+    /// The slot holding a timer tick read capability.
+    #[inline]
+    pub fn timer_slot() -> Option<usize> {
+        cap_lookup(cap_type::TIMER_TICK_READ, 0).ok()
+    }
+
+    /// The slot holding an event poll capability.
+    #[inline]
+    pub fn event_poll_slot() -> Option<usize> {
+        cap_lookup(cap_type::EVENT_POLL, 0).ok()
+    }
+
+    /// The slot holding a network socket capability.
+    #[inline]
+    pub fn network_socket_slot() -> Option<usize> {
+        cap_lookup(cap_type::NETWORK_SOCKET, 0).ok()
+    }
+
+    /// The slot holding a network send capability.
+    #[inline]
+    pub fn network_send_slot() -> Option<usize> {
+        cap_lookup(cap_type::NETWORK_SEND, 0).ok()
+    }
+
+    /// The slot holding a network receive capability.
+    #[inline]
+    pub fn network_receive_slot() -> Option<usize> {
+        cap_lookup(cap_type::NETWORK_RECEIVE, 0).ok()
+    }
+
+    /// The slot holding a real-time clock read capability.
+    #[inline]
+    pub fn rtc_slot() -> Option<usize> {
+        cap_lookup(cap_type::REALTIME_CLOCK_READ, 0).ok()
+    }
+}
+
 /// Reserved key codes used by the normalized keyboard pipeline.
 pub mod input_key_code {
     pub const ENTER: u32 = 0x10000;

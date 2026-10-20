@@ -3646,7 +3646,10 @@ fn handle_browser_key(app: &mut BrowserApp, key: std::InputKeyEvent) -> Dirty {
 
 fn destroy_and_exit(surface: u32) -> ! {
     if surface > 0 {
-        let _ = std::surface_destroy(6, surface);
+        // WHY the slot is resolved by type here too: a slot number is a
+        // position in a table, and the position depends on the order the
+        // task's capabilities were inserted in.
+        let _ = std::cap::framebuffer_slot().map(|slot| std::surface_destroy(slot, surface));
     }
     std::exit_with_code(0);
 }

@@ -1208,7 +1208,7 @@ enum Tap {
 
 fn exit_to_launcher(surface: u32) -> ! {
     if surface > 0 {
-        let _ = std::surface_destroy(6, surface);
+        let _ = std::cap::framebuffer_slot().map(|slot| std::surface_destroy(slot, surface));
     }
     std::exit_with_code(0);
 }
@@ -1392,7 +1392,19 @@ pub extern "C" fn _start() -> ! {
         "[CAMERA APP] Step 1: Allocating application surface (z=200)...",
     )
     .ok();
-    let surface = match std::surface_create(6, W as u32, H as u32, 200) {
+    // WHY the slot is resolved by type: a slot number is a position in a
+    // table, and the position depends on the order this task's
+    // capabilities were inserted in. Six happened to hold the framebuffer
+    // here, and would not in an app with one more capability.
+    let Some(fb_slot) = std::cap::framebuffer_slot() else {
+        std::log(
+            0,
+            "[CAMERA APP] This app holds no framebuffer capability, so it cannot draw.",
+        )
+        .ok();
+        std::exit_with_code(0);
+    };
+    let surface = match std::surface_create(fb_slot, W as u32, H as u32, 200) {
         Ok(s) => {
             std::log(0, "[CAMERA APP] Step 2: Surface created successfully.").ok();
             s
@@ -1410,7 +1422,7 @@ pub extern "C" fn _start() -> ! {
     // Render initial UI and present
     camera.mode = CameraMode::Photo;
     render_camera_ui(surface, &camera);
-    let _ = std::surface_flip(6);
+    let _ = std::cap::framebuffer_slot().map(|slot| std::surface_flip(slot));
     std::log(
         0,
         "[CAMERA APP] Step 3: Initial frame presented to hardware scanout.",
@@ -1432,7 +1444,7 @@ pub extern "C" fn _start() -> ! {
                     let _ = camera.stream_video_frame();
                     if camera.total_video_frames != before {
                         render_camera_band(surface, &camera, VIEWFINDER_Y0, VIEWFINDER_Y1);
-                        let _ = std::surface_flip(6);
+                        let _ = std::cap::framebuffer_slot().map(|slot| std::surface_flip(slot));
                     }
                 }
             }
@@ -1481,7 +1493,7 @@ pub extern "C" fn _start() -> ! {
                         Dirty::All => render_camera_ui(surface, &camera),
                         Dirty::None => {}
                     }
-                    let _ = std::surface_flip(6);
+                    let _ = std::cap::framebuffer_slot().map(|slot| std::surface_flip(slot));
                 }
             }
         }
