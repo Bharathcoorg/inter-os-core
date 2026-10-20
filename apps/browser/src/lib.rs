@@ -264,6 +264,37 @@ pub fn extract_proxy_html(json: &[u8], out: &mut [u8]) -> usize {
                 b'n' => { out[w] = b'\n'; w += 1; r += 2; }
                 b'r' => { out[w] = b'\r'; w += 1; r += 2; }
                 b't' => { out[w] = b'\t'; w += 1; r += 2; }
+                b'b' => { out[w] = 0x08; w += 1; r += 2; }
+                b'f' => { out[w] = 0x0C; w += 1; r += 2; }
+                // WHY the \uXXXX case matters: the gateway's JSON encoder
+                // escapes every non-ASCII character, so an em dash arrives
+                // as the six characters "\u2014". Without decoding it the
+                // reader printed the escape sequence on the page -- the
+                // live article's title read "InterOS \u2014 A security-first
+                // mobile operating system".
+                b'u' => {
+                    let (cp, next) = read_hex4(content, r + 2);
+                    match cp {
+                        Some(cp) => {
+                            let len = utf8_len(cp);
+                            if len > 0 && w + len <= out.len() {
+                                let end = w + len;
+                                w = write_utf8(out, w, cp);
+                                r = next;
+                                let _ = end;
+                            } else {
+                                out[w] = b'?';
+                                w += 1;
+                                r += 2;
+                            }
+                        }
+                        None => {
+                            out[w] = b'?';
+                            w += 1;
+                            r += 2;
+                        }
+                    }
+                }
                 _ => { out[w] = content[r]; w += 1; r += 1; }
             }
         } else if content[r] == b'"' {
@@ -275,6 +306,63 @@ pub fn extract_proxy_html(json: &[u8], out: &mut [u8]) -> usize {
         }
     }
     w
+}
+
+/// Reads four hexadecimal digits at `pos` as a Unicode code point.
+fn read_hex4(buf: &[u8], pos: usize) -> (Option<u32>, usize) {
+    if pos + 4 > buf.len() {
+        return (None, pos);
+    }
+    let mut value = 0u32;
+    for i in 0..4 {
+        let digit = match buf[pos + i] {
+            b'0'..=b'9' => buf[pos + i] - b'0',
+            b'a'..=b'f' => buf[pos + i] - b'a' + 10,
+            b'A'..=b'F' => buf[pos + i] - b'A' + 10,
+            _ => return (None, pos),
+        };
+        value = value * 16 + digit as u32;
+    }
+    (Some(value), pos + 4)
+}
+
+/// The number of UTF-8 bytes a code point occupies, or zero if it is not a
+/// scalar value.
+pub fn utf8_len(cp: u32) -> usize {
+    match cp {
+        0x0000..=0x007F => 1,
+        0x0080..=0x07FF => 2,
+        0x0800..=0xFFFF => 3,
+        0x10000..=0x10FFFF => 4,
+        _ => 0,
+    }
+}
+
+/// Writes a code point as UTF-8 into `out` at `w`, returning the new cursor.
+pub fn write_utf8(out: &mut [u8], w: usize, cp: u32) -> usize {
+    let len = utf8_len(cp);
+    if len == 0 || w + len > out.len() {
+        return w;
+    }
+    match len {
+        1 => out[w] = cp as u8,
+        2 => {
+            out[w] = 0xC0 | (cp >> 6) as u8;
+            out[w + 1] = 0x80 | (cp & 0x3F) as u8;
+        }
+        3 => {
+            out[w] = 0xE0 | (cp >> 12) as u8;
+            out[w + 1] = 0x80 | ((cp >> 6) & 0x3F) as u8;
+            out[w + 2] = 0x80 | (cp & 0x3F) as u8;
+        }
+        _ => {
+            out[w] = 0xF0 | (cp >> 18) as u8;
+            out[w + 1] = 0x80 | ((cp >> 12) & 0x3F) as u8;
+            out[w + 2] = 0x80 | ((cp >> 6) & 0x3F) as u8;
+            out[w + 3] = 0x80 | (cp & 0x3F) as u8;
+        }
+    }
+    w + len
 }
 
 /// Parsed HTTP/1.1 Response Header and Body.
@@ -339,32 +427,396 @@ pub fn parse_http_response(raw: &[u8]) -> Option<HttpResponse<'_>> {
     })
 }
 
-/// Extracts readable editorial content from raw HTML into clean Markdown / Gemtext
-/// lines without heap allocation.
-pub fn html_to_reader_document(html: &[u8], out: &mut [u8]) -> usize {
-    let mut r = 0;
-    let mut w = 0;
-    let n = html.len();
+// =============================================================================
+// Reader pipeline: HTML -> editorial text
+// =============================================================================
+//
+// WHY this layer exists at all: a web page is a layout, and a phone
+// reader wants the article. The pipeline has one job -- turn real markup
+// into a clean, linear, readable document that fits the platform font.
+//
+// Three defects in the previous implementation made it useless against a
+// real page, and all three were measured against the live site:
+//
+//  1. Whitespace was not collapsed. The source markup's indentation
+//     between tags became reader lines, so 688 of the 958 lines the live
+//     article produced were blank or a single space. With a 32-line
+//     document budget, the reader showed ONE line of content.
+//  2. Entities were decoded into UTF-8. The platform font covers ASCII
+//     32..126 and nothing else, so an em dash became three blank
+//     six-pixel boxes. The reader transliterates instead.
+//  3. Page chrome was kept. The site's own navigation was seven of the
+//     first twenty reader lines, each rendered as a link card.
+//
+// The rules below are the whole contract.
 
-    let write_byte = |b: u8, w: &mut usize, out: &mut [u8]| {
+/// Elements whose content is page furniture rather than article text.
+///
+/// WHY the list: a reader that keeps a site's navigation, header and
+/// footer turns an article into a list of link cards. The live article's
+/// navigation was seven of its first twenty reader lines.
+const CHROME_TAGS: [&[u8]; 16] = [
+    b"nav", b"header", b"footer", b"aside", b"script", b"style", b"noscript", b"svg",
+    b"form", b"button", b"select", b"template", b"iframe", b"canvas", b"video", b"object",
+];
+
+/// How many nested page-chrome elements the reader can be inside at once.
+///
+/// WHY this is bounded: the stack is a fixed array, and a page that nests
+/// chrome deeper than this simply stops tracking the extra levels. The
+/// content of a chrome element is dropped either way.
+pub const CHROME_STACK_DEPTH: usize = 16;
+
+/// Elements that end a paragraph and are therefore separated by a blank
+/// line in the rendered document.
+const PARAGRAPH_TAGS: [&[u8]; 20] = [
+    b"p", b"div", b"h1", b"h2", b"h3", b"h4", b"h5", b"h6", b"li", b"section", b"article",
+    b"ul", b"ol", b"table", b"tr", b"blockquote", b"pre", b"figure", b"figcaption", b"dl",
+];
+
+/// Elements that flow inside a line and never break it.
+const INLINE_TAGS: [&[u8]; 20] = [
+    b"span", b"b", b"i", b"em", b"strong", b"small", b"sup", b"sub", b"u", b"mark",
+    b"abbr", b"time", b"label", b"q", b"cite", b"var", b"kbd", b"samp", b"wbr", b"dfn",
+];
+
+/// The transliteration of a Unicode code point into the ASCII subset the
+/// platform font can draw.
+///
+/// WHY a table and not a straight decode: the platform font covers ASCII
+/// 32..126 and nothing else. A byte outside that range has no glyph -- it
+/// draws as a blank six-pixel gap. Decoding an em dash into UTF-8 would
+/// put three blank boxes on the page, which is worse than the escape
+/// sequence it replaced.
+pub fn transliterate(cp: u32) -> &'static [u8] {
+    match cp {
+        0x2010 | 0x2011 | 0x2012 | 0x2013 | 0x2014 | 0x2212 => b"-",
+        0x2026 => b"...",
+        0x2018 | 0x2019 | 0x201A | 0x2032 => b"'",
+        0x201C | 0x201D | 0x201E | 0x2033 => b"\"",
+        0x2022 | 0x00B7 => b"-",
+        0x2190 => b"<-",
+        0x2192 => b"->",
+        0x2191 => b"^",
+        0x2193 => b"v",
+        0x2197 => b"->",
+        0x2194 => b"<->",
+        0x00D7 => b"x",
+        0x00F7 => b"/",
+        0x00B0 => b"deg",
+        0x00A9 => b"(c)",
+        0x00AE => b"(r)",
+        0x2122 => b"(tm)",
+        0x00AB | 0x00BB | 0x2039 | 0x203A => b"\"",
+        0x00A0 | 0x2007 | 0x202F => b" ",
+        0x200B | 0x200C | 0x200D | 0x200E | 0x200F | 0xFEFF | 0x00AD => b"",
+        0x00E9 | 0x00E8 | 0x00EA => b"e",
+        0x00E0 | 0x00E2 => b"a",
+        0x00FC => b"u",
+        0x00F6 => b"o",
+        0x00E4 => b"a",
+        0x00DF => b"ss",
+        0x00E7 => b"c",
+        0x00F1 => b"n",
+        0x00E5 => b"a",
+        0x00E6 => b"ae",
+        0x00F8 => b"o",
+        0x0153 => b"ae",
+        0x2264 => b"<=",
+        0x2265 => b">=",
+        0x2260 => b"!=",
+        0x2248 => b"~=",
+        0x00BD => b"1/2",
+        0x00BC => b"1/4",
+        0x00BE => b"3/4",
+        0x20AC => b"EUR",
+        0x00A3 => b"GBP",
+        0x20B9 => b"INR",
+        0x00B5 => b"u",
+        0x00A7 => b"S",
+        0x00B6 => b"P",
+        0x2020 => b"+",
+        0x00B1 => b"+/-",
+        0x0131 => b"i",
+        0x2044 | 0x2215 => b"/",
+        0x2217 => b"*",
+        0x25CF => b"*",
+        _ => b"",
+    }
+}
+
+/// Writes a code point as the ASCII the platform font can draw.
+fn push_transliterated(out: &mut [u8], w: &mut usize, cp: u32) {
+    if (0x20..=0x7E).contains(&cp) {
+        if *w < out.len() {
+            out[*w] = cp as u8;
+            *w += 1;
+        }
+        return;
+    }
+    for &b in transliterate(cp) {
         if *w < out.len() {
             out[*w] = b;
             *w += 1;
+        } else {
+            break;
         }
-    };
-    let write_slice = |slice: &[u8], w: &mut usize, out: &mut [u8]| {
-        for &b in slice {
-            if *w < out.len() {
-                out[*w] = b;
-                *w += 1;
-            } else {
-                break;
+    }
+}
+
+/// Reads a run of decimal or hexadecimal digits at `pos`.
+fn read_digits(buf: &[u8], mut pos: usize, base: u32) -> (Option<u32>, usize) {
+    let mut value = 0u32;
+    let mut digits = 0usize;
+    while pos < buf.len() {
+        let digit = match buf[pos] {
+            b'0'..=b'9' => (buf[pos] - b'0') as u32,
+            b'a'..=b'f' if base == 16 => (buf[pos] - b'a' + 10) as u32,
+            b'A'..=b'F' if base == 16 => (buf[pos] - b'A' + 10) as u32,
+            _ => break,
+        };
+        value = value.saturating_mul(base).saturating_add(digit);
+        digits += 1;
+        pos += 1;
+    }
+    if digits == 0 {
+        (None, pos)
+    } else {
+        (Some(value), pos)
+    }
+}
+
+/// Decodes the HTML entity at `pos` into drawable ASCII.
+///
+/// Returns the position after the entity, or `None` when the text at
+/// `pos` is not an entity the reader understands.
+fn decode_html_entity(html: &[u8], pos: usize, out: &mut [u8], w: &mut usize) -> Option<usize> {
+    if html[pos..].starts_with(b"&#") {
+        let (cp, next) = if pos + 2 < html.len() && (html[pos + 2] == b'x' || html[pos + 2] == b'X') {
+            read_digits(html, pos + 3, 16)
+        } else {
+            read_digits(html, pos + 2, 10)
+        };
+        if let Some(cp) = cp {
+            if next < html.len() && html[next] == b';' {
+                push_transliterated(out, w, cp);
+                return Some(next + 1);
             }
         }
+        return None;
+    }
+
+    let semi = html[pos..].iter().position(|&b| b == b';').map(|p| pos + p)?;
+    if semi <= pos + 1 || semi - pos > 12 {
+        return None;
+    }
+    let name = &html[pos + 1..semi];
+    let cp = match name {
+        b"amp" => Some(b'&' as u32),
+        b"lt" => Some(b'<' as u32),
+        b"gt" => Some(b'>' as u32),
+        b"quot" => Some(b'"' as u32),
+        b"apos" => Some(b'\'' as u32),
+        b"nbsp" => Some(0x00A0),
+        b"mdash" => Some(0x2014),
+        b"ndash" => Some(0x2013),
+        b"hellip" => Some(0x2026),
+        b"lsquo" => Some(0x2018),
+        b"rsquo" => Some(0x2019),
+        b"ldquo" => Some(0x201C),
+        b"rdquo" => Some(0x201D),
+        b"bull" => Some(0x2022),
+        b"middot" => Some(0x00B7),
+        b"rarr" => Some(0x2192),
+        b"larr" => Some(0x2190),
+        b"uarr" => Some(0x2191),
+        b"darr" => Some(0x2193),
+        b"copy" => Some(0x00A9),
+        b"reg" => Some(0x00AE),
+        b"trade" => Some(0x2122),
+        b"deg" => Some(0x00B0),
+        b"times" => Some(0x00D7),
+        b"divide" => Some(0x00F7),
+        b"plusmn" => Some(0x00B1),
+        b"frac12" => Some(0x00BD),
+        b"frac14" => Some(0x00BC),
+        b"frac34" => Some(0x00BE),
+        b"eacute" => Some(0x00E9),
+        b"egrave" => Some(0x00E8),
+        b"agrave" => Some(0x00E0),
+        b"uuml" => Some(0x00FC),
+        b"ouml" => Some(0x00F6),
+        b"auml" => Some(0x00E4),
+        b"szlig" => Some(0x00DF),
+        b"ccedil" => Some(0x00E7),
+        b"ntilde" => Some(0x00F1),
+        b"aring" => Some(0x00E5),
+        b"aelig" => Some(0x00E6),
+        b"oslash" => Some(0x00F8),
+        b"laquo" => Some(0x00AB),
+        b"raquo" => Some(0x00BB),
+        b"euro" => Some(0x20AC),
+        b"pound" => Some(0x00A3),
+        b"rupee" => Some(0x20B9),
+        b"micro" => Some(0x00B5),
+        b"sect" => Some(0x00A7),
+        b"para" => Some(0x00B6),
+        b"dagger" => Some(0x2020),
+        b"permil" => Some(0x2030),
+        b"prime" => Some(0x2032),
+        b"sbquo" => Some(0x201A),
+        b"bdquo" => Some(0x201E),
+        b"lsaquo" => Some(0x2039),
+        b"rsaquo" => Some(0x203A),
+        b"le" => Some(0x2264),
+        b"ge" => Some(0x2265),
+        b"ne" => Some(0x2260),
+        b"minus" => Some(0x2212),
+        b"shy" => Some(0x00AD),
+        b"lowast" => Some(0x2217),
+        _ => None,
     };
+    let cp = cp?;
+    push_transliterated(out, w, cp);
+    Some(semi + 1)
+}
+
+/// Copies `src` into the output, decoding entities and transliterating.
+fn push_decoded(out: &mut [u8], w: &mut usize, src: &[u8]) {
+    let mut i = 0usize;
+    while i < src.len() {
+        if src[i] == b'&' {
+            if let Some(next) = decode_html_entity(src, i, out, w) {
+                i = next;
+                continue;
+            }
+        }
+        if *w < out.len() {
+            out[*w] = src[i];
+            *w += 1;
+        } else {
+            break;
+        }
+        i += 1;
+    }
+}
+
+/// Finds the value of `name` in a tag's attribute text.
+fn attr_value<'a>(tag: &'a [u8], name: &[u8]) -> Option<&'a [u8]> {
+    let mut i = 0usize;
+    while i < tag.len() {
+        if tag[i..].starts_with(name) {
+            let mut j = i + name.len();
+            while j < tag.len() && (tag[j] == b' ' || tag[j] == b'\t' || tag[j] == b'\n' || tag[j] == b'\r') {
+                j += 1;
+            }
+            if j < tag.len() && tag[j] == b'=' {
+                j += 1;
+                while j < tag.len() && (tag[j] == b' ' || tag[j] == b'\t') {
+                    j += 1;
+                }
+                if j < tag.len() && (tag[j] == b'"' || tag[j] == b'\'') {
+                    let quote = tag[j];
+                    let start = j + 1;
+                    let mut end = start;
+                    while end < tag.len() && tag[end] != quote {
+                        end += 1;
+                    }
+                    return Some(&tag[start..end.min(tag.len())]);
+                }
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Whether a tag name is in a fixed list.
+fn tag_in(list: &[&[u8]], name: &[u8]) -> bool {
+    list.iter().any(|candidate| candidate.eq_ignore_ascii_case(name))
+}
+
+/// The index of a tag in the chrome list, when it is one of them.
+///
+/// WHY an index and not the name: the chrome stack is a fixed array of
+/// byte values, so it has to be able to hold a name without borrowing
+/// from the page.
+fn chrome_tag_index(name: &[u8]) -> Option<usize> {
+    CHROME_TAGS.iter().position(|c| c.eq_ignore_ascii_case(name))
+}
+
+/// Pushes a newline, unless the output already ends with one.
+fn push_newline(out: &mut [u8], w: &mut usize) {
+    if *w > 0 && out[*w - 1] == b'\n' {
+        return;
+    }
+    if *w < out.len() {
+        out[*w] = b'\n';
+        *w += 1;
+    }
+}
+
+/// Pushes a blank line, unless the output already ends with one.
+fn push_blank_line(out: &mut [u8], w: &mut usize) {
+    if *w >= 2 && out[*w - 1] == b'\n' && out[*w - 2] == b'\n' {
+        return;
+    }
+    push_newline(out, w);
+    if *w < out.len() {
+        out[*w] = b'\n';
+        *w += 1;
+    }
+}
+
+/// Separates the next text from what precedes it with a single space.
+fn push_separator(out: &mut [u8], w: &mut usize) {
+    if *w == 0 {
+        return;
+    }
+    let last = out[*w - 1];
+    if last == b' ' || last == b'\n' {
+        return;
+    }
+    if *w < out.len() {
+        out[*w] = b' ';
+        *w += 1;
+    }
+}
+
+/// Extracts readable editorial content from raw HTML into clean Markdown / Gemtext
+/// lines without heap allocation.
+///
+/// The result is a sequence of `\n`-separated lines using a small
+/// vocabulary: `# ` for a heading, `* ` for a list item, `> ` for a quote,
+/// "```" for a code fence, `=> URL label` for a link, and plain text
+/// otherwise. Every byte of the result is in the range the platform font
+/// can draw.
+pub fn html_to_reader_document(html: &[u8], out: &mut [u8]) -> usize {
+    let mut r = 0usize;
+    let mut w = 0usize;
+    let n = html.len();
+
+    // The open page-chrome elements. Everything inside them is furniture,
+    // not article text. The stack is what makes an open and a close agree.
+    let mut chrome_stack: [u8; CHROME_STACK_DEPTH] = [0u8; CHROME_STACK_DEPTH];
+    let mut chrome_depth = 0usize;
+    // Whether whitespace in the source has been seen and is owed to the
+    // next piece of text as a single separating space.
+    let mut pending_space = false;
+    // Whether the current anchor is a same-page fragment, which is not a
+    // navigation target and must not become a link card.
+    let mut in_fragment_link = false;
+    // Whether the current anchor is an accessibility skip link, whose text
+    // is dropped entirely.
+    let mut in_skip_link = false;
+    // The depth of open heading elements, so a line break inside a title
+    // is a space rather than a new document line.
+    let mut heading_depth = 0usize;
+    // Whether the current anchor is a real link being emitted.
+    let mut in_link = false;
 
     while r < n {
-        // 1. Comments <!-- ... -->
+        // 1. Comments.
         if html[r..].starts_with(b"<!--") {
             r += 4;
             while r + 2 < n && !html[r..].starts_with(b"-->") {
@@ -376,144 +828,405 @@ pub fn html_to_reader_document(html: &[u8], out: &mut [u8]) -> usize {
             continue;
         }
 
-        // 2. Script and Style tags <script ...> ... </script>
-        if html[r..].starts_with(b"<script") || html[r..].starts_with(b"<SCRIPT") {
-            r += 7;
-            while r + 8 < n && !html[r..].starts_with(b"</script>") && !html[r..].starts_with(b"</SCRIPT>") {
-                r += 1;
-            }
-            while r < n && html[r] != b'>' {
-                r += 1;
-            }
-            if r < n { r += 1; }
-            continue;
-        }
-        if html[r..].starts_with(b"<style") || html[r..].starts_with(b"<STYLE") {
-            r += 6;
-            while r + 7 < n && !html[r..].starts_with(b"</style>") && !html[r..].starts_with(b"</STYLE>") {
-                r += 1;
-            }
-            while r < n && html[r] != b'>' {
-                r += 1;
-            }
-            if r < n { r += 1; }
-            continue;
-        }
-
-        // 3. Structural Tags
+        // 2. Tags.
         if html[r] == b'<' {
             let tag_start = r + 1;
             let mut tag_end = tag_start;
             while tag_end < n && html[tag_end] != b'>' {
                 tag_end += 1;
             }
-            let tag_content = &html[tag_start..tag_end];
+            let tag_content = &html[tag_start..tag_end.min(n)];
             let is_closing = tag_content.starts_with(b"/");
             let tag_name = if is_closing { &tag_content[1..] } else { tag_content };
-            let tag_word = tag_name.split(|&b| b == b' ' || b == b'\t' || b == b'/').next().unwrap_or(b"");
+            let tag_word = tag_name
+                .split(|&b| b == b' ' || b == b'\t' || b == b'\n' || b == b'\r' || b == b'/')
+                .next()
+                .unwrap_or(b"");
+            let next = if tag_end < n { tag_end + 1 } else { n };
 
-            if tag_word.eq_ignore_ascii_case(b"h1") || tag_word.eq_ignore_ascii_case(b"title") {
-                if !is_closing {
-                    if w > 0 && out[w - 1] != b'\n' { write_byte(b'\n', &mut w, out); }
-                    write_slice(b"# ", &mut w, out);
-                } else {
-                    write_slice(b"\n\n", &mut w, out);
+            // 2a. Raw-text elements. Their content is not markup, so it
+            // is skipped to the matching close tag rather than parsed.
+            //
+            // WHY this matters: the live page carries a 7 KB
+            // application/ld+json block whose text mentions "UserPtr<T>".
+            // A parser that treats that "<" as a tag reads the next ">"
+            // as the end of a tag, swallows a chunk of the document, and
+            // dumps the JSON into the article.
+            if tag_word.eq_ignore_ascii_case(b"script")
+                || tag_word.eq_ignore_ascii_case(b"style")
+                || tag_word.eq_ignore_ascii_case(b"textarea")
+            {
+                // WHY an external script is not a raw-text container: a
+                // `<script src="...">` tag has no closing tag in HTML. The
+                // raw-text skip searched for the next "</script>" and
+                // therefore swallowed everything between the module
+                // bundle and the next script -- the site's whole header,
+                // navigation and hero with it. An external or
+                // self-closing script is a void element: the tag is the
+                // whole thing.
+                let is_external = attr_value(tag_content, b"src").is_some()
+                    || tag_content.ends_with(b"/");
+                if is_external {
+                    r = next;
+                    continue;
                 }
-            } else if tag_word.eq_ignore_ascii_case(b"h2") {
                 if !is_closing {
-                    if w > 0 && out[w - 1] != b'\n' { write_byte(b'\n', &mut w, out); }
-                    write_slice(b"## ", &mut w, out);
-                } else {
-                    write_slice(b"\n\n", &mut w, out);
-                }
-            } else if tag_word.eq_ignore_ascii_case(b"h3") {
-                if !is_closing {
-                    if w > 0 && out[w - 1] != b'\n' { write_byte(b'\n', &mut w, out); }
-                    write_slice(b"### ", &mut w, out);
-                } else {
-                    write_slice(b"\n\n", &mut w, out);
-                }
-            } else if tag_word.eq_ignore_ascii_case(b"p") || tag_word.eq_ignore_ascii_case(b"div") {
-                if is_closing {
-                    write_slice(b"\n\n", &mut w, out);
-                } else if w > 0 && out[w - 1] != b'\n' {
-                    write_byte(b'\n', &mut w, out);
-                }
-            } else if tag_word.eq_ignore_ascii_case(b"li") {
-                if !is_closing {
-                    if w > 0 && out[w - 1] != b'\n' { write_byte(b'\n', &mut w, out); }
-                    write_slice(b"* ", &mut w, out);
-                } else {
-                    write_byte(b'\n', &mut w, out);
-                }
-            } else if tag_word.eq_ignore_ascii_case(b"pre") || tag_word.eq_ignore_ascii_case(b"code") {
-                if !is_closing {
-                    if w > 0 && out[w - 1] != b'\n' { write_byte(b'\n', &mut w, out); }
-                    write_slice(b"```\n", &mut w, out);
-                } else {
-                    write_slice(b"\n```\n", &mut w, out);
-                }
-            } else if tag_word.eq_ignore_ascii_case(b"br") || tag_word.eq_ignore_ascii_case(b"hr") {
-                write_byte(b'\n', &mut w, out);
-            } else if tag_word.eq_ignore_ascii_case(b"a") {
-                if !is_closing {
-                    if let Some(pos) = tag_content.windows(6).position(|w| w.eq_ignore_ascii_case(b"href=\"") || w.eq_ignore_ascii_case(b"href=\'")) {
-                        let href_start = pos + 6;
-                        let quote = tag_content[pos + 5];
-                        let href_end = tag_content[href_start..].iter().position(|&b| b == quote).map(|p| href_start + p).unwrap_or(tag_content.len());
-                        let href = &tag_content[href_start..href_end];
-                        if !href.is_empty() {
-                            if w > 0 && out[w - 1] != b'\n' { write_byte(b'\n', &mut w, out); }
-                            write_slice(b"=> ", &mut w, out);
-                            write_slice(href, &mut w, out);
-                            write_byte(b' ', &mut w, out);
-                        }
+                    let close: &[u8] = if tag_word.eq_ignore_ascii_case(b"script") {
+                        b"</script>"
+                    } else if tag_word.eq_ignore_ascii_case(b"style") {
+                        b"</style>"
+                    } else {
+                        b"</textarea>"
+                    };
+                    let mut scan = next;
+                    while scan < n && !html[scan..].starts_with(close) {
+                        scan += 1;
                     }
-                } else {
-                    write_byte(b'\n', &mut w, out);
+                    r = if scan < n { scan + close.len() } else { n };
+                    continue;
                 }
+                r = next;
+                continue;
             }
 
-            r = if tag_end < n { tag_end + 1 } else { n };
+            // 2b. Page chrome. The content is dropped as well as the tags
+            // -- a reader that keeps the text of a navigation menu is not
+            // a reader.
+            //
+            // WHY the open tags are stacked rather than counted: a
+            // counting depth is asymmetric. A `<nav>` inside a `<header>`
+            // never incremented the count -- its open tag was skipped
+            // because the count was already positive -- but its `</nav>`
+            // still decremented it. The count reached zero in the middle
+            // of the header, and the site's GitHub link and call-to-action
+            // leaked into the article.
+            //
+            // The stack makes the two ends agree: an open tag pushes, and
+            // a close tag only pops when it matches what is on top.
+            if let Some(index) = chrome_tag_index(tag_word) {
+                if !is_closing {
+                    if chrome_depth < CHROME_STACK_DEPTH {
+                        chrome_stack[chrome_depth] = index as u8;
+                        chrome_depth += 1;
+                    }
+                } else if chrome_depth > 0
+                    && chrome_stack[chrome_depth - 1] as usize == index
+                {
+                    chrome_depth -= 1;
+                }
+                r = next;
+                continue;
+            }
+            if chrome_depth > 0 {
+                r = next;
+                continue;
+            }
+
+            // 2b. Void elements.
+            if tag_word.eq_ignore_ascii_case(b"br") {
+                // WHY a space inside a heading: a heading is one title
+                // however the source wraps it. The live article's <h1>
+                // contains two <br> elements, and treating them as line
+                // breaks split one title into three document lines, so
+                // the reader showed a fragment of the heading and then
+                // two lines that looked like body copy.
+                if heading_depth > 0 {
+                    // A space inside a title, owed to the next text.
+                    pending_space = true;
+                } else {
+                    push_newline(out, &mut w);
+                    pending_space = false;
+                }
+                r = next;
+                continue;
+            }
+            if tag_word.eq_ignore_ascii_case(b"hr") {
+                push_blank_line(out, &mut w);
+                pending_space = false;
+                r = next;
+                continue;
+            }
+            if tag_word.eq_ignore_ascii_case(b"img") {
+                if let Some(alt) = attr_value(tag_content, b"alt") {
+                    if !alt.is_empty() {
+                        push_separator(out, &mut w);
+                        push_byte(out, &mut w, b'[');
+                        push_decoded(out, &mut w, alt);
+                        push_byte(out, &mut w, b']');
+                        pending_space = true;
+                    }
+                }
+                r = next;
+                continue;
+            }
+
+            // 2c. Headings.
+            if tag_word.eq_ignore_ascii_case(b"h1")
+                || tag_word.eq_ignore_ascii_case(b"h2")
+                || tag_word.eq_ignore_ascii_case(b"h3")
+                || tag_word.eq_ignore_ascii_case(b"h4")
+                || tag_word.eq_ignore_ascii_case(b"h5")
+                || tag_word.eq_ignore_ascii_case(b"h6")
+                || tag_word.eq_ignore_ascii_case(b"title")
+            {
+                if !is_closing {
+                    heading_depth += 1;
+                    push_newline(out, &mut w);
+                    let hashes = match tag_word {
+                        b"h1" | b"title" => 1,
+                        b"h2" => 2,
+                        b"h3" => 3,
+                        b"h4" => 4,
+                        b"h5" => 5,
+                        _ => 6,
+                    };
+                    for _ in 0..hashes {
+                        push_byte(out, &mut w, b'#');
+                    }
+                    push_byte(out, &mut w, b' ');
+                    pending_space = false;
+                } else {
+                    if heading_depth > 0 {
+                        heading_depth -= 1;
+                    }
+                    push_blank_line(out, &mut w);
+                    pending_space = false;
+                }
+                r = next;
+                continue;
+            }
+
+            // 2d. Links.
+            if tag_word.eq_ignore_ascii_case(b"a") {
+                if !is_closing {
+                    let href = attr_value(tag_content, b"href").unwrap_or(b"");
+                    let is_fragment = href.starts_with(b"#");
+                    // WHY the skip-link case: a "skip to content" link is
+                    // an accessibility affordance that is visually hidden
+                    // on the site and must not become the reader's first
+                    // line.
+                    let is_skip_link = attr_value(tag_content, b"class")
+                        .map(|c| c.windows(4).any(|w| w.eq_ignore_ascii_case(b"skip")))
+                        .unwrap_or(false);
+                    if is_skip_link {
+                        // WHY the text is dropped, not just the link: a
+                        // "skip to content" link is an accessibility
+                        // affordance that the site hides visually, and
+                        // leaving its label in the article put "Skip to
+                        // content" at the top of every page.
+                        in_skip_link = true;
+                    } else if is_fragment || href.is_empty() {
+                        in_fragment_link = true;
+                    } else {
+                        push_newline(out, &mut w);
+                        push_slice(out, &mut w, b"=> ");
+                        push_decoded(out, &mut w, href);
+                        push_byte(out, &mut w, b' ');
+                        in_link = true;
+                    }
+                    pending_space = false;
+                } else {
+                    if in_link {
+                        push_newline(out, &mut w);
+                        in_link = false;
+                    } else if in_fragment_link {
+                        push_separator(out, &mut w);
+                    }
+                    in_fragment_link = false;
+                    in_skip_link = false;
+                    pending_space = false;
+                }
+                r = next;
+                continue;
+            }
+
+            // 2e. Lists.
+            if tag_word.eq_ignore_ascii_case(b"li") {
+                if !is_closing {
+                    push_newline(out, &mut w);
+                    push_slice(out, &mut w, b"* ");
+                    pending_space = false;
+                } else {
+                    push_newline(out, &mut w);
+                    pending_space = false;
+                }
+                r = next;
+                continue;
+            }
+
+            // 2f. Code blocks.
+            if tag_word.eq_ignore_ascii_case(b"pre") || tag_word.eq_ignore_ascii_case(b"code") {
+                if !is_closing {
+                    push_newline(out, &mut w);
+                    push_slice(out, &mut w, b"```\n");
+                } else {
+                    push_slice(out, &mut w, b"\n```\n");
+                }
+                pending_space = false;
+                r = next;
+                continue;
+            }
+
+            // 2g. Quotes.
+            if tag_word.eq_ignore_ascii_case(b"blockquote") {
+                if !is_closing {
+                    push_newline(out, &mut w);
+                    push_slice(out, &mut w, b"> ");
+                    pending_space = false;
+                } else {
+                    push_blank_line(out, &mut w);
+                    pending_space = false;
+                }
+                r = next;
+                continue;
+            }
+
+            // 2h. Blocks and inline elements.
+            if tag_in(&PARAGRAPH_TAGS, tag_word) {
+                if !is_closing {
+                    push_newline(out, &mut w);
+                } else {
+                    push_blank_line(out, &mut w);
+                }
+                pending_space = false;
+                r = next;
+                continue;
+            }
+            if tag_in(&INLINE_TAGS, tag_word) {
+                // WHY a separator is owed on BOTH ends: the source markup
+                // puts adjacent inline elements together with no whitespace
+                // between them. Inserting the space only when the element
+                // closed fixed "<span>InterOS</span><span>A first</span>"
+                // but not "<span>InterOS<span>A first</span>", where the
+                // text sits inside the element. The live article's own
+                // title came out as "InterOSA security-first" until this
+                // was made symmetric.
+                //
+                // The separator is owed rather than written, so that the
+                // next piece of text decides whether one is needed -- an
+                // element that ends a line, or is empty, adds nothing.
+                pending_space = true;
+                r = next;
+                continue;
+            }
+
+            r = next;
             continue;
         }
 
-        // 4. HTML Entities
+        // 3. Entities.
         if html[r] == b'&' {
-            if html[r..].starts_with(b"&amp;") {
-                write_byte(b'&', &mut w, out); r += 5; continue;
-            } else if html[r..].starts_with(b"&lt;") {
-                write_byte(b'<', &mut w, out); r += 4; continue;
-            } else if html[r..].starts_with(b"&gt;") {
-                write_byte(b'>', &mut w, out); r += 4; continue;
-            } else if html[r..].starts_with(b"&quot;") {
-                write_byte(b'"', &mut w, out); r += 6; continue;
-            } else if html[r..].starts_with(b"&apos;") || html[r..].starts_with(b"&#39;") {
-                write_byte(b'\'', &mut w, out); r += 6; continue;
-            } else if html[r..].starts_with(b"&nbsp;") {
-                write_byte(b' ', &mut w, out); r += 6; continue;
+            if let Some(next) = decode_html_entity(html, r, out, &mut w) {
+                pending_space = false;
+                r = next;
+                continue;
             }
         }
 
-        // 5. Text characters
-        let b = html[r];
-        if b == b'\r' {
+        // 4. Text.
+        //
+        // WHY chrome content is dropped here and not only at the tag: the
+        // tag branch skips the markup of a chrome element, but its text
+        // was still reaching the document. The site's own navigation --
+        // seven links and a wordmark -- was the reader's first content.
+        if chrome_depth > 0 {
             r += 1;
             continue;
         }
-        if b == b'\t' {
-            write_byte(b' ', &mut w, out);
-        } else if b == b' ' {
-            if w == 0 || out[w - 1] != b' ' {
-                write_byte(b' ', &mut w, out);
-            }
-        } else {
-            write_byte(b, &mut w, out);
+        let b = html[r];
+        if b == b' ' || b == b'\t' || b == b'\n' || b == b'\r' || b == 0x0C {
+            // WHY whitespace is collapsed rather than written: the source
+            // markup's indentation between tags became reader lines, and
+            // 688 of the 958 lines the live article produced were blank.
+            pending_space = true;
+            r += 1;
+            continue;
         }
-        r += 1;
+
+        if pending_space {
+            pending_space = false;
+            push_separator(out, &mut w);
+        }
+        if in_skip_link {
+            r += 1;
+            continue;
+        }
+
+        // 5. Non-ASCII text is transliterated into what the font can draw.
+        if b < 0x80 {
+            push_byte(out, &mut w, b);
+            r += 1;
+            continue;
+        }
+
+        let (cp, next) = decode_utf8_at(html, r);
+        if cp >= 0x80 {
+            push_transliterated(out, &mut w, cp);
+        } else {
+            // A byte the font cannot draw at all: drop it rather than
+            // leave a blank gap on the page.
+        }
+        r = next;
     }
 
     w
+}
+
+/// Decodes the UTF-8 sequence at `pos` into a code point.
+///
+/// Returns the code point and the position after it. An invalid sequence
+/// yields the byte value itself and advances by one, so the reader never
+/// loops.
+pub fn decode_utf8_at(buf: &[u8], pos: usize) -> (u32, usize) {
+    let b0 = buf[pos];
+    if b0 < 0x80 {
+        return (b0 as u32, pos + 1);
+    }
+    let len = if b0 & 0xE0 == 0xC0 {
+        2
+    } else if b0 & 0xF0 == 0xE0 {
+        3
+    } else if b0 & 0xF8 == 0xF0 {
+        4
+    } else {
+        return (0, pos + 1);
+    };
+    if pos + len > buf.len() {
+        return (0, pos + 1);
+    }
+    let mut cp = match len {
+        2 => (b0 & 0x1F) as u32,
+        3 => (b0 & 0x0F) as u32,
+        _ => (b0 & 0x07) as u32,
+    };
+    for i in 1..len {
+        let cont = buf[pos + i];
+        if cont & 0xC0 != 0x80 {
+            return (0, pos + 1);
+        }
+        cp = (cp << 6) | (cont & 0x3F) as u32;
+    }
+    (cp, pos + len)
+}
+
+/// Pushes one byte into the output.
+fn push_byte(out: &mut [u8], w: &mut usize, b: u8) {
+    if *w < out.len() {
+        out[*w] = b;
+        *w += 1;
+    }
+}
+
+/// Pushes a slice into the output.
+fn push_slice(out: &mut [u8], w: &mut usize, slice: &[u8]) {
+    for &b in slice {
+        if *w < out.len() {
+            out[*w] = b;
+            *w += 1;
+        } else {
+            break;
+        }
+    }
 }
 
 /// Parses a Gemtext link line `=> URL [optional label]` into (target_url, label).
@@ -569,11 +1282,14 @@ impl<'a> DocumentTokenizer<'a> {
             None => (self.remaining, &b""[..]),
         };
         self.remaining = rest;
-        let clean_line = if !line.is_empty() && line[line.len() - 1] == b'\r' {
-            &line[..line.len() - 1]
-        } else {
-            line
-        };
+        // WHY the trailing whitespace is trimmed here: the pipeline inserts
+        // a separating space after an inline element, so a line could end
+        // with a space that the reader would draw as a trailing gap.
+        let mut end = line.len();
+        while end > 0 && (line[end - 1] == b' ' || line[end - 1] == b'\r' || line[end - 1] == b'\t') {
+            end -= 1;
+        }
+        let clean_line = &line[..end];
         let kind = classify_line(clean_line);
         Some((clean_line, kind))
     }
@@ -618,8 +1334,35 @@ pub const MAX_TITLE_LEN: usize = 64;
 pub const TAB_HISTORY_CAP: usize = 8;
 pub const MAX_BOOKMARKS: usize = 16;
 pub const MAX_HISTORY_ENTRIES: usize = 8;
-pub const MAX_DOC_LINES: usize = 32;
+pub const MAX_DOC_LINES: usize = 64;
 pub const MAX_LINE_BYTES: usize = 96;
+
+/// The largest raw HTML slice the browser keeps for the reader.
+///
+/// WHY this is a published constant rather than a local array size: the
+/// network path, the reader pipeline and the contract test all have to
+/// agree on one capacity. When the sizes were separate locals, the app
+/// truncated a 57 KB page at 2 KB and nothing in the build said so.
+pub const MAX_HTML_BYTES: usize = 64 * 1024;
+
+/// The largest reader document the browser keeps.
+///
+/// WHY 32 KB: the live page the reader was written for produces 12.6 KB of
+/// reader text. An 8 KB budget silently dropped the last third of the
+/// article -- the part after the fold, which is the part people read.
+pub const MAX_READER_BYTES: usize = 32 * 1024;
+
+/// The reader's content column, in pixels.
+///
+/// WHY 24 pixels of padding on each side: a reading surface with text
+/// running to the screen edge is unreadable on a phone, and the mission
+/// specification calls for 24px horizontal padding. The value is
+/// published so the wrapper and the renderer cannot drift apart.
+pub const CONTENT_PADDING: usize = 24;
+
+/// The width available for reader text, in pixels.
+pub const CONTENT_WIDTH: usize = 672 - CONTENT_PADDING * 2;
+
 
 /// Parsed and classified line of content for document rendering.
 #[derive(Debug, Clone, Copy)]
@@ -1548,6 +2291,135 @@ mod tests {
         assert_eq!(html, "<h1>InterOS</h1><p>Test</p>");
     }
 
+    /// The reader must not keep a page's own navigation.
+    ///
+    /// WHY this test exists: the reader used to keep every element, so the
+    /// live site's navigation was seven of the first twenty lines it
+    /// produced, each rendered as a link card.
+    #[test]
+    fn test_page_chrome_is_dropped_and_the_article_is_kept() {
+        let html = b"<html><head><title>Doc</title></head><body>\
+<header class=\"site-header\"><nav id=\"primary-nav\"><a href=\"#top\">Home</a></nav>\
+<div class=\"header-actions\"><a class=\"icon-link\" href=\"https://example.com/x\">GH</a></div></header>\
+<main><p>The actual article.</p></main></body></html>";
+        let mut out = [0u8; 512];
+        let n = html_to_reader_document(html, &mut out);
+        let text = core::str::from_utf8(&out[..n]).expect("utf8");
+
+        assert!(text.contains("The actual article."), "the article was lost: {text:?}");
+        assert!(!text.contains("Home"), "the navigation text leaked: {text:?}");
+        assert!(!text.contains("example.com"), "a header link leaked: {text:?}");
+    }
+
+    /// Whitespace between tags must not become reader lines.
+    ///
+    /// WHY this test exists: the source markup's indentation became reader
+    /// lines, so 688 of the 958 lines the live article produced were blank
+    /// or a single space, and the reader showed one line of content.
+    #[test]
+    fn test_source_indentation_does_not_become_blank_lines() {
+        let html = b"<html>\n   <body>\n     <div>\n       <p>One.</p>\n     </div>\n   </body>\n</html>";
+        let mut out = [0u8; 512];
+        let n = html_to_reader_document(html, &mut out);
+        let text = core::str::from_utf8(&out[..n]).expect("utf8");
+
+        let blanks = text.lines().filter(|l| l.trim().is_empty()).count();
+        assert!(blanks <= 2, "the document is mostly blank lines: {text:?}");
+        assert!(text.contains("One."), "the text was lost: {text:?}");
+    }
+
+    /// A script's content is not markup and must not reach the article.
+    ///
+    /// WHY this test exists: the live page carries a 7 KB
+    /// application/ld+json block whose text mentions "UserPtr<T>". A parser
+    /// that treats that "<" as a tag dumps the JSON into the article.
+    #[test]
+    fn test_script_content_is_not_markup() {
+        let html = b"<html><body><script type=\"application/ld+json\">{\"a\":\"UserPtr<T> bounds\"}</script>\
+<p>Article.</p></body></html>";
+        let mut out = [0u8; 512];
+        let n = html_to_reader_document(html, &mut out);
+        let text = core::str::from_utf8(&out[..n]).expect("utf8");
+
+        assert!(text.contains("Article."), "the article was lost: {text:?}");
+        assert!(!text.contains("UserPtr"), "script content leaked: {text:?}");
+    }
+
+    /// An external script has no closing tag and must not swallow the page.
+    ///
+    /// WHY this test exists: the raw-text skip searched for the next
+    /// "</script>", so a `<script src="...">` tag consumed everything up to
+    /// the next script -- the site's whole header and hero with it.
+    #[test]
+    fn test_an_external_script_does_not_swallow_the_page() {
+        let html = b"<html><head><script type=\"module\" src=\"/a.js\"></script></head>\
+<body><p>Kept.</p></body></html>";
+        let mut out = [0u8; 512];
+        let n = html_to_reader_document(html, &mut out);
+        let text = core::str::from_utf8(&out[..n]).expect("utf8");
+        assert!(text.contains("Kept."), "the article was swallowed: {text:?}");
+    }
+
+    /// A line break inside a heading is a space, not a new document line.
+    ///
+    /// WHY this test exists: the live article's <h1> contains two <br>
+    /// elements, and treating them as line breaks split one title into
+    /// three document lines.
+    #[test]
+    fn test_a_heading_stays_one_line() {
+        let html = b"<h1>InterOS<span>A first</span><br />mobile operating system</h1>";
+        let mut out = [0u8; 512];
+        let n = html_to_reader_document(html, &mut out);
+        let text = core::str::from_utf8(&out[..n]).expect("utf8");
+
+        assert_eq!(text.lines().filter(|l| l.starts_with('#')).count(), 1,
+            "the title was split across lines: {text:?}");
+        assert!(text.contains("InterOS A first mobile operating system"),
+            "the title text was not joined: {text:?}");
+    }
+
+    /// Adjacent inline elements are separated, so words do not run together.
+    ///
+    /// WHY this test exists: the live article's title is
+    /// "<span>InterOS</span><span class=\"hero-subtitle\">A security-first</span>",
+    /// and concatenating them produced "InterOSA security-first".
+    #[test]
+    fn test_adjacent_inline_elements_are_separated() {
+        let html = b"<h1><span>InterOS</span><span>A security-first</span></h1>";
+        let mut out = [0u8; 512];
+        let n = html_to_reader_document(html, &mut out);
+        let text = core::str::from_utf8(&out[..n]).expect("utf8");
+        assert!(text.contains("InterOS A security-first"),
+            "the inline elements ran together: {text:?}");
+    }
+
+    /// Every byte the reader emits must be drawable by the platform font.
+    ///
+    /// WHY this test exists: the platform font covers ASCII 32..126 and
+    /// nothing else, so a byte outside that range draws as a blank
+    /// six-pixel gap. An em dash decoded into UTF-8 would put three blank
+    /// boxes on the page.
+    #[test]
+    fn test_the_reader_document_is_drawable() {
+        // The em dash, the north-east arrow and the ellipsis, as UTF-8.
+        let html = b"<p>InterOS \xe2\x80\x94 a security-first OS \xe2\x86\x97 done\xe2\x80\xa6</p>";
+        let mut out = [0u8; 512];
+        let n = html_to_reader_document(html, &mut out);
+        let text = core::str::from_utf8(&out[..n]).expect("utf8");
+
+        // The newlines are the line separators the tokenizer splits on;
+        // they are never drawn. Every byte of an actual line has to be
+        // drawable.
+        for line in text.lines() {
+            for &b in line.as_bytes() {
+                assert!((32..=126).contains(&b),
+                    "the reader emitted byte {b:#04x}, which the font cannot draw: {text:?}");
+            }
+        }
+        assert!(text.contains("InterOS - a security-first OS"),
+            "the em dash was not transliterated: {text:?}");
+    }
+
     /// The reader pipeline, exercised against a real page captured from the
     /// Device Studio proxy.
     ///
@@ -1562,7 +2434,7 @@ mod tests {
     #[test]
     fn test_the_reader_pipeline_survives_a_live_page() {
         let Ok(path) = std::env::var("INTEROS_BROWSER_FIXTURE") else {
-            eprintln!("skipping: INTEROS_BROWSER_FIXTURE is not set");
+            std::eprintln!("skipping: INTEROS_BROWSER_FIXTURE is not set");
             return;
         };
         let Ok(raw) = std::fs::read(&path) else {
