@@ -43,9 +43,9 @@ const CHUNK: usize = 4096;
 /// so the read capability is index 4. The old code passed slot **3**, which is
 /// `HardwarePortIo`, so `sys_fs_list`'s
 /// `verify(3, FileSystemRead, Rights::READ)` failed and every listing was
-/// refused with PermissionDenied before the path was even looked at. Slot 6 is
-/// the framebuffer, which is why `surface_create(6, ...)` always worked while
-/// the listing never did.
+/// refused with PermissionDenied before the path was even looked at. The
+/// framebuffer slot happened to be the one number that was right in every
+/// app, which is exactly the accident the typed lookup exists to remove.
 #[inline]
 fn fs_read_slot() -> Option<usize> {
     std::cap_lookup(std::cap_type::FILE_SYSTEM_READ, 0).ok()
@@ -126,7 +126,7 @@ const READOUT_LINE2_Y0: usize = READOUT_LINE1_Y0 + font::GLYPH_H + 8;
 /// nothing a touch can reach writes to the header - the storage readout is
 /// filled once, before the first present - so a band for it would never run.
 const ROW_BAND_Y0: usize = 150;
-const ROW_BAND_Y1: usize = 800;
+const ROW_BAND_Y1: usize = 530;
 
 /// Ink for an affordance that is painted but has nothing behind it.
 ///
@@ -246,6 +246,39 @@ const PROBE_DEFAULT: [u8; 40] =
     *b"not queried\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
 
 
+/// What the last directory listing actually produced.
+///
+/// WHY this is an enum and not a byte count: "the directory is empty" and
+/// "the device refused to read the directory" are different facts, and the
+/// old screen said "Directory Empty" for both. A user whose files are
+/// behind a refusal was told the directory was empty.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListingState {
+    /// No listing has been attempted yet.
+    NotListed,
+    /// The listing succeeded and the directory holds no entries.
+    Empty,
+    /// The listing succeeded and the directory holds entries.
+    Listed,
+    /// The platform refused the listing.
+    Refused,
+}
+
+/// The directories this app can actually read.
+///
+/// WHY these four and not a category grid: the VFS mounts `/storage` with
+/// `/storage/photos`, `/storage/pictures` and `/storage/videos`, and the
+/// kernel's app path policy allows an app to list `/storage` and its
+/// children. Every other path -- `/data` included -- is refused before the
+/// path is even looked at. The old rows named scopes the platform does not
+/// have ("Cloud", "Documents", "Downloads", "Recent") and all of them
+/// opened `/data`, which the kernel refuses, so each one led to a refusal
+/// dressed up as a category.
+pub const CATEGORY_PATHS: [&str; 4] = ["/storage", "/storage/photos", "/storage/pictures", "/storage/videos"];
+
+/// The label each real directory is shown under.
+pub const CATEGORY_LABELS: [&[u8]; 4] = [b"Storage", b"Photos", b"Pictures", b"Videos"];
+
 pub struct FileManagerApp {
     pub selected_shortcut: usize,
     pub selected_entry: Option<usize>,
@@ -260,6 +293,10 @@ pub struct FileManagerApp {
     /// returns, and only read afterwards.
     pub probe_label: [u8; 40],
     pub probe_label_len: usize,
+    /// What the last listing produced, so the empty state can say which.
+    pub listing_state: ListingState,
+    /// The platform's own status code for a refused listing.
+    pub listing_error: i64,
     pub entries: [RuntimeFileEntry; MAX_PARSED_ENTRIES],
     pub entry_count: usize,
 }
@@ -267,7 +304,12 @@ pub struct FileManagerApp {
 impl FileManagerApp {
     pub const fn new() -> Self {
         let mut path = [0u8; 128];
-        let init = b"/data";
+        // WHY the default path is `/storage`: it is one of the paths the
+        // kernel's app policy lets this app list. The old default was
+        // `/data`, which the policy refuses before the path is examined, so
+        // the app opened on a directory it could never see and reported the
+        // refusal as an empty directory.
+        let init = b"/storage";
         let mut i = 0;
         while i < init.len() {
             path[i] = init[i];
@@ -281,6 +323,8 @@ impl FileManagerApp {
             current_path_len: init.len(),
             probe_label: PROBE_DEFAULT,
             probe_label_len: 10,
+            listing_state: ListingState::NotListed,
+            listing_error: 0,
             entries: [RuntimeFileEntry::EMPTY; MAX_PARSED_ENTRIES],
             entry_count: 0,
         }
@@ -320,14 +364,18 @@ impl FileManagerApp {
     }
 
     pub fn navigate_parent(&mut self) -> bool {
-        if &self.current_path[..self.current_path_len] == b"/data" {
+        if &self.current_path[..self.current_path_len] == b"/storage" {
             return false;
         }
         let slice = &self.current_path[..self.current_path_len];
         let last_slash = slice.iter().rposition(|&b| b == b'/');
         match last_slash {
             Some(0) | None => {
-                let init = b"/data";
+                // WHY the root is the storage root and not the old default:
+                // `/data` is refused by the kernel's app path policy, so
+                // navigating up to it put the app in a directory it cannot
+                // read.
+                let init = b"/storage";
                 self.current_path[..init.len()].copy_from_slice(init);
                 self.current_path_len = init.len();
             }
@@ -351,6 +399,9 @@ impl FileManagerApp {
     /// platform is often "refused", and a screen that only ever prints a byte
     /// count teaches the user nothing. Reporting the kernel's own status code is
     /// the only truthful thing to put there.
+    ///
+    /// WHY the state is recorded as well: the empty card has to be able to say
+    /// "unreadable" instead of "empty" when the listing was refused.
     pub fn record_probe(&mut self, result: Result<usize, i64>) {
         let mut buf = [0u8; 40];
         let n = match result {
@@ -369,6 +420,8 @@ impl FileManagerApp {
                 n
             }
             Err(code) => {
+                self.listing_state = ListingState::Refused;
+                self.listing_error = code;
                 let prefix = b"Refused (-";
                 let p = prefix.len();
                 buf[..p].copy_from_slice(prefix);
@@ -395,6 +448,14 @@ impl FileManagerApp {
         self.record_probe(probe);
         if let Ok(n) = probe {
             self.parse_entries(&entries[..n]);
+            // WHY the state follows the parse: a listing that succeeded with
+            // no entries is empty, and one that succeeded with entries is
+            // listed. Neither is the same fact as a refusal.
+            self.listing_state = if self.entry_count == 0 {
+                ListingState::Empty
+            } else {
+                ListingState::Listed
+            };
         } else {
             self.entry_count = 0;
         }
@@ -512,22 +573,24 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
         return BG_DARK;
     }
 
-    // 2. Vertical Category Rows (y: 150..800)
-    if (150..800).contains(&y) && x >= 36 && x < 684 {
-        let (row_idx, row_start_y, row_h) = if y < 240 {
-            (0, 150, 90)
-        } else if y < 330 {
-            (1, 240, 90)
-        } else if y < 420 {
-            (2, 330, 90)
-        } else if y < 510 {
-            (3, 420, 90)
-        } else if y < 600 {
-            (4, 510, 90)
-        } else if y < 710 {
-            (5, 600, 110)
+    // 2. Vertical Category Rows (y: 150..530)
+    //
+    // WHY four rows and not six: the kernel mounts `/storage` with three
+    // children, and the app path policy lets this app list exactly those.
+    // The old rows named scopes the platform does not have -- a recents
+    // list, documents, downloads and a cloud service -- and every one of
+    // them opened `/data`, which the kernel refuses, so each row led to a
+    // refusal dressed up as a category. The rows are now the four
+    // directories that exist and that this app is allowed to read.
+    if (150..530).contains(&y) && x >= 36 && x < 684 {
+        let (row_idx, row_start_y, row_h) = if y < 260 {
+            (0, 150, 110)
+        } else if y < 350 {
+            (1, 260, 90)
+        } else if y < 440 {
+            (2, 350, 90)
         } else {
-            (6, 710, 90)
+            (3, 440, 90)
         };
 
         // Thin bottom divider line
@@ -538,8 +601,8 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
         // Group container card outer border and rounded corners
         let mut on_card_border = false;
         let rx = (x - 36).min(683 - x);
-        let ry = (y - 150).min(799 - y);
-        if (y < 170 || y >= 780) && rx < 16 && ry < 16 {
+        let ry = (y - 150).min(529 - y);
+        if (y < 170 || y >= 510) && rx < 16 && ry < 16 {
             let cdx = (16 - rx) as isize;
             let cdy = (16 - ry) as isize;
             let d2 = cdx * cdx + cdy * cdy;
@@ -549,7 +612,7 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
             if d2 >= 196 {
                 on_card_border = true;
             }
-        } else if rx < 2 || y < 152 || y >= 798 {
+        } else if rx < 2 || y < 152 || y >= 528 {
             on_card_border = true;
         }
 
@@ -561,12 +624,11 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
         }
         let row_bg = if row_selected { 0xFF17253B } else { SURFACE_DARK };
 
-        let center_y = row_start_y + (if row_idx == 5 { 40 } else { 45 });
+        let center_y = row_start_y + (if row_idx == 0 { 40 } else { 45 });
         let icon_cx = 64i32;
         let icon_cy = center_y as i32;
         let idx = (x as i32) - icon_cx;
         let idy = (y as i32) - icon_cy;
-        let idist2 = idx * idx + idy * idy;
 
         // WHY the line box is centred on `center_y` and not inset from it: the
         // six single-line rows below laid their scale-2 runs out with
@@ -582,65 +644,23 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
         // so the box straddles `center_y` exactly.
         let label_y0 = center_y - std::design::font::line_height(2) / 2;
         // Render Icons
+        //
+        // WHY the labels come from `CATEGORY_LABELS`: the row and the path it
+        // opens are one fact, and a hand-written label beside a hand-written
+        // path is how the two drift apart.
         match row_idx {
             0 => {
-                // Clock icon (Recent)
-                if (idist2 >= 100 && idist2 <= 196) || (idx == 0 && idy >= -10 && idy <= 0) || (idy == 0 && idx >= 0 && idx <= 8) {
-                    return TEXT_PRIMARY;
-                }
-                if let Some(c) = test_text(x, y, 108, label_y0, 2, b"Recent", TEXT_PRIMARY, row_bg) {
-                    return c;
-                }
-            }
-            1 => {
-                // Images icon (Landscape frame)
-                if (idx.abs() <= 14 && idy.abs() <= 10) && (idx.abs() >= 12 || idy.abs() >= 8 || ((idx - 5).abs() <= 2 && (idy + 3).abs() <= 2) || (idy >= 2 && idx.abs() <= (10 - idy))) {
-                    return TEXT_PRIMARY;
-                }
-                if let Some(c) = test_text(x, y, 108, label_y0, 2, b"Images", TEXT_PRIMARY, row_bg) {
-                    return c;
-                }
-            }
-            2 => {
-                // Videos icon (Camcorder)
-                if ((idx >= -14 && idx <= 4 && idy.abs() <= 10) && (idx == -14 || idx == 4 || idy.abs() >= 8)) || (idx >= 6 && idx <= 14 && idy.abs() <= (idx - 5)) {
-                    return TEXT_PRIMARY;
-                }
-                if let Some(c) = test_text(x, y, 108, label_y0, 2, b"Videos", TEXT_PRIMARY, row_bg) {
-                    return c;
-                }
-            }
-            3 => {
-                // Documents icon (Folded sheet)
-                if (idx.abs() <= 10 && idy.abs() <= 14) && (idx.abs() >= 8 || idy == 12 || (idy == -12 && idx <= 2) || (idy == -2 || idy == 3 || idy == 8)) {
-                    return TEXT_PRIMARY;
-                }
-                if let Some(c) = test_text(x, y, 108, label_y0, 2, b"Documents", TEXT_PRIMARY, row_bg) {
-                    return c;
-                }
-            }
-            4 => {
-                // Downloads icon (Down arrow with tray)
-                if (idx == 0 && idy >= -12 && idy <= 4) || (idy >= 0 && idy <= 6 && idx.abs() <= (6 - idy)) || (idy == 10 && idx.abs() <= 12) || (idx.abs() == 12 && idy >= 6 && idy <= 10) {
-                    return TEXT_PRIMARY;
-                }
-                if let Some(c) = test_text(x, y, 108, label_y0, 2, b"Downloads", TEXT_PRIMARY, row_bg) {
-                    return c;
-                }
-            }
-            5 => {
-                // Internal Storage (Drive icon)
+                // Storage (Drive icon)
                 if (idx.abs() <= 14 && idy.abs() <= 10) && (idx.abs() >= 12 || idy.abs() >= 8 || (idy == 2 && idx.abs() <= 10)) {
                     return TEXT_PRIMARY;
                 }
                 // Two-line stack: label (scale 2, 48px tall) above caption
                 // (scale 1, 24px tall). Measured via
-                // std::design::font::measure: "Internal Storage"@2 = 298px,
+                // std::design::font::measure: "Storage"@2 = 130px,
                 // "Storage capacity unavailable"@1 = 267px,
                 // "Capacity detected; usage unavailable"@1 = 348px — all fit
                 // in the 576px budget (x 108..684). y0 delta (56) >=
                 // line_height(2) (48), so the bands never share a pixel.
-                // Old y0s (row_start+24 / +56, delta 32) overlapped by 16px.
                 //
                 // WHY `label_y0` is not rebound here: the row's own `center_y`
                 // is `row_start_y + 40` (this row is the taller of the two
@@ -649,8 +669,7 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                 // it to the same number was redundant; only the caption moves.
                 let caption_y0 =
                     label_y0 + std::design::font::line_height(2) + 8;
-                if let Some(c) =
-                    test_text(x, y, 108, label_y0, 2, b"Internal Storage", TEXT_PRIMARY, row_bg)
+                if let Some(c) = test_text(x, y, 108, label_y0, 2, CATEGORY_LABELS[0], TEXT_PRIMARY, row_bg)
                 {
                     return c;
                 }
@@ -663,20 +682,39 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                     return c;
                 }
 
-                // Tactile capacity track bar (x: 108..640, y: 700..706)
-                if y >= 700 && y < 706 && x >= 108 && x < 640 {
+                // Tactile capacity track bar (x: 108..640, y: 250..256)
+                if y >= 250 && y < 256 && x >= 108 && x < 640 {
                     return BORDER_SUBTLE;
                 }
             }
-            _ => {
-                // Cloud icon
-                if (idy >= 2 && idy <= 8 && idx.abs() <= 14) || ((idx + 6) * (idx + 6) + idy * idy <= 49) || ((idx - 6) * (idx - 6) + (idy + 2) * (idy + 2) <= 36) {
+            1 => {
+                // Photos icon (Landscape frame)
+                if (idx.abs() <= 14 && idy.abs() <= 10) && (idx.abs() >= 12 || idy.abs() >= 8 || ((idx - 5).abs() <= 2 && (idy + 3).abs() <= 2) || (idy >= 2 && idx.abs() <= (10 - idy))) {
                     return TEXT_PRIMARY;
                 }
-                if let Some(c) = test_text(x, y, 108, label_y0, 2, b"Cloud (Optional)", TEXT_PRIMARY, row_bg) {
+                if let Some(c) = test_text(x, y, 108, label_y0, 2, CATEGORY_LABELS[1], TEXT_PRIMARY, row_bg) {
                     return c;
                 }
             }
+            2 => {
+                // Pictures icon (Stack of frames)
+                if (idx.abs() <= 14 && idy.abs() <= 10) && (idx.abs() >= 12 || idy.abs() >= 8) {
+                    return TEXT_PRIMARY;
+                }
+                if let Some(c) = test_text(x, y, 108, label_y0, 2, CATEGORY_LABELS[2], TEXT_PRIMARY, row_bg) {
+                    return c;
+                }
+            }
+            3 => {
+                // Videos icon (Camcorder)
+                if ((idx >= -14 && idx <= 4 && idy.abs() <= 10) && (idx == -14 || idx == 4 || idy.abs() >= 8)) || (idx >= 6 && idx <= 14 && idy.abs() <= (idx - 5)) {
+                    return TEXT_PRIMARY;
+                }
+                if let Some(c) = test_text(x, y, 108, label_y0, 2, CATEGORY_LABELS[3], TEXT_PRIMARY, row_bg) {
+                    return c;
+                }
+            }
+            _ => {}
         }
 
         if on_card_border {
@@ -748,30 +786,53 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                         }
                     }
 
-                    // Headline: "Directory Empty" (scale 2)
-                    let hx = centered_x(b"Directory Empty", 2, 36, 648);
+                    // WHY the headline follows the listing's own state: the
+                    // card used to say "Directory Empty" for a directory the
+                    // device had refused to read, which told the user their
+                    // files were gone when the app had simply been refused.
+                    let (headline, subline, headline_ink): (&[u8], &[u8], u32) =
+                        match app.listing_state {
+                            ListingState::Refused => (
+                                b"Directory Unreadable",
+                                b"The device refused to list this directory",
+                                0xFFF59E0B,
+                            ),
+                            ListingState::NotListed => (
+                                b"Not Listed Yet",
+                                b"This directory has not been listed",
+                                TEXT_MUTED,
+                            ),
+                            _ => (
+                                b"Directory Empty",
+                                b"This directory holds no entries",
+                                TEXT_PRIMARY,
+                            ),
+                        };
+
+                    // Headline
+                    let hx = centered_x(headline, 2, 36, 648);
                     if let Some(c) = test_text(
                         x,
                         y,
                         hx,
                         card_y0 + 130,
                         2,
-                        b"Directory Empty",
-                        TEXT_PRIMARY,
+                        headline,
+                        headline_ink,
                         SURFACE_DARK,
                     ) {
                         return c;
                     }
 
-                    // Subtitle: "Directory empty or unread" (scale 1)
-                    let sx = centered_x(b"Directory empty or unread", 1, 36, 648);
+                    // Subtitle
+                    let sx = centered_x(subline, 1, 36, 648);
                     if let Some(c) = test_text(
                         x,
                         y,
                         sx,
                         card_y0 + 188,
                         1,
-                        b"Directory empty or unread",
+                        subline,
                         TEXT_MUTED,
                         SURFACE_DARK,
                     ) {
@@ -950,7 +1011,14 @@ enum Tap {
 
 fn exit_to_launcher(surface: u32) -> ! {
     if surface > 0 {
-        let _ = std::surface_destroy(6, surface);
+        // WHY the slot is resolved by type: a slot number is a position in
+        // the capability table, and the position depends on the order the
+        // kernel inserted this app's capabilities in. The old code passed the
+        // literal 6, which happens to be the framebuffer in this app's
+        // table today and is not guaranteed to be tomorrow.
+        if let Some(fb_slot) = std::cap::framebuffer_slot() {
+            let _ = std::surface_destroy(fb_slot, surface);
+        }
     }
     std::exit_with_code(0);
 }
@@ -1131,20 +1199,14 @@ fn handle_tap(app: &mut FileManagerApp, x: usize, y: usize) -> Tap {
     // only inside the row that was really tapped, and the renderer highlights
     // the selected row.
     if (ROW_BAND_Y0..ROW_BAND_Y1).contains(&y) && (36..684).contains(&x) {
-        let shortcut = if y < 240 {
-            0 // Recent
-        } else if y < 330 {
-            1 // Images
-        } else if y < 420 {
-            2 // Videos
-        } else if y < 510 {
-            3 // Documents
-        } else if y < 600 {
-            4 // Downloads
-        } else if y < 710 {
-            5 // Internal Storage
+        let shortcut = if y < 260 {
+            0 // Storage
+        } else if y < 350 {
+            1 // Photos
+        } else if y < 440 {
+            2 // Pictures
         } else {
-            6 // Cloud
+            3 // Videos
         };
         // WHY no redraw when the tap lands on the row that is already selected:
         // the fill, the accent bar and the caption are all functions of
@@ -1155,15 +1217,7 @@ fn handle_tap(app: &mut FileManagerApp, x: usize, y: usize) -> Tap {
         }
         app.selected_shortcut = shortcut;
         app.selected_entry = None;
-        let new_path = match shortcut {
-            1 => "/storage/photos",
-            2 => "/storage/videos",
-            3 => "/data",
-            4 => "/data",
-            5 => "/storage",
-            _ => "/data",
-        };
-        app.set_path(new_path);
+        app.set_path(CATEGORY_PATHS[shortcut]);
         app.refresh_directory();
         std::log(0, "[FILE_MANAGER] Category filter shortcut switched.").ok();
         return Tap::Redraw(Dirty::All);
@@ -1200,8 +1254,23 @@ fn handle_tap(app: &mut FileManagerApp, x: usize, y: usize) -> Tap {
                         let mut app_id_buf = [0u8; 64];
                         let an = get_app_for_mime(read_slot, mime, &mut app_id_buf);
                         if let Ok(app_id) = core::str::from_utf8(&app_id_buf[..an]) {
-                            std::log(0, "[FILE_MANAGER] Launching associated media viewer.").ok();
-                            let _ = std::app_launch(app_id);
+                            // WHY the launch result is reported: the old
+                            // code announced the launch before making it and
+                            // threw the answer away, so a refused launch was
+                            // logged as a launch that had happened.
+                            match std::app_launch(app_id) {
+                                Ok(_) => {
+                                    std::log(0, "[FILE_MANAGER] Launched the associated media viewer.").ok();
+                                }
+                                Err(code) => {
+                                    std::log(
+                                        0,
+                                        "[FILE_MANAGER] The associated media viewer could not be launched.",
+                                    )
+                                    .ok();
+                                    let _ = code;
+                                }
+                            }
                         }
                     }
                 }
