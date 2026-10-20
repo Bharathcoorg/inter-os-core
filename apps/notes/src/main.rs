@@ -11,7 +11,9 @@
 //! - Distraction-free full-page reading mode with bottom-docked virtual keyboard
 //! - Floating accessory strip with `☑` To-Do, `•` Bullet, `🎨` Palette, `🏷` Category, and `▼` Dismiss
 //! - Sleek 2026 vector iconography (no Windows 95 button widgets)
-//! - Sovereign local storage persistence (`/data/notes.bin`) with Fletcher-32 integrity
+//! - Sovereign local storage persistence in the app's own sandbox
+//!   (`data/notes.bin`, relative to `/user/<uid>/apps/org.interos.notes`)
+//!   with Fletcher-32 integrity, a staged copy and a quarantine path
 //! - Graceful lifecycle supervision and clean return to Launcher
 
 #![no_std]
@@ -19,9 +21,11 @@
 
 use core::panic::PanicInfo;
 use interos_std as std;
+use interos_std::design::outline_text;
 pub use notes::{
-    format_timestamp, LineSpan, Note, NoteColorTheme, NotesStore, TextEditorBuffer, CATEGORY_NAMES,
-    CivilTime, KEEP_COLORS, MAX_BODY_LEN, MAX_NOTES, MAX_TITLE_LEN, TIMESTAMP_UNKNOWN,
+    format_count_badge, format_timestamp, LineSpan, Note, NoteColorTheme, NotesStore,
+    TextEditorBuffer, CATEGORY_NAMES, CivilTime, KEEP_COLORS, MAX_BODY_LEN, MAX_NOTES, MAX_TITLE_LEN,
+    StorageState, TIMESTAMP_UNKNOWN,
 };
 
 const W: usize = 720;
@@ -52,6 +56,12 @@ pub enum EditorFocus {
     Body,
 }
 
+/// What the app knows about the note store on the device.
+///
+/// The type lives in the library so that the classification is covered by the
+/// library's unit tests; the screen copy that goes with each state lives in
+/// the renderer.
+
 pub struct AppState {
     pub store: NotesStore,
     pub view: ViewMode,
@@ -62,7 +72,15 @@ pub struct AppState {
     pub cursor_pos: (usize, usize),
     pub line_spans: [LineSpan; 32],
     pub line_spans_count: usize,
-    pub storage_online: bool,
+    /// What the last load found, and what the last save managed.
+    pub storage: StorageState,
+    /// Set when a save was attempted and did not reach the device.
+    ///
+    /// WHY this is separate from `storage`: a refused *read* and a failed
+    /// *write* are different failures, and the editor's "Saved" label has to
+    /// distinguish them. The old code discarded the result of every save,
+    /// so a note could be lost while the header still read "Saved".
+    pub save_failed: bool,
     pub scroll_offset_y: i32,
     pub selected_category: u8, // 0: All, 1: Work, 2: Personal, 3: Ideas, 4: System, 5: Pinned
     pub search_active: bool,
@@ -82,6 +100,21 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Writes the store to the device and records whether it landed.
+    ///
+    /// WHY the result is kept: the old code discarded the return value of
+    /// every save, so a note that never reached the device still read
+    /// "Saved" in the editor header. The header now says "Not saved" when
+    /// the write did not land.
+    pub fn save_to_storage(&mut self) -> bool {
+        let ok = save_notes_to_storage(&mut self.store);
+        self.save_failed = !ok;
+        if ok {
+            self.storage = StorageState::Ready;
+        }
+        ok
+    }
+
     pub fn update_editor_layout(&mut self) {
         self.line_spans_count = self.editor_buf.compute_lines(CHARS_PER_LINE, &mut self.line_spans);
         self.cursor_pos = self.editor_buf.cursor_line_col(CHARS_PER_LINE);
@@ -156,6 +189,19 @@ impl AppState {
 
 static mut CHUNK_BUF: [u32; CHUNK] = [0; CHUNK];
 
+/// Draws a run of text with the sharp outline face, falling back to the
+/// bitmap face when the outline face refuses the run.
+///
+/// WHY the outline face is tried first: the panel is 1080x2160 and this app
+/// paints at 720x1440, so the compositor magnifies a bitmap run 3:2 and the
+/// glyph edges read as soft. The outline face rasterises the real outline
+/// and reads as sharp at the panel's own resolution.
+///
+/// WHY the box test comes first: the run's own arguments decide which face
+/// is used, so the pixel under the cursor never gets to choose. The box is
+/// the union of the two faces' boxes -- the outline face's box sits one or
+/// two rows inside the bitmap cell's, and a bitmap fallback that lost its
+/// top row would draw a clipped glyph.
 #[inline(always)]
 fn test_text(
     x: usize,
@@ -168,6 +214,23 @@ fn test_text(
     bg: u32,
     bold: bool,
 ) -> Option<u32> {
+    if scale == 0 || text.is_empty() {
+        return None;
+    }
+    let (bx, bt, bw, bh) = outline_text::run_box(x0, y0, scale, text);
+    let bitmap_h = std::design::font::GLYPH_H * scale;
+    let bitmap_w = std::design::font::measure(text, scale);
+    let top = bt.min(y0);
+    let height = bh.max(bitmap_h);
+    // A bold outline run is one pixel wider than the run the box was measured
+    // from, so the box has to carry that pixel or the last glyph is cut.
+    let width = bw.max(bitmap_w) + if bold { 1 } else { 0 };
+    if x < bx || x - bx >= width || y < top || y - top >= height {
+        return None;
+    }
+    if let Some(run) = outline_text::place_run(x0, y0, scale, text, None, bold) {
+        return run.pixel(x, y, color, bg);
+    }
     std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, bg, bold)
 }
 
@@ -214,8 +277,12 @@ fn current_civil_time() -> Option<CivilTime> {
     let year = json_field(payload, b"\"year\":")?;
     let month = json_field(payload, b"\"month\":")?;
     let day = json_field(payload, b"\"day\":")?;
-    let hour = json_field(payload, b"\"hour\":").unwrap_or(0);
-    let minute = json_field(payload, b"\"minute\":").unwrap_or(0);
+    // WHY the hour and the minute are required and not defaulted: a payload
+    // that carried a date but no time would otherwise be stamped as
+    // midnight, and midnight is a time the clock never reported. The note
+    // carries no timestamp instead.
+    let hour = json_field(payload, b"\"hour\":")?;
+    let minute = json_field(payload, b"\"minute\":")?;
 
     if !(1970..=9999).contains(&year)
         || !(1..=12).contains(&month)
@@ -784,9 +851,15 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
                 }
             } else {
                 let count = state.store.count();
-                let mut badge = *b"[0]";
-                badge[1] = b'0' + (count.min(9) as u8);
-                if let Some(c) = test_text(x, y, 646, 42, 1, &badge, ACCENT_CYAN, SURFACE_BAR, true) {
+                let mut badge = [0u8; 8];
+                let n = format_count_badge(count, &mut badge);
+                // WHY the count is written out in full: the store holds up to
+                // MAX_NOTES notes, and the old badge collapsed the count to a
+                // single digit, so a device with twelve notes reported nine.
+                let w = outline_text::drawn_advance(&badge[..n], 1, None)
+                    .unwrap_or_else(|| std::design::font::measure(&badge[..n], 1));
+                let bx = 682usize.saturating_sub(w);
+                if let Some(c) = test_text(x, y, bx, 42, 1, &badge[..n], ACCENT_CYAN, SURFACE_BAR, true) {
                     return c;
                 }
             }
@@ -898,15 +971,36 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
                 if !in_rounded_rect(x, y, 62, 442, 596, 236, 22) {
                     return BORDER_BAR;
                 }
-                let title = if state.search_len > 0 {
-                    b"No matching notes" as &[u8]
+                // WHY the state is read here and not assumed: an empty list
+                // and an unreadable store look the same on the screen unless
+                // the app says which one it is. The old code drew "No Notes
+                // Saved Yet" for a store it had failed to read, which told
+                // the user their notes were gone.
+                let (title, subtitle): (&[u8], &[u8]) = if state.search_len > 0 {
+                    (b"No matching notes", b"Clear the search to see the rest of your notes")
                 } else {
-                    b"No Notes Saved Yet" as &[u8]
+                    match state.storage {
+                        StorageState::Ready | StorageState::Empty => (
+                            b"No Notes Saved Yet",
+                            b"Tap '+ Take a note...' below to capture ideas",
+                        ),
+                        StorageState::Recovered => (
+                            b"Recovered From A Partial Write",
+                            b"The staged copy was restored; the previous write did not finish",
+                        ),
+                        StorageState::Refused => (
+                            b"Storage Unavailable",
+                            b"The device refused to read the note store; notes cannot be saved",
+                        ),
+                        StorageState::Corrupt => (
+                            b"Store Failed Validation",
+                            b"The stored notes did not validate and were moved aside",
+                        ),
+                    }
                 };
                 if let Some(c) = test_text(x, y, 220, 500, 2, title, TEXT_WHITE, SURFACE_BAR, true) {
                     return c;
                 }
-                let subtitle = b"Tap '+ Take a note...' below to capture ideas";
                 if let Some(c) = test_text(x, y, 160, 560, 1, subtitle, TEXT_MUTED, SURFACE_BAR, false) {
                     return c;
                 }
@@ -1056,9 +1150,20 @@ fn render_note_editor(x: usize, y: usize, state: &AppState) -> u32 {
             return theme.chip_bg;
         }
 
-        // Status metadata: "Saved" or "Editing..."
-        let status_text = if note.is_dirty { b"Editing..." as &[u8] } else { b"Saved" as &[u8] };
-        if let Some(c) = test_text(x, y, 96, 38, 1, status_text, theme.text_muted, theme.bg, false) {
+        // Status metadata: "Saved", "Editing..." or "Not saved"
+        // WHY three states: the old code derived "Saved" from the note's own
+        // dirty flag, which the store cleared only after a successful write --
+        // and every write silently failed, so a note that had never reached
+        // the device still read "Saved".
+        let status_text: &[u8] = if state.save_failed {
+            b"Not saved"
+        } else if note.is_dirty {
+            b"Editing..."
+        } else {
+            b"Saved"
+        };
+        let status_color = if state.save_failed { DANGER_RED } else { theme.text_muted };
+        if let Some(c) = test_text(x, y, 96, 38, 1, status_text, status_color, theme.bg, false) {
             return c;
         }
 
@@ -1729,7 +1834,7 @@ fn handle_tap(state: &mut AppState, ux: usize, uy: usize) -> TapAction {
             // Top Bar: Back Chevron at (50, 46, r=24)
             if in_circle(ux, uy, 50, 46, 24) {
                 state.sync_editor_to_note();
-                save_notes_to_storage(&mut state.store);
+                state.save_to_storage();
                 state.view = ViewMode::List;
                 state.keyboard_visible = false;
                 state.swatch_picker_open = false;
@@ -1753,7 +1858,7 @@ fn handle_tap(state: &mut AppState, ux: usize, uy: usize) -> TapAction {
             // Top Bar: Trash / Delete at (640, 46, r=22)
             if in_circle(ux, uy, 640, 46, 22) {
                 state.store.delete_note(state.selected_note_id);
-                save_notes_to_storage(&mut state.store);
+                state.save_to_storage();
                 state.view = ViewMode::List;
                 state.keyboard_visible = false;
                 state.swatch_picker_open = false;
@@ -1868,7 +1973,7 @@ fn handle_tap(state: &mut AppState, ux: usize, uy: usize) -> TapAction {
                     // Delete button
                     if in_circle(ux, uy, 630, 1358, 24) {
                         state.store.delete_note(state.selected_note_id);
-                        save_notes_to_storage(&mut state.store);
+                        state.save_to_storage();
                         state.view = ViewMode::List;
                         return TapAction::Redraw;
                     }
@@ -1924,80 +2029,219 @@ fn handle_tap(state: &mut AppState, ux: usize, uy: usize) -> TapAction {
 // VFS Persistence Operations
 // -----------------------------------------------------------------------------
 
-const STORAGE_PATH: &str = "/data/notes.bin";
+/// The live note store, inside this app's own sandbox.
+///
+/// WHY the path is relative and not absolute: `app_storage_open` resolves a
+/// relative path inside the calling app's sandbox root
+/// (`/user/<uid>/apps/org.interos.notes`) and the kernel rejects an absolute
+/// path with `InvalidArguments`. The old constant was an absolute path
+/// under the device's `/data`, so the open always failed and every note the
+/// user wrote was lost when the app exited.
+const STORAGE_PATH: &str = "data/notes.bin";
 
-fn load_notes_from_storage(store: &mut NotesStore) -> bool {
-    let cap_slot = match std::cap_lookup(2, 0) {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
+/// The staged copy, written before the live store is replaced.
+///
+/// WHY a staging copy exists: the platform exposes no atomic rename, so a
+/// write that is interrupted by a power loss can leave the live store
+/// truncated. Writing the new blob to a staging file first means the last
+/// known-good copy survives, and the loader can restore it. The Fletcher-32
+/// checksum on the blob is what tells the loader which copy is the good one.
+const STAGING_PATH: &str = "data/notes.staged";
 
-    let fd = match std::app_storage_open(cap_slot, STORAGE_PATH, 1) {
-        Ok(fd) => fd,
-        Err(_) => return false,
-    };
+/// Where a store that failed validation is kept.
+///
+/// WHY the bytes are kept and not deleted: a store that does not validate is
+/// either a partial write or a file from a future version, and in both cases
+/// the user may still want what is in it. The bytes are copied here before
+/// the live store is reinitialised.
+const QUARANTINE_PATH: &str = "data/notes.corrupt";
 
-    let mut buf = [0u8; 8192];
-    let nread = match std::fs_read(cap_slot, fd, &mut buf) {
+/// The largest store blob the app reads or writes.
+///
+/// WHY this bound: the store holds at most `MAX_NOTES` notes, and the
+/// serialised form of one note is bounded by the title and body limits, so
+/// 8 KiB is comfortably above the largest store the app can produce and
+/// below the app's stack budget.
+const STORE_BLOB_MAX: usize = 8192;
+
+/// Reads a file from the app's sandbox into `buf`.
+///
+/// Returns the number of bytes read. `Err` carries the platform's own
+/// refusal code: `-8` is `FileNotFound`, which is how the app tells "there
+/// is no store yet" from "the platform would not read it".
+fn read_sandbox_file(cap_slot: usize, path: &str, buf: &mut [u8]) -> Result<usize, i64> {
+    let fd = std::app_storage_open(cap_slot, path, std::FS_READ)?;
+    let n = match std::fs_read(cap_slot, fd, buf) {
         Ok(n) => n,
-        Err(_) => {
+        Err(e) => {
             let _ = std::fs_close(fd);
-            return false;
+            return Err(e);
         }
     };
     let _ = std::fs_close(fd);
+    Ok(n)
+}
 
-    if nread > 0 {
-        match store.deserialize(&buf[..nread]) {
-            Ok(()) => true,
-            Err(_) => false,
+/// Writes a file into the app's sandbox and flushes it to the device.
+fn write_sandbox_file(cap_slot: usize, path: &str, bytes: &[u8]) -> Result<usize, i64> {
+    let fd = std::app_storage_open(cap_slot, path, std::FS_WRITE)?;
+    let n = match std::fs_write(cap_slot, fd, bytes) {
+        Ok(n) => n,
+        Err(e) => {
+            let _ = std::fs_close(fd);
+            return Err(e);
         }
-    } else {
-        false
+    };
+    // WHY the flush: the write is only durable once the platform has
+    // flushed it, and the whole point of the staging copy is to survive a
+    // power loss.
+    let _ = std::fs_fsync(fd);
+    let _ = std::fs_close(fd);
+    Ok(n)
+}
+
+/// Loads the note store and reports what the device actually held.
+///
+/// WHY the return type carries the distinction: an empty list and an
+/// unreadable list look identical until the app says which one it is, and
+/// the old code reported both as "no notes saved".
+fn load_notes_from_storage(store: &mut NotesStore) -> StorageState {
+    let read_cap = match std::cap_lookup(std::cap_type::FILE_SYSTEM_READ, 0) {
+        Ok(c) => c,
+        Err(_) => return StorageState::Refused,
+    };
+
+    let mut buf = [0u8; STORE_BLOB_MAX];
+    let live = read_sandbox_file(read_cap, STORAGE_PATH, &mut buf);
+
+    let live_bytes: &[u8] = match live {
+        Ok(n) => &buf[..n],
+        Err(-8) => {
+            // There is no live store. A staged copy is still worth trying,
+            // because that is exactly the state a power loss during a save
+            // leaves behind.
+            let mut staged = [0u8; STORE_BLOB_MAX];
+            match read_sandbox_file(read_cap, STAGING_PATH, &mut staged) {
+                Ok(n) if n > 0 => {
+                    if store.deserialize(&staged[..n]).is_ok() {
+                        restore_live_store(store);
+                        return StorageState::Recovered;
+                    }
+                    quarantine_failed_store(read_cap, &staged[..n]);
+                    return StorageState::Corrupt;
+                }
+                _ => return StorageState::Empty,
+            }
+        }
+        Err(_) => return StorageState::Refused,
+    };
+
+    if live_bytes.is_empty() {
+        return StorageState::Empty;
+    }
+    if store.deserialize(live_bytes).is_ok() {
+        return StorageState::Ready;
+    }
+
+    // The live store did not validate. Try the staged copy before giving up
+    // on the user's notes.
+    let mut staged = [0u8; STORE_BLOB_MAX];
+    match read_sandbox_file(read_cap, STAGING_PATH, &mut staged) {
+        Ok(n) if n > 0 && store.deserialize(&staged[..n]).is_ok() => {
+            restore_live_store(store);
+            StorageState::Recovered
+        }
+        _ => {
+            quarantine_failed_store(read_cap, live_bytes);
+            store.new_empty();
+            StorageState::Corrupt
+        }
     }
 }
 
+/// Copies the current store into the live path from the staging copy.
+///
+/// WHY this is a copy and not a rename: the platform has no rename syscall.
+/// The staging copy is the known-good blob, so it is written over the live
+/// path and the result is checked.
+fn restore_live_store(store: &NotesStore) {
+    let write_cap = match std::cap_lookup(std::cap_type::FILE_SYSTEM_WRITE, 0) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let mut buf = [0u8; STORE_BLOB_MAX];
+    let n = match store.serialize(&mut buf) {
+        Ok(n) => n,
+        Err(_) => return,
+    };
+    let _ = write_sandbox_file(write_cap, STORAGE_PATH, &buf[..n]);
+}
+
+/// Keeps a store that failed validation instead of destroying it.
+///
+/// WHY the bytes are copied before the live store is reset: a store that
+/// does not validate is either a partial write or a file this version does
+/// not understand, and in both cases the user may still want what is in
+/// it. The copy is best effort -- if the platform refuses the write, the
+/// bytes are still in the live path and the app says the store is corrupt.
+fn quarantine_failed_store(cap_slot: usize, bytes: &[u8]) {
+    let _ = write_sandbox_file(cap_slot, QUARANTINE_PATH, bytes);
+}
+
+/// Writes the store to the device.
+///
+/// WHY the staging copy comes first: the platform has no atomic rename, so
+/// the sequence is "stage, flush, replace, flush, read back". A power loss
+/// during the replace leaves the staging copy holding the last known-good
+/// blob, and the loader restores it. The read-back is what turns "the write
+/// was accepted" into "the write landed".
 fn save_notes_to_storage(store: &mut NotesStore) -> bool {
-    let cap_slot = match std::cap_lookup(2, 0) {
+    let write_cap = match std::cap_lookup(std::cap_type::FILE_SYSTEM_WRITE, 0) {
         Ok(c) => c,
         Err(_) => return false,
     };
 
-    let fd = match std::app_storage_open(cap_slot, STORAGE_PATH, 2 | 4) {
-        Ok(fd) => fd,
+    let mut buf = [0u8; STORE_BLOB_MAX];
+    let nbytes = match store.serialize(&mut buf) {
+        Ok(n) => n,
         Err(_) => return false,
     };
 
-    let mut buf = [0u8; 8192];
-    let nbytes = match store.serialize(&mut buf) {
-        Ok(n) => n,
-        Err(_) => {
-            let _ = std::fs_close(fd);
-            return false;
-        }
-    };
-
-    let written = match std::fs_write(cap_slot, fd, &buf[..nbytes]) {
-        Ok(n) => n,
-        Err(_) => {
-            let _ = std::fs_close(fd);
-            return false;
-        }
-    };
-
-    let _ = std::fs_fsync(fd);
-    let _ = std::fs_close(fd);
-
-    if written == nbytes {
-        for i in 0..store.count() {
-            if let Some(n) = store.get_by_index_mut(i) {
-                n.is_dirty = false;
-            }
-        }
-        true
-    } else {
-        false
+    // Stage first.
+    if write_sandbox_file(write_cap, STAGING_PATH, &buf[..nbytes]).is_err() {
+        return false;
     }
+    // Replace the live store.
+    match write_sandbox_file(write_cap, STORAGE_PATH, &buf[..nbytes]) {
+        Ok(n) if n == nbytes => {}
+        _ => return false,
+    }
+
+    // Read the live store back and validate it. Only a store that reads back
+    // and validates counts as saved.
+    let read_cap = match std::cap_lookup(std::cap_type::FILE_SYSTEM_READ, 0) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let mut check = [0u8; STORE_BLOB_MAX];
+    let n = match read_sandbox_file(read_cap, STORAGE_PATH, &mut check) {
+        Ok(n) => n,
+        Err(_) => return false,
+    };
+    if n != nbytes {
+        return false;
+    }
+    let mut verify = NotesStore::new();
+    if verify.deserialize(&check[..n]).is_err() {
+        return false;
+    }
+
+    for i in 0..store.count() {
+        if let Some(note) = store.get_by_index_mut(i) {
+            note.is_dirty = false;
+        }
+    }
+    true
 }
 
 // -----------------------------------------------------------------------------
@@ -2006,9 +2250,18 @@ fn save_notes_to_storage(store: &mut NotesStore) -> bool {
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    let fb_cap = match std::cap_lookup(0, 0) {
+    // WHY the lookup is by type: the old code asked for capability `0`, which
+    // is not a capability type at all, so the lookup always failed and the app
+    // fell back to the literal slot 6. Slot 6 is the IPC receive capability
+    // in this app's table; the display capability is a different slot, and
+    // the app only ever drew because the kernel searched for one on its
+    // behalf.
+    let fb_cap = match std::cap_lookup(std::cap_type::FRAMEBUFFER_DIRECT, 0) {
         Ok(cap) => cap,
-        Err(_) => 6,
+        Err(_) => {
+            std::log(0, "[NOTES] No framebuffer capability; refusing to draw.").ok();
+            std::exit_with_code(1);
+        }
     };
 
     let surface = match std::surface_create(fb_cap, W as u32, H as u32, 200) {
@@ -2026,7 +2279,8 @@ pub extern "C" fn _start() -> ! {
         cursor_pos: (0, 0),
         line_spans: [LineSpan { start: 0, end: 0 }; 32],
         line_spans_count: 0,
-        storage_online: false,
+        storage: StorageState::Empty,
+        save_failed: false,
         scroll_offset_y: 0,
         selected_category: 0,
         search_active: false,
@@ -2047,13 +2301,18 @@ pub extern "C" fn _start() -> ! {
     // wrote. When the store cannot be read the list is simply empty, and the
     // UI already says "No Notes Saved Yet".
     let loaded = load_notes_from_storage(&mut state.store);
-    if !loaded {
+    if matches!(
+        loaded,
+        StorageState::Refused | StorageState::Corrupt | StorageState::Empty
+    ) {
         state.store.new_empty();
     }
-    // WHY this is the read's own result and not a constant: "storage is
-    // online" is a claim about the device, and the read is the only thing
-    // that can support it.
-    state.storage_online = loaded;
+    // WHY this is the read's own result and not a constant: what the store
+    // holds is a fact about the device, and the read is the only thing that
+    // can support it. The old code kept the result in a flag that no
+    // renderer ever read, so a refused or corrupt store was displayed as an
+    // empty list.
+    state.storage = loaded;
     state.now_civil = current_civil_time();
 
     // Initial frame presentation
@@ -2094,7 +2353,7 @@ pub extern "C" fn _start() -> ! {
                                 needs_redraw = true;
                             } else if state.view == ViewMode::Editor {
                                 state.sync_editor_to_note();
-                                save_notes_to_storage(&mut state.store);
+                                state.save_to_storage();
                                 state.view = ViewMode::List;
                                 needs_redraw = true;
                             } else {

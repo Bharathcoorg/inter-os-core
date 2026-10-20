@@ -33,6 +33,34 @@ pub const MAGIC_HEADER: [u8; 6] = *b"NOTE\x03\x00";
 /// The oldest on-disk version this reader accepts.
 pub const LEGACY_MAGIC_HEADER: [u8; 6] = *b"NOTE\x02\x00";
 
+/// What the app knows about the note store on the device.
+///
+/// WHY this is an enum and not a bool: "the platform refused to read the
+/// store", "the store is corrupt" and "the store is empty" are three
+/// different facts. A single flag made all three look like an empty list,
+/// which told the user their notes were gone when the app had merely failed
+/// to read them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StorageState {
+    /// The store was read and every note in it validated.
+    Ready,
+    /// There is no store on the device yet.
+    Empty,
+    /// The platform refused to read the store.
+    Refused,
+    /// The store was read and failed its checksum or its structure.
+    Corrupt,
+    /// A staged copy was restored after the live store failed to validate.
+    Recovered,
+}
+
+impl StorageState {
+    /// Whether a write to the store can be expected to land.
+    pub fn writable(self) -> bool {
+        !matches!(self, StorageState::Refused)
+    }
+}
+
 // =============================================================================
 // Google Keep-Style Color Palettes & Categories
 // =============================================================================
@@ -361,6 +389,26 @@ pub fn format_timestamp(
     let take = year_len.min(buf.len().saturating_sub(n));
     buf[n..n + take].copy_from_slice(&year_buf[..take]);
     n + take
+}
+
+/// Formats the note-count badge as `[N]` and returns its length.
+///
+/// WHY the count is written out in full: the store holds up to `MAX_NOTES`
+/// notes, and the badge used to be built as `b'0' + count.min(9)`, so a
+/// device holding twelve notes reported nine. A count is a measurement and
+/// has to survive the second digit.
+pub fn format_count_badge(count: usize, buf: &mut [u8]) -> usize {
+    if buf.is_empty() {
+        return 0;
+    }
+    buf[0] = b'[';
+    let mut n = 1;
+    n += decimal_u16(count as u32, &mut buf[n..]);
+    if n < buf.len() {
+        buf[n] = b']';
+        n += 1;
+    }
+    n
 }
 
 /// Writes the decimal form of `value` into `buf` and returns its length.
@@ -1177,6 +1225,48 @@ pub fn fletcher32(data: &[u8]) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_the_count_badge_carries_every_digit() {
+        // WHY this test exists: the badge used to be `b'0' + count.min(9)`,
+        // so a device holding twelve notes reported nine. A count is a
+        // measurement and it has to survive the second digit.
+        let mut buf = [0u8; 8];
+        let n = format_count_badge(0, &mut buf);
+        assert_eq!(&buf[..n], b"[0]");
+        let n = format_count_badge(9, &mut buf);
+        assert_eq!(&buf[..n], b"[9]");
+        let n = format_count_badge(10, &mut buf);
+        assert_eq!(&buf[..n], b"[10]");
+        let n = format_count_badge(12, &mut buf);
+        assert_eq!(&buf[..n], b"[12]");
+        let n = format_count_badge(16, &mut buf);
+        assert_eq!(&buf[..n], b"[16]");
+    }
+
+    #[test]
+    fn test_the_count_badge_stays_inside_its_buffer() {
+        let mut buf = [0u8; 3];
+        // Three bytes hold "[9]" and nothing more; a wider count must not
+        // write past the end of the buffer.
+        let n = format_count_badge(16, &mut buf);
+        assert!(n <= buf.len());
+    }
+
+    #[test]
+    fn test_the_storage_states_are_distinguishable() {
+        // WHY this test exists: a single boolean collapsed "refused",
+        // "corrupt" and "empty" into one outcome, and the list then told the
+        // user their notes were gone when the app had only failed to read
+        // them.
+        assert_ne!(StorageState::Ready, StorageState::Empty);
+        assert_ne!(StorageState::Refused, StorageState::Corrupt);
+        assert_ne!(StorageState::Recovered, StorageState::Corrupt);
+        assert!(StorageState::Ready.writable());
+        assert!(StorageState::Empty.writable());
+        assert!(StorageState::Corrupt.writable());
+        assert!(!StorageState::Refused.writable());
+    }
 
     #[test]
     fn test_note_creation_and_fields() {

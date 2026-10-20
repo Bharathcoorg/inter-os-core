@@ -3,15 +3,18 @@
   "name": "Notes",
   "version": "1.0.0",
   "category": "personal",
-  "description": "Sovereign native notepad with persistent local storage",
+  "description": "Sovereign native notepad with persistent local storage and clock-derived timestamps.",
   "icon": "NOTE",
   "entrypoint": {
     "backend": "bin/notes.elf"
   },
   "permissions": [
+    "CAP_LOGGING",
+    "CAP_FRAMEBUFFER",
     "CAP_EVENT_POLL",
-    "CAP_FILE_SYSTEM_READ",
-    "CAP_FILE_SYSTEM_WRITE"
+    "CAP_FILESYSTEM_READ",
+    "CAP_FILESYSTEM_WRITE",
+    "CAP_REALTIME_CLOCK"
   ],
   "min_sdk_version": "0.8.0"
 }
