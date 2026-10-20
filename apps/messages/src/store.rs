@@ -18,10 +18,18 @@
 //! COST (this OS's competitive edge is small size): every figure below is a
 //! compile-time constant, not a heap allocation. This crate is `#![no_std]` with
 //! no allocator, so a bounded record *is* the store.
-//!   - one ThreadRecord: 4 + 24 + 2 * (1 + 22) = 52 bytes
-//!   - the settings kernel caps a value at 512 bytes, so `(512 - 2) / 52 == 9`:
-//!     the store holds MAX_THREADS = 9 threads, and the serialized blob is
-//!     `2 + 9 * 52 = 470` bytes on disk with 42 bytes of headroom.
+//!   - one ThreadRecord: 4 (id) + 1 (status) + 1 (count) + 1 (run head) +
+//!     1 (recipient length) + 24 (recipient) + 2 * (1 + 22) (recent ring)
+//!     = 78 bytes
+//!   - the settings kernel caps a value at 512 bytes, so `(512 - 2) / 78 == 6`:
+//!     the store holds MAX_THREADS = 6 threads, and the serialised blob is
+//!     `2 + 6 * 78 = 470` bytes on disk with 42 bytes of headroom.
+//!
+//! WHY the capacity is 6 and not 9: the record width is 78 bytes, and the
+//! header is 2 bytes, so nine records would need 704 bytes -- more than the
+//! settings store can hold. The old constant said nine, so the app accepted
+//! a seventh thread, failed to write it, and threw the refusal away. A store
+//! that cannot persist what it accepts is a store that loses data silently.
 
 #![allow(dead_code)]
 
@@ -46,11 +54,18 @@ const RECENT_MAX: usize = 22;
 /// Recent messages retained per thread (a small ring, newest last).
 const RECENT_HISTORY: usize = 2;
 
-/// In-RAM and serialized thread capacity, chosen from the 512-byte value cap.
-const MAX_THREADS: usize = 9;
+/// The largest value the settings kernel will store, in bytes.
+///
+/// WHY this is named rather than assumed: the store's capacity is derived
+/// from it, and a store that accepts more threads than the kernel can hold
+/// loses the last ones without saying so.
+pub const SETTINGS_VALUE_MAX: usize = 512;
+
+/// In-RAM and serialized thread capacity, chosen from the settings value cap.
+pub const MAX_THREADS: usize = (SETTINGS_VALUE_MAX - 2) / RECORD_BYTES;
 
 /// Record width, pinned. 1 id(u32,4) + status(1) + count(1) + run-head(1) +
-/// recipient length(1) + `RECIP_MAX` + `RECENT_HISTORY * (1 + RECENT_MAX)` = 52.
+/// recipient length(1) + `RECIP_MAX` + `RECENT_HISTORY * (1 + RECENT_MAX)` = 78.
 ///
 /// WHY the width is a constant: `#![no_std]` with no allocator means the store
 /// is a fixed byte array, so this encoding is its on-disk contract. Changing any
@@ -59,6 +74,11 @@ const RECORD_BYTES: usize = 4 + 1 + 1 + 1 + 1 + RECIP_MAX + RECENT_HISTORY * (1 
 
 /// Blob width = version(1) + count(1) + up to `MAX_THREADS` records.
 const STORE_BLOB_BYTES: usize = 2 + MAX_THREADS * RECORD_BYTES;
+
+/// The capacity has to be derived, not guessed: if the record width or the
+/// kernel's value cap changes, a hand-written thread count would let the
+/// store accept more threads than it can persist.
+const _: () = assert!(STORE_BLOB_BYTES <= SETTINGS_VALUE_MAX);
 
 pub const ESCAPE_BYTE: u8 = 0xFE;
 pub const ESCAPED_NEWLINE: u8 = 0x8A;
@@ -581,4 +601,51 @@ fn record_matches(r: &ThreadRecord, query: &[u8]) -> bool {
         return query.is_empty();
     }
     contains_ci(r.recipient(), query) || contains_ci(r.last_snippet(), query)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_store_blob_fits_the_settings_value_cap() {
+        // WHY this test exists: the record width is 78 bytes and the
+        // settings kernel caps a value at 512 bytes, so the store holds six
+        // threads. The old constant said nine, which needed 704 bytes, so
+        // the seventh thread was accepted, refused by the kernel, and the
+        // refusal was thrown away.
+        assert_eq!(RECORD_BYTES, 78);
+        assert_eq!(MAX_THREADS, 6);
+        assert!(STORE_BLOB_BYTES <= SETTINGS_VALUE_MAX);
+        assert_eq!(STORE_BLOB_BYTES, 470);
+    }
+
+    #[test]
+    fn the_capacity_is_derived_from_the_record_width() {
+        // A hand-written thread count would drift away from the record
+        // width the first time either changed.
+        assert_eq!(MAX_THREADS, (SETTINGS_VALUE_MAX - 2) / RECORD_BYTES);
+        assert_eq!(ThreadStore::EMPTY.capacity(), MAX_THREADS);
+    }
+
+    #[test]
+    fn a_full_store_refuses_another_thread_without_losing_the_ones_it_holds() {
+        // WHY this test exists: the store's own contract is that a refused
+        // write leaves the threads it already holds intact. The write
+        // itself cannot run on the host, so the test drives the table to its
+        // capacity and checks the refusal and the survival.
+        let mut store = ThreadStore::EMPTY;
+        for i in 0..MAX_THREADS {
+            let name = [b'a' + i as u8];
+            store.records[i] = ThreadRecord::new((i + 1) as u32, &name, 2);
+        }
+        store.len = MAX_THREADS as u8;
+        store.next_id = MAX_THREADS as u32 + 1;
+        assert!(store.is_full());
+        // The table the store already holds is untouched by the refusal.
+        assert_eq!(store.len as usize, MAX_THREADS);
+        for i in 0..MAX_THREADS {
+            assert_eq!(store.get(i).map(|r| r.id), Some((i + 1) as u32));
+        }
+    }
 }

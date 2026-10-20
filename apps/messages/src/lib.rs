@@ -5,6 +5,7 @@
 extern crate interos_std;
 
 pub mod gsm;
+pub mod store;
 
 pub const MAX_PHONE_LEN: usize = 32;
 pub const MAX_PEER_HANDLE_LEN: usize = 32;
@@ -21,22 +22,57 @@ pub enum MessageDirection {
     Outgoing,
 }
 
+/// Status of a messaging conversation thread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThreadStatus {
+    EncryptedP2P = 0,
+    CellularSms = 1,
+    PendingHandshake = 2,
+}
+
+/// Whether a recipient is something a telephone could be dialled with.
+///
+/// WHY this exists: the recipient field accepts a name or a handle as well
+/// as a number. Handing a name to a modem is not a transmission, it is a
+/// mistake, and the message has to stay local instead of being reported as
+/// a transmission that never happened.
+pub fn is_dialable(recipient: &[u8]) -> bool {
+    if recipient.is_empty() {
+        return false;
+    }
+    recipient.iter().all(|&b| {
+        b.is_ascii_digit() || matches!(b, b'+' | b' ' | b'-' | b'(' | b')' | b'.')
+    })
+}
+
 /// Truthful delivery status for SMS and P2P messaging.
+///
+/// WHY `LocalOnly` exists: a thread may be addressed to a name or a handle
+/// rather than to a dialable number, and in that case no transport is
+/// applicable and none is asked. That is a different fact from a transport
+/// that was asked and refused, and the two are drawn differently.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeliveryStatus {
+    /// No transport has confirmed this message.
     Pending,
+    /// The transport accepted the message.
     Sent,
+    /// The transport refused the message.
     Failed,
+    /// The transport refused the message for want of a bound transport.
     RefusedNoTransport,
+    /// The recipient is a local handle, so the message stayed on the device.
+    LocalOnly,
 }
 
 impl DeliveryStatus {
     pub const fn as_str(&self) -> &'static str {
         match self {
-            Self::Pending => "Pending",
+            Self::Pending => "Not sent",
             Self::Sent => "Sent",
             Self::Failed => "Failed",
             Self::RefusedNoTransport => "Refused - No Transport",
+            Self::LocalOnly => "Local only - not sent",
         }
     }
 }
@@ -421,6 +457,38 @@ extern crate std;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_delivery_state_never_claims_a_transport_it_did_not_have() {
+        // WHY this test exists: the delivery state used to be derived from a
+        // hardware-presence query, so a present modem produced "Sent"
+        // without a message ever being handed to it. A state that says
+        // "Pending" is also a claim -- it says a queue exists -- and no
+        // queue exists.
+        assert_eq!(DeliveryStatus::Sent.as_str(), "Sent");
+        assert_eq!(DeliveryStatus::Failed.as_str(), "Failed");
+        assert_eq!(
+            DeliveryStatus::RefusedNoTransport.as_str(),
+            "Refused - No Transport"
+        );
+        assert_eq!(DeliveryStatus::LocalOnly.as_str(), "Local only - not sent");
+        assert_eq!(DeliveryStatus::Pending.as_str(), "Not sent");
+        assert_ne!(DeliveryStatus::Pending.as_str(), "Pending");
+    }
+
+    #[test]
+    fn a_name_or_a_handle_is_not_something_a_modem_can_dial() {
+        // WHY this test exists: a recipient that is a name must not be
+        // handed to a transport. The message stays local, and the app says
+        // so, instead of reporting a transmission that never happened.
+        assert!(is_dialable(b"+441234567890"));
+        assert!(is_dialable(b"555 010 1234"));
+        assert!(is_dialable(b"555-010-1234"));
+        assert!(!is_dialable(b""));
+        assert!(!is_dialable(b"Alice"));
+        assert!(!is_dialable(b"alice@example"));
+        assert!(!is_dialable(b"555 CALL"));
+    }
 
     #[test]
     fn test_message_draft_limits() {

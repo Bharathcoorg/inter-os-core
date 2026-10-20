@@ -15,27 +15,15 @@
 
 use core::panic::PanicInfo;
 use interos_std as std;
+use interos_std::design::outline_text;
 
-mod store;
-use store::ThreadStore;
-
-pub mod gsm;
-
-use messages::{
-    DeliveryStatus, MessageDirection, MessageRecord, ThreadLedger,
-};
-
-/// Status of a messaging conversation thread.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ThreadStatus {
-    EncryptedP2P = 0,
-    CellularSms = 1,
-    PendingHandshake = 2,
-}
+use messages::gsm;
+use messages::store;
+use messages::store::ThreadStore;
+use messages::{DeliveryStatus, MessageDirection, MessageRecord, ThreadLedger, ThreadStatus};
 
 /// Conversation thread summary.
 #[allow(dead_code)]
-#[derive(Debug, Clone, Copy)]
 pub struct ConversationThread {
     pub peer_name: &'static str,
     pub peer_did: &'static str,
@@ -65,6 +53,14 @@ pub enum HeaderStatus {
     SealedLocally,
     /// The vault refused the seal, so the message was not persisted.
     VaultRefused,
+    /// The thread store refused the append, so the message was not persisted.
+    ///
+    /// WHY this is separate from `VaultRefused`: the vault and the thread
+    /// store are two different subsystems, and a user who loses a message
+    /// needs to know which one refused it.
+    StoreRefused,
+    /// Send was pressed with no recipient, so nothing was composed.
+    NoRecipient,
 }
 
 impl HeaderStatus {
@@ -74,6 +70,8 @@ impl HeaderStatus {
             HeaderStatus::NoTransport => b"NO TRANSPORT",
             HeaderStatus::SealedLocally => b"SEALED LOCALLY",
             HeaderStatus::VaultRefused => b"VAULT REFUSED",
+            HeaderStatus::StoreRefused => b"STORE REFUSED",
+            HeaderStatus::NoRecipient => b"NO RECIPIENT",
         }
     }
 }
@@ -343,7 +341,18 @@ const W: usize = 720;
 const H: usize = 1440;
 const CHUNK: usize = 4096;
 
-/// Anti-aliased run draw clipped to run's line box.
+/// Draws a run of text with the sharp outline face, falling back to the
+/// bitmap face when the outline face refuses the run.
+///
+/// WHY the outline face is tried first: the panel is 1080x2160 and this app
+/// paints at 720x1440, so the compositor magnifies a bitmap run 3:2 and the
+/// glyph edges read as soft. The outline face rasterises the real outline
+/// and reads as sharp at the panel's own resolution.
+///
+/// WHY the box test comes first: the run's own arguments decide which face
+/// is used, so the pixel under the cursor never gets to choose. The box is
+/// the union of the two faces' boxes, because the outline face's box sits
+/// one or two rows inside the bitmap cell's.
 #[inline(always)]
 fn test_text(
     x: usize,
@@ -358,8 +367,17 @@ fn test_text(
     if scale == 0 || text.is_empty() {
         return None;
     }
-    if x < x0 || y < y0 || y >= y0 + std::design::font::line_height(scale) {
+    let (bx, bt, bw, bh) = outline_text::run_box(x0, y0, scale, text);
+    let bitmap_h = std::design::font::line_height(scale);
+    let bitmap_w = std::design::font::measure(text, scale);
+    let top = bt.min(y0);
+    let height = bh.max(bitmap_h);
+    let width = bw.max(bitmap_w);
+    if x < bx || x - bx >= width || y < top || y - top >= height {
         return None;
+    }
+    if let Some(run) = outline_text::place_run(x0, y0, scale, text, None, false) {
+        return run.pixel(x, y, color, bg);
     }
     std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, bg, false)
 }
@@ -379,8 +397,19 @@ fn test_text_bold(
     if scale == 0 || text.is_empty() {
         return None;
     }
-    if x < x0 || y < y0 || y >= y0 + std::design::font::line_height(scale) {
+    let (bx, bt, bw, bh) = outline_text::run_box(x0, y0, scale, text);
+    let bitmap_h = std::design::font::line_height(scale);
+    let bitmap_w = std::design::font::measure_bold(text, scale);
+    let top = bt.min(y0);
+    let height = bh.max(bitmap_h);
+    // A bold outline run is one pixel wider than the run the box was measured
+    // from, so the box has to carry that pixel or the last glyph is cut.
+    let width = bw.max(bitmap_w) + 1;
+    if x < bx || x - bx >= width || y < top || y - top >= height {
         return None;
+    }
+    if let Some(run) = outline_text::place_run(x0, y0, scale, text, None, true) {
+        return run.pixel(x, y, color, bg);
     }
     std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, bg, true)
 }
@@ -941,15 +970,33 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                     ) {
                         return c;
                     }
+                    // WHY the subline follows the store's own state: an
+                    // unreadable or invalid store is not the same fact as
+                    // a device with no conversations, and the old code
+                    // showed the same two lines for both.
+                    let (subline, subline_color): (&[u8], u32) = match messages.store.state {
+                        store::StoreState::ReadRefused => (
+                            b"Stored conversations could not be read",
+                            0xFFF59E0B,
+                        ),
+                        store::StoreState::Invalid => (
+                            b"Stored conversations failed validation",
+                            0xFFEF4444,
+                        ),
+                        store::StoreState::Full => (
+                            b"Conversation store is full; older threads were not kept",
+                            0xFFF59E0B,
+                        ),
+                        _ => (b"Messaging unavailable: no transport", TEXT_MUTED),
+                    };
                     if let Some(c) = test_text(
                         x,
                         y,
-                        EMPTY_CARD.0
-                            + std::design::font::center_x(b"Messaging unavailable: no transport", 1, EMPTY_CARD.2),
+                        EMPTY_CARD.0 + std::design::font::center_x(subline, 1, EMPTY_CARD.2),
                         810,
                         1,
-                        b"Messaging unavailable: no transport",
-                        TEXT_MUTED,
+                        subline,
+                        subline_color,
                         SURFACE_DARK,
                     ) {
                         return c;
@@ -1203,10 +1250,22 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
             }
 
             let show_threat = flagged_phishing || flagged_urgency;
+            // WHY the two severities read differently and why neither calls
+            // the sender unverified: the app verified nothing. What it has
+            // is a local pattern match on the message text, and the banner
+            // says that rather than making a claim about the sender.
             let (bar_bg, bar_border, bar_text) = if flagged_phishing {
-                (0xFF381010, 0xFFEF4444, b"Caution: Unverified urgent request" as &[u8])
+                (
+                    0xFF381010,
+                    0xFFEF4444,
+                    b"Caution: text matches a known scam script" as &[u8],
+                )
             } else if flagged_urgency {
-                (0xFF2E1F08, 0xFFF59E0B, b"Caution: Unverified urgent request" as &[u8])
+                (
+                    0xFF2E1F08,
+                    0xFFF59E0B,
+                    b"Caution: text matches urgency language" as &[u8],
+                )
             } else {
                 // WHY this is no longer "Verified": the banner sat next to
                 // a refusal status and a "no transport" state, and no
@@ -1347,12 +1406,21 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                                 // the app cannot support.
                                 (b"Received (no transport)" as &[u8], TEXT_MUTED)
                             } else {
+                                // WHY every state is named rather than
+                                // colour-coded: "Sent" has to mean the
+                                // transport took the message, "Not sent" has
+                                // to mean nobody did, and a state with no
+                                // transport behind it has to say so.
                                 match msgs[i].status {
                                     DeliveryStatus::RefusedNoTransport => {
                                         (b"Refused - No Transport" as &[u8], 0xFFF59E0B)
                                     }
                                     DeliveryStatus::Sent => (b"Sent" as &[u8], 0xFF10B981),
-                                    _ => (b"Pending" as &[u8], TEXT_MUTED),
+                                    DeliveryStatus::Failed => (b"Failed" as &[u8], 0xFFEF4444),
+                                    DeliveryStatus::LocalOnly => {
+                                        (b"Local only - not sent" as &[u8], TEXT_MUTED)
+                                    }
+                                    DeliveryStatus::Pending => (b"Not sent" as &[u8], TEXT_MUTED),
                                 }
                             };
 
@@ -1473,11 +1541,15 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
     BG_DARK
 }
 
-/// Formats character count fraction e.g. "0/160" or "45/160".
+/// Formats the character count as `used/limit`.
+///
+/// WHY the limit is written from the constant and not typed in: the compose
+/// buffer's capacity is the limit the app actually enforces, and a typed-in
+/// denominator drifts away from it the first time the capacity changes.
 fn format_char_count(len: usize, out: &mut [u8; 8]) -> usize {
     let mut tmp = [0u8; 4];
     let mut n = 0usize;
-    let mut x = len.min(160);
+    let mut x = len.min(COMPOSE_CAP);
     loop {
         tmp[n] = b'0' + (x % 10) as u8;
         x /= 10;
@@ -1492,10 +1564,23 @@ fn format_char_count(len: usize, out: &mut [u8; 8]) -> usize {
         o += 1;
     }
     out[o] = b'/';
-    out[o + 1] = b'1';
-    out[o + 2] = b'6';
-    out[o + 3] = b'0';
-    o + 4
+    o += 1;
+    let mut limit = [0u8; 4];
+    let mut ln = 0usize;
+    let mut lv = COMPOSE_CAP;
+    loop {
+        limit[ln] = b'0' + (lv % 10) as u8;
+        lv /= 10;
+        ln += 1;
+        if lv == 0 {
+            break;
+        }
+    }
+    for i in 0..ln {
+        out[o] = limit[ln - 1 - i];
+        o += 1;
+    }
+    o
 }
 
 fn render_messages_ui(surface: u32, messages: &MessagesApp) {
@@ -1609,9 +1694,62 @@ fn edit_recipient(app: &mut MessagesApp, push: Option<u8>) -> Dirty {
     Dirty::Recipient
 }
 
+/// What the transport did with a composed message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransportOutcome {
+    /// The transport accepted the message.
+    Accepted,
+    /// The transport refused the message; the code is the platform's.
+    Refused(i64),
+    /// The recipient is a local handle, not a dialable number, so no
+    /// transport applies and none was asked.
+    NotDialable,
+}
+
+/// Whether a recipient is something a telephone could be dialled with.
+///
+/// WHY this is checked: the recipient field accepts a name or a handle as
+/// well as a number. Handing a name to a modem is not a transmission, it is
+/// a mistake, and the message has to stay local instead.
+fn is_dialable(recipient: &[u8]) -> bool {
+    messages::is_dialable(recipient)
+}
+
+/// Hands the composed message to the transport and reports what it said.
+///
+/// WHY the app asks the transport instead of deciding: the delivery state
+/// used to be derived from a hardware-presence query, so a modem that was
+/// present produced "Sent" without a single message ever being handed to
+/// it. A delivery state has to come from the transport that carries the
+/// message, or it does not get drawn.
+fn attempt_transport(recipient: &[u8], body: &[u8]) -> TransportOutcome {
+    if !is_dialable(recipient) {
+        return TransportOutcome::NotDialable;
+    }
+    let dest = match core::str::from_utf8(recipient) {
+        Ok(s) => s,
+        Err(_) => return TransportOutcome::NotDialable,
+    };
+    let text = match core::str::from_utf8(body) {
+        Ok(s) => s,
+        Err(_) => "",
+    };
+    match std::telephony_send_sms(dest, text) {
+        Ok(_) => TransportOutcome::Accepted,
+        Err(code) => {
+            std::log(
+                0,
+                "[MESSAGES APP] Telephony refused the composed message; it was not transmitted.",
+            )
+            .ok();
+            TransportOutcome::Refused(code)
+        }
+    }
+}
+
 /// Sends the composed message, packing via GSM-7, attempting dispatch,
-/// recording truthful DeliveryStatus::RefusedNoTransport when modem is offline,
-/// appending to ThreadLedger and persistent ThreadStore.
+/// recording the transport's own answer, appending to ThreadLedger and
+/// persistent ThreadStore.
 fn send_composed(app: &mut MessagesApp) -> Dirty {
     if app.compose_len == 0 {
         return Dirty::None;
@@ -1622,6 +1760,7 @@ fn send_composed(app: &mut MessagesApp) -> Dirty {
             "[MESSAGES APP] Send pressed with no recipient; nothing was stored locally.",
         )
         .ok();
+        app.header_status = HeaderStatus::NoRecipient;
         return Dirty::None;
     }
 
@@ -1634,11 +1773,11 @@ fn send_composed(app: &mut MessagesApp) -> Dirty {
     let mut gsm_packed = [0u8; 140];
     let _packed_len = gsm::pack_gsm7_septets(&body[..n], &mut gsm_packed);
 
-    // 2. Truthful modem dispatch check
-    let delivery_status = if app.modem_present {
-        DeliveryStatus::Sent
-    } else {
-        DeliveryStatus::RefusedNoTransport
+    // 2. Hand it to the transport and keep the transport's answer.
+    let delivery_status = match attempt_transport(&recip[..rn], &body[..n]) {
+        TransportOutcome::Accepted => DeliveryStatus::Sent,
+        TransportOutcome::Refused(_) => DeliveryStatus::RefusedNoTransport,
+        TransportOutcome::NotDialable => DeliveryStatus::LocalOnly,
     };
 
     // 3. Post to ThreadLedger
@@ -1654,7 +1793,20 @@ fn send_composed(app: &mut MessagesApp) -> Dirty {
     // 5. Commit to persistent settings store
     if sealed {
         app.total_sent += 1;
-        app.store.append(&recip[..rn], &body[..n]);
+        // WHY the result is checked: the store is bounded by the settings
+        // kernel's 512-byte value cap, so an append past the cap is refused.
+        // The old code threw the answer away, so a thread that could not be
+        // persisted looked exactly like one that could.
+        if app.store.append(&recip[..rn], &body[..n]) {
+            app.header_status = HeaderStatus::SealedLocally;
+        } else {
+            app.header_status = HeaderStatus::StoreRefused;
+            std::log(
+                0,
+                "[MESSAGES APP] The thread store refused the append; the message was not persisted.",
+            )
+            .ok();
+        }
     }
 
     // 6. Transition to conversation view
@@ -1879,9 +2031,14 @@ fn edit_search(app: &mut MessagesApp, push: Option<u8>) -> Dirty {
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
+    // WHY this does not announce a wire protocol: the app binds no
+    // transport until one is proven to exist, and the banner it does draw
+    // says the thread is local and undelivered. A startup line claiming a
+    // P2P wire protocol was online was a claim about a channel the app
+    // never had.
     std::log(
         0,
-        "[MESSAGES APP (Ring 3)] Sovereign Encrypted Messaging & P2P Wire Protocol online.",
+        "[MESSAGES APP (Ring 3)] Started; no messaging transport is bound.",
     )
     .ok();
 
@@ -1929,7 +2086,7 @@ pub extern "C" fn _start() -> ! {
                 messages.modem_present = true;
                 std::log(
                     0,
-                    "[MESSAGES APP] Telephony modem active: P2P cellular wire channel online.",
+                    "[MESSAGES APP] Telephony reported a present modem; a transport may be bound.",
                 )
                 .ok();
             } else {
