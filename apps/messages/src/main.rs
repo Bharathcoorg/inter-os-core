@@ -44,6 +44,43 @@ pub enum ViewMode {
     Conversation,
 }
 
+/// The settings key the dialer hands a recipient to this app under.
+///
+/// WHY a settings key and not an argument: `app_launch` takes an app id
+/// and nothing else, so the platform's settings store is the only channel
+/// the two apps share.
+const HANDOFF_KEY: &str = "dialer.handoff.recipient.v1";
+
+impl MessagesApp {
+    /// Takes a recipient handed over by the dialer, if there is one.
+    ///
+    /// WHY this is read before the first screen: the messaging app shows the
+    /// recipient before the first send, and it can only do that if the other
+    /// app wrote the number into the shared settings store.
+    ///
+    /// WHY the key is cleared: a hand-off that is never consumed would
+    /// prefill the recipient on every launch, long after the user had moved
+    /// on.
+    pub fn take_handoff_recipient(&mut self) {
+        let mut buf = [0u8; 64];
+        match std::settings_get(store::STORE_CAP_READ, HANDOFF_KEY, &mut buf) {
+            Ok(n) if n > 0 => {
+                let n = n.min(self.recip.len()).min(buf.len());
+                self.recip[..n].copy_from_slice(&buf[..n]);
+                self.recip_len = n;
+                self.recip_focused = true;
+                let _ = std::settings_set(store::STORE_CAP_WRITE, HANDOFF_KEY, &[]);
+                std::log(
+                    0,
+                    "[MESSAGES APP] A recipient was handed over by the dialer; it is shown in the recipient field.",
+                )
+                .ok();
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Honest state of the last compose attempt, as reported in the header pill.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeaderStatus {
@@ -2047,6 +2084,9 @@ pub extern "C" fn _start() -> ! {
     // Load persisted threads and synchronize to ThreadLedger
     messages.store = store::ThreadStore::load();
     messages.sync_store_to_ledger();
+
+    // A recipient handed over by the dialer, if there is one.
+    messages.take_handoff_recipient();
 
     let load_note: &str = match messages.store.state {
         store::StoreState::Empty => "Thread store loaded: no threads are stored yet.",

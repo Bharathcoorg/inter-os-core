@@ -17,6 +17,60 @@ pub const ESCAPE_BYTE: u8 = 0xFE;
 pub const ESCAPED_NEWLINE: u8 = 0x8A;
 pub const ESCAPED_ESCAPE: u8 = 0xEE;
 
+/// What the modem reported about the call.
+///
+/// WHY the modem's own answer and not the app's guess: `telephony_dial`
+/// returns as soon as the modem has accepted the request, and the modem
+/// enters its own `Dialing` state. The app used to turn that acceptance
+/// into a connected call, so the screen claimed a call that had never
+/// connected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModemCallState {
+    /// The modem reported no call.
+    Idle,
+    /// The modem is placing the call.
+    Dialing,
+    /// The modem reports the call as connected.
+    Connected,
+    /// The modem reports the call as ended.
+    Ended,
+    /// The modem reported a state this build does not know.
+    Other,
+}
+
+/// Reads the modem's own call state out of the telemetry payload.
+///
+/// WHY a parser and not a guess: the kernel writes the modem's call state
+/// into the payload as the modem's own value, and the modem is the only
+/// thing that knows whether a call connected. The token is the variant
+/// name, so the word before the `{` is the state.
+pub fn parse_modem_call_state(payload: &[u8]) -> ModemCallState {
+    const KEY: &[u8] = b"\"call_state\":\"";
+    let mut i = 0usize;
+    while i + KEY.len() <= payload.len() {
+        if &payload[i..i + KEY.len()] == KEY {
+            let rest = &payload[i + KEY.len()..];
+            let end = rest.iter().position(|&b| b == b'"').unwrap_or(rest.len());
+            let token = &rest[..end];
+            if token.starts_with(b"Idle") {
+                return ModemCallState::Idle;
+            }
+            if token.starts_with(b"Dialing") {
+                return ModemCallState::Dialing;
+            }
+            if token.starts_with(b"Active") {
+                return ModemCallState::Connected;
+            }
+            if token.starts_with(b"Disconnected") {
+                return ModemCallState::Ended;
+            }
+            return ModemCallState::Other;
+        }
+        i += 1;
+    }
+    ModemCallState::Other
+}
+
 /// Escapes any 0x0A ('\n') or 0xFE bytes in a raw store blob so the serialized
 /// settings value never contains a newline.
 pub fn escape_store_blob(raw: &[u8], out: &mut [u8]) -> Result<usize, ()> {
@@ -353,8 +407,36 @@ mod tests {
     }
 
     #[test]
-    fn test_call_history_ledger() {
-        let mut ledger = CallHistoryLedger::new();
+    fn the_modem_call_state_comes_from_the_modem_and_not_from_the_acceptance() {
+        // WHY this test exists: `telephony_dial` returns as soon as the modem
+        // has accepted the request, and the modem enters its own `Dialing`
+        // state. The app used to report that acceptance as a connected call,
+        // so the screen claimed a call that had never connected.
+        let dialing = br#"{"present":true,"operator":"none","rssi":99,"bars":0,"dbm":-110,"state":"PowerDown","call_state":"Dialing { destination: \"555\", start_ticks: 42 }","pdp_active":false,"ip":0.0.0.0}"#;
+        assert_eq!(parse_modem_call_state(dialing), ModemCallState::Dialing);
+
+        let active = br#"{"present":true,"call_state":"Active { number: \"555\", start_ticks: 42 }"}"#;
+        assert_eq!(parse_modem_call_state(active), ModemCallState::Connected);
+
+        let idle = br#"{"present":true,"call_state":"Idle"}"#;
+        assert_eq!(parse_modem_call_state(idle), ModemCallState::Idle);
+
+        let ended = br#"{"present":true,"call_state":"Disconnected"}"#;
+        assert_eq!(parse_modem_call_state(ended), ModemCallState::Ended);
+
+        // "Alerting" is the modem ringing out, which is not a connection.
+        let alerting = br#"{"present":true,"call_state":"Alerting { destination: \"555\", start_ticks: 42 }"}"#;
+        assert_eq!(parse_modem_call_state(alerting), ModemCallState::Other);
+
+        // A payload with no call state at all is not a call.
+        assert_eq!(
+            parse_modem_call_state(br#"{"present":false,"bars":0}"#),
+            ModemCallState::Other
+        );
+    }
+
+    #[test]
+    fn test_call_history_ledger() {        let mut ledger = CallHistoryLedger::new();
         assert_eq!(ledger.count, 0);
 
         ledger.push(CallLogEntry::new(b"+15551234", CallType::Outgoing, 45, 1000));

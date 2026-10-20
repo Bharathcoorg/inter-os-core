@@ -66,6 +66,7 @@ use interos_std::design::outline_text;
 use core::panic::PanicInfo;
 use interos_std as std;
 use interos_std::design::color;
+use dialer::ModemCallState;
 
 const W: usize = 720;
 const H: usize = 1440;
@@ -102,10 +103,16 @@ pub enum DialerSection {
 pub enum CallOutcome {
     /// No attempt yet.
     Idle,
-    /// A dial request is with the telephony service.
+    /// The telephony service accepted the request and the modem is placing
+    /// the call.
     Dialing,
-    /// The telephony service accepted the call.
-    Active,
+    /// The modem itself reported the call as connected.
+    Connected,
+    /// The modem reported the call as ended.
+    Ended,
+    /// The telephony service accepted the request but the modem did not
+    /// report a call state this build knows.
+    Unconfirmed,
     /// The telephony service refused the call.
     Refused,
     /// An emergency dial attempt was refused by the telephony service.
@@ -120,9 +127,78 @@ impl CallOutcome {
         match self {
             CallOutcome::Idle => b"",
             CallOutcome::Dialing => b"Calling...",
-            CallOutcome::Active => b"Call active",
+            CallOutcome::Connected => b"Call connected",
+            CallOutcome::Ended => b"Call ended",
+            CallOutcome::Unconfirmed => b"Call requested; the modem reported no call state",
             CallOutcome::Refused => b"Call refused by the telephony service",
             CallOutcome::EmergencyRefused => b"Emergency call refused by the telephony service",
+        }
+    }
+}
+
+/// Asks the modem what state its call is in.
+///
+/// WHY the modem and not the app: only the modem knows whether a call
+/// connected. The telephony service's acceptance of the request says the
+/// request was taken, and nothing more.
+fn query_modem_call_state() -> ModemCallState {
+    let mut buf = [0u8; 256];
+    match std::telephony_query(&mut buf) {
+        Ok(n) if n > 0 => dialer::parse_modem_call_state(&buf[..n]),
+        _ => ModemCallState::Other,
+    }
+}
+
+/// The settings key the dialer hands a recipient to the messaging app under.
+///
+/// WHY a settings key and not an argument: `app_launch` takes an app id and
+/// nothing else, so the platform's settings store is the only channel the
+/// two apps share.
+const HANDOFF_KEY: &str = "dialer.handoff.recipient.v1";
+
+/// The messaging app this app hands a recipient to.
+const MESSAGING_APP_ID: &str = "org.interos.messages";
+
+/// Hands the entered number to the messaging app and opens it.
+///
+/// WHY the recipient is written before the launch: the messaging app shows
+/// the recipient before the first send, and it can only do that if the
+/// number reached it. The old code logged a dispatched messaging intent and
+/// did nothing at all, which is a claim about an action that never
+/// happened.
+fn hand_off_to_messaging(number: &[u8]) -> bool {
+    if number.is_empty() || number.len() > 32 {
+        return false;
+    }
+    // The settings store refuses a value containing 0x0A, so the number is
+    // written only when it is plain text.
+    if number.iter().any(|&b| b == 0x0A) {
+        return false;
+    }
+    if std::settings_set(STORE_CAP_WRITE, HANDOFF_KEY, number).is_err() {
+        std::log(
+            0,
+            "[DIALER APP] The settings store refused the recipient hand-off; the messaging app was not opened.",
+        )
+        .ok();
+        return false;
+    }
+    match std::app_launch(MESSAGING_APP_ID) {
+        Ok(_) => {
+            std::log(
+                0,
+                "[DIALER APP] Handed the entered number to the messaging app and opened it.",
+            )
+            .ok();
+            true
+        }
+        Err(_) => {
+            std::log(
+                0,
+                "[DIALER APP] The messaging app could not be launched; the number was not sent anywhere.",
+            )
+            .ok();
+            false
         }
     }
 }
@@ -1153,16 +1229,27 @@ impl DialerApp {
         self.outcome = CallOutcome::Dialing;
         self.call_duration_secs = 0;
 
-        // A call is connected only after the authoritative telephony service
-        // accepts the request. UI/ACR dispatch must never manufacture an
-        // ActiveCall state.
+        // A call is connected only when the modem itself says so. The
+        // telephony service accepts the request and puts the modem into its
+        // own dialling state, and the old app reported that acceptance as a
+        // connected call. The modem's own answer is read instead.
         match std::telephony_dial(number) {
             Ok(()) => {
-                self.state = CallState::ActiveCall;
-                self.outcome = CallOutcome::Active;
+                let modem = query_modem_call_state();
+                self.state = match modem {
+                    ModemCallState::Connected => CallState::ActiveCall,
+                    ModemCallState::Ended => CallState::CallEnded,
+                    _ => CallState::Dialing,
+                };
+                self.outcome = match modem {
+                    ModemCallState::Connected => CallOutcome::Connected,
+                    ModemCallState::Ended => CallOutcome::Ended,
+                    ModemCallState::Dialing => CallOutcome::Dialing,
+                    _ => CallOutcome::Unconfirmed,
+                };
                 std::audio_play_tone(440).ok();
                 std::audio_silence().ok();
-                std::log(0, "[DIALER APP] Telephony service accepted call request.").ok();
+                std::log(0, "[DIALER APP] Telephony service accepted the call request.").ok();
                 self.record_call(number, true, emergency);
                 Ok(())
             }
@@ -3374,8 +3461,12 @@ fn handle_tap(dialer: &mut DialerApp, px: u32, py: u32) -> Tap<'static> {
                 return Tap::Redraw(Dirty::All);
             }
             if x >= 390 && x < 640 {
-                std::log(0, "[DIALER APP] Dispatched messaging intent with active number.").ok();
-                let _ = std::audio_haptic_click();
+                let mut num_buf = [0u8; 32];
+                let len = dialer.active_len.min(32);
+                num_buf[..len].copy_from_slice(&dialer.active_number[..len]);
+                if hand_off_to_messaging(&num_buf[..len]) {
+                    let _ = std::audio_haptic_click();
+                }
                 return Tap::Redraw(Dirty::Display);
             }
         }

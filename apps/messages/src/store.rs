@@ -38,9 +38,9 @@ use interos_std as std;
 use crate::ThreadStatus;
 
 /// `FileSystemRead` slot: accepted by `sys_settings_get`.
-const STORE_CAP_READ: usize = 4;
+pub const STORE_CAP_READ: usize = 4;
 /// `FileSystemWrite` slot: accepted by `sys_settings_set`.
-const STORE_CAP_WRITE: usize = 5;
+pub const STORE_CAP_WRITE: usize = 5;
 
 /// Settings key the whole store is serialized under.
 const STORE_KEY: &str = "messages.threads.v1";
