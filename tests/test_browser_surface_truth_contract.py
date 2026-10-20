@@ -158,3 +158,30 @@ def test_a_sheet_is_drawn_over_a_dimmed_screen():
     assert code.count("get_browser_pixel_content(") == 2, (
         "the scrim path and the content path must be two distinct calls"
     )
+
+
+def test_a_local_failure_is_reported_as_the_failure_that_happened():
+    """A refused read and an empty file are different failures.
+
+    WHY this matters: the error screen printed one paragraph for every
+    local failure, so a document that opened and whose read was refused
+    was reported as an app that held no filesystem capability -- which it
+    did hold. The screen now names the failure.
+    """
+    source = read("apps/browser/src/main.rs")
+    code = _code_only(source)
+
+    for reason in (
+        "NO PATH GIVEN",
+        "NO FILESYSTEM CAPABILITY",
+        "REFUSED BY THE DEVICE",
+        "THE FILE IS EMPTY",
+        "THE READ WAS REFUSED",
+    ):
+        assert reason in code, f"the error screen does not name {reason!r}"
+
+    # The read's own result is kept rather than collapsed into a zero.
+    assert "unwrap_or(0)" not in code, (
+        "the local read discards its error, so a refused read is reported as an empty file"
+    )
+    assert "LocalFailure::ReadRefused" in code, "a refused local read is not distinguished"

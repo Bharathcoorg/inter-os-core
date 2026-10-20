@@ -309,9 +309,36 @@ const BODY_NO_TRANSPORT: &[u8] = b"The address was parsed and a navigation was a
 but no network transport is bound to this app: no request was sent and no page was loaded.";
 const BODY_INVALID: &[u8] = b"Supported schemes are http, https, interlayer, file and gemini \
 followed by a host. Even a valid address loads nothing while no transport is bound.";
-const BODY_LOCAL_REFUSED: &[u8] = b"The address names a local document, but this app holds \
-no filesystem capability, so it cannot open a guest file at all. No local content \
-is available to show.";
+const BODY_LOCAL_NO_CAPABILITY: &[u8] = b"The address names a local document, but this app holds \
+no filesystem read capability, so it cannot open a guest file at all.";
+const BODY_LOCAL_REFUSED: &[u8] = b"The address names a local document, and this app holds the \
+capability to read one, but the guest filesystem refused to open it. Nothing was read.";
+const BODY_LOCAL_EMPTY: &[u8] = b"The address names a local document and the guest filesystem \
+opened it, but the file holds no bytes. There is nothing to show.";
+const BODY_LOCAL_READ_REFUSED: &[u8] = b"The address names a local document and the guest \
+filesystem opened it, but the read itself was refused. Nothing was shown.";
+const BODY_LOCAL_NO_PATH: &[u8] = b"The address names a local document but carries no path, so \
+there is nothing for the browser to open.";
+
+/// Why a local document could not be shown.
+///
+/// WHY this is carried rather than inferred: the error screen used to
+/// print one paragraph for every local failure, so a file that opened and
+/// held no bytes was reported as an app that held no filesystem
+/// capability. The screen has to state the failure that happened.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum LocalFailure {
+    /// The address carried no path.
+    NoPath,
+    /// The app holds no filesystem read capability.
+    NoCapability,
+    /// The filesystem refused to open the path.
+    Refused,
+    /// The document opened and held no bytes.
+    Empty,
+    /// The document opened and the read itself was refused.
+    ReadRefused,
+}
 
 // -----------------------------------------------------------------------------
 // Network Socket Syscall Wrappers
@@ -756,6 +783,8 @@ pub struct BrowserApp {
     /// beginning of a page, not the whole of it, and the screen has to say
     /// so rather than present a fragment as the article.
     pub response_truncated: bool,
+    /// Why the last local document could not be shown.
+    pub local_failure: LocalFailure,
 }
 
 impl BrowserApp {
@@ -787,6 +816,7 @@ impl BrowserApp {
             kb_shift: false,
             kb_symbols: false,
             response_truncated: false,
+            local_failure: LocalFailure::NoPath,
         };
         app.tabs.init_default();
         let start = b"about:blank";
@@ -806,12 +836,14 @@ impl BrowserApp {
     /// differently would be two readers.
     fn load_local_document(&mut self, path: &[u8]) -> bool {
         if path.is_empty() {
-            self.status = PageStatus::InvalidAddress;
+            self.status = PageStatus::LocalRefused;
+            self.local_failure = LocalFailure::NoPath;
             self.tabs.active_tab_mut().loading_state = LoadingState::Failed;
             return false;
         }
         let Ok(path_str) = core::str::from_utf8(path) else {
-            self.status = PageStatus::InvalidAddress;
+            self.status = PageStatus::LocalRefused;
+            self.local_failure = LocalFailure::NoPath;
             self.tabs.active_tab_mut().loading_state = LoadingState::Failed;
             self.tabs.active_tab_mut().error_code = -3; // EINVAL
             return false;
@@ -824,6 +856,7 @@ impl BrowserApp {
             )
             .ok();
             self.status = PageStatus::LocalRefused;
+            self.local_failure = LocalFailure::NoCapability;
             self.tabs.active_tab_mut().loading_state = LoadingState::Failed;
             self.tabs.active_tab_mut().error_code = -1; // EPERM
             let _ = std::audio_haptic_click();
@@ -839,6 +872,7 @@ impl BrowserApp {
                 )
                 .ok();
                 self.status = PageStatus::LocalRefused;
+                self.local_failure = LocalFailure::Refused;
                 self.tabs.active_tab_mut().loading_state = LoadingState::Failed;
                 self.tabs.active_tab_mut().error_code = code as i32;
                 let _ = std::audio_haptic_click();
@@ -846,15 +880,35 @@ impl BrowserApp {
             }
         };
 
-        let read_bytes = {
+        // WHY the read's own result is kept: a refused read and an empty
+        // file are different failures, and discarding the error reported
+        // every one of them as an empty file.
+        let read_result = {
             let buffer = unsafe { &mut *core::ptr::addr_of_mut!(FILE_BUF) };
-            let n = std::fs_read(slot, fd, buffer).unwrap_or(0);
+            let result = std::fs_read(slot, fd, buffer);
             let _ = std::fs_close(fd);
-            n
+            result
+        };
+        let read_bytes = match read_result {
+            Ok(n) => n,
+            Err(code) => {
+                std::log(
+                    0,
+                    "[BROWSER APP] The guest filesystem refused to read the local document.",
+                )
+                .ok();
+                self.status = PageStatus::LocalRefused;
+                self.local_failure = LocalFailure::ReadRefused;
+                self.tabs.active_tab_mut().loading_state = LoadingState::Failed;
+                self.tabs.active_tab_mut().error_code = code as i32;
+                let _ = std::audio_haptic_click();
+                return false;
+            }
         };
         if read_bytes == 0 {
             std::log(0, "[BROWSER APP] The local document is empty.").ok();
             self.status = PageStatus::LocalRefused;
+            self.local_failure = LocalFailure::Empty;
             self.tabs.active_tab_mut().loading_state = LoadingState::Failed;
             self.tabs.active_tab_mut().error_code = 0;
             let _ = std::audio_haptic_click();
@@ -878,6 +932,7 @@ impl BrowserApp {
         };
         if doc_len == 0 {
             self.status = PageStatus::LocalRefused;
+            self.local_failure = LocalFailure::Empty;
             self.tabs.active_tab_mut().loading_state = LoadingState::Failed;
             return false;
         }
@@ -1308,7 +1363,13 @@ impl Frame {
             ),
             PageStatus::NoTransport => (b"Navigation unavailable", BODY_NO_TRANSPORT),
             PageStatus::InvalidAddress => (b"Address cannot be opened", BODY_INVALID),
-            PageStatus::LocalRefused => (b"Local document unavailable", BODY_LOCAL_REFUSED),
+            PageStatus::LocalRefused => (b"Local document unavailable", match app.local_failure {
+                LocalFailure::NoPath => BODY_LOCAL_NO_PATH,
+                LocalFailure::NoCapability => BODY_LOCAL_NO_CAPABILITY,
+                LocalFailure::Refused => BODY_LOCAL_REFUSED,
+                LocalFailure::Empty => BODY_LOCAL_EMPTY,
+                LocalFailure::ReadRefused => BODY_LOCAL_READ_REFUSED,
+            }),
         };
 
         f.head_scale = 1;
@@ -2233,7 +2294,13 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
         if let Some(c) = draw_rounded_rect(x, y, err_rect, 8, CHROME_CARD, Some(CHROME_CARD_BORDER), 1) {
             let label: &[u8] = match app.status {
                 PageStatus::InvalidAddress => b"INVALID ADDRESS",
-                PageStatus::LocalRefused => b"REFUSED BY THE DEVICE",
+                PageStatus::LocalRefused => match app.local_failure {
+                    LocalFailure::NoPath => b"NO PATH GIVEN",
+                    LocalFailure::NoCapability => b"NO FILESYSTEM CAPABILITY",
+                    LocalFailure::Refused => b"REFUSED BY THE DEVICE",
+                    LocalFailure::Empty => b"THE FILE IS EMPTY",
+                    LocalFailure::ReadRefused => b"THE READ WAS REFUSED",
+                },
                 _ => b"NO RESPONSE FROM THE GATEWAY",
             };
             let lw = font::measure(label, 1);
