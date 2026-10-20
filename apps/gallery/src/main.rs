@@ -1006,8 +1006,30 @@ impl GalleryApp {
         }
     }
 
+    /// The number of entries the Photos tab holds, wallpapers included.
+    ///
+    /// WHY this is not the photo count: the grid indexes wallpapers first,
+    /// so the grid's length has to include them. The number of photographs
+    /// on the device is `device_photos_count`.
     pub fn photos_count(&self) -> usize {
         let mut count = walls::SCENES.len() + PHOTOS.len();
+        for i in 0..self.storage_count {
+            if !self.storage_items[i].is_video {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// The number of photographs on the device, not counting wallpapers.
+    ///
+    /// WHY this is separate: the summary line says "N wallpapers, M photos
+    /// on device", and the old code passed it the wallpapers as well, so
+    /// the two numbers counted the same things. The honest empty state --
+    /// "no photographs on this device" -- was also unreachable, because the
+    /// grid always held the built-in wallpapers.
+    pub fn device_photos_count(&self) -> usize {
+        let mut count = PHOTOS.len();
         for i in 0..self.storage_count {
             if !self.storage_items[i].is_video {
                 count += 1;
@@ -1726,8 +1748,11 @@ fn video_card_pixel(x: usize, y: usize, app: &GalleryApp, storage_idx: usize, co
     let thumb_h = 140;
 
     if y < y0 + thumb_h {
-        let t = ((y - y0) * 255 / thumb_h).min(255);
-        let grad = blend_argb(item.primary_color, item.secondary_color, t);
+        // WHY the tile is a flat neutral and not a gradient: the gradient
+        // was a blend between two fixed colours, and a two-tone ramp in the
+        // shape of a frame read as a preview of the video. This build has no
+        // video decoder, so there is no frame to show and the tile says so.
+        let _ = item;
 
         // Center play button overlay
         let cx = x0 + VIDEO_COL_W / 2;
@@ -1739,6 +1764,16 @@ fn video_card_pixel(x: usize, y: usize, app: &GalleryApp, storage_idx: usize, co
                 return 0xFFFFFFFF;
             }
             return 0xCC0F172A;
+        }
+
+        // "No preview" marker, so the flat tile is not read as a broken
+        // image but as an honest absence.
+        let marker = b"No preview";
+        let mw = font::measure(marker, 1);
+        let mx = x0 + (VIDEO_COL_W.saturating_sub(mw)) / 2;
+        let my = y0 + thumb_h - font::line_height(1) - 8;
+        if let Some(c) = text(x, y, mx, my, 1, marker, MUTED, SURFACE) {
+            return c;
         }
 
         // Size badge in bottom-right corner.
@@ -1765,7 +1800,7 @@ fn video_card_pixel(x: usize, y: usize, app: &GalleryApp, storage_idx: usize, co
             }
         }
 
-        return grad;
+        return SURFACE;
     }
 
     if y == y0 + thumb_h {
@@ -1828,7 +1863,7 @@ fn photos_grid_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
         return Some(catalogue_pixel(x, y, app));
     }
 
-    if app.photos_count() == 0 {
+    if app.device_photos_count() == 0 {
         return Some(ledger_pixel(x, y, app));
     }
 
@@ -1938,7 +1973,10 @@ fn screenshots_grid_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
         if let Some(c) = text_centered(x, y, MARGIN, y0, W - 2 * MARGIN, 2, b"No screenshots yet", TEXT, BG) {
             return Some(c);
         }
-        let note = b"Capture screen with + Shot or by pressing 'S'.";
+        // WHY the button is the only way mentioned: this app has no keyboard
+        // handler, so the old note that told the user to press 'S' named a
+        // shortcut that does not exist.
+        let note = b"Capture a screen with the + Shot button.";
         if let Some(c) = text_centered(x, y, MARGIN, y0 + 40, W - 2 * MARGIN, 1, note, MUTED, BG) {
             return Some(c);
         }
@@ -2187,7 +2225,12 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
                     n = append_u64(&mut res_buf, n, app.detail_h as u64);
                     append(&mut res_buf, n, b" px")
                 } else {
-                    append(&mut res_buf, 0, b"720 x 1440 (Native Display)")
+                // WHY the fallback is not the panel's own size: the old one
+                // was the resolution of the screen this app draws on, shown
+                // under a "Resolution:" label as if it were a measurement of
+                // the media. The media's dimensions are unknown until its
+                // header is read, and this build does not read it.
+                    append(&mut res_buf, 0, b"not measured")
                 };
                 if let Some(c) = text(x, y, sheet.x + 20 + rw, sheet.y + 104, 1, &res_buf[..rn], TEXT, SURFACE) {
                     return c;
@@ -2227,7 +2270,12 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
                         b"/storage"
                     }
                 } else {
-                    b"/system/wallpaper"
+                    // WHY not a path: the old fallback named a directory
+                    // under the system's image tree, a path that does not
+                    // exist on this platform. A built-in wallpaper is not a
+                    // file, and saying where it lives would be a claim
+                    // about a filesystem the app never read.
+                    b"built-in wallpaper"
                 };
                 let mut pb = [0u8; 48];
                 let pn = font::ellipsize(path_bytes, 1, sheet.w.saturating_sub(40 + pw), &mut pb);
@@ -2297,11 +2345,13 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
                 return 0xFF000000; // Letterbox black bars
             }
 
-            // DRM/KMS direct scanout animated frame pattern
-            let t = (player.position_ms * 255 / player.duration_ms.max(1)).min(255) as usize;
-            let scan_phase = ((player.position_ms / 30) + y as u32) % 32;
-            let scan_tint = if scan_phase < 2 { 0x18 } else { 0x00 };
-            let v_bg = blend_argb(0xFF0F172A + (scan_tint << 16) + (scan_tint << 8) + scan_tint, 0xFF1E293B, t);
+            // The video surface.
+            //
+            // WHY it is a flat surface and not a picture: this build has no
+            // video decoder, so there is no frame to show. The surface used
+            // to be an animated scanline ramp labelled as a direct scanout,
+            // which read as a playing video and was nothing of the sort.
+            let v_bg = SURFACE;
 
             // Codec watermark badge
             if y >= video_rect.y + 12 && y < video_rect.y + 12 + font::line_height(1) {
@@ -2311,14 +2361,15 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
                 }
             }
 
-            // DRM Direct Scanout indicator label
-            let scanout_str = b"DRM Direct Scanout";
-            let sw = font::measure(scanout_str, 1);
-            if y >= video_rect.y + 12 && y < video_rect.y + 12 + font::line_height(1) {
-                let sx = video_rect.x + video_rect.w.saturating_sub(sw + 16);
-                if let Some(c) = text(x, y, sx, video_rect.y + 12, 1, scanout_str, MUTED, v_bg) {
-                    return c;
-                }
+            // WHY the surface says it cannot decode: the tile is otherwise a
+            // blank rectangle, and a blank rectangle reads as a broken image
+            // rather than as an honest absence.
+            let no_decode = b"No video decoder on this device";
+            let nw = font::measure(no_decode, 1);
+            let nx = video_rect.x + (video_rect.w.saturating_sub(nw)) / 2;
+            let ny = video_rect.y + (video_rect.h.saturating_sub(font::line_height(1))) / 2;
+            if let Some(c) = text(x, y, nx, ny, 1, no_decode, MUTED, v_bg) {
+                return c;
             }
 
             return v_bg;
@@ -2337,9 +2388,9 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
                 return blend_argb(photo.primary_color, photo.secondary_color, t);
             }
             Media::StorageItem(idx) => {
-                let Some(item) = app.storage_items.get(idx) else {
+                if app.storage_items.get(idx).is_none() {
                     return BG;
-                };
+                }
                 if app.detail_rgba_len > 0 && app.detail_w > 0 && app.detail_h > 0 {
                     let img_x = ((x - view.x) * app.detail_w as usize / view.w.max(1)).min(app.detail_w as usize - 1);
                     let img_y = ((y - view.y) * app.detail_h as usize / view.h.max(1)).min(app.detail_h as usize - 1);
@@ -2352,8 +2403,12 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
                         return (a << 24) | (r << 16) | (g << 8) | b;
                     }
                 }
-                let t = ((y - DETAIL_VIEW_Y0) * 255 / (DETAIL_VIEW_Y1 - DETAIL_VIEW_Y0)).min(255);
-                return blend_argb(item.primary_color, item.secondary_color, t);
+                // WHY a flat fill and not a two-tone ramp: the ramp was a
+                // blend between two fixed colours, and a gradient in the
+                // shape of a picture reads as a picture of something. The
+                // grid's own tiles use a neutral placeholder for an image
+                // they cannot decode, and the detail view matches it.
+                return SURFACE;
             }
         }
     }
@@ -2694,7 +2749,13 @@ enum Tap {
 
 fn exit_to_launcher(surface: u32) -> ! {
     if surface > 0 {
-        let _ = std::surface_destroy(6, surface);
+        // WHY the slot is resolved by type: a slot number is a position in
+        // the capability table, and the position depends on the order the
+        // kernel inserted this app's capabilities in. The literal 6 happens
+        // to hold the framebuffer in this app's table today.
+        if let Some(fb_slot) = std::cap::framebuffer_slot() {
+            let _ = std::surface_destroy(fb_slot, surface);
+        }
     }
     std::exit_with_code(0);
 }
@@ -2966,13 +3027,17 @@ fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
     if y >= TAB_Y && y < TAB_Y + TAB_H {
         let tab_idx = (x * 4 / W).min(3);
         let new_tab = GalleryTab::from_index(tab_idx);
-        if new_tab != app.tab || app.filter != Filter::All {
-            app.tab = new_tab;
-            app.filter = Filter::All;
-            std::log(0, "[GALLERY] Tab switched.").ok();
-            std::log(0, "[GALLERY] Gallery filter chip switched.").ok();
-            return Tap::Redraw(Dirty::All);
-        }
+            if new_tab != app.tab || app.filter != Filter::All {
+                app.tab = new_tab;
+                app.filter = Filter::All;
+                std::log(0, "[GALLERY] Tab switched.").ok();
+                // WHY the chip row is named as such: the row under the title
+                // is the media filter row the design document asks for -- the
+                // grid behind it holds a different set of media depending on
+                // which chip is down -- so a tap on it changes the filter.
+                std::log(0, "[GALLERY] Gallery filter chip switched.").ok();
+                return Tap::Redraw(Dirty::All);
+            }
         return Tap::None;
     }
 
@@ -3045,7 +3110,7 @@ pub extern "C" fn _start() -> ! {
 
     let mut app = GalleryApp::new();
     app.rescan_storage();
-    let photos_count = app.photos_count();
+    let photos_count = app.device_photos_count();
     app.summary_len = build_summary(&mut app.summary, photos_count);
     app.catalogue_note_len = build_catalogue_note(&mut app.catalogue_note);
 
@@ -3137,12 +3202,21 @@ pub extern "C" fn _start() -> ! {
                 };
                 let mut dirty = Dirty::None;
                 while std::input_event_poll(&mut input).is_ok() {
-                    // Swipe up home gesture -> Return to launcher
-                    if input.kind == 4
-                        || input.kind == 6
-                        || input.kind == 7
-                        || input.kind == 8
-                        || input.kind == 10
+                    // Swipe up home gesture -> Return to launcher.
+                    //
+                    // WHY the gesture is bound to the home strip and not to
+                    // anywhere on the screen: the old code exited the app for
+                    // a pan or a fling from any point, so scrolling the grid
+                    // threw the user out of the gallery. The gesture belongs
+                    // to the bottom strip, which is where the system draws
+                    // it.
+                    let is_home_gesture = input.y >= 1400 && input.x >= 240 && input.x <= 480;
+                    if is_home_gesture
+                        && (input.kind == 4
+                            || input.kind == 6
+                            || input.kind == 7
+                            || input.kind == 8
+                            || input.kind == 10)
                     {
                         std::log(
                             0,
