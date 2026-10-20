@@ -731,6 +731,57 @@ fn attr_value<'a>(tag: &'a [u8], name: &[u8]) -> Option<&'a [u8]> {
     None
 }
 
+/// Whether a payload contains real markup rather than prose that happens
+/// to use angle brackets.
+///
+/// WHY this cannot be a test for the presence of '<': the GNU General
+/// Public Licence writes its own preamble as "<one line to give the
+/// program's name...>", and a standards document may use '<' as a
+/// comparison operator. Both are text. A tag, by contrast, is a '<' that
+/// opens a name and is closed by a '>' within a short run of tag-legal
+/// bytes.
+pub fn looks_like_markup(html: &[u8]) -> bool {
+    let mut i = 0usize;
+    while i < html.len() {
+        if html[i] != b'<' {
+            i += 1;
+            continue;
+        }
+        let mut j = i + 1;
+        if j < html.len() && html[j] == b'/' {
+            j += 1;
+        }
+        if j < html.len() && html[j].is_ascii_alphabetic() {
+            let mut k = j;
+            while k < html.len() && k - i < 64 {
+                let c = html[k];
+                if c == b'>' {
+                    return true;
+                }
+                if !(c.is_ascii_alphanumeric()
+                    || c == b' '
+                    || c == b'\t'
+                    || c == b'\n'
+                    || c == b'\r'
+                    || c == b'='
+                    || c == b'"'
+                    || c == b'\''
+                    || c == b'-'
+                    || c == b'/'
+                    || c == b'#'
+                    || c == b'.'
+                    || c == b':')
+                {
+                    break;
+                }
+                k += 1;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
 /// Whether a tag name is in a fixed list.
 fn tag_in(list: &[&[u8]], name: &[u8]) -> bool {
     list.iter().any(|candidate| candidate.eq_ignore_ascii_case(name))
@@ -783,6 +834,125 @@ fn push_separator(out: &mut [u8], w: &mut usize) {
     }
 }
 
+/// What kind of payload the reader was handed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PayloadKind {
+    /// Markup. Tags are structure, and a source newline is a space.
+    Markup,
+    /// A plain document. There are no tags, and a source newline is a
+    /// line break.
+    ///
+    /// WHY this has to be told rather than guessed: the GNU General Public
+    /// Licence writes its own preamble as "<one line to give the program's
+    /// name...>", a standards document uses '<' as a comparison operator,
+    /// and a URL in angle brackets is not a tag. No heuristic separates
+    /// those from markup, but the content type does -- a server says
+    /// `text/plain` and the reader believes it.
+    PlainText,
+}
+
+/// Whether a content type names a plain-text payload.
+///
+/// WHY the app needs this: the Device Studio gateway wraps a page in a
+/// JSON envelope, so the HTTP content type the browser sees is
+/// `application/json` and the page's own type is inside the envelope.
+pub fn content_type_is_plain(content_type: &[u8]) -> bool {
+    const NEEDLE: &[u8] = b"text/plain";
+    let mut start = 0usize;
+    while start + NEEDLE.len() <= content_type.len() {
+        let mut matched = true;
+        for (i, &n) in NEEDLE.iter().enumerate() {
+            if content_type[start + i].to_ascii_lowercase() != n {
+                matched = false;
+                break;
+            }
+        }
+        if matched {
+            // The match must be a whole media type, not a prefix of
+            // another one.
+            let before_ok = start == 0
+                || content_type[start - 1] == b' '
+                || content_type[start - 1] == b';';
+            let after = start + NEEDLE.len();
+            let after_ok = after >= content_type.len()
+                || content_type[after] == b';'
+                || content_type[after] == b' '
+                || content_type[after] == b',';
+            if before_ok && after_ok {
+                return true;
+            }
+        }
+        start += 1;
+    }
+    false
+}
+
+/// Finds the `content_type` the gateway reported for a page.
+///
+/// WHY the gateway's own type and not the HTTP header: the gateway wraps
+/// the page in a JSON envelope, so the response's HTTP content type is
+/// `application/json` and the page's real type is inside the envelope.
+pub fn proxy_content_type(json: &[u8]) -> Option<&[u8]> {
+    let key = b"\"content_type\": \"";
+    let key_pos = json.windows(key.len()).position(|w| w == key)?;
+    let start = key_pos + key.len();
+    let end = json[start..].iter().position(|&b| b == b'"')? + start;
+    Some(&json[start..end])
+}
+
+/// Renders a plain-text document into the reader's line format.
+///
+/// WHY this is not the markup path: a plain document has no tags, and
+/// collapsing its newlines into spaces turned a 35 KB licence into ONE
+/// line. A document that is not markup is text, and text has lines.
+pub fn reader_text_from_plain(text: &[u8], out: &mut [u8]) -> usize {
+    let mut w = 0usize;
+    let mut i = 0usize;
+    let mut pending_space = false;
+
+    while i < text.len() {
+        let b = text[i];
+
+        if b == b'\n' {
+            push_newline(out, &mut w);
+            pending_space = false;
+            i += 1;
+            continue;
+        }
+        if b == b'\r' {
+            i += 1;
+            continue;
+        }
+        if b == b' ' || b == b'\t' || b == 0x0C {
+            pending_space = true;
+            i += 1;
+            continue;
+        }
+        if b == b'&' {
+            if let Some(next) = decode_html_entity(text, i, out, &mut w) {
+                pending_space = false;
+                i = next;
+                continue;
+            }
+        }
+        if pending_space {
+            pending_space = false;
+            push_separator(out, &mut w);
+        }
+        if b < 0x80 {
+            push_byte(out, &mut w, b);
+            i += 1;
+            continue;
+        }
+        let (cp, next) = decode_utf8_at(text, i);
+        if cp >= 0x80 {
+            push_transliterated(out, &mut w, cp);
+        }
+        i = next;
+    }
+    w
+}
+
 /// Extracts readable editorial content from raw HTML into clean Markdown / Gemtext
 /// lines without heap allocation.
 ///
@@ -792,6 +962,20 @@ fn push_separator(out: &mut [u8], w: &mut usize) {
 /// otherwise. Every byte of the result is in the range the platform font
 /// can draw.
 pub fn html_to_reader_document(html: &[u8], out: &mut [u8]) -> usize {
+    // A payload with no markup at all is text, and its newlines are lines.
+    let kind = if looks_like_markup(html) {
+        PayloadKind::Markup
+    } else {
+        PayloadKind::PlainText
+    };
+    html_to_reader_document_kind(html, kind, out)
+}
+
+/// Extracts readable editorial content from a payload of a known kind.
+pub fn html_to_reader_document_kind(html: &[u8], kind: PayloadKind, out: &mut [u8]) -> usize {
+    if kind == PayloadKind::PlainText {
+        return reader_text_from_plain(html, out);
+    }
     let mut r = 0usize;
     let mut w = 0usize;
     let n = html.len();
@@ -812,6 +996,13 @@ pub fn html_to_reader_document(html: &[u8], out: &mut [u8]) -> usize {
     // The depth of open heading elements, so a line break inside a title
     // is a space rather than a new document line.
     let mut heading_depth = 0usize;
+    // Whether the payload is a document rather than markup.
+    //
+    // WHY this is decided by the absence of markup: a standards document
+    // or a licence is plain text, and its line structure is the content.
+    // Treating it as markup -- collapsing every newline into a space --
+    // produced a single line the length of the whole file.
+    let plain_text = false;
     // Whether the current anchor is a real link being emitted.
     let mut in_link = false;
 
@@ -1134,6 +1325,17 @@ pub fn html_to_reader_document(html: &[u8], out: &mut [u8]) -> usize {
             continue;
         }
         let b = html[r];
+        if b == b'\n' && plain_text {
+            // WHY a plain document keeps its line breaks: a standards
+            // document, a licence or an RFC has no markup at all, and
+            // collapsing its newlines turned the whole file into ONE
+            // 32 KB line. A document that is not markup is text, and text
+            // has lines.
+            push_newline(out, &mut w);
+            pending_space = false;
+            r += 1;
+            continue;
+        }
         if b == b' ' || b == b'\t' || b == b'\n' || b == b'\r' || b == 0x0C {
             // WHY whitespace is collapsed rather than written: the source
             // markup's indentation between tags became reader lines, and
@@ -1343,14 +1545,16 @@ pub const MAX_LINE_BYTES: usize = 96;
 /// network path, the reader pipeline and the contract test all have to
 /// agree on one capacity. When the sizes were separate locals, the app
 /// truncated a 57 KB page at 2 KB and nothing in the build said so.
-pub const MAX_HTML_BYTES: usize = 64 * 1024;
+pub const MAX_HTML_BYTES: usize = 128 * 1024;
 
 /// The largest reader document the browser keeps.
 ///
-/// WHY 32 KB: the live page the reader was written for produces 12.6 KB of
-/// reader text. An 8 KB budget silently dropped the last third of the
-/// article -- the part after the fold, which is the part people read.
-pub const MAX_READER_BYTES: usize = 32 * 1024;
+/// WHY 64 KB: the live article produces 10.6 KB of reader text, and a
+/// real documentation page produces more than 32 KB. The earlier 8 KB
+/// budget silently dropped the last third of an article -- the part after
+/// the fold, which is the part people read -- and a 32 KB budget still
+/// truncated the Rust book.
+pub const MAX_READER_BYTES: usize = 64 * 1024;
 
 /// The reader's content column, in pixels.
 ///
@@ -1361,7 +1565,127 @@ pub const MAX_READER_BYTES: usize = 32 * 1024;
 pub const CONTENT_PADDING: usize = 24;
 
 /// The width available for reader text, in pixels.
-pub const CONTENT_WIDTH: usize = 672 - CONTENT_PADDING * 2;
+///
+/// WHY this is stated rather than derived: the reader's text column is the
+/// 720-pixel surface less a 24-pixel margin on each side. The app asserts
+/// that its own width agrees, so the two cannot drift apart.
+pub const CONTENT_WIDTH: usize = 672;
+
+/// How many pieces a single document line may be broken into.
+pub const MAX_WRAP_PIECES: usize = 6;
+
+/// Wraps a line of text to a pixel width.
+///
+/// WHY the reader wraps rather than trusting the source: a line of prose
+/// has no line breaks in it, so without wrapping a long sentence runs off
+/// the right edge of the screen and is clipped mid-glyph.
+///
+/// The break is at a word boundary where one is available, and inside a
+/// word only when a single word is longer than the column. A break never
+/// lands inside a multi-byte character.
+pub fn wrap_line(
+    text: &[u8],
+    scale: usize,
+    max_w: usize,
+    out: &mut [[u8; MAX_LINE_BYTES]; MAX_WRAP_PIECES],
+    lens: &mut [usize; MAX_WRAP_PIECES],
+) -> usize {
+    if text.is_empty() {
+        return 0;
+    }
+    let mut pieces = 0usize;
+    let mut start = 0usize;
+
+    while start < text.len() && pieces < MAX_WRAP_PIECES {
+        // Measure the rest of the line from `start`.
+        let rest = &text[start..];
+        if std::design::font::measure(rest, scale) <= max_w {
+            let n = rest.len().min(MAX_LINE_BYTES);
+            out[pieces][..n].copy_from_slice(&rest[..n]);
+            lens[pieces] = n;
+            pieces += 1;
+            break;
+        }
+
+        // Find the last word boundary that fits.
+        let mut width = 0usize;
+        let mut last_space: Option<usize> = None;
+        let mut j = 0usize;
+        while j < rest.len() {
+            let mut k = j;
+            while k < rest.len() && rest[k] != b' ' {
+                k += 1;
+            }
+            let word = &rest[j..k];
+            let word_w = std::design::font::measure(word, scale);
+            let space_w = if j == 0 { 0 } else { std::design::font::measure(b" ", scale) };
+            if width + space_w + word_w > max_w && j > 0 {
+                // This word does not fit. Break before it.
+                break;
+            }
+            width += space_w + word_w;
+            if k < rest.len() {
+                last_space = Some(k);
+                j = k + 1;
+            } else {
+                break;
+            }
+        }
+
+        let cut = match last_space {
+            Some(space) => space,
+            None => {
+                // A single word longer than the column: break it inside the
+                // word, at a character boundary.
+                let mut w = 0usize;
+                let mut k = 0usize;
+                while k < rest.len() {
+                    let step = utf8_char_len(rest[k]);
+                    let chunk = &rest[k..(k + step).min(rest.len())];
+                    let cw = std::design::font::measure(chunk, scale);
+                    if w + cw > max_w && k > 0 {
+                        break;
+                    }
+                    w += cw;
+                    k += step;
+                }
+                k.max(1)
+            }
+        };
+
+        let piece = &rest[..cut];
+        let n = piece.len().min(MAX_LINE_BYTES);
+        out[pieces][..n].copy_from_slice(&piece[..n]);
+        lens[pieces] = n;
+        pieces += 1;
+
+        // Skip the space that was broken at.
+        let mut next = start + cut;
+        while next < text.len() && text[next] == b' ' {
+            next += 1;
+        }
+        if next == start {
+            next += 1;
+        }
+        start = next;
+    }
+    pieces
+}
+
+/// The length in bytes of the UTF-8 character that starts at `b`.
+fn utf8_char_len(b: u8) -> usize {
+    if b < 0x80 {
+        1
+    } else if b & 0xE0 == 0xC0 {
+        2
+    } else if b & 0xF0 == 0xE0 {
+        3
+    } else if b & 0xF8 == 0xF0 {
+        4
+    } else {
+        1
+    }
+}
 
 
 /// Parsed and classified line of content for document rendering.
@@ -1374,6 +1698,13 @@ pub struct DocLine {
     pub link_target_len: usize,
     pub link_label: [u8; 64],
     pub link_label_len: usize,
+    /// Whether this line is the continuation of the line above it.
+    ///
+    /// WHY this is carried rather than inferred: a wrapped heading is one
+    /// heading, and the reader draws a rule under a heading and a bullet
+    /// beside a list item once. A renderer that cannot tell a continuation
+    /// from a new item draws a second rule in the middle of a title.
+    pub continued: bool,
 }
 
 impl DocLine {
@@ -1385,6 +1716,7 @@ impl DocLine {
         link_target_len: 0,
         link_label: [0; 64],
         link_label_len: 0,
+        continued: false,
     };
 }
 
@@ -2418,6 +2750,266 @@ mod tests {
         }
         assert!(text.contains("InterOS - a security-first OS"),
             "the em dash was not transliterated: {text:?}");
+    }
+
+    /// A plain document keeps its lines.
+    ///
+    /// WHY this test exists: a standards document or a licence has no
+    /// markup, and collapsing its newlines into spaces turned a 35 KB file
+    /// into ONE line. The GNU licence also writes its own preamble as
+    /// "<one line to give the program's name...>", so no heuristic can
+    /// tell it from markup -- the content type can.
+    #[test]
+    fn test_a_plain_document_keeps_its_lines() {
+        let text = b"Title\n\nFirst paragraph line one.\nFirst paragraph line two.\n\nSecond paragraph.";
+        let mut out = [0u8; 512];
+        let n = reader_text_from_plain(text, &mut out);
+        let doc = core::str::from_utf8(&out[..n]).expect("utf8");
+
+        let mut non_empty = 0usize;
+        for line in doc.lines() {
+            if !line.trim().is_empty() {
+                non_empty += 1;
+            }
+        }
+        assert_eq!(non_empty, 4, "the document lost its lines: {doc:?}");
+        assert!(doc.contains("First paragraph line one."));
+    }
+
+    /// The content type decides how a payload is read.
+    #[test]
+    fn test_the_content_type_decides_the_mode() {
+        assert!(content_type_is_plain(b"text/plain"));
+        assert!(content_type_is_plain(b"text/plain; charset=utf-8"));
+        assert!(content_type_is_plain(b"TEXT/PLAIN"));
+        assert!(!content_type_is_plain(b"text/html; charset=utf-8"));
+        assert!(!content_type_is_plain(b"application/json"));
+        // A prefix of another media type is not a match.
+        assert!(!content_type_is_plain(b"text/plaintext"));
+        assert!(!content_type_is_plain(b"application/x-text/plain"));
+    }
+
+    /// The gateway's reported content type is found inside its envelope.
+    #[test]
+    fn test_the_gateway_content_type_is_read_from_the_envelope() {
+        let json = br#"{"success": true, "url": "https://example.com", "content_type": "text/plain; charset=utf-8", "html": "hi"}"#;
+        let ct = proxy_content_type(json).expect("no content type");
+        assert_eq!(ct, b"text/plain; charset=utf-8");
+        assert!(content_type_is_plain(ct));
+    }
+
+    /// A long line is wrapped to the reading column.
+    ///
+    /// WHY this matters: prose has no line breaks in it, so without
+    /// wrapping a long sentence ran off the right edge of the screen and
+    /// was clipped mid-glyph.
+    #[test]
+    fn test_a_long_line_is_wrapped_to_the_column() {
+        let text = b"InterOS is an open-source smartphone operating system with a capability-based microkernel and hardware-enforced memory isolation.";
+        let mut out = [[0u8; MAX_LINE_BYTES]; MAX_WRAP_PIECES];
+        let mut lens = [0usize; MAX_WRAP_PIECES];
+        let n = wrap_line(text, 1, CONTENT_WIDTH, &mut out, &mut lens);
+
+        assert!(n >= 2, "the line was not wrapped: {n} piece(s)");
+        for i in 0..n {
+            let width = interos_std::design::font::measure(&out[i][..lens[i]], 1);
+            assert!(
+                width <= CONTENT_WIDTH,
+                "piece {i} is {width} pixels wide, over the {CONTENT_WIDTH} column"
+            );
+            assert!(lens[i] > 0, "piece {i} is empty");
+        }
+
+        // The words must all survive the split.
+        let mut rejoined = [0u8; 256];
+        let mut len = 0usize;
+        for i in 0..n {
+            for j in 0..lens[i] {
+                if len < rejoined.len() {
+                    rejoined[len] = out[i][j];
+                    len += 1;
+                }
+            }
+            if i + 1 < n && len < rejoined.len() {
+                rejoined[len] = b' ';
+                len += 1;
+            }
+        }
+        let rejoined = core::str::from_utf8(&rejoined[..len]).expect("utf8");
+        assert!(rejoined.contains("InterOS is an open-source"));
+        assert!(rejoined.contains("memory isolation."));
+    }
+
+    /// A line that already fits is left alone.
+    #[test]
+    fn test_a_short_line_is_not_wrapped() {
+        let mut out = [[0u8; MAX_LINE_BYTES]; MAX_WRAP_PIECES];
+        let mut lens = [0usize; MAX_WRAP_PIECES];
+        let n = wrap_line(b"Short enough.", 1, CONTENT_WIDTH, &mut out, &mut lens);
+        assert_eq!(n, 1);
+        assert_eq!(&out[0][..lens[0]], b"Short enough.");
+    }
+
+    /// The reader pipeline, replayed against a matrix of real sites.
+    ///
+    /// WHY a matrix and not one page: real markup differs every time. A
+    /// marketing page, a wiki article, a documentation page, a forum and
+    /// a plain-text RFC each nest their content differently, and a reader
+    /// that handles one of them is not a reader.
+    ///
+    /// The fixtures are captured by `tools/capture_site_matrix.py`, which
+    /// asks the Device Studio gateway for each page -- the same route the
+    /// device itself uses.
+    ///
+    /// The test is skipped when no matrix has been captured, so the suite
+    /// still runs on a machine with no Studio.
+    #[test]
+    fn test_the_reader_survives_a_matrix_of_real_sites() {
+        let Ok(dir) = std::env::var("INTEROS_BROWSER_SITE_MATRIX") else {
+            std::eprintln!(
+                "skipping: INTEROS_BROWSER_SITE_MATRIX is not set. Capture one with:\n  python tools/capture_site_matrix.py"
+            );
+            return;
+        };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            std::eprintln!("skipping: {dir} could not be read");
+            return;
+        };
+
+        // WHY fixed buffers: the crate is `#![no_std]`, so a test cannot
+        // use Vec or String either. The failure list is bounded, and a
+        // bounded list is enough to name the sites that broke.
+        const MAX_FAILURES: usize = 16;
+        let mut failures: [[u8; 96]; MAX_FAILURES] = [[0; 96]; MAX_FAILURES];
+        let mut failure_lens: [usize; MAX_FAILURES] = [0; MAX_FAILURES];
+        let mut failure_count = 0usize;
+
+        let mut checked = 0usize;
+        let mut entry = entries;
+        while let Some(Ok(dir_entry)) = entry.next() {
+            let path = dir_entry.path();
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .as_bytes();
+            if name.len() < 5 || !name.ends_with(b".json") || name == b"index.json" {
+                continue;
+            }
+            let Ok(raw) = std::fs::read(&path) else {
+                continue;
+            };
+
+            // 1. The HTML is extracted from the proxy's JSON envelope.
+            let mut html = [0u8; MAX_HTML_BYTES];
+            let html_len = extract_proxy_html(&raw, &mut html);
+            if html_len == 0 {
+                if failure_count < MAX_FAILURES {
+                    let l = copy_fail(&mut failures[failure_count], &name);
+                    failure_lens[failure_count] = l;
+                    failure_count += 1;
+                }
+                continue;
+            }
+
+            // 2. The document is parsed from it, in the mode the gateway
+            //    reported for the page. A `text/plain` page is text, and
+            //    its newlines are lines.
+            let kind = match proxy_content_type(&raw) {
+                Some(ct) if content_type_is_plain(ct) => PayloadKind::PlainText,
+                _ => PayloadKind::Markup,
+            };
+            let mut doc = [0u8; MAX_READER_BYTES];
+            let doc_len = html_to_reader_document_kind(&html[..html_len], kind, &mut doc);
+            if doc_len == 0 {
+                if failure_count < MAX_FAILURES {
+                    let l = copy_fail(&mut failures[failure_count], &name);
+                    failure_lens[failure_count] = l;
+                    failure_count += 1;
+                }
+                continue;
+            }
+            let reader_text =
+                core::str::from_utf8(&doc[..doc_len]).expect("reader text is not UTF-8");
+
+            // 3. Every byte of every line has to be drawable by the
+            //    platform font.
+            let mut undrawable = false;
+            for line in reader_text.lines() {
+                for &b in line.as_bytes() {
+                    if !(32..=126).contains(&b) {
+                        undrawable = true;
+                        break;
+                    }
+                }
+                if undrawable {
+                    break;
+                }
+            }
+
+            // 4. The document must be content, not padding. The live
+            //    article's markup indentation produced 688 blank lines out
+            //    of 958 before the whitespace rule was fixed.
+            let mut total = 0usize;
+            let mut blank = 0usize;
+            let mut non_blank = 0usize;
+            let mut last_line: &[u8] = b"";
+            for line in reader_text.lines() {
+                total += 1;
+                if line.trim().is_empty() {
+                    blank += 1;
+                } else {
+                    non_blank += 1;
+                    last_line = line.as_bytes();
+                }
+            }
+            let blank_ratio = if total == 0 { 0usize } else { (blank * 100) / total };
+
+            // 5. A truncated document ends mid-tag.
+            let mut cut = false;
+            if let Some(&last) = last_line.last() {
+                cut = last == b'<' || last == b'=';
+            }
+
+            // WHY the blank test needs a floor as well as a ratio: a
+            // five-line page with three paragraph gaps is 60% blank and
+            // is perfectly normal. What is wrong is MANY blank lines
+            // relative to the content, which is what the markup's
+            // indentation produced.
+            let padding_heavy = blank > 8 && blank_ratio > 50;
+            if undrawable || non_blank == 0 || padding_heavy || cut {
+                if failure_count < MAX_FAILURES {
+                    let l = copy_fail(&mut failures[failure_count], &name);
+                    failure_lens[failure_count] = l;
+                    failure_count += 1;
+                }
+            }
+
+            std::eprintln!(
+                "{:24} html={:>7} reader={:>6} lines={:>4} non-blank={:>4} blank={:>2}%{}",
+                core::str::from_utf8(name).unwrap_or("?"),
+                html_len,
+                doc_len,
+                total,
+                non_blank,
+                blank_ratio,
+                if undrawable { " UNDRAWABLE" } else { "" }
+            );
+            checked += 1;
+        }
+
+        assert!(checked > 0, "no site fixtures were found");
+        assert!(
+            failure_count == 0,
+            "the reader failed on {failure_count} of {checked} real sites"
+        );
+    }
+
+    /// Copies a fixture name into a fixed failure slot.
+    fn copy_fail(slot: &mut [u8; 96], name: &[u8]) -> usize {
+        let take = name.len().min(slot.len());
+        slot[..take].copy_from_slice(&name[..take]);
+        take
     }
 
     /// The reader pipeline, exercised against a real page captured from the

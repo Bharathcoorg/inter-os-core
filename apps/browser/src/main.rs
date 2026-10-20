@@ -27,10 +27,9 @@ use interos_std::design::font;
 use interos_std::design::primitives::{draw_rounded_rect, Rect};
 
 use browser::{
-    extract_proxy_html, format_http_get, format_proxy_request, html_to_reader_document,
-    into_url_field, parse_gemtext_link, parse_http_response, parse_uri, scheme_mark, DocLine,
-    DocumentTokenizer, LineKind, LoadingState, TabSessionManager, UriScheme, MAX_DOC_LINES,
-    MAX_LINE_BYTES, MAX_TABS, URL_FIELD,
+    format_http_get, format_proxy_request, into_url_field, parse_gemtext_link, parse_uri,
+    scheme_mark, DocLine, DocumentTokenizer, LineKind, LoadingState, TabSessionManager, UriScheme,
+    MAX_DOC_LINES, MAX_LINE_BYTES, MAX_TABS, URL_FIELD,
 };
 
 // -----------------------------------------------------------------------------
@@ -57,6 +56,164 @@ const CHROME_CODE_BG: u32 = 0xFF0F172A;       // Code Block Slate Dark
 // -----------------------------------------------------------------------------
 // Viewport & Layout Geometry (720x1440, 8pt Grid)
 // -----------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
+// HTTP over TCP
+// -----------------------------------------------------------------------------
+
+/// The kernel's "not ready" result code.
+///
+/// WHY it is named here: a TCP connection is not established the instant
+/// `tcp_connect` returns -- the handshake completes asynchronously -- so
+/// the transport has to tell "not yet" apart from "failed". The kernel
+/// reports that as `SyscallResult::NotReady`.
+const NOT_READY: i64 = -30;
+
+/// The largest HTTP response the browser will hold.
+///
+/// WHY this is large: the Device Studio gateway serves a real page, and a
+/// documentation page is more than 64 KB of HTML. The gateway itself caps a
+/// response at 1 MB, so a response that reaches this limit has been
+/// truncated by the browser and the screen says so.
+const MAX_RESPONSE_BYTES: usize = 256 * 1024;
+
+/// The buffer an HTTP response is accumulated into.
+///
+/// WHY this is a static and not a local array: it is a quarter of a
+/// megabyte, and a local of that size does not belong on a 128 KB task
+/// stack.
+static mut RESPONSE_BUF: [u8; MAX_RESPONSE_BYTES] = [0; MAX_RESPONSE_BYTES];
+
+/// The buffer the page's HTML is extracted into.
+static mut HTML_BUF: [u8; browser::MAX_HTML_BYTES] = [0; browser::MAX_HTML_BYTES];
+
+/// The buffer the reader document is parsed into.
+static mut READER_BUF: [u8; browser::MAX_READER_BYTES] = [0; browser::MAX_READER_BYTES];
+
+/// How many times a send is retried while the connection finishes its
+/// handshake.
+///
+/// WHY a retry loop and not a single send: `tcp_send` refuses with
+/// `NotReady` until the connection reaches the established state, and the
+/// handshake completes asynchronously -- the SYN-ACK arrives on the
+/// network and is processed by the kernel's poll path. The previous
+/// implementation issued one datagram and read once, so it read nothing
+/// and reported a transport failure for every page.
+const TCP_SEND_ATTEMPTS: usize = 200;
+
+/// How many times a receive is retried while the response arrives.
+const TCP_RECV_ATTEMPTS: usize = 200;
+
+/// The outcome of a fetch over TCP.
+struct FetchOutcome {
+    /// The number of bytes received.
+    bytes: usize,
+    /// Whether the response filled the buffer, and so was truncated.
+    truncated: bool,
+    /// The last error the transport reported, if any.
+    error: i64,
+}
+
+/// Fetches an HTTP response over TCP.
+///
+/// WHY TCP and not UDP: the Device Studio gateway speaks HTTP over TCP.
+/// The browser used to open a UDP socket and send the request as a single
+/// datagram, which no TCP server answers, and then read once -- before a
+/// response could have arrived. The device therefore reported a transport
+/// failure for every page, including the ones the gateway would have
+/// served.
+fn fetch_over_tcp(
+    dst_ip: [u8; 4],
+    dst_port: u16,
+    local_port: u16,
+    request: &[u8],
+) -> FetchOutcome {
+    let mut outcome = FetchOutcome {
+        bytes: 0,
+        truncated: false,
+        error: 0,
+    };
+
+    // The initial sequence number is the device's choice, and a fresh one
+    // per connection is what the protocol asks for.
+    let mut seq_bytes = [0u8; 4];
+    let seq = match std::get_random(&mut seq_bytes) {
+        Ok(n) if n == 4 => u32::from_le_bytes(seq_bytes),
+        _ => 0x1F2E_3D4C,
+    };
+
+    let connection = match std::tcp_connect(dst_ip, dst_port, local_port, seq) {
+        Ok(id) => id,
+        Err(code) => {
+            outcome.error = code;
+            return outcome;
+        }
+    };
+
+    // The handshake is asynchronous, so the first sends are refused. The
+    // refusal is `NotReady`, which is not a failure -- it means the
+    // connection is not established yet.
+    let mut sent = false;
+    for _ in 0..TCP_SEND_ATTEMPTS {
+        match std::tcp_send(connection, request) {
+            Ok(()) => {
+                sent = true;
+                break;
+            }
+            Err(code) => {
+                if code != NOT_READY {
+                    outcome.error = code;
+                    let _ = std::tcp_close(connection);
+                    return outcome;
+                }
+            }
+        }
+        std::yield_now();
+    }
+    if !sent {
+        outcome.error = NOT_READY;
+        let _ = std::tcp_close(connection);
+        return outcome;
+    }
+
+    // The response is read until the server closes the connection. The
+    // gateway speaks HTTP/1.0 and sends no content length, so the end of
+    // the body is the end of the stream.
+    let mut total = 0usize;
+    let mut reads = 0usize;
+    while reads < TCP_RECV_ATTEMPTS {
+        reads += 1;
+        let buffer = unsafe { &mut *core::ptr::addr_of_mut!(RESPONSE_BUF) };
+        if total >= buffer.len() {
+            outcome.truncated = true;
+            break;
+        }
+        match std::tcp_recv(connection, &mut buffer[total..]) {
+            Ok(0) => break,
+            Ok(n) => {
+                total += n;
+            }
+            Err(code) => {
+                if code != NOT_READY {
+                    // A closed connection ends the response. The bytes
+                    // already read are still the response.
+                    if total == 0 {
+                        outcome.error = code;
+                    }
+                    break;
+                }
+            }
+        }
+        std::yield_now();
+    }
+    if reads >= TCP_RECV_ATTEMPTS {
+        outcome.truncated = true;
+    }
+
+    let _ = std::tcp_close(connection);
+    outcome.bytes = total;
+    outcome
+}
+
 const W: usize = 720;
 const H: usize = 1440;
 const CHUNK: usize = 4096;
@@ -70,6 +227,43 @@ const TOOLBAR_Y0: usize = STATUS_H;
 const TOOLBAR_Y1: usize = 116;
 
 /// Sovereign Omnibox URL Capsule (x 16..476)
+/// Appends bytes to a small buffer, truncating rather than overrunning.
+fn append_text(buf: &mut [u8], n: usize, bytes: &[u8]) -> usize {
+    let take = bytes.len().min(buf.len().saturating_sub(n));
+    buf[n..n + take].copy_from_slice(&bytes[..take]);
+    n + take
+}
+
+/// Appends the decimal form of a value to a small buffer.
+fn append_u64_text(buf: &mut [u8], mut n: usize, mut value: u64) -> usize {
+    if value == 0 {
+        return append_text(buf, n, b"0");
+    }
+    let mut digits = [0u8; 20];
+    let mut len = 0usize;
+    while value > 0 && len < digits.len() {
+        digits[len] = b'0' + (value % 10) as u8;
+        value /= 10;
+        len += 1;
+    }
+    while len > 0 {
+        len -= 1;
+        if n < buf.len() {
+            buf[n] = digits[len];
+            n += 1;
+        }
+    }
+    n
+}
+
+/// The type scale of a document title.
+///
+/// WHY there is a scale and not a size: the platform font offers integer
+/// scales, and the reader's three heading levels were all set at scale 1 --
+/// so a page title and a section heading were the same size on the screen
+/// and differed only in colour.
+const TYPE_H1_SCALE: usize = 2;
+
 const PILL: Rect = Rect::new(16, 56, 460, 52);
 const PILL_R: usize = 26;
 const PILL_TEXT_X: usize = 56;
@@ -543,8 +737,20 @@ pub struct BrowserApp {
     pub overlay: SheetOverlay,
     pub doc_lines: [DocLine; MAX_DOC_LINES],
     pub doc_line_count: usize,
+    /// How many lines the document has, before the reader's bound.
+    ///
+    /// WHY it is counted: the reader holds a bounded number of lines, and
+    /// a page that is longer than that is an excerpt. The screen says
+    /// which, rather than presenting a fragment as the whole article.
+    pub doc_total_lines: usize,
     pub kb_shift: bool,
     pub kb_symbols: bool,
+    /// Whether the last response was larger than the browser's buffer.
+    ///
+    /// WHY this is remembered: a response that overflows the buffer is the
+    /// beginning of a page, not the whole of it, and the screen has to say
+    /// so rather than present a fragment as the article.
+    pub response_truncated: bool,
 }
 
 impl BrowserApp {
@@ -572,8 +778,10 @@ impl BrowserApp {
             overlay: SheetOverlay::None,
             doc_lines: [DocLine::EMPTY; MAX_DOC_LINES],
             doc_line_count: 0,
+            doc_total_lines: 0,
             kb_shift: false,
             kb_symbols: false,
+            response_truncated: false,
         };
         app.tabs.init_default();
         let start = b"about:blank";
@@ -586,21 +794,64 @@ impl BrowserApp {
         &self.current_url[..self.current_url_len]
     }
 
+    /// Loads a reader document, wrapping every line to the reading column.
+    ///
+    /// WHY the wrapping happens here and not in the renderer: a renderer
+    /// that wrapped per pixel would have to break the same line over and
+    /// over, and the break would not be stable while the reader scrolls.
+    /// Wrapping once, when the document is loaded, gives the renderer a
+    /// list of lines that are each already the right length.
     pub fn load_document_content(&mut self, content: &[u8]) {
         self.doc_line_count = 0;
+        self.doc_total_lines = 0;
         let mut tokenizer = DocumentTokenizer::new(content);
+        let mut pieces: [[u8; MAX_LINE_BYTES]; browser::MAX_WRAP_PIECES] =
+            [[0; MAX_LINE_BYTES]; browser::MAX_WRAP_PIECES];
+        let mut piece_lens: [usize; browser::MAX_WRAP_PIECES] = [0; browser::MAX_WRAP_PIECES];
+
         while let Some((line, kind)) = tokenizer.next_line() {
+            self.doc_total_lines += 1;
             if self.doc_line_count >= MAX_DOC_LINES {
-                break;
+                // The document is longer than the reader holds. The count
+                // is remembered so the screen can say so.
+                continue;
             }
-            let idx = self.doc_line_count;
-            let mut dl = DocLine::EMPTY;
-            let n = line.len().min(MAX_LINE_BYTES);
-            dl.bytes[..n].copy_from_slice(&line[..n]);
-            dl.len = n;
-            dl.kind = kind;
-            if kind == LineKind::GemtextLink {
-                if let Some((tgt, lbl)) = parse_gemtext_link(line) {
+
+            let scale = match kind {
+                LineKind::Heading1 => TYPE_H1_SCALE,
+                _ => 1,
+            };
+            let count = browser::wrap_line(
+                line,
+                scale,
+                browser::CONTENT_WIDTH,
+                &mut pieces,
+                &mut piece_lens,
+            );
+
+            // A line that is not a link has no target to carry; a link
+            // carries its target and its label.
+            let (tgt, lbl) = if kind == LineKind::GemtextLink {
+                match parse_gemtext_link(line) {
+                    Some((tgt, lbl)) => (tgt, lbl),
+                    None => (&b""[..], &b""[..]),
+                }
+            } else {
+                (&b""[..], &b""[..])
+            };
+
+            for piece in 0..count {
+                if self.doc_line_count >= MAX_DOC_LINES {
+                    break;
+                }
+                let idx = self.doc_line_count;
+                let mut dl = DocLine::EMPTY;
+                let n = piece_lens[piece];
+                dl.bytes[..n].copy_from_slice(&pieces[piece][..n]);
+                dl.len = n;
+                dl.kind = kind;
+                dl.continued = piece > 0;
+                if kind == LineKind::GemtextLink {
                     let u = tgt.len().min(64);
                     dl.link_target[..u].copy_from_slice(&tgt[..u]);
                     dl.link_target_len = u;
@@ -608,9 +859,9 @@ impl BrowserApp {
                     dl.link_label[..l].copy_from_slice(&lbl[..l]);
                     dl.link_label_len = l;
                 }
+                self.doc_lines[idx] = dl;
+                self.doc_line_count += 1;
             }
-            self.doc_lines[idx] = dl;
-            self.doc_line_count += 1;
         }
     }
 
@@ -651,124 +902,125 @@ impl BrowserApp {
         }
 
         // Real Network Socket dispatch with ephemeral client binding
-        let sock_res = match self.active_socket_id {
-            Some(sock_id) => Ok(sock_id),
-            None => {
-                let ephemeral_port = 49152 + ((self.pages_loaded as u16) & 0x3FFF);
-                match net_socket(ephemeral_port) {
-                    Ok(id) => Ok(id),
-                    Err(_) => net_socket(80),
+        // The request is built first, so the transport only has to carry
+        // bytes.
+        //
+        // WHY the gateway is always the destination: the guest has no
+        // general connectivity. The Device Studio gateway fetches the page
+        // on the device's behalf, and the device reads the result.
+        let mut req_buf = [0u8; 512];
+        let (dst_ip, dst_port, req_len) = if parsed.scheme == UriScheme::Https {
+            let r_len = format_proxy_request(target, &mut req_buf);
+            ([10, 0, 2, 2], 4300, r_len)
+        } else {
+            let host_bytes = if parsed.host.is_empty() { b"interos.tech" } else { parsed.host };
+            let mut ip = [10, 0, 2, 2];
+            if let Ok(host_str) = core::str::from_utf8(host_bytes) {
+                if let Ok(resolved) = std::dns_resolve(host_str) {
+                    ip = resolved;
                 }
             }
+            let r_len = format_http_get(host_bytes, parsed.path, &mut req_buf);
+            (ip, parsed.port, r_len)
         };
-        match sock_res {
-            Ok(sock_id) => {
-                self.active_socket_id = Some(sock_id);
-                std::log(0, "[BROWSER APP] Network socket bound; resolving host and dispatching HTTP request...").ok();
 
-                // Dynamic HTTP/1.1 request formatting:
-                // If HTTPS, route through local development gateway proxy at 10.0.2.2:4300.
-                // If HTTP, connect directly to target IP and port.
-                let mut req_buf = [0u8; 512];
-                let (dst_ip, dst_port, req_len) = if parsed.scheme == UriScheme::Https {
-                    let r_len = format_proxy_request(target, &mut req_buf);
-                    ([10, 0, 2, 2], 4300, r_len)
-                } else {
-                    let host_bytes = if parsed.host.is_empty() { b"interos.tech" } else { parsed.host };
-                    let mut ip = [10, 0, 2, 2];
-                    if let Ok(host_str) = core::str::from_utf8(host_bytes) {
-                        if let Ok(resolved) = std::dns_resolve(host_str) {
-                            ip = resolved;
-                        }
-                    }
-                    let r_len = format_http_get(host_bytes, parsed.path, &mut req_buf);
-                    (ip, parsed.port, r_len)
-                };
+        // The local port has to be non-zero and unique for the connection.
+        let local_port = 45000u16 + ((self.pages_loaded as u16) & 0x03FF);
 
-                // Send dynamic HTTP request to target destination
-                let _ = std::net_sendto(dst_ip, dst_port, &req_buf[..req_len]);
+        std::log(0, "[BROWSER APP] Request dispatched over TCP to the Device Studio gateway.").ok();
 
-                // Non-blocking packet receive
-                let mut rx_buf = [0u8; 2048];
-                let rx_res = std::net_recvfrom(sock_id, &mut rx_buf);
+        let outcome = fetch_over_tcp(dst_ip, dst_port, local_port, &req_buf[..req_len]);
 
-                self.status = PageStatus::Loaded;
-                self.pages_loaded += 1;
-                self.loading_progress = 100;
-                self.tabs.active_tab_mut().loading_state = LoadingState::Completed;
+        // PLATFORM TRUTH: a page is loaded only when the transport actually
+        // delivered bytes. Nothing is synthesised, and the reason is
+        // reported as it was.
+        if outcome.bytes == 0 {
+            self.status = PageStatus::NoTransport;
+            self.loading_progress = 0;
+            self.tabs.active_tab_mut().loading_state = LoadingState::Failed;
+            self.tabs.active_tab_mut().error_code = outcome.error as i32;
+            std::log(
+                0,
+                "[BROWSER APP] The gateway returned no bytes. The failure is reported as it happened; no page was synthesised.",
+            )
+            .ok();
+            let _ = std::audio_play_tone(220);
+            let _ = std::audio_silence();
+            let _ = std::audio_haptic_click();
+            return false;
+        }
 
-                let mut loaded_from_network = false;
-                if let Ok(n) = rx_res {
-                    if n > 0 {
-                        let rx_slice = &rx_buf[..n];
-                        let key: &[u8] = b"\"html\":";
-                        if let Some(http_resp) = parse_http_response(rx_slice) {
-                            let mut html_buf = [0u8; 2048];
-                            let html_slice = if http_resp.body.windows(key.len()).any(|w| w == key) {
-                                let h_len = extract_proxy_html(http_resp.body, &mut html_buf);
-                                &html_buf[..h_len]
-                            } else {
-                                http_resp.body
-                            };
-                            let mut doc_buf = [0u8; 2048];
-                            let doc_len = html_to_reader_document(html_slice, &mut doc_buf);
-                            if doc_len > 0 {
-                                self.load_document_content(&doc_buf[..doc_len]);
-                                loaded_from_network = true;
-                            }
-                        } else if rx_slice.windows(key.len()).any(|w| w == key) {
-                            let mut html_buf = [0u8; 2048];
-                            let h_len = extract_proxy_html(rx_slice, &mut html_buf);
-                            let mut doc_buf = [0u8; 2048];
-                            let doc_len = html_to_reader_document(&html_buf[..h_len], &mut doc_buf);
-                            if doc_len > 0 {
-                                self.load_document_content(&doc_buf[..doc_len]);
-                                loaded_from_network = true;
-                            }
-                        }
-                    }
-                }
+        let response = unsafe { &*core::ptr::addr_of!(RESPONSE_BUF) };
+        let rx_slice = &response[..outcome.bytes];
 
-                // PLATFORM TRUTH: If network returned no content, report truthful error.
-                // NEVER synthesize fake mock content or pretend a website loaded.
-                if !loaded_from_network {
-                    self.status = PageStatus::NoTransport;
-                    self.loading_progress = 0;
-                    self.tabs.active_tab_mut().loading_state = LoadingState::Failed;
-                    self.tabs.active_tab_mut().error_code = -111; // ECONNREFUSED
-                    std::log(0, "[BROWSER APP] No real network response received. Truthful error status reported.").ok();
-                    return false;
-                }
+        let mut loaded_from_network = false;
+        let key: &[u8] = b"\"html\":";
+        let is_proxy_envelope = rx_slice.windows(key.len()).any(|w| w == key);
 
-                let _ = std::audio_play_tone(784);
-                let _ = std::audio_silence();
-                let _ = std::audio_haptic_click();
-                true
-            }
-            Err(code) => {
-                std::log(
-                    0,
-                    "[BROWSER APP] No transport is bound to this app; no request was issued and no page was loaded.",
-                )
-                .ok();
-                if std::audio_play_tone(784).is_ok() {
-                    std::log(0, "[BROWSER APP] Navigation chime emitted (784Hz).").ok();
-                } else {
-                    std::log(
-                        0,
-                        "[BROWSER APP] Navigation chime not emitted: the audio service refused the tone request.",
-                    )
-                    .ok();
-                }
-                let _ = std::audio_silence();
-                let _ = std::audio_haptic_click();
-                self.status = PageStatus::NoTransport;
-                self.error_code = code as i32;
-                self.tabs.active_tab_mut().loading_state = LoadingState::Failed;
-                self.tabs.active_tab_mut().error_code = code as i32;
-                false
+        // The gateway's JSON envelope names the page's own content type, and
+        // a `text/plain` page is text rather than markup.
+        let page_kind = match browser::proxy_content_type(rx_slice) {
+            Some(ct) if browser::content_type_is_plain(ct) => browser::PayloadKind::PlainText,
+            _ => browser::PayloadKind::Markup,
+        };
+
+        let html_len = if is_proxy_envelope {
+            let buffer = unsafe { &mut *core::ptr::addr_of_mut!(HTML_BUF) };
+            browser::extract_proxy_html(rx_slice, buffer)
+        } else {
+            // A response that is not the gateway's envelope is the page
+            // itself, so it is read in place.
+            let buffer = unsafe { &mut *core::ptr::addr_of_mut!(HTML_BUF) };
+            let take = rx_slice.len().min(buffer.len());
+            buffer[..take].copy_from_slice(&rx_slice[..take]);
+            take
+        };
+
+        if html_len > 0 {
+            // The HTML is read from one buffer and the reader document is
+            // written to another: the reader rewrites the markup in place,
+            // so source and destination cannot be the same memory.
+            let source = unsafe { &*core::ptr::addr_of!(HTML_BUF) };
+            let destination = unsafe { &mut *core::ptr::addr_of_mut!(READER_BUF) };
+            let doc_len = browser::html_to_reader_document_kind(&source[..html_len], page_kind, destination);
+            if doc_len > 0 {
+                self.load_document_content(&destination[..doc_len]);
+                loaded_from_network = true;
             }
         }
+
+        if outcome.truncated {
+            // WHY the screen says so: the response was larger than the
+            // browser's buffer, so what is on screen is the beginning of a
+            // page rather than the whole of it.
+            std::log(
+                0,
+                "[BROWSER APP] The response was larger than the browser's buffer; the page is shown truncated.",
+            )
+            .ok();
+            self.response_truncated = true;
+        } else {
+            self.response_truncated = false;
+        }
+
+        if !loaded_from_network {
+            self.status = PageStatus::NoTransport;
+            self.loading_progress = 0;
+            self.tabs.active_tab_mut().loading_state = LoadingState::Failed;
+            self.tabs.active_tab_mut().error_code = -111; // ECONNREFUSED
+            std::log(0, "[BROWSER APP] The response carried no readable document. Truthful error status reported.").ok();
+            return false;
+        }
+
+        self.status = PageStatus::Loaded;
+        self.pages_loaded += 1;
+        self.loading_progress = 100;
+        self.tabs.active_tab_mut().loading_state = LoadingState::Completed;
+
+        let _ = std::audio_play_tone(784);
+        let _ = std::audio_silence();
+        let _ = std::audio_haptic_click();
+        true
     }
 
     pub fn reload(&mut self) {
@@ -1839,11 +2091,20 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
             }
         }
 
-        // Error code badge card (360px wide to avoid clipping)
+        // The failure is named, not stamped with one code.
+        //
+        // WHY: the screen used to print "ERR_NETWORK_TRANSPORT_REFUSED"
+        // for every failure -- an invalid address, a refused local
+        // connection and a gateway that answered nothing all produced the
+        // same badge, so the badge was decoration rather than a report.
         let err_y = f.head_y + 40 + f.body_n * 28 + 24;
         let err_rect = Rect::new(cx - 180, err_y, 360, 36);
         if let Some(c) = draw_rounded_rect(x, y, err_rect, 8, CHROME_CARD, Some(CHROME_CARD_BORDER), 1) {
-            let label = b"ERR_NETWORK_TRANSPORT_REFUSED";
+            let label: &[u8] = match app.status {
+                PageStatus::InvalidAddress => b"INVALID ADDRESS",
+                PageStatus::LocalRefused => b"REFUSED BY THE DEVICE",
+                _ => b"NO RESPONSE FROM THE GATEWAY",
+            };
             let lw = font::measure(label, 1);
             if let Some(px) = text_px(x, y, cx - lw / 2, err_y + 8, 1, label, CHROME_RED, c, false) {
                 return px;
@@ -1866,9 +2127,17 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
         return CHROME_BG;
     }
 
-    // Render classified document lines with smooth vertical scrolling
+    // Render classified document lines with smooth vertical scrolling.
+    //
+    // WHY the layout is rebuilt for every pixel: the reader draws from a
+    // list of positioned lines, and the position of a line depends on the
+    // lines above it. The platform's rendering work owns a display list
+    // that would hoist this; until then the walk is bounded by the
+    // document.
     let content_start_y = 126;
     let base_y = (content_start_y as isize) - (app.scroll_offset_px as isize);
+    let pad = browser::CONTENT_PADDING;
+    let column = browser::CONTENT_WIDTH;
 
     let mut current_y = base_y;
     for i in 0..app.doc_line_count {
@@ -1877,6 +2146,10 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
 
         match line.kind {
             LineKind::Heading1 => {
+                // WHY the title is set at scale 2: the three heading levels
+                // were all set at scale 1, so a page title and a section
+                // heading were the same size and differed only in colour.
+                // The type scale is the hierarchy.
                 let title = if bytes.starts_with(b"# ") {
                     &bytes[2..]
                 } else if bytes.starts_with(b"#") {
@@ -1885,19 +2158,28 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                     bytes
                 };
                 let h_y = current_y + 8;
-                if y as isize >= h_y && (y as isize) < h_y + 26 {
-                    if let Some(px) = text_px(x, y, 28, h_y as usize, 1, title, 0xFFFFFFFF, CHROME_BG, true) {
+                let band = font::line_height(TYPE_H1_SCALE);
+                if y as isize >= h_y && (y as isize) < h_y + band as isize {
+                    if let Some(px) = text_px(
+                        x, y, pad, h_y as usize, TYPE_H1_SCALE, title, CHROME_TEXT, CHROME_BG, true,
+                    ) {
                         return px;
                     }
                 }
-                // Thin subtle divider line below main title
-                let d_y = h_y + 30;
-                if y as isize == d_y && x >= 28 && x <= W - 28 {
-                    return CHROME_DIVIDER;
+                // A rule under the title, drawn once for the heading rather
+                // than once for each line it was wrapped onto.
+                if !line.continued {
+                    let d_y = h_y + band as isize + 6;
+                    if y as isize == d_y && x >= pad && x <= W - pad {
+                        return CHROME_DIVIDER;
+                    }
                 }
-                current_y += 42;
+                current_y += band as isize + 26;
             }
             LineKind::Heading2 => {
+                // WHY the second level carries a rule above it: the type
+                // scale has two steps, so a second level that differed only
+                // in weight was still the same size as the third.
                 let title = if bytes.starts_with(b"## ") {
                     &bytes[3..]
                 } else if bytes.starts_with(b"##") {
@@ -1905,13 +2187,19 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                 } else {
                     bytes
                 };
-                let h_y = current_y + 8;
-                if y as isize >= h_y && (y as isize) < h_y + 24 {
-                    if let Some(px) = text_px(x, y, 28, h_y as usize, 1, title, 0xFFFFFFFF, CHROME_BG, true) {
+                let h_y = current_y + 14;
+                if !line.continued {
+                    let r_y = current_y + 4;
+                    if y as isize == r_y && x >= pad && x < pad + 40 {
+                        return CHROME_BLUE;
+                    }
+                }
+                if y as isize >= h_y && (y as isize) < h_y + font::line_height(1) as isize {
+                    if let Some(px) = text_px(x, y, pad, h_y as usize, 1, title, CHROME_TEXT, CHROME_BG, true) {
                         return px;
                     }
                 }
-                current_y += 36;
+                current_y += 40;
             }
             LineKind::Heading3 => {
                 let title = if bytes.starts_with(b"### ") {
@@ -1921,19 +2209,20 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                 } else {
                     bytes
                 };
-                let h_y = current_y + 6;
-                if y as isize >= h_y && (y as isize) < h_y + 20 {
-                    if let Some(px) = text_px(x, y, 28, h_y as usize, 1, title, CHROME_BLUE, CHROME_BG, true) {
+                let h_y = current_y + 8;
+                if y as isize >= h_y && (y as isize) < h_y + font::line_height(1) as isize {
+                    if let Some(px) = text_px(x, y, pad, h_y as usize, 1, title, CHROME_BLUE, CHROME_BG, true) {
                         return px;
                     }
                 }
-                current_y += 30;
+                current_y += 32;
             }
             LineKind::ListItem => {
                 let l_y = current_y + 4;
                 if y as isize >= l_y && (y as isize) < l_y + 24 {
-                    // Bullet dot at x=36
-                    let dx = x as isize - 36;
+                    // The bullet sits in the margin, and the text starts
+                    // after it.
+                    let dx = x as isize - (pad as isize + 10);
                     let dy = (y as isize) - (l_y + 8);
                     if dx * dx + dy * dy <= 8 {
                         return CHROME_BLUE;
@@ -1943,7 +2232,7 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                     } else {
                         bytes
                     };
-                    if let Some(px) = text_px(x, y, 52, l_y as usize, 1, item_text, CHROME_TEXT, CHROME_BG, false) {
+                    if let Some(px) = text_px(x, y, pad + 22, l_y as usize, 1, item_text, CHROME_TEXT, CHROME_BG, false) {
                         return px;
                     }
                 }
@@ -1951,41 +2240,46 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
             }
             LineKind::CodeBlock => {
                 if bytes.starts_with(b"```") {
-                    // Fence line: skip rendering
+                    // The fence itself is not drawn, but it still occupies
+                    // the space the block needs.
+                    current_y += 8;
                 } else {
+                    // WHY the box spans the whole run: each line of a code
+                    // block used to get its own bordered box, so a ten-line
+                    // snippet rendered as ten separate cards. The box now
+                    // starts at the first line of the run and ends at the
+                    // last.
                     let c_y = current_y + 2;
-                    let c_h = 36;
-                    let code_rect = Rect::new(24, c_y as usize, W - 48, c_h);
+                    let c_h = 30;
                     if y as isize >= c_y && (y as isize) < c_y + c_h as isize {
-                        if let Some(c) = draw_rounded_rect(x, y, code_rect, 8, 0xFF161B22, Some(0xFF30363D), 1) {
-                            if x >= 24 && x <= 27 {
+                        if let Some(c) = draw_rounded_rect(x, y, Rect::new(pad, c_y as usize, column, c_h), 8, 0xFF161B22, Some(0xFF30363D), 1) {
+                            if x >= pad && x <= pad + 3 {
                                 return CHROME_BLUE;
                             }
-                            if let Some(px) = text_px(x, y, 40, (c_y + 10) as usize, 1, bytes, 0xFF7EE787, c, false) {
+                            if let Some(px) = text_px(x, y, pad + 14, (c_y + 5) as usize, 1, bytes, 0xFF7EE787, c, false) {
                                 return px;
                             }
                             return c;
                         }
                     }
-                    current_y += 44;
+                    current_y += c_h as isize + 4;
                 }
             }
             LineKind::GemtextLink => {
                 let g_y = current_y + 4;
                 let g_h = 56;
-                let link_rect = Rect::new(24, g_y as usize, W - 48, g_h);
+                let link_rect = Rect::new(pad, g_y as usize, column, g_h);
                 if y as isize >= g_y && (y as isize) < g_y + g_h as isize {
                     if let Some(c) = draw_rounded_rect(x, y, link_rect, 12, CHROME_CARD, Some(CHROME_CARD_BORDER), 1) {
-                        // Left link icon badge (36x36 at x=36, y=g_y+10)
-                        let icon_box = Rect::new(36, (g_y + 10) as usize, 36, 36);
+                        // The link's mark sits in the margin.
+                        let icon_box = Rect::new(pad + 12, (g_y + 10) as usize, 36, 36);
                         if let Some(ic) = draw_rounded_rect(x, y, icon_box, 8, 0xFF1B2333, None, 0) {
-                            if link_arrow_glyph(x, y, 54, (g_y + 28) as usize) {
+                            if link_arrow_glyph(x, y, pad + 30, (g_y + 28) as usize) {
                                 return CHROME_BLUE;
                             }
                             return ic;
                         }
 
-                        // Title / Label text
                         let label_bytes = if line.link_label_len > 0 {
                             &line.link_label[..line.link_label_len]
                         } else if line.link_target_len > 0 {
@@ -1993,20 +2287,36 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                         } else {
                             bytes
                         };
-                        if let Some(px) = text_px(x, y, 84, (g_y + 10) as usize, 1, label_bytes, CHROME_TEXT, c, true) {
+                        // WHY the label is ellipsized: a link's text is
+                        // unbounded, and an unellipsized label runs off the
+                        // card and off the screen.
+                        let mut label_buf = [0u8; 64];
+                        let label_len = font::ellipsize(
+                            label_bytes,
+                            1,
+                            column - 72,
+                            &mut label_buf,
+                        );
+                        if let Some(px) = text_px(x, y, pad + 60, (g_y + 10) as usize, 1, &label_buf[..label_len], CHROME_TEXT, c, true) {
                             return px;
                         }
 
-                        // Subtitle / Target URL
                         if line.link_target_len > 0 {
                             let target_bytes = &line.link_target[..line.link_target_len];
-                            if let Some(px) = text_px(x, y, 84, (g_y + 30) as usize, 1, target_bytes, CHROME_MUTED, c, false) {
+                            let mut target_buf = [0u8; 64];
+                            let target_len = font::ellipsize(
+                                target_bytes,
+                                1,
+                                column - 72,
+                                &mut target_buf,
+                            );
+                            if let Some(px) = text_px(x, y, pad + 60, (g_y + 30) as usize, 1, &target_buf[..target_len], CHROME_MUTED, c, false) {
                                 return px;
                             }
                         }
 
-                        // Right chevron `>` at x = W - 48, y = g_y + 28
-                        let ch_x = (W - 48) as isize;
+                        // The chevron marks the card as tappable.
+                        let ch_x = (W - pad) as isize;
                         let ch_y = (g_y + 28) as isize;
                         let dist = ch_x - (x as isize);
                         if dist >= 0 && dist <= 7 {
@@ -2019,7 +2329,7 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                         return c;
                     }
                 }
-                current_y += 66;
+                current_y += g_h as isize + 10;
             }
             LineKind::Blockquote => {
                 let quote_text = if bytes.starts_with(b"> ") {
@@ -2032,11 +2342,11 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                 let q_y = current_y + 4;
                 let q_h = 28;
                 if y as isize >= q_y && (y as isize) < q_y + q_h as isize {
-                    // Left vertical quote bar at x=28..31
-                    if x >= 28 && x <= 31 {
+                    // The quote's bar sits in the margin.
+                    if x >= pad && x <= pad + 3 {
                         return CHROME_BLUE;
                     }
-                    if let Some(px) = text_px(x, y, 40, (q_y + 4) as usize, 1, quote_text, CHROME_MUTED, CHROME_BG, false) {
+                    if let Some(px) = text_px(x, y, pad + 14, (q_y + 4) as usize, 1, quote_text, CHROME_MUTED, CHROME_BG, false) {
                         return px;
                     }
                 }
@@ -2045,7 +2355,7 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
             LineKind::Paragraph => {
                 let p_y = current_y + 4;
                 if y as isize >= p_y && (y as isize) < p_y + 24 {
-                    if let Some(px) = text_px(x, y, 28, p_y as usize, 1, bytes, CHROME_TEXT, CHROME_BG, false) {
+                    if let Some(px) = text_px(x, y, pad, p_y as usize, 1, bytes, CHROME_TEXT, CHROME_BG, false) {
                         return px;
                     }
                 }
@@ -2053,6 +2363,27 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
             }
             LineKind::Empty => {
                 current_y += 14;
+            }
+        }
+    }
+
+    // The end of the document.
+    //
+    // WHY this says so: the reader holds a bounded number of lines, and a
+    // page with more lines than that is an excerpt. Showing the first
+    // lines without saying so presents a fragment as the article.
+    if app.doc_total_lines > app.doc_line_count && app.doc_line_count > 0 {
+        let note_y = current_y + 12;
+        if y as isize >= note_y && (y as isize) < note_y + 20 {
+            let mut buf = [0u8; 48];
+            let mut n = 0usize;
+            n = append_text(&mut buf, n, b"Showing the first ");
+            n = append_u64_text(&mut buf, n, app.doc_line_count as u64);
+            n = append_text(&mut buf, n, b" of ");
+            n = append_u64_text(&mut buf, n, app.doc_total_lines as u64);
+            n = append_text(&mut buf, n, b" lines");
+            if let Some(px) = text_px(x, y, browser::CONTENT_PADDING, note_y as usize, 1, &buf[..n], CHROME_MUTED, CHROME_BG, false) {
+                return px;
             }
         }
     }
