@@ -188,6 +188,13 @@ fn test_text(
     std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, bg, false)
 }
 
+#[inline(always)]
+fn centered_x(text: &[u8], scale: usize, x0: usize, available: usize) -> usize {
+    let w = outline_text::drawn_advance(text, scale, Some(available))
+        .unwrap_or_else(|| std::design::font::measure(text, scale));
+    x0 + if w >= available { 0 } else { (available - w) / 2 }
+}
+
 // -----------------------------------------------------------------------------
 // Counted Log Assembly (no allocator in this no_std app)
 // -----------------------------------------------------------------------------
@@ -362,10 +369,15 @@ impl FileManagerApp {
                 n
             }
             Err(code) => {
-                let prefix = b"refused -";
+                let prefix = b"Refused (-";
                 let p = prefix.len();
                 buf[..p].copy_from_slice(prefix);
-                p + fmt_u64(code.unsigned_abs(), &mut buf[p..])
+                let mut n = p + fmt_u64(code.unsigned_abs(), &mut buf[p..]);
+                if n < buf.len() {
+                    buf[n] = b')';
+                    n += 1;
+                }
+                n
             }
         };
         self.probe_label = [0u8; 40];
@@ -490,7 +502,7 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                 READOUT_LINE2_Y0,
                 1,
                 &label_buf[..label_len],
-                TEXT_PRIMARY,
+                0xFFF59E0B, // Status accent
                 BG_DARK,
             ) {
                 return c;
@@ -524,17 +536,21 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
         }
 
         // Group container card outer border and rounded corners
+        let mut on_card_border = false;
         let rx = (x - 36).min(683 - x);
         let ry = (y - 150).min(799 - y);
         if (y < 170 || y >= 780) && rx < 16 && ry < 16 {
             let cdx = (16 - rx) as isize;
             let cdy = (16 - ry) as isize;
-            if cdx * cdx + cdy * cdy >= 256 {
+            let d2 = cdx * cdx + cdy * cdy;
+            if d2 >= 256 {
                 return BG_DARK;
             }
-        }
-        if rx < 2 || y < 152 || y >= 798 {
-            return BORDER_SUBTLE;
+            if d2 >= 196 {
+                on_card_border = true;
+            }
+        } else if rx < 2 || y < 152 || y >= 798 {
+            on_card_border = true;
         }
 
         // Selected row gets a raised background and a left accent bar.
@@ -543,7 +559,7 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
         if row_selected && x < 44 {
             return ACCENT_SKY;
         }
-        let row_bg = if row_selected { 0xFF1D4ED8 } else { SURFACE_DARK };
+        let row_bg = if row_selected { 0xFF17253B } else { SURFACE_DARK };
 
         let center_y = row_start_y + (if row_idx == 5 { 40 } else { 45 });
         let icon_cx = 64i32;
@@ -663,6 +679,9 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
             }
         }
 
+        if on_card_border {
+            return BORDER_SUBTLE;
+        }
         return row_bg;
     }
 
@@ -683,14 +702,15 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
         // Entries container card: x: 36..684
         if x >= 36 && x < 684 {
             let container_h = if app.entry_count == 0 {
-                72
+                280
             } else {
-                app.entry_count * 56
+                (app.entry_count * 56).max(120)
             };
             let card_y0 = 880;
             let card_y1 = card_y0 + container_h;
 
             if y >= card_y0 && y < card_y1 {
+                let mut on_explorer_border = false;
                 let rx = (x - 36).min(683 - x);
                 let ry = (y - card_y0).min(card_y1 - 1 - y);
 
@@ -698,28 +718,68 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                 if rx < 16 && ry < 16 {
                     let cdx = (16 - rx) as isize;
                     let cdy = (16 - ry) as isize;
-                    if cdx * cdx + cdy * cdy >= 256 {
+                    let d2 = cdx * cdx + cdy * cdy;
+                    if d2 >= 256 {
                         return BG_DARK;
                     }
-                }
-
-                // Border
-                if rx < 2 || ry < 2 {
-                    return BORDER_SUBTLE;
+                    if d2 >= 196 {
+                        on_explorer_border = true;
+                    }
+                } else if rx < 2 || ry < 2 {
+                    on_explorer_border = true;
                 }
 
                 if app.entry_count == 0 {
+                    // Vector folder pictogram centered at cx = 360, cy = card_y0 + 70
+                    let cx = 360isize;
+                    let cy = (card_y0 + 70) as isize;
+                    let idx = x as isize - cx;
+                    let idy = y as isize - cy;
+
+                    // Folder tab (top-left) & folder body outline
+                    if (idy >= -22 && idy < -14 && idx >= -36 && idx <= -10)
+                        || (idy >= -14 && idy <= 24 && idx.abs() <= 36)
+                    {
+                        if idy == -14 || idy == 24 || idx.abs() == 36 || (idy < -14 && (idx == -36 || idx == -10 || idy == -22)) {
+                            return ACCENT_SKY;
+                        }
+                        if idy == 0 && idx >= -24 && idx <= 24 {
+                            return BORDER_SUBTLE;
+                        }
+                    }
+
+                    // Headline: "Directory Empty" (scale 2)
+                    let hx = centered_x(b"Directory Empty", 2, 36, 648);
                     if let Some(c) = test_text(
                         x,
                         y,
-                        56,
-                        card_y0 + 24,
+                        hx,
+                        card_y0 + 130,
+                        2,
+                        b"Directory Empty",
+                        TEXT_PRIMARY,
+                        SURFACE_DARK,
+                    ) {
+                        return c;
+                    }
+
+                    // Subtitle: "Directory empty or unread" (scale 1)
+                    let sx = centered_x(b"Directory empty or unread", 1, 36, 648);
+                    if let Some(c) = test_text(
+                        x,
+                        y,
+                        sx,
+                        card_y0 + 188,
                         1,
                         b"Directory empty or unread",
                         TEXT_MUTED,
                         SURFACE_DARK,
                     ) {
                         return c;
+                    }
+
+                    if on_explorer_border {
+                        return BORDER_SUBTLE;
                     }
                     return SURFACE_DARK;
                 }
