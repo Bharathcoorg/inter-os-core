@@ -1,10 +1,13 @@
 //! Inter OS Native Sovereign Camera & Neural Vision App
 //!
 //! Full production camera application executing in Ring 3 (User Mode):
-//! - Multi-mode capture engine: Photo, 30fps Video Streaming, Document Vision, QR Scanner, Night Mode
+//! - Multi-mode capture engine: Photo, Document Vision, QR Scanner, Night Mode
+//!   (no frame rate is claimed: the HAL never negotiates one)
 //! - Integrated ISP (Image Signal Processor): Tone curve adjustment, color filters, luminance histogram
 //! - Hardware-accelerated Zero-Copy DMA Video Streaming via SHM Pipe 0
-//! - Hardware keystore authenticated AES-XTS/HMAC encryption for photos in Sovereign Vault Sector 201
+//! - Photos sealed into Sovereign Vault Sector 201 with the kernel's vault
+//!   service. The keystore derivation syscall refuses every request on this
+//!   platform, so no keystore-backed cipher is claimed.
 //! - Multimodal neural vision context forwarding to the sovereign AI Context Broker
 //! - Hardware shutter tone & capacitive haptic feedback synthesis
 //! - DRM/KMS Client Surface Rendering (z=200) with Viewfinder Canvas, Mode Carousel, and Circular Shutter
@@ -56,7 +59,12 @@ pub enum CameraFilter {
     Monochrome = 1,
     HighContrast = 2,
     Sepia = 3,
-    NeuralHeatmap = 4,
+    /// A red-channel inversion.
+    ///
+    /// WHY it is not called a "neural heatmap": no model runs over the
+    /// frame. The filter is `255 - r`, and a name that implies inference
+    /// would claim a capability the app does not have.
+    InvertedRed = 4,
 }
 
 /// Sovereign Camera internal state machine.
@@ -290,7 +298,7 @@ impl CameraApp {
                     pixel[2] =
                         ((r as u32 * 272 + g as u32 * 534 + b as u32 * 131) / 1000).min(255) as u8;
                 }
-                CameraFilter::NeuralHeatmap => {
+                CameraFilter::InvertedRed => {
                     pixel[0] = 255 - r;
                     pixel[1] = g;
                     pixel[2] = b;
@@ -344,7 +352,10 @@ impl CameraApp {
         std::audio_haptic_click().ok();
 
         let mut container = [0u8; 512];
-        let header = b"INTEROS::CAMERA::JPEG_RAW_EXIF::V1";
+        // WHY the header says RGBA and not JPEG: the payload is a raw
+        // RGBA buffer with no JPEG encoder and no EXIF block behind it.
+        // The old header named a format the file does not contain.
+        let header = b"INTEROS::CAMERA::RGBA_RAW::V1";
         container[..header.len()].copy_from_slice(header);
         container[40..44].copy_from_slice(&meta[0].to_le_bytes());
         container[44..48].copy_from_slice(&meta[1].to_le_bytes());
@@ -644,21 +655,28 @@ fn test_gallery_icon(x: usize, y: usize, cx: usize, cy: usize) -> bool {
 /// each of the four pill branches, so a change to the corner geometry had to be
 /// applied four times and one of them could be missed.
 #[inline(always)]
-fn top_pill_body(x: usize, y: usize, rect: Rect) -> Option<(u32, usize, usize)> {
+fn top_pill_body(x: usize, y: usize, rect: Rect) -> Option<(u32, bool)> {
     if !rect.contains(x, y) {
         return None;
     }
     let rx = (x - rect.x).min(rect.x + rect.w - 1 - x);
     let ry = (y - rect.y).min(rect.y + rect.h - 1 - y);
     let r = TOP_PILL_RADIUS as isize;
+    let mut on_border = false;
     if (rx as isize) < r && (ry as isize) < r {
         let dx = r - rx as isize;
         let dy = r - ry as isize;
-        if dx * dx + dy * dy >= r * r {
+        let d2 = dx * dx + dy * dy;
+        if d2 >= r * r {
             return None;
         }
+        if d2 >= (r - 2) * (r - 2) {
+            on_border = true;
+        }
+    } else if rx < 2 || ry < 2 {
+        on_border = true;
     }
-    Some((SURFACE_RAISED, rx, ry))
+    Some((SURFACE_RAISED, on_border))
 }
 
 /// Draws a scale-1 label centred in `rect` at the top row's text row, or
@@ -718,7 +736,7 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
 
         // Flash / torch pill. This is a real control: it issues
         // `camera_toggle_flash` and reports what the backend answered.
-        if let Some((fill, rx, ry)) = top_pill_body(x, y, FLASH_RECT) {
+        if let Some((fill, on_border)) = top_pill_body(x, y, FLASH_RECT) {
             let is_lit =
                 camera.flash_available && (camera.flash == FlashMode::Torch || camera.flash == FlashMode::On);
             let icon_color = if is_lit {
@@ -744,7 +762,7 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
                 return c;
             }
 
-            if rx < 2 || ry < 2 {
+            if on_border {
                 return if is_lit { ACCENT_AMBER } else { BORDER_SUBTLE };
             }
             return fill;
@@ -756,7 +774,7 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
         // were a control. It now reports the frame the HAL actually returned -
         // "NO SENSOR" when the kernel refused camera authority, "NO FRAME" until
         // a capture succeeds, then the real `WxH`.
-        if let Some((_fill, rx, ry)) = top_pill_body(x, y, FRAME_RECT) {
+        if let Some((_fill, on_border)) = top_pill_body(x, y, FRAME_RECT) {
             let label = &camera.frame_label[..camera.frame_label_len];
             // WHY muted ink and not `DISABLED`: this pill is a readout, not a
             // control, and it has to stay legible - "NO SENSOR" is the answer to
@@ -766,7 +784,7 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
             if let Some(c) = top_row_label(x, y, FRAME_RECT, label, color) {
                 return c;
             }
-            if rx < 2 || ry < 2 {
+            if on_border {
                 return DISABLED;
             }
             return SURFACE_RAISED;
@@ -775,18 +793,18 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
         // ISP filter pill. This is a real control: the filter is applied in
         // `apply_isp_tone_curve` to the captured buffer, so selecting one
         // changes what the next capture is tone-mapped with.
-        if let Some((fill, rx, ry)) = top_pill_body(x, y, FILTER_RECT) {
+        if let Some((fill, on_border)) = top_pill_body(x, y, FILTER_RECT) {
             let (filter_name, filter_color) = match camera.filter {
                 CameraFilter::Normal => (&b"NORMAL"[..], ACCENT_SKY),
                 CameraFilter::Monochrome => (&b"MONO"[..], TEXT_MUTED),
                 CameraFilter::HighContrast => (&b"CONTRAST"[..], TEXT_PRIMARY),
                 CameraFilter::Sepia => (&b"SEPIA"[..], ACCENT_AMBER),
-                CameraFilter::NeuralHeatmap => (&b"HEATMAP"[..], DANGER_CRIMSON),
+                CameraFilter::InvertedRed => (&b"INVERT"[..], DANGER_CRIMSON),
             };
             if let Some(c) = top_row_label(x, y, FILTER_RECT, filter_name, filter_color) {
                 return c;
             }
-            if rx < 2 || ry < 2 {
+            if on_border {
                 return filter_color;
             }
             return fill;
@@ -797,12 +815,12 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
         // - it forwards nothing to any inference broker, and no such service is
         // bound to it. The badge now reports `total_photos`, a counter that only
         // advances when `camera_capture` actually returned a frame.
-        if let Some((_fill, rx, ry)) = top_pill_body(x, y, SHOTS_RECT) {
+        if let Some((_fill, on_border)) = top_pill_body(x, y, SHOTS_RECT) {
             let label = &camera.shots_label[..camera.shots_label_len];
             if let Some(c) = top_row_label(x, y, SHOTS_RECT, label, SUCCESS_EMERALD) {
                 return c;
             }
-            if rx < 2 || ry < 2 {
+            if on_border {
                 return SUCCESS_EMERALD;
             }
             return SURFACE_RAISED;
@@ -894,12 +912,19 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
             let rel_zy = y - ZOOM_PILL.y;
             let rx = rel_zx.min(ZOOM_PILL.w - 1 - rel_zx);
             let ry = rel_zy.min(ZOOM_PILL.h - 1 - rel_zy);
+            let mut on_border = false;
             if rx < 18 && ry < 18 {
                 let cdx = (18 - rx) as isize;
                 let cdy = (18 - ry) as isize;
-                if cdx * cdx + cdy * cdy >= 324 {
+                let d2 = cdx * cdx + cdy * cdy;
+                if d2 >= 324 {
                     return 0xFF080D1A;
                 }
+                if d2 >= 256 {
+                    on_border = true;
+                }
+            } else if rx < 2 || ry < 2 {
+                on_border = true;
             }
 
             let zoom_str = match camera.zoom_x10 {
@@ -918,7 +943,7 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
                 return c;
             }
 
-            if rx < 2 || ry < 2 {
+            if on_border {
                 return 0x66FFFFFF;
             }
             return 0xCC111827;
@@ -1239,8 +1264,8 @@ fn handle_camera_touch(camera: &mut CameraApp, x: u32, y: u32) -> Tap {
             CameraFilter::Normal => CameraFilter::Monochrome,
             CameraFilter::Monochrome => CameraFilter::HighContrast,
             CameraFilter::HighContrast => CameraFilter::Sepia,
-            CameraFilter::Sepia => CameraFilter::NeuralHeatmap,
-            CameraFilter::NeuralHeatmap => CameraFilter::Normal,
+            CameraFilter::Sepia => CameraFilter::InvertedRed,
+            CameraFilter::InvertedRed => CameraFilter::Normal,
         };
         std::audio_haptic_click().ok();
         return Tap::Redraw(Dirty::TopRow);

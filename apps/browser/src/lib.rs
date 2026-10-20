@@ -186,6 +186,336 @@ pub fn classify_line(line: &[u8]) -> LineKind {
     }
 }
 
+/// Formats a standards-compliant HTTP/1.1 GET request into `out`.
+pub fn format_http_get(host: &[u8], path: &[u8], out: &mut [u8]) -> usize {
+    let clean_path = if path.is_empty() { b"/" } else { path };
+    let mut cursor = 0;
+
+    let write_slice = |cur: &mut usize, src: &[u8], dst: &mut [u8]| {
+        let n = src.len().min(dst.len().saturating_sub(*cur));
+        dst[*cur..*cur + n].copy_from_slice(&src[..n]);
+        *cur += n;
+    };
+
+    write_slice(&mut cursor, b"GET ", out);
+    write_slice(&mut cursor, clean_path, out);
+    write_slice(&mut cursor, b" HTTP/1.1\r\nHost: ", out);
+    write_slice(&mut cursor, host, out);
+    write_slice(&mut cursor, b"\r\nUser-Agent: InterOS-Browser/1.0 (Mobile; Sovereign)\r\nAccept: text/html,text/gemini,text/plain,*/*\r\nConnection: close\r\n\r\n", out);
+
+    cursor
+}
+
+/// Formats an HTTP request to the local development gateway proxy at 10.0.2.2:4300.
+pub fn format_proxy_request(target_url: &[u8], out: &mut [u8]) -> usize {
+    let mut cursor = 0;
+    let write_slice = |cur: &mut usize, src: &[u8], dst: &mut [u8]| {
+        let n = src.len().min(dst.len().saturating_sub(*cur));
+        dst[*cur..*cur + n].copy_from_slice(&src[..n]);
+        *cur += n;
+    };
+
+    write_slice(&mut cursor, b"GET /api/browser/proxy?url=", out);
+    for &b in target_url {
+        if b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' || b == b'~' {
+            if cursor < out.len() {
+                out[cursor] = b;
+                cursor += 1;
+            }
+        } else {
+            if cursor + 3 <= out.len() {
+                out[cursor] = b'%';
+                let hi = b >> 4;
+                let lo = b & 0x0F;
+                out[cursor + 1] = if hi < 10 { b'0' + hi } else { b'A' + (hi - 10) };
+                out[cursor + 2] = if lo < 10 { b'0' + lo } else { b'A' + (lo - 10) };
+                cursor += 3;
+            }
+        }
+    }
+    write_slice(&mut cursor, b" HTTP/1.1\r\nHost: 10.0.2.2:4300\r\nUser-Agent: InterOS-Browser/1.0 (Mobile; Sovereign)\r\nConnection: close\r\n\r\n", out);
+    cursor
+}
+
+/// Extracts the HTML body from a proxy JSON response `{"success": true, ..., "html": "..."}`
+/// without heap allocation, unescaping `\"`, `\n`, `\r`, `\t`, and `\/`.
+pub fn extract_proxy_html(json: &[u8], out: &mut [u8]) -> usize {
+    let key = b"\"html\": \"";
+    let key_pos = match json.windows(key.len()).position(|w| w == key) {
+        Some(pos) => pos + key.len(),
+        None => {
+            let alt_key = b"\"html\":\"";
+            match json.windows(alt_key.len()).position(|w| w == alt_key) {
+                Some(pos) => pos + alt_key.len(),
+                None => return 0,
+            }
+        }
+    };
+
+    let content = &json[key_pos..];
+    let mut r = 0;
+    let mut w = 0;
+    while r < content.len() && w < out.len() {
+        if content[r] == b'\\' && r + 1 < content.len() {
+            match content[r + 1] {
+                b'"' => { out[w] = b'"'; w += 1; r += 2; }
+                b'\\' => { out[w] = b'\\'; w += 1; r += 2; }
+                b'/' => { out[w] = b'/'; w += 1; r += 2; }
+                b'n' => { out[w] = b'\n'; w += 1; r += 2; }
+                b'r' => { out[w] = b'\r'; w += 1; r += 2; }
+                b't' => { out[w] = b'\t'; w += 1; r += 2; }
+                _ => { out[w] = content[r]; w += 1; r += 1; }
+            }
+        } else if content[r] == b'"' {
+            break;
+        } else {
+            out[w] = content[r];
+            w += 1;
+            r += 1;
+        }
+    }
+    w
+}
+
+/// Parsed HTTP/1.1 Response Header and Body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HttpResponse<'a> {
+    pub status_code: u16,
+    pub content_type: &'a [u8],
+    pub body: &'a [u8],
+}
+
+/// Parses an HTTP/1.1 response stream into status code, Content-Type, and body slice.
+pub fn parse_http_response(raw: &[u8]) -> Option<HttpResponse<'_>> {
+    if !raw.starts_with(b"HTTP/1.") {
+        return None;
+    }
+    let space1 = raw.iter().position(|&b| b == b' ')?;
+    let status_slice = &raw[space1 + 1..];
+    if status_slice.len() < 3 {
+        return None;
+    }
+    let code_b = &status_slice[..3];
+    let status_code = (code_b[0].wrapping_sub(b'0') as u16) * 100
+        + (code_b[1].wrapping_sub(b'0') as u16) * 10
+        + (code_b[2].wrapping_sub(b'0') as u16);
+
+    let (header_bytes, body) = if let Some(pos) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+        (&raw[..pos], &raw[pos + 4..])
+    } else if let Some(pos) = raw.windows(2).position(|w| w == b"\n\n") {
+        (&raw[..pos], &raw[pos + 2..])
+    } else {
+        (raw, &b""[..])
+    };
+
+    let mut content_type = &b"text/html"[..];
+    for line in header_bytes.split(|&b| b == b'\n') {
+        let trimmed = if !line.is_empty() && line[line.len() - 1] == b'\r' {
+            &line[..line.len() - 1]
+        } else {
+            line
+        };
+        if trimmed.len() >= 13 {
+            let prefix = &trimmed[..13];
+            let is_ct = prefix.iter().zip(b"content-type:".iter()).all(|(a, b)| a.to_ascii_lowercase() == *b);
+            if is_ct {
+                let mut ct_val = &trimmed[13..];
+                while !ct_val.is_empty() && (ct_val[0] == b' ' || ct_val[0] == b'\t') {
+                    ct_val = &ct_val[1..];
+                }
+                if let Some(semi) = ct_val.iter().position(|&b| b == b';') {
+                    ct_val = &ct_val[..semi];
+                }
+                content_type = ct_val;
+                break;
+            }
+        }
+    }
+
+    Some(HttpResponse {
+        status_code,
+        content_type,
+        body,
+    })
+}
+
+/// Extracts readable editorial content from raw HTML into clean Markdown / Gemtext
+/// lines without heap allocation.
+pub fn html_to_reader_document(html: &[u8], out: &mut [u8]) -> usize {
+    let mut r = 0;
+    let mut w = 0;
+    let n = html.len();
+
+    let write_byte = |b: u8, w: &mut usize, out: &mut [u8]| {
+        if *w < out.len() {
+            out[*w] = b;
+            *w += 1;
+        }
+    };
+    let write_slice = |slice: &[u8], w: &mut usize, out: &mut [u8]| {
+        for &b in slice {
+            if *w < out.len() {
+                out[*w] = b;
+                *w += 1;
+            } else {
+                break;
+            }
+        }
+    };
+
+    while r < n {
+        // 1. Comments <!-- ... -->
+        if html[r..].starts_with(b"<!--") {
+            r += 4;
+            while r + 2 < n && !html[r..].starts_with(b"-->") {
+                r += 1;
+            }
+            if r + 2 < n {
+                r += 3;
+            }
+            continue;
+        }
+
+        // 2. Script and Style tags <script ...> ... </script>
+        if html[r..].starts_with(b"<script") || html[r..].starts_with(b"<SCRIPT") {
+            r += 7;
+            while r + 8 < n && !html[r..].starts_with(b"</script>") && !html[r..].starts_with(b"</SCRIPT>") {
+                r += 1;
+            }
+            while r < n && html[r] != b'>' {
+                r += 1;
+            }
+            if r < n { r += 1; }
+            continue;
+        }
+        if html[r..].starts_with(b"<style") || html[r..].starts_with(b"<STYLE") {
+            r += 6;
+            while r + 7 < n && !html[r..].starts_with(b"</style>") && !html[r..].starts_with(b"</STYLE>") {
+                r += 1;
+            }
+            while r < n && html[r] != b'>' {
+                r += 1;
+            }
+            if r < n { r += 1; }
+            continue;
+        }
+
+        // 3. Structural Tags
+        if html[r] == b'<' {
+            let tag_start = r + 1;
+            let mut tag_end = tag_start;
+            while tag_end < n && html[tag_end] != b'>' {
+                tag_end += 1;
+            }
+            let tag_content = &html[tag_start..tag_end];
+            let is_closing = tag_content.starts_with(b"/");
+            let tag_name = if is_closing { &tag_content[1..] } else { tag_content };
+            let tag_word = tag_name.split(|&b| b == b' ' || b == b'\t' || b == b'/').next().unwrap_or(b"");
+
+            if tag_word.eq_ignore_ascii_case(b"h1") || tag_word.eq_ignore_ascii_case(b"title") {
+                if !is_closing {
+                    if w > 0 && out[w - 1] != b'\n' { write_byte(b'\n', &mut w, out); }
+                    write_slice(b"# ", &mut w, out);
+                } else {
+                    write_slice(b"\n\n", &mut w, out);
+                }
+            } else if tag_word.eq_ignore_ascii_case(b"h2") {
+                if !is_closing {
+                    if w > 0 && out[w - 1] != b'\n' { write_byte(b'\n', &mut w, out); }
+                    write_slice(b"## ", &mut w, out);
+                } else {
+                    write_slice(b"\n\n", &mut w, out);
+                }
+            } else if tag_word.eq_ignore_ascii_case(b"h3") {
+                if !is_closing {
+                    if w > 0 && out[w - 1] != b'\n' { write_byte(b'\n', &mut w, out); }
+                    write_slice(b"### ", &mut w, out);
+                } else {
+                    write_slice(b"\n\n", &mut w, out);
+                }
+            } else if tag_word.eq_ignore_ascii_case(b"p") || tag_word.eq_ignore_ascii_case(b"div") {
+                if is_closing {
+                    write_slice(b"\n\n", &mut w, out);
+                } else if w > 0 && out[w - 1] != b'\n' {
+                    write_byte(b'\n', &mut w, out);
+                }
+            } else if tag_word.eq_ignore_ascii_case(b"li") {
+                if !is_closing {
+                    if w > 0 && out[w - 1] != b'\n' { write_byte(b'\n', &mut w, out); }
+                    write_slice(b"* ", &mut w, out);
+                } else {
+                    write_byte(b'\n', &mut w, out);
+                }
+            } else if tag_word.eq_ignore_ascii_case(b"pre") || tag_word.eq_ignore_ascii_case(b"code") {
+                if !is_closing {
+                    if w > 0 && out[w - 1] != b'\n' { write_byte(b'\n', &mut w, out); }
+                    write_slice(b"```\n", &mut w, out);
+                } else {
+                    write_slice(b"\n```\n", &mut w, out);
+                }
+            } else if tag_word.eq_ignore_ascii_case(b"br") || tag_word.eq_ignore_ascii_case(b"hr") {
+                write_byte(b'\n', &mut w, out);
+            } else if tag_word.eq_ignore_ascii_case(b"a") {
+                if !is_closing {
+                    if let Some(pos) = tag_content.windows(6).position(|w| w.eq_ignore_ascii_case(b"href=\"") || w.eq_ignore_ascii_case(b"href=\'")) {
+                        let href_start = pos + 6;
+                        let quote = tag_content[pos + 5];
+                        let href_end = tag_content[href_start..].iter().position(|&b| b == quote).map(|p| href_start + p).unwrap_or(tag_content.len());
+                        let href = &tag_content[href_start..href_end];
+                        if !href.is_empty() {
+                            if w > 0 && out[w - 1] != b'\n' { write_byte(b'\n', &mut w, out); }
+                            write_slice(b"=> ", &mut w, out);
+                            write_slice(href, &mut w, out);
+                            write_byte(b' ', &mut w, out);
+                        }
+                    }
+                } else {
+                    write_byte(b'\n', &mut w, out);
+                }
+            }
+
+            r = if tag_end < n { tag_end + 1 } else { n };
+            continue;
+        }
+
+        // 4. HTML Entities
+        if html[r] == b'&' {
+            if html[r..].starts_with(b"&amp;") {
+                write_byte(b'&', &mut w, out); r += 5; continue;
+            } else if html[r..].starts_with(b"&lt;") {
+                write_byte(b'<', &mut w, out); r += 4; continue;
+            } else if html[r..].starts_with(b"&gt;") {
+                write_byte(b'>', &mut w, out); r += 4; continue;
+            } else if html[r..].starts_with(b"&quot;") {
+                write_byte(b'"', &mut w, out); r += 6; continue;
+            } else if html[r..].starts_with(b"&apos;") || html[r..].starts_with(b"&#39;") {
+                write_byte(b'\'', &mut w, out); r += 6; continue;
+            } else if html[r..].starts_with(b"&nbsp;") {
+                write_byte(b' ', &mut w, out); r += 6; continue;
+            }
+        }
+
+        // 5. Text characters
+        let b = html[r];
+        if b == b'\r' {
+            r += 1;
+            continue;
+        }
+        if b == b'\t' {
+            write_byte(b' ', &mut w, out);
+        } else if b == b' ' {
+            if w == 0 || out[w - 1] != b' ' {
+                write_byte(b' ', &mut w, out);
+            }
+        } else {
+            write_byte(b, &mut w, out);
+        }
+        r += 1;
+    }
+
+    w
+}
+
 /// Parses a Gemtext link line `=> URL [optional label]` into (target_url, label).
 pub fn parse_gemtext_link(line: &[u8]) -> Option<(&[u8], &[u8])> {
     let mut i = 0;
@@ -826,6 +1156,11 @@ impl BrowserDataStore {
 
 #[cfg(test)]
 mod tests {
+    // WHY this is declared here: the crate is `#![no_std]` and aliases the
+    // SDK as `std`, but the host test that reads a captured page needs the
+    // real standard library for the filesystem and the environment.
+    extern crate std;
+
     use super::*;
 
     #[test]
@@ -1152,5 +1487,133 @@ mod tests {
         assert!(store.add_bookmark(BookmarkRecord::new(b"gemini://docs", b"Documentation", true)));
         assert_eq!(store.bookmark_count, 1);
         assert!(store.bookmarks[0].is_pinned);
+    }
+
+    #[test]
+    fn test_format_http_get_request() {
+        let mut buf = [0u8; 256];
+        let n = format_http_get(b"interos.tech", b"/docs/kernel", &mut buf);
+        let req = core::str::from_utf8(&buf[..n]).unwrap();
+        assert!(req.starts_with("GET /docs/kernel HTTP/1.1\r\nHost: interos.tech\r\n"));
+        assert!(req.contains("User-Agent: InterOS-Browser/1.0"));
+        assert!(req.ends_with("\r\n\r\n"));
+    }
+
+    #[test]
+    fn test_parse_http_response_success() {
+        let raw = b"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: 42\r\n\r\n<h1>Hello</h1><p>Test</p>";
+        let res = parse_http_response(raw).expect("valid http response");
+        assert_eq!(res.status_code, 200);
+        assert_eq!(res.content_type, b"text/html");
+        assert_eq!(res.body, b"<h1>Hello</h1><p>Test</p>");
+    }
+
+    #[test]
+    fn test_parse_http_response_not_found() {
+        let raw = b"HTTP/1.0 404 Not Found\r\nServer: Custom\r\n\r\nMissing";
+        let res = parse_http_response(raw).expect("valid http 404");
+        assert_eq!(res.status_code, 404);
+        assert_eq!(res.body, b"Missing");
+    }
+
+    #[test]
+    fn test_html_to_reader_document_conversion() {
+        let html = b"<html><head><title>InterOS Site</title></head><body><h1>Welcome</h1><p>This is a <b>sovereign</b> system.</p><p>Visit <a href=\"https://interos.tech\">Home</a> now.</p><ul><li>Feature 1</li></ul><pre><code>code sample</code></pre></body></html>";
+        let mut out = [0u8; 1024];
+        let n = html_to_reader_document(html, &mut out);
+        let doc = core::str::from_utf8(&out[..n]).unwrap();
+        assert!(doc.contains("# InterOS Site"));
+        assert!(doc.contains("# Welcome"));
+        assert!(doc.contains("This is a sovereign system."));
+        assert!(doc.contains("=> https://interos.tech Home"));
+        assert!(doc.contains("* Feature 1"));
+        assert!(doc.contains("```\ncode sample\n```"));
+    }
+
+    #[test]
+    fn test_format_proxy_request() {
+        let mut buf = [0u8; 256];
+        let n = format_proxy_request(b"https://interos.tech", &mut buf);
+        let req = core::str::from_utf8(&buf[..n]).unwrap();
+        assert!(req.starts_with("GET /api/browser/proxy?url=https%3A%2F%2Finteros.tech HTTP/1.1\r\n"));
+        assert!(req.contains("Host: 10.0.2.2:4300\r\n"));
+    }
+
+    #[test]
+    fn test_extract_proxy_html() {
+        let json = br#"{"success": true, "url": "https://interos.tech", "html": "<h1>InterOS</h1><p>Test</p>"}"#;
+        let mut out = [0u8; 128];
+        let n = extract_proxy_html(json, &mut out);
+        let html = core::str::from_utf8(&out[..n]).unwrap();
+        assert_eq!(html, "<h1>InterOS</h1><p>Test</p>");
+    }
+
+    /// The reader pipeline, exercised against a real page captured from the
+    /// Device Studio proxy.
+    ///
+    /// WHY this reads a file rather than an inline string: a hand-written
+    /// fixture proves only that the parser handles the markup its author
+    /// imagined. The live page is 57 KB of real markup, and the pipeline
+    /// has to survive it.
+    ///
+    /// The test is skipped when the fixture is absent, so the suite still
+    /// runs on a machine with no Studio. Capture one with:
+    ///   python tools/capture_browser_fixture.py
+    #[test]
+    fn test_the_reader_pipeline_survives_a_live_page() {
+        let Ok(path) = std::env::var("INTEROS_BROWSER_FIXTURE") else {
+            eprintln!("skipping: INTEROS_BROWSER_FIXTURE is not set");
+            return;
+        };
+        let Ok(raw) = std::fs::read(&path) else {
+            panic!("INTEROS_BROWSER_FIXTURE points at {path}, which could not be read");
+        };
+        assert!(raw.len() > 1024, "the captured proxy response is implausibly small");
+
+        // 1. The HTML is extracted from the proxy's JSON envelope.
+        let mut html = [0u8; MAX_HTML_BYTES];
+        let html_len = extract_proxy_html(&raw, &mut html);
+        assert!(html_len > 0, "no HTML was extracted from the proxy response");
+        assert!(html_len <= MAX_HTML_BYTES);
+
+        let html_text = core::str::from_utf8(&html[..html_len])
+            .expect("the extracted HTML is not valid UTF-8");
+        assert!(
+            html_text.contains("<html") || html_text.contains("<!doctype"),
+            "the extracted HTML does not look like a document"
+        );
+
+        // 2. The document is parsed from it.
+        let mut doc = [0u8; MAX_READER_BYTES];
+        let doc_len = html_to_reader_document(&html_text.as_bytes(), &mut doc);
+        assert!(doc_len > 0, "the reader produced an empty document");
+        assert!(doc_len <= MAX_READER_BYTES);
+
+        let reader_text = core::str::from_utf8(&doc[..doc_len]).expect("reader text is not UTF-8");
+
+        // 3. The document carries the page's real structure, not just the
+        //    first few hundred bytes of its <head>.
+        let lower = reader_text.to_ascii_lowercase();
+        assert!(
+            lower.contains("interos"),
+            "the reader text does not mention the page it came from"
+        );
+        assert!(
+            reader_text.contains('#') || reader_text.contains("InterOS"),
+            "the reader text carries no heading at all"
+        );
+
+        // 4. The pipeline did not simply stop at the first buffer boundary.
+        //    A truncated document ends mid-attribute or mid-sentence, so the
+        //    last line must still be a complete one.
+        let last_line = reader_text
+            .split('\n')
+            .filter(|line| !line.trim().is_empty())
+            .last()
+            .expect("the reader text has no lines");
+        assert!(
+            !last_line.ends_with('<') && !last_line.ends_with("="),
+            "the reader text was cut mid-tag: {last_line:?}"
+        );
     }
 }

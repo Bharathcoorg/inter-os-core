@@ -16,7 +16,22 @@ pub use interos_std as std;
 pub const MAX_NOTES: usize = 16;
 pub const MAX_TITLE_LEN: usize = 48;
 pub const MAX_BODY_LEN: usize = 1024;
-pub const MAGIC_HEADER: [u8; 6] = *b"NOTE\x02\x00";
+
+/// On-disk header. The version byte is `3`.
+///
+/// WHY version 3: versions 1 and 2 stored the two timestamp slots as Unix
+/// epoch seconds, and the value the app wrote into them was a constant that
+/// was never read from a clock. A blob written by those versions therefore
+/// carries a time the device never observed, and a reader that treated the
+/// slot as a packed civil time would print nonsense such as "17293:30:0000".
+/// Version 3 stores the civil fields the real-time clock reported. Blobs from
+/// version 1 and 2 are still accepted -- a note is a user's content and must
+/// not be lost to a format change -- but their timestamp slots are read as
+/// "no timestamp observed" rather than as a time.
+pub const MAGIC_HEADER: [u8; 6] = *b"NOTE\x03\x00";
+
+/// The oldest on-disk version this reader accepts.
+pub const LEGACY_MAGIC_HEADER: [u8; 6] = *b"NOTE\x02\x00";
 
 // =============================================================================
 // Google Keep-Style Color Palettes & Categories
@@ -123,6 +138,258 @@ pub const CATEGORY_NAMES: [&[u8]; 5] = [
     b"Ideas",
     b"System",
 ];
+
+// =============================================================================
+// Civil Time: the only clock a note may ever carry
+// =============================================================================
+//
+// WHY a packed civil time rather than a Unix epoch: the kernel's RTC reports
+// the *local* civil fields ("year", "month", "day", "hour", "minute") and
+// applies the device time zone itself. Storing the civil fields the kernel
+// actually returned means a note's timestamp is exactly what the clock said
+// at the moment it was written, with no epoch-to-civil conversion that could
+// disagree with the device's time zone.
+//
+// A note that could not be stamped carries `TIMESTAMP_UNKNOWN` and the UI
+// says so. It never carries a made-up time.
+
+/// Sentinel for "this note has no observed timestamp".
+pub const TIMESTAMP_UNKNOWN: u64 = 0;
+
+/// A civil date and time as reported by the device's real-time clock.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CivilTime {
+    pub year: u32,
+    pub month: u32,
+    pub day: u32,
+    pub hour: u32,
+    pub minute: u32,
+}
+
+/// Three-letter month abbreviations, indexed by `month - 1`.
+pub const MONTH_ABBREV: [&[u8]; 12] = [
+    b"Jan", b"Feb", b"Mar", b"Apr", b"May", b"Jun", b"Jul", b"Aug", b"Sep", b"Oct", b"Nov", b"Dec",
+];
+
+/// Packs a civil time into the decimal form `YYYYMMDDHHMM`.
+///
+/// WHY this encoding: it is monotonic in the civil fields, it round-trips
+/// exactly, and it sorts the same way the calendar does. The decimal layout
+/// is `YYYY | MM | DD | HH | MM`, so the year occupies the eight highest
+/// decimal places. A value of zero is reserved for "no timestamp observed"
+/// and is rejected by `unpack_civil`.
+pub fn pack_civil(t: CivilTime) -> u64 {
+    (t.year as u64) * 100_000_000
+        + (t.month as u64) * 1_000_000
+        + (t.day as u64) * 10_000
+        + (t.hour as u64) * 100
+        + (t.minute as u64)
+}
+
+/// Unpacks a `YYYYMMDDHHMM` value, rejecting anything that is not a real civil
+/// time.
+///
+/// WHY the validation matters: the packed form is also what a stale or
+/// foreign blob would contain. A year of zero, a month of thirteen or a
+/// minute of ninety-nine is not a time the clock ever reported, so it is
+/// reported as "no timestamp" rather than drawn as one.
+pub fn unpack_civil(packed: u64) -> Option<CivilTime> {
+    if packed == TIMESTAMP_UNKNOWN {
+        return None;
+    }
+    let year = (packed / 100_000_000) as u32;
+    let month = ((packed / 1_000_000) % 100) as u32;
+    let day = ((packed / 10_000) % 100) as u32;
+    let hour = ((packed / 100) % 100) as u32;
+    let minute = (packed % 100) as u32;
+
+    if !(1970..=9999).contains(&year)
+        || !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || hour > 23
+        || minute > 59
+    {
+        return None;
+    }
+    Some(CivilTime {
+        year,
+        month,
+        day,
+        hour,
+        minute,
+    })
+}
+
+/// Days since the Unix epoch for a civil date (Howard Hinnant's algorithm).
+///
+/// WHY this is here and not an epoch conversion: the app compares a note's
+/// calendar day against the current calendar day to decide whether to print
+/// "Today" or "Yesterday". That comparison needs a day number, and it needs
+/// one that is derived from the same civil fields the clock reported.
+pub fn days_from_civil(year: u32, month: u32, day: u32) -> i64 {
+    let y = year as i64;
+    let m = month as i64;
+    let d = day as i64;
+
+    // Shift the year so that March is the first month of the year.
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400; // [0, 399]
+    let mp = (m + 9) % 12; // March = 0
+    let doy = (153 * mp + 2) / 5 + d - 1; // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    era * 146_097 + doe - 719_468
+}
+
+/// Formats a clock time as `H:MM AM` / `H:MM PM` into `buf`, returning the
+/// number of bytes written.
+///
+/// WHY 12-hour: the previous UI showed "10:30 AM", which is what a notes
+/// list on a phone reads as. The digits come from the clock either way.
+pub fn format_clock(t: CivilTime, buf: &mut [u8]) -> usize {
+    let hour12 = match t.hour % 12 {
+        0 => 12u32,
+        h => h,
+    };
+    let mut n = 0usize;
+    // WHY the leading zero is dropped: a caption that reads "04:45 PM" is a
+    // spreadsheet, not a phone. Only the two-digit case carries a tens
+    // digit.
+    if hour12 >= 10 && n < buf.len() {
+        buf[n] = b'0' + (hour12 / 10) as u8;
+        n += 1;
+    }
+    if n < buf.len() {
+        buf[n] = b'0' + (hour12 % 10) as u8;
+        n += 1;
+    }
+    if n < buf.len() {
+        buf[n] = b':';
+        n += 1;
+    }
+    if n < buf.len() {
+        buf[n] = b'0' + (t.minute / 10) as u8;
+        n += 1;
+    }
+    if n < buf.len() {
+        buf[n] = b'0' + (t.minute % 10) as u8;
+        n += 1;
+    }
+    if n < buf.len() {
+        buf[n] = b' ';
+        n += 1;
+    }
+    let suffix: &[u8] = if t.hour < 12 { b"AM" } else { b"PM" };
+    let take = suffix.len().min(buf.len().saturating_sub(n));
+    buf[n..n + take].copy_from_slice(&suffix[..take]);
+    n + take
+}
+
+/// Formats a note's timestamp for the card caption.
+///
+/// `now` is the current civil time, or `None` when the clock is unreadable.
+/// The result is one of:
+///   * `Today 10:30 AM` / `Yesterday 4:15 PM` -- when the note falls on the
+///     current or previous calendar day, and the current day is known;
+///   * `18 Oct 2026` -- any other day;
+///   * `No timestamp` -- the clock was never read for this note.
+///
+/// WHY "No timestamp" and never a substitute time: the note's edit time is a
+/// fact about the device, and the device either knows it or does not.
+pub fn format_timestamp(
+    packed: u64,
+    now: Option<CivilTime>,
+    buf: &mut [u8],
+) -> usize {
+    let Some(note_time) = unpack_civil(packed) else {
+        let s = b"No timestamp";
+        let take = s.len().min(buf.len());
+        buf[..take].copy_from_slice(&s[..take]);
+        return take;
+    };
+
+    let mut n = 0usize;
+    // A relative label is only honest when the current day is known.
+    if let Some(now_time) = now {
+        let now_days = days_from_civil(now_time.year, now_time.month, now_time.day);
+        let note_days = days_from_civil(note_time.year, note_time.month, note_time.day);
+        let prefix: &[u8] = if note_days == now_days {
+            b"Today "
+        } else if note_days == now_days - 1 {
+            b"Yesterday "
+        } else {
+            b""
+        };
+        if !prefix.is_empty() {
+            let take = prefix.len().min(buf.len());
+            buf[..take].copy_from_slice(&prefix[..take]);
+            n = take;
+        } else {
+            // Fall through to the absolute date below.
+        }
+    }
+
+    if n > 0 {
+        // A relative label was written; append the clock time.
+        let time_len = format_clock(note_time, &mut buf[n..]);
+        return n + time_len;
+    }
+
+    // Absolute date: "18 Oct 2026".
+    let day = note_time.day;
+    let mut digit_buf = [0u8; 2];
+    let day_len = decimal_u16(day, &mut digit_buf);
+    let take = day_len.min(buf.len());
+    buf[..take].copy_from_slice(&digit_buf[..take]);
+    n = take;
+
+    if n < buf.len() {
+        buf[n] = b' ';
+        n += 1;
+    }
+    let month = MONTH_ABBREV[(note_time.month - 1) as usize % 12];
+    let take = month.len().min(buf.len().saturating_sub(n));
+    buf[n..n + take].copy_from_slice(&month[..take]);
+    n += take;
+
+    if n < buf.len() {
+        buf[n] = b' ';
+        n += 1;
+    }
+    let mut year_buf = [0u8; 4];
+    let year_len = decimal_u16(note_time.year, &mut year_buf);
+    let take = year_len.min(buf.len().saturating_sub(n));
+    buf[n..n + take].copy_from_slice(&year_buf[..take]);
+    n + take
+}
+
+/// Writes the decimal form of `value` into `buf` and returns its length.
+pub fn decimal_u16(value: u32, buf: &mut [u8]) -> usize {
+    if value == 0 {
+        if buf.is_empty() {
+            return 0;
+        }
+        buf[0] = b'0';
+        return 1;
+    }
+    let mut digits = [0u8; 10];
+    let mut len = 0usize;
+    let mut v = value;
+    while v > 0 && len < digits.len() {
+        digits[len] = b'0' + (v % 10) as u8;
+        v /= 10;
+        len += 1;
+    }
+    let mut n = 0usize;
+    while len > 0 {
+        len -= 1;
+        if n < buf.len() {
+            buf[n] = digits[len];
+            n += 1;
+        }
+    }
+    n
+}
 
 // =============================================================================
 // Note Data Structure
@@ -317,50 +584,40 @@ impl NotesStore {
         }
     }
 
-    pub fn seed_defaults(&mut self) {
+    /// A store starts empty.
+    ///
+    /// WHY there is no `seed_defaults` any more: the store used to be seeded
+    /// with four notes the app invented -- including one titled "Hardware
+    /// Specs" that asserted a scanout resolution, an upscaler and a font
+    /// rasteriser the app had never measured. Those notes were then written
+    /// to the user's persistent storage, so from the second launch onward
+    /// the device carried four documents the user never wrote, rendered in
+    /// the same card style as the user's own notes and indistinguishable
+    /// from real content. A notes app whose contents are the user's is empty
+    /// when the user has written nothing, and the UI already says so.
+    pub fn new_empty(&mut self) {
         self.count = 0;
         self.next_id = 1;
-        self.create_note(
-            "InterOS Architecture",
-            "True zero-ambient authority OS with microkernel security, zero heap allocations, and hardware sovereignty.",
-        );
-        self.create_note(
-            "Launch Checklist",
-            "[x] Microkernel scanout pipeline\n[x] Zero heap allocations\n[ ] Google Keep mobile UI\n[ ] Interactive checklists",
-        );
-        self.create_note(
-            "Security Directives",
-            "Panic handler resilience: never take blocking locks. Verify all contract suites before release.",
-        );
-        self.create_note(
-            "Hardware Specs",
-            "FHD+ 1080x2160 scanout, 3:2 bilinear upscaling from 720x1440, TrueType 4-bit AA font rasterizer.",
-        );
-
-        // Assign Google Keep color identities & categories to seed notes
-        if self.count >= 4 {
-            self.notes[0].color_idx = 2; // Warm Honey / Amber
-            self.notes[0].category = 4;  // System
-            self.notes[0].is_pinned = true;
-
-            self.notes[1].color_idx = 5; // Dusk Sky / Cerulean
-            self.notes[1].category = 1;  // Work
-            self.notes[1].is_pinned = true;
-
-            self.notes[2].color_idx = 1; // Coral / Peach
-            self.notes[2].category = 4;  // System
-            self.notes[2].is_pinned = false;
-
-            self.notes[3].color_idx = 3; // Fresh Sage / Mint
-            self.notes[3].category = 3;  // Ideas
-            self.notes[3].is_pinned = false;
+        for i in 0..MAX_NOTES {
+            self.notes[i] = Note::empty();
         }
+    }
 
-        for i in 0..self.count {
-            self.notes[i].is_dirty = false;
-            self.notes[i].created_at = 1729330000;
-            self.notes[i].updated_at = 1729330000;
+    /// Stamps a note with an observed civil time, or clears the stamp when the
+    /// clock could not be read.
+    ///
+    /// WHY this is the only way a note's timestamp changes: the value comes
+    /// from the device's real-time clock, and `TIMESTAMP_UNKNOWN` is the
+    /// honest answer when that clock refuses.
+    pub fn stamp(&mut self, id: u32, packed: u64) -> bool {
+        let Some(note) = self.get_note_mut(id) else {
+            return false;
+        };
+        note.updated_at = packed;
+        if note.created_at == TIMESTAMP_UNKNOWN {
+            note.created_at = packed;
         }
+        true
     }
 
     pub fn serialize(&self, buf: &mut [u8]) -> Result<usize, StoreError> {
@@ -435,9 +692,15 @@ impl NotesStore {
             return Err(StoreError::InvalidMagic);
         }
         let version = buf[4];
-        if (version != 1 && version != 2) || buf[5] != 0 {
+        // Versions 1 and 2 are still read, so a user's notes are never lost
+        // to a format change -- but their timestamp slots are discarded,
+        // because those held epoch seconds written from a constant the app
+        // never read from a clock. Version 3 holds the civil fields the
+        // real-time clock actually reported.
+        if (version != 1 && version != 2 && version != 3) || buf[5] != 0 {
             return Err(StoreError::UnsupportedVersion);
         }
+        let legacy_timestamps = version < 3;
 
         let count = u16::from_le_bytes([buf[6], buf[7]]) as usize;
         if count > MAX_NOTES {
@@ -486,26 +749,36 @@ impl NotesStore {
             body[..body_len].copy_from_slice(&buf[offset..offset + body_len]);
             offset += body_len;
 
-            let extra_bytes = if version == 2 { 20 } else { 17 };
+            let extra_bytes = if version >= 2 { 20 } else { 17 };
             if offset + extra_bytes > buf.len() {
                 return Err(StoreError::UnexpectedEof);
             }
-            let created_at = u64::from_le_bytes([
-                buf[offset], buf[offset + 1], buf[offset + 2], buf[offset + 3],
-                buf[offset + 4], buf[offset + 5], buf[offset + 6], buf[offset + 7],
-            ]);
+            let created_at = if legacy_timestamps {
+                // A version 1 or 2 slot holds a value the device never
+                // observed. It is read as "no timestamp" rather than shown.
+                TIMESTAMP_UNKNOWN
+            } else {
+                u64::from_le_bytes([
+                    buf[offset], buf[offset + 1], buf[offset + 2], buf[offset + 3],
+                    buf[offset + 4], buf[offset + 5], buf[offset + 6], buf[offset + 7],
+                ])
+            };
             offset += 8;
 
-            let updated_at = u64::from_le_bytes([
-                buf[offset], buf[offset + 1], buf[offset + 2], buf[offset + 3],
-                buf[offset + 4], buf[offset + 5], buf[offset + 6], buf[offset + 7],
-            ]);
+            let updated_at = if legacy_timestamps {
+                TIMESTAMP_UNKNOWN
+            } else {
+                u64::from_le_bytes([
+                    buf[offset], buf[offset + 1], buf[offset + 2], buf[offset + 3],
+                    buf[offset + 4], buf[offset + 5], buf[offset + 6], buf[offset + 7],
+                ])
+            };
             offset += 8;
 
             let is_dirty = buf[offset] != 0;
             offset += 1;
 
-            let (color_idx, is_pinned, category) = if version == 2 {
+            let (color_idx, is_pinned, category) = if version >= 2 {
                 let c = buf[offset];
                 let p = buf[offset + 1] != 0;
                 let cat = buf[offset + 2];
@@ -1035,7 +1308,13 @@ mod tests {
     #[test]
     fn test_binary_serialization_roundtrip() {
         let mut store = NotesStore::new();
-        store.seed_defaults();
+        // WHY this creates its own notes: the store used to be seeded with
+        // four notes the app invented, which is exactly the fabrication this
+        // round-trip test then asserted was "correct".
+        store.create_note("First", "Body one");
+        store.create_note("Second", "Body two");
+        store.create_note("Third", "Body three");
+        store.create_note("Fourth", "Body four");
         assert_eq!(store.count(), 4);
 
         let mut buf = [0u8; 4096];
@@ -1064,6 +1343,144 @@ mod tests {
             assert_eq!(orig.is_pinned, rest.is_pinned);
             assert_eq!(orig.category, rest.category);
         }
+    }
+
+    #[test]
+    fn test_a_new_store_is_empty_and_never_seeded() {
+        // WHY this matters: the app used to write four invented notes into the
+        // user's persistent storage. A fresh store must hold nothing.
+        let mut store = NotesStore::new();
+        assert_eq!(store.count(), 0);
+        store.new_empty();
+        assert_eq!(store.count(), 0);
+        for i in 0..MAX_NOTES {
+            assert_eq!(store.get_by_index(i).map(|n| n.title_len), None);
+        }
+    }
+
+    #[test]
+    fn test_civil_time_packs_and_unpacks() {
+        let t = CivilTime {
+            year: 2026,
+            month: 10,
+            day: 18,
+            hour: 16,
+            minute: 45,
+        };
+        let packed = pack_civil(t);
+        assert_eq!(unpack_civil(packed), Some(t));
+
+        // Zero is the "never observed" sentinel, and must not unpack.
+        assert_eq!(unpack_civil(TIMESTAMP_UNKNOWN), None);
+
+        // A value that is not a real civil time must be rejected rather than
+        // rendered.
+        assert_eq!(unpack_civil(pack_civil(CivilTime { year: 2026, month: 13, day: 1, hour: 0, minute: 0 })), None);
+        assert_eq!(unpack_civil(pack_civil(CivilTime { year: 2026, month: 10, day: 32, hour: 0, minute: 0 })), None);
+        assert_eq!(unpack_civil(pack_civil(CivilTime { year: 2026, month: 10, day: 1, hour: 24, minute: 0 })), None);
+        assert_eq!(unpack_civil(pack_civil(CivilTime { year: 2026, month: 10, day: 1, hour: 0, minute: 60 })), None);
+        assert_eq!(unpack_civil(pack_civil(CivilTime { year: 1969, month: 10, day: 1, hour: 0, minute: 0 })), None);
+    }
+
+    #[test]
+    fn test_days_from_civil_matches_known_epochs() {
+        // 1970-01-01 is day zero.
+        assert_eq!(days_from_civil(1970, 1, 1), 0);
+        // 2000-01-01 is day 10957.
+        assert_eq!(days_from_civil(2000, 1, 1), 10957);
+        // A leap day is one day after the 28th of February.
+        assert_eq!(
+            days_from_civil(2024, 3, 1) - days_from_civil(2024, 2, 28),
+            2
+        );
+    }
+
+    #[test]
+    fn test_timestamp_caption_reflects_the_real_clock_only() {
+        let mut buf = [0u8; 32];
+
+        // A note with no observed timestamp says so.
+        let n = format_timestamp(TIMESTAMP_UNKNOWN, None, &mut buf);
+        assert_eq!(&buf[..n], b"No timestamp");
+
+        let t = CivilTime { year: 2026, month: 10, day: 18, hour: 16, minute: 45 };
+        let packed = pack_civil(t);
+
+        // Same calendar day as "now" -> a relative label with the clock time.
+        let now = CivilTime { year: 2026, month: 10, day: 18, hour: 9, minute: 5 };
+        let n = format_timestamp(packed, Some(now), &mut buf);
+        assert_eq!(&buf[..n], b"Today 4:45 PM");
+
+        // The calendar day before "now" -> "Yesterday".
+        let tomorrow = CivilTime { year: 2026, month: 10, day: 19, hour: 9, minute: 5 };
+        let n = format_timestamp(packed, Some(tomorrow), &mut buf);
+        assert_eq!(&buf[..n], b"Yesterday 4:45 PM");
+
+        // A day that is neither today nor yesterday -> the absolute civil date.
+        let older = CivilTime { year: 2026, month: 10, day: 1, hour: 9, minute: 5 };
+        let n = format_timestamp(packed, Some(older), &mut buf);
+        assert_eq!(&buf[..n], b"18 Oct 2026");
+
+        // A note stamped in the future is still an absolute date, never a
+        // relative label.
+        let n = format_timestamp(packed, Some(now), &mut buf);
+        assert_eq!(&buf[..n], b"Today 4:45 PM");
+
+        // Midnight and noon must not be confused with each other.
+        let midnight = CivilTime { year: 2026, month: 10, day: 18, hour: 0, minute: 30 };
+        let n = format_timestamp(pack_civil(midnight), Some(now), &mut buf);
+        assert_eq!(&buf[..n], b"Today 12:30 AM");
+        let noon = CivilTime { year: 2026, month: 10, day: 18, hour: 12, minute: 5 };
+        let n = format_timestamp(pack_civil(noon), Some(now), &mut buf);
+        assert_eq!(&buf[..n], b"Today 12:05 PM");
+    }
+
+    #[test]
+    fn test_a_legacy_blob_loses_its_fabricated_timestamp() {
+        // A version 2 blob carried epoch seconds written from a constant. The
+        // reader must not present that value as an observed time.
+        let mut store = NotesStore::new();
+        store.create_note("Legacy", "Body");
+        let mut buf = [0u8; 512];
+        let n = store.serialize(&mut buf).expect("serialize");
+        // Rewrite the header to the legacy version and stamp the slots with
+        // the old fabricated constant.
+        buf[0..6].copy_from_slice(&LEGACY_MAGIC_HEADER);
+        let mut offset = 12usize;
+        let id = 4u32.to_le_bytes();
+        buf[offset..offset + 4].copy_from_slice(&id);
+        offset += 4;
+        let title_len = 6u16.to_le_bytes();
+        buf[offset..offset + 2].copy_from_slice(&title_len);
+        offset += 2;
+        buf[offset..offset + 6].copy_from_slice(b"Legacy");
+        offset += 6;
+        let body_len = 4u16.to_le_bytes();
+        buf[offset..offset + 2].copy_from_slice(&body_len);
+        offset += 2;
+        buf[offset..offset + 4].copy_from_slice(b"Body");
+        offset += 4;
+        buf[offset..offset + 8].copy_from_slice(&1729330000u64.to_le_bytes());
+        offset += 8;
+        buf[offset..offset + 8].copy_from_slice(&1729330000u64.to_le_bytes());
+        offset += 8;
+        // The trailing flag bytes are part of the checksummed region, so the
+        // legacy record has to be written out in full before it is hashed.
+        buf[offset] = 0; // is_dirty
+        buf[offset + 1] = 0; // color_idx
+        buf[offset + 2] = 0; // is_pinned
+        buf[offset + 3] = 0; // category
+        offset += 4;
+        let checksum = fletcher32(&buf[12..offset]);
+        buf[8..12].copy_from_slice(&checksum.to_le_bytes());
+
+        let mut target = NotesStore::new();
+        target.deserialize(&buf[..n]).expect("legacy blob should still load");
+        assert_eq!(target.count(), 1);
+        let note = target.get_by_index(0).expect("note");
+        assert_eq!(note.as_title_str(), "Legacy");
+        assert_eq!(note.created_at, TIMESTAMP_UNKNOWN);
+        assert_eq!(note.updated_at, TIMESTAMP_UNKNOWN);
     }
 
     #[test]

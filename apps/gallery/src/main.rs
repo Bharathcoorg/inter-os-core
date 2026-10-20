@@ -42,10 +42,10 @@ use std::design::touch;
 use std::design::walls;
 
 pub use gallery::{
-    decode_bmp, decode_image, decode_ppm, decode_qoi, decode_raw, encode_ppm,
-    has_image_suffix, has_video_suffix, is_media_file, media_at_with_storage,
-    Filter, GalleryTab, Media, StorageMediaItem, VideoCodec, VideoPlayerState,
-    MAX_STORAGE_ITEMS,
+    decode_bmp, decode_image, decode_ppm, decode_qoi, decode_raw,
+    encode_ppm, has_image_suffix, has_video_suffix, is_media_file, media_at_with_storage,
+    Filter, GalleryTab, Media, StorageMediaItem, Thumbnail, VideoCodec, VideoPlayerState,
+    MAX_STORAGE_ITEMS, THUMB_H, THUMB_W,
 };
 
 const W: usize = 720;
@@ -80,6 +80,62 @@ const NEON_BLUE: u32 = 0xFF38BDF8;
 /// serves `fs_list` and `settings_get`, because the settings gate
 /// (`sys_settings_get`) accepts `FileSystemRead` with READ rights exactly as
 /// `fs_list` does.
+/// Decoded thumbnails for the stored media items, one per slot.
+///
+/// WHY a cache and not a decode per frame: decoding a stored image is a
+/// file read, and the grid renders per pixel. The thumbnail is decoded once
+/// when the storage is scanned.
+static mut STORAGE_THUMBS: [Thumbnail; MAX_STORAGE_ITEMS] = [Thumbnail::EMPTY; MAX_STORAGE_ITEMS];
+
+/// Scratch buffer for reading a stored image file.
+static mut FILE_SCRATCH: [u8; FILE_SCRATCH_LEN] = [0; FILE_SCRATCH_LEN];
+
+/// Scratch buffer for the full RGBA decode of a stored image.
+static mut DECODE_SCRATCH: [u8; DECODE_SCRATCH_LEN] = [0; DECODE_SCRATCH_LEN];
+
+/// Length of the file read scratch buffer.
+const FILE_SCRATCH_LEN: usize = 16 * 1024;
+
+/// Length of the RGBA decode scratch buffer.
+///
+/// WHY this size: it matches the largest image the gallery's decoders can
+/// produce, so a decode either fits or is refused rather than truncating.
+const DECODE_SCRATCH_LEN: usize = 36 * 72 * 4;
+
+/// Decodes a stored image file into a thumbnail.
+///
+/// Returns `None` when the file cannot be read, or is not an image the
+/// gallery can decode. The caller then draws a labelled placeholder rather
+/// than a stand-in for the picture.
+fn decode_thumbnail(path: &[u8], name: &[u8]) -> Option<Thumbnail> {
+    let read_slot = fs_read_slot()?;
+    let path_str = core::str::from_utf8(path).ok()?;
+
+    let read_bytes = {
+        let buf = unsafe { &mut *core::ptr::addr_of_mut!(FILE_SCRATCH) };
+        let fd = std::fs_open(read_slot, path_str, std::FS_READ).ok()?;
+        let n = std::fs_read(read_slot, fd, buf).ok()?;
+        let _ = std::fs_close(fd);
+        n
+    };
+    if read_bytes == 0 {
+        return None;
+    }
+
+    let decoded = {
+        let buf = unsafe { &mut *core::ptr::addr_of_mut!(DECODE_SCRATCH) };
+        let data = unsafe { &*core::ptr::addr_of!(FILE_SCRATCH) };
+        decode_image(&data[..read_bytes.min(FILE_SCRATCH_LEN)], name, buf).ok()?
+    };
+    let (w, h, _len) = decoded;
+
+    let thumb = {
+        let buf = unsafe { &*core::ptr::addr_of!(DECODE_SCRATCH) };
+        Thumbnail::from_rgba(buf, w, h)?
+    };
+    Some(thumb)
+}
+
 #[inline]
 fn fs_read_slot() -> Option<usize> {
     std::cap_lookup(std::cap_type::FILE_SYSTEM_READ, 0).ok()
@@ -896,20 +952,26 @@ impl GalleryApp {
                         }
                     }
 
-                    if is_video {
-                        item.primary_color = 0xFF1E293B;
-                        item.secondary_color = 0xFF0F172A;
+                    // WHY the tile colours are neutral now: they used to be
+                    // hashed from the file name, which produced a gradient
+                    // that looked like a preview of the photograph and was
+                    // not one. A stored image that can be decoded is drawn
+                    // from its own pixels; one that cannot gets a neutral
+                    // placeholder and says so.
+                    item.primary_color = 0xFF1E293B;
+                    item.secondary_color = 0xFF0F172A;
+
+                    let slot = self.storage_count;
+                    if !is_video {
+                        let thumb =
+                            decode_thumbnail(&item.path[..item.path_len], &item.name[..item.name_len]);
+                        unsafe {
+                            STORAGE_THUMBS[slot] = thumb.unwrap_or(Thumbnail::EMPTY);
+                        }
                     } else {
-                        let hash = name_bytes.iter().fold(0u32, |acc, &b| acc.wrapping_mul(31).wrapping_add(b as u32));
-                        let hues = [
-                            (0xFF1E3A8A, 0xFF172554),
-                            (0xFF14532D, 0xFF052E16),
-                            (0xFF701A75, 0xFF4A044E),
-                            (0xFF7C2D12, 0xFF451A03),
-                        ];
-                        let (c1, c2) = hues[(hash as usize) % hues.len()];
-                        item.primary_color = c1;
-                        item.secondary_color = c2;
+                        unsafe {
+                            STORAGE_THUMBS[slot] = Thumbnail::EMPTY;
+                        }
                     }
 
                     self.storage_items[self.storage_count] = item;
@@ -1287,8 +1349,27 @@ fn storage_cell_pixel(x: usize, y: usize, app: &GalleryApp, idx: usize, col: usi
 
     let card_img_h = CELL - CAPTION_H;
     if y < y0 + card_img_h {
-        let t = ((y - y0) * 255 / card_img_h.max(1)).min(255);
-        let grad = blend_argb(item.primary_color, item.secondary_color, t);
+        // WHY the tile is drawn from the file's own pixels: the fill used
+        // to be a gradient whose colours were hashed from the file name.
+        // That looked like a preview of the photograph and was not one.
+        // Now a stored image the gallery could decode is drawn from its
+        // decoded thumbnail, and one it could not is drawn as a neutral
+        // placeholder that says so.
+        let thumb = unsafe { STORAGE_THUMBS[idx] };
+        let grad = match thumb.sample(
+            (x - x0) * THUMB_W / CELL,
+            (y - y0) * THUMB_H / card_img_h.max(1),
+        ) {
+            Some(colour) => colour,
+            None => {
+                if (x - x0) < 1 || (x - x0) >= CELL - 1 || (y - y0) < 1 || (y - y0) >= card_img_h - 1
+                {
+                    BORDER
+                } else {
+                    SURFACE
+                }
+            }
+        };
 
         if item.is_favourite && x >= x0 + CELL - 28 && x < x0 + CELL - 8 && y >= y0 + 8 && y < y0 + 28 {
             let cx = x0 + CELL - 18;
@@ -1660,17 +1741,24 @@ fn video_card_pixel(x: usize, y: usize, app: &GalleryApp, storage_idx: usize, co
             return 0xCC0F172A;
         }
 
-        // Duration badge in bottom-right corner: e.g. "02:45"
-        let badge_rect = Rect::new(x0 + VIDEO_COL_W - 68, y0 + thumb_h - 30, 56, 22);
+        // Size badge in bottom-right corner.
+        //
+        // WHY the badge shows a size and not a duration: the old badge read
+        // "02:45" for every video, a literal that was never read from a
+        // file. The gallery cannot know a video's duration without parsing
+        // its container, but the file's size is a real measurement from the
+        // directory listing.
+        let badge_rect = Rect::new(x0 + VIDEO_COL_W - 92, y0 + thumb_h - 30, 80, 22);
         if badge_rect.contains(x, y) {
             let b_shape = draw_rounded_rect(x, y, badge_rect, radius::SMALL, 0xCC000000, Some(BORDER), 1);
             if let Some(bc) = b_shape {
                 if bc != 0xCC000000 { return bc; }
-                let dur_str = b"02:45";
-                let dw = font::measure(dur_str, 1);
+                let mut size_buf = [0u8; 20];
+                let size_len = append_u64(&mut size_buf, 0, item.size);
+                let dw = font::measure(&size_buf[..size_len], 1);
                 let dx_pos = badge_rect.x + (badge_rect.w.saturating_sub(dw)) / 2;
                 let dy_pos = badge_rect.y + (badge_rect.h.saturating_sub(font::line_height(1))) / 2;
-                if let Some(tc) = text(x, y, dx_pos, dy_pos, 1, dur_str, 0xFFFFFFFF, 0xCC000000) {
+                if let Some(tc) = text(x, y, dx_pos, dy_pos, 1, &size_buf[..size_len], 0xFFFFFFFF, 0xCC000000) {
                     return tc;
                 }
                 return 0xCC000000;
@@ -1691,15 +1779,33 @@ fn video_card_pixel(x: usize, y: usize, app: &GalleryApp, storage_idx: usize, co
         return c;
     }
 
-    // Subtitle line (Codec / HD)
-    let meta_str: &[u8] = if item.name[..item.name_len].ends_with(b".webm") {
-        b"VP9 - 1080p HD"
-    } else if item.name[..item.name_len].ends_with(b".mkv") {
-        b"AV1 - 720p HD"
-    } else {
-        b"H.264 - 1080p HD"
-    };
-    if let Some(c) = text(x, y, x0 + 12, y0 + thumb_h + 36, 1, meta_str, MUTED, SURFACE) {
+    // Subtitle line (container and measured size).
+    //
+    // WHY the codec and resolution are gone: the old line read "VP9 -
+    // 1080p HD" or "H.264 - 1080p HD", derived from the file extension
+    // alone. An extension names a container, not a codec, and a resolution
+    // cannot be known without parsing the file. What the name does state
+    // is the container, and the size is a real measurement.
+    let mut meta_buf = [0u8; 44];
+    let mut meta_len = 0usize;
+    meta_len = append(&mut meta_buf, meta_len, b"Container ");
+    let name = &item.name[..item.name_len];
+    if let Some(dot) = name.iter().rposition(|&b| b == b'.') {
+        for &b in &name[dot + 1..] {
+            if meta_len >= meta_buf.len() {
+                break;
+            }
+            meta_buf[meta_len] = b.to_ascii_uppercase();
+            meta_len += 1;
+        }
+    }
+    meta_len = append(&mut meta_buf, meta_len, b"  ");
+    let mut size_buf = [0u8; 20];
+    let size_len = append_u64(&mut size_buf, 0, item.size);
+    meta_len = append(&mut meta_buf, meta_len, b"  ");
+    meta_len = append(&mut meta_buf, meta_len, &size_buf[..size_len]);
+    meta_len = append(&mut meta_buf, meta_len, b" bytes");
+    if let Some(c) = text(x, y, x0 + 12, y0 + thumb_h + 36, 1, &meta_buf[..meta_len], MUTED, SURFACE) {
         return c;
     }
 
@@ -1925,6 +2031,16 @@ fn nav_pixel(x: usize, y: usize) -> Option<u32> {
 const DETAIL_BACK: Rect = Rect::new(MARGIN, 28, touch::PRIMARY_ACTION, touch::PRIMARY_ACTION);
 
 fn format_video_time(pos_ms: u32, dur_ms: u32, out: &mut [u8; 32]) -> usize {
+    // WHY an unknown duration is shown as dashes: the gallery cannot parse
+    // a container, so it does not know how long a video is. Printing
+    // "00:00 / 00:00" would say the video is zero seconds long, which is a
+    // different and wrong claim.
+    if dur_ms == 0 {
+        let unknown = b"--:-- / --:--";
+        let take = unknown.len().min(out.len());
+        out[..take].copy_from_slice(&unknown[..take]);
+        return take;
+    }
     let p_sec = pos_ms / 1000;
     let d_sec = dur_ms / 1000;
     let pm = p_sec / 60;
@@ -2618,20 +2734,16 @@ fn open_media(app: &mut GalleryApp, media: Media) -> Tap {
                 app.detail_title_len = item.name_len;
                 app.detail_title = b"";
                 if item.is_video {
-                    let codec = if item.name[..item.name_len].ends_with(b".webm") {
-                        VideoCodec::Vp9
-                    } else if item.name[..item.name_len].ends_with(b".mkv") {
-                        VideoCodec::Av1
-                    } else if item.name[..item.name_len].ends_with(b".avi") {
-                        VideoCodec::Mpeg4
-                    } else {
-                        VideoCodec::H264Avc
-                    };
-                    let mut player = VideoPlayerState::new(30000, codec);
-                    player.is_playing = true;
+                    // WHY the player starts with an undetermined duration
+                    // and codec: the old code opened every video with a
+                    // hardcoded thirty-second duration and a codec guessed
+                    // from the file extension, and the scrubber then showed
+                    // that duration as though it had been measured. The
+                    // gallery cannot parse a container, so both are unknown.
+                    let player = VideoPlayerState::new_undetermined();
                     app.video_player = Some(player);
                     let mut n = append(&mut app.detail_meta, 0, b"Video, ");
-                    n = append(&mut app.detail_meta, n, codec.as_str().as_bytes());
+                    n = append(&mut app.detail_meta, n, VideoCodec::Undetermined.as_str().as_bytes());
                     app.detail_meta_len = n;
                     std::log(0, "[GALLERY] Storage video opened in video player.").ok();
                 } else {

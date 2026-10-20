@@ -79,6 +79,92 @@ pub fn append_u64(buf: &mut [u8], mut n: usize, mut value: u64) -> usize {
     n
 }
 
+/// Width of a decoded thumbnail, in pixels.
+pub const THUMB_W: usize = 54;
+
+/// Height of a decoded thumbnail, in pixels.
+pub const THUMB_H: usize = 42;
+
+/// Number of bytes a decoded thumbnail occupies (RGB triples).
+pub const THUMB_BYTES: usize = THUMB_W * THUMB_H * 3;
+
+/// A decoded thumbnail of a stored image.
+///
+/// WHY a thumbnail exists at all: the grid used to paint each stored file
+/// with a gradient whose colours were hashed from the file name. That is a
+/// picture of nothing -- it looks like a preview of the photograph and is
+/// not one. A thumbnail here is either the real image, decoded from the
+/// file, or it is absent and the tile says so.
+#[derive(Clone, Copy)]
+pub struct Thumbnail {
+    /// RGB triples, row-major.
+    pub rgb: [u8; THUMB_BYTES],
+    /// Whether the thumbnail holds a decoded image.
+    pub valid: bool,
+}
+
+impl Thumbnail {
+    /// The empty thumbnail -- no image was decoded.
+    pub const EMPTY: Self = Self {
+        rgb: [0u8; THUMB_BYTES],
+        valid: false,
+    };
+
+    /// Scales a decoded RGBA image down into a thumbnail.
+    ///
+    /// Returns `None` when the source is empty. A source that is smaller
+    /// than the thumbnail is sampled by nearest neighbour, which is enough
+    /// for a preview and never invents a pixel that was not in the file.
+    pub fn from_rgba(rgba: &[u8], src_w: u32, src_h: u32) -> Option<Self> {
+        if src_w == 0 || src_h == 0 {
+            return None;
+        }
+        let mut thumb = Self {
+            rgb: [0u8; THUMB_BYTES],
+            valid: true,
+        };
+        for ty in 0..THUMB_H {
+            // Nearest-neighbour sample: pick the source row that this
+            // thumbnail row maps to.
+            let sy = (ty as u64 * src_h as u64 / THUMB_H as u64) as usize;
+            let sy = if sy >= src_h as usize { src_h as usize - 1 } else { sy };
+            for tx in 0..THUMB_W {
+                let sx = (tx as u64 * src_w as u64 / THUMB_W as u64) as usize;
+                let sx = if sx >= src_w as usize { src_w as usize - 1 } else { sx };
+                let src = (sy * src_w as usize + sx) * 4;
+                if src + 3 >= rgba.len() {
+                    continue;
+                }
+                let dst = (ty * THUMB_W + tx) * 3;
+                thumb.rgb[dst] = rgba[src];
+                thumb.rgb[dst + 1] = rgba[src + 1];
+                thumb.rgb[dst + 2] = rgba[src + 2];
+            }
+        }
+        Some(thumb)
+    }
+
+    /// The colour of the thumbnail at a point inside the tile.
+    ///
+    /// Returns `None` when the thumbnail holds no image, so the caller can
+    /// draw a placeholder rather than a colour.
+    pub fn sample(&self, tx: usize, ty: usize) -> Option<u32> {
+        if !self.valid {
+            return None;
+        }
+        if tx >= THUMB_W || ty >= THUMB_H {
+            return None;
+        }
+        let i = (ty * THUMB_W + tx) * 3;
+        Some(
+            0xFF000000
+                | ((self.rgb[i] as u32) << 16)
+                | ((self.rgb[i + 1] as u32) << 8)
+                | (self.rgb[i + 2] as u32),
+        )
+    }
+}
+
 /// One media item the gallery can show or play.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Media {
@@ -156,19 +242,24 @@ impl StorageMediaItem {
 /// Supported mobile video codecs.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum VideoCodec {
-    H264Avc,
-    Vp9,
-    Av1,
-    Mpeg4,
+    /// The container was not parsed, so the codec is not known.
+    Undetermined,
 }
 
 impl VideoCodec {
-    pub fn as_str(self) -> &'static str {
+    /// A description of what is actually known about the codec.
+    ///
+    /// WHY this says almost nothing: a file extension names a *container*,
+    /// not a codec. An `.mp4` may carry H.264, HEVC or AV1; a `.webm` may
+    /// carry VP8, VP9 or AV1; an `.mkv` may carry anything at all. The old
+    /// code mapped extensions to codecs and then printed claims such as
+    /// "H.264 / AVC 1080p", "VP9 - 60 FPS" and "AV1 - HDR10" -- a codec, a
+    /// resolution, a frame rate and a colour profile, none of which had
+    /// been read from a file. Until the container is parsed, the codec is
+    /// undetermined, and that is what the screen says.
+    pub const fn as_str(self) -> &'static str {
         match self {
-            VideoCodec::H264Avc => "H.264 / AVC 1080p",
-            VideoCodec::Vp9 => "VP9 • 60 FPS",
-            VideoCodec::Av1 => "AV1 • HDR10",
-            VideoCodec::Mpeg4 => "MPEG-4 Part 2",
+            Self::Undetermined => "Codec undetermined (container not parsed)",
         }
     }
 }
@@ -207,17 +298,30 @@ pub struct VideoPlayerState {
 }
 
 impl VideoPlayerState {
-    pub const fn new(duration_ms: u32, codec: VideoCodec) -> Self {
+    /// Creates a player state for a file whose duration is not known.
+    ///
+    /// WHY the duration is not an argument: the gallery used to open every
+    /// video with a hardcoded 30-second duration, which the scrubber, the
+    /// elapsed clock and the progress bar then displayed as though it had
+    /// been measured. A container's duration is only known once the
+    /// container is parsed, so until then the duration is zero and the
+    /// screen shows that it is unknown.
+    pub const fn new_undetermined() -> Self {
         Self {
-            is_playing: true,
+            is_playing: false,
             position_ms: 0,
-            duration_ms,
+            duration_ms: 0,
             is_fullscreen: false,
             is_fill: false,
-            codec,
-            width: 720,
-            height: 1280,
+            codec: VideoCodec::Undetermined,
+            width: 0,
+            height: 0,
         }
+    }
+
+    /// Whether the media's duration is known.
+    pub const fn has_known_duration(&self) -> bool {
+        self.duration_ms > 0
     }
 
     pub fn toggle_play(&mut self) {
@@ -753,11 +857,23 @@ mod tests {
         assert!(item.is_video);
         assert!(item.is_favourite);
 
-        let mut player = VideoPlayerState::new(60_000, VideoCodec::H264Avc);
-        assert!(player.is_playing);
+        let mut player = VideoPlayerState::new_undetermined();
+        // WHY the duration starts unknown: the gallery cannot parse a
+        // container, so it must not claim a length it never read.
+        assert!(!player.is_playing);
         assert_eq!(player.position_ms, 0);
-        assert_eq!(player.codec.as_str(), "H.264 / AVC 1080p");
+        assert_eq!(player.duration_ms, 0);
+        assert!(!player.has_known_duration());
+        assert_eq!(player.codec.as_str(), "Codec undetermined (container not parsed)");
 
+        // A player with no known duration never advances its position.
+        player.advance_ticks(10);
+        assert_eq!(player.position_ms, 0);
+
+        // A player with a known duration advances and seeks.
+        player.duration_ms = 60_000;
+        player.is_playing = true;
+        assert!(player.has_known_duration());
         player.advance_ticks(10);
         assert_eq!(player.position_ms, 160);
 
@@ -768,6 +884,32 @@ mod tests {
         assert!(!player.is_playing);
         player.advance_ticks(10);
         assert_eq!(player.position_ms, 30_000); // does not advance when paused
+    }
+
+    #[test]
+    fn test_a_thumbnail_holds_only_decoded_pixels() {
+        // WHY this matters: the grid used to fill each stored file with a
+        // gradient hashed from its name. A thumbnail is either the real
+        // image or it is absent.
+        let empty = Thumbnail::EMPTY;
+        assert!(!empty.valid);
+        assert_eq!(empty.sample(0, 0), None);
+
+        // A two-by-two red image, scaled into the thumbnail.
+        let mut rgba = [0u8; 4 * 4];
+        for px in rgba.chunks_exact_mut(4) {
+            px[0] = 255;
+            px[1] = 0;
+            px[2] = 0;
+            px[3] = 255;
+        }
+        let thumb = Thumbnail::from_rgba(&rgba, 2, 2).expect("thumbnail");
+        assert!(thumb.valid);
+        let colour = thumb.sample(0, 0).expect("a pixel");
+        assert_eq!(colour & 0x00FF_FFFF, 0x00FF_0000);
+
+        // A zero-sized source is not an image.
+        assert!(Thumbnail::from_rgba(&rgba, 0, 2).is_none());
     }
 
     #[test]

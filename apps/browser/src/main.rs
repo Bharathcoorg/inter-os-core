@@ -27,31 +27,32 @@ use interos_std::design::font;
 use interos_std::design::primitives::{draw_rounded_rect, Rect};
 
 use browser::{
-    into_url_field, parse_gemtext_link, parse_uri, scheme_mark, DocLine, DocumentTokenizer,
-    LineKind, LoadingState, TabSessionManager, UriScheme, MAX_DOC_LINES, MAX_LINE_BYTES, MAX_TABS,
-    URL_FIELD,
+    extract_proxy_html, format_http_get, format_proxy_request, html_to_reader_document,
+    into_url_field, parse_gemtext_link, parse_http_response, parse_uri, scheme_mark, DocLine,
+    DocumentTokenizer, LineKind, LoadingState, TabSessionManager, UriScheme, MAX_DOC_LINES,
+    MAX_LINE_BYTES, MAX_TABS, URL_FIELD,
 };
 
 // -----------------------------------------------------------------------------
 // Sovereign InterOS Browser Design Tokens
 // -----------------------------------------------------------------------------
-const CHROME_BG: u32 = 0xFF000000;            // Pitch Black OLED
-const CHROME_SURFACE: u32 = 0xFF0E1117;       // Obsidian Glass Surface
+const CHROME_BG: u32 = 0xFF0B0F17;            // Obsidian Slate Deep Canvas
+const CHROME_SURFACE: u32 = 0xFF131A26;       // Elevated Glass Surface
 #[allow(dead_code)]
-const CHROME_SURFACE_HOVER: u32 = 0xFF181C22; // Slate Hover
-const CHROME_BORDER: u32 = 0xFF262C36;        // Fine Hairline Border
-const CHROME_DIVIDER: u32 = 0xFF1A1F26;       // Hairline Divider
-const CHROME_BLUE: u32 = 0xFF388BFD;          // Hyperlink / Accent Blue
+const CHROME_SURFACE_HOVER: u32 = 0xFF1E2838; // Slate Hover
+const CHROME_BORDER: u32 = 0xFF1E293B;        // Delicate Hairline Border
+const CHROME_DIVIDER: u32 = 0xFF182232;       // Section Divider
+const CHROME_BLUE: u32 = 0xFF38BDF8;          // Electric Sapphire Accent
 #[allow(dead_code)]
-const CHROME_BLUE_DARK: u32 = 0xFF21262D;     // Slate Dark
-const CHROME_TEXT: u32 = 0xFFFFFFFF;          // Pure White Text
-const CHROME_MUTED: u32 = 0xFF8B949E;         // Muted Slate Text
-const CHROME_CARD: u32 = 0xFF12161D;          // Card Background
-const CHROME_CARD_BORDER: u32 = 0xFF262C36;   // Card Stroke
-const CHROME_GREEN: u32 = 0xFF2EA043;         // Secure Green
-const CHROME_RED: u32 = 0xFFF85149;           // Alert / Error Red
+const CHROME_BLUE_DARK: u32 = 0xFF1E3A8A;     // Deep Sapphire
+const CHROME_TEXT: u32 = 0xFFF8FAFC;          // Pure Crisp Off-White Text
+const CHROME_MUTED: u32 = 0xFF94A3B8;         // Muted Slate Text
+const CHROME_CARD: u32 = 0xFF161F30;          // Card Background
+const CHROME_CARD_BORDER: u32 = 0xFF283548;   // Card Stroke
+const CHROME_GREEN: u32 = 0xFF34D399;         // Emerald Secure TLS
+const CHROME_RED: u32 = 0xFFF87171;           // Alert / Error Coral Red
 #[allow(dead_code)]
-const CHROME_CODE_BG: u32 = 0xFF161B22;       // Code Block Tint
+const CHROME_CODE_BG: u32 = 0xFF0F172A;       // Code Block Slate Dark
 
 // -----------------------------------------------------------------------------
 // Viewport & Layout Geometry (720x1440, 8pt Grid)
@@ -544,9 +545,6 @@ pub struct BrowserApp {
     pub doc_line_count: usize,
     pub kb_shift: bool,
     pub kb_symbols: bool,
-    pub is_playing_video: bool,
-    pub video_progress_secs: u32,
-    pub video_duration_secs: u32,
 }
 
 impl BrowserApp {
@@ -576,20 +574,12 @@ impl BrowserApp {
             doc_line_count: 0,
             kb_shift: false,
             kb_symbols: false,
-            is_playing_video: false,
-            video_progress_secs: 0,
-            video_duration_secs: 868,
         };
         app.tabs.init_default();
         let start = b"about:blank";
         app.current_url[..start.len()].copy_from_slice(start);
         app.current_url_len = start.len();
         app
-    }
-
-    pub fn is_youtube_page(&self) -> bool {
-        let u = self.current_url();
-        u.windows(7).any(|w| w == b"youtube") || u.windows(8).any(|w| w == b"youtu.be")
     }
 
     fn current_url(&self) -> &[u8] {
@@ -660,60 +650,94 @@ impl BrowserApp {
             return false;
         }
 
-        // Network Socket Syscall dispatch
+        // Real Network Socket dispatch with ephemeral client binding
         let sock_res = match self.active_socket_id {
             Some(sock_id) => Ok(sock_id),
-            None => net_socket(80),
+            None => {
+                let ephemeral_port = 49152 + ((self.pages_loaded as u16) & 0x3FFF);
+                match net_socket(ephemeral_port) {
+                    Ok(id) => Ok(id),
+                    Err(_) => net_socket(80),
+                }
+            }
         };
         match sock_res {
             Ok(sock_id) => {
                 self.active_socket_id = Some(sock_id);
-                std::log(0, "[BROWSER APP] Connected to network socket 80 via QEMU e1000/slirp.").ok();
-                let _ = std::net_sendto([10, 0, 2, 2], 80, b"GET / HTTP/1.1\r\nHost: interos.tech\r\n\r\n");
+                std::log(0, "[BROWSER APP] Network socket bound; resolving host and dispatching HTTP request...").ok();
+
+                // Dynamic HTTP/1.1 request formatting:
+                // If HTTPS, route through local development gateway proxy at 10.0.2.2:4300.
+                // If HTTP, connect directly to target IP and port.
+                let mut req_buf = [0u8; 512];
+                let (dst_ip, dst_port, req_len) = if parsed.scheme == UriScheme::Https {
+                    let r_len = format_proxy_request(target, &mut req_buf);
+                    ([10, 0, 2, 2], 4300, r_len)
+                } else {
+                    let host_bytes = if parsed.host.is_empty() { b"interos.tech" } else { parsed.host };
+                    let mut ip = [10, 0, 2, 2];
+                    if let Ok(host_str) = core::str::from_utf8(host_bytes) {
+                        if let Ok(resolved) = std::dns_resolve(host_str) {
+                            ip = resolved;
+                        }
+                    }
+                    let r_len = format_http_get(host_bytes, parsed.path, &mut req_buf);
+                    (ip, parsed.port, r_len)
+                };
+
+                // Send dynamic HTTP request to target destination
+                let _ = std::net_sendto(dst_ip, dst_port, &req_buf[..req_len]);
+
+                // Non-blocking packet receive
+                let mut rx_buf = [0u8; 2048];
+                let rx_res = std::net_recvfrom(sock_id, &mut rx_buf);
+
                 self.status = PageStatus::Loaded;
                 self.pages_loaded += 1;
                 self.loading_progress = 100;
                 self.tabs.active_tab_mut().loading_state = LoadingState::Completed;
 
-                let is_yt = target.windows(7).any(|w| w == b"youtube") || target.windows(8).any(|w| w == b"youtu.be");
-                if is_yt {
-                    self.is_playing_video = true;
-                    self.video_progress_secs = 84;
-                    self.video_duration_secs = 868;
-                    self.load_document_content(
-                        b"=> https://m.youtube.com/watch?v=rust Rust Microkernel Deep Dive (18:40)\n\
-=> https://m.youtube.com/watch?v=hardware Sovereign Reference Phone Hardware (12:15)\n\
-=> https://m.youtube.com/watch?v=gemini Local On-Device Neural Intelligence (09:50)\n\
-=> https://interos.tech Visit InterOS Official Portal",
-                    );
-                } else if target.windows(7).any(|w| w == b"interos") {
-                    self.is_playing_video = false;
-                    self.load_document_content(
-                        b"# InterOS Core\n\
-## Sovereign Mobile Operating System\n\
-Experience the future of decentralized mobile computing at https://interos.tech.\n\
-* High-performance handheld microkernel architecture\n\
-* Fluid touch gestures and 120Hz smooth scrolling\n\
-* Private, offline-first local intelligence\n\
-* Zero-ambient-authority capability security\n\
-=> https://interos.tech/docs Official System Architecture\n\
-=> https://m.youtube.com Watch InterOS Keynote on YouTube\n\
-=> https://github.com/bharathcoorg/inter-os-core Core Source Repository\n\
-=> https://interos.tech/apps Browse Native Application Catalog",
-                    );
-                } else {
-                    self.is_playing_video = false;
-                    self.load_document_content(
-                        b"# Sovereign Web Gateway\n\
-## InterOS Mobile Browser\n\
-Decentralized browsing with strict capability isolation.\n\
-* Full privacy: zero tracking telemetry\n\
-* Direct DRM/KMS scanout rendering\n\
-=> https://interos.tech Official Platform Portal\n\
-=> https://m.youtube.com Watch Videos on YouTube\n\
-=> https://github.com/bharathcoorg/inter-os-core Source Repository\n\
-=> gemini://geminispace.info Gemini Sovereign Capsule",
-                    );
+                let mut loaded_from_network = false;
+                if let Ok(n) = rx_res {
+                    if n > 0 {
+                        let rx_slice = &rx_buf[..n];
+                        let key: &[u8] = b"\"html\":";
+                        if let Some(http_resp) = parse_http_response(rx_slice) {
+                            let mut html_buf = [0u8; 2048];
+                            let html_slice = if http_resp.body.windows(key.len()).any(|w| w == key) {
+                                let h_len = extract_proxy_html(http_resp.body, &mut html_buf);
+                                &html_buf[..h_len]
+                            } else {
+                                http_resp.body
+                            };
+                            let mut doc_buf = [0u8; 2048];
+                            let doc_len = html_to_reader_document(html_slice, &mut doc_buf);
+                            if doc_len > 0 {
+                                self.load_document_content(&doc_buf[..doc_len]);
+                                loaded_from_network = true;
+                            }
+                        } else if rx_slice.windows(key.len()).any(|w| w == key) {
+                            let mut html_buf = [0u8; 2048];
+                            let h_len = extract_proxy_html(rx_slice, &mut html_buf);
+                            let mut doc_buf = [0u8; 2048];
+                            let doc_len = html_to_reader_document(&html_buf[..h_len], &mut doc_buf);
+                            if doc_len > 0 {
+                                self.load_document_content(&doc_buf[..doc_len]);
+                                loaded_from_network = true;
+                            }
+                        }
+                    }
+                }
+
+                // PLATFORM TRUTH: If network returned no content, report truthful error.
+                // NEVER synthesize fake mock content or pretend a website loaded.
+                if !loaded_from_network {
+                    self.status = PageStatus::NoTransport;
+                    self.loading_progress = 0;
+                    self.tabs.active_tab_mut().loading_state = LoadingState::Failed;
+                    self.tabs.active_tab_mut().error_code = -111; // ECONNREFUSED
+                    std::log(0, "[BROWSER APP] No real network response received. Truthful error status reported.").ok();
+                    return false;
                 }
 
                 let _ = std::audio_play_tone(784);
@@ -1662,105 +1686,29 @@ fn home_page_pixel(x: usize, y: usize, app: &BrowserApp) -> u32 {
         return CHROME_BG;
     }
 
-    // 3. Featured Showcase Cards (y 386..650)
-    // Card 1: Featured Video / YouTube Showcase (y: 386..516)
-    if y >= 386 && y < 516 {
-        let card = Rect::new(24, 386, W - 48, 130);
-        if let Some(c) = draw_rounded_rect(x, y, card, 16, CHROME_CARD, Some(0xFF2E1A24), 1) {
-            // Video thumbnail (x: 40..176, y: 400..502)
-            let thumb = Rect::new(40, 400, 136, 102);
-            if let Some(tc) = draw_rounded_rect(x, y, thumb, 10, 0xFF0D111A, Some(0xFF1E2532), 1) {
-                // Red play button circle at (108, 445)
-                let tdx = (x as isize) - 108;
-                let tdy = (y as isize) - 445;
-                if tdx * tdx + tdy * tdy <= 196 {
-                    let ppx = tdx + 5;
-                    let ppy = tdy.abs();
-                    if ppx >= 0 && ppx <= 12 && ppy * 12 <= (12 - ppx) * 8 {
-                        return 0xFFFFFFFF;
-                    }
-                    return 0xFFFF0000;
-                }
-                // Duration pill (14:28) at x: 124..168, y: 480..496
-                let dpill = Rect::new(124, 480, 44, 16);
-                if let Some(dc) = draw_rounded_rect(x, y, dpill, 4, 0xCC000000, None, 0) {
-                    if let Some(px) = text_px(x, y, 127, 482, 1, b"14:28", 0xFFFFFFFF, dc, false) {
-                        return px;
-                    }
-                    return dc;
-                }
-                return tc;
-            }
-
-            // Right side metadata
-            if let Some(px) = text_px(x, y, 192, 406, 1, b"FEATURED VIDEO", 0xFFFF334B, c, true) {
-                return px;
-            }
-            if let Some(px) = text_px(x, y, 192, 432, 1, b"InterOS Keynote 2026", 0xFFF0F6FC, c, true) {
-                return px;
-            }
-            if let Some(px) = text_px(x, y, 192, 458, 1, b"Sovereign Mobile Architecture (4K)", CHROME_MUTED, c, false) {
-                return px;
-            }
-            if let Some(px) = text_px(x, y, 192, 484, 1, b"YouTube - 3.2M views", CHROME_BLUE, c, false) {
-                return px;
-            }
-            return c;
-        }
-        return CHROME_BG;
-    }
-
-    // Card 2: Official Portal / InterOS Tech (y: 530..646)
-    if y >= 530 && y < 646 {
-        let card = Rect::new(24, 530, W - 48, 116);
-        if let Some(c) = draw_rounded_rect(x, y, card, 16, CHROME_CARD, Some(0xFF1B3654), 1) {
-            // Portal icon squircle at (40, 546, 56, 56)
-            let pbox = Rect::new(40, 546, 56, 56);
-            if let Some(pc) = draw_rounded_rect(x, y, pbox, 12, 0xFF162544, Some(0xFF388BFD), 1) {
-                if let Some(px) = text_px(x, y, 54, 564, 1, b"IO", 0xFF58A6FF, pc, true) {
-                    return px;
-                }
-                return pc;
-            }
-
-            // Right side metadata
-            if let Some(px) = text_px(x, y, 112, 548, 1, b"OFFICIAL PORTAL", 0xFF388BFD, c, true) {
-                return px;
-            }
-            if let Some(px) = text_px(x, y, 112, 574, 1, b"InterOS Architecture", 0xFFF0F6FC, c, true) {
-                return px;
-            }
-            if let Some(px) = text_px(x, y, 112, 598, 1, b"Kernel specs, apps & developer guides", CHROME_MUTED, c, false) {
-                return px;
-            }
-            return c;
-        }
-        return CHROME_BG;
-    }
-
-    // 4. "Your pages": saved bookmarks & session visits (y 660..1340)
-    if y >= 660 && y < 692 {
-        if let Some(px) = text_px(x, y, 28, 666, 1, b"Your pages", CHROME_TEXT, CHROME_BG, true) {
+    // 3. "Your pages": saved bookmarks & session visits (y 386..1340)
+    if y >= 386 && y < 418 {
+        if let Some(px) = text_px(x, y, 28, 392, 1, b"Your pages", CHROME_TEXT, CHROME_BG, true) {
             return px;
         }
         return CHROME_BG;
     }
 
-    // 5. Saved pages & recent visits cards
+    // 4. Saved pages & recent visits cards
     if home_row(app, 0).is_none() {
-        let empty_rect = Rect::new(24, 696, W - 48, 96);
+        let empty_rect = Rect::new(24, 422, W - 48, 96);
         if let Some(c) = draw_rounded_rect(x, y, empty_rect, 16, CHROME_CARD, Some(CHROME_CARD_BORDER), 1) {
-            let star_box = Rect::new(44, 712, 46, 46);
+            let star_box = Rect::new(44, 438, 46, 46);
             if let Some(sc) = draw_rounded_rect(x, y, star_box, 10, 0xFF181C24, None, 0) {
-                if star_glyph(x, y, 67, 735, false) {
+                if star_glyph(x, y, 67, 461, false) {
                     return CHROME_MUTED;
                 }
                 return sc;
             }
-            if let Some(px) = text_px(x, y, 104, 716, 1, b"No Bookmarks Yet", CHROME_TEXT, c, true) {
+            if let Some(px) = text_px(x, y, 104, 442, 1, b"No Bookmarks Yet", CHROME_TEXT, c, true) {
                 return px;
             }
-            if let Some(px) = text_px(x, y, 104, 742, 1, b"Bookmarked and visited pages appear here", CHROME_MUTED, c, false) {
+            if let Some(px) = text_px(x, y, 104, 468, 1, b"Bookmarked and visited pages appear here", CHROME_MUTED, c, false) {
                 return px;
             }
             return c;
@@ -1769,10 +1717,10 @@ fn home_page_pixel(x: usize, y: usize, app: &BrowserApp) -> u32 {
         return CHROME_BG;
     }
 
-    let card_h = 140;
-    let card_gap = 14;
+    let card_h = 100;
+    let card_gap = 12;
     for i in 0..4 {
-        let card_y = 696 + i * (card_h + card_gap);
+        let card_y = 422 + i * (card_h + card_gap);
         let card_rect = Rect::new(24, card_y, W - 48, card_h);
         let Some(row) = home_row(app, i) else {
             continue;
@@ -1918,126 +1866,8 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
         return CHROME_BG;
     }
 
-    // YouTube Cinema Video Player & Media Controls
-    if app.is_youtube_page() {
-        // 1. Cinema 16:9 Video Player Viewport (y 124..434)
-        if y >= 124 && y < 434 {
-            let cinema_rect = Rect::new(24, 124, W - 48, 310);
-            if let Some(c) = draw_rounded_rect(x, y, cinema_rect, 16, 0xFF080B12, Some(0xFF3A1218), 1) {
-                // Top overlay: Video Title
-                if let Some(px) = text_px(x, y, 44, 138, 1, b"InterOS Keynote: Sovereign Mobile Architecture", 0xFFF0F6FC, c, true) {
-                    return px;
-                }
-                if let Some(px) = text_px(x, y, 44, 164, 1, b"4K 60fps - InterOS Official (Verified)", 0xFF8B949E, c, false) {
-                    return px;
-                }
-
-                // Center Play/Pause button (cx = 360, cy = 250, radius 32)
-                let cdx = (x as isize) - 360;
-                let cdy = (y as isize) - 250;
-                let cr2 = cdx * cdx + cdy * cdy;
-                if cr2 <= 1024 {
-                    if app.is_playing_video {
-                        // Pause state: translucent circle with 2 pause bars
-                        if cr2 >= 900 {
-                            return 0xFF58A6FF;
-                        }
-                        if ((x >= 350 && x <= 354) || (x >= 366 && x <= 370)) && y >= 236 && y <= 264 {
-                            return 0xFFFFFFFF;
-                        }
-                        return 0xCC161B22;
-                    } else {
-                        // Play state: YouTube Red circle with white play triangle
-                        if cr2 <= 900 {
-                            let ppx = cdx + 6;
-                            let ppy = cdy.abs();
-                            if ppx >= 0 && ppx <= 16 && ppy * 16 <= (16 - ppx) * 12 {
-                                return 0xFFFFFFFF;
-                            }
-                            return 0xFFFF0000;
-                        }
-                        return 0xFFFF334B;
-                    }
-                }
-
-                // Bottom Scrubber Bar (y 388..424)
-                if y >= 388 && y < 424 {
-                    // Timecode
-                    if let Some(px) = text_px(x, y, 40, 394, 1, b"01:24 / 14:28", 0xFFE6EDF3, c, false) {
-                        return px;
-                    }
-                    // Progress Track: x: 180..610, y: 400..406
-                    if y >= 400 && y <= 406 && x >= 180 && x <= 610 {
-                        if x <= 230 {
-                            return 0xFFFF0000;
-                        }
-                        return 0xFF30363D;
-                    }
-                    // Scrubber knob circle at (230, 403), radius 5
-                    let kdx = (x as isize) - 230;
-                    let kdy = (y as isize) - 403;
-                    if kdx * kdx + kdy * kdy <= 25 {
-                        return 0xFFFFFFFF;
-                    }
-                    // Fullscreen indicator: [ ] at x: 636..656
-                    if ((x == 636 || x == 656) && y >= 394 && y <= 412) || ((y == 394 || y == 412) && ((x >= 636 && x <= 642) || (x >= 650 && x <= 656))) {
-                        return 0xFF8B949E;
-                    }
-                }
-
-                return c;
-            }
-            return CHROME_BG;
-        }
-
-        // 2. Action Buttons Row (y 446..496)
-        if y >= 446 && y < 496 {
-            // Like (34K) pill: x: 24..134
-            let like_rect = Rect::new(24, 450, 110, 40);
-            if let Some(c) = draw_rounded_rect(x, y, like_rect, 10, CHROME_CARD, Some(CHROME_BORDER), 1) {
-                if let Some(px) = text_px(x, y, 36, 460, 1, b"Like 34K", CHROME_TEXT, c, true) {
-                    return px;
-                }
-                return c;
-            }
-            // Share pill: x: 144..244
-            let share_rect = Rect::new(144, 450, 100, 40);
-            if let Some(c) = draw_rounded_rect(x, y, share_rect, 10, CHROME_CARD, Some(CHROME_BORDER), 1) {
-                if let Some(px) = text_px(x, y, 168, 460, 1, b"Share", CHROME_TEXT, c, true) {
-                    return px;
-                }
-                return c;
-            }
-            // Save pill: x: 254..354
-            let save_rect = Rect::new(254, 450, 100, 40);
-            if let Some(c) = draw_rounded_rect(x, y, save_rect, 10, CHROME_CARD, Some(CHROME_BORDER), 1) {
-                if let Some(px) = text_px(x, y, 284, 460, 1, b"Save", CHROME_TEXT, c, true) {
-                    return px;
-                }
-                return c;
-            }
-            // Subscribe pill: x: 516..696
-            let sub_rect = Rect::new(516, 450, 180, 40);
-            if let Some(c) = draw_rounded_rect(x, y, sub_rect, 10, 0xFF21262D, Some(0xFF30363D), 1) {
-                if let Some(px) = text_px(x, y, 546, 460, 1, b"SUBSCRIBED", 0xFFFFFFFF, c, true) {
-                    return px;
-                }
-                return c;
-            }
-            return CHROME_BG;
-        }
-
-        // 3. "Up Next" section header (y 506..536)
-        if y >= 506 && y < 536 {
-            if let Some(px) = text_px(x, y, 28, 512, 1, b"Up Next - Recommended", CHROME_MUTED, CHROME_BG, true) {
-                return px;
-            }
-            return CHROME_BG;
-        }
-    }
-
     // Render classified document lines with smooth vertical scrolling
-    let content_start_y = if app.is_youtube_page() { 540 } else { 126 };
+    let content_start_y = 126;
     let base_y = (content_start_y as isize) - (app.scroll_offset_px as isize);
 
     let mut current_y = base_y;
@@ -3092,28 +2922,12 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
         }
     }
 
-    // Start Page Featured Showcase Cards Tap (y: 386..650)
-    if app.status == PageStatus::Blank && x >= 24 && x <= W - 24 {
-        // Card 1: YouTube Featured Video (y: 386..516)
-        if y >= 386 && y < 516 {
-            let _ = std::audio_haptic_click();
-            app.navigate(b"https://m.youtube.com");
-            return Tap::Redraw;
-        }
-        // Card 2: Official Portal (y: 530..646)
-        if y >= 530 && y < 646 {
-            let _ = std::audio_haptic_click();
-            app.navigate(b"https://interos.tech");
-            return Tap::Redraw;
-        }
-    }
-
-    // Start Page "Your pages" Cards Tap
+    // Start Page "Your pages" Cards Tap (y: 422..1340)
     if app.status == PageStatus::Blank && x >= 24 && x < W - 24 {
-        let card_h = 140;
-        let card_gap = 14;
+        let card_h = 100;
+        let card_gap = 12;
         for i in 0..4 {
-            let card_y = 696 + i * (card_h + card_gap);
+            let card_y = 422 + i * (card_h + card_gap);
             if y >= card_y && y < card_y + card_h {
                 if let Some(row) = home_row(app, i) {
                     let _ = std::audio_haptic_click();
@@ -3128,22 +2942,9 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
         }
     }
 
-    // Content Viewport Links & Video Player Tap
+    // Content Viewport Links Tap
     if app.status == PageStatus::Loaded && y >= 120 && y < 1340 {
-        if app.is_youtube_page() && y >= 124 && y < 440 {
-            let _ = std::audio_haptic_click();
-            app.is_playing_video = !app.is_playing_video;
-            if app.is_playing_video {
-                let _ = std::audio_play_tone(523);
-                let _ = std::audio_silence();
-            } else {
-                let _ = std::audio_play_tone(392);
-                let _ = std::audio_silence();
-            }
-            return Tap::Redraw;
-        }
-
-        let content_start_y = if app.is_youtube_page() { 540 } else { 126 };
+        let content_start_y = 126;
         let base_y = (content_start_y as isize) - (app.scroll_offset_px as isize);
         let mut cur_y = base_y;
 
@@ -3418,8 +3219,24 @@ pub extern "C" fn _start() -> ! {
                 }
                 if events & std::EVENT_NETWORK_PACKET != 0 {
                     match browser.active_socket_id {
-                        Some(_) => {
+                        Some(sock_id) => {
                             std::log(0, "[BROWSER APP] Network packet arrived via e1000 socket.").ok();
+                            let mut rx_buf = [0u8; 2048];
+                            if let Ok(n) = std::net_recvfrom(sock_id, &mut rx_buf) {
+                                if n > 0 {
+                                    if let Some(http_resp) = browser::parse_http_response(&rx_buf[..n]) {
+                                        let mut doc_buf = [0u8; 2048];
+                                        let doc_len = browser::html_to_reader_document(http_resp.body, &mut doc_buf);
+                                        if doc_len > 0 {
+                                            browser.load_document_content(&doc_buf[..doc_len]);
+                                            if surface > 0 {
+                                                render_browser_ui(surface, &browser);
+                                                let _ = std::surface_flip(fb_slot);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                         None => {
                             std::log(0, "[BROWSER APP] Network event raised with no open socket; no packet was received.").ok();

@@ -135,7 +135,15 @@ const BADGE_X1: usize = 700;
 const BADGE_Y0: usize = 23;
 const BADGE_H: usize = 48;
 const BADGE_R: usize = 16;
-const BADGE_TEXT: &[u8] = b"CPL=3 RING";
+/// The badge states the shell's isolation, which the app can see, and
+/// nothing it cannot.
+///
+/// WHY the privilege level is gone: the app used to print "CPL=3 RING" and
+/// "CPL=3 Isolated" from a compile-time constant. It never queried the
+/// task's privilege level, so the badge asserted a number it had not
+/// observed -- and it contradicted the shell's own `caps` command, which
+/// admits that no capability inspection API is exposed.
+const BADGE_TEXT: &[u8] = b"RING 3";
 const BADGE_SCALE: usize = 2;
 
 /// Quick-command pill geometry. Each pill row is 52 rows tall and its scale-2
@@ -299,7 +307,7 @@ impl TerminalApp {
             "InterOS Sovereign Shell [Ring 3",
             TEXT_MUTED,
         ));
-        lines[1] = Some(ConsoleLine::from_static("CPL=3]", TEXT_MUTED));
+        lines[1] = Some(ConsoleLine::from_static("ISOLATED]", TEXT_MUTED));
         lines[2] = Some(ConsoleLine::from_static(
             "Isolated memory, token capabilities",
             ACCENT_SKY,
@@ -521,16 +529,24 @@ impl TerminalApp {
             }
             "status" => {
                 self.push_line("interos@sovereign:~$ status", SUCCESS_EMERALD);
-                self.push_line("InterOS Core Mobile Platform | CPL=3 Isolated", ACCENT_SKY);
-                // WHY: the uptime comes from the real 1 kHz hardware timer. If no
-                // capability slot grants TimerTickRead, the screen says so instead
-                // of inventing a metric.
+                // WHY the privilege level is gone: the shell never queries
+                // the task's CPL -- there is no inspection API -- so naming
+                // one here asserted a number it had not observed. The
+                // shell's own `caps` command says the same thing.
+                self.push_line("InterOS Core Mobile Platform | Ring 3 isolated", ACCENT_SKY);
+                // WHY: the uptime comes from the platform's real tick
+                // counter. If no capability slot grants TimerTickRead, the
+                // screen says so instead of inventing a metric.
                 match probe_ticks() {
                     Ok(ticks) => {
                         self.push_counted(
                             "status: uptime ",
                             ticks,
-                            " ticks since boot (1 kHz).",
+                            // WHY the rate is not printed: the tick counter
+                            // reports a count, never a frequency. Claiming
+                            // "1 kHz" asserted a rate the app cannot
+                            // measure.
+                            " ticks since boot.",
                             TEXT_PRIMARY,
                         );
                         log_counted(

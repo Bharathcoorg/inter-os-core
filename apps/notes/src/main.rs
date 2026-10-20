@@ -20,8 +20,8 @@
 use core::panic::PanicInfo;
 use interos_std as std;
 pub use notes::{
-    LineSpan, Note, NoteColorTheme, NotesStore, TextEditorBuffer, CATEGORY_NAMES, KEEP_COLORS,
-    MAX_BODY_LEN, MAX_NOTES, MAX_TITLE_LEN,
+    format_timestamp, LineSpan, Note, NoteColorTheme, NotesStore, TextEditorBuffer, CATEGORY_NAMES,
+    CivilTime, KEEP_COLORS, MAX_BODY_LEN, MAX_NOTES, MAX_TITLE_LEN, TIMESTAMP_UNKNOWN,
 };
 
 const W: usize = 720;
@@ -72,6 +72,13 @@ pub struct AppState {
     pub swatch_picker_open: bool,
     pub kb_shift: bool,
     pub kb_symbols: bool,
+    /// The most recent civil time read from the device's real-time clock.
+    ///
+    /// WHY the app caches it: the clock is a syscall, and a note list asks
+    /// for "today" once per card. `None` means the clock was refused or
+    /// carried no usable civil date, and the app says so rather than
+    /// substituting a time.
+    pub now_civil: Option<CivilTime>,
 }
 
 impl AppState {
@@ -83,8 +90,34 @@ impl AppState {
     pub fn sync_editor_to_note(&mut self) {
         if let Some(note) = self.store.get_note_mut(self.selected_note_id) {
             note.set_body(self.editor_buf.as_str());
-            note.updated_at = current_time_seconds();
+            // WHY the stamp comes from the clock and not a constant: the edit
+            // time is a fact about the device. When the clock is unreadable
+            // the note carries no timestamp, and the card says so.
+            note.updated_at = match self.now_civil {
+                Some(now) => notes::pack_civil(now),
+                None => TIMESTAMP_UNKNOWN,
+            };
         }
+    }
+
+    /// Creates a note and stamps it with the observed clock.
+    ///
+    /// WHY this returns an `Option`: the store has a fixed capacity, and when
+    /// it is full the app must not fall back to an existing note id. The old
+    /// code did exactly that -- `create_note(..).unwrap_or(1)` -- so a full
+    /// store silently opened the user's *first* note and overwrote it.
+    ///
+    /// WHY the title starts empty: the title "New Note" was app-authored
+    /// text landing in the user's own list. The editor already renders a
+    /// "Title" placeholder, so an untitled note is both honest and obvious.
+    pub fn create_stamped_note(&mut self, body: &str) -> Option<u32> {
+        let id = self.store.create_note("", body)?;
+        let packed = match self.now_civil {
+            Some(now) => notes::pack_civil(now),
+            None => TIMESTAMP_UNKNOWN,
+        };
+        self.store.stamp(id, packed);
+        Some(id)
     }
 
     pub fn filtered_indices(&self, out: &mut [usize; MAX_NOTES]) -> usize {
@@ -162,40 +195,87 @@ fn contains_ignore_case(haystack: &[u8], needle: &[u8]) -> bool {
     false
 }
 
-fn current_time_seconds() -> u64 {
+/// Reads the device's real-time clock and returns the civil time it reports.
+///
+/// WHY this returns an `Option` and not a fallback: the RTC syscall needs
+/// the `RealtimeClockRead` capability, and a RAPP that does not hold it is
+/// refused outright. The previous implementation called the clock, threw the
+/// answer away, and returned a hardcoded epoch constant -- so every note on
+/// the device carried an edit time the device never observed. A note must
+/// either be stamped with what the clock said or carry no timestamp at all.
+fn current_civil_time() -> Option<CivilTime> {
     let mut buf = [0u8; 64];
-    let _ = std::rtc_get_time(&mut buf);
-    1729330000
+    let n = std::rtc_get_time(&mut buf).ok()?;
+    if n == 0 {
+        return None;
+    }
+    let payload = &buf[..n];
+
+    let year = json_field(payload, b"\"year\":")?;
+    let month = json_field(payload, b"\"month\":")?;
+    let day = json_field(payload, b"\"day\":")?;
+    let hour = json_field(payload, b"\"hour\":").unwrap_or(0);
+    let minute = json_field(payload, b"\"minute\":").unwrap_or(0);
+
+    if !(1970..=9999).contains(&year)
+        || !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || hour > 23
+        || minute > 59
+    {
+        return None;
+    }
+    Some(CivilTime {
+        year,
+        month,
+        day,
+        hour,
+        minute,
+    })
 }
 
-fn format_note_timestamp(note: &Note, buf: &mut [u8; 32]) -> usize {
+/// Reads a numeric field out of the RTC's JSON payload.
+///
+/// WHY a parser and not a fixed offset: the kernel writes the fields in a
+/// fixed order today, but the length of the year and the presence of a
+/// leading zero are not fixed, so only reading the field can be correct.
+fn json_field(payload: &[u8], key: &[u8]) -> Option<u32> {
+    if key.is_empty() || key.len() > payload.len() {
+        return None;
+    }
+    for i in 0..=(payload.len() - key.len()) {
+        if &payload[i..i + key.len()] != key {
+            continue;
+        }
+        let mut j = i + key.len();
+        let mut value: u32 = 0;
+        let mut digits = 0;
+        while j < payload.len() && payload[j].is_ascii_digit() {
+            value = value.saturating_mul(10).saturating_add((payload[j] - b'0') as u32);
+            digits += 1;
+            j += 1;
+        }
+        if digits > 0 {
+            return Some(value);
+        }
+        return None;
+    }
+    None
+}
+
+/// Formats a note's caption timestamp from the clock, never from a constant.
+///
+/// WHY `now` is passed in rather than read here: the current day decides
+/// whether the caption says "Today", and the app already keeps the clock
+/// reading in one place.
+fn format_note_timestamp(note: &Note, now: Option<CivilTime>, buf: &mut [u8; 32]) -> usize {
     if note.is_dirty {
         let s = b"Editing now";
-        buf[..s.len()].copy_from_slice(s);
-        return s.len();
+        let take = s.len().min(buf.len());
+        buf[..take].copy_from_slice(&s[..take]);
+        return take;
     }
-    match note.id {
-        1 => {
-            let s = b"Today 10:30 AM";
-            buf[..s.len()].copy_from_slice(s);
-            s.len()
-        }
-        2 => {
-            let s = b"Yesterday 4:15 PM";
-            buf[..s.len()].copy_from_slice(s);
-            s.len()
-        }
-        3 => {
-            let s = b"18 Oct 2026";
-            buf[..s.len()].copy_from_slice(s);
-            s.len()
-        }
-        _ => {
-            let s = b"15 Oct 2026";
-            buf[..s.len()].copy_from_slice(s);
-            s.len()
-        }
-    }
+    notes::format_timestamp(note.updated_at, now, buf)
 }
 
 // -----------------------------------------------------------------------------
@@ -940,7 +1020,7 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
                 }
 
                 let mut ts_buf = [0u8; 32];
-                let ts_len = format_note_timestamp(note, &mut ts_buf);
+                let ts_len = format_note_timestamp(note, state.now_civil, &mut ts_buf);
                 if let Some(c) = test_text(x, y, 510, uy0 + 166, 1, &ts_buf[..ts_len], theme.text_muted, theme.bg, false) {
                     return c;
                 }
@@ -1565,7 +1645,12 @@ fn handle_tap(state: &mut AppState, ux: usize, uy: usize) -> TapAction {
             if uy >= 1318 && uy <= 1386 {
                 // FAB (+) or "Take a note..." tap
                 if in_circle(ux, uy, 654, 1352, 34) || (ux >= 28 && ux <= 410) {
-                    let new_id = state.store.create_note("New Note", "").unwrap_or(1);
+                    let Some(new_id) = state.create_stamped_note("") else {
+                        // The store is full. The card stays as it is; the
+                        // limit is reported by the store, not by opening
+                        // somebody else's note.
+                        return TapAction::Redraw;
+                    };
                     state.selected_note_id = new_id;
                     state.editor_buf.clear();
                     state.focus = EditorFocus::Body;
@@ -1578,7 +1663,12 @@ fn handle_tap(state: &mut AppState, ux: usize, uy: usize) -> TapAction {
 
                 // Checklist tool tap
                 if ux >= 415 && ux <= 465 {
-                    let new_id = state.store.create_note("Checklist", "[ ] ").unwrap_or(1);
+                    // WHY the body starts with a checklist marker: this is the
+                    // scaffold the checklist tool exists to create, and the
+                    // editor's first line must be a toggleable item.
+                    let Some(new_id) = state.create_stamped_note("[ ] ") else {
+                        return TapAction::Redraw;
+                    };
                     state.selected_note_id = new_id;
                     state.editor_buf.clear();
                     state.editor_buf.insert_checklist_item();
@@ -1592,7 +1682,9 @@ fn handle_tap(state: &mut AppState, ux: usize, uy: usize) -> TapAction {
 
                 // Palette tool tap
                 if ux >= 475 && ux <= 525 {
-                    let new_id = state.store.create_note("Note", "").unwrap_or(1);
+                    let Some(new_id) = state.create_stamped_note("") else {
+                        return TapAction::Redraw;
+                    };
                     state.selected_note_id = new_id;
                     state.editor_buf.clear();
                     state.focus = EditorFocus::Body;
@@ -1944,13 +2036,25 @@ pub extern "C" fn _start() -> ! {
         swatch_picker_open: false,
         kb_shift: false,
         kb_symbols: false,
+        now_civil: None,
     };
 
-    if !load_notes_from_storage(&mut state.store) {
-        state.store.seed_defaults();
-        save_notes_to_storage(&mut state.store);
+    // WHY nothing is seeded here: a notes app whose contents are the user's
+    // must not invent documents and write them into persistent storage. The
+    // store used to be seeded with four invented notes -- one of which
+    // asserted hardware specifications the app had never measured -- and
+    // then persisted them, so the device carried documents the user never
+    // wrote. When the store cannot be read the list is simply empty, and the
+    // UI already says "No Notes Saved Yet".
+    let loaded = load_notes_from_storage(&mut state.store);
+    if !loaded {
+        state.store.new_empty();
     }
-    state.storage_online = true;
+    // WHY this is the read's own result and not a constant: "storage is
+    // online" is a claim about the device, and the read is the only thing
+    // that can support it.
+    state.storage_online = loaded;
+    state.now_civil = current_civil_time();
 
     // Initial frame presentation
     render_notes_ui(fb_cap, surface, &state);
@@ -1972,6 +2076,7 @@ pub extern "C" fn _start() -> ! {
         scale_milli: 1000,
     };
     let mut blink_counter = 0usize;
+    let mut clock_counter = 0usize;
 
     // Interactive Event Loop
     loop {
@@ -2037,6 +2142,22 @@ pub extern "C" fn _start() -> ! {
             blink_counter = 0;
             state.cursor_visible = !state.cursor_visible;
             if (state.view == ViewMode::Editor && state.keyboard_visible) || state.search_active {
+                needs_redraw = true;
+            }
+        }
+
+        // Refresh the device clock roughly once a second.
+        //
+        // WHY this is a counter and not a per-frame read: the RTC is a
+        // syscall, and the caption only needs to be right to the minute. It
+        // is also the only way "Today" stays true across a session that
+        // crosses midnight -- but it is only ever allowed to carry a time
+        // the clock actually reported.
+        clock_counter += 1;
+        if clock_counter >= 20 {
+            clock_counter = 0;
+            state.now_civil = current_civil_time();
+            if state.view == ViewMode::List {
                 needs_redraw = true;
             }
         }

@@ -245,6 +245,39 @@ const CONTACT_NUM_MAX: usize = 16;
 /// contact count ceiling is completely lifted.
 pub const MAX_CONTACTS: usize = 12;
 
+/// Writes the decimal form of `value` into `line` at `n`, returning the new
+/// length.
+///
+/// WHY this exists: the notice band used to write a count as a single
+/// digit byte, `b'0' + count`, which printed a colon for ten and a wrong
+/// number for anything above nine.
+fn put_u16(line: &mut [u8], n: usize, value: u16) -> usize {
+    if value == 0 {
+        if n < line.len() {
+            line[n] = b'0';
+            return n + 1;
+        }
+        return n;
+    }
+    let mut digits = [0u8; 5];
+    let mut len = 0usize;
+    let mut v = value;
+    while v > 0 && len < digits.len() {
+        digits[len] = b'0' + (v % 10) as u8;
+        v /= 10;
+        len += 1;
+    }
+    let mut out = n;
+    while len > 0 {
+        len -= 1;
+        if out < line.len() {
+            line[out] = digits[len];
+            out += 1;
+        }
+    }
+    out
+}
+
 pub const ESCAPE_BYTE: u8 = 0xFE;
 pub const ESCAPED_NEWLINE: u8 = 0x8A;
 pub const ESCAPED_ESCAPE: u8 = 0xEE;
@@ -1610,23 +1643,14 @@ fn test_text_bold(
     None
 }
 
-/// Deterministic vibrant palette for contact profile avatars.
-fn contact_avatar_color(name: &[u8]) -> u32 {
-    const PALETTE: [u32; 8] = [
-        0xFF4F46E5, // Indigo
-        0xFF059669, // Emerald
-        0xFFE11D48, // Rose
-        0xFFD97706, // Amber
-        0xFF0891B2, // Cyan
-        0xFF7C3AED, // Violet
-        0xFF0D9488, // Teal
-        0xFF2563EB, // Blue
-    ];
-    let mut hash = 0u32;
-    for &b in name {
-        hash = hash.wrapping_mul(31).wrapping_add(b as u32);
-    }
-    PALETTE[(hash as usize) % PALETTE.len()]
+/// The backdrop colour of a contact's initial disc.
+///
+/// WHY this is one neutral colour and not a hash of the name: a colour
+/// picked from the name looks like a contact's own chosen identity, and the
+/// app has never received a contact photo or a profile colour. The disc
+/// shows the contact's real initial against a neutral surface.
+fn contact_avatar_color(_name: &[u8]) -> u32 {
+    0xFF334155 // Slate
 }
 
 /// Rows a `scale`-high text run occupies on the shared bitmap face.
@@ -2685,29 +2709,36 @@ fn contacts_notice_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         let head = b"Favorites only: ";
         line[..head.len()].copy_from_slice(head);
         n += head.len();
-        line[n] = b'0' + (fav_count as u8).min(9);
-        n += 1;
+        n = put_u16(&mut line, n, fav_count as u16);
         let mid = b" of ";
+        n += mid.len();
         line[n..n + mid.len()].copy_from_slice(mid);
         n += mid.len();
-        line[n] = b'0' + (used as u8).min(9);
-        n += 1;
+        n = put_u16(&mut line, n, used as u16);
     } else {
         let head = b"Saved ";
         line[n..n + head.len()].copy_from_slice(head);
         n += head.len();
-        line[n] = b'0' + (used as u8).min(9);
-        n += 1;
-        let mid = b" of 8";
+        n = put_u16(&mut line, n, used as u16);
+        // WHY the capacity is formatted from the constant and not written
+        // as the literal "8": the store holds twelve contacts, so the notice
+        // used to tell the user it was full at eight while the "STORE FULL"
+        // flag only appeared at twelve. The two lines disagreed about the
+        // same store.
+        let mid = b" of ";
+        n += mid.len();
         line[n..n + mid.len()].copy_from_slice(mid);
         n += mid.len();
+        n = put_u16(&mut line, n, MAX_CONTACTS as u16);
     }
     if unsaved > 0 {
         let tail = b" | unsaved ";
         line[n..n + tail.len()].copy_from_slice(tail);
         n += tail.len();
-        line[n] = b'0' + (unsaved as u8).min(9);
-        n += 1;
+        // WHY a decimal formatter and not a single digit: the old code
+        // clamped the count to nine, so a store holding ten contacts
+        // printed "9" -- a number the store never held.
+        n = put_u16(&mut line, n, unsaved as u16);
     }
     if used >= MAX_CONTACTS && !dialer.contacts_fav_only {
         let tail = b" | STORE FULL";

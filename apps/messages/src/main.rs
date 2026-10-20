@@ -647,19 +647,15 @@ fn build_frame(messages: &MessagesApp) -> Frame {
     }
 }
 
-/// Computes a deterministic avatar backdrop color based on peer handle.
-fn avatar_color(peer: &[u8]) -> u32 {
-    let mut hash = 0u32;
-    for &b in peer {
-        hash = hash.wrapping_mul(31).wrapping_add(b as u32);
-    }
-    match hash % 5 {
-        0 => 0xFF1E3A8A, // Sapphire
-        1 => 0xFF065F46, // Emerald
-        2 => 0xFF5B21B6, // Purple
-        3 => 0xFF831843, // Rose
-        _ => 0xFF374151, // Slate
-    }
+/// The backdrop colour of a peer's initial disc.
+///
+/// WHY this is one neutral colour and not a hash of the handle: a colour
+/// picked from the handle looks like a contact's chosen identity, and the
+/// app has never received a contact photo or a profile colour. The disc
+/// shows the peer's real initial against a neutral surface, which is what
+/// the app actually knows.
+fn avatar_color(_peer: &[u8]) -> u32 {
+    0xFF374151 // Slate
 }
 
 /// Case-insensitive substring match.
@@ -1212,7 +1208,11 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
             } else if flagged_urgency {
                 (0xFF2E1F08, 0xFFF59E0B, b"Caution: Unverified urgent request" as &[u8])
             } else {
-                (SURFACE_DARK, BORDER_SUBTLE, b"Verified Local Isolated Chat" as &[u8])
+                // WHY this is no longer "Verified": the banner sat next to
+                // a refusal status and a "no transport" state, and no
+                // handshake, key exchange or peer contact ever happened.
+                // The thread is local and unsent; that is what it can say.
+                (SURFACE_DARK, BORDER_SUBTLE, b"Local thread - not delivered" as &[u8])
             };
 
             if in_rect(SEARCH_FIELD, x, y) {
@@ -1339,7 +1339,13 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
 
                             // Subline / Status indicator
                             let (status_label, status_color) = if is_incoming {
-                                (b"Incoming SMS" as &[u8], TEXT_MUTED)
+                                // WHY this does not name a transport: the
+                                // record carries a direction flag, not the
+                                // channel it arrived on. Nothing in this app
+                                // received an SMS -- there is no transport
+                                // bound -- so naming one would be a claim
+                                // the app cannot support.
+                                (b"Received (no transport)" as &[u8], TEXT_MUTED)
                             } else {
                                 match msgs[i].status {
                                     DeliveryStatus::RefusedNoTransport => {

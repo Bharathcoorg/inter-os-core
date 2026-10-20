@@ -1733,6 +1733,16 @@ pub fn spawn_app_notes(id_security: TaskId) -> TaskId {
         rights: Rights::WRITE,
         object_id: 1,
     }).ok();
+    // WHY the clock: a note records when it was edited, and the only honest
+    // source for that is the device's real-time clock. The calendar is
+    // already granted RealtimeClockRead for the same reason. Without this
+    // the notes app can only say "No timestamp" for every note it holds.
+    caps.insert(Capability {
+        id: CapabilityId(2909),
+        cap_type: CapabilityType::RealtimeClockRead,
+        rights: Rights::READ,
+        object_id: 0,
+    }).ok();
 
     let id = spawn_user_process_with_parent(
         "app_notes",
