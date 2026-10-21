@@ -978,49 +978,54 @@ def main():
         assert unlocked, "Failed to unlock device"
         print("[LIFECYCLE TEST] [OK] Device unlocked, returned to Home grid.")
 
-        # System surface: Testing System Space
-        print("\n[LIFECYCLE TEST] === System surface: Testing System Space ===")
+        # Search surface: the universal search bar opens the search.
+        #
+        # WHY this changed: the bar says it searches "apps, settings & files",
+        # and it used to open a launcher-drawn copy of the Settings app's own
+        # page. It now opens the search itself, so the tap below is expected
+        # to render the search surface.
+        print("\n[LIFECYCLE TEST] === Search surface: Testing global search ===")
         time.sleep(1.0)
-        print("[LIFECYCLE TEST] Opening System Space via universal search bar tap (360, 1330)...")
-        reader.send(b"TAP 360 1330\n")
-        sys_space_ready = reader.wait_for(
-            "System surface rendered.",
+        print("[LIFECYCLE TEST] Opening global search via universal search bar tap (360, 700)...")
+        reader.send(b"TAP 360 700\n")
+        search_ready = reader.wait_for(
+            "Search surface rendered.",
             timeout=25.0,
-            print_keywords=["LAUNCHER", "System Space", "render_system_space"]
+            print_keywords=["LAUNCHER", "render_search"]
         )
-        if not sys_space_ready:
-            print("[LIFECYCLE TEST] Retrying open System Space (TAP 360 1330)...")
+        if not search_ready:
+            print("[LIFECYCLE TEST] Retrying open global search (TAP 360 700)...")
             time.sleep(1.0)
-            reader.send(b"TAP 360 1330\n")
-            sys_space_ready = reader.wait_for(
-                "System surface rendered.",
+            reader.send(b"TAP 360 700\n")
+            search_ready = reader.wait_for(
+                "Search surface rendered.",
                 timeout=35.0,
-                print_keywords=["LAUNCHER", "System Space", "render_system_space"]
+                print_keywords=["LAUNCHER", "render_search"]
             )
-        assert sys_space_ready, "Failed to open System Space"
-        print("[LIFECYCLE TEST] [OK] System Space opened.")
-        ppm_sys_space = os.path.abspath(r"target\test_system_space.ppm").replace("\\", "/")
-        _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_sys_space}")
-        print(f"[LIFECYCLE TEST] Screendump recorded: {ppm_sys_space}")
+        assert search_ready, "Failed to open global search"
+        print("[LIFECYCLE TEST] [OK] Global search opened.")
+        ppm_search = os.path.abspath(r"target\test_search.ppm").replace("\\", "/")
+        _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_search}")
+        print(f"[LIFECYCLE TEST] Screendump recorded: {ppm_search}")
         time.sleep(2.0)
-        print("[LIFECYCLE TEST] Returning to Home from System Space via bottom tap...")
+        print("[LIFECYCLE TEST] Returning to Home from search via bottom tap...")
         reader.send(b"TAP 360 1410\n")
-        sys_space_returned = reader.wait_for(
+        search_returned = reader.wait_for(
             "Home surface rendered.",
             timeout=25.0,
             print_keywords=["LAUNCHER", "render_full"]
         )
-        if not sys_space_returned:
-            print("[LIFECYCLE TEST] Retrying return to Home from System Space...")
+        if not search_returned:
+            print("[LIFECYCLE TEST] Retrying return to Home from search...")
             time.sleep(1.0)
             reader.send(b"TAP 360 1410\n")
-            sys_space_returned = reader.wait_for(
+            search_returned = reader.wait_for(
                 "Home surface rendered.",
                 timeout=25.0,
                 print_keywords=["LAUNCHER", "render_full"]
             )
-        assert sys_space_returned, "Failed to return to Home from System Space"
-        print("[LIFECYCLE TEST] [OK] Returned to Home from System Space.")
+        assert search_returned, "Failed to return to Home from the search"
+        print("[LIFECYCLE TEST] [OK] Returned to Home from the search.")
 
         ppm_final = os.path.abspath(r"target\test_launcher_final.ppm").replace("\\", "/")
         _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_final}")

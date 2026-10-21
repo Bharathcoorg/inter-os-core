@@ -23,6 +23,7 @@ pub mod audio;
 pub mod capability;
 pub mod compat;
 pub mod compositor;
+pub mod content;
 pub mod crypto;
 pub mod diagnostics;
 pub mod display_hal;

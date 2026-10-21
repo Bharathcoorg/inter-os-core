@@ -9,45 +9,16 @@ pub const PIN_MAX_DIGITS: usize = 8;
 pub const PIN_MIN_DIGITS: usize = 4;
 
 /// The seven semantic System Space categories.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Section {
-    Device = 0,
-    Network = 1,
-    Personal = 2,
-    Apps = 3,
-    Power = 4,
-    Security = 5,
-    System = 6,
-}
-
-impl Section {
-    pub const COUNT: usize = 7;
-
-    pub fn from_index(i: usize) -> Option<Section> {
-        match i {
-            0 => Some(Section::Device),
-            1 => Some(Section::Network),
-            2 => Some(Section::Personal),
-            3 => Some(Section::Apps),
-            4 => Some(Section::Power),
-            5 => Some(Section::Security),
-            6 => Some(Section::System),
-            _ => None,
-        }
-    }
-
-    pub fn title(self) -> &'static [u8] {
-        match self {
-            Section::Device => b"Device",
-            Section::Network => b"Network",
-            Section::Personal => b"Personal",
-            Section::Apps => b"Apps",
-            Section::Power => b"Power",
-            Section::Security => b"Security",
-            Section::System => b"System",
-        }
-    }
-}
+///
+/// WHY this is the platform's catalogue and not a second copy of it: the
+/// Settings app renders these sections and the launcher's search offers them
+/// as destinations. Two lists would drift, and a search result that opens a
+/// section the Settings app does not have is a destination that does not
+/// exist -- so both sides read the one definition in the SDK.
+///
+/// `title()` is the detail screen's title ("Apps & Storage") and
+/// `short_title()` is the name the landing grid uses ("Apps").
+pub use interos_std::settings::Section;
 
 /// Dynamic Voltage and Frequency Scaling (DVFS) Governor profiles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -656,8 +627,12 @@ mod tests {
         assert_eq!(Section::from_index(6), Some(Section::System));
         assert_eq!(Section::from_index(7), None);
 
-        assert_eq!(Section::Device.title(), b"Device");
-        assert_eq!(Section::Security.title(), b"Security");
+        // WHY the short title is asserted here: the landing grid calls the
+        // section "Security" and the detail screen calls it
+        // "Security & Privacy", and both are the same surface.
+        assert_eq!(Section::Device.short_title(), b"Device");
+        assert_eq!(Section::Security.short_title(), b"Security");
+        assert_eq!(Section::Security.title(), b"Security & Privacy");
     }
 
     #[test]

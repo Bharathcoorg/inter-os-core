@@ -586,6 +586,9 @@ pub(crate) fn capabilities_from_rapp_with_trust(
             22 => (CapabilityType::SystemControl, Rights::INVOKE, crate::services::SERVICE_CAMERA_CONTROL_OBJECT),
             23 => (CapabilityType::SystemControl, Rights::INVOKE, crate::services::SERVICE_SENSOR_CONTROL_OBJECT),
             24 => (CapabilityType::RealtimeClockRead, Rights::READ, 0),
+            25 => (CapabilityType::ContentIndexRead, Rights::READ, 0),
+            26 => (CapabilityType::ContentIntentDispatch, Rights::INVOKE, 0),
+            27 => (CapabilityType::SurfaceCapture, Rights::READ, 0),
             _ => return Err("Unknown RAPP v2 capability"),
         };
         caps.insert(Capability {
@@ -793,7 +796,7 @@ pub extern "C" fn app_settings_trampoline() -> ! {
 
 /// Spawns the native Sovereign Settings App in Ring 3.
 pub fn spawn_app_settings(id_security: TaskId) -> TaskId {
-    let mut caps = CapabilityTable::new(14);
+    let mut caps = CapabilityTable::new(15);
     caps.insert(Capability {
         id: CapabilityId(1701),
         cap_type: CapabilityType::SerialOutput,
@@ -864,6 +867,15 @@ pub fn spawn_app_settings(id_security: TaskId) -> TaskId {
         object_id: 0,
     }).ok();
 
+    // WHY the content index: this app owns the wallpaper and the ringtone
+    // slots, so it has to know whether the document it was handed is one the
+    // platform actually holds before it writes the slot.
+    caps.insert(Capability {
+        id: CapabilityId(1712),
+        cap_type: CapabilityType::ContentIndexRead,
+        rights: Rights::READ,
+        object_id: 0,
+    }).ok();
     let id = spawn_user_process_with_parent(
         "app_settings",
         APP_SETTINGS_ELF,
@@ -944,7 +956,7 @@ pub extern "C" fn app_dialer_trampoline() -> ! {
 
 /// Spawns the native Sovereign Dialer App in Ring 3.
 pub fn spawn_app_dialer(id_security: TaskId) -> TaskId {
-    let mut caps = CapabilityTable::new(8);
+    let mut caps = CapabilityTable::new(9);
     caps.insert(Capability {
         id: CapabilityId(1901),
         cap_type: CapabilityType::SerialOutput,
@@ -1008,6 +1020,15 @@ pub fn spawn_app_dialer(id_security: TaskId) -> TaskId {
         object_id: 0,
     }).ok();
 
+    // WHY the content index: the dialer shows the ringtone the user chose, and
+    // the ringtone is a document the platform holds, so the dialer reads the
+    // document's own record rather than the name alone.
+    caps.insert(Capability {
+        id: CapabilityId(1908),
+        cap_type: CapabilityType::ContentIndexRead,
+        rights: Rights::READ,
+        object_id: 0,
+    }).ok();
     let id = spawn_user_process_with_parent(
         "app_dialer",
         APP_DIALER_ELF,
@@ -1232,7 +1253,7 @@ pub extern "C" fn app_browser_trampoline() -> ! {
 
 /// Spawns the native Sovereign Browser & Decentralized Web Client in Ring 3.
 pub fn spawn_app_browser(id_security: TaskId) -> TaskId {
-    let mut caps = CapabilityTable::new(10);
+    let mut caps = CapabilityTable::new(12);
     caps.insert(Capability {
         id: CapabilityId(2301),
         cap_type: CapabilityType::SerialOutput,
@@ -1305,6 +1326,22 @@ pub fn spawn_app_browser(id_security: TaskId) -> TaskId {
         object_id: 0,
     }).ok();
 
+    // WHY the filesystem write: a download has to land somewhere the rest of
+    // the device can see, and the shared storage area is the one place every
+    // app may look. The browser saves into it and the file manager lists what
+    // the browser saved, through the platform's document index.
+    caps.insert(Capability {
+        id: CapabilityId(2309),
+        cap_type: CapabilityType::FileSystemWrite,
+        rights: Rights::WRITE,
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2310),
+        cap_type: CapabilityType::ContentIndexRead,
+        rights: Rights::READ,
+        object_id: 0,
+    }).ok();
     let id = spawn_user_process_with_parent(
         "app_browser",
         APP_BROWSER_ELF,
@@ -1547,7 +1584,7 @@ pub extern "C" fn app_file_manager_trampoline() -> ! {
 
 /// Spawns the native Sovereign File Manager & VFS Explorer in Ring 3.
 pub fn spawn_app_file_manager(id_security: TaskId) -> TaskId {
-    let mut caps = CapabilityTable::new(10);
+    let mut caps = CapabilityTable::new(12);
     caps.insert(Capability {
         id: CapabilityId(2701),
         cap_type: CapabilityType::SerialOutput,
@@ -1603,6 +1640,21 @@ pub fn spawn_app_file_manager(id_security: TaskId) -> TaskId {
         object_id: 0,
     }).ok();
 
+    // WHY the content capabilities: the file manager lists the documents the
+    // platform's index holds, so the downloads the browser saved and the
+    // photographs the camera wrote are the same documents the gallery shows.
+    caps.insert(Capability {
+        id: CapabilityId(2709),
+        cap_type: CapabilityType::ContentIndexRead,
+        rights: Rights::READ,
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2710),
+        cap_type: CapabilityType::ContentIntentDispatch,
+        rights: Rights::INVOKE,
+        object_id: 0,
+    }).ok();
     let id = spawn_user_process_with_parent(
         "app_file_manager",
         APP_FILE_MANAGER_ELF,
@@ -1621,7 +1673,7 @@ pub extern "C" fn app_gallery_trampoline() -> ! {
 
 /// Spawns the native Sovereign Gallery & Photo Studio in Ring 3.
 pub fn spawn_app_gallery(id_security: TaskId) -> TaskId {
-    let mut caps = CapabilityTable::new(10);
+    let mut caps = CapabilityTable::new(12);
     caps.insert(Capability {
         id: CapabilityId(2801),
         cap_type: CapabilityType::SerialOutput,
@@ -1671,6 +1723,22 @@ pub fn spawn_app_gallery(id_security: TaskId) -> TaskId {
         object_id: 0,
     }).ok();
 
+    // WHY the content capabilities: the gallery reads the platform's document
+    // index so that it and the file manager describe the same documents, and
+    // it dispatches intents so that a document it shows can be handed to the
+    // program that declared a handler for it.
+    caps.insert(Capability {
+        id: CapabilityId(2809),
+        cap_type: CapabilityType::ContentIndexRead,
+        rights: Rights::READ,
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2810),
+        cap_type: CapabilityType::ContentIntentDispatch,
+        rights: Rights::INVOKE,
+        object_id: 0,
+    }).ok();
     let id = spawn_user_process_with_parent(
         "app_gallery",
         APP_GALLERY_ELF,

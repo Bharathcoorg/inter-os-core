@@ -233,6 +233,19 @@ const DETAIL_INFO: Rect = Rect::new(W / 2 - 40, H - 100, 80, 48);
 const PHOTO_FAV_BTN: Rect = Rect::new(MARGIN + 40, H - 100, 80, 48);
 const PHOTO_DEL_BTN: Rect = Rect::new(W - MARGIN - 120, H - 100, 80, 48);
 const SET_WALLPAPER_BTN: Rect = Rect::new(MARGIN + 20, H - 164, W - 2 * MARGIN - 40, 48);
+/// The media information sheet's rectangle.
+const fn info_sheet_rect() -> Rect {
+    Rect::new(MARGIN, H - 470, W - 2 * MARGIN, 350)
+}
+/// The sheet's "open with" button.
+///
+/// WHY the sheet and not the photo view: the sheet is where the app says what
+/// it knows about the document, and "which app opens this" is another fact
+/// about the same document. A button that appeared without the facts beside
+/// it would be an action the user cannot judge.
+const fn info_open_with_btn() -> Rect {
+    Rect::new(MARGIN + 20, H - 470 + 264, 170, 44)
+}
 const WP_SHEET_RECT: Rect = Rect::new(MARGIN + 10, H - 340, W - 2 * MARGIN - 20, 260);
 const WP_SHEET_TITLE_Y: usize = H - 324;
 const WP_TARGET_HOME_BTN: Rect = Rect::new(MARGIN + 30, H - 280, W - 2 * MARGIN - 60, 44);
@@ -822,6 +835,76 @@ pub struct GalleryApp {
     pub detail_h: u32,
 }
 
+/// Hands an action to the package the platform's registry says owns it.
+///
+/// WHY the platform resolves it: the answer to "who fills the wallpaper slot"
+/// is a property of what is installed, and the registry is built from the
+/// installed packages' signed manifests. An app that kept its own table
+/// would be able to hand a wallpaper to a program that never asked for it.
+///
+/// WHY a refusal says so and names nothing: when no package declared the
+/// action, the platform has no answer to give.
+fn dispatch_wallpaper(action: &str, payload: &str) -> bool {
+    match std::content::intent_dispatch(std::content::IntentKind::Action, action, payload) {
+        Ok(_) => {
+            std::log("[GALLERY] The wallpaper was handed to the package that owns the slot.").ok();
+            true
+        }
+        Err(_) => {
+            std::log("[GALLERY] No app handles the wallpaper action; the wallpaper was not changed.").ok();
+            false
+        }
+    }
+}
+
+/// Hands the media the user opened to the package that declared a handler for
+/// its media type.
+///
+/// WHY the media type comes from the platform's index and not from the file's
+/// name: the index read the document's own bytes when it could, and a name
+/// that contradicts the bytes would otherwise send the document to the wrong
+/// program.
+fn dispatch_open_with(path: &str) -> bool {
+    let mut raw = [0u8; 2048];
+    let Some(record) = std::content::content_index_find_path(path, &mut raw) else {
+        std::log("[GALLERY] The platform's index does not hold this document.").ok();
+        return false;
+    };
+    let mut handler = [0u8; 64];
+    let n = match std::content::intent_resolve(
+        std::content::IntentKind::Mime,
+        record.mime,
+        &mut handler,
+    ) {
+        Ok(n) => n,
+        Err(_) => {
+            // WHY nothing is named: the platform refused the lookup because no
+            // installed package declared a handler for this media type, and
+            // offering a substitute would be a guess.
+            std::log("[GALLERY] No app handles this file.").ok();
+            return false;
+        }
+    };
+    if n == 0 {
+        std::log("[GALLERY] No app handles this file.").ok();
+        return false;
+    }
+    let Ok(_package) = core::str::from_utf8(&handler[..n]) else {
+        std::log("[GALLERY] No app handles this file.").ok();
+        return false;
+    };
+    match std::content::intent_dispatch(std::content::IntentKind::Mime, record.mime, path) {
+        Ok(_) => {
+            std::log("[GALLERY] The document was handed to the app that declared its type.").ok();
+            true
+        }
+        Err(_) => {
+            std::log("[GALLERY] The app that handles this file could not be launched.").ok();
+            false
+        }
+    }
+}
+
 impl GalleryApp {
     pub const fn new() -> Self {
         Self {
@@ -855,7 +938,18 @@ impl GalleryApp {
         }
     }
 
-    pub fn apply_wallpaper_target(&self, _lock: bool, _home: bool) {
+    /// Hands the wallpaper the user chose to the package that owns the slot.
+    ///
+    /// WHY it dispatches and does not write the store itself: the wallpaper
+    /// slot is the settings app's, and the platform's registry knows which
+    /// package declared the action that fills it. The old code built the
+    /// value and then dropped it on the floor, so the button did nothing at
+    /// all -- the wallpaper never changed and nothing said so.
+    ///
+    /// WHY the payload is a path or a catalogue key and the target is part of
+    /// the action: the settings app has to know which surface the user meant,
+    /// and the surface is what the action names.
+    pub fn apply_wallpaper_target(&self, lock: bool, home: bool) {
         let Some(media) = self.open else { return };
         let mut val = [0u8; 64];
         let val_len: usize = match media {
@@ -891,7 +985,23 @@ impl GalleryApp {
             }
         };
 
-        if val_len > 0 {
+        if val_len == 0 {
+            std::log("[GALLERY] There is no wallpaper to set.").ok();
+            return;
+        }
+        let Ok(payload) = core::str::from_utf8(&val[..val_len]) else {
+            std::log("[GALLERY] The wallpaper's name is not text; nothing was changed.").ok();
+            return;
+        };
+        let mut dispatched = false;
+        if home {
+            dispatched |= dispatch_wallpaper(std::content::ACTION_SET_WALLPAPER, payload);
+        }
+        if lock {
+            dispatched |= dispatch_wallpaper(std::content::ACTION_SET_LOCK_WALLPAPER, payload);
+        }
+        if !dispatched {
+            std::log("[GALLERY] No app handles the wallpaper action; the wallpaper was not changed.").ok();
         }
     }
 
@@ -903,89 +1013,81 @@ impl GalleryApp {
         }
     }
 
+    /// Rebuilds the gallery's list of the media the device holds.
+    ///
+    /// WHY the platform's index and not a directory scan of its own: the
+    /// index is the device's one description of the documents it holds, and
+    /// the file manager reads the same records. Two scans and two parsers
+    /// would be two notions of what a file is, and the two would disagree
+    /// about a file whose name and contents disagree.
+    ///
+    /// WHY the media type comes from the index: the platform read the
+    /// document's own bytes when it could, so a document named `.jpg` that
+    /// holds a PNG is shown as a PNG.
     pub fn rescan_storage(&mut self) {
         self.storage_count = 0;
-        let paths: [&str; 3] = ["/storage/photos", "/storage/pictures", "/storage/videos"];
         let mut list_buf = [0u8; 4096];
-        for dir_path in paths.iter() {
-            if self.storage_count >= MAX_STORAGE_ITEMS {
-                break;
+        let Ok(bytes) = std::content::content_index_list(&mut list_buf) else {
+            std::log("[GALLERY] The platform's document index could not be read; the gallery shows nothing it cannot name.").ok();
+            return;
+        };
+        let payload = &list_buf[..bytes];
+        for line in payload.split(|&b| b == b'\n') {
+            if line.is_empty() || self.storage_count >= MAX_STORAGE_ITEMS {
+                continue;
             }
-            if let Ok(bytes) = std::fs_list(dir_path, &mut list_buf) {
-                let payload = &list_buf[..bytes];
-                for line in payload.split(|&b| b == b'\n') {
-                    if line.is_empty() || self.storage_count >= MAX_STORAGE_ITEMS {
-                        continue;
-                    }
-                    let mut parts = line.split(|&b| b == b'|');
-                    let Some(name_bytes) = parts.next() else { continue };
-                    if name_bytes.is_empty() || !is_media_file(name_bytes) {
-                        continue;
-                    }
-                    let size: u64 = if let Some(size_bytes) = parts.next() {
-                        let mut s = 0u64;
-                        for &b in size_bytes {
-                            if b.is_ascii_digit() {
-                                s = s * 10 + (b - b'0') as u64;
-                            }
-                        }
-                        s
-                    } else {
-                        0
-                    };
-                    let is_video = has_video_suffix(name_bytes);
-                    let mut item = StorageMediaItem::EMPTY;
-                    let nl = name_bytes.len().min(item.name.len());
-                    item.name[..nl].copy_from_slice(&name_bytes[..nl]);
-                    item.name_len = nl;
+            let Ok(text) = core::str::from_utf8(line) else { continue };
+            let Some(record) = std::content::DocumentRecord::parse(text) else { continue };
+            let name_bytes = record.path.rsplit('/').next().unwrap_or(&record.path);
+            if name_bytes.is_empty() || !is_media_file(name_bytes.as_bytes()) {
+                continue;
+            }
+            let is_video = record.mime.starts_with("video/");
+            let mut item = StorageMediaItem::EMPTY;
+            let nl = name_bytes.len().min(item.name.len());
+            item.name[..nl].copy_from_slice(&name_bytes.as_bytes()[..nl]);
+            item.name_len = nl;
 
-                    let mut pl = append(&mut item.path, 0, dir_path.as_bytes());
-                    if !dir_path.ends_with('/') {
-                        pl = append(&mut item.path, pl, b"/");
+            let pl = append(&mut item.path, 0, record.path.as_bytes());
+            item.path_len = pl;
+            item.size = record.length;
+            item.is_video = is_video;
+
+            let mut fav_key = [0u8; 64];
+            let mut kn = append(&mut fav_key, 0, b"gallery.fav.");
+            kn = append(&mut fav_key, kn, &name_bytes.as_bytes()[..nl]);
+            let mut val_buf = [0u8; 8];
+            if let Ok(key_str) = core::str::from_utf8(&fav_key[..kn]) {
+                if let Ok(vn) = std::settings_get(key_str, &mut val_buf) {
+                    if vn > 0 && val_buf[0] == b'1' {
+                        item.is_favourite = true;
                     }
-                    pl = append(&mut item.path, pl, &name_bytes[..nl]);
-                    item.path_len = pl;
-                    item.size = size;
-                    item.is_video = is_video;
-
-                    let mut fav_key = [0u8; 64];
-                    let mut kn = append(&mut fav_key, 0, b"gallery.fav.");
-                    kn = append(&mut fav_key, kn, &name_bytes[..nl]);
-                    let mut val_buf = [0u8; 8];
-                    if let Ok(key_str) = core::str::from_utf8(&fav_key[..kn]) {
-                        if let Ok(vn) = std::settings_get(key_str, &mut val_buf) {
-                            if vn > 0 && val_buf[0] == b'1' {
-                                item.is_favourite = true;
-                            }
-                        }
-                    }
-
-                    // WHY the tile colours are neutral now: they used to be
-                    // hashed from the file name, which produced a gradient
-                    // that looked like a preview of the photograph and was
-                    // not one. A stored image that can be decoded is drawn
-                    // from its own pixels; one that cannot gets a neutral
-                    // placeholder and says so.
-                    item.primary_color = 0xFF1E293B;
-                    item.secondary_color = 0xFF0F172A;
-
-                    let slot = self.storage_count;
-                    if !is_video {
-                        let thumb =
-                            decode_thumbnail(&item.path[..item.path_len], &item.name[..item.name_len]);
-                        unsafe {
-                            STORAGE_THUMBS[slot] = thumb.unwrap_or(Thumbnail::EMPTY);
-                        }
-                    } else {
-                        unsafe {
-                            STORAGE_THUMBS[slot] = Thumbnail::EMPTY;
-                        }
-                    }
-
-                    self.storage_items[self.storage_count] = item;
-                    self.storage_count += 1;
                 }
             }
+
+            // WHY the tile colours are neutral now: they used to be
+            // hashed from the file name, which produced a gradient that
+            // looked like a preview of the photograph and was not one. A
+            // stored image that can be decoded is drawn from its own pixels;
+            // one that cannot gets a neutral placeholder and says so.
+            item.primary_color = 0xFF1E293B;
+            item.secondary_color = 0xFF0F172A;
+
+            let slot = self.storage_count;
+            if !is_video {
+                let thumb =
+                    decode_thumbnail(&item.path[..item.path_len], &item.name[..item.name_len]);
+                unsafe {
+                    STORAGE_THUMBS[slot] = thumb.unwrap_or(Thumbnail::EMPTY);
+                }
+            } else {
+                unsafe {
+                    STORAGE_THUMBS[slot] = Thumbnail::EMPTY;
+                }
+            }
+
+            self.storage_items[self.storage_count] = item;
+            self.storage_count += 1;
         }
     }
 
@@ -2186,7 +2288,7 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
 
     // Floating Info Sheet Overlay (for photos/wallpapers)
     if app.show_info_overlay && app.video_player.is_none() {
-        let sheet = Rect::new(MARGIN, H - 470, W - 2 * MARGIN, 350);
+        let sheet = info_sheet_rect();
         if sheet.contains(x, y) {
             if let Some(shape) = draw_rounded_rect(x, y, sheet, radius::CARD, THEME.surface_container, Some(THEME.primary), 2) {
                 if shape == THEME.primary { return THEME.primary; }
@@ -2303,6 +2405,25 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
                 };
                 if let Some(c) = text(x, y, sheet.x + 20 + fw, sheet.y + 200, 1, fmt_str, THEME.on_surface, THEME.surface_container) {
                     return c;
+                }
+
+                // The "open with" button, which hands the document to the app
+                // that declared a handler for its media type.
+                //
+                // WHY it is here: the sheet is where the app says what it
+                // knows about the document, and "which app opens this" is
+                // another fact about the same document. A button that
+                // appeared without the facts beside it would be an action
+                // the user cannot judge.
+                let open_with_btn = info_open_with_btn();
+                if let Some(oc) = draw_pill(x, y, open_with_btn, THEME.surface_container_high, Some(THEME.border)) {
+                    if oc != THEME.surface_container_high { return oc; }
+                    let o_lbl = b"Open with";
+                    let ow = font::measure(o_lbl, 1);
+                    let ox_pos = open_with_btn.x + (open_with_btn.w.saturating_sub(ow)) / 2;
+                    let oy_pos = open_with_btn.y + (open_with_btn.h.saturating_sub(font::line_height(1))) / 2;
+                    if let Some(tc) = text(x, y, ox_pos, oy_pos, 1, o_lbl, THEME.on_surface, THEME.surface_container_high) { return tc; }
+                    return THEME.surface_container_high;
                 }
 
                 // Dismiss Button
@@ -2962,6 +3083,27 @@ fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
 
             // Photo inspection controls
             if app.show_info_overlay {
+                // The sheet's "open with" button.
+                //
+                // WHY the document is looked up in the platform's index and
+                // not guessed from the name: the index read the document's
+                // own bytes when it could, and the handler that declared
+                // that media type is the program that can open it.
+                if info_open_with_btn().contains(x, y) {
+                    if let Some(Media::StorageItem(idx)) = app.open {
+                        if idx < app.storage_count {
+                            let item = &app.storage_items[idx];
+                            if let Ok(path) =
+                                core::str::from_utf8(&item.path[..item.path_len])
+                            {
+                                dispatch_open_with(path);
+                            }
+                        }
+                    } else {
+                        std::log("[GALLERY] There is no document to open with.").ok();
+                    }
+                    return Tap::Redraw(Dirty::All);
+                }
                 app.show_info_overlay = false;
                 return Tap::Redraw(Dirty::All);
             }

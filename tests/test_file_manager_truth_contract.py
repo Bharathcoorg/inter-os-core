@@ -145,17 +145,29 @@ def test_an_unreadable_directory_is_not_reported_as_an_empty_one():
     assert "Directory empty or unread" not in source
 
 
-def test_a_refused_launch_is_not_logged_as_a_launch():
+def test_a_refused_dispatch_is_not_logged_as_a_dispatch():
     """The old code logged "Launching associated media viewer" before the
     launch and threw the answer away.
 
     A refused launch was therefore logged as a launch.
+
+    WHY this contract changed: the app no longer decides for itself which
+    program opens a file. The platform's intent registry holds what the
+    installed packages declared, and the app asks the platform to dispatch
+    the document to the handler that declared its media type. The rule the
+    contract protects is unchanged -- a refused dispatch is not reported as a
+    dispatch -- but the mechanism is now the platform's registry rather than
+    the app's private table.
     """
     source = fm_main()
     assert "Launching associated media viewer" not in source
-    assert "Launched the associated media viewer." in source
-    assert "The associated media viewer could not be launched." in source
-    assert "match std::app_launch(app_id)" in source
+    assert "The document was dispatched to its handler." in source
+    assert "The document's handler could not be launched." in source
+    assert "match std::content::intent_dispatch(" in source
+    # A media type with no handler is reported as such, and names nothing.
+    assert "No app handles this file." in source
+    # The private table is no longer what decides.
+    assert "get_app_for_mime(" not in source
 
 
 def test_a_capability_slot_is_resolved_by_its_type():

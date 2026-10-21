@@ -13,18 +13,30 @@
 //! * [`layout`] — geometry computed from counts, so the shell adapts to whatever
 //!   apps and options exist rather than asserting a fixed set.
 //! * [`text`] — glyph metrics, so centring and wrapping agree with the rasteriser.
+//! * [`search`] — the one index the search runs against, and the ranking seam a
+//!   model-backed ranker plugs into.
+//! * [`recents`] — the task switcher's card model: what a running task is
+//!   called, what it is showing, and what a gesture on its card means.
 //!
 //! Nothing here talks to the kernel, the package registry or the framebuffer. The
 //! shell supplies state; these modules decide where things go and what colour
 //! they are. That separation is what makes a theme swappable and a layout
 //! testable without a device.
+//!
+//! WHY [`search`] and [`recents`] are in the library and not in the shell: the
+//! shell is `#![no_main]`, so cargo cannot build a test harness for the binary
+//! itself. The search's ranking and the switcher's card model are the two
+//! pieces of the shell whose behaviour is worth stating in a test rather than
+//! only in a frame, and they have to be in the library for that to be possible.
 
 extern crate interos_std;
 
 pub use interos_std::font;
 pub mod icons;
 pub mod layout;
+pub mod recents;
 pub use interos_std::design::outline_text;
+pub mod search;
 pub mod text;
 pub mod theme;
 

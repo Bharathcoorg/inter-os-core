@@ -30,6 +30,7 @@ use crate::{test_text_aa, LauncherState, H, W};
 use launcher::layout::{self, Rect};
 use launcher::text;
 use interos_std::design::walls;
+use interos_std::image as interop_image;
 use launcher::theme::*;
 
 /// WHY `Theme::LIGHT`: this is the one surface in the shell whose backdrop is a
@@ -337,6 +338,13 @@ fn lock_geometric_mountain_pixel(x: usize, y: usize) -> u32 {
 
 /// Full-bleed continuous fixed-point coverage anti-aliased wallpaper layer for the lock surface.
 fn lock_wallpaper_pixel(f: &Frame, x: usize, y: usize) -> u32 {
+    // WHY the document comes first: the lock wallpaper slot may name a
+    // document the user chose, and the document is what the user chose. A
+    // scene is the fallback the surface falls back to when the slot names no
+    // document or names one the platform cannot paint.
+    if let Some(document) = f.wallpaper_document {
+        return document.pixel(x, y, W, H);
+    }
     let scene = f.scene;
     if scene.key == b"stock" || scene.key == b"" {
         return lock_geometric_mountain_pixel(x, y);
@@ -697,6 +705,13 @@ struct Frame {
     /// path, and it is what lets the lock and home surfaces draw independently
     /// chosen wallpapers from one catalogue.
     scene: &'static walls::Scene,
+    /// The document the lock wallpaper slot names, when it names one the
+    /// platform can paint.
+    ///
+    /// WHY it is in the frame and not read per pixel: the document is a
+    /// choice the settings store answers, and the frame is where that answer
+    /// is resolved once for the whole surface.
+    wallpaper_document: Option<interop_image::Bitmap<'static>>,
     /// The ramp, resolved: top stop, brightest tone, shadowed rock, mist, and the
     /// darkest stop the foreground holds.
     top: u32,
@@ -797,6 +812,7 @@ impl Frame {
             na_r: lock_na_r_box(),
             ink: if scene.key == b"daylight" { scene.ink } else { 0xFFFFFFFF },
             scene,
+            wallpaper_document: state.lock_wallpaper_document,
             top: scene.top,
             horizon: scene.horizon(),
             shadow: scene.shadow(),
@@ -872,6 +888,7 @@ static FRAME_MEMO: FrameMemo = FrameMemo(UnsafeCell::new(FrameSlot {
         na_r: Rect::new(0, 0, 0, 0),
         ink: 0,
         scene: &walls::SCENES[0],
+        wallpaper_document: None,
         top: 0,
         horizon: 0,
         shadow: 0,

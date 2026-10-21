@@ -3,6 +3,7 @@
 //! Provides the primary interface between tasks and kernel services.
 //! Every privileged system call enforces capability validation before execution.
 
+pub mod content;
 pub mod entry;
 pub mod user_ptr;
 pub use entry::set_current_kernel_rsp;
@@ -199,6 +200,28 @@ pub enum SyscallNumber {
     DisplaySetOrientation = 131,
     CapLookup = 132,
     FsUnlink = 133,
+    /// Reads a running client's display surface, scaled, into the caller's
+    /// buffer.
+    ///
+    /// WHY it is its own number and not an extension of `SurfaceWrite`: reading
+    /// a *running* app's pixels is a different authority from writing your
+    /// own, and the platform had no framebuffer-grab call at all -- the task
+    /// switcher had to draw a picture it never received. The call is authorised
+    /// by the `SurfaceCapture` capability, so "who may see another app's
+    /// screen" is a capability decision rather than a property of the caller.
+    ///
+    /// WHY 134: it is the next free number above the table the dispatcher
+    /// already claims, so no existing ABI number moves.
+    SurfaceCapture = 134,
+    // The content layer: a shared document index and a system-wide intent
+    // registry. 140..=145 are above every number the dispatcher already
+    // claims, so no existing ABI number moves.
+    ContentIndexQuery = 140,
+    ContentIndexRefresh = 141,
+    IntentResolve = 142,
+    IntentList = 143,
+    IntentDispatch = 144,
+    IntentPending = 145,
 }
 
 /// System call result status codes.
@@ -2035,11 +2058,173 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
                  Ok(s) => s,
                  Err(_) => return SyscallResult::InvalidArguments as i64,
              };
-             match sys_fs_unlink(cap_slot, path) {
-                 Ok(()) => SyscallResult::Success as i64,
-                 Err(e) => e as i64,
-             }
-         }
+            match sys_fs_unlink(cap_slot, path) {
+                Ok(()) => SyscallResult::Success as i64,
+                Err(e) => e as i64,
+            }
+        }
+        134 => {
+            // SurfaceCapture: a1 = surface id, a2 = dest width, a3 = dest height,
+            // a4 = out pixel buffer, a5 = out pixel count.
+            //
+            // WHY the caller's own surface is not a special case: the call
+            // exists to read a surface the caller does not own, so the
+            // authority is the `SurfaceCapture` capability and nothing else.
+            // A task without it is refused even for a surface it owns, which
+            // keeps one answer to "may this task see that screen".
+            let dest_width = a2 as u32;
+            let dest_height = a3 as u32;
+            if dest_width == 0 || dest_height == 0 {
+                return SyscallResult::InvalidArguments as i64;
+            }
+            if dest_width > MAX_CAPTURE_DIMENSION || dest_height > MAX_CAPTURE_DIMENSION {
+                return SyscallResult::InvalidArguments as i64;
+            }
+            let needed = (dest_width as usize).saturating_mul(dest_height as usize);
+            if needed > MAX_CAPTURE_PIXELS {
+                return SyscallResult::InvalidArguments as i64;
+            }
+            if (a5 as usize) < needed {
+                return SyscallResult::InvalidArguments as i64;
+            }
+            let byte_len = needed.saturating_mul(4);
+            let user = match UserSliceMut::new(a4, byte_len) {
+                Ok(slice) => slice,
+                Err(_) => return SyscallResult::InvalidArguments as i64,
+            };
+            match sys_surface_capture(a1 as u32, dest_width, dest_height) {
+                Ok(scaled) => {
+                    // WHY the byte view: the user buffer holds ARGB8888 pixels,
+                    // and `UserSliceMut` transfers bytes. `u32` is four bytes
+                    // with no padding, so the byte view is the same memory.
+                    let bytes = unsafe {
+                        core::slice::from_raw_parts(scaled.as_ptr() as *const u8, scaled.len() * 4)
+                    };
+                    if user.copy_from_kernel(bytes).is_err() {
+                        return SyscallResult::InvalidArguments as i64;
+                    }
+                    needed as i64
+                }
+                Err(e) => e as i64,
+            }
+        }
+        140 => {
+            // ContentIndexQuery: a1 = query kind, a2 = param ptr, a3 = param len,
+            // a4 = out ptr, a5 = out len.
+            let param_len = a3 as usize;
+            if param_len > 256 { return SyscallResult::InvalidArguments as i64; }
+            let out_len = a5 as usize;
+            if out_len == 0 || out_len > 4096 { return SyscallResult::InvalidArguments as i64; }
+            let mut param = [0u8; 256];
+            if param_len > 0 && copy_from_user(&mut param[..param_len], a2, param_len).is_err() {
+                return SyscallResult::InvalidArguments as i64;
+            }
+            let param = match core::str::from_utf8(&param[..param_len]) {
+                Ok(s) => s,
+                Err(_) => return SyscallResult::InvalidArguments as i64,
+            };
+            let mut out = [0u8; 4096];
+            match content::sys_content_index_query(a1, param, &mut out[..out_len]) {
+                Ok(n) => {
+                    if copy_to_user(a4, &out[..n]).is_err() {
+                        return SyscallResult::InvalidArguments as i64;
+                    }
+                    n as i64
+                }
+                Err(e) => e as i64,
+            }
+        }
+        141 => {
+            // ContentIndexRefresh: no arguments.
+            match content::sys_content_index_refresh() {
+                Ok(n) => n as i64,
+                Err(e) => e as i64,
+            }
+        }
+        142 => {
+            // IntentResolve: a1 = kind, a2 = value ptr, a3 = value len,
+            // a4 = out ptr, a5 = out len.
+            let value_len = a3 as usize;
+            if value_len == 0 || value_len > 256 { return SyscallResult::InvalidArguments as i64; }
+            let out_len = a5 as usize;
+            if out_len == 0 || out_len > 4096 { return SyscallResult::InvalidArguments as i64; }
+            let mut value = [0u8; 256];
+            if copy_from_user(&mut value[..value_len], a2, value_len).is_err() {
+                return SyscallResult::InvalidArguments as i64;
+            }
+            let value = match core::str::from_utf8(&value[..value_len]) {
+                Ok(s) => s,
+                Err(_) => return SyscallResult::InvalidArguments as i64,
+            };
+            let mut out = [0u8; 4096];
+            match content::sys_intent_resolve(a1, value, &mut out[..out_len]) {
+                Ok(n) => {
+                    if copy_to_user(a4, &out[..n]).is_err() {
+                        return SyscallResult::InvalidArguments as i64;
+                    }
+                    n as i64
+                }
+                Err(e) => e as i64,
+            }
+        }
+        143 => {
+            // IntentList: a1 = out ptr, a2 = out len.
+            let out_len = a2 as usize;
+            if out_len == 0 || out_len > 4096 { return SyscallResult::InvalidArguments as i64; }
+            let mut out = [0u8; 4096];
+            match content::sys_intent_list(&mut out[..out_len]) {
+                Ok(n) => {
+                    if copy_to_user(a1, &out[..n]).is_err() {
+                        return SyscallResult::InvalidArguments as i64;
+                    }
+                    n as i64
+                }
+                Err(e) => e as i64,
+            }
+        }
+        144 => {
+            // IntentDispatch: a1 = kind, a2 = value ptr, a3 = value len,
+            // a4 = payload ptr, a5 = payload len.
+            let value_len = a3 as usize;
+            if value_len == 0 || value_len > 256 { return SyscallResult::InvalidArguments as i64; }
+            let payload_len = a5 as usize;
+            if payload_len > 256 { return SyscallResult::InvalidArguments as i64; }
+            let mut value = [0u8; 256];
+            if copy_from_user(&mut value[..value_len], a2, value_len).is_err() {
+                return SyscallResult::InvalidArguments as i64;
+            }
+            let value = match core::str::from_utf8(&value[..value_len]) {
+                Ok(s) => s,
+                Err(_) => return SyscallResult::InvalidArguments as i64,
+            };
+            let mut payload = [0u8; 256];
+            if payload_len > 0 && copy_from_user(&mut payload[..payload_len], a4, payload_len).is_err() {
+                return SyscallResult::InvalidArguments as i64;
+            }
+            let payload = match core::str::from_utf8(&payload[..payload_len]) {
+                Ok(s) => s,
+                Err(_) => return SyscallResult::InvalidArguments as i64,
+            };
+            match content::sys_intent_dispatch(a1, value, payload) {
+                Ok(tid) => tid as i64,
+                Err(e) => e as i64,
+            }
+        }
+        145 => {
+            // IntentPending: a1 = out ptr, a2 = out len.
+            let out_len = a2 as usize;
+            if out_len == 0 || out_len > 4096 { return SyscallResult::InvalidArguments as i64; }
+            let mut out = [0u8; 4096];
+            match content::sys_intent_pending(&mut out[..out_len]) {
+                Ok(n) => {
+                    if copy_to_user(a1, &out[..n]).is_err() {
+                        return SyscallResult::InvalidArguments as i64;
+                    }
+                    n as i64
+                }
+                Err(e) => e as i64,
+            }
+        }
         73 => {
             // SurfaceWrite: a1=display-cap slot, a2=surface id, a3=offset pixels,
             // a4=pixel buffer pointer, a5=pixel count.
@@ -2079,6 +2264,9 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             if user_slice.copy_to_kernel_typed(&mut surface.pixels[offset..end]).is_err() {
                 return SyscallResult::InvalidArguments as i64;
             }
+            // The client has now drawn into this surface, so a capture of it is
+            // a picture of what the client is showing.
+            surface.has_frame = true;
             // Record which surface rows moved, exactly as the safer
             // `write_surface_pixels` path does.
             //
@@ -3385,6 +3573,22 @@ pub fn sys_package_install(_cap_slot: usize, pkg_id: &str, user_consent: bool) -
         verified.version.1,
         verified.version.2
     );
+    // WHY the handlers are registered here and not at launch: the declaration
+    // is part of the signed manifest, so it is part of what the package is the
+    // moment the package is installed. A package that declares a media type
+    // and is then never launched is still the package the device will hand
+    // that media type to.
+    {
+        let mut registry = crate::content::INTENT_REGISTRY.lock();
+        registry.register(&verified.package_id, &verified.intents);
+    }
+    if !verified.intents.is_empty() {
+        serial_println!(
+            "[CONTENT] Package '{}' declared {} handler(s).",
+            verified.package_id,
+            verified.intents.len()
+        );
+    }
     Ok(())
 }
 
@@ -3615,6 +3819,13 @@ pub fn sys_package_uninstall(_cap_slot: usize, pkg_id: &str, user_consent: bool)
         registry.uninstall(pkg_id).map_err(|_| SyscallResult::DeviceError)?;
     }
 
+    // WHY the handlers are withdrawn with the package: a package that is gone
+    // must not still be the answer to "who handles this file?".
+    {
+        let mut registry = crate::content::INTENT_REGISTRY.lock();
+        registry.unregister(pkg_id);
+    }
+
     let previous_blob = crate::package::PACKAGE_BLOB_STORE.lock().get(pkg_id).cloned();
     if crate::package::PACKAGE_BLOB_STORE.lock().remove(pkg_id).is_err() {
         let _ = crate::package::PACKAGE_REGISTRY.lock().restore_entry(previous_entry);
@@ -3814,6 +4025,138 @@ pub fn sys_surface_write(cap_slot: usize, surface_id: u32, offset: usize, pixels
             crate::serial_println!("[SURFACE_WRITE ERROR] id={} owner={} offset={} count={}: {}", surface_id, owner.0, offset, pixels.len(), err);
             SyscallResult::PermissionDenied
         })
+}
+
+/// The widest and tallest preview a capture may ask for.
+///
+/// WHY a bound: the capture scales into a kernel-side buffer before it
+/// reaches the caller, so an unbounded request would be an unbounded
+/// allocation. A preview that fits on a phone screen is far below this.
+pub const MAX_CAPTURE_DIMENSION: u32 = 1024;
+
+/// The most pixels a single capture may produce.
+pub const MAX_CAPTURE_PIXELS: usize = 1024 * 1024;
+
+/// Reads a running client's display surface and returns it scaled to the
+/// requested size.
+///
+/// WHY the surface does not have to belong to the caller: that is the whole
+/// purpose of the call. The task switcher shows what an app is showing right
+/// now, and the app it is showing is by definition running in another task.
+///
+/// WHY the capability is checked by type: the question "may this task see
+/// another app's screen?" is a question about authority, not about
+/// ownership. A task that holds `SurfaceCapture` may read any surface; a task
+/// that does not hold it is refused, including for a surface it owns, so
+/// there is exactly one answer to the question for every task.
+///
+/// WHY the scaling happens here and not in the caller: the caller would have
+/// to read the whole source surface to downscale it, which is a 4 MB
+/// transfer for a preview that is a few hundred kilobytes.
+pub fn sys_surface_capture(
+    surface_id: u32,
+    dest_width: u32,
+    dest_height: u32,
+) -> Result<alloc::vec::Vec<u32>, SyscallResult> {
+    {
+        let sched = SCHEDULER.lock();
+        let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+        if !task.cap_table.authorize_capability(CapabilityType::SurfaceCapture, Rights::READ) {
+            return Err(SyscallResult::PermissionDenied);
+        }
+    }
+    let needed = (dest_width as usize).saturating_mul(dest_height as usize);
+    let mut scaled: alloc::vec::Vec<u32> = alloc::vec![0u32; needed];
+
+    // The source geometry, read under the display lock.
+    let (src_width, src_height) = {
+        let kms = crate::drivers::display_kms::DRM_KMS.lock();
+        let surface = kms
+            .surfaces
+            .iter()
+            .find(|s| s.id == surface_id)
+            .ok_or(SyscallResult::TargetNotFound)?;
+        if !surface.has_frame {
+            // WHY this is a refusal and not an empty image: a surface that has
+            // never been written holds the allocator's fill, not the app's
+            // picture. Returning it would be exactly the fabricated preview the
+            // task switcher used to draw.
+            return Err(SyscallResult::NotReady);
+        }
+        (surface.width as usize, surface.height as usize)
+    };
+    if src_width == 0 || src_height == 0 {
+        return Err(SyscallResult::NotReady);
+    }
+
+    // One band of source rows at a time.
+    //
+    // WHY a band and not the whole surface: the display lock is the
+    // compositor's, and holding it across the whole scaling would stall every
+    // other surface for the length of a capture. The band is two rows, the
+    // lock is held for the copy, and the arithmetic happens with the lock
+    // released.
+    let mut band: alloc::vec::Vec<u32> = alloc::vec![0u32; src_width * 2];
+    for dy in 0..dest_height as usize {
+        let sy0 = dy.saturating_mul(src_height) / dest_height as usize;
+        let sy1 = ((dy + 1).saturating_mul(src_height) / dest_height as usize)
+            .max(sy0 + 1)
+            .min(src_height);
+        let first_row = sy0;
+        let last_row = sy1 - 1;
+        {
+            let kms = crate::drivers::display_kms::DRM_KMS.lock();
+            let Some(surface) = kms.surfaces.iter().find(|s| s.id == surface_id) else {
+                return Err(SyscallResult::TargetNotFound);
+            };
+            band[..src_width].copy_from_slice(
+                &surface.pixels[first_row * src_width..(first_row + 1) * src_width],
+            );
+            if last_row != first_row {
+                band[src_width..src_width * 2].copy_from_slice(
+                    &surface.pixels[last_row * src_width..(last_row + 1) * src_width],
+                );
+            }
+        }
+        for dx in 0..dest_width as usize {
+            let sx0 = dx.saturating_mul(src_width) / dest_width as usize;
+            let sx1 = ((dx + 1).saturating_mul(src_width) / dest_width as usize)
+                .max(sx0 + 1)
+                .min(src_width);
+            let first_col = sx0;
+            let last_col = sx1 - 1;
+            // WHY the four corners of the box rather than every pixel in it:
+            // a 720-pixel surface scaled into a 150-pixel preview covers each
+            // destination pixel with nearly five source pixels, and the
+            // corners of that box carry its colour well enough for a
+            // thumbnail while keeping the capture's cost bounded.
+            let mut r: u64 = 0;
+            let mut g: u64 = 0;
+            let mut b: u64 = 0;
+            let mut a: u64 = 0;
+            let mut count: u64 = 0;
+            let band_rows = if last_row == first_row { 1 } else { 2 };
+            for band_row in 0..band_rows {
+                for sx in [first_col, last_col] {
+                    let pixel = band[band_row * src_width + sx];
+                    r += ((pixel >> 16) & 0xFF) as u64;
+                    g += ((pixel >> 8) & 0xFF) as u64;
+                    b += (pixel & 0xFF) as u64;
+                    a += ((pixel >> 24) & 0xFF) as u64;
+                    count += 1;
+                }
+            }
+            if count == 0 {
+                count = 1;
+            }
+            let alpha = (a / count) as u32;
+            let red = (r / count) as u32;
+            let green = (g / count) as u32;
+            let blue = (b / count) as u32;
+            scaled[dy * dest_width as usize + dx] = (alpha << 24) | (red << 16) | (green << 8) | blue;
+        }
+    }
+    Ok(scaled)
 }
 
 /// Destroys an owned display surface.
@@ -5403,6 +5746,17 @@ pub fn sys_app_launch(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
 
     let app_id = app_id.trim_matches(|c: char| c.is_whitespace() || c == '\0');
 
+    launch_registered_package(app_id, parent_id)
+}
+
+/// Launches a package the persistent registry holds, from the kernel's own authority.
+///
+/// WHY this is separate from [sys_app_launch]: the launcher's authority to spawn a
+/// program and the kernel's authority to hand a program to the package that declared
+/// a handler are different grants. The intent dispatcher holds the second and calls
+/// this, so a dispatch never borrows the caller's spawn authority and a launch never
+/// borrows the dispatcher's.
+fn launch_registered_package(app_id: &str, parent_id: TaskId) -> Result<crate::task::TaskId, SyscallResult> {
     // The persistent registry is the launch authority. A package blob or
     // native built-in is not executable merely because a caller knows its ID.
     crate::package::PACKAGE_REGISTRY.lock().seed();

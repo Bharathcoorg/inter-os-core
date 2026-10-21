@@ -118,17 +118,16 @@ impl Reading {
 // Frame: the surface's bands, stacked from the theme's own metrics
 // -----------------------------------------------------------------------------
 
-/// Vertical band the search control occupies.
+/// Whether a touch at (`x`, `y`) lands on the universal search control.
 ///
-/// WHY these two numbers and not a token sum: the shell's HomeScreen tap handler
-/// opens System Space from exactly this band, and a search bar drawn outside it
-/// would be a visible control that does nothing. The shell change that removes
-/// this coupling is for the tap handler to ask this module where the control is,
-/// the way it now asks [`home_hit`] about the deck.
-#[allow(dead_code)]
-const SEARCH_TOP: usize = 1320;
-#[allow(dead_code)]
-const SEARCH_H: usize = 64;
+/// WHY this is asked of this module: the control is painted here, so the tap
+/// that opens it has to be resolved with the same numbers the painter used.
+/// The shell used to carry its own copy of the band -- and a second, older
+/// band at 1320..1384 where nothing is drawn -- so a press could open the
+/// search from a place with no control on it.
+pub fn search_control_hit(x: usize, y: usize) -> bool {
+    frame().search.contains(x, y)
+}
 
 /// Height of the greeting block.
 ///
@@ -297,8 +296,15 @@ pub fn deck_band() -> (usize, usize) {
 /// user chose for it, from the same catalogue the lock screen and the Settings
 /// picker read. Every piece of ink drawn on it is chosen from the pixel behind
 /// it rather than assumed, so the surface reads for any scene.
-fn backdrop(scene: &interos_std::design::walls::Scene, x: usize, y: usize) -> u32 {
-    interos_std::design::walls::scene_pixel(scene, x, y, SCREEN_WIDTH, SCREEN_HEIGHT)
+fn backdrop(p: &Paint, x: usize, y: usize) -> u32 {
+    // WHY the document comes first: the wallpaper slot may name a document the
+    // user chose, and the document is what the user chose. A scene is the
+    // fallback the surface falls back to when the slot names no document or
+    // names one the platform cannot paint.
+    if let Some(document) = p.wallpaper_document {
+        return document.pixel(x, y, SCREEN_WIDTH, SCREEN_HEIGHT);
+    }
+    interos_std::design::walls::scene_pixel(p.scene, x, y, SCREEN_WIDTH, SCREEN_HEIGHT)
 }
 
 /// The wallpaper for a frame whose scene is already resolved.
@@ -309,8 +315,11 @@ fn backdrop(scene: &interos_std::design::walls::Scene, x: usize, y: usize) -> u3
 /// callers want the resolved tones; the picker-style callers that pass a bare
 /// scene genuinely only want one pixel.
 #[inline(always)]
-fn backdrop_ref(s: &interos_std::design::walls::SceneRef<'_>, x: usize, y: usize) -> u32 {
-    interos_std::design::walls::scene_pixel_ref(s, x, y, SCREEN_WIDTH, SCREEN_HEIGHT)
+fn backdrop_ref(p: &Paint, x: usize, y: usize) -> u32 {
+    if let Some(document) = p.wallpaper_document {
+        return document.pixel(x, y, SCREEN_WIDTH, SCREEN_HEIGHT);
+    }
+    interos_std::design::walls::scene_pixel_ref(&p.scene_ref, x, y, SCREEN_WIDTH, SCREEN_HEIGHT)
 }
 
 // -----------------------------------------------------------------------------
@@ -645,6 +654,12 @@ struct Paint {
     /// them for every one of the surface's pixels. On a full repaint that is
     /// millions of redundant blends.
     scene_ref: interos_std::design::walls::SceneRef<'static>,
+    /// The document wallpaper, when the wallpaper slot names one.
+    ///
+    /// WHY it is in the plan: the backdrop is read per pixel by four separate
+    /// painters, and the document is the wallpaper the user chose, so all of
+    /// them have to read the same one.
+    wallpaper_document: Option<interos_std::image::Bitmap<'static>>,
     clock: Option<Run>,
     greeting: [Run; 3],
     date_day: Run,
@@ -959,6 +974,7 @@ fn build(state: &LauncherState) -> Paint {
         telemetry: telemetry_plan(),
         scene: state.home_wallpaper,
         scene_ref: interos_std::design::walls::SceneRef::new(state.home_wallpaper),
+        wallpaper_document: state.home_wallpaper_document,
     }
 }
 
@@ -1253,13 +1269,13 @@ fn status_bar_pixel(x: usize, y: usize, theme: &Theme, p: &Paint) -> Option<u32>
     if y >= STATUS_BAR_HEIGHT {
         return None;
     }
-    let ink = layout::ink_on(theme, backdrop_ref(&p.scene_ref, x, y));
+    let ink = layout::ink_on(theme, backdrop_ref(p, x, y));
 
     // WHY gated on the source rather than drawn from the buffer: with no RTC
     // authority granted to this shell the read can be refused, and a clock is the
     // one thing on this surface a reader takes as a measurement. The gate itself is
     // resolved in the plan, so this is a plain "is the run there" test.
-    if let Some(c) = p.clock.as_ref().and_then(|r| r.pixel_inked_aa(x, y, ink, backdrop_ref(&p.scene_ref, x, y))) {
+    if let Some(c) = p.clock.as_ref().and_then(|r| r.pixel_inked_aa(x, y, ink, backdrop_ref(p, x, y))) {
         return Some(c);
     }
 
@@ -1406,7 +1422,7 @@ fn greeting_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Op
         if rounded_outline(f.date_widget, x, y, 24) {
             return Some(theme.outline_variant);
         }
-        let bg = backdrop_ref(&p.scene_ref, x, y);
+        let bg = backdrop_ref(p, x, y);
         let card_fill = interos_std::font::blend(theme.surface_frosted, bg, 240);
         if let Some(c) = p.date_weekday.pixel_aa(x, y, p.date_weekday.ink, card_fill) {
             return Some(c);
@@ -1426,13 +1442,13 @@ fn greeting_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Op
     }
 
     // Ink is taken per row against the wallpaper ramp
-    let ink = layout::ink_on(theme, backdrop_ref(&p.scene_ref, x, y));
+    let ink = layout::ink_on(theme, backdrop_ref(p, x, y));
     for run in p.greeting.iter() {
-        if let Some(c) = run.pixel_inked_aa(x, y, ink, backdrop_ref(&p.scene_ref, x, y)) {
+        if let Some(c) = run.pixel_inked_aa(x, y, ink, backdrop_ref(p, x, y)) {
             return Some(c);
         }
     }
-    if let Some(c) = p.weather.pixel_inked(x, y, ink, backdrop_ref(&p.scene_ref, x, y)) {
+    if let Some(c) = p.weather.pixel_inked(x, y, ink, backdrop_ref(p, x, y)) {
         return Some(c);
     }
     None
@@ -1561,7 +1577,7 @@ fn card_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option
     if rounded_outline(f.card, x, y, 28) {
         return Some(theme.outline_variant);
     }
-    let bg = backdrop_ref(&p.scene_ref, x, y);
+    let bg = backdrop_ref(p, x, y);
     let card_fill = interos_std::font::blend(theme.surface_frosted, bg, 245);
 
     // Dividers between rows
@@ -1679,7 +1695,7 @@ fn deck_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option
         return None;
     }
     if let Some(empty) = deck.empty.as_ref() {
-        return empty.pixel_inked(x, y, empty.ink, backdrop(&p.scene, x, y));
+        return empty.pixel_inked(x, y, empty.ink, backdrop(p, x, y));
     }
 
     let index = deck.slot_at(x, y)?;
@@ -1694,7 +1710,7 @@ fn deck_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option
     if rounded_outline(tile.cell, x, y, TILE_RADIUS) {
         return Some(theme.outline_variant);
     }
-    let bg = backdrop_ref(&p.scene_ref, x, y);
+    let bg = backdrop_ref(p, x, y);
     let tile_fill = interos_std::font::blend(tile.fill, bg, 240);
 
     if let Some(kind) = tile.icon {
@@ -1726,7 +1742,7 @@ fn deck_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option
 /// The universal search control.
 ///
 /// WHY it is on this surface at all: the reference home panel has no search bar
-/// -- that lives on the App View panel -- but the shell opens System Space from a
+/// -- that lives on the App View panel -- but the shell opens the search from a
 /// tap here, so removing it would take a working control with it.
 fn search_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option<u32> {
     if !f.search.contains(x, y) {
@@ -1738,7 +1754,7 @@ fn search_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Opti
     if rounded_outline(f.search, x, y, 28) {
         return Some(theme.outline_variant);
     }
-    let bg = backdrop_ref(&p.scene_ref, x, y);
+    let bg = backdrop_ref(p, x, y);
     let search_fill = interos_std::font::blend(theme.surface_frosted, bg, 240);
     let ink = theme.on_surface_variant;
 
@@ -1767,7 +1783,7 @@ fn nav_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option<
     if !f.nav.contains(x, y) {
         return None;
     }
-    let ink = layout::ink_on(theme, backdrop_ref(&p.scene_ref, x, y));
+    let ink = layout::ink_on(theme, backdrop_ref(p, x, y));
 
     // Home pill, the width the theme can name and the height the shell measures.
     if p.nav_pill.contains(x, y) {
@@ -1808,7 +1824,7 @@ pub fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             return c;
         }
     }
-    backdrop_ref(&p.scene_ref, x, y)
+    backdrop_ref(p, x, y)
 }
 
 // -----------------------------------------------------------------------------

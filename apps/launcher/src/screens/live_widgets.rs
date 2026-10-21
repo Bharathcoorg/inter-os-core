@@ -19,14 +19,14 @@
 //! the five apps `main.rs` opens for a tap in that region -- and everything below
 //! them is a reading, present or absent, derived from `LauncherState`.
 //!
-//! WHY the drawing primitives come from `system_space`: they are `pub(super)`
+//! WHY the drawing primitives come from `draw`: they are `pub(super)`
 //! precisely so the sibling surfaces that share this visual language share one
 //! implementation of "rounded rectangle" and "centre this run of text". See the
-//! note at the top of that file about when they move to a `screens/primitives.rs`.
+//! note at the top of that file about where they live.
 
 use core::cell::UnsafeCell;
 
-use super::system_space::{
+use super::draw::{
     counted, decimal, push, round_contains, run_center, run_left, run_right, Reading,
     VALUE_MAX,
 };

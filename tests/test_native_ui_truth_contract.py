@@ -194,15 +194,26 @@ def test_events_header_does_not_print_platform_diagnostics_to_the_reader():
     assert "Recent activity from your apps and system." in joined
 
 
-def test_recents_cards_do_not_draw_a_stand_in_for_a_thumbnail():
+def test_recents_cards_show_the_real_pixels_or_say_why_there_are_none():
     """Recents must not paint a picture it never received.
 
-    WHY: `surface_snapshot` copies window metadata only and documents that it
-    does not expose client pixel memory, and the Studio's DRM/KMS panel reports
-    that no live compositor-plane telemetry is exposed by the guest. The old
-    renderer drew a per-app fake screen -- traffic-light window chrome and
-    saturated fills from no design token file -- which is worse than admitting
-    there is no preview.
+    WHY this changed: the old renderer drew a per-app fake screen -- traffic
+    lights, a keypad, chat bubbles, saturated fills from no design token file
+    -- and put "No live preview" in the corner of the drawing, so the surface
+    showed a convincing picture of an app that had never been seen. That was
+    the fiction the contract was written against.
+
+    The rework replaced the fiction with the platform's own pixels. The kernel
+    holds every client's surface, and a client that holds the
+    `SurfaceCapture` capability may read a running app's surface; the shell
+    holds that capability and the task switcher shows what it gets. When the
+    platform will not answer -- the app has not drawn a frame, the app has no
+    surface, the capture was refused -- the card names the reason instead of
+    drawing anything.
+
+    So the contract is now: the stand-in renderer is gone, the pixels come
+    from a capture, and the card has honest wording for the case where there
+    is nothing to show.
     """
     source = read("apps/launcher/src/screens/activity.rs")
     for fabricated in (
@@ -212,7 +223,42 @@ def test_recents_cards_do_not_draw_a_stand_in_for_a_thumbnail():
         "org.interos.browser",
     ):
         assert fabricated not in _code_only(source), f"recents still draws fabricated preview art: {fabricated}"
-    assert 'b"No live preview"' in source
+    # The per-app stand-in renderer is gone: there is no archetype any more.
+    assert "render_mini_preview" not in _code_only(source)
+    # The picture comes from the platform, through the capture capability.
+    assert "std::surface_capture" in _code_only(source)
+    # And the card says so when there is no picture to show.
+    assert 'b"No preview"' in source
+    assert "the app has not drawn a frame yet" in source
+    assert "the shell may not read this app's screen" in source
+
+
+def test_the_search_offers_only_destinations_that_exist():
+    """The search must not offer a destination that is not there.
+
+    WHY: the launcher's search field said it searched "apps, settings & files"
+    and it did not. Tapping it opened a launcher-drawn copy of the Settings
+    app's own page under a second name -- "System Space" -- so the result set
+    held an entry that re-opened the Settings app while claiming to be
+    something else. A result that opens something other than what its label
+    says is a result that lies.
+
+    So the contract is now: there is no "System Space" result, the apps come
+    from the package registry, the settings surfaces come from the platform's
+    own catalogue, the files come from the filesystem listing, and each
+    category says whether it matched, found nothing, or could not be read.
+    """
+    search = read("apps/launcher/src/screens/search.rs")
+    shell = read("apps/launcher/src/main.rs")
+    for source in (search, shell):
+        assert "System Space" not in _code_only(source), "the search still offers the System Space duplicate"
+    # The three sources are the platform's own.
+    assert "std::package_registry" in _code_only(shell)
+    assert "std::fs_list" in _code_only(shell)
+    assert "interos_std::settings::Section::ALL" in _code_only(shell)
+    # And the model-backed ranking seam is marked as such.
+    assert "pub trait Ranker" in read("apps/launcher/src/search.rs")
+    assert "fn search_ranker()" in _code_only(shell)
 
 
 def test_browser_start_page_does_not_render_a_hardcoded_news_feed_or_ranking():
@@ -429,8 +475,16 @@ def test_the_wallpaper_refactor_cannot_change_a_colour():
         )
 
     # And the home surface must actually be on the resolved path.
+    #
+    # WHY the call takes the plan and not the scene reference: the plan is
+    # what carries the wallpaper the user chose, and a document wallpaper has
+    # to be paintable by the same four painters that paint the scene. The
+    # resolved path itself is unchanged: the plan's `scene_ref` is still what
+    # `scene_pixel_ref` reads, and the resolved tones are still not
+    # re-derived per pixel.
     home = _code_only(read("apps/launcher/src/screens/home.rs"))
-    assert "backdrop_ref(&p.scene_ref, x, y)" in home
+    assert "backdrop_ref(p, x, y)" in home
+    assert "scene_pixel_ref(&p.scene_ref, x, y," in home
     assert "SceneRef::new(state.home_wallpaper)" in home
 
 

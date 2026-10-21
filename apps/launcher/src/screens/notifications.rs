@@ -60,7 +60,7 @@ const ROW_W: usize = SCREEN_WIDTH - 64; // 656
 /// Left edge of the header block.
 ///
 /// WHY it is not `ROW_X`: the header is a screen title, and every other launcher
-/// surface (Home, App View, System Space) sets its header from this same left
+/// surface (Home, App View, Recents) sets its header from this same left
 /// edge rather than from the feed's content inset. Using `ROW_X` here drew the
 /// "Events" title four pixels left of the title on the screen you return to.
 const HEADER_X: usize = 36;

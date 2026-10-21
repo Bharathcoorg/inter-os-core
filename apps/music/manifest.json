@@ -1,0 +1,29 @@
+{
+  "id": "org.interos.music",
+  "name": "Music",
+  "version": "1.0.0",
+  "category": "media",
+  "description": "Native player for the audio documents the device holds.",
+  "icon": "MUSIC",
+  "entrypoint": {
+    "backend": "bin/music.elf"
+  },
+  "permissions": [
+    "CAP_LOGGING",
+    "CAP_FRAMEBUFFER",
+    "CAP_EVENT_POLL",
+    "CAP_FILESYSTEM_READ",
+    "CAP_CONTENT_INDEX"
+  ],
+  "intents": {
+    "mime": [
+      "audio/mpeg",
+      "audio/wav",
+      "audio/ogg",
+      "audio/flac",
+      "audio/aac",
+      "audio/mp4"
+    ]
+  },
+  "min_sdk_version": "0.8.0"
+}

@@ -161,13 +161,18 @@ pub enum ViewMode {
     HomeScreen,
     ActivitySpace,
     QuickControls,
-    SystemSpace,
     LockScreen,
     PowerMenu,
     PinEntry,
     AppDrawer,
     Notifications,
     LiveWidgets,
+    /// The global search: one list over apps, settings surfaces and files.
+    ///
+    /// WHY this is a view of its own and not a mode of the app drawer: the
+    /// drawer's field filters the installed apps and nothing else, and the
+    /// surface it opens has to answer a question about the whole platform.
+    Search,
 }
 
 #[derive(Clone, Copy)]
@@ -261,6 +266,28 @@ pub struct LauncherState {
     pub app_drawer_page: usize,
     pub search_query: [u8; 32],
     pub search_query_len: usize,
+    /// The one index the search runs against.
+    ///
+    /// WHY the index is in the state and not rebuilt per keystroke: the index
+    /// is built from the platform -- the package registry, the settings
+    /// catalogue and the file listing -- and rebuilding it on every keypress
+    /// would ask the platform the same three questions sixty times a second.
+    /// The index is refreshed when the search opens and when the platform's
+    /// answer changes; the *ranking* runs on every keystroke.
+    pub search_index: launcher::search::Index,
+    /// What the last ranking found.
+    pub search_results: launcher::search::Results,
+    /// The running tasks the switcher shows.
+    pub recents_cards: [launcher::recents::Card; launcher::recents::MAX_CARDS],
+    /// How many of those cards there are.
+    pub recents_count: usize,
+    /// The display surface each running task draws into.
+    ///
+    /// WHY the surface is kept beside the card: the card is what the switcher
+    /// shows, and the surface is where the picture of what the task is showing
+    /// comes from. They are the same thing seen from two sides, and keeping
+    /// them apart let the old screen draw a preview that no task ever sent.
+    pub recents_surfaces: [u32; launcher::recents::MAX_CARDS],
     pub active_child: Option<u64>,
     pub lock_state: std::UserLockState,
     /// The wallpaper the home surface renders.
@@ -269,6 +296,18 @@ pub struct LauncherState {
     /// per pixel, so a per-pixel lookup of a byte string would put a scan on the
     /// hot path. The key is resolved once, when the settings store answers.
     pub home_wallpaper: &'static walls::Scene,
+    /// The document the user chose as the wallpaper, when the wallpaper slot
+    /// names one the platform can paint.
+    ///
+    /// WHY a document and not only a scene: the gallery and the file manager
+    /// hand the platform a document when the user asks for it as a
+    /// wallpaper, and the shell has to be able to paint what the user chose.
+    /// A `None` here means the slot names no document, or names one the
+    /// platform cannot read, and the surface paints its scene.
+    pub home_wallpaper_document: Option<std::image::Bitmap<'static>>,
+    /// The document the user chose as the lock surface's wallpaper, when the
+    /// slot names one the platform can paint.
+    pub lock_wallpaper_document: Option<std::image::Bitmap<'static>>,
     /// The wallpaper the lock surface renders, independently of the home one.
     pub lock_wallpaper: &'static walls::Scene,
     /// Whether the settings store has answered a wallpaper read at all.
@@ -340,12 +379,19 @@ impl LauncherState {
             app_drawer_page: 0,
             search_query: [0u8; 32],
             search_query_len: 0,
+            search_index: launcher::search::Index::new(),
+            search_results: launcher::search::Results::new(),
+            recents_cards: [launcher::recents::Card::EMPTY; launcher::recents::MAX_CARDS],
+            recents_count: 0,
+            recents_surfaces: [0; launcher::recents::MAX_CARDS],
             active_child: None,
             lock_state: std::UserLockState::Uninitialized,
             // WHY the stock scene rather than the theme's own ramp: the home and
             // lock wallpapers are read from the settings store, and until that
             // read answers the shell must draw the wallpaper it shipped with.
             home_wallpaper: &walls::SCENES[1],
+            home_wallpaper_document: None,
+            lock_wallpaper_document: None,
             lock_wallpaper: &walls::SCENES[1],
             wallpaper_store_answered: false,
             pin_pad_visible: false,
@@ -558,14 +604,106 @@ fn refresh_wallpapers(state: &mut LauncherState) {
         state.lock_wallpaper = scene;
         std::log("[LAUNCHER] Lock wallpaper applied from store.").ok();
     }
-    if !answered {
-        std::log("[LAUNCHER] Wallpaper preferences unread: the settings store did not answer, so both surfaces use the stock wallpaper.",
+    refresh_wallpaper_document(state);
+    if !answered {        std::log("[LAUNCHER] Wallpaper preferences unread: the settings store did not answer, so both surfaces use the stock wallpaper.",
         )
         .ok();
     } else {
         std::log("[LAUNCHER] Wallpaper preferences read from the settings store for both surfaces.",
         )
         .ok();
+    }
+}
+
+/// The widest document wallpaper the shell will paint, in pixels.
+///
+/// WHY a bound: the shell has no heap, so the pixels live in a fixed buffer,
+/// and a document larger than the buffer is refused rather than half-painted.
+pub const WALLPAPER_MAX_W: usize = 64;
+/// The tallest document wallpaper the shell will paint, in pixels.
+pub const WALLPAPER_MAX_H: usize = 128;
+/// The size of the document wallpaper's pixel buffer, in bytes.
+pub const WALLPAPER_PIXEL_CAP: usize = WALLPAPER_MAX_W * WALLPAPER_MAX_H * 4;
+
+/// The pixels of the document wallpaper.
+///
+/// WHY a `static` and not a local: the shell's paint plan is built once per
+/// frame and read by every pixel, and a plan that borrowed a stack buffer
+/// could not be held in the plan's own slot.
+struct WallpaperPixels(core::cell::UnsafeCell<[u8; WALLPAPER_PIXEL_CAP]>);
+
+// SAFETY: the shell renders one surface in one task and the guest runs no
+// second thread, so the pixels are written and read from the same context.
+unsafe impl Sync for WallpaperPixels {}
+
+static WALLPAPER_PIXELS: WallpaperPixels = WallpaperPixels(core::cell::UnsafeCell::new(
+    [0u8; WALLPAPER_PIXEL_CAP],
+));
+
+/// The pixels of the lock surface's document wallpaper.
+static LOCK_WALLPAPER_PIXELS: WallpaperPixels = WallpaperPixels(core::cell::UnsafeCell::new(
+    [0u8; WALLPAPER_PIXEL_CAP],
+));
+
+/// Reads the document a wallpaper slot names and paints it.
+///
+/// WHY the document is read from the slot and not from the index: the slot is
+/// what the user chose, and the index is where the platform describes the
+/// documents. The shell reads the bytes the slot names and paints them if
+/// the platform's decoders can read them; a document it cannot read is
+/// reported and the surface keeps its scene wallpaper.
+fn load_wallpaper_document(key: &str, pixels: &WallpaperPixels) -> Option<std::image::Bitmap<'static>> {
+    let mut buf = [0u8; 160];
+    let n = read_setting(key, &mut buf)?;
+    if n == 0 || n > buf.len() {
+        return None;
+    }
+    let path = core::str::from_utf8(&buf[..n]).ok()?.trim_end_matches('\0').trim();
+    if path.is_empty() {
+        return None;
+    }
+    let Ok(fd) = std::fs_open(path, std::FS_READ) else {
+        std::log("[LAUNCHER] The wallpaper document could not be opened; the stock wallpaper is kept.").ok();
+        return None;
+    };
+    let mut file = [0u8; 8192];
+    let read = match std::fs_read(fd, &mut file) {
+        Ok(n) => n,
+        Err(_) => {
+            let _ = std::fs_close(fd);
+            std::log("[LAUNCHER] The wallpaper document could not be read; the stock wallpaper is kept.").ok();
+            return None;
+        }
+    };
+    let _ = std::fs_close(fd);
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let decoded = {
+        let buffer = unsafe { &mut *pixels.0.get() };
+        std::image::decode_image(&file[..read], name.as_bytes(), buffer)
+    };
+    let Ok((w, h, len)) = decoded else {
+        std::log("[LAUNCHER] The wallpaper document is not an image the platform can read, or it is larger than the shell can paint; the stock wallpaper is kept.").ok();
+        return None;
+    };
+    if w as usize > WALLPAPER_MAX_W || h as usize > WALLPAPER_MAX_H {
+        std::log("[LAUNCHER] The wallpaper document is larger than the shell can paint; the stock wallpaper is kept.").ok();
+        return None;
+    }
+    let rgba: &'static [u8] = unsafe { &(&(*pixels.0.get()))[..len] };
+    Some(std::image::Bitmap { w, h, rgba })
+}
+
+/// Reads the documents the wallpaper slots name, for both surfaces.
+fn refresh_wallpaper_document(state: &mut LauncherState) {
+    state.home_wallpaper_document = None;
+    state.lock_wallpaper_document = None;
+    if let Some(bitmap) = load_wallpaper_document("ui.wallpaper.home.document", &WALLPAPER_PIXELS) {
+        state.home_wallpaper_document = Some(bitmap);
+        std::log("[LAUNCHER] The wallpaper document was read and is now painted behind the home surface.").ok();
+    }
+    if let Some(bitmap) = load_wallpaper_document("ui.wallpaper.lock.document", &LOCK_WALLPAPER_PIXELS) {
+        state.lock_wallpaper_document = Some(bitmap);
+        std::log("[LAUNCHER] The wallpaper document was read and is now painted behind the lock surface.").ok();
     }
 }
 
@@ -916,9 +1054,571 @@ fn refresh_package_catalog(state: &mut LauncherState) {
     }
 }
 
+// -----------------------------------------------------------------------------
+// The search index
+// -----------------------------------------------------------------------------
+
+/// The ranker the search runs with.
+///
+/// WHY this is a function and not a constant: this is the seam a model-backed
+/// ranker plugs into. A semantic ranker asks the model manager's embedding
+/// service for a vector for the query and for each candidate and scores the
+/// candidate by the similarity of the two, so it is a different *source* for
+/// the score rather than a different kind of entry -- the index, the result
+/// list and the surface all stay as they are, and only the implementation of
+/// `launcher::search::Ranker` changes. The exact-match ranker stays the
+/// fallback, because a model that is not running has to leave the search
+/// working: a search that silently stops answering is worse than one that
+/// answers exactly.
+fn search_ranker() -> launcher::search::ExactMatch {
+    launcher::search::ExactMatch
+}
+
+/// Rebuilds the search index from the platform, then ranks the query.
+///
+/// WHY the three sources are asked separately: the platform keeps the things a
+/// person can search for in three places -- the package registry, the settings
+/// catalogue and the shared storage -- and each has to be asked directly. A
+/// hand-written list of app names would be a list of destinations that might
+/// not be installed, and the old search offered exactly that: a "System Space"
+/// entry that was a second copy of the Settings app's own page, under a name
+/// that app does not have.
+fn refresh_search_index(state: &mut LauncherState) {
+    use launcher::search::{Entry, SearchKind, SourceState};
+
+    state.search_index.clear();
+
+    // 1. The installed packages.
+    let mut registry = [0u8; 4096];
+    match std::package_registry(&mut registry) {
+        Ok(n) => {
+            for line in registry[..n].split(|b| *b == b'\n') {
+                let mut fields = line.split(|b| *b == b'|');
+                let Some(id) = fields.next() else {
+                    continue;
+                };
+                let Some(_process) = fields.next() else {
+                    continue;
+                };
+                let Some(_version) = fields.next() else {
+                    continue;
+                };
+                let Some(status) = fields.next() else {
+                    continue;
+                };
+                let _path = fields.next();
+                let Some(display_name) = fields.next() else {
+                    continue;
+                };
+                let _icon = fields.next();
+                let category = fields.next().unwrap_or(b"Tools");
+                if status != b"active" || id.is_empty() || id.len() > 32 {
+                    continue;
+                }
+                if is_shell_component(id) {
+                    continue;
+                }
+                let title = if display_name.is_empty() { id } else { display_name };
+                state
+                    .search_index
+                    .push(Entry::new(SearchKind::App, title, category, id));
+            }
+            state.search_index.set_apps_state(SourceState::Ready);
+        }
+        Err(_) => {
+            state.search_index.set_apps_state(SourceState::Unavailable(
+                "the package registry refused the query",
+            ));
+        }
+    }
+
+    // 2. The platform's settings surfaces.
+    //
+    // WHY the SDK's catalogue and not a list written here: the Settings app
+    // renders these sections and the shell searches them, and two lists would
+    // drift. One definition in the platform is the only arrangement that
+    // cannot offer a section the Settings app does not have.
+    let mut keyword_buf = [0u8; 96];
+    for section in interos_std::settings::Section::ALL {
+        let keywords = section_keywords(section, &mut keyword_buf);
+        let entry = Entry::new(
+            SearchKind::Settings,
+            section.short_title(),
+            b"Settings",
+            section.short_title(),
+        )
+        .with_keywords(&keyword_buf[..keywords]);
+        state.search_index.push(entry);
+    }
+    state
+        .search_index
+        .set_settings_state(launcher::search::SourceState::Ready);
+
+    // 3. The shared storage.
+    match list_storage_files(state) {
+        Ok(()) => state
+            .search_index
+            .set_files_state(launcher::search::SourceState::Ready),
+        Err(reason) => state.search_index.set_files_state(SourceState::Unavailable(reason)),
+    }
+
+    rank_search_results(state);
+}
+
+/// Runs the query across the index.
+fn rank_search_results(state: &mut LauncherState) {
+    let query = &state.search_query[..state.search_query_len];
+    state.search_results = state.search_index.search(query, &search_ranker());
+}
+
+/// Whether a package is one of the shell's own parts.
+///
+/// WHY these are not searchable: the launcher, the compositor and the init
+/// service are the shell, not destinations the person can be sent to, and a
+/// search result that opens the shell itself is a result that does nothing.
+fn is_shell_component(id: &[u8]) -> bool {
+    id == b"org.interos.launcher"
+        || id == b"launcher"
+        || id == b"org.interos.compositor"
+        || id == b"compositor"
+        || id == b"org.interos.init"
+        || id == b"init"
+        || id == b"user_init"
+        || id == b"org.interos.card_demo"
+        || id == b"card_demo"
+        || id == b"app_card_demo"
+}
+
+/// The section's keywords as one space-separated run.
+fn section_keywords(section: interos_std::settings::Section, buf: &mut [u8; 96]) -> usize {
+    let mut at = 0usize;
+    for keyword in section.keywords() {
+        if at > 0 {
+            if at + 1 >= buf.len() {
+                break;
+            }
+            buf[at] = b' ';
+            at += 1;
+        }
+        let len = keyword.len().min(buf.len().saturating_sub(at));
+        buf[at..at + len].copy_from_slice(&keyword[..len]);
+        at += len;
+    }
+    at
+}
+
+/// Adds the files the platform lists in the shared storage to the index.
+///
+/// WHY the storage is listed one level deep: `/storage` holds the folders the
+/// platform creates and the files a person has put there, and a file inside
+/// `photos` is a file the person will look for. The listing is the platform's
+/// own, so a file that is not there is not offered.
+///
+/// WHY the subtitle names the app that opens the row: a file row opens the
+/// Files app, and a row that names a file and opens something else is a row
+/// that does not say what it does. The path is on the row for the same
+/// reason: it is where the file is.
+fn list_storage_files(state: &mut LauncherState) -> Result<(), &'static str> {
+    use launcher::search::{Entry, SearchKind};
+
+    /// The name of the app a file row opens.
+    const FILES_APP: &[u8] = b"Files: ";
+
+    let mut buf = [0u8; 4096];
+    let listed = std::fs_list("/storage", &mut buf)
+        .map_err(|_| "the platform refused the storage listing")?;
+    let mut directories: [([u8; 48], usize); 8] = [([0; 48], 0); 8];
+    let mut directory_count = 0usize;
+
+    for line in buf[..listed].split(|b| *b == b'\n') {
+        if line.is_empty() {
+            continue;
+        }
+        let mut fields = line.split(|b| *b == b'|');
+        let Some(name) = fields.next() else {
+            continue;
+        };
+        let Some(_size) = fields.next() else {
+            continue;
+        };
+        let kind = fields.next().unwrap_or(b"file");
+        if name.is_empty() {
+            continue;
+        }
+        let mut path = [0u8; 48];
+        let mut at = 0usize;
+        for &byte in b"/storage/" {
+            if at >= path.len() {
+                break;
+            }
+            path[at] = byte;
+            at += 1;
+        }
+        let len = name.len().min(path.len().saturating_sub(at));
+        path[at..at + len].copy_from_slice(&name[..len]);
+        at += len;
+
+        if kind == b"dir" {
+            if directory_count < directories.len() {
+                let mut stored = [0u8; 48];
+                stored[..at].copy_from_slice(&path[..at]);
+                directories[directory_count] = (stored, at);
+                directory_count += 1;
+            }
+            continue;
+        }
+        let mut subtitle = [0u8; 40];
+        let mut sub_at = 0usize;
+        for &byte in FILES_APP {
+            if sub_at >= subtitle.len() {
+                break;
+            }
+            subtitle[sub_at] = byte;
+            sub_at += 1;
+        }
+        let sub_len = at.min(subtitle.len().saturating_sub(sub_at));
+        subtitle[sub_at..sub_at + sub_len].copy_from_slice(&path[..sub_len]);
+        state
+            .search_index
+            .push(Entry::new(SearchKind::File, name, &subtitle[..sub_at + sub_len], &path[..at]));
+    }
+
+    // One level into each folder the storage holds.
+    for index in 0..directory_count {
+        let (path, len) = directories[index];
+        let Ok(path_str) = core::str::from_utf8(&path[..len]) else {
+            continue;
+        };
+        let mut inner = [0u8; 4096];
+        let Ok(listed) = std::fs_list(path_str, &mut inner) else {
+            continue;
+        };
+        for line in inner[..listed].split(|b| *b == b'\n') {
+            if line.is_empty() {
+                continue;
+            }
+            let mut fields = line.split(|b| *b == b'|');
+            let Some(name) = fields.next() else {
+                continue;
+            };
+            let Some(_size) = fields.next() else {
+                continue;
+            };
+            let kind = fields.next().unwrap_or(b"file");
+            if name.is_empty() || kind == b"dir" {
+                continue;
+            }
+            let mut full = [0u8; 48];
+            let mut at = 0usize;
+            for &byte in &path[..len] {
+                if at >= full.len() {
+                    break;
+                }
+                full[at] = byte;
+                at += 1;
+            }
+            if at < full.len() {
+                full[at] = b'/';
+                at += 1;
+            }
+            let name_len = name.len().min(full.len().saturating_sub(at));
+            full[at..at + name_len].copy_from_slice(&name[..name_len]);
+            at += name_len;
+            let mut subtitle = [0u8; 40];
+            let mut sub_at = 0usize;
+            for &byte in b"Files: " {
+                if sub_at >= subtitle.len() {
+                    break;
+                }
+                subtitle[sub_at] = byte;
+                sub_at += 1;
+            }
+            let sub_len = at.min(subtitle.len().saturating_sub(sub_at));
+            subtitle[sub_at..sub_at + sub_len].copy_from_slice(&full[..sub_len]);
+            state.search_index.push(Entry::new(
+                SearchKind::File,
+                name,
+                &subtitle[..sub_at + sub_len],
+                &full[..at],
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Opens the result at `rank`.
+///
+/// WHY the three kinds open three different things: a result's label says what
+/// it is, so what it opens has to be that thing. An app result opens the app,
+/// a settings result opens the Settings app at that section, and a file
+/// result opens the Files app -- the platform has no per-file launch intent
+/// today, so the row names the file and the path it lives at and the Files app
+/// is where files are browsed.
+fn open_search_result(state: &mut LauncherState, rank: usize) -> bool {
+    use launcher::search::SearchKind;
+
+    let Some(hit) = state.search_results.hit(rank) else {
+        return false;
+    };
+    let Some(entry) = state.search_index.get(hit.index as usize) else {
+        return false;
+    };
+    let kind = entry.kind;
+    let mut target = [0u8; 64];
+    let len = entry.target().len().min(target.len());
+    target[..len].copy_from_slice(&entry.target()[..len]);
+
+    match kind {
+        SearchKind::App => {
+            let Ok(id) = core::str::from_utf8(&target[..len]) else {
+                return false;
+            };
+            match std::app_launch(id) {
+                Ok(task) => {
+                    state.push_recent(id, task);
+                    state.active_child = Some(task);
+                    true
+                }
+                Err(_) => false,
+            }
+        }
+        SearchKind::Settings => {
+            // WHY the intent: the row says "Network", so it has to open the
+            // Network page and not the Settings app's landing grid. The
+            // Settings app reads this key at startup and opens the section it
+            // names.
+            let _ = std::settings_set("intent.view.settings", &target[..len]);
+            match std::app_launch("org.interos.settings") {
+                Ok(task) => {
+                    state.active_child = Some(task);
+                    true
+                }
+                Err(_) => false,
+            }
+        }
+        SearchKind::File => match std::app_launch("org.interos.file_manager") {
+            Ok(task) => {
+                state.active_child = Some(task);
+                true
+            }
+            Err(_) => false,
+        },
+    }
+}
+
+/// Brings the task on the switcher's card to the front.
+///
+/// WHY it falls back to launching the package: the platform can stop a task
+/// without the shell hearing about it, and a card whose task is gone would
+/// otherwise open nothing at all. The package the card names is the same
+/// package the task was running, so launching it lands the person where the
+/// card said they would be.
+fn focus_recents_card(state: &mut LauncherState, slot: usize) -> bool {
+    if slot >= state.recents_count {
+        return false;
+    }
+    let card = state.recents_cards[slot];
+    if card.task_id > 0 && std::app_focus(card.task_id).is_ok() {
+        state.active_child = Some(card.task_id);
+        return true;
+    }
+    let Ok(id) = core::str::from_utf8(card.package()) else {
+        return false;
+    };
+    match std::app_launch(id) {
+        Ok(task) => {
+            let _ = std::app_focus(task);
+            state.active_child = Some(task);
+            state.recents_cards[slot].task_id = task;
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// Reads the foreground app's surface into the switcher's picture store.
+///
+/// WHY this is the shell's job and not the switcher's: the app is in the
+/// foreground, so its surface is behind the app's own window, and the only
+/// moment the platform will hand those pixels over is while the app is still
+/// running.
+fn capture_foreground(state: &mut LauncherState) {
+    let Some(task) = state.active_child else {
+        return;
+    };
+    for index in 0..state.recents_count {
+        if state.recents_cards[index].task_id != task {
+            continue;
+        }
+        let surface = state.recents_surfaces[index];
+        if surface == 0 {
+            return;
+        }
+        let mut package = [0u8; 40];
+        let len = state.recents_cards[index].package().len().min(40);
+        package[..len].copy_from_slice(&state.recents_cards[index].package()[..len]);
+        let _ = screens::activity::capture_package(&package[..len], surface);
+        return;
+    }
+}
+
+/// Rebuilds the task switcher's cards from the platform.
+///
+/// WHY the cards are the shell's recent apps and not only the live tasks: an
+/// app in this platform exits when the person leaves it, so a switcher built
+/// only from the live task list is empty every time it is opened -- an
+/// honest answer to a question nobody asked. The card list is what the
+/// person has been using, and each card says whether that app is still
+/// running, so the live preview appears exactly when the platform really
+/// has a picture to give.
+fn refresh_recents_cards(state: &mut LauncherState) {
+    use launcher::recents::{Card, MAX_CARDS};
+
+    // The surfaces, so a card knows which picture to ask for.
+    let mut windows = [0u8; 4096];
+    let mut surfaces: [(u64, u32); 24] = [(0, 0); 24];
+    let mut surface_count = 0usize;
+    if let Ok(n) = std::window_list(&mut windows) {
+        for line in windows[..n].split(|b| *b == b'\n') {
+            let mut fields = line.split(|b| *b == b'|');
+            let Some(id_raw) = fields.next() else {
+                continue;
+            };
+            let Some(owner_raw) = fields.next() else {
+                continue;
+            };
+            let Ok(id) = core::str::from_utf8(id_raw).unwrap_or("").parse::<u32>() else {
+                continue;
+            };
+            let Ok(owner) = core::str::from_utf8(owner_raw).unwrap_or("").parse::<u64>() else {
+                continue;
+            };
+            if surface_count >= surfaces.len() {
+                break;
+            }
+            surfaces[surface_count] = (owner, id);
+            surface_count += 1;
+        }
+    }
+
+    // The live tasks, so a card knows whether its app is still running.
+    let mut tasks = [0u8; 4096];
+    let mut live: [([u8; 32], usize, u64); 16] = [([0; 32], 0, 0); 16];
+    let mut live_count = 0usize;
+    if let Ok(n) = std::app_runtime_list(&mut tasks) {
+        for line in tasks[..n].split(|b| *b == b'\n') {
+            let mut fields = line.split(|b| *b == b'|');
+            let Some(task_raw) = fields.next() else {
+                continue;
+            };
+            let Some(package_id) = fields.next() else {
+                continue;
+            };
+            let Some(process_state) = fields
+                .next()
+                .and_then(|v| core::str::from_utf8(v).ok())
+                .and_then(|v| v.parse::<u8>().ok())
+            else {
+                continue;
+            };
+            let Ok(task_id) = core::str::from_utf8(task_raw).unwrap_or("").parse::<u64>() else {
+                continue;
+            };
+            if process_state > 2 || package_id.is_empty() || package_id.len() > 32 {
+                continue;
+            }
+            // WHY the shell's own parts are left out: the switcher is for the
+            // apps a person is using, and the launcher is the surface they are
+            // looking at.
+            if is_shell_component(package_id) {
+                continue;
+            }
+            if live_count >= live.len() {
+                break;
+            }
+            live[live_count].0[..package_id.len()].copy_from_slice(package_id);
+            live[live_count].1 = package_id.len();
+            live[live_count].2 = task_id;
+            live_count += 1;
+        }
+    }
+
+    let mut cards = [Card::EMPTY; MAX_CARDS];
+    let mut card_surfaces = [0u32; MAX_CARDS];
+    let mut count = 0usize;
+
+    for slot in 0..3usize {
+        let len = state.recent_app_lens[slot] as usize;
+        if len == 0 || len > 32 {
+            continue;
+        }
+        let package_id = &state.recent_apps[slot][..len];
+        if count >= MAX_CARDS {
+            break;
+        }
+
+        // Is that app still running?
+        let mut task_id = 0u64;
+        for entry in live.iter().take(live_count) {
+            if entry.0[..entry.1] == *package_id {
+                task_id = entry.2;
+                break;
+            }
+        }
+        let mut surface = 0u32;
+        for slot_surface in surfaces.iter().take(surface_count) {
+            if slot_surface.0 == task_id && task_id != 0 {
+                surface = slot_surface.1;
+                break;
+            }
+        }
+
+        let mut card = Card::EMPTY;
+        card.package_id[..len].copy_from_slice(package_id);
+        card.package_len = len as u8;
+        let mut label = [0u8; 24];
+        let label_len = recents_label(state, package_id, &mut label);
+        card.label = label;
+        card.label_len = label_len as u8;
+        card.task_id = task_id;
+        card.focused = task_id != 0 && state.active_child == Some(task_id);
+        // WHY the preview is asked of the switcher: the picture store lives
+        // there, and the card's answer has to be the same answer the painter
+        // will draw.
+        card.preview = screens::activity::preview_state(package_id, task_id, surface);
+        cards[count] = card;
+        card_surfaces[count] = surface;
+        count += 1;
+    }
+
+    state.recents_cards = cards;
+    state.recents_surfaces = card_surfaces;
+    state.recents_count = count;
+}
+
+/// The name a card shows for a package.
+///
+/// WHY the registry's name when the catalogue knows the package: the
+/// registry's display name is the one the package asked to be called, and
+/// inventing one from the id would show "File Manager" for a package that
+/// calls itself "Files".
+fn recents_label(state: &LauncherState, package_id: &[u8], buf: &mut [u8; 24]) -> usize {
+    for index in 0..state.app_count {
+        let len = state.app_id_lens[index] as usize;
+        if len > 0 && &state.app_ids[index][..len] == package_id {
+            let label_len = (state.app_label_lens[index] as usize).min(buf.len());
+            buf[..label_len].copy_from_slice(&state.app_labels[index][..label_len]);
+            return label_len;
+        }
+    }
+    launcher::text::humanise_package_id(package_id, buf).len()
+}
+
 fn refresh_runtime_recents(state: &mut LauncherState) {
     let mut buf = [0u8; 4096];
     let Ok(n) = std::app_runtime_list(&mut buf) else {
+        refresh_recents_cards(state);
         return;
     };
 
@@ -964,6 +1664,11 @@ fn refresh_runtime_recents(state: &mut LauncherState) {
             }
         }
     }
+
+    // WHY the cards are rebuilt here: the task switcher and this list are two
+    // views of the same question -- what is running -- and asking the platform
+    // twice would let them disagree.
+    refresh_recents_cards(state);
 }
 
 #[allow(dead_code)]
@@ -1023,13 +1728,13 @@ fn screen_renderer(view: ViewMode) -> ScreenPixelFn {
         ViewMode::HomeScreen => get_home_color,
         ViewMode::ActivitySpace => get_activity_color,
         ViewMode::QuickControls => get_quick_controls_color,
-        ViewMode::SystemSpace => get_system_space_color,
         ViewMode::LockScreen => get_lock_screen_color,
         ViewMode::PinEntry => get_pin_color,
         ViewMode::PowerMenu => get_power_menu_color,
         ViewMode::AppDrawer => get_app_drawer_color,
         ViewMode::Notifications => get_notifications_color,
         ViewMode::LiveWidgets => get_live_widgets_color,
+        ViewMode::Search => screens::search::get_search_color,
     }
 }
 
@@ -1184,52 +1889,7 @@ fn nav_target_at(x: usize, y: usize) -> Option<NavTarget> {
     })
 }
 
-/// Frame clock for the System Space orb, in kernel ticks.
-///
-/// WHY a static and not a field on the state: the painter's signature is shared
-/// by every view, and widening the state to mutable at thirty-odd call sites to
-/// carry one clock nothing else reads would be a signature change for its own
-/// sake. One writer, in the band renderer, and one reader, in the orb painter.
-static mut ORB_TICKS: u64 = 0;
-
-/// The back control's box, shared with the System Space painter so a tap and a
-/// pixel are answered by the same numbers.
-use crate::screens::system_space::{BACK_S, BACK_X, BACK_Y};
-
-/// Rows the System Space orb occupies, and so the band its driver repaints.
-const ORB_BAND_Y0: usize = 200;
-const ORB_BAND_Y1: usize = 310;
-
-/// Ticks between orb frames.
-///
-/// WHY 14: the kernel's tick is 10ms, so this is roughly a seventh of a second.
-/// Fast enough to read as continuous motion at this size, slow enough that the
-/// banded repaint it costs is a small fraction of a frame's budget. A shorter
-/// interval spends more time re-rasterising the orb than on anything else the
-/// shell has to do.
-const ORB_FRAME_TICKS: u64 = 14;
-
 fn render_band(surface: u32, state: &LauncherState, min_y: usize, max_y: usize) {
-    // WHY the clock is sampled here and not in the painter: the orb on the
-    // System Space surface animates, and an animation needs a time source that
-    // changes between frames rather than within one. Sampling once per band
-    // gives every pixel of the frame the same phase -- the orb holds still for
-    // the frame instead of crawling -- and it costs one syscall per repaint
-    // rather than one per pixel.
-    //
-    // WHY a static and not a field on the state: the painter's signature is
-    // shared by every view and every band, and widening the state to mutable at
-    // thirty-odd call sites to carry one clock would be a signature change for a
-    // value nothing else reads.
-    //
-    // WHY a refused read leaves the previous phase rather than zeroing it: a
-    // frame with no clock still has to draw something, and snapping the orb
-    // back to its zero phase on every refused read would make it strobe.
-    if let Some(ticks) = current_ticks_opt() {
-        unsafe {
-            ORB_TICKS = ticks;
-        }
-    }
     let draw = screen_renderer(state.current_view);
     let min_y = min_y.min(H);
     let max_y = max_y.min(H);
@@ -1661,11 +2321,6 @@ fn log_view_rendered(state: &LauncherState) {
             )
             .ok();
         }
-        ViewMode::SystemSpace => {
-            std::log("[LAUNCHER] render_system_space complete: Visual system space presented. System surface rendered.",
-            )
-            .ok();
-        }
         ViewMode::LockScreen => {
             std::log("[LAUNCHER] render_lock_screen complete: Atmospheric lock screen presented. Lock surface rendered.",
             )
@@ -1700,6 +2355,24 @@ fn log_view_rendered(state: &LauncherState) {
             std::log("[LAUNCHER] render_live_widgets complete: Live widgets dashboard presented. Live widgets surface rendered.",
             )
             .ok();
+        }
+        ViewMode::Search => {
+            // WHY the counts and the query are formatted rather than written:
+            // this line is the shell's own account of what the search found,
+            // and a literal would report the same number for every query.
+            let mut line = LineBuf::<128>::new();
+            {
+                use core::fmt::Write;
+                let query_len = state.search_query_len.min(32);
+                let _ = writeln!(
+                    line,
+                    "[LAUNCHER] render_search complete: {} results over {} entries, query '{}'. Search surface rendered.",
+                    state.search_results.count,
+                    state.search_index.len(),
+                    core::str::from_utf8(&state.search_query[..query_len]).unwrap_or("<not text>")
+                );
+            }
+            std::log(line.as_str()).ok();
         }
     }
 }
@@ -2143,27 +2816,6 @@ pub extern "C" fn _start() -> ! {
                         surface_flip_display();
                     }
                 }
-                // The System Space orb is driven, not just drawn.
-                //
-                // WHY a driver is needed at all: the shell repaints on state
-                // change, so a surface that looks the same every frame would hold
-                // one light angle forever. Sampling a clock in the painter gives
-                // every pixel of a frame the same phase, but something still has
-                // to produce the next frame.
-                //
-                // WHY this band and this interval: the orb occupies rows
-                // 115..245, so that is what is re-rasterised -- the title, the
-                // cards and the subtitle are static and re-drawing them would
-                // cost a banded repaint's worth of work for no visible change.
-                // Fourteen ticks is roughly a fifth of a second, which reads as
-                // motion without spending the compositor's whole budget on it.
-                if state.current_view == ViewMode::SystemSpace
-                    && state.active_child.is_none()
-                    && refresh_ticks % ORB_FRAME_TICKS == 0
-                {
-                    render_band(surface, &state, ORB_BAND_Y0, ORB_BAND_Y1);
-                    surface_flip_display();
-                }
                 if refresh_ticks % 10 == 0 {
                     let previous_count = state.app_count;
                     refresh_package_catalog(&mut state);
@@ -2171,7 +2823,7 @@ pub extern "C" fn _start() -> ! {
                     if previous_count != state.app_count {
                         let _ = std::log("[LAUNCHER] Package catalogue count updated dynamically.");
                         match state.current_view {
-                            ViewMode::HomeScreen => {
+                        ViewMode::HomeScreen => {
                                 present_dirty(
                                     surface,
                                     &state,
@@ -2185,6 +2837,29 @@ pub extern "C" fn _start() -> ! {
                             _ => {}
                         }
                     }
+                }
+                // The task switcher's previews are live, not a photograph.
+                //
+                // WHY this is on a timer and not only on entry: a preview is a
+                // picture of the app's last frame, and an app that is running
+                // keeps changing what it is showing. A preview captured once
+                // and never refreshed is a photograph, and the switcher is
+                // where somebody looks to see what their apps are doing.
+                if state.current_view == ViewMode::ActivitySpace && refresh_ticks % 100 == 0 {
+                    refresh_recents_cards(&mut state);
+                    screens::activity::refresh_previews(&mut state);
+                    present_dirty(surface, &state, Dirty::ActivityCards);
+                }
+                // The foreground app's picture.
+                //
+                // WHY the shell reads a running app's surface while the app is
+                // running: an app in this platform exits when the person
+                // leaves it, so the only way the switcher can hold a picture
+                // of an app at all is to take it while that app is still
+                // drawing. The picture is the app's own pixels, read through
+                // the platform's capture capability.
+                if refresh_ticks % 50 == 0 {
+                    capture_foreground(&mut state);
                 }
                 if state.current_view == ViewMode::HomeScreen && state.clock_time != old_clock {
                     render_band(surface, &state, 0, 48);
@@ -2259,6 +2934,7 @@ pub extern "C" fn _start() -> ! {
                     if input.kind == 8 {
                         if !matches!(state.current_view, ViewMode::LockScreen | ViewMode::PinEntry) {
                             refresh_runtime_recents(&mut state);
+                            screens::activity::refresh_previews(&mut state);
                             state.current_view = ViewMode::ActivitySpace;
                             render_view(surface, &state);
                             surface_flip_display();
@@ -2502,18 +3178,71 @@ pub extern "C" fn _start() -> ! {
                         }
                         ViewMode::ActivitySpace => {
                             // 1. Swipe gestures
+                            //
+                            // WHY the thresholds live in the model: the card
+                            // geometry, the dismiss distance and the gesture
+                            // that means "go home" are one decision, and the
+                            // painter, the hit test and this handler have to
+                            // agree about it.
                             if is_drag(input.kind) {
-                                // Vertical swipe down returns to home
-                                if input.dy >= 50 {
-                                    state.current_view = ViewMode::HomeScreen;
-                                    render_view(surface, &state);
-                                    surface_flip_display();
-                                    std::log("[LAUNCHER] Returned to home grid from recents via swipe.",
-                                    )
-                                    .ok();
-                                    std::log("[LAUNCHER] Returned to home grid from recents.",
-                                    )
-                                    .ok();
+                                match launcher::recents::classify_swipe(input.dy) {
+                                    launcher::recents::Swipe::Dismiss => {
+                                        let origin_y =
+                                            (input.y as i32 - input.dy as i32).max(0) as usize;
+                                        let x = input.x as usize;
+                                        let slot = launcher::recents::card_at(
+                                            x,
+                                            origin_y,
+                                            state.recents_count,
+                                        );
+                                        if let Some(slot) = slot {
+                                            screens::activity::activity_close_slot(&mut state, slot);
+                                            present_dirty(surface, &state, Dirty::ActivityCards);
+                                            std::log("[LAUNCHER] Task switcher card dismissed via swipe.")
+                                                .ok();
+                                            let mut drain = std::InputEvent {
+                                                kind: 0,
+                                                x: 0,
+                                                y: 0,
+                                                dx: 0,
+                                                dy: 0,
+                                                scale_milli: 1000,
+                                            };
+                                            while std::input_event_poll(&mut drain).is_ok() {}
+                                            break;
+                                        }
+                                    }
+                                    launcher::recents::Swipe::Home => {
+                                        state.current_view = ViewMode::HomeScreen;
+                                        render_view(surface, &state);
+                                        surface_flip_display();
+                                        std::log("[LAUNCHER] Returned to home grid from the task switcher via swipe.").ok();
+                                        let mut drain = std::InputEvent {
+                                            kind: 0,
+                                            x: 0,
+                                            y: 0,
+                                            dx: 0,
+                                            dy: 0,
+                                            scale_milli: 1000,
+                                        };
+                                        while std::input_event_poll(&mut drain).is_ok() {}
+                                        break;
+                                    }
+                                    launcher::recents::Swipe::None => {}
+                                }
+                            }
+
+                            // 2. Tap gestures
+                            if input.kind == 1 {
+                                let x = input.x as usize;
+                                let y = input.y as usize;
+
+                                // A. The close control on a card.
+                                if let Some(slot) = screens::activity::activity_close_hit(&state, x, y) {
+                                    screens::activity::activity_close_slot(&mut state, slot);
+                                    present_dirty(surface, &state, Dirty::ActivityCards);
+                                    std::log("[LAUNCHER] Task switcher card closed via its close control.")
+                                        .ok();
                                     let mut drain = std::InputEvent {
                                         kind: 0,
                                         x: 0,
@@ -2525,37 +3254,65 @@ pub extern "C" fn _start() -> ! {
                                     while std::input_event_poll(&mut drain).is_ok() {}
                                     break;
                                 }
-
-                                // Swiping up on a card closes/terminates that individual task.
-                                // Horizontal swipe also dismisses for backwards-compatibility.
-                                if input.dy <= -40 || input.dx.abs() >= 40 {
-                                    let y = input.y as usize;
-                                    let origin_y = (input.y as i32 - input.dy as i32).max(0) as usize;
-                                    let slot_opt = if (120..390).contains(&origin_y) || (120..390).contains(&y) {
-                                        Some(0)
-                                    } else if (420..690).contains(&origin_y) || (420..690).contains(&y) {
-                                        Some(1)
-                                    } else if (720..990).contains(&origin_y) || (720..990).contains(&y) {
-                                        Some(2)
-                                    } else {
-                                        None
-                                    };
-
-                                    if let Some(slot) = slot_opt {
-                                        if state.recent_task_ids[slot] > 0 {
-                                            let _ = std::app_stop(state.recent_task_ids[slot]);
-                                            if state.active_child == Some(state.recent_task_ids[slot]) {
-                                                state.active_child = None;
+                                // B. "Close all".
+                                else if screens::activity::close_all_rect().contains(x, y) {
+                                    for card in state.recents_cards.iter() {
+                                        if card.task_id > 0 {
+                                            let _ = std::app_stop(card.task_id);
+                                        }
+                                    }
+                                    let mut r_buf = [0u8; 4096];
+                                    if let Ok(n) = std::app_runtime_list(&mut r_buf) {
+                                        for line in r_buf[..n].split(|b| *b == b'\n') {
+                                            let mut fields = line.split(|b| *b == b'|');
+                                            if let Some(task_raw) = fields.next() {
+                                                if let Ok(task_id) =
+                                                    core::str::from_utf8(task_raw).unwrap_or("").parse::<u64>()
+                                                {
+                                                    if task_id > 1 {
+                                                        let _ = std::app_stop(task_id);
+                                                    }
+                                                }
                                             }
                                         }
-                                        state.dismiss_recent(slot);
-                                        present_dirty(surface, &state, Dirty::ActivityCards);
-                                        match slot {
-                                            0 => { std::log("[LAUNCHER] Card 0 dismissed via swipe.").ok(); }
-                                            1 => { std::log("[LAUNCHER] Card 1 dismissed via swipe.").ok(); }
-                                            2 => { std::log("[LAUNCHER] Card 2 dismissed via swipe.").ok(); }
-                                            _ => {}
-                                        }
+                                    }
+                                    state.recent_apps = [[0u8; 32]; 3];
+                                    state.recent_app_lens = [0; 3];
+                                    state.recent_task_ids = [0; 3];
+                                    state.active_child = None;
+                                    state.recents_count = 0;
+                                    state.recents_cards =
+                                        [launcher::recents::Card::EMPTY; launcher::recents::MAX_CARDS];
+                                    state.recents_surfaces = [0; launcher::recents::MAX_CARDS];
+                                    screens::activity::invalidate_activity_frame();
+                                    state.current_view = ViewMode::HomeScreen;
+                                    render_view(surface, &state);
+                                    surface_flip_display();
+                                    std::log("[LAUNCHER] Closed all running apps and returned to home grid.").ok();
+                                    let mut drain = std::InputEvent {
+                                        kind: 0,
+                                        x: 0,
+                                        y: 0,
+                                        dx: 0,
+                                        dy: 0,
+                                        scale_milli: 1000,
+                                    };
+                                    while std::input_event_poll(&mut drain).is_ok() {}
+                                    break;
+                                }
+                                // C. A card's body: bring that task to the front.
+                                //
+                                // WHY the card is the only thing that opens a task: the
+                                // switcher's job is to switch to something that is
+                                // already running, and a card that is not there is a
+                                // task the platform says is not running.
+                                else if let Some(slot) =
+                                    launcher::recents::card_at(x, y, state.recents_count)
+                                {
+                                    if focus_recents_card(&mut state, slot) {
+                                        state.current_view = ViewMode::HomeScreen;
+                                        std::log("[LAUNCHER] Switched to a running app from the task switcher.")
+                                            .ok();
                                         let mut drain = std::InputEvent {
                                             kind: 0,
                                             x: 0,
@@ -2568,184 +3325,12 @@ pub extern "C" fn _start() -> ! {
                                         break;
                                     }
                                 }
-                            }
-
-                            // 2. Tap gestures
-                            if input.kind == 1 {
-                                let x = input.x as usize;
-                                let y = input.y as usize;
-
-                                // A. Dismiss button taps
-                                if let Some(slot) = screens::activity::activity_close_hit(&state, x, y) {
-                                    screens::activity::activity_close_slot(&mut state, slot);
-                                    present_dirty(surface, &state, Dirty::ActivityCards);
-                                    std::log("[LAUNCHER] Card dismissed via dismiss button tap.",
-                                    )
-                                    .ok();
-                                    let mut drain = std::InputEvent {
-                                        kind: 0,
-                                        x: 0,
-                                        y: 0,
-                                        dx: 0,
-                                        dy: 0,
-                                        scale_milli: 1000,
-                                    };
-                                    while std::input_event_poll(&mut drain).is_ok() {}
-                                    break;
-                                }
-                                // B. Tap Card 0 body to switch
-                                else if screens::activity::WORKSPACE_CARDS[0].contains(x, y) {
-                                    if let Some(target) = state.recent_id(0) {
-                                        let mut target_buf = [0u8; 32];
-                                        let target_len = target.len().min(32);
-                                        target_buf[..target_len].copy_from_slice(&target.as_bytes()[..target_len]);
-                                        let target_str = core::str::from_utf8(&target_buf[..target_len]).unwrap_or("");
-
-                                        let switched = if state.recent_task_ids[0] > 0 && std::app_focus(state.recent_task_ids[0]).is_ok() {
-                                            state.active_child = Some(state.recent_task_ids[0]);
-                                            true
-                                        } else if let Ok(tid) = std::app_launch(target_str) {
-                                            let _ = std::app_focus(tid);
-                                            state.active_child = Some(tid);
-                                            state.recent_task_ids[0] = tid;
-                                            true
-                                        } else {
-                                            false
-                                        };
-                                        if switched {
-                                            state.current_view = ViewMode::HomeScreen;
-                                            std::log("[LAUNCHER] Switched to recent app from overview card 0.").ok();
-                                            let mut drain = std::InputEvent {
-                                                kind: 0,
-                                                x: 0,
-                                                y: 0,
-                                                dx: 0,
-                                                dy: 0,
-                                                scale_milli: 1000,
-                                            };
-                                            while std::input_event_poll(&mut drain).is_ok() {}
-                                            break;
-                                        }
-                                    }
-                                }
-                                // C. Tap Card 1 body to switch
-                                else if screens::activity::WORKSPACE_CARDS[1].contains(x, y) {
-                                    if let Some(target) = state.recent_id(1) {
-                                        let mut target_buf = [0u8; 32];
-                                        let target_len = target.len().min(32);
-                                        target_buf[..target_len].copy_from_slice(&target.as_bytes()[..target_len]);
-                                        let target_str = core::str::from_utf8(&target_buf[..target_len]).unwrap_or("");
-
-                                        let switched = if state.recent_task_ids[1] > 0 && std::app_focus(state.recent_task_ids[1]).is_ok() {
-                                            state.active_child = Some(state.recent_task_ids[1]);
-                                            true
-                                        } else if let Ok(tid) = std::app_launch(target_str) {
-                                            let _ = std::app_focus(tid);
-                                            state.active_child = Some(tid);
-                                            state.recent_task_ids[1] = tid;
-                                            true
-                                        } else {
-                                            false
-                                        };
-                                        if switched {
-                                            state.current_view = ViewMode::HomeScreen;
-                                            std::log("[LAUNCHER] Switched to recent app from overview card 1.").ok();
-                                            let mut drain = std::InputEvent {
-                                                kind: 0,
-                                                x: 0,
-                                                y: 0,
-                                                dx: 0,
-                                                dy: 0,
-                                                scale_milli: 1000,
-                                            };
-                                            while std::input_event_poll(&mut drain).is_ok() {}
-                                            break;
-                                        }
-                                    }
-                                }
-                                // D. Tap Card 2 body to switch
-                                else if screens::activity::WORKSPACE_CARDS[2].contains(x, y) {
-                                    if let Some(target) = state.recent_id(2) {
-                                        let mut target_buf = [0u8; 32];
-                                        let target_len = target.len().min(32);
-                                        target_buf[..target_len].copy_from_slice(&target.as_bytes()[..target_len]);
-                                        let target_str = core::str::from_utf8(&target_buf[..target_len]).unwrap_or("");
-
-                                        let switched = if state.recent_task_ids[2] > 0 && std::app_focus(state.recent_task_ids[2]).is_ok() {
-                                            state.active_child = Some(state.recent_task_ids[2]);
-                                            true
-                                        } else if let Ok(tid) = std::app_launch(target_str) {
-                                            let _ = std::app_focus(tid);
-                                            state.active_child = Some(tid);
-                                            state.recent_task_ids[2] = tid;
-                                            true
-                                        } else {
-                                            false
-                                        };
-                                        if switched {
-                                            state.current_view = ViewMode::HomeScreen;
-                                            std::log("[LAUNCHER] Switched to recent app from overview card 2.").ok();
-                                            let mut drain = std::InputEvent {
-                                                kind: 0,
-                                                x: 0,
-                                                y: 0,
-                                                dx: 0,
-                                                dy: 0,
-                                                scale_milli: 1000,
-                                            };
-                                            while std::input_event_poll(&mut drain).is_ok() {}
-                                            break;
-                                        }
-                                    }
-                                }
-                                // E. Tap "Close all" pill: terminates all active recents and returns to Home
-                                else if screens::activity::CLOSE_ALL_BTN.contains(x, y) || ((1210..1280).contains(&y) && (220..500).contains(&x)) {
-                                    for task in state.recent_task_ids.iter().copied() {
-                                        if task > 0 {
-                                            let _ = std::app_stop(task);
-                                        }
-                                    }
-                                    let mut r_buf = [0u8; 4096];
-                                    if let Ok(n) = std::app_runtime_list(&mut r_buf) {
-                                        for line in r_buf[..n].split(|b| *b == b'\n') {
-                                            let mut fields = line.split(|b| *b == b'|');
-                                            if let Some(task_raw) = fields.next() {
-                                                if let Ok(task_id) = core::str::from_utf8(task_raw).unwrap_or("").parse::<u64>() {
-                                                    if task_id > 1 {
-                                                        let _ = std::app_stop(task_id);
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                    state.recent_apps = [[0u8; 32]; 3];
-                                    state.recent_app_lens = [0; 3];
-                                    state.recent_task_ids = [0; 3];
-                                    state.active_child = None;
-                                    screens::activity::invalidate_activity_frame();
-                                    state.current_view = ViewMode::HomeScreen;
-                                    render_view(surface, &state);
-                                    surface_flip_display();
-                                    std::log("[LAUNCHER] Closed all recent apps and returned to home grid.").ok();
-                                    std::log("[LAUNCHER] Returned to home grid from recents.").ok();
-                                    let mut drain = std::InputEvent {
-                                        kind: 0,
-                                        x: 0,
-                                        y: 0,
-                                        dx: 0,
-                                        dy: 0,
-                                        scale_milli: 1000,
-                                    };
-                                    while std::input_event_poll(&mut drain).is_ok() {}
-                                    break;
-                                }
-                                // F. Tap empty background (or gesture bar): returns to Home
+                                // D. The backdrop: back to the home surface.
                                 else {
                                     state.current_view = ViewMode::HomeScreen;
                                     render_view(surface, &state);
                                     surface_flip_display();
-                                    std::log("[LAUNCHER] Returned to home grid from recents via backdrop tap.").ok();
-                                    std::log("[LAUNCHER] Returned to home grid from recents.").ok();
+                                    std::log("[LAUNCHER] Returned to home grid from the task switcher via backdrop tap.").ok();
                                     let mut drain = std::InputEvent {
                                         kind: 0,
                                         x: 0,
@@ -2908,77 +3493,6 @@ pub extern "C" fn _start() -> ! {
                                             scale_milli: 1000,
                                         };
                                         while std::input_event_poll(&mut drain).is_ok() {}
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                        ViewMode::SystemSpace => {
-                            if (is_drag(input.kind) && input.dy >= 60)
-                                || (input.kind == 1 && input.y >= 1350)
-                            {
-                                state.current_view = ViewMode::HomeScreen;
-                                render_view(surface, &state);
-                                surface_flip_display();
-                                std::log("[LAUNCHER] Returned to Home from System Space.").ok();
-                                let mut drain = std::InputEvent {
-                                    kind: 0,
-                                    x: 0,
-                                    y: 0,
-                                    dx: 0,
-                                    dy: 0,
-                                    scale_milli: 1000,
-                                };
-                                while std::input_event_poll(&mut drain).is_ok() {}
-                                break;
-                            }
-                            if input.kind == 1 {
-                                let x = input.x as usize;
-                                let y = input.y as usize;
-                                // WHY the back control is answerable here: it is
-                                // drawn on this surface (screens/system_space.rs,
-                                // BACK_X/BACK_Y/BACK_S) and the Settings app opens
-                                // the same screen with one, so a user who arrived
-                                // from the home surface's search bar previously
-                                // had no control to leave with -- only a gesture.
-                                // Gated to the drawn rect so a tap beside it cannot
-                                // navigate by accident.
-                                if (BACK_Y..BACK_Y + BACK_S).contains(&y)
-                                    && (BACK_X..BACK_X + BACK_S).contains(&x)
-                                {
-                                    state.current_view = ViewMode::HomeScreen;
-                                    render_view(surface, &state);
-                                    surface_flip_display();
-                                    std::log("[LAUNCHER] Back from System Space.")
-                                        .ok();
-                                    break;
-                                }
-                                if (700..820).contains(&y) && (40..345).contains(&x) {
-                                    state.current_view = ViewMode::PowerMenu;
-                                    render_view(surface, &state);
-                                    surface_flip_display();
-                                    std::log("[LAUNCHER] Power menu opened from System Space.")
-                                        .ok();
-                                    break;
-                                }
-                                // Category cards: Device, Network, Personal, Apps, Power, Security, System
-                                // Any card tap seamlessly transitions to or launches the sovereign Settings component
-                                if (360..900).contains(&y) && (40..680).contains(&x) {
-                                    if let Ok(task_id) = std::app_launch("org.interos.settings") {
-                                        state.push_recent("org.interos.settings", task_id);
-                                        state.active_child = Some(task_id);
-                                        state.current_view = ViewMode::HomeScreen;
-                                        let mut drain = std::InputEvent {
-                                            kind: 0,
-                                            x: 0,
-                                            y: 0,
-                                            dx: 0,
-                                            dy: 0,
-                                            scale_milli: 1000,
-                                        };
-                                        while std::input_event_poll(&mut drain).is_ok() {}
-                                        std::log("[LAUNCHER] Seamlessly transitioned to sovereign System Space settings.")
-                                            .ok();
                                         break;
                                     }
                                 }
@@ -3895,6 +4409,94 @@ pub extern "C" fn _start() -> ! {
 
                             }
                         }
+                        ViewMode::Search => {
+                            // 0. The keyboard edits the query.
+                            //
+                            // WHY the query is typed here and not on a field
+                            // screen of its own: the search runs over the whole
+                            // platform, so the words a person types have to
+                            // reach the one index that holds all of it.
+                            if let Some(key) = input.key_event() {
+                                if key.pressed {
+                                    if key.code == std::input_key_code::BACKSPACE || key.code == 8 {
+                                        if state.search_query_len > 0 {
+                                            state.search_query_len -= 1;
+                                            rank_search_results(&mut state);
+                                            render_view(surface, &state);
+                                            surface_flip_display();
+                                        }
+                                    } else if key.code == std::input_key_code::ESCAPE {
+                                        if state.search_query_len > 0 {
+                                            state.search_query_len = 0;
+                                            rank_search_results(&mut state);
+                                            render_view(surface, &state);
+                                            surface_flip_display();
+                                        } else {
+                                            state.current_view = ViewMode::HomeScreen;
+                                            render_view(surface, &state);
+                                            surface_flip_display();
+                                        }
+                                    } else if (32..=126).contains(&key.code)
+                                        && state.search_query_len < state.search_query.len()
+                                    {
+                                        state.search_query[state.search_query_len] = key.code as u8;
+                                        state.search_query_len += 1;
+                                        rank_search_results(&mut state);
+                                        render_view(surface, &state);
+                                        surface_flip_display();
+                                    }
+                                }
+                                break;
+                            }
+
+                            // 1. A tap on a result opens it.
+                            //
+                            // WHY the result decides what opens it: a result
+                            // that opened something other than what its label
+                            // says is a result that lies, and the whole point
+                            // of this search is that every row names a
+                            // destination that exists.
+                            if input.kind == 1 {
+                                let x = input.x as usize;
+                                let y = input.y as usize;
+                                if let Some(rank) =
+                                    screens::search::result_at(x, y, state.search_results.count)
+                                {
+                                    if open_search_result(&mut state, rank) {
+                                        state.current_view = ViewMode::HomeScreen;
+                                        std::log("[LAUNCHER] Opened a search result.").ok();
+                                        let mut drain = std::InputEvent {
+                                            kind: 0,
+                                            x: 0,
+                                            y: 0,
+                                            dx: 0,
+                                            dy: 0,
+                                            scale_milli: 1000,
+                                        };
+                                        while std::input_event_poll(&mut drain).is_ok() {}
+                                        break;
+                                    }
+                                }
+                            }
+
+                            // 2. A swipe down goes home.
+                            if is_drag(input.kind) && input.dy >= 60 {
+                                state.current_view = ViewMode::HomeScreen;
+                                render_view(surface, &state);
+                                surface_flip_display();
+                                std::log("[LAUNCHER] Returned to home grid from search via swipe.").ok();
+                                let mut drain = std::InputEvent {
+                                    kind: 0,
+                                    x: 0,
+                                    y: 0,
+                                    dx: 0,
+                                    dy: 0,
+                                    scale_milli: 1000,
+                                };
+                                while std::input_event_poll(&mut drain).is_ok() {}
+                                break;
+                            }
+                        }
                         ViewMode::HomeScreen => {
                             // Long-press opens the Power Menu.
                             //
@@ -3941,6 +4543,7 @@ pub extern "C" fn _start() -> ! {
                             if is_drag(input.kind) && input.dy <= -60 {
                                 if input.y >= 1000 {
                                     refresh_runtime_recents(&mut state);
+                                    screens::activity::refresh_previews(&mut state);
                                     state.current_view = ViewMode::ActivitySpace;
                                     let mut win_buf = [0u8; 1024];
                                     let _ = std::window_list(&mut win_buf);
@@ -4188,14 +4791,25 @@ pub extern "C" fn _start() -> ! {
                                     break;
                                 }
 
-                                // Universal search bar / System Space tap
-                                if ((665..755).contains(&y) && (30..690).contains(&x))
-                                    || ((1320..1384).contains(&y) && (40..680).contains(&x))
-                                {
-                                    state.current_view = ViewMode::SystemSpace;
+                                // Universal search bar tap: the search itself.
+                                //
+                                // WHY this opens the search and not a launcher-drawn copy of the
+                                // Settings app: the field says it searches "apps, settings & files",
+                                // and it now does. The surface it used to open -- "System Space" --
+                                // was a second name for the Settings app's own page, and a search
+                                // result that re-opens the Settings app under another name is a
+                                // result that does not say what it does.
+                                //
+                                // WHY the control is asked of the home screen: the bar is painted
+                                // there, so the tap has to be resolved with the numbers the painter
+                                // used.
+                                if screens::home::search_control_hit(x, y) {
+                                    state.search_query_len = 0;
+                                    refresh_search_index(&mut state);
+                                    state.current_view = ViewMode::Search;
                                     render_view(surface, &state);
                                     surface_flip_display();
-                                    std::log("[LAUNCHER] System space opened via universal search bar tap.").ok();
+                                    std::log("[LAUNCHER] Global search opened via universal search bar tap.").ok();
                                     let mut drain = std::InputEvent {
                                         kind: 0,
                                         x: 0,
@@ -4238,6 +4852,7 @@ pub extern "C" fn _start() -> ! {
                                     match target {
                                         NavTarget::Recents => {
                                             refresh_runtime_recents(&mut state);
+                                            screens::activity::refresh_previews(&mut state);
                                             state.current_view = ViewMode::ActivitySpace;
                                             let mut win_buf = [0u8; 1024];
                                             let _ = std::window_list(&mut win_buf);

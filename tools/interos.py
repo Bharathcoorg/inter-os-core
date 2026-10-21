@@ -61,6 +61,14 @@ RAPP_CAPABILITY_IDS = {
     "CAP_SYSTEM_CONTROL_CAMERA": 22,
     "CAP_SYSTEM_CONTROL_SENSOR": 23,
     "CAP_REALTIME_CLOCK": 24,
+    # The content layer: the shared document index and the system-wide intent
+    # registry. CAP_CONTENT_INDEX reads the index and the registry; it does not
+    # open the documents the index describes. CAP_CONTENT_INTENT dispatches an
+    # intent to the package that declared a handler for it; it is not
+    # CAP_PROCESS_SPAWN, because it can only reach the one package the
+    # registry names.
+    "CAP_CONTENT_INDEX": 25,
+    "CAP_CONTENT_INTENT": 26,
 
     # Template-facing aliases.
     #
@@ -884,6 +892,89 @@ def _rapp_v2_signing_bytes(package_bytes):
     return bytes(data[:0xB4] + data[0xB4:])
 
 
+# The intent kinds a RAPP v4 manifest may declare, and their wire values.
+RAPP_INTENT_KINDS = {"mime": 0, "scheme": 1, "action": 2}
+RAPP_MAX_INTENTS = 64
+RAPP_MAX_INTENT_VALUE_LEN = 96
+
+
+def _rapp_intent_table(manifest_data):
+    """Encodes the manifest's declared handlers into the RAPP v4 intent table.
+
+    WHY the table is inside the signed package: "this package handles
+    image/png" is a claim the device acts on when it resolves an intent, and a
+    claim that could be edited after signing would be no claim at all.
+    """
+    intents = manifest_data.get("intents") or {}
+    if not isinstance(intents, dict):
+        raise ValueError("intents must be an object with mime/scheme/action lists")
+    entries = []
+    for kind in ("mime", "scheme", "action"):
+        values = intents.get(kind, []) or []
+        if not isinstance(values, list):
+            raise ValueError(f"intents.{kind} must be a list")
+        for value in values:
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"intents.{kind} entries must be non-empty strings")
+            encoded = value.encode("utf-8")
+            if len(encoded) > RAPP_MAX_INTENT_VALUE_LEN:
+                raise ValueError(f"intent value too long: {value}")
+            entries.append((RAPP_INTENT_KINDS[kind], encoded))
+    if len(entries) > RAPP_MAX_INTENTS:
+        raise ValueError("too many intent declarations")
+    table = bytearray(len(entries).to_bytes(2, "little"))
+    for kind, encoded in entries:
+        table += bytes([kind, len(encoded)]) + encoded
+    return bytes(table)
+
+
+def _rapp_v4_encode(manifest_data, publisher_key, signature, payload, arch_name=None):
+    """Encodes a RAPP v4 package: the v3 header plus a signed intent table.
+
+    WHY v4 and not an extension of v2: a package that declares no handlers
+    must still be describable, and the intent table is a different kind of
+    declaration from a dependency. v4 leaves every earlier format's bytes
+    unchanged.
+    """
+    arch_map = {"x86_64": 0, "aarch64": 1, "riscv64": 2}
+    arch_name = arch_name or manifest_data.get("architecture", "x86_64")
+    if arch_name not in arch_map:
+        raise ValueError(f"Unsupported architecture: {arch_name}")
+    version = tuple(int(x) for x in str(manifest_data["version"]).split("."))
+    if len(version) != 3 or any(x < 0 or x > 65535 for x in version):
+        raise ValueError("version must be MAJOR.MINOR.PATCH with u16 components")
+    caps = [RAPP_CAPABILITY_IDS[p] for p in manifest_data.get("permissions", [])]
+    if len(set(caps)) != len(caps):
+        raise ValueError("duplicate capability permissions are not allowed")
+    if len(caps) > 1024:
+        raise ValueError("too many capabilities")
+    pkg = manifest_data["id"].encode("utf-8")
+    if not pkg or len(pkg) > 32:
+        raise ValueError("package id must be 1..32 UTF-8 bytes")
+    intent_table = _rapp_intent_table(manifest_data)
+    dep_table = b"\0\0"
+    section = (
+        len(dep_table).to_bytes(4, "little")
+        + len(intent_table).to_bytes(4, "little")
+        + dep_table
+        + intent_table
+    )
+    digest = hashlib.sha256(payload).digest()
+    header = bytearray()
+    header += b"RAPP" + (4).to_bytes(2, "little") + arch_map[arch_name].to_bytes(2, "little")
+    header += pkg.ljust(32, b"\0")
+    header += publisher_key
+    header += version[0].to_bytes(2, "little") + version[1].to_bytes(2, "little") + version[2].to_bytes(2, "little")
+    header += len(caps).to_bytes(2, "little")
+    header += digest
+    header += signature
+    header += len(payload).to_bytes(4, "little")
+    header += len(section).to_bytes(4, "little")
+    for cap in caps:
+        header += int(cap).to_bytes(2, "little")
+    return bytes(header) + section + payload
+
+
 def cmd_pack(args):
     app_name = args.name.lower().replace("-", "_")
     app_dir = APPS_DIR / app_name
@@ -931,20 +1022,29 @@ def cmd_pack(args):
             key_file.write_bytes(priv_key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
             log(f"Generated developer signing key at {key_file}")
         pub = priv_key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
-        unsigned = _rapp_v2_encode(manifest_data, pub, b"\0" * 64, payload, getattr(args, "arch", None))
+        # WHY the format is chosen by the manifest: a package that declares
+        # handlers needs the intent table, and a package that declares none
+        # stays on the older format so that a reader that predates v4 can
+        # still install it.
+        declares_intents = bool(manifest_data.get("intents"))
+        encode = _rapp_v4_encode if declares_intents else _rapp_v2_encode
+        unsigned = encode(manifest_data, pub, b"\0" * 64, payload, getattr(args, "arch", None))
         signature = priv_key.sign(_rapp_v2_signing_bytes(unsigned))
-        package_bytes = _rapp_v2_encode(manifest_data, pub, signature, payload, getattr(args, "arch", None))
+        package_bytes = encode(manifest_data, pub, signature, payload, getattr(args, "arch", None))
     except Exception as e:
-        log_error(f"RAPP v2 signing failed: {e}")
+        log_error(f"RAPP signing failed: {e}")
         return 1
     DIST_DIR.mkdir(parents=True, exist_ok=True)
     output = Path(getattr(args, "output", None) or DIST_DIR / f"{app_name}.rapp")
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_bytes(package_bytes)
-    log_success(f"RAPP v2 package created: {output} ({len(package_bytes)} bytes)")
-    log(f"  Ã¢â‚¬Â¢ Publisher key: {pub.hex()}")
-    log(f"  Ã¢â‚¬Â¢ Ed25519 signature: {signature.hex()[:24]}...")
-    log(f"  Ã¢â‚¬Â¢ Architecture: {manifest_data.get('architecture', 'x86_64')}")
+    log_success(f"RAPP package created: {output} ({len(package_bytes)} bytes)")
+    log(f"  • Publisher key: {pub.hex()}")
+    log(f"  • Ed25519 signature: {signature.hex()[:24]}...")
+    log(f"  • Architecture: {manifest_data.get('architecture', 'x86_64')}")
+    if declares_intents:
+        declared = sum(len(v) for v in (manifest_data.get("intents") or {}).values())
+        log(f"  • Declared handlers: {declared} (signed into the intent table)")
     return 0
 
 

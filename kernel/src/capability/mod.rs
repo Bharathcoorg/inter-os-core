@@ -69,6 +69,42 @@ pub enum CapabilityType {
     /// a clock without this capability, so the one element that dominates the
     /// reference design was permanently absent rather than merely wrong.
     RealtimeClockRead,
+    /// Permission to read the shared document index and the intent registry.
+    ///
+    /// WHY this is its own capability and not `FileSystemRead`: the index
+    /// describes documents -- their paths, lengths, media types and
+    /// identities -- and reading a description is not reading a file. An app
+    /// that may browse the shared area's catalogue does not thereby gain the
+    /// ability to open the documents in it, and an app that may open a
+    /// document does not thereby gain the ability to enumerate the catalogue.
+    ///
+    /// WHY it also covers the intent registry: the registry is a table of
+    /// which package handles which media type, scheme or action, and it
+    /// describes the device's programs rather than the device's documents.
+    /// Reading it is the same kind of act as reading the index, and it is the
+    /// answer to "who handles this?" that the file manager's view menu needs.
+    ContentIndexRead,
+    /// Permission to dispatch an intent to the package that declared a
+    /// handler for it.
+    ///
+    /// WHY this is not `ProcessSpawn`: spawning a process is authority over
+    /// the device's task table, and dispatching an intent is authority over one
+    /// named relationship -- "the package that declared this media type" --
+    /// which the kernel resolves from the signed manifests. An app that may
+    /// ask the device to open a document may not thereby spawn arbitrary
+    /// programs.
+    ContentIntentDispatch,
+    /// Permission to read the pixels of another task's display surface.
+    ///
+    /// WHY this is its own type and not `FrameBufferDirect`: the framebuffer
+    /// capability is the display service's authority over the scanout, and it
+    /// already lets a task write the surfaces that task owns. Reading a
+    /// *running* app's surface is a different question -- "may this task see
+    /// another app's screen?" -- and answering it with display authority would
+    /// make every client of the display service a screen reader. The task
+    /// switcher needs exactly this authority and nothing else does, so it is
+    /// named, granted deliberately, and revocable on its own.
+    SurfaceCapture,
 }
 
 impl CapabilityType {
@@ -93,6 +129,9 @@ impl CapabilityType {
             CapabilityType::EventPoll => 17,
             CapabilityType::SystemControl => 18,
             CapabilityType::RealtimeClockRead => 24,
+            CapabilityType::ContentIndexRead => 25,
+            CapabilityType::ContentIntentDispatch => 26,
+            CapabilityType::SurfaceCapture => 27,
         }
     }
 
@@ -117,6 +156,9 @@ impl CapabilityType {
             17 => Some(CapabilityType::EventPoll),
             18 => Some(CapabilityType::SystemControl),
             24 => Some(CapabilityType::RealtimeClockRead),
+            25 => Some(CapabilityType::ContentIndexRead),
+            26 => Some(CapabilityType::ContentIntentDispatch),
+            27 => Some(CapabilityType::SurfaceCapture),
             _ => None,
         }
     }
@@ -1448,12 +1490,14 @@ mod tests {
 
     #[test]
     fn capability_type_raw_encoding_roundtrips() {
-        for val in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 24] {
+        for val in [
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 24, 25, 26, 27,
+        ] {
             let cap_type = CapabilityType::from_raw(val).expect("valid capability type");
             assert_eq!(cap_type.to_raw(), val);
         }
         assert_eq!(CapabilityType::from_raw(0), None);
-        for invalid in [19, 20, 21, 22, 23, 25, 26, 999] {
+        for invalid in [19, 20, 21, 22, 23, 28, 29, 999] {
             assert_eq!(CapabilityType::from_raw(invalid), None);
         }
     }
@@ -1484,6 +1528,39 @@ mod tests {
         // Access telemetry incremented on discovery
         let (count, _) = table.access_stats(s0).unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn surface_capture_is_its_own_authority() {
+        // WHY this test exists: reading another task's surface answers the
+        // question "may this task see another app's screen?", and the answer
+        // has to be a capability decision. The display service's framebuffer
+        // authority must not answer it, or every client of the display
+        // service would be a screen reader.
+        let task_id = crate::task::TaskId(7);
+        let mut table = CapabilityTable::new_for_task(task_id, 2);
+        table.insert(Capability {
+            id: CapabilityId(0x2000),
+            cap_type: CapabilityType::FrameBufferDirect,
+            rights: Rights::READ | Rights::WRITE,
+            object_id: 1,
+        }).expect("insert framebuffer capability");
+        assert!(
+            !table.authorize_capability(CapabilityType::SurfaceCapture, Rights::READ),
+            "display authority must not authorise reading another task's surface"
+        );
+
+        table.insert(Capability {
+            id: CapabilityId(0x2001),
+            cap_type: CapabilityType::SurfaceCapture,
+            rights: Rights::READ,
+            object_id: 0,
+        }).expect("insert capture capability");
+        assert!(
+            table.authorize_capability(CapabilityType::SurfaceCapture, Rights::READ),
+            "the capture capability has to authorise the capture"
+        );
+        assert_eq!(CapabilityType::SurfaceCapture.to_raw(), 27);
     }
 
     #[test]

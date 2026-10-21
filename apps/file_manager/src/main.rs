@@ -26,8 +26,9 @@ use std::design::components;
 use std::design::font;
 use std::design::primitives::{draw_pill, Rect};
 pub use file_manager::{
-    detect_mime, fmt_u64, get_app_for_mime, parse_vfs_entries, FileMime, RuntimeFileEntry,
-    MAX_ENTRY_NAME_LEN, MAX_PARSED_ENTRIES,
+    action_for_mime, detect_mime, fmt_u64, parse_vfs_entries, document_from_index,
+    FileMime, RuntimeFileEntry, SelectedDocument, MAX_DOCUMENT_PATH_LEN, MAX_ENTRY_NAME_LEN,
+    MAX_PARSED_ENTRIES,
 };
 
 use interos_std::design::outline_text;
@@ -281,6 +282,30 @@ pub const CATEGORY_PATHS: [&str; 4] = ["/storage", "/storage/photos", "/storage/
 /// The label each real directory is shown under.
 pub const CATEGORY_LABELS: [&[u8]; 4] = [b"Storage", b"Photos", b"Pictures", b"Videos"];
 
+// -----------------------------------------------------------------------------
+// The selected document's actions
+// -----------------------------------------------------------------------------
+
+/// The panel that shows what the platform holds about the selected document
+/// and what the user can do with it.
+///
+/// WHY a panel in the gap between the category rows and the file card: the
+/// panel has to be somewhere the user can see, and this band is the one the
+/// screen already leaves empty. An action the user cannot see is an action
+/// the user cannot take.
+pub const ACTIONS_Y0: usize = 560;
+pub const ACTIONS_Y1: usize = 840;
+/// The "open with" line, where the handlers the registry names are drawn.
+pub const ACTION_OPEN_Y0: usize = 676;
+pub const ACTION_OPEN_Y1: usize = 720;
+/// The "set as" line, where the action the media type allows is drawn.
+pub const ACTION_SET_Y0: usize = 736;
+pub const ACTION_SET_Y1: usize = 780;
+/// The panel's left edge.
+pub const ACTIONS_X0: usize = 36;
+/// The panel's right edge.
+pub const ACTIONS_X1: usize = 684;
+
 pub struct FileManagerApp {
     pub selected_shortcut: usize,
     pub selected_entry: Option<usize>,
@@ -301,6 +326,16 @@ pub struct FileManagerApp {
     pub listing_error: i64,
     pub entries: [RuntimeFileEntry; MAX_PARSED_ENTRIES],
     pub entry_count: usize,
+    /// The document the user has selected, as the platform's index describes it.
+    ///
+    /// WHY the index and not the listing: the index is where the media type
+    /// and the identity of a document live, and a file without a media type
+    /// cannot be handed to the program that declared a handler for it.
+    pub selected_document: SelectedDocument,
+    /// Whether a document is selected.
+    pub has_selected_document: bool,
+    /// Why the index could not be read, when it could not.
+    pub index_error: i64,
 }
 
 impl FileManagerApp {
@@ -329,6 +364,9 @@ impl FileManagerApp {
             listing_error: 0,
             entries: [RuntimeFileEntry::EMPTY; MAX_PARSED_ENTRIES],
             entry_count: 0,
+            selected_document: SelectedDocument::EMPTY,
+            has_selected_document: false,
+            index_error: 0,
         }
     }
 
@@ -468,6 +506,72 @@ fn append(buf: &mut [u8], n: usize, bytes: &[u8]) -> usize {
     let take = bytes.len().min(buf.len().saturating_sub(n));
     buf[n..n + take].copy_from_slice(&bytes[..take]);
     n + take
+}
+
+/// Hands the selected document to the package that declared a handler for
+/// its media type.
+///
+/// WHY the platform resolves the handler and not this app: the registry is
+/// built from the installed packages' signed manifests, so the answer to
+/// "who opens this" is a property of the device. An app that kept its own
+/// table would be able to hand a file to a program that never asked for it.
+///
+/// WHY a refusal names nothing: when no package declared a handler for the
+/// media type the platform has no answer, and this app must not offer a
+/// substitute.
+fn open_with_handler(app: &FileManagerApp) -> bool {
+    let document = &app.selected_document;
+    if !document.has_handler() {
+        std::log("[FILE_MANAGER] No app handles this file.").ok();
+        return false;
+    }
+    match std::content::intent_dispatch(
+        std::content::IntentKind::Mime,
+        document.mime_str(),
+        document.path_str(),
+    ) {
+        Ok(_) => {
+            std::log("[FILE_MANAGER] The document was dispatched to its handler.").ok();
+            true
+        }
+        Err(_) => {
+            std::log("[FILE_MANAGER] The document's handler could not be launched.").ok();
+            false
+        }
+    }
+}
+
+/// Asks the platform to fill the slot the document's media type allows.
+///
+/// WHY the action is dispatched and not written here: the wallpaper and the
+/// ringtone are device slots, and the package that owns a slot is the one
+/// that fills it. Dispatching the action reaches that package with the
+/// document in hand.
+fn set_as_action(app: &FileManagerApp) -> bool {
+    let document = &app.selected_document;
+    let mime = document.mime_str();
+    let action = if mime.starts_with("image/") {
+        std::content::ACTION_SET_WALLPAPER
+    } else if mime.starts_with("audio/") {
+        std::content::ACTION_SET_RINGTONE
+    } else {
+        std::log("[FILE_MANAGER] This document cannot become a wallpaper or a ringtone.").ok();
+        return false;
+    };
+    match std::content::intent_dispatch(
+        std::content::IntentKind::Action,
+        action,
+        document.path_str(),
+    ) {
+        Ok(_) => {
+            std::log("[FILE_MANAGER] The document was dispatched to the slot's owner.").ok();
+            true
+        }
+        Err(_) => {
+            std::log("[FILE_MANAGER] No app handles this action.").ok();
+            false
+        }
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -727,7 +831,108 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
         return row_bg;
     }
 
-    // 3. VFS Directory Explorer Section (y: 840..1380)
+    // 3. The selected document's actions (y: 560..840)
+    //
+    // WHY this panel is only drawn when a document is selected: an empty
+    // panel that says "nothing is selected" is noise, and a panel that
+    // appeared with content the user did not choose would be a lie.
+    //
+    // WHY the panel states the type's provenance: the platform's index says
+    // whether it read the media type from the document's own bytes or from
+    // its name, and a screen that hid that would make a guess look like a
+    // fact.
+    if app.has_selected_document && (ACTIONS_Y0..ACTIONS_Y1).contains(&y) && x >= ACTIONS_X0 && x < ACTIONS_X1 {
+        let document = &app.selected_document;
+        let panel_bg = THEME.surface_container;
+        if y == ACTIONS_Y0 || y == ACTIONS_Y1 - 1 {
+            return THEME.border;
+        }
+        // The document's name.
+        let name = document.path_str();
+        let name_bytes = name.as_bytes();
+        let name_len = name_bytes.len().min(48);
+        if let Some(c) = test_text(
+            x,
+            y,
+            ACTIONS_X0 + 16,
+            ACTIONS_Y0 + 20,
+            2,
+            &name_bytes[..name_len],
+            THEME.on_surface,
+            panel_bg,
+        ) {
+            return c;
+        }
+        // The type the platform holds, and where that type came from.
+        let mut type_line = [0u8; 96];
+        let mut type_len = append(&mut type_line, 0, b"Type: ");
+        type_len = append(&mut type_line, type_len, &document.mime[..document.mime_len]);
+        type_len = append(&mut type_line, type_len, b" (");
+        type_len = append(&mut type_line, type_len, &document.provenance[..document.provenance_len]);
+        type_len = append(&mut type_line, type_len, b")");
+        if let Some(c) = test_text(
+            x,
+            y,
+            ACTIONS_X0 + 16,
+            ACTIONS_Y0 + 68,
+            1,
+            &type_line[..type_len],
+            THEME.on_surface_variant,
+            panel_bg,
+        ) {
+            return c;
+        }
+        // The handlers the registry names for this media type.
+        let mut open_line = [0u8; 96];
+        let mut open_len = append(&mut open_line, 0, b"Open with: ");
+        if document.has_handler() {
+            for (index, handler) in document.handlers[..document.handler_count].iter().enumerate() {
+                if index > 0 {
+                    open_len = append(&mut open_line, open_len, b", ");
+                }
+                open_len = append(&mut open_line, open_len, &handler.package_id[..handler.package_id_len]);
+                if open_len + 24 >= open_line.len() {
+                    break;
+                }
+            }
+        } else {
+            // WHY nothing is named here: no package declared a handler for
+            // this media type, so the platform has no answer to give and
+            // naming a program that cannot open the file would be a guess.
+            open_len = append(&mut open_line, open_len, b"no app handles this file");
+        }
+        if let Some(c) = test_text(
+            x,
+            y,
+            ACTIONS_X0 + 16,
+            ACTION_OPEN_Y0,
+            1,
+            &open_line[..open_len],
+            if document.has_handler() { THEME.on_surface } else { THEME.warning },
+            panel_bg,
+        ) {
+            return c;
+        }
+        // The action the media type allows.
+        let action = action_for_mime(document.mime_str());
+        if !action.is_empty() {
+            if let Some(c) = test_text(
+                x,
+                y,
+                ACTIONS_X0 + 16,
+                ACTION_SET_Y0,
+                1,
+                action,
+                THEME.primary,
+                panel_bg,
+            ) {
+                return c;
+            }
+        }
+        return panel_bg;
+    }
+
+    // 4. VFS Directory Explorer Section (y: 840..1380)
     if (840..1380).contains(&y) {
         // Section Header: "Directory Explorer" at y: 842, path at y: 842
         if (840..880).contains(&y) {
@@ -1173,6 +1378,30 @@ fn handle_tap(app: &mut FileManagerApp, x: usize, y: usize) -> Tap {
         );
     }
 
+    // The selected document's actions.
+    //
+    // WHY the actions are here and not on the file row: a row that both
+    // selects a file and launches a program gives the user no way to see who
+    // would open the file, and no way to ask for a different action on it.
+    // The panel names the handlers the platform's registry holds, and the
+    // user picks from what is actually there.
+    if app.has_selected_document
+        && (ACTIONS_Y0..ACTIONS_Y1).contains(&y)
+        && (ACTIONS_X0..ACTIONS_X1).contains(&x)
+    {
+        if (ACTION_OPEN_Y0..ACTION_OPEN_Y1).contains(&y) {
+            if open_with_handler(app) {
+                return Tap::Redraw(Dirty::All);
+            }
+            return Tap::Redraw(Dirty::All);
+        }
+        if (ACTION_SET_Y0..ACTION_SET_Y1).contains(&y) {
+            set_as_action(app);
+            return Tap::Redraw(Dirty::All);
+        }
+        return Tap::None;
+    }
+
     // Category rows are drawn as a vertical list (y ROW_BAND_Y0..ROW_BAND_Y1,
     // x 36..684; rows of 90px, Internal Storage 110px).
     // WHY row-shaped hit test: the previous horizontal band logged a filter
@@ -1219,37 +1448,38 @@ fn handle_tap(app: &mut FileManagerApp, x: usize, y: usize) -> Tap {
                 return Tap::Redraw(Dirty::All);
             }
             app.selected_entry = Some(entry_idx);
-            let mime = detect_mime(&entry.name[..entry.name_len], entry.is_dir);
-            if matches!(mime, FileMime::Image | FileMime::Video | FileMime::Audio | FileMime::Document) {
-                let mut path_buf = [0u8; 128];
-                let cp = &app.current_path[..app.current_path_len];
-                let mut n = append(&mut path_buf, 0, cp);
-                if !cp.ends_with(b"/") {
-                    n = append(&mut path_buf, n, b"/");
-                }
-                n = append(&mut path_buf, n, &entry.name[..entry.name_len]);
-                if let Ok(full_path) = core::str::from_utf8(&path_buf[..n]) {
-                    // WHY the chosen file is published: the viewer is a
-                    // separate task, and this is the only way it learns
-                    // which file the user picked.
-                    let _ = std::settings_set("intent.view.file", full_path.as_bytes());
-                    let mut app_id_buf = [0u8; 64];
-                    let an = get_app_for_mime(mime, &mut app_id_buf);
-                    if let Ok(app_id) = core::str::from_utf8(&app_id_buf[..an]) {
-                        // WHY the launch result is reported: the old code
-                        // announced the launch before making it and threw
-                        // the answer away, so a refused launch was logged
-                        // as a launch that had happened.
-                        match std::app_launch(app_id) {
-                            Ok(_) => {
-                                std::log("[FILE_MANAGER] Launched the associated media viewer.").ok();
-                            }
-                            Err(code) => {
-                                std::log("[FILE_MANAGER] The associated media viewer could not be launched.")
-                                    .ok();
-                                let _ = code;
-                            }
+            let mut path_buf = [0u8; 128];
+            let cp = &app.current_path[..app.current_path_len];
+            let mut n = append(&mut path_buf, 0, cp);
+            if !cp.ends_with(b"/") {
+                n = append(&mut path_buf, n, b"/");
+            }
+            n = append(&mut path_buf, n, &entry.name[..entry.name_len]);
+            if let Ok(full_path) = core::str::from_utf8(&path_buf[..n]) {
+                // WHY the index is asked and not the listing: the index is
+                // where the platform holds the media type of a document and
+                // the identity of it, and a file without a media type cannot
+                // be handed to the program that declared a handler for it.
+                match document_from_index(full_path) {
+                    Some(document) => {
+                        app.selected_document = document;
+                        app.has_selected_document = true;
+                        app.index_error = 0;
+                        // WHY the handler list is named and not guessed: the
+                        // registry holds what the installed packages
+                        // declared, and a file with no handler has no answer
+                        // to give.
+                        if app.selected_document.has_handler() {
+                            std::log("[FILE_MANAGER] Document selected. The platform's registry names its handlers.")
+                                .ok();
+                        } else {
+                            std::log("[FILE_MANAGER] Document selected. No app handles this file.").ok();
                         }
+                    }
+                    None => {
+                        app.has_selected_document = false;
+                        app.index_error = std::content::ERR_NO_HANDLER;
+                        std::log("[FILE_MANAGER] The platform's index does not hold this document.").ok();
                     }
                 }
             } else {

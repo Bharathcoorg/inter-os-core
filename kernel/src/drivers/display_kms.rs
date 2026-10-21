@@ -203,6 +203,15 @@ pub struct DrmSurface {
     /// in-progress multi-chunk surface writes), `composite()` skips blending this surface
     /// to prevent tearing.
     pub frame_ready: bool,
+    /// Whether the owning client has ever written a pixel into this surface.
+    ///
+    /// WHY this is separate from `frame_ready`: `frame_ready` says a commit is
+    /// not in flight, and it is true for a surface nobody has drawn on. A
+    /// preview of such a surface would be the allocator's fill colour, which
+    /// is a picture of nothing. The capture path refuses a surface that has
+    /// never been written, so the task switcher can say "this app has not
+    /// drawn anything yet" instead of showing a black rectangle.
+    pub has_frame: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -254,6 +263,7 @@ impl DrmSurface {
             dirty_rows: (0, 0),
             owner_task,
             frame_ready: true,
+            has_frame: false,
         }
     }
 
@@ -281,6 +291,7 @@ impl DrmSurface {
         self.pixels.copy_from_slice(src);
         self.mark_dirty_rows(0, self.height as usize);
         self.frame_ready = true;
+        self.has_frame = true;
         Ok(())
     }
 }
@@ -500,6 +511,7 @@ impl DrmKmsController {
         if end > surface.pixels.len() { return Err("surface write out of bounds"); }
         surface.pixels[offset..end].copy_from_slice(src);
         surface.dirty = true;
+        surface.has_frame = true;
         if end == surface.pixels.len() {
             surface.frame_ready = true;
         } else if offset == 0 {

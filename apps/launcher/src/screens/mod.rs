@@ -12,6 +12,7 @@
 pub mod boot;
 pub mod activity;
 pub mod app_drawer;
+pub mod draw;
 pub mod home;
 pub mod live_widgets;
 pub mod lock;
@@ -20,7 +21,7 @@ pub mod pin;
 pub mod power;
 pub mod power_transition;
 pub mod quick_controls;
-pub mod system_space;
+pub mod search;
 
 pub use activity::get_activity_color;
 pub use app_drawer::get_app_drawer_color;
@@ -38,4 +39,3 @@ pub use notifications::get_notifications_color;
 pub use pin::get_pin_color;
 pub use power::get_power_menu_color;
 pub use quick_controls::get_quick_controls_color;
-pub use system_space::get_system_space_color;

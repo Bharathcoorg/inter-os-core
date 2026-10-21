@@ -8,16 +8,22 @@ use ed25519_dalek::{Signature, VerifyingKey};
 use crate::crypto::{Sha256, SHA256_DIGEST_LENGTH};
 use crate::package::revocation::REVOCATION_REGISTRY;
 use crate::package::dependency::{Dependency, PackagePolicy, PackageVersion, VersionRequirement};
+use crate::content::intent::{IntentDeclaration, IntentKind};
 
 pub const RAPP_MAGIC: &[u8; 4] = b"RAPP";
 pub const RAPP_FORMAT_VERSION: u16 = 2;
 pub const RAPP_FORMAT_VERSION_V3: u16 = 3;
+pub const RAPP_FORMAT_VERSION_V4: u16 = 4;
 pub const RAPP_HEADER_SIZE: usize = 0xB4;
 pub const RAPP_V3_HEADER_SIZE: usize = 0xB8;
 pub const RAPP_MAX_DEPENDENCIES: usize = 32;
 pub const RAPP_MAX_PACKAGE_ID_LEN: usize = 32;
 pub const RAPP_SIGNATURE_OFFSET: usize = 0x70;
 pub const RAPP_SIGNATURE_SIZE: usize = 64;
+/// The largest number of intent declarations one package may carry.
+pub const RAPP_MAX_INTENTS: usize = 64;
+/// The largest length of one intent's value.
+pub const RAPP_MAX_INTENT_VALUE_LEN: usize = 96;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
@@ -29,7 +35,8 @@ pub enum RappError {
     BufferTooShort, InvalidMagic, UnsupportedVersion, UnsupportedArch,
     InvalidPackageId, InvalidPublisherKey, DigestMismatch, SignatureInvalid,
     PublisherUntrusted, PublisherRevoked, PackageRevoked, PayloadOverflow, UnknownCapability,
-    TooManyCapabilities, InvalidPayload, InvalidDependency, TooManyDependencies,
+    TooManyCapabilities, InvalidPayload, InvalidDependency, TooManyDependencies, TooManyIntents,
+    InvalidIntent,
 }
 
 #[derive(Debug, Clone)]
@@ -46,6 +53,12 @@ pub struct RappManifest {
     pub payload_len:usize,
     pub policy: PackagePolicy,
     pub dependencies:Vec<Dependency>,
+    /// What this package declares it can handle.
+    ///
+    /// WHY the declarations travel in the signed manifest: "this package
+    /// handles image/png" is a claim the device acts on, and a claim that
+    /// could be edited after signing would be no claim at all.
+    pub intents: Vec<IntentDeclaration>,
 }
 
 fn fixed_utf8(data:&[u8])->Result<String,RappError>{
@@ -104,12 +117,88 @@ pub fn verify_rapp_signature(data:&[u8], publisher_key:&[u8;32], signature:&[u8;
     key.verify_strict(&msg,&sig).map_err(|_|RappError::SignatureInvalid)
 }
 
+/// Parses the RAPP v3 dependency table.
+///
+/// WHY the table is parsed from a slice and not from the whole package: the
+/// v4 format carries the dependency table and the intent table in one signed
+/// section, and both are read the same way.
+fn parse_dependency_table(section:&[u8])->Result<Vec<Dependency>,RappError>{
+    if section.len()<2{return Err(RappError::InvalidDependency)}
+    let dep_count=u16::from_le_bytes([section[0],section[1]]) as usize;
+    if dep_count>RAPP_MAX_DEPENDENCIES{return Err(RappError::TooManyDependencies)}
+    let mut cursor=2usize;
+    let mut dependencies=Vec::with_capacity(dep_count);
+    for _ in 0..dep_count {
+        if cursor>=section.len(){return Err(RappError::InvalidDependency)}
+        let id_len=section[cursor] as usize; cursor+=1;
+        if id_len==0 || id_len>RAPP_MAX_PACKAGE_ID_LEN || cursor.checked_add(id_len+7).ok_or(RappError::InvalidDependency)?>section.len() {
+            return Err(RappError::InvalidDependency);
+        }
+        let package_id=core::str::from_utf8(&section[cursor..cursor+id_len]).map_err(|_|RappError::InvalidDependency)?.to_string();
+        cursor+=id_len;
+        let kind=section[cursor]; cursor+=1;
+        let major=u16::from_le_bytes([section[cursor],section[cursor+1]]);
+        let minor=u16::from_le_bytes([section[cursor+2],section[cursor+3]]);
+        let patch=u16::from_le_bytes([section[cursor+4],section[cursor+5]]);
+        cursor+=6;
+        let requirement=match kind {
+            0=>VersionRequirement::Exact(PackageVersion::new(major,minor,patch)),
+            1=>VersionRequirement::Minimum(PackageVersion::new(major,minor,patch)),
+            2=>VersionRequirement::Major(major),
+            _=>return Err(RappError::InvalidDependency),
+        };
+        dependencies.push(Dependency{package_id,requirement});
+    }
+    if cursor!=section.len(){return Err(RappError::InvalidDependency)}
+    Ok(dependencies)
+}
+
+/// Parses the RAPP v4 intent table.
+///
+/// WHY the kind is a byte and not a string: the table is inside a signed
+/// binary structure, and a fixed-width kind keeps the parser total -- an
+/// unknown kind is a refusal rather than a guess.
+fn parse_intent_table(section:&[u8])->Result<Vec<IntentDeclaration>,RappError>{
+    if section.len()<2{return Err(RappError::InvalidIntent)}
+    let count=u16::from_le_bytes([section[0],section[1]]) as usize;
+    if count>RAPP_MAX_INTENTS{return Err(RappError::TooManyIntents)}
+    let mut cursor=2usize;
+    let mut intents=Vec::with_capacity(count);
+    for _ in 0..count {
+        if cursor+2>section.len(){return Err(RappError::InvalidIntent)}
+        let kind=IntentKind::from_raw(section[cursor] as u64).ok_or(RappError::InvalidIntent)?;
+        cursor+=1;
+        let value_len=section[cursor] as usize; cursor+=1;
+        if value_len==0 || value_len>RAPP_MAX_INTENT_VALUE_LEN || cursor.checked_add(value_len).ok_or(RappError::InvalidIntent)?>section.len() {
+            return Err(RappError::InvalidIntent);
+        }
+        let value=core::str::from_utf8(&section[cursor..cursor+value_len]).map_err(|_|RappError::InvalidIntent)?.to_string();
+        cursor+=value_len;
+        intents.push(IntentDeclaration{kind,value});
+    }
+    if cursor!=section.len(){return Err(RappError::InvalidIntent)}
+    Ok(intents)
+}
+
+/// Parses the RAPP v4 signed section: a dependency table and an intent table.
+fn parse_v4_section(section:&[u8])->Result<(Vec<Dependency>,Vec<IntentDeclaration>),RappError>{
+    if section.len()<8{return Err(RappError::InvalidDependency)}
+    let dep_len=u32::from_le_bytes([section[0],section[1],section[2],section[3]]) as usize;
+    let intent_len=u32::from_le_bytes([section[4],section[5],section[6],section[7]]) as usize;
+    let dep_end=8usize.checked_add(dep_len).ok_or(RappError::PayloadOverflow)?;
+    let intent_end=dep_end.checked_add(intent_len).ok_or(RappError::PayloadOverflow)?;
+    if intent_end!=section.len(){return Err(RappError::PayloadOverflow)}
+    let dependencies=parse_dependency_table(&section[8..dep_end])?;
+    let intents=parse_intent_table(&section[dep_end..intent_end])?;
+    Ok((dependencies,intents))
+}
+
 pub fn parse_rapp(data:&[u8])->Result<RappManifest,RappError>{
     if data.len()<RAPP_HEADER_SIZE{return Err(RappError::BufferTooShort)}
     if &data[..4]!=RAPP_MAGIC{return Err(RappError::InvalidMagic)}
     let format_version=u16::from_le_bytes([data[4],data[5]]);
-    if format_version!=RAPP_FORMAT_VERSION && format_version!=RAPP_FORMAT_VERSION_V3{return Err(RappError::UnsupportedVersion)}
-    let header_end=if format_version==RAPP_FORMAT_VERSION_V3{RAPP_V3_HEADER_SIZE}else{RAPP_HEADER_SIZE};
+    if format_version!=RAPP_FORMAT_VERSION && format_version!=RAPP_FORMAT_VERSION_V3 && format_version!=RAPP_FORMAT_VERSION_V4{return Err(RappError::UnsupportedVersion)}
+    let header_end=if format_version==RAPP_FORMAT_VERSION{RAPP_HEADER_SIZE}else{RAPP_V3_HEADER_SIZE};
     if data.len()<header_end{return Err(RappError::BufferTooShort)}
     let arch=RappArch::from_u16(u16::from_le_bytes([data[6],data[7]])).ok_or(RappError::UnsupportedArch)?;
     let package_id=fixed_utf8(&data[8..40])?;
@@ -122,55 +211,36 @@ pub fn parse_rapp(data:&[u8])->Result<RappManifest,RappError>{
     let mut digest=[0u8;32]; digest.copy_from_slice(&data[0x50..0x70]);
     let mut signature=[0u8;64]; signature.copy_from_slice(&data[0x70..0xB0]);
     let payload_len=u32::from_le_bytes([data[0xB0],data[0xB1],data[0xB2],data[0xB3]]) as usize;
-    let dependency_len=if format_version==RAPP_FORMAT_VERSION_V3 {
+    // WHY v2 has no section and v3's section is the dependency table: the
+    // field at 0xB4 means "the length of the signed section that follows the
+    // capability table", and in v3 that section happens to be only the
+    // dependency table. In v4 it carries the intent table as well.
+    let section_len=if format_version==RAPP_FORMAT_VERSION { 0 } else {
         u32::from_le_bytes([data[0xB4],data[0xB5],data[0xB6],data[0xB7]]) as usize
-    } else { 0 };
+    };
     let caps_end=header_end.checked_add(cap_count.checked_mul(2).ok_or(RappError::PayloadOverflow)?).ok_or(RappError::PayloadOverflow)?;
     if data.len()<caps_end{return Err(RappError::BufferTooShort)}
     let mut capabilities=Vec::with_capacity(cap_count);
     for i in 0..cap_count{
         let o=header_end+i*2;
         let cap=u16::from_le_bytes([data[o],data[o+1]]);
-        if !(1..=24).contains(&cap) {
+        if !(1..=27).contains(&cap) {
             return Err(RappError::UnknownCapability);
         }
         capabilities.push(cap);
     }
-    let dependency_start=caps_end;
-    let dependency_end=dependency_start.checked_add(dependency_len).ok_or(RappError::PayloadOverflow)?;
-    if data.len()<dependency_end{return Err(RappError::PayloadOverflow)}
-    let mut dependencies=Vec::new();
-    if format_version==RAPP_FORMAT_VERSION_V3 {
-        if dependency_len<2{return Err(RappError::InvalidDependency)}
-        let dep_count=u16::from_le_bytes([data[dependency_start],data[dependency_start+1]]) as usize;
-        if dep_count>RAPP_MAX_DEPENDENCIES{return Err(RappError::TooManyDependencies)}
-        let mut cursor=dependency_start+2;
-        for _ in 0..dep_count {
-            if cursor>=dependency_end{return Err(RappError::InvalidDependency)}
-            let id_len=data[cursor] as usize; cursor+=1;
-            if id_len==0 || id_len>RAPP_MAX_PACKAGE_ID_LEN || cursor.checked_add(id_len+7).ok_or(RappError::InvalidDependency)?>dependency_end {
-                return Err(RappError::InvalidDependency);
-            }
-            let package_id=core::str::from_utf8(&data[cursor..cursor+id_len]).map_err(|_|RappError::InvalidDependency)?.to_string();
-            cursor+=id_len;
-            let kind=data[cursor]; cursor+=1;
-            let major=u16::from_le_bytes([data[cursor],data[cursor+1]]);
-            let minor=u16::from_le_bytes([data[cursor+2],data[cursor+3]]);
-            let patch=u16::from_le_bytes([data[cursor+4],data[cursor+5]]);
-            cursor+=6;
-            let requirement=match kind {
-                0=>VersionRequirement::Exact(PackageVersion::new(major,minor,patch)),
-                1=>VersionRequirement::Minimum(PackageVersion::new(major,minor,patch)),
-                2=>VersionRequirement::Major(major),
-                _=>return Err(RappError::InvalidDependency),
-            };
-            dependencies.push(Dependency{package_id,requirement});
+    let section_start=caps_end;
+    let section_end=section_start.checked_add(section_len).ok_or(RappError::PayloadOverflow)?;
+    if data.len()<section_end{return Err(RappError::PayloadOverflow)}
+    let (dependencies,intents)=match format_version {
+        RAPP_FORMAT_VERSION_V4 => parse_v4_section(&data[section_start..section_end])?,
+        RAPP_FORMAT_VERSION_V3 => (parse_dependency_table(&data[section_start..section_end])?, Vec::new()),
+        _ => {
+            if section_len!=0 { return Err(RappError::InvalidDependency); }
+            (Vec::new(), Vec::new())
         }
-        if cursor!=dependency_end{return Err(RappError::InvalidDependency)}
-    } else if dependency_len!=0 {
-        return Err(RappError::InvalidDependency);
-    }
-    let payload_offset=dependency_end;
+    };
+    let payload_offset=section_end;
     let payload_end=payload_offset.checked_add(payload_len).ok_or(RappError::PayloadOverflow)?;
     if data.len()<payload_end || data.len()!=payload_end{return Err(RappError::PayloadOverflow)}
     let computed=Sha256::digest(&data[payload_offset..payload_end]);
@@ -184,8 +254,9 @@ pub fn parse_rapp(data:&[u8])->Result<RappManifest,RappError>{
     let mut policy=PackagePolicy::from_rapp_capabilities(&capabilities);
     policy.dependencies=dependencies.clone();
     if !policy.validate(){return Err(RappError::InvalidDependency)}
-    Ok(RappManifest{format_version,package_id,publisher_key,version,arch,policy,dependencies,capabilities,payload_digest:digest,signature,payload_offset,payload_len})
+    Ok(RappManifest{format_version,package_id,publisher_key,version,arch,policy,dependencies,intents,capabilities,payload_digest:digest,signature,payload_offset,payload_len})
 }
+
 
 
 /// Encodes a RAPP v3 package with signed dependency metadata.
@@ -225,6 +296,63 @@ pub fn build_rapp_v3(
     for &cap in capabilities{b.extend_from_slice(&cap.to_le_bytes())}
     b.extend_from_slice(&dep); b.extend_from_slice(elf_payload); b
 }
+/// Encodes a RAPP v4 package with signed dependency and intent metadata.
+///
+/// WHY v4 exists rather than an extension of v3: the intent table is a
+/// different kind of declaration from a dependency, and a package that
+/// declares no intents must still be describable. v4 keeps the v3 header
+/// layout, adds the intent table to the signed section, and leaves every
+/// earlier format byte-for-byte unchanged.
+pub fn build_rapp_v4(
+    package_id:&str,
+    publisher_key:&[u8;32],
+    version:(u16,u16,u16),
+    arch:RappArch,
+    capabilities:&[u16],
+    dependencies:&[Dependency],
+    intents:&[IntentDeclaration],
+    elf_payload:&[u8],
+    signature:&[u8;64],
+)->Vec<u8>{
+    let digest=Sha256::digest(elf_payload);
+    let mut dep=Vec::new();
+    dep.extend_from_slice(&(dependencies.len() as u16).to_le_bytes());
+    for d in dependencies {
+        let id=d.package_id.as_bytes();
+        let n=id.len().min(RAPP_MAX_PACKAGE_ID_LEN);
+        dep.push(n as u8);
+        dep.extend_from_slice(&id[..n]);
+        match d.requirement {
+            VersionRequirement::Exact(v)=>{dep.push(0);dep.extend_from_slice(&v.major.to_le_bytes());dep.extend_from_slice(&v.minor.to_le_bytes());dep.extend_from_slice(&v.patch.to_le_bytes());}
+            VersionRequirement::Minimum(v)=>{dep.push(1);dep.extend_from_slice(&v.major.to_le_bytes());dep.extend_from_slice(&v.minor.to_le_bytes());dep.extend_from_slice(&v.patch.to_le_bytes());}
+            VersionRequirement::Major(v)=>{dep.push(2);dep.extend_from_slice(&v.to_le_bytes());dep.extend_from_slice(&0u16.to_le_bytes());dep.extend_from_slice(&0u16.to_le_bytes());}
+        }
+    }
+    let mut intent=Vec::new();
+    intent.extend_from_slice(&(intents.len() as u16).to_le_bytes());
+    for i in intents {
+        let value=i.value.as_bytes();
+        let n=value.len().min(RAPP_MAX_INTENT_VALUE_LEN);
+        intent.push(i.kind.as_raw() as u8);
+        intent.push(n as u8);
+        intent.extend_from_slice(&value[..n]);
+    }
+    let mut section=Vec::with_capacity(8+dep.len()+intent.len());
+    section.extend_from_slice(&(dep.len() as u32).to_le_bytes());
+    section.extend_from_slice(&(intent.len() as u32).to_le_bytes());
+    section.extend_from_slice(&dep);
+    section.extend_from_slice(&intent);
+
+    let header_end=RAPP_V3_HEADER_SIZE;
+    let mut b=Vec::with_capacity(header_end+capabilities.len()*2+section.len()+elf_payload.len());
+    b.extend_from_slice(RAPP_MAGIC); b.extend_from_slice(&RAPP_FORMAT_VERSION_V4.to_le_bytes()); b.extend_from_slice(&(arch as u16).to_le_bytes());
+    let mut pkg=[0u8;32]; let n=package_id.as_bytes().len().min(32); pkg[..n].copy_from_slice(&package_id.as_bytes()[..n]); b.extend_from_slice(&pkg);
+    b.extend_from_slice(publisher_key); b.extend_from_slice(&version.0.to_le_bytes()); b.extend_from_slice(&version.1.to_le_bytes()); b.extend_from_slice(&version.2.to_le_bytes()); b.extend_from_slice(&(capabilities.len() as u16).to_le_bytes());
+    b.extend_from_slice(&digest); b.extend_from_slice(signature); b.extend_from_slice(&(elf_payload.len() as u32).to_le_bytes()); b.extend_from_slice(&(section.len() as u32).to_le_bytes());
+    for &cap in capabilities{b.extend_from_slice(&cap.to_le_bytes())}
+    b.extend_from_slice(&section); b.extend_from_slice(elf_payload); b
+}
+
 /// Encodes a RAPP v2 package. The caller must supply a real Ed25519 signature
 /// over the canonical message; zero signatures are intentionally rejected by parse_rapp.
 pub fn build_rapp(package_id:&str,publisher_key:&[u8;32],version:(u16,u16,u16),arch:RappArch,capabilities:&[u16],elf_payload:&[u8],signature:&[u8;64])->Vec<u8>{
@@ -288,12 +416,16 @@ mod tests {
     }
 
     #[test]
-    fn parse_rapp_accepts_all_capabilities_1_through_24() {
-        let all_caps: alloc::vec::Vec<u16> = (1..=24).collect();
+    fn parse_rapp_accepts_all_capabilities_1_through_27() {
+        // WHY 27 and not 24: the content layer added 25 (ContentIndexRead) and
+        // 26 (ContentIntentDispatch), and the surface capture capability took
+        // 27. The table is the ABI, and a package that asks for a capability
+        // the kernel has must be installable.
+        let all_caps: alloc::vec::Vec<u16> = (1..=27).collect();
         let (pkg, pub_key, _) = create_signed_test_package(&all_caps, 20);
         REVOCATION_REGISTRY.lock().grant_trust_root(pub_key, "all_caps_test").unwrap();
 
-        let manifest = parse_rapp(&pkg).expect("package requesting IDs 1..=24 must parse");
+        let manifest = parse_rapp(&pkg).expect("package requesting IDs 1..=27 must parse");
         assert_eq!(manifest.capabilities, all_caps);
     }
 
@@ -304,10 +436,82 @@ mod tests {
         REVOCATION_REGISTRY.lock().grant_trust_root(pub0, "cap_zero").unwrap();
         assert_eq!(parse_rapp(&pkg0).unwrap_err(), RappError::UnknownCapability);
 
-        // Negative test: 25 is rejected
-        let (pkg25, pub25, _) = create_signed_test_package(&[25], 22);
-        REVOCATION_REGISTRY.lock().grant_trust_root(pub25, "cap_25").unwrap();
-        assert_eq!(parse_rapp(&pkg25).unwrap_err(), RappError::UnknownCapability);
+        // Negative test: 28 is the first identifier above the table
+        let (pkg28, pub28, _) = create_signed_test_package(&[28], 22);
+        REVOCATION_REGISTRY.lock().grant_trust_root(pub28, "cap_28").unwrap();
+        assert_eq!(parse_rapp(&pkg28).unwrap_err(), RappError::UnknownCapability);
+    }
+
+    #[test]
+    fn a_v4_package_carries_its_declared_handlers() {
+        // WHY a package that declares a handler can be installed: the
+        // declaration is part of the signed manifest, so the registry can be
+        // built from what was installed rather than from what an app says.
+        let signing_key = SigningKey::from_bytes(&[31; 32]);
+        let pub_key = signing_key.verifying_key().to_bytes();
+        let payload = b"\x7fELF_USER_BINARY_SAMPLE";
+        let declarations = [
+            IntentDeclaration::new(IntentKind::Mime, "image/png"),
+            IntentDeclaration::new(IntentKind::Action, "org.interos.action.set_wallpaper"),
+        ];
+        let mut pkg = build_rapp_v4(
+            "org.interos.gallery",
+            &pub_key,
+            (1, 0, 0),
+            RappArch::X86_64,
+            &[1, 25, 26],
+            &[],
+            &declarations,
+            payload,
+            &[0u8; 64],
+        );
+        REVOCATION_REGISTRY.lock().grant_trust_root(pub_key, "v4_intent_test").unwrap();
+
+        // The signature covers the intent table, so the table is read out of
+        // the signed bytes and not out of a side channel.
+        let section_len = u32::from_le_bytes([pkg[0xB4], pkg[0xB5], pkg[0xB6], pkg[0xB7]]) as usize;
+        let section_start = RAPP_V3_HEADER_SIZE + 3 * 2;
+        let payload_offset = section_start + section_len;
+        let msg = signed_message(&pkg, payload_offset, payload.len());
+        let sig = signing_key.sign(&msg);
+        pkg[RAPP_SIGNATURE_OFFSET..RAPP_SIGNATURE_OFFSET + RAPP_SIGNATURE_SIZE]
+            .copy_from_slice(&sig.to_bytes());
+
+        let manifest = parse_rapp(&pkg).expect("a v4 package with declared handlers must parse");
+        assert_eq!(manifest.format_version, RAPP_FORMAT_VERSION_V4);
+        assert_eq!(manifest.intents.len(), 2);
+        assert_eq!(manifest.intents[0].kind, IntentKind::Mime);
+        assert_eq!(manifest.intents[0].value, "image/png");
+        assert_eq!(manifest.intents[1].kind, IntentKind::Action);
+        assert_eq!(manifest.intents[1].value, "org.interos.action.set_wallpaper");
+    }
+
+    #[test]
+    fn a_v4_package_with_no_declarations_still_parses() {
+        let signing_key = SigningKey::from_bytes(&[32; 32]);
+        let pub_key = signing_key.verifying_key().to_bytes();
+        let payload = b"\x7fELF_USER_BINARY_SAMPLE";
+        let mut pkg = build_rapp_v4(
+            "org.interos.plain",
+            &pub_key,
+            (1, 0, 0),
+            RappArch::X86_64,
+            &[1],
+            &[],
+            &[],
+            payload,
+            &[0u8; 64],
+        );
+        REVOCATION_REGISTRY.lock().grant_trust_root(pub_key, "v4_empty_test").unwrap();
+        let section_len = u32::from_le_bytes([pkg[0xB4], pkg[0xB5], pkg[0xB6], pkg[0xB7]]) as usize;
+        let payload_offset = RAPP_V3_HEADER_SIZE + 2 + section_len;
+        let msg = signed_message(&pkg, payload_offset, payload.len());
+        let sig = signing_key.sign(&msg);
+        pkg[RAPP_SIGNATURE_OFFSET..RAPP_SIGNATURE_OFFSET + RAPP_SIGNATURE_SIZE]
+            .copy_from_slice(&sig.to_bytes());
+
+        let manifest = parse_rapp(&pkg).expect("a v4 package with no handlers must parse");
+        assert!(manifest.intents.is_empty());
     }
 
     #[test]
@@ -370,7 +574,7 @@ mod tests {
 
         // Negative tests: unknown IDs fail closed
         assert!(crate::task::user::capabilities_from_rapp(&[0], 0).is_err());
-        assert!(crate::task::user::capabilities_from_rapp(&[25], 0).is_err());
+        assert!(crate::task::user::capabilities_from_rapp(&[28], 0).is_err());
         assert!(crate::task::user::capabilities_from_rapp(&[999], 0).is_err());
     }
 

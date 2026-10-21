@@ -54,46 +54,13 @@ static mut CHUNK_BUF: [u32; CHUNK] = [0; CHUNK];
 // -----------------------------------------------------------------------------
 
 /// The seven semantic System Space categories, in landing-grid order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Section {
-    Device = 0,
-    Network = 1,
-    Personal = 2,
-    Apps = 3,
-    Power = 4,
-    Security = 5,
-    System = 6,
-}
-
-impl Section {
-    pub const COUNT: usize = 7;
-
-    pub fn from_index(i: usize) -> Option<Section> {
-        match i {
-            0 => Some(Section::Device),
-            1 => Some(Section::Network),
-            2 => Some(Section::Personal),
-            3 => Some(Section::Apps),
-            4 => Some(Section::Power),
-            5 => Some(Section::Security),
-            6 => Some(Section::System),
-            _ => None,
-        }
-    }
-
-    /// Detail-screen header title. Static data; no allocation.
-    pub fn title(self) -> &'static [u8] {
-        match self {
-            Section::Device => b"Device",
-            Section::Network => b"Network",
-            Section::Personal => b"Personal",
-            Section::Apps => b"Apps & Storage",
-            Section::Power => b"Power & Battery",
-            Section::Security => b"Security & Privacy",
-            Section::System => b"About InterOS",
-        }
-    }
-}
+///
+/// WHY this is the platform's catalogue and not a copy of it: the Settings app
+/// renders these sections and the launcher's search offers them as
+/// destinations, and two lists would drift. Both read the one definition in
+/// the SDK, so a search result labelled "Network" opens the Network page this
+/// app actually has.
+use interos_std::settings::Section;
 
 /// Dynamic Device Vitality Orb visual states representing real-time system health.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1407,6 +1374,164 @@ impl SettingsApp {
             self.wallpaper_lock = Some(scene);
             self.wallpaper_pending = None;
         }
+    }
+
+    /// Takes the intent the platform dispatched to this app, if there is one.
+    ///
+    /// WHY this app is the one that fills these slots: the wallpaper and the
+    /// ringtone are device slots, and the package that owns a slot is the one
+    /// that writes it. The gallery and the file manager ask the platform to
+    /// dispatch the action; the platform finds this app because this app's
+    /// manifest declares the action, and hands the document over with it.
+    ///
+    /// WHY the intent is polled and not pushed: a dispatch may reach an app
+    /// that is already running, and the platform's answer has to be the same
+    /// whether the app was just launched or has been up for a while.
+    pub fn handle_pending_intent(&mut self) -> bool {
+        let mut buf = [0u8; 320];
+        let n = match std::content::intent_pending(&mut buf) {
+            Ok(n) => n,
+            Err(_) => return false,
+        };
+        if n == 0 {
+            return false;
+        }
+        let Some(pending) = std::content::parse_pending(&buf[..n]) else {
+            return false;
+        };
+        if pending.kind != std::content::IntentKind::Action {
+            return false;
+        }
+        if pending.value == std::content::ACTION_SET_WALLPAPER {
+            self.apply_wallpaper_intent(pending.payload, WallpaperTarget::Home);
+            return true;
+        }
+        if pending.value == std::content::ACTION_SET_LOCK_WALLPAPER {
+            self.apply_wallpaper_intent(pending.payload, WallpaperTarget::Lock);
+            return true;
+        }
+        if pending.value == std::content::ACTION_SET_RINGTONE {
+            self.apply_ringtone_intent(pending.payload);
+            return true;
+        }
+        std::log("[SETTINGS APP] An action was dispatched that this app does not own.").ok();
+        false
+    }
+
+    /// Opens the section the launcher asked for, if it asked for one.
+    ///
+    /// WHY this is checked on every pass and not only at startup: the platform
+    /// launches an app single-instance per parent, so a launch request for an
+    /// app that is already running returns the running task and the app never
+    /// restarts. A section asked for by a search result would then be ignored,
+    /// and the result would open the landing grid instead of the section its
+    /// label names -- a destination that opens something other than what it
+    /// says.
+    pub fn open_requested_section(&mut self) -> bool {
+        let Some(section) = read_section_intent() else {
+            return false;
+        };
+        self.current_section = Some(section);
+        true
+    }
+
+    /// Fills the wallpaper slot from a dispatched document.
+    ///
+    /// WHY the payload is looked up in the index first: the payload is either
+    /// a document the platform holds or a key from the wallpaper catalogue, and
+    /// the two are told apart by what the platform knows rather than by the
+    /// shape of the string.
+    pub fn apply_wallpaper_intent(&mut self, payload: &str, target: WallpaperTarget) {
+        let mut raw = [0u8; 2048];
+        let found = std::content::content_index_find_path(payload, &mut raw);
+        let is_document = match found {
+            Some(record) => {
+                // WHY a document that is not a picture is refused: the
+                // platform's decoders read still images, and a wallpaper is a
+                // still picture. Writing a slot the shell cannot paint would
+                // leave the user with a wallpaper that never appears.
+                if !record.mime.starts_with("image/") {
+                    std::log("[SETTINGS APP] The dispatched wallpaper is not an image the platform can paint; nothing was changed.")
+                        .ok();
+                    return;
+                }
+                true
+            }
+            None => false,
+        };
+        if is_document {
+            if target == WallpaperTarget::Home
+                && std::settings_set("ui.wallpaper.home.document", payload.as_bytes()).is_err()
+            {
+                std::log("[SETTINGS APP] The settings store refused the wallpaper document write; no wallpaper was changed.")
+                    .ok();
+                return;
+            }
+            if target != WallpaperTarget::Home
+                && std::settings_set("ui.wallpaper.lock.document", payload.as_bytes()).is_err()
+            {
+                std::log("[SETTINGS APP] The settings store refused the wallpaper document write; no wallpaper was changed.")
+                    .ok();
+                return;
+            }
+            self.wallpaper_write = WallpaperWrite::Applied(target);
+            std::log("[SETTINGS APP] Wallpaper document written to the settings store.").ok();
+            return;
+        }
+        // A catalogue key: the launcher resolves it back through the same
+        // catalogue, so a key that is not in the catalogue would make the
+        // shell report an unknown scene.
+        let Some(scene) = std::design::walls::SCENES
+            .iter()
+            .find(|scene| scene.key == payload.as_bytes())
+        else {
+            std::log("[SETTINGS APP] The dispatched wallpaper is neither a document the platform holds nor a wallpaper key; nothing was changed.")
+                .ok();
+            return;
+        };
+        if target == WallpaperTarget::Home
+            && std::settings_set("ui.wallpaper.home", scene.key).is_err()
+        {
+            std::log("[SETTINGS APP] The settings store refused the wallpaper write; no wallpaper was changed.")
+                .ok();
+            return;
+        }
+        if target != WallpaperTarget::Home
+            && std::settings_set("ui.wallpaper.lock", scene.key).is_err()
+        {
+            std::log("[SETTINGS APP] The settings store refused the wallpaper write; no wallpaper was changed.")
+                .ok();
+            return;
+        }
+        self.wallpaper_write = WallpaperWrite::Applied(target);
+        self.wallpaper_home = Some(scene);
+        self.wallpaper_lock = Some(scene);
+        std::log("[SETTINGS APP] Wallpaper written to the settings store.").ok();
+    }
+
+    /// Fills the ringtone slot from a dispatched document.
+    ///
+    /// WHY the document is checked before the slot is written: a ringtone slot
+    /// that names a file the platform does not hold would be a slot that
+    /// points at nothing.
+    pub fn apply_ringtone_intent(&mut self, payload: &str) {
+        let mut raw = [0u8; 2048];
+        let Some(record) = std::content::content_index_find_path(payload, &mut raw) else {
+            std::log("[SETTINGS APP] The dispatched ringtone is not a document the platform holds; nothing was changed.")
+                .ok();
+            return;
+        };
+        if !record.mime.starts_with("audio/") {
+            std::log("[SETTINGS APP] The dispatched ringtone is not an audio document; nothing was changed.")
+                .ok();
+            return;
+        }
+        if std::settings_set("audio.ringtone", payload.as_bytes()).is_err() {
+            std::log("[SETTINGS APP] The settings store refused the ringtone write; the ringtone was not changed.")
+                .ok();
+            return;
+        }
+        std::log("[SETTINGS APP] Ringtone written to the settings store.").ok();
     }
 
 }
@@ -5477,6 +5602,20 @@ fn handle_tap(
     }
 }
 
+/// Reads the settings section the launcher asked this app to open.
+///
+/// WHY the key is cleared afterwards: the intent describes one launch, not the
+/// app's state. Leaving it in the store would make the next manual launch of
+/// the Settings app open the last section somebody searched for.
+fn read_section_intent() -> Option<Section> {
+    let mut buf = [0u8; 48];
+    let n = std::settings_get("intent.view.settings", &mut buf).ok()?;
+    let text = core::str::from_utf8(&buf[..n]).ok()?;
+    let section = Section::from_title(text.trim().as_bytes())?;
+    let _ = std::settings_set("intent.view.settings", b"");
+    Some(section)
+}
+
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     std::log("[SETTINGS APP (Ring 3)] System Space (Sovereign Settings & Diagnostics) online.",
@@ -5499,6 +5638,19 @@ pub extern "C" fn _start() -> ! {
     };
 
     let mut settings = SettingsApp::new();
+
+    // 0. Open the section the launcher asked for, if it asked for one.
+    //
+    // WHY this read: the launcher's search offers the platform's settings
+    // surfaces as destinations, and a destination that opens the Settings
+    // app's landing grid instead of the section its label names is a
+    // destination that opens something other than what it says. The launcher
+    // writes the section into the settings store before it launches this app,
+    // and this is where the app picks it up.
+    if let Some(section) = read_section_intent() {
+        settings.current_section = Some(section);
+        std::log("[SETTINGS APP] Opened the section the launcher asked for.").ok();
+    }
 
     // 1. Inspect Wireless Configuration (Network detail)
     settings.refresh_wireless();
@@ -5535,6 +5687,29 @@ pub extern "C" fn _start() -> ! {
 
     // 6. Interactive Event Loop
     loop {
+        // WHY the intent is taken on every pass: a dispatch may reach this
+        // app while it is already running, and the slot it fills has to be
+        // filled the same way whether the app was just launched or has been
+        // up for a while.
+        if settings.handle_pending_intent() {
+            settings.refresh_wallpaper_values();
+            if surface > 0 {
+                render_settings_ui(surface, &settings);
+                let _ = std::surface_flip();
+            }
+        }
+        // A section the launcher's search asked for.
+        //
+        // WHY this is here and not only at startup: the platform launches an
+        // app single-instance per parent, so a search result that names a
+        // section would be ignored by an app that is already running, and the
+        // result would open the landing grid instead of the section it names.
+        if settings.open_requested_section() {
+            if surface > 0 {
+                render_settings_ui(surface, &settings);
+                let _ = std::surface_flip();
+            }
+        }
         let interest = std::EVENT_TOUCH_INPUT | std::EVENT_TIMER_TICK;
         if let Ok(triggered) = std::event_poll(interest, 100) {
             if (triggered & std::EVENT_TOUCH_INPUT) != 0 {

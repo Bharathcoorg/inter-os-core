@@ -1,0 +1,36 @@
+{
+  "id": "org.interos.gallery",
+  "name": "Gallery",
+  "version": "1.0.0",
+  "category": "media",
+  "description": "Native gallery for the photographs and videos the device holds, and for the wallpaper catalogue.",
+  "icon": "GALLERY",
+  "entrypoint": {
+    "backend": "bin/gallery.elf"
+  },
+  "permissions": [
+    "CAP_LOGGING",
+    "CAP_FRAMEBUFFER",
+    "CAP_EVENT_POLL",
+    "CAP_FILESYSTEM_READ",
+    "CAP_FILESYSTEM_WRITE",
+    "CAP_CONTENT_INDEX",
+    "CAP_CONTENT_INTENT"
+  ],
+  "intents": {
+    "mime": [
+      "image/png",
+      "image/jpeg",
+      "image/gif",
+      "image/bmp",
+      "image/webp",
+      "image/qoi",
+      "image/x-portable-pixmap",
+      "video/mp4",
+      "video/webm",
+      "video/quicktime",
+      "video/x-matroska"
+    ]
+  },
+  "min_sdk_version": "0.8.0"
+}

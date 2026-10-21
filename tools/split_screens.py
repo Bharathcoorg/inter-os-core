@@ -21,7 +21,6 @@ SCREENS = [
     ("get_home_color", "home.rs", "Home surface: launcher deck, dock and status card."),
     ("get_activity_color", "activity.rs", "Activity Space: the multitasking overview deck."),
     ("get_quick_controls_color", "quick_controls.rs", "Quick Controls shade: radios, sliders and toggles."),
-    ("get_system_space_color", "system_space.rs", "System Space: device and account settings."),
     ("get_lock_screen_color", "lock.rs", "Lock Screen: wallpaper, clock, controls and unlock affordances."),
     ("get_power_menu_color", "power.rs", "Power Menu: lock, restart and power off."),
     ("get_app_drawer_color", "app_drawer.rs", "App Drawer: the full catalogue grid."),

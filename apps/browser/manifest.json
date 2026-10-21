@@ -1,0 +1,29 @@
+{
+  "id": "org.interos.browser",
+  "name": "Browser",
+  "version": "1.0.0",
+  "category": "web",
+  "description": "Native browser for the web, with a download destination the rest of the device can see.",
+  "icon": "WEB",
+  "entrypoint": {
+    "backend": "bin/browser.elf"
+  },
+  "permissions": [
+    "CAP_LOGGING",
+    "CAP_FRAMEBUFFER",
+    "CAP_EVENT_POLL",
+    "CAP_FILESYSTEM_READ",
+    "CAP_FILESYSTEM_WRITE",
+    "CAP_NETWORK_SOCKET",
+    "CAP_NETWORK_SEND",
+    "CAP_NETWORK_RECEIVE",
+    "CAP_CONTENT_INDEX"
+  ],
+  "intents": {
+    "scheme": [
+      "http",
+      "https"
+    ]
+  },
+  "min_sdk_version": "0.8.0"
+}

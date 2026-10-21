@@ -1,0 +1,27 @@
+{
+  "id": "org.interos.settings",
+  "name": "Settings",
+  "version": "1.0.0",
+  "category": "system",
+  "description": "Native settings for the device's wallpaper, ringtone and other slots.",
+  "icon": "SET",
+  "entrypoint": {
+    "backend": "bin/settings.elf"
+  },
+  "permissions": [
+    "CAP_LOGGING",
+    "CAP_FRAMEBUFFER",
+    "CAP_EVENT_POLL",
+    "CAP_FILESYSTEM_READ",
+    "CAP_FILESYSTEM_WRITE",
+    "CAP_CONTENT_INDEX"
+  ],
+  "intents": {
+    "action": [
+      "org.interos.action.set_wallpaper",
+      "org.interos.action.set_lock_wallpaper",
+      "org.interos.action.set_ringtone"
+    ]
+  },
+  "min_sdk_version": "0.8.0"
+}

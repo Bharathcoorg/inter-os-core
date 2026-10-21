@@ -146,6 +146,98 @@ InterOS Core features a native smartphone UI architecture designed for bare-meta
 
 ---
 
+## 5a. The Content Layer: Document Index & Intent Registry
+
+Two questions about the whole device used to be answered inside the apps that
+were asking them. "What files does this device hold?" was answered by the
+gallery's own storage scan and again by the file manager's own directory
+listing, with two parsers and two notions of what a file is. "Which program
+opens this file?" was answered by a table inside the file manager, and by
+nothing at all in the gallery, the browser or the dialer.
+
+Both questions are now answered by one kernel subsystem, `kernel/src/content/`:
+
+```text
++-------------------------------------------------------------+
+| Document index (kernel/src/content/index.rs)                |
+| - one walk of the shared storage area (/storage)            |
+| - per document: stable id, path, byte length, media type,   |
+|   modification time, and the PROVENANCE of the media type   |
++-------------------------------------------------------------+
+| Media type detection (kernel/src/content/mime.rs)           |
+| - bytes first: PNG/JPEG/GIF/BMP/QOI/RIFF/ftyp/PDF/PPM/...   |
+| - the file's name only as a fallback                         |
+| - the record says which of the two produced the answer       |
++-------------------------------------------------------------+
+| Intent registry (kernel/src/content/intent.rs)               |
+| - (kind, value) -> package id, built from signed manifests  |
+| - a pending intent, visible only to the package it names    |
++-------------------------------------------------------------+
+```
+
+### Authority
+
+Both halves are reachable only through a capability, so "who may see the
+index" is answered by the capability table and not by a constant:
+
+| Capability | Identifier | Grants |
+| :--- | :--- | :--- |
+| `ContentIndexRead` | `25` | Read the index, and read the registry of declared handlers |
+| `ContentIntentDispatch` | `26` | Dispatch an intent to the package that declared a handler for it |
+
+`ContentIntentDispatch` is deliberately **not** `ProcessSpawn`: dispatching an
+intent is authority over one named relationship — "the package that declared
+this media type" — which the kernel resolves from the signed manifests.
+
+### The index reads through the filesystem's own policy
+
+The index describes the shared storage area, and the answer to a query is
+filtered through `Vfs::enforce_app_path` before a record is returned. The
+per-app path policy is unchanged: the index reads through it rather than
+keeping a second copy of the rules.
+
+### The system call surface
+
+| Syscall | Number | Purpose |
+| :--- | :--- | :--- |
+| `ContentIndexQuery` | `140` | List the index, search it by name, search it by media type, or look a document up by its identity |
+| `ContentIndexRefresh` | `141` | Force a fresh walk of the shared storage area |
+| `IntentResolve` | `142` | The package that handles a media type, scheme or action |
+| `IntentList` | `143` | Every handler the installed packages have declared |
+| `IntentDispatch` | `144` | Hand an intent (and its payload) to the declared handler |
+| `IntentPending` | `145` | The intent dispatched to the calling package |
+
+The SDK wraps these in `interos_std::content` with the same shape as the other
+platform calls, and the calls take the caller's authority rather than a
+capability slot: a slot is a position in the task's table, while the
+capability *type* is what the operation means.
+
+### Truth
+
+- A media type that no installed package declares has **no handler**. The
+  platform refuses such an intent (`TargetNotFound`) and names nothing; the
+  app says "no app handles this file" and names nothing.
+- The index says where every media type answer came from — `bytes`,
+  `extension` or `unknown` — so a guess is never presented as a measurement.
+- The registry is built from the packages' own signed manifests, registered at
+  install and withdrawn at uninstall. The first-party applications run as
+  kernel-resident images rather than as installed packages, so their
+  declarations are seeded from the kernel table that mirrors their
+  `manifest.json`; `tests/test_content_intent_contract.py` compares the two
+  so they cannot drift apart.
+
+### The interlinks
+
+| Interlink | Path |
+| :--- | :--- |
+| Gallery "set as wallpaper" | gallery → `IntentDispatch(set_wallpaper)` → settings app → `ui.wallpaper.home` / `ui.wallpaper.home.document` → launcher paints it |
+| "Open with" | gallery or file manager → `IntentResolve` + `IntentDispatch(mime)` → the package that declared that media type |
+| Browser downloads | browser → `/storage/downloads/…` → the index → the file manager and the gallery list it |
+| "Set as ringtone" | file manager or gallery → `IntentDispatch(set_ringtone)` → settings app → `audio.ringtone` → the dialer shows and plays it |
+| The file manager's view options | the registry's own listing, filtered by the document's media type |
+
+---
+
 ## 6. Cryptographic `.rapp` Package Format
 
 Applications and system services are packaged using the native, deterministic `.rapp` binary format with Ed25519 signature enforcement:
@@ -170,8 +262,8 @@ Applications and system services are packaged using the native, deterministic `.
 ```
 
 ### Installation & Verification Pipeline:
-1. **Header Validation**: Checks `b"RAPP"` magic, version `2` (or `3` with dependency header), and target architecture code.
-2. **Buffer Bounds**: Strictly validates `data.len() == 0xB4 + 2 * cap_count + payload_len`.
+1. **Header Validation**: Checks `b"RAPP"` magic, version `2` (or `3` with the dependency header, or `4` with the dependency and intent headers), and target architecture code.
+2. **Buffer Bounds**: Strictly validates `data.len() == 0xB4 + 2 * cap_count + payload_len` for v2, and `0xB8 + 2 * cap_count + section_len + payload_len` for v3 and v4.
 3. **Cryptographic Attestation**:
    - Computes SHA-256 digest over the embedded ELF payload and verifies against the header digest.
    - Evaluates publisher public key against the kernel trust root registry.

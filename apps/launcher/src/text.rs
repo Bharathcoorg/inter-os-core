@@ -245,6 +245,109 @@ pub fn is_printable(c: u8) -> bool {
     (32..=126).contains(&c)
 }
 
+/// A label placed once for a frame.
+///
+/// WHY this exists: the per-pixel painter is called once for every pixel of the
+/// surface, and the old helpers re-placed the whole run for every one of them.
+/// Placing a run costs a glyph lookup per character, so a screen with ten
+/// labels was doing ten million glyph lookups per frame. A [`Label`] is placed
+/// once, when the frame is planned, and then answers "do you ink this pixel?"
+/// for the rest of the frame.
+///
+/// WHY the outline face is preferred at scale 2 and above: the bitmap face is
+/// the fallback for the smallest step, and the platform's own screens draw
+/// their body copy with the outline face, so a label drawn here has to be the
+/// same letterforms or it reads as a different app.
+#[derive(Clone, Copy)]
+pub struct Label {
+    x: usize,
+    top: usize,
+    w: usize,
+    h: usize,
+    scale: usize,
+    len: usize,
+    ink: u32,
+    bytes: [u8; LABEL_CAP],
+    outline: Option<crate::outline_text::OutlineRun>,
+}
+
+/// The longest run a [`Label`] can hold.
+pub const LABEL_CAP: usize = 64;
+
+impl Label {
+    /// A label that never inks anything.
+    pub const EMPTY: Label = Label {
+        x: 0,
+        top: 0,
+        w: 0,
+        h: 0,
+        scale: 1,
+        len: 0,
+        ink: 0,
+        bytes: [0; LABEL_CAP],
+        outline: None,
+    };
+
+    /// Places `text` with its line box's top-left at (`x`, `y`).
+    pub fn at(x: usize, y: usize, scale: usize, text: &[u8], ink: u32) -> Label {
+        let mut bytes = [0u8; LABEL_CAP];
+        let len = text.len().min(LABEL_CAP);
+        bytes[..len].copy_from_slice(&text[..len]);
+        let run = &bytes[..len];
+        let em = crate::outline_text::em_for_scale(scale);
+        let (ascent, _descent) = interos_std::design::typeface::line_metrics(em);
+        let baseline = (y + font::BASELINE * scale).max(ascent as usize);
+        let outline = if scale >= 2 {
+            crate::outline_text::OutlineRun::place(x, baseline, em, run)
+        } else {
+            None
+        };
+        let (bx, by, bw, bh) = outline
+            .map(|r| r.bounds())
+            .unwrap_or((x, y, measure(run, scale), line_height(scale)));
+        Label {
+            x: bx,
+            top: by,
+            w: bw,
+            h: bh,
+            scale,
+            len,
+            ink,
+            bytes,
+            outline,
+        }
+    }
+
+    /// The label's width in pixels.
+    pub fn width(&self) -> usize {
+        self.w
+    }
+
+    /// The colour of (`px`, `py`) if this label inks it, blended over `bg`.
+    pub fn pixel(&self, px: usize, py: usize, bg: u32) -> Option<u32> {
+        if self.len == 0 {
+            return None;
+        }
+        if px < self.x || px >= self.x + self.w || py < self.top || py >= self.top + self.h {
+            return None;
+        }
+        if let Some(ref outline) = self.outline {
+            return outline.pixel(px, py, self.ink, bg);
+        }
+        font::test_text_aa(
+            px,
+            py,
+            self.x,
+            self.top,
+            self.scale,
+            &self.bytes[..self.len],
+            self.ink,
+            bg,
+            false,
+        )
+    }
+}
+
 /// Maps a byte to its glyph index, or `None` when it has no glyph.
 pub fn glyph_index(c: u8) -> Option<usize> {
     if is_printable(c) {

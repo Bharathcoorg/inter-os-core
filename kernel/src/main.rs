@@ -260,6 +260,12 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     kernel::package::PACKAGE_BLOB_STORE.lock().restore();
     kernel::package::PACKAGE_REGISTRY.lock().seed();
     kernel::package::REVOCATION_REGISTRY.lock().seed();
+    // WHY the intent registry is seeded here: a package's declared handlers
+    // are part of what the device is, so they have to exist before the first
+    // app asks "who handles this file?". The first-party applications run as
+    // kernel-resident images rather than as installed RAPPs, so their
+    // declarations are seeded from the table that mirrors their manifests.
+    kernel::content::init();
     serial_println!("[PACKAGE] persistent registry, payload store and revocation state restored.");
 
     // Generate sample sandboxed package bytecode: returns 0 (exit success)

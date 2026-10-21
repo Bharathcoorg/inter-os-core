@@ -570,3 +570,359 @@ fn dynamic_user_greeting_contract() {
     assert_eq!(&configured_name[..len], b"Alice");
 }
 
+
+// ---------------------------------------------------------------------------
+// The search index and its ranking
+// ---------------------------------------------------------------------------
+
+use crate::recents::{self, Card, Preview, Swipe};
+use crate::search::{self, CategoryStatus, Entry, ExactMatch, Ranker, SearchKind, SourceState};
+
+/// An index with one app, one settings surface and one file.
+fn sample_index() -> search::Index {
+    let mut index = search::Index::new();
+    index.push(Entry::new(
+        SearchKind::App,
+        b"Messages",
+        b"Tools",
+        b"org.interos.messages",
+    ));
+    index.push(
+        Entry::new(
+            SearchKind::Settings,
+            b"Network",
+            b"Settings",
+            b"Network",
+        )
+        .with_keywords(b"network wifi wi-fi bluetooth cellular data"),
+    );
+    index.push(Entry::new(
+        SearchKind::File,
+        b"holiday.ppm",
+        b"/storage/photos/holiday.ppm",
+        b"/storage/photos/holiday.ppm",
+    ));
+    index
+}
+
+#[test]
+fn an_exact_title_beats_every_other_match() {
+    let index = sample_index();
+    let results = index.search(b"messages", &ExactMatch);
+    assert_eq!(results.count, 1, "only the app is named Messages");
+    let hit = results.hit(0).expect("a hit");
+    let entry = index.get(hit.index as usize).expect("the entry");
+    assert_eq!(entry.kind, SearchKind::App);
+    assert_eq!(entry.title(), b"Messages");
+}
+
+#[test]
+fn a_match_ignores_case() {
+    let index = sample_index();
+    let results = index.search(b"MESSAGES", &ExactMatch);
+    assert_eq!(results.count, 1);
+    let results = index.search(b"mEsSaGeS", &ExactMatch);
+    assert_eq!(results.count, 1);
+}
+
+#[test]
+fn a_settings_section_is_found_by_the_words_a_person_would_use() {
+    let index = sample_index();
+    // "wifi" is not in the section's title; it is in the words the section is
+    // known by. A search that only matched labels would not find it.
+    let results = index.search(b"wifi", &ExactMatch);
+    assert_eq!(results.count, 1, "wifi has to reach the Network section");
+    let hit = results.hit(0).expect("a hit");
+    let entry = index.get(hit.index as usize).expect("the entry");
+    assert_eq!(entry.kind, SearchKind::Settings);
+    assert_eq!(entry.title(), b"Network");
+}
+
+#[test]
+fn a_file_is_found_by_its_name() {
+    let index = sample_index();
+    let results = index.search(b"holiday", &ExactMatch);
+    assert_eq!(results.count, 1);
+    let hit = results.hit(0).expect("a hit");
+    let entry = index.get(hit.index as usize).expect("the entry");
+    assert_eq!(entry.kind, SearchKind::File);
+    assert_eq!(entry.title(), b"holiday.ppm");
+}
+
+#[test]
+fn a_query_that_matches_nothing_finds_nothing() {
+    let index = sample_index();
+    let results = index.search(b"zzzzz", &ExactMatch);
+    assert_eq!(results.count, 0);
+    assert_eq!(results.apps, CategoryStatus::NoMatch);
+    assert_eq!(results.settings, CategoryStatus::NoMatch);
+    assert_eq!(results.files, CategoryStatus::NoMatch);
+}
+
+#[test]
+fn an_empty_query_finds_nothing_rather_than_everything() {
+    let index = sample_index();
+    let results = index.search(b"", &ExactMatch);
+    assert_eq!(results.count, 0, "an empty query has no answer to give");
+}
+
+#[test]
+fn the_best_match_is_ranked_first() {
+    let mut index = search::Index::new();
+    index.push(Entry::new(
+        SearchKind::App,
+        b"Messages Archive",
+        b"Tools",
+        b"org.interos.archive",
+    ));
+    index.push(Entry::new(
+        SearchKind::App,
+        b"Messages",
+        b"Tools",
+        b"org.interos.messages",
+    ));
+    let results = index.search(b"messages", &ExactMatch);
+    assert_eq!(results.count, 2, "both contain the query");
+    let first = index.get(results.hit(0).expect("hit").index as usize).expect("entry");
+    let second = index.get(results.hit(1).expect("hit").index as usize).expect("entry");
+    assert_eq!(
+        first.title(),
+        b"Messages",
+        "the exact title has to outrank the longer one"
+    );
+    assert_eq!(second.title(), b"Messages Archive");
+}
+
+#[test]
+fn a_word_is_ranked_above_a_lucky_substring() {
+    let mut index = search::Index::new();
+    index.push(Entry::new(SearchKind::App, b"Sunset", b"", b"a"));
+    index.push(Entry::new(SearchKind::App, b"Settings", b"", b"b"));
+    let results = index.search(b"set", &ExactMatch);
+    // WHY both are found: a substring match is a real match, and a search
+    // that hid it would not find "Sunset" for a query that names it.
+    assert_eq!(results.count, 2);
+    // WHY the order matters: the word that *starts* with the query has to
+    // come first, or every short query matches half the index.
+    let first = index.get(results.hit(0).expect("hit").index as usize).expect("entry");
+    assert_eq!(first.title(), b"Settings");
+}
+
+#[test]
+fn an_unreadable_category_says_why_and_does_not_say_it_found_nothing() {
+    let mut index = sample_index();
+    index.set_files_state(SourceState::Unavailable(
+        "the platform refused the storage listing",
+    ));
+    let results = index.search(b"holiday", &ExactMatch);
+    assert_eq!(
+        results.files,
+        CategoryStatus::Unavailable("the platform refused the storage listing"),
+        "an unavailable category is not the same answer as an empty one"
+    );
+    assert_ne!(
+        results.files,
+        CategoryStatus::NoMatch,
+        "an unavailable category must not report as no match"
+    );
+    assert_eq!(
+        results.apps,
+        CategoryStatus::NoMatch,
+        "the other categories still answer for themselves"
+    );
+}
+
+#[test]
+fn a_category_that_answered_reports_how_many_matched() {
+    let index = sample_index();
+    let results = index.search(b"o", &ExactMatch);
+    // "Messages" contains an "o", "holiday.ppm" contains one, "Network" and
+    // "Settings" do not, but "org.interos.messages" and the file's path do.
+    assert!(matches!(results.apps, CategoryStatus::Matched(_)));
+    assert!(matches!(results.files, CategoryStatus::Matched(_)));
+}
+
+#[test]
+fn the_ranker_is_the_seam_a_model_backed_ranker_plugs_into() {
+    // WHY this test exists: the seam is only a seam if something else can
+    // implement it. A ranker that scores by its own rule has to be able to
+    // replace the exact-match ranker without the index or the results
+    // changing shape.
+    struct AlwaysTop;
+    impl Ranker for AlwaysTop {
+        fn score(&self, _query: &[u8], entry: &Entry) -> Option<u32> {
+            if entry.kind == SearchKind::File {
+                Some(search::SCORE_EXACT)
+            } else {
+                None
+            }
+        }
+    }
+
+    let index = sample_index();
+    let results = index.search(b"anything", &AlwaysTop);
+    assert_eq!(results.count, 1);
+    let hit = results.hit(0).expect("a hit");
+    let entry = index.get(hit.index as usize).expect("the entry");
+    assert_eq!(entry.kind, SearchKind::File);
+    assert_eq!(
+        results.apps,
+        CategoryStatus::NoMatch,
+        "a ranker that declines the apps reports no app match"
+    );
+}
+
+#[test]
+fn the_index_holds_at_most_what_it_says_it_holds() {
+    let mut index = search::Index::new();
+    let mut pushed = 0usize;
+    for n in 0..(search::MAX_ENTRIES + 8) {
+        let name = [b'A' + (n % 26) as u8];
+        if index.push(Entry::new(SearchKind::App, &name, b"", b"x")) {
+            pushed += 1;
+        }
+    }
+    assert_eq!(pushed, search::MAX_ENTRIES);
+    assert_eq!(index.len(), search::MAX_ENTRIES);
+    assert!(index.get(search::MAX_ENTRIES).is_none());
+}
+
+// ---------------------------------------------------------------------------
+// The task switcher's card model
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_card_names_the_task_and_says_whether_it_has_a_picture() {
+    let mut card = Card::EMPTY;
+    card.package_id[..6].copy_from_slice(b"dialer");
+    card.package_len = 6;
+    card.task_id = 7;
+    card.preview = Preview::Live {
+        width: recents::PREVIEW_W as u16,
+        height: recents::PREVIEW_H as u16,
+    };
+    assert_eq!(card.package(), b"dialer");
+    assert!(card.preview.is_live());
+    assert_eq!(card.preview.reason(), None);
+}
+
+#[test]
+fn a_card_without_a_picture_names_the_reason() {
+    let card = Card {
+        preview: Preview::Unavailable("the app has not drawn a frame yet"),
+        ..Card::EMPTY
+    };
+    assert!(!card.preview.is_live());
+    assert_eq!(
+        card.preview.reason(),
+        Some("the app has not drawn a frame yet"),
+        "a card with no picture has to say which of the reasons it is"
+    );
+}
+
+#[test]
+fn a_last_frame_is_not_a_live_preview() {
+    // WHY this is a state of its own: an app in this platform exits when the
+    // person leaves it, so the picture a card holds is the app's last frame
+    // rather than a view of a task that is still running. Calling that a live
+    // preview would be a claim the card cannot back.
+    let last = Preview::LastFrame {
+        width: recents::PREVIEW_W as u16,
+        height: recents::PREVIEW_H as u16,
+    };
+    assert!(!last.is_live(), "a last frame is not a live preview");
+    assert!(last.has_picture(), "a last frame is still a picture");
+    assert_eq!(last.reason(), None, "a picture is not a reason");
+
+    let live = Preview::Live {
+        width: recents::PREVIEW_W as u16,
+        height: recents::PREVIEW_H as u16,
+    };
+    assert!(live.is_live());
+    assert!(live.has_picture());
+}
+
+#[test]
+fn the_cards_stack_without_overlapping() {
+    for index in 0..recents::MAX_CARDS {
+        let card = recents::card_rect(index);
+        assert!(card.w <= 720, "the card has to fit the surface");
+        assert!(card.x + card.w <= 720);
+        if index > 0 {
+            let above = recents::card_rect(index - 1);
+            assert!(
+                card.y >= above.y + above.h,
+                "card {} overlaps the one above it",
+                index
+            );
+        }
+    }
+}
+
+#[test]
+fn the_preview_well_keeps_the_shape_of_the_screen_it_shows() {
+    let well = recents::preview_rect(0);
+    assert_eq!(well.w, recents::PREVIEW_W);
+    assert_eq!(well.h, recents::PREVIEW_H);
+    // The guest surface is 720 x 1440, so a preview with the same aspect
+    // ratio shows the screen's shape rather than a squashed one.
+    assert_eq!(well.w * 1440, well.h * 720, "the well has the screen's shape");
+    let card = recents::card_rect(0);
+    assert!(well.y + well.h <= card.y + card.h, "the well has to fit its card");
+}
+
+#[test]
+fn the_close_control_is_a_target_a_person_can_hit() {
+    let close = recents::close_rect(0);
+    assert!(close.w >= 44 && close.h >= 44, "the close target is too small");
+    let card = recents::card_rect(0);
+    assert!(close.x >= card.x && close.x + close.w <= card.x + card.w);
+    assert!(close.y >= card.y && close.y + close.h <= card.y + card.h);
+    // The hit test has to agree with the rectangle.
+    assert_eq!(recents::close_at(close.x + 2, close.y + 2, 1), Some(0));
+    assert_eq!(recents::close_at(card.x + 2, card.y + 2, 1), None);
+}
+
+#[test]
+fn a_card_is_found_by_the_point_that_is_on_it() {
+    let card = recents::card_rect(1);
+    assert_eq!(recents::card_at(card.x + 10, card.y + 10, 3), Some(1));
+    assert_eq!(recents::card_at(card.x + 10, card.y + 10, 1), None);
+    assert_eq!(recents::card_at(4, 4, 3), None);
+}
+
+#[test]
+fn a_gesture_is_read_as_a_dismiss_or_as_a_scroll() {
+    assert_eq!(recents::classify_swipe(-200), Swipe::Dismiss);
+    assert_eq!(
+        recents::classify_swipe(-recents::DISMISS_DISTANCE),
+        Swipe::Dismiss
+    );
+    assert_eq!(recents::classify_swipe(-10), Swipe::None);
+    assert_eq!(recents::classify_swipe(0), Swipe::None);
+    assert_eq!(recents::classify_swipe(200), Swipe::Home);
+    assert_eq!(
+        recents::classify_swipe(recents::HOME_DISTANCE),
+        Swipe::Home
+    );
+}
+
+#[test]
+fn a_label_inks_the_pixels_it_was_placed_at() {
+    // WHY this test exists: a label that is placed but never inks is a label
+    // that is invisible, and the screen that draws it cannot tell the
+    // difference between "there is no text" and "the text did not render".
+    use crate::text::Label;
+    let ink = 0xFF102030u32;
+    let bg = 0xFFFFFFFFu32;
+    let label = Label::at(88, 84, 2, b"settings", ink);
+    let mut inked = 0usize;
+    for y in 70..150 {
+        for x in 80..320 {
+            if label.pixel(x, y, bg) == Some(ink) {
+                inked += 1;
+            }
+        }
+    }
+    assert!(inked > 20, "the label inked {} pixels", inked);
+}

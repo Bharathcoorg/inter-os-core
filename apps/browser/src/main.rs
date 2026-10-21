@@ -784,6 +784,18 @@ pub struct BrowserApp {
     pub response_truncated: bool,
     /// Why the last local document could not be shown.
     pub local_failure: LocalFailure,
+    /// How many bytes of the last response the transport delivered.
+    ///
+    /// WHY it is kept: a download is the bytes the transport delivered, and
+    /// the app has to know how many there were to write them.
+    pub response_len: usize,
+    /// How many pages this app has saved into the shared storage area.
+    ///
+    /// WHY it is counted: a saved page is named by a counter rather than by a
+    /// clock reading, so two saves of the same page do not overwrite one
+    /// another and the name does not depend on a reading the device may not
+    /// have.
+    pub downloads_saved: u32,
 }
 
 impl BrowserApp {
@@ -816,6 +828,8 @@ impl BrowserApp {
             kb_symbols: false,
             response_truncated: false,
             local_failure: LocalFailure::NoPath,
+            response_len: 0,
+            downloads_saved: 0,
         };
         app.tabs.init_default();
         let start = b"about:blank";
@@ -1023,6 +1037,54 @@ impl BrowserApp {
         }
     }
 
+    /// Saves the page the browser is showing into the shared storage area.
+    ///
+    /// WHY the shared storage area: it is the one place every app may look,
+    /// so a saved page becomes a document the platform's index holds and the
+    /// file manager lists beside everything else on the device. A download the
+    /// rest of the device cannot see is not a download.
+    ///
+    /// WHY the bytes are the ones the transport delivered: the file is the
+    /// response, not a summary of it.
+    pub fn save_page_to_storage(&mut self) {
+        if self.status != PageStatus::Loaded {
+            std::log("[BROWSER APP] There is no loaded page to save.").ok();
+            return;
+        }
+        let response = unsafe { &*core::ptr::addr_of!(RESPONSE_BUF) };
+        if self.response_len == 0 || self.response_len > response.len() {
+            std::log("[BROWSER APP] The response the transport delivered is not held; nothing was saved.").ok();
+            return;
+        }
+        let mut path_buf = [0u8; 96];
+        let mut n = append_text(&mut path_buf, 0, b"/storage/downloads/page_");
+        n = append_u64_text(&mut path_buf, n, self.downloads_saved as u64);
+        n = append_text(&mut path_buf, n, b".html");
+        let Ok(path) = core::str::from_utf8(&path_buf[..n]) else {
+            std::log("[BROWSER APP] The download path could not be built; nothing was saved.").ok();
+            return;
+        };
+        match std::fs_open(path, std::FS_WRITE) {
+            Ok(fd) => {
+                let written = std::fs_write(fd, &response[..self.response_len]);
+                let _ = std::fs_close(fd);
+                match written {
+                    Ok(n) => {
+                        self.downloads_saved = self.downloads_saved.saturating_add(1);
+                        std::log("[BROWSER APP] The page was saved into the shared storage area.").ok();
+                        let _ = n;
+                    }
+                    Err(_) => {
+                        std::log("[BROWSER APP] The page could not be written; nothing was saved.").ok();
+                    }
+                }
+            }
+            Err(_) => {
+                std::log("[BROWSER APP] The shared storage area refused the download; nothing was saved.").ok();
+            }
+        }
+    }
+
     pub fn navigate(&mut self, target: &[u8]) -> bool {
         self.history.push(target);
         self.tabs.navigate_to(target);
@@ -1106,6 +1168,7 @@ impl BrowserApp {
 
         let response = unsafe { &*core::ptr::addr_of!(RESPONSE_BUF) };
         let rx_slice = &response[..outcome.bytes];
+        self.response_len = outcome.bytes;
 
         let mut loaded_from_network = false;
         let key: &[u8] = b"\"html\":";
@@ -2770,14 +2833,15 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
             Some(THEME.surface)
         }
         SheetOverlay::Menu => {
-            // Kebab Overflow Menu dropdown card at top right (x 440..696, y 116..360)
-            let menu_rect = Rect::new(440, 116, 256, 240);
+            // Kebab Overflow Menu dropdown card at top right (x 440..696, y 116..400)
+            let menu_rect = Rect::new(440, 116, 256, 284);
             if let Some(c) = draw_rounded_rect(x, y, menu_rect, R_CONTROL, THEME.surface_container_high, Some(THEME.border), 2) {
-                let items: [&[u8]; 5] = [
+                let items: [&[u8]; 6] = [
                     b"New Tab",
                     b"Bookmarks",
                     b"History",
                     b"Reload Page",
+                    b"Save Page",
                     b"Close Menu",
                 ];
                 for (idx, item) in items.iter().enumerate() {
@@ -2785,7 +2849,7 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
                     if let Some(px) = text_px(x, y, 464, item_y, 1, item, THEME.on_surface, c, false) {
                         return Some(px);
                     }
-                    if idx < 4 && y == item_y + 30 {
+                    if idx < 5 && y == item_y + 30 {
                         return Some(THEME.outline_variant);
                     }
                 }
@@ -3324,7 +3388,7 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
     // Handle Active Overlays Interactions
     match app.overlay {
         SheetOverlay::Menu => {
-            if x >= 440 && x <= 696 && y >= 116 && y <= 356 {
+            if x >= 440 && x <= 696 && y >= 116 && y <= 400 {
                 let row = (y - 116) / 48;
                 let _ = std::audio_haptic_click();
                 match row {
@@ -3339,6 +3403,11 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
                     1 => app.overlay = SheetOverlay::Bookmarks,
                     2 => app.overlay = SheetOverlay::History,
                     3 => app.reload(),
+                    // WHY the page is saved into the shared storage area: that is
+                    // the one place every app may look, so a saved page is a
+                    // document the platform's index holds and the file manager
+                    // lists beside the photographs the camera wrote.
+                    4 => app.save_page_to_storage(),
                     _ => app.overlay = SheetOverlay::None,
                 }
                 if row != 1 && row != 2 {

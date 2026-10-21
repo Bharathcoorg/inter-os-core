@@ -104,6 +104,13 @@ pub fn capability_policy(id: ServiceId, parent_id: TaskId) -> Result<Vec<Service
             // layout with both absent. Read-only, and scoped to the clock, so it
             // confers no power, crypto or telephony authority.
             policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::RealtimeClockRead, rights: Rights::READ, object_id: 0 });
+            // WHY the shell may read another app's screen: the task switcher
+            // shows a live preview of what each running app is showing, and
+            // the app it previews is by definition running in another task.
+            // This is the only grant of this authority in the system, so an
+            // app that wants to see another app's screen has to ask for it
+            // and the shell has to be granted it by name.
+            policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::SurfaceCapture, rights: Rights::READ, object_id: 0 });
             // The launcher hosts the lock screen and credential setup views, requiring
             // authority to query lock state, authenticate credentials, and set PINs for the user.
             policy.push(ServiceCapabilitySpec {

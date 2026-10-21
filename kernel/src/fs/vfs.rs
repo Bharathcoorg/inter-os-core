@@ -146,6 +146,13 @@ pub struct Vfs {
     /// Inode mutations keep succeeding in RAM either way; the latch only skips
     /// the doomed write-behind.
     persist_unavailable: core::cell::Cell<bool>,
+    /// Counts the changes made to the shared storage area.
+    ///
+    /// WHY the counter and not a flag: a flag would have to be cleared by the
+    /// reader, and two readers racing for it would leave the index describing
+    /// a filesystem that has moved on. A counter says which walk the index was
+    /// built from, so a stale index is detected rather than assumed.
+    storage_generation: u64,
 }
 
 /// The refusal a filesystem operation gives when the caller holds no usable
@@ -178,6 +185,7 @@ impl Vfs {
             next_inode: 1,
             task_file_tables: BTreeMap::new(),
             persist_unavailable: core::cell::Cell::new(false),
+            storage_generation: 0,
         };
 
         // Create root directory "/"
@@ -378,6 +386,7 @@ impl Vfs {
     ) -> InodeId {
         let norm_path = normalize_path(path);
         let digest = Sha256::digest(content);
+        self.bump_storage_generation(&norm_path);
 
         if let Some(&existing_id) = self.path_to_inode.get(&norm_path) {
             if let Some(inode) = self.inodes.get_mut(&existing_id) {
@@ -561,6 +570,66 @@ impl Vfs {
         self.path_to_inode.get(&norm_path).copied().or_else(|| self.hard_links.get(&norm_path).copied())
     }
 
+    /// The generation of the shared storage area.
+    ///
+    /// WHY it is public: the content index is built from a walk of this area,
+    /// and it has to know whether the walk it holds is still the truth.
+    pub fn storage_generation(&self) -> u64 {
+        self.storage_generation
+    }
+
+    /// Records a change to the shared storage area.
+    fn bump_storage_generation(&mut self, path: &str) {
+        if path.starts_with("/storage/") {
+            self.storage_generation = self.storage_generation.wrapping_add(1);
+        }
+    }
+
+    /// Lists every regular file at or under `root`, with the bytes a media
+    /// type classifier needs.
+    ///
+    /// WHY the walk is here and not in the content layer: the content layer
+    /// must not reach into the filesystem's private tables, and the filesystem
+    /// is the only thing that knows what a file's bytes are. The caller
+    /// decides what to do with the result.
+    pub fn walk_files(&self, root: &str, head_len: usize) -> Vec<(String, u64, u64, Vec<u8>)> {
+        let prefix = alloc::format!("{}/", normalize_path(root));
+        let mut out = Vec::new();
+        for inode in self.inodes.values() {
+            if inode.file_type != FileType::RegularFile {
+                continue;
+            }
+            if !inode.path.starts_with(&prefix) {
+                continue;
+            }
+            let head = inode
+                .data
+                .as_slice()
+                .iter()
+                .take(head_len)
+                .copied()
+                .collect::<Vec<u8>>();
+            out.push((
+                inode.path.clone(),
+                inode.size as u64,
+                inode.mtime,
+                head,
+            ));
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
+    /// Whether a path is visible to a task under the per-app path policy.
+    ///
+    /// WHY it is exposed: the content index describes documents, and a
+    /// description of a document the caller may not see would be a leak. The
+    /// index asks the same policy the filesystem asks, rather than keeping a
+    /// second copy of the rules.
+    pub fn app_path_visible(&self, task_id: TaskId, path: &str) -> bool {
+        self.enforce_app_path(task_id, path, false).is_ok()
+    }
+
     /// Returns the data byte size of an inode.
     pub fn get_size(&self, inode_id: InodeId) -> usize {
         self.inodes.get(&inode_id).map(|i| i.size).unwrap_or(0)
@@ -662,6 +731,7 @@ impl Vfs {
 
     pub fn unlink(&mut self, path: &str) -> Result<(), FsError> {
         let norm = normalize_path(path);
+        self.bump_storage_generation(&norm);
         if let Some(inode_id) = self.hard_links.remove(&norm) {
             let previous = self.inodes.get(&inode_id).cloned().ok_or(FsError::FileNotFound)?;
             if let Some(inode) = self.inodes.get_mut(&inode_id) {
@@ -1236,6 +1306,14 @@ pub fn read_file_for_task(
         let handle = table.get_mut(fd.0 as usize).and_then(|h| h.as_mut()).ok_or(FsError::InvalidFd)?;
         handle.offset += buf.len();
 
+        // WHY the shared area's generation moves on a write and not only on a
+        // create: a file the platform already indexed has just changed, and an
+        // index that still describes the old bytes is a stale index.
+        if let Some(inode) = self.inodes.get(&inode_id) {
+            let path = inode.path.clone();
+            self.bump_storage_generation(&path);
+        }
+
         // Publish the mutation immediately. Closing an FD is not the commit
         // point: a process may write and crash before close().
         self.persist_data_snapshot()?;
@@ -1581,6 +1659,7 @@ pub static VFS: Mutex<Vfs> = Mutex::new(Vfs {
     next_inode: 1,
     task_file_tables: BTreeMap::new(),
     persist_unavailable: core::cell::Cell::new(false),
+    storage_generation: 0,
 });
 
 /// Initializes the root filesystem with essential system directories and trusted files.

@@ -1106,6 +1106,15 @@ pub struct DialerApp {
     /// Favorites slot, so that slot opens something real rather than reporting
     /// that no store exists.
     pub contacts_fav_only: bool,
+    /// The name of the document the device's ringtone slot names.
+    ///
+    /// WHY the slot and not a ringtone this app chose: the ringtone is a
+    /// device-wide choice, and the file manager and the gallery are the apps
+    /// that put a document into it. This app plays whatever the slot holds, so
+    /// it reads the slot and shows what is in it.
+    pub ringtone: [u8; 64],
+    /// How many bytes of the ringtone's name are meaningful.
+    pub ringtone_len: usize,
 }
 
 impl DialerApp {
@@ -1141,7 +1150,45 @@ impl DialerApp {
             contact_edit: None,
             editor_last_cell: None,
             contacts_fav_only: false,
+            ringtone: [0u8; 64],
+            ringtone_len: 0,
         }
+    }
+
+    /// Reads the device's ringtone slot and confirms the document it names.
+    ///
+    /// WHY the document is confirmed against the platform's index and not
+    /// taken on the slot's word: a slot that names a document the device does
+    /// not hold is a slot that points at nothing, and the dialer must say so
+    /// rather than show a name that cannot be played.
+    pub fn refresh_ringtone(&mut self) {
+        self.ringtone_len = 0;
+        let mut buf = [0u8; 128];
+        let Ok(n) = std::settings_get("audio.ringtone", &mut buf) else {
+            std::log("[DIALER APP] The ringtone slot could not be read; the device's default ringtone is in use.").ok();
+            return;
+        };
+        if n == 0 || n > buf.len() {
+            return;
+        }
+        let Ok(path) = core::str::from_utf8(&buf[..n]) else {
+            std::log("[DIALER APP] The ringtone slot does not hold a path; the device's default ringtone is in use.").ok();
+            return;
+        };
+        let path = path.trim();
+        if path.is_empty() {
+            return;
+        }
+        let mut raw = [0u8; 2048];
+        let Some(record) = std::content::content_index_find_path(path, &mut raw) else {
+            std::log("[DIALER APP] The ringtone slot names a document the platform does not hold; the device's default ringtone is in use.").ok();
+            return;
+        };
+        let name = record.path.rsplit('/').next().unwrap_or(&record.path);
+        let len = name.len().min(self.ringtone.len());
+        self.ringtone[..len].copy_from_slice(&name.as_bytes()[..len]);
+        self.ringtone_len = len;
+        std::log("[DIALER APP] The ringtone slot names a document the platform holds.").ok();
     }
 
     /// Plays dual-tone multi-frequency acoustic feedback for a pressed keypad digit.
@@ -1937,6 +1984,31 @@ fn header_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     if y >= title_y0 && y < title_y0 + title_rows {
         if let Some(c) = test_text_bold(x, y, 120, title_y0, TITLE_SCALE, b"Phone", THEME.on_surface, THEME.surface_container) {
             return c;
+        }
+    }
+
+    // The ringtone the device's ringtone slot names.
+    //
+    // WHY it is drawn and not assumed: the slot is filled by another app, and
+    // a user who has chosen a ringtone must be able to see which one the
+    // device will play. A user who has not chosen one sees nothing, because
+    // the slot is empty and there is nothing to name.
+    if dialer.ringtone_len > 0 {
+        let label = &dialer.ringtone[..dialer.ringtone_len];
+        let width = std::design::font::measure(label, 1);
+        if width < 380 {
+            if let Some(c) = test_text(
+                x,
+                y,
+                600 - width,
+                52,
+                1,
+                label,
+                THEME.on_surface_variant,
+                THEME.surface_container,
+            ) {
+                return c;
+            }
         }
     }
 
@@ -3809,6 +3881,11 @@ pub extern "C" fn _start() -> ! {
     .ok();
 
     let mut dialer = DialerApp::new();
+
+    // WHY the ringtone is read here: the ringtone slot is a device-wide
+    // choice that the file manager and the gallery fill, and this app plays
+    // whatever is in it.
+    dialer.refresh_ringtone();
 
     // 1. Query Cellular Modem Baseband Telemetry
     // WHY: this app holds no telephony authority, so the query is normally

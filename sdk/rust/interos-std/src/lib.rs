@@ -7,9 +7,12 @@
 
 pub mod ai;
 pub mod app;
+pub mod content;
 pub mod design;
 pub mod font;
 pub mod font_fhd;
+pub mod image;
+pub mod settings;
 
 // WHY std under test only: the guest build of this crate is `#![no_std]` and must
 // stay that way, but the unit tests want `Vec` and the other collections to
@@ -207,6 +210,24 @@ pub enum SyscallNumber {
     DisplaySetOrientation = 131,
     CapLookup = 132,
     FsUnlink = 133,
+    /// The shared document index and the system-wide intent registry.
+    ContentIndexQuery = 140,
+    ContentIndexRefresh = 141,
+    IntentResolve = 142,
+    IntentList = 143,
+    IntentDispatch = 144,
+    IntentPending = 145,
+    /// Reads another client's display surface, scaled, into the caller's
+    /// buffer.
+    ///
+    /// WHY it is its own number and not an extension of `SurfaceWrite`: reading
+    /// a *running* app's pixels is a different authority from writing your
+    /// own, and the platform's own kernel shell has no framebuffer-grab call
+    /// at all -- the recents screen had to draw a picture it never received.
+    /// The call is authorised by the `SurfaceCapture` capability, so "who may
+    /// see another app's screen" is a capability decision rather than a
+    /// property of the caller.
+    SurfaceCapture = 134,
 }
 
 // -----------------------------------------------------------------------------
@@ -1284,6 +1305,16 @@ pub mod cap_type {
     pub const EVENT_POLL: u64 = 17;
     pub const SYSTEM_CONTROL: u64 = 18;
     pub const REALTIME_CLOCK_READ: u64 = 24;
+    /// Permission to read another client's display surface.
+    ///
+    /// WHY this is not `FRAMEBUFFER_DIRECT`: the framebuffer capability is the
+    /// display service's own authority over the scanout, and it authorises
+    /// writing the surfaces a task owns. Reading the pixels of a *running*
+    /// task's surface is a separate question -- "may this task see another
+    /// app's screen?" -- and it gets its own type so the answer is a
+    /// capability decision rather than a side effect of holding display
+    /// authority.
+    pub const SURFACE_CAPTURE: u64 = 27;
 }
 
 /// Dynamically discovers the slot index of an active capability matching `cap_type`
@@ -1520,6 +1551,50 @@ pub fn surface_write(
             offset as u64,
             pixels.as_ptr() as u64,
             pixels.len() as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as usize)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Reads a running client's display surface, scaled, into the caller's buffer.
+///
+/// The surface does not have to belong to the caller: that is the point of
+/// the call, and the reason it is a separate capability. The kernel refuses
+/// the read unless the caller holds the `SurfaceCapture` capability, so
+/// "may this task see another app's screen" is answered by the capability
+/// table and not by the identity of the caller.
+///
+/// `out` receives `dest_width * dest_height` ARGB8888 pixels, box-filtered
+/// from the source surface. The kernel returns:
+/// * the number of pixels written, on success;
+/// * `PermissionDenied` (`-1`) when the caller holds no capture capability;
+/// * `TargetNotFound` (`-6`) when no surface carries that id;
+/// * `NotReady` (`-30`) when the surface has not drawn a frame yet.
+pub fn surface_capture(
+    surface_id: u32,
+    dest_width: u32,
+    dest_height: u32,
+    out: &mut [u32],
+) -> Result<usize, i64> {
+    if dest_width == 0 || dest_height == 0 {
+        return Err(-3);
+    }
+    let needed = (dest_width as usize).saturating_mul(dest_height as usize);
+    if out.len() < needed {
+        return Err(-3);
+    }
+    let ret = unsafe {
+        syscall5(
+            SyscallNumber::SurfaceCapture,
+            surface_id as u64,
+            dest_width as u64,
+            dest_height as u64,
+            out.as_mut_ptr() as u64,
+            needed as u64,
         )
     };
     if ret >= 0 {

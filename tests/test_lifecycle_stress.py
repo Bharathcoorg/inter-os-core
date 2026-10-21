@@ -388,16 +388,19 @@ def execute_iteration_operations(reader, monitor_sock, iter_num):
         assert reader.wait_for("Home surface rendered.", timeout=25.0), "Unlock failed"
     time.sleep(0.8)
 
-    # System surface: System Space
-    reader.send(b"TAP 360 1330\n")
-    if not reader.wait_for("System surface rendered.", timeout=15.0):
-        reader.send(b"TAP 360 1330\n")
-        assert reader.wait_for("System surface rendered.", timeout=25.0), "System space open failed"
+    # Search surface: the universal search bar opens the search.
+    #
+    # WHY this changed: the bar opens the search itself now, not a
+    # launcher-drawn copy of the Settings app's page.
+    reader.send(b"TAP 360 700\n")
+    if not reader.wait_for("Search surface rendered.", timeout=15.0):
+        reader.send(b"TAP 360 700\n")
+        assert reader.wait_for("Search surface rendered.", timeout=25.0), "Global search open failed"
     time.sleep(0.8)
     reader.send(b"TAP 360 1410\n")
     if not reader.wait_for("Home surface rendered.", timeout=15.0):
         reader.send(b"TAP 360 1410\n")
-        assert reader.wait_for("Home surface rendered.", timeout=25.0), "Home return from system space failed"
+        assert reader.wait_for("Home surface rendered.", timeout=25.0), "Home return from search failed"
     time.sleep(0.8)
 
     print(f"\n  [STRESS ITERATION {iter_num}] All lifecycle operations completed successfully.")

@@ -28,12 +28,12 @@ A `.rapp` file is a contiguous, non-archive binary structure consisting of a fix
 +-------------------------------------------------------------+
 ```
 
-### Exact Field Offsets (RAPP v2 & v3)
+### Exact Field Offsets (RAPP v2, v3 & v4)
 
 | Byte Range | Length | Type | Field Description |
 | :--- | :--- | :--- | :--- |
 | `0x00 - 0x03` | 4 bytes | `[u8; 4]` | Magic identifier: ASCII `b"RAPP"` (`0x52, 0x41, 0x50, 0x50`) |
-| `0x04 - 0x05` | 2 bytes | `u16` (LE) | Format version: `2` (standard) or `3` (dependency extension) |
+| `0x04 - 0x05` | 2 bytes | `u16` (LE) | Format version: `2` (standard), `3` (dependency extension) or `4` (dependency and intent extension) |
 | `0x06 - 0x07` | 2 bytes | `u16` (LE) | Target CPU architecture (`0` = x86_64, `1` = AArch64, `2` = RISC-V 64) |
 | `0x08 - 0x27` | 32 bytes | `[u8; 32]` | Package identifier (UTF-8, null-padded, max 32 chars) |
 | `0x28 - 0x47` | 32 bytes | `[u8; 32]` | Publisher Ed25519 public key |
@@ -42,7 +42,7 @@ A `.rapp` file is a contiguous, non-archive binary structure consisting of a fix
 | `0x50 - 0x6F` | 32 bytes | `[u8; 32]` | SHA-256 cryptographic digest of the embedded ELF payload |
 | `0x70 - 0xAF` | 64 bytes | `[u8; 64]` | Ed25519 digital signature over canonical signing message |
 | `0xB0 - 0xB3` | 4 bytes | `u32` (LE) | Embedded ELF payload length in bytes |
-| `0xB4 - 0xB7` | 4 bytes | `u32` (LE) | *(RAPP v3 only)* Dependency table length in bytes (`dependency_len`) |
+| `0xB4 - 0xB7` | 4 bytes | `u32` (LE) | *(RAPP v3)* Dependency table length; *(RAPP v4)* Signed section length |
 
 ### Payload & Table Offsets
 
@@ -57,6 +57,55 @@ A `.rapp` file is a contiguous, non-archive binary structure consisting of a fix
     - Each dependency entry: `id_len` (1B u8) + `package_id` (`id_len` bytes UTF-8) + `kind` (1B: 0=Exact, 1=Minimum, 2=Major) + `major` (2B) + `minor` (2B) + `patch` (2B).
   - ELF executable binary payload: follows immediately after dependency table for `payload_len` bytes.
   - Exact total length: `0xB8 + 2*N + dependency_len + payload_len`.
+- **RAPP v4 Header**: 184 bytes (`0xB8`) — the same header as v3.
+  - Capabilities table: `0xB8 .. 0xB8 + 2*N`.
+  - Signed section: `0xB8 + 2*N .. 0xB8 + 2*N + section_len`.
+    - `dep_len`: 4 bytes (`u32` LE) — the length of the dependency table that follows.
+    - `intent_len`: 4 bytes (`u32` LE) — the length of the intent table that follows the dependency table.
+    - Dependency table: `dep_len` bytes, encoded exactly as in v3.
+    - Intent table: `intent_len` bytes.
+      - `intent_count`: 2 bytes (`u16` LE, max 64).
+      - Each intent entry: `kind` (1B: 0=mime, 1=scheme, 2=action) + `value_len` (1B u8, 1..=96) + `value` (`value_len` bytes UTF-8).
+  - ELF executable binary payload: follows immediately after the signed section for `payload_len` bytes.
+  - Exact total length: `0xB8 + 2*N + section_len + payload_len`.
+
+### The manifest extension: declared handlers (RAPP v4)
+
+A package declares what it can handle in its `manifest.json`:
+
+```json
+{
+  "id": "org.interos.gallery",
+  "name": "Gallery",
+  "version": "1.0.0",
+  "permissions": ["CAP_LOGGING", "CAP_CONTENT_INDEX", "CAP_CONTENT_INTENT"],
+  "intents": {
+    "mime":   ["image/png", "video/mp4"],
+    "scheme": ["http", "https"],
+    "action": ["org.interos.action.set_wallpaper"]
+  }
+}
+```
+
+`interos package <name>` writes a **RAPP v4** package when the manifest carries an
+`intents` block, and a RAPP v2 package otherwise. The three keys are the three
+kinds of thing a package can declare a handler for:
+
+| Key | Wire `kind` | Example | What it means |
+| :--- | :--- | :--- | :--- |
+| `mime` | `0` | `image/png` | The package opens documents of that media type |
+| `scheme` | `1` | `https` | The package opens URIs of that scheme |
+| `action` | `2` | `org.interos.action.set_wallpaper` | The package performs that named action |
+
+The declarations are inside the **signed** section of the package, so a claim a
+package makes about what it handles cannot be edited after signing. The
+kernel's intent registry is built from these tables: a package is registered
+when it is installed and withdrawn when it is uninstalled, and the registry
+answers "who handles this?" only from what is installed.
+
+A media type that no installed package declares has **no handler**. The
+platform refuses such an intent and names nothing, rather than offering a
+substitute.
 
 ---
 
@@ -64,13 +113,13 @@ A `.rapp` file is a contiguous, non-archive binary structure consisting of a fix
 
 When `parse_rapp(data: &[u8])` executes in the microkernel:
 
-1. **Magic & Format Check**: Asserts `data[0..4] == b"RAPP"` and format version equals `2` (or `3`).
+1. **Magic & Format Check**: Asserts `data[0..4] == b"RAPP"` and format version equals `2` (or `3`, or `4`).
 2. **Architecture Match**: Rejects binaries if the target architecture does not match the active kernel architecture.
-3. **Exact Buffer Bounds**: Total slice length must strictly equal `0xB4 + 2*N + payload_len` (for v2) or `0xB8 + 2*N + dependency_len + payload_len` (for v3). Packages with trailing garbage, truncated payloads, or length mismatches are rejected with `RappError::BufferTooShort`, `RappError::PayloadOverflow`, or `RappError::InvalidPayload`.
+3. **Exact Buffer Bounds**: Total slice length must strictly equal `0xB4 + 2*N + payload_len` (for v2), `0xB8 + 2*N + dependency_len + payload_len` (for v3), or `0xB8 + 2*N + section_len + payload_len` (for v4). Packages with trailing garbage, truncated payloads, or length mismatches are rejected with `RappError::BufferTooShort`, `RappError::PayloadOverflow`, or `RappError::InvalidPayload`.
 4. **Payload Digest Verification**: Computes the SHA-256 digest over the ELF payload bytes and asserts exact equality with the header `payload_digest`.
 5. **Trust Root Evaluation**: Checks the publisher's public key against the kernel's active trust store (`REVOCATION_REGISTRY`). Untrusted or revoked keys return `RappError::PublisherUntrusted` or `RappError::PublisherRevoked`.
 6. **Canonical Signature Verification**:
-   - The signing message is reconstructed by copying the header with the 64-byte signature field (`0x70..0xB0`) set to zero, followed by the capability array, followed by the dependency table (for v3), followed by the ELF payload bytes.
+   - The signing message is reconstructed by copying the header with the 64-byte signature field (`0x70..0xB0`) set to zero, followed by the capability array, followed by the signed section (the dependency table for v3, the dependency and intent tables for v4), followed by the ELF payload bytes.
    - The signature is verified using `ed25519_dalek::Verifier`. Packages with zeroed, corrupt, or invalid signatures are rejected with `RappError::SignatureInvalid`.
 
 ---
@@ -129,8 +178,20 @@ name promises. `tools/interos.py` enforces this with
 `ALIAS_FORBIDDEN_CAPABILITY_IDS`, and `tests/test_rapp_capability_abi.py` pins
 it against this table.
 | `24` | `RealtimeClockRead` | `READ` | `0` (Global) | Read wall-clock hardware real-time clock (RTC) |
+| `25` | `ContentIndexRead` | `READ` | `0` (Global) | Read the shared document index and the intent registry |
+| `26` | `ContentIntentDispatch` | `INVOKE` | `0` (Global) | Dispatch an intent to the package that declared a handler for it |
 
-Values outside `1..=24` (such as `0` or `25+`) are strictly unknown and rejected during package verification (`RappError::UnknownCapability`).
+Values outside `1..=27` (such as `0` or `28+`) are strictly unknown and rejected during package verification (`RappError::UnknownCapability`).
+
+**Why the content layer has its own two identifiers.** `ContentIndexRead` is
+not `FileSystemRead`: the index *describes* documents — their paths, lengths,
+media types and identities — and reading a description is not reading a file.
+An app that may browse the shared area's catalogue does not thereby gain the
+ability to open the documents in it. `ContentIntentDispatch` is not
+`ProcessSpawn`: spawning a process is authority over the device's task table,
+while dispatching an intent is authority over one named relationship — "the
+package that declared this media type" — which the kernel resolves from the
+signed manifests.
 
 ---
 
