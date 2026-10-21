@@ -109,8 +109,95 @@ def test_the_threat_banner_describes_the_pattern_not_the_sender():
     """
     source = messages_main()
     assert "Caution: Unverified urgent request" not in source
-    assert "Caution: text matches a known scam script" in source
     assert "Caution: text matches urgency language" in source
+
+
+def test_the_threat_banner_does_not_claim_a_scam_script_database():
+    """The banner said the text "matches a known scam script".
+
+    There is no scam-script database on the device. The analyzer holds a
+    fixed list of phishing words and a fixed list of link prefixes and
+    matches the text against them, so a badge that implies a database
+    claims more evidence than the code has.
+    """
+    source = messages_main()
+    assert "Caution: text matches a known scam script" not in source
+    assert "Caution: text matches local phishing keywords" in source
+    # The analyzer is a keyword list, and the badge has to say so.
+    gsm = read("apps/messages/src/gsm.rs")
+    assert "PHISHING_PATTERNS" in gsm
+    assert "SUSPICIOUS_LINK_PATTERNS" in gsm
+
+
+def test_an_incoming_record_says_it_was_written_on_this_device():
+    """The bubble said "Received (no transport)".
+
+    Nothing can arrive: no transport is bound to this app. A record whose
+    direction is incoming can only be one this device wrote, so the label
+    has to say that.
+    """
+    lib = messages_lib()
+    assert "Received (no transport)" not in read("apps/messages/src/main.rs")
+    assert "pub const INCOMING_LOCAL_LABEL" in lib
+    assert "never received" in lib
+
+
+def test_the_thread_list_and_the_conversation_scroll():
+    """A long thread was cut off with no way out of it.
+
+    A thread holds sixteen messages and the visible band holds twelve, so
+    the oldest four were drawn off the top of the screen with no way to
+    reach them.
+    """
+    source = messages_main()
+    assert "use interos_std::design::scroll::ScrollState;" in source
+    assert "pub list_scroll: ScrollState" in source
+    assert "pub convo_scroll: ScrollState" in source
+    assert "convo_scroll.apply_drag(" in source
+    assert "list_scroll.apply_drag(" in source
+
+
+def test_the_sealed_thread_is_published_as_an_indexed_document():
+    """The sealed thread lived in a vault sector, invisible to every other app.
+
+    A vault sector is a secret, so the file manager could not list the
+    thread and the launcher could not find it. The app writes a transcript
+    into the shared storage area, where the platform's document index
+    describes it.
+    """
+    publish = read("apps/messages/src/publish.rs")
+    assert 'pub const STORAGE_ROOT: &str = "/storage";' in publish
+    assert "std::fs_open(" in publish
+    assert "std::content::content_index_refresh()" in publish
+    # The hand-off names the media type the registry knows.
+    assert "std::content::intent_resolve(" in publish
+    assert "std::content::intent_dispatch(" in publish
+    assert 'pub const THREAD_DOC_MIME: &str = "text/plain";' in publish
+
+
+def test_the_privacy_setting_lives_in_the_platform_settings_store():
+    """A per-contact privacy setting has to outlive the app that set it.
+
+    A flag kept in the app's own memory is forgotten the moment the app
+    closes, and a privacy control that forgets itself is not a privacy
+    control.
+    """
+    privacy = read("apps/messages/src/privacy.rs")
+    assert "std::settings_get(" in privacy
+    assert "std::settings_set(" in privacy
+    assert 'pub const PRIVACY_KEY_PREFIX: &str = "messages.privacy.v1.";' in privacy
+
+
+def test_the_unavailable_platform_features_are_reported_not_drawn():
+    """The design document asks for read receipts, notifications and files.
+
+    The platform offers none of them to this app, so the details screen has
+    to say so. A control that does nothing is worse than a missing one.
+    """
+    source = messages_main()
+    assert "Unavailable: no transport is bound" in source
+    assert "Unavailable: no channel is bound" in source
+    assert "Unavailable: no attachment service" in source
 
 
 def test_the_startup_line_does_not_announce_a_wire_protocol():

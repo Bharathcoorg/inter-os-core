@@ -430,7 +430,13 @@ def test_the_browsers_downloads_land_where_the_index_can_see_them():
     assert "fn save_page_to_storage" in browser
     save = browser[browser.index("fn save_page_to_storage"):]
     save = save[: save.index("pub fn navigate(")]
-    assert "/storage/downloads/" in save
+    # WHY the path may be built by a helper: the browser names the folder
+    # once, in one place, and the writer uses that name. The contract is
+    # that a download lands in the shared storage area, not that the
+    # folder's name is spelled out at the call site.
+    browser_lib = read(APPS / "browser" / "src" / "lib.rs")
+    assert 'DOWNLOAD_PREFIX: &str = "/storage/downloads/' in browser_lib
+    assert "download_path(" in save
     assert "std::fs_open" in save
     assert "std::fs_write" in save
     # The index covers the whole shared area, so a download is in it.

@@ -114,21 +114,88 @@ def test_the_empty_state_does_not_claim_a_filesystem_search():
     assert 'b"The device refused to read the track store"' in source
 
 
-def test_the_scrub_note_is_not_silently_dropped():
-    """The note was 783 pixels wide and the content band is 672.
+def test_the_scrubber_is_omitted_rather_than_drawn_inert():
+    """The scrubber was a permanently inert bar with a note under it.
 
-    The centred helper refuses a run that does not fit, so the sentence
-    explaining why the scrubber stays at zero was dropped exactly when a
-    track was selected.
+    No audio backend reports a playback position and this app has no
+    transport that can seek, so the control was drawn and could do nothing
+    at all. The design document says to omit the control when seeking is
+    unsupported, and a note under an inert bar is a workaround rather than
+    an answer.
     """
     source = music_main()
-    assert "b\"No audio backend reports a playback position;\"" in source
-    assert "SCRUB_NOTE_Y + font::line_height(1)" in source
-    # The old single-line form is gone.
-    assert (
-        'b"No audio backend reports a playback position; the scrubber stays at 0:00"'
-        not in source
-    )
+    assert "SCRUB_NOTE_Y" not in source
+    assert "TRACK_Y" not in source
+    assert "TIMES_Y" not in source
+    assert 'b"No audio backend reports a playback position;"' not in source
+    assert "the scrubber stays at 0:00" not in source
+
+
+def test_the_library_is_published_into_the_device_s_document_index():
+    """The library was a record in the app's own settings store.
+
+    The file manager could not list it, the launcher's search could not
+    find it and the platform's document index did not know it existed.
+    """
+    library = read("apps/music/src/library.rs")
+    assert 'pub const STORAGE_ROOT: &str = "/storage";' in library
+    assert "std::fs_open(" in library
+    assert "std::content::content_index_refresh()" in library
+    # The document is named after the track, so the launcher's search finds
+    # it by the word a person would type.
+    assert 'pub const DOC_PREFIX: &[u8] = b"music-";' in library
+
+
+def test_the_library_can_be_searched_sorted_and_imported():
+    """The design document asks for a search, an order and an import.
+
+    The app held neither: the list was flat, there was nothing to type
+    into, and the app read only its own store while holding the authority
+    to read the shared storage.
+    """
+    source = music_main()
+    library = read("apps/music/src/library.rs")
+    assert "const SEARCH_FIELD: Rect" in source
+    assert "pub search: [u8; SEARCH_CAP]" in source
+    assert "const SORT_BTN: Rect" in source
+    assert "pub sort: SortMode" in source
+    assert "const IMPORT_BTN: Rect" in source
+    assert "std::fs_list(" in library
+    assert "pub fn import_from_storage(" in library
+
+
+def test_the_queue_is_the_library_and_playlists_are_reported_unavailable():
+    """The design document asks for a queue and for playlists.
+
+    The library store holds one flat ordered list, so the queue is that
+    list and the list can be reordered. There is no second list to hold a
+    playlist, so the screen says so instead of offering a control that
+    does nothing.
+    """
+    source = music_main()
+    lib = read("apps/music/src/lib.rs")
+    assert "pub fn move_to(&mut self, idx: usize, to: usize) -> bool" in lib
+    assert "pub fn sort_by_title(&mut self) -> bool" in lib
+    assert "Playlists unavailable" in source
+    assert "const PUBLISH_BTN: Rect" in source
+
+
+def test_the_artwork_uses_the_platform_s_card_component():
+    """The artwork was a hand-rolled rounded rectangle with its own fill.
+
+    A card that invents its own fill, its own hairline and its own radius
+    is a card a third-party app cannot match, and the platform already says
+    what a card looks like.
+    """
+    source = music_main()
+    assert "components::card_style(&THEME, components::Elevation::Resting)" in source
+    assert "ART_CARD.radius" in source
+    assert "ART_CARD.fill" in source
+    # The track rows are the platform's list row.
+    assert "components::list_row_style(&THEME, false)" in source
+    assert "components::list_row_style(&THEME, true)" in source
+    assert "ROW.radius" in source
+    assert "ROW.pad" in source
 
 
 def test_the_track_list_can_be_scrolled():
