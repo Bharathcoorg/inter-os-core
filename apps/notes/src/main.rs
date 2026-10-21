@@ -24,6 +24,9 @@ use interos_std as std;
 use notes::theme::THEME;
 use interos_std::design::components;
 use interos_std::design::outline_text;
+use interos_std::design::scroll::ScrollState;
+use notes::keyboard::{self, KeyAction};
+use notes::library;
 pub use notes::{
     format_count_badge, format_timestamp, LineSpan, Note, NoteColorTheme, NotesStore,
     TextEditorBuffer, CATEGORY_NAMES, CivilTime, KEEP_COLORS, MAX_BODY_LEN, MAX_NOTES, MAX_TITLE_LEN,
@@ -48,6 +51,56 @@ const W: usize = 720;
 const H: usize = 1440;
 const CHUNK: usize = 4096;
 const CHARS_PER_LINE: usize = 40;
+
+/// The note card's height.
+const CARD_H: usize = 216;
+
+/// The gap between two note cards.
+const CARD_GAP: usize = 20;
+
+/// The distance from one card's top to the next one's top.
+const CARD_STRIDE: usize = CARD_H + CARD_GAP;
+
+/// The top of the note list's visible band.
+const LIST_TOP: usize = 164;
+
+/// The bottom of the note list's visible band.
+const LIST_BOTTOM: usize = 1308;
+
+/// The height of the note list's visible band.
+const LIST_VIEWPORT_H: usize = LIST_BOTTOM - LIST_TOP;
+
+/// The scroll thumb's track, at the list's trailing edge.
+const LIST_TRACK_X: usize = 700;
+
+/// The scroll thumb's width.
+const LIST_TRACK_W: usize = 4;
+
+/// The category chips: the five categories a note may carry.
+const CHIP_XS: [usize; 5] = [28, 126, 224, 344, 442];
+const CHIP_WS: [usize; 5] = [88, 88, 110, 88, 100];
+
+/// The pin filter, beside the category chips.
+///
+/// WHY the pin has its own control: a pin is a state a note carries, not a
+/// category it belongs to, and a filter that cannot be combined with a
+/// category is a filter that hides more than the person asked for.
+///
+/// WHY 44: the design system's minimum touch target is 44 logical pixels,
+/// and the whole chip row is 44 tall so the pin filter and the five
+/// category chips are the same size. A 42-pixel chip is two pixels short
+/// of the minimum, which is the kind of shortfall nobody notices and
+/// everybody's thumb does.
+const PIN_FILTER: (usize, usize, usize, usize) = (556, 96, 136, 44);
+
+/// The ruled page's left edge.
+const RULE_X0: usize = 44;
+
+/// The ruled page's right edge: the note's text column.
+const RULE_X1: usize = RULE_X0 + CHARS_PER_LINE * 8;
+
+/// The distance from a line's top to the rule drawn under it.
+const RULE_DY: usize = 30;
 
 // -----------------------------------------------------------------------------
 // Visual Design Tokens
@@ -100,8 +153,26 @@ pub struct AppState {
     /// distinguish them. The old code discarded the result of every save,
     /// so a note could be lost while the header still read "Saved".
     pub save_failed: bool,
-    pub scroll_offset_y: i32,
-    pub selected_category: u8, // 0: All, 1: Work, 2: Personal, 3: Ideas, 4: System, 5: Pinned
+    /// The note list's scroll position.
+    ///
+    /// WHY the platform's model and not a hand-rolled offset: the platform
+    /// clamps the offset, draws the thumb and answers "is this list
+    /// scrollable" in one place, and the list that used its own counter
+    /// could scroll past its last card and could not say that it had more.
+    pub list_scroll: ScrollState,
+    /// The soft keyboard's scroll position.
+    ///
+    /// WHY the keyboard scrolls: the symbols page has more rows than the
+    /// dock can show, and a row that cannot be reached is a character that
+    /// cannot be typed.
+    pub kb_scroll: ScrollState,
+    /// Whether the list shows only the pinned notes.
+    ///
+    /// WHY this is separate from the category: a pin is a state a note
+    /// carries, not a category it belongs to. Mixing the two in one row
+    /// made a filter that cannot be combined with a category.
+    pub pinned_only: bool,
+    pub selected_category: u8, // 0: All, 1: Work, 2: Personal, 3: Ideas, 4: System
     pub search_active: bool,
     pub search_query: [u8; 32],
     pub search_len: usize,
@@ -130,6 +201,10 @@ impl AppState {
         self.save_failed = !ok;
         if ok {
             self.storage = StorageState::Ready;
+            // WHY the notes are published after a write: the document the
+            // file manager and the launcher read has to be the note the
+            // user just wrote.
+            self.publish_notes();
         }
         ok
     }
@@ -182,11 +257,13 @@ impl AppState {
             };
 
             // Category filter
-            if self.selected_category == 5 {
-                if !note.is_pinned {
-                    continue;
-                }
-            } else if self.selected_category > 0 && note.category != self.selected_category {
+            //
+            // WHY the pin is not a category: a pin is a state the note
+            // carries, and it has its own filter beside the categories.
+            if self.selected_category > 0 && note.category != self.selected_category {
+                continue;
+            }
+            if self.pinned_only && !note.is_pinned {
                 continue;
             }
 
@@ -203,6 +280,55 @@ impl AppState {
             count += 1;
         }
         count
+    }
+
+    /// Re-derives the note list's scroll extent from the notes it shows.
+    ///
+    /// WHY the extent follows the *filtered* count: the old counter used
+    /// the store's count, so a search that matched two of sixteen notes
+    /// still scrolled as if all sixteen were there, and a note below the
+    /// fold could not be reached.
+    pub fn sync_list_extent(&mut self) {
+        let mut filtered = [0usize; MAX_NOTES];
+        let visible = self.filtered_indices(&mut filtered);
+        self.list_scroll = ScrollState::new(
+            visible * CARD_STRIDE,
+            LIST_VIEWPORT_H,
+            self.list_scroll.offset,
+        );
+    }
+
+    /// Re-derives the soft keyboard's scroll extent from the page it shows.
+    pub fn sync_kb_extent(&mut self) {
+        self.kb_scroll = ScrollState::new(
+            keyboard::content_h(self.kb_symbols),
+            keyboard::viewport_h(),
+            self.kb_scroll.offset,
+        );
+    }
+
+    /// Publishes every note as a document the device can find, and asks the
+    /// platform to describe them again.
+    ///
+    /// WHY the app publishes its notes: the note store lives in the app's
+    /// own sandbox, and a sandbox is private. The file manager could not
+    /// list a note, the launcher's search could not find one and the
+    /// platform's document index did not know that notes existed.
+    ///
+    /// Returns how many documents were written.
+    pub fn publish_notes(&mut self) -> usize {
+        let mut written = 0usize;
+        for i in 0..self.store.count() {
+            let note = self.store.get_by_index(i).copied();
+            let Some(note) = note else { continue };
+            if library::publish_note(&note) == library::PublishOutcome::Written {
+                written += 1;
+            }
+        }
+        if written > 0 {
+            library::refresh_index();
+        }
+        written
     }
 }
 
@@ -577,115 +703,10 @@ fn draw_plus_glyph(x: usize, y: usize, cx: usize, cy: usize, color: u32) -> Opti
 // Soft Keyboard Layout (Docked at Screen Bottom: y: 980..1410)
 // -----------------------------------------------------------------------------
 
-const KB_Y0: usize = 980;
-const KB_Y1: usize = 1410;
+/// The keyboard dock's edges, from the platform's key table.
+const KB_Y0: usize = keyboard::KB_Y0;
+const KB_Y1: usize = keyboard::KB_Y1;
 
-fn get_soft_keyboard_char(x: usize, y: usize, shift: bool, symbols: bool) -> Option<u8> {
-    if y < KB_Y0 || y >= KB_Y1 {
-        return None;
-    }
-
-    if symbols {
-        // Row 0: 1 2 3 4 5 6 7 8 9 0 (y: 994..1066)
-        if y >= 994 && y <= 1066 {
-            let col = (x.saturating_sub(15)) / 70;
-            if col < 10 {
-                return Some(b"1234567890"[col]);
-            }
-        }
-        // Row 1: - / : ; ( ) $ & @ " (y: 1076..1148)
-        if y >= 1076 && y <= 1148 {
-            let col = (x.saturating_sub(15)) / 70;
-            if col < 10 {
-                return Some(b"-/:;()$&@\""[col]);
-            }
-        }
-        // Row 2: ABC, ? ! ' # % * + = Backspace (y: 1158..1230)
-        if y >= 1158 && y <= 1230 {
-            if x >= 15 && x <= 95 {
-                return Some(0xFE); // toggle ABC
-            }
-            if x >= 620 && x <= 705 {
-                return Some(8); // Backspace
-            }
-            let col = (x.saturating_sub(105)) / 64;
-            if col < 8 {
-                return Some(b"?!'#%*+="[col]);
-            }
-        }
-        // Row 3: comma, space, period, done (y: 1240..1312)
-        if y >= 1240 && y <= 1312 {
-            if x >= 15 && x <= 115 {
-                return Some(0xFE); // Back to ABC
-            }
-            if x >= 125 && x <= 195 {
-                return Some(b',');
-            }
-            if x >= 205 && x <= 515 {
-                return Some(b' ');
-            }
-            if x >= 525 && x <= 595 {
-                return Some(b'.');
-            }
-            if x >= 605 && x <= 705 {
-                return Some(0xFD); // Dismiss / Done
-            }
-        }
-        return None;
-    }
-
-    // Standard QWERTY
-    // Row 0: Q W E R T Y U I O P (y: 994..1066)
-    if y >= 994 && y <= 1066 {
-        let col = (x.saturating_sub(15)) / 70;
-        if col < 10 {
-            let ch = b"QWERTYUIOP"[col];
-            return Some(if shift { ch } else { ch.to_ascii_lowercase() });
-        }
-    }
-    // Row 1: A S D F G H J K L (y: 1076..1148)
-    if y >= 1076 && y <= 1148 {
-        let col = (x.saturating_sub(46)) / 70;
-        if col < 9 {
-            let ch = b"ASDFGHJKL"[col];
-            return Some(if shift { ch } else { ch.to_ascii_lowercase() });
-        }
-    }
-    // Row 2: Shift, Z X C V B N M, Backspace (y: 1158..1230)
-    if y >= 1158 && y <= 1230 {
-        if x >= 15 && x <= 95 {
-            return Some(0xFF); // Shift toggle
-        }
-        if x >= 620 && x <= 705 {
-            return Some(8); // Backspace
-        }
-        let col = (x.saturating_sub(105)) / 70;
-        if col < 7 {
-            let ch = b"ZXCVBNM"[col];
-            return Some(if shift { ch } else { ch.to_ascii_lowercase() });
-        }
-    }
-    // Row 3: 123, comma, space, period, Done (y: 1240..1312)
-    if y >= 1240 && y <= 1312 {
-        if x >= 15 && x <= 115 {
-            return Some(0xFE); // toggle symbols
-        }
-        if x >= 125 && x <= 195 {
-            return Some(b',');
-        }
-        if x >= 205 && x <= 515 {
-            return Some(b' ');
-        }
-        if x >= 525 && x <= 595 {
-            return Some(b'.');
-        }
-        if x >= 605 && x <= 705 {
-            return Some(0xFD); // Dismiss / Done
-        }
-    }
-
-    None
-}
 
 // -----------------------------------------------------------------------------
 // Pixel Rendering Engine (Zero Allocation Shader)
@@ -888,26 +909,28 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
         return THEME.surface;
     }
 
-    // --- B. Category Filter Chips (y: 96..138) ---
+    // --- B. Category Filter Chips and the Pin Filter (y: 96..138) ---
     // Clean 18px gap below search bar
+    //
+    // WHY the pin is not a sixth chip: a pin is a state a note carries, and
+    // a state is not a category. Mixed into the category row it could not
+    // be combined with a category, and a person who wanted the pinned
+    // notes of one category could not have them.
     if y >= 96 && y <= 138 {
-        let chip_xs = [28usize, 126, 224, 344, 442, 552];
-        let chip_ws = [88usize, 88, 110, 88, 100, 100];
-        let chip_names = [
-            b"All" as &[u8],
-            b"Work",
-            b"Personal",
-            b"Ideas",
-            b"System",
-            b"Pinned",
+        let chip_names: [&[u8]; 5] = [
+            CATEGORY_NAMES[0],
+            CATEGORY_NAMES[1],
+            CATEGORY_NAMES[2],
+            CATEGORY_NAMES[3],
+            CATEGORY_NAMES[4],
         ];
 
-        for i in 0..6 {
-            let cx = chip_xs[i];
-            let cw = chip_ws[i];
+        for i in 0..5 {
+            let cx = CHIP_XS[i];
+            let cw = CHIP_WS[i];
             if x >= cx && x < cx + cw {
                 let is_active = state.selected_category as usize == i;
-                if in_rounded_rect(x, y, cx, 96, cw, 42, 14) {
+                if in_rounded_rect(x, y, cx, 96, cw, 44, 14) {
                     if is_active {
                         let txt_color = THEME.on_surface;
                         let text_x = cx + (cw - chip_names[i].len() * 8) / 2;
@@ -916,7 +939,7 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
                         }
                         return THEME.primary;
                     } else {
-                        if !in_rounded_rect(x, y, cx + 1, 97, cw - 2, 40, 13) {
+                        if !in_rounded_rect(x, y, cx + 1, 97, cw - 2, 42, 13) {
                             return THEME.border;
                         }
                         let text_x = cx + (cw - chip_names[i].len() * 8) / 2;
@@ -927,6 +950,31 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
                     }
                 }
             }
+        }
+
+        // The pin filter.
+        if in_rounded_rect(x, y, PIN_FILTER.0, PIN_FILTER.1, PIN_FILTER.2, PIN_FILTER.3, 14) {
+            let active = state.pinned_only;
+            let fill = if active { THEME.primary } else { THEME.surface_container };
+            let ink = if active { THEME.on_surface } else { THEME.on_surface_variant };
+            if !active && !in_rounded_rect(
+                x,
+                y,
+                PIN_FILTER.0 + 1,
+                PIN_FILTER.1 + 1,
+                PIN_FILTER.2 - 2,
+                PIN_FILTER.3 - 2,
+                13,
+            ) {
+                return THEME.border;
+            }
+            if let Some(c) = draw_pin_glyph(x, y, PIN_FILTER.0 + 22, PIN_FILTER.1 + 22, active, ink) {
+                return c;
+            }
+            if let Some(c) = test_text(x, y, PIN_FILTER.0 + 40, 109, 1, b"PINNED", ink, fill, false) {
+                return c;
+            }
+            return fill;
         }
         return THEME.surface;
     }
@@ -1029,9 +1077,8 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
         }
 
         // Generous, breathable card metrics (Zero text overlapping)
-        let card_h = 216;
-        let card_gap = 20;
-        let stride = card_h + card_gap; // 236 px
+        let card_h = CARD_H;
+        let stride = CARD_STRIDE;
 
         for slot in 0..visible_count {
             let note_idx = filtered[slot];
@@ -1040,7 +1087,11 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
                 None => continue,
             };
 
-            let cy0 = (164 - state.scroll_offset_y + (slot * stride) as i32) as isize;
+            // WHY the offset is subtracted here and not stored per card:
+            // the platform's scroll model owns the position, and the card
+            // that is drawn is the one the model says is under the finger.
+            let cy0 = LIST_TOP as isize - state.list_scroll.offset as isize
+                + (slot * stride) as isize;
             let cy1 = cy0 + card_h as isize;
 
             let iy = y as isize;
@@ -1147,6 +1198,20 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
                 }
 
                 return theme.bg;
+            }
+        }
+
+        // The scroll thumb.
+        //
+        // WHY the thumb is drawn: a list that has more cards than the band
+        // can show has to say so, and a thumb is the platform's own way of
+        // saying it.
+        if let Some((thumb_y, thumb_h)) =
+            state.list_scroll.thumb_rect(LIST_TOP, LIST_VIEWPORT_H, LIST_TRACK_W)
+        {
+            if x >= LIST_TRACK_X && x < LIST_TRACK_X + LIST_TRACK_W && y >= thumb_y && y < thumb_y + thumb_h
+            {
+                return THEME.primary;
             }
         }
 
@@ -1401,6 +1466,25 @@ fn render_note_editor(x: usize, y: usize, state: &AppState) -> u32 {
     // Starts at y: 176 (clean 26px below title text)
     let body_max_y = if state.keyboard_visible { 910 } else { 1318 };
     if y >= 170 && y < body_max_y {
+        // The ruled page.
+        //
+        // WHY the page is ruled: the design document asks for a ruled note
+        // page, and an editor with no geometry under the text gives the
+        // writer nothing to write on. The rule belongs to the note, so it
+        // is drawn in the note's own border colour and not in the app's.
+        if y >= 176 + RULE_DY && x >= RULE_X0 && x < RULE_X1 {
+            let line_index = (y - 176 - RULE_DY) / 36;
+            if (y - 176 - RULE_DY) % 36 == 0 {
+                let ruled = if state.editor_buf.len == 0 {
+                    line_index == 0
+                } else {
+                    line_index < state.line_spans_count
+                };
+                if ruled {
+                    return theme.border;
+                }
+            }
+        }
         if state.editor_buf.len == 0 {
             if let Some(c) = test_text(x, y, 44, 176, 1, b"Note", theme.text_muted, theme.bg, false) {
                 return c;
@@ -1484,143 +1568,84 @@ fn render_soft_keyboard(x: usize, y: usize, state: &AppState) -> u32 {
         return THEME.border;
     }
 
-    // Row 0: Q W E R T Y U I O P (y: 994..1066)
-    if y >= 994 && y <= 1066 {
-        let col = (x.saturating_sub(15)) / 70;
-        let kx = 15 + col * 70;
-        if col < 10 && x >= kx + 3 && x <= kx + 63 {
-            if in_rounded_rect(x, y, kx + 3, 994, 60, 72, 10) {
-                let ch = if state.kb_symbols {
-                    b"1234567890"[col]
-                } else {
-                    let c = b"QWERTYUIOP"[col];
-                    if state.kb_shift { c } else { c.to_ascii_lowercase() }
-                };
-                let ch_buf = [ch];
-                if let Some(c) = test_text(x, y, kx + 25, 1006, 2, &ch_buf, THEME.on_surface, THEME.surface_container_high, true) {
-                    return c;
-                }
-                return THEME.surface_container_high;
-            }
+    // The key sheet.
+    //
+    // WHY the keys come from a table: the sheet scrolls when it has more
+    // rows than the dock can show, and a sheet that scrolls has to know
+    // where its keys are at every offset. The table is the one description
+    // the renderer and the tap handler share.
+    //
+    // WHY the keys are the platform's pills: a key is a small control, and
+    // a control that invents its own fill, its own radius and its own ink
+    // is a control a third-party app cannot match.
+    let rows = keyboard::rows(state.kb_symbols);
+    let offset = state.kb_scroll.offset;
+    for (index, row) in rows.iter().enumerate() {
+        let top = keyboard::row_y(index, offset);
+        if top >= KB_Y1 {
+            break;
         }
-    }
-
-    // Row 1: A S D F G H J K L (y: 1076..1148)
-    if y >= 1076 && y <= 1148 {
-        let col = (x.saturating_sub(46)) / 70;
-        let kx = 46 + col * 70;
-        if col < 9 && x >= kx + 3 && x <= kx + 63 {
-            if in_rounded_rect(x, y, kx + 3, 1076, 60, 72, 10) {
-                let ch = if state.kb_symbols {
-                    b"-/:;()$&@\""[col]
-                } else {
-                    let c = b"ASDFGHJKL"[col];
-                    if state.kb_shift { c } else { c.to_ascii_lowercase() }
-                };
-                let ch_buf = [ch];
-                if let Some(c) = test_text(x, y, kx + 25, 1088, 2, &ch_buf, THEME.on_surface, THEME.surface_container_high, true) {
-                    return c;
-                }
-                return THEME.surface_container_high;
-            }
+        if top + keyboard::KB_KEY_H <= KB_Y0 {
+            continue;
         }
-    }
-
-    // Row 2: Shift, Letters, Backspace (y: 1158..1230)
-    if y >= 1158 && y <= 1230 {
-        // Shift key (15..95)
-        if x >= 15 && x <= 95 {
-            if in_rounded_rect(x, y, 15, 1158, 80, 72, 10) {
-                let fill = if state.kb_shift { THEME.primary } else { THEME.surface_container };
-                let txt = if state.kb_symbols { b"ABC" as &[u8] } else { b"^" as &[u8] };
-                if let Some(c) = test_text(x, y, 42, 1182, 1, txt, THEME.on_surface, fill, true) {
-                    return c;
+        for key in row.keys {
+            let action = key.action;
+            let kx = key.x;
+            let kw = key.w;
+            if x < kx || x >= kx + kw {
+                continue;
+            }
+            if y < top || y >= top + keyboard::KB_KEY_H {
+                continue;
+            }
+            // The platform's pill treatment.
+            let fill = THEME.surface_container_high;
+            if in_rounded_rect(x, y, kx + 3, top, kw - 6, keyboard::KB_KEY_H - 12, THEME.radii.pill) {
+                // The character the key types, in the case the shift state
+                // asks for.
+                if let Some(c) = keyboard::char_of(keyboard::shifted(action, state.kb_shift)) {
+                    let ch_buf = [c];
+                    if let Some(c) = test_text(x, y, kx + (kw - 8) / 2, top + 12, 2, &ch_buf, THEME.on_surface, fill, true) {
+                        return c;
+                    }
+                    return fill;
+                }
+                match action {
+                    KeyAction::Char(_) => {
+                        // The character was drawn above.
+                    }
+                    KeyAction::Shift => {
+                        let label: &[u8] = if state.kb_symbols { b"ABC" } else { b"^" };
+                        if let Some(c) = test_text(x, y, kx + (kw - label.len() * 8) / 2, top + 26, 1, label, THEME.on_surface, fill, true) {
+                            return c;
+                        }
+                    }
+                    KeyAction::Symbols => {
+                        let label: &[u8] = if state.kb_symbols { b"ABC" } else { b"?123" };
+                        if let Some(c) = test_text(x, y, kx + (kw - label.len() * 8) / 2, top + 26, 1, label, THEME.on_surface, fill, true) {
+                            return c;
+                        }
+                    }
+                    KeyAction::Backspace => {
+                        if let Some(c) = test_text(x, y, kx + (kw - 24) / 2, top + 26, 1, b"<X>", THEME.on_surface, fill, true) {
+                            return c;
+                        }
+                    }
+                    KeyAction::Space => {
+                        if let Some(c) = test_text(x, y, kx + (kw - 40) / 2, top + 26, 1, b"Space", THEME.on_surface_variant, fill, false) {
+                            return c;
+                        }
+                    }
+                    KeyAction::Done => {
+                        if let Some(c) = draw_chevron_down(x, y, kx + kw / 2, top + 36, THEME.on_surface) {
+                            return c;
+                        }
+                    }
                 }
                 return fill;
             }
-        }
-
-        // Center 7 keys: Z X C V B N M
-        let col = (x.saturating_sub(105)) / 70;
-        let kx = 105 + col * 70;
-        if col < 7 && x >= kx + 3 && x <= kx + 63 {
-            if in_rounded_rect(x, y, kx + 3, 1158, 60, 72, 10) {
-                let ch = if state.kb_symbols {
-                    b"?!'#%*+="[col]
-                } else {
-                    let c = b"ZXCVBNM"[col];
-                    if state.kb_shift { c } else { c.to_ascii_lowercase() }
-                };
-                let ch_buf = [ch];
-                if let Some(c) = test_text(x, y, kx + 25, 1170, 2, &ch_buf, THEME.on_surface, THEME.surface_container_high, true) {
-                    return c;
-                }
-                return THEME.surface_container_high;
-            }
-        }
-
-        // Backspace key (620..705)
-        if x >= 620 && x <= 705 {
-            if in_rounded_rect(x, y, 620, 1158, 85, 72, 10) {
-                if let Some(c) = test_text(x, y, 646, 1182, 1, b"<X]", THEME.on_surface, THEME.surface_container, true) {
-                    return c;
-                }
-                return THEME.surface_container;
-            }
-        }
-    }
-
-    // Row 3: 123, Comma, Space, Period, Done (y: 1240..1312)
-    if y >= 1240 && y <= 1312 {
-        // 123 / ABC toggle key (15..115)
-        if x >= 15 && x <= 115 {
-            if in_rounded_rect(x, y, 15, 1240, 100, 72, 10) {
-                let txt = if state.kb_symbols { b"ABC" as &[u8] } else { b"?123" as &[u8] };
-                if let Some(c) = test_text(x, y, 42, 1264, 1, txt, THEME.on_surface, THEME.surface_container, true) {
-                    return c;
-                }
-                return THEME.surface_container;
-            }
-        }
-
-        // Comma key (125..195)
-        if x >= 125 && x <= 195 {
-            if in_rounded_rect(x, y, 125, 1240, 70, 72, 10) {
-                if let Some(c) = test_text(x, y, 155, 1252, 2, b",", THEME.on_surface, THEME.surface_container_high, true) {
-                    return c;
-                }
-                return THEME.surface_container_high;
-            }
-        }
-
-        // Spacebar (205..515)
-        if x >= 205 && x <= 515 {
-            if in_rounded_rect(x, y, 205, 1240, 310, 72, 10) {
-                if let Some(c) = test_text(x, y, 328, 1264, 1, b"Space", THEME.on_surface_variant, THEME.surface_container_high, false) {
-                    return c;
-                }
-                return THEME.surface_container_high;
-            }
-        }
-
-        // Period key (525..595)
-        if x >= 525 && x <= 595 {
-            if in_rounded_rect(x, y, 525, 1240, 70, 72, 10) {
-                if let Some(c) = test_text(x, y, 555, 1252, 2, b".", THEME.on_surface, THEME.surface_container_high, true) {
-                    return c;
-                }
-                return THEME.surface_container_high;
-            }
-        }
-
-        // Done / Dismiss key (605..705)
-        if x >= 605 && x <= 705 {
-            if in_rounded_rect(x, y, 605, 1240, 100, 72, 10) {
-                if let Some(c) = draw_chevron_down(x, y, 655, 1276, THEME.on_surface) {
-                    return c;
-                }
-                return THEME.primary;
-            }
+            // The space between the keys shows the sheet.
+            return THEME.surface_container_low;
         }
     }
 
@@ -1678,6 +1703,10 @@ fn inject_char(state: &mut AppState, code: u8) {
                 state.search_len += 1;
             }
         }
+        // WHY the extent is re-derived: the list shows the notes the search
+        // matches, and a scroll extent that counted every note would scroll
+        // past the last card that is really there.
+        state.sync_list_extent();
         return;
     }
 
@@ -1715,6 +1744,38 @@ fn inject_char(state: &mut AppState, code: u8) {
     }
 }
 
+/// Applies a key of the soft keyboard.
+///
+/// WHY the two views share this: the same key table drives both the list
+/// view's search keyboard and the editor's keyboard, and a key that behaved
+/// differently in each would be a key that lied about what it did.
+fn apply_key_action(state: &mut AppState, action: KeyAction) {
+    match action {
+        KeyAction::Shift => {
+            state.kb_shift = !state.kb_shift;
+        }
+        KeyAction::Symbols => {
+            state.kb_symbols = !state.kb_symbols;
+            // WHY the extent is re-derived: the symbols page has more rows
+            // than the letters page, so the sheet's height and its scroll
+            // position change with the page.
+            state.sync_kb_extent();
+        }
+        KeyAction::Backspace => {
+            inject_char(state, 8);
+        }
+        KeyAction::Space => {
+            inject_char(state, b' ');
+        }
+        KeyAction::Done => {
+            state.keyboard_visible = false;
+        }
+        KeyAction::Char(c) => {
+            inject_char(state, c);
+        }
+    }
+}
+
 fn handle_tap(state: &mut AppState, ux: usize, uy: usize) -> TapAction {
     // 1. Android Home Gesture Bar Exit (x: 240..480, y >= 1400)
     if uy >= 1400 && ux >= 240 && ux <= 480 {
@@ -1732,16 +1793,10 @@ fn handle_tap(state: &mut AppState, ux: usize, uy: usize) -> TapAction {
 
             // Keyboard taps in list view (search typing)
             if state.keyboard_visible && uy >= KB_Y0 && uy <= KB_Y1 {
-                if let Some(code) = get_soft_keyboard_char(ux, uy, state.kb_shift, state.kb_symbols) {
-                    if code == 0xFF {
-                        state.kb_shift = !state.kb_shift;
-                    } else if code == 0xFE {
-                        state.kb_symbols = !state.kb_symbols;
-                    } else if code == 0xFD {
-                        state.keyboard_visible = false;
-                    } else {
-                        inject_char(state, code);
-                    }
+                if let Some(action) =
+                    keyboard::key_at(ux, uy, state.kb_shift, state.kb_symbols, state.kb_scroll.offset)
+                {
+                    apply_key_action(state, action);
                     return TapAction::Redraw;
                 }
             }
@@ -1758,16 +1813,31 @@ fn handle_tap(state: &mut AppState, ux: usize, uy: usize) -> TapAction {
                 return TapAction::Redraw;
             }
 
-            // Category Filter Chips Tap (y: 96..138)
-            if uy >= 96 && uy <= 138 {
-                let chip_xs = [28usize, 126, 224, 344, 442, 552];
-                let chip_ws = [88usize, 88, 110, 88, 100, 100];
-                for i in 0..6 {
-                    if ux >= chip_xs[i] && ux < chip_xs[i] + chip_ws[i] {
+            // Category Filter Chips Tap (y: 96..140)
+            //
+            // WHY the pin has its own control: a pin is a state a note
+            // carries, not a category it belongs to, and the two filters
+            // have to be combinable.
+            //
+            // WHY 140 and not 138: the chip row is 44 logical pixels tall
+            // so it meets the design system's minimum touch target, and
+            // the hit band has to be the row's own height. A band that
+            // stopped two pixels short of the chip would leave the last
+            // two pixels of every chip dead.
+            if uy >= 96 && uy < 140 {
+                for i in 0..5 {
+                    if ux >= CHIP_XS[i] && ux < CHIP_XS[i] + CHIP_WS[i] {
                         state.selected_category = i as u8;
-                        state.scroll_offset_y = 0;
+                        state.list_scroll.offset = 0;
+                        state.sync_list_extent();
                         return TapAction::Redraw;
                     }
+                }
+                if ux >= PIN_FILTER.0 && ux < PIN_FILTER.0 + PIN_FILTER.2 {
+                    state.pinned_only = !state.pinned_only;
+                    state.list_scroll.offset = 0;
+                    state.sync_list_extent();
+                    return TapAction::Redraw;
                 }
             }
 
@@ -1830,12 +1900,12 @@ fn handle_tap(state: &mut AppState, ux: usize, uy: usize) -> TapAction {
             if uy >= 162 && uy <= 1308 {
                 let mut filtered = [0usize; MAX_NOTES];
                 let visible_count = state.filtered_indices(&mut filtered);
-                let card_h = 216;
-                let card_gap = 20;
-                let stride = card_h + card_gap;
+                let card_h = CARD_H;
+                let stride = CARD_STRIDE;
 
                 for slot in 0..visible_count {
-                    let cy0 = (164 - state.scroll_offset_y + (slot * stride) as i32) as isize;
+                    let cy0 = LIST_TOP as isize - state.list_scroll.offset as isize
+                        + (slot * stride) as isize;
                     let cy1 = cy0 + card_h as isize;
                     let iy = uy as isize;
                     if iy >= cy0 && iy < cy1 && ux >= 28 && ux <= 692 {
@@ -1861,6 +1931,7 @@ fn handle_tap(state: &mut AppState, ux: usize, uy: usize) -> TapAction {
                 state.sync_editor_to_note();
                 state.save_to_storage();
                 state.view = ViewMode::List;
+                state.sync_list_extent();
                 state.keyboard_visible = false;
                 state.swatch_picker_open = false;
                 return TapAction::Redraw;
@@ -1883,6 +1954,7 @@ fn handle_tap(state: &mut AppState, ux: usize, uy: usize) -> TapAction {
             // Top Bar: Trash / Delete at (640, 46, r=22)
             if in_circle(ux, uy, 640, 46, 22) {
                 state.store.delete_note(state.selected_note_id);
+                state.sync_list_extent();
                 state.save_to_storage();
                 state.view = ViewMode::List;
                 state.keyboard_visible = false;
@@ -1952,16 +2024,12 @@ fn handle_tap(state: &mut AppState, ux: usize, uy: usize) -> TapAction {
 
                 // Keyboard Key Taps (y: 980..1408)
                 if uy >= KB_Y0 && uy <= KB_Y1 {
-                    if let Some(code) = get_soft_keyboard_char(ux, uy, state.kb_shift, state.kb_symbols) {
-                        if code == 0xFF {
-                            state.kb_shift = !state.kb_shift;
-                        } else if code == 0xFE {
-                            state.kb_symbols = !state.kb_symbols;
-                        } else if code == 0xFD {
-                            state.keyboard_visible = false;
+                    if let Some(action) =
+                        keyboard::key_at(ux, uy, state.kb_shift, state.kb_symbols, state.kb_scroll.offset)
+                    {
+                        apply_key_action(state, action);
+                        if !state.keyboard_visible {
                             state.swatch_picker_open = false;
-                        } else {
-                            inject_char(state, code);
                         }
                         return TapAction::Redraw;
                     }
@@ -1998,6 +2066,7 @@ fn handle_tap(state: &mut AppState, ux: usize, uy: usize) -> TapAction {
                     // Delete button
                     if in_circle(ux, uy, 630, 1358, 24) {
                         state.store.delete_note(state.selected_note_id);
+                        state.sync_list_extent();
                         state.save_to_storage();
                         state.view = ViewMode::List;
                         return TapAction::Redraw;
@@ -2287,7 +2356,9 @@ pub extern "C" fn _start() -> ! {
         line_spans_count: 0,
         storage: StorageState::Empty,
         save_failed: false,
-        scroll_offset_y: 0,
+        list_scroll: ScrollState::new(0, LIST_VIEWPORT_H, 0),
+        kb_scroll: ScrollState::new(keyboard::content_h(false), keyboard::viewport_h(), 0),
+        pinned_only: false,
         selected_category: 0,
         search_active: false,
         search_query: [0; 32],
@@ -2320,6 +2391,13 @@ pub extern "C" fn _start() -> ! {
     // empty list.
     state.storage = loaded;
     state.now_civil = current_civil_time();
+
+    // The scroll extents follow what the store now holds, and the notes are
+    // published so the file manager, the launcher and the platform's
+    // document index can find them.
+    state.sync_list_extent();
+    state.sync_kb_extent();
+    state.publish_notes();
 
     // Initial frame presentation
     render_notes_ui(surface, &state);
@@ -2373,6 +2451,32 @@ pub extern "C" fn _start() -> ! {
                 }
 
                 if input.kind == 4 || input.kind == 6 || input.kind == 7 || input.kind == 8 || input.kind == 10 {
+                    // A drag that ends over a scrolling band is a scroll
+                    // gesture; anything else is the system's navigation
+                    // gesture.
+                    //
+                    // WHY the drag has to be handled here: the old code
+                    // treated every one of these events as an exit, so a
+                    // person who dragged the note list left the app instead
+                    // of scrolling it, and a note below the fold could not
+                    // be reached.
+                    let over_list = state.view == ViewMode::List
+                        && !state.keyboard_visible
+                        && input.y >= LIST_TOP as u32
+                        && (input.y as usize) < LIST_BOTTOM;
+                    let over_keyboard = state.keyboard_visible
+                        && input.y >= KB_Y0 as u32
+                        && (input.y as usize) < KB_Y1;
+                    if (input.kind == 4 || input.kind == 10) && over_list {
+                        state.list_scroll.apply_drag(input.dy);
+                        needs_redraw = true;
+                        continue;
+                    }
+                    if (input.kind == 4 || input.kind == 10) && over_keyboard {
+                        state.kb_scroll.apply_drag(input.dy);
+                        needs_redraw = true;
+                        continue;
+                    }
                     // System navigation exit gestures
                     let _ = std::surface_destroy(surface);
                     std::exit_with_code(0);
@@ -2390,9 +2494,8 @@ pub extern "C" fn _start() -> ! {
                     }
                 } else if input.kind == 2 {
                     // Touch drag / kinetic scroll event
-                    if state.view == ViewMode::List {
-                        let max_scroll = (state.store.count() as i32 * 236 - 800).max(0);
-                        state.scroll_offset_y = (state.scroll_offset_y - input.dy).clamp(0, max_scroll);
+                    if state.view == ViewMode::List && !state.keyboard_visible {
+                        state.list_scroll.apply_drag(input.dy);
                         needs_redraw = true;
                     }
                 }

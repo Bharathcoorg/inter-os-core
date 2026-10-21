@@ -30,6 +30,7 @@
 #![allow(dead_code)]
 
 use interos_std::design::outline_text;
+use interos_std::design::scroll::ScrollState;
 
 use core::panic::PanicInfo;
 use interos_std as std;
@@ -43,9 +44,9 @@ use std::design::walls;
 
 pub use gallery::{
     decode_bmp, decode_image, decode_ppm, decode_qoi, decode_raw,
-    encode_ppm, has_image_suffix, has_video_suffix, is_media_file, media_at_with_storage,
-    Filter, GalleryTab, Media, StorageMediaItem, Thumbnail, VideoCodec, VideoPlayerState,
-    MAX_STORAGE_ITEMS, THUMB_H, THUMB_W,
+    encode_ppm, grid_row_count, has_image_suffix, has_video_suffix, is_media_file,
+    measure_image_header, media_at_with_storage, Filter, GalleryTab, Media, StorageMediaItem,
+    Thumbnail, VideoCodec, VideoPlayerState, MAX_STORAGE_ITEMS, THUMB_H, THUMB_W,
 };
 
 const W: usize = 720;
@@ -151,24 +152,44 @@ const COL_X: [usize; 3] = [MARGIN, MARGIN + CELL + GUTTER, MARGIN + 2 * (CELL + 
 const HEADER_H: usize = 144;
 const TITLE_Y: usize = 40;
 const SUBTITLE_Y: usize = 78;
+/// The device's own count, on the line under the catalogue's count.
+const DEVICE_LINE_Y: usize = 102;
+
+/// The filter chip row.
+///
+/// WHY the row is on top and not under the tab bar: the tab bar and the chip
+/// row both sat at the same height, so one was drawn over the other and the
+/// chip row was never drawn at all. The row is the media filter - the grid
+/// behind it holds a different set depending on which chip is down - and it
+/// is now a row of its own, drawn by the platform's pill widget.
+const CHIP_Y: usize = 144;
+const CHIP_H: usize = 48;
+/// The gap between two filter chips.
+const CHIP_GAP: usize = 10;
+/// The padding inside a chip, around its label.
+const CHIP_PAD: usize = spacing::GRID_16;
+/// The narrowest a chip may be.
+const CHIP_MIN_W: usize = 64;
+
+/// The labels of the filter chips, in the order the filter enum holds them.
+///
+/// WHY the filter and not the tabs: a chip is a filter over one grid, and the
+/// tabs are destinations. The old chip row carried the tab labels, which
+/// made it a second, undrawn copy of the tab bar.
+const CHIP_LABELS: [&[u8]; 4] = [b"All", b"Wallpapers", b"Photos", b"Videos"];
 
 const PILL_Y: usize = 152;
 const PILL_H: usize = 48;
-/// The gap between two filter chips.
-///
-/// WHY 10 and not a step of the platform's spacing scale: the scale steps in
-/// fours, and the two nearest steps are 8 and 12. A chip row that is 8 apart
-/// reads as a single run of chips and one that is 12 apart reads as two
-/// groups, and 10 is the row this app's own filter bar was drawn at. The
-/// value is used once, so a token of its own would be a token of one app's.
-const PILL_GAP: usize = 10;
-const PILL_PAD: usize = spacing::GRID_16;
-const PILL_MIN_W: usize = 64;
 
-const GRID_TOP: usize = 216;
+const GRID_TOP: usize = 264;
 const ROW_STRIDE: usize = CELL + GUTTER;
-const ROWS: usize = 4;
-/// 216 + 4 x 216 + 3 x 12 = 1116: the grid stops clear of the bottom bar.
+const ROWS: usize = 5;
+/// 264 + 5 x 216 + 4 x 12 = 1392: the grid stops clear of the home strip.
+///
+/// WHY the grid reaches the bottom of the screen now: the bottom section bar
+/// that used to sit here was drawn but never hit-tested, and two of its three
+/// entries named destinations this platform has no index for. The tab bar
+/// above is the navigation, and the space the dead bar held is the grid's.
 const GRID_BOTTOM: usize = GRID_TOP + ROWS * CELL + (ROWS - 1) * GUTTER;
 
 /// Caption strip under a thumbnail's image.
@@ -182,13 +203,10 @@ const NAV_LABEL_Y: usize = 1356;
 /// The system home gesture strip: a 200x6 indicator drawn inside a 240x44 box.
 ///
 /// WHY 44 and not 40: the design system's minimum touch target is 44 logical
-/// pixels, and this strip was 40. The strip now reaches the bottom edge of
-/// the surface, which is where the indicator already was.
+/// pixels, and this strip was 40. The strip now reaches the bottom edge of the
+/// surface, which is where the indicator already was.
 const HOME_HIT: Rect = Rect::new(240, 1396, 240, MIN_TOUCH_TARGET);
 const HOME_PILL: Rect = Rect::new(260, 1418, 200, 6);
-
-const FILTER_BAND_Y0: usize = PILL_Y;
-const FILTER_BAND_Y1: usize = PILL_Y + PILL_H;
 
 // Inspection view geometry.
 const DETAIL_BAR_H: usize = 112;
@@ -254,14 +272,14 @@ const WP_TARGET_BOTH_BTN: Rect = Rect::new(MARGIN + 30, H - 176, W - 2 * MARGIN 
 const WP_TARGET_CANCEL_BTN: Rect = Rect::new(MARGIN + 30, H - 124, W - 2 * MARGIN - 60, 36);
 
 const TAB_LABELS: [&[u8]; 4] = [b"Photos", b"Videos", b"Albums", b"Screenshots"];
-const TAB_Y: usize = 144;
+/// The tab row, under the filter chips.
+const TAB_Y: usize = 204;
 const TAB_H: usize = 48;
 
 const VIDEO_COL_W: usize = (W - 2 * MARGIN - 16) / 2;
 const VIDEO_COL_X: [usize; 2] = [MARGIN, MARGIN + VIDEO_COL_W + 16];
 const VIDEO_ROW_H: usize = 230;
 
-const PILL_LABELS: [&[u8]; 4] = [b"Photos", b"Videos", b"Albums", b"Screenshots"];
 const NAV_LABELS: [&[u8]; 3] = [b"Photos", b"Albums", b"Places"];
 
 // -----------------------------------------------------------------------------
@@ -487,13 +505,14 @@ fn filters_available(app: &GalleryApp) -> bool {
 
 /// How many bottom-bar destinations this build can actually reach.
 ///
-/// WHY 1 and not 3: nothing bound to this app returns an album list or a place
-/// list - the VFS exposes no such index and the platform binds no service that
-/// does - so `Albums` and `Places` had no screen behind them. The wallpaper
-/// catalogue does not change this: it is a set on THIS screen, selected by the
-/// filter chips above, not a destination of its own. Entries at or past this
-/// index are drawn recessed and are not hit-tested.
-const REAL_SECTIONS: usize = 1;
+/// WHY the bar is gone and not shrunk: the platform's document index holds
+/// documents and nothing else - there is no album record and no place record
+/// in it, and no service on this device answers for one - so `Albums` and
+/// `Places` had no screen behind them. The old bar drew them recessed and
+/// hit-tested nothing at all, so two of its three entries were dead and the
+/// third duplicated the tab bar above. The tab bar is the navigation, and the
+/// space the dead bar held is the grid's.
+const REAL_SECTIONS: usize = 0;
 
 /// Ink for an affordance that is painted but has no capability behind it.
 ///
@@ -727,11 +746,27 @@ fn build_image_note(scan: &MediaScan, buf: &mut [u8; 72]) -> usize {
 }
 
 /// Renders the device's real media summary into `buf`.
+///
+/// WHY the two counts are two lines and not one: the built-in wallpaper
+/// catalogue is artwork this app carries, and the photographs are files on
+/// the device. Written side by side they read as two counts of the same
+/// thing, and a reader would take "3 wallpapers, 0 photos on device" to mean
+/// the device holds three photographs.
 fn build_summary(buf: &mut [u8; 48], photos_count: usize) -> usize {
-    let mut n = append_u64(buf, 0, walls::SCENES.len() as u64);
-    n = append(buf, n, b" wallpapers, ");
+    let mut n = append(buf, 0, b"On this device: ");
     n = append_u64(buf, n, photos_count as u64);
-    append(buf, n, b" photos on device")
+    append(buf, n, if photos_count == 1 { b" photo" } else { b" photos" })
+}
+
+/// Renders the built-in catalogue's own count into `buf`.
+///
+/// WHY it says "built-in catalogue": the number is the length of the
+/// wallpaper table this app was built with, not a count of anything the
+/// device holds.
+fn build_catalogue_summary(buf: &mut [u8; 48]) -> usize {
+    let mut n = append(buf, 0, b"Built-in catalogue: ");
+    n = append_u64(buf, n, walls::SCENES.len() as u64);
+    append(buf, n, if walls::SCENES.len() == 1 { b" wallpaper" } else { b" wallpapers" })
 }
 
 /// Renders the wallpaper catalogue's real provenance into `buf`.
@@ -807,6 +842,15 @@ pub struct GalleryApp {
     /// Device media summary, measured once at boot.
     pub summary: [u8; 48],
     pub summary_len: usize,
+    /// The built-in catalogue's own count, on its own line.
+    pub catalogue_summary: [u8; 48],
+    pub catalogue_summary_len: usize,
+    /// Where the grid is scrolled to.
+    ///
+    /// WHY the scroll lives on the app and not in the renderer: the renderer
+    /// runs once per pixel, and a scroll recomputed there would be
+    /// recomputed a million times for one gesture.
+    pub scroll: ScrollState,
     /// The measured media scan, pre-rendered.
     pub scan_line: [u8; 96],
     pub scan_line_len: usize,
@@ -920,6 +964,9 @@ impl GalleryApp {
             detail_meta_len: 0,
             summary: [0u8; 48],
             summary_len: 0,
+            catalogue_summary: [0u8; 48],
+            catalogue_summary_len: 0,
+            scroll: ScrollState::new(0, GRID_BOTTOM - GRID_TOP, 0),
             scan_line: [0u8; 96],
             scan_line_len: 0,
             image_note: [0u8; 72],
@@ -1051,6 +1098,9 @@ impl GalleryApp {
             let pl = append(&mut item.path, 0, record.path.as_bytes());
             item.path_len = pl;
             item.size = record.length;
+            // WHY the modification time is kept: the platform's index holds
+            // it, and the sheet shows it with the source it came from.
+            item.mtime = record.mtime;
             item.is_video = is_video;
 
             let mut fav_key = [0u8; 64];
@@ -1091,12 +1141,53 @@ impl GalleryApp {
         }
     }
 
+    /// Reads a document's own header and measures its dimensions.
+    ///
+    /// WHY the header and not the pixels: the dimensions are in the header,
+    /// and a header is a few dozen bytes. The app can therefore say how big
+    /// the document is without decoding it, and the sheet can say where the
+    /// number came from.
+    ///
+    /// WHY the old build measured nothing: the resolution line under every
+    /// document said "not measured", which is honest but leaves the sheet
+    /// with nothing on it. A header is a measurement the platform's own
+    /// decoders make, and this app can make it too.
     pub fn load_detail_image(&mut self, idx: usize) {
         self.detail_rgba_len = 0;
         self.detail_w = 0;
         self.detail_h = 0;
         if idx >= self.storage_count {
             return;
+        }
+        if self.storage_items[idx].is_video {
+            return;
+        }
+        let mut path_buf = [0u8; 64];
+        let path_len = self.storage_items[idx].path_len.min(64);
+        path_buf[..path_len].copy_from_slice(&self.storage_items[idx].path[..path_len]);
+        let mut name_buf = [0u8; 48];
+        let name_len = self.storage_items[idx].name_len.min(48);
+        name_buf[..name_len].copy_from_slice(&self.storage_items[idx].name[..name_len]);
+        let Ok(path) = core::str::from_utf8(&path_buf[..path_len]) else {
+            return;
+        };
+        let Ok(handle) = std::fs_open(path, std::FS_READ) else {
+            std::log("[GALLERY] The document could not be opened to read its header.").ok();
+            return;
+        };
+        let mut header = [0u8; 64];
+        let read = std::fs_read(handle, &mut header);
+        let _ = std::fs_close(handle);
+        let Ok(n) = read else {
+            std::log("[GALLERY] The document's header could not be read.").ok();
+            return;
+        };
+        if let Some((w, h)) = measure_image_header(&header[..n], &name_buf[..name_len]) {
+            self.storage_items[idx].width = w;
+            self.storage_items[idx].height = h;
+            self.storage_items[idx].has_dimensions = true;
+            self.detail_w = w;
+            self.detail_h = h;
         }
     }
 
@@ -1130,6 +1221,60 @@ impl GalleryApp {
             }
         }
         count
+    }
+
+    /// The number of rows the current tab's grid holds.
+    ///
+    /// WHY it is measured and not a constant: the grid holds what the device
+    /// holds, and a fixed row count would either clip a long library or
+    /// leave an empty band under a short one.
+    pub fn grid_rows(&self) -> usize {
+        match self.tab {
+            GalleryTab::Photos => grid_row_count(self.photos_count(), 3),
+            GalleryTab::Videos => grid_row_count(self.videos_count(), 2),
+            GalleryTab::Albums => 2,
+            GalleryTab::Screenshots => grid_row_count(self.screenshots_count(), 3),
+        }
+    }
+
+    /// The height of the grid's content, which is what the scroll moves over.
+    pub fn grid_content_height(&self) -> usize {
+        match self.tab {
+            GalleryTab::Videos => self.grid_rows() * VIDEO_ROW_H,
+            GalleryTab::Albums => self.grid_rows() * 200,
+            _ => self.grid_rows() * ROW_STRIDE,
+        }
+    }
+
+    /// Scrolls the grid.
+    pub fn scroll_by(&mut self, dy: i32) -> bool {
+        let before = self.scroll.offset;
+        let mut scroll = ScrollState::new(
+            self.grid_content_height(),
+            GRID_BOTTOM - GRID_TOP,
+            self.scroll.offset,
+        );
+        scroll.apply_drag(dy);
+        self.scroll = scroll;
+        self.scroll.offset != before
+    }
+
+    /// Puts the grid back at the top.
+    pub fn reset_scroll(&mut self) {
+        self.scroll = ScrollState::new(0, GRID_BOTTOM - GRID_TOP, 0);
+    }
+
+    /// Brings the scroll state back in step with what the grid now holds.
+    ///
+    /// WHY the content height is rebuilt: the library changed, so the scroll
+    /// has to be told how long the content is, or it would keep a position
+    /// that points past the end.
+    pub fn sync_scroll(&mut self) {
+        self.scroll = ScrollState::new(
+            self.grid_content_height(),
+            GRID_BOTTOM - GRID_TOP,
+            self.scroll.offset,
+        );
     }
 
     pub fn photo_at(&self, mut index: usize) -> Option<Media> {
@@ -1379,9 +1524,12 @@ fn blend_argb(top: u32, bottom: u32, t: usize) -> u32 {
 }
 
 /// One grid cell holding a wallpaper.
-fn wallpaper_cell_pixel(x: usize, y: usize, col: usize) -> u32 {
-    let scene = &walls::SCENES[col];
-    let rect = Rect::new(COL_X[col], GRID_TOP, CELL, CELL);
+///
+/// WHY the cell's top is a parameter: the grid scrolls, and a cell drawn at a
+/// fixed height would sit still while the grid moved under it.
+fn wallpaper_cell_pixel(x: usize, y: usize, index: usize, col: usize, y0: usize) -> u32 {
+    let scene = &walls::SCENES[index];
+    let rect = Rect::new(COL_X[col], y0, CELL, CELL);
     let Some(shape) = draw_rounded_rect(x, y, rect, radius::SMALL, THEME.surface_container, Some(THEME.border), 1) else {
         return THEME.surface;
     };
@@ -1416,12 +1564,11 @@ fn wallpaper_cell_pixel(x: usize, y: usize, col: usize) -> u32 {
 }
 
 /// One grid cell holding a photo-ledger record.
-fn photo_cell_pixel(x: usize, y: usize, idx: usize, col: usize, row: usize) -> u32 {
+fn photo_cell_pixel(x: usize, y: usize, idx: usize, col: usize, y0: usize) -> u32 {
     let Some(photo) = PHOTOS.get(idx) else {
         return THEME.surface;
     };
     let x0 = COL_X[col];
-    let y0 = GRID_TOP + row * ROW_STRIDE;
     let Some(shape) = draw_rounded_rect(
         x,
         y,
@@ -1440,13 +1587,12 @@ fn photo_cell_pixel(x: usize, y: usize, idx: usize, col: usize, row: usize) -> u
     blend_argb(photo.primary_color, photo.secondary_color, t)
 }
 
-fn storage_cell_pixel(x: usize, y: usize, app: &GalleryApp, idx: usize, col: usize, row: usize) -> u32 {
+fn storage_cell_pixel(x: usize, y: usize, app: &GalleryApp, idx: usize, col: usize, y0: usize) -> u32 {
     if idx >= app.storage_count {
         return THEME.surface;
     }
     let item = &app.storage_items[idx];
     let x0 = COL_X[col];
-    let y0 = GRID_TOP + row * ROW_STRIDE;
     let rect = Rect::new(x0, y0, CELL, CELL);
     let Some(shape) = draw_rounded_rect(
         x,
@@ -1525,38 +1671,45 @@ fn storage_cell_pixel(x: usize, y: usize, app: &GalleryApp, idx: usize, col: usi
     THEME.surface_container
 }
 
-fn item_pixel(x: usize, y: usize, app: &GalleryApp, media: Media, col: usize, row: usize) -> u32 {
+fn item_pixel(x: usize, y: usize, app: &GalleryApp, media: Media, col: usize, y0: usize) -> u32 {
     match media {
-        Media::Wallpaper(_) => wallpaper_cell_pixel(x, y, col),
-        Media::Photo(idx) => photo_cell_pixel(x, y, idx, col, row),
-        Media::StorageItem(idx) => storage_cell_pixel(x, y, app, idx, col, row),
+        Media::Wallpaper(idx) => wallpaper_cell_pixel(x, y, idx, col, y0),
+        Media::Photo(idx) => photo_cell_pixel(x, y, idx, col, y0),
+        Media::StorageItem(idx) => storage_cell_pixel(x, y, app, idx, col, y0),
     }
 }
 
 // -----------------------------------------------------------------------------
-// Segmented filter tabs - geometry derived from the real font metrics so the
-// rendered pill and the hit-test are always the same rectangle.
+// The filter chip row
+//
+// WHY the platform's pill and not a hand-drawn chip: the chip is the
+// platform's own control, and a filter row that looks like the shell's
+// controls is one a user already knows how to read. The row is also live:
+// a chip that is drawn but cannot be chosen is an affordance that lies.
 // -----------------------------------------------------------------------------
-fn pill_rect(index: usize) -> Rect {
+
+/// The chip at an index, from the label's own measured width.
+fn chip_rect(index: usize) -> Rect {
     let mut x = MARGIN;
-    for (i, label) in PILL_LABELS.iter().enumerate() {
-        let w = (font::measure(label, 2) + PILL_PAD * 2).max(PILL_MIN_W);
-        let rect = Rect::new(x, PILL_Y, w, PILL_H);
+    for (i, label) in CHIP_LABELS.iter().enumerate() {
+        let w = (font::measure(label, 1) + CHIP_PAD * 2).max(CHIP_MIN_W);
+        let rect = Rect::new(x, CHIP_Y, w, CHIP_H);
         if i == index {
             return rect;
         }
-        x += w + PILL_GAP;
+        x += w + CHIP_GAP;
     }
     Rect::new(0, 0, 0, 0)
 }
 
-fn pill_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
-    if y < PILL_Y || y >= PILL_Y + PILL_H {
+/// The chip row, drawn with the platform's pill widget.
+fn chip_row_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
+    if y < CHIP_Y || y >= CHIP_Y + CHIP_H {
         return None;
     }
     let available = filters_available(app);
-    for (i, label) in PILL_LABELS.iter().enumerate() {
-        let rect = pill_rect(i);
+    for (i, label) in CHIP_LABELS.iter().enumerate() {
+        let rect = chip_rect(i);
         if !rect.contains(x, y) {
             continue;
         }
@@ -1577,13 +1730,14 @@ fn pill_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
             return Some(shape);
         }
         // WHY `drawn_advance` here too: the label is drawn by the same
-        // `text` funnel the ledger title uses, so at scale 2 it lands on the
-        // outline face and centring on the bitmap measure would leave it off
-        // the pill's centre by the same 1-4% of its width. On the bitmap
+        // `text` funnel the ledger title uses, so at scale 2 it lands on
+        // the outline face and centring on the bitmap measure would leave it off
+        // the chip's centre by the same 1-4% of its width. On the bitmap
         // fallback the answer is the measure the rasteriser steps by.
-        let lw = outline_text::drawn_advance(label, 2, None).unwrap_or_else(|| font::measure(label, 2));
+        let lw = outline_text::drawn_advance(label, 1, None).unwrap_or_else(|| font::measure(label, 1));
         let lx = rect.x + rect.w.saturating_sub(lw) / 2;
-        if let Some(c) = text(x, y, lx, PILL_Y, 2, label, ink, fill) {
+        let ly = CHIP_Y + (CHIP_H.saturating_sub(font::line_height(1))) / 2;
+        if let Some(c) = text(x, y, lx, ly, 1, label, ink, fill) {
             return Some(c);
         }
         return Some(fill);
@@ -1591,7 +1745,26 @@ fn pill_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
     None
 }
 
-/// Modern flagship media suite tab bar with neon cyan active underline indicator.
+/// The chip at a point, or `None`.
+///
+/// WHY it is a function and not a table: the row is drawn from the labels'
+/// measured widths, and a hit test that used its own table would land on a
+/// different chip than the one under the finger.
+fn chip_at(x: usize, y: usize) -> Option<usize> {
+    if y < CHIP_Y || y >= CHIP_Y + CHIP_H {
+        return None;
+    }
+    for (i, _) in CHIP_LABELS.iter().enumerate() {
+        if chip_rect(i).contains(x, y) {
+            return Some(i);
+        }
+    }
+    None
+}
+
+// -----------------------------------------------------------------------------
+// Modern flagship media suite tab bar with neon cyan active underline indicator.
+// -----------------------------------------------------------------------------
 fn tab_bar_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
     if y < TAB_Y || y >= TAB_Y + TAB_H {
         return None;
@@ -1644,13 +1817,18 @@ fn col_of(x: usize) -> Option<usize> {
     None
 }
 
-fn row_of(y: usize) -> Option<usize> {
+fn row_of(app: &GalleryApp, y: usize) -> Option<usize> {
     if y < GRID_TOP || y >= GRID_BOTTOM {
         return None;
     }
-    let rel = y - GRID_TOP;
+    // WHY the scroll is added back: the row a point is in is the row the
+    // grid shows at that point, and the grid is scrolled.
+    let rel = y - GRID_TOP + app.scroll.offset;
     let row = rel / ROW_STRIDE;
-    if row >= ROWS || rel % ROW_STRIDE >= CELL {
+    if row >= app.grid_rows() {
+        return None;
+    }
+    if rel % ROW_STRIDE >= CELL {
         return None;
     }
     Some(row)
@@ -1814,21 +1992,23 @@ fn video_col_of(x: usize) -> Option<usize> {
     None
 }
 
-fn video_row_of(y: usize) -> Option<usize> {
+fn video_row_of(app: &GalleryApp, y: usize) -> Option<usize> {
     if y < GRID_TOP || y >= GRID_BOTTOM {
         return None;
     }
-    let rel = y - GRID_TOP;
+    let rel = y - GRID_TOP + app.scroll.offset;
     let row = rel / VIDEO_ROW_H;
+    if row >= app.grid_rows() {
+        return None;
+    }
     if rel % VIDEO_ROW_H >= 210 {
         return None;
     }
     Some(row)
 }
 
-fn video_card_pixel(x: usize, y: usize, app: &GalleryApp, storage_idx: usize, col: usize, row: usize) -> u32 {
+fn video_card_pixel(x: usize, y: usize, app: &GalleryApp, storage_idx: usize, col: usize, y0: usize) -> u32 {
     let x0 = VIDEO_COL_X[col];
-    let y0 = GRID_TOP + row * VIDEO_ROW_H;
     let card_rect = Rect::new(x0, y0, VIDEO_COL_W, 210);
 
     let Some(shape) = draw_rounded_rect(x, y, card_rect, radius::SMALL, THEME.surface_container, Some(THEME.border), 1) else {
@@ -1947,14 +2127,15 @@ fn video_card_pixel(x: usize, y: usize, app: &GalleryApp, storage_idx: usize, co
 }
 
 fn photos_grid_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
-    if let (Some(col), Some(row)) = (col_of(x), row_of(y)) {
+    if let (Some(col), Some(row)) = (col_of(x), row_of(app, y)) {
         let index = row * 3 + col;
+        let y0 = GRID_TOP + row * ROW_STRIDE - app.scroll.offset;
         if app.filter == Filter::Wallpapers {
             if index < walls::SCENES.len() {
-                return Some(wallpaper_cell_pixel(x, y, index));
+                return Some(wallpaper_cell_pixel(x, y, index, col, y0));
             }
         } else if let Some(media) = app.photo_at(index) {
-            return Some(item_pixel(x, y, app, media, col, row));
+            return Some(item_pixel(x, y, app, media, col, y0));
         }
     }
 
@@ -1983,10 +2164,11 @@ fn videos_grid_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
         return Some(THEME.surface);
     }
 
-    if let (Some(col), Some(row)) = (video_col_of(x), video_row_of(y)) {
+    if let (Some(col), Some(row)) = (video_col_of(x), video_row_of(app, y)) {
         let index = row * 2 + col;
+        let y0 = GRID_TOP + row * VIDEO_ROW_H - app.scroll.offset;
         if let Some(storage_idx) = app.video_at(index) {
-            return Some(video_card_pixel(x, y, app, storage_idx, col, row));
+            return Some(video_card_pixel(x, y, app, storage_idx, col, y0));
         }
     }
 
@@ -2002,7 +2184,7 @@ fn albums_grid_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
         return Some(THEME.surface);
     };
 
-    let rel_y = y - GRID_TOP;
+    let rel_y = y - GRID_TOP + app.scroll.offset;
     let row = rel_y / 200;
     if row >= 2 || rel_y % 200 >= 180 {
         return Some(THEME.surface);
@@ -2010,7 +2192,7 @@ fn albums_grid_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
 
     let album_idx = row * 2 + col;
     let x0 = VIDEO_COL_X[col];
-    let y0 = GRID_TOP + row * 200;
+    let y0 = GRID_TOP + row * 200 - app.scroll.offset;
     let card_rect = Rect::new(x0, y0, VIDEO_COL_W, 180);
 
     let Some(shape) = draw_rounded_rect(x, y, card_rect, radius::SMALL, THEME.surface_container, Some(THEME.border), 1) else {
@@ -2053,7 +2235,11 @@ fn albums_grid_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
         0 => (b"Camera", app.album_count(0)),
         1 => (b"Screenshots", app.screenshots_count()),
         2 => (b"Downloads", app.album_count(2)),
-        _ => (b"Sovereign Media", walls::SCENES.len()),
+        // WHY the fourth album names itself: the count under it is the
+        // length of the wallpaper table this app was built with, and
+        // "Sovereign Media" beside a real device count read as a library
+        // this device holds. It is the built-in catalogue and it says so.
+        _ => (b"Built-in Set", walls::SCENES.len()),
     };
 
     if let Some(c) = text(x, y, x0 + 16, y0 + banner_h + 12, 2, title, THEME.on_surface, THEME.surface_container) {
@@ -2062,7 +2248,7 @@ fn albums_grid_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
 
     let mut count_buf = [0u8; 32];
     let mut cn = append_u64(&mut count_buf, 0, count as u64);
-    cn = append(&mut count_buf, cn, b" items");
+    cn = append(&mut count_buf, cn, if album_idx == 3 { b" built-in scenes" } else { b" items" });
     if let Some(c) = text(x, y, x0 + 16, y0 + banner_h + 46, 1, &count_buf[..cn], THEME.on_surface_variant, THEME.surface_container) {
         return Some(c);
     }
@@ -2087,10 +2273,11 @@ fn screenshots_grid_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
         return Some(THEME.surface);
     }
 
-    if let (Some(col), Some(row)) = (col_of(x), row_of(y)) {
+    if let (Some(col), Some(row)) = (col_of(x), row_of(app, y)) {
         let index = row * 3 + col;
+        let y0 = GRID_TOP + row * ROW_STRIDE - app.scroll.offset;
         if let Some(storage_idx) = app.screenshot_at(index) {
-            return Some(storage_cell_pixel(x, y, app, storage_idx, col, row));
+            return Some(storage_cell_pixel(x, y, app, storage_idx, col, y0));
         }
     }
 
@@ -2102,62 +2289,25 @@ fn grid_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
         return None;
     }
 
+    // The scroll indicator, over the grid.
+    //
+    // WHY it is drawn here: a library larger than the band it is drawn in is
+    // only reachable if the user can see that there is more of it, and the
+    // indicator is the only thing on the screen that says so.
+    if let Some((thumb_y, thumb_h)) = app.scroll.thumb_rect(GRID_TOP + 8, GRID_BOTTOM - GRID_TOP - 16, 32)
+    {
+        let tx = W - 8;
+        if x >= tx && x < tx + 4 && y >= thumb_y && y < thumb_y + thumb_h {
+            return Some(THEME.primary);
+        }
+    }
+
     match app.tab {
         GalleryTab::Photos => photos_grid_pixel(x, y, app),
         GalleryTab::Videos => videos_grid_pixel(x, y, app),
         GalleryTab::Albums => albums_grid_pixel(x, y, app),
         GalleryTab::Screenshots => screenshots_grid_pixel(x, y, app),
     }
-}
-
-// -----------------------------------------------------------------------------
-// Bottom section bar
-// -----------------------------------------------------------------------------
-/// WHY the bar takes no `&GalleryApp`: with `REAL_SECTIONS == 1` there is
-/// exactly one reachable destination, so a stored "selected tab" would always be
-/// 0 and would only pretend to be state. The bar marks where this screen is, and
-/// marks the destinations it cannot reach as recessed.
-fn nav_pixel(x: usize, y: usize) -> Option<u32> {
-    if y < NAV_Y0 || y >= NAV_Y1 {
-        return None;
-    }
-    if y == NAV_Y0 {
-        return Some(THEME.border);
-    }
-    for (i, label) in NAV_LABELS.iter().enumerate() {
-        let box_x0 = i * (W / 3);
-        if x < box_x0 || x >= box_x0 + W / 3 {
-            continue;
-        }
-        let cx = box_x0 + W / 6;
-        // WHY the hairline ink past the real destinations: it is the same token
-        // the unavailable filter chips use, so "painted but not actionable" looks
-        // identical wherever the user meets it.
-        let color = if i < REAL_SECTIONS { THEME.on_surface } else { THEME.border };
-        let is_icon = match i {
-            0 => tab_photos_icon(x, y, cx, NAV_ICON_CY),
-            1 => tab_albums_icon(x, y, cx, NAV_ICON_CY),
-            _ => tab_places_icon(x, y, cx, NAV_ICON_CY),
-        };
-        if is_icon {
-            return Some(color);
-        }
-        if let Some(c) = text_centered(
-            x,
-            y,
-            box_x0,
-            NAV_LABEL_Y,
-            W / 3,
-            1,
-            label,
-            color,
-            THEME.surface_container,
-        ) {
-            return Some(c);
-        }
-        return Some(THEME.surface_container);
-    }
-    Some(THEME.surface_container)
 }
 
 // -----------------------------------------------------------------------------
@@ -2317,23 +2467,28 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
                 }
 
                 // Line 2: Resolution
+                //
+                // WHY the source is named: a number without a source is a
+                // claim, and the sheet's job is to say what is known about
+                // the document and where each fact came from.
                 let res_lbl = b"Resolution: ";
                 let rw = font::measure(res_lbl, 1);
                 if let Some(c) = text(x, y, sheet.x + 20, sheet.y + 104, 1, res_lbl, THEME.on_surface_variant, THEME.surface_container) {
                     return c;
                 }
-                let mut res_buf = [0u8; 32];
+                let mut res_buf = [0u8; 48];
                 let rn = if app.detail_w > 0 && app.detail_h > 0 {
                     let mut n = append_u64(&mut res_buf, 0, app.detail_w as u64);
                     n = append(&mut res_buf, n, b" x ");
                     n = append_u64(&mut res_buf, n, app.detail_h as u64);
-                    append(&mut res_buf, n, b" px")
+                    let n = append(&mut res_buf, n, b" px");
+                    append(&mut res_buf, n, b" (file header)")
                 } else {
                 // WHY the fallback is not the panel's own size: the old one
                 // was the resolution of the screen this app draws on, shown
                 // under a "Resolution:" label as if it were a measurement of
                 // the media. The media's dimensions are unknown until its
-                // header is read, and this build does not read it.
+                // header is read, and this build reads it when it can.
                     append(&mut res_buf, 0, b"not measured")
                 };
                 if let Some(c) = text(x, y, sheet.x + 20 + rw, sheet.y + 104, 1, &res_buf[..rn], THEME.on_surface, THEME.surface_container) {
@@ -2346,25 +2501,53 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
                 if let Some(c) = text(x, y, sheet.x + 20, sheet.y + 136, 1, size_lbl, THEME.on_surface_variant, THEME.surface_container) {
                     return c;
                 }
-                let mut sz_buf = [0u8; 32];
+                let mut sz_buf = [0u8; 48];
                 let sn = if let Media::StorageItem(idx) = media {
                     if idx < app.storage_count {
                         let n = append_u64(&mut sz_buf, 0, app.storage_items[idx].size);
-                        append(&mut sz_buf, n, b" bytes")
+                        let n = append(&mut sz_buf, n, b" bytes");
+                        append(&mut sz_buf, n, b" (device index)")
                     } else {
-                        append(&mut sz_buf, 0, b"0 bytes")
+                        append(&mut sz_buf, 0, b"not in the index")
                     }
                 } else {
-                    append(&mut sz_buf, 0, b"Internal System Asset")
+                    append(&mut sz_buf, 0, b"built-in artwork")
                 };
                 if let Some(c) = text(x, y, sheet.x + 20 + sw, sheet.y + 136, 1, &sz_buf[..sn], THEME.on_surface, THEME.surface_container) {
                     return c;
                 }
 
-                // Line 4: Path
+                // Line 4: Modified
+                //
+                // WHY it is here and not left out: the platform's document
+                // index holds a modification time for every document it
+                // knows, and a sheet that leaves it out throws away a fact
+                // the app already has.
+                let mod_lbl = b"Modified: ";
+                let mw = font::measure(mod_lbl, 1);
+                if let Some(c) = text(x, y, sheet.x + 20, sheet.y + 168, 1, mod_lbl, THEME.on_surface_variant, THEME.surface_container) {
+                    return c;
+                }
+                let mut mod_buf = [0u8; 48];
+                let modn = if let Media::StorageItem(idx) = media {
+                    if idx < app.storage_count {
+                        let n = append_u64(&mut mod_buf, 0, app.storage_items[idx].mtime);
+                        let n = append(&mut mod_buf, n, b" ticks");
+                        append(&mut mod_buf, n, b" (device index)")
+                    } else {
+                        append(&mut mod_buf, 0, b"not in the index")
+                    }
+                } else {
+                    append(&mut mod_buf, 0, b"built-in artwork")
+                };
+                if let Some(c) = text(x, y, sheet.x + 20 + mw, sheet.y + 168, 1, &mod_buf[..modn], THEME.on_surface, THEME.surface_container) {
+                    return c;
+                }
+
+                // Line 5: Path
                 let path_lbl = b"Location: ";
                 let pw = font::measure(path_lbl, 1);
-                if let Some(c) = text(x, y, sheet.x + 20, sheet.y + 168, 1, path_lbl, THEME.on_surface_variant, THEME.surface_container) {
+                if let Some(c) = text(x, y, sheet.x + 20, sheet.y + 200, 1, path_lbl, THEME.on_surface_variant, THEME.surface_container) {
                     return c;
                 }
                 let path_bytes = if let Media::StorageItem(idx) = media {
@@ -2383,27 +2566,30 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
                 };
                 let mut pb = [0u8; 48];
                 let pn = font::ellipsize(path_bytes, 1, sheet.w.saturating_sub(40 + pw), &mut pb);
-                if let Some(c) = text(x, y, sheet.x + 20 + pw, sheet.y + 168, 1, &pb[..pn], THEME.on_surface, THEME.surface_container) {
+                if let Some(c) = text(x, y, sheet.x + 20 + pw, sheet.y + 200, 1, &pb[..pn], THEME.on_surface, THEME.surface_container) {
                     return c;
                 }
 
-                // Line 5: Format
+                // Line 6: Format
                 let fmt_lbl = b"Format: ";
                 let fw = font::measure(fmt_lbl, 1);
-                if let Some(c) = text(x, y, sheet.x + 20, sheet.y + 200, 1, fmt_lbl, THEME.on_surface_variant, THEME.surface_container) {
+                if let Some(c) = text(x, y, sheet.x + 20, sheet.y + 232, 1, fmt_lbl, THEME.on_surface_variant, THEME.surface_container) {
                     return c;
                 }
                 let fmt_str: &[u8] = if let Media::StorageItem(idx) = media {
                     let name = &app.storage_items[idx].name[..app.storage_items[idx].name_len];
-                    if name.ends_with(b".ppm") { b"PPM / Direct Scanout RGB24" }
+                    // WHY the format line names the container and nothing
+                    // more: the old line said "Direct Scanout", which claimed
+                    // a display path this app does not own and cannot prove.
+                    if name.ends_with(b".ppm") { b"PPM / Portable Pixmap" }
                     else if name.ends_with(b".bmp") { b"BMP / Bitmap Raster" }
                     else if name.ends_with(b".qoi") { b"QOI / Quite OK Image Format" }
                     else if name.ends_with(b".mp4") { b"MP4 Video Container" }
-                    else { b"Binary Media Stream" }
+                    else { b"Unrecognised media format" }
                 } else {
                     b"Vector Silhouette Wall Reference"
                 };
-                if let Some(c) = text(x, y, sheet.x + 20 + fw, sheet.y + 200, 1, fmt_str, THEME.on_surface, THEME.surface_container) {
+                if let Some(c) = text(x, y, sheet.x + 20 + fw, sheet.y + 232, 1, fmt_str, THEME.on_surface, THEME.surface_container) {
                     return c;
                 }
 
@@ -2755,11 +2941,26 @@ fn gallery_pixel(x: usize, y: usize, app: &GalleryApp) -> u32 {
         if let Some(c) = text_bold(x, y, MARGIN, TITLE_Y, 1, b"Photos", THEME.on_surface, THEME.surface) {
             return c;
         }
+        // WHY the two counts are on two lines: the catalogue is artwork this
+        // app carries and the photographs are files on the device. One line
+        // holding both read as two counts of the same thing.
         if let Some(c) = text(
             x,
             y,
             MARGIN,
             SUBTITLE_Y,
+            1,
+            &app.catalogue_summary[..app.catalogue_summary_len],
+            THEME.on_surface_variant,
+            THEME.surface,
+        ) {
+            return c;
+        }
+        if let Some(c) = text(
+            x,
+            y,
+            MARGIN,
+            DEVICE_LINE_Y,
             1,
             &app.summary[..app.summary_len],
             THEME.on_surface_variant,
@@ -2775,13 +2976,13 @@ fn gallery_pixel(x: usize, y: usize, app: &GalleryApp) -> u32 {
         return c;
     }
 
-    // 3. Thumbnail grid band (or honest empty state).
-    if let Some(c) = grid_pixel(x, y, app) {
+    // 3. Filter chip row, drawn by the platform's pill widget.
+    if let Some(c) = chip_row_pixel(x, y, app) {
         return c;
     }
 
-    // 4. Bottom section bar.
-    if let Some(c) = nav_pixel(x, y) {
+    // 4. Thumbnail grid band (or honest empty state).
+    if let Some(c) = grid_pixel(x, y, app) {
         return c;
     }
 
@@ -3169,21 +3370,36 @@ fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
         return Tap::Redraw(Dirty::All);
     }
 
+    // The filter chip row.
+    //
+    // WHY the chips are tested before the tab row: the chip row is the filter
+    // over the grid, and a tap on a chip has to change what the grid holds.
+    // A chip that is drawn but cannot be chosen is an affordance that lies.
+    if let Some(index) = chip_at(x, y) {
+        if !filters_available(app) {
+            return Tap::None;
+        }
+        let filter = Filter::from_index(index);
+        if filter == app.filter {
+            return Tap::None;
+        }
+        app.filter = filter;
+        app.reset_scroll();
+        std::log("[GALLERY] Gallery filter chip switched.").ok();
+        return Tap::Redraw(Dirty::All);
+    }
+
     // Modern Top Tab Navigation Bar
     if y >= TAB_Y && y < TAB_Y + TAB_H {
         let tab_idx = (x * 4 / W).min(3);
         let new_tab = GalleryTab::from_index(tab_idx);
-            if new_tab != app.tab || app.filter != Filter::All {
-                app.tab = new_tab;
-                app.filter = Filter::All;
-                std::log("[GALLERY] Tab switched.").ok();
-                // WHY the chip row is named as such: the row under the title
-                // is the media filter row the design document asks for -- the
-                // grid behind it holds a different set of media depending on
-                // which chip is down -- so a tap on it changes the filter.
-                std::log("[GALLERY] Gallery filter chip switched.").ok();
-                return Tap::Redraw(Dirty::All);
-            }
+        if new_tab != app.tab {
+            app.tab = new_tab;
+            app.filter = Filter::All;
+            app.reset_scroll();
+            std::log("[GALLERY] Tab switched.").ok();
+            return Tap::Redraw(Dirty::All);
+        }
         return Tap::None;
     }
 
@@ -3191,7 +3407,7 @@ fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
     if y >= GRID_TOP && y < GRID_BOTTOM {
         match app.tab {
             GalleryTab::Photos => {
-                if let (Some(col), Some(row)) = (col_of(x), row_of(y)) {
+                if let (Some(col), Some(row)) = (col_of(x), row_of(app, y)) {
                     let index = row * 3 + col;
                     if let Some(media) = app.photo_at(index) {
                         return open_media(app, media);
@@ -3199,7 +3415,7 @@ fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
                 }
             }
             GalleryTab::Videos => {
-                if let (Some(col), Some(row)) = (video_col_of(x), video_row_of(y)) {
+                if let (Some(col), Some(row)) = (video_col_of(x), video_row_of(app, y)) {
                     let index = row * 2 + col;
                     if let Some(storage_idx) = app.video_at(index) {
                         return open_media(app, Media::StorageItem(storage_idx));
@@ -3208,7 +3424,7 @@ fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
             }
             GalleryTab::Albums => {
                 if let Some(col) = video_col_of(x) {
-                    let rel_y = y - GRID_TOP;
+                    let rel_y = y - GRID_TOP + app.scroll.offset;
                     let row = rel_y / 200;
                     if row < 2 && rel_y % 200 < 180 {
                         let album_idx = row * 2 + col;
@@ -3228,12 +3444,13 @@ fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
                             }
                             _ => {}
                         }
+                        app.reset_scroll();
                         return Tap::Redraw(Dirty::All);
                     }
                 }
             }
             GalleryTab::Screenshots => {
-                if let (Some(col), Some(row)) = (col_of(x), row_of(y)) {
+                if let (Some(col), Some(row)) = (col_of(x), row_of(app, y)) {
                     let index = row * 3 + col;
                     if let Some(storage_idx) = app.screenshot_at(index) {
                         return open_media(app, Media::StorageItem(storage_idx));
@@ -3258,6 +3475,7 @@ pub extern "C" fn _start() -> ! {
     app.rescan_storage();
     let photos_count = app.device_photos_count();
     app.summary_len = build_summary(&mut app.summary, photos_count);
+    app.catalogue_summary_len = build_catalogue_summary(&mut app.catalogue_summary);
     app.catalogue_note_len = build_catalogue_note(&mut app.catalogue_note);
 
     // Measure what this device actually holds before anything is drawn, so the
@@ -3347,6 +3565,21 @@ pub extern "C" fn _start() -> ! {
                         exit_to_launcher(surface);
                     }
 
+                    // A pan or a fling over the grid scrolls the grid.
+                    //
+                    // WHY the grid scrolls and the app does not leave: a
+                    // library larger than the band it is drawn in was
+                    // unreachable, because nothing on the screen moved.
+                    if (input.kind == 4 || input.kind == 10)
+                        && app.open.is_none()
+                        && input.y as usize >= GRID_TOP
+                        && (input.y as usize) < GRID_BOTTOM
+                    {
+                        if app.scroll_by(input.dy) {
+                            dirty = dirty.widen(Dirty::All);
+                        }
+                    }
+
                     if input.kind == 1 {
                         match handle_tap(&mut app, input.x as usize, input.y as usize) {
                             Tap::Leave(msg) => {
@@ -3363,10 +3596,10 @@ pub extern "C" fn _start() -> ! {
                         // A chip tap moves the chip row and, because the grid
                         // band is filtered, the grid rows as well. Both are
                         // re-rasterised and nothing else is: the header, the
-                        // section bar and the home strip are all unchanged by a
+                        // tab row and the home strip are all unchanged by a
                         // filter, so they keep the pixels they already have.
                         Dirty::FilterRow => {
-                            render_gallery_band(surface, &app, FILTER_BAND_Y0, FILTER_BAND_Y1);
+                            render_gallery_band(surface, &app, CHIP_Y, CHIP_Y + CHIP_H);
                             render_gallery_band(surface, &app, GRID_TOP, GRID_BOTTOM);
                         }
                         Dirty::All => render_gallery_ui(surface, &app),

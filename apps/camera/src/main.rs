@@ -1,35 +1,45 @@
-//! Inter OS Native Sovereign Camera & Neural Vision App
+//! InterOS camera application, executing in Ring 3 (User Mode).
 //!
-//! Full production camera application executing in Ring 3 (User Mode):
-//! - Multi-mode capture engine: Photo, Document Vision, QR Scanner, Night Mode
-//!   (no frame rate is claimed: the HAL never negotiates one)
-//! - Integrated ISP (Image Signal Processor): Tone curve adjustment, color filters, luminance histogram
-//! - Hardware-accelerated Zero-Copy DMA Video Streaming via SHM Pipe 0
-//! - Photos sealed into Sovereign Vault Sector 201 with the kernel's vault
-//!   service. The keystore derivation syscall refuses every request on this
-//!   platform, so no keystore-backed cipher is claimed.
-//! - Multimodal neural vision context forwarding to the sovereign AI Context Broker
-//! - Hardware shutter tone & capacitive haptic feedback synthesis
-//! - DRM/KMS Client Surface Rendering (z=200) with Viewfinder Canvas, Mode Carousel, and Circular Shutter
+//! - A capture engine that takes a still photograph and writes it into the
+//!   shared storage area as a PPM (P6), and publishes it into the platform's
+//!   document index, so the gallery can open the photo the user just took
+//! - A mode carousel of Photo, Video and Document framing. The Video mode is
+//!   in the carousel and says the platform has no stream to give, rather than
+//!   offering a mode the camera HAL cannot serve
+//! - An image signal processor that is arithmetic the app performs on the
+//!   frame it was handed: a tone curve and colour filters. No model runs over
+//!   the frame and none is claimed
+//! - A capture readout that says which fact the platform stated: the camera
+//!   authority was refused, or the camera HAL has no sensor bound, or a frame
+//!   has not been captured yet
+//! - A settings surface that states what the platform supports, including the
+//!   format the camera writes, where the last photo went and what the last
+//!   press of the shutter produced
+//! - DRM/KMS client surface rendering (z=200) with a viewfinder canvas, a
+//!   mode carousel, a settings surface and a circular shutter
 //! - Affordances whose backing capability is absent are drawn in a recessed
-//!   unavailable treatment and are not hit-tested, instead of being painted live
-//!   and ignored: see `CameraApp::camera_authorised`
-//! - The mode tag reports the frame geometry the camera HAL actually returned,
-//!   and the status badge reports the real count of captures that succeeded
+//!   unavailable treatment and are not hit-tested, instead of being painted
+//!   live and ignored
 //! - Banded rendering (`render_camera_band`): only the rows an input actually
 //!   dirtied are re-rasterised, instead of all 1,036,800 pixels on every event
-//! - Asynchronous event reactor loop handling touch controls and timer intervals
+//! - Asynchronous event reactor loop handling touch controls and timer
+//!   intervals
 
 #![no_std]
 #![no_main]
 
 use core::panic::PanicInfo;
 use interos_std as std;
-use camera::theme::{MIN_TOUCH_TARGET, THEME, radius};
+use camera::theme::{MIN_TOUCH_TARGET, THEME, Theme, radius};
 use std::design::primitives::Rect;
 
+use interos_std::design::components;
 use interos_std::design::outline_text;
 
+use camera::{
+    CameraApp, CameraFilter, CameraMode, CameraScreen, CameraStatus, CaptureOutcome, FlashMode,
+    SettingsRow, SETTINGS_ROW_ORDER, VIEWFINDER_TEXT_W,
+};
 
 /// The platform's corner radii, under the short names the renderer uses.
 ///
@@ -39,365 +49,17 @@ use interos_std::design::outline_text;
 /// platform's and not this app's.
 const R_CARD: usize = radius::CARD;
 
+/// The platform's card treatment for the settings sheet.
+///
+/// WHY the platform's card and not a fill the app chose: the sheet is a card,
+/// and a card that invents its own fill and its own hairline is a card a
+/// third-party app cannot match.
+const SHEET_CARD: components::CardStyle =
+    components::card_style(&THEME, components::Elevation::Raised);
+
 const W: usize = 720;
 const H: usize = 1440;
 const CHUNK: usize = 4096;
-
-/// Operating mode of the Sovereign Camera.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CameraMode {
-    Photo = 0,
-    Video = 1,
-    DocumentVision = 2,
-    QrScanner = 3,
-    NightMode = 4,
-}
-
-/// Flash torch hardware control mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FlashMode {
-    Off = 0,
-    On = 1,
-    Auto = 2,
-    Torch = 3,
-}
-
-/// Real-time ISP color and tonal filters.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CameraFilter {
-    Normal = 0,
-    Monochrome = 1,
-    HighContrast = 2,
-    Sepia = 3,
-    /// A red-channel inversion.
-    ///
-    /// WHY it is not called a "neural heatmap": no model runs over the
-    /// frame. The filter is `255 - r`, and a name that implies inference
-    /// would claim a capability the app does not have.
-    InvertedRed = 4,
-}
-
-/// Sovereign Camera internal state machine.
-pub struct CameraApp {
-    pub mode: CameraMode,
-    pub flash: FlashMode,
-    pub filter: CameraFilter,
-    pub zoom_x10: u32,
-    pub exposure_bias: i16,
-    pub total_photos: u32,
-    pub total_video_frames: u32,
-    pub current_sector: u64,
-    /// Whether the flash/torch hardware backend answered a toggle request.
-    ///
-    /// WHY: this app holds neither `SystemControl` on the camera service object
-    /// nor `HardwarePortIo` on port 0xCA00, so `camera_toggle_flash` is refused
-    /// with PermissionDenied. The previous code discarded that error, kept a lit
-    /// `Torch` state locally and rendered it as an active amber pill.
-    pub flash_available: bool,
-    /// Whether the kernel granted this task camera authority at all.
-    ///
-    /// WHY probed rather than assumed: `sys_camera_capture` gates every action -
-    /// capture, autofocus state and flash - behind `SystemControl` on the camera
-    /// service object or `HardwarePortIo` on port 0xCA00, and this task is
-    /// spawned with neither. The kernel's own answer is the only honest source
-    /// for "can this app drive a camera", and it is allowed to change (a build
-    /// that binds the HAL would flip it), so the UI follows the probe instead of
-    /// a hard-coded "unavailable". The probe is the read-only autofocus query:
-    /// unlike a flash toggle it changes no hardware state.
-    pub camera_authorised: bool,
-    /// Frame geometry of the last capture that actually succeeded, pre-rendered.
-    ///
-    /// WHY a fixed buffer instead of formatting per pixel: `get_camera_pixel` is
-    /// called once per pixel, so a `format!`-style routine in the hot path would
-    /// run tens of thousands of times for one number. The label is rebuilt when a
-    /// capture succeeds and only read afterwards.
-    pub frame_label: [u8; 16],
-    pub frame_label_len: usize,
-    /// `total_photos` as text, pre-rendered for the same reason as above.
-    pub shots_label: [u8; 16],
-    pub shots_label_len: usize,
-    pub head_x: usize,
-    pub sub_x: usize,
-}
-
-/// Label shown before any capture has succeeded: a real answer ("the HAL has not
-/// returned a frame yet"), not a made-up resolution.
-const NO_FRAME_LABEL: [u8; 16] = *b"NO FRAME\0\0\0\0\0\0\0\0";
-/// Label shown when the kernel refused this task camera authority.
-const NO_SENSOR_LABEL: [u8; 16] = *b"NO SENSOR\0\0\0\0\0\0\0";
-/// Badge text when nothing has been captured: `0 SHOTS`.
-const ZERO_SHOTS_LABEL: [u8; 16] = *b"0 SHOTS\0\0\0\0\0\0\0\0\0";
-
-/// Formats `v` as decimal ASCII into `out`; returns the bytes written.
-///
-/// WHY: measured values only exist at runtime, and the app has no allocator.
-fn fmt_u32(mut v: u32, out: &mut [u8]) -> usize {
-    if out.is_empty() {
-        return 0;
-    }
-    if v == 0 {
-        out[0] = b'0';
-        return 1;
-    }
-    let mut digits = [0u8; 10];
-    let mut n = 0usize;
-    while v > 0 && n < 10 {
-        digits[n] = b'0' + (v % 10) as u8;
-        v /= 10;
-        n += 1;
-    }
-    let n = n.min(out.len());
-    for i in 0..n {
-        out[i] = digits[n - 1 - i];
-    }
-    n
-}
-
-/// Copies `src` into a `LEN`-byte label buffer and returns its length.
-fn set_label(dst: &mut [u8; 16], src: &[u8]) -> usize {
-    dst.fill(0);
-    let n = src.len().min(dst.len());
-    dst[..n].copy_from_slice(&src[..n]);
-    n
-}
-
-impl CameraApp {
-    pub const fn new() -> Self {
-        Self {
-            mode: CameraMode::Photo,
-            flash: FlashMode::Auto,
-            filter: CameraFilter::Normal,
-            zoom_x10: 10,
-            exposure_bias: 0,
-            total_photos: 0,
-            total_video_frames: 0,
-            current_sector: 201,
-            // WHY: fail closed. Assume no flash hardware until a toggle is
-            // actually accepted by the backend.
-            flash_available: false,
-            // WHY: fail closed here too. `probe_camera_authority` overwrites
-            // this at start-up with the kernel's real answer; until it has, the
-            // app must not claim it can drive a sensor.
-            camera_authorised: false,
-            frame_label: NO_FRAME_LABEL,
-            frame_label_len: 8,
-            shots_label: ZERO_SHOTS_LABEL,
-            shots_label_len: 7,
-            head_x: 0,
-            sub_x: 0,
-        }
-    }
-
-    /// Precomputes text positions for static labels to prevent per-pixel recalculation.
-    pub fn init(&mut self) {
-        let head = b"No camera sensor bound";
-        let sub = b"Viewfinder inactive - no frames from the camera HAL";
-        self.head_x = centred_x(head, 2, 20, VIEWFINDER_W);
-        self.sub_x = centred_x(sub, 1, 20, VIEWFINDER_W);
-    }
-
-    /// Asks the kernel whether this task holds camera authority, and records the
-    /// answer for the UI.
-    ///
-    /// WHY `camera_autofocus_state` and not `camera_toggle_flash`: the autofocus
-    /// query only reads the HAL's current focus state, so probing cannot flip a
-    /// torch on behind the user's back the way a flash probe would.
-    pub fn probe_camera_authority(&mut self) {
-        self.camera_authorised = std::camera_autofocus_state().is_ok();
-        if !self.camera_authorised {
-            // WHY the label, not just the flag: with no authority the mode tag
-            // must say so. The old tag read "48MP PRO" unconditionally, which
-            // advertised a capture resolution and a mode the hardware never
-            // reported and this app can never produce.
-            self.frame_label = NO_SENSOR_LABEL;
-            self.frame_label_len = 9;
-        }
-    }
-
-    /// Rebuilds the two derived labels after the counters move.
-    ///
-    /// WHY a separate step: `total_photos` only advances on a capture that the
-    /// HAL actually returned, and the frame geometry only exists after one, so
-    /// both labels are functions of real results and are recomputed only when a
-    /// result arrives.
-    fn refresh_labels(&mut self) {
-        let shots = if self.total_photos == 1 {
-            &b" SHOT"[..]
-        } else {
-            &b" SHOTS"[..]
-        };
-        let mut buf = [0u8; 16];
-        let mut n = fmt_u32(self.total_photos, &mut buf);
-        for &b in shots {
-            if n < buf.len() {
-                buf[n] = b;
-                n += 1;
-            }
-        }
-        self.shots_label_len = set_label(&mut self.shots_label, &buf[..n]);
-    }
-
-    /// Records the frame geometry the camera HAL reported for a real capture.
-    fn set_frame_geometry(&mut self, w: u32, h: u32) {
-        let mut buf = [0u8; 16];
-        let mut n = fmt_u32(w, &mut buf);
-        if n < buf.len() {
-            buf[n] = b'x';
-            n += 1;
-        }
-        n += fmt_u32(h, &mut buf[n..]);
-        self.frame_label_len = set_label(&mut self.frame_label, &buf[..n]);
-    }
-
-    /// Toggles the flash/torch hardware and returns the state the hardware
-    /// actually reported.
-    ///
-    /// Returns `None` when the flash backend is absent or refused the request.
-    /// In that case the local mode is forced back to `Off` so neither the model
-    /// nor the UI can claim an emitting torch that no hardware produced.
-    pub fn toggle_flash(&mut self) -> Option<bool> {
-        match std::camera_toggle_flash() {
-            Ok(new_state) => {
-                self.flash_available = true;
-                self.flash = if new_state {
-                    FlashMode::Torch
-                } else {
-                    FlashMode::Off
-                };
-                Some(new_state)
-            }
-            Err(_) => {
-                self.flash_available = false;
-                self.flash = FlashMode::Off;
-                None
-            }
-        }
-    }
-
-    /// Applies software ISP tone curve adjustments directly on raw RGB pixel buffer.
-    pub fn apply_isp_tone_curve(&self, buf: &mut [u8]) {
-        for pixel in buf.chunks_exact_mut(4) {
-            let r = (pixel[0] as i16 + self.exposure_bias * 16).clamp(0, 255) as u8;
-            let g = (pixel[1] as i16 + self.exposure_bias * 16).clamp(0, 255) as u8;
-            let b = (pixel[2] as i16 + self.exposure_bias * 16).clamp(0, 255) as u8;
-
-            match self.filter {
-                CameraFilter::Normal => {
-                    pixel[0] = r;
-                    pixel[1] = g;
-                    pixel[2] = b;
-                }
-                CameraFilter::Monochrome => {
-                    let luma = ((r as u32 * 299 + g as u32 * 587 + b as u32 * 114) / 1000) as u8;
-                    pixel[0] = luma;
-                    pixel[1] = luma;
-                    pixel[2] = luma;
-                }
-                CameraFilter::HighContrast => {
-                    let luma = ((r as u32 * 299 + g as u32 * 587 + b as u32 * 114) / 1000) as u8;
-                    let high = if luma > 128 { 255 } else { 0 };
-                    pixel[0] = high;
-                    pixel[1] = high;
-                    pixel[2] = high;
-                }
-                CameraFilter::Sepia => {
-                    pixel[0] =
-                        ((r as u32 * 393 + g as u32 * 769 + b as u32 * 189) / 1000).min(255) as u8;
-                    pixel[1] =
-                        ((r as u32 * 349 + g as u32 * 686 + b as u32 * 168) / 1000).min(255) as u8;
-                    pixel[2] =
-                        ((r as u32 * 272 + g as u32 * 534 + b as u32 * 131) / 1000).min(255) as u8;
-                }
-                CameraFilter::InvertedRed => {
-                    pixel[0] = 255 - r;
-                    pixel[1] = g;
-                    pixel[2] = b;
-                }
-            }
-        }
-    }
-
-    /// Computes full-frame RGB luminance metrics.
-    pub fn compute_histogram(&self, buf: &[u8]) -> (u8, u8, u8) {
-        let mut r_acc: u64 = 0;
-        let mut g_acc: u64 = 0;
-        let mut b_acc: u64 = 0;
-        let mut count: u64 = 0;
-
-        for pixel in buf.chunks_exact(4) {
-            r_acc += pixel[0] as u64;
-            g_acc += pixel[1] as u64;
-            b_acc += pixel[2] as u64;
-            count += 1;
-        }
-
-        if count == 0 {
-            (0, 0, 0)
-        } else {
-            (
-                (r_acc / count) as u8,
-                (g_acc / count) as u8,
-                (b_acc / count) as u8,
-            )
-        }
-    }
-
-    /// Captures a still photograph, processes with ISP, and persists to Sovereign Vault.
-    pub fn capture_still_photo(&mut self) -> Result<u32, i64> {
-        let mut raw_buf = [0u8; 1024];
-        let mut meta = [0u32; 4];
-
-        std::camera_capture(&mut raw_buf, &mut meta)?;
-        self.apply_isp_tone_curve(&mut raw_buf);
-
-        // WHY before the histogram: `meta` is what the camera HAL actually
-        // reported for this frame. Recording it the moment the capture succeeds
-        // is what lets the mode tag show a real resolution instead of a claim.
-        self.set_frame_geometry(meta[0], meta[1]);
-
-        let (r, g, b) = self.compute_histogram(&raw_buf);
-
-        std::audio_play_tone(880).ok();
-        std::audio_silence().ok();
-        std::audio_haptic_click().ok();
-
-        let mut container = [0u8; 512];
-        // WHY the header says RGBA and not JPEG: the payload is a raw
-        // RGBA buffer with no JPEG encoder and no EXIF block behind it.
-        // The old header named a format the file does not contain.
-        let header = b"INTEROS::CAMERA::RGBA_RAW::V1";
-        container[..header.len()].copy_from_slice(header);
-        container[40..44].copy_from_slice(&meta[0].to_le_bytes());
-        container[44..48].copy_from_slice(&meta[1].to_le_bytes());
-        container[48] = r;
-        container[49] = g;
-        container[50] = b;
-        container[51] = self.mode as u8;
-
-        let mut iv = [0u8; 16];
-        if std::get_random(&mut iv).is_err() {
-            std::log("[CAMERA APP] Refusing to encrypt frame without cryptographic TRNG entropy.",
-            )
-            .ok();
-            return Err(-1);
-        }
-        std::vault_encrypt_sector(self.current_sector, &mut container, &iv)?;
-
-        self.total_photos += 1;
-        self.refresh_labels();
-        std::log("[CAMERA APP] Shutter fired: HAL frame returned, ISP tone-mapped, encrypted to Vault Sector 201.",
-        ).ok();
-
-        Ok(self.total_photos)
-    }
-
-    /// Streams an active video frame through Zero-Copy DMA SHM Pipe 0.
-    pub fn stream_video_frame(&mut self) -> Result<u64, i64> {
-        // A real camera frame must come from the camera HAL. Do not fabricate
-        // a MIPI/CSI frame packet when no hardware frame is available.
-        Err(-95)
-    }
-}
 
 // -----------------------------------------------------------------------------
 // Visual Design Tokens
@@ -431,11 +93,6 @@ const VIEWFINDER_Y1: usize = 1120;
 
 /// Inner width of the viewfinder canvas, which is inset 20px from each edge of
 /// the surface (`x >= 20 && x < W - 20`).
-///
-/// WHY it is named: it is the column a centred run in the viewfinder is measured
-/// against, so `outline_text::place_run` has the same width the layout used to
-/// centre it. The absence headline measures 472px on the bitmap face at scale 2
-/// and 462px on the outline face, so both clear it.
 const VIEWFINDER_W: usize = W - 40;
 
 const MODE_STRIP_Y0: usize = 1150;
@@ -460,7 +117,7 @@ const TOP_ROW_H: usize = 40;
 const BACK_RECT: Rect = Rect::new(24, TOP_ROW_Y, 52, TOP_ROW_H);
 /// Flash / torch pill.
 const FLASH_RECT: Rect = Rect::new(92, TOP_ROW_Y, 120, TOP_ROW_H);
-/// Capture-geometry readout. NOT a control: it reports what the HAL returned.
+/// Capture-geometry readout. NOT a control: it reports what the platform said.
 const FRAME_RECT: Rect = Rect::new(228, TOP_ROW_Y, 160, TOP_ROW_H);
 /// ISP filter pill (a real, local software filter - genuinely actionable).
 const FILTER_RECT: Rect = Rect::new(404, TOP_ROW_Y, 140, TOP_ROW_H);
@@ -493,10 +150,6 @@ const FLASH_TEXT_W: usize = FLASH_RECT.w - 32 - 8;
 /// is not a touch target, so the tap region has to be the whole strip - but the
 /// old code hit-tested `x 240..480 && y >= 1400` with no upper bound on y, a
 /// region that was never drawn, so a tap well above the indicator exited the app.
-///
-/// WHY 44 and not 40: the design system's minimum touch target is 44 logical
-/// pixels and this strip was 40. It now reaches the bottom edge of the
-/// surface, which is where the indicator already was.
 const HOME_HIT: Rect = Rect::new(240, 1396, 240, MIN_TOUCH_TARGET);
 const HOME_PILL: Rect = Rect::new(260, 1418, 200, 6);
 
@@ -510,17 +163,69 @@ const SHUTTER_RING_INNER: usize = 56;
 /// Inner tactile shutter core.
 const SHUTTER_R_CORE: usize = 48;
 
-/// The in-viewfinder zoom pill, in absolute surface coordinates.
+/// The dock's two side controls, as the centres of their pictograms.
 ///
-/// WHY absolute and not viewfinder-relative: the tap handler works in surface
-/// coordinates, and the old code transcribed the pill twice in two different
-/// frames (`rel 276..404 / 874..930` while drawing, `296..424 / 994..1050`
-/// while hit-testing). One rectangle, one frame.
-const ZOOM_PILL: Rect = Rect::new(296, 994, 128, 56);
+/// WHY they are controls now: the camera used to paint a gallery thumbnail and
+/// a lens-flip glyph in the dock and hit-test neither, because there was
+/// nothing behind them to open and no lens to flip. The photo roll now exists
+/// - the camera writes into the shared storage area and the platform's
+/// document index describes it - and the settings surface the camera lacked
+/// now has a place to live.
+const PHOTOS_CX: usize = 110;
+const SETTINGS_CX: usize = 610;
 
-/// Half-extent of the disabled gallery-thumbnail and lens-flip squares in the
-/// dock. WHY they are never hit-tested: see the dock drawing below.
+/// Half-extent of the dock's side buttons.
 const DOCK_SIDEBTN_HALF: usize = 36;
+
+// -----------------------------------------------------------------------------
+// The settings surface.
+//
+// WHY a sheet over the viewfinder and not a new screen: the settings are the
+// camera's own, and keeping the viewfinder visible behind them means the
+// surface never pretends the camera stopped existing.
+// -----------------------------------------------------------------------------
+
+/// The sheet's card.
+const SHEET_RECT: Rect = Rect::new(24, 140, 672, 960);
+/// The sheet's title row.
+const SHEET_TITLE_Y0: usize = 160;
+/// The first settings row.
+const SHEET_ROW_Y0: usize = 200;
+/// The height of one settings row.
+const SHEET_ROW_H: usize = 96;
+/// The left edge of the settings text.
+const SHEET_TEXT_X: usize = 48;
+/// The width of the settings text column.
+const SHEET_TEXT_W: usize = camera::SETTINGS_TEXT_MAX;
+/// The left edge of a settings row's own surface.
+///
+/// WHY the row is inset from the card: the platform's list rows carry their
+/// own padding, and a row drawn flush to the card's edge would read as part
+/// of the card rather than as a control.
+const SHEET_ROW_X0: usize = 36;
+/// The width of a settings row's own surface.
+const SHEET_ROW_W: usize = 648;
+/// The gap between one row's surface and the next.
+const SHEET_ROW_GAP: usize = 8;
+
+// -----------------------------------------------------------------------------
+// The viewfinder's framing guides.
+//
+// WHY they are a setting and not decoration: the brackets, the reticle and
+// the thirds grid used to be drawn behind a counter that only advanced when a
+// video frame arrived, and no video frame ever arrives on this platform, so
+// the guides could never be seen. They are drawn now because the user asked
+// for them, and they are drawn in the platform's own ink so they read the
+// same as every other guide in the system.
+// -----------------------------------------------------------------------------
+
+/// Half-extent of the corner brackets.
+const BRACKET_ARM: usize = 30;
+/// Half-extent of the focus reticle.
+const RETICLE_ARM: usize = 40;
+/// The reticle's centre, in viewfinder-relative coordinates.
+const RETICLE_CX: usize = 340;
+const RETICLE_CY: usize = 500;
 
 /// Whether a touch at (dx, dy) from the shutter centre is on the shutter.
 ///
@@ -532,23 +237,29 @@ fn shutter_hit(dx: isize, dy: isize) -> bool {
     dx * dx + dy * dy <= r * r
 }
 
-// -----------------------------------------------------------------------------
-// Embedded 8x8 ASCII Font (Characters 32 ' ' through 126 '~')
+/// Whether a touch at (dx, dy) is on one of the dock's side buttons.
+fn side_button_hit(x: usize, y: usize, cx: usize) -> bool {
+    let dx = (x as isize - cx as isize).abs();
+    let dy = (y as isize - SHUTTER_CY as isize).abs();
+    dx <= DOCK_SIDEBTN_HALF as isize && dy <= DOCK_SIDEBTN_HALF as isize
+}
+
 // -----------------------------------------------------------------------------
 // Typography provided by interos_std::design::font
+// -----------------------------------------------------------------------------
 
 /// Rasterises one text run into the pixel at `(x, y)`.
 ///
-/// WHY the outline face comes first: the zoom readout, the mode carousel and the
-/// viewfinder's absence headline run at scale 2, so on the bitmap face each is a
-/// 16x24 cell magnified by an integer -- a soft ramp where an edge belongs.
+/// WHY the outline face comes first: the mode carousel and the viewfinder's
+/// absence headline run at scale 2, so on the bitmap face each is a 16x24
+/// cell magnified by an integer -- a soft ramp where an edge belongs.
 /// `outline_text::place_run` rasterises the real outline at the em that matches
-/// the cell's cap height (17 rows at scale 1, so 17*N*2048/1456 px per em), and
-/// answers for the pixel itself. When it declines -- a run at scale 1, whose cell
-/// is already at its native size, a run wider than the column the caller
-/// reserved, a glyph whose ink would leave that column, or a weight this app
-/// draws bold -- the bitmap face below draws the run exactly as it did before, so
-/// a refusal costs the edge quality and never the text.
+/// the cell's cap height, and answers for the pixel itself. When it declines --
+/// a run at scale 1, whose cell is already at its native size, a run wider than
+/// the column the caller reserved, a glyph whose ink would leave that column,
+/// or a weight this app draws bold -- the bitmap face below draws the run
+/// exactly as it did before, so a refusal costs the edge quality and never the
+/// text.
 ///
 /// WHY the box test comes first: rasterising is the expensive part and most
 /// pixels this app asks about are nowhere near a run. Gating on
@@ -558,11 +269,12 @@ fn shutter_hit(dx: isize, dy: isize) -> bool {
 ///
 /// WHY the run answers alone when it is placed: the two faces are alternatives,
 /// not layers. Falling through to the bitmap face after an outline run had
-/// already inked a pixel would double-ink every partially covered edge, which is
-/// exactly what the first attempt at this in the launcher drew: an outline glyph
-/// with a hard-edged bitmap ghost one pixel off, on every string. The face is
-/// chosen from the run's own arguments before `(x, y)` is consulted, so it is the
-/// same choice for every pixel of the run.
+/// already inked a pixel would double-ink every partially covered edge.
+///
+/// WHY the background is a parameter and not the surface colour: a run's edge
+/// is blended against whatever is under it, and a run that sits on a pill, on
+/// the viewfinder or on the settings card is not on the surface colour. A
+/// blended edge computed against the wrong background is a visible halo.
 #[inline(always)]
 fn test_text(
     x: usize,
@@ -573,6 +285,7 @@ fn test_text(
     text: &[u8],
     max_w: usize,
     color: u32,
+    bg: u32,
 ) -> Option<u32> {
     if scale < 2 {
         let w = std::design::font::measure(text, scale);
@@ -580,33 +293,16 @@ fn test_text(
         if x < x0 || x - x0 >= w || y < y0 || y - y0 >= h {
             return None;
         }
-        return std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, THEME.surface, false);
+        return std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, bg, false);
     }
     let (bx, bt, bw, bh) = outline_text::run_box(x0, y0, scale, text);
     if x < bx || x - bx >= bw || y < bt || y - bt >= bh {
         return None;
     }
     if let Some(run) = outline_text::place_run(x0, y0, scale, text, Some(max_w), false) {
-        return run.pixel(x, y, color, THEME.surface);
+        return run.pixel(x, y, color, bg);
     }
-    std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, THEME.surface, false)
-}
-
-/// Left x that centres `text` at `scale` inside `[x0, x0 + available)`, measured
-/// for the face that will actually ink it.
-///
-/// WHY the measured width and not `font::measure`: the run is placed through
-/// `test_text`, which prefers the outline face, and the outline face advances
-/// by its own table rather than the bitmap cell's. Both widths are decided by
-/// `outline_text::drawn_advance`, which mirrors `place_run`'s own refusals, so
-/// the centring uses the width of the run that is drawn instead of the width of
-/// a run that is not. On the bitmap fallback the answer is `font::measure`,
-/// which is what the bitmap rasteriser steps by.
-#[inline(always)]
-fn centred_x(text: &[u8], scale: usize, x0: usize, available: usize) -> usize {
-    let w = outline_text::drawn_advance(text, scale, Some(available))
-        .unwrap_or_else(|| std::design::font::measure(text, scale));
-    x0 + available.saturating_sub(w) / 2
+    std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, bg, false)
 }
 
 /// Vector lightning bolt pictogram for flash pill
@@ -622,18 +318,7 @@ fn test_lightning(x: usize, y: usize, cx: usize, cy: usize) -> bool {
     }
 }
 
-/// Vector dual curved arrows pictogram for lens flip
-fn test_flip_arrows(x: usize, y: usize, cx: usize, cy: usize) -> bool {
-    let dx = x as isize - cx as isize;
-    let dy = y as isize - cy as isize;
-    let r2 = dx * dx + dy * dy;
-    let on_arc = r2 >= 13 * 13 && r2 <= 17 * 17 && ((dx.abs() > 4) || (dy.abs() > 4));
-    let arrow1 = (dx - 12).abs() <= 4 && (dy + 8).abs() <= 4 && (dx + dy <= 6);
-    let arrow2 = (dx + 12).abs() <= 4 && (dy - 8).abs() <= 4 && (dx + dy >= -6);
-    on_arc || arrow1 || arrow2
-}
-
-/// Vector landscape pictogram for gallery preview thumbnail
+/// Vector landscape pictogram for the photo library button.
 fn test_gallery_icon(x: usize, y: usize, cx: usize, cy: usize) -> bool {
     let dx = x as isize - cx as isize;
     let dy = y as isize - cy as isize;
@@ -648,6 +333,28 @@ fn test_gallery_icon(x: usize, y: usize, cx: usize, cy: usize) -> bool {
         let m1 = (dx + 4).abs() <= (dy + 2);
         let m2 = (dx - 10).abs() <= (dy - 2);
         if m1 || m2 {
+            return true;
+        }
+    }
+    false
+}
+
+/// Vector sliders pictogram for the settings button.
+///
+/// WHY a sliders glyph and not a gear: a gear promises a configuration screen,
+/// and this is one - but a gear drawn as a circle of teeth at this size is a
+/// smudge. Three bars with a knob on each read as "adjust" at 36 pixels.
+fn test_settings_icon(x: usize, y: usize, cx: usize, cy: usize) -> bool {
+    let dx = x as isize - cx as isize;
+    let dy = y as isize - cy as isize;
+    let rows = [(-12i32, -8i32), (0i32, 8i32), (12i32, 0i32)];
+    for (row_y, knob_x) in rows {
+        let ry = dy - row_y as isize;
+        if ry.abs() <= 1 && dx.abs() <= 14 {
+            return true;
+        }
+        let kx = dx - knob_x as isize;
+        if ry.abs() <= 4 && kx.abs() <= 4 {
             return true;
         }
     }
@@ -688,11 +395,6 @@ fn top_pill_body(x: usize, y: usize, rect: Rect) -> Option<(u32, bool)> {
 
 /// Draws a scale-1 label centred in `rect` at the top row's text row, or
 /// reports that this pixel is not part of the run.
-///
-/// WHY a helper: centring the run is `rect.x + (rect.w - measure) / 2`, and
-/// every top-row label needs it. Measuring per pixel is what the old code did
-/// inline four times; `measure` is a pure sum of advances, so this is cheap and
-/// it keeps the centring identical across all four.
 #[inline(always)]
 fn top_row_label(
     x: usize,
@@ -700,27 +402,49 @@ fn top_row_label(
     rect: Rect,
     label: &[u8],
     color: u32,
+    bg: u32,
 ) -> Option<u32> {
     let w = std::design::font::measure(label, 1);
     if w > rect.w {
         // WHY draw nothing rather than overflow: a label wider than its control
         // would run into the next pill, and a truncated run would lie about the
-        // value. `PROBE` returns true for these strings.
+        // value.
         return None;
     }
     let x0 = rect.x + (rect.w - w) / 2;
-    test_text(x, y, x0, TOP_ROW_TEXT_Y0, 1, label, rect.w, color)
+    test_text(x, y, x0, TOP_ROW_TEXT_Y0, 1, label, rect.w, color, bg)
 }
 
 /// Draws a scale-1 label right of the flash pictogram.
 #[inline(always)]
-fn flash_label(x: usize, y: usize, label: &[u8], color: u32) -> Option<u32> {
+fn flash_label(x: usize, y: usize, label: &[u8], color: u32, bg: u32) -> Option<u32> {
     let w = std::design::font::measure(label, 1);
     if w > FLASH_TEXT_W {
         return None;
     }
     let x0 = FLASH_TEXT_X + (FLASH_TEXT_W - w) / 2;
-    test_text(x, y, x0, TOP_ROW_TEXT_Y0, 1, label, FLASH_TEXT_W, color)
+    test_text(x, y, x0, TOP_ROW_TEXT_Y0, 1, label, FLASH_TEXT_W, color, bg)
+}
+
+/// The ink of the framing guides.
+///
+/// WHY the theme's own roles and not the colours the guides used to carry:
+/// the brackets were a white literal and the reticle a dark literal, so they
+/// did not follow the theme and the brackets were invisible against the
+/// surface they sat on. The bracket is the muted ink, the grid is that ink
+/// thinned over the viewfinder, and the reticle is the warning accent.
+fn guide_ink() -> u32 {
+    THEME.on_surface_variant
+}
+
+/// The ink of the thirds grid.
+fn grid_ink() -> u32 {
+    Theme::blend(THEME.surface_container_low, THEME.on_surface_variant, 40)
+}
+
+/// The ink of the viewfinder's border.
+fn viewfinder_border_ink() -> u32 {
+    Theme::blend(THEME.surface, THEME.on_surface, 204)
 }
 
 #[inline(never)]
@@ -736,7 +460,6 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
         // 22px right of the button's centre, so the glyph was not centred in the
         // thing it labelled. The chevron is now centred on `BACK_RECT`, and the
         // box is inset by one pixel so it is never clipped by `contains`.
-        // Standardized back button squircle (24..72, 24..72)
         if let Some(c) = std::design::back_button::pixel(x, y, THEME.on_surface, THEME.border, THEME.surface_container) {
             return c;
         }
@@ -765,7 +488,7 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
             } else {
                 &b"AUTO"[..]
             };
-            if let Some(c) = flash_label(x, y, label, icon_color) {
+            if let Some(c) = flash_label(x, y, label, icon_color, fill) {
                 return c;
             }
 
@@ -778,17 +501,23 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
         // Capture geometry. WHY this is no longer "48MP PRO": that string
         // advertised a resolution and a shooting mode the hardware never
         // reported and this app can never produce, and it was painted as if it
-        // were a control. It now reports the frame the HAL actually returned -
-        // "NO SENSOR" when the kernel refused camera authority, "NO FRAME" until
-        // a capture succeeds, then the real `WxH`.
+        // were a control. It now reports what the platform said: "NO AUTH" when
+        // the platform refused this app the camera authority, "NO SENSOR" when
+        // the camera HAL reported that no sensor is bound, "NO FRAME" until a
+        // capture succeeds, then the real `WxH`.
         if let Some((_fill, on_border)) = top_pill_body(x, y, FRAME_RECT) {
-            let label = &camera.frame_label[..camera.frame_label_len];
+            let (label, label_len) = camera.frame_readout();
+            let label = &label[..label_len];
             // WHY muted ink and not `DISABLED`: this pill is a readout, not a
             // control, and it has to stay legible - "NO SENSOR" is the answer to
             // a question the user is asking. Only its outline is recessed, to
             // signal that there is nothing to press.
-            let color = if camera.camera_authorised { THEME.primary } else { THEME.on_surface_variant };
-            if let Some(c) = top_row_label(x, y, FRAME_RECT, label, color) {
+            let color = if camera.status == CameraStatus::AuthorityRefused {
+                THEME.error
+            } else {
+                THEME.primary
+            };
+            if let Some(c) = top_row_label(x, y, FRAME_RECT, label, color, THEME.surface_container) {
                 return c;
             }
             if on_border {
@@ -797,9 +526,9 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
             return THEME.surface_container;
         }
 
-        // ISP filter pill. This is a real control: the filter is applied in
-        // `apply_isp_tone_curve` to the captured buffer, so selecting one
-        // changes what the next capture is tone-mapped with.
+        // ISP filter pill. This is a real control: the filter is applied to
+        // the captured frame, so selecting one changes what the next capture
+        // is tone-mapped with.
         if let Some((fill, on_border)) = top_pill_body(x, y, FILTER_RECT) {
             let (filter_name, filter_color) = match camera.filter {
                 CameraFilter::Normal => (&b"NORMAL"[..], THEME.primary),
@@ -808,7 +537,7 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
                 CameraFilter::Sepia => (&b"SEPIA"[..], THEME.warning),
                 CameraFilter::InvertedRed => (&b"INVERT"[..], THEME.error),
             };
-            if let Some(c) = top_row_label(x, y, FILTER_RECT, filter_name, filter_color) {
+            if let Some(c) = top_row_label(x, y, FILTER_RECT, filter_name, filter_color, fill) {
                 return c;
             }
             if on_border {
@@ -824,7 +553,7 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
         // advances when `camera_capture` actually returned a frame.
         if let Some((_fill, on_border)) = top_pill_body(x, y, SHOTS_RECT) {
             let label = &camera.shots_label[..camera.shots_label_len];
-            if let Some(c) = top_row_label(x, y, SHOTS_RECT, label, THEME.success) {
+            if let Some(c) = top_row_label(x, y, SHOTS_RECT, label, THEME.success, THEME.surface_container) {
                 return c;
             }
             if on_border {
@@ -841,131 +570,78 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
         let rel_y = y - VIEWFINDER_Y0;
         let rel_x = x - 20;
 
-        // WHY no live-feed chrome without a frame: framing brackets, a thirds
-        // grid, a focus reticle and a zoom pill together read as a running
-        // camera. `stream_video_frame` returns Err(-95) because no camera HAL is
-        // bound, so this canvas was drawing the grammar of a live sensor over
-        // nothing at all, and nothing on screen ever said otherwise. With zero
-        // received frames the viewfinder now states the absence instead. The
-        // condition is a real counter, not a flag: `total_video_frames` only
-        // advances when the frame call succeeds, so a bound sensor brings the
-        // live chrome back on its own.
-        if camera.total_video_frames == 0 {
-            // Fast bounds check: head sits at y=470 (scale 2, height <= 48), sub sits at y=530 (scale 1, height <= 24).
-            // Outside y in 465..560, the viewfinder canvas has no text ink.
-            if y >= 465 && y < 560 {
-                let head = b"No camera sensor bound";
-                let sub = b"Viewfinder inactive - no frames from the camera HAL";
-                if y < 525 {
-                    if let Some(c) = test_text(
-                        x,
-                        y,
-                        camera.head_x,
-                        470,
-                        2,
-                        head,
-                        VIEWFINDER_W,
-                        THEME.on_surface,
-                    ) {
-                        return c;
+        // The viewfinder's window.
+        let vf = Rect::new(20, VIEWFINDER_Y0, VIEWFINDER_W, VIEWFINDER_Y1 - VIEWFINDER_Y0);
+        if let Some(c) = std::design::primitives::draw_rounded_rect(
+            x,
+            y,
+            vf,
+            R_CARD,
+            THEME.surface_container_low,
+            Some(viewfinder_border_ink()),
+            1,
+        ) {
+            // The framing guides. WHY they are drawn when the user asked for
+            // them and not behind a counter that never moves: the old code drew
+            // them only once a video frame had arrived, and no video frame
+            // arrives on this platform, so the guides were unreachable. They are
+            // a framing aid the user turns on in the settings surface, and they
+            // are painted in the platform's own ink.
+            if camera.guides {
+                if let Some(c) = guide_pixel(rel_x, rel_y) {
+                    return c;
+                }
+            }
+
+            // The absence panel. WHY it states which fact the platform gave:
+            // "no sensor" and "no authority" are different problems with
+            // different remedies, and a screen that says the first when the
+            // second is true sends the user after the wrong thing.
+            if camera.total_photos == 0 {
+                if y >= 465 && y < 560 {
+                    if y < 525 {
+                        if let Some(c) = test_text(
+                            x,
+                            y,
+                            camera.head_x,
+                            470,
+                            2,
+                            &camera.head[..camera.head_len],
+                            VIEWFINDER_TEXT_W,
+                            THEME.on_surface,
+                            THEME.surface_container_low,
+                        ) {
+                            return c;
+                        }
+                    } else if y >= 528 {
+                        if let Some(c) = test_text(
+                            x,
+                            y,
+                            camera.sub_x,
+                            530,
+                            1,
+                            &camera.sub[..camera.sub_len],
+                            VIEWFINDER_TEXT_W,
+                            THEME.on_surface_variant,
+                            THEME.surface_container_low,
+                        ) {
+                            return c;
+                        }
                     }
-                } else if y >= 528 {
-                    if let Some(c) = test_text(
-                        x,
-                        y,
-                        camera.sub_x,
-                        530,
-                        1,
-                        sub,
-                        VIEWFINDER_W,
-                        THEME.on_surface_variant,
-                    ) {
-                        return c;
-                    }
                 }
             }
-            return THEME.surface_container_low;
+            return c;
         }
-
-        // Viewfinder Outer L-Corner Framing
-        let is_top_left = (rel_x <= 30 && rel_y <= 4) || (rel_x <= 4 && rel_y <= 30);
-        let is_top_right = (rel_x >= 650 && rel_y <= 4) || (rel_x >= 676 && rel_y <= 30);
-        let is_bot_left = (rel_x <= 30 && rel_y >= 996) || (rel_x <= 4 && rel_y >= 970);
-        let is_bot_right = (rel_x >= 650 && rel_y >= 996) || (rel_x >= 676 && rel_y >= 970);
-        if is_top_left || is_top_right || is_bot_left || is_bot_right {
-            return 0x88FFFFFF;
-        }
-
-        // Center Focus Reticle: (340, 500)
-        let center_x = 340;
-        let center_y = 500;
-        let dx = (rel_x as isize - center_x as isize).abs();
-        let dy = (rel_y as isize - center_y as isize).abs();
-        let is_reticle =
-            (dx <= 40 && dy <= 40) && ((dx >= 36 && dy <= 12) || (dy >= 36 && dx <= 12));
-        let is_crosshair = (dx <= 4 && dy <= 1) || (dy <= 4 && dx <= 1);
-        if is_reticle || is_crosshair {
-            return THEME.warning;
-        }
-
-        // Zoom pill, fully inside the viewfinder: abs x 296..424, abs y
-        // 994..1050. The old pill sat at abs y 1080..1130 with text rows
-        // 1098..1146, so its bottom 10px spilled past the viewfinder edge and
-        // its descenders clipped at 1130; on-device it read as half-covered by
-        // the control strip. This pill ends 70px above the viewfinder edge and
-        // 100px above the mode strip, so it can never be covered.
-        if ZOOM_PILL.contains(x, y) {
-            let rel_zx = x - ZOOM_PILL.x;
-            let rel_zy = y - ZOOM_PILL.y;
-            let rx = rel_zx.min(ZOOM_PILL.w - 1 - rel_zx);
-            let ry = rel_zy.min(ZOOM_PILL.h - 1 - rel_zy);
-            let mut on_border = false;
-            if rx < R_CARD && ry < R_CARD {
-                let cdx = (R_CARD - rx) as isize;
-                let cdy = (R_CARD - ry) as isize;
-                let d2 = cdx * cdx + cdy * cdy;
-                if d2 >= (R_CARD * R_CARD) as isize {
-                    return THEME.surface_container_low;
-                }
-                if d2 >= ((R_CARD - 2) * (R_CARD - 2)) as isize {
-                    on_border = true;
-                }
-            } else if rx < 2 || ry < 2 {
-                on_border = true;
-            }
-
-            let zoom_str = match camera.zoom_x10 {
-                10 => &b"1.0x"[..],
-                20 => &b"2.0x"[..],
-                _ => &b"5.0x"[..],
-            };
-
-            let scale = 2usize;
-            let tx0 = centred_x(zoom_str, scale, ZOOM_PILL.x, ZOOM_PILL.w);
-            // WHY derived: a scale-2 run is 48 rows tall and the pill is 56, so
-            // the run owns the pill minus 4 rows top and bottom. Hard-coding 998
-            // is what let the previous pill's descenders clip.
-            let ty0 = ZOOM_PILL.y + (ZOOM_PILL.h - 48) / 2;
-            if let Some(c) = test_text(x, y, tx0, ty0, scale, zoom_str, ZOOM_PILL.w, THEME.on_surface) {
-                return c;
-            }
-
-            if on_border {
-                return 0x66FFFFFF;
-            }
-            return 0xCC111827;
-        }
-
-        // 3x3 Rule-of-Thirds Grid Lines
-        let is_grid = (rel_x == 226 || rel_x == 453) || (rel_y == 333 || rel_y == 666);
-        if is_grid {
-            return 0x26FFFFFF;
-        }
-
-        return THEME.surface_container_low;
     }
 
-    // 3. Mode Selector Carousel (y: 1150..1200, 50px tall, >=48px touch)
+    // 3. The settings surface. WHY it is drawn over the viewfinder: the
+    //    settings are the camera's own, and the viewfinder stays visible
+    //    behind them so the surface never pretends the camera stopped.
+    if camera.screen == CameraScreen::Settings && SHEET_RECT.contains(x, y) {
+        return settings_pixel(x, y, camera);
+    }
+
+    // 4. Mode Selector Carousel (y: 1150..1200, 50px tall, >=48px touch)
     // WHY three equal slots in 20..700 (outer 20px margins, aligned with the
     // viewfinder): S0 20..246, S1 247..473, S2 474..700, each 226 wide with
     // 1px separators. The old row inked DOCUMENTS at 108..352 and PHOTO at
@@ -1005,7 +681,7 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
             let doc_color = if is_doc { THEME.on_surface } else { THEME.on_surface_variant };
             let doc_w = std::design::font::measure(DOC, scale);
             let doc_x = S0_X + (S0_W.saturating_sub(doc_w)) / 2;
-            if let Some(c) = test_text(x, y, doc_x, y0, scale, DOC, S0_W, doc_color) {
+            if let Some(c) = test_text(x, y, doc_x, y0, scale, DOC, S0_W, doc_color, THEME.surface) {
                 return c;
             }
         } else if x < S2_X {
@@ -1014,7 +690,7 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
             let photo_color = if is_photo { THEME.on_surface } else { THEME.on_surface_variant };
             let pho_w = std::design::font::measure(PHO, scale);
             let pho_x = S1_X + (S1_W.saturating_sub(pho_w)) / 2;
-            if let Some(c) = test_text(x, y, pho_x, y0, scale, PHO, S1_W, photo_color) {
+            if let Some(c) = test_text(x, y, pho_x, y0, scale, PHO, S1_W, photo_color, THEME.surface) {
                 return c;
             }
         } else {
@@ -1023,7 +699,7 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
             let vid_color = if is_vid { THEME.on_surface } else { THEME.on_surface_variant };
             let vid_w = std::design::font::measure(VID, scale);
             let vid_x = S2_X + (S2_W.saturating_sub(vid_w)) / 2;
-            if let Some(c) = test_text(x, y, vid_x, y0, scale, VID, S2_W, vid_color) {
+            if let Some(c) = test_text(x, y, vid_x, y0, scale, VID, S2_W, vid_color, THEME.surface) {
                 return c;
             }
         }
@@ -1034,7 +710,6 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
             CameraMode::Photo => x >= 328 && x < 392,
             CameraMode::Video => x >= 555 && x < 619,
             CameraMode::DocumentVision => x >= 101 && x < 165,
-            _ => false,
         };
         if is_active_mode && y >= 1194 && y < 1198 {
             return THEME.warning;
@@ -1043,24 +718,18 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
         return THEME.surface;
     }
 
-    // 4. Bottom Shutter Dock & Hardware Controls (y: DOCK_Y0..DOCK_Y1)
+    // 5. Bottom Shutter Dock & Hardware Controls (y: DOCK_Y0..DOCK_Y1)
     if (DOCK_Y0..DOCK_Y1 - 30).contains(&y) {
-        // Left gallery thumbnail. WHY drawn recessed and never hit-tested:
-        // nothing behind it exists to open. The camera HAL exposes no photo roll
-        // and this task holds no media index, so the old amber landscape glyph
-        // promised a library that cannot be listed and the old hit handler had
-        // no branch for it at all - a control that looks live and does nothing.
-        let thumb_dx = (x as isize - 110).abs();
-        let thumb_dy = (y as isize - SHUTTER_CY as isize).abs();
-        if thumb_dx <= DOCK_SIDEBTN_HALF as isize && thumb_dy <= DOCK_SIDEBTN_HALF as isize {
-            // WHY muted rather than `DISABLED` here: an icon painted in the
-            // hairline token against a #25282A card is nearly invisible, which
-            // is the same defect as the invisible exit hotspot this app's file
-            // manager had. Visible-but-inert is the honest middle.
-            if test_gallery_icon(x, y, 110, SHUTTER_CY) {
+        // The photo library button. WHY it is a control now: the camera writes
+        // its photos into the shared storage area and the platform's document
+        // index describes them, so there is something behind it to open.
+        if side_button_hit(x, y, PHOTOS_CX) {
+            if test_gallery_icon(x, y, PHOTOS_CX, SHUTTER_CY) {
                 return THEME.on_surface_variant;
             }
-            if thumb_dx == DOCK_SIDEBTN_HALF as isize || thumb_dy == DOCK_SIDEBTN_HALF as isize {
+            let dx = (x as isize - PHOTOS_CX as isize).abs();
+            let dy = (y as isize - SHUTTER_CY as isize).abs();
+            if dx == DOCK_SIDEBTN_HALF as isize || dy == DOCK_SIDEBTN_HALF as isize {
                 return THEME.border;
             }
             return THEME.surface_container;
@@ -1081,7 +750,11 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
 
         // Outer metallic ring.
         if dist_sq <= outer && dist_sq >= inner {
-            return if camera.camera_authorised { THEME.on_surface } else { DISABLED };
+            return if camera.status == CameraStatus::AuthorityRefused {
+                DISABLED
+            } else {
+                THEME.on_surface
+            };
         }
         // Concentric track gap.
         if dist_sq < inner && dist_sq >= core {
@@ -1089,7 +762,7 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
         }
         // Inner tactile shutter core.
         if dist_sq < core {
-            if !camera.camera_authorised {
+            if camera.status == CameraStatus::AuthorityRefused {
                 return THEME.surface_container;
             } else if camera.mode == CameraMode::Video {
                 return THEME.error;
@@ -1100,19 +773,18 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
             }
         }
 
-        // Right Lens Flip Button. WHY drawn recessed and never hit-tested: the
-        // camera HAL exposes `capture_frame` and nothing that selects between a
-        // front and a rear sensor, so there is no lens to flip. The old handler
-        // played a haptic click and changed no state - a control that looked
-        // armed and only pretended to.
-        let flip_dx = (x as isize - 610).abs();
-        let flip_dy = (y as isize - SHUTTER_CY as isize).abs();
-        let flip_r2 = flip_dx * flip_dx + flip_dy * flip_dy;
-        if flip_r2 <= (DOCK_SIDEBTN_HALF * DOCK_SIDEBTN_HALF) as isize {
-            if test_flip_arrows(x, y, 610, SHUTTER_CY) {
+        // The settings button. WHY it replaced the lens-flip glyph: the camera
+        // HAL exposes `capture_frame` and nothing that selects between a front
+        // and a rear sensor, so there is no lens to flip and the old glyph was
+        // a control that looked armed and only pretended to be. The settings
+        // surface the camera needed now has a place to live.
+        if side_button_hit(x, y, SETTINGS_CX) {
+            if test_settings_icon(x, y, SETTINGS_CX, SHUTTER_CY) {
                 return THEME.on_surface_variant;
             }
-            if flip_r2 >= 30 * 30 {
+            let dx = (x as isize - SETTINGS_CX as isize).abs();
+            let dy = (y as isize - SHUTTER_CY as isize).abs();
+            if dx == DOCK_SIDEBTN_HALF as isize || dy == DOCK_SIDEBTN_HALF as isize {
                 return THEME.border;
             }
             return THEME.surface_container;
@@ -1126,6 +798,146 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
         return THEME.on_surface_variant;
     }
 
+    THEME.surface
+}
+
+/// The framing guides, in viewfinder-relative coordinates.
+///
+/// WHY the ink is the theme's: the guides used to carry colour literals of
+/// their own - a translucent white for the brackets, a translucent white for
+/// the reticle and a translucent white for the grid - which meant they did
+/// not follow the theme and the brackets were invisible against the surface
+/// they sat on.
+fn guide_pixel(rel_x: usize, rel_y: usize) -> Option<u32> {
+    // The corner brackets.
+    let is_top_left = (rel_x <= BRACKET_ARM && rel_y <= 4) || (rel_x <= 4 && rel_y <= BRACKET_ARM);
+    let is_top_right =
+        (rel_x >= 650 && rel_y <= 4) || (rel_x >= 676 && rel_y <= BRACKET_ARM);
+    let is_bot_left =
+        (rel_x <= BRACKET_ARM && rel_y >= 996) || (rel_x <= 4 && rel_y >= 970);
+    let is_bot_right = (rel_x >= 650 && rel_y >= 996) || (rel_x >= 676 && rel_y >= 970);
+    if is_top_left || is_top_right || is_bot_left || is_bot_right {
+        return Some(guide_ink());
+    }
+
+    // The focus reticle.
+    let dx = (rel_x as isize - RETICLE_CX as isize).abs();
+    let dy = (rel_y as isize - RETICLE_CY as isize).abs();
+    let is_reticle = (dx <= RETICLE_ARM as isize && dy <= RETICLE_ARM as isize)
+        && ((dx >= 36 && dy <= 12) || (dy >= 36 && dx <= 12));
+    let is_crosshair = (dx <= 4 && dy <= 1) || (dy <= 4 && dx <= 1);
+    if is_reticle || is_crosshair {
+        return Some(THEME.warning);
+    }
+
+    // The thirds grid.
+    let is_grid = (rel_x == 226 || rel_x == 453) || (rel_y == 333 || rel_y == 666);
+    if is_grid {
+        return Some(grid_ink());
+    }
+
+    None
+}
+
+/// The settings surface.
+///
+/// WHY the values are pre-rendered: the renderer is called once per pixel, and
+/// formatting a value there would run tens of thousands of times for one row.
+fn settings_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
+    // The card, in the platform's own treatment.
+    if let Some(c) = std::design::primitives::draw_rounded_rect(
+        x,
+        y,
+        SHEET_RECT,
+        SHEET_CARD.radius,
+        SHEET_CARD.fill,
+        SHEET_CARD.border,
+        1,
+    ) {
+        // The title.
+        if y >= SHEET_TITLE_Y0 && y < SHEET_TITLE_Y0 + 24 {
+            if let Some(c) = test_text(
+                x,
+                y,
+                SHEET_TEXT_X,
+                SHEET_TITLE_Y0,
+                1,
+                b"CAMERA SETTINGS",
+                SHEET_TEXT_W,
+                THEME.on_surface,
+                SHEET_CARD.fill,
+            ) {
+                return c;
+            }
+        }
+
+        // The rows.
+        for (index, row) in SETTINGS_ROW_ORDER.iter().enumerate() {
+            let row_y = SHEET_ROW_Y0 + index * SHEET_ROW_H;
+            if y < row_y || y >= row_y + SHEET_ROW_H {
+                continue;
+            }
+            // The platform's list-row treatment, so a settings row here is a
+            // settings row anywhere else in the system.
+            let style = components::list_row_style(&THEME, false);
+            // The row's own surface. WHY the row is drawn under its own text
+            // and not left on the card: a settings row that is a card with
+            // text on it is not the platform's row, and the user would be
+            // looking at a different control in every other app.
+            let plate = std::design::primitives::draw_rounded_rect(
+                x,
+                y,
+                std::design::primitives::Rect::new(
+                    SHEET_ROW_X0,
+                    row_y,
+                    SHEET_ROW_W,
+                    SHEET_ROW_H - SHEET_ROW_GAP,
+                ),
+                style.radius,
+                style.fill,
+                None,
+                0,
+            );
+            let title = camera.settings_row_title(*row);
+            if y < row_y + 24 {
+                if let Some(c) =
+                    test_text(x, y, SHEET_TEXT_X, row_y, 1, title, SHEET_TEXT_W, THEME.on_surface_variant, style.fill)
+                {
+                    return c;
+                }
+            } else if y < row_y + 52 {
+                let len = camera.settings_value_lens[index];
+                let value = &camera.settings_values[index][..len];
+                if let Some(c) =
+                    test_text(x, y, SHEET_TEXT_X, row_y + 28, 1, value, SHEET_TEXT_W, THEME.on_surface, style.fill)
+                {
+                    return c;
+                }
+            } else {
+                let note = camera.settings_row_note(*row);
+                if !note.is_empty() {
+                    if let Some(c) = test_text(
+                        x,
+                        y,
+                        SHEET_TEXT_X,
+                        row_y + 56,
+                        1,
+                        note,
+                        SHEET_TEXT_W,
+                        THEME.on_surface_variant,
+                        style.fill,
+                    ) {
+                        return c;
+                    }
+                }
+            }
+            // The row's own surface, where no glyph landed.
+            if let Some(plate) = plate {
+                return plate;
+            }
+        }
+        return c;
+    }
     THEME.surface
 }
 
@@ -1178,7 +990,8 @@ enum Dirty {
     None,
     /// Flash or ISP filter changed: the top control row only.
     TopRow,
-    /// Zoom changed: only the viewfinder canvas.
+    /// The viewfinder changed: the guides, the absence panel or the settings
+    /// sheet, which is drawn over the viewfinder.
     Viewfinder,
     /// More than one band moved: the whole surface.
     ///
@@ -1224,6 +1037,125 @@ fn exit_to_launcher(surface: u32) -> ! {
     std::exit_with_code(0);
 }
 
+/// Hands the last photo to the app that opens images and reports what the
+/// platform answered.
+///
+/// WHY the refusal is reported and not swallowed: an app that holds no
+/// intent-dispatch authority cannot open anything, and a button that says it
+/// opened the gallery when it did not is the defect this app is being fixed
+/// for.
+fn open_photo_library(camera: &CameraApp) {
+    match camera.open_photo_library() {
+        Ok(_) => {
+            std::log("[CAMERA APP] The platform handed the photo to the app that handles images.")
+                .ok();
+        }
+        Err(camera::ERR_NO_PHOTO) => {
+            std::log("[CAMERA APP] No photo to open: this app has not written one yet.").ok();
+        }
+        Err(code) => {
+            let mut buf = [0u8; 96];
+            let prefix = b"[CAMERA APP] The platform refused to hand the photo over, code -";
+            let p = prefix.len().min(buf.len());
+            buf[..p].copy_from_slice(&prefix[..p]);
+            let n = p + camera::append_decimal(code.unsigned_abs() as u32, &mut buf[p..]);
+            if let Ok(msg) = core::str::from_utf8(&buf[..n]) {
+                std::log(msg).ok();
+            }
+            std::log("[CAMERA APP] This app holds no intent-dispatch authority, so it cannot open the gallery.")
+                .ok();
+        }
+    }
+}
+
+/// Handles a tap on the settings surface.
+///
+/// WHY the rows are answered here and not in the main handler: the settings
+/// surface is a screen of its own, and a row that changed nothing was a row
+/// that looked like a control.
+/// Writes a log line that ends with the platform's own refusal code.
+///
+/// WHY the code is carried through untouched: it is the kernel's answer,
+/// not a constant written here, and a message that softened it would be
+/// reporting something the platform did not say.
+fn log_capture_code(prefix: &[u8], code: i64) {
+    let mut buf = [0u8; 96];
+    let p = prefix.len().min(buf.len());
+    buf[..p].copy_from_slice(&prefix[..p]);
+    let n = p + camera::append_decimal(code.unsigned_abs() as u32, &mut buf[p..]);
+    if let Ok(msg) = core::str::from_utf8(&buf[..n]) {
+        std::log(msg).ok();
+    }
+}
+
+fn handle_settings_tap(camera: &mut CameraApp, x: usize, y: usize) -> Tap {
+    if !SHEET_RECT.contains(x, y) {
+        return Tap::None;
+    }
+    if y < SHEET_ROW_Y0 {
+        return Tap::None;
+    }
+    let index = (y - SHEET_ROW_Y0) / SHEET_ROW_H;
+    if index >= SETTINGS_ROW_ORDER.len() {
+        return Tap::None;
+    }
+    let row = SETTINGS_ROW_ORDER[index];
+    match row {
+        SettingsRow::Filter => {
+            camera.filter = camera.filter.next();
+            camera.refresh_settings_values();
+            std::log("[CAMERA APP] The image processing for the next capture changed.").ok();
+            Tap::Redraw(Dirty::All)
+        }
+        SettingsRow::Flash => {
+            match camera.toggle_flash() {
+                Some(on) => {
+                    std::log(if on {
+                        "[CAMERA APP] Flash hardware reported torch ON."
+                    } else {
+                        "[CAMERA APP] Flash hardware reported torch OFF."
+                    })
+                    .ok();
+                }
+                None => {
+                    std::log("[CAMERA APP] Flash unavailable: the camera hardware backend refused the toggle; flash is off.")
+                        .ok();
+                }
+            }
+            camera.refresh_settings_values();
+            Tap::Redraw(Dirty::All)
+        }
+        SettingsRow::Guides => {
+            camera.guides = !camera.guides;
+            camera.refresh_settings_values();
+            std::log(if camera.guides {
+                "[CAMERA APP] The framing guides are on."
+            } else {
+                "[CAMERA APP] The framing guides are off."
+            })
+            .ok();
+            Tap::Redraw(Dirty::Viewfinder)
+        }
+        SettingsRow::OpenLibrary => {
+            open_photo_library(camera);
+            Tap::Redraw(Dirty::Viewfinder)
+        }
+        SettingsRow::Close => {
+            camera.screen = CameraScreen::Viewfinder;
+            Tap::Redraw(Dirty::Viewfinder)
+        }
+        SettingsRow::Format
+        | SettingsRow::Photos
+        | SettingsRow::LastPhoto
+        | SettingsRow::LastCapture
+        => {
+            // These rows report what the platform said; they have nothing to
+            // change.
+            Tap::None
+        }
+    }
+}
+
 fn handle_camera_touch(camera: &mut CameraApp, x: u32, y: u32) -> Tap {
     let x = x as usize;
     let y = y as usize;
@@ -1233,10 +1165,21 @@ fn handle_camera_touch(camera: &mut CameraApp, x: u32, y: u32) -> Tap {
     // x 240..480 && y >= 1400`, a second transcription of the header's geometry
     // with no upper bound on y.
     if std::design::back_button::contains(x, y) || BACK_RECT.contains(x, y) || HOME_HIT.contains(x, y) {
+        if camera.screen == CameraScreen::Settings {
+            // The back control closes the settings before it leaves the app:
+            // the settings are a sheet over the camera, not a separate place.
+            camera.screen = CameraScreen::Viewfinder;
+            return Tap::Redraw(Dirty::Viewfinder);
+        }
         return Tap::Leave("[CAMERA] Back control or home gesture pressed. Exiting to launcher.");
     }
 
-    // 2. Flash mode toggle pill - a real control, backed by `camera_toggle_flash`.
+    // 2. The settings surface, when it is open.
+    if camera.screen == CameraScreen::Settings {
+        return handle_settings_tap(camera, x, y);
+    }
+
+    // 3. Flash mode toggle pill - a real control, backed by `camera_toggle_flash`.
     //
     // WHY: the flash pill previously advanced the local mode and then
     // discarded the `Err` from camera_toggle_flash, so the UI showed the next
@@ -1263,31 +1206,13 @@ fn handle_camera_touch(camera: &mut CameraApp, x: u32, y: u32) -> Tap {
         return Tap::Redraw(Dirty::TopRow);
     }
 
-    // 3. ISP filter toggle pill - a real control: `apply_isp_tone_curve` applies
-    //    the selected filter to the captured buffer, so it changes the next
-    //    capture rather than only a label.
+    // 4. ISP filter toggle pill - a real control: the filter is applied to the
+    //    captured frame, so it changes the next capture rather than only a
+    //    label.
     if FILTER_RECT.contains(x, y) {
-        camera.filter = match camera.filter {
-            CameraFilter::Normal => CameraFilter::Monochrome,
-            CameraFilter::Monochrome => CameraFilter::HighContrast,
-            CameraFilter::HighContrast => CameraFilter::Sepia,
-            CameraFilter::Sepia => CameraFilter::InvertedRed,
-            CameraFilter::InvertedRed => CameraFilter::Normal,
-        };
+        camera.filter = camera.filter.next();
         std::audio_haptic_click().ok();
         return Tap::Redraw(Dirty::TopRow);
-    }
-
-    // 4. Zoom toggle pill in viewfinder. Guarded by active video frames so an
-    //    inactive/unbound camera HAL cannot register touch events on invisible chrome.
-    if camera.total_video_frames > 0 && ZOOM_PILL.contains(x, y) {
-        camera.zoom_x10 = match camera.zoom_x10 {
-            10 => 20,
-            20 => 50,
-            _ => 10,
-        };
-        std::audio_haptic_click().ok();
-        return Tap::Redraw(Dirty::Viewfinder);
     }
 
     // 5. Mode Selector Carousel: three equal 226px slots in 20..700, matching the
@@ -1312,13 +1237,29 @@ fn handle_camera_touch(camera: &mut CameraApp, x: u32, y: u32) -> Tap {
         return Tap::Redraw(Dirty::All);
     }
 
-    // 6. Shutter Button. WHY gated on the authority probe: the shutter is drawn
+    // 6. The photo library button. WHY it is a control now: the camera writes
+    //    its photos into the shared storage area and the platform's document
+    //    index describes them, so there is something behind it to open.
+    if side_button_hit(x, y, PHOTOS_CX) {
+        open_photo_library(camera);
+        return Tap::Redraw(Dirty::Viewfinder);
+    }
+
+    // 7. The settings button.
+    if side_button_hit(x, y, SETTINGS_CX) {
+        camera.screen = CameraScreen::Settings;
+        camera.refresh_settings_values();
+        std::audio_haptic_click().ok();
+        return Tap::Redraw(Dirty::Viewfinder);
+    }
+
+    // 8. Shutter Button. WHY gated on the authority probe: the shutter is drawn
     //    recessed when the kernel refused camera authority, and a recessed
     //    control that still fired would be the dead affordance again. WHY the
     //    circle test: it is derived from the radii the renderer draws, where the
     //    old rectangle included 24px above and 26px below the painted ring.
     if shutter_hit(x as isize - SHUTTER_CX as isize, y as isize - SHUTTER_CY as isize) {
-        if !camera.camera_authorised {
+        if camera.status == CameraStatus::AuthorityRefused {
             std::log("[CAMERA APP] Shutter unavailable: the kernel refused camera authority for this task.",
             )
             .ok();
@@ -1326,63 +1267,93 @@ fn handle_camera_touch(camera: &mut CameraApp, x: u32, y: u32) -> Tap {
         }
         // WHY report the real outcome: `let _ =` here discarded the refusal, so a
         // press that captured nothing was indistinguishable from one that did.
-        // The two attempts return different `Ok` types (`u64` frame id, `u32`
-        // shot count), so both are folded to a unit `Ok` and the real `Err` code
-        // is carried through untouched - it is the kernel's answer, never a
-        // constant written here.
-        let outcome: Result<(), i64> = if camera.mode == CameraMode::Video {
-            camera.stream_video_frame().map(|_| ())
+        // The real `Err` code is carried through untouched - it is the kernel's
+        // answer, never a constant written here.
+        let outcome = if camera.mode == CameraMode::Video {
+            camera.stream_video_frame()
         } else {
-            camera.capture_still_photo().map(|_| ())
+            camera.capture_still_photo()
         };
+        // WHY each outcome is reported in its own words: "captured and
+        // indexed", "captured but not indexed", "captured but not written"
+        // and "not captured" are four different events. A screen that
+        // called the last three of them a refusal would send the user
+        // after the wrong thing.
         match outcome {
-            Ok(()) => return Tap::Redraw(Dirty::All),
-            Err(code) => {
-                let mut buf = [0u8; 32];
-                let prefix = b"[CAMERA APP] Capture refused, code -";
-                let p = prefix.len().min(buf.len());
-                buf[..p].copy_from_slice(&prefix[..p]);
-                let n = p + fmt_u32(code.unsigned_abs() as u32, &mut buf[p..]);
-                if let Ok(msg) = core::str::from_utf8(&buf[..n]) {
-                    std::log(msg).ok();
-                }
-                return Tap::None;
+            CaptureOutcome::Published => {
+                std::log(
+                    "[CAMERA APP] The photo is on the device and the document index describes it.",
+                )
+                .ok();
+            }
+            CaptureOutcome::WrittenNotIndexed => {
+                std::log(
+                    "[CAMERA APP] The photo is on the device, but the document index did not describe it.",
+                )
+                .ok();
+            }
+            CaptureOutcome::WriteRefused(code) => {
+                log_capture_code(
+                    b"[CAMERA APP] The frame was captured but the platform refused to write it, code -",
+                    code,
+                );
+            }
+            CaptureOutcome::CaptureRefused(code) => {
+                log_capture_code(b"[CAMERA APP] Capture refused, code -", code);
+            }
+            CaptureOutcome::NoVideoStream => {
+                std::log(
+                    "[CAMERA APP] The camera HAL exposes no video stream; this platform cannot deliver a video frame.",
+                )
+                .ok();
+            }
+            CaptureOutcome::None => {
+                std::log("[CAMERA APP] The shutter produced no frame.").ok();
             }
         }
+        camera.refresh_settings_values();
+        return Tap::Redraw(Dirty::All);
     }
 
-    // The dock's gallery thumbnail and lens-flip square are painted recessed and
-    // are deliberately not hit-tested: there is no photo roll to open and no
-    // lens selector to flip, and the old lens branch answered a tap with a
-    // haptic click and no state change at all.
     Tap::None
 }
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    std::log("[CAMERA APP (Ring 3)] Sovereign Camera & Neural Vision online.",
-    )
-    .ok();
+    std::log("[CAMERA APP (Ring 3)] Camera online.").ok();
 
     let mut camera = CameraApp::new();
-    camera.init();
+    camera.refresh_shots_label();
+    camera.refresh_status_text();
 
     // Ask the kernel whether this task may drive a camera at all.
     //
     // WHY before the first frame: the shutter, the capture-geometry readout and
     // the flash pill are all drawn from this answer, so the very first presented
     // frame already tells the truth. The probe is a read-only autofocus query
-    // and changes no hardware state, which the comment above this line used to
-    // guarantee for the whole app.
+    // and changes no hardware state.
     camera.probe_camera_authority();
-    if camera.camera_authorised {
-        std::log("[CAMERA APP] Kernel granted camera authority; capture controls are armed.",
-        )
-        .ok();
-    } else {
-        std::log("[CAMERA APP] Kernel refused camera authority for this task; capture controls are shown unavailable.",
-        )
-        .ok();
+    match camera.status {
+        CameraStatus::AuthorityRefused => {
+            std::log("[CAMERA APP] The platform refused camera authority for this task; the viewfinder says so.",
+            )
+            .ok();
+        }
+        CameraStatus::NoSensor => {
+            std::log("[CAMERA APP] Camera authority held, but the camera HAL reported that no sensor is bound.",
+            )
+            .ok();
+        }
+        CameraStatus::AuthorityHeld => {
+            std::log("[CAMERA APP] The platform granted camera authority; capture controls are armed.",
+            )
+            .ok();
+        }
+        CameraStatus::Failed => {
+            std::log("[CAMERA APP] The camera authority query failed; the viewfinder says so.",
+            )
+            .ok();
+        }
     }
 
     // Allocate dedicated KMS Client Surface (z=200)
@@ -1417,22 +1388,12 @@ pub extern "C" fn _start() -> ! {
     // Interactive Event Reactor Loop
     loop {
         if let Ok(events) = std::event_poll(std::EVENT_TOUCH_INPUT | std::EVENT_TIMER_TICK, 100) {
-            if (events & std::EVENT_TIMER_TICK) != 0 {
-                if camera.mode == CameraMode::Video {
-                    // WHY only redraw when a frame actually arrived: the old
-                    // loop flipped the surface on every 100-tick timer event
-                    // whether or not anything changed, which spent scanout
-                    // bandwidth redisplaying an identical viewfinder. The
-                    // counter only moves when `stream_video_frame` succeeds, so
-                    // comparing it is a real "did the canvas move" test.
-                    let before = camera.total_video_frames;
-                    let _ = camera.stream_video_frame();
-                    if camera.total_video_frames != before {
-                        render_camera_band(surface, &camera, VIEWFINDER_Y0, VIEWFINDER_Y1);
-                        let _ = std::surface_flip();
-                    }
-                }
-            }
+            // WHY the timer tick carries no work: the only thing the camera
+            // used to do on a tick was ask for a video frame, and the camera
+            // HAL has no stream to give, so every tick asked for a frame that
+            // could not arrive. The video mode now says so when the shutter is
+            // pressed, which is the moment the user is actually asking.
+            let _ = &events;
 
             if (events & std::EVENT_TOUCH_INPUT) != 0 {
                 let mut input = std::InputEvent {
