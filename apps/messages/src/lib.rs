@@ -9,6 +9,8 @@ pub mod theme;
 
 pub mod gsm;
 pub mod store;
+pub mod privacy;
+pub mod publish;
 
 pub const MAX_PHONE_LEN: usize = 32;
 pub const MAX_PEER_HANDLE_LEN: usize = 32;
@@ -17,6 +19,73 @@ pub const MAX_THREADS: usize = 8;
 pub const MAX_MESSAGES_PER_THREAD: usize = 16;
 pub const MAX_DRAFT_LEN: usize = 160;
 pub const MAX_MESSAGE_BODY_LEN: usize = 160;
+
+/// The label a record the app holds as incoming is drawn with.
+///
+/// WHY it says the record was written here: no transport is bound to this
+/// app, so nothing can arrive. A record whose direction is incoming can
+/// only be one this device wrote, and drawing it as "Received" would be a
+/// claim about a channel the app has never had.
+pub const INCOMING_LOCAL_LABEL: &[u8] = b"Written locally - never received";
+
+/// The label the thread list draws for a thread whose previews are hidden.
+///
+/// WHY this is a constant and not a format: the whole point of the privacy
+/// setting is that the snippet is not on the screen, so there is nothing to
+/// format.
+pub const HIDDEN_PREVIEW_LABEL: &[u8] = b"Message";
+
+/// Case-insensitive substring match.
+pub fn contains_ci(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    if needle.len() > haystack.len() {
+        return false;
+    }
+    for i in 0..=(haystack.len() - needle.len()) {
+        let mut matched = true;
+        for j in 0..needle.len() {
+            if haystack[i + j].to_ascii_lowercase() != needle[j].to_ascii_lowercase() {
+                matched = false;
+                break;
+            }
+        }
+        if matched {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether a thread matches a search query.
+pub fn thread_matches(tr: &ThreadRecord, query: &[u8]) -> bool {
+    contains_ci(tr.peer(), query)
+}
+
+/// The index of the `n`th thread that matches `query`.
+///
+/// WHY the list is addressed by the matching index and not by the ledger's
+/// own: a filtered list draws only the rows that match, so the row under the
+/// finger is the `n`th match and not the `n`th thread. The two are the same
+/// only when nothing is filtered.
+pub fn filtered_thread_index(
+    threads: &[ThreadRecord],
+    thread_count: usize,
+    query: &[u8],
+    n: usize,
+) -> Option<usize> {
+    let mut seen = 0usize;
+    for i in 0..thread_count.min(threads.len()) {
+        if thread_matches(&threads[i], query) {
+            if seen == n {
+                return Some(i);
+            }
+            seen += 1;
+        }
+    }
+    None
+}
 
 /// Message transmission direction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -460,6 +529,61 @@ extern crate std;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_incoming_record_says_it_was_written_on_this_device() {
+        // WHY this test exists: the record used to be drawn as "Received
+        // (no transport)". Nothing can arrive, because no transport is bound
+        // to this app, so a record whose direction is incoming can only be
+        // one this device wrote. A label that says it was received is a
+        // claim about a channel the app has never had.
+        let label = INCOMING_LOCAL_LABEL;
+        assert!(!label.windows(8).any(|w| w == b"Received"));
+        assert!(!label.windows(6).any(|w| w == b"inbox"));
+        assert!(label.windows(7).any(|w| w == b"locally"));
+        assert!(label.windows(7).any(|w| w == b"never r"));
+    }
+
+    #[test]
+    fn a_hidden_preview_shows_the_message_itself() {
+        // WHY this test exists: the privacy setting is only a privacy
+        // control if the preview is not on the screen. A preview that was
+        // merely shortened would still be the message.
+        assert_eq!(HIDDEN_PREVIEW_LABEL, b"Message");
+    }
+
+    #[test]
+    fn a_filtered_list_is_addressed_by_the_matching_row() {
+        // WHY this test exists: the list draws only the rows that match, so
+        // the row under the finger is the n-th match and not the n-th
+        // thread. Addressing it by the ledger's own index would open the
+        // wrong conversation and delete the wrong thread.
+        let mut ledger = ThreadLedger::new();
+        ledger.create_or_get_thread(b"+15550000");
+        ledger.create_or_get_thread(b"+15551111");
+        ledger.create_or_get_thread(b"+15552222");
+
+        // An empty query matches everything, so the row and the ledger
+        // agree.
+        assert_eq!(
+            filtered_thread_index(&ledger.threads, ledger.thread_count, b"", 0),
+            Some(0)
+        );
+        assert_eq!(
+            filtered_thread_index(&ledger.threads, ledger.thread_count, b"", 2),
+            Some(2)
+        );
+
+        // A query that matches one thread reports that thread's own index.
+        assert_eq!(
+            filtered_thread_index(&ledger.threads, ledger.thread_count, b"2222", 0),
+            Some(2)
+        );
+        assert_eq!(
+            filtered_thread_index(&ledger.threads, ledger.thread_count, b"2222", 1),
+            None
+        );
+    }
 
     #[test]
     fn a_delivery_state_never_claims_a_transport_it_did_not_have() {

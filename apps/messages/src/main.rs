@@ -18,11 +18,17 @@ use interos_std as std;
 use messages::theme::{MIN_TOUCH_TARGET, THEME, radius, spacing, type_scale};
 use interos_std::design::components;
 use interos_std::design::outline_text;
+use interos_std::design::scroll::ScrollState;
 
 use messages::gsm;
+use messages::privacy;
+use messages::publish;
 use messages::store;
 use messages::store::ThreadStore;
-use messages::{DeliveryStatus, MessageDirection, MessageRecord, ThreadLedger, ThreadStatus};
+use messages::{
+    DeliveryStatus, HIDDEN_PREVIEW_LABEL, INCOMING_LOCAL_LABEL, MessageDirection, MessageRecord,
+    ThreadLedger, ThreadStatus,
+};
 
 /// Conversation thread summary.
 #[allow(dead_code)]
@@ -44,6 +50,11 @@ pub static THREADS: [ConversationThread; 0] = [];
 pub enum ViewMode {
     ThreadList,
     Conversation,
+    /// The details of the open thread: what the app knows about it, and what
+    /// the platform does not offer.
+    Details,
+    /// The recipient picker: every recipient the platform can hand over.
+    Recipients,
 }
 
 /// The settings key the dialer hands a recipient to this app under.
@@ -71,6 +82,12 @@ impl MessagesApp {
                 self.recip[..n].copy_from_slice(&buf[..n]);
                 self.recip_len = n;
                 self.recip_focused = true;
+                // WHY the hand-off is kept: the recipient picker offers the
+                // recipients the platform can produce, and the dialer's
+                // hand-off is one of them. The settings key is cleared, but
+                // the value it carried is not thrown away with it.
+                self.handoff[..n].copy_from_slice(&buf[..n]);
+                self.handoff_len = n;
                 let _ = std::settings_set(HANDOFF_KEY, &[]);
                 std::log("[MESSAGES APP] A recipient was handed over by the dialer; it is shown in the recipient field.",
                 )
@@ -78,6 +95,13 @@ impl MessagesApp {
             }
             _ => {}
         }
+    }
+
+    /// Records a line of text telling the user what the last action did.
+    pub fn set_notice(&mut self, text: &[u8]) {
+        let n = text.len().min(NOTICE_CAP);
+        self.notice[..n].copy_from_slice(&text[..n]);
+        self.notice_len = n;
     }
 }
 
@@ -148,6 +172,40 @@ pub struct MessagesApp {
     pub recip_len: usize,
     pub recip_focused: bool,
     pub recip_select_all: bool,
+    /// The recipient the dialer handed over, kept for the recipient picker.
+    ///
+    /// WHY it is kept after the field is filled: the picker offers the
+    /// recipients the platform can produce, and the dialer's hand-off is one
+    /// of them. Clearing it with the settings key would leave the picker
+    /// offering nothing the user was just given.
+    pub handoff: [u8; RECIP_CAP],
+    pub handoff_len: usize,
+    /// The thread list's scroll position.
+    ///
+    /// WHY the list scrolls: the ledger holds eight threads and the visible
+    /// band holds fewer, and a thread below the band was unreachable.
+    pub list_scroll: ScrollState,
+    /// The conversation's scroll position.
+    ///
+    /// WHY the conversation scrolls: a thread holds sixteen messages and the
+    /// band holds twelve, so the oldest messages were drawn off the top of
+    /// the screen with no way to reach them.
+    pub convo_scroll: ScrollState,
+    /// The path of the document the open thread was published at.
+    pub published_path: [u8; publish::PATH_CAP],
+    pub published_path_len: usize,
+    /// A line of text telling the user what the last action did.
+    pub notice: [u8; NOTICE_CAP],
+    pub notice_len: usize,
+    /// Whether each thread hides its preview in the thread list.
+    ///
+    /// WHY it is cached on the app: the answer lives in the platform's
+    /// settings store, and asking it for every pixel of the list would mean
+    /// a system call per pixel. The cache is refreshed when the ledger
+    /// changes and when the user changes the setting.
+    pub hidden_previews: [bool; messages::MAX_THREADS],
+    /// The screen the recipient picker was opened from.
+    pub picker_return: ViewMode,
 }
 
 impl MessagesApp {
@@ -176,7 +234,84 @@ impl MessagesApp {
             recip_len: 0,
             recip_focused: false,
             recip_select_all: false,
+            handoff: [0; RECIP_CAP],
+            handoff_len: 0,
+            list_scroll: ScrollState::new(0, LIST_VIEWPORT_H, 0),
+            convo_scroll: ScrollState::new(0, CONVO_VIEWPORT_H, 0),
+            published_path: [0; publish::PATH_CAP],
+            published_path_len: 0,
+            notice: [0; NOTICE_CAP],
+            notice_len: 0,
+            hidden_previews: [false; messages::MAX_THREADS],
+            picker_return: ViewMode::ThreadList,
         }
+    }
+
+    /// The ledger index of the thread with `tid`.
+    ///
+    /// WHY it is looked up by id: the privacy cache is indexed by the
+    /// ledger's own order, and the thread the user has open is named by its
+    /// id.
+    pub fn thread_ledger_index(&self, tid: u32) -> Option<usize> {
+        (0..self.ledger.thread_count).find(|i| self.ledger.threads[*i].id == tid)
+    }
+
+    /// Reads the per-thread privacy settings out of the platform's settings
+    /// store and caches them.
+    ///
+    /// WHY the store is the source: the setting has to outlive the app, and
+    /// the settings store is the one place on the device where a preference
+    /// is kept between runs.
+    pub fn refresh_privacy(&mut self) {
+        for i in 0..self.ledger.thread_count {
+            if i >= self.hidden_previews.len() {
+                break;
+            }
+            let peer = self.ledger.threads[i].peer();
+            self.hidden_previews[i] = privacy::previews_hidden(peer);
+        }
+    }
+
+    /// Re-derives the thread list's scroll extent from the number of rows.
+    ///
+    /// WHY the extent is re-derived and not set once: the row count changes
+    /// when a thread is added or deleted, and a scroll extent that is stale
+    /// would let the list scroll past its last row or clip its last row.
+    pub fn sync_list_extent(&mut self) {
+        let rows = self.match_count();
+        self.list_scroll = ScrollState::new(
+            rows.saturating_mul(CARD_H),
+            LIST_VIEWPORT_H,
+            self.list_scroll.offset,
+        );
+    }
+
+    /// Re-derives the conversation's scroll extent from the number of bubbles.
+    ///
+    /// WHY the extent is re-derived: a thread's message count changes when a
+    /// message is posted, and the scroll offset has to be re-clamped against
+    /// the new content or the view would end up past the last bubble.
+    pub fn sync_convo_extent(&mut self) {
+        let mut msgs = [MessageRecord::EMPTY; messages::MAX_MESSAGES_PER_THREAD];
+        let count = match self.active_thread_id {
+            Some(tid) => self.ledger.get_thread_messages(tid, &mut msgs),
+            None => 0,
+        };
+        self.convo_scroll = ScrollState::new(
+            count.saturating_mul(BUBBLE_STEP),
+            CONVO_VIEWPORT_H,
+            self.convo_scroll.offset,
+        );
+    }
+
+    /// Brings the newest message of the open thread into view.
+    ///
+    /// WHY the bottom is where a conversation rests: a new message is
+    /// written at the end of the thread, and a view that stayed where it was
+    /// would not show the message the user just sent.
+    pub fn scroll_convo_to_newest(&mut self) {
+        self.sync_convo_extent();
+        self.convo_scroll.offset = self.convo_scroll.max_offset();
     }
 
     /// Derives the 256-bit AES-GCM / ChaCha20 session key from Keystore Slot 3.
@@ -278,6 +413,21 @@ impl MessagesApp {
             }
         }
         count
+    }
+
+    /// The ledger index of the `n`th thread that matches the search.
+    ///
+    /// WHY the list is addressed by the matching index and not by the
+    /// ledger's own: a filtered list draws only the rows that match, so the
+    /// row under the finger is the `n`th match and not the `n`th thread. The
+    /// two are the same only when nothing is filtered.
+    pub fn filtered_index(&self, n: usize) -> Option<usize> {
+        messages::filtered_thread_index(
+            &self.ledger.threads,
+            self.ledger.thread_count,
+            &self.search[..self.search_len],
+            n,
+        )
     }
 
     /// Synchronizes threads from persistent ThreadStore into ThreadLedger on startup.
@@ -547,6 +697,42 @@ const CARD_Y0: usize = 180;
 const CARD_H: usize = 120;
 const CARD_BODY_H: usize = 104;
 
+/// The height of the thread list's visible band.
+///
+/// WHY it is derived from the band's edges and not typed in: the band is
+/// bounded by the card row above it and the recipient field below it, and a
+/// typed-in height drifts away from both the first time either moves.
+const LIST_VIEWPORT_H: usize = RECIPIENT_BAND_Y0 - CARD_Y0;
+
+/// The top of the conversation's visible band.
+const CONVO_TOP: usize = 180;
+
+/// The height of the conversation's visible band.
+const CONVO_VIEWPORT_H: usize = RECIPIENT_BAND_Y0 - CONVO_TOP;
+
+/// The height of a chat bubble.
+const BUBBLE_H: usize = 76;
+
+/// The gap between two chat bubbles.
+const BUBBLE_GAP: usize = 14;
+
+/// The distance from one bubble's top to the next one's top.
+const BUBBLE_STEP: usize = BUBBLE_H + BUBBLE_GAP;
+
+/// The longest line of notice text the app shows.
+const NOTICE_CAP: usize = 96;
+
+// Details and recipient-picker geometry
+const DETAILS_TOP: usize = 180;
+const DETAIL_ROW_H: usize = 96;
+const DETAIL_ROWS: usize = 11;
+const RECIP_ROW_TOP: usize = 180;
+const RECIP_ROW_H: usize = 88;
+const RECIP_ROWS: usize = 8;
+const PICK_CONTROL: (usize, usize, usize, usize) = (616, 1284, 80, MIN_TOUCH_TARGET);
+const PICK_LABEL: &[u8] = b"PICK";
+const INFO_LABEL: &[u8] = b"INFO";
+
 // Empty-state card
 const EMPTY_CARD: (usize, usize, usize, usize) = (24, 560, 672, 340);
 
@@ -667,12 +853,320 @@ fn editor_pixel(
     None
 }
 
+/// What tapping a row of the thread details screen does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DetailAction {
+    /// The row is a fact and does nothing.
+    None,
+    /// Publish the thread as a document the device can find.
+    Publish,
+    /// Hand the published document to the app that handles it.
+    HandOff,
+    /// Turn the thread's previews in the list on or off.
+    TogglePreviews,
+}
+
+/// One row of the thread details screen.
+#[derive(Clone, Copy)]
+struct DetailLine {
+    label: &'static [u8],
+    value: [u8; 72],
+    value_len: usize,
+    action: DetailAction,
+}
+
+/// One row of the recipient picker.
+#[derive(Clone, Copy)]
+struct PickerLine {
+    title: &'static [u8],
+    value: [u8; 72],
+    value_len: usize,
+    /// Whether tapping the row fills the recipient field.
+    selectable: bool,
+}
+
+/// Adds one row to the details screen.
+fn detail_push(
+    out: &mut [DetailLine],
+    n: &mut usize,
+    label: &'static [u8],
+    value: &[u8],
+    action: DetailAction,
+) {
+    if *n >= out.len() {
+        return;
+    }
+    let line = &mut out[*n];
+    line.label = label;
+    let v = value.len().min(line.value.len());
+    line.value[..v].copy_from_slice(&value[..v]);
+    line.value_len = v;
+    line.action = action;
+    *n += 1;
+}
+
+/// Adds one row to the recipient picker.
+fn picker_push(
+    out: &mut [PickerLine],
+    n: &mut usize,
+    title: &'static [u8],
+    value: &[u8],
+    selectable: bool,
+) {
+    if *n >= out.len() {
+        return;
+    }
+    let line = &mut out[*n];
+    line.title = title;
+    let v = value.len().min(line.value.len());
+    line.value[..v].copy_from_slice(&value[..v]);
+    line.value_len = v;
+    line.selectable = selectable;
+    *n += 1;
+}
+
+/// Builds the rows of the thread details screen.
+///
+/// WHY the rows say what the platform does not offer: the design document
+/// asks for read receipts, a notification control and attachments, and this
+/// app has none of them. A row that named a control the app cannot honour
+/// would be a dead control, so the row states the fact instead.
+fn build_detail_lines(app: &MessagesApp, out: &mut [DetailLine; DETAIL_ROWS]) -> usize {
+    let mut n = 0usize;
+    let mut count_buf = [0u8; 8];
+
+    let (peer, messages_count, unread) = match app.active_thread_id {
+        Some(tid) => match app.ledger.get_thread(tid) {
+            Some(tr) => (
+                tr.peer(),
+                tr.message_count,
+                tr.unread_count,
+            ),
+            None => (b"(no thread)".as_ref(), 0, 0),
+        },
+        None => (b"(no thread)".as_ref(), 0, 0),
+    };
+
+    detail_push(out, &mut n, b"Recipient", peer, DetailAction::None);
+    let cn = put_usize(&mut count_buf, messages_count as usize);
+    detail_push(out, &mut n, b"Messages", &count_buf[..cn], DetailAction::None);
+    let un = put_usize(&mut count_buf, unread as usize);
+    detail_push(out, &mut n, b"Unread", &count_buf[..un], DetailAction::None);
+    detail_push(
+        out,
+        &mut n,
+        b"Transport",
+        b"None bound to this app",
+        DetailAction::None,
+    );
+    detail_push(
+        out,
+        &mut n,
+        b"Stored in",
+        b"Settings store; vault sector 202",
+        DetailAction::None,
+    );
+    if app.published_path_len > 0 {
+        detail_push(
+            out,
+            &mut n,
+            b"Published document",
+            &app.published_path[..app.published_path_len],
+            DetailAction::Publish,
+        );
+    } else {
+        detail_push(
+            out,
+            &mut n,
+            b"Published document",
+            b"Not published yet",
+            DetailAction::Publish,
+        );
+    }
+    let hidden = app
+        .active_thread_id
+        .and_then(|tid| app.thread_ledger_index(tid))
+        .map(|idx| app.hidden_previews[idx])
+        .unwrap_or(false);
+    detail_push(
+        out,
+        &mut n,
+        b"Previews in the list",
+        if hidden { b"Hidden" } else { b"Shown" },
+        DetailAction::TogglePreviews,
+    );
+    detail_push(
+        out,
+        &mut n,
+        b"Hand to another app",
+        b"Share the published document",
+        DetailAction::HandOff,
+    );
+    detail_push(
+        out,
+        &mut n,
+        b"Read receipts",
+        b"Unavailable: no transport is bound",
+        DetailAction::None,
+    );
+    detail_push(
+        out,
+        &mut n,
+        b"Notifications",
+        b"Unavailable: no channel is bound",
+        DetailAction::None,
+    );
+    detail_push(
+        out,
+        &mut n,
+        b"Attachments",
+        b"Unavailable: no attachment service",
+        DetailAction::None,
+    );
+    detail_push(
+        out,
+        &mut n,
+        b"Group participants",
+        b"Unavailable: no transport is bound",
+        DetailAction::None,
+    );
+    n
+}
+
+/// Builds the rows of the recipient picker.
+///
+/// WHY the picker offers what the platform can produce and no more: the
+/// device has no contacts store, so the only recipients it can name are the
+/// one the dialer handed over and the peers of the conversations this device
+/// already holds. The row that says so is what keeps the picker from
+/// looking like a directory of contacts it cannot see.
+fn build_picker_lines(app: &MessagesApp, out: &mut [PickerLine; RECIP_ROWS]) -> usize {
+    let mut n = 0usize;
+    if app.handoff_len > 0 {
+        picker_push(
+            out,
+            &mut n,
+            b"From the dialer",
+            &app.handoff[..app.handoff_len],
+            true,
+        );
+    }
+    let mut shown = 0usize;
+    for i in 0..app.ledger.thread_count {
+        if shown >= 6 {
+            break;
+        }
+        let tr = &app.ledger.threads[i];
+        picker_push(out, &mut n, b"Recent conversation", tr.peer(), true);
+        shown += 1;
+    }
+    picker_push(
+        out,
+        &mut n,
+        b"No contacts store on this device",
+        b"Type the address in the recipient field",
+        false,
+    );
+    n
+}
+
+/// The pixel of the recipient picker's control.
+///
+/// WHY it is a pill and not a text link: the platform's control treatment
+/// for a small, always-available action is a pill, and a control that
+/// borrowed another shape would not match the shell.
+#[inline(always)]
+fn pick_control_pixel(x: usize, y: usize, label: &[u8]) -> Option<u32> {
+    if !in_rect(PICK_CONTROL, x, y) {
+        return None;
+    }
+    let fx = PICK_CONTROL.0;
+    let fy = PICK_CONTROL.1;
+    let rx = (x - fx).min(fx + PICK_CONTROL.2 - 1 - x);
+    let ry = (y - fy).min(fy + PICK_CONTROL.3 - 1 - y);
+    if rx < R_SOFT && ry < R_SOFT {
+        let cdx = (R_SOFT - rx) as isize;
+        let cdy = (R_SOFT - ry) as isize;
+        if cdx * cdx + cdy * cdy >= (R_SOFT * R_SOFT) as isize {
+            return Some(THEME.surface);
+        }
+    }
+    let label_w = std::design::font::measure(label, 1);
+    let label_x = fx + (PICK_CONTROL.2.saturating_sub(label_w)) / 2;
+    let label_y = fy + (PICK_CONTROL.3.saturating_sub(std::design::font::line_height(1))) / 2;
+    if let Some(c) = test_text(
+        x,
+        y,
+        label_x,
+        label_y,
+        1,
+        label,
+        THEME.on_surface,
+        THEME.surface_container_high,
+    ) {
+        return Some(c);
+    }
+    Some(THEME.surface_container_high)
+}
+
+/// The pixel of a card-shaped row carrying a caption line and a body line.
+///
+/// WHY the card treatment is the platform's: a row that invents its own
+/// fill and its own hairline is a row a third-party app cannot match, and
+/// the platform already says what a card looks like.
+#[inline(always)]
+fn card_row_pixel(
+    x: usize,
+    y: usize,
+    rect: (usize, usize, usize, usize),
+    label: &[u8],
+    value: &[u8],
+) -> Option<u32> {
+    let fx = rect.0;
+    let fy = rect.1;
+    if x < fx || x >= fx + rect.2 || y < fy || y >= fy + rect.3 {
+        return None;
+    }
+    let rx = (x - fx).min(fx + rect.2 - 1 - x);
+    let ry = (y - fy).min(fy + rect.3 - 1 - y);
+    if rx < CARD.radius && ry < CARD.radius {
+        let cdx = (CARD.radius - rx) as isize;
+        let cdy = (CARD.radius - ry) as isize;
+        if cdx * cdx + cdy * cdy >= (CARD.radius * CARD.radius) as isize {
+            return Some(THEME.surface);
+        }
+    }
+    if let Some(c) = test_text(x, y, fx + 24, fy + 20, 1, label, THEME.on_surface_variant, CARD.fill) {
+        return Some(c);
+    }
+    if let Some(c) = test_text(x, y, fx + 24, fy + 50, 1, value, THEME.on_surface, CARD.fill) {
+        return Some(c);
+    }
+    if rx < 2 || ry < 2 {
+        return Some(CARD_BORDER);
+    }
+    Some(CARD.fill)
+}
+
 struct Frame {
     pill: PillFrame,
     search: EditorFrame,
     recipient: EditorFrame,
     compose: EditorFrame,
     filtered: Option<usize>,
+    /// The threat level of each thread's newest message.
+    ///
+    /// WHY it is computed once per frame and not once per pixel: the
+    /// analyzer scans the message against a keyword list, and doing that for
+    /// every pixel of the list would cost a screen of keyword scans for one
+    /// answer.
+    threat: [gsm::ThreatLevel; messages::MAX_THREADS],
+    /// The rows of the thread details screen.
+    detail: [DetailLine; DETAIL_ROWS],
+    detail_count: usize,
+    /// The rows of the recipient picker.
+    picker: [PickerLine; RECIP_ROWS],
+    picker_count: usize,
 }
 
 fn build_frame(messages: &MessagesApp) -> Frame {
@@ -687,6 +1181,29 @@ fn build_frame(messages: &MessagesApp) -> Frame {
     } else {
         Some(messages.active_thread_idx)
     };
+    let mut threat = [gsm::ThreatLevel::Safe; messages::MAX_THREADS];
+    for i in 0..messages.ledger.thread_count {
+        if i >= threat.len() {
+            break;
+        }
+        if let Some(last) = messages.ledger.latest_message(messages.ledger.threads[i].id) {
+            threat[i] = gsm::analyze_threat(last.text()).level;
+        }
+    }
+    let mut detail = [DetailLine {
+        label: b"",
+        value: [0; 72],
+        value_len: 0,
+        action: DetailAction::None,
+    }; DETAIL_ROWS];
+    let detail_count = build_detail_lines(messages, &mut detail);
+    let mut picker = [PickerLine {
+        title: b"",
+        value: [0; 72],
+        value_len: 0,
+        selectable: false,
+    }; RECIP_ROWS];
+    let picker_count = build_picker_lines(messages, &mut picker);
     Frame {
         pill: build_pill(messages),
         search: build_editor(
@@ -723,6 +1240,11 @@ fn build_frame(messages: &MessagesApp) -> Frame {
             messages.compose_select_all,
         ),
         filtered,
+        threat,
+        detail,
+        detail_count,
+        picker,
+        picker_count,
     }
 }
 
@@ -737,31 +1259,8 @@ fn avatar_color(_peer: &[u8]) -> u32 {
     THEME.muted // Slate
 }
 
-/// Case-insensitive substring match.
-fn contains_ci(haystack: &[u8], needle: &[u8]) -> bool {
-    if needle.is_empty() {
-        return true;
-    }
-    if needle.len() > haystack.len() {
-        return false;
-    }
-    for i in 0..=(haystack.len() - needle.len()) {
-        let mut matched = true;
-        for j in 0..needle.len() {
-            if haystack[i + j].to_ascii_lowercase() != needle[j].to_ascii_lowercase() {
-                matched = false;
-                break;
-            }
-        }
-        if matched {
-            return true;
-        }
-    }
-    false
-}
-
 fn thread_matches(tr: &messages::ThreadRecord, query: &[u8]) -> bool {
-    contains_ci(tr.peer(), query)
+    messages::thread_matches(tr, query)
 }
 
 /// Master pixel scanout pipeline (zero heap allocations).
@@ -787,18 +1286,21 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
 
         // Header Title: In ThreadList mode, "Messages"; in Conversation mode, peer handle or "Messages"
         if y >= TITLE_Y && y < TITLE_Y + std::design::font::line_height(TITLE_SCALE) {
-            let title = if messages.view_mode == ViewMode::Conversation {
-                if let Some(tid) = messages.active_thread_id {
-                    if let Some(tr) = messages.ledger.get_thread(tid) {
-                        tr.peer()
+            let title: &[u8] = match messages.view_mode {
+                ViewMode::ThreadList => TITLE_TEXT,
+                ViewMode::Conversation => {
+                    if let Some(tid) = messages.active_thread_id {
+                        if let Some(tr) = messages.ledger.get_thread(tid) {
+                            tr.peer()
+                        } else {
+                            TITLE_TEXT
+                        }
                     } else {
                         TITLE_TEXT
                     }
-                } else {
-                    TITLE_TEXT
                 }
-            } else {
-                TITLE_TEXT
+                ViewMode::Details => b"Thread details",
+                ViewMode::Recipients => b"Choose a recipient",
             };
 
             if let Some(c) = test_text_bold(
@@ -1059,12 +1561,18 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                 }
             } else {
                 // Render conversation thread rows
-                let idx = (y - CARD_Y0) / CARD_H;
-                let card_top = CARD_Y0 + idx * CARD_H;
-                let card_offset_y = (y - CARD_Y0) % CARD_H;
+                //
+                // WHY the offset is added back: the rows are drawn at their
+                // scrolled position, so the row under the finger is the one
+                // whose scrolled band contains it.
+                let scroll = messages.list_scroll.offset;
+                let rel = (y - CARD_Y0) + scroll;
+                let idx = rel / CARD_H;
+                let card_top = CARD_Y0 + idx * CARD_H - scroll;
+                let card_offset_y = rel % CARD_H;
                 if card_offset_y < CARD_BODY_H && x >= CARD_X0 && x < CARD_X1 {
-                    if let Some(tr) = messages.ledger.get_thread_by_idx(idx) {
-                        if thread_matches(tr, &messages.search[..messages.search_len]) {
+                    if let Some(ledger_idx) = messages.filtered_index(idx) {
+                        if let Some(tr) = messages.ledger.get_thread_by_idx(ledger_idx) {
                             let rx = (x - CARD_X0).min(CARD_X1 - 1 - x);
                             let ry = card_offset_y.min(CARD_BODY_H - 1 - card_offset_y);
                             if rx < CARD.radius && ry < CARD.radius {
@@ -1113,8 +1621,15 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                             }
 
                             // 3. Last message preview
+                            //
+                            // WHY a hidden thread shows a fixed word: the
+                            // privacy setting exists so that the message is
+                            // not on the screen, and a preview that was
+                            // merely shortened would still be the message.
                             let mut snippet = [0u8; 48];
-                            let slen = if let Some(last_msg) = messages.ledger.latest_message(tr.id) {
+                            let slen = if messages.hidden_previews[ledger_idx] {
+                                copy_ascii(HIDDEN_PREVIEW_LABEL, &mut snippet)
+                            } else if let Some(last_msg) = messages.ledger.latest_message(tr.id) {
                                 std::design::font::ellipsize(
                                     last_msg.text(),
                                     1,
@@ -1140,11 +1655,17 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                             }
 
                             // 4. Security indicator badge dot
-                            let threat = gsm::analyze_threat(&snippet[..slen]);
+                            //
+                            // WHY the level comes from the frame and not
+                            // from the drawn snippet: the snippet is
+                            // truncated and, for a thread whose previews are
+                            // hidden, it is not the message at all. The badge
+                            // describes the message.
+                            let threat = f.threat[ledger_idx];
                             let s_dx = x as isize - (CARD_X0 + 20) as isize;
                             let s_dy = y as isize - (card_top + 24) as isize;
                             if s_dx * s_dx + s_dy * s_dy <= 16 {
-                                return threat.level.color();
+                                return threat.color();
                             }
 
                             // 5. Unread counter pill (if unread_count > 0)
@@ -1225,6 +1746,9 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                 }
                 return THEME.surface_container;
             }
+            if let Some(c) = pick_control_pixel(x, y, PICK_LABEL) {
+                return c;
+            }
             return THEME.surface;
         }
 
@@ -1275,7 +1799,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
             }
             return THEME.surface;
         }
-    } else {
+    } else if messages.view_mode == ViewMode::Conversation {
         // ---------------------------------------------------------------------
         // ViewMode 2: ConversationView
         // ---------------------------------------------------------------------
@@ -1308,7 +1832,13 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                 (
                     THEME.error_container,
                     THEME.error,
-                    b"Caution: text matches a known scam script" as &[u8],
+                    // WHY it names a local keyword list: the analyzer holds
+                    // a fixed list of phishing words and a fixed list of
+                    // link prefixes and matches the text against them. There
+                    // is no database of known scam scripts on this device,
+                    // and a badge that implies one would claim more
+                    // evidence than the code has.
+                    b"Caution: text matches local phishing keywords" as &[u8],
                 )
             } else if flagged_urgency {
                 (
@@ -1393,19 +1923,18 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                     return c;
                 }
             } else {
-                let bubble_h = 76usize;
-                let bubble_gap = 14usize;
-                let step = bubble_h + bubble_gap;
-                let total_h = count * step;
-                let start_y = if total_h < (RECIPIENT_BAND_Y0 - 180) {
-                    RECIPIENT_BAND_Y0 - total_h - 16
-                } else {
-                    180
-                };
-
+                // The bubbles are laid out from the top of the band and the
+                // scroll model moves them.
+                //
+                // WHY they are not bottom-aligned any more: a thread holds
+                // sixteen messages and the band holds twelve, so the oldest
+                // four were drawn off the top of the screen with no way to
+                // reach them. The offset is the model's, so the band, the
+                // thumb and the tap targets cannot disagree.
+                let scroll = messages.convo_scroll.offset;
                 for i in 0..count {
-                    let b_top = start_y + i * step;
-                    let b_bot = b_top + bubble_h;
+                    let b_top = CONVO_TOP + i * BUBBLE_STEP - scroll;
+                    let b_bot = b_top + BUBBLE_H;
                     if y >= b_top && y < b_bot {
                         let is_incoming = msgs[i].direction == MessageDirection::Incoming;
                         let (bx0, bx1, fill_color, border_color) = if is_incoming {
@@ -1448,13 +1977,14 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
 
                             // Subline / Status indicator
                             let (status_label, status_color) = if is_incoming {
-                                // WHY this does not name a transport: the
-                                // record carries a direction flag, not the
-                                // channel it arrived on. Nothing in this app
-                                // received an SMS -- there is no transport
-                                // bound -- so naming one would be a claim
-                                // the app cannot support.
-                                (b"Received (no transport)" as &[u8], THEME.on_surface_variant)
+                                // WHY this says the record was written here:
+                                // no transport is bound to this app, so
+                                // nothing can arrive. A record whose
+                                // direction is incoming can only be one this
+                                // device wrote, and naming a transport it
+                                // does not have would be a claim the app
+                                // cannot support.
+                                (INCOMING_LOCAL_LABEL, THEME.on_surface_variant)
                             } else {
                                 // WHY every state is named rather than
                                 // colour-coded: "Sent" has to mean the
@@ -1531,6 +2061,9 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                 }
                 return THEME.surface_container;
             }
+            if let Some(c) = pick_control_pixel(x, y, INFO_LABEL) {
+                return c;
+            }
             return THEME.surface;
         }
 
@@ -1578,6 +2111,153 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                     return bg;
                 }
                 return THEME.surface;
+            }
+            return THEME.surface;
+        }
+    } else if messages.view_mode == ViewMode::Details {
+        // ---------------------------------------------------------------------
+        // ViewMode 3: ThreadDetailsView
+        //
+        // WHY the rows are cards and not a form: the screen is a report of
+        // what the app knows about the thread, and the platform's card
+        // treatment is what a report is drawn on.
+        // ---------------------------------------------------------------------
+        if y >= DETAILS_TOP && y < RECIPIENT_BAND_Y0 {
+            for row in 0..f.detail_count {
+                let top = DETAILS_TOP + row * DETAIL_ROW_H;
+                if y >= top && y < top + DETAIL_ROW_H {
+                    let line = &f.detail[row];
+                    let rect = (CARD_X0, top, CARD_X1 - CARD_X0, DETAIL_ROW_H - 8);
+                    if let Some(c) = card_row_pixel(
+                        x,
+                        y,
+                        rect,
+                        line.label,
+                        &line.value[..line.value_len],
+                    ) {
+                        return c;
+                    }
+                }
+            }
+            return THEME.surface;
+        }
+        if y >= RECIPIENT_BAND_Y0 && y < COMPOSE_BAND_Y1 {
+            // The notice band: what the last action on this screen did.
+            let rect = (CARD_X0, RECIPIENT_BAND_Y0 + 16, CARD_X1 - CARD_X0, 96);
+            if x >= rect.0 && x < rect.0 + rect.2 && y >= rect.1 && y < rect.1 + rect.3 {
+                let rx = (x - rect.0).min(rect.0 + rect.2 - 1 - x);
+                let ry = (y - rect.1).min(rect.1 + rect.3 - 1 - y);
+                if rx < CARD.radius && ry < CARD.radius {
+                    let cdx = (CARD.radius - rx) as isize;
+                    let cdy = (CARD.radius - ry) as isize;
+                    if cdx * cdx + cdy * cdy >= (CARD.radius * CARD.radius) as isize {
+                        return THEME.surface;
+                    }
+                }
+                let mut buf = [0u8; 96];
+                let n = if messages.notice_len > 0 {
+                    std::design::font::ellipsize(
+                        &messages.notice[..messages.notice_len],
+                        1,
+                        rect.2 - 48,
+                        &mut buf,
+                    )
+                } else {
+                    std::design::font::ellipsize(
+                        b"Nothing has been published or shared yet.",
+                        1,
+                        rect.2 - 48,
+                        &mut buf,
+                    )
+                };
+                if let Some(c) = test_text(
+                    x,
+                    y,
+                    rect.0 + 24,
+                    rect.1 + 40,
+                    1,
+                    &buf[..n],
+                    THEME.on_surface_variant,
+                    CARD.fill,
+                ) {
+                    return c;
+                }
+                if rx < 2 || ry < 2 {
+                    return CARD_BORDER;
+                }
+                return CARD.fill;
+            }
+            return THEME.surface;
+        }
+    } else {
+        // ---------------------------------------------------------------------
+        // ViewMode 4: RecipientPickerView
+        //
+        // WHY the rows are the recipients the platform can produce: the
+        // device has no contacts store, so the picker offers the dialer's
+        // hand-off and the peers of the conversations this device holds, and
+        // says that no other source exists.
+        // ---------------------------------------------------------------------
+        if y >= RECIP_ROW_TOP && y < RECIPIENT_BAND_Y0 {
+            for row in 0..f.picker_count {
+                let top = RECIP_ROW_TOP + row * RECIP_ROW_H;
+                if y >= top && y < top + RECIP_ROW_H {
+                    let line = &f.picker[row];
+                    let rect = (CARD_X0, top, CARD_X1 - CARD_X0, RECIP_ROW_H - 8);
+                    if let Some(c) = card_row_pixel(
+                        x,
+                        y,
+                        rect,
+                        line.title,
+                        &line.value[..line.value_len],
+                    ) {
+                        return c;
+                    }
+                }
+            }
+            return THEME.surface;
+        }
+        if y >= RECIPIENT_BAND_Y0 && y < COMPOSE_BAND_Y1 {
+            // The chosen address stays on screen, so the user can see what
+            // the row they tapped filled in.
+            let rect = (CARD_X0, RECIPIENT_BAND_Y0 + 16, CARD_X1 - CARD_X0, 96);
+            if x >= rect.0 && x < rect.0 + rect.2 && y >= rect.1 && y < rect.1 + rect.3 {
+                let rx = (x - rect.0).min(rect.0 + rect.2 - 1 - x);
+                let ry = (y - rect.1).min(rect.1 + rect.3 - 1 - y);
+                if rx < CARD.radius && ry < CARD.radius {
+                    let cdx = (CARD.radius - rx) as isize;
+                    let cdy = (CARD.radius - ry) as isize;
+                    if cdx * cdx + cdy * cdy >= (CARD.radius * CARD.radius) as isize {
+                        return THEME.surface;
+                    }
+                }
+                let mut buf = [0u8; 64];
+                let n = if messages.recip_len > 0 {
+                    std::design::font::ellipsize(
+                        &messages.recip[..messages.recip_len],
+                        1,
+                        rect.2 - 48,
+                        &mut buf,
+                    )
+                } else {
+                    copy_ascii(b"No recipient chosen", &mut buf)
+                };
+                if let Some(c) = test_text(
+                    x,
+                    y,
+                    rect.0 + 24,
+                    rect.1 + 40,
+                    1,
+                    &buf[..n],
+                    THEME.on_surface,
+                    CARD.fill,
+                ) {
+                    return c;
+                }
+                if rx < 2 || ry < 2 {
+                    return CARD_BORDER;
+                }
+                return CARD.fill;
             }
             return THEME.surface;
         }
@@ -1795,6 +2475,94 @@ fn attempt_transport(recipient: &[u8], body: &[u8]) -> TransportOutcome {
     }
 }
 
+/// Publishes the thread as a document in the shared storage area.
+///
+/// WHY the app publishes the thread: the sealed copy lives in a vault
+/// sector, and a vault sector is a secret no other app can read. The
+/// design document asks for the sealed thread to be readable, so the thread
+/// is also written into the shared storage area, where the file manager
+/// lists it and the launcher's search finds it.
+fn publish_thread(app: &mut MessagesApp, tid: u32) {
+    let mut msgs = [MessageRecord::EMPTY; messages::MAX_MESSAGES_PER_THREAD];
+    let count = app.ledger.get_thread_messages(tid, &mut msgs);
+    let mut peer = [0u8; messages::MAX_PEER_HANDLE_LEN];
+    let mut peer_len = 0usize;
+    if let Some(tr) = app.ledger.get_thread(tid) {
+        peer_len = tr.peer().len().min(peer.len());
+        peer[..peer_len].copy_from_slice(&tr.peer()[..peer_len]);
+    }
+    let (outcome, path, path_len) = publish::publish(tid, &peer[..peer_len], &msgs[..count]);
+    app.published_path[..path_len].copy_from_slice(&path[..path_len]);
+    app.published_path_len = path_len;
+    match outcome {
+        publish::PublishOutcome::Published => {
+            app.set_notice(b"Published: the file manager and the launcher can find this thread.");
+        }
+        publish::PublishOutcome::IndexRefused => {
+            app.set_notice(b"Published, but the device refused to refresh the document index.");
+        }
+        publish::PublishOutcome::WriteRefused => {
+            app.set_notice(b"The device refused the write; the thread was not published.");
+        }
+    }
+}
+
+/// Hands the published document to the app that handles its media type.
+fn hand_off_thread(app: &mut MessagesApp) {
+    if app.published_path_len == 0 {
+        if let Some(tid) = app.active_thread_id {
+            publish_thread(app, tid);
+        }
+    }
+    if app.published_path_len == 0 {
+        app.set_notice(b"Publish the thread before handing it to another app.");
+        return;
+    }
+    let Ok(path) = core::str::from_utf8(&app.published_path[..app.published_path_len]) else {
+        app.set_notice(b"The published path is not readable; nothing was handed over.");
+        return;
+    };
+    match publish::hand_to_handler(path) {
+        publish::HandOutcome::Handed => {
+            app.set_notice(b"Handed to the app that declared this document type.");
+        }
+        publish::HandOutcome::NoHandler => {
+            app.set_notice(b"No app on this device declares a handler for this document.");
+        }
+        publish::HandOutcome::DispatchRefused => {
+            app.set_notice(b"The platform refused the hand-over.");
+        }
+    }
+}
+
+/// Turns the open thread's previews in the thread list on or off.
+fn toggle_previews(app: &mut MessagesApp) {
+    let Some(tid) = app.active_thread_id else {
+        return;
+    };
+    let mut peer = [0u8; messages::MAX_PEER_HANDLE_LEN];
+    let mut peer_len = 0usize;
+    if let Some(tr) = app.ledger.get_thread(tid) {
+        peer_len = tr.peer().len().min(peer.len());
+        peer[..peer_len].copy_from_slice(&tr.peer()[..peer_len]);
+    }
+    let idx = app.thread_ledger_index(tid);
+    let hidden = idx.map(|i| app.hidden_previews[i]).unwrap_or(false);
+    let now_hidden = !hidden;
+    if privacy::set_previews_hidden(&peer[..peer_len], now_hidden) {
+        if let Some(i) = idx {
+            app.hidden_previews[i] = now_hidden;
+        }
+        app.set_notice(if now_hidden {
+            b"Previews hidden in the thread list."
+        } else {
+            b"Previews shown in the thread list."
+        });
+    } else {
+        app.set_notice(b"The device refused to store the privacy setting.");
+    }
+}
+
 /// Sends the composed message, packing via GSM-7, attempting dispatch,
 /// recording the transport's own answer, appending to ThreadLedger and
 /// persistent ThreadStore.
@@ -1853,13 +2621,23 @@ fn send_composed(app: &mut MessagesApp) -> Dirty {
         }
     }
 
-    // 6. Transition to conversation view
+    // 6. Publish the thread so the file manager and the launcher can find it.
+    if let Some(tid) = app.active_thread_id {
+        publish_thread(app, tid);
+    }
+
+    // 7. Transition to conversation view
     app.view_mode = ViewMode::Conversation;
     app.compose_len = 0;
     app.compose_focused = false;
     app.compose_select_all = false;
     app.recip_focused = false;
     app.recip_select_all = false;
+
+    // WHY the conversation is scrolled to its newest message: the message
+    // the user just sent is at the end of the thread, and a view that
+    // stayed where it was would not show it.
+    app.scroll_convo_to_newest();
 
     Dirty::All
 }
@@ -1874,16 +2652,109 @@ fn handle_tap(app: &mut MessagesApp, px: u32, py: u32) -> Tap<'static> {
 
     // Header Back button (24..72, 24..72)
     if std::design::back_button::contains(x, y) || (x >= 24 && x < 100 && y >= 28 && y < 68) {
-        if app.view_mode == ViewMode::Conversation {
-            // Return to conversation directory
-            app.view_mode = ViewMode::ThreadList;
-            app.compose_focused = false;
-            app.compose_select_all = false;
-            std::log("[MESSAGES APP] Back pressed: Navigating to ThreadListView.").ok();
-            return Tap::Redraw(Dirty::All);
-        } else {
-            return Tap::Leave("[MESSAGES APP] Back control pressed. Exiting to launcher.");
+        match app.view_mode {
+            ViewMode::Conversation => {
+                // Return to conversation directory
+                app.view_mode = ViewMode::ThreadList;
+                app.compose_focused = false;
+                app.compose_select_all = false;
+                std::log("[MESSAGES APP] Back pressed: Navigating to ThreadListView.").ok();
+                return Tap::Redraw(Dirty::All);
+            }
+            ViewMode::Details => {
+                app.view_mode = ViewMode::Conversation;
+                std::log("[MESSAGES APP] Back pressed: Returning to the conversation.").ok();
+                return Tap::Redraw(Dirty::All);
+            }
+            ViewMode::Recipients => {
+                app.view_mode = app.picker_return;
+                std::log("[MESSAGES APP] Back pressed: Leaving the recipient picker.").ok();
+                return Tap::Redraw(Dirty::All);
+            }
+            ViewMode::ThreadList => {
+                return Tap::Leave("[MESSAGES APP] Back control pressed. Exiting to launcher.");
+            }
         }
+    }
+
+    // The thread details screen's own rows.
+    if app.view_mode == ViewMode::Details && y >= DETAILS_TOP && y < RECIPIENT_BAND_Y0 {
+        let mut detail = [DetailLine {
+            label: b"",
+            value: [0; 72],
+            value_len: 0,
+            action: DetailAction::None,
+        }; DETAIL_ROWS];
+        let count = build_detail_lines(app, &mut detail);
+        let row = (y - DETAILS_TOP) / DETAIL_ROW_H;
+        if row < count {
+            match detail[row].action {
+                DetailAction::None => {
+                    // The recipient row is the one that opens the picker,
+                    // and every other row is a fact about the thread.
+                    if detail[row].label == b"Recipient" {
+                        app.picker_return = ViewMode::Details;
+                        app.view_mode = ViewMode::Recipients;
+                        return Tap::Redraw(Dirty::All);
+                    }
+                }
+                DetailAction::Publish => {
+                    if let Some(tid) = app.active_thread_id {
+                        publish_thread(app, tid);
+                    } else {
+                        app.set_notice(b"There is no thread to publish.");
+                    }
+                    return Tap::Redraw(Dirty::All);
+                }
+                DetailAction::HandOff => {
+                    hand_off_thread(app);
+                    return Tap::Redraw(Dirty::All);
+                }
+                DetailAction::TogglePreviews => {
+                    toggle_previews(app);
+                    return Tap::Redraw(Dirty::All);
+                }
+            }
+        }
+    }
+
+    // The recipient picker's rows.
+    if app.view_mode == ViewMode::Recipients && y >= RECIP_ROW_TOP && y < RECIPIENT_BAND_Y0 {
+        let mut picker = [PickerLine {
+            title: b"",
+            value: [0; 72],
+            value_len: 0,
+            selectable: false,
+        }; RECIP_ROWS];
+        let count = build_picker_lines(app, &mut picker);
+        let row = (y - RECIP_ROW_TOP) / RECIP_ROW_H;
+        if row < count && picker[row].selectable {
+            let n = picker[row].value_len.min(RECIP_CAP);
+            app.recip[..n].copy_from_slice(&picker[row].value[..n]);
+            app.recip_len = n;
+            app.recip_focused = false;
+            app.recip_select_all = false;
+            app.view_mode = app.picker_return;
+            let _ = std::audio_haptic_click();
+            std::log("[MESSAGES APP] A recipient was chosen from the picker.").ok();
+            return Tap::Redraw(Dirty::All);
+        }
+    }
+
+    // The control at the right of the recipient band: it opens the recipient
+    // picker from the thread list and the thread's details from a
+    // conversation.
+    if in_rect(PICK_CONTROL, x, y)
+        && (app.view_mode == ViewMode::ThreadList || app.view_mode == ViewMode::Conversation)
+    {
+        if app.view_mode == ViewMode::ThreadList {
+            app.picker_return = ViewMode::ThreadList;
+            app.view_mode = ViewMode::Recipients;
+        } else {
+            app.view_mode = ViewMode::Details;
+        }
+        let _ = std::audio_haptic_click();
+        return Tap::Redraw(Dirty::All);
     }
 
     // Send button circle
@@ -1928,19 +2799,27 @@ fn handle_tap(app: &mut MessagesApp, px: u32, py: u32) -> Tap<'static> {
         }
 
         // Tapping a conversation row opens ConversationView
+        //
+        // WHY the offset is added back: the rows are drawn at their
+        // scrolled position, so the row under the finger is the one whose
+        // scrolled band contains it.
         if x >= CARD_X0 && x < CARD_X1 && y >= CARD_Y0 {
-            let idx = (y - CARD_Y0) / CARD_H;
-            let coff = (y - CARD_Y0) % CARD_H;
+            let scroll = app.list_scroll.offset;
+            let rel = (y - CARD_Y0) + scroll;
+            let idx = rel / CARD_H;
+            let coff = rel % CARD_H;
             if coff < CARD_BODY_H {
-                if let Some(tr) = app.ledger.get_thread_by_idx(idx) {
-                    if thread_matches(tr, &app.search[..app.search_len]) {
+                if let Some(ledger_idx) = app.filtered_index(idx) {
+                    if let Some(tr) = app.ledger.get_thread_by_idx(ledger_idx) {
                         // Delete affordance tap on card's right edge
                         let ddx = x as isize - (CARD_X1 - 38) as isize;
                         let ddy = coff as isize - 50;
                         if ddx.abs() <= 16 && ddy.abs() <= 16 {
                             let tid = tr.id;
                             app.ledger.remove_thread(tid);
-                            app.store.remove(idx);
+                            app.store.remove(ledger_idx);
+                            app.refresh_privacy();
+                            app.sync_list_extent();
                             std::log("[MESSAGES APP] Thread deleted.").ok();
                             return Tap::Redraw(Dirty::All);
                         }
@@ -1956,6 +2835,7 @@ fn handle_tap(app: &mut MessagesApp, px: u32, py: u32) -> Tap<'static> {
                         app.recip_len = n;
                         app.ledger.mark_thread_read(tid);
                         app.view_mode = ViewMode::Conversation;
+                        app.scroll_convo_to_newest();
                         let _ = std::audio_haptic_click();
                         std::log("[MESSAGES APP] Conversation opened.").ok();
                         return Tap::Redraw(Dirty::All);
@@ -1983,9 +2863,22 @@ fn handle_messages_key(app: &mut MessagesApp, key: std::InputKeyEvent) -> Dirty 
             app.recip_focused = false;
             app.recip_select_all = false;
             return Dirty::All;
-        } else if app.view_mode == ViewMode::Conversation {
-            app.view_mode = ViewMode::ThreadList;
-            return Dirty::All;
+        } else {
+            match app.view_mode {
+                ViewMode::Conversation => {
+                    app.view_mode = ViewMode::ThreadList;
+                    return Dirty::All;
+                }
+                ViewMode::Details => {
+                    app.view_mode = ViewMode::Conversation;
+                    return Dirty::All;
+                }
+                ViewMode::Recipients => {
+                    app.view_mode = app.picker_return;
+                    return Dirty::All;
+                }
+                ViewMode::ThreadList => {}
+            }
         }
         return Dirty::None;
     }
@@ -2065,6 +2958,10 @@ fn edit_search(app: &mut MessagesApp, push: Option<u8>) -> Dirty {
     }
     let after = app.match_count();
     if before != after {
+        // WHY the extent is re-derived: the number of rows the list draws
+        // changed, and a scroll extent that is stale would let the list
+        // scroll past its last row.
+        app.sync_list_extent();
         Dirty::All
     } else {
         Dirty::Search
@@ -2087,6 +2984,12 @@ pub extern "C" fn _start() -> ! {
     // Load persisted threads and synchronize to ThreadLedger
     messages.store = store::ThreadStore::load();
     messages.sync_store_to_ledger();
+
+    // The per-thread privacy settings, and the scroll extents that follow
+    // from what the ledger now holds.
+    messages.refresh_privacy();
+    messages.sync_list_extent();
+    messages.sync_convo_extent();
 
     // A recipient handed over by the dialer, if there is one.
     messages.take_handoff_recipient();
@@ -2177,11 +3080,49 @@ pub extern "C" fn _start() -> ! {
                             continue;
                         }
                         if input.kind == 4 || input.kind == 6 || input.kind == 7 || input.kind == 8 || input.kind == 10 {
-                            if input.kind == 6 && messages.view_mode == ViewMode::Conversation {
-                                // Back gesture returns to ThreadListView
-                                messages.view_mode = ViewMode::ThreadList;
+                            // A drag that ends over a scrolling band is a
+                            // scroll gesture; anything else is the system's
+                            // navigation gesture.
+                            //
+                            // WHY the band needs the gesture: a thread holds
+                            // sixteen messages and the visible band holds
+                            // twelve, so the oldest four were drawn off the
+                            // top of the screen with no way to reach them.
+                            let over_conversation = messages.view_mode == ViewMode::Conversation
+                                && input.y >= CONVO_TOP as u32
+                                && (input.y as usize) < RECIPIENT_BAND_Y0;
+                            let over_list = messages.view_mode == ViewMode::ThreadList
+                                && input.y >= CARD_Y0 as u32
+                                && (input.y as usize) < RECIPIENT_BAND_Y0;
+                            if (input.kind == 4 || input.kind == 10) && (over_conversation || over_list) {
+                                if over_conversation {
+                                    messages.convo_scroll.apply_drag(input.dy);
+                                } else {
+                                    messages.list_scroll.apply_drag(input.dy);
+                                }
                                 dirty = merge(dirty, Dirty::All);
                                 continue;
+                            }
+                            if input.kind == 6 {
+                                // Back gesture walks one screen up.
+                                match messages.view_mode {
+                                    ViewMode::Conversation => {
+                                        messages.view_mode = ViewMode::ThreadList;
+                                        dirty = merge(dirty, Dirty::All);
+                                        continue;
+                                    }
+                                    ViewMode::Details => {
+                                        messages.view_mode = ViewMode::Conversation;
+                                        dirty = merge(dirty, Dirty::All);
+                                        continue;
+                                    }
+                                    ViewMode::Recipients => {
+                                        messages.view_mode = messages.picker_return;
+                                        dirty = merge(dirty, Dirty::All);
+                                        continue;
+                                    }
+                                    ViewMode::ThreadList => {}
+                                }
                             }
                             std::log("[MESSAGES APP] Navigation gesture recognized. Exiting to launcher.").ok();
                             if surface > 0 {
