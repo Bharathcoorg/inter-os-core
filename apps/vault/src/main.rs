@@ -172,6 +172,16 @@ pub struct VaultApp {
     pub status_len: usize,
 }
 
+/// The hardware keystore slot holding the root master key.
+///
+/// WHY it is named: the argument is a keystore slot, not a capability
+/// slot, and the two are not interchangeable. Naming it keeps the
+/// difference visible at the call site.
+pub const ROOT_KEY_SLOT: u32 = 0;
+
+/// The hardware keystore slot holding the storage encryption key.
+pub const STORAGE_KEY_SLOT: u32 = 1;
+
 impl VaultApp {
     pub const fn new() -> Self {
         Self {
@@ -256,7 +266,7 @@ impl VaultApp {
     /// exact answer each slot gave.
     pub fn derive_keys(&mut self) {
         let mut key0 = [0u8; 32];
-        self.key_probe[0] = match std::keystore_derive(0, &mut key0) {
+        self.key_probe[0] = match std::keystore_derive(ROOT_KEY_SLOT, &mut key0) {
             Ok(len) if len == 32 => {
                 std::log(
                     0,
@@ -270,7 +280,7 @@ impl VaultApp {
         };
 
         let mut key1 = [0u8; 32];
-        self.key_probe[1] = match std::keystore_derive(1, &mut key1) {
+        self.key_probe[1] = match std::keystore_derive(STORAGE_KEY_SLOT, &mut key1) {
             Ok(len) if len == 32 => {
                 std::log(
                     0,
@@ -314,10 +324,22 @@ impl VaultApp {
     /// with no signature or digest to compare against this is a presence check,
     /// not an authentication.
     pub fn probe_identity(&mut self) {
-        self.identity = match std::fs_open(3, "/system/etc/device_id", std::FS_READ) {
+        // WHY the slot is resolved by type: the old code passed the literal
+        // slot 3, which holds this app's *write* capability, and the VFS
+        // verifies the capability's type at the slot it is given. The read
+        // was therefore refused before the file was ever opened, and the
+        // identity read as unreadable on a device that has the file.
+        let read_slot = match std::cap::fs_read_slot() {
+            Some(slot) => slot,
+            None => {
+                self.identity = IdentityState::Unreadable;
+                return;
+            }
+        };
+        self.identity = match std::fs_open(read_slot, "/system/etc/device_id", std::FS_READ) {
             Ok(fd) => {
                 let mut dev_buf = [0u8; 64];
-                let state = match std::fs_read(3, fd, &mut dev_buf) {
+                let state = match std::fs_read(read_slot, fd, &mut dev_buf) {
                     Ok(n) if n >= 4 && &dev_buf[..4] == b"DID:" => IdentityState::Present,
                     Ok(_) => IdentityState::Malformed,
                     Err(_) => IdentityState::Unreadable,
@@ -418,15 +440,36 @@ impl VaultApp {
         all_ok
     }
 
-    /// Builds a sovereign backup export frame, persists it through the kernel
-    /// settings store, and validates the stored frame by reading it back.
+    /// Builds a status frame, persists it through the kernel settings store,
+    /// and validates the stored frame by reading it back.
     ///
     /// The frame is persisted as hex (the settings store rejects newline bytes
     /// and raw counter/checksum bytes can contain 0x0A) under
-    /// `vault.backup_export` via FileSystemWrite at cap slot 3, and "verified"
-    /// means the read-back frame carries the expected magic and its stored
-    /// Fletcher-32 checksum equals the recomputed one.
+    /// `vault.backup_export` through the app's filesystem capabilities, and
+    /// "verified" means the read-back frame carries the expected magic and
+    /// its stored Fletcher-32 checksum equals the recomputed one.
+    ///
+    /// WHY it is called a status frame and not a backup: the frame holds two
+    /// counters and a checksum, written in the clear. It is not a copy of the
+    /// vault and it is not encrypted, and the screen says so.
     pub fn export_backup(&mut self) -> BackupState {
+        // WHY the slots are resolved by type: the write and the read are
+        // different capabilities, and the VFS and the settings store both
+        // verify the capability's type at the slot they are given.
+        let write_slot = match std::cap::fs_write_slot() {
+            Some(slot) => slot,
+            None => {
+                self.backup = BackupState::WriteRefused;
+                return BackupState::WriteRefused;
+            }
+        };
+        let read_slot = match std::cap::fs_read_slot() {
+            Some(slot) => slot,
+            None => {
+                self.backup = BackupState::ReadRefused;
+                return BackupState::ReadRefused;
+            }
+        };
         let mut header = [0u8; 40];
         header[..28].copy_from_slice(b"INTER_SOVEREIGN_VAULT_BACKUP");
         header[28..32].copy_from_slice(&self.total_encryptions.to_le_bytes());
@@ -436,7 +479,7 @@ impl VaultApp {
 
         let mut encoded = [0u8; 80];
         let enc_len = hex_encode(&header, &mut encoded);
-        self.backup = if std::settings_set(3, "vault.backup_export", &encoded[..enc_len]).is_err() {
+        self.backup = if std::settings_set(write_slot, "vault.backup_export", &encoded[..enc_len]).is_err() {
             std::log(
                 0,
                 "[VAULT APP] Backup export refused: the settings store rejected the write.",
@@ -446,7 +489,7 @@ impl VaultApp {
         } else {
             let mut stored_hex = [0u8; 80];
             let mut frame = [0u8; 40];
-            match std::settings_get(3, "vault.backup_export", &mut stored_hex) {
+            match std::settings_get(read_slot, "vault.backup_export", &mut stored_hex) {
                 Ok(n) => match hex_decode(&stored_hex[..n.min(stored_hex.len())], &mut frame) {
                     Some(40) => {
                         let stored_sum =
@@ -496,6 +539,23 @@ impl VaultApp {
         self.derive_keys();
         self.probe_entropy();
         self.probe_identity();
+        // WHY the result is announced: the banner used to claim the keystore
+        // was online before the app had asked, and on a platform that
+        // refuses raw key export the claim was false. The answer is now
+        // reported after the probe, not before it.
+        if self.keys_derived() {
+            std::log(
+                0,
+                "[VAULT APP] Hardware keystore exported both keys; the vault can encrypt.",
+            )
+            .ok();
+        } else {
+            std::log(
+                0,
+                "[VAULT APP] Hardware keystore did not export raw key material to this app; no key is claimed.",
+            )
+            .ok();
+        }
     }
 }
 
@@ -918,9 +978,9 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
         return fill;
     }
 
-    // ---- Card C: backup export and entropy --------------------------------
+    // ---- Card C: the status frame and entropy ------------------------------
     if let Some(fill) = card_pixel(x, y, MARGIN, CARD_C_Y, CARD_W, CARD_C_H) {
-        if let Some(c) = caption_pixel(x, y, MARGIN + PAD, CARD_C_Y + 24, b"BACKUP EXPORT & ENTROPY", INNER_W) {
+        if let Some(c) = caption_pixel(x, y, MARGIN + PAD, CARD_C_Y + 24, b"STATUS FRAME & ENTROPY", INNER_W) {
             return c;
         }
         let (backup_verdict, backup_ink) = match vault.backup {
@@ -929,7 +989,7 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
             BackupState::WrittenButTruncated => (b"read back truncated".as_slice(), DANGER),
             BackupState::ReadRefused => (b"read-back refused".as_slice(), WARN),
             BackupState::WriteRefused => (b"settings write refused".as_slice(), WARN),
-            BackupState::NotAttempted => (b"not exported yet".as_slice(), MUTED),
+            BackupState::NotAttempted => (b"not written yet".as_slice(), MUTED),
         };
         if let Some(c) = metric_row(
             x,
@@ -937,10 +997,14 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
             MARGIN,
             CARD_C_Y + 64,
             CARD_W,
-            b"Sovereign backup frame",
+            b"Status frame",
             backup_verdict,
             backup_ink,
-            b"settings_set/get(3, \"vault.backup_export\")",
+            // WHY the source line says what the frame is: the old one named
+            // the syscall and the slot it used, which told the reader how the
+            // frame was written and nothing about what it contained. The
+            // frame is two counters and a checksum, in the clear.
+            b"counters and checksum, in the clear",
         ) {
             return c;
         }
@@ -1015,7 +1079,12 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
         BTN_Y,
         BTN_W,
         BTN_H,
-        b"Export backup",
+        // WHY the button is named for what it writes: the old label called
+        // it a backup export, but the frame is a hex record of two counters
+        // and a checksum, written in the clear to the settings store. It is
+        // not a copy of the vault and it is not encrypted, so that label
+        // overstated what the user gets.
+        b"Write status frame",
         false,
     ) {
         return c;
@@ -1390,9 +1459,15 @@ fn handle_vault_touch(vault: &mut VaultApp, x: u32, y: u32) -> Tap {
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
+    // WHY the banner does not announce the keystore: the keystore's
+    // availability is a fact about the platform, and the banner was written
+    // before the app had asked. On this platform the kernel refuses to
+    // export raw key material to a Ring 3 app, so the banner claimed a
+    // service that was not there. The app now says it is probing, and the
+    // result is on the screen and in the log below.
     std::log(
         0,
-        "[VAULT APP (Ring 3)] Sovereign Multi-Sector Storage Manager & Keystore online.",
+        "[VAULT APP (Ring 3)] Started; probing the platform's storage and keystore.",
     )
     .ok();
 
@@ -1407,7 +1482,23 @@ pub extern "C" fn _start() -> ! {
         "[VAULT APP] Step 1: Allocating application surface (z=200)...",
     )
     .ok();
-    let surface = match std::surface_create(6, W as u32, H as u32, 200) {
+    // WHY the slot is resolved by type: the old code passed the literal
+    // slot 6, which holds this app's IPC receive capability, not its
+    // framebuffer. The surface was created through the wrong authority.
+    let fb_slot = match std::cap::framebuffer_slot() {
+        Some(slot) => slot,
+        None => {
+            std::log(
+                0,
+                "[VAULT APP] No framebuffer capability; the vault cannot draw.",
+            )
+            .ok();
+            loop {
+                std::yield_now();
+            }
+        }
+    };
+    let surface = match std::surface_create(fb_slot, W as u32, H as u32, 200) {
         Ok(s) => {
             std::log(0, "[VAULT APP] Step 2: Surface created successfully.").ok();
             s
@@ -1428,7 +1519,7 @@ pub extern "C" fn _start() -> ! {
         b"verification and backup export are user-triggered",
     );
     repaint(surface, &vault, Dirty::All);
-    let _ = std::surface_flip(6);
+    let _ = std::surface_flip(fb_slot);
     std::audio_haptic_click().ok();
     std::log(
         0,
@@ -1465,7 +1556,7 @@ pub extern "C" fn _start() -> ! {
     loop {
         if let Ok(events) = std::event_poll(std::EVENT_TOUCH_INPUT | std::EVENT_TIMER_TICK, 100) {
             if (events & std::EVENT_TIMER_TICK) != 0 {
-                let _ = std::surface_flip(6);
+                let _ = std::surface_flip(fb_slot);
             }
 
             if (events & std::EVENT_TOUCH_INPUT) != 0 {
@@ -1479,20 +1570,31 @@ pub extern "C" fn _start() -> ! {
                 };
                 let mut dirty = Dirty::None;
                 while std::input_event_poll(&mut input).is_ok() {
-                    if input.kind == 4 || input.kind == 6 || input.kind == 7 || input.kind == 8 || input.kind == 10 {
+                    // WHY the gesture is bound to the home strip: the old
+                    // code returned to the launcher for a pan or a fling
+                    // from anywhere on the screen, so a scroll threw the
+                    // user out of the vault.
+                    let is_home_gesture = input.y >= 1400 && input.x >= 240 && input.x <= 480;
+                    if is_home_gesture
+                        && (input.kind == 4
+                            || input.kind == 6
+                            || input.kind == 7
+                            || input.kind == 8
+                            || input.kind == 10)
+                    {
                         std::log(
                             0,
                             "[VAULT APP] Navigation gesture recognized. Returning to launcher.",
                         )
                         .ok();
-                        let _ = std::surface_destroy(6, surface);
+                        let _ = std::surface_destroy(fb_slot, surface);
                         std::exit_with_code(0);
                     }
                     if input.kind == 1 {
                         match handle_vault_touch(&mut vault, input.x, input.y) {
                             Tap::Leave(msg) => {
                                 std::log(0, msg).ok();
-                                let _ = std::surface_destroy(6, surface);
+                                let _ = std::surface_destroy(fb_slot, surface);
                                 std::exit_with_code(0);
                             }
                             Tap::Redraw(d) => dirty = dirty.widen(d),
@@ -1506,7 +1608,7 @@ pub extern "C" fn _start() -> ! {
                 // presented exactly once instead of once per event.
                 if dirty != Dirty::None {
                     repaint(surface, &vault, dirty);
-                    let _ = std::surface_flip(6);
+                    let _ = std::surface_flip(fb_slot);
                 }
             }
         }
