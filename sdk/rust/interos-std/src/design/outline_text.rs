@@ -865,12 +865,17 @@ mod tests {
     #[test]
     fn a_longer_run_is_refused_rather_than_truncated() {
         let _pool: Option<_> = Some(reset_slots());
-        // 64 bytes is the placement key's bound. Refusing is the honest
+        // The placement key's length is the bound. Refusing is the honest
         // outcome: the caller keeps the bitmap face, which never truncates.
-        let long_64 = b"abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz01";
-        let long_65 = b"abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz012";
-        assert!(OutlineRun::place(0, 200, 12, long_64).is_some());
-        assert!(OutlineRun::place(0, 200, 12, long_65).is_none());
+        //
+        // WHY the em is small here: the coverage buffer's width is the other
+        // limit, and a run of a hundred and twenty-eight characters at the
+        // body's size is wider than the buffer, so it would be refused for
+        // its width rather than for its length. The test is about the key.
+        let long_ok = [b'a'; KEY_MAX];
+        let long_too_long = [b'a'; KEY_MAX + 1];
+        assert!(OutlineRun::place(0, 200, 6, &long_ok).is_some());
+        assert!(OutlineRun::place(0, 200, 6, &long_too_long).is_none());
     }
 
     #[test]
