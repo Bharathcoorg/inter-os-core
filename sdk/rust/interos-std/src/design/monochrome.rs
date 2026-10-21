@@ -569,11 +569,14 @@ pub fn icon_hit(icon: Icon, px: i32, py: i32) -> bool {
         Icon::Stop => square(px, py, 7, 7, 10, 10, 2),
         Icon::Record => circle(px, py, 12, 12, 7, true, 0),
         Icon::Send => {
-            seg(px, py, 3, 12, 21, 4, 2)
-                || seg(px, py, 3, 12, 21, 20, 2)
-                || seg(px, py, 3, 12, 10, 13, 2)
-                || seg(px, py, 10, 13, 21, 4, 2)
-                || seg(px, py, 10, 13, 21, 20, 2)
+            // WHY the dart and not the chevron: a chevron pointing left
+            // reads as "back", and a control that sends reads as "back" if
+            // the shape is the one the platform already uses for going
+            // back.
+            seg(px, py, 3, 11, 21, 4, 2)
+                || seg(px, py, 21, 4, 10, 20, 2)
+                || seg(px, py, 10, 20, 13, 12, 2)
+                || seg(px, py, 13, 12, 3, 11, 2)
         }
         Icon::Attach => {
             circle(px, py, 7, 16, 3, false, 2)

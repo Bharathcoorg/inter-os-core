@@ -40,7 +40,18 @@ const SLOTS: usize = 32;
 
 /// The longest text a placement key can hold. Longer runs are refused rather
 /// than hashed, because a hash would collide and draw the wrong glyphs.
-pub const KEY_MAX: usize = 64;
+///
+/// WHY a hundred and twenty-eight and not sixty-four: the key holds the
+/// text itself, so its length is the length of the longest run the face
+/// will draw. A sixty-four byte key refused every sentence longer than
+/// sixty-four characters, and a refused run is drawn by the bitmap face at
+/// the bitmap's whole-cell size -- which is a different size from the rest
+/// of the screen, so a paragraph of prose came out in a larger face than
+/// the label above it. The width limit below is the one that should bind:
+/// a run wider than the coverage buffer cannot be drawn at all, and a
+/// hundred and twenty-eight characters at the caption's size is narrower
+/// than that buffer.
+pub const KEY_MAX: usize = 128;
 
 /// Ink coverage for the placed runs: 255 is fully inked, 0 is untouched.
 ///

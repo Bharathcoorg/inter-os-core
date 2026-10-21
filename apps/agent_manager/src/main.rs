@@ -33,8 +33,8 @@
 use core::panic::PanicInfo;
 
 use interos_std as std;
-use std::design::components::{self, Elevation};
 use std::design::font;
+use std::design::monochrome::{self, Icon};
 use std::design::primitives::Rect;
 use std::design::scroll::ScrollState;
 use agent_manager::theme::THEME;
@@ -67,8 +67,33 @@ const GUTTER: usize = 24;
 /// The width of the content column.
 const CONTENT_W: usize = W - 2 * GUTTER;
 
-/// The status bar's height, from the platform's viewport metrics.
-const STATUS_H: usize = 84;
+/// The app bar's height.
+///
+/// WHY this band is the app's bar and not the platform's status bar: the
+/// platform's status bar belongs to the shell, and this app owns the whole
+/// frame it is given. What lives in this band is the app's own bar -- the
+/// way out, the title and the two controls the showcases put there.
+const APPBAR_H: usize = 84;
+/// The size of an app bar icon button.
+const ICON_BTN: usize = 44;
+/// The gap between two app bar icon buttons.
+const ICON_BTN_GAP: usize = 8;
+/// The app bar's title's left edge.
+const APPBAR_TITLE_X: usize = 88;
+/// The app bar's title's top.
+const APPBAR_TITLE_Y: usize = 24;
+/// The floating action button's radius.
+const FAB_R: usize = 28;
+/// The floating action button's margin from the body's edge.
+const FAB_MARGIN: usize = 16;
+/// The padding inside a chat bubble.
+const BUBBLE_PAD: usize = 12;
+/// The chat surface's composer band.
+const COMPOSER_H: usize = 76;
+/// The composer's field height.
+const COMPOSER_FIELD_H: usize = 56;
+/// The composer's send button radius.
+const COMPOSER_SEND_R: usize = 24;
 
 /// The segmented control's band.
 const TAB_Y: usize = 92;
@@ -100,9 +125,19 @@ const CARD_PAD_X: usize = 16;
 const CARD_PAD_TOP: usize = 12;
 const CARD_PAD_BOTTOM: usize = 16;
 const CARD_GAP: usize = 12;
-const TITLE_ROW_H: usize = 72;
-const TITLE_GAP: usize = 8;
-const ROW_H: usize = 48;
+/// The height of a card's heading row.
+///
+/// WHY the heading is given a row of its own: the heading is the name of
+/// the thing the rows under it belong to, and a name that shares a line
+/// with a measurement is a measurement.
+const TITLE_ROW_H: usize = 28;
+const TITLE_GAP: usize = 0;
+/// The height of a row.
+///
+/// WHY a row is a touch target's height and not a line's height: a row a
+/// person can read but cannot press is a label, and the platform's
+/// minimum touch target is forty-four pixels.
+const ROW_H: usize = 44;
 const LINES_TOP: usize = CARD_PAD_TOP + TITLE_ROW_H + TITLE_GAP;
 
 /// The label column's width in pixels.
@@ -129,6 +164,14 @@ const WIDE_W: usize = GUTTER + CONTENT_W - CARD_PAD_X - (GUTTER + CARD_PAD_X);
 
 /// How many characters a wide line wraps at.
 const WRAP_COLS: usize = 52;
+
+/// The longest run the outline face will draw, in bytes.
+///
+/// WHY the app knows the face's limit: a run the face refuses is drawn by
+/// the bitmap face at the bitmap's whole-cell size, and a paragraph drawn
+/// in a different face from the label above it is a paragraph that looks
+/// like it belongs to another screen.
+const MAX_RUN_BYTES: usize = std::design::outline_text::KEY_MAX;
 /// How many physical rows a wide line can have.
 const WIDE_ROWS: usize = 4;
 
@@ -141,20 +184,29 @@ const WIDE_ROWS: usize = 4;
 // does this one: the rows are the 24px rung, the headings are the 48px
 // rung, and the difference between a heading and a row is the weight and
 // the ink as much as it is the size.
-const TYPE_CAPTION: usize = THEME.type_scale.caption.scale;
-const TYPE_BODY: usize = THEME.type_scale.body.scale;
-/// The scale a heading is drawn at.
+/// The cap heights the design document names, in the units a reader sees.
 ///
-/// WHY the heading and the body were both at the body scale: the
-/// screen had no hierarchy, and a screen whose every level of text is
-/// the same size is a screen that reads as a dump. The heading is a
-/// step up from the body.
-const TYPE_TITLE: usize = THEME.type_scale.title.scale;
+/// WHY the app names them rather than a scale multiple: the platform's
+/// type scale is a ladder of cap heights, and a scale multiple is a
+/// ladder of multiples. One of them can be drawn exactly and the other
+/// has to be guessed at.
+const CAP_CAPTION: u32 = std::design::typography::CAPTION_CAP_PX;
+const CAP_BODY: u32 = std::design::typography::BODY_CAP_PX;
+const CAP_SECTION: u32 = std::design::typography::SECTION_CAP_PX;
+const CAP_TITLE: u32 = std::design::typography::TITLE_CAP_PX;
+
+/// The line heights that go with the cap heights.
+const LINE_CAPTION: usize = std::design::typography::CAPTION_LINE_PX;
+const LINE_BODY: usize = std::design::typography::BODY_LINE_PX;
 
 /// How many cards the body can hold.
-const MAX_CARDS: usize = 12;
+///
+/// WHY the budget is generous: a body that runs out of room drops the tail
+/// of its content without saying so, and a screen that quietly hides half
+/// of a provider list is a screen that lies about the device.
+const MAX_CARDS: usize = 16;
 /// How many lines the body can hold.
-const MAX_LINES: usize = 28;
+const MAX_LINES: usize = 64;
 /// The longest label a line carries.
 const LABEL_MAX: usize = 30;
 /// The longest value a line carries.
@@ -210,15 +262,6 @@ impl Tone {
 ///
 /// WHY the roles are coloured differently: a conversation that is read as
 /// a list of undifferentiated lines is hard to follow, and the two sides
-/// of an exchange have to be tellable apart at a glance.
-fn chat_role_tone(role: ChatRole) -> Tone {
-    match role {
-        ChatRole::User => Tone::Accent,
-        ChatRole::Assistant => Tone::Good,
-        ChatRole::Notice => Tone::Unavailable,
-    }
-}
-
 /// The tone a transcript message's text carries.
 ///
 /// WHY the platform's own notices are muted rather than coloured as
@@ -257,6 +300,12 @@ pub struct Line {
     pub row_count: u8,
     /// The action this line performs when tapped, or -1.
     pub action: i8,
+    /// Whether the value is drawn as a status chip rather than as text.
+    ///
+    /// WHY a chip and not coloured text: a state that is written in colour
+    /// is a state a person has to read, and a state that is written as a
+    /// dot and a word is a state a person can find at a glance.
+    pub chip: bool,
 }
 
 impl Line {
@@ -271,6 +320,7 @@ impl Line {
             row_starts: [0; WIDE_ROWS],
             row_count: 1,
             action: -1,
+            chip: false,
         }
     }
 
@@ -309,13 +359,34 @@ impl Line {
 /// WHY the rows are capped: the line's value buffer holds a fixed number of
 /// bytes, and a row that begins past the end of the buffer would be a row
 /// of nothing.
-fn wrap_rows(value: &[u8]) -> ([u8; WIDE_ROWS], u8) {
+fn wrap_rows(value: &[u8], cap_px: u32, max_px: usize) -> ([u8; WIDE_ROWS], u8) {
     let mut starts = [0u8; WIDE_ROWS];
     let mut count = 1usize;
     let mut row_start = 0usize;
 
     while row_start < value.len() && count < WIDE_ROWS {
-        let limit = (row_start + WRAP_COLS).min(value.len());
+        // WHY the row is measured and not counted: the platform's face is
+        // proportional, so a row's width depends on the letters in it. A
+        // character count wrapped every line at fifty-two characters, which
+        // is less than half the column the caption scale can fill, so a
+        // sentence that fitted on one row was broken into two and the space
+        // beside it was left empty.
+        let mut limit = row_start;
+        let mut width = 0usize;
+        while limit < value.len() {
+            // WHY the row is capped in bytes as well as in width: a row
+            // longer than the face's key is refused by the face and drawn
+            // by the bitmap, and the bitmap draws at a whole cell.
+            if limit - row_start >= MAX_RUN_BYTES {
+                break;
+            }
+            let step = measure_cap(&value[limit..limit + 1], cap_px);
+            if width + step > max_px {
+                break;
+            }
+            width += step;
+            limit += 1;
+        }
         if limit >= value.len() {
             // The rest of the text fits on this row, so this is the last one.
             break;
@@ -342,6 +413,13 @@ fn wrap_rows(value: &[u8]) -> ([u8; WIDE_ROWS], u8) {
     (starts, count as u8)
 }
 
+/// What a card in the body is: a panel of measurements, or a message.
+pub const CARD_PANEL: u8 = 0;
+/// A message the platform said: a bubble on the left.
+pub const CARD_BUBBLE_THEM: u8 = 1;
+/// A message the person said: a bubble on the right.
+pub const CARD_BUBBLE_ME: u8 = 2;
+
 /// One card of the body.
 #[derive(Clone, Copy)]
 pub struct Card {
@@ -359,6 +437,15 @@ pub struct Card {
     pub y: u16,
     /// The card's height.
     pub height: u16,
+    /// Whether the card is a panel or a message bubble.
+    pub kind: u8,
+    /// The bubble's width, in pixels.
+    ///
+    /// WHY a bubble carries its own width and a panel does not: a panel is
+    /// the full content column, and a bubble is as wide as the words in it.
+    /// A bubble drawn at the full width is a paragraph in a box, which is
+    /// what a message is not.
+    pub width: u16,
 }
 
 impl Card {
@@ -371,6 +458,8 @@ impl Card {
             line_count: 0,
             y: 0,
             height: 0,
+            kind: CARD_PANEL,
+            width: 0,
         }
     }
 }
@@ -390,6 +479,8 @@ pub enum Action {
     Send,
     /// Empty the conversation and the prompt.
     ClearChat,
+    /// Go to the conversation.
+    OpenChat,
 }
 
 /// A bottom action bar button.
@@ -441,6 +532,8 @@ pub struct AgentManagerApp {
     pub content_height: u16,
     /// The conversation and the prompt being written.
     pub chat: ChatSession,
+    /// Whether the overflow sheet is open.
+    pub sheet_open: bool,
 }
 
 impl AgentManagerApp {
@@ -463,6 +556,7 @@ impl AgentManagerApp {
             line_count: 0,
             content_height: 0,
             chat: ChatSession::new(),
+        sheet_open: false,
         };
         app.set_action(b"Measurements taken from the platform.", Tone::Muted);
         app.rebuild();
@@ -607,6 +701,24 @@ impl AgentManagerApp {
     // Building the body
     // -------------------------------------------------------------------------
 
+    /// The bottom of the body's band on the current surface.
+    ///
+    /// WHY the band moves: the chat surface carries a composer, and a
+    /// composer that scrolls away with the conversation is a composer that
+    /// cannot be reached while the answer is being read.
+    pub fn body_bottom(&self) -> usize {
+        if self.surface == Surface::Chat {
+            ACTION_TOP - COMPOSER_H
+        } else {
+            ACTION_TOP
+        }
+    }
+
+    /// The height of the body's band on the current surface.
+    pub fn body_h(&self) -> usize {
+        self.body_bottom().saturating_sub(BODY_TOP)
+    }
+
     /// Rebuilds the body for the current surface.
     pub fn rebuild(&mut self) {
         self.lines = [Line::empty(); MAX_LINES];
@@ -638,26 +750,57 @@ impl AgentManagerApp {
         card.title_len = len as u8;
         card.title_tone = tone;
         card.line_start = self.line_count;
+        card.kind = CARD_PANEL;
+        self.cards[index] = card;
+        self.card_count += 1;
+    }
+
+    /// Starts a message bubble.
+    ///
+    /// WHY a bubble has no heading: the speaker is shown by which side the
+    /// bubble is on, and a heading above it would say the same thing twice.
+    fn begin_bubble(&mut self, kind: u8) {
+        let index = self.card_count as usize;
+        if index >= MAX_CARDS {
+            return;
+        }
+        let mut card = Card::empty();
+        card.line_start = self.line_count;
+        card.kind = kind;
         self.cards[index] = card;
         self.card_count += 1;
     }
 
     /// Appends a line with a label and a value.
     fn add_line(&mut self, label: &[u8], value: &[u8], tone: Tone) {
-        self.push_line(label, value, tone, false, -1);
+        self.push_line(label, value, tone, false, -1, false);
     }
 
-    /// Appends a line that can be tapped to select a provider.
-    fn add_selectable(&mut self, label: &[u8], value: &[u8], tone: Tone, action: i8) {
-        self.push_line(label, value, tone, false, action);
+    /// Appends a line whose value is a status chip.
+    fn add_chip(&mut self, label: &[u8], value: &[u8], tone: Tone) {
+        self.push_line(label, value, tone, false, -1, true);
+    }
+
+    /// Appends a line that can be tapped to select a provider and whose
+    /// value is a status chip.
+    fn add_selectable_chip(&mut self, label: &[u8], value: &[u8], tone: Tone, action: i8) {
+        self.push_line(label, value, tone, false, action, true);
     }
 
     /// Appends a line that runs the full width of the card.
     fn add_wide(&mut self, value: &[u8], tone: Tone) {
-        self.push_line(b"", value, tone, true, -1);
+        self.push_line(b"", value, tone, true, -1, false);
     }
 
-    fn push_line(&mut self, label: &[u8], value: &[u8], tone: Tone, wide: bool, action: i8) {
+    fn push_line(
+        &mut self,
+        label: &[u8],
+        value: &[u8],
+        tone: Tone,
+        wide: bool,
+        action: i8,
+        chip: bool,
+    ) {
         let index = self.line_count as usize;
         if index >= MAX_LINES {
             return;
@@ -681,11 +824,12 @@ impl AgentManagerApp {
         line.tone = tone;
         line.wide = wide;
         if wide {
-            let (starts, count) = wrap_rows(&line.value[..line.value_len as usize]);
+            let (starts, count) = wrap_rows(&line.value[..line.value_len as usize], CAP_CAPTION, WIDE_W);
             line.row_starts = starts;
             line.row_count = count;
         }
         line.action = action;
+        line.chip = chip;
         self.lines[index] = line;
         self.line_count += 1;
 
@@ -703,19 +847,44 @@ impl AgentManagerApp {
         let mut y = 0usize;
         for index in 0..self.card_count as usize {
             let card = self.cards[index];
-            let mut height = LINES_TOP;
-            for line_index in 0..card.line_count as usize {
-                let line = self.lines[card.line_start as usize + line_index];
-                height += line.rows() * ROW_H;
+            let mut height;
+            let mut width = CONTENT_W;
+
+            if card.kind == CARD_PANEL {
+                height = LINES_TOP;
+                for line_index in 0..card.line_count as usize {
+                    let line = self.lines[card.line_start as usize + line_index];
+                    height += line.rows() * ROW_H;
+                }
+                height += CARD_PAD_BOTTOM;
+            } else {
+                // WHY a bubble is measured by its longest row: a bubble that
+                // is the full width of the column is a paragraph in a box,
+                // and a bubble that is wider than its words is a bubble with
+                // a hole in it. The width is the words plus the padding
+                // they sit inside.
+                let mut widest = 0usize;
+                let mut rows_total = 0usize;
+                for line_index in 0..card.line_count as usize {
+                    let line = self.lines[card.line_start as usize + line_index];
+                    rows_total += line.rows();
+                    for row in 0..line.rows() {
+                        let (start, end) = line.row_range(row);
+                        widest = widest.max(measure_cap(&line.value[start..end], CAP_CAPTION));
+                    }
+                }
+                width = (widest + 2 * BUBBLE_PAD).min(CONTENT_W);
+                height = 2 * BUBBLE_PAD + rows_total * ROW_H;
             }
-            height += CARD_PAD_BOTTOM;
+
             self.cards[index].y = y as u16;
             self.cards[index].height = height as u16;
+            self.cards[index].width = width as u16;
             y += height + CARD_GAP;
         }
         let content = y.saturating_sub(CARD_GAP);
         self.content_height = content as u16;
-        self.scroll = ScrollState::new(content, BODY_H, self.scroll.offset);
+        self.scroll = ScrollState::new(content, self.body_h(), self.scroll.offset);
     }
 
     // -------------------------------------------------------------------------
@@ -727,11 +896,15 @@ impl AgentManagerApp {
         let models = self.device.models;
         self.begin_card(b"Device model state", Tone::Plain);
         self.add_line(b"Model directory", MODEL_DIRECTORY_LABEL, Tone::Plain);
-        self.add_line(b"Directory", models.status.as_str().as_bytes(), model_tone(models.status));
+        self.add_chip(
+            b"Directory",
+            models.status.as_str().as_bytes(),
+            model_tone(models.status),
+        );
         let mut count = [0u8; 8];
         let n = format_u32(models.entries as u32, &mut count);
         self.add_line(b"Entries", &count[..n], Tone::Plain);
-        self.add_line(
+        self.add_chip(
             b"Embedding weights",
             if models.has_embedding_weights {
                 b"PRESENT"
@@ -744,7 +917,7 @@ impl AgentManagerApp {
                 Tone::Muted
             },
         );
-        self.add_line(
+        self.add_chip(
             b"Generative weights",
             if models.has_generative_weights {
                 b"PRESENT"
@@ -777,7 +950,7 @@ impl AgentManagerApp {
         self.begin_card(b"Provider catalogue", Tone::Accent);
         for (index, provider) in providers().iter().enumerate() {
             let state = provider.install_state(&self.device);
-            self.add_selectable(
+            self.add_selectable_chip(
                 provider.display_name().as_bytes(),
                 state.as_str().as_bytes(),
                 install_tone(state),
@@ -795,9 +968,9 @@ impl AgentManagerApp {
         self.add_line(b"Provider", selected.display_name().as_bytes(), Tone::Accent);
         self.add_line(b"Identifier", selected.id().as_bytes(), Tone::Plain);
         let state = selected.install_state(&self.device);
-        self.add_line(b"Install state", state.as_str().as_bytes(), install_tone(state));
+        self.add_chip(b"Install state", state.as_str().as_bytes(), install_tone(state));
         let binding = selected.runtime_binding(&self.device);
-        self.add_line(
+        self.add_chip(
             b"Runtime",
             binding.as_str().as_bytes(),
             if binding.is_bound() {
@@ -1066,7 +1239,7 @@ impl AgentManagerApp {
     fn build_chat(&mut self) {
         let availability = resolve_inference_service(&self.device.services);
         self.begin_card(b"Model service", Tone::Plain);
-        self.add_line(
+        self.add_chip(
             b"State",
             if availability.is_available() {
                 b"running"
@@ -1082,10 +1255,13 @@ impl AgentManagerApp {
         self.add_wide(availability.reason().as_bytes(), Tone::Muted);
 
         if self.chat.is_empty() {
-            self.begin_card(b"Conversation", Tone::Plain);
+            // WHY an empty conversation still says something: a screen that
+            // is blank tells the reader nothing, and the honest thing to
+            // say is what the surface is for.
+            self.begin_bubble(CARD_BUBBLE_THEM);
             self.add_wide(
-                b"No messages yet. Type a prompt and press SEND.",
-                Tone::Muted,
+                b"No messages yet. Type a prompt below and press the send button.",
+                Tone::Plain,
             );
         } else {
             for position in 0..self.chat.len() {
@@ -1097,26 +1273,18 @@ impl AgentManagerApp {
                 };
                 let role = message.role;
                 let len = message.text_len as usize;
-                self.begin_card(role.label().as_bytes(), chat_role_tone(role));
+                // WHY the speaker is shown by the side of the bubble: a
+                // label above every message repeats what the layout already
+                // says, and the design the showcases describe puts the
+                // person on the right and the platform on the left.
+                let kind = match role {
+                    ChatRole::User => CARD_BUBBLE_ME,
+                    _ => CARD_BUBBLE_THEM,
+                };
+                self.begin_bubble(kind);
                 self.add_wide(&message.text[..len], chat_role_ink(role));
             }
         }
-
-        self.begin_card(b"Prompt", Tone::Plain);
-        if self.chat.prompt_is_empty() {
-            self.add_wide(b"Nothing typed yet.", Tone::Muted);
-        } else {
-            // WHY the prompt is copied out: the builder takes the body
-            // mutably and the prompt belongs to the app.
-            let mut prompt = [0u8; CHAT_PROMPT_MAX];
-            let len = self.chat.prompt_text().len().min(CHAT_PROMPT_MAX);
-            prompt[..len].copy_from_slice(&self.chat.prompt_text()[..len]);
-            self.add_wide(&prompt[..len], Tone::Plain);
-        }
-        self.add_wide(
-            b"Text is entered with the keyboard. SEND asks the platform's model service.",
-            Tone::Muted,
-        );
     }
 
     /// Sends the prompt to whatever model the device has.
@@ -1194,7 +1362,7 @@ impl AgentManagerApp {
             summary[n] = *byte;
             n += 1;
         }
-        self.add_line(
+        self.add_chip(
             b"Overall",
             &summary[..n],
             if test.all_passed {
@@ -1204,7 +1372,7 @@ impl AgentManagerApp {
             },
         );
         for row in test.rows.iter() {
-            self.add_line(
+            self.add_chip(
                 row.label.as_bytes(),
                 if row.passed { b"PASS" } else { b"FAIL" },
                 if row.passed { Tone::Good } else { Tone::Bad },
@@ -1466,7 +1634,7 @@ fn text(
     y: usize,
     x0: usize,
     y0: usize,
-    scale: usize,
+    cap_px: u32,
     body: &[u8],
     ink: u32,
     bg: u32,
@@ -1485,9 +1653,9 @@ fn text(
     // WHY the bitmap face is still here: a run the outline face refuses
     // -- a character the typeface has no outline for -- has to be drawn
     // somehow, and the bitmap face is what it is drawn with.
-    let em = std::design::outline_text::em_for_scale(scale);
+    let em = std::design::outline_text::em_for_cap_height(cap_px);
     let (ascent, _) = std::design::typeface::line_metrics(em);
-    let baseline = (y0 + font::BASELINE * scale).max(ascent as usize);
+    let baseline = (y0 + font::BASELINE).max(ascent as usize);
     if let Some(run) = std::design::outline_text::OutlineRun::place_styled(x0, baseline, em, body, bold) {
         let (bx, by, bw, bh) = run.bounds();
         if x >= bx && x < bx + bw && y >= by && y < by + bh {
@@ -1495,21 +1663,42 @@ fn text(
         }
         return None;
     }
-    font::test_text_aa(x, y, x0, y0, scale, body, ink, bg, bold)
+    // WHY the fallback is the nearest whole scale: the bitmap face draws
+    // in whole cells, and a run the outline face refuses -- a character the
+    // typeface has no outline for -- has to be drawn at some size. It is
+    // the nearest one the face has.
+    let fallback = (std::design::outline_text::em_for_cap_height(cap_px) as usize / font::GLYPH_H)
+        .max(1);
+    font::test_text_aa(x, y, x0, y0, fallback, body, ink, bg, bold)
 }
 
-/// The number of bytes of `body` that fit in `max_px` at the given scale.
+/// The width of `body` at a cap height.
+///
+/// WHY the face is measured through the typeface and not through the
+/// bitmap's own scale: a cap height is not a scale, and the bitmap face
+/// can only be asked about whole cells.
+fn measure_cap(body: &[u8], cap_px: u32) -> usize {
+    let em = std::design::outline_text::em_for_cap_height(cap_px);
+    std::design::typeface::text_advance_px(body, em) as usize
+}
+
+/// The number of bytes of `body` that fit in `max_px` at the given cap height.
 ///
 /// WHY this is measured and not counted: the platform's face is
 /// proportional, so a string's width depends on the letters in it. Counting
 /// characters would let a wide string run past the column it belongs to.
-fn fit(body: &[u8], max_px: usize, scale: usize) -> usize {
-    if font::measure(body, scale) <= max_px {
-        return body.len();
+fn fit(body: &[u8], max_px: usize, cap_px: u32) -> usize {
+    // WHY the byte limit comes first: a run longer than the face's key is
+    // refused by the face and drawn by the bitmap, and the bitmap draws at
+    // a whole cell, so the run would come out at a different size from
+    // every other run on the screen.
+    let limit = body.len().min(MAX_RUN_BYTES);
+    if measure_cap(&body[..limit], cap_px) <= max_px {
+        return limit;
     }
     let mut len = 0usize;
-    while len < body.len() {
-        if font::measure(&body[..len + 1], scale) > max_px {
+    while len < limit {
+        if measure_cap(&body[..len + 1], cap_px) > max_px {
             break;
         }
         len += 1;
@@ -1523,113 +1712,252 @@ fn fit(body: &[u8], max_px: usize, scale: usize) -> usize {
 
 /// The colour of one pixel.
 fn get_pixel(x: usize, y: usize, app: &AgentManagerApp) -> u32 {
-    if y < STATUS_H {
-        return status_pixel(x, y, app);
+    let base = if y < APPBAR_H {
+        appbar_pixel(x, y, app)
+    } else if y < BODY_TOP {
+        tab_pixel(x, y, app)
+    } else {
+        let bottom = app.body_bottom();
+        if y < bottom {
+            body_pixel(x, y, app).unwrap_or(THEME.surface)
+        } else if y < ACTION_TOP {
+            composer_pixel(x, y, app)
+        } else {
+            action_pixel(x, y, app)
+        }
+    };
+    // The overflow sheet is on top of everything else, because a sheet that
+    // is behind the thing it covers is a panel, not a sheet.
+    if let Some(c) = sheet_pixel(x, y, app) {
+        return c;
     }
-    if y < BODY_TOP {
-        return tab_pixel(x, y, app);
-    }
-    if y < ACTION_TOP {
-        return body_pixel(x, y, app).unwrap_or(THEME.surface);
-    }
-    action_pixel(x, y, app)
+    base
 }
 
-/// The status bar.
-fn status_pixel(x: usize, y: usize, app: &AgentManagerApp) -> u32 {
-    let mut colour = THEME.overlay;
+/// The app bar: the way out, the surface's name, and the two controls.
+///
+/// WHY the band is the page's colour and not a card's: the design the
+/// showcases describe puts the app bar on the background and lets the
+/// cards float on it. A white bar across the top of a grey page is a
+/// different design.
+fn appbar_pixel(x: usize, y: usize, app: &AgentManagerApp) -> u32 {
+    let mut colour = THEME.surface;
 
-    // The app's own mark.
+    // The back control.
     //
-    // WHY this is the one piece of colour in the chrome: the theme reserves
-    // its accent for a brand mark, and the mark is the app.
-    let tile = Rect::new(GUTTER, (STATUS_H - 32) / 2, 32, 32);
-    if tile.contains(x, y) {
-        colour = std::design::primitives::draw_rounded_rect(
-            x,
-            y,
-            tile,
-            THEME.radii.small,
-            THEME.accent,
-            None,
-            0,
-        )
-        .unwrap_or(THEME.accent);
-        let lx = x - tile.x;
-        let ly = y - tile.y;
-        let d = (lx as i32 - 16).abs();
-        if d <= 9 {
-            let target = 24 - 2 * d;
-            if (ly as i32 - target).abs() <= 2 {
-                colour = THEME.surface;
-            }
-        }
+    // WHY the app has one: it is launched from the launcher's drawer, and
+    // without a back control the only way out of it is the system gesture.
+    // It is drawn in the platform's own place and tested with the
+    // platform's own hit region, so the button a person sees and the
+    // button a person presses are the same button.
+    if let Some(c) = std::design::back_button::pixel(
+        x,
+        y,
+        THEME.on_surface,
+        THEME.border,
+        THEME.surface,
+    ) {
+        colour = c;
     }
 
-    // The runtime's state, which is the one thing on this screen that is
-    // allowed to be a colour.
-    //
-    // WHY the pill's place is worked out first: the title and the pill
-    // share one band, so the title has to know where the pill is before
-    // it can be drawn, or the two overlap and the title is cut.
-    let bound = app.device.services.inference_runtime_binding().is_bound();
-    let label: &[u8] = if bound { b"RUNTIME BOUND" } else { b"RUNTIME UNBOUND" };
-    let ink = if bound { THEME.success } else { THEME.warning };
-    let pill_w = font::measure(label, TYPE_CAPTION) + 24;
-    let pill_x = W - GUTTER - pill_w;
-    let pill = Rect::new(pill_x, (STATUS_H - 30) / 2, pill_w, 30);
-
-    // The title, at the largest scale that leaves the pill its room.
-    //
-    // WHY the scale is chosen rather than fixed: the title and the status
-    // share a band, and a title drawn at a fixed scale is a title that
-    // either collides with the status or is smaller than it needs to be.
-    let title_room = pill_x.saturating_sub(GUTTER + 44 + 12);
-    let title_scale = if font::measure(b"AGENT MANAGER", TYPE_TITLE) <= title_room {
-        TYPE_TITLE
-    } else if font::measure(b"AGENT MANAGER", TYPE_BODY) <= title_room {
-        TYPE_BODY
-    } else {
-        TYPE_CAPTION
-    };
+    // The surface's name. It is the largest thing on the bar, because the
+    // name of the screen is the first thing a person looks for.
+    let title = app.surface.title();
     if let Some(c) = text(
         x,
         y,
-        GUTTER + 44,
-        6,
-        title_scale,
-        b"AGENT MANAGER",
+        APPBAR_TITLE_X,
+        APPBAR_TITLE_Y,
+        CAP_TITLE,
+        title.as_bytes(),
         THEME.on_surface,
-        THEME.overlay,
+        THEME.surface,
         true,
     ) {
         colour = c;
     }
-    if pill.contains(x, y) {
-        colour = std::design::primitives::draw_pill(
-            x,
-            y,
-            pill,
-            THEME.surface_container_high,
-            Some(THEME.overlay_border),
-        )
-        .unwrap_or(THEME.surface_container_high);
+
+    // The search control, which leads to the search surface.
+    if let Some(c) = icon_button_px(x, y, appbar_search_rect(), Icon::Search) {
+        colour = c;
+    }
+
+    // The overflow control, which opens the sheet.
+    if let Some(c) = icon_button_px(x, y, appbar_more_rect(), Icon::More) {
+        colour = c;
+    }
+
+    colour
+}
+
+/// The colour of `(x, y)` if it is an app bar icon button.
+///
+/// WHY the button is a circle on a hairline and not a bare glyph: a glyph
+/// on the page is a label, and a label that is also a control is a control
+/// nobody presses.
+fn icon_button_px(x: usize, y: usize, rect: Rect, icon: Icon) -> Option<u32> {
+    let cx = rect.x + rect.w / 2;
+    let cy = rect.y + rect.h / 2;
+    let mut colour = monochrome::circle_px(
+        x,
+        y,
+        cx,
+        cy,
+        rect.w / 2,
+        THEME.surface_container,
+        Some(THEME.border),
+    )?;
+    let glyph = Rect::new(cx - 11, cy - 11, 22, 22);
+    if let Some(c) = monochrome::icon_px(x, y, glyph, icon, THEME.on_surface) {
+        colour = c;
+    }
+    Some(colour)
+}
+
+/// The app bar's search control.
+fn appbar_search_rect() -> Rect {
+    Rect::new(
+        W - GUTTER - ICON_BTN * 2 - ICON_BTN_GAP,
+        (APPBAR_H - ICON_BTN) / 2,
+        ICON_BTN,
+        ICON_BTN,
+    )
+}
+
+/// The app bar's overflow control.
+fn appbar_more_rect() -> Rect {
+    Rect::new(
+        W - GUTTER - ICON_BTN,
+        (APPBAR_H - ICON_BTN) / 2,
+        ICON_BTN,
+        ICON_BTN,
+    )
+}
+
+// ---------------------------------------------------------------------------
+// The overflow sheet
+// ---------------------------------------------------------------------------
+
+/// The sheet's width.
+const SHEET_W: usize = 272;
+/// The sheet's row height.
+const SHEET_ROW_H: usize = 52;
+/// The sheet's padding.
+const SHEET_PAD: usize = 8;
+
+/// The rows the sheet holds.
+///
+/// WHY the sheet holds the actions and not the surfaces: the surfaces are
+/// already in the segmented control, and a sheet that repeats them is a
+/// sheet with nothing in it.
+const SHEET_ROWS: [(Icon, &str, Action); 3] = [
+    (Icon::Refresh, "Re-measure device", Action::Refresh),
+    (Icon::Activity, "Run self-test", Action::RunTest),
+    (Icon::Send, "Open chat", Action::OpenChat),
+];
+
+/// The sheet's rectangle.
+fn sheet_rect() -> Rect {
+    let height = SHEET_PAD * 2 + SHEET_ROWS.len() * SHEET_ROW_H;
+    Rect::new(W - GUTTER - SHEET_W, APPBAR_H + 8, SHEET_W, height)
+}
+
+/// The colour of `(x, y)` if it is the overflow sheet.
+fn sheet_pixel(x: usize, y: usize, app: &AgentManagerApp) -> Option<u32> {
+    if !app.sheet_open {
+        return None;
+    }
+    let rect = sheet_rect();
+    if !rect.contains(x, y) {
+        return None;
+    }
+    let mut colour =
+        monochrome::card_px(x, y, rect, THEME.surface_container, Some(THEME.border))?;
+    for (index, (icon, label, _)) in SHEET_ROWS.iter().enumerate() {
+        let row_y = rect.y + SHEET_PAD + index * SHEET_ROW_H;
+        let row = Rect::new(rect.x, row_y, rect.w, SHEET_ROW_H);
+        if !row.contains(x, y) {
+            continue;
+        }
+        let glyph = Rect::new(rect.x + 16, row_y + (SHEET_ROW_H - 22) / 2, 22, 22);
+        if let Some(c) = monochrome::icon_px(x, y, glyph, *icon, THEME.on_surface) {
+            colour = c;
+        }
         if let Some(c) = text(
             x,
             y,
-            pill_x + 12,
-            pill.y + 3,
-            TYPE_CAPTION,
-            label,
-            ink,
-            THEME.surface_container_high,
-            true,
+            rect.x + 50,
+            row_y + (SHEET_ROW_H - LINE_BODY) / 2,
+            CAP_BODY,
+            label.as_bytes(),
+            THEME.on_surface,
+            THEME.surface_container,
+            false,
         ) {
             colour = c;
         }
     }
+    Some(colour)
+}
 
-    colour
+// ---------------------------------------------------------------------------
+// The floating action button
+// ---------------------------------------------------------------------------
+
+/// The floating action button's rectangle.
+///
+/// WHY it floats over the body instead of sitting in the action bar: a
+/// button that is in the bar is a button in a row, and a row of buttons
+/// has no primary one. The floating button is the screen's one obvious
+/// action, and it is the one a thumb reaches for first.
+fn fab_rect(app: &AgentManagerApp) -> Rect {
+    // WHY the chat surface has no floating button: the composer carries a
+    // send button already, and two controls that do the same thing on one
+    // screen is one control too many.
+    if app.surface == Surface::Chat {
+        return Rect::new(0, 0, 0, 0);
+    }
+    let bottom = app.body_bottom();
+    Rect::new(
+        W - GUTTER - FAB_R * 2 - FAB_MARGIN,
+        bottom - FAB_R * 2 - FAB_MARGIN,
+        FAB_R * 2,
+        FAB_R * 2,
+    )
+}
+
+/// The action the floating button performs on a surface.
+fn fab_action(surface: Surface) -> Action {
+    match surface {
+        Surface::Models => Action::Install,
+        Surface::Chat => Action::Send,
+        _ => Action::Refresh,
+    }
+}
+
+/// The glyph the floating button carries on a surface.
+fn fab_icon(surface: Surface) -> Icon {
+    match surface {
+        Surface::Models => Icon::Plus,
+        Surface::Chat => Icon::Send,
+        _ => Icon::Refresh,
+    }
+}
+
+/// The colour of `(x, y)` if it is the floating action button.
+fn fab_pixel(x: usize, y: usize, app: &AgentManagerApp) -> Option<u32> {
+    let rect = fab_rect(app);
+    if rect.w == 0 || rect.h == 0 {
+        return None;
+    }
+    let cx = rect.x + rect.w / 2;
+    let cy = rect.y + rect.h / 2;
+    let mut colour = monochrome::circle_px(x, y, cx, cy, FAB_R, THEME.primary, None)?;
+    let glyph = Rect::new(cx - 13, cy - 13, 26, 26);
+    if let Some(c) = monochrome::icon_px(x, y, glyph, fab_icon(app.surface), THEME.on_primary) {
+        colour = c;
+    }
+    Some(colour)
 }
 
 /// The segmented control.
@@ -1652,34 +1980,48 @@ fn tab_pixel(x: usize, y: usize, app: &AgentManagerApp) -> u32 {
             } else {
                 (THEME.surface_container, THEME.on_surface_variant)
             };
-            colour = std::design::primitives::draw_rounded_rect(
+            colour = monochrome::chip_px(
                 x,
                 y,
                 seg,
-                THEME.radii.chip,
                 fill,
                 if selected { None } else { Some(THEME.border) },
-                TYPE_CAPTION,
             )
             .unwrap_or(fill);
 
             let label = Surface::ALL[index].tab_label().as_bytes();
-            let text_w = font::measure(label, 1);
+            let text_w = measure_cap(label, CAP_CAPTION);
             let text_x = seg_x + segment_w.saturating_sub(text_w) / 2;
-            if let Some(c) = text(x, y, text_x, TAB_Y + 12, 1, label, ink, fill, selected) {
+            if let Some(c) = text(
+                x,
+                y,
+                text_x,
+                TAB_Y + (TAB_H - LINE_CAPTION) / 2,
+                CAP_CAPTION,
+                label,
+                ink,
+                fill,
+                selected,
+            ) {
                 colour = c;
             }
         }
-    }
-    // The hairline under the control.
-    if y == TAB_Y + TAB_H + 1 {
-        colour = THEME.outline_variant;
     }
     colour
 }
 
 /// The scrollable body.
 fn body_pixel(x: usize, y: usize, app: &AgentManagerApp) -> Option<u32> {
+    // The floating action button is on top of the body, on top of the last
+    // card, because that is where a thumb reaches for it.
+    if let Some(c) = fab_pixel(x, y, app) {
+        return Some(c);
+    }
+    body_cards_pixel(x, y, app)
+}
+
+/// The scrollable body's cards.
+fn body_cards_pixel(x: usize, y: usize, app: &AgentManagerApp) -> Option<u32> {
     let offset = app.scroll.offset;
     let content_y = y - BODY_TOP + offset;
 
@@ -1691,7 +2033,6 @@ fn body_pixel(x: usize, y: usize, app: &AgentManagerApp) -> Option<u32> {
             continue;
         }
 
-        let style = components::card_style(&THEME, Elevation::Resting);
         let top = BODY_TOP as i64 + card_y as i64 - offset as i64;
         let bottom = top + card_h as i64;
         if bottom <= 0 || top >= H as i64 {
@@ -1699,36 +2040,37 @@ fn body_pixel(x: usize, y: usize, app: &AgentManagerApp) -> Option<u32> {
         }
         let rect_y = top.max(0) as usize;
         let rect_h = (bottom.min(H as i64) - rect_y as i64) as usize;
+
+        if card.kind != CARD_PANEL {
+            return bubble_pixel(x, y, app, card, rect_y, rect_h);
+        }
+
         let rect = Rect::new(GUTTER, rect_y, CONTENT_W, rect_h);
-        let mut colour = std::design::primitives::draw_rounded_rect(
-            x,
-            y,
-            rect,
-            style.radius,
-            style.fill,
-            style.border,
-            TYPE_CAPTION,
-        )?;
+        // WHY the card is the platform's monochrome card: a card that invents
+        // its own fill and its own hairline is a card a third-party app
+        // cannot match, and the design system already says what a card
+        // looks like.
+        let mut colour =
+            monochrome::card_px(x, y, rect, THEME.surface_container, Some(THEME.border))?;
 
         // The heading.
         let title_top = card_y + CARD_PAD_TOP;
         if content_y >= title_top && content_y < title_top + TITLE_ROW_H {
             let title = &card.title[..card.title_len as usize];
-            let len = fit(title, CONTENT_W - 2 * CARD_PAD_X, TYPE_TITLE);
+            let len = fit(title, CONTENT_W - 2 * CARD_PAD_X, CAP_SECTION);
             if let Some(c) = text(
                 x,
                 y,
                 GUTTER + CARD_PAD_X,
                 BODY_TOP + title_top - offset,
-                TYPE_TITLE,
+                CAP_SECTION,
                 &title[..len],
                 card.title_tone.colour(),
-                style.fill,
-                // WHY the heading is not bold: a bold run at the heading's size is
-                // heavy enough to shout, and a screen whose every heading
-                // shouts is a screen with no hierarchy. The heading's size
-                // already separates it from the body.
-                false,
+                THEME.surface_container,
+                // WHY the heading is bold: the heading is the name of the
+                // thing the rows under it belong to, and a name has to be
+                // findable before the rows are read.
+                true,
             ) {
                 colour = c;
             }
@@ -1751,7 +2093,7 @@ fn body_pixel(x: usize, y: usize, app: &AgentManagerApp) -> Option<u32> {
                     let (start, end) = line.row_range(row);
                     if start < end {
                         let body = &line.value[start..end];
-                        let len = fit(body, WIDE_W, TYPE_CAPTION);
+                        let len = fit(body, WIDE_W, CAP_CAPTION);
                         // WHY the row's own y and not the line's: a wide
                         // line that wraps has more than one physical row, and
                         // every one of them is a row of its own.
@@ -1760,10 +2102,10 @@ fn body_pixel(x: usize, y: usize, app: &AgentManagerApp) -> Option<u32> {
                             y,
                             GUTTER + CARD_PAD_X,
                             screen_y + row * ROW_H,
-                            TYPE_CAPTION,
+                            CAP_CAPTION,
                             &body[..len],
                             line.tone.colour(),
-                            style.fill,
+                            THEME.surface_container,
                             false,
                         ) {
                             colour = c;
@@ -1771,45 +2113,69 @@ fn body_pixel(x: usize, y: usize, app: &AgentManagerApp) -> Option<u32> {
                     }
                 } else {
                     let label = &line.label[..line.label_len as usize];
-                    let len = fit(label, LABEL_W - LABEL_GAP, TYPE_CAPTION);
+                    let len = fit(label, LABEL_W - LABEL_GAP, CAP_CAPTION);
                     if let Some(c) = text(
                         x,
                         y,
                         GUTTER + CARD_PAD_X,
-                        screen_y,
-                        TYPE_CAPTION,
+                        screen_y + (ROW_H - LINE_CAPTION) / 2,
+                        CAP_CAPTION,
                         &label[..len],
                         THEME.on_surface_variant,
-                        style.fill,
+                        THEME.surface_container,
                         false,
                     ) {
                         colour = c;
                     }
                     let value = &line.value[..line.value_len as usize];
-                    let len = fit(value, VALUE_W, TYPE_BODY);
-                    // WHY the mark: a value cut in the middle of a word
-                    // reads as a word, and the reader is left with a
-                    // different name for the thing than the platform gave.
-                    let mut shown = [0u8; 256];
-                    shown[..len].copy_from_slice(&value[..len]);
-                    let len = if len < value.len() && len >= 3 {
-                        shown[len - 3..len].copy_from_slice(b"...");
-                        len
+                    if line.chip {
+                        // WHY a chip and not coloured text: a state written
+                        // in colour is a state a person has to read, and a
+                        // state written as a dot and a word is a state a
+                        // person can find at a glance.
+                        if let Some(c) = chip_px(
+                            x,
+                            y,
+                            GUTTER + CONTENT_W - CARD_PAD_X,
+                            screen_y + (ROW_H - 26) / 2,
+                            value,
+                            line.tone,
+                        ) {
+                            colour = c;
+                        }
                     } else {
-                        len
-                    };
-                    if let Some(c) = text(
-                        x,
-                        y,
-                        VALUE_X,
-                        screen_y,
-                        TYPE_BODY,
-                        &shown[..len],
-                        line.tone.colour(),
-                        style.fill,
-                        false,
-                    ) {
-                        colour = c;
+                        let len = fit(value, VALUE_W, CAP_BODY);
+                        // WHY the mark: a value cut in the middle of a word
+                        // reads as a word, and the reader is left with a
+                        // different name for the thing than the platform gave.
+                        let mut shown = [0u8; 256];
+                        shown[..len].copy_from_slice(&value[..len]);
+                        let len = if len < value.len() && len >= 3 {
+                            shown[len - 3..len].copy_from_slice(b"...");
+                            len
+                        } else {
+                            len
+                        };
+                        // WHY the value is right-aligned: a value that starts
+                        // at a fixed column leaves a ragged edge, and a list of
+                        // ragged values reads as a table of unrelated things.
+                        // Aligned to the row's edge, the values form a column
+                        // a person can scan down.
+                        let value_w = measure_cap(&shown[..len], CAP_BODY);
+                        let value_x = (GUTTER + CONTENT_W - CARD_PAD_X).saturating_sub(value_w);
+                        if let Some(c) = text(
+                            x,
+                            y,
+                            value_x,
+                            screen_y + (ROW_H - LINE_BODY) / 2,
+                            CAP_BODY,
+                            &shown[..len],
+                            line.tone.colour(),
+                            THEME.surface_container,
+                            false,
+                        ) {
+                            colour = c;
+                        }
                     }
                 }
                 break;
@@ -1818,7 +2184,171 @@ fn body_pixel(x: usize, y: usize, app: &AgentManagerApp) -> Option<u32> {
         }
         return Some(colour);
     }
-    None
+
+    Some(THEME.surface)
+}
+
+/// The colour of `(x, y)` if it is a message bubble.
+///
+/// WHY the person is on the right and the platform is on the left: the
+/// design the showcases describe says so, and a conversation drawn the
+/// other way round reads as a log rather than as a conversation.
+fn bubble_pixel(
+    x: usize,
+    y: usize,
+    app: &AgentManagerApp,
+    card: Card,
+    rect_y: usize,
+    rect_h: usize,
+) -> Option<u32> {
+    let width = (card.width as usize).min(CONTENT_W);
+    let left = if card.kind == CARD_BUBBLE_ME {
+        W - GUTTER - width
+    } else {
+        GUTTER
+    };
+    let rect = Rect::new(left, rect_y, width, rect_h);
+    let (fill, ink) = if card.kind == CARD_BUBBLE_ME {
+        (THEME.primary, THEME.on_primary)
+    } else {
+        (THEME.surface_container_low, THEME.on_surface)
+    };
+    let mut colour = monochrome::card_px(x, y, rect, fill, None)?;
+
+    let mut cursor = rect_y + BUBBLE_PAD;
+    for line_index in 0..card.line_count as usize {
+        let line = app.lines[card.line_start as usize + line_index];
+        for row in 0..line.rows() {
+            let (start, end) = line.row_range(row);
+            let body = &line.value[start..end];
+            let len = fit(body, width.saturating_sub(2 * BUBBLE_PAD), CAP_CAPTION);
+            if let Some(c) = text(
+                x,
+                y,
+                left + BUBBLE_PAD,
+                cursor,
+                CAP_CAPTION,
+                &body[..len],
+                ink,
+                fill,
+                false,
+            ) {
+                colour = c;
+            }
+            cursor += ROW_H;
+        }
+    }
+    Some(colour)
+}
+
+/// The colour of `(x, y)` if it is a status chip whose right edge is at
+/// `right_x`.
+fn chip_px(
+    x: usize,
+    y: usize,
+    right_x: usize,
+    top: usize,
+    label: &[u8],
+    tone: Tone,
+) -> Option<u32> {
+    let text_w = measure_cap(label, CAP_CAPTION);
+    let width = 10 + 8 + 6 + text_w + 10;
+    let left = right_x.saturating_sub(width);
+    let rect = Rect::new(left, top, width, 26);
+    let mut colour = monochrome::chip_px(x, y, rect, THEME.surface_container_low, None)?;
+    let dot_cx = left + 10 + 4;
+    let dot_cy = top + 13;
+    if let Some(c) = monochrome::circle_px(x, y, dot_cx, dot_cy, 4, tone.colour(), None) {
+        colour = c;
+    }
+    if let Some(c) = text(
+        x,
+        y,
+        dot_cx + 10,
+        top + (26 - LINE_CAPTION) / 2,
+        CAP_CAPTION,
+        label,
+        tone.colour(),
+        THEME.surface_container_low,
+        false,
+    ) {
+        colour = c;
+    }
+    Some(colour)
+}
+
+/// The composer band, on the chat surface.
+///
+/// WHY the composer is pinned rather than scrolled: a composer that scrolls
+/// away is a composer that cannot be reached while reading the answer, and
+/// the answer is the reason the person is here.
+fn composer_pixel(x: usize, y: usize, app: &AgentManagerApp) -> u32 {
+    let mut colour = THEME.surface;
+    if app.surface != Surface::Chat {
+        return colour;
+    }
+    let top = ACTION_TOP - COMPOSER_H;
+    if y == top {
+        colour = THEME.border;
+    }
+    let field_y = top + (COMPOSER_H - COMPOSER_FIELD_H) / 2;
+    let send_cx = W - GUTTER - COMPOSER_SEND_R;
+    let send_cy = top + COMPOSER_H / 2;
+    let field_right = send_cx.saturating_sub(COMPOSER_SEND_R + 12);
+    let field = Rect::new(
+        GUTTER,
+        field_y,
+        field_right.saturating_sub(GUTTER),
+        COMPOSER_FIELD_H,
+    );
+    if field.contains(x, y) {
+        if let Some(c) =
+            monochrome::control_px(x, y, field, THEME.surface_container, Some(THEME.border))
+        {
+            colour = c;
+        }
+        let prompt = app.chat.prompt_text();
+        let (body, ink) = if app.chat.prompt_is_empty() {
+            (&b"Type a message..."[..], THEME.muted)
+        } else {
+            (prompt, THEME.on_surface)
+        };
+        let len = fit(body, field.w.saturating_sub(28), CAP_BODY);
+        if let Some(c) = text(
+            x,
+            y,
+            field.x + 14,
+            field_y + (COMPOSER_FIELD_H - LINE_BODY) / 2,
+            CAP_BODY,
+            &body[..len],
+            ink,
+            THEME.surface_container,
+            false,
+        ) {
+            colour = c;
+        }
+    }
+    if let Some(c) = monochrome::circle_px(
+        x,
+        y,
+        send_cx,
+        send_cy,
+        COMPOSER_SEND_R,
+        THEME.primary,
+        None,
+    ) {
+        colour = c;
+    }
+    if let Some(c) = monochrome::icon_px(
+        x,
+        y,
+        Rect::new(send_cx - 12, send_cy - 12, 24, 24),
+        Icon::Send,
+        THEME.on_primary,
+    ) {
+        colour = c;
+    }
+    colour
 }
 
 /// The bottom action bar.
@@ -1847,24 +2377,26 @@ fn action_pixel(x: usize, y: usize, app: &AgentManagerApp) -> u32 {
                 } else {
                     (THEME.surface_container_high, THEME.on_surface)
                 };
-                colour = std::design::primitives::draw_rounded_rect(
+                // WHY the primary button has no hairline: a light line
+                // around a black button is a seam, and a seam on the one
+                // control a person is meant to press is a thing that looks
+                // like a mistake.
+                colour = monochrome::chip_px(
                     x,
                     y,
                     rect,
-                    THEME.radii.control,
                     fill,
-                    Some(THEME.border),
-                    TYPE_CAPTION,
+                    if index == 0 { None } else { Some(THEME.border) },
                 )
                 .unwrap_or(fill);
-                let text_w = font::measure(button.label.as_bytes(), 1);
+                let text_w = measure_cap(button.label.as_bytes(), CAP_CAPTION);
                 let text_x = bx + width.saturating_sub(text_w) / 2;
                 if let Some(c) = text(
                     x,
                     y,
                     text_x,
-                    BUTTON_Y + 18,
-                    TYPE_CAPTION,
+                    BUTTON_Y + (BUTTON_H - LINE_CAPTION) / 2,
+                    CAP_CAPTION,
                     button.label.as_bytes(),
                     ink,
                     fill,
@@ -1880,7 +2412,7 @@ fn action_pixel(x: usize, y: usize, app: &AgentManagerApp) -> u32 {
     // The last action's result.
     let message = &app.action_log[..app.action_log_len];
     if y >= RESULT_Y && y < RESULT_Y + ROW_H {
-        let len = fit(message, CONTENT_W, TYPE_CAPTION);
+        let len = fit(message, CONTENT_W, CAP_CAPTION);
         // WHY the mark: a status line that stops in the middle of a word
         // reads as a word, and a reader who takes it for one is reading a
         // sentence the platform never said. The mark says the sentence
@@ -1898,7 +2430,7 @@ fn action_pixel(x: usize, y: usize, app: &AgentManagerApp) -> u32 {
             y,
             GUTTER,
             RESULT_Y,
-            TYPE_CAPTION,
+            CAP_CAPTION,
             &shown[..len],
             app.action_tone.colour(),
             THEME.overlay,
@@ -1948,6 +2480,11 @@ fn hit_body(app: &AgentManagerApp, x: usize, y: usize) -> Option<i8> {
         if content_y < card_y || content_y >= card_y + card_h {
             continue;
         }
+        // WHY a bubble is skipped: a bubble is a message, and a message is
+        // not something a tap selects.
+        if card.kind != CARD_PANEL {
+            continue;
+        }
         let mut cursor = card_y + LINES_TOP;
         for line_index in 0..card.line_count as usize {
             let line = app.lines[card.line_start as usize + line_index];
@@ -1973,6 +2510,54 @@ fn handle_tap(app: &mut AgentManagerApp, x: u32, y: u32) -> Tap {
     // The home indicator.
     if uy >= GESTURE_Y - 12 && uy <= GESTURE_Y + 17 && (240..=480).contains(&ux) {
         return Tap::Leave("[AGENT_MGR] Home indicator tapped. Returning to the launcher.");
+    }
+
+    // The overflow sheet, which is on top of everything.
+    //
+    // WHY a tap outside the sheet closes it and does nothing else: a sheet
+    // that swallows every tap under it is a sheet the reader cannot get
+    // past, and a sheet that acted on the tap under it would be a button
+    // the person cannot see they are pressing.
+    if app.sheet_open {
+        let sheet = sheet_rect();
+        if !sheet.contains(ux, uy) {
+            app.sheet_open = false;
+            return Tap::Redraw;
+        }
+        for (index, (_icon, _label, action)) in SHEET_ROWS.iter().enumerate() {
+            let row_y = sheet.y + SHEET_PAD + index * SHEET_ROW_H;
+            if uy >= row_y && uy < row_y + SHEET_ROW_H {
+                app.sheet_open = false;
+                match action {
+                    Action::Refresh => app.refresh(),
+                    Action::RunTest => app.run_self_test(),
+                    Action::OpenChat => {
+                        app.surface = Surface::Chat;
+                        app.scroll = ScrollState::new(app.content_height as usize, BODY_H, 0);
+                        app.rebuild();
+                    }
+                    _ => {}
+                }
+                return Tap::Redraw;
+            }
+        }
+        return Tap::None;
+    }
+
+    // The app bar's search control.
+    if appbar_search_rect().contains(ux, uy) {
+        if app.surface != Surface::Search {
+            app.surface = Surface::Search;
+            app.scroll = ScrollState::new(app.content_height as usize, BODY_H, 0);
+            app.rebuild();
+        }
+        return Tap::Redraw;
+    }
+
+    // The app bar's overflow control.
+    if appbar_more_rect().contains(ux, uy) {
+        app.sheet_open = true;
+        return Tap::Redraw;
     }
 
     // The segmented control.
@@ -2015,6 +2600,11 @@ fn handle_tap(app: &mut AgentManagerApp, x: u32, y: u32) -> Tap {
                         Action::RunTest => app.run_self_test(),
                         Action::Send => app.send_prompt(),
                         Action::ClearChat => app.clear_chat(),
+                        Action::OpenChat => {
+                            app.surface = Surface::Chat;
+                            app.scroll = ScrollState::new(app.content_height as usize, BODY_H, 0);
+                            app.rebuild();
+                        }
                     }
                     return Tap::Redraw;
                 }
@@ -2024,8 +2614,38 @@ fn handle_tap(app: &mut AgentManagerApp, x: u32, y: u32) -> Tap {
         return Tap::None;
     }
 
+    // The composer's send button.
+    if app.surface == Surface::Chat && uy >= ACTION_TOP - COMPOSER_H && uy < ACTION_TOP {
+        let send_cx = W - GUTTER - COMPOSER_SEND_R;
+        let send_cy = ACTION_TOP - COMPOSER_H + COMPOSER_H / 2;
+        let dx = ux as i64 - send_cx as i64;
+        let dy = uy as i64 - send_cy as i64;
+        if dx * dx + dy * dy <= (COMPOSER_SEND_R * COMPOSER_SEND_R) as i64 {
+            app.send_prompt();
+            return Tap::Redraw;
+        }
+        return Tap::None;
+    }
+
+    // The floating action button.
+    if app.surface != Surface::Chat && uy >= BODY_TOP && uy < app.body_bottom() {
+        let fab = fab_rect(app);
+        let cx = fab.x + fab.w / 2;
+        let cy = fab.y + fab.h / 2;
+        let dx = ux as i64 - cx as i64;
+        let dy = uy as i64 - cy as i64;
+        if dx * dx + dy * dy <= (FAB_R * FAB_R) as i64 {
+            match fab_action(app.surface) {
+                Action::Install => app.install_selected(),
+                Action::Send => app.send_prompt(),
+                _ => app.refresh(),
+            }
+            return Tap::Redraw;
+        }
+    }
+
     // The body.
-    if uy >= BODY_TOP && uy < BODY_BOTTOM {
+    if uy >= BODY_TOP && uy < app.body_bottom() {
         if let Some(action) = hit_body(app, ux, uy) {
             app.select_provider(action as usize);
             return Tap::Redraw;

@@ -279,7 +279,7 @@ def test_the_app_does_not_report_a_model_as_ready():
 def test_the_app_is_a_single_column_portrait_layout():
     """The app used to be a four-panel desktop dashboard.
 
-    A phone app is one column: a status bar, a body and an action bar. The
+    A phone app is one column: an app bar, a body and an action bar. The
     geometry below is the geometry of a 720x1440 portrait screen, and the
     bands have to be in that order for the app to read as a phone app.
     """
@@ -287,14 +287,14 @@ def test_the_app_is_a_single_column_portrait_layout():
         source = lib + main
         width = _const(source, "W")
         height = _const(source, "H")
-        status = _const(source, "STATUS_H")
+        status = _const(source, "APPBAR_H")
         body_top = _const(source, "BODY_TOP")
         action_top = _const(source, "ACTION_TOP")
         assert (width, height) == (720, 1440), (
             f"{path} draws on {width}x{height}, not the platform's 720x1440 portrait screen"
         )
         assert 0 < status < body_top < action_top <= height, (
-            f"{path} bands are out of order: status {status}, body {body_top}, "
+            f"{path} bands are out of order: app bar {status}, body {body_top}, "
             f"action {action_top}, height {height}"
         )
 
@@ -331,8 +331,13 @@ def test_the_app_uses_the_platforms_design_system():
         assert "design::theme" in source or "design::theme" in _code(theme), (
             f"{path} does not use the platform's theme roles"
         )
-        assert "design::components" in source, (
-            f"{path} does not use the platform's components"
+        # WHY either module is the platform's system: `components` holds
+        # the treatments the shell draws and `monochrome` holds the palette,
+        # the type ladder and the icons the app showcases describe. An app
+        # that uses one of them is using the platform's design system, and
+        # an app that uses neither is drawing its own.
+        assert "design::components" in source or "design::monochrome" in source, (
+            f"{path} does not use the platform's design system"
         )
         # The app's own theme, and it is the platform's roles with the
         # app's own values.
