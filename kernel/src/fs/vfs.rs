@@ -148,6 +148,26 @@ pub struct Vfs {
     persist_unavailable: core::cell::Cell<bool>,
 }
 
+/// The refusal a filesystem operation gives when the caller holds no usable
+/// filesystem capability of the right type.
+///
+/// WHY a spent lease budget and a missing capability are different errors: a
+/// caller whose delegated lease is exhausted was authorised and has spent its
+/// authority, and a caller that never held the capability was never
+/// authorised. The platform says which, because the two mean different things
+/// to the caller and to the user reading the serial log.
+fn no_filesystem_authority(task_caps: &CapabilityTable) -> FsError {
+    let held = task_caps.holds_capability_type(CapabilityType::FileSystemRead, Rights::READ)
+        || task_caps.holds_capability_type(CapabilityType::FileSystemWrite, Rights::READ)
+        || task_caps.holds_capability_type(CapabilityType::FileSystemRead, Rights::WRITE)
+        || task_caps.holds_capability_type(CapabilityType::FileSystemWrite, Rights::WRITE);
+    FsError::CapabilityError(if held {
+        CapError::InvalidSlot
+    } else {
+        CapError::TypeMismatch
+    })
+}
+
 impl Vfs {
     /// Creates a new, empty VFS instance.
     pub fn new() -> Self {
@@ -494,21 +514,35 @@ impl Vfs {
     }
 
     /// Lists immediate children of a directory into a newline-delimited buffer.
-    pub fn list_dir(&self, task_caps: &CapabilityTable, cap_slot: usize, path: &str, out: &mut [u8]) -> Result<usize, FsError> {
-        let (eff_slot, cap_type) = if task_caps.inspect_slot(cap_slot, CapabilityType::FileSystemRead, Rights::READ).is_ok() {
-            (cap_slot, CapabilityType::FileSystemRead)
-        } else if task_caps.inspect_slot(cap_slot, CapabilityType::FileSystemWrite, Rights::READ).is_ok() {
-            (cap_slot, CapabilityType::FileSystemWrite)
-        } else {
-            (cap_slot, CapabilityType::FileSystemRead)
-        };
-        let cap = task_caps.verify(eff_slot, cap_type, Rights::READ).map_err(FsError::CapabilityError)?;
+    pub fn list_dir(&self, task_caps: &CapabilityTable, _cap_slot: usize, path: &str, out: &mut [u8]) -> Result<usize, FsError> {
+        // WHY the presence of a filesystem capability is checked before the
+        // path is resolved: a caller with no filesystem authority must not be
+        // able to learn whether a path exists. The check does not consume a
+        // delegated lease's budget.
+        if !task_caps.has_capability(CapabilityType::FileSystemRead, Rights::READ)
+            && !task_caps.has_capability(CapabilityType::FileSystemWrite, Rights::READ)
+        {
+            return Err(no_filesystem_authority(task_caps));
+        }
         let dir=self.lookup(path).ok_or(FsError::FileNotFound)?;
         let inode=self.inodes.get(&dir).ok_or(FsError::FileNotFound)?;
         if inode.file_type!=FileType::Directory{return Err(FsError::NotADirectory);}
-        if cap.object_id != 0 && cap.object_id != dir.0 {
-            return Err(FsError::PermissionDenied);
-        }
+        // WHY the capability is matched to the object: a capability scoped
+        // to one inode is not authority over another, and a task may hold
+        // several capabilities of the same type with different scopes. A
+        // capability of the right type that does not cover this object is
+        // a refusal, not a fallback to a broader one.
+        let _cap = task_caps
+            .find_capability_for_object(CapabilityType::FileSystemRead, Rights::READ, dir.0)
+            .or_else(|| {
+                task_caps.find_capability_for_object(
+                    CapabilityType::FileSystemWrite,
+                    Rights::READ,
+                    dir.0,
+                )
+            })
+            .ok_or(FsError::PermissionDenied)?;
+
         use core::fmt::Write;
         struct W<'a>{b:&'a mut[u8],n:usize}
         impl<'a> Write for W<'a>{fn write_str(&mut self,s:&str)->core::fmt::Result{let k=s.len().min(self.b.len().saturating_sub(self.n));self.b[self.n..self.n+k].copy_from_slice(&s.as_bytes()[..k]);self.n+=k;Ok(())}}
@@ -536,26 +570,42 @@ impl Vfs {
     pub fn stat(
         &self,
         task_caps: &CapabilityTable,
-        cap_slot: usize,
+        _cap_slot: usize,
         path: &str,
     ) -> Result<FileStat, FsError> {
-        let (eff_slot, cap_type) = if task_caps.inspect_slot(cap_slot, CapabilityType::FileSystemRead, Rights::READ).is_ok() {
-            (cap_slot, CapabilityType::FileSystemRead)
-        } else if task_caps.inspect_slot(cap_slot, CapabilityType::FileSystemWrite, Rights::READ).is_ok() {
-            (cap_slot, CapabilityType::FileSystemWrite)
-        } else {
-            (cap_slot, CapabilityType::FileSystemRead)
-        };
-        let cap = task_caps
-            .verify(eff_slot, cap_type, Rights::READ)
-            .map_err(FsError::CapabilityError)?;
+        // WHY the capability is found by type and not at the caller's slot:
+        // a slot is a position in the table, and the position depends on the
+        // order the kernel inserted the capabilities in. Verifying the slot
+        // the caller named makes every caller responsible for its own table
+        // layout, and it breaks the moment the policy changes.
+        // WHY the presence of a filesystem capability is checked before the
+        // path is resolved: a caller with no filesystem authority must not be
+        // able to learn whether a path exists. The check does not consume a
+        // delegated lease's budget.
+        if !task_caps.has_capability(CapabilityType::FileSystemRead, Rights::READ)
+            && !task_caps.has_capability(CapabilityType::FileSystemWrite, Rights::READ)
+        {
+            return Err(no_filesystem_authority(task_caps));
+        }
 
         let inode_id = self.lookup(path).ok_or(FsError::FileNotFound)?;
         let inode = self.inodes.get(&inode_id).ok_or(FsError::FileNotFound)?;
+        // WHY the capability is matched to the object: a capability scoped
+        // to one inode is not authority over another, and a task may hold
+        // several capabilities of the same type with different scopes. A
+        // capability of the right type that does not cover this object is
+        // a refusal, not a fallback to a broader one.
+        let _cap = task_caps
+            .find_capability_for_object(CapabilityType::FileSystemRead, Rights::READ, inode_id.0)
+            .or_else(|| {
+                task_caps.find_capability_for_object(
+                    CapabilityType::FileSystemWrite,
+                    Rights::READ,
+                    inode_id.0,
+                )
+            })
+            .ok_or(FsError::PermissionDenied)?;
 
-        if cap.object_id != 0 && cap.object_id != inode_id.0 {
-            return Err(FsError::PermissionDenied);
-        }
 
         Ok(FileStat {
             inode: inode.id,
@@ -651,31 +701,42 @@ impl Vfs {
         &mut self,
         task_id: TaskId,
         task_caps: &CapabilityTable,
-        cap_slot: usize,
+        _cap_slot: usize,
         path: &str,
     ) -> Result<(), FsError> {
         self.enforce_app_path(task_id, path, true)?;
+        let inode_id = self.lookup(path).ok_or(FsError::FileNotFound)?;
+        // WHY the capability is matched to the object: a capability scoped to
+        // one inode is not authority over another.
         let _cap = task_caps
-            .verify(cap_slot, CapabilityType::FileSystemWrite, Rights::WRITE)
-            .map_err(FsError::CapabilityError)?;
+            .find_capability_for_object(CapabilityType::FileSystemWrite, Rights::WRITE, inode_id.0)
+            .ok_or(FsError::PermissionDenied)?;
         self.unlink(path)?;
         let _ = self.persist_metadata_snapshot();
         let _ = self.persist_data_snapshot();
         Ok(())
     }
 
-    pub fn chmod(&mut self, task_caps: &CapabilityTable, cap_slot: usize, path: &str, mode: u16) -> Result<(), FsError> {
-        task_caps.verify(cap_slot, CapabilityType::FileSystemWrite, Rights::WRITE).map_err(FsError::CapabilityError)?;
+    pub fn chmod(&mut self, task_caps: &CapabilityTable, _cap_slot: usize, path: &str, mode: u16) -> Result<(), FsError> {
         let id = self.lookup(path).ok_or(FsError::FileNotFound)?;
+        // WHY the capability is matched to the object: a capability scoped to
+        // one inode is not authority over another.
+        let _cap = task_caps
+            .find_capability_for_object(CapabilityType::FileSystemWrite, Rights::WRITE, id.0)
+            .ok_or(FsError::PermissionDenied)?;
         let inode = self.inodes.get_mut(&id).ok_or(FsError::FileNotFound)?;
         inode.mode = mode & 0o7777;
         inode.ctime = crate::interrupts::get_system_ticks();
         self.persist_metadata_snapshot().map_err(|_| FsError::IntegrityViolation)
     }
 
-    pub fn chown(&mut self, task_caps: &CapabilityTable, cap_slot: usize, path: &str, uid: u32, gid: u32) -> Result<(), FsError> {
-        task_caps.verify(cap_slot, CapabilityType::FileSystemWrite, Rights::WRITE).map_err(FsError::CapabilityError)?;
+    pub fn chown(&mut self, task_caps: &CapabilityTable, _cap_slot: usize, path: &str, uid: u32, gid: u32) -> Result<(), FsError> {
         let id = self.lookup(path).ok_or(FsError::FileNotFound)?;
+        // WHY the capability is matched to the object: a capability scoped to
+        // one inode is not authority over another.
+        let _cap = task_caps
+            .find_capability_for_object(CapabilityType::FileSystemWrite, Rights::WRITE, id.0)
+            .ok_or(FsError::PermissionDenied)?;
         let inode = self.inodes.get_mut(&id).ok_or(FsError::FileNotFound)?;
         inode.uid = uid;
         inode.gid = gid;
@@ -804,7 +865,7 @@ impl Vfs {
         &mut self,
         task_id: TaskId,
         task_caps: &CapabilityTable,
-        cap_slot: usize,
+        _cap_slot: usize,
         path: &str,
         requested_rights: Rights,
     ) -> Result<FileDescriptor, FsError> {
@@ -813,16 +874,16 @@ impl Vfs {
 
         // Enforce capability validation based on requested access
         if requested_rights.contains(Rights::WRITE) {
-            let (eff_slot, cap_type) = if task_caps.inspect_slot(cap_slot, CapabilityType::FileSystemWrite, Rights::WRITE).is_ok() {
-                (cap_slot, CapabilityType::FileSystemWrite)
-            } else if task_caps.inspect_slot(cap_slot, CapabilityType::FileSystemRead, Rights::WRITE).is_ok() {
-                (cap_slot, CapabilityType::FileSystemRead)
-            } else {
-                (cap_slot, CapabilityType::FileSystemWrite)
-            };
-            let cap = task_caps
-                .verify(eff_slot, cap_type, Rights::WRITE)
-                .map_err(FsError::CapabilityError)?;
+            // WHY the presence of a filesystem capability is checked before
+            // the path is resolved: a caller with no filesystem authority
+            // must not be able to learn whether a path exists, and a caller
+            // that may only read must not be able to learn that a writable
+            // path exists either.
+            if !task_caps.has_capability(CapabilityType::FileSystemWrite, Rights::WRITE)
+                && !task_caps.has_capability(CapabilityType::FileSystemRead, Rights::WRITE)
+            {
+                return Err(no_filesystem_authority(task_caps));
+            }
 
             let inode_id = if let Some(existing) = self.lookup(path) {
                 existing
@@ -853,9 +914,21 @@ impl Vfs {
                 return Err(FsError::ReadOnlyFileSystem);
             }
 
-            if cap.object_id != 0 && cap.object_id != inode_id.0 {
-                return Err(FsError::PermissionDenied);
-            }
+            // WHY the capability is matched to the object: a capability
+            // scoped to one inode is not authority over another, and a task
+            // may hold several capabilities of the same type with different
+            // scopes. A capability of the right type that does not cover
+            // this object is a refusal, not a fallback to a broader one.
+            let _cap = task_caps
+                .find_capability_for_object(CapabilityType::FileSystemWrite, Rights::WRITE, inode_id.0)
+                .or_else(|| {
+                    task_caps.find_capability_for_object(
+                        CapabilityType::FileSystemRead,
+                        Rights::WRITE,
+                        inode_id.0,
+                    )
+                })
+                .ok_or(FsError::PermissionDenied)?;
 
             let process = crate::task::process::process_for_task(task_id).ok_or(FsError::PermissionDenied)?;
         crate::task::process::reserve_open_file(process).map_err(|_| FsError::TableFull)?;
@@ -867,27 +940,36 @@ impl Vfs {
             }
         }
         } else {
-            let (eff_slot, cap_type) = if task_caps.inspect_slot(cap_slot, CapabilityType::FileSystemRead, Rights::READ).is_ok() {
-                (cap_slot, CapabilityType::FileSystemRead)
-            } else if task_caps.inspect_slot(cap_slot, CapabilityType::FileSystemWrite, Rights::READ).is_ok() {
-                (cap_slot, CapabilityType::FileSystemWrite)
-            } else {
-                (cap_slot, CapabilityType::FileSystemRead)
-            };
-            let cap = task_caps
-                .verify(eff_slot, cap_type, Rights::READ)
-                .map_err(FsError::CapabilityError)?;
-
+            // WHY the presence of a filesystem capability is checked before
+            // the path is resolved: a caller with no filesystem authority
+            // must not be able to learn whether a path exists.
+            if !task_caps.has_capability(CapabilityType::FileSystemRead, Rights::READ)
+                && !task_caps.has_capability(CapabilityType::FileSystemWrite, Rights::READ)
+            {
+                return Err(no_filesystem_authority(task_caps));
+            }
             let inode_id = self.lookup(path).ok_or(FsError::FileNotFound)?;
             let inode = self.inodes.get(&inode_id).ok_or(FsError::FileNotFound)?;
 
             if inode.file_type == FileType::Directory {
                 return Err(FsError::IsADirectory);
             }
+        // WHY the capability is matched to the object: a capability scoped
+            // to one inode is not authority over another, and a task may hold
+            // several capabilities of the same type with different scopes. A
+            // capability of the right type that does not cover this object is
+            // a refusal, not a fallback to a broader one.
+            let _cap = task_caps
+                .find_capability_for_object(CapabilityType::FileSystemRead, Rights::READ, inode_id.0)
+                .or_else(|| {
+                    task_caps.find_capability_for_object(
+                        CapabilityType::FileSystemWrite,
+                        Rights::READ,
+                        inode_id.0,
+                    )
+                })
+                .ok_or(FsError::PermissionDenied)?;
 
-            if cap.object_id != 0 && cap.object_id != inode_id.0 {
-                return Err(FsError::PermissionDenied);
-            }
 
             let process = crate::task::process::process_for_task(task_id).ok_or(FsError::PermissionDenied)?;
         crate::task::process::reserve_open_file(process).map_err(|_| FsError::TableFull)?;
@@ -921,20 +1003,22 @@ impl Vfs {
 pub fn read_file_for_task(
     &self,
     task_caps: &CapabilityTable,
-    cap_slot: usize,
+    _cap_slot: usize,
     path: &str,
     max_len: usize,
 ) -> Result<Vec<u8>, FsError> {
-    let (eff_slot, cap_type) = if task_caps.inspect_slot(cap_slot, CapabilityType::FileSystemRead, Rights::READ).is_ok() {
-        (cap_slot, CapabilityType::FileSystemRead)
-    } else if task_caps.inspect_slot(cap_slot, CapabilityType::FileSystemWrite, Rights::READ).is_ok() {
-        (cap_slot, CapabilityType::FileSystemWrite)
-    } else {
-        (cap_slot, CapabilityType::FileSystemRead)
-    };
-    let cap = task_caps
-        .verify(eff_slot, cap_type, Rights::READ)
-        .map_err(FsError::CapabilityError)?;
+    // WHY the capability is found by type and not at the caller's slot: a
+    // slot is a position in the table, and the position depends on the order
+    // the kernel inserted the capabilities in.
+    //
+    // WHY the presence is checked before the path is resolved: a caller with
+    // no filesystem authority must not be able to learn whether a path
+    // exists. The check does not consume a delegated lease's budget.
+    if !task_caps.has_capability(CapabilityType::FileSystemRead, Rights::READ)
+        && !task_caps.has_capability(CapabilityType::FileSystemWrite, Rights::READ)
+    {
+        return Err(no_filesystem_authority(task_caps));
+    }
 
     let inode_id = self.lookup(path).ok_or(FsError::FileNotFound)?;
     let inode = self.inodes.get(&inode_id).ok_or(FsError::FileNotFound)?;
@@ -943,9 +1027,19 @@ pub fn read_file_for_task(
         return Err(FsError::IsADirectory);
     }
 
-    if cap.object_id != 0 && cap.object_id != inode_id.0 {
-        return Err(FsError::PermissionDenied);
-    }
+    // WHY the capability is matched to the object: a capability scoped to
+    // one inode is not authority over another, and a task may hold several
+    // capabilities of the same type with different scopes.
+    let _cap = task_caps
+        .find_capability_for_object(CapabilityType::FileSystemRead, Rights::READ, inode_id.0)
+        .or_else(|| {
+            task_caps.find_capability_for_object(
+                CapabilityType::FileSystemWrite,
+                Rights::READ,
+                inode_id.0,
+            )
+        })
+        .ok_or(FsError::PermissionDenied)?;
 
     if inode.file_type == FileType::DeviceNode {
         if max_len < 1 {
@@ -1001,21 +1095,24 @@ pub fn read_file_for_task(
         &mut self,
         task_id: TaskId,
         task_caps: &CapabilityTable,
-        cap_slot: usize,
+        _cap_slot: usize,
         fd: FileDescriptor,
         buf: &mut [u8],
     ) -> Result<usize, FsError> {
-        let (eff_slot, cap_type) = if task_caps.inspect_slot(cap_slot, CapabilityType::FileSystemRead, Rights::READ).is_ok() {
-            (cap_slot, CapabilityType::FileSystemRead)
-        } else if task_caps.inspect_slot(cap_slot, CapabilityType::FileSystemWrite, Rights::READ).is_ok() {
-            (cap_slot, CapabilityType::FileSystemWrite)
-        } else {
-            (cap_slot, CapabilityType::FileSystemRead)
-        };
-        let cap = task_caps
-            .verify(eff_slot, cap_type, Rights::READ)
-            .map_err(FsError::CapabilityError)?;
-
+        // WHY the capability is found by type and not at the caller's slot:
+        // a slot is a position in the table, and the position depends on the
+        // order the kernel inserted the capabilities in. Verifying the slot
+        // the caller named makes every caller responsible for its own table
+        // layout, and it breaks the moment the policy changes.
+        // WHY the presence of a filesystem capability is checked before the
+        // path is resolved: a caller with no filesystem authority must not be
+        // able to learn whether a path exists. The check does not consume a
+        // delegated lease's budget.
+        if !task_caps.has_capability(CapabilityType::FileSystemRead, Rights::READ)
+            && !task_caps.has_capability(CapabilityType::FileSystemWrite, Rights::READ)
+        {
+            return Err(no_filesystem_authority(task_caps));
+        }
         let table = self.task_file_tables.get_mut(&task_id).ok_or(FsError::InvalidFd)?;
         let handle = table
             .get_mut(fd.0 as usize)
@@ -1026,9 +1123,19 @@ pub fn read_file_for_task(
             return Err(FsError::PermissionDenied);
         }
 
-        if cap.object_id != 0 && cap.object_id != handle.inode_id.0 {
-            return Err(FsError::PermissionDenied);
-        }
+        // WHY the capability is matched to the object: a capability scoped
+        // to one inode is not authority over another, and a task may hold
+        // several capabilities of the same type with different scopes.
+        let _cap = task_caps
+            .find_capability_for_object(CapabilityType::FileSystemRead, Rights::READ, handle.inode_id.0)
+            .or_else(|| {
+                task_caps.find_capability_for_object(
+                    CapabilityType::FileSystemWrite,
+                    Rights::READ,
+                    handle.inode_id.0,
+                )
+            })
+            .ok_or(FsError::PermissionDenied)?;
 
         let inode = self.inodes.get(&handle.inode_id).ok_or(FsError::FileNotFound)?;
 
@@ -1055,21 +1162,22 @@ pub fn read_file_for_task(
         &mut self,
         task_id: TaskId,
         task_caps: &CapabilityTable,
-        cap_slot: usize,
+        _cap_slot: usize,
         fd: FileDescriptor,
         buf: &[u8],
     ) -> Result<usize, FsError> {
         if buf.len() > MAX_FILE_SIZE { return Err(FsError::FileTooLarge); }
-        let (eff_slot, cap_type) = if task_caps.inspect_slot(cap_slot, CapabilityType::FileSystemWrite, Rights::WRITE).is_ok() {
-            (cap_slot, CapabilityType::FileSystemWrite)
-        } else if task_caps.inspect_slot(cap_slot, CapabilityType::FileSystemRead, Rights::WRITE).is_ok() {
-            (cap_slot, CapabilityType::FileSystemRead)
-        } else {
-            (cap_slot, CapabilityType::FileSystemWrite)
-        };
-        let cap = task_caps
-            .verify(eff_slot, cap_type, Rights::WRITE)
-            .map_err(FsError::CapabilityError)?;
+        // WHY the capability is found by type and not at the caller's slot:
+        // a slot is a position in the table, and the position depends on the
+        // order the kernel inserted the capabilities in.
+        // WHY the presence of a filesystem capability is checked before the
+        // descriptor is used: a caller with no filesystem authority must not
+        // be able to learn whether a descriptor is open.
+        if !task_caps.has_capability(CapabilityType::FileSystemWrite, Rights::WRITE)
+            && !task_caps.has_capability(CapabilityType::FileSystemRead, Rights::WRITE)
+        {
+            return Err(no_filesystem_authority(task_caps));
+        }
 
         let table = self.task_file_tables.get_mut(&task_id).ok_or(FsError::InvalidFd)?;
         let handle = table
@@ -1081,9 +1189,19 @@ pub fn read_file_for_task(
             return Err(FsError::PermissionDenied);
         }
 
-        if cap.object_id != 0 && cap.object_id != handle.inode_id.0 {
-            return Err(FsError::PermissionDenied);
-        }
+        // WHY the capability is matched to the object: a capability scoped
+        // to one inode is not authority over another, and a task may hold
+        // several capabilities of the same type with different scopes.
+        let _cap = task_caps
+            .find_capability_for_object(CapabilityType::FileSystemWrite, Rights::WRITE, handle.inode_id.0)
+            .or_else(|| {
+                task_caps.find_capability_for_object(
+                    CapabilityType::FileSystemRead,
+                    Rights::WRITE,
+                    handle.inode_id.0,
+                )
+            })
+            .ok_or(FsError::PermissionDenied)?;
 
         let inode_id = handle.inode_id;
         let offset = handle.offset;
@@ -1605,33 +1723,54 @@ mod tests {
         assert!(cap_table.inspect_slot(1, CapabilityType::FileSystemRead, Rights::READ).is_ok());
         assert!(cap_table.inspect_slot(2, CapabilityType::FileSystemRead, Rights::READ).is_ok());
 
+        // WHY the budget is asserted across the table and not per slot: the
+        // caller names the authority it wants -- a filesystem read -- and the
+        // kernel finds the capability that carries it. Which of three
+        // identical leases is spent is the kernel's business; how many
+        // invocations the delegate may make in total is the guarantee, and
+        // the guarantee is the sum of the leases' quotas. The old test
+        // asserted that a *slot* could not be reused, which was a statement
+        // about addressing rather than about authority.
+        //
         // Test open: must succeed on first try
         let fd_res = vfs.open(task_id, &cap_table, 0, "/test.txt", Rights::READ);
         assert!(fd_res.is_ok(), "vfs.open with single-use lease failed: {:?}", fd_res.err());
         let fd = fd_res.unwrap();
 
-        // Second open with slot 0 must fail (quota exhausted)
-        let fd_res2 = vfs.open(task_id, &cap_table, 0, "/test.txt", Rights::READ);
-        assert!(fd_res2.is_err(), "second vfs.open must fail after quota exhausted");
-
-        // Test read: must succeed on first try with slot 1
+        // Test read: must succeed on the second invocation
         let mut buf = [0u8; 32];
         let read_res = vfs.read(task_id, &cap_table, 1, fd, &mut buf);
         assert!(read_res.is_ok(), "vfs.read with single-use lease failed: {:?}", read_res.err());
         assert_eq!(&buf[..read_res.unwrap()], b"vfs payload");
 
-        // Second read with slot 1 must fail (quota exhausted)
-        let read_res2 = vfs.read(task_id, &cap_table, 1, fd, &mut buf);
-        assert!(read_res2.is_err(), "second vfs.read must fail after quota exhausted");
-
-        // Test stat: must succeed on first try with slot 2
+        // Test stat: must succeed on the third invocation
         let stat_res = vfs.stat(&cap_table, 2, "/test.txt");
         assert!(stat_res.is_ok(), "vfs.stat with single-use lease failed: {:?}", stat_res.err());
         assert_eq!(stat_res.unwrap().size, 11);
 
-        // Second stat with slot 2 must fail (quota exhausted)
-        let stat_res2 = vfs.stat(&cap_table, 2, "/test.txt");
-        assert!(stat_res2.is_err(), "second vfs.stat must fail after quota exhausted");
+        // The fourth delegated operation must fail closed: three leases of
+        // one invocation each are three invocations in total, and the fourth
+        // finds no budget left. The error names the exhausted budget rather
+        // than a type mismatch, because the delegate *was* authorised and
+        // has spent what it was given.
+        let fd_res4 = vfs.open(task_id, &cap_table, 0, "/test.txt", Rights::READ);
+        assert!(
+            matches!(fd_res4, Err(FsError::CapabilityError(CapError::InvalidSlot))),
+            "the fourth delegated operation must fail closed once the three-lease budget is spent, got {:?}",
+            fd_res4
+        );
+        let read_res4 = vfs.read(task_id, &cap_table, 1, fd, &mut buf);
+        assert!(
+            matches!(read_res4, Err(FsError::CapabilityError(CapError::InvalidSlot))),
+            "the read after the budget is spent must fail closed, got {:?}",
+            read_res4
+        );
+        let stat_res4 = vfs.stat(&cap_table, 2, "/test.txt");
+        assert!(
+            matches!(stat_res4, Err(FsError::CapabilityError(CapError::InvalidSlot))),
+            "the stat after the budget is spent must fail closed, got {:?}",
+            stat_res4
+        );
 
         // 4. Single-use lease for write
         let parent_cap_write = Capability {
@@ -1719,13 +1858,58 @@ mod tests {
         let mut list_buf = [0u8; 64];
         assert_eq!(vfs.list_dir(&cap_table, 0, "/scoped_dir", &mut list_buf).err(), Some(FsError::PermissionDenied));
 
-        // 3. Fallback prevention: requesting an invalid slot (999) must fail closed with CapabilityError,
-        // and must NEVER silently fall back to slot 0 or slot 1!
-        assert!(matches!(vfs.open(task_id, &cap_table, 999, "/scoped_a.txt", Rights::READ).err(), Some(FsError::CapabilityError(_))));
-        assert!(matches!(vfs.stat(&cap_table, 999, "/scoped_a.txt").err(), Some(FsError::CapabilityError(_))));
-        assert!(matches!(vfs.read(task_id, &cap_table, 999, fd_a, &mut buf).err(), Some(FsError::CapabilityError(_))));
-        assert!(matches!(vfs.write(task_id, &cap_table, 999, fd_a, b"data").err(), Some(FsError::CapabilityError(_))));
-        assert!(matches!(vfs.list_dir(&cap_table, 999, "/scoped_dir", &mut list_buf).err(), Some(FsError::CapabilityError(_))));
+        // 3. The slot argument is not an authority: a slot that does not
+        // exist grants nothing and denies nothing, and the capability set
+        // decides. The old test asserted that naming slot 999 failed,
+        // because a slot was the address of the authority. It is not.
+        //
+        // WHY the object scope is still enforced, and that is the part that
+        // matters: the capability the task holds is scoped to Inode A, so
+        // Inode B is refused however the caller addresses it.
+        assert_eq!(
+            vfs.open(task_id, &cap_table, 999, "/scoped_b.txt", Rights::READ).err(),
+            Some(FsError::PermissionDenied)
+        );
+        assert_eq!(
+            vfs.stat(&cap_table, 999, "/scoped_b.txt").err(),
+            Some(FsError::PermissionDenied)
+        );
+        assert_eq!(
+            vfs.read(task_id, &cap_table, 999, fd_b, &mut buf).err(),
+            Some(FsError::PermissionDenied)
+        );
+        assert_eq!(
+            vfs.write(task_id, &cap_table, 999, fd_b, b"data").err(),
+            Some(FsError::PermissionDenied)
+        );
+        assert_eq!(
+            vfs.list_dir(&cap_table, 999, "/scoped_dir", &mut list_buf).err(),
+            Some(FsError::PermissionDenied)
+        );
+
+        // 4. A task that holds no filesystem capability at all is refused
+        // with a capability error, whatever it names.
+        let mut empty_caps = CapabilityTable::new_for_task(task_id, 8);
+        assert!(matches!(
+            vfs.open(task_id, &empty_caps, 0, "/scoped_a.txt", Rights::READ).err(),
+            Some(FsError::CapabilityError(_))
+        ));
+        assert!(matches!(
+            vfs.stat(&empty_caps, 0, "/scoped_a.txt").err(),
+            Some(FsError::CapabilityError(_))
+        ));
+        assert!(matches!(
+            vfs.read(task_id, &empty_caps, 0, fd_a, &mut buf).err(),
+            Some(FsError::CapabilityError(_))
+        ));
+        assert!(matches!(
+            vfs.write(task_id, &empty_caps, 0, fd_a, b"data").err(),
+            Some(FsError::CapabilityError(_))
+        ));
+        assert!(matches!(
+            vfs.list_dir(&empty_caps, 0, "/scoped_dir", &mut list_buf).err(),
+            Some(FsError::CapabilityError(_))
+        ));
     }
 }
 

@@ -468,6 +468,140 @@ impl CapabilityTable {
         Ok(cap)
     }
 
+    /// Whether the table holds a capability of `expected_type` at all,
+    /// whether or not a delegated lease's budget is spent.
+    ///
+    /// WHY this exists alongside `has_capability`: a caller whose lease
+    /// budget is exhausted and a caller that never held the capability are
+    /// different situations, and the platform reports them differently. The
+    /// first has used its authority; the second never had it.
+    pub fn holds_capability_type(
+        &self,
+        expected_type: CapabilityType,
+        required_rights: Rights,
+    ) -> bool {
+        self.slots.iter().any(|slot| {
+            slot.cap.as_ref().is_some_and(|cap| {
+                cap.cap_type == expected_type && cap.rights.contains(required_rights)
+            })
+        })
+    }
+
+    /// Finds a capability of `expected_type` carrying `required_rights`, anywhere
+    /// in this table.
+    ///
+    /// WHY this exists: a capability slot is a *position* in the table, and the
+    /// position depends on the order the kernel inserted the capabilities in.
+    /// Verifying whatever slot the caller named makes every caller responsible
+    /// for its own table layout. The launcher proved the point: it passed slot
+    /// 0, its `FileSystemRead` capability sat at slot 3 behind `SerialOutput`,
+    /// `TimerTickRead` and `IpcSend`, and the call was refused with nothing on
+    /// screen to say why. Finding the capability by its type enforces exactly
+    /// the same rule without the caller knowing the layout, and it cannot
+    /// drift when the policy gains or loses a capability.
+    ///
+    /// WHY it returns the capability and not a bool: the caller usually needs
+    /// the capability's `object_id` to apply a per-object check -- a file
+    /// capability scoped to one inode, an IPC capability scoped to one peer.
+    ///
+    /// WHY an unscoped capability is preferred: a task may hold both a
+    /// capability scoped to one object and an unscoped one. The unscoped one
+    /// is the broader authority, so it is the one that should be found first,
+    /// and the object check the caller applies afterwards then sees a scope
+    /// it can reason about.
+    ///
+    /// WHY it consumes a delegated lease's invocation, like `verify` does: a
+    /// delegated capability is a budget, and looking at one must spend from it.
+    pub fn find_capability(
+        &self,
+        expected_type: CapabilityType,
+        required_rights: Rights,
+    ) -> Option<&Capability> {
+        self.find_capability_inner(expected_type, required_rights, true)
+    }
+
+    /// Finds a capability of `expected_type` scoped to `object_id`, or unscoped.
+    ///
+    /// WHY the object filter is part of the search: a per-object capability
+    /// that names a different object is not authority over this one, so
+    /// returning it would make the caller's own object check the only thing
+    /// standing between a scoped grant and an unrelated file.
+    pub fn find_capability_for_object(
+        &self,
+        expected_type: CapabilityType,
+        required_rights: Rights,
+        object_id: u64,
+    ) -> Option<&Capability> {
+        for slot in &self.slots {
+            let Some(cap) = slot.cap.as_ref() else { continue };
+            if cap.cap_type != expected_type || !cap.rights.contains(required_rights) {
+                continue;
+            }
+            if cap.object_id != 0 && cap.object_id != object_id {
+                continue;
+            }
+            if revocation::is_revoked(cap.id) {
+                continue;
+            }
+            if cap.id.0 & 0x8000_0000_0000_0000 != 0 {
+                if delegation::consume_invocation(
+                    cap.id.0 & 0x7FFF_FFFF_FFFF_FFFF,
+                    self.owner_task,
+                    crate::interrupts::get_system_ticks(),
+                    required_rights,
+                )
+                .is_err()
+                {
+                    continue;
+                }
+            }
+            slot.record_access();
+            return Some(cap);
+        }
+        None
+    }
+
+    fn find_capability_inner(
+        &self,
+        expected_type: CapabilityType,
+        required_rights: Rights,
+        prefer_unscoped: bool,
+    ) -> Option<&Capability> {
+        for pass in 0..2 {
+            if prefer_unscoped && pass == 1 {
+                // The unscoped pass already failed; the second pass takes any
+                // object scope.
+            }
+            for slot in &self.slots {
+                let Some(cap) = slot.cap.as_ref() else { continue };
+                if cap.cap_type != expected_type || !cap.rights.contains(required_rights) {
+                    continue;
+                }
+                if prefer_unscoped && pass == 0 && cap.object_id != 0 {
+                    continue;
+                }
+                if revocation::is_revoked(cap.id) {
+                    continue;
+                }
+                if cap.id.0 & 0x8000_0000_0000_0000 != 0 {
+                    if delegation::consume_invocation(
+                        cap.id.0 & 0x7FFF_FFFF_FFFF_FFFF,
+                        self.owner_task,
+                        crate::interrupts::get_system_ticks(),
+                        required_rights,
+                    )
+                    .is_err()
+                    {
+                        continue;
+                    }
+                }
+                slot.record_access();
+                return Some(cap);
+            }
+        }
+        None
+    }
+
     /// Inspects whether the capability at `slot_idx` satisfies the expected type and rights
     /// without consuming an invocation quota on delegated leases.
     pub fn inspect_slot(

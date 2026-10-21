@@ -336,14 +336,23 @@ pub fn sys_waitpid(child_id: u64) -> SyscallResult {
 /// Emits a diagnostic log message to the UART serial COM1.
 ///
 /// Requires the caller to hold a `SerialOutput` capability with `Rights::WRITE`.
-pub fn sys_log(cap_slot: usize, msg: &str) -> SyscallResult {
+pub fn sys_log(_cap_slot: usize, msg: &str) -> SyscallResult {
     let sched = SCHEDULER.lock();
     let current = match sched.current_task() {
         Some(t) => t,
         None => return SyscallResult::PermissionDenied,
     };
 
-    if current.cap_table.verify(cap_slot, CapabilityType::SerialOutput, Rights::WRITE).is_err() {
+    // WHY the capability is authorised by type and not by the slot the
+    // caller named: a slot is a position in this task's capability table,
+    // and the position depends on the order the kernel inserted the
+    // capabilities in. The launcher proved the point -- it passed slot 0
+    // while its FileSystemRead capability sat at slot 3, and the call was
+    // refused with nothing on screen to say why. Authorising by type
+    // enforces exactly the same rule without the caller knowing the
+    // layout, and it cannot drift when the policy gains or loses a
+    // capability.
+    if !current.cap_table.authorize_capability(CapabilityType::SerialOutput, Rights::WRITE) {
         return SyscallResult::PermissionDenied;
     }
 
@@ -358,14 +367,23 @@ pub fn sys_log(cap_slot: usize, msg: &str) -> SyscallResult {
 /// Reads the current system hardware timer ticks.
 ///
 /// Requires the caller to hold a `TimerTickRead` capability with `Rights::READ`.
-pub fn sys_get_ticks(cap_slot: usize) -> Result<u64, SyscallResult> {
+pub fn sys_get_ticks(_cap_slot: usize) -> Result<u64, SyscallResult> {
     let sched = SCHEDULER.lock();
     let current = match sched.current_task() {
         Some(t) => t,
         None => return Err(SyscallResult::PermissionDenied),
     };
 
-    if current.cap_table.verify(cap_slot, CapabilityType::TimerTickRead, Rights::READ).is_err() {
+    // WHY the capability is authorised by type and not by the slot the
+    // caller named: a slot is a position in this task's capability table,
+    // and the position depends on the order the kernel inserted the
+    // capabilities in. The launcher proved the point -- it passed slot 0
+    // while its FileSystemRead capability sat at slot 3, and the call was
+    // refused with nothing on screen to say why. Authorising by type
+    // enforces exactly the same rule without the caller knowing the
+    // layout, and it cannot drift when the policy gains or loses a
+    // capability.
+    if !current.cap_table.authorize_capability(CapabilityType::TimerTickRead, Rights::READ) {
         return Err(SyscallResult::PermissionDenied);
     }
     drop(sched);
@@ -627,14 +645,14 @@ pub fn sys_ipc_send(
 ///
 /// Requires an `IpcReceive` capability with `Rights::READ` in the explicitly specified `cap_slot`.
 /// Does not fall back to ambiently searching the capability table if `cap_slot` is invalid or exhausted.
-pub fn sys_ipc_recv(cap_slot: usize) -> Result<IpcMessage, SyscallResult> {
+pub fn sys_ipc_recv(_cap_slot: usize) -> Result<IpcMessage, SyscallResult> {
     let (receiver_id, is_valid) = {
         let sched = SCHEDULER.lock();
         let current = match sched.current_task() {
             Some(t) => t,
             None => return Err(SyscallResult::PermissionDenied),
         };
-        let valid = current.cap_table.verify(cap_slot, CapabilityType::IpcReceive, Rights::READ).is_ok();
+        let valid = current.cap_table.authorize_capability(CapabilityType::IpcReceive, Rights::READ);
         (current.id, valid)
     };
 
@@ -906,7 +924,7 @@ pub fn sys_fs_unlink(cap_slot: usize, path: &str) -> Result<(), SyscallResult> {
 ///
 /// Requires the caller to hold a `StorageRawBlock` capability with `Rights::READ`.
 pub fn sys_block_read(
-    cap_slot: usize,
+    _cap_slot: usize,
     lba: u32,
     buf: &mut [u8; SECTOR_SIZE],
 ) -> SyscallResult {
@@ -916,7 +934,16 @@ pub fn sys_block_read(
         None => return SyscallResult::PermissionDenied,
     };
 
-    if current.cap_table.verify(cap_slot, CapabilityType::StorageRawBlock, Rights::READ).is_err() {
+    // WHY the capability is authorised by type and not by the slot the
+    // caller named: a slot is a position in this task's capability table,
+    // and the position depends on the order the kernel inserted the
+    // capabilities in. The launcher proved the point -- it passed slot 0
+    // while its FileSystemRead capability sat at slot 3, and the call was
+    // refused with nothing on screen to say why. Authorising by type
+    // enforces exactly the same rule without the caller knowing the
+    // layout, and it cannot drift when the policy gains or loses a
+    // capability.
+    if !current.cap_table.authorize_capability(CapabilityType::StorageRawBlock, Rights::READ) {
         return SyscallResult::PermissionDenied;
     }
     drop(sched);
@@ -2159,11 +2186,11 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
         }
         78 => {
             // PackageRollback: a1=cap_slot, a2=pkg_id_ptr, a3=pkg_id_len, a4=user_consent
-            let cap_slot=a1 as usize; let len=a3 as usize;
+            let _cap_slot=a1 as usize; let len=a3 as usize;
             if len==0||len>128{return SyscallResult::InvalidArguments as i64;}
             let mut buf=[0u8;128]; let pkg=match read_user_string(a2,len,&mut buf){Ok(s)=>s,Err(_)=>return SyscallResult::InvalidArguments as i64};
             let sched=SCHEDULER.lock(); let current=match sched.current_task(){Some(t)=>t,None=>return SyscallResult::PermissionDenied as i64};
-            if current.cap_table.verify(cap_slot,CapabilityType::FileSystemWrite,Rights::WRITE).is_err(){return SyscallResult::PermissionDenied as i64;}
+            if !current.cap_table.authorize_capability(CapabilityType::FileSystemWrite,Rights::WRITE){return SyscallResult::PermissionDenied as i64;}
             drop(sched);
             if a4==0{return SyscallResult::PermissionDenied as i64;}
             match crate::package::PACKAGE_REGISTRY.lock().rollback(pkg){Ok(())=>SyscallResult::Success as i64,Err(_)=>SyscallResult::FileNotFound as i64}
@@ -3250,14 +3277,15 @@ fn authorize_capability_18_for_install(manifest: &RappManifest) -> Result<(), Sy
     Ok(())
 }
 
-pub fn sys_package_install(cap_slot: usize, pkg_id: &str, user_consent: bool) -> Result<(), SyscallResult> {
+pub fn sys_package_install(_cap_slot: usize, pkg_id: &str, user_consent: bool) -> Result<(), SyscallResult> {
     if !user_consent { return Err(SyscallResult::PermissionDenied); }
 
     let (read_slot, task_id, cap_table) = {
         let sched = SCHEDULER.lock();
         let current = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
-        current.cap_table.verify(cap_slot, CapabilityType::FileSystemWrite, Rights::WRITE)
-            .map_err(|_| SyscallResult::PermissionDenied)?;
+        if !current.cap_table.authorize_capability(CapabilityType::FileSystemWrite, Rights::WRITE) {
+            return Err(SyscallResult::PermissionDenied);
+        }
         let read_slot = current.cap_table.find_slot(CapabilityType::FileSystemRead, Rights::READ)
             .ok_or(SyscallResult::PermissionDenied)?;
         (read_slot, current.id, current.cap_table.clone())
@@ -3551,13 +3579,14 @@ pub fn dev_uninstall_verified_rapp(pkg_id: &str) -> Result<(), SyscallResult> {
     Ok(())
 }
 
-pub fn sys_package_uninstall(cap_slot: usize, pkg_id: &str, user_consent: bool) -> Result<(), SyscallResult> {
+pub fn sys_package_uninstall(_cap_slot: usize, pkg_id: &str, user_consent: bool) -> Result<(), SyscallResult> {
     if !user_consent { return Err(SyscallResult::PermissionDenied); }
     let current = {
         let sched = SCHEDULER.lock();
         let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
-        task.cap_table.verify(cap_slot, CapabilityType::FileSystemWrite, Rights::WRITE)
-            .map_err(|_| SyscallResult::PermissionDenied)?;
+        if !task.cap_table.authorize_capability(CapabilityType::FileSystemWrite, Rights::WRITE) {
+            return Err(SyscallResult::PermissionDenied);
+        }
         task.id
     };
     if pkg_id.is_empty() || pkg_id.len() > crate::package::rapp::RAPP_MAX_PACKAGE_ID_LEN
@@ -5058,13 +5087,13 @@ pub fn sys_storage_query() -> Result<u64, SyscallResult> {
     Ok((drive.sector_count() as u64).saturating_mul(crate::drivers::SECTOR_SIZE as u64))
 }
 
-pub fn sys_settings_get(cap_slot: usize, key_ptr: u64, key_len: usize, out: &mut [u8]) -> Result<usize, SyscallResult> {
+pub fn sys_settings_get(_cap_slot: usize, key_ptr: u64, key_len: usize, out: &mut [u8]) -> Result<usize, SyscallResult> {
     if key_len == 0 || key_len > 96 || out.len() > 512 { return Err(SyscallResult::InvalidArguments); }
     {
         let sched = SCHEDULER.lock();
         let current = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
-        let has_read = current.cap_table.verify(cap_slot, CapabilityType::FileSystemRead, Rights::READ).is_ok()
-            || current.cap_table.verify(cap_slot, CapabilityType::FileSystemWrite, Rights::READ).is_ok();
+        let has_read = current.cap_table.authorize_capability(CapabilityType::FileSystemRead, Rights::READ)
+            || current.cap_table.authorize_capability(CapabilityType::FileSystemWrite, Rights::READ);
         if !has_read {
             return Err(SyscallResult::PermissionDenied);
         }
@@ -5075,12 +5104,14 @@ pub fn sys_settings_get(cap_slot: usize, key_ptr: u64, key_len: usize, out: &mut
     Ok(crate::settings::SETTINGS.lock().get(key, out))
 }
 
-pub fn sys_settings_set(cap_slot: usize, key_ptr: u64, key_len: usize, val_ptr: u64, val_len: usize) -> Result<(), SyscallResult> {
+pub fn sys_settings_set(_cap_slot: usize, key_ptr: u64, key_len: usize, val_ptr: u64, val_len: usize) -> Result<(), SyscallResult> {
     if key_len == 0 || key_len > 96 || val_len > 512 { return Err(SyscallResult::InvalidArguments); }
     {
         let sched = SCHEDULER.lock();
         let current = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
-        current.cap_table.verify(cap_slot, CapabilityType::FileSystemWrite, Rights::WRITE).map_err(|_| SyscallResult::PermissionDenied)?;
+        if !current.cap_table.authorize_capability(CapabilityType::FileSystemWrite, Rights::WRITE) {
+            return Err(SyscallResult::PermissionDenied);
+        }
     }
     let mut key = [0u8; 96];
     let mut val = [0u8; 512];
@@ -5157,8 +5188,9 @@ pub fn sys_service_package_verify(cap_slot: usize, path: &str) -> Result<u8, Sys
     require_service_manager()?;
     let sched = SCHEDULER.lock();
     let current = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
-    current.cap_table.verify(cap_slot, CapabilityType::FileSystemRead, Rights::READ)
-        .map_err(|_| SyscallResult::PermissionDenied)?;
+    if !current.cap_table.authorize_capability(CapabilityType::FileSystemRead, Rights::READ) {
+        return Err(SyscallResult::PermissionDenied);
+    }
     drop(sched);
 
     if path.is_empty() || path.len() > 256 || !path.starts_with("/packages/") || !path.ends_with(".rapp") {
@@ -5185,8 +5217,9 @@ pub fn sys_service_package_launch(cap_slot: usize, path: &str) -> Result<crate::
     let sched = SCHEDULER.lock();
     let parent_id = sched.current_task_id().ok_or(SyscallResult::PermissionDenied)?;
     let current = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
-    current.cap_table.verify(cap_slot, CapabilityType::FileSystemRead, Rights::READ)
-        .map_err(|_| SyscallResult::PermissionDenied)?;
+    if !current.cap_table.authorize_capability(CapabilityType::FileSystemRead, Rights::READ) {
+        return Err(SyscallResult::PermissionDenied);
+    }
     drop(sched);
 
     if path.is_empty() || path.len() > 256 || !path.starts_with("/packages/") || !path.ends_with(".rapp") {
