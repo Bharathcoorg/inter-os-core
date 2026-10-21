@@ -500,6 +500,31 @@ impl Theme {
         self.dark
     }
 
+    /// The fill of a control that is the opposite of the page it sits on.
+    ///
+    /// WHY this exists: the platform's light theme carries a blue accent, so
+    /// `primary` is a brand colour and cannot also mean "the one filled
+    /// control on this screen". The design references the apps are built
+    /// from put that control in near-black, and an app that wanted it had
+    /// nowhere to ask: it reached for `warning` for an operator key and
+    /// `error` for a clear key, and the platform's status colours stopped
+    /// meaning what they say.
+    ///
+    /// WHY it is a method and not a field: every theme already has the two
+    /// colours it needs. The opposite of the page is the page's own ink, and
+    /// the ink on it is the page itself, so a light theme gets a near-black
+    /// control with light text, a dark theme gets a near-white one with dark
+    /// text, and the neutral system gets the white control its own design
+    /// calls for.
+    pub const fn inverted_surface(&self) -> u32 {
+        self.on_surface
+    }
+
+    /// The ink drawn on [`Theme::inverted_surface`].
+    pub const fn on_inverted_surface(&self) -> u32 {
+        self.surface
+    }
+
     /// Blends two `0xAARRGGBB` values. `t` is 0..=256.
     ///
     /// WHY the SDK's blend and not a second one: the wallpaper ramp, the veil

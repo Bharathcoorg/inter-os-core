@@ -158,10 +158,15 @@ pub const fn list_row_style(theme: &Theme, selected: bool) -> ListRowStyle {
 
 /// Draws a pill: a fully rounded shape with a centred label.
 ///
-/// WHY the selected label is inked with the surface colour: the pill is filled
-/// with the raised surface, and a selected label that matched its own
-/// background would vanish. This is the treatment the launcher's category chips
-/// use, and the shell's tab row is a row of these.
+/// WHY the selected segment is filled with the opposite of the page: the
+/// design references the apps are built from put the current segment in
+/// near-black, and that is the only way a row of otherwise identical chips
+/// says which one is current. The old treatment -- the same raised fill for
+/// every segment and a different ink for the selected one -- made the
+/// selection a matter of reading rather than of seeing.
+///
+/// WHY the ink on it is the page's own colour: the control is the opposite of
+/// the page, so the page's colour is what reads on it.
 pub fn pill(
     surface: &mut Surface,
     theme: &Theme,
@@ -170,17 +175,12 @@ pub fn pill(
     scale: usize,
     selected: bool,
 ) {
-    fill_rounded_rect(
-        surface,
-        rect,
-        theme.radii.pill,
-        theme.surface_container_high,
-    );
-    let ink = if selected {
-        theme.surface
+    let (fill, ink) = if selected {
+        (theme.inverted_surface(), theme.on_inverted_surface())
     } else {
-        theme.on_surface
+        (theme.surface_container_high, theme.on_surface)
     };
+    fill_rounded_rect(surface, rect, theme.radii.pill, fill);
     let label_h = font::line_height(scale);
     let text_w = font::measure(label, scale);
     let x = if text_w >= rect.w {
@@ -190,6 +190,139 @@ pub fn pill(
     };
     let y = rect.y + rect.h.saturating_sub(label_h) / 2;
     draw_label(surface, x, y, scale, label, ink);
+}
+
+/// The three treatments a button can carry.
+///
+/// WHY these are named rather than left to the app: the reference designs
+/// give a screen exactly one filled control, and an app that is left to
+/// choose for itself fills two of them and the screen stops having a
+/// primary action.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ButtonKind {
+    /// The one control on the screen a person presses. Filled with the
+    /// opposite of the page.
+    Primary,
+    /// A control that sits beside the primary one. A surface and a hairline.
+    Secondary,
+    /// A control with no fill at all.
+    Ghost,
+}
+
+/// The platform's button treatment: the fill, the hairline, the radius and
+/// the ink the label is drawn in.
+///
+/// WHY it is a struct and not loose values: a button is one shape, and an app
+/// that reached for the fill from one place and the radius from another would
+/// draw a button that does not match the platform's. The guest apps paint one
+/// pixel at a time, so the *treatment* is the part that has to be shared.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ButtonStyle {
+    /// The fill the button is painted with.
+    pub fill: u32,
+    /// The hairline the button is outlined with, if it has one.
+    pub border: Option<u32>,
+    /// The corner radius the button's corners are drawn at.
+    pub radius: usize,
+    /// The ink the label is drawn in.
+    pub ink: u32,
+}
+
+/// Resolves the platform's button treatment.
+///
+/// WHY the primary is the opposite of the page and not the theme's accent:
+/// the platform's light theme carries a blue accent, and a screen with a
+/// blue button on it reads as a marketing page. The design references put
+/// the one filled control in near-black, and an app that wanted that had
+/// nowhere to ask for it.
+pub const fn button_style(theme: &Theme, kind: ButtonKind) -> ButtonStyle {
+    match kind {
+        ButtonKind::Primary => ButtonStyle {
+            fill: theme.inverted_surface(),
+            border: None,
+            radius: theme.radii.control,
+            ink: theme.on_inverted_surface(),
+        },
+        ButtonKind::Secondary => ButtonStyle {
+            fill: theme.surface,
+            border: Some(theme.border),
+            radius: theme.radii.control,
+            ink: theme.on_surface,
+        },
+        ButtonKind::Ghost => ButtonStyle {
+            fill: theme.surface,
+            border: None,
+            radius: theme.radii.control,
+            ink: theme.on_surface,
+        },
+    }
+}
+
+/// Draws a button: a rounded rectangle, a label, and the treatment the
+/// button kind calls for.
+pub fn button(
+    surface: &mut Surface,
+    theme: &Theme,
+    rect: Rect,
+    label: &[u8],
+    scale: usize,
+    kind: ButtonKind,
+) {
+    let style = button_style(theme, kind);
+    surface.draw_aa_rounded_rect(
+        rect.x,
+        rect.y,
+        rect.w,
+        rect.h,
+        style.radius,
+        style.fill,
+        style.border,
+        1,
+    );
+    let label_h = font::line_height(scale);
+    let text_w = font::measure(label, scale);
+    let x = if text_w >= rect.w {
+        rect.x
+    } else {
+        rect.x + (rect.w - text_w) / 2
+    };
+    let y = rect.y + rect.h.saturating_sub(label_h) / 2;
+    draw_label(surface, x, y, scale, label, style.ink);
+}
+
+/// The platform's segmented-control treatment for one segment.
+///
+/// WHY a selected segment is the opposite of the page: the design references
+/// the apps are built from put the current segment in near-black, and that is
+/// the only way a row of otherwise identical chips says which one is
+/// current. The old treatment -- the same fill for every segment and a
+/// different ink for the selected one -- made the selection a matter of
+/// reading rather than of seeing.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct SegmentStyle {
+    /// The fill the segment is painted with.
+    pub fill: u32,
+    /// The ink the segment's label is drawn in.
+    pub ink: u32,
+    /// The corner radius the segment's corners are drawn at.
+    pub radius: usize,
+}
+
+/// Resolves the platform's treatment for one segment of a segmented control.
+pub const fn segment_style(theme: &Theme, selected: bool) -> SegmentStyle {
+    if selected {
+        SegmentStyle {
+            fill: theme.inverted_surface(),
+            ink: theme.on_inverted_surface(),
+            radius: theme.radii.pill,
+        }
+    } else {
+        SegmentStyle {
+            fill: theme.surface_container_high,
+            ink: theme.on_surface,
+            radius: theme.radii.pill,
+        }
+    }
 }
 
 /// Draws a segmented control: a row of pills, one of them selected.

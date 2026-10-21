@@ -13,6 +13,8 @@ pub mod display_list;
 pub mod scroll;
 pub mod theme;
 pub mod components;
+#[cfg(test)]
+mod cap_ladder;
 
 pub mod typography {
     use crate::font;
@@ -37,6 +39,39 @@ pub mod typography {
     pub const BODY_SCALE: usize = 2;
     pub const TITLE_SCALE: usize = 3;
     pub const DISPLAY_SCALE: usize = 6;
+
+    /// The cap heights, in pixels, of the platform's type scale.
+    ///
+    /// WHY these exist beside the scales: the scales are *multiples* of the
+    /// bitmap face's sixteen-pixel cell, and the multiples available are
+    /// sixteen, thirty-two, forty-eight and ninety-six. The design
+    /// document's scale asks for a caption of twelve to fourteen pixels, a
+    /// section heading of twenty to twenty-four, a title of twenty-eight to
+    /// thirty-two and a page heading of thirty-six to forty-four -- so two
+    /// of the six sizes the document names had no rung to sit on, and an
+    /// app that wanted one either overshot or had to reach for a different
+    /// face. These name the sizes directly, in the units a reader sees, and
+    /// `outline_text::place_run_cap` draws them.
+    ///
+    /// The values are the middle of each range the design document gives.
+    pub const CAPTION_CAP_PX: u32 = 13;
+    pub const BODY_CAP_PX: u32 = 16;
+    pub const SECTION_CAP_PX: u32 = 22;
+    pub const TITLE_CAP_PX: u32 = 30;
+    pub const HEADING_CAP_PX: u32 = 40;
+    pub const DISPLAY_CAP_PX: u32 = 52;
+
+    /// The line boxes, in pixels, that go with the cap heights above.
+    ///
+    /// WHY the line box is named and not derived: a line box is the space a
+    /// run reserves, and it is a layout decision -- two labels on one row
+    /// have to agree on it -- rather than a property of the glyphs.
+    pub const CAPTION_LINE_PX: usize = 16;
+    pub const BODY_LINE_PX: usize = 20;
+    pub const SECTION_LINE_PX: usize = 28;
+    pub const TITLE_LINE_PX: usize = 36;
+    pub const HEADING_LINE_PX: usize = 48;
+    pub const DISPLAY_LINE_PX: usize = 60;
 
     /// Badge glyphs inside an icon, e.g. a call badge.
     ///

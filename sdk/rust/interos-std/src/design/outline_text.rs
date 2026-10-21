@@ -80,6 +80,36 @@ pub fn reset_slot_pool() {
     }
 }
 
+/// The run that was placed last.
+///
+/// WHY this exists: a caller that paints a run asks for that same run for
+/// every pixel of it, and placing it rebuilt a sixty-four byte key --
+/// zeroed and then filled -- for each of those pixels. On a screen drawn
+/// one pixel at a time that was the single largest cost in a frame, and
+/// it grew with the number of pixels rather than with the amount of text.
+#[derive(Clone, Copy)]
+struct LastPlaced {
+    em: u32,
+    x: usize,
+    y: usize,
+    bold: bool,
+    len: u8,
+    key: [u8; KEY_MAX],
+    run: Option<OutlineRun>,
+}
+
+static mut LAST_PLACED: Option<LastPlaced> = None;
+
+/// Forgets the last placement.
+///
+/// WHY it exists: a caller that keeps a frame plan across frames must be
+/// able to say that the cache no longer describes the screen.
+pub fn forget_last_placement() {
+    unsafe {
+        *core::ptr::addr_of_mut!(LAST_PLACED) = None;
+    }
+}
+
 /// Which slot a placement lands in.
 ///
 /// Uses a direct-mapped hash on `(x, y, em, text_len, bold)` to select a slot
@@ -162,6 +192,58 @@ pub struct OutlineRun {
     slot: usize,
 }
 
+/// The em, in 1/2048 of an em, that gives a cap height of `cap_px` pixels.
+///
+/// WHY this exists: the integer scale ladder is a ladder of *multiples* of
+/// the bitmap face's 16-pixel cell, so it has a hole in it. The design
+/// document's type scale asks for a caption of 12 to 14 pixels, a section
+/// heading of 20 to 24 and a page heading of 36 to 44, and the multiples
+/// available are 16, 32, 48 and 96 -- so a section heading and a page
+/// heading have no rung to sit on, and an app that wants one either
+/// overshoots or has to draw it with the other face. This face rasterises
+/// from outlines, so it can be asked for the size the document names.
+pub const fn em_for_cap_height(cap_px: u32) -> u32 {
+    if cap_px == 0 {
+        return 0;
+    }
+    // 1456 is the cap height in 1/2048 of an em, and 2048 is the em.
+    ((cap_px as u64 * 2048 + 728) / 1456) as u32
+}
+
+/// Places a run whose size is named as a cap height in pixels rather than as
+/// a multiple of the bitmap face's cell.
+///
+/// WHY the cap height and not the em: a cap height is what a reader sees,
+/// and the design document's type scale is written in the sizes a reader
+/// sees.
+pub fn place_run_cap(
+    x0: usize,
+    y0: usize,
+    cap_px: u32,
+    text: &[u8],
+    max_w: Option<usize>,
+    bold: bool,
+) -> Option<OutlineRun> {
+    if cap_px == 0 || text.is_empty() || text.len() > KEY_MAX {
+        return None;
+    }
+    let em = em_for_cap_height(cap_px);
+    let (ascent, _) = typeface::line_metrics(em);
+    // The baseline is placed from the cap height rather than from the
+    // bitmap's constant, so a run at any size sits on the same optical
+    // line the other sizes do.
+    let cap_rows = typeface::line_metrics(em).0;
+    let _ = cap_rows;
+    let baseline = y0 + ascent as usize;
+    let run = OutlineRun::place_styled(x0, baseline, em, text, bold)?;
+    if let Some(mw) = max_w {
+        if run.w > mw {
+            return None;
+        }
+    }
+    Some(run)
+}
+
 impl OutlineRun {
     /// An empty run, for a frame that has no outline text.
     pub const EMPTY: OutlineRun = OutlineRun {
@@ -207,6 +289,27 @@ impl OutlineRun {
             return None;
         }
 
+        // WHY the fast path comes first: a caller that paints a run asks
+        // for it once per pixel, and the key below is a sixty-four byte
+        // array that is zeroed and then filled. The check is a comparison
+        // against the text placed last, which copies nothing.
+        unsafe {
+            // SAFETY: the static is read through a raw pointer and the
+            // reference it yields does not outlive this call, and nothing
+            // reached from here re-enters it.
+            if let Some(last) = (&*core::ptr::addr_of!(LAST_PLACED)).as_ref() {
+                if last.em == em
+                    && last.x == x
+                    && last.y == y
+                    && last.bold == bold
+                    && last.len as usize == text.len()
+                    && last.key[..text.len()] == *text
+                {
+                    return last.run;
+                }
+            }
+        }
+
         let mut key = [0u8; KEY_MAX];
         key[..text.len()].copy_from_slice(text);
         let slot = slot_for(em, x, y, text, bold);
@@ -223,14 +326,26 @@ impl OutlineRun {
                 && loaded.len == text.len()
                 && loaded.key[..text.len()] == *text
             {
-                return Some(OutlineRun {
+                let run = OutlineRun {
                     x,
                     y,
                     w: loaded.w,
                     h: loaded.h,
                     ascent: ascent as usize,
                     slot,
-                });
+                };
+                unsafe {
+                    *core::ptr::addr_of_mut!(LAST_PLACED) = Some(LastPlaced {
+                        em,
+                        x,
+                        y,
+                        bold,
+                        len: text.len() as u8,
+                        key,
+                        run: Some(run),
+                    });
+                }
+                return Some(run);
             }
         }
 
@@ -395,7 +510,7 @@ pub fn place_run(
 }
 
 impl OutlineRun {
-    pub fn place_run(
+pub fn place_run(
         x0: usize,
         baseline: usize,
         scale: usize,
