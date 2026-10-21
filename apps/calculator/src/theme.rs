@@ -43,18 +43,15 @@ pub mod type_scale {
 
 /// The theme this app draws in.
 ///
-/// WHY the LIGHT variant: the platform's design document gives the
-/// calculator a warm ivory background, and the light theme's surface is
-/// that ivory (`#F7F6F2`). The header of this module used to call the
-/// app a DARK variant while the app drew a surface the document did not
-/// ask for, and a document and a drawing that disagree are two
-/// descriptions of the same screen.
-///
-/// WHY the roles still do the work: the calculator's keys are painted from
-/// the roles below, so the switch changed the surface and the ink on it
-/// and nothing else. A third-party app that asks the SDK for the same
-/// roles draws the same calculator.
-pub const THEME: Theme = Theme::LIGHT;
+    /// WHY this palette: the design the app showcases describe is
+    /// monochrome -- a `#FAFAFA` page, a `#FFFFFF` surface, a `#E5E5E5`
+    /// hairline, and colour reserved for a status -- and the platform's
+    /// design system now holds that palette, so every application and the
+    /// shell draw the same pixels.
+pub const THEME: Theme = Theme {
+    name: "calculator",
+    ..interos_std::design::monochrome::THEME
+};
 
 /// The smallest edge an interactive target may have.
 pub const MIN_TOUCH_TARGET: usize = interos_std::design::touch::MIN_TARGET;

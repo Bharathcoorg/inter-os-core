@@ -43,10 +43,15 @@ pub mod type_scale {
 
 /// The theme this app draws in.
 ///
-/// WHY the LIGHT variant: the app draws a light surface,
-/// and the dark variant would be a different surface with a different
-/// reading.
-pub const THEME: Theme = Theme::LIGHT;
+    /// WHY this palette: the design the app showcases describe is
+    /// monochrome -- a `#FAFAFA` page, a `#FFFFFF` surface, a `#E5E5E5`
+    /// hairline, and colour reserved for a status -- and the platform's
+    /// design system now holds that palette, so every application and the
+    /// shell draw the same pixels.
+pub const THEME: Theme = Theme {
+    name: "vault",
+    ..interos_std::design::monochrome::THEME
+};
 
 /// The smallest edge an interactive target may have.
 pub const MIN_TOUCH_TARGET: usize = interos_std::design::touch::MIN_TARGET;

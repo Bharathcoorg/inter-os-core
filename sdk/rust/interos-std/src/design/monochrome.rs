@@ -115,6 +115,74 @@ pub const RADIUS_PILL: usize = 24;
 pub const RADIUS_SCREEN: usize = 28;
 
 // ---------------------------------------------------------------------------
+// The theme
+// ---------------------------------------------------------------------------
+
+/// The theme the app showcases describe.
+///
+/// WHY this is in the design system and not in each application: the
+/// showcases all describe the same system in the same words, and an
+/// application that carries its own copy of the palette is one more copy
+/// to keep in step. An application that wants its own name writes
+/// `Theme { name: "notes", ..monochrome::THEME }` and gets the same
+/// pixels every other application gets.
+pub const THEME: super::theme::Theme = super::theme::Theme {
+    name: "monochrome",
+    dark: false,
+
+    // The page and the surfaces on it.
+    surface: BG,
+    surface_container: SURFACE,
+    surface_container_high: SURFACE,
+    surface_container_low: SURFACE_MUTED,
+    surface_frosted: SURFACE,
+    overlay: SURFACE,
+    overlay_border: BORDER,
+
+    // The ink.
+    on_surface: TEXT_PRIMARY,
+    on_surface_variant: TEXT_SECONDARY,
+    muted: TEXT_MUTED,
+    on_primary: ON_PRIMARY,
+    on_primary_container: TEXT_PRIMARY,
+    ink_on_light: TEXT_PRIMARY,
+    ink_on_dark: ON_PRIMARY,
+
+    // The hairlines.
+    outline: TEXT_PRIMARY,
+    outline_variant: BORDER,
+    border: BORDER,
+
+    // The primary is black, because the one filled control on a screen is
+    // the one a person presses.
+    primary: TEXT_PRIMARY,
+    primary_container: SURFACE_MUTED,
+    secondary: TEXT_SECONDARY,
+    accent: TEXT_PRIMARY,
+
+    // The three status colours, and only these three.
+    error: ERROR,
+    error_container: 0xFFFDECEC,
+    success: SUCCESS,
+    success_container: 0xFFEAF9EF,
+    on_success_container: 0xFF15803D,
+    warning: WARNING,
+    warning_container: 0xFFFEF6E7,
+    emergency: ERROR,
+
+    // The app draws no wallpaper of its own.
+    wallpaper_top: BG,
+    wallpaper_mid: SURFACE_MUTED,
+    wallpaper_bottom: 0xFFEDEDED,
+    wallpaper_ink: TEXT_PRIMARY,
+
+    type_scale: super::theme::TypeScale::STANDARD,
+    spacing: super::theme::Spacing::STANDARD,
+    radii: super::theme::Radii::STANDARD,
+    touch: super::theme::Touch::STANDARD,
+};
+
+// ---------------------------------------------------------------------------
 // The frame
 // ---------------------------------------------------------------------------
 
