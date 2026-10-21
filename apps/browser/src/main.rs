@@ -33,6 +33,8 @@ use browser::{
     scheme_mark, DocLine, DocumentTokenizer, LineKind, LoadingState, TabSessionManager, UriScheme,
     MAX_DOC_LINES, MAX_LINE_BYTES, MAX_TABS, URL_FIELD,
 };
+use interos_std::design::outline_text;
+use interos_std::design::scroll::ScrollState;
 
 // -----------------------------------------------------------------------------
 // Sovereign InterOS Browser Design Tokens
@@ -79,6 +81,27 @@ const MAX_FILE_BYTES: usize = 64 * 1024;
 
 /// The buffer the reader document is parsed into.
 static mut READER_BUF: [u8; browser::MAX_READER_BYTES] = [0; browser::MAX_READER_BYTES];
+
+/// The lines the reader holds for the document on screen.
+///
+/// WHY a static and not a field of the app state: a thousand lines is a
+/// quarter of a megabyte, and the app state is built on the task's stack.
+/// The lines are the reader's buffer, and a buffer of that size does not
+/// belong on a 128 KB stack.
+static mut DOC_LINES: [DocLine; MAX_DOC_LINES] = [DocLine::EMPTY; MAX_DOC_LINES];
+
+/// The reader's line at an index.
+///
+/// WHY a function and not a field of the app state: the lines live in a
+/// static because a thousand of them do not belong on the task's stack,
+/// and both the renderer and the tap handler read them.
+///
+/// WHY the pointer form: the app is single threaded, and taking a
+/// reference to the whole static would claim a borrow the compiler
+/// cannot check.
+fn doc_line(index: usize) -> &'static DocLine {
+    unsafe { &(*core::ptr::addr_of!(DOC_LINES))[index] }
+}
 
 /// How many times a send is retried while the connection finishes its
 /// handshake.
@@ -318,14 +341,97 @@ const TABS_BTN: Rect = Rect::new(582, 1356, 114, 48);
 const GESTURE_PILL: Rect = Rect::new(260, 1422, 200, 6);
 const HOME_Y0: usize = 1410;
 
+/// The top of the band the reader draws the document in.
+const READER_TOP_Y: usize = 126;
+
+/// The height of the band the reader draws the document in.
+///
+/// WHY it is named: the reader's viewport is the space between the
+/// toolbar and the navigation bar, and the scroll state has to know how
+/// tall that band is to know how far a document can move in it.
+const READER_VIEWPORT_H: usize = NAV_BAR_Y0 - READER_TOP_Y;
+
+// -----------------------------------------------------------------------------
+// The quick-link row
+//
+// WHY the row is a row of pills and not a stack of cards: the platform
+// offers the pill as its treatment for a tappable run of text, and the
+// browser had drawn its own rounded rectangle with its own radius. The
+// row is now painted by the platform, so it is the row the shell draws.
+// -----------------------------------------------------------------------------
+
+/// The left edge of the quick-link row.
+const QUICK_LINK_X: usize = 24;
+
+/// The top of the quick-link row.
+const QUICK_LINK_Y: usize = 156;
+
+/// The height of a quick-link pill.
+const QUICK_LINK_H: usize = 52;
+
+/// The width of the quick-link row.
+const QUICK_LINK_W: usize = W - 48;
+
+/// The gap between the two pills.
+const QUICK_LINK_GAP: usize = 16;
+
+/// The top of the row of addresses under the pills.
+const QUICK_LINK_URL_Y: usize = QUICK_LINK_Y + QUICK_LINK_H + 4;
+
+/// The height of the row of addresses under the pills.
+const QUICK_LINK_URL_H: usize = 24;
+
+/// The quick links the address bar offers, and the addresses they open.
+///
+/// WHY there are two and not three: the third was a gemini:// link, and
+/// the browser reads pages over HTTP. It cannot fetch that scheme, so the
+/// link led to an error screen.
+const QUICK_LINKS: [(&[u8], &[u8]); 2] = [
+    (b"InterOS", b"https://interos.tech"),
+    (b"GitHub", b"https://github.com"),
+];
+
+/// The quick-link row, painted by the platform's pill.
+///
+/// WHY a buffer and not a drawing call: the platform's pill paints into
+/// a surface, and this app's renderer answers one pixel at a time. The
+/// row is painted once per frame and the renderer reads the pixel it
+/// needs out of the buffer.
+static mut QUICK_LINK_ROW: [u32; QUICK_LINK_W * QUICK_LINK_H] = [0; QUICK_LINK_W * QUICK_LINK_H];
+
+/// How many saved pages the downloads list holds.
+const MAX_DOWNLOADS: usize = 12;
+
+/// How many characters a list filter holds.
+const FILTER_MAX: usize = 32;
+
+/// The top of the filter row in the bookmark and history sheets.
+const FILTER_Y: usize = 176;
+
+/// The height of the filter row in the bookmark and history sheets.
+const FILTER_H: usize = 44;
+
+/// The first row below the filter row.
+const LIST_Y: usize = 236;
+
 const PLACEHOLDER: &[u8] = b"Search or type URL";
 
 // Contract strings pinned for test suites
-const BODY_BLANK: &[u8] = b"Sovereign Decentralized Web Client on InterOS Microkernel.";
+//
+// WHY the body of the start page says what the screen does and not what the
+// app is: the line used to read "Sovereign Decentralized Web Client on
+// InterOS Microkernel.", which is a claim about the platform presented as
+// the page the person was looking at. The page now says what is on it.
+const BODY_BLANK: &[u8] = b"Type an address to open a page, or pick one of the quick links below.";
+const BODY_LOADED: &[u8] = b"The page's text is shown here. Tap a link to open it.";
 const BODY_NO_TRANSPORT: &[u8] = b"The address was parsed and a navigation was attempted, \
 but no network transport is bound to this app: no request was sent and no page was loaded.";
-const BODY_INVALID: &[u8] = b"Supported schemes are http, https, interlayer, file and gemini \
+const BODY_INVALID: &[u8] = b"Supported schemes are http, https, interlayer and file \
 followed by a host. Even a valid address loads nothing while no transport is bound.";
+const BODY_UNRECOGNISED: &[u8] = b"The address did not name a host this browser can open, \
+so nothing was requested and no page was loaded.";
+const BODY_UNSUPPORTED_SCHEME: &[u8] = b"This browser reads pages over HTTP. The address \
+names a scheme it cannot fetch, so nothing was requested.";
 const BODY_LOCAL_NO_CAPABILITY: &[u8] = b"The address names a local document, but this app holds \
 no filesystem read capability, so it cannot open a guest file at all.";
 const BODY_LOCAL_REFUSED: &[u8] = b"The address names a local document, and this app holds the \
@@ -723,6 +829,7 @@ pub enum SheetOverlay {
     TabSwitcher,
     Bookmarks,
     History,
+    Downloads,
     Menu,
 }
 
@@ -732,6 +839,16 @@ pub enum PageStatus {
     Loaded,
     NoTransport,
     InvalidAddress,
+    /// The address named no host the browser could ask for.
+    ///
+    /// WHY this is a state and not a substituted host: the address bar used
+    /// to stand in `interos.tech` for an address it could not parse, so a
+    /// page that named nothing was shown as though that site had been
+    /// fetched. The screen has to be able to say the address was not
+    /// recognised.
+    UnrecognisedAddress,
+    /// The address named a scheme the browser cannot fetch.
+    UnsupportedScheme,
     LocalRefused,
 }
 
@@ -748,7 +865,15 @@ pub enum BookmarkStep {
 pub struct BrowserApp {
     pub current_url: [u8; 64],
     pub current_url_len: usize,
-    pub scroll_offset_px: usize,
+    /// How far the reader has been scrolled, and how far it can be.
+    ///
+    /// WHY the platform's scroll model and not a bare offset: the reader
+    /// used to carry a pixel offset that nothing clamped, so a long page
+    /// could be dragged past its end and the scrollbar thumb could leave
+    /// its track. The scroll state knows the document's height and the
+    /// height of the band it is drawn in, so the offset is always inside
+    /// the document.
+    pub scroll: ScrollState,
     pub pages_loaded: usize,
     pub trackers_blocked: usize,
     pub active_socket_id: Option<u32>,
@@ -766,13 +891,15 @@ pub struct BrowserApp {
     pub error_code: i32,
     pub tabs: TabSessionManager,
     pub overlay: SheetOverlay,
-    pub doc_lines: [DocLine; MAX_DOC_LINES],
     pub doc_line_count: usize,
     /// How many lines the document has, before the reader's bound.
     ///
     /// WHY it is counted: the reader holds a bounded number of lines, and
     /// a page that is longer than that is an excerpt. The screen says
     /// which, rather than presenting a fragment as the whole article.
+    ///
+    /// WHY it counts the wrapped lines: the reader draws the wrapped
+    /// lines, so the total has to be counted in the same unit.
     pub doc_total_lines: usize,
     pub kb_shift: bool,
     pub kb_symbols: bool,
@@ -796,6 +923,40 @@ pub struct BrowserApp {
     /// another and the name does not depend on a reading the device may not
     /// have.
     pub downloads_saved: u32,
+    /// The pages the browser saved, as the platform's index holds them.
+    ///
+    /// WHY they come from the index: the index is the platform's record of
+    /// what is in the shared storage area, so the list survives the app
+    /// being closed and agrees with what the file manager shows.
+    pub downloads: [DownloadEntry; MAX_DOWNLOADS],
+    /// How many of the saved pages the list holds.
+    pub download_count: usize,
+    /// The text the open list is filtered by.
+    ///
+    /// WHY the panel has its own filter and not the address bar: the
+    /// address bar is the place an address is typed, and a list that
+    /// borrowed it would put a page's address and a search term in the
+    /// same field.
+    pub filter: [u8; FILTER_MAX],
+    pub filter_len: usize,
+}
+
+/// A page the browser saved.
+#[derive(Clone, Copy)]
+pub struct DownloadEntry {
+    /// The path of the saved page in the shared storage area.
+    pub path: [u8; 96],
+    pub path_len: usize,
+    /// The size of the saved page in bytes.
+    pub length: u64,
+}
+
+impl DownloadEntry {
+    const EMPTY: DownloadEntry = DownloadEntry {
+        path: [0; 96],
+        path_len: 0,
+        length: 0,
+    };
 }
 
 impl BrowserApp {
@@ -803,7 +964,7 @@ impl BrowserApp {
         let mut app = Self {
             current_url: [0; 64],
             current_url_len: 0,
-            scroll_offset_px: 0,
+            scroll: ScrollState::new(0, READER_VIEWPORT_H, 0),
             pages_loaded: 0,
             trackers_blocked: 0,
             active_socket_id: None,
@@ -821,7 +982,6 @@ impl BrowserApp {
             error_code: 0,
             tabs: TabSessionManager::new(),
             overlay: SheetOverlay::None,
-            doc_lines: [DocLine::EMPTY; MAX_DOC_LINES],
             doc_line_count: 0,
             doc_total_lines: 0,
             kb_shift: false,
@@ -830,16 +990,61 @@ impl BrowserApp {
             local_failure: LocalFailure::NoPath,
             response_len: 0,
             downloads_saved: 0,
+            downloads: [DownloadEntry::EMPTY; MAX_DOWNLOADS],
+            download_count: 0,
+            filter: [0; FILTER_MAX],
+            filter_len: 0,
         };
         app.tabs.init_default();
         let start = b"about:blank";
         app.current_url[..start.len()].copy_from_slice(start);
         app.current_url_len = start.len();
+        // WHY the list is read at start-up: the pages the browser saved
+        // are on the shared storage area whether or not this app is the
+        // one that saved them, and the index is the platform's record of
+        // them.
+        app.refresh_downloads();
         app
     }
 
     fn current_url(&self) -> &[u8] {
         &self.current_url[..self.current_url_len]
+    }
+
+    /// The text the open list is filtered by.
+    pub fn filter_bytes(&self) -> &[u8] {
+        &self.filter[..self.filter_len]
+    }
+
+    /// Adds a character to the list filter.
+    ///
+    /// WHY the filter is bounded: the panel is a fixed column of text, and
+    /// a filter longer than the column would be a filter the person
+    /// cannot read.
+    pub fn filter_push(&mut self, c: u8) {
+        if self.filter_len < FILTER_MAX {
+            self.filter[self.filter_len] = c;
+            self.filter_len += 1;
+        }
+    }
+
+    /// Removes the last character from the list filter.
+    pub fn filter_backspace(&mut self) {
+        self.filter_len = self.filter_len.saturating_sub(1);
+    }
+
+    /// Clears the list filter.
+    pub fn filter_clear(&mut self) {
+        self.filter_len = 0;
+    }
+
+    /// Whether the open sheet is a list the filter applies to.
+    ///
+    /// WHY only the lists: a tab strip and a menu are not lists of things
+    /// a person would look for, and a filter over them would be a field
+    /// that could not narrow anything.
+    pub fn filterable(&self) -> bool {
+        matches!(self.overlay, SheetOverlay::Bookmarks | SheetOverlay::History)
     }
 
     /// Reads a local document from the guest filesystem and renders it.
@@ -980,15 +1185,9 @@ impl BrowserApp {
         let mut pieces: [[u8; MAX_LINE_BYTES]; browser::MAX_WRAP_PIECES] =
             [[0; MAX_LINE_BYTES]; browser::MAX_WRAP_PIECES];
         let mut piece_lens: [usize; browser::MAX_WRAP_PIECES] = [0; browser::MAX_WRAP_PIECES];
+        let lines = unsafe { &mut *core::ptr::addr_of_mut!(DOC_LINES) };
 
         while let Some((line, kind)) = tokenizer.next_line() {
-            self.doc_total_lines += 1;
-            if self.doc_line_count >= MAX_DOC_LINES {
-                // The document is longer than the reader holds. The count
-                // is remembered so the screen can say so.
-                continue;
-            }
-
             let scale = match kind {
                 LineKind::Heading1 => TYPE_H1_SCALE,
                 _ => 1,
@@ -1000,6 +1199,19 @@ impl BrowserApp {
                 &mut pieces,
                 &mut piece_lens,
             );
+
+            // WHY the total counts the pieces and not the source lines: the
+            // reader shows the wrapped lines, so the total has to be
+            // counted in the same unit. Counting source lines and pieces
+            // in one number made the disclosure read "the first 150 of
+            // 100 lines".
+            self.doc_total_lines += count;
+
+            if self.doc_line_count >= MAX_DOC_LINES {
+                // The document is longer than the reader holds. The count
+                // is remembered so the screen can say so.
+                continue;
+            }
 
             // A line that is not a link has no target to carry; a link
             // carries its target and its label.
@@ -1031,10 +1243,17 @@ impl BrowserApp {
                     dl.link_label[..l].copy_from_slice(&lbl[..l]);
                     dl.link_label_len = l;
                 }
-                self.doc_lines[idx] = dl;
+                lines[idx] = dl;
                 self.doc_line_count += 1;
             }
         }
+
+        // WHY the scroll extent is measured here: the reader can only be
+        // scrolled as far as the document is long, and the document's
+        // length is known only once its lines are in. A long page scrolls
+        // through all of it instead of stopping at the first screenful.
+        let content_h = browser::document_height_px(&lines[..self.doc_line_count]);
+        self.scroll = browser::reader_scroll(content_h, READER_VIEWPORT_H);
     }
 
     /// Saves the page the browser is showing into the shared storage area.
@@ -1057,9 +1276,7 @@ impl BrowserApp {
             return;
         }
         let mut path_buf = [0u8; 96];
-        let mut n = append_text(&mut path_buf, 0, b"/storage/downloads/page_");
-        n = append_u64_text(&mut path_buf, n, self.downloads_saved as u64);
-        n = append_text(&mut path_buf, n, b".html");
+        let n = browser::download_path(self.downloads_saved, &mut path_buf);
         let Ok(path) = core::str::from_utf8(&path_buf[..n]) else {
             std::log("[BROWSER APP] The download path could not be built; nothing was saved.").ok();
             return;
@@ -1073,6 +1290,13 @@ impl BrowserApp {
                         self.downloads_saved = self.downloads_saved.saturating_add(1);
                         std::log("[BROWSER APP] The page was saved into the shared storage area.").ok();
                         let _ = n;
+                        // WHY the index is refreshed here: the platform's
+                        // index is what the file manager and the launcher
+                        // read, and it is built by walking the shared
+                        // storage area. A saved page that is not in the
+                        // index is a file the rest of the device cannot
+                        // find.
+                        self.publish_download(path);
                     }
                     Err(_) => {
                         std::log("[BROWSER APP] The page could not be written; nothing was saved.").ok();
@@ -1082,6 +1306,81 @@ impl BrowserApp {
             Err(_) => {
                 std::log("[BROWSER APP] The shared storage area refused the download; nothing was saved.").ok();
             }
+        }
+    }
+
+    /// Publishes a saved page into the platform's content index.
+    ///
+    /// WHY the index is refreshed and not written to: the index is the
+    /// platform's record of what is in the shared storage area, and it is
+    /// built by walking that area. Refreshing it is the platform's own
+    /// way of publishing a document, and it is the only way an app can
+    /// publish one.
+    ///
+    /// WHY the result is checked: a refresh that fails leaves the page
+    /// invisible to the file manager and the launcher, and the app has to
+    /// say so rather than let the person believe it was published.
+    pub fn publish_download(&mut self, path: &str) {
+        match std::content::content_index_refresh() {
+            Ok(_) => {
+                let mut buffer = [0u8; 4096];
+                let found = std::content::content_index_find_path(path, &mut buffer);
+                if found.is_some() {
+                    std::log("[BROWSER APP] The saved page is in the platform's content index; the file manager and the launcher can find it.")
+                        .ok();
+                } else {
+                    std::log("[BROWSER APP] The saved page was written, but the content index does not hold it yet; it may not appear in the file manager until the next index refresh.")
+                        .ok();
+                }
+            }
+            Err(_) => {
+                std::log("[BROWSER APP] The content index could not be refreshed; the saved page is on the storage area but the file manager may not list it yet.")
+                    .ok();
+            }
+        }
+        self.refresh_downloads();
+    }
+
+    /// Reads the pages the browser saved from the platform's content index.
+    ///
+    /// WHY the index and not a list the app keeps: the index is the
+    /// platform's record of what is in the shared storage area, so the
+    /// list survives the app being closed and closed again, and it agrees
+    /// with what the file manager shows.
+    pub fn refresh_downloads(&mut self) {
+        self.download_count = 0;
+        let mut buffer = [0u8; 4096];
+        let len = match std::content::content_index_list(&mut buffer) {
+            Ok(len) => len,
+            Err(_) => {
+                std::log("[BROWSER APP] The content index could not be read; the downloads list is empty.").ok();
+                return;
+            }
+        };
+        let mut records: [std::content::DocumentRecord; MAX_DOWNLOADS] =
+            [std::content::DocumentRecord {
+                id: 0,
+                path: "",
+                mime: "",
+                provenance: "",
+                length: 0,
+                mtime: 0,
+            }; MAX_DOWNLOADS];
+        let count = std::content::parse_index(&buffer[..len], &mut records);
+        for record in records.iter().take(count) {
+            if !browser::is_download_path(record.path) {
+                continue;
+            }
+            if self.download_count >= MAX_DOWNLOADS {
+                break;
+            }
+            let entry = &mut self.downloads[self.download_count];
+            let bytes = record.path.as_bytes();
+            let n = bytes.len().min(entry.path.len());
+            entry.path[..n].copy_from_slice(&bytes[..n]);
+            entry.path_len = n;
+            entry.length = record.length;
+            self.download_count += 1;
         }
     }
 
@@ -1095,12 +1394,42 @@ impl BrowserApp {
         let n = target.len().min(self.current_url.len());
         self.current_url[..n].copy_from_slice(&target[..n]);
         self.current_url_len = n;
-        self.scroll_offset_px = 0;
+        self.scroll = ScrollState::new(0, READER_VIEWPORT_H, 0);
 
         let parsed = parse_uri(target);
         std::log("[BROWSER APP] Navigation target URL:").ok();
         if let Ok(url) = core::str::from_utf8(target) {
             std::log(url).ok();
+        }
+
+        // WHY the address is judged before anything is requested: the
+        // browser used to stand in `interos.tech` for an address that named
+        // no host, so a page that named nothing was fetched from that site
+        // and shown as though the person had asked for it. An address the
+        // browser cannot make sense of is reported as such, and nothing is
+        // requested.
+        match browser::classify_address(target) {
+            browser::AddressOutcome::Fetchable => {}
+            browser::AddressOutcome::NoScheme | browser::AddressOutcome::NoHost => {
+                std::log("[BROWSER APP] The address did not name a host this browser can open; nothing was requested.")
+                    .ok();
+                self.status = PageStatus::UnrecognisedAddress;
+                self.loading_progress = 0;
+                self.tabs.active_tab_mut().loading_state = LoadingState::Failed;
+                self.tabs.active_tab_mut().error_code = -22; // EINVAL
+                let _ = std::audio_haptic_click();
+                return false;
+            }
+            browser::AddressOutcome::UnsupportedScheme => {
+                std::log("[BROWSER APP] The address names a scheme this browser cannot fetch; nothing was requested.")
+                    .ok();
+                self.status = PageStatus::UnsupportedScheme;
+                self.loading_progress = 0;
+                self.tabs.active_tab_mut().loading_state = LoadingState::Failed;
+                self.tabs.active_tab_mut().error_code = -22; // EINVAL
+                let _ = std::audio_haptic_click();
+                return false;
+            }
         }
 
         // A local document is read from the guest filesystem and read
@@ -1131,7 +1460,12 @@ impl BrowserApp {
             let r_len = format_proxy_request(target, &mut req_buf);
             ([10, 0, 2, 2], 4300, r_len)
         } else {
-            let host_bytes = if parsed.host.is_empty() { b"interos.tech" } else { parsed.host };
+            // WHY the host is used as it was typed: this used to fall back
+            // to `interos.tech` when the address named no host, so a
+            // request the person never made was sent to that site and the
+            // answer was shown as though it were what they asked for. The
+            // address is judged above, so by this point it names a host.
+            let host_bytes = parsed.host;
             let mut ip = [10, 0, 2, 2];
             if let Ok(host_str) = core::str::from_utf8(host_bytes) {
                 if let Ok(resolved) = std::dns_resolve(host_str) {
@@ -1407,21 +1741,20 @@ impl Frame {
         };
         f.pill_len = font::ellipsize(src, 1, PILL_TEXT_MAX, &mut f.pill);
         f.show_caret = app.address_focused;
-        f.caret_x = PILL_TEXT_X + font::measure(&f.pill[..f.pill_len], 1);
+        f.caret_x = PILL_TEXT_X + text_width(&f.pill[..f.pill_len], 1);
         f.select_w = if app.select_all {
-            font::measure(&f.pill[..f.pill_len], 1)
+            text_width(&f.pill[..f.pill_len], 1)
         } else {
             0
         };
 
         let (head_src, body_src): (&[u8], &[u8]) = match app.status {
             PageStatus::Blank => (b"InterOS Browser", BODY_BLANK),
-            PageStatus::Loaded => (
-                b"Web Documents",
-                b"Classified structured lines rendered via zero-heap scanout.",
-            ),
+            PageStatus::Loaded => (b"Web Documents", BODY_LOADED),
             PageStatus::NoTransport => (b"Navigation unavailable", BODY_NO_TRANSPORT),
             PageStatus::InvalidAddress => (b"Address cannot be opened", BODY_INVALID),
+            PageStatus::UnrecognisedAddress => (b"Address not recognised", BODY_UNRECOGNISED),
+            PageStatus::UnsupportedScheme => (b"Scheme not supported", BODY_UNSUPPORTED_SCHEME),
             PageStatus::LocalRefused => (b"Local document unavailable", match app.local_failure {
                 LocalFailure::NoPath => BODY_LOCAL_NO_PATH,
                 LocalFailure::NoCapability => BODY_LOCAL_NO_CAPABILITY,
@@ -1435,14 +1768,14 @@ impl Frame {
         let n = head_src.len().min(f.head.len());
         f.head[..n].copy_from_slice(&head_src[..n]);
         f.head_len = n;
-        let head_w = font::measure_bold(&f.head[..f.head_len], 1);
+        let head_w = text_width(&f.head[..f.head_len], 1);
         f.head_x = (W.saturating_sub(head_w)) / 2;
 
         let mut lines: [&'static [u8]; 6] = [&b""[..]; 6];
         f.body_n = font::wrap_text(body_src, 1, 560, 6, &mut lines);
         for i in 0..f.body_n {
             f.body[i] = lines[i];
-            f.body_x[i] = (W.saturating_sub(font::measure(lines[i], 1))) / 2;
+            f.body_x[i] = (W.saturating_sub(text_width(lines[i], 1))) / 2;
         }
 
         f.icon_cy = 380;
@@ -1458,6 +1791,17 @@ impl Frame {
 // -----------------------------------------------------------------------------
 // Glyphs & Vector Drawing
 // -----------------------------------------------------------------------------
+/// The colour of (`x`, `y`) if the text inks it, blended over `bg`.
+///
+/// WHY the outline face comes first: the compositor magnifies the frame
+/// three to two, and the bitmap face is a twenty-four row cell blown up
+/// to thirty-six, which reads soft. The outline face is drawn at the size
+/// the screen uses, so the magnified text keeps its edges.
+///
+/// WHY the baseline is the bitmap's baseline: the outline face's ascent
+/// is taller than the bitmap cell's, so placing the run the way the
+/// bitmap's baseline is placed keeps every label where the layout put
+/// it. This is the shell's own convention.
 #[inline(always)]
 fn text_px(
     x: usize,
@@ -1470,10 +1814,32 @@ fn text_px(
     bg: u32,
     bold: bool,
 ) -> Option<u32> {
+    if scale == 0 || text.is_empty() {
+        return None;
+    }
+    let em = outline_text::em_for_scale(scale);
+    let (ascent, _) = interos_std::design::typeface::line_metrics(em);
+    let baseline = (y0 + font::BASELINE * scale).max(ascent as usize);
+    if let Some(run) = outline_text::OutlineRun::place_styled(x0, baseline, em, text, bold) {
+        let (bx, by, bw, bh) = run.bounds();
+        if x >= bx && x < bx + bw && y >= by && y < by + bh {
+            return run.pixel(x, y, color, bg);
+        }
+        return None;
+    }
     if x < x0 || y < y0 || y >= y0 + font::GLYPH_H * scale {
         return None;
     }
     font::test_text_aa(x, y, x0, y0, scale, text, color, bg, bold)
+}
+
+/// The width of a string as the reader draws it.
+///
+/// WHY the outline face's advance and not the bitmap's: the text is
+/// drawn with the outline face, so a caret or a centred label measured
+/// with the bitmap's width sits in the wrong place.
+fn text_width(text: &[u8], scale: usize) -> usize {
+    outline_text::drawn_advance(text, scale, None).unwrap_or_else(|| font::measure(text, scale))
 }
 
 /// Blends a colour toward another by a fixed amount in 0..=255.
@@ -2106,7 +2472,7 @@ fn home_page_pixel(x: usize, y: usize, app: &BrowserApp) -> u32 {
 
         // Brand Title
         let brand_text = b"InterOS Browser";
-        let bw = font::measure_bold(brand_text, 1);
+        let bw = text_width(brand_text, 1);
         let bx0 = (W.saturating_sub(bw)) / 2;
         if let Some(px) = text_px(x, y, bx0, 196, 1, brand_text, THEME.on_surface, THEME.surface, true) {
             return px;
@@ -2114,7 +2480,7 @@ fn home_page_pixel(x: usize, y: usize, app: &BrowserApp) -> u32 {
 
         // Subtitle
         let sub_text = b"Sovereign Web";
-        let sw = font::measure(sub_text, 1);
+        let sw = text_width(sub_text, 1);
         let sx0 = (W.saturating_sub(sw)) / 2;
         if let Some(px) = text_px(x, y, sx0, 220, 1, sub_text, THEME.on_surface_variant, THEME.surface, false) {
             return px;
@@ -2242,7 +2608,7 @@ fn home_page_pixel(x: usize, y: usize, app: &BrowserApp) -> u32 {
             }
             let thumb = Rect::new(W - 48 - 84, card_y + card_h - 88, 68, 68);
             if let Some(tc) = draw_rounded_rect(x, y, thumb, R_CHIP, THEME.surface_container, None, 0) {
-                let tw = font::measure_bold(row.scheme_mark, 1);
+                let tw = text_width(row.scheme_mark, 1);
                 if let Some(px) = text_px(
                     x,
                     y,
@@ -2314,6 +2680,8 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
     // Error state / No transport screen
     if app.status == PageStatus::NoTransport
         || app.status == PageStatus::InvalidAddress
+        || app.status == PageStatus::UnrecognisedAddress
+        || app.status == PageStatus::UnsupportedScheme
         || app.status == PageStatus::LocalRefused
     {
         let cx = W / 2;
@@ -2353,6 +2721,8 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
         if let Some(c) = draw_rounded_rect(x, y, err_rect, R_SMALL, THEME.surface_container_high, Some(THEME.border), 1) {
             let label: &[u8] = match app.status {
                 PageStatus::InvalidAddress => b"INVALID ADDRESS",
+                PageStatus::UnrecognisedAddress => b"ADDRESS NOT RECOGNISED",
+                PageStatus::UnsupportedScheme => b"SCHEME NOT SUPPORTED",
                 PageStatus::LocalRefused => match app.local_failure {
                     LocalFailure::NoPath => b"NO PATH GIVEN",
                     LocalFailure::NoCapability => b"NO FILESYSTEM CAPABILITY",
@@ -2362,7 +2732,7 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                 },
                 _ => b"NO RESPONSE FROM THE GATEWAY",
             };
-            let lw = font::measure(label, 1);
+            let lw = text_width(label, 1);
             if let Some(px) = text_px(x, y, cx - lw / 2, err_y + 8, 1, label, THEME.error, c, false) {
                 return px;
             }
@@ -2374,7 +2744,7 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
         let btn_rect = Rect::new(cx - 90, btn_y, 180, 48);
         if let Some(c) = draw_rounded_rect(x, y, btn_rect, R_CONTROL, THEME.primary, None, 0) {
             let rel = b"Reload Page";
-            let rw = font::measure_bold(rel, 1);
+            let rw = text_width(rel, 1);
             if let Some(px) = text_px(x, y, cx - rw / 2, btn_y + 14, 1, rel, THEME.on_primary, c, true) {
                 return px;
             }
@@ -2391,14 +2761,14 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
     // lines above it. The platform's rendering work owns a display list
     // that would hoist this; until then the walk is bounded by the
     // document.
-    let content_start_y = 126;
-    let base_y = (content_start_y as isize) - (app.scroll_offset_px as isize);
+    let content_start_y = READER_TOP_Y;
+    let base_y = (content_start_y as isize) - (app.scroll.offset as isize);
     let pad = browser::CONTENT_PADDING;
     let column = browser::CONTENT_WIDTH;
 
     let mut current_y = base_y;
     for i in 0..app.doc_line_count {
-        let line = &app.doc_lines[i];
+        let line = doc_line(i);
         let bytes = &line.bytes[..line.len];
 
         match line.kind {
@@ -2431,7 +2801,7 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                         return THEME.outline_variant;
                     }
                 }
-                current_y += band as isize + 26;
+                current_y += browser::doc_line_height(line.kind, bytes) as isize;
             }
             LineKind::Heading2 => {
                 // WHY the second level carries a rule above it: the type
@@ -2456,7 +2826,7 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                         return px;
                     }
                 }
-                current_y += 40;
+                current_y += browser::doc_line_height(line.kind, bytes) as isize;
             }
             LineKind::Heading3 => {
                 let title = if bytes.starts_with(b"### ") {
@@ -2472,7 +2842,7 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                         return px;
                     }
                 }
-                current_y += 32;
+                current_y += browser::doc_line_height(line.kind, bytes) as isize;
             }
             LineKind::ListItem => {
                 let l_y = current_y + 4;
@@ -2493,13 +2863,13 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                         return px;
                     }
                 }
-                current_y += 28;
+                current_y += browser::doc_line_height(line.kind, bytes) as isize;
             }
             LineKind::CodeBlock => {
                 if bytes.starts_with(b"```") {
                     // The fence itself is not drawn, but it still occupies
                     // the space the block needs.
-                    current_y += 8;
+                    current_y += browser::doc_line_height(line.kind, bytes) as isize;
                 } else {
                     // WHY the box spans the whole run: each line of a code
                     // block used to get its own bordered box, so a ten-line
@@ -2519,7 +2889,7 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                             return c;
                         }
                     }
-                    current_y += c_h as isize + 4;
+                    current_y += browser::doc_line_height(line.kind, bytes) as isize;
                 }
             }
             LineKind::GemtextLink => {
@@ -2586,7 +2956,7 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                         return c;
                     }
                 }
-                current_y += g_h as isize + 10;
+                current_y += browser::doc_line_height(line.kind, bytes) as isize;
             }
             LineKind::Blockquote => {
                 let quote_text = if bytes.starts_with(b"> ") {
@@ -2607,7 +2977,7 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                         return px;
                     }
                 }
-                current_y += 34;
+                current_y += browser::doc_line_height(line.kind, bytes) as isize;
             }
             LineKind::Paragraph => {
                 let p_y = current_y + 4;
@@ -2616,10 +2986,10 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                         return px;
                     }
                 }
-                current_y += 28;
+                current_y += browser::doc_line_height(line.kind, bytes) as isize;
             }
             LineKind::Empty => {
-                current_y += 14;
+                current_y += browser::doc_line_height(line.kind, bytes) as isize;
             }
         }
     }
@@ -2646,16 +3016,20 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
     }
 
     // Scroll Position Indicator (on right edge x 712..716)
+    //
+    // WHY the platform's scroll model draws it: the thumb's position and
+    // its size both come from the scroll state, so the thumb cannot leave
+    // its track and it cannot be drawn for a document that does not
+    // scroll.
     if x >= 712 && x < 716 && y >= 120 && y < 1340 {
         let track_h = 1340 - 120;
-        let thumb_h = 60;
-        let scroll_max = (current_y.saturating_sub(base_y) as usize).saturating_sub(track_h).max(1);
-        let thumb_y = 120 + ((app.scroll_offset_px * (track_h - thumb_h)) / scroll_max).min(track_h - thumb_h);
-        if y >= thumb_y && y < thumb_y + thumb_h {
-            return THEME.on_surface_variant;
-        } else {
-            return THEME.outline_variant;
+        let min_thumb_h = 60;
+        if let Some((thumb_y, thumb_h)) = app.scroll.thumb_rect(120, track_h, min_thumb_h) {
+            if y >= thumb_y && y < thumb_y + thumb_h {
+                return THEME.on_surface_variant;
+            }
         }
+        return THEME.outline_variant;
     }
 
     THEME.surface
@@ -2763,19 +3137,38 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
                 return Some(THEME.surface);
             }
 
+            // The filter row.
+            //
+            // WHY the list has a filter: a list of everything a person has
+            // saved cannot be found in without one, and a bookmark the
+            // person cannot find is a bookmark they did not keep.
+            if y >= FILTER_Y && y < FILTER_Y + FILTER_H {
+                if let Some(px) = filter_row_pixel(x, y, app, b"Filter bookmarks") {
+                    return Some(px);
+                }
+                return Some(THEME.surface);
+            }
+
             // List of bookmarks
             let count = app.bookmarks.len();
+            let filter = app.filter_bytes();
             if count == 0 {
                 let empty_msg = b"No bookmarks saved yet.";
-                if let Some(px) = text_px(x, y, 32, 220, 1, empty_msg, THEME.on_surface_variant, THEME.surface, false) {
+                if let Some(px) = text_px(x, y, 32, 250, 1, empty_msg, THEME.on_surface_variant, THEME.surface, false) {
                     return Some(px);
                 }
             } else {
                 let row_h = 80;
+                let mut shown = 0usize;
                 for i in 0..count {
-                    let r_y = 180 + i * row_h;
-                    let r_rect = Rect::new(24, r_y, W - 48, row_h - 10);
                     if let Some(rec) = app.bookmarks.record(i) {
+                        if !browser::contains_ignore_case(rec.title_bytes(), filter)
+                            && !browser::contains_ignore_case(rec.url_bytes(), filter)
+                        {
+                            continue;
+                        }
+                        let r_y = LIST_Y + shown * row_h;
+                        let r_rect = Rect::new(24, r_y, W - 48, row_h - 10);
                         if let Some(c) = draw_rounded_rect(x, y, r_rect, R_CHIP, THEME.surface_container_high, Some(THEME.border), 1) {
                             if star_glyph(x, y, 48, r_y + 35, true) {
                                 return Some(THEME.primary);
@@ -2788,6 +3181,13 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
                             }
                             return Some(c);
                         }
+                        shown += 1;
+                    }
+                }
+                if shown == 0 {
+                    let empty_msg = b"No bookmark matches the filter.";
+                    if let Some(px) = text_px(x, y, 32, 250, 1, empty_msg, THEME.on_surface_variant, THEME.surface, false) {
+                        return Some(px);
                     }
                 }
             }
@@ -2809,37 +3209,108 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
                 return Some(THEME.surface);
             }
 
+            // The filter row.
+            if y >= FILTER_Y && y < FILTER_Y + FILTER_H {
+                if let Some(px) = filter_row_pixel(x, y, app, b"Filter history") {
+                    return Some(px);
+                }
+                return Some(THEME.surface);
+            }
+
             let count = app.history.len();
+            let filter = app.filter_bytes();
             if count == 0 {
                 let empty_msg = b"No history recorded for this session.";
-                if let Some(px) = text_px(x, y, 32, 220, 1, empty_msg, THEME.on_surface_variant, THEME.surface, false) {
+                if let Some(px) = text_px(x, y, 32, 250, 1, empty_msg, THEME.on_surface_variant, THEME.surface, false) {
                     return Some(px);
                 }
             } else {
                 let row_h = 60;
+                let mut shown = 0usize;
                 for i in 0..count.min(8) {
-                    let r_y = 180 + i * row_h;
-                    let r_rect = Rect::new(24, r_y, W - 48, row_h - 8);
                     if let Some(entry) = app.history.entry(count - 1 - i) {
+                        if !browser::contains_ignore_case(entry, filter) {
+                            continue;
+                        }
+                        let r_y = LIST_Y + shown * row_h;
+                        let r_rect = Rect::new(24, r_y, W - 48, row_h - 8);
                         if let Some(c) = draw_rounded_rect(x, y, r_rect, R_SMALL, THEME.surface_container_high, Some(THEME.border), 1) {
                             if let Some(px) = text_px(x, y, 40, r_y + 18, 1, entry, THEME.on_surface, c, false) {
                                 return Some(px);
                             }
                             return Some(c);
                         }
+                        shown += 1;
+                    }
+                }
+                if shown == 0 {
+                    let empty_msg = b"No address matches the filter.";
+                    if let Some(px) = text_px(x, y, 32, 250, 1, empty_msg, THEME.on_surface_variant, THEME.surface, false) {
+                        return Some(px);
+                    }
+                }
+            }
+            Some(THEME.surface)
+        }
+        SheetOverlay::Downloads => {
+            if y < TOOLBAR_Y1 || y >= NAV_BAR_Y0 {
+                return None;
+            }
+            // Downloads Header
+            if y >= 120 && y < 170 {
+                let header = b"Downloads";
+                if let Some(px) = text_px(x, y, 32, 134, 1, header, THEME.on_surface, THEME.surface, true) {
+                    return Some(px);
+                }
+                if close_glyph(x, y, 660, 145) {
+                    return Some(THEME.on_surface_variant);
+                }
+                return Some(THEME.surface);
+            }
+
+            // The list of pages the browser saved.
+            //
+            // WHY the list is the platform's index and not the app's own
+            // counter: the index is what the file manager and the launcher
+            // read, so this list and theirs name the same files.
+            if app.download_count == 0 {
+                let empty_msg = b"No pages saved yet. Save a page to keep it here.";
+                if let Some(px) = text_px(x, y, 32, 220, 1, empty_msg, THEME.on_surface_variant, THEME.surface, false) {
+                    return Some(px);
+                }
+            } else {
+                let row_h = 72;
+                for i in 0..app.download_count {
+                    let r_y = 180 + i * row_h;
+                    let r_rect = Rect::new(24, r_y, W - 48, row_h - 10);
+                    let entry = &app.downloads[i];
+                    if let Some(c) = draw_rounded_rect(x, y, r_rect, R_CHIP, THEME.surface_container_high, Some(THEME.border), 1) {
+                        if let Some(px) = text_px(x, y, 44, r_y + 12, 1, &entry.path[..entry.path_len], THEME.on_surface, c, true) {
+                            return Some(px);
+                        }
+                        let mut size_buf = [0u8; 32];
+                        let mut n = 0usize;
+                        n = append_text(&mut size_buf, n, b"Published to the content index, ");
+                        n = append_u64_text(&mut size_buf, n, entry.length);
+                        n = append_text(&mut size_buf, n, b" bytes");
+                        if let Some(px) = text_px(x, y, 44, r_y + 40, 1, &size_buf[..n], THEME.on_surface_variant, c, false) {
+                            return Some(px);
+                        }
+                        return Some(c);
                     }
                 }
             }
             Some(THEME.surface)
         }
         SheetOverlay::Menu => {
-            // Kebab Overflow Menu dropdown card at top right (x 440..696, y 116..400)
-            let menu_rect = Rect::new(440, 116, 256, 284);
+            // Kebab Overflow Menu dropdown card at top right (x 440..696, y 116..444)
+            let menu_rect = Rect::new(440, 116, 256, 328);
             if let Some(c) = draw_rounded_rect(x, y, menu_rect, R_CONTROL, THEME.surface_container_high, Some(THEME.border), 2) {
-                let items: [&[u8]; 6] = [
+                let items: [&[u8]; 7] = [
                     b"New Tab",
                     b"Bookmarks",
                     b"History",
+                    b"Downloads",
                     b"Reload Page",
                     b"Save Page",
                     b"Close Menu",
@@ -2849,7 +3320,7 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
                     if let Some(px) = text_px(x, y, 464, item_y, 1, item, THEME.on_surface, c, false) {
                         return Some(px);
                     }
-                    if idx < 5 && y == item_y + 30 {
+                    if idx < 6 && y == item_y + 30 {
                         return Some(THEME.outline_variant);
                     }
                 }
@@ -2858,6 +3329,44 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
             None
         }
     }
+}
+
+/// The pixel of the list filter row at (`x`, `y`).
+///
+/// WHY the row carries the filter as text: a person has to be able to see
+/// what the list is being narrowed to, and a filter that was invisible
+/// could not be corrected either.
+fn filter_row_pixel(x: usize, y: usize, app: &BrowserApp, hint: &[u8]) -> Option<u32> {
+    let rect = Rect::new(24, FILTER_Y, W - 48, FILTER_H);
+    let c = draw_rounded_rect(x, y, rect, R_CONTROL, THEME.surface_container_high, Some(THEME.border), 1)?;
+    // The magnifier.
+    let cx = 46isize;
+    let cy = (FILTER_Y + FILTER_H / 2) as isize;
+    let dx = x as isize - cx;
+    let dy = y as isize - cy;
+    if dx * dx + dy * dy <= 25 {
+        return Some(THEME.on_surface_variant);
+    }
+    if dx >= 6 && dx <= 12 && dy >= 6 && dy <= 12 {
+        return Some(THEME.on_surface_variant);
+    }
+    let filter = app.filter_bytes();
+    if filter.is_empty() {
+        if let Some(px) = text_px(x, y, 68, FILTER_Y + 12, 1, hint, THEME.on_surface_variant, c, false) {
+            return Some(px);
+        }
+    } else {
+        if let Some(px) = text_px(x, y, 68, FILTER_Y + 12, 1, filter, THEME.on_surface, c, true) {
+            return Some(px);
+        }
+    }
+    // The clear control, only when there is something to clear.
+    if !filter.is_empty() {
+        if close_glyph(x, y, W - 48, FILTER_Y + FILTER_H / 2) {
+            return Some(THEME.on_surface_variant);
+        }
+    }
+    Some(c)
 }
 
 // -----------------------------------------------------------------------------
@@ -3002,7 +3511,12 @@ fn get_browser_pixel_content(x: usize, y: usize, app: &BrowserApp, f: &Frame) ->
                     }
                     return ic;
                 }
-                if let Some(px) = text_px(x, y, 92, 144, 1, b"Search Web", THEME.on_surface_variant, c, false) {
+                // The search suggestion names the host the query goes to.
+                //
+                // WHY: the card used to read "Search Web" over a request that
+                // was sent to one host, so the screen promised a web search
+                // the browser does not perform.
+                if let Some(px) = text_px(x, y, 92, 144, 1, browser::SEARCH_LABEL, THEME.on_surface_variant, c, false) {
                     return px;
                 }
                 let q = &app.address[..app.address_len.min(32)];
@@ -3042,35 +3556,29 @@ fn get_browser_pixel_content(x: usize, y: usize, app: &BrowserApp, f: &Frame) ->
                 }
                 return THEME.surface;
             }
-            let q1 = Rect::new(24, 160, W - 48, 62);
-            if let Some(c) = draw_rounded_rect(x, y, q1, R_CONTROL, THEME.surface_container_high, Some(THEME.border), 1) {
-                if let Some(px) = text_px(x, y, 44, 172, 1, b"InterOS Documentation", THEME.on_surface, c, true) {
+            // The quick-link row.
+            //
+            // WHY the platform's pill and not a card the app drew itself: the
+            // app had its own rounded rectangle with its own radius, and a
+            // control the platform also offers was not the platform's
+            // control. The pill is painted by the platform, so the row is
+            // the row the shell would draw.
+            //
+            // WHY the gemini link is gone: the browser reads pages over
+            // HTTP and cannot fetch a gemini:// address, so the link led to
+            // an error screen. The row offers only what the app can open.
+            if y >= QUICK_LINK_Y && y < QUICK_LINK_Y + QUICK_LINK_H {
+                if let Some(px) = quick_link_pixel(x, y) {
                     return px;
                 }
-                if let Some(px) = text_px(x, y, 44, 196, 1, b"https://interos.tech", THEME.on_surface_variant, c, false) {
-                    return px;
-                }
-                return c;
+                return THEME.surface;
             }
-            let q2 = Rect::new(24, 232, W - 48, 62);
-            if let Some(c) = draw_rounded_rect(x, y, q2, R_CONTROL, THEME.surface_container_high, Some(THEME.border), 1) {
-                if let Some(px) = text_px(x, y, 44, 244, 1, b"Gemini Sovereign Space", THEME.on_surface, c, true) {
+            // The addresses the pills stand for.
+            if y >= QUICK_LINK_URL_Y && y < QUICK_LINK_URL_Y + QUICK_LINK_URL_H {
+                if let Some(px) = quick_link_url_pixel(x, y) {
                     return px;
                 }
-                if let Some(px) = text_px(x, y, 44, 268, 1, b"gemini://geminispace.info", THEME.on_surface_variant, c, false) {
-                    return px;
-                }
-                return c;
-            }
-            let q3 = Rect::new(24, 304, W - 48, 62);
-            if let Some(c) = draw_rounded_rect(x, y, q3, R_CONTROL, THEME.surface_container_high, Some(THEME.border), 1) {
-                if let Some(px) = text_px(x, y, 44, 316, 1, b"Core Source Repository", THEME.on_surface, c, true) {
-                    return px;
-                }
-                if let Some(px) = text_px(x, y, 44, 340, 1, b"https://github.com", THEME.on_surface_variant, c, false) {
-                    return px;
-                }
-                return c;
+                return THEME.surface;
             }
             return THEME.surface;
         }
@@ -3088,8 +3596,72 @@ fn render_browser_ui(surface: u32, app: &BrowserApp) {
     render_browser_band(surface, app, 0, H);
 }
 
+/// Paints the quick-link row with the platform's own pill.
+///
+/// WHY the background is the surface and not transparency: the row sits on
+/// the screen's background, and a transparent gap between the pills would
+/// show whatever the layer beneath the app holds.
+fn paint_quick_link_row() {
+    let buffer = unsafe { &mut *core::ptr::addr_of_mut!(QUICK_LINK_ROW) };
+    for pixel in buffer.iter_mut() {
+        *pixel = THEME.surface;
+    }
+    let Ok(mut surface) = interos_std::design::draw_target::Surface::new(buffer, QUICK_LINK_W, QUICK_LINK_H)
+    else {
+        return;
+    };
+    let pill_w = (QUICK_LINK_W - QUICK_LINK_GAP) / 2;
+    for (index, (label, _)) in QUICK_LINKS.iter().enumerate() {
+        let rect = Rect::new(index * (pill_w + QUICK_LINK_GAP), 0, pill_w, QUICK_LINK_H);
+        components::pill(&mut surface, &THEME, rect, label, 2, false);
+    }
+}
+
+/// The pixel of the quick-link row at (`x`, `y`).
+fn quick_link_pixel(x: usize, y: usize) -> Option<u32> {
+    if x < QUICK_LINK_X || x >= QUICK_LINK_X + QUICK_LINK_W {
+        return None;
+    }
+    let row = y.checked_sub(QUICK_LINK_Y)?;
+    if row >= QUICK_LINK_H {
+        return None;
+    }
+    let buffer = unsafe { &*core::ptr::addr_of!(QUICK_LINK_ROW) };
+    Some(buffer[row * QUICK_LINK_W + (x - QUICK_LINK_X)])
+}
+
+/// The pixel of the addresses under the quick-link row at (`x`, `y`).
+fn quick_link_url_pixel(x: usize, y: usize) -> Option<u32> {
+    let pill_w = (QUICK_LINK_W - QUICK_LINK_GAP) / 2;
+    for (index, (_, url)) in QUICK_LINKS.iter().enumerate() {
+        let left = QUICK_LINK_X + index * (pill_w + QUICK_LINK_GAP);
+        if x < left || x >= left + pill_w {
+            continue;
+        }
+        let width = text_width(url, 1);
+        let start = left + (pill_w.saturating_sub(width)) / 2;
+        return text_px(
+            x,
+            y,
+            start,
+            QUICK_LINK_URL_Y,
+            1,
+            url,
+            THEME.on_surface_variant,
+            THEME.surface,
+            false,
+        );
+    }
+    None
+}
+
 fn render_browser_band(surface: u32, app: &BrowserApp, y0: usize, y1: usize) {
     let frame = Frame::build(app);
+    // WHY the row is painted here and not per pixel: the platform's pill
+    // paints into a surface, and the renderer answers one pixel at a time.
+    if app.address_focused && app.address_len == 0 {
+        paint_quick_link_row();
+    }
     let mut chunk = [0u32; CHUNK];
     let mut offset = y0 * W;
     let end = y1.min(H) * W;
@@ -3296,13 +3868,8 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
                 app.address_focused = false;
                 app.select_all = false;
                 let mut search_url = [0u8; 128];
-                let prefix = b"https://interos.tech/search?q=";
-                let p_len = prefix.len();
-                search_url[..p_len].copy_from_slice(prefix);
-                let q_len = app.address_len.min(128 - p_len);
-                search_url[p_len..p_len + q_len].copy_from_slice(&app.address[..q_len]);
-                let total = p_len + q_len;
-                app.navigate(&search_url[..total]);
+                let n = browser::search_url(&app.address[..app.address_len], &mut search_url);
+                app.navigate(&search_url[..n]);
                 return Tap::Redraw;
             }
             if y >= 208 && y <= 276 {
@@ -3316,23 +3883,23 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
                 return Tap::Redraw;
             }
         } else if app.address_len == 0 && x >= 24 && x <= W - 24 {
-            if y >= 160 && y <= 222 {
-                let _ = std::audio_haptic_click();
-                app.address_focused = false;
-                app.navigate(b"https://interos.tech");
-                return Tap::Redraw;
-            }
-            if y >= 232 && y <= 294 {
-                let _ = std::audio_haptic_click();
-                app.address_focused = false;
-                app.navigate(b"gemini://geminispace.info");
-                return Tap::Redraw;
-            }
-            if y >= 304 && y <= 366 {
-                let _ = std::audio_haptic_click();
-                app.address_focused = false;
-                app.navigate(b"https://github.com");
-                return Tap::Redraw;
+            // The quick-link row.
+            //
+            // WHY the gemini link is gone: the browser reads pages over
+            // HTTP and cannot fetch a gemini:// address, so the link led to
+            // an error screen.
+            if y >= QUICK_LINK_Y && y < QUICK_LINK_Y + QUICK_LINK_H {
+                let pill_w = (QUICK_LINK_W - QUICK_LINK_GAP) / 2;
+                for (index, (_, url)) in QUICK_LINKS.iter().enumerate() {
+                    let left = QUICK_LINK_X + index * (pill_w + QUICK_LINK_GAP);
+                    if x >= left && x < left + pill_w {
+                        let _ = std::audio_haptic_click();
+                        app.address_focused = false;
+                        app.select_all = false;
+                        app.navigate(url);
+                        return Tap::Redraw;
+                    }
+                }
             }
         }
 
@@ -3388,8 +3955,13 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
     // Handle Active Overlays Interactions
     match app.overlay {
         SheetOverlay::Menu => {
-            if x >= 440 && x <= 696 && y >= 116 && y <= 400 {
-                let row = (y - 116) / 48;
+            if x >= 440 && x <= 696 && y >= 116 && y <= 444 {
+                // WHY the row is the item's own height: the menu's items
+                // are forty-four pixels apart, and a hit test that used
+                // forty-eight put the top of an item in the row above it,
+                // so "Save Page" could be reached by tapping "Reload
+                // Page".
+                let row = (y - 116) / 44;
                 let _ = std::audio_haptic_click();
                 match row {
                     0 => {
@@ -3402,15 +3974,23 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
                     }
                     1 => app.overlay = SheetOverlay::Bookmarks,
                     2 => app.overlay = SheetOverlay::History,
-                    3 => app.reload(),
+                    // WHY there is a downloads entry: the browser saved
+                    // pages into the shared storage area and never said
+                    // which, so a person could not open what they had
+                    // saved.
+                    3 => {
+                        app.refresh_downloads();
+                        app.overlay = SheetOverlay::Downloads;
+                    }
+                    4 => app.reload(),
                     // WHY the page is saved into the shared storage area: that is
                     // the one place every app may look, so a saved page is a
                     // document the platform's index holds and the file manager
                     // lists beside the photographs the camera wrote.
-                    4 => app.save_page_to_storage(),
+                    5 => app.save_page_to_storage(),
                     _ => app.overlay = SheetOverlay::None,
                 }
-                if row != 1 && row != 2 {
+                if row != 1 && row != 2 && row != 3 {
                     app.overlay = SheetOverlay::None;
                 }
                 // WHY the address field is released: a sheet opened from the
@@ -3473,44 +4053,99 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
         SheetOverlay::Bookmarks => {
             if x >= 640 && y >= 120 && y <= 165 {
                 app.overlay = SheetOverlay::None;
+                app.filter_clear();
+                return Tap::Redraw;
+            }
+            // The filter's clear control.
+            if y >= FILTER_Y && y < FILTER_Y + FILTER_H && x >= W - 96 && x <= W - 24 {
+                let _ = std::audio_haptic_click();
+                app.filter_clear();
                 return Tap::Redraw;
             }
             let row_h = 80;
+            let filter = app.filter_bytes();
+            let mut shown = 0usize;
             for i in 0..app.bookmarks.len() {
-                let r_y = 180 + i * row_h;
-                if y >= r_y && y < r_y + row_h && x >= 24 && x <= W - 24 {
-                    let _ = std::audio_haptic_click();
-                    if let Some(rec) = app.bookmarks.record(i) {
+                if let Some(rec) = app.bookmarks.record(i) {
+                    if !browser::contains_ignore_case(rec.title_bytes(), filter)
+                        && !browser::contains_ignore_case(rec.url_bytes(), filter)
+                    {
+                        continue;
+                    }
+                    let r_y = LIST_Y + shown * row_h;
+                    if y >= r_y && y < r_y + row_h && x >= 24 && x <= W - 24 {
+                        let _ = std::audio_haptic_click();
                         let mut url = [0u8; 64];
                         let u = rec.url_bytes();
                         let n = u.len().min(url.len());
                         url[..n].copy_from_slice(&u[..n]);
                         app.overlay = SheetOverlay::None;
+                        app.filter_clear();
                         app.navigate(&url[..n]);
                         return Tap::Redraw;
                     }
+                    shown += 1;
                 }
             }
         }
         SheetOverlay::History => {
             if x >= 640 && y >= 120 && y <= 165 {
                 app.overlay = SheetOverlay::None;
+                app.filter_clear();
+                return Tap::Redraw;
+            }
+            // The filter's clear control.
+            if y >= FILTER_Y && y < FILTER_Y + FILTER_H && x >= W - 96 && x <= W - 24 {
+                let _ = std::audio_haptic_click();
+                app.filter_clear();
                 return Tap::Redraw;
             }
             let row_h = 60;
             let count = app.history.len();
+            let filter = app.filter_bytes();
+            let mut shown = 0usize;
             for i in 0..count.min(8) {
-                let r_y = 180 + i * row_h;
-                if y >= r_y && y < r_y + row_h && x >= 24 && x <= W - 24 {
-                    let _ = std::audio_haptic_click();
-                    if let Some(entry) = app.history.entry(count - 1 - i) {
+                if let Some(entry) = app.history.entry(count - 1 - i) {
+                    if !browser::contains_ignore_case(entry, filter) {
+                        continue;
+                    }
+                    let r_y = LIST_Y + shown * row_h;
+                    if y >= r_y && y < r_y + row_h && x >= 24 && x <= W - 24 {
+                        let _ = std::audio_haptic_click();
                         let mut url = [0u8; 64];
                         let n = entry.len().min(url.len());
                         url[..n].copy_from_slice(&entry[..n]);
                         app.overlay = SheetOverlay::None;
+                        app.filter_clear();
                         app.navigate(&url[..n]);
                         return Tap::Redraw;
                     }
+                    shown += 1;
+                }
+            }
+        }
+        SheetOverlay::Downloads => {
+            if x >= 640 && y >= 120 && y <= 165 {
+                app.overlay = SheetOverlay::None;
+                return Tap::Redraw;
+            }
+            // The saved pages.
+            //
+            // WHY tapping one opens it: a download the person cannot open
+            // is a download they did not keep.
+            let row_h = 72;
+            for i in 0..app.download_count {
+                let r_y = 180 + i * row_h;
+                if y >= r_y && y < r_y + row_h && x >= 24 && x <= W - 24 {
+                    let _ = std::audio_haptic_click();
+                    let entry = app.downloads[i];
+                    let mut url = [0u8; 128];
+                    url[..7].copy_from_slice(b"file://");
+                    let n = 7 + entry.path_len.min(url.len() - 7);
+                    url[7..n].copy_from_slice(&entry.path[..n - 7]);
+                    app.overlay = SheetOverlay::None;
+                    app.navigate(&url[..n]);
+                    return Tap::Redraw;
                 }
             }
         }
@@ -3567,31 +4202,19 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
 
     // Content Viewport Links Tap
     if app.status == PageStatus::Loaded && y >= 120 && y < 1340 {
-        let content_start_y = 126;
-        let base_y = (content_start_y as isize) - (app.scroll_offset_px as isize);
+        let content_start_y = READER_TOP_Y;
+        let base_y = (content_start_y as isize) - (app.scroll.offset as isize);
         let mut cur_y = base_y;
 
         let mut clicked_target: Option<([u8; 64], usize)> = None;
         for i in 0..app.doc_line_count {
-            let line = &app.doc_lines[i];
+            let line = doc_line(i);
             let bytes = &line.bytes[..line.len];
-            let line_h = match line.kind {
-                LineKind::Heading1 => 42,
-                LineKind::Heading2 => 36,
-                LineKind::Heading3 => 30,
-                LineKind::ListItem => 28,
-                LineKind::CodeBlock => {
-                    if bytes.starts_with(b"```") {
-                        0
-                    } else {
-                        44
-                    }
-                }
-                LineKind::GemtextLink => 66,
-                LineKind::Blockquote => 34,
-                LineKind::Paragraph => 28,
-                LineKind::Empty => 14,
-            };
+            // WHY the height comes from the shared table: the renderer and
+            // this handler used to walk the document with two different
+            // tables, so a link a few lines down was drawn in one place
+            // and tapped in another.
+            let line_h = browser::doc_line_height(line.kind, bytes);
 
             if line.kind == LineKind::GemtextLink && line.link_target_len > 0 {
                 let g_y = cur_y + 4;
@@ -3604,7 +4227,7 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
                     break;
                 }
             }
-            cur_y += line_h;
+            cur_y += line_h as isize;
         }
 
         if let Some((target_buf, target_len)) = clicked_target {
@@ -3613,12 +4236,17 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
             return Tap::Redraw;
         }
 
-        // Tap on content area scrolls if not a link
+        // Tap on content area scrolls if not a link.
+        //
+        // WHY the scroll state does the clamping: the offset used to be a
+        // bare number that grew without bound, so a long page could be
+        // dragged past its end and the reader would show empty space below
+        // the last line.
         if y > 1000 {
-            app.scroll_offset_px = app.scroll_offset_px.saturating_add(60);
+            app.scroll.offset = (app.scroll.offset + 60).min(app.scroll.max_offset());
             return Tap::Redraw;
-        } else if y < 400 && app.scroll_offset_px > 0 {
-            app.scroll_offset_px = app.scroll_offset_px.saturating_sub(60);
+        } else if y < 400 && app.scroll.offset > 0 {
+            app.scroll.offset = app.scroll.offset.saturating_sub(60);
             return Tap::Redraw;
         }
     }
@@ -3626,6 +4254,8 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
     // Offline / Error screen Reload Button tap
     if (app.status == PageStatus::NoTransport
         || app.status == PageStatus::InvalidAddress
+        || app.status == PageStatus::UnrecognisedAddress
+        || app.status == PageStatus::UnsupportedScheme
         || app.status == PageStatus::LocalRefused)
         && ((y >= 630 && y <= 720) || (y >= 920 && y <= 968))
         && x >= (W / 2 - 90)
@@ -3651,7 +4281,32 @@ enum Dirty {
 
 fn handle_browser_key(app: &mut BrowserApp, key: std::InputKeyEvent) -> Dirty {
     use std::input_key_code;
-    if !key.pressed || !app.address_focused {
+    if !key.pressed {
+        return Dirty::None;
+    }
+    // WHY the open list takes the keys first: a panel that is open and
+    // filtered is what the person is looking at, and the address field is
+    // not on the screen. A list that could not be searched was the fault
+    // this closes.
+    if !app.address_focused && app.filterable() {
+        match key.code {
+            input_key_code::ESCAPE => {
+                app.overlay = SheetOverlay::None;
+                app.filter_clear();
+                return Dirty::All;
+            }
+            input_key_code::BACKSPACE => {
+                app.filter_backspace();
+                return Dirty::All;
+            }
+            code if (32..=126).contains(&code) => {
+                app.filter_push(code as u8);
+                return Dirty::All;
+            }
+            _ => return Dirty::None,
+        }
+    }
+    if !app.address_focused {
         return Dirty::None;
     }
     match key.code {
@@ -3799,11 +4454,13 @@ pub extern "C" fn _start() -> ! {
                             destroy_and_exit(surface);
                         }
                         // Touch drag / vertical scroll
+                        //
+                        // WHY the platform's scroll model handles the drag: a
+                        // bare offset grew without bound, so a long page
+                        // could be dragged past its last line.
                         if input.kind == 2 && browser.status == PageStatus::Loaded {
                             if input.dy != 0 {
-                                browser.scroll_offset_px = browser
-                                    .scroll_offset_px
-                                    .saturating_add_signed(-(input.dy as isize));
+                                browser.scroll.apply_drag(-(input.dy as i32));
                                 dirty = Dirty::All;
                             }
                         }

@@ -5,6 +5,9 @@ pub use interos_std as std;
 /// The app's view of the platform's design system.
 pub mod theme;
 
+/// The platform's scroll model.
+use interos_std::design::scroll::ScrollState;
+
 /// Supported URI schemes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UriScheme {
@@ -1487,7 +1490,14 @@ pub const MAX_TITLE_LEN: usize = 64;
 pub const TAB_HISTORY_CAP: usize = 8;
 pub const MAX_BOOKMARKS: usize = 16;
 pub const MAX_HISTORY_ENTRIES: usize = 8;
-pub const MAX_DOC_LINES: usize = 64;
+/// The most document lines the reader holds.
+///
+/// WHY it is a thousand and not sixty-four: the reader used to stop after
+/// sixty-four lines and tell the reader that it was showing the first
+/// sixty-four of the rest. A page that is longer than that was therefore
+/// a page nobody could finish. A thousand lines hold the whole of a
+/// documentation page, and the reader scrolls through them.
+pub const MAX_DOC_LINES: usize = 1024;
 pub const MAX_LINE_BYTES: usize = 96;
 
 /// The largest raw HTML slice the browser keeps for the reader.
@@ -2178,6 +2188,215 @@ impl BrowserDataStore {
         self.bookmark_count += 1;
         true
     }
+}
+
+/// The host a search query is sent to.
+///
+/// WHY the host is named rather than implied: the browser has no search
+/// engine of its own. What it does is send the query to one host, and a
+/// screen that says "Search Web" for a request that goes to a single site
+/// is a claim the browser cannot keep.
+pub const SEARCH_HOST: &str = "interos.tech";
+
+/// The address a search query is sent to.
+pub const SEARCH_ENDPOINT: &[u8] = b"https://interos.tech/search?q=";
+
+/// The label the search suggestion carries.
+///
+/// WHY it names the host: the suggestion has to say where the query goes,
+/// and the only place the query goes is that one host.
+pub const SEARCH_LABEL: &[u8] = b"Search interos.tech";
+
+/// Builds the address a search query is sent to.
+///
+/// WHY the query is copied rather than escaped: the browser sends the
+/// bytes the user typed. A query that needs escaping is a query the
+/// search host will reject, and the screen says which host was asked.
+pub fn search_url(query: &[u8], out: &mut [u8]) -> usize {
+    let prefix = SEARCH_ENDPOINT;
+    let mut n = prefix.len().min(out.len());
+    out[..n].copy_from_slice(&prefix[..n]);
+    let take = query.len().min(out.len().saturating_sub(n));
+    out[n..n + take].copy_from_slice(&query[..take]);
+    n += take;
+    n
+}
+
+/// What the browser made of the address the user typed.
+///
+/// WHY this is a value and not a branch in the renderer: the address bar
+/// used to substitute `interos.tech` for an address it could not parse,
+/// so a page that named no host was shown as though the browser had
+/// fetched that site. The screen has to be able to say that the address
+/// was not recognised, and it can only say that if the decision is
+/// recorded somewhere the screen can read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddressOutcome {
+    /// The address names a host the browser can ask for.
+    Fetchable,
+    /// The address carries no scheme the browser knows.
+    NoScheme,
+    /// The address carries a scheme but names no host.
+    NoHost,
+    /// The address names a scheme the browser cannot fetch.
+    UnsupportedScheme,
+}
+
+/// Decides what the browser can do with the address the user typed.
+pub fn classify_address(raw: &[u8]) -> AddressOutcome {
+    let parsed = parse_uri(raw);
+    match parsed.scheme {
+        UriScheme::Unknown => return AddressOutcome::NoScheme,
+        // WHY the gemini scheme is refused: the browser reads pages over
+        // HTTP and the gateway in front of it speaks HTTP. It cannot speak
+        // gemini, so an address in that scheme names a host the browser has
+        // no way to ask.
+        UriScheme::Gemini => return AddressOutcome::UnsupportedScheme,
+        _ => {}
+    }
+    if parsed.host.is_empty() {
+        return AddressOutcome::NoHost;
+    }
+    AddressOutcome::Fetchable
+}
+
+/// The directory the browser saves pages into.
+pub const DOWNLOAD_DIR: &str = "/storage/downloads";
+
+/// The prefix the path of a page the browser saved carries.
+pub const DOWNLOAD_PREFIX: &str = "/storage/downloads/page_";
+
+/// The name the browser gives the pages it saves.
+///
+/// WHY one name: the file manager and the launcher find these documents
+/// through the platform's content index, and a name is what a person
+/// recognises in a list of files.
+pub const DOWNLOAD_NAME_PREFIX: &str = "page_";
+
+/// Builds the path a saved page is written to.
+pub fn download_path(index: u32, out: &mut [u8]) -> usize {
+    let prefix = DOWNLOAD_PREFIX.as_bytes();
+    let mut n = prefix.len().min(out.len());
+    out[..n].copy_from_slice(&prefix[..n]);
+
+    let mut digits = [0u8; 10];
+    let mut len = 0usize;
+    let mut value = index;
+    loop {
+        digits[len] = b'0' + (value % 10) as u8;
+        len += 1;
+        value /= 10;
+        if value == 0 {
+            break;
+        }
+    }
+    while len > 0 {
+        len -= 1;
+        if n >= out.len() {
+            break;
+        }
+        out[n] = digits[len];
+        n += 1;
+    }
+    for suffix in b".html" {
+        if n >= out.len() {
+            break;
+        }
+        out[n] = *suffix;
+        n += 1;
+    }
+    n
+}
+
+/// Whether a path in the shared document index is a page the browser saved.
+///
+/// WHY the name is matched as well as the directory: the shared storage
+/// area holds every app's documents, and the browser's list is its own
+/// pages and nobody else's.
+pub fn is_download_path(path: &str) -> bool {
+    if !path.starts_with("/storage/") {
+        return false;
+    }
+    let Some(name) = path.rsplit('/').next() else {
+        return false;
+    };
+    name.starts_with(DOWNLOAD_NAME_PREFIX) && name.ends_with(".html")
+}
+
+/// The height one document line occupies, in logical pixels.
+///
+/// WHY this lives here and not in the renderer: the renderer walked the
+/// lines to draw them and the tap handler walked them again to find the
+/// link under the finger, and the two walks disagreed about how tall a
+/// code block is. One table of heights is the only way the finger and
+/// the eye agree.
+pub fn doc_line_height(kind: LineKind, bytes: &[u8]) -> usize {
+    match kind {
+        LineKind::Heading1 => {
+            std::design::font::line_height(crate::theme::type_scale::BODY) + 26
+        }
+        LineKind::Heading2 => 40,
+        LineKind::Heading3 => 32,
+        LineKind::ListItem => 28,
+        LineKind::Blockquote => 34,
+        LineKind::CodeBlock => {
+            if bytes.starts_with(b"```") {
+                // The fence itself is not drawn, but it still occupies the
+                // space the block needs.
+                8
+            } else {
+                34
+            }
+        }
+        LineKind::GemtextLink => 66,
+        LineKind::Paragraph => 28,
+        LineKind::Empty => 14,
+    }
+}
+
+/// The height of a whole document, in logical pixels.
+pub fn document_height_px(lines: &[DocLine]) -> usize {
+    let mut total = 0usize;
+    for line in lines {
+        total = total.saturating_add(doc_line_height(line.kind, &line.bytes[..line.len]));
+    }
+    total
+}
+
+/// The scroll state the reader uses for a document of a given height.
+///
+/// WHY the viewport is a parameter: the reader's viewport is the band
+/// between the toolbar and the navigation bar, and the scroll state has
+/// to know how tall that band is to know how far the document can move.
+pub fn reader_scroll(content_h: usize, viewport_h: usize) -> ScrollState {
+    ScrollState::new(content_h, viewport_h, 0)
+}
+
+/// Whether `haystack` contains `needle`, ignoring case.
+///
+/// WHY the match is loose: a person looking for a bookmark types the
+/// first letters of what they remember, and a filter that matched only
+/// the exact bytes would find nothing.
+pub fn contains_ignore_case(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    if needle.len() > haystack.len() {
+        return false;
+    }
+    for start in 0..=(haystack.len() - needle.len()) {
+        let mut matched = true;
+        for (offset, &wanted) in needle.iter().enumerate() {
+            if haystack[start + offset].to_ascii_lowercase() != wanted.to_ascii_lowercase() {
+                matched = false;
+                break;
+            }
+        }
+        if matched {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -3049,5 +3268,147 @@ mod tests {
             !last_line.ends_with('<') && !last_line.ends_with("="),
             "the reader text was cut mid-tag: {last_line:?}"
         );
+    }
+
+    /// The search suggestion has to name the host the query really goes to.
+    ///
+    /// WHY: the card used to read "Search Web" over a request that was
+    /// sent to one host, so the screen promised a web search the browser
+    /// does not perform.
+    #[test]
+    fn test_the_search_label_names_the_host_the_query_goes_to() {
+        assert!(
+            core::str::from_utf8(SEARCH_LABEL)
+                .unwrap()
+                .contains(SEARCH_HOST),
+            "the search label does not name the host the query is sent to"
+        );
+        assert_ne!(
+            SEARCH_LABEL,
+            &b"Search Web"[..],
+            "the search label still promises a web search"
+        );
+        // The endpoint and the label have to agree about the host.
+        let endpoint = core::str::from_utf8(SEARCH_ENDPOINT).unwrap();
+        assert!(
+            endpoint.contains(SEARCH_HOST),
+            "the search endpoint goes somewhere the label does not name"
+        );
+    }
+
+    /// The query the user typed has to reach the endpoint the label names.
+    #[test]
+    fn test_a_search_query_is_sent_to_the_named_endpoint() {
+        let mut out = [0u8; 128];
+        let n = search_url(b"interos kernel", &mut out);
+        let built = &out[..n];
+        assert_eq!(&built[..SEARCH_ENDPOINT.len()], SEARCH_ENDPOINT);
+        assert_eq!(&built[SEARCH_ENDPOINT.len()..], b"interos kernel");
+        assert!(core::str::from_utf8(built)
+            .unwrap()
+            .starts_with("https://interos.tech/search?q="));
+    }
+
+    /// An address the browser cannot parse must not be shown as a site.
+    ///
+    /// WHY: the address bar used to substitute `interos.tech` for an
+    /// address that named no host, so the page that came back was
+    /// presented as though the user had asked for that site.
+    #[test]
+    fn test_an_address_that_names_no_host_is_not_recognised() {
+        assert_eq!(classify_address(b"hello"), AddressOutcome::NoScheme);
+        assert_eq!(classify_address(b"ftp://example.org"), AddressOutcome::NoScheme);
+        assert_eq!(classify_address(b"http://"), AddressOutcome::NoHost);
+        assert_eq!(
+            classify_address(b"gemini://geminispace.info"),
+            AddressOutcome::UnsupportedScheme
+        );
+        assert_eq!(
+            classify_address(b"https://interos.tech"),
+            AddressOutcome::Fetchable
+        );
+        assert_eq!(
+            classify_address(b"http://example.org/page"),
+            AddressOutcome::Fetchable
+        );
+        assert_eq!(
+            classify_address(b"file:///storage/downloads/page_0.html"),
+            AddressOutcome::Fetchable
+        );
+    }
+
+    /// The reader's scroll extent has to cover the whole document.
+    ///
+    /// WHY: the page body used to stop after a fixed number of lines and
+    /// say so, and there was no way to reach the rest of the page.
+    #[test]
+    fn test_the_reader_scroll_extent_covers_the_whole_document() {
+        let lines = [
+            DocLine {
+                bytes: [0u8; MAX_LINE_BYTES],
+                len: 3,
+                kind: LineKind::Paragraph,
+                continued: false,
+                link_target: [0u8; 64],
+                link_label: [0u8; 64],
+                link_target_len: 0,
+                link_label_len: 0,
+            },
+            DocLine {
+                bytes: [0u8; MAX_LINE_BYTES],
+                len: 0,
+                kind: LineKind::Empty,
+                continued: false,
+                link_target: [0u8; 64],
+                link_label: [0u8; 64],
+                link_target_len: 0,
+                link_label_len: 0,
+            },
+        ];
+        let height = document_height_px(&lines);
+        assert_eq!(height, doc_line_height(LineKind::Paragraph, b"abc") + 14);
+
+        // A document taller than the viewport can be scrolled through, and
+        // the scroll stops at the end of the document.
+        let viewport = 20usize;
+        let mut scroll = reader_scroll(height, viewport);
+        assert_eq!(scroll.max_offset(), height.saturating_sub(viewport));
+        assert_eq!(scroll.offset, 0);
+        scroll.offset = scroll.max_offset();
+        assert_eq!(scroll.offset + viewport, height);
+
+        // A document that fits does not scroll at all.
+        let short = reader_scroll(10, viewport);
+        assert_eq!(short.max_offset(), 0);
+        assert!(short.thumb_rect(0, 100, 20).is_none());
+
+        // A drag past the end of the document stops at the end of it.
+        let mut dragged = reader_scroll(height, viewport);
+        dragged.apply_drag(-1000);
+        assert_eq!(dragged.offset, dragged.max_offset());
+        dragged.apply_drag(1000);
+        assert_eq!(dragged.offset, 0);
+    }
+
+    /// The path a page is saved to has to be the one the platform's index
+    /// can be asked about.
+    #[test]
+    fn test_a_saved_page_has_a_path_the_index_can_find() {
+        let mut out = [0u8; 64];
+        let n = download_path(7, &mut out);
+        let path = core::str::from_utf8(&out[..n]).unwrap();
+        assert_eq!(path, "/storage/downloads/page_7.html");
+        assert!(is_download_path(path));
+        assert!(!is_download_path("/storage/photos/holiday.ppm"));
+        assert!(!is_download_path("/storage/downloads/notes.txt"));
+    }
+
+    /// A filter that matched only whole words would find nothing.
+    #[test]
+    fn test_the_panel_filter_ignores_case() {
+        assert!(contains_ignore_case(b"https://InterOS.tech/docs", b"interos"));
+        assert!(contains_ignore_case(b"https://interos.tech", b"INTEROS.TECH"));
+        assert!(!contains_ignore_case(b"https://example.org", b"interos"));
+        assert!(contains_ignore_case(b"anything", b""));
     }
 }
