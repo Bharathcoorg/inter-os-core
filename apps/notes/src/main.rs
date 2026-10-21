@@ -1065,10 +1065,23 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
                         ),
                     }
                 };
-                if let Some(c) = test_text(x, y, 220, 500, 2, title, THEME.on_surface, THEME.surface_container, true) {
+                // WHY the title is centred and the subtitle is bounded: the
+                // card is a fixed width, and a title placed by a number
+                // that happens to suit one string runs past the card's
+                // edge the moment the state changes. The subtitle is
+                // ellipsized to the card's inner width for the same
+                // reason: a sentence that runs past the card is a
+                // sentence the user cannot finish reading.
+                const CARD_X: usize = 60;
+                const CARD_W: usize = 600;
+                let title_x = CARD_X + std::design::font::center_x(title, 2, CARD_W);
+                if let Some(c) = test_text(x, y, title_x, 500, 2, title, THEME.on_surface, THEME.surface_container, true) {
                     return c;
                 }
-                if let Some(c) = test_text(x, y, 160, 560, 1, subtitle, THEME.on_surface_variant, THEME.surface_container, false) {
+                let mut sub_buf = [0u8; 96];
+                let sub_len = std::design::font::ellipsize(subtitle, 1, CARD_W - 40, &mut sub_buf);
+                let sub_x = CARD_X + std::design::font::center_x(&sub_buf[..sub_len], 1, CARD_W);
+                if let Some(c) = test_text(x, y, sub_x, 560, 1, &sub_buf[..sub_len], THEME.on_surface_variant, THEME.surface_container, false) {
                     return c;
                 }
                 return CARD.fill;

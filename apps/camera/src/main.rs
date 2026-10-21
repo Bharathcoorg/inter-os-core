@@ -565,7 +565,21 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
         return THEME.surface;
     }
 
-    // 2. Viewfinder Canvas (y: VIEWFINDER_Y0..VIEWFINDER_Y1, x: 20..700)
+    // 2. The settings surface.
+    //
+    // WHY it is drawn *before* the viewfinder and not after it: the
+    // viewfinder's own window is a rounded rectangle that covers
+    // 20..700 by 120..1120, and the settings sheet sits entirely inside
+    // it. The viewfinder returns a pixel for every pixel of that window,
+    // so a sheet drawn after it is never reached -- the button opened the
+    // settings and the screen did not change. Drawn first, the sheet is
+    // over the viewfinder, which is what the settings are: a sheet over
+    // the camera, with the camera still visible behind it.
+    if camera.screen == CameraScreen::Settings && SHEET_RECT.contains(x, y) {
+        return settings_pixel(x, y, camera);
+    }
+
+    // 3. Viewfinder Canvas (y: VIEWFINDER_Y0..VIEWFINDER_Y1, x: 20..700)
     if (VIEWFINDER_Y0..VIEWFINDER_Y1).contains(&y) && x >= 20 && x < W - 20 {
         let rel_y = y - VIEWFINDER_Y0;
         let rel_x = x - 20;
@@ -632,13 +646,6 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
             }
             return c;
         }
-    }
-
-    // 3. The settings surface. WHY it is drawn over the viewfinder: the
-    //    settings are the camera's own, and the viewfinder stays visible
-    //    behind them so the surface never pretends the camera stopped.
-    if camera.screen == CameraScreen::Settings && SHEET_RECT.contains(x, y) {
-        return settings_pixel(x, y, camera);
     }
 
     // 4. Mode Selector Carousel (y: 1150..1200, 50px tall, >=48px touch)
