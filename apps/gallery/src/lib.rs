@@ -209,11 +209,25 @@ pub struct StorageMediaItem {
     pub name_len: usize,
     pub path: [u8; 64],
     pub path_len: usize,
+    /// The byte length the platform's document index holds for this document.
     pub size: u64,
+    /// The modification time the platform's document index holds.
+    ///
+    /// WHY the index and not the file: the index is where the platform keeps
+    /// the fact, and the sheet says which source every number came from.
+    pub mtime: u64,
     pub is_video: bool,
     pub is_favourite: bool,
+    /// The document's own width, when the app has read its header.
     pub width: u32,
+    /// The document's own height, when the app has read its header.
     pub height: u32,
+    /// Whether the width and the height are the document's own.
+    ///
+    /// WHY it is a flag and not a zero width: a zero width is also what a
+    /// document the app could not read looks like, and the sheet has to say
+    /// which of the two it is showing.
+    pub has_dimensions: bool,
     pub primary_color: u32,
     pub secondary_color: u32,
 }
@@ -228,19 +242,56 @@ impl StorageMediaItem {
     /// see `gallery::theme` for that mapping. A media item that has real
     /// pixels carries the colours sampled from them, which is the same
     /// argument.
+    ///
+    /// WHY the dimensions are zero and not the screen's: the old placeholder
+    /// carried 720 x 1440, the size of the panel this app draws on, and the
+    /// sheet printed that as the document's resolution.
     pub const EMPTY: Self = Self {
         name: [0u8; 48],
         name_len: 0,
         path: [0u8; 64],
         path_len: 0,
         size: 0,
+        mtime: 0,
         is_video: false,
         is_favourite: false,
-        width: 720,
-        height: 1440,
+        width: 0,
+        height: 0,
+        has_dimensions: false,
         primary_color: 0xFF1E293B,
         secondary_color: 0xFF0F172A,
     };
+}
+
+/// The dimensions a document's own header carries, if the header is one the
+/// platform can read.
+///
+/// WHY the header and not the pixels: a header is a few dozen bytes and the
+/// dimensions are in it, so the app can measure a document it cannot
+/// afford to decode - and can say where the number came from.
+pub fn measure_image_header(data: &[u8], name: &[u8]) -> Option<(u32, u32)> {
+    if name.ends_with(b".ppm") || (data.len() >= 2 && &data[0..2] == b"P6") {
+        return decode_ppm_header(data).ok().map(|(w, h, _)| (w, h));
+    }
+    if name.ends_with(b".bmp") || (data.len() >= 2 && &data[0..2] == b"BM") {
+        return decode_bmp_header(data).ok().map(|(w, h, _, _)| (w, h));
+    }
+    if name.ends_with(b".qoi") || (data.len() >= 4 && &data[0..4] == b"qoif") {
+        return decode_qoi_header(data).ok().map(|(w, h, _, _)| (w, h));
+    }
+    None
+}
+
+/// The number of grid rows a library of `item_count` items takes.
+///
+/// WHY it is a function: the grid scrolls when the library is taller than the
+/// band it is drawn in, and the scroll's extent has to be the same number
+/// the rows are laid out with.
+pub fn grid_row_count(item_count: usize, columns: usize) -> usize {
+    if columns == 0 {
+        return 0;
+    }
+    item_count.div_ceil(columns)
 }
 
 /// Supported mobile video codecs.
@@ -669,5 +720,51 @@ mod tests {
         // Corrupt magic
         qoi_data[0] = b'x';
         assert_eq!(decode_qoi_header(&qoi_data), Err(()));
+    }
+
+    /// The sheet's resolution is the document's own, read out of the
+    /// document's own header.
+    #[test]
+    fn test_a_documents_dimensions_are_measured_from_its_header() {
+        // A 2x1 PPM: "P6\n2 1\n255\n" and two pixels.
+        let ppm = b"P6\n2 1\n255\n\x01\x02\x03\x04\x05\x06";
+        assert_eq!(measure_image_header(ppm, b"a.ppm"), Some((2, 1)));
+
+        // A 1x1 QOI.
+        let qoi = [
+            b'q', b'o', b'i', b'f', 0, 0, 0, 1, 0, 0, 0, 1, 4, 0, 0xFE, 255, 0, 0, 0, 0, 0,
+            0, 1,
+        ];
+        assert_eq!(measure_image_header(&qoi, b"a.qoi"), Some((1, 1)));
+
+        // A document the platform cannot read the header of has no
+        // dimensions to report, and the app says so rather than guessing.
+        assert_eq!(measure_image_header(b"not an image", b"a.txt"), None);
+        assert_eq!(measure_image_header(b"", b"a.ppm"), None);
+    }
+
+    /// The grid's scroll extent is the number of rows the library takes.
+    #[test]
+    fn test_the_grid_scrolls_when_the_library_is_taller_than_the_band() {
+        assert_eq!(grid_row_count(0, 3), 0);
+        assert_eq!(grid_row_count(1, 3), 1);
+        assert_eq!(grid_row_count(3, 3), 1);
+        assert_eq!(grid_row_count(4, 3), 2);
+        assert_eq!(grid_row_count(12, 3), 4);
+        assert_eq!(grid_row_count(13, 3), 5);
+        // A grid of no columns holds nothing.
+        assert_eq!(grid_row_count(9, 0), 0);
+    }
+
+    /// The placeholder carries no dimensions, so nothing can mistake the
+    /// screen's size for a document's.
+    #[test]
+    fn test_an_unreadable_document_carries_no_dimensions() {
+        let item = StorageMediaItem::EMPTY;
+        assert_eq!(item.width, 0);
+        assert_eq!(item.height, 0);
+        assert!(!item.has_dimensions);
+        assert_eq!(item.size, 0);
+        assert_eq!(item.mtime, 0);
     }
 }
