@@ -1051,7 +1051,12 @@ fn sensor_bus_card(x: usize, y: usize, app: &Dashboard) -> Option<u32> {
             let mut w = [0u8; 32];
             let n = write_lit(b"accel y ", &mut w);
             let n = n + fmt_i64(*accel, &mut w[n..]);
-            if let Some(c) = row(x, y, line_at(slot), b"Accelerometer", &w[..n], OK, b"sensor_read() -> accel") {
+            // WHY the unit is on the value: the kernel's IMU reports
+            // acceleration in milli-g, so a bare number is a measurement
+            // without its scale. The row above carries the unit in the
+            // label; this one has to carry it in the value.
+            let n = n + write_lit(b" mg", &mut w[n..]);
+            if let Some(c) = row(x, y, line_at(slot), b"Accelerometer", &w[..n], OK, b"sensor_read() -> accel (milli-g)") {
                 return Some(c);
             }
             slot += 1;
@@ -1126,11 +1131,17 @@ fn inventory_card(x: usize, y: usize, app: &Dashboard) -> Option<u32> {
     }
 
     match &app.telemetry {
-        Telemetry::Present { .. } => {
+        Telemetry::Present { orientation, orientation_len, .. } => {
             channel!(0, b"Accelerometer", b"measured", OK, b"sensor_read() -> accel, present:true");
             channel!(1, b"Gyroscope", b"no field", WARN, b"sys_sensor_read serialises no gyro axis");
             channel!(2, b"Ambient light", b"measured", OK, b"sensor_read() -> lux, present:true");
             channel!(3, b"Proximity", b"measured", OK, b"sensor_read() -> near, present:true");
+            // WHY the orientation row reports the value here: the bus card
+            // above already prints the orientation string the payload
+            // carried, so an unconditional "unavailable" for the same
+            // channel contradicted the card directly above it.
+            channel!(4, b"Screen orientation", b"measured", OK, b"sensor_read() -> orientation");
+            let _ = (orientation, orientation_len);
         }
         _ => {
             // WHY these are the app's own reasons and not the kernel's verbatim
@@ -1142,18 +1153,24 @@ fn inventory_card(x: usize, y: usize, app: &Dashboard) -> Option<u32> {
             // that string in full - wrapped to the card's whole inner width -
             // so the kernel's own words stay on screen; this row says the same
             // thing in a form that fits the column it is measured against.
+            //
+            // WHY the reasons differ by state: a refused call never reached
+            // the hardware check, so saying the hardware is not present would
+            // be a claim the app cannot support. A malformed payload is a
+            // third fact again.
             let reason: &[u8] = match &app.telemetry {
                 Telemetry::Absent { .. } => b"no physical IMU or ambient sensor".as_slice(),
-                _ => b"hardware_present is false here".as_slice(),
+                Telemetry::Denied(_) => b"sensor_read was refused".as_slice(),
+                _ => b"payload lacked the expected fields".as_slice(),
             };
             channel!(0, b"Accelerometer", b"unavailable", WARN, reason);
             channel!(1, b"Gyroscope", b"unavailable", WARN, b"not in sys_sensor_read payload");
             channel!(2, b"Ambient light", b"unavailable", WARN, reason);
             channel!(3, b"Proximity", b"unavailable", WARN, reason);
+            channel!(4, b"Screen orientation", b"unavailable", WARN, b"derived from accel; none present");
         }
     }
 
-    channel!(4, b"Screen orientation", b"unavailable", WARN, b"derived from accel; none present");
     channel!(5, b"Heart rate", b"unavailable", WARN, b"no PPG backend in the sensor manager");
     // WHY "in the manager" here and not "in the sensor manager" as the row
     // above: the barometer label is 2px wider than the heart-rate label and its
@@ -1195,7 +1212,28 @@ fn inventory_card(x: usize, y: usize, app: &Dashboard) -> Option<u32> {
     // WHY it gets its own row slot: it is the last thing the card says, and
     // `line` fits it into the card's full inner width on a character boundary,
     // so a longer variant of this sentence can never run off the card.
-    line(x, y, top + 9 * ROW_PITCH, b"Inventory says 'simulated'; the bus says no hardware.", MUTED)
+    //
+    // WHY the sentence is built from the two answers: it used to be a fixed
+    // line that said the inventory was simulated and the bus had no
+    // hardware, whatever either of them had actually answered. On a device
+    // whose inventory answers "available" the sentence was still there.
+    let bus_word: &[u8] = match &app.telemetry {
+        Telemetry::Present { .. } => b"the bus reports hardware".as_slice(),
+        Telemetry::Absent { .. } => b"the bus says no hardware".as_slice(),
+        Telemetry::Denied(_) => b"the bus read was refused".as_slice(),
+        Telemetry::Malformed => b"the bus payload was malformed".as_slice(),
+    };
+    let mut closing = [0u8; 80];
+    let n = match app.inv_sensors {
+        Some(_) => {
+            let mut n = write_lit(b"Inventory says '", &mut closing);
+            n += write_lit(&word[..wn], &mut closing[n..]);
+            n + write_lit(b"'; ", &mut closing[n..])
+        }
+        None => write_lit(b"Inventory was refused; ", &mut closing),
+    };
+    let n = n + write_lit(bus_word, &mut closing[n..]);
+    line(x, y, top + 9 * ROW_PITCH, &closing[..n], MUTED)
 }
 
 /// Card 4: runtime facts.
@@ -1209,7 +1247,7 @@ fn identity_card(x: usize, y: usize, app: &Dashboard) -> Option<u32> {
     }
 
     let n = fmt_u64(app.surface_id as u64, &mut v);
-    if let Some(c) = row(x, y, top + ROW_PITCH, b"Surface", &v[..n], TEXT, b"surface_create(6, 720x1440, z=200)") {
+    if let Some(c) = row(x, y, top + ROW_PITCH, b"Surface", &v[..n], TEXT, b"surface_create(720x1440, z=200)") {
         return Some(c);
     }
 
@@ -1411,7 +1449,22 @@ fn status(app: &mut Dashboard, text: &[u8], color: u32) {
 pub extern "C" fn _start() -> ! {
     std::log(0, "[SENSORS (Ring 3)] Sensor inventory starting.").ok();
 
-    let surface = match std::surface_create(6, W as u32, H as u32, 200) {
+    // WHY the slot is resolved by type: a slot number is a position in the
+    // capability table, and the position depends on the order the kernel
+    // inserted this app's capabilities in. The literal 6 happens to hold the
+    // framebuffer in this app's table today.
+    let fb_slot = match std::cap::framebuffer_slot() {
+        Some(slot) => slot,
+        None => {
+            std::log(
+                0,
+                "[SENSORS] No framebuffer capability; the dashboard cannot draw.",
+            )
+            .ok();
+            std::exit_with_code(1);
+        }
+    };
+    let surface = match std::surface_create(fb_slot, W as u32, H as u32, 200) {
         Ok(s) => s,
         Err(_) => {
             std::log(0, "[SENSORS] No display surface available; nothing to draw.").ok();
@@ -1483,7 +1536,7 @@ pub extern "C" fn _start() -> ! {
     let _ = n;
 
     repaint(surface, &app, Dirty::All);
-    let _ = std::surface_flip(6);
+    let _ = std::surface_flip(fb_slot);
     std::log(0, "[SENSORS] Initial frame presented to hardware scanout.").ok();
 
     loop {
@@ -1501,14 +1554,14 @@ pub extern "C" fn _start() -> ! {
                 while std::input_event_poll(&mut input).is_ok() {
                     if matches!(input.kind, 4 | 6 | 7 | 8 | 10) {
                         std::log(0, "[SENSORS] Navigation gesture. Exiting to launcher.").ok();
-                        let _ = std::surface_destroy(6, surface);
+                        let _ = std::surface_destroy(fb_slot, surface);
                         std::exit_with_code(0);
                     }
                     if input.kind == 1 {
                         let tapped_back =
                             (24..100).contains(&input.x) && (28..68).contains(&input.y);
                         if tapped_back || input.y >= 1400 {
-                            let _ = std::surface_destroy(6, surface);
+                            let _ = std::surface_destroy(fb_slot, surface);
                             std::exit_with_code(0);
                         }
                         app.telemetry = read_sensors();
@@ -1532,7 +1585,7 @@ pub extern "C" fn _start() -> ! {
                 }
                 if dirty != Dirty::None {
                     repaint(surface, &app, dirty);
-                    let _ = std::surface_flip(6);
+                    let _ = std::surface_flip(fb_slot);
                 }
             }
         }
