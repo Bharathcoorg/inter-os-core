@@ -1,0 +1,18 @@
+{
+  "id": "org.interos.agentmanager",
+  "name": "Agent Manager",
+  "version": "0.2.0",
+  "category": "system",
+  "description": "Native InterOS agent supervisor. Reports the models, capability grants, services and search configuration the device actually holds.",
+  "entrypoint": {
+    "backend": "bin/agent_manager.elf"
+  },
+  "permissions": [
+    "CAP_LOGGING",
+    "CAP_FRAMEBUFFER",
+    "CAP_EVENT_POLL",
+    "CAP_FILESYSTEM_READ",
+    "CAP_CONTENT_INDEX"
+  ],
+  "min_sdk_version": "0.8.0"
+}
