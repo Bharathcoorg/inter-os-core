@@ -411,6 +411,76 @@ impl Theme {
         touch: Touch::STANDARD,
     };
 
+    /// The neutral system: a black page, white ink, neutral grey chrome.
+    ///
+    /// WHY this variant exists: the platform had two systems, and both of them
+    /// are *branded* -- the light one carries a blue accent and the dark one a
+    /// sky-blue one. An app that is meant to read as a piece of engineering
+    /// equipment rather than as a consumer product has nowhere to go: it asks
+    /// the theme for a card and gets a tinted one.
+    ///
+    /// WHAT THIS VARIANT IS FOR: a monochrome interface whose colour is
+    /// reserved. Every structural role here -- the page, the cards, the raised
+    /// and sunken surfaces, the ink, the borders, the hairlines, the primary
+    /// fill -- is black, white or a neutral grey, so nothing in the chrome
+    /// carries a hue. The only roles that keep a colour are the ones that
+    /// mean something: the status roles (`error`, `success`, `warning` and
+    /// their containers) for a state the user has to see, and `accent` for a
+    /// brand mark or a model identity. An app that draws this theme and puts
+    /// colour anywhere else has broken the variant's contract.
+    ///
+    /// WHY `primary` is white rather than a brand colour: a primary action is
+    /// a filled control, and on a black page a white fill is the strongest
+    /// contrast available without introducing a hue. The ink on it is black.
+    pub const NEUTRAL: Theme = Theme {
+        name: "neutral",
+        dark: true,
+
+        surface: 0xFF000000,
+        surface_container: 0xFF0D0D0D,
+        surface_container_high: 0xFF171717,
+        surface_container_low: 0xFF070707,
+        surface_frosted: 0xFF141414,
+        overlay: 0xFF0D0D0D,
+        overlay_border: 0xFF2B2B2B,
+
+        on_surface: 0xFFFFFFFF,
+        on_surface_variant: 0xFFB6B6B6,
+        muted: 0xFF7C7C7C,
+        on_primary: 0xFF000000,
+        on_primary_container: 0xFFFFFFFF,
+        ink_on_light: 0xFF111214,
+        ink_on_dark: 0xFFFFFFFF,
+
+        outline: 0xFFB6B6B6,
+        outline_variant: 0xFF262626,
+        border: 0xFF2E2E2E,
+
+        primary: 0xFFFFFFFF,
+        primary_container: 0xFF1B1B1B,
+        secondary: 0xFF8E8E8E,
+        accent: color::DARK_ACCENT,
+
+        error: color::DARK_DANGER,
+        error_container: 0xFF3A1418,
+        success: color::DARK_SUCCESS,
+        success_container: 0xFF12372A,
+        on_success_container: 0xFFA7F3D0,
+        warning: color::DARK_WARNING,
+        warning_container: 0xFF3A2C0A,
+        emergency: color::EMERGENCY,
+
+        wallpaper_top: 0xFF101010,
+        wallpaper_mid: 0xFF080808,
+        wallpaper_bottom: 0xFF000000,
+        wallpaper_ink: 0xFFFFFFFF,
+
+        type_scale: TypeScale::STANDARD,
+        spacing: Spacing::STANDARD,
+        radii: Radii::STANDARD,
+        touch: Touch::STANDARD,
+    };
+
     /// Selects a theme by name, defaulting to light for an unknown name.
     ///
     /// WHY a default and not a refusal: a theme name that arrives from a
@@ -419,6 +489,7 @@ impl Theme {
     pub fn by_name(name: &str) -> Theme {
         match name {
             "dark" => Theme::DARK,
+            "neutral" => Theme::NEUTRAL,
             _ => Theme::LIGHT,
         }
     }
@@ -602,7 +673,7 @@ mod tests {
             ("wallpaper_mid", "wallpaper_bottom"),
         ];
 
-        for theme in [Theme::LIGHT, Theme::DARK] {
+        for theme in [Theme::LIGHT, Theme::DARK, Theme::NEUTRAL] {
             for (a, b) in MUST_DIFFER {
                 assert_ne!(
                     role(&theme, a),
@@ -692,6 +763,114 @@ mod tests {
         assert!(Theme::by_name("dark").is_dark());
         assert_eq!(Theme::by_name("light").name, "light");
         assert!(!Theme::by_name("light").is_dark());
+        assert_eq!(Theme::by_name("nonsense").name, "light");
+    }
+
+    #[test]
+    fn every_role_is_present_and_opaque_in_the_neutral_theme() {
+        for name in ROLES {
+            let value = role(&Theme::NEUTRAL, name);
+            assert_ne!(value, 0, "{} is unset in the neutral theme", name);
+            assert_eq!(
+                value >> 24,
+                0xFF,
+                "{} is not opaque in the neutral theme",
+                name
+            );
+        }
+    }
+
+    /// The roles that make up an interface's chrome.
+    ///
+    /// WHY this list: the neutral variant's promise is that nothing in the
+    /// structure carries a hue, so the roles that decide a page, a card, a
+    /// row, an ink, a border or a filled action have to be grey, black or
+    /// white. The roles that are *not* on the list are the ones that mean
+    /// something -- a state, or a brand -- and they are allowed a colour.
+    const NEUTRAL_CHROME_ROLES: &[&str] = &[
+        "surface",
+        "surface_container",
+        "surface_container_high",
+        "surface_container_low",
+        "surface_frosted",
+        "overlay",
+        "overlay_border",
+        "on_surface",
+        "on_surface_variant",
+        "muted",
+        "on_primary",
+        "on_primary_container",
+        "outline",
+        "outline_variant",
+        "border",
+        "primary",
+        "primary_container",
+        "secondary",
+        "wallpaper_top",
+        "wallpaper_mid",
+        "wallpaper_bottom",
+        "wallpaper_ink",
+    ];
+
+    #[test]
+    fn the_neutral_theme_keeps_the_colour_out_of_the_chrome() {
+        // WHY this is a property and not a table: a chrome role that drifts
+        // towards a hue is how a "monochrome" interface becomes a coloured
+        // one, one role at a time, and nobody notices until the screen is
+        // wrong. The check is on the pixels: red, green and blue equal.
+        for name in NEUTRAL_CHROME_ROLES {
+            let value = role(&Theme::NEUTRAL, name);
+            let r = (value >> 16) & 0xFF;
+            let g = (value >> 8) & 0xFF;
+            let b = value & 0xFF;
+            assert_eq!(
+                (r, g, b),
+                (r, r, r),
+                "{} is not a neutral grey in the neutral theme: {value:#010x}",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn the_neutral_theme_reserves_its_colour_for_meaning() {
+        // WHY these must keep a hue: the status roles are how the user sees
+        // that a thing was allowed, refused or is missing, and the accent is
+        // where a brand mark or a model identity goes. A neutral theme that
+        // greyed these out would have taken the colour away from the only
+        // places the user needs it.
+        for name in ["error", "success", "warning", "accent", "emergency"] {
+            let value = role(&Theme::NEUTRAL, name);
+            let r = (value >> 16) & 0xFF;
+            let g = (value >> 8) & 0xFF;
+            let b = value & 0xFF;
+            assert!(
+                r != g || g != b,
+                "{} is a grey in the neutral theme: it is a status colour and \
+                 has to be readable as one",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn the_neutral_theme_is_a_dark_theme_with_the_platforms_metrics() {
+        assert!(Theme::NEUTRAL.is_dark());
+        assert_eq!(Theme::NEUTRAL.name, "neutral");
+        assert_eq!(Theme::NEUTRAL.touch.min_target, 44);
+        assert_eq!(Theme::NEUTRAL.radii.card, Radii::STANDARD.card);
+        assert_eq!(Theme::NEUTRAL.spacing.md, Spacing::STANDARD.md);
+        assert_eq!(Theme::NEUTRAL.type_scale.body.scale, TypeScale::STANDARD.body.scale);
+        // The black page and the white ink are the two ends of the variant.
+        assert_eq!(Theme::NEUTRAL.surface, 0xFF000000);
+        assert_eq!(Theme::NEUTRAL.on_surface, 0xFFFFFFFF);
+    }
+
+    #[test]
+    fn the_neutral_theme_is_selected_by_name() {
+        assert_eq!(Theme::by_name("neutral").name, "neutral");
+        assert!(Theme::by_name("neutral").is_dark());
+        // And an unknown name still falls back to light, unchanged.
         assert_eq!(Theme::by_name("nonsense").name, "light");
     }
 
