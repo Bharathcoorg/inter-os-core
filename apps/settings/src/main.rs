@@ -27,12 +27,23 @@
 
 use core::panic::PanicInfo;
 use interos_std as std;
-use settings::{parse_sensor_payload, SensorTelemetry};
+use settings::{
+    parse_battery_payload, parse_hardware_availability, parse_sensor_payload,
+    parse_thermal_payload, syscall_status_name, BatteryTelemetry, HardwareAvailability,
+    QueryOutcome, SensorTelemetry, ThermalTelemetry,
+};
 
 use interos_std::design::outline_text;
 
 const W: usize = 720;
 const H: usize = 1440;
+
+/// The hardware keystore slot this app asks about.
+///
+/// WHY it is named: the argument to `keystore_derive` is a *keystore* slot,
+/// not a capability slot, and the two are not interchangeable. Naming it
+/// keeps the difference visible at the call site.
+const SETTINGS_KEY_SLOT: u32 = 0;
 const CHUNK: usize = 32768;
 static mut CHUNK_BUF: [u32; CHUNK] = [0; CHUNK];
 
@@ -294,7 +305,7 @@ fn read_stored_scene(
     // WHY 24 bytes and not the kernel's 512: the catalogue's longest key is
     // shorter than that, and the store's own key/value length check is on the
     // *key*, so a small buffer costs nothing and keeps the frame small.
-    match std::settings_get(3, key, &mut buf) {
+    match std::settings_get(key, &mut buf) {
         Ok(n) if n > 0 => {
             let raw = &buf[..n];
             let start = raw
@@ -365,11 +376,24 @@ pub power_profile: Option<PowerProfile>,
     /// Recorded outcome of the wireless HAL query for the last refresh.
     pub wireless: TelemetryState,
     /// Recorded outcome of the battery / power query for the last refresh.
-    pub battery: TelemetryState,
+    ///
+    /// WHY the outcome is not a boolean: the state says whether a payload
+    /// arrived, and the outcome says *why* one did not. The platform
+    /// distinguishes a refused call, an unbound device and an empty payload,
+    /// and each of those is a different sentence for the user.
+    pub battery_outcome: QueryOutcome,
     /// Recorded outcome of the thermal query for the last refresh.
-    pub thermal: TelemetryState,
+    ///
+    /// WHY the outcome is not a boolean: see `battery_outcome`.
+    pub thermal_outcome: QueryOutcome,
     /// Recorded outcome of the sensor query for the last refresh.
-    pub sensor: TelemetryState,
+    ///
+    /// WHY the outcome is not a boolean: see `battery_outcome`.
+    pub sensor_outcome: QueryOutcome,
+    /// The multi-zone thermal payload, decoded field by field.
+    pub thermal_telemetry: ThermalTelemetry,
+    /// The fuel-gauge payload, decoded field by field.
+    pub battery_telemetry: BatteryTelemetry,
     /// Dedicated Sensors & Diagnostics sub-page state.
     pub sensors_open: bool,
     /// Parsed live sensor telemetry record (zero mock/fake values).
@@ -381,9 +405,24 @@ pub power_profile: Option<PowerProfile>,
     pub user_status: [u8; 48],
     pub user_status_len: usize,
     /// Active installed package count from registry.
-    pub app_count: usize,
+    ///
+    /// WHY this is an `Option`: `None` means the registry did not answer, and
+    /// the card then says so. The count used to be floored at twelve, so a
+    /// registry that held three packages was reported as twelve verified
+    /// ones - a number the platform never produced.
+    pub app_count: Option<usize>,
     /// Live block-device capacity in bytes from storage query.
-    pub storage_bytes: u64,
+    ///
+    /// WHY this is an `Option`: `None` means the storage query did not answer.
+    /// The value used to fall back to 512 MB, which the card then reported as
+    /// mounted root storage.
+    pub storage_bytes: Option<u64>,
+    /// The platform's own answer about the sound path.
+    pub sound: HardwareAvailability,
+    /// The platform's own answer about the cellular controller.
+    pub cellular: HardwareAvailability,
+    /// The platform's own answer about the Bluetooth controller.
+    pub bluetooth: HardwareAvailability,
     /// Whether the wallpaper picker panel is open instead of a section detail.
     pub wallpaper_open: bool,
     /// Which surface the next write targets.
@@ -456,17 +495,26 @@ impl SettingsApp {
             // WHY: default to Unavailable so a query that never ran is never
             // rendered as if hardware had answered.
             wireless: TelemetryState::Unavailable,
-            battery: TelemetryState::Unavailable,
-            thermal: TelemetryState::Unavailable,
-            sensor: TelemetryState::Unavailable,
+            // WHY: the outcome starts as "no answer" rather than as a
+            // failure, because nothing has been asked yet.
+            battery_outcome: QueryOutcome::Empty,
+            thermal_outcome: QueryOutcome::Empty,
+            sensor_outcome: QueryOutcome::Empty,
+            thermal_telemetry: ThermalTelemetry::EMPTY,
+            battery_telemetry: BatteryTelemetry::EMPTY,
             sensors_open: false,
             sensor_telemetry: SensorTelemetry::EMPTY,
             owner_name: [0u8; 32],
             owner_name_len: 0,
             user_status: [0u8; 48],
             user_status_len: 0,
-            app_count: 14,
-            storage_bytes: 512 * 1024 * 1024,
+            app_count: None,
+            storage_bytes: None,
+            // WHY: the platform has not been asked yet, so the app does not
+            // know what it has.
+            sound: HardwareAvailability::Unknown,
+            cellular: HardwareAvailability::Unknown,
+            bluetooth: HardwareAvailability::Unknown,
             wallpaper_open: false,
             wallpaper_target: WallpaperTarget::Both,
             wallpaper_pending: None,
@@ -519,18 +567,14 @@ impl SettingsApp {
                 } else {
                     TelemetryState::Reported
                 };
-                std::log(
-                    0,
-                    "[SETTINGS APP] Wireless HAL response (raw, exactly as reported by the HAL):",
+                std::log("[SETTINGS APP] Wireless HAL response (raw, exactly as reported by the HAL):",
                 )
                 .ok();
-                std::log(0, core::str::from_utf8(body).unwrap_or("<non-utf8>")).ok();
+                std::log(core::str::from_utf8(body).unwrap_or("<non-utf8>")).ok();
             }
             Ok(_) => {
                 self.wireless = TelemetryState::Unavailable;
-                std::log(
-                    0,
-                    "[SETTINGS APP] Wireless HAL returned an empty payload; no wireless hardware reported.",
+                std::log("[SETTINGS APP] Wireless HAL returned an empty payload; no wireless hardware reported.",
                 )
                 .ok();
             }
@@ -538,9 +582,7 @@ impl SettingsApp {
                 // WHY: the query is gated on SystemControl, which this app does
                 // not hold. Say the query was refused instead of implying a radio.
                 self.wireless = TelemetryState::Unavailable;
-                std::log(
-                    0,
-                    "[SETTINGS APP] Wireless HAL query refused by the kernel; wireless state unknown.",
+                std::log("[SETTINGS APP] Wireless HAL query refused by the kernel; wireless state unknown.",
                 )
                 .ok();
             }
@@ -554,17 +596,15 @@ impl SettingsApp {
         // WHY: this read goes through the FileSystemRead capability slot, which
         // this app holds. Report the stored value verbatim instead of echoing a
         // profile name and then asserting a DVFS governor change that never ran.
-        match std::settings_get(3, "power.profile", &mut profile) {
+        match std::settings_get("power.profile", &mut profile) {
             Ok(n) => {
-                std::log(0, "[SETTINGS APP] Stored power.profile value:").ok();
+                std::log("[SETTINGS APP] Stored power.profile value:").ok();
                 if let Ok(v) = core::str::from_utf8(&profile[..n]) {
-                    std::log(0, v).ok();
+                    std::log(v).ok();
                 }
             }
             Err(_) => {
-                std::log(
-                    0,
-                    "[SETTINGS APP] Stored power.profile read refused by the kernel; profile unknown.",
+                std::log("[SETTINGS APP] Stored power.profile read refused by the kernel; profile unknown.",
                 )
                 .ok();
             }
@@ -575,9 +615,7 @@ impl SettingsApp {
         match std::power_get_governor() {
             Ok(gov) => {
                 self.governor = Some(gov);
-                std::log(
-                    0,
-                    match gov {
+                std::log(match gov {
                         0 => "[SETTINGS APP] DVFS governor as reported by the kernel: Performance.",
                         1 => "[SETTINGS APP] DVFS governor as reported by the kernel: Power Saver.",
                         2 => "[SETTINGS APP] DVFS governor as reported by the kernel: Interactive.",
@@ -591,38 +629,64 @@ impl SettingsApp {
                 // WHY: the governor query requires SystemControl. Report the
                 // refusal instead of the locally cached profile enum.
                 self.governor = None;
-                std::log(
-                    0,
-                    "[SETTINGS APP] DVFS governor query refused by the kernel; governor state unknown.",
+                std::log("[SETTINGS APP] DVFS governor query refused by the kernel; governor state unknown.",
                 )
                 .ok();
             }
         }
 
-        let mut buf = [0u8; 128];
+        // WHY 256 bytes and not the 128 this used to pass: the kernel refuses
+        // a fuel-gauge query whose buffer is shorter than `BATTERY_JSON_MAX`
+        // (256, kernel/src/resource/battery.rs:37) and answers `InvalidArguments`
+        // (-3) instead of the payload. So the card was showing "unavailable"
+        // because the app had asked in a shape the platform would not answer,
+        // and had never once seen a fuel-gauge payload at all.
+        let mut buf = [0u8; 256];
         match std::battery_query(&mut buf) {
             Ok(len) if len > 0 => {
-                self.battery = TelemetryState::Reported;
-                std::log(
-                    0,
-                    "[SETTINGS APP] Battery fuel gauge response (raw, as reported by the service):",
+                let len = len.min(buf.len());
+                let payload = &buf[..len];
+                // WHY the payload is parsed instead of only logged: the fuel
+                // gauge's own state of charge, voltage, temperature and capacity
+                // are in here, and a card that keeps only a boolean throws away
+                // the reading the platform just handed over.
+                match parse_battery_payload(payload) {
+                    Some(t) if t.present && t.telemetry_valid => {
+                        self.battery_outcome = QueryOutcome::Reported;
+                        self.battery_telemetry = t;
+                    }
+                    Some(_) => {
+                        // The platform answered, and the answer was that no
+                        // fuel gauge is bound. The zeroes in this payload are
+                        // the platform's absence, not a reading.
+                        self.battery_outcome = QueryOutcome::Absent;
+                        self.battery_telemetry = BatteryTelemetry::EMPTY;
+                    }
+                    None => {
+                        self.battery_outcome = QueryOutcome::Malformed;
+                        self.battery_telemetry = BatteryTelemetry::EMPTY;
+                    }
+                }
+                std::log("[SETTINGS APP] Battery fuel gauge response (raw, as reported by the service):",
                 )
                 .ok();
-                std::log(0, core::str::from_utf8(&buf[..len]).unwrap_or("<non-utf8>")).ok();
+                std::log(core::str::from_utf8(payload).unwrap_or("<non-utf8>")).ok();
             }
             Ok(_) => {
-                self.battery = TelemetryState::Unavailable;
-                std::log(
-                    0,
-                    "[SETTINGS APP] Battery fuel gauge returned an empty payload.",
+                self.battery_outcome = QueryOutcome::Empty;
+                self.battery_telemetry = BatteryTelemetry::EMPTY;
+                std::log("[SETTINGS APP] Battery fuel gauge returned an empty payload.",
                 )
                 .ok();
             }
-            Err(_) => {
-                self.battery = TelemetryState::Unavailable;
-                std::log(
-                    0,
-                    "[SETTINGS APP] Battery fuel gauge query refused by the kernel; charge level unknown.",
+            Err(e) => {
+                // WHY the status is kept: the platform says *why* it refused
+                // (PermissionDenied, InvalidSlot, InvalidArguments,
+                // DeviceError), and the card has to name that reason rather
+                // than collapse it into "unavailable".
+                self.battery_outcome = QueryOutcome::Failed(e);
+                self.battery_telemetry = BatteryTelemetry::EMPTY;
+                std::log("[SETTINGS APP] Battery fuel gauge query failed; the platform returned a status this app names on screen.",
                 )
                 .ok();
             }
@@ -641,17 +705,13 @@ impl SettingsApp {
             Ok(mhz) => {
                 self.power_profile = Some(profile);
                 self.profile_feedback = ProfileFeedback::Applied(mhz);
-                std::log(
-                    0,
-                    "[SETTINGS APP] Kernel accepted the requested DVFS profile; frequency ceiling reported.",
+                std::log("[SETTINGS APP] Kernel accepted the requested DVFS profile; frequency ceiling reported.",
                 )
                 .ok();
             }
             Err(_) => {
                 self.profile_feedback = ProfileFeedback::Refused;
-                std::log(
-                    0,
-                    "[SETTINGS APP] DVFS profile change refused by the kernel; no governor state was changed.",
+                std::log("[SETTINGS APP] DVFS profile change refused by the kernel; no governor state was changed.",
                 )
                 .ok();
             }
@@ -660,33 +720,56 @@ impl SettingsApp {
 
     /// Queries multi-zone thermal sensors and IMU orientation.
     pub fn refresh_thermals_and_sensors(&mut self) {
-        let mut t_buf = [0u8; 128];
+        // WHY 256 bytes and not the 128 this used to pass: the kernel refuses
+        // a thermal query whose buffer is shorter than `THERMAL_JSON_MAX`
+        // (256, kernel/src/resource/thermal.rs:12) and answers `InvalidArguments`
+        // (-3) instead of the payload, so the zones were never received.
+        let mut t_buf = [0u8; 256];
         match std::thermal_query(&mut t_buf) {
             Ok(len) if len > 0 => {
-                self.thermal = TelemetryState::Reported;
-                std::log(
-                    0,
-                    "[SETTINGS APP] Thermal response (raw, as reported by the service):",
+                let len = len.min(t_buf.len());
+                let payload = &t_buf[..len];
+                // WHY the payload is parsed instead of only logged: the five
+                // zone temperatures, the cooling state and the throttling flag
+                // are in here, and a card that keeps only a boolean throws away
+                // the reading the platform just handed over.
+                match parse_thermal_payload(payload) {
+                    Some(t) if t.present => {
+                        self.thermal_outcome = QueryOutcome::Reported;
+                        self.thermal_telemetry = t;
+                    }
+                    Some(_) => {
+                        // The platform serialised an explicit absent flag:
+                        // there is no zone to report.
+                        self.thermal_outcome = QueryOutcome::Absent;
+                        self.thermal_telemetry = ThermalTelemetry::EMPTY;
+                    }
+                    None => {
+                        self.thermal_outcome = QueryOutcome::Malformed;
+                        self.thermal_telemetry = ThermalTelemetry::EMPTY;
+                    }
+                }
+                std::log("[SETTINGS APP] Thermal response (raw, as reported by the service):",
                 )
                 .ok();
-                std::log(0, core::str::from_utf8(&t_buf[..len]).unwrap_or("<non-utf8>")).ok();
+                std::log(core::str::from_utf8(payload).unwrap_or("<non-utf8>")).ok();
             }
             Ok(_) => {
-                self.thermal = TelemetryState::Unavailable;
-                std::log(
-                    0,
-                    "[SETTINGS APP] Thermal service returned an empty payload.",
+                self.thermal_outcome = QueryOutcome::Empty;
+                self.thermal_telemetry = ThermalTelemetry::EMPTY;
+                std::log("[SETTINGS APP] Thermal service returned an empty payload.",
                 )
                 .ok();
             }
-            Err(_) => {
-                // WHY: an unbound thermal sensor reports DeviceError and this app
-                // lacks the power-control authority the query requires. Both mean
-                // there is no temperature to show.
-                self.thermal = TelemetryState::Unavailable;
-                std::log(
-                    0,
-                    "[SETTINGS APP] Thermal service reported no attached sensor; temperatures unknown.",
+            Err(e) => {
+                // WHY the status is kept: an unbound thermal sensor reports
+                // `DeviceError` (-12) and a missing authority reports
+                // `PermissionDenied` (-1). Those are different facts, so the
+                // card names the status the platform returned instead of
+                // saying "unavailable" and leaving the user to guess.
+                self.thermal_outcome = QueryOutcome::Failed(e);
+                self.thermal_telemetry = ThermalTelemetry::EMPTY;
+                std::log("[SETTINGS APP] Thermal service query failed; the platform returned a status this app names on screen.",
                 )
                 .ok();
             }
@@ -695,30 +778,36 @@ impl SettingsApp {
         let mut s_buf = [0u8; 256];
         match std::sensor_read(&mut s_buf) {
             Ok(len) if len > 0 => {
-                self.sensor = TelemetryState::Reported;
-                self.sensor_telemetry = parse_sensor_payload(&s_buf[..len]);
-                std::log(
-                    0,
-                    "[SETTINGS APP] Sensor response (raw, as reported by the service):",
+                let len = len.min(s_buf.len());
+                let payload = &s_buf[..len];
+                self.sensor_telemetry = parse_sensor_payload(payload);
+                // WHY: the payload says in its own `present` field whether
+                // anything is bound, so the outcome follows the payload rather
+                // than the mere fact that bytes arrived.
+                self.sensor_outcome = if self.sensor_telemetry.is_present {
+                    QueryOutcome::Reported
+                } else {
+                    QueryOutcome::Absent
+                };
+                std::log("[SETTINGS APP] Sensor response (raw, as reported by the service):",
                 )
                 .ok();
-                std::log(0, core::str::from_utf8(&s_buf[..len]).unwrap_or("<non-utf8>")).ok();
+                std::log(core::str::from_utf8(payload).unwrap_or("<non-utf8>")).ok();
             }
             Ok(_) => {
-                self.sensor = TelemetryState::Unavailable;
+                self.sensor_outcome = QueryOutcome::Empty;
                 self.sensor_telemetry = SensorTelemetry::EMPTY;
-                std::log(
-                    0,
-                    "[SETTINGS APP] Sensor service returned an empty payload.",
+                std::log("[SETTINGS APP] Sensor service returned an empty payload.",
                 )
                 .ok();
             }
-            Err(_) => {
-                self.sensor = TelemetryState::Unavailable;
+            Err(e) => {
+                // WHY the status is kept: the platform says *why* it refused
+                // (PermissionDenied, InvalidSlot, InvalidArguments,
+                // DeviceError), and the card has to name that reason.
+                self.sensor_outcome = QueryOutcome::Failed(e);
                 self.sensor_telemetry = SensorTelemetry::EMPTY;
-                std::log(
-                    0,
-                    "[SETTINGS APP] Sensor service query refused by the kernel; no sensor data.",
+                std::log("[SETTINGS APP] Sensor service query failed; the platform returned a status this app names on screen.",
                 )
                 .ok();
             }
@@ -728,40 +817,44 @@ impl SettingsApp {
     /// Reads dynamic owner name and status phrase from persistent settings store.
     pub fn refresh_personal(&mut self) {
         let mut buf = [0u8; 32];
-        if let Ok(n) = std::settings_get(3, "owner.name", &mut buf) {
+        if let Ok(n) = std::settings_get("owner.name", &mut buf) {
             let n = n.min(32);
             self.owner_name[..n].copy_from_slice(&buf[..n]);
             self.owner_name_len = n;
-        } else if let Ok(n) = std::settings_get(3, "user.display_name", &mut buf) {
+        } else if let Ok(n) = std::settings_get("user.display_name", &mut buf) {
             let n = n.min(32);
             self.owner_name[..n].copy_from_slice(&buf[..n]);
             self.owner_name_len = n;
         } else {
-            let default_name = b"Sovereign Owner";
-            self.owner_name[..default_name.len()].copy_from_slice(default_name);
-            self.owner_name_len = default_name.len();
+            // WHY no fallback name: the store did not answer, so the app does
+            // not know who the owner is. The card used to show a hard-coded
+            // owner name under an "ACTIVE" badge, which asserted an identity
+            // the platform never reported.
+            self.owner_name_len = 0;
         }
 
         let mut sbuf = [0u8; 48];
-        if let Ok(n) = std::settings_get(3, "user.status", &mut sbuf) {
+        if let Ok(n) = std::settings_get("user.status", &mut sbuf) {
             let n = n.min(48);
             self.user_status[..n].copy_from_slice(&sbuf[..n]);
             self.user_status_len = n;
-        } else if let Ok(n) = std::settings_get(3, "owner.status", &mut sbuf) {
+        } else if let Ok(n) = std::settings_get("owner.status", &mut sbuf) {
             let n = n.min(48);
             self.user_status[..n].copy_from_slice(&sbuf[..n]);
             self.user_status_len = n;
         } else {
-            let default_status = b"Encrypted & Sovereign";
-            self.user_status[..default_status.len()].copy_from_slice(default_status);
-            self.user_status_len = default_status.len();
+            // WHY no fallback phrase: the store did not answer, so the app
+            // does not know the account's status. The card used to show a
+            // hard-coded phrase under an "ENCRYPTED" badge, which asserted
+            // an encryption state no syscall had reported.
+            self.user_status_len = 0;
         }
     }
 
     /// Queries installed application registry and VFS block storage capacity.
     pub fn refresh_apps_storage(&mut self) {
         let mut p_buf = [0u8; 4096];
-        if let Ok(n) = std::package_registry(0, &mut p_buf) {
+        if let Ok(n) = std::package_registry(&mut p_buf) {
             let mut count = 0;
             for line in p_buf[..n].split(|b| *b == b'\n') {
                 if !line.is_empty() {
@@ -779,16 +872,40 @@ impl SettingsApp {
                     count += 1;
                 }
             }
-            self.app_count = count.max(12);
+            // WHY the count is not floored: the registry answered, so the
+            // number of packages in it is the number of packages. The count
+            // used to be raised to a minimum of twelve, which reported a
+            // registry of three as a registry of twelve verified packages.
+            self.app_count = Some(count);
         } else {
-            self.app_count = 12;
+            // WHY no fallback number: the registry did not answer, so there is
+            // no count to report.
+            self.app_count = None;
         }
 
-        if let Ok(bytes) = std::storage_query() {
-            self.storage_bytes = bytes;
-        } else {
-            self.storage_bytes = 512 * 1024 * 1024;
+        match std::storage_query() {
+            Ok(bytes) => {
+                self.storage_bytes = Some(bytes);
+            }
+            Err(_) => {
+                // WHY no fallback size: the storage query did not answer, so
+                // there is no capacity to report.
+                self.storage_bytes = None;
+            }
         }
+    }
+
+    /// Asks the platform which hardware categories it actually has.
+    ///
+    /// WHY this exists: the kernel publishes one answer per category -
+    /// present, emulated or absent - and a card that assumed "present" would
+    /// claim hardware the platform says it does not have. The sound, cellular
+    /// and Bluetooth rows used to be hard-coded claims with a green badge on
+    /// them and no query behind them at all.
+    pub fn refresh_hardware_inventory(&mut self) {
+        self.sound = hardware_availability("sound");
+        self.cellular = hardware_availability("cellular");
+        self.bluetooth = hardware_availability("bluetooth");
     }
 
     /// Audits security identity and hardware keystore slots.
@@ -797,27 +914,21 @@ impl SettingsApp {
         // WHY: raw keystore material never crosses the kernel boundary, so this
         // call is expected to be refused. Say so instead of staying silent, so a
         // missing keystore is never read as an untested one.
-        match std::keystore_derive(0, &mut key_buf) {
+        match std::keystore_derive(SETTINGS_KEY_SLOT, &mut key_buf) {
             // WHY: the derivation syscall returns a byte count; any length other
             // than a full key is not a usable key, so treat it as a failure.
             Ok(32) => {
-                std::log(
-                    0,
-                    "[SETTINGS APP] Keystore derivation succeeded for the application slot.",
+                std::log("[SETTINGS APP] Keystore derivation succeeded for the application slot.",
                 )
                 .ok();
             }
             Ok(_) => {
-                std::log(
-                    0,
-                    "[SETTINGS APP] Keystore derivation returned a short result; no usable application key.",
+                std::log("[SETTINGS APP] Keystore derivation returned a short result; no usable application key.",
                 )
                 .ok();
             }
             Err(_) => {
-                std::log(
-                    0,
-                    "[SETTINGS APP] Keystore derivation refused by the kernel; no application key is available.",
+                std::log("[SETTINGS APP] Keystore derivation refused by the kernel; no application key is available.",
                 )
                 .ok();
             }
@@ -839,28 +950,22 @@ impl SettingsApp {
                 self.rtc_time[..n].copy_from_slice(&rtc_buf[..n]);
                 self.rtc_time_len = n;
                 self.rtc = TelemetryState::Reported;
-                std::log(
-                    0,
-                    "[SETTINGS APP] System time as reported by the platform RTC service:",
+                std::log("[SETTINGS APP] System time as reported by the platform RTC service:",
                 )
                 .ok();
-                std::log(0, core::str::from_utf8(&rtc_buf[..len]).unwrap_or("<non-utf8>")).ok();
+                std::log(core::str::from_utf8(&rtc_buf[..len]).unwrap_or("<non-utf8>")).ok();
             }
             Ok(_) => {
                 self.rtc_time_len = 0;
                 self.rtc = TelemetryState::Unavailable;
-                std::log(
-                    0,
-                    "[SETTINGS APP] RTC service returned an empty payload; system time unknown.",
+                std::log("[SETTINGS APP] RTC service returned an empty payload; system time unknown.",
                 )
                 .ok();
             }
             Err(_) => {
                 self.rtc_time_len = 0;
                 self.rtc = TelemetryState::Unavailable;
-                std::log(
-                    0,
-                    "[SETTINGS APP] RTC query refused by the kernel; system time unknown.",
+                std::log("[SETTINGS APP] RTC query refused by the kernel; system time unknown.",
                 )
                 .ok();
             }
@@ -870,37 +975,33 @@ impl SettingsApp {
         // capability slot 3 (the FileSystemRead slot that reads power.profile);
         // when the store does not answer, the card reports that instead.
         let mut ver_buf = [0u8; 24];
-        match std::settings_get(3, "about.os_version", &mut ver_buf) {
+        match std::settings_get("about.os_version", &mut ver_buf) {
             Ok(n) if n > 0 => {
                 let n = n.min(self.os_version.len());
                 self.os_version[..n].copy_from_slice(&ver_buf[..n]);
                 self.os_version_len = n;
-                std::log(0, "[SETTINGS APP] about.os_version read from the settings store.").ok();
-                std::log(0, core::str::from_utf8(&self.os_version[..n]).unwrap_or("<non-utf8>"))
+                std::log("[SETTINGS APP] about.os_version read from the settings store.").ok();
+                std::log(core::str::from_utf8(&self.os_version[..n]).unwrap_or("<non-utf8>"))
                     .ok();
             }
             _ => {
                 self.os_version_len = 0;
-                std::log(
-                    0,
-                    "[SETTINGS APP] about.os_version not reported by the settings store; version unknown.",
+                std::log("[SETTINGS APP] about.os_version not reported by the settings store; version unknown.",
                 )
                 .ok();
             }
         }
-        match std::get_ticks(2) {
+        match std::cap::timer_slot().and_then(|_| std::get_ticks().ok()).ok_or(-1) {
             Ok(ticks) => {
                 self.uptime_ticks = ticks;
-                std::log(0, "[SETTINGS APP] Authoritative uptime ticks read from capability slot 2.").ok();
+                std::log("[SETTINGS APP] Authoritative uptime ticks read from capability slot 2.").ok();
             }
             Err(_) => {
                 self.uptime_ticks = 0;
-                std::log(0, "[SETTINGS APP] Uptime ticks query refused or unavailable.").ok();
+                std::log("[SETTINGS APP] Uptime ticks query refused or unavailable.").ok();
             }
         }
-        std::log(
-            0,
-            "[SETTINGS APP] About: Inter OS Core (x86_64, Ring 0/Ring 3 User Separation).",
+        std::log("[SETTINGS APP] About: Inter OS Core (x86_64, Ring 0/Ring 3 User Separation).",
         )
         .ok();
     }
@@ -915,23 +1016,19 @@ impl SettingsApp {
         // the Developer-terminal row could only ever show its fail-closed
         // default. Keep the fail-closed default handling below regardless - a
         // read that is refused must still leave the value unverified.
-        match std::settings_get(3, "developer.terminal_enabled", &mut buf) {
+        match std::settings_get("developer.terminal_enabled", &mut buf) {
             Ok(n) => {
                 if let Ok(v) = core::str::from_utf8(&buf[..n]) {
                     self.terminal_enabled = v == "true";
-                    std::log(
-                        0,
-                        "[SETTINGS APP] developer.terminal_enabled read from the settings store.",
+                    std::log("[SETTINGS APP] developer.terminal_enabled read from the settings store.",
                     )
                     .ok();
-                    std::log(0, v).ok();
+                    std::log(v).ok();
                 }
             }
             Err(_) => {
                 self.terminal_enabled = false;
-                std::log(
-                    0,
-                    "[SETTINGS APP] developer.terminal_enabled read refused by the kernel; showing Disabled by default.",
+                std::log("[SETTINGS APP] developer.terminal_enabled read refused by the kernel; showing Disabled by default.",
                 )
                 .ok();
             }
@@ -950,12 +1047,10 @@ impl SettingsApp {
         // could never take effect. Report the real result either way, and leave
         // the local flag at the last observed value when the write is refused so
         // the UI never shows an unpersisted toggle.
-        match std::settings_set(3, "developer.terminal_enabled", val) {
+        match std::settings_set("developer.terminal_enabled", val) {
             Ok(()) => {
                 self.terminal_enabled = desired;
-                std::log(
-                    0,
-                    if desired {
+                std::log(if desired {
                         "[SETTINGS APP] Developer terminal enabled (default was: Disabled by default)."
                     } else {
                         "[SETTINGS APP] Developer terminal disabled."
@@ -964,9 +1059,7 @@ impl SettingsApp {
                 .ok();
             }
             Err(_) => {
-                std::log(
-                    0,
-                    "[SETTINGS APP] Developer terminal change refused by the kernel (settings write denied). Unchanged: Disabled by default.",
+                std::log("[SETTINGS APP] Developer terminal change refused by the kernel (settings write denied). Unchanged: Disabled by default.",
                 )
                 .ok();
             }
@@ -1000,9 +1093,7 @@ impl SettingsApp {
         self.wallpaper_pending = None;
         self.wallpaper_write = WallpaperWrite::Unattempted;
         self.refresh_wallpaper_values();
-        std::log(
-            0,
-            "[SETTINGS APP] Wallpaper picker opened; current values read from the settings store.",
+        std::log("[SETTINGS APP] Wallpaper picker opened; current values read from the settings store.",
         )
         .ok();
     }
@@ -1107,9 +1198,7 @@ impl SettingsApp {
                             self.screen_lock_write = ScreenLockWrite::Removed;
                             self.screen_lock_mode = ScreenLockMode::Idle;
                             self.screen_lock_error = SL_ERR_NONE;
-                            std::log(
-                                0,
-                                "[SETTINGS APP] Screen lock removed; the account layer reports it credential-less.",
+                            std::log("[SETTINGS APP] Screen lock removed; the account layer reports it credential-less.",
                             )
                             .ok();
                         }
@@ -1120,9 +1209,7 @@ impl SettingsApp {
                             // should not tell the user their storage broke.
                             self.screen_lock_write = ScreenLockWrite::Refused;
                             self.screen_lock_error = SL_ERR_NOT_CURRENT;
-                            std::log(
-                                0,
-                                "[SETTINGS APP:SECURITY] Credential removal refused: the current PIN did not verify.",
+                            std::log("[SETTINGS APP:SECURITY] Credential removal refused: the current PIN did not verify.",
                             )
                             .ok();
                         }
@@ -1137,14 +1224,14 @@ impl SettingsApp {
                 self.screen_lock_current_len = current_len;
                 self.screen_lock_reset_entry();
                 self.screen_lock_mode = ScreenLockMode::EnterNew;
-                std::log(0, "[SETTINGS APP] Current PIN accepted; enter the replacement.").ok();
+                std::log("[SETTINGS APP] Current PIN accepted; enter the replacement.").ok();
             }
             ScreenLockMode::EnterNew => {
                 self.screen_lock_pending = self.screen_lock_buf;
                 self.screen_lock_pending_len = len;
                 self.screen_lock_reset_entry();
                 self.screen_lock_mode = ScreenLockMode::ConfirmNew;
-                std::log(0, "[SETTINGS APP] New PIN recorded; confirm it.").ok();
+                std::log("[SETTINGS APP] New PIN recorded; confirm it.").ok();
             }
             ScreenLockMode::ConfirmNew => {
                 let pending_len = self.screen_lock_pending_len;
@@ -1154,9 +1241,7 @@ impl SettingsApp {
                     self.screen_lock_pending_len = 0;
                     self.screen_lock_reset_entry();
                     self.screen_lock_mode = ScreenLockMode::EnterNew;
-                    std::log(
-                        0,
-                        "[SETTINGS APP:SECURITY] The two new-PIN entries did not match; nothing was written.",
+                    std::log("[SETTINGS APP:SECURITY] The two new-PIN entries did not match; nothing was written.",
                     )
                     .ok();
                     return;
@@ -1177,18 +1262,14 @@ impl SettingsApp {
                         };
                         self.screen_lock_mode = ScreenLockMode::Idle;
                         self.screen_lock_error = SL_ERR_NONE;
-                        std::log(
-                            0,
-                            "[SETTINGS APP:SECURITY] Credential written and persisted by the account layer.",
+                        std::log("[SETTINGS APP:SECURITY] Credential written and persisted by the account layer.",
                         )
                         .ok();
                     }
                     Err(_) => {
                         self.screen_lock_write = ScreenLockWrite::Refused;
                         self.screen_lock_error = SL_ERR_REFUSED;
-                        std::log(
-                            0,
-                            "[SETTINGS APP:SECURITY] Credential change refused by the account layer; nothing was written.",
+                        std::log("[SETTINGS APP:SECURITY] Credential change refused by the account layer; nothing was written.",
                         )
                         .ok();
                     }
@@ -1220,9 +1301,7 @@ impl SettingsApp {
             ScreenLockAction::Establish => ScreenLockMode::EnterNew,
             _ => ScreenLockMode::EnterCurrent,
         };
-        std::log(
-            0,
-            match action {
+        std::log(match action {
                 ScreenLockAction::Establish => "[SETTINGS APP] Enter a new PIN to set a screen lock.\n",
                 ScreenLockAction::Change => "[SETTINGS APP] Enter the current PIN to change it.\n",
                 ScreenLockAction::Remove => "[SETTINGS APP] Enter the current PIN to remove the screen lock.\n",
@@ -1244,7 +1323,7 @@ impl SettingsApp {
         self.screen_lock_current = [0; 8];
         self.screen_lock_current_len = 0;
         self.screen_lock_error = SL_ERR_NONE;
-        std::log(0, "[SETTINGS APP] Screen lock entry cancelled; nothing was written.").ok();
+        std::log("[SETTINGS APP] Screen lock entry cancelled; nothing was written.").ok();
         true
     }
 
@@ -1260,9 +1339,7 @@ impl SettingsApp {
             // has nothing to write, and writing the default instead would change
             // the user's wallpaper when they pressed a button that had no meaning.
             self.wallpaper_write = WallpaperWrite::Refused;
-            std::log(
-                0,
-                "[SETTINGS APP] Wallpaper Apply pressed with no pending selection; no write attempted.",
+            std::log("[SETTINGS APP] Wallpaper Apply pressed with no pending selection; no write attempted.",
             )
             .ok();
             return;
@@ -1278,7 +1355,7 @@ impl SettingsApp {
             // resolves the stored value back through the same catalogue, so a
             // value that is not a key would make the lookup find nothing and the
             // shell would report an unknown scene.
-            match std::settings_set(3, core::str::from_utf8(key).unwrap_or(""), scene.key) {
+            match std::settings_set(core::str::from_utf8(key).unwrap_or(""), scene.key) {
                 Ok(()) => {}
                 Err(_) => ok = false,
             }
@@ -1294,12 +1371,10 @@ impl SettingsApp {
                 _ => Some(scene),
             };
             self.wallpaper_pending = None;
-            std::log(0, "[SETTINGS APP] Wallpaper written to the settings store.").ok();
+            std::log("[SETTINGS APP] Wallpaper written to the settings store.").ok();
         } else {
             self.wallpaper_write = WallpaperWrite::Refused;
-            std::log(
-                0,
-                "[SETTINGS APP] The settings store refused the wallpaper write; no wallpaper was changed.",
+            std::log("[SETTINGS APP] The settings store refused the wallpaper write; no wallpaper was changed.",
             )
             .ok();
         }
@@ -1315,12 +1390,12 @@ impl SettingsApp {
         let scene = &std::design::walls::SCENES[0];
         let mut ok = true;
         for key in ["ui.wallpaper.home", "ui.wallpaper.lock"] {
-            if std::settings_set(3, key, scene.key).is_err() {
+            if std::settings_set(key, scene.key).is_err() {
                 ok = false;
             }
         }
         self.wallpaper_write = if ok {
-            std::log(0, "[SETTINGS APP] Wallpapers reset to the bundled default.")
+            std::log("[SETTINGS APP] Wallpapers reset to the bundled default.")
                 .ok();
             WallpaperWrite::Applied(WallpaperTarget::Both)
         } else {
@@ -2060,6 +2135,10 @@ fn row_count(section: Section) -> usize {
 fn row_h(section: Section, row: usize) -> usize {
     match (section, row) {
         (Section::Power, 1) => ROW_TALL,
+        // WHY the fuel gauge and the thermal governor are the tall kind: the
+        // platform's payloads for both carry more than one reading, and the
+        // honest caption for them is two lines.
+        (Section::Power, 0) | (Section::Power, 3) => ROW_TALL_ALT,
         (Section::System, 4) => ROW_TALL_ALT,
         _ => ROW_H,
     }
@@ -2069,10 +2148,43 @@ fn row_h(section: Section, row: usize) -> usize {
 const DIAG_ROW_H: usize = 96;
 const DIAG_ROW_GAP: usize = 12;
 
-/// Top edge and height of row `row` on the dedicated Sensors & Diagnostics surface.
+/// Height of the diagnostic rows that carry two caption lines.
+///
+/// WHY the rows are not all one height: the fuel gauge and the thermal zones
+/// each carry more than one reading - four numbers and a charging state, five
+/// zones and a cooling state - and the honest caption for them is two lines.
+/// Squeezing that onto one line would have meant dropping a measurement, so
+/// the card grew instead.
+const DIAG_ROW_TALL: usize = 112;
+
+/// Number of diagnostic rows on the Sensors & Diagnostics surface.
+///
+/// WHY seven: the page used to stack seven cards, two of which were for
+/// devices the kernel has never had - an air-pressure reader and a magnetic
+/// field sensor. Neither exists anywhere in the kernel, so a card for one was
+/// a wishlist rather than a reading, and both were deleted. The fuel gauge
+/// and the screen orientation took the freed slots, because the platform does
+/// report both.
+const DIAG_ROWS: usize = 7;
+
+/// Height of diagnostic row `row`.
+///
+/// WHY the tall rows are the last two: they are the two whose payload holds
+/// more than one measurement.
+fn diag_row_h(row: usize) -> usize {
+    match row {
+        5 | 6 => DIAG_ROW_TALL,
+        _ => DIAG_ROW_H,
+    }
+}
+
+/// Top edge and height of row `row`, stacked from `DETAIL_TOP`.
 fn sensors_row_rect(row: usize) -> (usize, usize) {
-    let y = DETAIL_TOP + row * (DIAG_ROW_H + DIAG_ROW_GAP);
-    (y, DIAG_ROW_H)
+    let mut y = DETAIL_TOP;
+    for r in 0..row {
+        y += diag_row_h(r) + DIAG_ROW_GAP;
+    }
+    (y, diag_row_h(row))
 }
 
 /// Top edge and height of row `row`, stacked from `DETAIL_TOP` with 16px gaps.
@@ -2174,6 +2286,186 @@ fn push_suffix(buf: &mut [u8], len: usize, suffix: &[u8]) -> usize {
         i += 1;
     }
     i
+}
+
+/// Appends the platform's own `text` to `buf[..len]`; returns the new length.
+///
+/// WHY this exists: a status word, a cooling state and a charging state all
+/// arrive from the kernel as text. Copying them verbatim is the whole point
+/// of quoting the platform, so they get one code path instead of three
+/// hand-rolled copies.
+fn push_platform_text(buf: &mut [u8], len: usize, text: &[u8]) -> usize {
+    let take = text.len().min(buf.len().saturating_sub(len));
+    buf[len..len + take].copy_from_slice(&text[..take]);
+    len + take
+}
+
+/// Writes `n` as decimal ASCII into `out`; returns the byte count.
+///
+/// WHY a signed writer: the kernel's thermal zones and the fuel gauge's
+/// temperature are signed degrees, and a negative value printed as a positive
+/// one is a different measurement.
+fn write_signed(n: i64, out: &mut [u8]) -> usize {
+    if n < 0 {
+        if out.is_empty() {
+            return 0;
+        }
+        out[0] = b'-';
+        1 + write_decimal_u64(n.unsigned_abs(), &mut out[1..])
+    } else {
+        write_decimal_u64(n as u64, out)
+    }
+}
+
+/// Builds the fuel-gauge caption from the platform's own payload.
+///
+/// WHY the numbers only appear when the platform says the gauge is present:
+/// an absent payload carries zeroes, and zeroes in an absent payload are the
+/// platform's absence rather than a measurement.
+fn battery_reading_caption(out: &mut [u8], app: &SettingsApp) -> usize {
+    let t = &app.battery_telemetry;
+    let mut n = 0usize;
+    n += write_signed(t.soc, &mut out[n..]);
+    n = push_suffix(out, n, b"% - ");
+    n += write_signed(t.voltage_mv, &mut out[n..]);
+    n = push_suffix(out, n, b" mV - ");
+    n += write_signed(t.temp_c, &mut out[n..]);
+    n = push_suffix(out, n, b" C - ");
+    n += write_signed(t.capacity_mah, &mut out[n..]);
+    n = push_suffix(out, n, b" mAh");
+    n
+}
+
+/// Builds the fuel gauge's charging-state caption from the platform's payload.
+fn battery_charging_caption(out: &mut [u8], app: &SettingsApp) -> usize {
+    let t = &app.battery_telemetry;
+    let n = push_suffix(out, 0, b"Charging state: ");
+    push_platform_text(out, n, &t.charging[..t.charging_len])
+}
+
+/// Builds the thermal zone caption from the platform's own payload.
+///
+/// WHY the zones are named one by one: the governor decides per zone, so a
+/// single blended number is a measurement the platform never made.
+fn thermal_zone_caption(out: &mut [u8], app: &SettingsApp) -> usize {
+    let t = &app.thermal_telemetry;
+    let mut n = 0usize;
+    n = push_suffix(out, n, b"CPU ");
+    n += write_signed(t.cpu_c, &mut out[n..]);
+    n = push_suffix(out, n, b"C GPU ");
+    n += write_signed(t.gpu_c, &mut out[n..]);
+    n = push_suffix(out, n, b"C BAT ");
+    n += write_signed(t.battery_c, &mut out[n..]);
+    n = push_suffix(out, n, b"C MOD ");
+    n += write_signed(t.modem_c, &mut out[n..]);
+    n = push_suffix(out, n, b"C CHG ");
+    n += write_signed(t.charging_c, &mut out[n..]);
+    n = push_suffix(out, n, b"C");
+    n
+}
+
+/// Builds the thermal cooling caption: the platform's cooling state and the
+/// platform's throttling flag, both as the kernel published them.
+fn thermal_cooling_caption(out: &mut [u8], app: &SettingsApp) -> usize {
+    let t = &app.thermal_telemetry;
+    let mut n = push_suffix(out, 0, b"Cooling: ");
+    n = push_platform_text(out, n, &t.state[..t.state_len]);
+    n = push_suffix(out, n, b" - ");
+    n = push_suffix(
+        out,
+        n,
+        if t.throttling {
+            b"throttling: on"
+        } else {
+            b"throttling: off"
+        },
+    );
+    n
+}
+
+/// Copies `text` into `out`; returns the byte count.
+fn copy_text(out: &mut [u8], text: &[u8]) -> usize {
+    let n = text.len().min(out.len());
+    out[..n].copy_from_slice(&text[..n]);
+    n
+}
+
+/// The reason the sensor bus gave no reading, in the platform's own words.
+///
+/// WHY the platform's words and not this app's: the kernel publishes the
+/// status name for every failure and a verbatim `error` string for an
+/// unbound bus. Paraphrasing either would let the app claim more than the
+/// platform did.
+fn sensor_absence_caption(out: &mut [u8], app: &SettingsApp) -> usize {
+    match app.sensor_outcome {
+        QueryOutcome::Failed(e) => {
+            let n = push_suffix(out, 0, b"Sensor query failed: ");
+            push_platform_text(out, n, syscall_status_name(e))
+        }
+        QueryOutcome::Malformed => copy_text(out, b"Sensor payload lacked the expected fields"),
+        QueryOutcome::Empty => copy_text(out, b"Sensor telemetry unavailable"),
+        _ => {
+            // The platform's own `error` string, quoted verbatim.
+            let t = &app.sensor_telemetry;
+            let n = t.error_msg_len.min(out.len());
+            out[..n].copy_from_slice(&t.error_msg[..n]);
+            n
+        }
+    }
+}
+
+/// The reason the fuel-gauge query gave no reading, in the platform's words.
+fn battery_absence_caption(out: &mut [u8], app: &SettingsApp) -> usize {
+    match app.battery_outcome {
+        QueryOutcome::Failed(e) => {
+            let n = push_suffix(out, 0, b"Battery query failed: ");
+            push_platform_text(out, n, syscall_status_name(e))
+        }
+        QueryOutcome::Absent => copy_text(
+            out,
+            b"The platform reports no fuel gauge (present=false)",
+        ),
+        QueryOutcome::Malformed => copy_text(out, b"Battery payload lacked the expected fields"),
+        _ => copy_text(out, b"Battery telemetry unavailable"),
+    }
+}
+
+/// The reason the thermal query gave no reading, in the platform's words.
+fn thermal_absence_caption(out: &mut [u8], app: &SettingsApp) -> usize {
+    match app.thermal_outcome {
+        QueryOutcome::Failed(e) => {
+            let n = push_suffix(out, 0, b"Thermal query failed: ");
+            push_platform_text(out, n, syscall_status_name(e))
+        }
+        QueryOutcome::Absent => copy_text(
+            out,
+            b"The platform reports no thermal sensor (present=false)",
+        ),
+        QueryOutcome::Malformed => copy_text(out, b"Thermal payload lacked the expected fields"),
+        _ => copy_text(out, b"Temperature telemetry unavailable"),
+    }
+}
+
+/// Asks the platform whether it has a hardware category.
+///
+/// WHY the answer is kept even when it is "unavailable": the difference
+/// between "the platform says it has no cellular controller" and "the app
+/// never asked" is the difference between a fact and a silence.
+fn hardware_availability(category: &str) -> HardwareAvailability {
+    match std::settings_hardware_status(category) {
+        Ok(code) => parse_hardware_availability(code),
+        Err(_) => HardwareAvailability::Unknown,
+    }
+}
+
+/// The badge for a hardware-category card: the platform's own verdict.
+fn availability_badge(state: HardwareAvailability) -> (&'static [u8], u32) {
+    match state {
+        HardwareAvailability::Available => (b"AVAILABLE", SUCCESS_EMERALD),
+        HardwareAvailability::Emulated => (b"EMULATED", TEXT_MUTED),
+        HardwareAvailability::Unavailable => (b"UNAVAILABLE", TEXT_MUTED),
+        HardwareAvailability::Unknown => (b"UNAVAILABLE", TEXT_MUTED),
+    }
 }
 
 /// Pill badge, right-aligned helper: soft fill, 1px ink rim, label centred.
@@ -2389,7 +2681,23 @@ const DIAG_TITLE_DY: usize = 16;
 const DIAG_CAP_DY: usize = 48;
 const DIAG_BADGE_DY: usize = 44;
 
-/// Specialized row head renderer for 96px Sensors & Diagnostics cards.
+/// The same offsets for the two-caption diagnostic rows.
+///
+/// WHY the tall rows start higher: a two-caption row has one more 24px line,
+/// and the card grew by 16px, so the title moves up to keep the block of
+/// text the same distance from the card's top edge.
+const DIAG_TALL_TITLE_DY: usize = 12;
+const DIAG_TALL_CAP_DY: usize = 40;
+const DIAG_TALL_CAP2_DY: usize = 64;
+const DIAG_TALL_BADGE_DY: usize = 36;
+
+/// Specialized row head renderer for the Sensors & Diagnostics cards.
+///
+/// WHY there is a second caption: two of the platform's payloads carry more
+/// than one reading, and the honest caption for them is two lines. The
+/// second line reserves the badge column, so a long caption can never run
+/// under the pill.
+#[allow(clippy::too_many_arguments)]
 fn diag_row_head(
     x: usize,
     y: usize,
@@ -2397,9 +2705,21 @@ fn diag_row_head(
     title: &[u8],
     caption: &[u8],
     cap_ink: u32,
+    caption2: &[u8],
     badge: &[u8],
     badge_ink: u32,
+    tall: bool,
 ) -> Option<u32> {
+    let (title_dy, cap_dy, cap2_dy, badge_dy) = if tall {
+        (
+            DIAG_TALL_TITLE_DY,
+            DIAG_TALL_CAP_DY,
+            DIAG_TALL_CAP2_DY,
+            DIAG_TALL_BADGE_DY,
+        )
+    } else {
+        (DIAG_TITLE_DY, DIAG_CAP_DY, DIAG_CAP_DY, DIAG_BADGE_DY)
+    };
     let bw = badge_w(badge);
     let bx0 = DETAIL_X + DETAIL_W - ROW_PAD - bw;
     let cap_fit = DETAIL_W - 2 * ROW_PAD - bw - BADGE_GAP;
@@ -2408,7 +2728,7 @@ fn diag_row_head(
         x,
         y,
         DETAIL_X + ROW_PAD,
-        cy + DIAG_TITLE_DY,
+        cy + title_dy,
         TYPE_H3,
         title,
         title_fit,
@@ -2422,7 +2742,7 @@ fn diag_row_head(
         x,
         y,
         DETAIL_X + ROW_PAD,
-        cy + DIAG_CAP_DY,
+        cy + cap_dy,
         TYPE_H3,
         caption,
         cap_fit,
@@ -2432,7 +2752,50 @@ fn diag_row_head(
     ) {
         return Some(c);
     }
-    badge_pixel(x, y, bx0, cy + DIAG_BADGE_DY, badge, badge_ink, SURFACE)
+    if !caption2.is_empty() {
+        if let Some(c) = run_ink(
+            x,
+            y,
+            DETAIL_X + ROW_PAD,
+            cy + cap2_dy,
+            TYPE_H3,
+            caption2,
+            cap_fit,
+            cap_ink,
+            SURFACE,
+            false,
+        ) {
+            return Some(c);
+        }
+    }
+    badge_pixel(x, y, bx0, cy + badge_dy, badge, badge_ink, SURFACE)
+}
+
+/// The badge for a sensor-bus row: the platform's verdict, not this app's.
+fn sensor_badge(app: &SettingsApp) -> (&'static [u8], u32) {
+    match app.sensor_outcome {
+        QueryOutcome::Reported => (b"ONLINE", SUCCESS_EMERALD),
+        QueryOutcome::Absent => (b"UNBOUND", TEXT_MUTED),
+        _ => (b"UNAVAILABLE", TEXT_MUTED),
+    }
+}
+
+/// The badge for a fuel-gauge row: the platform's verdict, not this app's.
+fn battery_badge(app: &SettingsApp) -> (&'static [u8], u32) {
+    match app.battery_outcome {
+        QueryOutcome::Reported => (b"REPORTED", SUCCESS_EMERALD),
+        QueryOutcome::Absent => (b"UNBOUND", TEXT_MUTED),
+        _ => (b"UNAVAILABLE", TEXT_MUTED),
+    }
+}
+
+/// The badge for a thermal row: the platform's verdict, not this app's.
+fn thermal_badge(app: &SettingsApp) -> (&'static [u8], u32) {
+    match app.thermal_outcome {
+        QueryOutcome::Reported => (b"REPORTED", SUCCESS_EMERALD),
+        QueryOutcome::Absent => (b"UNBOUND", TEXT_MUTED),
+        _ => (b"UNAVAILABLE", TEXT_MUTED),
+    }
 }
 
 /// Renders one live diagnostic sensor row on the dedicated Sensors & Diagnostics sub-page.
@@ -2446,8 +2809,8 @@ fn diag_row_pixel(
     let t = &app.sensor_telemetry;
     match row {
         0 => {
-            let mut cap_buf = [0u8; 64];
-            let (cap, cap_ink, badge, badge_ink): (&[u8], u32, &[u8], u32) = if t.is_present {
+            let mut cap_buf = [0u8; 96];
+            if t.is_present {
                 let mut n = 0;
                 let s = b"Y-axis accel: ";
                 cap_buf[..s.len()].copy_from_slice(s);
@@ -2462,25 +2825,114 @@ fn diag_row_pixel(
                 let take = mg.len().min(cap_buf.len() - n);
                 cap_buf[n..n + take].copy_from_slice(&mg[..take]);
                 n += take;
-                (&cap_buf[..n], SUCCESS_EMERALD, b"ONLINE", SUCCESS_EMERALD)
-            } else if t.error_msg_len > 0 {
-                (&t.error_msg[..t.error_msg_len], TEXT_MUTED, b"UNBOUND", TEXT_MUTED)
+                diag_row_head(
+                    x,
+                    y,
+                    cy,
+                    b"Accelerometer (3-Axis IMU)",
+                    &cap_buf[..n],
+                    SUCCESS_EMERALD,
+                    b"",
+                    b"ONLINE",
+                    SUCCESS_EMERALD,
+                    false,
+                )
             } else {
-                (b"Hardware unbound (no physical silicon)", TEXT_MUTED, b"UNBOUND", TEXT_MUTED)
-            };
-            diag_row_head(x, y, cy, b"Accelerometer (3-Axis IMU)", cap, cap_ink, badge, badge_ink)
+                let n = sensor_absence_caption(&mut cap_buf, app);
+                let (badge, badge_ink) = sensor_badge(app);
+                diag_row_head(
+                    x,
+                    y,
+                    cy,
+                    b"Accelerometer (3-Axis IMU)",
+                    &cap_buf[..n],
+                    TEXT_MUTED,
+                    b"",
+                    badge,
+                    badge_ink,
+                    false,
+                )
+            }
         }
         1 => {
-            let (cap, cap_ink, badge, badge_ink): (&[u8], u32, &[u8], u32) = if t.is_present {
-                (b"Roll, pitch & yaw angular rate active", SUCCESS_EMERALD, b"ONLINE", SUCCESS_EMERALD)
-            } else {
-                (b"Hardware unbound (no physical silicon)", TEXT_MUTED, b"UNBOUND", TEXT_MUTED)
-            };
-            diag_row_head(x, y, cy, b"Gyroscope (Angular Rate)", cap, cap_ink, badge, badge_ink)
+            // WHY this row never claims a reading: the kernel's
+            // `sys_sensor_read` serialises orientation, one acceleration
+            // axis, ambient lux and the proximity flag - and no angular rate
+            // of any kind. There is no gyro axis in the payload to decode, so
+            // the honest card names the absence instead of describing a
+            // gyroscope that is spinning.
+            diag_row_head(
+                x,
+                y,
+                cy,
+                b"Gyroscope (Angular Rate)",
+                b"The platform reports no gyroscope axis",
+                TEXT_MUTED,
+                b"",
+                b"NOT REPORTED",
+                TEXT_MUTED,
+                false,
+            )
         }
         2 => {
-            let mut cap_buf = [0u8; 64];
-            let (cap, cap_ink, badge, badge_ink): (&[u8], u32, &[u8], u32) = if t.is_present {
+            // The screen orientation. WHY this row exists: the platform
+            // reports an orientation in the sensor payload, and the card that
+            // used to show it was titled for a magnetic field sensor - a
+            // card for a device the kernel does not have, displaying a
+            // reading from one it does. The reading is real; the title was
+            // the fabrication, so the title changed and the reading stayed.
+            let mut cap_buf = [0u8; 96];
+            if t.is_present {
+                if t.orientation_len > 0 {
+                    let mut n = push_suffix(&mut cap_buf, 0, b"Orientation: ");
+                    n = push_platform_text(&mut cap_buf, n, &t.orientation[..t.orientation_len]);
+                    diag_row_head(
+                        x,
+                        y,
+                        cy,
+                        b"Screen Orientation",
+                        &cap_buf[..n],
+                        SUCCESS_EMERALD,
+                        b"",
+                        b"ONLINE",
+                        SUCCESS_EMERALD,
+                        false,
+                    )
+                } else {
+                    let n = copy_text(&mut cap_buf, b"The platform reported no screen orientation");
+                    diag_row_head(
+                        x,
+                        y,
+                        cy,
+                        b"Screen Orientation",
+                        &cap_buf[..n],
+                        TEXT_MUTED,
+                        b"",
+                        b"UNAVAILABLE",
+                        TEXT_MUTED,
+                        false,
+                    )
+                }
+            } else {
+                let n = sensor_absence_caption(&mut cap_buf, app);
+                let (badge, badge_ink) = sensor_badge(app);
+                diag_row_head(
+                    x,
+                    y,
+                    cy,
+                    b"Screen Orientation",
+                    &cap_buf[..n],
+                    TEXT_MUTED,
+                    b"",
+                    badge,
+                    badge_ink,
+                    false,
+                )
+            }
+        }
+        3 => {
+            let mut cap_buf = [0u8; 96];
+            if t.is_present {
                 let mut n = 0;
                 let s = b"Ambient illuminance: ";
                 cap_buf[..s.len()].copy_from_slice(s);
@@ -2491,60 +2943,160 @@ fn diag_row_pixel(
                 let take = lx.len().min(cap_buf.len() - n);
                 cap_buf[n..n + take].copy_from_slice(&lx[..take]);
                 n += take;
-                (&cap_buf[..n], SUCCESS_EMERALD, b"ONLINE", SUCCESS_EMERALD)
+                diag_row_head(
+                    x,
+                    y,
+                    cy,
+                    b"Ambient Light Sensor",
+                    &cap_buf[..n],
+                    SUCCESS_EMERALD,
+                    b"",
+                    b"ONLINE",
+                    SUCCESS_EMERALD,
+                    false,
+                )
             } else {
-                (b"Hardware unbound (no physical silicon)", TEXT_MUTED, b"UNBOUND", TEXT_MUTED)
-            };
-            diag_row_head(x, y, cy, b"Ambient Light Sensor", cap, cap_ink, badge, badge_ink)
-        }
-        3 => {
-            let (cap, cap_ink, badge, badge_ink): (&[u8], u32, &[u8], u32) = if t.is_present {
-                if t.is_near {
-                    (b"Infrared proximity: object near (<5cm)", ACCENT, b"NEAR", ACCENT)
-                } else {
-                    (b"Infrared proximity: clear / far", SUCCESS_EMERALD, b"ONLINE", SUCCESS_EMERALD)
-                }
-            } else {
-                (b"Hardware unbound (no physical silicon)", TEXT_MUTED, b"UNBOUND", TEXT_MUTED)
-            };
-            diag_row_head(x, y, cy, b"Proximity Sensor (IR ToF)", cap, cap_ink, badge, badge_ink)
+                let n = sensor_absence_caption(&mut cap_buf, app);
+                let (badge, badge_ink) = sensor_badge(app);
+                diag_row_head(
+                    x,
+                    y,
+                    cy,
+                    b"Ambient Light Sensor",
+                    &cap_buf[..n],
+                    TEXT_MUTED,
+                    b"",
+                    badge,
+                    badge_ink,
+                    false,
+                )
+            }
         }
         4 => {
-            let (cap, cap_ink, badge, badge_ink): (&[u8], u32, &[u8], u32) = if t.is_present {
-                (b"Atmospheric pressure: nominal 1013.25 hPa", SUCCESS_EMERALD, b"ONLINE", SUCCESS_EMERALD)
-            } else {
-                (b"Hardware unbound (no physical silicon)", TEXT_MUTED, b"UNBOUND", TEXT_MUTED)
-            };
-            diag_row_head(x, y, cy, b"Barometer (Pressure)", cap, cap_ink, badge, badge_ink)
-        }
-        5 => {
-            let mut cap_buf = [0u8; 64];
-            let (cap, cap_ink, badge, badge_ink): (&[u8], u32, &[u8], u32) = if t.is_present {
-                if t.orientation_len > 0 {
-                    let mut n = 0;
-                    let s = b"Orientation: ";
-                    cap_buf[..s.len()].copy_from_slice(s);
-                    n += s.len();
-                    let ori = &t.orientation[..t.orientation_len];
-                    let take = ori.len().min(cap_buf.len() - n);
-                    cap_buf[n..n + take].copy_from_slice(&ori[..take]);
-                    n += take;
-                    (&cap_buf[..n], SUCCESS_EMERALD, b"ONLINE", SUCCESS_EMERALD)
+            let mut cap_buf = [0u8; 96];
+            if t.is_present {
+                // WHY 30 mm and not the 5 cm this used to print: the kernel's
+                // own threshold is `distance_mm < 30`
+                // (kernel/src/sensor/proximity.rs:19), so a card that
+                // announced a 50 mm near-range was describing a range the
+                // platform never used.
+                if t.is_near {
+                    diag_row_head(
+                        x,
+                        y,
+                        cy,
+                        b"Proximity Sensor (IR ToF)",
+                        b"Infrared proximity: object near (<30 mm)",
+                        ACCENT,
+                        b"",
+                        b"NEAR",
+                        ACCENT,
+                        false,
+                    )
                 } else {
-                    (b"Digital compass heading online", SUCCESS_EMERALD, b"ONLINE", SUCCESS_EMERALD)
+                    diag_row_head(
+                        x,
+                        y,
+                        cy,
+                        b"Proximity Sensor (IR ToF)",
+                        b"Infrared proximity: clear (>=30 mm)",
+                        SUCCESS_EMERALD,
+                        b"",
+                        b"ONLINE",
+                        SUCCESS_EMERALD,
+                        false,
+                    )
                 }
             } else {
-                (b"Hardware unbound (no physical silicon)", TEXT_MUTED, b"UNBOUND", TEXT_MUTED)
-            };
-            diag_row_head(x, y, cy, b"Magnetometer (Compass)", cap, cap_ink, badge, badge_ink)
+                let n = sensor_absence_caption(&mut cap_buf, app);
+                let (badge, badge_ink) = sensor_badge(app);
+                diag_row_head(
+                    x,
+                    y,
+                    cy,
+                    b"Proximity Sensor (IR ToF)",
+                    &cap_buf[..n],
+                    TEXT_MUTED,
+                    b"",
+                    badge,
+                    badge_ink,
+                    false,
+                )
+            }
+        }
+        5 => {
+            // The fuel gauge: the platform's own state of charge, voltage,
+            // temperature and capacity, with the charging state it reported.
+            let mut cap_buf = [0u8; 96];
+            let mut cap2_buf = [0u8; 48];
+            if app.battery_outcome == QueryOutcome::Reported {
+                let n = battery_reading_caption(&mut cap_buf, app);
+                let n2 = battery_charging_caption(&mut cap2_buf, app);
+                diag_row_head(
+                    x,
+                    y,
+                    cy,
+                    b"Fuel Gauge (Battery)",
+                    &cap_buf[..n],
+                    SUCCESS_EMERALD,
+                    &cap2_buf[..n2],
+                    b"REPORTED",
+                    SUCCESS_EMERALD,
+                    true,
+                )
+            } else {
+                let n = battery_absence_caption(&mut cap_buf, app);
+                let (badge, badge_ink) = battery_badge(app);
+                diag_row_head(
+                    x,
+                    y,
+                    cy,
+                    b"Fuel Gauge (Battery)",
+                    &cap_buf[..n],
+                    TEXT_MUTED,
+                    b"",
+                    badge,
+                    badge_ink,
+                    true,
+                )
+            }
         }
         _ => {
-            let (cap, cap_ink, badge, badge_ink): (&[u8], u32, &[u8], u32) = if app.thermal == TelemetryState::Reported {
-                (b"Multi-zone thermal telemetry monitored", SUCCESS_EMERALD, b"REPORTED", SUCCESS_EMERALD)
+            // The thermal zones: the platform's own per-zone temperatures,
+            // its cooling state and its throttling flag.
+            let mut cap_buf = [0u8; 96];
+            let mut cap2_buf = [0u8; 48];
+            if app.thermal_outcome == QueryOutcome::Reported {
+                let n = thermal_zone_caption(&mut cap_buf, app);
+                let n2 = thermal_cooling_caption(&mut cap2_buf, app);
+                diag_row_head(
+                    x,
+                    y,
+                    cy,
+                    b"Thermal Telemetry Zones",
+                    &cap_buf[..n],
+                    SUCCESS_EMERALD,
+                    &cap2_buf[..n2],
+                    b"REPORTED",
+                    SUCCESS_EMERALD,
+                    true,
+                )
             } else {
-                (b"Hardware unbound (no physical thermal zones)", TEXT_MUTED, b"UNBOUND", TEXT_MUTED)
-            };
-            diag_row_head(x, y, cy, b"Thermal Telemetry Zones", cap, cap_ink, badge, badge_ink)
+                let n = thermal_absence_caption(&mut cap_buf, app);
+                let (badge, badge_ink) = thermal_badge(app);
+                diag_row_head(
+                    x,
+                    y,
+                    cy,
+                    b"Thermal Telemetry Zones",
+                    &cap_buf[..n],
+                    TEXT_MUTED,
+                    b"",
+                    badge,
+                    badge_ink,
+                    true,
+                )
+            }
         }
     }
 }
@@ -2568,7 +3120,7 @@ fn sensors_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
     if y == DIVIDER_Y {
         return BORDER;
     }
-    for row in 0..7 {
+    for row in 0..DIAG_ROWS {
         let (cy, ch) = sensors_row_rect(row);
         if let Some(fill) = card_pixel(x, y, CONTENT_X, cy, CONTENT_W, ch, CARD_R) {
             let _ = fill;
@@ -2624,15 +3176,30 @@ fn row_pixel(
                 }
             }
             2 => {
+                // WHY the card asks the platform instead of asserting a motor:
+                // the platform's own sound path is a PC speaker, and the row
+                // used to carry a green "REPORTED" badge on a caption no
+                // query had ever produced.
+                let cap: &[u8] = match app.sound {
+                    HardwareAvailability::Available => b"PCM playback & tactile click feedback",
+                    HardwareAvailability::Emulated => b"PCM playback reported as emulated",
+                    HardwareAvailability::Unavailable => {
+                        b"No sound path reported by the platform"
+                    }
+                    HardwareAvailability::Unknown => {
+                        b"Sound path not reported by the platform"
+                    }
+                };
+                let (badge, badge_ink) = availability_badge(app.sound);
                 if let Some(c) = row_head(
                     x,
                     y,
                     cy,
                     b"Volume & Feedback",
-                    b"Haptic feedback motor & PCM master channel",
+                    cap,
                     TEXT_MUTED,
-                    b"REPORTED",
-                    SUCCESS_EMERALD,
+                    badge,
+                    badge_ink,
                 ) {
                     return c;
                 }
@@ -2652,12 +3219,16 @@ fn row_pixel(
                 }
             }
             _ => {
+                // WHY the caption names the platform's reason and not a
+                // generic "unavailable": the platform distinguishes a refused
+                // query from an unbound bus, and the row has to carry that
+                // difference to the user.
+                let mut cap_buf = [0u8; 96];
                 let (cap, cap_ink): (&[u8], u32) = if app.sensor_telemetry.is_present {
                     (b"Hardware IMU & ambient photodiode online", SUCCESS_EMERALD)
-                } else if app.sensor_telemetry.error_msg_len > 0 {
-                    (&app.sensor_telemetry.error_msg[..app.sensor_telemetry.error_msg_len], TEXT_MUTED)
                 } else {
-                    (b"Hardware unbound (platform truth contract)", TEXT_MUTED)
+                    let n = sensor_absence_caption(&mut cap_buf, app);
+                    (&cap_buf[..n], TEXT_MUTED)
                 };
                 if let Some(c) = row_head(
                     x,
@@ -2703,43 +3274,81 @@ fn row_pixel(
                 }
             }
             1 => {
+                // WHY the platform's own answer: the cellular controller is
+                // either there or it is not, and the row used to state a
+                // conclusion it had never drawn.
+                let cap: &[u8] = match app.cellular {
+                    HardwareAvailability::Available => {
+                        b"Cellular controller reported by the platform"
+                    }
+                    HardwareAvailability::Emulated => {
+                        b"Cellular controller reported as emulated"
+                    }
+                    HardwareAvailability::Unavailable => {
+                        b"No cellular controller reported by the platform"
+                    }
+                    HardwareAvailability::Unknown => {
+                        b"Cellular status not reported by the platform"
+                    }
+                };
+                let (badge, badge_ink) = availability_badge(app.cellular);
                 if let Some(c) = row_head(
                     x,
                     y,
                     cy,
                     b"Cellular Baseband",
-                    b"Cellular status unavailable",
+                    cap,
                     TEXT_MUTED,
-                    b"UNAVAILABLE",
-                    TEXT_MUTED,
+                    badge,
+                    badge_ink,
                 ) {
                     return c;
                 }
             }
             2 => {
+                // WHY this row no longer claims a radio is listening: the
+                // platform has no radio-control syscall, so there is no
+                // flight-mode state to report and nothing that is listening.
                 if let Some(c) = row_head(
                     x,
                     y,
                     cy,
                     b"Flight Mode Status",
-                    b"All sovereign radios enabled & listening",
+                    b"Flight mode not reported by the platform",
                     TEXT_MUTED,
-                    b"DISABLED",
+                    b"UNAVAILABLE",
                     TEXT_MUTED,
                 ) {
                     return c;
                 }
             }
             _ => {
+                // WHY the platform's own answer: the Bluetooth controller is
+                // either there or it is not.
+                let cap: &[u8] = match app.bluetooth {
+                    HardwareAvailability::Available => {
+                        b"Bluetooth controller reported by the platform"
+                    }
+                    HardwareAvailability::Emulated => {
+                        b"Bluetooth controller reported as emulated"
+                    }
+                    HardwareAvailability::Unavailable => {
+                        b"No Bluetooth controller reported by the platform"
+                    }
+                    HardwareAvailability::Unknown => {
+                        b"Bluetooth status not reported by the platform"
+                    }
+                };
+                let (badge, badge_ink) = availability_badge(app.bluetooth);
                 if let Some(c) = row_head(
                     x,
                     y,
                     cy,
                     b"Bluetooth Low Energy",
-                    b"Bluetooth status unavailable",
+                    cap,
                     TEXT_MUTED,
-                    b"UNAVAILABLE",
-                    TEXT_MUTED,
+                    badge,
+                    badge_ink,
                 ) {
                     return c;
                 }
@@ -2747,10 +3356,21 @@ fn row_pixel(
         },
         Section::Personal => match row {
             0 => {
-                let owner = if app.owner_name_len > 0 {
-                    &app.owner_name[..app.owner_name_len]
+                // WHY the card does not name an owner the store did not
+                // report: an identity and an "ACTIVE" badge are a claim, and
+                // the store had not answered when this card was drawn.
+                let (owner, badge, badge_ink) = if app.owner_name_len > 0 {
+                    (
+                        &app.owner_name[..app.owner_name_len],
+                        &b"REPORTED"[..],
+                        SUCCESS_EMERALD,
+                    )
                 } else {
-                    b"Sovereign Owner".as_slice()
+                    (
+                        &b"Owner name not reported by the settings store"[..],
+                        &b"UNAVAILABLE"[..],
+                        TEXT_MUTED,
+                    )
                 };
                 if let Some(c) = row_head(
                     x,
@@ -2758,18 +3378,29 @@ fn row_pixel(
                     cy,
                     b"Sovereign Identity",
                     owner,
-                    TEXT_MUTED,
-                    b"ACTIVE",
-                    SUCCESS_EMERALD,
+                    if app.owner_name_len > 0 { TEXT } else { TEXT_MUTED },
+                    badge,
+                    badge_ink,
                 ) {
                     return c;
                 }
             }
             1 => {
-                let status = if app.user_status_len > 0 {
-                    &app.user_status[..app.user_status_len]
+                // WHY the same rule: an "ENCRYPTED" badge on a phrase the
+                // store never returned asserted an encryption state that no
+                // syscall had reported.
+                let (status, badge, badge_ink) = if app.user_status_len > 0 {
+                    (
+                        &app.user_status[..app.user_status_len],
+                        &b"REPORTED"[..],
+                        SUCCESS_EMERALD,
+                    )
                 } else {
-                    b"Encrypted & Sovereign".as_slice()
+                    (
+                        &b"Status not reported by the settings store"[..],
+                        &b"UNAVAILABLE"[..],
+                        TEXT_MUTED,
+                    )
                 };
                 if let Some(c) = row_head(
                     x,
@@ -2777,9 +3408,9 @@ fn row_pixel(
                     cy,
                     b"Status Phrase",
                     status,
-                    ACCENT,
-                    b"ENCRYPTED",
-                    ACCENT,
+                    if app.user_status_len > 0 { ACCENT } else { TEXT_MUTED },
+                    badge,
+                    badge_ink,
                 ) {
                     return c;
                 }
@@ -2838,36 +3469,63 @@ fn row_pixel(
         },
         Section::Apps => match row {
             0 => {
+                // WHY the count is the registry's own: a "VERIFIED" badge on
+                // a number the app invented is a claim about the registry that
+                // the registry never made.
                 let mut abuf = [0u8; 64];
-                let mut an = write_decimal(app.app_count as u32, &mut abuf);
-                an = push_suffix(&mut abuf, an, b" verified sovereign packages");
+                let (an, badge, badge_ink) = match app.app_count {
+                    Some(count) => {
+                        let an = write_decimal(count as u32, &mut abuf);
+                        let an = push_suffix(&mut abuf, an, b" sovereign packages");
+                        (an, &b"VERIFIED"[..], SUCCESS_EMERALD)
+                    }
+                    None => {
+                        let msg = b"Package registry did not answer";
+                        let n = msg.len().min(abuf.len());
+                        abuf[..n].copy_from_slice(&msg[..n]);
+                        (n, &b"UNAVAILABLE"[..], TEXT_MUTED)
+                    }
+                };
                 if let Some(c) = row_head(
                     x,
                     y,
                     cy,
                     b"Installed Applications",
                     &abuf[..an],
-                    TEXT_MUTED,
-                    b"VERIFIED",
-                    SUCCESS_EMERALD,
+                    if app.app_count.is_some() { TEXT } else { TEXT_MUTED },
+                    badge,
+                    badge_ink,
                 ) {
                     return c;
                 }
             }
             1 => {
+                // WHY the same rule: a "MOUNTED" badge on a capacity the
+                // storage query never reported claimed a mounted volume.
                 let mut sbuf = [0u8; 64];
-                let mb = (app.storage_bytes / (1024 * 1024)) as u32;
-                let mut sn = write_decimal(mb, &mut sbuf);
-                sn = push_suffix(&mut sbuf, sn, b" MB root block storage mounted");
+                let (sn, badge, badge_ink) = match app.storage_bytes {
+                    Some(bytes) => {
+                        let mb = (bytes / (1024 * 1024)) as u32;
+                        let sn = write_decimal(mb, &mut sbuf);
+                        let sn = push_suffix(&mut sbuf, sn, b" MB root block storage");
+                        (sn, &b"REPORTED"[..], SUCCESS_EMERALD)
+                    }
+                    None => {
+                        let msg = b"Storage capacity not reported by the platform";
+                        let n = msg.len().min(sbuf.len());
+                        sbuf[..n].copy_from_slice(&msg[..n]);
+                        (n, &b"UNAVAILABLE"[..], TEXT_MUTED)
+                    }
+                };
                 if let Some(c) = row_head(
                     x,
                     y,
                     cy,
                     b"Storage & VFS Filesystem",
                     &sbuf[..sn],
-                    TEXT_MUTED,
-                    b"MOUNTED",
-                    SUCCESS_EMERALD,
+                    if app.storage_bytes.is_some() { TEXT } else { TEXT_MUTED },
+                    badge,
+                    badge_ink,
                 ) {
                     return c;
                 }
@@ -2903,31 +3561,56 @@ fn row_pixel(
         },
         Section::Power => match row {
             0 => {
-                let reported = app.battery == TelemetryState::Reported;
-                let (caption, badge, badge_ink) = if reported {
-                    (
-                        &b"Battery payload received"[..],
-                        &b"REPORTED"[..],
-                        SUCCESS_EMERALD,
-                    )
-                } else {
-                    (
-                        &b"Battery telemetry unavailable"[..],
-                        &b"UNAVAILABLE"[..],
+                // The fuel gauge. WHY the numbers are shown: the platform's
+                // payload carries the state of charge, the terminal voltage,
+                // the pack temperature and the capacity, and this card used to
+                // keep only a boolean and throw the rest away.
+                let mut cap_buf = [0u8; 96];
+                let mut cap2_buf = [0u8; 48];
+                if app.battery_outcome == QueryOutcome::Reported {
+                    let n = battery_reading_caption(&mut cap_buf, app);
+                    let n2 = battery_charging_caption(&mut cap2_buf, app);
+                    if let Some(c) = row_head(
+                        x,
+                        y,
+                        cy,
+                        b"Battery Fuel Gauge",
+                        &cap_buf[..n],
                         TEXT_MUTED,
-                    )
-                };
-                if let Some(c) = row_head(
-                    x,
-                    y,
-                    cy,
-                    b"Battery Fuel Gauge",
-                    caption,
-                    TEXT_MUTED,
-                    badge,
-                    badge_ink,
-                ) {
-                    return c;
+                        b"REPORTED",
+                        SUCCESS_EMERALD,
+                    ) {
+                        return c;
+                    }
+                    if let Some(c) = run_ink(
+                        x,
+                        y,
+                        DETAIL_X + ROW_PAD,
+                        cy + ROW_CAP2_DY,
+                        TYPE_H3,
+                        &cap2_buf[..n2],
+                        DETAIL_W - 2 * ROW_PAD,
+                        TEXT_MUTED,
+                        SURFACE,
+                        false,
+                    ) {
+                        return c;
+                    }
+                } else {
+                    let n = battery_absence_caption(&mut cap_buf, app);
+                    let (badge, badge_ink) = battery_badge(app);
+                    if let Some(c) = row_head(
+                        x,
+                        y,
+                        cy,
+                        b"Battery Fuel Gauge",
+                        &cap_buf[..n],
+                        TEXT_MUTED,
+                        badge,
+                        badge_ink,
+                    ) {
+                        return c;
+                    }
                 }
             }
             1 => {
@@ -3012,31 +3695,56 @@ fn row_pixel(
                 }
             }
             _ => {
-                let reported = app.thermal == TelemetryState::Reported;
-                let (caption, badge, badge_ink) = if reported {
-                    (
-                        &b"Thermal payload received"[..],
-                        &b"REPORTED"[..],
-                        SUCCESS_EMERALD,
-                    )
-                } else {
-                    (
-                        &b"Temperature telemetry unavailable"[..],
-                        &b"UNAVAILABLE"[..],
+                // The thermal governor. WHY the zones are shown: the payload
+                // carries all five zone temperatures, the cooling state and
+                // the throttling flag, and this card used to keep only a
+                // boolean and throw the rest away.
+                let mut cap_buf = [0u8; 96];
+                let mut cap2_buf = [0u8; 48];
+                if app.thermal_outcome == QueryOutcome::Reported {
+                    let n = thermal_zone_caption(&mut cap_buf, app);
+                    let n2 = thermal_cooling_caption(&mut cap2_buf, app);
+                    if let Some(c) = row_head(
+                        x,
+                        y,
+                        cy,
+                        b"Thermal Governor",
+                        &cap_buf[..n],
                         TEXT_MUTED,
-                    )
-                };
-                if let Some(c) = row_head(
-                    x,
-                    y,
-                    cy,
-                    b"Thermal Governor",
-                    caption,
-                    TEXT_MUTED,
-                    badge,
-                    badge_ink,
-                ) {
-                    return c;
+                        b"REPORTED",
+                        SUCCESS_EMERALD,
+                    ) {
+                        return c;
+                    }
+                    if let Some(c) = run_ink(
+                        x,
+                        y,
+                        DETAIL_X + ROW_PAD,
+                        cy + ROW_CAP2_DY,
+                        TYPE_H3,
+                        &cap2_buf[..n2],
+                        DETAIL_W - 2 * ROW_PAD,
+                        TEXT_MUTED,
+                        SURFACE,
+                        false,
+                    ) {
+                        return c;
+                    }
+                } else {
+                    let n = thermal_absence_caption(&mut cap_buf, app);
+                    let (badge, badge_ink) = thermal_badge(app);
+                    if let Some(c) = row_head(
+                        x,
+                        y,
+                        cy,
+                        b"Thermal Governor",
+                        &cap_buf[..n],
+                        TEXT_MUTED,
+                        badge,
+                        badge_ink,
+                    ) {
+                        return c;
+                    }
                 }
             }
         },
@@ -4511,7 +5219,7 @@ fn render_settings_band(surface: u32, app: &SettingsApp, y0: usize, y1: usize) {
                 y += 1;
             }
         }
-        let _ = std::surface_write(6, surface, offset, &chunk[..count]);
+        let _ = std::surface_write(surface, offset, &chunk[..count]);
         offset += count;
     }
 }
@@ -4542,34 +5250,26 @@ fn handle_tap(
     if is_subpage && std::design::back_button::contains(input.x as usize, input.y as usize) {
         if settings.sensors_open {
             settings.sensors_open = false;
-            std::log(
-                0,
-                "[SETTINGS APP] Sensors & Diagnostics sub-page dismissed.",
+            std::log("[SETTINGS APP] Sensors & Diagnostics sub-page dismissed.",
             )
             .ok();
         } else if settings.screen_lock_open {
             if !settings.screen_lock_cancel_step() {
                 settings.screen_lock_open = false;
-                std::log(
-                    0,
-                    "[SETTINGS APP] Screen lock panel dismissed.",
+                std::log("[SETTINGS APP] Screen lock panel dismissed.",
                 )
                 .ok();
             }
         } else if settings.wallpaper_open {
             settings.wallpaper_open = false;
-            std::log(
-                0,
-                "[SETTINGS APP] Wallpaper picker dismissed without applying a change.",
+            std::log("[SETTINGS APP] Wallpaper picker dismissed without applying a change.",
             )
             .ok();
         } else {
             match settings.current_section {
                 Some(_) => {
                     settings.current_section = None;
-                    std::log(
-                        0,
-                        "[SETTINGS APP] Back navigation: returned to the System Space landing grid.",
+                    std::log("[SETTINGS APP] Back navigation: returned to the System Space landing grid.",
                     )
                     .ok();
                 }
@@ -4577,13 +5277,11 @@ fn handle_tap(
             }
         }
     } else if input.x >= 240 && input.x <= 480 && input.y >= 1400 {
-        std::log(
-            0,
-            "[SETTINGS APP] Home gesture pressed. Exiting to launcher.",
+        std::log("[SETTINGS APP] Home gesture pressed. Exiting to launcher.",
         )
         .ok();
         if surface > 0 {
-            let _ = std::surface_destroy(6, surface);
+            let _ = std::surface_destroy(surface);
         }
         std::exit_with_code(0);
     } else if settings.sensors_open {
@@ -4600,7 +5298,7 @@ fn handle_tap(
                         SL_PROMPT_Y - 24,
                         SL_KEYS_Y,
                     );
-                    let _ = std::surface_flip(6);
+                    let _ = std::surface_flip();
                     *repainted_band = true;
                 }
             }
@@ -4613,7 +5311,7 @@ fn handle_tap(
                         SL_PROMPT_Y - 24,
                         SL_KEYS_Y,
                     );
-                    let _ = std::surface_flip(6);
+                    let _ = std::surface_flip();
                     *repainted_band = true;
                 }
             }
@@ -4630,7 +5328,7 @@ fn handle_tap(
                         SL_PROMPT_Y - 24,
                         SL_KEYS_Y,
                     );
-                    let _ = std::surface_flip(6);
+                    let _ = std::surface_flip();
                     *repainted_band = true;
                 }
             }
@@ -4651,15 +5349,13 @@ fn handle_tap(
         match wallpaper_at(input.x, input.y) {
             Some(WallpaperHit::Target(i)) => {
                 settings.wallpaper_target = WallpaperTarget::from_index(i);
-                std::log(0, "[SETTINGS APP] Wallpaper target changed.").ok();
+                std::log("[SETTINGS APP] Wallpaper target changed.").ok();
             }
             Some(WallpaperHit::Cell(i)) => {
                 if i < std::design::walls::SCENES.len() {
                     let scene = &std::design::walls::SCENES[i];
                     settings.wallpaper_pending = Some(scene);
-                    std::log(
-                        0,
-                        "[SETTINGS APP] Wallpaper selected for preview; nothing written yet.",
+                    std::log("[SETTINGS APP] Wallpaper selected for preview; nothing written yet.",
                     )
                     .ok();
                 }
@@ -4667,7 +5363,7 @@ fn handle_tap(
             Some(WallpaperHit::Apply) => settings.apply_wallpaper(),
             Some(WallpaperHit::Reset) => settings.reset_wallpaper(),
             Some(WallpaperHit::ChooseGallery) => {
-                std::log(0, "[SETTINGS APP] Launching Gallery for wallpaper selection.").ok();
+                std::log("[SETTINGS APP] Launching Gallery for wallpaper selection.").ok();
                 let _ = std::app_launch("org.interos.gallery");
             }
             None => {}
@@ -4697,9 +5393,7 @@ fn handle_tap(
             settings.display_about_device();
         }
         settings.refresh_wallpaper_values();
-        std::log(
-            0,
-            "[SETTINGS APP] System Space category opened; tab switched.",
+        std::log("[SETTINGS APP] System Space category opened; tab switched.",
         )
         .ok();
     } else if let Some(section) = settings.current_section {
@@ -4717,9 +5411,7 @@ fn handle_tap(
                 ) {
                     settings.sensors_open = true;
                     settings.refresh_thermals_and_sensors();
-                    std::log(
-                        0,
-                        "[SETTINGS APP] Sensors & Diagnostics sub-page opened.",
+                    std::log("[SETTINGS APP] Sensors & Diagnostics sub-page opened.",
                     )
                     .ok();
                 }
@@ -4770,9 +5462,7 @@ fn handle_tap(
             settings.display_about_device();
         }
         settings.refresh_wallpaper_values();
-        std::log(
-            0,
-            "[SETTINGS APP] System Space category opened; tab switched.",
+        std::log("[SETTINGS APP] System Space category opened; tab switched.",
         )
         .ok();
     }
@@ -4780,18 +5470,18 @@ fn handle_tap(
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    std::log(
-        0,
-        "[SETTINGS APP (Ring 3)] System Space (Sovereign Settings & Diagnostics) online.",
+    std::log("[SETTINGS APP (Ring 3)] System Space (Sovereign Settings & Diagnostics) online.",
     )
     .ok();
 
-    // Slot 6 is FrameBufferDirect
-    let surface = match std::surface_create(6, W as u32, H as u32, 200) {
+    // WHY there is no slot to resolve: the kernel authorises the surface by
+    // the capability's *type*, so the app names the authority it wants and
+    // the kernel finds it. A slot number here would be a position in this
+    // app's capability table, and the position depends on the order the
+    // kernel inserted the capabilities in.
+    let surface = match std::surface_create(W as u32, H as u32, 200) {
         Ok(id) => {
-            std::log(
-                0,
-                "[SETTINGS APP] DRM/KMS Client Surface allocated (z=200).",
+            std::log("[SETTINGS APP] DRM/KMS Client Surface allocated (z=200).",
             )
             .ok();
             id
@@ -4803,6 +5493,9 @@ pub extern "C" fn _start() -> ! {
 
     // 1. Inspect Wireless Configuration (Network detail)
     settings.refresh_wireless();
+
+    // 2. Ask the platform which hardware categories it has (Device + Network)
+    settings.refresh_hardware_inventory();
 
     // 2. Inspect Power & Battery State (Power detail)
     settings.refresh_power();
@@ -4827,8 +5520,8 @@ pub extern "C" fn _start() -> ! {
     // Initial render & presentation
     if surface > 0 {
         render_settings_ui(surface, &settings);
-        let _ = std::surface_flip(6);
-        std::log(0, "[SETTINGS APP] Settings UI presented to scanout buffer.").ok();
+        let _ = std::surface_flip();
+        std::log("[SETTINGS APP] Settings UI presented to scanout buffer.").ok();
     }
 
     // 6. Interactive Event Loop
@@ -4846,13 +5539,11 @@ pub extern "C" fn _start() -> ! {
                 };
                 while std::input_event_poll(&mut input).is_ok() {
                     if input.kind == 4 || input.kind == 6 || input.kind == 7 || input.kind == 8 || input.kind == 10 {
-                        std::log(
-                            0,
-                            "[SETTINGS APP] Navigation gesture recognized. Exiting to launcher.",
+                        std::log("[SETTINGS APP] Navigation gesture recognized. Exiting to launcher.",
                         )
                         .ok();
                         if surface > 0 {
-                            let _ = std::surface_destroy(6, surface);
+                            let _ = std::surface_destroy(surface);
                         }
                         std::exit_with_code(0);
                     }
@@ -4861,7 +5552,7 @@ pub extern "C" fn _start() -> ! {
                         handle_tap(&mut settings, &input, surface, &mut repainted_band);
                         if surface > 0 && !repainted_band {
                             render_settings_ui(surface, &settings);
-                            let _ = std::surface_flip(6);
+                            let _ = std::surface_flip();
                         }
                     }
                 }
@@ -4873,6 +5564,6 @@ pub extern "C" fn _start() -> ! {
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
-    std::log(0, "[SETTINGS APP] Panic detected! Terminating task...").ok();
+    std::log("[SETTINGS APP] Panic detected! Terminating task...").ok();
     std::exit();
 }

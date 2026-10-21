@@ -301,6 +301,38 @@ pub enum SensorStatus {
     Live,
 }
 
+/// The platform's own answer about whether a hardware category is present.
+///
+/// WHY the app asks instead of assuming: the kernel publishes three answers
+/// per category - present, emulated, absent - and a card that assumed the
+/// first one would claim hardware the platform says it does not have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HardwareAvailability {
+    /// The platform reports the category as present.
+    Available,
+    /// The platform reports the category as present but emulated.
+    Emulated,
+    /// The platform reports the category as absent.
+    Unavailable,
+    /// The platform did not answer.
+    Unknown,
+}
+
+/// Decodes the status code the kernel's `settings_hardware_status` returns.
+///
+/// WHY the codes are the kernel's: `kernel/src/syscall/mod.rs` maps
+/// `HardwareAvailability::Available` to 0, `SimulatedVirtual` to 1 and
+/// `Unavailable` to 2. Decoding them here keeps the mapping in one place
+/// that a test can pin against the kernel.
+pub fn parse_hardware_availability(code: i64) -> HardwareAvailability {
+    match code {
+        0 => HardwareAvailability::Available,
+        1 => HardwareAvailability::Emulated,
+        2 => HardwareAvailability::Unavailable,
+        _ => HardwareAvailability::Unknown,
+    }
+}
+
 /// Decoded sensor subsystem telemetry. Zero mock/fake values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SensorTelemetry {
@@ -310,7 +342,16 @@ pub struct SensorTelemetry {
     pub is_near: bool,
     pub orientation: [u8; 24],
     pub orientation_len: usize,
-    pub error_msg: [u8; 64],
+    /// The kernel's own `status` field, quoted verbatim.
+    ///
+    /// WHY this is kept: the platform publishes `NOT_IMPLEMENTED` next to its
+    /// `error` string when no sensor is bound, and that is the platform's own
+    /// word for the situation. Replacing it with the app's own wording loses
+    /// the one statement the platform actually made.
+    pub status: [u8; 24],
+    pub status_len: usize,
+    /// The kernel's own `error` string, quoted verbatim.
+    pub error_msg: [u8; 96],
     pub error_msg_len: usize,
 }
 
@@ -322,8 +363,124 @@ impl SensorTelemetry {
         is_near: false,
         orientation: [0u8; 24],
         orientation_len: 0,
-        error_msg: [0u8; 64],
+        status: [0u8; 24],
+        status_len: 0,
+        error_msg: [0u8; 96],
         error_msg_len: 0,
+    };
+}
+
+/// Why a platform query did not produce a reading.
+///
+/// WHY this is not a boolean: the platform tells three different stories -
+/// "the call was refused", "nothing is bound to that bus" and "the payload
+/// came back empty" - and they are not the same sentence. Collapsing them
+/// into one `Unavailable` is what let the app claim a device was offline
+/// when in fact it had never been asked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueryOutcome {
+    /// The call succeeded and the payload carries a reading.
+    Reported,
+    /// The call succeeded and the payload declares that no hardware is bound.
+    Absent,
+    /// The call succeeded but the payload carried no bytes at all.
+    Empty,
+    /// The call succeeded but the payload did not carry the expected fields.
+    Malformed,
+    /// The kernel returned a negative status; this is that status code.
+    Failed(i64),
+}
+
+/// The platform's own name for a negative `SyscallResult`.
+///
+/// WHY the names and not the bare numbers: the kernel publishes exactly these
+/// spellings (`kernel/src/syscall/mod.rs`, `enum SyscallResult`), so quoting
+/// them is quoting the platform rather than inventing a vocabulary.
+pub fn syscall_status_name(code: i64) -> &'static [u8] {
+    match code {
+        -1 => b"PermissionDenied",
+        -2 => b"InvalidSlot",
+        -3 => b"InvalidArguments",
+        -12 => b"DeviceError",
+        _ => b"UnknownStatus",
+    }
+}
+
+/// Decoded multi-zone thermal telemetry, exactly as the kernel serialised it.
+///
+/// WHY the zones are named rather than summed: the governor makes its
+/// decisions per zone, so a single "average temperature" is a number the
+/// platform never produced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThermalTelemetry {
+    /// The kernel's own `present` flag.
+    pub present: bool,
+    pub cpu_c: i64,
+    pub gpu_c: i64,
+    pub battery_c: i64,
+    pub modem_c: i64,
+    pub charging_c: i64,
+    /// The cooling state, spelled exactly as the kernel spelled it
+    /// (`Normal`, `Warm`, `Alert`, `Throttled`, `Critical`).
+    pub state: [u8; 16],
+    pub state_len: usize,
+    /// The kernel's own throttling flag.
+    pub throttling: bool,
+}
+
+impl ThermalTelemetry {
+    pub const EMPTY: Self = Self {
+        present: false,
+        cpu_c: 0,
+        gpu_c: 0,
+        battery_c: 0,
+        modem_c: 0,
+        charging_c: 0,
+        state: [0u8; 16],
+        state_len: 0,
+        throttling: false,
+    };
+}
+
+/// Decoded fuel-gauge telemetry, exactly as the kernel serialised it.
+///
+/// WHY `present` and `telemetry_valid` are both kept: the payload carries
+/// them separately, and the numbers in an absent payload are zeros that were
+/// never measured. A card that prints them is printing the absence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BatteryTelemetry {
+    /// The kernel's own `present` flag.
+    pub present: bool,
+    /// The kernel's own `telemetry_valid` flag.
+    pub telemetry_valid: bool,
+    pub voltage_mv: i64,
+    /// State of charge, in percent.
+    pub soc: i64,
+    pub capacity_mah: i64,
+    /// The charging state, spelled exactly as the kernel spelled it
+    /// (`Discharging`, `Charging`, `Full`, `Disconnected`).
+    pub charging: [u8; 20],
+    pub charging_len: usize,
+    pub temp_c: i64,
+    /// The DVFS governor the payload reported, when the payload carried one.
+    pub governor: [u8; 20],
+    pub governor_len: usize,
+    pub mhz: i64,
+}
+
+impl BatteryTelemetry {
+    pub const EMPTY: Self = Self {
+        present: false,
+        telemetry_valid: false,
+        voltage_mv: 0,
+        soc: 0,
+        capacity_mah: 0,
+        charging: [0u8; 20],
+        charging_len: 0,
+        temp_c: 0,
+        governor: [0u8; 20],
+        governor_len: 0,
+        mhz: 0,
     };
 }
 
@@ -419,6 +576,12 @@ pub fn parse_sensor_payload(payload: &[u8]) -> SensorTelemetry {
         }
         Some(false) => {
             result.is_present = false;
+            // WHY both strings are kept: the platform states the situation in
+            // `status` and explains it in `error`, and the app quotes both
+            // rather than paraphrasing either.
+            if let Some(n) = json_str(payload, b"status", &mut result.status) {
+                result.status_len = n;
+            }
             if let Some(n) = json_str(payload, b"error", &mut result.error_msg) {
                 result.error_msg_len = n;
             }
@@ -428,6 +591,55 @@ pub fn parse_sensor_payload(payload: &[u8]) -> SensorTelemetry {
         }
     }
     result
+}
+
+/// Decodes a real `thermal_query()` JSON payload from the kernel.
+///
+/// WHY this returns `None` for a malformed payload: a payload without the
+/// fields is not a reading of zero, it is a payload this app cannot read, and
+/// the two must not look the same on screen.
+pub fn parse_thermal_payload(payload: &[u8]) -> Option<ThermalTelemetry> {
+    let present = json_bool(payload, b"present")?;
+    let mut result = ThermalTelemetry {
+        present,
+        ..ThermalTelemetry::EMPTY
+    };
+    if !present {
+        // The platform declared that nothing is bound; there are no zone
+        // numbers to read and the card must say so rather than print zeros.
+        return Some(result);
+    }
+    result.cpu_c = json_i64(payload, b"cpu")?;
+    result.gpu_c = json_i64(payload, b"gpu")?;
+    result.battery_c = json_i64(payload, b"battery")?;
+    result.modem_c = json_i64(payload, b"modem")?;
+    result.charging_c = json_i64(payload, b"charging")?;
+    result.state_len = json_str(payload, b"state", &mut result.state)?;
+    result.throttling = json_bool(payload, b"throttling")?;
+    Some(result)
+}
+
+/// Decodes a real `battery_query()` JSON payload from the kernel.
+///
+/// WHY the absent payload is still decoded: the platform reports "no fuel
+/// gauge" as `present:false` with zeroes, and the app has to be able to say
+/// that the zeroes are the platform's answer rather than a measurement.
+pub fn parse_battery_payload(payload: &[u8]) -> Option<BatteryTelemetry> {
+    let present = json_bool(payload, b"present")?;
+    let telemetry_valid = json_bool(payload, b"telemetry_valid").unwrap_or(present);
+    let mut result = BatteryTelemetry {
+        present,
+        telemetry_valid,
+        ..BatteryTelemetry::EMPTY
+    };
+    result.voltage_mv = json_i64(payload, b"voltage_mv").unwrap_or(0);
+    result.soc = json_i64(payload, b"soc").unwrap_or(0);
+    result.capacity_mah = json_i64(payload, b"capacity").unwrap_or(0);
+    result.temp_c = json_i64(payload, b"temp").unwrap_or(0);
+    result.charging_len = json_str(payload, b"charging", &mut result.charging).unwrap_or(0);
+    result.governor_len = json_str(payload, b"governor", &mut result.governor).unwrap_or(0);
+    result.mhz = json_i64(payload, b"mhz").unwrap_or(0);
+    Some(result)
 }
 
 #[cfg(test)]
@@ -554,6 +766,112 @@ mod tests {
         let t = parse_sensor_payload(payload);
         assert!(!t.is_present);
         assert_eq!(&t.error_msg[..t.error_msg_len], b"No physical IMU or ambient sensor detected");
+        assert_eq!(&t.status[..t.status_len], b"NOT_IMPLEMENTED");
+    }
+
+    #[test]
+    fn test_sensor_payload_carries_no_gyroscope_axis() {
+        // The kernel's `sys_sensor_read` serialises orientation, accel, lux
+        // and near - and no angular rate of any kind. Nothing this app can
+        // decode may be presented as a gyroscope reading.
+        let payload: &[u8] = br#"{"present":true,"orientation":"Portrait","accel":980,"lux":450,"near":false}"#;
+        let t = parse_sensor_payload(payload);
+        assert!(t.is_present);
+        for axis in [&b"gyro"[..], &b"yaw"[..], &b"pitch"[..], &b"roll"[..]] {
+            assert!(
+                !payload.windows(axis.len()).any(|w| w == axis),
+                "the platform's sensor payload must not carry a gyroscope axis"
+            );
+        }
+    }
+
+    #[test]
+    fn test_thermal_zones_are_decoded_not_guessed() {
+        let payload = br#"{"present":true,"cpu":42,"gpu":39,"battery":31,"modem":28,"charging":30,"state":"Normal","throttling":false}"#;
+        let t = parse_thermal_payload(payload).expect("thermal payload decodes");
+        assert!(t.present);
+        assert_eq!(t.cpu_c, 42);
+        assert_eq!(t.gpu_c, 39);
+        assert_eq!(t.battery_c, 31);
+        assert_eq!(t.modem_c, 28);
+        assert_eq!(t.charging_c, 30);
+        assert_eq!(&t.state[..t.state_len], b"Normal");
+        assert!(!t.throttling);
+    }
+
+    #[test]
+    fn test_thermal_throttling_flag_is_the_kernels_own() {
+        let payload = br#"{"present":true,"cpu":70,"gpu":68,"battery":60,"modem":55,"charging":58,"state":"Throttled","throttling":true}"#;
+        let t = parse_thermal_payload(payload).expect("thermal payload decodes");
+        assert!(t.throttling);
+        assert_eq!(&t.state[..t.state_len], b"Throttled");
+    }
+
+    #[test]
+    fn test_thermal_absent_payload_carries_no_zone_numbers() {
+        let payload = br#"{"present":false}"#;
+        let t = parse_thermal_payload(payload).expect("absent payload still decodes");
+        assert!(!t.present);
+        assert_eq!(t.cpu_c, 0);
+        assert_eq!(t.state_len, 0);
+    }
+
+    #[test]
+    fn test_thermal_malformed_payload_is_rejected() {
+        assert!(parse_thermal_payload(br#"{"present":true,"cpu":42}"#).is_none());
+        assert!(parse_thermal_payload(br#"{"cpu":42}"#).is_none());
+    }
+
+    #[test]
+    fn test_battery_reading_is_decoded_field_by_field() {
+        let payload = br#"{"present":true,"telemetry_valid":true,"voltage_mv":4046,"soc":78,"capacity":3150,"charging":"Discharging","temp":25,"governor":"Balanced","mhz":1000}"#;
+        let b = parse_battery_payload(payload).expect("battery payload decodes");
+        assert!(b.present);
+        assert!(b.telemetry_valid);
+        assert_eq!(b.voltage_mv, 4046);
+        assert_eq!(b.soc, 78);
+        assert_eq!(b.capacity_mah, 3150);
+        assert_eq!(&b.charging[..b.charging_len], b"Discharging");
+        assert_eq!(b.temp_c, 25);
+    }
+
+    #[test]
+    fn test_battery_absent_payload_is_not_a_zero_percent_reading() {
+        let payload = br#"{"present":false,"telemetry_valid":false,"voltage_mv":0,"soc":0,"capacity":0,"charging":"Disconnected","temp":0,"governor":"Balanced","mhz":1000}"#;
+        let b = parse_battery_payload(payload).expect("absent payload still decodes");
+        assert!(!b.present);
+        assert!(!b.telemetry_valid);
+        // The zeros are the platform's absence, so a card must not present
+        // them as a measurement.
+        assert_eq!(b.soc, 0);
+        assert_eq!(&b.charging[..b.charging_len], b"Disconnected");
+    }
+
+    #[test]
+    fn test_platform_status_names_are_the_kernels_own() {
+        assert_eq!(syscall_status_name(-1), b"PermissionDenied");
+        assert_eq!(syscall_status_name(-2), b"InvalidSlot");
+        assert_eq!(syscall_status_name(-3), b"InvalidArguments");
+        assert_eq!(syscall_status_name(-12), b"DeviceError");
+    }
+
+    #[test]
+    fn test_hardware_availability_is_decoded_from_the_kernels_codes() {
+        assert_eq!(
+            parse_hardware_availability(0),
+            HardwareAvailability::Available
+        );
+        assert_eq!(
+            parse_hardware_availability(1),
+            HardwareAvailability::Emulated
+        );
+        assert_eq!(
+            parse_hardware_availability(2),
+            HardwareAvailability::Unavailable
+        );
+        assert_eq!(
+            parse_hardware_availability(-1),
+            HardwareAvailability::Unknown
+        );
     }
 }
-
