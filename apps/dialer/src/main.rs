@@ -17,19 +17,40 @@
 //!   handler at all.
 //!
 //! Live vs. honestly-disabled controls (nothing here is drawn and inert any more):
-//! - The segmented tabs and the bottom dock are both live. Dial, Recents and
-//!   Contacts are three real sections; the dock's Favorites slot opens the
-//!   contacts list filtered to the contacts the user starred.
+//! - The segmented tabs and the bottom dock are both live. Dial, Recents,
+//!   Contacts and Settings are four real sections; the dock's Favorites slot
+//!   opens the contacts list filtered to the contacts the user starred.
 //! - Recents is backed by a real ledger of every dial attempt this session made
 //!   and the outcome the telephony service actually returned for it.
 //! - Contacts is backed by a real, user-created store (`ContactStore`): browse,
 //!   add, edit, delete, star, and dial by name or by an entered number.
+//! - Both long lists scroll. The recents ledger and the contact list are taller
+//!   than the window they are shown in, so they carry the platform's scroll
+//!   model and a visible thumb; a row below the fold used to be unreachable.
 //! - The signal bars are drawn from the real `"bars"` field of the modem
 //!   telemetry, not from a boolean. The battery is drawn only when
 //!   `battery_query` actually returned a state-of-charge; otherwise nothing is
 //!   drawn there, as the browser does for telemetry it does not receive.
 //! - The call control is drawn recessed while the number field is empty, because
 //!   there is nothing it could dial.
+//!
+//! THE SETTINGS SURFACE AND WHAT THE PLATFORM ACTUALLY SUPPORTS:
+//! - The ringtone picker is built from the platform's document index, so it
+//!   offers the audio documents the device really holds, and choosing one
+//!   writes the device's `audio.ringtone` slot.
+//! - The keypad-tone toggle is a real preference, stored in the settings store.
+//! - The default-SIM choice is NOT offered: the platform exposes one SIM
+//!   profile and no subscription-selection call, so the row says so instead of
+//!   offering a choice that cannot be made.
+//! - The call-duration row says that the platform's telephony telemetry
+//!   carries no duration, because the app no longer counts one itself.
+//!
+//! THE CALL DURATION IS NOT COUNTED, AND NOT SHOWN:
+//! the platform's telephony telemetry reports the modem's call state and its
+//! signal readings, and no duration. The app used to keep a counter of its
+//! own, which could only ever be the app's own ticks rather than a fact about
+//! the call, so the counter is gone and the surface says the platform reports
+//! no duration.
 //!
 //! WHAT THE CONTACT STORE IS AND IS NOT (read before changing any of it):
 //! the records are real user input held in fixed-size arrays, and every mutation
@@ -63,13 +84,20 @@
 
 use interos_std::design::components;
 use interos_std::design::outline_text;
+use interos_std::design::scroll::ScrollState;
 
 use core::panic::PanicInfo;
 use interos_std as std;
 use dialer::theme::{type_scale, THEME, Theme};
 use interos_std::design::color;
 use dialer::ModemCallState;
-
+use dialer::{
+    contacts_scroll_extents, dtmf_enabled, parse_audio_documents, put_decimal,
+    recents_scroll_extents, set_dtmf_enabled, RingtoneChoice, SettingsRow,
+    CONTACT_ROW_H as LIB_CONTACT_ROW_H, CONTACTS_LIST_Y0 as LIB_CONTACTS_LIST_Y0,
+    CONTACTS_VIEWPORT_Y1 as LIB_CONTACTS_VIEWPORT_Y1, RECENTS_ROW_H as LIB_RECENTS_ROW_H,
+    RECENTS_VIEWPORT_Y1 as LIB_RECENTS_VIEWPORT_Y1, RECENTS_Y0 as LIB_RECENTS_Y0,
+};
 
 /// The platform's corner radii, under the short names the renderer uses.
 ///
@@ -106,6 +134,11 @@ pub enum CallState {
 /// WHY `Contacts` exists now: the app owns a real contact store
 /// (`ContactStore`), so the tab and both dock slots that used to imply a
 /// contacts screen have something real behind them.
+///
+/// WHY `Settings` exists now: the dialer's design document asks for a
+/// settings surface, and the platform supports some of what it asks for: the
+/// device's ringtone slot and a settings store. The surface also says which
+/// of the requested settings the platform does not offer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DialerSection {
     /// The 3x4 dial pad and the call controls.
@@ -114,6 +147,9 @@ pub enum DialerSection {
     Recents = 1,
     /// The user's contacts: browse, add, edit, delete, star and dial.
     Contacts = 2,
+    /// The dialer's own settings: the ringtone, the keypad tone and the
+    /// choices the platform does not offer.
+    Settings = 3,
 }
 
 /// Real outcome of the last call attempt, drawn under the dialed number.
@@ -152,6 +188,20 @@ impl CallOutcome {
             CallOutcome::EmergencyRefused => b"Emergency call refused by the telephony service",
         }
     }
+
+    /// The line that says the platform reports no call duration.
+    ///
+    /// WHY it is drawn only for a connected call: a duration is a fact about a
+    /// call that is up, and the platform's telephony telemetry carries the
+    /// modem's call state and its signal readings and no duration at all. The
+    /// app used to keep a counter of its own and show it, which was the app's
+    /// ticks rather than a fact about the call.
+    fn duration_note(&self) -> &'static [u8] {
+        match self {
+            CallOutcome::Connected => b"The platform reports no call duration",
+            _ => b"",
+        }
+    }
 }
 
 /// Asks the modem what state its call is in.
@@ -177,13 +227,79 @@ const HANDOFF_KEY: &str = "dialer.handoff.recipient.v1";
 /// The messaging app this app hands a recipient to.
 const MESSAGING_APP_ID: &str = "org.interos.messages";
 
+/// The message type the hand-off is sent under.
+///
+/// WHY a number and not a name: the IPC message type is a number on the wire,
+/// and this app is the only thing that both sends and receives it.
+const HANDOFF_MSG_TYPE: u32 = 0x4449_414C;
+
+/// Logs a line that carries a platform error code.
+///
+/// WHY the code is in the line and not beside it: a report of a refusal that
+/// does not carry the number the platform returned is not a report.
+fn log_with_code(prefix: &str, code: i64) {
+    let mut buf = [0u8; 160];
+    let mut n = 0usize;
+    for byte in prefix.as_bytes() {
+        if n >= buf.len() {
+            break;
+        }
+        buf[n] = *byte;
+        n += 1;
+    }
+    if n < buf.len() {
+        buf[n] = b' ';
+        n += 1;
+    }
+    if code < 0 && n < buf.len() {
+        buf[n] = b'-';
+        n += 1;
+    }
+    n += put_decimal(code.unsigned_abs() as u32, &mut buf[n..]);
+    if let Ok(text) = core::str::from_utf8(&buf[..n]) {
+        std::log(text).ok();
+    }
+}
+
+/// Finds the messaging app's task id in the platform's runtime list.
+///
+/// WHY the runtime list and not a fixed id: task ids are assigned by the
+/// kernel when the task is created, so a number written into an app is a
+/// number that is wrong on the next boot. The platform publishes the list.
+///
+/// WHY the parse: the list is one `task_id|package_id|process_state|task_state|parent_task_id`
+/// record per line.
+fn messaging_task_id() -> Option<u64> {
+    let mut buf = [0u8; 1024];
+    let n = std::app_runtime_list(&mut buf).ok()?;
+    let text = core::str::from_utf8(&buf[..n]).ok()?;
+    for line in text.lines() {
+        let mut fields = line.split('|');
+        let task_id = fields.next()?;
+        let package = fields.next()?;
+        if package.trim() != MESSAGING_APP_ID {
+            continue;
+        }
+        if let Ok(id) = u64::from_str_radix(task_id.trim(), 16) {
+            return Some(id);
+        }
+    }
+    None
+}
+
 /// Hands the entered number to the messaging app and opens it.
 ///
-/// WHY the recipient is written before the launch: the messaging app shows
-/// the recipient before the first send, and it can only do that if the
-/// number reached it. The old code logged a dispatched messaging intent and
-/// did nothing at all, which is a claim about an action that never
-/// happened.
+/// WHY the IPC message comes first: this app holds an IPC-send capability, and
+/// a capability that is never used is a capability the platform granted for
+/// nothing. The recipient is sent to the messaging app over IPC when the
+/// platform's authority allows it.
+///
+/// WHY the settings store is still there: the IPC-send capability this task
+/// holds is scoped to one object - the task that launched it - and the kernel
+/// refuses a message to any other destination. The messaging app is not that
+/// task, so the message is refused with PermissionDenied and the settings
+/// store remains the channel the two apps share. The refusal is reported
+/// rather than swallowed, because a refused hand-off is a fact the user needs.
 fn hand_off_to_messaging(number: &[u8]) -> bool {
     if number.is_empty() || number.len() > 32 {
         return false;
@@ -193,6 +309,30 @@ fn hand_off_to_messaging(number: &[u8]) -> bool {
     if number.iter().any(|&b| b == 0x0A) {
         return false;
     }
+
+    // The capability path: hand the recipient to the messaging app over IPC.
+    let mut delivered_by_ipc = false;
+    match messaging_task_id() {
+        Some(task_id) => match std::ipc_send(task_id, HANDOFF_MSG_TYPE, number) {
+            Ok(()) => {
+                delivered_by_ipc = true;
+                std::log("[DIALER APP] Handed the recipient to the messaging app over IPC.").ok();
+            }
+            Err(code) => {
+                log_with_code(
+                    "[DIALER APP] The platform refused the IPC hand-off, code",
+                    code,
+                );
+                std::log("[DIALER APP] This app's IPC-send authority covers the task that launched it, not the messaging app, so the message could not be sent to it.")
+                    .ok();
+            }
+        },
+        None => {
+            std::log("[DIALER APP] The messaging app is not running, so there is no task to hand the recipient to over IPC.")
+                .ok();
+        }
+    }
+
     if std::settings_set(HANDOFF_KEY, number).is_err() {
         std::log("[DIALER APP] The settings store refused the recipient hand-off; the messaging app was not opened.",
         )
@@ -201,9 +341,10 @@ fn hand_off_to_messaging(number: &[u8]) -> bool {
     }
     match std::app_launch(MESSAGING_APP_ID) {
         Ok(_) => {
-            std::log("[DIALER APP] Handed the entered number to the messaging app and opened it.",
+            std::log("[DIALER APP] Wrote the recipient to the shared settings store and opened the messaging app.",
             )
             .ok();
+            let _ = delivered_by_ipc;
             true
         }
         Err(_) => {
@@ -224,6 +365,13 @@ pub struct CallRecord {
     pub accepted: bool,
     /// `true` when the entry came from the emergency control.
     pub emergency: bool,
+    /// The outcome the platform reported for this attempt.
+    ///
+    /// WHY the ledger keeps the outcome and not only a yes/no: a call the
+    /// telephony service accepted and a call the modem reported as connected
+    /// are different facts, and a history that flattened them into "accepted"
+    /// could not say which one happened.
+    pub outcome: CallOutcome,
 }
 
 /// Keypad DTMF frequency pair (low frequency, high frequency in Hz).
@@ -364,6 +512,17 @@ fn put_u16(line: &mut [u8], n: usize, value: u16) -> usize {
         }
     }
     out
+}
+
+/// Copies `src` into `out` and returns how many bytes were written.
+///
+/// WHY this exists: the app has no allocator, so every piece of text it shows
+/// is copied into a fixed buffer, and the copy has to say how much of it it
+/// used.
+pub fn copy_bytes(out: &mut [u8], src: &[u8]) -> usize {
+    let n = core::cmp::min(out.len(), src.len());
+    out[..n].copy_from_slice(&src[..n]);
+    n
 }
 
 pub const ESCAPE_BYTE: u8 = 0xFE;
@@ -1062,7 +1221,21 @@ impl ContactEditor {
 
 /// Entries the recents ledger keeps. Bounded so the ledger stays a fixed-size
 /// stack allocation; the oldest entry is dropped once it is full.
-const RECENTS_CAP: usize = 5;
+///
+/// WHY sixteen and not five: the ledger is a call history, and a history of
+/// five calls is not one. The platform's own call-log ledger holds sixteen
+/// (see `dialer::MAX_CALL_LOGS`), and the list scrolls, so the entries below
+/// the fold are reachable.
+const RECENTS_CAP: usize = 16;
+
+/// Which view of the settings surface is showing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsView {
+    /// The dialer's own settings.
+    Main,
+    /// The ringtone picker, opened from the ringtone row.
+    RingtonePicker,
+}
 
 /// Production Telephony Dialer state manager.
 pub struct DialerApp {
@@ -1071,7 +1244,6 @@ pub struct DialerApp {
     pub active_len: usize,
     pub is_muted: bool,
     pub is_speaker: bool,
-    pub call_duration_secs: u32,
     pub calls_completed: u32,
     /// Whether the telephony service actually reported a baseband present.
     pub modem_present: bool,
@@ -1088,6 +1260,12 @@ pub struct DialerApp {
     /// Real ledger of dial attempts, newest first.
     pub recents: [CallRecord; RECENTS_CAP],
     pub recents_len: usize,
+    /// How far the recents ledger is scrolled.
+    pub recents_scroll: ScrollState,
+    /// How far the contact list is scrolled.
+    pub contacts_scroll: ScrollState,
+    /// How far the ringtone picker is scrolled.
+    pub ringtone_scroll: ScrollState,
     /// The user's contacts, read back out of the platform settings store.
     pub contacts: ContactStore,
     /// Row selected in the Contacts section, or `None` when nothing is selected.
@@ -1115,7 +1293,30 @@ pub struct DialerApp {
     pub ringtone: [u8; 64],
     /// How many bytes of the ringtone's name are meaningful.
     pub ringtone_len: usize,
+    /// Which view of the settings surface is showing.
+    pub settings_view: SettingsView,
+    /// The audio documents the platform's index holds, which the ringtone
+    /// picker offers.
+    pub ringtone_choices: [RingtoneChoice; RINGTONE_CHOICE_CAP],
+    /// How many of the ringtone choices are real.
+    pub ringtone_choice_count: usize,
+    /// Whether the keypad sounds while a digit is entered.
+    pub dtmf_enabled: bool,
+    /// Whether the audio service has already refused a keypad tone this
+    /// session, so the refusal is reported once rather than on every key.
+    pub dtmf_refusal_reported: bool,
+    /// The settings rows' values, pre-rendered.
+    ///
+    /// WHY they are pre-rendered: the renderer runs once per pixel of the
+    /// surface, and formatting a value there would run tens of thousands of
+    /// times for one row of text.
+    pub settings_values: [[u8; 48]; 4],
+    /// How many bytes of each settings value are used.
+    pub settings_value_lens: [usize; 4],
 }
+
+/// How many audio documents the ringtone picker can hold.
+pub const RINGTONE_CHOICE_CAP: usize = 8;
 
 impl DialerApp {
     pub const fn new() -> Self {
@@ -1125,7 +1326,6 @@ impl DialerApp {
             active_len: 0,
             is_muted: false,
             is_speaker: false,
-            call_duration_secs: 0,
             calls_completed: 0,
             // WHY: fail closed. Until the telephony service reports a baseband,
             // no inbound-call path may be claimed.
@@ -1139,8 +1339,12 @@ impl DialerApp {
                 len: 0,
                 accepted: false,
                 emergency: false,
+                outcome: CallOutcome::Idle,
             }; RECENTS_CAP],
             recents_len: 0,
+            recents_scroll: ScrollState::new(0, 0, 0),
+            contacts_scroll: ScrollState::new(0, 0, 0),
+            ringtone_scroll: ScrollState::new(0, 0, 0),
             // WHY the store is empty here and filled by `load()` in `_start`:
             // `new()` is a `const fn` so it can be called before the scheduler and
             // the storage service exist, and a syscall from it would fault. The
@@ -1152,6 +1356,13 @@ impl DialerApp {
             contacts_fav_only: false,
             ringtone: [0u8; 64],
             ringtone_len: 0,
+            settings_view: SettingsView::Main,
+            ringtone_choices: [RingtoneChoice::EMPTY; RINGTONE_CHOICE_CAP],
+            ringtone_choice_count: 0,
+            dtmf_enabled: true,
+            dtmf_refusal_reported: false,
+            settings_values: [[0u8; 48]; 4],
+            settings_value_lens: [0; 4],
         }
     }
 
@@ -1192,16 +1403,199 @@ impl DialerApp {
     }
 
     /// Plays dual-tone multi-frequency acoustic feedback for a pressed keypad digit.
-    pub fn play_dtmf(&self, digit: char) {
+    ///
+    /// WHY the refusal is reported: this task holds no audio authority, so the
+    /// audio service refuses the tone with PermissionDenied. The old code
+    /// discarded the answer, so a keypad that could not be heard looked exactly
+    /// like one that could. The refusal is reported once per session, because a
+    /// report on every key press is noise rather than information.
+    pub fn play_dtmf(&mut self, digit: char) {
+        if !self.dtmf_enabled {
+            return;
+        }
         if let Some(pair) = get_dtmf_frequencies(digit) {
             // WHY only the high tone: the audio service exposes a single
             // oscillator (`audio_play_tone`), so only one of the two CCITT
             // frequencies can ever be emitted. The low tone is reported by
             // `get_dtmf_frequencies` and drawn in the key sublabel, never
             // claimed to have sounded.
-            std::audio_play_tone(pair.high_freq).ok();
-            std::audio_haptic_click().ok();
-            std::audio_silence().ok();
+            match std::audio_play_tone(pair.high_freq) {
+                Ok(()) => {
+                    std::audio_haptic_click().ok();
+                    std::audio_silence().ok();
+                }
+                Err(code) => {
+                    if !self.dtmf_refusal_reported {
+                        self.dtmf_refusal_reported = true;
+                        log_with_code(
+                            "[DIALER APP] The audio service refused the keypad tone, code",
+                            code,
+                        );
+                        std::log("[DIALER APP] This app holds no audio authority, so the keypad tone is silent; the key is still shown.")
+                            .ok();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Recomputes the scroll extents of the lists.
+    ///
+    /// WHY this is a step and not something the renderer does: the extents are
+    /// a fact about how many rows there are and how tall the window is, and the
+    /// renderer runs once per pixel of the surface.
+    pub fn refresh_scrolls(&mut self) {
+        let recents = recents_scroll_extents(self.recents_len);
+        self.recents_scroll = recents.state();
+        let rows = self.contacts_visible_rows();
+        let contacts = contacts_scroll_extents(rows);
+        self.contacts_scroll = contacts.state();
+    }
+
+    /// How many contact rows the list shows, after the favourites filter.
+    ///
+    /// WHY the filter is counted here and not in the renderer: a filtered-out
+    /// row is not a row, and a scroll extent that counted it would offer the
+    /// user a thumb for content that is not there.
+    pub fn contacts_visible_rows(&self) -> usize {
+        let mut count = 0usize;
+        for i in 0..self.contacts.len() {
+            if let Some(record) = self.contacts.record(i) {
+                if !self.contacts_fav_only || record.is_favourite() {
+                    count += 1;
+                }
+            }
+        }
+        for i in 0..self.contacts.unsaved_len() {
+            if let Some(record) = self.contacts.unsaved_record(i) {
+                if !self.contacts_fav_only || record.is_favourite() {
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+
+    /// Reads the audio documents the platform's index holds.
+    ///
+    /// WHY the index and not a list this app keeps: the ringtone slot names a
+    /// document on the device, and the documents on the device are the
+    /// platform's. A picker over an app's own list would offer files the
+    /// platform does not hold.
+    pub fn refresh_ringtone_choices(&mut self) {
+        self.ringtone_choice_count = 0;
+        let mut raw = [0u8; 2048];
+        match std::content::content_index_search_mime("audio/", &mut raw) {
+            Ok(n) => {
+                self.ringtone_choice_count = parse_audio_documents(
+                    &raw[..n],
+                    &mut self.ringtone_choices,
+                );
+                let count = self.ringtone_choice_count;
+                std::log("[DIALER APP] The platform's index holds").ok();
+                let mut buf = [0u8; 16];
+                let written = put_decimal(count as u32, &mut buf);
+                if let Ok(text) = core::str::from_utf8(&buf[..written]) {
+                    std::log(text).ok();
+                }
+                std::log("[DIALER APP] audio documents for the ringtone picker.").ok();
+            }
+            Err(code) => {
+                log_with_code(
+                    "[DIALER APP] The platform refused the document index query, code",
+                    code,
+                );
+            }
+        }
+        let rows = self.ringtone_choice_count;
+        self.ringtone_scroll = crate::ringtone_scroll_extents(rows);
+    }
+
+    /// Writes a document into the device's ringtone slot.
+    ///
+    /// WHY the slot and not a local preference: the ringtone is a device-wide
+    /// choice, and the settings app, the file manager and the gallery all read
+    /// the same slot.
+    pub fn set_ringtone(&mut self, path: &[u8]) -> Result<(), i64> {
+        std::settings_set("audio.ringtone", path)?;
+        self.refresh_ringtone();
+        Ok(())
+    }
+
+    /// Applies a drag to the list under the pointer, if there is one.
+    ///
+    /// WHY the gesture scrolls rather than leaving the app: a drag on a list
+    /// is how a list is read, and the platform's own apps treat a pan over a
+    /// list as a scroll. The scroll model owns the offset and the thumb, so
+    /// the two cannot disagree.
+    pub fn apply_scroll(&mut self, _x: usize, y: usize, dy: i32) -> bool {
+        match self.section {
+            DialerSection::Recents => {
+                if y >= RECENTS_Y0 && y < RECENTS_VIEWPORT_Y1 {
+                    self.recents_scroll.apply_drag(dy);
+                    return true;
+                }
+            }
+            DialerSection::Contacts => {
+                // The editor is a text entry, so a drag there is not a scroll.
+                if self.contact_edit.is_none() && y >= LIST_Y0 && y < LIST_VIEWPORT_Y1 {
+                    self.contacts_scroll.apply_drag(dy);
+                    return true;
+                }
+            }
+            DialerSection::Settings => {
+                if self.settings_view == SettingsView::RingtonePicker
+                    && y >= RINGTONE_ROW_Y0
+                    && y < RINGTONE_VIEWPORT_Y1
+                {
+                    self.ringtone_scroll.apply_drag(dy);
+                    return true;
+                }
+            }
+            DialerSection::Keypad => {}
+        }
+        false
+    }
+
+    /// Turns the keypad tone on or off and stores the choice.
+    pub fn toggle_dtmf(&mut self) -> Result<bool, i64> {
+        let next = !self.dtmf_enabled;
+        set_dtmf_enabled(next)?;
+        self.dtmf_enabled = next;
+        Ok(next)
+    }
+
+    /// Rebuilds the settings surface's values.
+    pub fn refresh_settings_values(&mut self) {
+        let mut scratch = [0u8; 48];
+        for (index, row) in SettingsRow::ORDER.iter().enumerate() {
+            let len = self.settings_row_value(*row, &mut scratch);
+            self.settings_value_lens[index] = len;
+            let n = len.min(self.settings_values[index].len());
+            self.settings_values[index][..n].copy_from_slice(&scratch[..n]);
+        }
+    }
+
+    /// The value of a settings row.
+    ///
+    /// WHY each value is a fact the platform supplied: the ringtone is the
+    /// document the device's slot names, the keypad tone is the preference the
+    /// settings store holds, and the two rows the platform cannot answer say
+    /// so rather than showing a value that would be the app's own invention.
+    fn settings_row_value(&self, row: SettingsRow, out: &mut [u8; 48]) -> usize {
+        match row {
+            SettingsRow::Ringtone => {
+                if self.ringtone_len == 0 {
+                    copy_bytes(out, b"None chosen")
+                } else {
+                    copy_bytes(out, &self.ringtone[..self.ringtone_len])
+                }
+            }
+            SettingsRow::KeypadTone => {
+                copy_bytes(out, if self.dtmf_enabled { b"On" } else { b"Off" })
+            }
+            SettingsRow::DefaultSim => copy_bytes(out, b"One SIM, no choice"),
+            SettingsRow::CallDuration => copy_bytes(out, b"Not reported"),
         }
     }
 
@@ -1231,13 +1625,17 @@ impl DialerApp {
     }
 
     /// Appends one real dial attempt to the recents ledger, newest first.
-    fn record_call(&mut self, number: &str, accepted: bool, emergency: bool) {
+    fn record_call(&mut self, number: &str, outcome: CallOutcome, emergency: bool) {
         let n = number.len().min(self.active_number.len());
         let mut entry = CallRecord {
             number: [0u8; 32],
             len: n,
-            accepted,
+            accepted: !matches!(
+                outcome,
+                CallOutcome::Refused | CallOutcome::EmergencyRefused
+            ),
             emergency,
+            outcome,
         };
         let mut idx = 0usize;
         while idx < n {
@@ -1257,6 +1655,9 @@ impl DialerApp {
             }
         }
         self.recents[0] = entry;
+        // WHY the scroll is recomputed: the ledger grew, so the list is
+        // taller than its window and the thumb has to say so.
+        self.refresh_scrolls();
     }
 
     /// Initiates an outgoing cellular call.
@@ -1284,7 +1685,6 @@ impl DialerApp {
 
         self.state = CallState::Dialing;
         self.outcome = CallOutcome::Dialing;
-        self.call_duration_secs = 0;
 
         // A call is connected only when the modem itself says so. The
         // telephony service accepts the request and puts the modem into its
@@ -1304,10 +1704,20 @@ impl DialerApp {
                     ModemCallState::Dialing => CallOutcome::Dialing,
                     _ => CallOutcome::Unconfirmed,
                 };
-                std::audio_play_tone(440).ok();
-                std::audio_silence().ok();
+                // WHY there is no tone here: the app used to play a bare 440 Hz
+                // tone on every accepted request. That tone was a placeholder
+                // for a ring-back that this platform does not have, it was not
+                // described as one, and the audio service refuses the call
+                // anyway because this task holds no audio authority - so the
+                // screen said "calling" and the device said nothing. The
+                // call's own state is on the card instead.
                 std::log("[DIALER APP] Telephony service accepted the call request.").ok();
-                self.record_call(number, true, emergency);
+                if self.outcome == CallOutcome::Connected {
+                    std::log("[DIALER APP] The modem reported the call as connected. The platform's telephony telemetry carries no call duration, so the app shows none.",
+                    )
+                    .ok();
+                }
+                self.record_call(number, self.outcome, emergency);
                 Ok(())
             }
             Err(err) => {
@@ -1318,7 +1728,7 @@ impl DialerApp {
                     CallOutcome::Refused
                 };
                 std::log("[DIALER APP] Call request rejected by telephony service.").ok();
-                self.record_call(number, false, emergency);
+                self.record_call(number, self.outcome, emergency);
                 Err(err)
             }
         }
@@ -1359,13 +1769,18 @@ impl DialerApp {
         }
     }
 
-    /// Steps the section. All three tabs are live now.
+    /// Steps the section. All four tabs are live now.
     pub fn step_section(&mut self) -> DialerSection {
         self.section = match self.section {
             DialerSection::Keypad => DialerSection::Recents,
             DialerSection::Recents => DialerSection::Contacts,
-            DialerSection::Contacts => DialerSection::Keypad,
+            DialerSection::Contacts => DialerSection::Settings,
+            DialerSection::Settings => DialerSection::Keypad,
         };
+        if self.section == DialerSection::Settings {
+            self.settings_view = SettingsView::Main;
+            self.refresh_settings_values();
+        }
         self.section
     }
 
@@ -1376,6 +1791,10 @@ impl DialerApp {
         self.contact_edit = None;
         self.contact_sel = None;
         self.editor_last_cell = None;
+        // WHY the scrolls are recomputed here: the favourites filter changes
+        // how many rows the list has, and a scroll extent that counted a
+        // filtered-out row would offer a thumb for content that is not there.
+        self.refresh_scrolls();
     }
 
     /// Opens the editor for a new contact.
@@ -1678,6 +2097,13 @@ impl DialerApp {
 /// disc, the keypad disc, the dock plate â€” not the page background. Blending
 /// every glyph edge toward one hardcoded colour tinted the AA fringe of any run
 /// drawn on a darker local fill.
+///
+/// `max_w` is the width of the column the run is drawn in. WHY it is a
+/// parameter: the outline face advances by the designer's table and the bitmap
+/// face by the cell, so a run that was ellipsized against the bitmap measure
+/// can be wider in the outline face than the column it was given. The platform's
+/// own placement refuses a run that does not fit the column it was told about,
+/// and the bitmap face - which respects the ellipsize - draws it instead.
 #[inline(always)]
 fn test_text(
     x: usize,
@@ -1686,6 +2112,7 @@ fn test_text(
     y0: usize,
     scale: usize,
     text: &[u8],
+    max_w: usize,
     color: u32,
     bg: u32,
 ) -> Option<u32> {
@@ -1693,13 +2120,7 @@ fn test_text(
         return None;
     }
     // The outline face, chosen ONCE for the run rather than once per pixel.
-    if let Some(run) = outline_text::OutlineRun::place_run(
-        x0,
-        y0 + std::design::font::BASELINE * scale,
-        scale,
-        text,
-        false,
-    ) {
+    if let Some(run) = outline_text::place_run(x0, y0, scale, text, Some(max_w), false) {
         let (rx, rtop, rw, rh) = run.bounds();
         if x >= rx && x - rx < rw && y >= rtop && y - rtop < rh {
             return run.pixel(x, y, color, bg);
@@ -1721,19 +2142,14 @@ fn test_text_bold(
     y0: usize,
     scale: usize,
     text: &[u8],
+    max_w: usize,
     color: u32,
     bg: u32,
 ) -> Option<u32> {
     if scale == 0 || text.is_empty() {
         return None;
     }
-    if let Some(run) = outline_text::OutlineRun::place_run(
-        x0,
-        y0 + std::design::font::BASELINE * scale,
-        scale,
-        text,
-        true,
-    ) {
+    if let Some(run) = outline_text::place_run(x0, y0, scale, text, Some(max_w), true) {
         let (rx, rtop, rw, rh) = run.bounds();
         if x >= rx && x - rx < rw && y >= rtop && y - rtop < rh {
             return run.pixel(x, y, color, bg);
@@ -1769,19 +2185,27 @@ const fn run_rows(scale: usize) -> usize {
 const HEADER_H: usize = 94;
 const TITLE_SCALE: usize = type_scale::CAPTION;
 
-// Segmented navigation tabs (y: 104..156). Symmetrically balanced 200px pills
-// across the 720px viewport (48px margins, 12px gaps).
+// Segmented navigation tabs (y: 104..156). Symmetrically balanced pills across
+// the 720px viewport (48px margins, 12px gaps).
+//
+// WHY four pills and not three: the dialer's design document asks for a
+// settings surface - a ringtone picker, a keypad-tone choice and the choice
+// of SIM the platform does not offer - and a section the user cannot reach is
+// not a surface. The four pills are 147px wide with 12px gaps, which still
+// leaves the longest label ("Contacts") its full width.
 const TAB_SCALE: usize = type_scale::CAPTION;
 const TAB_BAND_Y0: usize = 104;
 const TAB_BAND_H: usize = 52;
-const TAB_W: usize = 200;
+const TAB_W: usize = 147;
 const TAB1_X0: usize = 48;
-const TAB1_X1: usize = TAB1_X0 + TAB_W; // 248
-const TAB2_X0: usize = 260;
-const TAB2_X1: usize = TAB2_X0 + TAB_W; // 460
-const TAB3_X0: usize = 472;
-const TAB3_X1: usize = TAB3_X0 + TAB_W; // 672
-const TAB_LABELS: [&[u8]; 3] = [b"Dial", b"Recents", b"Contacts"];
+const TAB1_X1: usize = TAB1_X0 + TAB_W; // 195
+const TAB2_X0: usize = 207;
+const TAB2_X1: usize = TAB2_X0 + TAB_W; // 354
+const TAB3_X0: usize = 366;
+const TAB3_X1: usize = TAB3_X0 + TAB_W; // 513
+const TAB4_X0: usize = 525;
+const TAB4_X1: usize = TAB4_X0 + TAB_W; // 672
+const TAB_LABELS: [&[u8]; 4] = [b"Dial", b"Recents", b"Contacts", b"Settings"];
 
 // Dialed-number display card.
 const DISPLAY_X0: usize = 24;
@@ -1829,8 +2253,14 @@ const ACTION_Y1: usize = 1140;
 // Recents ledger geometry. WHY it starts at 424 rather than 410: the first row
 // needs room for a scale-2 run (48 rows) plus a scale-1 run (24 rows) inside an
 // 96 px row, and 410 would push the last of five rows past the action bar.
-const RECENTS_Y0: usize = 424;
-const RECENTS_ROW_H: usize = 96;
+//
+// WHY the numbers come from the library: the height of a list and the height
+// of the window it is shown in are one fact, and the scroll model is built
+// from them. Two copies of the same number in two files is a copy that drifts.
+const RECENTS_Y0: usize = LIB_RECENTS_Y0;
+const RECENTS_ROW_H: usize = LIB_RECENTS_ROW_H;
+/// The bottom of the recents list's window.
+const RECENTS_VIEWPORT_Y1: usize = LIB_RECENTS_VIEWPORT_Y1;
 const CONTENT_Y0: usize = 410;
 const CONTENT_Y1: usize = 1140;
 
@@ -1862,10 +2292,13 @@ const ROW_Y: [usize; 4] = [410, 560, 710, 860];
 /// Selected-contact card, reusing the dialer's display-card band.
 const CARD_Y0: usize = 170;
 const CARD_Y1: usize = 380;
-/// Contact list band. 8 rows of 66px = 528px, which is exactly the room the
-/// store's capacity and the surface both allow.
-const LIST_Y0: usize = 410;
-const CONTACT_ROW_H: usize = 66;
+/// Contact list band. The band is 528px tall, which is eight rows of 66px, and
+/// the store can hold twelve saved contacts plus twelve unsaved ones, so the
+/// list is taller than its window and has to scroll.
+const LIST_Y0: usize = LIB_CONTACTS_LIST_Y0;
+const CONTACT_ROW_H: usize = LIB_CONTACT_ROW_H;
+/// The bottom of the contact list's window.
+const LIST_VIEWPORT_Y1: usize = LIB_CONTACTS_VIEWPORT_Y1;
 /// Footer band: the honest capacity/durability notice.
 const NOTICE_Y0: usize = 938;
 const NOTICE_Y1: usize = 990;
@@ -1874,6 +2307,54 @@ const STAR_CX: usize = 660;
 const STAR_R: i32 = 20;
 /// Action discs in the contacts action row.
 const C_ACTION_Y: usize = 1065;
+
+// Settings section geometry.
+//
+// WHY the settings surface is a section and not a dialog: a dialog needs a
+// focus model and a dismissal rule the platform does not have, and a section
+// the user can leave with the same back control as every other section is
+// one the platform can express.
+const SETTINGS_TITLE_Y0: usize = 416;
+const SETTINGS_ROW_Y0: usize = 452;
+const SETTINGS_ROW_H: usize = 96;
+const SETTINGS_TEXT_X: usize = 48;
+
+/// The ringtone picker's rows and the window they are shown in.
+const RINGTONE_ROW_H: usize = 72;
+const RINGTONE_ROW_Y0: usize = 452;
+const RINGTONE_VIEWPORT_Y1: usize = 1028;
+/// The row that leaves the picker.
+const RINGTONE_BACK_Y0: usize = 1040;
+const RINGTONE_BACK_H: usize = 64;
+
+/// The scroll extents of the ringtone picker's list.
+fn ringtone_scroll_extents(rows: usize) -> ScrollState {
+    ScrollState::new(
+        rows * RINGTONE_ROW_H,
+        RINGTONE_VIEWPORT_Y1 - RINGTONE_ROW_Y0,
+        0,
+    )
+}
+
+/// The width of the scroll indicator's track.
+const SCROLL_TRACK_X: usize = 690;
+/// The width of the scroll indicator's thumb.
+const SCROLL_THUMB_W: usize = 4;
+
+/// Draws the platform's scroll indicator beside a list.
+///
+/// WHY the indicator is drawn whenever the list scrolls and never otherwise:
+/// an indicator on a list that fits says there is more when there is not, and
+/// an indicator that is missing on a list that does not fit says the rest of
+/// the list does not exist.
+#[inline(always)]
+fn scroll_indicator(x: usize, y: usize, scroll: &ScrollState, track_y: usize, track_h: usize) -> Option<u32> {
+    let (thumb_y, thumb_h) = scroll.thumb_rect(track_y, track_h, 24)?;
+    if x >= SCROLL_TRACK_X && x < SCROLL_TRACK_X + SCROLL_THUMB_W && y >= thumb_y && y < thumb_y + thumb_h {
+        return Some(THEME.primary);
+    }
+    None
+}
 
 fn get_keypad_char(row: usize, col: usize) -> Option<char> {
     match (row, col) {
@@ -1982,7 +2463,7 @@ fn header_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     let title_rows = run_rows(TITLE_SCALE);
     let title_y0 = (HEADER_H - title_rows) / 2;
     if y >= title_y0 && y < title_y0 + title_rows {
-        if let Some(c) = test_text_bold(x, y, 120, title_y0, TITLE_SCALE, b"Phone", THEME.on_surface, THEME.surface_container) {
+        if let Some(c) = test_text_bold(x, y, 120, title_y0, TITLE_SCALE, b"Phone",240,  THEME.on_surface, THEME.surface_container) {
             return c;
         }
     }
@@ -2003,7 +2484,7 @@ fn header_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
                 600 - width,
                 52,
                 1,
-                label,
+                label,200, 
                 THEME.on_surface_variant,
                 THEME.surface_container,
             ) {
@@ -2060,13 +2541,18 @@ fn header_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     THEME.surface_container
 }
 
-/// Segmented tabs. All three sections exist, so all three are live.
+/// Segmented tabs. All four sections exist, so all four are live.
 fn tabs_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     if !(TAB_BAND_Y0..TAB_BAND_Y0 + TAB_BAND_H).contains(&y) {
         return THEME.surface;
     }
     let label_y0 = TAB_BAND_Y0 + (TAB_BAND_H.saturating_sub(run_rows(TAB_SCALE))) / 2;
-    let ranges = [(TAB1_X0, TAB1_X1), (TAB2_X0, TAB2_X1), (TAB3_X0, TAB3_X1)];
+    let ranges = [
+        (TAB1_X0, TAB1_X1),
+        (TAB2_X0, TAB2_X1),
+        (TAB3_X0, TAB3_X1),
+        (TAB4_X0, TAB4_X1),
+    ];
     for (i, (x0, x1)) in ranges.iter().enumerate() {
         if x < *x0 || x >= *x1 {
             continue;
@@ -2076,6 +2562,7 @@ fn tabs_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
             DialerSection::Keypad => i == 0,
             DialerSection::Recents => i == 1,
             DialerSection::Contacts => i == 2,
+            DialerSection::Settings => i == 3,
         };
         let (fill, border, ink) = if active {
             // The platform's segmented-control grammar: the selected segment
@@ -2094,9 +2581,9 @@ fn tabs_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         }
         let label_x0 = *x0 + std::design::font::center_x(TAB_LABELS[i], TAB_SCALE, w);
         let label_px = if active {
-            test_text_bold(x, y, label_x0, label_y0, TAB_SCALE, TAB_LABELS[i], ink, fill)
+            test_text_bold(x, y, label_x0, label_y0, TAB_SCALE, TAB_LABELS[i],TAB_W,  ink, fill)
         } else {
-            test_text(x, y, label_x0, label_y0, TAB_SCALE, TAB_LABELS[i], ink, fill)
+            test_text(x, y, label_x0, label_y0, TAB_SCALE, TAB_LABELS[i],TAB_W,  ink, fill)
         };
         if let Some(c) = label_px {
             return c;
@@ -2144,7 +2631,7 @@ fn display_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
                 if n > 0 {
                     let w = std::design::font::measure(&buf[..n], 1);
                     let cx = DISPLAY_X0 + (DISPLAY_W.saturating_sub(w)) / 2;
-                    if let Some(c) = test_text(x, y, cx, 190, 1, &buf[..n], THEME.primary, THEME.surface_container) {
+                    if let Some(c) = test_text(x, y, cx, 190, 1, &buf[..n],DISPLAY_W - 48,  THEME.primary, THEME.surface_container) {
                         return c;
                     }
                 }
@@ -2158,11 +2645,36 @@ fn display_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         let n = std::design::font::ellipsize(digits, scale, DISPLAY_W - 48, &mut buf);
         let total_w = std::design::font::measure(&buf[..n], scale);
         let x0 = DISPLAY_X0 + (DISPLAY_W.saturating_sub(total_w)) / 2;
-        if let Some(c) = test_text(x, y, x0, y0, scale, &buf[..n], THEME.on_surface, THEME.surface_container) {
+        if let Some(c) = test_text(x, y, x0, y0, scale, &buf[..n],DISPLAY_W - 48,  THEME.on_surface, THEME.surface_container) {
             return c;
         }
 
         // Action Pills: [+ Add Contact] and [Send Message]
+        //
+        // WHY the pills give way to the call's own state while a call is up:
+        // what the platform knows about the call is the most important thing
+        // on the card, and the platform's answer is that its telemetry carries
+        // no call duration. The app used to keep a counter of its own and
+        // show it, which was the app's ticks rather than a fact about the call.
+        let duration_note = dialer.outcome.duration_note();
+        if !duration_note.is_empty() {
+            if y >= 305 && y < 305 + run_rows(1) {
+                let w = std::design::font::measure(duration_note, 1);
+                let x0 = DISPLAY_X0 + (DISPLAY_W.saturating_sub(w)) / 2;
+                if let Some(c) = test_text(
+                    x,
+                    y,
+                    x0,
+                    305,
+                    1,
+                    duration_note,DISPLAY_W - 48, 
+                    THEME.on_surface_variant,
+                    THEME.surface_container,
+                ) {
+                    return c;
+                }
+            }
+        } else {
         let p1_x0 = 80usize;
         let p1_w = 250usize;
         let p1_y0 = 295usize;
@@ -2179,7 +2691,7 @@ fn display_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
                 let lw = std::design::font::measure(label, 1);
                 let lx = p1_x0 + (p1_w.saturating_sub(lw)) / 2;
                 let ly = p1_y0 + (p1_h.saturating_sub(run_rows(1))) / 2;
-                if let Some(c) = test_text(x, y, lx, ly, 1, label, THEME.primary, fill) {
+                if let Some(c) = test_text(x, y, lx, ly, 1, label,250,  THEME.primary, fill) {
                     return c;
                 }
                 return fill;
@@ -2202,11 +2714,12 @@ fn display_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
                 let lw = std::design::font::measure(label, 1);
                 let lx = p2_x0 + (p2_w.saturating_sub(lw)) / 2;
                 let ly = p2_y0 + (p2_h.saturating_sub(run_rows(1))) / 2;
-                if let Some(c) = test_text(x, y, lx, ly, 1, label, THEME.success, fill) {
+                if let Some(c) = test_text(x, y, lx, ly, 1, label,250,  THEME.success, fill) {
                     return c;
                 }
                 return fill;
             }
+        }
         }
     } else if y >= PLACEHOLDER_Y0 && y < PLACEHOLDER_Y0 + run_rows(PLACEHOLDER_SCALE) {
         let x0 = DISPLAY_X0
@@ -2221,7 +2734,7 @@ fn display_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
             x0,
             PLACEHOLDER_Y0,
             PLACEHOLDER_SCALE,
-            b"Enter a phone number",
+            b"Enter a phone number",DISPLAY_W - 48, 
             THEME.on_surface_variant,
             THEME.surface_container,
         ) {
@@ -2241,7 +2754,7 @@ fn display_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
                 CallOutcome::Refused | CallOutcome::EmergencyRefused => THEME.error,
                 _ => THEME.on_surface_variant,
             };
-            if let Some(c) = test_text(x, y, cx, OUTCOME_Y0, 1, &buf[..n], ink, THEME.surface_container) {
+            if let Some(c) = test_text(x, y, cx, OUTCOME_Y0, 1, &buf[..n],DISPLAY_W - 48,  ink, THEME.surface_container) {
                 return c;
             }
         }
@@ -2345,7 +2858,7 @@ fn keypad_pixel_at(x: usize, y: usize, editing: Option<&DialerApp>) -> u32 {
                             digit_x0,
                             digit_y0,
                             KEY_DIGIT_SCALE,
-                            digit_bytes,
+                            digit_bytes,120, 
                             THEME.on_surface,
                             disc_fill,
                         ) {
@@ -2363,7 +2876,7 @@ fn keypad_pixel_at(x: usize, y: usize, editing: Option<&DialerApp>) -> u32 {
                             sub_x,
                             sub_y0,
                             KEY_SUB_SCALE,
-                            sub_buf,
+                            sub_buf,120, 
                             THEME.on_surface_variant,
                             disc_fill,
                         ) {
@@ -2390,12 +2903,16 @@ fn editor_keypad_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
 }
 
 /// Recents ledger, or the honest empty state when nothing has been dialled.
+///
+/// WHY the ledger scrolls: it holds sixteen attempts and the window holds
+/// five, so the entries below the fold were unreachable. The scroll model is
+/// the platform's, and the thumb beside the list says how much is below.
 fn recents_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     if dialer.recents_len == 0 {
         // Headline: a scale-2 run owns 48 rows (620..668).
         let head: &[u8] = b"No calls yet";
         let head_x = DISPLAY_X0 + std::design::font::center_x(head, 1, DISPLAY_W);
-        if let Some(c) = test_text_bold(x, y, head_x, 620, 1, head, THEME.on_surface, THEME.surface) {
+        if let Some(c) = test_text_bold(x, y, head_x, 620, 1, head,DISPLAY_W,  THEME.on_surface, THEME.surface) {
             return c;
         }
         // Body: a scale-1 run owns 24 rows (680..704).
@@ -2405,16 +2922,19 @@ fn recents_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         if n > 0 {
             let w = std::design::font::measure(&buf[..n], 1);
             let bx = DISPLAY_X0 + (DISPLAY_W.saturating_sub(w)) / 2;
-            if let Some(c) = test_text(x, y, bx, 680, 1, &buf[..n], THEME.on_surface_variant, THEME.surface) {
+            if let Some(c) = test_text(x, y, bx, 680, 1, &buf[..n],DISPLAY_W,  THEME.on_surface_variant, THEME.surface) {
                 return c;
             }
         }
         return THEME.surface;
     }
 
+    let offset = dialer.recents_scroll.offset;
     for i in 0..dialer.recents_len {
         let row_y = RECENTS_Y0 + i * RECENTS_ROW_H;
-        if y < row_y || y >= row_y + RECENTS_ROW_H {
+        // The row's place in the scrolled list, and whether it is on screen.
+        let scrolled_y = row_y.saturating_sub(offset);
+        if y < scrolled_y || y >= scrolled_y + RECENTS_ROW_H {
             continue;
         }
         let rec = &dialer.recents[i];
@@ -2428,35 +2948,303 @@ fn recents_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
             x,
             y,
             nx,
-            row_y + 14,
+            scrolled_y + 14,
             1,
-            &nbuf[..nn],
+            &nbuf[..nn],DISPLAY_W - 96, 
             THEME.on_surface,
             THEME.surface_container,
         ) {
             return c;
         }
         // Outcome, scale 1: run_rows(1) = 24 rows at row_y + 56.
-        let out: &[u8] = match (rec.emergency, rec.accepted) {
-            (true, true) => b"Emergency - accepted by telephony",
-            (true, false) => b"Emergency - refused by telephony",
-            (false, true) => b"Accepted by telephony",
-            (false, false) => b"Refused by telephony",
+        let out: &[u8] = if rec.emergency {
+            if rec.accepted {
+                b"Emergency - accepted by telephony"
+            } else {
+                b"Emergency - refused by telephony"
+            }
+        } else {
+            match rec.outcome {
+                CallOutcome::Connected => b"Call connected - the platform reports no duration",
+                CallOutcome::Ended => b"Call ended",
+                CallOutcome::Unconfirmed => b"Accepted; the modem reported no call state",
+                CallOutcome::Dialing => b"Accepted by telephony",
+                _ => b"Refused by telephony",
+            }
         };
         let ox = DISPLAY_X0 + 24;
-        if let Some(c) = test_text(x, y, ox, row_y + 46, 1, out, THEME.on_surface_variant, THEME.surface_container) {
+        if let Some(c) = test_text(x, y, ox, scrolled_y + 46, 1, out,DISPLAY_W - 96,  THEME.on_surface_variant, THEME.surface_container) {
             return c;
         }
-        // Row plate and divider.
+        // Row plate and divider, in the platform's list-row treatment.
+        //
+        // WHY the platform's treatment: the row's fill, its corner radius and
+        // its divider are the platform's, so a row in this app looks like a row
+        // in the file manager or the gallery.
+        let style = components::list_row_style(&THEME, false);
         if x >= DISPLAY_X0 && x < DISPLAY_X1 {
-            if y == row_y + RECENTS_ROW_H - 1 {
-                return THEME.border;
+            if let Some(plate) = std::design::primitives::draw_rounded_rect(
+                x,
+                y,
+                std::design::primitives::Rect::new(DISPLAY_X0, scrolled_y, DISPLAY_W, RECENTS_ROW_H),
+                style.radius,
+                style.fill,
+                None,
+                0,
+            ) {
+                if rec.emergency {
+                    return THEME.on_surface;
+                }
+                return plate;
             }
-            if rec.emergency {
-                return THEME.on_surface;
-            }
-            return THEME.surface_container;
         }
+    }
+
+    // The scroll indicator, drawn beside the list it belongs to.
+    if let Some(c) = scroll_indicator(
+        x,
+        y,
+        &dialer.recents_scroll,
+        RECENTS_Y0,
+        RECENTS_VIEWPORT_Y1 - RECENTS_Y0,
+    ) {
+        return c;
+    }
+    THEME.surface
+}
+
+/// The settings surface: the dialer's own settings, and the ringtone picker.
+///
+/// WHY each row states what the platform supports: the surface is where the
+/// user looks for what the phone can do, so a row that offers a choice the
+/// platform cannot make is a lie told in the place the user trusts.
+fn settings_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
+    if !(CONTENT_Y0..CONTENT_Y1).contains(&y) {
+        return THEME.surface;
+    }
+    if dialer.settings_view == SettingsView::RingtonePicker {
+        return ringtone_picker_pixel(x, y, dialer);
+    }
+
+    // The title.
+    if y >= SETTINGS_TITLE_Y0 && y < SETTINGS_TITLE_Y0 + run_rows(1) {
+        if let Some(c) = test_text(
+            x,
+            y,
+            SETTINGS_TEXT_X,
+            SETTINGS_TITLE_Y0,
+            1,
+            b"DIALER SETTINGS",DISPLAY_W - 48, 
+            THEME.on_surface,
+            THEME.surface,
+        ) {
+            return c;
+        }
+    }
+
+    for (index, row) in SettingsRow::ORDER.iter().enumerate() {
+        let row_y = SETTINGS_ROW_Y0 + index * SETTINGS_ROW_H;
+        if y < row_y || y >= row_y + SETTINGS_ROW_H {
+            continue;
+        }
+        // The platform's list-row treatment.
+        let style = components::list_row_style(&THEME, false);
+        if std::design::primitives::draw_rounded_rect(
+            x,
+            y,
+            std::design::primitives::Rect::new(DISPLAY_X0, row_y, DISPLAY_W, SETTINGS_ROW_H),
+            style.radius,
+            style.fill,
+            None,
+            0,
+        )
+        .is_none()
+        {
+            return THEME.surface;
+        }
+
+        // The value, at the trailing edge, in the platform's list-row position.
+        let len = dialer.settings_value_lens[index];
+        let value = &dialer.settings_values[index][..len];
+        let value_w = std::design::font::measure(value, 1);
+        let value_x = DISPLAY_X1.saturating_sub(style.pad + value_w);
+        if let Some(c) = test_text(
+            x,
+            y,
+            value_x,
+            row_y + (SETTINGS_ROW_H - run_rows(1)) / 2,
+            1,
+            value,160, 
+            THEME.on_surface_variant,
+            style.fill,
+        ) {
+            return c;
+        }
+
+        // The title.
+        if y >= row_y + 8 && y < row_y + 8 + run_rows(1) {
+            if let Some(c) = test_text(
+                x,
+                y,
+                DISPLAY_X0 + style.pad,
+                row_y + 8,
+                1,
+                row.title(),300, 
+                THEME.on_surface,
+                style.fill,
+            ) {
+                return c;
+            }
+        }
+
+        // The note: what the platform supports about this setting.
+        if y >= row_y + 36 && y < row_y + 36 + run_rows(1) {
+            let note_w = DISPLAY_W
+                .saturating_sub(2 * style.pad)
+                .saturating_sub(value_w)
+                .saturating_sub(12);
+            let mut nbuf = [0u8; 64];
+            let n = std::design::font::ellipsize(row.note(), 1, note_w, &mut nbuf);
+            if n > 0 {
+                if let Some(c) = test_text(
+                    x,
+                    y,
+                    DISPLAY_X0 + style.pad,
+                    row_y + 36,
+                    1,
+                    &nbuf[..n],note_w, 
+                    THEME.on_surface_variant,
+                    style.fill,
+                ) {
+                    return c;
+                }
+            }
+        }
+        return style.fill;
+    }
+    THEME.surface
+}
+
+/// The ringtone picker: the audio documents the platform's index holds.
+///
+/// WHY the picker is a list of the platform's documents and not a list of
+/// sounds: the ringtone slot names a document on the device, so the choices
+/// are the documents the device holds.
+fn ringtone_picker_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
+    // The title.
+    if y >= SETTINGS_TITLE_Y0 && y < SETTINGS_TITLE_Y0 + run_rows(1) {
+        if let Some(c) = test_text(
+            x,
+            y,
+            SETTINGS_TEXT_X,
+            SETTINGS_TITLE_Y0,
+            1,
+            b"CHOOSE A RINGTONE",DISPLAY_W - 48, 
+            THEME.on_surface,
+            THEME.surface,
+        ) {
+            return c;
+        }
+    }
+
+    let offset = dialer.ringtone_scroll.offset;
+    for i in 0..dialer.ringtone_choice_count {
+        let row_y = RINGTONE_ROW_Y0 + i * RINGTONE_ROW_H;
+        let scrolled_y = row_y.saturating_sub(offset);
+        if y < scrolled_y || y >= scrolled_y + RINGTONE_ROW_H {
+            continue;
+        }
+        let style = components::list_row_style(&THEME, false);
+        if std::design::primitives::draw_rounded_rect(
+            x,
+            y,
+            std::design::primitives::Rect::new(DISPLAY_X0, scrolled_y, DISPLAY_W, RINGTONE_ROW_H),
+            style.radius,
+            style.fill,
+            None,
+            0,
+        )
+        .is_none()
+        {
+            return THEME.surface;
+        }
+        if y == scrolled_y + RINGTONE_ROW_H - 1 && x >= DISPLAY_X0 && x < DISPLAY_X1 {
+            return style.divider;
+        }
+        let choice = &dialer.ringtone_choices[i];
+        let name = &choice.name[..choice.name_len];
+        if let Some(c) = test_text(
+            x,
+            y,
+            DISPLAY_X0 + style.pad,
+            scrolled_y + 8,
+            1,
+            name,DISPLAY_W - 2 * style.pad, 
+            THEME.on_surface,
+            style.fill,
+        ) {
+            return c;
+        }
+        let path = &choice.path[..choice.path_len];
+        let mut pbuf = [0u8; 64];
+        let n = std::design::font::ellipsize(path, 1, DISPLAY_W - 2 * style.pad, &mut pbuf);
+        if n > 0 {
+            if let Some(c) = test_text(
+                x,
+                y,
+                DISPLAY_X0 + style.pad,
+                scrolled_y + 34,
+                1,
+                &pbuf[..n],DISPLAY_W - 2 * style.pad, 
+                THEME.on_surface_variant,
+                style.fill,
+            ) {
+                return c;
+            }
+        }
+        return style.fill;
+    }
+
+    // The row that leaves the picker.
+    if y >= RINGTONE_BACK_Y0 && y < RINGTONE_BACK_Y0 + RINGTONE_BACK_H {
+        let style = components::list_row_style(&THEME, false);
+        if std::design::primitives::draw_rounded_rect(
+            x,
+            y,
+            std::design::primitives::Rect::new(DISPLAY_X0, RINGTONE_BACK_Y0, DISPLAY_W, RINGTONE_BACK_H),
+            style.radius,
+            style.fill,
+            None,
+            0,
+        )
+        .is_none()
+        {
+            return THEME.surface;
+        }
+        if let Some(c) = test_text(
+            x,
+            y,
+            DISPLAY_X0 + style.pad,
+            RINGTONE_BACK_Y0 + (RINGTONE_BACK_H - run_rows(1)) / 2,
+            1,
+            b"Back to the settings",DISPLAY_W - 48, 
+            THEME.on_surface,
+            style.fill,
+        ) {
+            return c;
+        }
+        return style.fill;
+    }
+
+    // The scroll indicator, drawn beside the list it belongs to.
+    if let Some(c) = scroll_indicator(
+        x,
+        y,
+        &dialer.ringtone_scroll,
+        RINGTONE_ROW_Y0,
+        RINGTONE_VIEWPORT_Y1 - RINGTONE_ROW_Y0,
+    ) {
+        return c;
     }
     THEME.surface
 }
@@ -2525,7 +3313,7 @@ fn contacts_card_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
                     DISPLAY_X0 + 24,
                     fy + 8,
                     1,
-                    &lbuf[..ln],
+                    &lbuf[..ln],DISPLAY_W - 48, 
                     THEME.on_surface_variant,
                     fill,
                 ) {
@@ -2542,7 +3330,7 @@ fn contacts_card_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
                     DISPLAY_X0 + 24,
                     vy,
                     1,
-                    &vbuf[..vn],
+                    &vbuf[..vn],DISPLAY_W - 48, 
                     THEME.on_surface,
                     fill,
                 ) {
@@ -2564,7 +3352,7 @@ fn contacts_card_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     let Some(sel) = dialer.contact_sel else {
         let head: &[u8] = b"No contact selected";
         let hx = DISPLAY_X0 + std::design::font::center_x(head, 2, DISPLAY_W);
-        if let Some(c) = test_text(x, y, hx, 206, 2, head, THEME.on_surface, THEME.surface) {
+        if let Some(c) = test_text(x, y, hx, 206, 2, head,DISPLAY_W - 48,  THEME.on_surface, THEME.surface) {
             return c;
         }
         // WHY this says what to press: an empty card is a dead end unless it
@@ -2575,7 +3363,7 @@ fn contacts_card_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         if n > 0 {
             let w = std::design::font::measure(&buf[..n], 1);
             let bx = DISPLAY_X0 + (DISPLAY_W.saturating_sub(w)) / 2;
-            if let Some(c) = test_text(x, y, bx, 286, 1, &buf[..n], THEME.on_surface_variant, THEME.surface) {
+            if let Some(c) = test_text(x, y, bx, 286, 1, &buf[..n],DISPLAY_W - 48,  THEME.on_surface_variant, THEME.surface) {
                 return c;
             }
         }
@@ -2598,7 +3386,7 @@ fn contacts_card_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         let label: &[u8] = b"Starred";
         let lw = std::design::font::measure(label, 1);
         let lx = DISPLAY_X1 - 24 - lw;
-        if let Some(c) = test_text(x, y, lx, 196, 1, label, THEME.warning, THEME.surface) {
+        if let Some(c) = test_text(x, y, lx, 196, 1, label,120,  THEME.warning, THEME.surface) {
             return c;
         }
     }
@@ -2607,7 +3395,7 @@ fn contacts_card_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     let nn = std::design::font::ellipsize(rec.name_bytes(), 2, DISPLAY_W - 48, &mut nbuf);
     let nw = std::design::font::measure(&nbuf[..nn], 2);
     let nx = DISPLAY_X0 + (DISPLAY_W.saturating_sub(nw)) / 2;
-    if let Some(c) = test_text(x, y, nx, 196, 2, &nbuf[..nn], THEME.on_surface, THEME.surface) {
+    if let Some(c) = test_text(x, y, nx, 196, 2, &nbuf[..nn],DISPLAY_W - 48,  THEME.on_surface, THEME.surface) {
         return c;
     }
 
@@ -2615,7 +3403,7 @@ fn contacts_card_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     let un = std::design::font::ellipsize(rec.number_bytes(), 2, DISPLAY_W - 48, &mut ubuf);
     let uw = std::design::font::measure(&ubuf[..un], 2);
     let ux = DISPLAY_X0 + (DISPLAY_W.saturating_sub(uw)) / 2;
-    if let Some(c) = test_text(x, y, ux, 252, 2, &ubuf[..un], THEME.on_surface_variant, THEME.surface) {
+    if let Some(c) = test_text(x, y, ux, 252, 2, &ubuf[..un],DISPLAY_W - 48,  THEME.on_surface_variant, THEME.surface) {
         return c;
     }
 
@@ -2647,7 +3435,7 @@ fn contacts_card_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
                 let lw = std::design::font::measure(&lbuf[..ln], 1);
                 let lx = cx0 + (chip_w.saturating_sub(lw)) / 2;
                 let ly = chip_y + (56 - run_rows(1)) / 2;
-                if let Some(c) = test_text(x, y, lx, ly, 1, &lbuf[..ln], *ink, *fill) {
+                if let Some(c) = test_text(x, y, lx, ly, 1, &lbuf[..ln],120,  *ink, *fill) {
                     return c;
                 }
             }
@@ -2664,10 +3452,16 @@ fn contacts_card_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
 /// them: the durable list is a statement about storage, and the unsaved list is
 /// not. Mixing them would let a contact the kernel refused to store look exactly
 /// like one it accepted.
+///
+/// WHY the list scrolls: the store holds twelve contacts and the unsaved group
+/// can hold twelve more, while the window holds eight rows. The rows below the
+/// fold were unreachable, so the list carries the platform's scroll model and a
+/// thumb beside it.
 fn contacts_list_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     // Row plates. Saved rows come first, then unsaved ones, because the durable
     // list is the one the user asked the device to keep.
     let total_rows = dialer.contacts.len() + dialer.contacts.unsaved_len();
+    let offset = dialer.contacts_scroll.offset;
     let mut row = 0usize;
     let mut cursor = LIST_Y0;
     while row < total_rows {
@@ -2694,33 +3488,38 @@ fn contacts_list_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
             row += 1;
             continue;
         }
-        if !(cursor..cursor + CONTACT_ROW_H).contains(&y) {
+        // The row's place on screen, once the list is scrolled.
+        let scrolled_y = cursor.saturating_sub(offset);
+        if !(scrolled_y..scrolled_y + CONTACT_ROW_H).contains(&y) {
             cursor += CONTACT_ROW_H;
             row += 1;
             continue;
         }
         let selected = dialer.contact_sel == Some(sel);
-        let plate = if selected {
-            color::SURFACE_RAISED
-        } else {
-            THEME.surface_container
-        };
+        // The platform's list-row treatment: the fill, the corner radius and the
+        // divider are the platform's, so a row here looks like a row anywhere
+        // else in the system.
+        let style = components::list_row_style(&THEME, selected);
         if std::design::primitives::draw_rounded_rect(
             x,
             y,
-            std::design::primitives::Rect::new(DISPLAY_X0, cursor, DISPLAY_W, CONTACT_ROW_H),
-            12,
-            plate,
-            Some(THEME.border),
-            1,
+            std::design::primitives::Rect::new(DISPLAY_X0, scrolled_y, DISPLAY_W, CONTACT_ROW_H),
+            style.radius,
+            style.fill,
+            None,
+            0,
         )
         .is_none()
         {
             return THEME.surface;
         }
+        // The divider, in the platform's divider ink.
+        if y == scrolled_y + CONTACT_ROW_H - 1 && x >= DISPLAY_X0 && x < DISPLAY_X1 {
+            return style.divider;
+        }
         // Vibrant avatar disc with the contact's initial.
         let av_cx = DISPLAY_X0 + 30;
-        let av_cy = cursor + CONTACT_ROW_H / 2;
+        let av_cy = scrolled_y + CONTACT_ROW_H / 2;
         let dx = x as i32 - av_cx as i32;
         let dy = y as i32 - av_cy as i32;
         let d2 = dx * dx + dy * dy;
@@ -2733,7 +3532,7 @@ fn contacts_list_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
             let iw = std::design::font::measure(&initial, 1);
             let ix = (av_cx as i32 - iw as i32 / 2).max(0) as usize;
             let iy = (av_cy as i32 - run_rows(1) as i32 / 2).max(0) as usize;
-            if let Some(t) = test_text_bold(x, y, ix, iy, 1, &initial, THEME.ink_on_dark, av_bg) {
+            if let Some(t) = test_text_bold(x, y, ix, iy, 1, &initial,24,  THEME.ink_on_dark, av_bg) {
                 return t;
             }
             return av_bg;
@@ -2743,7 +3542,7 @@ fn contacts_list_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
             let nn = std::design::font::ellipsize(rec.name_bytes(), 1, DISPLAY_W - 150, &mut nbuf);
             if nn > 0 {
                 if let Some(t) =
-                    test_text(x, y, tx, cursor + 8, 1, &nbuf[..nn], THEME.on_surface, plate)
+                    test_text(x, y, tx, scrolled_y + 8, 1, &nbuf[..nn],DISPLAY_W - 150,  THEME.on_surface, style.fill)
                 {
                     return t;
                 }
@@ -2755,11 +3554,11 @@ fn contacts_list_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
                     x,
                     y,
                     tx,
-                    cursor + 36,
+                    scrolled_y + 36,
                     1,
-                    &ubuf[..un],
+                    &ubuf[..un],DISPLAY_W - 150, 
                     THEME.on_surface_variant,
-                    plate,
+                    style.fill,
                 ) {
                     return t;
                 }
@@ -2768,7 +3567,7 @@ fn contacts_list_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
             // an unsaved contact cannot be starred in storage, and drawing it
             // filled would claim otherwise.
             let sdx = x as i32 - STAR_CX as i32;
-            let sdy = y as i32 - (cursor + CONTACT_ROW_H / 2) as i32;
+            let sdy = y as i32 - (scrolled_y + CONTACT_ROW_H / 2) as i32;
             if sdx * sdx + sdy * sdy <= STAR_R * STAR_R {
                 return if rec.is_favourite() {
                     THEME.warning
@@ -2776,13 +3575,24 @@ fn contacts_list_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
                     THEME.border
                 };
             }
-            return plate;
+            return style.fill;
         }
 
 
     // Notice band under the list.
     if (NOTICE_Y0..NOTICE_Y1).contains(&y) {
         return contacts_notice_pixel(x, y, dialer);
+    }
+
+    // The scroll indicator, drawn beside the list it belongs to.
+    if let Some(c) = scroll_indicator(
+        x,
+        y,
+        &dialer.contacts_scroll,
+        LIST_Y0,
+        LIST_VIEWPORT_Y1 - LIST_Y0,
+    ) {
+        return c;
     }
     THEME.surface
 }
@@ -2813,7 +3623,7 @@ fn contacts_notice_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         DISPLAY_X0 + 24,
         NOTICE_Y0 + 4,
         1,
-        state.as_str().as_bytes(),
+        state.as_str().as_bytes(),DISPLAY_W - 48, 
         ink,
         THEME.surface,
     ) {
@@ -2883,7 +3693,7 @@ fn contacts_notice_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
             DISPLAY_X0 + 24,
             NOTICE_Y0 + 34,
             1,
-            &buf[..tn],
+            &buf[..tn],DISPLAY_W - 48, 
             THEME.on_surface_variant,
             THEME.surface,
         ) {
@@ -2916,7 +3726,7 @@ fn emergency_dial_pixel(x: usize, y: usize, dialer: &DialerApp) -> Option<u32> {
     let sos_x0 = SOS_CX.saturating_sub(sos_w / 2);
     let sos_y0 = SOS_CY.saturating_sub(sos_rows / 2);
     if y >= sos_y0 && y < sos_y0 + sos_rows {
-        if let Some(c) = test_text_bold(x, y, sos_x0, sos_y0, SOS_SCALE, b"SOS", THEME.emergency, THEME.error_container) {
+        if let Some(c) = test_text_bold(x, y, sos_x0, sos_y0, SOS_SCALE, b"SOS",60,  THEME.emergency, THEME.error_container) {
             return Some(c);
         }
     }
@@ -2986,7 +3796,7 @@ fn contacts_action_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
             } else {
                 THEME.surface_container
             };
-            if let Some(c) = test_text(x, y, lx, ly, 1, &lbuf[..ln], text_color, fill) {
+            if let Some(c) = test_text(x, y, lx, ly, 1, &lbuf[..ln],160,  text_color, fill) {
                 return c;
             }
         }
@@ -3212,7 +4022,7 @@ fn dock_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
             label_x,
             DOCK_LABEL_Y0,
             DOCK_LABEL_SCALE,
-            DOCK_LABELS[slot],
+            DOCK_LABELS[slot],DOCK_ITEM_W, 
             ink,
             plate,
         ) {
@@ -3254,9 +4064,9 @@ fn get_dialer_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     }
 
     // 4. Section content (y: 410..1140): the dial pad and the call controls in
-    //    the Keypad section, the real call ledger in Recents, and the contact
+    //    the Keypad section, the real call ledger in Recents, the contact
     //    store -- the list while browsing, or the dial pad typed as a multi-tap
-    //    text entry -- in Contacts.
+    //    text entry -- in Contacts, and the dialer's own settings in Settings.
     if (CONTENT_Y0..CONTENT_Y1).contains(&y) {
         return match dialer.section {
             DialerSection::Keypad => {
@@ -3267,6 +4077,7 @@ fn get_dialer_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
                 action_pixel(x, y, dialer)
             }
             DialerSection::Recents => recents_pixel(x, y, dialer),
+            DialerSection::Settings => settings_pixel(x, y, dialer),
             DialerSection::Contacts => {
                 if dialer.contact_edit.is_some() {
                     // The editor reuses the real dial pad, so its geometry, its
@@ -3423,7 +4234,7 @@ fn handle_tap(dialer: &mut DialerApp, px: u32, py: u32) -> Tap<'static> {
         return Tap::Leave("[DIALER APP] Back control or home gesture pressed. Exiting to launcher.");
     }
 
-    // 2. Segmented tabs. All three are live sections.
+    // 2. Segmented tabs. All four are live sections.
     if (TAB_BAND_Y0..TAB_BAND_Y0 + TAB_BAND_H).contains(&y) {
         if x >= TAB1_X0 && x < TAB1_X1 {
             dialer.section = DialerSection::Keypad;
@@ -3437,6 +4248,12 @@ fn handle_tap(dialer: &mut DialerApp, px: u32, py: u32) -> Tap<'static> {
         }
         if x >= TAB3_X0 && x < TAB3_X1 {
             dialer.open_contacts(dialer.contacts_fav_only);
+            let _ = std::audio_haptic_click();
+            return Tap::Redraw(Dirty::All);
+        }
+        if x >= TAB4_X0 && x < TAB4_X1 {
+            dialer.settings_view = SettingsView::Main;
+            dialer.refresh_settings_values();
             let _ = std::audio_haptic_click();
             return Tap::Redraw(Dirty::All);
         }
@@ -3483,21 +4300,31 @@ fn handle_tap(dialer: &mut DialerApp, px: u32, py: u32) -> Tap<'static> {
 
     // 5. Section content: the keypad and action row in the Keypad section, the
     if dialer.section == DialerSection::Recents {
-        if y >= RECENTS_Y0 && y < RECENTS_Y0 + dialer.recents_len * RECENTS_ROW_H {
-            let row_idx = (y - RECENTS_Y0) / RECENTS_ROW_H;
-            if row_idx < dialer.recents_len {
-                let rec = &dialer.recents[row_idx];
-                dialer.active_number = [0u8; 32];
-                let n = rec.len.min(32);
-                dialer.active_number[..n].copy_from_slice(&rec.number[..n]);
-                dialer.active_len = n;
-                dialer.section = DialerSection::Keypad;
-                std::log("[DIALER APP] Loaded number from recents.").ok();
-                let _ = std::audio_haptic_click();
-                return Tap::Redraw(Dirty::All);
+        // The ledger scrolls, so the row under the tap is the one at the
+        // scrolled position, not the one at the unshifted position.
+        let offset = dialer.recents_scroll.offset;
+        if y >= RECENTS_Y0 && y < RECENTS_VIEWPORT_Y1 {
+            let content_y = y + offset;
+            if content_y >= RECENTS_Y0 {
+                let row_idx = (content_y - RECENTS_Y0) / RECENTS_ROW_H;
+                if row_idx < dialer.recents_len {
+                    let rec = &dialer.recents[row_idx];
+                    dialer.active_number = [0u8; 32];
+                    let n = rec.len.min(32);
+                    dialer.active_number[..n].copy_from_slice(&rec.number[..n]);
+                    dialer.active_len = n;
+                    dialer.section = DialerSection::Keypad;
+                    std::log("[DIALER APP] Loaded number from recents.").ok();
+                    let _ = std::audio_haptic_click();
+                    return Tap::Redraw(Dirty::All);
+                }
             }
         }
         return Tap::None;
+    }
+
+    if dialer.section == DialerSection::Settings {
+        return handle_settings_tap(dialer, x, y);
     }
 
     if dialer.section == DialerSection::Contacts {
@@ -3570,6 +4397,104 @@ fn handle_tap(dialer: &mut DialerApp, px: u32, py: u32) -> Tap<'static> {
     }
 
     Tap::None
+}
+
+/// The settings surface's hit-testing.
+///
+/// WHY each row answers for itself: a row that changes nothing was a row that
+/// looked like a control. The two rows the platform cannot answer say so when
+/// they are pressed, so the user learns the limit from the app and not from a
+/// guess.
+fn handle_settings_tap(dialer: &mut DialerApp, x: usize, y: usize) -> Tap<'static> {
+    if dialer.settings_view == SettingsView::RingtonePicker {
+        return handle_ringtone_picker_tap(dialer, x, y);
+    }
+    if y < SETTINGS_ROW_Y0 {
+        return Tap::None;
+    }
+    let index = (y - SETTINGS_ROW_Y0) / SETTINGS_ROW_H;
+    if index >= SettingsRow::ORDER.len() {
+        return Tap::None;
+    }
+    match SettingsRow::ORDER[index] {
+        SettingsRow::Ringtone => {
+            dialer.refresh_ringtone_choices();
+            dialer.settings_view = SettingsView::RingtonePicker;
+            Tap::Redraw(Dirty::All)
+        }
+        SettingsRow::KeypadTone => {
+            match dialer.toggle_dtmf() {
+                Ok(on) => {
+                    std::log(if on {
+                        "[DIALER APP] The keypad tone is on."
+                    } else {
+                        "[DIALER APP] The keypad tone is off."
+                    })
+                    .ok();
+                }
+                Err(code) => {
+                    log_with_code(
+                        "[DIALER APP] The settings store refused the keypad-tone preference, code",
+                        code,
+                    );
+                }
+            }
+            dialer.refresh_settings_values();
+            Tap::Redraw(Dirty::All)
+        }
+        SettingsRow::DefaultSim => {
+            std::log("[DIALER APP] The platform exposes one SIM profile and no subscription-selection call, so a default SIM cannot be chosen here.")
+                .ok();
+            Tap::None
+        }
+        SettingsRow::CallDuration => {
+            std::log("[DIALER APP] The platform's telephony telemetry carries no call duration, so the app shows none.")
+                .ok();
+            Tap::None
+        }
+    }
+}
+
+/// The ringtone picker's hit-testing.
+fn handle_ringtone_picker_tap(dialer: &mut DialerApp, _x: usize, y: usize) -> Tap<'static> {
+    // The row that leaves the picker.
+    if y >= RINGTONE_BACK_Y0 && y < RINGTONE_BACK_Y0 + RINGTONE_BACK_H {
+        dialer.settings_view = SettingsView::Main;
+        dialer.refresh_settings_values();
+        return Tap::Redraw(Dirty::All);
+    }
+    if y < RINGTONE_ROW_Y0 || y >= RINGTONE_VIEWPORT_Y1 {
+        return Tap::None;
+    }
+    // The list scrolls, so the row under the tap is the one at the scrolled
+    // position.
+    let offset = dialer.ringtone_scroll.offset;
+    let content_y = y + offset;
+    if content_y < RINGTONE_ROW_Y0 {
+        return Tap::None;
+    }
+    let index = (content_y - RINGTONE_ROW_Y0) / RINGTONE_ROW_H;
+    if index >= dialer.ringtone_choice_count {
+        return Tap::None;
+    }
+    let choice = dialer.ringtone_choices[index];
+    let path = &choice.path[..choice.path_len];
+    match dialer.set_ringtone(path) {
+        Ok(()) => {
+            dialer.settings_view = SettingsView::Main;
+            dialer.refresh_settings_values();
+            std::log("[DIALER APP] The device's ringtone slot now names the chosen document.")
+                .ok();
+            Tap::Redraw(Dirty::All)
+        }
+        Err(code) => {
+            log_with_code(
+                "[DIALER APP] The settings store refused the ringtone write, code",
+                code,
+            );
+            Tap::None
+        }
+    }
 }
 
 /// Contacts section hit-testing: the card's chips and editor fields, the contact
@@ -3746,6 +4671,9 @@ fn handle_contacts_tap(dialer: &mut DialerApp, x: usize, y: usize) -> Tap<'stati
     // List rows: the star toggles, the body selects.
     if (LIST_Y0..NOTICE_Y0).contains(&y) && x >= DISPLAY_X0 && x < DISPLAY_X1 {
         let total = dialer.contacts.len() + dialer.contacts.unsaved_len();
+        // The list scrolls, so the row under the tap is the one at the scrolled
+        // position, and the star moves with it.
+        let offset = dialer.contacts_scroll.offset;
         let mut row = 0usize;
         let mut cursor = LIST_Y0;
         while row < total {
@@ -3769,14 +4697,16 @@ fn handle_contacts_tap(dialer: &mut DialerApp, x: usize, y: usize) -> Tap<'stati
                 row += 1;
                 continue;
             }
-            if y < cursor || y >= cursor + CONTACT_ROW_H {
+            let scrolled_y = cursor.saturating_sub(offset);
+            if y < scrolled_y || y >= scrolled_y + CONTACT_ROW_H {
                 cursor += CONTACT_ROW_H;
                 row += 1;
                 continue;
             }
-            if in_circle(x, y, STAR_CX, cursor + CONTACT_ROW_H / 2, STAR_R) {
+            if in_circle(x, y, STAR_CX, scrolled_y + CONTACT_ROW_H / 2, STAR_R) {
                 dialer.contact_sel = Some(sel);
                 dialer.toggle_selected_favourite();
+                dialer.refresh_scrolls();
                 return Tap::Redraw(Dirty::All);
             }
             // WHY the row stays selected and the action changes rather than a
@@ -3886,6 +4816,11 @@ pub extern "C" fn _start() -> ! {
     // choice that the file manager and the gallery fill, and this app plays
     // whatever is in it.
     dialer.refresh_ringtone();
+
+    // WHY the keypad-tone preference is read here: it is the user's choice,
+    // stored in the settings store, and the keypad has to honour it from the
+    // first key press.
+    dialer.dtmf_enabled = dtmf_enabled();
 
     // 1. Query Cellular Modem Baseband Telemetry
     // WHY: this app holds no telephony authority, so the query is normally
@@ -4008,6 +4943,13 @@ pub extern "C" fn _start() -> ! {
         }
     }
 
+    // WHY the scroll extents and the settings values are computed before the
+    // first frame: the first frame the user sees has to show the real state of
+    // the lists and the real value of every setting, not a default that is
+    // corrected a moment later.
+    dialer.refresh_scrolls();
+    dialer.refresh_settings_values();
+
     // 3. Allocate dedicated KMS Client Surface (z=200)
     std::log("[DIALER APP] Step 1: Allocating application surface (z=200)...",
     )
@@ -4045,12 +4987,13 @@ pub extern "C" fn _start() -> ! {
             100,
         ) {
             if (events & std::EVENT_TIMER_TICK) != 0 {
-                if dialer.state == CallState::ActiveCall {
-                    dialer.call_duration_secs += 1;
-                }
-                // WHY no flip here: nothing on the surface is derived from the
-                // call timer, so re-presenting an unchanged frame costs a full
-                // scanout copy for no visible difference.
+                // WHY there is no work here any more: the tick used to advance
+                // a call-duration counter the app kept itself. The platform's
+                // telephony telemetry carries no duration, so the counter was
+                // the app's own ticks rather than a fact about the call, and it
+                // is gone. Nothing on the surface is derived from a timer, so
+                // re-presenting an unchanged frame would cost a full scanout
+                // copy for no visible difference.
             }
 
             if (events & std::EVENT_MODEM_URC) != 0 {
@@ -4094,6 +5037,14 @@ pub extern "C" fn _start() -> ! {
                             Tap::None => {}
                         }
                         continue;
+                    }
+                    if input.kind == 4 || input.kind == 10 {
+                        // A drag over a list scrolls it; a drag anywhere else
+                        // is the system's navigation gesture.
+                        if dialer.apply_scroll(input.x as usize, input.y as usize, input.dy) {
+                            dirty = merge(dirty, Dirty::All);
+                            continue;
+                        }
                     }
                     if input.kind == 4 || input.kind == 6 || input.kind == 7 || input.kind == 8 || input.kind == 10 {
                         std::log("[DIALER APP] Navigation gesture recognized. Returning to launcher.",

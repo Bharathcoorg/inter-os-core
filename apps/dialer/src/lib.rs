@@ -2,6 +2,8 @@
 
 pub use interos_std as std;
 
+use interos_std::design::scroll::ScrollState;
+
 /// The app's view of the platform's design system.
 pub mod theme;
 
@@ -277,12 +279,17 @@ pub enum CallType {
 pub const MAX_CALL_LOGS: usize = 16;
 
 /// Bounded call history record.
+///
+/// WHY there is no duration field: the platform's telephony telemetry carries
+/// the modem's call state and its signal readings, and no duration. A record
+/// that carried one would carry a number this app invented, and a call
+/// history that shows an invented duration is a history that cannot be
+/// believed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CallLogEntry {
     pub number: [u8; CONTACT_NUM_MAX],
     pub number_len: usize,
     pub call_type: CallType,
-    pub duration_secs: u32,
     pub timestamp_epoch_secs: u64,
 }
 
@@ -291,17 +298,15 @@ impl CallLogEntry {
         number: [0; CONTACT_NUM_MAX],
         number_len: 0,
         call_type: CallType::Outgoing,
-        duration_secs: 0,
         timestamp_epoch_secs: 0,
     };
 
-    pub fn new(number_bytes: &[u8], call_type: CallType, duration_secs: u32, timestamp: u64) -> Self {
+    pub fn new(number_bytes: &[u8], call_type: CallType, timestamp: u64) -> Self {
         let mut entry = Self::EMPTY;
         let n = number_bytes.len().min(CONTACT_NUM_MAX);
         entry.number[..n].copy_from_slice(&number_bytes[..n]);
         entry.number_len = n;
         entry.call_type = call_type;
-        entry.duration_secs = duration_secs;
         entry.timestamp_epoch_secs = timestamp;
         entry
     }
@@ -339,6 +344,259 @@ impl CallHistoryLedger {
         // Most recent first: index 0 is (head - 1 + MAX_CALL_LOGS) % MAX_CALL_LOGS
         let slot = (self.head + MAX_CALL_LOGS - 1 - idx) % MAX_CALL_LOGS;
         Some(&self.entries[slot])
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The lists the dialer scrolls.
+//
+// WHY the extents live here and not in the renderer: a list that is taller
+// than its window has to be scrollable, and the height of a list and the
+// height of the window it is shown in are one fact. Putting them in the
+// model means the test can state the fact without drawing a pixel.
+// ---------------------------------------------------------------------------
+
+/// The height of one row in the recents ledger.
+pub const RECENTS_ROW_H: usize = 96;
+
+/// The top of the recents list.
+pub const RECENTS_Y0: usize = 424;
+
+/// The bottom of the recents list's window.
+pub const RECENTS_VIEWPORT_Y1: usize = 1140;
+
+/// The height of one row in the contact list.
+pub const CONTACT_ROW_H: usize = 66;
+
+/// The top of the contact list.
+pub const CONTACTS_LIST_Y0: usize = 410;
+
+/// The bottom of the contact list's window; the notice band starts here.
+pub const CONTACTS_VIEWPORT_Y1: usize = 938;
+
+/// How tall a scrollable list is, and how much of it is on screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScrollExtents {
+    /// The height of the whole list.
+    pub content_h: usize,
+    /// The height of the part of the list that is on screen.
+    pub viewport_h: usize,
+}
+
+impl ScrollExtents {
+    /// Whether the list has anything below the fold.
+    ///
+    /// WHY this is asked of the extents and not of the scroll state: a list
+    /// that fits does not need an indicator, and an indicator on a list that
+    /// fits is a control that says there is more when there is not.
+    pub const fn scrolls(self) -> bool {
+        self.content_h > self.viewport_h
+    }
+
+    /// The scroll state these extents describe.
+    pub const fn state(self) -> ScrollState {
+        ScrollState::new(self.content_h, self.viewport_h, 0)
+    }
+}
+
+/// The extents of the recents ledger.
+///
+/// WHY the ledger's window is the whole content band: the recents section
+/// owns that band, and a ledger that could only be scrolled through a
+/// window smaller than its own would leave the rows below the fold
+/// unreachable in the one section that has nothing else to show.
+pub const fn recents_scroll_extents(entries: usize) -> ScrollExtents {
+    ScrollExtents {
+        content_h: entries * RECENTS_ROW_H,
+        viewport_h: RECENTS_VIEWPORT_Y1 - RECENTS_Y0,
+    }
+}
+
+/// The extents of the contact list.
+pub const fn contacts_scroll_extents(rows: usize) -> ScrollExtents {
+    ScrollExtents {
+        content_h: rows * CONTACT_ROW_H,
+        viewport_h: CONTACTS_VIEWPORT_Y1 - CONTACTS_LIST_Y0,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The ringtone picker.
+// ---------------------------------------------------------------------------
+
+/// One audio document the picker can offer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RingtoneChoice {
+    /// The document's file name, which is what the row shows.
+    pub name: [u8; 40],
+    /// How many bytes of the name are used.
+    pub name_len: usize,
+    /// The document's path, which is what the ringtone slot holds.
+    pub path: [u8; 96],
+    /// How many bytes of the path are used.
+    pub path_len: usize,
+}
+
+impl RingtoneChoice {
+    /// An empty choice.
+    pub const EMPTY: Self = Self {
+        name: [0; 40],
+        name_len: 0,
+        path: [0; 96],
+        path_len: 0,
+    };
+}
+
+/// Reads the audio documents out of the platform's index answer.
+///
+/// WHY the picker is built from the index and not from a list this app keeps:
+/// the ringtone slot names a document on the device, and the documents on the
+/// device are the platform's. A picker over the app's own list would offer
+/// files the platform does not hold.
+///
+/// WHY only audio documents: the slot is a ringtone, and a ringtone that is
+/// a photograph is not a ringtone.
+pub fn parse_audio_documents(payload: &[u8], out: &mut [RingtoneChoice]) -> usize {
+    let mut count = 0usize;
+    for line in payload.split(|byte| *byte == b'\n') {
+        if count >= out.len() {
+            break;
+        }
+        if line.is_empty() {
+            continue;
+        }
+        let mut fields = line.split(|byte| *byte == b'|');
+        let _id = fields.next();
+        let Some(path) = fields.next() else { continue };
+        let Some(mime) = fields.next() else { continue };
+        if !mime.starts_with(b"audio/") {
+            continue;
+        }
+        let n = path.len().min(out[count].path.len());
+        out[count].path[..n].copy_from_slice(&path[..n]);
+        out[count].path_len = n;
+        let name = match path.iter().rposition(|byte| *byte == b'/') {
+            Some(index) => &path[index + 1..],
+            None => path,
+        };
+        let m = name.len().min(out[count].name.len());
+        out[count].name[..m].copy_from_slice(&name[..m]);
+        out[count].name_len = m;
+        count += 1;
+    }
+    count
+}
+
+// ---------------------------------------------------------------------------
+// The keypad-tone preference.
+// ---------------------------------------------------------------------------
+
+/// The settings key the keypad-tone preference is stored under.
+pub const DTMF_ENABLED_KEY: &str = "dialer.dtmf.enabled";
+
+/// Whether the keypad sounds while a digit is entered.
+///
+/// WHY the default is on: a phone whose keypad is silent because the
+/// preference was never written is a phone the user cannot use without
+/// looking at the screen, and the platform's own answer to "the user has not
+/// chosen" is the ordinary behaviour.
+pub fn dtmf_enabled() -> bool {
+    let mut buf = [0u8; 16];
+    match std::settings_get(DTMF_ENABLED_KEY, &mut buf) {
+        Ok(n) if n > 0 => buf[0] != b'0',
+        _ => true,
+    }
+}
+
+/// Stores the keypad-tone preference.
+pub fn set_dtmf_enabled(enabled: bool) -> Result<(), i64> {
+    std::settings_set(DTMF_ENABLED_KEY, if enabled { b"1" } else { b"0" })
+}
+
+/// Writes a number into `out` as decimal and returns how many bytes it wrote.
+///
+/// WHY this is here and not only in the binary: the app has to put a
+/// platform's error code into a log line, and a log line that says "code -"
+/// without the number is not a report of what the platform answered.
+pub fn put_decimal(mut value: u32, out: &mut [u8]) -> usize {
+    if value == 0 {
+        if out.is_empty() {
+            return 0;
+        }
+        out[0] = b'0';
+        return 1;
+    }
+    let mut digits = [0u8; 10];
+    let mut count = 0usize;
+    while value > 0 && count < digits.len() {
+        digits[count] = b'0' + (value % 10) as u8;
+        value /= 10;
+        count += 1;
+    }
+    let mut written = 0usize;
+    let mut index = count;
+    while index > 0 {
+        index -= 1;
+        if written >= out.len() {
+            break;
+        }
+        out[written] = digits[index];
+        written += 1;
+    }
+    written
+}
+
+// ---------------------------------------------------------------------------
+// The settings surface.
+// ---------------------------------------------------------------------------
+
+/// The settings the dialer's settings surface offers.
+///
+/// WHY the surface names the settings it cannot offer: the dialer's design
+/// document asks for a default-SIM choice, and the platform exposes one SIM
+/// profile and no subscription-selection call. A row that says so is an
+/// answer; a row that offers a choice which cannot be made is a lie.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsRow {
+    /// The document the device plays for an incoming call.
+    Ringtone,
+    /// Whether a pressed key sounds.
+    KeypadTone,
+    /// Which SIM the phone calls on.
+    DefaultSim,
+    /// What the platform reports about the length of a call.
+    CallDuration,
+}
+
+impl SettingsRow {
+    /// The rows, in the order the surface shows them.
+    pub const ORDER: [SettingsRow; 4] = [
+        SettingsRow::Ringtone,
+        SettingsRow::KeypadTone,
+        SettingsRow::DefaultSim,
+        SettingsRow::CallDuration,
+    ];
+
+    /// The row's title.
+    pub const fn title(self) -> &'static [u8] {
+        match self {
+            SettingsRow::Ringtone => b"Ringtone",
+            SettingsRow::KeypadTone => b"Keypad tone",
+            SettingsRow::DefaultSim => b"Default SIM",
+            SettingsRow::CallDuration => b"Call duration",
+        }
+    }
+
+    /// The row's note: what the platform actually supports.
+    pub const fn note(self) -> &'static [u8] {
+        match self {
+            SettingsRow::Ringtone => b"The document the device plays for an incoming call",
+            SettingsRow::KeypadTone => b"Whether a pressed key sounds",
+            SettingsRow::DefaultSim => {
+                b"Not supported: the platform exposes one SIM and no way to choose"
+            }
+            SettingsRow::CallDuration => b"The platform's telephony telemetry carries no duration",
+        }
     }
 }
 
@@ -442,22 +700,86 @@ mod tests {
     fn test_call_history_ledger() {        let mut ledger = CallHistoryLedger::new();
         assert_eq!(ledger.count, 0);
 
-        ledger.push(CallLogEntry::new(b"+15551234", CallType::Outgoing, 45, 1000));
+        ledger.push(CallLogEntry::new(b"+15551234", CallType::Outgoing, 1000));
         assert_eq!(ledger.count, 1);
         let first = ledger.get(0).unwrap();
         assert_eq!(&first.number[..first.number_len], b"+15551234");
         assert_eq!(first.call_type, CallType::Outgoing);
-        assert_eq!(first.duration_secs, 45);
 
         // Push 20 calls to verify circular overwrite at capacity 16
         for i in 2..=20 {
-            ledger.push(CallLogEntry::new(b"+15550000", CallType::Incoming, i as u32, 1000 + i as u64));
+            ledger.push(CallLogEntry::new(b"+15550000", CallType::Incoming, 1000 + i as u64));
         }
         assert_eq!(ledger.count, MAX_CALL_LOGS);
-        // Latest pushed call has duration_secs = 20
-        assert_eq!(ledger.get(0).unwrap().duration_secs, 20);
-        assert_eq!(ledger.get(15).unwrap().duration_secs, 5);
+        // The newest call is first and the oldest is still the sixteenth.
+        assert_eq!(ledger.get(0).unwrap().timestamp_epoch_secs, 1020);
+        assert_eq!(ledger.get(15).unwrap().timestamp_epoch_secs, 1005);
         assert_eq!(ledger.get(16), None);
+    }
+
+    #[test]
+    fn the_recents_list_scrolls_when_there_is_more_than_it_can_show() {
+        // A ledger that fits its window needs no indicator, and one that does
+        // not fit has to be scrollable, or the rows below the fold are
+        // unreachable.
+        let fits = recents_scroll_extents(3);
+        assert!(!fits.scrolls());
+        assert_eq!(fits.content_h, 3 * RECENTS_ROW_H);
+        assert_eq!(fits.viewport_h, RECENTS_VIEWPORT_Y1 - RECENTS_Y0);
+
+        let overflows = recents_scroll_extents(16);
+        assert!(overflows.scrolls());
+        assert!(overflows.state().max_offset() > 0);
+    }
+
+    #[test]
+    fn the_contact_list_scrolls_when_there_is_more_than_it_can_show() {
+        let fits = contacts_scroll_extents(4);
+        assert!(!fits.scrolls());
+        assert_eq!(fits.content_h, 4 * CONTACT_ROW_H);
+        assert_eq!(fits.viewport_h, CONTACTS_VIEWPORT_Y1 - CONTACTS_LIST_Y0);
+
+        // Twelve saved and twelve unsaved contacts are more than the window
+        // holds, and every one of them has to be reachable.
+        let overflows = contacts_scroll_extents(24);
+        assert!(overflows.scrolls());
+        assert!(overflows.state().max_offset() > 0);
+    }
+
+    #[test]
+    fn the_ringtone_picker_offers_only_the_audio_documents_the_platform_holds() {
+        let payload = b"1|/storage/audio/chime.pcm|audio/x-wav|bytes|4096|7\n2|/storage/photos/shot-1.ppm|image/x-portable-pixmap|bytes|2048|9\n3|/storage/audio/alarm.pcm|audio/x-wav|bytes|1024|11\n";
+        let mut choices = [RingtoneChoice::EMPTY; 4];
+        let n = parse_audio_documents(payload, &mut choices);
+        // The photograph is not a ringtone.
+        assert_eq!(n, 2);
+        assert_eq!(&choices[0].path[..choices[0].path_len], b"/storage/audio/chime.pcm");
+        assert_eq!(&choices[0].name[..choices[0].name_len], b"chime.pcm");
+        assert_eq!(&choices[1].name[..choices[1].name_len], b"alarm.pcm");
+    }
+
+    #[test]
+    fn the_ringtone_picker_survives_an_index_answer_with_nothing_in_it() {
+        let mut choices = [RingtoneChoice::EMPTY; 2];
+        assert_eq!(parse_audio_documents(b"", &mut choices), 0);
+        assert_eq!(parse_audio_documents(b"garbage\n", &mut choices), 0);
+    }
+
+    #[test]
+    fn the_settings_surface_says_which_choices_the_platform_does_not_offer() {
+        // The default-SIM row has to name the limit rather than offer a
+        // choice the platform cannot make.
+        let note = core::str::from_utf8(SettingsRow::DefaultSim.note()).unwrap();
+        assert!(note.contains("Not supported"));
+        assert!(note.contains("one SIM"));
+        // The duration row has to say the platform reports none.
+        let note = core::str::from_utf8(SettingsRow::CallDuration.note()).unwrap();
+        assert!(note.contains("no duration"));
+        // Every row has a title and a note.
+        for row in SettingsRow::ORDER {
+            assert!(!row.title().is_empty());
+            assert!(!row.note().is_empty());
+        }
     }
 }
 
