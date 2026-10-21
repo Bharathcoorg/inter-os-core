@@ -25,9 +25,19 @@
 
 use core::panic::PanicInfo;
 use interos_std as std;
+use camera::theme::{MIN_TOUCH_TARGET, THEME, radius};
 use std::design::primitives::Rect;
 
 use interos_std::design::outline_text;
+
+
+/// The platform's corner radii, under the short names the renderer uses.
+///
+/// WHY the aliases exist: the corner test names its radius four times, and a
+/// number that appears four times is a number that can drift from the
+/// platform. The alias resolves to the platform's step, so the drift is the
+/// platform's and not this app's.
+const R_CARD: usize = radius::CARD;
 
 const W: usize = 720;
 const H: usize = 1440;
@@ -390,24 +400,21 @@ impl CameraApp {
 }
 
 // -----------------------------------------------------------------------------
-// Visual Design Tokens (canonical dark preview-first)
+// Visual Design Tokens
+//
+// WHY there is no palette here any more: the app used to carry its own
+// colours, which is a second design system inside one app. Every colour now
+// resolves through the platform's theme, so a third-party app that asks the
+// SDK for the same roles draws the same camera. See `camera::theme` for the
+// mapping from the old names to the platform's roles.
 // -----------------------------------------------------------------------------
-const BG_DARK: u32 = 0xFF111214;
-const SURFACE_RAISED: u32 = 0xFF25282A;
-const BORDER_SUBTLE: u32 = 0xFF3A3D40;
-const ACCENT_AMBER: u32 = 0xFFD97706;
-const ACCENT_SKY: u32 = 0xFF2563EB;
-const SUCCESS_EMERALD: u32 = 0xFF16A34A;
-const DANGER_CRIMSON: u32 = 0xFFDC2626;
-const TEXT_PRIMARY: u32 = 0xFFF7F6F2;
-const TEXT_MUTED: u32 = 0xFF777773;
 
 /// Ink for a control that is painted but has nothing behind it.
 ///
 /// WHY the border token and not a grey invented here: it is the design system's
 /// own hairline, so "unavailable" reads the same in this app as it does in the
 /// file manager and the gallery, and it stays in step if the token ever moves.
-const DISABLED: u32 = BORDER_SUBTLE;
+const DISABLED: u32 = THEME.border;
 
 // -----------------------------------------------------------------------------
 // Screen bands - the single source of truth for both drawing and the
@@ -480,13 +487,17 @@ const FLASH_ICON_CY: usize = FLASH_RECT.y + FLASH_RECT.h / 2;
 const FLASH_TEXT_X: usize = FLASH_RECT.x + 32;
 const FLASH_TEXT_W: usize = FLASH_RECT.w - 32 - 8;
 
-/// The system home gesture strip: a 200x6 indicator drawn inside a 240x40 box.
+/// The system home gesture strip: a 200x6 indicator drawn inside a 240x44 box.
 ///
 /// WHY the hit box is larger than the ink, and why both are named: 6px of ink
 /// is not a touch target, so the tap region has to be the whole strip - but the
 /// old code hit-tested `x 240..480 && y >= 1400` with no upper bound on y, a
 /// region that was never drawn, so a tap well above the indicator exited the app.
-const HOME_HIT: Rect = Rect::new(240, 1400, 240, 40);
+///
+/// WHY 44 and not 40: the design system's minimum touch target is 44 logical
+/// pixels and this strip was 40. It now reaches the bottom edge of the
+/// surface, which is where the indicator already was.
+const HOME_HIT: Rect = Rect::new(240, 1396, 240, MIN_TOUCH_TARGET);
 const HOME_PILL: Rect = Rect::new(260, 1418, 200, 6);
 
 // Shutter button, as concentric radii about its centre.
@@ -569,16 +580,16 @@ fn test_text(
         if x < x0 || x - x0 >= w || y < y0 || y - y0 >= h {
             return None;
         }
-        return std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, BG_DARK, false);
+        return std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, THEME.surface, false);
     }
     let (bx, bt, bw, bh) = outline_text::run_box(x0, y0, scale, text);
     if x < bx || x - bx >= bw || y < bt || y - bt >= bh {
         return None;
     }
     if let Some(run) = outline_text::place_run(x0, y0, scale, text, Some(max_w), false) {
-        return run.pixel(x, y, color, BG_DARK);
+        return run.pixel(x, y, color, THEME.surface);
     }
-    std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, BG_DARK, false)
+    std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, THEME.surface, false)
 }
 
 /// Left x that centres `text` at `scale` inside `[x0, x0 + available)`, measured
@@ -672,7 +683,7 @@ fn top_pill_body(x: usize, y: usize, rect: Rect) -> Option<(u32, bool)> {
     } else if rx < 2 || ry < 2 {
         on_border = true;
     }
-    Some((SURFACE_RAISED, on_border))
+    Some((THEME.surface_container, on_border))
 }
 
 /// Draws a scale-1 label centred in `rect` at the top row's text row, or
@@ -717,7 +728,7 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
     // 1. Status Bar & Top Controls (y: 0..110)
     if y < TOP_BAND_Y1 {
         if y >= TOP_BAND_Y1 - 2 {
-            return BORDER_SUBTLE;
+            return THEME.border;
         }
 
         // Back control. WHY an outline measured from the rectangle's own edges
@@ -726,7 +737,7 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
         // thing it labelled. The chevron is now centred on `BACK_RECT`, and the
         // box is inset by one pixel so it is never clipped by `contains`.
         // Standardized back button squircle (24..72, 24..72)
-        if let Some(c) = std::design::back_button::pixel(x, y, TEXT_PRIMARY, BORDER_SUBTLE, SURFACE_RAISED) {
+        if let Some(c) = std::design::back_button::pixel(x, y, THEME.on_surface, THEME.border, THEME.surface_container) {
             return c;
         }
 
@@ -736,11 +747,11 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
             let is_lit =
                 camera.flash_available && (camera.flash == FlashMode::Torch || camera.flash == FlashMode::On);
             let icon_color = if is_lit {
-                ACCENT_AMBER
+                THEME.warning
             } else if !camera.flash_available {
-                TEXT_MUTED
+                THEME.on_surface_variant
             } else {
-                TEXT_PRIMARY
+                THEME.on_surface
             };
 
             if test_lightning(x, y, FLASH_ICON_CX, FLASH_ICON_CY) {
@@ -759,7 +770,7 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
             }
 
             if on_border {
-                return if is_lit { ACCENT_AMBER } else { BORDER_SUBTLE };
+                return if is_lit { THEME.warning } else { THEME.border };
             }
             return fill;
         }
@@ -776,14 +787,14 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
             // control, and it has to stay legible - "NO SENSOR" is the answer to
             // a question the user is asking. Only its outline is recessed, to
             // signal that there is nothing to press.
-            let color = if camera.camera_authorised { ACCENT_SKY } else { TEXT_MUTED };
+            let color = if camera.camera_authorised { THEME.primary } else { THEME.on_surface_variant };
             if let Some(c) = top_row_label(x, y, FRAME_RECT, label, color) {
                 return c;
             }
             if on_border {
                 return DISABLED;
             }
-            return SURFACE_RAISED;
+            return THEME.surface_container;
         }
 
         // ISP filter pill. This is a real control: the filter is applied in
@@ -791,11 +802,11 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
         // changes what the next capture is tone-mapped with.
         if let Some((fill, on_border)) = top_pill_body(x, y, FILTER_RECT) {
             let (filter_name, filter_color) = match camera.filter {
-                CameraFilter::Normal => (&b"NORMAL"[..], ACCENT_SKY),
-                CameraFilter::Monochrome => (&b"MONO"[..], TEXT_MUTED),
-                CameraFilter::HighContrast => (&b"CONTRAST"[..], TEXT_PRIMARY),
-                CameraFilter::Sepia => (&b"SEPIA"[..], ACCENT_AMBER),
-                CameraFilter::InvertedRed => (&b"INVERT"[..], DANGER_CRIMSON),
+                CameraFilter::Normal => (&b"NORMAL"[..], THEME.primary),
+                CameraFilter::Monochrome => (&b"MONO"[..], THEME.on_surface_variant),
+                CameraFilter::HighContrast => (&b"CONTRAST"[..], THEME.on_surface),
+                CameraFilter::Sepia => (&b"SEPIA"[..], THEME.warning),
+                CameraFilter::InvertedRed => (&b"INVERT"[..], THEME.error),
             };
             if let Some(c) = top_row_label(x, y, FILTER_RECT, filter_name, filter_color) {
                 return c;
@@ -813,16 +824,16 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
         // advances when `camera_capture` actually returned a frame.
         if let Some((_fill, on_border)) = top_pill_body(x, y, SHOTS_RECT) {
             let label = &camera.shots_label[..camera.shots_label_len];
-            if let Some(c) = top_row_label(x, y, SHOTS_RECT, label, SUCCESS_EMERALD) {
+            if let Some(c) = top_row_label(x, y, SHOTS_RECT, label, THEME.success) {
                 return c;
             }
             if on_border {
-                return SUCCESS_EMERALD;
+                return THEME.success;
             }
-            return SURFACE_RAISED;
+            return THEME.surface_container;
         }
 
-        return BG_DARK;
+        return THEME.surface;
     }
 
     // 2. Viewfinder Canvas (y: VIEWFINDER_Y0..VIEWFINDER_Y1, x: 20..700)
@@ -854,7 +865,7 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
                         2,
                         head,
                         VIEWFINDER_W,
-                        TEXT_PRIMARY,
+                        THEME.on_surface,
                     ) {
                         return c;
                     }
@@ -867,13 +878,13 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
                         1,
                         sub,
                         VIEWFINDER_W,
-                        TEXT_MUTED,
+                        THEME.on_surface_variant,
                     ) {
                         return c;
                     }
                 }
             }
-            return 0xFF080D1A;
+            return THEME.surface_container_low;
         }
 
         // Viewfinder Outer L-Corner Framing
@@ -894,7 +905,7 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
             (dx <= 40 && dy <= 40) && ((dx >= 36 && dy <= 12) || (dy >= 36 && dx <= 12));
         let is_crosshair = (dx <= 4 && dy <= 1) || (dy <= 4 && dx <= 1);
         if is_reticle || is_crosshair {
-            return ACCENT_AMBER;
+            return THEME.warning;
         }
 
         // Zoom pill, fully inside the viewfinder: abs x 296..424, abs y
@@ -909,14 +920,14 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
             let rx = rel_zx.min(ZOOM_PILL.w - 1 - rel_zx);
             let ry = rel_zy.min(ZOOM_PILL.h - 1 - rel_zy);
             let mut on_border = false;
-            if rx < 18 && ry < 18 {
-                let cdx = (18 - rx) as isize;
-                let cdy = (18 - ry) as isize;
+            if rx < R_CARD && ry < R_CARD {
+                let cdx = (R_CARD - rx) as isize;
+                let cdy = (R_CARD - ry) as isize;
                 let d2 = cdx * cdx + cdy * cdy;
-                if d2 >= 324 {
-                    return 0xFF080D1A;
+                if d2 >= (R_CARD * R_CARD) as isize {
+                    return THEME.surface_container_low;
                 }
-                if d2 >= 256 {
+                if d2 >= ((R_CARD - 2) * (R_CARD - 2)) as isize {
                     on_border = true;
                 }
             } else if rx < 2 || ry < 2 {
@@ -935,7 +946,7 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
             // the run owns the pill minus 4 rows top and bottom. Hard-coding 998
             // is what let the previous pill's descenders clip.
             let ty0 = ZOOM_PILL.y + (ZOOM_PILL.h - 48) / 2;
-            if let Some(c) = test_text(x, y, tx0, ty0, scale, zoom_str, ZOOM_PILL.w, TEXT_PRIMARY) {
+            if let Some(c) = test_text(x, y, tx0, ty0, scale, zoom_str, ZOOM_PILL.w, THEME.on_surface) {
                 return c;
             }
 
@@ -951,7 +962,7 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
             return 0x26FFFFFF;
         }
 
-        return 0xFF080D1A;
+        return THEME.surface_container_low;
     }
 
     // 3. Mode Selector Carousel (y: 1150..1200, 50px tall, >=48px touch)
@@ -991,7 +1002,7 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
         if x < S1_X {
             // Document (slot 0)
             let is_doc = camera.mode == CameraMode::DocumentVision;
-            let doc_color = if is_doc { TEXT_PRIMARY } else { TEXT_MUTED };
+            let doc_color = if is_doc { THEME.on_surface } else { THEME.on_surface_variant };
             let doc_w = std::design::font::measure(DOC, scale);
             let doc_x = S0_X + (S0_W.saturating_sub(doc_w)) / 2;
             if let Some(c) = test_text(x, y, doc_x, y0, scale, DOC, S0_W, doc_color) {
@@ -1000,7 +1011,7 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
         } else if x < S2_X {
             // Photo (slot 1)
             let is_photo = camera.mode == CameraMode::Photo;
-            let photo_color = if is_photo { TEXT_PRIMARY } else { TEXT_MUTED };
+            let photo_color = if is_photo { THEME.on_surface } else { THEME.on_surface_variant };
             let pho_w = std::design::font::measure(PHO, scale);
             let pho_x = S1_X + (S1_W.saturating_sub(pho_w)) / 2;
             if let Some(c) = test_text(x, y, pho_x, y0, scale, PHO, S1_W, photo_color) {
@@ -1009,7 +1020,7 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
         } else {
             // Video (slot 2)
             let is_vid = camera.mode == CameraMode::Video;
-            let vid_color = if is_vid { TEXT_PRIMARY } else { TEXT_MUTED };
+            let vid_color = if is_vid { THEME.on_surface } else { THEME.on_surface_variant };
             let vid_w = std::design::font::measure(VID, scale);
             let vid_x = S2_X + (S2_W.saturating_sub(vid_w)) / 2;
             if let Some(c) = test_text(x, y, vid_x, y0, scale, VID, S2_W, vid_color) {
@@ -1026,10 +1037,10 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
             _ => false,
         };
         if is_active_mode && y >= 1194 && y < 1198 {
-            return ACCENT_AMBER;
+            return THEME.warning;
         }
 
-        return BG_DARK;
+        return THEME.surface;
     }
 
     // 4. Bottom Shutter Dock & Hardware Controls (y: DOCK_Y0..DOCK_Y1)
@@ -1047,12 +1058,12 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
             // is the same defect as the invisible exit hotspot this app's file
             // manager had. Visible-but-inert is the honest middle.
             if test_gallery_icon(x, y, 110, SHUTTER_CY) {
-                return TEXT_MUTED;
+                return THEME.on_surface_variant;
             }
             if thumb_dx == DOCK_SIDEBTN_HALF as isize || thumb_dy == DOCK_SIDEBTN_HALF as isize {
-                return BORDER_SUBTLE;
+                return THEME.border;
             }
-            return SURFACE_RAISED;
+            return THEME.surface_container;
         }
 
         // Center Shutter Button. WHY the disabled treatment: `camera_capture` is
@@ -1070,22 +1081,22 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
 
         // Outer metallic ring.
         if dist_sq <= outer && dist_sq >= inner {
-            return if camera.camera_authorised { TEXT_PRIMARY } else { DISABLED };
+            return if camera.camera_authorised { THEME.on_surface } else { DISABLED };
         }
         // Concentric track gap.
         if dist_sq < inner && dist_sq >= core {
-            return BG_DARK;
+            return THEME.surface;
         }
         // Inner tactile shutter core.
         if dist_sq < core {
             if !camera.camera_authorised {
-                return SURFACE_RAISED;
+                return THEME.surface_container;
             } else if camera.mode == CameraMode::Video {
-                return DANGER_CRIMSON;
+                return THEME.error;
             } else if camera.mode == CameraMode::DocumentVision {
-                return ACCENT_SKY;
+                return THEME.primary;
             } else {
-                return TEXT_PRIMARY;
+                return THEME.on_surface;
             }
         }
 
@@ -1099,23 +1110,23 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
         let flip_r2 = flip_dx * flip_dx + flip_dy * flip_dy;
         if flip_r2 <= (DOCK_SIDEBTN_HALF * DOCK_SIDEBTN_HALF) as isize {
             if test_flip_arrows(x, y, 610, SHUTTER_CY) {
-                return TEXT_MUTED;
+                return THEME.on_surface_variant;
             }
             if flip_r2 >= 30 * 30 {
-                return BORDER_SUBTLE;
+                return THEME.border;
             }
-            return SURFACE_RAISED;
+            return THEME.surface_container;
         }
 
-        return BG_DARK;
+        return THEME.surface;
     }
 
     // Home gesture bar at bottom
     if HOME_PILL.contains(x, y) {
-        return TEXT_MUTED;
+        return THEME.on_surface_variant;
     }
 
-    BG_DARK
+    THEME.surface
 }
 
 fn render_camera_ui(surface: u32, camera: &CameraApp) {

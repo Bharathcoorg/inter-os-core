@@ -23,7 +23,7 @@ The QEMU Phone profile is a reproducible virtual development target. It provides
 | **Disk Image** | `target/inter-os-bios.img` | Canonical output of `interos build demo` |
 | **Serial TCP (COM1)** | `127.0.0.1:4301` | Microkernel serial UART stream |
 | **HMP Monitor** | `127.0.0.1:44445` | QEMU monitor for register/state inspection |
-| **VNC Endpoint** | `127.0.0.1:5901` (`:1`) | RFB framebuffer and input channel |
+| **VNC Endpoint** | `127.0.0.1:5901` (`:1`, default) | RFB framebuffer and input channel; the display is configurable with `INTEROS_VNC_DISPLAY`, and a launch whose display is already taken moves to a free one and reports the display it used |
 | **WebSocket Bridge** | `127.0.0.1:6081` | noVNC WebSocket bridge for browser access |
 | **Device Studio** | `http://127.0.0.1:4300` | Developer control console |
 | **Scanout Contract** | `1080 × 2160` FHD+ (720 × 1440 logical, 3:2 bilinear hardware upscaled) | Physical display scanout plane |
@@ -83,7 +83,29 @@ The QEMU developer transport supports live application deployment over the COM1 
 
 ---
 
-## 6. Verification Terminology
+## 6. Device State Reporting
+
+Device Studio reports the state of the device it can prove, and nothing else.
+
+| Field | Meaning |
+| :--- | :--- |
+| `device_state: running` | The QEMU process this Studio launched is alive **and** its monitor answers. |
+| `device_state: not_running` | No such process exists. A port that answers is reported as somebody else's listener, never as the device. |
+| `device_state: unknown` | Something answers on the host (a monitor, a port) that the Studio cannot identify as the device it launched. |
+
+The Studio tracks the QEMU process it launched by PID **and** the operating system's process creation time, so a recycled PID can never be mistaken for the guest. The VNC port is probed as a secondary signal only: it can never make the Studio report a running device.
+
+The VNC display is a setting rather than a constant:
+
+- `INTEROS_VNC_DISPLAY` selects the display index (`N` listens on `127.0.0.1:(5900+N)`); the default is `1`, i.e. `127.0.0.1:5901`.
+- `VNC_PORT` is still honoured when it names a display range; the display index is derived from it so QEMU and the Studio's own client cannot disagree about the port.
+- When the selected display is already served by another process, the Studio picks a free display, reports it in the launch response (`vnc_display`, `vnc_port`), and writes it to the console log.
+
+`POST /api/qemu/launch` starts a device after a stale state, and `POST /api/qemu/stop` clears one: stopping a device that is not running succeeds and reports `QEMU is not running` instead of an error about a guest that never existed.
+
+---
+
+## 7. Verification Terminology
 
 In accordance with the [Platform Reality Contract](PLATFORM_REALITY_CONTRACT.md):
 - **Built**: Artifact was produced successfully by the build graph.

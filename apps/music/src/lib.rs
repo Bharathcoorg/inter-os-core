@@ -2,6 +2,9 @@
 
 pub use interos_std as std;
 
+/// The app's view of the platform's design system.
+pub mod theme;
+
 /// `FileSystemRead` slot: accepted by `sys_settings_get`.
 pub const STORE_CAP_READ: usize = 4;
 /// `FileSystemWrite` slot: accepted by `sys_settings_set`.

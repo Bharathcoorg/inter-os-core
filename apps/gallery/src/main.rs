@@ -33,7 +33,7 @@ use interos_std::design::outline_text;
 
 use core::panic::PanicInfo;
 use interos_std as std;
-use std::design::color;
+use gallery::theme::{MIN_TOUCH_TARGET, THEME};
 use std::design::font;
 use std::design::primitives::{draw_pill, draw_rounded_rect, Rect};
 use std::design::radius;
@@ -53,20 +53,20 @@ const H: usize = 1440;
 const CHUNK: usize = 4096;
 
 // -----------------------------------------------------------------------------
-// 32-bit ARGB8888 Design Color Tokens
+// Visual Design Tokens
+//
+// WHY there is no palette here any more: the app used to reach into the
+// platform's *palette* module for its colours, which named values rather than
+// roles, and carried a second accent of its own on top. Every colour now
+// resolves through the platform's theme, so a third-party app that asks the
+// SDK for the same roles draws the same gallery. See `gallery::theme` for
+// the mapping from the old names to the platform's roles.
+//
+// WHY the app's two old accents are now one: the gallery's "neon cyan" and
+// its "accent sky" were both the app's accent, and the platform has one
+// accent role. The second constant is gone rather than kept as a second
+// spelling of the same role.
 // -----------------------------------------------------------------------------
-const BG: u32 = color::BACKGROUND;
-const SURFACE: u32 = color::SURFACE;
-const SOFT: u32 = color::SURFACE_SOFT;
-const BORDER: u32 = color::BORDER;
-const TEXT: u32 = color::TEXT;
-const MUTED: u32 = color::TEXT_MUTED;
-const INVERSE: u32 = color::SURFACE;
-const ACCENT_SKY: u32 = 0xFF2563EB;
-const ACCENT_AMBER: u32 = 0xFFF59E0B;
-const DANGER_CRIMSON: u32 = 0xFFEF4444;
-const NEON_CYAN: u32 = 0xFF00E5FF;
-const NEON_BLUE: u32 = 0xFF38BDF8;
 
 /// Capability slot that holds `FileSystemRead` for the `app_gallery` task.
 ///
@@ -139,7 +139,7 @@ fn decode_thumbnail(path: &[u8], name: &[u8]) -> Option<Thumbnail> {
 // Layout constants - single source of truth for rendering *and* hit-testing
 // -----------------------------------------------------------------------------
 /// Screen margin (8pt grid value).
-const MARGIN: usize = 24;
+const MARGIN: usize = spacing::GRID_24;
 /// Grid gutter between columns/rows. 8px gutters with a 24px margin cannot
 /// produce an integer cell on a 720px canvas (720 - 48 - 16 = 656, 656/3 is not
 /// integral), so the gutter is the next 8pt-grid value that divides exactly:
@@ -154,8 +154,15 @@ const SUBTITLE_Y: usize = 78;
 
 const PILL_Y: usize = 152;
 const PILL_H: usize = 48;
+/// The gap between two filter chips.
+///
+/// WHY 10 and not a step of the platform's spacing scale: the scale steps in
+/// fours, and the two nearest steps are 8 and 12. A chip row that is 8 apart
+/// reads as a single run of chips and one that is 12 apart reads as two
+/// groups, and 10 is the row this app's own filter bar was drawn at. The
+/// value is used once, so a token of its own would be a token of one app's.
 const PILL_GAP: usize = 10;
-const PILL_PAD: usize = 16;
+const PILL_PAD: usize = spacing::GRID_16;
 const PILL_MIN_W: usize = 64;
 
 const GRID_TOP: usize = 216;
@@ -172,7 +179,12 @@ const NAV_Y1: usize = 1400;
 const NAV_ICON_CY: usize = 1330;
 const NAV_LABEL_Y: usize = 1356;
 
-const HOME_HIT: Rect = Rect::new(240, 1400, 240, 40);
+/// The system home gesture strip: a 200x6 indicator drawn inside a 240x44 box.
+///
+/// WHY 44 and not 40: the design system's minimum touch target is 44 logical
+/// pixels, and this strip was 40. The strip now reaches the bottom edge of
+/// the surface, which is where the indicator already was.
+const HOME_HIT: Rect = Rect::new(240, 1396, 240, MIN_TOUCH_TARGET);
 const HOME_PILL: Rect = Rect::new(260, 1418, 200, 6);
 
 const FILTER_BAND_Y0: usize = PILL_Y;
@@ -193,8 +205,30 @@ const DETAIL_FAV: Rect = Rect::new(W - 140, 32, 48, 48);
 const DETAIL_DEL: Rect = Rect::new(W - 80, 32, 48, 48);
 const PLAY_PAUSE_BTN: Rect = Rect::new(W / 2 - 28, DETAIL_VIEW_Y1 + 16, 56, 56);
 const SCRUB_BAR: Rect = Rect::new(MARGIN, DETAIL_VIEW_Y1 + 84, W - 2 * MARGIN, 20);
-const FULLSCREEN_BTN: Rect = Rect::new(W - MARGIN - 100, DETAIL_VIEW_Y1 + 114, 100, 36);
-const ASPECT_BTN: Rect = Rect::new(W - 80, 32, 60, 40);
+/// The scrub track's touch region.
+///
+/// WHY it is taller than the track: the drawn groove is 20 rows because that
+/// is what a slider's groove looks like, and a 20-row groove is not a touch
+/// target. The platform's minimum is 44 logical pixels, so the region a tap
+/// lands in is 44 rows tall and centred on the groove. The fullscreen button
+/// below it is tested first, so the two rows they share go to the button.
+const SCRUB_HIT: Rect = Rect::new(
+    SCRUB_BAR.x,
+    SCRUB_BAR.y + SCRUB_BAR.h / 2 - MIN_TOUCH_TARGET / 2,
+    SCRUB_BAR.w,
+    MIN_TOUCH_TARGET,
+);
+/// The fullscreen control.
+///
+/// WHY 44 and not 36: the design system's minimum touch target is 44 logical
+/// pixels and this button was 36. The row below the scrub bar has room for
+/// the four extra rows, so nothing else moved.
+const FULLSCREEN_BTN: Rect = Rect::new(W - MARGIN - 100, DETAIL_VIEW_Y1 + 114, 100, MIN_TOUCH_TARGET);
+/// The aspect-ratio control.
+///
+/// WHY 44 and not 40: the design system's minimum touch target is 44 logical
+/// pixels and this button was 40.
+const ASPECT_BTN: Rect = Rect::new(W - 80, 32, 60, MIN_TOUCH_TARGET);
 const DETAIL_INFO: Rect = Rect::new(W / 2 - 40, H - 100, 80, 48);
 const PHOTO_FAV_BTN: Rect = Rect::new(MARGIN + 40, H - 100, 80, 48);
 const PHOTO_DEL_BTN: Rect = Rect::new(W - MARGIN - 120, H - 100, 80, 48);
@@ -454,7 +488,6 @@ const REAL_SECTIONS: usize = 1;
 /// own hairline, so an unavailable control reads as recessed chrome against both
 /// the page fill and a card, and it stays in step with the rest of the shell if
 /// the hairline token ever moves.
-const DISABLED: u32 = BORDER;
 
 // -----------------------------------------------------------------------------
 // Media model
@@ -1247,17 +1280,17 @@ fn blend_argb(top: u32, bottom: u32, t: usize) -> u32 {
 fn wallpaper_cell_pixel(x: usize, y: usize, col: usize) -> u32 {
     let scene = &walls::SCENES[col];
     let rect = Rect::new(COL_X[col], GRID_TOP, CELL, CELL);
-    let Some(shape) = draw_rounded_rect(x, y, rect, radius::SMALL, SURFACE, Some(BORDER), 1) else {
-        return BG;
+    let Some(shape) = draw_rounded_rect(x, y, rect, radius::SMALL, THEME.surface_container, Some(THEME.border), 1) else {
+        return THEME.surface;
     };
-    if shape == BORDER {
-        return BORDER;
+    if shape == THEME.border {
+        return THEME.border;
     }
     // The image area is the cell minus its caption strip, and it is tested with
     // the same rounded-rectangle rasteriser so the artwork is clipped by the
     // card's corners rather than painting over them.
     let image = Rect::new(rect.x, rect.y, rect.w, rect.h - CAPTION_H);
-    if draw_rounded_rect(x, y, image, radius::SMALL, SURFACE, None, 0).is_some() {
+    if draw_rounded_rect(x, y, image, radius::SMALL, THEME.surface_container, None, 0).is_some() {
         return scene_pixel_in(scene, x, y, image, crop_origin_y(scene));
     }
     let caption = Rect::new(rect.x, rect.y + rect.h - CAPTION_H, rect.w, CAPTION_H);
@@ -1270,20 +1303,20 @@ fn wallpaper_cell_pixel(x: usize, y: usize, col: usize) -> u32 {
             caption.w,
             1,
             scene.name,
-            TEXT,
-            SURFACE,
+            THEME.on_surface,
+            THEME.surface_container,
         ) {
             return c;
         }
-        return SURFACE;
+        return THEME.surface_container;
     }
-    SURFACE
+    THEME.surface_container
 }
 
 /// One grid cell holding a photo-ledger record.
 fn photo_cell_pixel(x: usize, y: usize, idx: usize, col: usize, row: usize) -> u32 {
     let Some(photo) = PHOTOS.get(idx) else {
-        return BG;
+        return THEME.surface;
     };
     let x0 = COL_X[col];
     let y0 = GRID_TOP + row * ROW_STRIDE;
@@ -1292,14 +1325,14 @@ fn photo_cell_pixel(x: usize, y: usize, idx: usize, col: usize, row: usize) -> u
         y,
         Rect::new(x0, y0, CELL, CELL),
         radius::SMALL,
-        SURFACE,
-        Some(BORDER),
+        THEME.surface_container,
+        Some(THEME.border),
         1,
     ) else {
-        return BG;
+        return THEME.surface;
     };
-    if shape == BORDER {
-        return BORDER;
+    if shape == THEME.border {
+        return THEME.border;
     }
     let t = ((y - y0) * 255 / CELL.max(1)).min(255);
     blend_argb(photo.primary_color, photo.secondary_color, t)
@@ -1307,7 +1340,7 @@ fn photo_cell_pixel(x: usize, y: usize, idx: usize, col: usize, row: usize) -> u
 
 fn storage_cell_pixel(x: usize, y: usize, app: &GalleryApp, idx: usize, col: usize, row: usize) -> u32 {
     if idx >= app.storage_count {
-        return BG;
+        return THEME.surface;
     }
     let item = &app.storage_items[idx];
     let x0 = COL_X[col];
@@ -1318,14 +1351,14 @@ fn storage_cell_pixel(x: usize, y: usize, app: &GalleryApp, idx: usize, col: usi
         y,
         rect,
         radius::SMALL,
-        SURFACE,
-        Some(BORDER),
+        THEME.surface_container,
+        Some(THEME.border),
         1,
     ) else {
-        return BG;
+        return THEME.surface;
     };
-    if shape == BORDER {
-        return BORDER;
+    if shape == THEME.border {
+        return THEME.border;
     }
 
     let card_img_h = CELL - CAPTION_H;
@@ -1345,9 +1378,9 @@ fn storage_cell_pixel(x: usize, y: usize, app: &GalleryApp, idx: usize, col: usi
             None => {
                 if (x - x0) < 1 || (x - x0) >= CELL - 1 || (y - y0) < 1 || (y - y0) >= card_img_h - 1
                 {
-                    BORDER
+                    THEME.border
                 } else {
-                    SURFACE
+                    THEME.surface_container
                 }
             }
         };
@@ -1358,7 +1391,7 @@ fn storage_cell_pixel(x: usize, y: usize, app: &GalleryApp, idx: usize, col: usi
             let dx = (x as isize - cx as isize).abs();
             let dy = (y as isize - cy as isize).abs();
             if dx * dx + dy * dy <= 36 {
-                return ACCENT_AMBER;
+                return THEME.warning;
             }
         }
 
@@ -1379,15 +1412,15 @@ fn storage_cell_pixel(x: usize, y: usize, app: &GalleryApp, idx: usize, col: usi
     }
 
     if y == y0 + card_img_h {
-        return BORDER;
+        return THEME.border;
     }
     let text_y = y0 + card_img_h + (CAPTION_H.saturating_sub(font::line_height(1))) / 2;
     let mut buf = [0u8; 32];
     let n = font::ellipsize(&item.name[..item.name_len], 1, CELL - 16, &mut buf);
-    if let Some(c) = text(x, y, x0 + 8, text_y, 1, &buf[..n], TEXT, SURFACE) {
+    if let Some(c) = text(x, y, x0 + 8, text_y, 1, &buf[..n], THEME.on_surface, THEME.surface_container) {
         return c;
     }
-    SURFACE
+    THEME.surface_container
 }
 
 fn item_pixel(x: usize, y: usize, app: &GalleryApp, media: Media, col: usize, row: usize) -> u32 {
@@ -1431,11 +1464,11 @@ fn pill_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
         // which is how the rest of the shell paints something it cannot do.
         // It is not hit-tested in that state, so the two agree.
         let (fill, ink, border) = if !available {
-            (BG, MUTED, Some(BORDER))
+            (THEME.surface, THEME.on_surface_variant, Some(THEME.border))
         } else if app.filter == Filter::from_index(i) {
-            (TEXT, INVERSE, None)
+            (THEME.on_surface, THEME.on_primary, None)
         } else {
-            (SOFT, TEXT, Some(BORDER))
+            (THEME.surface_container_high, THEME.on_surface, Some(THEME.border))
         };
         let shape = draw_pill(x, y, rect, fill, border)?;
         if shape != fill {
@@ -1472,29 +1505,29 @@ fn tab_bar_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
         let line_w = 72;
         let lx0 = x0 + (tab_w - line_w) / 2;
         if x >= lx0 && x < lx0 + line_w {
-            return Some(NEON_CYAN);
+            return Some(THEME.primary);
         }
     }
 
     if y == TAB_Y + TAB_H - 1 {
-        return Some(BORDER);
+        return Some(THEME.border);
     }
 
     // Tab Label Text (Scale 1 with bold active state)
     let label = TAB_LABELS[tab_idx];
-    let text_color = if is_active { TEXT } else { MUTED };
+    let text_color = if is_active { THEME.on_surface } else { THEME.on_surface_variant };
     let text_y = TAB_Y + (TAB_H.saturating_sub(font::line_height(1))) / 2;
     if is_active {
-        if let Some(c) = text_centered_bold(x, y, x0, text_y, tab_w, 1, label, text_color, SURFACE) {
+        if let Some(c) = text_centered_bold(x, y, x0, text_y, tab_w, 1, label, text_color, THEME.surface_container) {
             return Some(c);
         }
     } else {
-        if let Some(c) = text_centered(x, y, x0, text_y, tab_w, 1, label, text_color, SURFACE) {
+        if let Some(c) = text_centered(x, y, x0, text_y, tab_w, 1, label, text_color, THEME.surface_container) {
             return Some(c);
         }
     }
 
-    Some(SURFACE)
+    Some(THEME.surface_container)
 }
 
 // -----------------------------------------------------------------------------
@@ -1563,14 +1596,14 @@ fn ledger_block_y0(app: &GalleryApp) -> usize {
 fn ledger_pixel(x: usize, y: usize, app: &GalleryApp) -> u32 {
     let y0 = ledger_block_y0(app);
     if empty_frame(x, y, 360, y0 + 120) {
-        return MUTED;
+        return THEME.on_surface_variant;
     }
     let title = b"No photos";
-    if let Some(c) = text_centered(x, y, MARGIN, y0 + 200, W - 2 * MARGIN, 2, title, TEXT, BG) {
+    if let Some(c) = text_centered(x, y, MARGIN, y0 + 200, W - 2 * MARGIN, 2, title, THEME.on_surface, THEME.surface) {
         return c;
     }
     let camera_note = b"No camera hardware on this device.";
-    if let Some(c) = text_centered(x, y, MARGIN, y0 + 280, W - 2 * MARGIN, 1, camera_note, MUTED, BG)
+    if let Some(c) = text_centered(x, y, MARGIN, y0 + 280, W - 2 * MARGIN, 1, camera_note, THEME.on_surface_variant, THEME.surface)
     {
         return c;
     }
@@ -1582,8 +1615,8 @@ fn ledger_pixel(x: usize, y: usize, app: &GalleryApp) -> u32 {
         W - 2 * MARGIN,
         1,
         &app.image_note[..app.image_note_len],
-        MUTED,
-        BG,
+        THEME.on_surface_variant,
+        THEME.surface,
     ) {
         return c;
     }
@@ -1595,8 +1628,8 @@ fn ledger_pixel(x: usize, y: usize, app: &GalleryApp) -> u32 {
         W - 2 * MARGIN,
         1,
         &app.scan_line[..app.scan_line_len],
-        TEXT,
-        BG,
+        THEME.on_surface,
+        THEME.surface,
     ) {
         return c;
     }
@@ -1608,8 +1641,8 @@ fn ledger_pixel(x: usize, y: usize, app: &GalleryApp) -> u32 {
         W - 2 * MARGIN,
         1,
         &app.unreadable_line[..app.unreadable_line_len],
-        MUTED,
-        BG,
+        THEME.on_surface_variant,
+        THEME.surface,
     ) {
         return c;
     }
@@ -1618,11 +1651,11 @@ fn ledger_pixel(x: usize, y: usize, app: &GalleryApp) -> u32 {
     // note they used to carry is gone; this one still describes something the
     // app cannot do.
     let sections_note = b"Albums and Places need their own index.";
-    if let Some(c) = text_centered(x, y, MARGIN, y0 + 376, W - 2 * MARGIN, 1, sections_note, MUTED, BG)
+    if let Some(c) = text_centered(x, y, MARGIN, y0 + 376, W - 2 * MARGIN, 1, sections_note, THEME.on_surface_variant, THEME.surface)
     {
         return c;
     }
-    BG
+    THEME.surface
 }
 
 /// Where the wallpaper catalogue's provenance note is drawn.
@@ -1649,8 +1682,8 @@ fn catalogue_pixel(x: usize, y: usize, app: &GalleryApp) -> u32 {
         W - 2 * MARGIN,
         1,
         &app.summary[..app.summary_len],
-        TEXT,
-        BG,
+        THEME.on_surface,
+        THEME.surface,
     ) {
         return c;
     }
@@ -1662,12 +1695,12 @@ fn catalogue_pixel(x: usize, y: usize, app: &GalleryApp) -> u32 {
         W - 2 * MARGIN,
         1,
         &app.catalogue_note[..app.catalogue_note_len],
-        MUTED,
-        BG,
+        THEME.on_surface_variant,
+        THEME.surface,
     ) {
         return c;
     }
-    BG
+    THEME.surface
 }
 
 fn video_col_of(x: usize) -> Option<usize> {
@@ -1696,11 +1729,11 @@ fn video_card_pixel(x: usize, y: usize, app: &GalleryApp, storage_idx: usize, co
     let y0 = GRID_TOP + row * VIDEO_ROW_H;
     let card_rect = Rect::new(x0, y0, VIDEO_COL_W, 210);
 
-    let Some(shape) = draw_rounded_rect(x, y, card_rect, radius::SMALL, SURFACE, Some(BORDER), 1) else {
-        return BG;
+    let Some(shape) = draw_rounded_rect(x, y, card_rect, radius::SMALL, THEME.surface_container, Some(THEME.border), 1) else {
+        return THEME.surface;
     };
-    if shape == BORDER {
-        return BORDER;
+    if shape == THEME.border {
+        return THEME.border;
     }
 
     let item = &app.storage_items[storage_idx];
@@ -1731,7 +1764,7 @@ fn video_card_pixel(x: usize, y: usize, app: &GalleryApp, storage_idx: usize, co
         let mw = font::measure(marker, 1);
         let mx = x0 + (VIDEO_COL_W.saturating_sub(mw)) / 2;
         let my = y0 + thumb_h - font::line_height(1) - 8;
-        if let Some(c) = text(x, y, mx, my, 1, marker, MUTED, SURFACE) {
+        if let Some(c) = text(x, y, mx, my, 1, marker, THEME.on_surface_variant, THEME.surface_container) {
             return c;
         }
 
@@ -1744,7 +1777,12 @@ fn video_card_pixel(x: usize, y: usize, app: &GalleryApp, storage_idx: usize, co
         // directory listing.
         let badge_rect = Rect::new(x0 + VIDEO_COL_W - 92, y0 + thumb_h - 30, 80, 22);
         if badge_rect.contains(x, y) {
-            let b_shape = draw_rounded_rect(x, y, badge_rect, radius::SMALL, 0xCC000000, Some(BORDER), 1);
+            // WHY the badge's own scrim and not a platform role: the badge
+            // sits on a *photo*, and a scrim over a picture has to be the
+            // picture's own darkness -- the platform's surface colour would
+            // put a pale patch on a dark photograph. The app's chrome around
+            // the picture comes from the platform's theme.
+            let b_shape = draw_rounded_rect(x, y, badge_rect, radius::SMALL, 0xCC000000, Some(THEME.border), 1);
             if let Some(bc) = b_shape {
                 if bc != 0xCC000000 { return bc; }
                 let mut size_buf = [0u8; 20];
@@ -1759,17 +1797,17 @@ fn video_card_pixel(x: usize, y: usize, app: &GalleryApp, storage_idx: usize, co
             }
         }
 
-        return SURFACE;
+        return THEME.surface_container;
     }
 
     if y == y0 + thumb_h {
-        return BORDER;
+        return THEME.border;
     }
 
     // Title line
     let mut name_buf = [0u8; 32];
     let n = font::ellipsize(&item.name[..item.name_len], 1, VIDEO_COL_W - 24, &mut name_buf);
-    if let Some(c) = text(x, y, x0 + 12, y0 + thumb_h + 12, 1, &name_buf[..n], TEXT, SURFACE) {
+    if let Some(c) = text(x, y, x0 + 12, y0 + thumb_h + 12, 1, &name_buf[..n], THEME.on_surface, THEME.surface_container) {
         return c;
     }
 
@@ -1799,11 +1837,11 @@ fn video_card_pixel(x: usize, y: usize, app: &GalleryApp, storage_idx: usize, co
     meta_len = append(&mut meta_buf, meta_len, b"  ");
     meta_len = append(&mut meta_buf, meta_len, &size_buf[..size_len]);
     meta_len = append(&mut meta_buf, meta_len, b" bytes");
-    if let Some(c) = text(x, y, x0 + 12, y0 + thumb_h + 36, 1, &meta_buf[..meta_len], MUTED, SURFACE) {
+    if let Some(c) = text(x, y, x0 + 12, y0 + thumb_h + 36, 1, &meta_buf[..meta_len], THEME.on_surface_variant, THEME.surface_container) {
         return c;
     }
 
-    SURFACE
+    THEME.surface_container
 }
 
 fn photos_grid_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
@@ -1826,21 +1864,21 @@ fn photos_grid_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
         return Some(ledger_pixel(x, y, app));
     }
 
-    Some(BG)
+    Some(THEME.surface)
 }
 
 fn videos_grid_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
     let count = app.videos_count();
     if count == 0 {
         let y0 = GRID_TOP + 120;
-        if let Some(c) = text_centered(x, y, MARGIN, y0, W - 2 * MARGIN, 2, b"No videos found", TEXT, BG) {
+        if let Some(c) = text_centered(x, y, MARGIN, y0, W - 2 * MARGIN, 2, b"No videos found", THEME.on_surface, THEME.surface) {
             return Some(c);
         }
         let note = b"Saved videos in /storage/videos will appear here.";
-        if let Some(c) = text_centered(x, y, MARGIN, y0 + 40, W - 2 * MARGIN, 1, note, MUTED, BG) {
+        if let Some(c) = text_centered(x, y, MARGIN, y0 + 40, W - 2 * MARGIN, 1, note, THEME.on_surface_variant, THEME.surface) {
             return Some(c);
         }
-        return Some(BG);
+        return Some(THEME.surface);
     }
 
     if let (Some(col), Some(row)) = (video_col_of(x), video_row_of(y)) {
@@ -1850,7 +1888,7 @@ fn videos_grid_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
         }
     }
 
-    Some(BG)
+    Some(THEME.surface)
 }
 
 fn albums_grid_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
@@ -1859,13 +1897,13 @@ fn albums_grid_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
     } else if x >= VIDEO_COL_X[1] && x < VIDEO_COL_X[1] + VIDEO_COL_W {
         1
     } else {
-        return Some(BG);
+        return Some(THEME.surface);
     };
 
     let rel_y = y - GRID_TOP;
     let row = rel_y / 200;
     if row >= 2 || rel_y % 200 >= 180 {
-        return Some(BG);
+        return Some(THEME.surface);
     }
 
     let album_idx = row * 2 + col;
@@ -1873,16 +1911,21 @@ fn albums_grid_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
     let y0 = GRID_TOP + row * 200;
     let card_rect = Rect::new(x0, y0, VIDEO_COL_W, 180);
 
-    let Some(shape) = draw_rounded_rect(x, y, card_rect, radius::SMALL, SURFACE, Some(BORDER), 1) else {
-        return Some(BG);
+    let Some(shape) = draw_rounded_rect(x, y, card_rect, radius::SMALL, THEME.surface_container, Some(THEME.border), 1) else {
+        return Some(THEME.surface);
     };
-    if shape == BORDER {
-        return Some(BORDER);
+    if shape == THEME.border {
+        return Some(THEME.border);
     }
 
     let banner_h = 100;
     if y < y0 + banner_h {
         let t = ((y - y0) * 255 / banner_h).min(255);
+        // WHY the banner's own gradient and not the platform's roles: the
+        // banner stands for the *album*, and each album has a colour of its
+        // own so the user can tell them apart at a glance. The app's chrome
+        // around it comes from the platform's theme; the album's colours are
+        // content, the way a photo's colours are.
         let grad = match album_idx {
             0 => blend_argb(0xFF1E3A8A, 0xFF2563EB, t),
             1 => blend_argb(0xFF047857, 0xFF10B981, t),
@@ -1901,7 +1944,7 @@ fn albums_grid_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
     }
 
     if y == y0 + banner_h {
-        return Some(BORDER);
+        return Some(THEME.border);
     }
 
     let (title, count): (&[u8], usize) = match album_idx {
@@ -1911,35 +1954,35 @@ fn albums_grid_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
         _ => (b"Sovereign Media", walls::SCENES.len()),
     };
 
-    if let Some(c) = text(x, y, x0 + 16, y0 + banner_h + 12, 2, title, TEXT, SURFACE) {
+    if let Some(c) = text(x, y, x0 + 16, y0 + banner_h + 12, 2, title, THEME.on_surface, THEME.surface_container) {
         return Some(c);
     }
 
     let mut count_buf = [0u8; 32];
     let mut cn = append_u64(&mut count_buf, 0, count as u64);
     cn = append(&mut count_buf, cn, b" items");
-    if let Some(c) = text(x, y, x0 + 16, y0 + banner_h + 46, 1, &count_buf[..cn], MUTED, SURFACE) {
+    if let Some(c) = text(x, y, x0 + 16, y0 + banner_h + 46, 1, &count_buf[..cn], THEME.on_surface_variant, THEME.surface_container) {
         return Some(c);
     }
 
-    Some(SURFACE)
+    Some(THEME.surface_container)
 }
 
 fn screenshots_grid_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
     let count = app.screenshots_count();
     if count == 0 {
         let y0 = GRID_TOP + 120;
-        if let Some(c) = text_centered(x, y, MARGIN, y0, W - 2 * MARGIN, 2, b"No screenshots yet", TEXT, BG) {
+        if let Some(c) = text_centered(x, y, MARGIN, y0, W - 2 * MARGIN, 2, b"No screenshots yet", THEME.on_surface, THEME.surface) {
             return Some(c);
         }
         // WHY the button is the only way mentioned: this app has no keyboard
         // handler, so the old note that told the user to press 'S' named a
         // shortcut that does not exist.
         let note = b"Capture a screen with the + Shot button.";
-        if let Some(c) = text_centered(x, y, MARGIN, y0 + 40, W - 2 * MARGIN, 1, note, MUTED, BG) {
+        if let Some(c) = text_centered(x, y, MARGIN, y0 + 40, W - 2 * MARGIN, 1, note, THEME.on_surface_variant, THEME.surface) {
             return Some(c);
         }
-        return Some(BG);
+        return Some(THEME.surface);
     }
 
     if let (Some(col), Some(row)) = (col_of(x), row_of(y)) {
@@ -1949,7 +1992,7 @@ fn screenshots_grid_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
         }
     }
 
-    Some(BG)
+    Some(THEME.surface)
 }
 
 fn grid_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
@@ -1977,7 +2020,7 @@ fn nav_pixel(x: usize, y: usize) -> Option<u32> {
         return None;
     }
     if y == NAV_Y0 {
-        return Some(BORDER);
+        return Some(THEME.border);
     }
     for (i, label) in NAV_LABELS.iter().enumerate() {
         let box_x0 = i * (W / 3);
@@ -1988,7 +2031,7 @@ fn nav_pixel(x: usize, y: usize) -> Option<u32> {
         // WHY the hairline ink past the real destinations: it is the same token
         // the unavailable filter chips use, so "painted but not actionable" looks
         // identical wherever the user meets it.
-        let color = if i < REAL_SECTIONS { TEXT } else { DISABLED };
+        let color = if i < REAL_SECTIONS { THEME.on_surface } else { THEME.border };
         let is_icon = match i {
             0 => tab_photos_icon(x, y, cx, NAV_ICON_CY),
             1 => tab_albums_icon(x, y, cx, NAV_ICON_CY),
@@ -2006,13 +2049,13 @@ fn nav_pixel(x: usize, y: usize) -> Option<u32> {
             1,
             label,
             color,
-            SURFACE,
+            THEME.surface_container,
         ) {
             return Some(c);
         }
-        return Some(SURFACE);
+        return Some(THEME.surface_container);
     }
-    Some(SURFACE)
+    Some(THEME.surface_container)
 }
 
 // -----------------------------------------------------------------------------
@@ -2066,58 +2109,58 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
             if y < 80 {
                 // Header strip in fullscreen
                 let codec_str = player.codec.as_str().as_bytes();
-                if let Some(c) = text(x, y, MARGIN, 28, 2, codec_str, 0xFFFFFFFF, 0xFF0F172A) {
+                if let Some(c) = text(x, y, MARGIN, 28, 2, codec_str, THEME.on_primary, THEME.surface_container_low) {
                     return c;
                 }
-                return 0xFF0F172A;
+                return THEME.surface_container_low;
             }
             if y >= H - 120 {
                 // Bottom control overlay
-                if let Some(c) = draw_pill(x, y, PLAY_PAUSE_BTN, SOFT, Some(BORDER)) {
-                    if c != SOFT { return c; }
+                if let Some(c) = draw_pill(x, y, PLAY_PAUSE_BTN, THEME.surface_container_high, Some(THEME.border)) {
+                    if c != THEME.surface_container_high { return c; }
                     let icon: &[u8] = if player.is_playing { b"||" } else { b">" };
                     let lw = font::measure(icon, 2);
                     let lx = PLAY_PAUSE_BTN.x + (PLAY_PAUSE_BTN.w.saturating_sub(lw)) / 2;
                     let ly = PLAY_PAUSE_BTN.y + (PLAY_PAUSE_BTN.h.saturating_sub(font::line_height(2))) / 2;
-                    if let Some(tc) = text(x, y, lx, ly, 2, icon, TEXT, SOFT) { return tc; }
-                    return SOFT;
+                    if let Some(tc) = text(x, y, lx, ly, 2, icon, THEME.on_surface, THEME.surface_container_high) { return tc; }
+                    return THEME.surface_container_high;
                 }
-                if let Some(c) = draw_pill(x, y, FULLSCREEN_BTN, SOFT, Some(BORDER)) {
-                    if c != SOFT { return c; }
+                if let Some(c) = draw_pill(x, y, FULLSCREEN_BTN, THEME.surface_container_high, Some(THEME.border)) {
+                    if c != THEME.surface_container_high { return c; }
                     let lbl = b"Exit Full";
                     let lw = font::measure(lbl, 1);
                     let lx = FULLSCREEN_BTN.x + (FULLSCREEN_BTN.w.saturating_sub(lw)) / 2;
                     let ly = FULLSCREEN_BTN.y + (FULLSCREEN_BTN.h.saturating_sub(font::line_height(1))) / 2;
-                    if let Some(tc) = text(x, y, lx, ly, 1, lbl, TEXT, SOFT) { return tc; }
-                    return SOFT;
+                    if let Some(tc) = text(x, y, lx, ly, 1, lbl, THEME.on_surface, THEME.surface_container_high) { return tc; }
+                    return THEME.surface_container_high;
                 }
-                return 0xFF0F172A;
+                return THEME.surface_container_low;
             }
             let t = (player.position_ms * 255 / player.duration_ms.max(1)).min(255) as usize;
-            return blend_argb(0xFF0F172A, 0xFF1E293B, t);
+            return blend_argb(THEME.surface_container_low, THEME.surface_container, t);
         }
     }
 
     // App bar: back control + CRUD / Aspect buttons + title/meta
     if y < DETAIL_BAR_H {
         if y == DETAIL_BAR_H - 1 {
-            return BORDER;
+            return THEME.border;
         }
-        if let Some(c) = std::design::back_button::pixel(x, y, TEXT, BORDER, SOFT) {
+        if let Some(c) = std::design::back_button::pixel(x, y, THEME.on_surface, THEME.border, THEME.surface_container_high) {
             return c;
         }
 
         // Aspect toggle button for video player (Fit vs Fill)
         if let Some(ref player) = app.video_player {
             let aspect_lbl: &[u8] = if player.is_fill { b"Fill" } else { b"Fit" };
-            let aspect_color = if player.is_fill { NEON_CYAN } else { TEXT };
-            if let Some(c) = draw_pill(x, y, ASPECT_BTN, SOFT, Some(BORDER)) {
-                if c != SOFT { return c; }
+            let aspect_color = if player.is_fill { THEME.primary } else { THEME.on_surface };
+            if let Some(c) = draw_pill(x, y, ASPECT_BTN, THEME.surface_container_high, Some(THEME.border)) {
+                if c != THEME.surface_container_high { return c; }
                 let lw = font::measure(aspect_lbl, 1);
                 let lx = ASPECT_BTN.x + (ASPECT_BTN.w.saturating_sub(lw)) / 2;
                 let ly = ASPECT_BTN.y + (ASPECT_BTN.h.saturating_sub(font::line_height(1))) / 2;
-                if let Some(tc) = text(x, y, lx, ly, 1, aspect_lbl, aspect_color, SOFT) { return tc; }
-                return SOFT;
+                if let Some(tc) = text(x, y, lx, ly, 1, aspect_lbl, aspect_color, THEME.surface_container_high) { return tc; }
+                return THEME.surface_container_high;
             }
         }
 
@@ -2127,54 +2170,54 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
         if y >= 28 && y < 28 + font::line_height(2) {
             let mut buf = [0u8; 48];
             let n = font::ellipsize(title_bytes, 2, text_w, &mut buf);
-            if let Some(c) = text(x, y, text_x, 28, 2, &buf[..n], TEXT, SURFACE) {
+            if let Some(c) = text(x, y, text_x, 28, 2, &buf[..n], THEME.on_surface, THEME.surface_container) {
                 return c;
             }
         }
         if y >= 80 && y < 80 + font::line_height(1) {
             let mut buf = [0u8; 64];
             let n = font::ellipsize(&app.detail_meta[..app.detail_meta_len], 1, text_w, &mut buf);
-            if let Some(c) = text(x, y, text_x, 80, 1, &buf[..n], MUTED, SURFACE) {
+            if let Some(c) = text(x, y, text_x, 80, 1, &buf[..n], THEME.on_surface_variant, THEME.surface_container) {
                 return c;
             }
         }
-        return SURFACE;
+        return THEME.surface_container;
     }
 
     // Floating Info Sheet Overlay (for photos/wallpapers)
     if app.show_info_overlay && app.video_player.is_none() {
         let sheet = Rect::new(MARGIN, H - 470, W - 2 * MARGIN, 350);
         if sheet.contains(x, y) {
-            if let Some(shape) = draw_rounded_rect(x, y, sheet, radius::CARD, SURFACE, Some(NEON_CYAN), 2) {
-                if shape == NEON_CYAN { return NEON_CYAN; }
+            if let Some(shape) = draw_rounded_rect(x, y, sheet, radius::CARD, THEME.surface_container, Some(THEME.primary), 2) {
+                if shape == THEME.primary { return THEME.primary; }
 
                 // Title
-                if let Some(c) = text(x, y, sheet.x + 20, sheet.y + 20, 2, b"Media Information", TEXT, SURFACE) {
+                if let Some(c) = text(x, y, sheet.x + 20, sheet.y + 20, 2, b"Media Information", THEME.on_surface, THEME.surface_container) {
                     return c;
                 }
 
                 // Divider
                 if y == sheet.y + 56 {
-                    return BORDER;
+                    return THEME.border;
                 }
 
                 // Line 1: File Name
                 let name_lbl = b"File: ";
                 let nw = font::measure(name_lbl, 1);
-                if let Some(c) = text(x, y, sheet.x + 20, sheet.y + 72, 1, name_lbl, MUTED, SURFACE) {
+                if let Some(c) = text(x, y, sheet.x + 20, sheet.y + 72, 1, name_lbl, THEME.on_surface_variant, THEME.surface_container) {
                     return c;
                 }
                 let title_bytes = app.detail_title();
                 let mut nb = [0u8; 48];
                 let nlen = font::ellipsize(title_bytes, 1, sheet.w.saturating_sub(40 + nw), &mut nb);
-                if let Some(c) = text(x, y, sheet.x + 20 + nw, sheet.y + 72, 1, &nb[..nlen], TEXT, SURFACE) {
+                if let Some(c) = text(x, y, sheet.x + 20 + nw, sheet.y + 72, 1, &nb[..nlen], THEME.on_surface, THEME.surface_container) {
                     return c;
                 }
 
                 // Line 2: Resolution
                 let res_lbl = b"Resolution: ";
                 let rw = font::measure(res_lbl, 1);
-                if let Some(c) = text(x, y, sheet.x + 20, sheet.y + 104, 1, res_lbl, MUTED, SURFACE) {
+                if let Some(c) = text(x, y, sheet.x + 20, sheet.y + 104, 1, res_lbl, THEME.on_surface_variant, THEME.surface_container) {
                     return c;
                 }
                 let mut res_buf = [0u8; 32];
@@ -2191,14 +2234,14 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
                 // header is read, and this build does not read it.
                     append(&mut res_buf, 0, b"not measured")
                 };
-                if let Some(c) = text(x, y, sheet.x + 20 + rw, sheet.y + 104, 1, &res_buf[..rn], TEXT, SURFACE) {
+                if let Some(c) = text(x, y, sheet.x + 20 + rw, sheet.y + 104, 1, &res_buf[..rn], THEME.on_surface, THEME.surface_container) {
                     return c;
                 }
 
                 // Line 3: File Size
                 let size_lbl = b"Size: ";
                 let sw = font::measure(size_lbl, 1);
-                if let Some(c) = text(x, y, sheet.x + 20, sheet.y + 136, 1, size_lbl, MUTED, SURFACE) {
+                if let Some(c) = text(x, y, sheet.x + 20, sheet.y + 136, 1, size_lbl, THEME.on_surface_variant, THEME.surface_container) {
                     return c;
                 }
                 let mut sz_buf = [0u8; 32];
@@ -2212,14 +2255,14 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
                 } else {
                     append(&mut sz_buf, 0, b"Internal System Asset")
                 };
-                if let Some(c) = text(x, y, sheet.x + 20 + sw, sheet.y + 136, 1, &sz_buf[..sn], TEXT, SURFACE) {
+                if let Some(c) = text(x, y, sheet.x + 20 + sw, sheet.y + 136, 1, &sz_buf[..sn], THEME.on_surface, THEME.surface_container) {
                     return c;
                 }
 
                 // Line 4: Path
                 let path_lbl = b"Location: ";
                 let pw = font::measure(path_lbl, 1);
-                if let Some(c) = text(x, y, sheet.x + 20, sheet.y + 168, 1, path_lbl, MUTED, SURFACE) {
+                if let Some(c) = text(x, y, sheet.x + 20, sheet.y + 168, 1, path_lbl, THEME.on_surface_variant, THEME.surface_container) {
                     return c;
                 }
                 let path_bytes = if let Media::StorageItem(idx) = media {
@@ -2238,14 +2281,14 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
                 };
                 let mut pb = [0u8; 48];
                 let pn = font::ellipsize(path_bytes, 1, sheet.w.saturating_sub(40 + pw), &mut pb);
-                if let Some(c) = text(x, y, sheet.x + 20 + pw, sheet.y + 168, 1, &pb[..pn], TEXT, SURFACE) {
+                if let Some(c) = text(x, y, sheet.x + 20 + pw, sheet.y + 168, 1, &pb[..pn], THEME.on_surface, THEME.surface_container) {
                     return c;
                 }
 
                 // Line 5: Format
                 let fmt_lbl = b"Format: ";
                 let fw = font::measure(fmt_lbl, 1);
-                if let Some(c) = text(x, y, sheet.x + 20, sheet.y + 200, 1, fmt_lbl, MUTED, SURFACE) {
+                if let Some(c) = text(x, y, sheet.x + 20, sheet.y + 200, 1, fmt_lbl, THEME.on_surface_variant, THEME.surface_container) {
                     return c;
                 }
                 let fmt_str: &[u8] = if let Media::StorageItem(idx) = media {
@@ -2258,23 +2301,23 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
                 } else {
                     b"Vector Silhouette Wall Reference"
                 };
-                if let Some(c) = text(x, y, sheet.x + 20 + fw, sheet.y + 200, 1, fmt_str, TEXT, SURFACE) {
+                if let Some(c) = text(x, y, sheet.x + 20 + fw, sheet.y + 200, 1, fmt_str, THEME.on_surface, THEME.surface_container) {
                     return c;
                 }
 
                 // Dismiss Button
                 let dismiss_btn = Rect::new(sheet.x + (sheet.w - 140) / 2, sheet.y + 270, 140, 44);
-                if let Some(dc) = draw_pill(x, y, dismiss_btn, SOFT, Some(BORDER)) {
-                    if dc != SOFT { return dc; }
+                if let Some(dc) = draw_pill(x, y, dismiss_btn, THEME.surface_container_high, Some(THEME.border)) {
+                    if dc != THEME.surface_container_high { return dc; }
                     let d_lbl = b"Dismiss";
                     let dw = font::measure(d_lbl, 1);
                     let dx_pos = dismiss_btn.x + (dismiss_btn.w.saturating_sub(dw)) / 2;
                     let dy_pos = dismiss_btn.y + (dismiss_btn.h.saturating_sub(font::line_height(1))) / 2;
-                    if let Some(tc) = text(x, y, dx_pos, dy_pos, 1, d_lbl, TEXT, SOFT) { return tc; }
-                    return SOFT;
+                    if let Some(tc) = text(x, y, dx_pos, dy_pos, 1, d_lbl, THEME.on_surface, THEME.surface_container_high) { return tc; }
+                    return THEME.surface_container_high;
                 }
 
-                return SURFACE;
+                return THEME.surface_container;
             }
         }
     }
@@ -2282,12 +2325,12 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
     // Viewport: Image or Video canvas
     if y >= DETAIL_VIEW_Y0 && y < DETAIL_VIEW_Y1 && x >= MARGIN && x < W - MARGIN {
         let view = Rect::new(DETAIL_VIEW_X, DETAIL_VIEW_Y0, DETAIL_VIEW_W, DETAIL_VIEW_H);
-        let shape = match draw_rounded_rect(x, y, view, radius::SMALL, BG, Some(BORDER), 1) {
+        let shape = match draw_rounded_rect(x, y, view, radius::SMALL, THEME.surface, Some(THEME.border), 1) {
             Some(c) => c,
-            None => return BG,
+            None => return THEME.surface,
         };
-        if shape == BORDER {
-            return BORDER;
+        if shape == THEME.border {
+            return THEME.border;
         }
 
         if let Some(ref player) = app.video_player {
@@ -2301,7 +2344,14 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
             };
 
             if !video_rect.contains(x, y) {
-                return 0xFF000000; // Letterbox black bars
+                // Letterbox black bars.
+                //
+                // WHY black and not the platform's darkest surface: the bars
+                // are the *picture's* letterbox, the way a film is letterboxed
+                // in a cinema, and a bar that carried the app's surface colour
+                // would read as part of the app. The app's chrome around the
+                // picture comes from the platform's theme.
+                return 0xFF000000;
             }
 
             // The video surface.
@@ -2310,12 +2360,12 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
             // video decoder, so there is no frame to show. The surface used
             // to be an animated scanline ramp labelled as a direct scanout,
             // which read as a playing video and was nothing of the sort.
-            let v_bg = SURFACE;
+            let v_bg = THEME.surface_container;
 
             // Codec watermark badge
             if y >= video_rect.y + 12 && y < video_rect.y + 12 + font::line_height(1) {
                 let badge = player.codec.as_str().as_bytes();
-                if let Some(c) = text(x, y, video_rect.x + 16, video_rect.y + 12, 1, badge, NEON_CYAN, v_bg) {
+                if let Some(c) = text(x, y, video_rect.x + 16, video_rect.y + 12, 1, badge, THEME.primary, v_bg) {
                     return c;
                 }
             }
@@ -2327,7 +2377,7 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
             let nw = font::measure(no_decode, 1);
             let nx = video_rect.x + (video_rect.w.saturating_sub(nw)) / 2;
             let ny = video_rect.y + (video_rect.h.saturating_sub(font::line_height(1))) / 2;
-            if let Some(c) = text(x, y, nx, ny, 1, no_decode, MUTED, v_bg) {
+            if let Some(c) = text(x, y, nx, ny, 1, no_decode, THEME.on_surface_variant, v_bg) {
                 return c;
             }
 
@@ -2341,14 +2391,14 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
             }
             Media::Photo(idx) => {
                 let Some(photo) = PHOTOS.get(idx) else {
-                    return BG;
+                    return THEME.surface;
                 };
                 let t = ((y - DETAIL_VIEW_Y0) * 255 / (DETAIL_VIEW_Y1 - DETAIL_VIEW_Y0)).min(255);
                 return blend_argb(photo.primary_color, photo.secondary_color, t);
             }
             Media::StorageItem(idx) => {
                 if app.storage_items.get(idx).is_none() {
-                    return BG;
+                    return THEME.surface;
                 }
                 if app.detail_rgba_len > 0 && app.detail_w > 0 && app.detail_h > 0 {
                     let img_x = ((x - view.x) * app.detail_w as usize / view.w.max(1)).min(app.detail_w as usize - 1);
@@ -2367,21 +2417,21 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
                 // shape of a picture reads as a picture of something. The
                 // grid's own tiles use a neutral placeholder for an image
                 // they cannot decode, and the detail view matches it.
-                return SURFACE;
+                return THEME.surface_container;
             }
         }
     }
 
     // Video Player interactive controls (Play/Pause, Scrub bar, Time, Fullscreen)
     if let Some(ref player) = app.video_player {
-        if let Some(c) = draw_pill(x, y, PLAY_PAUSE_BTN, SOFT, Some(BORDER)) {
-            if c != SOFT { return c; }
+        if let Some(c) = draw_pill(x, y, PLAY_PAUSE_BTN, THEME.surface_container_high, Some(THEME.border)) {
+            if c != THEME.surface_container_high { return c; }
             let icon: &[u8] = if player.is_playing { b"||" } else { b">" };
             let lw = font::measure(icon, 2);
             let lx = PLAY_PAUSE_BTN.x + (PLAY_PAUSE_BTN.w.saturating_sub(lw)) / 2;
             let ly = PLAY_PAUSE_BTN.y + (PLAY_PAUSE_BTN.h.saturating_sub(font::line_height(2))) / 2;
-            if let Some(tc) = text(x, y, lx, ly, 2, icon, TEXT, SOFT) { return tc; }
-            return SOFT;
+            if let Some(tc) = text(x, y, lx, ly, 2, icon, THEME.on_surface, THEME.surface_container_high) { return tc; }
+            return THEME.surface_container_high;
         }
 
         // Scrub track with Neon Cyan progress and circular seek head thumb
@@ -2393,34 +2443,34 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
             let dy = y as isize - thumb_cy as isize;
             if dx * dx + dy * dy <= 49 {
                 if dx * dx + dy * dy >= 25 {
-                    return NEON_CYAN;
+                    return THEME.primary;
                 }
                 return 0xFFFFFFFF;
             }
             if x < thumb_x {
-                return NEON_CYAN;
+                return THEME.primary;
             }
-            return BORDER;
+            return THEME.border;
         }
 
         // Timestamp readout
         if y >= DETAIL_VIEW_Y1 + 114 && y < DETAIL_VIEW_Y1 + 114 + font::line_height(1) {
             let mut time_buf = [0u8; 32];
             let tn = format_video_time(player.position_ms, player.duration_ms, &mut time_buf);
-            if let Some(c) = text(x, y, MARGIN, DETAIL_VIEW_Y1 + 114, 1, &time_buf[..tn], TEXT, BG) {
+            if let Some(c) = text(x, y, MARGIN, DETAIL_VIEW_Y1 + 114, 1, &time_buf[..tn], THEME.on_surface, THEME.surface) {
                 return c;
             }
         }
 
         // Fullscreen toggle button
-        if let Some(c) = draw_pill(x, y, FULLSCREEN_BTN, SOFT, Some(BORDER)) {
-            if c != SOFT { return c; }
+        if let Some(c) = draw_pill(x, y, FULLSCREEN_BTN, THEME.surface_container_high, Some(THEME.border)) {
+            if c != THEME.surface_container_high { return c; }
             let lbl = b"Fullscreen";
             let lw = font::measure(lbl, 1);
             let lx = FULLSCREEN_BTN.x + (FULLSCREEN_BTN.w.saturating_sub(lw)) / 2;
             let ly = FULLSCREEN_BTN.y + (FULLSCREEN_BTN.h.saturating_sub(font::line_height(1))) / 2;
-            if let Some(tc) = text(x, y, lx, ly, 1, lbl, TEXT, SOFT) { return tc; }
-            return SOFT;
+            if let Some(tc) = text(x, y, lx, ly, 1, lbl, THEME.on_surface, THEME.surface_container_high) { return tc; }
+            return THEME.surface_container_high;
         }
     }
 
@@ -2431,130 +2481,130 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
         } else {
             false
         };
-        let fav_bg = if is_fav { ACCENT_AMBER } else { SOFT };
-        if let Some(c) = draw_pill(x, y, PHOTO_FAV_BTN, fav_bg, Some(BORDER)) {
+        let fav_bg = if is_fav { THEME.warning } else { THEME.surface_container_high };
+        if let Some(c) = draw_pill(x, y, PHOTO_FAV_BTN, fav_bg, Some(THEME.border)) {
             if c != fav_bg { return c; }
             let fav_lbl = b"Fav";
             let lw = font::measure(fav_lbl, 1);
             let lx = PHOTO_FAV_BTN.x + (PHOTO_FAV_BTN.w.saturating_sub(lw)) / 2;
             let ly = PHOTO_FAV_BTN.y + (PHOTO_FAV_BTN.h.saturating_sub(font::line_height(1))) / 2;
-            let tc_color = if is_fav { 0xFFFFFFFF } else { TEXT };
+            let tc_color = if is_fav { 0xFFFFFFFF } else { THEME.on_surface };
             if let Some(tc) = text(x, y, lx, ly, 1, fav_lbl, tc_color, fav_bg) { return tc; }
             return fav_bg;
         }
 
-        let info_bg = if app.show_info_overlay { ACCENT_SKY } else { SOFT };
-        if let Some(c) = draw_pill(x, y, DETAIL_INFO, info_bg, Some(BORDER)) {
+        let info_bg = if app.show_info_overlay { THEME.primary } else { THEME.surface_container_high };
+        if let Some(c) = draw_pill(x, y, DETAIL_INFO, info_bg, Some(THEME.border)) {
             if c != info_bg { return c; }
             let info_lbl = b"Info";
             let lw = font::measure(info_lbl, 1);
             let lx = DETAIL_INFO.x + (DETAIL_INFO.w.saturating_sub(lw)) / 2;
             let ly = DETAIL_INFO.y + (DETAIL_INFO.h.saturating_sub(font::line_height(1))) / 2;
-            let tc_color = if app.show_info_overlay { 0xFFFFFFFF } else { TEXT };
+            let tc_color = if app.show_info_overlay { 0xFFFFFFFF } else { THEME.on_surface };
             if let Some(tc) = text(x, y, lx, ly, 1, info_lbl, tc_color, info_bg) { return tc; }
             return info_bg;
         }
 
-        if let Some(c) = draw_pill(x, y, PHOTO_DEL_BTN, SOFT, Some(DANGER_CRIMSON)) {
-            if c != SOFT { return c; }
+        if let Some(c) = draw_pill(x, y, PHOTO_DEL_BTN, THEME.surface_container_high, Some(THEME.error)) {
+            if c != THEME.surface_container_high { return c; }
             let del_lbl = b"Del";
             let lw = font::measure(del_lbl, 1);
             let lx = PHOTO_DEL_BTN.x + (PHOTO_DEL_BTN.w.saturating_sub(lw)) / 2;
             let ly = PHOTO_DEL_BTN.y + (PHOTO_DEL_BTN.h.saturating_sub(font::line_height(1))) / 2;
-            if let Some(tc) = text(x, y, lx, ly, 1, del_lbl, DANGER_CRIMSON, SOFT) { return tc; }
-            return SOFT;
+            if let Some(tc) = text(x, y, lx, ly, 1, del_lbl, THEME.error, THEME.surface_container_high) { return tc; }
+            return THEME.surface_container_high;
         }
 
         if !app.show_wallpaper_sheet {
-            if let Some(c) = draw_pill(x, y, SET_WALLPAPER_BTN, SOFT, Some(BORDER)) {
-                if c != SOFT { return c; }
+            if let Some(c) = draw_pill(x, y, SET_WALLPAPER_BTN, THEME.surface_container_high, Some(THEME.border)) {
+                if c != THEME.surface_container_high { return c; }
                 let lbl = b"Set as Wallpaper";
                 let lw = outline_text::drawn_advance(lbl, 2, None).unwrap_or_else(|| font::measure(lbl, 2));
                 let lx = SET_WALLPAPER_BTN.x + (SET_WALLPAPER_BTN.w.saturating_sub(lw)) / 2;
                 let ly = SET_WALLPAPER_BTN.y + (SET_WALLPAPER_BTN.h.saturating_sub(font::line_height(2))) / 2;
-                if let Some(tc) = text(x, y, lx, ly, 2, lbl, TEXT, SOFT) { return tc; }
-                return SOFT;
+                if let Some(tc) = text(x, y, lx, ly, 2, lbl, THEME.on_surface, THEME.surface_container_high) { return tc; }
+                return THEME.surface_container_high;
             }
         } else {
             // Target selector sheet modal (elevated surface with crisp border)
-            if let Some(c) = draw_rounded_rect(x, y, WP_SHEET_RECT, radius::CARD, SURFACE, Some(BORDER), 2) {
-                if c != SURFACE { return c; }
+            if let Some(c) = draw_rounded_rect(x, y, WP_SHEET_RECT, radius::CARD, THEME.surface_container, Some(THEME.border), 2) {
+                if c != THEME.surface_container { return c; }
                 // Title
                 let title = b"Set as Wallpaper";
                 let tw = outline_text::drawn_advance(title, 2, None).unwrap_or_else(|| font::measure(title, 2));
                 let tx = WP_SHEET_RECT.x + (WP_SHEET_RECT.w.saturating_sub(tw)) / 2;
-                if let Some(tc) = text_bold(x, y, tx, WP_SHEET_TITLE_Y, 2, title, TEXT, SURFACE) { return tc; }
+                if let Some(tc) = text_bold(x, y, tx, WP_SHEET_TITLE_Y, 2, title, THEME.on_surface, THEME.surface_container) { return tc; }
 
                 // Home button
-                if let Some(bc) = draw_pill(x, y, WP_TARGET_HOME_BTN, SOFT, Some(BORDER)) {
-                    if bc != SOFT { return bc; }
+                if let Some(bc) = draw_pill(x, y, WP_TARGET_HOME_BTN, THEME.surface_container_high, Some(THEME.border)) {
+                    if bc != THEME.surface_container_high { return bc; }
                     let lbl = b"Home Screen";
                     let lw = font::measure(lbl, 1);
                     let lx = WP_TARGET_HOME_BTN.x + (WP_TARGET_HOME_BTN.w.saturating_sub(lw)) / 2;
                     let ly = WP_TARGET_HOME_BTN.y + (WP_TARGET_HOME_BTN.h.saturating_sub(font::line_height(1))) / 2;
-                    if let Some(tc) = text(x, y, lx, ly, 1, lbl, TEXT, SOFT) { return tc; }
-                    return SOFT;
+                    if let Some(tc) = text(x, y, lx, ly, 1, lbl, THEME.on_surface, THEME.surface_container_high) { return tc; }
+                    return THEME.surface_container_high;
                 }
 
                 // Lock button
-                if let Some(bc) = draw_pill(x, y, WP_TARGET_LOCK_BTN, SOFT, Some(BORDER)) {
-                    if bc != SOFT { return bc; }
+                if let Some(bc) = draw_pill(x, y, WP_TARGET_LOCK_BTN, THEME.surface_container_high, Some(THEME.border)) {
+                    if bc != THEME.surface_container_high { return bc; }
                     let lbl = b"Lock Screen";
                     let lw = font::measure(lbl, 1);
                     let lx = WP_TARGET_LOCK_BTN.x + (WP_TARGET_LOCK_BTN.w.saturating_sub(lw)) / 2;
                     let ly = WP_TARGET_LOCK_BTN.y + (WP_TARGET_LOCK_BTN.h.saturating_sub(font::line_height(1))) / 2;
-                    if let Some(tc) = text(x, y, lx, ly, 1, lbl, TEXT, SOFT) { return tc; }
-                    return SOFT;
+                    if let Some(tc) = text(x, y, lx, ly, 1, lbl, THEME.on_surface, THEME.surface_container_high) { return tc; }
+                    return THEME.surface_container_high;
                 }
 
                 // Both button
-                if let Some(bc) = draw_pill(x, y, WP_TARGET_BOTH_BTN, ACCENT_SKY, None) {
-                    if bc != ACCENT_SKY { return bc; }
+                if let Some(bc) = draw_pill(x, y, WP_TARGET_BOTH_BTN, THEME.primary, None) {
+                    if bc != THEME.primary { return bc; }
                     let lbl = b"Both Screens";
                     let lw = font::measure(lbl, 1);
                     let lx = WP_TARGET_BOTH_BTN.x + (WP_TARGET_BOTH_BTN.w.saturating_sub(lw)) / 2;
                     let ly = WP_TARGET_BOTH_BTN.y + (WP_TARGET_BOTH_BTN.h.saturating_sub(font::line_height(1))) / 2;
-                    if let Some(tc) = text(x, y, lx, ly, 1, lbl, 0xFFFFFFFF, ACCENT_SKY) { return tc; }
-                    return ACCENT_SKY;
+                    if let Some(tc) = text(x, y, lx, ly, 1, lbl, THEME.on_primary, THEME.primary) { return tc; }
+                    return THEME.primary;
                 }
 
                 // Cancel button
-                if let Some(bc) = draw_pill(x, y, WP_TARGET_CANCEL_BTN, SOFT, Some(BORDER)) {
-                    if bc != SOFT { return bc; }
+                if let Some(bc) = draw_pill(x, y, WP_TARGET_CANCEL_BTN, THEME.surface_container_high, Some(THEME.border)) {
+                    if bc != THEME.surface_container_high { return bc; }
                     let lbl = b"Cancel";
                     let lw = font::measure(lbl, 1);
                     let lx = WP_TARGET_CANCEL_BTN.x + (WP_TARGET_CANCEL_BTN.w.saturating_sub(lw)) / 2;
                     let ly = WP_TARGET_CANCEL_BTN.y + (WP_TARGET_CANCEL_BTN.h.saturating_sub(font::line_height(1))) / 2;
-                    if let Some(tc) = text(x, y, lx, ly, 1, lbl, MUTED, SOFT) { return tc; }
-                    return SOFT;
+                    if let Some(tc) = text(x, y, lx, ly, 1, lbl, THEME.on_surface_variant, THEME.surface_container_high) { return tc; }
+                    return THEME.surface_container_high;
                 }
 
-                return SURFACE;
+                return THEME.surface_container;
             }
         }
     }
 
     // Close control: 256 x 56 pill
-    if let Some(c) = draw_pill(x, y, CLOSE, SOFT, Some(BORDER)) {
-        if c != SOFT {
+    if let Some(c) = draw_pill(x, y, CLOSE, THEME.surface_container_high, Some(THEME.border)) {
+        if c != THEME.surface_container_high {
             return c;
         }
         let label = b"Close";
         let lw = outline_text::drawn_advance(label, 2, None).unwrap_or_else(|| font::measure(label, 2));
         let lx = CLOSE.x + (CLOSE.w.saturating_sub(lw)) / 2;
         let ly = CLOSE.y + (CLOSE.h.saturating_sub(font::line_height(2))) / 2;
-        if let Some(c) = text(x, y, lx, ly, 2, label, TEXT, SOFT) {
+        if let Some(c) = text(x, y, lx, ly, 2, label, THEME.on_surface, THEME.surface_container_high) {
             return c;
         }
-        return SOFT;
+        return THEME.surface_container_high;
     }
 
     // Home gesture indicator.
     if HOME_PILL.contains(x, y) {
-        return MUTED;
+        return THEME.on_surface_variant;
     }
 
-    BG
+    THEME.surface
 }
 
 // -----------------------------------------------------------------------------
@@ -2568,20 +2618,20 @@ fn gallery_pixel(x: usize, y: usize, app: &GalleryApp) -> u32 {
 
     // 1. Header: screen title + a real ledger summary + capture button
     if y < HEADER_H {
-        if let Some(c) = draw_pill(x, y, CAPTURE_BTN, SOFT, Some(BORDER)) {
-            if c != SOFT {
+        if let Some(c) = draw_pill(x, y, CAPTURE_BTN, THEME.surface_container_high, Some(THEME.border)) {
+            if c != THEME.surface_container_high {
                 return c;
             }
             let label = b"+ Shot";
             let lw = font::measure(label, 1);
             let lx = CAPTURE_BTN.x + (CAPTURE_BTN.w.saturating_sub(lw)) / 2;
             let ly = CAPTURE_BTN.y + (CAPTURE_BTN.h.saturating_sub(font::line_height(1))) / 2;
-            if let Some(tc) = text(x, y, lx, ly, 1, label, TEXT, SOFT) {
+            if let Some(tc) = text(x, y, lx, ly, 1, label, THEME.on_surface, THEME.surface_container_high) {
                 return tc;
             }
-            return SOFT;
+            return THEME.surface_container_high;
         }
-        if let Some(c) = text_bold(x, y, MARGIN, TITLE_Y, 1, b"Photos", TEXT, BG) {
+        if let Some(c) = text_bold(x, y, MARGIN, TITLE_Y, 1, b"Photos", THEME.on_surface, THEME.surface) {
             return c;
         }
         if let Some(c) = text(
@@ -2591,12 +2641,12 @@ fn gallery_pixel(x: usize, y: usize, app: &GalleryApp) -> u32 {
             SUBTITLE_Y,
             1,
             &app.summary[..app.summary_len],
-            MUTED,
-            BG,
+            THEME.on_surface_variant,
+            THEME.surface,
         ) {
             return c;
         }
-        return BG;
+        return THEME.surface;
     }
 
     // 2. Top Modern Tab Navigation Bar
@@ -2616,10 +2666,10 @@ fn gallery_pixel(x: usize, y: usize, app: &GalleryApp) -> u32 {
 
     // 5. Home gesture indicator.
     if HOME_PILL.contains(x, y) {
-        return MUTED;
+        return THEME.on_surface_variant;
     }
 
-    BG
+    THEME.surface
 }
 
 fn render_gallery_ui(surface: u32, app: &GalleryApp) {
@@ -2857,14 +2907,19 @@ fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
                     player.toggle_play();
                     return Tap::Redraw(Dirty::All);
                 }
-                if SCRUB_BAR.contains(x, y) {
+                // WHY the fullscreen button is tested before the scrub region:
+                // the scrub's touch region is 44 rows and the two of them
+                // share two rows at the boundary, and the button is the
+                // smaller target of the two.
+                if FULLSCREEN_BTN.contains(x, y) {
+                    player.is_fullscreen = true;
+                    return Tap::Redraw(Dirty::All);
+                }
+
+                if SCRUB_HIT.contains(x, y) {
                     let rel_x = x.saturating_sub(SCRUB_BAR.x);
                     let ratio = (rel_x * 1000 / SCRUB_BAR.w.max(1)) as u32;
                     player.seek_to_ratio(ratio);
-                    return Tap::Redraw(Dirty::All);
-                }
-                if FULLSCREEN_BTN.contains(x, y) {
-                    player.is_fullscreen = true;
                     return Tap::Redraw(Dirty::All);
                 }
             }

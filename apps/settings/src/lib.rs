@@ -2,6 +2,9 @@
 
 pub use interos_std as std;
 
+/// The app's view of the platform's design system.
+pub mod theme;
+
 pub const PIN_MAX_DIGITS: usize = 8;
 pub const PIN_MIN_DIGITS: usize = 4;
 

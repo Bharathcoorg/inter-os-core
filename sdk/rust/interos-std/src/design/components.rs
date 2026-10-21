@@ -62,6 +62,44 @@ pub fn fill_rounded_rect(surface: &mut Surface, rect: Rect, radius: usize, color
     );
 }
 
+/// The platform's card treatment: the fill, the hairline and the corner radius.
+///
+/// WHY this is data and not only a drawing call: the guest apps paint one
+/// pixel at a time into a band, because a surface write is capped at 4,096
+/// pixels and a whole frame does not fit in one call. A component that could
+/// only paint a whole [`Surface`] would be a component the guest apps could
+/// not use at all. The *treatment* is the part that has to be shared -- the
+/// fill, the hairline and the radius -- and a per-pixel painter applies it
+/// with the platform's own primitive.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct CardStyle {
+    /// The fill the card is painted with.
+    pub fill: u32,
+    /// The hairline the card is outlined with, if it has one.
+    pub border: Option<u32>,
+    /// The corner radius the card's corners are drawn at.
+    pub radius: usize,
+}
+
+/// Resolves the platform's card treatment for an elevation.
+///
+/// WHY the elevation decides the colours and not the caller: the elevation is
+/// a decision about depth, and the colours that express it are the theme's to
+/// choose. An app that passed a colour instead would have to know the palette
+/// to ask for an elevation.
+pub const fn card_style(theme: &Theme, elevation: Elevation) -> CardStyle {
+    let (fill, border) = match elevation {
+        Elevation::Resting => (theme.surface_container, Some(theme.border)),
+        Elevation::Raised => (theme.surface_container_high, Some(theme.border)),
+        Elevation::Pressed => (theme.surface_container_low, None),
+    };
+    CardStyle {
+        fill,
+        border,
+        radius: theme.radii.card,
+    }
+}
+
 /// Draws a card: a rounded rectangle with the platform's elevation treatment.
 ///
 /// WHY the hairline is drawn rather than a shadow: the platform's display has
@@ -69,21 +107,53 @@ pub fn fill_rounded_rect(surface: &mut Surface, rect: Rect, radius: usize, color
 /// get right on every surface it draws over. A hairline is one pixel of a
 /// colour the theme already names.
 pub fn card(surface: &mut Surface, theme: &Theme, rect: Rect, elevation: Elevation) {
-    let (fill, outline) = match elevation {
-        Elevation::Resting => (theme.surface_container, Some(theme.border)),
-        Elevation::Raised => (theme.surface_container_high, Some(theme.border)),
-        Elevation::Pressed => (theme.surface_container_low, None),
-    };
+    let style = card_style(theme, elevation);
     surface.draw_aa_rounded_rect(
         rect.x,
         rect.y,
         rect.w,
         rect.h,
-        theme.radii.card,
-        fill,
-        outline,
+        style.radius,
+        style.fill,
+        style.border,
         1,
     );
+}
+
+/// The platform's list-row treatment: the fill, the corner radius, the
+/// divider's ink and the row's inner padding.
+///
+/// WHY it is a struct and not four loose values: a row is one shape, and an
+/// app that reached for the padding from one place and the fill from another
+/// would draw a row that does not match the platform's.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ListRowStyle {
+    /// The fill the row is painted with.
+    pub fill: u32,
+    /// The corner radius the row's corners are drawn at.
+    pub radius: usize,
+    /// The ink the row's divider is drawn in.
+    pub divider: u32,
+    /// The row's inner padding, on the text's leading edge.
+    pub pad: usize,
+}
+
+/// Resolves the platform's list-row treatment.
+///
+/// WHY a selected row is a raised surface and not the brand colour: the row
+/// is still the same row, and a selection that repainted the row's own fill
+/// with the accent would read as a different kind of thing.
+pub const fn list_row_style(theme: &Theme, selected: bool) -> ListRowStyle {
+    ListRowStyle {
+        fill: if selected {
+            theme.surface_container_high
+        } else {
+            theme.surface
+        },
+        radius: theme.radii.card,
+        divider: theme.outline_variant,
+        pad: theme.spacing.md,
+    }
 }
 
 /// Draws a pill: a fully rounded shape with a centred label.
@@ -241,23 +311,19 @@ impl<'a> ListRow<'a> {
 /// belongs to the list is a divider that the last row also draws, and the last
 /// row of a list is the one that shows the edge of the list.
 pub fn list_row(surface: &mut Surface, theme: &Theme, rect: Rect, row: &ListRow<'_>) {
-    let fill = if row.selected {
-        theme.surface_container_high
-    } else {
-        theme.surface
-    };
+    let style = list_row_style(theme, row.selected);
     surface.draw_aa_rounded_rect(
         rect.x,
         rect.y,
         rect.w,
         rect.h,
-        theme.radii.card,
-        fill,
+        style.radius,
+        style.fill,
         None,
         0,
     );
 
-    let pad = theme.spacing.md;
+    let pad = style.pad;
     let title_scale = theme.type_scale.body.scale;
     let caption_scale = theme.type_scale.caption.scale;
     let title_h = font::line_height(title_scale);
@@ -307,7 +373,7 @@ pub fn list_row(surface: &mut Surface, theme: &Theme, rect: Rect, row: &ListRow<
     }
     for x in rect.x..rect.x + rect.w {
         if let Some(existing) = surface.get(x, divider_y) {
-            let blended = Theme::blend(existing, theme.outline_variant, 192);
+            let blended = Theme::blend(existing, style.divider, 192);
             surface.set(x, divider_y, blended);
         }
     }
@@ -370,11 +436,44 @@ fn label_pixel(
 #[cfg(test)]
 mod tests {
     use super::{
-        app_icon_tile, card, list_row, pill, segmented_control, Elevation, ListRow,
+        app_icon_tile, card, card_style, list_row, list_row_style, pill, segmented_control,
+        Elevation, ListRow,
     };
     use crate::design::draw_target::Surface;
     use crate::design::primitives::Rect;
     use crate::design::theme::Theme;
+
+    #[test]
+    fn a_card_style_is_the_treatment_the_card_is_drawn_with() {
+        let theme = Theme::LIGHT;
+        // WHY this matters: a guest app paints one pixel at a time, so the
+        // treatment is the only thing it can share with the whole-surface
+        // widget. The two must be the same numbers or the app's card and the
+        // widget's card are different cards.
+        let resting = card_style(&theme, Elevation::Resting);
+        assert_eq!(resting.fill, theme.surface_container);
+        assert_eq!(resting.border, Some(theme.border));
+        assert_eq!(resting.radius, theme.radii.card);
+
+        let raised = card_style(&theme, Elevation::Raised);
+        assert_eq!(raised.fill, theme.surface_container_high);
+        let pressed = card_style(&theme, Elevation::Pressed);
+        assert_eq!(pressed.fill, theme.surface_container_low);
+        assert_eq!(pressed.border, None);
+    }
+
+    #[test]
+    fn a_list_row_style_is_the_treatment_the_row_is_drawn_with() {
+        let theme = Theme::LIGHT;
+        let resting = list_row_style(&theme, false);
+        assert_eq!(resting.fill, theme.surface);
+        assert_eq!(resting.divider, theme.outline_variant);
+        assert_eq!(resting.pad, theme.spacing.md);
+        assert_eq!(resting.radius, theme.radii.card);
+
+        let selected = list_row_style(&theme, true);
+        assert_eq!(selected.fill, theme.surface_container_high);
+    }
 
     fn paint(w: usize, h: usize, f: impl FnOnce(&mut Surface<'_>)) -> [u32; 16384] {
         let mut pixels = [0u32; 16384];

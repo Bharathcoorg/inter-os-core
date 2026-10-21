@@ -2,6 +2,9 @@
 
 pub use interos_std as std;
 
+/// The app's view of the platform's design system.
+pub mod theme;
+
 /// Managed storage sector definitions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VaultSectorType {

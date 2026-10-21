@@ -23,6 +23,8 @@ emulator/installed_apps/
 emulator/data/apps/*
 !emulator/data/apps/.gitkeep
 emulator/data/themes/custom_*.theme
+# Runtime record of the QEMU process the Studio launched (not source)
+emulator/data/qemu_launch_state.json
 
 # Agent & IDE caches and rules
 .kilo/

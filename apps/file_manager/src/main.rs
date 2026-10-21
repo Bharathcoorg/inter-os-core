@@ -21,6 +21,8 @@
 
 use core::panic::PanicInfo;
 use interos_std as std;
+use file_manager::theme::{MIN_TOUCH_TARGET, THEME, radius, spacing};
+use std::design::components;
 use std::design::font;
 use std::design::primitives::{draw_pill, Rect};
 pub use file_manager::{
@@ -29,6 +31,23 @@ pub use file_manager::{
 };
 
 use interos_std::design::outline_text;
+
+
+/// The platform's corner radii, under the short names the renderer uses.
+///
+/// WHY the aliases exist: the corner test names its radius four times, and a
+/// number that appears four times is a number that can drift from the
+/// platform. The alias resolves to the platform's step, so the drift is the
+/// platform's and not this app's.
+const R_SOFT: usize = radius::SOFT_PILL;
+
+/// The platform's list-row treatment, at the two states the file list uses.
+///
+/// WHY the file list is the platform's list row: a row that invents its own
+/// fill, its own divider and its own padding is a row a third-party app
+/// cannot match, and the platform already says what a row looks like.
+const ROW: components::ListRowStyle = components::list_row_style(&THEME, false);
+const ROW_SELECTED: components::ListRowStyle = components::list_row_style(&THEME, true);
 
 const W: usize = 720;
 const H: usize = 1440;
@@ -46,24 +65,14 @@ const CHUNK: usize = 4096;
 /// platform's own answer -- a refusal it received, not one it invented.
 
 // -----------------------------------------------------------------------------
-// 32-bit ARGB8888 Design Color Tokens (Screen 11 Light Theme)
+// Visual Design Tokens
+//
+// WHY there is no palette here any more: the app used to carry its own
+// colours, which is a second design system inside one app. Every colour now
+// resolves through the platform's theme, so a third-party app that asks the
+// SDK for the same roles draws the same file manager. See `file_manager::theme`
+// for the mapping from the old names to the platform's roles.
 // -----------------------------------------------------------------------------
-const BG_DARK: u32 = 0xFF000000;
-#[allow(dead_code)]
-const SURFACE_DARK: u32 = 0xFF0E1117;
-#[allow(dead_code)]
-const SURFACE_RAISED: u32 = 0xFF181C22;
-const BORDER_SUBTLE: u32 = 0xFF262C36;
-const TEXT_PRIMARY: u32 = 0xFFFFFFFF;
-const TEXT_MUTED: u32 = 0xFF8B949E;
-#[allow(dead_code)]
-const ACCENT_SKY: u32 = 0xFF38BDF8;
-#[allow(dead_code)]
-const ACCENT_AMBER: u32 = 0xFFF59E0B;
-#[allow(dead_code)]
-const SUCCESS_EMERALD: u32 = 0xFF10B981;
-#[allow(dead_code)]
-const DANGER_CRIMSON: u32 = 0xFFEF4444;
 
 // -----------------------------------------------------------------------------
 // Header geometry - single source of truth for drawing and hit-testing
@@ -72,7 +81,7 @@ const DANGER_CRIMSON: u32 = 0xFFEF4444;
 const HEADER_H: usize = 140;
 /// Screen margin (8pt grid value). Also the left inset of the back control and
 /// the right inset the storage readout is aligned to.
-const HEADER_MARGIN: usize = 24;
+const HEADER_MARGIN: usize = spacing::GRID_24;
 
 /// The header's back control: a 52x52 pill in the strip above the title.
 ///
@@ -95,7 +104,11 @@ const BACK: Rect = Rect::new(HEADER_MARGIN, 8, 52, 52);
 /// `x 240..480 && y >= 1400` with no upper bound on y, a 241x40px region that was
 /// never painted. Both rectangles are named here so the region that is
 /// hit-tested is the region that contains the ink.
-const HOME_HIT: Rect = Rect::new(240, 1400, 240, 40);
+///
+/// WHY 44 and not 40: the design system's minimum touch target is 44 logical
+/// pixels and this strip was 40. It now reaches the bottom edge of the
+/// surface, which is where the indicator already was.
+const HOME_HIT: Rect = Rect::new(240, 1396, 240, MIN_TOUCH_TARGET);
 const HOME_PILL: Rect = Rect::new(260, 1418, 200, 6);
 
 /// Right edge the header readout is aligned to (the 24px right margin).
@@ -125,7 +138,7 @@ const ROW_BAND_Y1: usize = 530;
 /// behind them were removed rather than greyed, because there was nothing left
 /// for them to grey out *and* say.
 #[allow(dead_code)]
-const DISABLED: u32 = BORDER_SUBTLE;
+const DISABLED: u32 = THEME.border;
 
 
 /// Rasterises one text run into the pixel at `(x, y)`.
@@ -133,7 +146,7 @@ const DISABLED: u32 = BORDER_SUBTLE;
 /// `bg` is the fill the run is drawn on top of. WHY it is a parameter: the
 /// anti-aliased edges of a glyph are blended toward `bg`, so hard-coding the
 /// page colour handed the selected row's label dark fringes against its own
-/// `SURFACE_RAISED` fill. Callers pass the fill that is actually under the run.
+/// the raised surface's fill. Callers pass the fill that is actually under the run.
 ///
 /// The face is `GLYPH_H` (24) rows tall, so a run at `scale` owns
 /// `GLYPH_H * scale` rows. Clipping to that line box here means a caller can no
@@ -468,8 +481,8 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
         // expose real readings. Never paint plausible but fabricated values.
 
         // Back control, painted from the same rectangle the tap handler tests.
-        if let Some(c) = draw_pill(x, y, BACK, SURFACE_RAISED, Some(BORDER_SUBTLE)) {
-            if c != SURFACE_RAISED {
+        if let Some(c) = draw_pill(x, y, BACK, THEME.surface_container_high, Some(THEME.border)) {
+            if c != THEME.surface_container_high {
                 return c;
             }
             if let Some(ink) = std::design::back_button::chevron_ink(
@@ -477,11 +490,11 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                 y,
                 BACK.x + BACK.w / 2,
                 BACK.y + BACK.h / 2,
-                TEXT_PRIMARY,
+                THEME.on_surface,
             ) {
                 return ink;
             }
-            return SURFACE_RAISED;
+            return THEME.surface_container_high;
         }
 
         // Title: "Files" at x: 48, y: 64 (scale 3).
@@ -498,14 +511,14 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
         // box cannot be narrowed again. Naming the numbers here would satisfy
         // the compiler and silently break the test whose job is to prevent
         // that regression, so the literal stays the single source of truth.
-        if let Some(c) = test_text(x, y, 48, 64, 3, b"Files", TEXT_PRIMARY, BG_DARK) {
+        if let Some(c) = test_text(x, y, 48, 64, 3, b"Files", THEME.on_surface, THEME.surface) {
             return c;
         }
 
         let dot_dx = x as i32 - 192;
         let dot_dy = y as i32 - 96;
         if dot_dx * dot_dx + dot_dy * dot_dy <= 9 {
-            return 0xFFEF4444; // Nothing OS signature electric red dot accent
+            return THEME.error; // Nothing OS signature electric red dot accent
         }
 
         // Storage readout, right-aligned, two measured lines.
@@ -529,8 +542,8 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                 READOUT_LINE1_Y0,
                 1,
                 path,
-                TEXT_MUTED,
-                BG_DARK,
+                THEME.on_surface_variant,
+                THEME.surface,
             ) {
                 return c;
             }
@@ -552,14 +565,14 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                 READOUT_LINE2_Y0,
                 1,
                 &label_buf[..label_len],
-                0xFFF59E0B, // Status accent
-                BG_DARK,
+                THEME.warning, // Status accent
+                THEME.surface,
             ) {
                 return c;
             }
         }
 
-        return BG_DARK;
+        return THEME.surface;
     }
 
     // 2. Vertical Category Rows (y: 150..530)
@@ -582,9 +595,9 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
             (3, 440, 90)
         };
 
-        // Thin bottom divider line
+        // Thin bottom divider line, in the platform's divider ink.
         if y == row_start_y + row_h - 1 {
-            return BORDER_SUBTLE;
+            return ROW.divider;
         }
 
         // Group container card outer border and rounded corners
@@ -596,7 +609,7 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
             let cdy = (16 - ry) as isize;
             let d2 = cdx * cdx + cdy * cdy;
             if d2 >= 256 {
-                return BG_DARK;
+                return THEME.surface;
             }
             if d2 >= 196 {
                 on_card_border = true;
@@ -609,9 +622,11 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
         let row_selected =
             app.selected_shortcut == row_idx && y >= row_start_y && y < row_start_y + row_h;
         if row_selected && x < 44 {
-            return ACCENT_SKY;
+            return THEME.primary;
         }
-        let row_bg = if row_selected { 0xFF17253B } else { SURFACE_DARK };
+        // The row's fill, from the platform's list-row treatment: the raised
+        // surface for the selected row and the flat one for the rest.
+        let row_bg = if row_selected { ROW_SELECTED.fill } else { ROW.fill };
 
         let center_y = row_start_y + (if row_idx == 0 { 40 } else { 45 });
         let icon_cx = 64i32;
@@ -641,7 +656,7 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
             0 => {
                 // Storage (Drive icon)
                 if (idx.abs() <= 14 && idy.abs() <= 10) && (idx.abs() >= 12 || idy.abs() >= 8 || (idy == 2 && idx.abs() <= 10)) {
-                    return TEXT_PRIMARY;
+                    return THEME.on_surface;
                 }
                 // Two-line stack: label (scale 2, 48px tall) above caption
                 // (scale 1, 24px tall). Measured via
@@ -658,7 +673,7 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                 // it to the same number was redundant; only the caption moves.
                 let caption_y0 =
                     label_y0 + std::design::font::line_height(2) + 8;
-                if let Some(c) = test_text(x, y, 108, label_y0, 2, CATEGORY_LABELS[0], TEXT_PRIMARY, row_bg)
+                if let Some(c) = test_text(x, y, 108, label_y0, 2, CATEGORY_LABELS[0], THEME.on_surface, row_bg)
                 {
                     return c;
                 }
@@ -667,39 +682,39 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                 } else {
                     b"Storage capacity unavailable"
                 };
-                if let Some(c) = test_text(x, y, 108, caption_y0, 1, capacity_status, TEXT_MUTED, row_bg) {
+                if let Some(c) = test_text(x, y, 108, caption_y0, 1, capacity_status, THEME.on_surface_variant, row_bg) {
                     return c;
                 }
 
                 // Tactile capacity track bar (x: 108..640, y: 250..256)
                 if y >= 250 && y < 256 && x >= 108 && x < 640 {
-                    return BORDER_SUBTLE;
+                    return THEME.border;
                 }
             }
             1 => {
                 // Photos icon (Landscape frame)
                 if (idx.abs() <= 14 && idy.abs() <= 10) && (idx.abs() >= 12 || idy.abs() >= 8 || ((idx - 5).abs() <= 2 && (idy + 3).abs() <= 2) || (idy >= 2 && idx.abs() <= (10 - idy))) {
-                    return TEXT_PRIMARY;
+                    return THEME.on_surface;
                 }
-                if let Some(c) = test_text(x, y, 108, label_y0, 2, CATEGORY_LABELS[1], TEXT_PRIMARY, row_bg) {
+                if let Some(c) = test_text(x, y, 108, label_y0, 2, CATEGORY_LABELS[1], THEME.on_surface, row_bg) {
                     return c;
                 }
             }
             2 => {
                 // Pictures icon (Stack of frames)
                 if (idx.abs() <= 14 && idy.abs() <= 10) && (idx.abs() >= 12 || idy.abs() >= 8) {
-                    return TEXT_PRIMARY;
+                    return THEME.on_surface;
                 }
-                if let Some(c) = test_text(x, y, 108, label_y0, 2, CATEGORY_LABELS[2], TEXT_PRIMARY, row_bg) {
+                if let Some(c) = test_text(x, y, 108, label_y0, 2, CATEGORY_LABELS[2], THEME.on_surface, row_bg) {
                     return c;
                 }
             }
             3 => {
                 // Videos icon (Camcorder)
                 if ((idx >= -14 && idx <= 4 && idy.abs() <= 10) && (idx == -14 || idx == 4 || idy.abs() >= 8)) || (idx >= 6 && idx <= 14 && idy.abs() <= (idx - 5)) {
-                    return TEXT_PRIMARY;
+                    return THEME.on_surface;
                 }
-                if let Some(c) = test_text(x, y, 108, label_y0, 2, CATEGORY_LABELS[3], TEXT_PRIMARY, row_bg) {
+                if let Some(c) = test_text(x, y, 108, label_y0, 2, CATEGORY_LABELS[3], THEME.on_surface, row_bg) {
                     return c;
                 }
             }
@@ -707,7 +722,7 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
         }
 
         if on_card_border {
-            return BORDER_SUBTLE;
+            return THEME.border;
         }
         return row_bg;
     }
@@ -716,14 +731,14 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
     if (840..1380).contains(&y) {
         // Section Header: "Directory Explorer" at y: 842, path at y: 842
         if (840..880).contains(&y) {
-            if let Some(c) = test_text(x, y, 48, 842, 1, b"Directory Explorer", TEXT_PRIMARY, BG_DARK) {
+            if let Some(c) = test_text(x, y, 48, 842, 1, b"Directory Explorer", THEME.on_surface, THEME.surface) {
                 return c;
             }
             let path_bytes = &app.current_path[..app.current_path_len];
-            if let Some(c) = test_text(x, y, 260, 842, 1, path_bytes, TEXT_MUTED, BG_DARK) {
+            if let Some(c) = test_text(x, y, 260, 842, 1, path_bytes, THEME.on_surface_variant, THEME.surface) {
                 return c;
             }
-            return BG_DARK;
+            return THEME.surface;
         }
 
         // Entries container card: x: 36..684
@@ -742,14 +757,14 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                 let ry = (y - card_y0).min(card_y1 - 1 - y);
 
                 // Rounded corners
-                if rx < 16 && ry < 16 {
-                    let cdx = (16 - rx) as isize;
-                    let cdy = (16 - ry) as isize;
+                if rx < R_SOFT && ry < R_SOFT {
+                    let cdx = (R_SOFT - rx) as isize;
+                    let cdy = (R_SOFT - ry) as isize;
                     let d2 = cdx * cdx + cdy * cdy;
-                    if d2 >= 256 {
-                        return BG_DARK;
+                    if d2 >= (R_SOFT * R_SOFT) as isize {
+                        return THEME.surface;
                     }
-                    if d2 >= 196 {
+                    if d2 >= ((R_SOFT - 2) * (R_SOFT - 2)) as isize {
                         on_explorer_border = true;
                     }
                 } else if rx < 2 || ry < 2 {
@@ -768,10 +783,10 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                         || (idy >= -14 && idy <= 24 && idx.abs() <= 36)
                     {
                         if idy == -14 || idy == 24 || idx.abs() == 36 || (idy < -14 && (idx == -36 || idx == -10 || idy == -22)) {
-                            return ACCENT_SKY;
+                            return THEME.primary;
                         }
                         if idy == 0 && idx >= -24 && idx <= 24 {
-                            return BORDER_SUBTLE;
+                            return THEME.border;
                         }
                     }
 
@@ -784,17 +799,17 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                             ListingState::Refused => (
                                 b"Directory Unreadable",
                                 b"The device refused to list this directory",
-                                0xFFF59E0B,
+                                THEME.warning,
                             ),
                             ListingState::NotListed => (
                                 b"Not Listed Yet",
                                 b"This directory has not been listed",
-                                TEXT_MUTED,
+                                THEME.on_surface_variant,
                             ),
                             _ => (
                                 b"Directory Empty",
                                 b"This directory holds no entries",
-                                TEXT_PRIMARY,
+                                THEME.on_surface,
                             ),
                         };
 
@@ -808,7 +823,7 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                         2,
                         headline,
                         headline_ink,
-                        SURFACE_DARK,
+                        THEME.surface_container,
                     ) {
                         return c;
                     }
@@ -822,16 +837,16 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                         card_y0 + 188,
                         1,
                         subline,
-                        TEXT_MUTED,
-                        SURFACE_DARK,
+                        THEME.on_surface_variant,
+                        THEME.surface_container,
                     ) {
                         return c;
                     }
 
                     if on_explorer_border {
-                        return BORDER_SUBTLE;
+                        return THEME.border;
                     }
-                    return SURFACE_DARK;
+                    return THEME.surface_container;
                 }
 
                 // Render specific entry row
@@ -843,14 +858,14 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
 
                     // Row divider (except last row)
                     if row_offset_y == 55 && entry_idx + 1 < app.entry_count {
-                        return BORDER_SUBTLE;
+                        return THEME.border;
                     }
 
                     let is_selected = app.selected_entry == Some(entry_idx);
                     if is_selected && x < 44 {
-                        return ACCENT_SKY;
+                        return THEME.primary;
                     }
-                    let entry_bg = if is_selected { 0xFF1D4ED8 } else { SURFACE_DARK };
+                    let entry_bg = if is_selected { THEME.primary } else { THEME.surface_container };
 
                     // Icon glyph / indicator at x: 56..80
                     let icon_cx = 64isize;
@@ -863,12 +878,12 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                         if (idx.abs() <= 12 && idy.abs() <= 8 && (idy >= -4 || idx <= 0))
                             || (idx >= -12 && idx <= 12 && idy == 8)
                         {
-                            return ACCENT_SKY;
+                            return THEME.primary;
                         }
                     } else {
                         // File document glyph
                         if (idx.abs() <= 8 && idy.abs() <= 10) && (idx.abs() >= 7 || idy.abs() >= 9 || idy == 0) {
-                            return TEXT_MUTED;
+                            return THEME.on_surface_variant;
                         }
                     }
 
@@ -881,7 +896,7 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                         text_y0,
                         1,
                         &entry.name[..entry.name_len],
-                        TEXT_PRIMARY,
+                        THEME.on_surface,
                         entry_bg,
                     ) {
                         return c;
@@ -897,7 +912,7 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                         text_y0,
                         1,
                         &entry.size_label[..entry.size_label_len],
-                        if entry.is_dir { ACCENT_SKY } else { TEXT_MUTED },
+                        if entry.is_dir { THEME.primary } else { THEME.on_surface_variant },
                         entry_bg,
                     ) {
                         return c;
@@ -907,15 +922,15 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                 }
             }
         }
-        return BG_DARK;
+        return THEME.surface;
     }
 
     // 4. Home Gesture Pill, drawn from the same rectangle the tap handler tests.
     if HOME_PILL.contains(x, y) {
-        return TEXT_MUTED;
+        return THEME.on_surface_variant;
     }
 
-    BG_DARK
+    THEME.surface
 }
 
 fn render_file_manager_ui(surface: u32, app: &FileManagerApp) {

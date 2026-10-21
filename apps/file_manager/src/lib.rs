@@ -3,6 +3,9 @@
 
 extern crate interos_std;
 
+/// The app's view of the platform's design system.
+pub mod theme;
+
 pub const MAX_PARSED_ENTRIES: usize = 8;
 pub const MAX_ENTRY_NAME_LEN: usize = 32;
 

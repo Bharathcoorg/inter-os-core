@@ -419,10 +419,15 @@ document.addEventListener('DOMContentLoaded', () => {
   function updateHardwareProfilerUI(data) {
     if (!data) return;
     const isAlive = !!data.qemu_alive;
+    // WHY a third state: the Studio reports what it can prove. "unknown" means
+    // something answers on the host that the Studio cannot identify as its
+    // device, and calling that "Standby" would be a claim in the other
+    // direction.
+    const isUnknown = !isAlive && data.device_state === 'unknown';
 
     // 1. Header Global Status (Simple & Clean: Online vs Standby)
     if (qemuGlobalText) {
-      qemuGlobalText.textContent = isAlive ? 'Online' : 'Standby';
+      qemuGlobalText.textContent = isAlive ? 'Online' : (isUnknown ? 'Unknown' : 'Standby');
     }
     if (qemuGlobalDot) {
       if (isAlive) {
@@ -431,7 +436,7 @@ document.addEventListener('DOMContentLoaded', () => {
         qemuGlobalDot.style.boxShadow = '0 0 6px rgba(16, 185, 129, 0.6)';
       } else {
         qemuGlobalDot.classList.remove('pulse');
-        qemuGlobalDot.style.background = '#71717A';
+        qemuGlobalDot.style.background = isUnknown ? '#A1A1AA' : '#71717A';
         qemuGlobalDot.style.boxShadow = 'none';
       }
     }
@@ -443,7 +448,9 @@ document.addEventListener('DOMContentLoaded', () => {
       }
       qemuGlobalStatus.title = isAlive
         ? `QEMU Microkernel: ${data.status ?? 'status unavailable'} (Mode: ${data.mode ?? 'mode unavailable'})`
-        : 'QEMU Microkernel: Standby';
+        : (isUnknown
+            ? `QEMU Microkernel: ${data.device_reason ?? 'state unknown'}`
+            : 'QEMU Microkernel: Standby');
     }
 
     try {

@@ -15,6 +15,20 @@
 
 use core::panic::PanicInfo;
 use interos_std as std;
+use calculator::theme::{THEME, radius, spacing};
+
+
+/// The platform's corner radii, under the short names the renderer uses.
+///
+/// WHY the aliases exist: the corner test names its radius four times, and a
+/// number that appears four times is a number that can drift from the
+/// platform. The alias resolves to the platform's step, so the drift is the
+/// platform's and not this app's.
+const R_CHIP: usize = radius::CHIP;
+const R_CONTROL: usize = radius::CONTROL;
+const R_MAJOR: usize = radius::MAJOR;
+const R_SHEET: usize = radius::SHEET;
+const R_SOFT: usize = radius::SOFT_PILL;
 
 const W: usize = 720;
 const H: usize = 1440;
@@ -23,33 +37,19 @@ const CHUNK: usize = 4096;
 pub use calculator::{CalcError, CalculatorState, Decimal};
 
 // -----------------------------------------------------------------------------
-// 32-bit ARGB8888 Design Color Tokens (Screen 16 Minimal Dark Theme)
+// Visual Design Tokens
+//
+// WHY there is no palette here any more: the app used to carry its own
+// colours, which is a second design system inside one app. Every colour now
+// resolves through the platform's theme, so a third-party app that asks the
+// SDK for the same roles draws the same calculator. See `calculator::theme`
+// for the mapping from the old names to the platform's roles.
+//
+// WHY the keypad's buttons are the roles they are: a digit is a control on a
+// container, an operator is a control on a warning-tinted container, and a
+// destructive key is a control on an error-tinted container. The platform
+// names each of those, so the keypad does not have to.
 // -----------------------------------------------------------------------------
-const BG_DARK: u32 = 0xFF000000;
-const SURFACE_DARK: u32 = 0xFF0E1117;
-const SURFACE_RAISED: u32 = 0xFF181C22;
-const BORDER_SUBTLE: u32 = 0xFF262C36;
-const TEXT_PRIMARY: u32 = 0xFFFFFFFF;
-const TEXT_MUTED: u32 = 0xFF8B949E;
-
-// Accent Tokens
-const ACCENT_AMBER: u32 = 0xFFF59E0B;
-const ACCENT_AMBER_BORDER: u32 = 0xFFD97706;
-const ERROR_RED: u32 = 0xFFEF4444;
-
-// Keypad Semantic Theme Tokens
-const BTN_DIGIT_BG: u32 = 0xFF141820;
-const BTN_DIGIT_BORDER: u32 = 0xFF222936;
-const BTN_FN_BG: u32 = 0xFF1E2430;
-const BTN_FN_BORDER: u32 = 0xFF2E3848;
-const BTN_FN_TEXT: u32 = 0xFF94A3B8;
-const BTN_OP_BG: u32 = 0xFF262117;
-const BTN_OP_BORDER: u32 = 0xFF4D3818;
-const BTN_OP_TEXT: u32 = 0xFFF59E0B;
-const BTN_CLEAR_BG: u32 = 0xFF2A1518;
-const BTN_CLEAR_BORDER: u32 = 0xFF522026;
-const BTN_CLEAR_TEXT: u32 = 0xFFF85149;
-
 // -----------------------------------------------------------------------------
 // Canonical InterOS Typography
 // -----------------------------------------------------------------------------
@@ -64,7 +64,7 @@ fn test_text(
     text: &[u8],
     color: u32,
 ) -> Option<u32> {
-    std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, BG_DARK, false)
+    std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, THEME.surface, false)
 }
 
 const fn run_rows(scale: usize) -> usize {
@@ -76,7 +76,7 @@ const HEADER_H: usize = 110;
 // Display Card Geometry
 const DISPLAY_X0: usize = 24;
 const DISPLAY_X1: usize = 696;
-const DISPLAY_PAD: usize = 24;
+const DISPLAY_PAD: usize = spacing::GRID_24;
 const VALUE_Y0: usize = 290;
 
 // Button layout constants (Minimum 64pt targets: 144x140px)
@@ -239,15 +239,15 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
     // 1. Status Bar & Header Title with Back Chevron Disc (y: 0..110)
     if y < HEADER_H {
         // Standardized back button squircle (24..72, 24..72)
-        if let Some(c) = std::design::back_button::pixel(x, y, TEXT_PRIMARY, BORDER_SUBTLE, SURFACE_RAISED) {
+        if let Some(c) = std::design::back_button::pixel(x, y, THEME.on_surface, THEME.border, THEME.surface_container_high) {
             return c;
         }
 
         // Canonical App Title: "Calculator" at clean scale 1 bold with subtitle
-        if let Some(c) = std::design::font::test_text_aa(x, y, 92, 34, 1, b"Calculator", TEXT_PRIMARY, BG_DARK, true) {
+        if let Some(c) = std::design::font::test_text_aa(x, y, 92, 34, 1, b"Calculator", THEME.on_surface, THEME.surface, true) {
             return c;
         }
-        if let Some(c) = std::design::font::test_text_aa(x, y, 92, 58, 1, b"Precision Arithmetic", TEXT_MUTED, BG_DARK, false) {
+        if let Some(c) = std::design::font::test_text_aa(x, y, 92, 58, 1, b"Precision Arithmetic", THEME.on_surface_variant, THEME.surface, false) {
             return c;
         }
 
@@ -255,17 +255,17 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
         if x >= 576 && x < 688 && y >= 32 && y < 80 {
             let rx = (x - 576).min(687 - x);
             let ry = (y - 32).min(79 - y);
-            if rx < 14 && ry < 14 {
-                let cdx = (14 - rx) as isize;
-                let cdy = (14 - ry) as isize;
-                if cdx * cdx + cdy * cdy > 196 {
-                    return BG_DARK;
+            if rx < R_SOFT && ry < R_SOFT {
+                let cdx = (R_SOFT - rx) as isize;
+                let cdy = (R_SOFT - ry) as isize;
+                if cdx * cdx + cdy * cdy > (R_SOFT * R_SOFT) as isize {
+                    return THEME.surface;
                 }
             }
             let (bg, border, text_c) = if calc.show_history {
-                (ACCENT_AMBER, ACCENT_AMBER_BORDER, 0xFF000000)
+                (THEME.warning, THEME.warning_container, THEME.on_primary)
             } else {
-                (SURFACE_RAISED, BORDER_SUBTLE, TEXT_PRIMARY)
+                (THEME.surface_container_high, THEME.border, THEME.on_surface)
             };
             if rx < 2 || ry < 2 {
                 return border;
@@ -276,7 +276,7 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
             return bg;
         }
 
-        return BG_DARK;
+        return THEME.surface;
     }
 
     // 2. History Drawer / Overlay (Active when calc.show_history is true)
@@ -284,18 +284,18 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
         if y >= 110 && y < 1380 && x >= DISPLAY_X0 && x < DISPLAY_X1 {
             let rx = (x - DISPLAY_X0).min(DISPLAY_X1 - 1 - x);
             let ry = (y - 110).min(1379 - y);
-            if rx < 24 && ry < 24 {
-                let cdx = (24 - rx) as isize;
-                let cdy = (24 - ry) as isize;
-                if cdx * cdx + cdy * cdy > 576 {
-                    return BG_DARK;
+            if rx < R_SHEET && ry < R_SHEET {
+                let cdx = (R_SHEET - rx) as isize;
+                let cdy = (R_SHEET - ry) as isize;
+                if cdx * cdx + cdy * cdy > (R_SHEET * R_SHEET) as isize {
+                    return THEME.surface;
                 }
             }
 
             // Header of History Drawer: y: 125..175
             if y >= 125 && y < 175 {
                 // "Calculation History" title
-                if let Some(c) = std::design::font::test_text_aa(x, y, 48, 140, 1, b"Calculation History", TEXT_PRIMARY, SURFACE_DARK, true) {
+                if let Some(c) = std::design::font::test_text_aa(x, y, 48, 140, 1, b"Calculation History", THEME.on_surface, THEME.surface_container, true) {
                     return c;
                 }
 
@@ -303,52 +303,52 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                 if x >= 440 && x < 530 && y >= 130 && y < 170 {
                     let prx = (x - 440).min(529 - x);
                     let pry = (y - 130).min(169 - y);
-                    if prx < 10 && pry < 10 {
-                        let cdx = (10 - prx) as isize;
-                        let cdy = (10 - pry) as isize;
-                        if cdx * cdx + cdy * cdy > 100 {
-                            return SURFACE_DARK;
+                    if prx < R_CHIP && pry < R_CHIP {
+                        let cdx = (R_CHIP - prx) as isize;
+                        let cdy = (R_CHIP - pry) as isize;
+                        if cdx * cdx + cdy * cdy > (R_CHIP * R_CHIP) as isize {
+                            return THEME.surface_container;
                         }
                     }
                     if prx < 2 || pry < 2 {
-                        return BORDER_SUBTLE;
+                        return THEME.border;
                     }
-                    if let Some(c) = std::design::font::test_text_aa(x, y, 452, 138, 1, b"CLEAR", ERROR_RED, SURFACE_RAISED, true) {
+                    if let Some(c) = std::design::font::test_text_aa(x, y, 452, 138, 1, b"CLEAR", THEME.error, THEME.surface_container_high, true) {
                         return c;
                     }
-                    return SURFACE_RAISED;
+                    return THEME.surface_container_high;
                 }
 
                 // Close button pill: x: 550..660, y: 130..170
                 if x >= 550 && x < 660 && y >= 130 && y < 170 {
                     let prx = (x - 550).min(659 - x);
                     let pry = (y - 130).min(169 - y);
-                    if prx < 10 && pry < 10 {
-                        let cdx = (10 - prx) as isize;
-                        let cdy = (10 - pry) as isize;
-                        if cdx * cdx + cdy * cdy > 100 {
-                            return SURFACE_DARK;
+                    if prx < R_CHIP && pry < R_CHIP {
+                        let cdx = (R_CHIP - prx) as isize;
+                        let cdy = (R_CHIP - pry) as isize;
+                        if cdx * cdx + cdy * cdy > (R_CHIP * R_CHIP) as isize {
+                            return THEME.surface_container;
                         }
                     }
                     if prx < 2 || pry < 2 {
-                        return BORDER_SUBTLE;
+                        return THEME.border;
                     }
-                    if let Some(c) = std::design::font::test_text_aa(x, y, 566, 138, 1, b"CLOSE", TEXT_PRIMARY, SURFACE_RAISED, true) {
+                    if let Some(c) = std::design::font::test_text_aa(x, y, 566, 138, 1, b"CLOSE", THEME.on_surface, THEME.surface_container_high, true) {
                         return c;
                     }
-                    return SURFACE_RAISED;
+                    return THEME.surface_container_high;
                 }
             }
 
             // Separator line
             if y == 182 && x >= 40 && x < 680 {
-                return BORDER_SUBTLE;
+                return THEME.border;
             }
 
             // History Entries
             let count = calc.history.count();
             if count == 0 {
-                if let Some(c) = std::design::font::test_text_aa(x, y, 180, 320, 2, b"No recent calculations", TEXT_MUTED, SURFACE_DARK, false) {
+                if let Some(c) = std::design::font::test_text_aa(x, y, 180, 320, 2, b"No recent calculations", THEME.on_surface_variant, THEME.surface_container, false) {
                     return c;
                 }
             } else {
@@ -358,11 +358,11 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                     if y >= row_y0 && y < row_y1 && x >= 40 && x < 680 {
                         let erx = (x - 40).min(679 - x);
                         let ery = (y - row_y0).min(row_y1 - 1 - y);
-                        if erx < 16 && ery < 16 {
-                            let cdx = (16 - erx) as isize;
-                            let cdy = (16 - ery) as isize;
-                            if cdx * cdx + cdy * cdy > 256 {
-                                return SURFACE_DARK;
+                        if erx < R_SOFT && ery < R_SOFT {
+                            let cdx = (R_SOFT - erx) as isize;
+                            let cdy = (R_SOFT - ery) as isize;
+                            if cdx * cdx + cdy * cdy > (R_SOFT * R_SOFT) as isize {
+                                return THEME.surface_container;
                             }
                         }
 
@@ -372,7 +372,7 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                             if !expr_bytes.is_empty() {
                                 let ew = std::design::font::measure_bold(expr_bytes, 2);
                                 let ex0 = 650usize.saturating_sub(ew);
-                                if let Some(c) = std::design::font::test_text_aa(x, y, ex0, row_y0 + 16, 2, expr_bytes, TEXT_MUTED, SURFACE_RAISED, false) {
+                                if let Some(c) = std::design::font::test_text_aa(x, y, ex0, row_y0 + 16, 2, expr_bytes, THEME.on_surface_variant, THEME.surface_container_high, false) {
                                     return c;
                                 }
                             }
@@ -382,37 +382,37 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                             let rlen = entry.result.format(&mut res_buf);
                             let rw = std::design::font::measure_bold(&res_buf[..rlen], 3);
                             let rx0 = 650usize.saturating_sub(rw);
-                            if let Some(c) = std::design::font::test_text_aa(x, y, rx0, row_y0 + 58, 3, &res_buf[..rlen], TEXT_PRIMARY, SURFACE_RAISED, true) {
+                            if let Some(c) = std::design::font::test_text_aa(x, y, rx0, row_y0 + 58, 3, &res_buf[..rlen], THEME.on_surface, THEME.surface_container_high, true) {
                                 return c;
                             }
                         }
 
                         if erx < 2 || ery < 2 {
-                            return BORDER_SUBTLE;
+                            return THEME.border;
                         }
-                        return SURFACE_RAISED;
+                        return THEME.surface_container_high;
                     }
                 }
             }
 
             if rx < 2 || ry < 2 {
-                return BORDER_SUBTLE;
+                return THEME.border;
             }
-            return SURFACE_DARK;
+            return THEME.surface_container;
         }
 
-        return BG_DARK;
+        return THEME.surface;
     }
 
     // 3. Numerical Display Area Container Card (Dual-Line: y: 110..410, x: 24..696)
     if (110..410).contains(&y) && x >= DISPLAY_X0 && x < DISPLAY_X1 {
         let rx = (x - DISPLAY_X0).min(DISPLAY_X1 - 1 - x);
         let ry = (y - 110).min(409 - y);
-        if rx < 24 && ry < 24 {
-            let cdx = (24 - rx) as isize;
-            let cdy = (24 - ry) as isize;
-            if cdx * cdx + cdy * cdy > 576 {
-                return BG_DARK;
+        if rx < R_SHEET && ry < R_SHEET {
+            let cdx = (R_SHEET - rx) as isize;
+            let cdy = (R_SHEET - ry) as isize;
+            if cdx * cdx + cdy * cdy > (R_SHEET * R_SHEET) as isize {
+                return THEME.surface;
             }
         }
 
@@ -421,26 +421,26 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
             if (130..164).contains(&y) && (44..104).contains(&x) {
                 let prx = (x - 44).min(103 - x);
                 let pry = (y - 130).min(163 - y);
-                if prx < 12 && pry < 12 {
-                    let cdx = (12 - prx) as isize;
-                    let cdy = (12 - pry) as isize;
-                    if cdx * cdx + cdy * cdy <= 144 {
+                if prx < R_CONTROL && pry < R_CONTROL {
+                    let cdx = (R_CONTROL - prx) as isize;
+                    let cdy = (R_CONTROL - pry) as isize;
+                    if cdx * cdx + cdy * cdy <= (R_CONTROL * R_CONTROL) as isize {
                         if prx < 2 || pry < 2 {
-                            return ACCENT_AMBER_BORDER;
+                            return THEME.warning_container;
                         }
-                        if let Some(c) = draw_calc_operator_glyph(x, y, 74, 147, op, ACCENT_AMBER) {
+                        if let Some(c) = draw_calc_operator_glyph(x, y, 74, 147, op, THEME.warning) {
                             return c;
                         }
-                        return SURFACE_RAISED;
+                        return THEME.surface_container_high;
                     }
                 } else {
                     if prx < 2 || pry < 2 {
-                        return ACCENT_AMBER_BORDER;
+                        return THEME.warning_container;
                     }
-                    if let Some(c) = draw_calc_operator_glyph(x, y, 74, 147, op, ACCENT_AMBER) {
+                    if let Some(c) = draw_calc_operator_glyph(x, y, 74, 147, op, THEME.warning) {
                         return c;
                     }
-                    return SURFACE_RAISED;
+                    return THEME.surface_container_high;
                 }
             }
         }
@@ -457,14 +457,14 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                 } else {
                     b""
                 };
-                if let Some(c) = std::design::font::test_text_aa(x, y, p.tape_x, 185, 2, expr_slice, TEXT_MUTED, SURFACE_DARK, false) {
+                if let Some(c) = std::design::font::test_text_aa(x, y, p.tape_x, 185, 2, expr_slice, THEME.on_surface_variant, THEME.surface_container, false) {
                     return c;
                 }
             }
             if p.is_error {
                 let h = run_rows(3);
                 if y >= VALUE_Y0 && y < VALUE_Y0 + h {
-                    if let Some(c) = std::design::font::test_text_aa(x, y, p.err_x, VALUE_Y0, 3, p.err_text, ERROR_RED, SURFACE_DARK, true) {
+                    if let Some(c) = std::design::font::test_text_aa(x, y, p.err_x, VALUE_Y0, 3, p.err_text, THEME.error, THEME.surface_container, true) {
                         return c;
                     }
                 }
@@ -472,7 +472,7 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                 let h = run_rows(p.digits_scale);
                 if y >= VALUE_Y0 && y < VALUE_Y0 + h {
                     let digits = &calc.display_buf[..p.digits_len.min(calc.display_buf.len())];
-                    if let Some(c) = std::design::font::test_text_aa(x, y, p.digits_x, VALUE_Y0, p.digits_scale, digits, TEXT_PRIMARY, SURFACE_DARK, true) {
+                    if let Some(c) = std::design::font::test_text_aa(x, y, p.digits_x, VALUE_Y0, p.digits_scale, digits, THEME.on_surface, THEME.surface_container, true) {
                         return c;
                     }
                 }
@@ -480,10 +480,10 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
         }
 
         if rx < 2 || ry < 2 {
-            return BORDER_SUBTLE;
+            return THEME.border;
         }
 
-        return SURFACE_DARK;
+        return THEME.surface_container;
     }
 
     // 4. Keypad Matrix (5 rows, 4 cols)
@@ -499,17 +499,17 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                     let ky1 = by + BTN_H - 4;
 
                     if x < kx0 || x >= kx1 || y < ky0 || y >= ky1 {
-                        return BG_DARK;
+                        return THEME.surface;
                     }
 
                     // Keycap squircle corner test (radius: 34)
                     let rx = (x - kx0).min(kx1 - 1 - x);
                     let ry = (y - ky0).min(ky1 - 1 - y);
-                    if rx < 34 && ry < 34 {
-                        let cdx = (34 - rx) as isize;
-                        let cdy = (34 - ry) as isize;
-                        if cdx * cdx + cdy * cdy > 1156 {
-                            return BG_DARK;
+                    if rx < R_MAJOR && ry < R_MAJOR {
+                        let cdx = (R_MAJOR - rx) as isize;
+                        let cdy = (R_MAJOR - ry) as isize;
+                        if cdx * cdx + cdy * cdy > (R_MAJOR * R_MAJOR) as isize {
+                            return THEME.surface;
                         }
                     }
 
@@ -521,22 +521,22 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                     let is_fn = matches!(action, Some('P') | Some('%') | Some('~'));
 
                     let (btn_bg, btn_border, text_color) = if is_active_op {
-                        (ACCENT_AMBER, ACCENT_AMBER_BORDER, 0xFF000000)
+                        (THEME.warning, THEME.warning_container, THEME.on_primary)
                     } else if is_equals {
                         // Equals: Warm Amber accent token with black glyph
-                        (ACCENT_AMBER, ACCENT_AMBER_BORDER, 0xFF000000)
+                        (THEME.warning, THEME.warning_container, THEME.on_primary)
                     } else if is_op {
                         // Arithmetic operators: Deep amber bronze with warm amber glyphs
-                        (BTN_OP_BG, BTN_OP_BORDER, BTN_OP_TEXT)
+                        (THEME.warning_container, THEME.warning_container, THEME.warning)
                     } else if is_clear {
                         // Clear: Crimson wine with semantic red text
-                        (BTN_CLEAR_BG, BTN_CLEAR_BORDER, BTN_CLEAR_TEXT)
+                        (THEME.error_container, THEME.error_container, THEME.error)
                     } else if is_fn {
                         // Functions: Soft slate with cool light text
-                        (BTN_FN_BG, BTN_FN_BORDER, BTN_FN_TEXT)
+                        (THEME.surface_container_high, THEME.border, THEME.on_surface_variant)
                     } else {
                         // Digits 0..9 and Decimal point: Obsidian slate with crisp white text
-                        (BTN_DIGIT_BG, BTN_DIGIT_BORDER, TEXT_PRIMARY)
+                        (THEME.surface_container, THEME.border, THEME.on_surface)
                     };
 
                     if rx < 2 || ry < 2 {
@@ -578,10 +578,10 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
 
     // 5. Home Gesture Pill (x: 260..460, y: 1418..1424)
     if y >= 1418 && y < 1424 && x >= 260 && x < 460 {
-        return TEXT_MUTED;
+        return THEME.on_surface_variant;
     }
 
-    BG_DARK
+    THEME.surface
 }
 
 fn render_calculator_ui(surface: u32, calc: &CalculatorState) {

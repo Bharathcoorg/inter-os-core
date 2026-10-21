@@ -7,6 +7,23 @@ const W: u32 = 720;
 const H: u32 = 96;
 const CHUNK: usize = 1024;
 
+// -----------------------------------------------------------------------------
+// Visual Design Tokens
+//
+// WHY this app carries none: it paints no pixels of its own. The surface it
+// keeps current is the system line, and the line the user sees is drawn by
+// the kernel's compositor (`kernel/src/drivers/display_kms.rs`), which owns
+// the system line's own ink. This app's only job is to keep that surface
+// empty and current, so there is no palette, no radius scale, no type scale
+// and no touch target here to migrate -- the platform's roles apply to the
+// kernel's drawing, not to this task.
+//
+// WHY the geometry below is still the platform's: the surface this app
+// maintains is 720x96 because that is the surface the platform hands out for
+// the system line, and a second number here would be a second idea of how
+// big the platform's surfaces are.
+// -----------------------------------------------------------------------------
+
 /// Sweep period of the progress bar, in ticks. The bar's pixels are a function of
 /// `ticks % BAR_PERIOD`, so this is also the granularity at which the line's
 /// content can change.

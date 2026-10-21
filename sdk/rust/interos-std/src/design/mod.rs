@@ -463,6 +463,15 @@ pub mod radius {
     pub const CHIP: usize = 10;
     /// Buttons, interactive tiles and text fields.
     pub const CONTROL: usize = 12;
+    /// A large control: a 40-48px pill that is rounded but not a capsule.
+    ///
+    /// WHY this step exists: the terminal's badge, the camera's top-row pills
+    /// and the browser's chrome all rounded their corners at 16 and kept the
+    /// number to themselves, so a third-party app had no step for the shape it
+    /// could see on screen and had to invent one. It is between
+    /// [`CONTROL`] and [`CARD`] because that is where it sits: too round for a
+    /// text field, too square for a card.
+    pub const SOFT_PILL: usize = 16;
     /// Cards and list rows.
     pub const CARD: usize = 18;
     /// Sheets and full-width panels.

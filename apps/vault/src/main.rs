@@ -32,6 +32,8 @@ mod font;
 
 use core::panic::PanicInfo;
 use interos_std as std;
+use interos_std::design::components;
+use vault::theme::{spacing, THEME};
 
 const W: usize = 720;
 const H: usize = 1440;
@@ -522,26 +524,31 @@ impl VaultApp {
 // Visual Design Tokens (canonical light System Space palette)
 // -----------------------------------------------------------------------------
 
-const BG: u32 = std::design::color::BACKGROUND; // #F7F6F2 base
-const SURFACE: u32 = std::design::color::SURFACE; // #FFFFFF card surface
-const SOFT: u32 = std::design::color::SURFACE_SOFT; // #EFEEE9 controls / tiles
-const BORDER: u32 = std::design::color::BORDER; // #E1E0DB hairlines
-const TEXT: u32 = std::design::color::TEXT; // #111214 primary text
-const MUTED: u32 = std::design::color::TEXT_MUTED; // #777773 secondary text
-const ACCENT: u32 = std::design::color::ACCENT; // restrained blue
-const OK: u32 = std::design::color::SUCCESS; // muted green
-const WARN: u32 = std::design::color::WARNING; // amber
-const DANGER: u32 = std::design::color::DANGER; // muted red
-const GESTURE_BAR: u32 = 0xFFC4C3BD; // home indicator pill on the light base
 
 // -----------------------------------------------------------------------------
 // Layout (8-point grid; 24px screen margin; 48px minimum touch targets)
 // -----------------------------------------------------------------------------
 
-const MARGIN: usize = 24;
+const MARGIN: usize = spacing::GRID_24;
 const CARD_W: usize = W - MARGIN * 2; // 672
-const PAD: usize = 24; // card inner padding
-const CARD_R: usize = 18;
+const PAD: usize = spacing::GRID_24; // card inner padding
+/// The platform's card treatment, at the elevation the app's cards sit at.
+///
+/// WHY the app's cards are the platform's cards: a card that invents its own
+/// fill and its own hairline is a card a third-party app cannot match, and
+/// the platform already says what a card looks like. The resting elevation is
+/// the one a card on the vault page sits at: the surface one step above the
+/// page, with a hairline around it.
+const CARD: components::CardStyle =
+    components::card_style(&THEME, components::Elevation::Resting);
+
+/// The card's hairline, or the card's own fill when the card has no hairline.
+const CARD_BORDER: u32 = match CARD.border {
+    Some(c) => c,
+    None => CARD.fill,
+};
+
+const CARD_R: usize = CARD.radius;
 const INNER_W: usize = CARD_W - PAD * 2; // 624
 
 const HEAD_BOTTOM: usize = 104;
@@ -663,15 +670,15 @@ fn card_pixel(x: usize, y: usize, x0: usize, y0: usize, w: usize, h: usize) -> O
         return None;
     }
     if !in_round(x, y, x0 + 1, y0 + 1, w - 2, h - 2, CARD_R - 1) {
-        return Some(BORDER);
+        return Some(CARD_BORDER);
     }
-    Some(SURFACE)
+    Some(CARD.fill)
 }
 
 
 /// 48x48 back control: canonical squircle with the chevron centred.
 fn back_button_pixel(x: usize, y: usize) -> Option<u32> {
-    std::design::back_button::pixel(x, y, TEXT, BORDER, SOFT)
+    std::design::back_button::pixel(x, y, THEME.on_surface, THEME.border, THEME.surface_container_high)
 }
 
 /// Width of the header action pill for a given label.
@@ -691,17 +698,17 @@ fn action_pixel(x: usize, y: usize, label: &[u8]) -> Option<u32> {
         return None;
     }
     if !in_round(x, y, x0 + 1, y0 + 1, w - 2, h - 2, h / 2 - 1) {
-        return Some(BORDER);
+        return Some(THEME.border);
     }
     // WHY the centring box is the control's full width and not `w - 16`: the pill
     // is exactly the label plus 32px of padding (`action_w` adds it), so
     // subtracting another 16 centred the text in a box inset 16 from the right
     // alone and sat the run 8px left of the pill's true centre. Measured on the
     // guest: label ink 570..669 against a 560..696 pill, centre 619.5 vs 628.
-    if let Some(c) = font::ink_center(x, y, x0, y0 + (h - 24) / 2, 1, label, w, TEXT, SOFT, true) {
+    if let Some(c) = font::ink_center(x, y, x0, y0 + (h - 24) / 2, 1, label, w, THEME.on_surface, THEME.surface_container_high, true) {
         return Some(c);
     }
-    Some(SOFT)
+    Some(THEME.surface_container_high)
 }
 
 /// Caption band shared by every card: an accent label on the card surface.
@@ -714,7 +721,7 @@ fn caption_pixel(
     text: &[u8],
     max_w: usize,
 ) -> Option<u32> {
-    if let Some(c) = font::ink(x, y, x0, y0, 1, text, max_w, ACCENT, SURFACE, true) {
+    if let Some(c) = font::ink(x, y, x0, y0, 1, text, max_w, THEME.primary, THEME.surface_container, true) {
         return Some(c);
     }
     None
@@ -737,13 +744,13 @@ fn metric_row(
 ) -> Option<u32> {
     let ix = x0 + PAD;
     let half = w / 2 - PAD - 16;
-    if let Some(c) = font::ink(x, y, ix, y0, 1, label, half, MUTED, SURFACE, false) {
+    if let Some(c) = font::ink(x, y, ix, y0, 1, label, half, THEME.on_surface_variant, THEME.surface_container, false) {
         return Some(c);
     }
-    if let Some(c) = font::ink_right(x, y, x0 + w - PAD, y0, 1, value, half, value_ink, SURFACE, true) {
+    if let Some(c) = font::ink_right(x, y, x0 + w - PAD, y0, 1, value, half, value_ink, THEME.surface_container, true) {
         return Some(c);
     }
-    if let Some(c) = font::ink(x, y, ix, y0 + 32, 1, source, w - PAD * 2, MUTED, SURFACE, false) {
+    if let Some(c) = font::ink(x, y, ix, y0 + 32, 1, source, w - PAD * 2, THEME.on_surface_variant, THEME.surface_container, false) {
         return Some(c);
     }
     None
@@ -765,19 +772,19 @@ fn tile_pixel(
         return None;
     }
     if !in_round(x, y, tx + 1, ty + 1, TILE_W - 2, TILE_H - 2, 13) {
-        return Some(BORDER);
+        return Some(THEME.border);
     }
     let iw = TILE_W - 32;
-    if let Some(c) = font::ink(x, y, tx + 16, ty + 16, 1, title, iw, TEXT, SOFT, true) {
+    if let Some(c) = font::ink(x, y, tx + 16, ty + 16, 1, title, iw, THEME.on_surface, THEME.surface_container_high, true) {
         return Some(c);
     }
-    if let Some(c) = font::ink(x, y, tx + 16, ty + 48, 1, verdict, iw, verdict_ink, SOFT, true) {
+    if let Some(c) = font::ink(x, y, tx + 16, ty + 48, 1, verdict, iw, verdict_ink, THEME.surface_container_high, true) {
         return Some(c);
     }
-    if let Some(c) = font::ink(x, y, tx + 16, ty + 80, 1, hint, iw, MUTED, SOFT, false) {
+    if let Some(c) = font::ink(x, y, tx + 16, ty + 80, 1, hint, iw, THEME.on_surface_variant, THEME.surface_container_high, false) {
         return Some(c);
     }
-    Some(SOFT)
+    Some(THEME.surface_container_high)
 }
 
 /// Primary/secondary action button, 56px tall (>= the 48px preferred target).
@@ -796,10 +803,10 @@ fn button_pixel(
         return None;
     }
     if !in_round(x, y, bx + 1, by + 1, bw - 2, bh - 2, 13) {
-        return Some(if primary { ACCENT } else { BORDER });
+        return Some(if primary { THEME.primary } else { THEME.border });
     }
-    let fill = if primary { ACCENT } else { SOFT };
-    let ink_c = if primary { SURFACE } else { TEXT };
+    let fill = if primary { THEME.primary } else { THEME.surface_container_high };
+    let ink_c = if primary { THEME.surface_container } else { THEME.on_surface };
     // WHY the centring box is the control's full width and not `bw - 32`:
     // `ink_center` centres inside `[x0, x0 + max_w)`, so a narrower box measures
     // from the left edge and pushes the run left of the button's true centre.
@@ -818,14 +825,14 @@ fn button_pixel(
 
 fn header_pixel(x: usize, y: usize) -> u32 {
     if y == HEAD_BOTTOM - 1 {
-        return BORDER;
+        return THEME.border;
     }
     if y >= HEAD_BOTTOM {
-        return BG;
+        return THEME.surface;
     }
     let (pill_x, _, _, _) = action_rect(ACTION);
     let text_max = pill_x.saturating_sub(TITLE_X + 16);
-    if let Some(c) = font::ink(x, y, TITLE_X, 20, 2, TITLE, text_max, TEXT, BG, true) {
+    if let Some(c) = font::ink(x, y, TITLE_X, 20, 2, TITLE, text_max, THEME.on_surface, THEME.surface, true) {
         return c;
     }
     // WHY y=76: the title runs at scale 2 (a 48 px line, ink 20..68), so the
@@ -833,10 +840,10 @@ fn header_pixel(x: usize, y: usize) -> u32 {
     // the 104 px header band. The old y=52 assumed the previous 8x8 face at
     // scale 2 (16 px); with the design face it printed the caption straight
     // through the title's descenders.
-    if let Some(c) = font::ink(x, y, TITLE_X, 76, 1, SUBTITLE, text_max, MUTED, BG, false) {
+    if let Some(c) = font::ink(x, y, TITLE_X, 76, 1, SUBTITLE, text_max, THEME.on_surface_variant, THEME.surface, false) {
         return c;
     }
-    BG
+    THEME.surface
 }
 
 // -----------------------------------------------------------------------------
@@ -847,7 +854,7 @@ fn header_pixel(x: usize, y: usize) -> u32 {
 fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
     // Home gesture pill.
     if y >= 1418 && y < 1424 && x >= 260 && x < 460 {
-        return GESTURE_BAR;
+        return THEME.on_surface_variant;
     }
     if let Some(c) = back_button_pixel(x, y) {
         return c;
@@ -896,10 +903,10 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
             return c;
         }
         let (identity_verdict, identity_ink) = match vault.identity {
-            IdentityState::Present => (b"DID: prefix present".as_slice(), OK),
-            IdentityState::Malformed => (b"present but malformed".as_slice(), WARN),
-            IdentityState::Unreadable => (b"not readable".as_slice(), WARN),
-            IdentityState::NotChecked => (b"not checked".as_slice(), MUTED),
+            IdentityState::Present => (b"DID: prefix present".as_slice(), THEME.success),
+            IdentityState::Malformed => (b"present but malformed".as_slice(), THEME.warning),
+            IdentityState::Unreadable => (b"not readable".as_slice(), THEME.warning),
+            IdentityState::NotChecked => (b"not checked".as_slice(), THEME.on_surface_variant),
         };
         if let Some(c) = metric_row(
             x,
@@ -926,9 +933,9 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
             let (tx, ty) = tile_origin(index);
             let (name, hint) = sector_tile(index);
             let (verdict, verdict_ink) = match vault.sectors[index].map(|s| s.authenticated) {
-                Some(true) => (b"round-trip verified".as_slice(), OK),
-                Some(false) => (b"not tested this session".as_slice(), MUTED),
-                None => (b"no record".as_slice(), WARN),
+                Some(true) => (b"round-trip verified".as_slice(), THEME.success),
+                Some(false) => (b"not tested this session".as_slice(), THEME.on_surface_variant),
+                None => (b"no record".as_slice(), THEME.warning),
             };
             if let Some(c) = tile_pixel(x, y, tx, ty, name, verdict, verdict_ink, hint) {
                 return c;
@@ -943,12 +950,12 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
             return c;
         }
         let (backup_verdict, backup_ink) = match vault.backup {
-            BackupState::WrittenAndValid => (b"written and validated".as_slice(), OK),
-            BackupState::WrittenButChecksumMismatch => (b"checksum mismatch".as_slice(), DANGER),
-            BackupState::WrittenButTruncated => (b"read back truncated".as_slice(), DANGER),
-            BackupState::ReadRefused => (b"read-back refused".as_slice(), WARN),
-            BackupState::WriteRefused => (b"settings write refused".as_slice(), WARN),
-            BackupState::NotAttempted => (b"not written yet".as_slice(), MUTED),
+            BackupState::WrittenAndValid => (b"written and validated".as_slice(), THEME.success),
+            BackupState::WrittenButChecksumMismatch => (b"checksum mismatch".as_slice(), THEME.error),
+            BackupState::WrittenButTruncated => (b"read back truncated".as_slice(), THEME.error),
+            BackupState::ReadRefused => (b"read-back refused".as_slice(), THEME.warning),
+            BackupState::WriteRefused => (b"settings write refused".as_slice(), THEME.warning),
+            BackupState::NotAttempted => (b"not written yet".as_slice(), THEME.on_surface_variant),
         };
         if let Some(c) = metric_row(
             x,
@@ -976,17 +983,17 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
             CARD_W,
             b"Encryptions / decryptions",
             counters,
-            TEXT,
+            THEME.on_surface,
             b"counters incremented by real sector calls",
         ) {
             return c;
         }
         let entropy_ink = match vault.entropy_probe {
-            EntropyProbe::Read16 => OK,
-            EntropyProbe::AllZero => DANGER,
-            EntropyProbe::Short => WARN,
-            EntropyProbe::Refused(_) => WARN,
-            EntropyProbe::NotRun => MUTED,
+            EntropyProbe::Read16 => THEME.success,
+            EntropyProbe::AllZero => THEME.error,
+            EntropyProbe::Short => THEME.warning,
+            EntropyProbe::Refused(_) => THEME.warning,
+            EntropyProbe::NotRun => THEME.on_surface_variant,
         };
         let entropy_word = entropy_verdict(vault.entropy_probe);
         if let Some(c) = metric_row(
@@ -1010,7 +1017,7 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
             CARD_W,
             b"Key material on screen",
             b"never shown",
-            OK,
+            THEME.success,
             b"keys stay inside the syscall boundary",
         ) {
             return c;
@@ -1058,14 +1065,14 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
         1,
         &vault.status[..vault.status_len],
         CARD_W,
-        MUTED,
-        BG,
+        THEME.on_surface_variant,
+        THEME.surface,
         false,
     ) {
         return c;
     }
 
-    BG
+    THEME.surface
 }
 
 // -----------------------------------------------------------------------------
@@ -1134,10 +1141,10 @@ fn key_verdict(p: KeyProbe) -> &'static [u8] {
 
 fn key_ink(p: KeyProbe) -> u32 {
     match p {
-        KeyProbe::Derived => OK,
-        KeyProbe::Short => WARN,
-        KeyProbe::Refused(_) => WARN,
-        KeyProbe::NotRun => MUTED,
+        KeyProbe::Derived => THEME.success,
+        KeyProbe::Short => THEME.warning,
+        KeyProbe::Refused(_) => THEME.warning,
+        KeyProbe::NotRun => THEME.on_surface_variant,
     }
 }
 

@@ -21,6 +21,8 @@
 
 use core::panic::PanicInfo;
 use interos_std as std;
+use notes::theme::THEME;
+use interos_std::design::components;
 use interos_std::design::outline_text;
 pub use notes::{
     format_count_badge, format_timestamp, LineSpan, Note, NoteColorTheme, NotesStore,
@@ -28,22 +30,39 @@ pub use notes::{
     StorageState, TIMESTAMP_UNKNOWN,
 };
 
+/// The platform's card treatment, at the elevation the app's cards sit at.
+///
+/// WHY the app's cards are the platform's cards: a card that invents its own
+/// fill and its own hairline is a card a third-party app cannot match, and
+/// the platform already says what a card looks like.
+const CARD: components::CardStyle =
+    components::card_style(&THEME, components::Elevation::Resting);
+
+/// The card's hairline, or the card's own fill when the card has no hairline.
+const CARD_BORDER: u32 = match CARD.border {
+    Some(c) => c,
+    None => CARD.fill,
+};
+
 const W: usize = 720;
 const H: usize = 1440;
 const CHUNK: usize = 4096;
 const CHARS_PER_LINE: usize = 40;
 
-// Base canvas and UI chrome tokens (InterOS Design Specs 2026)
-const BG_CANVAS: u32 = 0xFF0D1017;
-const SURFACE_BAR: u32 = 0xFF161A22;
-const BORDER_BAR: u32 = 0xFF242A38;
-const TEXT_WHITE: u32 = 0xFFF8FAFC;
-const TEXT_MUTED: u32 = 0xFF94A3B8;
-const ACCENT_CYAN: u32 = 0xFF38BDF8;
-const ACCENT_GOLD: u32 = 0xFFFBBF24;
-const ACCENT_GREEN: u32 = 0xFF10B981;
-const DANGER_RED: u32 = 0xFFEF4444;
-
+// -----------------------------------------------------------------------------
+// Visual Design Tokens
+//
+// WHY there is no palette here any more: the app used to carry its own
+// colours, which is a second design system inside one app. Every colour now
+// resolves through the platform's theme, so a third-party app that asks the
+// SDK for the same roles draws the same notes surface. See `notes::theme` for
+// the mapping from the old names to the platform's roles.
+//
+// WHY the note's own colour theme is still a local palette: `KEEP_COLORS` is
+// the *note's* palette -- a thing the user picks, one of eight, each with its
+// own colours -- and not the app's chrome. The platform's theme describes the
+// surface the note is drawn on; the note's own colours are content.
+// -----------------------------------------------------------------------------
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ViewMode {
     List,
@@ -466,13 +485,13 @@ fn draw_palette_glyph(x: usize, y: usize, cx: usize, cy: usize, color: u32) -> O
     }
     // 3 distinct color wells:
     if (dx + 3) * (dx + 3) + (dy + 2) * (dy + 2) <= 3 {
-        return Some(0xFF00D2FF);
+        return Some(THEME.primary);
     }
     if (dx + 1) * (dx + 1) + (dy - 4) * (dy - 4) <= 3 {
-        return Some(0xFFF59E0B);
+        return Some(THEME.warning);
     }
     if (dx - 3) * (dx - 3) + (dy + 1) * (dy + 1) <= 3 {
-        return Some(0xFFEF4444);
+        return Some(THEME.error);
     }
     None
 }
@@ -520,13 +539,13 @@ fn draw_checkbox_glyph(x: usize, y: usize, bx: usize, by: usize, is_checked: boo
         let is_check = (rx >= 5 && rx <= 9 && (ry as i32 - (rx as i32 + 6)).abs() <= 1)
             || (rx >= 9 && rx <= 16 && (ry as i32 - (24 - rx as i32)).abs() <= 1);
         if is_check {
-            return Some(TEXT_WHITE);
+            return Some(THEME.on_surface);
         }
-        return Some(if accent != 0 { accent } else { ACCENT_GREEN });
+        return Some(if accent != 0 { accent } else { THEME.success });
     } else {
         let in_inner = in_rounded_rect(x, y, bx + 2, by + 2, 18, 18, 4);
         if !in_inner {
-            return Some(TEXT_MUTED);
+            return Some(THEME.on_surface_variant);
         }
         return None;
     }
@@ -678,7 +697,7 @@ fn render_pixel(x: usize, y: usize, state: &AppState) -> u32 {
         if in_rounded_rect(x, y, 260, 1422, 200, 4, 2) {
             return 0x80FFFFFF;
         }
-        return BG_CANVAS;
+        return THEME.surface;
     }
 
     // 2. View Mode Dispatch
@@ -814,30 +833,30 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
     if y >= 24 && y <= 78 && x >= 28 && x <= 692 {
         if in_rounded_rect(x, y, 28, 24, 664, 54, 24) {
             if !in_rounded_rect(x, y, 30, 26, 660, 50, 22) {
-                return if state.search_active { ACCENT_CYAN } else { BORDER_BAR };
+                return if state.search_active { THEME.primary } else { THEME.border };
             }
 
             // Search Icon on Left
-            if let Some(c) = draw_search_glyph(x, y, 58, 51, TEXT_MUTED) {
+            if let Some(c) = draw_search_glyph(x, y, 58, 51, THEME.on_surface_variant) {
                 return c;
             }
 
             // Search Query Text or Placeholder
             if state.search_len > 0 {
                 let q = &state.search_query[..state.search_len];
-                if let Some(c) = test_text(x, y, 88, 42, 1, q, TEXT_WHITE, SURFACE_BAR, false) {
+                if let Some(c) = test_text(x, y, 88, 42, 1, q, THEME.on_surface, THEME.surface_container, false) {
                     return c;
                 }
                 // Blinking cursor
                 if state.cursor_visible && state.search_active {
                     let cur_x = 88 + state.search_len * 8;
                     if x >= cur_x && x <= cur_x + 2 && y >= 42 && y <= 60 {
-                        return ACCENT_CYAN;
+                        return THEME.primary;
                     }
                 }
             } else {
                 let hint = b"Search your notes...";
-                if let Some(c) = test_text(x, y, 88, 42, 1, hint, TEXT_MUTED, SURFACE_BAR, false) {
+                if let Some(c) = test_text(x, y, 88, 42, 1, hint, THEME.on_surface_variant, THEME.surface_container, false) {
                     return c;
                 }
             }
@@ -847,7 +866,7 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
                 let dx = (x as i32 - 650).abs();
                 let dy = (y as i32 - 51).abs();
                 if (dx - dy).abs() <= 1 && dx <= 6 {
-                    return TEXT_MUTED;
+                    return THEME.on_surface_variant;
                 }
             } else {
                 let count = state.store.count();
@@ -859,14 +878,14 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
                 let w = outline_text::drawn_advance(&badge[..n], 1, None)
                     .unwrap_or_else(|| std::design::font::measure(&badge[..n], 1));
                 let bx = 682usize.saturating_sub(w);
-                if let Some(c) = test_text(x, y, bx, 42, 1, &badge[..n], ACCENT_CYAN, SURFACE_BAR, true) {
+                if let Some(c) = test_text(x, y, bx, 42, 1, &badge[..n], THEME.primary, THEME.surface_container, true) {
                     return c;
                 }
             }
 
-            return SURFACE_BAR;
+            return THEME.surface_container;
         }
-        return BG_CANVAS;
+        return THEME.surface;
     }
 
     // --- B. Category Filter Chips (y: 96..138) ---
@@ -890,26 +909,26 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
                 let is_active = state.selected_category as usize == i;
                 if in_rounded_rect(x, y, cx, 96, cw, 42, 14) {
                     if is_active {
-                        let txt_color = 0xFF0B111A;
+                        let txt_color = THEME.on_surface;
                         let text_x = cx + (cw - chip_names[i].len() * 8) / 2;
-                        if let Some(c) = test_text(x, y, text_x, 109, 1, chip_names[i], txt_color, ACCENT_CYAN, true) {
+                        if let Some(c) = test_text(x, y, text_x, 109, 1, chip_names[i], txt_color, THEME.primary, true) {
                             return c;
                         }
-                        return ACCENT_CYAN;
+                        return THEME.primary;
                     } else {
                         if !in_rounded_rect(x, y, cx + 1, 97, cw - 2, 40, 13) {
-                            return BORDER_BAR;
+                            return THEME.border;
                         }
                         let text_x = cx + (cw - chip_names[i].len() * 8) / 2;
-                        if let Some(c) = test_text(x, y, text_x, 109, 1, chip_names[i], 0xFFCBD5E1, SURFACE_BAR, false) {
+                        if let Some(c) = test_text(x, y, text_x, 109, 1, chip_names[i], THEME.on_surface_variant, THEME.surface_container, false) {
                             return c;
                         }
-                        return SURFACE_BAR;
+                        return THEME.surface_container;
                     }
                 }
             }
         }
-        return BG_CANVAS;
+        return THEME.surface;
     }
 
     // --- C. Keyboard in List View (if searching) ---
@@ -921,42 +940,42 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
     if !state.keyboard_visible && y >= 1318 && y <= 1386 {
         // Right circular Cyan FAB (+) at (654, 1352, r=28)
         if in_circle(x, y, 654, 1352, 28) {
-            if let Some(c) = draw_plus_glyph(x, y, 654, 1352, 0xFF0A0F17) {
+            if let Some(c) = draw_plus_glyph(x, y, 654, 1352, THEME.on_surface) {
                 return c;
             }
-            return ACCENT_CYAN;
+            return THEME.primary;
         }
 
         // Left Pill: "Take a note..." + Quick tools (x: 28..608)
         if in_rounded_rect(x, y, 28, 1320, 580, 64, 26) {
             if !in_rounded_rect(x, y, 30, 1322, 576, 60, 24) {
-                return BORDER_BAR;
+                return THEME.border;
             }
 
             // Checklist tool icon at x: 440
-            if let Some(c) = draw_checkbox_glyph(x, y, 440, 1341, false, ACCENT_CYAN) {
+            if let Some(c) = draw_checkbox_glyph(x, y, 440, 1341, false, THEME.primary) {
                 return c;
             }
 
             // Palette tool icon at x: 500
-            if let Some(c) = draw_palette_glyph(x, y, 500, 1352, TEXT_MUTED) {
+            if let Some(c) = draw_palette_glyph(x, y, 500, 1352, THEME.on_surface_variant) {
                 return c;
             }
 
             // Search / edit tool icon at x: 560
-            if let Some(c) = draw_keyboard_glyph(x, y, 560, 1352, TEXT_MUTED) {
+            if let Some(c) = draw_keyboard_glyph(x, y, 560, 1352, THEME.on_surface_variant) {
                 return c;
             }
 
             // "Take a note..." placeholder
-            if let Some(c) = test_text(x, y, 56, 1344, 1, b"Take a note...", TEXT_MUTED, SURFACE_BAR, false) {
+            if let Some(c) = test_text(x, y, 56, 1344, 1, b"Take a note...", THEME.on_surface_variant, THEME.surface_container, false) {
                 return c;
             }
 
-            return SURFACE_BAR;
+            return THEME.surface_container;
         }
 
-        return BG_CANVAS;
+        return THEME.surface;
     }
 
     // --- E. Dynamic Note Cards Feed (y: 162..1308) ---
@@ -969,7 +988,7 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
             // Empty state card
             if in_rounded_rect(x, y, 60, 440, 600, 240, 24) {
                 if !in_rounded_rect(x, y, 62, 442, 596, 236, 22) {
-                    return BORDER_BAR;
+                    return CARD_BORDER;
                 }
                 // WHY the state is read here and not assumed: an empty list
                 // and an unreadable store look the same on the screen unless
@@ -998,15 +1017,15 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
                         ),
                     }
                 };
-                if let Some(c) = test_text(x, y, 220, 500, 2, title, TEXT_WHITE, SURFACE_BAR, true) {
+                if let Some(c) = test_text(x, y, 220, 500, 2, title, THEME.on_surface, THEME.surface_container, true) {
                     return c;
                 }
-                if let Some(c) = test_text(x, y, 160, 560, 1, subtitle, TEXT_MUTED, SURFACE_BAR, false) {
+                if let Some(c) = test_text(x, y, 160, 560, 1, subtitle, THEME.on_surface_variant, THEME.surface_container, false) {
                     return c;
                 }
-                return SURFACE_BAR;
+                return CARD.fill;
             }
-            return BG_CANVAS;
+            return THEME.surface;
         }
 
         // Generous, breathable card metrics (Zero text overlapping)
@@ -1029,11 +1048,19 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
                 let theme = KEEP_COLORS[note.color_idx as usize % 8];
 
                 // Rounded Card Frame (r=20)
-                if !in_rounded_rect(x, y, 28, cy0 as usize, 664, card_h, 20) {
-                    return BG_CANVAS;
+                if !in_rounded_rect(x, y, 28, cy0 as usize, 664, card_h, CARD.radius) {
+                    return THEME.surface;
                 }
-                // Card Border (r=18)
-                if !in_rounded_rect(x, y, 30, (cy0 + 2) as usize, 660, card_h - 4, 18) {
+                // Card Border: the card's own hairline, one step inside it.
+                if !in_rounded_rect(
+                    x,
+                    y,
+                    30,
+                    (cy0 + 2) as usize,
+                    660,
+                    card_h - 4,
+                    CARD.radius.saturating_sub(2),
+                ) {
                     return theme.border;
                 }
 
@@ -1052,7 +1079,7 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
 
                 // Pinned Vector Icon if pinned (x: 656, y: uy0 + 26)
                 if note.is_pinned {
-                    if let Some(c) = draw_pin_glyph(x, y, 656, uy0 + 26, true, ACCENT_GOLD) {
+                    if let Some(c) = draw_pin_glyph(x, y, 656, uy0 + 26, true, THEME.warning) {
                         return c;
                     }
                 }
@@ -1123,10 +1150,10 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
             }
         }
 
-        return BG_CANVAS;
+        return THEME.surface;
     }
 
-    BG_CANVAS
+    THEME.surface
 }
 
 // -----------------------------------------------------------------------------
@@ -1136,7 +1163,7 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
 fn render_note_editor(x: usize, y: usize, state: &AppState) -> u32 {
     let note = match state.store.get_note(state.selected_note_id) {
         Some(n) => n,
-        None => return BG_CANVAS,
+        None => return THEME.surface,
     };
     let theme = KEEP_COLORS[note.color_idx as usize % 8];
 
@@ -1144,7 +1171,7 @@ fn render_note_editor(x: usize, y: usize, state: &AppState) -> u32 {
     if y < 84 {
         // Back Chevron at (50, 46, r=22)
         if in_circle(x, y, 50, 46, 22) {
-            if let Some(c) = draw_chevron_left(x, y, 50, 46, TEXT_WHITE) {
+            if let Some(c) = draw_chevron_left(x, y, 50, 46, THEME.on_surface) {
                 return c;
             }
             return theme.chip_bg;
@@ -1162,7 +1189,7 @@ fn render_note_editor(x: usize, y: usize, state: &AppState) -> u32 {
         } else {
             b"Saved"
         };
-        let status_color = if state.save_failed { DANGER_RED } else { theme.text_muted };
+        let status_color = if state.save_failed { THEME.error } else { theme.text_muted };
         if let Some(c) = test_text(x, y, 96, 38, 1, status_text, status_color, theme.bg, false) {
             return c;
         }
@@ -1170,7 +1197,7 @@ fn render_note_editor(x: usize, y: usize, state: &AppState) -> u32 {
         // Right Tools:
         // 1. Pin Toggle Glyph (x: 520, y: 46)
         if in_circle(x, y, 520, 46, 20) {
-            let pcol = if note.is_pinned { ACCENT_GOLD } else { theme.text_muted };
+            let pcol = if note.is_pinned { THEME.warning } else { theme.text_muted };
             if let Some(c) = draw_pin_glyph(x, y, 520, 46, note.is_pinned, pcol) {
                 return c;
             }
@@ -1179,7 +1206,7 @@ fn render_note_editor(x: usize, y: usize, state: &AppState) -> u32 {
 
         // 2. Palette Toggle Glyph (x: 580, y: 46)
         if in_circle(x, y, 580, 46, 20) {
-            if let Some(c) = draw_palette_glyph(x, y, 580, 46, TEXT_WHITE) {
+            if let Some(c) = draw_palette_glyph(x, y, 580, 46, THEME.on_surface) {
                 return c;
             }
             return theme.chip_bg;
@@ -1187,7 +1214,7 @@ fn render_note_editor(x: usize, y: usize, state: &AppState) -> u32 {
 
         // 3. Trash Can Glyph (x: 640, y: 46)
         if in_circle(x, y, 640, 46, 20) {
-            if let Some(c) = draw_trash_glyph(x, y, 640, 46, TEXT_WHITE) {
+            if let Some(c) = draw_trash_glyph(x, y, 640, 46, THEME.on_surface) {
                 return c;
             }
             return theme.chip_bg;
@@ -1233,7 +1260,7 @@ fn render_note_editor(x: usize, y: usize, state: &AppState) -> u32 {
     if state.swatch_picker_open && y >= swatch_y0 && y <= swatch_y1 {
         if in_rounded_rect(x, y, 20, swatch_y0, 680, 62, 22) {
             if !in_rounded_rect(x, y, 22, swatch_y0 + 2, 676, 58, 20) {
-                return BORDER_BAR;
+                return THEME.border;
             }
 
             let cy = swatch_y0 + 31;
@@ -1244,7 +1271,7 @@ fn render_note_editor(x: usize, y: usize, state: &AppState) -> u32 {
                 // Active circle ring
                 if i == note.color_idx as usize {
                     if in_circle(x, y, cx, cy, 22) && !in_circle(x, y, cx, cy, 18) {
-                        return TEXT_WHITE;
+                        return THEME.on_surface;
                     }
                 }
 
@@ -1256,7 +1283,7 @@ fn render_note_editor(x: usize, y: usize, state: &AppState) -> u32 {
                 }
             }
 
-            return SURFACE_BAR;
+            return THEME.surface_container;
         }
     }
 
@@ -1265,51 +1292,51 @@ fn render_note_editor(x: usize, y: usize, state: &AppState) -> u32 {
         // Accessory Strip (y: 916..974)
         if y >= 916 && y <= 974 {
             if !in_rounded_rect(x, y, 16, 916, 688, 58, 18) {
-                return BG_CANVAS;
+                return THEME.surface;
             }
 
             // Checkbox button at x: 44
             if in_rounded_rect(x, y, 32, 922, 54, 46, 10) {
-                if let Some(c) = draw_checkbox_glyph(x, y, 48, 934, false, ACCENT_CYAN) {
+                if let Some(c) = draw_checkbox_glyph(x, y, 48, 934, false, THEME.primary) {
                     return c;
                 }
-                return SURFACE_BAR;
+                return THEME.surface_container;
             }
 
             // Bullet button at x: 98
             if in_rounded_rect(x, y, 96, 922, 54, 46, 10) {
-                if let Some(c) = test_text(x, y, 118, 936, 1, b"*", TEXT_WHITE, SURFACE_BAR, true) {
+                if let Some(c) = test_text(x, y, 118, 936, 1, b"*", THEME.on_surface, THEME.surface_container, true) {
                     return c;
                 }
-                return SURFACE_BAR;
+                return THEME.surface_container;
             }
 
             // Palette button at x: 160
             if in_rounded_rect(x, y, 160, 922, 54, 46, 10) {
-                if let Some(c) = draw_palette_glyph(x, y, 187, 945, TEXT_WHITE) {
+                if let Some(c) = draw_palette_glyph(x, y, 187, 945, THEME.on_surface) {
                     return c;
                 }
-                return SURFACE_BAR;
+                return THEME.surface_container;
             }
 
             // Category Cycle Pill at x: 224..340
             let cat_name = CATEGORY_NAMES[note.category as usize % 5];
             if in_rounded_rect(x, y, 224, 922, 116, 46, 10) {
-                if let Some(c) = test_text(x, y, 240, 936, 1, cat_name, theme.accent, SURFACE_BAR, true) {
+                if let Some(c) = test_text(x, y, 240, 936, 1, cat_name, theme.accent, THEME.surface_container, true) {
                     return c;
                 }
-                return SURFACE_BAR;
+                return THEME.surface_container;
             }
 
             // Hide Keyboard Button at x: 630 (Down Chevron)
             if in_rounded_rect(x, y, 626, 922, 64, 46, 10) {
-                if let Some(c) = draw_chevron_down(x, y, 658, 945, ACCENT_CYAN) {
+                if let Some(c) = draw_chevron_down(x, y, 658, 945, THEME.primary) {
                     return c;
                 }
-                return SURFACE_BAR;
+                return THEME.surface_container;
             }
 
-            return SURFACE_BAR;
+            return THEME.surface_container;
         }
 
         // Soft Keyboard (y: 980..1408)
@@ -1321,7 +1348,7 @@ fn render_note_editor(x: usize, y: usize, state: &AppState) -> u32 {
         if y >= 1324 && y <= 1392 {
             if in_rounded_rect(x, y, 36, 1324, 648, 68, 28) {
                 if !in_rounded_rect(x, y, 38, 1326, 644, 64, 26) {
-                    return BORDER_BAR;
+                    return THEME.border;
                 }
 
                 // Category Tag
@@ -1335,37 +1362,37 @@ fn render_note_editor(x: usize, y: usize, state: &AppState) -> u32 {
 
                 // Checklist tool
                 if in_circle(x, y, 240, 1358, 20) {
-                    if let Some(c) = draw_checkbox_glyph(x, y, 229, 1347, false, ACCENT_CYAN) {
+                    if let Some(c) = draw_checkbox_glyph(x, y, 229, 1347, false, THEME.primary) {
                         return c;
                     }
-                    return SURFACE_BAR;
+                    return THEME.surface_container;
                 }
 
                 // Palette tool
                 if in_circle(x, y, 340, 1358, 20) {
-                    if let Some(c) = draw_palette_glyph(x, y, 340, 1358, TEXT_WHITE) {
+                    if let Some(c) = draw_palette_glyph(x, y, 340, 1358, THEME.on_surface) {
                         return c;
                     }
-                    return SURFACE_BAR;
+                    return THEME.surface_container;
                 }
 
                 // Type / Edit note button (Keyboard icon)
                 if in_circle(x, y, 440, 1358, 20) {
-                    if let Some(c) = draw_keyboard_glyph(x, y, 440, 1358, ACCENT_CYAN) {
+                    if let Some(c) = draw_keyboard_glyph(x, y, 440, 1358, THEME.primary) {
                         return c;
                     }
-                    return SURFACE_BAR;
+                    return THEME.surface_container;
                 }
 
                 // Delete Note icon
                 if in_circle(x, y, 630, 1358, 20) {
-                    if let Some(c) = draw_trash_glyph(x, y, 630, 1358, DANGER_RED) {
+                    if let Some(c) = draw_trash_glyph(x, y, 630, 1358, THEME.error) {
                         return c;
                     }
-                    return SURFACE_BAR;
+                    return THEME.surface_container;
                 }
 
-                return SURFACE_BAR;
+                return THEME.surface_container;
             }
         }
     }
@@ -1450,11 +1477,11 @@ fn render_note_editor(x: usize, y: usize, state: &AppState) -> u32 {
 fn render_soft_keyboard(x: usize, y: usize, state: &AppState) -> u32 {
     // Container Frame
     if !in_rounded_rect(x, y, 6, KB_Y0, 708, KB_Y1 - KB_Y0, 22) {
-        return BG_CANVAS;
+        return THEME.surface;
     }
     // Top border stroke
     if y == KB_Y0 || y == KB_Y0 + 1 {
-        return BORDER_BAR;
+        return THEME.border;
     }
 
     // Row 0: Q W E R T Y U I O P (y: 994..1066)
@@ -1470,10 +1497,10 @@ fn render_soft_keyboard(x: usize, y: usize, state: &AppState) -> u32 {
                     if state.kb_shift { c } else { c.to_ascii_lowercase() }
                 };
                 let ch_buf = [ch];
-                if let Some(c) = test_text(x, y, kx + 25, 1006, 2, &ch_buf, TEXT_WHITE, 0xFF252932, true) {
+                if let Some(c) = test_text(x, y, kx + 25, 1006, 2, &ch_buf, THEME.on_surface, THEME.surface_container_high, true) {
                     return c;
                 }
-                return 0xFF252932;
+                return THEME.surface_container_high;
             }
         }
     }
@@ -1491,10 +1518,10 @@ fn render_soft_keyboard(x: usize, y: usize, state: &AppState) -> u32 {
                     if state.kb_shift { c } else { c.to_ascii_lowercase() }
                 };
                 let ch_buf = [ch];
-                if let Some(c) = test_text(x, y, kx + 25, 1088, 2, &ch_buf, TEXT_WHITE, 0xFF252932, true) {
+                if let Some(c) = test_text(x, y, kx + 25, 1088, 2, &ch_buf, THEME.on_surface, THEME.surface_container_high, true) {
                     return c;
                 }
-                return 0xFF252932;
+                return THEME.surface_container_high;
             }
         }
     }
@@ -1504,9 +1531,9 @@ fn render_soft_keyboard(x: usize, y: usize, state: &AppState) -> u32 {
         // Shift key (15..95)
         if x >= 15 && x <= 95 {
             if in_rounded_rect(x, y, 15, 1158, 80, 72, 10) {
-                let fill = if state.kb_shift { ACCENT_CYAN } else { 0xFF20232B };
+                let fill = if state.kb_shift { THEME.primary } else { THEME.surface_container };
                 let txt = if state.kb_symbols { b"ABC" as &[u8] } else { b"^" as &[u8] };
-                if let Some(c) = test_text(x, y, 42, 1182, 1, txt, TEXT_WHITE, fill, true) {
+                if let Some(c) = test_text(x, y, 42, 1182, 1, txt, THEME.on_surface, fill, true) {
                     return c;
                 }
                 return fill;
@@ -1525,20 +1552,20 @@ fn render_soft_keyboard(x: usize, y: usize, state: &AppState) -> u32 {
                     if state.kb_shift { c } else { c.to_ascii_lowercase() }
                 };
                 let ch_buf = [ch];
-                if let Some(c) = test_text(x, y, kx + 25, 1170, 2, &ch_buf, TEXT_WHITE, 0xFF252932, true) {
+                if let Some(c) = test_text(x, y, kx + 25, 1170, 2, &ch_buf, THEME.on_surface, THEME.surface_container_high, true) {
                     return c;
                 }
-                return 0xFF252932;
+                return THEME.surface_container_high;
             }
         }
 
         // Backspace key (620..705)
         if x >= 620 && x <= 705 {
             if in_rounded_rect(x, y, 620, 1158, 85, 72, 10) {
-                if let Some(c) = test_text(x, y, 646, 1182, 1, b"<X]", TEXT_WHITE, 0xFF20232B, true) {
+                if let Some(c) = test_text(x, y, 646, 1182, 1, b"<X]", THEME.on_surface, THEME.surface_container, true) {
                     return c;
                 }
-                return 0xFF20232B;
+                return THEME.surface_container;
             }
         }
     }
@@ -1549,55 +1576,55 @@ fn render_soft_keyboard(x: usize, y: usize, state: &AppState) -> u32 {
         if x >= 15 && x <= 115 {
             if in_rounded_rect(x, y, 15, 1240, 100, 72, 10) {
                 let txt = if state.kb_symbols { b"ABC" as &[u8] } else { b"?123" as &[u8] };
-                if let Some(c) = test_text(x, y, 42, 1264, 1, txt, TEXT_WHITE, 0xFF20232B, true) {
+                if let Some(c) = test_text(x, y, 42, 1264, 1, txt, THEME.on_surface, THEME.surface_container, true) {
                     return c;
                 }
-                return 0xFF20232B;
+                return THEME.surface_container;
             }
         }
 
         // Comma key (125..195)
         if x >= 125 && x <= 195 {
             if in_rounded_rect(x, y, 125, 1240, 70, 72, 10) {
-                if let Some(c) = test_text(x, y, 155, 1252, 2, b",", TEXT_WHITE, 0xFF252932, true) {
+                if let Some(c) = test_text(x, y, 155, 1252, 2, b",", THEME.on_surface, THEME.surface_container_high, true) {
                     return c;
                 }
-                return 0xFF252932;
+                return THEME.surface_container_high;
             }
         }
 
         // Spacebar (205..515)
         if x >= 205 && x <= 515 {
             if in_rounded_rect(x, y, 205, 1240, 310, 72, 10) {
-                if let Some(c) = test_text(x, y, 328, 1264, 1, b"Space", TEXT_MUTED, 0xFF252932, false) {
+                if let Some(c) = test_text(x, y, 328, 1264, 1, b"Space", THEME.on_surface_variant, THEME.surface_container_high, false) {
                     return c;
                 }
-                return 0xFF252932;
+                return THEME.surface_container_high;
             }
         }
 
         // Period key (525..595)
         if x >= 525 && x <= 595 {
             if in_rounded_rect(x, y, 525, 1240, 70, 72, 10) {
-                if let Some(c) = test_text(x, y, 555, 1252, 2, b".", TEXT_WHITE, 0xFF252932, true) {
+                if let Some(c) = test_text(x, y, 555, 1252, 2, b".", THEME.on_surface, THEME.surface_container_high, true) {
                     return c;
                 }
-                return 0xFF252932;
+                return THEME.surface_container_high;
             }
         }
 
         // Done / Dismiss key (605..705)
         if x >= 605 && x <= 705 {
             if in_rounded_rect(x, y, 605, 1240, 100, 72, 10) {
-                if let Some(c) = draw_chevron_down(x, y, 655, 1276, 0xFF0A0F17) {
+                if let Some(c) = draw_chevron_down(x, y, 655, 1276, THEME.on_surface) {
                     return c;
                 }
-                return ACCENT_CYAN;
+                return THEME.primary;
             }
         }
     }
 
-    0xFF181B22
+    THEME.surface_container_low
 }
 
 // -----------------------------------------------------------------------------

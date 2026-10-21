@@ -15,6 +15,8 @@
 
 use core::panic::PanicInfo;
 use interos_std as std;
+use messages::theme::{MIN_TOUCH_TARGET, THEME, radius, spacing, type_scale};
+use interos_std::design::components;
 use interos_std::design::outline_text;
 
 use messages::gsm;
@@ -346,15 +348,38 @@ fn put_usize(out: &mut [u8; 8], v: usize) -> usize {
 
 // -----------------------------------------------------------------------------
 // Visual Design Tokens
+//
+// WHY there is no palette here any more: the app used to carry its own
+// colours, which is a second design system inside one app. Every colour now
+// resolves through the platform's theme, so a third-party app that asks the
+// SDK for the same roles draws the same messages surface. See
+// `messages::theme` for the mapping from the old names to the platform's roles.
 // -----------------------------------------------------------------------------
-const BG_DARK: u32 = 0xFF000000;
-const SURFACE_DARK: u32 = 0xFF0E1117;
-const SURFACE_RAISED: u32 = 0xFF181C22;
-const BORDER_SUBTLE: u32 = 0xFF262C36;
-const ACCENT_SKY: u32 = 0xFF10B981;
-const TEXT_PRIMARY: u32 = 0xFFFFFFFF;
-const TEXT_MUTED: u32 = 0xFF8B949E;
-const DISABLED_FILL: u32 = 0xFF161B22;
+
+
+/// The platform's corner radii, under the short names the renderer uses.
+///
+/// WHY the aliases exist: the corner test names its radius four times, and a
+/// number that appears four times is a number that can drift from the
+/// platform. The alias resolves to the platform's step, so the drift is the
+/// platform's and not this app's.
+const R_CARD: usize = radius::CARD;
+const R_SHEET: usize = radius::SHEET;
+const R_SOFT: usize = radius::SOFT_PILL;
+
+/// The platform's card treatment, at the elevation the app's cards sit at.
+///
+/// WHY the app's cards are the platform's cards: a card that invents its own
+/// fill and its own hairline is a card a third-party app cannot match, and
+/// the platform already says what a card looks like.
+const CARD: components::CardStyle =
+    components::card_style(&THEME, components::Elevation::Resting);
+
+/// The card's hairline, or the card's own fill when the card has no hairline.
+const CARD_BORDER: u32 = match CARD.border {
+    Some(c) => c,
+    None => CARD.fill,
+};
 
 const W: usize = 720;
 const H: usize = 1440;
@@ -440,13 +465,13 @@ const HEADER_Y0: usize = 0;
 const HEADER_Y1: usize = 96;
 const TITLE_TEXT: &[u8] = b"Messages";
 const TITLE_X: usize = 116;
-const TITLE_SCALE: usize = 1;
+const TITLE_SCALE: usize = type_scale::CAPTION;
 const TITLE_Y: usize = 36;
 
 const PILL_RIGHT: usize = W - 24;
 const PILL_TOP: usize = 28;
 const PILL_BOTTOM: usize = 68;
-const PILL_PAD_X: usize = 20;
+const PILL_PAD_X: usize = spacing::GRID_20;
 
 #[inline]
 fn pill_text(app: &MessagesApp) -> &'static [u8] {
@@ -481,16 +506,22 @@ const SEARCH_FIELD: (usize, usize, usize, usize) = (24, 106, 672, 48);
 const SEARCH_TEXT_X: usize = 82;
 const SEARCH_TEXT_MAX_W: usize = 696 - 20 - SEARCH_TEXT_X;
 const SEARCH_PLACEHOLDER: &[u8] = b"Search chats...";
-const SEARCH_TEXT_SCALE: usize = 1;
+const SEARCH_TEXT_SCALE: usize = type_scale::CAPTION;
 
 // Recipient ("To:") editor
-const RECIPIENT_BAND_Y0: usize = 1288;
+const RECIPIENT_BAND_Y0: usize = 1284;
 const RECIPIENT_BAND_Y1: usize = 1330;
-const RECIPIENT_FIELD: (usize, usize, usize, usize) = (24, 1292, 586, 36);
+// WHY the field is 44 tall and starts at the band's top: the design system's
+// minimum touch target is 44 logical pixels, and this field was 36, so a
+// 36-row strip had to be tapped to focus it. The band moved up by the four
+// rows the field gained; the thread list above ends at the band, so the list
+// gives up those four rows rather than the field overlapping the compose
+// band below.
+const RECIPIENT_FIELD: (usize, usize, usize, usize) = (24, 1284, 586, MIN_TOUCH_TARGET);
 const RECIPIENT_TEXT_X: usize = 76;
 const RECIPIENT_TEXT_MAX_W: usize = 490 - RECIPIENT_TEXT_X;
 const RECIPIENT_PLACEHOLDER: &[u8] = b"Recipient (name or handle)";
-const RECIPIENT_TEXT_SCALE: usize = 1;
+const RECIPIENT_TEXT_SCALE: usize = type_scale::CAPTION;
 
 // Compose field geometry (y 1330..1414)
 const COMPOSE_BAND_Y0: usize = 1330;
@@ -499,7 +530,7 @@ const COMPOSE_FIELD: (usize, usize, usize, usize) = (24, 1344, 586, 60);
 const COMPOSE_TEXT_X: usize = 52;
 const COMPOSE_TEXT_MAX_W: usize = 610 - 20 - COMPOSE_TEXT_X;
 const COMPOSE_PLACEHOLDER: &[u8] = b"Type a message...";
-const COMPOSE_TEXT_SCALE: usize = 2;
+const COMPOSE_TEXT_SCALE: usize = type_scale::BODY;
 const SEND_CX: usize = 662;
 const SEND_CY: usize = 1374;
 const SEND_R: i32 = 29;
@@ -528,9 +559,9 @@ fn selection_fill() -> u32 {
     const PERCENT: u32 = 38;
     let t = PERCENT * 256 / 100;
     let channel = |c: u32, bg: u32| -> u32 { (c * t + bg * (256 - t)) >> 8 };
-    let r = channel((ACCENT_SKY >> 16) & 0xFF, (SURFACE_DARK >> 16) & 0xFF);
-    let g = channel((ACCENT_SKY >> 8) & 0xFF, (SURFACE_DARK >> 8) & 0xFF);
-    let b = channel(ACCENT_SKY & 0xFF, SURFACE_DARK & 0xFF);
+    let r = channel((THEME.primary >> 16) & 0xFF, (THEME.surface_container >> 16) & 0xFF);
+    let g = channel((THEME.primary >> 8) & 0xFF, (THEME.surface_container >> 8) & 0xFF);
+    let b = channel(THEME.primary & 0xFF, THEME.surface_container & 0xFF);
     0xFF00_0000 | (r << 16) | (g << 8) | b
 }
 
@@ -587,12 +618,12 @@ fn build_editor(
         scale,
         caret_x: x,
         select_w: 0,
-        color: TEXT_MUTED,
+        color: THEME.on_surface_variant,
     };
     if raw_len == 0 {
         f.len = std::design::font::ellipsize(placeholder, scale, max_w, &mut f.buf);
     } else {
-        f.color = TEXT_PRIMARY;
+        f.color = THEME.on_surface;
         f.len = std::design::font::ellipsize(&raw[..raw_len], scale, max_w, &mut f.buf);
     }
     let w = std::design::font::measure(&f.buf[..f.len], scale);
@@ -631,7 +662,7 @@ fn editor_pixel(
         return Some(selection_fill());
     }
     if focused && x >= f.caret_x && x < f.caret_x + 2 {
-        return Some(ACCENT_SKY);
+        return Some(THEME.primary);
     }
     None
 }
@@ -703,7 +734,7 @@ fn build_frame(messages: &MessagesApp) -> Frame {
 /// shows the peer's real initial against a neutral surface, which is what
 /// the app actually knows.
 fn avatar_color(_peer: &[u8]) -> u32 {
-    0xFF374151 // Slate
+    THEME.muted // Slate
 }
 
 /// Case-insensitive substring match.
@@ -739,11 +770,11 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
     // 1. Header (y 0..96)
     if y < HEADER_Y1 {
         if y >= 94 {
-            return BORDER_SUBTLE;
+            return THEME.border;
         }
 
         // Standardized back button squircle (24..72, 24..72)
-        if let Some(c) = std::design::back_button::pixel(x, y, TEXT_PRIMARY, BORDER_SUBTLE, SURFACE_RAISED) {
+        if let Some(c) = std::design::back_button::pixel(x, y, THEME.on_surface, THEME.border, THEME.surface_container_high) {
             return c;
         }
 
@@ -751,7 +782,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
         let dot_dx = x as i32 - 96;
         let dot_dy = y as i32 - 48;
         if dot_dx * dot_dx + dot_dy * dot_dy <= 16 {
-            return 0xFFEF4444;
+            return THEME.error;
         }
 
         // Header Title: In ThreadList mode, "Messages"; in Conversation mode, peer handle or "Messages"
@@ -777,8 +808,8 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                 TITLE_Y,
                 TITLE_SCALE,
                 title,
-                TEXT_PRIMARY,
-                SURFACE_DARK,
+                THEME.on_surface,
+                THEME.surface_container,
             ) {
                 return c;
             }
@@ -788,11 +819,11 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
         if x >= f.pill.left && x < PILL_RIGHT && y >= PILL_TOP && y < PILL_BOTTOM {
             let rx = (x - f.pill.left).min(PILL_RIGHT - 1 - x);
             let ry = (y - PILL_TOP).min(PILL_BOTTOM - 1 - y);
-            if rx < 20 && ry < 20 {
-                let cdx = (20 - rx) as isize;
-                let cdy = (20 - ry) as isize;
-                if cdx * cdx + cdy * cdy >= 400 {
-                    return SURFACE_DARK;
+            if rx < R_CARD && ry < R_CARD {
+                let cdx = (R_CARD - rx) as isize;
+                let cdy = (R_CARD - ry) as isize;
+                if cdx * cdx + cdy * cdy >= (R_CARD * R_CARD) as isize {
+                    return THEME.surface_container;
                 }
             }
             if let Some(c) = test_text_bold(
@@ -802,18 +833,18 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                 f.pill.text_y,
                 f.pill.scale,
                 f.pill.label,
-                TEXT_MUTED,
-                SURFACE_RAISED,
+                THEME.on_surface_variant,
+                THEME.surface_container_high,
             ) {
                 return c;
             }
             if rx < 2 || ry < 2 {
-                return BORDER_SUBTLE;
+                return THEME.border;
             }
-            return SURFACE_RAISED;
+            return THEME.surface_container_high;
         }
 
-        return SURFACE_DARK;
+        return THEME.surface_container;
     }
 
     // -------------------------------------------------------------------------
@@ -827,11 +858,11 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                 let fy = SEARCH_FIELD.1;
                 let rx = (x - fx).min(fx + SEARCH_FIELD.2 - 1 - x);
                 let ry = (y - fy).min(fy + SEARCH_FIELD.3 - 1 - y);
-                if rx < 22 && ry < 22 {
-                    let cdx = (22 - rx) as isize;
-                    let cdy = (22 - ry) as isize;
-                    if cdx * cdx + cdy * cdy >= 484 {
-                        return BG_DARK;
+                if rx < R_SHEET && ry < R_SHEET {
+                    let cdx = (R_SHEET - rx) as isize;
+                    let cdy = (R_SHEET - ry) as isize;
+                    if cdx * cdx + cdy * cdy >= (R_SHEET * R_SHEET) as isize {
+                        return THEME.surface;
                     }
                 }
 
@@ -842,24 +873,24 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                 let dy = (y as isize - cy as isize).abs();
                 let d_sq = dx * dx + dy * dy;
                 if d_sq >= 20 && d_sq <= 48 {
-                    return TEXT_MUTED;
+                    return THEME.on_surface_variant;
                 }
                 let hx = x as isize - (cx + 5) as isize;
                 let hy = y as isize - (cy + 5) as isize;
                 if hx >= 0 && hx <= 8 && hy >= 0 && hy <= 8 && (hx - hy).abs() <= 1 {
-                    return TEXT_MUTED;
+                    return THEME.on_surface_variant;
                 }
 
-                if let Some(c) = editor_pixel(x, y, &f.search, messages.search_focused, SURFACE_DARK) {
+                if let Some(c) = editor_pixel(x, y, &f.search, messages.search_focused, THEME.surface_container) {
                     return c;
                 }
 
                 if rx < 2 || ry < 2 {
-                    return BORDER_SUBTLE;
+                    return THEME.border;
                 }
-                return SURFACE_DARK;
+                return THEME.surface_container;
             }
-            return BG_DARK;
+            return THEME.surface;
         }
 
         // 3. Thread List / Empty State (y 168..1288)
@@ -869,11 +900,11 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                 if in_rect(EMPTY_CARD, x, y) {
                     let rx = (x - EMPTY_CARD.0).min(EMPTY_CARD.0 + EMPTY_CARD.2 - 1 - x);
                     let ry = (y - EMPTY_CARD.1).min(EMPTY_CARD.1 + EMPTY_CARD.3 - 1 - y);
-                    if rx < 24 && ry < 24 {
-                        let cdx = (24 - rx) as isize;
-                        let cdy = (24 - ry) as isize;
-                        if cdx * cdx + cdy * cdy >= 576 {
-                            return BG_DARK;
+                    if rx < R_SHEET && ry < R_SHEET {
+                        let cdx = (R_SHEET - rx) as isize;
+                        let cdy = (R_SHEET - ry) as isize;
+                        if cdx * cdx + cdy * cdy >= (R_SHEET * R_SHEET) as isize {
+                            return THEME.surface;
                         }
                     }
 
@@ -891,8 +922,8 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                         676,
                         1,
                         line,
-                        TEXT_PRIMARY,
-                        SURFACE_DARK,
+                        THEME.on_surface,
+                        THEME.surface_container,
                     ) {
                         return c;
                     }
@@ -903,17 +934,17 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                         716,
                         1,
                         sub_line,
-                        TEXT_MUTED,
-                        SURFACE_DARK,
+                        THEME.on_surface_variant,
+                        THEME.surface_container,
                     ) {
                         return c;
                     }
                     if rx < 2 || ry < 2 {
-                        return BORDER_SUBTLE;
+                        return CARD_BORDER;
                     }
-                    return SURFACE_DARK;
+                    return CARD.fill;
                 }
-                return BG_DARK;
+                return THEME.surface;
             }
 
             // Zero conversation threads: Honest Empty State Card
@@ -921,11 +952,11 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                 if in_rect(EMPTY_CARD, x, y) {
                     let rx = (x - EMPTY_CARD.0).min(EMPTY_CARD.0 + EMPTY_CARD.2 - 1 - x);
                     let ry = (y - EMPTY_CARD.1).min(EMPTY_CARD.1 + EMPTY_CARD.3 - 1 - y);
-                    if rx < 24 && ry < 24 {
-                        let cdx = (24 - rx) as isize;
-                        let cdy = (24 - ry) as isize;
-                        if cdx * cdx + cdy * cdy >= 576 {
-                            return BG_DARK;
+                    if rx < R_SHEET && ry < R_SHEET {
+                        let cdx = (R_SHEET - rx) as isize;
+                        let cdy = (R_SHEET - ry) as isize;
+                        if cdx * cdx + cdy * cdy >= (R_SHEET * R_SHEET) as isize {
+                            return THEME.surface;
                         }
                     }
 
@@ -944,13 +975,13 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
 
                         if !corner_out {
                             if y >= cy - 22 && y < cy - 16 && x >= cx - 40 && x < cx + 28 {
-                                return ACCENT_SKY;
+                                return THEME.primary;
                             }
                             if y >= cy - 8 && y < cy - 2 && x >= cx - 40 && x < cx + 16 {
-                                return BORDER_SUBTLE;
+                                return THEME.border;
                             }
                             if y >= cy + 6 && y < cy + 12 && x >= cx - 40 && x < cx - 4 {
-                                return BORDER_SUBTLE;
+                                return THEME.border;
                             }
                             let is_rim = bx < 2 || by < 2 || (in_corner && {
                                 let cdx = (18 - bx) as isize;
@@ -958,9 +989,9 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                                 cdx * cdx + cdy * cdy >= 256
                             });
                             if is_rim {
-                                return BORDER_SUBTLE;
+                                return THEME.border;
                             }
-                            return SURFACE_RAISED;
+                            return THEME.surface_container_high;
                         }
                     }
 
@@ -970,9 +1001,9 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                         let rel_y = (y - (cy + 30)) as isize;
                         if rel_x >= (rel_y * 24) / 18 {
                             if rel_x == (rel_y * 24) / 18 || x == cx - 19 || y == cy + 47 {
-                                return BORDER_SUBTLE;
+                                return THEME.border;
                             }
-                            return SURFACE_RAISED;
+                            return THEME.surface_container_high;
                         }
                     }
 
@@ -984,8 +1015,8 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                         740,
                         2,
                         b"No Conversations Yet",
-                        TEXT_PRIMARY,
-                        SURFACE_DARK,
+                        THEME.on_surface,
+                        THEME.surface_container,
                     ) {
                         return c;
                     }
@@ -996,17 +1027,17 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                     let (subline, subline_color): (&[u8], u32) = match messages.store.state {
                         store::StoreState::ReadRefused => (
                             b"Stored conversations could not be read",
-                            0xFFF59E0B,
+                            THEME.warning,
                         ),
                         store::StoreState::Invalid => (
                             b"Stored conversations failed validation",
-                            0xFFEF4444,
+                            THEME.error,
                         ),
                         store::StoreState::Full => (
                             b"Conversation store is full; older threads were not kept",
-                            0xFFF59E0B,
+                            THEME.warning,
                         ),
-                        _ => (b"Messaging unavailable: no transport", TEXT_MUTED),
+                        _ => (b"Messaging unavailable: no transport", THEME.on_surface_variant),
                     };
                     if let Some(c) = test_text(
                         x,
@@ -1016,15 +1047,15 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                         1,
                         subline,
                         subline_color,
-                        SURFACE_DARK,
+                        THEME.surface_container,
                     ) {
                         return c;
                     }
 
                     if rx < 2 || ry < 2 {
-                        return BORDER_SUBTLE;
+                        return THEME.border;
                     }
-                    return SURFACE_DARK;
+                    return THEME.surface_container;
                 }
             } else {
                 // Render conversation thread rows
@@ -1036,11 +1067,11 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                         if thread_matches(tr, &messages.search[..messages.search_len]) {
                             let rx = (x - CARD_X0).min(CARD_X1 - 1 - x);
                             let ry = card_offset_y.min(CARD_BODY_H - 1 - card_offset_y);
-                            if rx < 16 && ry < 16 {
-                                let cdx = (16 - rx) as isize;
-                                let cdy = (16 - ry) as isize;
-                                if cdx * cdx + cdy * cdy >= 256 {
-                                    return BG_DARK;
+                            if rx < CARD.radius && ry < CARD.radius {
+                                let cdx = (CARD.radius - rx) as isize;
+                                let cdy = (CARD.radius - ry) as isize;
+                                if cdx * cdx + cdy * cdy >= (CARD.radius * CARD.radius) as isize {
+                                    return CARD.fill;
                                 }
                             }
 
@@ -1059,7 +1090,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                                     acy.saturating_sub(12),
                                     1,
                                     &glyph,
-                                    0xFFFFFFFF,
+                                    THEME.ink_on_dark,
                                     avatar_color(tr.peer()),
                                 ) {
                                     return c;
@@ -1075,8 +1106,8 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                                 card_top + 22,
                                 1,
                                 tr.peer(),
-                                TEXT_PRIMARY,
-                                SURFACE_DARK,
+                                THEME.on_surface,
+                                THEME.surface_container,
                             ) {
                                 return c;
                             }
@@ -1102,8 +1133,8 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                                 card_top + 56,
                                 1,
                                 &snippet[..slen],
-                                TEXT_MUTED,
-                                SURFACE_DARK,
+                                THEME.on_surface_variant,
+                                THEME.surface_container,
                             ) {
                                 return c;
                             }
@@ -1132,12 +1163,12 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                                         py0 + 5,
                                         1,
                                         &digit[..dn],
-                                        0xFFFFFFFF,
-                                        ACCENT_SKY,
+                                        THEME.ink_on_dark,
+                                        THEME.primary,
                                     ) {
                                         return c;
                                     }
-                                    return ACCENT_SKY;
+                                    return THEME.primary;
                                 }
                             }
 
@@ -1147,18 +1178,18 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                             let gx = x as isize - dxc as isize;
                             let gy = y as isize - dyc as isize;
                             if gx.abs() <= 6 && gy.abs() <= 6 && (gx - gy).abs() <= 2 {
-                                return ACCENT_SKY;
+                                return THEME.primary;
                             }
 
                             if rx < 2 || ry < 2 {
-                                return BORDER_SUBTLE;
+                                return THEME.border;
                             }
-                            return SURFACE_DARK;
+                            return THEME.surface_container;
                         }
                     }
                 }
             }
-            return BG_DARK;
+            return THEME.surface;
         }
 
         // 3b. Recipient editor band (y 1288..1330)
@@ -1168,59 +1199,59 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                 let fy = RECIPIENT_FIELD.1;
                 let rx = (x - fx).min(fx + RECIPIENT_FIELD.2 - 1 - x);
                 let ry = (y - fy).min(fy + RECIPIENT_FIELD.3 - 1 - y);
-                if rx < 18 && ry < 18 {
-                    let cdx = (18 - rx) as isize;
-                    let cdy = (18 - ry) as isize;
-                    if cdx * cdx + cdy * cdy >= 324 {
-                        return BG_DARK;
+                if rx < R_CARD && ry < R_CARD {
+                    let cdx = (R_CARD - rx) as isize;
+                    let cdy = (R_CARD - ry) as isize;
+                    if cdx * cdx + cdy * cdy >= (R_CARD * R_CARD) as isize {
+                        return THEME.surface;
                     }
                 }
-                if let Some(c) = test_text(x, y, 40, f.recipient.y, 1, b"To:", TEXT_MUTED, SURFACE_DARK) {
+                if let Some(c) = test_text(x, y, 40, f.recipient.y, 1, b"To:", THEME.on_surface_variant, THEME.surface_container) {
                     return c;
                 }
-                if let Some(c) = editor_pixel(x, y, &f.recipient, messages.recip_focused, SURFACE_DARK) {
+                if let Some(c) = editor_pixel(x, y, &f.recipient, messages.recip_focused, THEME.surface_container) {
                     return c;
                 }
 
                 // Character count indicator (e.g. 0/160)
                 let mut count_buf = [0u8; 8];
                 let cn = format_char_count(messages.compose_len, &mut count_buf);
-                if let Some(c) = test_text(x, y, 530, f.recipient.y, 1, &count_buf[..cn], TEXT_MUTED, SURFACE_DARK) {
+                if let Some(c) = test_text(x, y, 530, f.recipient.y, 1, &count_buf[..cn], THEME.on_surface_variant, THEME.surface_container) {
                     return c;
                 }
 
                 if rx < 2 || ry < 2 {
-                    return BORDER_SUBTLE;
+                    return THEME.border;
                 }
-                return SURFACE_DARK;
+                return THEME.surface_container;
             }
-            return BG_DARK;
+            return THEME.surface;
         }
 
         // 4. Compose Input Bar (y 1330..1414)
         if y >= COMPOSE_BAND_Y0 && y < COMPOSE_BAND_Y1 {
             if y == COMPOSE_BAND_Y0 {
-                return BORDER_SUBTLE;
+                return THEME.border;
             }
             if in_rect(COMPOSE_FIELD, x, y) {
                 let fx = COMPOSE_FIELD.0;
                 let fy = COMPOSE_FIELD.1;
                 let rx = (x - fx).min(fx + COMPOSE_FIELD.2 - 1 - x);
                 let ry = (y - fy).min(fy + COMPOSE_FIELD.3 - 1 - y);
-                if rx < 24 && ry < 24 {
-                    let cdx = (24 - rx) as isize;
-                    let cdy = (24 - ry) as isize;
-                    if cdx * cdx + cdy * cdy >= 576 {
-                        return BG_DARK;
+                if rx < R_SHEET && ry < R_SHEET {
+                    let cdx = (R_SHEET - rx) as isize;
+                    let cdy = (R_SHEET - ry) as isize;
+                    if cdx * cdx + cdy * cdy >= (R_SHEET * R_SHEET) as isize {
+                        return THEME.surface;
                     }
                 }
-                if let Some(c) = editor_pixel(x, y, &f.compose, messages.compose_focused, SURFACE_DARK) {
+                if let Some(c) = editor_pixel(x, y, &f.compose, messages.compose_focused, THEME.surface_container) {
                     return c;
                 }
                 if rx < 2 || ry < 2 {
-                    return BORDER_SUBTLE;
+                    return THEME.border;
                 }
-                return SURFACE_DARK;
+                return THEME.surface_container;
             }
 
             // Send control circle
@@ -1229,8 +1260,8 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                 let dy = (y as isize) - SEND_CY as isize;
                 if dx * dx + dy * dy <= (SEND_R * SEND_R) as isize {
                     let live = messages.compose_len > 0;
-                    let bg = if live { ACCENT_SKY } else { DISABLED_FILL };
-                    let ink = if live { 0xFFFFFFFF } else { TEXT_MUTED };
+                    let bg = if live { THEME.primary } else { THEME.surface_container_low };
+                    let ink = if live { THEME.ink_on_dark } else { THEME.on_surface_variant };
                     let rel_x = dx;
                     let rel_y = dy;
                     let is_arrow = (rel_y.abs() <= 10 && rel_x >= -8 + rel_y.abs() && rel_x <= -4 + rel_y.abs())
@@ -1240,9 +1271,9 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                     }
                     return bg;
                 }
-                return BG_DARK;
+                return THEME.surface;
             }
-            return BG_DARK;
+            return THEME.surface;
         }
     } else {
         // ---------------------------------------------------------------------
@@ -1275,14 +1306,14 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
             // says that rather than making a claim about the sender.
             let (bar_bg, bar_border, bar_text) = if flagged_phishing {
                 (
-                    0xFF381010,
-                    0xFFEF4444,
+                    THEME.error_container,
+                    THEME.error,
                     b"Caution: text matches a known scam script" as &[u8],
                 )
             } else if flagged_urgency {
                 (
-                    0xFF2E1F08,
-                    0xFFF59E0B,
+                    THEME.warning_container,
+                    THEME.warning,
                     b"Caution: text matches urgency language" as &[u8],
                 )
             } else {
@@ -1290,7 +1321,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                 // a refusal status and a "no transport" state, and no
                 // handshake, key exchange or peer contact ever happened.
                 // The thread is local and unsent; that is what it can say.
-                (SURFACE_DARK, BORDER_SUBTLE, b"Local thread - not delivered" as &[u8])
+                (THEME.surface_container, THEME.border, b"Local thread - not delivered" as &[u8])
             };
 
             if in_rect(SEARCH_FIELD, x, y) {
@@ -1298,11 +1329,11 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                 let fy = SEARCH_FIELD.1;
                 let rx = (x - fx).min(fx + SEARCH_FIELD.2 - 1 - x);
                 let ry = (y - fy).min(fy + SEARCH_FIELD.3 - 1 - y);
-                if rx < 18 && ry < 18 {
-                    let cdx = (18 - rx) as isize;
-                    let cdy = (18 - ry) as isize;
-                    if cdx * cdx + cdy * cdy >= 324 {
-                        return BG_DARK;
+                if rx < R_CARD && ry < R_CARD {
+                    let cdx = (R_CARD - rx) as isize;
+                    let cdy = (R_CARD - ry) as isize;
+                    if cdx * cdx + cdy * cdy >= (R_CARD * R_CARD) as isize {
+                        return THEME.surface;
                     }
                 }
 
@@ -1329,7 +1360,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                     text_y,
                     1,
                     bar_text,
-                    if show_threat { 0xFFFFFFFF } else { TEXT_MUTED },
+                    if show_threat { THEME.ink_on_dark } else { THEME.on_surface_variant },
                     bar_bg,
                 ) {
                     return c;
@@ -1340,7 +1371,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                 }
                 return bar_bg;
             }
-            return BG_DARK;
+            return THEME.surface;
         }
 
         // Chat Message Bubbles Area (y 168..1280)
@@ -1355,10 +1386,10 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                 let line2 = b"Type a draft below to compose";
                 let l1_w = std::design::font::measure_bold(line1, 1);
                 let l2_w = std::design::font::measure(line2, 1);
-                if let Some(c) = test_text_bold(x, y, (W.saturating_sub(l1_w)) / 2, 676, 1, line1, TEXT_PRIMARY, BG_DARK) {
+                if let Some(c) = test_text_bold(x, y, (W.saturating_sub(l1_w)) / 2, 676, 1, line1, THEME.on_surface, THEME.surface) {
                     return c;
                 }
-                if let Some(c) = test_text(x, y, (W.saturating_sub(l2_w)) / 2, 716, 1, line2, TEXT_MUTED, BG_DARK) {
+                if let Some(c) = test_text(x, y, (W.saturating_sub(l2_w)) / 2, 716, 1, line2, THEME.on_surface_variant, THEME.surface) {
                     return c;
                 }
             } else {
@@ -1378,19 +1409,19 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                     if y >= b_top && y < b_bot {
                         let is_incoming = msgs[i].direction == MessageDirection::Incoming;
                         let (bx0, bx1, fill_color, border_color) = if is_incoming {
-                            (32usize, 520usize, SURFACE_RAISED, BORDER_SUBTLE)
+                            (32usize, 520usize, THEME.surface_container_high, THEME.border)
                         } else {
-                            (200usize, 688usize, 0xFF0E382B, 0xFF10B981)
+                            (200usize, 688usize, THEME.success_container, THEME.success)
                         };
 
                         if x >= bx0 && x < bx1 {
                             let rx = (x - bx0).min(bx1 - 1 - x);
                             let ry = (y - b_top).min(b_bot - 1 - y);
-                            if rx < 16 && ry < 16 {
-                                let cdx = (16 - rx) as isize;
-                                let cdy = (16 - ry) as isize;
-                                if cdx * cdx + cdy * cdy >= 256 {
-                                    return BG_DARK;
+                            if rx < R_SOFT && ry < R_SOFT {
+                                let cdx = (R_SOFT - rx) as isize;
+                                let cdy = (R_SOFT - ry) as isize;
+                                if cdx * cdx + cdy * cdy >= (R_SOFT * R_SOFT) as isize {
+                                    return THEME.surface;
                                 }
                             }
 
@@ -1409,7 +1440,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                                 b_top + 14,
                                 1,
                                 &buf[..n],
-                                TEXT_PRIMARY,
+                                THEME.on_surface,
                                 fill_color,
                             ) {
                                 return c;
@@ -1423,7 +1454,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                                 // received an SMS -- there is no transport
                                 // bound -- so naming one would be a claim
                                 // the app cannot support.
-                                (b"Received (no transport)" as &[u8], TEXT_MUTED)
+                                (b"Received (no transport)" as &[u8], THEME.on_surface_variant)
                             } else {
                                 // WHY every state is named rather than
                                 // colour-coded: "Sent" has to mean the
@@ -1432,14 +1463,14 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                                 // transport behind it has to say so.
                                 match msgs[i].status {
                                     DeliveryStatus::RefusedNoTransport => {
-                                        (b"Refused - No Transport" as &[u8], 0xFFF59E0B)
+                                        (b"Refused - No Transport" as &[u8], THEME.warning)
                                     }
-                                    DeliveryStatus::Sent => (b"Sent" as &[u8], 0xFF10B981),
-                                    DeliveryStatus::Failed => (b"Failed" as &[u8], 0xFFEF4444),
+                                    DeliveryStatus::Sent => (b"Sent" as &[u8], THEME.success),
+                                    DeliveryStatus::Failed => (b"Failed" as &[u8], THEME.error),
                                     DeliveryStatus::LocalOnly => {
-                                        (b"Local only - not sent" as &[u8], TEXT_MUTED)
+                                        (b"Local only - not sent" as &[u8], THEME.on_surface_variant)
                                     }
-                                    DeliveryStatus::Pending => (b"Not sent" as &[u8], TEXT_MUTED),
+                                    DeliveryStatus::Pending => (b"Not sent" as &[u8], THEME.on_surface_variant),
                                 }
                             };
 
@@ -1464,7 +1495,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                     }
                 }
             }
-            return BG_DARK;
+            return THEME.surface;
         }
 
         // Draft Bar: Recipient row (y 1288..1330)
@@ -1474,59 +1505,59 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                 let fy = RECIPIENT_FIELD.1;
                 let rx = (x - fx).min(fx + RECIPIENT_FIELD.2 - 1 - x);
                 let ry = (y - fy).min(fy + RECIPIENT_FIELD.3 - 1 - y);
-                if rx < 18 && ry < 18 {
-                    let cdx = (18 - rx) as isize;
-                    let cdy = (18 - ry) as isize;
-                    if cdx * cdx + cdy * cdy >= 324 {
-                        return BG_DARK;
+                if rx < R_CARD && ry < R_CARD {
+                    let cdx = (R_CARD - rx) as isize;
+                    let cdy = (R_CARD - ry) as isize;
+                    if cdx * cdx + cdy * cdy >= (R_CARD * R_CARD) as isize {
+                        return THEME.surface;
                     }
                 }
-                if let Some(c) = test_text(x, y, 40, f.recipient.y, 1, b"To:", TEXT_MUTED, SURFACE_DARK) {
+                if let Some(c) = test_text(x, y, 40, f.recipient.y, 1, b"To:", THEME.on_surface_variant, THEME.surface_container) {
                     return c;
                 }
-                if let Some(c) = editor_pixel(x, y, &f.recipient, messages.recip_focused, SURFACE_DARK) {
+                if let Some(c) = editor_pixel(x, y, &f.recipient, messages.recip_focused, THEME.surface_container) {
                     return c;
                 }
 
                 // Character count indicator (e.g. 0/160)
                 let mut count_buf = [0u8; 8];
                 let cn = format_char_count(messages.compose_len, &mut count_buf);
-                if let Some(c) = test_text(x, y, 530, f.recipient.y, 1, &count_buf[..cn], TEXT_MUTED, SURFACE_DARK) {
+                if let Some(c) = test_text(x, y, 530, f.recipient.y, 1, &count_buf[..cn], THEME.on_surface_variant, THEME.surface_container) {
                     return c;
                 }
 
                 if rx < 2 || ry < 2 {
-                    return BORDER_SUBTLE;
+                    return THEME.border;
                 }
-                return SURFACE_DARK;
+                return THEME.surface_container;
             }
-            return BG_DARK;
+            return THEME.surface;
         }
 
         // Compose input field (y 1330..1414)
         if y >= COMPOSE_BAND_Y0 && y < COMPOSE_BAND_Y1 {
             if y == COMPOSE_BAND_Y0 {
-                return BORDER_SUBTLE;
+                return THEME.border;
             }
             if in_rect(COMPOSE_FIELD, x, y) {
                 let fx = COMPOSE_FIELD.0;
                 let fy = COMPOSE_FIELD.1;
                 let rx = (x - fx).min(fx + COMPOSE_FIELD.2 - 1 - x);
                 let ry = (y - fy).min(fy + COMPOSE_FIELD.3 - 1 - y);
-                if rx < 24 && ry < 24 {
-                    let cdx = (24 - rx) as isize;
-                    let cdy = (24 - ry) as isize;
-                    if cdx * cdx + cdy * cdy >= 576 {
-                        return BG_DARK;
+                if rx < R_SHEET && ry < R_SHEET {
+                    let cdx = (R_SHEET - rx) as isize;
+                    let cdy = (R_SHEET - ry) as isize;
+                    if cdx * cdx + cdy * cdy >= (R_SHEET * R_SHEET) as isize {
+                        return THEME.surface;
                     }
                 }
-                if let Some(c) = editor_pixel(x, y, &f.compose, messages.compose_focused, SURFACE_DARK) {
+                if let Some(c) = editor_pixel(x, y, &f.compose, messages.compose_focused, THEME.surface_container) {
                     return c;
                 }
                 if rx < 2 || ry < 2 {
-                    return BORDER_SUBTLE;
+                    return THEME.border;
                 }
-                return SURFACE_DARK;
+                return THEME.surface_container;
             }
 
             // Send control circle
@@ -1535,8 +1566,8 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                 let dy = (y as isize) - SEND_CY as isize;
                 if dx * dx + dy * dy <= (SEND_R * SEND_R) as isize {
                     let live = messages.compose_len > 0;
-                    let bg = if live { ACCENT_SKY } else { DISABLED_FILL };
-                    let ink = if live { 0xFFFFFFFF } else { TEXT_MUTED };
+                    let bg = if live { THEME.primary } else { THEME.surface_container_low };
+                    let ink = if live { THEME.ink_on_dark } else { THEME.on_surface_variant };
                     let rel_x = dx;
                     let rel_y = dy;
                     let is_arrow = (rel_y.abs() <= 10 && rel_x >= -8 + rel_y.abs() && rel_x <= -4 + rel_y.abs())
@@ -1546,18 +1577,18 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                     }
                     return bg;
                 }
-                return BG_DARK;
+                return THEME.surface;
             }
-            return BG_DARK;
+            return THEME.surface;
         }
     }
 
     // 5. Home Gesture Pill (x: 240..480, y: 1418..1424)
     if y >= 1418 && y < 1424 && x >= HOME_X0 && x < HOME_X1 {
-        return TEXT_MUTED;
+        return THEME.on_surface_variant;
     }
 
-    BG_DARK
+    THEME.surface
 }
 
 /// Formats the character count as `used/limit`.

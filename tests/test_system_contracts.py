@@ -141,8 +141,15 @@ class SystemContractTests(unittest.TestCase):
         contract = (ROOT / "docs/QEMU_PHONE_PLATFORM.md").read_text(encoding="utf-8")
         studio = (ROOT / "emulator/server.py").read_text(encoding="utf-8")
         self.assertIn("127.0.0.1:5901", contract)
-        self.assertIn('"-vnc", "127.0.0.1:1"', studio)
-        self.assertIn("127.0.0.1:5901", studio)
+        # WHY the shape changed: the VNC display is configurable (a taken
+        # display would otherwise make QEMU exit at launch), so the source no
+        # longer contains a typed-in display. What is pinned instead is the
+        # behaviour: display 1 is the default (127.0.0.1:5901), the port is
+        # derived from the display, and the listener stays on loopback.
+        self.assertIn("DEFAULT_VNC_DISPLAY = 1", studio)
+        self.assertIn("5900 + display", studio)
+        self.assertIn('"-vnc", f"127.0.0.1:{vnc_display}"', studio)
+        self.assertNotIn('"-vnc", "127.0.0.1:1"', studio)
 
     def test_build_cli_exposes_canonical_demo(self):
         cli = (ROOT / "tools/interos.py").read_text(encoding="utf-8")

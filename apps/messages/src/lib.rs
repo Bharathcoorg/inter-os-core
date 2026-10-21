@@ -4,6 +4,9 @@
 
 extern crate interos_std;
 
+/// The app's view of the platform's design system.
+pub mod theme;
+
 pub mod gsm;
 pub mod store;
 

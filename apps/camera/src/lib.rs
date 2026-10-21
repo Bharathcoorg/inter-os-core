@@ -2,6 +2,9 @@
 
 pub use interos_std as std;
 
+/// The app's view of the platform's design system.
+pub mod theme;
+
 /// Operating mode of the Sovereign Camera.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CameraMode {

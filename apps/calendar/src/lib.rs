@@ -2,6 +2,9 @@
 
 pub use interos_std as std;
 
+/// The app's view of the platform's design system.
+pub mod theme;
+
 pub const EVENT_TITLE_MAX: usize = 32;
 pub const MAX_EVENTS: usize = 12;
 pub const RECORD_BYTES: usize = 2 + 1 + 1 + 1 + 1 + 1 + EVENT_TITLE_MAX + 1;

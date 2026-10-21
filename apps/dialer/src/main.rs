@@ -61,12 +61,30 @@
 #![no_std]
 #![no_main]
 
+use interos_std::design::components;
 use interos_std::design::outline_text;
 
 use core::panic::PanicInfo;
 use interos_std as std;
+use dialer::theme::{type_scale, THEME, Theme};
 use interos_std::design::color;
 use dialer::ModemCallState;
+
+
+/// The platform's corner radii, under the short names the renderer uses.
+///
+/// WHY the aliases exist: the corner test names its radius four times, and a
+/// number that appears four times is a number that can drift from the
+/// platform. The alias resolves to the platform's step, so the drift is the
+/// platform's and not this app's.
+
+/// The platform's card treatment, at the elevation the app's cards sit at.
+///
+/// WHY the app's cards are the platform's cards: a card that invents its own
+/// fill and its own hairline is a card a third-party app cannot match, and
+/// the platform already says what a card looks like.
+const CARD: components::CardStyle =
+    components::card_style(&THEME, components::Elevation::Resting);
 
 const W: usize = 720;
 const H: usize = 1440;
@@ -1594,23 +1612,14 @@ impl DialerApp {
 }
 
 // -----------------------------------------------------------------------------
-// 32-bit ARGB8888 Design Color Tokens (Screen 9 Modern Light Theme)
+// Visual Design Tokens
+//
+// WHY there is no palette here any more: the app used to carry its own
+// colours, which is a second design system inside one app. Every colour now
+// resolves through the platform's theme, so a third-party app that asks the
+// SDK for the same roles draws the same dialer. See `dialer::theme` for the
+// mapping from the old names to the platform's roles.
 // -----------------------------------------------------------------------------
-const BG_DARK: u32 = 0xFFF7F6F2;
-const SURFACE_DARK: u32 = 0xFFFFFFFF;
-const SURFACE_RAISED: u32 = 0xFFEFEEE9;
-const BORDER_SUBTLE: u32 = 0xFFE1E0DB;
-const TEXT_PRIMARY: u32 = 0xFF111214;
-const TEXT_MUTED: u32 = 0xFF777773;
-#[allow(dead_code)]
-const DISABLED_FILL: u32 = 0xFFE6E5E0;
-#[allow(dead_code)]
-const DISABLED_INK: u32 = 0xFFA9A8A3;
-const ACCENT_SKY: u32 = 0xFF2563EB;
-const SUCCESS_EMERALD: u32 = 0xFF2E8B57;
-const DANGER_CRIMSON: u32 = 0xFFDC2626;
-#[allow(dead_code)]
-const WARNING_AMBER: u32 = 0xFFF59E0B;
 
 // -----------------------------------------------------------------------------
 // Canonical InterOS Typography
@@ -1697,7 +1706,7 @@ fn test_text_bold(
 /// app has never received a contact photo or a profile colour. The disc
 /// shows the contact's real initial against a neutral surface.
 fn contact_avatar_color(_name: &[u8]) -> u32 {
-    0xFF334155 // Slate
+    THEME.on_surface // Slate
 }
 
 /// Rows a `scale`-high text run occupies on the shared bitmap face.
@@ -1711,11 +1720,11 @@ const fn run_rows(scale: usize) -> usize {
 /// Header band height: y >= HEADER_H draws the hairline rule, so a header run
 /// has to fit inside 0..HEADER_H.
 const HEADER_H: usize = 94;
-const TITLE_SCALE: usize = 1;
+const TITLE_SCALE: usize = type_scale::CAPTION;
 
 // Segmented navigation tabs (y: 104..156). Symmetrically balanced 200px pills
 // across the 720px viewport (48px margins, 12px gaps).
-const TAB_SCALE: usize = 1;
+const TAB_SCALE: usize = type_scale::CAPTION;
 const TAB_BAND_Y0: usize = 104;
 const TAB_BAND_H: usize = 52;
 const TAB_W: usize = 200;
@@ -1725,7 +1734,6 @@ const TAB2_X0: usize = 260;
 const TAB2_X1: usize = TAB2_X0 + TAB_W; // 460
 const TAB3_X0: usize = 472;
 const TAB3_X1: usize = TAB3_X0 + TAB_W; // 672
-const TAB_ACTIVE_FILL: u32 = 0xFF111214;
 const TAB_LABELS: [&[u8]; 3] = [b"Dial", b"Recents", b"Contacts"];
 
 // Dialed-number display card.
@@ -1734,7 +1742,7 @@ const DISPLAY_X1: usize = 696;
 const DISPLAY_Y0: usize = 170;
 const DISPLAY_Y1: usize = 380;
 const DISPLAY_W: usize = DISPLAY_X1 - DISPLAY_X0;
-const PLACEHOLDER_SCALE: usize = 2;
+const PLACEHOLDER_SCALE: usize = type_scale::BODY;
 const PLACEHOLDER_Y0: usize = 250;
 /// Real call-outcome caption under the dialed number. A scale-1 run owns
 /// run_rows(1) = 24 rows, so 340..364 clears the 96-row scale-4 digit box at
@@ -1747,16 +1755,15 @@ const BACKSPACE_CY: usize = 1065;
 const BACKSPACE_R: i32 = 42;
 
 // Keypad layout metrics: scale 2 digit, scale 1 sublabel, 48px radius circular discs.
-const KEY_DIGIT_SCALE: usize = 2;
-const KEY_SUB_SCALE: usize = 1;
+const KEY_DIGIT_SCALE: usize = type_scale::BODY;
+const KEY_SUB_SCALE: usize = type_scale::CAPTION;
 const KEY_RADIUS: usize = 48;
 
 // SOS emergency disc (radius 42px with scale 1 bold vector text comfortably centered inside).
 const SOS_CX: usize = 138;
 const SOS_CY: usize = 1065;
 const SOS_R: i32 = 42;
-const SOS_SCALE: usize = 1;
-const SOS_FILL: u32 = 0xFF2A1518;
+const SOS_SCALE: usize = type_scale::CAPTION;
 
 // Central call control.
 const CALL_CX: usize = 360;
@@ -1789,7 +1796,7 @@ const DOCK_ITEM_W: usize = 140;
 const DOCK_ITEM_X0: [usize; 4] = [48, 208, 368, 528];
 const DOCK_LABELS: [&[u8]; 4] = [b"Favorites", b"Recents", b"Keypad", b"Contacts"];
 const DOCK_LABEL_Y0: usize = 1340;
-const DOCK_LABEL_SCALE: usize = 1;
+const DOCK_LABEL_SCALE: usize = type_scale::CAPTION;
 /// Icon band inside the dock plate: a scale-1 label below, a 36 px glyph above.
 const DOCK_ICON_Y0: usize = 1290;
 const DOCK_ICON_H: usize = 36;
@@ -1913,11 +1920,11 @@ fn json_present_true(json: &[u8]) -> bool {
 /// Header band: back control, title, real signal bars, real battery.
 fn header_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     if y >= HEADER_H {
-        return BORDER_SUBTLE;
+        return THEME.border;
     }
 
     // Standardized back button squircle (24..72, 24..72)
-    if let Some(c) = std::design::back_button::pixel(x, y, TEXT_PRIMARY, BORDER_SUBTLE, SURFACE_RAISED) {
+    if let Some(c) = std::design::back_button::pixel(x, y, THEME.on_surface, THEME.border, THEME.surface_container_high) {
         return c;
     }
 
@@ -1928,7 +1935,7 @@ fn header_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     let title_rows = run_rows(TITLE_SCALE);
     let title_y0 = (HEADER_H - title_rows) / 2;
     if y >= title_y0 && y < title_y0 + title_rows {
-        if let Some(c) = test_text_bold(x, y, 120, title_y0, TITLE_SCALE, b"Phone", TEXT_PRIMARY, SURFACE_DARK) {
+        if let Some(c) = test_text_bold(x, y, 120, title_y0, TITLE_SCALE, b"Phone", THEME.on_surface, THEME.surface_container) {
             return c;
         }
     }
@@ -1944,12 +1951,12 @@ fn header_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         let bar_min_y = 62 - (bar_idx + 1) * 5;
         if bar_x < 9 && y >= bar_min_y {
             return if (bar_idx as u8) < dialer.signal_bars {
-                ACCENT_SKY
+                THEME.primary
             } else {
-                BORDER_SUBTLE
+                THEME.border
             };
         }
-        return SURFACE_DARK;
+        return THEME.surface_container;
     }
 
     // Battery indicator (x: 678..706, y: 44..58)
@@ -1968,23 +1975,23 @@ fn header_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
             let fill_w = inner_w * pct / 100;
             // Outline.
             if x == 678 || x == 702 || y == 44 || y == 57 || (x >= 703 && y >= 48 && y < 54) {
-                return TEXT_MUTED;
+                return THEME.on_surface_variant;
             }
             // Real fill from the reported state of charge.
             if x >= inner_x0 && x < inner_x0 + fill_w && y >= 46 && y < 56 {
-                return TEXT_PRIMARY;
+                return THEME.on_surface;
             }
         }
-        return SURFACE_DARK;
+        return THEME.surface_container;
     }
 
-    SURFACE_DARK
+    THEME.surface_container
 }
 
 /// Segmented tabs. All three sections exist, so all three are live.
 fn tabs_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     if !(TAB_BAND_Y0..TAB_BAND_Y0 + TAB_BAND_H).contains(&y) {
-        return BG_DARK;
+        return THEME.surface;
     }
     let label_y0 = TAB_BAND_Y0 + (TAB_BAND_H.saturating_sub(run_rows(TAB_SCALE))) / 2;
     let ranges = [(TAB1_X0, TAB1_X1), (TAB2_X0, TAB2_X1), (TAB3_X0, TAB3_X1)];
@@ -1999,9 +2006,12 @@ fn tabs_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
             DialerSection::Contacts => i == 2,
         };
         let (fill, border, ink) = if active {
-            (TAB_ACTIVE_FILL, None, 0xFFFFFFFF)
+            // The platform's segmented-control grammar: the selected segment
+            // is filled with the accent and its label is the ink on the
+            // accent.
+            (THEME.primary, None, THEME.on_primary)
         } else {
-            (SURFACE_RAISED, Some(BORDER_SUBTLE), TEXT_MUTED)
+            (THEME.surface_container_high, Some(THEME.border), THEME.on_surface_variant)
         };
         // WHY a pill and not the old square fill: the design draws segmented
         // tabs as capsules. The text is only asked inside the pill so a glyph
@@ -2021,14 +2031,14 @@ fn tabs_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         }
         return fill;
     }
-    BG_DARK
+    THEME.surface
 }
 
 /// Dialed-number card: the number, the placeholder, the backspace disc and the
 /// real outcome caption.
 fn display_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     if !(DISPLAY_Y0..DISPLAY_Y1).contains(&y) || x < DISPLAY_X0 || x >= DISPLAY_X1 {
-        return BG_DARK;
+        return THEME.surface;
     }
 
     let card_rect = std::design::primitives::Rect::new(
@@ -2041,13 +2051,13 @@ fn display_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         x,
         y,
         card_rect,
-        20,
-        SURFACE_DARK,
-        Some(BORDER_SUBTLE),
+        CARD.radius,
+        CARD.fill,
+        CARD.border,
         1,
     ) {
         Some(c) => c,
-        None => return BG_DARK,
+        None => return THEME.surface,
     };
 
     if dialer.active_len > 0 {
@@ -2062,7 +2072,7 @@ fn display_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
                 if n > 0 {
                     let w = std::design::font::measure(&buf[..n], 1);
                     let cx = DISPLAY_X0 + (DISPLAY_W.saturating_sub(w)) / 2;
-                    if let Some(c) = test_text(x, y, cx, 190, 1, &buf[..n], ACCENT_SKY, SURFACE_DARK) {
+                    if let Some(c) = test_text(x, y, cx, 190, 1, &buf[..n], THEME.primary, THEME.surface_container) {
                         return c;
                     }
                 }
@@ -2076,7 +2086,7 @@ fn display_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         let n = std::design::font::ellipsize(digits, scale, DISPLAY_W - 48, &mut buf);
         let total_w = std::design::font::measure(&buf[..n], scale);
         let x0 = DISPLAY_X0 + (DISPLAY_W.saturating_sub(total_w)) / 2;
-        if let Some(c) = test_text(x, y, x0, y0, scale, &buf[..n], TEXT_PRIMARY, SURFACE_DARK) {
+        if let Some(c) = test_text(x, y, x0, y0, scale, &buf[..n], THEME.on_surface, THEME.surface_container) {
             return c;
         }
 
@@ -2090,14 +2100,14 @@ fn display_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
                 x,
                 y,
                 std::design::primitives::Rect::new(p1_x0, p1_y0, p1_w, p1_h),
-                0xFF27272A,
-                Some(BORDER_SUBTLE),
+                THEME.surface_container,
+                Some(THEME.border),
             ) {
                 let label = b"+ Add Contact";
                 let lw = std::design::font::measure(label, 1);
                 let lx = p1_x0 + (p1_w.saturating_sub(lw)) / 2;
                 let ly = p1_y0 + (p1_h.saturating_sub(run_rows(1))) / 2;
-                if let Some(c) = test_text(x, y, lx, ly, 1, label, ACCENT_SKY, fill) {
+                if let Some(c) = test_text(x, y, lx, ly, 1, label, THEME.primary, fill) {
                     return c;
                 }
                 return fill;
@@ -2113,14 +2123,14 @@ fn display_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
                 x,
                 y,
                 std::design::primitives::Rect::new(p2_x0, p2_y0, p2_w, p2_h),
-                0xFF27272A,
-                Some(BORDER_SUBTLE),
+                THEME.surface_container,
+                Some(THEME.border),
             ) {
                 let label = b"Send Message";
                 let lw = std::design::font::measure(label, 1);
                 let lx = p2_x0 + (p2_w.saturating_sub(lw)) / 2;
                 let ly = p2_y0 + (p2_h.saturating_sub(run_rows(1))) / 2;
-                if let Some(c) = test_text(x, y, lx, ly, 1, label, SUCCESS_EMERALD, fill) {
+                if let Some(c) = test_text(x, y, lx, ly, 1, label, THEME.success, fill) {
                     return c;
                 }
                 return fill;
@@ -2140,8 +2150,8 @@ fn display_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
             PLACEHOLDER_Y0,
             PLACEHOLDER_SCALE,
             b"Enter a phone number",
-            TEXT_MUTED,
-            SURFACE_DARK,
+            THEME.on_surface_variant,
+            THEME.surface_container,
         ) {
             return c;
         }
@@ -2156,10 +2166,10 @@ fn display_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
             let w = std::design::font::measure(&buf[..n], 1);
             let cx = DISPLAY_X0 + (DISPLAY_W.saturating_sub(w)) / 2;
             let ink = match dialer.outcome {
-                CallOutcome::Refused | CallOutcome::EmergencyRefused => DANGER_CRIMSON,
-                _ => TEXT_MUTED,
+                CallOutcome::Refused | CallOutcome::EmergencyRefused => THEME.error,
+                _ => THEME.on_surface_variant,
             };
-            if let Some(c) = test_text(x, y, cx, OUTCOME_Y0, 1, &buf[..n], ink, SURFACE_DARK) {
+            if let Some(c) = test_text(x, y, cx, OUTCOME_Y0, 1, &buf[..n], ink, THEME.surface_container) {
                 return c;
             }
         }
@@ -2190,20 +2200,20 @@ fn keypad_pixel_at(x: usize, y: usize, editing: Option<&DialerApp>) -> u32 {
                     let r = KEY_RADIUS as i32;
 
                     if dist_sq > r * r {
-                        return BG_DARK;
+                        return THEME.surface;
                     }
 
                     // Disc border
                     if dist_sq >= (r - 2) * (r - 2) {
-                        return BORDER_SUBTLE;
+                        return THEME.border;
                     }
 
                     // Bottom lip elevation depth
                     if dy >= r - 4 && dist_sq < (r - 2) * (r - 2) {
-                        return 0xFFF0EFEB;
+                        return THEME.on_surface;
                     }
 
-                    let disc_fill = SURFACE_DARK;
+                    let disc_fill = THEME.surface_container;
 
                     let editing_name = matches!(
                         editing,
@@ -2264,7 +2274,7 @@ fn keypad_pixel_at(x: usize, y: usize, editing: Option<&DialerApp>) -> u32 {
                             digit_y0,
                             KEY_DIGIT_SCALE,
                             digit_bytes,
-                            TEXT_PRIMARY,
+                            THEME.on_surface,
                             disc_fill,
                         ) {
                             return c;
@@ -2282,7 +2292,7 @@ fn keypad_pixel_at(x: usize, y: usize, editing: Option<&DialerApp>) -> u32 {
                             sub_y0,
                             KEY_SUB_SCALE,
                             sub_buf,
-                            TEXT_MUTED,
+                            THEME.on_surface_variant,
                             disc_fill,
                         ) {
                             return c;
@@ -2294,7 +2304,7 @@ fn keypad_pixel_at(x: usize, y: usize, editing: Option<&DialerApp>) -> u32 {
             }
         }
     }
-    BG_DARK
+    THEME.surface
 }
 
 /// The keypad section's pad: a number pad, unchanged.
@@ -2313,7 +2323,7 @@ fn recents_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         // Headline: a scale-2 run owns 48 rows (620..668).
         let head: &[u8] = b"No calls yet";
         let head_x = DISPLAY_X0 + std::design::font::center_x(head, 1, DISPLAY_W);
-        if let Some(c) = test_text_bold(x, y, head_x, 620, 1, head, TEXT_PRIMARY, BG_DARK) {
+        if let Some(c) = test_text_bold(x, y, head_x, 620, 1, head, THEME.on_surface, THEME.surface) {
             return c;
         }
         // Body: a scale-1 run owns 24 rows (680..704).
@@ -2323,11 +2333,11 @@ fn recents_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         if n > 0 {
             let w = std::design::font::measure(&buf[..n], 1);
             let bx = DISPLAY_X0 + (DISPLAY_W.saturating_sub(w)) / 2;
-            if let Some(c) = test_text(x, y, bx, 680, 1, &buf[..n], TEXT_MUTED, BG_DARK) {
+            if let Some(c) = test_text(x, y, bx, 680, 1, &buf[..n], THEME.on_surface_variant, THEME.surface) {
                 return c;
             }
         }
-        return BG_DARK;
+        return THEME.surface;
     }
 
     for i in 0..dialer.recents_len {
@@ -2349,8 +2359,8 @@ fn recents_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
             row_y + 14,
             1,
             &nbuf[..nn],
-            TEXT_PRIMARY,
-            SURFACE_DARK,
+            THEME.on_surface,
+            THEME.surface_container,
         ) {
             return c;
         }
@@ -2362,21 +2372,21 @@ fn recents_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
             (false, false) => b"Refused by telephony",
         };
         let ox = DISPLAY_X0 + 24;
-        if let Some(c) = test_text(x, y, ox, row_y + 46, 1, out, TEXT_MUTED, SURFACE_DARK) {
+        if let Some(c) = test_text(x, y, ox, row_y + 46, 1, out, THEME.on_surface_variant, THEME.surface_container) {
             return c;
         }
         // Row plate and divider.
         if x >= DISPLAY_X0 && x < DISPLAY_X1 {
             if y == row_y + RECENTS_ROW_H - 1 {
-                return BORDER_SUBTLE;
+                return THEME.border;
             }
             if rec.emergency {
-                return 0xFFF3E9EC;
+                return THEME.on_surface;
             }
-            return SURFACE_DARK;
+            return THEME.surface_container;
         }
     }
-    BG_DARK
+    THEME.surface
 }
 
 // -----------------------------------------------------------------------------
@@ -2390,7 +2400,7 @@ fn recents_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
 /// top-to-bottom walk of the same rows.
 fn contacts_card_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     if !(CARD_Y0..CARD_Y1).contains(&y) || x < DISPLAY_X0 || x >= DISPLAY_X1 {
-        return BG_DARK;
+        return THEME.surface;
     }
 
     // Editor: two labelled fields. WHY the caret is a 2px accent bar and not a
@@ -2424,15 +2434,15 @@ fn contacts_card_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
                 y,
                 std::design::primitives::Rect::new(DISPLAY_X0, fy, DISPLAY_W, 96),
                 18,
-                color::SURFACE,
+                THEME.surface_container,
                 Some(if focused {
-                    color::ACCENT
+                    THEME.primary
                 } else {
-                    color::BORDER
+                    THEME.border
                 }),
                 1,
             ) else {
-                return BG_DARK;
+                return THEME.surface;
             };
             let mut lbuf = [0u8; 16];
             let ln = std::design::font::ellipsize(label, 1, DISPLAY_W - 48, &mut lbuf);
@@ -2444,7 +2454,7 @@ fn contacts_card_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
                     fy + 8,
                     1,
                     &lbuf[..ln],
-                    color::TEXT_MUTED,
+                    THEME.on_surface_variant,
                     fill,
                 ) {
                     return c;
@@ -2461,7 +2471,7 @@ fn contacts_card_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
                     vy,
                     1,
                     &vbuf[..vn],
-                    color::TEXT,
+                    THEME.on_surface,
                     fill,
                 ) {
                     return c;
@@ -2470,19 +2480,19 @@ fn contacts_card_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
             if focused {
                 let cx = DISPLAY_X0 + 24 + std::design::font::measure(&vbuf[..vn], 2);
                 if x >= cx && x < cx + 2 && (vy..vy + run_rows(2)).contains(&y) {
-                    return color::ACCENT;
+                    return THEME.primary;
                 }
             }
             return fill;
         }
-        return BG_DARK;
+        return THEME.surface;
     }
 
     // Browse: the selected contact, or the honest empty state.
     let Some(sel) = dialer.contact_sel else {
         let head: &[u8] = b"No contact selected";
         let hx = DISPLAY_X0 + std::design::font::center_x(head, 2, DISPLAY_W);
-        if let Some(c) = test_text(x, y, hx, 206, 2, head, TEXT_PRIMARY, BG_DARK) {
+        if let Some(c) = test_text(x, y, hx, 206, 2, head, THEME.on_surface, THEME.surface) {
             return c;
         }
         // WHY this says what to press: an empty card is a dead end unless it
@@ -2493,11 +2503,11 @@ fn contacts_card_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         if n > 0 {
             let w = std::design::font::measure(&buf[..n], 1);
             let bx = DISPLAY_X0 + (DISPLAY_W.saturating_sub(w)) / 2;
-            if let Some(c) = test_text(x, y, bx, 286, 1, &buf[..n], TEXT_MUTED, BG_DARK) {
+            if let Some(c) = test_text(x, y, bx, 286, 1, &buf[..n], THEME.on_surface_variant, THEME.surface) {
                 return c;
             }
         }
-        return BG_DARK;
+        return THEME.surface;
     };
 
     let rec = if sel >= ContactEditor::UNSAVED_BASE {
@@ -2508,7 +2518,7 @@ fn contacts_card_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         dialer.contacts.record(sel)
     };
     let Some(rec) = rec else {
-        return BG_DARK;
+        return THEME.surface;
     };
 
     // Star state, so the card agrees with the row.
@@ -2516,7 +2526,7 @@ fn contacts_card_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         let label: &[u8] = b"Starred";
         let lw = std::design::font::measure(label, 1);
         let lx = DISPLAY_X1 - 24 - lw;
-        if let Some(c) = test_text(x, y, lx, 196, 1, label, color::WARNING, BG_DARK) {
+        if let Some(c) = test_text(x, y, lx, 196, 1, label, THEME.warning, THEME.surface) {
             return c;
         }
     }
@@ -2525,7 +2535,7 @@ fn contacts_card_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     let nn = std::design::font::ellipsize(rec.name_bytes(), 2, DISPLAY_W - 48, &mut nbuf);
     let nw = std::design::font::measure(&nbuf[..nn], 2);
     let nx = DISPLAY_X0 + (DISPLAY_W.saturating_sub(nw)) / 2;
-    if let Some(c) = test_text(x, y, nx, 196, 2, &nbuf[..nn], TEXT_PRIMARY, BG_DARK) {
+    if let Some(c) = test_text(x, y, nx, 196, 2, &nbuf[..nn], THEME.on_surface, THEME.surface) {
         return c;
     }
 
@@ -2533,16 +2543,16 @@ fn contacts_card_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     let un = std::design::font::ellipsize(rec.number_bytes(), 2, DISPLAY_W - 48, &mut ubuf);
     let uw = std::design::font::measure(&ubuf[..un], 2);
     let ux = DISPLAY_X0 + (DISPLAY_W.saturating_sub(uw)) / 2;
-    if let Some(c) = test_text(x, y, ux, 252, 2, &ubuf[..un], TEXT_MUTED, BG_DARK) {
+    if let Some(c) = test_text(x, y, ux, 252, 2, &ubuf[..un], THEME.on_surface_variant, THEME.surface) {
         return c;
     }
 
     // The three row actions, as labelled chips. WHY chips and not a menu: the app
     // has no menu surface, and a chip is a tap target the user can see.
     let chips: [(&[u8], u32, u32); 3] = [
-        (b"CALL", color::SUCCESS, color::SURFACE),
-        (b"EDIT", color::ACCENT, color::SURFACE),
-        (b"DELETE", color::DANGER, color::SURFACE),
+        (b"CALL", THEME.success, THEME.surface_container),
+        (b"EDIT", THEME.primary, THEME.surface_container),
+        (b"DELETE", THEME.error, THEME.surface_container),
     ];
     let chip_gap = 12usize;
     let chip_w = (DISPLAY_W - 2 * chip_gap) / 3;
@@ -2573,7 +2583,7 @@ fn contacts_card_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         }
     }
 
-    BG_DARK
+    THEME.surface
 }
 
 /// The contact list rows, then the honest capacity/durability notice.
@@ -2621,7 +2631,7 @@ fn contacts_list_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         let plate = if selected {
             color::SURFACE_RAISED
         } else {
-            color::SURFACE
+            THEME.surface_container
         };
         if std::design::primitives::draw_rounded_rect(
             x,
@@ -2629,12 +2639,12 @@ fn contacts_list_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
             std::design::primitives::Rect::new(DISPLAY_X0, cursor, DISPLAY_W, CONTACT_ROW_H),
             12,
             plate,
-            Some(color::BORDER),
+            Some(THEME.border),
             1,
         )
         .is_none()
         {
-            return BG_DARK;
+            return THEME.surface;
         }
         // Vibrant avatar disc with the contact's initial.
         let av_cx = DISPLAY_X0 + 30;
@@ -2645,13 +2655,13 @@ fn contacts_list_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         if d2 <= 20 * 20 {
             let av_bg = contact_avatar_color(rec.name_bytes());
             if d2 >= 18 * 18 {
-                return std::design::font::blend(av_bg, 0xFFFFFFFF, 48);
+                return std::design::font::blend(av_bg, THEME.ink_on_dark, 48);
             }
             let initial = [rec.initial()];
             let iw = std::design::font::measure(&initial, 1);
             let ix = (av_cx as i32 - iw as i32 / 2).max(0) as usize;
             let iy = (av_cy as i32 - run_rows(1) as i32 / 2).max(0) as usize;
-            if let Some(t) = test_text_bold(x, y, ix, iy, 1, &initial, 0xFFFFFFFF, av_bg) {
+            if let Some(t) = test_text_bold(x, y, ix, iy, 1, &initial, THEME.ink_on_dark, av_bg) {
                 return t;
             }
             return av_bg;
@@ -2661,7 +2671,7 @@ fn contacts_list_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
             let nn = std::design::font::ellipsize(rec.name_bytes(), 1, DISPLAY_W - 150, &mut nbuf);
             if nn > 0 {
                 if let Some(t) =
-                    test_text(x, y, tx, cursor + 8, 1, &nbuf[..nn], color::TEXT, plate)
+                    test_text(x, y, tx, cursor + 8, 1, &nbuf[..nn], THEME.on_surface, plate)
                 {
                     return t;
                 }
@@ -2676,7 +2686,7 @@ fn contacts_list_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
                     cursor + 36,
                     1,
                     &ubuf[..un],
-                    color::TEXT_MUTED,
+                    THEME.on_surface_variant,
                     plate,
                 ) {
                     return t;
@@ -2689,9 +2699,9 @@ fn contacts_list_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
             let sdy = y as i32 - (cursor + CONTACT_ROW_H / 2) as i32;
             if sdx * sdx + sdy * sdy <= STAR_R * STAR_R {
                 return if rec.is_favourite() {
-                    color::WARNING
+                    THEME.warning
                 } else {
-                    color::BORDER
+                    THEME.border
                 };
             }
             return plate;
@@ -2702,7 +2712,7 @@ fn contacts_list_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     if (NOTICE_Y0..NOTICE_Y1).contains(&y) {
         return contacts_notice_pixel(x, y, dialer);
     }
-    BG_DARK
+    THEME.surface
 }
 
 /// The honest capacity / durability notice under the contact list.
@@ -2712,7 +2722,7 @@ fn contacts_list_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
 /// row in it is session-only. All three have to be visible without a log reader.
 fn contacts_notice_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     if !(NOTICE_Y0..NOTICE_Y1).contains(&y) || x < DISPLAY_X0 || x >= DISPLAY_X1 {
-        return BG_DARK;
+        return THEME.surface;
     }
     let used = dialer.contacts.len();
     let unsaved = dialer.contacts.unsaved_len();
@@ -2721,9 +2731,9 @@ fn contacts_notice_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     // The first line is the durability statement, which is the one that matters.
     let durable = state == ContactStoreState::Written || state == ContactStoreState::Loaded;
     let ink = if durable {
-        color::TEXT_MUTED
+        THEME.on_surface_variant
     } else {
-        color::WARNING
+        THEME.warning
     };
     if let Some(c) = test_text(
         x,
@@ -2733,7 +2743,7 @@ fn contacts_notice_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         1,
         state.as_str().as_bytes(),
         ink,
-        BG_DARK,
+        THEME.surface,
     ) {
         return c;
     }
@@ -2802,13 +2812,13 @@ fn contacts_notice_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
             NOTICE_Y0 + 34,
             1,
             &buf[..tn],
-            color::TEXT_MUTED,
-            BG_DARK,
+            THEME.on_surface_variant,
+            THEME.surface,
         ) {
             return c;
         }
     }
-    BG_DARK
+    THEME.surface
 }
 
 /// The SOS / emergency disc.
@@ -2826,7 +2836,7 @@ fn emergency_dial_pixel(x: usize, y: usize, dialer: &DialerApp) -> Option<u32> {
         return None;
     }
     if s_d2 >= (SOS_R - 2) * (SOS_R - 2) {
-        return Some(0xFFE11D48);
+        return Some(THEME.error);
     }
     // "SOS" is scale 1 bold vector outline, comfortably centered in the disc with clean margins.
     let sos_rows = run_rows(SOS_SCALE);
@@ -2834,19 +2844,19 @@ fn emergency_dial_pixel(x: usize, y: usize, dialer: &DialerApp) -> Option<u32> {
     let sos_x0 = SOS_CX.saturating_sub(sos_w / 2);
     let sos_y0 = SOS_CY.saturating_sub(sos_rows / 2);
     if y >= sos_y0 && y < sos_y0 + sos_rows {
-        if let Some(c) = test_text_bold(x, y, sos_x0, sos_y0, SOS_SCALE, b"SOS", 0xFFF43F5E, SOS_FILL) {
+        if let Some(c) = test_text_bold(x, y, sos_x0, sos_y0, SOS_SCALE, b"SOS", THEME.emergency, THEME.error_container) {
             return Some(c);
         }
     }
     let _ = dialer;
-    Some(SOS_FILL)
+    Some(THEME.error_container)
 }
 
 /// The contacts action row: the emergency disc is unchanged, and the other two
 /// discs carry the section's primary and secondary actions.
 fn contacts_action_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     if !(ACTION_Y0..ACTION_Y1).contains(&y) {
-        return BG_DARK;
+        return THEME.surface;
     }
     if let Some(c) = emergency_dial_pixel(x, y, dialer) {
         return c;
@@ -2856,18 +2866,18 @@ fn contacts_action_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     let has_sel = dialer.contact_sel.is_some();
     // Centre disc: SAVE while editing, CALL with a selection, ADD otherwise.
     let centre: (Option<u32>, &[u8]) = if editing {
-        (Some(color::SUCCESS), b"SAVE")
+        (Some(THEME.success), b"SAVE")
     } else if has_sel {
-        (Some(color::SUCCESS), b"CALL")
+        (Some(THEME.success), b"CALL")
     } else {
-        (Some(color::ACCENT), b"ADD")
+        (Some(THEME.primary), b"ADD")
     };
     // Right disc: DELETE while editing an existing contact, CANCEL while editing
     // a new one, EDIT with a selection, and the favourites filter otherwise.
     let right: (Option<u32>, &[u8]) = if editing {
         let exists = matches!(dialer.contact_edit.and_then(|e| e.target), Some(_));
         if exists {
-            (Some(color::DANGER), b"DELETE")
+            (Some(THEME.error), b"DELETE")
         } else {
             (Some(color::SURFACE_RAISED), b"CANCEL")
         }
@@ -2891,7 +2901,7 @@ fn contacts_action_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         }
         let fill = fill.unwrap_or(color::SURFACE_RAISED);
         if dx * dx + dy * dy >= (r - 3) * (r - 3) {
-            return color::BORDER;
+            return THEME.border;
         }
         let mut lbuf = [0u8; 16];
         let ln = std::design::font::ellipsize(label, 1, 2 * r as usize - 12, &mut lbuf);
@@ -2900,9 +2910,9 @@ fn contacts_action_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
             let lx = (cx as i32 - lw as i32 / 2).max(0) as usize;
             let ly = C_ACTION_Y - run_rows(1) / 2;
             let text_color = if fill == color::SURFACE_RAISED {
-                color::TEXT
+                THEME.on_surface
             } else {
-                color::SURFACE
+                THEME.surface_container
             };
             if let Some(c) = test_text(x, y, lx, ly, 1, &lbuf[..ln], text_color, fill) {
                 return c;
@@ -2910,13 +2920,13 @@ fn contacts_action_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         }
         return fill;
     }
-    BG_DARK
+    THEME.surface
 }
 
 /// Emergency / call / contacts row. Only drawn in the Keypad section.
 fn action_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     if !(ACTION_Y0..ACTION_Y1).contains(&y) {
-        return BG_DARK;
+        return THEME.surface;
     }
     if let Some(c) = emergency_dial_pixel(x, y, dialer) {
         return c;
@@ -2930,13 +2940,28 @@ fn action_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         let in_call = dialer.state != CallState::Idle;
         let can_call = in_call || dialer.active_len > 0;
 
+        // WHY the ring is derived and not a colour of its own: the ring is
+        // the key's own fill, darkened, so it follows the theme instead of
+        // being a second red and a second green the platform does not name.
         let (bg_color, border_color, glyph) = if in_call {
-            (DANGER_CRIMSON, 0xFFB91C1C, 0xFFFFFFFF)
+            (
+                THEME.error,
+                Theme::veil(THEME.error, 20, false),
+                THEME.ink_on_dark,
+            )
         } else if can_call {
-            (SUCCESS_EMERALD, 0xFF15803D, 0xFFFFFFFF)
+            (
+                THEME.success,
+                Theme::veil(THEME.success, 20, false),
+                THEME.ink_on_dark,
+            )
         } else {
             // Fresh soft mint circle with emerald icon when idle
-            (0xFFD1FAE5, 0xFFA7F3D0, 0xFF059669)
+            (
+                THEME.success_container,
+                Theme::veil(THEME.success_container, 20, false),
+                THEME.on_success_container,
+            )
         };
 
         if c_d2 >= (CALL_R - 2) * (CALL_R - 2) {
@@ -2977,7 +3002,7 @@ fn action_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         let b_d2 = b_dx * b_dx + b_dy * b_dy;
         if b_d2 <= BACKSPACE_R * BACKSPACE_R {
             if b_d2 >= (BACKSPACE_R - 2) * (BACKSPACE_R - 2) {
-                return BORDER_SUBTLE;
+                return THEME.border;
             }
             // Crisp vector backspace tag glyph
             let in_tag = if b_dx >= -15 && b_dx <= -4 {
@@ -3000,14 +3025,14 @@ fn action_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
                 let cy = b_dy;
                 let on_x = cx.abs() <= 4 && cy.abs() <= 4 && (cx == cy || cx == -cy || cx == cy + 1 || cx == cy - 1);
                 if on_rim || on_x {
-                    return TEXT_PRIMARY;
+                    return THEME.on_surface;
                 }
             }
-            return SURFACE_DARK;
+            return THEME.surface_container;
         }
     }
 
-    BG_DARK
+    THEME.surface
 }
 
 /// Bottom navigation dock. All four slots are live: Favorites opens the contacts
@@ -3015,11 +3040,11 @@ fn action_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
 /// section.
 fn dock_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     if !(DOCK_Y0..DOCK_Y1).contains(&y) {
-        return BG_DARK;
+        return THEME.surface;
     }
     // Top hairline divider
     if y == DOCK_Y0 {
-        return BORDER_SUBTLE;
+        return THEME.border;
     }
 
     let mut slot = 4usize;
@@ -3030,7 +3055,7 @@ fn dock_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         }
     }
     if slot == 4 {
-        return SURFACE_DARK;
+        return THEME.surface_container;
     }
 
     let active = match (slot, dialer.section) {
@@ -3048,8 +3073,8 @@ fn dock_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     let cx = DOCK_ITEM_X0[slot] + DOCK_ITEM_W / 2;
     let cy = DOCK_ICON_Y0 + DOCK_ICON_H / 2;
 
-    let ink = if active { ACCENT_SKY } else { TEXT_MUTED };
-    let plate = SURFACE_DARK;
+    let ink = if active { THEME.primary } else { THEME.on_surface_variant };
+    let plate = THEME.surface_container;
 
     // Icon band
     if y >= DOCK_ICON_Y0 && y < DOCK_ICON_Y0 + DOCK_ICON_H {
@@ -3085,7 +3110,7 @@ fn dock_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
                     || sdy > 0 && sdx.abs() as i32 <= 12 - sdy.abs();
                 if on && sdx.abs() <= 14 && sdy.abs() <= 13 {
                     return if dialer.contacts.favourites() > 0 {
-                        color::WARNING
+                        THEME.warning
                     } else {
                         ink
                     };
@@ -3126,7 +3151,7 @@ fn dock_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     // Active pill background under icon
     if active {
         let pill_rect = std::design::primitives::Rect::new(cx - 32, cy - 16, 64, 32);
-        if let Some(p_color) = std::design::primitives::draw_pill(x, y, pill_rect, 0xFFDBEAFE, None) {
+        if let Some(p_color) = std::design::primitives::draw_pill(x, y, pill_rect, THEME.primary_container, None) {
             return p_color;
         }
     }
@@ -3164,7 +3189,7 @@ fn get_dialer_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         return match dialer.section {
             DialerSection::Keypad => {
                 let c = keypad_pixel(x, y);
-                if c != BG_DARK {
+                if c != THEME.surface {
                     return c;
                 }
                 action_pixel(x, y, dialer)
@@ -3176,7 +3201,7 @@ fn get_dialer_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
                     // hit test and its sublabels are the same ones the keypad
                     // section uses. Only what a press produces changes.
                     let c = editor_keypad_pixel(x, y, dialer);
-                    if c != BG_DARK {
+                    if c != THEME.surface {
                         return c;
                     }
                     return contacts_action_pixel(x, y, dialer);
@@ -3196,10 +3221,10 @@ fn get_dialer_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
 
     // 6. Home Gesture Pill (x: 260..460, y: 1418..1424)
     if y >= 1418 && y < 1424 && x >= 260 && x < 460 {
-        return TEXT_MUTED;
+        return THEME.on_surface_variant;
     }
 
-    BG_DARK
+    THEME.surface
 }
 
 fn render_dialer_ui(surface: u32, dialer: &DialerApp) {

@@ -29,12 +29,62 @@ PORT = int(os.environ.get("STUDIO_PORT", 4300))
 SERIAL_TCP_PORT = int(os.environ.get("SERIAL_PORT", 4301))
 QMP_PORT = int(os.environ.get("QMP_PORT", 4302))
 MONITOR_PORT = int(os.environ.get("MONITOR_PORT", 44445))
-VNC_PORT = int(os.environ.get("VNC_PORT", 5901))
 WS_PORT = int(os.environ.get("WS_PORT", 6081))
 DIRECTORY = os.path.dirname(os.path.abspath(__file__))
 
+# QEMU's VNC display index. Display N listens on 127.0.0.1:(5900 + N), so the
+# historical display 1 is the endpoint 127.0.0.1:5901.
+#
+# WHY the display is a setting and not a constant: it used to be hard-coded to
+# 1, so anything else holding 127.0.0.1:5901 made QEMU exit at launch while
+# the Studio went on reporting a running device. INTEROS_VNC_DISPLAY moves the
+# display; VNC_PORT is still honoured when it names a display range, and the
+# display index is derived from it so QEMU and the Studio's own RFB client can
+# never disagree about which port the guest is on.
+DEFAULT_VNC_DISPLAY = 1
+
+
+def _resolve_vnc_endpoint():
+    """Return the (display, port) pair QEMU and the Studio must agree on."""
+    display = DEFAULT_VNC_DISPLAY
+    raw_display = os.environ.get("INTEROS_VNC_DISPLAY", "").strip()
+    raw_port = os.environ.get("VNC_PORT", "").strip()
+    if raw_display:
+        try:
+            display = int(raw_display)
+        except ValueError:
+            print(f"[*] Notice: ignoring invalid INTEROS_VNC_DISPLAY={raw_display!r}")
+            display = DEFAULT_VNC_DISPLAY
+    if not 0 <= display <= 99:
+        print(f"[*] Notice: INTEROS_VNC_DISPLAY={display} is out of range; using {DEFAULT_VNC_DISPLAY}.")
+        display = DEFAULT_VNC_DISPLAY
+    if raw_port:
+        try:
+            wanted = int(raw_port)
+        except ValueError:
+            wanted = None
+        if wanted is not None and wanted != 5900 + display:
+            derived = wanted - 5900
+            if not raw_display and 0 <= derived <= 99:
+                display = derived
+            else:
+                print(f"[*] Notice: VNC_PORT={wanted} ignored; QEMU's -vnc takes a display index, "
+                      f"so display {display} (port {5900 + display}) is used.")
+    return display, 5900 + display
+
+
+VNC_DISPLAY, VNC_PORT = _resolve_vnc_endpoint()
+
+# The display and port the QEMU instance this Studio launched is expected on.
+# A launch may move it when the configured display is taken; every consumer
+# (the RFB client, the websockify bridge, the port probe) follows this.
+active_vnc_display = VNC_DISPLAY
+active_vnc_port = VNC_PORT
+
 qemu_subproc = None
 ws_subproc = None
+# The VNC port the studio's own websockify bridge currently points at.
+ws_bridge_port = None
 serial_lines = []
 serial_socket_conn = None
 serial_socket_lock = threading.Lock()
@@ -42,6 +92,415 @@ telemetry_lock = threading.Lock()
 # Bumped on every QEMU (re)launch; readers compare it to detect stale sockets.
 serial_epoch = 0
 launcher_has_booted = False
+
+# The QEMU process this Studio launched, tracked by PID and start time.
+#
+# WHY a PID alone is not enough: PIDs are recycled, so a PID that was QEMU
+# yesterday may be an unrelated process today, and a Studio that remembered
+# only the number would call that "the device". The start time makes the pair
+# a fingerprint: a different process that inherited the PID has a different
+# start time, so it is never mistaken for the guest this Studio launched.
+qemu_process_record = {"pid": None, "start_key": None, "started_at": 0.0}
+qemu_process_lock = threading.Lock()
+
+# The persisted launch record. It names the QEMU process this Studio launched
+# (PID plus the operating system's creation time) so a restarted Studio can
+# re-adopt a guest that outlived it instead of mistaking it for a stranger's
+# process. It is runtime state, not source.
+QEMU_LAUNCH_STATE_FILE = os.path.join(DIRECTORY, "data", "qemu_launch_state.json")
+
+
+class NoTrackedQemu(Exception):
+    """Raised when the Studio has no QEMU process of its own to talk to."""
+
+# -----------------------------------------------------------------------------
+# QEMU process identity and the device's provable state
+# -----------------------------------------------------------------------------
+# The Studio decides whether a device is running from the PROCESS it launched,
+# never from a port alone. A port that answers proves that something holds it,
+# not that the guest this Studio launched is behind it, so a stale port can
+# never make the Studio claim a running device.
+
+
+def _windows_process_start_key(pid):
+    """The Windows process creation time of `pid`, or None if it is gone."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+    except Exception:
+        return None
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    except Exception:
+        return None
+    try:
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.GetProcessTimes.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(wintypes.FILETIME),
+            ctypes.POINTER(wintypes.FILETIME),
+            ctypes.POINTER(wintypes.FILETIME),
+            ctypes.POINTER(wintypes.FILETIME),
+        ]
+        kernel32.GetProcessTimes.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+    except Exception:
+        return None
+    handle = kernel32.OpenProcess(0x1000, False, int(pid))  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return None
+    try:
+        creation = wintypes.FILETIME()
+        exit_time = wintypes.FILETIME()
+        kernel_time = wintypes.FILETIME()
+        user_time = wintypes.FILETIME()
+        ok = kernel32.GetProcessTimes(
+            handle,
+            ctypes.byref(creation),
+            ctypes.byref(exit_time),
+            ctypes.byref(kernel_time),
+            ctypes.byref(user_time),
+        )
+        if not ok:
+            return None
+        return (creation.dwHighDateTime << 32) | creation.dwLowDateTime
+    except Exception:
+        return None
+    finally:
+        try:
+            kernel32.CloseHandle(handle)
+        except Exception:
+            pass
+
+
+def _posix_process_start_key(pid):
+    """The kernel start time of `pid`, or None when it cannot be read."""
+    try:
+        with open(f"/proc/{int(pid)}/stat", "rb") as handle:
+            data = handle.read()
+    except Exception:
+        return None
+    # The comm field is parenthesised and may itself contain spaces, so the
+    # remaining fields are located from the last ')'.
+    close = data.rfind(b")")
+    if close < 0:
+        return None
+    fields = data[close + 2:].split()
+    # fields[0] is the process state (field 3), so starttime (field 22) is 19.
+    if len(fields) < 20:
+        return None
+    try:
+        return int(fields[19])
+    except ValueError:
+        return None
+
+
+def _process_start_key(pid):
+    """A comparable token for when `pid` started, or None when it is unknown.
+
+    The token is the operating system's own process creation time, so it is
+    stable for the life of that process and different for every other process
+    that later reuses the PID.
+    """
+    if not pid or int(pid) <= 0:
+        return None
+    if sys.platform == "win32":
+        return _windows_process_start_key(pid)
+    return _posix_process_start_key(pid)
+
+
+def _write_launch_state(record):
+    """Persist the launch record so a restarted Studio can re-adopt its guest."""
+    try:
+        os.makedirs(os.path.dirname(QEMU_LAUNCH_STATE_FILE), exist_ok=True)
+        tmp = QEMU_LAUNCH_STATE_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as handle:
+            json.dump(record, handle)
+        os.replace(tmp, QEMU_LAUNCH_STATE_FILE)
+    except Exception:
+        pass
+
+
+def _remove_launch_state():
+    try:
+        os.remove(QEMU_LAUNCH_STATE_FILE)
+    except OSError:
+        pass
+
+
+def _read_launch_state():
+    try:
+        with open(QEMU_LAUNCH_STATE_FILE, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def track_qemu_process(proc, vnc_display=None, vnc_port=None):
+    """Record the QEMU process this Studio launched, with its start time."""
+    global qemu_process_record
+    if proc is None:
+        clear_qemu_process()
+        return
+    start_key = _process_start_key(proc.pid)
+    with qemu_process_lock:
+        qemu_process_record = {
+            "pid": proc.pid,
+            "start_key": start_key,
+            "started_at": time.time(),
+        }
+        record = dict(qemu_process_record)
+    if start_key is not None:
+        # The record outlives this server process on purpose: a guest that
+        # outlives the Studio is still the guest this Studio launched, and
+        # the identity (PID plus creation time) is what proves it.
+        _write_launch_state({
+            "pid": record["pid"],
+            "start_key": record["start_key"],
+            "started_at": record["started_at"],
+            "vnc_display": vnc_display,
+            "vnc_port": vnc_port,
+        })
+
+
+def clear_qemu_process():
+    """Forget the tracked QEMU process (it is gone, or was never ours)."""
+    global qemu_process_record
+    with qemu_process_lock:
+        qemu_process_record = {"pid": None, "start_key": None, "started_at": 0.0}
+    _remove_launch_state()
+
+
+def tracked_qemu_process():
+    with qemu_process_lock:
+        return dict(qemu_process_record)
+
+
+def _recorded_process_alive(record):
+    """True when the recorded process identity still names a live process."""
+    pid = record.get("pid")
+    key = record.get("start_key")
+    if not pid or key is None:
+        return False
+    return _process_start_key(pid) == key
+
+
+def adopt_previous_qemu_process():
+    """Re-adopt the QEMU an earlier Studio instance launched, if it is that process.
+
+    WHY: a guest outliving the Studio process is a normal development loop
+    (the Studio is restarted while the guest keeps running). The record names
+    the exact process - PID plus the operating system's creation time - so
+    re-adopting it PROVES the identity instead of assuming it, and a recycled
+    PID can never be adopted.
+    """
+    global qemu_process_record
+    with qemu_process_lock:
+        if qemu_process_record.get("pid"):
+            return dict(qemu_process_record)
+    record = _read_launch_state()
+    if not record:
+        return None
+    pid = record.get("pid")
+    key = record.get("start_key")
+    if not pid or key is None or not _recorded_process_alive(record):
+        # The recorded process is gone (or the PID now belongs to something
+        # else): the record describes nothing that exists.
+        _remove_launch_state()
+        return None
+    with qemu_process_lock:
+        qemu_process_record = {
+            "pid": int(pid),
+            "start_key": key,
+            "started_at": float(record.get("started_at") or 0.0),
+        }
+    return dict(qemu_process_record)
+
+
+def tracked_qemu_process_alive():
+    """True when the QEMU process this Studio launched is provably still running.
+
+    The Popen handle is authoritative for a child of this process: poll()
+    reaps it and can never be fooled by a recycled PID. When only the record
+    survives, the PID's current start time is compared with the recorded one,
+    so a different process that inherited the PID is not mistaken for the
+    guest. With neither, the Studio cannot prove the device is there and
+    reports that it is not.
+    """
+    record = tracked_qemu_process()
+    pid = record.get("pid")
+    if not pid:
+        record = adopt_previous_qemu_process() or {}
+        pid = record.get("pid")
+        if not pid:
+            return False
+    proc = qemu_subproc
+    if proc is not None and getattr(proc, "pid", None) == pid:
+        return proc.poll() is None
+    return _recorded_process_alive(record)
+
+
+def _monitor_answers(timeout=0.35):
+    """True when QEMU's HMP monitor answers on the monitor port."""
+    try:
+        ok, _ = send_qemu_monitor_cmd("info status", timeout=timeout)
+        return bool(ok)
+    except Exception:
+        return False
+
+
+def wait_for_monitor(timeout=2.0):
+    """Wait (briefly) for the monitor of a freshly launched guest to answer.
+
+    QEMU binds the monitor socket during startup, so a launch that has just
+    returned may need a moment before the monitor is reachable. Waiting here
+    keeps the launch result from reporting a guest as "unknown" purely because
+    it was asked one millisecond too early.
+    """
+    deadline = time.time() + max(float(timeout), 0.0)
+    while True:
+        if _monitor_answers():
+            return True
+        if time.time() >= deadline:
+            return False
+        time.sleep(0.1)
+
+
+def _port_occupied(port, host="127.0.0.1"):
+    """True when the port cannot be taken by a new listener.
+
+    WHY a bind probe rather than a connect probe: a connect only answers
+    "is somebody accepting", and a listener whose accept queue is full (or
+    which never accepts) makes the connect hang or be refused while the port
+    is very much in use - which is exactly the "something else holds the VNC
+    port" case the Studio has to recognise. A bind asks the question the
+    launch actually needs answered: can QEMU have this port?
+
+    The bind uses SO_REUSEADDR only on POSIX, where it still refuses a port
+    another socket is actively listening on but permits a TIME_WAIT remnant,
+    so a relaunch does not drift onto a new display. On Windows the
+    exclusive bind (no SO_REUSEADDR) refuses a listening port and still
+    permits a TIME_WAIT remnant.
+    """
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        if os.name != "nt":
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        probe.bind((host, port))
+        return False
+    except OSError:
+        return True
+    finally:
+        try:
+            probe.close()
+        except OSError:
+            pass
+
+
+def _port_is_free(port, host="127.0.0.1"):
+    """True when a new listener can take the port."""
+    return not _port_occupied(port, host=host)
+
+
+def qemu_device_state(probe_monitor=True):
+    """The Studio's provable belief about the device.
+
+    "running" requires BOTH: the QEMU process this Studio launched is alive,
+    AND the monitor socket answers. The VNC port is probed as a secondary
+    signal only; it can never make the Studio claim a running device.
+    """
+    process_alive = tracked_qemu_process_alive()
+    monitor_answers = _monitor_answers() if probe_monitor else False
+    vnc_port_busy = _port_occupied(active_vnc_port)
+    record = tracked_qemu_process()
+    if process_alive and monitor_answers:
+        state = "running"
+        reason = "The QEMU process this Studio launched is alive and its monitor answers."
+    elif process_alive:
+        state = "unknown"
+        reason = "The QEMU process this Studio launched is alive, but its monitor did not answer."
+    elif monitor_answers:
+        state = "unknown"
+        reason = (f"A QEMU monitor answers on port {MONITOR_PORT}, but this Studio did not launch it "
+                  "and cannot identify it as the device.")
+    elif vnc_port_busy:
+        state = "not_running"
+        reason = (f"No QEMU process is tracked by this Studio; port {active_vnc_port} is held by "
+                  "another process, which is not the device.")
+    else:
+        state = "not_running"
+        reason = "No QEMU process is tracked by this Studio."
+    return {
+        "running": state == "running",
+        "state": state,
+        "reason": reason,
+        "process_tracked": bool(record.get("pid")),
+        "process_alive": process_alive,
+        "pid": record.get("pid"),
+        "monitor_answers": monitor_answers,
+        "vnc_port_busy": vnc_port_busy,
+    }
+
+
+def stop_tracked_qemu():
+    """Terminate the tracked QEMU process and report whether it is gone.
+
+    The tracked process is the one this Studio launched, proven by PID plus
+    the operating system's creation time. A child of this process is stopped
+    through its own handle; a process adopted from an earlier Studio instance
+    (a guest that outlived this server) is asked to quit through its own
+    monitor, the supported way to release its sockets and file locks.
+
+    Returns True when the tracked process is gone afterwards.
+    """
+    record = tracked_qemu_process()
+    pid = record.get("pid")
+    proc = qemu_subproc
+    if not pid:
+        stop_qemu_backend()
+        return True
+    if proc is not None and getattr(proc, "pid", None) == pid:
+        stop_qemu_backend()
+        try:
+            proc.wait(timeout=2)
+        except Exception:
+            pass
+        return proc.poll() is not None
+    send_qemu_monitor_cmd('quit')
+    time.sleep(0.5)
+    gone = not _recorded_process_alive(record)
+    stop_qemu_backend()
+    return gone
+
+
+def select_vnc_display(preferred=None, limit=64):
+    """Pick a VNC display whose port has no listener.
+
+    WHY: the display used to be a hard-coded 1, so anything else holding
+    127.0.0.1:5901 made QEMU exit at launch while the Studio went on
+    reporting a running device. The display is a setting now, and a taken
+    display is reported instead of being silently fatal.
+
+    The search always starts at the CONFIGURED display, so a Studio that had
+    to move aside returns to it once it is free again.
+
+    Returns (display, port, substituted) or (None, None, False) when no free
+    display was found.
+    """
+    start = VNC_DISPLAY if preferred is None else preferred
+    for offset in range(limit):
+        display = start + offset
+        if display > 99:
+            break
+        port = 5900 + display
+        if _port_is_free(port):
+            return display, port, offset > 0
+    return None, None, False
+
+
 
 # Guest scanout geometry.
 #
@@ -569,6 +1028,15 @@ def inspect_apk(file_bytes):
 # Real-time hardware telemetry captured from QEMU QMP + Serial
 latest_telemetry = {
     "qemu_alive": False,
+    # The Studio's provable belief about the device: "running", "not_running"
+    # or "unknown". "qemu_alive" is true only for "running".
+    "device_state": "not_running",
+    "device_reason": "No QEMU process is tracked by this Studio.",
+    # The process this Studio launched, and whether it is provably alive.
+    "qemu_process": {"tracked": False, "pid": None, "alive": False},
+    # Secondary signals. They describe the host, never the device on their own.
+    "monitor_answers": False,
+    "vnc_port_busy": False,
     "websockify_alive": False,
     "status": "standby",
     "cpu": {
@@ -632,7 +1100,9 @@ def build_websockify_cmd(ws_port=None, vnc_port=None, studio_port=None):
     else:
         target_ws = f"127.0.0.1:{ws_port}"
     if vnc_port is None:
-        target_vnc = "127.0.0.1:5901"
+        # The bridge must reach the guest the Studio actually launched, which
+        # may sit on a different VNC display than the configured default.
+        target_vnc = f"127.0.0.1:{active_vnc_port}"
     else:
         target_vnc = f"127.0.0.1:{vnc_port}"
     origins = get_permitted_ws_origins(studio_port)
@@ -646,8 +1116,18 @@ def build_websockify_cmd(ws_port=None, vnc_port=None, studio_port=None):
 
 
 def start_websockify_if_needed():
-    """Starts websockify on WS_PORT (6081) bridging to QEMU VNC (5901) with strict Origin checking."""
-    global ws_subproc
+    """Starts websockify on WS_PORT (6081) bridging to the guest's VNC port with strict Origin checking."""
+    global ws_subproc, ws_bridge_port
+    # The bridge follows the guest: a guest launched onto a different display
+    # needs a bridge that points at that display, not at the old port.
+    if ws_subproc is not None and ws_bridge_port is not None and ws_bridge_port != active_vnc_port:
+        try:
+            ws_subproc.terminate()
+            ws_subproc.wait(timeout=1)
+        except Exception:
+            pass
+        ws_subproc = None
+        ws_bridge_port = None
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.settimeout(0.15)
@@ -660,9 +1140,10 @@ def start_websockify_if_needed():
     try:
         cmd = build_websockify_cmd()
         ws_subproc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        ws_bridge_port = active_vnc_port
         time.sleep(0.3)
         latest_telemetry["websockify_alive"] = True
-        print(f"[*] Live Bare-Metal VBE bridge active on ws://127.0.0.1:{WS_PORT} -> VNC :{VNC_PORT}")
+        print(f"[*] Live Bare-Metal VBE bridge active on ws://127.0.0.1:{WS_PORT} -> VNC :{active_vnc_port}")
     except Exception as e:
         print(f"[*] Notice: websockify auto-start: {e}")
         latest_telemetry["websockify_alive"] = False
@@ -857,7 +1338,7 @@ SUPPORTED_PROFILES = {
         "boot_type": "BIOS/MBR Bootloader",
         "image": os.path.join(WORKSPACE_ROOT, "target", "inter-os-bios.img"),
         "status": "Primary QEMU Phone contract",
-        "display": {"backend": "vnc", "host": "127.0.0.1", "port": 5901, "websocket_port": 6081, "guest_width": 1080, "guest_height": 2160},
+        "display": {"backend": "vnc", "host": "127.0.0.1", "port": VNC_PORT, "display_index": VNC_DISPLAY, "websocket_port": WS_PORT, "guest_width": 1080, "guest_height": 2160},
         "serial": {"host": "127.0.0.1", "port": 4301},
         "monitor": {"host": "127.0.0.1", "port": 44445},
     },
@@ -1036,6 +1517,25 @@ def send_qemu_monitor_cmd(cmd_str, host='127.0.0.1', port=MONITOR_PORT, timeout=
         return False, "Failed to send monitor command"
 
 
+def reset_monitor_connection():
+    """Drops the persistent monitor socket.
+
+    WHY: the socket belongs to the QEMU instance it connected to. After a
+    relaunch it would either point at a dead monitor or, worse, at a monitor
+    this Studio does not own. Dropping it forces the next command to open a
+    fresh connection to the guest that is actually running.
+    """
+    global _persistent_monitor_sock
+    with _persistent_monitor_lock:
+        sock = _persistent_monitor_sock
+        _persistent_monitor_sock = None
+    if sock is not None:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
 current_device_orientation = 'portrait'
 _capture_lock = threading.Lock()
 _last_frame_cache = {}
@@ -1110,6 +1610,22 @@ class VncScanoutClient:
         self.connected = False
         self._invalidate_cached_frame()
 
+    def set_port(self, port):
+        """Point this client at the VNC port the launched guest actually uses.
+
+        WHY: a launch may move the guest onto a different display when the
+        configured one is taken. The client must follow the guest, and it must
+        not keep talking to whatever else is listening on the old port.
+        """
+        try:
+            port = int(port)
+        except (TypeError, ValueError):
+            return
+        if port == self.port:
+            return
+        self.port = port
+        self.force_reconnect()
+
     def _invalidate_cached_frame(self):
         """Drops the published frame so consumers see 503, not stale pixels."""
         with self.frame_cond:
@@ -1183,6 +1699,13 @@ class VncScanoutClient:
             try:
                 self._run_session()
                 backoff = 0.5
+            except NoTrackedQemu as e:
+                # There is no guest to attach to. That is the normal state of a
+                # Studio with the device stopped, not a failure worth logging
+                # on every tick.
+                self.connected = False
+                time.sleep(0.5)
+                continue
             except Exception as e:
                 print(f"[vnc] session error, retry in {backoff:.2f}s: {e}")
                 self.connected = False
@@ -1208,6 +1731,13 @@ class VncScanoutClient:
         return bytes(buf)
 
     def _run_session(self):
+        # WHY the process check comes before the connection: the VNC port can
+        # be held by something that is not the guest (a stale listener, another
+        # program). Attaching to it would publish another program's pixels as
+        # the phone screen, so the Studio only ever opens an RFB session to
+        # the QEMU process it launched.
+        if not tracked_qemu_process_alive():
+            raise NoTrackedQemu("no QEMU process launched by this Studio is running")
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(3.0)
         s.connect((self.host, self.port))
@@ -1581,8 +2111,11 @@ def notify_qemu_relaunched():
 
 def stop_qemu_backend():
     """Stops any running QEMU and websockify processes managed by this instance."""
-    global qemu_subproc, ws_subproc, launcher_has_booted
+    global qemu_subproc, ws_subproc, launcher_has_booted, serial_log_is_session, ws_bridge_port
     launcher_has_booted = False
+    # The UART log of a session that has ended is not the live guest's output
+    # any more, so it stops being served as such.
+    serial_log_is_session = False
     if ws_subproc:
         try:
             ws_subproc.terminate()
@@ -1590,6 +2123,7 @@ def stop_qemu_backend():
         except Exception:
             pass
         ws_subproc = None
+        ws_bridge_port = None
 
     if qemu_subproc:
         try:
@@ -1600,11 +2134,19 @@ def stop_qemu_backend():
         qemu_subproc = None
         notify_qemu_relaunched()
 
+    # The tracked process is gone: forget it, so no later check can mistake a
+    # recycled PID for the guest this Studio launched.
+    clear_qemu_process()
+    reset_monitor_connection()
+
     # Never discover and kill arbitrary QEMU processes by executable name,
     # shared disk path, or monitor port. Only qemu_subproc, created and owned by
     # this Device Studio server process, may be terminated here.
 
     latest_telemetry["qemu_alive"] = False
+    latest_telemetry["device_state"] = "not_running"
+    latest_telemetry["device_reason"] = "No QEMU process is tracked by this Studio."
+    latest_telemetry["qemu_process"] = {"tracked": False, "pid": None, "alive": False}
     latest_telemetry["status"] = "standby"
     latest_telemetry["mode"] = "standby"
     latest_telemetry["cpu"]["halted"] = True
@@ -1643,10 +2185,12 @@ def qemu_x86_accel_candidates(exe):
 def qemu_process_survives_startup(proc, grace=0.5):
     """True while the process is still alive after `grace` seconds.
 
-    Only used to validate a hardware accelerator: a rejected `-accel whpx`
-    aborts during machine init (well inside this window), while a guest that
-    got this far keeps running. TCG launches are never probed, so the normal
-    launch path keeps its original latency.
+    Used for two things: to validate a hardware accelerator (a rejected
+    `-accel whpx` aborts during machine init, well inside this window, while a
+    guest that got this far keeps running) and to prove that a launch did not
+    die on a port conflict. A launch that exits during this window never
+    becomes a device, and the Studio must say so instead of reporting a
+    running guest it does not have.
     """
     deadline = time.time() + grace
     while time.time() < deadline:
@@ -1657,16 +2201,30 @@ def qemu_process_survives_startup(proc, grace=0.5):
 
 
 def launch_qemu_profile(profile_key="x86_64", ram_mb=None, smp=1):
-    """Launches a real QEMU instance for the specified target device profile."""
+    """Launches a real QEMU instance for the specified target device profile.
+
+    Returns (ok, message, info). `info` carries the launch facts the caller
+    reports: the PID, the VNC display and port actually used, and the device
+    state the Studio can prove once the guest is up.
+    """
     global qemu_subproc, active_profile_key, current_serial_log_path, launcher_has_booted, last_reboot_cursor
-    global serial_log_is_session
+    global serial_log_is_session, active_vnc_display, active_vnc_port
     launcher_has_booted = False
     with telemetry_lock:
         last_reboot_cursor = len(serial_lines)
-    stop_qemu_backend()
+    # The guest this Studio launched (or adopted from an earlier Studio
+    # instance) is the only QEMU that may be stopped here.
+    stop_tracked_qemu()
+
+    launch_info = {
+        "pid": None,
+        "vnc_display": active_vnc_display,
+        "vnc_port": active_vnc_port,
+        "device_state": "not_running",
+    }
 
     if profile_key not in SUPPORTED_PROFILES:
-        return False, f"Unknown profile: {profile_key}"
+        return False, f"Unknown profile: {profile_key}", launch_info
 
     prof = SUPPORTED_PROFILES[profile_key]
     arch = prof["arch"]
@@ -1677,15 +2235,15 @@ def launch_qemu_profile(profile_key="x86_64", ram_mb=None, smp=1):
         # failure: no fallback binary, no guess about which QEMU to run.
         searched = _qemu_search_log or [f"qemu-system-{arch} in PATH"]
         return False, (f"QEMU binary 'qemu-system-{arch}' not found on host. "
-                       f"Searched: {'; '.join(searched)}.")
+                       f"Searched: {'; '.join(searched)}."), launch_info
 
     img_path = prof["image"]
     if not os.path.exists(img_path):
-        return False, f"Boot image not found at '{img_path}'. Build target first with 'interos build {arch}'."
+        return False, f"Boot image not found at '{img_path}'. Build target first with 'interos build {arch}'.", launch_info
     default_data_disk = "inter-os-data-master.img" if arch == "x86_64" else f"interos-data-{arch}.img"
     data_disk_path = os.environ.get("DATA_DISK_PATH", os.path.join(WORKSPACE_ROOT, "target", default_data_disk))
     if not os.path.isabs(data_disk_path) and ".." in data_disk_path:
-        return False, "Security violation: Invalid data disk path traversal detected."
+        return False, "Security violation: Invalid data disk path traversal detected.", launch_info
 
     ram = ram_mb or prof["ram"]
     serial_log = os.path.join(WORKSPACE_ROOT, "target", f"{arch}_boot.log")
@@ -1700,16 +2258,48 @@ def launch_qemu_profile(profile_key="x86_64", ram_mb=None, smp=1):
     except Exception:
         pass
 
+    # The VNC display is chosen here, not assumed. A display whose port is
+    # already served would make QEMU exit at launch, so a taken display is
+    # replaced by a free one and the substitution is reported.
+    vnc_display, vnc_port, vnc_substituted = select_vnc_display()
+    if vnc_display is None:
+        message = (f"No free VNC display available near :{active_vnc_display} "
+                   f"(ports {5900 + active_vnc_display}-{5999} are all in use).")
+        serial_lines.append(f"[STUDIO] {message}")
+        return False, message, launch_info
+    active_vnc_display = vnc_display
+    active_vnc_port = vnc_port
+    launch_info["vnc_display"] = vnc_display
+    launch_info["vnc_port"] = vnc_port
+    if vnc_substituted:
+        note = (f"VNC display :{vnc_display} (port {vnc_port}) was selected because the "
+                f"configured display :{VNC_DISPLAY} (port {5900 + VNC_DISPLAY}) is already in use.")
+        print(f"[*] {note}")
+        display_note_lines = [f"[STUDIO] {note}"]
+    else:
+        display_note_lines = []
+
+    # The monitor and serial ports are QEMU's own listeners: if another
+    # process holds them, QEMU exits at startup. Say so before spawning
+    # rather than reporting a launch that cannot have succeeded.
+    for port, what in ((MONITOR_PORT, "QEMU monitor"), (SERIAL_TCP_PORT, "guest serial (COM1)")):
+        if _port_occupied(port):
+            message = (f"The {what} port {port} is already in use by another process, so QEMU cannot "
+                       f"start. Stop that process (a QEMU this Studio did not launch, for instance) "
+                       f"and try again.")
+            serial_lines.append(f"[STUDIO] {message}")
+            return False, message, launch_info
+
     display_backend = os.environ.get("INTEROS_DISPLAY", "sdl")
     cmd = [
         exe,
         "-m", f"{ram}M",
         "-smp", str(smp),
         "-name", "InterOS Core — Native Full HD (1080×2160)",
-        "-monitor", "tcp:127.0.0.1:44445,server,nowait",
-        "-serial", "tcp:127.0.0.1:4301,server,nowait",
+        "-monitor", f"tcp:127.0.0.1:{MONITOR_PORT},server,nowait",
+        "-serial", f"tcp:127.0.0.1:{SERIAL_TCP_PORT},server,nowait",
         "-display", display_backend,
-        "-vnc", "127.0.0.1:1"
+        "-vnc", f"127.0.0.1:{vnc_display}"
     ]
     if arch == "x86_64":
         cmd.extend(["-machine", "q35", "-cpu", "qemu64"])
@@ -1786,6 +2376,9 @@ def launch_qemu_profile(profile_key="x86_64", ram_mb=None, smp=1):
     accel_candidates = qemu_x86_accel_candidates(exe) if arch == "x86_64" else [None]
     try:
         serial_lines.clear()
+        # The display substitution is part of this launch's story, so it is
+        # written after the log buffer is reset for the new session.
+        serial_lines.extend(display_note_lines)
         last_error = None
         for accel in accel_candidates:
             attempt = list(cmd)
@@ -1797,38 +2390,97 @@ def launch_qemu_profile(profile_key="x86_64", ram_mb=None, smp=1):
             except Exception as e:
                 last_error = e
                 continue
-            if accel and not qemu_process_survives_startup(proc):
-                serial_lines.append(
-                    f"[STUDIO] Accelerator '{accel}' did not start this machine; retrying with TCG.")
+            if not qemu_process_survives_startup(proc, grace=0.6):
+                # The process died during startup. QEMU exits immediately when a
+                # port it must bind is taken, so this is the port-conflict case
+                # the Studio used to report as a running device.
+                exit_code = proc.poll()
                 try:
                     proc.terminate()
                     proc.wait(timeout=2)
                 except Exception:
                     pass
-                continue
+                if accel:
+                    serial_lines.append(
+                        f"[STUDIO] Accelerator '{accel}' did not start this machine; retrying with TCG.")
+                    continue
+                message = (f"QEMU exited during startup (exit code {exit_code}). It could not bind one of "
+                           f"its own ports (monitor {MONITOR_PORT}, serial {SERIAL_TCP_PORT}, "
+                           f"VNC {vnc_port}); the device did not start.")
+                serial_lines.append(f"[STUDIO] {message}")
+                print(f"[*] {message}")
+                return False, message, launch_info
+            # The monitor connection belongs to the previous instance; drop it
+            # so the next command reaches the guest that was just launched.
+            reset_monitor_connection()
+            # A QEMU that cannot bind one of its ports can die a moment after
+            # the process exists, so the monitor is given time to answer and
+            # the process is checked again. A guest that is not there must
+            # never be reported as a device that is.
+            wait_for_monitor(timeout=3.0)
+            if proc.poll() is not None:
+                exit_code = proc.poll()
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=2)
+                except Exception:
+                    pass
+                if accel:
+                    serial_lines.append(
+                        f"[STUDIO] Accelerator '{accel}' did not start this machine; retrying with TCG.")
+                    continue
+                message = (f"QEMU exited during startup (exit code {exit_code}). It could not bind one of "
+                           f"its own ports (monitor {MONITOR_PORT}, serial {SERIAL_TCP_PORT}, "
+                           f"VNC {vnc_port}); the device did not start.")
+                serial_lines.append(f"[STUDIO] {message}")
+                print(f"[*] {message}")
+                return False, message, launch_info
             qemu_subproc = proc
+            # Track the process this Studio launched: its PID plus the start
+            # time that makes the pair a fingerprint no recycled PID can
+            # impersonate.
+            track_qemu_process(proc, vnc_display=vnc_display, vnc_port=vnc_port)
+            launch_info["pid"] = proc.pid
             active_profile_key = profile_key
+            # The guest may be on a different display than the configured one;
+            # the Studio's own RFB client follows it.
+            vnc_client.set_port(active_vnc_port)
             # QEMU owns the VNC listener; bridge startup must happen after the VM exists.
             start_websockify_if_needed()
             accel_note = f" accel={accel}" if accel else ""
+            display_note = f"VNC display :{vnc_display} (port {vnc_port})"
             serial_lines.append(
-                f"[STUDIO] Launched QEMU {arch} microkernel instance (PID {proc.pid}){accel_note}.")
-            return True, f"QEMU {arch} started (PID {proc.pid}, accelerator {accel or 'default'})"
-        return False, f"Failed to spawn QEMU: {last_error}"
+                f"[STUDIO] Launched QEMU {arch} microkernel instance (PID {proc.pid}, {display_note}){accel_note}.")
+            print(f"[*] QEMU {arch} started (PID {proc.pid}, {display_note})")
+            state = qemu_device_state()
+            launch_info["device_state"] = state["state"]
+            message = (f"QEMU {arch} started (PID {proc.pid}, accelerator {accel or 'default'}, "
+                       f"{display_note})")
+            if not state["running"]:
+                message += f"; the device is not yet provably up ({state['reason']})"
+            return True, message, launch_info
+        message = f"Failed to spawn QEMU: {last_error}"
+        serial_lines.append(f"[STUDIO] {message}")
+        return False, message, launch_info
     except Exception as e:
-        return False, f"Failed to spawn QEMU: {e}"
+        message = f"Failed to spawn QEMU: {e}"
+        serial_lines.append(f"[STUDIO] {message}")
+        return False, message, launch_info
 
 
 def start_qemu_backend():
     """Ensures QEMU backend is active and reachable; launches primary instance if needed."""
     global qemu_subproc, ws_subproc
 
-    # Check if a QEMU instance is already running on monitor port
-    t = query_qemu_monitor()
-    if t["qemu_alive"]:
-        return True, "Connected to active microkernel instance"
+    # A device is running only when the process this Studio launched is alive
+    # AND the monitor answers. A monitor that answers without a tracked process
+    # belongs to a QEMU this Studio did not launch, so it is not the device.
+    state = qemu_device_state()
+    if state["running"]:
+        return True, "Connected to the microkernel instance this Studio launched"
 
-    return launch_qemu_profile("x86_64")
+    ok, message, _info = launch_qemu_profile("x86_64")
+    return ok, message
 
 
 last_telemetry_query = 0.0
@@ -1847,6 +2499,12 @@ def query_qemu_monitor(host='127.0.0.1', port=MONITOR_PORT, timeout=0.35, force=
     recv() timed out, and the VNC fallback silently returned the last cached
     snapshot as live state - an early-boot real-mode RIP was displayed while
     the kernel was already running in long mode.
+
+    WHY the answer is not taken from the VNC port any more: a port that
+    answers proves that SOMETHING holds it, not that the guest this Studio
+    launched is behind it. The device is reported as running only when the
+    tracked QEMU process is alive AND the monitor answers; the port probe is
+    kept as a secondary signal that can never override the process check.
     """
     global last_telemetry_query, latest_telemetry
     now = time.time()
@@ -1858,6 +2516,9 @@ def query_qemu_monitor(host='127.0.0.1', port=MONITOR_PORT, timeout=0.35, force=
             return latest_telemetry
 
         last_telemetry_query = now
+        monitor_answers = False
+        vnc_port_busy = False
+        vm_status = "unknown"
         try:
             def monitor(cmd):
                 ok, resp = send_qemu_monitor_cmd(
@@ -1914,7 +2575,7 @@ def query_qemu_monitor(host='127.0.0.1', port=MONITOR_PORT, timeout=0.35, force=
                 full_path = block_match.group(2).strip()
                 block_file = full_path.split('\\')[-1].split('/')[-1]
 
-            latest_telemetry["qemu_alive"] = True
+            monitor_answers = True
             latest_telemetry["status"] = vm_status
             latest_telemetry["mode"] = "qemu_live"
             latest_telemetry["cpu"]["thread_id"] = thread_id
@@ -1930,36 +2591,60 @@ def query_qemu_monitor(host='127.0.0.1', port=MONITOR_PORT, timeout=0.35, force=
                     latest_telemetry["websockify_alive"] = (s_ws.connect_ex(('127.0.0.1', WS_PORT)) == 0)
             except Exception:
                 latest_telemetry["websockify_alive"] = False
-
-            return latest_telemetry
         except Exception:
-            # Fallback: check VNC port 5900
-            try:
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s_vnc:
-                    s_vnc.settimeout(0.15)
-                    s_vnc.connect(('127.0.0.1', VNC_PORT))
-                    latest_telemetry["qemu_alive"] = True
-                    latest_telemetry["status"] = "running"
-                    latest_telemetry["mode"] = "qemu_vnc_only"
-                    # The monitor could not answer: report the CPU state as
-                    # unavailable instead of replaying the last cached parse
-                    # as live telemetry.
-                    latest_telemetry["cpu"]["rip"] = "Unavailable"
-                    latest_telemetry["cpu"]["thread_id"] = "Unavailable"
-                    latest_telemetry["cpu"]["halted"] = None
-                    latest_telemetry["cpu"]["registers"] = {}
-                    return latest_telemetry
-            except Exception:
-                pass
+            # The monitor did not answer. The VNC port is probed as a
+            # SECONDARY signal only: it says who holds the port, never that
+            # the device is up.
+            vnc_port_busy = _port_occupied(active_vnc_port)
+            # The monitor could not answer: report the CPU state as
+            # unavailable instead of replaying the last cached parse
+            # as live telemetry.
+            latest_telemetry["cpu"]["rip"] = "Unavailable"
+            latest_telemetry["cpu"]["thread_id"] = "Unavailable"
+            latest_telemetry["cpu"]["halted"] = None
+            latest_telemetry["cpu"]["registers"] = {}
 
-            latest_telemetry["qemu_alive"] = False
+        # The device state is resolved from the process and the monitor
+        # together; the port probe is reported but never decides it.
+        process_alive = tracked_qemu_process_alive()
+        record = tracked_qemu_process()
+        running = bool(process_alive and monitor_answers)
+        if running:
+            device_state = "running"
+            device_reason = "The QEMU process this Studio launched is alive and its monitor answers."
+        elif process_alive:
+            device_state = "unknown"
+            device_reason = "The QEMU process this Studio launched is alive, but its monitor did not answer."
+        elif monitor_answers:
+            device_state = "unknown"
+            device_reason = (f"A QEMU monitor answers on port {MONITOR_PORT}, but this Studio did not "
+                             "launch it and cannot identify it as the device.")
+        elif vnc_port_busy:
+            device_state = "not_running"
+            device_reason = (f"No QEMU process is tracked by this Studio; port {active_vnc_port} is held "
+                             "by another process, which is not the device.")
+        else:
+            device_state = "not_running"
+            device_reason = "No QEMU process is tracked by this Studio."
+
+        latest_telemetry["qemu_alive"] = running
+        latest_telemetry["device_state"] = device_state
+        latest_telemetry["device_reason"] = device_reason
+        latest_telemetry["monitor_answers"] = monitor_answers
+        latest_telemetry["vnc_port_busy"] = vnc_port_busy
+        latest_telemetry["qemu_process"] = {
+            "tracked": bool(record.get("pid")),
+            "pid": record.get("pid"),
+            "alive": process_alive,
+        }
+        if not running:
             latest_telemetry["status"] = "standby"
             latest_telemetry["mode"] = "standby"
             latest_telemetry["cpu"]["halted"] = True
             latest_telemetry["cpu"]["rip"] = "Offline"
             latest_telemetry["cpu"]["thread_id"] = "Offline"
             latest_telemetry["cpu"]["registers"] = {}
-            return latest_telemetry
+        return latest_telemetry
 
 
 def is_safe_proxy_url(url_str):
@@ -2701,11 +3386,26 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                     pass
 
             lines = serial_lines[after:] if after < len(serial_lines) else []
+            # The Studio says whether these lines are the live guest's output
+            # or the tail of a session that has ended. The lines themselves are
+            # real guest output either way, but calling them "live" for a
+            # device that is not running would be a claim the Studio cannot
+            # back.
+            session_active = bool(serial_log_is_session and tracked_qemu_process_alive())
+            if session_active:
+                source = 'LIVE_GUEST_UART'
+            elif serial_lines:
+                source = 'LAST_SESSION_UART'
+            else:
+                source = 'UNAVAILABLE'
             response = json.dumps({
                 'lines': lines,
                 'total': len(serial_lines),
                 'cursor': len(serial_lines),
-                'next_index': len(serial_lines)
+                'next_index': len(serial_lines),
+                'source': source,
+                'session_active': session_active,
+                'qemu_running': tracked_qemu_process_alive(),
             })
             self.wfile.write(response.encode())
             return
@@ -2722,6 +3422,11 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 'qemu': t["qemu_alive"],
                 'status': t["status"],
                 'mode': t.get("mode", "standby"),
+                # What the Studio can prove about the device, and why. "unknown"
+                # is an answer, not a gap: it means the Studio cannot tell
+                # whether the device is there.
+                'device_state': t.get("device_state", "unknown"),
+                'device_reason': t.get("device_reason"),
                 'launcher_ready': bool(launcher_ready and t["qemu_alive"]),
                 'active_profile': active_profile_key,
                 # The selected device profile (AVD-Manager equivalent). It is the
@@ -2736,7 +3441,12 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 'guest_width': ((SUPPORTED_PROFILES.get(active_profile_key) or {}).get('display') or {}).get('guest_width'),
                 'guest_height': ((SUPPORTED_PROFILES.get(active_profile_key) or {}).get('display') or {}).get('guest_height'),
                 'orientation': current_device_orientation,
-                'pid': qemu_subproc.pid if qemu_subproc else None
+                'pid': qemu_subproc.pid if qemu_subproc else None,
+                # The VNC display the guest was actually given, and the port it
+                # listens on. These are the configured values until a launch
+                # moves the guest onto a free display.
+                'vnc_display': active_vnc_display,
+                'vnc_port': active_vnc_port,
             })
             self.wfile.write(response.encode())
             return
@@ -2826,8 +3536,30 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             # (native portrait 720x1440, portrait phone slice 360x720, or full
             # landscape 1280x720); anything else is an honest 503 so the phone
             # never shows a broken image.
+            #
+            # WHY the device state gates this route: a frame served from a
+            # stale session (or from whatever else holds the VNC port) is not
+            # the guest's screen, and presenting it as one is the same class
+            # of claim the liveness fix removed. No provable device, no frame.
+            #
+            # WHY the query is parsed here: this route used `query` without
+            # ever assigning it in this scope, so every request raised
+            # UnboundLocalError and the client got no response at all.
+            query = urllib.parse.parse_qs(parsed_path.query)
             prefer_jpeg = query.get('format', ['png'])[0].lower() == 'jpeg'
             img_bytes, mime_or_reason = None, 'No guest frame available'
+            device = qemu_device_state()
+            if not device["running"]:
+                self.send_response(503)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    'success': False,
+                    'error': f"No guest frame available: {device['reason']}",
+                    'device_state': device['state'],
+                }).encode())
+                return
             with vnc_client.frame_cond:
                 live_canonical = (
                     vnc_client.connected
@@ -2836,13 +3568,12 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 )
             if live_canonical:
                 img_bytes, mime_or_reason = vnc_client.get_image_frame(prefer_jpeg=prefer_jpeg)
-            monitor_alive = bool(query_qemu_monitor().get('qemu_alive'))
-            if img_bytes is None and monitor_alive:
+            if img_bytes is None:
                 # VNC session not established but the guest is alive: fall back
                 # to the existing capture pipeline (live screendump, canonical
                 # portrait only) rather than inventing pixels.
                 img_bytes, mime_or_reason = capture_qemu_screen_frame(prefer_jpeg=prefer_jpeg)
-            if img_bytes is not None and (live_canonical or monitor_alive):
+            if img_bytes is not None:
                 self.send_response(200)
                 self.send_header('Content-Type', mime_or_reason)
                 self.send_header('Content-Length', str(len(img_bytes)))
@@ -2964,6 +3695,23 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             return
 
         if self.path == '/api/apps/list':
+            # The guest package registry is the only authority for what is
+            # installed. When the Studio cannot prove a device is running, it
+            # says so instead of waiting on a guest that is not there.
+            device = qemu_device_state()
+            if not device["running"]:
+                self.send_response(503)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    'success': False,
+                    'source': 'UNAVAILABLE',
+                    'status': 'NOT_RUNNING',
+                    'apps': [],
+                    'total': 0,
+                    'error': f"The guest package registry is unavailable: {device['reason']}",
+                }).encode())
+                return
             ok, error, catalog = guest_package_catalog()
             self.send_response(200 if ok else 503)
             self.send_header('Content-Type', 'application/json')
@@ -2978,6 +3726,20 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             return
 
         if self.path == '/api/rapp/list':
+            device = qemu_device_state()
+            if not device["running"]:
+                self.send_response(503)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    'success': False,
+                    'source': 'UNAVAILABLE',
+                    'status': 'NOT_RUNNING',
+                    'apps': [],
+                    'total': 0,
+                    'error': f"The guest package registry is unavailable: {device['reason']}",
+                }).encode())
+                return
             ok, error, catalog = guest_package_catalog()
             rapp_apps = [a for a in catalog if a.get('id')]
             self.send_response(200 if ok else 503)
@@ -3495,20 +4257,34 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             profile = str(data.get('profile') or active_profile_key or 'x86_64').strip()
             # A live guest already satisfies "Power On"; launching a second
             # QEMU next to the running one would be reported as success while
-            # nothing changed.
-            if query_qemu_monitor(force=True).get('qemu_alive'):
+            # nothing changed. Liveness is the tracked PROCESS plus the
+            # monitor, never a port: a stale listener used to make this route
+            # answer "QEMU is already running" for a device that did not exist,
+            # and that same stale state blocked a real launch.
+            state = qemu_device_state()
+            if state["running"]:
                 self._send_json(200, {
                     'success': True,
                     'message': 'QEMU is already running',
                     'already_running': True,
                     'profile': profile,
+                    'pid': state.get('pid'),
+                    'device_state': state['state'],
+                    'vnc_display': active_vnc_display,
+                    'vnc_port': active_vnc_port,
                 })
                 return
-            ok, resp = launch_qemu_profile(profile)
+            ok, resp, info = launch_qemu_profile(profile)
             self._send_json(200 if ok else 500, {
                 'success': ok,
                 'message': str(resp),
                 'profile': profile,
+                'pid': (info or {}).get('pid'),
+                'device_state': (info or {}).get('device_state'),
+                # The display the guest was actually given. When the configured
+                # one was taken, a free display was chosen and named here.
+                'vnc_display': (info or {}).get('vnc_display', active_vnc_display),
+                'vnc_port': (info or {}).get('vnc_port', active_vnc_port),
             })
             return
 
@@ -3517,40 +4293,53 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             # stop_qemu_backend() only ever terminates the QEMU process this
             # server launched (never an arbitrary qemu-system-x86_64), and a
             # guest that is not running is a successful no-op rather than an
-            # error, so the client can call this route unconditionally.
+            # error, so the client can call this route unconditionally. A guest
+            # that outlived this Studio (owned=False) is reported as NOT
+            # stopped, because this route did not stop it.
             content_length = self._bounded_content_length()
             if content_length is None:
                 return
             if content_length > 0:
                 self.rfile.read(content_length)
             proc = qemu_subproc
-            process_alive = bool(proc and proc.poll() is None)
-            monitor_alive = bool(query_qemu_monitor(force=True).get('qemu_alive'))
-            was_running = process_alive or monitor_alive
-            if was_running and proc is None:
-                # The guest was attached from an earlier session; instruct QEMU
-                # monitor directly to quit cleanly so all sockets and file locks are released.
-                send_qemu_monitor_cmd('quit')
-                time.sleep(0.5)
-            stop_qemu_backend()
-            if proc is not None:
-                try:
-                    proc.wait(timeout=2)
-                except Exception:
-                    pass
-            still_running = bool((proc and proc.poll() is None) or query_qemu_monitor(force=True).get('qemu_alive'))
+            # What this Studio can prove: the process it launched is alive.
+            # A port that answers without a tracked process is somebody
+            # else's listener, not the device.
+            was_running = tracked_qemu_process_alive()
+            unowned_monitor = False
+            if was_running:
+                still_running = not stop_tracked_qemu()
+            else:
+                # Nothing of ours is running. Clear the stale device state
+                # instead of leaving the Studio believing a device is up, and
+                # do NOT terminate a QEMU this Studio did not launch: it
+                # cannot prove ownership of it.
+                stop_qemu_backend()
+                still_running = False
+                unowned_monitor = _monitor_answers()
             if still_running:
-                message = f"QEMU did not exit after the stop request"
+                message = "QEMU did not exit after the stop request"
             elif was_running:
                 message = f"QEMU stopped (PID {proc.pid})" if proc is not None else "QEMU stopped"
+            elif unowned_monitor:
+                message = (f"No QEMU launched by this Studio is running, but a QEMU instance this Studio "
+                           f"does not own still holds the monitor port {MONITOR_PORT}; it was left alone.")
             else:
                 message = "QEMU is not running"
-            self._send_json(500 if still_running else 200, {
-                'success': not still_running,
+            # A guest this Studio does not own was NOT stopped, so the stop did
+            # not succeed. Reporting success would claim a device action that
+            # did not happen; owned=False tells the client that the guest
+            # outlived this Studio and has to be handled through its monitor.
+            stopped_ok = not still_running and not unowned_monitor
+            self._send_json(500 if still_running else (409 if unowned_monitor else 200), {
+                'success': stopped_ok,
                 'was_running': was_running,
                 'stopped': bool(was_running and not still_running),
-                'owned': True,
+                # owned=False means the guest outlived this Studio process, so
+                # nothing in it may be killed by this route.
+                'owned': not unowned_monitor,
                 'message': message,
+                'device_state': qemu_device_state()['state'],
             })
             return
 
@@ -3600,22 +4389,21 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 # JPEG frame alive across reboots.
                 _last_frame_cache.pop('portrait_jpeg', None)
                 _last_frame_cache.pop('portrait', None)
+                info = None
                 if data.get('cold') or action in ('cold_reboot', 'relaunch'):
-                    if qemu_subproc is None and query_qemu_monitor(force=True).get('qemu_alive'):
-                        send_qemu_monitor_cmd('quit')
-                        time.sleep(0.5)
-                    stop_qemu_backend()
-                    ok, resp = launch_qemu_profile(active_profile_key)
+                    # A QEMU this Studio did not launch is never terminated
+                    # here: only the process this Studio owns is stopped. A
+                    # guest adopted from an earlier Studio instance is still
+                    # this Studio's guest, so it is stopped too.
+                    stop_tracked_qemu()
+                    ok, resp, info = launch_qemu_profile(active_profile_key)
                     restart_method = 'backend_relaunch'
                 else:
                     ok, resp = send_qemu_monitor_cmd('system_reset')
                     restart_method = 'monitor_system_reset'
                     if not ok:
-                        if qemu_subproc is None and query_qemu_monitor(force=True).get('qemu_alive'):
-                            send_qemu_monitor_cmd('quit')
-                            time.sleep(0.5)
-                        stop_qemu_backend()
-                        ok, resp = launch_qemu_profile(active_profile_key)
+                        stop_tracked_qemu()
+                        ok, resp, info = launch_qemu_profile(active_profile_key)
                         restart_method = 'backend_relaunch'
                 self.send_response(200 if ok else 500)
                 self.send_header('Content-Type', 'application/json')
@@ -3625,29 +4413,34 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                     'action': 'reboot',
                     'qemu_reset': ok and restart_method == 'monitor_system_reset',
                     'restart_method': restart_method if ok else 'failed',
-                    'message': str(resp)
+                    'message': str(resp),
+                    **({'vnc_display': (info or {}).get('vnc_display'),
+                        'vnc_port': (info or {}).get('vnc_port')} if info else {})
                 }).encode())
                 return
             elif action in ('sleep', 'power', 'wake', 'toggle'):
                 # A real guest ACPI power-off can terminate QEMU. A subsequent
                 # physical power-button action starts a new guest; it must not be
                 # reported as a successful serial command to a dead VM.
-                process_alive = qemu_subproc is not None and qemu_subproc.poll() is None
                 monitor_state = query_qemu_monitor(force=True)
-                monitor_alive = bool(monitor_state.get('qemu_alive', False))
-                vm_alive = process_alive or monitor_alive
+                # The device is running only when the tracked process is alive
+                # and the monitor answers.
+                vm_alive = bool(monitor_state.get('qemu_alive', False))
                 guest_status = str(monitor_state.get('status', '')).strip().lower()
                 if not vm_alive and action in ('power', 'wake', 'toggle'):
-                    ok, msg = launch_qemu_profile(active_profile_key)
+                    ok, msg, info = launch_qemu_profile(active_profile_key)
                     result = {'success': ok, 'action': 'power_on', 'qemu_started': ok, 'message': str(msg)}
+                    if info:
+                        result['vnc_display'] = info.get('vnc_display')
+                        result['vnc_port'] = info.get('vnc_port')
                 elif vm_alive and guest_status == 'shutdown' and action in ('power', 'wake', 'toggle'):
                     # The QEMU process/monitor can remain alive after guest ACPI shutdown.
                     # Serial input cannot wake a halted guest; reset it through QEMU's monitor.
                     ok, msg = send_qemu_monitor_cmd('system_reset')
                     restart_method = 'monitor_system_reset'
                     if not ok:
-                        stop_qemu_backend()
-                        ok, msg = launch_qemu_profile(active_profile_key)
+                        stop_tracked_qemu()
+                        ok, msg, info = launch_qemu_profile(active_profile_key)
                         restart_method = 'backend_relaunch'
                     result = {'success': ok, 'action': 'power_on', 'restart_method': restart_method if ok else 'failed', 'message': str(msg)}
                 elif vm_alive and action in ('power', 'wake', 'toggle'):
@@ -3751,14 +4544,20 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             action = str(data.get('action', 'lock')).strip().lower()
             cmd = "LOCK_KEY" if action in ('lock', 'power', 'toggle') else "POWER_KEY"
             ok, msg = send_guest_serial_command(cmd, timeout=2)
-            with telemetry_lock:
-                serial_lines.append(f"[STUDIO_POWER] {cmd} toggle dispatched")
-            self.send_response(200)
+            if ok:
+                with telemetry_lock:
+                    serial_lines.append(f"[STUDIO_POWER] {cmd} toggle dispatched")
+            else:
+                # The command never reached a guest. Reporting it as dispatched
+                # would claim a device action that did not happen.
+                with telemetry_lock:
+                    serial_lines.append(f"[STUDIO_POWER] {cmd} not dispatched: {msg}")
+            self.send_response(200 if ok else 503)
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
             self.wfile.write(json.dumps({
-                'success': True,
-                'status': 'DISPATCHED',
+                'success': ok,
+                'status': 'DISPATCHED' if ok else 'NOT_DISPATCHED',
                 'action': action,
                 'detail': msg
             }).encode())
@@ -4393,6 +5192,8 @@ if __name__ == '__main__':
             print("============================================================")
             httpd.serve_forever()
     except KeyboardInterrupt:
-        stop_qemu_backend()
+        # The guest this Studio launched (or adopted) is stopped with it, so
+        # the next Studio session starts from a clean device state.
+        stop_tracked_qemu()
         print("\nStopping studio server.")
         sys.exit(0)

@@ -232,7 +232,20 @@ class StudioSecurityTests(unittest.TestCase):
         server_py = os.path.join(WORKSPACE_ROOT, "emulator", "server.py")
         with open(server_py, "r", encoding="utf-8") as f:
             server_src = f.read()
-        self.assertIn('"-vnc", "127.0.0.1:1"', server_src, "emulator/server.py must pass 127.0.0.1:1 for VNC")
+        # WHY the shape changed: the VNC display is a setting now, because a
+        # hard-coded display made QEMU exit at launch whenever something else
+        # held the port. The contract that matters is unchanged and stronger:
+        # the listener stays on loopback, the default display is still 1
+        # (127.0.0.1:5901), and the display is taken from the resolved
+        # configuration rather than typed into the argument list.
+        self.assertIn('"-vnc", f"127.0.0.1:{vnc_display}"', server_src,
+                      "emulator/server.py must bind the VNC listener to loopback using the resolved display")
+        self.assertIn("DEFAULT_VNC_DISPLAY = 1", server_src,
+                      "emulator/server.py must keep display 1 (127.0.0.1:5901) as the default")
+        self.assertNotIn('"-vnc", "127.0.0.1:1"', server_src,
+                         "emulator/server.py must not hard-code the VNC display")
+        self.assertNotIn('"-vnc", "0.0.0.0', server_src,
+                         "emulator/server.py must never bind VNC to a wildcard address")
 
     def test_10_dns_rebinding_and_host_origin_validation(self):
         """Verify Host authority and Origin are strictly validated against permitted local loopback."""

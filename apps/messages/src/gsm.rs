@@ -3,6 +3,8 @@
 
 use interos_std::ai::{cosine_similarity_q7, MatryoshkaDim};
 
+use crate::theme::THEME;
+
 /// Standard GSM 03.38 / 23.040 SMS character bounds.
 pub const SINGLE_SMS_MAX_CHARS: usize = 160;
 pub const MULTIPART_SMS_SEGMENT_MAX_CHARS: usize = 153;
@@ -43,11 +45,16 @@ impl ThreatLevel {
         }
     }
 
+    /// The threat level's colour.
+    ///
+    /// WHY these are the platform's roles and not colours of their own: a
+    /// threat level is a state the interface reports, and the platform already
+    /// names the three states -- a clean message, a warning and a failure.
     pub const fn color(&self) -> u32 {
         match self {
-            Self::Safe => 0xFF2E8B57,       // Emerald Green
-            Self::Suspicious => 0xFFF59E0B, // Amber Warning
-            Self::HighRisk => 0xFFEF4444,   // Crimson Threat
+            Self::Safe => THEME.success,
+            Self::Suspicious => THEME.warning,
+            Self::HighRisk => THEME.error,
         }
     }
 }
@@ -87,9 +94,9 @@ impl SecurityBadge {
 
     pub const fn color(&self) -> u32 {
         match self {
-            Self::VerifiedSafe => 0xFF2E8B57,
-            Self::SuspiciousUrgency => 0xFFF59E0B,
-            Self::PotentialPhishing => 0xFFEF4444,
+            Self::VerifiedSafe => THEME.success,
+            Self::SuspiciousUrgency => THEME.warning,
+            Self::PotentialPhishing => THEME.error,
         }
     }
 }

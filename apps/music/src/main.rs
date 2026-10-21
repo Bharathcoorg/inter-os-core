@@ -32,10 +32,8 @@ use interos_std as std;
 
 mod store;
 use store::TrackStore;
-use std::design::color::{
-    DARK_BACKGROUND as BG, DARK_BORDER as BORDER, DARK_SURFACE as SURFACE, DARK_TEXT as TEXT,
-    DARK_TEXT_MUTED as MUTED, TEXT as INK_ON_LIGHT, TEXT_MUTED as FAINT,
-};
+use music::theme::{MIN_TOUCH_TARGET, THEME, radius, spacing};
+use std::design::components;
 use std::design::font;
 use std::design::outline_text;
 use std::design::primitives::{draw_circle, draw_pill, draw_rounded_rect, Rect};
@@ -416,6 +414,24 @@ impl MusicApp {
     }
 }
 
+
+/// The platform's corner radii, under the short names the renderer uses.
+///
+/// WHY the aliases exist: the corner test names its radius four times, and a
+/// number that appears four times is a number that can drift from the
+/// platform. The alias resolves to the platform's step, so the drift is the
+/// platform's and not this app's.
+const R_CONTROL: usize = radius::CONTROL;
+const R_SHEET: usize = radius::SHEET;
+
+/// The platform's list-row treatment, at the two states the track list uses.
+///
+/// WHY the track list is the platform's list row: a row that invents its own
+/// fill, its own divider and its own padding is a row a third-party app
+/// cannot match, and the platform already says what a row looks like.
+const ROW: components::ListRowStyle = components::list_row_style(&THEME, false);
+const ROW_SELECTED: components::ListRowStyle = components::list_row_style(&THEME, true);
+
 const W: usize = 720;
 
 /// The hardware keystore slot this app asks for its media key from.
@@ -428,26 +444,21 @@ const H: usize = 1440;
 const CHUNK: usize = 4096;
 
 // -----------------------------------------------------------------------------
-// 32-bit ARGB8888 Design Color Tokens (immersive dark media surface)
+// Visual Design Tokens
 //
-// Every token the renderer uses is an alias of the shared canonical palette in
-// `interos_std::design::color`, so this surface cannot silently drift from the
-// design system the way raw hex literals in this file could. The aliases keep
-// the short local names the renderer already uses. (When reconciled, every
-// literal matched its shared token exactly, so this is a structural fix, not a
-// colour change.)
+// WHY there is no palette here any more: the app used to reach into the
+// platform's *palette* module for its colours, which named values rather than
+// roles, so an app could not ask "what is the accent on this surface" and get
+// an answer that held in both themes. Every colour now resolves through the
+// platform's theme, so a third-party app that asks the SDK for the same roles
+// draws the same media surface. See `music::theme` for the mapping from the
+// old names to the platform's roles.
 // -----------------------------------------------------------------------------
-/// Recessed control fill - a disabled transport sits below the surface.
-///
-/// The one colour not in the shared palette: it is the step between
-/// `DARK_BACKGROUND` and `DARK_SURFACE` that gives a disabled control its
-/// sunken read, used nowhere else.
-const RECESSED: u32 = 0xFF1B1E20;
 
 // -----------------------------------------------------------------------------
 // Layout constants - shared by the renderer and the hit-tester
 // -----------------------------------------------------------------------------
-const MARGIN: usize = 24;
+const MARGIN: usize = spacing::GRID_24;
 const CONTENT_W: usize = W - 2 * MARGIN;
 
 const BAR_H: usize = 96;
@@ -481,9 +492,14 @@ const META_Y1: usize = 840;
 // -----------------------------------------------------------------------------
 const VOLUME_Y0: usize = 848;
 const VOLUME_Y1: usize = 892;
-/// Step-down / step-up controls: 56 x 40 px, both >= the 56 px touch minimum.
-const VOL_MINUS: Rect = Rect::new(24, 852, 56, 40);
-const VOL_PLUS: Rect = Rect::new(600, 852, 56, 40);
+/// Step-down / step-up controls.
+///
+/// WHY 56 x 44 and not 56 x 40: the design system's minimum touch target is
+/// 44 logical pixels and these were 40, so a step-down had to be hit
+/// precisely. The row band is 848..892, so a 44-row button fills it exactly
+/// and the label and meter beside it are unchanged.
+const VOL_MINUS: Rect = Rect::new(24, 848, 56, MIN_TOUCH_TARGET);
+const VOL_PLUS: Rect = Rect::new(600, 848, 56, MIN_TOUCH_TARGET);
 const VOL_LABEL_X: usize = 96;
 const VOL_VALUE_X: usize = 190;
 /// Meter trough and fill, drawn only when a real level is known.
@@ -839,9 +855,9 @@ fn volume_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> Option<u32> {
     // Step controls first: they are drawn on top of nothing, but their hit rects
     // are the authority for the tap handler.
     for (r, plus) in [(VOL_MINUS, false), (VOL_PLUS, true)] {
-        if let Some(c) = draw_rounded_rect(x, y, r, 12, RECESSED, Some(BORDER), 1) {
-            let ink = if app.volume_percent.is_some() { TEXT } else { FAINT };
-            if c == RECESSED && step_glyph(x, y, r, plus) {
+        if let Some(c) = draw_rounded_rect(x, y, r, R_CONTROL, THEME.surface_container_low, Some(THEME.border), 1) {
+            let ink = if app.volume_percent.is_some() { THEME.on_surface } else { THEME.muted };
+            if c == THEME.surface_container_low && step_glyph(x, y, r, plus) {
                 return Some(ink);
             }
             return Some(c);
@@ -851,19 +867,19 @@ fn volume_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> Option<u32> {
     // Meter trough / fill.
     if y >= VOL_METER_Y0 && y < VOL_METER_Y1 && x >= VOL_METER_X0 && x < VOL_METER_X1 {
         if f.vol.known && x < VOL_METER_X0 + f.vol.fill_w {
-            return Some(TEXT);
+            return Some(THEME.on_surface);
         }
-        return Some(RECESSED);
+        return Some(THEME.surface_container_low);
     }
 
     // Label + value, both gated on their own measured line box.
     let label_y = VOLUME_Y0
         + (VOLUME_Y1 - VOLUME_Y0).saturating_sub(font::line_height(1))
         / 2;
-    if let Some(c) = text(x, y, VOL_LABEL_X, label_y, 1, b"Volume", MUTED, BG) {
+    if let Some(c) = text(x, y, VOL_LABEL_X, label_y, 1, b"Volume", THEME.on_surface_variant, THEME.surface) {
         return Some(c);
     }
-    let value_color = if f.vol.known { TEXT } else { FAINT };
+    let value_color = if f.vol.known { THEME.on_surface } else { THEME.muted };
     text(
         x,
         y,
@@ -872,7 +888,7 @@ fn volume_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> Option<u32> {
         1,
         &f.vol.value[..f.vol.value_len],
         value_color,
-        BG,
+        THEME.surface,
     )
 }
 
@@ -883,32 +899,32 @@ fn volume_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> Option<u32> {
 fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
     // 0. Home Gesture Pill (x: 260..460, y: 1418..1424).
     if y >= HOME_Y0 && y < HOME_Y1 && x >= 260 && x < 460 {
-        return MUTED;
+        return THEME.on_surface_variant;
     }
 
     // 1. Top bar: dismiss control + screen label.
     if y < BAR_H {
         if y == BAR_H - 1 {
-            return BORDER;
+            return THEME.border;
         }
         // Standardized back button squircle (24..72, 24..72)
-        if let Some(c) = std::design::back_button::pixel(x, y, TEXT, BORDER, RECESSED) {
+        if let Some(c) = std::design::back_button::pixel(x, y, THEME.on_surface, THEME.border, THEME.surface_container_low) {
             return c;
         }
-        if let Some(c) = text_centered(x, y, 48, 1, b"Media player", MUTED, BG) {
+        if let Some(c) = text_centered(x, y, 48, 1, b"Media player", THEME.on_surface_variant, THEME.surface) {
             return c;
         }
-        return BG;
+        return THEME.surface;
     }
 
     // 2. Album artwork: a neutral placeholder, never a fabricated cover.
     let art = Rect::new(ART_X, ART_Y, ART_W, ART_H);
-    if let Some(c) = draw_rounded_rect(x, y, art, 24, SURFACE, Some(BORDER), 1) {
-        if c != SURFACE {
+    if let Some(c) = draw_rounded_rect(x, y, art, R_SHEET, THEME.surface_container, Some(THEME.border), 1) {
+        if c != THEME.surface_container {
             return c;
         }
         if note_glyph(x, y, ART_X + ART_W / 2, ART_GLYPH_CY) {
-            return FAINT;
+            return THEME.muted;
         }
         if let Some(c) = text_centered(
             x,
@@ -916,12 +932,12 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
             ART_CAPTION_Y,
             1,
             b"No artwork - no album art in library",
-            FAINT,
-            SURFACE,
+            THEME.muted,
+            THEME.surface_container,
         ) {
             return c;
         }
-        return SURFACE;
+        return THEME.surface_container;
     }
 
     // 3. Track metadata from the real, persisted library (empty -> honest idle
@@ -937,7 +953,7 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
         let mut tbuf = [0u8; 40];
         let tn = font::ellipsize(title, 1, CONTENT_W, &mut tbuf);
         let tw = font::measure_bold(&tbuf[..tn], 1);
-        if let Some(c) = text_bold(x, y, (W.saturating_sub(tw)) / 2, TITLE_Y, 1, &tbuf[..tn], TEXT, BG) {
+        if let Some(c) = text_bold(x, y, (W.saturating_sub(tw)) / 2, TITLE_Y, 1, &tbuf[..tn], THEME.on_surface, THEME.surface) {
             return c;
         }
     }
@@ -954,10 +970,10 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
             cap[cl..cl + dn].copy_from_slice(&db[..dn]);
             cl += dn;
         }
-        if let Some(c) = text_centered(x, y, ARTIST_Y, 1, &cap[..cl], MUTED, BG) {
+        if let Some(c) = text_centered(x, y, ARTIST_Y, 1, &cap[..cl], THEME.on_surface_variant, THEME.surface) {
             return c;
         }
-    } else if let Some(c) = text_centered(x, y, ARTIST_Y, 1, b"Local library is empty - nothing to play", MUTED, BG) {
+    } else if let Some(c) = text_centered(x, y, ARTIST_Y, 1, b"Local library is empty - nothing to play", THEME.on_surface_variant, THEME.surface) {
         return c;
     }
     let state_label: &[u8] = match app.state {
@@ -965,7 +981,7 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
         PlaybackState::Paused => b"Paused",
         PlaybackState::Stopped => b"Stopped",
     };
-    if let Some(c) = text_centered(x, y, STATE_Y, 1, state_label, FAINT, BG) {
+    if let Some(c) = text_centered(x, y, STATE_Y, 1, state_label, THEME.muted, THEME.surface) {
         return c;
     }
 
@@ -974,17 +990,17 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
     //    every state; with a track selected the honest duration is shown, and
     //    elapsed stays 0:00 because nothing actually plays.
     //
-    // WHY the recessed fill rather than BORDER: the rule used to be drawn in the
+    // WHY the recessed fill rather than THEME.border: the rule used to be drawn in the
     // same stroke colour as the enabled controls elsewhere on this surface,
-    // which read as a seekable track. RECESSED is the one tone in this palette
+    // which read as a seekable track. THEME.surface_container_low is the one tone in this palette
     // reserved for something that cannot be acted on, and with no position
     // there is nothing to seek.
     if y >= TRACK_Y && y < TRACK_Y + TRACK_H && x >= MARGIN && x < MARGIN + CONTENT_W {
-        return RECESSED;
+        return THEME.surface_container_low;
     }
     if y >= TIMES_Y && y < TIMES_Y + font::line_height(1) {
         // Elapsed is truly 0:00: no transport has ever advanced a position.
-        if let Some(c) = text(x, y, MARGIN, TIMES_Y, 1, b"0:00", FAINT, BG) {
+        if let Some(c) = text(x, y, MARGIN, TIMES_Y, 1, b"0:00", THEME.muted, THEME.surface) {
             return c;
         }
         // The right label is the stored duration when one is known, otherwise
@@ -997,7 +1013,7 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
             }
             None => (b"--:--" as &[u8], font::measure(b"--:--", 1)),
         };
-        if let Some(c) = text(x, y, MARGIN + CONTENT_W - rw, TIMES_Y, 1, rem, FAINT, BG) {
+        if let Some(c) = text(x, y, MARGIN + CONTENT_W - rw, TIMES_Y, 1, rem, THEME.muted, THEME.surface) {
             return c;
         }
     }
@@ -1020,10 +1036,10 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
             b"playback position",
         )
     };
-    if let Some(c) = text_centered(x, y, SCRUB_NOTE_Y, 1, note_a, FAINT, BG) {
+    if let Some(c) = text_centered(x, y, SCRUB_NOTE_Y, 1, note_a, THEME.muted, THEME.surface) {
         return c;
     }
-    if let Some(c) = text_centered(x, y, SCRUB_NOTE_Y + font::line_height(1), 1, note_b, FAINT, BG) {
+    if let Some(c) = text_centered(x, y, SCRUB_NOTE_Y + font::line_height(1), 1, note_b, THEME.muted, THEME.surface) {
         return c;
     }
 
@@ -1032,7 +1048,7 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
         if let Some(c) = volume_pixel(x, y, app, f) {
             return c;
         }
-        return BG;
+        return THEME.surface;
     }
 
     // 5. Transport row at y = 990. Targets: 64 / 88 / 64 px, all >= 56 px.
@@ -1041,12 +1057,12 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
     let active = !app.store.is_empty();
 
     {
-        let r = if active { SURFACE } else { RECESSED };
-        if let Some(c) = draw_circle(x, y, PREV_CX, TRANSPORT_CY, SIDE_R, r, Some(BORDER)) {
+        let r = if active { THEME.surface_container } else { THEME.surface_container_low };
+        if let Some(c) = draw_circle(x, y, PREV_CX, TRANSPORT_CY, SIDE_R, r, Some(THEME.border)) {
             if c != r {
                 return c;
             }
-            let ink = if active { TEXT } else { FAINT };
+            let ink = if active { THEME.on_surface } else { THEME.muted };
             let dx = (x as isize) - PREV_CX as isize;
             let dy = (y as isize) - TRANSPORT_CY as isize;
             // WHY this glyph points left with its bar on the right: that is what
@@ -1070,13 +1086,13 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
     }
 
     {
-        let r = if active { TEXT } else { RECESSED };
-        let ring = if active { None } else { Some(BORDER) };
+        let r = if active { THEME.on_surface } else { THEME.surface_container_low };
+        let ring = if active { None } else { Some(THEME.border) };
         if let Some(c) = draw_circle(x, y, PLAY_CX, TRANSPORT_CY, PLAY_R, r, ring) {
             if c != r {
                 return c;
             }
-            let glyph = if active { INK_ON_LIGHT } else { FAINT };
+            let glyph = if active { THEME.on_primary } else { THEME.muted };
             let dx = (x as isize) - PLAY_CX as isize;
             let dy = (y as isize) - TRANSPORT_CY as isize;
             if app.state == PlaybackState::Playing && active {
@@ -1094,12 +1110,12 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
     }
 
     {
-        let r = if active { SURFACE } else { RECESSED };
-        if let Some(c) = draw_circle(x, y, NEXT_CX, TRANSPORT_CY, SIDE_R, r, Some(BORDER)) {
+        let r = if active { THEME.surface_container } else { THEME.surface_container_low };
+        if let Some(c) = draw_circle(x, y, NEXT_CX, TRANSPORT_CY, SIDE_R, r, Some(THEME.border)) {
             if c != r {
                 return c;
             }
-            let ink = if active { TEXT } else { FAINT };
+            let ink = if active { THEME.on_surface } else { THEME.muted };
             let dx = (x as isize) - NEXT_CX as isize;
             let dy = (y as isize) - TRANSPORT_CY as isize;
             // Points right with its bar behind it on the left: the next-track
@@ -1122,87 +1138,87 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
     //    open, real rows when the library has entries, and an honest empty state
     //    otherwise.
     if y >= LIST_LABEL_Y && y < LIST_LABEL_Y + font::line_height(1) {
-        if let Some(c) = text(x, y, MARGIN, LIST_LABEL_Y, 1, b"TRACKS", FAINT, BG) {
+        if let Some(c) = text(x, y, MARGIN, LIST_LABEL_Y, 1, b"TRACKS", THEME.muted, THEME.surface) {
             return c;
         }
     }
-    if let Some(c) = draw_pill(x, y, ADD_BTN, SURFACE, Some(BORDER)) {
+    if let Some(c) = draw_pill(x, y, ADD_BTN, THEME.surface_container, Some(THEME.border)) {
         if let Some(c) = text_in_rect_centered(
             x,
             y,
             ADD_BTN,
             1,
             b"ADD TRACK",
-            TEXT,
-            SURFACE,
+            THEME.on_surface,
+            THEME.surface_container,
         ) {
             return c;
         }
         return c;
     }
     if y == LIST_DIVIDER_Y && x >= MARGIN && x < MARGIN + CONTENT_W {
-        return BORDER;
+        return THEME.border;
     }
 
     if app.add_open {
         // Add-track editor: a title field, a duration (seconds) field, and
         // Save / Cancel controls. Shares its rects with the tap handler and with
         // its own repaint band.
-        if let Some(c) = draw_rounded_rect(x, y, ADD_TITLE_FIELD, 12, SURFACE, Some(BORDER), 1) {
-            if c != SURFACE {
+        if let Some(c) = draw_rounded_rect(x, y, ADD_TITLE_FIELD, R_CONTROL, THEME.surface_container, Some(THEME.border), 1) {
+            if c != THEME.surface_container {
                 return c;
             }
             let tt = &app.add_title[..app.add_title_len];
             let shown: &[u8] = if tt.is_empty() { b"Track title" } else { tt };
             let ty = ADD_TITLE_FIELD.y + (ADD_TITLE_FIELD.h.saturating_sub(font::line_height(1))) / 2;
-            let ink = if tt.is_empty() { FAINT } else { TEXT };
-            if let Some(c) = text(x, y, ADD_TITLE_FIELD.x + 16, ty, 1, shown, ink, SURFACE) {
+            let ink = if tt.is_empty() { THEME.muted } else { THEME.on_surface };
+            if let Some(c) = text(x, y, ADD_TITLE_FIELD.x + 16, ty, 1, shown, ink, THEME.surface_container) {
                 return c;
             }
-            return SURFACE;
+            return THEME.surface_container;
         }
-        if let Some(c) = draw_rounded_rect(x, y, ADD_DUR_FIELD, 12, SURFACE, Some(BORDER), 1) {
-            if c != SURFACE {
+        if let Some(c) = draw_rounded_rect(x, y, ADD_DUR_FIELD, R_CONTROL, THEME.surface_container, Some(THEME.border), 1) {
+            if c != THEME.surface_container {
                 return c;
             }
             let dd = &app.add_dur[..app.add_dur_len];
             let shown: &[u8] = if dd.is_empty() { b"duration (s)" } else { dd };
             let dyy = ADD_DUR_FIELD.y + (ADD_DUR_FIELD.h.saturating_sub(font::line_height(1))) / 2;
-            let ink = if dd.is_empty() { FAINT } else { TEXT };
-            if let Some(c) = text(x, y, ADD_DUR_FIELD.x + 16, dyy, 1, shown, ink, SURFACE) {
+            let ink = if dd.is_empty() { THEME.muted } else { THEME.on_surface };
+            if let Some(c) = text(x, y, ADD_DUR_FIELD.x + 16, dyy, 1, shown, ink, THEME.surface_container) {
                 return c;
             }
-            return SURFACE;
+            return THEME.surface_container;
         }
-        if let Some(c) = draw_pill(x, y, ADD_SAVE_BTN, SURFACE, Some(BORDER)) {
+        if let Some(c) = draw_pill(x, y, ADD_SAVE_BTN, THEME.surface_container, Some(THEME.border)) {
             if let Some(c) = text_in_rect_centered(
                 x,
                 y,
                 ADD_SAVE_BTN,
                 1,
                 b"ADD TRACK",
-                TEXT,
-                SURFACE,
+                THEME.on_surface,
+                THEME.surface_container,
             ) {
                 return c;
             }
             return c;
         }
-        if let Some(c) = draw_pill(x, y, ADD_CANCEL_BTN, RECESSED, Some(BORDER)) {
+        if let Some(c) = draw_pill(x, y, ADD_CANCEL_BTN, THEME.surface_container_low, Some(THEME.border)) {
             if let Some(c) = text_in_rect_centered(
                 x,
                 y,
                 ADD_CANCEL_BTN,
                 1,
                 b"CANCEL",
-                FAINT,
-                RECESSED,
+                THEME.muted,
+                THEME.surface_container_low,
             ) {
                 return c;
             }
             return c;
         }
-        return BG;
+        return THEME.surface;
     }
 
     if app.store.is_empty() {
@@ -1229,13 +1245,13 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
                 b"No audio files were found in local storage",
             ),
         };
-        if let Some(c) = text_centered_bold(x, y, LIST_TITLE_Y, 1, title, TEXT, BG) {
+        if let Some(c) = text_centered_bold(x, y, LIST_TITLE_Y, 1, title, THEME.on_surface, THEME.surface) {
             return c;
         }
-        if let Some(c) = text_centered(x, y, LIST_SUB_Y, 1, subline, MUTED, BG) {
+        if let Some(c) = text_centered(x, y, LIST_SUB_Y, 1, subline, THEME.on_surface_variant, THEME.surface) {
             return c;
         }
-        return BG;
+        return THEME.surface;
     }
 
     let scroll = app.list_scroll.offset;
@@ -1250,13 +1266,16 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
         let t = app.store.get(i).unwrap();
         if y >= row_y && y < row_y + 80 {
             let selected = i == app.current_track_idx;
+            // The platform's list-row treatment: the fill of the row the tap
+            // lands on and the fill of the row it does not.
+            let row_fill = if selected { ROW_SELECTED.fill } else { ROW.fill };
             let title_y = row_y + 12;
             // Delete affordance, matching its hit region in the tap handler.
             let del_x = MARGIN + CONTENT_W - 40;
             let ddx = x as isize - del_x as isize;
             let ddy = y as isize - (row_y + 24) as isize;
             if ddx.abs() <= 6 && ddy.abs() <= 6 && (ddx.abs() - ddy.abs()).abs() <= 2 {
-                return FAINT;
+                return THEME.muted;
             }
             let mut buf = [0u8; 48];
             let n = font::ellipsize(t.title(), 1, CONTENT_W - 96, &mut buf);
@@ -1267,22 +1286,22 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
                 title_y,
                 1,
                 &buf[..n],
-                if selected { TEXT } else { MUTED },
-                BG,
+                if selected { THEME.on_surface } else { THEME.on_surface_variant },
+                row_fill,
             ) {
                 return c;
             }
             // Duration caption from the stored length (never a fake position).
             let mut db = [0u8; 12];
             let dn = fmt_mmss(&mut db, t.duration_sec());
-            if let Some(c) = text(x, y, MARGIN + 8, row_y + 44, 1, &db[..dn], FAINT, BG) {
+            if let Some(c) = text(x, y, MARGIN + 8, row_y + 44, 1, &db[..dn], THEME.muted, row_fill) {
                 return c;
             }
-            return BG;
+            return row_fill;
         }
         // Row-gap divider at +88 (see the gate note above the text runs).
         if y == row_y + 88 && x >= MARGIN && x < MARGIN + CONTENT_W {
-            return BORDER;
+            return ROW.divider;
         }
     }
 
@@ -1294,10 +1313,10 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
     {
         let track_x = MARGIN + CONTENT_W - 4;
         if x == track_x && y >= thumb_y && y < thumb_y + thumb_h {
-            return FAINT;
+            return THEME.muted;
         }
     }
-    return BG;
+    return THEME.surface;
 }
 
 fn render_music_ui(surface: u32, app: &MusicApp) {

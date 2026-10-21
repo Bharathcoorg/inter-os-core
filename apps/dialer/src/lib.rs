@@ -2,6 +2,9 @@
 
 pub use interos_std as std;
 
+/// The app's view of the platform's design system.
+pub mod theme;
+
 pub const CONTACT_NAME_MAX: usize = 18;
 pub const CONTACT_NUM_MAX: usize = 16;
 pub const CONTACT_RECORD_BYTES: usize = 1 + 1 + CONTACT_NAME_MAX + CONTACT_NUM_MAX; // 36 bytes

@@ -139,8 +139,13 @@ def test_device_studio_power_on_and_reboot_are_not_reported_as_simulated():
     # `query_qemu_monitor()` form (d4c006c) was restructured by 2ce79a6 into a
     # single forced query whose result also reports guest_status, so assert the
     # current equivalent rather than a cached process flag.
+    #
+    # The local name moved from monitor_alive to vm_alive when liveness was
+    # pinned to the QEMU process this Studio launched (the query's own
+    # qemu_alive is now true only for that process, so the value it carries is
+    # the same fact the power path needs).
     assert "monitor_state = query_qemu_monitor(force=True)" in server
-    assert "monitor_alive = bool(monitor_state.get('qemu_alive', False))" in server
+    assert "vm_alive = bool(monitor_state.get('qemu_alive', False))" in server
     assert "restart_method = 'monitor_system_reset'" in server
     assert "restart_method = 'backend_relaunch'" in server
     assert "simulated" not in app

@@ -22,9 +22,12 @@ SDK = ROOT / "sdk" / "rust" / "interos-std" / "src" / "design" / "mod.rs"
 # remaining work visible and it can only shrink. An app that has been
 # fixed and left in the list fails the suite, so a name cannot outlive the
 # fault it was added for.
-UNDERSIZED_TARGETS = {
-    "messages": "RECIPIENT_FIELD",
-}
+#
+# WHY it is empty: every app's named hit rectangle is now at least the
+# platform's 44 logical pixel minimum. The recipient field in the messages
+# app was the last one: it was a 36-row strip that had to be tapped to focus
+# it, and it is now a 44-row field that starts at the top of its band.
+UNDERSIZED_TARGETS: dict[str, str] = {}
 
 # A hit rectangle written as a named constant.
 RECT = re.compile(

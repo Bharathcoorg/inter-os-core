@@ -23,6 +23,8 @@
 
 use core::panic::PanicInfo;
 use interos_std as std;
+use browser::theme::{MIN_TOUCH_TARGET, THEME, radius, type_scale};
+use interos_std::design::components;
 use interos_std::design::font;
 use interos_std::design::primitives::{draw_rounded_rect, Rect};
 
@@ -35,22 +37,6 @@ use browser::{
 // -----------------------------------------------------------------------------
 // Sovereign InterOS Browser Design Tokens
 // -----------------------------------------------------------------------------
-const CHROME_BG: u32 = 0xFF0B0F17;            // Obsidian Slate Deep Canvas
-const CHROME_SURFACE: u32 = 0xFF131A26;       // Elevated Glass Surface
-#[allow(dead_code)]
-const CHROME_SURFACE_HOVER: u32 = 0xFF1E2838; // Slate Hover
-const CHROME_BORDER: u32 = 0xFF1E293B;        // Delicate Hairline Border
-const CHROME_DIVIDER: u32 = 0xFF182232;       // Section Divider
-const CHROME_BLUE: u32 = 0xFF38BDF8;          // Electric Sapphire Accent
-#[allow(dead_code)]
-const CHROME_BLUE_DARK: u32 = 0xFF1E3A8A;     // Deep Sapphire
-const CHROME_TEXT: u32 = 0xFFF8FAFC;          // Pure Crisp Off-White Text
-const CHROME_MUTED: u32 = 0xFF94A3B8;         // Muted Slate Text
-const CHROME_CARD: u32 = 0xFF161F30;          // Card Background
-const CHROME_CARD_BORDER: u32 = 0xFF283548;   // Card Stroke
-const CHROME_RED: u32 = 0xFFF87171;           // Alert / Error Coral Red
-#[allow(dead_code)]
-const CHROME_CODE_BG: u32 = 0xFF0F172A;       // Code Block Slate Dark
 
 // -----------------------------------------------------------------------------
 // Viewport & Layout Geometry (720x1440, 8pt Grid)
@@ -219,6 +205,29 @@ fn fetch_over_tcp(
     outcome
 }
 
+
+/// The platform's corner radii, under the short names the renderer uses.
+///
+/// WHY the aliases exist: the corner test names its radius four times, and a
+/// number that appears four times is a number that can drift from the
+/// platform. The alias resolves to the platform's step, so the drift is the
+/// platform's and not this app's.
+const R_CARD: usize = radius::CARD;
+const R_CHIP: usize = radius::CHIP;
+const R_CONTROL: usize = radius::CONTROL;
+const R_SMALL: usize = radius::SMALL;
+const R_SOFT: usize = radius::SOFT_PILL;
+
+/// The platform's card treatment, at the elevation the browser's cards sit at.
+///
+/// WHY the browser's cards are the platform's cards: a card that invents its
+/// own fill and its own hairline is a card a third-party app cannot match, and
+/// the platform already says what a card looks like. The raised elevation is
+/// the one the browser's cards have always been -- a fill one step above the
+/// page, with a hairline around it.
+const CARD: components::CardStyle =
+    components::card_style(&THEME, components::Elevation::Raised);
+
 const W: usize = 720;
 const H: usize = 1440;
 const CHUNK: usize = 4096;
@@ -267,13 +276,21 @@ fn append_u64_text(buf: &mut [u8], mut n: usize, mut value: u64) -> usize {
 /// scales, and the reader's three heading levels were all set at scale 1 --
 /// so a page title and a section heading were the same size on the screen
 /// and differed only in colour.
-const TYPE_H1_SCALE: usize = 2;
+const TYPE_H1_SCALE: usize = type_scale::BODY;
 
 const PILL: Rect = Rect::new(16, 56, 460, 52);
 const PILL_R: usize = 26;
 const PILL_TEXT_X: usize = 56;
 const PILL_TEXT_Y: usize = 70;
 const PILL_TEXT_MAX: usize = 380;
+
+/// The tab switcher's "+ New Tab" control.
+///
+/// WHY 44 and not 38: the design system's minimum touch target is 44 logical
+/// pixels and this button was 38. The tab switcher header band is 120..170, so
+/// the button now fills the band from its top to its bottom and the tab cards
+/// below, which start at 180, are untouched.
+const NEW_TAB_BTN: Rect = Rect::new(530, 126, 150, MIN_TOUCH_TARGET);
 
 /// Omnibox Right Controls
 const RELOAD_BTN: Rect = Rect::new(486, 60, 44, 44);
@@ -1291,7 +1308,7 @@ impl Frame {
         let mut f = Self {
             pill: [0; 96],
             pill_len: 0,
-            pill_color: CHROME_MUTED,
+            pill_color: THEME.on_surface_variant,
             show_caret: false,
             caret_x: PILL_TEXT_X,
             select_w: 0,
@@ -1321,9 +1338,9 @@ impl Frame {
         f.pill_color = if app.address_len > 0
             || (app.current_url_len > 0 && &app.current_url[..app.current_url_len] != b"about:blank")
         {
-            CHROME_TEXT
+            THEME.on_surface
         } else {
-            CHROME_MUTED
+            THEME.on_surface_variant
         };
         f.pill_len = font::ellipsize(src, 1, PILL_TEXT_MAX, &mut f.pill);
         f.show_caret = app.address_focused;
@@ -1501,13 +1518,13 @@ fn tab_badge_pixel(x: usize, y: usize, cx: usize, cy: usize, count: usize) -> Op
         return None;
     }
     if (dx >= 11 && dx <= 13) || (dy >= 11 && dy <= 13) {
-        return Some(CHROME_MUTED);
+        return Some(THEME.on_surface_variant);
     }
     let digit = [b'0' + (count as u8).min(9).max(1)];
-    if let Some(px) = text_px(x, y, cx - 4, cy - 10, 1, &digit, CHROME_TEXT, CHROME_SURFACE, true) {
+    if let Some(px) = text_px(x, y, cx - 4, cy - 10, 1, &digit, THEME.on_surface, THEME.surface_container, true) {
         return Some(px);
     }
-    Some(CHROME_SURFACE)
+    Some(THEME.surface_container)
 }
 
 /// Link Arrow Glyph (`→`)
@@ -1671,14 +1688,14 @@ fn get_soft_keyboard_char(x: usize, y: usize, shift: bool, symbols: bool) -> Opt
 
 fn render_browser_soft_keyboard(x: usize, y: usize, app: &BrowserApp) -> u32 {
     let krect = Rect::new(6, KB_Y0, 708, KB_Y1 - KB_Y0);
-    if let Some(_) = draw_rounded_rect(x, y, krect, 22, 0xFF181B22, Some(CHROME_BORDER), 1) {
+    if let Some(_) = draw_rounded_rect(x, y, krect, R_CARD, THEME.surface_container_low, Some(THEME.border), 1) {
         // Row 0: Q W E R T Y U I O P (y: 994..1066)
         if y >= 994 && y <= 1066 {
             let col = (x.saturating_sub(15)) / 70;
             let kx = 15 + col * 70;
             if col < 10 && x >= kx + 3 && x <= kx + 63 {
                 let rect = Rect::new(kx + 3, 994, 60, 72);
-                if let Some(c) = draw_rounded_rect(x, y, rect, 10, 0xFF252932, None, 0) {
+                if let Some(c) = draw_rounded_rect(x, y, rect, R_CHIP, THEME.surface_container_high, None, 0) {
                     let ch = if app.kb_symbols {
                         b"1234567890"[col]
                     } else {
@@ -1686,7 +1703,7 @@ fn render_browser_soft_keyboard(x: usize, y: usize, app: &BrowserApp) -> u32 {
                         if app.kb_shift { ch } else { ch.to_ascii_lowercase() }
                     };
                     let ch_buf = [ch];
-                    if let Some(px) = text_px(x, y, kx + 25, 1006, 2, &ch_buf, CHROME_TEXT, c, true) {
+                    if let Some(px) = text_px(x, y, kx + 25, 1006, 2, &ch_buf, THEME.on_surface, c, true) {
                         return px;
                     }
                     return c;
@@ -1700,7 +1717,7 @@ fn render_browser_soft_keyboard(x: usize, y: usize, app: &BrowserApp) -> u32 {
             let kx = 46 + col * 70;
             if col < 9 && x >= kx + 3 && x <= kx + 63 {
                 let rect = Rect::new(kx + 3, 1076, 60, 72);
-                if let Some(c) = draw_rounded_rect(x, y, rect, 10, 0xFF252932, None, 0) {
+                if let Some(c) = draw_rounded_rect(x, y, rect, R_CHIP, THEME.surface_container_high, None, 0) {
                     let ch = if app.kb_symbols {
                         b"-/:;()$&@\""[col]
                     } else {
@@ -1708,7 +1725,7 @@ fn render_browser_soft_keyboard(x: usize, y: usize, app: &BrowserApp) -> u32 {
                         if app.kb_shift { ch } else { ch.to_ascii_lowercase() }
                     };
                     let ch_buf = [ch];
-                    if let Some(px) = text_px(x, y, kx + 25, 1088, 2, &ch_buf, CHROME_TEXT, c, true) {
+                    if let Some(px) = text_px(x, y, kx + 25, 1088, 2, &ch_buf, THEME.on_surface, c, true) {
                         return px;
                     }
                     return c;
@@ -1721,10 +1738,10 @@ fn render_browser_soft_keyboard(x: usize, y: usize, app: &BrowserApp) -> u32 {
             // Shift key (15..95)
             if x >= 15 && x <= 95 {
                 let rect = Rect::new(15, 1158, 80, 72);
-                let fill = if app.kb_shift { CHROME_BLUE } else { 0xFF20232B };
-                if let Some(c) = draw_rounded_rect(x, y, rect, 10, fill, None, 0) {
+                let fill = if app.kb_shift { THEME.primary } else { THEME.surface_container };
+                if let Some(c) = draw_rounded_rect(x, y, rect, R_CHIP, fill, None, 0) {
                     let txt = if app.kb_symbols { b"ABC" as &[u8] } else { b"^" as &[u8] };
-                    if let Some(px) = text_px(x, y, 42, 1182, 1, txt, CHROME_TEXT, c, true) {
+                    if let Some(px) = text_px(x, y, 42, 1182, 1, txt, THEME.on_surface, c, true) {
                         return px;
                     }
                     return c;
@@ -1736,7 +1753,7 @@ fn render_browser_soft_keyboard(x: usize, y: usize, app: &BrowserApp) -> u32 {
             let kx = 105 + col * 70;
             if col < 7 && x >= kx + 3 && x <= kx + 63 {
                 let rect = Rect::new(kx + 3, 1158, 60, 72);
-                if let Some(c) = draw_rounded_rect(x, y, rect, 10, 0xFF252932, None, 0) {
+                if let Some(c) = draw_rounded_rect(x, y, rect, R_CHIP, THEME.surface_container_high, None, 0) {
                     let ch = if app.kb_symbols {
                         b"?!'#%*+="[col]
                     } else {
@@ -1744,7 +1761,7 @@ fn render_browser_soft_keyboard(x: usize, y: usize, app: &BrowserApp) -> u32 {
                         if app.kb_shift { ch } else { ch.to_ascii_lowercase() }
                     };
                     let ch_buf = [ch];
-                    if let Some(px) = text_px(x, y, kx + 25, 1170, 2, &ch_buf, CHROME_TEXT, c, true) {
+                    if let Some(px) = text_px(x, y, kx + 25, 1170, 2, &ch_buf, THEME.on_surface, c, true) {
                         return px;
                     }
                     return c;
@@ -1754,8 +1771,8 @@ fn render_browser_soft_keyboard(x: usize, y: usize, app: &BrowserApp) -> u32 {
             // Backspace key (620..705)
             if x >= 620 && x <= 705 {
                 let rect = Rect::new(620, 1158, 85, 72);
-                if let Some(c) = draw_rounded_rect(x, y, rect, 10, 0xFF20232B, None, 0) {
-                    if let Some(px) = text_px(x, y, 646, 1182, 1, b"<X]", CHROME_TEXT, c, true) {
+                if let Some(c) = draw_rounded_rect(x, y, rect, R_CHIP, THEME.surface_container, None, 0) {
+                    if let Some(px) = text_px(x, y, 646, 1182, 1, b"<X]", THEME.on_surface, c, true) {
                         return px;
                     }
                     return c;
@@ -1768,9 +1785,9 @@ fn render_browser_soft_keyboard(x: usize, y: usize, app: &BrowserApp) -> u32 {
             // ?123 / ABC toggle key (15..115)
             if x >= 15 && x <= 115 {
                 let rect = Rect::new(15, 1240, 100, 72);
-                if let Some(c) = draw_rounded_rect(x, y, rect, 10, 0xFF20232B, None, 0) {
+                if let Some(c) = draw_rounded_rect(x, y, rect, R_CHIP, THEME.surface_container, None, 0) {
                     let txt = if app.kb_symbols { b"ABC" as &[u8] } else { b"?123" as &[u8] };
-                    if let Some(px) = text_px(x, y, 42, 1264, 1, txt, CHROME_TEXT, c, true) {
+                    if let Some(px) = text_px(x, y, 42, 1264, 1, txt, THEME.on_surface, c, true) {
                         return px;
                     }
                     return c;
@@ -1780,8 +1797,8 @@ fn render_browser_soft_keyboard(x: usize, y: usize, app: &BrowserApp) -> u32 {
             // Comma key (125..195)
             if x >= 125 && x <= 195 {
                 let rect = Rect::new(125, 1240, 70, 72);
-                if let Some(c) = draw_rounded_rect(x, y, rect, 10, 0xFF252932, None, 0) {
-                    if let Some(px) = text_px(x, y, 155, 1252, 2, b",", CHROME_TEXT, c, true) {
+                if let Some(c) = draw_rounded_rect(x, y, rect, R_CHIP, THEME.surface_container_high, None, 0) {
+                    if let Some(px) = text_px(x, y, 155, 1252, 2, b",", THEME.on_surface, c, true) {
                         return px;
                     }
                     return c;
@@ -1791,8 +1808,8 @@ fn render_browser_soft_keyboard(x: usize, y: usize, app: &BrowserApp) -> u32 {
             // Spacebar (205..515)
             if x >= 205 && x <= 515 {
                 let rect = Rect::new(205, 1240, 310, 72);
-                if let Some(c) = draw_rounded_rect(x, y, rect, 10, 0xFF252932, None, 0) {
-                    if let Some(px) = text_px(x, y, 328, 1264, 1, b"Space", CHROME_MUTED, c, false) {
+                if let Some(c) = draw_rounded_rect(x, y, rect, R_CHIP, THEME.surface_container_high, None, 0) {
+                    if let Some(px) = text_px(x, y, 328, 1264, 1, b"Space", THEME.on_surface_variant, c, false) {
                         return px;
                     }
                     return c;
@@ -1802,8 +1819,8 @@ fn render_browser_soft_keyboard(x: usize, y: usize, app: &BrowserApp) -> u32 {
             // Period key (525..595)
             if x >= 525 && x <= 595 {
                 let rect = Rect::new(525, 1240, 70, 72);
-                if let Some(c) = draw_rounded_rect(x, y, rect, 10, 0xFF252932, None, 0) {
-                    if let Some(px) = text_px(x, y, 555, 1252, 2, b".", CHROME_TEXT, c, true) {
+                if let Some(c) = draw_rounded_rect(x, y, rect, R_CHIP, THEME.surface_container_high, None, 0) {
+                    if let Some(px) = text_px(x, y, 555, 1252, 2, b".", THEME.on_surface, c, true) {
                         return px;
                     }
                     return c;
@@ -1813,26 +1830,26 @@ fn render_browser_soft_keyboard(x: usize, y: usize, app: &BrowserApp) -> u32 {
             // Go / Navigate key (605..705) - Vibrant Blue Accent
             if x >= 605 && x <= 705 {
                 let rect = Rect::new(605, 1240, 100, 72);
-                if let Some(c) = draw_rounded_rect(x, y, rect, 10, CHROME_BLUE, None, 0) {
-                    if let Some(px) = text_px(x, y, 642, 1264, 1, b"Go", 0xFFFFFFFF, c, true) {
+                if let Some(c) = draw_rounded_rect(x, y, rect, R_CHIP, THEME.primary, None, 0) {
+                    if let Some(px) = text_px(x, y, 642, 1264, 1, b"Go", THEME.on_primary, c, true) {
                         return px;
                     }
                     return c;
                 }
             }
         }
-        return 0xFF181B22;
+        return THEME.surface_container_low;
     }
-    CHROME_BG
+    THEME.surface
 }
 
 fn render_accessory_bar(x: usize, y: usize, _app: &BrowserApp) -> u32 {
     let bar_rect = Rect::new(16, KB_ACC_Y0, 688, 56);
-    if let Some(_) = draw_rounded_rect(x, y, bar_rect, 16, CHROME_SURFACE, Some(CHROME_BORDER), 1) {
+    if let Some(_) = draw_rounded_rect(x, y, bar_rect, R_SOFT, THEME.surface_container, Some(THEME.border), 1) {
         // Chip 1: "https://" (x 24..134)
         let c1 = Rect::new(24, KB_ACC_Y0 + 6, 110, 44);
-        if let Some(c) = draw_rounded_rect(x, y, c1, 10, CHROME_CARD, None, 0) {
-            if let Some(px) = text_px(x, y, 36, KB_ACC_Y0 + 16, 1, b"https://", CHROME_TEXT, c, false) {
+        if let Some(c) = draw_rounded_rect(x, y, c1, R_CHIP, THEME.surface_container_high, None, 0) {
+            if let Some(px) = text_px(x, y, 36, KB_ACC_Y0 + 16, 1, b"https://", THEME.on_surface, c, false) {
                 return px;
             }
             return c;
@@ -1840,8 +1857,8 @@ fn render_accessory_bar(x: usize, y: usize, _app: &BrowserApp) -> u32 {
 
         // Chip 2: ".com" (x 144..224)
         let c2 = Rect::new(144, KB_ACC_Y0 + 6, 80, 44);
-        if let Some(c) = draw_rounded_rect(x, y, c2, 10, CHROME_CARD, None, 0) {
-            if let Some(px) = text_px(x, y, 164, KB_ACC_Y0 + 16, 1, b".com", CHROME_TEXT, c, false) {
+        if let Some(c) = draw_rounded_rect(x, y, c2, R_CHIP, THEME.surface_container_high, None, 0) {
+            if let Some(px) = text_px(x, y, 164, KB_ACC_Y0 + 16, 1, b".com", THEME.on_surface, c, false) {
                 return px;
             }
             return c;
@@ -1849,8 +1866,8 @@ fn render_accessory_bar(x: usize, y: usize, _app: &BrowserApp) -> u32 {
 
         // Chip 3: ".org" (x 234..314)
         let c3 = Rect::new(234, KB_ACC_Y0 + 6, 80, 44);
-        if let Some(c) = draw_rounded_rect(x, y, c3, 10, CHROME_CARD, None, 0) {
-            if let Some(px) = text_px(x, y, 254, KB_ACC_Y0 + 16, 1, b".org", CHROME_TEXT, c, false) {
+        if let Some(c) = draw_rounded_rect(x, y, c3, R_CHIP, THEME.surface_container_high, None, 0) {
+            if let Some(px) = text_px(x, y, 254, KB_ACC_Y0 + 16, 1, b".org", THEME.on_surface, c, false) {
                 return px;
             }
             return c;
@@ -1858,8 +1875,8 @@ fn render_accessory_bar(x: usize, y: usize, _app: &BrowserApp) -> u32 {
 
         // Chip 4: "Clear" (x 324..404)
         let c4 = Rect::new(324, KB_ACC_Y0 + 6, 80, 44);
-        if let Some(c) = draw_rounded_rect(x, y, c4, 10, CHROME_CARD, None, 0) {
-            if let Some(px) = text_px(x, y, 342, KB_ACC_Y0 + 16, 1, b"Clear", CHROME_MUTED, c, false) {
+        if let Some(c) = draw_rounded_rect(x, y, c4, R_CHIP, THEME.surface_container_high, None, 0) {
+            if let Some(px) = text_px(x, y, 342, KB_ACC_Y0 + 16, 1, b"Clear", THEME.on_surface_variant, c, false) {
                 return px;
             }
             return c;
@@ -1867,16 +1884,16 @@ fn render_accessory_bar(x: usize, y: usize, _app: &BrowserApp) -> u32 {
 
         // Dismiss Down Chevron (x 630..694)
         let c_down = Rect::new(630, KB_ACC_Y0 + 6, 64, 44);
-        if let Some(c) = draw_rounded_rect(x, y, c_down, 10, CHROME_CARD, None, 0) {
-            if let Some(col) = draw_chevron_down(x, y, 662, KB_ACC_Y0 + 28, CHROME_BLUE) {
+        if let Some(c) = draw_rounded_rect(x, y, c_down, R_CHIP, THEME.surface_container_high, None, 0) {
+            if let Some(col) = draw_chevron_down(x, y, 662, KB_ACC_Y0 + 28, THEME.primary) {
                 return col;
             }
             return c;
         }
 
-        return CHROME_SURFACE;
+        return THEME.surface_container;
     }
-    CHROME_BG
+    THEME.surface
 }
 
 // -----------------------------------------------------------------------------
@@ -1893,14 +1910,14 @@ fn toolbar_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
         PILL,
         PILL_R,
         if app.address_focused {
-            CHROME_BG
+            THEME.surface
         } else {
-            CHROME_SURFACE
+            THEME.surface_container
         },
         Some(if app.address_focused {
-            CHROME_BLUE
+            THEME.primary
         } else {
-            CHROME_BORDER
+            THEME.border
         }),
         if app.address_focused { 2 } else { 1 },
     ) {
@@ -1917,9 +1934,9 @@ fn toolbar_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
             // failed navigation shows no lock beside a URL that was never
             // contacted.
             if app.status != PageStatus::Loaded {
-                return CHROME_SURFACE;
+                return THEME.surface_container;
             }
-            return if is_https { CHROME_MUTED } else { CHROME_MUTED };
+            return if is_https { THEME.on_surface_variant } else { THEME.on_surface_variant };
         }
         let in_sel = f.select_w > 0
             && x >= PILL_TEXT_X
@@ -1928,13 +1945,13 @@ fn toolbar_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
             && y < PILL_TEXT_Y + font::GLYPH_H;
         let t = &f.pill[..f.pill_len];
         if !t.is_empty() {
-            let bg = if in_sel { 0xFFD2E3FC } else { c };
+            let bg = if in_sel { THEME.primary_container } else { c };
             if let Some(px) = text_px(x, y, PILL_TEXT_X, PILL_TEXT_Y, 1, t, f.pill_color, bg, false) {
                 return px;
             }
         }
         if in_sel {
-            return 0xFFD2E3FC;
+            return THEME.primary_container;
         }
         if f.show_caret
             && x >= f.caret_x
@@ -1942,24 +1959,24 @@ fn toolbar_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
             && y >= PILL_TEXT_Y
             && y < PILL_TEXT_Y + font::GLYPH_H
         {
-            return CHROME_BLUE;
+            return THEME.primary;
         }
         return c;
     }
 
     // Reload Button
-    if let Some(c) = draw_rounded_rect(x, y, RELOAD_BTN, BTN_R, CHROME_BG, None, 0) {
+    if let Some(c) = draw_rounded_rect(x, y, RELOAD_BTN, BTN_R, THEME.surface, None, 0) {
         let cx = RELOAD_BTN.x + RELOAD_BTN.w / 2;
         let cy = RELOAD_BTN.y + RELOAD_BTN.h / 2;
         return if reload_glyph(x, y, cx, cy) {
-            CHROME_MUTED
+            THEME.on_surface_variant
         } else {
             c
         };
     }
 
     // Tab Counter Badge `[N]` Button
-    if let Some(_) = draw_rounded_rect(x, y, TABS_TOP_BTN, BTN_R, CHROME_BG, None, 0) {
+    if let Some(_) = draw_rounded_rect(x, y, TABS_TOP_BTN, BTN_R, THEME.surface, None, 0) {
         let cx = TABS_TOP_BTN.x + TABS_TOP_BTN.w / 2;
         let cy = TABS_TOP_BTN.y + TABS_TOP_BTN.h / 2;
         if let Some(badge) = tab_badge_pixel(x, y, cx, cy, app.tabs.tab_count()) {
@@ -1968,22 +1985,22 @@ fn toolbar_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
     }
 
     // Overflow Kebab Menu Button (`⋮`)
-    if let Some(c) = draw_rounded_rect(x, y, KEBAB_BTN, BTN_R, CHROME_BG, None, 0) {
+    if let Some(c) = draw_rounded_rect(x, y, KEBAB_BTN, BTN_R, THEME.surface, None, 0) {
         let cx = KEBAB_BTN.x + KEBAB_BTN.w / 2;
         let cy = KEBAB_BTN.y + KEBAB_BTN.h / 2;
         return if kebab_glyph(x, y, cx, cy) {
-            CHROME_MUTED
+            THEME.on_surface_variant
         } else {
             c
         };
     }
 
     // Close Button (dismisses app to launcher)
-    if let Some(c) = draw_rounded_rect(x, y, CLOSE_BTN, BTN_R, CHROME_BG, None, 0) {
+    if let Some(c) = draw_rounded_rect(x, y, CLOSE_BTN, BTN_R, THEME.surface, None, 0) {
         let cx = CLOSE_BTN.x + CLOSE_BTN.w / 2;
         let cy = CLOSE_BTN.y + CLOSE_BTN.h / 2;
         return if close_glyph(x, y, cx, cy) {
-            CHROME_MUTED
+            THEME.on_surface_variant
         } else {
             c
         };
@@ -1992,13 +2009,13 @@ fn toolbar_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
     // Blue Loading Progress Bar (y 114..116)
     if y >= 114 && y < 116 {
         return if app.loading_progress > 0 {
-            CHROME_BLUE
+            THEME.primary
         } else {
-            CHROME_DIVIDER
+            THEME.outline_variant
         };
     }
 
-    CHROME_BG
+    THEME.surface
 }
 
 // -----------------------------------------------------------------------------
@@ -2009,17 +2026,17 @@ fn home_page_pixel(x: usize, y: usize, app: &BrowserApp) -> u32 {
     if y >= 130 && y < 244 {
         // App icon squircle (52x52) centered at (334, 134)
         let icon_rect = Rect::new(334, 134, 52, 52);
-        if let Some(c) = draw_rounded_rect(x, y, icon_rect, 14, CHROME_BLUE, Some(CHROME_BORDER), 1) {
+        if let Some(c) = draw_rounded_rect(x, y, icon_rect, R_CARD, THEME.primary, Some(THEME.border), 1) {
             let cx = 360isize;
             let cy = 160isize;
             let dx = (x as isize) - cx;
             let dy = (y as isize) - cy;
             let r2 = dx * dx + dy * dy;
             if r2 >= 196 && r2 <= 289 {
-                return 0xFFFFFFFF;
+                return THEME.on_primary;
             }
             if (dx.abs() <= 1 && dy.abs() <= 17) || (dy.abs() <= 1 && dx.abs() <= 17) {
-                return 0xFFFFFFFF;
+                return THEME.on_primary;
             }
             return c;
         }
@@ -2028,7 +2045,7 @@ fn home_page_pixel(x: usize, y: usize, app: &BrowserApp) -> u32 {
         let brand_text = b"InterOS Browser";
         let bw = font::measure_bold(brand_text, 1);
         let bx0 = (W.saturating_sub(bw)) / 2;
-        if let Some(px) = text_px(x, y, bx0, 196, 1, brand_text, CHROME_TEXT, CHROME_BG, true) {
+        if let Some(px) = text_px(x, y, bx0, 196, 1, brand_text, THEME.on_surface, THEME.surface, true) {
             return px;
         }
 
@@ -2036,10 +2053,10 @@ fn home_page_pixel(x: usize, y: usize, app: &BrowserApp) -> u32 {
         let sub_text = b"Sovereign Web";
         let sw = font::measure(sub_text, 1);
         let sx0 = (W.saturating_sub(sw)) / 2;
-        if let Some(px) = text_px(x, y, sx0, 220, 1, sub_text, CHROME_MUTED, CHROME_BG, false) {
+        if let Some(px) = text_px(x, y, sx0, 220, 1, sub_text, THEME.on_surface_variant, THEME.surface, false) {
             return px;
         }
-        return CHROME_BG;
+        return THEME.surface;
     }
 
     // 2. Favorites / Quick Access Grid (y 252..376)
@@ -2050,94 +2067,94 @@ fn home_page_pixel(x: usize, y: usize, app: &BrowserApp) -> u32 {
         // are a list the app shipped with, not the user's favourites. The
         // user's own bookmarks are the list below this one, and it says so
         // when it is empty.
-        if let Some(px) = text_px(x, y, 28, 254, 1, b"Quick links", CHROME_MUTED, CHROME_BG, true) {
+        if let Some(px) = text_px(x, y, 28, 254, 1, b"Quick links", THEME.on_surface_variant, THEME.surface, true) {
                 return px;
             }
-            return CHROME_BG;
+            return THEME.surface;
         }
 
         // Col 0: cx = 98 (InterOS Platform)
         let c0_rect = Rect::new(66, 278, 64, 64);
-        if let Some(c) = draw_rounded_rect(x, y, c0_rect, 16, CHROME_CARD, Some(CHROME_BORDER), 1) {
-            if let Some(px) = text_px(x, y, 86, 300, 1, b"IO", CHROME_TEXT, c, true) {
+        if let Some(c) = draw_rounded_rect(x, y, c0_rect, R_SOFT, THEME.surface_container_high, Some(THEME.border), 1) {
+            if let Some(px) = text_px(x, y, 86, 300, 1, b"IO", THEME.on_surface, c, true) {
                 return px;
             }
             return c;
         }
-        if let Some(px) = text_px(x, y, 70, 350, 1, b"InterOS", CHROME_TEXT, CHROME_BG, false) {
+        if let Some(px) = text_px(x, y, 70, 350, 1, b"InterOS", THEME.on_surface, THEME.surface, false) {
             return px;
         }
 
         // Col 1: cx = 266 (YouTube Mobile)
         let c1_rect = Rect::new(234, 278, 64, 64);
-        if let Some(c) = draw_rounded_rect(x, y, c1_rect, 16, CHROME_CARD, Some(CHROME_BORDER), 1) {
+        if let Some(c) = draw_rounded_rect(x, y, c1_rect, R_SOFT, THEME.surface_container_high, Some(THEME.border), 1) {
             let px = (x as isize) - 260;
             let py = ((y as isize) - 310).abs();
             if px >= 0 && px <= 14 && py * 14 <= (14 - px) * 10 {
-                return CHROME_MUTED;
+                return THEME.on_surface_variant;
             }
             return c;
         }
-        if let Some(px) = text_px(x, y, 238, 350, 1, b"YouTube", CHROME_TEXT, CHROME_BG, false) {
+        if let Some(px) = text_px(x, y, 238, 350, 1, b"YouTube", THEME.on_surface, THEME.surface, false) {
             return px;
         }
 
         // Col 2: cx = 434 (GitHub Source)
         let c2_rect = Rect::new(402, 278, 64, 64);
-        if let Some(c) = draw_rounded_rect(x, y, c2_rect, 16, CHROME_CARD, Some(CHROME_BORDER), 1) {
-            if let Some(px) = text_px(x, y, 422, 300, 1, b"GH", CHROME_TEXT, c, true) {
+        if let Some(c) = draw_rounded_rect(x, y, c2_rect, R_SOFT, THEME.surface_container_high, Some(THEME.border), 1) {
+            if let Some(px) = text_px(x, y, 422, 300, 1, b"GH", THEME.on_surface, c, true) {
                 return px;
             }
             return c;
         }
-        if let Some(px) = text_px(x, y, 410, 350, 1, b"GitHub", CHROME_TEXT, CHROME_BG, false) {
+        if let Some(px) = text_px(x, y, 410, 350, 1, b"GitHub", THEME.on_surface, THEME.surface, false) {
             return px;
         }
 
         // Col 3: cx = 602 (Wikipedia)
         let c3_rect = Rect::new(570, 278, 64, 64);
-        if let Some(c) = draw_rounded_rect(x, y, c3_rect, 16, CHROME_CARD, Some(CHROME_BORDER), 1) {
-            if let Some(px) = text_px(x, y, 594, 300, 1, b"W", CHROME_TEXT, c, true) {
+        if let Some(c) = draw_rounded_rect(x, y, c3_rect, R_SOFT, THEME.surface_container_high, Some(THEME.border), 1) {
+            if let Some(px) = text_px(x, y, 594, 300, 1, b"W", THEME.on_surface, c, true) {
                 return px;
             }
             return c;
         }
-        if let Some(px) = text_px(x, y, 566, 350, 1, b"Wikipedia", CHROME_TEXT, CHROME_BG, false) {
+        if let Some(px) = text_px(x, y, 566, 350, 1, b"Wikipedia", THEME.on_surface, THEME.surface, false) {
             return px;
         }
 
-        return CHROME_BG;
+        return THEME.surface;
     }
 
     // 3. "Your pages": saved bookmarks & session visits (y 386..1340)
     if y >= 386 && y < 418 {
-        if let Some(px) = text_px(x, y, 28, 392, 1, b"Your pages", CHROME_TEXT, CHROME_BG, true) {
+        if let Some(px) = text_px(x, y, 28, 392, 1, b"Your pages", THEME.on_surface, THEME.surface, true) {
             return px;
         }
-        return CHROME_BG;
+        return THEME.surface;
     }
 
     // 4. Saved pages & recent visits cards
     if home_row(app, 0).is_none() {
         let empty_rect = Rect::new(24, 422, W - 48, 96);
-        if let Some(c) = draw_rounded_rect(x, y, empty_rect, 16, CHROME_CARD, Some(CHROME_CARD_BORDER), 1) {
+        if let Some(c) = draw_rounded_rect(x, y, empty_rect, CARD.radius, CARD.fill, CARD.border, 1) {
             let star_box = Rect::new(44, 438, 46, 46);
-            if let Some(sc) = draw_rounded_rect(x, y, star_box, 10, 0xFF181C24, None, 0) {
+            if let Some(sc) = draw_rounded_rect(x, y, star_box, R_CHIP, THEME.surface_container_low, None, 0) {
                 if star_glyph(x, y, 67, 461, false) {
-                    return CHROME_MUTED;
+                    return THEME.on_surface_variant;
                 }
                 return sc;
             }
-            if let Some(px) = text_px(x, y, 104, 442, 1, b"No Bookmarks Yet", CHROME_TEXT, c, true) {
+            if let Some(px) = text_px(x, y, 104, 442, 1, b"No Bookmarks Yet", THEME.on_surface, c, true) {
                 return px;
             }
-            if let Some(px) = text_px(x, y, 104, 468, 1, b"Bookmarked and visited pages appear here", CHROME_MUTED, c, false) {
+            if let Some(px) = text_px(x, y, 104, 468, 1, b"Bookmarked and visited pages appear here", THEME.on_surface_variant, c, false) {
                 return px;
             }
             return c;
         }
 
-        return CHROME_BG;
+        return THEME.surface;
     }
 
     let card_h = 100;
@@ -2149,19 +2166,19 @@ fn home_page_pixel(x: usize, y: usize, app: &BrowserApp) -> u32 {
             continue;
         };
 
-        if let Some(c) = draw_rounded_rect(x, y, card_rect, 16, CHROME_CARD, Some(CHROME_CARD_BORDER), 1) {
-            if let Some(px) = text_px(x, y, 44, card_y + 20, 1, row.title, CHROME_TEXT, CHROME_CARD, true) {
+        if let Some(c) = draw_rounded_rect(x, y, card_rect, CARD.radius, CARD.fill, CARD.border, 1) {
+            if let Some(px) = text_px(x, y, 44, card_y + 20, 1, row.title, THEME.on_surface, THEME.surface_container_high, true) {
                 return px;
             }
             let url = &row.url[..row.url_len];
-            if let Some(px) = text_px(x, y, 44, card_y + 48, 1, url, CHROME_MUTED, CHROME_CARD, false) {
+            if let Some(px) = text_px(x, y, 44, card_y + 48, 1, url, THEME.on_surface_variant, THEME.surface_container_high, false) {
                 return px;
             }
-            if let Some(px) = text_px(x, y, 44, card_y + card_h - 28, 1, row.meta, CHROME_BLUE, CHROME_CARD, false) {
+            if let Some(px) = text_px(x, y, 44, card_y + card_h - 28, 1, row.meta, THEME.primary, THEME.surface_container_high, false) {
                 return px;
             }
             let thumb = Rect::new(W - 48 - 84, card_y + card_h - 88, 68, 68);
-            if let Some(tc) = draw_rounded_rect(x, y, thumb, 10, CHROME_SURFACE, None, 0) {
+            if let Some(tc) = draw_rounded_rect(x, y, thumb, R_CHIP, THEME.surface_container, None, 0) {
                 let tw = font::measure_bold(row.scheme_mark, 1);
                 if let Some(px) = text_px(
                     x,
@@ -2170,7 +2187,7 @@ fn home_page_pixel(x: usize, y: usize, app: &BrowserApp) -> u32 {
                     thumb.y + 24,
                     1,
                     row.scheme_mark,
-                    CHROME_MUTED,
+                    THEME.on_surface_variant,
                     tc,
                     true,
                 ) {
@@ -2182,7 +2199,7 @@ fn home_page_pixel(x: usize, y: usize, app: &BrowserApp) -> u32 {
         }
     }
 
-    CHROME_BG
+    THEME.surface
 }
 
 struct HomeRow {
@@ -2239,7 +2256,7 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
         let cx = W / 2;
         let cy = f.icon_cy;
         if offline_glyph(x, y, cx, cy) {
-            return CHROME_MUTED;
+            return THEME.on_surface_variant;
         }
         if f.head_len > 0 {
             if let Some(px) = text_px(
@@ -2249,15 +2266,15 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                 f.head_y,
                 f.head_scale,
                 &f.head[..f.head_len],
-                CHROME_TEXT,
-                CHROME_BG,
+                THEME.on_surface,
+                THEME.surface,
                 true,
             ) {
                 return px;
             }
         }
         for i in 0..f.body_n {
-            if let Some(px) = text_px(x, y, f.body_x[i], f.body_y[i], 1, f.body[i], CHROME_MUTED, CHROME_BG, false) {
+            if let Some(px) = text_px(x, y, f.body_x[i], f.body_y[i], 1, f.body[i], THEME.on_surface_variant, THEME.surface, false) {
                 return px;
             }
         }
@@ -2270,7 +2287,7 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
         // same badge, so the badge was decoration rather than a report.
         let err_y = f.head_y + 40 + f.body_n * 28 + 24;
         let err_rect = Rect::new(cx - 180, err_y, 360, 36);
-        if let Some(c) = draw_rounded_rect(x, y, err_rect, 8, CHROME_CARD, Some(CHROME_CARD_BORDER), 1) {
+        if let Some(c) = draw_rounded_rect(x, y, err_rect, R_SMALL, THEME.surface_container_high, Some(THEME.border), 1) {
             let label: &[u8] = match app.status {
                 PageStatus::InvalidAddress => b"INVALID ADDRESS",
                 PageStatus::LocalRefused => match app.local_failure {
@@ -2283,7 +2300,7 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                 _ => b"NO RESPONSE FROM THE GATEWAY",
             };
             let lw = font::measure(label, 1);
-            if let Some(px) = text_px(x, y, cx - lw / 2, err_y + 8, 1, label, CHROME_RED, c, false) {
+            if let Some(px) = text_px(x, y, cx - lw / 2, err_y + 8, 1, label, THEME.error, c, false) {
                 return px;
             }
             return c;
@@ -2292,16 +2309,16 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
         // Reload Button Card
         let btn_y = err_y + 54;
         let btn_rect = Rect::new(cx - 90, btn_y, 180, 48);
-        if let Some(c) = draw_rounded_rect(x, y, btn_rect, 12, CHROME_BLUE, None, 0) {
+        if let Some(c) = draw_rounded_rect(x, y, btn_rect, R_CONTROL, THEME.primary, None, 0) {
             let rel = b"Reload Page";
             let rw = font::measure_bold(rel, 1);
-            if let Some(px) = text_px(x, y, cx - rw / 2, btn_y + 14, 1, rel, 0xFFFFFFFF, c, true) {
+            if let Some(px) = text_px(x, y, cx - rw / 2, btn_y + 14, 1, rel, THEME.on_primary, c, true) {
                 return px;
             }
             return c;
         }
 
-        return CHROME_BG;
+        return THEME.surface;
     }
 
     // Render classified document lines with smooth vertical scrolling.
@@ -2338,7 +2355,7 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                 let band = font::line_height(TYPE_H1_SCALE);
                 if y as isize >= h_y && (y as isize) < h_y + band as isize {
                     if let Some(px) = text_px(
-                        x, y, pad, h_y as usize, TYPE_H1_SCALE, title, CHROME_TEXT, CHROME_BG, true,
+                        x, y, pad, h_y as usize, TYPE_H1_SCALE, title, THEME.on_surface, THEME.surface, true,
                     ) {
                         return px;
                     }
@@ -2348,7 +2365,7 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                 if !line.continued {
                     let d_y = h_y + band as isize + 6;
                     if y as isize == d_y && x >= pad && x <= W - pad {
-                        return CHROME_DIVIDER;
+                        return THEME.outline_variant;
                     }
                 }
                 current_y += band as isize + 26;
@@ -2368,11 +2385,11 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                 if !line.continued {
                     let r_y = current_y + 4;
                     if y as isize == r_y && x >= pad && x < pad + 40 {
-                        return CHROME_BLUE;
+                        return THEME.primary;
                     }
                 }
                 if y as isize >= h_y && (y as isize) < h_y + font::line_height(1) as isize {
-                    if let Some(px) = text_px(x, y, pad, h_y as usize, 1, title, CHROME_TEXT, CHROME_BG, true) {
+                    if let Some(px) = text_px(x, y, pad, h_y as usize, 1, title, THEME.on_surface, THEME.surface, true) {
                         return px;
                     }
                 }
@@ -2388,7 +2405,7 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                 };
                 let h_y = current_y + 8;
                 if y as isize >= h_y && (y as isize) < h_y + font::line_height(1) as isize {
-                    if let Some(px) = text_px(x, y, pad, h_y as usize, 1, title, CHROME_BLUE, CHROME_BG, true) {
+                    if let Some(px) = text_px(x, y, pad, h_y as usize, 1, title, THEME.primary, THEME.surface, true) {
                         return px;
                     }
                 }
@@ -2402,14 +2419,14 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                     let dx = x as isize - (pad as isize + 10);
                     let dy = (y as isize) - (l_y + 8);
                     if dx * dx + dy * dy <= 8 {
-                        return CHROME_BLUE;
+                        return THEME.primary;
                     }
                     let item_text = if bytes.starts_with(b"* ") || bytes.starts_with(b"- ") || bytes.starts_with(b"+ ") {
                         &bytes[2..]
                     } else {
                         bytes
                     };
-                    if let Some(px) = text_px(x, y, pad + 22, l_y as usize, 1, item_text, CHROME_TEXT, CHROME_BG, false) {
+                    if let Some(px) = text_px(x, y, pad + 22, l_y as usize, 1, item_text, THEME.on_surface, THEME.surface, false) {
                         return px;
                     }
                 }
@@ -2429,11 +2446,11 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                     let c_y = current_y + 2;
                     let c_h = 30;
                     if y as isize >= c_y && (y as isize) < c_y + c_h as isize {
-                        if let Some(c) = draw_rounded_rect(x, y, Rect::new(pad, c_y as usize, column, c_h), 8, CHROME_CODE_BG, Some(CHROME_BORDER), 1) {
+                        if let Some(c) = draw_rounded_rect(x, y, Rect::new(pad, c_y as usize, column, c_h), 8, THEME.surface_container_low, Some(THEME.border), 1) {
                             if x >= pad && x <= pad + 3 {
-                                return CHROME_BLUE;
+                                return THEME.primary;
                             }
-                            if let Some(px) = text_px(x, y, pad + 14, (c_y + 5) as usize, 1, bytes, 0xFF7EE787, c, false) {
+                            if let Some(px) = text_px(x, y, pad + 14, (c_y + 5) as usize, 1, bytes, THEME.success, c, false) {
                                 return px;
                             }
                             return c;
@@ -2447,12 +2464,12 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                 let g_h = 56;
                 let link_rect = Rect::new(pad, g_y as usize, column, g_h);
                 if y as isize >= g_y && (y as isize) < g_y + g_h as isize {
-                    if let Some(c) = draw_rounded_rect(x, y, link_rect, 12, CHROME_CARD, Some(CHROME_CARD_BORDER), 1) {
+                    if let Some(c) = draw_rounded_rect(x, y, link_rect, R_CONTROL, THEME.surface_container_high, Some(THEME.border), 1) {
                         // The link's mark sits in the margin.
                         let icon_box = Rect::new(pad + 12, (g_y + 10) as usize, 36, 36);
-                        if let Some(ic) = draw_rounded_rect(x, y, icon_box, 8, 0xFF1B2333, None, 0) {
+                        if let Some(ic) = draw_rounded_rect(x, y, icon_box, R_SMALL, THEME.surface_container, None, 0) {
                             if link_arrow_glyph(x, y, pad + 30, (g_y + 28) as usize) {
-                                return CHROME_BLUE;
+                                return THEME.primary;
                             }
                             return ic;
                         }
@@ -2474,7 +2491,7 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                             column - 72,
                             &mut label_buf,
                         );
-                        if let Some(px) = text_px(x, y, pad + 60, (g_y + 10) as usize, 1, &label_buf[..label_len], CHROME_TEXT, c, true) {
+                        if let Some(px) = text_px(x, y, pad + 60, (g_y + 10) as usize, 1, &label_buf[..label_len], THEME.on_surface, c, true) {
                             return px;
                         }
 
@@ -2487,7 +2504,7 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                                 column - 72,
                                 &mut target_buf,
                             );
-                            if let Some(px) = text_px(x, y, pad + 60, (g_y + 30) as usize, 1, &target_buf[..target_len], CHROME_MUTED, c, false) {
+                            if let Some(px) = text_px(x, y, pad + 60, (g_y + 30) as usize, 1, &target_buf[..target_len], THEME.on_surface_variant, c, false) {
                                 return px;
                             }
                         }
@@ -2499,7 +2516,7 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                         if dist >= 0 && dist <= 7 {
                             let dy = ((y as isize) - ch_y).abs();
                             if (dy - dist).abs() <= 1 {
-                                return CHROME_MUTED;
+                                return THEME.on_surface_variant;
                             }
                         }
 
@@ -2521,9 +2538,9 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                 if y as isize >= q_y && (y as isize) < q_y + q_h as isize {
                     // The quote's bar sits in the margin.
                     if x >= pad && x <= pad + 3 {
-                        return CHROME_BLUE;
+                        return THEME.primary;
                     }
-                    if let Some(px) = text_px(x, y, pad + 14, (q_y + 4) as usize, 1, quote_text, CHROME_MUTED, CHROME_BG, false) {
+                    if let Some(px) = text_px(x, y, pad + 14, (q_y + 4) as usize, 1, quote_text, THEME.on_surface_variant, THEME.surface, false) {
                         return px;
                     }
                 }
@@ -2532,7 +2549,7 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
             LineKind::Paragraph => {
                 let p_y = current_y + 4;
                 if y as isize >= p_y && (y as isize) < p_y + 24 {
-                    if let Some(px) = text_px(x, y, pad, p_y as usize, 1, bytes, CHROME_TEXT, CHROME_BG, false) {
+                    if let Some(px) = text_px(x, y, pad, p_y as usize, 1, bytes, THEME.on_surface, THEME.surface, false) {
                         return px;
                     }
                 }
@@ -2559,7 +2576,7 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
             n = append_text(&mut buf, n, b" of ");
             n = append_u64_text(&mut buf, n, app.doc_total_lines as u64);
             n = append_text(&mut buf, n, b" lines");
-            if let Some(px) = text_px(x, y, browser::CONTENT_PADDING, note_y as usize, 1, &buf[..n], CHROME_MUTED, CHROME_BG, false) {
+            if let Some(px) = text_px(x, y, browser::CONTENT_PADDING, note_y as usize, 1, &buf[..n], THEME.on_surface_variant, THEME.surface, false) {
                 return px;
             }
         }
@@ -2572,13 +2589,13 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
         let scroll_max = (current_y.saturating_sub(base_y) as usize).saturating_sub(track_h).max(1);
         let thumb_y = 120 + ((app.scroll_offset_px * (track_h - thumb_h)) / scroll_max).min(track_h - thumb_h);
         if y >= thumb_y && y < thumb_y + thumb_h {
-            return CHROME_MUTED;
+            return THEME.on_surface_variant;
         } else {
-            return CHROME_DIVIDER;
+            return THEME.outline_variant;
         }
     }
 
-    CHROME_BG
+    THEME.surface
 }
 
 // -----------------------------------------------------------------------------
@@ -2595,19 +2612,18 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
             // Tab Switcher Header (y 120..170)
             if y >= 120 && y < 170 {
                 let header = b"Open Tabs";
-                if let Some(px) = text_px(x, y, 32, 134, 1, header, CHROME_TEXT, CHROME_BG, true) {
+                if let Some(px) = text_px(x, y, 32, 134, 1, header, THEME.on_surface, THEME.surface, true) {
                     return Some(px);
                 }
-                // "+ New Tab" button at x=530..680, y=126..164
-                let new_btn = Rect::new(530, 126, 150, 38);
-                if let Some(c) = draw_rounded_rect(x, y, new_btn, 8, CHROME_BLUE, None, 0) {
+                // "+ New Tab" button in the header.
+                if let Some(c) = draw_rounded_rect(x, y, NEW_TAB_BTN, R_SMALL, THEME.primary, None, 0) {
                     let label = b"+ New Tab";
-                    if let Some(px) = text_px(x, y, 560, 138, 1, label, 0xFFFFFFFF, c, true) {
+                    if let Some(px) = text_px(x, y, 560, 138, 1, label, THEME.on_primary, c, true) {
                         return Some(px);
                     }
                     return Some(c);
                 }
-                return Some(CHROME_BG);
+                return Some(THEME.surface);
             }
 
             // Tab cards stacked vertically (4 slots)
@@ -2620,14 +2636,14 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
                 let is_active = app.tabs.active_tab_index() == i;
 
                 if let Some(tab_data) = tab {
-                    let border_col = if is_active { CHROME_BLUE } else { CHROME_CARD_BORDER };
+                    let border_col = if is_active { THEME.primary } else { THEME.border };
                     let border_w = if is_active { 2 } else { 1 };
-                    if let Some(c) = draw_rounded_rect(x, y, card_rect, 14, CHROME_CARD, Some(border_col), border_w) {
+                    if let Some(c) = draw_rounded_rect(x, y, card_rect, CARD.radius, CARD.fill, Some(border_col), border_w) {
                         // Tab badge `[i+1]`
                         let badge_rect = Rect::new(40, card_y + 16, 28, 24);
-                        if let Some(bc) = draw_rounded_rect(x, y, badge_rect, 6, CHROME_SURFACE, None, 0) {
+                        if let Some(bc) = draw_rounded_rect(x, y, badge_rect, R_SMALL, THEME.surface_container, None, 0) {
                             let digit = [b'1' + (i as u8)];
-                            if let Some(px) = text_px(x, y, 48, card_y + 20, 1, &digit, CHROME_BLUE, bc, true) {
+                            if let Some(px) = text_px(x, y, 48, card_y + 20, 1, &digit, THEME.primary, bc, true) {
                                 return Some(px);
                             }
                             return Some(bc);
@@ -2635,13 +2651,13 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
 
                         // Tab Title
                         let title = tab_data.title_bytes();
-                        if let Some(px) = text_px(x, y, 78, card_y + 20, 1, title, CHROME_TEXT, c, true) {
+                        if let Some(px) = text_px(x, y, 78, card_y + 20, 1, title, THEME.on_surface, c, true) {
                             return Some(px);
                         }
 
                         // Tab URL
                         let url = tab_data.url();
-                        if let Some(px) = text_px(x, y, 40, card_y + 54, 1, url, CHROME_MUTED, c, false) {
+                        if let Some(px) = text_px(x, y, 40, card_y + 54, 1, url, THEME.on_surface_variant, c, false) {
                             return Some(px);
                         }
 
@@ -2649,23 +2665,23 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
                         let close_cx = 646;
                         let close_cy = card_y + 32;
                         if close_glyph(x, y, close_cx, close_cy) {
-                            return Some(CHROME_MUTED);
+                            return Some(THEME.on_surface_variant);
                         }
 
                         return Some(c);
                     }
                 } else {
                     // Empty slot dashed/dim card
-                    if let Some(c) = draw_rounded_rect(x, y, card_rect, 14, CHROME_SURFACE, Some(CHROME_DIVIDER), 1) {
+                    if let Some(c) = draw_rounded_rect(x, y, card_rect, CARD.radius, CARD.fill, CARD.border, 1) {
                         let label = b"+ Empty Tab Slot";
-                        if let Some(px) = text_px(x, y, 40, card_y + 44, 1, label, CHROME_MUTED, c, false) {
+                        if let Some(px) = text_px(x, y, 40, card_y + 44, 1, label, THEME.on_surface_variant, c, false) {
                             return Some(px);
                         }
                         return Some(c);
                     }
                 }
             }
-            Some(CHROME_BG)
+            Some(THEME.surface)
         }
         SheetOverlay::Bookmarks => {
             if y < TOOLBAR_Y1 || y >= NAV_BAR_Y0 {
@@ -2674,21 +2690,21 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
             // Bookmarks Header
             if y >= 120 && y < 170 {
                 let header = b"Saved Bookmarks";
-                if let Some(px) = text_px(x, y, 32, 134, 1, header, CHROME_TEXT, CHROME_BG, true) {
+                if let Some(px) = text_px(x, y, 32, 134, 1, header, THEME.on_surface, THEME.surface, true) {
                     return Some(px);
                 }
                 // Close button 'X' at x=650, y=140
                 if close_glyph(x, y, 660, 145) {
-                    return Some(CHROME_MUTED);
+                    return Some(THEME.on_surface_variant);
                 }
-                return Some(CHROME_BG);
+                return Some(THEME.surface);
             }
 
             // List of bookmarks
             let count = app.bookmarks.len();
             if count == 0 {
                 let empty_msg = b"No bookmarks saved yet.";
-                if let Some(px) = text_px(x, y, 32, 220, 1, empty_msg, CHROME_MUTED, CHROME_BG, false) {
+                if let Some(px) = text_px(x, y, 32, 220, 1, empty_msg, THEME.on_surface_variant, THEME.surface, false) {
                     return Some(px);
                 }
             } else {
@@ -2697,14 +2713,14 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
                     let r_y = 180 + i * row_h;
                     let r_rect = Rect::new(24, r_y, W - 48, row_h - 10);
                     if let Some(rec) = app.bookmarks.record(i) {
-                        if let Some(c) = draw_rounded_rect(x, y, r_rect, 10, CHROME_CARD, Some(CHROME_BORDER), 1) {
+                        if let Some(c) = draw_rounded_rect(x, y, r_rect, R_CHIP, THEME.surface_container_high, Some(THEME.border), 1) {
                             if star_glyph(x, y, 48, r_y + 35, true) {
-                                return Some(CHROME_BLUE);
+                                return Some(THEME.primary);
                             }
-                            if let Some(px) = text_px(x, y, 70, r_y + 16, 1, rec.title_bytes(), CHROME_TEXT, c, true) {
+                            if let Some(px) = text_px(x, y, 70, r_y + 16, 1, rec.title_bytes(), THEME.on_surface, c, true) {
                                 return Some(px);
                             }
-                            if let Some(px) = text_px(x, y, 70, r_y + 42, 1, rec.url_bytes(), CHROME_MUTED, c, false) {
+                            if let Some(px) = text_px(x, y, 70, r_y + 42, 1, rec.url_bytes(), THEME.on_surface_variant, c, false) {
                                 return Some(px);
                             }
                             return Some(c);
@@ -2712,7 +2728,7 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
                     }
                 }
             }
-            Some(CHROME_BG)
+            Some(THEME.surface)
         }
         SheetOverlay::History => {
             if y < TOOLBAR_Y1 || y >= NAV_BAR_Y0 {
@@ -2721,19 +2737,19 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
             // History Header
             if y >= 120 && y < 170 {
                 let header = b"Navigation History";
-                if let Some(px) = text_px(x, y, 32, 134, 1, header, CHROME_TEXT, CHROME_BG, true) {
+                if let Some(px) = text_px(x, y, 32, 134, 1, header, THEME.on_surface, THEME.surface, true) {
                     return Some(px);
                 }
                 if close_glyph(x, y, 660, 145) {
-                    return Some(CHROME_MUTED);
+                    return Some(THEME.on_surface_variant);
                 }
-                return Some(CHROME_BG);
+                return Some(THEME.surface);
             }
 
             let count = app.history.len();
             if count == 0 {
                 let empty_msg = b"No history recorded for this session.";
-                if let Some(px) = text_px(x, y, 32, 220, 1, empty_msg, CHROME_MUTED, CHROME_BG, false) {
+                if let Some(px) = text_px(x, y, 32, 220, 1, empty_msg, THEME.on_surface_variant, THEME.surface, false) {
                     return Some(px);
                 }
             } else {
@@ -2742,8 +2758,8 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
                     let r_y = 180 + i * row_h;
                     let r_rect = Rect::new(24, r_y, W - 48, row_h - 8);
                     if let Some(entry) = app.history.entry(count - 1 - i) {
-                        if let Some(c) = draw_rounded_rect(x, y, r_rect, 8, CHROME_CARD, Some(CHROME_BORDER), 1) {
-                            if let Some(px) = text_px(x, y, 40, r_y + 18, 1, entry, CHROME_TEXT, c, false) {
+                        if let Some(c) = draw_rounded_rect(x, y, r_rect, R_SMALL, THEME.surface_container_high, Some(THEME.border), 1) {
+                            if let Some(px) = text_px(x, y, 40, r_y + 18, 1, entry, THEME.on_surface, c, false) {
                                 return Some(px);
                             }
                             return Some(c);
@@ -2751,12 +2767,12 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
                     }
                 }
             }
-            Some(CHROME_BG)
+            Some(THEME.surface)
         }
         SheetOverlay::Menu => {
             // Kebab Overflow Menu dropdown card at top right (x 440..696, y 116..360)
             let menu_rect = Rect::new(440, 116, 256, 240);
-            if let Some(c) = draw_rounded_rect(x, y, menu_rect, 12, CHROME_CARD, Some(CHROME_BORDER), 2) {
+            if let Some(c) = draw_rounded_rect(x, y, menu_rect, R_CONTROL, THEME.surface_container_high, Some(THEME.border), 2) {
                 let items: [&[u8]; 5] = [
                     b"New Tab",
                     b"Bookmarks",
@@ -2766,11 +2782,11 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
                 ];
                 for (idx, item) in items.iter().enumerate() {
                     let item_y = 130 + idx * 44;
-                    if let Some(px) = text_px(x, y, 464, item_y, 1, item, CHROME_TEXT, c, false) {
+                    if let Some(px) = text_px(x, y, 464, item_y, 1, item, THEME.on_surface, c, false) {
                         return Some(px);
                     }
                     if idx < 4 && y == item_y + 30 {
-                        return Some(CHROME_DIVIDER);
+                        return Some(THEME.outline_variant);
                     }
                 }
                 return Some(c);
@@ -2785,26 +2801,26 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
 // -----------------------------------------------------------------------------
 fn bottom_bar_pixel(x: usize, y: usize, app: &BrowserApp) -> u32 {
     if y == NAV_BAR_Y0 {
-        return CHROME_DIVIDER;
+        return THEME.outline_variant;
     }
 
     // 1. Back Button `<`
-    if let Some(_) = draw_rounded_rect(x, y, BACK_BTN, BTN_R, CHROME_BG, None, 0) {
+    if let Some(_) = draw_rounded_rect(x, y, BACK_BTN, BTN_R, THEME.surface, None, 0) {
         let cx = BACK_BTN.x + BACK_BTN.w / 2;
         let cy = BACK_BTN.y + BACK_BTN.h / 2;
         let active = app.tabs.can_go_back() || app.history.can_back();
-        let col = if active { CHROME_TEXT } else { CHROME_BORDER };
+        let col = if active { THEME.on_surface } else { THEME.border };
         if let Some(c) = std::design::back_button::chevron_ink(x, y, cx, cy, col) {
             return c;
         }
     }
 
     // 2. Forward Button `>`
-    if let Some(_) = draw_rounded_rect(x, y, FWD_BTN, BTN_R, CHROME_BG, None, 0) {
+    if let Some(_) = draw_rounded_rect(x, y, FWD_BTN, BTN_R, THEME.surface, None, 0) {
         let cx = FWD_BTN.x + FWD_BTN.w / 2;
         let cy = FWD_BTN.y + FWD_BTN.h / 2;
         let active = app.tabs.can_go_forward() || app.history.can_forward();
-        let col = if active { CHROME_TEXT } else { CHROME_BORDER };
+        let col = if active { THEME.on_surface } else { THEME.border };
         let mirrored_x = if (x as isize) <= cx as isize {
             cx + (cx - x)
         } else {
@@ -2816,28 +2832,28 @@ fn bottom_bar_pixel(x: usize, y: usize, app: &BrowserApp) -> u32 {
     }
 
     // 3. Home / New Tab `+` Button
-    if let Some(_) = draw_rounded_rect(x, y, HOME_TAB_BTN, BTN_R, CHROME_SURFACE, Some(CHROME_BORDER), 1) {
+    if let Some(_) = draw_rounded_rect(x, y, HOME_TAB_BTN, BTN_R, THEME.surface_container, Some(THEME.border), 1) {
         let cx = HOME_TAB_BTN.x + HOME_TAB_BTN.w / 2;
         let cy = HOME_TAB_BTN.y + HOME_TAB_BTN.h / 2;
         let dx = (x as isize - cx as isize).abs();
         let dy = (y as isize - cy as isize).abs();
         if (dx <= 1 && dy <= 7) || (dy <= 1 && dx <= 7) {
-            return CHROME_TEXT;
+            return THEME.on_surface;
         }
     }
 
     // 4. Bookmark Star Button
-    if let Some(_) = draw_rounded_rect(x, y, ADD_BOOK_BTN, BTN_R, CHROME_BG, None, 0) {
+    if let Some(_) = draw_rounded_rect(x, y, ADD_BOOK_BTN, BTN_R, THEME.surface, None, 0) {
         let cx = ADD_BOOK_BTN.x + ADD_BOOK_BTN.w / 2;
         let cy = ADD_BOOK_BTN.y + ADD_BOOK_BTN.h / 2;
         let filled = app.bookmarks.len() + app.bookmarks.unsaved_len() > 0;
         if star_glyph(x, y, cx, cy, filled) {
-            return CHROME_MUTED;
+            return THEME.on_surface_variant;
         }
     }
 
     // 5. Tabs Counter `[N]`
-    if let Some(_) = draw_rounded_rect(x, y, TABS_BTN, BTN_R, CHROME_BG, None, 0) {
+    if let Some(_) = draw_rounded_rect(x, y, TABS_BTN, BTN_R, THEME.surface, None, 0) {
         let cx = TABS_BTN.x + TABS_BTN.w / 2;
         let cy = TABS_BTN.y + TABS_BTN.h / 2;
         if let Some(px) = tab_badge_pixel(x, y, cx, cy, app.tabs.tab_count()) {
@@ -2845,7 +2861,7 @@ fn bottom_bar_pixel(x: usize, y: usize, app: &BrowserApp) -> u32 {
         }
     }
 
-    CHROME_BG
+    THEME.surface
 }
 
 // -----------------------------------------------------------------------------
@@ -2864,7 +2880,7 @@ fn get_browser_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
     if let Some(overlay_px) = render_sheet_overlay(x, y, app) {
         return overlay_px;
     }
-    blend_toward(base, CHROME_BG, 150)
+    blend_toward(base, THEME.surface, 150)
 }
 
 /// The screen without the sheet overlay applied.
@@ -2874,7 +2890,7 @@ fn get_browser_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
 /// to be renderable on its own.
 fn get_browser_pixel_content(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
     if y < STATUS_H {
-        return CHROME_BG;
+        return THEME.surface;
     }
     if y < TOOLBAR_Y1 {
         return toolbar_pixel(x, y, app, f);
@@ -2884,9 +2900,9 @@ fn get_browser_pixel_content(x: usize, y: usize, app: &BrowserApp, f: &Frame) ->
     }
     if y >= NAV_BAR_Y1 {
         if GESTURE_PILL.contains(x, y) {
-            return CHROME_BORDER;
+            return THEME.border;
         }
-        return CHROME_BG;
+        return THEME.surface;
     }
 
     // Active Sheet Overlay if present
@@ -2912,21 +2928,21 @@ fn get_browser_pixel_content(x: usize, y: usize, app: &BrowserApp, f: &Frame) ->
         if app.address_len > 0 {
             // Search suggestion card: y: 130..198
             let s_rect = Rect::new(24, 130, W - 48, 68);
-            if let Some(c) = draw_rounded_rect(x, y, s_rect, 14, CHROME_CARD, Some(CHROME_BORDER), 1) {
+            if let Some(c) = draw_rounded_rect(x, y, s_rect, CARD.radius, CARD.fill, CARD.border, 1) {
                 let icon_box = Rect::new(38, 144, 40, 40);
-                if let Some(ic) = draw_rounded_rect(x, y, icon_box, 8, CHROME_SURFACE, None, 0) {
+                if let Some(ic) = draw_rounded_rect(x, y, icon_box, R_SMALL, THEME.surface_container, None, 0) {
                     let dx = (x as isize) - 58;
                     let dy = (y as isize) - 164;
                     if (dx * dx + dy * dy >= 9 && dx * dx + dy * dy <= 25) || (dx >= 3 && dx <= 6 && dy >= 3 && dy <= 6) {
-                        return CHROME_BLUE;
+                        return THEME.primary;
                     }
                     return ic;
                 }
-                if let Some(px) = text_px(x, y, 92, 144, 1, b"Search Web", CHROME_MUTED, c, false) {
+                if let Some(px) = text_px(x, y, 92, 144, 1, b"Search Web", THEME.on_surface_variant, c, false) {
                     return px;
                 }
                 let q = &app.address[..app.address_len.min(32)];
-                if let Some(px) = text_px(x, y, 92, 168, 1, q, CHROME_BLUE, c, true) {
+                if let Some(px) = text_px(x, y, 92, 168, 1, q, THEME.primary, c, true) {
                     return px;
                 }
                 return c;
@@ -2934,65 +2950,65 @@ fn get_browser_pixel_content(x: usize, y: usize, app: &BrowserApp, f: &Frame) ->
 
             // Direct Navigate card: y: 208..276
             let d_rect = Rect::new(24, 208, W - 48, 68);
-            if let Some(c) = draw_rounded_rect(x, y, d_rect, 14, CHROME_CARD, Some(CHROME_BORDER), 1) {
+            if let Some(c) = draw_rounded_rect(x, y, d_rect, CARD.radius, CARD.fill, CARD.border, 1) {
                 let icon_box = Rect::new(38, 222, 40, 40);
-                if let Some(ic) = draw_rounded_rect(x, y, icon_box, 8, CHROME_CARD, None, 0) {
+                if let Some(ic) = draw_rounded_rect(x, y, icon_box, R_SMALL, THEME.surface_container_high, None, 0) {
                     let dx = (x as isize) - 58;
                     let dy = (y as isize) - 242;
                     if dx * dx + dy * dy <= 16 {
-                        return CHROME_TEXT;
+                        return THEME.on_surface;
                     }
                     return ic;
                 }
-                if let Some(px) = text_px(x, y, 92, 222, 1, b"Open Address", CHROME_MUTED, c, false) {
+                if let Some(px) = text_px(x, y, 92, 222, 1, b"Open Address", THEME.on_surface_variant, c, false) {
                     return px;
                 }
                 let q = &app.address[..app.address_len.min(32)];
-                if let Some(px) = text_px(x, y, 92, 246, 1, q, CHROME_TEXT, c, true) {
+                if let Some(px) = text_px(x, y, 92, 246, 1, q, THEME.on_surface, c, true) {
                     return px;
                 }
                 return c;
             }
-            return CHROME_BG;
+            return THEME.surface;
         } else {
             // When address_len == 0, show Quick Destinations
             if y >= 130 && y < 156 {
-                if let Some(px) = text_px(x, y, 28, 134, 1, b"Quick links", CHROME_MUTED, CHROME_BG, true) {
+                if let Some(px) = text_px(x, y, 28, 134, 1, b"Quick links", THEME.on_surface_variant, THEME.surface, true) {
                     return px;
                 }
-                return CHROME_BG;
+                return THEME.surface;
             }
             let q1 = Rect::new(24, 160, W - 48, 62);
-            if let Some(c) = draw_rounded_rect(x, y, q1, 12, CHROME_CARD, Some(CHROME_BORDER), 1) {
-                if let Some(px) = text_px(x, y, 44, 172, 1, b"InterOS Documentation", CHROME_TEXT, c, true) {
+            if let Some(c) = draw_rounded_rect(x, y, q1, R_CONTROL, THEME.surface_container_high, Some(THEME.border), 1) {
+                if let Some(px) = text_px(x, y, 44, 172, 1, b"InterOS Documentation", THEME.on_surface, c, true) {
                     return px;
                 }
-                if let Some(px) = text_px(x, y, 44, 196, 1, b"https://interos.tech", CHROME_MUTED, c, false) {
+                if let Some(px) = text_px(x, y, 44, 196, 1, b"https://interos.tech", THEME.on_surface_variant, c, false) {
                     return px;
                 }
                 return c;
             }
             let q2 = Rect::new(24, 232, W - 48, 62);
-            if let Some(c) = draw_rounded_rect(x, y, q2, 12, CHROME_CARD, Some(CHROME_BORDER), 1) {
-                if let Some(px) = text_px(x, y, 44, 244, 1, b"Gemini Sovereign Space", CHROME_TEXT, c, true) {
+            if let Some(c) = draw_rounded_rect(x, y, q2, R_CONTROL, THEME.surface_container_high, Some(THEME.border), 1) {
+                if let Some(px) = text_px(x, y, 44, 244, 1, b"Gemini Sovereign Space", THEME.on_surface, c, true) {
                     return px;
                 }
-                if let Some(px) = text_px(x, y, 44, 268, 1, b"gemini://geminispace.info", CHROME_MUTED, c, false) {
+                if let Some(px) = text_px(x, y, 44, 268, 1, b"gemini://geminispace.info", THEME.on_surface_variant, c, false) {
                     return px;
                 }
                 return c;
             }
             let q3 = Rect::new(24, 304, W - 48, 62);
-            if let Some(c) = draw_rounded_rect(x, y, q3, 12, CHROME_CARD, Some(CHROME_BORDER), 1) {
-                if let Some(px) = text_px(x, y, 44, 316, 1, b"Core Source Repository", CHROME_TEXT, c, true) {
+            if let Some(c) = draw_rounded_rect(x, y, q3, R_CONTROL, THEME.surface_container_high, Some(THEME.border), 1) {
+                if let Some(px) = text_px(x, y, 44, 316, 1, b"Core Source Repository", THEME.on_surface, c, true) {
                     return px;
                 }
-                if let Some(px) = text_px(x, y, 44, 340, 1, b"https://github.com", CHROME_MUTED, c, false) {
+                if let Some(px) = text_px(x, y, 44, 340, 1, b"https://github.com", THEME.on_surface_variant, c, false) {
                     return px;
                 }
                 return c;
             }
-            return CHROME_BG;
+            return THEME.surface;
         }
     }
 
@@ -3339,8 +3355,8 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
             return Tap::Redraw;
         }
         SheetOverlay::TabSwitcher => {
-            // New Tab button in header (x 530..680, y 126..164)
-            if x >= 530 && x <= 680 && y >= 126 && y <= 164 {
+            // New Tab button in the header.
+            if NEW_TAB_BTN.contains(x, y) {
                 let _ = std::audio_haptic_click();
                 app.tabs.new_tab(b"about:blank");
                 let start = b"about:blank";

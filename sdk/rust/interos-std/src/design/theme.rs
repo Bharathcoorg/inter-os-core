@@ -109,6 +109,8 @@ pub struct Radii {
     pub chip: usize,
     /// 12: buttons, interactive tiles and text fields.
     pub control: usize,
+    /// 16: a large control -- a 40-48px pill that is not a capsule.
+    pub soft_pill: usize,
     /// 18: cards and list rows.
     pub card: usize,
     /// 24: sheets and full-width panels.
@@ -127,6 +129,7 @@ impl Radii {
         small: radius::SMALL,
         chip: radius::CHIP,
         control: radius::CONTROL,
+        soft_pill: radius::SOFT_PILL,
         card: radius::CARD,
         sheet: radius::SHEET,
         major: radius::MAJOR,
@@ -246,10 +249,32 @@ pub struct Theme {
 
     /// A failure, a refusal, a destructive action.
     pub error: u32,
+    /// A low-emphasis container tinted with the failure colour.
+    ///
+    /// WHY it is its own role: a destructive control that is filled with the
+    /// failure colour shouts; a destructive control that is filled with the
+    /// failure colour's own tint says the same thing at the volume the rest of
+    /// the interface speaks at. A calculator's "clear" key and a dialer's "SOS"
+    /// key are that control, and neither of them is a page.
+    pub error_container: u32,
     /// A success, a healthy reading.
     pub success: u32,
+    /// A low-emphasis container tinted with the success colour.
+    ///
+    /// WHY it is its own role: the same reasoning as [`Theme::error_container`]
+    /// -- a control that carries a success is tinted rather than filled, and
+    /// a dialer's call key is that control.
+    pub success_container: u32,
+    /// The ink on a success-tinted container.
+    pub on_success_container: u32,
     /// A caution, a reading that is outside the expected range.
     pub warning: u32,
+    /// A low-emphasis container tinted with the caution colour.
+    ///
+    /// WHY it is its own role: the same reasoning as [`Theme::error_container`]
+    /// -- a warning is a state the interface reports, and a control that
+    /// carries one is tinted rather than filled.
+    pub warning_container: u32,
     /// The alarm red: the emergency action, the failed credential.
     ///
     /// WHY it is the same in both variants: this is a platform colour rather
@@ -312,8 +337,12 @@ impl Theme {
         accent: 0xFF7C3AED,
 
         error: color::DANGER,
+        error_container: 0xFFFBE0E0,
         success: color::SUCCESS,
+        success_container: 0xFFD1FAE5,
+        on_success_container: 0xFF059669,
         warning: color::WARNING,
+        warning_container: 0xFFFCEFD8,
         emergency: color::EMERGENCY,
 
         wallpaper_top: 0xFF9CB8D6,
@@ -363,8 +392,12 @@ impl Theme {
         accent: 0xFFB794F6,
 
         error: color::DARK_DANGER,
+        error_container: 0xFF3A1418,
         success: color::DARK_SUCCESS,
+        success_container: 0xFF12372A,
+        on_success_container: 0xFFA7F3D0,
         warning: color::DARK_WARNING,
+        warning_container: 0xFF3A2C0A,
         emergency: color::EMERGENCY,
 
         wallpaper_top: 0xFF1B2733,
@@ -459,8 +492,12 @@ mod tests {
         "secondary",
         "accent",
         "error",
+        "error_container",
         "success",
+        "success_container",
+        "on_success_container",
         "warning",
+        "warning_container",
         "emergency",
         "wallpaper_top",
         "wallpaper_mid",
@@ -492,8 +529,12 @@ mod tests {
             "secondary" => theme.secondary,
             "accent" => theme.accent,
             "error" => theme.error,
+            "error_container" => theme.error_container,
             "success" => theme.success,
+            "success_container" => theme.success_container,
+            "on_success_container" => theme.on_success_container,
             "warning" => theme.warning,
+            "warning_container" => theme.warning_container,
             "emergency" => theme.emergency,
             "wallpaper_top" => theme.wallpaper_top,
             "wallpaper_mid" => theme.wallpaper_mid,
@@ -549,6 +590,12 @@ mod tests {
             ("error", "success"),
             ("error", "warning"),
             ("success", "warning"),
+            ("error", "error_container"),
+            ("success", "success_container"),
+            ("warning", "warning_container"),
+            ("error_container", "warning_container"),
+            ("primary_container", "error_container"),
+            ("primary_container", "warning_container"),
             ("border", "outline_variant"),
             ("border", "outline"),
             ("wallpaper_top", "wallpaper_mid"),

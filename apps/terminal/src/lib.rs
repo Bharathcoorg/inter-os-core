@@ -2,6 +2,9 @@
 
 pub use interos_std as std;
 
+/// The app's view of the platform's design system.
+pub mod theme;
+
 pub const LINE_CAP: usize = 128;
 pub const CONSOLE_LINES: usize = 22;
 

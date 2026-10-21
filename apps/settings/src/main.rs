@@ -27,12 +27,14 @@
 
 use core::panic::PanicInfo;
 use interos_std as std;
+use settings::theme::{spacing, THEME};
 use settings::{
     parse_battery_payload, parse_hardware_availability, parse_sensor_payload,
     parse_thermal_payload, syscall_status_name, BatteryTelemetry, HardwareAvailability,
     QueryOutcome, SensorTelemetry, ThermalTelemetry,
 };
 
+use interos_std::design::components;
 use interos_std::design::outline_text;
 
 const W: usize = 720;
@@ -1419,15 +1421,6 @@ impl SettingsApp {
 // either a token outright or a token with an alpha channel, so the palette is
 // the only source of colour on any surface.
 
-const BG: u32 = std::design::color::BACKGROUND; // #F7F6F2 base
-const SURFACE: u32 = std::design::color::SURFACE; // #FFFFFF card surface
-const SOFT: u32 = std::design::color::SURFACE_SOFT; // #EFEEE9 controls / pills
-const BORDER: u32 = std::design::color::BORDER; // #E1E0DB hairlines
-const TEXT: u32 = std::design::color::TEXT; // #111214 primary text
-const TEXT_MUTED: u32 = std::design::color::TEXT_MUTED; // #777773 secondary text
-const ACCENT: u32 = std::design::color::ACCENT; // restrained blue
-const SUCCESS_EMERALD: u32 = std::design::color::SUCCESS; // muted green
-const DANGER: u32 = std::design::color::DANGER; // refused writes and destructive actions
 
 /// The home-indicator pill.
 ///
@@ -1435,7 +1428,6 @@ const DANGER: u32 = std::design::color::DANGER; // refused writes and destructiv
 /// a value that existed nowhere in the design system. The reference `GestureBar`
 /// component is a neutral dash, so the palette's own secondary ink is the answer
 /// the system already gives.
-const GESTURE_BAR: u32 = TEXT_MUTED;
 
 /// Opacity of the translucent name plate over the wallpaper preview.
 const PLATE_ALPHA: u32 = 0xCC;
@@ -1507,7 +1499,23 @@ const CARD_GAP: usize = std::design::spacing::GRID_16;
 /// Standard card radius: the doc's "standard cards 16-20 px" rung, which is the
 /// SDK's `radius::CARD` token. WHY one radius for every card on every surface: a
 /// card is a component, and a component has one shape.
-const CARD_R: usize = std::design::radius::CARD;
+/// The platform's card treatment, at the elevation the app's cards sit at.
+///
+/// WHY the app's cards are the platform's cards: a card that invents its own
+/// fill and its own hairline is a card a third-party app cannot match, and
+/// the platform already says what a card looks like. The resting elevation is
+/// the one a card on the settings page sits at: the surface one step above
+/// the page, with a hairline around it.
+const CARD: components::CardStyle =
+    components::card_style(&THEME, components::Elevation::Resting);
+
+/// The card's hairline, or the card's own fill when the card has no hairline.
+const CARD_BORDER: u32 = match CARD.border {
+    Some(c) => c,
+    None => CARD.fill,
+};
+
+const CARD_R: usize = CARD.radius;
 
 /// Control radius: the doc's "controls/keypad 12-14 px" rung. Used by the back
 /// control, every segmented-control segment, every keypad key and the inner rim
@@ -1586,6 +1594,10 @@ const IDENTITY_SUB_Y: usize = 296;
 /// Landing card height: modern spaced card proportion.
 const CARD_H: usize = 126;
 /// Gutter between landing cards.
+///
+/// WHY 14 and not a step of the platform's spacing scale: the scale steps in
+/// fours, and 14 is between 12 and 16. It is used once, so a token of its own
+/// would be a token of one app's.
 const GRID_GAP: usize = 14;
 /// Top of the landing grid: spaced comfortably below the identity hero block.
 const GRID_Y: usize = 348;
@@ -1756,7 +1768,7 @@ const SL_DOTS_Y: usize = SL_PROMPT_Y + SL_ERROR_DY + LINE_H + std::design::spaci
 /// One entry dot.
 const SL_DOT: usize = std::design::spacing::GRID_16;
 /// Gap between dots.
-const SL_DOT_GAP: usize = 20;
+const SL_DOT_GAP: usize = spacing::GRID_20;
 /// Dot radius: the image rung, which for a 16px dot is a full circle.
 const SL_DOT_R: usize = IMAGE_R;
 /// One keypad key; the grid is three across with the last row CLR / 0 / OK.
@@ -1918,9 +1930,9 @@ fn card_pixel(x: usize, y: usize, x0: usize, y0: usize, w: usize, h: usize, r: u
         return None;
     }
     if !in_round_rect(x, y, x0 + 1, y0 + 1, w - 2, h - 2, r.saturating_sub(1)) {
-        return Some(BORDER);
+        return Some(CARD_BORDER);
     }
-    Some(SURFACE)
+    Some(CARD.fill)
 }
 
 
@@ -1931,7 +1943,7 @@ fn card_pixel(x: usize, y: usize, x0: usize, y0: usize, w: usize, h: usize, r: u
 /// no token expresses it), and the control, the segmented-control segments and
 /// the keypad keys are all the same class of object.
 fn back_button_pixel(x: usize, y: usize) -> Option<u32> {
-    std::design::back_button::pixel(x, y, TEXT, BORDER, SOFT)
+    std::design::back_button::pixel(x, y, THEME.on_surface, THEME.border, THEME.surface_container_high)
 }
 
 // Category icon family: rounded geometric marks on a ~24px grid, 2px strokes,
@@ -2145,7 +2157,7 @@ fn row_h(section: Section, row: usize) -> usize {
 
 /// Diagnostic row layout constants for the Sensors & Diagnostics surface.
 const DIAG_ROW_H: usize = 96;
-const DIAG_ROW_GAP: usize = 12;
+const DIAG_ROW_GAP: usize = spacing::GRID_12;
 
 /// Height of the diagnostic rows that carry two caption lines.
 ///
@@ -2460,10 +2472,10 @@ fn hardware_availability(category: &str) -> HardwareAvailability {
 /// The badge for a hardware-category card: the platform's own verdict.
 fn availability_badge(state: HardwareAvailability) -> (&'static [u8], u32) {
     match state {
-        HardwareAvailability::Available => (b"AVAILABLE", SUCCESS_EMERALD),
-        HardwareAvailability::Emulated => (b"EMULATED", TEXT_MUTED),
-        HardwareAvailability::Unavailable => (b"UNAVAILABLE", TEXT_MUTED),
-        HardwareAvailability::Unknown => (b"UNAVAILABLE", TEXT_MUTED),
+        HardwareAvailability::Available => (b"AVAILABLE", THEME.success),
+        HardwareAvailability::Emulated => (b"EMULATED", THEME.on_surface_variant),
+        HardwareAvailability::Unavailable => (b"UNAVAILABLE", THEME.on_surface_variant),
+        HardwareAvailability::Unknown => (b"UNAVAILABLE", THEME.on_surface_variant),
     }
 }
 
@@ -2497,7 +2509,7 @@ fn badge_pixel(
     if let Some(c) = run_ink(x, y, tx, ty, TYPE_H3, label, tw + 1, ink, bg, false) {
         return Some(c);
     }
-    Some(SOFT)
+    Some(THEME.surface_container_high)
 }
 
 /// One action button: a pill with a fitted, centred label.
@@ -2578,9 +2590,9 @@ fn segment_pixel(
         return None;
     }
     if !active && !in_round_rect(x, y, sx0 + 1, sy0 + 1, sw - 2, sh - 2, CONTROL_R - 1) {
-        return Some(BORDER);
+        return Some(THEME.border);
     }
-    let fill = if active { TEXT } else { SOFT };
+    let fill = if active { THEME.on_surface } else { THEME.surface_container_high };
     let lw = run_w(label, TYPE_H3, true);
     let lx = if lw + 2 * std::design::spacing::GRID_8 >= sw {
         sx0 + std::design::spacing::GRID_8
@@ -2595,7 +2607,7 @@ fn segment_pixel(
         TYPE_H3,
         label,
         sw - 2 * std::design::spacing::GRID_8,
-        if active { SURFACE } else { TEXT },
+        if active { THEME.surface_container } else { THEME.on_surface },
         fill,
         true,
     ) {
@@ -2636,8 +2648,8 @@ fn row_head(
         TYPE_H3,
         title,
         title_fit,
-        TEXT,
-        SURFACE,
+        THEME.on_surface,
+        THEME.surface_container,
         true,
     ) {
         return Some(c);
@@ -2651,12 +2663,12 @@ fn row_head(
         caption,
         cap_fit,
         cap_ink,
-        SURFACE,
+        THEME.surface_container,
         false,
     ) {
         return Some(c);
     }
-    badge_pixel(x, y, bx0, cy + BADGE_DY, badge, badge_ink, SURFACE)
+    badge_pixel(x, y, bx0, cy + BADGE_DY, badge, badge_ink, THEME.surface_container)
 }
 
 /// One segment of the DVFS profile selector.
@@ -2731,8 +2743,8 @@ fn diag_row_head(
         TYPE_H3,
         title,
         title_fit,
-        TEXT,
-        SURFACE,
+        THEME.on_surface,
+        THEME.surface_container,
         true,
     ) {
         return Some(c);
@@ -2746,7 +2758,7 @@ fn diag_row_head(
         caption,
         cap_fit,
         cap_ink,
-        SURFACE,
+        THEME.surface_container,
         false,
     ) {
         return Some(c);
@@ -2761,39 +2773,39 @@ fn diag_row_head(
             caption2,
             cap_fit,
             cap_ink,
-            SURFACE,
+            THEME.surface_container,
             false,
         ) {
             return Some(c);
         }
     }
-    badge_pixel(x, y, bx0, cy + badge_dy, badge, badge_ink, SURFACE)
+    badge_pixel(x, y, bx0, cy + badge_dy, badge, badge_ink, THEME.surface_container)
 }
 
 /// The badge for a sensor-bus row: the platform's verdict, not this app's.
 fn sensor_badge(app: &SettingsApp) -> (&'static [u8], u32) {
     match app.sensor_outcome {
-        QueryOutcome::Reported => (b"ONLINE", SUCCESS_EMERALD),
-        QueryOutcome::Absent => (b"UNBOUND", TEXT_MUTED),
-        _ => (b"UNAVAILABLE", TEXT_MUTED),
+        QueryOutcome::Reported => (b"ONLINE", THEME.success),
+        QueryOutcome::Absent => (b"UNBOUND", THEME.on_surface_variant),
+        _ => (b"UNAVAILABLE", THEME.on_surface_variant),
     }
 }
 
 /// The badge for a fuel-gauge row: the platform's verdict, not this app's.
 fn battery_badge(app: &SettingsApp) -> (&'static [u8], u32) {
     match app.battery_outcome {
-        QueryOutcome::Reported => (b"REPORTED", SUCCESS_EMERALD),
-        QueryOutcome::Absent => (b"UNBOUND", TEXT_MUTED),
-        _ => (b"UNAVAILABLE", TEXT_MUTED),
+        QueryOutcome::Reported => (b"REPORTED", THEME.success),
+        QueryOutcome::Absent => (b"UNBOUND", THEME.on_surface_variant),
+        _ => (b"UNAVAILABLE", THEME.on_surface_variant),
     }
 }
 
 /// The badge for a thermal row: the platform's verdict, not this app's.
 fn thermal_badge(app: &SettingsApp) -> (&'static [u8], u32) {
     match app.thermal_outcome {
-        QueryOutcome::Reported => (b"REPORTED", SUCCESS_EMERALD),
-        QueryOutcome::Absent => (b"UNBOUND", TEXT_MUTED),
-        _ => (b"UNAVAILABLE", TEXT_MUTED),
+        QueryOutcome::Reported => (b"REPORTED", THEME.success),
+        QueryOutcome::Absent => (b"UNBOUND", THEME.on_surface_variant),
+        _ => (b"UNAVAILABLE", THEME.on_surface_variant),
     }
 }
 
@@ -2830,10 +2842,10 @@ fn diag_row_pixel(
                     cy,
                     b"Accelerometer (3-Axis IMU)",
                     &cap_buf[..n],
-                    SUCCESS_EMERALD,
+                    THEME.success,
                     b"",
                     b"ONLINE",
-                    SUCCESS_EMERALD,
+                    THEME.success,
                     false,
                 )
             } else {
@@ -2845,7 +2857,7 @@ fn diag_row_pixel(
                     cy,
                     b"Accelerometer (3-Axis IMU)",
                     &cap_buf[..n],
-                    TEXT_MUTED,
+                    THEME.on_surface_variant,
                     b"",
                     badge,
                     badge_ink,
@@ -2866,10 +2878,10 @@ fn diag_row_pixel(
                 cy,
                 b"Gyroscope (Angular Rate)",
                 b"The platform reports no gyroscope axis",
-                TEXT_MUTED,
+                THEME.on_surface_variant,
                 b"",
                 b"NOT REPORTED",
-                TEXT_MUTED,
+                THEME.on_surface_variant,
                 false,
             )
         }
@@ -2891,10 +2903,10 @@ fn diag_row_pixel(
                         cy,
                         b"Screen Orientation",
                         &cap_buf[..n],
-                        SUCCESS_EMERALD,
+                        THEME.success,
                         b"",
                         b"ONLINE",
-                        SUCCESS_EMERALD,
+                        THEME.success,
                         false,
                     )
                 } else {
@@ -2905,10 +2917,10 @@ fn diag_row_pixel(
                         cy,
                         b"Screen Orientation",
                         &cap_buf[..n],
-                        TEXT_MUTED,
+                        THEME.on_surface_variant,
                         b"",
                         b"UNAVAILABLE",
-                        TEXT_MUTED,
+                        THEME.on_surface_variant,
                         false,
                     )
                 }
@@ -2921,7 +2933,7 @@ fn diag_row_pixel(
                     cy,
                     b"Screen Orientation",
                     &cap_buf[..n],
-                    TEXT_MUTED,
+                    THEME.on_surface_variant,
                     b"",
                     badge,
                     badge_ink,
@@ -2948,10 +2960,10 @@ fn diag_row_pixel(
                     cy,
                     b"Ambient Light Sensor",
                     &cap_buf[..n],
-                    SUCCESS_EMERALD,
+                    THEME.success,
                     b"",
                     b"ONLINE",
-                    SUCCESS_EMERALD,
+                    THEME.success,
                     false,
                 )
             } else {
@@ -2963,7 +2975,7 @@ fn diag_row_pixel(
                     cy,
                     b"Ambient Light Sensor",
                     &cap_buf[..n],
-                    TEXT_MUTED,
+                    THEME.on_surface_variant,
                     b"",
                     badge,
                     badge_ink,
@@ -2986,10 +2998,10 @@ fn diag_row_pixel(
                         cy,
                         b"Proximity Sensor (IR ToF)",
                         b"Infrared proximity: object near (<30 mm)",
-                        ACCENT,
+                        THEME.primary,
                         b"",
                         b"NEAR",
-                        ACCENT,
+                        THEME.primary,
                         false,
                     )
                 } else {
@@ -2999,10 +3011,10 @@ fn diag_row_pixel(
                         cy,
                         b"Proximity Sensor (IR ToF)",
                         b"Infrared proximity: clear (>=30 mm)",
-                        SUCCESS_EMERALD,
+                        THEME.success,
                         b"",
                         b"ONLINE",
-                        SUCCESS_EMERALD,
+                        THEME.success,
                         false,
                     )
                 }
@@ -3015,7 +3027,7 @@ fn diag_row_pixel(
                     cy,
                     b"Proximity Sensor (IR ToF)",
                     &cap_buf[..n],
-                    TEXT_MUTED,
+                    THEME.on_surface_variant,
                     b"",
                     badge,
                     badge_ink,
@@ -3037,10 +3049,10 @@ fn diag_row_pixel(
                     cy,
                     b"Fuel Gauge (Battery)",
                     &cap_buf[..n],
-                    SUCCESS_EMERALD,
+                    THEME.success,
                     &cap2_buf[..n2],
                     b"REPORTED",
-                    SUCCESS_EMERALD,
+                    THEME.success,
                     true,
                 )
             } else {
@@ -3052,7 +3064,7 @@ fn diag_row_pixel(
                     cy,
                     b"Fuel Gauge (Battery)",
                     &cap_buf[..n],
-                    TEXT_MUTED,
+                    THEME.on_surface_variant,
                     b"",
                     badge,
                     badge_ink,
@@ -3074,10 +3086,10 @@ fn diag_row_pixel(
                     cy,
                     b"Thermal Telemetry Zones",
                     &cap_buf[..n],
-                    SUCCESS_EMERALD,
+                    THEME.success,
                     &cap2_buf[..n2],
                     b"REPORTED",
-                    SUCCESS_EMERALD,
+                    THEME.success,
                     true,
                 )
             } else {
@@ -3089,7 +3101,7 @@ fn diag_row_pixel(
                     cy,
                     b"Thermal Telemetry Zones",
                     &cap_buf[..n],
-                    TEXT_MUTED,
+                    THEME.on_surface_variant,
                     b"",
                     badge,
                     badge_ink,
@@ -3110,14 +3122,14 @@ fn sensors_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
         TYPE_DISPLAY,
         b"Sensors & Diagnostics",
         W - HEADER_X - MARGIN,
-        TEXT,
-        BG,
+        THEME.on_surface,
+        THEME.surface,
         true,
     ) {
         return c;
     }
     if y == DIVIDER_Y {
-        return BORDER;
+        return THEME.border;
     }
     for row in 0..DIAG_ROWS {
         let (cy, ch) = sensors_row_rect(row);
@@ -3126,10 +3138,10 @@ fn sensors_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
             if let Some(c) = diag_row_pixel(x, y, app, row, cy) {
                 return c;
             }
-            return SURFACE;
+            return THEME.surface_container;
         }
     }
-    BG
+    THEME.surface
 }
 
 /// Renders the contents of one detail row for the pixel under test.
@@ -3153,9 +3165,9 @@ fn row_pixel(
                     cy,
                     b"Display",
                     b"Direct DRM/KMS FrameBuffer (720x1440, 60Hz)",
-                    TEXT_MUTED,
+                    THEME.on_surface_variant,
                     b"ACTIVE",
-                    SUCCESS_EMERALD,
+                    THEME.success,
                 ) {
                     return c;
                 }
@@ -3167,9 +3179,9 @@ fn row_pixel(
                     cy,
                     b"Sound & Haptics",
                     b"Hardware audio sink unavailable",
-                    TEXT_MUTED,
+                    THEME.on_surface_variant,
                     b"UNAVAILABLE",
-                    TEXT_MUTED,
+                    THEME.on_surface_variant,
                 ) {
                     return c;
                 }
@@ -3196,7 +3208,7 @@ fn row_pixel(
                     cy,
                     b"Volume & Feedback",
                     cap,
-                    TEXT_MUTED,
+                    THEME.on_surface_variant,
                     badge,
                     badge_ink,
                 ) {
@@ -3210,9 +3222,9 @@ fn row_pixel(
                     cy,
                     b"System Gestures",
                     b"Full-screen edge swipes & home gesture bar",
-                    TEXT_MUTED,
+                    THEME.on_surface_variant,
                     b"ENABLED",
-                    SUCCESS_EMERALD,
+                    THEME.success,
                 ) {
                     return c;
                 }
@@ -3224,10 +3236,10 @@ fn row_pixel(
                 // difference to the user.
                 let mut cap_buf = [0u8; 96];
                 let (cap, cap_ink): (&[u8], u32) = if app.sensor_telemetry.is_present {
-                    (b"Hardware IMU & ambient photodiode online", SUCCESS_EMERALD)
+                    (b"Hardware IMU & ambient photodiode online", THEME.success)
                 } else {
                     let n = sensor_absence_caption(&mut cap_buf, app);
-                    (&cap_buf[..n], TEXT_MUTED)
+                    (&cap_buf[..n], THEME.on_surface_variant)
                 };
                 if let Some(c) = row_head(
                     x,
@@ -3237,7 +3249,7 @@ fn row_pixel(
                     cap,
                     cap_ink,
                     b"VIEW",
-                    ACCENT,
+                    THEME.primary,
                 ) {
                     return c;
                 }
@@ -3250,13 +3262,13 @@ fn row_pixel(
                     (
                         &b"Wireless telemetry reported"[..],
                         &b"REPORTED"[..],
-                        SUCCESS_EMERALD,
+                        THEME.success,
                     )
                 } else {
                     (
                         &b"Radio status unavailable"[..],
                         &b"UNAVAILABLE"[..],
-                        TEXT_MUTED,
+                        THEME.on_surface_variant,
                     )
                 };
                 if let Some(c) = row_head(
@@ -3265,7 +3277,7 @@ fn row_pixel(
                     cy,
                     b"Wi-Fi Radio",
                     caption,
-                    if reported { SUCCESS_EMERALD } else { TEXT_MUTED },
+                    if reported { THEME.success } else { THEME.on_surface_variant },
                     badge,
                     badge_ink,
                 ) {
@@ -3297,7 +3309,7 @@ fn row_pixel(
                     cy,
                     b"Cellular Baseband",
                     cap,
-                    TEXT_MUTED,
+                    THEME.on_surface_variant,
                     badge,
                     badge_ink,
                 ) {
@@ -3314,9 +3326,9 @@ fn row_pixel(
                     cy,
                     b"Flight Mode Status",
                     b"Flight mode not reported by the platform",
-                    TEXT_MUTED,
+                    THEME.on_surface_variant,
                     b"UNAVAILABLE",
-                    TEXT_MUTED,
+                    THEME.on_surface_variant,
                 ) {
                     return c;
                 }
@@ -3345,7 +3357,7 @@ fn row_pixel(
                     cy,
                     b"Bluetooth Low Energy",
                     cap,
-                    TEXT_MUTED,
+                    THEME.on_surface_variant,
                     badge,
                     badge_ink,
                 ) {
@@ -3362,13 +3374,13 @@ fn row_pixel(
                     (
                         &app.owner_name[..app.owner_name_len],
                         &b"REPORTED"[..],
-                        SUCCESS_EMERALD,
+                        THEME.success,
                     )
                 } else {
                     (
                         &b"Owner name not reported by the settings store"[..],
                         &b"UNAVAILABLE"[..],
-                        TEXT_MUTED,
+                        THEME.on_surface_variant,
                     )
                 };
                 if let Some(c) = row_head(
@@ -3377,7 +3389,7 @@ fn row_pixel(
                     cy,
                     b"Sovereign Identity",
                     owner,
-                    if app.owner_name_len > 0 { TEXT } else { TEXT_MUTED },
+                    if app.owner_name_len > 0 { THEME.on_surface } else { THEME.on_surface_variant },
                     badge,
                     badge_ink,
                 ) {
@@ -3392,13 +3404,13 @@ fn row_pixel(
                     (
                         &app.user_status[..app.user_status_len],
                         &b"REPORTED"[..],
-                        SUCCESS_EMERALD,
+                        THEME.success,
                     )
                 } else {
                     (
                         &b"Status not reported by the settings store"[..],
                         &b"UNAVAILABLE"[..],
-                        TEXT_MUTED,
+                        THEME.on_surface_variant,
                     )
                 };
                 if let Some(c) = row_head(
@@ -3407,7 +3419,7 @@ fn row_pixel(
                     cy,
                     b"Status Phrase",
                     status,
-                    if app.user_status_len > 0 { ACCENT } else { TEXT_MUTED },
+                    if app.user_status_len > 0 { THEME.primary } else { THEME.on_surface_variant },
                     badge,
                     badge_ink,
                 ) {
@@ -3436,16 +3448,16 @@ fn row_pixel(
                     cy,
                     b"Wallpaper",
                     &cap[..n],
-                    TEXT_MUTED,
+                    THEME.on_surface_variant,
                     if app.wallpaper_source == WallpaperSource::Answered {
                         b"OPEN"
                     } else {
                         b"UNREAD"
                     },
                     if app.wallpaper_source == WallpaperSource::Answered {
-                        ACCENT
+                        THEME.primary
                     } else {
-                        TEXT_MUTED
+                        THEME.on_surface_variant
                     },
                 ) {
                     return c;
@@ -3458,9 +3470,9 @@ fn row_pixel(
                     cy,
                     b"Language & Locale",
                     b"System language: English (en-US)",
-                    TEXT_MUTED,
+                    THEME.on_surface_variant,
                     b"DEFAULT",
-                    TEXT_MUTED,
+                    THEME.on_surface_variant,
                 ) {
                     return c;
                 }
@@ -3476,13 +3488,13 @@ fn row_pixel(
                     Some(count) => {
                         let an = write_decimal(count as u32, &mut abuf);
                         let an = push_suffix(&mut abuf, an, b" sovereign packages");
-                        (an, &b"VERIFIED"[..], SUCCESS_EMERALD)
+                        (an, &b"VERIFIED"[..], THEME.success)
                     }
                     None => {
                         let msg = b"Package registry did not answer";
                         let n = msg.len().min(abuf.len());
                         abuf[..n].copy_from_slice(&msg[..n]);
-                        (n, &b"UNAVAILABLE"[..], TEXT_MUTED)
+                        (n, &b"UNAVAILABLE"[..], THEME.on_surface_variant)
                     }
                 };
                 if let Some(c) = row_head(
@@ -3491,7 +3503,7 @@ fn row_pixel(
                     cy,
                     b"Installed Applications",
                     &abuf[..an],
-                    if app.app_count.is_some() { TEXT } else { TEXT_MUTED },
+                    if app.app_count.is_some() { THEME.on_surface } else { THEME.on_surface_variant },
                     badge,
                     badge_ink,
                 ) {
@@ -3507,13 +3519,13 @@ fn row_pixel(
                         let mb = (bytes / (1024 * 1024)) as u32;
                         let sn = write_decimal(mb, &mut sbuf);
                         let sn = push_suffix(&mut sbuf, sn, b" MB root block storage");
-                        (sn, &b"REPORTED"[..], SUCCESS_EMERALD)
+                        (sn, &b"REPORTED"[..], THEME.success)
                     }
                     None => {
                         let msg = b"Storage capacity not reported by the platform";
                         let n = msg.len().min(sbuf.len());
                         sbuf[..n].copy_from_slice(&msg[..n]);
-                        (n, &b"UNAVAILABLE"[..], TEXT_MUTED)
+                        (n, &b"UNAVAILABLE"[..], THEME.on_surface_variant)
                     }
                 };
                 if let Some(c) = row_head(
@@ -3522,7 +3534,7 @@ fn row_pixel(
                     cy,
                     b"Storage & VFS Filesystem",
                     &sbuf[..sn],
-                    if app.storage_bytes.is_some() { TEXT } else { TEXT_MUTED },
+                    if app.storage_bytes.is_some() { THEME.on_surface } else { THEME.on_surface_variant },
                     badge,
                     badge_ink,
                 ) {
@@ -3536,9 +3548,9 @@ fn row_pixel(
                     cy,
                     b"Sandboxing & Isolation",
                     b"Zero ambient authority & capabilities enforced",
-                    TEXT_MUTED,
+                    THEME.on_surface_variant,
                     b"ENFORCED",
-                    SUCCESS_EMERALD,
+                    THEME.success,
                 ) {
                     return c;
                 }
@@ -3550,9 +3562,9 @@ fn row_pixel(
                     cy,
                     b"App Permissions",
                     b"Granular object-scoped capability delegation",
-                    TEXT_MUTED,
+                    THEME.on_surface_variant,
                     b"AUDITED",
-                    ACCENT,
+                    THEME.primary,
                 ) {
                     return c;
                 }
@@ -3575,9 +3587,9 @@ fn row_pixel(
                         cy,
                         b"Battery Fuel Gauge",
                         &cap_buf[..n],
-                        TEXT_MUTED,
+                        THEME.on_surface_variant,
                         b"REPORTED",
-                        SUCCESS_EMERALD,
+                        THEME.success,
                     ) {
                         return c;
                     }
@@ -3589,8 +3601,8 @@ fn row_pixel(
                         TYPE_H3,
                         &cap2_buf[..n2],
                         DETAIL_W - 2 * ROW_PAD,
-                        TEXT_MUTED,
-                        SURFACE,
+                        THEME.on_surface_variant,
+                        THEME.surface_container,
                         false,
                     ) {
                         return c;
@@ -3604,7 +3616,7 @@ fn row_pixel(
                         cy,
                         b"Battery Fuel Gauge",
                         &cap_buf[..n],
-                        TEXT_MUTED,
+                        THEME.on_surface_variant,
                         badge,
                         badge_ink,
                     ) {
@@ -3616,17 +3628,17 @@ fn row_pixel(
                 // CPU frequency scaling: observed governor (real query) plus a
                 // live DVFS profile selector whose result is reported honestly.
                 let (gov_run, gov_ink): (&[u8], u32) = match app.governor {
-                    Some(0) => (b"Governor reported by the kernel: Performance", TEXT_MUTED),
-                    Some(1) => (b"Governor reported by the kernel: Power Saver", TEXT_MUTED),
-                    Some(2) => (b"Governor reported by the kernel: Interactive", TEXT_MUTED),
-                    Some(3) => (b"Governor reported by the kernel: Schedutil", TEXT_MUTED),
-                    _ => (b"DVFS state unavailable", TEXT_MUTED),
+                    Some(0) => (b"Governor reported by the kernel: Performance", THEME.on_surface_variant),
+                    Some(1) => (b"Governor reported by the kernel: Power Saver", THEME.on_surface_variant),
+                    Some(2) => (b"Governor reported by the kernel: Interactive", THEME.on_surface_variant),
+                    Some(3) => (b"Governor reported by the kernel: Schedutil", THEME.on_surface_variant),
+                    _ => (b"DVFS state unavailable", THEME.on_surface_variant),
                 };
                 let gov_reported = app.governor.is_some();
                 let (gov_badge, gov_badge_ink): (&[u8], u32) = if gov_reported {
-                    (b"REPORTED", SUCCESS_EMERALD)
+                    (b"REPORTED", THEME.success)
                 } else {
-                    (b"UNAVAILABLE", TEXT_MUTED)
+                    (b"UNAVAILABLE", THEME.on_surface_variant)
                 };
                 if let Some(c) = row_head(
                     x,
@@ -3651,17 +3663,17 @@ fn row_pixel(
                     ProfileFeedback::Applied(mhz) => {
                         let mut i = write_decimal(mhz, &mut fb);
                         i = push_suffix(&mut fb, i, b" MHz accepted by the kernel");
-                        (i, ACCENT)
+                        (i, THEME.primary)
                     }
                     ProfileFeedback::Refused => {
                         let s = b"Kernel refused the change; no profile applied";
                         fb[..s.len()].copy_from_slice(s);
-                        (s.len(), TEXT_MUTED)
+                        (s.len(), THEME.on_surface_variant)
                     }
                     ProfileFeedback::Unattempted => {
                         let s = b"Profile not yet sent to the kernel";
                         fb[..s.len()].copy_from_slice(s);
-                        (s.len(), TEXT_MUTED)
+                        (s.len(), THEME.on_surface_variant)
                     }
                 };
                 if let Some(c) = run_ink(
@@ -3673,7 +3685,7 @@ fn row_pixel(
                     &fb[..fb_len],
                     DETAIL_W - 2 * ROW_PAD,
                     fb_ink,
-                    SURFACE,
+                    THEME.surface_container,
                     false,
                 ) {
                     return c;
@@ -3686,9 +3698,9 @@ fn row_pixel(
                     cy,
                     b"Display Timeout & Sleep",
                     b"Screen sleep timeout: 30 seconds idle",
-                    TEXT_MUTED,
+                    THEME.on_surface_variant,
                     b"ACTIVE",
-                    SUCCESS_EMERALD,
+                    THEME.success,
                 ) {
                     return c;
                 }
@@ -3709,9 +3721,9 @@ fn row_pixel(
                         cy,
                         b"Thermal Governor",
                         &cap_buf[..n],
-                        TEXT_MUTED,
+                        THEME.on_surface_variant,
                         b"REPORTED",
-                        SUCCESS_EMERALD,
+                        THEME.success,
                     ) {
                         return c;
                     }
@@ -3723,8 +3735,8 @@ fn row_pixel(
                         TYPE_H3,
                         &cap2_buf[..n2],
                         DETAIL_W - 2 * ROW_PAD,
-                        TEXT_MUTED,
-                        SURFACE,
+                        THEME.on_surface_variant,
+                        THEME.surface_container,
                         false,
                     ) {
                         return c;
@@ -3738,7 +3750,7 @@ fn row_pixel(
                         cy,
                         b"Thermal Governor",
                         &cap_buf[..n],
-                        TEXT_MUTED,
+                        THEME.on_surface_variant,
                         badge,
                         badge_ink,
                     ) {
@@ -3754,7 +3766,7 @@ fn row_pixel(
                 // rather than the "UNAVAILABLE" treatment the rows below use for
                 // subsystems this platform has no way to read.
                 let (_, detail, ink, badge) = sl_state_line(app);
-                if let Some(c) = row_head(x, y, cy, b"Screen lock", detail, ink, badge, TEXT) {
+                if let Some(c) = row_head(x, y, cy, b"Screen lock", detail, ink, badge, THEME.on_surface) {
                     return c;
                 }
             }
@@ -3764,8 +3776,8 @@ fn row_pixel(
                     y,
                     cy,
                     b"Hardware Keystore",
-                    b"Keystore status unavailable", TEXT_MUTED,
-                    b"UNAVAILABLE", TEXT_MUTED,
+                    b"Keystore status unavailable", THEME.on_surface_variant,
+                    b"UNAVAILABLE", THEME.on_surface_variant,
                 ) {
                     return c;
                 }
@@ -3776,8 +3788,8 @@ fn row_pixel(
                     y,
                     cy,
                     b"Storage Vault Encryption",
-                    b"Vault encryption status unavailable", TEXT_MUTED,
-                    b"UNAVAILABLE", TEXT_MUTED,
+                    b"Vault encryption status unavailable", THEME.on_surface_variant,
+                    b"UNAVAILABLE", THEME.on_surface_variant,
                 ) {
                     return c;
                 }
@@ -3788,8 +3800,8 @@ fn row_pixel(
                     y,
                     cy,
                     b"Privacy Shield Filter",
-                    b"Privacy filter status unavailable", TEXT_MUTED,
-                    b"UNAVAILABLE", TEXT_MUTED,
+                    b"Privacy filter status unavailable", THEME.on_surface_variant,
+                    b"UNAVAILABLE", THEME.on_surface_variant,
                 ) {
                     return c;
                 }
@@ -3805,9 +3817,9 @@ fn row_pixel(
                 );
                 let reported = app.os_version_len > 0;
                 let (badge, badge_ink) = if reported {
-                    (&b"REPORTED"[..], SUCCESS_EMERALD)
+                    (&b"REPORTED"[..], THEME.success)
                 } else {
-                    (&b"UNAVAILABLE"[..], TEXT_MUTED)
+                    (&b"UNAVAILABLE"[..], THEME.on_surface_variant)
                 };
                 if let Some(c) = row_head(
                     x,
@@ -3815,7 +3827,7 @@ fn row_pixel(
                     cy,
                     b"InterOS Core",
                     &ver[..n],
-                    if reported { TEXT } else { TEXT_MUTED },
+                    if reported { THEME.on_surface } else { THEME.on_surface_variant },
                     badge,
                     badge_ink,
                 ) {
@@ -3829,9 +3841,9 @@ fn row_pixel(
                     cy,
                     b"Platform Microkernel",
                     b"Capability Security & VFS Block Storage",
-                    TEXT_MUTED,
+                    THEME.on_surface_variant,
                     b"RING 0",
-                    ACCENT,
+                    THEME.primary,
                 ) {
                     return c;
                 }
@@ -3850,9 +3862,9 @@ fn row_pixel(
                     s.len()
                 };
                 let (badge, badge_ink) = if reported {
-                    (&b"REPORTED"[..], SUCCESS_EMERALD)
+                    (&b"REPORTED"[..], THEME.success)
                 } else {
-                    (&b"UNAVAILABLE"[..], TEXT_MUTED)
+                    (&b"UNAVAILABLE"[..], THEME.on_surface_variant)
                 };
                 if let Some(c) = row_head(
                     x,
@@ -3860,7 +3872,7 @@ fn row_pixel(
                     cy,
                     b"Hardware Real-Time Clock",
                     &rbuf[..n],
-                    if reported { ACCENT } else { TEXT_MUTED },
+                    if reported { THEME.primary } else { THEME.on_surface_variant },
                     badge,
                     badge_ink,
                 ) {
@@ -3872,11 +3884,11 @@ fn row_pixel(
                 let (cap, cap_ink, badge, badge_ink) = if app.uptime_ticks > 0 {
                     let mut un = write_decimal_u64(app.uptime_ticks, &mut ubuf);
                     un = push_suffix(&mut ubuf, un, b" ticks (x86_64 Sovereign SMP)");
-                    (&ubuf[..un], TEXT, &b"REPORTED"[..], SUCCESS_EMERALD)
+                    (&ubuf[..un], THEME.on_surface, &b"REPORTED"[..], THEME.success)
                 } else {
                     let s = b"x86_64 Sovereign SMP / 64-bit Paging";
                     ubuf[..s.len()].copy_from_slice(s);
-                    (&ubuf[..s.len()], TEXT_MUTED, &b"HARDWARE"[..], SUCCESS_EMERALD)
+                    (&ubuf[..s.len()], THEME.on_surface_variant, &b"HARDWARE"[..], THEME.success)
                 };
                 if let Some(c) = row_head(
                     x,
@@ -3896,12 +3908,12 @@ fn row_pixel(
                 // the row stays tappable; the badge reports the last state the
                 // kernel actually persisted.
                 let (state_run, badge, badge_ink) = if app.terminal_enabled {
-                    (&b"Enabled"[..], &b"ENABLED"[..], SUCCESS_EMERALD)
+                    (&b"Enabled"[..], &b"ENABLED"[..], THEME.success)
                 } else {
                     (
                         &b"Disabled by default"[..],
                         &b"DISABLED"[..],
-                        TEXT_MUTED,
+                        THEME.on_surface_variant,
                     )
                 };
                 let bw = badge_w(badge);
@@ -3911,7 +3923,7 @@ fn row_pixel(
                     cy,
                     b"Developer terminal",
                     state_run,
-                    TEXT_MUTED,
+                    THEME.on_surface_variant,
                     badge,
                     badge_ink,
                 ) {
@@ -3925,8 +3937,8 @@ fn row_pixel(
                     TYPE_H3,
                     b"Config key: developer.terminal_enabled",
                     DETAIL_W - 2 * ROW_PAD - bw - BADGE_GAP,
-                    TEXT_MUTED,
-                    SURFACE,
+                    THEME.on_surface_variant,
+                    THEME.surface_container,
                     false,
                 ) {
                     return c;
@@ -3934,7 +3946,7 @@ fn row_pixel(
             }
         },
     }
-    SURFACE
+    THEME.surface_container
 }
 
 /// Detail screen pixel: header (back + title + divider) then the stacked rows.
@@ -3953,14 +3965,14 @@ fn detail_pixel(x: usize, y: usize, app: &SettingsApp, section: Section) -> u32 
         TYPE_DISPLAY,
         section.title(),
         W - HEADER_X - MARGIN,
-        TEXT,
-        BG,
+        THEME.on_surface,
+        THEME.surface,
         true,
     ) {
         return c;
     }
     if y == DIVIDER_Y {
-        return BORDER;
+        return THEME.border;
     }
     for row in 0..row_count(section) {
         let (cy, ch) = detail_row_rect(section, row);
@@ -3968,7 +3980,7 @@ fn detail_pixel(x: usize, y: usize, app: &SettingsApp, section: Section) -> u32 
             return row_pixel(x, y, app, section, row, cy, fill);
         }
     }
-    BG
+    THEME.surface
 }
 
 /// One landing category card: icon, bold title, subtitle wrapped to at most
@@ -3984,7 +3996,7 @@ fn landing_card_pixel(x: usize, y: usize, i: usize) -> Option<u32> {
     let (cx0, cy0, cw, ch) = card_rect(i);
     if let Some(fill) = card_pixel(x, y, cx0, cy0, cw, ch, CARD_R) {
         let (title, subtitle, icon) = category(i);
-        if let Some(ic) = icon(x, y, cx0 + CARD_ICON_CX, cy0 + CARD_PAD + LINE_H / 2, TEXT) {
+        if let Some(ic) = icon(x, y, cx0 + CARD_ICON_CX, cy0 + CARD_PAD + LINE_H / 2, THEME.on_surface) {
             return Some(ic);
         }
         let text_w = cw.saturating_sub(CARD_TEXT_X + CARD_PAD);
@@ -3997,7 +4009,7 @@ fn landing_card_pixel(x: usize, y: usize, i: usize) -> Option<u32> {
             TYPE_H3,
             title,
             text_w,
-            TEXT,
+            THEME.on_surface,
             fill,
             true,
         ) {
@@ -4013,7 +4025,7 @@ fn landing_card_pixel(x: usize, y: usize, i: usize) -> Option<u32> {
             TYPE_H3,
             &sub_buf[..sub_len],
             text_w,
-            TEXT_MUTED,
+            THEME.on_surface_variant,
             fill,
             false,
         ) {
@@ -4072,14 +4084,14 @@ fn vitality_orb_pixel(x: usize, y: usize, state: OrbState) -> Option<u32> {
 
         Some(0xFF000000 | (r << 16) | (g << 8) | b)
     } else {
-        // Ambient ethereal halo smoothly fading from c_outer into BG with quadratic falloff
+        // Ambient ethereal halo smoothly fading from c_outer into THEME.surface with quadratic falloff
         let halo_span = (HALO_R - ORB_R) as u32;
         let halo_d = dist - (ORB_R as u32);
         let span_rem = halo_span.saturating_sub(halo_d);
         let alpha = (span_rem * span_rem * 160) / (halo_span * halo_span);
-        let bg_r = (BG >> 16) & 0xFF;
-        let bg_g = (BG >> 8) & 0xFF;
-        let bg_b = BG & 0xFF;
+        let bg_r = (THEME.surface >> 16) & 0xFF;
+        let bg_g = (THEME.surface >> 8) & 0xFF;
+        let bg_b = THEME.surface & 0xFF;
 
         let r = (r_outer * alpha + bg_r * (255 - alpha)) / 255;
         let g = (g_outer * alpha + bg_g * (255 - alpha)) / 255;
@@ -4114,13 +4126,13 @@ fn landing_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
         TYPE_H3,
         title,
         W - 2 * CONTENT_X,
-        TEXT,
-        BG,
+        THEME.on_surface,
+        THEME.surface,
         true,
     ) {
         return c;
     }
-    BG
+    THEME.surface
 }
 
 // -----------------------------------------------------------------------------
@@ -4216,8 +4228,8 @@ fn wallpaper_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
         TYPE_DISPLAY,
         b"Wallpaper",
         W - HEADER_X - MARGIN,
-        TEXT,
-        BG,
+        THEME.on_surface,
+        THEME.surface,
         true,
     ) {
         return c;
@@ -4230,8 +4242,8 @@ fn wallpaper_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
         TYPE_H3,
         b"Shown on the lock screen and the home surface",
         W - HEADER_X - MARGIN,
-        TEXT_MUTED,
-        BG,
+        THEME.on_surface_variant,
+        THEME.surface,
         false,
     ) {
         return c;
@@ -4250,7 +4262,7 @@ fn wallpaper_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
             WP_PREVIEW_H,
             WP_PREVIEW_R,
         ) {
-            return BG;
+            return THEME.surface;
         }
         // Name plate over the lower edge of the preview, so the scene in view is
         // named without covering its sky.
@@ -4278,7 +4290,7 @@ fn wallpaper_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
                     blend_over(std::design::color::DARK_BACKGROUND, base, PLATE_ALPHA),
                 )
             } else {
-                (TEXT, blend_over(BG, base, PLATE_ALPHA))
+                (THEME.on_surface, blend_over(THEME.surface, base, PLATE_ALPHA))
             };
             if let Some(c) = run_ink(
                 x,
@@ -4309,7 +4321,7 @@ fn wallpaper_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
                 return c;
             }
         }
-        return BG;
+        return THEME.surface;
     }
 
     // Gallery.
@@ -4321,7 +4333,7 @@ fn wallpaper_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
             }
             let scene = &std::design::walls::SCENES[i];
             let is_pending = app.wallpaper_pending == Some(scene);
-            let ring = if is_pending { ACCENT } else { BORDER };
+            let ring = if is_pending { THEME.primary } else { THEME.border };
             if !in_round_rect(
                 x + 3,
                 y + 3,
@@ -4374,15 +4386,15 @@ fn wallpaper_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
                 TYPE_H3,
                 scene.name,
                 WP_CELL_W - 2 * WP_CELL_PAD,
-                TEXT,
-                SURFACE,
+                THEME.on_surface,
+                THEME.surface_container,
                 true,
             ) {
                 return c;
             }
-            return SURFACE;
+            return THEME.surface_container;
         }
-        return BG;
+        return THEME.surface;
     }
 
     // Actions.
@@ -4406,7 +4418,7 @@ fn wallpaper_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
             BUTTON_H / 2,
         );
         if !apply && !reset {
-            return BG;
+            return THEME.surface;
         }
         // WHY the Apply press is only drawn enabled and only enabled when a
         // selection exists: an enabled-looking Apply with nothing to write is the
@@ -4419,17 +4431,17 @@ fn wallpaper_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
             (
                 b"Apply".as_slice(),
                 CONTENT_X,
-                if enabled { TEXT } else { SOFT },
-                if enabled { SURFACE } else { TEXT_MUTED },
-                if enabled { None } else { Some(BORDER) },
+                if enabled { THEME.on_surface } else { THEME.surface_container_high },
+                if enabled { THEME.surface_container } else { THEME.on_surface_variant },
+                if enabled { None } else { Some(THEME.border) },
             )
         } else {
             (
                 b"Reset to default".as_slice(),
                 CONTENT_X + BUTTON_HALF + CARD_GAP,
-                SOFT,
-                TEXT,
-                Some(BORDER),
+                THEME.surface_container_high,
+                THEME.on_surface,
+                Some(THEME.border),
             )
         };
         if let Some(c) = button_pixel(
@@ -4446,7 +4458,7 @@ fn wallpaper_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
         ) {
             return c;
         }
-        return BG;
+        return THEME.surface;
     }
 
     // Choose from Gallery action button
@@ -4459,35 +4471,35 @@ fn wallpaper_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
             CONTENT_W,
             WP_CHOOSE_GALLERY_H,
             b"Choose from Gallery",
-            SOFT,
-            TEXT,
-            Some(BORDER),
+            THEME.surface_container_high,
+            THEME.on_surface,
+            Some(THEME.border),
         ) {
             return c;
         }
-        return BG;
+        return THEME.surface;
     }
 
     // Outcome line.
     if y >= WP_STATUS_Y {
         let (line, ink): (&[u8], u32) = match app.wallpaper_write {
             WallpaperWrite::Applied(target) => match target {
-                WallpaperTarget::Home => (&b"Applied to the home surface"[..], ACCENT),
-                WallpaperTarget::Lock => (&b"Applied to the lock screen"[..], ACCENT),
-                WallpaperTarget::Both => (&b"Applied to home and lock screens"[..], ACCENT),
+                WallpaperTarget::Home => (&b"Applied to the home surface"[..], THEME.primary),
+                WallpaperTarget::Lock => (&b"Applied to the lock screen"[..], THEME.primary),
+                WallpaperTarget::Both => (&b"Applied to home and lock screens"[..], THEME.primary),
             },
             WallpaperWrite::Refused => (
                 &b"The settings store refused the write; nothing changed"[..],
-                TEXT_MUTED,
+                THEME.on_surface_variant,
             ),
             WallpaperWrite::Unattempted => match app.wallpaper_source {
                 WallpaperSource::Answered => (
                     &b"Select a wallpaper, then choose a target and apply"[..],
-                    TEXT_MUTED,
+                    THEME.on_surface_variant,
                 ),
                 WallpaperSource::Unread => (
                     &b"The settings store did not answer; the current wallpaper is unknown"[..],
-                    TEXT_MUTED,
+                    THEME.on_surface_variant,
                 ),
             },
         };
@@ -4500,14 +4512,14 @@ fn wallpaper_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
             line,
             CONTENT_W,
             ink,
-            BG,
+            THEME.surface,
             false,
         ) {
             return c;
         }
     }
 
-    BG
+    THEME.surface
 }
 
 /// Hit-test for the picker's three interactive regions.
@@ -4632,26 +4644,26 @@ fn sl_state_line(app: &SettingsApp) -> (&'static [u8], &'static [u8], u32, &'sta
         None => (
             b"Unknown",
             b"The account layer did not answer",
-            TEXT_MUTED,
+            THEME.on_surface_variant,
             b"UNKNOWN",
         ),
         Some(false) => (
             b"No PIN set",
             b"The lock screen unlocks on a swipe",
-            TEXT_MUTED,
+            THEME.on_surface_variant,
             b"OFF",
         ),
         Some(true) => match app.screen_lock_reported {
             Some(std::UserLockState::Unlocked) => (
                 b"PIN set",
                 b"Unlocked in this session",
-                TEXT,
+                THEME.on_surface,
                 b"PIN",
             ),
             Some(std::UserLockState::Lockout) => (
                 b"PIN set",
                 b"Locked out after failed attempts",
-                TEXT,
+                THEME.on_surface,
                 b"WAIT",
             ),
             Some(std::UserLockState::Uninitialized) => (
@@ -4661,13 +4673,13 @@ fn sl_state_line(app: &SettingsApp) -> (&'static [u8], &'static [u8], u32, &'sta
                 // would be inventing a state the kernel never reported.
                 b"PIN set",
                 b"The account reports no initialized lock",
-                TEXT_MUTED,
+                THEME.on_surface_variant,
                 b"PIN",
             ),
             _ => (
                 b"PIN set",
                 b"Required to unlock this device",
-                TEXT,
+                THEME.on_surface,
                 b"PIN",
             ),
         },
@@ -4728,8 +4740,8 @@ fn screen_lock_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
         TYPE_DISPLAY,
         b"Screen lock",
         W - HEADER_X - MARGIN,
-        TEXT,
-        BG,
+        THEME.on_surface,
+        THEME.surface,
         true,
     ) {
         return c;
@@ -4742,8 +4754,8 @@ fn screen_lock_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
         TYPE_H3,
         b"Set, change or remove the PIN this device asks for",
         W - HEADER_X - MARGIN,
-        TEXT_MUTED,
-        BG,
+        THEME.on_surface_variant,
+        THEME.surface,
         false,
     ) {
         return c;
@@ -4767,7 +4779,7 @@ fn screen_lock_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
                 CARD_R - 1,
             );
             if !inner {
-                return BORDER;
+                return THEME.border;
             }
             let (headline, detail, ink, _) = sl_state_line(app);
             // WHY the headline is the H3 rung and not the Display rung it used to
@@ -4783,7 +4795,7 @@ fn screen_lock_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
                 headline,
                 CONTENT_W - 2 * ROW_PAD - bw - BADGE_GAP,
                 ink,
-                SURFACE,
+                THEME.surface_container,
                 true,
             ) {
                 return c;
@@ -4796,18 +4808,18 @@ fn screen_lock_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
                 TYPE_H3,
                 detail,
                 CONTENT_W - 2 * ROW_PAD,
-                TEXT_MUTED,
-                SURFACE,
+                THEME.on_surface_variant,
+                THEME.surface_container,
                 false,
             ) {
                 return c;
             }
-            if let Some(c) = badge_pixel(x, y, bx0, SL_STATUS_Y + BADGE_DY, badge, TEXT, SURFACE) {
+            if let Some(c) = badge_pixel(x, y, bx0, SL_STATUS_Y + BADGE_DY, badge, THEME.on_surface, THEME.surface_container) {
                 return c;
             }
-            return SURFACE;
+            return THEME.surface_container;
         }
-        return BG;
+        return THEME.surface;
     }
 
     // Step prompt and the typed-entry dots, only while a step is in progress.
@@ -4823,15 +4835,15 @@ fn screen_lock_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
             TYPE_H3,
             sl_prompt(app),
             CONTENT_W,
-            TEXT,
-            BG,
+            THEME.on_surface,
+            THEME.surface,
             true,
         ) {
             return c;
         }
         let line = sl_error_line(app);
         if !line.is_empty() {
-            let ink = DANGER;
+            let ink = THEME.error;
             if let Some(c) = run_ink(
                 x,
                 y,
@@ -4841,7 +4853,7 @@ fn screen_lock_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
                 line,
                 CONTENT_W,
                 ink,
-                BG,
+                THEME.surface,
                 false,
             ) {
                 return c;
@@ -4861,9 +4873,9 @@ fn screen_lock_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
             if in_round_rect(x, y, cx0, cy0, dot, dot, SL_DOT_R) {
                 let inner = in_round_rect(x, y, cx0 + 2, cy0 + 2, dot - 4, dot - 4, SL_DOT_R - 2);
                 if !inner {
-                    return BORDER;
+                    return THEME.border;
                 }
-                return if i < filled { ACCENT } else { SOFT };
+                return if i < filled { THEME.primary } else { THEME.surface_container_high };
             }
         }
     }
@@ -4886,12 +4898,12 @@ fn screen_lock_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
                     SL_KEY_R - 2,
                 );
                 if !inner {
-                    return BORDER;
+                    return THEME.border;
                 }
                 let label: &[u8] = match sl_digit(row, col) {
                     Some(d) => {
                         let one = [d, 0];
-                        return run_one_digit(x, y, kx, ky, &one[..1], TEXT, SURFACE);
+                        return run_one_digit(x, y, kx, ky, &one[..1], THEME.on_surface, THEME.surface_container);
                     }
                     None if col == 0 => b"CLR",
                     None => b"OK",
@@ -4913,16 +4925,16 @@ fn screen_lock_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
                     TYPE_H3,
                     label,
                     SL_KEY_W - 2 * std::design::spacing::GRID_8,
-                    TEXT,
-                    SURFACE,
+                    THEME.on_surface,
+                    THEME.surface_container,
                     true,
                 ) {
                     return c;
                 }
-                return SURFACE;
+                return THEME.surface_container;
             }
         }
-        return BG;
+        return THEME.surface;
     }
 
     // Action row: what the reported state actually allows.
@@ -4966,7 +4978,7 @@ fn screen_lock_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
             )
         };
         if !inside {
-            return BG;
+            return THEME.surface;
         }
         // WHY the layout changes with the state rather than always drawing two
         // buttons: an account with no PIN has nothing to change and nothing to
@@ -4983,8 +4995,8 @@ fn screen_lock_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
                 &b"Set a screen lock PIN"[..],
                 CONTENT_X,
                 CONTENT_W,
-                TEXT,
-                SURFACE,
+                THEME.on_surface,
+                THEME.surface_container,
                 None,
             )
         } else if left {
@@ -4992,18 +5004,18 @@ fn screen_lock_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
                 &b"Change PIN"[..],
                 CONTENT_X,
                 half,
-                SOFT,
-                TEXT,
-                Some(BORDER),
+                THEME.surface_container_high,
+                THEME.on_surface,
+                Some(THEME.border),
             )
         } else {
             (
                 &b"Remove PIN"[..],
                 CONTENT_X + half + CARD_GAP,
                 half,
-                SOFT,
-                DANGER,
-                Some(BORDER),
+                THEME.surface_container_high,
+                THEME.error,
+                Some(THEME.border),
             )
         };
         if let Some(c) = button_pixel(
@@ -5020,7 +5032,7 @@ fn screen_lock_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
         ) {
             return c;
         }
-        return BG;
+        return THEME.surface;
     }
 
     // Outcome line.
@@ -5033,14 +5045,14 @@ fn screen_lock_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
             TYPE_H3,
             sl_write_line(app),
             CONTENT_W,
-            TEXT_MUTED,
-            BG,
+            THEME.on_surface_variant,
+            THEME.surface,
             false,
         ) {
             return c;
         }
     }
-    BG
+    THEME.surface
 }
 
 /// Draws one keypad digit, centred in its key.
@@ -5155,7 +5167,7 @@ fn get_settings_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
         && x >= GESTURE_X
         && x < GESTURE_X + GESTURE_W
     {
-        return GESTURE_BAR;
+        return THEME.on_surface_variant;
     }
     // Shared 48x48 back control: rendered on landing grid and sub-pages for uniform OS navigation
     if let Some(c) = back_button_pixel(x, y) {

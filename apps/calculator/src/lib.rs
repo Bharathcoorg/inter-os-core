@@ -3,6 +3,9 @@
 
 extern crate interos_std;
 
+/// The app's view of the platform's design system.
+pub mod theme;
+
 /// Error types encountered during mathematical evaluation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CalcError {

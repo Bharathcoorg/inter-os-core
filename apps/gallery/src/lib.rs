@@ -2,6 +2,9 @@
 
 pub use interos_std as std;
 
+/// The app's view of the platform's design system.
+pub mod theme;
+
 pub const IMAGE_SUFFIXES: [&[u8]; 9] = [
     b".jpg", b".jpeg", b".png", b".bmp", b".gif", b".webp", b".qoi", b".ppm", b".raw",
 ];
@@ -224,6 +227,15 @@ pub struct StorageMediaItem {
 }
 
 impl StorageMediaItem {
+    /// The placeholder for a media item the gallery has no pixels for.
+    ///
+    /// WHY these two colours are not the platform's roles: they are the
+    /// *media's* own colours -- the two ends of the gradient a tile is filled
+    /// with so a thumbnail-less item still has a depth -- and not the app's
+    /// chrome. The app's chrome around it comes from the platform's theme;
+    /// see `gallery::theme` for that mapping. A media item that has real
+    /// pixels carries the colours sampled from them, which is the same
+    /// argument.
     pub const EMPTY: Self = Self {
         name: [0u8; 48],
         name_len: 0,

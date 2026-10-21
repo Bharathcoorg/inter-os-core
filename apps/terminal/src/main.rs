@@ -22,6 +22,7 @@
 
 use core::panic::PanicInfo;
 use interos_std as std;
+use terminal::theme::{radius, spacing, type_scale, typography, Theme, THEME};
 
 use interos_std::design::outline_text;
 
@@ -32,14 +33,6 @@ const CHUNK: usize = 4096;
 // -----------------------------------------------------------------------------
 // Visual Design Tokens
 // -----------------------------------------------------------------------------
-const BG_DARK: u32 = 0xFF05080E;
-const SURFACE_DARK: u32 = 0xFF0B101D;
-const SURFACE_RAISED: u32 = 0xFF141C30;
-const BORDER_SUBTLE: u32 = 0xFF24324D;
-const SUCCESS_EMERALD: u32 = 0xFF10B981;
-const ACCENT_SKY: u32 = 0xFF38BDF8;
-const TEXT_PRIMARY: u32 = 0xFFF8FAFC;
-const TEXT_MUTED: u32 = 0xFF94A3B8;
 
 // -----------------------------------------------------------------------------
 // Embedded 8x8 ASCII Font (Characters 32 ' ' through 126 '~')
@@ -72,9 +65,9 @@ fn test_text(
     color: u32,
 ) -> Option<u32> {
     if let Some(run) = outline_text::place_run(x0, y0, scale, text, None, false) {
-        return run.pixel(x, y, color, BG_DARK);
+        return run.pixel(x, y, color, THEME.surface);
     }
-    std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, BG_DARK, false)
+    std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, THEME.surface, false)
 }
 
 // -----------------------------------------------------------------------------
@@ -93,15 +86,24 @@ const fn run_rows(scale: usize) -> usize {
 
 /// Header band height: y >= HEADER_H draws the hairline rule, so a header run
 /// has to fit inside 0..HEADER_H.
+///
+/// WHY 94 and not a token sum: the band is the title's own 72-row line box
+/// plus the 22 rows the title is centred in, and the 22 is the header's own
+/// padding rather than a step of the platform's spacing scale. The scale has
+/// no 22, and inventing one for a single band would be a second scale.
 const HEADER_H: usize = 94;
 /// Scale of the header title run; it needs run_rows(3) = 72 rows.
-const TITLE_SCALE: usize = 3;
+const TITLE_SCALE: usize = type_scale::TITLE;
 /// First console line box top. The tallest console buffer (22 lines) ends at
 /// CONSOLE_TOP + 22 * CONSOLE_LINE_ROWS = 1170, clear of the pill dock at 1210.
 const CONSOLE_TOP: usize = 114;
 /// Console line pitch == the line box height, so full-height runs stack without
 /// overlapping.
-const CONSOLE_LINE_ROWS: usize = 48;
+///
+/// WHY the platform's body line box: the pitch is not an arbitrary number, it
+/// is the height of the line the console draws, and the platform's type scale
+/// already says how tall a body run is.
+const CONSOLE_LINE_ROWS: usize = typography::BODY.line_height_px;
 /// Lines the console buffer keeps.
 ///
 /// WHY a named constant and not the literal 18 sprinkled through the buffer
@@ -117,14 +119,14 @@ const CONSOLE_LINES: usize = 22;
 /// Left edge of a console run. WHY 24 and not 28: it is the same left margin the
 /// two pill dock rows use, so the console's text column lines up with them, and
 /// every extra pixel here is a pixel the wrapped pieces may use.
-const CONSOLE_X0: usize = 24;
+const CONSOLE_X0: usize = spacing::GRID_24;
 /// Right edge of a console run: the surface edge. WHY W and not a named inner
 /// edge: a console has no card to sit inside, so the text column runs to the
 /// edge of the surface, and a run that reaches it is wrapped, never clipped.
 const CONSOLE_X1: usize = W;
 /// Console body scale. WHY named: the wrap width and the draw gate below both
 /// scale by it, so a change here cannot leave one of them behind.
-const CONSOLE_SCALE: usize = 2;
+const CONSOLE_SCALE: usize = type_scale::BODY;
 
 /// System CPL badge box. Grown from the old 176x40 so the scale-2
 /// "CPL=3 RING" run (228 x 48) fits inside it with padding instead of being
@@ -133,26 +135,37 @@ const CONSOLE_SCALE: usize = 2;
 const BADGE_X0: usize = 440;
 const BADGE_X1: usize = 700;
 const BADGE_Y0: usize = 23;
-const BADGE_H: usize = 48;
-const BADGE_R: usize = 16;
+/// The badge's height: the platform's preferred target, and exactly the height
+/// of the run it holds.
+const BADGE_H: usize = std::design::touch::PREFERRED_TARGET;
+/// The badge's corner radius: the platform's soft-pill step, the shape a
+/// 48-row control takes when it is rounded but not a capsule.
+const BADGE_R: usize = radius::SOFT_PILL;
 /// The badge states the shell's isolation, which the app can see, and
 /// nothing it cannot.
 ///
 /// WHY the privilege level is gone: the app used to print "CPL=3 RING" and
-/// "CPL=3 Isolated" from a compile-time constant. It never queried the
+/// "CPL=3 ISOLATED" from a compile-time constant. It never queried the
 /// task's privilege level, so the badge asserted a number it had not
 /// observed -- and it contradicted the shell's own `caps` command, which
 /// admits that no capability inspection API is exposed.
 const BADGE_TEXT: &[u8] = b"RING 3";
-const BADGE_SCALE: usize = 2;
+const BADGE_SCALE: usize = type_scale::BODY;
 
 /// Quick-command pill geometry. Each pill row is 52 rows tall and its scale-2
 /// label is centred in that box, so the label's 48-row box is never clipped.
-const PILL_SCALE: usize = 2;
+///
+/// WHY the height is derived: the label is a body run, so the box that holds
+/// it is the body line box plus a hair of breathing room, and the platform's
+/// scale already says how tall a body run is.
+const PILL_SCALE: usize = type_scale::BODY;
 const PILL1_Y0: usize = 1222;
-const PILL1_H: usize = 52;
+const PILL1_H: usize = typography::BODY.line_height_px + spacing::GRID_4;
 const PILL2_Y0: usize = 1290;
-const PILL2_H: usize = 52;
+const PILL2_H: usize = typography::BODY.line_height_px + spacing::GRID_4;
+/// The quick-command pills' corner radius: the platform's control step, the
+/// rounding a button takes.
+const PILL_R: usize = radius::CONTROL;
 
 // -----------------------------------------------------------------------------
 // Counted Text Assembly (no allocator in this no_std app)
@@ -333,22 +346,22 @@ impl TerminalApp {
         // diagnostics." is 830px and breaks after "for".
         lines[0] = Some(ConsoleLine::from_static(
             "InterOS Sovereign Shell [Ring 3",
-            TEXT_MUTED,
+            THEME.on_surface_variant,
         ));
-        lines[1] = Some(ConsoleLine::from_static("ISOLATED]", TEXT_MUTED));
+        lines[1] = Some(ConsoleLine::from_static("ISOLATED]", THEME.on_surface_variant));
         lines[2] = Some(ConsoleLine::from_static(
             "Isolated memory, token capabilities",
-            ACCENT_SKY,
+            THEME.primary,
         ));
-        lines[3] = Some(ConsoleLine::from_static("enforced.", ACCENT_SKY));
+        lines[3] = Some(ConsoleLine::from_static("enforced.", THEME.primary));
         lines[4] = Some(ConsoleLine::from_static(
             "Tap quick commands below for",
-            TEXT_MUTED,
+            THEME.on_surface_variant,
         ));
-        lines[5] = Some(ConsoleLine::from_static("diagnostics.", TEXT_MUTED));
+        lines[5] = Some(ConsoleLine::from_static("diagnostics.", THEME.on_surface_variant));
         lines[6] = Some(ConsoleLine::from_static(
             "interos:$ _",
-            SUCCESS_EMERALD,
+            THEME.success,
         ));
         Self {
             history: [None::<HistoryEntry>; 8],
@@ -375,7 +388,7 @@ impl TerminalApp {
         line[..p].copy_from_slice(PROMPT);
         let n = p + cmd.len().min(line.len() - p);
         line[p..n].copy_from_slice(&cmd.as_bytes()[..n - p]);
-        self.push_line_bytes(&line[..n], SUCCESS_EMERALD);
+        self.push_line_bytes(&line[..n], THEME.success);
     }
 
     pub fn push_line_bytes(&mut self, text: &[u8], color: u32) {
@@ -452,7 +465,7 @@ impl TerminalApp {
     /// be read as a claim about a different directory.
     pub fn list_path(&mut self, path: &str) {
         if path.is_empty() {
-            self.push_line("ls: needs a path, e.g. ls /storage", TEXT_MUTED);
+            self.push_line("ls: needs a path, e.g. ls /storage", THEME.on_surface_variant);
             self.record_history("ls", -1);
             return;
         }
@@ -460,7 +473,7 @@ impl TerminalApp {
         let listed = std::fs_list(path, &mut buf);
         match listed {
             Ok(n) if n > 0 => {
-                self.push_counted("vfs: ", n as u64, " bytes listed.", SUCCESS_EMERALD);
+                self.push_counted("vfs: ", n as u64, " bytes listed.", THEME.success);
                 let mut start = 0;
                 while start < n {
                     let end = buf[start..n]
@@ -470,7 +483,7 @@ impl TerminalApp {
                         .unwrap_or(n);
                     if let Ok(entry_str) = core::str::from_utf8(&buf[start..end]) {
                         if !entry_str.is_empty() {
-                            self.push_line(entry_str, TEXT_PRIMARY);
+                            self.push_line(entry_str, THEME.on_surface);
                         }
                     }
                     start = end.saturating_add(1);
@@ -478,11 +491,11 @@ impl TerminalApp {
                 self.record_history("ls", 0);
             }
             Ok(_) => {
-                self.push_line("vfs: directory empty.", TEXT_MUTED);
+                self.push_line("vfs: directory empty.", THEME.on_surface_variant);
                 self.record_history("ls", 0);
             }
             Err(code) => {
-                self.push_line("vfs: fs_list query refused or unavailable.", TEXT_MUTED);
+                self.push_line("vfs: fs_list query refused or unavailable.", THEME.on_surface_variant);
                 self.record_history("ls", code);
             }
         }
@@ -491,7 +504,7 @@ impl TerminalApp {
     /// Prints a file the user named.
     pub fn cat_path(&mut self, path: &str) {
         if path.is_empty() {
-            self.push_line("cat: needs a path, e.g. cat /storage/photos/name.ppm", TEXT_MUTED);
+            self.push_line("cat: needs a path, e.g. cat /storage/photos/name.ppm", THEME.on_surface_variant);
             self.record_history("cat", -1);
             return;
         }
@@ -500,7 +513,7 @@ impl TerminalApp {
                 let mut buf = [0u8; 512];
                 match std::fs_read(fd, &mut buf) {
                     Ok(n) if n > 0 => {
-                        self.push_counted("cat: ", n as u64, " bytes read.", SUCCESS_EMERALD);
+                        self.push_counted("cat: ", n as u64, " bytes read.", THEME.success);
                         let mut start = 0;
                         while start < n {
                             let end = buf[start..n]
@@ -510,7 +523,7 @@ impl TerminalApp {
                                 .unwrap_or(n);
                             if let Ok(line_str) = core::str::from_utf8(&buf[start..end]) {
                                 if !line_str.is_empty() {
-                                    self.push_line(line_str, TEXT_PRIMARY);
+                                    self.push_line(line_str, THEME.on_surface);
                                 }
                             }
                             start = end.saturating_add(1);
@@ -518,18 +531,18 @@ impl TerminalApp {
                         self.record_history("cat", 0);
                     }
                     Ok(_) => {
-                        self.push_line("cat: file empty.", TEXT_MUTED);
+                        self.push_line("cat: file empty.", THEME.on_surface_variant);
                         self.record_history("cat", 0);
                     }
                     Err(code) => {
-                        self.push_line("cat: fs_read refused or error.", TEXT_MUTED);
+                        self.push_line("cat: fs_read refused or error.", THEME.on_surface_variant);
                         self.record_history("cat", code);
                     }
                 }
                 let _ = std::fs_close(fd);
             }
             Err(code) => {
-                self.push_line("cat: fs_open refused or file not found.", TEXT_MUTED);
+                self.push_line("cat: fs_open refused or file not found.", THEME.on_surface_variant);
                 self.record_history("cat", code);
             }
         }
@@ -555,7 +568,7 @@ impl TerminalApp {
         let mut line = ConsoleLine {
             text: [0; LINE_CAP],
             len: total_len,
-            color: SUCCESS_EMERALD,
+            color: THEME.success,
         };
         line.text[..total_len].copy_from_slice(&buf[..total_len]);
 
@@ -590,7 +603,7 @@ impl TerminalApp {
                     self.line_count -= 1;
                 }
                 self.push_echo("^C");
-                self.push_line("interos:$ _", SUCCESS_EMERALD);
+                self.push_line("interos:$ _", THEME.success);
                 return true;
             }
             if key.code == b'l' as u32 || key.code == b'L' as u32 || key.code == 12 {
@@ -687,8 +700,8 @@ impl TerminalApp {
                 // `vfs` and `clear`, and the old list left them out, so the
                 // help was a worse description of the shell than the shell
                 // itself.
-                self.push_line("Commands: help, status, ps, mem, caps, share, dma, ping, ls, vfs, services, cat, clear", TEXT_PRIMARY);
-                self.push_line("ls [path] lists a directory; cat [path] prints a file.", TEXT_MUTED);
+                self.push_line("Commands: help, status, ps, mem, caps, share, dma, ping, ls, vfs, services, cat, clear", THEME.on_surface);
+                self.push_line("ls [path] lists a directory; cat [path] prints a file.", THEME.on_surface_variant);
                 std::log("[TERMINAL] Commands: help, status, ps, mem, caps, share, dma, ping, ls, vfs, services, cat, clear",
                 )
                 .ok();
@@ -700,7 +713,7 @@ impl TerminalApp {
                 // the task's CPL -- no syscall reports it to a Ring 3 app --
                 // so naming one here asserted a number it had not observed.
                 // The shell's own `caps` command reports what it can resolve.
-                self.push_line("InterOS Core Mobile Platform | Ring 3 isolated", ACCENT_SKY);
+                self.push_line("InterOS Core Mobile Platform | Ring 3 isolated", THEME.primary);
                 // WHY: the uptime comes from the platform's real tick
                 // counter. If no capability slot grants TimerTickRead, the
                 // screen says so instead of inventing a metric.
@@ -714,7 +727,7 @@ impl TerminalApp {
                             // "1 kHz" asserted a rate the app cannot
                             // measure.
                             " ticks since boot.",
-                            TEXT_PRIMARY,
+                            THEME.on_surface,
                         );
                         log_counted(
                             "[TERMINAL] Status: uptime ",
@@ -724,7 +737,7 @@ impl TerminalApp {
                         self.record_history("status", 0);
                     }
                     Err(code) => {
-                        self.push_line("status: uptime unavailable; get_ticks refused.", TEXT_MUTED);
+                        self.push_line("status: uptime unavailable; get_ticks refused.", THEME.on_surface_variant);
                         log_counted(
                             "[TERMINAL] Status: uptime unavailable, get_ticks error ",
                             code.unsigned_abs(),
@@ -744,7 +757,7 @@ impl TerminalApp {
                             "ps: ",
                             count as u64,
                             " other tasks (app_runtime_list).",
-                            TEXT_PRIMARY,
+                            THEME.on_surface,
                         );
                         log_counted(
                             "[TERMINAL] ps: app_runtime_list reported ",
@@ -754,7 +767,7 @@ impl TerminalApp {
                         self.record_history("ps", 0);
                     }
                     Err(code) => {
-                        self.push_line("ps: unavailable; app_runtime_list refused.", TEXT_MUTED);
+                        self.push_line("ps: unavailable; app_runtime_list refused.", THEME.on_surface_variant);
                         log_counted(
                             "[TERMINAL] ps: app_runtime_list refused, error ",
                             code.unsigned_abs(),
@@ -770,14 +783,14 @@ impl TerminalApp {
                 // command reports the absence instead of a plausible-sounding stat.
                 // History records -1: no syscall ran, so there is no kernel code —
                 // -1 marks "no data available".
-                self.push_line("mem: unavailable; no heap or paging", TEXT_MUTED);
-                self.push_line("metrics are exposed to this app.", TEXT_MUTED);
+                self.push_line("mem: unavailable; no heap or paging", THEME.on_surface_variant);
+                self.push_line("metrics are exposed to this app.", THEME.on_surface_variant);
                 std::log("[TERMINAL] mem: no heap/paging metrics are exposed; nothing was queried.").ok();
                 self.record_history("mem", -1);
             }
             "caps" => {
                 self.push_echo("caps");
-                self.push_line("caps: policy: zero ambient authority", TEXT_PRIMARY);
+                self.push_line("caps: policy: zero ambient authority", THEME.on_surface);
                 // WHY this is an inspection and not a statement: the platform
                 // resolves a capability slot by its type, so the shell can ask
                 // which of the capabilities it knows about it actually holds.
@@ -788,14 +801,14 @@ impl TerminalApp {
                 let mut absent = 0u32;
                 for (name, cap_type) in KNOWN_CAPABILITIES.iter() {
                     if std::cap_lookup(*cap_type, 0).is_ok() {
-                        self.push_line(name, TEXT_PRIMARY);
+                        self.push_line(name, THEME.on_surface);
                         held += 1;
                     } else {
                         absent += 1;
                     }
                 }
-                self.push_counted("caps: held ", held as u64, " of the types this app knows about.", TEXT_MUTED);
-                self.push_counted("caps: not held ", absent as u64, " of them.", TEXT_MUTED);
+                self.push_counted("caps: held ", held as u64, " of the types this app knows about.", THEME.on_surface_variant);
+                self.push_counted("caps: not held ", absent as u64, " of them.", THEME.on_surface_variant);
                 std::log("[TERMINAL] caps: capability slots resolved by type from the app's own table.",
                 )
                 .ok();
@@ -811,7 +824,7 @@ impl TerminalApp {
                     Some("interos.terminal"),
                 ) {
                     Ok(token) => {
-                        self.push_counted("Share: accepted, token ", token, ".", ACCENT_SKY);
+                        self.push_counted("Share: accepted, token ", token, ".", THEME.primary);
                         log_counted("[TERMINAL APP] Share: dispatch accepted, token ", token, ".");
                         self.record_history("share", 0);
                     }
@@ -820,7 +833,7 @@ impl TerminalApp {
                             "Share: dispatch refused, code -",
                             code.unsigned_abs(),
                             ".",
-                            TEXT_MUTED,
+                            THEME.on_surface_variant,
                         );
                         log_counted(
                             "[TERMINAL APP] Share: dispatch refused, code -",
@@ -836,12 +849,12 @@ impl TerminalApp {
                 let payload = b"DMA::TERMINAL::STREAM_PACKET";
                 match std::shm_pipe_transfer(3, payload, 0x01) {
                     Ok(_) => {
-                        self.push_line("DMA: test payload transfer acknowledged by Pipe 3.", SUCCESS_EMERALD);
+                        self.push_line("DMA: test payload transfer acknowledged by Pipe 3.", THEME.success);
                         std::log("[TERMINAL APP] DMA test payload transfer acknowledged by Pipe 3.").ok();
                         self.record_history("dma", 0);
                     }
                     Err(code) => {
-                        self.push_line("DMA: Pipe 3 transfer unavailable or refused.", TEXT_MUTED);
+                        self.push_line("DMA: Pipe 3 transfer unavailable or refused.", THEME.on_surface_variant);
                         std::log("[TERMINAL APP] DMA test payload transfer failed or was refused.").ok();
                         self.record_history("dma", code);
                     }
@@ -849,7 +862,7 @@ impl TerminalApp {
             }
             "ping" => {
                 self.push_echo("ping");
-                self.push_line("ping: unavailable; no ICMP/network probe is implemented.", TEXT_MUTED);
+                self.push_line("ping: unavailable; no ICMP/network probe is implemented.", THEME.on_surface_variant);
                 std::log("[TERMINAL APP] ping unavailable: no network probe was executed.").ok();
                 self.record_history("ping", 0);
             }
@@ -858,12 +871,12 @@ impl TerminalApp {
                 let mut buf = [0u8; 512];
                 match std::service_list(&mut buf) {
                     Ok(n) => {
-                        self.push_counted("services: snapshot returned ", n as u64, " bytes.", TEXT_PRIMARY);
+                        self.push_counted("services: snapshot returned ", n as u64, " bytes.", THEME.on_surface);
                         std::log("[TERMINAL APP] services command executed.").ok();
                         self.record_history("services", 0);
                     }
                     Err(code) => {
-                        self.push_line("services: query refused or unavailable.", TEXT_MUTED);
+                        self.push_line("services: query refused or unavailable.", THEME.on_surface_variant);
                         self.record_history("services", code);
                     }
                 }
@@ -879,7 +892,7 @@ impl TerminalApp {
             }
             "cat" => {
                 self.push_echo("cat");
-                self.push_line("cat: needs a path, e.g. cat /storage/photos/name.ppm", TEXT_MUTED);
+                self.push_line("cat: needs a path, e.g. cat /storage/photos/name.ppm", THEME.on_surface_variant);
                 self.record_history("cat", -1);
             }
             "clear" => {
@@ -897,32 +910,32 @@ impl TerminalApp {
                 let ubytes = unknown.as_bytes();
                 let un = ubytes.len().min(LINE_CAP - prefix.len());
                 pbuf[prefix.len()..prefix.len() + un].copy_from_slice(&ubytes[..un]);
-                self.push_line_bytes(&pbuf[..prefix.len() + un], SUCCESS_EMERALD);
+                self.push_line_bytes(&pbuf[..prefix.len() + un], THEME.success);
 
                 let mut err_buf = [0u8; LINE_CAP];
                 let err_pre = b"terminal: command not found: ";
                 err_buf[..err_pre.len()].copy_from_slice(err_pre);
                 let en = ubytes.len().min(LINE_CAP - err_pre.len());
                 err_buf[err_pre.len()..err_pre.len() + en].copy_from_slice(&ubytes[..en]);
-                self.push_line_bytes(&err_buf[..err_pre.len() + en], TEXT_MUTED);
+                self.push_line_bytes(&err_buf[..err_pre.len() + en], THEME.on_surface_variant);
 
                 self.record_history("unknown", -1);
             }
         }
-        self.push_line("interos:$ _", SUCCESS_EMERALD);
+        self.push_line("interos:$ _", THEME.success);
     }
 }
 
 #[inline(never)]
-fn get_terminal_pixel(x: usize, y: usize, term: &TerminalApp) -> u32 {
+fn get_terminal_pixel(x: usize, y: usize, term: &TerminalApp, scanline_wash: u32) -> u32 {
     // 1. Status Bar & Header (y: 0..HEADER_H)
     if y < HEADER_H {
         if y >= 94 {
-            return BORDER_SUBTLE;
+            return THEME.border;
         }
 
         // Standardized back button squircle (24..72, 24..72)
-        if let Some(c) = std::design::back_button::pixel(x, y, TEXT_PRIMARY, BORDER_SUBTLE, SURFACE_RAISED) {
+        if let Some(c) = std::design::back_button::pixel(x, y, THEME.on_surface, THEME.border, THEME.surface_container_high) {
             return c;
         }
 
@@ -933,7 +946,7 @@ fn get_terminal_pixel(x: usize, y: usize, term: &TerminalApp) -> u32 {
         let title_rows = run_rows(TITLE_SCALE);
         let title_y0 = (HEADER_H - title_rows) / 2;
         if y >= title_y0 && y < title_y0 + title_rows {
-            if let Some(c) = test_text(x, y, 116, title_y0, TITLE_SCALE, b"Terminal", TEXT_PRIMARY) {
+            if let Some(c) = test_text(x, y, 116, title_y0, TITLE_SCALE, b"Terminal", THEME.on_surface) {
                 return c;
             }
         }
@@ -946,7 +959,7 @@ fn get_terminal_pixel(x: usize, y: usize, term: &TerminalApp) -> u32 {
                 let cdx = (BADGE_R - rx) as isize;
                 let cdy = (BADGE_R - ry) as isize;
                 if cdx * cdx + cdy * cdy >= (BADGE_R * BADGE_R) as isize {
-                    return BG_DARK;
+                    return THEME.surface;
                 }
             }
 
@@ -963,18 +976,18 @@ fn get_terminal_pixel(x: usize, y: usize, term: &TerminalApp) -> u32 {
                 badge_label_y0,
                 BADGE_SCALE,
                 BADGE_TEXT,
-                SUCCESS_EMERALD,
+                THEME.success,
             ) {
                 return c;
             }
 
             if rx < 2 || ry < 2 {
-                return SUCCESS_EMERALD;
+                return THEME.success;
             }
-            return SURFACE_RAISED;
+            return THEME.surface_container_high;
         }
 
-        return BG_DARK;
+        return THEME.surface;
     }
 
     // 2. Terminal Console Canvas (y: 96..1200)
@@ -1013,15 +1026,15 @@ fn get_terminal_pixel(x: usize, y: usize, term: &TerminalApp) -> u32 {
 
         // Subtle CRT scanline effect
         if y % 3 == 0 {
-            return 0xFF030509;
+            return scanline_wash;
         }
-        return BG_DARK;
+        return THEME.surface;
     }
 
     // 3. Quick Command Pills Dock (y: 1210..1370)
     if y >= 1210 && y < 1370 {
         if y == 1210 {
-            return BORDER_SUBTLE;
+            return THEME.border;
         }
 
         // Row 1 (y: 1222..1274)
@@ -1039,25 +1052,25 @@ fn get_terminal_pixel(x: usize, y: usize, term: &TerminalApp) -> u32 {
                 if x >= x0 && x < x1 {
                     let rx = (x - x0).min(x1 - 1 - x);
                     let ry = (y - PILL1_Y0).min(PILL1_Y0 + PILL1_H - 1 - y);
-                    if rx < 12 && ry < 12 {
-                        let cdx = (12 - rx) as isize;
-                        let cdy = (12 - ry) as isize;
-                        if cdx * cdx + cdy * cdy >= 144 {
-                            return SURFACE_DARK;
+                    if rx < PILL_R && ry < PILL_R {
+                        let cdx = (PILL_R - rx) as isize;
+                        let cdy = (PILL_R - ry) as isize;
+                        if cdx * cdx + cdy * cdy >= (PILL_R * PILL_R) as isize {
+                            return THEME.surface_container;
                         }
                     }
 
                     // Real proportional advance per label instead of a fixed
                     // 8px-per-character cell, centred in this pill's own width.
                     let tx = x0 + std::design::font::center_x(label, PILL_SCALE, x1 - x0);
-                    if let Some(c) = test_text(x, y, tx, label_y0, PILL_SCALE, label, ACCENT_SKY) {
+                    if let Some(c) = test_text(x, y, tx, label_y0, PILL_SCALE, label, THEME.primary) {
                         return c;
                     }
 
                     if rx < 2 || ry < 2 {
-                        return BORDER_SUBTLE;
+                        return THEME.border;
                     }
-                    return SURFACE_RAISED;
+                    return THEME.surface_container_high;
                 }
             }
         }
@@ -1075,39 +1088,51 @@ fn get_terminal_pixel(x: usize, y: usize, term: &TerminalApp) -> u32 {
                 if x >= x0 && x < x1 {
                     let rx = (x - x0).min(x1 - 1 - x);
                     let ry = (y - PILL2_Y0).min(PILL2_Y0 + PILL2_H - 1 - y);
-                    if rx < 12 && ry < 12 {
-                        let cdx = (12 - rx) as isize;
-                        let cdy = (12 - ry) as isize;
-                        if cdx * cdx + cdy * cdy >= 144 {
-                            return SURFACE_DARK;
+                    if rx < PILL_R && ry < PILL_R {
+                        let cdx = (PILL_R - rx) as isize;
+                        let cdy = (PILL_R - ry) as isize;
+                        if cdx * cdx + cdy * cdy >= (PILL_R * PILL_R) as isize {
+                            return THEME.surface_container;
                         }
                     }
 
                     let tx = x0 + std::design::font::center_x(label, PILL_SCALE, x1 - x0);
-                    if let Some(c) = test_text(x, y, tx, label_y0, PILL_SCALE, label, ACCENT_SKY) {
+                    if let Some(c) = test_text(x, y, tx, label_y0, PILL_SCALE, label, THEME.primary) {
                         return c;
                     }
 
                     if rx < 2 || ry < 2 {
-                        return BORDER_SUBTLE;
+                        return THEME.border;
                     }
-                    return SURFACE_RAISED;
+                    return THEME.surface_container_high;
                 }
             }
         }
 
-        return SURFACE_DARK;
+        return THEME.surface_container;
     }
 
     // Home Gesture Bar
     if y >= 1418 && y < 1424 && x >= 260 && x < 460 {
-        return TEXT_MUTED;
+        return THEME.on_surface_variant;
     }
 
-    BG_DARK
+    THEME.surface
+}
+
+/// The CRT scanline wash: the page colour, darkened.
+///
+/// WHY it is derived and not a colour of its own: the wash is the page's own
+/// colour with a third of its light taken out, so it follows the theme
+/// instead of being a second page colour the platform does not name. It is
+/// computed once per frame because it is a per-frame constant and the
+/// renderer asks for it a third of a million times.
+fn scanline_wash() -> u32 {
+    Theme::veil(THEME.surface, 37, false)
 }
 
 fn render_terminal_ui(surface: u32, term: &TerminalApp) {
+    let wash = scanline_wash();
     let mut chunk = [0u32; CHUNK];
     let total = W * H;
     let mut offset = 0;
@@ -1116,7 +1141,7 @@ fn render_terminal_ui(surface: u32, term: &TerminalApp) {
         let mut x = offset % W;
         let mut y = offset / W;
         for i in 0..count {
-            chunk[i] = get_terminal_pixel(x, y, term);
+            chunk[i] = get_terminal_pixel(x, y, term, wash);
             x += 1;
             if x == W {
                 x = 0;
@@ -1157,6 +1182,7 @@ const CONSOLE_Y1: usize = CONSOLE_TOP + CONSOLE_LINES * CONSOLE_LINE_ROWS;
 /// 1,036,800 pixels on every touch event, including touches that ran no command
 /// at all.
 fn render_terminal_band(surface: u32, term: &TerminalApp, y0: usize, y1: usize) {
+    let wash = scanline_wash();
     let mut chunk = [0u32; CHUNK];
     let mut offset = y0 * W;
     let end = y1.min(H) * W;
@@ -1165,7 +1191,7 @@ fn render_terminal_band(surface: u32, term: &TerminalApp, y0: usize, y1: usize) 
         let mut x = offset % W;
         let mut y = offset / W;
         for i in 0..count {
-            chunk[i] = get_terminal_pixel(x, y, term);
+            chunk[i] = get_terminal_pixel(x, y, term, wash);
             x += 1;
             if x == W {
                 x = 0;

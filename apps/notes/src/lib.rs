@@ -13,6 +13,9 @@
 
 pub use interos_std as std;
 
+/// The app's view of the platform's design system.
+pub mod theme;
+
 pub const MAX_NOTES: usize = 16;
 pub const MAX_TITLE_LEN: usize = 48;
 pub const MAX_BODY_LEN: usize = 1024;
@@ -64,6 +67,17 @@ impl StorageState {
 // =============================================================================
 // Google Keep-Style Color Palettes & Categories
 // =============================================================================
+//
+// WHY these palettes are local and not the platform's roles: a note's colour
+// theme is the *note's* palette -- one of eight the user picks, each with its
+// own seven colours -- and not the app's chrome. The platform's theme
+// describes the surface the note is drawn on and the ink on it; the note's own
+// colours are the content the user chose. The app's chrome around it comes
+// from the platform's theme; see `notes::theme` for that mapping.
+//
+// WHY eight and not one: the whole feature is that a note carries a colour.
+// Resolving all eight through the platform's roles would leave the user with
+// eight copies of the same surface, which is not a palette.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NoteColorTheme {

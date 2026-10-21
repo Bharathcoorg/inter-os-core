@@ -17,8 +17,10 @@
 //! - Asynchronous event reactor loop handling reminder alarms, user intent schedules, and tick updates
 
 use interos_std as std;
+use calendar::theme::{radius, type_scale, THEME};
 use core::panic::PanicInfo;
 
+use interos_std::design::components;
 use interos_std::design::outline_text;
 
 /// Calendar event status.
@@ -807,29 +809,25 @@ impl CalendarApp {
 
 // -----------------------------------------------------------------------------
 // Visual Design Tokens
+//
+// WHY there is no palette here any more: the app used to carry its own
+// colours, which is a second design system inside one app. Every colour now
+// resolves through the platform's theme, so a third-party app that asks the
+// SDK for the same roles draws the same calendar. See `calendar::theme` for
+// the mapping from the old names to the platform's roles.
 // -----------------------------------------------------------------------------
-const BG_DARK: u32 = 0xFF070B12;
-const SURFACE_DARK: u32 = 0xFF111B2B;
-const SURFACE_RAISED: u32 = 0xFF17243A;
-const BORDER_SUBTLE: u32 = 0xFF26354D;
-const ACCENT_SKY: u32 = 0xFF31C4FF;
-#[allow(dead_code)]
-const SUCCESS_EMERALD: u32 = 0xFF56D68A;
-const DANGER_CORAL: u32 = 0xFFFF6B6B;
 
 // Empty-state action button: "+ New Event", centred on the 720px surface.
 // The geometry is derived from the label so the pill is always wider than its
 // own text: label 236px at scale 2 plus 36px of margin per side.
 const ACTION_BTN_LABEL: &[u8] = b"+ New Event";
-const ACTION_BTN_SCALE: usize = 2;
+const ACTION_BTN_SCALE: usize = type_scale::BODY;
 const ACTION_BTN_W: usize = 308;
 const ACTION_BTN_H: usize = 56;
 const ACTION_BTN_X0: usize = (720 - ACTION_BTN_W) / 2;
 const ACTION_BTN_Y0: usize = 800;
 const ACTION_BTN_X1: usize = ACTION_BTN_X0 + ACTION_BTN_W;
 const ACTION_BTN_Y1: usize = ACTION_BTN_Y0 + ACTION_BTN_H;
-const TEXT_PRIMARY: u32 = 0xFFF4F7FB;
-const TEXT_MUTED: u32 = 0xFF9AA8BC;
 
 // -----------------------------------------------------------------------------
 // Embedded 8x8 ASCII Font (Characters 32 ' ' through 126 '~')
@@ -1020,6 +1018,27 @@ fn fmt_count(out: &mut [u8], n: usize) -> usize {
     len + tail.len()
 }
 
+
+/// The platform's corner radii, under the short names the renderer uses.
+///
+/// WHY the aliases exist: the corner test names its radius four times, and a
+/// number that appears four times is a number that can drift from the
+/// platform. The alias resolves to the platform's step, so the drift is the
+/// platform's and not this app's.
+/// The platform's card treatment, at the elevation the app's cards sit at.
+///
+/// WHY the app's cards are the platform's cards: a card that invents its own
+/// fill and its own hairline is a card a third-party app cannot match, and
+/// the platform already says what a card looks like.
+const CARD: components::CardStyle =
+    components::card_style(&THEME, components::Elevation::Resting);
+
+const R_CARD: usize = CARD.radius;
+const R_CHIP: usize = radius::CHIP;
+const R_CONTROL: usize = radius::CONTROL;
+const R_SHEET: usize = radius::SHEET;
+const R_SOFT: usize = radius::SOFT_PILL;
+
 const W: usize = 720;
 const H: usize = 1440;
 const CHUNK: usize = 4096;
@@ -1044,7 +1063,7 @@ const GRID_START_Y: usize = 144;
 // y 0..96 (their rule is 94..96), and the grid owns 144..456, so the weekday
 // run has exactly one full scale-2 line box (96..144) available in the gap.
 const WEEKDAY_Y0: usize = 96;
-const WEEKDAY_SCALE: usize = 2;
+const WEEKDAY_SCALE: usize = type_scale::BODY;
 
 // WHY these exist: they are the explicit no-date state drawn when the hardware
 // RTC yields no civil date. They name the absence instead of standing in a
@@ -1258,11 +1277,11 @@ fn get_calendar_pixel(
     // 1. Status Bar & Header (y: 0..96)
     if y < 96 {
         if y >= 94 {
-            return BORDER_SUBTLE;
+            return THEME.border;
         }
 
         // Standardized back button squircle (24..72, 24..72)
-        if let Some(c) = std::design::back_button::pixel(x, y, TEXT_PRIMARY, BORDER_SUBTLE, SURFACE_RAISED) {
+        if let Some(c) = std::design::back_button::pixel(x, y, THEME.on_surface, THEME.border, THEME.surface_container_high) {
             return c;
         }
 
@@ -1278,7 +1297,7 @@ fn get_calendar_pixel(
             // month pill begins at x 480, so that is the room the header has
             // for it. "Calendar" measures 249px on the bitmap face at scale 3
             // and 247px on the outline face, so both clear it by 117px.
-            if let Some(c) = test_text(x, y, 116, 12, 3, b"Calendar", 480 - 116, TEXT_PRIMARY, SURFACE_DARK) {
+            if let Some(c) = test_text(x, y, 116, 12, 3, b"Calendar", 480 - 116, THEME.on_surface, THEME.surface_container) {
                 return c;
             }
         }
@@ -1293,14 +1312,14 @@ fn get_calendar_pixel(
             let mut on_pill_border = false;
             let rx = (x - 480).min(695 - x);
             let ry = (y - 20).min(75 - y);
-            if rx < 20 && ry < 20 {
-                let cdx = (20 - rx) as isize;
-                let cdy = (20 - ry) as isize;
+            if rx < R_CARD && ry < R_CARD {
+                let cdx = (R_CARD - rx) as isize;
+                let cdy = (R_CARD - ry) as isize;
                 let d2 = cdx * cdx + cdy * cdy;
-                if d2 >= 400 {
-                    return SURFACE_DARK;
+                if d2 >= (R_CARD * R_CARD) as isize {
+                    return CARD.fill;
                 }
-                if d2 >= 324 {
+                if d2 >= ((R_CARD - 2) * (R_CARD - 2)) as isize {
                     on_pill_border = true;
                 }
             } else if rx < 2 || ry < 2 {
@@ -1333,17 +1352,17 @@ fn get_calendar_pixel(
             // both fit.
             let pill_x = centered_x(pill_text, 2, 480, 216);
             let pill_y0 = 20 + (56 - std::design::font::line_height(2)) / 2;
-            if let Some(c) = test_text(x, y, pill_x, pill_y0, 2, pill_text, 216, ACCENT_SKY, SURFACE_RAISED) {
+            if let Some(c) = test_text(x, y, pill_x, pill_y0, 2, pill_text, 216, THEME.primary, THEME.surface_container_high) {
                 return c;
             }
 
             if on_pill_border {
-                return BORDER_SUBTLE;
+                return THEME.border;
             }
-            return SURFACE_RAISED;
+            return THEME.surface_container_high;
         }
 
-        return SURFACE_DARK;
+        return THEME.surface_container;
     }
 
     // 2. Weekday Header (y: 96..144)
@@ -1368,7 +1387,7 @@ fn get_calendar_pixel(
                 // measures 32px on the bitmap face at scale 2 and 36px on the
                 // outline face, so both fit an 88px column.
                 if let Some(color) =
-                    test_text(x, y, text_x, WEEKDAY_Y0, WEEKDAY_SCALE, HEADERS[c], COL_W, TEXT_MUTED, BG_DARK)
+                    test_text(x, y, text_x, WEEKDAY_Y0, WEEKDAY_SCALE, HEADERS[c], COL_W, THEME.on_surface_variant, THEME.surface)
                 {
                     return color;
                 }
@@ -1381,11 +1400,11 @@ fn get_calendar_pixel(
             // WHY W is the column: this headline replaces the seven letters and
             // is centred across the whole surface. It measures 286px on the
             // bitmap face at scale 2 and 277px on the outline face.
-            if let Some(c) = test_text(x, y, text_x, WEEKDAY_Y0, WEEKDAY_SCALE, NO_DATE_HEADLINE, W, TEXT_MUTED, BG_DARK) {
+            if let Some(c) = test_text(x, y, text_x, WEEKDAY_Y0, WEEKDAY_SCALE, NO_DATE_HEADLINE, W, THEME.on_surface_variant, THEME.surface) {
                 return c;
             }
         }
-        return BG_DARK;
+        return THEME.surface;
     }
 
     // 3. Month Calendar Grid (6 rows x 7 cols) (y: 144..456)
@@ -1405,12 +1424,12 @@ fn get_calendar_pixel(
                 1,
                 NO_DATE_DETAIL,
                 W,
-                TEXT_MUTED,
-                BG_DARK,
+                THEME.on_surface_variant,
+                THEME.surface,
             ) {
                 return c;
             }
-            return BG_DARK;
+            return THEME.surface;
         }
 
         let r = (y - GRID_START_Y) / ROW_PITCH;
@@ -1433,14 +1452,14 @@ fn get_calendar_pixel(
                         let mut on_cell_border = false;
                         let rx = (x - col_x).min(col_x + COL_W - 1 - x);
                         let ry = (y - cell_y).min(cell_y + ROW_H - 1 - y);
-                        if rx < 10 && ry < 10 {
-                            let cdx = (10 - rx) as isize;
-                            let cdy = (10 - ry) as isize;
+                        if rx < R_CHIP && ry < R_CHIP {
+                            let cdx = (R_CHIP - rx) as isize;
+                            let cdy = (R_CHIP - ry) as isize;
                             let d2 = cdx * cdx + cdy * cdy;
-                            if d2 >= 100 {
-                                return BG_DARK;
+                            if d2 >= (R_CHIP * R_CHIP) as isize {
+                                return THEME.surface;
                             }
-                            if d2 >= 64 {
+                            if d2 >= ((R_CHIP - 2) * (R_CHIP - 2)) as isize {
                                 on_cell_border = true;
                             }
                         } else if rx < 2 || ry < 2 {
@@ -1453,7 +1472,7 @@ fn get_calendar_pixel(
                         // the real measurement; the old fixed -8 / -16 cell
                         // pushed them right by 3px and 6px respectively.
                         let d = day_num as u8;
-                        let text_color = if is_current { 0xFFFFFFFF } else { TEXT_PRIMARY };
+                        let text_color = if is_current { THEME.on_primary } else { THEME.on_surface };
                         // WHY the offset: a scale-2 run is 48 rows and the cell
                         // is now 48 rows, so it is centred at offset 0. Before,
                         // the cell was 44 rows and the run started at +14, which
@@ -1471,14 +1490,14 @@ fn get_calendar_pixel(
                         // cell it falls in, and the widest, "31", measures 44px
                         // on the bitmap face at scale 2 and 46px on the outline
                         // face, so both fit.
-                        let cell_bg = if is_current { 0xFF173552 } else { SURFACE_DARK };
+                        let cell_bg = if is_current { THEME.primary_container } else { THEME.surface_container };
                         if let Some(color) = test_text(x, y, text_x, text_y, 2, &text[..n], COL_W, text_color, cell_bg) {
                             return color;
                         }
 
                         // Border rim
                         if on_cell_border {
-                            return if is_current { ACCENT_SKY } else { BORDER_SUBTLE };
+                            return if is_current { THEME.primary } else { THEME.border };
                         }
 
                         return cell_bg;
@@ -1486,13 +1505,13 @@ fn get_calendar_pixel(
                 }
             }
         }
-        return BG_DARK;
+        return THEME.surface;
     }
 
     // 4. Section Divider & Header (y: 470..530)
     if y >= 470 && y < 530 {
         if y >= 476 && y < 478 && x >= 24 && x < W - 24 {
-            return BORDER_SUBTLE;
+            return THEME.border;
         }
 
         // Title: names the day the agenda below is listing.
@@ -1509,7 +1528,7 @@ fn get_calendar_pixel(
         // measures 362px on the bitmap face at scale 2 and 349px on the outline
         // face, so both fit.
         if y >= 480 && y < 480 + std::design::font::line_height(2) {
-            if let Some(c) = test_text(x, y, 28, 480, 2, section_title, 550 - 28, TEXT_MUTED, BG_DARK) {
+            if let Some(c) = test_text(x, y, 28, 480, 2, section_title, 550 - 28, THEME.on_surface_variant, THEME.surface) {
                 return c;
             }
         }
@@ -1519,14 +1538,14 @@ fn get_calendar_pixel(
             let mut on_badge_border = false;
             let rx = (x - 550).min(695 - x);
             let ry = (y - 492).min(521 - y);
-            if rx < 14 && ry < 14 {
-                let cdx = (14 - rx) as isize;
-                let cdy = (14 - ry) as isize;
+            if rx < R_SOFT && ry < R_SOFT {
+                let cdx = (R_SOFT - rx) as isize;
+                let cdy = (R_SOFT - ry) as isize;
                 let d2 = cdx * cdx + cdy * cdy;
-                if d2 >= 196 {
-                    return BG_DARK;
+                if d2 >= (R_SOFT * R_SOFT) as isize {
+                    return THEME.surface;
                 }
-                if d2 >= 144 {
+                if d2 >= ((R_SOFT - 2) * (R_SOFT - 2)) as isize {
                     on_badge_border = true;
                 }
             } else if rx < 2 || ry < 2 {
@@ -1549,17 +1568,17 @@ fn get_calendar_pixel(
             let badge_x = centered_x(badge_str, 1, 550, 146);
             let badge_y = 492 + (30 - std::design::font::line_height(1)) / 2;
             // WHY 146 is the column: it is the count pill's own width (550..696).
-            if let Some(c) = test_text(x, y, badge_x, badge_y, 1, badge_str, 146, ACCENT_SKY, SURFACE_RAISED) {
+            if let Some(c) = test_text(x, y, badge_x, badge_y, 1, badge_str, 146, THEME.primary, THEME.surface_container_high) {
                 return c;
             }
 
             if on_badge_border {
-                return BORDER_SUBTLE;
+                return THEME.border;
             }
-            return SURFACE_RAISED;
+            return THEME.surface_container_high;
         }
 
-        return BG_DARK;
+        return THEME.surface;
     }
 
     // 5. Agenda List / Empty State Container (y: 536..1360)
@@ -1577,14 +1596,14 @@ fn get_calendar_pixel(
                 let mut on_card_border = false;
                 let rx = (x - 24).min(695 - x);
                 let ry = (y - 546).min(869 - y);
-                if rx < 20 && ry < 20 {
-                    let cdx = (20 - rx) as isize;
-                    let cdy = (20 - ry) as isize;
+                if rx < R_CARD && ry < R_CARD {
+                    let cdx = (R_CARD - rx) as isize;
+                    let cdy = (R_CARD - ry) as isize;
                     let d2 = cdx * cdx + cdy * cdy;
-                    if d2 >= 400 {
-                        return BG_DARK;
+                    if d2 >= (R_CARD * R_CARD) as isize {
+                        return THEME.surface;
                     }
-                    if d2 >= 324 {
+                    if d2 >= ((R_CARD - 2) * (R_CARD - 2)) as isize {
                         on_card_border = true;
                     }
                 } else if rx < 2 || ry < 2 {
@@ -1597,19 +1616,19 @@ fn get_calendar_pixel(
 
                 // Calendar binder rings
                 if (y >= cy - 44 && y < cy - 28) && ((x >= cx - 26 && x < cx - 18) || (x >= cx + 18 && x < cx + 26)) {
-                    return TEXT_MUTED;
+                    return THEME.on_surface_variant;
                 }
 
                 // Calendar tear-sheet body (x: cx - 44..cx + 44, y: cy - 32..cy + 44)
                 if x >= cx - 44 && x < cx + 44 && y >= cy - 32 && y < cy + 44 {
                     // Top header stripe in Coral
                     if y < cy - 12 {
-                        return DANGER_CORAL;
+                        return THEME.error;
                     }
 
                     // Border rim of page
                     if x == cx - 44 || x == cx + 43 || y == cy + 43 {
-                        return BORDER_SUBTLE;
+                        return THEME.border;
                     }
 
                     // Content lines on page
@@ -1617,10 +1636,10 @@ fn get_calendar_pixel(
                         || (y >= cy + 16 && y < cy + 20 && x >= cx - 28 && x < cx + 16)
                         || (y >= cy + 28 && y < cy + 32 && x >= cx - 28 && x < cx + 6)
                     {
-                        return BORDER_SUBTLE;
+                        return THEME.border;
                     }
 
-                    return SURFACE_RAISED;
+                    return THEME.surface_container_high;
                 }
 
                 // Empty state text
@@ -1653,8 +1672,8 @@ fn get_calendar_pixel(
                         // measures 430px on the bitmap face at scale 2 and 413px on
                         // the outline face, so both fit.
                         672,
-                        TEXT_PRIMARY,
-                        SURFACE_DARK,
+                        THEME.on_surface,
+                        THEME.surface_container,
                     ) {
                         return c;
                     }
@@ -1708,8 +1727,8 @@ fn get_calendar_pixel(
                         // width (24..696), the same box the headline above it is
                         // centred in.
                         672,
-                        TEXT_MUTED,
-                        SURFACE_DARK,
+                        THEME.on_surface_variant,
+                        THEME.surface_container,
                     ) {
                         return c;
                     }
@@ -1727,14 +1746,14 @@ fn get_calendar_pixel(
                     let mut on_btn_border = false;
                     let bx = (x - ACTION_BTN_X0).min(ACTION_BTN_X1 - 1 - x);
                     let by = (y - ACTION_BTN_Y0).min(ACTION_BTN_Y1 - 1 - y);
-                    if bx < 24 && by < 24 {
-                        let cdx = (24 - bx) as isize;
-                        let cdy = (24 - by) as isize;
+                    if bx < R_SHEET && by < R_SHEET {
+                        let cdx = (R_SHEET - bx) as isize;
+                        let cdy = (R_SHEET - by) as isize;
                         let d2 = cdx * cdx + cdy * cdy;
-                        if d2 >= 576 {
-                            return SURFACE_DARK;
+                        if d2 >= (R_SHEET * R_SHEET) as isize {
+                            return THEME.surface_container;
                         }
-                        if d2 >= 484 {
+                        if d2 >= ((R_SHEET - 2) * (R_SHEET - 2)) as isize {
                             on_btn_border = true;
                         }
                     } else if bx < 2 || by < 2 {
@@ -1761,23 +1780,23 @@ fn get_calendar_pixel(
                         // the bitmap face at scale 2 and 227px on the outline
                         // face, so both fit the 308px button.
                         ACTION_BTN_W,
-                        ACCENT_SKY,
-                        0xFF132338,
+                        THEME.primary,
+                        THEME.surface_container,
                     ) {
                         return c;
                     }
 
                     if on_btn_border {
-                        return ACCENT_SKY;
+                        return THEME.primary;
                     }
-                    return 0xFF132338;
+                    return THEME.surface_container;
                 }
 
                 // Card border
                 if on_card_border {
-                    return BORDER_SUBTLE;
+                    return THEME.border;
                 }
-                return SURFACE_DARK;
+                return THEME.surface_container;
             }
         } else {
             // Event cards for the selected day, earliest first.
@@ -1786,17 +1805,17 @@ fn get_calendar_pixel(
             if card_idx < agenda.len && card_offset_y < 114 && x >= 24 && x < W - 24 {
                 let rx = (x - 24).min(W - 25 - x);
                 let ry = card_offset_y.min(113 - card_offset_y);
-                if rx < 16 && ry < 16 {
-                    let cdx = (16 - rx) as isize;
-                    let cdy = (16 - ry) as isize;
-                    if cdx * cdx + cdy * cdy >= 256 {
-                        return BG_DARK;
+                if rx < R_SOFT && ry < R_SOFT {
+                    let cdx = (R_SOFT - rx) as isize;
+                    let cdy = (R_SOFT - ry) as isize;
+                    if cdx * cdx + cdy * cdy >= (R_SOFT * R_SOFT) as isize {
+                        return THEME.surface;
                     }
                 }
 
                 // Left color accent bar
                 if x < 34 {
-                    return ACCENT_SKY;
+                    return THEME.primary;
                 }
 
                 // Card text: the stored title, the stored time and the stored
@@ -1805,40 +1824,40 @@ fn get_calendar_pixel(
                 let item = &agenda.items[card_idx];
                 let line_h1 = std::design::font::line_height(1);
                 if y >= card_y + 12 && y < card_y + 12 + line_h1 {
-                    if let Some(c) = test_text(x, y, 44, card_y + 12, 1, item.title_bytes(), 696 - 44, TEXT_PRIMARY, SURFACE_DARK) {
+                    if let Some(c) = test_text(x, y, 44, card_y + 12, 1, item.title_bytes(), 696 - 44, THEME.on_surface, THEME.surface_container) {
                         return c;
                     }
                 }
                 if y >= card_y + 44 && y < card_y + 44 + line_h1 {
                     let mut time_buf = [0u8; 5];
                     let time_n = fmt_time(&mut time_buf, item.hour, item.minute);
-                    if let Some(c) = test_text(x, y, 44, card_y + 44, 1, &time_buf[..time_n], 696 - 44, ACCENT_SKY, SURFACE_DARK) {
+                    if let Some(c) = test_text(x, y, 44, card_y + 44, 1, &time_buf[..time_n], 696 - 44, THEME.primary, THEME.surface_container) {
                         return c;
                     }
                 }
                 if y >= card_y + 76 && y < card_y + 76 + line_h1 {
                     let mut date_buf = [0u8; 12];
                     let date_n = fmt_date(&mut date_buf, item.year, item.month, item.day);
-                    if let Some(c) = test_text(x, y, 44, card_y + 76, 1, &date_buf[..date_n], 696 - 44, TEXT_MUTED, SURFACE_DARK) {
+                    if let Some(c) = test_text(x, y, 44, card_y + 76, 1, &date_buf[..date_n], 696 - 44, THEME.on_surface_variant, THEME.surface_container) {
                         return c;
                     }
                 }
 
                 if rx < 2 || ry < 2 {
-                    return BORDER_SUBTLE;
+                    return THEME.border;
                 }
-                return SURFACE_DARK;
+                return THEME.surface_container;
             }
         }
-        return BG_DARK;
+        return THEME.surface;
     }
 
     // 6. Home Gesture Pill (x: 260..460, y: 1418..1424)
     if y >= 1418 && y < 1424 && x >= 260 && x < 460 {
-        return TEXT_MUTED;
+        return THEME.on_surface_variant;
     }
 
-    BG_DARK
+    THEME.surface
 }
 
 /// Sheet height for the date and time steps: neither draws a keyboard, so they
@@ -1856,19 +1875,19 @@ fn flow_pixel(x: usize, y: usize, app: &CalendarApp) -> u32 {
         _ => SHEET_COMPACT_Y1,
     };
     if x < SHEET_X0 || x >= SHEET_X1 || y < SHEET_Y0 || y >= sheet_y1 {
-        return BG_DARK;
+        return THEME.surface;
     }
     let rx = (x - SHEET_X0).min(SHEET_X1 - 1 - x);
     let ry = (y - SHEET_Y0).min(sheet_y1 - 1 - y);
-    if rx < 20 && ry < 20 {
-        let cdx = (20 - rx) as isize;
-        let cdy = (20 - ry) as isize;
-        if cdx * cdx + cdy * cdy >= 400 {
-            return BG_DARK;
+    if rx < R_CARD && ry < R_CARD {
+        let cdx = (R_CARD - rx) as isize;
+        let cdy = (R_CARD - ry) as isize;
+        if cdx * cdx + cdy * cdy >= (R_CARD * R_CARD) as isize {
+            return THEME.surface;
         }
     }
     if rx < 2 || ry < 2 {
-        return BORDER_SUBTLE;
+        return THEME.border;
     }
 
     let mut step_buf = [0u8; 56];
@@ -1904,8 +1923,8 @@ fn flow_pixel(x: usize, y: usize, app: &CalendarApp) -> u32 {
         // "NEW EVENT" measures 226px on the bitmap face at scale 2 and 223px on
         // the outline face.
         SHEET_X1 - SHEET_X0 - 40,
-        TEXT_PRIMARY,
-        SURFACE_DARK,
+        THEME.on_surface,
+        THEME.surface_container,
     ) {
         return c;
     }
@@ -1917,8 +1936,8 @@ fn flow_pixel(x: usize, y: usize, app: &CalendarApp) -> u32 {
         1,
         step_str,
         SHEET_X1 - SHEET_X0 - 40,
-        TEXT_MUTED,
-        SURFACE_DARK,
+        THEME.on_surface_variant,
+        THEME.surface_container,
     ) {
         return c;
     }
@@ -1927,7 +1946,7 @@ fn flow_pixel(x: usize, y: usize, app: &CalendarApp) -> u32 {
         Flow::Title => title_step_pixel(x, y, app),
         Flow::Date => date_step_pixel(x, y, app),
         Flow::Time => time_step_pixel(x, y, app),
-        Flow::None => BG_DARK,
+        Flow::None => THEME.surface,
     }
 }
 
@@ -1936,11 +1955,11 @@ fn title_step_pixel(x: usize, y: usize, app: &CalendarApp) -> u32 {
     if x >= TITLE_FIELD_X0 && x < TITLE_FIELD_X1 && y >= TITLE_FIELD_Y0 && y < TITLE_FIELD_Y1 {
         let rx = (x - TITLE_FIELD_X0).min(TITLE_FIELD_X1 - 1 - x);
         let ry = (y - TITLE_FIELD_Y0).min(TITLE_FIELD_Y1 - 1 - y);
-        if rx < 10 && ry < 10 {
-            let cdx = (10 - rx) as isize;
-            let cdy = (10 - ry) as isize;
-            if cdx * cdx + cdy * cdy >= 100 {
-                return SURFACE_DARK;
+        if rx < R_CHIP && ry < R_CHIP {
+            let cdx = (R_CHIP - rx) as isize;
+            let cdy = (R_CHIP - ry) as isize;
+            if cdx * cdx + cdy * cdy >= (R_CHIP * R_CHIP) as isize {
+                return THEME.surface_container;
             }
         }
         // The title being typed, or a visible placeholder when it is empty. WHY
@@ -1951,7 +1970,7 @@ fn title_step_pixel(x: usize, y: usize, app: &CalendarApp) -> u32 {
         } else {
             &app.title[..app.title_len]
         };
-        let color = if app.title_len == 0 { TEXT_MUTED } else { TEXT_PRIMARY };
+        let color = if app.title_len == 0 { THEME.on_surface_variant } else { THEME.on_surface };
         if let Some(c) = test_text(
             x,
             y,
@@ -1963,7 +1982,7 @@ fn title_step_pixel(x: usize, y: usize, app: &CalendarApp) -> u32 {
             // inside the field and the field ends at TITLE_FIELD_X1.
             TITLE_FIELD_X1 - (TITLE_FIELD_X0 + 12),
             color,
-            SURFACE_RAISED,
+            THEME.surface_container_high,
         ) {
             return c;
         }
@@ -1974,12 +1993,12 @@ fn title_step_pixel(x: usize, y: usize, app: &CalendarApp) -> u32 {
             && y >= TITLE_TEXT_Y
             && y < TITLE_TEXT_Y + std::design::font::line_height(1)
         {
-            return ACCENT_SKY;
+            return THEME.primary;
         }
         if rx < 2 || ry < 2 {
-            return BORDER_SUBTLE;
+            return THEME.border;
         }
-        return SURFACE_RAISED;
+        return THEME.surface_container_high;
     }
 
     for row in 0..4 {
@@ -1990,25 +2009,25 @@ fn title_step_pixel(x: usize, y: usize, app: &CalendarApp) -> u32 {
         }
     }
 
-    SURFACE_DARK
+    THEME.surface_container
 }
 
 /// Rasterises one keyboard key.
 fn key_pixel(x: usize, y: usize, row: usize, col: usize) -> u32 {
     let label = key_label(row, col);
     let Some((x0, y0, x1, y1)) = key_rect(row, col) else {
-        return BG_DARK;
+        return THEME.surface;
     };
     if label.is_empty() {
-        return BG_DARK;
+        return THEME.surface;
     }
     let rx = (x - x0).min(x1 - 1 - x);
     let ry = (y - y0).min(y1 - 1 - y);
-    if rx < 10 && ry < 10 {
-        let cdx = (10 - rx) as isize;
-        let cdy = (10 - ry) as isize;
-        if cdx * cdx + cdy * cdy >= 100 {
-            return BG_DARK;
+    if rx < R_CHIP && ry < R_CHIP {
+        let cdx = (R_CHIP - rx) as isize;
+        let cdy = (R_CHIP - ry) as isize;
+        if cdx * cdx + cdy * cdy >= (R_CHIP * R_CHIP) as isize {
+            return THEME.surface;
         }
     }
     // WHY the NEXT key is the only accented one: it is the only key on the sheet
@@ -2029,15 +2048,15 @@ fn key_pixel(x: usize, y: usize, row: usize, col: usize) -> u32 {
         // measures 130 against 304px, "DEL" 74 against 176px and "NEXT" 104
         // against 180px, so every key fits on either face.
         x1 - x0,
-        if accent { ACCENT_SKY } else { TEXT_PRIMARY },
-        SURFACE_RAISED,
+        if accent { THEME.primary } else { THEME.on_surface },
+        THEME.surface_container_high,
     ) {
         return c;
     }
     if rx < 2 || ry < 2 {
-        return if accent { ACCENT_SKY } else { BORDER_SUBTLE };
+        return if accent { THEME.primary } else { THEME.border };
     }
-    SURFACE_RAISED
+    THEME.surface_container_high
 }
 
 /// Rasterises one stepper box: label, value, and the -/+ pair under it.
@@ -2058,11 +2077,11 @@ fn stepper_box_pixel(
     }
     let rx = (x - x0).min(x1 - 1 - x);
     let ry = (y - STEP_Y0).min(STEP_Y1 - 1 - y);
-    if rx < 10 && ry < 10 {
-        let cdx = (10 - rx) as isize;
-        let cdy = (10 - ry) as isize;
-        if cdx * cdx + cdy * cdy >= 100 {
-            return Some(SURFACE_DARK);
+    if rx < R_CHIP && ry < R_CHIP {
+        let cdx = (R_CHIP - rx) as isize;
+        let cdy = (R_CHIP - ry) as isize;
+        if cdx * cdx + cdy * cdy >= (R_CHIP * R_CHIP) as isize {
+            return Some(THEME.surface_container);
         }
     }
     if let Some(c) = test_text(
@@ -2074,8 +2093,8 @@ fn stepper_box_pixel(
         label,
         // The steppers' labels are scale 1; the column is the box's inner width.
         x1 - x0,
-        TEXT_MUTED,
-        SURFACE_RAISED,
+        THEME.on_surface_variant,
+        THEME.surface_container_high,
     ) {
         return Some(c);
     }
@@ -2092,7 +2111,7 @@ fn stepper_box_pixel(
         // date boxes' 192px and the time boxes' 300px.
         x1 - x0,
         value_color,
-        SURFACE_RAISED,
+        THEME.surface_container_high,
     ) {
         return Some(c);
     }
@@ -2104,11 +2123,11 @@ fn stepper_box_pixel(
         if x >= kx0 && x < kx1 && y >= ky0 && y < ky1 {
             let krx = (x - kx0).min(kx1 - 1 - x);
             let kry = (y - ky0).min(ky1 - 1 - y);
-            if krx < 10 && kry < 10 {
-                let cdx = (10 - krx) as isize;
-                let cdy = (10 - kry) as isize;
-                if cdx * cdx + cdy * cdy >= 100 {
-                    return Some(SURFACE_DARK);
+            if krx < R_CHIP && kry < R_CHIP {
+                let cdx = (R_CHIP - krx) as isize;
+                let cdy = (R_CHIP - kry) as isize;
+                if cdx * cdx + cdy * cdy >= (R_CHIP * R_CHIP) as isize {
+                    return Some(THEME.surface_container);
                 }
             }
             if let Some(c) = test_text(
@@ -2122,21 +2141,21 @@ fn stepper_box_pixel(
                 // in the 72px button, "-" measures 12px on the bitmap face at
                 // scale 2 and 11px on the outline, "+" 24 and 23px.
                 kx1 - kx0,
-                ACCENT_SKY,
-                SURFACE_RAISED,
+                THEME.primary,
+                THEME.surface_container_high,
             ) {
                 return Some(c);
             }
             if krx < 2 || kry < 2 {
-                return Some(ACCENT_SKY);
+                return Some(THEME.primary);
             }
-            return Some(SURFACE_RAISED);
+            return Some(THEME.surface_container_high);
         }
     }
     if rx < 2 || ry < 2 {
-        return Some(BORDER_SUBTLE);
+        return Some(THEME.border);
     }
-    Some(SURFACE_RAISED)
+    Some(THEME.surface_container_high)
 }
 
 /// Rasterises the date step.
@@ -2217,12 +2236,12 @@ fn flow_status_pixel(x: usize, y: usize, app: &CalendarApp) -> u32 {
         1,
         status,
         SHEET_X1 - SHEET_X0 - 40,
-        if ok { SUCCESS_EMERALD } else { TEXT_MUTED },
-        SURFACE_DARK,
+        if ok { THEME.success } else { THEME.on_surface_variant },
+        THEME.surface_container,
     ) {
         return c;
     }
-    SURFACE_DARK
+    THEME.surface_container
 }
 
 /// Formats one stepper field, or `--` when the user has not set it.
@@ -2237,9 +2256,9 @@ fn stepper_value<'a>(
     match value {
         Some(v) => {
             let n = fmt_dec(out, v, min_digits);
-            (&out[..n], TEXT_PRIMARY)
+            (&out[..n], THEME.on_surface)
         }
-        None => (b"--", TEXT_MUTED),
+        None => (b"--", THEME.on_surface_variant),
     }
 }
 
@@ -2291,14 +2310,14 @@ fn flow_buttons_pixel(x: usize, y: usize, forward_label: &[u8]) -> Option<u32> {
         let mut on_btn_border = false;
         let rx = (x - bx0).min(bx1 - 1 - x);
         let ry = (y - FLOW_BTN_Y0).min(FLOW_BTN_Y1 - 1 - y);
-        if rx < 12 && ry < 12 {
-            let cdx = (12 - rx) as isize;
-            let cdy = (12 - ry) as isize;
+        if rx < R_CONTROL && ry < R_CONTROL {
+            let cdx = (R_CONTROL - rx) as isize;
+            let cdy = (R_CONTROL - ry) as isize;
             let d2 = cdx * cdx + cdy * cdy;
-            if d2 >= 144 {
-                return Some(SURFACE_DARK);
+            if d2 >= (R_CONTROL * R_CONTROL) as isize {
+                return Some(THEME.surface_container);
             }
-            if d2 >= 100 {
+            if d2 >= ((R_CONTROL - 2) * (R_CONTROL - 2)) as isize {
                 on_btn_border = true;
             }
         } else if rx < 2 || ry < 2 {
@@ -2317,15 +2336,15 @@ fn flow_buttons_pixel(x: usize, y: usize, forward_label: &[u8]) -> Option<u32> {
             // button, and "CANCEL" 160px against 155px against its 252px one, so
             // every label fits on either face.
             bx1 - bx0,
-            if accent { ACCENT_SKY } else { TEXT_MUTED },
-            SURFACE_RAISED,
+            if accent { THEME.primary } else { THEME.on_surface_variant },
+            THEME.surface_container_high,
         ) {
             return Some(c);
         }
         if on_btn_border {
-            return Some(if accent { ACCENT_SKY } else { BORDER_SUBTLE });
+            return Some(if accent { THEME.primary } else { THEME.border });
         }
-        return Some(SURFACE_RAISED);
+        return Some(THEME.surface_container_high);
     }
     None
 }

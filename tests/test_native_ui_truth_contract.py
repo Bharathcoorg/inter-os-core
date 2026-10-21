@@ -517,10 +517,15 @@ def test_device_studio_does_not_infer_guest_cpu_state_from_qemu_liveness():
 
 def test_unavailable_settings_services_use_neutral_not_success_styling():
     source = read("apps/settings/src/main.rs")
-    assert 'b"DVFS state unavailable", TEXT_MUTED' in source
-    assert 'b"Keystore status unavailable", TEXT_MUTED' in source
-    assert 'b"Vault encryption status unavailable", TEXT_MUTED' in source
-    assert 'b"Privacy filter status unavailable", TEXT_MUTED' in source
-    assert 'b"Keystore status unavailable", SUCCESS_EMERALD' not in source
-    assert 'b"Vault encryption status unavailable", SUCCESS_EMERALD' not in source
-    assert 'b"Privacy filter status unavailable", SUCCESS_EMERALD' not in source
+    # WHY the platform's role and not a name of the app's own: the settings
+    # app's colours come from the platform's theme now, so "the neutral ink"
+    # is `on_surface_variant` and "the success ink" is `success`. The claim
+    # under test is unchanged: an unavailable service is reported in the
+    # neutral ink and never in the success ink.
+    assert 'b"DVFS state unavailable", THEME.on_surface_variant' in source
+    assert 'b"Keystore status unavailable", THEME.on_surface_variant' in source
+    assert 'b"Vault encryption status unavailable", THEME.on_surface_variant' in source
+    assert 'b"Privacy filter status unavailable", THEME.on_surface_variant' in source
+    assert 'b"Keystore status unavailable", THEME.success' not in source
+    assert 'b"Vault encryption status unavailable", THEME.success' not in source
+    assert 'b"Privacy filter status unavailable", THEME.success' not in source
