@@ -281,6 +281,38 @@ impl ConsoleLine {
     }
 }
 
+/// The shell's prompt.
+///
+/// WHY it names nothing but the shell: the old prompt was
+/// The old prompt carried a user account and a host name, which asserted
+/// an identity the shell had never read. The shell knows its own name and
+/// nothing else, so the prompt says that and stops.
+pub const PROMPT: &[u8] = b"interos:$ ";
+
+/// The directory `ls` lists when the user does not name one.
+///
+/// WHY the storage root: the kernel's app path policy refuses `/data`
+/// before the path is examined, so listing it could only ever produce a
+/// refusal dressed up as an empty directory.
+const LS_PATH: &str = "/storage";
+
+/// The capability types this app knows how to ask for.
+///
+/// WHY a fixed list: the platform resolves a capability slot by its type
+/// but offers no way to enumerate a task's whole table, so the most the
+/// shell can report is which of the types it knows about it holds. The
+/// list is the app's own table, and the `caps` command says so.
+pub const KNOWN_CAPABILITIES: [(&str, u64); 8] = [
+    ("serial output", std::cap_type::SERIAL_OUTPUT),
+    ("ipc send", std::cap_type::IPC_SEND),
+    ("timer tick read", std::cap_type::TIMER_TICK_READ),
+    ("filesystem read", std::cap_type::FILE_SYSTEM_READ),
+    ("filesystem write", std::cap_type::FILE_SYSTEM_WRITE),
+    ("event poll", std::cap_type::EVENT_POLL),
+    ("ipc receive", std::cap_type::IPC_RECEIVE),
+    ("framebuffer", std::cap_type::FRAMEBUFFER_DIRECT),
+];
+
 /// Sovereign Intent Terminal Shell state engine.
 pub struct TerminalApp {
     pub history: [Option<HistoryEntry>; 8],
@@ -319,7 +351,7 @@ impl TerminalApp {
         ));
         lines[5] = Some(ConsoleLine::from_static("diagnostics.", TEXT_MUTED));
         lines[6] = Some(ConsoleLine::from_static(
-            "interos@sovereign:~$ _",
+            "interos:$ _",
             SUCCESS_EMERALD,
         ));
         Self {
@@ -335,6 +367,19 @@ impl TerminalApp {
 
     pub fn push_line(&mut self, text: &str, color: u32) {
         self.push_line_bytes(text.as_bytes(), color);
+    }
+
+    /// Echoes a command the way a shell does: the prompt, then the command.
+    pub fn push_echo(&mut self, cmd: &str) {
+        let mut line = [0u8; 64];
+        let p = PROMPT.len();
+        if p > line.len() {
+            return;
+        }
+        line[..p].copy_from_slice(PROMPT);
+        let n = p + cmd.len().min(line.len() - p);
+        line[p..n].copy_from_slice(&cmd.as_bytes()[..n - p]);
+        self.push_line_bytes(&line[..n], SUCCESS_EMERALD);
     }
 
     pub fn push_line_bytes(&mut self, text: &[u8], color: u32) {
@@ -356,8 +401,22 @@ impl TerminalApp {
             if n == 0 || piece[0].is_empty() {
                 break;
             }
+            // WHY the offset is computed and not taken from the piece's
+            // length: `wrap_text` skips the leading spaces of the text it is
+            // given, so the piece it returns starts after them. Advancing by
+            // the piece's length therefore restarted the remainder one
+            // character too early, and every wrapped line repeated the first
+            // character of the next one.
+            let mut skip = 0usize;
+            while skip < rest.len() && rest[skip] == b' ' {
+                skip += 1;
+            }
+            let consumed = skip + piece[0].len();
+            if consumed == 0 || consumed > rest.len() {
+                break;
+            }
             self.push_console_line(piece[0], color);
-            rest = &rest[piece[0].len()..];
+            rest = &rest[consumed..];
         }
     }
 
@@ -390,9 +449,109 @@ impl TerminalApp {
         self.push_line_bytes(&buf[..n], color);
     }
 
+    /// Lists a directory the user named.
+    ///
+    /// WHY the path is reported in the output: the shell does not know what
+    /// the user meant to list, and a line that does not name the path could
+    /// be read as a claim about a different directory.
+    pub fn list_path(&mut self, path: &str) {
+        if path.is_empty() {
+            self.push_line("ls: needs a path, e.g. ls /storage", TEXT_MUTED);
+            self.record_history("ls", -1);
+            return;
+        }
+        let mut buf = [0u8; 512];
+        let listed = match std::cap::fs_read_slot() {
+            Some(slot) => std::fs_list(slot, path, &mut buf),
+            None => Err(-1),
+        };
+        match listed {
+            Ok(n) if n > 0 => {
+                self.push_counted("vfs: ", n as u64, " bytes listed.", SUCCESS_EMERALD);
+                let mut start = 0;
+                while start < n {
+                    let end = buf[start..n]
+                        .iter()
+                        .position(|&b| b == b'\n')
+                        .map(|p| start + p)
+                        .unwrap_or(n);
+                    if let Ok(entry_str) = core::str::from_utf8(&buf[start..end]) {
+                        if !entry_str.is_empty() {
+                            self.push_line(entry_str, TEXT_PRIMARY);
+                        }
+                    }
+                    start = end.saturating_add(1);
+                }
+                self.record_history("ls", 0);
+            }
+            Ok(_) => {
+                self.push_line("vfs: directory empty.", TEXT_MUTED);
+                self.record_history("ls", 0);
+            }
+            Err(code) => {
+                self.push_line("vfs: fs_list query refused or unavailable.", TEXT_MUTED);
+                self.record_history("ls", code);
+            }
+        }
+    }
+
+    /// Prints a file the user named.
+    pub fn cat_path(&mut self, path: &str) {
+        if path.is_empty() {
+            self.push_line("cat: needs a path, e.g. cat /storage/photos/name.ppm", TEXT_MUTED);
+            self.record_history("cat", -1);
+            return;
+        }
+        let slot = match std::cap::fs_read_slot() {
+            Some(slot) => slot,
+            None => {
+                self.push_line("cat: no filesystem read capability.", TEXT_MUTED);
+                self.record_history("cat", -1);
+                return;
+            }
+        };
+        match std::fs_open(slot, path, std::FS_READ) {
+            Ok(fd) => {
+                let mut buf = [0u8; 512];
+                match std::fs_read(slot, fd, &mut buf) {
+                    Ok(n) if n > 0 => {
+                        self.push_counted("cat: ", n as u64, " bytes read.", SUCCESS_EMERALD);
+                        let mut start = 0;
+                        while start < n {
+                            let end = buf[start..n]
+                                .iter()
+                                .position(|&b| b == b'\n')
+                                .map(|p| start + p)
+                                .unwrap_or(n);
+                            if let Ok(line_str) = core::str::from_utf8(&buf[start..end]) {
+                                if !line_str.is_empty() {
+                                    self.push_line(line_str, TEXT_PRIMARY);
+                                }
+                            }
+                            start = end.saturating_add(1);
+                        }
+                        self.record_history("cat", 0);
+                    }
+                    Ok(_) => {
+                        self.push_line("cat: file empty.", TEXT_MUTED);
+                        self.record_history("cat", 0);
+                    }
+                    Err(code) => {
+                        self.push_line("cat: fs_read refused or error.", TEXT_MUTED);
+                        self.record_history("cat", code);
+                    }
+                }
+                let _ = std::fs_close(fd);
+            }
+            Err(code) => {
+                self.push_line("cat: fs_open refused or file not found.", TEXT_MUTED);
+                self.record_history("cat", code);
+            }
+        }
+    }
+
     /// Records an executed command in the history ledger.
-    pub fn record_history(&mut self, cmd: &'static str, status: i64) {
-        let idx = self.history_count % self.history.len();
+    pub fn record_history(&mut self, cmd: &'static str, status: i64) {        let idx = self.history_count % self.history.len();
         self.history[idx] = Some(HistoryEntry { cmd, status });
         self.history_count += 1;
         self.total_commands_executed += 1;
@@ -401,7 +560,7 @@ impl TerminalApp {
     /// Updates the terminal prompt line to display the current input buffer contents with cursor.
     fn sync_prompt_line(&mut self) {
         let mut buf = [0u8; LINE_CAP];
-        let prefix = b"interos@sovereign:~$ ";
+        let prefix = PROMPT;
         buf[..prefix.len()].copy_from_slice(prefix);
         let n = self.input_len.min(LINE_CAP - prefix.len() - 1);
         buf[prefix.len()..prefix.len() + n].copy_from_slice(&self.input_buf[..n]);
@@ -416,7 +575,7 @@ impl TerminalApp {
         line.text[..total_len].copy_from_slice(&buf[..total_len]);
 
         if self.line_count > 0
-            && self.lines[self.line_count - 1].map_or(false, |l| l.as_bytes().starts_with(b"interos@"))
+            && self.lines[self.line_count - 1].map_or(false, |l| l.as_bytes().starts_with(b"interos:"))
         {
             self.lines[self.line_count - 1] = Some(line);
         } else if self.line_count < CONSOLE_LINES {
@@ -441,12 +600,12 @@ impl TerminalApp {
             if key.code == b'c' as u32 || key.code == b'C' as u32 || key.code == 3 {
                 self.input_len = 0;
                 if self.line_count > 0
-                    && self.lines[self.line_count - 1].map_or(false, |l| l.as_bytes().starts_with(b"interos@"))
+                    && self.lines[self.line_count - 1].map_or(false, |l| l.as_bytes().starts_with(b"interos:"))
                 {
                     self.line_count -= 1;
                 }
-                self.push_line("interos@sovereign:~$ ^C", SUCCESS_EMERALD);
-                self.push_line("interos@sovereign:~$ _", SUCCESS_EMERALD);
+                self.push_echo("^C");
+                self.push_line("interos:$ _", SUCCESS_EMERALD);
                 return true;
             }
             if key.code == b'l' as u32 || key.code == b'L' as u32 || key.code == 12 {
@@ -510,29 +669,54 @@ impl TerminalApp {
     /// Executes a built-in terminal command and renders to console.
     pub fn execute_command(&mut self, cmd_line: &str) {
         if self.line_count > 0
-            && self.lines[self.line_count - 1].map_or(false, |l| l.as_bytes().starts_with(b"interos@"))
+            && self.lines[self.line_count - 1].map_or(false, |l| l.as_bytes().starts_with(b"interos:"))
         {
             self.line_count -= 1;
         }
 
         let cmd = cmd_line.trim();
+
+        // `cat <path>` and `ls <path>` take an argument, so they are handled
+        // before the verb match: the verb alone does not say what to read or
+        // where to look.
+        //
+        // WHY the path is the user's to give: the kernel's app path policy
+        // refuses `/data` before the path is examined, so a hard-coded target
+        // could only ever produce a refusal. Naming a path the app is
+        // allowed to read is what makes the command useful.
+        if let Some(arg) = cmd.strip_prefix("cat ") {
+            self.push_echo(cmd);
+            self.cat_path(arg.trim());
+            return;
+        }
+        if let Some(arg) = cmd.strip_prefix("ls ") {
+            self.push_echo(cmd);
+            self.list_path(arg.trim());
+            return;
+        }
+
         match cmd {
             "help" => {
-                self.push_line("interos@sovereign:~$ help", SUCCESS_EMERALD);
-                self.push_line("Commands: help, status, ps, mem, caps, share, dma, ping, ls, services, cat", TEXT_PRIMARY);
+                self.push_echo("help");
+                // WHY every command is listed: the dispatcher also answers
+                // `vfs` and `clear`, and the old list left them out, so the
+                // help was a worse description of the shell than the shell
+                // itself.
+                self.push_line("Commands: help, status, ps, mem, caps, share, dma, ping, ls, vfs, services, cat, clear", TEXT_PRIMARY);
+                self.push_line("ls [path] lists a directory; cat [path] prints a file.", TEXT_MUTED);
                 std::log(
                     0,
-                    "[TERMINAL] Commands: help, status, ps, mem, caps, share, dma, ping, ls, services, cat",
+                    "[TERMINAL] Commands: help, status, ps, mem, caps, share, dma, ping, ls, vfs, services, cat, clear",
                 )
                 .ok();
                 self.record_history("help", 0);
             }
             "status" => {
-                self.push_line("interos@sovereign:~$ status", SUCCESS_EMERALD);
+                self.push_echo("status");
                 // WHY the privilege level is gone: the shell never queries
-                // the task's CPL -- there is no inspection API -- so naming
-                // one here asserted a number it had not observed. The
-                // shell's own `caps` command says the same thing.
+                // the task's CPL -- no syscall reports it to a Ring 3 app --
+                // so naming one here asserted a number it had not observed.
+                // The shell's own `caps` command reports what it can resolve.
                 self.push_line("InterOS Core Mobile Platform | Ring 3 isolated", ACCENT_SKY);
                 // WHY: the uptime comes from the platform's real tick
                 // counter. If no capability slot grants TimerTickRead, the
@@ -568,7 +752,7 @@ impl TerminalApp {
                 }
             }
             "ps" => {
-                self.push_line("interos@sovereign:~$ ps", SUCCESS_EMERALD);
+                self.push_echo("ps");
                 // WHY: the task count is read from the runtime list; a fixed
                 // number would claim a measurement that was never taken.
                 match count_runtime_tasks() {
@@ -598,7 +782,7 @@ impl TerminalApp {
                 }
             }
             "mem" => {
-                self.push_line("interos@sovereign:~$ mem", SUCCESS_EMERALD);
+                self.push_echo("mem");
                 // WHY: no heap or paging query exists on this platform, so the
                 // command reports the absence instead of a plausible-sounding stat.
                 // History records -1: no syscall ran, so there is no kernel code —
@@ -609,16 +793,35 @@ impl TerminalApp {
                 self.record_history("mem", -1);
             }
             "caps" => {
-                self.push_line("interos@sovereign:~$ caps", SUCCESS_EMERALD);
-                // WHY: this is a static policy statement, not an inspection: the
-                // platform exposes no capability-table query to Ring 3.
+                self.push_echo("caps");
                 self.push_line("caps: policy: zero ambient authority", TEXT_PRIMARY);
-                self.push_line("caps: (statement only; no inspection API).", TEXT_MUTED);
-                std::log(0, "[TERMINAL] caps: static policy statement; no runtime capability inspection exists.").ok();
+                // WHY this is an inspection and not a statement: the platform
+                // resolves a capability slot by its type, so the shell can ask
+                // which of the capabilities it knows about it actually holds.
+                // It cannot enumerate the whole table -- no syscall does that
+                // -- so the list below is the set of types this app knows
+                // about, and the line after it says so.
+                let mut held = 0u32;
+                let mut absent = 0u32;
+                for (name, cap_type) in KNOWN_CAPABILITIES.iter() {
+                    if std::cap_lookup(*cap_type, 0).is_ok() {
+                        self.push_line(name, TEXT_PRIMARY);
+                        held += 1;
+                    } else {
+                        absent += 1;
+                    }
+                }
+                self.push_counted("caps: held ", held as u64, " of the types this app knows about.", TEXT_MUTED);
+                self.push_counted("caps: not held ", absent as u64, " of them.", TEXT_MUTED);
+                std::log(
+                    0,
+                    "[TERMINAL] caps: capability slots resolved by type from the app's own table.",
+                )
+                .ok();
                 self.record_history("caps", 0);
             }
             "share" => {
-                self.push_line("interos@sovereign:~$ share", SUCCESS_EMERALD);
+                self.push_echo("share");
                 // WHY: the dispatch Result decides the message — a refused intent
                 // is reported as refused, never as a success.
                 match std::share_sheet_dispatch(
@@ -648,7 +851,7 @@ impl TerminalApp {
                 }
             }
             "dma" => {
-                self.push_line("interos@sovereign:~$ dma", SUCCESS_EMERALD);
+                self.push_echo("dma");
                 let payload = b"DMA::TERMINAL::STREAM_PACKET";
                 match std::shm_pipe_transfer(3, payload, 0x01) {
                     Ok(_) => {
@@ -664,13 +867,13 @@ impl TerminalApp {
                 }
             }
             "ping" => {
-                self.push_line("interos@sovereign:~$ ping", SUCCESS_EMERALD);
+                self.push_echo("ping");
                 self.push_line("ping: unavailable; no ICMP/network probe is implemented.", TEXT_MUTED);
                 std::log(0, "[TERMINAL APP] ping unavailable: no network probe was executed.").ok();
                 self.record_history("ping", 0);
             }
             "services" => {
-                self.push_line("interos@sovereign:~$ services", SUCCESS_EMERALD);
+                self.push_echo("services");
                 let mut buf = [0u8; 512];
                 match std::service_list(&mut buf) {
                     Ok(n) => {
@@ -685,70 +888,18 @@ impl TerminalApp {
                 }
             }
             "ls" | "vfs" => {
-                self.push_line("interos@sovereign:~$ ls", SUCCESS_EMERALD);
-                let mut buf = [0u8; 512];
-                match std::fs_list(3, "/data", &mut buf) {
-                    Ok(n) if n > 0 => {
-                        self.push_counted("vfs(/data): ", n as u64, " bytes listed.", SUCCESS_EMERALD);
-                        let mut start = 0;
-                        while start < n {
-                            let end = buf[start..n].iter().position(|&b| b == b'\n').map(|p| start + p).unwrap_or(n);
-                            if let Ok(entry_str) = core::str::from_utf8(&buf[start..end]) {
-                                if !entry_str.is_empty() {
-                                    self.push_line(entry_str, TEXT_PRIMARY);
-                                }
-                            }
-                            start = end.saturating_add(1);
-                        }
-                        self.record_history("ls", 0);
-                    }
-                    Ok(_) => {
-                        self.push_line("vfs(/data): directory empty.", TEXT_MUTED);
-                        self.record_history("ls", 0);
-                    }
-                    Err(code) => {
-                        self.push_line("vfs: fs_list(/data) query refused or unavailable.", TEXT_MUTED);
-                        self.record_history("ls", code);
-                    }
-                }
+                self.push_echo("ls");
+                // WHY the storage root and not the data directory: the
+                // kernel's app path policy refuses `/data` before the path is
+                // examined, so listing it could only ever produce a refusal
+                // dressed up as an empty directory. `/storage` is a path this
+                // app is allowed to list.
+                self.list_path(LS_PATH);
             }
             "cat" => {
-                self.push_line("interos@sovereign:~$ cat", SUCCESS_EMERALD);
-                let path = "/data/manifest.json";
-                match std::fs_open(3, path, std::FS_READ) {
-                    Ok(fd) => {
-                        let mut buf = [0u8; 512];
-                        match std::fs_read(3, fd, &mut buf) {
-                            Ok(n) if n > 0 => {
-                                self.push_counted("cat(/data/manifest.json): ", n as u64, " bytes read.", SUCCESS_EMERALD);
-                                let mut start = 0;
-                                while start < n {
-                                    let end = buf[start..n].iter().position(|&b| b == b'\n').map(|p| start + p).unwrap_or(n);
-                                    if let Ok(line_str) = core::str::from_utf8(&buf[start..end]) {
-                                        if !line_str.is_empty() {
-                                            self.push_line(line_str, TEXT_PRIMARY);
-                                        }
-                                    }
-                                    start = end.saturating_add(1);
-                                }
-                                self.record_history("cat", 0);
-                            }
-                            Ok(_) => {
-                                self.push_line("cat(/data/manifest.json): file empty.", TEXT_MUTED);
-                                self.record_history("cat", 0);
-                            }
-                            Err(code) => {
-                                self.push_line("cat: fs_read refused or error.", TEXT_MUTED);
-                                self.record_history("cat", code);
-                            }
-                        }
-                        let _ = std::fs_close(fd);
-                    }
-                    Err(code) => {
-                        self.push_line("cat: fs_open(/data/manifest.json) refused or file not found.", TEXT_MUTED);
-                        self.record_history("cat", code);
-                    }
-                }
+                self.push_echo("cat");
+                self.push_line("cat: needs a path, e.g. cat /storage/photos/name.ppm", TEXT_MUTED);
+                self.record_history("cat", -1);
             }
             "clear" => {
                 self.lines = [None; CONSOLE_LINES];
@@ -756,11 +907,11 @@ impl TerminalApp {
                 self.record_history("clear", 0);
             }
             "" => {
-                self.push_line("interos@sovereign:~$", SUCCESS_EMERALD);
+                self.push_echo("");
             }
             unknown => {
                 let mut pbuf = [0u8; LINE_CAP];
-                let prefix = b"interos@sovereign:~$ ";
+                let prefix = PROMPT;
                 pbuf[..prefix.len()].copy_from_slice(prefix);
                 let ubytes = unknown.as_bytes();
                 let un = ubytes.len().min(LINE_CAP - prefix.len());
@@ -777,7 +928,7 @@ impl TerminalApp {
                 self.record_history("unknown", -1);
             }
         }
-        self.push_line("interos@sovereign:~$ _", SUCCESS_EMERALD);
+        self.push_line("interos:$ _", SUCCESS_EMERALD);
     }
 }
 
@@ -1101,8 +1252,19 @@ pub extern "C" fn _start() -> ! {
     )
     .ok();
 
-    // Slot 6 is FrameBufferDirect
-    let surface = match std::surface_create(6, W as u32, H as u32, 200) {
+    // WHY the slot is resolved by type: a slot number is a position in the
+    // capability table, and the position depends on the order the kernel
+    // inserted this app's capabilities in.
+    let fb_slot = match std::cap::framebuffer_slot() {
+        Some(slot) => slot,
+        None => {
+            std::log(0, "[TERMINAL APP] No framebuffer capability; the console cannot draw.").ok();
+            loop {
+                std::yield_now();
+            }
+        }
+    };
+    let surface = match std::surface_create(fb_slot, W as u32, H as u32, 200) {
         Ok(id) => {
             std::log(
                 0,
@@ -1119,7 +1281,7 @@ pub extern "C" fn _start() -> ! {
     // Render & present terminal UI
     if surface > 0 {
         repaint(surface, &term, Dirty::All);
-        let _ = std::surface_flip(6);
+        let _ = std::surface_flip(fb_slot);
         std::log(
             0,
             "[TERMINAL APP] Terminal console presented to scanout buffer.",
@@ -1158,7 +1320,7 @@ pub extern "C" fn _start() -> ! {
                         )
                         .ok();
                         if surface > 0 {
-                            let _ = std::surface_destroy(6, surface);
+                            let _ = std::surface_destroy(fb_slot, surface);
                         }
                         std::exit_with_code(0);
                     }
@@ -1170,7 +1332,7 @@ pub extern "C" fn _start() -> ! {
                         {
                             std::log(0, "[TERMINAL APP] Back button or home gesture pressed. Exiting to launcher.").ok();
                             if surface > 0 {
-                                let _ = std::surface_destroy(6, surface);
+                                let _ = std::surface_destroy(fb_slot, surface);
                             }
                             std::exit_with_code(0);
                         }
@@ -1224,7 +1386,7 @@ pub extern "C" fn _start() -> ! {
                 // presented exactly once at the end.
                 if dirty != Dirty::None && surface > 0 {
                     repaint(surface, &term, dirty);
-                    let _ = std::surface_flip(6);
+                    let _ = std::surface_flip(fb_slot);
                 }
             }
         }
