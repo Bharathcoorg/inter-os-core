@@ -16,6 +16,12 @@ pub use interos_std as std;
 /// The app's view of the platform's design system.
 pub mod theme;
 
+/// The soft keyboard's keys.
+pub mod keyboard;
+
+/// The notes' documents in the shared storage area.
+pub mod library;
+
 pub const MAX_NOTES: usize = 16;
 pub const MAX_TITLE_LEN: usize = 48;
 pub const MAX_BODY_LEN: usize = 1024;
