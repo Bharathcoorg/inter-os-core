@@ -699,23 +699,36 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                 let is_backspace = action == Some('B');
                 let is_fn = matches!(action, Some('P') | Some('%') | Some('~'));
 
-                // WHY the equals key is the primary and not the warning:
-                // the active operator was already the warning colour, and
-                // one colour that means two things is a colour that means
-                // nothing. The equals key now carries the primary
-                // treatment, and the design document gives it that one.
+                // WHY the operators and the equals are the opposite of the page
+                // and not a colour of their own: the design the app is built
+                // from puts the whole operator column in near-black, and the
+                // platform's tokens already carry that colour. What the app
+                // had instead was the *warning* role on an operator key and
+                // the *error* role on the clear key, and a status colour that
+                // means "operator" and "clear" is a status colour that means
+                // nothing -- in this app and in every app that reads the
+                // platform's warning and error roles.
+                //
+                // WHY the armed operator is a slightly lighter black and not
+                // a hue: a person has to see which operator is waiting, and
+                // a shade of the same colour says that without spending the
+                // screen's one accent.
                 let (btn_bg, btn_border, text_color) = if is_equals {
-                    (THEME.primary, THEME.primary, THEME.on_primary)
-                } else if is_active_op {
-                    (THEME.warning, THEME.warning_container, THEME.on_primary)
+                    (THEME.inverted_surface(), THEME.inverted_surface(), THEME.on_inverted_surface())
                 } else if is_op {
-                    // Arithmetic operators: the warning container with the
-                    // warning ink.
-                    (THEME.warning_container, THEME.warning_container, THEME.warning)
+                    (THEME.inverted_surface(), THEME.inverted_surface(), THEME.on_inverted_surface())
+                } else if is_active_op {
+                    let armed = interos_std::design::theme::Theme::blend(
+                        THEME.inverted_surface(),
+                        THEME.surface,
+                        64,
+                    );
+                    (armed, armed, THEME.on_inverted_surface())
                 } else if is_clear {
-                    // Clear-all: the destructive key, and the only one
-                    // that throws the whole expression away.
-                    (THEME.error_container, THEME.error_container, THEME.error)
+                    // Clear-all: an ordinary key. Throwing away what is on
+                    // the screen is not an error, and the design gives it a
+                    // plain key.
+                    (THEME.surface_container_high, THEME.border, THEME.on_surface)
                 } else if is_clear_entry {
                     // Clear-entry: a raised key, and the only one that
                     // throws the number being typed away.
@@ -723,14 +736,14 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                 } else if is_backspace {
                     // Backspace: a plain key, and the only one that takes
                     // a single character back.
-                    (THEME.surface_container, THEME.border, THEME.on_surface)
+                    (THEME.surface_container_high, THEME.border, THEME.on_surface)
                 } else if is_fn {
                     // Functions: a raised key with cool light text.
                     (THEME.surface_container_high, THEME.border, THEME.on_surface_variant)
                 } else {
-                    // Digits 0..9 and Decimal point: the container fill
-                    // with crisp text.
-                    (THEME.surface_container, THEME.border, THEME.on_surface)
+                    // Digits 0..9 and Decimal point: the raised fill, which
+                    // is the one the design gives a key on the page.
+                    (THEME.surface_container_high, THEME.border, THEME.on_surface)
                 };
 
                 if rx < 2 || ry < 2 {
