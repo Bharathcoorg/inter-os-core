@@ -287,6 +287,288 @@ fn hex_nibble(b: u8) -> Option<u8> {
     }
 }
 
+/// A file the host is writing into the guest.
+///
+/// WHY the state is here and not in the caller: the console carries one
+/// write at a time, and the chunks of a file arrive as separate
+/// commands with nothing tying them together but the path that named
+/// them.
+struct GuestWrite {
+    path: String,
+    expected_len: usize,
+    bytes: Vec<u8>,
+}
+
+static GUEST_WRITE: Mutex<Option<GuestWrite>> = Mutex::new(None);
+
+/// Whether a path may be reached from the console.
+///
+/// WHY the guest decides and not the host: the host's check is a
+/// convenience, and a convenience is not an authority. The console is
+/// outside the capability model, so the path is checked here, against
+/// the same shape the host uses, before anything is read or written.
+fn guest_path_is_safe(path: &str, writable: bool) -> bool {
+    if path.is_empty() || path.len() > 192 {
+        return false;
+    }
+    if !path.starts_with('/') || path.contains("//") || path.contains("..") {
+        return false;
+    }
+    if path
+        .bytes()
+        .any(|b| b < 0x20 || matches!(b, b'|' | b';' | b'&' | b'$' | b'\'' | b'"' | b'\\'))
+    {
+        return false;
+    }
+    // WHY a write is confined to /data: that is the guest's own writable
+    // area, and a console write anywhere else would put a file where the
+    // platform's own packages live.
+    if writable && !path.starts_with("/data/") {
+        return false;
+    }
+    true
+}
+
+/// The guest's side of the Studio's filesystem channel.
+///
+/// WHY this exists: the Studio could install packages and read the
+/// device's own catalogue, but the guest's files were unreachable in
+/// both directions. A model could never be put on the device, and a file
+/// the guest wrote could never be read from the host. The console is the
+/// only channel between the two, so the console carries the files.
+fn handle_guest_fs_command(parts: &mut core::str::SplitAsciiWhitespace<'_>) -> bool {
+    let Some(verb) = parts.next() else { return false };
+
+    if verb.eq_ignore_ascii_case("STUDIO_FS_LIST") {
+        let Some(path) = parts.next() else {
+            serial_println!("[STUDIO_FS] ERROR missing path");
+            return true;
+        };
+        if !guest_path_is_safe(path, false) {
+            serial_println!("[STUDIO_FS] ERROR unsafe path");
+            return true;
+        }
+        let mut buf = [0u8; 4096];
+        let listed = {
+            let vfs = crate::fs::VFS.lock();
+            vfs.list_dir_by_path(path, &mut buf)
+        };
+        match listed {
+            Ok(n) => {
+                serial_println!("LIST_OK path={}", path);
+                for line in buf[..n].split(|b| *b == b'\n') {
+                    if line.is_empty() {
+                        continue;
+                    }
+                    let Ok(text) = core::str::from_utf8(line) else { continue };
+                    let mut fields = text.split('|');
+                    let (Some(name), Some(kind), Some(size)) =
+                        (fields.next(), fields.next(), fields.next())
+                    else {
+                        continue;
+                    };
+                    serial_println!("[STUDIO_FS_ENTRY] path={}|{}|{}", name, kind, size);
+                }
+            }
+            Err(_) => {
+                serial_println!("[STUDIO_FS] ERROR list failed path={}", path);
+            }
+        }
+        return true;
+    }
+
+    if verb.eq_ignore_ascii_case("STUDIO_FS_READ") {
+        let Some(path) = parts.next() else {
+            serial_println!("[STUDIO_FS] ERROR missing path");
+            return true;
+        };
+        let offset = parts.next().and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
+        let length = parts.next().and_then(|v| v.parse::<usize>().ok()).unwrap_or(192);
+        if !guest_path_is_safe(path, false) {
+            serial_println!("[STUDIO_FS] ERROR unsafe path");
+            return true;
+        }
+        // WHY the read is bounded: the reply is a line on the console, and
+        // a line that is longer than the console's buffer is a line the
+        // host never sees whole.
+        let length = length.clamp(1, 192);
+        let mut buf = [0u8; 192];
+        let read = {
+            let vfs = crate::fs::VFS.lock();
+            vfs.read_file_range(path, offset, &mut buf[..length])
+        };
+        match read {
+            Ok(n) => {
+                let mut hex = [0u8; 384];
+                let mut hex_len = 0usize;
+                for byte in &buf[..n] {
+                    hex[hex_len] = b"0123456789abcdef"[(byte >> 4) as usize];
+                    hex[hex_len + 1] = b"0123456789abcdef"[(byte & 0x0f) as usize];
+                    hex_len += 2;
+                }
+                serial_println!(
+                    "[STUDIO_FS_READ] hex={} len={}",
+                    core::str::from_utf8(&hex[..hex_len]).unwrap_or(""),
+                    n
+                );
+            }
+            Err(_) => {
+                serial_println!("[STUDIO_FS] ERROR read failed path={}", path);
+            }
+        }
+        return true;
+    }
+
+    if verb.eq_ignore_ascii_case("STUDIO_FS_BEGIN") {
+        let Some(path) = parts.next() else {
+            serial_println!("[STUDIO_FS] ERROR missing path");
+            return true;
+        };
+        let len = parts.next().and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
+        if !guest_path_is_safe(path, true) {
+            serial_println!("[STUDIO_FS] ERROR unsafe path");
+            return true;
+        }
+        if len == 0 || len > crate::fs::vfs::MAX_FILE_SIZE {
+            serial_println!("[STUDIO_FS] ERROR invalid length {}", len);
+            return true;
+        }
+        *GUEST_WRITE.lock() = Some(GuestWrite {
+            path: String::from(path),
+            expected_len: len,
+            bytes: alloc::vec![0u8; len],
+        });
+        serial_println!("WRITE_READY path={}", path);
+        return true;
+    }
+
+    if verb.eq_ignore_ascii_case("STUDIO_FS_CHUNK") {
+        let Some(offset) = parts.next().and_then(|v| v.parse::<usize>().ok()) else {
+            serial_println!("[STUDIO_FS] ERROR missing offset");
+            return true;
+        };
+        let Some(hex) = parts.next() else {
+            serial_println!("[STUDIO_FS] ERROR missing chunk");
+            return true;
+        };
+        if hex.len() == 0 || hex.len() > 512 || hex.len() % 2 != 0 {
+            serial_println!("[STUDIO_FS] ERROR invalid chunk");
+            return true;
+        }
+        let chunk_len = hex.len() / 2;
+        let mut write = GUEST_WRITE.lock();
+        let Some(ref mut state) = *write else {
+            serial_println!("[STUDIO_FS] ERROR no write in progress");
+            return true;
+        };
+        if offset.checked_add(chunk_len).map(|end| end <= state.expected_len) != Some(true) {
+            serial_println!("[STUDIO_FS] ERROR chunk out of bounds");
+            return true;
+        }
+        let raw = hex.as_bytes();
+        for i in 0..chunk_len {
+            let Some(hi) = hex_nibble(raw[i * 2]) else {
+                serial_println!("[STUDIO_FS] ERROR bad hex");
+                return true;
+            };
+            let Some(lo) = hex_nibble(raw[i * 2 + 1]) else {
+                serial_println!("[STUDIO_FS] ERROR bad hex");
+                return true;
+            };
+            state.bytes[offset + i] = (hi << 4) | lo;
+        }
+        serial_println!("CHUNK_OK offset={}", offset);
+        return true;
+    }
+
+    if verb.eq_ignore_ascii_case("STUDIO_FS_COMMIT") {
+        let mut write = GUEST_WRITE.lock();
+        let Some(state) = write.take() else {
+            serial_println!("[STUDIO_FS] ERROR no write in progress");
+            return true;
+        };
+        let path = state.path.clone();
+        let bytes = state.bytes;
+        let written = {
+            let mut vfs = crate::fs::VFS.lock();
+            // WHY the parents are made first: a file written into a
+            // directory the guest has never seen would be a file nobody
+            // can list, and the host would believe it had been written.
+            let mut parent = String::new();
+            let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
+            for part in &parts[..parts.len().saturating_sub(1)] {
+                if !parent.is_empty() {
+                    parent.push('/');
+                }
+                parent.push_str(part);
+                let _ = vfs.mkdir(&parent);
+            }
+            vfs.create_file(&path, &bytes, false);
+            vfs.sync()
+        };
+        match written {
+            Ok(()) => serial_println!("WRITE_OK path={}", path),
+            Err(_) => serial_println!("[STUDIO_FS] ERROR commit failed path={}", path),
+        }
+        return true;
+    }
+
+    if verb.eq_ignore_ascii_case("STUDIO_FS_DELETE_FILE") {
+        let Some(path) = parts.next() else {
+            serial_println!("[STUDIO_FS] ERROR missing path");
+            return true;
+        };
+        if !guest_path_is_safe(path, true) {
+            serial_println!("[STUDIO_FS] ERROR unsafe path");
+            return true;
+        }
+        let removed = {
+            let mut vfs = crate::fs::VFS.lock();
+            vfs.unlink(path)
+        };
+        match removed {
+            Ok(()) => serial_println!("DELETE_OK path={}", path),
+            Err(_) => serial_println!("[STUDIO_FS] ERROR delete failed path={}", path),
+        }
+        return true;
+    }
+
+    if verb.eq_ignore_ascii_case("STUDIO_FS_MKDIR") {
+        let Some(path) = parts.next() else {
+            serial_println!("[STUDIO_FS] ERROR missing path");
+            return true;
+        };
+        if !guest_path_is_safe(path, true) {
+            serial_println!("[STUDIO_FS] ERROR unsafe path");
+            return true;
+        }
+        {
+            let mut vfs = crate::fs::VFS.lock();
+            vfs.mkdir(path);
+        }
+        serial_println!("MKDIR_OK path={}", path);
+        return true;
+    }
+
+    if verb.eq_ignore_ascii_case("RAPP_UNINSTALL") {
+        let Some(package_id) = parts.next() else {
+            serial_println!("[STUDIO_PKG] ERROR missing package id");
+            return true;
+        };
+        let removed = {
+            let mut vfs = crate::fs::VFS.lock();
+            vfs.remove_app_storage(package_id)
+        };
+        match removed {
+            Ok(()) => serial_println!("UNINSTALL_OK package={}", package_id),
+            Err(_) => serial_println!("[STUDIO_PKG] ERROR uninstall failed package={}", package_id),
+        }
+        return true;
+    }
+
+    false
+}
+
 fn handle_rapp_command(s: &str) -> bool {
     let mut parts = s.split_ascii_whitespace();
     let Some(verb) = parts.next() else { return false; };
@@ -611,11 +893,50 @@ fn handle_serial_command(cmd: &[u8]) {
         return;
     }
 
+    // The guest's filesystem channel, and the console's other guest-facing
+    // commands. WHY it is asked for before the rest: the Studio sends
+    // these to read and write the guest's own files, and the rest of the
+    // console is the platform's own diagnostics.
+    {
+        let mut guest_parts = s.split_ascii_whitespace();
+        let _ = guest_parts.next();
+        if handle_guest_fs_command(&mut guest_parts) {
+            return;
+        }
+    }
+
     let mut parts = s.split_ascii_whitespace();
     let verb = match parts.next() {
         Some(v) => v,
         None => return,
     };
+
+    if verb.eq_ignore_ascii_case("SURFACES") {
+        // WHY this verb exists: a screen that shows the wrong thing is
+        // diagnosed by what the compositor holds, and the only other way to
+        // see it is to add a print to the compositor's own loop.
+        if let Some(kms) = crate::drivers::display_kms::DRM_KMS.try_lock() {
+            for surface in kms.surfaces.iter() {
+                serial_println!(
+                    "[SURFACES] id={} owner={} z={} x={} y={} {}x{} visible={} ready={} has_frame={} complete={}",
+                    surface.id,
+                    surface.owner_task,
+                    surface.z_order,
+                    surface.x,
+                    surface.y,
+                    surface.width,
+                    surface.height,
+                    surface.visible,
+                    surface.frame_ready,
+                    surface.has_frame,
+                    surface.frame_complete,
+                );
+            }
+        } else {
+            serial_println!("[SURFACES] the display lock is held");
+        }
+        return;
+    }
 
     if verb.eq_ignore_ascii_case("DIAG_STATE") || verb.eq_ignore_ascii_case("STATS") {
         let (tasks_tot, tasks_act) = {
