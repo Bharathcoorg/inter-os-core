@@ -851,9 +851,9 @@ fn build(state: &LauncherState) -> Paint {
 
     let dw = f.date_widget;
     let dw_w = dw.w;
-    let date_weekday = Run::centred(dw.x, dw.y + 14, caption_scale, dw_w.saturating_sub(16), dw_w, full_weekday, theme.accent);
-    let date_day = Run::centred(dw.x, dw.y + 44, type_scale::BODY, dw_w.saturating_sub(16), dw_w, day_slice, theme.text);
-    let date_month = Run::centred(dw.x, dw.y + 94, caption_scale, dw_w.saturating_sub(16), dw_w, full_month, theme.text_muted);
+    let date_weekday = Run::centred(dw.x, dw.y + 14, caption_scale, dw_w.saturating_sub(16), dw_w, full_weekday, theme.primary);
+    let date_day = Run::centred(dw.x, dw.y + 44, type_scale::BODY, dw_w.saturating_sub(16), dw_w, day_slice, theme.on_surface);
+    let date_month = Run::centred(dw.x, dw.y + 94, caption_scale, dw_w.saturating_sub(16), dw_w, full_month, theme.on_surface_variant);
 
     let weather = Run::EMPTY;
 
@@ -862,7 +862,7 @@ fn build(state: &LauncherState) -> Paint {
         f.card_title.y,
         type_scale::BODY,
         b"Today",
-        theme.text,
+        theme.on_surface,
     );
     let card_row_h = card_row_h();
     let card_stack = layout::list(f.card_rows, CARD_ROWS, card_row_h, 0);
@@ -881,14 +881,14 @@ fn build(state: &LauncherState) -> Paint {
                     rect.y + 18,
                     CARD_ROW_LABEL,
                     card_row_name(row),
-                    theme.text,
+                    theme.on_surface,
                 ),
                 detail: Run::whole(
                     rect.x + 80,
                     rect.y + 68,
                     CARD_ROW_DETAIL,
                     &buf[..len],
-                    theme.text_muted,
+                    theme.on_surface_variant,
                 ),
                 done: row == 0 && state.task0_done,
             };
@@ -910,7 +910,7 @@ fn build(state: &LauncherState) -> Paint {
             LABEL_SCALE,
             search_room,
             b"Search apps, settings & files",
-            theme.text_muted,
+            theme.on_surface_variant,
         )
     } else {
         Run::whole(0, 0, LABEL_SCALE, b"", 0)
@@ -991,9 +991,6 @@ pub fn find_package_index(state: &LauncherState, suffix: &[u8]) -> Option<usize>
     for i in 0..state.app_count {
         let len = (state.app_id_lens[i] as usize).min(32);
         let id = &state.app_ids[i][..len];
-        if id == b"org.interos.sensor_dashboard" || id == b"sensor_dashboard" || id == b"sensors" {
-            continue;
-        }
         if id.ends_with(suffix) {
             return Some(i);
         }
@@ -1016,15 +1013,15 @@ fn deck_plan(state: &LauncherState, theme: &Theme, _deck: Rect) -> DeckPlan {
         empty: None,
     };
 
-    let fill = launcher::theme::CARD_FROSTED_CREAM;
+    let fill = theme.surface_frosted;
 
     let dock_defs: [(Option<launcher::icons::IconKind>, &[u8], &[u8], u32); 6] = [
-        (Some(launcher::icons::IconKind::Phone), b"dialer", b"Phone", theme.text),
-        (Some(launcher::icons::IconKind::Messages), b"messages", b"Messages", theme.text),
-        (Some(launcher::icons::IconKind::Camera), b"camera", b"Camera", theme.text),
-        (Some(launcher::icons::IconKind::Files), b"file_manager", b"Files", theme.text),
-        (Some(launcher::icons::IconKind::Browser), b"browser", b"Browser", theme.text),
-        (Some(launcher::icons::IconKind::Apps), b"apps", b"Apps", theme.text),
+        (Some(launcher::icons::IconKind::Phone), b"dialer", b"Phone", theme.on_surface),
+        (Some(launcher::icons::IconKind::Messages), b"messages", b"Messages", theme.on_surface),
+        (Some(launcher::icons::IconKind::Camera), b"camera", b"Camera", theme.on_surface),
+        (Some(launcher::icons::IconKind::Files), b"file_manager", b"Files", theme.on_surface),
+        (Some(launcher::icons::IconKind::Browser), b"browser", b"Browser", theme.on_surface),
+        (Some(launcher::icons::IconKind::Apps), b"apps", b"Apps", theme.on_surface),
     ];
 
     let label_bytes: [&[u8]; 6] = core::array::from_fn(|slot| {
@@ -1068,7 +1065,7 @@ fn deck_plan(state: &LauncherState, theme: &Theme, _deck: Rect) -> DeckPlan {
                 label_fit,
                 cell.w,
                 label_bytes,
-                theme.text,
+                theme.on_surface,
             ),
             fill,
         };
@@ -1407,10 +1404,10 @@ fn greeting_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Op
             return None;
         }
         if rounded_outline(f.date_widget, x, y, 24) {
-            return Some(launcher::theme::DIVIDER_HAIRLINE);
+            return Some(theme.outline_variant);
         }
         let bg = backdrop_ref(&p.scene_ref, x, y);
-        let card_fill = interos_std::font::blend(launcher::theme::CARD_FROSTED_CREAM, bg, 240);
+        let card_fill = interos_std::font::blend(theme.surface_frosted, bg, 240);
         if let Some(c) = p.date_weekday.pixel_aa(x, y, p.date_weekday.ink, card_fill) {
             return Some(c);
         }
@@ -1562,14 +1559,14 @@ fn card_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option
         return None;
     }
     if rounded_outline(f.card, x, y, 28) {
-        return Some(launcher::theme::DIVIDER_HAIRLINE);
+        return Some(theme.outline_variant);
     }
     let bg = backdrop_ref(&p.scene_ref, x, y);
-    let card_fill = interos_std::font::blend(launcher::theme::CARD_FROSTED_CREAM, bg, 245);
+    let card_fill = interos_std::font::blend(theme.surface_frosted, bg, 245);
 
     // Dividers between rows
     if (y == 385 || y == 505) && x >= f.card.x + 24 && x <= f.card.x + f.card.w - 24 {
-        return Some(launcher::theme::DIVIDER_HAIRLINE);
+        return Some(theme.outline_variant);
     }
 
     if let Some(c) = p.card_title.pixel_aa(x, y, p.card_title.ink, card_fill) {
@@ -1590,7 +1587,7 @@ fn card_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option
         let cdx = x as i32 - 645;
         let cdy = (y as i32 - row_cy as i32).abs();
         if cdx >= -3 && cdx <= 3 && (cdy == 3 - cdx || cdy == 2 - cdx) {
-            return Some(theme.text_muted);
+            return Some(theme.on_surface_variant);
         }
 
         let icon_cx = 78i32;
@@ -1609,12 +1606,12 @@ fn card_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option
                 let cby = y as i32 - 322;
                 if cbx.abs() <= 12 && cby.abs() <= 12 {
                     if cbx.abs() == 12 || cby.abs() == 12 {
-                        return Some(theme.text_muted);
+                        return Some(theme.on_surface_variant);
                     }
                     if row.done {
                         let tick = (cbx >= -6 && cbx <= -1 && cby == cbx + 6)
                             || (cbx >= 0 && cbx <= 6 && cby == 6 - cbx);
-                        return Some(if tick { card_fill } else { theme.accent });
+                        return Some(if tick { card_fill } else { theme.primary });
                     }
                     return Some(card_fill);
                 }
@@ -1625,22 +1622,22 @@ fn card_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option
                     let is_border = idx.abs() == 8 || idy == -7 || idy == 5;
                     let is_dot = idy == -1 && (idx == -4 || idx == 0 || idx == 4);
                     if is_border || is_dot {
-                        return Some(theme.accent);
+                        return Some(theme.primary);
                     }
                 } else if idx >= -6 && idx <= -2 && idy >= 5 && idy <= 8 && (idx + idy <= 2) {
-                    return Some(theme.accent);
+                    return Some(theme.primary);
                 }
             }
             _ => {
                 // Activities: vector activity badge icon
                 let r2 = idx * idx + idy * idy;
                 if r2 <= 72 && r2 >= 36 {
-                    return Some(theme.accent);
+                    return Some(theme.primary);
                 }
                 let tick = (idx >= -4 && idx <= -1 && idy == idx + 2)
                     || (idx >= -1 && idx <= 4 && idy == -idx);
                 if tick {
-                    return Some(theme.accent);
+                    return Some(theme.primary);
                 }
             }
         }
@@ -1676,7 +1673,7 @@ fn icon_scale(cell: Rect, glyphs: usize) -> usize {
     by_h.min(by_w).clamp(ICON_SCALE_MIN, ICON_SCALE_MAX)
 }
 
-fn deck_pixel(x: usize, y: usize, f: &Frame, p: &Paint, _theme: &Theme) -> Option<u32> {
+fn deck_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option<u32> {
     let deck = &p.deck;
     if !f.deck.contains(x, y) {
         return None;
@@ -1695,7 +1692,7 @@ fn deck_pixel(x: usize, y: usize, f: &Frame, p: &Paint, _theme: &Theme) -> Optio
         return None;
     }
     if rounded_outline(tile.cell, x, y, TILE_RADIUS) {
-        return Some(launcher::theme::DIVIDER_HAIRLINE);
+        return Some(theme.outline_variant);
     }
     let bg = backdrop_ref(&p.scene_ref, x, y);
     let tile_fill = interos_std::font::blend(tile.fill, bg, 240);
@@ -1739,11 +1736,11 @@ fn search_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Opti
         return None;
     }
     if rounded_outline(f.search, x, y, 28) {
-        return Some(launcher::theme::DIVIDER_HAIRLINE);
+        return Some(theme.outline_variant);
     }
     let bg = backdrop_ref(&p.scene_ref, x, y);
-    let search_fill = interos_std::font::blend(launcher::theme::CARD_FROSTED_CREAM, bg, 240);
-    let ink = theme.text_muted;
+    let search_fill = interos_std::font::blend(theme.surface_frosted, bg, 240);
+    let ink = theme.on_surface_variant;
 
     // Magnifier: ring plus handle
     let (gx, cy, _r) = p.search_magnifier;

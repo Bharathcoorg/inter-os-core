@@ -242,9 +242,9 @@ fn both_themes_are_legible_on_their_own_background() {
     // vanishes. This is the assertion that caught the dark theme declaring a
     // near-black `text_on_accent` and having it chosen as its own ink.
     for t in [Theme::LIGHT, Theme::DARK] {
-        let ink = ink_on(&t, t.bg);
+        let ink = ink_on(&t, t.surface);
         assert_ne!(
-            ink, t.bg,
+            ink, t.surface,
             "{:?} ink on its own background is invisible",
             t.name
         );
@@ -277,7 +277,7 @@ fn ink_polarity_flips_with_the_backdrop() {
 #[test]
 fn both_themes_are_distinct_and_named() {
     assert_ne!(Theme::LIGHT.name, Theme::DARK.name);
-    assert_ne!(Theme::LIGHT.bg, Theme::DARK.bg);
+    assert_ne!(Theme::LIGHT.surface, Theme::DARK.surface);
     assert_eq!(Theme::by_name("dark").name, "dark");
     assert_eq!(
         Theme::by_name("light").name,
@@ -314,7 +314,14 @@ fn themes_declare_the_same_metrics() {
     // shared constants rather than per-theme; this guards the invariant.
     assert_eq!(SCREEN_WIDTH, W);
     assert_eq!(SCREEN_HEIGHT, H);
-    assert!(MIN_TOUCH_TARGET >= 48);
+    // WHY the platform's minimum and not the shell's own: the minimum touch
+    // target is the floor every app on the device is held to, and the shell
+    // holds itself to the same floor. It used to declare 48 while the platform
+    // declared 44, which meant a third-party app could draw a target the shell
+    // would have refused.
+    assert_eq!(MIN_TOUCH_TARGET, interos_std::design::touch::MIN_TARGET);
+    assert_eq!(MIN_TOUCH_TARGET, 44);
+    assert!(MIN_TOUCH_TARGET >= 44);
     // Padding must be a multiple of the base unit so every gap lands on the grid.
     assert_eq!(
         CONTENT_PADDING % space::XS,

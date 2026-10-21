@@ -12,13 +12,6 @@ use launcher::theme::{Theme, SCREEN_WIDTH};
 /// is the `pin_buffer`'s own length in `main.rs`.
 const DOT_COUNT: u8 = 8;
 
-const BG: u32 = 0xFF111214;
-const PANEL: u32 = 0xFF25282A;
-const BORDER: u32 = 0xFF35383D;
-const TEXT: u32 = 0xFFF5F6F7;
-const MUTED: u32 = 0xFF9AA0A6;
-const ACCENT: u32 = 0xFF38BDF8;
-const DANGER: u32 = 0xFFF87171;
 
 const KEY_W: usize = 140;
 const KEY_H: usize = 104;
@@ -163,14 +156,14 @@ fn key_digit(col: usize, row: usize) -> u8 {
 }
 
 pub fn get_pin_color(x: usize, y: usize, state: &LauncherState) -> u32 {
-    let _theme = Theme::DARK;
+    let theme = Theme::DARK;
     if y < 48 {
         if state.clock_source_ok {
-            if let Some(c) = test_text_aa(x, y, 48, 14, 1, &state.clock_time, TEXT, BG) {
+            if let Some(c) = test_text_aa(x, y, 48, 14, 1, &state.clock_time, theme.on_surface, theme.surface) {
                 return c;
             }
         }
-        return BG;
+        return theme.surface;
     }
 
     // WHY the step is shown: first boot asks for the PIN twice, and a second
@@ -181,7 +174,7 @@ pub fn get_pin_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     } else {
         b"Enter PIN".as_slice()
     };
-    if let Some(c) = test_text_aa(x, y, 48, PROMPT_Y, 3, heading, TEXT, BG) {
+    if let Some(c) = test_text_aa(x, y, 48, PROMPT_Y, 3, heading, theme.on_surface, theme.surface) {
         return c;
     }
 
@@ -200,20 +193,20 @@ pub fn get_pin_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         let dx = x as i32 - cx as i32;
         let dy = y as i32 - dot_y as i32;
         if dx * dx + dy * dy <= (DOT_R * DOT_R) as i32 {
-            return if active { ACCENT } else { BORDER };
+            return if active { theme.primary } else { theme.border };
         }
     }
 
     if state.pin_error != 0 {
         let msg = if state.pin_error == 2 { b"No credential configured".as_slice() } else { b"Incorrect PIN".as_slice() };
-        if let Some(c) = test_text_aa(x, y, 250, STATUS_Y, 1, msg, DANGER, BG) {
+        if let Some(c) = test_text_aa(x, y, 250, STATUS_Y, 1, msg, theme.error, theme.surface) {
             return c;
         }
     } else if state.pin_setup_mode && state.pin_setup_step == 1 {
-        if let Some(c) = test_text_aa(x, y, 250, STATUS_Y, 1, b"Re-enter the same PIN", MUTED, BG) {
+        if let Some(c) = test_text_aa(x, y, 250, STATUS_Y, 1, b"Re-enter the same PIN", theme.on_surface_variant, theme.surface) {
             return c;
         }
-    } else if let Some(c) = test_text_aa(x, y, 250, STATUS_Y, 1, if state.pin_setup_mode { b"Choose 4 to 8 digits".as_slice() } else { b"Enter your device PIN".as_slice() }, MUTED, BG) {
+    } else if let Some(c) = test_text_aa(x, y, 250, STATUS_Y, 1, if state.pin_setup_mode { b"Choose 4 to 8 digits".as_slice() } else { b"Enter your device PIN".as_slice() }, theme.on_surface_variant, theme.surface) {
         return c;
     }
 
@@ -223,35 +216,35 @@ pub fn get_pin_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             if round_contains(&rect, 18, x, y) {
                 if let Some(c) = test_text_aa(
                     x, y, rect.x + 61, rect.y + 36, 2,
-                    &[key_digit(col, row)], TEXT, PANEL
+                    &[key_digit(col, row)], theme.on_surface, theme.surface_container
                 ) { return c; }
                 if x == rect.x || y == rect.y || x + 1 == rect.x + rect.w || y + 1 == rect.y + rect.h {
-                    return BORDER;
+                    return theme.border;
                 }
-                return PANEL;
+                return theme.surface_container;
             }
         }
     }
 
     let zero = key_rect(1, 3);
     if round_contains(&zero, 18, x, y) {
-        if let Some(c) = test_text_aa(x, y, zero.x + 61, zero.y + 36, 2, b"0", TEXT, PANEL) { return c; }
-        return PANEL;
+        if let Some(c) = test_text_aa(x, y, zero.x + 61, zero.y + 36, 2, b"0", theme.on_surface, theme.surface_container) { return c; }
+        return theme.surface_container;
     }
 
     let back = Rect::new(490, 1036, 100, 90);
     if round_contains(&back, 18, x, y) {
-        if let Some(c) = test_text_aa(x, y, 524, 1070, 1, b"DEL", MUTED, PANEL) { return c; }
-        return PANEL;
+        if let Some(c) = test_text_aa(x, y, 524, 1070, 1, b"DEL", theme.on_surface_variant, theme.surface_container) { return c; }
+        return theme.surface_container;
     }
 
     let enter = Rect::new(130, 1036, 300, 90);
     if round_contains(&enter, 18, x, y) {
-        if let Some(c) = test_text_aa(x, y, 238, 1070, 1, b"UNLOCK", TEXT, ACCENT) { return c; }
-        return ACCENT;
+        if let Some(c) = test_text_aa(x, y, 238, 1070, 1, b"UNLOCK", theme.on_surface, theme.primary) { return c; }
+        return theme.primary;
     }
 
-    BG
+    theme.surface
 }
 
 /// The key a point on the PIN surface presses, or `None` outside every key.

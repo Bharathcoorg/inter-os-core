@@ -881,7 +881,6 @@ fn refresh_package_catalog(state: &mut LauncherState) {
         if id == b"org.interos.launcher" || id == b"launcher"
             || id == b"org.interos.compositor" || id == b"compositor"
             || id == b"org.interos.init" || id == b"init" || id == b"user_init"
-            || id == b"org.interos.sensor_dashboard" || id == b"sensor_dashboard" || id == b"sensors"
             || id == b"org.interos.card_demo" || id == b"card_demo" || id == b"app_card_demo"
         {
             continue;
@@ -1593,7 +1592,7 @@ impl Dirty {
 /// WHY a `None` renders and flips nothing: the surface already holds the right
 /// bytes, and `surface_flip` composites and copies out the whole scanout, so
 /// flipping an unchanged surface is pure cost. The reference apps in this tree
-/// (`camera`, `vault`, `sensor_dashboard`) gate the same way.
+/// (`camera`, `vault`) gate the same way.
 fn present_dirty(surface: u32, state: &LauncherState, dirty: Dirty) {
     if dirty == Dirty::None {
         return;
@@ -1796,9 +1795,6 @@ fn resolve_app_at_touch<'a>(state: &'a LauncherState, x: u32, y: u32) -> Option<
     if in_grid_view {
         if (410..=450).contains(&x) && (240..=280).contains(&y) {
             return package_id_by_suffix(state, b"file_manager").or_else(|| package_id_by_suffix(state, b"files")).or(Some("org.interos.file_manager"));
-        }
-        if (250..=290).contains(&x) && (1160..=1200).contains(&y) {
-            return package_id_by_suffix(state, b"sensor_dashboard").or(Some("org.interos.sensor_dashboard"));
         }
         if (390..=430).contains(&x) && (1160..=1200).contains(&y) {
             return package_id_by_suffix(state, b"gallery").or(Some("org.interos.gallery"));

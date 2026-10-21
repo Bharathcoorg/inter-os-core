@@ -662,8 +662,8 @@ fn category_color(cat: Category, theme: &Theme) -> u32 {
     match cat {
         Category::Messages => theme.success,
         Category::System => theme.warning,
-        Category::Apps => theme.accent,
-        Category::Unlisted => theme.text_muted,
+        Category::Apps => theme.primary,
+        Category::Unlisted => theme.on_surface_variant,
     }
 }
 
@@ -834,7 +834,7 @@ fn row_plan(rec: &NotificationRecord, y: usize, cat: Category, now: Option<u64>,
             type_scale::BODY,
             title_fit,
             title_bytes,
-            theme.text,
+            theme.on_surface,
         ),
         body: LabelRun::fitted(
             ROW_TEXT_X,
@@ -842,21 +842,21 @@ fn row_plan(rec: &NotificationRecord, y: usize, cat: Category, now: Option<u64>,
             type_scale::CAPTION,
             body_fit,
             body_bytes,
-            theme.text_muted,
+            theme.on_surface_variant,
         ),
         time: LabelRun::right(
             ROW_X + ROW_W - space::MD,
             y + space::LG - space::XS,
             type_scale::CAPTION,
             &age[..age_len],
-            theme.text_muted,
+            theme.on_surface_variant,
         ),
         source: LabelRun::right(
             ROW_X + ROW_W - space::MD,
             y + space::XL + space::XS + space::XS,
             type_scale::CAPTION,
             source_bytes,
-            theme.text_muted,
+            theme.on_surface_variant,
         ),
     }
 }
@@ -887,14 +887,14 @@ fn build_events_frame(state: &LauncherState) -> EventsFrame {
     } else {
         b""
     };
-    let clock = LabelRun::new(48, 14, type_scale::CAPTION, clock_slice, theme.text);
-    let title = LabelRun::new(HEADER_X, TITLE_Y, type_scale::BODY, b"Events", theme.text);
+    let clock = LabelRun::new(48, 14, type_scale::CAPTION, clock_slice, theme.on_surface);
+    let title = LabelRun::new(HEADER_X, TITLE_Y, type_scale::BODY, b"Events", theme.on_surface);
     let subtitle = LabelRun::new(
         HEADER_X,
         SUBTITLE_Y,
         type_scale::CAPTION,
         b"Everything in one feed",
-        theme.text_muted,
+        theme.on_surface_variant,
     );
     // WHY one line here and not the three this used to print: the earlier lines
     // read "Ages are guest ticks since posting. No calendar, so no day groups."
@@ -909,14 +909,14 @@ fn build_events_frame(state: &LauncherState) -> EventsFrame {
         SOURCE_NOTE_Y,
         type_scale::CAPTION,
         b"Recent activity from your apps and system.",
-        theme.text_muted,
+        theme.on_surface_variant,
     );
     let filter_note = LabelRun::new(
         HEADER_X,
         FILTER_NOTE_Y,
         type_scale::CAPTION,
         b"Filter the feed by its real source.",
-        theme.text_muted,
+        theme.on_surface_variant,
     );
 
     // Chronological order: newest first. The kernel returns records in posting
@@ -978,7 +978,7 @@ fn build_events_frame(state: &LauncherState) -> EventsFrame {
                 rect.w,
                 type_scale::CAPTION,
                 &label[..n],
-                if filter == i { theme.bg } else { theme.text_muted },
+                if filter == i { theme.surface } else { theme.on_surface_variant },
             ),
             active: filter == i,
         };
@@ -1026,7 +1026,7 @@ fn build_events_frame(state: &LauncherState) -> EventsFrame {
         if bucket != current_bucket {
             if section_count < sections.len() {
                 sections[section_count] = SectionPlan {
-                    label: LabelRun::new(36, y, type_scale::CAPTION, SECTION_NAMES[bucket], theme.text),
+                    label: LabelRun::new(36, y, type_scale::CAPTION, SECTION_NAMES[bucket], theme.on_surface),
                 };
                 section_count += 1;
             }
@@ -1071,18 +1071,18 @@ fn build_events_frame(state: &LauncherState) -> EventsFrame {
     } else {
         CLEAR_BTN.y + CLEAR_BTN.h + space::MD
     };
-    let more_note = LabelRun::new(36, note_y, type_scale::CAPTION, &more[..more_len], theme.text_muted);
+    let more_note = LabelRun::new(36, note_y, type_scale::CAPTION, &more[..more_len], theme.on_surface_variant);
 
     // The empty state says what is absent, in the record service's own terms.
     let (empty_head, empty_body) = if total == 0 {
         (
-            LabelRun::new(36, SECTION_HEAD_Y, type_scale::BODY, b"No notifications", theme.text_muted),
+            LabelRun::new(36, SECTION_HEAD_Y, type_scale::BODY, b"No notifications", theme.on_surface_variant),
             LabelRun::new(
                 36,
                 SECTION_HEAD_Y + text::line_height(type_scale::BODY) + space::SM,
                 type_scale::CAPTION,
                 b"The kernel holds no active notification records.",
-                theme.text_muted,
+                theme.on_surface_variant,
             ),
         )
     } else {
@@ -1095,7 +1095,7 @@ fn build_events_frame(state: &LauncherState) -> EventsFrame {
         CLEAR_BTN.w,
         type_scale::CAPTION,
         b"Clear all",
-        theme.text_muted,
+        theme.on_surface_variant,
     );
 
     EventsFrame {
@@ -1175,24 +1175,24 @@ pub fn get_notifications_color(x: usize, y: usize, state: &LauncherState) -> u32
 
     // 1. Status Bar (y < 60)
     if y < STATUS_BAR_HEIGHT + 12 {
-        if let Some(c) = f.clock.pixel_on(x, y, theme.bg) {
+        if let Some(c) = f.clock.pixel_on(x, y, theme.surface) {
             return c;
         }
-        return theme.bg;
+        return theme.surface;
     }
 
     // 2. Header block: title, subtitle and the derivation lines. Each run owns
     // its own rows, so they are tested in order and the first ink wins.
-    if let Some(c) = f.title.pixel_on(x, y, theme.bg) {
+    if let Some(c) = f.title.pixel_on(x, y, theme.surface) {
         return c;
     }
-    if let Some(c) = f.subtitle.pixel_on(x, y, theme.bg) {
+    if let Some(c) = f.subtitle.pixel_on(x, y, theme.surface) {
         return c;
     }
-    if let Some(c) = f.source_note.pixel_on(x, y, theme.bg) {
+    if let Some(c) = f.source_note.pixel_on(x, y, theme.surface) {
         return c;
     }
-    if let Some(c) = f.filter_note.pixel_on(x, y, theme.bg) {
+    if let Some(c) = f.filter_note.pixel_on(x, y, theme.surface) {
         return c;
     }
 
@@ -1205,29 +1205,29 @@ pub fn get_notifications_color(x: usize, y: usize, state: &LauncherState) -> u32
                 if rounded_contains(pill.rect, x, y, pill.rect.h / 2) {
                     if pill.active {
                         if rounded_outline(pill.rect, x, y, pill.rect.h / 2) {
-                            return theme.text;
+                            return theme.on_surface;
                         }
-                        if let Some(c) = pill.label.pixel_on(x, y, theme.text) {
+                        if let Some(c) = pill.label.pixel_on(x, y, theme.on_surface) {
                             return c;
                         }
-                        return theme.text;
+                        return theme.on_surface;
                     }
                     if rounded_outline(pill.rect, x, y, pill.rect.h / 2) {
                         return theme.border;
                     }
-                    if let Some(c) = pill.label.pixel_on(x, y, theme.surface_sunken) {
+                    if let Some(c) = pill.label.pixel_on(x, y, theme.surface_container_low) {
                         return c;
                     }
-                    return theme.surface_sunken;
+                    return theme.surface_container_low;
                 }
-                return theme.bg;
+                return theme.surface;
             }
         }
     }
 
     // 4. Section headers
     for i in 0..f.section_count {
-        if let Some(c) = f.sections[i].label.pixel_on(x, y, theme.bg) {
+        if let Some(c) = f.sections[i].label.pixel_on(x, y, theme.surface) {
             return c;
         }
     }
@@ -1244,32 +1244,32 @@ pub fn get_notifications_color(x: usize, y: usize, state: &LauncherState) -> u32
                 if dot_contains(row.dot_c.0, row.dot_c.1, row.dot_r, x, y) {
                     return row.dot_color;
                 }
-                if let Some(c) = row.title.pixel_on(x, y, theme.surface) {
+                if let Some(c) = row.title.pixel_on(x, y, theme.surface_container) {
                     return c;
                 }
-                if let Some(c) = row.body.pixel_on(x, y, theme.surface) {
+                if let Some(c) = row.body.pixel_on(x, y, theme.surface_container) {
                     return c;
                 }
-                if let Some(c) = row.time.pixel_on(x, y, theme.surface) {
+                if let Some(c) = row.time.pixel_on(x, y, theme.surface_container) {
                     return c;
                 }
-                if let Some(c) = row.source.pixel_on(x, y, theme.surface) {
+                if let Some(c) = row.source.pixel_on(x, y, theme.surface_container) {
                     return c;
                 }
-                return theme.surface;
+                return theme.surface_container;
             }
-            return theme.bg;
+            return theme.surface;
         }
     }
 
     // 6. Notes: records past the viewport cut, then the empty state.
-    if let Some(c) = f.more_note.pixel_on(x, y, theme.bg) {
+    if let Some(c) = f.more_note.pixel_on(x, y, theme.surface) {
         return c;
     }
-    if let Some(c) = f.empty_head.pixel_on(x, y, theme.bg) {
+    if let Some(c) = f.empty_head.pixel_on(x, y, theme.surface) {
         return c;
     }
-    if let Some(c) = f.empty_body.pixel_on(x, y, theme.bg) {
+    if let Some(c) = f.empty_body.pixel_on(x, y, theme.surface) {
         return c;
     }
 
@@ -1279,18 +1279,18 @@ pub fn get_notifications_color(x: usize, y: usize, state: &LauncherState) -> u32
             if rounded_outline(f.clear_btn, x, y, 22) {
                 return theme.border;
             }
-            if let Some(c) = f.clear_label.pixel_on(x, y, theme.surface_sunken) {
+            if let Some(c) = f.clear_label.pixel_on(x, y, theme.surface_container_low) {
                 return c;
             }
-            return theme.surface_sunken;
+            return theme.surface_container_low;
         }
-        return theme.bg;
+        return theme.surface;
     }
 
     // 8. Home Indicator Pill
     if rounded_contains(f.home_pill, x, y, 2) {
-        return theme.text_muted;
+        return theme.on_surface_variant;
     }
 
-    theme.bg
+    theme.surface
 }

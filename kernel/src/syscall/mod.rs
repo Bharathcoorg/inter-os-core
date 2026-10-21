@@ -11,7 +11,7 @@ pub use user_ptr::{
     validate_user_buffer, UserAccessError, UserPtr, UserSlice, UserSliceMut,
 };
 
-use crate::capability::{CapError, Capability, CapabilityId, CapabilityTable, CapabilityType, Rights};
+use crate::capability::{CapError, CapabilityType, Rights};
 use crate::drivers::{BlockDevice, ATA_PRIMARY, SECTOR_SIZE};
 use crate::drivers::display::DisplayDriver;
 use crate::hal::traits::PowerController;
@@ -5350,7 +5350,7 @@ pub fn dev_launch_app(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
         serial_println!("[PROCESS] Guest application launched id={} task={}", verified.package_id, tid.0);
         return Ok(tid);
     }
-    // First-party applications (all 21 registry entries resolve here; the two
+    // First-party applications (every registry entry resolves here; the two
     // persistent system services are already running and refuse re-launch).
     let parent = crate::task::TaskId(0);
     let tid = match app_id {
@@ -5366,7 +5366,6 @@ pub fn dev_launch_app(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
         "org.interos.music" | "music" | "app_music" => crate::task::user::spawn_app_music(parent),
         "org.interos.file_manager" | "file_manager" | "files" | "app_file_manager" => crate::task::user::spawn_app_file_manager(parent),
         "org.interos.gallery" | "gallery" | "photos" | "app_gallery" => crate::task::user::spawn_app_gallery(parent),
-        "org.interos.sensor_dashboard" | "sensor_dashboard" => spawn_app_sensor_dashboard(parent),
         "org.interos.notes" | "notes" | "app_notes" => crate::task::user::spawn_app_notes(parent),
         "org.interos.compositor" | "compositor" | "org.interos.launcher" | "launcher" => {
             return Err(SyscallResult::PermissionDenied);
@@ -5385,66 +5384,6 @@ pub fn dev_launch_app(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
 /// separate from the normal userspace syscall path and gated to QEMU.
 pub fn dev_launch_verified_rapp(app_id: &str) -> Result<crate::task::TaskId, SyscallResult> {
     dev_launch_app(app_id)
-}
-
-/// Spawns the Sensor Dashboard app in Ring 3.
-///
-/// WHY two object-scoped SystemControl capabilities: `sys_sensor_read` authorizes
-/// against `SystemControl|INVOKE` on the sensor control object, and
-/// `sys_battery_query` / `sys_thermal_query` against the power control object.
-/// Object-scoped INVOKE grants exactly the read path the dashboard probes and
-/// none of the device-wide authority the object-blind `require_system_control()`
-/// form would imply. When the hardware is absent the queries themselves return
-/// `DeviceError` with an explicit absent flag, so the app still reports absence
-/// rather than invented telemetry.
-fn spawn_app_sensor_dashboard(id_security: TaskId) -> TaskId {
-    let mut caps = CapabilityTable::new(8);
-    caps.insert(Capability {
-        id: CapabilityId(3401),
-        cap_type: CapabilityType::SerialOutput,
-        rights: Rights::WRITE,
-        object_id: 0,
-    }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(3402),
-        cap_type: CapabilityType::TimerTickRead,
-        rights: Rights::READ,
-        object_id: 0,
-    }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(3403),
-        cap_type: CapabilityType::EventPoll,
-        rights: Rights::READ.union(Rights::INVOKE),
-        object_id: 0,
-    }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(3404),
-        cap_type: CapabilityType::FrameBufferDirect,
-        rights: Rights::WRITE,
-        object_id: 1,
-    }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(3405),
-        cap_type: CapabilityType::SystemControl,
-        rights: Rights::INVOKE,
-        object_id: crate::services::SERVICE_SENSOR_CONTROL_OBJECT,
-    }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(3406),
-        cap_type: CapabilityType::SystemControl,
-        rights: Rights::INVOKE,
-        object_id: crate::services::SERVICE_POWER_CONTROL_OBJECT,
-    }).ok();
-
-    let id = crate::task::user::spawn_user_process_with_parent(
-        "sensor_dashboard",
-        crate::task::images::APP_SENSOR_DASHBOARD_ELF,
-        caps,
-        6,
-        id_security,
-    ).expect("Failed to spawn registered first-party app");
-    serial_println!("[OK] Spawned app_sensor_dashboard (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
-    id
 }
 
 pub fn sys_app_launch(app_id: &str) -> Result<crate::task::TaskId, SyscallResult> {
@@ -5613,9 +5552,6 @@ pub fn sys_app_launch(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
         }
         "org.interos.gallery" | "gallery" | "photos" => {
             crate::task::user::spawn_app_gallery(parent_id)
-        }
-        "org.interos.sensor_dashboard" | "sensor_dashboard" => {
-            spawn_app_sensor_dashboard(parent_id)
         }
         "org.interos.notes" | "notes" | "app_notes" => {
             crate::task::user::spawn_app_notes(parent_id)

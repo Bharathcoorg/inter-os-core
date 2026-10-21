@@ -8,8 +8,9 @@ use super::system_space::round_contains;
 use crate::{test_text_aa, LauncherState};
 use launcher::layout::Rect;
 use launcher::text;
+use launcher::theme::Theme;
 
-const COLOR_BG_TOP: u32 = 0xFF111214;
+const COLOR_BG_TOP: u32 = Theme::DARK.surface;
 /// WHY darker and not equal: the backdrop used to interpolate between two
 /// identical colours, spending ~10 integer ops per pixel on a ramp with zero
 /// extent. The ramp now darkens toward the foot, which anchors the card stack
@@ -17,15 +18,15 @@ const COLOR_BG_TOP: u32 = 0xFF111214;
 /// power sheet uses to separate itself from the surface beneath it.
 const COLOR_BG_BOT: u32 = 0xFF0A0C0F;
 
-const COLOR_CARD_FILL: u32 = 0xFF25282A;
+const COLOR_CARD_FILL: u32 = Theme::DARK.surface_container;
 const COLOR_CARD_BORDER: u32 = 0xFF3A3D40;
-const COLOR_CARD_TEXT: u32 = 0xFFF7F6F2;
+const COLOR_CARD_TEXT: u32 = Theme::DARK.on_surface;
 
 const COLOR_EMERGENCY_FILL: u32 = 0xFF2B1416;
 const COLOR_EMERGENCY_BORDER: u32 = 0xFF582328;
-const COLOR_EMERGENCY_TEXT: u32 = 0xFFFF5555;
+const COLOR_EMERGENCY_TEXT: u32 = Theme::DARK.emergency;
 
-const COLOR_CANCEL_FILL: u32 = 0xFF25282A;
+const COLOR_CANCEL_FILL: u32 = Theme::DARK.surface_container;
 const COLOR_CANCEL_BORDER: u32 = 0xFF3A3D40;
 const COLOR_CANCEL_TEXT: u32 = 0xFF777773;
 

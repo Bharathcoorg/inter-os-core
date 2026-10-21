@@ -110,12 +110,12 @@ function Invoke-GuestBuild {
     # uniquifies internal-linkage symbols as "<name>.llvm.<hash>", where the hash is
     # derived from the module identifier -- the absolute source path -- so one revision
     # built from two different directories yields two different byte images. Measured:
-    # launcher, messages, sensor_dashboard and notes differed between two builds of
-    # the same revision in two directories while every loadable section was byte
-    # identical; rebuilding twice inside a single directory was bit-for-bit stable, and
-    # music/init/settings carry no such symbols and matched everywhere.
+    # launcher, messages and notes differed between two builds of the same revision in
+    # two directories while every loadable section was byte identical; rebuilding twice
+    # inside a single directory was bit-for-bit stable, and music/init/settings carry no
+    # such symbols and matched everywhere.
     # --strip-unneeded drops the symbol table and keeps the loadable segments the
-    # kernel's ELF loader needs; with it, all four matched exactly across directories.
+    # kernel's ELF loader needs; with it, all of them matched exactly across directories.
     Invoke-Native -Exe $StripTool -Arguments @("--strip-debug", "--strip-unneeded", $targetPath) -What "llvm-strip ($Artifact)"
     # Stripping must not change the executable type the kernel loader sees.
     Assert-ExecutableElf -Path $targetPath
@@ -159,7 +159,7 @@ foreach ($app in @(
     # but never built here therefore ships a stale image with no compiler error --
     # and if the file is absent the kernel build fails with a confusing message about
     # a userspace binary rather than about a build script.
-    "sensor_dashboard", "notes"
+    "notes"
 )) {
     # WHY `--bin $app`: an app that also exposes a lib target makes the extra rustc
     # flags ambiguous, and cargo then refuses with "extra arguments to `rustc` can

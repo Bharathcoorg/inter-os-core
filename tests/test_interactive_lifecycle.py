@@ -597,27 +597,11 @@ def main():
             exit_gesture="home_bar"
         )
 
-        # App 13: Sensors (Grid View / Live Widgets shortcut: x=270, y=1180)
+        # App 13: Notes (Grid View target: x=550, y=1180)
         test_app_lifecycle(
             reader=reader,
             monitor_sock=monitor_sock,
             operation_num=14,
-            app_name="Sensors",
-            app_id="org.interos.sensor_dashboard",
-            tap_coords=(270, 1180),
-            present_marker="Initial frame presented to hardware scanout",
-            dump_prefix="test_sensors",
-            in_app_interactions=[
-                ("Tap refresh sensor bus", (360, 500), "Re-read sensor bus", "refresh"),
-            ],
-            exit_gesture="swipe_up"
-        )
-
-        # App 14: Notes (Grid View target: x=550, y=1180)
-        test_app_lifecycle(
-            reader=reader,
-            monitor_sock=monitor_sock,
-            operation_num=15,
             app_name="Notes",
             app_id="org.interos.notes",
             tap_coords=(550, 1180),

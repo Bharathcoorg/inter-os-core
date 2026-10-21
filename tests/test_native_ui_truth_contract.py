@@ -310,11 +310,17 @@ def test_the_kernel_boot_settings_panel_invents_no_readings():
 def test_a_corner_radius_scale_has_exactly_one_spelling_per_value():
     """Two scales that carry the same names at different values is a trap.
 
-    WHY: `interos_std::design::radius` and `launcher::theme::radius` both define
-    `CONTROL`, `CARD` and `SHEET`, at 12/18/24 and 18/24/32 respectively. A
-    screen that reaches for the wrong one renders a control with visibly
-    different corners from its siblings, and nothing in the type system objects.
-    `system_space.rs` was doing exactly that for its back pill.
+    WHY: `interos_std::design::radius` and `launcher::theme::radius` used to
+    both define `CONTROL`, `CARD` and `SHEET`, at 12/18/24 and 18/24/32
+    respectively. A screen that reached for the wrong one rendered a control
+    with visibly different corners from its siblings, and nothing in the type
+    system objected. `system_space.rs` was doing exactly that for its back
+    pill.
+
+    The launcher's copy is gone: `launcher::theme::radius` is now the SDK's
+    scale, re-exported, so there is one scale and one spelling per value. This
+    asserts that stays true -- that the launcher declares no radius of its own
+    and reaches for the platform's.
 
     The SDK module also shipped `SM`/`MD`/`LG` as second spellings of
     `CONTROL`/`CARD`/`SHEET` under a different type. Those are removed; this
@@ -336,6 +342,17 @@ def test_a_corner_radius_scale_has_exactly_one_spelling_per_value():
     assert not offenders, (
         "launcher screens must resolve radii from launcher::theme::radius, "
         f"not the SDK scale: {offenders}"
+    )
+
+    # The launcher's theme module must not declare a radius of its own: the
+    # scale it re-exports is the platform's, and a second copy of it is the
+    # fault this test was written for.
+    theme_module = read("apps/launcher/src/theme.rs")
+    assert "pub use interos_std::design::radius;" in theme_module, (
+        "the launcher's theme module must resolve radii through the SDK's scale"
+    )
+    assert "pub mod radius" not in theme_module, (
+        "the launcher declares a radius module of its own"
     )
 
 

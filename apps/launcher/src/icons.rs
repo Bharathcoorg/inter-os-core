@@ -22,7 +22,6 @@ pub enum IconKind {
     Vault,
     Health,
     MeshChat,
-    Sensors,
     Apps,
     Calendar,
     Notes,
@@ -94,10 +93,6 @@ pub fn match_icon_kind(id: &[u8]) -> Option<IconKind> {
         || id == b"MeshChat"
     {
         Some(IconKind::MeshChat)
-    } else if id == b"org.interos.sensor_dashboard" || id == b"sensor_dashboard" || id == b"sensors" || id == b"SENS"
-        || id == b"Sensors" || id == b"Sensor Dashboard"
-    {
-        Some(IconKind::Sensors)
     } else if id == b"org.interos.apps" || id == b"apps" || id == b"APPS" || id == b"drawer"
         || id == b"Apps"
     {
@@ -382,15 +377,6 @@ pub fn eval_icon_subpixel(kind: IconKind, fx: i32, fy: i32) -> bool {
             let b2 = fy >= 63 && fy <= 87 && fx.abs() <= 95;
             n1 || n2 || n3 || b1 || b2
         }
-        IconKind::Sensors => {
-            let d2 = fx * fx + (fy - 95) * (fy - 95);
-            let core = d2 <= 900;
-            let arc1 = d2 >= 4000 && d2 <= 7000;
-            let arc2 = d2 >= 13000 && d2 <= 19000;
-            let arc3 = d2 >= 27000 && d2 <= 35000;
-            let in_cone = fy <= 95 && fx.abs() * 10 <= (95 - fy) * 12;
-            core || ((arc1 || arc2 || arc3) && in_cone)
-        }
         IconKind::Apps => {
             // 4 rounded squircle tiles in 2x2 grid
             let qx = fx.abs() - 72;
@@ -495,7 +481,6 @@ mod tests {
         assert_eq!(match_icon_kind(b"org.interos.vault"), Some(IconKind::Vault));
         assert_eq!(match_icon_kind(b"org.interos.health"), Some(IconKind::Health));
         assert_eq!(match_icon_kind(b"org.interos.meshchat"), Some(IconKind::MeshChat));
-        assert_eq!(match_icon_kind(b"org.interos.sensor_dashboard"), Some(IconKind::Sensors));
         assert_eq!(match_icon_kind(b"org.interos.calendar"), Some(IconKind::Calendar));
         assert_eq!(match_icon_kind(b"org.interos.notes"), Some(IconKind::Notes));
         assert_eq!(match_icon_kind(b"org.interos.contacts"), Some(IconKind::Contacts));
@@ -521,7 +506,6 @@ mod tests {
             IconKind::Vault,
             IconKind::Health,
             IconKind::MeshChat,
-            IconKind::Sensors,
             IconKind::Apps,
             IconKind::Calendar,
             IconKind::Notes,

@@ -2308,7 +2308,7 @@ FIRST_PARTY_APP_IDS = frozenset({
     "org.interos.settings", "org.interos.calculator", "org.interos.dialer",
     "org.interos.vault", "org.interos.camera", "org.interos.browser",
     "org.interos.messages", "org.interos.calendar", "org.interos.music",
-    "org.interos.file_manager", "org.interos.gallery", "org.interos.sensor_dashboard",
+    "org.interos.file_manager", "org.interos.gallery",
     "org.interos.terminal", "org.interos.notes"
 })
 

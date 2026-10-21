@@ -180,7 +180,6 @@ pub fn filtered_indices(state: &LauncherState, tab: usize, out: &mut [usize; 32]
         if id == b"org.interos.launcher" || id == b"launcher"
             || id == b"org.interos.compositor" || id == b"compositor"
             || id == b"org.interos.init" || id == b"init" || id == b"user_init"
-            || id == b"org.interos.sensor_dashboard" || id == b"sensor_dashboard" || id == b"sensors"
             || id == b"org.interos.card_demo" || id == b"card_demo" || id == b"app_card_demo"
         {
             continue;
@@ -350,10 +349,10 @@ fn app_id(state: &LauncherState, index: usize) -> &[u8] {
 fn hue_for(theme: &Theme, index: usize) -> u32 {
     const ROTATION_KEY: usize = 4;
     match index % ROTATION_KEY {
-        0 => theme.accent,
+        0 => theme.primary,
         1 => theme.success,
         2 => theme.warning,
-        _ => theme.danger,
+        _ => theme.error,
     }
 }
 
@@ -373,7 +372,6 @@ fn icon_color(kind: Option<launcher::icons::IconKind>, index: usize, theme: &The
         Some(IconKind::Terminal) => 0xFF1C1C1E,
         Some(IconKind::Health) => 0xFFFF375F,
         Some(IconKind::Vault) => 0xFF5856D6,
-        Some(IconKind::Sensors) => 0xFF30B0C7,
         Some(IconKind::MeshChat) => 0xFF007AFF,
         Some(IconKind::Calendar) => 0xFFFF3B30,
         Some(IconKind::Notes) => 0xFFFFCC00,
@@ -737,7 +735,7 @@ fn build(state: &LauncherState) -> Paint {
                 (STATUS_BAR_HEIGHT - text::line_height(LABEL_SCALE)) / 2,
                 LABEL_SCALE,
                 &state.clock_time,
-                theme.text,
+                theme.on_surface,
             ))
         } else {
             None
@@ -755,13 +753,13 @@ fn build(state: &LauncherState) -> Paint {
         let q_len = state.search_query_len.min(32);
         q_buf[..q_len].copy_from_slice(&state.search_query[..q_len]);
         q_buf[q_len] = b'|';
-        (q_buf, q_len + 1, theme.text)
+        (q_buf, q_len + 1, theme.on_surface)
     } else {
         let (raw, raw_len) = search_placeholder(state);
         let mut p_buf = [0u8; 36];
         let p_len = raw_len.min(36);
         p_buf[..p_len].copy_from_slice(&raw[..p_len]);
-        (p_buf, p_len, theme.text_muted)
+        (p_buf, p_len, theme.on_surface_variant)
     };
     let search_x = f.search.x + space::XXL + space::MD;
     let search_room = f
@@ -793,9 +791,9 @@ fn build(state: &LauncherState) -> Paint {
         let chip_rect = Rect::new(chip_x, chip_y, chip_w, chip_h);
         let active = state.app_drawer_tab == i;
         let ink = if active {
-            theme.bg
+            theme.surface
         } else {
-            theme.text
+            theme.on_surface
         };
         let label = Run::centred(
             chip_rect.x,
@@ -848,7 +846,7 @@ fn build(state: &LauncherState) -> Paint {
                 disc.center_y() - text::line_height(BADGE_SCALE) / 2,
                 BADGE_SCALE,
                 badge,
-                theme.text,
+                theme.on_surface,
             )
         };
 
@@ -866,7 +864,7 @@ fn build(state: &LauncherState) -> Paint {
                 cell.w.saturating_sub(8),
                 cell.w,
                 label,
-                theme.text,
+                theme.on_surface,
             ),
         };
     }
@@ -879,9 +877,9 @@ fn build(state: &LauncherState) -> Paint {
             _ => (&b"No apps installed"[..], &b"The package registry is empty"[..]),
         };
         Some(EmptyPlan {
-            head: Run::whole(f.grid.x, f.grid.y + 40, type_scale::TITLE, head_bytes, theme.text),
+            head: Run::whole(f.grid.x, f.grid.y + 40, type_scale::TITLE, head_bytes, theme.on_surface),
             body: [
-                Run::whole(f.grid.x, f.grid.y + 80, type_scale::BODY, body_bytes, theme.text_muted),
+                Run::whole(f.grid.x, f.grid.y + 80, type_scale::BODY, body_bytes, theme.on_surface_variant),
                 Run::EMPTY,
             ],
             body_count: 1,
@@ -969,7 +967,7 @@ pub fn get_app_drawer_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         return status_bar(x, y, &theme, &paint(x, y, state).status);
     }
     if f.pill.contains(x, y) {
-        return theme.text_muted;
+        return theme.on_surface_variant;
     }
     if f.search.contains(x, y) {
         return search_field(x, y, &f.search, &theme, paint(x, y, state));
@@ -995,7 +993,7 @@ pub fn get_app_drawer_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     if slot >= p.shown {
         // A short final page leaves real slots empty; they show the page, not a blank
         // card that pretends to be an app.
-        return theme.bg;
+        return theme.surface;
     }
     app_tile(x, y, &theme, &p.tiles[slot])
 }
@@ -1029,7 +1027,7 @@ fn status_bar(x: usize, y: usize, theme: &Theme, s: &StatusPlan) -> u32 {
     // per pixel: with no RTC authority granted the read is refused, and drawing a
     // stale or placeholder reading on chrome the user glances at would present an
     // unmeasured value as a measurement.
-    if let Some(c) = s.clock.as_ref().and_then(|r| r.pixel_on(x, y, theme.bg)) {
+    if let Some(c) = s.clock.as_ref().and_then(|r| r.pixel_on(x, y, theme.surface)) {
         return c;
     }
 
@@ -1040,15 +1038,15 @@ fn status_bar(x: usize, y: usize, theme: &Theme, s: &StatusPlan) -> u32 {
     // two status bars cannot contradict each other.
     if inside_rounded(s.battery, x, y, radius::CHIP) {
         if !inside_rounded(s.battery.inset(1), x, y, radius::CHIP - 1) {
-            return theme.text;
+            return theme.on_surface;
         }
         if s.battery_dash.contains(x, y) {
-            return theme.text_muted;
+            return theme.on_surface_variant;
         }
-        return theme.surface_sunken;
+        return theme.surface_container_low;
     }
     if s.tip.contains(x, y) {
-        return theme.text;
+        return theme.on_surface;
     }
 
     // Wi-Fi. Two arcs and a dot, no filled segment: the radio has no level to show.
@@ -1056,24 +1054,24 @@ fn status_bar(x: usize, y: usize, theme: &Theme, s: &StatusPlan) -> u32 {
     let wdy = y as i32 - s.wifi_centre.1;
     let wd2 = wdx * wdx + wdy * wdy;
     if wdy <= 0 && ((36..=64).contains(&wd2) || (100..=144).contains(&wd2)) {
-        return theme.text;
+        return theme.on_surface;
     }
     if wd2 <= 9 {
-        return theme.text;
+        return theme.on_surface;
     }
 
     // Signal bars. Four ascending, hollow.
     for bar in s.bars.iter() {
         if bar.contains(x, y) {
-            return theme.text;
+            return theme.on_surface;
         }
     }
-    theme.bg
+    theme.surface
 }
 
 fn search_field(x: usize, y: usize, field: &Rect, theme: &Theme, p: &Paint) -> u32 {
     if !inside_rounded(*field, x, y, radius::CONTROL) {
-        return theme.bg;
+        return theme.surface;
     }
     if !inside_rounded(field.inset(1), x, y, radius::CONTROL - 1) {
         return theme.border;
@@ -1089,17 +1087,17 @@ fn search_field(x: usize, y: usize, field: &Rect, theme: &Theme, p: &Paint) -> u
     let ring = (36..=81).contains(&d2);
     let handle = (5..=11).contains(&dx) && (dx - dy).abs() <= 2 && dy >= 5;
     if ring || handle {
-        return theme.text_muted;
+        return theme.on_surface_variant;
     }
 
     // Placeholder. WHY the catalogue count is the placeholder: the count is the
     // number the drawer's own log line reports, and a field that says how many are
     // installed is a status line that looks like an input. The count is formatted
     // once per frame now, rather than for every pixel of the field.
-    if let Some(c) = p.search.pixel_on(x, y, theme.surface_raised) {
+    if let Some(c) = p.search.pixel_on(x, y, theme.surface_container_high) {
         return c;
     }
-    theme.surface_raised
+    theme.surface_container_high
 }
 
 /// The filter row: 4 category chips (All, Work, Personal, Tools).
@@ -1108,18 +1106,18 @@ fn filter_chips(x: usize, y: usize, theme: &Theme, p: &Paint) -> u32 {
         if chip.rect.contains(x, y) {
             let rad = chip.rect.h / 2;
             if inside_rounded(chip.rect, x, y, rad) {
-                if let Some(c) = chip.label.pixel_on(x, y, theme.surface_raised) {
+                if let Some(c) = chip.label.pixel_on(x, y, theme.surface_container_high) {
                     return c;
                 }
                 if chip.active {
-                    return theme.text;
+                    return theme.on_surface;
                 } else {
-                    return theme.surface_raised;
+                    return theme.surface_container_high;
                 }
             }
         }
     }
-    theme.bg
+    theme.surface
 }
 
 /// Page dots.
@@ -1146,14 +1144,14 @@ fn pagination_dots(x: usize, y: usize, theme: &Theme, p: &Paint) -> u32 {
         };
         if d2 <= r * r {
             return if page == p.dots_current {
-                theme.text
+                theme.on_surface
             } else {
-                theme.text_muted
+                theme.on_surface_variant
             };
         }
         cx += pitch;
     }
-    theme.bg
+    theme.surface
 }
 
 /// No packages are catalogued.
@@ -1165,15 +1163,15 @@ fn pagination_dots(x: usize, y: usize, theme: &Theme, p: &Paint) -> u32 {
 /// WHY the body is resolved here: it is a constant, but the old painter re-wrapped it
 /// and re-centred each of its lines for every pixel of the grid area.
 fn empty_catalogue(x: usize, y: usize, theme: &Theme, p: &EmptyPlan) -> u32 {
-    if let Some(c) = p.head.pixel_on(x, y, theme.bg) {
+    if let Some(c) = p.head.pixel_on(x, y, theme.surface) {
         return c;
     }
     for line in 0..p.body_count {
-        if let Some(c) = p.body[line].pixel_on(x, y, theme.bg) {
+        if let Some(c) = p.body[line].pixel_on(x, y, theme.surface) {
             return c;
         }
     }
-    theme.bg
+    theme.surface
 }
 
 /// One app tile. Returns the page background for a pixel that is not on a tile.
@@ -1200,12 +1198,12 @@ fn app_tile(x: usize, y: usize, theme: &Theme, t: &TilePlan) -> u32 {
     }
 
     // 2. App name label
-    if let Some(c) = t.label.pixel_on(x, y, theme.bg) {
+    if let Some(c) = t.label.pixel_on(x, y, theme.surface) {
         return c;
     }
 
     // 3. Clean background canvas
-    theme.bg
+    theme.surface
 }
 
 /// Whether a pixel belongs to a rectangle with rounded corners.

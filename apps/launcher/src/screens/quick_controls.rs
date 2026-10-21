@@ -75,10 +75,10 @@ const THEME: Theme = Theme::DARK;
 /// The colour a bound level would fill its trough with.
 ///
 /// WHY the brightest ink in the theme: the reference slider's fill is the one
-/// high-contrast element on its dark surface, and `Theme::DARK.text` is that ink
+/// high-contrast element on its dark surface, and `Theme::DARK.on_surface` is that ink
 /// without inventing a colour. Nothing on this platform reads a level today, so
 /// this is the day-one value of a fill, not a painted one.
-const LEVEL_FILL: u32 = Theme::DARK.text;
+const LEVEL_FILL: u32 = Theme::DARK.on_surface;
 
 // ---------------------------------------------------------------------------
 // Panel geometry
@@ -857,7 +857,7 @@ impl QuickControlsFrame {
                 Rect::new(0, STATUS_BAR_H - STATUS_H, SCREEN_WIDTH, STATUS_H),
                 type_scale::CAPTION,
                 &state.clock_time,
-                theme.text,
+                theme.on_surface,
             )
         } else {
             LabelRun::EMPTY
@@ -867,19 +867,19 @@ impl QuickControlsFrame {
             Rect::new(PANEL_X, HEADING_Y, PANEL_W, BODY_H),
             type_scale::BODY,
             b"Quick Controls",
-            theme.text,
+            theme.on_surface,
         );
         let summary = LabelRun::left(
             Rect::new(PANEL_X, SUMMARY_Y, PANEL_W, CAPTION_H),
             type_scale::CAPTION,
             &buf[..at],
-            theme.text_muted,
+            theme.on_surface_variant,
         );
         let sections = [
-            LabelRun::left(Rect::new(PANEL_X, CONNECTIVITY_LABEL_Y, PANEL_W, SECTION_H), type_scale::CAPTION, b"Connectivity", theme.text_muted),
-            LabelRun::left(Rect::new(PANEL_X, LEVEL_LABEL_Y, PANEL_W, SECTION_H), type_scale::CAPTION, b"Brightness and volume", theme.text_muted),
-            LabelRun::left(Rect::new(PANEL_X, SYSTEM_LABEL_Y, PANEL_W, SECTION_H), type_scale::CAPTION, b"Secondary controls", theme.text_muted),
-            LabelRun::left(Rect::new(PANEL_X, FOOTER_LABEL_Y, PANEL_W, SECTION_H), type_scale::CAPTION, b"Device and power", theme.text_muted),
+            LabelRun::left(Rect::new(PANEL_X, CONNECTIVITY_LABEL_Y, PANEL_W, SECTION_H), type_scale::CAPTION, b"Connectivity", theme.on_surface_variant),
+            LabelRun::left(Rect::new(PANEL_X, LEVEL_LABEL_Y, PANEL_W, SECTION_H), type_scale::CAPTION, b"Brightness and volume", theme.on_surface_variant),
+            LabelRun::left(Rect::new(PANEL_X, SYSTEM_LABEL_Y, PANEL_W, SECTION_H), type_scale::CAPTION, b"Secondary controls", theme.on_surface_variant),
+            LabelRun::left(Rect::new(PANEL_X, FOOTER_LABEL_Y, PANEL_W, SECTION_H), type_scale::CAPTION, b"Device and power", theme.on_surface_variant),
         ];
 
         // The two-up radio grid, row-major in the reference's order.
@@ -977,7 +977,7 @@ impl QuickControlsFrame {
             Rect::new(power_icon_x + ICON + space::MD, POWER_BTN.y, POWER_BTN.w, POWER_BTN.h),
             type_scale::CAPTION,
             b"Power menu",
-            theme.surface,
+            theme.surface_container,
         );
 
         QuickControlsFrame {
@@ -1005,7 +1005,7 @@ impl QuickControlsFrame {
 /// readable without a second colour anywhere.
 fn build_tile(rect: Rect, item: PanelRow, value: &Value, theme: &Theme) -> TileFrame {
     let (fill, value_ink) = value.reading.skin(theme);
-    let ink = if value.available { theme.text } else { theme.text_muted };
+    let ink = if value.available { theme.on_surface } else { theme.on_surface_variant };
     let text_x = rect.x + TILE_PAD_X + ICON + space::MD;
     let label_y = rect.y + TILE_PAD_Y;
     let value_y = label_y + BODY_H + TILE_TEXT_GAP;
@@ -1040,7 +1040,7 @@ fn build_row(
     divider_y: Option<usize>,
     theme: &Theme,
 ) -> RowFrame {
-    let ink = if value.available { theme.text } else { theme.text_muted };
+    let ink = if value.available { theme.on_surface } else { theme.on_surface_variant };
     let (label, value_run) = row_runs(rect, rect.y, rect.h, item.label(), &value.reading, ink, theme);
     RowFrame {
         rect,
@@ -1074,7 +1074,7 @@ fn build_level(
     track: Option<Rect>,
     theme: &Theme,
 ) -> RowFrame {
-    let ink = if value.available { theme.text } else { theme.text_muted };
+    let ink = if value.available { theme.on_surface } else { theme.on_surface_variant };
     let (label, value_run) =
         row_runs(rect, rect.y + space::SM, BODY_H, item.label(), &value.reading, ink, theme);
     let fill_w = match (track, level) {
@@ -1084,7 +1084,7 @@ fn build_level(
     RowFrame {
         rect,
         corner: radius::CONTROL,
-        fill: Some(theme.surface),
+        fill: Some(theme.surface_container),
         border: Some(theme.border),
         ink,
         icon: item.icon(),
@@ -1165,7 +1165,7 @@ pub fn get_quick_controls_color(x: usize, y: usize, state: &LauncherState) -> u3
     // nothing behind it honestly has the surface's own colour. The next frame
     // begins at (0, 0) and rebuilds the plan.
     let Some(frame) = cached else {
-        return theme.bg;
+        return theme.surface;
     };
     quick_controls_pixel(x, y, frame, &theme)
 }
@@ -1179,25 +1179,25 @@ fn quick_controls_pixel(x: usize, y: usize, frame: &QuickControlsFrame, theme: &
         return home_indicator_pixel(x, y, theme);
     }
     if y < HEADING_Y {
-        return theme.bg;
+        return theme.surface;
     }
     if y < SUMMARY_Y {
-        if let Some(c) = frame.heading.pixel_on(x, y, theme.bg) {
+        if let Some(c) = frame.heading.pixel_on(x, y, theme.surface) {
             return c;
         }
-        return theme.bg;
+        return theme.surface;
     }
     if y < CONNECTIVITY_LABEL_Y {
-        if let Some(c) = frame.summary.pixel_on(x, y, theme.bg) {
+        if let Some(c) = frame.summary.pixel_on(x, y, theme.surface) {
             return c;
         }
-        return theme.bg;
+        return theme.surface;
     }
     if y < CONNECTIVITY_TOP {
-        if let Some(c) = frame.sections[0].pixel_on(x, y, theme.bg) {
+        if let Some(c) = frame.sections[0].pixel_on(x, y, theme.surface) {
             return c;
         }
-        return theme.bg;
+        return theme.surface;
     }
     if y < LEVEL_LABEL_Y {
         for tile in &frame.radios {
@@ -1205,31 +1205,31 @@ fn quick_controls_pixel(x: usize, y: usize, frame: &QuickControlsFrame, theme: &
                 return tile_pixel(x, y, tile, theme);
             }
         }
-        return theme.bg;
+        return theme.surface;
     }
     if y < LEVEL_TOP {
-        if let Some(c) = frame.sections[1].pixel_on(x, y, theme.bg) {
+        if let Some(c) = frame.sections[1].pixel_on(x, y, theme.surface) {
             return c;
         }
-        return theme.bg;
+        return theme.surface;
     }
     if y < VOLUME_SLIDER.y {
         if frame.brightness.rect.contains(x, y) {
             return row_pixel(x, y, &frame.brightness, theme);
         }
-        return theme.bg;
+        return theme.surface;
     }
     if y < SYSTEM_LABEL_Y {
         if frame.volume.rect.contains(x, y) {
             return row_pixel(x, y, &frame.volume, theme);
         }
-        return theme.bg;
+        return theme.surface;
     }
     if y < SYSTEM_TOP {
-        if let Some(c) = frame.sections[2].pixel_on(x, y, theme.bg) {
+        if let Some(c) = frame.sections[2].pixel_on(x, y, theme.surface) {
             return c;
         }
-        return theme.bg;
+        return theme.surface;
     }
     if y < FOOTER_LABEL_Y {
         for row in &frame.controls {
@@ -1237,24 +1237,24 @@ fn quick_controls_pixel(x: usize, y: usize, frame: &QuickControlsFrame, theme: &
                 return row_pixel(x, y, row, theme);
             }
         }
-        return theme.bg;
+        return theme.surface;
     }
     if y < FOOTER_Y {
-        if let Some(c) = frame.sections[3].pixel_on(x, y, theme.bg) {
+        if let Some(c) = frame.sections[3].pixel_on(x, y, theme.surface) {
             return c;
         }
-        return theme.bg;
+        return theme.surface;
     }
     if y < POWER_Y {
         if frame.lock.rect.contains(x, y) {
             return row_pixel(x, y, &frame.lock, theme);
         }
-        return theme.bg;
+        return theme.surface;
     }
     if POWER_BTN.contains(x, y) {
         return power_pixel(x, y, frame, theme);
     }
-    theme.bg
+    theme.surface
 }
 
 /// One radio tile.
@@ -1265,7 +1265,7 @@ fn quick_controls_pixel(x: usize, y: usize, frame: &QuickControlsFrame, theme: &
 /// control.
 fn tile_pixel(x: usize, y: usize, tile: &TileFrame, theme: &Theme) -> u32 {
     if !round_contains(&tile.rect, radius::CARD, x, y) {
-        return theme.bg;
+        return theme.surface;
     }
     if !round_contains(&tile.rect.inset(1), radius::CARD - 1, x, y) {
         return tile.border;
@@ -1300,14 +1300,14 @@ fn row_pixel(x: usize, y: usize, row: &RowFrame, theme: &Theme) -> u32 {
     let base = match row.fill {
         Some(fill) => {
             if !round_contains(&row.rect, row.corner, x, y) {
-                return theme.bg;
+                return theme.surface;
             }
             if !round_contains(&row.rect.inset(1), row.corner - 1, x, y) {
                 return row.border.unwrap_or(theme.border);
             }
             fill
         }
-        None => theme.bg,
+        None => theme.surface,
     };
 
     if let Some(track) = row.track {
@@ -1315,7 +1315,7 @@ fn row_pixel(x: usize, y: usize, row: &RowFrame, theme: &Theme) -> u32 {
             return if row.fill_w > 0 && x <= track.x + row.fill_w {
                 LEVEL_FILL
             } else {
-                theme.surface_sunken
+                theme.surface_container_low
             };
         }
     }
@@ -1340,16 +1340,16 @@ fn row_pixel(x: usize, y: usize, row: &RowFrame, theme: &Theme) -> u32 {
 // the surface -- which is what makes the panel's primary action findable.
 fn power_pixel(x: usize, y: usize, frame: &QuickControlsFrame, theme: &Theme) -> u32 {
     if !round_contains(&POWER_BTN, POWER_BTN.h / 2, x, y) {
-        return theme.bg;
+        return theme.surface;
     }
-    let ink = theme.surface;
+    let ink = theme.surface_container;
     if icon_hits(QcIcon::Power, frame.power_icon_x, frame.power_icon_y, x, y) {
         return ink;
     }
-    if let Some(c) = frame.power_label.pixel_aa(x, y, ink, theme.text) {
+    if let Some(c) = frame.power_label.pixel_aa(x, y, ink, theme.on_surface) {
         return c;
     }
-    theme.text
+    theme.on_surface
 }
 
 /// Status bar: the clock, if the shell was given one, right-aligned, with the
@@ -1359,13 +1359,13 @@ fn power_pixel(x: usize, y: usize, frame: &QuickControlsFrame, theme: &Theme) ->
 /// and this guest has no radio, no battery gauge and no signal to show. A blank
 /// strip with a clock and a rule is the honest version of that bar.
 fn status_bar_pixel(x: usize, y: usize, frame: &QuickControlsFrame, theme: &Theme) -> u32 {
-    if let Some(c) = frame.clock.pixel_on(x, y, theme.bg) {
+    if let Some(c) = frame.clock.pixel_on(x, y, theme.surface) {
         return c;
     }
     if y == STATUS_BAR_H - 1 && x >= PANEL_X && x < PANEL_X + PANEL_W {
         return theme.border;
     }
-    theme.bg
+    theme.surface
 }
 
 /// Home indicator.
@@ -1378,12 +1378,12 @@ fn home_indicator_pixel(x: usize, y: usize, theme: &Theme) -> u32 {
     let ix = (SCREEN_WIDTH - INDICATOR_W) / 2;
     let rect = Rect::new(ix, iy, INDICATOR_W, INDICATOR_H);
     if !rect.contains(x, y) {
-        return theme.bg;
+        return theme.surface;
     }
     if !round_contains(&rect, rect.h / 2, x, y) {
-        return theme.bg;
+        return theme.surface;
     }
-    Theme::blend(theme.text_muted, theme.bg, 140)
+    Theme::blend(theme.on_surface_variant, theme.surface, 140)
 }
 
 // ---------------------------------------------------------------------------

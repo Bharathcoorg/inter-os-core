@@ -863,7 +863,6 @@ impl SettingsApp {
                         if id == b"org.interos.launcher" || id == b"launcher"
                             || id == b"org.interos.compositor" || id == b"compositor"
                             || id == b"org.interos.init" || id == b"init" || id == b"user_init"
-                            || id == b"org.interos.sensor_dashboard" || id == b"sensor_dashboard" || id == b"sensors"
                             || id == b"org.interos.card_demo" || id == b"card_demo"
                         {
                             continue;

@@ -11,6 +11,8 @@ pub mod draw_target;
 pub mod outline_text;
 pub mod display_list;
 pub mod scroll;
+pub mod theme;
+pub mod components;
 
 pub mod typography {
     use crate::font;
@@ -24,26 +26,49 @@ pub mod typography {
         pub baseline_offset_px: usize,
     }
 
+    /// The permitted multipliers, named on their own.
+    ///
+    /// WHY these are separate from the styles below: the rasteriser draws at
+    /// integer multiples only, so a caller that wants "a caption" needs the
+    /// number as well as the line box, and a style that carried the number
+    /// only inside a struct would force every such caller to unpack it.
+    pub const BADGE_SCALE: usize = 1;
+    pub const CAPTION_SCALE: usize = 1;
+    pub const BODY_SCALE: usize = 2;
+    pub const TITLE_SCALE: usize = 3;
+    pub const DISPLAY_SCALE: usize = 6;
+
+    /// Badge glyphs inside an icon, e.g. a call badge.
+    ///
+    /// WHY it exists: the shell draws a badge in the corner of an icon, and the
+    /// badge is a caption at the smallest step the face can express. It was
+    /// carried by the launcher alone, which meant the step existed only there.
+    pub const BADGE: TextStyle = TextStyle {
+        scale: BADGE_SCALE,
+        line_height_px: 24,
+        baseline_offset_px: font::BASELINE,
+    };
+
     pub const CAPTION: TextStyle = TextStyle {
-        scale: 1,
+        scale: CAPTION_SCALE,
         line_height_px: 24,
         baseline_offset_px: font::BASELINE,
     };
 
     pub const BODY: TextStyle = TextStyle {
-        scale: 2,
+        scale: BODY_SCALE,
         line_height_px: 48,
         baseline_offset_px: font::BASELINE * 2,
     };
 
     pub const TITLE: TextStyle = TextStyle {
-        scale: 3,
+        scale: TITLE_SCALE,
         line_height_px: 72,
         baseline_offset_px: font::BASELINE * 3,
     };
 
     pub const DISPLAY: TextStyle = TextStyle {
-        scale: 6,
+        scale: DISPLAY_SCALE,
         line_height_px: 144,
         baseline_offset_px: font::BASELINE * 6,
     };
@@ -326,12 +351,31 @@ impl DisplayMetrics {
     }
 }
 
+/// The platform palette: the colours that exist.
+///
+/// WHY a palette and not the interface: this module says which colours the
+/// platform has. It does not say which one a card is filled with, which one a
+/// caption is inked in, or which one marks the selected tab -- that is
+/// [`super::theme`]'s job, and an interface asks the theme for a role.
+///
+/// WHY the light and dark halves are one module: they are the same palette
+/// read against two surfaces, so a colour that has no dark counterpart is a gap
+/// in the palette rather than a separate scheme.
 pub mod color {
     // Canonical light system
     pub const BACKGROUND: u32 = 0xFFF7F6F2;
     pub const SURFACE: u32 = 0xFFFFFFFF;
-    pub const SURFACE_SOFT: u32 = 0xFFEFEEE9;
     pub const SURFACE_RAISED: u32 = 0xFFEFEEE9;
+    /// The same fill as [`SURFACE_RAISED`], under the name an app outside the
+    /// design-system work still uses.
+    ///
+    /// WHY it points at the other constant and does not repeat the number: two
+    /// spellings of one value is how a palette stops being a palette, and an
+    /// alias carries the value without carrying a second copy of it. The
+    /// duplicate spelling goes when the app that uses it is migrated.
+    pub const SURFACE_SOFT: u32 = SURFACE_RAISED;
+    /// A recessed fill: a well, a track, a disabled field.
+    pub const SURFACE_SUNKEN: u32 = 0xFFE9E8E3;
     pub const BORDER: u32 = 0xFFE1E0DB;
     pub const TEXT: u32 = 0xFF111214;
     pub const TEXT_MUTED: u32 = 0xFF525458;
@@ -339,6 +383,10 @@ pub mod color {
     // Canonical dark surfaces
     pub const DARK_BACKGROUND: u32 = 0xFF111214;
     pub const DARK_SURFACE: u32 = 0xFF25282A;
+    /// One elevation step above the dark surface.
+    pub const DARK_SURFACE_RAISED: u32 = 0xFF2F3235;
+    /// One step below the dark surface.
+    pub const DARK_SURFACE_SUNKEN: u32 = 0xFF1A1C1E;
     pub const DARK_BORDER: u32 = 0xFF35383D;
     pub const DARK_TEXT: u32 = 0xFFF5F6F7;
     pub const DARK_TEXT_MUTED: u32 = 0xFF9AA0A6;
@@ -349,6 +397,13 @@ pub mod color {
     pub const WARNING: u32 = 0xFFD97706;
     pub const DANGER: u32 = 0xFFDC2626;
     pub const EMERGENCY: u32 = 0xFFFF5555;
+
+    // The same accents against the dark surfaces: a tint that reads on a
+    // near-black page has to be lighter than the tint that reads on white.
+    pub const DARK_ACCENT: u32 = 0xFF38BDF8;
+    pub const DARK_SUCCESS: u32 = 0xFF34D399;
+    pub const DARK_WARNING: u32 = 0xFFFBBF24;
+    pub const DARK_DANGER: u32 = 0xFFF87171;
 
     /// Color gamut profiles supported by the display compositor.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -400,10 +455,23 @@ pub mod radius {
     // than deprecated, because a deprecation here would leave the ambiguity in
     // place for every reader who greps for either spelling.
     pub const SMALL: usize = 8;
+    /// Chips and badges: the small round things that sit inside a row.
+    ///
+    /// WHY this step exists: the launcher drew its chips and badges at 10 and
+    /// kept the number to itself, so a third-party app had no step for the
+    /// thing it could see on screen and had to invent one.
+    pub const CHIP: usize = 10;
+    /// Buttons, interactive tiles and text fields.
     pub const CONTROL: usize = 12;
+    /// Cards and list rows.
     pub const CARD: usize = 18;
+    /// Sheets and full-width panels.
     pub const SHEET: usize = 24;
+    /// Large panels and dialogs.
     pub const MAJOR: usize = 32;
+    /// The rounded corner of the device's own display surface.
+    pub const SCREEN: usize = 44;
+    /// A fully rounded pill; clamped to half the shape's height.
     pub const PILL: usize = 999;
 }
 

@@ -11,7 +11,7 @@ use launcher::icons::{self, IconKind};
 use launcher::layout::Rect;
 use launcher::text;
 use launcher::theme::{
-    type_scale, SCREEN_HEIGHT, SCREEN_WIDTH,
+    type_scale, Theme, SCREEN_HEIGHT, SCREEN_WIDTH,
     STATUS_BAR_HEIGHT,
 };
 
@@ -30,7 +30,7 @@ pub const CARD_BORDER: u32 = 0xFF2A3446;
 pub const CARD_BORDER_HIGHLIGHT: u32 = 0xFF3E4D64;
 
 pub const TEXT_WHITE: u32 = 0xFFF8FAFC;
-pub const TEXT_MUTED: u32 = 0xFF94A3B8;
+pub const SUBTLE_INK: u32 = 0xFF94A3B8;
 
 // Squircle Icon Badge
 pub const SQUIRCLE_SIZE: usize = 48;
@@ -46,7 +46,7 @@ const fn rgb(r: u8, g: u8, b: u8) -> u32 {
 // State Badge Colors (Platform Truth compliant: no forbidden traffic-light literals)
 pub const STATE_ACTIVE_DOT: u32 = 0xFF22C55E; // Emerald green
 pub const STATE_ACTIVE_TEXT: u32 = 0xFF4ADE80;
-pub const STATE_RUNNING_DOT: u32 = 0xFF38BDF8; // Electric sky blue
+pub const STATE_RUNNING_DOT: u32 = Theme::DARK.primary; // Electric sky blue
 pub const STATE_RUNNING_TEXT: u32 = 0xFF7DD3FC;
 pub const STATE_RECENT_DOT: u32 = 0xFF64748B; // Muted silver
 pub const STATE_RECENT_TEXT: u32 = 0xFF94A3B8;
@@ -785,7 +785,7 @@ fn build_activity_frame(state: &LauncherState) -> ActivityFrame {
                 CARD_W,
                 head_scale,
                 b"Swipe up from any app to switch between tasks",
-                TEXT_MUTED,
+                SUBTLE_INK,
             ),
         )
     } else {

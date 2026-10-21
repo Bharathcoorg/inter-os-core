@@ -426,17 +426,17 @@ impl WidgetsFrame {
             name_buf[..name_len].copy_from_slice(&name_fitted[..name_len]);
 
             let (fill, name_ink, chevron, caption) = if installed.is_some() {
-                let fill = Theme::blend(theme.surface, theme.accent, 22);
+                let fill = Theme::blend(theme.surface_container, theme.primary, 22);
                 let chevron = Rect::new(
                     pad.x + pad.w.saturating_sub(chevron_w),
                     name_rect.y,
                     chevron_w,
                     name_rect.h,
                 );
-                (fill, theme.text, Some(chevron), None)
+                (fill, theme.on_surface, Some(chevron), None)
             } else {
                 let caption = Rect::new(pad.x, name_rect.y + name_rect.h + space::SM, pad.w, caption_h);
-                (theme.surface_sunken, theme.text_muted, None, Some(caption))
+                (theme.surface_container_low, theme.on_surface_variant, None, Some(caption))
             };
 
             entries[i] = EntryFrame {
@@ -540,7 +540,7 @@ impl WidgetsFrame {
                     label_col,
                     label_buf,
                     label_len,
-                    label_ink: theme.text,
+                    label_ink: theme.on_surface,
                 };
             }
         }
@@ -672,7 +672,7 @@ pub fn get_live_widgets_color(x: usize, y: usize, state: &LauncherState) -> u32 
         for entry in &f.entries {
             if entry.rect.contains(x, y) {
                 if !round_contains(&entry.rect, radius::CARD, x, y) {
-                    return theme.bg;
+                    return theme.surface;
                 }
                 if !round_contains(&entry.inner, radius::CARD.saturating_sub(1), x, y) {
                     return entry.border;
@@ -689,7 +689,7 @@ pub fn get_live_widgets_color(x: usize, y: usize, state: &LauncherState) -> u32 
                         return c;
                     }
                     if let Some(ref chevron) = entry.chevron {
-                        if let Some(c) = run_right(x, y, chevron, type_scale::BODY, b">", theme.accent) {
+                        if let Some(c) = run_right(x, y, chevron, type_scale::BODY, b">", theme.primary) {
                             return c;
                         }
                     }
@@ -702,7 +702,7 @@ pub fn get_live_widgets_color(x: usize, y: usize, state: &LauncherState) -> u32 
                             caption,
                             type_scale::CAPTION,
                             b"Not installed",
-                            theme.text_muted,
+                            theme.on_surface_variant,
                         ) {
                             return c;
                         }
@@ -715,7 +715,7 @@ pub fn get_live_widgets_color(x: usize, y: usize, state: &LauncherState) -> u32 
 
     // Title and summary
     if y >= HEADER_TOP && y < ENTRIES[0].rect.y {
-        if let Some(c) = run_left(x, y, &f.title_rect, WIDGETS_TITLE_SCALE, b"Live Widgets", theme.text) {
+        if let Some(c) = run_left(x, y, &f.title_rect, WIDGETS_TITLE_SCALE, b"Live Widgets", theme.on_surface) {
             return c;
         }
         if f.summary_rect.contains(x, y) {
@@ -725,7 +725,7 @@ pub fn get_live_widgets_color(x: usize, y: usize, state: &LauncherState) -> u32 
                 &f.summary_rect,
                 WIDGETS_SUMMARY_SCALE,
                 &f.summary_buf[..f.summary_len],
-                theme.text_muted,
+                theme.on_surface_variant,
             ) {
                 return c;
             }
@@ -740,7 +740,7 @@ pub fn get_live_widgets_color(x: usize, y: usize, state: &LauncherState) -> u32 
             let row = &f.rows[index];
             if row.rect.contains(x, y) {
                 if !round_contains(&row.rect, radius::CARD, x, y) {
-                    return theme.bg;
+                    return theme.surface;
                 }
                 if !round_contains(&row.inner, radius::CARD.saturating_sub(1), x, y) {
                     return row.border;
@@ -783,8 +783,8 @@ pub fn get_live_widgets_color(x: usize, y: usize, state: &LauncherState) -> u32 
         INDICATOR_H,
     );
     if round_contains(&indicator, INDICATOR_H / 2, x, y) {
-        return Theme::blend(theme.text_muted, theme.bg, 140);
+        return Theme::blend(theme.on_surface_variant, theme.surface, 140);
     }
 
-    theme.bg
+    theme.surface
 }

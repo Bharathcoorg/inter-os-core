@@ -13,24 +13,24 @@ pub fn get_power_transition_color(x: usize, y: usize, state: &LauncherState) -> 
     let d2 = (dx * dx + dy * dy) as usize;
     let ring_outer = 110usize * 110;
     let ring_inner = 96usize * 96;
-    let bg = Theme::DARK.bg;
+    let bg = Theme::DARK.surface;
     if d2 >= ring_inner && d2 <= ring_outer {
         let segment = ((x * 3 + y * 5) / 7) % 32;
         let lit = progress * 32 / 1000;
-        return if segment < lit { Theme::DARK.accent } else { Theme::DARK.surface_raised };
+        return if segment < lit { Theme::DARK.primary } else { Theme::DARK.surface_container_high };
     }
     let logo_outer = 48usize * 48;
     let logo_inner = 32usize * 32;
     if d2 >= logo_inner && d2 <= logo_outer {
         let intensity = 1000usize.saturating_sub(progress);
-        return blend(bg, Theme::DARK.accent, intensity);
+        return blend(bg, Theme::DARK.primary, intensity);
     }
     let line_y = cy + 180;
     if y >= line_y && y < line_y + 8 {
         let width = W * 2 / 3;
         let left = (W - width) / 2;
         if x >= left && x < left + width {
-            return if x - left < width * progress / 1000 { Theme::DARK.accent } else { Theme::DARK.surface_raised };
+            return if x - left < width * progress / 1000 { Theme::DARK.primary } else { Theme::DARK.surface_container_high };
         }
     }
     bg

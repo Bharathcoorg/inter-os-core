@@ -1302,9 +1302,9 @@ pub fn pin_pad_entry_band() -> (usize, usize) {
 /// `danger` is a deep red (220,38,38); swapping either in would restain the pad
 /// rather than fix it. The pad is the one surface in the shell that draws on a
 /// backdrop it owns rather than on a theme page, and the header does the same.
-const PIN_HEADING_INK: u32 = 0xFFFFFFFF;
+const PIN_HEADING_INK: u32 = Theme::DARK.ink_on_dark;
 const PIN_SUBHEADING_INK: u32 = 0xFF90A0B0;
-const PIN_ERROR_INK: u32 = 0xFFFF5555;
+const PIN_ERROR_INK: u32 = Theme::DARK.emergency;
 const PIN_DOT_EMPTY_INK: u32 = 0xFF708090;
 
 /// The prompt above the keypad and the sub-prompt under it, for the state the
@@ -1476,7 +1476,7 @@ fn lock_pin_pad_pixel(
                 if i < state.pin_len as usize {
                     // Filled dots in the theme's accent: the one piece of colour
                     // on the pad, on the state the user is actually watching.
-                    return Some(THEME.accent);
+                    return Some(THEME.primary);
                 } else if dist_sq >= (PIN_DOT_R - 2) * (PIN_DOT_R - 2) {
                     return Some(PIN_DOT_EMPTY_INK);
                 }

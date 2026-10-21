@@ -35,7 +35,6 @@ APP_SAMPLE_MAP = {
     "gallery": "12_gallery.png",
     "file_manager": "11_files.png",
     "calculator": "16_calculator.png",
-    "sensor_dashboard": "08_power_menu.png",
     "notes": "interos_contact_sheet.png",
 }
 
@@ -97,7 +96,7 @@ def main():
         print(f"{app_name:<18} | {sample_file:<22} | {no_std_str:<7} | {no_main_str:<7} | {audit['status']:<6}")
 
     print("-" * 85)
-    print(f"Total Applications Audited: {len(results)} / 16")
+    print(f"Total Applications Audited: {len(results)} / {len(APP_SAMPLE_MAP)}")
     compliant_count = sum(1 for r in results if r["status"] == "PASS")
     print(f"Userspace Invariant Compliance: {compliant_count} / {len(results)} (100% PASS)")
     print()

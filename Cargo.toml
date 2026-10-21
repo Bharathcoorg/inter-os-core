@@ -10,7 +10,6 @@ members = [
     "apps/messages",
     "apps/calendar",
     "apps/music",
-    "apps/sensor_dashboard",
     "apps/calculator",
     "sdk/rust/interos-std",
     "userspace/init",

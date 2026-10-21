@@ -130,13 +130,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sensor_dashboard"
-version = "0.1.0"
-dependencies = [
- "interos-std",
-]
-
-[[package]]
 name = "settings"
 version = "0.1.0"
 dependencies = [

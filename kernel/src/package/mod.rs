@@ -50,7 +50,6 @@ pub const FIRST_PARTY_PACKAGES: &[PackageDescriptor] = &[
     PackageDescriptor { package_id: "org.interos.music", path: "/packages/org.interos.music.rapp", process_name: "app_music", display_name: "Music", icon: "MUS", category: "Personal", is_system: false },
     PackageDescriptor { package_id: "org.interos.file_manager", path: "/packages/org.interos.file_manager.rapp", process_name: "app_file_manager", display_name: "Files", icon: "FILE", category: "Work", is_system: false },
     PackageDescriptor { package_id: "org.interos.gallery", path: "/packages/org.interos.gallery.rapp", process_name: "app_gallery", display_name: "Gallery", icon: "PIC", category: "Personal", is_system: false },
-    PackageDescriptor { package_id: "org.interos.sensor_dashboard", path: "/packages/org.interos.sensor_dashboard.rapp", process_name: "sensor_dashboard", display_name: "Sensors", icon: "SENS", category: "Tools", is_system: true },
     PackageDescriptor { package_id: "org.interos.notes", path: "/packages/org.interos.notes.rapp", process_name: "app_notes", display_name: "Notes", icon: "NOTE", category: "Personal", is_system: false },
 ];
 

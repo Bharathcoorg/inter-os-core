@@ -151,9 +151,9 @@ impl Reading {
 
     pub(super) fn skin(&self, theme: &Theme) -> (u32, u32) {
         if self.available {
-            (theme.surface, theme.text)
+            (theme.surface_container, theme.on_surface)
         } else {
-            (theme.surface_sunken, theme.text_muted)
+            (theme.surface_container_low, theme.on_surface_variant)
         }
     }
 }
@@ -199,7 +199,7 @@ impl<'a> Cell<'a> {
 
 pub(super) fn cell_pixel(x: usize, y: usize, theme: &Theme, cell: &Cell) -> u32 {
     if !cell.rect.contains(x, y) || !cell.contains(x, y) {
-        return theme.bg;
+        return theme.surface;
     }
     let inner = cell.rect.inset(1);
     if !round_contains(&inner, cell.corner.saturating_sub(1), x, y) {
@@ -224,7 +224,7 @@ pub(super) fn cell_pixel(x: usize, y: usize, theme: &Theme, cell: &Cell) -> u32 
         }
     } else if x < label_col.x + label_col.w {
         let (run, len) = text::ellipsize(cell.label, cell.scale, label_col.w);
-        if let Some(c) = run_left(x, y, &label_col, cell.scale, &run[..len], theme.text) {
+        if let Some(c) = run_left(x, y, &label_col, cell.scale, &run[..len], theme.on_surface) {
             return c;
         }
     }
@@ -566,9 +566,9 @@ fn back_control_pixel(x: usize, y: usize) -> Option<u32> {
         return None;
     }
     if !in_round_rect(x, y, BACK_X + 1, BACK_Y + 1, BACK_S - 2, BACK_S - 2, BACK_R - 1) {
-        return Some(TEXT_DARK);
+        return Some(PRIMARY_INK);
     }
-    if let Some(c) = chevron_ink(x, y, BACK_X + BACK_S / 2, BACK_Y + BACK_S / 2, TEXT_DARK) {
+    if let Some(c) = chevron_ink(x, y, BACK_X + BACK_S / 2, BACK_Y + BACK_S / 2, PRIMARY_INK) {
         return Some(c);
     }
     Some(0xFFFFFFFF)
@@ -731,10 +731,10 @@ const ORB_BAND_Y0: usize = 200;
 const ORB_BAND_Y1: usize = 310;
 
 const BG_COLOR: u32 = 0xFFF8FAFC;
-const CARD_BG: u32 = 0xFFFFFFFF;
+const CARD_BG: u32 = Theme::LIGHT.surface_container;
 const CARD_BORDER: u32 = 0xFFE2E8F0;
-const TEXT_DARK: u32 = 0xFF0F172A;
-const TEXT_MUTED: u32 = 0xFF64748B;
+const PRIMARY_INK: u32 = 0xFF0F172A;
+const SUBTLE_INK: u32 = 0xFF64748B;
 const CARD_RADIUS: usize = 20;
 
 #[inline]
@@ -757,13 +757,13 @@ pub fn get_system_space_color(x: usize, y: usize, state: &LauncherState) -> u32 
     // 1. Status Bar
     if y < STATUS_BAR_HEIGHT {
         if state.clock_source_ok {
-            if let Some(c) = test_text_aa(x, y, 48, 14, 1, &state.clock_time, TEXT_DARK, BG_COLOR) {
+            if let Some(c) = test_text_aa(x, y, 48, 14, 1, &state.clock_time, PRIMARY_INK, BG_COLOR) {
                 return c;
             }
         }
         // Battery status icon on top right
         if x >= 640 && x <= 672 && y >= 16 && y <= 28 {
-            if let Some(c) = draw_battery_icon(x, y, 656, 22, TEXT_DARK) {
+            if let Some(c) = draw_battery_icon(x, y, 656, 22, PRIMARY_INK) {
                 return c;
             }
         }
@@ -792,7 +792,7 @@ pub fn get_system_space_color(x: usize, y: usize, state: &LauncherState) -> u32 
 
     // 3. Large Bold Title: "System Space"
     if y >= 100 && y < 195 && x >= 48 && x < 620 {
-        if let Some(c) = test_text_aa(x, y, 48, 112, 3, b"System Space", TEXT_DARK, BG_COLOR) {
+        if let Some(c) = test_text_aa(x, y, 48, 112, 3, b"System Space", PRIMARY_INK, BG_COLOR) {
             return c;
         }
     }
@@ -809,7 +809,7 @@ pub fn get_system_space_color(x: usize, y: usize, state: &LauncherState) -> u32 
         let adv = interos_std::design::typeface::text_advance_px(b"Everything in one place", 24) as usize;
         let st_x = (720usize.saturating_sub(adv)) / 2;
         if x >= st_x && x < st_x + adv + 8 {
-            if let Some(c) = test_text_aa(x, y, st_x, 324, 1, b"Everything in one place", TEXT_MUTED, BG_COLOR) {
+            if let Some(c) = test_text_aa(x, y, st_x, 324, 1, b"Everything in one place", SUBTLE_INK, BG_COLOR) {
                 return c;
             }
         }
@@ -818,16 +818,16 @@ pub fn get_system_space_color(x: usize, y: usize, state: &LauncherState) -> u32 
     // 4. Row 1 Cards
     // Left: Device
     if let Some(bg) = card_pixel(&CARD_R1_L, x, y) {
-        if let Some(ic) = draw_device_icon(x, y, 75, CARD_R1_L.y + CARD_ICON_DY, TEXT_DARK) {
+        if let Some(ic) = draw_device_icon(x, y, 75, CARD_R1_L.y + CARD_ICON_DY, PRIMARY_INK) {
             return ic;
         }
         if let Some(c) = test_text_aa(
-            x, y, 105, CARD_R1_L.y + CARD_TITLE_DY, 2, b"Device", TEXT_DARK, 0xFFFFFFFF,
+            x, y, 105, CARD_R1_L.y + CARD_TITLE_DY, 2, b"Device", PRIMARY_INK, 0xFFFFFFFF,
         ) {
             return c;
         }
         if let Some(c) = test_text_aa(
-            x, y, 65, CARD_R1_L.y + CARD_CAPTION_DY, 1, b"Display, Sound, Gestures", TEXT_MUTED,
+            x, y, 65, CARD_R1_L.y + CARD_CAPTION_DY, 1, b"Display, Sound, Gestures", SUBTLE_INK,
             0xFFFFFFFF,
         ) {
             return c;
@@ -836,16 +836,16 @@ pub fn get_system_space_color(x: usize, y: usize, state: &LauncherState) -> u32 
     }
     // Right: Network
     if let Some(bg) = card_pixel(&CARD_R1_R, x, y) {
-        if let Some(ic) = draw_network_icon(x, y, 410, CARD_R1_R.y + CARD_ICON_DY, TEXT_DARK) {
+        if let Some(ic) = draw_network_icon(x, y, 410, CARD_R1_R.y + CARD_ICON_DY, PRIMARY_INK) {
             return ic;
         }
         if let Some(c) = test_text_aa(
-            x, y, 440, CARD_R1_R.y + CARD_TITLE_DY, 2, b"Network", TEXT_DARK, 0xFFFFFFFF,
+            x, y, 440, CARD_R1_R.y + CARD_TITLE_DY, 2, b"Network", PRIMARY_INK, 0xFFFFFFFF,
         ) {
             return c;
         }
         if let Some(c) = test_text_aa(
-            x, y, 400, CARD_R1_R.y + CARD_CAPTION_DY, 1, b"Wi-Fi, Mobile, Bluetooth", TEXT_MUTED,
+            x, y, 400, CARD_R1_R.y + CARD_CAPTION_DY, 1, b"Wi-Fi, Mobile, Bluetooth", SUBTLE_INK,
             0xFFFFFFFF,
         ) {
             return c;
@@ -856,16 +856,16 @@ pub fn get_system_space_color(x: usize, y: usize, state: &LauncherState) -> u32 
     // 5. Row 2 Cards
     // Left: Personal
     if let Some(bg) = card_pixel(&CARD_R2_L, x, y) {
-        if let Some(ic) = draw_personal_icon(x, y, 75, CARD_R2_L.y + CARD_ICON_DY, TEXT_DARK) {
+        if let Some(ic) = draw_personal_icon(x, y, 75, CARD_R2_L.y + CARD_ICON_DY, PRIMARY_INK) {
             return ic;
         }
         if let Some(c) = test_text_aa(
-            x, y, 105, CARD_R2_L.y + CARD_TITLE_DY, 2, b"Personal", TEXT_DARK, 0xFFFFFFFF,
+            x, y, 105, CARD_R2_L.y + CARD_TITLE_DY, 2, b"Personal", PRIMARY_INK, 0xFFFFFFFF,
         ) {
             return c;
         }
         if let Some(c) = test_text_aa(
-            x, y, 65, CARD_R2_L.y + CARD_CAPTION_DY, 1, b"Accounts, Language, Time", TEXT_MUTED,
+            x, y, 65, CARD_R2_L.y + CARD_CAPTION_DY, 1, b"Accounts, Language, Time", SUBTLE_INK,
             0xFFFFFFFF,
         ) {
             return c;
@@ -874,16 +874,16 @@ pub fn get_system_space_color(x: usize, y: usize, state: &LauncherState) -> u32 
     }
     // Right: Apps
     if let Some(bg) = card_pixel(&CARD_R2_R, x, y) {
-        if let Some(ic) = draw_apps_icon(x, y, 410, CARD_R2_R.y + CARD_ICON_DY, TEXT_DARK) {
+        if let Some(ic) = draw_apps_icon(x, y, 410, CARD_R2_R.y + CARD_ICON_DY, PRIMARY_INK) {
             return ic;
         }
         if let Some(c) = test_text_aa(
-            x, y, 440, CARD_R2_R.y + CARD_TITLE_DY, 2, b"Apps", TEXT_DARK, 0xFFFFFFFF,
+            x, y, 440, CARD_R2_R.y + CARD_TITLE_DY, 2, b"Apps", PRIMARY_INK, 0xFFFFFFFF,
         ) {
             return c;
         }
         if let Some(c) = test_text_aa(
-            x, y, 400, CARD_R2_R.y + CARD_CAPTION_DY, 1, b"Permissions, Storage", TEXT_MUTED,
+            x, y, 400, CARD_R2_R.y + CARD_CAPTION_DY, 1, b"Permissions, Storage", SUBTLE_INK,
             0xFFFFFFFF,
         ) {
             return c;
@@ -894,18 +894,18 @@ pub fn get_system_space_color(x: usize, y: usize, state: &LauncherState) -> u32 
     // 6. Row 3 Cards
     // Left: Power (POWER_ENTRY)
     if let Some(bg) = card_pixel(&CARD_R3_L, x, y) {
-        if let Some(ic) = draw_battery_icon(x, y, 75, CARD_R3_L.y + CARD_ICON_DY, TEXT_DARK) {
+        if let Some(ic) = draw_battery_icon(x, y, 75, CARD_R3_L.y + CARD_ICON_DY, PRIMARY_INK) {
             return ic;
         }
         if let Some(c) = test_text_aa(
-            x, y, 105, CARD_R3_L.y + CARD_TITLE_DY, 2, b"Power", TEXT_DARK, 0xFFFFFFFF,
+            x, y, 105, CARD_R3_L.y + CARD_TITLE_DY, 2, b"Power", PRIMARY_INK, 0xFFFFFFFF,
         ) {
             return c;
         }
         // WHY "Power options" and not "Charging": the subtitle names the section,
         // and "Charging" would claim a live charge state this shell never measured.
         if let Some(c) = test_text_aa(
-            x, y, 65, CARD_R3_L.y + CARD_CAPTION_DY, 1, b"Battery, Power options", TEXT_MUTED,
+            x, y, 65, CARD_R3_L.y + CARD_CAPTION_DY, 1, b"Battery, Power options", SUBTLE_INK,
             0xFFFFFFFF,
         ) {
             return c;
@@ -914,16 +914,16 @@ pub fn get_system_space_color(x: usize, y: usize, state: &LauncherState) -> u32 
     }
     // Right: Security
     if let Some(bg) = card_pixel(&CARD_R3_R, x, y) {
-        if let Some(ic) = draw_security_icon(x, y, 410, CARD_R3_R.y + CARD_ICON_DY, TEXT_DARK) {
+        if let Some(ic) = draw_security_icon(x, y, 410, CARD_R3_R.y + CARD_ICON_DY, PRIMARY_INK) {
             return ic;
         }
         if let Some(c) = test_text_aa(
-            x, y, 440, CARD_R3_R.y + CARD_TITLE_DY, 2, b"Security", TEXT_DARK, 0xFFFFFFFF,
+            x, y, 440, CARD_R3_R.y + CARD_TITLE_DY, 2, b"Security", PRIMARY_INK, 0xFFFFFFFF,
         ) {
             return c;
         }
         if let Some(c) = test_text_aa(
-            x, y, 400, CARD_R3_R.y + CARD_CAPTION_DY, 1, b"Lock, Encryption", TEXT_MUTED,
+            x, y, 400, CARD_R3_R.y + CARD_CAPTION_DY, 1, b"Lock, Encryption", SUBTLE_INK,
             0xFFFFFFFF,
         ) {
             return c;
@@ -933,16 +933,16 @@ pub fn get_system_space_color(x: usize, y: usize, state: &LauncherState) -> u32 
 
     // 7. Row 4 Card: System (Full width)
     if let Some(bg) = card_pixel(&CARD_R4, x, y) {
-        if let Some(ic) = draw_gear_icon(x, y, 75, CARD_R4.y + CARD_ICON_DY, TEXT_DARK) {
+        if let Some(ic) = draw_gear_icon(x, y, 75, CARD_R4.y + CARD_ICON_DY, PRIMARY_INK) {
             return ic;
         }
         if let Some(c) = test_text_aa(
-            x, y, 105, CARD_R4.y + CARD_TITLE_DY, 2, b"System", TEXT_DARK, 0xFFFFFFFF,
+            x, y, 105, CARD_R4.y + CARD_TITLE_DY, 2, b"System", PRIMARY_INK, 0xFFFFFFFF,
         ) {
             return c;
         }
         if let Some(c) = test_text_aa(
-            x, y, 105, CARD_R4.y + CARD_CAPTION_DY, 1, b"Updates, About, Tools", TEXT_MUTED,
+            x, y, 105, CARD_R4.y + CARD_CAPTION_DY, 1, b"Updates, About, Tools", SUBTLE_INK,
             0xFFFFFFFF,
         ) {
             return c;
