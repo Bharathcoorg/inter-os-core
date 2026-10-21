@@ -184,7 +184,14 @@ def test_a_capability_slot_is_resolved_by_its_type():
     # The one capability question the shell is left with is a yes/no one --
     # "do I hold this capability type?" -- and its answer is never bound to
     # a name and handed to a platform call.
-    assert re.search(r"=\s*std::cap_lookup\(", code) is None
+    #
+    # WHY there is no assertion that forbids `cap_lookup` outright: the
+    # answer to "do I hold this capability?" is still the SDK's only
+    # capability query, and the shell's `caps` command has to answer it.
+    # What is forbidden is *keeping* a slot, and the rule below is the one
+    # that says so: every use must be a boolean probe, and a boolean probe
+    # can never be handed to a platform call, because no platform call
+    # takes a slot any more.
     for match in re.finditer(r"std::cap_lookup\(", code):
         assert re.match(r"[^\n;]*\.is_ok\(\)", code[match.end():])
     # The console still opens a surface, presents it and tears it down.

@@ -58,6 +58,10 @@ def _calculator_main():
     return (ROOT / "apps" / "calculator" / "src" / "main.rs").read_text(encoding="utf-8")
 
 
+def _calculator_lib():
+    return (ROOT / "apps" / "calculator" / "src" / "lib.rs").read_text(encoding="utf-8")
+
+
 def test_calculator_emits_the_post_flip_marker():
     assert btl.POST_FLIP_MARKER in _calculator_main()
 
@@ -164,17 +168,26 @@ def test_the_input_accepted_marker_requires_the_exact_coordinates():
 def test_keypad_coordinates_come_from_the_apps_own_geometry():
     source = _calculator_main()
     assert "const COL_X: [usize; 4] = [28, 194, 360, 526];" in source
-    assert "const ROW_Y: [usize; 5] = [440, 610, 780, 950, 1120];" in source
+    assert "const ROW_Y: [usize; 6] = [420, 580, 740, 900, 1060, 1220];" in source
     assert "const BTN_W: usize = 144;" in source
     assert "const BTN_H: usize = 140;" in source
     # Digit '7' is keypad row 1, column 0.
-    assert "(1, 0) => Some('7')" in source
-    # Row 1 starts at y=610, column 0 at x=28; both centres must be inside
+    #
+    # WHY the library and not main.rs: the key map moved into the
+    # calculator's library so that it can be unit tested, and the bench
+    # has to agree with the map the app actually draws.
+    assert "(1, 0) => Some('7')" in _calculator_lib()
+    # Row 1 starts at y=580, column 0 at x=28; both centres must be inside
     # their own button so the tap cannot fall between two keys.
+    #
+    # WHY six rows: the keypad gained a sixth row for the backspace,
+    # clear-entry and clear-all keys, and the rows above it moved up. A
+    # bench that kept the old y would tap the row below the one it meant
+    # and measure the wrong key.
     assert btl.KEYPAD_X == 28 + 144 // 2
-    assert btl.KEYPAD_Y == 610 + 140 // 2
+    assert btl.KEYPAD_Y == 580 + 140 // 2
     assert 28 <= btl.KEYPAD_X < 28 + 144
-    assert 610 <= btl.KEYPAD_Y < 610 + 140
+    assert 580 <= btl.KEYPAD_Y < 580 + 140
 
 
 # --------------------------------------------------------------------------

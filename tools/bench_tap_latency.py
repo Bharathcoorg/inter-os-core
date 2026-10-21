@@ -59,10 +59,15 @@ from bench_boot import _find_qemu, _kill_port_owner, describe_artifact, summariz
 from bench_heap import parse_diag_state  # noqa: E402
 
 # Digit '7' is keypad row 1, column 0. COL_X[0]=28 + BTN_W/2=72 -> x=100;
-# ROW_Y[1]=610 + BTN_H/2=70 -> y=680. Derived from the app's own geometry
+# ROW_Y[1]=580 + BTN_H/2=70 -> y=650. Derived from the app's own geometry
 # constants rather than guessed, so a tap cannot land between two keys.
+# WHY the row moved from 610 to 580: the keypad gained a sixth row for the
+# backspace, clear-entry and clear-all keys, and the rows above it moved
+# up to make room. A tap that still used the old y would land on the row
+# below the one it meant, and the bench would have been measuring the
+# wrong key.
 KEYPAD_X = 28 + 144 // 2
-KEYPAD_Y = 610 + 140 // 2
+KEYPAD_Y = 580 + 140 // 2
 
 APP_LAUNCH_ID = "calculator"
 APP_READY_MARKER = "[CALCULATOR] Initial frame presented to hardware scanout."
