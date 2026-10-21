@@ -37,7 +37,7 @@ use std::design::components::{self, Elevation};
 use std::design::font;
 use std::design::primitives::Rect;
 use std::design::scroll::ScrollState;
-use std::design::theme::{self, Theme};
+use agent_manager::theme::THEME;
 
 use agent_manager::{
     format_threshold, format_u32, granted_capability_count, probe_capability_grants, providers,
@@ -61,7 +61,6 @@ const CHUNK: usize = 4096;
 /// identity, not of a setting the user may change underneath it. The neutral
 /// variant is the one the design system offers for an interface whose colour
 /// is reserved.
-const THEME: Theme = theme::Theme::NEUTRAL;
 
 /// The horizontal gutter the platform's other apps use.
 const GUTTER: usize = 24;
@@ -69,15 +68,15 @@ const GUTTER: usize = 24;
 const CONTENT_W: usize = W - 2 * GUTTER;
 
 /// The status bar's height, from the platform's viewport metrics.
-const STATUS_H: usize = 48;
+const STATUS_H: usize = 84;
 
 /// The segmented control's band.
-const TAB_Y: usize = 60;
+const TAB_Y: usize = 92;
 const TAB_H: usize = 44;
 const TAB_GAP: usize = 5;
 
 /// The scrollable body's band.
-const BODY_TOP: usize = 116;
+const BODY_TOP: usize = 152;
 const BODY_BOTTOM: usize = 1284;
 const BODY_H: usize = BODY_BOTTOM - BODY_TOP;
 /// The bottom action bar's band.
@@ -98,12 +97,12 @@ const _: () = assert!(ACTION_TOP == BODY_BOTTOM);
 
 // The body model.
 const CARD_PAD_X: usize = 16;
-const CARD_PAD_TOP: usize = 10;
-const CARD_PAD_BOTTOM: usize = 14;
+const CARD_PAD_TOP: usize = 12;
+const CARD_PAD_BOTTOM: usize = 16;
 const CARD_GAP: usize = 12;
-const TITLE_ROW_H: usize = 46;
+const TITLE_ROW_H: usize = 72;
 const TITLE_GAP: usize = 8;
-const ROW_H: usize = 26;
+const ROW_H: usize = 48;
 const LINES_TOP: usize = CARD_PAD_TOP + TITLE_ROW_H + TITLE_GAP;
 
 /// The label column's width in pixels.
@@ -144,6 +143,13 @@ const WIDE_ROWS: usize = 4;
 // the ink as much as it is the size.
 const TYPE_CAPTION: usize = THEME.type_scale.caption.scale;
 const TYPE_BODY: usize = THEME.type_scale.body.scale;
+/// The scale a heading is drawn at.
+///
+/// WHY the heading and the body were both at the body scale: the
+/// screen had no hierarchy, and a screen whose every level of text is
+/// the same size is a screen that reads as a dump. The heading is a
+/// step up from the body.
+const TYPE_TITLE: usize = THEME.type_scale.title.scale;
 
 /// How many cards the body can hold.
 const MAX_CARDS: usize = 12;
@@ -1537,7 +1543,7 @@ fn status_pixel(x: usize, y: usize, app: &AgentManagerApp) -> u32 {
     //
     // WHY this is the one piece of colour in the chrome: the theme reserves
     // its accent for a brand mark, and the mark is the app.
-    let tile = Rect::new(GUTTER, 8, 32, 32);
+    let tile = Rect::new(GUTTER, (STATUS_H - 32) / 2, 32, 32);
     if tile.contains(x, y) {
         colour = std::design::primitives::draw_rounded_rect(
             x,
@@ -1560,12 +1566,38 @@ fn status_pixel(x: usize, y: usize, app: &AgentManagerApp) -> u32 {
         }
     }
 
+    // The runtime's state, which is the one thing on this screen that is
+    // allowed to be a colour.
+    //
+    // WHY the pill's place is worked out first: the title and the pill
+    // share one band, so the title has to know where the pill is before
+    // it can be drawn, or the two overlap and the title is cut.
+    let bound = app.device.services.inference_runtime_binding().is_bound();
+    let label: &[u8] = if bound { b"RUNTIME BOUND" } else { b"RUNTIME UNBOUND" };
+    let ink = if bound { THEME.success } else { THEME.warning };
+    let pill_w = font::measure(label, TYPE_CAPTION) + 24;
+    let pill_x = W - GUTTER - pill_w;
+    let pill = Rect::new(pill_x, (STATUS_H - 30) / 2, pill_w, 30);
+
+    // The title, at the largest scale that leaves the pill its room.
+    //
+    // WHY the scale is chosen rather than fixed: the title and the status
+    // share a band, and a title drawn at a fixed scale is a title that
+    // either collides with the status or is smaller than it needs to be.
+    let title_room = pill_x.saturating_sub(GUTTER + 44 + 12);
+    let title_scale = if font::measure(b"AGENT MANAGER", TYPE_TITLE) <= title_room {
+        TYPE_TITLE
+    } else if font::measure(b"AGENT MANAGER", TYPE_BODY) <= title_room {
+        TYPE_BODY
+    } else {
+        TYPE_CAPTION
+    };
     if let Some(c) = text(
         x,
         y,
         GUTTER + 44,
-        4,
-        TYPE_BODY,
+        6,
+        title_scale,
         b"AGENT MANAGER",
         THEME.on_surface,
         THEME.overlay,
@@ -1573,15 +1605,6 @@ fn status_pixel(x: usize, y: usize, app: &AgentManagerApp) -> u32 {
     ) {
         colour = c;
     }
-
-    // The runtime's state, which is the one thing on this screen that is
-    // allowed to be a colour.
-    let bound = app.device.services.inference_runtime_binding().is_bound();
-    let label: &[u8] = if bound { b"RUNTIME BOUND" } else { b"RUNTIME UNBOUND" };
-    let ink = if bound { THEME.success } else { THEME.warning };
-    let pill_w = font::measure(label, TYPE_CAPTION) + 24;
-    let pill_x = W - GUTTER - pill_w;
-    let pill = Rect::new(pill_x, 9, pill_w, 30);
     if pill.contains(x, y) {
         colour = std::design::primitives::draw_pill(
             x,
@@ -1595,7 +1618,7 @@ fn status_pixel(x: usize, y: usize, app: &AgentManagerApp) -> u32 {
             x,
             y,
             pill_x + 12,
-            18,
+            pill.y + 3,
             TYPE_CAPTION,
             label,
             ink,
@@ -1691,13 +1714,13 @@ fn body_pixel(x: usize, y: usize, app: &AgentManagerApp) -> Option<u32> {
         let title_top = card_y + CARD_PAD_TOP;
         if content_y >= title_top && content_y < title_top + TITLE_ROW_H {
             let title = &card.title[..card.title_len as usize];
-            let len = fit(title, CONTENT_W - 2 * CARD_PAD_X, TYPE_BODY);
+            let len = fit(title, CONTENT_W - 2 * CARD_PAD_X, TYPE_TITLE);
             if let Some(c) = text(
                 x,
                 y,
                 GUTTER + CARD_PAD_X,
                 BODY_TOP + title_top - offset,
-                TYPE_BODY,
+                TYPE_TITLE,
                 &title[..len],
                 card.title_tone.colour(),
                 style.fill,
@@ -1763,14 +1786,25 @@ fn body_pixel(x: usize, y: usize, app: &AgentManagerApp) -> Option<u32> {
                         colour = c;
                     }
                     let value = &line.value[..line.value_len as usize];
-                    let len = fit(value, VALUE_W, TYPE_CAPTION);
+                    let len = fit(value, VALUE_W, TYPE_BODY);
+                    // WHY the mark: a value cut in the middle of a word
+                    // reads as a word, and the reader is left with a
+                    // different name for the thing than the platform gave.
+                    let mut shown = [0u8; 256];
+                    shown[..len].copy_from_slice(&value[..len]);
+                    let len = if len < value.len() && len >= 3 {
+                        shown[len - 3..len].copy_from_slice(b"...");
+                        len
+                    } else {
+                        len
+                    };
                     if let Some(c) = text(
                         x,
                         y,
                         VALUE_X,
                         screen_y,
-                        TYPE_CAPTION,
-                        &value[..len],
+                        TYPE_BODY,
+                        &shown[..len],
                         line.tone.colour(),
                         style.fill,
                         false,

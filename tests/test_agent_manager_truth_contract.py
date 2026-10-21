@@ -42,11 +42,13 @@ MIRRORED = ROOT / "apps" / "agent_manager" / "src"
 def _read(path: Path):
     lib = path / "lib.rs"
     main = path / "main.rs"
+    theme = path / "theme.rs"
     if not lib.is_file() or not main.is_file():
         raise AssertionError(f"the agent manager's source is missing at {path}")
     return (
         lib.read_text(encoding="utf-8"),
         main.read_text(encoding="utf-8"),
+        theme.read_text(encoding="utf-8") if theme.is_file() else "",
     )
 
 
@@ -149,7 +151,7 @@ def test_the_app_does_not_claim_an_intermcp_interceptor():
     component that does not exist, and the description was the part of the
     app that looked most authoritative.
     """
-    for path, (lib, main) in SOURCES.items():
+    for path, (lib, main, _theme) in SOURCES.items():
         _forbids(lib + main, r"intermcp", "an InterMCP interceptor")
 
 
@@ -159,7 +161,7 @@ def test_the_app_does_not_claim_a_permission_modal():
     No such modal exists. The app has no way to raise one, so the line was
     a claim about a component the platform does not have.
     """
-    for path, (lib, main) in SOURCES.items():
+    for path, (lib, main, _theme) in SOURCES.items():
         _forbids(lib + main, r"permission modal", "a permission modal")
         _forbids(lib + main, r"modal dispatched", "a dispatched permission modal")
 
@@ -170,7 +172,7 @@ def test_the_app_does_not_claim_a_connected_host_bridge():
     Nothing was connected. The platform's service registry is the thing that
     says whether a runtime is bound, and the app now asks it.
     """
-    for path, (lib, main) in SOURCES.items():
+    for path, (lib, main, _theme) in SOURCES.items():
         _forbids(lib + main, r"\bconnected\b", "a connected runtime")
         _forbids(lib + main, r"ring-3 ipc socket", "a Ring-3 IPC socket connection")
 
@@ -182,7 +184,7 @@ def test_the_catalogue_does_not_advertise_a_model_the_device_does_not_hold():
     vendor's plan. The catalogue now shows an install state, and the state
     is a measurement.
     """
-    for path, (lib, main) in SOURCES.items():
+    for path, (lib, main, _theme) in SOURCES.items():
         _forbids(lib + main, r"gemma\s*4", "a Gemma 4 entry")
         _forbids(lib + main, r"\b\d+\s?[MB]\b", "a parameter count")
         _forbids(lib + main, r"q4_k_m|q8_0|\bf16\b", "a quantisation claim")
@@ -195,7 +197,7 @@ def test_the_app_does_not_claim_a_system_wide_integration():
     not wired up, so the badge asserted something no test supported. The
     app now says the opposite, in the Runtime surface.
     """
-    for path, (lib, main) in SOURCES.items():
+    for path, (lib, main, _theme) in SOURCES.items():
         _forbids(lib + main, r"integration[:\s]+active", "an active system-wide integration")
         _forbids(
             lib + main,
@@ -211,7 +213,7 @@ def test_the_app_does_not_claim_a_completed_keystore_derivation():
     line was false twice over: nothing was derived, and the call could not
     have succeeded.
     """
-    for path, (lib, main) in SOURCES.items():
+    for path, (lib, main, _theme) in SOURCES.items():
         _forbids(lib + main, r"derivation complete", "a completed key derivation")
         _forbids(lib + main, r"key derivation completed", "a completed key derivation")
 
@@ -222,7 +224,7 @@ def test_the_app_does_not_print_a_bracket_pass_it_did_not_run():
     The arithmetic those lines quoted was right, but nothing executed it.
     The rows are now the return values of the platform's own functions.
     """
-    for path, (lib, main) in SOURCES.items():
+    for path, (lib, main, _theme) in SOURCES.items():
         _forbids(lib + main, r"\[pass\]", "a literal [PASS]")
         _forbids(lib + main, r"\[ok\]", "a literal [OK]")
 
@@ -233,7 +235,7 @@ def test_the_app_does_not_invent_a_content_index():
     The app had opened no index. It now asks the platform's own document
     index and intent registry, and says "REFUSED" when the platform says no.
     """
-    for path, (lib, main) in SOURCES.items():
+    for path, (lib, main, _theme) in SOURCES.items():
         _forbids(lib + main, r"index empty", "an invented empty index")
         _forbids(lib + main, r"partition path", "an invented partition path")
 
@@ -246,7 +248,7 @@ def test_the_model_layer_does_not_hardcode_a_capability_grant():
     capability type, so the model layer must not carry a grant as a
     constant.
     """
-    for path, (lib, main) in SOURCES.items():
+    for path, (lib, main, _theme) in SOURCES.items():
         layer = _model_layer(lib)
         assert "cap_lookup" in layer, (
             f"{path} does not ask the kernel which capability types it holds"
@@ -266,7 +268,7 @@ def test_the_app_does_not_report_a_model_as_ready():
     A readiness badge that no query produced is a decoration. The install
     state is now one of three measured answers.
     """
-    for path, (lib, main) in SOURCES.items():
+    for path, (lib, main, _theme) in SOURCES.items():
         _forbids(lib + main, r"\bready\b", "a ready badge")
 
 
@@ -281,7 +283,7 @@ def test_the_app_is_a_single_column_portrait_layout():
     geometry below is the geometry of a 720x1440 portrait screen, and the
     bands have to be in that order for the app to read as a phone app.
     """
-    for path, (lib, main) in SOURCES.items():
+    for path, (lib, main, _theme) in SOURCES.items():
         source = lib + main
         width = _const(source, "W")
         height = _const(source, "H")
@@ -303,7 +305,7 @@ def test_the_app_keeps_a_forty_four_pixel_touch_target():
     The platform's minimum touch target is 44 logical pixels, and the app's
     segmented control and action buttons have to clear it.
     """
-    for path, (lib, main) in SOURCES.items():
+    for path, (lib, main, _theme) in SOURCES.items():
         source = lib + main
         tab = _const(source, "TAB_H")
         button = _const(source, "BUTTON_H")
@@ -314,19 +316,38 @@ def test_the_app_keeps_a_forty_four_pixel_touch_target():
 
 
 def test_the_app_uses_the_platforms_design_system():
-    """The app used to carry its own hex colours and its own spacing.
+    """The app's colours live in one place, and the roles are the platform's.
 
     The design system is the platform's, and a second one inside an app is
-    how the platform's surfaces stop matching each other. No hex literal
-    belongs in the app.
+    how the platform's surfaces stop matching each other. The app has a
+    theme of its own -- a supervisor is read, and a light surface with
+    black ink reads better than a dark instrument panel -- but the theme
+    is built from the platform's roles, scales, radii and spacing, and
+    every colour the app uses is named there rather than written at the
+    point of use.
     """
-    for path, (lib, main) in SOURCES.items():
+    for path, (lib, main, theme) in SOURCES.items():
         source = _code(lib + main)
-        assert "design::theme" in source, f"{path} does not use the platform's theme"
+        assert "design::theme" in source or "design::theme" in _code(theme), (
+            f"{path} does not use the platform's theme roles"
+        )
         assert "design::components" in source, (
             f"{path} does not use the platform's components"
         )
-        assert "Theme::NEUTRAL" in source, f"{path} does not use the neutral theme"
+        # The app's own theme, and it is the platform's roles with the
+        # app's own values.
+        assert theme, f"{path} has no theme module"
+        themed = _code(theme)
+        assert "Theme {" in themed, f"{path}'s theme is not a theme"
+        for role in ("surface", "on_surface", "on_surface_variant", "border"):
+            assert f"{role}:" in themed, f"{path}'s theme does not name {role}"
+        for scale in ("TypeScale", "Spacing", "Radii", "Touch"):
+            assert scale in themed, f"{path}'s theme does not use the platform's {scale}"
+        # The status colours, and only the status colours.
+        for status in ("success", "warning", "error"):
+            assert f"{status}:" in themed, f"{path}'s theme does not name {status}"
+        # No colour is written at the point of use: the theme is the only
+        # place a colour is allowed to be a number.
         literals = _hits(source, r"0x[0-9A-Fa-f]{6,8}\b")
         assert not literals, (
             f"{path} carries its own colour literals: {sorted(set(literals))[:5]}"
@@ -344,7 +365,7 @@ def test_the_app_draws_six_surfaces_behind_one_tab_row():
     segment width is derived from the count. A count written down in two
     places is a count that can disagree with itself.
     """
-    for path, (lib, main) in SOURCES.items():
+    for path, (lib, main, _theme) in SOURCES.items():
         source = _code(lib + main)
         for name in ("Models", "Access", "Runtime", "Search", "Test", "Chat"):
             assert name in source, f"{path} has no {name} surface"
@@ -361,7 +382,7 @@ def test_the_tab_row_derives_its_geometry_from_the_surface_count():
     for a row of six. The sixth tab ran past the content column, and the
     row's hit test and its drawing disagreed about where it was.
     """
-    for path, (lib, main) in SOURCES.items():
+    for path, (lib, main, _theme) in SOURCES.items():
         source = _code(lib + main)
         assert not re.search(r"\(\s*CONTENT_W\s*-\s*4\s*\*\s*TAB_GAP\s*\)", source), (
             f"{path} still writes the tab row's gap count down"
@@ -379,7 +400,7 @@ def test_the_chat_never_invents_a_reply():
     the user would believe it. The app has to answer with the platform's
     own reason.
     """
-    for path, (lib, main) in SOURCES.items():
+    for path, (lib, main, _theme) in SOURCES.items():
         source = _code(lib + main)
         # The chat pushes the platform's own reason into the transcript.
         assert "availability.reason()" in source, (
@@ -403,7 +424,7 @@ def test_the_chat_answers_from_the_platforms_service_registry():
     service registry, because that is the only thing that knows which
     services are running.
     """
-    for path, (lib, main) in SOURCES.items():
+    for path, (lib, main, _theme) in SOURCES.items():
         source = _code(lib + main)
         assert "resolve_inference_service" in source, (
             f"{path} does not resolve the inference service"
@@ -427,7 +448,7 @@ def test_the_chat_checks_the_service_version():
     changed. A request sent to a service that speaks another version
     would be misread rather than refused.
     """
-    for path, (lib, main) in SOURCES.items():
+    for path, (lib, main, _theme) in SOURCES.items():
         source = _code(lib + main)
         assert "INFERENCE_ABI_VERSION" in source, (
             f"{path} does not check the inference service's version"
@@ -447,7 +468,7 @@ def test_a_registry_that_could_not_be_read_is_not_the_same_as_no_service():
     said that there is no inference service. It has said nothing, and the
     chat must not report silence as a measurement.
     """
-    for path, (lib, main) in SOURCES.items():
+    for path, (lib, main, _theme) in SOURCES.items():
         source = _code(lib + main)
         assert "RegistryUnavailable" in source, (
             f"{path} does not distinguish a registry it could not read"
@@ -466,7 +487,7 @@ def test_the_transcript_and_the_prompt_are_bounded():
     drops the last character typed is worse: it lies about what was
     written.
     """
-    for path, (lib, main) in SOURCES.items():
+    for path, (lib, main, _theme) in SOURCES.items():
         source = _code(lib + main)
         for name in ("CHAT_MAX_MESSAGES", "CHAT_TEXT_MAX", "CHAT_PROMPT_MAX"):
             assert re.search(
@@ -513,7 +534,7 @@ def test_the_chat_is_reachable_and_answers_the_platforms_reason():
     not a surface, and a send button that does nothing is a dead
     affordance.
     """
-    for path, (lib, main) in SOURCES.items():
+    for path, (lib, main, _theme) in SOURCES.items():
         source = _code(lib + main)
         assert "Surface::Chat" in source, f"{path} does not reach the chat"
         assert "fn send_prompt" in source, f"{path} has no way to send a prompt"
@@ -529,7 +550,7 @@ def test_the_provider_is_a_trait_and_not_a_table():
     The catalogue is a registry of `dyn Provider`, so adding a model means
     writing one implementation and adding one registry entry.
     """
-    for path, (lib, main) in SOURCES.items():
+    for path, (lib, main, _theme) in SOURCES.items():
         source = _code(lib + main)
         assert "pub trait Provider" in source, f"{path} has no Provider trait"
         assert "dyn Provider" in source, (
@@ -546,7 +567,7 @@ def test_the_self_test_runs_the_platforms_own_function():
     The platform's fixed-point cosine is the function the supervisor's own
     arithmetic was quoting, and a failing row has to say FAIL.
     """
-    for path, (lib, main) in SOURCES.items():
+    for path, (lib, main, _theme) in SOURCES.items():
         source = _code(lib + main)
         assert "cosine_similarity_q7" in source, (
             f"{path} does not run the platform's cosine function"
@@ -561,7 +582,7 @@ def test_the_app_says_the_launcher_path_is_not_wired_up():
     not wired up, so the Runtime surface has to say so rather than leave a
     reader to infer it from an absence.
     """
-    for path, (lib, main) in SOURCES.items():
+    for path, (lib, main, _theme) in SOURCES.items():
         assert "launcher-to-service" in _code(lib + main), (
             f"{path} does not report the state of the launcher-to-service path"
         )
@@ -610,7 +631,7 @@ def test_the_contract_can_fail():
             f"the detector for {pattern!r} does not catch {synthetic!r}"
         )
 
-    for path, (lib, main) in SOURCES.items():
+    for path, (lib, main, _theme) in SOURCES.items():
         for pattern, _ in cases:
             assert not _hits(_code(lib + main), pattern), (
                 f"{path} trips the detector for {pattern!r}"

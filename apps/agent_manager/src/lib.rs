@@ -153,6 +153,8 @@ impl Surface {
 // -----------------------------------------------------------------------------
 
 /// Which side of a conversation a message came from.
+pub mod theme;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChatRole {
     /// Something the person typed.
