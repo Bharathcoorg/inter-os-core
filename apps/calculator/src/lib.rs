@@ -3,8 +3,153 @@
 
 extern crate interos_std;
 
+/// The platform's scroll model.
+use interos_std::design::scroll::ScrollState;
+
 /// The app's view of the platform's design system.
 pub mod theme;
+
+/// The width the expression tape wraps at, in pixels.
+///
+/// WHY it is a column and not the whole card: the tape has to leave room
+/// for the card's padding on both sides, or the last character of a line
+/// sits on the card's edge.
+pub const TAPE_COLUMN_W: usize = 600;
+
+/// How many tape lines the display shows at once.
+pub const TAPE_VISIBLE_LINES: usize = 2;
+
+/// The height of one tape line, in pixels.
+pub const TAPE_LINE_H: usize = 48;
+
+/// The most lines an expression wraps into.
+pub const TAPE_MAX_LINES: usize = 10;
+
+/// The width of one character as the display draws it.
+///
+/// WHY the outline face's advance and not the bitmap's: the display draws
+/// with the outline face, so a line wrapped with the bitmap's widths would
+/// not fit the column it was wrapped for.
+pub fn char_width(ch: u8, scale: usize) -> usize {
+    let em = interos_std::design::outline_text::em_for_scale(scale);
+    let outline = interos_std::design::typeface::advance_px(ch, em) as usize;
+    if outline > 0 {
+        return outline;
+    }
+    interos_std::design::font::advance_of(ch, false) * scale
+}
+
+/// The width of a string as the display draws it.
+pub fn text_width(text: &[u8], scale: usize) -> usize {
+    if let Some(width) = interos_std::design::outline_text::drawn_advance(text, scale, None) {
+        return width;
+    }
+    interos_std::design::font::measure_bold(text, scale)
+}
+
+/// Wraps an expression into the lines the tape shows.
+///
+/// WHY the tape wraps at all: the display used to show the last thirty-two
+/// characters of the expression and said nothing about it, so a long
+/// expression was cut off at the front with no way to reach it.
+///
+/// WHY the lines are returned whole: the tape is a fixed column of text
+/// and the expression is longer than one line, so the expression has to be
+/// broken into lines the column can hold.
+pub fn wrap_expression(
+    expr: &[u8],
+    scale: usize,
+    max_w: usize,
+    out: &mut [[u8; 128]],
+    lens: &mut [usize],
+) -> usize {
+    let mut lines = 0usize;
+    let mut start = 0usize;
+    let mut width = 0usize;
+    for (index, &ch) in expr.iter().enumerate() {
+        let advance = char_width(ch, scale);
+        if width + advance > max_w && index > start {
+            if lines >= out.len() {
+                break;
+            }
+            let len = index - start;
+            out[lines][..len].copy_from_slice(&expr[start..index]);
+            lens[lines] = len;
+            lines += 1;
+            start = index;
+            width = 0;
+        }
+        width += advance;
+    }
+    if start < expr.len() && lines < out.len() {
+        let len = expr.len() - start;
+        out[lines][..len].copy_from_slice(&expr[start..]);
+        lens[lines] = len;
+        lines += 1;
+    }
+    lines
+}
+
+/// The height of a tape that holds a given number of lines.
+pub fn tape_content_h(lines: usize) -> usize {
+    lines * TAPE_LINE_H
+}
+
+/// How many rows the keypad has.
+pub const KEY_ROWS: usize = 6;
+
+/// How many columns the keypad has.
+pub const KEY_COLS: usize = 4;
+
+/// The action of the key at (row, col), if the grid has one there.
+///
+/// WHY the layout lives here and not in the renderer: the renderer draws
+/// the keys, the hit test finds them and the tests check them, and three
+/// places that have to agree are better as one.
+pub const fn button_action(row: usize, col: usize) -> Option<char> {
+    match (row, col) {
+        (0, 0) => Some('C'), // AC (All Clear): throws the whole expression away
+        (0, 1) => Some('E'), // CE (Clear Entry): throws the number being typed away
+        (0, 2) => Some('B'), // Backspace: takes the last character back
+        (0, 3) => Some('P'), // () Parentheses
+        (1, 0) => Some('7'),
+        (1, 1) => Some('8'),
+        (1, 2) => Some('9'),
+        (1, 3) => Some('/'), // ÷ Divide
+        (2, 0) => Some('4'),
+        (2, 1) => Some('5'),
+        (2, 2) => Some('6'),
+        (2, 3) => Some('*'), // × Multiply
+        (3, 0) => Some('1'),
+        (3, 1) => Some('2'),
+        (3, 2) => Some('3'),
+        (3, 3) => Some('-'), // - Subtract
+        (4, 0) => Some('~'), // +/- Sign flip
+        (4, 1) => Some('0'),
+        (4, 2) => Some('.'), // . Decimal point
+        (4, 3) => Some('+'), // + Add
+        (5, 0) => Some('%'), // mod: the binary modulo, the remainder of a division
+        (5, 2) => Some('='), // = Evaluate
+        _ => None,
+    }
+}
+
+/// The label a key carries.
+///
+/// WHY the modulo key reads "mod": the operation is a binary modulo, the
+/// remainder of one number divided by another, and a "%" on the key said
+/// percentage, which is a different operation with the same glyph.
+pub const fn button_label(action: char) -> &'static [u8] {
+    match action {
+        'C' => b"AC",
+        'E' => b"CE",
+        'P' => b"()",
+        '~' => b"+/-",
+        '.' => b".",
+        '%' => b"mod",
+        _ => b"",
+    }
+}
 
 /// Error types encountered during mathematical evaluation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -588,7 +733,13 @@ impl<'a> Parser<'a> {
                 }
                 left = left.checked_div(right).ok_or(CalcError::Overflow)?;
             } else if self.bytes[self.pos] == b'%' {
-                // Modulo check: only binary modulo if followed by operand
+                // A '%' between two numbers is a binary modulo: the
+                // remainder of the left operand divided by the right one.
+                //
+                // WHY the operand has to follow: a '%' with nothing after
+                // it is a postfix percentage, and a percentage of nothing
+                // is not a number. The two readings share a glyph, so the
+                // parser tells them apart by what comes next.
                 let next_char = self.peek_non_space(self.pos + 1);
                 let is_operand_next = match next_char {
                     Some(c) => c.is_ascii_digit() || c == b'.' || c == b'(' || c.is_ascii_alphabetic(),
@@ -807,6 +958,20 @@ pub struct CalculatorState {
     pub display_len: usize,
     pub history: CalculationHistory,
     pub show_history: bool,
+    /// How far the expression tape is scrolled, and how far it can be.
+    ///
+    /// WHY the platform's scroll model and not a bare offset: the tape
+    /// used to show the last thirty-two characters of the expression and
+    /// say nothing about it. The scroll state knows how tall the tape is
+    /// and how tall the expression is, so the whole expression is
+    /// reachable.
+    pub tape_scroll: ScrollState,
+    /// The lines the expression wraps into, as the tape shows them.
+    pub tape_lines: [[u8; 128]; TAPE_MAX_LINES],
+    /// The length of each wrapped line.
+    pub tape_lens: [usize; TAPE_MAX_LINES],
+    /// How many lines the expression wraps into.
+    pub tape_count: usize,
 }
 
 impl CalculatorState {
@@ -826,7 +991,63 @@ impl CalculatorState {
             display_len: 1,
             history: CalculationHistory::new(),
             show_history: false,
+            tape_scroll: ScrollState::new(0, TAPE_VISIBLE_LINES * TAPE_LINE_H, 0),
+            tape_lines: [[0; 128]; TAPE_MAX_LINES],
+            tape_lens: [0; TAPE_MAX_LINES],
+            tape_count: 0,
         }
+    }
+
+    /// The expression the tape shows.
+    ///
+    /// WHY the last calculation is shown when the expression is empty: a
+    /// person who has just pressed equals wants to see what they
+    /// calculated, and the tape is where the display puts it.
+    pub fn tape_expression(&self) -> &[u8] {
+        if self.expr_len > 0 {
+            &self.expr_buf[..self.expr_len]
+        } else if let Some(last_entry) = self.history.get_recent(0) {
+            &last_entry.expr[..last_entry.expr_len]
+        } else {
+            b""
+        }
+    }
+
+    /// Re-wraps the expression and sets the tape's scroll extent.
+    ///
+    /// WHY it is called after an input and not on every frame: the
+    /// expression changes when a key is pressed, and wrapping it on every
+    /// frame would measure the same text a thousand times a second.
+    pub fn sync_tape(&mut self) {
+        // WHY the end is remembered before the extent changes: the tape
+        // follows the expression as it is typed, so a person who has not
+        // scrolled away sees the newest part, and a person who has
+        // scrolled away is left where they were.
+        let at_end = self.tape_scroll.offset >= self.tape_scroll.max_offset();
+        let expr = self.tape_expression();
+        let mut lines = [[0u8; 128]; TAPE_MAX_LINES];
+        let mut lens = [0usize; TAPE_MAX_LINES];
+        let count = wrap_expression(expr, 2, TAPE_COLUMN_W, &mut lines, &mut lens);
+        self.tape_lines = lines;
+        self.tape_lens = lens;
+        self.tape_count = count;
+        self.tape_scroll.content_h = tape_content_h(count);
+        self.tape_scroll.viewport_h = TAPE_VISIBLE_LINES * TAPE_LINE_H;
+        if at_end {
+            self.tape_scroll.offset = self.tape_scroll.max_offset();
+        }
+        self.tape_scroll.clamp();
+    }
+
+    /// Scrolls the expression tape by a number of lines.
+    pub fn scroll_tape(&mut self, lines: isize) {
+        let delta = (lines.unsigned_abs() as usize) * TAPE_LINE_H;
+        if lines < 0 {
+            self.tape_scroll.offset = self.tape_scroll.offset.saturating_sub(delta);
+        } else {
+            self.tape_scroll.offset = (self.tape_scroll.offset + delta).min(self.tape_scroll.max_offset());
+        }
+        self.tape_scroll.clamp();
     }
 
     pub fn expr_str(&self) -> &str {
@@ -1076,6 +1297,14 @@ impl CalculatorState {
                     }
                 }
                 '%' => {
+                    // Binary modulo: the remainder of the accumulator
+                    // divided by the operand.
+                    //
+                    // WHY this is not a percentage: a percentage scales
+                    // the accumulator by a hundredth, and a remainder is
+                    // what is left over after the division. The keypad's
+                    // key is labelled "mod" so the glyph says which one
+                    // this is.
                     if self.current_operand == 0 {
                         self.error = true;
                         self.calc_error = Some(CalcError::DivisionByZero);
@@ -1152,6 +1381,48 @@ impl CalculatorState {
         self.expr_len = 0;
         self.display_buf[0] = b'0';
         self.display_len = 1;
+        self.tape_scroll = ScrollState::new(0, TAPE_VISIBLE_LINES * TAPE_LINE_H, 0);
+    }
+
+    /// Clears the number being typed, keeping the pending operation.
+    ///
+    /// WHY this is separate from [`Self::clear`]: clear-all throws the
+    /// whole expression away, including the number already accumulated and
+    /// the operation waiting for its second operand. Clear-entry throws
+    /// away only the number being typed, which is what a person means
+    /// when they mistype the second operand and do not want to start the
+    /// whole calculation again.
+    pub fn clear_entry(&mut self) {
+        if self.error {
+            self.clear();
+            return;
+        }
+        // The trailing operator and its spaces are part of the pending
+        // operation, so they stay.
+        let mut end = self.expr_len;
+        while end > 0 && self.expr_buf[end - 1] == b' ' {
+            end -= 1;
+        }
+        let mut start = end;
+        while start > 0 {
+            let ch = self.expr_buf[start - 1];
+            if ch.is_ascii_digit() || ch == b'.' {
+                start -= 1;
+            } else {
+                break;
+            }
+        }
+        if start < end {
+            self.expr_len = start;
+        }
+        self.current_operand = 0;
+        self.result_mode = false;
+        if self.expr_len == 0 {
+            self.display_buf[0] = b'0';
+            self.display_len = 1;
+        } else {
+            self.update_display_from_operand();
+        }
     }
 
     pub fn toggle_sign(&mut self) {
@@ -1521,5 +1792,154 @@ mod tests {
         let d4 = Decimal::ZERO;
         let l4 = d4.format(&mut buf);
         assert_eq!(&buf[..l4], b"0");
+    }
+
+    /// The keypad has to carry a clear-all, a clear-entry and a backspace,
+    /// and they have to be three different keys.
+    ///
+    /// WHY: backspace was keyboard-only, and the clear key threw the whole
+    /// expression away. A person who mistyped the second operand had no
+    /// key that threw away only that operand.
+    #[test]
+    fn test_the_keypad_has_a_clear_entry_and_a_backspace_of_its_own() {
+        let mut clear_all = None;
+        let mut clear_entry = None;
+        let mut backspace = None;
+        for row in 0..KEY_ROWS {
+            for col in 0..KEY_COLS {
+                match button_action(row, col) {
+                    Some('C') => clear_all = Some((row, col)),
+                    Some('E') => clear_entry = Some((row, col)),
+                    Some('B') => backspace = Some((row, col)),
+                    _ => {}
+                }
+            }
+        }
+        let clear_all = clear_all.expect("the keypad has no clear-all key");
+        let clear_entry = clear_entry.expect("the keypad has no clear-entry key");
+        let backspace = backspace.expect("the keypad has no backspace key");
+        assert_ne!(clear_all, clear_entry);
+        assert_ne!(clear_all, backspace);
+        assert_ne!(clear_entry, backspace);
+    }
+
+    /// The three clearing keys have to do three different things.
+    #[test]
+    fn test_clear_entry_keeps_the_pending_operation_and_clear_all_does_not() {
+        let mut calc = CalculatorState::new();
+        calc.push_digit(1);
+        calc.push_digit(2);
+        calc.set_operation('+');
+        calc.push_digit(3);
+        calc.push_digit(4);
+
+        // Clear-entry throws the number being typed away and keeps the
+        // operation that is waiting for it.
+        calc.clear_entry();
+        assert_eq!(calc.expr_str(), "12 + ");
+        assert_eq!(calc.current_operand, 0);
+        assert_eq!(calc.active_operation, Some('+'));
+
+        // The number that was cleared is not in the expression, and the
+        // calculation that follows uses the new one.
+        calc.push_digit(5);
+        assert_eq!(calc.evaluate(), 17);
+
+        // Clear-all throws everything away.
+        calc.set_operation('*');
+        calc.push_digit(9);
+        calc.clear();
+        assert_eq!(calc.expr_str(), "");
+        assert_eq!(calc.active_operation, None);
+        assert_eq!(calc.current_operand, 0);
+    }
+
+    /// Backspace has to take one character back, not the whole entry.
+    #[test]
+    fn test_backspace_takes_one_character_back() {
+        let mut calc = CalculatorState::new();
+        calc.push_digit(1);
+        calc.push_digit(2);
+        calc.push_digit(3);
+        assert_eq!(calc.expr_str(), "123");
+        calc.backspace();
+        assert_eq!(calc.expr_str(), "12");
+        calc.backspace();
+        assert_eq!(calc.expr_str(), "1");
+    }
+
+    /// The key that says "mod" has to be the key that does the modulo.
+    ///
+    /// WHY: the key showed a "%" and the operation was a binary modulo,
+    /// the remainder of a division. A "%" on the key said percentage.
+    #[test]
+    fn test_the_modulo_key_says_what_it_does() {
+        assert_eq!(button_label('%'), b"mod");
+        let mut found = false;
+        for row in 0..KEY_ROWS {
+            for col in 0..KEY_COLS {
+                if button_action(row, col) == Some('%') {
+                    found = true;
+                }
+            }
+        }
+        assert!(found, "the keypad has no modulo key");
+
+        // The operation the key queues is the remainder of a division.
+        let mut calc = CalculatorState::new();
+        calc.push_digit(17);
+        calc.set_operation('%');
+        calc.push_digit(5);
+        assert_eq!(calc.evaluate(), 2);
+    }
+
+    /// The tape has to hold the whole expression, not its last characters.
+    ///
+    /// WHY: the tape used to show the last thirty-two characters and say
+    /// nothing about it, so the start of a long expression was simply
+    /// gone.
+    #[test]
+    fn test_the_tape_holds_the_whole_expression_and_scrolls_to_it() {
+        let mut calc = CalculatorState::new();
+        calc.push_str("1 + 2 + 3 + 4 + 5 + 6 + 7 + 8 + 9 + 10 + 11 + 12 + 13 + 14 + 15 + 16 + 17 + 18 + 19 + 20");
+        calc.sync_tape();
+
+        // The expression is longer than the thirty-two characters the tape
+        // used to show, and every character of it is on the tape.
+        let mut on_tape = 0usize;
+        for index in 0..calc.tape_count {
+            on_tape += calc.tape_lens[index];
+        }
+        assert_eq!(on_tape, calc.expr_len);
+        assert!(calc.tape_count > TAPE_VISIBLE_LINES);
+
+        // The scroll extent is the whole expression.
+        assert_eq!(
+            calc.tape_scroll.content_h,
+            tape_content_h(calc.tape_count)
+        );
+        assert_eq!(calc.tape_scroll.viewport_h, TAPE_VISIBLE_LINES * TAPE_LINE_H);
+
+        // The tape follows the end of the expression, and it can be
+        // scrolled back to the beginning.
+        assert_eq!(calc.tape_scroll.offset, calc.tape_scroll.max_offset());
+        calc.scroll_tape(-(calc.tape_count as isize));
+        assert_eq!(calc.tape_scroll.offset, 0);
+        calc.scroll_tape(1);
+        assert_eq!(calc.tape_scroll.offset, TAPE_LINE_H);
+        calc.scroll_tape(-1);
+        assert_eq!(calc.tape_scroll.offset, 0);
+    }
+
+    /// A short expression fits on the tape and does not scroll.
+    #[test]
+    fn test_a_short_expression_does_not_scroll() {
+        let mut calc = CalculatorState::new();
+        calc.push_str("1 + 2");
+        calc.sync_tape();
+        assert_eq!(calc.tape_count, 1);
+        assert_eq!(calc.tape_scroll.max_offset(), 0);
+        calc.scroll_tape(1);
+        assert_eq!(calc.tape_scroll.offset, 0);
     }
 }
