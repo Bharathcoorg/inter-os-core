@@ -13,6 +13,7 @@ pub mod display_list;
 pub mod scroll;
 pub mod theme;
 pub mod components;
+pub mod monochrome;
 #[cfg(test)]
 mod cap_ladder;
 

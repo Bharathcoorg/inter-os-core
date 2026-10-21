@@ -594,6 +594,14 @@ mod tests {
     fn reset_slots() -> std::sync::MutexGuard<'static, ()> {
         let guard = POOL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_slot_pool();
+        // WHY the last placement is forgotten as well: the fast path answers
+        // a repeat placement from the run it placed last, and that run names
+        // the slot it was drawn into. A test that resets the pool releases
+        // those slots, so a later placement may draw a different run into the
+        // slot the cached run names -- and the cached run would then be read
+        // back over somebody else's glyphs. That is a failure that appears on
+        // one run and not the next, which is the definition of untrustworthy.
+        forget_last_placement();
         guard
     }
 
