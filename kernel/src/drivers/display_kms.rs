@@ -473,6 +473,13 @@ impl DrmKmsController {
                 // to, hides nothing.
                 continue;
             }
+            if !s.input_enabled {
+                // WHY the system's own overlays do not block: the system
+                // line is a band the compositor keeps current, and it is
+                // never written whole, so treating it as a torn frame would
+                // stop the shell from ever publishing again.
+                continue;
+            }
             if s.z_order > own_min {
                 return false;
             }
@@ -531,21 +538,7 @@ impl DrmKmsController {
         } else {
             z_order
         };
-        let mut surface = DrmSurface::new(id, width, height, actual_z, owner_task);
-        surface.input_enabled = !is_overlay;
-        // WHY a task whose surfaces are hidden stays hidden: the shell keeps
-        // drawing while an application is in the foreground -- its switcher
-        // pictures, its overlays -- and a surface it creates after the
-        // application was launched would be composited over the
-        // application, so the shell's own widgets appear through the
-        // application's cards.
-        if self
-            .surfaces
-            .iter()
-            .any(|s| s.owner_task == owner_task && !s.visible)
-        {
-            surface.visible = false;
-        }
+        let surface = DrmSurface::new(id, width, height, actual_z, owner_task);
         self.surfaces.push(surface);
         self.frame_dirty = true;
         // A new surface appears on top of whatever was there before, so the rows

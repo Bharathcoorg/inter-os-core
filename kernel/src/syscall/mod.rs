@@ -5748,32 +5748,6 @@ pub fn dev_launch_app(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
 /// that is hidden keeps its state, and raising it again brings it back
 /// with everything it had. The launcher is not one of these -- its surface
 /// is the desktop, and the desktop is what the new application is drawn
-/// over.
-fn hide_running_app_surfaces() {
-    // WHY a fixed array and not a vector: the kernel has no allocator.
-    let mut owners = [0u64; 16];
-    let mut count = 0usize;
-    {
-        let sched = SCHEDULER.lock();
-        for task in sched.tasks_iter() {
-            // WHY the name is the test: an application task is named
-            // `app_*`, and the shell's own tasks are named `launcher` and
-            // `compositor`.
-            if task.name.starts_with("app_") && count < owners.len() {
-                owners[count] = task.id.0;
-                count += 1;
-            }
-        }
-    }
-    if count == 0 {
-        return;
-    }
-    let mut kms = crate::drivers::display_kms::DRM_KMS.lock();
-    for owner in owners.iter().take(count) {
-        kms.set_surfaces_visibility_for_task(*owner, false);
-    }
-}
-
 /// The task that owns the shell's surfaces.
 ///
 /// WHY the shell is found by name: the shell is the task the platform
