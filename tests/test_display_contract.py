@@ -65,9 +65,15 @@ def main() -> None:
     must(services, "cap_type: CapabilityType::FrameBufferDirect, rights: Rights::WRITE, object_id: 1",
          "displayd-only framebuffer capability")
     must(service, "pub fn run_display() -> !", "dedicated display service loop")
-    must(service, "std::surface_create(4, 320, 480, 0)", "display service creates surface through ABI")
-    must(service, "std::surface_write(4, surface", "display service writes through ABI")
-    must(service, "std::surface_flip(4)", "display service flips through ABI")
+    # WHY the spelling changed: a capability *slot* is a position in the
+    # task's capability table, not a capability. The kernel now authorises
+    # every platform call by the capability's *type*, so the caller no
+    # longer names a slot and the SDK's display functions take no slot
+    # argument. The intent is unchanged: the display service must create a
+    # surface, write pixels into it, and flip it to the scanout.
+    must(service, "std::surface_create(320, 480, 0)", "display service creates surface through ABI")
+    must(service, "std::surface_write(surface", "display service writes through ABI")
+    must(service, "std::surface_flip()", "display service flips through ABI")
     must(drivers, "crate::framebuffer::present_argb8888", "KMS-to-hardware scanout handoff")
     must(displayd, "interos_system_service::run_display()", "displayd uses dedicated implementation")
 
@@ -101,6 +107,17 @@ def main() -> None:
         must(aarch64_display_hal, marker, f"aarch64 display_hal {marker}")
 
     print("display driver boundary and DisplayMetrics contract: PASS")
+
+
+def test_display_driver_boundary_and_display_metrics_contract() -> None:
+    """Expose the contract to pytest.
+
+    Every check lives in `main()` so the file stays directly executable
+    (`python tests/test_display_contract.py`); this wrapper runs the very
+    same checks under pytest without duplicating any of them.
+    """
+    main()
+
 
 if __name__ == "__main__":
     main()

@@ -103,7 +103,12 @@ class LauncherIntegrationTests(unittest.TestCase):
         src = _text(LAUNCHER)
         self.assertIn("fn stored_wallpaper_key", src)
         self.assertIn("let raw = &raw[..n];", src)
-        self.assertIn("Ok(n) if n > 0 && n <= buf.len() => Some((buf, n))", src)
+        # WHY the assertion is on the length travelling with the value and
+        # not on the exact spelling of the read: the guarantee is that the
+        # store's length reaches the caller, so the trailing zero padding
+        # cannot reach a byte-exact comparison. How the read is written is
+        # not the invariant.
+        self.assertIn("n > 0 && n <= buf.len() => Some((buf, n))", src)
 
     def test_03_state_refreshes_at_boot_and_when_a_foreground_app_exits(self):
         src = _text(LAUNCHER)

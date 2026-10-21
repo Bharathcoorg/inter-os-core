@@ -99,7 +99,12 @@ def test_reboot_keeps_guest_scanout_visible_in_studio():
 def test_volume_is_guest_rendered_as_a_system_overlay():
     launcher = read("apps/launcher/src/main.rs")
     assert "render_volume_hud" in launcher
-    assert "std::window_set_geometry(4, id, 100, 220, 100, true)" in launcher
+    # WHY the call carries no capability slot: the kernel authorises the
+    # geometry change by capability type, and a slot number is a position
+    # in a table rather than a capability. The HUD is still the guest's
+    # own window, placed at the same place and made visible.
+    assert "std::window_set_geometry(id, 100, 220, 100, true)" in launcher
+    assert "std::window_set_geometry(4," not in launcher
 
 
 def test_studio_does_not_gate_real_scanout_on_launcher_ready_state():

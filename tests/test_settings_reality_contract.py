@@ -144,8 +144,18 @@ class SettingsRealityContractTests(unittest.TestCase):
     app = (ROOT / "apps/settings/src/main.rs").read_text(encoding="utf-8")
     assert "developer.terminal_enabled=false" in source
     assert "developer_terminal_enabled()" in syscall
-    assert 'std::settings_get(0, "developer.terminal_enabled"' in launcher
+    # WHY the assertion is on the key and not on a capability slot number: a
+    # slot is a *position* in the task's capability table, and the kernel now
+    # authorises by the capability's type, so the launcher names the
+    # authority it wants and the kernel finds it. Pinning a slot number
+    # would pin an accident, and the accident is what broke this read
+    # before: the launcher passed slot 0 while its FileSystemRead
+    # capability sat at slot 3, and the flag was never seen.
+    assert 'read_setting("developer.terminal_enabled"' in launcher
     assert "developer_terminal_enabled()" in launcher
+    # The shell must not name a capability slot where it reads state.
+    assert "std::settings_get(0," not in launcher
+    assert "std::settings_get(3," not in launcher
     assert "toggle_terminal" in app
     assert "Developer terminal" in app
     assert "Disabled by default" in app

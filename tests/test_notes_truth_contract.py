@@ -9,9 +9,81 @@ app rather than by running it, and each one is a rule that has to keep
 holding as the app changes.
 """
 
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+
+# The SDK functions that used to take a capability slot as their first
+# argument. The kernel now authorises every one of them by the
+# capability's *type*, so the app names the authority it wants and the
+# kernel finds it.
+SLOT_ARG_SDK_CALLS = (
+    "app_storage_open",
+    "display_set_mode",
+    "display_set_orientation",
+    "fs_list",
+    "fs_open",
+    "fs_read",
+    "fs_stat",
+    "fs_unlink",
+    "fs_write",
+    "get_ticks",
+    "ipc_recv",
+    "ipc_send",
+    "log",
+    "package_install",
+    "package_list",
+    "package_registry",
+    "package_rollback",
+    "package_uninstall",
+    "service_package_launch",
+    "service_package_verify",
+    "settings_get",
+    "settings_set",
+    "surface_create",
+    "surface_destroy",
+    "surface_flip",
+    "surface_write",
+    "verify_package",
+    "window_focus",
+    "window_set_geometry",
+    "window_set_input",
+)
+
+# A capability slot named in a comment or in a user-visible label is not
+# a call, so the call patterns are matched against the code with both
+# removed.
+_COMMENT_OR_LITERAL = re.compile(
+    r"//[^\n]*"
+    r"|/\*.*?\*/"
+    r'|"(?:[^"\\]|\\.)*"'
+    r'|(?:b|br|r#*)"(?:[^"\\]|\\.)*"#*',
+    re.DOTALL,
+)
+
+
+def code_only(source: str) -> str:
+    """Return `source` with comments and string literals removed."""
+    return _COMMENT_OR_LITERAL.sub(" ", source)
+
+
+def slot_arguments(source: str) -> list[str]:
+    """Return the SDK calls in `source` that still take a capability slot.
+
+    A slot argument is either a bare number or the name of a resolved
+    slot, and a call that names one is a call that pinned a position in
+    the task's capability table.
+    """
+    code = code_only(source)
+    return [
+        name
+        for name in SLOT_ARG_SDK_CALLS
+        if re.search(
+            r"\b" + name + r"\s*\(\s*(?:\d|[A-Za-z_][A-Za-z0-9_]*_slot\b|\bslot\b)",
+            code,
+        )
+    ]
 
 
 def read(path: str) -> str:
@@ -24,6 +96,14 @@ def notes_main() -> str:
 
 def notes_lib() -> str:
     return read("apps/notes/src/lib.rs")
+
+
+def notes_source() -> str:
+    """Everything the notes app is made of."""
+    return "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in sorted((ROOT / "apps/notes/src").rglob("*.rs"))
+    )
 
 
 def test_the_note_store_is_opened_within_the_app_sandbox():
@@ -41,29 +121,59 @@ def test_the_note_store_is_opened_within_the_app_sandbox():
 
 
 def test_the_store_uses_the_named_filesystem_capabilities():
-    """The store used to ask for capability `2`, which is the framebuffer.
+    """A capability slot is a position in a table, not an identity.
 
-    The VFS verifies the capability *type* at the slot it is given, so a
-    framebuffer capability presented for filesystem authority is refused and
-    the store never opens. The two filesystem capabilities have to be named.
+    WHY this contract changed: a slot is a position in the task's
+    capability table, and the kernel now authorises every platform call by
+    the capability's *type*, so the SDK's functions no longer take a slot
+    argument at all. The app names the authority it wants -- a filesystem
+    read, a filesystem write -- and the kernel finds it. Pinning a slot
+    number pinned an accident: the launcher proved it by passing slot 0
+    while its `FileSystemRead` capability sat at slot 3, so the
+    developer-terminal flag it wanted was never read and the refusal
+    reached the user with nothing on screen to say why. So the old rule
+    ("the two filesystem capabilities have to be named") becomes "the app
+    names no slot at all".
     """
-    source = notes_main()
-    assert "std::cap_lookup(std::cap_type::FILE_SYSTEM_READ, 0)" in source
-    assert "std::cap_lookup(std::cap_type::FILE_SYSTEM_WRITE, 0)" in source
-    assert "std::cap_lookup(2, 0)" not in source
-    assert "std::cap_lookup(0, 0)" not in source
+    source = notes_source()
+    assert slot_arguments(source) == []
+    # The app resolves no slot: not through the SDK's slot helpers, and not
+    # by looking a capability type up for itself.
+    assert "std::cap::" not in source
+    assert "std::cap_lookup(" not in source
+    # The store is still the user's own: it is opened inside the app's own
+    # sandbox, by a relative path, and it is still read and written.
+    assert 'const STORAGE_PATH: &str = "data/notes.bin";' in source
+    assert '"/data/notes.bin"' not in source
+    assert "std::app_storage_open(" in source
+    assert "std::fs_read(" in source
+    assert "std::fs_write(" in source
 
 
 def test_the_display_capability_is_looked_up_by_type():
-    """`cap_lookup(0, ...)` asks for a capability type that does not exist.
+    """The framebuffer capability is found by the kernel, not by the app.
 
-    The lookup therefore always failed and the app fell back to the literal
-    slot 6, which is the IPC receive capability in the notes table. The app
-    only ever drew because the kernel searched for a framebuffer capability
-    on its behalf.
+    WHY this contract changed: a slot is a position in the task's
+    capability table, and the position depends on the order the kernel
+    inserted the capabilities in, so the app cannot name one. The kernel
+    now authorises the surface by the capability's *type* and the SDK
+    takes no slot argument, so there is nothing left for the app to look
+    up. Pinning a slot number pinned an accident: the launcher proved it
+    by passing slot 0 while its `FileSystemRead` capability sat at slot 3,
+    so the developer-terminal flag it wanted was never read. The old
+    contract pinned the framebuffer by type because the app had to hand a
+    slot to `surface_create`; it no longer hands over anything.
     """
-    source = notes_main()
-    assert "std::cap_lookup(std::cap_type::FRAMEBUFFER_DIRECT, 0)" in source
+    source = notes_source()
+    assert slot_arguments(source) == []
+    assert "std::cap::" not in source
+    assert "std::cap_lookup(" not in source
+    # The app still asks for a surface, still presents it and still draws
+    # into it, and it does not fall back to a literal slot when the
+    # platform refuses.
+    assert "std::surface_create(" in source
+    assert "std::surface_flip(" in source
+    assert "std::surface_write(" in source
     assert "Err(_) => 6," not in source
 
 
