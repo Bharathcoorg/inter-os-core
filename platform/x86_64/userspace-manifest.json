@@ -129,6 +129,11 @@
       "name": "notes",
       "kind": "application",
       "manifest": "apps/notes/Cargo.toml"
+    },
+    {
+      "name": "agent_manager",
+      "kind": "application",
+      "manifest": "apps/agent_manager/Cargo.toml"
     }
   ],
   "kernel": {

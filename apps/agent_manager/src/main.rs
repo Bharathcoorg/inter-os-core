@@ -41,9 +41,10 @@ use std::design::theme::{self, Theme};
 
 use agent_manager::{
     format_threshold, format_u32, granted_capability_count, probe_capability_grants, providers,
-    service_name, CapabilityGrant, DeviceState, InstallState, ModelProbeStatus, ProbeStatus,
-    Provider, RuntimeBinding, SearchConfiguration, SelfTest, ServiceState, Surface,
-    CAPABILITY_COUNT, MATRYOSHKA_DEFAULT_DIM, MAX_RESULTS_DEFAULT, SIMILARITY_DEFAULT_Q15,
+    resolve_inference_service, service_name, CapabilityGrant, ChatRole, ChatSession, DeviceState,
+    InstallState, ModelProbeStatus, ProbeStatus, Provider, RuntimeBinding, SearchConfiguration,
+    SelfTest, ServiceState, Surface, CHAT_PROMPT_MAX, CAPABILITY_COUNT, MATRYOSHKA_DEFAULT_DIM,
+    MAX_RESULTS_DEFAULT, SIMILARITY_DEFAULT_Q15,
 };
 
 // -----------------------------------------------------------------------------
@@ -106,7 +107,14 @@ const ROW_H: usize = 26;
 const LINES_TOP: usize = CARD_PAD_TOP + TITLE_ROW_H + TITLE_GAP;
 
 /// The label column's width in pixels.
-const LABEL_W: usize = 300;
+/// The label column's width.
+///
+/// WHY 216 and not 300: the longest label the app uses is eighteen
+/// characters, and a column wide enough for the longest label is a
+/// column with room to spare. The old width spent a quarter of the
+/// content column on white space, which is what made the rows read
+/// as a table rather than as a phone's list.
+const LABEL_W: usize = 216;
 /// The gap between the label column and the value column.
 ///
 /// WHY the gap is not zero: the face is proportional, and a label that
@@ -189,6 +197,32 @@ impl Tone {
             Self::Unavailable => THEME.warning,
             Self::Accent => THEME.accent,
         }
+    }
+}
+
+/// The tone a transcript card's title carries.
+///
+/// WHY the roles are coloured differently: a conversation that is read as
+/// a list of undifferentiated lines is hard to follow, and the two sides
+/// of an exchange have to be tellable apart at a glance.
+fn chat_role_tone(role: ChatRole) -> Tone {
+    match role {
+        ChatRole::User => Tone::Accent,
+        ChatRole::Assistant => Tone::Good,
+        ChatRole::Notice => Tone::Unavailable,
+    }
+}
+
+/// The tone a transcript message's text carries.
+///
+/// WHY the platform's own notices are muted rather than coloured as
+/// warnings: a notice that reports an absence is not a failure, and
+/// painting it as one would make the screen cry wolf.
+fn chat_role_ink(role: ChatRole) -> Tone {
+    match role {
+        ChatRole::User => Tone::Plain,
+        ChatRole::Assistant => Tone::Plain,
+        ChatRole::Notice => Tone::Muted,
     }
 }
 
@@ -346,6 +380,10 @@ pub enum Action {
     Remove,
     /// Run the self-test.
     RunTest,
+    /// Send the prompt to whatever model the device has.
+    Send,
+    /// Empty the conversation and the prompt.
+    ClearChat,
 }
 
 /// A bottom action bar button.
@@ -395,6 +433,8 @@ pub struct AgentManagerApp {
     pub line_count: u8,
     /// The body's total height, in body coordinates.
     pub content_height: u16,
+    /// The conversation and the prompt being written.
+    pub chat: ChatSession,
 }
 
 impl AgentManagerApp {
@@ -416,6 +456,7 @@ impl AgentManagerApp {
             lines: [Line::empty(); MAX_LINES],
             line_count: 0,
             content_height: 0,
+            chat: ChatSession::new(),
         };
         app.set_action(b"Measurements taken from the platform.", Tone::Muted);
         app.rebuild();
@@ -573,6 +614,7 @@ impl AgentManagerApp {
             Surface::Runtime => self.build_runtime(),
             Surface::Search => self.build_search(),
             Surface::Test => self.build_test(),
+            Surface::Chat => self.build_chat(),
         }
 
         self.layout();
@@ -677,7 +719,7 @@ impl AgentManagerApp {
     /// Builds the model management surface.
     fn build_models(&mut self) {
         let models = self.device.models;
-        self.begin_card(b"DEVICE MODEL STATE", Tone::Muted);
+        self.begin_card(b"Device model state", Tone::Plain);
         self.add_line(b"Model directory", MODEL_DIRECTORY_LABEL, Tone::Plain);
         self.add_line(b"Directory", models.status.as_str().as_bytes(), model_tone(models.status));
         let mut count = [0u8; 8];
@@ -726,7 +768,7 @@ impl AgentManagerApp {
             );
         }
 
-        self.begin_card(b"PROVIDER CATALOGUE", Tone::Accent);
+        self.begin_card(b"Provider catalogue", Tone::Accent);
         for (index, provider) in providers().iter().enumerate() {
             let state = provider.install_state(&self.device);
             self.add_selectable(
@@ -743,7 +785,7 @@ impl AgentManagerApp {
         );
 
         let selected = self.selected_provider();
-        self.begin_card(b"SELECTED PROVIDER", Tone::Muted);
+        self.begin_card(b"Selected provider", Tone::Plain);
         self.add_line(b"Provider", selected.display_name().as_bytes(), Tone::Accent);
         self.add_line(b"Identifier", selected.id().as_bytes(), Tone::Plain);
         let state = selected.install_state(&self.device);
@@ -767,7 +809,7 @@ impl AgentManagerApp {
             Tone::Plain,
         );
 
-        self.begin_card(b"LAST ACTION", Tone::Muted);
+        self.begin_card(b"Last action", Tone::Plain);
         let mut message = [0u8; ACTION_LOG_MAX];
         let len = self.action_log_len.min(ACTION_LOG_MAX);
         message[..len].copy_from_slice(&self.action_log[..len]);
@@ -779,7 +821,7 @@ impl AgentManagerApp {
         // WHY the grants are copied out: the builder mutates the body while
         // it walks the list, and the list belongs to the app.
         let grants = self.grants;
-        self.begin_card(b"CAPABILITY GRANTS", Tone::Muted);
+        self.begin_card(b"Capability grants", Tone::Plain);
         let granted = granted_capability_count(&grants);
         let mut summary = [0u8; 24];
         let mut n = 0;
@@ -810,7 +852,7 @@ impl AgentManagerApp {
             );
         }
 
-        self.begin_card(b"WHAT THE GRANTS ALLOW", Tone::Muted);
+        self.begin_card(b"What the grants allow", Tone::Plain);
         let mut any = false;
         for grant in grants.iter() {
             if grant.granted {
@@ -829,7 +871,7 @@ impl AgentManagerApp {
             Tone::Muted,
         );
 
-        self.begin_card(b"WHAT IS NOT GRANTED", Tone::Muted);
+        self.begin_card(b"What is not granted", Tone::Plain);
         let mut any = false;
         for grant in grants.iter() {
             if !grant.granted {
@@ -845,7 +887,7 @@ impl AgentManagerApp {
     /// Builds the runtime status surface.
     fn build_runtime(&mut self) {
         let services = self.device.services;
-        self.begin_card(b"SERVICE REGISTRY", Tone::Muted);
+        self.begin_card(b"Service registry", Tone::Plain);
         let mut count = [0u8; 12];
         let mut n = 0;
         n += format_u32(services.count as u32, &mut count[n..]);
@@ -873,7 +915,7 @@ impl AgentManagerApp {
             self.add_wide(b"The registry answered and listed no services.", Tone::Muted);
         }
 
-        self.begin_card(b"INFERENCE RUNTIME", Tone::Accent);
+        self.begin_card(b"Inference runtime", Tone::Accent);
         let binding = services.inference_runtime_binding();
         self.add_line(
             b"Runtime",
@@ -900,7 +942,7 @@ impl AgentManagerApp {
     /// Builds the search configuration surface.
     fn build_search(&mut self) {
         let search = self.search;
-        self.begin_card(b"RETRIEVAL SETTINGS", Tone::Muted);
+        self.begin_card(b"Retrieval settings", Tone::Plain);
         let held = search.dimension.is_some();
         let dimension = search.dimension.unwrap_or(MATRYOSHKA_DEFAULT_DIM);
         let mut value = [0u8; VALUE_MAX];
@@ -978,7 +1020,7 @@ impl AgentManagerApp {
             );
         }
 
-        self.begin_card(b"SEARCH SOURCES", Tone::Muted);
+        self.begin_card(b"Search sources", Tone::Plain);
         for source in search.sources.iter() {
             let mut value = [0u8; VALUE_MAX];
             let n = if source.status == ProbeStatus::Listed {
@@ -1002,11 +1044,129 @@ impl AgentManagerApp {
             Tone::Muted,
         );
 
-        self.begin_card(b"CONTENT LAYER", Tone::Accent);
+        self.begin_card(b"Content layer", Tone::Accent);
         self.add_wide(
             b"The document index and the intent registry are the platform's own. The counts above are the platform's answers.",
             Tone::Muted,
         );
+    }
+
+    /// Builds the chat surface.
+    ///
+    /// WHY the service state comes first: the conversation is the
+    /// feature, but the answer to "why is there no reply" is the service
+    /// state, and somebody about to type deserves to know before they
+    /// type rather than after.
+    fn build_chat(&mut self) {
+        let availability = resolve_inference_service(&self.device.services);
+        self.begin_card(b"Model service", Tone::Plain);
+        self.add_line(
+            b"State",
+            if availability.is_available() {
+                b"running"
+            } else {
+                b"not available"
+            },
+            if availability.is_available() {
+                Tone::Good
+            } else {
+                Tone::Unavailable
+            },
+        );
+        self.add_wide(availability.reason().as_bytes(), Tone::Muted);
+
+        if self.chat.is_empty() {
+            self.begin_card(b"Conversation", Tone::Plain);
+            self.add_wide(
+                b"No messages yet. Type a prompt and press SEND.",
+                Tone::Muted,
+            );
+        } else {
+            for position in 0..self.chat.len() {
+                // WHY the message is copied out: the builder mutates the
+                // body while it walks the transcript, and the transcript
+                // belongs to the app.
+                let Some(message) = self.chat.message_at(position).copied() else {
+                    break;
+                };
+                let role = message.role;
+                let len = message.text_len as usize;
+                self.begin_card(role.label().as_bytes(), chat_role_tone(role));
+                self.add_wide(&message.text[..len], chat_role_ink(role));
+            }
+        }
+
+        self.begin_card(b"Prompt", Tone::Plain);
+        if self.chat.prompt_is_empty() {
+            self.add_wide(b"Nothing typed yet.", Tone::Muted);
+        } else {
+            // WHY the prompt is copied out: the builder takes the body
+            // mutably and the prompt belongs to the app.
+            let mut prompt = [0u8; CHAT_PROMPT_MAX];
+            let len = self.chat.prompt_text().len().min(CHAT_PROMPT_MAX);
+            prompt[..len].copy_from_slice(&self.chat.prompt_text()[..len]);
+            self.add_wide(&prompt[..len], Tone::Plain);
+        }
+        self.add_wide(
+            b"Text is entered with the keyboard. SEND asks the platform's model service.",
+            Tone::Muted,
+        );
+    }
+
+    /// Sends the prompt to whatever model the device has.
+    ///
+    /// WHY the prompt is recorded before the answer is sought: the
+    /// exchange is the user's, and it belongs in the transcript whether
+    /// or not a model was there to answer it. A conversation that
+    /// silently swallowed the prompt would leave the user unable to say
+    /// what they had asked.
+    pub fn send_prompt(&mut self) {
+        if self.chat.prompt_is_empty() {
+            self.set_action(b"Nothing to send.", Tone::Muted);
+            return;
+        }
+        let mut prompt = [0u8; CHAT_PROMPT_MAX];
+        let len = self.chat.prompt_text().len().min(CHAT_PROMPT_MAX);
+        prompt[..len].copy_from_slice(&self.chat.prompt_text()[..len]);
+        self.chat.push(ChatRole::User, &prompt[..len]);
+        self.chat.clear_prompt();
+
+        let availability = resolve_inference_service(&self.device.services);
+        if !availability.is_available() {
+            // WHY the reason is the reply: there is no model to answer, and
+            // the honest answer to a prompt is the reason there is no
+            // answer. The platform's own words, not a sentence invented
+            // here.
+            self.chat
+                .push(ChatRole::Notice, availability.reason().as_bytes());
+            self.set_action(availability.reason().as_bytes(), Tone::Unavailable);
+            // WHY the body is rebuilt here and not only at the end: the early
+            // return is what an absent model takes, and without the
+            // rebuild the transcript kept saying "No messages yet"
+            // after the person had typed a prompt and pressed send.
+            self.rebuild();
+            return;
+        }
+        // A service that is running and speaks this version is the only
+        // path to a real answer, and the platform does not yet carry the
+        // call that would deliver one. The app says so rather than
+        // inventing a reply.
+        self.chat.push(
+            ChatRole::Notice,
+            b"The inference service is running, but this build has no way to deliver a request to it.",
+        );
+        self.set_action(
+            b"The model service is running; this build cannot deliver a request to it.",
+            Tone::Unavailable,
+        );
+        self.rebuild();
+    }
+
+    /// Empties the conversation and the prompt.
+    pub fn clear_chat(&mut self) {
+        self.chat = ChatSession::new();
+        self.set_action(b"Conversation cleared.", Tone::Muted);
+        self.rebuild();
     }
 
     /// Builds the self-test surface.
@@ -1014,7 +1174,7 @@ impl AgentManagerApp {
         // WHY the rows are copied out: the builder mutates the body while it
         // walks the rows, and the rows belong to the app.
         let test = self.self_test;
-        self.begin_card(b"SELF-TEST", Tone::Accent);
+        self.begin_card(b"Self-test", Tone::Accent);
         let passed = test.rows.iter().filter(|row| row.passed).count();
         let mut summary = [0u8; 24];
         let mut n = 0;
@@ -1050,7 +1210,7 @@ impl AgentManagerApp {
             Tone::Muted,
         );
 
-        self.begin_card(b"LAST ACTION", Tone::Muted);
+        self.begin_card(b"Last action", Tone::Plain);
         let mut message = [0u8; ACTION_LOG_MAX];
         let len = self.action_log_len.min(ACTION_LOG_MAX);
         message[..len].copy_from_slice(&self.action_log[..len]);
@@ -1146,7 +1306,70 @@ impl AgentManagerApp {
                     enabled: false,
                 },
             ],
+            Surface::Chat => [
+                ActionButton {
+                    label: "SEND",
+                    action: Action::Send,
+                    // WHY the button is live even when there is no model:
+                    // pressing it is how the user finds out, and the
+                    // answer is the platform's reason rather than a
+                    // button that does nothing.
+                    enabled: true,
+                },
+                ActionButton {
+                    label: "CLEAR",
+                    action: Action::ClearChat,
+                    enabled: true,
+                },
+                ActionButton {
+                    label: "",
+                    action: Action::Refresh,
+                    enabled: false,
+                },
+            ],
         }
+    }
+}
+
+/// What a key press did to the composer.
+enum ChatKey {
+    /// The composer changed, so the body has to be rebuilt.
+    Edited,
+    /// The key was not for the composer.
+    Ignored,
+}
+
+/// Routes a key press to the composer.
+///
+/// WHY the printable range is ASCII 32..126: that is the whole of the
+/// font the platform ships, so a key outside it is a character the
+/// screen cannot draw. Accepting one would put a glyph in the prompt
+/// that the transcript could never show again.
+///
+/// WHY the composer refuses a character it cannot hold rather than
+/// dropping it: a composer that silently loses the last character typed
+/// is a composer that lies about what was written.
+fn handle_chat_key(app: &mut AgentManagerApp, code: u32) -> ChatKey {
+    use std::input_key_code;
+    match code {
+        input_key_code::ENTER | 13 => {
+            app.send_prompt();
+            ChatKey::Edited
+        }
+        input_key_code::BACKSPACE | 8 => {
+            app.chat.pop_prompt_char();
+            app.rebuild();
+            ChatKey::Edited
+        }
+        32..=126 => {
+            if app.chat.push_prompt_char(code as u8) {
+                app.rebuild();
+                ChatKey::Edited
+            } else {
+                ChatKey::Ignored
+            }
+        }
+        _ => ChatKey::Ignored,
     }
 }
 
@@ -1246,11 +1469,20 @@ fn text(
     if body.is_empty() {
         return None;
     }
-    if scale >= 2 {
-        let em = std::design::outline_text::em_for_scale(scale);
-        let (ascent, _) = std::design::typeface::line_metrics(em);
-        let baseline = (y0 + font::BASELINE * scale).max(ascent as usize);
-        let run = std::design::outline_text::OutlineRun::place_styled(x0, baseline, em, body, bold)?;
+    // WHY the outline face at every scale and not only the large ones: the
+    // panel is 1080x2160 and this app paints 720x1440, so the compositor
+    // magnifies every run by three in width and two in height. A bitmap
+    // glyph magnified by three is a soft glyph, and most of the text on
+    // this screen is a small run. The outline face is a real outline at
+    // the panel's own resolution, so it stays sharp at any size.
+    //
+    // WHY the bitmap face is still here: a run the outline face refuses
+    // -- a character the typeface has no outline for -- has to be drawn
+    // somehow, and the bitmap face is what it is drawn with.
+    let em = std::design::outline_text::em_for_scale(scale);
+    let (ascent, _) = std::design::typeface::line_metrics(em);
+    let baseline = (y0 + font::BASELINE * scale).max(ascent as usize);
+    if let Some(run) = std::design::outline_text::OutlineRun::place_styled(x0, baseline, em, body, bold) {
         let (bx, by, bw, bh) = run.bounds();
         if x >= bx && x < bx + bw && y >= by && y < by + bh {
             return run.pixel(x, y, ink, bg);
@@ -1380,7 +1612,12 @@ fn status_pixel(x: usize, y: usize, app: &AgentManagerApp) -> u32 {
 /// The segmented control.
 fn tab_pixel(x: usize, y: usize, app: &AgentManagerApp) -> u32 {
     let mut colour = THEME.surface;
-    let segment_w = (CONTENT_W - 4 * TAB_GAP) / Surface::COUNT;
+    // WHY the gap count is derived rather than written down: the tab row
+    // has a gap between every pair of segments, so a row of N segments
+    // has N-1 gaps. The number was written down, and the last tab in the
+    // row ran past the content column the moment a sixth surface was
+    // added.
+    let segment_w = (CONTENT_W - (Surface::COUNT - 1) * TAB_GAP) / Surface::COUNT;
     let index = (x.saturating_sub(GUTTER)) / (segment_w + TAB_GAP);
     if index < Surface::COUNT {
         let seg_x = GUTTER + index * (segment_w + TAB_GAP);
@@ -1464,7 +1701,11 @@ fn body_pixel(x: usize, y: usize, app: &AgentManagerApp) -> Option<u32> {
                 &title[..len],
                 card.title_tone.colour(),
                 style.fill,
-                true,
+                // WHY the heading is not bold: a bold run at the heading's size is
+                // heavy enough to shout, and a screen whose every heading
+                // shouts is a screen with no hierarchy. The heading's size
+                // already separates it from the body.
+                false,
             ) {
                 colour = c;
             }
@@ -1606,13 +1847,25 @@ fn action_pixel(x: usize, y: usize, app: &AgentManagerApp) -> u32 {
     let message = &app.action_log[..app.action_log_len];
     if y >= RESULT_Y && y < RESULT_Y + ROW_H {
         let len = fit(message, CONTENT_W, TYPE_CAPTION);
+        // WHY the mark: a status line that stops in the middle of a word
+        // reads as a word, and a reader who takes it for one is reading a
+        // sentence the platform never said. The mark says the sentence
+        // continues.
+        let mut shown = [0u8; ACTION_LOG_MAX];
+        shown[..len].copy_from_slice(&message[..len]);
+        let len = if len < message.len() && len >= 3 {
+            shown[len - 3..len].copy_from_slice(b"...");
+            len
+        } else {
+            len
+        };
         if let Some(c) = text(
             x,
             y,
             GUTTER,
             RESULT_Y,
             TYPE_CAPTION,
-            &message[..len],
+            &shown[..len],
             app.action_tone.colour(),
             THEME.overlay,
             false,
@@ -1690,7 +1943,9 @@ fn handle_tap(app: &mut AgentManagerApp, x: u32, y: u32) -> Tap {
 
     // The segmented control.
     if uy >= TAB_Y && uy < TAB_Y + TAB_H {
-        let segment_w = (CONTENT_W - 4 * TAB_GAP) / Surface::COUNT;
+        // WHY the gap count is derived: see the note at the tab row's
+        // own geometry.
+        let segment_w = (CONTENT_W - (Surface::COUNT - 1) * TAB_GAP) / Surface::COUNT;
         let index = (ux.saturating_sub(GUTTER)) / (segment_w + TAB_GAP);
         if let Some(surface) = Surface::from_index(index) {
             if surface != app.surface {
@@ -1724,6 +1979,8 @@ fn handle_tap(app: &mut AgentManagerApp, x: u32, y: u32) -> Tap {
                         Action::Install => app.install_selected(),
                         Action::Remove => app.remove_selected(),
                         Action::RunTest => app.run_self_test(),
+                        Action::Send => app.send_prompt(),
+                        Action::ClearChat => app.clear_chat(),
                     }
                     return Tap::Redraw;
                 }
@@ -1804,7 +2061,16 @@ pub extern "C" fn _start() -> ! {
             while std::input_event_poll(&mut input).is_ok() {
                 if let Some(key) = input.key_event() {
                     if key.pressed {
-                        let _ = key.code;
+                        // WHY the keys go to the composer only on the chat
+                        // surface: on every other surface a key press is
+                        // the platform's, and swallowing it would make the
+                        // app look broken.
+                        if app.surface == Surface::Chat {
+                            match handle_chat_key(&mut app, key.code) {
+                                ChatKey::Edited => dirty = Dirty::All,
+                                ChatKey::Ignored => {}
+                            }
+                        }
                     }
                     continue;
                 }

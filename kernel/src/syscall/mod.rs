@@ -5297,6 +5297,7 @@ fn native_first_party_app_available(package_id: &str) -> bool {
             // into the registry, but a package missing from this match was filtered straight
             // back out, so the drawer never saw it and the launch arm was unreachable.
             | "org.interos.notes"
+    | "org.interos.agentmanager"
     )
 }
 
@@ -5710,6 +5711,7 @@ pub fn dev_launch_app(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
         "org.interos.file_manager" | "file_manager" | "files" | "app_file_manager" => crate::task::user::spawn_app_file_manager(parent),
         "org.interos.gallery" | "gallery" | "photos" | "app_gallery" => crate::task::user::spawn_app_gallery(parent),
         "org.interos.notes" | "notes" | "app_notes" => crate::task::user::spawn_app_notes(parent),
+    "org.interos.agentmanager" | "agentmanager" | "agent_manager" | "app_agent_manager" => crate::task::user::spawn_app_agent_manager(parent),
         "org.interos.compositor" | "compositor" | "org.interos.launcher" | "launcher" => {
             return Err(SyscallResult::PermissionDenied);
         }
@@ -5909,6 +5911,12 @@ fn launch_registered_package(app_id: &str, parent_id: TaskId) -> Result<crate::t
         }
         "org.interos.notes" | "notes" | "app_notes" => {
             crate::task::user::spawn_app_notes(parent_id)
+        }
+        "org.interos.agentmanager"
+        | "agentmanager"
+        | "agent_manager"
+        | "app_agent_manager" => {
+            crate::task::user::spawn_app_agent_manager(parent_id)
         }
         _ => {
             crate::serial_println!("[APP_LAUNCH DEBUG] unknown app_id: '{}'", app_id);

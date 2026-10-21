@@ -153,7 +153,7 @@ foreach ($app in @(
     "compositor", "launcher", "settings", "terminal",
     "dialer", "vault", "camera", "calculator",
     "browser", "messages", "calendar", "music",
-    "file_manager", "gallery",
+    "file_manager", "gallery", "agent_manager",
     # WHY these: kernel/src/task/images.rs embeds them with include_bytes!,
     # and include_bytes! does not trigger a kernel rebuild. An app that is embedded
     # but never built here therefore ships a stale image with no compiler error --

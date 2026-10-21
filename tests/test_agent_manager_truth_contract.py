@@ -333,18 +333,193 @@ def test_the_app_uses_the_platforms_design_system():
         )
 
 
-def test_the_app_draws_five_surfaces_behind_one_tab_row():
-    """The five surfaces the supervisor was asked for have to be there.
+def test_the_app_draws_six_surfaces_behind_one_tab_row():
+    """The surfaces the supervisor was asked for have to be there.
 
     Model management, permissions, runtime status, search configuration and
-    a test interface, reachable from one tab row.
+    a test interface, plus the chat the assistant is reached through, all
+    reachable from one tab row.
+
+    WHY the count is six: the chat surface joined the row, and the row's
+    segment width is derived from the count. A count written down in two
+    places is a count that can disagree with itself.
     """
     for path, (lib, main) in SOURCES.items():
         source = _code(lib + main)
-        for name in ("Models", "Access", "Runtime", "Search", "Test"):
+        for name in ("Models", "Access", "Runtime", "Search", "Test", "Chat"):
             assert name in source, f"{path} has no {name} surface"
-        assert re.search(r"const\s+COUNT\s*:\s*usize\s*=\s*5\s*;", source), (
-            f"{path} does not have five surfaces"
+        assert re.search(r"const\s+COUNT\s*:\s*usize\s*=\s*6\s*;", source), (
+            f"{path} does not have six surfaces"
+        )
+
+
+def test_the_tab_row_derives_its_geometry_from_the_surface_count():
+    """The last tab in the row has to land inside the content column.
+
+    WHY this matters: the segment width was written with a fixed gap
+    count of four, which is right for a row of five segments and wrong
+    for a row of six. The sixth tab ran past the content column, and the
+    row's hit test and its drawing disagreed about where it was.
+    """
+    for path, (lib, main) in SOURCES.items():
+        source = _code(lib + main)
+        assert not re.search(r"\(\s*CONTENT_W\s*-\s*4\s*\*\s*TAB_GAP\s*\)", source), (
+            f"{path} still writes the tab row's gap count down"
+        )
+        assert re.search(
+            r"\(\s*Surface::COUNT\s*-\s*1\s*\)\s*\*\s*TAB_GAP", source
+        ), f"{path} does not derive the tab row's geometry from the surface count"
+
+
+def test_the_chat_never_invents_a_reply():
+    """The chat must not produce an answer no model gave.
+
+    WHY this matters: a chat surface that produced a plausible sentence
+    when no model was present would be the worst lie in the app, because
+    the user would believe it. The app has to answer with the platform's
+    own reason.
+    """
+    for path, (lib, main) in SOURCES.items():
+        source = _code(lib + main)
+        # The chat pushes the platform's own reason into the transcript.
+        assert "availability.reason()" in source, (
+            f"{path} does not put the platform's reason into the transcript"
+        )
+        # There is no canned answer anywhere in the chat's path.
+        _forbids(
+            source,
+            r"As an AI language model|I'm sorry, I can't|I cannot answer|"
+            r"Here is (?:a|the) (?:possible|sample) (?:answer|response)|"
+            r"(?:sample|dummy|mock|fake|placeholder) (?:answer|reply|response)",
+            "a fabricated answer",
+        )
+
+
+def test_the_chat_answers_from_the_platforms_service_registry():
+    """The chat's availability comes from a measurement, not a constant.
+
+    WHY this matters: the catalogue once listed a host bridge and a model
+    the device did not have. The chat has to ask the platform's own
+    service registry, because that is the only thing that knows which
+    services are running.
+    """
+    for path, (lib, main) in SOURCES.items():
+        source = _code(lib + main)
+        assert "resolve_inference_service" in source, (
+            f"{path} does not resolve the inference service"
+        )
+        assert "service_list" in lib or "service_list" in main, (
+            f"{path} does not read the platform's service registry"
+        )
+        _forbids(
+            source,
+            r"fn\s+resolve_inference_service\s*\([^)]*\)\s*->\s*InferenceAvailability\s*\{\s*"
+            r"InferenceAvailability::Available",
+            "a hardcoded availability",
+        )
+
+
+def test_the_chat_checks_the_service_version():
+    """A service that speaks another version is reported, not used.
+
+    WHY this matters: the platform's service registry carries an ABI
+    version per service precisely so a client can tell that the contract
+    changed. A request sent to a service that speaks another version
+    would be misread rather than refused.
+    """
+    for path, (lib, main) in SOURCES.items():
+        source = _code(lib + main)
+        assert "INFERENCE_ABI_VERSION" in source, (
+            f"{path} does not check the inference service's version"
+        )
+        assert "WrongVersion" in source, (
+            f"{path} does not report a version it does not speak"
+        )
+        assert "abi_version" in source, (
+            f"{path} does not read the service's ABI version"
+        )
+
+
+def test_a_registry_that_could_not_be_read_is_not_the_same_as_no_service():
+    """Silence is not a fact.
+
+    WHY this matters: a registry the platform refused to answer has not
+    said that there is no inference service. It has said nothing, and the
+    chat must not report silence as a measurement.
+    """
+    for path, (lib, main) in SOURCES.items():
+        source = _code(lib + main)
+        assert "RegistryUnavailable" in source, (
+            f"{path} does not distinguish a registry it could not read"
+        )
+        assert "ProbeStatus::Listed" in source, (
+            f"{path} does not check the registry's own answer"
+        )
+
+
+def test_the_transcript_and_the_prompt_are_bounded():
+    """Neither the conversation nor the prompt can grow without bound.
+
+    WHY this matters: the app is `no_std` with no allocator, so an
+    unbounded buffer is not a memory problem, it is a build that does not
+    compile or a screen that stops rendering. A composer that silently
+    drops the last character typed is worse: it lies about what was
+    written.
+    """
+    for path, (lib, main) in SOURCES.items():
+        source = _code(lib + main)
+        for name in ("CHAT_MAX_MESSAGES", "CHAT_TEXT_MAX", "CHAT_PROMPT_MAX"):
+            assert re.search(
+                rf"pub\s+const\s+{name}\s*:\s*usize\s*=\s*\d+\s*;", source
+            ), f"{path} does not bound {name}"
+        assert re.search(r"fn\s+push_prompt_char\([^)]*\)\s*->\s*bool", source), (
+            f"{path}'s composer does not report a refused character"
+        )
+        assert re.search(
+            r"fn\s+push\(&mut self,\s*role:\s*ChatRole", source
+        ), f"{path} does not have a bounded transcript"
+        # A refused character is reported, not dropped: the composer's
+        # return value is what tells the caller the character was refused.
+        assert re.search(
+            r"if\s+app\.chat\.push_prompt_char\(", source
+        ) or re.search(
+            r"if\s+chat\.push_prompt_char\(", source
+        ), f"{path} ignores the composer's refusal"
+
+
+def test_the_sdk_defines_a_versioned_inference_interface():
+    """The interface the chat speaks is named and versioned in the SDK.
+
+    WHY this matters: the platform's rules keep inference runtimes out of
+    the kernel and behind a narrow, versioned service interface. An
+    interface that only the app knows about is not an interface, and a
+    version that only the app knows about cannot be checked.
+    """
+    ai = (
+        ROOT / "sdk" / "rust" / "interos-std" / "src" / "ai.rs"
+    ).read_text(encoding="utf-8")
+    assert re.search(
+        r"pub\s+const\s+INFERENCE_ABI_VERSION\s*:\s*u16\s*=\s*\d+\s*;", ai
+    ), "the SDK does not version the inference service interface"
+    assert re.search(
+        r"pub\s+const\s+SERVICE_INFERENCE\s*:\s*u8\s*=\s*\d+\s*;", ai
+    ), "the SDK does not name the inference service's id"
+
+
+def test_the_chat_is_reachable_and_answers_the_platforms_reason():
+    """The chat is a tab, and pressing send reports what the platform said.
+
+    WHY this matters: a surface that exists but is not in the tab row is
+    not a surface, and a send button that does nothing is a dead
+    affordance.
+    """
+    for path, (lib, main) in SOURCES.items():
+        source = _code(lib + main)
+        assert "Surface::Chat" in source, f"{path} does not reach the chat"
+        assert "fn send_prompt" in source, f"{path} has no way to send a prompt"
+        assert "Action::Send" in source, f"{path} has no send control"
+        assert "ChatRole::Notice" in source, (
+            f"{path} does not record the platform's answer in the transcript"
         )
 
 

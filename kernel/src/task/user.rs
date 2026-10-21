@@ -1822,3 +1822,62 @@ pub fn spawn_app_notes(id_security: TaskId) -> TaskId {
     serial_println!("[OK] Spawned app_notes (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
     id
 }
+
+/// Spawns the agent manager.
+///
+/// WHY these capabilities and no others: the app's whole job is to report
+/// what the device holds, so it reads the model directory, the settings
+/// store, the document index and the service registry, and it draws. It
+/// writes nothing, it does not drive hardware, and it holds no authority
+/// over the device beyond reading. A supervisor that could change what it
+/// supervises would not be a supervisor.
+///
+/// WHY the content index: the search surface reports the platform's
+/// document layer, and reading the index is reading a description of
+/// documents rather than the documents themselves.
+pub fn spawn_app_agent_manager(id_security: TaskId) -> TaskId {
+    let mut caps = CapabilityTable::new(5);
+    caps.insert(Capability {
+        id: CapabilityId(2910),
+        cap_type: CapabilityType::SerialOutput,
+        rights: Rights::WRITE,
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2911),
+        cap_type: CapabilityType::FrameBufferDirect,
+        rights: Rights::WRITE,
+        object_id: 1,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2912),
+        cap_type: CapabilityType::EventPoll,
+        rights: Rights::READ.union(Rights::INVOKE),
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2913),
+        cap_type: CapabilityType::FileSystemRead,
+        rights: Rights::READ,
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2914),
+        cap_type: CapabilityType::ContentIndexRead,
+        rights: Rights::READ,
+        object_id: 0,
+    }).ok();
+
+    let id = spawn_user_process_with_parent(
+        "app_agent_manager",
+        APP_AGENT_MANAGER_ELF,
+        caps,
+        6,
+        id_security,
+    ).expect("Failed to spawn the agent manager");
+    serial_println!(
+        "[OK] Spawned app_agent_manager (Ring 3 User Mode, Isolated CR3, ID: {:?})",
+        id
+    );
+    id
+}
