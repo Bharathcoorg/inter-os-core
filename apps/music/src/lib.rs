@@ -5,6 +5,10 @@ pub use interos_std as std;
 /// The app's view of the platform's design system.
 pub mod theme;
 
+/// The library's documents in the shared storage area, and the import that
+/// reads the audio files the device holds.
+pub mod library;
+
 /// `FileSystemRead` slot: accepted by `sys_settings_get`.
 pub const STORE_CAP_READ: usize = 4;
 /// `FileSystemWrite` slot: accepted by `sys_settings_set`.
@@ -30,6 +34,69 @@ pub const STORE_BLOB_BYTES: usize = 2 + MAX_TRACKS * RECORD_BYTES;
 
 pub const DUR_MIN: u32 = 1;
 pub const DUR_MAX: u32 = 100_000;
+
+/// How the library is ordered.
+///
+/// WHY this is an enum and not a number: the order is a choice the user
+/// makes, and the names are what the screen shows next to the control that
+/// changes it. A number would leave the screen to spell it out again.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SortMode {
+    /// The order the tracks were added. This is the queue's own order.
+    Added,
+    /// Alphabetical by title.
+    Title,
+    /// Shortest first.
+    Duration,
+}
+
+impl SortMode {
+    /// The label the sort control shows.
+    pub const fn label(self) -> &'static str {
+        match self {
+            SortMode::Added => "ADDED",
+            SortMode::Title => "TITLE",
+            SortMode::Duration => "LENGTH",
+        }
+    }
+
+    /// The next mode the control cycles through.
+    pub const fn next(self) -> SortMode {
+        match self {
+            SortMode::Added => SortMode::Title,
+            SortMode::Title => SortMode::Duration,
+            SortMode::Duration => SortMode::Added,
+        }
+    }
+}
+
+/// Case-insensitive substring match.
+///
+/// WHY the search is case-insensitive: a person looking for "nocturne" types
+/// it in lower case whatever the track is called, and a search that only
+/// matched the exact case would report that the library does not hold the
+/// track it holds.
+pub fn contains_ci(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    if needle.len() > haystack.len() {
+        return false;
+    }
+    for i in 0..=(haystack.len() - needle.len()) {
+        let mut matched = true;
+        for j in 0..needle.len() {
+            if !haystack[i + j].eq_ignore_ascii_case(&needle[j]) {
+                matched = false;
+                break;
+            }
+        }
+        if matched {
+            return true;
+        }
+    }
+    false
+}
 
 pub const ESCAPE_BYTE: u8 = 0xFE;
 pub const ESCAPED_NEWLINE: u8 = 0x8A;
@@ -142,11 +209,22 @@ impl TrackRecord {
         self.duration_sec
     }
 
+    /// Whether the track's length is known.
+    ///
+    /// WHY zero means "unknown" and not "zero seconds": a track imported
+    /// from the shared storage has a real file behind it and no length
+    /// anybody has read, and a length of zero would be a claim that the
+    /// track is empty.
+    pub fn duration_known(&self) -> bool {
+        self.duration_sec != 0
+    }
+
     pub fn valid(&self) -> bool {
         self.id != 0
             && (self.title_len as usize) <= TITLE_MAX
             && self.title_len > 0
-            && (DUR_MIN..=DUR_MAX).contains(&self.duration_sec)
+            // A duration of zero is the "not read" marker, not a length.
+            && self.duration_sec <= DUR_MAX
             && self
                 .title
                 .iter()
@@ -340,7 +418,12 @@ impl TrackStore {
             self.state = StoreState::Full;
             return false;
         }
-        if title.is_empty() || title.len() > TITLE_MAX || !(DUR_MIN..=DUR_MAX).contains(&duration_sec) {
+        // WHY a duration of zero is accepted: a track imported from the
+        // shared storage has a real file behind it and a length nobody has
+        // read. Refusing it would leave the file out of the library, and
+        // storing a made-up length would be worse.
+        let known = (DUR_MIN..=DUR_MAX).contains(&duration_sec);
+        if title.is_empty() || title.len() > TITLE_MAX || (!known && duration_sec != 0) {
             self.state = StoreState::Invalid;
             return false;
         }
@@ -394,11 +477,232 @@ impl TrackStore {
             false
         }
     }
+
+    /// Moves the track at `idx` to `to`, keeping every other track in place.
+    ///
+    /// WHY this is the queue's reorder action: the library is one ordered
+    /// list and the queue is that list in play order, so a track that moves
+    /// up in the queue moves up in the library.
+    ///
+    /// Returns `true` only when the new order was persisted. A refused
+    /// write leaves the queue exactly as it was.
+    pub fn move_to(&mut self, idx: usize, to: usize) -> bool {
+        let original = self.records;
+        if !move_record(&mut self.records, idx, to) {
+            return false;
+        }
+        if self.write() {
+            self.state = StoreState::Written;
+            true
+        } else {
+            self.records = original;
+            self.state = StoreState::WriteRefused;
+            false
+        }
+    }
+
+    /// Orders the library by the order the tracks were added.
+    ///
+    /// WHY the id is the order: every track is given the next id when it is
+    /// added, so the ids are the order the tracks arrived in and nothing
+    /// else has to be stored to remember it.
+    pub fn sort_by_added(&mut self) -> bool {
+        self.sort_records(added_less)
+    }
+
+    /// Orders the library by title, keeping tracks with the same title in the
+    /// order they were added.
+    pub fn sort_by_title(&mut self) -> bool {
+        self.sort_records(title_less)
+    }
+
+    /// Orders the library by length, shortest first.
+    pub fn sort_by_duration(&mut self) -> bool {
+        self.sort_records(duration_less)
+    }
+
+    /// Sorts the records with `less` and persists the new order.
+    fn sort_records(&mut self, less: fn(&TrackRecord, &TrackRecord) -> bool) -> bool {
+        let len = self.len as usize;
+        if len < 2 {
+            return true;
+        }
+        let original = self.records;
+        if !sort_records(&mut self.records, len, less) {
+            return false;
+        }
+        if self.write() {
+            self.state = StoreState::Written;
+            true
+        } else {
+            self.records = original;
+            self.state = StoreState::WriteRefused;
+            false
+        }
+    }
+}
+
+/// Moves the record at `idx` to `to` inside `records`, keeping the rest in
+/// place.
+///
+/// WHY the permutation and the persistence are separate functions: the
+/// permutation is the queue's behaviour and can be checked on its own, and
+/// the persistence is the device's answer about it.
+pub fn move_record(records: &mut [TrackRecord; MAX_TRACKS], idx: usize, to: usize) -> bool {
+    let len = records.len();
+    if idx >= len || to >= len || idx == to {
+        return false;
+    }
+    let moved = records[idx];
+    if idx < to {
+        records.copy_within(idx + 1..=to, idx);
+    } else {
+        records.copy_within(to..idx, to + 1);
+    }
+    records[to] = moved;
+    true
+}
+
+/// Sorts the first `len` records with `less`, keeping equal records in their
+/// old order.
+///
+/// WHY an insertion sort: the library holds eight tracks, and a sort that
+/// allocates is a sort the render path cannot pay for.
+pub fn sort_records(
+    records: &mut [TrackRecord; MAX_TRACKS],
+    len: usize,
+    less: fn(&TrackRecord, &TrackRecord) -> bool,
+) -> bool {
+    if len < 2 {
+        return true;
+    }
+    for a in 1..len {
+        let key = records[a];
+        let mut b = a;
+        while b > 0 && less(&key, &records[b - 1]) {
+            records[b] = records[b - 1];
+            b -= 1;
+        }
+        records[b] = key;
+    }
+    true
+}
+
+/// Whether `a` sorts before `b` by title, ignoring case.
+pub fn title_less(a: &TrackRecord, b: &TrackRecord) -> bool {
+    let at = a.title();
+    let bt = b.title();
+    let n = at.len().min(bt.len());
+    for i in 0..n {
+        let x = at[i].to_ascii_lowercase();
+        let y = bt[i].to_ascii_lowercase();
+        if x != y {
+            return x < y;
+        }
+    }
+    at.len() < bt.len()
+}
+
+/// Whether `a` sorts before `b` by the order the tracks were added.
+///
+/// WHY the id is the order: every track is given the next id when it is
+/// added, so the ids are the order the tracks arrived in.
+pub fn added_less(a: &TrackRecord, b: &TrackRecord) -> bool {
+    a.id < b.id
+}
+
+/// Whether `a` sorts before `b` by length.
+pub fn duration_less(a: &TrackRecord, b: &TrackRecord) -> bool {
+    a.duration_sec() < b.duration_sec()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_track_nobody_measured_is_stored_as_an_unknown_length() {
+        // WHY this matters: a track imported from the shared storage has a
+        // real file behind it and a length nobody read. Storing a length of
+        // zero would claim the track is empty, and refusing the track would
+        // leave the file out of the library.
+        let unknown = TrackRecord::from_parts(1, b"nocturne", 0);
+        assert!(unknown.valid());
+        assert!(!unknown.duration_known());
+
+        let known = TrackRecord::from_parts(2, b"nocturne", 225);
+        assert!(known.valid());
+        assert!(known.duration_known());
+    }
+
+    #[test]
+    fn a_length_outside_the_platform_s_range_is_refused() {
+        let too_long = TrackRecord::from_parts(1, b"nocturne", DUR_MAX + 1);
+        assert!(!too_long.valid());
+    }
+
+    #[test]
+    fn moving_a_track_up_reorders_the_queue() {
+        // WHY this matters: the queue is the order the tracks are played in,
+        // and the reorder action has to move the track and leave every
+        // other track where it was.
+        let mut records = [TrackRecord::EMPTY; MAX_TRACKS];
+        records[0] = TrackRecord::from_parts(1, b"first", 10);
+        records[1] = TrackRecord::from_parts(2, b"second", 20);
+        records[2] = TrackRecord::from_parts(3, b"third", 30);
+
+        assert!(move_record(&mut records, 2, 1));
+        assert_eq!(records[0].title(), b"first");
+        assert_eq!(records[1].title(), b"third");
+        assert_eq!(records[2].title(), b"second");
+
+        // A move that is out of the queue changes nothing.
+        let before = records;
+        assert!(!move_record(&mut records, 0, 9));
+        assert_eq!(records[0].title(), before[0].title());
+    }
+
+    #[test]
+    fn sorting_by_title_orders_the_queue_and_keeps_equal_titles_in_order() {
+        let mut records = [TrackRecord::EMPTY; MAX_TRACKS];
+        records[0] = TrackRecord::from_parts(1, b"banana", 10);
+        records[1] = TrackRecord::from_parts(2, b"Apple", 20);
+        records[2] = TrackRecord::from_parts(3, b"apple", 30);
+
+        assert!(sort_records(&mut records, 3, title_less));
+        assert_eq!(records[0].title(), b"Apple");
+        assert_eq!(records[1].title(), b"apple");
+        assert_eq!(records[2].title(), b"banana");
+    }
+
+    #[test]
+    fn sorting_by_added_restores_the_order_the_tracks_arrived_in() {
+        // WHY the id is the order: every track is given the next id when it
+        // is added, so the ids are the order the tracks arrived in and
+        // nothing else has to be stored to remember it.
+        let mut records = [TrackRecord::EMPTY; MAX_TRACKS];
+        records[0] = TrackRecord::from_parts(3, b"third", 10);
+        records[1] = TrackRecord::from_parts(1, b"first", 20);
+        records[2] = TrackRecord::from_parts(2, b"second", 30);
+
+        assert!(sort_records(&mut records, 3, added_less));
+        assert_eq!(records[0].title(), b"first");
+        assert_eq!(records[1].title(), b"second");
+        assert_eq!(records[2].title(), b"third");
+    }
+
+    #[test]
+    fn the_search_matches_a_title_whatever_the_case_it_was_typed_in() {
+        // WHY this matters: a person looking for "nocturne" types it in
+        // lower case whatever the track is called, and a search that only
+        // matched the exact case would report that the library does not
+        // hold the track it holds.
+        assert!(contains_ci(b"Nocturne in C", b"nocturne"));
+        assert!(contains_ci(b"Nocturne in C", b"NOCTURNE"));
+        assert!(contains_ci(b"Nocturne in C", b"in c"));
+        assert!(!contains_ci(b"Nocturne in C", b"prelude"));
+        assert!(contains_ci(b"Nocturne in C", b""));
+    }
 
     #[test]
     fn test_escape_and_unescape_roundtrip_with_0x0a() {

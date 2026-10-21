@@ -31,8 +31,11 @@ use core::panic::PanicInfo;
 use interos_std as std;
 
 mod store;
+use library::{ImportOutcome, PublishOutcome};
 use store::TrackStore;
+use music::library;
 use music::theme::{MIN_TOUCH_TARGET, THEME, radius, spacing};
+use music::SortMode;
 use std::design::components;
 use std::design::font;
 use std::design::outline_text;
@@ -115,6 +118,25 @@ pub struct MusicApp {
     /// not be reached at all. The shared model is used so the thumb and the
     /// offset cannot disagree with each other.
     pub list_scroll: std::design::scroll::ScrollState,
+    /// The library's search query and its length.
+    ///
+    /// WHY the app searches its own library: the design document asks for a
+    /// search over the library, and the library is a list of tracks the
+    /// device holds. A query that is not text is not a query.
+    pub search: [u8; SEARCH_CAP],
+    pub search_len: usize,
+    pub search_focused: bool,
+    /// How the queue is ordered.
+    pub sort: SortMode,
+    /// The store indices of the tracks the list shows, in the order it shows
+    /// them.
+    ///
+    /// WHY the list is addressed through this table and not through the
+    /// store's own indices: a search hides the tracks that do not match, so
+    /// the row under the finger is the n-th match and not the n-th track.
+    pub order: [u8; music::MAX_TRACKS],
+    /// How many entries `order` holds.
+    pub order_len: usize,
 }
 
 impl MusicApp {
@@ -135,6 +157,12 @@ impl MusicApp {
             add_open: false,
             add_focus: 0,
             list_scroll: std::design::scroll::ScrollState::new(0, LIST_VIEWPORT_H, 0),
+            search: [0; SEARCH_CAP],
+            search_len: 0,
+            search_focused: false,
+            sort: SortMode::Added,
+            order: [0; music::MAX_TRACKS],
+            order_len: 0,
         }
     }
 
@@ -144,12 +172,77 @@ impl MusicApp {
     /// is the library's length times the row height, and a stale extent
     /// would let the list scroll past its last row.
     pub fn sync_list_extent(&mut self) {
-        let content_h = self.store.len() * TRACKLIST_ROW_H;
+        self.rebuild_order();
+        let content_h = self.order_len * TRACKLIST_ROW_H;
         self.list_scroll = std::design::scroll::ScrollState::new(
             content_h,
             LIST_VIEWPORT_H,
             self.list_scroll.offset,
         );
+    }
+
+    /// Rebuilds the table of the tracks the list shows.
+    ///
+    /// WHY the table exists: a search hides the tracks that do not match, so
+    /// the row under the finger is the n-th match and not the n-th track.
+    /// Addressing a row by the store's own index would open the wrong track
+    /// and delete the wrong track.
+    pub fn rebuild_order(&mut self) {
+        let mut n = 0usize;
+        for i in 0..self.store.len() {
+            let Some(track) = self.store.get(i) else {
+                continue;
+            };
+            if music::contains_ci(track.title(), &self.search[..self.search_len]) {
+                self.order[n] = i as u8;
+                n += 1;
+            }
+        }
+        self.order_len = n;
+    }
+
+    /// The store index of the `n`th track the list shows.
+    pub fn store_index_at(&self, n: usize) -> Option<usize> {
+        if n >= self.order_len {
+            return None;
+        }
+        Some(self.order[n] as usize)
+    }
+
+    /// Moves the `n`th track the list shows one place up in the queue.
+    ///
+    /// Returns `true` only when the new order was persisted.
+    pub fn move_up(&mut self, n: usize) -> bool {
+        let Some(store_idx) = self.store_index_at(n) else {
+            return false;
+        };
+        if store_idx == 0 {
+            return false;
+        }
+        if !self.store.move_to(store_idx, store_idx - 1) {
+            return false;
+        }
+        self.rebuild_order();
+        true
+    }
+
+    /// Cycles the queue's order and persists the new one.
+    ///
+    /// WHY the order is persisted: the queue is the order the tracks are
+    /// played in, and an order that is forgotten when the app closes is not
+    /// an order.
+    pub fn cycle_sort(&mut self) -> bool {
+        let next = self.sort.next();
+        let ok = match next {
+            SortMode::Added => self.store.sort_by_added(),
+            SortMode::Title => self.store.sort_by_title(),
+            SortMode::Duration => self.store.sort_by_duration(),
+        };
+        if ok {
+            self.sort = next;
+            self.rebuild_order();
+        }
+        ok
     }
 
     /// Asks the audio manager for the real master volume.
@@ -422,7 +515,6 @@ impl MusicApp {
 /// platform. The alias resolves to the platform's step, so the drift is the
 /// platform's and not this app's.
 const R_CONTROL: usize = radius::CONTROL;
-const R_SHEET: usize = radius::SHEET;
 
 /// The platform's list-row treatment, at the two states the track list uses.
 ///
@@ -474,16 +566,31 @@ const ART_CAPTION_Y: usize = 400;
 const TITLE_Y: usize = 636;
 const ARTIST_Y: usize = 676;
 const STATE_Y: usize = 712;
-const TIMES_Y: usize = 752;
-const TRACK_Y: usize = 788;
-const TRACK_H: usize = 4;
-const SCRUB_NOTE_Y: usize = 816;
 
-/// Metadata band (title, artist, state, times, track rule, scrub note).
+/// The library's search field.
+///
+/// WHY there is a field and not a magnifier icon: the design document asks
+/// for a search over the library, and a search that is not a place to type
+/// is not a search.
+const SEARCH_FIELD: Rect = Rect { x: 24, y: 744, w: 440, h: 48 };
+
+/// The control that changes the queue's order.
+const SORT_BTN: Rect = Rect { x: 476, y: 744, w: 100, h: 48 };
+
+/// The control that imports the audio files the device holds.
+const IMPORT_BTN: Rect = Rect { x: 588, y: 744, w: 108, h: 48 };
+
+/// The line that names the features the platform does not offer this app.
+const UNAVAILABLE_Y: usize = 804;
+
+/// The search query's capacity, in bytes.
+const SEARCH_CAP: usize = 32;
+
+/// Metadata band (title, artist, state, search row, availability line).
 ///
 /// WHY this band exists: pressing play/pause moves the state label at y 716 and
-/// nothing else in this region, and a disabled scrub bar never changes at all.
-/// The old renderer re-rasterised all 1440 rows to change 24 of them.
+/// nothing else in this region. The old renderer re-rasterised all 1440 rows to
+/// change 24 of them.
 const META_Y0: usize = 620;
 const META_Y1: usize = 840;
 
@@ -531,8 +638,10 @@ const LIST_SUB_Y: usize = 1210;
 
 /// Track-list row pitch and the pitch body of each row.
 const TRACKLIST_ROW_H: usize = 96;
+/// The control that publishes the library into the device's document index.
+const PUBLISH_BTN: Rect = Rect { x: 396, y: 1070, w: 120, h: 44 };
 /// "ADD TRACK" button on the label row (right side, >= 44 px tall to hit).
-const ADD_BTN: Rect = Rect { x: 24 + 672 - 168, y: 1072, w: 168, h: 40 };
+const ADD_BTN: Rect = Rect { x: 24 + 672 - 168, y: 1070, w: 168, h: 44 };
 /// Add-track editor fields, shown while `add_open` in the track-list band.
 const ADD_TITLE_FIELD: Rect = Rect { x: 24, y: 1140, w: 672, h: 48 };
 const ADD_DUR_FIELD: Rect = Rect { x: 24, y: 1196, w: 264, h: 48 };
@@ -794,12 +903,120 @@ impl VolumeFrame {
 
 struct Frame {
     vol: VolumeFrame,
+    /// The state line: the transport's own state and the queue's position.
+    state: [u8; 56],
+    state_len: usize,
+    /// The queue's caption: how many tracks the queue holds.
+    queue_caption: [u8; 32],
+    queue_caption_len: usize,
+}
+
+/// The position of the current track in the queue the list shows.
+///
+/// WHY the position is looked up through the order table: the list shows
+/// the tracks that match the search, so the current track's place in the
+/// queue is not its store index.
+fn current_position(app: &MusicApp) -> Option<(usize, usize)> {
+    for n in 0..app.order_len {
+        if app.order[n] as usize == app.current_track_idx {
+            return Some((n + 1, app.order_len));
+        }
+    }
+    None
 }
 
 fn build_frame(app: &MusicApp) -> Frame {
-    Frame {
+    let mut f = Frame {
         vol: VolumeFrame::build(app),
+        state: [0; 56],
+        state_len: 0,
+        queue_caption: [0; 32],
+        queue_caption_len: 0,
+    };
+    let state_label: &[u8] = match app.state {
+        PlaybackState::Playing => b"Playing",
+        PlaybackState::Paused => b"Paused",
+        PlaybackState::Stopped => b"Stopped",
+    };
+    let mut at = 0usize;
+    for &byte in state_label {
+        if at < f.state.len() {
+            f.state[at] = byte;
+            at += 1;
+        }
     }
+    // WHY the position is in the state line: the state is what the transport
+    // reports and the position is where that track sits in the queue, and
+    // the two are the two facts a person looks for when the music is not
+    // doing what they expect.
+    if let Some((position, total)) = current_position(app) {
+        for &byte in b" - " {
+            if at < f.state.len() {
+                f.state[at] = byte;
+                at += 1;
+            }
+        }
+        at += push_u32(&mut f.state[at..], position as u32);
+        for &byte in b" of " {
+            if at < f.state.len() {
+                f.state[at] = byte;
+                at += 1;
+            }
+        }
+        at += push_u32(&mut f.state[at..], total as u32);
+        for &byte in b" in queue" {
+            if at < f.state.len() {
+                f.state[at] = byte;
+                at += 1;
+            }
+        }
+    }
+    f.state_len = at.min(f.state.len());
+
+    let mut cap_at = 0usize;
+    let mut prefix = [0u8; 4];
+    let pn = put_u8(&mut prefix, app.order_len.min(99) as u8);
+    for i in 0..pn {
+        if cap_at < f.queue_caption.len() {
+            f.queue_caption[cap_at] = prefix[i];
+            cap_at += 1;
+        }
+    }
+    for &byte in b" tracks" {
+        if cap_at < f.queue_caption.len() {
+            f.queue_caption[cap_at] = byte;
+            cap_at += 1;
+        }
+    }
+    f.queue_caption_len = cap_at;
+    f
+}
+
+/// Writes a decimal `v` into `out` and returns how many bytes it wrote.
+fn push_u32(out: &mut [u8], v: u32) -> usize {
+    if out.is_empty() {
+        return 0;
+    }
+    let mut digits = [0u8; 10];
+    let mut n = 0usize;
+    let mut value = v;
+    loop {
+        digits[n] = b'0' + (value % 10) as u8;
+        value /= 10;
+        n += 1;
+        if value == 0 {
+            break;
+        }
+    }
+    let mut at = 0usize;
+    for i in 0..n {
+        if at >= out.len() {
+            break;
+        }
+        out[at] = digits[n - 1 - i];
+        at += 1;
+    }
+    at
 }
 
 // -----------------------------------------------------------------------------
@@ -847,6 +1064,29 @@ fn note_glyph(x: usize, y: usize, cx: usize, cy: usize) -> bool {
         }
     }
     false
+}
+
+/// A small upward triangle: the queue's "move up" affordance.
+fn up_glyph(x: usize, y: usize, cx: usize, cy: usize) -> bool {
+    let dx = (x as isize) - (cx as isize);
+    let dy = (y as isize) - (cy as isize);
+    if dy < -6 || dy > 6 {
+        return false;
+    }
+    dx.abs() <= dy + 6
+}
+
+/// A small right-pointing triangle: the marker on the track that is playing.
+///
+/// WHY a shape and not only a colour: the design document asks for the
+/// current track to be marked without relying on colour alone.
+fn play_glyph(x: usize, y: usize, cx: usize, cy: usize) -> bool {
+    let dx = (x as isize) - (cx as isize);
+    let dy = (y as isize) - (cy as isize);
+    if dx < -6 || dx > 6 {
+        return false;
+    }
+    dy.abs() <= 6 - dx
 }
 
 /// Draws the volume row: label, real value, meter trough and the two step
@@ -918,9 +1158,16 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
     }
 
     // 2. Album artwork: a neutral placeholder, never a fabricated cover.
+    //
+    // WHY the platform's card treatment: the artwork is a card, and a card
+    // that invents its own fill, its own hairline and its own radius is a
+    // card a third-party app cannot match. The platform already says what a
+    // card looks like, and the placeholder is drawn on it.
+    const ART_CARD: components::CardStyle =
+        components::card_style(&THEME, components::Elevation::Resting);
     let art = Rect::new(ART_X, ART_Y, ART_W, ART_H);
-    if let Some(c) = draw_rounded_rect(x, y, art, R_SHEET, THEME.surface_container, Some(THEME.border), 1) {
-        if c != THEME.surface_container {
+    if let Some(c) = draw_rounded_rect(x, y, art, ART_CARD.radius, ART_CARD.fill, ART_CARD.border, 1) {
+        if c != ART_CARD.fill {
             return c;
         }
         if note_glyph(x, y, ART_X + ART_W / 2, ART_GLYPH_CY) {
@@ -933,11 +1180,11 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
             1,
             b"No artwork - no album art in library",
             THEME.muted,
-            THEME.surface_container,
+            ART_CARD.fill,
         ) {
             return c;
         }
-        return THEME.surface_container;
+        return ART_CARD.fill;
     }
 
     // 3. Track metadata from the real, persisted library (empty -> honest idle
@@ -984,62 +1231,100 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
     if let Some(c) = text_centered(x, y, STATE_Y, 1, state_label, THEME.muted, THEME.surface) {
         return c;
     }
-
-    // 4. Scrubber: it never moves to an invented position. No audio backend
-    //    reports one, so the bar stays recessed (inert, no fill, no knob) in
-    //    every state; with a track selected the honest duration is shown, and
-    //    elapsed stays 0:00 because nothing actually plays.
-    //
-    // WHY the recessed fill rather than THEME.border: the rule used to be drawn in the
-    // same stroke colour as the enabled controls elsewhere on this surface,
-    // which read as a seekable track. THEME.surface_container_low is the one tone in this palette
-    // reserved for something that cannot be acted on, and with no position
-    // there is nothing to seek.
-    if y >= TRACK_Y && y < TRACK_Y + TRACK_H && x >= MARGIN && x < MARGIN + CONTENT_W {
-        return THEME.surface_container_low;
-    }
-    if y >= TIMES_Y && y < TIMES_Y + font::line_height(1) {
-        // Elapsed is truly 0:00: no transport has ever advanced a position.
-        if let Some(c) = text(x, y, MARGIN, TIMES_Y, 1, b"0:00", THEME.muted, THEME.surface) {
-            return c;
-        }
-        // The right label is the stored duration when one is known, otherwise
-        // the honest unknown. It is a length, not a playback position.
-        let mut db = [0u8; 12];
-        let (rem, rw) = match sel {
-            Some(t) => {
-                let n = fmt_mmss(&mut db, t.duration_sec());
-                (&db[..n] as &[u8], font::measure(&db[..n], 1))
-            }
-            None => (b"--:--" as &[u8], font::measure(b"--:--", 1)),
-        };
-        if let Some(c) = text(x, y, MARGIN + CONTENT_W - rw, TIMES_Y, 1, rem, THEME.muted, THEME.surface) {
-            return c;
-        }
-    }
-    // The scrub note.
-    //
-    // WHY it is drawn on two lines: the sentence is 69 characters, which is
-    // 783 pixels at this face, and the content band is 672 pixels wide. The
-    // centred helper refuses a run that does not fit, so the note was
-    // silently dropped exactly when a track was selected -- which is the
-    // moment the note mattered most. Two lines of at most 42 characters fit
-    // in 505 pixels.
-    let (note_a, note_b): (&[u8], &[u8]) = if sel.is_some() {
-        (
-            b"No audio backend reports a playback position;",
-            b"the scrubber stays at 0:00",
-        )
-    } else {
-        (
-            b"No media backend reports a",
-            b"playback position",
-        )
-    };
-    if let Some(c) = text_centered(x, y, SCRUB_NOTE_Y, 1, note_a, THEME.muted, THEME.surface) {
+    if let Some(c) = text_centered(
+        x,
+        y,
+        STATE_Y + font::line_height(1),
+        1,
+        &f.state[..f.state_len],
+        THEME.muted,
+        THEME.surface,
+    ) {
         return c;
     }
-    if let Some(c) = text_centered(x, y, SCRUB_NOTE_Y + font::line_height(1), 1, note_b, THEME.muted, THEME.surface) {
+
+    // 3b. The library's search field, the order control and the import
+    //     control.
+    //
+    // WHY the seek bar is not here: no audio backend reports a playback
+    // position and this app has no transport that can seek, so a scrubber
+    // would be a control that cannot do anything. The design document says
+    // to omit the control when seeking is unsupported, and a note under an
+    // inert bar is a workaround, not an answer.
+    if let Some(c) = draw_rounded_rect(
+        x,
+        y,
+        SEARCH_FIELD,
+        radius::CONTROL,
+        THEME.surface_container,
+        Some(THEME.border),
+        1,
+    ) {
+        if c != THEME.surface_container {
+            return c;
+        }
+        let query = &app.search[..app.search_len];
+        let shown: &[u8] = if query.is_empty() { b"Search the library" } else { query };
+        let ink = if query.is_empty() { THEME.muted } else { THEME.on_surface };
+        let mut buf = [0u8; SEARCH_CAP];
+        let n = font::ellipsize(shown, 1, SEARCH_FIELD.w - 32, &mut buf);
+        if let Some(c) = text(
+            x,
+            y,
+            SEARCH_FIELD.x + 16,
+            SEARCH_FIELD.y + (SEARCH_FIELD.h.saturating_sub(font::line_height(1))) / 2,
+            1,
+            &buf[..n],
+            ink,
+            THEME.surface_container,
+        ) {
+            return c;
+        }
+        return THEME.surface_container;
+    }
+    if let Some(c) = draw_pill(x, y, SORT_BTN, THEME.surface_container, Some(THEME.border)) {
+        if let Some(c) = text_in_rect_centered(
+            x,
+            y,
+            SORT_BTN,
+            1,
+            app.sort.label().as_bytes(),
+            THEME.on_surface,
+            THEME.surface_container,
+        ) {
+            return c;
+        }
+        return c;
+    }
+    if let Some(c) = draw_pill(x, y, IMPORT_BTN, THEME.surface_container, Some(THEME.border)) {
+        if let Some(c) = text_in_rect_centered(
+            x,
+            y,
+            IMPORT_BTN,
+            1,
+            b"IMPORT",
+            THEME.on_surface,
+            THEME.surface_container,
+        ) {
+            return c;
+        }
+        return c;
+    }
+    // The features the platform does not offer this app.
+    //
+    // WHY they are named: the design document asks for playlists, and the
+    // library store holds one flat list. A control that promised a
+    // playlist would be a control that does nothing, so the screen says
+    // what the device can do instead.
+    if let Some(c) = text_centered(
+        x,
+        y,
+        UNAVAILABLE_Y,
+        1,
+        b"Playlists unavailable - the store holds one queue",
+        THEME.muted,
+        THEME.surface,
+    ) {
         return c;
     }
 
@@ -1134,13 +1419,44 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
         }
     }
 
-    // 6. Track list section: an "ADD TRACK" control, the add editor when it is
-    //    open, real rows when the library has entries, and an honest empty state
-    //    otherwise.
+    // 6. The queue section: the queue's own header, the controls that act on
+    //    it, the add editor when it is open, real rows when the queue has
+    //    entries, and an honest empty state otherwise.
+    //
+    // WHY the section is called a queue: the library store holds one ordered
+    // list and that list is the order the tracks are played in. The design
+    // document asks for a queue and for playlists, and the store supports
+    // exactly one of them.
     if y >= LIST_LABEL_Y && y < LIST_LABEL_Y + font::line_height(1) {
-        if let Some(c) = text(x, y, MARGIN, LIST_LABEL_Y, 1, b"TRACKS", THEME.muted, THEME.surface) {
+        if let Some(c) = text(x, y, MARGIN, LIST_LABEL_Y, 1, b"QUEUE", THEME.muted, THEME.surface) {
             return c;
         }
+        if let Some(c) = text(
+            x,
+            y,
+            MARGIN + 80,
+            LIST_LABEL_Y,
+            1,
+            &f.queue_caption[..f.queue_caption_len],
+            THEME.muted,
+            THEME.surface,
+        ) {
+            return c;
+        }
+    }
+    if let Some(c) = draw_pill(x, y, PUBLISH_BTN, THEME.surface_container, Some(THEME.border)) {
+        if let Some(c) = text_in_rect_centered(
+            x,
+            y,
+            PUBLISH_BTN,
+            1,
+            b"PUBLISH",
+            THEME.on_surface,
+            THEME.surface_container,
+        ) {
+            return c;
+        }
+        return c;
     }
     if let Some(c) = draw_pill(x, y, ADD_BTN, THEME.surface_container, Some(THEME.border)) {
         if let Some(c) = text_in_rect_centered(
@@ -1221,29 +1537,36 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
         return THEME.surface;
     }
 
-    if app.store.is_empty() {
+    if app.order_len == 0 {
         // WHY the empty state follows the store's own state: the old copy
         // said the search had found no audio files in local storage, which
         // is a claim about a filesystem the app never searched. A refused
         // read, a store that failed validation and a store that is simply
         // empty are three different facts.
-        let (title, subline): (&[u8], &[u8]) = match app.store.state {
-            store::StoreState::ReadRefused => (
-                b"Track store unreadable",
-                b"The device refused to read the track store",
-            ),
-            store::StoreState::Invalid => (
-                b"Track store invalid",
-                b"The stored tracks failed validation and were not loaded",
-            ),
-            store::StoreState::Untouched => (
-                b"Track store not read",
-                b"The track store has not been read yet",
-            ),
-            _ => (
-                b"No tracks",
-                b"No audio files were found in local storage",
-            ),
+        let (title, subline): (&[u8], &[u8]) = if !app.store.is_empty() {
+            (
+                b"No track matches",
+                b"The search matched no track in the queue",
+            )
+        } else {
+            match app.store.state {
+                store::StoreState::ReadRefused => (
+                    b"Track store unreadable",
+                    b"The device refused to read the track store",
+                ),
+                store::StoreState::Invalid => (
+                    b"Track store invalid",
+                    b"The stored tracks failed validation and were not loaded",
+                ),
+                store::StoreState::Untouched => (
+                    b"Track store not read",
+                    b"The track store has not been read yet",
+                ),
+                _ => (
+                    b"No tracks",
+                    b"No audio files were found in local storage",
+                ),
+            }
         };
         if let Some(c) = text_centered_bold(x, y, LIST_TITLE_Y, 1, title, THEME.on_surface, THEME.surface) {
             return c;
@@ -1255,7 +1578,7 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
     }
 
     let scroll = app.list_scroll.offset;
-    for i in 0..app.store.len() {
+    for i in 0..app.order_len {
         let row_y = LIST_TOP + i * TRACKLIST_ROW_H - scroll;
         if row_y >= LIST_HIT_Y1 {
             break;
@@ -1263,41 +1586,72 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
         if row_y + TRACKLIST_ROW_H <= LIST_TOP {
             continue;
         }
-        let t = app.store.get(i).unwrap();
+        let Some(store_idx) = app.store_index_at(i) else {
+            continue;
+        };
+        let t = app.store.get(store_idx).unwrap();
         if y >= row_y && y < row_y + 80 {
-            let selected = i == app.current_track_idx;
+            let selected = store_idx == app.current_track_idx;
             // The platform's list-row treatment: the fill of the row the tap
-            // lands on and the fill of the row it does not.
+            // lands on and the fill of the row it does not, the platform's
+            // radius and the platform's padding.
+            //
+            // WHY the row is the platform's row and not a hand-rolled
+            // block: a row that invents its own fill, its own radius and its
+            // own padding is a row a third-party app cannot match.
             let row_fill = if selected { ROW_SELECTED.fill } else { ROW.fill };
-            let title_y = row_y + 12;
-            // Delete affordance, matching its hit region in the tap handler.
-            let del_x = MARGIN + CONTENT_W - 40;
-            let ddx = x as isize - del_x as isize;
-            let ddy = y as isize - (row_y + 24) as isize;
-            if ddx.abs() <= 6 && ddy.abs() <= 6 && (ddx.abs() - ddy.abs()).abs() <= 2 {
-                return THEME.muted;
+            let row_rect = Rect::new(MARGIN, row_y, CONTENT_W, 80);
+            if let Some(c) = draw_rounded_rect(x, y, row_rect, ROW.radius, row_fill, None, 0) {
+                if c != row_fill {
+                    return c;
+                }
+                // The marker of the track that is playing.
+                //
+                // WHY the marker is a shape and not only a colour: the
+                // design document asks for the current track to be marked
+                // without relying on colour alone.
+                if selected && play_glyph(x, y, MARGIN + ROW.pad - 8, row_y + 20) {
+                    return THEME.on_surface;
+                }
+                // The queue's "move up" affordance.
+                if up_glyph(x, y, MARGIN + CONTENT_W - 78, row_y + 20) {
+                    return THEME.muted;
+                }
+                // Delete affordance, matching its hit region in the tap handler.
+                let del_x = MARGIN + CONTENT_W - 40;
+                let ddx = x as isize - del_x as isize;
+                let ddy = y as isize - (row_y + 24) as isize;
+                if ddx.abs() <= 6 && ddy.abs() <= 6 && (ddx.abs() - ddy.abs()).abs() <= 2 {
+                    return THEME.muted;
+                }
+                let mut buf = [0u8; 48];
+                let n = font::ellipsize(t.title(), 1, CONTENT_W - 120, &mut buf);
+                if let Some(c) = text(
+                    x,
+                    y,
+                    MARGIN + ROW.pad,
+                    row_y + 12,
+                    1,
+                    &buf[..n],
+                    if selected { THEME.on_surface } else { THEME.on_surface_variant },
+                    row_fill,
+                ) {
+                    return c;
+                }
+                // The length from the stored record. A track nobody has
+                // measured says so; it does not claim a length of zero.
+                let mut db = [0u8; 12];
+                let dn = if t.duration_known() {
+                    fmt_mmss(&mut db, t.duration_sec())
+                } else {
+                    db[..5].copy_from_slice(b"--:--");
+                    5
+                };
+                if let Some(c) = text(x, y, MARGIN + ROW.pad, row_y + 44, 1, &db[..dn], THEME.muted, row_fill) {
+                    return c;
+                }
+                return row_fill;
             }
-            let mut buf = [0u8; 48];
-            let n = font::ellipsize(t.title(), 1, CONTENT_W - 96, &mut buf);
-            if let Some(c) = text_bold(
-                x,
-                y,
-                MARGIN + 8,
-                title_y,
-                1,
-                &buf[..n],
-                if selected { THEME.on_surface } else { THEME.on_surface_variant },
-                row_fill,
-            ) {
-                return c;
-            }
-            // Duration caption from the stored length (never a fake position).
-            let mut db = [0u8; 12];
-            let dn = fmt_mmss(&mut db, t.duration_sec());
-            if let Some(c) = text(x, y, MARGIN + 8, row_y + 44, 1, &db[..dn], THEME.muted, row_fill) {
-                return c;
-            }
-            return row_fill;
         }
         // Row-gap divider at +88 (see the gate note above the text runs).
         if y == row_y + 88 && x >= MARGIN && x < MARGIN + CONTENT_W {
@@ -1473,13 +1827,71 @@ fn handle_tap(app: &mut MusicApp, px: u32, py: u32) -> Tap<'static> {
         return Tap::Redraw(Dirty::None);
     }
 
-    // Scrubber: drawn recessed with an explicit "no position" note, so there is
-    // nothing to seek and the tap only reports that honestly.
-    if x >= MARGIN && x < MARGIN + CONTENT_W && y >= TIMES_Y && y < META_Y1 {
-        std::log("[MUSIC APP] Scrubber tapped: no media backend reports a playback position or duration, so there is nothing to seek.",
-        )
-        .ok();
-        return Tap::Redraw(Dirty::None);
+    // The library's search field.
+    if SEARCH_FIELD.contains(x, y) {
+        app.search_focused = true;
+        let _ = std::audio_haptic_click();
+        return Tap::Redraw(Dirty::All);
+    }
+
+    // The control that changes the queue's order.
+    if SORT_BTN.contains(x, y) {
+        if app.cycle_sort() {
+            app.sync_list_extent();
+            let _ = std::audio_haptic_click();
+        }
+        return Tap::Redraw(Dirty::All);
+    }
+
+    // The control that imports the audio files the device holds.
+    if IMPORT_BTN.contains(x, y) {
+        let outcome = library::import_from_storage(&mut app.store);
+        match outcome {
+            ImportOutcome::Imported(n) => {
+                app.sync_list_extent();
+                std::log("[MUSIC APP] Imported a track from the shared storage; its length was not read.",
+                )
+                .ok();
+                let _ = n;
+            }
+            ImportOutcome::ListRefused => {
+                std::log("[MUSIC APP] The device refused to list the shared storage; nothing was imported.",
+                )
+                .ok();
+            }
+            ImportOutcome::NoneFound => {
+                std::log("[MUSIC APP] The shared storage holds no audio file the library does not already hold.",
+                )
+                .ok();
+            }
+        }
+        let _ = std::audio_haptic_click();
+        return Tap::Redraw(Dirty::All);
+    }
+
+    // The control that publishes the library into the device's document index.
+    if PUBLISH_BTN.contains(x, y) {
+        match library::publish_library(&app.store) {
+            PublishOutcome::Published(n) => {
+                std::log("[MUSIC APP] Published the library into the device's document index; the file manager and the launcher can find it now.",
+                )
+                .ok();
+                let _ = n;
+            }
+            PublishOutcome::IndexRefused(n) => {
+                std::log("[MUSIC APP] Published the library, but the device refused to refresh the document index.",
+                )
+                .ok();
+                let _ = n;
+            }
+            PublishOutcome::WriteRefused => {
+                std::log("[MUSIC APP] The device refused the write; the library was not published.",
+                )
+                .ok();
+            }
+        }
+        let _ = std::audio_haptic_click();
+        return Tap::Redraw(Dirty::All);
     }
 
     // ADD TRACK control on the label row opens the add editor.
@@ -1488,6 +1900,7 @@ fn handle_tap(app: &mut MusicApp, px: u32, py: u32) -> Tap<'static> {
         app.add_focus = 0;
         app.add_title_len = 0;
         app.add_dur_len = 0;
+        app.search_focused = false;
         let _ = std::audio_haptic_click();
         return Tap::Redraw(Dirty::All);
     }
@@ -1512,13 +1925,14 @@ fn handle_tap(app: &mut MusicApp, px: u32, py: u32) -> Tap<'static> {
             std::log("[MUSIC APP] Add track cancelled; nothing was stored.").ok();
             return Tap::Redraw(Dirty::All);
         }
-    } else if app.store.is_empty() {
-        std::log("[MUSIC APP] Track list tapped: no audio files in the local library.",
+    } else if app.order_len == 0 {
+        std::log("[MUSIC APP] Track list tapped: the queue holds no track.",
         )
         .ok();
     } else {
-        // A real row: tap its delete affordance to remove it, tap elsewhere in
-        // the row to select it as now-playing.
+        // A real row: tap its delete affordance to remove it, tap its move-up
+        // affordance to move it up in the queue, and tap elsewhere in the row
+        // to select it as now-playing.
         //
         // WHY the scroll offset is added back: the rows are drawn at their
         // scrolled position, so the row under the finger is the one whose
@@ -1527,28 +1941,48 @@ fn handle_tap(app: &mut MusicApp, px: u32, py: u32) -> Tap<'static> {
         let ry = y.saturating_sub(LIST_TOP) + app.list_scroll.offset;
         let idx = ry / TRACKLIST_ROW_H;
         let coff = ry % TRACKLIST_ROW_H;
-        if idx < app.store.len() && coff < 80 && x >= MARGIN && x < MARGIN + CONTENT_W {
+        if idx < app.order_len && coff < 80 && x >= MARGIN && x < MARGIN + CONTENT_W {
             let ddx = x as isize - (MARGIN + CONTENT_W - 40) as isize;
             let ddy = coff as isize - 24;
             if ddx.abs() <= 16 && ddy.abs() <= 12 {
-                if app.store.remove(idx) {
+                if let Some(store_idx) = app.store_index_at(idx) {
+                    if app.store.remove(store_idx) {
+                        app.sync_list_extent();
+                        std::log("[MUSIC APP] Track removed; the deletion was persisted to the settings store.",
+                        )
+                        .ok();
+                        if app.current_track_idx >= app.store.len() && app.current_track_idx > 0 {
+                            app.current_track_idx -= 1;
+                        }
+                    } else {
+                        std::log("[MUSIC APP] Track deletion was not persisted; the library is unchanged.",
+                        )
+                        .ok();
+                    }
+                }
+                return Tap::Redraw(Dirty::All);
+            }
+            // The queue's "move up" affordance.
+            let udx = x as isize - (MARGIN + CONTENT_W - 78) as isize;
+            let udy = coff as isize - 20;
+            if udx.abs() <= 14 && udy.abs() <= 14 {
+                if app.move_up(idx) {
                     app.sync_list_extent();
-                    std::log("[MUSIC APP] Track removed; the deletion was persisted to the settings store.",
+                    std::log("[MUSIC APP] Track moved up in the queue; the new order was persisted.",
                     )
                     .ok();
-                    if app.current_track_idx >= app.store.len() && app.current_track_idx > 0 {
-                        app.current_track_idx -= 1;
-                    }
                 } else {
-                    std::log("[MUSIC APP] Track deletion was not persisted; the library is unchanged.",
+                    std::log("[MUSIC APP] The track is already first in the queue, or the new order was not persisted.",
                     )
                     .ok();
                 }
                 return Tap::Redraw(Dirty::All);
             }
-            app.current_track_idx = idx.min(app.store.len().saturating_sub(1));
-            let _ = std::audio_haptic_click();
-            return Tap::Redraw(Dirty::All);
+            if let Some(store_idx) = app.store_index_at(idx) {
+                app.current_track_idx = store_idx.min(app.store.len().saturating_sub(1));
+                let _ = std::audio_haptic_click();
+                return Tap::Redraw(Dirty::All);
+            }
         }
     }
 
@@ -1564,6 +1998,32 @@ fn handle_music_key(app: &mut MusicApp, key: std::InputKeyEvent) -> Tap<'static>
     use std::input_key_code;
     if !key.pressed {
         return Tap::None;
+    }
+    // While the library's search field is focused the keyboard types into
+    // it; the media bindings below are suspended so a space types a space
+    // rather than pausing.
+    //
+    // WHY the search is checked first: the field the person tapped last is
+    // the field they are typing into.
+    if app.search_focused {
+        return match key.code {
+            input_key_code::ESCAPE => {
+                app.search_focused = false;
+                Tap::Redraw(Dirty::All)
+            }
+            input_key_code::BACKSPACE => {
+                app.search_len = app.search_len.saturating_sub(1);
+                app.sync_list_extent();
+                Tap::Redraw(Dirty::All)
+            }
+            code if (32..=126).contains(&code) && app.search_len < SEARCH_CAP => {
+                app.search[app.search_len] = code as u8;
+                app.search_len += 1;
+                app.sync_list_extent();
+                Tap::Redraw(Dirty::All)
+            }
+            _ => Tap::None,
+        };
     }
     // While the add-track editor is open the keyboard types into it; the media
     // bindings below are suspended so a space types a space rather than pausing.
