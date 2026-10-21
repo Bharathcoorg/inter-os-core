@@ -1014,9 +1014,9 @@ impl AgentManagerApp {
             summary[n] = *byte;
             n += 1;
         }
-        self.add_line(b"Granted", &summary[..n], Tone::Plain);
+        self.add_chip(b"Granted", &summary[..n], Tone::Plain);
         for grant in grants.iter() {
-            self.add_line(
+            self.add_chip(
                 grant.name.as_bytes(),
                 if grant.granted {
                     b"GRANTED"
@@ -1503,6 +1503,42 @@ impl AgentManagerApp {
             ],
         }
     }
+}
+
+/// Moves the body with the keyboard.
+///
+/// WHY this exists: a body that can only be scrolled with a finger is a
+/// body that cannot be scrolled at all on a device without one, and the
+/// keys that move a list everywhere else on the platform moved nothing
+/// here. The step is a quarter of the body, so a key press moves the list
+/// a visible amount without running off the end of it.
+fn handle_scroll_key(app: &mut AgentManagerApp, code: u32) -> bool {
+    use std::input_key_code;
+    let step = (app.body_h() / 4).max(1);
+    match code {
+        input_key_code::ARROW_DOWN => {
+            let next = app.scroll.offset + step;
+            app.scroll.offset = next.min(app.scroll.max_offset());
+        }
+        input_key_code::ARROW_UP => {
+            app.scroll.offset = app.scroll.offset.saturating_sub(step);
+        }
+        input_key_code::PAGE_DOWN => {
+            let next = app.scroll.offset + app.body_h();
+            app.scroll.offset = next.min(app.scroll.max_offset());
+        }
+        input_key_code::PAGE_UP => {
+            app.scroll.offset = app.scroll.offset.saturating_sub(app.body_h());
+        }
+        input_key_code::HOME => {
+            app.scroll.offset = 0;
+        }
+        input_key_code::END => {
+            app.scroll.offset = app.scroll.max_offset();
+        }
+        _ => return false,
+    }
+    true
 }
 
 /// What a key press did to the composer.
@@ -2702,66 +2738,78 @@ pub extern "C" fn _start() -> ! {
     let _ = std::surface_flip();
 
     loop {
-        if std::event_poll(std::EVENT_TOUCH_INPUT, 100).is_ok() {
-            let mut input = std::InputEvent {
-                kind: 0,
-                x: 0,
-                y: 0,
-                dx: 0,
-                dy: 0,
-                scale_milli: 1000,
-            };
-            let mut dirty = Dirty::None;
-            while std::input_event_poll(&mut input).is_ok() {
-                if let Some(key) = input.key_event() {
-                    if key.pressed {
-                        // WHY the keys go to the composer only on the chat
-                        // surface: on every other surface a key press is
-                        // the platform's, and swallowing it would make the
-                        // app look broken.
-                        if app.surface == Surface::Chat {
-                            match handle_chat_key(&mut app, key.code) {
-                                ChatKey::Edited => dirty = Dirty::All,
-                                ChatKey::Ignored => {}
-                            }
+        // WHY the pipeline is drained before the wait, and not only after a
+        // touch woke the app: a key press produces no touch event, so an
+        // app that waits for a touch before it reads the pipeline never
+        // sees a key until somebody touches the screen. The arrow keys
+        // were dead for that reason.
+        let mut input = std::InputEvent {
+            kind: 0,
+            x: 0,
+            y: 0,
+            dx: 0,
+            dy: 0,
+            scale_milli: 1000,
+        };
+        let mut dirty = Dirty::None;
+        let mut handled = false;
+        while std::input_event_poll(&mut input).is_ok() {
+            handled = true;
+            if let Some(key) = input.key_event() {
+                if key.pressed {
+                    // WHY the keys go to the composer only on the chat
+                    // surface: on every other surface a key press is the
+                    // platform's, and swallowing it would make the app look
+                    // broken.
+                    if app.surface == Surface::Chat {
+                        match handle_chat_key(&mut app, key.code) {
+                            ChatKey::Edited => dirty = Dirty::All,
+                            ChatKey::Ignored => {}
                         }
+                    } else if handle_scroll_key(&mut app, key.code) {
+                        dirty = Dirty::All;
                     }
+                }
+                continue;
+            }
+            if input.kind == 4 || input.kind == 6 || input.kind == 7 || input.kind == 8 || input.kind == 10
+            {
+                // A drag over the body scrolls it; anything else is the
+                // system's navigation gesture.
+                //
+                // WHY the body keeps the gesture: the body is a scrollable
+                // list, and a list that cannot be scrolled is a list whose
+                // lower half cannot be reached.
+                let over_body =
+                    (input.y as usize) >= BODY_TOP && (input.y as usize) < app.body_bottom();
+                if (input.kind == 4 || input.kind == 10) && over_body {
+                    app.scroll.apply_drag(input.dy as i32);
+                    dirty = Dirty::All;
                     continue;
                 }
-                if input.kind == 4 || input.kind == 6 || input.kind == 7 || input.kind == 8 || input.kind == 10
-                {
-                    // A drag over the body scrolls it; anything else is the
-                    // system's navigation gesture.
-                    //
-                    // WHY the body keeps the gesture: the body is a scrollable
-                    // list, and a list that cannot be scrolled is a list whose
-                    // lower half cannot be reached.
-                    let over_body = (input.y as usize) >= BODY_TOP && (input.y as usize) < BODY_BOTTOM;
-                    if (input.kind == 4 || input.kind == 10) && over_body {
-                        app.scroll.apply_drag(input.dy as i32);
-                        dirty = Dirty::All;
-                        continue;
+                std::log("[AGENT_MGR] Navigation gesture recognized. Returning to the launcher.").ok();
+                let _ = std::surface_destroy(surface);
+                std::exit_with_code(0);
+            }
+            if input.kind == 1 || input.kind == 2 {
+                match handle_tap(&mut app, input.x, input.y) {
+                    Tap::Leave(message) => {
+                        std::log(message).ok();
+                        let _ = std::surface_destroy(surface);
+                        std::exit_with_code(0);
                     }
-                    std::log("[AGENT_MGR] Navigation gesture recognized. Returning to the launcher.").ok();
-                    let _ = std::surface_destroy(surface);
-                    std::exit_with_code(0);
-                }
-                if input.kind == 1 || input.kind == 2 {
-                    match handle_tap(&mut app, input.x, input.y) {
-                        Tap::Leave(message) => {
-                            std::log(message).ok();
-                            let _ = std::surface_destroy(surface);
-                            std::exit_with_code(0);
-                        }
-                        Tap::Redraw => dirty = Dirty::All,
-                        Tap::None => {}
-                    }
+                    Tap::Redraw => dirty = Dirty::All,
+                    Tap::None => {}
                 }
             }
-            if dirty == Dirty::All {
-                repaint(surface, &app);
-                let _ = std::surface_flip();
-            }
+        }
+        if !handled {
+            // Nothing was waiting: sleep until something arrives.
+            let _ = std::event_poll(std::EVENT_TOUCH_INPUT, 100);
+        }
+        if dirty == Dirty::All {
+            repaint(surface, &app);
+            let _ = std::surface_flip();
         }
         std::yield_now();
     }
