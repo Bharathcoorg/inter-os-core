@@ -1,15 +1,17 @@
 //! Inter OS Sovereign Vault & Multi-Sector Storage Manager
 //!
-//! Ring 3 encrypted-storage manager. Everything this app displays is the result
-//! of a syscall it just made:
+//! Ring 3 storage manager. Everything this app displays is the result of
+//! a syscall it just made:
 //!
 //! - `keystore_derive(0/1)` for the two key slots. This kernel refuses to export
 //!   raw key material to Ring 3, so both probes normally answer
 //!   `PermissionDenied` and the screen says "unavailable" rather than implying
 //!   an enclave it does not have.
-//! - `vault_encrypt_sector` / `vault_decrypt_sector` for the per-sector
-//!   round-trip self-test. A sector row is only marked "round-trip verified"
-//!   after encrypt -> mutate-check -> decrypt -> compare actually succeeded.
+//! - `vault_encrypt_sector` / `vault_decrypt_sector` for the crypto self-test.
+//!   A sector row is only marked "round-trip verified" after encrypt ->
+//!   mutate-check -> decrypt -> compare actually succeeded. The probe runs
+//!   against `SELF_TEST_BLOCK`, a block of this app's own, because sealing a
+//!   managed sector would replace the record another app stored there.
 //! - `devfs_read("/dev/urandom")` for the 16-byte IV. IV generation fails closed:
 //!   there is no fixed or synthesised IV anywhere in this file.
 //! - `settings_set/get("vault.backup_export")` for the sovereign backup frame,
@@ -34,21 +36,14 @@ use core::panic::PanicInfo;
 use interos_std as std;
 use interos_std::design::components;
 use vault::theme::{spacing, THEME};
+use vault::{
+    fletcher32, hex_decode, hex_encode, key_material_row, BackupState, EntropyProbe,
+    IdentityState, KeyProbe, VaultSectorType,
+};
 
 const W: usize = 720;
 const H: usize = 1440;
 const CHUNK: usize = 4096;
-
-/// Managed storage sector definitions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VaultSectorType {
-    RootKeystore = 100,
-    MediaContainers = 200,
-    CameraPhotos = 201,
-    EncryptedMessages = 202,
-    CalendarEvents = 203,
-    MusicTracks = 204,
-}
 
 /// Sector metadata record.
 #[derive(Debug, Clone, Copy)]
@@ -63,100 +58,14 @@ pub struct SectorRecord {
     pub authenticated: bool,
 }
 
-/// Outcome of one `keystore_derive` probe. `Refused` carries the kernel's own
-/// negative status code; nothing here is guessed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum KeyProbe {
-    NotRun,
-    Derived,
-    /// The call succeeded but did not hand back a 32-byte key.
-    Short,
-    Refused(i64),
-}
+/// The managed sector blocks, in the order the tiles show them.
+///
+/// WHY they are named here: the sector records the app manages are these
+/// blocks, and the library's tile hints are built from the same list.
+const MANAGED_SECTORS: [u64; 6] = vault::MANAGED_SECTORS;
 
-/// Outcome of the 16-byte `/dev/urandom` read probe.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EntropyProbe {
-    NotRun,
-    Read16,
-    Short,
-    AllZero,
-    Refused(i64),
-}
-
-/// Outcome of the `/system/etc/device_id` read. This is a magic-prefix check,
-/// never an attestation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IdentityState {
-    NotChecked,
-    Present,
-    Malformed,
-    Unreadable,
-}
-
-/// Outcome of the sovereign backup export, including its read-back validation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BackupState {
-    NotAttempted,
-    WrittenAndValid,
-    WrittenButChecksumMismatch,
-    WrittenButTruncated,
-    ReadRefused,
-    WriteRefused,
-}
-
-/// Computes a Fletcher-32 checksum over `data` (both sums taken mod 255).
-fn fletcher32(data: &[u8]) -> u32 {
-    let mut sum1: u32 = 0;
-    let mut sum2: u32 = 0;
-    for &byte in data.iter() {
-        sum1 = (sum1 + byte as u32) % 255;
-        sum2 = (sum2 + sum1) % 255;
-    }
-    (sum2 << 8) | sum1
-}
-
-/// Hex-encodes `data` into `out` (two characters per byte).
-/// Returns the number of bytes written.
-fn hex_encode(data: &[u8], out: &mut [u8]) -> usize {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut i = 0usize;
-    for &b in data.iter() {
-        if i + 2 > out.len() {
-            break;
-        }
-        out[i] = DIGITS[(b >> 4) as usize];
-        out[i + 1] = DIGITS[(b & 0x0F) as usize];
-        i += 2;
-    }
-    i
-}
-
-fn hex_nibble(c: u8) -> Option<u8> {
-    match c {
-        b'0'..=b'9' => Some(c - b'0'),
-        b'a'..=b'f' => Some(c - b'a' + 10),
-        b'A'..=b'F' => Some(c - b'A' + 10),
-        _ => None,
-    }
-}
-
-/// Decodes hex characters in `hex` into `out`.
-/// Returns the decoded length, or None on odd length, bad characters, or an
-/// output buffer that is too small.
-fn hex_decode(hex: &[u8], out: &mut [u8]) -> Option<usize> {
-    if hex.len() % 2 != 0 || hex.len() / 2 > out.len() {
-        return None;
-    }
-    let mut i = 0usize;
-    while i < hex.len() {
-        let hi = hex_nibble(hex[i])?;
-        let lo = hex_nibble(hex[i + 1])?;
-        out[i / 2] = (hi << 4) | lo;
-        i += 2;
-    }
-    Some(hex.len() / 2)
-}
+/// The block the self-test writes to.
+const SELF_TEST_BLOCK: u64 = vault::SELF_TEST_BLOCK;
 
 /// Production Sovereign Vault state manager.
 pub struct VaultApp {
@@ -189,42 +98,42 @@ impl VaultApp {
         Self {
             sectors: [
                 Some(SectorRecord {
-                    sector_id: 100,
+                    sector_id: MANAGED_SECTORS[0],
                     sector_type: VaultSectorType::RootKeystore,
                     description: "Root Keystore & Identity",
                     encrypted_bytes: 512,
                     authenticated: false,
                 }),
                 Some(SectorRecord {
-                    sector_id: 200,
+                    sector_id: MANAGED_SECTORS[1],
                     sector_type: VaultSectorType::MediaContainers,
                     description: "General Media & Documents",
                     encrypted_bytes: 512,
                     authenticated: false,
                 }),
                 Some(SectorRecord {
-                    sector_id: 201,
+                    sector_id: MANAGED_SECTORS[2],
                     sector_type: VaultSectorType::CameraPhotos,
                     description: "Camera Photos & ISP Metadata",
                     encrypted_bytes: 512,
                     authenticated: false,
                 }),
                 Some(SectorRecord {
-                    sector_id: 202,
+                    sector_id: MANAGED_SECTORS[3],
                     sector_type: VaultSectorType::EncryptedMessages,
                     description: "Encrypted Messages & P2P Wire",
                     encrypted_bytes: 512,
                     authenticated: false,
                 }),
                 Some(SectorRecord {
-                    sector_id: 203,
+                    sector_id: MANAGED_SECTORS[4],
                     sector_type: VaultSectorType::CalendarEvents,
                     description: "Calendar Events & Timeline",
                     encrypted_bytes: 512,
                     authenticated: false,
                 }),
                 Some(SectorRecord {
-                    sector_id: 204,
+                    sector_id: MANAGED_SECTORS[5],
                     sector_type: VaultSectorType::MusicTracks,
                     description: "Audio Tracks & Music Studio",
                     encrypted_bytes: 512,
@@ -353,8 +262,17 @@ impl VaultApp {
         None
     }
 
-    /// Performs an authenticated encryption and decryption test on a target sector.
-    pub fn test_sector_roundtrip(&mut self, sector_id: u64, payload_tag: &[u8]) -> bool {
+    /// Performs an authenticated encryption and decryption test.
+    ///
+    /// WHY the round trip runs against `SELF_TEST_BLOCK` and not against the
+    /// sector the row is about: `vault_encrypt_sector` is not a dry run. The
+    /// kernel seals the caller's payload over the block it is given and
+    /// writes the envelope to the storage vault, so a self-test against a
+    /// managed sector replaced that sector's record - the camera's photos,
+    /// the messages app's wire records, the calendar's agenda - with a test
+    /// payload. The managed sectors are live data; the probe has a block of
+    /// its own.
+    pub fn test_vault_roundtrip(&mut self, block: u64, payload_tag: &[u8]) -> bool {
         let Some(iv) = self.generate_iv() else {
             std::log("[VAULT APP] Entropy unavailable; refusing sector verification.").ok();
             return false;
@@ -363,27 +281,22 @@ impl VaultApp {
         let copy_len = payload_tag.len().min(64);
         sector_buf[..copy_len].copy_from_slice(&payload_tag[..copy_len]);
 
-        match std::vault_encrypt_sector(sector_id, &mut sector_buf, &iv) {
+        match std::vault_encrypt_sector(block, &mut sector_buf, &iv) {
             Ok(()) => {
                 self.total_encryptions += 1;
                 if &sector_buf[..copy_len] != &payload_tag[..copy_len] {
-                    match std::vault_decrypt_sector(sector_id, &mut sector_buf, &iv) {
+                    match std::vault_decrypt_sector(block, &mut sector_buf, &iv) {
                         Ok(()) => {
                             self.total_decryptions += 1;
                             if &sector_buf[..copy_len] == &payload_tag[..copy_len] {
-                                for slot in self.sectors.iter_mut().flatten() {
-                                    if slot.sector_id == sector_id {
-                                        slot.authenticated = true;
-                                    }
-                                }
                                 self.update_counter_buf();
                                 return true;
                             } else {
-                                std::log("[VAULT APP] Sector decrypted but payload mismatch!").ok();
+                                std::log("[VAULT APP] Block decrypted but payload mismatch!").ok();
                             }
                         }
                         Err(_) => {
-                            std::log("[VAULT APP] Sector decrypt returned Err.").ok();
+                            std::log("[VAULT APP] Block decrypt returned Err.").ok();
                         }
                     }
                 } else {
@@ -391,7 +304,7 @@ impl VaultApp {
                 }
             }
             Err(_) => {
-                std::log("[VAULT APP] Sector encrypt returned Err.").ok();
+                std::log("[VAULT APP] Block encrypt returned Err.").ok();
             }
         }
         self.update_counter_buf();
@@ -400,11 +313,16 @@ impl VaultApp {
 
     /// Re-runs one sector's round-trip test, recording failure as well as
     /// success so a sector that later stops verifying stops claiming otherwise.
+    ///
+    /// WHY the probe runs on the app's own block: the row is about a managed
+    /// sector, but writing the test payload over that sector would destroy
+    /// the record another app stored there. The row reports whether the
+    /// vault's crypto round-trips; it never claims the sector was touched.
     pub fn verify_sector(&mut self, index: usize) -> bool {
-        let Some(sec) = self.sectors[index] else {
+        if self.sectors[index].is_none() {
             return false;
-        };
-        let ok = self.test_sector_roundtrip(sec.sector_id, b"INTER_VAULT_TOUCH_AUTH_VERIFY");
+        }
+        let ok = self.test_vault_roundtrip(SELF_TEST_BLOCK, b"INTER_VAULT_TOUCH_AUTH_VERIFY");
         if let Some(slot) = self.sectors[index].as_mut() {
             slot.authenticated = ok;
         }
@@ -417,10 +335,17 @@ impl VaultApp {
     pub fn verify_all_sectors(&mut self) -> bool {
         // Not short-circuited on purpose: every sector must be exercised even
         // after an early failure, so the per-sector failure logs are complete.
+        //
+        // WHY one probe and not six: every round trip writes the block it is
+        // given, and the six managed sectors are live data. One probe on the
+        // app's own block exercises the same crypto path six times over
+        // without writing over anyone's record.
         let mut all_ok = true;
         for index in 0..6 {
-            let Some(sec) = self.sectors[index] else { continue };
-            let ok = self.test_sector_roundtrip(sec.sector_id, b"INTER_ROOT_KEYSTORE_RECORD_V1");
+            let Some(_sec) = self.sectors[index] else {
+                continue;
+            };
+            let ok = self.test_vault_roundtrip(SELF_TEST_BLOCK, b"INTER_ROOT_KEYSTORE_RECORD_V1");
             if let Some(slot) = self.sectors[index].as_mut() {
                 slot.authenticated = ok;
             }
@@ -564,7 +489,16 @@ const ACTION_X1: usize = W - MARGIN;
 const ACTION: &[u8] = b"RE-PROBE";
 
 const TITLE: &[u8] = b"Vault";
-const SUBTITLE: &[u8] = b"Sovereign encrypted storage";
+/// The subtitle under the title.
+///
+/// WHY it does not say the storage is encrypted: the app cannot confirm that.
+/// Whether the platform's storage is encrypted is the platform's answer to
+/// give, and this app has no probe that asks it - the keystore probe
+/// reports whether raw key material was handed over, not whether anything on
+/// the disk is encrypted. The old subtitle read "Sovereign encrypted
+/// storage", which is a claim about the platform drawn before the app had
+/// asked anything.
+const SUBTITLE: &[u8] = b"Sovereign storage manager";
 
 const STATUS_Y: usize = 1328;
 /// Rows the status line owns: one scale-1 run at `STATUS_Y`.
@@ -602,15 +536,19 @@ fn tile_origin(index: usize) -> (usize, usize) {
     (TILE_COL_X[index % 2], TILE_ROW_Y[index / 2])
 }
 
-/// Sector names shown on the tiles, indexed exactly like `VaultApp::sectors`.
-fn sector_tile(index: usize) -> (&'static [u8], &'static [u8]) {
+/// The name shown on each sector tile, indexed exactly like `VaultApp::sectors`.
+///
+/// WHY the hint is not here: the hint names the block the self-test writes
+/// to, and that block is the library's `SELF_TEST_BLOCK`; the library builds
+/// the hint from it so the two cannot drift.
+fn sector_tile(index: usize) -> &'static [u8] {
     match index {
-        0 => (b"Root keystore", b"Sector 100 - tap to test"),
-        1 => (b"Media & documents", b"Sector 200 - tap to test"),
-        2 => (b"Camera photos", b"Sector 201 - tap to test"),
-        3 => (b"Messages & wire", b"Sector 202 - tap to test"),
-        4 => (b"Calendar events", b"Sector 203 - tap to test"),
-        _ => (b"Audio tracks", b"Sector 204 - tap to test"),
+        0 => b"Root keystore",
+        1 => b"Media & documents",
+        2 => b"Camera photos",
+        3 => b"Messages & wire",
+        4 => b"Calendar events",
+        _ => b"Audio tracks",
     }
 }
 
@@ -931,13 +869,23 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
         }
         for index in 0..6 {
             let (tx, ty) = tile_origin(index);
-            let (name, hint) = sector_tile(index);
+            let name = sector_tile(index);
+            let (hint_buf, hint_len) = vault::sector_tile_hint(index);
             let (verdict, verdict_ink) = match vault.sectors[index].map(|s| s.authenticated) {
                 Some(true) => (b"round-trip verified".as_slice(), THEME.success),
                 Some(false) => (b"not tested this session".as_slice(), THEME.on_surface_variant),
                 None => (b"no record".as_slice(), THEME.warning),
             };
-            if let Some(c) = tile_pixel(x, y, tx, ty, name, verdict, verdict_ink, hint) {
+            if let Some(c) = tile_pixel(
+                x,
+                y,
+                tx,
+                ty,
+                name,
+                verdict,
+                verdict_ink,
+                &hint_buf[..hint_len],
+            ) {
                 return c;
             }
         }
@@ -984,7 +932,7 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
             b"Encryptions / decryptions",
             counters,
             THEME.on_surface,
-            b"counters incremented by real sector calls",
+            b"counters incremented by real vault calls",
         ) {
             return c;
         }
@@ -1009,6 +957,17 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
         ) {
             return c;
         }
+        // WHY the row follows the probe: the row used to say "never shown" and
+        // "keys stay inside the syscall boundary" with a success ink, whatever
+        // the keystore had answered. When the keystore does export a key, the
+        // key is in this app's memory and that sentence is false. The row now
+        // reports the answer the app was given.
+        let (key_value, key_source) = key_material_row(vault.keys_derived());
+        let key_ink = if vault.keys_derived() {
+            THEME.warning
+        } else {
+            THEME.success
+        };
         if let Some(c) = metric_row(
             x,
             y,
@@ -1016,9 +975,9 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
             CARD_C_Y + 256,
             CARD_W,
             b"Key material on screen",
-            b"never shown",
-            THEME.success,
-            b"keys stay inside the syscall boundary",
+            key_value.as_bytes(),
+            key_ink,
+            key_source.as_bytes(),
         ) {
             return c;
         }
@@ -1033,7 +992,12 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
         BTN_Y,
         BTN_W,
         BTN_H,
-        b"Verify all sectors",
+        // WHY the button is named for what it runs: the old label called it
+        // "Verify all sectors", but the probe cannot read or write the
+        // managed sectors without touching live data, so the button runs the
+        // vault's own crypto round trip against the app's self-test block and
+        // updates every sector row's verdict.
+        b"Verify vault crypto",
         false,
     ) {
         return c;
@@ -1355,8 +1319,10 @@ fn handle_vault_touch(vault: &mut VaultApp, x: u32, y: u32) -> Tap {
         if in_round(x, y, tx, ty, TILE_W, TILE_H, 14) {
             let ok = vault.verify_sector(index);
             if ok {
-                status(vault, b"sector round-trip verified");
-                std::log("[VAULT] Sector card touched. Round-trip re-verified.").ok();
+                status(vault, b"vault round-trip verified on block 1900");
+                std::log("[VAULT] Sector card touched. Round-trip re-verified on the app's self-test block 1900; the managed sector was not written.",
+                )
+                .ok();
             } else {
                 status(vault, b"sector round-trip FAILED (see log)");
                 std::log("[VAULT] Sector card touched. Round-trip verification FAILED (see reason above).",
@@ -1387,8 +1353,10 @@ fn handle_vault_touch(vault: &mut VaultApp, x: u32, y: u32) -> Tap {
         let all_ok = vault.verify_all_sectors();
         std::audio_haptic_click().ok();
         if all_ok {
-            status(vault, b"all 6 sectors round-trip verified");
-            std::log("[VAULT] All 6 sectors roundtrip verified.").ok();
+            status(vault, b"vault round-trip verified on block 1900");
+            std::log("[VAULT] All 6 sector rows re-verified against the app's self-test block 1900; the managed sectors were not written.",
+            )
+            .ok();
         } else {
             status(vault, b"one or more sectors FAILED (see log)");
             std::log("[VAULT] Roundtrip verification FAILED for one or more sectors (see reasons above).",
@@ -1415,6 +1383,29 @@ fn handle_vault_touch(vault: &mut VaultApp, x: u32, y: u32) -> Tap {
     }
 
     Tap::None
+}
+
+/// The surface this app owns, so the panic path can give it back.
+///
+/// WHY it is a static and not a local: the surface was created in `_start`
+/// and the panic handler is a separate entry point with no access to it, so
+/// a panic left the surface allocated until the task was reaped. The
+/// platform's compositor keeps a surface's pixels until it is destroyed.
+static mut VAULT_SURFACE: u32 = 0;
+
+/// Destroys the app's surface, if it has one.
+///
+/// WHY it is safe to call twice: the exit paths destroy the surface and then
+/// exit, and the panic path may run after either.
+fn release_surface() {
+    let surface = unsafe {
+        let s = core::ptr::addr_of!(VAULT_SURFACE).read_volatile();
+        core::ptr::addr_of_mut!(VAULT_SURFACE).write_volatile(0);
+        s
+    };
+    if surface > 0 {
+        let _ = std::surface_destroy(surface);
+    }
 }
 
 #[no_mangle]
@@ -1453,6 +1444,11 @@ pub extern "C" fn _start() -> ! {
             std::exit_with_code(1);
         }
     };
+    // WHY the surface is published here: the panic handler has to be able to
+    // give it back, and it cannot reach a local of `_start`.
+    unsafe {
+        core::ptr::addr_of_mut!(VAULT_SURFACE).write_volatile(surface);
+    }
 
     // 3. Render initial UI and present
     status(
@@ -1488,10 +1484,11 @@ pub extern "C" fn _start() -> ! {
     // Interactive Event Reactor Loop
     loop {
         if let Ok(events) = std::event_poll(std::EVENT_TOUCH_INPUT | std::EVENT_TIMER_TICK, 100) {
-            if (events & std::EVENT_TIMER_TICK) != 0 {
-                let _ = std::surface_flip();
-            }
-
+            // WHY there is no flip on the timer tick: the app repaints only
+            // the rows an input dirtied, and publishing a frame it did not
+            // write tells the platform's compositor to re-present someone
+            // else's picture. A frame is published by the task that finished
+            // writing it, and by nobody else.
             if (events & std::EVENT_TOUCH_INPUT) != 0 {
                 let mut input = std::InputEvent {
                     kind: 0,
@@ -1518,14 +1515,14 @@ pub extern "C" fn _start() -> ! {
                         std::log("[VAULT APP] Navigation gesture recognized. Returning to launcher.",
                         )
                         .ok();
-                        let _ = std::surface_destroy(surface);
+                        release_surface();
                         std::exit_with_code(0);
                     }
                     if input.kind == 1 {
                         match handle_vault_touch(&mut vault, input.x, input.y) {
                             Tap::Leave(msg) => {
                                 std::log(msg).ok();
-                                let _ = std::surface_destroy(surface);
+                                release_surface();
                                 std::exit_with_code(0);
                             }
                             Tap::Redraw(d) => dirty = dirty.widen(d),
@@ -1551,5 +1548,9 @@ pub extern "C" fn _start() -> ! {
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
     std::log("[VAULT APP] Panic detected! Terminating task...").ok();
+    // WHY the surface is released here too: the app owns a surface, and a
+    // panic that left it allocated kept the platform's compositor holding
+    // this app's pixels.
+    release_surface();
     std::exit_with_code(1);
 }

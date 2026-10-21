@@ -125,6 +125,84 @@ pub fn hex_decode(hex: &[u8], out: &mut [u8]) -> Option<usize> {
     Some(hex.len() / 2)
 }
 
+/// The block this app reserves for its own crypto self-test.
+///
+/// WHY the self-test has a block of its own: `vault_encrypt_sector` is not a
+/// dry run - the kernel seals the caller's payload over the block it is
+/// given and writes the envelope to the storage vault. The managed sectors
+/// are live data: the camera, the messages app, the calendar and the media
+/// store seal their own records there. A self-test that ran against one of
+/// them would replace that record with a test payload, so the probe runs
+/// against a block no other app seals.
+///
+/// WHY 1900: the vault's region holds 2048 blocks and every block an app
+/// uses in this tree is at or below 204, so a block well above them and
+/// below the limit is free.
+pub const SELF_TEST_BLOCK: u64 = 1900;
+
+/// The blocks the managed sectors live at, in the order the tiles show them.
+pub const MANAGED_SECTORS: [u64; 6] = [100, 200, 201, 202, 203, 204];
+
+/// The hint a sector tile carries, and its length.
+///
+/// WHY the hint names the block the probe writes to: the tap runs the
+/// vault's crypto probe against the app's own block, never against the
+/// sector the row is about, and a hint that read "tap to test" after the
+/// sector's number invited the reader to believe the opposite.
+pub fn sector_tile_hint(index: usize) -> ([u8; 24], usize) {
+    let mut out = [0u8; 24];
+    let prefix = b"Sector ";
+    out[..prefix.len()].copy_from_slice(prefix);
+    let mut n = prefix.len();
+    let block = MANAGED_SECTORS.get(index).copied().unwrap_or(0);
+    n += decimal(block, &mut out[n..]);
+    let tail = b" - block ";
+    let take = tail.len().min(out.len() - n);
+    out[n..n + take].copy_from_slice(&tail[..take]);
+    n += take;
+    n += decimal(SELF_TEST_BLOCK, &mut out[n..]);
+    (out, n)
+}
+/// Writes `value` as decimal ASCII into `out`; returns the byte count.
+///
+/// WHY it is written by hand: the app is `no_std` with no allocator, so the
+/// formatting crates that turn a number into text are not available.
+fn decimal(value: u64, out: &mut [u8]) -> usize {
+    let mut digits = [0u8; 20];
+    let mut count = 0usize;
+    let mut v = value;
+    while v > 0 && count < digits.len() {
+        digits[count] = b'0' + (v % 10) as u8;
+        count += 1;
+        v /= 10;
+    }
+    let n = count.min(out.len());
+    for i in 0..n {
+        out[i] = digits[count - 1 - i];
+    }
+    n
+}
+
+/// The verdict and the provenance for the "Key material on screen" row.
+///
+/// WHY it follows the probe: the row used to say "never shown" and "keys stay
+/// inside the syscall boundary" with a success ink, whatever the keystore
+/// had answered. When the keystore does export a key, the key is in this
+/// app's memory and that sentence is false.
+pub fn key_material_row(derived: bool) -> (&'static str, &'static str) {
+    if derived {
+        (
+            "exported to this app",
+            "keystore_derive returned the key to Ring 3",
+        )
+    } else {
+        (
+            "never shown",
+            "the keystore refused to export raw key material",
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,6 +253,81 @@ mod tests {
         assert_eq!(VaultSectorType::CameraPhotos.sector_id(), 201);
         assert_eq!(VaultSectorType::MusicTracks.sector_id(), 204);
         assert!(VaultSectorType::RootKeystore.description().contains("Keystore"));
+    }
+
+    #[test]
+    fn the_sector_tile_hints_fit_their_tile() {
+        // WHY: the hint names the block the self-test writes to, and a hint
+        // the tile ellipsises would hide the very fact it exists to report.
+        for index in 0..MANAGED_SECTORS.len() {
+            let (hint, len) = sector_tile_hint(index);
+            let hint = &hint[..len];
+            let w = interos_std::font::measure(hint, 1);
+            assert!(
+                w <= 272,
+                "the hint {:?} is {}px wide and the tile reserves 272px",
+                core::str::from_utf8(hint).unwrap(),
+                w
+            );
+        }
+    }
+
+    #[test]
+    fn the_self_test_never_writes_over_a_managed_sector() {
+        // WHY: `vault_encrypt_sector` seals the caller's payload over the
+        // block it is given and persists it, so a self-test against a managed
+        // sector would replace the record the camera, the messages app or
+        // the calendar stored there.
+        for sector in MANAGED_SECTORS.iter() {
+            assert_ne!(
+                *sector, SELF_TEST_BLOCK,
+                "the self-test block is a managed sector"
+            );
+        }
+        // And the block is inside the vault's region, so the probe reaches a
+        // real block rather than failing at the edge of the range.
+        assert!(SELF_TEST_BLOCK < 2048, "the self-test block is past the vault's range");
+    }
+
+    #[test]
+    fn the_tile_hint_names_its_own_sector_and_the_test_block() {
+        for (index, sector) in MANAGED_SECTORS.iter().enumerate() {
+            let (hint, len) = sector_tile_hint(index);
+            let text = core::str::from_utf8(&hint[..len]).expect("the hint is text");
+            assert!(
+                text.starts_with("Sector "),
+                "the hint does not name a sector: {}",
+                text
+            );
+            let mut digits = [0u8; 20];
+            let n = decimal(*sector, &mut digits);
+            let sector_text = core::str::from_utf8(&digits[..n]).expect("the block is text");
+            assert!(
+                text.contains(sector_text),
+                "the hint does not name its own sector: {}",
+                text
+            );
+            assert!(
+                text.contains("1900"),
+                "the hint does not name the block the probe writes to: {}",
+                text
+            );
+        }
+    }
+
+    #[test]
+    fn the_key_material_row_follows_the_probe() {
+        // WHY: the row used to claim the keys stayed inside the syscall
+        // boundary whatever the keystore answered, and a keystore that
+        // exports a key puts that key in this app's memory.
+        let (value, source) = key_material_row(false);
+        assert_eq!(value, "never shown");
+        assert!(source.contains("refused"));
+        let (value, source) = key_material_row(true);
+        assert_eq!(value, "exported to this app");
+        assert!(source.contains("keystore_derive"));
+        // The two readings must not say the same thing.
+        assert_ne!(value, "never shown");
     }
 
     #[test]
