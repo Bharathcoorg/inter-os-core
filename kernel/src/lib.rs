@@ -7,7 +7,7 @@
 //! cannot link them.
 
 #![no_std]
-#![feature(abi_x86_interrupt)]
+#![cfg_attr(not(target_os = "windows"), feature(abi_x86_interrupt))]
 
 extern crate alloc;
 

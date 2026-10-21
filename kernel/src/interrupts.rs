@@ -3,14 +3,19 @@
 //! Handles CPU hardware exceptions (Breakpoint, Double Fault, Page Fault, GPF)
 //! and 8259 PIC external hardware interrupts (PIT system timer, PS/2 keyboard).
 
+#[cfg(not(target_os = "windows"))]
 use conquer_once::spin::Lazy;
 use core::sync::atomic::{AtomicU64, Ordering};
+#[cfg(not(target_os = "windows"))]
 use pc_keyboard::{layouts, DecodedKey, HandleControl, Keyboard, ScancodeSet1};
 use pic8259::ChainedPics;
 use spin::Mutex;
 use x86_64::instructions::port::Port;
-use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
+#[cfg(not(target_os = "windows"))]
+use x86_64::structures::idt::{InterruptDescriptorTable, PageFaultErrorCode};
+use x86_64::structures::idt::InterruptStackFrame;
 
+#[cfg(not(target_os = "windows"))]
 use crate::{gdt, serial_println};
 
 /// Master PIC remapped interrupt offset (IRQ 0-7 -> INT 32-39).
@@ -33,6 +38,7 @@ pub static PICS: Mutex<ChainedPics> =
     Mutex::new(unsafe { ChainedPics::new(PIC_1_OFFSET, PIC_2_OFFSET) });
 
 /// PS/2 Keyboard decoder state.
+#[cfg(not(target_os = "windows"))]
 static KEYBOARD: Mutex<Option<Keyboard<layouts::Us104Key, ScancodeSet1>>> = Mutex::new(None);
 
 /// Hardware IRQ interrupt vector indices.
@@ -210,6 +216,7 @@ extern "x86-interrupt" fn double_fault_handler(
 /// arguments. That is unsafe once paging state is suspect because the reporter
 /// itself can become the second fault. This path only touches the 16550 PIO
 /// registers and uses bounded polling.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 #[inline(never)]
 fn fault_report_byte(byte: u8) -> bool {
     let mut lsr = Port::<u8>::new(0x3FD);
@@ -228,6 +235,7 @@ fn fault_report_byte(byte: u8) -> bool {
 }
 
 #[inline(never)]
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn fault_report_bytes(bytes: &[u8]) -> bool {
     const MAX_BYTES: usize = 256;
     let len = core::cmp::min(bytes.len(), MAX_BYTES);
@@ -240,6 +248,7 @@ fn fault_report_bytes(bytes: &[u8]) -> bool {
 }
 
 #[inline(never)]
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn fault_report_hex(value: u64) -> bool {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     if !fault_report_bytes(b"0x") {
@@ -254,6 +263,7 @@ fn fault_report_hex(value: u64) -> bool {
 }
 
 #[inline(never)]
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn fault_report_line(label: &[u8], value: u64) -> bool {
     fault_report_bytes(label)
         && fault_report_hex(value)
@@ -265,6 +275,7 @@ fn fault_report_line(label: &[u8], value: u64) -> bool {
 /// Inline asm rather than a typed accessor for the same reason CR2 is read
 /// this way: a fault handler cannot unwrap, panic or format.
 #[inline(always)]
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn handler_stack_pointer() -> u64 {
     let stack_pointer: u64;
     unsafe {
@@ -280,6 +291,7 @@ fn handler_stack_pointer() -> u64 {
 /// exception runs on the stack that was already current and pushes exactly
 /// RIP, CS and RFLAGS, so frame offset 24 is never written by the CPU.
 #[inline(always)]
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn frame_has_stack_pointer(stack_frame: &InterruptStackFrame) -> bool {
     stack_frame.code_segment.rpl() == x86_64::PrivilegeLevel::Ring3
 }
@@ -300,6 +312,7 @@ fn frame_has_stack_pointer(stack_frame: &InterruptStackFrame) -> bool {
 /// pointer is reported under the distinct label `KSP` so the two can never be
 /// confused for the same measurement.
 #[inline(never)]
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn fault_report_stack_pointer(frame_stack_pointer: Option<u64>) -> bool {
     match frame_stack_pointer {
         Some(value) => fault_report_line(FAULT_FRAME_STACK_LABEL, value),
@@ -308,6 +321,7 @@ fn fault_report_stack_pointer(frame_stack_pointer: Option<u64>) -> bool {
 }
 
 #[inline(never)]
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn halt_after_fault_report_failure() -> ! {
     loop {
         x86_64::instructions::hlt();

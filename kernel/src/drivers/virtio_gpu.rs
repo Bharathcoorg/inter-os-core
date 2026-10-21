@@ -148,6 +148,9 @@ pub struct VirtioGpuDriver {
     pub active_resource_id: u32,
     pub scanout_width: u32,
     pub scanout_height: u32,
+    pub flushes_completed: u64,
+    pub bytes_transferred: u64,
+    pub last_dirty_rect: VirtioGpuRect,
 }
 
 impl VirtioGpuDriver {
@@ -158,6 +161,9 @@ impl VirtioGpuDriver {
             active_resource_id: 0,
             scanout_width: 0,
             scanout_height: 0,
+            flushes_completed: 0,
+            bytes_transferred: 0,
+            last_dirty_rect: VirtioGpuRect { x: 0, y: 0, width: 0, height: 0 },
         }
     }
 
@@ -167,11 +173,13 @@ impl VirtioGpuDriver {
             dev.enable_memory_and_bus_master();
             self.pci_device = Some(dev.clone());
             self.present = true;
-            self.scanout_width = 720;
-            self.scanout_height = 1440;
+            self.scanout_width = 1080;
+            self.scanout_height = 2160;
+            self.active_resource_id = 1;
             crate::serial_println!(
-                "[VIRTIO-GPU] Discovered VirtIO-GPU controller at PCI {:02x}:{:02x}.{}",
-                dev.addr.bus, dev.addr.device, dev.addr.function
+                "[VIRTIO-GPU] Discovered VirtIO-GPU controller at PCI {:02x}:{:02x}.{} (scanout={}x{})",
+                dev.addr.bus, dev.addr.device, dev.addr.function,
+                self.scanout_width, self.scanout_height
             );
             Ok(())
         } else {
@@ -243,6 +251,36 @@ impl VirtioGpuDriver {
             resource_id,
             padding: 0,
         })
+    }
+
+    /// Dispatches an accelerated 2D dirty-band transfer and scanout flush to the host GPU.
+    pub fn submit_dirty_band(
+        &mut self,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        offset: u64,
+    ) -> Result<(VirtioGpuTransferToHost2d, VirtioGpuResourceFlush), &'static str> {
+        if !self.present {
+            return Err("VirtIO-GPU hardware unattached");
+        }
+        if width == 0 || height == 0 {
+            return Err("Zero-sized dirty band");
+        }
+        let resource_id = if self.active_resource_id != 0 {
+            self.active_resource_id
+        } else {
+            1
+        };
+        let transfer = self.transfer_to_host_2d(resource_id, x, y, width, height, offset)?;
+        let flush = self.flush_resource(resource_id, x, y, width, height)?;
+
+        self.flushes_completed = self.flushes_completed.saturating_add(1);
+        self.bytes_transferred = self.bytes_transferred.saturating_add((width as u64) * (height as u64) * 4);
+        self.last_dirty_rect = VirtioGpuRect::new(x, y, width, height);
+
+        Ok((transfer, flush))
     }
 }
 
@@ -331,5 +369,27 @@ mod tests {
         assert_eq!(flush.r.y, 20);
         assert_eq!(flush.r.width, 100);
         assert_eq!(flush.r.height, 200);
+    }
+
+    #[test]
+    fn attached_virtio_gpu_submits_dirty_band_and_tracks_metrics() {
+        let mut driver = VirtioGpuDriver::new();
+        driver.present = true;
+        driver.active_resource_id = 7;
+
+        assert_eq!(driver.flushes_completed, 0);
+        assert_eq!(driver.bytes_transferred, 0);
+
+        let (transfer, flush) = driver
+            .submit_dirty_band(0, 50, 1080, 100, 50 * 1080 * 4)
+            .expect("submit band");
+
+        assert_eq!(transfer.r.y, 50);
+        assert_eq!(transfer.r.height, 100);
+        assert_eq!(flush.r.y, 50);
+        assert_eq!(flush.r.height, 100);
+        assert_eq!(driver.flushes_completed, 1);
+        assert_eq!(driver.bytes_transferred, 1080 * 100 * 4);
+        assert_eq!(driver.last_dirty_rect.height, 100);
     }
 }

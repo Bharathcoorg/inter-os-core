@@ -84,6 +84,16 @@ impl DisplayDriver for KmsDisplayDriver<'_> {
             dirty_rows,
         );
 
+        // Accelerated 2D dirty-band scanout flush when modern VirtIO-GPU is discovered
+        if let Some(mut gpu) = crate::drivers::virtio_gpu::VIRTIO_GPU.try_lock() {
+            if gpu.present && dirty_rows.1 > dirty_rows.0 {
+                let dy0 = dirty_rows.0 as u32;
+                let dy1 = dirty_rows.1 as u32;
+                let sw = self.controller.scanout_width;
+                let _ = gpu.submit_dirty_band(0, dy0, sw, dy1 - dy0, (dy0 as u64) * (sw as u64) * 4);
+            }
+        }
+
         #[cfg(target_arch = "x86_64")]
         let t2 = unsafe { core::arch::x86_64::_rdtsc() };
 

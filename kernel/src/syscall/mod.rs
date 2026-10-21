@@ -6150,15 +6150,14 @@ mod tests {
 
     #[test]
     /// Exercises the real privileged-authorization gate for capability 18.
-///
-/// WHY this replaces a table-only test: asserting that a capability table
-/// holding an object-0 `SystemControl` token authorizes object 0 only proves
-/// `CapabilityTable::authorize_object` works. It passed unchanged against the
-/// code that let any holder of capability 18 reach device-wide administration.
-/// The confinement lives in `authorize_device_wide_system_control` and
-/// `authorize_system_control_object`, so those are what this drives.
-#[test]
-fn capability_18_is_confined_to_the_system_supervisor_gate() {
+    ///
+    /// WHY this replaces a table-only test: asserting that a capability table
+    /// holding an object-0 `SystemControl` token authorizes object 0 only proves
+    /// `CapabilityTable::authorize_object` works. It passed unchanged against the
+    /// code that let any holder of capability 18 reach device-wide administration.
+    /// The confinement lives in `authorize_device_wide_system_control` and
+    /// `authorize_system_control_object`, so those are what this drives.
+    fn capability_18_is_confined_to_the_system_supervisor_gate() {
     use crate::capability::{Capability, CapabilityId, CapabilityType, Rights};
     use crate::services::SERVICE_POWER_CONTROL_OBJECT;
 

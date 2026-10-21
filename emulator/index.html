@@ -88,6 +88,10 @@
 
       <!-- Center: Action Controls (Focus Mode, Fullscreen WebApp, Screenshot, Reboot) -->
       <div class="header-center-actions">
+        <button class="header-action-pill active" id="btn-header-scale" title="Toggle Display Sizing: Responsive Fit / Flagship">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
+          <span id="header-scale-text">Flagship</span>
+        </button>
         <button class="header-action-pill active" id="btn-focus-mode" title="Toggle Immersive Smartphone Focus Mode (Hotkey: F, Esc to exit)">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="5" y="2" width="14" height="20" rx="3"/><circle cx="12" cy="18" r="1"/></svg>
           <span>Focus Mode</span>
@@ -335,6 +339,9 @@
           </button>
           <button class="emu-btn" id="emu-btn-fullscreen" title="Toggle Fullscreen WebApp (Hide Browser UI) [Key: F11]">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>
+          </button>
+          <button class="emu-btn" id="emu-btn-scale" title="Cycle Display Sizing: Fit (360px) / Flagship (470px)">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
           </button>
           <button class="emu-btn" id="emu-btn-rotate" title="Rotate Screen (Orientation)" style="display: none !important;">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>

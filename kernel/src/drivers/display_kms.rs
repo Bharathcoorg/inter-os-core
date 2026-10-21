@@ -2088,7 +2088,7 @@ mod tests {
     fn frame_scheduler_budget_and_deadline_tracking() {
         let mut sched = FrameScheduler::new(60);
         assert_eq!(sched.frame_budget_ns(), 16_666_666);
-        let mut sched120 = FrameScheduler::new(120);
+        let sched120 = FrameScheduler::new(120);
         assert_eq!(sched120.frame_budget_ns(), 8_333_333);
 
         sched.record_frame(100, 95); // Missed deadline (now 100 > deadline 95)

@@ -47,6 +47,7 @@ pub fn init_and_test_drivers() {
     test_gt911_pipeline();
     test_sdhci_controller();
     virtio_gpu::test_virtio_gpu_structures();
+    let _ = virtio_gpu::VIRTIO_GPU.lock().probe();
     crate::serial_println!(
         "--- [Hardware driver register models exercised; no physical controller is bound] ---"
     );

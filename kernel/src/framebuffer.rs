@@ -1975,23 +1975,6 @@ pub(crate) fn present_dst_row_band(band: (usize, usize), src_h: usize, dst_h: us
 }
 
 #[inline(always)]
-fn isqrt_byte(n: u32) -> u32 {
-    let mut res = 0u32;
-    let mut bit = 1u32 << 16;
-    let mut num = n;
-    while bit > 0 {
-        if num >= res + bit {
-            num -= res + bit;
-            res = (res >> 1) + bit;
-        } else {
-            res >>= 1;
-        }
-        bit >>= 2;
-    }
-    res
-}
-
-#[inline(always)]
 fn blend_half(c0: u32, c1: u32) -> u32 {
     if c0 == c1 {
         return c0;
@@ -2004,9 +1987,9 @@ fn blend_half(c0: u32, c1: u32) -> u32 {
     let g1 = ((c1 >> 8) & 0xFF) as u32;
     let b1 = (c1 & 0xFF) as u32;
 
-    let r = isqrt_byte((r0 * r0 + r1 * r1 + 1) >> 1);
-    let g = isqrt_byte((g0 * g0 + g1 * g1 + 1) >> 1);
-    let b = isqrt_byte((b0 * b0 + b1 * b1 + 1) >> 1);
+    let r = (r0 + r1 + 1) >> 1;
+    let g = (g0 + g1 + 1) >> 1;
+    let b = (b0 + b1 + 1) >> 1;
 
     0xFF000000 | (r << 16) | (g << 8) | b
 }
@@ -2549,11 +2532,6 @@ mod present_band_tests {
                 stride: self.stride,
             });
             fb.buffer_ptr = Some(self.bytes.as_mut_ptr());
-        }
-
-        fn row(&self, y: usize) -> &[u8] {
-            let start = y * self.stride * self.bpp;
-            &self.bytes[start..start + self.stride * self.bpp]
         }
 
         /// The part of row `y` inside the scaled viewport.

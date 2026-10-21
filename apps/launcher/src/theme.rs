@@ -160,7 +160,7 @@ impl Theme {
         surface_sunken: 0xFFE9E8E3,
         border: 0xFFE1E0DB,
         text: 0xFF111214,
-        text_muted: 0xFF777773,
+        text_muted: 0xFF525458,
         text_on_accent: 0xFFFFFFFF,
         accent: 0xFF2563EB,
         success: 0xFF2E8B57,

@@ -116,7 +116,11 @@ impl TouchDigitizer {
         pressure: u16,
         phase: TouchPhase,
     ) -> Option<TouchGesture> {
-        let slot_idx = (slot as usize) % MAX_TOUCH_SLOTS;
+        let slot_idx = slot as usize;
+        if slot_idx >= MAX_TOUCH_SLOTS {
+            // Reject unsupported touch slots safely without aliasing or buffer overflow
+            return None;
+        }
 
         let contact = TouchPoint {
             slot,

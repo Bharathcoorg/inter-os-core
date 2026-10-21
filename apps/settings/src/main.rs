@@ -5158,12 +5158,9 @@ fn get_settings_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
     {
         return GESTURE_BAR;
     }
-    // Shared 48x48 back control: rendered on sub-pages for uniform OS navigation
-    let is_subpage = app.sensors_open || app.wallpaper_open || app.screen_lock_open || app.current_section.is_some();
-    if is_subpage {
-        if let Some(c) = back_button_pixel(x, y) {
-            return c;
-        }
+    // Shared 48x48 back control: rendered on landing grid and sub-pages for uniform OS navigation
+    if let Some(c) = back_button_pixel(x, y) {
+        return c;
     }
     if app.sensors_open {
         return sensors_pixel(x, y, app);
@@ -5243,11 +5240,7 @@ fn handle_tap(
     surface: u32,
     repainted_band: &mut bool,
 ) {
-    let is_subpage = settings.sensors_open
-        || settings.wallpaper_open
-        || settings.screen_lock_open
-        || settings.current_section.is_some();
-    if is_subpage && std::design::back_button::contains(input.x as usize, input.y as usize) {
+    if std::design::back_button::contains(input.x as usize, input.y as usize) {
         if settings.sensors_open {
             settings.sensors_open = false;
             std::log("[SETTINGS APP] Sensors & Diagnostics sub-page dismissed.",
@@ -5265,16 +5258,21 @@ fn handle_tap(
             std::log("[SETTINGS APP] Wallpaper picker dismissed without applying a change.",
             )
             .ok();
+        } else if settings.current_section.is_some() {
+            settings.current_section = None;
+            std::log(
+                "[SETTINGS APP] Back navigation: returned to the System Space landing grid.",
+            )
+            .ok();
         } else {
-            match settings.current_section {
-                Some(_) => {
-                    settings.current_section = None;
-                    std::log("[SETTINGS APP] Back navigation: returned to the System Space landing grid.",
-                    )
-                    .ok();
-                }
-                None => {}
+            std::log(
+                "[SETTINGS APP] Back control pressed at root. Exiting to launcher.",
+            )
+            .ok();
+            if surface > 0 {
+                let _ = std::surface_destroy(surface);
             }
+            std::exit_with_code(0);
         }
     } else if input.x >= 240 && input.x <= 480 && input.y >= 1400 {
         std::log("[SETTINGS APP] Home gesture pressed. Exiting to launcher.",

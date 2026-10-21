@@ -1174,7 +1174,7 @@ mod tests {
     #[test]
     fn a_restored_account_is_never_unlocked() {
         let path = "/user/.accounts.test_lock_clamp";
-        let mut mgr = fully_populated();
+        let mgr = fully_populated();
         // The owner was provisioned with a PIN, which `provision_owner` leaves
         // Unlocked; the guest is Unlocked by design.
         assert_eq!(mgr.get_lock_state(UserId::OWNER).ok(), Some(UserLockState::Unlocked));

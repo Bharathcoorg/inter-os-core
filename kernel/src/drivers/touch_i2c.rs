@@ -87,7 +87,11 @@ impl GoodixGt911Driver {
                 }
 
                 let track_id = frame_data[offset];
-                let slot = (track_id as usize) % MAX_TOUCH_SLOTS;
+                let slot = track_id as usize;
+                if slot >= MAX_TOUCH_SLOTS {
+                    // Reject unsupported touch contacts safely
+                    continue;
+                }
 
                 let raw_x = u16::from_le_bytes([frame_data[offset + 1], frame_data[offset + 2]]) as u32;
                 let raw_y = u16::from_le_bytes([frame_data[offset + 3], frame_data[offset + 4]]) as u32;

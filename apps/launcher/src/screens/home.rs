@@ -148,7 +148,7 @@ const CARD_ROW_DETAIL: usize = type_scale::CAPTION;
 const CARD_ROWS: usize = 3;
 
 /// Type scale for a deck tile's name: scale 2 (BODY) with outline anti-aliasing for readability.
-const LABEL_SCALE: usize = type_scale::CAPTION;
+const LABEL_SCALE: usize = type_scale::BODY;
 
 /// Largest and smallest icon scale a deck tile will draw its badge word at.
 ///
@@ -450,7 +450,7 @@ impl Run {
         let w = bitmap_measure.max(outline_advance);
         let top = baseline.saturating_sub(asc as usize);
         let box_h = (baseline + desc as usize).saturating_sub(top);
-        let outline = if scale >= 2 {
+        let outline = if scale >= 2 && len <= launcher::outline_text::KEY_MAX {
             launcher::outline_text::OutlineRun::place(x, baseline, em, text)
         } else {
             None
@@ -504,7 +504,9 @@ impl Run {
             return None;
         }
         if let Some(ref outline) = self.outline {
-            return outline.pixel(px, py, ink, bg);
+            if let Some(c) = outline.pixel(px, py, ink, bg) {
+                return Some(c);
+            }
         }
         test_text_aa(
             px,
@@ -545,7 +547,6 @@ struct DeckTilePlan {
     icon: Option<launcher::icons::IconKind>,
     icon_cx: usize,
     icon_cy: usize,
-    #[allow(dead_code)]
     ink: u32,
     badge: Run,
     /// The app's name, resolved to exactly where and how it is drawn.
@@ -557,7 +558,6 @@ struct DeckTilePlan {
     /// the deck showed a grid of unlabelled tiles; the resolution work was already
     /// here, so painting it costs one bounds test per pixel inside a tile.
     label: Run,
-    #[allow(dead_code)]
     fill: u32,
 }
 
@@ -984,8 +984,8 @@ pub const DOCK_TILES: [Rect; 6] = [
 /// Smooth rounded pill corner radius for the 6 home screen app pills.
 pub const TILE_RADIUS: usize = 32;
 
-/// Half-size of a deck tile's pictogram, in pixels: 40x40 box.
-pub const DOCK_ICON_EXTENT: i32 = 20;
+/// Half-size of a deck tile's pictogram, in pixels: 56x56 box (increased icon size).
+pub const DOCK_ICON_EXTENT: i32 = 28;
 
 pub fn find_package_index(state: &LauncherState, suffix: &[u8]) -> Option<usize> {
     for i in 0..state.app_count {
@@ -1016,7 +1016,7 @@ fn deck_plan(state: &LauncherState, theme: &Theme, _deck: Rect) -> DeckPlan {
         empty: None,
     };
 
-    let fill = theme.surface;
+    let fill = launcher::theme::CARD_FROSTED_CREAM;
 
     let dock_defs: [(Option<launcher::icons::IconKind>, &[u8], &[u8], u32); 6] = [
         (Some(launcher::icons::IconKind::Phone), b"dialer", b"Phone", theme.text),
@@ -1044,7 +1044,7 @@ fn deck_plan(state: &LauncherState, theme: &Theme, _deck: Rect) -> DeckPlan {
         }
     });
     let label_fit = DOCK_TILES[0].w.saturating_sub(space::XS * 2);
-    let label_scale = type_scale::CAPTION;
+    let label_scale = LABEL_SCALE;
 
     for (slot, &(icon_kind, _, _, icon_ink)) in dock_defs.iter().enumerate() {
         let cell = DOCK_TILES[slot];
@@ -1498,7 +1498,11 @@ fn card_row_text(state: &LauncherState, row: usize, out: &mut [u8; CARD_DETAIL_C
             // "Messages" claimed a messaging state the shell cannot see.
             if state.notification_count > 0 {
                 let mut at = push_decimal(out, 0, state.notification_count);
-                at = put(out, at, b" unread notifications");
+                if state.notification_count == 1 {
+                    at = put(out, at, b" unread notification");
+                } else {
+                    at = put(out, at, b" unread notifications");
+                }
                 at
             } else {
                 put(out, 0, b"No new notifications")
@@ -1528,7 +1532,11 @@ fn card_row_text(state: &LauncherState, row: usize, out: &mut [u8; CARD_DETAIL_C
                 at
             } else {
                 let mut at = push_decimal(out, 0, state.app_count);
-                at = put(out, at, b" apps installed in system");
+                if state.app_count == 1 {
+                    at = put(out, at, b" app installed");
+                } else {
+                    at = put(out, at, b" apps installed");
+                }
                 at
             }
         }
@@ -1690,7 +1698,7 @@ fn deck_pixel(x: usize, y: usize, f: &Frame, p: &Paint, _theme: &Theme) -> Optio
         return Some(launcher::theme::DIVIDER_HAIRLINE);
     }
     let bg = backdrop_ref(&p.scene_ref, x, y);
-    let tile_fill = interos_std::font::blend(launcher::theme::CARD_FROSTED_CREAM, bg, 240);
+    let tile_fill = interos_std::font::blend(tile.fill, bg, 240);
 
     if let Some(kind) = tile.icon {
         if let Some(c) = launcher::icons::rasterize_icon_pixel_scaled_aa(
@@ -1699,16 +1707,16 @@ fn deck_pixel(x: usize, y: usize, f: &Frame, p: &Paint, _theme: &Theme) -> Optio
             y,
             tile.icon_cx,
             tile.icon_cy,
-            launcher::theme::TEXT_CHARCOAL,
+            tile.ink,
             tile_fill,
             DOCK_ICON_EXTENT,
         ) {
             return Some(c);
         }
-    } else if let Some(c) = tile.badge.pixel_aa(x, y, launcher::theme::TEXT_CHARCOAL, tile_fill) {
+    } else if let Some(c) = tile.badge.pixel_aa(x, y, tile.ink, tile_fill) {
         return Some(c);
     }
-    if let Some(c) = tile.label.pixel_aa(x, y, launcher::theme::TEXT_CHARCOAL, tile_fill) {
+    if let Some(c) = tile.label.pixel_aa(x, y, tile.ink, tile_fill) {
         return Some(c);
     }
     Some(tile_fill)
