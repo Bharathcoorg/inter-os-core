@@ -7,6 +7,33 @@
 //! Supports Matryoshka Representation Learning (MRL) dimension truncations
 //! (128, 256, 512, 768) and Q7 fixed-point cosine similarity calculation.
 
+// -----------------------------------------------------------------------------
+// The inference service interface
+// -----------------------------------------------------------------------------
+
+/// The version of the inference service interface this SDK speaks.
+///
+/// WHY a version at all: the platform's service registry reports an ABI
+/// version for every service it knows, so a service can change its
+/// contract without the device pretending it did not. An app that speaks
+/// one version can be told that the service speaks another, which is a
+/// fact it can report, rather than sending a request that will be
+/// misread.
+pub const INFERENCE_ABI_VERSION: u16 = 1;
+
+/// The service id the platform's inference service answers to.
+///
+/// WHY a service id and not a new kind of object: the platform's service
+/// registry already carries an id, a state and an ABI version per
+/// service. A narrow, versioned service interface therefore needs
+/// nothing but an id and a version to be discoverable, and it is
+/// discoverable by the same call that finds every other service.
+///
+/// WHY the id is 13: the platform defines services 1 through 12, and an
+/// inference service is the next one. The id is a name, not a claim that
+/// such a service exists.
+pub const SERVICE_INFERENCE: u8 = 13;
+
 /// Valid Matryoshka representation dimensions for EmbeddingGemma 2.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]

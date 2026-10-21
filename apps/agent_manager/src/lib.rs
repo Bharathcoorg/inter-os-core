@@ -87,11 +87,13 @@ pub enum Surface {
     Search = 3,
     /// The self-test, run against the platform's own functions.
     Test = 4,
+    /// The conversation with whatever model the device actually has.
+    Chat = 5,
 }
 
 impl Surface {
     /// How many surfaces the app has.
-    pub const COUNT: usize = 5;
+    pub const COUNT: usize = 6;
 
     /// Every surface, in the order the tab row shows them.
     pub const ALL: [Surface; Surface::COUNT] = [
@@ -100,6 +102,7 @@ impl Surface {
         Surface::Runtime,
         Surface::Search,
         Surface::Test,
+        Surface::Chat,
     ];
 
     /// The surface's position in the tab row.
@@ -115,6 +118,7 @@ impl Surface {
             2 => Some(Surface::Runtime),
             3 => Some(Surface::Search),
             4 => Some(Surface::Test),
+            5 => Some(Surface::Chat),
             _ => None,
         }
     }
@@ -127,6 +131,7 @@ impl Surface {
             Surface::Runtime => "Runtime",
             Surface::Search => "Search",
             Surface::Test => "Self-test",
+            Surface::Chat => "Chat",
         }
     }
 
@@ -138,7 +143,299 @@ impl Surface {
             Surface::Runtime => "RUNTIME",
             Surface::Search => "SEARCH",
             Surface::Test => "TEST",
+            Surface::Chat => "CHAT",
         }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// The chat surface
+// -----------------------------------------------------------------------------
+
+/// Which side of a conversation a message came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatRole {
+    /// Something the person typed.
+    User,
+    /// Something the model said.
+    Assistant,
+    /// Something the platform said about the exchange.
+    Notice,
+}
+
+impl ChatRole {
+    /// The label the transcript carries for this side of the exchange.
+    pub const fn label(self) -> &'static str {
+        match self {
+            ChatRole::User => "YOU",
+            ChatRole::Assistant => "MODEL",
+            ChatRole::Notice => "PLATFORM",
+        }
+    }
+}
+
+/// The longest message the transcript holds.
+pub const CHAT_TEXT_MAX: usize = 96;
+
+/// The longest prompt the composer holds.
+pub const CHAT_PROMPT_MAX: usize = 160;
+
+/// How many messages the transcript holds.
+///
+/// WHY the transcript is a ring: a conversation that has run for a while
+/// has more messages than a screen has room for, and a supervisor that
+/// grows without bound is a supervisor that eventually cannot allocate.
+/// The oldest message is the one that goes.
+///
+/// WHY ten and not more: the body holds twelve cards, and the chat
+/// spends two of them on the service state and the prompt. A transcript
+/// that wanted a thirteenth card would have its oldest message dropped
+/// by the *body* rather than by the ring, and the two would disagree
+/// about which message was oldest.
+pub const CHAT_MAX_MESSAGES: usize = 10;
+
+/// One message in the conversation.
+#[derive(Clone, Copy)]
+pub struct ChatMessage {
+    /// Which side of the exchange the message came from.
+    pub role: ChatRole,
+    /// The message's text.
+    pub text: [u8; CHAT_TEXT_MAX],
+    /// How much of the text buffer the message uses.
+    pub text_len: u8,
+}
+
+impl ChatMessage {
+    /// An empty message.
+    pub const fn empty() -> Self {
+        Self {
+            role: ChatRole::Notice,
+            text: [0u8; CHAT_TEXT_MAX],
+            text_len: 0,
+        }
+    }
+}
+
+/// What the platform can do with a prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InferenceAvailability {
+    /// A service answered, it is running, and it speaks this version.
+    Available {
+        /// The version the service speaks.
+        abi_version: u16,
+    },
+    /// A service answered, but it is not running.
+    NotRunning {
+        /// The state the platform reported.
+        state: ServiceState,
+    },
+    /// A service answered, but it speaks a version this app does not.
+    WrongVersion {
+        /// The version the service speaks.
+        abi_version: u16,
+    },
+    /// The platform's registry names no inference service at all.
+    NoService,
+    /// The platform's registry could not be read.
+    ///
+    /// WHY this is a different answer from `NoService`: a registry that
+    /// was refused has not said that there is no inference service. It has
+    /// said nothing, and the screen must not turn that into a fact.
+    RegistryUnavailable,
+}
+
+impl InferenceAvailability {
+    /// The sentence the chat shows for this answer.
+    ///
+    /// WHY a sentence and not a word: "unavailable" tells the user
+    /// nothing they can act on. The three answers have three different
+    /// remedies, and the screen has to name which one it is.
+    pub fn reason(self) -> &'static str {
+        match self {
+            InferenceAvailability::Available { .. } => {
+                "The platform's inference service is running and speaks this version."
+            }
+            InferenceAvailability::NotRunning { state } => match state {
+                ServiceState::Declared => {
+                    "The platform declares an inference service, but it has not started."
+                }
+                ServiceState::Starting => {
+                    "The platform's inference service is still starting."
+                }
+                ServiceState::Stopped => {
+                    "The platform's inference service is stopped."
+                }
+                ServiceState::Failed => {
+                    "The platform's inference service failed to start."
+                }
+                ServiceState::Unknown => {
+                    "The platform reports an inference service in a state this app does not know."
+                }
+                ServiceState::Running => unreachable!(),
+            },
+            InferenceAvailability::WrongVersion { .. } => {
+                "The platform's inference service speaks a version this app does not."
+            }
+            InferenceAvailability::NoService => {
+                "This device has no inference service: the platform's registry names none."
+            }
+            InferenceAvailability::RegistryUnavailable => {
+                "The platform's service registry could not be read, so the services it runs are unknown."
+            }
+        }
+    }
+
+    /// Whether a prompt can be sent.
+    pub const fn is_available(self) -> bool {
+        matches!(self, InferenceAvailability::Available { .. })
+    }
+}
+
+/// Looks for the platform's inference service in the registry.
+///
+/// WHY the registry and not a hardcoded list: the registry is what the
+/// platform reports about the services it is actually running. A service
+/// that the registry does not name is not a service this device has,
+/// whatever any catalogue says it should be.
+///
+/// WHY the registry's own answer is checked first: a registry the
+/// platform refused to answer has not said that there is no inference
+/// service. It has said nothing, and the chat must not report silence
+/// as a fact.
+///
+/// WHY the version is checked: the service's contract can change, and a
+/// request sent to a service that speaks another version would be
+/// misread rather than refused. The mismatch is a fact the app can
+/// report, so it reports it instead of guessing.
+pub fn resolve_inference_service(registry: &ServiceRegistry) -> InferenceAvailability {
+    if registry.status != ProbeStatus::Listed {
+        return InferenceAvailability::RegistryUnavailable;
+    }
+    let count = (registry.count as usize).min(MAX_SERVICES);
+    let entries = &registry.entries[..count];
+    let mut found: Option<&ServiceEntry> = None;
+    for entry in entries {
+        if entry.id == interos_std::ai::SERVICE_INFERENCE {
+            found = Some(entry);
+            break;
+        }
+    }
+    let Some(entry) = found else {
+        return InferenceAvailability::NoService;
+    };
+    if entry.state != ServiceState::Running {
+        return InferenceAvailability::NotRunning { state: entry.state };
+    }
+    if entry.abi_version != interos_std::ai::INFERENCE_ABI_VERSION {
+        return InferenceAvailability::WrongVersion {
+            abi_version: entry.abi_version,
+        };
+    }
+    InferenceAvailability::Available {
+        abi_version: entry.abi_version,
+    }
+}
+
+/// The conversation, and the prompt being written.
+#[derive(Clone, Copy)]
+pub struct ChatSession {
+    /// The transcript, oldest first when read through `message_at`.
+    pub messages: [ChatMessage; CHAT_MAX_MESSAGES],
+    /// How many messages the transcript holds.
+    pub message_count: u8,
+    /// Where the next message goes.
+    pub next: u8,
+    /// The prompt being written.
+    pub prompt: [u8; CHAT_PROMPT_MAX],
+    /// How much of the prompt buffer is used.
+    pub prompt_len: u8,
+}
+
+impl ChatSession {
+    /// An empty conversation.
+    pub const fn new() -> Self {
+        Self {
+            messages: [ChatMessage::empty(); CHAT_MAX_MESSAGES],
+            message_count: 0,
+            next: 0,
+            prompt: [0u8; CHAT_PROMPT_MAX],
+            prompt_len: 0,
+        }
+    }
+
+    /// Adds a message, dropping the oldest when the transcript is full.
+    pub fn push(&mut self, role: ChatRole, text: &[u8]) {
+        let index = self.next as usize % CHAT_MAX_MESSAGES;
+        self.messages[index].role = role;
+        let len = text.len().min(CHAT_TEXT_MAX);
+        self.messages[index].text[..len].copy_from_slice(&text[..len]);
+        self.messages[index].text_len = len as u8;
+        self.next = (self.next + 1) % CHAT_MAX_MESSAGES as u8;
+        if (self.message_count as usize) < CHAT_MAX_MESSAGES {
+            self.message_count += 1;
+        }
+    }
+
+    /// The message at a position, oldest first.
+    ///
+    /// WHY the index is computed rather than stored: the ring's write
+    /// position moves, and a transcript whose order is derived from it
+    /// cannot disagree with itself about which message is oldest.
+    pub fn message_at(&self, position: usize) -> Option<&ChatMessage> {
+        if position >= self.message_count as usize {
+            return None;
+        }
+        let count = self.message_count as usize;
+        let start = (self.next as usize + CHAT_MAX_MESSAGES - count) % CHAT_MAX_MESSAGES;
+        let index = (start + position) % CHAT_MAX_MESSAGES;
+        Some(&self.messages[index])
+    }
+
+    /// The number of messages the transcript holds.
+    pub const fn len(&self) -> usize {
+        self.message_count as usize
+    }
+
+    /// Whether the transcript is empty.
+    pub const fn is_empty(&self) -> bool {
+        self.message_count == 0
+    }
+
+    /// Appends a character to the prompt.
+    ///
+    /// WHY the prompt is bounded and refuses silently: a composer that
+    /// cannot hold more than the platform will accept is a composer that
+    /// has to truncate a half-typed sentence, and a half-typed sentence
+    /// that is silently cut is a sentence the user never wrote.
+    pub fn push_prompt_char(&mut self, c: u8) -> bool {
+        if self.prompt_len as usize >= CHAT_PROMPT_MAX {
+            return false;
+        }
+        self.prompt[self.prompt_len as usize] = c;
+        self.prompt_len += 1;
+        true
+    }
+
+    /// Removes the last character of the prompt.
+    pub fn pop_prompt_char(&mut self) {
+        if self.prompt_len > 0 {
+            self.prompt_len -= 1;
+        }
+    }
+
+    /// Empties the prompt.
+    pub fn clear_prompt(&mut self) {
+        self.prompt_len = 0;
+    }
+
+    /// The prompt's text.
+    pub fn prompt_text(&self) -> &[u8] {
+        &self.prompt[..self.prompt_len as usize]
+    }
+
+    /// Whether there is anything to send.
+    pub fn prompt_is_empty(&self) -> bool {
+        self.prompt_len == 0
     }
 }
 
@@ -1602,6 +1899,223 @@ pub fn format_u32(value: u32, buf: &mut [u8]) -> usize {
 mod tests {
     use super::*;
 
+    /// A registry that reported the given services.
+    fn registry(status: ProbeStatus, entries: &[ServiceEntry]) -> ServiceRegistry {
+        let mut reg = ServiceRegistry {
+            status,
+            count: 0,
+            highest_id: 0,
+            entries: [ServiceEntry {
+                id: 0,
+                state: ServiceState::Running,
+                abi_version: 0,
+                age_ticks: 0,
+                failures: 0,
+            }; MAX_SERVICES],
+        };
+        for entry in entries {
+            let index = reg.count as usize;
+            if index >= MAX_SERVICES {
+                break;
+            }
+            reg.entries[index] = *entry;
+            reg.count += 1;
+            if entry.id > reg.highest_id {
+                reg.highest_id = entry.id;
+            }
+        }
+        reg
+    }
+
+    /// A service entry with the given id, state and version.
+    fn service(id: u8, state: ServiceState, abi_version: u16) -> ServiceEntry {
+        ServiceEntry {
+            id,
+            state,
+            abi_version,
+            age_ticks: 0,
+            failures: 0,
+        }
+    }
+
+    #[test]
+    fn a_platform_with_no_inference_service_says_so() {
+        // WHY this matters: the catalogue once listed a model and a host
+        // bridge that the device did not have. The chat's answer has to
+        // come from the registry, and the registry names no inference
+        // service on this platform.
+        let reg = registry(ProbeStatus::Listed, &[service(1, ServiceState::Running, 1)]);
+        assert_eq!(
+            resolve_inference_service(&reg),
+            InferenceAvailability::NoService
+        );
+    }
+
+    #[test]
+    fn a_registry_that_could_not_be_read_is_not_the_same_as_no_service() {
+        // WHY this matters: a refused registry has not said that there
+        // is no inference service. It has said nothing, and the chat
+        // must not turn silence into a fact.
+        let reg = registry(ProbeStatus::Refused, &[]);
+        assert_eq!(
+            resolve_inference_service(&reg),
+            InferenceAvailability::RegistryUnavailable
+        );
+    }
+
+    #[test]
+    fn an_inference_service_that_is_not_running_is_reported_as_not_running() {
+        let reg = registry(
+            ProbeStatus::Listed,
+            &[service(
+                interos_std::ai::SERVICE_INFERENCE,
+                ServiceState::Failed,
+                interos_std::ai::INFERENCE_ABI_VERSION,
+            )],
+        );
+        assert_eq!(
+            resolve_inference_service(&reg),
+            InferenceAvailability::NotRunning {
+                state: ServiceState::Failed
+            }
+        );
+    }
+
+    #[test]
+    fn an_inference_service_that_speaks_another_version_is_reported() {
+        // WHY this matters: a request sent to a service that speaks
+        // another version would be misread rather than refused, so the
+        // mismatch has to be a fact the app can report.
+        let reg = registry(
+            ProbeStatus::Listed,
+            &[service(
+                interos_std::ai::SERVICE_INFERENCE,
+                ServiceState::Running,
+                interos_std::ai::INFERENCE_ABI_VERSION + 1,
+            )],
+        );
+        assert_eq!(
+            resolve_inference_service(&reg),
+            InferenceAvailability::WrongVersion {
+                abi_version: interos_std::ai::INFERENCE_ABI_VERSION + 1
+            }
+        );
+    }
+
+    #[test]
+    fn a_running_service_that_speaks_this_version_is_available() {
+        let reg = registry(
+            ProbeStatus::Listed,
+            &[service(
+                interos_std::ai::SERVICE_INFERENCE,
+                ServiceState::Running,
+                interos_std::ai::INFERENCE_ABI_VERSION,
+            )],
+        );
+        let availability = resolve_inference_service(&reg);
+        assert!(availability.is_available());
+        assert_eq!(
+            availability,
+            InferenceAvailability::Available {
+                abi_version: interos_std::ai::INFERENCE_ABI_VERSION
+            }
+        );
+    }
+
+    #[test]
+    fn every_unavailable_answer_carries_a_reason() {
+        // WHY this matters: "unavailable" on its own tells the user
+        // nothing they can act on. Each of the answers has a sentence
+        // that names what the platform said.
+        for availability in [
+            InferenceAvailability::NoService,
+            InferenceAvailability::RegistryUnavailable,
+            InferenceAvailability::NotRunning {
+                state: ServiceState::Failed,
+            },
+            InferenceAvailability::WrongVersion { abi_version: 9 },
+        ] {
+            let reason = availability.reason();
+            assert!(!reason.is_empty());
+            assert!(reason.ends_with('.'), "the reason is a sentence");
+            assert!(!availability.is_available());
+        }
+    }
+
+    #[test]
+    fn the_transcript_drops_the_oldest_message_when_it_is_full() {
+        // WHY this matters: the transcript is a ring, and a ring that
+        // grew past its bound would either stop accepting messages or
+        // overwrite something it had not meant to.
+        let mut chat = ChatSession::new();
+        for index in 0..(CHAT_MAX_MESSAGES + 3) {
+            chat.push(ChatRole::User, &[index as u8]);
+        }
+        assert_eq!(chat.len(), CHAT_MAX_MESSAGES);
+        // The three oldest went; the rest are the newest, in order.
+        assert_eq!(chat.message_at(0).unwrap().text[0], 3);
+        assert_eq!(
+            chat.message_at(CHAT_MAX_MESSAGES - 1).unwrap().text[0],
+            (CHAT_MAX_MESSAGES + 2) as u8
+        );
+    }
+
+    #[test]
+    fn the_transcript_reads_oldest_first() {
+        let mut chat = ChatSession::new();
+        chat.push(ChatRole::User, b"first");
+        chat.push(ChatRole::Assistant, b"second");
+        assert_eq!(chat.message_at(0).unwrap().text[..5], *b"first");
+        assert_eq!(chat.message_at(1).unwrap().text[..6], *b"second");
+        assert!(chat.message_at(2).is_none());
+    }
+
+    #[test]
+    fn the_composer_refuses_a_character_it_cannot_hold() {
+        // WHY this matters: a composer that silently drops the last
+        // character typed is a composer that lies about what was written.
+        let mut chat = ChatSession::new();
+        for _ in 0..CHAT_PROMPT_MAX {
+            assert!(chat.push_prompt_char(b'x'));
+        }
+        assert!(!chat.push_prompt_char(b'y'));
+        assert_eq!(chat.prompt_text().len(), CHAT_PROMPT_MAX);
+        // The refused character is not in the buffer.
+        assert!(chat.prompt_text().iter().all(|byte| *byte == b'x'));
+    }
+
+    #[test]
+    fn the_composer_takes_a_backspace_and_a_clear() {
+        let mut chat = ChatSession::new();
+        chat.push_prompt_char(b'a');
+        chat.push_prompt_char(b'b');
+        chat.pop_prompt_char();
+        assert_eq!(chat.prompt_text(), b"a");
+        chat.clear_prompt();
+        assert!(chat.prompt_is_empty());
+        // A backspace on an empty composer is not an error.
+        chat.pop_prompt_char();
+        assert!(chat.prompt_is_empty());
+    }
+
+    #[test]
+    fn a_message_longer_than_the_buffer_is_shortened() {
+        let mut chat = ChatSession::new();
+        let long = [b'z'; CHAT_TEXT_MAX + 40];
+        chat.push(ChatRole::User, &long);
+        assert_eq!(chat.message_at(0).unwrap().text_len as usize, CHAT_TEXT_MAX);
+    }
+
+    #[test]
+    fn the_chat_is_the_last_tab_and_the_tab_row_fits() {
+        // WHY this matters: the segmented control's segment width was
+        // written with a fixed gap count, and the last tab in the row
+        // ran past the content column when a sixth surface was added.
+        assert_eq!(Surface::COUNT, 6);
+        assert_eq!(Surface::from_index(5), Some(Surface::Chat));
+        assert_eq!(Surface::Chat.tab_label(), "CHAT");
+    }
+
     #[test]
     fn the_catalogue_lists_installed_state_not_a_vendor_plan() {
         // WHY this matters: the catalogue used to print a model with a
@@ -1926,14 +2440,18 @@ mod tests {
 
     #[test]
     fn the_surface_list_is_the_tab_row() {
-        assert_eq!(Surface::COUNT, 5);
+        // WHY the count is six and not five: the chat surface joined the
+        // row, and the row's segment width is derived from the count, so
+        // the two have to agree or the last tab runs past the content
+        // column.
+        assert_eq!(Surface::COUNT, 6);
         for (index, surface) in Surface::ALL.iter().enumerate() {
             assert_eq!(surface.index(), index);
             assert_eq!(Surface::from_index(index), Some(*surface));
             assert!(!surface.tab_label().is_empty());
             assert!(!surface.title().is_empty());
         }
-        assert_eq!(Surface::from_index(5), None);
+        assert_eq!(Surface::from_index(Surface::COUNT), None);
     }
 
     #[test]
