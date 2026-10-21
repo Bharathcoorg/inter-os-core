@@ -67,6 +67,18 @@ static NEXT_PROCESS_ID: AtomicU64 = AtomicU64::new(1);
 pub static PROCESS_TABLE: Mutex<[Option<ProcessRecord>; MAX_PROCESSES]> = Mutex::new([None; MAX_PROCESSES]);
 pub static THREAD_TABLE: Mutex<[Option<ThreadRecord>; MAX_THREADS]> = Mutex::new([None; MAX_THREADS]);
 
+/// Serialises the tests that reason about the process table.
+///
+/// WHY it is here and not in one test module: the process table is a
+/// process-global, and the tests that register a task live in several
+/// modules. A lock in one of them does not lock the others, so two tests
+/// in different modules still interleave. That shows up as a failure that
+/// appears on one run and not the next, which is the definition of
+/// untrustworthy. `std` is available under `cfg(test)`, so the lock costs
+/// nothing in the guest.
+#[cfg(test)]
+pub static PROCESS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub fn register_leader(task: TaskId, parent_task: TaskId) -> Option<ProcessId> {
     if task == TaskId(0) { return None; }
     let id = ProcessId(NEXT_PROCESS_ID.fetch_add(1, Ordering::Relaxed));

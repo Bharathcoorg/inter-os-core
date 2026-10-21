@@ -285,6 +285,9 @@ pub fn sys_exit_with_code(exit_code: i32) -> ! {
         let surfaces_cleaned = crate::drivers::display_kms::DRM_KMS.lock().destroy_surfaces_owned_by(id.0);
         if surfaces_cleaned > 0 {
             serial_println!("[KMS] Reclaimed {} display surface(s) owned by exiting task {}.", surfaces_cleaned, id.0);
+            // WHY the shell comes back: an application that was in the
+            // foreground is gone, and the shell is what is underneath it.
+            show_shell_surfaces();
             let mut kms = crate::drivers::display_kms::DRM_KMS.lock();
             let mut display = crate::drivers::KmsDisplayDriver::new(&mut kms);
             let _ = display.composite_and_flip();
@@ -4177,6 +4180,15 @@ pub fn sys_surface_flip(cap_slot: usize) -> Result<u64, SyscallResult> {
     let owner = require_display_service(cap_slot)?;
     let mut kms = crate::drivers::display_kms::DRM_KMS.lock();
     kms.commit_surfaces(Some(owner.0));
+    // WHY the flip is skipped when it would publish a torn frame: the flip
+    // publishes every surface, so a flip that lands while the task above is
+    // halfway through writing its frame replaces the display with that
+    // task's half-drawn screen. The frame the task above finished is
+    // already on the display, and waiting for the next one costs a frame
+    // rather than costing the screen.
+    if !kms.may_publish(owner.0) {
+        return Ok(0);
+    }
     let mut display = crate::drivers::KmsDisplayDriver::new(&mut kms);
     display.composite_and_flip().map_err(|_| SyscallResult::DeviceError)
 }
@@ -5675,6 +5687,12 @@ pub fn dev_launch_app(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
         return Err(SyscallResult::InvalidArguments);
     }
     SCHEDULER.lock().reap_orphans();
+    // The bridge launches an application the way a person taps a tile in
+    // the launcher, and the launcher is the only foreground. An
+    // application that is still on the screen composites over the new one,
+    // so the new application's transparent regions show the old one's
+    // frame and two applications' text lands on top of each other.
+    hide_background_surfaces();
     // External verified `.rapp` blobs take precedence when present.
     if let Some(blob) = crate::package::PACKAGE_BLOB_STORE.lock().get(app_id).cloned() {
         let verified = crate::package::parse_rapp(&blob.bytes)
@@ -5722,6 +5740,102 @@ pub fn dev_launch_app(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
     serial_println!("[APP] QEMU dev bridge launched application '{}' as Task {}", app_id, tid.0);
     serial_println!("[PROCESS] Guest application launched id={} task={}", app_id, tid.0);
     Ok(tid)
+}
+
+/// Hides the surfaces of the applications that are already running.
+///
+/// WHY the surfaces are hidden and not the tasks stopped: an application
+/// that is hidden keeps its state, and raising it again brings it back
+/// with everything it had. The launcher is not one of these -- its surface
+/// is the desktop, and the desktop is what the new application is drawn
+/// over.
+fn hide_running_app_surfaces() {
+    // WHY a fixed array and not a vector: the kernel has no allocator.
+    let mut owners = [0u64; 16];
+    let mut count = 0usize;
+    {
+        let sched = SCHEDULER.lock();
+        for task in sched.tasks_iter() {
+            // WHY the name is the test: an application task is named
+            // `app_*`, and the shell's own tasks are named `launcher` and
+            // `compositor`.
+            if task.name.starts_with("app_") && count < owners.len() {
+                owners[count] = task.id.0;
+                count += 1;
+            }
+        }
+    }
+    if count == 0 {
+        return;
+    }
+    let mut kms = crate::drivers::display_kms::DRM_KMS.lock();
+    for owner in owners.iter().take(count) {
+        kms.set_surfaces_visibility_for_task(*owner, false);
+    }
+}
+
+/// The task that owns the shell's surfaces.
+///
+/// WHY the shell is found by name: the shell is the task the platform
+/// starts, and its surfaces are the desktop the applications are drawn
+/// over.
+fn shell_task_id() -> Option<u64> {
+    let sched = SCHEDULER.lock();
+    sched
+        .tasks_iter()
+        .find(|t| t.name == "launcher")
+        .map(|t| t.id.0)
+}
+
+/// Shows the shell's surfaces.
+///
+/// WHY this is here and not in the shell: the shell redraws itself on a
+/// timer whether or not it is in the foreground, and every flip publishes
+/// every surface, so a shell that is still drawing while an application
+/// is in front puts the desktop back on the screen.
+fn show_shell_surfaces() {
+    let Some(shell) = shell_task_id() else {
+        return;
+    };
+    let mut kms = crate::drivers::display_kms::DRM_KMS.lock();
+    kms.set_surfaces_visibility_for_task(shell, true);
+}
+
+/// Hides the shell's surfaces, and the surfaces of any application that was
+/// already running.
+///
+/// WHY this is here: the bridge launches an application the way a person
+/// taps a tile in the shell, and the shell is the only foreground. A
+/// shell that is still drawing while an application is in front puts the
+/// desktop back on the screen, and two applications' text lands on top of
+/// each other.
+///
+/// WHY the surfaces are hidden and not the tasks stopped: an application
+/// that is hidden keeps its state, and raising it again brings it back
+/// with everything it had.
+fn hide_background_surfaces() {
+    let mut owners = [0u64; 16];
+    let mut count = 0usize;
+    {
+        let sched = SCHEDULER.lock();
+        for task in sched.tasks_iter() {
+            // WHY the name is the test: an application task is named
+            // `app_*`, and the shell's own task is named `launcher`.
+            if (task.name.starts_with("app_") || task.name == "launcher")
+                && count < owners.len()
+            {
+                owners[count] = task.id.0;
+                count += 1;
+            }
+        }
+    }
+    if count == 0 {
+        return;
+    }
+    let mut kms = crate::drivers::display_kms::DRM_KMS.lock();
+    for owner in owners.iter().take(count) {
+        kms.set_surfaces_visibility_for_task(*owner, false);
+    }
 }
 
 /// Launches a verified persistent RAPP from the QEMU development bridge.

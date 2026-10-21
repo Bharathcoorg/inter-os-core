@@ -739,6 +739,7 @@ mod tests {
 
     #[test]
     fn normal_child_exit_and_wait_reap() {
+        let _process = crate::task::process::PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut sched = Scheduler::new();
         sched.init(CapabilityTable::new_for_task(TaskId(0), 16));
 
@@ -803,6 +804,7 @@ mod tests {
 
     #[test]
     fn repeated_exit_reap_returns_error_and_does_not_double_free() {
+        let _process = crate::task::process::PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut sched = Scheduler::new();
         sched.init(CapabilityTable::new_for_task(TaskId(0), 16));
 
@@ -825,6 +827,7 @@ mod tests {
 
     #[test]
     fn parent_exit_before_child_reparents_and_reaps_orphans() {
+        let _process = crate::task::process::PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut sched = Scheduler::new();
         sched.init(CapabilityTable::new_for_task(TaskId(0), 16));
 
@@ -857,6 +860,7 @@ mod tests {
 
     #[test]
     fn child_exit_before_parent_reparents_and_reaps_when_parent_dies() {
+        let _process = crate::task::process::PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut sched = Scheduler::new();
         sched.init(CapabilityTable::new_for_task(TaskId(0), 16));
 
@@ -885,6 +889,7 @@ mod tests {
 
     #[test]
     fn development_bridge_task_exit_reaped_by_kernel() {
+        let _process = crate::task::process::PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut sched = Scheduler::new();
         sched.init(CapabilityTable::new_for_task(TaskId(0), 16));
 
@@ -906,6 +911,7 @@ mod tests {
 
     #[test]
     fn resource_reclamation_cycle_preserves_limits_and_no_leak() {
+        let _process = crate::task::process::PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut sched = Scheduler::new();
         sched.init(CapabilityTable::new_for_task(TaskId(0), 16));
 
@@ -927,6 +933,7 @@ mod tests {
 
     #[test]
     fn reap_orphans_lock_safety_when_tables_busy() {
+        let _process = crate::task::process::PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut sched = Scheduler::new();
         sched.init(CapabilityTable::new_for_task(TaskId(0), 16));
 
@@ -976,6 +983,7 @@ mod tests {
     /// counted it, the accounting would overstate how much was reclaimed.
     #[test]
     fn a_zombie_deferred_by_busy_tables_is_reaped_exactly_once() {
+        let _process = crate::task::process::PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut sched = Scheduler::new();
         sched.init(CapabilityTable::new_for_task(TaskId(0), 16));
 

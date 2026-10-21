@@ -163,7 +163,14 @@ pub static INPUT_PIPELINE: Mutex<InputPipeline> = Mutex::new(InputPipeline::new(
 /// Routes normalized input events to the currently focused surface owner.
 pub fn dispatch_to_focused_window(event: InputEvent) {
     let owner = {
-        let is_system_power_lock = event.kind == InputEventKind::Key && (event.x == 0x1000F || event.x == 0x10005);
+        // WHY only the power key is a system key here: the system owns the
+        // screen lock, and the power key turns the device off whatever is
+        // on it. The arrow keys are navigation keys, and an app with a
+        // scrollable list has to receive them -- the down arrow was
+        // captured here as a lock key, so the list could not be scrolled
+        // with the keyboard at all, and the key was spent on a surface
+        // nobody was looking at.
+        let is_system_power_lock = event.kind == InputEventKind::Key && event.x == 0x1000F;
         let top_kms_owner = {
             let mut target_owner = None;
             for _ in 0..1000 {

@@ -212,6 +212,15 @@ pub struct DrmSurface {
     /// never been written, so the task switcher can say "this app has not
     /// drawn anything yet" instead of showing a black rectangle.
     pub has_frame: bool,
+    /// Whether the surface has ever held a whole frame.
+    ///
+    /// WHY this is separate from `frame_ready`: a surface that has already
+    /// presented a whole frame keeps presenting it while a band is
+    /// rewritten. The rows outside the band still hold the last frame, so
+    /// the surface is presentable, and an application that repaints one
+    /// band at a time would otherwise vanish from the display every time
+    /// it repainted one.
+    pub frame_complete: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -264,6 +273,7 @@ impl DrmSurface {
             owner_task,
             frame_ready: true,
             has_frame: false,
+            frame_complete: false,
         }
     }
 
@@ -428,6 +438,48 @@ impl DrmKmsController {
         }
     }
 
+    /// Whether a flip by `owner_task` may publish the display right now.
+    ///
+    /// WHY this exists: the flip publishes every surface in the kernel, not
+    /// just the caller's, so a flip that lands while another task is halfway
+    /// through writing its frame publishes that task's half-drawn screen --
+    /// and, because a whole-screen surface is an identity copy, it replaces
+    /// the display rather than landing on it. The shell's own frame then
+    /// appears on top of the application, the application appears on top of
+    /// the shell, and the screen alternates between them.
+    ///
+    /// WHY the rule is about the task *below*: a task whose own surfaces are
+    /// whole may always publish, because it is publishing its own finished
+    /// frame. A task below another may not publish while the task above it
+    /// is halfway through a frame, because that frame would be torn.
+    pub fn may_publish(&self, owner_task: u64) -> bool {
+        let own_min = self
+            .surfaces
+            .iter()
+            .filter(|s| s.owner_task == owner_task && s.visible)
+            .map(|s| s.z_order)
+            .min();
+        let Some(own_min) = own_min else {
+            // The caller owns nothing visible, so it has no frame of its own
+            // to publish and nothing of its own to protect.
+            return true;
+        };
+        for s in self.surfaces.iter() {
+            if !s.visible || s.owner_task == owner_task {
+                continue;
+            }
+            if s.frame_ready || !s.has_frame {
+                // A surface that is whole, or one that has never been written
+                // to, hides nothing.
+                continue;
+            }
+            if s.z_order > own_min {
+                return false;
+            }
+        }
+        true
+    }
+
     /// Allocates a new client surface for application rendering.
     pub fn create_surface(&mut self, width: u32, height: u32, z_order: u32, owner_task: u64) -> u32 {
         let pixels = match (width as usize).checked_mul(height as usize) {
@@ -481,6 +533,19 @@ impl DrmKmsController {
         };
         let mut surface = DrmSurface::new(id, width, height, actual_z, owner_task);
         surface.input_enabled = !is_overlay;
+        // WHY a task whose surfaces are hidden stays hidden: the shell keeps
+        // drawing while an application is in the foreground -- its switcher
+        // pictures, its overlays -- and a surface it creates after the
+        // application was launched would be composited over the
+        // application, so the shell's own widgets appear through the
+        // application's cards.
+        if self
+            .surfaces
+            .iter()
+            .any(|s| s.owner_task == owner_task && !s.visible)
+        {
+            surface.visible = false;
+        }
         self.surfaces.push(surface);
         self.frame_dirty = true;
         // A new surface appears on top of whatever was there before, so the rows
@@ -514,7 +579,14 @@ impl DrmKmsController {
         surface.has_frame = true;
         if end == surface.pixels.len() {
             surface.frame_ready = true;
-        } else if offset == 0 {
+            surface.frame_complete = true;
+        } else if offset == 0 && !surface.frame_complete {
+            // WHY the first frame is the only one that un-latches: before
+            // the surface has held a whole frame, a partial write leaves it
+            // showing the rows it has not been given yet, and the
+            // compositor must not publish that. After it has held a whole
+            // frame, the rows outside the band still hold that frame, so
+            // the surface is presentable while it is being repainted.
             surface.frame_ready = false;
         }
         self.frame_dirty = true;
@@ -930,10 +1002,19 @@ impl DrmKmsController {
 
         let has_mobile_portrait = self.surfaces.iter().any(|s| s.visible && s.frame_ready && s.width == 720 && s.height == 1440);
 
-        // Occlusion culling: if a higher-z visible, frame-ready surface covers the
-        // entire mobile/scanout viewport at (0, 0) with opacity 255 and opaque
-        // pixel alpha (0xFF), every lower-z surface beneath it is 100% occluded
-        // and does not need to be upscaled or composited.
+        // Occlusion culling: if a higher-z visible, frame-ready surface covers
+        // the entire mobile/scanout viewport at (0, 0), every lower-z surface
+        // beneath it is 100% occluded and does not need to be upscaled or
+        // composited.
+        //
+        // WHY the rule does not ask whether the covering surface's own pixels
+        // are opaque: a surface that covers the screen is the screen, and the
+        // pixels it does not paint are the platform's background. Asking
+        // instead leaves the shell's own frame underneath an application that
+        // has not painted every pixel yet, and the shell's widgets appear
+        // through the application's cards. The rule that decides what shows
+        // through a transparent pixel is the blend, and the blend is right:
+        // the pixel under it is the backdrop, not the desktop.
         let top_opaque_idx = self.surfaces.iter().enumerate().rev().find(|(_, s)| {
             if !s.visible || !s.frame_ready || s.opacity != 255 || s.x != 0 || s.y != 0 {
                 return false;
@@ -944,7 +1025,7 @@ impl DrmKmsController {
             let covers = (s.width == 720 && s.height == 1440 && 720i64 * sh as i64 == 1440i64 * sw as i64)
                 || (s.width == 1080 && s.height == 2160 && 1080i64 * sh as i64 == 2160i64 * sw as i64)
                 || (s.width == self.scanout_width && s.height == self.scanout_height);
-            covers && !s.pixels.is_empty() && s.pixels.iter().step_by(997).all(|&p| (p >> 24) == 0xFF)
+            covers && !s.pixels.is_empty()
         }).map(|(idx, _)| idx);
 
         let can_incremental_band = self.present_dirty_rows.1 <= self.present_dirty_rows.0
