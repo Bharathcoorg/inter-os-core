@@ -23,6 +23,10 @@
 use core::panic::PanicInfo;
 use interos_std as std;
 use terminal::theme::{radius, spacing, type_scale, typography, Theme, THEME};
+use terminal::{
+    capability_line, classify_key, ConsoleLine, HistoryEntry, ShellKey, BANNER, CONSOLE_LINES,
+    HELP_COMMANDS, HELP_DETAIL, LINE_CAP,
+};
 
 use interos_std::design::outline_text;
 
@@ -104,18 +108,6 @@ const CONSOLE_TOP: usize = 114;
 /// is the height of the line the console draws, and the platform's type scale
 /// already says how tall a body run is.
 const CONSOLE_LINE_ROWS: usize = typography::BODY.line_height_px;
-/// Lines the console buffer keeps.
-///
-/// WHY a named constant and not the literal 18 sprinkled through the buffer
-/// code: the console band below is derived from it, and a band that drifted
-/// from the buffer it repaints would either miss a line or repaint rows that
-/// hold no text.
-///
-/// WHY 22 and not 18: a wrapped line occupies one row per piece, so the buffer
-/// has to hold more logical lines than an unwrapped console did. 114 + 22*48 =
-/// 1170 still clears the pill dock at 1210.
-const CONSOLE_LINES: usize = 22;
-
 /// Left edge of a console run. WHY 24 and not 28: it is the same left margin the
 /// two pill dock rows use, so the console's text column lines up with them, and
 /// every extra pixel here is a pixel the wrapped pieces may use.
@@ -249,53 +241,12 @@ fn count_runtime_tasks() -> Result<usize, i64> {
     Ok(count)
 }
 
-/// Command entry in terminal history.
-#[derive(Debug, Clone, Copy)]
-pub struct HistoryEntry {
-    pub cmd: &'static str,
-    pub status: i64,
-}
-
-/// Byte capacity of one rendered console line. WHY owned bytes: command output
-/// (task counts, uptime ticks, dispatch results) is only known at runtime and
-/// this no_std app has no allocator, so every line carries a fixed buffer.
-const LINE_CAP: usize = 128;
-
-#[derive(Debug, Clone, Copy)]
-pub struct ConsoleLine {
-    pub text: [u8; LINE_CAP],
-    pub len: usize,
-    pub color: u32,
-}
-
-impl ConsoleLine {
-    /// Builds a line from a compile-time string literal (usable in `const fn`).
-    pub const fn from_static(text: &'static str, color: u32) -> Self {
-        let bytes = text.as_bytes();
-        let mut buf = [0u8; LINE_CAP];
-        let mut i = 0;
-        while i < bytes.len() && i < LINE_CAP {
-            buf[i] = bytes[i];
-            i += 1;
-        }
-        Self {
-            text: buf,
-            len: i,
-            color,
-        }
-    }
-
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.text[..self.len]
-    }
-}
-
 /// The shell's prompt.
 ///
-/// WHY it names nothing but the shell: the old prompt was
-/// The old prompt carried a user account and a host name, which asserted
-/// an identity the shell had never read. The shell knows its own name and
-/// nothing else, so the prompt says that and stops.
+/// WHY it names nothing but the shell: the old prompt carried a user account
+/// and a host name, which asserted an identity the shell had never read. The
+/// shell knows its own name and nothing else, so the prompt says that and
+/// stops.
 pub const PROMPT: &[u8] = b"interos:$ ";
 
 /// The directory `ls` lists when the user does not name one.
@@ -337,28 +288,27 @@ impl TerminalApp {
     pub const fn new() -> Self {
         let mut lines = [None; CONSOLE_LINES];
         // WHY these are pre-wrapped by hand: `new` is a `const fn`, so it cannot
-        // call the wrapping `push_line` (the wrapper takes &mut self). The four
-        // banner strings are the only lines the app can open with, so wrapping
-        // them here instead keeps the boot screen as wrapped as every later
-        // line. "InterOS Sovereign Shell [Ring 3 CPL=3]" is 722px at scale 2 and
-        // breaks after "Ring 3"; "Isolated memory, token capabilities enforced."
-        // is 850px and breaks after "capabilities"; "Tap quick commands below for
-        // diagnostics." is 830px and breaks after "for".
-        lines[0] = Some(ConsoleLine::from_static(
-            "InterOS Sovereign Shell [Ring 3",
-            THEME.on_surface_variant,
-        ));
-        lines[1] = Some(ConsoleLine::from_static("ISOLATED]", THEME.on_surface_variant));
-        lines[2] = Some(ConsoleLine::from_static(
-            "Isolated memory, token capabilities",
-            THEME.primary,
-        ));
-        lines[3] = Some(ConsoleLine::from_static("enforced.", THEME.primary));
-        lines[4] = Some(ConsoleLine::from_static(
-            "Tap quick commands below for",
-            THEME.on_surface_variant,
-        ));
-        lines[5] = Some(ConsoleLine::from_static("diagnostics.", THEME.on_surface_variant));
+        // call the wrapping `push_line` (the wrapper takes &mut self). The
+        // banner strings are the only lines the app can open with, so
+        // wrapping them here instead keeps the boot screen as wrapped as
+        // every later line.
+        //
+        // WHY the banner says what the shell can see and nothing else: it
+        // used to read "InterOS Sovereign Shell [Ring 3 ISOLATED]" and
+        // "Isolated memory, token capabilities enforced." The shell cannot
+        // read an isolation state - no syscall reports one - so the banner
+        // asserted a property it had never observed, and the second line
+        // claimed the platform enforces capabilities without the shell
+        // having seen a refusal or a grant. The banner now names the shell's
+        // privilege ring, which is a fact about where a Ring 3 app runs, and
+        // the one capability fact the shell can observe: the platform
+        // resolves a capability by its type.
+        lines[0] = Some(ConsoleLine::from_static(BANNER[0], THEME.on_surface_variant));
+        lines[1] = Some(ConsoleLine::from_static(BANNER[1], THEME.on_surface_variant));
+        lines[2] = Some(ConsoleLine::from_static(BANNER[2], THEME.primary));
+        lines[3] = Some(ConsoleLine::from_static(BANNER[3], THEME.primary));
+        lines[4] = Some(ConsoleLine::from_static(BANNER[4], THEME.on_surface_variant));
+        lines[5] = Some(ConsoleLine::from_static(BANNER[5], THEME.on_surface_variant));
         lines[6] = Some(ConsoleLine::from_static(
             "interos:$ _",
             THEME.success,
@@ -589,7 +539,6 @@ impl TerminalApp {
 
     /// Handles keyboard input events routed to this terminal.
     pub fn handle_key(&mut self, key: std::InputKeyEvent) -> bool {
-        use std::input_key_code;
         if !key.pressed {
             return false;
         }
@@ -619,8 +568,8 @@ impl TerminalApp {
             }
         }
 
-        match key.code {
-            input_key_code::ENTER | 10 | 13 => {
+        match classify_key(key.code) {
+            ShellKey::Enter => {
                 let mut cmd_buf = [0u8; 64];
                 let len = self.input_len.min(64);
                 cmd_buf[..len].copy_from_slice(&self.input_buf[..len]);
@@ -632,7 +581,7 @@ impl TerminalApp {
                 }
                 true
             }
-            input_key_code::BACKSPACE | 8 | 127 => {
+            ShellKey::Backspace => {
                 if self.input_len > 0 {
                     self.input_len -= 1;
                     self.sync_prompt_line();
@@ -641,7 +590,7 @@ impl TerminalApp {
                     false
                 }
             }
-            input_key_code::ESCAPE | 27 => {
+            ShellKey::Escape => {
                 if self.input_len > 0 {
                     self.input_len = 0;
                     self.sync_prompt_line();
@@ -650,9 +599,9 @@ impl TerminalApp {
                     false
                 }
             }
-            code if (32..=126).contains(&code) => {
+            ShellKey::Character(code) => {
                 if self.input_len < self.input_buf.len() {
-                    self.input_buf[self.input_len] = code as u8;
+                    self.input_buf[self.input_len] = code;
                     self.input_len += 1;
                     self.sync_prompt_line();
                     true
@@ -660,7 +609,7 @@ impl TerminalApp {
                     false
                 }
             }
-            _ => false,
+            ShellKey::Ignored => false,
         }
     }
 
@@ -700,8 +649,8 @@ impl TerminalApp {
                 // `vfs` and `clear`, and the old list left them out, so the
                 // help was a worse description of the shell than the shell
                 // itself.
-                self.push_line("Commands: help, status, ps, mem, caps, share, dma, ping, ls, vfs, services, cat, clear", THEME.on_surface);
-                self.push_line("ls [path] lists a directory; cat [path] prints a file.", THEME.on_surface_variant);
+                self.push_line(HELP_COMMANDS, THEME.on_surface);
+                self.push_line(HELP_DETAIL, THEME.on_surface_variant);
                 std::log("[TERMINAL] Commands: help, status, ps, mem, caps, share, dma, ping, ls, vfs, services, cat, clear",
                 )
                 .ok();
@@ -709,11 +658,12 @@ impl TerminalApp {
             }
             "status" => {
                 self.push_echo("status");
-                // WHY the privilege level is gone: the shell never queries
+                // WHY the isolation word is gone: the shell never queries
                 // the task's CPL -- no syscall reports it to a Ring 3 app --
-                // so naming one here asserted a number it had not observed.
-                // The shell's own `caps` command reports what it can resolve.
-                self.push_line("InterOS Core Mobile Platform | Ring 3 isolated", THEME.primary);
+                // and nothing reports an isolation state either, so naming
+                // one asserted a property the shell had not observed. The
+                // shell's own `caps` command reports what it can resolve.
+                self.push_line("InterOS Core Mobile Platform | Ring 3", THEME.primary);
                 // WHY: the uptime comes from the platform's real tick
                 // counter. If no capability slot grants TimerTickRead, the
                 // screen says so instead of inventing a metric.
@@ -790,18 +740,35 @@ impl TerminalApp {
             }
             "caps" => {
                 self.push_echo("caps");
-                self.push_line("caps: policy: zero ambient authority", THEME.on_surface);
                 // WHY this is an inspection and not a statement: the platform
                 // resolves a capability slot by its type, so the shell can ask
                 // which of the capabilities it knows about it actually holds.
                 // It cannot enumerate the whole table -- no syscall does that
                 // -- so the list below is the set of types this app knows
-                // about, and the line after it says so.
+                // about, and every line says which of them the shell holds.
+                //
+                // WHY every line is marked: the list used to name only the
+                // types the shell held, so a reader saw a bare list of names
+                // and a pair of counts at the bottom, and the names read as
+                // the shell's whole capability set. It is a subset of the
+                // types the app knows about, and it now says so on every
+                // line.
+                self.push_line("caps: the types this app knows about:", THEME.on_surface);
                 let mut held = 0u32;
                 let mut absent = 0u32;
+                let mut buf = [0u8; 64];
                 for (name, cap_type) in KNOWN_CAPABILITIES.iter() {
-                    if std::cap_lookup(*cap_type, 0).is_ok() {
-                        self.push_line(name, THEME.on_surface);
+                    let is_held = std::cap_lookup(*cap_type, 0).is_ok();
+                    let n = capability_line(is_held, name, &mut buf);
+                    self.push_line_bytes(
+                        &buf[..n],
+                        if is_held {
+                            THEME.on_surface
+                        } else {
+                            THEME.on_surface_variant
+                        },
+                    );
+                    if is_held {
                         held += 1;
                     } else {
                         absent += 1;
