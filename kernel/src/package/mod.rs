@@ -101,6 +101,8 @@ pub const FIRST_PARTY_INTENTS: &[(&str, &str, &str)] = &[
     ("org.interos.terminal", "mime", "text/markdown"),
     ("org.interos.terminal", "mime", "text/csv"),
     ("org.interos.terminal", "mime", "application/json"),
+    // The notes app opens the notes the device holds.
+    ("org.interos.notes", "mime", "text/x-interos-note"),
     // The browser opens the web.
     ("org.interos.browser", "scheme", "http"),
     ("org.interos.browser", "scheme", "https"),

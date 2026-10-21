@@ -1305,6 +1305,22 @@ pub mod cap_type {
     pub const EVENT_POLL: u64 = 17;
     pub const SYSTEM_CONTROL: u64 = 18;
     pub const REALTIME_CLOCK_READ: u64 = 24;
+    /// Permission to read the shared document index and the intent registry.
+    ///
+    /// WHY this is not `FILE_SYSTEM_READ`: the index *describes* documents --
+    /// their paths, lengths, media types and identities -- and reading a
+    /// description is not reading a file. An app that may browse the shared
+    /// area's catalogue does not thereby gain the ability to open the
+    /// documents in it.
+    pub const CONTENT_INDEX: u64 = 25;
+    /// Permission to dispatch an intent to the package that declared a
+    /// handler for it.
+    ///
+    /// WHY this is not `PROCESS_SPAWN`: an intent names one relationship --
+    /// "the package that declared this media type" -- and the kernel resolves
+    /// it from the signed manifests. An app that may ask the device to open a
+    /// document may not thereby spawn arbitrary programs.
+    pub const CONTENT_INTENT: u64 = 26;
     /// Permission to read another client's display surface.
     ///
     /// WHY this is not `FRAMEBUFFER_DIRECT`: the framebuffer capability is the

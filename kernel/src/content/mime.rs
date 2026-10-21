@@ -110,6 +110,10 @@ const EXTENSIONS: &[(&str, &str)] = &[
     ("zip", "application/zip"),
     ("doc", "application/msword"),
     ("rapp", "application/vnd.interos.rapp"),
+    // A published note is a note, not a plain text document: the notes app
+    // declares this type in its manifest, so the intent registry and the
+    // notes app agree about which app opens one.
+    ("note", "text/x-interos-note"),
 ];
 
 /// Detects a media type from a file's own bytes.

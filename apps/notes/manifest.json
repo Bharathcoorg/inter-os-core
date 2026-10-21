@@ -14,7 +14,13 @@
     "CAP_EVENT_POLL",
     "CAP_FILESYSTEM_READ",
     "CAP_FILESYSTEM_WRITE",
-    "CAP_REALTIME_CLOCK"
+    "CAP_REALTIME_CLOCK",
+    "CAP_CONTENT_INDEX"
   ],
+  "intents": {
+    "mime": [
+      "text/x-interos-note"
+    ]
+  },
   "min_sdk_version": "0.8.0"
 }
