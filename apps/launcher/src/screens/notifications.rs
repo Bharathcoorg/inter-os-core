@@ -874,7 +874,13 @@ fn build_events_frame(state: &LauncherState) -> EventsFrame {
     // The one clock this surface is allowed to read a record's timestamp
     // against: the kernel's own tick counter. Read once per frame, here, and
     // never per pixel.
-    let now = interos_std::get_ticks(1).ok();
+    //
+    // WHY the slot is resolved by type: a slot number is a position in the
+    // launcher's capability table, and the position depends on the order the
+    // kernel inserted the capabilities in. The kernel verifies the
+    // capability's type at the slot it is given, so a slot holding the wrong
+    // type is refused and the timestamps would silently have no clock.
+    let now = interos_std::cap::timer_slot().and_then(|_| interos_std::get_ticks().ok());
 
     let clock_slice: &[u8] = if state.clock_source_ok && state.clock_time[0] != b' ' {
         &state.clock_time

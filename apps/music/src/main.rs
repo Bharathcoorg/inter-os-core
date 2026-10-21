@@ -169,9 +169,7 @@ impl MusicApp {
                 // draw as a 0..100 meter. Report the absence, do not clamp a
                 // nonsense reading into a plausible-looking one.
                 self.volume_percent = None;
-                std::log(
-                    0,
-                    "[MUSIC APP] Audio service returned an out-of-range volume; meter unavailable.",
+                std::log("[MUSIC APP] Audio service returned an out-of-range volume; meter unavailable.",
                 )
                 .ok();
                 false
@@ -180,9 +178,7 @@ impl MusicApp {
                 // WHY: audio control is refused without the audio-service
                 // authority. Never log or draw a volume that was never issued.
                 self.volume_percent = None;
-                std::log(
-                    0,
-                    "[MUSIC APP] Volume query refused by the audio service; no volume is known.",
+                std::log("[MUSIC APP] Volume query refused by the audio service; no volume is known.",
                 )
                 .ok();
                 false
@@ -198,9 +194,7 @@ impl MusicApp {
         let Some(current) = self.volume_percent else {
             // WHY: no level is known, so there is no level to step from. The
             // control is drawn recessed for this exact state.
-            std::log(
-                0,
-                "[MUSIC APP] Volume step ignored: no volume is known to step from.",
+            std::log("[MUSIC APP] Volume step ignored: no volume is known to step from.",
             )
             .ok();
             return false;
@@ -216,18 +210,14 @@ impl MusicApp {
                 true
             }
             Ok(_) => {
-                std::log(
-                    0,
-                    "[MUSIC APP] Audio service applied an out-of-range volume; meter hidden.",
+                std::log("[MUSIC APP] Audio service applied an out-of-range volume; meter hidden.",
                 )
                 .ok();
                 self.volume_percent = None;
                 false
             }
             Err(_) => {
-                std::log(
-                    0,
-                    "[MUSIC APP] Volume change refused by the audio service; level unchanged.",
+                std::log("[MUSIC APP] Volume change refused by the audio service; level unchanged.",
                 )
                 .ok();
                 false
@@ -243,19 +233,19 @@ impl MusicApp {
         match std::keystore_derive(MEDIA_KEY_SLOT, &mut media_key) {
             Ok(32) => {
                 self.keystore_derived = true;
-                std::log(0, "[MUSIC APP] Hardware keystore: Ingested media decryption key for local audio streaming.").ok();
+                std::log("[MUSIC APP] Hardware keystore: Ingested media decryption key for local audio streaming.").ok();
                 true
             }
             Ok(_) => {
                 // WHY: a short result is not a key. Report it instead of leaving
                 // the caller to assume derivation succeeded.
-                std::log(0, "[MUSIC APP] Hardware keystore: short derivation result; no media key available.").ok();
+                std::log("[MUSIC APP] Hardware keystore: short derivation result; no media key available.").ok();
                 false
             }
             Err(_) => {
                 // WHY: this app holds no keystore capability, so the call is
                 // refused. Say so instead of reporting a key that was never issued.
-                std::log(0, "[MUSIC APP] Hardware keystore: derivation refused by the kernel; no media key available.").ok();
+                std::log("[MUSIC APP] Hardware keystore: derivation refused by the kernel; no media key available.").ok();
                 false
             }
         }
@@ -277,18 +267,14 @@ impl MusicApp {
         let _ = std::audio_silence();
         let _ = std::audio_haptic_click();
         if played == 4 {
-            std::log(
-                0,
-                "[MUSIC APP] Arpeggiated C-major melody synthesized (261Hz -> 523Hz).",
+            std::log("[MUSIC APP] Arpeggiated C-major melody synthesized (261Hz -> 523Hz).",
             )
             .ok();
             true
         } else {
             // WHY: audio control is refused without the audio-service authority.
             // Never log a synthesized melody that was never emitted.
-            std::log(
-                0,
-                "[MUSIC APP] Arpeggio not played: the audio service refused the tone requests.",
+            std::log("[MUSIC APP] Arpeggio not played: the audio service refused the tone requests.",
             )
             .ok();
             false
@@ -305,15 +291,13 @@ impl MusicApp {
         // Returning false here is what stops the caller from reporting playback
         // or counting a buffer that was never streamed.
         if self.store.is_empty() {
-            std::log(0, "[MUSIC APP] No media payload is available for DMA streaming.").ok();
+            std::log("[MUSIC APP] No media payload is available for DMA streaming.").ok();
             return false;
         }
         // A real library is present, but there is still no audio mixer, no DMA
         // descriptor and no playback-position source in this guest, so fail
         // closed: nothing streams and nothing is counted.
-        std::log(
-            0,
-            "[MUSIC APP] Local library present but no DMA descriptor was obtained; no buffer streamed.",
+        std::log("[MUSIC APP] Local library present but no DMA descriptor was obtained; no buffer streamed.",
         )
         .ok();
         false
@@ -321,7 +305,7 @@ impl MusicApp {
 
     /// Encrypts metadata only when a real media record exists.
     pub fn encrypt_track_record(&mut self) {
-        std::log(0, "[MUSIC APP] No media record is available for encryption.").ok();
+        std::log("[MUSIC APP] No media record is available for encryption.").ok();
     }
 
     /// Steps the playlist index, but only when there is real media to step over.
@@ -330,9 +314,7 @@ impl MusicApp {
     /// with an empty library changes nothing, so it reports nothing changed.
     pub fn step_track(&mut self, delta: isize) -> bool {
         if self.store.is_empty() {
-            std::log(
-                0,
-                "[MUSIC APP] Track step ignored: the local library is empty, so there is no next or previous track.",
+            std::log("[MUSIC APP] Track step ignored: the local library is empty, so there is no next or previous track.",
             )
             .ok();
             return false;
@@ -352,7 +334,7 @@ impl MusicApp {
         match self.state {
             PlaybackState::Playing => {
                 self.state = PlaybackState::Paused;
-                std::log(0, "[MUSIC APP] Transport paused by user.").ok();
+                std::log("[MUSIC APP] Transport paused by user.").ok();
                 false
             }
             _ => {
@@ -362,9 +344,7 @@ impl MusicApp {
                     true
                 } else {
                     self.state = PlaybackState::Stopped;
-                    std::log(
-                        0,
-                        "[MUSIC APP] Play requested but no media is available; transport stays stopped.",
+                    std::log("[MUSIC APP] Play requested but no media is available; transport stays stopped.",
                     )
                     .ok();
                     false
@@ -378,17 +358,13 @@ impl MusicApp {
     /// write is acknowledged; a refusal is logged, never shown as a stored track.
     fn save_add(&mut self) -> Dirty {
         if self.add_title_len == 0 {
-            std::log(
-                0,
-                "[MUSIC APP] Add track needs a title; nothing was stored.",
+            std::log("[MUSIC APP] Add track needs a title; nothing was stored.",
             )
             .ok();
             return Dirty::None;
         }
         if self.add_dur_len == 0 {
-            std::log(
-                0,
-                "[MUSIC APP] Add track needs a duration in seconds; nothing was stored.",
+            std::log("[MUSIC APP] Add track needs a duration in seconds; nothing was stored.",
             )
             .ok();
             return Dirty::None;
@@ -397,9 +373,7 @@ impl MusicApp {
         for i in 0..self.add_dur_len {
             let b = self.add_dur[i];
             if !(b'0'..=b'9').contains(&b) {
-                std::log(
-                    0,
-                    "[MUSIC APP] Duration must be digits only; nothing was stored.",
+                std::log("[MUSIC APP] Duration must be digits only; nothing was stored.",
                 )
                 .ok();
                 return Dirty::None;
@@ -407,9 +381,7 @@ impl MusicApp {
             secs = secs.saturating_mul(10).saturating_add((b - b'0') as u32).min(100_000);
         }
         if secs == 0 {
-            std::log(
-                0,
-                "[MUSIC APP] Duration must be at least 1 second; nothing was stored.",
+            std::log("[MUSIC APP] Duration must be at least 1 second; nothing was stored.",
             )
             .ok();
             return Dirty::None;
@@ -419,9 +391,7 @@ impl MusicApp {
         title[..n].copy_from_slice(&self.add_title[..n]);
         if self.store.add(&title[..n], secs) {
             self.sync_list_extent();
-            std::log(
-                0,
-                "[MUSIC APP] Track stored to the local library by title and duration; no audio file is claimed.",
+            std::log("[MUSIC APP] Track stored to the local library by title and duration; no audio file is claimed.",
             )
             .ok();
             self.add_title_len = 0;
@@ -432,7 +402,7 @@ impl MusicApp {
         } else {
             // Report the store's real refusal (capacity or write refusal), never
             // a track that did not persist.
-            std::log(0, self.store.last_reason()).ok();
+            std::log(self.store.last_reason()).ok();
             Dirty::None
         }
     }
@@ -1361,7 +1331,7 @@ fn render_music_band(surface: u32, app: &MusicApp, y0: usize, y1: usize) {
                 y += 1;
             }
         }
-        let _ = std::surface_write(6, surface, offset, &chunk[..count]);
+        let _ = std::surface_write(surface, offset, &chunk[..count]);
         offset += count;
     }
 }
@@ -1487,9 +1457,7 @@ fn handle_tap(app: &mut MusicApp, px: u32, py: u32) -> Tap<'static> {
     // Scrubber: drawn recessed with an explicit "no position" note, so there is
     // nothing to seek and the tap only reports that honestly.
     if x >= MARGIN && x < MARGIN + CONTENT_W && y >= TIMES_Y && y < META_Y1 {
-        std::log(
-            0,
-            "[MUSIC APP] Scrubber tapped: no media backend reports a playback position or duration, so there is nothing to seek.",
+        std::log("[MUSIC APP] Scrubber tapped: no media backend reports a playback position or duration, so there is nothing to seek.",
         )
         .ok();
         return Tap::Redraw(Dirty::None);
@@ -1522,13 +1490,11 @@ fn handle_tap(app: &mut MusicApp, px: u32, py: u32) -> Tap<'static> {
         }
         if ADD_CANCEL_BTN.contains(x, y) {
             app.cancel_add();
-            std::log(0, "[MUSIC APP] Add track cancelled; nothing was stored.").ok();
+            std::log("[MUSIC APP] Add track cancelled; nothing was stored.").ok();
             return Tap::Redraw(Dirty::All);
         }
     } else if app.store.is_empty() {
-        std::log(
-            0,
-            "[MUSIC APP] Track list tapped: no audio files in the local library.",
+        std::log("[MUSIC APP] Track list tapped: no audio files in the local library.",
         )
         .ok();
     } else {
@@ -1548,18 +1514,14 @@ fn handle_tap(app: &mut MusicApp, px: u32, py: u32) -> Tap<'static> {
             if ddx.abs() <= 16 && ddy.abs() <= 12 {
                 if app.store.remove(idx) {
                     app.sync_list_extent();
-                    std::log(
-                        0,
-                        "[MUSIC APP] Track removed; the deletion was persisted to the settings store.",
+                    std::log("[MUSIC APP] Track removed; the deletion was persisted to the settings store.",
                     )
                     .ok();
                     if app.current_track_idx >= app.store.len() && app.current_track_idx > 0 {
                         app.current_track_idx -= 1;
                     }
                 } else {
-                    std::log(
-                        0,
-                        "[MUSIC APP] Track deletion was not persisted; the library is unchanged.",
+                    std::log("[MUSIC APP] Track deletion was not persisted; the library is unchanged.",
                     )
                     .ok();
                 }
@@ -1672,9 +1634,7 @@ fn handle_music_key(app: &mut MusicApp, key: std::InputKeyEvent) -> Tap<'static>
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    std::log(
-        0,
-        "[MUSIC APP (Ring 3)] Native music player online.",
+    std::log("[MUSIC APP (Ring 3)] Native music player online.",
     )
     .ok();
 
@@ -1692,7 +1652,7 @@ pub extern "C" fn _start() -> ! {
         _ => "",
     };
     if !load_note.is_empty() {
-        std::log(0, load_note).ok();
+        std::log(load_note).ok();
     }
 
     // 1. Hardware Keystore Derivation
@@ -1707,22 +1667,9 @@ pub extern "C" fn _start() -> ! {
     // capability table, and the position depends on the order the kernel
     // inserted this app's capabilities in. The literal 6 happens to hold the
     // framebuffer in this app's table today.
-    let fb_slot = match std::cap::framebuffer_slot() {
-        Some(slot) => slot,
-        None => {
-            std::log(
-                0,
-                "[MUSIC APP] No framebuffer capability; the player cannot draw.",
-            )
-            .ok();
-            loop {
-                std::yield_now();
-            }
-        }
-    };
-    let surface = match std::surface_create(fb_slot, W as u32, H as u32, 200) {
+    let surface = match std::surface_create(W as u32, H as u32, 200) {
         Ok(id) => {
-            std::log(0, "[MUSIC APP] DRM/KMS Client Surface allocated (z=200).").ok();
+            std::log("[MUSIC APP] DRM/KMS Client Surface allocated (z=200).").ok();
             id
         }
         Err(_) => 0,
@@ -1740,8 +1687,8 @@ pub extern "C" fn _start() -> ! {
 
     if surface > 0 {
         render_music_ui(surface, &music);
-        let _ = std::surface_flip(fb_slot);
-        std::log(0, "[MUSIC APP] Music canvas presented to scanout buffer.").ok();
+        let _ = std::surface_flip();
+        std::log("[MUSIC APP] Music canvas presented to scanout buffer.").ok();
     }
 
     // 6. Asynchronous Event Reactor Loop
@@ -1766,9 +1713,9 @@ pub extern "C" fn _start() -> ! {
                         if let Some(key) = input.key_event() {
                             match handle_music_key(&mut music, key) {
                                 Tap::Leave(msg) => {
-                                    std::log(0, msg).ok();
+                                    std::log(msg).ok();
                                     if surface > 0 {
-                                        let _ = std::surface_destroy(fb_slot, surface);
+                                        let _ = std::surface_destroy(surface);
                                     }
                                     std::exit_with_code(0);
                                 }
@@ -1795,24 +1742,26 @@ pub extern "C" fn _start() -> ! {
                                 dirty = merge(dirty, Dirty::All);
                                 continue;
                             }
-                            std::log(
-                                0,
-                                "[MUSIC APP] Navigation gesture recognized. Exiting to launcher.",
+                            std::log("[MUSIC APP] Navigation gesture recognized. Exiting to launcher.",
                             )
                             .ok();
                             if surface > 0 {
-                                if let Some(fb_slot) = std::cap::framebuffer_slot() {
-                                    let _ = std::surface_destroy(fb_slot, surface);
-                                }
+                                // WHY no slot argument: a slot is a position
+                                // in this task's capability table, and the
+                                // kernel authorises the release by the
+                                // capability's type. The surface must be
+                                // handed back or it stays a leaked KMS
+                                // surface for the life of the device.
+                                let _ = std::surface_destroy(surface);
                             }
                             std::exit_with_code(0);
                         }
                         if input.kind == 1 {
                             match handle_tap(&mut music, input.x, input.y) {
                                 Tap::Leave(msg) => {
-                                    std::log(0, msg).ok();
+                                    std::log(msg).ok();
                                     if surface > 0 {
-                                        let _ = std::surface_destroy(fb_slot, surface);
+                                        let _ = std::surface_destroy(surface);
                                     }
                                     std::exit_with_code(0);
                                 }
@@ -1823,13 +1772,11 @@ pub extern "C" fn _start() -> ! {
                     }
                     if dirty != Dirty::None && surface > 0 {
                         repaint(surface, &music, dirty);
-                        let _ = std::surface_flip(fb_slot);
+                        let _ = std::surface_flip();
                     }
                 }
                 if events & std::EVENT_IPC_MSG != 0 {
-                    std::log(
-                        0,
-                        "[MUSIC APP] IPC message event raised; no playback command was parsed from it.",
+                    std::log("[MUSIC APP] IPC message event raised; no playback command was parsed from it.",
                     )
                     .ok();
                 }
@@ -1848,6 +1795,6 @@ pub extern "C" fn _start() -> ! {
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
-    std::log(0, "[MUSIC APP] Panic detected! Terminating task...").ok();
+    std::log("[MUSIC APP] Panic detected! Terminating task...").ok();
     std::exit();
 }

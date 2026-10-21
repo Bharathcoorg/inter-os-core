@@ -34,27 +34,16 @@ const W: usize = 720;
 const H: usize = 1440;
 const CHUNK: usize = 4096;
 
-/// Capability slot that holds `FileSystemRead` for the `app_file_manager` task.
+/// The app resolves no capability slot of its own.
 ///
-/// WHY a named constant and not a bare number: `spawn_app_file_manager` inserts
-/// its capabilities in a fixed order - SerialOutput, IpcSend, TimerTickRead,
-/// HardwarePortIo, FileSystemRead, FileSystemWrite, FrameBufferDirect,
-/// EventPoll - and `CapabilityTable::insert` always takes the first free slot,
-/// so the read capability is index 4. The old code passed slot **3**, which is
-/// `HardwarePortIo`, so `sys_fs_list`'s
-/// `verify(3, FileSystemRead, Rights::READ)` failed and every listing was
-/// refused with PermissionDenied before the path was even looked at. The
-/// framebuffer slot happened to be the one number that was right in every
-/// app, which is exactly the accident the typed lookup exists to remove.
-#[inline]
-fn fs_read_slot() -> Option<usize> {
-    std::cap_lookup(std::cap_type::FILE_SYSTEM_READ, 0).ok()
-}
-
-#[inline]
-fn fs_write_slot() -> Option<usize> {
-    std::cap_lookup(std::cap_type::FILE_SYSTEM_WRITE, 0).ok()
-}
+/// WHY it does not resolve one: a slot is a position in this task's
+/// capability table, and the position depends on the order the kernel
+/// inserted the capabilities in, so the app cannot name one. The old code
+/// passed a bare number that happened to be the framebuffer in every app
+/// and was wrong in this one, and the listing was refused before the path
+/// was ever examined. The kernel now authorises a filesystem call by the
+/// capability's type, so the app asks for the listing and reports the
+/// platform's own answer -- a refusal it received, not one it invented.
 
 // -----------------------------------------------------------------------------
 // 32-bit ARGB8888 Design Color Tokens (Screen 11 Light Theme)
@@ -212,7 +201,7 @@ fn log_counted(prefix: &str, value: u64, suffix: &str) {
     let s = suffix.len().min(buf.len().saturating_sub(n));
     buf[n..n + s].copy_from_slice(&suffix.as_bytes()[..s]);
     if let Ok(msg) = core::str::from_utf8(&buf[..n + s]) {
-        std::log(0, msg).ok();
+        std::log(msg).ok();
     }
 }
 
@@ -441,10 +430,10 @@ impl FileManagerApp {
     /// Refreshes entries by querying fs_list for current_path.
     pub fn refresh_directory(&mut self) {
         let mut entries = [0u8; 1024];
-        let probe = match fs_read_slot() {
-            Some(slot) => std::fs_list(slot, self.current_path_str(), &mut entries),
-            None => Err(-1),
-        };
+        // WHY the listing is asked for directly: the kernel authorises the
+        // call by the capability's type, and its own answer -- a listing or
+        // a refusal with a status code -- is the one that is reported.
+        let probe = std::fs_list(self.current_path_str(), &mut entries);
         self.record_probe(probe);
         if let Ok(n) = probe {
             self.parse_entries(&entries[..n]);
@@ -960,7 +949,7 @@ fn render_file_manager_band(surface: u32, app: &FileManagerApp, y0: usize, y1: u
                 y += 1;
             }
         }
-        let _ = std::surface_write(6, surface, offset, &chunk[..count]);
+        let _ = std::surface_write(surface, offset, &chunk[..count]);
         offset += count;
     }
 }
@@ -1011,14 +1000,12 @@ enum Tap {
 
 fn exit_to_launcher(surface: u32) -> ! {
     if surface > 0 {
-        // WHY the slot is resolved by type: a slot number is a position in
-        // the capability table, and the position depends on the order the
-        // kernel inserted this app's capabilities in. The old code passed the
-        // literal 6, which happens to be the framebuffer in this app's
-        // table today and is not guaranteed to be tomorrow.
-        if let Some(fb_slot) = std::cap::framebuffer_slot() {
-            let _ = std::surface_destroy(fb_slot, surface);
-        }
+        // WHY the surface is destroyed without naming a capability: the
+        // kernel authorises the call by capability type, and a slot number
+        // is a position in a table rather than a capability. The old code
+        // passed the literal 6, which happens to be the framebuffer in this
+        // app's table today and is not guaranteed to be tomorrow.
+        let _ = std::surface_destroy(surface);
     }
     std::exit_with_code(0);
 }
@@ -1028,9 +1015,7 @@ fn exit_to_launcher(surface: u32) -> ! {
 // -----------------------------------------------------------------------------
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    std::log(
-        0,
-        "[FILE_MANAGER (Ring 3)] Sovereign File Manager & VFS Explorer online.",
+    std::log("[FILE_MANAGER (Ring 3)] Sovereign File Manager & VFS Explorer online.",
     )
     .ok();
 
@@ -1039,9 +1024,7 @@ pub extern "C" fn _start() -> ! {
     // Query physical block storage capacity from driver
     if let Ok(bytes) = std::storage_query() {
         app.storage_capacity_bytes = bytes;
-        std::log(
-            0,
-            "[FILE_MANAGER] Storage capacity validated from hardware service.",
+        std::log("[FILE_MANAGER] Storage capacity validated from hardware service.",
         )
         .ok();
     }
@@ -1049,16 +1032,14 @@ pub extern "C" fn _start() -> ! {
     // Enumerate initial VFS directory. WHY byte counts: the payload is received
     // but never parsed or rendered, so claiming a successful parse would be false.
     //
-    // WHY `FS_READ_CAP_SLOT` (4) and not the literal 3 that was here before:
-    // slot 3 is `HardwarePortIo`, so `sys_fs_list`'s capability check failed
-    // before the path was ever examined and the app logged a refusal it had not
-    // actually been entitled to receive. The result is recorded on screen too,
-    // so the header says what this app can actually see of the filesystem.
+    // WHY no capability is named here: the kernel authorises the listing by
+    // the capability's type, so the app asks for it and reports the answer
+    // the platform gives. The old code named a slot number, the check failed
+    // before the path was ever examined, and the app logged a refusal it had
+    // not actually been entitled to receive. The result is recorded on screen
+    // too, so the header says what this app can actually see of the filesystem.
     let mut entries = [0u8; 1024];
-    let probe = match fs_read_slot() {
-        Some(slot) => std::fs_list(slot, app.current_path_str(), &mut entries),
-        None => Err(-1),
-    };
+    let probe = std::fs_list(app.current_path_str(), &mut entries);
     app.record_probe(probe);
     match probe {
         Ok(n) => {
@@ -1084,21 +1065,9 @@ pub extern "C" fn _start() -> ! {
     }
 
     // Allocate client surface (z=200)
-    let Ok(fb_slot) = std::cap_lookup(std::cap_type::FRAMEBUFFER_DIRECT, 0) else {
-        std::log(
-            0,
-            "[FILE_MANAGER] Framebuffer capability not found.",
-        )
-        .ok();
-        loop {
-            std::yield_now();
-        }
-    };
-    let surface = match std::surface_create(fb_slot, W as u32, H as u32, 200) {
+    let surface = match std::surface_create(W as u32, H as u32, 200) {
         Ok(id) => {
-            std::log(
-                0,
-                "[FILE_MANAGER] DRM/KMS Client Surface allocated (z=200).",
+            std::log("[FILE_MANAGER] DRM/KMS Client Surface allocated (z=200).",
             )
             .ok();
             id
@@ -1108,8 +1077,8 @@ pub extern "C" fn _start() -> ! {
 
     if surface > 0 {
         render_file_manager_ui(surface, &app);
-        let _ = std::surface_flip(fb_slot);
-        std::log(0, "[FILE_MANAGER] Files UI presented to scanout buffer.").ok();
+        let _ = std::surface_flip();
+        std::log("[FILE_MANAGER] Files UI presented to scanout buffer.").ok();
     }
 
     // Interactive Event Loop
@@ -1130,9 +1099,7 @@ pub extern "C" fn _start() -> ! {
                     // Swipe gesture -> Return to launcher
                     if input.kind == 4 || input.kind == 6 || input.kind == 7 || input.kind == 8 || input.kind == 10
                     {
-                        std::log(
-                            0,
-                            "[FILE_MANAGER] Navigation gesture recognized. Exiting to launcher.",
+                        std::log("[FILE_MANAGER] Navigation gesture recognized. Exiting to launcher.",
                         )
                         .ok();
                         exit_to_launcher(surface);
@@ -1141,7 +1108,7 @@ pub extern "C" fn _start() -> ! {
                     if input.kind == 1 {
                         match handle_tap(&mut app, input.x as usize, input.y as usize) {
                             Tap::Leave(msg) => {
-                                std::log(0, msg).ok();
+                                std::log(msg).ok();
                                 exit_to_launcher(surface);
                             }
                             Tap::Redraw(d) => dirty = dirty.widen(d),
@@ -1157,7 +1124,7 @@ pub extern "C" fn _start() -> ! {
                         Dirty::All => render_file_manager_ui(surface, &app),
                         Dirty::None => {}
                     }
-                    let _ = std::surface_flip(fb_slot);
+                    let _ = std::surface_flip();
                 }
             }
         }
@@ -1183,7 +1150,7 @@ fn handle_tap(app: &mut FileManagerApp, x: usize, y: usize) -> Tap {
     }
     if BACK.contains(x, y) {
         if app.navigate_parent() {
-            std::log(0, "[FILE_MANAGER] Navigated to parent directory.").ok();
+            std::log("[FILE_MANAGER] Navigated to parent directory.").ok();
             return Tap::Redraw(Dirty::All);
         }
         return Tap::Leave(
@@ -1219,7 +1186,7 @@ fn handle_tap(app: &mut FileManagerApp, x: usize, y: usize) -> Tap {
         app.selected_entry = None;
         app.set_path(CATEGORY_PATHS[shortcut]);
         app.refresh_directory();
-        std::log(0, "[FILE_MANAGER] Category filter shortcut switched.").ok();
+        std::log("[FILE_MANAGER] Category filter shortcut switched.").ok();
         return Tap::Redraw(Dirty::All);
     }
 
@@ -1233,7 +1200,7 @@ fn handle_tap(app: &mut FileManagerApp, x: usize, y: usize) -> Tap {
             let entry = app.entries[entry_idx];
             if entry.is_dir {
                 app.navigate_into(entry_idx);
-                std::log(0, "[FILE_MANAGER] Navigated into directory.").ok();
+                std::log("[FILE_MANAGER] Navigated into directory.").ok();
                 return Tap::Redraw(Dirty::All);
             }
             app.selected_entry = Some(entry_idx);
@@ -1247,35 +1214,31 @@ fn handle_tap(app: &mut FileManagerApp, x: usize, y: usize) -> Tap {
                 }
                 n = append(&mut path_buf, n, &entry.name[..entry.name_len]);
                 if let Ok(full_path) = core::str::from_utf8(&path_buf[..n]) {
-                    if let Some(write_slot) = fs_write_slot() {
-                        let _ = std::settings_set(write_slot, "intent.view.file", full_path.as_bytes());
-                    }
-                    if let Some(read_slot) = fs_read_slot() {
-                        let mut app_id_buf = [0u8; 64];
-                        let an = get_app_for_mime(read_slot, mime, &mut app_id_buf);
-                        if let Ok(app_id) = core::str::from_utf8(&app_id_buf[..an]) {
-                            // WHY the launch result is reported: the old
-                            // code announced the launch before making it and
-                            // threw the answer away, so a refused launch was
-                            // logged as a launch that had happened.
-                            match std::app_launch(app_id) {
-                                Ok(_) => {
-                                    std::log(0, "[FILE_MANAGER] Launched the associated media viewer.").ok();
-                                }
-                                Err(code) => {
-                                    std::log(
-                                        0,
-                                        "[FILE_MANAGER] The associated media viewer could not be launched.",
-                                    )
+                    // WHY the chosen file is published: the viewer is a
+                    // separate task, and this is the only way it learns
+                    // which file the user picked.
+                    let _ = std::settings_set("intent.view.file", full_path.as_bytes());
+                    let mut app_id_buf = [0u8; 64];
+                    let an = get_app_for_mime(mime, &mut app_id_buf);
+                    if let Ok(app_id) = core::str::from_utf8(&app_id_buf[..an]) {
+                        // WHY the launch result is reported: the old code
+                        // announced the launch before making it and threw
+                        // the answer away, so a refused launch was logged
+                        // as a launch that had happened.
+                        match std::app_launch(app_id) {
+                            Ok(_) => {
+                                std::log("[FILE_MANAGER] Launched the associated media viewer.").ok();
+                            }
+                            Err(code) => {
+                                std::log("[FILE_MANAGER] The associated media viewer could not be launched.")
                                     .ok();
-                                    let _ = code;
-                                }
+                                let _ = code;
                             }
                         }
                     }
                 }
             } else {
-                std::log(0, "[FILE_MANAGER] Directory entry selected.").ok();
+                std::log("[FILE_MANAGER] Directory entry selected.").ok();
             }
             return Tap::Redraw(Dirty::All);
         }
@@ -1286,6 +1249,6 @@ fn handle_tap(app: &mut FileManagerApp, x: usize, y: usize) -> Tap {
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
-    std::log(0, "[FILE_MANAGER] Panic detected! Terminating task...").ok();
+    std::log("[FILE_MANAGER] Panic detected! Terminating task...").ok();
     std::exit();
 }

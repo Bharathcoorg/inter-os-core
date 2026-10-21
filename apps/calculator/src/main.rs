@@ -601,7 +601,7 @@ fn render_calculator_ui(surface: u32, calc: &CalculatorState) {
                 y += 1;
             }
         }
-        let _ = std::surface_write(6, surface, offset, &chunk[..count]);
+        let _ = std::surface_write(surface, offset, &chunk[..count]);
         offset += count;
     }
 }
@@ -626,7 +626,7 @@ fn render_calculator_band(surface: u32, calc: &CalculatorState, y0: usize, y1: u
                 y += 1;
             }
         }
-        let _ = std::surface_write(6, surface, offset, &chunk[..count]);
+        let _ = std::surface_write(surface, offset, &chunk[..count]);
         offset += count;
     }
 }
@@ -671,53 +671,53 @@ fn handle_keyboard_key(calc: &mut CalculatorState, code: u32) -> bool {
     match code {
         48..=57 => {
             calc.push_digit((code - 48) as i64);
-            std::log(0, "[CALCULATOR] Keypad digit pressed.").ok();
+            std::log("[CALCULATOR] Keypad digit pressed.").ok();
         }
         43 => {
             calc.set_operation('+');
-            std::log(0, "[CALCULATOR] Keypad operator selected.").ok();
+            std::log("[CALCULATOR] Keypad operator selected.").ok();
         }
         45 => {
             calc.set_operation('-');
-            std::log(0, "[CALCULATOR] Keypad operator selected.").ok();
+            std::log("[CALCULATOR] Keypad operator selected.").ok();
         }
         42 => {
             calc.set_operation('*');
-            std::log(0, "[CALCULATOR] Keypad operator selected.").ok();
+            std::log("[CALCULATOR] Keypad operator selected.").ok();
         }
         47 => {
             calc.set_operation('/');
-            std::log(0, "[CALCULATOR] Keypad operator selected.").ok();
+            std::log("[CALCULATOR] Keypad operator selected.").ok();
         }
         40 | 41 => {
             calc.push_parenthesis();
-            std::log(0, "[CALCULATOR] Keypad operator selected.").ok();
+            std::log("[CALCULATOR] Keypad operator selected.").ok();
         }
         46 => {
             calc.push_char('.');
         }
         61 | input_key_code::ENTER => {
             calc.evaluate();
-            std::log(0, "[CALCULATOR] Evaluation completed.").ok();
+            std::log("[CALCULATOR] Evaluation completed.").ok();
         }
         99 | 67 | input_key_code::ESCAPE => {
             calc.clear();
-            std::log(0, "[CALCULATOR] Clear pressed.").ok();
+            std::log("[CALCULATOR] Clear pressed.").ok();
         }
         input_key_code::BACKSPACE => {
             calc.backspace();
         }
         37 => {
             calc.set_operation('%');
-            std::log(0, "[CALCULATOR] Modulo operation queued.").ok();
+            std::log("[CALCULATOR] Modulo operation queued.").ok();
         }
         94 | 115 | 83 => {
             calc.square();
-            std::log(0, "[CALCULATOR] Square evaluated.").ok();
+            std::log("[CALCULATOR] Square evaluated.").ok();
         }
         95 | 126 => {
             calc.toggle_sign();
-            std::log(0, "[CALCULATOR] Sign toggled.").ok();
+            std::log("[CALCULATOR] Sign toggled.").ok();
         }
         104 | 72 => {
             calc.toggle_history();
@@ -792,32 +792,32 @@ fn handle_touch_point(calc: &mut CalculatorState, x: u32, y: u32) -> Tap {
                             '0'..='9' => {
                                 let digit = (action as u8 - b'0') as i64;
                                 calc.push_digit(digit);
-                                std::log(0, "[CALCULATOR] Keypad digit pressed.").ok();
+                                std::log("[CALCULATOR] Keypad digit pressed.").ok();
                             }
                             '+' | '-' | '*' | '/' => {
                                 calc.set_operation(action);
-                                std::log(0, "[CALCULATOR] Keypad operator selected.").ok();
+                                std::log("[CALCULATOR] Keypad operator selected.").ok();
                             }
                             'P' => {
                                 calc.push_parenthesis();
-                                std::log(0, "[CALCULATOR] Keypad operator selected.").ok();
+                                std::log("[CALCULATOR] Keypad operator selected.").ok();
                             }
                             '%' => {
                                 calc.set_operation('%');
-                                std::log(0, "[CALCULATOR] Modulo operation queued.").ok();
+                                std::log("[CALCULATOR] Modulo operation queued.").ok();
                             }
                             '=' => {
                                 let res = calc.evaluate();
                                 let _ = res;
-                                std::log(0, "[CALCULATOR] Evaluation completed.").ok();
+                                std::log("[CALCULATOR] Evaluation completed.").ok();
                             }
                             'C' => {
                                 calc.clear();
-                                std::log(0, "[CALCULATOR] Clear pressed.").ok();
+                                std::log("[CALCULATOR] Clear pressed.").ok();
                             }
                             '~' => {
                                 calc.toggle_sign();
-                                std::log(0, "[CALCULATOR] Sign toggled.").ok();
+                                std::log("[CALCULATOR] Sign toggled.").ok();
                             }
                             '.' => {
                                 calc.push_char('.');
@@ -837,41 +837,27 @@ fn handle_touch_point(calc: &mut CalculatorState, x: u32, y: u32) -> Tap {
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    std::log(
-        0,
-        "[CALCULATOR (Ring 3)] Open-Source Touch Calculator online.",
+    std::log("[CALCULATOR (Ring 3)] Open-Source Touch Calculator online.",
     )
     .ok();
 
     let mut calc = CalculatorState::new();
 
     // 1. Allocate dedicated KMS Client Surface (z=200)
-    std::log(
-        0,
-        "[CALCULATOR] Step 1: Allocating application surface (z=200)...",
+    std::log("[CALCULATOR] Step 1: Allocating application surface (z=200)...",
     )
     .ok();
     // WHY the slot is resolved by type: a slot number is a position in a
     // table, and the position depends on the order this task's
     // capabilities were inserted in. Six happened to hold the framebuffer
     // here, and would not in an app with one more capability.
-    let Some(fb_slot) = std::cap::framebuffer_slot() else {
-        std::log(
-            0,
-            "[CALCULATOR] This app holds no framebuffer capability, so it cannot draw.",
-        )
-        .ok();
-        std::exit_with_code(0);
-    };
-    let surface = match std::surface_create(fb_slot, W as u32, H as u32, 200) {
+    let surface = match std::surface_create(W as u32, H as u32, 200) {
         Ok(s) => {
-            std::log(0, "[CALCULATOR] Step 2: Surface created successfully.").ok();
+            std::log("[CALCULATOR] Step 2: Surface created successfully.").ok();
             s
         }
         Err(_) => {
-            std::log(
-                0,
-                "[CALCULATOR] Display surface unavailable; refusing headless execution.",
+            std::log("[CALCULATOR] Display surface unavailable; refusing headless execution.",
             )
             .ok();
             std::exit_with_code(1);
@@ -883,10 +869,8 @@ pub extern "C" fn _start() -> ! {
 
     // 3. Render initial Calculator UI frame and present
     repaint(surface, &calc, Dirty::All);
-    let _ = std::cap::framebuffer_slot().map(|slot| std::surface_flip(slot));
-    std::log(
-        0,
-        "[CALCULATOR] Initial frame presented to hardware scanout.",
+    let _ = std::surface_flip();
+    std::log("[CALCULATOR] Initial frame presented to hardware scanout.",
     )
     .ok();
 
@@ -910,19 +894,26 @@ pub extern "C" fn _start() -> ! {
                     continue;
                 }
                 if input.kind == 4 || input.kind == 6 || input.kind == 7 || input.kind == 8 || input.kind == 10 {
-                    std::log(
-                        0,
-                        "[CALCULATOR] Navigation gesture recognized. Returning to launcher.",
+                    std::log("[CALCULATOR] Navigation gesture recognized. Returning to launcher.",
                     )
                     .ok();
-                    let _ = std::cap::framebuffer_slot().map(|slot| std::surface_destroy(slot, surface));
+                    if surface > 0 {
+                        // WHY no slot argument: a slot is a position in this
+                        // task's capability table, and the kernel authorises
+                        // the release by the capability's type. The surface
+                        // must be handed back or it stays a leaked KMS
+                        // surface for the life of the device.
+                        let _ = std::surface_destroy(surface);
+                    }
                     std::exit_with_code(0);
                 }
                 if input.kind == 1 || input.kind == 2 {
                     match handle_touch_point(&mut calc, input.x, input.y) {
                         Tap::Leave(msg) => {
-                            std::log(0, msg).ok();
-                            let _ = std::cap::framebuffer_slot().map(|slot| std::surface_destroy(slot, surface));
+                            std::log(msg).ok();
+                            if surface > 0 {
+                                let _ = std::surface_destroy(surface);
+                            }
                             std::exit_with_code(0);
                         }
                         Tap::Redraw(d) => dirty = dirty.widen(d),
@@ -932,8 +923,8 @@ pub extern "C" fn _start() -> ! {
             }
             if dirty != Dirty::None {
                 repaint(surface, &calc, dirty);
-                let _ = std::cap::framebuffer_slot().map(|slot| std::surface_flip(slot));
-                std::log(0, "[CALCULATOR] Post-input frame presented.").ok();
+                let _ = std::surface_flip();
+                std::log("[CALCULATOR] Post-input frame presented.").ok();
             }
         }
 
@@ -943,6 +934,6 @@ pub extern "C" fn _start() -> ! {
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
-    std::log(0, "[PANIC] Calculator app error!").ok();
+    std::log("[PANIC] Calculator app error!").ok();
     std::exit_with_code(1);
 }

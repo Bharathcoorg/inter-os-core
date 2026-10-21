@@ -1848,5 +1848,5 @@ pub fn log_render(state: &LauncherState) {
     let msg = core::str::from_utf8(&buf[..len]).unwrap_or(
         "[LAUNCHER] render_full complete: Home surface rendered.",
     );
-    let _ = interos_std::log(0, msg);
+    let _ = interos_std::log(msg);
 }

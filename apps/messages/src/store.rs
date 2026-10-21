@@ -38,9 +38,7 @@ use interos_std as std;
 use crate::ThreadStatus;
 
 /// `FileSystemRead` slot: accepted by `sys_settings_get`.
-pub const STORE_CAP_READ: usize = 4;
 /// `FileSystemWrite` slot: accepted by `sys_settings_set`.
-pub const STORE_CAP_WRITE: usize = 5;
 
 /// Settings key the whole store is serialized under.
 const STORE_KEY: &str = "messages.threads.v1";
@@ -344,9 +342,9 @@ impl ThreadStore {
         let (blob, used) = self.encode();
         let mut escaped = [0u8; 512];
         if let Ok(esc_len) = escape_store_blob(&blob[..used], &mut escaped) {
-            std::settings_set(STORE_CAP_WRITE, STORE_KEY, &escaped[..esc_len]).is_ok()
+            std::settings_set(STORE_KEY, &escaped[..esc_len]).is_ok()
         } else {
-            std::settings_set(STORE_CAP_WRITE, STORE_KEY, &blob[..used]).is_ok()
+            std::settings_set(STORE_KEY, &blob[..used]).is_ok()
         }
     }
 
@@ -354,7 +352,7 @@ impl ThreadStore {
     pub fn load() -> Self {
         let mut store = ThreadStore::EMPTY;
         let mut raw = [0u8; 512];
-        match std::settings_get(STORE_CAP_READ, STORE_KEY, &mut raw) {
+        match std::settings_get(STORE_KEY, &mut raw) {
             Ok(0) => store.state = StoreState::Empty,
             Ok(n) => {
                 let mut blob = [0u8; STORE_BLOB_BYTES];

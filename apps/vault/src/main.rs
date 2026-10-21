@@ -268,9 +268,7 @@ impl VaultApp {
         let mut key0 = [0u8; 32];
         self.key_probe[0] = match std::keystore_derive(ROOT_KEY_SLOT, &mut key0) {
             Ok(len) if len == 32 => {
-                std::log(
-                    0,
-                    "[VAULT APP] Hardware Keystore Slot 0 derived: Root Master Key online.",
+                std::log("[VAULT APP] Hardware Keystore Slot 0 derived: Root Master Key online.",
                 )
                 .ok();
                 KeyProbe::Derived
@@ -282,9 +280,7 @@ impl VaultApp {
         let mut key1 = [0u8; 32];
         self.key_probe[1] = match std::keystore_derive(STORAGE_KEY_SLOT, &mut key1) {
             Ok(len) if len == 32 => {
-                std::log(
-                    0,
-                    "[VAULT APP] Hardware Keystore Slot 1 derived: Storage Encryption Key online.",
+                std::log("[VAULT APP] Hardware Keystore Slot 1 derived: Storage Encryption Key online.",
                 )
                 .ok();
                 KeyProbe::Derived
@@ -294,9 +290,7 @@ impl VaultApp {
         };
 
         if !self.keys_derived() {
-            std::log(
-                0,
-                "[VAULT APP] Hardware keystore did not export raw key material to Ring 3; no key is claimed.",
+            std::log("[VAULT APP] Hardware keystore did not export raw key material to Ring 3; no key is claimed.",
             )
             .ok();
         }
@@ -329,17 +323,10 @@ impl VaultApp {
         // verifies the capability's type at the slot it is given. The read
         // was therefore refused before the file was ever opened, and the
         // identity read as unreadable on a device that has the file.
-        let read_slot = match std::cap::fs_read_slot() {
-            Some(slot) => slot,
-            None => {
-                self.identity = IdentityState::Unreadable;
-                return;
-            }
-        };
-        self.identity = match std::fs_open(read_slot, "/system/etc/device_id", std::FS_READ) {
+        self.identity = match std::fs_open("/system/etc/device_id", std::FS_READ) {
             Ok(fd) => {
                 let mut dev_buf = [0u8; 64];
-                let state = match std::fs_read(read_slot, fd, &mut dev_buf) {
+                let state = match std::fs_read(fd, &mut dev_buf) {
                     Ok(n) if n >= 4 && &dev_buf[..4] == b"DID:" => IdentityState::Present,
                     Ok(_) => IdentityState::Malformed,
                     Err(_) => IdentityState::Unreadable,
@@ -367,7 +354,7 @@ impl VaultApp {
     /// Performs an authenticated encryption and decryption test on a target sector.
     pub fn test_sector_roundtrip(&mut self, sector_id: u64, payload_tag: &[u8]) -> bool {
         let Some(iv) = self.generate_iv() else {
-            std::log(0, "[VAULT APP] Entropy unavailable; refusing sector verification.").ok();
+            std::log("[VAULT APP] Entropy unavailable; refusing sector verification.").ok();
             return false;
         };
         let mut sector_buf = [0u8; 512];
@@ -390,19 +377,19 @@ impl VaultApp {
                                 self.update_counter_buf();
                                 return true;
                             } else {
-                                std::log(0, "[VAULT APP] Sector decrypted but payload mismatch!").ok();
+                                std::log("[VAULT APP] Sector decrypted but payload mismatch!").ok();
                             }
                         }
                         Err(_) => {
-                            std::log(0, "[VAULT APP] Sector decrypt returned Err.").ok();
+                            std::log("[VAULT APP] Sector decrypt returned Err.").ok();
                         }
                     }
                 } else {
-                    std::log(0, "[VAULT APP] Encrypted buffer identical to plaintext!").ok();
+                    std::log("[VAULT APP] Encrypted buffer identical to plaintext!").ok();
                 }
             }
             Err(_) => {
-                std::log(0, "[VAULT APP] Sector encrypt returned Err.").ok();
+                std::log("[VAULT APP] Sector encrypt returned Err.").ok();
             }
         }
         self.update_counter_buf();
@@ -456,20 +443,6 @@ impl VaultApp {
         // WHY the slots are resolved by type: the write and the read are
         // different capabilities, and the VFS and the settings store both
         // verify the capability's type at the slot they are given.
-        let write_slot = match std::cap::fs_write_slot() {
-            Some(slot) => slot,
-            None => {
-                self.backup = BackupState::WriteRefused;
-                return BackupState::WriteRefused;
-            }
-        };
-        let read_slot = match std::cap::fs_read_slot() {
-            Some(slot) => slot,
-            None => {
-                self.backup = BackupState::ReadRefused;
-                return BackupState::ReadRefused;
-            }
-        };
         let mut header = [0u8; 40];
         header[..28].copy_from_slice(b"INTER_SOVEREIGN_VAULT_BACKUP");
         header[28..32].copy_from_slice(&self.total_encryptions.to_le_bytes());
@@ -479,17 +452,15 @@ impl VaultApp {
 
         let mut encoded = [0u8; 80];
         let enc_len = hex_encode(&header, &mut encoded);
-        self.backup = if std::settings_set(write_slot, "vault.backup_export", &encoded[..enc_len]).is_err() {
-            std::log(
-                0,
-                "[VAULT APP] Backup export refused: the settings store rejected the write.",
+        self.backup = if std::settings_set("vault.backup_export", &encoded[..enc_len]).is_err() {
+            std::log("[VAULT APP] Backup export refused: the settings store rejected the write.",
             )
             .ok();
             BackupState::WriteRefused
         } else {
             let mut stored_hex = [0u8; 80];
             let mut frame = [0u8; 40];
-            match std::settings_get(read_slot, "vault.backup_export", &mut stored_hex) {
+            match std::settings_get("vault.backup_export", &mut stored_hex) {
                 Ok(n) => match hex_decode(&stored_hex[..n.min(stored_hex.len())], &mut frame) {
                     Some(40) => {
                         let stored_sum =
@@ -497,34 +468,26 @@ impl VaultApp {
                         if frame[..28] == *b"INTER_SOVEREIGN_VAULT_BACKUP"
                             && stored_sum == fletcher32(&frame[..36])
                         {
-                            std::log(
-                                0,
-                                "[VAULT APP] Sovereign Backup Export persisted; read-back Fletcher-32 checksum valid.",
+                            std::log("[VAULT APP] Sovereign Backup Export persisted; read-back Fletcher-32 checksum valid.",
                             )
                             .ok();
                             BackupState::WrittenAndValid
                         } else {
-                            std::log(
-                                0,
-                                "[VAULT APP] Backup Export stored, but the read-back frame failed checksum validation.",
+                            std::log("[VAULT APP] Backup Export stored, but the read-back frame failed checksum validation.",
                             )
                             .ok();
                             BackupState::WrittenButChecksumMismatch
                         }
                     }
                     _ => {
-                        std::log(
-                            0,
-                            "[VAULT APP] Backup Export stored, but the read-back frame was truncated or undecodable; validation not performed.",
+                        std::log("[VAULT APP] Backup Export stored, but the read-back frame was truncated or undecodable; validation not performed.",
                         )
                         .ok();
                         BackupState::WrittenButTruncated
                     }
                 },
                 _ => {
-                    std::log(
-                        0,
-                        "[VAULT APP] Backup Export stored, but the read-back was refused; validation not performed.",
+                    std::log("[VAULT APP] Backup Export stored, but the read-back was refused; validation not performed.",
                     )
                     .ok();
                     BackupState::ReadRefused
@@ -544,15 +507,11 @@ impl VaultApp {
         // refuses raw key export the claim was false. The answer is now
         // reported after the probe, not before it.
         if self.keys_derived() {
-            std::log(
-                0,
-                "[VAULT APP] Hardware keystore exported both keys; the vault can encrypt.",
+            std::log("[VAULT APP] Hardware keystore exported both keys; the vault can encrypt.",
             )
             .ok();
         } else {
-            std::log(
-                0,
-                "[VAULT APP] Hardware keystore did not export raw key material to this app; no key is claimed.",
+            std::log("[VAULT APP] Hardware keystore did not export raw key material to this app; no key is claimed.",
             )
             .ok();
         }
@@ -1224,7 +1183,7 @@ fn render_vault_ui(surface: u32, vault: &VaultApp) {
             }
         }
 
-        let _ = std::surface_write(6, surface, offset, &chunk[..count]);
+        let _ = std::surface_write(surface, offset, &chunk[..count]);
         offset += count;
     }
 }
@@ -1260,7 +1219,7 @@ fn render_vault_band(surface: u32, vault: &VaultApp, y0: usize, y1: usize) {
             }
         }
 
-        let _ = std::surface_write(6, surface, offset, &chunk[..count]);
+        let _ = std::surface_write(surface, offset, &chunk[..count]);
         offset += count;
     }
 }
@@ -1379,7 +1338,7 @@ fn handle_vault_touch(vault: &mut VaultApp, x: u32, y: u32) -> Tap {
             vault,
             b"re-probed keystore, entropy and device identity",
         );
-        std::log(0, "[VAULT] Re-probed keystore, entropy and device identity.").ok();
+        std::log("[VAULT] Re-probed keystore, entropy and device identity.").ok();
         return Tap::Redraw(Dirty::Reprobe);
     }
 
@@ -1390,12 +1349,10 @@ fn handle_vault_touch(vault: &mut VaultApp, x: u32, y: u32) -> Tap {
             let ok = vault.verify_sector(index);
             if ok {
                 status(vault, b"sector round-trip verified");
-                std::log(0, "[VAULT] Sector card touched. Round-trip re-verified.").ok();
+                std::log("[VAULT] Sector card touched. Round-trip re-verified.").ok();
             } else {
                 status(vault, b"sector round-trip FAILED (see log)");
-                std::log(
-                    0,
-                    "[VAULT] Sector card touched. Round-trip verification FAILED (see reason above).",
+                std::log("[VAULT] Sector card touched. Round-trip verification FAILED (see reason above).",
                 )
                 .ok();
             }
@@ -1408,12 +1365,10 @@ fn handle_vault_touch(vault: &mut VaultApp, x: u32, y: u32) -> Tap {
         let ok = vault.verify_sector(0);
         if ok {
             status(vault, b"sector round-trip verified");
-            std::log(0, "[VAULT] Sector card touched. Round-trip re-verified.").ok();
+            std::log("[VAULT] Sector card touched. Round-trip re-verified.").ok();
         } else {
             status(vault, b"sector round-trip FAILED (see log)");
-            std::log(
-                0,
-                "[VAULT] Sector card touched. Round-trip verification FAILED (see reason above).",
+            std::log("[VAULT] Sector card touched. Round-trip verification FAILED (see reason above).",
             )
             .ok();
         }
@@ -1426,12 +1381,10 @@ fn handle_vault_touch(vault: &mut VaultApp, x: u32, y: u32) -> Tap {
         std::audio_haptic_click().ok();
         if all_ok {
             status(vault, b"all 6 sectors round-trip verified");
-            std::log(0, "[VAULT] All 6 sectors roundtrip verified.").ok();
+            std::log("[VAULT] All 6 sectors roundtrip verified.").ok();
         } else {
             status(vault, b"one or more sectors FAILED (see log)");
-            std::log(
-                0,
-                "[VAULT] Roundtrip verification FAILED for one or more sectors (see reasons above).",
+            std::log("[VAULT] Roundtrip verification FAILED for one or more sectors (see reasons above).",
             )
             .ok();
         }
@@ -1465,9 +1418,7 @@ pub extern "C" fn _start() -> ! {
     // export raw key material to a Ring 3 app, so the banner claimed a
     // service that was not there. The app now says it is probing, and the
     // result is on the screen and in the log below.
-    std::log(
-        0,
-        "[VAULT APP (Ring 3)] Started; probing the platform's storage and keystore.",
+    std::log("[VAULT APP (Ring 3)] Started; probing the platform's storage and keystore.",
     )
     .ok();
 
@@ -1477,36 +1428,19 @@ pub extern "C" fn _start() -> ! {
     vault.reprobe();
 
     // 2. Allocate dedicated KMS Client Surface (z=200)
-    std::log(
-        0,
-        "[VAULT APP] Step 1: Allocating application surface (z=200)...",
+    std::log("[VAULT APP] Step 1: Allocating application surface (z=200)...",
     )
     .ok();
     // WHY the slot is resolved by type: the old code passed the literal
     // slot 6, which holds this app's IPC receive capability, not its
     // framebuffer. The surface was created through the wrong authority.
-    let fb_slot = match std::cap::framebuffer_slot() {
-        Some(slot) => slot,
-        None => {
-            std::log(
-                0,
-                "[VAULT APP] No framebuffer capability; the vault cannot draw.",
-            )
-            .ok();
-            loop {
-                std::yield_now();
-            }
-        }
-    };
-    let surface = match std::surface_create(fb_slot, W as u32, H as u32, 200) {
+    let surface = match std::surface_create(W as u32, H as u32, 200) {
         Ok(s) => {
-            std::log(0, "[VAULT APP] Step 2: Surface created successfully.").ok();
+            std::log("[VAULT APP] Step 2: Surface created successfully.").ok();
             s
         }
         Err(_) => {
-            std::log(
-                0,
-                "[VAULT APP] Display surface unavailable; refusing headless execution.",
+            std::log("[VAULT APP] Display surface unavailable; refusing headless execution.",
             )
             .ok();
             std::exit_with_code(1);
@@ -1519,33 +1453,25 @@ pub extern "C" fn _start() -> ! {
         b"verification and backup export are user-triggered",
     );
     repaint(surface, &vault, Dirty::All);
-    let _ = std::surface_flip(fb_slot);
+    let _ = std::surface_flip();
     std::audio_haptic_click().ok();
-    std::log(
-        0,
-        "[VAULT APP] Step 3: Initial frame presented to hardware scanout.",
+    std::log("[VAULT APP] Step 3: Initial frame presented to hardware scanout.",
     )
     .ok();
 
     match vault.identity {
         IdentityState::Present => {
-            std::log(
-                0,
-                "[VAULT APP] Device identity file present with a DID: prefix (magic check only; no cryptographic attestation is performed).",
+            std::log("[VAULT APP] Device identity file present with a DID: prefix (magic check only; no cryptographic attestation is performed).",
             )
             .ok();
         }
         IdentityState::Malformed => {
-            std::log(
-                0,
-                "[VAULT APP] Device identity file missing or malformed; identity check not performed.",
+            std::log("[VAULT APP] Device identity file missing or malformed; identity check not performed.",
             )
             .ok();
         }
         IdentityState::Unreadable => {
-            std::log(
-                0,
-                "[VAULT APP] Device identity file could not be opened; identity check not performed.",
+            std::log("[VAULT APP] Device identity file could not be opened; identity check not performed.",
             )
             .ok();
         }
@@ -1556,7 +1482,7 @@ pub extern "C" fn _start() -> ! {
     loop {
         if let Ok(events) = std::event_poll(std::EVENT_TOUCH_INPUT | std::EVENT_TIMER_TICK, 100) {
             if (events & std::EVENT_TIMER_TICK) != 0 {
-                let _ = std::surface_flip(fb_slot);
+                let _ = std::surface_flip();
             }
 
             if (events & std::EVENT_TOUCH_INPUT) != 0 {
@@ -1582,19 +1508,17 @@ pub extern "C" fn _start() -> ! {
                             || input.kind == 8
                             || input.kind == 10)
                     {
-                        std::log(
-                            0,
-                            "[VAULT APP] Navigation gesture recognized. Returning to launcher.",
+                        std::log("[VAULT APP] Navigation gesture recognized. Returning to launcher.",
                         )
                         .ok();
-                        let _ = std::surface_destroy(fb_slot, surface);
+                        let _ = std::surface_destroy(surface);
                         std::exit_with_code(0);
                     }
                     if input.kind == 1 {
                         match handle_vault_touch(&mut vault, input.x, input.y) {
                             Tap::Leave(msg) => {
-                                std::log(0, msg).ok();
-                                let _ = std::surface_destroy(fb_slot, surface);
+                                std::log(msg).ok();
+                                let _ = std::surface_destroy(surface);
                                 std::exit_with_code(0);
                             }
                             Tap::Redraw(d) => dirty = dirty.widen(d),
@@ -1608,7 +1532,7 @@ pub extern "C" fn _start() -> ! {
                 // presented exactly once instead of once per event.
                 if dirty != Dirty::None {
                     repaint(surface, &vault, dirty);
-                    let _ = std::surface_flip(fb_slot);
+                    let _ = std::surface_flip();
                 }
             }
         }
@@ -1619,6 +1543,6 @@ pub extern "C" fn _start() -> ! {
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
-    std::log(0, "[VAULT APP] Panic detected! Terminating task...").ok();
+    std::log("[VAULT APP] Panic detected! Terminating task...").ok();
     std::exit_with_code(1);
 }

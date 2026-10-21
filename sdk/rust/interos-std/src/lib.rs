@@ -70,6 +70,18 @@ pub mod compositor {
     }
 }
 
+/// The capability-slot argument reserved in the syscall ABI.
+///
+/// WHY it is reserved: a capability slot is a *position* in the task's
+/// capability table, and the position depends on the order the kernel
+/// inserted the capabilities in. The kernel therefore authorises by
+/// capability *type* and ignores this argument, which is what
+/// `PackageRegistry` already did. Making the caller name a slot made every
+/// caller responsible for its own table layout: the launcher passed slot 0
+/// while its `FileSystemRead` capability sat at slot 3, and the call was
+/// refused with nothing on screen to say why.
+pub const RESERVED_CAP_SLOT: u64 = 0;
+
 /// Well-known system call identifiers matching the Inter OS microkernel.
 #[repr(u64)]
 pub enum SyscallNumber {
@@ -575,11 +587,11 @@ pub fn waitpid(child_id: u64) -> Result<(), i64> {
 
 /// Emits a diagnostic log string through the kernel serial console.
 /// Requires the caller to hold a `SerialOutput` capability in `cap_slot`.
-pub fn log(cap_slot: usize, msg: &str) -> Result<(), i64> {
+pub fn log(msg: &str) -> Result<(), i64> {
     let ret = unsafe {
         syscall3(
             SyscallNumber::Log,
-            cap_slot as u64,
+            RESERVED_CAP_SLOT,
             msg.as_ptr() as u64,
             msg.len() as u64,
         )
@@ -594,11 +606,11 @@ pub fn log(cap_slot: usize, msg: &str) -> Result<(), i64> {
 /// Queries the hardware timer ticks since boot.
 /// Requires the caller to hold a `TimerTickRead` capability in `cap_slot`.
 /// Launches a signed trusted system-service RAPP after kernel verification.
-pub fn service_package_launch(cap_slot: usize, path: &str) -> Result<u64, i64> {
+pub fn service_package_launch(path: &str) -> Result<u64, i64> {
     let ret = unsafe {
         syscall3(
             SyscallNumber::ServicePackageLaunch,
-            cap_slot as u64,
+            RESERVED_CAP_SLOT,
             path.as_ptr() as u64,
             path.len() as u64,
         )
@@ -610,8 +622,8 @@ pub fn service_package_launch(cap_slot: usize, path: &str) -> Result<u64, i64> {
     }
 }
 
-pub fn get_ticks(cap_slot: usize) -> Result<u64, i64> {
-    let ret = unsafe { syscall1(SyscallNumber::GetTicks, cap_slot as u64) };
+pub fn get_ticks() -> Result<u64, i64> {
+    let ret = unsafe { syscall1(SyscallNumber::GetTicks, RESERVED_CAP_SLOT) };
     if ret >= 0 {
         Ok(ret as u64)
     } else {
@@ -626,7 +638,6 @@ pub fn get_task_id() -> u64 {
 
 /// Transmits a message through zero-trust IPC.
 pub fn ipc_send(
-    cap_slot: usize,
     target_task_id: u64,
     msg_type: u32,
     payload: &[u8],
@@ -634,7 +645,7 @@ pub fn ipc_send(
     let ret = unsafe {
         syscall5(
             SyscallNumber::IpcSend,
-            cap_slot as u64,
+            RESERVED_CAP_SLOT,
             target_task_id,
             msg_type as u64,
             payload.as_ptr() as u64,
@@ -649,11 +660,11 @@ pub fn ipc_send(
 }
 
 /// Receives a message from the task IPC mailbox.
-pub fn ipc_recv(cap_slot: usize, out_buf: &mut [u8]) -> Result<usize, i64> {
+pub fn ipc_recv(out_buf: &mut [u8]) -> Result<usize, i64> {
     let ret = unsafe {
         syscall3(
             SyscallNumber::IpcRecv,
-            cap_slot as u64,
+            RESERVED_CAP_SLOT,
             out_buf.as_mut_ptr() as u64,
             out_buf.len() as u64,
         )
@@ -669,20 +680,20 @@ pub fn ipc_recv(cap_slot: usize, out_buf: &mut [u8]) -> Result<usize, i64> {
 pub mod log {
     pub fn init(_pkg: &str) {}
     pub fn info(msg: &str) {
-        let _ = crate::log(0, msg);
+        let _ = crate::log(msg);
     }
     pub fn warn(msg: &str) {
-        let _ = crate::log(0, msg);
+        let _ = crate::log(msg);
     }
     pub fn error(msg: &str) {
-        let _ = crate::log(0, msg);
+        let _ = crate::log(msg);
     }
 }
 
 /// Ergonomic IPC helper module matching application templates.
 pub mod ipc {
     pub fn send(target_task_id: u64, msg_type: u32, payload: &[u8]) -> Result<(), i64> {
-        crate::ipc_send(0, target_task_id, msg_type, payload)
+        crate::ipc_send(target_task_id, msg_type, payload)
     }
 
     pub fn receive_any(out_buf: &mut [u8]) -> Result<(u64, u32, usize), i64> {
@@ -904,11 +915,11 @@ pub fn package_audit(pkg_id: &str) -> Result<u32, i64> {
 
 /// Installs a verified marketplace package onto persistent storage.
 /// Requires the caller to hold a `FileSystemWrite` capability in `cap_slot`.
-pub fn package_install(cap_slot: usize, pkg_id: &str, user_consent: bool) -> Result<(), i64> {
+pub fn package_install(pkg_id: &str, user_consent: bool) -> Result<(), i64> {
     let ret = unsafe {
         syscall4(
             SyscallNumber::PackageInstall,
-            cap_slot as u64,
+            RESERVED_CAP_SLOT,
             pkg_id.as_ptr() as u64,
             pkg_id.len() as u64,
             user_consent as u64,
@@ -922,11 +933,11 @@ pub fn package_install(cap_slot: usize, pkg_id: &str, user_consent: bool) -> Res
 }
 
 /// Rolls back a first-party package registry activation transaction.
-pub fn package_rollback(cap_slot: usize, pkg_id: &str, user_consent: bool) -> Result<(), i64> {
+pub fn package_rollback(pkg_id: &str, user_consent: bool) -> Result<(), i64> {
     let ret = unsafe {
         syscall4(
             SyscallNumber::PackageRollback,
-            cap_slot as u64,
+            RESERVED_CAP_SLOT,
             pkg_id.as_ptr() as u64,
             pkg_id.len() as u64,
             user_consent as u64,
@@ -956,11 +967,11 @@ pub fn window_list(out_buf: &mut [u8]) -> Result<usize, i64> {
 }
 
 /// Reads the kernel package lifecycle registry. Requires FileSystemRead capability in cap_slot.
-pub fn package_registry(cap_slot: usize, out_buf: &mut [u8]) -> Result<usize, i64> {
+pub fn package_registry(out_buf: &mut [u8]) -> Result<usize, i64> {
     let ret = unsafe {
         syscall3(
             SyscallNumber::PackageRegistry,
-            cap_slot as u64,
+            RESERVED_CAP_SLOT,
             out_buf.as_mut_ptr() as u64,
             out_buf.len() as u64,
         )
@@ -985,11 +996,11 @@ pub fn package_registry(cap_slot: usize, out_buf: &mut [u8]) -> Result<usize, i6
 /// needs to decide whether to offer the install.
 ///
 /// Requires the `FileSystemRead` capability in `cap_slot`.
-pub fn verify_package(cap_slot: usize, path: &str, out_buf: &mut [u8]) -> Result<usize, i64> {
+pub fn verify_package(path: &str, out_buf: &mut [u8]) -> Result<usize, i64> {
     let ret = unsafe {
         syscall5(
             SyscallNumber::VerifyPackage,
-            cap_slot as u64,
+            RESERVED_CAP_SLOT,
             path.as_ptr() as u64,
             path.len() as u64,
             out_buf.as_mut_ptr() as u64,
@@ -1474,7 +1485,6 @@ pub fn cap_delegate(
 /// Interacts with the microkernel fluid inertial physics scroller (0=down, 1=move, 2=up, 3=tick).
 /// Creates a surface through the privileged Ring-3 display service boundary.
 pub fn surface_create(
-    display_cap_slot: usize,
     width: u32,
     height: u32,
     z_order: u32,
@@ -1482,7 +1492,7 @@ pub fn surface_create(
     let ret = unsafe {
         syscall5(
             SyscallNumber::SurfaceCreate,
-            display_cap_slot as u64,
+            RESERVED_CAP_SLOT,
             width as u64,
             height as u64,
             z_order as u64,
@@ -1498,7 +1508,6 @@ pub fn surface_create(
 
 /// Writes ARGB8888 pixels through the display service boundary.
 pub fn surface_write(
-    display_cap_slot: usize,
     surface_id: u32,
     offset: usize,
     pixels: &[u32],
@@ -1506,7 +1515,7 @@ pub fn surface_write(
     let ret = unsafe {
         syscall5(
             SyscallNumber::SurfaceWrite,
-            display_cap_slot as u64,
+            RESERVED_CAP_SLOT,
             surface_id as u64,
             offset as u64,
             pixels.as_ptr() as u64,
@@ -1521,11 +1530,11 @@ pub fn surface_write(
 }
 
 /// Destroys a surface owned by the display service.
-pub fn surface_destroy(display_cap_slot: usize, surface_id: u32) -> Result<(), i64> {
+pub fn surface_destroy(surface_id: u32) -> Result<(), i64> {
     let ret = unsafe {
         syscall2(
             SyscallNumber::SurfaceDestroy,
-            display_cap_slot as u64,
+            RESERVED_CAP_SLOT,
             surface_id as u64,
         )
     };
@@ -1537,8 +1546,8 @@ pub fn surface_destroy(display_cap_slot: usize, surface_id: u32) -> Result<(), i
 }
 
 /// Composites and atomically flips the display scanout.
-pub fn surface_flip(display_cap_slot: usize) -> Result<u64, i64> {
-    let ret = unsafe { syscall5(SyscallNumber::SurfaceFlip, display_cap_slot as u64, 0, 0, 0, 0) };
+pub fn surface_flip() -> Result<u64, i64> {
+    let ret = unsafe { syscall5(SyscallNumber::SurfaceFlip, RESERVED_CAP_SLOT, 0, 0, 0, 0) };
     if ret >= 0 {
         Ok(ret as u64)
     } else {
@@ -1547,11 +1556,11 @@ pub fn surface_flip(display_cap_slot: usize) -> Result<u64, i64> {
 }
 
 /// Enables or disables pointer/touch hit-testing for an owned window.
-pub fn window_set_input(display_cap_slot: usize, window_id: u32, enabled: bool) -> Result<(), i64> {
+pub fn window_set_input(window_id: u32, enabled: bool) -> Result<(), i64> {
     let ret = unsafe {
         syscall3(
             SyscallNumber::WindowSetInput,
-            display_cap_slot as u64,
+            RESERVED_CAP_SLOT,
             window_id as u64,
             enabled as u64,
         )
@@ -1572,7 +1581,6 @@ pub fn window_set_input(display_cap_slot: usize, window_id: u32, enabled: bool) 
 /// or a refresh the panel rejects, comes back as `InvalidArguments` and the
 /// previous mode stays in effect.
 pub fn display_set_mode(
-    display_cap_slot: usize,
     width: u32,
     height: u32,
     refresh_hz: u16,
@@ -1580,7 +1588,7 @@ pub fn display_set_mode(
     let ret = unsafe {
         syscall5(
             SyscallNumber::DisplaySetMode,
-            display_cap_slot as u64,
+            RESERVED_CAP_SLOT,
             width as u64,
             height as u64,
             refresh_hz as u64,
@@ -1602,11 +1610,11 @@ pub fn display_set_mode(
 /// 0..=3 gets `InvalidArguments` rather than a silent no-op.
 ///
 /// 0 = Portrait, 1 = LandscapeRight, 2 = PortraitInverted, 3 = LandscapeLeft.
-pub fn display_set_orientation(display_cap_slot: usize, orientation: u32) -> Result<(), i64> {
+pub fn display_set_orientation(orientation: u32) -> Result<(), i64> {
     let ret = unsafe {
         syscall5(
             SyscallNumber::DisplaySetOrientation,
-            display_cap_slot as u64,
+            RESERVED_CAP_SLOT,
             orientation as u64,
             0,
             0,
@@ -1802,11 +1810,11 @@ pub const FS_READ: u32 = 1;
 pub const FS_WRITE: u32 = 2;
 
 /// Opens a file in the Virtual Filesystem with requested rights.
-pub fn fs_open(cap_slot: usize, path: &str, rights: u32) -> Result<u32, i64> {
+pub fn fs_open(path: &str, rights: u32) -> Result<u32, i64> {
     let ret = unsafe {
         syscall4(
             SyscallNumber::FsOpen,
-            cap_slot as u64,
+            RESERVED_CAP_SLOT,
             path.as_ptr() as u64,
             path.len() as u64,
             rights as u64,
@@ -1872,11 +1880,11 @@ pub fn app_restart(package_id: &str) -> Result<u64, i64> {
     }
 }
 
-pub fn package_uninstall(cap_slot: usize, package_id: &str, user_consent: bool) -> Result<(), i64> {
+pub fn package_uninstall(package_id: &str, user_consent: bool) -> Result<(), i64> {
     let ret = unsafe {
         syscall4(
             SyscallNumber::PackageUninstall,
-            cap_slot as u64,
+            RESERVED_CAP_SLOT,
             package_id.as_ptr() as u64,
             package_id.len() as u64,
             user_consent as u64,
@@ -1929,11 +1937,11 @@ pub fn app_wake() -> Result<(), i64> {
 }
 
 /// Opens a file inside the calling application's private storage namespace.
-pub fn app_storage_open(cap_slot: usize, relative_path: &str, rights: u32) -> Result<u32, i64> {
+pub fn app_storage_open(relative_path: &str, rights: u32) -> Result<u32, i64> {
     let ret = unsafe {
         syscall4(
             SyscallNumber::AppStorageOpen,
-            cap_slot as u64,
+            RESERVED_CAP_SLOT,
             relative_path.as_ptr() as u64,
             relative_path.len() as u64,
             rights as u64,
@@ -1947,11 +1955,11 @@ pub fn app_storage_open(cap_slot: usize, relative_path: &str, rights: u32) -> Re
 }
 
 /// Reads data from an open file descriptor.
-pub fn fs_read(cap_slot: usize, fd: u32, buf: &mut [u8]) -> Result<usize, i64> {
+pub fn fs_read(fd: u32, buf: &mut [u8]) -> Result<usize, i64> {
     let ret = unsafe {
         syscall4(
             SyscallNumber::FsRead,
-            cap_slot as u64,
+            RESERVED_CAP_SLOT,
             fd as u64,
             buf.as_mut_ptr() as u64,
             buf.len() as u64,
@@ -1965,11 +1973,11 @@ pub fn fs_read(cap_slot: usize, fd: u32, buf: &mut [u8]) -> Result<usize, i64> {
 }
 
 /// Writes data to an open file descriptor.
-pub fn fs_write(cap_slot: usize, fd: u32, buf: &[u8]) -> Result<usize, i64> {
+pub fn fs_write(fd: u32, buf: &[u8]) -> Result<usize, i64> {
     let ret = unsafe {
         syscall4(
             SyscallNumber::FsWrite,
-            cap_slot as u64,
+            RESERVED_CAP_SLOT,
             fd as u64,
             buf.as_ptr() as u64,
             buf.len() as u64,
@@ -2008,11 +2016,11 @@ pub fn fs_fsync(fd: u32) -> Result<(), i64> {
 }
 
 /// Unlinks (deletes) a file from the Virtual Filesystem.
-pub fn fs_unlink(cap_slot: usize, path: &str) -> Result<(), i64> {
+pub fn fs_unlink(path: &str) -> Result<(), i64> {
     let ret = unsafe {
         syscall4(
             SyscallNumber::FsUnlink,
-            cap_slot as u64,
+            RESERVED_CAP_SLOT,
             path.as_ptr() as u64,
             path.len() as u64,
             0,
@@ -2105,14 +2113,14 @@ impl FileStatRecord {
 /// `out` must be at least `FILE_STAT_BYTES` bytes: a shorter buffer is refused
 /// rather than partially decoded, because a truncated stat would report a short
 /// size and a short digest that both look self-consistent.
-pub fn fs_stat(cap_slot: usize, path: &str, out: &mut [u8]) -> Result<usize, i64> {
+pub fn fs_stat(path: &str, out: &mut [u8]) -> Result<usize, i64> {
     if out.len() < FILE_STAT_BYTES {
         return Err(-3);
     }
     let ret = unsafe {
         syscall5(
             SyscallNumber::FsStat,
-            cap_slot as u64,
+            RESERVED_CAP_SLOT,
             path.as_ptr() as u64,
             path.len() as u64,
             out.as_mut_ptr() as u64,
@@ -2466,11 +2474,11 @@ pub fn power_set_profile(profile_idx: u32) -> Result<u32, i64> {
     }
 }
 
-pub fn package_list(cap_slot: usize, out_buf: &mut [u8]) -> Result<usize, i64> {
+pub fn package_list(out_buf: &mut [u8]) -> Result<usize, i64> {
     let ret = unsafe {
         syscall3(
             SyscallNumber::PackageList,
-            cap_slot as u64,
+            RESERVED_CAP_SLOT,
             out_buf.as_mut_ptr() as u64,
             out_buf.len() as u64,
         )
@@ -2484,7 +2492,6 @@ pub fn package_list(cap_slot: usize, out_buf: &mut [u8]) -> Result<usize, i64> {
 
 /// Moves an owned window in the compositor.
 pub fn window_set_geometry(
-    display_cap_slot: usize,
     id: u32,
     x: i32,
     y: i32,
@@ -2495,7 +2502,7 @@ pub fn window_set_geometry(
     let r = unsafe {
         syscall5(
             SyscallNumber::WindowSetGeometry,
-            display_cap_slot as u64,
+            RESERVED_CAP_SLOT,
             id as u64,
             x as i64 as u64,
             y as i64 as u64,
@@ -2509,11 +2516,11 @@ pub fn window_set_geometry(
     }
 }
 /// Focuses the topmost live surface through the display service.
-pub fn window_focus(display_cap_slot: usize, x: u32, y: u32) -> Result<(), i64> {
+pub fn window_focus(x: u32, y: u32) -> Result<(), i64> {
     let r = unsafe {
         syscall3(
             SyscallNumber::WindowFocus,
-            display_cap_slot as u64,
+            RESERVED_CAP_SLOT,
             x as u64,
             y as u64,
         )
@@ -2527,11 +2534,11 @@ pub fn window_focus(display_cap_slot: usize, x: u32, y: u32) -> Result<(), i64> 
 
 /// Verifies a signed Ring-3 system-service RAPP and returns its service ID.
 /// Requires the PID1 service-manager authority and a FileSystemRead capability.
-pub fn service_package_verify(cap_slot: usize, path: &str) -> Result<u8, i64> {
+pub fn service_package_verify(path: &str) -> Result<u8, i64> {
     let r = unsafe {
         syscall3(
             SyscallNumber::ServicePackageVerify,
-            cap_slot as u64,
+            RESERVED_CAP_SLOT,
             path.as_ptr() as u64,
             path.len() as u64,
         )
@@ -2613,11 +2620,11 @@ pub fn service_recover_failed(service_id: u8) -> Result<u64, i64> {
 }
 
 /// Reads a persistent setting.
-pub fn settings_get(cap_slot: usize, key: &str, out: &mut [u8]) -> Result<usize, i64> {
+pub fn settings_get(key: &str, out: &mut [u8]) -> Result<usize, i64> {
     let r = unsafe {
         syscall5(
             SyscallNumber::SettingsGet,
-            cap_slot as u64,
+            RESERVED_CAP_SLOT,
             key.as_ptr() as u64,
             key.len() as u64,
             out.len() as u64,
@@ -2631,11 +2638,11 @@ pub fn settings_get(cap_slot: usize, key: &str, out: &mut [u8]) -> Result<usize,
     }
 }
 /// Updates a persistent setting.
-pub fn settings_set(cap_slot: usize, key: &str, value: &[u8]) -> Result<(), i64> {
+pub fn settings_set(key: &str, value: &[u8]) -> Result<(), i64> {
     let r = unsafe {
         syscall5(
             SyscallNumber::SettingsSet,
-            cap_slot as u64,
+            RESERVED_CAP_SLOT,
             key.as_ptr() as u64,
             key.len() as u64,
             value.as_ptr() as u64,
@@ -2660,11 +2667,11 @@ pub fn storage_query() -> Result<u64, i64> {
 }
 
 /// Lists immediate VFS directory children using a read capability.
-pub fn fs_list(cap_slot: usize, path: &str, out: &mut [u8]) -> Result<usize, i64> {
+pub fn fs_list(path: &str, out: &mut [u8]) -> Result<usize, i64> {
     let r = unsafe {
         syscall4(
             SyscallNumber::FsList,
-            cap_slot as u64,
+            RESERVED_CAP_SLOT,
             path.as_ptr() as u64,
             path.len() as u64,
             out.as_mut_ptr() as u64,

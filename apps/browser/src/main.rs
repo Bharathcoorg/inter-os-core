@@ -370,16 +370,6 @@ const STORE_BLOB_BYTES: usize = 2 + MAX_BOOKMARKS * BM_RECORD_BYTES;
 const STORE_VERSION: u8 = 1;
 const STORE_KEY: &str = "browser.bookmarks.v1";
 
-#[inline]
-fn fs_write_slot() -> Option<usize> {
-    std::cap_lookup(std::cap_type::FILE_SYSTEM_WRITE, 0).ok()
-}
-
-#[inline]
-fn fs_read_slot() -> Option<usize> {
-    std::cap_lookup(std::cap_type::FILE_SYSTEM_READ, 0).ok()
-}
-
 #[derive(Clone, Copy)]
 pub struct Bookmark {
     pub name: &'static str,
@@ -491,12 +481,8 @@ impl BookmarkStore {
 
     pub fn load() -> Self {
         let mut store = BookmarkStore::EMPTY;
-        let Some(slot) = fs_read_slot() else {
-            store.state = BookmarkStoreState::ReadRefused;
-            return store;
-        };
         let mut blob = [0u8; STORE_BLOB_BYTES];
-        match std::settings_get(slot, STORE_KEY, &mut blob) {
+        match std::settings_get(STORE_KEY, &mut blob) {
             Ok(0) => store.state = BookmarkStoreState::Empty,
             Ok(n) => {
                 let mut records = [BookmarkRecord::EMPTY; MAX_BOOKMARKS];
@@ -553,11 +539,7 @@ impl BookmarkStore {
             self.state = BookmarkStoreState::WriteRefused;
             return Err(-22);
         }
-        let Some(slot) = fs_write_slot() else {
-            self.state = BookmarkStoreState::WriteRefused;
-            return Err(-1);
-        };
-        match std::settings_set(slot, STORE_KEY, &blob[..used]) {
+        match std::settings_set(STORE_KEY, &blob[..used]) {
             Ok(()) => {
                 self.state = BookmarkStoreState::Written;
                 Ok(())
@@ -849,28 +831,34 @@ impl BrowserApp {
             return false;
         };
 
-        let Some(slot) = std::cap_lookup(std::cap_type::FILE_SYSTEM_READ, 0).ok() else {
-            std::log(
-                0,
-                "[BROWSER APP] This app holds no filesystem read capability, so a local document cannot be opened.",
-            )
-            .ok();
+        // WHY the capability is asked for by its type and not by a slot: a
+        // slot is a position in this task's capability table, and the
+        // position depends on the order the kernel inserted the
+        // capabilities in. The kernel authorises the open itself by
+        // capability type, so all the browser has to know is whether it
+        // holds a filesystem read authority at all.
+        //
+        // WHY the platform is asked rather than the answer assumed: the
+        // local branch used to report that the app held no filesystem
+        // capability without asking, so a refusal the browser had invented
+        // was shown as a refusal the device had given. The question is
+        // asked here, and only this answer is reported.
+        if std::cap_lookup(std::cap_type::FILE_SYSTEM_READ, 0).is_err() {
+            std::log("[BROWSER APP] This app holds no filesystem read capability, so a local document cannot be opened.")
+                .ok();
             self.status = PageStatus::LocalRefused;
             self.local_failure = LocalFailure::NoCapability;
             self.tabs.active_tab_mut().loading_state = LoadingState::Failed;
             self.tabs.active_tab_mut().error_code = -1; // EPERM
             let _ = std::audio_haptic_click();
             return false;
-        };
+        }
 
-        let fd = match std::fs_open(slot, path_str, std::FS_READ) {
+        let fd = match std::fs_open(path_str, std::FS_READ) {
             Ok(fd) => fd,
             Err(code) => {
-                std::log(
-                    0,
-                    "[BROWSER APP] The guest filesystem refused to open the local document.",
-                )
-                .ok();
+                std::log("[BROWSER APP] The guest filesystem refused to open the local document.")
+                    .ok();
                 self.status = PageStatus::LocalRefused;
                 self.local_failure = LocalFailure::Refused;
                 self.tabs.active_tab_mut().loading_state = LoadingState::Failed;
@@ -885,18 +873,15 @@ impl BrowserApp {
         // every one of them as an empty file.
         let read_result = {
             let buffer = unsafe { &mut *core::ptr::addr_of_mut!(FILE_BUF) };
-            let result = std::fs_read(slot, fd, buffer);
+            let result = std::fs_read(fd, buffer);
             let _ = std::fs_close(fd);
             result
         };
         let read_bytes = match read_result {
             Ok(n) => n,
             Err(code) => {
-                std::log(
-                    0,
-                    "[BROWSER APP] The guest filesystem refused to read the local document.",
-                )
-                .ok();
+                std::log("[BROWSER APP] The guest filesystem refused to read the local document.")
+                    .ok();
                 self.status = PageStatus::LocalRefused;
                 self.local_failure = LocalFailure::ReadRefused;
                 self.tabs.active_tab_mut().loading_state = LoadingState::Failed;
@@ -906,7 +891,7 @@ impl BrowserApp {
             }
         };
         if read_bytes == 0 {
-            std::log(0, "[BROWSER APP] The local document is empty.").ok();
+            std::log("[BROWSER APP] The local document is empty.").ok();
             self.status = PageStatus::LocalRefused;
             self.local_failure = LocalFailure::Empty;
             self.tabs.active_tab_mut().loading_state = LoadingState::Failed;
@@ -1034,9 +1019,9 @@ impl BrowserApp {
         self.scroll_offset_px = 0;
 
         let parsed = parse_uri(target);
-        std::log(0, "[BROWSER APP] Navigation target URL:").ok();
+        std::log("[BROWSER APP] Navigation target URL:").ok();
         if let Ok(url) = core::str::from_utf8(target) {
-            std::log(0, url).ok();
+            std::log(url).ok();
         }
 
         // A local document is read from the guest filesystem and read
@@ -1049,9 +1034,7 @@ impl BrowserApp {
         // CAP_FILESYSTEM_READ, and the refusal it reported was one it had
         // assumed.
         if parsed.scheme.is_local() {
-            std::log(
-                0,
-                "[BROWSER APP] Address names a local document; reading it from the guest filesystem.",
+            std::log("[BROWSER APP] Address names a local document; reading it from the guest filesystem.",
             )
             .ok();
             return self.load_local_document(&parsed.path);
@@ -1083,7 +1066,7 @@ impl BrowserApp {
         // The local port has to be non-zero and unique for the connection.
         let local_port = 45000u16 + ((self.pages_loaded as u16) & 0x03FF);
 
-        std::log(0, "[BROWSER APP] Request dispatched over TCP to the Device Studio gateway.").ok();
+        std::log("[BROWSER APP] Request dispatched over TCP to the Device Studio gateway.").ok();
 
         let outcome = fetch_over_tcp(dst_ip, dst_port, local_port, &req_buf[..req_len]);
 
@@ -1095,9 +1078,7 @@ impl BrowserApp {
             self.loading_progress = 0;
             self.tabs.active_tab_mut().loading_state = LoadingState::Failed;
             self.tabs.active_tab_mut().error_code = outcome.error as i32;
-            std::log(
-                0,
-                "[BROWSER APP] The gateway returned no bytes. The failure is reported as it happened; no page was synthesised.",
+            std::log("[BROWSER APP] The gateway returned no bytes. The failure is reported as it happened; no page was synthesised.",
             )
             .ok();
             let _ = std::audio_play_tone(220);
@@ -1149,9 +1130,7 @@ impl BrowserApp {
             // WHY the screen says so: the response was larger than the
             // browser's buffer, so what is on screen is the beginning of a
             // page rather than the whole of it.
-            std::log(
-                0,
-                "[BROWSER APP] The response was larger than the browser's buffer; the page is shown truncated.",
+            std::log("[BROWSER APP] The response was larger than the browser's buffer; the page is shown truncated.",
             )
             .ok();
             self.response_truncated = true;
@@ -1164,7 +1143,7 @@ impl BrowserApp {
             self.loading_progress = 0;
             self.tabs.active_tab_mut().loading_state = LoadingState::Failed;
             self.tabs.active_tab_mut().error_code = -111; // ECONNREFUSED
-            std::log(0, "[BROWSER APP] The response carried no readable document. Truthful error status reported.").ok();
+            std::log("[BROWSER APP] The response carried no readable document. Truthful error status reported.").ok();
             return false;
         }
 
@@ -1191,17 +1170,17 @@ impl BrowserApp {
             let mut target = [0u8; 64];
             let n = url.len().min(target.len());
             target[..n].copy_from_slice(&url[..n]);
-            std::log(0, "[BROWSER APP] Back: re-issuing navigation attempt.").ok();
+            std::log("[BROWSER APP] Back: re-issuing navigation attempt.").ok();
             self.navigate_again(&target[..n]);
             return;
         }
         if let Some(entry) = self.history.back() {
             let n = entry.iter().position(|&b| b == 0).unwrap_or(entry.len());
-            std::log(0, "[BROWSER APP] Back: re-issuing the navigation attempt for the previous address.").ok();
+            std::log("[BROWSER APP] Back: re-issuing the navigation attempt for the previous address.").ok();
             self.navigate_again(&entry[..n]);
             return;
         }
-        std::log(0, "[BROWSER APP] Back is unavailable: the history holds no earlier address.").ok();
+        std::log("[BROWSER APP] Back is unavailable: the history holds no earlier address.").ok();
     }
 
     pub fn go_forward(&mut self) {
@@ -1209,17 +1188,17 @@ impl BrowserApp {
             let mut target = [0u8; 64];
             let n = url.len().min(target.len());
             target[..n].copy_from_slice(&url[..n]);
-            std::log(0, "[BROWSER APP] Forward: re-issuing navigation attempt.").ok();
+            std::log("[BROWSER APP] Forward: re-issuing navigation attempt.").ok();
             self.navigate_again(&target[..n]);
             return;
         }
         if let Some(entry) = self.history.forward() {
             let n = entry.iter().position(|&b| b == 0).unwrap_or(entry.len());
-            std::log(0, "[BROWSER APP] Forward: re-issuing the navigation attempt for the next address.").ok();
+            std::log("[BROWSER APP] Forward: re-issuing the navigation attempt for the next address.").ok();
             self.navigate_again(&entry[..n]);
             return;
         }
-        std::log(0, "[BROWSER APP] Forward is unavailable: the history holds no later address.").ok();
+        std::log("[BROWSER APP] Forward is unavailable: the history holds no later address.").ok();
     }
 
     pub fn start_add_bookmark(&mut self) {
@@ -1227,7 +1206,7 @@ impl BrowserApp {
         self.address_focused = true;
         self.address_len = 0;
         self.select_all = false;
-        std::log(0, "[BROWSER APP] Adding a bookmark: type the title, then the address.").ok();
+        std::log("[BROWSER APP] Adding a bookmark: type the title, then the address.").ok();
     }
 
     pub fn commit_bookmark_step(&mut self) -> Result<(), i64> {
@@ -1235,7 +1214,7 @@ impl BrowserApp {
             BookmarkStep::Idle => Ok(()),
             BookmarkStep::Title => {
                 if self.address_len == 0 {
-                    std::log(0, "[BROWSER APP] Bookmark not added: a bookmark needs a title.").ok();
+                    std::log("[BROWSER APP] Bookmark not added: a bookmark needs a title.").ok();
                     return Err(-22);
                 }
                 let n = self.address_len.min(self.bm_title.len());
@@ -1244,12 +1223,12 @@ impl BrowserApp {
                 self.bm_step = BookmarkStep::Address;
                 self.address_len = 0;
                 self.select_all = false;
-                std::log(0, "[BROWSER APP] Bookmark title set; type the address.").ok();
+                std::log("[BROWSER APP] Bookmark title set; type the address.").ok();
                 Ok(())
             }
             BookmarkStep::Address => {
                 if self.address_len == 0 {
-                    std::log(0, "[BROWSER APP] Bookmark not added: a bookmark needs an address.").ok();
+                    std::log("[BROWSER APP] Bookmark not added: a bookmark needs an address.").ok();
                     return Err(-22);
                 }
                 if self.address_len > BM_URL_MAX {
@@ -1264,10 +1243,10 @@ impl BrowserApp {
                 self.bm_title_len = 0;
                 match outcome {
                     Ok(()) => {
-                        std::log(0, "[BROWSER APP] Bookmark written to the settings store and acknowledged.").ok();
+                        std::log("[BROWSER APP] Bookmark written to the settings store and acknowledged.").ok();
                     }
                     Err(_) => {
-                        std::log(0, "[BROWSER APP] Bookmark was NOT saved: the kernel refused the settings write. It is held in the unsaved group for this session only.").ok();
+                        std::log("[BROWSER APP] Bookmark was NOT saved: the kernel refused the settings write. It is held in the unsaved group for this session only.").ok();
                     }
                 }
                 outcome
@@ -3046,7 +3025,7 @@ fn render_browser_band(surface: u32, app: &BrowserApp, y0: usize, y1: usize) {
                 y += 1;
             }
         }
-        let _ = std::surface_write(6, surface, offset, &chunk[..count]);
+        let _ = std::surface_write(surface, offset, &chunk[..count]);
         offset += count;
     }
 }
@@ -3117,7 +3096,7 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
         app.select_all = app.address_len > 0;
         app.overlay = SheetOverlay::None;
         let _ = std::audio_haptic_click();
-        std::log(0, "[BROWSER APP] Address field focused for keyboard input.").ok();
+        std::log("[BROWSER APP] Address field focused for keyboard input.").ok();
         return Tap::Redraw;
     }
 
@@ -3304,7 +3283,7 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
         app.status = PageStatus::Blank;
         app.address_focused = false;
         app.overlay = SheetOverlay::None;
-        std::log(0, "[BROWSER APP] Returned to Sovereign Browser New Tab start page.").ok();
+        std::log("[BROWSER APP] Returned to Sovereign Browser New Tab start page.").ok();
         return Tap::Redraw;
     }
     if ADD_BOOK_BTN.contains(x, y) {
@@ -3609,7 +3588,7 @@ fn handle_browser_key(app: &mut BrowserApp, key: std::InputKeyEvent) -> Dirty {
         input_key_code::ESCAPE => {
             if app.bm_step != BookmarkStep::Idle {
                 app.cancel_bookmark_step();
-                std::log(0, "[BROWSER APP] Add-bookmark cancelled.").ok();
+                std::log("[BROWSER APP] Add-bookmark cancelled.").ok();
                 return Dirty::All;
             }
             app.address_focused = false;
@@ -3649,7 +3628,6 @@ fn destroy_and_exit(surface: u32) -> ! {
         // WHY the slot is resolved by type here too: a slot number is a
         // position in a table, and the position depends on the order the
         // task's capabilities were inserted in.
-        let _ = std::cap::framebuffer_slot().map(|slot| std::surface_destroy(slot, surface));
     }
     std::exit_with_code(0);
 }
@@ -3659,9 +3637,7 @@ fn destroy_and_exit(surface: u32) -> ! {
 // -----------------------------------------------------------------------------
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    std::log(
-        0,
-        "[BROWSER APP (Ring 3)] Sovereign Decentralized Web Client online.",
+    std::log("[BROWSER APP (Ring 3)] Sovereign Decentralized Web Client online.",
     )
     .ok();
 
@@ -3669,41 +3645,33 @@ pub extern "C" fn _start() -> ! {
 
     match browser.bookmarks.state() {
         BookmarkStoreState::Loaded => {
-            std::log(0, "[BROWSER APP] Bookmarks read back out of the settings store.").ok();
+            std::log("[BROWSER APP] Bookmarks read back out of the settings store.").ok();
         }
         BookmarkStoreState::Empty => {
-            std::log(0, "[BROWSER APP] No saved bookmarks: the settings store holds no browser bookmarks key.").ok();
+            std::log("[BROWSER APP] No saved bookmarks: the settings store holds no browser bookmarks key.").ok();
         }
         BookmarkStoreState::ReadRefused => {
-            std::log(0, "[BROWSER APP] Bookmark read REFUSED by the kernel: this task holds no filesystem capability, so no stored bookmarks were loaded and none will be shown as saved.").ok();
+            std::log("[BROWSER APP] Bookmark read REFUSED by the kernel: this task holds no filesystem capability, so no stored bookmarks were loaded and none will be shown as saved.").ok();
         }
         BookmarkStoreState::Invalid => {
-            std::log(0, "[BROWSER APP] Stored bookmark bytes failed validation; no bookmarks were loaded from them.").ok();
+            std::log("[BROWSER APP] Stored bookmark bytes failed validation; no bookmarks were loaded from them.").ok();
         }
         BookmarkStoreState::Untouched
         | BookmarkStoreState::Written
         | BookmarkStoreState::WriteRefused
         | BookmarkStoreState::Full => {
-            std::log(0, "[BROWSER APP] Bookmark store reported a state it cannot be in before any write; no bookmarks are shown as saved.").ok();
+            std::log("[BROWSER APP] Bookmark store reported a state it cannot be in before any write; no bookmarks are shown as saved.").ok();
         }
     }
 
-    std::log(
-        0,
-        "[BROWSER APP] History and bookmarks are real, user-created records. Zero heap allocations in event loop.",
+    std::log("[BROWSER APP] History and bookmarks are real, user-created records. Zero heap allocations in event loop.",
     )
     .ok();
 
     // Allocate DRM/KMS Client Surface (z=200)
-    let Ok(fb_slot) = std::cap_lookup(std::cap_type::FRAMEBUFFER_DIRECT, 0) else {
-        std::log(0, "[BROWSER APP] Framebuffer capability not found.").ok();
-        loop {
-            std::yield_now();
-        }
-    };
-    let surface = match std::surface_create(fb_slot, W as u32, H as u32, 200) {
+    let surface = match std::surface_create(W as u32, H as u32, 200) {
         Ok(id) => {
-            std::log(0, "[BROWSER APP] DRM/KMS Client Surface allocated (z=200).").ok();
+            std::log("[BROWSER APP] DRM/KMS Client Surface allocated (z=200).").ok();
             id
         }
         Err(_) => 0,
@@ -3711,8 +3679,8 @@ pub extern "C" fn _start() -> ! {
 
     if surface > 0 {
         render_browser_ui(surface, &browser);
-        let _ = std::surface_flip(fb_slot);
-        std::log(0, "[BROWSER APP] Browser canvas presented to scanout buffer.").ok();
+        let _ = std::surface_flip();
+        std::log("[BROWSER APP] Browser canvas presented to scanout buffer.").ok();
     }
 
     let interest_mask = std::EVENT_TOUCH_INPUT
@@ -3742,7 +3710,7 @@ pub extern "C" fn _start() -> ! {
                             continue;
                         }
                         if input.kind == 4 || input.kind == 6 || input.kind == 7 || input.kind == 8 || input.kind == 10 {
-                            std::log(0, "[BROWSER APP] Navigation gesture recognized. Exiting to launcher.").ok();
+                            std::log("[BROWSER APP] Navigation gesture recognized. Exiting to launcher.").ok();
                             destroy_and_exit(surface);
                         }
                         // Touch drag / vertical scroll
@@ -3757,7 +3725,7 @@ pub extern "C" fn _start() -> ! {
                         if input.kind == 1 {
                             match handle_tap(&mut browser, input.x, input.y) {
                                 Tap::Leave(msg) => {
-                                    std::log(0, msg).ok();
+                                    std::log(msg).ok();
                                     destroy_and_exit(surface);
                                 }
                                 Tap::Redraw => dirty = Dirty::All,
@@ -3773,16 +3741,16 @@ pub extern "C" fn _start() -> ! {
                             }
                             Dirty::All => render_browser_ui(surface, &browser),
                         }
-                        let _ = std::surface_flip(fb_slot);
+                        let _ = std::surface_flip();
                     }
                 }
                 if events & std::EVENT_IPC_MSG != 0 {
-                    std::log(0, "[BROWSER APP] IPC message event raised; no navigation intent was parsed from it.").ok();
+                    std::log("[BROWSER APP] IPC message event raised; no navigation intent was parsed from it.").ok();
                 }
                 if events & std::EVENT_NETWORK_PACKET != 0 {
                     match browser.active_socket_id {
                         Some(sock_id) => {
-                            std::log(0, "[BROWSER APP] Network packet arrived via e1000 socket.").ok();
+                            std::log("[BROWSER APP] Network packet arrived via e1000 socket.").ok();
                             let mut rx_buf = [0u8; 2048];
                             if let Ok(n) = std::net_recvfrom(sock_id, &mut rx_buf) {
                                 if n > 0 {
@@ -3793,7 +3761,7 @@ pub extern "C" fn _start() -> ! {
                                             browser.load_document_content(&doc_buf[..doc_len]);
                                             if surface > 0 {
                                                 render_browser_ui(surface, &browser);
-                                                let _ = std::surface_flip(fb_slot);
+                                                let _ = std::surface_flip();
                                             }
                                         }
                                     }
@@ -3801,7 +3769,7 @@ pub extern "C" fn _start() -> ! {
                             }
                         }
                         None => {
-                            std::log(0, "[BROWSER APP] Network event raised with no open socket; no packet was received.").ok();
+                            std::log("[BROWSER APP] Network event raised with no open socket; no packet was received.").ok();
                         }
                     }
                 }
@@ -3818,6 +3786,6 @@ pub extern "C" fn _start() -> ! {
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
-    std::log(0, "[BROWSER APP] Panic detected! Terminating task...").ok();
+    std::log("[BROWSER APP] Panic detected! Terminating task...").ok();
     std::exit();
 }

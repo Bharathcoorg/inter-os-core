@@ -330,14 +330,15 @@ fn read_sensor_service() -> Option<(u8, u32)> {
 }
 
 fn probe_ticks() -> Probe<u64> {
-    let mut last = i64::MIN;
-    for slot in 0..12usize {
-        match std::get_ticks(slot) {
-            Ok(t) => return Probe::Ok(t),
-            Err(e) => last = e,
-        }
+    // WHY there is one call and not a loop over slots: the kernel
+    // authorises the tick counter by the capability's type, so the app
+    // names the authority it wants and the kernel finds it. Probing
+    // twelve slots for the right one was the old way of saying "give me
+    // a tick".
+    match std::get_ticks() {
+        Ok(t) => Probe::Ok(t),
+        Err(e) => Probe::Refused(e),
     }
-    Probe::Refused(last)
 }
 
 fn read_inventory(category: &str) -> Option<i64> {
@@ -708,7 +709,7 @@ fn render(surface: u32, app: &Dashboard) {
                 y += 1;
             }
         }
-        let _ = std::surface_write(6, surface, offset, &chunk[..count]);
+        let _ = std::surface_write(surface, offset, &chunk[..count]);
         offset += count;
     }
 }
@@ -739,7 +740,7 @@ fn render_band(surface: u32, app: &Dashboard, y0: usize, y1: usize) {
                 y += 1;
             }
         }
-        let _ = std::surface_write(6, surface, offset, &chunk[..count]);
+        let _ = std::surface_write(surface, offset, &chunk[..count]);
         offset += count;
     }
 }
@@ -1447,27 +1448,16 @@ fn status(app: &mut Dashboard, text: &[u8], color: u32) {
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    std::log(0, "[SENSORS (Ring 3)] Sensor inventory starting.").ok();
+    std::log("[SENSORS (Ring 3)] Sensor inventory starting.").ok();
 
     // WHY the slot is resolved by type: a slot number is a position in the
     // capability table, and the position depends on the order the kernel
     // inserted this app's capabilities in. The literal 6 happens to hold the
     // framebuffer in this app's table today.
-    let fb_slot = match std::cap::framebuffer_slot() {
-        Some(slot) => slot,
-        None => {
-            std::log(
-                0,
-                "[SENSORS] No framebuffer capability; the dashboard cannot draw.",
-            )
-            .ok();
-            std::exit_with_code(1);
-        }
-    };
-    let surface = match std::surface_create(fb_slot, W as u32, H as u32, 200) {
+    let surface = match std::surface_create(W as u32, H as u32, 200) {
         Ok(s) => s,
         Err(_) => {
-            std::log(0, "[SENSORS] No display surface available; nothing to draw.").ok();
+            std::log("[SENSORS] No display surface available; nothing to draw.").ok();
             std::exit_with_code(1);
         }
     };
@@ -1502,42 +1492,42 @@ pub extern "C" fn _start() -> ! {
 
     let (status_text, status_color): (&[u8], u32) = match &app.telemetry {
         Telemetry::Present { .. } => {
-            std::log(0, "[SENSORS] sensor_read() returned live hardware telemetry; channels show real values.").ok();
+            std::log("[SENSORS] sensor_read() returned live hardware telemetry; channels show real values.").ok();
             (b"live sensor hardware; channels show measured values", ACCENT)
         }
         Telemetry::Absent { .. } => {
-            std::log(0, "[SENSORS] sensor_read() reports no sensor hardware is bound; showing the inventory.").ok();
+            std::log("[SENSORS] sensor_read() reports no sensor hardware is bound; showing the inventory.").ok();
             (b"no sensor hardware bound; inventory below names why", ACCENT)
         }
         Telemetry::Denied(_) => {
-            std::log(0, "[SENSORS] sensor_read() refused: this app holds no sensor control capability.").ok();
+            std::log("[SENSORS] sensor_read() refused: this app holds no sensor control capability.").ok();
             (b"sensor read refused; every channel unavailable", ACCENT)
         }
         Telemetry::Malformed => {
-            std::log(0, "[SENSORS] sensor_read() returned a payload with no present field.").ok();
+            std::log("[SENSORS] sensor_read() returned a payload with no present field.").ok();
             (b"sensor payload had no present field", ACCENT)
         }
     };
     status(&mut app, status_text, status_color);
 
     if app.inv_wifi == Some(2) {
-        std::log(0, "[SENSORS] settings inventory: no physical Wi-Fi controller on this platform.").ok();
+        std::log("[SENSORS] settings inventory: no physical Wi-Fi controller on this platform.").ok();
     }
     if app.inv_cellular == Some(2) {
-        std::log(0, "[SENSORS] settings inventory: no physical baseband modem on this platform.").ok();
+        std::log("[SENSORS] settings inventory: no physical baseband modem on this platform.").ok();
     }
     if app.inv_display == Some(0) {
-        std::log(0, "[SENSORS] settings inventory: display scanout is available.").ok();
+        std::log("[SENSORS] settings inventory: display scanout is available.").ok();
     }
 
     let mut v = [0u8; 24];
     let n = write_lit(BUILD_VERSION.as_bytes(), &mut v);
-    std::log(0, "[SENSORS] Inventory app build: ").ok();
+    std::log("[SENSORS] Inventory app build: ").ok();
     let _ = n;
 
     repaint(surface, &app, Dirty::All);
-    let _ = std::surface_flip(fb_slot);
-    std::log(0, "[SENSORS] Initial frame presented to hardware scanout.").ok();
+    let _ = std::surface_flip();
+    std::log("[SENSORS] Initial frame presented to hardware scanout.").ok();
 
     loop {
         if let Ok(events) = std::event_poll(std::EVENT_TOUCH_INPUT | std::EVENT_TIMER_TICK, 100) {
@@ -1553,15 +1543,15 @@ pub extern "C" fn _start() -> ! {
                 let mut dirty = Dirty::None;
                 while std::input_event_poll(&mut input).is_ok() {
                     if matches!(input.kind, 4 | 6 | 7 | 8 | 10) {
-                        std::log(0, "[SENSORS] Navigation gesture. Exiting to launcher.").ok();
-                        let _ = std::surface_destroy(fb_slot, surface);
+                        std::log("[SENSORS] Navigation gesture. Exiting to launcher.").ok();
+                        let _ = std::surface_destroy(surface);
                         std::exit_with_code(0);
                     }
                     if input.kind == 1 {
                         let tapped_back =
                             (24..100).contains(&input.x) && (28..68).contains(&input.y);
                         if tapped_back || input.y >= 1400 {
-                            let _ = std::surface_destroy(fb_slot, surface);
+                            let _ = std::surface_destroy(surface);
                             std::exit_with_code(0);
                         }
                         app.telemetry = read_sensors();
@@ -1579,13 +1569,13 @@ pub extern "C" fn _start() -> ! {
                         app.inv_wifi = read_inventory("wifi");
                         app.inv_cellular = read_inventory("cellular");
                         status(&mut app, b"re-read sensor bus, thermal zones and fuel gauge", ACCENT);
-                        std::log(0, "[SENSORS] Re-read sensor bus, thermal zones and fuel gauge.").ok();
+                        std::log("[SENSORS] Re-read sensor bus, thermal zones and fuel gauge.").ok();
                         dirty = dirty.widen(Dirty::Refresh);
                     }
                 }
                 if dirty != Dirty::None {
                     repaint(surface, &app, dirty);
-                    let _ = std::surface_flip(fb_slot);
+                    let _ = std::surface_flip();
                 }
             }
         }
@@ -1595,6 +1585,6 @@ pub extern "C" fn _start() -> ! {
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
-    std::log(0, "[PANIC] Sensor dashboard encountered an unrecoverable error!").ok();
+    std::log("[PANIC] Sensor dashboard encountered an unrecoverable error!").ok();
     std::exit_with_code(1);
 }

@@ -199,21 +199,17 @@ fn log_counted(prefix: &str, value: u64, suffix: &str) {
     let mut buf = [0u8; 192];
     let n = build_counted(&mut buf, prefix.as_bytes(), value, suffix.as_bytes());
     if let Ok(msg) = core::str::from_utf8(&buf[..n]) {
-        std::log(0, msg).ok();
+        std::log(msg).ok();
     }
 }
 
 /// Reads the hardware tick counter, probing each capability slot for one that
 /// holds `TimerTickRead` (WHY: the slot holding that capability varies per task).
 fn probe_ticks() -> Result<u64, i64> {
-    let mut last = -1i64;
-    for slot in 0..12usize {
-        match std::get_ticks(slot) {
-            Ok(t) => return Ok(t),
-            Err(e) => last = e,
-        }
-    }
-    Err(last)
+    // WHY there is one call and not a loop over slots: the kernel
+    // authorises the tick counter by the capability's type, so the
+    // shell names the authority it wants and the kernel finds it.
+    std::get_ticks()
 }
 
 /// Counts the newline-terminated task records `app_runtime_list` returned,
@@ -461,10 +457,7 @@ impl TerminalApp {
             return;
         }
         let mut buf = [0u8; 512];
-        let listed = match std::cap::fs_read_slot() {
-            Some(slot) => std::fs_list(slot, path, &mut buf),
-            None => Err(-1),
-        };
+        let listed = std::fs_list(path, &mut buf);
         match listed {
             Ok(n) if n > 0 => {
                 self.push_counted("vfs: ", n as u64, " bytes listed.", SUCCESS_EMERALD);
@@ -502,18 +495,10 @@ impl TerminalApp {
             self.record_history("cat", -1);
             return;
         }
-        let slot = match std::cap::fs_read_slot() {
-            Some(slot) => slot,
-            None => {
-                self.push_line("cat: no filesystem read capability.", TEXT_MUTED);
-                self.record_history("cat", -1);
-                return;
-            }
-        };
-        match std::fs_open(slot, path, std::FS_READ) {
+        match std::fs_open(path, std::FS_READ) {
             Ok(fd) => {
                 let mut buf = [0u8; 512];
-                match std::fs_read(slot, fd, &mut buf) {
+                match std::fs_read(fd, &mut buf) {
                     Ok(n) if n > 0 => {
                         self.push_counted("cat: ", n as u64, " bytes read.", SUCCESS_EMERALD);
                         let mut start = 0;
@@ -704,9 +689,7 @@ impl TerminalApp {
                 // itself.
                 self.push_line("Commands: help, status, ps, mem, caps, share, dma, ping, ls, vfs, services, cat, clear", TEXT_PRIMARY);
                 self.push_line("ls [path] lists a directory; cat [path] prints a file.", TEXT_MUTED);
-                std::log(
-                    0,
-                    "[TERMINAL] Commands: help, status, ps, mem, caps, share, dma, ping, ls, vfs, services, cat, clear",
+                std::log("[TERMINAL] Commands: help, status, ps, mem, caps, share, dma, ping, ls, vfs, services, cat, clear",
                 )
                 .ok();
                 self.record_history("help", 0);
@@ -789,7 +772,7 @@ impl TerminalApp {
                 // -1 marks "no data available".
                 self.push_line("mem: unavailable; no heap or paging", TEXT_MUTED);
                 self.push_line("metrics are exposed to this app.", TEXT_MUTED);
-                std::log(0, "[TERMINAL] mem: no heap/paging metrics are exposed; nothing was queried.").ok();
+                std::log("[TERMINAL] mem: no heap/paging metrics are exposed; nothing was queried.").ok();
                 self.record_history("mem", -1);
             }
             "caps" => {
@@ -813,9 +796,7 @@ impl TerminalApp {
                 }
                 self.push_counted("caps: held ", held as u64, " of the types this app knows about.", TEXT_MUTED);
                 self.push_counted("caps: not held ", absent as u64, " of them.", TEXT_MUTED);
-                std::log(
-                    0,
-                    "[TERMINAL] caps: capability slots resolved by type from the app's own table.",
+                std::log("[TERMINAL] caps: capability slots resolved by type from the app's own table.",
                 )
                 .ok();
                 self.record_history("caps", 0);
@@ -856,12 +837,12 @@ impl TerminalApp {
                 match std::shm_pipe_transfer(3, payload, 0x01) {
                     Ok(_) => {
                         self.push_line("DMA: test payload transfer acknowledged by Pipe 3.", SUCCESS_EMERALD);
-                        std::log(0, "[TERMINAL APP] DMA test payload transfer acknowledged by Pipe 3.").ok();
+                        std::log("[TERMINAL APP] DMA test payload transfer acknowledged by Pipe 3.").ok();
                         self.record_history("dma", 0);
                     }
                     Err(code) => {
                         self.push_line("DMA: Pipe 3 transfer unavailable or refused.", TEXT_MUTED);
-                        std::log(0, "[TERMINAL APP] DMA test payload transfer failed or was refused.").ok();
+                        std::log("[TERMINAL APP] DMA test payload transfer failed or was refused.").ok();
                         self.record_history("dma", code);
                     }
                 }
@@ -869,7 +850,7 @@ impl TerminalApp {
             "ping" => {
                 self.push_echo("ping");
                 self.push_line("ping: unavailable; no ICMP/network probe is implemented.", TEXT_MUTED);
-                std::log(0, "[TERMINAL APP] ping unavailable: no network probe was executed.").ok();
+                std::log("[TERMINAL APP] ping unavailable: no network probe was executed.").ok();
                 self.record_history("ping", 0);
             }
             "services" => {
@@ -878,7 +859,7 @@ impl TerminalApp {
                 match std::service_list(&mut buf) {
                     Ok(n) => {
                         self.push_counted("services: snapshot returned ", n as u64, " bytes.", TEXT_PRIMARY);
-                        std::log(0, "[TERMINAL APP] services command executed.").ok();
+                        std::log("[TERMINAL APP] services command executed.").ok();
                         self.record_history("services", 0);
                     }
                     Err(code) => {
@@ -1142,7 +1123,7 @@ fn render_terminal_ui(surface: u32, term: &TerminalApp) {
                 y += 1;
             }
         }
-        let _ = std::surface_write(6, surface, offset, &chunk[..count]);
+        let _ = std::surface_write(surface, offset, &chunk[..count]);
         offset += count;
     }
 }
@@ -1191,7 +1172,7 @@ fn render_terminal_band(surface: u32, term: &TerminalApp, y0: usize, y1: usize) 
                 y += 1;
             }
         }
-        let _ = std::surface_write(6, surface, offset, &chunk[..count]);
+        let _ = std::surface_write(surface, offset, &chunk[..count]);
         offset += count;
     }
 }
@@ -1246,29 +1227,16 @@ fn repaint(surface: u32, term: &TerminalApp, dirty: Dirty) {
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    std::log(
-        0,
-        "[TERMINAL APP (Ring 3)] InterOS Developer Terminal online.",
+    std::log("[TERMINAL APP (Ring 3)] InterOS Developer Terminal online.",
     )
     .ok();
 
     // WHY the slot is resolved by type: a slot number is a position in the
     // capability table, and the position depends on the order the kernel
     // inserted this app's capabilities in.
-    let fb_slot = match std::cap::framebuffer_slot() {
-        Some(slot) => slot,
-        None => {
-            std::log(0, "[TERMINAL APP] No framebuffer capability; the console cannot draw.").ok();
-            loop {
-                std::yield_now();
-            }
-        }
-    };
-    let surface = match std::surface_create(fb_slot, W as u32, H as u32, 200) {
+    let surface = match std::surface_create(W as u32, H as u32, 200) {
         Ok(id) => {
-            std::log(
-                0,
-                "[TERMINAL APP] DRM/KMS Client Surface allocated (z=200).",
+            std::log("[TERMINAL APP] DRM/KMS Client Surface allocated (z=200).",
             )
             .ok();
             id
@@ -1281,10 +1249,8 @@ pub extern "C" fn _start() -> ! {
     // Render & present terminal UI
     if surface > 0 {
         repaint(surface, &term, Dirty::All);
-        let _ = std::surface_flip(fb_slot);
-        std::log(
-            0,
-            "[TERMINAL APP] Terminal console presented to scanout buffer.",
+        let _ = std::surface_flip();
+        std::log("[TERMINAL APP] Terminal console presented to scanout buffer.",
         )
         .ok();
     }
@@ -1314,13 +1280,11 @@ pub extern "C" fn _start() -> ! {
                         continue;
                     }
                     if input.kind == 4 || input.kind == 6 || input.kind == 7 || input.kind == 8 || input.kind == 10 {
-                        std::log(
-                            0,
-                            "[TERMINAL APP] Navigation gesture recognized. Exiting to launcher.",
+                        std::log("[TERMINAL APP] Navigation gesture recognized. Exiting to launcher.",
                         )
                         .ok();
                         if surface > 0 {
-                            let _ = std::surface_destroy(fb_slot, surface);
+                            let _ = std::surface_destroy(surface);
                         }
                         std::exit_with_code(0);
                     }
@@ -1330,9 +1294,9 @@ pub extern "C" fn _start() -> ! {
                             || (input.x >= 24 && input.x < 100 && input.y >= 28 && input.y < 68)
                             || (input.x >= 240 && input.x <= 480 && input.y >= 1400)
                         {
-                            std::log(0, "[TERMINAL APP] Back button or home gesture pressed. Exiting to launcher.").ok();
+                            std::log("[TERMINAL APP] Back button or home gesture pressed. Exiting to launcher.").ok();
                             if surface > 0 {
-                                let _ = std::surface_destroy(fb_slot, surface);
+                                let _ = std::surface_destroy(surface);
                             }
                             std::exit_with_code(0);
                         }
@@ -1377,7 +1341,7 @@ pub extern "C" fn _start() -> ! {
                         // whole surface anyway.
 
                         std::audio_haptic_click().ok();
-                        std::log(0, "[TERMINAL APP] Normalized touch event received.").ok();
+                        std::log("[TERMINAL APP] Normalized touch event received.").ok();
                     }
                 }
                 // WHY once per batch: the drain above can carry several touches
@@ -1386,7 +1350,7 @@ pub extern "C" fn _start() -> ! {
                 // presented exactly once at the end.
                 if dirty != Dirty::None && surface > 0 {
                     repaint(surface, &term, dirty);
-                    let _ = std::surface_flip(fb_slot);
+                    let _ = std::surface_flip();
                 }
             }
         }
@@ -1396,6 +1360,6 @@ pub extern "C" fn _start() -> ! {
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
-    std::log(0, "[TERMINAL APP] Panic detected! Terminating task...").ok();
+    std::log("[TERMINAL APP] Panic detected! Terminating task...").ok();
     std::exit();
 }

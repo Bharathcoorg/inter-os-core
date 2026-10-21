@@ -158,7 +158,7 @@ pub fn default_app_for_mime(mime: FileMime) -> &'static str {
     }
 }
 
-pub fn get_app_for_mime(read_slot: usize, mime: FileMime, out: &mut [u8]) -> usize {
+pub fn get_app_for_mime(mime: FileMime, out: &mut [u8]) -> usize {
     let key = match mime {
         FileMime::Image => "mime.image",
         FileMime::Video => "mime.video",
@@ -166,7 +166,7 @@ pub fn get_app_for_mime(read_slot: usize, mime: FileMime, out: &mut [u8]) -> usi
         FileMime::Document => "mime.document",
         _ => return 0,
     };
-    if let Ok(n) = interos_std::settings_get(read_slot, key, out) {
+    if let Ok(n) = interos_std::settings_get(key, out) {
         if n > 0 {
             return n;
         }

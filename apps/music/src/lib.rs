@@ -244,14 +244,14 @@ impl TrackStore {
             Ok(n) => n,
             Err(_) => return false,
         };
-        std::settings_set(STORE_CAP_WRITE, STORE_KEY, &enc[..enc_len]).is_ok()
+        std::settings_set(STORE_KEY, &enc[..enc_len]).is_ok()
     }
 
     /// Reads the library back out of the settings store, validating the blob.
     pub fn load() -> Self {
         let mut store = TrackStore::EMPTY;
         let mut enc = [0u8; 512];
-        match std::settings_get(STORE_CAP_READ, STORE_KEY, &mut enc) {
+        match std::settings_get(STORE_KEY, &mut enc) {
             Ok(0) => store.state = StoreState::Empty,
             Ok(n) => {
                 let mut blob = [0u8; STORE_BLOB_BYTES];

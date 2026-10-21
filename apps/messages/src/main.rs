@@ -63,16 +63,14 @@ impl MessagesApp {
     /// on.
     pub fn take_handoff_recipient(&mut self) {
         let mut buf = [0u8; 64];
-        match std::settings_get(store::STORE_CAP_READ, HANDOFF_KEY, &mut buf) {
+        match std::settings_get(HANDOFF_KEY, &mut buf) {
             Ok(n) if n > 0 => {
                 let n = n.min(self.recip.len()).min(buf.len());
                 self.recip[..n].copy_from_slice(&buf[..n]);
                 self.recip_len = n;
                 self.recip_focused = true;
-                let _ = std::settings_set(store::STORE_CAP_WRITE, HANDOFF_KEY, &[]);
-                std::log(
-                    0,
-                    "[MESSAGES APP] A recipient was handed over by the dialer; it is shown in the recipient field.",
+                let _ = std::settings_set(HANDOFF_KEY, &[]);
+                std::log("[MESSAGES APP] A recipient was handed over by the dialer; it is shown in the recipient field.",
                 )
                 .ok();
             }
@@ -185,19 +183,17 @@ impl MessagesApp {
         match std::keystore_derive(3, &mut key) {
             Ok(32) => {
                 self.keystore_derived = true;
-                std::log(
-                    0,
-                    "[MESSAGES APP] Hardware Keystore Slot 3: Ingested 256-bit P2P messaging key.",
+                std::log("[MESSAGES APP] Hardware Keystore Slot 3: Ingested 256-bit P2P messaging key.",
                 )
                 .ok();
                 true
             }
             Ok(_) => {
-                std::log(0, "[MESSAGES APP] Keystore Slot 3: short result; no messaging key available.").ok();
+                std::log("[MESSAGES APP] Keystore Slot 3: short result; no messaging key available.").ok();
                 false
             }
             Err(_) => {
-                std::log(0, "[MESSAGES APP] Keystore Slot 3: derivation refused by the kernel; no session key.").ok();
+                std::log("[MESSAGES APP] Keystore Slot 3: derivation refused by the kernel; no session key.").ok();
                 false
             }
         }
@@ -210,18 +206,14 @@ impl MessagesApp {
         sector_buf[..copy_len].copy_from_slice(&body[..copy_len]);
         let mut iv = [0u8; 16];
         if std::get_random(&mut iv).is_err() {
-            std::log(
-                0,
-                "[MESSAGES APP] Refusing to seal message without cryptographic TRNG entropy.",
+            std::log("[MESSAGES APP] Refusing to seal message without cryptographic TRNG entropy.",
             )
             .ok();
             return false;
         }
         let assessment = gsm::analyze_threat(body);
         if assessment.level != gsm::ThreatLevel::Safe {
-            std::log(
-                0,
-                "[MESSAGES APP] Heuristic privacy shield: flagged potential urgency/phishing payload.",
+            std::log("[MESSAGES APP] Heuristic privacy shield: flagged potential urgency/phishing payload.",
             )
             .ok();
         }
@@ -229,23 +221,17 @@ impl MessagesApp {
             Ok(_) => {
                 self.sector_encrypted = true;
                 self.header_status = HeaderStatus::SealedLocally;
-                std::log(
-                    0,
-                    "[MESSAGES APP] Sector 202: Message sector sealed and persisted by the storage vault.",
+                std::log("[MESSAGES APP] Sector 202: Message sector sealed and persisted by the storage vault.",
                 )
                 .ok();
-                std::log(
-                    0,
-                    "[MESSAGES APP] No transport is bound to this app; the sealed message was not transmitted.",
+                std::log("[MESSAGES APP] No transport is bound to this app; the sealed message was not transmitted.",
                 )
                 .ok();
                 true
             }
             Err(_) => {
                 self.header_status = HeaderStatus::VaultRefused;
-                std::log(
-                    0,
-                    "[MESSAGES APP] Sector 202: vault write refused by the kernel; message not persisted.",
+                std::log("[MESSAGES APP] Sector 202: vault write refused by the kernel; message not persisted.",
                 )
                 .ok();
                 false
@@ -265,16 +251,12 @@ impl MessagesApp {
         let _ = std::audio_silence();
         let _ = std::audio_haptic_click();
         if tones_played == 2 {
-            std::log(
-                0,
-                "[MESSAGES APP] Outgoing message bubble chime emitted (659Hz -> 988Hz).",
+            std::log("[MESSAGES APP] Outgoing message bubble chime emitted (659Hz -> 988Hz).",
             )
             .ok();
             true
         } else {
-            std::log(
-                0,
-                "[MESSAGES APP] Bubble chime not emitted: the audio service refused the tone requests.",
+            std::log("[MESSAGES APP] Bubble chime not emitted: the audio service refused the tone requests.",
             )
             .ok();
             false
@@ -1641,7 +1623,7 @@ fn render_messages_band(surface: u32, messages: &MessagesApp, y0: usize, y1: usi
                 y += 1;
             }
         }
-        let _ = std::surface_write(6, surface, offset, &chunk[..count]);
+        let _ = std::surface_write(surface, offset, &chunk[..count]);
         offset += count;
     }
 }
@@ -1774,9 +1756,7 @@ fn attempt_transport(recipient: &[u8], body: &[u8]) -> TransportOutcome {
     match std::telephony_send_sms(dest, text) {
         Ok(_) => TransportOutcome::Accepted,
         Err(code) => {
-            std::log(
-                0,
-                "[MESSAGES APP] Telephony refused the composed message; it was not transmitted.",
+            std::log("[MESSAGES APP] Telephony refused the composed message; it was not transmitted.",
             )
             .ok();
             TransportOutcome::Refused(code)
@@ -1792,9 +1772,7 @@ fn send_composed(app: &mut MessagesApp) -> Dirty {
         return Dirty::None;
     }
     if app.recip_len == 0 {
-        std::log(
-            0,
-            "[MESSAGES APP] Send pressed with no recipient; nothing was stored locally.",
+        std::log("[MESSAGES APP] Send pressed with no recipient; nothing was stored locally.",
         )
         .ok();
         app.header_status = HeaderStatus::NoRecipient;
@@ -1838,9 +1816,7 @@ fn send_composed(app: &mut MessagesApp) -> Dirty {
             app.header_status = HeaderStatus::SealedLocally;
         } else {
             app.header_status = HeaderStatus::StoreRefused;
-            std::log(
-                0,
-                "[MESSAGES APP] The thread store refused the append; the message was not persisted.",
+            std::log("[MESSAGES APP] The thread store refused the append; the message was not persisted.",
             )
             .ok();
         }
@@ -1872,7 +1848,7 @@ fn handle_tap(app: &mut MessagesApp, px: u32, py: u32) -> Tap<'static> {
             app.view_mode = ViewMode::ThreadList;
             app.compose_focused = false;
             app.compose_select_all = false;
-            std::log(0, "[MESSAGES APP] Back pressed: Navigating to ThreadListView.").ok();
+            std::log("[MESSAGES APP] Back pressed: Navigating to ThreadListView.").ok();
             return Tap::Redraw(Dirty::All);
         } else {
             return Tap::Leave("[MESSAGES APP] Back control pressed. Exiting to launcher.");
@@ -1884,15 +1860,13 @@ fn handle_tap(app: &mut MessagesApp, px: u32, py: u32) -> Tap<'static> {
     let sdy = y as isize - SEND_CY as isize;
     if sdx * sdx + sdy * sdy <= (SEND_R * SEND_R) as isize {
         if app.compose_len == 0 {
-            std::log(
-                0,
-                "[MESSAGES APP] Send pressed with an empty composer; nothing was sealed.",
+            std::log("[MESSAGES APP] Send pressed with an empty composer; nothing was sealed.",
             )
             .ok();
             return Tap::Redraw(Dirty::None);
         }
         let dirty = send_composed(app);
-        std::log(0, "[MESSAGES APP] Message composed and processed.").ok();
+        std::log("[MESSAGES APP] Message composed and processed.").ok();
         return Tap::Redraw(dirty);
     }
 
@@ -1900,7 +1874,7 @@ fn handle_tap(app: &mut MessagesApp, px: u32, py: u32) -> Tap<'static> {
     if in_rect(COMPOSE_FIELD, x, y) {
         focus_compose(app);
         let _ = std::audio_haptic_click();
-        std::log(0, "[MESSAGES APP] Compose field focused for keyboard input.").ok();
+        std::log("[MESSAGES APP] Compose field focused for keyboard input.").ok();
         return Tap::Redraw(Dirty::All);
     }
 
@@ -1908,7 +1882,7 @@ fn handle_tap(app: &mut MessagesApp, px: u32, py: u32) -> Tap<'static> {
     if in_rect(RECIPIENT_FIELD, x, y) {
         focus_recipient(app);
         let _ = std::audio_haptic_click();
-        std::log(0, "[MESSAGES APP] Recipient field focused for keyboard input.").ok();
+        std::log("[MESSAGES APP] Recipient field focused for keyboard input.").ok();
         return Tap::Redraw(Dirty::All);
     }
 
@@ -1918,7 +1892,7 @@ fn handle_tap(app: &mut MessagesApp, px: u32, py: u32) -> Tap<'static> {
         if in_rect(SEARCH_FIELD, x, y) {
             focus_search(app);
             let _ = std::audio_haptic_click();
-            std::log(0, "[MESSAGES APP] Search field focused for keyboard input.").ok();
+            std::log("[MESSAGES APP] Search field focused for keyboard input.").ok();
             return Tap::Redraw(Dirty::All);
         }
 
@@ -1936,7 +1910,7 @@ fn handle_tap(app: &mut MessagesApp, px: u32, py: u32) -> Tap<'static> {
                             let tid = tr.id;
                             app.ledger.remove_thread(tid);
                             app.store.remove(idx);
-                            std::log(0, "[MESSAGES APP] Thread deleted.").ok();
+                            std::log("[MESSAGES APP] Thread deleted.").ok();
                             return Tap::Redraw(Dirty::All);
                         }
 
@@ -1952,7 +1926,7 @@ fn handle_tap(app: &mut MessagesApp, px: u32, py: u32) -> Tap<'static> {
                         app.ledger.mark_thread_read(tid);
                         app.view_mode = ViewMode::Conversation;
                         let _ = std::audio_haptic_click();
-                        std::log(0, "[MESSAGES APP] Conversation opened.").ok();
+                        std::log("[MESSAGES APP] Conversation opened.").ok();
                         return Tap::Redraw(Dirty::All);
                     }
                 }
@@ -2073,9 +2047,7 @@ pub extern "C" fn _start() -> ! {
     // says the thread is local and undelivered. A startup line claiming a
     // P2P wire protocol was online was a claim about a channel the app
     // never had.
-    std::log(
-        0,
-        "[MESSAGES APP (Ring 3)] Started; no messaging transport is bound.",
+    std::log("[MESSAGES APP (Ring 3)] Started; no messaging transport is bound.",
     )
     .ok();
 
@@ -2096,18 +2068,16 @@ pub extern "C" fn _start() -> ! {
         _ => "",
     };
     if !load_note.is_empty() {
-        std::log(0, load_note).ok();
+        std::log(load_note).ok();
     }
 
     // 1. Ingest Hardware Keystore Key
     messages.derive_messaging_key();
 
     // 2. Allocate DRM/KMS Client Surface (z=200)
-    let surface = match std::surface_create(6, W as u32, H as u32, 200) {
+    let surface = match std::surface_create(W as u32, H as u32, 200) {
         Ok(id) => {
-            std::log(
-                0,
-                "[MESSAGES APP] DRM/KMS Client Surface allocated (z=200).",
+            std::log("[MESSAGES APP] DRM/KMS Client Surface allocated (z=200).",
             )
             .ok();
             id
@@ -2124,30 +2094,22 @@ pub extern "C" fn _start() -> ! {
                 .unwrap_or(false);
             if present {
                 messages.modem_present = true;
-                std::log(
-                    0,
-                    "[MESSAGES APP] Telephony reported a present modem; a transport may be bound.",
+                std::log("[MESSAGES APP] Telephony reported a present modem; a transport may be bound.",
                 )
                 .ok();
             } else {
-                std::log(
-                    0,
-                    "[MESSAGES APP] Telephony telemetry did not report a present modem; no cellular channel is in use.",
+                std::log("[MESSAGES APP] Telephony telemetry did not report a present modem; no cellular channel is in use.",
                 )
                 .ok();
             }
         }
         Ok(_) => {
-            std::log(
-                0,
-                "[MESSAGES APP] Telephony query returned an empty payload; no cellular modem reported.",
+            std::log("[MESSAGES APP] Telephony query returned an empty payload; no cellular modem reported.",
             )
             .ok();
         }
         Err(_) => {
-            std::log(
-                0,
-                "[MESSAGES APP] Telephony query refused by the kernel; no cellular modem is attached.",
+            std::log("[MESSAGES APP] Telephony query refused by the kernel; no cellular modem is attached.",
             )
             .ok();
         }
@@ -2155,10 +2117,8 @@ pub extern "C" fn _start() -> ! {
 
     if surface > 0 {
         render_messages_ui(surface, &messages);
-        let _ = std::surface_flip(6);
-        std::log(
-            0,
-            "[MESSAGES APP] Messages canvas presented to scanout buffer.",
+        let _ = std::surface_flip();
+        std::log("[MESSAGES APP] Messages canvas presented to scanout buffer.",
         )
         .ok();
     }
@@ -2192,18 +2152,18 @@ pub extern "C" fn _start() -> ! {
                                 dirty = merge(dirty, Dirty::All);
                                 continue;
                             }
-                            std::log(0, "[MESSAGES APP] Navigation gesture recognized. Exiting to launcher.").ok();
+                            std::log("[MESSAGES APP] Navigation gesture recognized. Exiting to launcher.").ok();
                             if surface > 0 {
-                                let _ = std::surface_destroy(6, surface);
+                                let _ = std::surface_destroy(surface);
                             }
                             std::exit_with_code(0);
                         }
                         if input.kind == 1 {
                             match handle_tap(&mut messages, input.x, input.y) {
                                 Tap::Leave(msg) => {
-                                    std::log(0, msg).ok();
+                                    std::log(msg).ok();
                                     if surface > 0 {
-                                        let _ = std::surface_destroy(6, surface);
+                                        let _ = std::surface_destroy(surface);
                                     }
                                     std::exit_with_code(0);
                                 }
@@ -2226,34 +2186,26 @@ pub extern "C" fn _start() -> ! {
                             }
                             Dirty::All => render_messages_ui(surface, &messages),
                         }
-                        let _ = std::surface_flip(6);
+                        let _ = std::surface_flip();
                     }
                 }
                 if events & std::EVENT_MODEM_URC != 0 {
                     if messages.modem_present {
-                        std::log(
-                            0,
-                            "[MESSAGES APP] Baseband URC signalled; no SMS payload was read from the modem.",
+                        std::log("[MESSAGES APP] Baseband URC signalled; no SMS payload was read from the modem.",
                         )
                         .ok();
                     } else {
-                        std::log(
-                            0,
-                            "[MESSAGES APP] Modem URC event raised with no attached baseband; nothing was received.",
+                        std::log("[MESSAGES APP] Modem URC event raised with no attached baseband; nothing was received.",
                         )
                         .ok();
                     }
                 }
                 if events & std::EVENT_IPC_MSG != 0 {
-                    std::log(
-                        0,
-                        "[MESSAGES APP] IPC message event raised; no message body was fetched or decrypted.",
+                    std::log("[MESSAGES APP] IPC message event raised; no message body was fetched or decrypted.",
                     )
                     .ok();
                     if messages.ledger.thread_count == 0 {
-                        std::log(
-                            0,
-                            "[MESSAGES APP] No conversation thread exists; nothing could be delivered.",
+                        std::log("[MESSAGES APP] No conversation thread exists; nothing could be delivered.",
                         )
                         .ok();
                     }
@@ -2271,6 +2223,6 @@ pub extern "C" fn _start() -> ! {
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
-    std::log(0, "[MESSAGES APP] Panic detected! Terminating task...").ok();
+    std::log("[MESSAGES APP] Panic detected! Terminating task...").ok();
     std::exit();
 }

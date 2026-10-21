@@ -10,15 +10,13 @@ use crate::InputEvent;
 pub struct AppSession {
     package_id: &'static str,
     surface: Option<u32>,
-    display_cap_slot: usize,
 }
 
 impl AppSession {
-    pub const fn new(package_id: &'static str, display_cap_slot: usize) -> Self {
+    pub const fn new(package_id: &'static str) -> Self {
         Self {
             package_id,
             surface: None,
-            display_cap_slot,
         }
     }
 
@@ -27,7 +25,7 @@ impl AppSession {
     }
 
     pub fn open_window(&mut self, width: u32, height: u32, z_order: u32) -> Result<u32, i64> {
-        let surface = crate::surface_create(self.display_cap_slot, width, height, z_order)?;
+        let surface = crate::surface_create(width, height, z_order)?;
         self.surface = Some(surface);
         Ok(surface)
     }
@@ -37,12 +35,12 @@ impl AppSession {
     }
 
     pub fn present(&self) -> Result<u64, i64> {
-        crate::surface_flip(self.display_cap_slot)
+        crate::surface_flip()
     }
 
     pub fn destroy_window(&mut self) -> Result<(), i64> {
         if let Some(surface) = self.surface.take() {
-            crate::surface_destroy(self.display_cap_slot, surface)?;
+            crate::surface_destroy(surface)?;
         }
         Ok(())
     }
@@ -68,29 +66,29 @@ impl AppSession {
         crate::app_wake()
     }
 
-    pub fn open_private_file(
-        &self,
-        fs_cap_slot: usize,
-        relative_path: &str,
-        rights: u32,
-    ) -> Result<u32, i64> {
-        crate::app_storage_open(fs_cap_slot, relative_path, rights)
+    /// Opens a file inside this app's own sandbox.
+    ///
+    /// WHY there is no slot argument: the path is resolved inside the
+    /// calling app's sandbox root, and the kernel authorises the request by
+    /// the capability's *type* rather than by a slot the caller had to know
+    /// the position of.
+    pub fn open_private_file(&self, relative_path: &str, rights: u32) -> Result<u32, i64> {
+        crate::app_storage_open(relative_path, rights)
     }
 
-    /// Sends a bounded IPC message using an explicitly supplied capability slot.
+    /// Sends a bounded IPC message.
     pub fn send_ipc(
         &self,
-        ipc_cap_slot: usize,
         target_task_id: u64,
         msg_type: u32,
         payload: &[u8],
     ) -> Result<(), i64> {
-        crate::ipc_send(ipc_cap_slot, target_task_id, msg_type, payload)
+        crate::ipc_send(target_task_id, msg_type, payload)
     }
 
-    /// Receives one IPC payload using an explicitly supplied capability slot.
-    pub fn receive_ipc(&self, ipc_cap_slot: usize, out: &mut [u8]) -> Result<usize, i64> {
-        crate::ipc_recv(ipc_cap_slot, out)
+    /// Receives one IPC payload.
+    pub fn receive_ipc(&self, out: &mut [u8]) -> Result<usize, i64> {
+        crate::ipc_recv(out)
     }
 
     /// Posts an application notification through the kernel notification service.
@@ -103,9 +101,8 @@ impl AppSession {
         crate::notification_cancel(self.package_id, notification_id)
     }
 
-    /// Opens a network socket through an explicitly supplied capability slot.
-    pub fn open_socket(&self, network_cap_slot: usize, protocol: u32) -> Result<u64, i64> {
-        let _ = network_cap_slot;
+    /// Opens a network socket.
+    pub fn open_socket(&self, protocol: u32) -> Result<u64, i64> {
         crate::net_socket(protocol as u16).map(|sock| sock as u64)
     }
 

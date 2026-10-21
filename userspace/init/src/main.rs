@@ -15,7 +15,7 @@ const POLL_INTERVAL_TICKS: u64 = 100;
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    std::log(0, "[PID1] Inter OS userspace init started in Ring 3.").ok();
+    std::log("[PID1] Inter OS userspace init started in Ring 3.").ok();
 
     // PID 1 discovers declared services from the authoritative kernel registry.
     let mut remaining = SERVICE_RETRY_ROUNDS;
@@ -38,18 +38,18 @@ pub extern "C" fn _start() -> ! {
     // the Compositor -> Display/Input dependency graph.
     match std::service_stop(11) {
         Ok(_) => {
-            let _ = std::log(0, "[PID1] Service stop lifecycle contract exercised.");
+            let _ = std::log("[PID1] Service stop lifecycle contract exercised.");
             match std::service_start(11) {
                 Ok(_) => {
-                    let _ = std::log(0, "[PID1] Service restart lifecycle contract exercised.");
+                    let _ = std::log("[PID1] Service restart lifecycle contract exercised.");
                 }
                 Err(_) => {
-                    let _ = std::log(0, "[PID1] Service restart lifecycle contract failed.");
+                    let _ = std::log("[PID1] Service restart lifecycle contract failed.");
                 }
             }
         }
         Err(_) => {
-            let _ = std::log(0, "[PID1] Service stop lifecycle contract failed.");
+            let _ = std::log("[PID1] Service stop lifecycle contract failed.");
         }
     }
 
@@ -58,9 +58,9 @@ pub extern "C" fn _start() -> ! {
     let mut service_buf = [0u8; SERVICE_BUFFER];
     if let Ok(len) = std::service_list(&mut service_buf) {
         if registry_has_all_running_services(&service_buf[..len]) {
-            let _ = std::log(0, "[PID1] All system services running after bootstrap.");
+            let _ = std::log("[PID1] All system services running after bootstrap.");
         } else {
-            let _ = std::log(0, "[PID1] Service bootstrap validation failed.");
+            let _ = std::log("[PID1] Service bootstrap validation failed.");
         }
     }
 
@@ -68,27 +68,23 @@ pub extern "C" fn _start() -> ! {
     let mut ipc_buf = [0u8; 64];
 
     loop {
-        let now = std::get_ticks(0).unwrap_or(last_poll);
+        let now = std::get_ticks().unwrap_or(last_poll);
 
         if now.saturating_sub(last_poll) >= POLL_INTERVAL_TICKS || last_poll == 0 {
             if let Ok(len) = std::service_list(&mut service_buf) {
                 if len > 0 {
-                    std::log(
-                        0,
-                        "[PID1] Service registry observed; userspace lifecycle loop active.",
+                    std::log("[PID1] Service registry observed; userspace lifecycle loop active.",
                     )
                     .ok();
                 } else {
-                    std::log(0, "[PID1] Service registry returned no active services.").ok();
+                    std::log("[PID1] Service registry returned no active services.").ok();
                 }
             }
             let mut recovery_buf = [0u8; SERVICE_BUFFER];
             if let Ok(recovery_len) = std::service_list(&mut recovery_buf) {
                 for service_id in declared_service_ids(&recovery_buf[..recovery_len]).iter().copied().flatten() {
                     if std::service_recover_failed(service_id).is_ok() {
-                        std::log(
-                            0,
-                            "[PID1] Recovered a failed service through the lifecycle ABI.",
+                        std::log("[PID1] Recovered a failed service through the lifecycle ABI.",
                         )
                         .ok();
                     }
@@ -98,11 +94,9 @@ pub extern "C" fn _start() -> ! {
         }
 
         // Check for incoming IPC requests from launcher
-        if let Ok(msg_len) = std::ipc_recv(10, &mut ipc_buf) {
+        if let Ok(msg_len) = std::ipc_recv(&mut ipc_buf) {
             if msg_len > 0 {
-                let _ = std::log(
-                    0,
-                    "[PID1] Application launch request received via IPC from launcher.",
+                let _ = std::log("[PID1] Application launch request received via IPC from launcher.",
                 );
                 let app_id = core::str::from_utf8(&ipc_buf[..msg_len])
                     .unwrap_or("")
@@ -110,13 +104,11 @@ pub extern "C" fn _start() -> ! {
                 if !app_id.is_empty() {
                     match std::app_launch(app_id) {
                         Ok(_) => {
-                            let _ = std::log(
-                                0,
-                                "[PID1] Target application launched successfully in Ring 3.",
+                            let _ = std::log("[PID1] Target application launched successfully in Ring 3.",
                             );
                         }
                         Err(_) => {
-                            let _ = std::log(0, "[PID1] Target application launch rejected.");
+                            let _ = std::log("[PID1] Target application launch rejected.");
                         }
                     }
                 }

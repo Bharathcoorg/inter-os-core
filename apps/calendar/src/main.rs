@@ -97,8 +97,6 @@ const STORE_KEY: &str = "calendar.events.v1";
 /// exist before the first save. No new syscall and no kernel or SDK change is
 /// involved: this is the store the platform already gives an unprivileged app
 /// for exactly this shape of data.
-const STORE_CAP_READ: usize = 4;
-const STORE_CAP_WRITE: usize = 5;
 
 /// Earliest and latest years the 2-byte year field can represent. The stepper
 /// starts at the floor rather than at a year nobody chose.
@@ -259,7 +257,7 @@ fn write_store(records: &[EventRecord; MAX_EVENTS], len: usize) -> bool {
         let start = 2 + i * RECORD_BYTES;
         records[i].encode(&mut blob[start..start + RECORD_BYTES]);
     }
-    std::settings_set(STORE_CAP_WRITE, STORE_KEY, &blob).is_ok()
+    std::settings_set(STORE_KEY, &blob).is_ok()
 }
 
 /// The agenda: bounded records plus an honest account of the last load or save.
@@ -286,7 +284,7 @@ impl EventStore {
     fn load() -> Self {
         let mut store = EventStore::EMPTY;
         let mut blob = [0u8; STORE_BLOB_BYTES];
-        match std::settings_get(STORE_CAP_READ, STORE_KEY, &mut blob) {
+        match std::settings_get(STORE_KEY, &mut blob) {
             Ok(0) => store.state = StoreState::Empty,
             Ok(n) => {
                 let mut records = [EventRecord::EMPTY; MAX_EVENTS];
@@ -649,8 +647,8 @@ impl CalendarApp {
         match std::rtc_get_time(&mut time_buf) {
             Ok(n) if n > 0 => {
                 let payload = &time_buf[..n];
-                std::log(0, "[CALENDAR APP] RTC payload as reported by the kernel:").ok();
-                std::log(0, core::str::from_utf8(payload).unwrap_or("<non-utf8>")).ok();
+                std::log("[CALENDAR APP] RTC payload as reported by the kernel:").ok();
+                std::log(core::str::from_utf8(payload).unwrap_or("<non-utf8>")).ok();
 
                 let y = json_field(payload, b"\"year\":");
                 let m = json_field(payload, b"\"month\":");
@@ -672,31 +670,25 @@ impl CalendarApp {
                         }
                         self.date_known = true;
                         self.rtc_synchronized = true;
-                        std::log(
-                            0,
-                            "[CALENDAR APP] Hardware RTC synchronized: civil date read from the RTC payload.",
+                        std::log("[CALENDAR APP] Hardware RTC synchronized: civil date read from the RTC payload.",
                         )
                         .ok();
                         return true;
                     }
                     _ => {
-                        std::log(
-                            0,
-                            "[CALENDAR APP] RTC payload carried no usable civil date; current date unknown.",
+                        std::log("[CALENDAR APP] RTC payload carried no usable civil date; current date unknown.",
                         )
                         .ok();
                     }
                 }
             }
             Ok(_) => {
-                std::log(0, "[CALENDAR APP] RTC returned an empty payload; current date unknown.").ok();
+                std::log("[CALENDAR APP] RTC returned an empty payload; current date unknown.").ok();
             }
             Err(_) => {
                 // WHY: rtc_get_time requires the system-control authority, which
                 // this app does not hold. Report the refusal.
-                std::log(
-                    0,
-                    "[CALENDAR APP] RTC query refused by the kernel; current date unknown.",
+                std::log("[CALENDAR APP] RTC query refused by the kernel; current date unknown.",
                 )
                 .ok();
             }
@@ -749,7 +741,7 @@ impl CalendarApp {
             {
                 self.notified_mask |= 1 << i;
                 let _ = std::notification_post("app_calendar", "calendar|Calendar Alert|Scheduled event reached");
-                std::log(0, "[CALENDAR APP] Triggered notification for scheduled event.").ok();
+                std::log("[CALENDAR APP] Triggered notification for scheduled event.").ok();
             }
         }
     }
@@ -764,9 +756,7 @@ impl CalendarApp {
         agenda_sector[..copy_len].copy_from_slice(&event_name.as_bytes()[..copy_len]);
         let mut iv = [0u8; 16];
         if std::get_random(&mut iv).is_err() {
-            std::log(
-                0,
-                "[CALENDAR APP] Refusing to encrypt agenda event without cryptographic TRNG entropy.",
+            std::log("[CALENDAR APP] Refusing to encrypt agenda event without cryptographic TRNG entropy.",
             )
             .ok();
             return false;
@@ -780,16 +770,12 @@ impl CalendarApp {
                 // cipher it used. Naming "AES-XTS/HMAC" here invented a crypto
                 // detail this app cannot observe, so report only the outcome the
                 // vault actually acknowledged.
-                std::log(
-                    0,
-                    "[CALENDAR APP] Sector 203: Updated agenda sealed and persisted by the storage vault.",
+                std::log("[CALENDAR APP] Sector 203: Updated agenda sealed and persisted by the storage vault.",
                 )
                 .ok();
             }
             Err(_) => {
-                std::log(
-                    0,
-                    "[CALENDAR APP] Sector 203: vault write refused by the kernel; event not persisted.",
+                std::log("[CALENDAR APP] Sector 203: vault write refused by the kernel; event not persisted.",
                 )
                 .ok();
             }
@@ -807,15 +793,11 @@ impl CalendarApp {
         let _ = std::audio_silence();
         let _ = std::audio_haptic_click();
         if tones_played == 3 {
-            std::log(
-                0,
-                "[CALENDAR APP] Agenda reminder chime emitted (A-Major: 440Hz -> 554Hz -> 659Hz).",
+            std::log("[CALENDAR APP] Agenda reminder chime emitted (A-Major: 440Hz -> 554Hz -> 659Hz).",
             )
             .ok();
         } else {
-            std::log(
-                0,
-                "[CALENDAR APP] Reminder chime not emitted: the audio service refused the tone requests.",
+            std::log("[CALENDAR APP] Reminder chime not emitted: the audio service refused the tone requests.",
             )
             .ok();
         }
@@ -2393,7 +2375,7 @@ fn render_calendar_band(surface: u32, app: &CalendarApp, y0: usize, y1: usize) {
                 y += 1;
             }
         }
-        let _ = std::surface_write(6, surface, offset, &chunk[..count]);
+        let _ = std::surface_write(surface, offset, &chunk[..count]);
         offset += count;
     }
 }
@@ -2465,7 +2447,7 @@ fn repaint(surface: u32, app: &CalendarApp, dirty: Dirty) {
             render_calendar_band(surface, app, y0, y1);
         }
     }
-    let _ = std::cap::framebuffer_slot().map(|slot| std::surface_flip(slot));
+    let _ = std::surface_flip();
 }
 
 /// What one resolved touch did.
@@ -2480,7 +2462,11 @@ enum Tap {
 
 fn exit_to_launcher(surface: u32) -> ! {
     if surface > 0 {
-        let _ = std::cap::framebuffer_slot().map(|slot| std::surface_destroy(slot, surface));
+        // WHY no slot argument: a slot is a position in this task's
+        // capability table, and the kernel authorises the release by the
+        // capability's type. The surface must be handed back or it stays a
+        // leaked KMS surface for the life of the device.
+        let _ = std::surface_destroy(surface);
     }
     std::exit_with_code(0);
 }
@@ -2813,9 +2799,7 @@ fn handle_tap(app: &mut CalendarApp, x: usize, y: usize) -> Tap {
     debug_assert_eq!(ACTION_BTN_Y1, 856);
     if x >= ACTION_BTN_X0 && x < ACTION_BTN_X1 && y >= 800 && y < 856 {
         open_flow(app);
-        std::log(
-            0,
-            "[CALENDAR APP] Create-event flow opened: title entry.",
+        std::log("[CALENDAR APP] Create-event flow opened: title entry.",
         )
         .ok();
         return Tap::Redraw(Dirty::AGENDA);
@@ -2826,7 +2810,7 @@ fn handle_tap(app: &mut CalendarApp, x: usize, y: usize) -> Tap {
 
 #[no_mangle]
 pub extern "C" fn _start() {
-    std::log(0, "[CALENDAR APP (Ring 3)] Calendar Agenda service online.").ok();
+    std::log("[CALENDAR APP (Ring 3)] Calendar Agenda service online.").ok();
 
     let mut calendar = CalendarApp::new();
 
@@ -2838,19 +2822,9 @@ pub extern "C" fn _start() {
     // table, and the position depends on the order this task's
     // capabilities were inserted in. Six happened to hold the framebuffer
     // here, and would not in an app with one more capability.
-    let Some(fb_slot) = std::cap::framebuffer_slot() else {
-        std::log(
-            0,
-            "[CALENDAR APP] This app holds no framebuffer capability, so it cannot draw.",
-        )
-        .ok();
-        return;
-    };
-    let surface = match std::surface_create(fb_slot, W as u32, H as u32, 200) {
+    let surface = match std::surface_create(W as u32, H as u32, 200) {
         Ok(id) => {
-            std::log(
-                0,
-                "[CALENDAR APP] DRM/KMS Client Surface allocated (z=200).",
+            std::log("[CALENDAR APP] DRM/KMS Client Surface allocated (z=200).",
             )
             .ok();
             id
@@ -2865,18 +2839,14 @@ pub extern "C" fn _start() {
     if calendar.date_known {
         let days = days_in_month(calendar.current_year, calendar.current_month);
         let dow = day_of_week(calendar.current_year, calendar.current_month, 1);
-        std::log(
-            0,
-            match days {
+        std::log(match days {
                 31 => "[CALENDAR APP] Gregorian date math: the RTC-reported month has 31 days.",
                 30 => "[CALENDAR APP] Gregorian date math: the RTC-reported month has 30 days.",
                 _ => "[CALENDAR APP] Gregorian date math: the RTC-reported month has fewer than 30 days.",
             },
         )
         .ok();
-        std::log(
-            0,
-            match dow {
+        std::log(match dow {
                 0 => "[CALENDAR APP] Weekday for the first of the RTC-reported month: Sunday.",
                 1 => "[CALENDAR APP] Weekday for the first of the RTC-reported month: Monday.",
                 2 => "[CALENDAR APP] Weekday for the first of the RTC-reported month: Tuesday.",
@@ -2888,9 +2858,7 @@ pub extern "C" fn _start() {
         )
         .ok();
     } else {
-        std::log(
-            0,
-            "[CALENDAR APP] No civil date available from the hardware RTC; month grid shows no selected day.",
+        std::log("[CALENDAR APP] No civil date available from the hardware RTC; month grid shows no selected day.",
         )
         .ok();
     }
@@ -2902,18 +2870,16 @@ pub extern "C" fn _start() {
     // what storage returned instead of an empty list that later fills in.
     calendar.store = EventStore::load();
     calendar.total_events = calendar.store.len() as u32;
-    std::log(0, "[CALENDAR APP] Event store:").ok();
-    std::log(0, calendar.store.state.as_str()).ok();
+    std::log("[CALENDAR APP] Event store:").ok();
+    std::log(calendar.store.state.as_str()).ok();
     if calendar.date_known {
         calendar.selected_day = Some(calendar.current_day as u8);
     }
 
     if surface > 0 {
         render_calendar_ui(surface, &calendar);
-        let _ = std::cap::framebuffer_slot().map(|slot| std::surface_flip(slot));
-        std::log(
-            0,
-            "[CALENDAR APP] Calendar canvas presented to scanout buffer.",
+        let _ = std::surface_flip();
+        std::log("[CALENDAR APP] Calendar canvas presented to scanout buffer.",
         )
         .ok();
     }
@@ -2940,13 +2906,13 @@ pub extern "C" fn _start() {
                     let mut dirty = Dirty::EMPTY;
                     while std::input_event_poll(&mut input).is_ok() {
                         if input.kind == 4 || input.kind == 6 || input.kind == 7 || input.kind == 8 || input.kind == 10 {
-                            std::log(0, "[CALENDAR APP] Navigation gesture recognized. Exiting to launcher.").ok();
+                            std::log("[CALENDAR APP] Navigation gesture recognized. Exiting to launcher.").ok();
                             exit_to_launcher(surface);
                         }
                         if input.kind == 1 {
                             match handle_tap(&mut calendar, input.x as usize, input.y as usize) {
                                 Tap::Leave(msg) => {
-                                    std::log(0, msg).ok();
+                                    std::log(msg).ok();
                                     exit_to_launcher(surface);
                                 }
                                 Tap::Redraw(d) => dirty = dirty.widen(d),
@@ -2962,9 +2928,7 @@ pub extern "C" fn _start() {
                     // WHY: no intent payload was fetched from the IPC bus and no
                     // parser ran on one. Report the event; never claim a schedule
                     // intent was parsed out of a raw event bit.
-                    std::log(
-                        0,
-                        "[CALENDAR APP] IPC message event raised; no schedule intent payload was read.",
+                    std::log("[CALENDAR APP] IPC message event raised; no schedule intent payload was read.",
                     )
                     .ok();
                 }
@@ -2985,6 +2949,6 @@ pub extern "C" fn _start() {
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
-    std::log(0, "[CALENDAR APP] Panic detected! Terminating task...").ok();
+    std::log("[CALENDAR APP] Panic detected! Terminating task...").ok();
     std::exit();
 }

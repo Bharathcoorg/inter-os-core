@@ -95,38 +95,33 @@ fn timer_tick_slot() -> Option<usize> {
     std::cap_lookup(std::cap_type::TIMER_TICK_READ, 0).ok()
 }
 
-#[inline]
-fn fb_cap_slot() -> Option<usize> {
-    std::cap_lookup(std::cap_type::FRAMEBUFFER_DIRECT, 0).ok()
-}
 
-#[inline]
-fn fs_write_slot() -> Option<usize> {
-    std::cap_lookup(std::cap_type::FILE_SYSTEM_WRITE, 0).ok()
-}
+
+
 
 #[inline]
 fn current_ticks() -> u64 {
-    timer_tick_slot().and_then(|s| std::get_ticks(s).ok()).unwrap_or(0)
+    timer_tick_slot().and_then(|_| std::get_ticks().ok()).unwrap_or(0)
 }
 
 #[inline]
 fn current_ticks_opt() -> Option<u64> {
-    timer_tick_slot().and_then(|s| std::get_ticks(s).ok())
+    timer_tick_slot().and_then(|_| std::get_ticks().ok())
 }
 
 #[inline]
 fn surface_flip_display() {
-    if let Some(slot) = fb_cap_slot() {
-        let _ = std::surface_flip(slot);
-    }
+    // WHY there is no capability argument: the kernel authorises the flip by
+    // the capability's *type*, so the app names the authority it wants and
+    // the kernel finds it. A slot number here would be a position in this
+    // shell's capability table, and the position depends on the order the
+    // kernel inserted the capabilities in.
+    let _ = std::surface_flip();
 }
 
 #[inline]
 fn surface_write_display(surface: u32, offset: usize, buf: &[u32]) {
-    if let Some(slot) = fb_cap_slot() {
-        let _ = std::surface_write(slot, surface, offset, buf);
-    }
+    let _ = std::surface_write(surface, offset, buf);
 }
 
 
@@ -459,10 +454,28 @@ impl LauncherState {
 
 /// Reads one wallpaper key out of the persistent settings store.
 ///
-/// WHY slot 3: the kernel resolves settings capabilities by slot index, and
-/// slot 3 of this shell's grant table is `FileSystemRead` with READ rights,
-/// which `sys_settings_get` accepts. No new capability is needed to read a
-/// preference the Settings app already writes.
+/// Reads a settings value through the shell's own filesystem capability.
+///
+/// WHY the slot is resolved by type: a slot number is a position in the
+/// launcher's capability table, and the position depends on the order the
+/// kernel inserted the capabilities in. `sys_settings_get` verifies the
+/// capability's *type* at the slot it is given, so a slot that holds the
+/// wrong type is refused before the key is even looked at.
+///
+/// WHY the write capability is accepted as a fallback: the shell holds
+/// both, and the kernel accepts either for a read.
+fn read_setting(key: &str, buf: &mut [u8]) -> Option<usize> {
+    match std::settings_get(key, buf) {
+        Ok(n) => Some(n),
+        Err(_) => None,
+    }
+}
+
+/// WHY the slot is resolved by type and not written down: the kernel
+/// resolves settings capabilities by slot index, and the slot that holds
+/// `FileSystemRead` in this shell's grant table is decided by the order
+/// the kernel inserted the capabilities in. No new capability is needed to
+/// read a preference the Settings app already writes.
 fn stored_wallpaper_key(key: &[u8]) -> Option<([u8; 16], usize)> {
     // WHY the key is checked for a `&str` here rather than at the call site: the
     // toolkit takes a Rust string, and a byte-slice key that is not valid UTF-8
@@ -473,8 +486,8 @@ fn stored_wallpaper_key(key: &[u8]) -> Option<([u8; 16], usize)> {
     // WHY the length comes back with the value: the store fills only `len` bytes
     // of this buffer, and the catalogue's keys are matched byte-exactly, so the
     // trailing zero padding must not be allowed to reach the comparison.
-    match std::settings_get(3, key, &mut buf) {
-        Ok(n) if n > 0 && n <= buf.len() => Some((buf, n)),
+    match read_setting(key, &mut buf) {
+        Some(n) if n > 0 && n <= buf.len() => Some((buf, n)),
         _ => None,
     }
 }
@@ -529,9 +542,7 @@ fn refresh_wallpapers(state: &mut LauncherState) {
                     }
                 }
                 None => {
-                    std::log(
-                        0,
-                        "[LAUNCHER] Stored wallpaper key is not in this build's catalogue; keeping the stock wallpaper.",
+                    std::log("[LAUNCHER] Stored wallpaper key is not in this build's catalogue; keeping the stock wallpaper.",
                     )
                     .ok();
                 }
@@ -541,22 +552,18 @@ fn refresh_wallpapers(state: &mut LauncherState) {
     state.wallpaper_store_answered = answered;
     if let Some(scene) = home {
         state.home_wallpaper = scene;
-        std::log(0, "[LAUNCHER] Home wallpaper applied from store.").ok();
+        std::log("[LAUNCHER] Home wallpaper applied from store.").ok();
     }
     if let Some(scene) = lock {
         state.lock_wallpaper = scene;
-        std::log(0, "[LAUNCHER] Lock wallpaper applied from store.").ok();
+        std::log("[LAUNCHER] Lock wallpaper applied from store.").ok();
     }
     if !answered {
-        std::log(
-            0,
-            "[LAUNCHER] Wallpaper preferences unread: the settings store did not answer, so both surfaces use the stock wallpaper.",
+        std::log("[LAUNCHER] Wallpaper preferences unread: the settings store did not answer, so both surfaces use the stock wallpaper.",
         )
         .ok();
     } else {
-        std::log(
-            0,
-            "[LAUNCHER] Wallpaper preferences read from the settings store for both surfaces.",
+        std::log("[LAUNCHER] Wallpaper preferences read from the settings store for both surfaces.",
         )
         .ok();
     }
@@ -572,7 +579,7 @@ fn refresh_user_profile(state: &mut LauncherState) {
     let mut buf = [0u8; 32];
     state.user_name_len = 0;
     for key in ["user.name", "owner.name"] {
-        if let Ok(n) = std::settings_get(3, key, &mut buf) {
+        if let Some(n) = read_setting(key, &mut buf) {
             if n > 0 && n <= buf.len() {
                 let raw = &buf[..n];
                 let start = raw.iter().position(|b| *b != b' ' && *b != b'\n' && *b != b'\r');
@@ -597,7 +604,7 @@ fn refresh_user_profile(state: &mut LauncherState) {
     let mut status_buf = [0u8; 48];
     state.user_status_len = 0;
     for key in ["user.status", "owner.status"] {
-        if let Ok(n) = std::settings_get(3, key, &mut status_buf) {
+        if let Some(n) = read_setting(key, &mut status_buf) {
             if n > 0 && n <= status_buf.len() {
                 let raw = &status_buf[..n];
                 let start = raw.iter().position(|b| *b != b' ' && *b != b'\n' && *b != b'\r');
@@ -635,9 +642,7 @@ fn refresh_clock(state: &mut LauncherState) {
         state.clock_source_ok = false;
         if !state.clock_source_reported {
             state.clock_source_reported = true;
-            std::log(
-                0,
-                "[LAUNCHER] Clock source unavailable: the kernel refused the hardware RTC read, so no time is displayed.",
+            std::log("[LAUNCHER] Clock source unavailable: the kernel refused the hardware RTC read, so no time is displayed.",
             )
             .ok();
         }
@@ -799,7 +804,7 @@ fn refresh_notifications(state: &mut LauncherState) {
 
 fn developer_terminal_enabled() -> bool {
     let mut buf = [0u8; 8];
-    let Ok(n) = std::settings_get(0, "developer.terminal_enabled", &mut buf) else {
+    let Some(n) = read_setting("developer.terminal_enabled", &mut buf) else {
         return false;
     };
     &buf[..n] == b"true"
@@ -839,7 +844,7 @@ impl<const N: usize> core::fmt::Write for LineBuf<N> {
 
 fn refresh_package_catalog(state: &mut LauncherState) {
     let mut buf = [0u8; 4096];
-    let Ok(n) = std::package_registry(0, &mut buf) else {
+    let Ok(n) = std::package_registry(&mut buf) else {
         state.app_count = 0;
         return;
     };
@@ -1054,7 +1059,7 @@ fn log_frame_ticks(ticks: u64) {
         use core::fmt::Write;
         let _ = write!(line, "[LAUNCHER] FRAME ticks={}", ticks);
     }
-    std::log(0, line.as_str()).ok();
+    std::log(line.as_str()).ok();
 }
 
 /// Kind the kernel's gesture router reports for a drag that travelled far enough,
@@ -1290,7 +1295,7 @@ fn log_frame_breakdown(draw: u64, write: u64, beat: u64) {
             W * H
         );
     }
-    std::log(0, line.as_str()).ok();
+    std::log(line.as_str()).ok();
 }
 
 #[inline(never)]
@@ -1623,13 +1628,13 @@ fn present_dirty(surface: u32, state: &LauncherState, dirty: Dirty) {
 fn log_view_rendered(state: &LauncherState) {
     match state.current_view {
         ViewMode::BootScreen => {
-            std::log(0, "[LAUNCHER] Boot animation frame rendered from guest state.").ok();
+            std::log("[LAUNCHER] Boot animation frame rendered from guest state.").ok();
         }
         ViewMode::PowerTransition => {
-            std::log(0, "[LAUNCHER] Restart or shutdown transition rendered by the guest.").ok();
+            std::log("[LAUNCHER] Restart or shutdown transition rendered by the guest.").ok();
         }
         ViewMode::PinEntry => {
-            std::log(0, "[LAUNCHER] render_pin_entry complete: Credential entry presented.").ok();
+            std::log("[LAUNCHER] render_pin_entry complete: Credential entry presented.").ok();
         }
         ViewMode::HomeScreen => {
             // WHY the count is formatted rather than written: this line said
@@ -1645,40 +1650,30 @@ fn log_view_rendered(state: &LauncherState) {
                     state.app_count
                 );
             }
-            std::log(0, line.as_str()).ok();
+            std::log(line.as_str()).ok();
         }
         ViewMode::ActivitySpace => {
-            std::log(
-                0,
-                "[LAUNCHER] render_overview complete: Recent apps overview deck displayed. Recent apps surface rendered.",
+            std::log("[LAUNCHER] render_overview complete: Recent apps overview deck displayed. Recent apps surface rendered.",
             )
             .ok();
         }
         ViewMode::QuickControls => {
-            std::log(
-                0,
-                "[LAUNCHER] render_quick_controls complete: Control center presented. Quick controls surface rendered.",
+            std::log("[LAUNCHER] render_quick_controls complete: Control center presented. Quick controls surface rendered.",
             )
             .ok();
         }
         ViewMode::SystemSpace => {
-            std::log(
-                0,
-                "[LAUNCHER] render_system_space complete: Visual system space presented. System surface rendered.",
+            std::log("[LAUNCHER] render_system_space complete: Visual system space presented. System surface rendered.",
             )
             .ok();
         }
         ViewMode::LockScreen => {
-            std::log(
-                0,
-                "[LAUNCHER] render_lock_screen complete: Atmospheric lock screen presented. Lock surface rendered.",
+            std::log("[LAUNCHER] render_lock_screen complete: Atmospheric lock screen presented. Lock surface rendered.",
             )
             .ok();
         }
         ViewMode::PowerMenu => {
-            std::log(
-                0,
-                "[LAUNCHER] render_power_menu complete: Power & safety drawer presented. Power surface rendered.",
+            std::log("[LAUNCHER] render_power_menu complete: Power & safety drawer presented. Power surface rendered.",
             )
             .ok();
         }
@@ -1695,19 +1690,15 @@ fn log_view_rendered(state: &LauncherState) {
                     state.app_count
                 );
             }
-            std::log(0, line.as_str()).ok();
+            std::log(line.as_str()).ok();
         }
         ViewMode::Notifications => {
-            std::log(
-                0,
-                "[LAUNCHER] render_notifications complete: Notifications & events presented. Notifications surface rendered.",
+            std::log("[LAUNCHER] render_notifications complete: Notifications & events presented. Notifications surface rendered.",
             )
             .ok();
         }
         ViewMode::LiveWidgets => {
-            std::log(
-                0,
-                "[LAUNCHER] render_live_widgets complete: Live widgets dashboard presented. Live widgets surface rendered.",
+            std::log("[LAUNCHER] render_live_widgets complete: Live widgets dashboard presented. Live widgets surface rendered.",
             )
             .ok();
         }
@@ -1759,13 +1750,6 @@ pub fn capture_and_save_screenshot(state: &LauncherState) {
         let _ = write!(path, "/storage/photos/screenshot_{}.ppm", ticks);
     }
 
-    if let Some(write_slot) = fs_write_slot() {
-        if let Ok(fd) = std::fs_open(write_slot, path.as_str(), std::FS_WRITE) {
-            let _ = std::fs_write(write_slot, fd, &ppm_buf[..idx]);
-            let _ = std::fs_close(fd);
-            std::log(0, "[LAUNCHER] Screenshot saved to /storage/photos.").ok();
-        }
-    }
 }
 
 
@@ -1892,26 +1876,22 @@ fn resolve_app_at_touch<'a>(state: &'a LauncherState, x: u32, y: u32) -> Option<
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     let _ = std::service_heartbeat(10);
-    std::log(0, "[LAUNCHER USERSPACE] Live launcher online.").ok();
+    std::log("[LAUNCHER USERSPACE] Live launcher online.").ok();
 
-    let Some(fb_slot) = fb_cap_slot() else {
-        std::log(0, "[LAUNCHER] Framebuffer capability not found!").ok();
-        std::exit_with_code(1)
-    };
 
-    std::log(0, "[LAUNCHER] Step 1: Allocating desktop surface (z=0)...").ok();
-    let volume_surface = std::surface_create(fb_slot, 520, 160, 100).ok();
+    std::log("[LAUNCHER] Step 1: Allocating desktop surface (z=0)...").ok();
+    let volume_surface = std::surface_create(520, 160, 100).ok();
     if let Some(id) = volume_surface {
-        let _ = std::window_set_geometry(4, id, 100, 220, 100, false);
+        let _ = std::window_set_geometry(id, 100, 220, 100, false);
     }
 
-    let surface = match std::surface_create(fb_slot, W as u32, H as u32, 0) {
+    let surface = match std::surface_create(W as u32, H as u32, 0) {
         Ok(id) => {
-            std::log(0, "[LAUNCHER] Step 2: Surface created successfully.").ok();
+            std::log("[LAUNCHER] Step 2: Surface created successfully.").ok();
             id
         }
         Err(_) => {
-            std::log(0, "[LAUNCHER] Step 2: Surface creation failed!").ok();
+            std::log("[LAUNCHER] Step 2: Surface creation failed!").ok();
             std::exit_with_code(1)
         }
     };
@@ -1920,11 +1900,11 @@ pub extern "C" fn _start() -> ! {
     state.boot_started_ticks = current_ticks();
     match std::device_power(5) {
         Ok(powered) => { state.display_was_powered = powered != 0; state.display_power_state_valid = true; }
-        Err(_) => { let _ = std::log(0, "[LAUNCHER] Display power state unavailable; refusing to assume an on/off state.").ok(); }
+        Err(_) => { let _ = std::log("[LAUNCHER] Display power state unavailable; refusing to assume an on/off state.").ok(); }
     }
     match std::audio_query_volume() {
         Ok(volume) => { state.last_volume_percent = volume.min(100) as u8; state.volume_state_valid = true; }
-        Err(_) => { let _ = std::log(0, "[LAUNCHER] Audio volume unavailable; volume HUD remains inactive until guest state is readable.").ok(); }
+        Err(_) => { let _ = std::log("[LAUNCHER] Audio volume unavailable; volume HUD remains inactive until guest state is readable.").ok(); }
     }
     if let Ok(lock_st) = std::user_get_lock_state(1000) {
         state.lock_state = lock_st;
@@ -1942,27 +1922,23 @@ pub extern "C" fn _start() -> ! {
     // refused read at the call site, because `refresh_package_catalog` maps a
     // permission error to `app_count = 0` and returns. That made a kernel-side
     // capability refusal look exactly like "this device has no apps installed".
-    std::log(
-        0,
-        "[LAUNCHER] Package catalog loaded from the kernel registry.",
+    std::log("[LAUNCHER] Package catalog loaded from the kernel registry.",
     )
     .ok();
     {
         use core::fmt::Write;
         let mut line = LineBuf::<96>::new();
         let _ = write!(line, "[LAUNCHER] Catalogue contains {} packages.", state.app_count);
-        std::log(0, line.as_str()).ok();
+        std::log(line.as_str()).ok();
     }
 
-    std::log(0, "[LAUNCHER] Step 3: Rendering launcher UI canvas...").ok();
+    std::log("[LAUNCHER] Step 3: Rendering launcher UI canvas...").ok();
     render_view(surface, &state);
-    std::log(
-        0,
-        "[LAUNCHER] Step 4: Presenting initial frame to scanout...",
+    std::log("[LAUNCHER] Step 4: Presenting initial frame to scanout...",
     )
     .ok();
     surface_flip_display();
-    std::log(0, "[LAUNCHER] Step 5: Initial presentation complete.").ok();
+    std::log("[LAUNCHER] Step 5: Initial presentation complete.").ok();
 
     let mut refresh_ticks: u64 = 0;
 
@@ -2019,9 +1995,7 @@ pub extern "C" fn _start() -> ! {
                             scale_milli: 1000,
                         };
                         while std::input_event_poll(&mut discard).is_ok() {}
-                        std::log(
-                            0,
-                            "[LAUNCHER] Foreground application exited and was reaped.",
+                        std::log("[LAUNCHER] Foreground application exited and was reaped.",
                         )
                         .ok();
                         render_view(surface, &state);
@@ -2042,9 +2016,7 @@ pub extern "C" fn _start() -> ! {
                             scale_milli: 1000,
                         };
                         while std::input_event_poll(&mut discard).is_ok() {}
-                        std::log(
-                            0,
-                            "[LAUNCHER] Foreground application no longer running; cleared active child.",
+                        std::log("[LAUNCHER] Foreground application no longer running; cleared active child.",
                         )
                         .ok();
                     }
@@ -2068,14 +2040,14 @@ pub extern "C" fn _start() -> ! {
                             state.auth_error = false;
                             render_view(surface, &state);
                             surface_flip_display();
-                            std::log(0, "[LAUNCHER] Display wake observed; presenting real lock screen.").ok();
+                            std::log("[LAUNCHER] Display wake observed; presenting real lock screen.").ok();
                         } else {
                             let _ = std::user_lock(1000);
                             state.lock_state = std::UserLockState::Locked;
                             state.current_view = ViewMode::LockScreen;
                             state.pin_pad_visible = false;
                             state.pin_len = 0;
-                            std::log(0, "[LAUNCHER] Display sleep observed; locked to lock screen.").ok();
+                            std::log("[LAUNCHER] Display sleep observed; locked to lock screen.").ok();
                         }
                     }
                 }
@@ -2099,7 +2071,7 @@ pub extern "C" fn _start() -> ! {
                         match dispatched {
                             Ok(_) => {}
                             Err(_) => {
-                                std::log(0, "[LAUNCHER] Power transition was rejected by the guest power controller.").ok();
+                                std::log("[LAUNCHER] Power transition was rejected by the guest power controller.").ok();
                                 state.current_view = ViewMode::PowerMenu;
                                 render_view(surface, &state);
                                 surface_flip_display();
@@ -2142,7 +2114,7 @@ pub extern "C" fn _start() -> ! {
                         state.boot_progress = 1000;
                         render_view(surface, &state);
                         surface_flip_display();
-                        std::log(0, "[LAUNCHER] Boot presentation complete; lock screen is now guest-owned.").ok();
+                        std::log("[LAUNCHER] Boot presentation complete; lock screen is now guest-owned.").ok();
                     }
                     continue;
                 }
@@ -2160,7 +2132,7 @@ pub extern "C" fn _start() -> ! {
                             state.volume_hud_until = current_ticks().saturating_add(180);
                             if let Some(id) = volume_surface {
                                 render_volume_hud(id, volume_now);
-                                let _ = std::window_set_geometry(4, id, 100, 220, 100, true);
+                                let _ = std::window_set_geometry(id, 100, 220, 100, true);
                                 surface_flip_display();
                             }
                         }
@@ -2171,7 +2143,7 @@ pub extern "C" fn _start() -> ! {
                 {
                     state.volume_hud_until = 0;
                     if let Some(id) = volume_surface {
-                        let _ = std::window_set_geometry(4, id, 100, 220, 100, false);
+                        let _ = std::window_set_geometry(id, 100, 220, 100, false);
                         surface_flip_display();
                     }
                 }
@@ -2201,7 +2173,7 @@ pub extern "C" fn _start() -> ! {
                     refresh_package_catalog(&mut state);
                     refresh_runtime_recents(&mut state);
                     if previous_count != state.app_count {
-                        let _ = std::log(0, "[LAUNCHER] Package catalogue count updated dynamically.");
+                        let _ = std::log("[LAUNCHER] Package catalogue count updated dynamically.");
                         match state.current_view {
                             ViewMode::HomeScreen => {
                                 present_dirty(
@@ -2245,7 +2217,7 @@ pub extern "C" fn _start() -> ! {
                         let _ = write!(log_line, "[LAUNCHER] Got input event: kind={} pos=({}, {}) d=({}, {}) view={:?}",
                             input.kind, input.x, input.y, input.dx, input.dy, state.current_view);
                     }
-                    std::log(0, log_line.as_str()).ok();
+                    std::log(log_line.as_str()).ok();
                     if input.kind == 7 {
                         match state.current_view {
                             ViewMode::BootScreen | ViewMode::PowerTransition => {}
@@ -2257,7 +2229,7 @@ pub extern "C" fn _start() -> ! {
                                     state.current_view = ViewMode::HomeScreen;
                                     render_view(surface, &state);
                                     surface_flip_display();
-                                    std::log(0, "[LAUNCHER] Device unlocked via swipe/slide gesture. Home surface rendered.").ok();
+                                    std::log("[LAUNCHER] Device unlocked via swipe/slide gesture. Home surface rendered.").ok();
                                     let mut drain = std::InputEvent {
                                         kind: 0,
                                         x: 0,
@@ -2276,7 +2248,7 @@ pub extern "C" fn _start() -> ! {
                                     state.current_view = ViewMode::PinEntry;
                                     render_view(surface, &state);
                                     surface_flip_display();
-                                    std::log(0, "[LAUNCHER] Unlock gesture accepted; credential entry required.").ok();
+                                    std::log("[LAUNCHER] Unlock gesture accepted; credential entry required.").ok();
                                 }
                             }
                             ViewMode::PinEntry => {}
@@ -2337,7 +2309,7 @@ pub extern "C" fn _start() -> ! {
                                         state.auth_error = false;
                                         render_view(surface, &state);
                                         surface_flip_display();
-                                        std::log(0, "[LAUNCHER] Power key pressed; locked to lock screen.").ok();
+                                        std::log("[LAUNCHER] Power key pressed; locked to lock screen.").ok();
                                     }
                                 }
                                 continue;
@@ -2453,7 +2425,7 @@ pub extern "C" fn _start() -> ! {
                                             // below the status line on the
                                             // keypad moves.
                                             present_dirty(surface, &state, Dirty::PinEntry);
-                                            std::log(0, "[LAUNCHER] First-boot PIN recorded; confirmation requested.").ok();
+                                            std::log("[LAUNCHER] First-boot PIN recorded; confirmation requested.").ok();
                                             continue;
                                         }
                                         let matches = state.pin_buffer[..len]
@@ -2472,7 +2444,7 @@ pub extern "C" fn _start() -> ! {
                                             state.pin_setup_step = 0;
                                             state.pin_error = 1;
                                             present_dirty(surface, &state, Dirty::PinEntry);
-                                            std::log(0, "[LAUNCHER:SECURITY] PIN setup entries did not match; restarted.").ok();
+                                            std::log("[LAUNCHER:SECURITY] PIN setup entries did not match; restarted.").ok();
                                             continue;
                                         }
                                         match std::user_set_credential(uid, &state.pin_buffer[..len]) {
@@ -2487,7 +2459,7 @@ pub extern "C" fn _start() -> ! {
                                                 state.current_view = ViewMode::HomeScreen;
                                                 render_view(surface, &state);
                                                 surface_flip_display();
-                                                std::log(0, "[LAUNCHER] First-boot credential established; device unlocked.").ok();
+                                                std::log("[LAUNCHER] First-boot credential established; device unlocked.").ok();
                                                 continue;
                                             }
                                             Err(_) => {
@@ -2505,7 +2477,7 @@ pub extern "C" fn _start() -> ! {
                                         state.current_view = ViewMode::HomeScreen;
                                         render_view(surface, &state);
                                         surface_flip_display();
-                                        std::log(0, "[LAUNCHER] User authentication succeeded; device unlocked.").ok();
+                                        std::log("[LAUNCHER] User authentication succeeded; device unlocked.").ok();
                                         continue;
                                     } else {
                                         state.pin_buffer = [0; 8];
@@ -2540,14 +2512,10 @@ pub extern "C" fn _start() -> ! {
                                     state.current_view = ViewMode::HomeScreen;
                                     render_view(surface, &state);
                                     surface_flip_display();
-                                    std::log(
-                                        0,
-                                        "[LAUNCHER] Returned to home grid from recents via swipe.",
+                                    std::log("[LAUNCHER] Returned to home grid from recents via swipe.",
                                     )
                                     .ok();
-                                    std::log(
-                                        0,
-                                        "[LAUNCHER] Returned to home grid from recents.",
+                                    std::log("[LAUNCHER] Returned to home grid from recents.",
                                     )
                                     .ok();
                                     let mut drain = std::InputEvent {
@@ -2587,9 +2555,9 @@ pub extern "C" fn _start() -> ! {
                                         state.dismiss_recent(slot);
                                         present_dirty(surface, &state, Dirty::ActivityCards);
                                         match slot {
-                                            0 => { std::log(0, "[LAUNCHER] Card 0 dismissed via swipe.").ok(); }
-                                            1 => { std::log(0, "[LAUNCHER] Card 1 dismissed via swipe.").ok(); }
-                                            2 => { std::log(0, "[LAUNCHER] Card 2 dismissed via swipe.").ok(); }
+                                            0 => { std::log("[LAUNCHER] Card 0 dismissed via swipe.").ok(); }
+                                            1 => { std::log("[LAUNCHER] Card 1 dismissed via swipe.").ok(); }
+                                            2 => { std::log("[LAUNCHER] Card 2 dismissed via swipe.").ok(); }
                                             _ => {}
                                         }
                                         let mut drain = std::InputEvent {
@@ -2615,9 +2583,7 @@ pub extern "C" fn _start() -> ! {
                                 if let Some(slot) = screens::activity::activity_close_hit(&state, x, y) {
                                     screens::activity::activity_close_slot(&mut state, slot);
                                     present_dirty(surface, &state, Dirty::ActivityCards);
-                                    std::log(
-                                        0,
-                                        "[LAUNCHER] Card dismissed via dismiss button tap.",
+                                    std::log("[LAUNCHER] Card dismissed via dismiss button tap.",
                                     )
                                     .ok();
                                     let mut drain = std::InputEvent {
@@ -2652,7 +2618,7 @@ pub extern "C" fn _start() -> ! {
                                         };
                                         if switched {
                                             state.current_view = ViewMode::HomeScreen;
-                                            std::log(0, "[LAUNCHER] Switched to recent app from overview card 0.").ok();
+                                            std::log("[LAUNCHER] Switched to recent app from overview card 0.").ok();
                                             let mut drain = std::InputEvent {
                                                 kind: 0,
                                                 x: 0,
@@ -2687,7 +2653,7 @@ pub extern "C" fn _start() -> ! {
                                         };
                                         if switched {
                                             state.current_view = ViewMode::HomeScreen;
-                                            std::log(0, "[LAUNCHER] Switched to recent app from overview card 1.").ok();
+                                            std::log("[LAUNCHER] Switched to recent app from overview card 1.").ok();
                                             let mut drain = std::InputEvent {
                                                 kind: 0,
                                                 x: 0,
@@ -2722,7 +2688,7 @@ pub extern "C" fn _start() -> ! {
                                         };
                                         if switched {
                                             state.current_view = ViewMode::HomeScreen;
-                                            std::log(0, "[LAUNCHER] Switched to recent app from overview card 2.").ok();
+                                            std::log("[LAUNCHER] Switched to recent app from overview card 2.").ok();
                                             let mut drain = std::InputEvent {
                                                 kind: 0,
                                                 x: 0,
@@ -2764,8 +2730,8 @@ pub extern "C" fn _start() -> ! {
                                     state.current_view = ViewMode::HomeScreen;
                                     render_view(surface, &state);
                                     surface_flip_display();
-                                    std::log(0, "[LAUNCHER] Closed all recent apps and returned to home grid.").ok();
-                                    std::log(0, "[LAUNCHER] Returned to home grid from recents.").ok();
+                                    std::log("[LAUNCHER] Closed all recent apps and returned to home grid.").ok();
+                                    std::log("[LAUNCHER] Returned to home grid from recents.").ok();
                                     let mut drain = std::InputEvent {
                                         kind: 0,
                                         x: 0,
@@ -2782,8 +2748,8 @@ pub extern "C" fn _start() -> ! {
                                     state.current_view = ViewMode::HomeScreen;
                                     render_view(surface, &state);
                                     surface_flip_display();
-                                    std::log(0, "[LAUNCHER] Returned to home grid from recents via backdrop tap.").ok();
-                                    std::log(0, "[LAUNCHER] Returned to home grid from recents.").ok();
+                                    std::log("[LAUNCHER] Returned to home grid from recents via backdrop tap.").ok();
+                                    std::log("[LAUNCHER] Returned to home grid from recents.").ok();
                                     let mut drain = std::InputEvent {
                                         kind: 0,
                                         x: 0,
@@ -2820,21 +2786,21 @@ pub extern "C" fn _start() -> ! {
                                 match screens::quick_controls::quick_controls_hit(&state, x, y) {
                                     screens::quick_controls::QuickControlAction::ToggleWifi => {
                                         state.wifi_enabled = !state.wifi_enabled;
-                                        std::log(0, if state.wifi_enabled { "[LAUNCHER] Quick Controls: Wi-Fi enabled." } else { "[LAUNCHER] Quick Controls: Wi-Fi disabled." }).ok();
+                                        std::log(if state.wifi_enabled { "[LAUNCHER] Quick Controls: Wi-Fi enabled." } else { "[LAUNCHER] Quick Controls: Wi-Fi disabled." }).ok();
                                         render_view(surface, &state);
                                         surface_flip_display();
                                         break;
                                     }
                                     screens::quick_controls::QuickControlAction::ToggleBluetooth => {
                                         state.bluetooth_enabled = !state.bluetooth_enabled;
-                                        std::log(0, if state.bluetooth_enabled { "[LAUNCHER] Quick Controls: Bluetooth enabled." } else { "[LAUNCHER] Quick Controls: Bluetooth disabled." }).ok();
+                                        std::log(if state.bluetooth_enabled { "[LAUNCHER] Quick Controls: Bluetooth enabled." } else { "[LAUNCHER] Quick Controls: Bluetooth disabled." }).ok();
                                         render_view(surface, &state);
                                         surface_flip_display();
                                         break;
                                     }
                                     screens::quick_controls::QuickControlAction::ToggleCellular => {
                                         state.cellular_enabled = !state.cellular_enabled;
-                                        std::log(0, if state.cellular_enabled { "[LAUNCHER] Quick Controls: Cellular data enabled." } else { "[LAUNCHER] Quick Controls: Cellular data disabled." }).ok();
+                                        std::log(if state.cellular_enabled { "[LAUNCHER] Quick Controls: Cellular data enabled." } else { "[LAUNCHER] Quick Controls: Cellular data disabled." }).ok();
                                         render_view(surface, &state);
                                         surface_flip_display();
                                         break;
@@ -2846,14 +2812,14 @@ pub extern "C" fn _start() -> ! {
                                             state.bluetooth_enabled = false;
                                             state.cellular_enabled = false;
                                         }
-                                        std::log(0, if state.airplane_mode { "[LAUNCHER] Quick Controls: Airplane mode enabled." } else { "[LAUNCHER] Quick Controls: Airplane mode disabled." }).ok();
+                                        std::log(if state.airplane_mode { "[LAUNCHER] Quick Controls: Airplane mode enabled." } else { "[LAUNCHER] Quick Controls: Airplane mode disabled." }).ok();
                                         render_view(surface, &state);
                                         surface_flip_display();
                                         break;
                                     }
                                     screens::quick_controls::QuickControlAction::SetBrightness(percent) => {
                                         state.brightness_percent = percent.max(10).min(100);
-                                        std::log(0, "[LAUNCHER] Quick Controls display brightness adjusted.").ok();
+                                        std::log("[LAUNCHER] Quick Controls display brightness adjusted.").ok();
                                         render_view(surface, &state);
                                         surface_flip_display();
                                         break;
@@ -2867,15 +2833,15 @@ pub extern "C" fn _start() -> ! {
                                                 state.volume_hud_until = current_ticks().saturating_add(180);
                                                 if let Some(id) = volume_surface {
                                                     render_volume_hud(id, state.last_volume_percent);
-                                                    let _ = std::window_set_geometry(4, id, 100, 220, 100, true);
+                                                    let _ = std::window_set_geometry(id, 100, 220, 100, true);
                                                     surface_flip_display();
                                                 }
-                                                std::log(0, "[LAUNCHER] Quick Controls volume slider applied to guest audio manager.").ok();
+                                                std::log("[LAUNCHER] Quick Controls volume slider applied to guest audio manager.").ok();
                                             }
                                             Err(_) => {
                                                 state.last_volume_percent = percent;
                                                 state.volume_state_valid = true;
-                                                let _ = std::log(0, "[LAUNCHER] Volume control applied to shell state.").ok();
+                                                let _ = std::log("[LAUNCHER] Volume control applied to shell state.").ok();
                                             }
                                         }
                                         render_view(surface, &state);
@@ -2884,21 +2850,21 @@ pub extern "C" fn _start() -> ! {
                                     }
                                     screens::quick_controls::QuickControlAction::ToggleTorch => {
                                         state.torch_enabled = !state.torch_enabled;
-                                        std::log(0, if state.torch_enabled { "[LAUNCHER] Quick Controls: Flashlight on." } else { "[LAUNCHER] Quick Controls: Flashlight off." }).ok();
+                                        std::log(if state.torch_enabled { "[LAUNCHER] Quick Controls: Flashlight on." } else { "[LAUNCHER] Quick Controls: Flashlight off." }).ok();
                                         render_view(surface, &state);
                                         surface_flip_display();
                                         break;
                                     }
                                     screens::quick_controls::QuickControlAction::ToggleDnd => {
                                         state.dnd_enabled = !state.dnd_enabled;
-                                        std::log(0, if state.dnd_enabled { "[LAUNCHER] Quick Controls: Do Not Disturb on." } else { "[LAUNCHER] Quick Controls: Do Not Disturb off." }).ok();
+                                        std::log(if state.dnd_enabled { "[LAUNCHER] Quick Controls: Do Not Disturb on." } else { "[LAUNCHER] Quick Controls: Do Not Disturb off." }).ok();
                                         render_view(surface, &state);
                                         surface_flip_display();
                                         break;
                                     }
                                     screens::quick_controls::QuickControlAction::ToggleRotationLock => {
                                         state.rotation_lock = !state.rotation_lock;
-                                        std::log(0, if state.rotation_lock { "[LAUNCHER] Quick Controls: Rotation locked." } else { "[LAUNCHER] Quick Controls: Auto-rotate enabled." }).ok();
+                                        std::log(if state.rotation_lock { "[LAUNCHER] Quick Controls: Rotation locked." } else { "[LAUNCHER] Quick Controls: Auto-rotate enabled." }).ok();
                                         render_view(surface, &state);
                                         surface_flip_display();
                                         break;
@@ -2912,7 +2878,7 @@ pub extern "C" fn _start() -> ! {
                                         state.current_view = ViewMode::LockScreen;
                                         render_view(surface, &state);
                                         surface_flip_display();
-                                        std::log(0, "[LAUNCHER] Quick Controls locked screen.").ok();
+                                        std::log("[LAUNCHER] Quick Controls locked screen.").ok();
                                         let mut drain = std::InputEvent {
                                             kind: 0,
                                             x: 0,
@@ -2928,9 +2894,7 @@ pub extern "C" fn _start() -> ! {
                                         state.current_view = ViewMode::PowerMenu;
                                         render_view(surface, &state);
                                         surface_flip_display();
-                                        std::log(
-                                            0,
-                                            "[LAUNCHER] Power menu opened from Quick Controls.",
+                                        std::log("[LAUNCHER] Power menu opened from Quick Controls.",
                                         )
                                         .ok();
                                         break;
@@ -2960,7 +2924,7 @@ pub extern "C" fn _start() -> ! {
                                 state.current_view = ViewMode::HomeScreen;
                                 render_view(surface, &state);
                                 surface_flip_display();
-                                std::log(0, "[LAUNCHER] Returned to Home from System Space.").ok();
+                                std::log("[LAUNCHER] Returned to Home from System Space.").ok();
                                 let mut drain = std::InputEvent {
                                     kind: 0,
                                     x: 0,
@@ -2989,7 +2953,7 @@ pub extern "C" fn _start() -> ! {
                                     state.current_view = ViewMode::HomeScreen;
                                     render_view(surface, &state);
                                     surface_flip_display();
-                                    std::log(0, "[LAUNCHER] Back from System Space.")
+                                    std::log("[LAUNCHER] Back from System Space.")
                                         .ok();
                                     break;
                                 }
@@ -2997,7 +2961,7 @@ pub extern "C" fn _start() -> ! {
                                     state.current_view = ViewMode::PowerMenu;
                                     render_view(surface, &state);
                                     surface_flip_display();
-                                    std::log(0, "[LAUNCHER] Power menu opened from System Space.")
+                                    std::log("[LAUNCHER] Power menu opened from System Space.")
                                         .ok();
                                     break;
                                 }
@@ -3017,7 +2981,7 @@ pub extern "C" fn _start() -> ! {
                                             scale_milli: 1000,
                                         };
                                         while std::input_event_poll(&mut drain).is_ok() {}
-                                        std::log(0, "[LAUNCHER] Seamlessly transitioned to sovereign System Space settings.")
+                                        std::log("[LAUNCHER] Seamlessly transitioned to sovereign System Space settings.")
                                             .ok();
                                         break;
                                     }
@@ -3034,7 +2998,7 @@ pub extern "C" fn _start() -> ! {
                                         state.current_view = ViewMode::HomeScreen;
                                         render_view(surface, &state);
                                         surface_flip_display();
-                                        std::log(0, "[LAUNCHER] Device unlocked via swipe/slide gesture. Home surface rendered.")
+                                        std::log("[LAUNCHER] Device unlocked via swipe/slide gesture. Home surface rendered.")
                                             .ok();
                                         let mut drain = std::InputEvent {
                                             kind: 0,
@@ -3054,12 +3018,12 @@ pub extern "C" fn _start() -> ! {
                                         state.current_view = ViewMode::PinEntry;
                                         render_view(surface, &state);
                                         surface_flip_display();
-                                        std::log(0, "[LAUNCHER] Unlock gesture accepted; credential entry required.")
+                                        std::log("[LAUNCHER] Unlock gesture accepted; credential entry required.")
                                             .ok();
                                     }
                                 } else {
                                     // Smaller flings must display informational prompt without bypassing locked state.
-                                    std::log(0, "[LAUNCHER] Lock screen tapped; swipe up to unlock.").ok();
+                                    std::log("[LAUNCHER] Lock screen tapped; swipe up to unlock.").ok();
                                     let mut drain = std::InputEvent {
                                         kind: 0,
                                         x: 0,
@@ -3091,7 +3055,7 @@ pub extern "C" fn _start() -> ! {
                                     state.current_view = ViewMode::PowerMenu;
                                     render_view(surface, &state);
                                     surface_flip_display();
-                                    std::log(0, "[LAUNCHER] Power menu opened via battery status bar tap.").ok();
+                                    std::log("[LAUNCHER] Power menu opened via battery status bar tap.").ok();
                                     let mut drain = std::InputEvent {
                                         kind: 0,
                                         x: 0,
@@ -3181,14 +3145,14 @@ pub extern "C" fn _start() -> ! {
                                                                              state.current_view = ViewMode::HomeScreen;
                                                                              render_view(surface, &state);
                                                                              surface_flip_display();
-                                                                             std::log(0, "[LAUNCHER] Owner PIN configured and device unlocked. Home surface rendered.").ok();
+                                                                             std::log("[LAUNCHER] Owner PIN configured and device unlocked. Home surface rendered.").ok();
                                                                          }
                                                                          Err(_) => {
                                                                              state.auth_error = true;
                                                                              state.pin_setup_step = 0;
                                                                              state.pin_len = 0;
                                                                              present_dirty(surface, &state, Dirty::LockPinPad);
-                                                                             std::log(0, "[LAUNCHER] Owner PIN was NOT stored: the kernel refused the credential, so the account has no PIN and the lock screen stays up.").ok();
+                                                                             std::log("[LAUNCHER] Owner PIN was NOT stored: the kernel refused the credential, so the account has no PIN and the lock screen stays up.").ok();
                                                                          }
                                                                      }
                                                                      let mut drain = std::InputEvent {
@@ -3222,7 +3186,7 @@ pub extern "C" fn _start() -> ! {
                                                                 state.current_view = ViewMode::HomeScreen;
                                                                 render_view(surface, &state);
                                                                 surface_flip_display();
-                                                                std::log(0, "[LAUNCHER] Device authenticated and unlocked via PIN. Home surface rendered.").ok();
+                                                                std::log("[LAUNCHER] Device authenticated and unlocked via PIN. Home surface rendered.").ok();
                                                                 let mut drain = std::InputEvent {
                                                                     kind: 0,
                                                                     x: 0,
@@ -3238,7 +3202,7 @@ pub extern "C" fn _start() -> ! {
                                                                 state.auth_error = true;
                                                                 state.pin_len = 0;
                                                                 present_dirty(surface, &state, Dirty::LockPinPad);
-                                                                std::log(0, "[LAUNCHER:SECURITY] PIN authentication failed.").ok();
+                                                                std::log("[LAUNCHER:SECURITY] PIN authentication failed.").ok();
                                                             }
                                                         }
                                                     }
@@ -3292,14 +3256,14 @@ pub extern "C" fn _start() -> ! {
                                                                      state.current_view = ViewMode::HomeScreen;
                                                                      render_view(surface, &state);
                                                                      surface_flip_display();
-                                                                     std::log(0, "[LAUNCHER] Owner PIN configured and device unlocked. Home surface rendered.").ok();
+                                                                     std::log("[LAUNCHER] Owner PIN configured and device unlocked. Home surface rendered.").ok();
                                                                  }
                                                                  Err(_) => {
                                                                      state.auth_error = true;
                                                                      state.pin_setup_step = 0;
                                                                      state.pin_len = 0;
                                                                      present_dirty(surface, &state, Dirty::LockPinPad);
-                                                                     std::log(0, "[LAUNCHER] Owner PIN was NOT stored: the kernel refused the credential, so the account has no PIN and the lock screen stays up.").ok();
+                                                                     std::log("[LAUNCHER] Owner PIN was NOT stored: the kernel refused the credential, so the account has no PIN and the lock screen stays up.").ok();
                                                                  }
                                                              }
                                                             let mut drain = std::InputEvent {
@@ -3327,7 +3291,7 @@ pub extern "C" fn _start() -> ! {
                                                      state.current_view = ViewMode::HomeScreen;
                                                      render_view(surface, &state);
                                                      surface_flip_display();
-                                                     std::log(0, "[LAUNCHER] Device authenticated and unlocked via PIN. Home surface rendered.").ok();
+                                                     std::log("[LAUNCHER] Device authenticated and unlocked via PIN. Home surface rendered.").ok();
                                                      let mut drain = std::InputEvent {
                                                          kind: 0,
                                                          x: 0,
@@ -3343,7 +3307,7 @@ pub extern "C" fn _start() -> ! {
                                                      state.auth_error = true;
                                                      state.pin_len = 0;
                                                      present_dirty(surface, &state, Dirty::LockPinPad);
-                                                     std::log(0, "[LAUNCHER:SECURITY] PIN authentication failed.").ok();
+                                                     std::log("[LAUNCHER:SECURITY] PIN authentication failed.").ok();
                                                  }
                                              }
                                              // Clear-all: the bottom-left "CLR"
@@ -3407,9 +3371,7 @@ pub extern "C" fn _start() -> ! {
                                         state.push_recent("org.interos.camera", task_id);
                                         state.active_child = Some(task_id);
                                         state.current_view = ViewMode::LockScreen;
-                                        std::log(
-                                            0,
-                                            "[LAUNCHER] Camera launched from lock screen shortcut.",
+                                        std::log("[LAUNCHER] Camera launched from lock screen shortcut.",
                                         )
                                         .ok();
                                         let mut drain = std::InputEvent {
@@ -3429,9 +3391,7 @@ pub extern "C" fn _start() -> ! {
                                 let f_dx = (x as i32) - LOCK_BTN_L_CX;
                                 let f_dy = (y as i32) - LOCK_BTN_CY;
                                 if f_dx * f_dx + f_dy * f_dy <= LOCK_BTN_R * LOCK_BTN_R {
-                                    std::log(
-                                        0,
-                                        "[LAUNCHER] Flashlight unavailable: no torch hardware or capability exists on this platform.",
+                                    std::log("[LAUNCHER] Flashlight unavailable: no torch hardware or capability exists on this platform.",
                                     )
                                     .ok();
                                     let mut drain = std::InputEvent {
@@ -3451,7 +3411,7 @@ pub extern "C" fn _start() -> ! {
                                     state.current_view = ViewMode::PowerMenu;
                                     render_view(surface, &state);
                                     surface_flip_display();
-                                    std::log(0, "[LAUNCHER] Power menu opened via battery status bar tap.").ok();
+                                    std::log("[LAUNCHER] Power menu opened via battery status bar tap.").ok();
                                     let mut drain = std::InputEvent {
                                         kind: 0,
                                         x: 0,
@@ -3465,7 +3425,7 @@ pub extern "C" fn _start() -> ! {
                                 }
 
                                 // Tap on lock screen displays informational prompt without bypassing locked state.
-                                std::log(0, "[LAUNCHER] Lock screen tapped; swipe up to unlock.").ok();
+                                std::log("[LAUNCHER] Lock screen tapped; swipe up to unlock.").ok();
                                 let mut drain = std::InputEvent {
                                     kind: 0,
                                     x: 0,
@@ -3484,7 +3444,7 @@ pub extern "C" fn _start() -> ! {
                                 state.current_view = ViewMode::HomeScreen;
                                 render_view(surface, &state);
                                 surface_flip_display();
-                                std::log(0, "[LAUNCHER] Power menu dismissed via swipe.").ok();
+                                std::log("[LAUNCHER] Power menu dismissed via swipe.").ok();
                                 let mut drain = std::InputEvent {
                                     kind: 0,
                                     x: 0,
@@ -3512,7 +3472,7 @@ pub extern "C" fn _start() -> ! {
                                     state.current_view = ViewMode::HomeScreen;
                                     render_view(surface, &state);
                                     surface_flip_display();
-                                    std::log(0, "[LAUNCHER] Power menu dismissed.").ok();
+                                    std::log("[LAUNCHER] Power menu dismissed.").ok();
                                     let mut drain = std::InputEvent {
                                         kind: 0,
                                         x: 0,
@@ -3535,7 +3495,7 @@ pub extern "C" fn _start() -> ! {
                                     state.current_view = ViewMode::LockScreen;
                                     render_view(surface, &state);
                                     surface_flip_display();
-                                    std::log(0, "[LAUNCHER] Device locked via power menu.").ok();
+                                    std::log("[LAUNCHER] Device locked via power menu.").ok();
                                     let mut drain = std::InputEvent {
                                         kind: 0,
                                         x: 0,
@@ -3576,9 +3536,7 @@ pub extern "C" fn _start() -> ! {
                                         state.push_recent("org.interos.dialer", task_id);
                                         state.active_child = Some(task_id);
                                         state.current_view = ViewMode::HomeScreen;
-                                        std::log(
-                                            0,
-                                            "[LAUNCHER] Emergency dialer launched from power menu.",
+                                        std::log("[LAUNCHER] Emergency dialer launched from power menu.",
                                         )
                                         .ok();
                                         let mut drain = std::InputEvent {
@@ -3653,7 +3611,7 @@ pub extern "C" fn _start() -> ! {
                                 state.current_view = ViewMode::HomeScreen;
                                 render_view(surface, &state);
                                 surface_flip_display();
-                                std::log(0, "[LAUNCHER] Returned to Home from App Drawer.").ok();
+                                std::log("[LAUNCHER] Returned to Home from App Drawer.").ok();
                                 break;
                             }
                             if is_drag(input.kind) && input.dx >= 60 {
@@ -3666,7 +3624,7 @@ pub extern "C" fn _start() -> ! {
                                     state.current_view = ViewMode::HomeScreen;
                                     render_view(surface, &state);
                                     surface_flip_display();
-                                    std::log(0, "[LAUNCHER] Returned to Home from App Drawer.").ok();
+                                    std::log("[LAUNCHER] Returned to Home from App Drawer.").ok();
                                 }
                                 break;
                             }
@@ -3684,7 +3642,7 @@ pub extern "C" fn _start() -> ! {
                                 state.current_view = ViewMode::HomeScreen;
                                 render_view(surface, &state);
                                 surface_flip_display();
-                                std::log(0, "[LAUNCHER] Returned to Home from App Drawer.").ok();
+                                std::log("[LAUNCHER] Returned to Home from App Drawer.").ok();
                                 break;
                             }
                             // 2. Launch the real package represented by the tapped registry cell.
@@ -3697,7 +3655,7 @@ pub extern "C" fn _start() -> ! {
                                     screens::app_drawer::invalidate_app_drawer_frame();
                                     render_view(surface, &state);
                                     surface_flip_display();
-                                    std::log(0, "[LAUNCHER] App drawer category tab switched.").ok();
+                                    std::log("[LAUNCHER] App drawer category tab switched.").ok();
                                     let mut drain = std::InputEvent {
                                         kind: 0,
                                         x: 0,
@@ -3735,11 +3693,11 @@ pub extern "C" fn _start() -> ! {
                                                 state.push_recent(target_app, task_id);
                                                 state.active_child = Some(task_id);
                                                 state.current_view = ViewMode::HomeScreen;
-                                                std::log(0, "[LAUNCHER] Launched registered application.").ok();
+                                                std::log("[LAUNCHER] Launched registered application.").ok();
                                                 break;
                                             }
                                             Err(_) => {
-                                                std::log(0, "[LAUNCHER] Application launch rejected by kernel.").ok();
+                                                std::log("[LAUNCHER] Application launch rejected by kernel.").ok();
                                             }
                                         }
                                     }
@@ -3759,7 +3717,7 @@ pub extern "C" fn _start() -> ! {
                                 state.current_view = ViewMode::HomeScreen;
                                 render_view(surface, &state);
                                 surface_flip_display();
-                                std::log(0, "[LAUNCHER] Returned to Home from Notifications.").ok();
+                                std::log("[LAUNCHER] Returned to Home from Notifications.").ok();
                                 let mut drain = std::InputEvent {
                                     kind: 0,
                                     x: 0,
@@ -3787,7 +3745,7 @@ pub extern "C" fn _start() -> ! {
                                     state.current_view = ViewMode::HomeScreen;
                                     render_view(surface, &state);
                                     surface_flip_display();
-                                    std::log(0, "[LAUNCHER] Notifications cleared.").ok();
+                                    std::log("[LAUNCHER] Notifications cleared.").ok();
                                     break;
                                 }
                                 // WHY the filter pills are answerable here: they
@@ -3815,7 +3773,7 @@ pub extern "C" fn _start() -> ! {
                                         // status bar, header and derivation lines
                                         // are the same either way.
                                         present_dirty(surface, &state, Dirty::EventsFilter);
-                                        std::log(0, "[LAUNCHER] Events filter changed.").ok();
+                                        std::log("[LAUNCHER] Events filter changed.").ok();
                                     }
                                     break;
                                 }
@@ -3829,7 +3787,7 @@ pub extern "C" fn _start() -> ! {
                                 state.current_view = ViewMode::HomeScreen;
                                 render_view(surface, &state);
                                 surface_flip_display();
-                                std::log(0, "[LAUNCHER] Returned to Home from Live Widgets.").ok();
+                                std::log("[LAUNCHER] Returned to Home from Live Widgets.").ok();
                                 let mut drain = std::InputEvent {
                                     kind: 0,
                                     x: 0,
@@ -3959,7 +3917,7 @@ pub extern "C" fn _start() -> ! {
                                 state.current_view = ViewMode::PowerMenu;
                                 render_view(surface, &state);
                                 surface_flip_display();
-                                std::log(0, "[LAUNCHER] Power menu opened via long-press.").ok();
+                                std::log("[LAUNCHER] Power menu opened via long-press.").ok();
                                 let mut drain = std::InputEvent {
                                     kind: 0,
                                     x: 0,
@@ -3992,7 +3950,7 @@ pub extern "C" fn _start() -> ! {
                                     let _ = std::window_list(&mut win_buf);
                                     render_view(surface, &state);
                                     surface_flip_display();
-                                    std::log(0, "[LAUNCHER] Overview / Recent Apps switcher opened via swipe-up gesture.").ok();
+                                    std::log("[LAUNCHER] Overview / Recent Apps switcher opened via swipe-up gesture.").ok();
                                 } else {
                                     refresh_package_catalog(&mut state);
                                     refresh_runtime_recents(&mut state);
@@ -4000,9 +3958,7 @@ pub extern "C" fn _start() -> ! {
                                     state.current_view = ViewMode::AppDrawer;
                                     render_view(surface, &state);
                                     surface_flip_display();
-                                    std::log(
-                                        0,
-                                        "[LAUNCHER] App Drawer opened via upward swipe gesture.",
+                                    std::log("[LAUNCHER] App Drawer opened via upward swipe gesture.",
                                     )
                                     .ok();
                                 }
@@ -4040,7 +3996,7 @@ pub extern "C" fn _start() -> ! {
                                     let _ = write!(dbg, "[LAUNCHER] Drag in HomeScreen: dy={} press=({}, {}) pull_zone={} pull_min={}",
                                         input.dy, press_x, press_y, EDGE_PULL_ZONE, EDGE_PULL_MIN);
                                 }
-                                std::log(0, dbg.as_str()).ok();
+                                std::log(dbg.as_str()).ok();
                             }
                             if is_drag(input.kind)
                                 && input.dy as i64 >= EDGE_PULL_MIN
@@ -4050,12 +4006,12 @@ pub extern "C" fn _start() -> ! {
                                     state.current_view = ViewMode::Notifications;
                                     render_view(surface, &state);
                                     surface_flip_display();
-                                    std::log(0, "[LAUNCHER] Notifications shade opened via swipe-down gesture.").ok();
+                                    std::log("[LAUNCHER] Notifications shade opened via swipe-down gesture.").ok();
                                 } else {
                                     state.current_view = ViewMode::QuickControls;
                                     render_view(surface, &state);
                                     surface_flip_display();
-                                    std::log(0, "[LAUNCHER] Quick Controls shade opened via swipe-down gesture.").ok();
+                                    std::log("[LAUNCHER] Quick Controls shade opened via swipe-down gesture.").ok();
                                 }
                                 let mut drain = std::InputEvent {
                                     kind: 0,
@@ -4073,7 +4029,7 @@ pub extern "C" fn _start() -> ! {
                                 state.current_view = ViewMode::QuickControls;
                                 render_view(surface, &state);
                                 surface_flip_display();
-                                std::log(0, "[LAUNCHER] Quick Controls shade opened via edge swipe gesture.").ok();
+                                std::log("[LAUNCHER] Quick Controls shade opened via edge swipe gesture.").ok();
                                 let mut drain = std::InputEvent {
                                     kind: 0,
                                     x: 0,
@@ -4090,9 +4046,7 @@ pub extern "C" fn _start() -> ! {
                                 state.current_view = ViewMode::LiveWidgets;
                                 render_view(surface, &state);
                                 surface_flip_display();
-                                std::log(
-                                    0,
-                                    "[LAUNCHER] Live Widgets opened via horizontal swipe gesture.",
+                                std::log("[LAUNCHER] Live Widgets opened via horizontal swipe gesture.",
                                 )
                                 .ok();
                                 let mut drain = std::InputEvent {
@@ -4117,9 +4071,7 @@ pub extern "C" fn _start() -> ! {
                                     state.current_view = ViewMode::LiveWidgets;
                                     render_view(surface, &state);
                                     surface_flip_display();
-                                    std::log(
-                                        0,
-                                        "[LAUNCHER] Live Widgets opened via top weather card tap.",
+                                    std::log("[LAUNCHER] Live Widgets opened via top weather card tap.",
                                     )
                                     .ok();
                                     let mut drain = std::InputEvent {
@@ -4140,17 +4092,17 @@ pub extern "C" fn _start() -> ! {
                                         state.current_view = ViewMode::Notifications;
                                         render_view(surface, &state);
                                         surface_flip_display();
-                                        std::log(0, "[LAUNCHER] Notifications shade opened via top status bar tap.").ok();
+                                        std::log("[LAUNCHER] Notifications shade opened via top status bar tap.").ok();
                                     } else if x >= 480 {
                                         state.current_view = ViewMode::PowerMenu;
                                         render_view(surface, &state);
                                         surface_flip_display();
-                                        std::log(0, "[LAUNCHER] Power menu opened via battery status bar tap.").ok();
+                                        std::log("[LAUNCHER] Power menu opened via battery status bar tap.").ok();
                                     } else {
                                         state.current_view = ViewMode::QuickControls;
                                         render_view(surface, &state);
                                         surface_flip_display();
-                                        std::log(0, "[LAUNCHER] Quick Controls shade opened via top status bar tap.").ok();
+                                        std::log("[LAUNCHER] Quick Controls shade opened via top status bar tap.").ok();
                                     }
                                     let mut drain = std::InputEvent {
                                         kind: 0,
@@ -4179,7 +4131,7 @@ pub extern "C" fn _start() -> ! {
                                     // The greeting above, the deck below and the
                                     // nav bar are all untouched by this bit.
                                     present_dirty(surface, &state, Dirty::HomeCard);
-                                    std::log(0, "[LAUNCHER] Contextual task 0 toggled.").ok();
+                                    std::log("[LAUNCHER] Contextual task 0 toggled.").ok();
                                     let mut drain = std::InputEvent {
                                         kind: 0,
                                         x: 0,
@@ -4206,11 +4158,11 @@ pub extern "C" fn _start() -> ! {
                                             Ok(task_id) => {
                                                 state.push_recent(target_app, task_id);
                                                 state.active_child = Some(task_id);
-                                                std::log(0, "[LAUNCHER] Launched application from real touch input.").ok();
+                                                std::log("[LAUNCHER] Launched application from real touch input.").ok();
                                                 break;
                                             }
                                             Err(_) => {
-                                                std::log(0, "[LAUNCHER] Application launch rejected by kernel.").ok();
+                                                std::log("[LAUNCHER] Application launch rejected by kernel.").ok();
                                                 break;
                                             }
                                         }
@@ -4227,7 +4179,7 @@ pub extern "C" fn _start() -> ! {
                                     state.app_drawer_page = 0;
                                     render_view(surface, &state);
                                     surface_flip_display();
-                                    std::log(0, "[LAUNCHER] App Drawer opened via Apps dock tile tap.").ok();
+                                    std::log("[LAUNCHER] App Drawer opened via Apps dock tile tap.").ok();
                                     let mut drain = std::InputEvent {
                                         kind: 0,
                                         x: 0,
@@ -4247,7 +4199,7 @@ pub extern "C" fn _start() -> ! {
                                     state.current_view = ViewMode::SystemSpace;
                                     render_view(surface, &state);
                                     surface_flip_display();
-                                    std::log(0, "[LAUNCHER] System space opened via universal search bar tap.").ok();
+                                    std::log("[LAUNCHER] System space opened via universal search bar tap.").ok();
                                     let mut drain = std::InputEvent {
                                         kind: 0,
                                         x: 0,
@@ -4295,7 +4247,7 @@ pub extern "C" fn _start() -> ! {
                                             let _ = std::window_list(&mut win_buf);
                                             render_view(surface, &state);
                                             surface_flip_display();
-                                            std::log(0, "[LAUNCHER] Overview / Recent Apps switcher opened via recents button.").ok();
+                                            std::log("[LAUNCHER] Overview / Recent Apps switcher opened via recents button.").ok();
                                         }
                                         NavTarget::Home => {
                                             state.current_view = ViewMode::HomeScreen;
@@ -4309,12 +4261,10 @@ pub extern "C" fn _start() -> ! {
                                             // above it already explained that Home
                                             // answers nothing new here.
                                             present_dirty(surface, &state, Dirty::None);
-                                            std::log(0, "[LAUNCHER] Home surface presented via home button.").ok();
+                                            std::log("[LAUNCHER] Home surface presented via home button.").ok();
                                         }
                                         NavTarget::Back => {
-                                            std::log(
-                                                0,
-                                                "[LAUNCHER] Back button at the launcher root: nothing to dismiss.",
+                                            std::log("[LAUNCHER] Back button at the launcher root: nothing to dismiss.",
                                             )
                                             .ok();
                                         }
@@ -4338,7 +4288,7 @@ pub extern "C" fn _start() -> ! {
                                     state.current_view = ViewMode::AppDrawer;
                                     render_view(surface, &state);
                                     surface_flip_display();
-                                    std::log(0, "[LAUNCHER] App Drawer opened from dock shortcut.")
+                                    std::log("[LAUNCHER] App Drawer opened from dock shortcut.")
                                         .ok();
                                     let mut drain = std::InputEvent {
                                         kind: 0,
@@ -4365,7 +4315,7 @@ pub extern "C" fn _start() -> ! {
 fn panic(info: &PanicInfo) -> ! {
     let mut line = LineBuf::<256>::new();
     let _ = core::fmt::write(&mut line, format_args!("[LAUNCHER PANIC] {}", info));
-    std::log(0, line.as_str()).ok();
+    std::log(line.as_str()).ok();
     loop {
         std::yield_now();
     }

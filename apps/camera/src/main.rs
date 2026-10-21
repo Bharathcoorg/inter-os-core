@@ -366,9 +366,7 @@ impl CameraApp {
 
         let mut iv = [0u8; 16];
         if std::get_random(&mut iv).is_err() {
-            std::log(
-                0,
-                "[CAMERA APP] Refusing to encrypt frame without cryptographic TRNG entropy.",
+            std::log("[CAMERA APP] Refusing to encrypt frame without cryptographic TRNG entropy.",
             )
             .ok();
             return Err(-1);
@@ -377,9 +375,7 @@ impl CameraApp {
 
         self.total_photos += 1;
         self.refresh_labels();
-        std::log(
-            0,
-            "[CAMERA APP] Shutter fired: HAL frame returned, ISP tone-mapped, encrypted to Vault Sector 201.",
+        std::log("[CAMERA APP] Shutter fired: HAL frame returned, ISP tone-mapped, encrypted to Vault Sector 201.",
         ).ok();
 
         Ok(self.total_photos)
@@ -1154,7 +1150,7 @@ fn render_camera_band(surface: u32, camera: &CameraApp, y0: usize, y1: usize) {
                 y += 1;
             }
         }
-        let _ = std::surface_write(6, surface, offset, &chunk[..count]);
+        let _ = std::surface_write(surface, offset, &chunk[..count]);
         offset += count;
     }
 }
@@ -1208,7 +1204,11 @@ enum Tap {
 
 fn exit_to_launcher(surface: u32) -> ! {
     if surface > 0 {
-        let _ = std::cap::framebuffer_slot().map(|slot| std::surface_destroy(slot, surface));
+        // WHY no slot argument: a slot is a position in this task's
+        // capability table, and the kernel authorises the release by the
+        // capability's type. The surface must be handed back or it stays a
+        // leaked KMS surface for the life of the device.
+        let _ = std::surface_destroy(surface);
     }
     std::exit_with_code(0);
 }
@@ -1234,9 +1234,7 @@ fn handle_camera_touch(camera: &mut CameraApp, x: u32, y: u32) -> Tap {
     if FLASH_RECT.contains(x, y) {
         match camera.toggle_flash() {
             Some(on) => {
-                std::log(
-                    0,
-                    if on {
+                std::log(if on {
                         "[CAMERA APP] Flash hardware reported torch ON."
                     } else {
                         "[CAMERA APP] Flash hardware reported torch OFF."
@@ -1245,9 +1243,7 @@ fn handle_camera_touch(camera: &mut CameraApp, x: u32, y: u32) -> Tap {
                 .ok();
             }
             None => {
-                std::log(
-                    0,
-                    "[CAMERA APP] Flash unavailable: the camera hardware backend refused the toggle; flash is off.",
+                std::log("[CAMERA APP] Flash unavailable: the camera hardware backend refused the toggle; flash is off.",
                 )
                 .ok();
             }
@@ -1288,13 +1284,13 @@ fn handle_camera_touch(camera: &mut CameraApp, x: u32, y: u32) -> Tap {
     if (MODE_STRIP_Y0..MODE_STRIP_Y1).contains(&y) {
         if x >= 20 && x < 246 {
             camera.mode = CameraMode::DocumentVision;
-            std::log(0, "[CAMERA APP] Switched to Document Vision mode.").ok();
+            std::log("[CAMERA APP] Switched to Document Vision mode.").ok();
         } else if x >= 247 && x < 473 {
             camera.mode = CameraMode::Photo;
-            std::log(0, "[CAMERA APP] Switched to Photo mode.").ok();
+            std::log("[CAMERA APP] Switched to Photo mode.").ok();
         } else if x >= 474 && x < 700 {
             camera.mode = CameraMode::Video;
-            std::log(0, "[CAMERA APP] Switched to Video mode.").ok();
+            std::log("[CAMERA APP] Switched to Video mode.").ok();
         }
         std::audio_haptic_click().ok();
         // WHY the whole surface and not just the strip: `mode` is read in two
@@ -1312,9 +1308,7 @@ fn handle_camera_touch(camera: &mut CameraApp, x: u32, y: u32) -> Tap {
     //    old rectangle included 24px above and 26px below the painted ring.
     if shutter_hit(x as isize - SHUTTER_CX as isize, y as isize - SHUTTER_CY as isize) {
         if !camera.camera_authorised {
-            std::log(
-                0,
-                "[CAMERA APP] Shutter unavailable: the kernel refused camera authority for this task.",
+            std::log("[CAMERA APP] Shutter unavailable: the kernel refused camera authority for this task.",
             )
             .ok();
             return Tap::None;
@@ -1339,7 +1333,7 @@ fn handle_camera_touch(camera: &mut CameraApp, x: u32, y: u32) -> Tap {
                 buf[..p].copy_from_slice(&prefix[..p]);
                 let n = p + fmt_u32(code.unsigned_abs() as u32, &mut buf[p..]);
                 if let Ok(msg) = core::str::from_utf8(&buf[..n]) {
-                    std::log(0, msg).ok();
+                    std::log(msg).ok();
                 }
                 return Tap::None;
             }
@@ -1355,9 +1349,7 @@ fn handle_camera_touch(camera: &mut CameraApp, x: u32, y: u32) -> Tap {
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    std::log(
-        0,
-        "[CAMERA APP (Ring 3)] Sovereign Camera & Neural Vision online.",
+    std::log("[CAMERA APP (Ring 3)] Sovereign Camera & Neural Vision online.",
     )
     .ok();
 
@@ -1373,46 +1365,30 @@ pub extern "C" fn _start() -> ! {
     // guarantee for the whole app.
     camera.probe_camera_authority();
     if camera.camera_authorised {
-        std::log(
-            0,
-            "[CAMERA APP] Kernel granted camera authority; capture controls are armed.",
+        std::log("[CAMERA APP] Kernel granted camera authority; capture controls are armed.",
         )
         .ok();
     } else {
-        std::log(
-            0,
-            "[CAMERA APP] Kernel refused camera authority for this task; capture controls are shown unavailable.",
+        std::log("[CAMERA APP] Kernel refused camera authority for this task; capture controls are shown unavailable.",
         )
         .ok();
     }
 
     // Allocate dedicated KMS Client Surface (z=200)
-    std::log(
-        0,
-        "[CAMERA APP] Step 1: Allocating application surface (z=200)...",
+    std::log("[CAMERA APP] Step 1: Allocating application surface (z=200)...",
     )
     .ok();
     // WHY the slot is resolved by type: a slot number is a position in a
     // table, and the position depends on the order this task's
     // capabilities were inserted in. Six happened to hold the framebuffer
     // here, and would not in an app with one more capability.
-    let Some(fb_slot) = std::cap::framebuffer_slot() else {
-        std::log(
-            0,
-            "[CAMERA APP] This app holds no framebuffer capability, so it cannot draw.",
-        )
-        .ok();
-        std::exit_with_code(0);
-    };
-    let surface = match std::surface_create(fb_slot, W as u32, H as u32, 200) {
+    let surface = match std::surface_create(W as u32, H as u32, 200) {
         Ok(s) => {
-            std::log(0, "[CAMERA APP] Step 2: Surface created successfully.").ok();
+            std::log("[CAMERA APP] Step 2: Surface created successfully.").ok();
             s
         }
         Err(_) => {
-            std::log(
-                0,
-                "[CAMERA APP] Surface allocation unavailable; falling back to headless execution.",
+            std::log("[CAMERA APP] Surface allocation unavailable; falling back to headless execution.",
             )
             .ok();
             std::exit_with_code(0);
@@ -1422,10 +1398,8 @@ pub extern "C" fn _start() -> ! {
     // Render initial UI and present
     camera.mode = CameraMode::Photo;
     render_camera_ui(surface, &camera);
-    let _ = std::cap::framebuffer_slot().map(|slot| std::surface_flip(slot));
-    std::log(
-        0,
-        "[CAMERA APP] Step 3: Initial frame presented to hardware scanout.",
+    let _ = std::surface_flip();
+    std::log("[CAMERA APP] Step 3: Initial frame presented to hardware scanout.",
     )
     .ok();
 
@@ -1444,7 +1418,7 @@ pub extern "C" fn _start() -> ! {
                     let _ = camera.stream_video_frame();
                     if camera.total_video_frames != before {
                         render_camera_band(surface, &camera, VIEWFINDER_Y0, VIEWFINDER_Y1);
-                        let _ = std::cap::framebuffer_slot().map(|slot| std::surface_flip(slot));
+                        let _ = std::surface_flip();
                     }
                 }
             }
@@ -1461,9 +1435,7 @@ pub extern "C" fn _start() -> ! {
                 let mut dirty = Dirty::None;
                 while std::input_event_poll(&mut input).is_ok() {
                     if input.kind == 4 || input.kind == 6 || input.kind == 7 || input.kind == 8 || input.kind == 10 {
-                        std::log(
-                            0,
-                            "[CAMERA APP] Navigation gesture recognized. Returning to launcher.",
+                        std::log("[CAMERA APP] Navigation gesture recognized. Returning to launcher.",
                         )
                         .ok();
                         exit_to_launcher(surface);
@@ -1471,7 +1443,7 @@ pub extern "C" fn _start() -> ! {
                     if input.kind == 1 {
                         match handle_camera_touch(&mut camera, input.x, input.y) {
                             Tap::Leave(msg) => {
-                                std::log(0, msg).ok();
+                                std::log(msg).ok();
                                 exit_to_launcher(surface);
                             }
                             Tap::Redraw(d) => dirty = dirty.widen(d),
@@ -1493,7 +1465,7 @@ pub extern "C" fn _start() -> ! {
                         Dirty::All => render_camera_ui(surface, &camera),
                         Dirty::None => {}
                     }
-                    let _ = std::cap::framebuffer_slot().map(|slot| std::surface_flip(slot));
+                    let _ = std::surface_flip();
                 }
             }
         }
@@ -1504,6 +1476,6 @@ pub extern "C" fn _start() -> ! {
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
-    std::log(0, "[CAMERA APP] Panic detected! Terminating task...").ok();
+    std::log("[CAMERA APP] Panic detected! Terminating task...").ok();
     std::exit_with_code(1);
 }

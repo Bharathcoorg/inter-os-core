@@ -1604,7 +1604,7 @@ fn render_soft_keyboard(x: usize, y: usize, state: &AppState) -> u32 {
 // UI Presentation & Hardware Scanout
 // -----------------------------------------------------------------------------
 
-fn render_notes_ui(fb_cap: usize, surface: u32, state: &AppState) {
+fn render_notes_ui(surface: u32, state: &AppState) {
     let total_pixels = W * H;
     let mut pixel_idx = 0;
 
@@ -1619,9 +1619,7 @@ fn render_notes_ui(fb_cap: usize, surface: u32, state: &AppState) {
             }
         }
         unsafe {
-            let _ = std::surface_write(
-                fb_cap,
-                surface,
+            let _ = std::surface_write(surface,
                 pixel_idx,
                 &CHUNK_BUF[..count],
             );
@@ -2069,9 +2067,9 @@ const STORE_BLOB_MAX: usize = 8192;
 /// Returns the number of bytes read. `Err` carries the platform's own
 /// refusal code: `-8` is `FileNotFound`, which is how the app tells "there
 /// is no store yet" from "the platform would not read it".
-fn read_sandbox_file(cap_slot: usize, path: &str, buf: &mut [u8]) -> Result<usize, i64> {
-    let fd = std::app_storage_open(cap_slot, path, std::FS_READ)?;
-    let n = match std::fs_read(cap_slot, fd, buf) {
+fn read_sandbox_file(path: &str, buf: &mut [u8]) -> Result<usize, i64> {
+    let fd = std::app_storage_open(path, std::FS_READ)?;
+    let n = match std::fs_read(fd, buf) {
         Ok(n) => n,
         Err(e) => {
             let _ = std::fs_close(fd);
@@ -2083,9 +2081,9 @@ fn read_sandbox_file(cap_slot: usize, path: &str, buf: &mut [u8]) -> Result<usiz
 }
 
 /// Writes a file into the app's sandbox and flushes it to the device.
-fn write_sandbox_file(cap_slot: usize, path: &str, bytes: &[u8]) -> Result<usize, i64> {
-    let fd = std::app_storage_open(cap_slot, path, std::FS_WRITE)?;
-    let n = match std::fs_write(cap_slot, fd, bytes) {
+fn write_sandbox_file(path: &str, bytes: &[u8]) -> Result<usize, i64> {
+    let fd = std::app_storage_open(path, std::FS_WRITE)?;
+    let n = match std::fs_write(fd, bytes) {
         Ok(n) => n,
         Err(e) => {
             let _ = std::fs_close(fd);
@@ -2106,13 +2104,9 @@ fn write_sandbox_file(cap_slot: usize, path: &str, bytes: &[u8]) -> Result<usize
 /// unreadable list look identical until the app says which one it is, and
 /// the old code reported both as "no notes saved".
 fn load_notes_from_storage(store: &mut NotesStore) -> StorageState {
-    let read_cap = match std::cap_lookup(std::cap_type::FILE_SYSTEM_READ, 0) {
-        Ok(c) => c,
-        Err(_) => return StorageState::Refused,
-    };
 
     let mut buf = [0u8; STORE_BLOB_MAX];
-    let live = read_sandbox_file(read_cap, STORAGE_PATH, &mut buf);
+    let live = read_sandbox_file(STORAGE_PATH, &mut buf);
 
     let live_bytes: &[u8] = match live {
         Ok(n) => &buf[..n],
@@ -2121,13 +2115,13 @@ fn load_notes_from_storage(store: &mut NotesStore) -> StorageState {
             // because that is exactly the state a power loss during a save
             // leaves behind.
             let mut staged = [0u8; STORE_BLOB_MAX];
-            match read_sandbox_file(read_cap, STAGING_PATH, &mut staged) {
+            match read_sandbox_file(STAGING_PATH, &mut staged) {
                 Ok(n) if n > 0 => {
                     if store.deserialize(&staged[..n]).is_ok() {
                         restore_live_store(store);
                         return StorageState::Recovered;
                     }
-                    quarantine_failed_store(read_cap, &staged[..n]);
+                    quarantine_failed_store(&staged[..n]);
                     return StorageState::Corrupt;
                 }
                 _ => return StorageState::Empty,
@@ -2146,13 +2140,13 @@ fn load_notes_from_storage(store: &mut NotesStore) -> StorageState {
     // The live store did not validate. Try the staged copy before giving up
     // on the user's notes.
     let mut staged = [0u8; STORE_BLOB_MAX];
-    match read_sandbox_file(read_cap, STAGING_PATH, &mut staged) {
+    match read_sandbox_file(STAGING_PATH, &mut staged) {
         Ok(n) if n > 0 && store.deserialize(&staged[..n]).is_ok() => {
             restore_live_store(store);
             StorageState::Recovered
         }
         _ => {
-            quarantine_failed_store(read_cap, live_bytes);
+            quarantine_failed_store(live_bytes);
             store.new_empty();
             StorageState::Corrupt
         }
@@ -2165,16 +2159,12 @@ fn load_notes_from_storage(store: &mut NotesStore) -> StorageState {
 /// The staging copy is the known-good blob, so it is written over the live
 /// path and the result is checked.
 fn restore_live_store(store: &NotesStore) {
-    let write_cap = match std::cap_lookup(std::cap_type::FILE_SYSTEM_WRITE, 0) {
-        Ok(c) => c,
-        Err(_) => return,
-    };
     let mut buf = [0u8; STORE_BLOB_MAX];
     let n = match store.serialize(&mut buf) {
         Ok(n) => n,
         Err(_) => return,
     };
-    let _ = write_sandbox_file(write_cap, STORAGE_PATH, &buf[..n]);
+    let _ = write_sandbox_file(STORAGE_PATH, &buf[..n]);
 }
 
 /// Keeps a store that failed validation instead of destroying it.
@@ -2184,8 +2174,8 @@ fn restore_live_store(store: &NotesStore) {
 /// not understand, and in both cases the user may still want what is in
 /// it. The copy is best effort -- if the platform refuses the write, the
 /// bytes are still in the live path and the app says the store is corrupt.
-fn quarantine_failed_store(cap_slot: usize, bytes: &[u8]) {
-    let _ = write_sandbox_file(cap_slot, QUARANTINE_PATH, bytes);
+fn quarantine_failed_store(bytes: &[u8]) {
+    let _ = write_sandbox_file(QUARANTINE_PATH, bytes);
 }
 
 /// Writes the store to the device.
@@ -2196,10 +2186,6 @@ fn quarantine_failed_store(cap_slot: usize, bytes: &[u8]) {
 /// blob, and the loader restores it. The read-back is what turns "the write
 /// was accepted" into "the write landed".
 fn save_notes_to_storage(store: &mut NotesStore) -> bool {
-    let write_cap = match std::cap_lookup(std::cap_type::FILE_SYSTEM_WRITE, 0) {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
 
     let mut buf = [0u8; STORE_BLOB_MAX];
     let nbytes = match store.serialize(&mut buf) {
@@ -2208,23 +2194,19 @@ fn save_notes_to_storage(store: &mut NotesStore) -> bool {
     };
 
     // Stage first.
-    if write_sandbox_file(write_cap, STAGING_PATH, &buf[..nbytes]).is_err() {
+    if write_sandbox_file(STAGING_PATH, &buf[..nbytes]).is_err() {
         return false;
     }
     // Replace the live store.
-    match write_sandbox_file(write_cap, STORAGE_PATH, &buf[..nbytes]) {
+    match write_sandbox_file(STORAGE_PATH, &buf[..nbytes]) {
         Ok(n) if n == nbytes => {}
         _ => return false,
     }
 
     // Read the live store back and validate it. Only a store that reads back
     // and validates counts as saved.
-    let read_cap = match std::cap_lookup(std::cap_type::FILE_SYSTEM_READ, 0) {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
     let mut check = [0u8; STORE_BLOB_MAX];
-    let n = match read_sandbox_file(read_cap, STORAGE_PATH, &mut check) {
+    let n = match read_sandbox_file(STORAGE_PATH, &mut check) {
         Ok(n) => n,
         Err(_) => return false,
     };
@@ -2250,23 +2232,20 @@ fn save_notes_to_storage(store: &mut NotesStore) -> bool {
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    // WHY the lookup is by type: the old code asked for capability `0`, which
-    // is not a capability type at all, so the lookup always failed and the app
-    // fell back to the literal slot 6. Slot 6 is the IPC receive capability
-    // in this app's table; the display capability is a different slot, and
-    // the app only ever drew because the kernel searched for one on its
-    // behalf.
-    let fb_cap = match std::cap_lookup(std::cap_type::FRAMEBUFFER_DIRECT, 0) {
-        Ok(cap) => cap,
+    // WHY there is no capability lookup before the surface is asked for: the
+    // kernel authorises the surface by the capability's *type*, so the app
+    // names the authority it wants and the kernel finds it. A slot is a
+    // position in this app's capability table, and the position depends on
+    // the order the kernel inserted the capabilities in -- the launcher
+    // proved that by passing slot 0 while its filesystem read capability sat
+    // at slot 3, and the developer-terminal flag it wanted was never read.
+    // The platform's own answer to the request is the one that is reported.
+    let surface = match std::surface_create(W as u32, H as u32, 200) {
+        Ok(s) => s,
         Err(_) => {
-            std::log(0, "[NOTES] No framebuffer capability; refusing to draw.").ok();
+            std::log("[NOTES] No surface could be created; refusing to draw.").ok();
             std::exit_with_code(1);
         }
-    };
-
-    let surface = match std::surface_create(fb_cap, W as u32, H as u32, 200) {
-        Ok(s) => s,
-        Err(_) => 0,
     };
 
     let mut state = AppState {
@@ -2316,13 +2295,11 @@ pub extern "C" fn _start() -> ! {
     state.now_civil = current_civil_time();
 
     // Initial frame presentation
-    render_notes_ui(fb_cap, surface, &state);
-    let _ = std::surface_flip(fb_cap);
+    render_notes_ui(surface, &state);
+    let _ = std::surface_flip();
 
     // Required by automated lifecycle test contracts
-    std::log(
-        0,
-        "[NOTES] Initial frame presented via hardware scanout.",
+    std::log("[NOTES] Initial frame presented via hardware scanout.",
     )
     .ok();
 
@@ -2357,7 +2334,7 @@ pub extern "C" fn _start() -> ! {
                                 state.view = ViewMode::List;
                                 needs_redraw = true;
                             } else {
-                                let _ = std::surface_destroy(fb_cap, surface);
+                                let _ = std::surface_destroy(surface);
                                 std::exit_with_code(0);
                             }
                         } else if state.view == ViewMode::Editor {
@@ -2370,7 +2347,7 @@ pub extern "C" fn _start() -> ! {
 
                 if input.kind == 4 || input.kind == 6 || input.kind == 7 || input.kind == 8 || input.kind == 10 {
                     // System navigation exit gestures
-                    let _ = std::surface_destroy(fb_cap, surface);
+                    let _ = std::surface_destroy(surface);
                     std::exit_with_code(0);
                 }
 
@@ -2378,7 +2355,7 @@ pub extern "C" fn _start() -> ! {
                     // Touch tap event
                     match handle_tap(&mut state, input.x as usize, input.y as usize) {
                         TapAction::Exit => {
-                            let _ = std::surface_destroy(fb_cap, surface);
+                            let _ = std::surface_destroy(surface);
                             std::exit_with_code(0);
                         }
                         TapAction::Redraw => needs_redraw = true,
@@ -2422,8 +2399,8 @@ pub extern "C" fn _start() -> ! {
         }
 
         if needs_redraw {
-            render_notes_ui(fb_cap, surface, &state);
-            let _ = std::surface_flip(fb_cap);
+            render_notes_ui(surface, &state);
+            let _ = std::surface_flip();
         }
 
         std::yield_now();

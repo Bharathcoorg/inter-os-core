@@ -175,27 +175,21 @@ fn hand_off_to_messaging(number: &[u8]) -> bool {
     if number.iter().any(|&b| b == 0x0A) {
         return false;
     }
-    if std::settings_set(STORE_CAP_WRITE, HANDOFF_KEY, number).is_err() {
-        std::log(
-            0,
-            "[DIALER APP] The settings store refused the recipient hand-off; the messaging app was not opened.",
+    if std::settings_set(HANDOFF_KEY, number).is_err() {
+        std::log("[DIALER APP] The settings store refused the recipient hand-off; the messaging app was not opened.",
         )
         .ok();
         return false;
     }
     match std::app_launch(MESSAGING_APP_ID) {
         Ok(_) => {
-            std::log(
-                0,
-                "[DIALER APP] Handed the entered number to the messaging app and opened it.",
+            std::log("[DIALER APP] Handed the entered number to the messaging app and opened it.",
             )
             .ok();
             true
         }
         Err(_) => {
-            std::log(
-                0,
-                "[DIALER APP] The messaging app could not be launched; the number was not sent anywhere.",
+            std::log("[DIALER APP] The messaging app could not be launched; the number was not sent anywhere.",
             )
             .ok();
             false
@@ -461,8 +455,6 @@ const STORE_KEY: &str = "dialer.contacts.v1";
 /// and `FileSystemWrite` with `Rights::WRITE` in slot 7. `sys_settings_get` is
 /// authorized by slot 3 (or 7), while `sys_settings_set` strictly requires a
 /// `FileSystemWrite` capability, which is slot 7.
-const STORE_CAP_READ: usize = 3;
-const STORE_CAP_WRITE: usize = 7;
 
 /// Byte cost of the whole feature, stated once so it can be re-checked:
 /// 8 contacts x 36 bytes = 288 bytes of RAM for the records, plus a 290-byte
@@ -677,7 +669,7 @@ impl ContactStore {
     fn load() -> Self {
         let mut store = ContactStore::EMPTY;
         let mut encoded = [0u8; STORE_BLOB_BYTES + 32];
-        match std::settings_get(STORE_CAP_READ, STORE_KEY, &mut encoded) {
+        match std::settings_get(STORE_KEY, &mut encoded) {
             Ok(0) => store.state = ContactStoreState::Empty,
             Ok(n) => {
                 let mut blob = [0u8; STORE_BLOB_BYTES];
@@ -770,7 +762,7 @@ impl ContactStore {
             self.last_error = -22;
             return Err(-22);
         }
-        match std::settings_set(STORE_CAP_WRITE, STORE_KEY, &encoded[..encoded_len]) {
+        match std::settings_set(STORE_KEY, &encoded[..encoded_len]) {
             Ok(()) => {
                 self.state = ContactStoreState::Written;
                 self.last_error = 0;
@@ -1249,7 +1241,7 @@ impl DialerApp {
                 };
                 std::audio_play_tone(440).ok();
                 std::audio_silence().ok();
-                std::log(0, "[DIALER APP] Telephony service accepted the call request.").ok();
+                std::log("[DIALER APP] Telephony service accepted the call request.").ok();
                 self.record_call(number, true, emergency);
                 Ok(())
             }
@@ -1260,7 +1252,7 @@ impl DialerApp {
                 } else {
                     CallOutcome::Refused
                 };
-                std::log(0, "[DIALER APP] Call request rejected by telephony service.").ok();
+                std::log("[DIALER APP] Call request rejected by telephony service.").ok();
                 self.record_call(number, false, emergency);
                 Err(err)
             }
@@ -1284,15 +1276,11 @@ impl DialerApp {
             // modem state was ever touched. Ask the service and report the
             // outcome it actually returned.
             if std::telephony_hangup().is_ok() {
-                std::log(
-                    0,
-                    "[DIALER APP] Call Terminated: telephony service released the channel.",
+                std::log("[DIALER APP] Call Terminated: telephony service released the channel.",
                 )
                 .ok();
             } else {
-                std::log(
-                    0,
-                    "[DIALER APP] Call Terminated locally: the telephony service refused the hangup, so no channel was released.",
+                std::log("[DIALER APP] Call Terminated locally: the telephony service refused the hangup, so no channel was released.",
                 )
                 .ok();
             }
@@ -1300,9 +1288,7 @@ impl DialerApp {
             // WHY: no call was ever established, so there is no channel to
             // release and no completed call to count. Reporting a released
             // channel here would be a success claim for a rejected operation.
-            std::log(
-                0,
-                "[DIALER APP] Hangup with no connected call; no channel was released.",
+            std::log("[DIALER APP] Hangup with no connected call; no channel was released.",
             )
             .ok();
         }
@@ -1355,9 +1341,7 @@ impl DialerApp {
                     self.editor_last_cell = None;
                 }
                 None => {
-                    std::log(
-                        0,
-                        "[DIALER APP] Edit requested for a contact row that no longer exists; the editor was not opened.",
+                    std::log("[DIALER APP] Edit requested for a contact row that no longer exists; the editor was not opened.",
                     )
                     .ok();
                 }
@@ -1371,9 +1355,7 @@ impl DialerApp {
                 self.editor_last_cell = None;
             }
             None => {
-                std::log(
-                    0,
-                    "[DIALER APP] Edit requested for a contact row that no longer exists; the editor was not opened.",
+                std::log("[DIALER APP] Edit requested for a contact row that no longer exists; the editor was not opened.",
                 )
                 .ok();
             }
@@ -1396,9 +1378,7 @@ impl DialerApp {
             return;
         };
         if ed.name_len == 0 || ed.number_len == 0 {
-            std::log(
-                0,
-                "[DIALER APP] Contact not saved: a contact needs both a name and a number.",
+            std::log("[DIALER APP] Contact not saved: a contact needs both a name and a number.",
             )
             .ok();
             return;
@@ -1422,16 +1402,12 @@ impl DialerApp {
         self.editor_last_cell = None;
         match outcome {
             Ok(()) => {
-                std::log(
-                    0,
-                    "[DIALER APP] Contact written to the settings store and acknowledged.",
+                std::log("[DIALER APP] Contact written to the settings store and acknowledged.",
                 )
                 .ok();
             }
             Err(_) => {
-                std::log(
-                    0,
-                    "[DIALER APP] Contact was NOT saved: the kernel refused the settings write. It is held in the unsaved group for this session only.",
+                std::log("[DIALER APP] Contact was NOT saved: the kernel refused the settings write. It is held in the unsaved group for this session only.",
                 )
                 .ok();
             }
@@ -1447,17 +1423,13 @@ impl DialerApp {
             let inner = sel - ContactEditor::UNSAVED_BASE;
             match self.contacts.remove_unsaved(inner) {
                 Ok(()) => {
-                    std::log(
-                        0,
-                        "[DIALER APP] Unsaved contact dropped. It was never written to storage, so nothing had to be removed from it.",
+                    std::log("[DIALER APP] Unsaved contact dropped. It was never written to storage, so nothing had to be removed from it.",
                     )
                     .ok();
                     self.contact_sel = None;
                 }
                 Err(_) => {
-                    std::log(
-                        0,
-                        "[DIALER APP] The contact row tapped no longer exists; nothing was deleted.",
+                    std::log("[DIALER APP] The contact row tapped no longer exists; nothing was deleted.",
                     )
                     .ok();
                 }
@@ -1466,17 +1438,13 @@ impl DialerApp {
         }
         match self.contacts.remove(sel) {
             Ok(()) => {
-                std::log(
-                    0,
-                    "[DIALER APP] Contact removed and the store write was acknowledged.",
+                std::log("[DIALER APP] Contact removed and the store write was acknowledged.",
                 )
                 .ok();
                 self.contact_sel = None;
             }
             Err(_) => {
-                std::log(
-                    0,
-                    "[DIALER APP] NOT deleted from storage: the kernel refused the store write, so the stored copy is unchanged.",
+                std::log("[DIALER APP] NOT deleted from storage: the kernel refused the store write, so the stored copy is unchanged.",
                 )
                 .ok();
             }
@@ -1489,21 +1457,17 @@ impl DialerApp {
             return;
         };
         if sel >= ContactEditor::UNSAVED_BASE {
-            std::log(
-                0,
-                "[DIALER APP] A contact that was never saved cannot be starred in storage; the star stays with the saved copy.",
+            std::log("[DIALER APP] A contact that was never saved cannot be starred in storage; the star stays with the saved copy.",
             )
             .ok();
             return;
         }
         match self.contacts.toggle_favourite(sel) {
             Ok(()) => {
-                std::log(0, "[DIALER APP] Favourite flag written and acknowledged.").ok();
+                std::log("[DIALER APP] Favourite flag written and acknowledged.").ok();
             }
             Err(_) => {
-                std::log(
-                    0,
-                    "[DIALER APP] Favourite flag changed for this session only: the kernel refused the store write.",
+                std::log("[DIALER APP] Favourite flag changed for this session only: the kernel refused the store write.",
                 )
                 .ok();
             }
@@ -1535,9 +1499,7 @@ impl DialerApp {
         self.active_number[..n].copy_from_slice(&number[..n]);
         self.active_len = n;
         self.section = DialerSection::Keypad;
-        std::log(
-            0,
-            "[DIALER APP] Contact number placed in the entry; press the call control to dial it.",
+        std::log("[DIALER APP] Contact number placed in the entry; press the call control to dial it.",
         )
         .ok();
     }
@@ -1554,13 +1516,11 @@ impl DialerApp {
         // contact dial can never present itself as an emergency call.
         let _ = self.dial_internal(number, false);
         if self.outcome == CallOutcome::EmergencyRefused {
-            std::log(
-                0,
-                "[DIALER APP] The telephony service refused this call; the outcome is shown under the number.",
+            std::log("[DIALER APP] The telephony service refused this call; the outcome is shown under the number.",
             )
             .ok();
         } else {
-            std::log(0, "[DIALER APP] The telephony service accepted the call request.").ok();
+            std::log("[DIALER APP] The telephony service accepted the call request.").ok();
         }
     }
 
@@ -3273,7 +3233,7 @@ fn render_dialer_band(surface: u32, dialer: &DialerApp, y0: usize, y1: usize) {
                 y += 1;
             }
         }
-        let _ = std::surface_write(6, surface, offset, &chunk[..count]);
+        let _ = std::surface_write(surface, offset, &chunk[..count]);
         offset += count;
     }
 }
@@ -3337,9 +3297,7 @@ fn toggle_call(dialer: &mut DialerApp) -> Dirty {
     if dialer.active_len == 0 {
         // Unreachable from a tap: the control is drawn recessed while the entry
         // is empty. Reachable from the keyboard, so it still reports honestly.
-        std::log(
-            0,
-            "[DIALER] Call requested with no number entered; no telephony request was issued.",
+        std::log("[DIALER] Call requested with no number entered; no telephony request was issued.",
         )
         .ok();
         return Dirty::None;
@@ -3348,13 +3306,13 @@ fn toggle_call(dialer: &mut DialerApp) -> Dirty {
     let len = dialer.active_len;
     num_buf[..len].copy_from_slice(&dialer.active_number[..len]);
     let Ok(target) = core::str::from_utf8(&num_buf[..len]) else {
-        std::log(0, "[DIALER] Invalid dial string.").ok();
+        std::log("[DIALER] Invalid dial string.").ok();
         return Dirty::None;
     };
     if dialer.dial(target).is_ok() {
-        std::log(0, "[DIALER] Telephony service accepted the call.").ok();
+        std::log("[DIALER] Telephony service accepted the call.").ok();
     } else {
-        std::log(0, "[DIALER] Call could not be established.").ok();
+        std::log("[DIALER] Call could not be established.").ok();
     }
     Dirty::All
 }
@@ -3409,7 +3367,7 @@ fn handle_tap(dialer: &mut DialerApp, px: u32, py: u32) -> Tap<'static> {
                 // says it shows.
                 0 => {
                     dialer.open_contacts(true);
-                    std::log(0, "[DIALER APP] Favorites: showing starred contacts.").ok();
+                    std::log("[DIALER APP] Favorites: showing starred contacts.").ok();
                     return Tap::Redraw(Dirty::All);
                 }
                 _ => {
@@ -3437,7 +3395,7 @@ fn handle_tap(dialer: &mut DialerApp, px: u32, py: u32) -> Tap<'static> {
                 dialer.active_number[..n].copy_from_slice(&rec.number[..n]);
                 dialer.active_len = n;
                 dialer.section = DialerSection::Keypad;
-                std::log(0, "[DIALER APP] Loaded number from recents.").ok();
+                std::log("[DIALER APP] Loaded number from recents.").ok();
                 let _ = std::audio_haptic_click();
                 return Tap::Redraw(Dirty::All);
             }
@@ -3480,7 +3438,7 @@ fn handle_tap(dialer: &mut DialerApp, px: u32, py: u32) -> Tap<'static> {
                     if x >= bx && x < bx + BTN_W {
                         if let Some(digit) = get_keypad_char(row, col) {
                             dialer.input_digit(digit);
-                            std::log(0, "[DIALER APP] Keypad digit entered.").ok();
+                            std::log("[DIALER APP] Keypad digit entered.").ok();
                         }
                         return Tap::Redraw(if dialer.active_len == 1 { Dirty::All } else { Dirty::Display });
                     }
@@ -3493,15 +3451,11 @@ fn handle_tap(dialer: &mut DialerApp, px: u32, py: u32) -> Tap<'static> {
             if in_circle(x, y, SOS_CX, SOS_CY, SOS_R) {
                 let _ = dialer.dial_emergency();
                 if dialer.outcome == CallOutcome::EmergencyRefused {
-                    std::log(
-                        0,
-                        "[DIALER APP] Emergency call refused by the telephony service; the outcome is shown under the number.",
+                    std::log("[DIALER APP] Emergency call refused by the telephony service; the outcome is shown under the number.",
                     )
                     .ok();
                 } else {
-                    std::log(
-                        0,
-                        "[DIALER APP] Telephony service accepted the emergency call.",
+                    std::log("[DIALER APP] Telephony service accepted the emergency call.",
                     )
                     .ok();
                 }
@@ -3589,15 +3543,11 @@ fn handle_contacts_tap(dialer: &mut DialerApp, x: usize, y: usize) -> Tap<'stati
             if in_circle(x, y, SOS_CX, SOS_CY, SOS_R) {
                 let _ = dialer.dial_emergency();
                 if dialer.outcome == CallOutcome::EmergencyRefused {
-                    std::log(
-                        0,
-                        "[DIALER APP] Emergency call refused by the telephony service; the outcome is shown under the number.",
+                    std::log("[DIALER APP] Emergency call refused by the telephony service; the outcome is shown under the number.",
                     )
                     .ok();
                 } else {
-                    std::log(
-                        0,
-                        "[DIALER APP] Telephony service accepted the emergency call.",
+                    std::log("[DIALER APP] Telephony service accepted the emergency call.",
                     )
                     .ok();
                 }
@@ -3642,9 +3592,7 @@ fn handle_contacts_tap(dialer: &mut DialerApp, x: usize, y: usize) -> Tap<'stati
                 // WHY a chip with no selection is inert rather than defaulting to
                 // row 0: there is no contact the user pointed at, and guessing
                 // one would call, edit or delete a contact nobody chose.
-                std::log(
-                    0,
-                    "[DIALER APP] That action needs a selected contact; tap a row first.",
+                std::log("[DIALER APP] That action needs a selected contact; tap a row first.",
                 )
                 .ok();
                 return Tap::Redraw(Dirty::None);
@@ -3663,15 +3611,11 @@ fn handle_contacts_tap(dialer: &mut DialerApp, x: usize, y: usize) -> Tap<'stati
         if in_circle(x, y, SOS_CX, SOS_CY, SOS_R) {
             let _ = dialer.dial_emergency();
             if dialer.outcome == CallOutcome::EmergencyRefused {
-                std::log(
-                    0,
-                    "[DIALER APP] Emergency call refused by the telephony service; the outcome is shown under the number.",
+                std::log("[DIALER APP] Emergency call refused by the telephony service; the outcome is shown under the number.",
                 )
                 .ok();
             } else {
-                std::log(
-                    0,
-                    "[DIALER APP] Telephony service accepted the emergency call.",
+                std::log("[DIALER APP] Telephony service accepted the emergency call.",
                 )
                 .ok();
             }
@@ -3690,9 +3634,7 @@ fn handle_contacts_tap(dialer: &mut DialerApp, x: usize, y: usize) -> Tap<'stati
                 dialer.start_edit_contact(dialer.contact_sel.unwrap_or(0));
             } else {
                 dialer.contacts_fav_only = !dialer.contacts_fav_only;
-                std::log(
-                    0,
-                    if dialer.contacts_fav_only {
+                std::log(if dialer.contacts_fav_only {
                         "[DIALER APP] Showing starred contacts only."
                     } else {
                         "[DIALER APP] Showing all contacts."
@@ -3819,7 +3761,7 @@ fn handle_dialer_key(dialer: &mut DialerApp, key: std::InputKeyEvent) -> Tap<'st
         input_key_code::ENTER => Tap::Redraw(toggle_call(dialer)),
         input_key_code::TAB => {
             dialer.step_section();
-            std::log(0, "[DIALER APP] Section switched by keyboard.").ok();
+            std::log("[DIALER APP] Section switched by keyboard.").ok();
             Tap::Redraw(Dirty::All)
         }
         // Dial pad keys only. The keypad's own sublabel letters (ABC, DEF, ...)
@@ -3837,9 +3779,7 @@ fn handle_dialer_key(dialer: &mut DialerApp, key: std::InputKeyEvent) -> Tap<'st
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    std::log(
-        0,
-        "[DIALER APP (Ring 3)] Sovereign Dialer & Telephony online.",
+    std::log("[DIALER APP (Ring 3)] Sovereign Dialer & Telephony online.",
     )
     .ok();
 
@@ -3855,18 +3795,14 @@ pub extern "C" fn _start() -> ! {
             let payload = &modem_buf[..len];
             if json_present_true(payload) {
                 dialer.modem_present = true;
-                std::log(
-                    0,
-                    "[DIALER APP] Baseband Modem: Hardware detected and online.",
+                std::log("[DIALER APP] Baseband Modem: Hardware detected and online.",
                 )
                 .ok();
             } else {
                 // WHY: the payload simply did not list a present modem.
                 // "Offline" would assert a baseband state the HAL never
                 // reported, so state only what the report actually said.
-                std::log(
-                    0,
-                    "[DIALER APP] Baseband Modem: the telemetry report did not list a present modem.",
+                std::log("[DIALER APP] Baseband Modem: the telemetry report did not list a present modem.",
                 )
                 .ok();
             }
@@ -3879,25 +3815,19 @@ pub extern "C" fn _start() -> ! {
                 }
                 None => {
                     dialer.signal_bars = 0;
-                    std::log(
-                        0,
-                        "[DIALER APP] Modem telemetry carried no signal bar count; the meter shows no bars.",
+                    std::log("[DIALER APP] Modem telemetry carried no signal bar count; the meter shows no bars.",
                     )
                     .ok();
                 }
             }
         }
         Ok(_) => {
-            std::log(
-                0,
-                "[DIALER APP] Telephony query returned an empty payload; no baseband reported.",
+            std::log("[DIALER APP] Telephony query returned an empty payload; no baseband reported.",
             )
             .ok();
         }
         Err(_) => {
-            std::log(
-                0,
-                "[DIALER APP] Telephony query refused by the kernel; no cellular baseband is available to this app.",
+            std::log("[DIALER APP] Telephony query refused by the kernel; no cellular baseband is available to this app.",
             )
             .ok();
         }
@@ -3917,32 +3847,24 @@ pub extern "C" fn _start() -> ! {
                     }
                     None => {
                         dialer.battery_soc = None;
-                        std::log(
-                            0,
-                            "[DIALER APP] Fuel gauge reported no state of charge; the battery indicator is left blank.",
+                        std::log("[DIALER APP] Fuel gauge reported no state of charge; the battery indicator is left blank.",
                         )
                         .ok();
                     }
                 }
             } else {
-                std::log(
-                    0,
-                    "[DIALER APP] No battery fuel gauge is present; the battery indicator is left blank.",
+                std::log("[DIALER APP] No battery fuel gauge is present; the battery indicator is left blank.",
                 )
                 .ok();
             }
         }
         Ok(_) => {
-            std::log(
-                0,
-                "[DIALER APP] Battery query returned an empty payload; the battery indicator is left blank.",
+            std::log("[DIALER APP] Battery query returned an empty payload; the battery indicator is left blank.",
             )
             .ok();
         }
         Err(_) => {
-            std::log(
-                0,
-                "[DIALER APP] Battery query refused by the kernel; the battery indicator is left blank.",
+            std::log("[DIALER APP] Battery query refused by the kernel; the battery indicator is left blank.",
             )
             .ok();
         }
@@ -3960,55 +3882,45 @@ pub extern "C" fn _start() -> ! {
     // same thing on screen.
     dialer.contacts = ContactStore::load();
     match dialer.contacts.state {
-        ContactStoreState::Loaded => { std::log(
-            0,
-            "[DIALER APP] Contacts read back out of the settings store.",
+        ContactStoreState::Loaded => { std::log("[DIALER APP] Contacts read back out of the settings store.",
         )
         .ok();
         }
-        ContactStoreState::Empty => { std::log(
-            0,
-            "[DIALER APP] No saved contacts: the settings store holds no dialer contacts key.",
+        ContactStoreState::Empty => { std::log("[DIALER APP] No saved contacts: the settings store holds no dialer contacts key.",
         )
         .ok();
         }
-        ContactStoreState::ReadRefused => { std::log(
-            0,
-            "[DIALER APP] Contacts read REFUSED by the kernel: no stored contacts were loaded, and none will be shown as saved.",
+        ContactStoreState::ReadRefused => { std::log("[DIALER APP] Contacts read REFUSED by the kernel: no stored contacts were loaded, and none will be shown as saved.",
         )
         .ok();
         }
-        ContactStoreState::Invalid => { std::log(
-            0,
-            "[DIALER APP] Stored contact bytes failed validation; no contacts were loaded from them.",
+        ContactStoreState::Invalid => { std::log("[DIALER APP] Stored contact bytes failed validation; no contacts were loaded from them.",
         )
         .ok();
         }
         ContactStoreState::Untouched | ContactStoreState::Written
         | ContactStoreState::WriteRefused | ContactStoreState::Full => {
-            std::log(
-                0,
-                "[DIALER APP] Contacts store reported a state it cannot be in before any write; no contacts are shown as saved.",
+            std::log("[DIALER APP] Contacts store reported a state it cannot be in before any write; no contacts are shown as saved.",
             )
             .ok();
         }
     }
 
     // 3. Allocate dedicated KMS Client Surface (z=200)
-    std::log(
-        0,
-        "[DIALER APP] Step 1: Allocating application surface (z=200)...",
+    std::log("[DIALER APP] Step 1: Allocating application surface (z=200)...",
     )
     .ok();
-    let surface = match std::surface_create(6, W as u32, H as u32, 200) {
+    // WHY the slot is resolved by type: a capability slot is a position in
+    // this app's table, and the position depends on the order the kernel
+    // inserted the capabilities in. The literal 6 happens to hold the
+    // framebuffer in this app's table today.
+    let surface = match std::surface_create(W as u32, H as u32, 200) {
         Ok(s) => {
-            std::log(0, "[DIALER APP] Step 2: Surface created successfully.").ok();
+            std::log("[DIALER APP] Step 2: Surface created successfully.").ok();
             s
         }
         Err(_) => {
-            std::log(
-                0,
-                "[DIALER APP] Display surface unavailable; refusing headless call simulation.",
+            std::log("[DIALER APP] Display surface unavailable; refusing headless call simulation.",
             )
             .ok();
             std::exit_with_code(1);
@@ -4017,10 +3929,8 @@ pub extern "C" fn _start() -> ! {
 
     // 4. Render an empty dialer; numbers are entered by the user.
     render_dialer_ui(surface, &dialer);
-    let _ = std::surface_flip(6);
-    std::log(
-        0,
-        "[DIALER APP] Step 3: Initial frame presented to hardware scanout.",
+    let _ = std::surface_flip();
+    std::log("[DIALER APP] Step 3: Initial frame presented to hardware scanout.",
     )
     .ok();
 
@@ -4047,15 +3957,11 @@ pub extern "C" fn _start() -> ! {
                 // no call setup message was decoded, and no baseband is attached,
                 // so no inbound call occurred. Report the event only.
                 if dialer.modem_present {
-                    std::log(
-                        0,
-                        "[DIALER APP] Baseband URC signalled; no call setup message was decoded from it.",
+                    std::log("[DIALER APP] Baseband URC signalled; no call setup message was decoded from it.",
                     )
                     .ok();
                 } else {
-                    std::log(
-                        0,
-                        "[DIALER APP] Modem URC event raised with no attached baseband; no call was received.",
+                    std::log("[DIALER APP] Modem URC event raised with no attached baseband; no call was received.",
                     )
                     .ok();
                 }
@@ -4078,8 +3984,8 @@ pub extern "C" fn _start() -> ! {
                     if let Some(key) = input.key_event() {
                         match handle_dialer_key(&mut dialer, key) {
                             Tap::Leave(msg) => {
-                                std::log(0, msg).ok();
-                                let _ = std::surface_destroy(6, surface);
+                                std::log(msg).ok();
+                                let _ = std::surface_destroy(surface);
                                 std::exit_with_code(0);
                             }
                             Tap::Redraw(d) => dirty = merge(dirty, d),
@@ -4088,19 +3994,17 @@ pub extern "C" fn _start() -> ! {
                         continue;
                     }
                     if input.kind == 4 || input.kind == 6 || input.kind == 7 || input.kind == 8 || input.kind == 10 {
-                        std::log(
-                            0,
-                            "[DIALER APP] Navigation gesture recognized. Returning to launcher.",
+                        std::log("[DIALER APP] Navigation gesture recognized. Returning to launcher.",
                         )
                         .ok();
-                        let _ = std::surface_destroy(6, surface);
+                        let _ = std::surface_destroy(surface);
                         std::exit_with_code(0);
                     }
                     if input.kind == 1 {
                         match handle_tap(&mut dialer, input.x, input.y) {
                             Tap::Leave(msg) => {
-                                std::log(0, msg).ok();
-                                let _ = std::surface_destroy(6, surface);
+                                std::log(msg).ok();
+                                let _ = std::surface_destroy(surface);
                                 std::exit_with_code(0);
                             }
                             Tap::Redraw(d) => dirty = merge(dirty, d),
@@ -4120,7 +4024,7 @@ pub extern "C" fn _start() -> ! {
                         Dirty::Fields => render_dialer_band(surface, &dialer, DISPLAY_Y0, DISPLAY_Y1),
                         Dirty::All => render_dialer_ui(surface, &dialer),
                     }
-                    let _ = std::surface_flip(6);
+                    let _ = std::surface_flip();
                 }
             }
         }
@@ -4131,6 +4035,6 @@ pub extern "C" fn _start() -> ! {
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
-    std::log(0, "[DIALER APP] Panic detected! Terminating task...").ok();
+    std::log("[DIALER APP] Panic detected! Terminating task...").ok();
     std::exit_with_code(1);
 }
