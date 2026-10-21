@@ -616,6 +616,233 @@ pub fn parse_battery_payload(payload: &[u8]) -> Option<BatteryTelemetry> {
     Some(result)
 }
 
+/// Dynamic Device Vitality Orb visual states representing real-time system health.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrbState {
+    /// Radiant sapphire and electric cyan vitality orb.
+    Sapphire,
+    /// Thermals and battery are optimal / cool.
+    Emerald,
+    /// High-performance profile engaged.
+    Ultraviolet,
+    /// Battery is low or root block storage is constrained (< 100 MB).
+    Amber,
+}
+
+impl OrbState {
+    /// Returns (inner_core_neon, outer_rim_glow) colors.
+    pub fn colors(self) -> (u32, u32) {
+        match self {
+            OrbState::Sapphire => (0x38BDF8, 0x2563EB),
+            OrbState::Emerald => (0x00FF87, 0x10B981),
+            OrbState::Ultraviolet => (0xA78BFA, 0x8B5CF6),
+            // WHY amber is a pair of its own: the state used to return the
+            // sapphire pair, so a device the orb called constrained was
+            // painted in the healthy blue. The core is the platform's caution
+            // colour lifted towards the raised surface and the rim is the
+            // caution colour itself, which gives amber the same light-core /
+            // deep-rim shape the other three states have.
+            //
+            // WHY both colours come from the theme: the orb is the one place
+            // on this screen that carries a colour of its own, and a colour
+            // that was not a role would be a palette the platform does not
+            // know about.
+            OrbState::Amber => (
+                theme::Theme::blend(
+                    theme::THEME.warning,
+                    theme::THEME.surface_container_high,
+                    64,
+                ),
+                theme::THEME.warning,
+            ),
+        }
+    }
+}
+
+/// The Display row's caption.
+///
+/// WHY it is built at run time: the scanout size is the platform's own
+/// constant (`design::viewport`), and the refresh rate is not something the
+/// platform reports at all. The row used to print a size and a rate that no
+/// query had ever produced: the size was this app's own logical surface and
+/// the rate was a number nothing had observed.
+///
+/// WHY `reported` decides the wording: the kernel publishes one verdict per
+/// hardware category, so a row that said "not reported" about a display the
+/// platform does have would be its own kind of untruth.
+pub fn display_caption(out: &mut [u8; 72], reported: bool) -> usize {
+    if !reported {
+        let msg = b"Display not reported by the platform";
+        out[..msg.len()].copy_from_slice(msg);
+        return msg.len();
+    }
+    let mut n = 0usize;
+    let mut push = |bytes: &[u8], n: &mut usize| {
+        let take = bytes.len().min(out.len() - *n);
+        out[*n..*n + take].copy_from_slice(&bytes[..take]);
+        *n += take;
+    };
+    push(b"Scanout ", &mut n);
+    let mut number = [0u8; 20];
+    let width = decimal(interos_std::design::viewport::SCANOUT_WIDTH, &mut number);
+    push(&number[..width], &mut n);
+    push(b"x", &mut n);
+    let height = decimal(interos_std::design::viewport::SCANOUT_HEIGHT, &mut number);
+    push(&number[..height], &mut n);
+    // WHY the refresh rate is named as unreported rather than omitted: the
+    // platform has no call that answers it, and a row that simply left it out
+    // would read as a complete description of a display it had only half
+    // asked about.
+    push(b"; refresh rate not reported", &mut n);
+    n
+}
+
+/// Writes `value` as decimal ASCII into `out`; returns the byte count.
+///
+/// WHY it is written by hand: the app is `no_std` with no allocator, so the
+/// formatting crates that turn a number into text are not available.
+fn decimal(value: usize, out: &mut [u8; 20]) -> usize {
+    let mut digits = [0u8; 20];
+    let mut count = 0usize;
+    let mut v = value;
+    while v > 0 && count < digits.len() {
+        digits[count] = b'0' + (v % 10) as u8;
+        count += 1;
+        v /= 10;
+    }
+    let n = count.min(out.len());
+    for i in 0..n {
+        out[i] = digits[count - 1 - i];
+    }
+    n
+}
+
+/// The caption a document-handler row carries.
+///
+/// WHY the three cases are told apart: a slot with a document the platform
+/// holds has handlers, a slot with a document the platform does not hold has
+/// none to ask about, and a slot holding a catalogue key is not a document at
+/// all.
+pub fn handler_caption(out: &mut [u8; 96], has_document: bool, packages: &[&[u8]]) -> usize {
+    let mut n = 0usize;
+    let mut push = |bytes: &[u8], n: &mut usize| {
+        let take = bytes.len().min(out.len() - *n);
+        out[*n..*n + take].copy_from_slice(&bytes[..take]);
+        *n += take;
+    };
+    if !has_document {
+        push(b"No document in this slot", &mut n);
+        return n;
+    }
+    if packages.is_empty() {
+        push(b"no installed app declares a handler", &mut n);
+        return n;
+    }
+    push(b"handled by ", &mut n);
+    for (i, package) in packages.iter().enumerate() {
+        if i > 0 {
+            push(b", ", &mut n);
+        }
+        push(package, &mut n);
+    }
+    n
+}
+
+/// The top edge and height of row `row` in a stack that starts at `top` and
+/// separates its rows by `gap`.
+///
+/// WHY it is a helper and not a loop in the painter: the painter asks for a
+/// row's rectangle once per pixel and the scroll model asks for the whole
+/// stack's height once per page, and the two have to agree.
+pub fn stacked_row_rect<F>(top: usize, gap: usize, row: usize, height_of: F) -> (usize, usize)
+where
+    F: Fn(usize) -> usize,
+{
+    let mut y = top;
+    for r in 0..row {
+        y += height_of(r) + gap;
+    }
+    (y, height_of(row))
+}
+
+/// The height of a whole stack of rows.
+pub fn stacked_height<F>(count: usize, gap: usize, height_of: F) -> usize
+where
+    F: Fn(usize) -> usize,
+{
+    let mut height = 0usize;
+    for r in 0..count {
+        height += height_of(r);
+        if r + 1 < count {
+            height += gap;
+        }
+    }
+    height
+}
+
+/// What the platform says about the document in one of the app's slots.
+///
+/// WHY the app keeps this: the wallpaper and the ringtone are the two
+/// document slots the app owns, and a document is not only a path - it has a
+/// media type, and the media type is what the platform's intent registry
+/// resolves against. An app that holds a path but never asks the registry
+/// what handles it cannot tell the user who else can open the document, and
+/// cannot ask the platform to hand the document over.
+#[derive(Clone, Copy)]
+pub struct DocumentSlot {
+    /// The document path the settings store holds.
+    pub path: [u8; 192],
+    pub path_len: usize,
+    /// The media type the platform's content index reports for the document.
+    pub mime: [u8; 48],
+    pub mime_len: usize,
+    /// The packages that declare a handler for that media type.
+    pub packages: [[u8; 48]; 3],
+    pub package_lens: [usize; 3],
+    pub package_count: usize,
+    /// The package the platform resolves that media type to, when it resolves
+    /// one.
+    pub resolved: [u8; 48],
+    pub resolved_len: usize,
+}
+
+impl DocumentSlot {
+    /// A slot the platform has said nothing about.
+    pub const EMPTY: Self = Self {
+        path: [0u8; 192],
+        path_len: 0,
+        mime: [0u8; 48],
+        mime_len: 0,
+        packages: [[0u8; 48]; 3],
+        package_lens: [0; 3],
+        package_count: 0,
+        resolved: [0u8; 48],
+        resolved_len: 0,
+    };
+
+    /// The packages that declare a handler for this slot's media type.
+    pub fn handler_packages(&self) -> [&[u8]; 3] {
+        let mut out: [&[u8]; 3] = [&[], &[], &[]];
+        for i in 0..self.package_count.min(out.len()) {
+            out[i] = &self.packages[i][..self.package_lens[i]];
+        }
+        out
+    }
+}
+
+/// The outcome of the last dispatch the app made.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum DispatchOutcome {
+    /// Nothing has been dispatched yet.
+    Unattempted,
+    /// The platform launched a handler and named the task.
+    Dispatched,
+    /// No package declares a handler for the document's media type.
+    NoHandler,
+    /// The platform refused the dispatch.
+    Refused,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -851,5 +1078,119 @@ mod tests {
             parse_hardware_availability(-1),
             HardwareAvailability::Unknown
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // The Display row, the vitality orb, the document handlers and the
+    // scroll model.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_the_display_row_reports_the_platforms_scanout_and_says_the_rate_is_unreported() {
+        let mut out = [0u8; 72];
+        let n = display_caption(&mut out, true);
+        let caption = core::str::from_utf8(&out[..n]).expect("the caption is text");
+        // The scanout is the platform's own constant, not this app's surface.
+        assert!(caption.starts_with("Scanout 1080x2160"), "{}", caption);
+        // And the refresh rate is named as unreported rather than invented.
+        assert!(caption.contains("refresh rate not reported"), "{}", caption);
+        // The old caption claimed a mode the app had never been told.
+        assert!(!caption.contains("60Hz"), "{}", caption);
+        assert!(!caption.contains("FrameBuffer"), "{}", caption);
+    }
+
+    #[test]
+    fn test_the_display_row_says_so_when_the_platform_did_not_report_a_display() {
+        let mut out = [0u8; 72];
+        let n = display_caption(&mut out, false);
+        let caption = core::str::from_utf8(&out[..n]).expect("the caption is text");
+        assert_eq!(caption, "Display not reported by the platform");
+    }
+
+    #[test]
+    fn test_the_amber_orb_is_its_own_colour_and_not_the_sapphire_pair() {
+        let amber = OrbState::Amber.colors();
+        let sapphire = OrbState::Sapphire.colors();
+        // WHY both halves matter: the state used to return the sapphire pair
+        // outright, so a constrained device was painted in the healthy blue.
+        assert_ne!(amber, sapphire);
+        assert_ne!(amber.0, sapphire.0);
+        assert_ne!(amber.1, sapphire.1);
+        // And the amber pair is the platform's own caution colour, not a
+        // colour the app made up.
+        assert_eq!(amber.1, theme::THEME.warning);
+    }
+
+    #[test]
+    fn test_every_orb_state_has_its_own_pair() {
+        let states = [
+            OrbState::Sapphire,
+            OrbState::Emerald,
+            OrbState::Ultraviolet,
+            OrbState::Amber,
+        ];
+        for i in 0..states.len() {
+            for j in (i + 1)..states.len() {
+                assert_ne!(
+                    states[i].colors(),
+                    states[j].colors(),
+                    "two orb states share a colour pair"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_the_handler_caption_names_the_apps_the_platform_declared() {
+        let mut out = [0u8; 96];
+        let n = handler_caption(&mut out, true, &[b"org.interos.gallery", b"org.interos.photos"]);
+        let caption = core::str::from_utf8(&out[..n]).expect("the caption is text");
+        assert_eq!(caption, "handled by org.interos.gallery, org.interos.photos");
+    }
+
+    #[test]
+    fn test_the_handler_caption_says_when_nothing_declares_a_handler() {
+        let mut out = [0u8; 96];
+        let n = handler_caption(&mut out, true, &[]);
+        let caption = core::str::from_utf8(&out[..n]).expect("the caption is text");
+        assert_eq!(caption, "no installed app declares a handler");
+    }
+
+    #[test]
+    fn test_the_handler_caption_says_when_the_slot_holds_no_document() {
+        let mut out = [0u8; 96];
+        let n = handler_caption(&mut out, false, &[]);
+        let caption = core::str::from_utf8(&out[..n]).expect("the caption is text");
+        assert_eq!(caption, "No document in this slot");
+    }
+
+    #[test]
+    fn test_a_stacked_rows_rect_agrees_with_the_stack_height() {
+        let heights = [120usize, 120, 96];
+        let top = 128usize;
+        let gap = 16usize;
+        // The first row starts at the top of the stack.
+        assert_eq!(stacked_row_rect(top, gap, 0, |r| heights[r]), (128, 120));
+        // The second starts one row and one gap lower.
+        assert_eq!(stacked_row_rect(top, gap, 1, |r| heights[r]), (264, 120));
+        assert_eq!(stacked_row_rect(top, gap, 2, |r| heights[r]), (400, 96));
+        // And the whole stack's height is the rows plus the gaps between them.
+        assert_eq!(stacked_height(3, gap, |r| heights[r]), 120 + 120 + 96 + 2 * 16);
+    }
+
+    #[test]
+    fn test_a_page_longer_than_its_viewport_can_be_scrolled_and_a_short_one_cannot() {
+        let mut scroll = interos_std::design::scroll::ScrollState::new(1000, 400, 0);
+        assert_eq!(scroll.max_offset(), 600);
+        // A drag moves the offset and the model clamps it at both ends.
+        scroll.apply_drag(-250);
+        assert_eq!(scroll.offset, 250);
+        scroll.apply_drag(-5000);
+        assert_eq!(scroll.offset, 600);
+        scroll.apply_drag(5000);
+        assert_eq!(scroll.offset, 0);
+        // A page that fits has nothing to scroll.
+        let short = interos_std::design::scroll::ScrollState::new(300, 400, 0);
+        assert_eq!(short.max_offset(), 0);
     }
 }

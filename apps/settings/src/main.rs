@@ -29,13 +29,15 @@ use core::panic::PanicInfo;
 use interos_std as std;
 use settings::theme::{spacing, THEME};
 use settings::{
-    parse_battery_payload, parse_hardware_availability, parse_sensor_payload,
-    parse_thermal_payload, syscall_status_name, BatteryTelemetry, HardwareAvailability,
-    QueryOutcome, SensorTelemetry, ThermalTelemetry,
+    display_caption, handler_caption, parse_battery_payload, parse_hardware_availability,
+    parse_sensor_payload, parse_thermal_payload, stacked_height, stacked_row_rect,
+    syscall_status_name, BatteryTelemetry, DispatchOutcome, DocumentSlot, HardwareAvailability,
+    OrbState, QueryOutcome, SensorTelemetry, ThermalTelemetry,
 };
 
 use interos_std::design::components;
 use interos_std::design::outline_text;
+use interos_std::design::scroll::ScrollState;
 
 const W: usize = 720;
 const H: usize = 1440;
@@ -61,31 +63,6 @@ static mut CHUNK_BUF: [u32; CHUNK] = [0; CHUNK];
 /// the SDK, so a search result labelled "Network" opens the Network page this
 /// app actually has.
 use interos_std::settings::Section;
-
-/// Dynamic Device Vitality Orb visual states representing real-time system health.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OrbState {
-    /// Radiant sapphire and electric cyan vitality orb.
-    Sapphire,
-    /// Thermals and battery are optimal / cool.
-    Emerald,
-    /// DVFS profile is Performance / Turbo.
-    Ultraviolet,
-    /// Battery is low or root block storage is constrained (< 100 MB).
-    Amber,
-}
-
-impl OrbState {
-    /// Returns (inner_core_neon, outer_rim_glow) colors.
-    pub fn colors(self) -> (u32, u32) {
-        match self {
-            OrbState::Sapphire => (0x38BDF8, 0x2563EB),
-            OrbState::Emerald => (0x00FF87, 0x10B981),
-            OrbState::Ultraviolet => (0xA78BFA, 0x8B5CF6),
-            OrbState::Amber => (0x38BDF8, 0x2563EB),
-        }
-    }
-}
 
 /// Dynamic Voltage and Frequency Scaling (DVFS) Governor profiles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -392,6 +369,34 @@ pub power_profile: Option<PowerProfile>,
     pub cellular: HardwareAvailability,
     /// The platform's own answer about the Bluetooth controller.
     pub bluetooth: HardwareAvailability,
+    /// The platform's own answer about the display.
+    ///
+    /// WHY the row asks: the Display row used to carry the badge "ACTIVE" and
+    /// the caption "Direct DRM/KMS FrameBuffer (720x1440, 60Hz)" without ever
+    /// asking the platform anything. The size in that caption was this app's
+    /// own logical surface, the refresh rate was never observed by anything,
+    /// and the badge asserted a live state no query had produced.
+    pub display: HardwareAvailability,
+    /// The Display row's caption, built from the platform's own scanout
+    /// constants and the platform's own answer.
+    pub display_caption: [u8; 72],
+    pub display_caption_len: usize,
+    /// The scroll model of the page on screen.
+    ///
+    /// WHY the page owns one: the section pages and the diagnostics page
+    /// stack their rows from one origin, and a stack with no offset has no
+    /// way to reach the rows that fall past the bottom of the screen. The
+    /// model is the platform's own, so the offset and the thumb cannot
+    /// disagree.
+    pub scroll: ScrollState,
+    /// What the platform says about the document in the wallpaper slot.
+    pub wallpaper_slot: DocumentSlot,
+    /// What the platform says about the document in the ringtone slot.
+    pub ringtone_slot: DocumentSlot,
+    /// The outcome of the last dispatch of the wallpaper document.
+    pub wallpaper_dispatch: DispatchOutcome,
+    /// The outcome of the last dispatch of the ringtone document.
+    pub ringtone_dispatch: DispatchOutcome,
     /// Whether the wallpaper picker panel is open instead of a section detail.
     pub wallpaper_open: bool,
     /// Which surface the next write targets.
@@ -484,6 +489,16 @@ impl SettingsApp {
             sound: HardwareAvailability::Unknown,
             cellular: HardwareAvailability::Unknown,
             bluetooth: HardwareAvailability::Unknown,
+            // WHY Unknown: the display has not been asked about yet, and
+            // "not asked" is not "not there".
+            display: HardwareAvailability::Unknown,
+            display_caption: [0u8; 72],
+            display_caption_len: 0,
+            scroll: ScrollState::new(0, 0, 0),
+            wallpaper_slot: DocumentSlot::EMPTY,
+            ringtone_slot: DocumentSlot::EMPTY,
+            wallpaper_dispatch: DispatchOutcome::Unattempted,
+            ringtone_dispatch: DispatchOutcome::Unattempted,
             wallpaper_open: false,
             wallpaper_target: WallpaperTarget::Both,
             wallpaper_pending: None,
@@ -874,6 +889,29 @@ impl SettingsApp {
         self.sound = hardware_availability("sound");
         self.cellular = hardware_availability("cellular");
         self.bluetooth = hardware_availability("bluetooth");
+        self.display = hardware_availability("display");
+        self.display_caption_len = display_row_caption(&mut self.display_caption, self.display);
+    }
+
+    /// Recomputes the scroll model for the page that is on screen.
+    ///
+    /// WHY it is called whenever the page changes: the content height is a
+    /// property of the page, and a model still carrying the previous page's
+    /// height would clamp the offset against the wrong number.
+    pub fn refresh_scroll(&mut self) {
+        self.scroll.content_h = page_content_height(self);
+        self.scroll.viewport_h = page_viewport_height();
+        self.scroll.clamp();
+    }
+
+    /// Puts the page back at the top.
+    ///
+    /// WHY the offset is cleared and not carried over: a page the user has
+    /// scrolled to the bottom of is a page they have read, and opening the
+    /// same page again should start at its first row.
+    pub fn reset_scroll(&mut self) {
+        self.scroll.offset = 0;
+        self.refresh_scroll();
     }
 
     /// Audits security identity and hardware keystore slots.
@@ -1050,6 +1088,51 @@ impl SettingsApp {
         }
         self.wallpaper_home = home.ok().flatten();
         self.wallpaper_lock = lock.ok().flatten();
+        self.refresh_document_slots();
+    }
+
+    /// Asks the platform who else handles the documents in this app's slots.
+    ///
+    /// WHY it is a separate reading and not part of the wallpaper read: the
+    /// two slots are the wallpaper and the ringtone, and the answer for one
+    /// says nothing about the other.
+    pub fn refresh_document_slots(&mut self) {
+        self.wallpaper_slot = read_document_slot("ui.wallpaper.home.document");
+        self.ringtone_slot = read_document_slot("audio.ringtone");
+    }
+
+    /// Hands the document in the wallpaper slot to the app that handles it.
+    pub fn dispatch_wallpaper_document(&mut self) {
+        self.wallpaper_dispatch = dispatch_document(&self.wallpaper_slot);
+        match self.wallpaper_dispatch {
+            DispatchOutcome::Dispatched => {
+                std::log("[SETTINGS APP] The platform dispatched the wallpaper document to its handler.").ok();
+            }
+            DispatchOutcome::NoHandler => {
+                std::log("[SETTINGS APP] No installed app declares a handler for the wallpaper document's media type; nothing was dispatched.").ok();
+            }
+            DispatchOutcome::Refused => {
+                std::log("[SETTINGS APP] The platform refused to dispatch the wallpaper document; nothing was dispatched.").ok();
+            }
+            DispatchOutcome::Unattempted => {}
+        }
+    }
+
+    /// Hands the document in the ringtone slot to the app that handles it.
+    pub fn dispatch_ringtone_document(&mut self) {
+        self.ringtone_dispatch = dispatch_document(&self.ringtone_slot);
+        match self.ringtone_dispatch {
+            DispatchOutcome::Dispatched => {
+                std::log("[SETTINGS APP] The platform dispatched the ringtone document to its handler.").ok();
+            }
+            DispatchOutcome::NoHandler => {
+                std::log("[SETTINGS APP] No installed app declares a handler for the ringtone document's media type; nothing was dispatched.").ok();
+            }
+            DispatchOutcome::Refused => {
+                std::log("[SETTINGS APP] The platform refused to dispatch the ringtone document; nothing was dispatched.").ok();
+            }
+            DispatchOutcome::Unattempted => {}
+        }
     }
 
     /// Opens the wallpaper picker over whatever the store currently holds.
@@ -1641,6 +1724,19 @@ const CARD_BORDER: u32 = match CARD.border {
 };
 
 const CARD_R: usize = CARD.radius;
+
+/// The platform's list-row treatment, at the state the document-handler rows
+/// use.
+///
+/// WHY the app's document rows are the platform's list rows: a row that
+/// invents its own fill, its own divider and its own padding is a row a
+/// third-party app cannot match, and the platform already says what a list
+/// row looks like.
+const ROW: components::ListRowStyle = components::list_row_style(&THEME, false);
+
+/// Height of a document-handler row: the list row's own padding above and
+/// below its two line boxes.
+const HANDLER_ROW_H: usize = ROW.pad * 2 + LINE_H * 2;
 
 /// Control radius: the doc's "controls/keypad 12-14 px" rung. Used by the back
 /// control, every segmented-control segment, every keypad key and the inner rim
@@ -2259,7 +2355,7 @@ fn row_count(section: Section) -> usize {
     match section {
         Section::Device => 5,
         Section::Network => 4,
-        Section::Personal => 4,
+        Section::Personal => 6,
         Section::Apps => 4,
         Section::Power => 4,
         Section::Security => 4,
@@ -2276,6 +2372,10 @@ fn row_h(section: Section, row: usize) -> usize {
         // honest caption for them is two lines.
         (Section::Power, 0) | (Section::Power, 3) => ROW_TALL_ALT,
         (Section::System, 4) => ROW_TALL_ALT,
+        // WHY the document rows are the list row's own height: the platform
+        // says what a list row is, and its height is its padding around two
+        // line boxes.
+        (Section::Personal, 4) | (Section::Personal, 5) => HANDLER_ROW_H,
         _ => ROW_H,
     }
 }
@@ -2325,11 +2425,62 @@ fn sensors_row_rect(row: usize) -> (usize, usize) {
 
 /// Top edge and height of row `row`, stacked from `DETAIL_TOP` with 16px gaps.
 fn detail_row_rect(section: Section, row: usize) -> (usize, usize) {
-    let mut y = DETAIL_TOP;
-    for r in 0..row {
-        y += row_h(section, r) + ROW_GAP;
+    stacked_row_rect(DETAIL_TOP, ROW_GAP, row, |r| row_h(section, r))
+}
+
+/// Top edge and height of row `row` after the page's scroll offset.
+///
+/// WHY a second entry point and not an argument on the first: the row
+/// rectangles are used both to draw a row and to hit-test a tap, and the two
+/// have to agree on where the row is. A tap test that used the unscrolled
+/// rectangle would answer for a row the user cannot see.
+fn detail_row_rect_scrolled(section: Section, row: usize, offset: usize) -> (usize, usize) {
+    let (cy, ch) = detail_row_rect(section, row);
+    (cy.saturating_sub(offset), ch)
+}
+
+/// Top edge and height of diagnostic row `row` after the page's scroll offset.
+fn sensors_row_rect_scrolled(row: usize, offset: usize) -> (usize, usize) {
+    let (cy, ch) = sensors_row_rect(row);
+    (cy.saturating_sub(offset), ch)
+}
+
+/// The bottom of the band a page's content may be drawn in.
+///
+/// WHY the band stops short of the screen edge: the home indicator strip
+/// belongs to the page, not to the content, and a row drawn under it would
+/// sit on the gesture bar.
+const CONTENT_BOTTOM: usize = H - std::design::spacing::GRID_32;
+
+/// The height of the band a page's content is drawn in.
+fn page_viewport_height() -> usize {
+    CONTENT_BOTTOM.saturating_sub(DETAIL_TOP)
+}
+
+/// The content height of the page on screen.
+///
+/// WHY the landing grid is not in here: it is a two-column grid whose cards
+/// are all laid out from one origin, and it fits the band. A page with
+/// nothing to scroll reports a content height of zero, and the scroll model
+/// then refuses to move.
+fn page_content_height(app: &SettingsApp) -> usize {
+    if app.sensors_open {
+        return sensors_content_height();
     }
-    (y, row_h(section, row))
+    match app.current_section {
+        Some(section) => section_content_height(section),
+        None => 0,
+    }
+}
+
+/// The content height of a section's detail page.
+fn section_content_height(section: Section) -> usize {
+    stacked_height(row_count(section), ROW_GAP, |r| row_h(section, r))
+}
+
+/// The content height of the diagnostics page.
+fn sensors_content_height() -> usize {
+    stacked_height(DIAG_ROWS, DIAG_ROW_GAP, diag_row_h)
 }
 
 /// Composes the About card's version line from the settings store's answer.
@@ -2604,6 +2755,146 @@ fn availability_badge(state: HardwareAvailability) -> (&'static [u8], u32) {
     }
 }
 
+/// The caption the Display row carries.
+///
+/// WHY the platform's answer decides the wording: the kernel publishes one
+/// verdict per hardware category, so a row that said "not reported" about a
+/// display the platform does have would be its own kind of untruth.
+fn display_row_caption(out: &mut [u8; 72], state: HardwareAvailability) -> usize {
+    display_caption(out, state != HardwareAvailability::Unknown)
+}
+
+/// Reads the document in `key` and asks the platform who handles it.
+///
+/// WHY the content index is asked first: a path does not say what a document
+/// is, and the media type the index holds is the only thing the intent
+/// registry resolves against.
+fn read_document_slot(key: &str) -> DocumentSlot {
+    let mut slot = DocumentSlot::EMPTY;
+    let mut path = [0u8; 192];
+    let Ok(n) = std::settings_get(key, &mut path) else {
+        return slot;
+    };
+    let Ok(text) = core::str::from_utf8(&path[..n]) else {
+        return slot;
+    };
+    let text = text.trim();
+    if text.is_empty() {
+        return slot;
+    }
+    let mut raw = [0u8; 2048];
+    let Some(record) = std::content::content_index_find_path(text, &mut raw) else {
+        return slot;
+    };
+    let path_len = text.len().min(slot.path.len());
+    slot.path[..path_len].copy_from_slice(&text.as_bytes()[..path_len]);
+    slot.path_len = path_len;
+    let mime_len = record.mime.len().min(slot.mime.len());
+    slot.mime[..mime_len].copy_from_slice(&record.mime.as_bytes()[..mime_len]);
+    slot.mime_len = mime_len;
+    fill_handlers(&mut slot);
+    fill_resolved(&mut slot);
+    slot
+}
+
+/// Fills the slot's handler list from the platform's intent registry.
+///
+/// WHY the registry is asked and not guessed: the set of apps that can open a
+/// document is whatever the installed packages declared, and a list the app
+/// wrote itself would name apps that are not installed.
+fn fill_handlers(slot: &mut DocumentSlot) {
+    let mut buf = [0u8; 1024];
+    let Ok(n) = std::content::intent_list(&mut buf) else {
+        return;
+    };
+    let Ok(text) = core::str::from_utf8(&buf[..n]) else {
+        return;
+    };
+    for line in text.split('\n') {
+        if line.is_empty() {
+            continue;
+        }
+        let mut parts = line.split('|');
+        let (Some(kind), Some(value), Some(package)) =
+            (parts.next(), parts.next(), parts.next())
+        else {
+            continue;
+        };
+        if kind != "mime" {
+            continue;
+        }
+        if value.as_bytes() != &slot.mime[..slot.mime_len] {
+            continue;
+        }
+        if slot.package_count >= slot.packages.len() {
+            break;
+        }
+        let take = package.len().min(slot.packages[0].len());
+        slot.packages[slot.package_count][..take].copy_from_slice(&package.as_bytes()[..take]);
+        slot.package_lens[slot.package_count] = take;
+        slot.package_count += 1;
+    }
+}
+
+/// Asks the platform which package it resolves this media type to.
+///
+/// WHY a refusal names nothing: the platform's own answer to a media type
+/// with no handler is that there is no handler, and the app must say that
+/// rather than offer a substitute.
+fn fill_resolved(slot: &mut DocumentSlot) {
+    let Ok(mime) = core::str::from_utf8(&slot.mime[..slot.mime_len]) else {
+        return;
+    };
+    let mut out = [0u8; 64];
+    let Ok(n) = std::content::intent_resolve(
+        std::content::IntentKind::Mime,
+        mime,
+        &mut out,
+    ) else {
+        return;
+    };
+    let take = n.min(slot.resolved.len());
+    slot.resolved[..take].copy_from_slice(&out[..take]);
+    slot.resolved_len = take;
+}
+
+/// Hands the document to the package the platform resolves for it.
+///
+/// WHY the platform picks and not the app: the registry is where the
+/// installed packages declared what they take, and an app that chose for
+/// itself would be choosing from a list it made up.
+pub fn dispatch_document(slot: &DocumentSlot) -> DispatchOutcome {
+    if slot.mime_len == 0 || slot.path_len == 0 {
+        return DispatchOutcome::NoHandler;
+    }
+    let (Ok(mime), Ok(path)) = (
+        core::str::from_utf8(&slot.mime[..slot.mime_len]),
+        core::str::from_utf8(&slot.path[..slot.path_len]),
+    ) else {
+        return DispatchOutcome::Refused;
+    };
+    match std::content::intent_dispatch(std::content::IntentKind::Mime, mime, path) {
+        Ok(_) => DispatchOutcome::Dispatched,
+        Err(err) if err == std::content::ERR_NO_HANDLER => DispatchOutcome::NoHandler,
+        Err(_) => DispatchOutcome::Refused,
+    }
+}
+
+/// The caption the document-handler rows carry.
+///
+/// WHY the three cases are told apart: a slot with a document that the
+/// platform holds has handlers, a slot with a document the platform does not
+/// hold has none to ask about, and a slot holding a catalogue key is not a
+/// document at all.
+fn handler_row_caption(out: &mut [u8; 96], slot: &DocumentSlot) -> usize {
+    let packages = slot.handler_packages();
+    handler_caption(
+        out,
+        slot.mime_len > 0,
+        &packages[..slot.package_count.min(packages.len())],
+    )
+}
+
 /// Pill badge, right-aligned helper: soft fill, 1px ink rim, label centred.
 /// The width is derived from the measured label so the pill always fits its
 /// text and the caller can reserve exactly that much horizontal space.
@@ -2794,6 +3085,79 @@ fn row_head(
         return Some(c);
     }
     badge_pixel(x, y, bx0, cy + BADGE_DY, badge, badge_ink, THEME.surface_container)
+}
+
+/// One row of the document-handler list.
+///
+/// WHY it is a list row and not a card: the row answers a question about
+/// the platform's intent registry, and a list of the apps that declared a
+/// handler is a list. The platform's own list-row treatment supplies the
+/// fill, the divider's ink and the padding.
+fn handler_row_pixel(
+    x: usize,
+    y: usize,
+    cy: usize,
+    slot: &DocumentSlot,
+    title: &[u8],
+    outcome: &DispatchOutcome,
+) -> Option<u32> {
+    // The divider the platform's list row draws between rows.
+    if y == cy && x >= DETAIL_X && x < DETAIL_X + DETAIL_W {
+        return Some(ROW.divider);
+    }
+    let text_x = DETAIL_X + ROW.pad;
+    let text_w = DETAIL_W - 2 * ROW.pad;
+    if let Some(c) = run_ink(
+        x,
+        y,
+        text_x,
+        cy + ROW.pad,
+        TYPE_H3,
+        title,
+        text_w,
+        THEME.on_surface,
+        ROW.fill,
+        true,
+    ) {
+        return Some(c);
+    }
+    let mut cap = [0u8; 96];
+    let cap_len = handler_row_caption(&mut cap, slot);
+    if let Some(c) = run_ink(
+        x,
+        y,
+        text_x,
+        cy + ROW.pad + LINE_H,
+        TYPE_H3,
+        &cap[..cap_len],
+        text_w,
+        THEME.on_surface_variant,
+        ROW.fill,
+        false,
+    ) {
+        return Some(c);
+    }
+    // The outcome of the last dispatch, in the platform's own terms.
+    let (badge, badge_ink): (&[u8], u32) = match outcome {
+        DispatchOutcome::Dispatched => (&b"DISPATCHED"[..], THEME.success),
+        DispatchOutcome::NoHandler => (&b"NO HANDLER"[..], THEME.on_surface_variant),
+        DispatchOutcome::Refused => (&b"REFUSED"[..], THEME.on_surface_variant),
+        DispatchOutcome::Unattempted => (&b"TAP TO SEND"[..], THEME.on_surface_variant),
+    };
+    let bw = badge_w(badge);
+    let bx0 = DETAIL_X + DETAIL_W - ROW.pad - bw;
+    if let Some(c) = badge_pixel(
+        x,
+        y,
+        bx0,
+        cy + ROW.pad + LINE_H,
+        badge,
+        badge_ink,
+        ROW.fill,
+    ) {
+        return Some(c);
+    }
+    Some(ROW.fill)
 }
 
 /// One segment of the DVFS profile selector.
@@ -3256,8 +3620,16 @@ fn sensors_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
     if y == DIVIDER_Y {
         return THEME.border;
     }
+    // WHY the band is clipped: the diagnostics page is a stack, and a stack
+    // that scrolls may reach up under the screen title.
+    if y < DETAIL_TOP {
+        return THEME.surface;
+    }
     for row in 0..DIAG_ROWS {
-        let (cy, ch) = sensors_row_rect(row);
+        let (cy, ch) = sensors_row_rect_scrolled(row, app.scroll.offset);
+        if cy + ch <= DETAIL_TOP || cy >= CONTENT_BOTTOM {
+            continue;
+        }
         if let Some(fill) = card_pixel(x, y, CONTENT_X, cy, CONTENT_W, ch, CARD_R) {
             let _ = fill;
             if let Some(c) = diag_row_pixel(x, y, app, row, cy) {
@@ -3284,15 +3656,29 @@ fn row_pixel(
     match section {
         Section::Device => match row {
             0 => {
+                // WHY the row asks the platform now: it used to print
+                // "Direct DRM/KMS FrameBuffer (720x1440, 60Hz)" next to an
+                // "ACTIVE" badge. The size in that caption was this app's own
+                // logical surface, the refresh rate was never observed by
+                // anything, and the badge asserted a live state no query had
+                // produced. The row now carries the platform's own answer
+                // about the display, the platform's own scanout size, and says
+                // plainly that the refresh rate is not reported.
+                let (badge, badge_ink) = match app.display {
+                    HardwareAvailability::Unknown => {
+                        (&b"NOT REPORTED"[..], THEME.on_surface_variant)
+                    }
+                    other => availability_badge(other),
+                };
                 if let Some(c) = row_head(
                     x,
                     y,
                     cy,
                     b"Display",
-                    b"Direct DRM/KMS FrameBuffer (720x1440, 60Hz)",
+                    &app.display_caption[..app.display_caption_len],
                     THEME.on_surface_variant,
-                    b"ACTIVE",
-                    THEME.success,
+                    badge,
+                    badge_ink,
                 ) {
                     return c;
                 }
@@ -3588,20 +3974,48 @@ fn row_pixel(
                     return c;
                 }
             }
-            _ => {
+            3 => {
+                // WHY the row no longer names a language: the platform has no
+                // locale anywhere - no setting, no syscall, no payload - so
+                // "System language: English (en-US)" was a string the app
+                // carried, and a "DEFAULT" badge on it claimed a locale the
+                // platform never reported.
                 if let Some(c) = row_head(
                     x,
                     y,
                     cy,
                     b"Language & Locale",
-                    b"System language: English (en-US)",
+                    b"The platform reports no system language",
                     THEME.on_surface_variant,
-                    b"DEFAULT",
+                    b"NOT REPORTED",
                     THEME.on_surface_variant,
                 ) {
                     return c;
                 }
             }
+            4 | 5 => {
+                // WHY these rows are the platform's list rows and not cards:
+                // they are a list of the apps the platform says can open the
+                // documents in this app's own slots, and the platform already
+                // says what a list row looks like.
+                let (slot, outcome, title) = if row == 4 {
+                    (
+                        &app.wallpaper_slot,
+                        &app.wallpaper_dispatch,
+                        &b"Wallpaper document"[..],
+                    )
+                } else {
+                    (
+                        &app.ringtone_slot,
+                        &app.ringtone_dispatch,
+                        &b"Ringtone document"[..],
+                    )
+                };
+                if let Some(c) = handler_row_pixel(x, y, cy, slot, title, outcome) {
+                    return c;
+                }
+            }
+            _ => {}
         },
         Section::Apps => match row {
             0 => {
@@ -4099,8 +4513,17 @@ fn detail_pixel(x: usize, y: usize, app: &SettingsApp, section: Section) -> u32 
     if y == DIVIDER_Y {
         return THEME.border;
     }
+    // WHY the band is clipped: a scrolled row may reach up under the screen
+    // title, and a row drawn over the title would read as part of the
+    // header. The band below the divider belongs to the page's content.
+    if y < DETAIL_TOP {
+        return THEME.surface;
+    }
     for row in 0..row_count(section) {
-        let (cy, ch) = detail_row_rect(section, row);
+        let (cy, ch) = detail_row_rect_scrolled(section, row, app.scroll.offset);
+        if cy + ch <= DETAIL_TOP || cy >= CONTENT_BOTTOM {
+            continue;
+        }
         if let Some(fill) = card_pixel(x, y, CONTENT_X, cy, CONTENT_W, ch, CARD_R) {
             return row_pixel(x, y, app, section, row, cy, fill);
         }
@@ -5379,6 +5802,7 @@ fn handle_tap(
     if std::design::back_button::contains(input.x as usize, input.y as usize) {
         if settings.sensors_open {
             settings.sensors_open = false;
+            settings.reset_scroll();
             std::log("[SETTINGS APP] Sensors & Diagnostics sub-page dismissed.",
             )
             .ok();
@@ -5396,6 +5820,7 @@ fn handle_tap(
             .ok();
         } else if settings.current_section.is_some() {
             settings.current_section = None;
+            settings.reset_scroll();
             std::log(
                 "[SETTINGS APP] Back navigation: returned to the System Space landing grid.",
             )
@@ -5503,7 +5928,8 @@ fn handle_tap(
             None => {}
         }
     } else if settings.current_section == Some(Section::Personal) {
-        let (cy, ch) = detail_row_rect(Section::Personal, 2);
+        let (cy, ch) =
+            detail_row_rect_scrolled(Section::Personal, 2, settings.scroll.offset);
         if in_round_rect(
             input.x as usize,
             input.y as usize,
@@ -5514,6 +5940,31 @@ fn handle_tap(
             CARD_R,
         ) {
             settings.open_wallpapers();
+        } else {
+            // WHY the two document rows are tappable: the app owns the
+            // wallpaper and the ringtone slots, and a slot the app owns is a
+            // slot the user can ask the platform to hand over to the app
+            // that handles its media type.
+            for row in [4usize, 5usize] {
+                let (cy, ch) =
+                    detail_row_rect_scrolled(Section::Personal, row, settings.scroll.offset);
+                if in_round_rect(
+                    input.x as usize,
+                    input.y as usize,
+                    DETAIL_X,
+                    cy,
+                    DETAIL_W,
+                    ch,
+                    ROW.radius,
+                ) {
+                    if row == 4 {
+                        settings.dispatch_wallpaper_document();
+                    } else {
+                        settings.dispatch_ringtone_document();
+                    }
+                    break;
+                }
+            }
         }
     } else if (110..=170).contains(&input.y) {
         // Gated hero/search tap region: route taps to power/thermals
@@ -5527,13 +5978,15 @@ fn handle_tap(
             settings.display_about_device();
         }
         settings.refresh_wallpaper_values();
+        settings.reset_scroll();
         std::log("[SETTINGS APP] System Space category opened; tab switched.",
         )
         .ok();
     } else if let Some(section) = settings.current_section {
         match section {
             Section::Device => {
-                let (cy, ch) = detail_row_rect(Section::Device, 4);
+                let (cy, ch) =
+                    detail_row_rect_scrolled(Section::Device, 4, settings.scroll.offset);
                 if in_round_rect(
                     input.x as usize,
                     input.y as usize,
@@ -5545,6 +5998,7 @@ fn handle_tap(
                 ) {
                     settings.sensors_open = true;
                     settings.refresh_thermals_and_sensors();
+                    settings.reset_scroll();
                     std::log("[SETTINGS APP] Sensors & Diagnostics sub-page opened.",
                     )
                     .ok();
@@ -5561,7 +6015,8 @@ fn handle_tap(
                 }
             }
             Section::System => {
-                let (cy, ch) = detail_row_rect(Section::System, 4);
+                let (cy, ch) =
+                    detail_row_rect_scrolled(Section::System, 4, settings.scroll.offset);
                 if in_round_rect(
                     input.x as usize,
                     input.y as usize,
@@ -5575,7 +6030,8 @@ fn handle_tap(
                 }
             }
             Section::Security => {
-                let (cy, ch) = detail_row_rect(Section::Security, 0);
+                let (cy, ch) =
+                    detail_row_rect_scrolled(Section::Security, 0, settings.scroll.offset);
                 if in_round_rect(
                     input.x as usize,
                     input.y as usize,
@@ -5596,6 +6052,7 @@ fn handle_tap(
             settings.display_about_device();
         }
         settings.refresh_wallpaper_values();
+        settings.reset_scroll();
         std::log("[SETTINGS APP] System Space category opened; tab switched.",
         )
         .ok();
@@ -5680,6 +6137,7 @@ pub extern "C" fn _start() -> ! {
 
     // Initial render & presentation
     if surface > 0 {
+        settings.refresh_scroll();
         render_settings_ui(surface, &settings);
         let _ = std::surface_flip();
         std::log("[SETTINGS APP] Settings UI presented to scanout buffer.").ok();
@@ -5705,6 +6163,7 @@ pub extern "C" fn _start() -> ! {
         // section would be ignored by an app that is already running, and the
         // result would open the landing grid instead of the section it names.
         if settings.open_requested_section() {
+            settings.reset_scroll();
             if surface > 0 {
                 render_settings_ui(surface, &settings);
                 let _ = std::surface_flip();
@@ -5723,6 +6182,25 @@ pub extern "C" fn _start() -> ! {
                 };
                 while std::input_event_poll(&mut input).is_ok() {
                     if input.kind == 4 || input.kind == 6 || input.kind == 7 || input.kind == 8 || input.kind == 10 {
+                        // A drag over the page's content is a scroll gesture;
+                        // anything else is the system's navigation gesture.
+                        //
+                        // WHY the pages needed the gesture: a section page
+                        // stacks its rows from one origin, and a row that
+                        // falls past the bottom of the band had no way to be
+                        // reached at all. The scroll model owns the offset,
+                        // so the drawing and the hit test cannot disagree.
+                        let over_content = (input.y as usize) >= DETAIL_TOP
+                            && (input.y as usize) < CONTENT_BOTTOM
+                            && settings.scroll.max_offset() > 0;
+                        if (input.kind == 4 || input.kind == 10) && over_content {
+                            settings.scroll.apply_drag(input.dy);
+                            if surface > 0 {
+                                render_settings_ui(surface, &settings);
+                                let _ = std::surface_flip();
+                            }
+                            continue;
+                        }
                         std::log("[SETTINGS APP] Navigation gesture recognized. Exiting to launcher.",
                         )
                         .ok();
@@ -5735,6 +6213,7 @@ pub extern "C" fn _start() -> ! {
                         let mut repainted_band = false;
                         handle_tap(&mut settings, &input, surface, &mut repainted_band);
                         if surface > 0 && !repainted_band {
+                            settings.refresh_scroll();
                             render_settings_ui(surface, &settings);
                             let _ = std::surface_flip();
                         }
