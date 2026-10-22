@@ -538,7 +538,13 @@ impl DrmKmsController {
         } else {
             z_order
         };
-        let surface = DrmSurface::new(id, width, height, actual_z, owner_task);
+        let mut surface = DrmSurface::new(id, width, height, actual_z, owner_task);
+        // WHY the system's own surfaces do not take input: the system line
+        // and the display service's own surface sit above the shell's
+        // surface in the z order, and a surface that takes input is a
+        // surface the gestures are routed to. Without this the system band
+        // swallowed every swipe, and the device could not be unlocked.
+        surface.input_enabled = !is_overlay;
         self.surfaces.push(surface);
         self.frame_dirty = true;
         // A new surface appears on top of whatever was there before, so the rows

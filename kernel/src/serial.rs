@@ -918,7 +918,7 @@ fn handle_serial_command(cmd: &[u8]) {
         if let Some(kms) = crate::drivers::display_kms::DRM_KMS.try_lock() {
             for surface in kms.surfaces.iter() {
                 serial_println!(
-                    "[SURFACES] id={} owner={} z={} x={} y={} {}x{} visible={} ready={} has_frame={} complete={}",
+                    "[SURFACES] id={} owner={} z={} x={} y={} {}x{} visible={} ready={} has_frame={} complete={} input={}",
                     surface.id,
                     surface.owner_task,
                     surface.z_order,
@@ -930,6 +930,7 @@ fn handle_serial_command(cmd: &[u8]) {
                     surface.frame_ready,
                     surface.has_frame,
                     surface.frame_complete,
+                    surface.input_enabled,
                 );
             }
         } else {
