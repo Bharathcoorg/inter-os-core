@@ -554,11 +554,15 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
         // advances when `camera_capture` actually returned a frame.
         if let Some((_fill, on_border)) = top_pill_body(x, y, SHOTS_RECT) {
             let label = &camera.shots_label[..camera.shots_label_len];
-            if let Some(c) = top_row_label(x, y, SHOTS_RECT, label, THEME.success, THEME.surface_container) {
+            // WHY the count is ink and not success green: the label says how
+            // many frames this camera has taken, which is neither good nor
+            // bad. Green here made a normal state look like a verdict, and
+            // the theme keeps green for the platform's own status.
+            if let Some(c) = top_row_label(x, y, SHOTS_RECT, label, THEME.on_surface, THEME.surface_container) {
                 return c;
             }
             if on_border {
-                return THEME.success;
+                return THEME.border;
             }
             return THEME.surface_container;
         }
@@ -720,7 +724,11 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
             CameraMode::DocumentVision => x >= 101 && x < 165,
         };
         if is_active_mode && y >= 1194 && y < 1198 {
-            return THEME.warning;
+            // WHY the ink and not the warning accent: the underline says
+            // which of three modes is showing, and that is a position, not
+            // a warning. An orange underline on every camera screen spends
+            // the one colour the theme reserves for something being wrong.
+            return THEME.on_surface;
         }
 
         return THEME.surface;
