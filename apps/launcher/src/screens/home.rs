@@ -57,7 +57,7 @@ use launcher::theme::{
 /// it to each screen; until then each screen binds the default itself and the
 /// screen is already written against the struct rather than against constants.
 fn active_theme() -> Theme {
-    launcher::theme::SHELL
+    Theme::LIGHT
 }
 
 // -----------------------------------------------------------------------------
@@ -556,7 +556,10 @@ struct DeckTilePlan {
     icon: Option<launcher::icons::IconKind>,
     icon_cx: usize,
     icon_cy: usize,
+    /// Vibrant icon pictogram ink tint.
     ink: u32,
+    /// High-contrast readable ink for the app title label.
+    label_ink: u32,
     badge: Run,
     /// The app's name, resolved to exactly where and how it is drawn.
     ///
@@ -567,6 +570,7 @@ struct DeckTilePlan {
     /// the deck showed a grid of unlabelled tiles; the resolution work was already
     /// here, so painting it costs one bounds test per pixel inside a tile.
     label: Run,
+    /// Vibrant pastel container fill for the tile pill squircle.
     fill: u32,
 }
 
@@ -577,6 +581,7 @@ impl DeckTilePlan {
         icon_cx: 0,
         icon_cy: 0,
         ink: 0,
+        label_ink: 0,
         badge: Run::EMPTY,
         label: Run::EMPTY,
         fill: 0,
@@ -1014,6 +1019,28 @@ pub fn find_package_index(state: &LauncherState, suffix: &[u8]) -> Option<usize>
     None
 }
 
+/// Returns the vibrant pastel container fill for a deck tile.
+#[inline]
+pub fn tile_container(theme: &Theme, app_id: &[u8]) -> u32 {
+    theme.vibrant_container_bytes(app_id)
+}
+
+/// Returns the vibrant icon pictogram ink tint for a deck tile.
+#[inline]
+pub fn tile_icon_tint(theme: &Theme, app_id: &[u8]) -> u32 {
+    theme.vibrant_icon_tint_bytes(app_id)
+}
+
+/// Returns readable high-contrast ink for a deck tile label drawn on its vibrant container.
+#[inline]
+pub fn tile_label_ink(theme: &Theme, app_id: &[u8]) -> u32 {
+    if let Ok(s) = core::str::from_utf8(app_id) {
+        theme.on_vibrant_container(s)
+    } else {
+        theme.ink_on_light
+    }
+}
+
 /// Resolves the deck for this frame.
 fn deck_plan(state: &LauncherState, theme: &Theme, _deck: Rect) -> DeckPlan {
     let mut plan = DeckPlan {
@@ -1029,43 +1056,53 @@ fn deck_plan(state: &LauncherState, theme: &Theme, _deck: Rect) -> DeckPlan {
         empty: None,
     };
 
-    let fill = theme.surface_frosted;
-
-    let dock_defs: [(Option<launcher::icons::IconKind>, &[u8], &[u8], u32); 6] = [
-        (Some(launcher::icons::IconKind::Phone), b"dialer", b"Phone", theme.on_surface),
-        (Some(launcher::icons::IconKind::Messages), b"messages", b"Messages", theme.on_surface),
-        (Some(launcher::icons::IconKind::Camera), b"camera", b"Camera", theme.on_surface),
-        (Some(launcher::icons::IconKind::Files), b"file_manager", b"Files", theme.on_surface),
-        (Some(launcher::icons::IconKind::Browser), b"browser", b"Browser", theme.on_surface),
-        (Some(launcher::icons::IconKind::Apps), b"apps", b"Apps", theme.on_surface),
+    let dock_defs: [(Option<launcher::icons::IconKind>, &[u8], &[u8]); 6] = [
+        (Some(launcher::icons::IconKind::Phone), b"dialer", b"Phone"),
+        (Some(launcher::icons::IconKind::Messages), b"messages", b"Messages"),
+        (Some(launcher::icons::IconKind::Camera), b"camera", b"Camera"),
+        (Some(launcher::icons::IconKind::Files), b"file_manager", b"Files"),
+        (Some(launcher::icons::IconKind::Browser), b"browser", b"Browser"),
+        (Some(launcher::icons::IconKind::Apps), b"apps", b"Apps"),
     ];
 
-    let label_bytes: [&[u8]; 6] = core::array::from_fn(|slot| {
-        let (_, suffix, default_label, _) = dock_defs[slot];
-        if slot == 0 || slot == 5 {
-            default_label
+    let label_fit = DOCK_TILES[0].w.saturating_sub(space::XS * 2);
+    let label_scale = LABEL_SCALE;
+
+    for slot in 0..6 {
+        let (default_icon, suffix, default_label) = dock_defs[slot];
+        let (app_id_bytes, label_bytes, icon_kind) = if slot == 5 {
+            (suffix, default_label, default_icon)
         } else if let Some(pkg_idx) = find_package_index(state, suffix).or_else(|| {
             if suffix == b"file_manager" {
                 find_package_index(state, b"files")
+            } else if suffix == b"dialer" {
+                find_package_index(state, b"phone")
+            } else if suffix == b"browser" {
+                find_package_index(state, b"web")
             } else {
                 None
             }
         }) {
-            app_label(state, pkg_idx)
+            let id = app_id(state, pkg_idx);
+            let label = app_label(state, pkg_idx);
+            let icon = launcher::icons::match_icon_kind(id)
+                .or_else(|| launcher::icons::match_icon_kind(label))
+                .or(default_icon);
+            let resolved_id = if id.is_empty() { suffix } else { id };
+            let resolved_label = if label.is_empty() { default_label } else { label };
+            (resolved_id, resolved_label, icon)
         } else {
-            default_label
-        }
-    });
-    let label_fit = DOCK_TILES[0].w.saturating_sub(space::XS * 2);
-    let label_scale = LABEL_SCALE;
+            (suffix, default_label, default_icon)
+        };
 
-    for (slot, &(icon_kind, _, _, icon_ink)) in dock_defs.iter().enumerate() {
         let cell = DOCK_TILES[slot];
-        let label_bytes = label_bytes[slot];
-
         let icon_cx = cell.x + cell.w / 2;
         let icon_cy = cell.y + 60;
         let label_y = cell.y + 120;
+
+        let fill = tile_container(theme, app_id_bytes);
+        let icon_ink = tile_icon_tint(theme, app_id_bytes);
+        let label_ink = tile_label_ink(theme, app_id_bytes);
 
         plan.cells[slot] = DeckTilePlan {
             cell,
@@ -1073,6 +1110,7 @@ fn deck_plan(state: &LauncherState, theme: &Theme, _deck: Rect) -> DeckPlan {
             icon_cx,
             icon_cy,
             ink: icon_ink,
+            label_ink,
             badge: Run::EMPTY,
             label: Run::centred(
                 cell.x,
@@ -1081,7 +1119,7 @@ fn deck_plan(state: &LauncherState, theme: &Theme, _deck: Rect) -> DeckPlan {
                 label_fit,
                 cell.w,
                 label_bytes,
-                theme.on_surface,
+                label_ink,
             ),
             fill,
         };
@@ -1710,8 +1748,7 @@ fn deck_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option
     if rounded_outline(tile.cell, x, y, TILE_RADIUS) {
         return Some(theme.outline_variant);
     }
-    let bg = backdrop_ref(p, x, y);
-    let tile_fill = interos_std::font::blend(tile.fill, bg, 240);
+    let tile_fill = tile.fill;
 
     if let Some(kind) = tile.icon {
         if let Some(c) = launcher::icons::rasterize_icon_pixel_scaled_aa(
@@ -1729,7 +1766,7 @@ fn deck_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option
     } else if let Some(c) = tile.badge.pixel_aa(x, y, tile.ink, tile_fill) {
         return Some(c);
     }
-    if let Some(c) = tile.label.pixel_aa(x, y, tile.ink, tile_fill) {
+    if let Some(c) = tile.label.pixel_aa(x, y, tile.label_ink, tile_fill) {
         return Some(c);
     }
     Some(tile_fill)
@@ -1870,4 +1907,176 @@ pub fn log_render(state: &LauncherState) {
         "[LAUNCHER] render_full complete: Home surface rendered.",
     );
     let _ = interos_std::log(msg);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use launcher::theme::Theme;
+
+    #[test]
+    fn deck_tile_vibrant_icon_tints_for_all_recognized_apps() {
+        let theme = Theme::LIGHT;
+
+        // 1. Phone / Dialer -> Emerald Green (0xFF10B981)
+        assert_eq!(tile_icon_tint(&theme, b"dialer"), 0xFF10B981);
+        assert_eq!(tile_icon_tint(&theme, b"phone"), 0xFF10B981);
+        assert_eq!(tile_icon_tint(&theme, b"org.interos.dialer"), 0xFF10B981);
+
+        // 2. Messages -> Electric Sky Blue (0xFF0284C7)
+        assert_eq!(tile_icon_tint(&theme, b"messages"), 0xFF0284C7);
+        assert_eq!(tile_icon_tint(&theme, b"sms"), 0xFF0284C7);
+        assert_eq!(tile_icon_tint(&theme, b"org.interos.messages"), 0xFF0284C7);
+
+        // 3. Camera -> Warm Gold (0xFFF59E0B)
+        assert_eq!(tile_icon_tint(&theme, b"camera"), 0xFFF59E0B);
+        assert_eq!(tile_icon_tint(&theme, b"org.interos.camera"), 0xFFF59E0B);
+
+        // 4. Files -> Amber Orange (0xFFEA580C)
+        assert_eq!(tile_icon_tint(&theme, b"files"), 0xFFEA580C);
+        assert_eq!(tile_icon_tint(&theme, b"file_manager"), 0xFFEA580C);
+        assert_eq!(tile_icon_tint(&theme, b"org.interos.file_manager"), 0xFFEA580C);
+
+        // 5. Browser -> Indigo (0xFF6366F1)
+        assert_eq!(tile_icon_tint(&theme, b"browser"), 0xFF6366F1);
+        assert_eq!(tile_icon_tint(&theme, b"web"), 0xFF6366F1);
+        assert_eq!(tile_icon_tint(&theme, b"org.interos.browser"), 0xFF6366F1);
+
+        // 6. Music -> Coral Red (0xFFF43F5E)
+        assert_eq!(tile_icon_tint(&theme, b"music"), 0xFFF43F5E);
+        assert_eq!(tile_icon_tint(&theme, b"audio"), 0xFFF43F5E);
+        assert_eq!(tile_icon_tint(&theme, b"org.interos.music"), 0xFFF43F5E);
+
+        // 7. Settings -> Steel Blue (0xFF64748B)
+        assert_eq!(tile_icon_tint(&theme, b"settings"), 0xFF64748B);
+        assert_eq!(tile_icon_tint(&theme, b"cfg"), 0xFF64748B);
+        assert_eq!(tile_icon_tint(&theme, b"org.interos.settings"), 0xFF64748B);
+
+        // 8. Notes -> Amber (0xFFD97706)
+        assert_eq!(tile_icon_tint(&theme, b"notes"), 0xFFD97706);
+        assert_eq!(tile_icon_tint(&theme, b"note"), 0xFFD97706);
+        assert_eq!(tile_icon_tint(&theme, b"org.interos.notes"), 0xFFD97706);
+
+        // 9. Vault -> Gold (0xFFEAB308)
+        assert_eq!(tile_icon_tint(&theme, b"vault"), 0xFFEAB308);
+        assert_eq!(tile_icon_tint(&theme, b"pass"), 0xFFEAB308);
+        assert_eq!(tile_icon_tint(&theme, b"org.interos.vault"), 0xFFEAB308);
+
+        // 10. Calculator -> Teal (0xFF0D9488)
+        assert_eq!(tile_icon_tint(&theme, b"calculator"), 0xFF0D9488);
+        assert_eq!(tile_icon_tint(&theme, b"calc"), 0xFF0D9488);
+        assert_eq!(tile_icon_tint(&theme, b"org.interos.calculator"), 0xFF0D9488);
+
+        // 11. Calendar -> Cerulean (0xFF0284C7)
+        assert_eq!(tile_icon_tint(&theme, b"calendar"), 0xFF0284C7);
+        assert_eq!(tile_icon_tint(&theme, b"cal"), 0xFF0284C7);
+        assert_eq!(tile_icon_tint(&theme, b"org.interos.calendar"), 0xFF0284C7);
+
+        // 12. Agent Manager -> Violet (0xFF7C3AED)
+        assert_eq!(tile_icon_tint(&theme, b"agent_manager"), 0xFF7C3AED);
+        assert_eq!(tile_icon_tint(&theme, b"agent"), 0xFF7C3AED);
+        assert_eq!(tile_icon_tint(&theme, b"ai"), 0xFF7C3AED);
+        assert_eq!(tile_icon_tint(&theme, b"org.interos.agent_manager"), 0xFF7C3AED);
+
+        // Apps tile fallback -> Violet (theme.accent = 0xFF7C3AED)
+        assert_eq!(tile_icon_tint(&theme, b"apps"), theme.accent);
+    }
+
+    #[test]
+    fn deck_tile_vibrant_pastel_containers_and_label_contrast() {
+        let theme = Theme::LIGHT;
+
+        let apps: &[(&[u8], &str)] = &[
+            (b"dialer", "dialer"),
+            (b"messages", "messages"),
+            (b"camera", "camera"),
+            (b"files", "files"),
+            (b"browser", "browser"),
+            (b"music", "music"),
+            (b"settings", "settings"),
+            (b"notes", "notes"),
+            (b"vault", "vault"),
+            (b"calculator", "calculator"),
+            (b"calendar", "calendar"),
+            (b"agent_manager", "agent_manager"),
+        ];
+
+        for &(id_bytes, id_str) in apps {
+            let container = tile_container(&theme, id_bytes);
+            let expected_container = theme.vibrant_container(id_str);
+            assert_eq!(container, expected_container, "Container mismatch for {}", id_str);
+
+            let label_ink = tile_label_ink(&theme, id_bytes);
+            let expected_label_ink = theme.on_vibrant_container(id_str);
+            assert_eq!(label_ink, expected_label_ink, "Label ink mismatch for {}", id_str);
+            assert_eq!(label_ink, theme.ink_on_light, "Must use high-contrast ink_on_light for {}", id_str);
+
+            // Container must not be raw surface or raw accent
+            assert_ne!(container, theme.surface);
+            assert_ne!(container, tile_icon_tint(&theme, id_bytes));
+
+            // WCAG AA contrast check: ink vs container
+            let lum_c = interos_std::design::accessibility::relative_luminance_x10000(container);
+            let lum_i = interos_std::design::accessibility::relative_luminance_x10000(label_ink);
+            let cr = interos_std::design::accessibility::contrast_ratio_x100(lum_c, lum_i);
+            assert!(cr >= 450, "Contrast ratio must be >= 4.5:1 for {}, got {}.{:02}:1", id_str, cr / 100, cr % 100);
+        }
+    }
+
+    #[test]
+    fn deck_plan_populates_six_vibrant_tiles() {
+        let state = LauncherState::new();
+        let theme = Theme::LIGHT;
+        let plan = deck_plan(&state, &theme, frame().deck);
+
+        assert_eq!(plan.slots, 6);
+        assert_eq!(plan.app_count, 6);
+
+        // Verify each tile matches expected vibrant container and icon tint
+        let expected: [(&[u8], launcher::icons::IconKind, u32); 6] = [
+            (b"dialer", launcher::icons::IconKind::Phone, 0xFF10B981),        // Emerald Green
+            (b"messages", launcher::icons::IconKind::Messages, 0xFF0284C7),   // Electric Sky Blue
+            (b"camera", launcher::icons::IconKind::Camera, 0xFFF59E0B),       // Warm Gold
+            (b"file_manager", launcher::icons::IconKind::Files, 0xFFEA580C),  // Amber Orange
+            (b"browser", launcher::icons::IconKind::Browser, 0xFF6366F1),     // Indigo
+            (b"apps", launcher::icons::IconKind::Apps, 0xFF7C3AED),           // Violet
+        ];
+
+        for (slot, (app_id, icon_kind, expected_tint)) in expected.iter().enumerate() {
+            let tile = &plan.cells[slot];
+            assert_eq!(tile.icon, Some(*icon_kind), "Slot {} icon kind mismatch", slot);
+            assert_eq!(tile.ink, *expected_tint, "Slot {} vibrant icon tint mismatch", slot);
+            assert_eq!(tile.fill, theme.vibrant_container_bytes(app_id), "Slot {} vibrant container mismatch", slot);
+            assert_eq!(tile.label_ink, theme.ink_on_light, "Slot {} label ink must be high contrast", slot);
+            assert!(tile.label.len > 0, "Slot {} label must not be empty", slot);
+        }
+    }
+
+    #[test]
+    fn deck_pixel_renders_vibrant_pastel_container_fill() {
+        let state = LauncherState::new();
+        let p = build(&state);
+        let theme = Theme::LIGHT;
+
+        // For slot 0 (Phone tile at x: 30..230, y: 805..985):
+        // Test a pixel safely inside the squircle corner, but away from icon/label
+        let cell = DOCK_TILES[0];
+        let px = cell.x + 18;
+        let py = cell.y + 18;
+        assert!(rounded_contains(cell, px, py, TILE_RADIUS));
+        assert!(!rounded_outline(cell, px, py, TILE_RADIUS));
+
+        let color = deck_pixel(px, py, &p.frame, &p, &theme);
+        assert_eq!(color, Some(theme.vibrant_container_bytes(b"dialer")), "Squircle must render vibrant pastel container fill");
+
+        // Test outline pixel: must return outline_variant
+        let ox = cell.x;
+        let oy = cell.y + cell.h / 2;
+        let border_color = deck_pixel(ox, oy, &p.frame, &p, &theme);
+        assert_eq!(border_color, Some(theme.outline_variant), "Border pixel must render outline_variant");
+
+        // Test pixel outside deck: must return None
+        let outside = deck_pixel(0, 0, &p.frame, &p, &theme);
+        assert_eq!(outside, None);
+    }
 }
