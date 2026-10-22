@@ -446,6 +446,8 @@ pub power_profile: Option<PowerProfile>,
     pub screen_lock_has_credential: Option<bool>,
     /// Authoritative monotonic uptime ticks queried from kernel capability slot 2 (TimerTickRead).
     pub uptime_ticks: u64,
+    /// Continuous frame counter driven by EVENT_TIMER_TICK for vitality orb animation.
+    pub frame_count: u32,
 }
 
 impl SettingsApp {
@@ -523,6 +525,7 @@ impl SettingsApp {
             screen_lock_reported: None,
             screen_lock_has_credential: None,
             uptime_ticks: 0,
+            frame_count: 0,
         }
     }
 
@@ -1625,10 +1628,11 @@ fn blend_over(fg: u32, bg: u32, alpha: u32) -> u32 {
 // launcher's `theme::type_scale` documents the same consequence for its own
 // BADGE and CAPTION rungs, which coincide for exactly this reason.
 
-/// 24px cell: row titles, captions, badges, control labels, buttons.
-const TYPE_H3: usize = 1;
-/// 48px cell: screen titles and keypad digits.
-const TYPE_DISPLAY: usize = 2;
+/// Standard mobile type scale steps (from canonical steps {1, 2, 3, 6}):
+/// Scale 2 (cap 16px): list row labels, category card titles, button labels.
+const TYPE_H3: usize = 2;
+/// Scale 3 (cap 22px): screen titles, section headings, landing title.
+const TYPE_DISPLAY: usize = 3;
 /// One line box at the H3 rung: the face's own cell height.
 const LINE_H: usize = std::design::font::line_height(TYPE_H3);
 
@@ -4486,7 +4490,7 @@ fn landing_card_pixel(x: usize, y: usize, i: usize) -> Option<u32> {
 
 /// Renders a pixel of the Dynamic Device Vitality Orb at (ORB_CX, ORB_CY) with core radius ORB_R
 /// and ethereal ambient halo extending out to HALO_R.
-fn vitality_orb_pixel(x: usize, y: usize, state: OrbState) -> Option<u32> {
+fn vitality_orb_pixel(x: usize, y: usize, state: OrbState, frame: u32) -> Option<u32> {
     if x < ORB_CX.saturating_sub(HALO_R)
         || x > ORB_CX + HALO_R
         || y < ORB_CY.saturating_sub(HALO_R)
@@ -4510,20 +4514,29 @@ fn vitality_orb_pixel(x: usize, y: usize, state: OrbState) -> Option<u32> {
     let g_outer = (c_outer >> 8) & 0xFF;
     let b_outer = c_outer & 0xFF;
 
-    if dist <= ORB_R as u32 {
-        // Inner core: smooth neon radial gradient from c_inner at center to c_outer at rim
-        let t = (dist * 255) / (ORB_R as u32);
+    // Continuous breathing pulse of core radius (period 64 frames)
+    let pulse_phase = (frame % 64) as i32;
+    let pulse_tri = if pulse_phase < 32 { pulse_phase } else { 64 - pulse_phase };
+    let r_core = (ORB_R as i32 + (pulse_tri - 16) / 8) as u32;
+
+    if dist <= r_core {
+        // Inner core: radial gradient modulated by outward-traveling luminous wave
+        let wave_phase = (dist as i32 * 3 - (frame as i32 * 4)).rem_euclid(48);
+        let wave_amp = if wave_phase < 24 { wave_phase } else { 48 - wave_phase };
+        let mut t = (dist * 255) / r_core;
+        t = ((t as i32) + (wave_amp - 12) * 2).clamp(0, 255) as u32;
+
         let r = ((r_inner * (255 - t) + r_outer * t) / 255) as u32;
         let g = ((g_inner * (255 - t) + g_outer * t) / 255) as u32;
         let b = ((b_inner * (255 - t) + b_outer * t) / 255) as u32;
 
-        // Specular highlight at top-left inside core (dx ~ -12, dy ~ -12)
+        // Specular highlight with gentle drift
         let sx = dx + 12;
         let sy = dy + 12;
         let sd2 = (sx * sx + sy * sy) as u32;
         if sd2 < 144 {
             let s_dist = sd2.isqrt();
-            let s_factor = ((12 - s_dist) * 60) / 12;
+            let s_factor = ((12 - s_dist) * (60 + wave_amp as u32)) / 12;
             let sr = (r + s_factor).min(255);
             let sg = (g + s_factor).min(255);
             let sb = (b + s_factor).min(255);
@@ -4532,11 +4545,18 @@ fn vitality_orb_pixel(x: usize, y: usize, state: OrbState) -> Option<u32> {
 
         Some(0xFF000000 | (r << 16) | (g << 8) | b)
     } else {
-        // Ambient ethereal halo smoothly fading from c_outer into THEME.surface with quadratic falloff
-        let halo_span = (HALO_R - ORB_R) as u32;
-        let halo_d = dist - (ORB_R as u32);
+        // Ambient halo with continuous outward-pulsing wave shimmer
+        let halo_span = (HALO_R as u32).saturating_sub(r_core);
+        let halo_d = dist.saturating_sub(r_core);
         let span_rem = halo_span.saturating_sub(halo_d);
-        let alpha = (span_rem * span_rem * 160) / (halo_span * halo_span);
+
+        let halo_wave_phase = (halo_d as i32 * 4 - (frame as i32 * 5)).rem_euclid(32);
+        let halo_wave = if halo_wave_phase < 16 { halo_wave_phase } else { 32 - halo_wave_phase };
+        let wave_boost = (halo_wave * 40) / 16;
+
+        let base_alpha = (span_rem * span_rem * 160) / (halo_span * halo_span);
+        let alpha = ((base_alpha as i32 + wave_boost).clamp(0, 255)) as u32;
+
         let bg_r = (THEME.surface >> 16) & 0xFF;
         let bg_g = (THEME.surface >> 8) & 0xFF;
         let bg_b = THEME.surface & 0xFF;
@@ -4559,19 +4579,19 @@ fn landing_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
         }
     }
     // Dynamic Device Vitality Orb centered at ORB_CX, ORB_CY
-    if let Some(c) = vitality_orb_pixel(x, y, app.orb_state()) {
+    if let Some(c) = vitality_orb_pixel(x, y, app.orb_state(), app.frame_count) {
         return c;
     }
-    // Device identity title below orb: "Settings"
+    // Device identity title below orb: "Settings" at TYPE_DISPLAY (scale 3)
     let title = b"Settings";
-    let tw = run_w(title, TYPE_H3, true);
+    let tw = run_w(title, TYPE_DISPLAY, true);
     let tx = if tw < W { (W - tw) / 2 } else { CONTENT_X };
     if let Some(c) = run_ink(
         x,
         y,
         tx,
         IDENTITY_TITLE_Y,
-        TYPE_H3,
+        TYPE_DISPLAY,
         title,
         W - 2 * CONTENT_X,
         THEME.on_surface,
@@ -6069,6 +6089,13 @@ pub extern "C" fn _start() -> ! {
         }
         let interest = std::EVENT_TOUCH_INPUT | std::EVENT_TIMER_TICK;
         if let Ok(triggered) = std::event_poll(interest, 100) {
+            if (triggered & std::EVENT_TIMER_TICK) != 0 {
+                settings.frame_count = settings.frame_count.wrapping_add(1);
+                if settings.current_section.is_none() && !settings.sensors_open && !settings.screen_lock_open && !settings.wallpaper_open {
+                    render_settings_band(surface, &settings, 70, 262);
+                    let _ = std::surface_flip();
+                }
+            }
             if (triggered & std::EVENT_TOUCH_INPUT) != 0 {
                 let mut input = std::InputEvent {
                     kind: 0,

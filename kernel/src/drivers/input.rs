@@ -212,7 +212,7 @@ fn shell_owns_the_screen() -> bool {
     let Some(shell) = crate::syscall::shell_task_id() else {
         return false;
     };
-    let mut kms = crate::drivers::display_kms::DRM_KMS.lock();
+    let kms = crate::drivers::display_kms::DRM_KMS.lock();
     kms.surfaces
         .iter()
         .filter(|s| s.visible && s.input_enabled)
