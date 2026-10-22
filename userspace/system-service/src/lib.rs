@@ -33,16 +33,13 @@ pub fn run(service_id: u8, name: &str) -> ! {
 /// FrameBufferDirect object-1 capability owns the hardware-facing display ABI.
 pub fn run_display() -> ! {
     let _ = std::log("[displayd] userspace display manager online.");
-    let surface = match std::surface_create(320, 480, 0) {
-        Ok(id) => id,
-        Err(_) => {
-            let _ = std::log("[displayd] display surface creation rejected.");
-            std::exit_with_code(1);
-        }
-    };
-    let pixels = [0xFF202830u32, 0xFF202830, 0xFF202830, 0xFF202830];
-    let _ = std::surface_write(surface, 0, &pixels);
-    let _ = std::surface_flip();
+    // WHY the service holds no surface: it used to create a 320x480 one, write
+    // four pixels into it and flip, and leave the rest of it as the
+    // allocator's fill. The compositor published that surface, and the
+    // unfilled part of it went under the foreground application as a black
+    // rectangle in the corner of every screen. A service that draws nothing
+    // should hold nothing: the kernel's compositor owns the scanout, and
+    // this service's job is to be alive and to say so.
     let timer_slot = std::cap_lookup(std::cap_type::TIMER_TICK_READ, 0).ok();
     let has_epoll = std::cap_lookup(std::cap_type::EVENT_POLL, 0).is_ok();
     let mut last_tick = 0u64;
