@@ -1116,8 +1116,8 @@ fn handle_serial_command(cmd: &[u8]) {
                     let total = drive.sector_count();
                     let layout = crate::storage::filesystem::FilesystemLayout::canonical();
                     let end = total.saturating_sub(layout.tail_reserved_sectors);
-                    let region = end.saturating_sub(layout.base_lba).min(crate::storage::filesystem::MAX_INTERFS_REGION_SECTORS);
-                    if region > 42 {
+                    let region = end.saturating_sub(layout.base_lba);
+                    if region >= crate::storage::filesystem::MIN_INTERFS_REGION_SECTORS {
                         match crate::storage::interfs::InterFs::mount_region(drive, layout.base_lba, region) {
                             Ok(mut fs) => match fs.check_integrity() {
                                 Ok(report) => {

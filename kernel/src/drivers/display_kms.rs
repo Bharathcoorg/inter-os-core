@@ -159,6 +159,16 @@ pub fn union_rows(band: &mut (usize, usize), y0: usize, y1: usize) {
     band.1 = band.1.max(y1);
 }
 
+/// A mask of `count` rows starting at `start` within one 64-bit word.
+///
+/// WHY this is a helper and not an inline expression: both ends of a written
+/// band need one, and the shift has to be written so that a full word does
+/// not overflow (`1u64 << 64` is not a thing).
+fn row_bit_mask(start: usize, count: usize) -> u64 {
+    let low = if count >= 64 { u64::MAX } else { (1u64 << count) - 1 };
+    low << start
+}
+
 /// Porter-Duff source-over alpha blending (`out = src * a + dst * (1 - a)`).
 /// Respects both per-pixel alpha channel and surface-level opacity.
 #[inline(always)]
@@ -234,7 +244,24 @@ pub struct DrmSurface {
     /// the surface is presentable, and an application that repaints one
     /// band at a time would otherwise vanish from the display every time
     /// it repainted one.
+    ///
+    /// WHY the compositor requires it: a surface that has never held a whole
+    /// frame still holds the allocator's fill (opaque black) everywhere the
+    /// owner has not drawn. Blending such a surface puts a black rectangle
+    /// under the foreground application, and the application's translucent
+    /// cards then blend against that black instead of against the platform
+    /// background. The capture path already refuses a surface the owner has
+    /// never written; the compositor refuses the same surface, for the same
+    /// reason.
     pub frame_complete: bool,
+    /// The rows the owner has written content into, one bit per row.
+    ///
+    /// WHY a bitmap and not a count: a client paints its canvas in whatever
+    /// order it likes, and the surface holds a whole frame only when every
+    /// row has been given content. A count would double-count a band that is
+    /// repainted, and a leading-row frontier would stall on a client that
+    /// paints the bottom of the canvas first.
+    pub written_row_bits: Vec<u64>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -288,6 +315,7 @@ impl DrmSurface {
             frame_ready: true,
             has_frame: false,
             frame_complete: false,
+            written_row_bits: vec![0u64; (height as usize + 63) / 64],
         }
     }
 
@@ -302,9 +330,84 @@ impl DrmSurface {
     }
 
     /// Marks a half-open band of rows `[y0, y1)` as dirty on this surface.
+    ///
+    /// WHY this also records coverage: every path that puts client pixels
+    /// into a surface ends here, so this is the one place the compositor
+    /// learns which rows the owner has actually given it. The leading-row
+    /// frontier it maintains is what tells a whole frame (the owner painted
+    /// the surface edge to edge) from a half-written surface (the owner
+    /// painted a corner of it), and the compositor publishes only whole
+    /// frames: a surface that still holds the allocator's fill is not a
+    /// picture of anything.
     pub fn mark_dirty_rows(&mut self, y0: usize, y1: usize) {
-        union_rows(&mut self.dirty_rows, y0, y1.min(self.height as usize));
+        let y1 = y1.min(self.height as usize);
+        union_rows(&mut self.dirty_rows, y0, y1);
         self.dirty = true;
+        self.note_written_rows(y0, y1);
+    }
+
+    /// Records that the owner wrote content into rows `[y0, y1)`.
+    ///
+    /// WHY every row matters: a surface holds a whole frame only when the
+    /// owner has filled it edge to edge. A write that leaves a row untouched
+    /// leaves the allocator's fill in it, and the compositor will not publish
+    /// a surface that still holds fill in some of its rows.
+    fn note_written_rows(&mut self, y0: usize, y1: usize) {
+        if self.frame_complete {
+            return;
+        }
+        let height = self.height as usize;
+        let y1 = y1.min(height);
+        if y1 <= y0 || height == 0 {
+            return;
+        }
+        let first = y0 / 64;
+        let last = (y1 - 1) / 64;
+        if first == last {
+            self.written_row_bits[first] |= row_bit_mask(y0 % 64, y1 - y0);
+        } else {
+            self.written_row_bits[first] |= u64::MAX << (y0 % 64);
+            for word in first + 1..last {
+                self.written_row_bits[word] = u64::MAX;
+            }
+            self.written_row_bits[last] |= row_bit_mask(0, y1 - last * 64);
+        }
+        if self.every_row_written() {
+            self.frame_complete = true;
+        }
+    }
+
+    /// Whether every row of this surface has been given content.
+    fn every_row_written(&self) -> bool {
+        let height = self.height as usize;
+        if height == 0 {
+            return false;
+        }
+        let full_words = height / 64;
+        let remainder = height % 64;
+        let full = self.written_row_bits.iter().take(full_words).all(|w| *w == u64::MAX);
+        let tail = if remainder == 0 {
+            true
+        } else {
+            self.written_row_bits.get(full_words).copied().unwrap_or(0)
+                == ((1u64 << remainder) - 1)
+        };
+        full && tail
+    }
+
+    /// Records that this surface holds a whole frame the owner drew.
+    ///
+    /// WHY this exists: the write paths record coverage on their own, but a
+    /// caller that fills `pixels` directly -- the kernel's own unit tests for
+    /// the scaling and blending paths -- has to say that the surface holds a
+    /// frame, or the compositor treats it as a surface the owner never drew
+    /// and skips it.
+    pub fn mark_frame_drawn(&mut self) {
+        for word in self.written_row_bits.iter_mut() {
+            *word = u64::MAX;
+        }
+        self.frame_complete = true;
+        self.has_frame = true;
     }
 
     /// Updates surface pixels from an input buffer.
@@ -1006,7 +1109,35 @@ impl DrmKmsController {
         let mut present_band = self.present_dirty_rows;
 
         for (surf_idx, surface) in self.surfaces.iter_mut().enumerate() {
-            if !surface.visible || surface.opacity == 0 || !surface.frame_ready {
+            // WHY a surface that holds no frame is skipped: the pixels it still
+            // holds are the allocator's fill (opaque black), not a picture the
+            // owner drew. Blending one puts a black rectangle underneath the
+            // foreground application, and the application's translucent cards
+            // then blend against that black instead of against the platform
+            // background -- which is how a solid black block ended up in the
+            // corner of every screen. The capture path already refuses a
+            // surface the owner has never written; the compositor refuses the
+            // same surface, for the same reason.
+            // WHY a surface the owner has never written is skipped: its pixels
+            // are still the allocator's fill, which is opaque black, and
+            // blending one puts a black rectangle under the foreground
+            // application. The application's translucent cards then blend
+            // against that black instead of against the platform
+            // background, and a solid black block appears in the corner of
+            // every screen.
+            //
+            // WHY the guard is `has_frame` and not `frame_complete`: a
+            // surface that has never been written has no frame at all, and
+            // the two flags answer different questions -- `frame_ready` says
+            // a commit is not in flight and `frame_complete` says the
+            // surface has held a whole frame, which a partial write does
+            // not make true.
+            if !surface.visible
+                || surface.opacity == 0
+                || !surface.frame_ready
+                || !surface.frame_complete
+                || !surface.has_frame
+            {
                 continue;
             }
 
@@ -1663,6 +1794,7 @@ mod tests {
         s.pixels = vec![0xFF000000, 0xFFFFFFFF, 0xFF000000, 0xFFFFFFFF];
         s.visible = true;
         s.opacity = 255;
+        s.mark_frame_drawn();
         kms.surfaces.push(s);
 
         kms.composite();
@@ -1702,6 +1834,7 @@ mod tests {
                 s.pixels[y * 720 + x] = 0xFF000000 | (v << 16) | (v << 8) | v;
             }
         }
+        s.mark_frame_drawn();
         kms.surfaces.push(s);
         kms.frame_dirty = true;
         kms.surfaces[0].dirty = true;
@@ -1738,6 +1871,7 @@ mod tests {
         for y in 0..1440usize {
             kms.surfaces[0].pixels[y * 720 + col] = 0xFFFFFFFF;
         }
+        kms.surfaces[0].mark_frame_drawn();
         kms.frame_dirty = true;
         kms.surfaces[0].dirty = true;
         kms.composite();
@@ -1808,6 +1942,7 @@ mod tests {
                 kms.surfaces[0].pixels[y * 720 + x] = 0xFF000000 | ((x * 31 + y * 17) as u32 & 0xFFFFFF);
             }
         }
+        kms.surfaces[0].mark_frame_drawn();
         kms.frame_dirty = true;
         kms.surfaces[0].dirty = true;
         kms.composite();
@@ -1843,6 +1978,7 @@ mod tests {
         // A pixel that no interpolation could produce marks the copy.
         kms.surfaces[0].pixels[0] = 0xFF123456;
         kms.surfaces[0].pixels[1080 * 2160 - 1] = 0xFF654321;
+        kms.surfaces[0].mark_frame_drawn();
         assert!(kms.identity_full_cover_will_run());
         kms.composite();
         assert_eq!(kms.back_buffer[0], 0xFF123456);
@@ -1869,6 +2005,7 @@ mod tests {
         kms.surfaces[0].pixels[0] = 0xFF112233;
         kms.surfaces[0].pixels[720] = 0xFF112233;
         kms.surfaces[0].pixels[(1439 * 720) + 719] = 0xFF445566;
+        kms.surfaces[0].mark_frame_drawn();
         kms.composite();
         // Geometry is unchanged (centered 360-wide slice at x=460), but the
         // exact-half portrait shrink now box-averages each 2x2 quad: dst(0,0)
@@ -1897,6 +2034,7 @@ mod tests {
         kms.set_display_mode(1080, 2160, 60).expect("mode");
         let id = kms.create_surface(720, 1440, 0, 1);
         // Initial composite and flip presents the newly created surface
+        kms.surfaces[0].mark_frame_drawn();
         kms.composite();
         let _ = kms.take_present_dirty_rows();
         kms.page_flip();
@@ -1921,13 +2059,11 @@ mod tests {
         let id = kms.create_surface(10, 10, 1, 42);
         assert_ne!(id, 0);
 
-        // Initially surface is frame_ready = true
-        assert!(kms.surfaces[0].is_frame_ready());
-
         // Partial write starting at offset 0 unlatches frame_ready
         let chunk1 = [0xFFFF0000; 20];
         kms.write_surface_pixels(id, 42, 0, &chunk1).expect("write chunk 1");
         assert!(!kms.surfaces[0].is_frame_ready());
+        assert!(!kms.surfaces[0].frame_complete);
 
         // Composite while unlatched must skip blending the uncommitted surface
         kms.composite();
@@ -1941,9 +2077,86 @@ mod tests {
         assert!(kms.commit_surface(id, Some(42)));
         assert!(kms.surfaces[0].is_frame_ready());
 
-        // Composite now blends the committed surface
+        // The commit does not make the surface publishable: it still holds the
+        // allocator's fill in the rows the owner never wrote, so it holds no
+        // whole frame and the compositor keeps it off the display. This is the
+        // rule that stopped the display service's half-written surface from
+        // putting a black rectangle under every foreground application.
+        assert!(!kms.surfaces[0].frame_complete);
+        kms.composite();
+        assert_eq!(kms.back_buffer[0], PLATFORM_BACKGROUND);
+
+        // Writing the rest of the surface makes it a whole frame, and only then
+        // is it published.
+        kms.write_surface_pixels(id, 42, 20, &[0xFFFF0000; 80]).expect("write chunk 2");
+        assert!(kms.surfaces[0].frame_complete);
         kms.composite();
         assert_eq!(kms.back_buffer[0], 0xFFFF0000);
+    }
+
+    #[test]
+    fn a_surface_that_holds_no_frame_is_never_blended() {
+        // WHY this test exists: the display service creates a 320x480 surface,
+        // writes four pixels into it and flips. Everything else in that
+        // surface is the allocator's fill (opaque black), so blending it put a
+        // solid black rectangle under every foreground application, and the
+        // application's translucent cards blended against that black instead
+        // of against the platform background. A surface that holds no frame
+        // the owner drew is not a picture, and the compositor must not blend
+        // it -- exactly as the capture path already refuses to capture it.
+        let mut kms = DrmKmsController::new(1080, 2160);
+        kms.set_display_mode(1080, 2160, 60).expect("mode");
+
+        let id = kms.create_surface(320, 480, 0, 2);
+        assert_ne!(id, 0);
+
+        // The display service's whole write: four pixels at the origin.
+        kms.write_surface_pixels(id, 2, 0, &[0xFF202830; 4]).expect("write probe");
+        // The flip commits the owner's surfaces, exactly as the surface-flip
+        // syscall does.
+        kms.commit_surfaces(Some(2));
+
+        assert!(kms.surfaces[0].has_frame, "the owner did write into it");
+        assert!(
+            !kms.surfaces[0].frame_complete,
+            "four pixels of a 320x480 surface is not a whole frame"
+        );
+
+        kms.composite();
+        assert_eq!(
+            kms.back_buffer[0], PLATFORM_BACKGROUND,
+            "a surface that holds no frame must not be blended into the display"
+        );
+        // No pixel of the scanout may carry the allocator's fill.
+        assert!(
+            !kms.back_buffer.iter().any(|&p| p == 0xFF000000),
+            "the allocator's fill reached the display"
+        );
+    }
+
+    #[test]
+    fn a_surface_the_owner_wrote_whole_is_published() {
+        // WHY this test exists: the rule above must not cost the platform its
+        // own screens. A client that paints its canvas edge to edge holds a
+        // whole frame, and that surface is published like any other.
+        let mut kms = DrmKmsController::new(1080, 2160);
+        kms.set_display_mode(1080, 2160, 60).expect("mode");
+
+        let id = kms.create_surface(64, 64, 0, 2);
+        assert_ne!(id, 0);
+
+        // The same write, in the chunks a client actually uses: the last chunk
+        // reaches the end of the surface, so the frame is whole.
+        let body = vec![0xFF202830; 64 * 64 - 64];
+        kms.write_surface_pixels(id, 2, 0, &body).expect("write body");
+        kms.write_surface_pixels(id, 2, 64 * 64 - 64, &[0xFF202830; 64]).expect("write tail");
+        assert!(kms.surfaces[0].frame_complete);
+
+        kms.composite();
+        assert_eq!(
+            kms.back_buffer[0], 0xFF202830,
+            "a surface the owner wrote whole must reach the display"
+        );
     }
 
     #[test]
@@ -2012,12 +2225,14 @@ mod tests {
         // Surface 1: background wallpaper (opaque green 0xFF00FF00)
         let s1 = kms.create_surface(720, 1440, 0, 1);
         kms.surfaces[0].pixels.fill(0xFF00FF00);
+        kms.surfaces[0].mark_frame_drawn();
         kms.composite();
 
         // Surface 2: semi-transparent white (0x80FFFFFF) over the wallpaper
         let s2 = kms.create_surface(720, 1440, 10, 2);
         let s2_idx = kms.surfaces.iter().position(|s| s.id == s2).unwrap();
         kms.surfaces[s2_idx].pixels.fill(0x80FFFFFF);
+        kms.surfaces[s2_idx].mark_frame_drawn();
 
         kms.composite();
 
