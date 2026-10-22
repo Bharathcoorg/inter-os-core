@@ -19,6 +19,8 @@ pub mod accessibility;
 #[cfg(test)]
 mod cap_ladder;
 
+pub use theme::{AccentPalette, StockApp, Theme};
+
 pub mod typography {
     use crate::font;
 
@@ -490,6 +492,55 @@ pub mod color {
     pub const DARK_WARNING: u32 = 0xFFFBBF24;
     pub const DARK_DANGER: u32 = 0xFFF87171;
 
+    // Vibrant stock application accents (Light surfaces)
+    pub const VIBRANT_PHONE: u32 = 0xFF10B981;       // Emerald green
+    pub const VIBRANT_MESSAGES: u32 = 0xFF0284C7;    // Electric blue
+    pub const VIBRANT_FILES: u32 = 0xFFEA580C;       // Amber / orange
+    pub const VIBRANT_MUSIC: u32 = 0xFFF43F5E;       // Coral red
+    pub const VIBRANT_SETTINGS: u32 = 0xFF64748B;    // Steel blue
+    pub const VIBRANT_BROWSER: u32 = 0xFF6366F1;     // Indigo
+    pub const VIBRANT_VAULT: u32 = 0xFFEAB308;       // Gold
+    pub const VIBRANT_CAMERA: u32 = 0xFFF59E0B;      // Gold / warm amber
+    pub const VIBRANT_CALCULATOR: u32 = 0xFF0D9488;  // Teal
+    pub const VIBRANT_CALENDAR: u32 = 0xFF0284C7;    // Cerulean / sky blue
+    pub const VIBRANT_NOTES: u32 = 0xFFD97706;       // Warm amber
+    pub const VIBRANT_GALLERY: u32 = 0xFF8B5CF6;     // Iris / purple
+    pub const VIBRANT_AGENT: u32 = 0xFF7C3AED;       // Electric violet
+
+    // Vibrant stock application accents (Dark surfaces)
+    pub const DARK_VIBRANT_PHONE: u32 = 0xFF34D399;       // Soft emerald
+    pub const DARK_VIBRANT_MESSAGES: u32 = 0xFF38BDF8;    // Electric sky blue
+    pub const DARK_VIBRANT_FILES: u32 = 0xFFFB923C;       // Soft warm orange
+    pub const DARK_VIBRANT_MUSIC: u32 = 0xFFFB7185;       // Soft coral red
+    pub const DARK_VIBRANT_SETTINGS: u32 = 0xFF94A3B8;    // Soft steel blue
+    pub const DARK_VIBRANT_BROWSER: u32 = 0xFF818CF8;     // Soft indigo
+    pub const DARK_VIBRANT_VAULT: u32 = 0xFFFACC15;       // Soft gold
+    pub const DARK_VIBRANT_CAMERA: u32 = 0xFFFBBF24;      // Soft gold / amber
+    pub const DARK_VIBRANT_CALCULATOR: u32 = 0xFF2DD4BF;  // Soft teal
+    pub const DARK_VIBRANT_CALENDAR: u32 = 0xFF38BDF8;    // Soft cerulean
+    pub const DARK_VIBRANT_NOTES: u32 = 0xFFFBBF24;       // Soft warm amber
+    pub const DARK_VIBRANT_GALLERY: u32 = 0xFFA78BFA;     // Soft iris
+    pub const DARK_VIBRANT_AGENT: u32 = 0xFFB794F6;       // Soft violet
+
+    // Semantic color token aliases
+    pub const EMERALD_GREEN: u32 = VIBRANT_PHONE;
+    pub const ELECTRIC_BLUE: u32 = VIBRANT_MESSAGES;
+    pub const AMBER_ORANGE: u32 = VIBRANT_FILES;
+    pub const CORAL_RED: u32 = VIBRANT_MUSIC;
+    pub const STEEL_BLUE: u32 = VIBRANT_SETTINGS;
+    pub const INDIGO: u32 = VIBRANT_BROWSER;
+    pub const GOLD: u32 = VIBRANT_VAULT;
+
+    pub const DARK_EMERALD_GREEN: u32 = DARK_VIBRANT_PHONE;
+    pub const DARK_ELECTRIC_BLUE: u32 = DARK_VIBRANT_MESSAGES;
+    pub const DARK_AMBER_ORANGE: u32 = DARK_VIBRANT_FILES;
+    pub const DARK_CORAL_RED: u32 = DARK_VIBRANT_MUSIC;
+    pub const DARK_STEEL_BLUE: u32 = DARK_VIBRANT_SETTINGS;
+    pub const DARK_INDIGO: u32 = DARK_VIBRANT_BROWSER;
+    pub const DARK_GOLD: u32 = DARK_VIBRANT_VAULT;
+
+    pub use super::theme::AccentPalette;
+
     /// Color gamut profiles supported by the display compositor.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum ColorSpace {
@@ -507,6 +558,13 @@ pub mod color {
         pub const DANGER: u32 = 0xFFE81B1B;
         pub const VIBRANT_CYAN: u32 = 0xFF00B4D8;
         pub const VIBRANT_PURPLE: u32 = 0xFF7B2CBF;
+        pub const EMERALD_GREEN: u32 = 0xFF00C853;
+        pub const ELECTRIC_BLUE: u32 = 0xFF0091EA;
+        pub const AMBER_ORANGE: u32 = 0xFFFF6D00;
+        pub const CORAL_RED: u32 = 0xFFFF1744;
+        pub const STEEL_BLUE: u32 = 0xFF546E7A;
+        pub const INDIGO: u32 = 0xFF651FFF;
+        pub const GOLD: u32 = 0xFFFFD600;
     }
 }
 

@@ -24,6 +24,7 @@
 //! radii and the touch minimum live on the theme for the same reason the colours
 //! do: so that one value describes the whole look of an app.
 
+use super::accessibility;
 use super::color;
 use super::radius;
 use super::spacing;
@@ -166,6 +167,342 @@ impl Touch {
         preferred_target: touch::PREFERRED_TARGET,
         primary_action: touch::PRIMARY_ACTION,
     };
+}
+
+/// Canonical first-party and system applications with dedicated stock color identities.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum StockApp {
+    /// Phone / Dialer application (emerald green).
+    Phone,
+    /// Messages application (electric blue).
+    Messages,
+    /// Files / File Manager application (amber / orange).
+    Files,
+    /// Music / Media application (coral red).
+    Music,
+    /// Settings / Configuration application (steel blue).
+    Settings,
+    /// Browser / Web application (indigo).
+    Browser,
+    /// Vault / Passwords application (gold).
+    Vault,
+    /// Camera application (gold / warm amber).
+    Camera,
+    /// Calculator application (teal).
+    Calculator,
+    /// Calendar application (sky blue).
+    Calendar,
+    /// Notes application (warm amber).
+    Notes,
+    /// Gallery / Photos application (iris / purple).
+    Gallery,
+    /// Agent Manager / System AI application (electric violet).
+    AgentManager,
+}
+
+impl StockApp {
+    /// Matches an application string identifier (e.g. `"dialer"`, `"org.interos.dialer"`).
+    pub fn from_id(id: &str) -> Option<Self> {
+        Self::from_bytes(id.as_bytes())
+    }
+
+    /// Matches an application byte-slice identifier with zero heap allocations.
+    pub fn from_bytes(id: &[u8]) -> Option<Self> {
+        if id.is_empty() {
+            return None;
+        }
+
+        if equals_ignore_ascii(id, b"dialer")
+            || equals_ignore_ascii(id, b"org.interos.dialer")
+            || equals_ignore_ascii(id, b"phone")
+            || equals_ignore_ascii(id, b"app_dialer")
+            || equals_ignore_ascii(id, b"call")
+            || equals_ignore_ascii(id, b"tel")
+        {
+            Some(StockApp::Phone)
+        } else if equals_ignore_ascii(id, b"messages")
+            || equals_ignore_ascii(id, b"org.interos.messages")
+            || equals_ignore_ascii(id, b"app_messages")
+            || equals_ignore_ascii(id, b"msg")
+            || equals_ignore_ascii(id, b"sms")
+        {
+            Some(StockApp::Messages)
+        } else if equals_ignore_ascii(id, b"files")
+            || equals_ignore_ascii(id, b"file_manager")
+            || equals_ignore_ascii(id, b"org.interos.file_manager")
+            || equals_ignore_ascii(id, b"app_file_manager")
+            || equals_ignore_ascii(id, b"file")
+        {
+            Some(StockApp::Files)
+        } else if equals_ignore_ascii(id, b"music")
+            || equals_ignore_ascii(id, b"org.interos.music")
+            || equals_ignore_ascii(id, b"app_music")
+            || equals_ignore_ascii(id, b"mus")
+            || equals_ignore_ascii(id, b"audio")
+            || equals_ignore_ascii(id, b"media")
+        {
+            Some(StockApp::Music)
+        } else if equals_ignore_ascii(id, b"settings")
+            || equals_ignore_ascii(id, b"org.interos.settings")
+            || equals_ignore_ascii(id, b"app_settings")
+            || equals_ignore_ascii(id, b"setting")
+            || equals_ignore_ascii(id, b"set")
+            || equals_ignore_ascii(id, b"cfg")
+        {
+            Some(StockApp::Settings)
+        } else if equals_ignore_ascii(id, b"browser")
+            || equals_ignore_ascii(id, b"org.interos.browser")
+            || equals_ignore_ascii(id, b"app_browser")
+            || equals_ignore_ascii(id, b"web")
+            || equals_ignore_ascii(id, b"brow")
+        {
+            Some(StockApp::Browser)
+        } else if equals_ignore_ascii(id, b"vault")
+            || equals_ignore_ascii(id, b"org.interos.vault")
+            || equals_ignore_ascii(id, b"app_vault")
+            || equals_ignore_ascii(id, b"vaul")
+            || equals_ignore_ascii(id, b"pass")
+        {
+            Some(StockApp::Vault)
+        } else if equals_ignore_ascii(id, b"camera")
+            || equals_ignore_ascii(id, b"org.interos.camera")
+            || equals_ignore_ascii(id, b"app_camera")
+            || equals_ignore_ascii(id, b"cam")
+        {
+            Some(StockApp::Camera)
+        } else if equals_ignore_ascii(id, b"calculator")
+            || equals_ignore_ascii(id, b"org.interos.calculator")
+            || equals_ignore_ascii(id, b"app_calculator")
+            || equals_ignore_ascii(id, b"calc")
+            || equals_ignore_ascii(id, b"num")
+        {
+            Some(StockApp::Calculator)
+        } else if equals_ignore_ascii(id, b"calendar")
+            || equals_ignore_ascii(id, b"org.interos.calendar")
+            || equals_ignore_ascii(id, b"app_calendar")
+            || equals_ignore_ascii(id, b"cal")
+        {
+            Some(StockApp::Calendar)
+        } else if equals_ignore_ascii(id, b"notes")
+            || equals_ignore_ascii(id, b"org.interos.notes")
+            || equals_ignore_ascii(id, b"app_notes")
+            || equals_ignore_ascii(id, b"note")
+        {
+            Some(StockApp::Notes)
+        } else if equals_ignore_ascii(id, b"gallery")
+            || equals_ignore_ascii(id, b"org.interos.gallery")
+            || equals_ignore_ascii(id, b"app_gallery")
+            || equals_ignore_ascii(id, b"gal")
+            || equals_ignore_ascii(id, b"pho")
+            || equals_ignore_ascii(id, b"pic")
+            || equals_ignore_ascii(id, b"photos")
+        {
+            Some(StockApp::Gallery)
+        } else if equals_ignore_ascii(id, b"agent_manager")
+            || equals_ignore_ascii(id, b"org.interos.agent_manager")
+            || equals_ignore_ascii(id, b"agent")
+            || equals_ignore_ascii(id, b"ai")
+        {
+            Some(StockApp::AgentManager)
+        } else {
+            None
+        }
+    }
+}
+
+/// Helper function to compare byte slices ignoring ASCII case without allocations.
+#[inline]
+fn equals_ignore_ascii(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if !a[i].eq_ignore_ascii_case(&b[i]) {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// The stock accent palette: vibrant application color tokens and monochrome foundations.
+///
+/// Provides designated accents for first-party applications (Phone, Messages,
+/// Files, Music, Settings, Browser, Vault, Camera, etc.) alongside the standard
+/// monochrome palette for restrained interfaces.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct AccentPalette {
+    /// Emerald green for Phone / Dialer.
+    pub phone: u32,
+    /// Electric blue for Messages.
+    pub messages: u32,
+    /// Amber / orange for File Manager.
+    pub files: u32,
+    /// Coral red for Music.
+    pub music: u32,
+    /// Steel blue for Settings.
+    pub settings: u32,
+    /// Indigo for Browser.
+    pub browser: u32,
+    /// Gold for Vault.
+    pub vault: u32,
+    /// Gold / warm amber for Camera.
+    pub camera: u32,
+    /// Teal for Calculator.
+    pub calculator: u32,
+    /// Sky blue for Calendar.
+    pub calendar: u32,
+    /// Warm amber for Notes.
+    pub notes: u32,
+    /// Iris / purple for Gallery.
+    pub gallery: u32,
+    /// Electric violet for Agent Manager.
+    pub agent: u32,
+    /// General fallback accent.
+    pub accent: u32,
+}
+
+impl AccentPalette {
+    /// The vibrant light accent palette: saturated tones calibrated for light surfaces.
+    pub const VIBRANT_LIGHT: AccentPalette = AccentPalette {
+        phone: color::VIBRANT_PHONE,
+        messages: color::VIBRANT_MESSAGES,
+        files: color::VIBRANT_FILES,
+        music: color::VIBRANT_MUSIC,
+        settings: color::VIBRANT_SETTINGS,
+        browser: color::VIBRANT_BROWSER,
+        vault: color::VIBRANT_VAULT,
+        camera: color::VIBRANT_CAMERA,
+        calculator: color::VIBRANT_CALCULATOR,
+        calendar: color::VIBRANT_CALENDAR,
+        notes: color::VIBRANT_NOTES,
+        gallery: color::VIBRANT_GALLERY,
+        agent: color::VIBRANT_AGENT,
+        accent: 0xFF7C3AED,
+    };
+
+    /// The vibrant dark accent palette: luminous pastel tones calibrated for dark surfaces.
+    pub const VIBRANT_DARK: AccentPalette = AccentPalette {
+        phone: color::DARK_VIBRANT_PHONE,
+        messages: color::DARK_VIBRANT_MESSAGES,
+        files: color::DARK_VIBRANT_FILES,
+        music: color::DARK_VIBRANT_MUSIC,
+        settings: color::DARK_VIBRANT_SETTINGS,
+        browser: color::DARK_VIBRANT_BROWSER,
+        vault: color::DARK_VIBRANT_VAULT,
+        camera: color::DARK_VIBRANT_CAMERA,
+        calculator: color::DARK_VIBRANT_CALCULATOR,
+        calendar: color::DARK_VIBRANT_CALENDAR,
+        notes: color::DARK_VIBRANT_NOTES,
+        gallery: color::DARK_VIBRANT_GALLERY,
+        agent: color::DARK_VIBRANT_AGENT,
+        accent: 0xFFB794F6,
+    };
+
+    /// The monochrome light foundation: neutral ink tones on light surfaces.
+    pub const MONOCHROME_LIGHT: AccentPalette = AccentPalette {
+        phone: 0xFF0A0A0A,
+        messages: 0xFF0A0A0A,
+        files: 0xFF0A0A0A,
+        music: 0xFF0A0A0A,
+        settings: 0xFF525252,
+        browser: 0xFF0A0A0A,
+        vault: 0xFF0A0A0A,
+        camera: 0xFF0A0A0A,
+        calculator: 0xFF0A0A0A,
+        calendar: 0xFF0A0A0A,
+        notes: 0xFF0A0A0A,
+        gallery: 0xFF0A0A0A,
+        agent: 0xFF0A0A0A,
+        accent: 0xFF0A0A0A,
+    };
+
+    /// The monochrome dark foundation: neutral light ink tones on dark surfaces.
+    pub const MONOCHROME_DARK: AccentPalette = AccentPalette {
+        phone: 0xFFFFFFFF,
+        messages: 0xFFFFFFFF,
+        files: 0xFFFFFFFF,
+        music: 0xFFFFFFFF,
+        settings: 0xFFA3A3A3,
+        browser: 0xFFFFFFFF,
+        vault: 0xFFFFFFFF,
+        camera: 0xFFFFFFFF,
+        calculator: 0xFFFFFFFF,
+        calendar: 0xFFFFFFFF,
+        notes: 0xFFFFFFFF,
+        gallery: 0xFFFFFFFF,
+        agent: 0xFFFFFFFF,
+        accent: 0xFFFFFFFF,
+    };
+
+    /// Canonical monochrome default.
+    pub const MONOCHROME: AccentPalette = Self::MONOCHROME_LIGHT;
+
+    /// Returns the accent color for a specific `StockApp` kind.
+    #[inline]
+    pub const fn for_app_kind(&self, kind: StockApp) -> u32 {
+        match kind {
+            StockApp::Phone => self.phone,
+            StockApp::Messages => self.messages,
+            StockApp::Files => self.files,
+            StockApp::Music => self.music,
+            StockApp::Settings => self.settings,
+            StockApp::Browser => self.browser,
+            StockApp::Vault => self.vault,
+            StockApp::Camera => self.camera,
+            StockApp::Calculator => self.calculator,
+            StockApp::Calendar => self.calendar,
+            StockApp::Notes => self.notes,
+            StockApp::Gallery => self.gallery,
+            StockApp::AgentManager => self.agent,
+        }
+    }
+
+    /// Returns the accent color for a string application identifier.
+    #[inline]
+    pub fn for_app(&self, app_id: &str) -> u32 {
+        if let Some(kind) = StockApp::from_id(app_id) {
+            self.for_app_kind(kind)
+        } else {
+            self.accent
+        }
+    }
+
+    /// Returns the accent color for a byte-slice application identifier.
+    #[inline]
+    pub fn for_app_bytes(&self, app_id: &[u8]) -> u32 {
+        if let Some(kind) = StockApp::from_bytes(app_id) {
+            self.for_app_kind(kind)
+        } else {
+            self.accent
+        }
+    }
+
+    /// Emerald green for Phone / Dialer.
+    #[inline]
+    pub const fn dialer(&self) -> u32 {
+        self.phone
+    }
+
+    /// Amber / orange for Files / File Manager.
+    #[inline]
+    pub const fn file_manager(&self) -> u32 {
+        self.files
+    }
+
+    /// Electric violet for Agent Manager.
+    #[inline]
+    pub const fn agent_manager(&self) -> u32 {
+        self.agent
+    }
+}
+
+impl Default for AccentPalette {
+    #[inline]
+    fn default() -> Self {
+        Self::VIBRANT_LIGHT
+    }
 }
 
 /// A complete visual language.
@@ -564,6 +901,157 @@ impl Theme {
             Theme::blend(self.wallpaper_mid, self.wallpaper_bottom, (t - 128) * 2)
         }
     }
+
+    // --- Dynamic Surface Tinting & Pastel Containers -------------------------
+
+    /// Dynamically tints the theme's base surface with `tint` at a given percentage (0..=100).
+    ///
+    /// Computes the exact tone by blending `surface` towards `tint` using fixed-point
+    /// `#![no_std]` arithmetic with zero heap allocation.
+    pub fn surface_tint(&self, tint: u32, percent: u32) -> u32 {
+        let p = percent.min(100);
+        let t = (p * 256) / 100;
+        Theme::blend(self.surface, tint, t)
+    }
+
+    /// Dynamically computes a soft pastel container fill for any base accent color.
+    ///
+    /// On light themes, generates an airy ~14% tint on the light surface.
+    /// On dark themes, generates a deep, atmospheric ~18% tint on the dark surface.
+    pub fn pastel_container(&self, base_color: u32) -> u32 {
+        if self.dark {
+            self.surface_tint(base_color, 18)
+        } else {
+            self.surface_tint(base_color, 14)
+        }
+    }
+
+    /// Returns a low-emphasis pastel container fill tinted with the theme's expressive accent.
+    #[inline]
+    pub fn accent_container(&self) -> u32 {
+        self.pastel_container(self.accent)
+    }
+
+    /// Returns a low-emphasis pastel container fill tinted with a specific accent color.
+    #[inline]
+    pub fn accent_container_for(&self, accent: u32) -> u32 {
+        self.pastel_container(accent)
+    }
+
+    /// Returns high-contrast ink suitable for drawing over a pastel container.
+    pub fn on_pastel_container(&self, container: u32) -> u32 {
+        let lum = accessibility::relative_luminance_x10000(container);
+        if lum > 5000 {
+            self.ink_on_light
+        } else {
+            self.ink_on_dark
+        }
+    }
+
+    /// Returns high-contrast ink suitable for drawing over [`Theme::accent_container`].
+    #[inline]
+    pub fn on_accent_container(&self) -> u32 {
+        self.on_pastel_container(self.accent_container())
+    }
+
+    // --- Vibrant App Color & Icon Tokens ------------------------------------
+
+    /// Returns the accent palette associated with this theme.
+    ///
+    /// Resolves vibrant palettes for canonical light and dark systems,
+    /// and monochrome foundations for neutral or monochrome variants.
+    pub const fn accents(&self) -> AccentPalette {
+        if self.is_monochrome() {
+            if self.dark {
+                AccentPalette::MONOCHROME_DARK
+            } else {
+                AccentPalette::MONOCHROME_LIGHT
+            }
+        } else if self.dark {
+            AccentPalette::VIBRANT_DARK
+        } else {
+            AccentPalette::VIBRANT_LIGHT
+        }
+    }
+
+    /// Whether this theme belongs to a monochrome or neutral variant.
+    pub const fn is_monochrome(&self) -> bool {
+        let bytes = self.name.as_bytes();
+        if bytes.len() >= 7
+            && bytes[0] == b'n'
+            && bytes[1] == b'e'
+            && bytes[2] == b'u'
+            && bytes[3] == b't'
+            && bytes[4] == b'r'
+            && bytes[5] == b'a'
+            && bytes[6] == b'l'
+        {
+            return true;
+        }
+        if bytes.len() >= 10
+            && bytes[0] == b'm'
+            && bytes[1] == b'o'
+            && bytes[2] == b'n'
+            && bytes[3] == b'o'
+            && bytes[4] == b'c'
+            && bytes[5] == b'h'
+            && bytes[6] == b'r'
+            && bytes[7] == b'o'
+            && bytes[8] == b'm'
+            && bytes[9] == b'e'
+        {
+            return true;
+        }
+        false
+    }
+
+    /// Returns the vibrant icon tint for an application by its string identifier.
+    ///
+    /// Supports both short names (e.g. `"dialer"`, `"messages"`, `"music"`)
+    /// and fully qualified package IDs (e.g. `"org.interos.dialer"`).
+    #[inline]
+    pub fn vibrant_icon_tint(&self, app_id: &str) -> u32 {
+        if let Some(kind) = StockApp::from_id(app_id) {
+            self.accents().for_app_kind(kind)
+        } else {
+            self.accent
+        }
+    }
+
+    /// Returns the vibrant icon tint for an application by its byte-slice identifier.
+    #[inline]
+    pub fn vibrant_icon_tint_bytes(&self, app_id: &[u8]) -> u32 {
+        if let Some(kind) = StockApp::from_bytes(app_id) {
+            self.accents().for_app_kind(kind)
+        } else {
+            self.accent
+        }
+    }
+
+    /// Returns a pastel container fill corresponding to the application's vibrant accent.
+    #[inline]
+    pub fn vibrant_container(&self, app_id: &str) -> u32 {
+        self.pastel_container(self.vibrant_icon_tint(app_id))
+    }
+
+    /// Returns a pastel container fill corresponding to the application's byte-slice identifier.
+    #[inline]
+    pub fn vibrant_container_bytes(&self, app_id: &[u8]) -> u32 {
+        self.pastel_container(self.vibrant_icon_tint_bytes(app_id))
+    }
+
+    /// Returns readable ink for text drawn on the application's vibrant container.
+    #[inline]
+    pub fn on_vibrant_container(&self, app_id: &str) -> u32 {
+        self.on_pastel_container(self.vibrant_container(app_id))
+    }
+}
+
+impl Default for Theme {
+    #[inline]
+    fn default() -> Self {
+        Self::LIGHT
+    }
 }
 
 #[cfg(test)]
@@ -953,5 +1441,249 @@ mod tests {
         let base = 0xFF808080;
         assert!(Theme::veil(base, 50, false) < base);
         assert!(Theme::veil(base, 50, true) > base);
+    }
+
+    #[test]
+    fn vibrant_stock_color_tokens_and_palette_coverage() {
+        use super::{AccentPalette, StockApp};
+        use crate::design::color;
+
+        let light = AccentPalette::VIBRANT_LIGHT;
+        assert_eq!(light.phone, color::VIBRANT_PHONE);
+        assert_eq!(light.dialer(), color::EMERALD_GREEN);
+        assert_eq!(light.messages, color::ELECTRIC_BLUE);
+        assert_eq!(light.files, color::AMBER_ORANGE);
+        assert_eq!(light.file_manager(), color::AMBER_ORANGE);
+        assert_eq!(light.music, color::CORAL_RED);
+        assert_eq!(light.settings, color::STEEL_BLUE);
+        assert_eq!(light.browser, color::INDIGO);
+        assert_eq!(light.vault, color::GOLD);
+        assert_eq!(light.camera, color::VIBRANT_CAMERA);
+
+        let dark = AccentPalette::VIBRANT_DARK;
+        assert_eq!(dark.phone, color::DARK_EMERALD_GREEN);
+        assert_eq!(dark.messages, color::DARK_ELECTRIC_BLUE);
+        assert_eq!(dark.files, color::DARK_AMBER_ORANGE);
+        assert_eq!(dark.music, color::DARK_CORAL_RED);
+        assert_eq!(dark.settings, color::DARK_STEEL_BLUE);
+        assert_eq!(dark.browser, color::DARK_INDIGO);
+        assert_eq!(dark.vault, color::DARK_GOLD);
+        assert_eq!(dark.camera, color::DARK_VIBRANT_CAMERA);
+
+        for app in [
+            StockApp::Phone,
+            StockApp::Messages,
+            StockApp::Files,
+            StockApp::Music,
+            StockApp::Settings,
+            StockApp::Browser,
+            StockApp::Vault,
+            StockApp::Camera,
+            StockApp::Calculator,
+            StockApp::Calendar,
+            StockApp::Notes,
+            StockApp::Gallery,
+            StockApp::AgentManager,
+        ] {
+            let l_col = light.for_app_kind(app);
+            let d_col = dark.for_app_kind(app);
+            assert_eq!(l_col >> 24, 0xFF, "light accent must be opaque");
+            assert_eq!(d_col >> 24, 0xFF, "dark accent must be opaque");
+            assert_ne!(l_col, d_col, "light and dark vibrant tones must differ");
+        }
+    }
+
+    #[test]
+    fn stock_app_id_matching_and_case_insensitivity() {
+        use super::Theme;
+
+        let theme = Theme::LIGHT;
+
+        // Phone / Dialer
+        assert_eq!(theme.vibrant_icon_tint("dialer"), theme.accents().phone);
+        assert_eq!(theme.vibrant_icon_tint("Phone"), theme.accents().phone);
+        assert_eq!(theme.vibrant_icon_tint("org.interos.dialer"), theme.accents().phone);
+        assert_eq!(theme.vibrant_icon_tint_bytes(b"CALL"), theme.accents().phone);
+
+        // Messages
+        assert_eq!(theme.vibrant_icon_tint("messages"), theme.accents().messages);
+        assert_eq!(theme.vibrant_icon_tint("SMS"), theme.accents().messages);
+        assert_eq!(theme.vibrant_icon_tint("org.interos.messages"), theme.accents().messages);
+
+        // Files
+        assert_eq!(theme.vibrant_icon_tint("files"), theme.accents().files);
+        assert_eq!(theme.vibrant_icon_tint("file_manager"), theme.accents().files);
+        assert_eq!(theme.vibrant_icon_tint("org.interos.file_manager"), theme.accents().files);
+
+        // Music
+        assert_eq!(theme.vibrant_icon_tint("music"), theme.accents().music);
+        assert_eq!(theme.vibrant_icon_tint("audio"), theme.accents().music);
+        assert_eq!(theme.vibrant_icon_tint("org.interos.music"), theme.accents().music);
+
+        // Settings
+        assert_eq!(theme.vibrant_icon_tint("settings"), theme.accents().settings);
+        assert_eq!(theme.vibrant_icon_tint("SET"), theme.accents().settings);
+        assert_eq!(theme.vibrant_icon_tint("org.interos.settings"), theme.accents().settings);
+
+        // Browser
+        assert_eq!(theme.vibrant_icon_tint("browser"), theme.accents().browser);
+        assert_eq!(theme.vibrant_icon_tint("web"), theme.accents().browser);
+        assert_eq!(theme.vibrant_icon_tint("org.interos.browser"), theme.accents().browser);
+
+        // Vault & Camera
+        assert_eq!(theme.vibrant_icon_tint("vault"), theme.accents().vault);
+        assert_eq!(theme.vibrant_icon_tint("org.interos.vault"), theme.accents().vault);
+        assert_eq!(theme.vibrant_icon_tint("camera"), theme.accents().camera);
+        assert_eq!(theme.vibrant_icon_tint("org.interos.camera"), theme.accents().camera);
+
+        // Unrecognized fallback to accent
+        assert_eq!(theme.vibrant_icon_tint("unknown_third_party_app"), theme.accent);
+        assert_eq!(theme.vibrant_icon_tint_bytes(b""), theme.accent);
+    }
+
+    #[test]
+    fn monochrome_foundation_tokens_are_strictly_neutral() {
+        use super::{AccentPalette, StockApp, Theme};
+
+        for palette in [AccentPalette::MONOCHROME_LIGHT, AccentPalette::MONOCHROME_DARK] {
+            for app in [
+                StockApp::Phone,
+                StockApp::Messages,
+                StockApp::Files,
+                StockApp::Music,
+                StockApp::Settings,
+                StockApp::Browser,
+                StockApp::Vault,
+                StockApp::Camera,
+                StockApp::Calculator,
+                StockApp::Calendar,
+                StockApp::Notes,
+                StockApp::Gallery,
+                StockApp::AgentManager,
+            ] {
+                let val = palette.for_app_kind(app);
+                let r = (val >> 16) & 0xFF;
+                let g = (val >> 8) & 0xFF;
+                let b = val & 0xFF;
+                assert_eq!(
+                    (r, g, b),
+                    (r, r, r),
+                    "Monochrome palette must not contain hue for {:?}",
+                    app
+                );
+            }
+        }
+
+        let neutral_theme = Theme::NEUTRAL;
+        let dialer_tint = neutral_theme.vibrant_icon_tint("dialer");
+        let r = (dialer_tint >> 16) & 0xFF;
+        let g = (dialer_tint >> 8) & 0xFF;
+        let b = dialer_tint & 0xFF;
+        assert_eq!((r, g, b), (r, r, r));
+    }
+
+    #[test]
+    fn dynamic_surface_tinting_and_pastel_containers() {
+        use super::Theme;
+
+        let light = Theme::LIGHT;
+        let dark = Theme::DARK;
+
+        // Surface tinting endpoints
+        assert_eq!(light.surface_tint(0xFF00FF00, 0), light.surface);
+        assert_eq!(light.surface_tint(0xFF00FF00, 100), 0xFF00FF00);
+
+        // Pastel containers
+        let light_accent_cont = light.accent_container();
+        let dark_accent_cont = dark.accent_container();
+        assert_ne!(light_accent_cont, light.surface);
+        assert_ne!(dark_accent_cont, dark.surface);
+        assert_ne!(light_accent_cont, dark_accent_cont);
+        assert_eq!(light_accent_cont >> 24, 0xFF);
+        assert_eq!(dark_accent_cont >> 24, 0xFF);
+
+        // App vibrant containers
+        let phone_cont_light = light.vibrant_container("dialer");
+        let phone_cont_dark = dark.vibrant_container("dialer");
+        assert_ne!(phone_cont_light, light.surface);
+        assert_ne!(phone_cont_dark, dark.surface);
+        assert_ne!(phone_cont_light, phone_cont_dark);
+    }
+
+    #[test]
+    fn wcag_contrast_ratios_for_vibrant_tokens_and_containers() {
+        use super::Theme;
+        use crate::design::accessibility::{contrast_ratio_x100, meets_wcag_aa};
+
+        let light = Theme::LIGHT;
+        let dark = Theme::DARK;
+
+        // 1. Text ink on pastel containers must satisfy WCAG AA (>= 4.5:1 / cr >= 450)
+        let light_ink = light.on_accent_container();
+        let light_container = light.accent_container();
+        assert!(
+            meets_wcag_aa(light_ink, light_container),
+            "Light accent container ink must meet WCAG AA, ratio was {}",
+            contrast_ratio_x100(light_ink, light_container)
+        );
+
+        let dark_ink = dark.on_accent_container();
+        let dark_container = dark.accent_container();
+        assert!(
+            meets_wcag_aa(dark_ink, dark_container),
+            "Dark accent container ink must meet WCAG AA, ratio was {}",
+            contrast_ratio_x100(dark_ink, dark_container)
+        );
+
+        // 2. All app vibrant containers must meet WCAG AA with their resolved ink
+        for app in ["dialer", "messages", "files", "music", "settings", "browser", "vault", "camera"] {
+            let l_cont = light.vibrant_container(app);
+            let l_ink = light.on_vibrant_container(app);
+            let l_ratio = contrast_ratio_x100(l_ink, l_cont);
+            assert!(
+                l_ratio >= 450,
+                "Light container for {} must meet WCAG AA (ratio: {})",
+                app,
+                l_ratio
+            );
+
+            let d_cont = dark.vibrant_container(app);
+            let d_ink = dark.on_pastel_container(d_cont);
+            let d_ratio = contrast_ratio_x100(d_ink, d_cont);
+            assert!(
+                d_ratio >= 450,
+                "Dark container for {} must meet WCAG AA (ratio: {})",
+                app,
+                d_ratio
+            );
+        }
+
+        // 3. Vibrant dark icons on dark surface must meet UI graphical contrast (>= 3.0:1 / cr >= 300)
+        for app in ["dialer", "messages", "files", "music", "settings", "browser", "vault", "camera"] {
+            let icon_color = dark.vibrant_icon_tint(app);
+            let icon_cr = contrast_ratio_x100(icon_color, dark.surface);
+            assert!(
+                icon_cr >= 300,
+                "Dark vibrant icon for {} must meet WCAG UI component contrast >= 3.0:1, got {}",
+                app,
+                icon_cr
+            );
+        }
+    }
+
+    #[test]
+    fn theme_accent_swapping_and_palette_customization() {
+        use super::{AccentPalette, Theme};
+
+        let base_light = Theme::LIGHT;
+        assert_eq!(base_light.vibrant_icon_tint("dialer"), AccentPalette::VIBRANT_LIGHT.phone);
+        assert_eq!(base_light.accents().phone, AccentPalette::VIBRANT_LIGHT.phone);
+        assert_eq!(Theme::DARK.accents().phone, AccentPalette::VIBRANT_DARK.phone);
+        assert_eq!(Theme::NEUTRAL.accents().phone, AccentPalette::MONOCHROME_DARK.phone);
+
+        // Custom palette resolution
+        let custom_palette = AccentPalette::MONOCHROME_LIGHT;
+        assert_eq!(custom_palette.for_app("dialer"), AccentPalette::MONOCHROME_LIGHT.phone);
+        assert_eq!(custom_palette.for_app("messages"), AccentPalette::MONOCHROME_LIGHT.messages);
     }
 }
