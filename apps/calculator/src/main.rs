@@ -17,7 +17,7 @@
 
 use core::panic::PanicInfo;
 use interos_std as std;
-use calculator::theme::{THEME, radius, spacing};
+use calculator::theme::{THEME, radius, spacing, typography};
 
 use interos_std::design::components;
 use interos_std::design::outline_text;
@@ -60,45 +60,38 @@ pub use calculator::{CalcError, CalculatorState, Decimal};
 // -----------------------------------------------------------------------------
 /// The colour of (`x`, `y`) if the text inks it, blended over `bg`.
 ///
-/// WHY the outline face comes first: the compositor magnifies the frame
-/// three to two, and the bitmap face is a twenty-four row cell blown up
-/// to thirty-six, which reads soft. The outline face is drawn at the size
-/// the screen uses, so the magnified text keeps its edges.
-///
-/// WHY the baseline is the bitmap's baseline: the outline face's ascent
-/// is taller than the bitmap cell's, so placing the run the way the
-/// bitmap's baseline is placed keeps every label where the layout put
-/// it. This is the shell's own convention.
+/// WHY the platform's own text drawing and not a second one: the app used
+/// to place the run itself, out of the bitmap face's multiples, which
+/// meant the app and the platform could disagree about where a run sits and
+/// how wide it is. The platform draws a run at a cap height, and a cap
+/// height is the size the design ladder names in the units a reader sees,
+/// so that is what the app asks for.
 #[inline(always)]
 fn test_text(
     x: usize,
     y: usize,
     x0: usize,
     y0: usize,
-    scale: usize,
+    cap_px: u32,
     text: &[u8],
     color: u32,
     bg: u32,
     bold: bool,
 ) -> Option<u32> {
-    if scale == 0 || text.is_empty() {
+    if cap_px == 0 || text.is_empty() {
         return None;
     }
-    let em = outline_text::em_for_scale(scale);
-    let (ascent, _) = interos_std::design::typeface::line_metrics(em);
-    let baseline = (y0 + std::design::font::ascent_for_scale(scale)).max(ascent as usize);
-    if let Some(run) = outline_text::OutlineRun::place_styled(x0, baseline, em, text, bold) {
-        let (bx, by, bw, bh) = run.bounds();
-        if x >= bx && x < bx + bw && y >= by && y < by + bh {
-            return run.pixel(x, y, color, bg);
-        }
-        return None;
-    }
-    test_text(x, y, x0, y0, scale, text, color, bg, bold)
+    interos_std::design::monochrome::text_px(x, y, x0, y0, cap_px, text, color, bg, bold)
 }
 
-const fn run_rows(scale: usize) -> usize {
-    std::design::font::line_height(scale)
+/// The line box of a run drawn at a cap height.
+///
+/// WHY the typeface's own box and not a number: a line box is the space a
+/// run reserves, and a run reserves its ascent and its descent.
+const fn run_rows(cap_px: u32) -> usize {
+    let em = outline_text::em_for_cap_height(cap_px);
+    let (ascent, descent) = interos_std::design::typeface::line_metrics(em);
+    (ascent + descent) as usize
 }
 
 const HEADER_H: usize = 110;
@@ -107,16 +100,68 @@ const HEADER_H: usize = 110;
 const DISPLAY_X0: usize = 24;
 const DISPLAY_X1: usize = 696;
 const DISPLAY_PAD: usize = spacing::GRID_24;
-const VALUE_Y0: usize = 290;
 
-// The expression tape's geometry.
-//
-// WHY the tape is two lines and not one: the tape used to show the last
-// thirty-two characters of the expression and say nothing about it, so a
-// long expression was cut off at the front with no way to reach it. Two
-// lines of the column, scrolled with the platform's scroll model, hold a
-// whole expression.
-const TAPE_Y0: usize = 176;
+/// The cap heights the display draws at.
+///
+/// WHY the rungs and not the scales: the scale ladder and the cap ladder
+/// are not the same ladder -- the title *scale* is three, whose cap is
+/// twenty-two -- and the reference calculator's own result stands thirty
+/// pixels of cap tall on a seven-hundred and twenty pixel screen. These
+/// are the sizes the design ladder names in the units a reader sees.
+const CAP_EXPRESSION: u32 = calculator::EXPRESSION_CAP_PX;
+const CAP_RESULT: u32 = calculator::RESULT_CAP_PX;
+const CAP_LABEL: u32 = calculator::KEY_LABEL_CAP_PX;
+const CAP_SECTION: u32 = typography::SECTION_CAP_PX;
+
+/// The rungs the result comes down when it does not fit the card.
+///
+/// WHY a ladder of rungs and not a smaller number: a run that does not fit
+/// its column has to come down, and the rungs are the sizes the design
+/// ladder names. The result is on the top rung unless the number is too
+/// long for the card.
+const RESULT_LADDER: [u32; 4] = [
+    CAP_RESULT,
+    typography::SECTION_CAP_PX,
+    typography::BODY_CAP_PX,
+    typography::CAPTION_CAP_PX,
+];
+
+/// The rungs the error line comes down when it does not fit the card.
+const ERROR_LADDER: [u32; 3] = [
+    typography::SECTION_CAP_PX,
+    typography::BODY_CAP_PX,
+    typography::CAPTION_CAP_PX,
+];
+
+/// The gap between the expression and the result.
+const VALUE_GAP: usize = 12;
+
+/// The top of the result's cap.
+const VALUE_Y0: usize = TAPE_Y1 + VALUE_GAP;
+
+/// The bottom of the display band.
+///
+/// WHY the band ends below the result's line box and not below its cap: a
+/// result with a thousands separator has a comma that hangs below the cap,
+/// and a band that ended at the cap would cut it off.
+const DISPLAY_Y1: usize = VALUE_Y0 + typography::TITLE_LINE_PX + DISPLAY_PAD;
+
+/// The top of the display band: the card that holds the expression and the
+/// result.
+const DISPLAY_Y0: usize = 110;
+
+/// The expression tape's geometry.
+///
+/// WHY the tape is two lines and not one: the tape used to show the last
+/// thirty-two characters of the expression and say nothing about it, so a
+/// long expression was cut off at the front with no way to reach it. Two
+/// lines of the column, scrolled with the platform's scroll model, hold a
+/// whole expression.
+///
+/// WHY the tape starts at the card's padding and not at the card's edge:
+/// the tape is a caption above the answer, and a caption that starts at the
+/// card's edge is a caption that is drawn on the border.
+const TAPE_Y0: usize = DISPLAY_Y0 + DISPLAY_PAD;
 const TAPE_LINES: usize = calculator::TAPE_VISIBLE_LINES;
 const TAPE_LINE_H: usize = calculator::TAPE_LINE_H;
 const TAPE_Y1: usize = TAPE_Y0 + TAPE_LINES * TAPE_LINE_H;
@@ -202,34 +247,49 @@ fn draw_calc_operator_glyph(x: usize, y: usize, cx: usize, cy: usize, op: char, 
     }
 }
 
-/// The backspace glyph: a left-pointing arrow with a cross in it.
+/// The size of the backspace mark's chevron, in pixels.
 ///
-/// WHY it is drawn and not typed: the platform's typeface carries no
-/// backspace character, and a key labelled with a character the face does
-/// not carry would draw as a blank.
+/// WHY the platform's shapes and not a drawn arrow: the app's own backspace
+/// was a shaft, a head and a cross, drawn by hand at a size that lost its
+/// edges -- a smudge that read as a pen. The platform draws its icons in a
+/// fixed twenty-four unit grid, so the shape is the same shape at every
+/// size, and the key carries the same chevron the shell's back button
+/// carries.
+const BACKSPACE_CHEVRON: usize = 80;
+
+/// How far the chevron's box sits to the left of the key's centre.
+const BACKSPACE_CHEVRON_X: usize = 38;
+
+/// The size of the backspace mark's cross, in pixels.
+const BACKSPACE_CROSS: usize = 22;
+
+/// How far the cross's box sits to the left of the key's centre.
+const BACKSPACE_CROSS_X: usize = 7;
+
+/// The backspace glyph: the platform's chevron with the platform's cross in
+/// its opening.
+///
+/// WHY the cross sits in the chevron's opening: that is the shape a
+/// backspace key has always had -- an arrow pointing back with a cross in
+/// it -- and the platform's icon set carries the two halves of it.
 fn draw_calc_backspace_glyph(x: usize, y: usize, cx: usize, cy: usize, color: u32) -> Option<u32> {
-    let dx = (x as isize) - (cx as isize);
-    let dy = (y as isize) - (cy as isize);
-    // The shaft of the arrow.
-    if dy.abs() <= 1 && dx >= -6 && dx <= 10 {
-        return Some(color);
+    use interos_std::design::monochrome::{icon_px, Icon};
+    let chevron = Rect::new(
+        cx.saturating_sub(BACKSPACE_CHEVRON_X),
+        cy.saturating_sub(BACKSPACE_CHEVRON / 2),
+        BACKSPACE_CHEVRON,
+        BACKSPACE_CHEVRON,
+    );
+    if let Some(c) = icon_px(x, y, chevron, Icon::ChevronLeft, color) {
+        return Some(c);
     }
-    // The head of the arrow: two strokes running back from the point.
-    if dx >= -16 && dx <= -6 {
-        let t = (dx + 16) as isize;
-        if (dy.abs() - (10 - t)).abs() <= 1 {
-            return Some(color);
-        }
-    }
-    // The cross that says this deletes.
-    if dx >= 0 && dx <= 10 && dy.abs() <= 8 {
-        let ex = dx - 5;
-        let sum = ex.abs() + dy.abs();
-        if sum <= 7 && sum >= 4 && ex.abs() >= 1 {
-            return Some(color);
-        }
-    }
-    None
+    let cross = Rect::new(
+        cx.saturating_sub(BACKSPACE_CROSS_X),
+        cy.saturating_sub(BACKSPACE_CROSS / 2),
+        BACKSPACE_CROSS,
+        BACKSPACE_CROSS,
+    );
+    icon_px(x, y, cross, Icon::Close, color)
 }
 
 /// The scroll chevron on the expression tape.
@@ -281,6 +341,50 @@ fn get_button_action(row: usize, col: usize) -> Option<char> {
     calculator::button_action(row, col)
 }
 
+/// The distances from a pixel to the edges of the key at (row, col).
+///
+/// WHY the distances and not a boolean: the renderer draws the key's own
+/// hairline from them and the hit test answers from the same numbers, so
+/// the key that is drawn and the key that is pressed are the same shape.
+///
+/// WHY the shape is the keycap and not the grid cell: the key that is
+/// drawn used to be four pixels smaller than the cell it was hit in, so
+/// the gap between two keys belonged to one of them and a press in that gap
+/// answered a key that was not there.
+fn key_edges(row: usize, col: usize, x: usize, y: usize) -> Option<(usize, usize)> {
+    let rect = key_rect(row, col)?;
+    if x < rect.x || x >= rect.x + rect.w || y < rect.y || y >= rect.y + rect.h {
+        return None;
+    }
+    let rx = (x - rect.x).min(rect.x + rect.w - 1 - x);
+    let ry = (y - rect.y).min(rect.y + rect.h - 1 - y);
+    // The keycap's squircle corner, the same test the renderer draws with.
+    if rx < R_MAJOR && ry < R_MAJOR {
+        let cdx = (R_MAJOR - rx) as isize;
+        let cdy = (R_MAJOR - ry) as isize;
+        if cdx * cdx + cdy * cdy > (R_MAJOR * R_MAJOR) as isize {
+            return None;
+        }
+    }
+    Some((rx, ry))
+}
+
+/// Whether the pixel is on the key at (row, col).
+fn key_hit(row: usize, col: usize, x: usize, y: usize) -> bool {
+    key_edges(row, col, x, y).is_some()
+}
+
+/// The home indicator, in the platform's own geometry.
+///
+/// WHY these numbers and not the app's own: the shell draws the home
+/// indicator on every screen, and the app drew a second one -- a grey
+/// line, two hundred pixels wide, in a different row. One home indicator
+/// is the shell's.
+const HOME_PILL_W: usize = 140;
+const HOME_PILL_H: usize = 5;
+const HOME_PILL_Y: usize = 1418;
+const HOME_PILL_X: usize = (W - HOME_PILL_W) / 2;
+
 #[derive(Clone, Copy)]
 struct CalcDisplayPlan {
     has_tape: bool,
@@ -291,9 +395,9 @@ struct CalcDisplayPlan {
     is_error: bool,
     err_text: &'static [u8],
     err_x: usize,
-    err_scale: usize,
+    err_cap: u32,
     digits_len: usize,
-    digits_scale: usize,
+    digits_cap: u32,
     digits_x: usize,
 }
 
@@ -314,9 +418,9 @@ fn prepare_calc_plan(calc: &CalculatorState) {
         is_error: false,
         err_text: b"",
         err_x: 0,
-        err_scale: 3,
+        err_cap: ERROR_LADDER[0],
         digits_len: 0,
-        digits_scale: 3,
+        digits_cap: RESULT_LADDER[0],
         digits_x: 0,
     };
     let column = display_column_w();
@@ -330,7 +434,10 @@ fn prepare_calc_plan(calc: &CalculatorState) {
             TAPE_TEXT_X1
         };
         for index in 0..calc.tape_count.min(calculator::TAPE_MAX_LINES) {
-            let width = calculator::text_width(&calc.tape_lines[index][..calc.tape_lens[index]], 2);
+            let width = calculator::text_width(
+                &calc.tape_lines[index][..calc.tape_lens[index]],
+                CAP_EXPRESSION,
+            );
             plan.tape_xs[index] = right.saturating_sub(width);
         }
         plan.has_tape = true;
@@ -344,35 +451,35 @@ fn prepare_calc_plan(calc: &CalculatorState) {
             _ => b"Error",
         };
         // WHY the error is fitted to the column: the error line used to be
-        // drawn at scale three and run past the card's right edge, so the
-        // end of the message was outside the card it belongs to.
-        let mut scale = 3usize;
-        while scale > 1 && calculator::text_width(err_text, scale) > column {
-            scale -= 1;
+        // drawn too large and ran past the card's right edge, so the end of
+        // the message was outside the card it belongs to.
+        let mut cap = ERROR_LADDER[0];
+        for rung in ERROR_LADDER.iter() {
+            cap = *rung;
+            if calculator::text_width(err_text, cap) <= column {
+                break;
+            }
         }
         plan.err_x = (DISPLAY_X1 - DISPLAY_PAD)
-            .saturating_sub(calculator::text_width(err_text, scale));
+            .saturating_sub(calculator::text_width(err_text, cap));
         plan.err_text = err_text;
-        plan.err_scale = scale;
+        plan.err_cap = cap;
         plan.is_error = true;
     } else {
         let digits = &calc.display_buf[..calc.display_len];
-        let mut scale: usize = if digits.len() <= 7 {
-            3
-        } else if digits.len() <= 10 {
-            2
-        } else {
-            1
-        };
-        // WHY the value is fitted to the column as well: the length of a
-        // number is not the width of it, and a long number at scale three
-        // would run off the card.
-        while scale > 1 && calculator::text_width(digits, scale) > column {
-            scale -= 1;
+        // WHY the result comes down a rung when it does not fit: the length
+        // of a number is not the width of it, and a long number at the title
+        // rung would run off the card.
+        let mut cap = RESULT_LADDER[0];
+        for rung in RESULT_LADDER.iter() {
+            cap = *rung;
+            if calculator::text_width(digits, cap) <= column {
+                break;
+            }
         }
-        let total_w = calculator::text_width(digits, scale);
+        let total_w = calculator::text_width(digits, cap);
         plan.digits_x = (DISPLAY_X1 - DISPLAY_PAD).saturating_sub(total_w);
-        plan.digits_scale = scale;
+        plan.digits_cap = cap;
         plan.digits_len = calc.display_len;
     }
     unsafe {
@@ -393,14 +500,14 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
         }
 
         // Canonical App Title: "Calculator" at clean scale 1 bold with subtitle
-        if let Some(c) = test_text(x, y, 92, 34, 1, b"Calculator", THEME.on_surface, THEME.surface, true) {
+        if let Some(c) = test_text(x, y, 92, 34, CAP_EXPRESSION, b"Calculator", THEME.on_surface, THEME.surface, true) {
             return c;
         }
         // WHY the subtitle says what the app does: it used to read
         // "Precision Arithmetic", which is a claim about the numbers the
         // app computes. The app adds, subtracts, multiplies and divides,
         // and that is what the subtitle now says.
-        if let Some(c) = test_text(x, y, 92, 58, 1, b"Add, subtract, multiply and divide", THEME.on_surface_variant, THEME.surface, false) {
+        if let Some(c) = test_text(x, y, 92, 58, CAP_EXPRESSION, b"Add, subtract, multiply and divide", THEME.on_surface_variant, THEME.surface, false) {
             return c;
         }
 
@@ -423,7 +530,7 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
             if rx < 2 || ry < 2 {
                 return border;
             }
-            if let Some(c) = test_text(x, y, 604, 46, 1, b"History", text_c, bg, true) {
+            if let Some(c) = test_text(x, y, 604, 46, CAP_EXPRESSION, b"History", text_c, bg, true) {
                 return c;
             }
             return bg;
@@ -448,7 +555,7 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
             // Header of History Drawer: y: 125..175
             if y >= 125 && y < 175 {
                 // "Calculation History" title
-                if let Some(c) = test_text(x, y, 48, 140, 1, b"Calculation History", THEME.on_surface, THEME.surface_container, true) {
+                if let Some(c) = test_text(x, y, 48, 140, CAP_EXPRESSION, b"Calculation History", THEME.on_surface, THEME.surface_container, true) {
                     return c;
                 }
 
@@ -466,7 +573,7 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                     if prx < 2 || pry < 2 {
                         return THEME.border;
                     }
-                    if let Some(c) = test_text(x, y, 452, 138, 1, b"CLEAR", THEME.error, THEME.surface_container_high, true) {
+                    if let Some(c) = test_text(x, y, 452, 138, CAP_EXPRESSION, b"CLEAR", THEME.error, THEME.surface_container_high, true) {
                         return c;
                     }
                     return THEME.surface_container_high;
@@ -486,7 +593,7 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                     if prx < 2 || pry < 2 {
                         return THEME.border;
                     }
-                    if let Some(c) = test_text(x, y, 566, 138, 1, b"CLOSE", THEME.on_surface, THEME.surface_container_high, true) {
+                    if let Some(c) = test_text(x, y, 566, 138, CAP_EXPRESSION, b"CLOSE", THEME.on_surface, THEME.surface_container_high, true) {
                         return c;
                     }
                     return THEME.surface_container_high;
@@ -506,7 +613,7 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
             // draw.
             let row_style = components::list_row_style(&THEME, false);
             if count == 0 {
-                if let Some(c) = test_text(x, y, 180, 320, 2, b"No recent calculations", THEME.on_surface_variant, THEME.surface_container, false) {
+                if let Some(c) = test_text(x, y, 180, 320, CAP_LABEL, b"No recent calculations", THEME.on_surface_variant, THEME.surface_container, false) {
                     return c;
                 }
             } else {
@@ -528,9 +635,9 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                             // Top line: expression
                             let expr_bytes = &entry.expr[..entry.expr_len];
                             if !expr_bytes.is_empty() {
-                                let ew = calculator::text_width(expr_bytes, 2);
+                                let ew = calculator::text_width(expr_bytes, CAP_LABEL);
                                 let ex0 = 650usize.saturating_sub(ew);
-                                if let Some(c) = test_text(x, y, ex0, row_y0 + 16, 2, expr_bytes, THEME.on_surface_variant, row_style.fill, false) {
+                                if let Some(c) = test_text(x, y, ex0, row_y0 + 16, CAP_LABEL, expr_bytes, THEME.on_surface_variant, row_style.fill, false) {
                                     return c;
                                 }
                             }
@@ -538,9 +645,9 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                             // Bottom line: result
                             let mut res_buf = [0u8; 32];
                             let rlen = entry.result.format(&mut res_buf);
-                            let rw = calculator::text_width(&res_buf[..rlen], 3);
+                            let rw = calculator::text_width(&res_buf[..rlen], CAP_SECTION);
                             let rx0 = 650usize.saturating_sub(rw);
-                            if let Some(c) = test_text(x, y, rx0, row_y0 + 58, 3, &res_buf[..rlen], THEME.on_surface, row_style.fill, true) {
+                            if let Some(c) = test_text(x, y, rx0, row_y0 + 58, CAP_SECTION, &res_buf[..rlen], THEME.on_surface, row_style.fill, true) {
                                 return c;
                             }
                         }
@@ -562,14 +669,15 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
         return THEME.surface;
     }
 
-    // 3. Numerical Display Area Container Card (Dual-Line: y: 110..410, x: 24..696)
-    if (110..410).contains(&y) && x >= DISPLAY_X0 && x < DISPLAY_X1 {
+    // 3. The display band: the expression above, the result below, on one
+    //    card that holds the two runs and nothing else.
+    if (DISPLAY_Y0..DISPLAY_Y1).contains(&y) && x >= DISPLAY_X0 && x < DISPLAY_X1 {
         // WHY the platform's card treatment: the card's fill, its hairline
         // and its radius come from the platform's own elevation, so an app
         // that drew a card with the SDK draws this card.
         let card = components::card_style(&THEME, components::Elevation::Resting);
         let rx = (x - DISPLAY_X0).min(DISPLAY_X1 - 1 - x);
-        let ry = (y - 110).min(409 - y);
+        let ry = (y - DISPLAY_Y0).min(DISPLAY_Y1 - 1 - y);
         if rx < card.radius && ry < card.radius {
             let cdx = (card.radius - rx) as isize;
             let cdy = (card.radius - ry) as isize;
@@ -578,11 +686,16 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
             }
         }
 
-        // Active operation badge if set: x: 44..104, y: 130..164
+        // The pending operation's badge, level with the result.
+        //
+        // WHY it sits beside the result and not beside the expression: the
+        // expression is what was typed and the result is the number the
+        // pending operation is waiting on, so the badge belongs to the
+        // number.
         if let Some(op) = calc.active_operation {
-            if (130..164).contains(&y) && (44..104).contains(&x) {
+            if (VALUE_Y0..VALUE_Y0 + 34).contains(&y) && (44..104).contains(&x) {
                 let prx = (x - 44).min(103 - x);
-                let pry = (y - 130).min(163 - y);
+                let pry = (y - VALUE_Y0).min(VALUE_Y0 + 33 - y);
                 if prx < R_CONTROL && pry < R_CONTROL {
                     let cdx = (R_CONTROL - prx) as isize;
                     let cdy = (R_CONTROL - pry) as isize;
@@ -590,7 +703,7 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                         if prx < 2 || pry < 2 {
                             return THEME.warning_container;
                         }
-                        if let Some(c) = draw_calc_operator_glyph(x, y, 74, 147, op, THEME.warning) {
+                        if let Some(c) = draw_calc_operator_glyph(x, y, 74, VALUE_Y0 + 17, op, THEME.warning) {
                             return c;
                         }
                         return THEME.surface_container_high;
@@ -599,7 +712,7 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                     if prx < 2 || pry < 2 {
                         return THEME.warning_container;
                     }
-                    if let Some(c) = draw_calc_operator_glyph(x, y, 74, 147, op, THEME.warning) {
+                    if let Some(c) = draw_calc_operator_glyph(x, y, 74, VALUE_Y0 + 17, op, THEME.warning) {
                         return c;
                     }
                     return THEME.surface_container_high;
@@ -623,7 +736,7 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                 if line < p.tape_count {
                     let line_y = TAPE_Y0 + row * TAPE_LINE_H;
                     let text = &calc.tape_lines[line][..calc.tape_lens[line]];
-                    if let Some(c) = test_text(x, y, p.tape_xs[line], line_y, 2, text, THEME.on_surface_variant, THEME.surface_container, false) {
+                    if let Some(c) = test_text(x, y, p.tape_xs[line], line_y, CAP_EXPRESSION, text, THEME.on_surface_variant, THEME.surface_container, false) {
                         return c;
                     }
                 }
@@ -639,17 +752,17 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                 }
             }
             if p.is_error {
-                let h = run_rows(p.err_scale);
+                let h = run_rows(p.err_cap);
                 if y >= VALUE_Y0 && y < VALUE_Y0 + h {
-                    if let Some(c) = test_text(x, y, p.err_x, VALUE_Y0, p.err_scale, p.err_text, THEME.error, THEME.surface_container, true) {
+                    if let Some(c) = test_text(x, y, p.err_x, VALUE_Y0, p.err_cap, p.err_text, THEME.error, THEME.surface_container, true) {
                         return c;
                     }
                 }
             } else {
-                let h = run_rows(p.digits_scale);
+                let h = run_rows(p.digits_cap);
                 if y >= VALUE_Y0 && y < VALUE_Y0 + h {
                     let digits = &calc.display_buf[..p.digits_len.min(calc.display_buf.len())];
-                    if let Some(c) = test_text(x, y, p.digits_x, VALUE_Y0, p.digits_scale, digits, THEME.on_surface, THEME.surface_container, true) {
+                    if let Some(c) = test_text(x, y, p.digits_x, VALUE_Y0, p.digits_cap, digits, THEME.on_surface, THEME.surface_container, true) {
                         return c;
                     }
                 }
@@ -669,19 +782,10 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
             let Some(rect) = key_rect(row, col) else {
                 continue;
             };
-            if x >= rect.x && x < rect.x + rect.w && y >= rect.y && y < rect.y + rect.h {
-                let kx0 = rect.x + 4;
-                let kx1 = rect.x + rect.w - 4;
-                let ky0 = rect.y + 4;
-                let ky1 = rect.y + rect.h - 4;
-
-                if x < kx0 || x >= kx1 || y < ky0 || y >= ky1 {
-                    return THEME.surface;
-                }
-
-                // Keycap squircle corner test (radius: 34)
-                let rx = (x - kx0).min(kx1 - 1 - x);
-                let ry = (y - ky0).min(ky1 - 1 - y);
+            let Some((rx, ry)) = key_edges(row, col, x, y) else {
+                continue;
+            };
+            {
                 if rx < R_MAJOR && ry < R_MAJOR {
                     let cdx = (R_MAJOR - rx) as isize;
                     let cdy = (R_MAJOR - ry) as isize;
@@ -771,12 +875,20 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                             'C' | 'E' | 'P' | '~' | '.' | '%' => calculator::button_label(act),
                             _ => &[act as u8],
                         };
-                        let scale = if label.len() > 1 { 1 } else { 2 };
-                        let w = calculator::text_width(label, scale);
+                        // WHY every key label is on the body rung: the
+                        // reference calculator's key labels stand fifteen
+                        // pixels tall, and the body rung is the platform's
+                        // name for that size. A key that said "mod" at a
+                        // smaller size than the key that said "7" would be
+                        // two sizes for one job.
+                        let w = calculator::text_width(label, CAP_LABEL);
                         let x0 = center_x.saturating_sub(w / 2);
-                        let y_offset = if scale == 1 { 12 } else { 24 };
-                        let y0 = center_y.saturating_sub(y_offset);
-                        if let Some(c) = test_text(x, y, x0, y0, scale, label, text_color, btn_bg, true) {
+                        // WHY the cap is centred and not the baseline: a
+                        // digit's cap is what the eye centres, and a
+                        // baseline centred in a key hangs the digit high in
+                        // it.
+                        let y0 = center_y.saturating_sub((CAP_LABEL / 2) as usize);
+                        if let Some(c) = test_text(x, y, x0, y0, CAP_LABEL, label, text_color, btn_bg, true) {
                             return c;
                         }
                     }
@@ -787,9 +899,21 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
         }
     }
 
-    // 5. Home Gesture Pill (x: 260..460, y: 1418..1424)
-    if y >= 1418 && y < 1424 && x >= 260 && x < 460 {
-        return THEME.on_surface_variant;
+    // 5. Home Gesture Pill
+    //
+    // WHY the platform's own pill and not the app's own bar: the shell
+    // draws the home indicator on every screen, and the app's bar was a
+    // grey line of a different size in a different place, so the screen
+    // carried two home indicators and the one that was drawn was the one
+    // nobody could see. The pill is the shell's: the same width, the same
+    // height and the same row, in the ink that stands out against the
+    // page behind it.
+    if y >= HOME_PILL_Y
+        && y < HOME_PILL_Y + HOME_PILL_H
+        && x >= HOME_PILL_X
+        && x < HOME_PILL_X + HOME_PILL_W
+    {
+        return THEME.on_surface;
     }
 
     THEME.surface
@@ -816,9 +940,6 @@ fn render_calculator_ui(surface: u32, calc: &CalculatorState) {
         offset += count;
     }
 }
-
-const DISPLAY_Y0: usize = 110;
-const DISPLAY_Y1: usize = 410;
 
 fn render_calculator_band(surface: u32, calc: &CalculatorState, y0: usize, y1: usize) {
     prepare_calc_plan(calc);
@@ -879,44 +1000,48 @@ fn repaint(surface: u32, calc: &CalculatorState, dirty: Dirty) {
 
 fn handle_keyboard_key(calc: &mut CalculatorState, code: u32) -> bool {
     use std::input_key_code;
+    // WHY the keypad's own names: the keyboard names a key by the character
+    // it types and the keypad names it by what it does, and the state
+    // change goes through the same function either way, so the number on
+    // the display is the number that was typed.
     match code {
         48..=57 => {
-            calc.push_digit((code - 48) as i64);
+            calc.press_key((code as u8) as char);
             std::log("[CALCULATOR] Keypad digit pressed.").ok();
         }
         43 => {
-            calc.set_operation('+');
+            calc.press_key('+');
             std::log("[CALCULATOR] Keypad operator selected.").ok();
         }
         45 => {
-            calc.set_operation('-');
+            calc.press_key('-');
             std::log("[CALCULATOR] Keypad operator selected.").ok();
         }
         42 => {
-            calc.set_operation('*');
+            calc.press_key('*');
             std::log("[CALCULATOR] Keypad operator selected.").ok();
         }
         47 => {
-            calc.set_operation('/');
+            calc.press_key('/');
             std::log("[CALCULATOR] Keypad operator selected.").ok();
         }
         40 | 41 => {
-            calc.push_parenthesis();
+            calc.press_key('P');
             std::log("[CALCULATOR] Keypad operator selected.").ok();
         }
         46 => {
-            calc.push_char('.');
+            calc.press_key('.');
         }
         61 | input_key_code::ENTER => {
-            calc.evaluate();
+            calc.press_key('=');
             std::log("[CALCULATOR] Evaluation completed.").ok();
         }
         99 | 67 | input_key_code::ESCAPE => {
-            calc.clear();
+            calc.press_key('C');
             std::log("[CALCULATOR] Clear pressed.").ok();
         }
         input_key_code::BACKSPACE => {
-            calc.backspace();
+            calc.press_key('B');
         }
         // WHY the tape scrolls with the arrow and page keys: the tape
         // holds the whole expression, and a person with a keyboard has to
@@ -934,7 +1059,7 @@ fn handle_keyboard_key(calc: &mut CalculatorState, code: u32) -> bool {
             calc.scroll_tape(TAPE_LINES as isize);
         }
         37 => {
-            calc.set_operation('%');
+            calc.press_key('%');
             std::log("[CALCULATOR] Modulo operation queued.").ok();
         }
         94 | 115 | 83 => {
@@ -942,7 +1067,7 @@ fn handle_keyboard_key(calc: &mut CalculatorState, code: u32) -> bool {
             std::log("[CALCULATOR] Square evaluated.").ok();
         }
         95 | 126 => {
-            calc.toggle_sign();
+            calc.press_key('~');
             std::log("[CALCULATOR] Sign toggled.").ok();
         }
         104 | 72 => {
@@ -1025,65 +1150,120 @@ fn handle_touch_point(calc: &mut CalculatorState, x: u32, y: u32) -> Tap {
     }
 
     // Keypad Matrix hit test
+    //
+    // WHY the same shape the renderer draws: a key that answers a touch it
+    // does not show is a key that is not where it looks, and the gap
+    // between two keys has to belong to neither of them.
     for row in 0..6 {
         for col in 0..4 {
-            let Some(rect) = key_rect(row, col) else {
+            if !key_hit(row, col, x as usize, y as usize) {
                 continue;
-            };
-            if x >= rect.x as u32 && x < (rect.x + rect.w) as u32 && y >= rect.y as u32 && y < (rect.y + rect.h) as u32 {
-                if let Some(action) = get_button_action(row, col) {
-                    match action {
-                        '0'..='9' => {
-                            let digit = (action as u8 - b'0') as i64;
-                            calc.push_digit(digit);
-                            std::log("[CALCULATOR] Keypad digit pressed.").ok();
-                        }
-                        '+' | '-' | '*' | '/' => {
-                            calc.set_operation(action);
-                            std::log("[CALCULATOR] Keypad operator selected.").ok();
-                        }
-                        'P' => {
-                            calc.push_parenthesis();
-                            std::log("[CALCULATOR] Keypad operator selected.").ok();
-                        }
-                        '%' => {
-                            calc.set_operation('%');
-                            std::log("[CALCULATOR] Modulo operation queued.").ok();
-                        }
-                        '=' => {
-                            let res = calc.evaluate();
-                                let _ = res;
-                                std::log("[CALCULATOR] Evaluation completed.").ok();
-                            }
-                            'C' => {
-                                calc.clear();
-                                std::log("[CALCULATOR] Clear-all pressed.").ok();
-                            }
-                            'E' => {
-                                calc.clear_entry();
-                                std::log("[CALCULATOR] Clear-entry pressed.").ok();
-                            }
-                            'B' => {
-                                calc.backspace();
-                                std::log("[CALCULATOR] Backspace pressed.").ok();
-                            }
-                            '~' => {
-                                calc.toggle_sign();
-                                std::log("[CALCULATOR] Sign toggled.").ok();
-                            }
-                            '.' => {
-                                calc.push_char('.');
-                            }
-                            _ => {}
-                        }
-                        return Tap::Redraw(Dirty::Display);
-                    }
-                    return Tap::None;
             }
+            if let Some(action) = get_button_action(row, col) {
+                match action {
+                    '0'..='9' => {
+                        std::log("[CALCULATOR] Keypad digit pressed.").ok();
+                    }
+                    '+' | '-' | '*' | '/' => {
+                        std::log("[CALCULATOR] Keypad operator selected.").ok();
+                    }
+                    'P' => {
+                        std::log("[CALCULATOR] Keypad operator selected.").ok();
+                    }
+                    '%' => {
+                        std::log("[CALCULATOR] Modulo operation queued.").ok();
+                    }
+                    '=' => {
+                        std::log("[CALCULATOR] Evaluation completed.").ok();
+                    }
+                    'C' => {
+                        std::log("[CALCULATOR] Clear-all pressed.").ok();
+                    }
+                    'E' => {
+                        std::log("[CALCULATOR] Clear-entry pressed.").ok();
+                    }
+                    'B' => {
+                        std::log("[CALCULATOR] Backspace pressed.").ok();
+                    }
+                    '~' => {
+                        std::log("[CALCULATOR] Sign toggled.").ok();
+                    }
+                    '.' => {}
+                    _ => {}
+                }
+                // WHY the state change goes through one function: the value
+                // on the display has to be the value the key produced, and
+                // the keypad and the keyboard are two ways of pressing the
+                // same key.
+                calc.press_key(action);
+                return Tap::Redraw(Dirty::Display);
+            }
+            return Tap::None;
         }
     }
 
     Tap::None
+}
+
+// -----------------------------------------------------------------------------
+// The raw contact channel
+// -----------------------------------------------------------------------------
+//
+// WHY the app reads the platform's input device node: the normalized
+// pipeline publishes a gesture when the finger lifts, so a key that
+// answers on the gesture cannot answer until the finger is up, and a
+// person who presses "7" and sees nothing until they lift their finger
+// cannot tell whether the key is broken or they are. The device node
+// carries the contact itself -- its phase, its slot and its position -- so
+// the key under the finger answers while the finger is still on it.
+//
+// WHY the gesture path stays: the device node is one reader of one queue,
+// and a guest that does not publish it leaves the gesture as the only way
+// in. The app falls back to it and says so on the log.
+
+/// The platform's input device node.
+const INPUT_DEVICE: &str = "/dev/input/event0";
+
+/// The length of one record the device node publishes.
+const CONTACT_RECORD_LEN: usize = 16;
+
+/// The record type of a contact.
+const CONTACT_TYPE_TOUCH: u8 = 2;
+
+/// The phase of a contact: the finger landing on the glass.
+///
+/// WHY the value and not a name: the device node publishes the phase as
+/// the platform's own contact phase, and the phases are down, move, up and
+/// cancel in that order.
+const CONTACT_PHASE_DOWN: u8 = 0;
+
+/// One record from the platform's input device node.
+enum DeviceRecord {
+    /// The queue is empty.
+    Empty,
+    /// A contact: where it is and what phase it is in.
+    Contact { x: u16, y: u16, phase: u8 },
+    /// A record that is not a contact: a key, or a gesture.
+    Other,
+}
+
+/// Reads one record from the platform's input device node.
+fn read_device_record(fd: u32) -> DeviceRecord {
+    let mut buf = [0u8; CONTACT_RECORD_LEN];
+    match std::fs_read(fd, &mut buf) {
+        Ok(n) if n >= CONTACT_RECORD_LEN => {
+            if buf[0] == CONTACT_TYPE_TOUCH {
+                DeviceRecord::Contact {
+                    x: u16::from_le_bytes([buf[2], buf[3]]),
+                    y: u16::from_le_bytes([buf[4], buf[5]]),
+                    phase: buf[8],
+                }
+            } else {
+                DeviceRecord::Other
+            }
+        }
+        _ => DeviceRecord::Empty,
+    }
 }
 
 #[no_mangle]
@@ -1118,14 +1298,34 @@ pub extern "C" fn _start() -> ! {
     // 2. Start with an empty expression; calculations are driven by user input.
     calc.clear();
 
-    // 3. Render initial Calculator UI frame and present
+    // 3. The raw contact channel.
+    //
+    // WHY the queue is drained before the loop starts: the contacts that
+    // are already queued are the ones that brought the app here, and a key
+    // that answers a contact that ended before the app was up is a key
+    // that answers a press nobody made.
+    let contact_device = match std::fs_open(INPUT_DEVICE, std::FS_READ) {
+        Ok(fd) => {
+            while !matches!(read_device_record(fd), DeviceRecord::Empty) {}
+            Some(fd)
+        }
+        Err(_) => {
+            std::log("[CALCULATOR] The raw contact channel is unavailable; a key answers when the finger lifts.").ok();
+            None
+        }
+    };
+    // Whether the contact that is on the glass has already answered the key
+    // under it.
+    let mut contact_answered = false;
+
+    // 4. Render initial Calculator UI frame and present
     repaint(surface, &calc, Dirty::All);
     let _ = std::surface_flip();
     std::log("[CALCULATOR] Initial frame presented to hardware scanout.",
     )
     .ok();
 
-    // 4. Interactive Event Reactor Loop
+    // 5. Interactive Event Reactor Loop
     loop {
         if let Ok(_events) = std::event_poll(std::EVENT_TOUCH_INPUT, 100) {
             let mut input = std::InputEvent {
@@ -1137,6 +1337,42 @@ pub extern "C" fn _start() -> ! {
                 scale_milli: 1000,
             };
             let mut dirty = Dirty::None;
+
+            // The contacts the platform publishes while the finger is down.
+            //
+            // WHY they are read before the gestures: the contact is the
+            // finger landing, and the gesture that follows is the same
+            // touch arriving again at the end of it. A key answers the
+            // first of the two, and the frame that carries the answer is
+            // drawn before the second of them is looked at.
+            if let Some(fd) = contact_device {
+                loop {
+                    match read_device_record(fd) {
+                        DeviceRecord::Empty => break,
+                        DeviceRecord::Other => continue,
+                        DeviceRecord::Contact { x, y, phase } => {
+                            if phase != CONTACT_PHASE_DOWN {
+                                continue;
+                            }
+                            match handle_touch_point(&mut calc, x as u32, y as u32) {
+                                Tap::Leave(msg) => {
+                                    std::log(msg).ok();
+                                    if surface > 0 {
+                                        let _ = std::surface_destroy(surface);
+                                    }
+                                    std::exit_with_code(0);
+                                }
+                                Tap::Redraw(d) => {
+                                    contact_answered = true;
+                                    dirty = dirty.widen(d);
+                                }
+                                Tap::None => {}
+                            }
+                        }
+                    }
+                }
+            }
+
             while std::input_event_poll(&mut input).is_ok() {
                 if let Some(key) = input.key_event() {
                     if key.pressed && handle_keyboard_key(&mut calc, key.code) {
@@ -1159,6 +1395,14 @@ pub extern "C" fn _start() -> ! {
                     std::exit_with_code(0);
                 }
                 if input.kind == 1 || input.kind == 2 {
+                    // WHY the gesture is ignored when the contact already
+                    // answered: the contact that landed on the key is the
+                    // same touch, and answering it twice would type two
+                    // digits for one press.
+                    if contact_answered {
+                        contact_answered = false;
+                        continue;
+                    }
                     match handle_touch_point(&mut calc, input.x, input.y) {
                         Tap::Leave(msg) => {
                             std::log(msg).ok();

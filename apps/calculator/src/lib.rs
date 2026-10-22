@@ -20,31 +20,72 @@ pub const TAPE_COLUMN_W: usize = 600;
 pub const TAPE_VISIBLE_LINES: usize = 2;
 
 /// The height of one tape line, in pixels.
-pub const TAPE_LINE_H: usize = 48;
+///
+/// WHY the caption rung's own line box and not a number of the app's: the
+/// tape holds the expression, and the expression is a caption -- the run
+/// above the answer. A line box that is not the one the run is drawn in is
+/// a line box the run does not fit in.
+pub const TAPE_LINE_H: usize = interos_std::design::typography::CAPTION_LINE_PX;
 
 /// The most lines an expression wraps into.
 pub const TAPE_MAX_LINES: usize = 10;
 
-/// The width of one character as the display draws it.
+/// The cap height of the result on the display: the title rung.
+///
+/// WHY a cap height and not a scale: the platform's ladder names the size a
+/// reader sees, and measuring the reference calculator settles what that
+/// size is -- its own result stands thirty pixels tall on a seven-hundred
+/// and twenty pixel screen. The scale ladder and the cap ladder are not
+/// the same ladder: the title *scale* is three, whose cap is twenty-two,
+/// so a run drawn at "the title scale" comes out a rung below the one the
+/// reference measures.
+pub const RESULT_CAP_PX: u32 = interos_std::design::typography::TITLE_CAP_PX;
+
+/// The cap height of the expression above the result: the caption rung.
+pub const EXPRESSION_CAP_PX: u32 = interos_std::design::typography::CAPTION_CAP_PX;
+
+/// The cap height of a key label: the body rung.
+pub const KEY_LABEL_CAP_PX: u32 = interos_std::design::typography::BODY_CAP_PX;
+
+/// The cap height the tape's line breaks are measured at.
+///
+/// WHY the body rung and not the caption the tape is drawn at: the line
+/// breaks are the expression's, and the expression is broken to fit the
+/// card. A tape that re-broke the expression every time its size changed
+/// would be a different expression in a different size -- and the tape's
+/// scroll would reach a different place, which is the whole of what the
+/// scroll is for.
+pub const TAPE_WRAP_CAP_PX: u32 = interos_std::design::typography::BODY_CAP_PX;
+
+/// The width of one character as the display draws it, at a cap height.
 ///
 /// WHY the outline face's advance and not the bitmap's: the display draws
 /// with the outline face, so a line wrapped with the bitmap's widths would
 /// not fit the column it was wrapped for.
-pub fn char_width(ch: u8, scale: usize) -> usize {
-    let em = interos_std::design::outline_text::em_for_scale(scale);
+pub fn char_width(ch: u8, cap_px: u32) -> usize {
+    let em = interos_std::design::outline_text::em_for_cap_height(cap_px);
     let outline = interos_std::design::typeface::advance_px(ch, em) as usize;
     if outline > 0 {
         return outline;
     }
-    interos_std::design::font::advance_of(ch, false) * scale
+    interos_std::design::font::advance_of(ch, false) * bitmap_scale_for_cap(cap_px)
 }
 
-/// The width of a string as the display draws it.
-pub fn text_width(text: &[u8], scale: usize) -> usize {
-    if let Some(width) = interos_std::design::outline_text::drawn_advance(text, scale, None) {
-        return width;
-    }
-    interos_std::design::font::measure_bold(text, scale)
+/// The width of a string as the display draws it, at a cap height.
+pub fn text_width(text: &[u8], cap_px: u32) -> usize {
+    interos_std::design::monochrome::text_width(text, cap_px)
+}
+
+/// The bitmap face's step that a cap height falls back to.
+///
+/// WHY the em and the cell and not the cap: the bitmap face draws in whole
+/// cells, so a run the outline face refuses is drawn at the nearest cell
+/// the face has. This is the same step the platform's own text drawing
+/// falls back to, so a label measured here and drawn there agree.
+fn bitmap_scale_for_cap(cap_px: u32) -> usize {
+    (interos_std::design::font::em_for_cap_scale(cap_px) as usize
+        / interos_std::design::font::GLYPH_H)
+        .max(1)
 }
 
 /// Wraps an expression into the lines the tape shows.
@@ -58,7 +99,7 @@ pub fn text_width(text: &[u8], scale: usize) -> usize {
 /// broken into lines the column can hold.
 pub fn wrap_expression(
     expr: &[u8],
-    scale: usize,
+    cap_px: u32,
     max_w: usize,
     out: &mut [[u8; 128]],
     lens: &mut [usize],
@@ -67,7 +108,7 @@ pub fn wrap_expression(
     let mut start = 0usize;
     let mut width = 0usize;
     for (index, &ch) in expr.iter().enumerate() {
-        let advance = char_width(ch, scale);
+        let advance = char_width(ch, cap_px);
         if width + advance > max_w && index > start {
             if lines >= out.len() {
                 break;
@@ -1027,7 +1068,7 @@ impl CalculatorState {
         let expr = self.tape_expression();
         let mut lines = [[0u8; 128]; TAPE_MAX_LINES];
         let mut lens = [0usize; TAPE_MAX_LINES];
-        let count = wrap_expression(expr, 2, TAPE_COLUMN_W, &mut lines, &mut lens);
+        let count = wrap_expression(expr, TAPE_WRAP_CAP_PX, TAPE_COLUMN_W, &mut lines, &mut lens);
         self.tape_lines = lines;
         self.tape_lens = lens;
         self.tape_count = count;
@@ -1056,6 +1097,38 @@ impl CalculatorState {
 
     pub fn display_str(&self) -> &str {
         core::str::from_utf8(&self.display_buf[..self.display_len]).unwrap_or("0")
+    }
+
+    /// Applies a key press to the state, and reports whether it changed the
+    /// display.
+    ///
+    /// WHY every key comes through here: the keypad and the keyboard are
+    /// two ways of pressing the same key, and the number the display shows
+    /// has to be the number the key press produced. Two paths that each
+    /// half-implement a key are two ways of showing a number the person
+    /// did not type.
+    ///
+    /// WHY the keypad's own vocabulary and not the keyboard's: the keypad
+    /// names a key by what it does -- `B` is the key that takes a
+    /// character back -- and the keyboard names it by the character it
+    /// types. The keypad's names are the ones that survive a keyboard that
+    /// has no key for them.
+    pub fn press_key(&mut self, action: char) -> bool {
+        match action {
+            '0'..='9' => self.push_digit((action as u8 - b'0') as i64),
+            '+' | '-' | '*' | '/' | '%' => self.set_operation(action),
+            'P' => self.push_parenthesis(),
+            '.' => self.push_char('.'),
+            '=' => {
+                self.evaluate();
+            }
+            'C' => self.clear(),
+            'E' => self.clear_entry(),
+            'B' => self.backspace(),
+            '~' => self.toggle_sign(),
+            _ => return false,
+        }
+        true
     }
 
     pub fn push_char(&mut self, c: char) {
@@ -1959,5 +2032,87 @@ mod tests {
         assert_eq!(calc.tape_scroll.max_offset(), 0);
         calc.scroll_tape(1);
         assert_eq!(calc.tape_scroll.offset, 0);
+    }
+
+    /// The result is drawn at the title rung.
+    ///
+    /// WHY: the reference calculator's own result stands thirty pixels of
+    /// cap tall on a seven-hundred and twenty pixel screen, and a result
+    /// that is the size of a key label reads as a keypad and not as an
+    /// answer.
+    #[test]
+    fn test_the_result_is_drawn_at_the_title_rung() {
+        assert_eq!(RESULT_CAP_PX, interos_std::design::typography::TITLE_CAP_PX);
+        assert_eq!(RESULT_CAP_PX, 30);
+    }
+
+    /// The expression above the result is drawn at the caption rung.
+    ///
+    /// WHY: the expression is a caption -- the run above the answer -- and
+    /// a caption is the smallest rung the ladder names.
+    #[test]
+    fn test_the_expression_is_drawn_at_the_caption_rung() {
+        assert_eq!(
+            EXPRESSION_CAP_PX,
+            interos_std::design::typography::CAPTION_CAP_PX
+        );
+        assert_eq!(EXPRESSION_CAP_PX, 13);
+        // The tape's line box is the caption's own, so the run the tape
+        // draws is the run the tape reserves.
+        assert_eq!(TAPE_LINE_H, interos_std::design::typography::CAPTION_LINE_PX);
+    }
+
+    /// The result is the largest text on the screen.
+    ///
+    /// WHY: the result is the hero of the display, and a hero that is the
+    /// same size as a key label is not a hero.
+    #[test]
+    fn test_the_result_is_the_largest_text_on_the_screen() {
+        assert!(RESULT_CAP_PX > KEY_LABEL_CAP_PX);
+        assert!(RESULT_CAP_PX > EXPRESSION_CAP_PX);
+        assert_eq!(KEY_LABEL_CAP_PX, interos_std::design::typography::BODY_CAP_PX);
+    }
+
+    /// A key press updates the value on the display.
+    ///
+    /// WHY: the keypad and the keyboard are two ways of pressing the same
+    /// key, and the number the display shows has to be the number the key
+    /// press produced.
+    #[test]
+    fn test_a_key_press_updates_the_value_on_the_display() {
+        let mut calc = CalculatorState::new();
+        calc.clear();
+        assert_eq!(calc.display_str(), "0");
+
+        assert!(calc.press_key('7'));
+        assert_eq!(calc.display_str(), "7");
+
+        assert!(calc.press_key('8'));
+        assert_eq!(calc.display_str(), "78");
+
+        assert!(calc.press_key('+'));
+        assert!(calc.press_key('5'));
+        assert_eq!(calc.display_str(), "5");
+
+        assert!(calc.press_key('='));
+        assert_eq!(calc.display_str(), "83");
+    }
+
+    /// The backspace key takes a character back, and the clear key throws
+    /// the expression away -- through the same entry point as a digit.
+    #[test]
+    fn test_the_editing_keys_go_through_the_same_entry_point() {
+        let mut calc = CalculatorState::new();
+        calc.clear();
+        calc.press_key('1');
+        calc.press_key('2');
+        assert_eq!(calc.display_str(), "12");
+        assert!(calc.press_key('B'));
+        assert_eq!(calc.display_str(), "1");
+        assert!(calc.press_key('C'));
+        assert_eq!(calc.display_str(), "0");
+        // A key the keypad does not carry changes nothing.
+        assert!(!calc.press_key('!'));
+        assert_eq!(calc.display_str(), "0");
     }
 }
