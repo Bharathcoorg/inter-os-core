@@ -80,8 +80,16 @@ def _split_arguments(text: str) -> list[str]:
     return arguments
 
 
-def test_the_sdk_ladder_is_the_documents_cap_heights():
-    """The rungs are the document's, not the bitmap cell's multiples."""
+def test_a_rung_names_one_size_and_both_faces_honour_it():
+    """A label is drawn with one face or the other, so both must size it alike.
+
+    WHY this matters: the ladder was once written with the design
+    document's own numbers, which are a third smaller than the bitmap
+    cell's multiples. Every label drawn with the outline face then came
+    out at half the size of the same label drawn with the bitmap face, and
+    the platform became a patchwork of two sizes. That is what "the text
+    is very small" was.
+    """
     sdk = (ROOT / "sdk/rust/interos-std/src/design/mod.rs").read_text(encoding="utf-8")
     for name in LADDER:
         assert f"pub const {name}_CAP_PX" in sdk, f"the SDK does not name the {name} cap height"
@@ -91,6 +99,28 @@ def test_the_sdk_ladder_is_the_documents_cap_heights():
     assert "pub const TITLE_SCALE: usize = 4;" in sdk
     assert "pub const HEADING_SCALE: usize = 5;" in sdk
     assert "pub const DISPLAY_SCALE: usize = 6;" in sdk
+    # The font module carries the rule the two faces share.
+    font = (ROOT / "sdk/rust/interos-std/src/font.rs").read_text(encoding="utf-8")
+    assert "pub const fn cap_for_scale" in font
+    assert "pub const fn em_for_cap_scale" in font, (
+        "a cap height the ladder produced has to resolve back to the size the "
+        "ladder named, so the outline face and the bitmap face draw the same "
+        "label at the same size"
+    )
+    # WHY the SDK derives its rungs instead of naming them: a second copy of
+    # the ladder is a second ladder, and the two drift apart the moment one
+    # of them is touched.
+    assert "font::cap_for_scale(CAPTION_SCALE)" in sdk, (
+        "the SDK's caption rung must come from the font module's ladder"
+    )
+    assert "font::line_height(CAPTION_SCALE)" in sdk, (
+        "the SDK's caption line box must come from the font module's ladder"
+    )
+    # The kit the applications draw with resolves a cap the same way.
+    kit = (ROOT / "sdk/rust/interos-std/src/design/monochrome.rs").read_text(encoding="utf-8")
+    assert "em_for_cap_scale" in kit, (
+        "the monochrome kit must resolve a cap height through the ladder"
+    )
 
 
 def test_every_rung_is_reachable_from_the_sdk():

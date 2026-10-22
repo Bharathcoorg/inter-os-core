@@ -898,6 +898,17 @@ fn weekday_from_civil(year: u32, month: u32, day: u32) -> usize {
     // 1970-01-01 (days == 0) was a Thursday, index 4 in a Sunday-first week.
     (((days + 4) % 7 + 7) % 7) as usize
 }
+/// The uid the shell is running as.
+///
+/// WHY this is asked for and not written down: the account the launcher
+/// unlocks is its own, and a literal uid is right only for the one account
+/// the launcher was ever run as. The lock screen's swipe called it with a
+/// literal, so the unlock was refused for every account but that one and
+/// the swipe did nothing.
+fn shell_uid() -> u32 {
+    std::user_get_current()
+}
+
 fn parse_dec_u64(bytes: &[u8]) -> u64 {
     let mut val = 0u64;
     for &b in bytes {
@@ -2896,7 +2907,7 @@ pub extern "C" fn _start() -> ! {
                             ViewMode::BootScreen | ViewMode::PowerTransition => {}
                             ViewMode::HomeScreen => {}
                             ViewMode::LockScreen => {
-                                if state.lock_state == std::UserLockState::Unlocked || std::user_unlock(1000, b"").is_ok() {
+                                if state.lock_state == std::UserLockState::Unlocked || std::user_unlock(shell_uid(), b"").is_ok() {
                                     state.lock_state = std::UserLockState::Unlocked;
                                     state.pin_pad_visible = false;
                                     state.current_view = ViewMode::HomeScreen;
@@ -3504,7 +3515,7 @@ pub extern "C" fn _start() -> ! {
                             // 1. Vertical swipe up to unlock requires a vertical fling <= -28 px.
                             if is_drag(input.kind) {
                                 if input.dy <= -28 {
-                                    if state.lock_state == std::UserLockState::Unlocked || std::user_unlock(1000, b"").is_ok() {
+                                    if state.lock_state == std::UserLockState::Unlocked || std::user_unlock(shell_uid(), b"").is_ok() {
                                         state.lock_state = std::UserLockState::Unlocked;
                                         state.pin_pad_visible = false;
                                         state.current_view = ViewMode::HomeScreen;
@@ -3649,7 +3660,7 @@ pub extern "C" fn _start() -> ! {
                                                                     // credential at all.
                                                                      match set {
                                                                          Ok(()) => {
-                                                                             let _ = std::user_unlock(1000, &state.pin_buffer[..4]);
+                                                                             let _ = std::user_unlock(shell_uid(), &state.pin_buffer[..4]);
                                                                              state.lock_state = std::UserLockState::Unlocked;
                                                                              state.pin_pad_visible = false;
                                                                              state.pin_setup_step = 0;
@@ -3690,7 +3701,7 @@ pub extern "C" fn _start() -> ! {
                                                                  }
                                                             }
                                                         } else {
-                                                            if std::user_unlock(1000, &state.pin_buffer[..4]).is_ok() {
+                                                            if std::user_unlock(shell_uid(), &state.pin_buffer[..4]).is_ok() {
                                                                 state.lock_state = std::UserLockState::Unlocked;
                                                                 state.pin_pad_visible = false;
                                                                 state.pin_len = 0;
@@ -3760,7 +3771,7 @@ pub extern "C" fn _start() -> ! {
                                                              // have no credential at all.
                                                              match set {
                                                                  Ok(()) => {
-                                                                     let _ = std::user_unlock(1000, &state.pin_buffer[..n]);
+                                                                     let _ = std::user_unlock(shell_uid(), &state.pin_buffer[..n]);
                                                                      state.lock_state = std::UserLockState::Unlocked;
                                                                      state.pin_pad_visible = false;
                                                                      state.pin_setup_step = 0;
@@ -3795,7 +3806,7 @@ pub extern "C" fn _start() -> ! {
                                                              present_dirty(surface, &state, Dirty::LockPinPad);
                                                          }
                                                      }
-                                                 } else if std::user_unlock(1000, &state.pin_buffer[..n]).is_ok() {
+                                                 } else if std::user_unlock(shell_uid(), &state.pin_buffer[..n]).is_ok() {
                                                      state.lock_state = std::UserLockState::Unlocked;
                                                      state.pin_pad_visible = false;
                                                      state.pin_len = 0;

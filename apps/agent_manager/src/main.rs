@@ -91,7 +91,13 @@ const BUBBLE_PAD: usize = 12;
 /// The chat surface's composer band.
 const COMPOSER_H: usize = 76;
 /// The composer's field height.
-const COMPOSER_FIELD_H: usize = 56;
+/// The composer's field height.
+///
+/// WHY it follows the type rather than being a number: the platform's
+/// type scale names a line box, and a field that is shorter than the line
+/// it holds cannot hold it. A fixed height here broke the moment the
+/// ladder's rungs moved, because the arithmetic underflowed.
+const COMPOSER_FIELD_H: usize = LINE_BODY + 28;
 /// The composer's send button radius.
 const COMPOSER_SEND_R: usize = 24;
 
@@ -137,7 +143,9 @@ const TITLE_GAP: usize = 0;
 /// WHY a row is a touch target's height and not a line's height: a row a
 /// person can read but cannot press is a label, and the platform's
 /// minimum touch target is forty-four pixels.
-const ROW_H: usize = 44;
+/// A row's height. It follows the type for the same reason the composer's
+/// field does.
+const ROW_H: usize = LINE_BODY + 20;
 const LINES_TOP: usize = CARD_PAD_TOP + TITLE_ROW_H + TITLE_GAP;
 
 /// The label column's width in pixels.
@@ -1877,7 +1885,8 @@ fn appbar_more_rect() -> Rect {
 /// The sheet's width.
 const SHEET_W: usize = 272;
 /// The sheet's row height.
-const SHEET_ROW_H: usize = 52;
+/// A sheet row's height. It follows the type for the same reason.
+const SHEET_ROW_H: usize = LINE_BODY + 24;
 /// The sheet's padding.
 const SHEET_PAD: usize = 8;
 
@@ -2301,7 +2310,7 @@ fn chip_px(
         x,
         y,
         dot_cx + 10,
-        top + (26 - LINE_CAPTION) / 2,
+        top + (LINE_CAPTION + 12).saturating_sub(LINE_CAPTION) / 2,
         CAP_CAPTION,
         label,
         tone.colour(),
@@ -2327,7 +2336,7 @@ fn composer_pixel(x: usize, y: usize, app: &AgentManagerApp) -> u32 {
     if y == top {
         colour = THEME.border;
     }
-    let field_y = top + (COMPOSER_H - COMPOSER_FIELD_H) / 2;
+    let field_y = top + COMPOSER_H.saturating_sub(COMPOSER_FIELD_H) / 2;
     let send_cx = W - GUTTER - COMPOSER_SEND_R;
     let send_cy = top + COMPOSER_H / 2;
     let field_right = send_cx.saturating_sub(COMPOSER_SEND_R + 12);

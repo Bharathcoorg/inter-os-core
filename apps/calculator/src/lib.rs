@@ -2043,7 +2043,16 @@ mod tests {
     #[test]
     fn test_the_result_is_drawn_at_the_title_rung() {
         assert_eq!(RESULT_CAP_PX, interos_std::design::typography::TITLE_CAP_PX);
-        assert_eq!(RESULT_CAP_PX, 30);
+        // WHY the relationship and not the number: the ladder's rungs are the
+        // bitmap cell's cap heights, and the number they carry moves when
+        // the ladder moves. What the screen depends on is that the answer
+        // is several times the size of a key label.
+        assert!(
+            RESULT_CAP_PX >= EXPRESSION_CAP_PX * 2,
+            "the answer is {} pixels and the expression is {}",
+            RESULT_CAP_PX,
+            EXPRESSION_CAP_PX
+        );
     }
 
     /// The expression above the result is drawn at the caption rung.
@@ -2056,7 +2065,14 @@ mod tests {
             EXPRESSION_CAP_PX,
             interos_std::design::typography::CAPTION_CAP_PX
         );
-        assert_eq!(EXPRESSION_CAP_PX, 13);
+        // The expression is a caption, and the caption is the smallest rung
+        // the ladder names.
+        assert_eq!(
+            EXPRESSION_CAP_PX,
+            interos_std::font::cap_for_scale(
+                interos_std::design::typography::CAPTION_SCALE
+            )
+        );
         // The tape's line box is the caption's own, so the run the tape
         // draws is the run the tape reserves.
         assert_eq!(TAPE_LINE_H, interos_std::design::typography::CAPTION_LINE_PX);

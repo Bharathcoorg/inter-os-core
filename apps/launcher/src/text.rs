@@ -42,7 +42,15 @@ use crate::font;
 pub fn advance(c: u8, scale: usize) -> usize {
     if scale >= 2 {
         let em = crate::outline_text::em_for_scale(scale);
-        return interos_std::design::typeface::text_advance_px(&[c], em) as usize;
+        let outline = interos_std::design::typeface::text_advance_px(&[c], em) as usize;
+        if outline > 0 {
+            return outline;
+        }
+        // WHY the fallback is the bitmap's advance and not zero: a byte
+        // the outline face has no glyph for would advance by nothing, and
+        // the wrap and the ellipsis loops advance a cursor that never
+        // moves. A label with one unmapped byte in it hung the shell's
+        // home screen.
     }
     font::advance_of(c, false) * scale
 }

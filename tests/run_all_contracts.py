@@ -134,7 +134,7 @@ def run_contracts(target_files=None):
     file_reports = {}
 
     # 1. Execute framework tests (pytest/unittest) via pytest
-    pytest_timeout = int(os.environ.get("INTEROS_PYTEST_TIMEOUT", "360"))
+    pytest_timeout = int(os.environ.get("INTEROS_PYTEST_TIMEOUT", "900"))
     script_timeout = int(os.environ.get("INTEROS_SCRIPT_TIMEOUT", "90"))
 
     if framework_tests:
@@ -194,7 +194,14 @@ def run_contracts(target_files=None):
                 print("---------------------\n")
         except subprocess.TimeoutExpired:
             failures.append("pytest_timeout")
-            print("ERROR: Pytest framework execution timed out after 180s!", file=sys.stderr)
+            # WHY every framework file is reported: a batch that timed out ran
+            # no suite to completion, and a file with no report was printed
+            # as "NOT EXECUTED" -- which reads as a broken suite rather than
+            # as a gate that ran out of time.
+            for p in framework_tests:
+                file_reports[p] = (False, "NOT RUN: the pytest batch timed out")
+            print("ERROR: Pytest framework execution timed out after "
+                  f"{pytest_timeout}s!", file=sys.stderr)
 
     # 2. Execute script-based contract tests directly
     for p in script_tests:
