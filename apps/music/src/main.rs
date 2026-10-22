@@ -1198,9 +1198,9 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
         // Ellipsise to the content column so a long real title truncates instead
         // of vanishing (the old code drew nothing when the title overflowed).
         let mut tbuf = [0u8; 40];
-        let tn = font::ellipsize(title, 1, CONTENT_W, &mut tbuf);
-        let tw = font::measure_bold(&tbuf[..tn], 1);
-        if let Some(c) = text_bold(x, y, (W.saturating_sub(tw)) / 2, TITLE_Y, 1, &tbuf[..tn], THEME.on_surface, THEME.surface) {
+        let tn = font::ellipsize(title, 2, CONTENT_W, &mut tbuf);
+        let tw = font::measure_bold(&tbuf[..tn], 2);
+        if let Some(c) = text_bold(x, y, (W.saturating_sub(tw)) / 2, TITLE_Y, 2, &tbuf[..tn], THEME.on_surface, THEME.surface) {
             return c;
         }
     }
@@ -1406,11 +1406,11 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
             // Points right with its bar behind it on the left: the next-track
             // glyph. See the note on the previous button for why these two were
             // bound to each other's centres.
-            if (-18..=-14).contains(&dx) && dy.abs() <= 10 {
+            if (14..=18).contains(&dx) && dy.abs() <= 10 {
                 return ink;
             }
-            if (-8..=12).contains(&dx) {
-                let allow = (12 - dx) * 12 / 20;
+            if (-12..=8).contains(&dx) {
+                let allow = (dx + 12) * 12 / 20;
                 if dy.abs() <= allow {
                     return ink;
                 }
