@@ -139,25 +139,19 @@ fn slot_for(em: u32, x: usize, y: usize, text: &[u8], bold: bool) -> usize {
 /// rasteriser it is used against. If the face ever names it, use that instead.
 const BITMAP_CAP_ROWS: u64 = 17;
 
-/// Pixels per em that reproduce a bitmap cell's cap height at `scale`.
+/// Pixels per em that draw the cap height the scale rung names.
 ///
-/// WHY this exists: a caller migrating a label from the bitmap face to the
-/// outline face must not guess an em, or the text silently changes size. The
-/// bitmap face's cap height is `BITMAP_CAP_ROWS` rows at scale 1, so a cell
-/// drawn at `scale` has a cap height of `BITMAP_CAP_ROWS * scale` pixels. The
-/// outline face's cap height is 1456 of 2048 em. Solving for em gives this.
-///
-/// The two faces share a cap height here, but they do not share a width or a
-/// total height, and callers must not assume otherwise.
-pub fn em_for_scale(scale: usize) -> u32 {
-    if scale == 0 {
-        return 0;
-    }
-    // Rounded to nearest so a scale lands on a whole em rather than drifting a
-    // fraction of a pixel per glyph, which reads as uneven stroke weight.
-    let num = BITMAP_CAP_ROWS * 2048 * scale as u64;
-    let den = 1456u64;
-    ((num + den / 2) / den) as u32
+/// WHY the rung names the design document's size and not the bitmap cell's
+/// multiple: the document's type scale is written in the sizes a reader
+/// sees -- a caption of thirteen pixels, a body of sixteen, a title of
+/// thirty and a page heading of forty -- while the bitmap cell's multiples
+/// (seventeen, thirty-four, fifty-one, a hundred and two) are more than
+/// twice those for every rung above the first. A label drawn at the
+/// bitmap's cap no longer fits the box the document's layout reserves for
+/// it, which is the overlap the panel showed. `cap_for_scale` carries the
+/// ladder, and the em follows from the cap it names.
+pub const fn em_for_scale(scale: usize) -> u32 {
+    em_for_cap_height(crate::font::cap_for_scale(scale))
 }
 
 /// The colour of (`px`, `py`) if the run placed at (`x`, `baseline`) with size
@@ -510,7 +504,7 @@ pub fn place_run(
     }
     let em = em_for_scale(scale);
     let (ascent, _) = typeface::line_metrics(em);
-    let baseline = (y0 + ascent as usize).max(y0 + font::BASELINE * scale);
+    let baseline = (y0 + ascent as usize).max(y0 + font::ascent_for_scale(scale));
     let run = OutlineRun::place_styled(x0, baseline, em, text, bold)?;
     if let Some(mw) = max_w {
         if run.w > mw {
@@ -539,7 +533,7 @@ pub fn place_run(
 }
 
 pub fn baseline_row(y0: usize, scale: usize, ascent: u32) -> usize {
-    (y0 + ascent as usize).max(y0 + font::BASELINE * scale)
+    (y0 + ascent as usize).max(y0 + font::ascent_for_scale(scale))
 }
 
 pub fn run_box(x0: usize, y0: usize, scale: usize, text: &[u8]) -> (usize, usize, usize, usize) {
@@ -914,13 +908,16 @@ mod tests {
     }
 
     #[test]
-    fn em_for_scale_reproduces_the_bitmap_cap_height() {
-        // The whole point of `em_for_scale`: a label moved from the bitmap face
-        // to the outline face must keep its cap height, or the text silently
-        // changes size on screen. Check the derivation rather than trust it.
-        for scale in 1..=6usize {
+    fn em_for_scale_names_the_design_cap_height() {
+        // The whole point of `em_for_scale`: the scale rung names the size the
+        // design document asks for, in the units a reader sees -- a caption of
+        // thirteen pixels, a body of sixteen, a title of thirty and a page
+        // heading of forty -- and the em must draw exactly that cap height,
+        // whatever the bitmap cell's own multiples were. Check the derivation
+        // rather than trust it.
+        for scale in [1usize, 2, 3, 6] {
             let em = em_for_scale(scale);
-            let want = BITMAP_CAP_ROWS as u64 * scale as u64;
+            let want = crate::font::cap_for_scale(scale) as u64;
             let got = (em as u64 * 1456 + 1024) / 2048;
             assert_eq!(
                 got, want,

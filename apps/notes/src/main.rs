@@ -363,7 +363,7 @@ fn test_text(
         return None;
     }
     let (bx, bt, bw, bh) = outline_text::run_box(x0, y0, scale, text);
-    let bitmap_h = std::design::font::GLYPH_H * scale;
+    let bitmap_h = std::design::font::line_height(scale);
     let bitmap_w = std::design::font::measure(text, scale);
     let top = bt.min(y0);
     let height = bh.max(bitmap_h);

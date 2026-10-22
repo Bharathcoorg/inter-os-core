@@ -240,7 +240,7 @@ pub fn text_px(
     if x < x0 || y < y0 || y >= y0 + crate::font::GLYPH_H * fallback {
         return None;
     }
-    crate::font::test_text_aa(x, y, x0, y0, fallback, text, ink, bg, bold)
+    crate::font::test_glyph_aa(x, y, x0, y0, fallback, text, ink, bg, bold)
 }
 
 /// The width of `text` as a reader sees it at a cap height.

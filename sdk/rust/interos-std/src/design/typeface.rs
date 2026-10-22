@@ -132,11 +132,17 @@ pub struct Metrics {
 /// WHY this is the face's own hhea values rather than a measured bounding box:
 /// line height is a property of the design, and deriving it from the ink of one
 /// string would make every line a different height.
-pub fn line_metrics(px_per_em: u32) -> (u32, u32) {
+pub const fn line_metrics(px_per_em: u32) -> (u32, u32) {
     let upem = face::UNITS_PER_EM as i32;
     let ascent = (face::ASCENT as i32 * px_per_em as i32) / upem;
     let descent = (-(face::DESCENT as i32) * px_per_em as i32) / upem;
-    (ascent.max(0) as u32, descent.max(0) as u32)
+    // WHY if-then and not `max`: a const fn cannot call the const-unstable
+    // `Ord::max`, and the metrics are needed in const contexts by the
+    // typography styles and app layout constants.
+    (
+        if ascent > 0 { ascent as u32 } else { 0 },
+        if descent > 0 { descent as u32 } else { 0 },
+    )
 }
 
 /// The horizontal advance of `ch` at `px_per_em`, in pixels.

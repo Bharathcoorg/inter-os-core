@@ -100,7 +100,7 @@ pub fn entry_band() -> (usize, usize) {
 ) -> Option<u32> {
     let em = launcher::outline_text::em_for_scale(scale);
     let (asc, desc) = interos_std::design::typeface::line_metrics(em);
-    let baseline = (y0 + launcher::font::BASELINE * scale).max(asc as usize);
+    let baseline = (y0 + launcher::font::ascent_for_scale(scale)).max(asc as usize);
     let top = baseline.saturating_sub(asc as usize);
     if x < x0 || y < top || y >= baseline + desc as usize {
         return None;

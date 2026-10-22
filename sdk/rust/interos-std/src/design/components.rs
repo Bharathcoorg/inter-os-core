@@ -554,7 +554,7 @@ fn label_pixel(
     if scale >= 2 {
         let em = outline_text::em_for_scale(scale);
         let (ascent, _) = typeface::line_metrics(em);
-        let baseline = (y0 + font::BASELINE * scale).max(ascent as usize);
+        let baseline = (y0 + font::ascent_for_scale(scale)).max(ascent as usize);
         if let Some(run) = outline_text::OutlineRun::place(x0, baseline, em, text) {
             let (bx, by, bw, bh) = run.bounds();
             if px >= bx && px < bx + bw && py >= by && py < by + bh {

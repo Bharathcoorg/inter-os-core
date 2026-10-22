@@ -296,7 +296,7 @@ impl Label {
         let run = &bytes[..len];
         let em = crate::outline_text::em_for_scale(scale);
         let (ascent, _descent) = interos_std::design::typeface::line_metrics(em);
-        let baseline = (y + font::BASELINE * scale).max(ascent as usize);
+        let baseline = (y + font::ascent_for_scale(scale)).max(ascent as usize);
         let outline = if scale >= 2 {
             crate::outline_text::OutlineRun::place(x, baseline, em, run)
         } else {

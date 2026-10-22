@@ -1655,27 +1655,84 @@ pub fn coverage(c: u8, col: usize, row: usize, bold: bool) -> u32 {
     }
 }
 
+/// The cap height, in pixels, that a rung of the scale ladder names.
+///
+/// WHY the rung names a cap height and not a cell multiple: the design
+/// document writes its type scale in the sizes a reader sees -- a caption
+/// of twelve to fourteen pixels, body text of fourteen, a title of
+/// twenty-eight to thirty-two and a page heading of thirty-six to
+/// forty-four -- while the rungs were multiples of the bitmap face's
+/// sixteen-pixel cell, whose caps (seventeen, thirty-four, fifty-one,
+/// a hundred and two) are more than twice the document's size for every
+/// rung above the first. An app that took its size from the ladder
+/// therefore drew text two and a half times the size the document asks
+/// for, and every reserved box overflowed its neighbour: the classic
+/// "everything overlaps, nothing has space" state the panel showed. The
+/// rungs now name the document's sizes, and the bitmap face is the
+/// fallback, not the source of truth.
+///
+/// Half-steps (4, 5) keep the ladder monotone for callers that land on
+/// them; the values are the middle of each range the document gives.
+pub const fn cap_for_scale(scale: usize) -> u32 {
+    match scale {
+        1 => 13, // badge / caption
+        2 => 16, // body
+        3 => 30, // title
+        4 => 32, // half-step between title and heading
+        5 => 38, // half-step
+        6 => 40, // page heading / display
+        7 => 52, // hero display
+        s => (s as u32).saturating_mul(8),
+    }
+}
+
+/// The ascent, in pixels, of a run at the size a scale rung names.
+///
+/// WHY a function and not the bitmap's constant: a run's baseline now
+/// comes from the typeface metrics at the rung's size, so a caller that
+/// places a line box at `y0` and asks where the baseline sits gets the
+/// same row the renderer places the ink on. `const` because app layout
+/// constants and the `typography` styles are built in const contexts.
+pub const fn ascent_for_scale(scale: usize) -> usize {
+    let em = crate::design::outline_text::em_for_cap_height(cap_for_scale(scale));
+    let (ascent, _) = crate::design::typeface::line_metrics(em);
+    ascent as usize
+}
+
 #[inline]
 pub fn measure(text: &[u8], scale: usize) -> usize {
-    let mut w = 0usize;
-    for &c in text {
-        w += advance_of(c, false) * scale;
+    match scale {
+        0 => 0,
+        s => {
+            let em = crate::design::outline_text::em_for_cap_height(cap_for_scale(s));
+            crate::design::typeface::text_advance_px(text, em) as usize
+        }
     }
-    w
 }
 
 #[inline]
 pub fn measure_bold(text: &[u8], scale: usize) -> usize {
-    let mut w = 0usize;
-    for &c in text {
-        w += advance_of(c, true) * scale;
-    }
-    w
+    // The renderer dilates a bold run by one column in total, not per glyph,
+    // so the measurement names the same width the ink paints.
+    measure(text, scale) + usize::from(!text.is_empty())
 }
 
-#[inline]
-pub fn line_height(scale: usize) -> usize {
-    GLYPH_H * scale
+/// The line box, in pixels, a run at `scale` reserves.
+///
+/// WHY these are the design document's values: a line box is the space a
+/// run reserves, and it is a layout decision rather than a property of
+/// the glyphs. The old `GLYPH_H * scale` values reserved two and a half
+/// times the document's boxes, which is where the reserved space and the
+/// neighbouring content collided.
+pub const fn line_height(scale: usize) -> usize {
+    match scale {
+        1 => 16, // caption
+        2 => 20, // body
+        3 => 36, // title
+        6 => 48, // page heading
+        7 => 60, // hero display
+        s => (cap_for_scale(s) as usize * 5 + 3) / 4,
+    }
 }
 
 #[inline]
@@ -1894,8 +1951,38 @@ pub fn test_text_bold(
 /// instead of stair-stepping, which is what makes text read as type rather than
 /// as blocks. Integer `scale` upscales the covered glyph with nearest neighbour:
 /// the source pixels are anti-aliased, the magnification stays sharp.
-#[inline(always)]
+/// The colour of `(x, y)` if `text` inks it, drawn at the size the scale
+/// rung names in the design document.
+///
+/// WHY this delegates to the outline face: the rungs used to name multiples
+/// of the bitmap cell, whose caps are more than double the design
+/// document's sizes for every rung above the first, and that is what made
+/// every reserved box overflow its neighbour. The rungs now name the
+/// design's cap heights (`cap_for_scale`), the outline face draws them
+/// sharp at the panel's own resolution, and the bitmap face below
+/// (`test_glyph_aa`) remains for runs the outline face refuses.
 pub fn test_text_aa(
+    x: usize,
+    y: usize,
+    x0: usize,
+    y0: usize,
+    scale: usize,
+    text: &[u8],
+    color: u32,
+    bg: u32,
+    bold: bool,
+) -> Option<u32> {
+    crate::design::monochrome::text_px(x, y, x0, y0, cap_for_scale(scale), text, color, bg, bold)
+}
+
+/// The bitmap cell face, renamed to make its role explicit.
+///
+/// [`test_text_aa`] now means "the size the design document names". This
+/// body kept its engine because a run the outline face refuses -- a
+/// character the typeface has no outline for -- has to be drawn somehow,
+/// and the bitmap cell is what it is drawn with.
+#[inline(always)]
+pub fn test_glyph_aa(
     x: usize,
     y: usize,
     x0: usize,
@@ -1950,12 +2037,15 @@ pub fn ellipsize<'a>(text: &[u8], scale: usize, max_w: usize, out_buf: &mut [u8]
         return 0;
     }
 
+    // The trim budget is spent in the outline face's advances, so the
+    // truncated run's width is the width the renderer will paint.
+    let em = crate::design::outline_text::em_for_cap_height(cap_for_scale(scale));
     let budget = max_w - dots_w;
     let mut current_w = 0usize;
     let mut fit_len = 0usize;
 
     for (i, &c) in text.iter().enumerate() {
-        let adv = advance_of(c, false) * scale;
+        let adv = crate::design::typeface::advance_px(c, em) as usize;
         if current_w + adv > budget || fit_len + 3 > out_buf.len() {
             break;
         }
@@ -2456,7 +2546,14 @@ mod tests {
         assert!(m_w > m_i, "W should be wider than i");
         assert!(m_a > m_i, "A should be wider than i");
         assert_eq!(measure(b"Ai", 1), m_a + m_i);
-        assert_eq!(measure(b"Ai", 2), (m_a + m_i) * 2);
+        // WHY the second rung is not doubled: the rung names a cap height,
+        // and successive rungs are the design document's sizes rather than
+        // exact multiples of one another, so a run's width grows with the
+        // em it is drawn at, not with the rung number.
+        let m2_a = measure(b"A", 2);
+        let m2_i = measure(b"i", 2);
+        assert!(m2_a > m_a, "body type is wider than caption type");
+        assert_eq!(measure(b"Ai", 2), m2_a + m2_i);
     }
 
     #[test]

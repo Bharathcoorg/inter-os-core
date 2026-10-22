@@ -79,34 +79,40 @@ pub mod typography {
     /// WHY it exists: the shell draws a badge in the corner of an icon, and the
     /// badge is a caption at the smallest step the face can express. It was
     /// carried by the launcher alone, which meant the step existed only there.
+    /// WHY the numbers are the design document's: a style is what an app
+    /// copies when it asks for "a caption", so a style that reserved the
+    /// bitmap cell's multiples reserved two and a half times the space a
+    /// reader expects and pushed the neighbouring content out of the way.
+    /// The line boxes and baselines are the ones the document names, and
+    /// the baseline is the row the renderer sits the ink on at that rung.
     pub const BADGE: TextStyle = TextStyle {
         scale: BADGE_SCALE,
-        line_height_px: 24,
-        baseline_offset_px: font::BASELINE,
+        line_height_px: 16,
+        baseline_offset_px: font::ascent_for_scale(BADGE_SCALE),
     };
 
     pub const CAPTION: TextStyle = TextStyle {
         scale: CAPTION_SCALE,
-        line_height_px: 24,
-        baseline_offset_px: font::BASELINE,
+        line_height_px: 16,
+        baseline_offset_px: font::ascent_for_scale(CAPTION_SCALE),
     };
 
     pub const BODY: TextStyle = TextStyle {
         scale: BODY_SCALE,
-        line_height_px: 48,
-        baseline_offset_px: font::BASELINE * 2,
+        line_height_px: 20,
+        baseline_offset_px: font::ascent_for_scale(BODY_SCALE),
     };
 
     pub const TITLE: TextStyle = TextStyle {
         scale: TITLE_SCALE,
-        line_height_px: 72,
-        baseline_offset_px: font::BASELINE * 3,
+        line_height_px: 36,
+        baseline_offset_px: font::ascent_for_scale(TITLE_SCALE),
     };
 
     pub const DISPLAY: TextStyle = TextStyle {
         scale: DISPLAY_SCALE,
-        line_height_px: 144,
-        baseline_offset_px: font::BASELINE * 6,
+        line_height_px: 60,
+        baseline_offset_px: font::ascent_for_scale(DISPLAY_SCALE),
     };
 }
 

@@ -1819,7 +1819,7 @@ fn text_px(
     }
     let em = outline_text::em_for_scale(scale);
     let (ascent, _) = interos_std::design::typeface::line_metrics(em);
-    let baseline = (y0 + font::BASELINE * scale).max(ascent as usize);
+    let baseline = (y0 + font::ascent_for_scale(scale)).max(ascent as usize);
     if let Some(run) = outline_text::OutlineRun::place_styled(x0, baseline, em, text, bold) {
         let (bx, by, bw, bh) = run.bounds();
         if x >= bx && x < bx + bw && y >= by && y < by + bh {
@@ -1827,7 +1827,7 @@ fn text_px(
         }
         return None;
     }
-    if x < x0 || y < y0 || y >= y0 + font::GLYPH_H * scale {
+    if x < x0 || y < y0 || y >= y0 + font::line_height(scale) {
         return None;
     }
     font::test_text_aa(x, y, x0, y0, scale, text, color, bg, bold)
@@ -2371,7 +2371,7 @@ fn toolbar_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
             && x >= PILL_TEXT_X
             && x < PILL_TEXT_X + f.select_w
             && y >= PILL_TEXT_Y
-            && y < PILL_TEXT_Y + font::GLYPH_H;
+            && y < PILL_TEXT_Y + font::line_height(1);
         let t = &f.pill[..f.pill_len];
         if !t.is_empty() {
             let bg = if in_sel { THEME.primary_container } else { c };
@@ -2386,7 +2386,7 @@ fn toolbar_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
             && x >= f.caret_x
             && x < f.caret_x + 2
             && y >= PILL_TEXT_Y
-            && y < PILL_TEXT_Y + font::GLYPH_H
+            && y < PILL_TEXT_Y + font::line_height(1)
         {
             return THEME.primary;
         }

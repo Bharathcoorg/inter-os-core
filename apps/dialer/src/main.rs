@@ -2177,7 +2177,7 @@ fn contact_avatar_color(_name: &[u8]) -> u32 {
 /// helper is not `const`, and every run box below is derived from a
 /// compile-time constant.
 const fn run_rows(scale: usize) -> usize {
-    scale * std::design::font::GLYPH_H
+    std::design::font::line_height(scale)
 }
 
 /// Header band height: y >= HEADER_H draws the hairline rule, so a header run

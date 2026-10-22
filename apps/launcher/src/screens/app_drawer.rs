@@ -586,7 +586,7 @@ impl Run {
         let text = &buf[..len];
         let em = launcher::outline_text::em_for_scale(scale);
         let (asc, desc) = interos_std::design::typeface::line_metrics(em);
-        let baseline = (y + launcher::font::BASELINE * scale).max(asc as usize);
+        let baseline = (y + launcher::font::ascent_for_scale(scale)).max(asc as usize);
         let outline_advance = interos_std::design::typeface::text_advance_px(text, em) as usize;
         let top = baseline.saturating_sub(asc as usize);
         let outline = if scale >= 2 {

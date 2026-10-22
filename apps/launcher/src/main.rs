@@ -54,7 +54,7 @@ fn test_text(
     if scale >= 1 && text.len() <= launcher::outline_text::KEY_MAX {
         let em = launcher::outline_text::em_for_scale(scale);
         let (ascent, _) = interos_std::design::typeface::line_metrics(em);
-        let baseline = (y0 + launcher::font::BASELINE * scale).max(ascent as usize);
+        let baseline = (y0 + launcher::font::ascent_for_scale(scale)).max(ascent as usize);
         if let Some(run) = launcher::outline_text::OutlineRun::place(x0, baseline, em, text) {
             let (bx, by, bw, bh) = run.bounds();
             if x >= bx && x < bx + bw && y >= by && y < by + bh {
@@ -139,7 +139,7 @@ pub fn test_text_aa(
     if scale >= 2 && text.len() <= launcher::outline_text::KEY_MAX {
         let em = launcher::outline_text::em_for_scale(scale);
         let (ascent, _) = interos_std::design::typeface::line_metrics(em);
-        let baseline = (y0 + launcher::font::BASELINE * scale).max(ascent as usize);
+        let baseline = (y0 + launcher::font::ascent_for_scale(scale)).max(ascent as usize);
         if let Some(run) = launcher::outline_text::OutlineRun::place(x0, baseline, em, text) {
             let (bx, by, bw, bh) = run.bounds();
             if x >= bx && x < bx + bw && y >= by && y < by + bh {

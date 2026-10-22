@@ -507,7 +507,7 @@ const STATUS_Y: usize = 1328;
 /// `font::line_height(1)` is this constant - but that helper takes its scale at
 /// runtime, so the band ceiling is spelled from the shared glyph height instead
 /// of repeating a literal 24 that could drift from the face.
-const STATUS_H: usize = std::design::font::GLYPH_H;
+const STATUS_H: usize = std::design::font::line_height(1);
 const GESTURE_Y0: usize = 1400;
 
 /// Card A: hardware keystore probes.

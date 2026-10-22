@@ -520,7 +520,7 @@ mod tests {
     #[test]
     fn the_stack_stays_inside_the_rows_main_rs_repaints() {
         assert!(ICON_Y0 >= BAND_TOP);
-        assert!(STATUS_Y + launcher::font::GLYPH_H <= BAND_TOP + BAND_ROWS);
+        assert!(STATUS_Y + launcher::font::line_height(1) <= BAND_TOP + BAND_ROWS);
     }
 
     #[test]

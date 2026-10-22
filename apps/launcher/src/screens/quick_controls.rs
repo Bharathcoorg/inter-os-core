@@ -613,7 +613,7 @@ impl LabelRun {
         let em = launcher::outline_text::em_for_scale(scale);
         let (asc, desc) = interos_std::design::typeface::line_metrics(em);
         let baseline = (rect.y + (rect.h.saturating_sub(text::line_height(scale))) / 2
-            + launcher::font::BASELINE * scale).max(asc as usize);
+            + launcher::font::ascent_for_scale(scale)).max(asc as usize);
         let top = baseline.saturating_sub(asc as usize);
         // WHY the width is the wider of the two measures: the outline face is
         // condensed but is not always the narrower one. "Do not disturb"
@@ -651,7 +651,7 @@ impl LabelRun {
         let em = launcher::outline_text::em_for_scale(scale);
         let (asc, desc) = interos_std::design::typeface::line_metrics(em);
         let baseline = (rect.y + (rect.h.saturating_sub(text::line_height(scale))) / 2
-            + launcher::font::BASELINE * scale).max(asc as usize);
+            + launcher::font::ascent_for_scale(scale)).max(asc as usize);
         let top = baseline.saturating_sub(asc as usize);
         let w = text::measure(&buf[..len], scale)
             .max(interos_std::design::typeface::text_advance_px(&buf[..len], em) as usize);

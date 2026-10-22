@@ -133,9 +133,10 @@ const TOP_PILL_RADIUS: usize = 16;
 
 /// Text baseline row for every scale-1 label in the top row.
 ///
-/// WHY derived: the face is `GLYPH_H` (24) rows tall, so a scale-1 run owns 24
-/// rows and must be centred inside the 40px control or its descenders clip.
-const TOP_ROW_TEXT_Y0: usize = TOP_ROW_Y + (TOP_ROW_H - std::design::font::GLYPH_H) / 2;
+/// WHY derived: a scale-1 run owns the face's 16-pixel line box, so the
+/// label is centred inside the 40px control without its descenders
+/// clipping against the pill's edges.
+const TOP_ROW_TEXT_Y0: usize = TOP_ROW_Y + (TOP_ROW_H - std::design::font::line_height(1)) / 2;
 
 /// Centre of the flash pictogram inside `FLASH_RECT`.
 const FLASH_ICON_CX: usize = FLASH_RECT.x + 24;

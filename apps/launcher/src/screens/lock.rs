@@ -1041,15 +1041,18 @@ const PIN_DIGIT_BOLD: bool = true;
 /// stays in the lighter face so it cannot compete with the thing it labels.
 const PIN_LABEL_SCALE: usize = 1;
 
-/// The cell origin that centres a run's cap ink on `cy`: ink begins
-/// `CAP_TOP * scale` into its cell and stands `CAP_HEIGHT * scale` rows tall.
+/// The cell origin that centres a run's cap ink on `cy`: the ink is a cap
+/// height tall and its centre sits half a cap below the baseline.
 ///
 /// WHY derived rather than typed: the old keypad hand-typed `cy - 17`, which
-/// put its scale-2 figures six pixels below the disc's centre. This lands the
-/// cap box on the centre for whatever scale is in use, so the next typeface or
-/// scale change cannot re-offset the keys.
+/// put its scale-2 figures six pixels below the disc's centre. This lands
+/// the cap box on the centre for whatever scale is in use, and it takes the
+/// metrics from the same ladder the renderer draws with, so the next
+/// typeface or scale change cannot re-offset the keys.
 fn pin_face_y(cy: usize, scale: usize) -> usize {
-    cy.saturating_sub(launcher::font::CAP_TOP * scale + launcher::font::CAP_HEIGHT * scale / 2)
+    cy.saturating_sub(
+        launcher::font::ascent_for_scale(scale) - launcher::font::cap_for_scale(scale) as usize / 2,
+    )
 }
 
 /// Backspace pictogram: the conventional left-pointing pentagon, outlined,

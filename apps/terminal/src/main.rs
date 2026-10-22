@@ -85,7 +85,7 @@ fn test_text(
 /// slices the glyphs, so the height is computed once and reused for both the
 /// gate and the pitch of repeated runs.
 const fn run_rows(scale: usize) -> usize {
-    scale * std::design::font::GLYPH_H
+    std::design::font::line_height(scale)
 }
 
 /// Header band height: y >= HEADER_H draws the hairline rule, so a header run

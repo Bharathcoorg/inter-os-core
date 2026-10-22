@@ -125,7 +125,7 @@ const READOUT_MAX_W: usize = 400;
 /// tall, so scale-1 runs own 68..92 and 100..124 - both inside the title's
 /// 64..136 band, separated by 8 rows, and never overlapping each other.
 const READOUT_LINE1_Y0: usize = 68;
-const READOUT_LINE2_Y0: usize = READOUT_LINE1_Y0 + font::GLYPH_H + 8;
+const READOUT_LINE2_Y0: usize = READOUT_LINE1_Y0 + font::line_height(1) + 8;
 
 /// Rows the category list owns. WHY there is no header band constant beside it:
 /// nothing a touch can reach writes to the header - the storage readout is
@@ -184,7 +184,7 @@ fn test_text(
     color: u32,
     bg: u32,
 ) -> Option<u32> {
-    if x < x0 || y < y0 || y >= y0 + std::design::font::GLYPH_H * scale {
+    if x < x0 || y < y0 || y >= y0 + std::design::font::line_height(scale) {
         return None;
     }
     if let Some(run) = outline_text::place_run(x0, y0, scale, text, None, false) {

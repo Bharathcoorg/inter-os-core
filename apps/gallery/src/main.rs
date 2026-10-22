@@ -308,7 +308,7 @@ fn text(
     // pixel off, on every string on the surface. The launcher's first version of
     // this change did exactly that and it was only visible in the capture.
     if let Some(run) =
-        outline_text::OutlineRun::place_run(x0, y0 + font::BASELINE * scale, scale, s, false)
+        outline_text::OutlineRun::place_run(x0, y0 + font::ascent_for_scale(scale), scale, s, false)
     {
         // WHY the window is the run's and not the cell's: at the em that matches
         // this scale the outline's ascent reaches 18px above the cell origin and
@@ -1840,11 +1840,10 @@ const LEDGER_BLOCK_H: usize = 400;
 
 /// Height of the catalogue provenance note: two measured scale-1 lines.
 ///
-/// WHY `GLYPH_H` and not `line_height(1)`: the font module's line height is not a
-/// `const fn`, and this constant is needed in a `const`. `line_height(scale)` is
-/// exactly `GLYPH_H * scale`, so writing the cell height directly is the same
-/// number with no second source of truth.
-const CATALOGUE_BLOCK_H: usize = 2 * font::GLYPH_H;
+/// WHY `line_height`: the provenance note is two scale-1 lines, and the
+/// font module's line height is a `const fn`, so the reserve names the
+/// boxes the design document asks for rather than the bitmap cell's.
+const CATALOGUE_BLOCK_H: usize = 2 * font::line_height(1);
 
 /// Where the honest ledger note is drawn.
 ///

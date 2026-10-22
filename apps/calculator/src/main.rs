@@ -86,7 +86,7 @@ fn test_text(
     }
     let em = outline_text::em_for_scale(scale);
     let (ascent, _) = interos_std::design::typeface::line_metrics(em);
-    let baseline = (y0 + std::design::font::BASELINE * scale).max(ascent as usize);
+    let baseline = (y0 + std::design::font::ascent_for_scale(scale)).max(ascent as usize);
     if let Some(run) = outline_text::OutlineRun::place_styled(x0, baseline, em, text, bold) {
         let (bx, by, bw, bh) = run.bounds();
         if x >= bx && x < bx + bw && y >= by && y < by + bh {
@@ -98,7 +98,7 @@ fn test_text(
 }
 
 const fn run_rows(scale: usize) -> usize {
-    scale * std::design::font::GLYPH_H
+    std::design::font::line_height(scale)
 }
 
 const HEADER_H: usize = 110;

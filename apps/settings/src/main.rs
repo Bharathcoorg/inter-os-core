@@ -1691,7 +1691,7 @@ const TYPE_H3: usize = 1;
 /// 48px cell: screen titles and keypad digits.
 const TYPE_DISPLAY: usize = 2;
 /// One line box at the H3 rung: the face's own cell height.
-const LINE_H: usize = std::design::font::GLYPH_H * TYPE_H3;
+const LINE_H: usize = std::design::font::line_height(TYPE_H3);
 
 // -----------------------------------------------------------------------------
 // Layout constants (spacing, radius and touch targets from the SDK tokens)
@@ -1775,10 +1775,10 @@ const HEADER_X: usize = BACK_X + BACK_S + std::design::spacing::GRID_16;
 /// centring the 8-point grid allows.
 const HEADER_Y: usize = std::design::spacing::GRID_32;
 /// Y of a panel header's subtitle: one 8px step below the title's line box.
-const HEADER_SUB_Y: usize = HEADER_Y + std::design::font::GLYPH_H * TYPE_DISPLAY + std::design::spacing::GRID_8;
+const HEADER_SUB_Y: usize = HEADER_Y + std::design::font::line_height(TYPE_DISPLAY) + std::design::spacing::GRID_8;
 /// The header rule: a hairline closing the header block, one 16px step below the
 /// title's line box.
-const DIVIDER_Y: usize = HEADER_Y + std::design::font::GLYPH_H * TYPE_DISPLAY + std::design::spacing::GRID_16;
+const DIVIDER_Y: usize = HEADER_Y + std::design::font::line_height(TYPE_DISPLAY) + std::design::spacing::GRID_16;
 /// Top of the first content element on any screen: one 32px step below the rule.
 /// Every surface's body begins on this line.
 const DETAIL_TOP: usize = DIVIDER_Y + std::design::spacing::GRID_32;
