@@ -43,6 +43,9 @@ const EXTENSION_SLOT_COUNT: u32 = 4;
 pub const TOTAL_SLOT_COUNT: u32 = SLOT_COUNT + EXTENSION_SLOT_COUNT;
 pub const JOURNAL_MIN_KIND: u8 = 1;
 pub const JOURNAL_MAX_KIND: u8 = 10;
+/// Maximum supported persistent storage capacity bound for modern smartphone storage (6 GB).
+pub const MAX_PERSISTENT_STORAGE_BYTES: u64 = 6 * 1024 * 1024 * 1024;
+pub const MAX_PERSISTENT_STORAGE_SECTORS: u32 = (6u32 * 1024 * 1024) * 2;
 /// Payload bytes one slot can hold.
 ///
 /// WHY this is `SLOT_SECTORS - 1` sectors and not `SLOT_SECTORS * 512 - 64`:
@@ -755,6 +758,25 @@ mod tests {
         assert_eq!(slot_base(DISK, 18), Some(DISK - 18 * 128));
         assert_eq!(slot_base(DISK, 19), Some(DISK - 17 * 128));
         assert!(slot_base(DISK, 20).is_none(), "there is no slot 20");
+    }
+
+    #[test]
+    fn persistent_storage_bounds_support_six_gb_capacity() {
+        const SIX_GB_SECTORS: u32 = MAX_PERSISTENT_STORAGE_SECTORS;
+        assert_eq!(SIX_GB_SECTORS as u64 * SECTOR_SIZE as u64, MAX_PERSISTENT_STORAGE_BYTES);
+
+        let reserved = journal_reserved().expect("reserved sectors");
+        assert_eq!(reserved, TOTAL_SLOT_COUNT * SLOT_SECTORS);
+
+        let range = journal_range(SIX_GB_SECTORS).expect("valid journal range for 6 GB storage");
+        assert_eq!(range.start, SIX_GB_SECTORS - reserved);
+        assert_eq!(range.end, SIX_GB_SECTORS);
+
+        for slot in 0..TOTAL_SLOT_COUNT {
+            let base = slot_base(SIX_GB_SECTORS, slot).expect("valid slot base on 6 GB device");
+            assert!(base >= SIX_GB_SECTORS - reserved);
+            assert!(base + SLOT_SECTORS <= SIX_GB_SECTORS);
+        }
     }
 
     /// Kind 9 — the verified-boot rollback floor — must have a real, durable

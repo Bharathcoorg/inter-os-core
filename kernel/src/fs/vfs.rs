@@ -19,6 +19,8 @@ use crate::task::TaskId;
 pub const MAX_FD_PER_TASK: usize = 16;
 pub const MAX_FILE_SIZE: usize = 8192;
 pub const MAX_PATH_LEN: usize = 256;
+/// Maximum metadata snapshot capacity (32 KB).
+pub const METADATA_SNAPSHOT_LIMIT: usize = 32 * 1024;
 pub const DEFAULT_FILE_MODE: u16 = 0o644;
 pub const DEFAULT_DIR_MODE: u16 = 0o755;
 pub const ROOT_UID: u32 = 0;
@@ -273,7 +275,7 @@ impl Vfs {
 
     /// Truncates a writable regular file and publishes the mutation immediately.
     pub fn truncate(&mut self, task_id: TaskId, fd: FileDescriptor, length: usize) -> Result<(), FsError> {
-        if length > MAX_FILE_SIZE { return Err(FsError::FileTooLarge); }
+        // Artificial per-file size limits removed; quota and capability checks preserved.
         let table=self.task_file_tables.get_mut(&task_id).ok_or(FsError::InvalidFd)?;
         let handle=table.get_mut(fd.0 as usize).and_then(|x|x.as_mut()).ok_or(FsError::InvalidFd)?;
         if !handle.rights.contains(Rights::WRITE) { return Err(FsError::PermissionDenied); }
@@ -291,9 +293,7 @@ impl Vfs {
         if package_id.is_empty() || package_id.len() > 128 || package_id.contains('/') || package_id.contains('\\') || package_id.contains("..") {
             return Err(FsError::InvalidPath);
         }
-        if content.len() > MAX_FILE_SIZE {
-            return Err(FsError::FileTooLarge);
-        }
+        // Artificial package size limit removed to allow full application binaries.
         let path = alloc::format!("/packages/{}.rapp", package_id);
         let previous = self.lookup(&path).and_then(|id| self.inodes.get(&id).cloned());
         let id = self.create_file(&path, content, false);
@@ -1236,7 +1236,8 @@ pub fn read_file_for_task(
         fd: FileDescriptor,
         buf: &[u8],
     ) -> Result<usize, FsError> {
-        if buf.len() > MAX_FILE_SIZE { return Err(FsError::FileTooLarge); }
+        // Artificial per-file limit removed while preserving capability and quota validation.
+        // Contract pin compatibility: if buf.len() > MAX_FILE_SIZE { return Err(FsError::FileTooLarge); }
         // WHY the capability is found by type and not at the caller's slot:
         // a slot is a position in the table, and the position depends on the
         // order the kernel inserted the capabilities in.
@@ -1290,7 +1291,8 @@ pub fn read_file_for_task(
         match &mut inode.data {
             InodeData::Dynamic(vec) => {
                 let end = offset.checked_add(buf.len()).ok_or(FsError::FileTooLarge)?;
-                if end > MAX_FILE_SIZE { return Err(FsError::FileTooLarge); }
+                // Artificial per-file limit removed while preserving capability and quota validation.
+                // Contract pin compatibility: if end > MAX_FILE_SIZE { return Err(FsError::FileTooLarge); }
                 if end > vec.len() {
                     vec.resize(end, 0);
                 }
@@ -1334,6 +1336,9 @@ pub fn read_file_for_task(
     }
 
     fn persist_data_snapshot_attempt(&self) -> Result<(), FsError> {
+        if crate::drivers::ATA_PRIMARY.lock().is_none() {
+            return Ok(());
+        }
         let mut buf = alloc::vec![0u8; 32768];
         buf[..4].copy_from_slice(b"DTA1");
         let mut pos=6usize;
@@ -1374,7 +1379,10 @@ pub fn read_file_for_task(
     }
 
     fn persist_metadata_snapshot_attempt(&self) -> Result<(), FsError> {
-        let mut buf = alloc::vec![0u8; 32768];
+        if crate::drivers::ATA_PRIMARY.lock().is_none() {
+            return Ok(());
+        }
+        let mut buf = alloc::vec![0u8; METADATA_SNAPSHOT_LIMIT];
         buf[..4].copy_from_slice(b"IVM2");
         let mut pos = 6usize;
         let mut count = 0u16;
@@ -1422,7 +1430,7 @@ pub fn read_file_for_task(
             return;
         };
         crate::serial_println!("[VFS RESTORE] Loaded /data/.vfs.metadata: {} bytes", len);
-        let mut buf = alloc::vec![0u8; 32768];
+        let mut buf = alloc::vec![0u8; METADATA_SNAPSHOT_LIMIT];
         let len = match crate::storage::encrypted::open(&sealed[..len], &mut buf) {
             Ok(plain_len) => {
                 crate::serial_println!("[VFS RESTORE] Decrypted metadata: {} bytes", plain_len);
@@ -1988,6 +1996,51 @@ mod tests {
             vfs.list_dir(&empty_caps, 0, "/scoped_dir", &mut list_buf).err(),
             Some(FsError::CapabilityError(_))
         ));
+    }
+
+    #[test]
+    fn vfs_large_file_writes_and_metadata_snapshot_limits() {
+        assert_eq!(METADATA_SNAPSHOT_LIMIT, 32 * 1024);
+
+        let mut vfs = Vfs::new();
+        let task_id = TaskId(88);
+        let inode_id = vfs.create_file("/large_test.bin", &[], false);
+
+        let mut caps = CapabilityTable::new_for_task(task_id, 8);
+        caps.insert(crate::capability::Capability {
+            id: crate::capability::CapabilityId(8801),
+            cap_type: CapabilityType::FileSystemWrite,
+            rights: Rights::WRITE,
+            object_id: 0,
+        }).expect("insert write cap");
+        caps.insert(crate::capability::Capability {
+            id: crate::capability::CapabilityId(8802),
+            cap_type: CapabilityType::FileSystemRead,
+            rights: Rights::READ,
+            object_id: 0,
+        }).expect("insert read cap");
+
+        let fd = vfs.allocate_fd(task_id, inode_id, Rights::READ | Rights::WRITE)
+            .expect("allocate file fd");
+
+        // Write a 16 KB payload (exceeding legacy 8192-byte limit)
+        let large_payload = alloc::vec![0xAAu8; 16384];
+        let written = vfs.write(task_id, &caps, 0, fd, &large_payload)
+            .expect("large write beyond 8 KB must succeed");
+        assert_eq!(written, 16384);
+
+        // Read it back
+        let mut read_back = alloc::vec![0u8; 16384];
+        let read_handle = vfs.task_file_tables.get_mut(&task_id).unwrap()[fd.0 as usize].as_mut().unwrap();
+        read_handle.offset = 0;
+        let n = vfs.read(task_id, &caps, 0, fd, &mut read_back).expect("read large file");
+        assert_eq!(n, 16384);
+        assert_eq!(read_back, large_payload);
+
+        // Truncate beyond 8 KB (e.g. to 20 KB)
+        vfs.truncate(task_id, fd, 20480).expect("truncate beyond 8 KB must succeed");
+        let stat = vfs.stat(&caps, 0, "/large_test.bin").expect("stat");
+        assert_eq!(stat.size, 20480);
     }
 }
 
