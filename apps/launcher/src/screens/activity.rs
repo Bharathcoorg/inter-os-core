@@ -29,7 +29,7 @@ use launcher::text::Label;
 use launcher::theme::{radius, type_scale, Theme, STATUS_BAR_HEIGHT};
 
 /// The theme the surface is drawn with.
-const THEME: Theme = Theme::LIGHT;
+const THEME: Theme = launcher::theme::SHELL;
 
 /// How many pixels one preview holds.
 const PREVIEW_PIXELS: usize = recents::PREVIEW_W * recents::PREVIEW_H;

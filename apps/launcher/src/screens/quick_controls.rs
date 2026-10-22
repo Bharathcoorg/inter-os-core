@@ -70,15 +70,15 @@ use crate::LauncherState;
 /// would read as a different app. `Theme::DARK` is also the theme whose
 /// `surface_sunken` exists to be a well, which is what an unavailable control on
 /// this surface is.
-const THEME: Theme = Theme::DARK;
+const THEME: Theme = launcher::theme::SHELL_DARK;
 
 /// The colour a bound level would fill its trough with.
 ///
 /// WHY the brightest ink in the theme: the reference slider's fill is the one
-/// high-contrast element on its dark surface, and `Theme::DARK.on_surface` is that ink
+/// high-contrast element on its dark surface, and `launcher::theme::SHELL_DARK.on_surface` is that ink
 /// without inventing a colour. Nothing on this platform reads a level today, so
 /// this is the day-one value of a fill, not a painted one.
-const LEVEL_FILL: u32 = Theme::DARK.on_surface;
+const LEVEL_FILL: u32 = launcher::theme::SHELL_DARK.on_surface;
 
 // ---------------------------------------------------------------------------
 // Panel geometry

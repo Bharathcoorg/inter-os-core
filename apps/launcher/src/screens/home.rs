@@ -49,7 +49,7 @@ use launcher::theme::{
 
 /// The visual language this surface draws in.
 ///
-/// WHY a local binding and not a global: `Theme::LIGHT` and `Theme::DARK` both
+/// WHY a local binding and not a global: `launcher::theme::SHELL` and `Theme::DARK` both
 /// exist and nothing selects between them per screen yet. A `static` here would
 /// be shared mutable state that every screen would then fight over, which is the
 /// same mistake as the hardcoded hex codes in miniature. The shell change that
@@ -57,7 +57,7 @@ use launcher::theme::{
 /// it to each screen; until then each screen binds the default itself and the
 /// screen is already written against the struct rather than against constants.
 fn active_theme() -> Theme {
-    Theme::LIGHT
+    launcher::theme::SHELL
 }
 
 // -----------------------------------------------------------------------------

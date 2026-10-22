@@ -104,6 +104,18 @@ pub mod legacy {
     }
 }
 
+/// The visual language the shell draws: the platform's stock monochrome
+/// system.
+///
+/// WHY re-exports and not copies: the shell must be the *first* thing on
+/// the device that draws the stock language -- a shell with its own palette
+/// is how the device ends up showing two companies' products. The light
+/// binding is for the pages, the dark one for the surfaces that are dark on
+/// purpose: the boot splash, the power menu, the control centre and the pin
+/// keypad.
+pub use interos_std::design::monochrome::THEME as SHELL;
+pub use interos_std::design::monochrome::THEME_DARK as SHELL_DARK;
+
 /// The logical surface width.
 pub const SCREEN_WIDTH: usize = interos_std::design::viewport::LOGICAL_WIDTH;
 

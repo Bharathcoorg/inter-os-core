@@ -58,6 +58,26 @@ pub const ERROR: u32 = 0xFFEF_4444;
 /// The text on a filled, dark surface.
 pub const ON_PRIMARY: u32 = 0xFF_FFFF;
 
+/// The dark variant's neutral-grey ladder: the stock light theme's values
+/// with paper and ink traded places, and no hue anywhere in it.
+///
+/// WHY the ladder is spelled out rather than inverted at the use site: a
+/// surface role names a decision, and a decision is easier to audit as a
+/// value than as an inversion rule.
+pub const DARK_BG: u32 = 0xFF0A_0A0A;
+/// A resting card on the dark pages.
+pub const DARK_SURFACE: u32 = 0xFF14_1414;
+/// One elevation step above a dark card: a chip, a pressed control.
+pub const DARK_SURFACE_HIGH: u32 = 0xFF23_2323;
+/// A well or a track on the dark pages.
+pub const DARK_MUTED: u32 = 0xFF18_1818;
+/// The hairline on the dark pages.
+pub const DARK_BORDER: u32 = 0xFF2E_2E2E;
+/// Secondary ink on the dark pages.
+pub const TEXT_MUTED_ON_DARK: u32 = 0xFFA3_A3A3;
+/// The least prominent ink on the dark pages.
+pub const TEXT_MUTED_DARK: u32 = 0xFF52_5252;
+
 // ---------------------------------------------------------------------------
 // The type scale
 // ---------------------------------------------------------------------------
@@ -180,7 +200,73 @@ pub const THEME: super::theme::Theme = super::theme::Theme {
     spacing: super::theme::Spacing::STANDARD,
     radii: super::theme::Radii::STANDARD,
     touch: super::theme::Touch::STANDARD,
+
+
 };
+    /// The dark half of the stock theme.
+    ///
+    /// WHY it exists beside [`THEME`]: the shell owns surfaces that are dark
+    /// on purpose -- the boot splash, the power menu, the control centre and
+    /// the pin keypad -- and a shell that cut those surfaces from a warm
+    /// Material dark palette while its pages drew the stock monochrome one
+    /// showed two companies' products in one device. The paper and the ink
+    /// trade places, and the greys stay neutral: no hue is added, and the
+    /// status colours do not move.
+    pub const THEME_DARK: super::theme::Theme = super::theme::Theme {
+        name: "monochrome-dark",
+        dark: true,
+
+        // The page and the surfaces on it: the ink colours become the paper.
+        surface: DARK_BG,
+        surface_container: DARK_SURFACE,
+        surface_container_high: DARK_SURFACE_HIGH,
+        surface_container_low: DARK_MUTED,
+        surface_frosted: DARK_SURFACE,
+        overlay: DARK_SURFACE,
+        overlay_border: DARK_BORDER,
+
+        // The ink.
+        on_surface: BG,
+        on_surface_variant: TEXT_MUTED_ON_DARK,
+        muted: TEXT_MUTED_DARK,
+        on_primary: DARK_BG,
+        on_primary_container: BG,
+        ink_on_light: TEXT_PRIMARY,
+        ink_on_dark: BG,
+
+        // The hairlines.
+        outline: BG,
+        outline_variant: DARK_BORDER,
+        border: DARK_BORDER,
+
+        // On a dark page the one filled control is the light one.
+        primary: BG,
+        primary_container: DARK_SURFACE_HIGH,
+        secondary: TEXT_MUTED_ON_DARK,
+        accent: BG,
+
+        // The three status colours, unchanged from the light variant: an
+        // alarm does not change hue with the theme.
+        error: ERROR,
+        error_container: 0xFF271515,
+        success: SUCCESS,
+        success_container: 0xFF10221A,
+        on_success_container: 0xFF86EFAC,
+        warning: WARNING,
+        warning_container: 0xFF251C09,
+        emergency: ERROR,
+
+        // A dark wallpaper ramp.
+        wallpaper_top: DARK_BG,
+        wallpaper_mid: DARK_SURFACE,
+        wallpaper_bottom: 0xFF000000,
+        wallpaper_ink: BG,
+
+        type_scale: super::theme::TypeScale::STANDARD,
+        spacing: super::theme::Spacing::STANDARD,
+        radii: super::theme::Radii::STANDARD,
+        touch: super::theme::Touch::STANDARD,
+    };
 
 // ---------------------------------------------------------------------------
 // The frame

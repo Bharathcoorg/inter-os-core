@@ -18,7 +18,7 @@ use launcher::theme::Theme;
 
 /// Theme used for startup presentation.
 #[allow(dead_code)]
-const THEME: Theme = Theme::DARK;
+const THEME: Theme = launcher::theme::SHELL_DARK;
 
 // -----------------------------------------------------------------------------
 // The band this view owns
@@ -84,7 +84,7 @@ const STATUS_Y: usize = 862;
 // -----------------------------------------------------------------------------
 const COLOR_BG: u32 = 0xFF050608;              // Obsidian True Black (OLED depth)
 const COLOR_IVORY: u32 = 0xFFFAF8F4;           // Warm Ivory (Letters & Wordmark)
-const COLOR_WHITE: u32 = Theme::DARK.ink_on_dark;           // Shimmer Peak Specular Crest
+const COLOR_WHITE: u32 = launcher::theme::SHELL_DARK.ink_on_dark;           // Shimmer Peak Specular Crest
 const COLOR_GLASS_TOP: u32 = 0xFF161B26;       // Monolith Top Stop
 const COLOR_GLASS_BOTTOM: u32 = 0xFF0A0D14;    // Monolith Bottom Stop
 const COLOR_GLASS_BORDER: u32 = 0xFF263042;    // Frosted Beveled Border

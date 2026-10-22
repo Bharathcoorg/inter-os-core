@@ -38,7 +38,7 @@ use launcher::theme::*;
 /// near-black ridge. Every piece of ink below is chosen from the pixel behind it
 /// instead of from the palette, so the surface reads if the wallpaper ramp is ever
 /// swapped for the dark one.
-const THEME: Theme = Theme::LIGHT;
+const THEME: Theme = launcher::theme::SHELL;
 
 /// Reference panel width, in reference pixels.
 ///
@@ -1322,9 +1322,9 @@ pub fn pin_pad_entry_band() -> (usize, usize) {
 /// `danger` is a deep red (220,38,38); swapping either in would restain the pad
 /// rather than fix it. The pad is the one surface in the shell that draws on a
 /// backdrop it owns rather than on a theme page, and the header does the same.
-const PIN_HEADING_INK: u32 = Theme::DARK.ink_on_dark;
+const PIN_HEADING_INK: u32 = launcher::theme::SHELL_DARK.ink_on_dark;
 const PIN_SUBHEADING_INK: u32 = 0xFF90A0B0;
-const PIN_ERROR_INK: u32 = Theme::DARK.emergency;
+const PIN_ERROR_INK: u32 = launcher::theme::SHELL_DARK.emergency;
 const PIN_DOT_EMPTY_INK: u32 = 0xFF708090;
 
 /// The prompt above the keypad and the sub-prompt under it, for the state the

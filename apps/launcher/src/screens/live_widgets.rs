@@ -39,7 +39,7 @@ use launcher::theme::*;
 /// WHY `Theme::LIGHT`: this is a glanceable summary of what the device knows, and
 /// the reference's is a light page of white cards on near-white, sitting between
 /// the dark Power drawer and the near-black lock surface.
-const THEME: Theme = Theme::LIGHT;
+const THEME: Theme = launcher::theme::SHELL;
 
 // -----------------------------------------------------------------------------
 // The five things a tap on this surface actually opens

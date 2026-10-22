@@ -708,7 +708,7 @@ struct Paint {
 
 /// Builds this frame's plan.
 fn build(state: &LauncherState) -> Paint {
-    let theme = Theme::LIGHT;
+    let theme = launcher::theme::SHELL;
     let f = frame();
 
     // Status bar.
@@ -955,7 +955,7 @@ pub fn get_app_drawer_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     // from the same setting that picks the wallpaper, and this line becomes
     // `state.theme`. Until then the binding is a value, not a constant, so the swap
     // is one edit in one place.
-    let theme = Theme::LIGHT;
+    let theme = launcher::theme::SHELL;
 
     // WHY the bands are recomputed rather than read from the plan: the shell asks
     // `drawer_hit` -- which rebuilds `frame()` -- whether a tap landed on the search

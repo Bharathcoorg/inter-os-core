@@ -869,7 +869,7 @@ fn build_events_frame(state: &LauncherState) -> EventsFrame {
     // Until then the binding is a value, not a constant, so the swap is one edit
     // in one place. Events is a light surface by design (design system: "Events,
     // Files and Gallery are light").
-    let theme = Theme::LIGHT;
+    let theme = launcher::theme::SHELL;
 
     // The one clock this surface is allowed to read a record's timestamp
     // against: the kernel's own tick counter. Read once per frame, here, and
@@ -1171,7 +1171,7 @@ pub fn get_notifications_color(x: usize, y: usize, state: &LauncherState) -> u32
         }
         (*slot).as_ref().unwrap()
     };
-    let theme = Theme::LIGHT;
+    let theme = launcher::theme::SHELL;
 
     // 1. Status Bar (y < 60)
     if y < STATUS_BAR_HEIGHT + 12 {

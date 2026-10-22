@@ -21,7 +21,7 @@ use launcher::text::Label;
 use launcher::theme::{radius, space, type_scale, Theme, STATUS_BAR_HEIGHT};
 
 /// The theme the surface is drawn with.
-const THEME: Theme = Theme::LIGHT;
+const THEME: Theme = launcher::theme::SHELL;
 
 /// How many results the list shows.
 const MAX_ROWS: usize = 6;

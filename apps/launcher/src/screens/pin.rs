@@ -156,7 +156,7 @@ fn key_digit(col: usize, row: usize) -> u8 {
 }
 
 pub fn get_pin_color(x: usize, y: usize, state: &LauncherState) -> u32 {
-    let theme = Theme::DARK;
+    let theme = launcher::theme::SHELL_DARK;
     if y < 48 {
         if state.clock_source_ok {
             if let Some(c) = test_text_aa(x, y, 48, 14, 1, &state.clock_time, theme.on_surface, theme.surface) {
