@@ -1747,6 +1747,94 @@ pub const fn cap_for_scale(scale: usize) -> u32 {
     }
 }
 
+/// User text scale levels for Dynamic Type / accessibility scaling.
+/// - 0: Compact (80%)
+/// - 1: Normal / Standard (100%)
+/// - 2: Large (125%)
+/// - 3: Extra Large (150%)
+pub const TEXT_SCALE_COMPACT: u8 = 0;
+pub const TEXT_SCALE_NORMAL: u8 = 1;
+pub const TEXT_SCALE_LARGE: u8 = 2;
+pub const TEXT_SCALE_EXTRA_LARGE: u8 = 3;
+
+/// Scales a base cap height according to user text scale with bounds checking.
+///
+/// Bounds checking ensures text scales gracefully without collapsing below
+/// minimum legible height (10px) or overflowing:
+/// - 0: Compact (80% of normal cap height, bounded to min 10px)
+/// - 1: Normal (100% of canonical cap height)
+/// - 2: Large (125% of canonical cap height)
+/// - 3: Extra Large (150% of canonical cap height)
+/// - Any user_text_scale > 3 is clamped to 3 (extra large).
+pub const fn scale_cap_height(base_cap: u32, user_text_scale: u8) -> u32 {
+    if base_cap == 0 {
+        return 0;
+    }
+    match user_text_scale {
+        0 => {
+            // Compact: 80% with 10px minimum bounds check
+            let scaled = (base_cap * 80 + 50) / 100;
+            if scaled < 10 {
+                10
+            } else {
+                scaled
+            }
+        }
+        1 => base_cap,
+        2 => (base_cap * 125 + 50) / 100,
+        _ => (base_cap * 150 + 50) / 100,
+    }
+}
+
+/// The cap height, in pixels, for a given scale rung and user text scale level.
+pub const fn cap_for_user_scale(scale: usize, user_text_scale: u8) -> u32 {
+    let base_cap = cap_for_scale(scale);
+    scale_cap_height(base_cap, user_text_scale)
+}
+
+/// Alias for `cap_for_user_scale` driving dynamic type scaling.
+pub const fn cap_for_scale_with_user(scale: usize, user_text_scale: u8) -> u32 {
+    cap_for_user_scale(scale, user_text_scale)
+}
+
+/// The em, in pixels, for a given scale rung and user text scale level.
+pub const fn em_for_user_scale(scale: usize, user_text_scale: u8) -> u32 {
+    let cap = cap_for_user_scale(scale, user_text_scale);
+    crate::design::outline_text::em_for_cap_height(cap)
+}
+
+/// The line box, in pixels, for a given scale rung and user text scale level.
+pub const fn line_height_for_user_scale(scale: usize, user_text_scale: u8) -> usize {
+    if scale == 0 {
+        return 0;
+    }
+    let em = em_for_user_scale(scale, user_text_scale);
+    let (ascent, descent) = crate::design::typeface::line_metrics(em);
+    (ascent + descent) as usize
+}
+
+/// The ascent, in pixels, for a given scale rung and user text scale level.
+pub const fn ascent_for_user_scale(scale: usize, user_text_scale: u8) -> usize {
+    let (ascent, _) = crate::design::typeface::line_metrics(em_for_user_scale(scale, user_text_scale));
+    ascent as usize
+}
+
+/// Measures text advance under dynamic user text scaling.
+pub fn measure_user_scale(text: &[u8], scale: usize, user_text_scale: u8) -> usize {
+    match scale {
+        0 => 0,
+        s => {
+            let em = em_for_user_scale(s, user_text_scale);
+            crate::design::typeface::text_advance_px(text, em) as usize
+        }
+    }
+}
+
+/// Measures bold text advance under dynamic user text scaling.
+pub fn measure_bold_user_scale(text: &[u8], scale: usize, user_text_scale: u8) -> usize {
+    measure_user_scale(text, scale, user_text_scale) + usize::from(!text.is_empty())
+}
+
 /// The ascent, in pixels, of a run at the size a scale rung names.
 ///
 /// WHY a function and not the bitmap's constant: a run's baseline now
@@ -2830,6 +2918,38 @@ mod tests {
         // Spot test rendering within the run
         let hit = test_text_aa_runs(10, 10, 0, 0, 1, runs, 0xFFFFFFFF, 0xFF000000);
         let _ = hit;
+    }
+
+    #[test]
+    fn test_user_text_scale_dynamic_scaling() {
+        // Test all scale rungs across user text scales
+        for rung in 1..=6 {
+            let base = cap_for_scale(rung);
+            let compact = cap_for_user_scale(rung, TEXT_SCALE_COMPACT);
+            let normal = cap_for_user_scale(rung, TEXT_SCALE_NORMAL);
+            let large = cap_for_user_scale(rung, TEXT_SCALE_LARGE);
+            let extra_large = cap_for_user_scale(rung, TEXT_SCALE_EXTRA_LARGE);
+
+            assert_eq!(normal, base);
+            assert!(compact <= normal, "Compact must be <= normal");
+            assert!(compact >= 10, "Compact cap height must stay >= 10px minimum bound");
+            assert!(normal <= large, "Normal must be <= large");
+            assert!(large <= extra_large, "Large must be <= extra large");
+
+            // cap_for_scale_with_user alias agrees
+            assert_eq!(cap_for_scale_with_user(rung, TEXT_SCALE_LARGE), large);
+
+            // Out-of-bounds scale clamped to extra large
+            assert_eq!(cap_for_user_scale(rung, 10), extra_large);
+        }
+
+        // Test dynamic measurement
+        let text = b"Settings";
+        let w_compact = measure_user_scale(text, 2, TEXT_SCALE_COMPACT);
+        let w_normal = measure_user_scale(text, 2, TEXT_SCALE_NORMAL);
+        let w_large = measure_user_scale(text, 2, TEXT_SCALE_LARGE);
+        assert!(w_compact <= w_normal);
+        assert!(w_normal <= w_large);
     }
 }
 

@@ -14,6 +14,8 @@ pub mod scroll;
 pub mod theme;
 pub mod components;
 pub mod monochrome;
+pub mod node;
+pub mod accessibility;
 #[cfg(test)]
 mod cap_ladder;
 
@@ -573,17 +575,7 @@ pub mod touch {
     pub const PRIMARY_ACTION: usize = 56;
 }
 
-pub mod motion {
-    pub const PRESS_FEEDBACK_MS: u32 = 100;
-    pub const QUICK_CONTROLS_MS: u32 = 150;
-    pub const STANDARD_TRANSITION_MS: u32 = 200;
-    pub const MAJOR_TRANSITION_MS: u32 = 300;
-    pub const ACTIVITY_EXPANSION_MS: u32 = 280;
-
-    pub const FAST: u32 = 120;
-    pub const STANDARD: u32 = 220;
-    pub const EMPHASIZED: u32 = 360;
-}
+pub mod motion;
 
 pub mod viewport {
     /// Canonical portrait smartphone logical viewport dimensions (9:18 standard).
