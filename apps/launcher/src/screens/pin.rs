@@ -6,7 +6,7 @@
 
 use crate::{test_text_aa, LauncherState};
 use launcher::layout::Rect;
-use launcher::theme::{Theme, SCREEN_WIDTH};
+use launcher::theme::SCREEN_WIDTH;
 
 /// How many entry dots the pad draws: the longest PIN this surface accepts, which
 /// is the `pin_buffer`'s own length in `main.rs`.

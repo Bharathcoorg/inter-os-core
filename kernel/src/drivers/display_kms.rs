@@ -494,9 +494,19 @@ impl DrmKmsController {
             // physical scanout buffer. This prevents a single display client
             // from multiplying large kernel-heap allocations across 32 slots.
             Some(value) if value > 0 && (value <= MAX_SURFACE_PIXELS || (width <= 1080 && height <= 2400)) => value,
-            _ => return 0,
+            _ => {
+                crate::serial_println!(
+                    "[SURFACE_CREATE REFUSED] owner={} {}x{} z={} exceeds the per-surface pixel budget",
+                    owner_task, width, height, z_order
+                );
+                return 0;
+            }
         };
         if self.surfaces.len() >= MAX_CLIENT_SURFACES {
+            crate::serial_println!(
+                "[SURFACE_CREATE REFUSED] owner={} {}: the client surface table is full",
+                owner_task, width
+            );
             return 0;
         }
         let id = self.next_surface_id;
@@ -558,6 +568,14 @@ impl DrmKmsController {
             kind,
             false,
         ).is_err() {
+            let why = crate::gui::WINDOW_MANAGER
+                .lock()
+                .last_reject()
+                .unwrap_or("unregistered window-manager rejection");
+            crate::serial_println!(
+                "[SURFACE_CREATE REFUSED] owner={} {}: the window manager rejected the window: {}",
+                owner_task, width, why
+            );
             self.surfaces.pop();
             return 0;
         }
@@ -923,37 +941,6 @@ impl DrmKmsController {
         })
     }
 
-    /// Returns whether an opaque surface will completely cover the scanout,
-    /// overwriting every single pixel of the back buffer.
-    ///
-    /// When true, clearing the back buffer to the background color writes millions
-    /// of pixels that are immediately replaced pixel-for-pixel by the surface blit.
-    /// Dropping the fill removes that redundant full-screen write pass.
-    fn opaque_full_cover_will_run(&self) -> bool {
-        if self.identity_full_cover_will_run() {
-            return true;
-        }
-        let landscape = matches!(
-            self.orientation,
-            DisplayOrientation::LandscapeRight | DisplayOrientation::LandscapeLeft
-        );
-        if landscape || self.scanout_width == 0 || self.scanout_height == 0 {
-            return false;
-        }
-        let sw = self.scanout_width as i64;
-        let sh = self.scanout_height as i64;
-        self.surfaces.iter().any(|s| {
-            s.visible
-                && s.frame_ready
-                && s.opacity == 255
-                && s.width == 720
-                && s.height == 1440
-                && s.x == 0
-                && s.y == 0
-                && 720i64 * sh == 1440i64 * sw
-        })
-    }
-
     /// Composites all visible surfaces onto the back buffer in z-order.
     pub fn composite(&mut self) {
         self.ensure_buffers();
@@ -973,25 +960,17 @@ impl DrmKmsController {
         }
         // Clear back buffer to base background color (slate navy: 0xFF0B0F19)
         //
-        // WHY the fill is conditional: the phone's steady state is one opaque
-        // 720x1440 launcher surface covering the whole scanout, and the
-        // identity blit below then overwrites the fill pixel for pixel, so the
-        // fill writes 1,036,800 pixels that are about to be replaced. Dropping
-        // it removes a full-surface write pass from every such frame.
-        //
-        // WHY that is claimed as less work and not as a measured speedup: on
-        // this host, under QEMU's TCG accelerator, the run-to-run spread over
-        // six boots (21.7M to 49.2M total flip cycles) is wider than the change
-        // itself, so the numbers cannot speak for it. What is certain is that
-        // the pass is provably redundant on this path, and a redundant pass
-        // cannot make a frame faster.
-        //
-        // When no identity cover exists the fill runs exactly as before, so a
-        // pixel no surface reaches still lands on the base colour.
-        let bg_color = 0xFF0B0F19u32;
-        if !self.opaque_full_cover_will_run() {
-            self.back_buffer.fill(bg_color);
-        }
+        // WHY the fill is unconditional, and not gated on "an opaque surface
+        // will overwrite it anyway": the back buffer is reused between
+        // composites, and a covering surface rarely fills its own frame with
+        // opaque pixels alone. A client's translucent pixels blend with
+        // whatever the previous composite left in these rows, so when the
+        // launcher hid and a new foreground took the screen, the launcher's
+        // residual pixels kept bleeding through every card the new screen
+        // drew. A cost measured as noise cannot buy that: the platform's
+        // background colour is the one pixel state that is true under every
+        // foreground, so every composite starts from it.
+        self.back_buffer.fill(0xFF0B0F19u32);
 
         // Sort surfaces by z_order ascending (lower z painted first)
         self.surfaces.sort_by_key(|s| s.z_order);
@@ -1000,36 +979,6 @@ impl DrmKmsController {
         let sh = self.scanout_height as i32;
 
         let has_mobile_portrait = self.surfaces.iter().any(|s| s.visible && s.frame_ready && s.width == 720 && s.height == 1440);
-
-        // Occlusion culling: if a higher-z visible, frame-ready surface covers
-        // the entire mobile/scanout viewport at (0, 0), every lower-z surface
-        // beneath it is 100% occluded and does not need to be upscaled or
-        // composited.
-        //
-        // WHY the rule does not ask whether the covering surface's own pixels
-        // are opaque: a surface that covers the screen is the screen, and the
-        // pixels it does not paint are the platform's background. Asking
-        // instead leaves the shell's own frame underneath an application that
-        // has not painted every pixel yet, and the shell's widgets appear
-        // through the application's cards. The rule that decides what shows
-        // through a transparent pixel is the blend, and the blend is right:
-        // the pixel under it is the backdrop, not the desktop.
-        let top_opaque_idx = self.surfaces.iter().enumerate().rev().find(|(_, s)| {
-            if !s.visible || !s.frame_ready || s.opacity != 255 || s.x != 0 || s.y != 0 {
-                return false;
-            }
-            if has_mobile_portrait && s.height == 96 {
-                return false;
-            }
-            let covers = (s.width == 720 && s.height == 1440 && 720i64 * sh as i64 == 1440i64 * sw as i64)
-                || (s.width == 1080 && s.height == 2160 && 1080i64 * sh as i64 == 2160i64 * sw as i64)
-                || (s.width == self.scanout_width && s.height == self.scanout_height);
-            covers && !s.pixels.is_empty()
-        }).map(|(idx, _)| idx);
-
-        let can_incremental_band = self.present_dirty_rows.1 <= self.present_dirty_rows.0
-            && self.front_buffer.len() == self.back_buffer.len()
-            && !self.front_buffer.is_empty();
 
         // Scanout rows the flip will have to re-present. Seeded with whatever
         // the callers already declared dirty; the surface loop narrows it to
@@ -1040,14 +989,6 @@ impl DrmKmsController {
         for (surf_idx, surface) in self.surfaces.iter_mut().enumerate() {
             if !surface.visible || surface.opacity == 0 || !surface.frame_ready {
                 continue;
-            }
-
-            if let Some(top_idx) = top_opaque_idx {
-                if surf_idx < top_idx {
-                    surface.dirty = false;
-                    surface.dirty_rows = (0, 0);
-                    continue;
-                }
             }
 
             if has_mobile_portrait && surface.height == 96 {
@@ -1068,10 +1009,9 @@ impl DrmKmsController {
 
             // Identity full cover: a surface whose geometry is exactly the
             // unrotated scanout's, at the origin, is one straight copy. This is
-            // the only blit that replaces the backdrop outright, which is what
-            // makes `identity_full_cover_will_run` allowed to drop the
-            // background fill. It is also what keeps a scanout-matching client
-            // from paying an interpolation it does not need.
+            // the only blit that replaces the baseline outright, and it is also
+            // what keeps a scanout-matching client from paying an interpolation
+            // it does not need.
             //
             // WHY it is ordered before the launcher block: at a 720x1440 scanout
             // the launcher surface matches this condition too, and the branch
@@ -1155,7 +1095,6 @@ impl DrmKmsController {
                 // samplers here, widen to the destination rect the surface
                 // covers: still bounded by this surface, and never wider than
                 // the pre-banding code ever presented.
-                let mut scaled_dirty_band: Option<(usize, usize)> = None;
                 if surface.dirty_rows.1 > surface.dirty_rows.0 {
                     if landscape {
                         // Rotation swaps horizontal/vertical axes; changes span destination height.
@@ -1174,7 +1113,6 @@ impl DrmKmsController {
                         let r1 = (dst_y + ((surface.dirty_rows.1 + 1) * dst_h + s_h as usize - 1) / s_h as usize).min(dst_y + dst_h);
                         if r1 > r0 {
                             union_rows(&mut present_band, r0, r1);
-                            scaled_dirty_band = Some((r0.saturating_sub(dst_y), (r1 - dst_y).min(dst_h)));
                         }
                     }
                 }
@@ -1266,26 +1204,14 @@ impl DrmKmsController {
                         let s_w_usize = s_w as usize;
                         let s_h_usize = s_h as usize;
 
-                        let (dy_lo, dy_hi) = if can_incremental_band && top_opaque_idx == Some(surf_idx) && dst_x == 0 && dst_y == 0 && dst_w == scanout_w {
-                            if let Some((b0, b1)) = scaled_dirty_band {
-                                if b0 > 0 {
-                                    let end0 = b0 * scanout_w;
-                                    self.back_buffer[..end0].copy_from_slice(&self.front_buffer[..end0]);
-                                }
-                                if b1 < dst_h {
-                                    let start1 = b1 * scanout_w;
-                                    let end1 = (dst_h * scanout_w).min(self.back_buffer.len());
-                                    if start1 < end1 {
-                                        self.back_buffer[start1..end1].copy_from_slice(&self.front_buffer[start1..end1]);
-                                    }
-                                }
-                                (b0, b1)
-                            } else {
-                                (0, dst_h)
-                            }
-                        } else {
-                            (0, dst_h)
-                        };
+                        // Re-present the full destination height: the fill
+                        // above already repainted every row, so this blit has
+                        // to repaint every row a stale front buffer could
+                        // still hold a previous foreground in. Narrowing what
+                        // is *presented* to the rows that changed is the diff
+                        // pass's job below; narrowing what is *composed* was
+                        // how one foreground's pixels bled through the next.
+                        let (dy_lo, dy_hi) = (0usize, dst_h);
 
                         for dy in dy_lo..dy_hi {
                             let ry = dy % 3;

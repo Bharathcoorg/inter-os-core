@@ -1546,7 +1546,11 @@ pub fn surface_create(
             0,
         )
     };
-    if ret >= 0 {
+    // WHY zero is an error and not a surface id: surface ids start at one,
+    // so a zero return means the create was refused upstream, and handing
+    // the app a surface it cannot write to only moves the failure from the
+    // create to the first pixel write.
+    if ret > 0 {
         Ok(ret as u32)
     } else {
         Err(ret)

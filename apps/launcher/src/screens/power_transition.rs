@@ -2,7 +2,6 @@
 //! The transition is rendered by InterOS before the real power syscall is issued.
 
 use crate::{LauncherState, H, W};
-use launcher::theme::Theme;
 
 pub fn get_power_transition_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     let progress = state.power_transition_progress.min(1000) as usize;

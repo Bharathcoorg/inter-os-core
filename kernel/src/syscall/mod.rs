@@ -4011,8 +4011,26 @@ pub fn sys_surface_create(cap_slot: usize, width: u32, height: u32, z_order: u32
     }
     let mut kms = crate::drivers::display_kms::DRM_KMS.lock();
     let mut display = crate::drivers::KmsDisplayDriver::new(&mut kms);
-    display.create_surface(width, height, z_order, owner.0)
-        .map_err(|_| SyscallResult::DeviceError)
+    let created = display.create_surface(width, height, z_order, owner.0);
+    // WHY the verdict is logged: a surface id the app cannot distinguish
+    // from success is how an app spends its whole run drawing into
+    // nothing. The serial line is the one place the truth is stated.
+    match created {
+        Ok(id) => {
+            crate::serial_println!(
+                "[SURFACE_CREATE] owner={} {}x{} z={} -> id={}",
+                owner.0, width, height, z_order, id
+            );
+            Ok(id)
+        }
+        Err(why) => {
+            crate::serial_println!(
+                "[SURFACE_CREATE REFUSED] owner={} {}x{} z={}: {}",
+                owner.0, width, height, z_order, why
+            );
+            Err(SyscallResult::DeviceError)
+        }
+    }
 }
 
 /// Writes bounded ARGB pixels into an owned display surface.
@@ -4187,6 +4205,10 @@ pub fn sys_surface_flip(cap_slot: usize) -> Result<u64, SyscallResult> {
     // already on the display, and waiting for the next one costs a frame
     // rather than costing the screen.
     if !kms.may_publish(owner.0) {
+        crate::serial_println!(
+            "[SURFACE_FLIP HELD] owner={} would publish over a torn frame; waiting",
+            owner.0
+        );
         return Ok(0);
     }
     let mut display = crate::drivers::KmsDisplayDriver::new(&mut kms);

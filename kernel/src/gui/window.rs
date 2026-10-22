@@ -44,11 +44,12 @@ pub struct WindowManager {
     windows: Vec<Window>,
     next_id: u32,
     focused: Option<WindowId>,
+    last_reject: Option<&'static str>,
 }
 
 impl WindowManager {
     pub const fn new() -> Self {
-        Self { windows: Vec::new(), next_id: 1, focused: None }
+        Self { windows: Vec::new(), next_id: 1, focused: None, last_reject: None }
     }
 
     pub fn create(&mut self, owner: u64, rect: WindowRect, kind: WindowKind, modal: bool) -> Result<WindowId, &'static str> {
@@ -65,9 +66,23 @@ impl WindowManager {
 
     /// Registers a display-backed window using the KMS surface ID as its stable
     /// cross-layer identity. This keeps the GUI and display registries coherent.
+    /// The reason the most recent window registration was refused, for the
+    /// surface-create diagnostic to name. WHY it is stored and not returned:
+    /// the window registrations that fail happen several locks deep, and the
+    /// one caller that can print to the serial line does not hold the error.
+    pub fn last_reject(&self) -> Option<&'static str> {
+        self.last_reject
+    }
+
     pub fn create_with_id(&mut self, id: WindowId, owner: u64, rect: WindowRect, kind: WindowKind, modal: bool) -> Result<(), &'static str> {
-        if id.0 == 0 || rect.width == 0 || rect.height == 0 { return Err("invalid window identity or bounds"); }
-        if self.windows.len() >= 128 { return Err("window limit reached"); }
+        if id.0 == 0 || rect.width == 0 || rect.height == 0 {
+            self.last_reject = Some("invalid window identity or bounds");
+            return Err("invalid window identity or bounds");
+        }
+        if self.windows.len() >= 128 {
+            self.last_reject = Some("window limit reached");
+            return Err("window limit reached");
+        }
         self.windows.retain(|w| w.id != id);
         let z = self.windows.iter().map(|w| w.z).max().unwrap_or(0).saturating_add(1);
         self.windows.push(Window { id, owner, rect, kind, visible: true, modal, z });
