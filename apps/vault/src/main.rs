@@ -682,11 +682,30 @@ fn metric_row(
 ) -> Option<u32> {
     let ix = x0 + PAD;
     let half = w / 2 - PAD - 16;
-    if let Some(c) = font::ink(x, y, ix, y0, 1, label, half, THEME.on_surface_variant, THEME.surface_container, false) {
+    if let Some(c) = font::ink(x, y, ix, y0, 1, label, half, THEME.on_surface, THEME.surface_container, true) {
         return Some(c);
     }
-    if let Some(c) = font::ink_right(x, y, x0 + w - PAD, y0, 1, value, half, value_ink, THEME.surface_container, true) {
-        return Some(c);
+    // Cryptographic status badge on the right
+    let v_w = font::width(value, 1, true);
+    let badge_w = (v_w + 28).min(half);
+    let badge_h = 24;
+    let bx0 = x0 + w - PAD - badge_w;
+    let by0 = y0.saturating_sub(2);
+    if in_round(x, y, bx0, by0, badge_w, badge_h, badge_h / 2) {
+        if !in_round(x, y, bx0 + 1, by0 + 1, badge_w - 2, badge_h - 2, badge_h / 2 - 1) {
+            return Some(THEME.border);
+        }
+        let dot_cx = bx0 + 10;
+        let dot_cy = by0 + badge_h / 2;
+        let ddx = (x as i32) - (dot_cx as i32);
+        let ddy = (y as i32) - (dot_cy as i32);
+        if ddx * ddx + ddy * ddy <= 9 {
+            return Some(value_ink);
+        }
+        if let Some(c) = font::ink(x, y, bx0 + 18, by0 + 4, 1, value, badge_w.saturating_sub(22), value_ink, THEME.surface_container_low, true) {
+            return Some(c);
+        }
+        return Some(THEME.surface_container_low);
     }
     if let Some(c) = font::ink(x, y, ix, y0 + 32, 1, source, w - PAD * 2, THEME.on_surface_variant, THEME.surface_container, false) {
         return Some(c);
@@ -716,10 +735,29 @@ fn tile_pixel(
     if let Some(c) = font::ink(x, y, tx + 16, ty + 16, 1, title, iw, THEME.on_surface, THEME.surface_container_high, true) {
         return Some(c);
     }
-    if let Some(c) = font::ink(x, y, tx + 16, ty + 48, 1, verdict, iw, verdict_ink, THEME.surface_container_high, true) {
-        return Some(c);
+    // Cryptographic status badge: pill container with indicator dot and status verdict
+    let badge_x = tx + 16;
+    let badge_y = ty + 42;
+    let badge_h = 24;
+    let v_w = font::width(verdict, 1, true);
+    let badge_w = (v_w + 32).min(iw);
+    if in_round(x, y, badge_x, badge_y, badge_w, badge_h, badge_h / 2) {
+        if !in_round(x, y, badge_x + 1, badge_y + 1, badge_w - 2, badge_h - 2, badge_h / 2 - 1) {
+            return Some(THEME.border);
+        }
+        let dot_cx = badge_x + 10;
+        let dot_cy = badge_y + badge_h / 2;
+        let ddx = (x as i32) - (dot_cx as i32);
+        let ddy = (y as i32) - (dot_cy as i32);
+        if ddx * ddx + ddy * ddy <= 9 {
+            return Some(verdict_ink);
+        }
+        if let Some(c) = font::ink(x, y, badge_x + 18, badge_y + 4, 1, verdict, badge_w.saturating_sub(22), verdict_ink, THEME.surface_container, true) {
+            return Some(c);
+        }
+        return Some(THEME.surface_container);
     }
-    if let Some(c) = font::ink(x, y, tx + 16, ty + 80, 1, hint, iw, THEME.on_surface_variant, THEME.surface_container_high, false) {
+    if let Some(c) = font::ink(x, y, tx + 16, ty + 76, 1, hint, iw, THEME.on_surface_variant, THEME.surface_container_high, false) {
         return Some(c);
     }
     Some(THEME.surface_container_high)
