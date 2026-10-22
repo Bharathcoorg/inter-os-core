@@ -1179,8 +1179,12 @@ impl DrmKmsController {
                 }
             }
 
-            if has_mobile_portrait && surface.height == 96 {
-                // Do not overlay legacy desktop banner on mobile portrait phone canvas
+            if has_mobile_portrait && surface.height == 96 && surface.y != 0 {
+                // WHY only a band that is not at the top: the phone's status
+                // bar is a band of this height at the top of the screen, and
+                // skipping it left every screen without a clock, a battery or
+                // a signal. The legacy desktop banner this rule was written
+                // for is not at the top, so it is still skipped.
                 continue;
             }
 

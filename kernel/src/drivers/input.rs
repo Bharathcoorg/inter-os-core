@@ -161,7 +161,75 @@ pub static INPUT_PIPELINE: Mutex<InputPipeline> = Mutex::new(InputPipeline::new(
 
 /// Moves recognized hardware gestures into the stable userspace event queue.
 /// Routes normalized input events to the currently focused surface owner.
+/// Brings the shell back to the front of the screen.
+///
+/// WHY the platform does this and not the application: the gesture is the
+/// platform's -- it belongs to the edge of the screen and every system
+/// reserves it -- and an application that does not implement it leaves a
+/// person who has opened an application with no way home. The shell's own
+/// surfaces come forward and the foreground application's surfaces go
+/// behind them, so the application keeps its state and the person gets
+/// their desk back.
+fn go_home() {
+    let Some(shell) = crate::syscall::shell_task_id() else {
+        return;
+    };
+    let mut kms = crate::drivers::display_kms::DRM_KMS.lock();
+    apply_home_to_surfaces(&mut kms, shell);
+}
+
+/// Brings the shell's surfaces forward and the others' back.
+///
+/// WHY this is a function over the compositor and not a sequence of calls
+/// on it: the change is a decision about which surfaces the screen shows,
+/// and a decision that cannot be run in a test is a decision nobody can
+/// check.
+fn apply_home_to_surfaces(
+    kms: &mut crate::drivers::display_kms::DrmKmsController,
+    shell: u64,
+) {
+    // WHY the shell comes forward first: the application's surfaces are
+    // hidden after, and a frame in between would show the application on
+    // top of the shell for one flip.
+    kms.set_surfaces_visibility_for_task(shell, true);
+    let owners: alloc::vec::Vec<u64> = kms
+        .surfaces
+        .iter()
+        .filter(|s| s.owner_task != shell)
+        .map(|s| s.owner_task)
+        .collect();
+    for owner in owners {
+        kms.set_surfaces_visibility_for_task(owner, false);
+    }
+}
+
+/// Whether the shell is the surface that owns the screen.
+///
+/// WHY this is asked at all: the shell handles its own home gesture (it
+/// draws the unlocked desk), so the platform's action must not run a
+/// second time on top of the shell's own handling.
+fn shell_owns_the_screen() -> bool {
+    let Some(shell) = crate::syscall::shell_task_id() else {
+        return false;
+    };
+    let mut kms = crate::drivers::display_kms::DRM_KMS.lock();
+    kms.surfaces
+        .iter()
+        .filter(|s| s.visible && s.input_enabled)
+        .max_by_key(|s| s.z_order)
+        .map(|s| s.owner_task == shell)
+        .unwrap_or(false)
+}
+
 pub fn dispatch_to_focused_window(event: InputEvent) {
+    // WHY the home gesture is taken here: this is the one point where the
+    // platform knows both what was recognised and who is in front. An
+    // application in front that does not implement the gesture would
+    // otherwise swallow it, and the person would be stuck in the app.
+    if event.kind == InputEventKind::Home && !shell_owns_the_screen() {
+        go_home();
+        return;
+    }
     let owner = {
         // WHY only the power key is a system key here: the system owns the
         // screen lock, and the power key turns the device off whatever is
@@ -298,6 +366,27 @@ pub fn pump_touch_events() {
 
 #[cfg(test)]
 mod tests {    #[test]
+    fn the_home_gesture_brings_the_shell_back() {
+        let mut kms = crate::drivers::display_kms::DrmKmsController::new(720, 1440);
+        kms.set_display_mode(720, 1440, 60).expect("mode");
+        let shell = kms.create_surface(720, 1440, 0, 11);
+        let app = kms.create_surface(720, 1440, 200, 14);
+        assert_ne!(shell, 0);
+        assert_ne!(app, 0);
+
+        // The application is in front.
+        kms.set_surfaces_visibility_for_task(11, false);
+        kms.set_surfaces_visibility_for_task(14, true);
+
+        super::apply_home_to_surfaces(&mut kms, 11);
+
+        let shell_visible = kms.surfaces.iter().find(|s| s.id == shell).map(|s| s.visible);
+        let app_visible = kms.surfaces.iter().find(|s| s.id == app).map(|s| s.visible);
+        assert_eq!(shell_visible, Some(true), "the shell has to come back");
+        assert_eq!(app_visible, Some(false), "the application has to go behind");
+    }
+
+    #[test]
     fn canonical_system_gesture_encoding_is_stable() {
         let event = InputEvent::from_canonical(crate::input::GestureEvent {
             kind: crate::input::GestureKind::Home,

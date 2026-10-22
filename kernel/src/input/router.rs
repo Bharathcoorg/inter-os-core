@@ -84,6 +84,15 @@ const TAP_SLOP: i32 = 24;
 /// the touched edge's direction is `Cancel`, not a mislabelled Back/Recents.
 const EDGE_SWIPE_MIN: i32 = 40;
 
+/// The band at the bottom of the screen the platform owns.
+///
+/// WHY it is the gesture bar's height and not the side band's twenty-four:
+/// the home gesture is the one the visible gesture bar invites, so the band
+/// that owns it has to be the bar the person can see. A swipe that starts
+/// on the bar goes home; a swipe that starts in the app's own list scrolls
+/// the list.
+pub const GESTURE_EDGE: u32 = 48;
+
 pub struct InputRouter {
     pointers: [PointerState; 5],
     last_tap_tick: u64,
@@ -137,7 +146,7 @@ impl InputRouter {
     pub fn classify_owner(&self, position: Point, screen_width: u32, screen_height: u32, edge: u32) -> PointerOwner {
         if position.x < edge as i32
             || position.x >= screen_width.saturating_sub(edge) as i32
-            || position.y >= screen_height.saturating_sub(edge) as i32
+            || position.y >= screen_height.saturating_sub(GESTURE_EDGE) as i32
         {
             PointerOwner::System
         } else {
@@ -148,7 +157,7 @@ impl InputRouter {
     fn classify_edge(position: Point, screen_width: u32, screen_height: u32, edge: u32) -> u8 {
         if position.x < edge as i32 { 1 }
         else if position.x >= screen_width.saturating_sub(edge) as i32 { 2 }
-        else if position.y >= screen_height.saturating_sub(edge) as i32 { 3 }
+        else if position.y >= screen_height.saturating_sub(GESTURE_EDGE) as i32 { 3 }
         else { 0 }
     }
 

@@ -5773,7 +5773,7 @@ pub fn dev_launch_app(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
 /// WHY the shell is found by name: the shell is the task the platform
 /// starts, and its surfaces are the desktop the applications are drawn
 /// over.
-fn shell_task_id() -> Option<u64> {
+pub(crate) fn shell_task_id() -> Option<u64> {
     let sched = SCHEDULER.lock();
     sched
         .tasks_iter()
@@ -5787,7 +5787,7 @@ fn shell_task_id() -> Option<u64> {
 /// timer whether or not it is in the foreground, and every flip publishes
 /// every surface, so a shell that is still drawing while an application
 /// is in front puts the desktop back on the screen.
-fn show_shell_surfaces() {
+pub(crate) fn show_shell_surfaces() {
     let Some(shell) = shell_task_id() else {
         return;
     };
@@ -5807,7 +5807,7 @@ fn show_shell_surfaces() {
 /// WHY the surfaces are hidden and not the tasks stopped: an application
 /// that is hidden keeps its state, and raising it again brings it back
 /// with everything it had.
-fn hide_background_surfaces() {
+pub(crate) fn hide_background_surfaces() {
     let mut owners = [0u64; 16];
     let mut count = 0usize;
     {

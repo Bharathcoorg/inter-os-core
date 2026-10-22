@@ -71,15 +71,30 @@ const LOCK_STATUS_TIME_X: usize = LOCK_CONTENT_X;
 const LOCK_STATUS_TIME_Y: usize = 27;
 const LOCK_STATUS_TIME_SCALE: usize = 1;
 
+/// The day and the date, at the document's own position and size.
+///
+/// WHY the day is a caption and the date is a body: the document puts the
+/// weekday and the date on one line in the secondary ink, and the hero
+/// clock below it is the only thing on the screen that is allowed to be
+/// large.
 pub const LOCK_DATE_Y: usize = 78;
 pub const LOCK_DATE_SCALE: usize = 2;
-pub const LOCK_DATE_EM: u32 = 20;
+pub const LOCK_DATE_EM: u32 = 23;
 pub const LOCK_DATE_BASELINE: usize = 100;
 
-pub const LOCK_CLOCK_Y: usize = 118;
-pub const LOCK_CLOCK_SCALE: usize = 3;
+/// The hero clock.
+///
+/// WHY the display rung and not a number of its own: the clock was measured
+/// at one size and drawn at another -- the label's width came from the
+/// section rung while the glyphs were drawn at the heading's em -- so the
+/// clock and its own measurement never agreed, and the block it belongs to
+/// could not be placed by the same edge. One rung for both, and the
+/// document's position for the block: the hero sits at y 280, below the
+/// date, and the screen's content column starts at the same edge.
+pub const LOCK_CLOCK_Y: usize = 232;
+pub const LOCK_CLOCK_SCALE: usize = 5;
 pub const LOCK_CLOCK_EM: u32 = 56;
-pub const LOCK_CLOCK_BASELINE: usize = 175;
+pub const LOCK_CLOCK_BASELINE: usize = 284;
 
 pub const LOCK_HINT_Y: usize = 1275;
 pub const LOCK_HINT_SCALE: usize = 1;
@@ -1583,9 +1598,16 @@ pub fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         if let Some(pin_color) = lock_pin_pad_pixel(color, x, y, state, f) {
             return pin_color;
         }
-    } else if y >= 250 && y < 1200 {
-        // Fast path: between the clock/date band (y < 250) and hint/buttons (y >= 1200),
-        // there are NO UI elements on the lock screen when PIN pad is inactive.
+    } else if y >= f.clock.y + f.clock.h && y < 1200 {
+        // Fast path: between the clock's own box and the hint and buttons,
+        // there are NO UI elements on the lock screen when the PIN pad is
+        // inactive.
+        //
+        // WHY the bound is the clock's box and not a number: the bound used
+        // to be a hardcoded two hundred and fifty, which is where the clock
+        // used to end. Move the clock and the fast path cut it in half --
+        // the screen showed the top of the digits and nothing else, and the
+        // number was in a different file from the clock.
         return color;
     }
 
