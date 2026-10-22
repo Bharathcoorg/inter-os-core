@@ -29,11 +29,13 @@ use super::theme::Theme;
 use super::typeface;
 
 pub mod dialog;
+pub mod keyboard;
 pub mod nav_bar;
 pub mod snackbar;
 pub mod text_field;
 
 pub use dialog::*;
+pub use keyboard::*;
 pub use nav_bar::*;
 pub use snackbar::*;
 pub use text_field::*;
