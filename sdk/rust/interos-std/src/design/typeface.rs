@@ -145,25 +145,76 @@ pub const fn line_metrics(px_per_em: u32) -> (u32, u32) {
     )
 }
 
-/// The horizontal advance of `ch` at `px_per_em`, in pixels.
+/// The horizontal advance of codepoint `cp` at `px_per_em`, in pixels.
 ///
 /// WHY this is the face's advance and not the measured ink: spacing is the
 /// designer's statement, and measuring ink would make the gap depend on which
 /// letter it happened to be.
-pub fn advance_px(ch: u8, px_per_em: u32) -> u32 {
-    match slot(ch) {
-        Some(i) => (face::ADVANCE[i] as u32 * px_per_em) / face::UNITS_PER_EM as u32,
+pub fn advance_codepoint(cp: u32, px_per_em: u32) -> u32 {
+    match face::lookup_glyph(cp) {
+        Some((adv, _)) => (adv as u32 * px_per_em) / face::UNITS_PER_EM as u32,
         None => 0,
     }
 }
 
+/// The horizontal advance of `ch` at `px_per_em`, in pixels.
+#[inline]
+pub fn advance_char(ch: char, px_per_em: u32) -> u32 {
+    advance_codepoint(ch as u32, px_per_em)
+}
+
+/// The horizontal advance of `ch` at `px_per_em`, in pixels.
+///
+/// Supports ASCII (32..=126) and 8-bit Latin-1 Supplement (160..=255).
+#[inline]
+pub fn advance_px(ch: u8, px_per_em: u32) -> u32 {
+    advance_codepoint(ch as u32, px_per_em)
+}
+
+/// Total advance of UTF-8 `text` at `px_per_em`, in pixels.
+pub fn str_advance_px(text: &str, px_per_em: u32) -> u32 {
+    text.chars().map(|c| advance_codepoint(c as u32, px_per_em)).sum()
+}
+
 /// Total advance of `text` at `px_per_em`, in pixels.
+///
+/// Decodes valid UTF-8 and advances each Unicode codepoint; falls back
+/// to byte-by-byte advances if not valid UTF-8.
 pub fn text_advance_px(text: &[u8], px_per_em: u32) -> u32 {
-    text.iter().map(|c| advance_px(*c, px_per_em)).sum()
+    if let Ok(s) = core::str::from_utf8(text) {
+        str_advance_px(s, px_per_em)
+    } else {
+        text.iter().map(|c| advance_px(*c, px_per_em)).sum()
+    }
+}
+
+/// Horizontal advance with fallback to U+FFFD if the codepoint is unmapped.
+pub fn advance_with_fallback(cp: u32, px_per_em: u32) -> u32 {
+    let (adv, _) = face::lookup_glyph_or_fallback(cp);
+    (adv as u32 * px_per_em) / face::UNITS_PER_EM as u32
+}
+
+/// Horizontal advance of the fallback glyph (`U+FFFD`) at `px_per_em`, in pixels.
+pub fn fallback_advance_px(px_per_em: u32) -> u32 {
+    let (adv, _) = face::fallback_glyph();
+    (adv as u32 * px_per_em) / face::UNITS_PER_EM as u32
+}
+
+/// Fallback replacement character codepoint (`U+FFFD`).
+pub const REPLACEMENT_CHAR: u32 = face::REPLACEMENT_CODEPOINT;
+
+/// Fallback glyph replacement: returns `cp` if supported by the typeface,
+/// or `U+FFFD` if unmapped.
+pub fn fallback_glyph_replacement(cp: u32) -> u32 {
+    if face::lookup_glyph(cp).is_some() {
+        cp
+    } else {
+        REPLACEMENT_CHAR
+    }
 }
 
 #[inline]
-fn slot(ch: u8) -> Option<usize> {
+pub fn slot(ch: u8) -> Option<usize> {
     if (face::FIRST_CHAR..=face::LAST_CHAR).contains(&ch) {
         Some((ch - face::FIRST_CHAR) as usize)
     } else {
@@ -178,6 +229,20 @@ fn be_i16(data: &[u8], at: usize) -> i16 {
 
 /// Rasterises `ch` at `px_per_em` into `dst`.
 ///
+/// Supports ASCII (32..=126) and Latin-1 8-bit (160..=255).
+#[inline]
+pub fn raster(
+    ch: u8,
+    px_per_em: u32,
+    origin_x: i32,
+    origin_y: i32,
+    dst: &mut Coverage,
+) -> Option<Metrics> {
+    raster_codepoint(ch as u32, px_per_em, origin_x, origin_y, dst)
+}
+
+/// Rasterises Unicode codepoint `cp` at `px_per_em` into `dst`.
+///
 /// `origin_x`/`origin_y` place the pen on the baseline inside `dst`: `x` grows
 /// right, `y` grows DOWN, so a glyph's ink above the baseline lands at negative
 /// `y` relative to the pen. Passing the position explicitly rather than assuming
@@ -189,19 +254,66 @@ fn be_i16(data: &[u8], at: usize) -> i16 {
 /// the encoded range, or when the glyph is more complex than the fixed bounds
 /// above allow. A `None` is a refusal rather than a failure: nothing is written
 /// and the caller keeps whatever it had.
-pub fn raster(
-    ch: u8,
+pub fn raster_codepoint(
+    cp: u32,
     px_per_em: u32,
     origin_x: i32,
     origin_y: i32,
     dst: &mut Coverage,
 ) -> Option<Metrics> {
-    let i = slot(ch)?;
-    let start = face::OUTLINE_OFFSET[i] as usize;
-    let end = face::OUTLINE_OFFSET[i + 1] as usize;
-    let advance = advance_px(ch, px_per_em);
+    let (adv, blob) = face::lookup_glyph(cp)?;
+    let advance = (adv as u32 * px_per_em) / face::UNITS_PER_EM as u32;
+    raster_outline(blob, advance, px_per_em, origin_x, origin_y, dst)
+}
 
-    if end <= start || dst.w == 0 || dst.h == 0 || px_per_em == 0 {
+/// Rasterises Unicode character `ch` at `px_per_em` into `dst`.
+#[inline]
+pub fn raster_char(
+    ch: char,
+    px_per_em: u32,
+    origin_x: i32,
+    origin_y: i32,
+    dst: &mut Coverage,
+) -> Option<Metrics> {
+    raster_codepoint(ch as u32, px_per_em, origin_x, origin_y, dst)
+}
+
+/// Rasterises Unicode codepoint `cp` into `dst`, replacing unmapped codepoints
+/// with the `U+FFFD` fallback replacement glyph.
+pub fn raster_with_fallback(
+    cp: u32,
+    px_per_em: u32,
+    origin_x: i32,
+    origin_y: i32,
+    dst: &mut Coverage,
+) -> Option<Metrics> {
+    let (adv, blob) = face::lookup_glyph_or_fallback(cp);
+    let advance = (adv as u32 * px_per_em) / face::UNITS_PER_EM as u32;
+    raster_outline(blob, advance, px_per_em, origin_x, origin_y, dst)
+}
+
+/// Rasterises the `U+FFFD` fallback replacement glyph into `dst`.
+pub fn raster_fallback(
+    px_per_em: u32,
+    origin_x: i32,
+    origin_y: i32,
+    dst: &mut Coverage,
+) -> Option<Metrics> {
+    let (adv, blob) = face::fallback_glyph();
+    let advance = (adv as u32 * px_per_em) / face::UNITS_PER_EM as u32;
+    raster_outline(blob, advance, px_per_em, origin_x, origin_y, dst)
+}
+
+/// Internal helper: decodes and rasterises a glyph outline blob into `dst`.
+fn raster_outline(
+    blob: &[u8],
+    advance: u32,
+    px_per_em: u32,
+    origin_x: i32,
+    origin_y: i32,
+    dst: &mut Coverage,
+) -> Option<Metrics> {
+    if blob.is_empty() || dst.w == 0 || dst.h == 0 || px_per_em == 0 {
         return Some(Metrics {
             advance_px: advance,
             width: 0,
@@ -210,16 +322,12 @@ pub fn raster(
     }
 
     // --- decode the outline, in font units --------------------------------
-    let blob = &face::OUTLINE_BYTES[start..end];
     let mut x = [0i32; MAX_POINTS];
     let mut y = [0i32; MAX_POINTS];
     let mut on_curve = [false; MAX_POINTS];
     let mut contour_last = [0u16; MAX_CONTOURS];
     let mut n_points = 0usize;
 
-    if blob.is_empty() {
-        return None;
-    }
     let n_contours = blob[0] as usize;
     if n_contours > MAX_CONTOURS {
         return None;
@@ -590,6 +698,158 @@ fn flatten_contour(
     Some(n_seg)
 }
 
+// ---------------------------------------------------------------------------
+// Text Direction & BiDi Detection
+// ---------------------------------------------------------------------------
+
+/// Text layout direction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextDirection {
+    /// Left-to-right (Latin, Cyrillic, Greek, etc.).
+    Ltr,
+    /// Right-to-left (Arabic, Hebrew, Syriac, Thaana, etc.).
+    Rtl,
+}
+
+/// Returns true if codepoint `cp` is a right-to-left character (Arabic, Hebrew, Syriac, Thaana, etc.).
+pub fn is_rtl_codepoint(cp: u32) -> bool {
+    matches!(
+        cp,
+        0x0590..=0x05FF // Hebrew
+        | 0xFB1D..=0xFB4F // Hebrew Presentation Forms
+        | 0x0600..=0x06FF // Arabic
+        | 0x0750..=0x077F // Arabic Supplement
+        | 0x0870..=0x089F // Arabic Extended-B
+        | 0x08A0..=0x08FF // Arabic Extended-A
+        | 0xFB50..=0xFDFF // Arabic Presentation Forms-A
+        | 0xFE70..=0xFEFF // Arabic Presentation Forms-B
+        | 0x0700..=0x074F // Syriac
+        | 0x0780..=0x07BF // Thaana
+        | 0x0800..=0x083F // Samaritan
+        | 0x0840..=0x085F // Mandaic
+        | 0x200F          // Right-to-Left Mark (RLM)
+        | 0x202B          // Right-to-Left Embedding (RLE)
+        | 0x202E          // Right-to-Left Override (RLO)
+        | 0x2067          // Right-to-Left Isolate (RLI)
+    )
+}
+
+/// Returns true if character `ch` is a right-to-left character (Arabic, Hebrew, etc.).
+#[inline]
+pub fn is_rtl_char(ch: char) -> bool {
+    is_rtl_codepoint(ch as u32)
+}
+
+/// Returns true if codepoint `cp` is a strong left-to-right character.
+pub fn is_strong_ltr_codepoint(cp: u32) -> bool {
+    matches!(
+        cp,
+        0x0041..=0x005A // A-Z
+        | 0x0061..=0x007A // a-z
+        | 0x00C0..=0x00D6 // Latin-1 Supplement letters
+        | 0x00D8..=0x00F6
+        | 0x00F8..=0x00FF
+        | 0x0100..=0x024F // Latin Extended-A and B
+        | 0x0370..=0x03FF // Greek
+        | 0x0400..=0x04FF // Cyrillic
+        | 0x3000..=0x9FFF // CJK symbols, kana, ideographs
+        | 0xAC00..=0xD7AF // Hangul
+    )
+}
+
+/// Returns true if character `ch` is a strong left-to-right character.
+#[inline]
+pub fn is_strong_ltr_char(ch: char) -> bool {
+    is_strong_ltr_codepoint(ch as u32)
+}
+
+/// Returns true if `text` has right-to-left directionality.
+///
+/// Follows the standard Unicode Bidirectional heuristic (UAX #9 rule P2):
+/// inspects characters in order and resolves direction by the first strong
+/// directional character (Arabic, Hebrew, Syriac, Thaana vs Latin, Greek, CJK).
+/// If no strong directional character is present, defaults to false (LTR).
+pub fn is_rtl_run(text: &str) -> bool {
+    for ch in text.chars() {
+        if is_rtl_char(ch) {
+            return true;
+        } else if is_strong_ltr_char(ch) {
+            return false;
+        }
+    }
+    false
+}
+
+/// Returns true if byte run `bytes` has right-to-left directionality.
+/// Decodes as UTF-8 if valid; otherwise inspects byte values.
+pub fn is_rtl_run_bytes(bytes: &[u8]) -> bool {
+    if let Ok(s) = core::str::from_utf8(bytes) {
+        is_rtl_run(s)
+    } else {
+        bytes.iter().any(|&b| is_rtl_codepoint(b as u32))
+    }
+}
+
+/// Computes the horizontal pen alignment offset for a line of text.
+///
+/// For LTR text, pen starts at `0` (left edge).
+/// For RTL text, pen aligns to the right edge: `container_w.saturating_sub(text_w)`.
+#[inline]
+pub fn rtl_align_offset(text_w: usize, container_w: usize, is_rtl: bool) -> usize {
+    if is_rtl && container_w > text_w {
+        container_w - text_w
+    } else {
+        0
+    }
+}
+
+/// Layout hook for line positioning: determines starting pen X coordinate
+/// inside a container `[container_x, container_x + container_w]` based on
+/// text direction.
+#[inline]
+pub fn layout_line_x(container_x: usize, container_w: usize, text_w: usize, is_rtl: bool) -> usize {
+    container_x + rtl_align_offset(text_w, container_w, is_rtl)
+}
+
+/// High-level line layout hook that measures text advance, detects BiDi direction,
+/// and computes the starting pen `x` position within `[container_x, container_x + container_w]`.
+///
+/// Returns `(pen_x, text_w, direction)`.
+pub fn layout_line_hook(
+    text: &str,
+    px_per_em: u32,
+    container_x: usize,
+    container_w: usize,
+) -> (usize, usize, TextDirection) {
+    let is_rtl = is_rtl_run(text);
+    let dir = if is_rtl {
+        TextDirection::Rtl
+    } else {
+        TextDirection::Ltr
+    };
+    let text_w = str_advance_px(text, px_per_em) as usize;
+    let pen_x = layout_line_x(container_x, container_w, text_w, is_rtl);
+    (pen_x, text_w, dir)
+}
+
+/// High-level line layout hook for byte slices (UTF-8 or raw bytes).
+pub fn layout_line_bytes_hook(
+    text: &[u8],
+    px_per_em: u32,
+    container_x: usize,
+    container_w: usize,
+) -> (usize, usize, TextDirection) {
+    let is_rtl = is_rtl_run_bytes(text);
+    let dir = if is_rtl {
+        TextDirection::Rtl
+    } else {
+        TextDirection::Ltr
+    };
+    let text_w = text_advance_px(text, px_per_em) as usize;
+    let pen_x = layout_line_x(container_x, container_w, text_w, is_rtl);
+    (pen_x, text_w, dir)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -672,9 +932,15 @@ mod tests {
             w: 64,
             h: 64,
         };
+        // Unmapped control character should be refused
         assert!(
-            raster(0x00E9, 32, 32, 32, &mut cov).is_none(),
-            "a char outside 32..=126"
+            raster(0x01, 32, 32, 32, &mut cov).is_none(),
+            "a control char outside encoded tables"
+        );
+        // Unmapped high codepoint should be refused by raster_codepoint
+        assert!(
+            raster_codepoint(0x1F600, 32, 32, 32, &mut cov).is_none(),
+            "an unmapped emoji codepoint"
         );
     }
 
@@ -724,5 +990,132 @@ mod tests {
         let mut sy1 = [0i32; MAX_SEGMENTS];
         let res = flatten_contour(&x, &y, &on_curve, 0, 127, &mut sx0, &mut sy0, &mut sx1, &mut sy1, 0);
         assert!(res.is_none());
+    }
+
+    #[test]
+    fn latin1_accented_characters_render() {
+        // Test common accented characters: é, ñ, ç, ß, À, °
+        for &ch in &[0x00E9u32, 0x00F1, 0x00E7, 0x00DF, 0x00C0, 0x00B0] {
+            let mut buf = [0u8; 64 * 64];
+            let mut cov = Coverage {
+                buf: &mut buf,
+                w: 64,
+                h: 64,
+            };
+            let m = raster_codepoint(ch, 32, 16, 40, &mut cov).expect("rasterises glyph");
+            let ink = buf.iter().filter(|c| **c > 0).count();
+            assert!(ink > 10, "expected ink for codepoint 0x{ch:04X}, got {ink}");
+            assert!(m.advance_px > 0);
+            assert!(m.width > 0 && m.height > 0);
+        }
+    }
+
+    #[test]
+    fn latin_extended_a_characters_render() {
+        // Test Latin Extended-A characters: Ā, č, š, ž
+        for &ch in &[0x0100u32, 0x010D, 0x0161, 0x017E] {
+            let mut buf = [0u8; 64 * 64];
+            let mut cov = Coverage {
+                buf: &mut buf,
+                w: 64,
+                h: 64,
+            };
+            let m = raster_codepoint(ch, 32, 16, 40, &mut cov).expect("rasterises glyph");
+            let ink = buf.iter().filter(|c| **c > 0).count();
+            assert!(ink > 10, "expected ink for codepoint 0x{ch:04X}, got {ink}");
+            assert!(m.advance_px > 0);
+        }
+    }
+
+    #[test]
+    fn typographical_symbols_render() {
+        // Em-dash, en-dash, bullet, curly quotes, ellipsis, euro
+        for &ch in &[0x2014u32, 0x2013, 0x2022, 0x201C, 0x201D, 0x2026, 0x20AC] {
+            let mut buf = [0u8; 64 * 64];
+            let mut cov = Coverage {
+                buf: &mut buf,
+                w: 64,
+                h: 64,
+            };
+            let m = raster_codepoint(ch, 32, 16, 40, &mut cov).expect("rasterises glyph");
+            let ink = buf.iter().filter(|c| **c > 0).count();
+            assert!(ink > 5, "expected ink for symbol 0x{ch:04X}, got {ink}");
+            assert!(m.advance_px > 0);
+        }
+    }
+
+    #[test]
+    fn fallback_glyph_replacement_renders_and_advances() {
+        // Unmapped codepoints
+        let unmapped = 0x1F600u32; // Grinning face emoji
+        assert_eq!(fallback_glyph_replacement(unmapped), REPLACEMENT_CHAR);
+        assert_eq!(fallback_glyph_replacement(0x0041), 0x0041); // 'A' is mapped
+
+        // Raster with fallback
+        let mut buf = [0u8; 64 * 64];
+        let mut cov = Coverage {
+            buf: &mut buf,
+            w: 64,
+            h: 64,
+        };
+        let m = raster_with_fallback(unmapped, 32, 16, 40, &mut cov).expect("renders fallback");
+        let ink = buf.iter().filter(|c| **c > 0).count();
+        assert!(ink > 15, "expected ink for fallback glyph, got {ink}");
+        assert_eq!(m.advance_px, fallback_advance_px(32));
+        assert!(m.advance_px > 0);
+    }
+
+    #[test]
+    fn bidi_detection_and_layout_hook() {
+        // RTL characters: Hebrew and Arabic
+        assert!(is_rtl_char('\u{05E9}')); // Hebrew Shin
+        assert!(is_rtl_char('\u{0645}')); // Arabic Meem
+        assert!(is_rtl_codepoint(0x05D0)); // Hebrew Alef
+        assert!(is_rtl_codepoint(0x0627)); // Arabic Alef
+
+        // Non-RTL characters
+        assert!(!is_rtl_char('A'));
+        assert!(!is_rtl_char('é'));
+        assert!(!is_rtl_char('5'));
+        assert!(!is_rtl_char(' '));
+        assert!(!is_rtl_codepoint(0x0020));
+
+        // RTL runs
+        assert!(is_rtl_run("שלום"));
+        assert!(is_rtl_run("مرحبا"));
+        assert!(is_rtl_run("  שלום world")); // Starts with Hebrew after neutral space
+        assert!(!is_rtl_run("Hello שלום")); // Starts with Latin
+        assert!(!is_rtl_run("12345"));
+        assert!(is_rtl_run_bytes("שלום".as_bytes()));
+        assert!(!is_rtl_run_bytes(b"Hello world"));
+
+        // Layout line hook
+        let container_x = 10;
+        let container_w = 200;
+        let (pen_ltr, w_ltr, dir_ltr) = layout_line_hook("Hello", 24, container_x, container_w);
+        assert_eq!(dir_ltr, TextDirection::Ltr);
+        assert_eq!(pen_ltr, container_x); // Left-aligned
+        assert!(w_ltr > 0);
+
+        let (pen_rtl, w_rtl, dir_rtl) = layout_line_hook("שלום", 24, container_x, container_w);
+        assert_eq!(dir_rtl, TextDirection::Rtl);
+        assert_eq!(pen_rtl, container_x + container_w - w_rtl); // Right-aligned
+        assert!(pen_rtl > container_x);
+    }
+
+    #[test]
+    fn text_advance_px_supports_utf8_and_latin1() {
+        let ascii_adv = text_advance_px(b"Cafe", 24);
+        let utf8_adv = text_advance_px("Café".as_bytes(), 24);
+        assert!(utf8_adv > 0);
+        assert!(ascii_adv > 0);
+        assert_eq!(str_advance_px("Café", 24), utf8_adv);
+
+        // Degree symbol and bullets
+        let deg_adv = text_advance_px("24°C".as_bytes(), 24);
+        assert!(deg_adv > text_advance_px(b"24C", 24));
+
+        let bullet_adv = text_advance_px("• item".as_bytes(), 24);
+        assert!(bullet_adv > text_advance_px(b"item", 24));
     }
 }
