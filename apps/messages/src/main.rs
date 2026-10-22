@@ -515,7 +515,9 @@ fn put_usize(out: &mut [u8; 8], v: usize) -> usize {
 /// number that appears four times is a number that can drift from the
 /// platform. The alias resolves to the platform's step, so the drift is the
 /// platform's and not this app's.
+#[allow(dead_code)]
 const R_CARD: usize = radius::CARD;
+#[allow(dead_code)]
 const R_SHEET: usize = radius::SHEET;
 const R_SOFT: usize = radius::SOFT_PILL;
 
@@ -528,6 +530,7 @@ const CARD: components::CardStyle =
     components::card_style(&THEME, components::Elevation::Resting);
 
 /// The card's hairline, or the card's own fill when the card has no hairline.
+#[allow(dead_code)]
 const CARD_BORDER: u32 = match CARD.border {
     Some(c) => c,
     None => CARD.fill,
@@ -1082,20 +1085,10 @@ fn pick_control_pixel(x: usize, y: usize, label: &[u8]) -> Option<u32> {
     if !in_rect(PICK_CONTROL, x, y) {
         return None;
     }
-    let fx = PICK_CONTROL.0;
-    let fy = PICK_CONTROL.1;
-    let rx = (x - fx).min(fx + PICK_CONTROL.2 - 1 - x);
-    let ry = (y - fy).min(fy + PICK_CONTROL.3 - 1 - y);
-    if rx < R_SOFT && ry < R_SOFT {
-        let cdx = (R_SOFT - rx) as isize;
-        let cdy = (R_SOFT - ry) as isize;
-        if cdx * cdx + cdy * cdy >= (R_SOFT * R_SOFT) as isize {
-            return Some(THEME.surface);
-        }
-    }
+    let rect = primitives::Rect::new(PICK_CONTROL.0, PICK_CONTROL.1, PICK_CONTROL.2, PICK_CONTROL.3);
     let label_w = std::design::font::measure(label, 1);
-    let label_x = fx + (PICK_CONTROL.2.saturating_sub(label_w)) / 2;
-    let label_y = fy + (PICK_CONTROL.3.saturating_sub(std::design::font::line_height(1))) / 2;
+    let label_x = rect.x + (rect.w.saturating_sub(label_w)) / 2;
+    let label_y = rect.y + (rect.h.saturating_sub(std::design::font::line_height(1))) / 2;
     if let Some(c) = test_text(
         x,
         y,
@@ -1108,7 +1101,7 @@ fn pick_control_pixel(x: usize, y: usize, label: &[u8]) -> Option<u32> {
     ) {
         return Some(c);
     }
-    Some(THEME.surface_container_high)
+    monochrome::control_px(x, y, rect, THEME.surface_container_high, Some(THEME.border))
 }
 
 /// The pixel of a card-shaped row carrying a caption line and a body line.
@@ -1325,15 +1318,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
 
         // Status pill, top-right: truthful NO TRANSPORT / outcome
         if x >= f.pill.left && x < PILL_RIGHT && y >= PILL_TOP && y < PILL_BOTTOM {
-            let rx = (x - f.pill.left).min(PILL_RIGHT - 1 - x);
-            let ry = (y - PILL_TOP).min(PILL_BOTTOM - 1 - y);
-            if rx < R_CARD && ry < R_CARD {
-                let cdx = (R_CARD - rx) as isize;
-                let cdy = (R_CARD - ry) as isize;
-                if cdx * cdx + cdy * cdy >= (R_CARD * R_CARD) as isize {
-                    return THEME.surface_container;
-                }
-            }
+            let rect = primitives::Rect::new(f.pill.left, PILL_TOP, PILL_RIGHT - f.pill.left, PILL_BOTTOM - PILL_TOP);
             if let Some(c) = test_text_bold(
                 x,
                 y,
@@ -1346,10 +1331,10 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
             ) {
                 return c;
             }
-            if rx < 2 || ry < 2 {
-                return THEME.border;
+            if let Some(c) = monochrome::chip_px(x, y, rect, THEME.surface_container_high, Some(THEME.border)) {
+                return c;
             }
-            return THEME.surface_container_high;
+            return THEME.surface_container;
         }
 
         return THEME.surface_container;
@@ -1362,17 +1347,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
         // 2. Search & Filter Bar (y 104..156)
         if y >= SEARCH_Y0 && y < SEARCH_Y1 {
             if in_rect(SEARCH_FIELD, x, y) {
-                let fx = SEARCH_FIELD.0;
-                let fy = SEARCH_FIELD.1;
-                let rx = (x - fx).min(fx + SEARCH_FIELD.2 - 1 - x);
-                let ry = (y - fy).min(fy + SEARCH_FIELD.3 - 1 - y);
-                if rx < R_SHEET && ry < R_SHEET {
-                    let cdx = (R_SHEET - rx) as isize;
-                    let cdy = (R_SHEET - ry) as isize;
-                    if cdx * cdx + cdy * cdy >= (R_SHEET * R_SHEET) as isize {
-                        return THEME.surface;
-                    }
-                }
+                let rect = primitives::Rect::new(SEARCH_FIELD.0, SEARCH_FIELD.1, SEARCH_FIELD.2, SEARCH_FIELD.3);
 
                 // Vector magnifying glass icon at (cx: 56, cy: 130)
                 let cx = 56;
@@ -1393,10 +1368,9 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                     return c;
                 }
 
-                if rx < 2 || ry < 2 {
-                    return THEME.border;
+                if let Some(c) = monochrome::card_px(x, y, rect, THEME.surface_container, Some(THEME.border)) {
+                    return c;
                 }
-                return THEME.surface_container;
             }
             return THEME.surface;
         }
@@ -1591,18 +1565,9 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                 let card_top = CARD_Y0 + idx * CARD_H - scroll;
                 let card_offset_y = rel % CARD_H;
                 if card_offset_y < CARD_BODY_H && x >= CARD_X0 && x < CARD_X1 {
+                    let card_rect = primitives::Rect::new(CARD_X0, card_top, CARD_X1 - CARD_X0, CARD_BODY_H);
                     if let Some(ledger_idx) = messages.filtered_index(idx) {
                         if let Some(tr) = messages.ledger.get_thread_by_idx(ledger_idx) {
-                            let rx = (x - CARD_X0).min(CARD_X1 - 1 - x);
-                            let ry = card_offset_y.min(CARD_BODY_H - 1 - card_offset_y);
-                            if rx < CARD.radius && ry < CARD.radius {
-                                let cdx = (CARD.radius - rx) as isize;
-                                let cdy = (CARD.radius - ry) as isize;
-                                if cdx * cdx + cdy * cdy >= (CARD.radius * CARD.radius) as isize {
-                                    return CARD.fill;
-                                }
-                            }
-
                             // 1. Avatar glyph with colored backdrop
                             let acx = CARD_X0 + 44;
                             let acy = card_top + 52;
@@ -1722,10 +1687,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                                 return THEME.primary;
                             }
 
-                            if rx < 2 || ry < 2 {
-                                return THEME.border;
-                            }
-                            return THEME.surface_container;
+                            return monochrome::card_px(x, y, card_rect, CARD.fill, CARD.border).unwrap_or(THEME.surface);
                         }
                     }
                 }
@@ -1736,17 +1698,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
         // 3b. Recipient editor band (y 1288..1330)
         if y >= RECIPIENT_BAND_Y0 && y < RECIPIENT_BAND_Y1 {
             if in_rect(RECIPIENT_FIELD, x, y) {
-                let fx = RECIPIENT_FIELD.0;
-                let fy = RECIPIENT_FIELD.1;
-                let rx = (x - fx).min(fx + RECIPIENT_FIELD.2 - 1 - x);
-                let ry = (y - fy).min(fy + RECIPIENT_FIELD.3 - 1 - y);
-                if rx < R_CARD && ry < R_CARD {
-                    let cdx = (R_CARD - rx) as isize;
-                    let cdy = (R_CARD - ry) as isize;
-                    if cdx * cdx + cdy * cdy >= (R_CARD * R_CARD) as isize {
-                        return THEME.surface;
-                    }
-                }
+                let rect = primitives::Rect::new(RECIPIENT_FIELD.0, RECIPIENT_FIELD.1, RECIPIENT_FIELD.2, RECIPIENT_FIELD.3);
                 if let Some(c) = test_text(x, y, 40, f.recipient.y, 1, b"To:", THEME.on_surface_variant, THEME.surface_container) {
                     return c;
                 }
@@ -1761,10 +1713,9 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                     return c;
                 }
 
-                if rx < 2 || ry < 2 {
-                    return THEME.border;
+                if let Some(c) = monochrome::card_px(x, y, rect, THEME.surface_container, Some(THEME.border)) {
+                    return c;
                 }
-                return THEME.surface_container;
             }
             if let Some(c) = pick_control_pixel(x, y, PICK_LABEL) {
                 return c;
@@ -1774,28 +1725,14 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
 
         // 4. Compose Input Bar (y 1330..1414)
         if y >= COMPOSE_BAND_Y0 && y < COMPOSE_BAND_Y1 {
-            if y == COMPOSE_BAND_Y0 {
-                return THEME.border;
-            }
             if in_rect(COMPOSE_FIELD, x, y) {
-                let fx = COMPOSE_FIELD.0;
-                let fy = COMPOSE_FIELD.1;
-                let rx = (x - fx).min(fx + COMPOSE_FIELD.2 - 1 - x);
-                let ry = (y - fy).min(fy + COMPOSE_FIELD.3 - 1 - y);
-                if rx < R_SHEET && ry < R_SHEET {
-                    let cdx = (R_SHEET - rx) as isize;
-                    let cdy = (R_SHEET - ry) as isize;
-                    if cdx * cdx + cdy * cdy >= (R_SHEET * R_SHEET) as isize {
-                        return THEME.surface;
-                    }
-                }
+                let rect = primitives::Rect::new(COMPOSE_FIELD.0, COMPOSE_FIELD.1, COMPOSE_FIELD.2, COMPOSE_FIELD.3);
                 if let Some(c) = editor_pixel(x, y, &f.compose, messages.compose_focused, THEME.surface_container) {
                     return c;
                 }
-                if rx < 2 || ry < 2 {
-                    return THEME.border;
+                if let Some(c) = monochrome::card_px(x, y, rect, THEME.surface_container, Some(THEME.border)) {
+                    return c;
                 }
-                return THEME.surface_container;
             }
 
             // Send control circle
@@ -1875,17 +1812,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
             };
 
             if in_rect(SEARCH_FIELD, x, y) {
-                let fx = SEARCH_FIELD.0;
-                let fy = SEARCH_FIELD.1;
-                let rx = (x - fx).min(fx + SEARCH_FIELD.2 - 1 - x);
-                let ry = (y - fy).min(fy + SEARCH_FIELD.3 - 1 - y);
-                if rx < R_CARD && ry < R_CARD {
-                    let cdx = (R_CARD - rx) as isize;
-                    let cdy = (R_CARD - ry) as isize;
-                    if cdx * cdx + cdy * cdy >= (R_CARD * R_CARD) as isize {
-                        return THEME.surface;
-                    }
-                }
+                let rect = primitives::Rect::new(SEARCH_FIELD.0, SEARCH_FIELD.1, SEARCH_FIELD.2, SEARCH_FIELD.3);
 
                 if show_threat {
                     // Warning icon at cx: 56, cy: 130
@@ -1916,10 +1843,9 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                     return c;
                 }
 
-                if rx < 2 || ry < 2 {
-                    return bar_border;
+                if let Some(c) = monochrome::card_px(x, y, rect, bar_bg, Some(bar_border)) {
+                    return c;
                 }
-                return bar_bg;
             }
             return THEME.surface;
         }
@@ -1957,22 +1883,14 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                     let b_bot = b_top + BUBBLE_H;
                     if y >= b_top && y < b_bot {
                         let is_incoming = msgs[i].direction == MessageDirection::Incoming;
-                        let (bx0, bx1, fill_color, border_color) = if is_incoming {
-                            (32usize, 520usize, THEME.surface_container_high, THEME.border)
+                        let (bx0, bx1, fill_color, border_color, ink_color) = if is_incoming {
+                            (32usize, 520usize, THEME.surface_container_high, THEME.border, THEME.on_surface)
                         } else {
-                            (200usize, 688usize, THEME.success_container, THEME.success)
+                            (200usize, 688usize, THEME.inverted_surface(), THEME.inverted_surface(), THEME.ink_on_dark)
                         };
 
                         if x >= bx0 && x < bx1 {
-                            let rx = (x - bx0).min(bx1 - 1 - x);
-                            let ry = (y - b_top).min(b_bot - 1 - y);
-                            if rx < R_SOFT && ry < R_SOFT {
-                                let cdx = (R_SOFT - rx) as isize;
-                                let cdy = (R_SOFT - ry) as isize;
-                                if cdx * cdx + cdy * cdy >= (R_SOFT * R_SOFT) as isize {
-                                    return THEME.surface;
-                                }
-                            }
+                            let bubble_rect = primitives::Rect::new(bx0, b_top, bx1 - bx0, BUBBLE_H);
 
                             // Message body text (scale 1)
                             let mut buf = [0u8; 96];
@@ -1989,7 +1907,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                                 b_top + 14,
                                 1,
                                 &buf[..n],
-                                THEME.on_surface,
+                                ink_color,
                                 fill_color,
                             ) {
                                 return c;
@@ -1997,20 +1915,8 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
 
                             // Subline / Status indicator
                             let (status_label, status_color) = if is_incoming {
-                                // WHY this says the record was written here:
-                                // no transport is bound to this app, so
-                                // nothing can arrive. A record whose
-                                // direction is incoming can only be one this
-                                // device wrote, and naming a transport it
-                                // does not have would be a claim the app
-                                // cannot support.
                                 (INCOMING_LOCAL_LABEL, THEME.on_surface_variant)
                             } else {
-                                // WHY every state is named rather than
-                                // colour-coded: "Sent" has to mean the
-                                // transport took the message, "Not sent" has
-                                // to mean nobody did, and a state with no
-                                // transport behind it has to say so.
                                 match msgs[i].status {
                                     DeliveryStatus::RefusedNoTransport => {
                                         (b"Refused - No Transport" as &[u8], THEME.warning)
@@ -2018,9 +1924,9 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                                     DeliveryStatus::Sent => (b"Sent" as &[u8], THEME.success),
                                     DeliveryStatus::Failed => (b"Failed" as &[u8], THEME.error),
                                     DeliveryStatus::LocalOnly => {
-                                        (b"Local only - not sent" as &[u8], THEME.on_surface_variant)
+                                        (b"Local only - not sent" as &[u8], THEME.muted)
                                     }
-                                    DeliveryStatus::Pending => (b"Not sent" as &[u8], THEME.on_surface_variant),
+                                    DeliveryStatus::Pending => (b"Not sent" as &[u8], THEME.muted),
                                 }
                             };
 
@@ -2037,8 +1943,16 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                                 return c;
                             }
 
-                            if rx < 2 || ry < 2 {
-                                return border_color;
+                            if let Some(c) = primitives::draw_rounded_rect(
+                                x,
+                                y,
+                                bubble_rect,
+                                R_SOFT,
+                                fill_color,
+                                Some(border_color),
+                                1,
+                            ) {
+                                return c;
                             }
                             return fill_color;
                         }
@@ -2051,17 +1965,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
         // Draft Bar: Recipient row (y 1288..1330)
         if y >= RECIPIENT_BAND_Y0 && y < RECIPIENT_BAND_Y1 {
             if in_rect(RECIPIENT_FIELD, x, y) {
-                let fx = RECIPIENT_FIELD.0;
-                let fy = RECIPIENT_FIELD.1;
-                let rx = (x - fx).min(fx + RECIPIENT_FIELD.2 - 1 - x);
-                let ry = (y - fy).min(fy + RECIPIENT_FIELD.3 - 1 - y);
-                if rx < R_CARD && ry < R_CARD {
-                    let cdx = (R_CARD - rx) as isize;
-                    let cdy = (R_CARD - ry) as isize;
-                    if cdx * cdx + cdy * cdy >= (R_CARD * R_CARD) as isize {
-                        return THEME.surface;
-                    }
-                }
+                let rect = primitives::Rect::new(RECIPIENT_FIELD.0, RECIPIENT_FIELD.1, RECIPIENT_FIELD.2, RECIPIENT_FIELD.3);
                 if let Some(c) = test_text(x, y, 40, f.recipient.y, 1, b"To:", THEME.on_surface_variant, THEME.surface_container) {
                     return c;
                 }
@@ -2076,10 +1980,9 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                     return c;
                 }
 
-                if rx < 2 || ry < 2 {
-                    return THEME.border;
+                if let Some(c) = monochrome::card_px(x, y, rect, THEME.surface_container, Some(THEME.border)) {
+                    return c;
                 }
-                return THEME.surface_container;
             }
             if let Some(c) = pick_control_pixel(x, y, INFO_LABEL) {
                 return c;
@@ -2089,28 +1992,14 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
 
         // Compose input field (y 1330..1414)
         if y >= COMPOSE_BAND_Y0 && y < COMPOSE_BAND_Y1 {
-            if y == COMPOSE_BAND_Y0 {
-                return THEME.border;
-            }
             if in_rect(COMPOSE_FIELD, x, y) {
-                let fx = COMPOSE_FIELD.0;
-                let fy = COMPOSE_FIELD.1;
-                let rx = (x - fx).min(fx + COMPOSE_FIELD.2 - 1 - x);
-                let ry = (y - fy).min(fy + COMPOSE_FIELD.3 - 1 - y);
-                if rx < R_SHEET && ry < R_SHEET {
-                    let cdx = (R_SHEET - rx) as isize;
-                    let cdy = (R_SHEET - ry) as isize;
-                    if cdx * cdx + cdy * cdy >= (R_SHEET * R_SHEET) as isize {
-                        return THEME.surface;
-                    }
-                }
+                let rect = primitives::Rect::new(COMPOSE_FIELD.0, COMPOSE_FIELD.1, COMPOSE_FIELD.2, COMPOSE_FIELD.3);
                 if let Some(c) = editor_pixel(x, y, &f.compose, messages.compose_focused, THEME.surface_container) {
                     return c;
                 }
-                if rx < 2 || ry < 2 {
-                    return THEME.border;
+                if let Some(c) = monochrome::card_px(x, y, rect, THEME.surface_container, Some(THEME.border)) {
+                    return c;
                 }
-                return THEME.surface_container;
             }
 
             // Send control circle
@@ -2165,15 +2054,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
             // The notice band: what the last action on this screen did.
             let rect = (CARD_X0, RECIPIENT_BAND_Y0 + 16, CARD_X1 - CARD_X0, 96);
             if x >= rect.0 && x < rect.0 + rect.2 && y >= rect.1 && y < rect.1 + rect.3 {
-                let rx = (x - rect.0).min(rect.0 + rect.2 - 1 - x);
-                let ry = (y - rect.1).min(rect.1 + rect.3 - 1 - y);
-                if rx < CARD.radius && ry < CARD.radius {
-                    let cdx = (CARD.radius - rx) as isize;
-                    let cdy = (CARD.radius - ry) as isize;
-                    if cdx * cdx + cdy * cdy >= (CARD.radius * CARD.radius) as isize {
-                        return THEME.surface;
-                    }
-                }
+                let card_rect = primitives::Rect::new(rect.0, rect.1, rect.2, rect.3);
                 let mut buf = [0u8; 96];
                 let n = if messages.notice_len > 0 {
                     std::design::font::ellipsize(
@@ -2205,12 +2086,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                 return monochrome::card_px(
                     x,
                     y,
-                    primitives::Rect::new(
-                        EMPTY_CARD.0,
-                        EMPTY_CARD.1,
-                        EMPTY_CARD.2,
-                        EMPTY_CARD.3,
-                    ),
+                    card_rect,
                     CARD.fill,
                     CARD.border,
                 )
@@ -2251,15 +2127,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
             // the row they tapped filled in.
             let rect = (CARD_X0, RECIPIENT_BAND_Y0 + 16, CARD_X1 - CARD_X0, 96);
             if x >= rect.0 && x < rect.0 + rect.2 && y >= rect.1 && y < rect.1 + rect.3 {
-                let rx = (x - rect.0).min(rect.0 + rect.2 - 1 - x);
-                let ry = (y - rect.1).min(rect.1 + rect.3 - 1 - y);
-                if rx < CARD.radius && ry < CARD.radius {
-                    let cdx = (CARD.radius - rx) as isize;
-                    let cdy = (CARD.radius - ry) as isize;
-                    if cdx * cdx + cdy * cdy >= (CARD.radius * CARD.radius) as isize {
-                        return THEME.surface;
-                    }
-                }
+                let card_rect = primitives::Rect::new(rect.0, rect.1, rect.2, rect.3);
                 let mut buf = [0u8; 64];
                 let n = if messages.recip_len > 0 {
                     std::design::font::ellipsize(
@@ -2286,12 +2154,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                 return monochrome::card_px(
                     x,
                     y,
-                    primitives::Rect::new(
-                        EMPTY_CARD.0,
-                        EMPTY_CARD.1,
-                        EMPTY_CARD.2,
-                        EMPTY_CARD.3,
-                    ),
+                    card_rect,
                     CARD.fill,
                     CARD.border,
                 )
