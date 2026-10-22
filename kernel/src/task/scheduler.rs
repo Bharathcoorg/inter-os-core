@@ -471,7 +471,34 @@ impl Scheduler {
         self.tasks[current_idx].cap_table.revoke_all();
         // Surface ownership follows task lifetime. Reclaim all app surfaces at
         // the common exit path so normal std::exit() cannot leave stale windows.
-        crate::drivers::display_kms::DRM_KMS.lock().destroy_surfaces_owned_by(task_id.0);
+        //
+        // WHY the shell is found here and not by a helper that looks it up
+        // itself: this method already holds the scheduler's lock, and every
+        // helper that finds the shell goes through the scheduler. Calling one
+        // here would take the same lock twice, so the owner is read from the
+        // table that is already open, and the display is asked directly.
+        //
+        // WHY the shell is raised at all: an application is a layer over the
+        // desktop. When the layer is gone and the desktop stays hidden, the
+        // screen composits the system band over an empty canvas, which is the
+        // blank white screen a person sees after pressing back.
+        let shell_owner = self
+            .tasks
+            .iter()
+            .find(|t| t.name == "launcher")
+            .map(|t| t.id.0);
+        {
+            let mut kms = crate::drivers::display_kms::DRM_KMS.lock();
+            kms.destroy_surfaces_owned_by(task_id.0);
+            // WHY not gated on a reclaimed surface: the task may have taken its
+            // own surface down before it died, and the screen still has to come
+            // back to the desktop. See the exit syscall for the same rule.
+            if let Some(shell) = shell_owner {
+                if shell != task_id.0 {
+                    kms.set_surfaces_visibility_for_task(shell, true);
+                }
+            }
+        }
 
         // Reparent live children to primordial init so a dead parent cannot leave
         // an unreapable child/zombie subtree behind.
@@ -555,7 +582,28 @@ impl Scheduler {
         crate::event::cleanup_task(id);
         crate::net::cleanup_task(id);
         crate::capability::cleanup_task(id);
-        crate::drivers::display_kms::DRM_KMS.lock().destroy_surfaces_owned_by(id.0);
+        // WHY the shell is raised here too: this is the other place a task's
+        // surfaces die, and a task that is terminated by someone else leaves
+        // the same blank screen the common exit path leaves. The lookup is
+        // done from the table this method already holds for the reason given
+        // at the common exit path above.
+        let shell_owner = self
+            .tasks
+            .iter()
+            .find(|t| t.name == "launcher")
+            .map(|t| t.id.0);
+        {
+            let mut kms = crate::drivers::display_kms::DRM_KMS.lock();
+            kms.destroy_surfaces_owned_by(id.0);
+            // WHY not gated on a reclaimed surface: the task may have taken its
+            // own surface down before it died, and the screen still has to come
+            // back to the desktop. See the exit syscall for the same rule.
+            if let Some(shell) = shell_owner {
+                if shell != id.0 {
+                    kms.set_surfaces_visibility_for_task(shell, true);
+                }
+            }
+        }
         let user_id = crate::task::process::user_for_task(id).unwrap_or(0);
         crate::notification::NOTIFICATION_MANAGER.lock().cancel_all_for_package(&task_name, user_id);
 

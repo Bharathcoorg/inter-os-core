@@ -3,7 +3,7 @@
 //! Production Ring-3 graphical application executing in User Mode:
 //! - DRM/KMS Client Surface allocation with dynamic capability lookup
 //! - Pure `#![no_std]` and `#![no_main]` with zero heap allocations in scanout and event polling
-//! - Google Keep-style colorful card aesthetic with 8 distinct pastel themes
+//! - Monochrome note tones: four paper steps and four ink steps, all platform roles
 //! - Generous, airy spacing between cards, chips, search pill, and typography
 //! - Staggered card stream with kinetic touch drag scrolling and category filter chips
 //! - Elevated Search Pill bar with live substring filtering and keyboard integration
@@ -28,9 +28,9 @@ use interos_std::design::scroll::ScrollState;
 use notes::keyboard::{self, KeyAction};
 use notes::library;
 pub use notes::{
-    format_count_badge, format_timestamp, LineSpan, Note, NoteColorTheme, NotesStore,
-    TextEditorBuffer, CATEGORY_NAMES, CivilTime, KEEP_COLORS, MAX_BODY_LEN, MAX_NOTES, MAX_TITLE_LEN,
-    StorageState, TIMESTAMP_UNKNOWN,
+    format_count_badge, format_timestamp, LineSpan, Note, NoteTone, NotesStore,
+    TextEditorBuffer, CATEGORY_NAMES, CivilTime, MAX_BODY_LEN, MAX_NOTES, MAX_TITLE_LEN,
+    NOTE_TONE_COUNT, NOTE_TONES, StorageState, TIMESTAMP_UNKNOWN,
 };
 
 /// The platform's card treatment, at the elevation the app's cards sit at.
@@ -111,10 +111,11 @@ const RULE_DY: usize = 30;
 // SDK for the same roles draws the same notes surface. See `notes::theme` for
 // the mapping from the old names to the platform's roles.
 //
-// WHY the note's own colour theme is still a local palette: `KEEP_COLORS` is
-// the *note's* palette -- a thing the user picks, one of eight, each with its
-// own colours -- and not the app's chrome. The platform's theme describes the
-// surface the note is drawn on; the note's own colours are content.
+// WHY the note's own tone is still a ladder: `NOTE_TONES` is the tone the
+// user picks for a note -- one of eight, from paper to ink -- and not the
+// app's chrome. The platform's theme describes the surface the note is drawn
+// on; the tone is what the user chose to write it on, and every step of the
+// ladder is itself a platform role.
 // -----------------------------------------------------------------------------
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ViewMode {
@@ -609,15 +610,20 @@ fn draw_palette_glyph(x: usize, y: usize, cx: usize, cy: usize, color: u32) -> O
     if r2 >= 49 && r2 <= 81 {
         return Some(color);
     }
-    // 3 distinct color wells:
+    // 3 tone wells, all in the ink the caller asked for.
+    //
+    // WHY they are not green, amber and red: a palette glyph is a shape, not
+    // a status, and the platform's three status colours are reserved for a
+    // reading that means something. Drawing them here spent the status
+    // palette on decoration.
     if (dx + 3) * (dx + 3) + (dy + 2) * (dy + 2) <= 3 {
-        return Some(THEME.primary);
+        return Some(color);
     }
     if (dx + 1) * (dx + 1) + (dy - 4) * (dy - 4) <= 3 {
-        return Some(THEME.warning);
+        return Some(color);
     }
     if (dx - 3) * (dx - 3) + (dy + 1) * (dy + 1) <= 3 {
-        return Some(THEME.error);
+        return Some(color);
     }
     None
 }
@@ -651,7 +657,24 @@ fn draw_chevron_down(x: usize, y: usize, cx: usize, cy: usize, color: u32) -> Op
     None
 }
 
-fn draw_checkbox_glyph(x: usize, y: usize, bx: usize, by: usize, is_checked: bool, accent: u32) -> Option<u32> {
+/// Draws a checklist box: an ink rim when empty, a filled ink box with the
+/// tick punched out of it when checked.
+///
+/// WHY the tick is `bg` and not a fixed colour: the box sits on a note whose
+/// fill the user chose, and a tick painted in a fixed ink disappears the
+/// moment the fill is that ink's own tone. The surface under the box is the
+/// one colour the tick is guaranteed to contrast with.
+#[allow(clippy::too_many_arguments)]
+fn draw_checkbox_glyph(
+    x: usize,
+    y: usize,
+    bx: usize,
+    by: usize,
+    is_checked: bool,
+    ink: u32,
+    rim: u32,
+    bg: u32,
+) -> Option<u32> {
     if x < bx || x >= bx + 22 || y < by || y >= by + 22 {
         return None;
     }
@@ -665,13 +688,13 @@ fn draw_checkbox_glyph(x: usize, y: usize, bx: usize, by: usize, is_checked: boo
         let is_check = (rx >= 5 && rx <= 9 && (ry as i32 - (rx as i32 + 6)).abs() <= 1)
             || (rx >= 9 && rx <= 16 && (ry as i32 - (24 - rx as i32)).abs() <= 1);
         if is_check {
-            return Some(THEME.on_surface);
+            return Some(bg);
         }
-        return Some(if accent != 0 { accent } else { THEME.success });
+        return Some(ink);
     } else {
         let in_inner = in_rounded_rect(x, y, bx + 2, by + 2, 18, 18, 4);
         if !in_inner {
-            return Some(THEME.on_surface_variant);
+            return Some(rim);
         }
         return None;
     }
@@ -714,9 +737,13 @@ const KB_Y1: usize = keyboard::KB_Y1;
 
 fn render_pixel(x: usize, y: usize, state: &AppState) -> u32 {
     // 1. Android / InterOS Bottom Home Gesture Bar (y: 1416..1440)
+    //
+    // WHY the indicator is ink and not a translucent white: the bar is drawn
+    // on the theme's page, and a white pill on a near-white page is a pill
+    // nobody can see. The ink role is the strong mark a home indicator is.
     if y >= 1416 && y <= 1440 {
         if in_rounded_rect(x, y, 260, 1422, 200, 4, 2) {
-            return 0x80FFFFFF;
+            return THEME.on_surface;
         }
         return THEME.surface;
     }
@@ -932,7 +959,11 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
                 let is_active = state.selected_category as usize == i;
                 if in_rounded_rect(x, y, cx, 96, cw, 44, 14) {
                     if is_active {
-                        let txt_color = THEME.on_surface;
+                        // WHY on_primary and not on_surface: the active chip
+                        // is filled with `primary`, and in the monochrome
+                        // theme both `primary` and `on_surface` are the same
+                        // near-black. Ink on a filled control is `on_primary`.
+                        let txt_color = THEME.on_primary;
                         let text_x = cx + (cw - chip_names[i].len() * 8) / 2;
                         if let Some(c) = test_text(x, y, text_x, 109, 1, chip_names[i], txt_color, THEME.primary, true) {
                             return c;
@@ -956,7 +987,7 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
         if in_rounded_rect(x, y, PIN_FILTER.0, PIN_FILTER.1, PIN_FILTER.2, PIN_FILTER.3, 14) {
             let active = state.pinned_only;
             let fill = if active { THEME.primary } else { THEME.surface_container };
-            let ink = if active { THEME.on_surface } else { THEME.on_surface_variant };
+            let ink = if active { THEME.on_primary } else { THEME.on_surface_variant };
             if !active && !in_rounded_rect(
                 x,
                 y,
@@ -986,9 +1017,12 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
 
     // --- D. Floating Action Bar Dock at Bottom (y: 1318..1386) ---
     if !state.keyboard_visible && y >= 1318 && y <= 1386 {
-        // Right circular Cyan FAB (+) at (654, 1352, r=28)
+        // Right circular primary FAB (+) at (654, 1352, r=28)
         if in_circle(x, y, 654, 1352, 28) {
-            if let Some(c) = draw_plus_glyph(x, y, 654, 1352, THEME.on_surface) {
+            // The glyph is drawn on the filled primary control, so its ink is
+            // the control's on-colour; on_surface would be the same black as
+            // the fill in the monochrome theme.
+            if let Some(c) = draw_plus_glyph(x, y, 654, 1352, THEME.on_primary) {
                 return c;
             }
             return THEME.primary;
@@ -1001,7 +1035,16 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
             }
 
             // Checklist tool icon at x: 440
-            if let Some(c) = draw_checkbox_glyph(x, y, 440, 1341, false, THEME.primary) {
+            if let Some(c) = draw_checkbox_glyph(
+                x,
+                y,
+                440,
+                1341,
+                false,
+                THEME.primary,
+                THEME.on_surface_variant,
+                THEME.surface_container,
+            ) {
                 return c;
             }
 
@@ -1109,7 +1152,7 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
 
             let iy = y as isize;
             if iy >= cy0 && iy < cy1 && x >= 28 && x <= 692 {
-                let theme = KEEP_COLORS[note.color_idx as usize % 8];
+                let theme = NOTE_TONES[note.color_idx as usize % NOTE_TONE_COUNT];
 
                 // Rounded Card Frame (r=20)
                 if !in_rounded_rect(x, y, 28, cy0 as usize, 664, card_h, CARD.radius) {
@@ -1137,13 +1180,17 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
 
                 // 1. Top row: Note Title (Scale 1 Bold, y: uy0 + 22 .. uy0 + 46)
                 let title = note.title_bytes();
-                if let Some(c) = test_text(x, y, 56, uy0 + 22, 1, title, theme.text_primary, theme.bg, true) {
+                if let Some(c) = test_text(x, y, 56, uy0 + 22, 1, title, theme.title_ink, theme.fill, true) {
                     return c;
                 }
 
                 // Pinned Vector Icon if pinned (x: 656, y: uy0 + 26)
+                //
+                // WHY the tone's accent and not `warning`: a pin is a state
+                // the user set, not a caution. Amber here was a second status
+                // palette spent on a bookmark.
                 if note.is_pinned {
-                    if let Some(c) = draw_pin_glyph(x, y, 656, uy0 + 26, true, THEME.warning) {
+                    if let Some(c) = draw_pin_glyph(x, y, 656, uy0 + 26, true, theme.accent) {
                         return c;
                     }
                 }
@@ -1157,18 +1204,27 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
                     // Preview line 1 at uy0 + 60 (ends at uy0 + 84)
                     if !sn.p1.is_empty() {
                         if sn.p1_is_chk {
-                            if let Some(c) = draw_checkbox_glyph(x, y, 56, uy0 + 60, sn.p1_is_done, theme.accent) {
+                            if let Some(c) = draw_checkbox_glyph(
+                                x,
+                                y,
+                                56,
+                                uy0 + 60,
+                                sn.p1_is_done,
+                                theme.accent,
+                                theme.muted_ink,
+                                theme.fill,
+                            ) {
                                 return c;
                             }
-                            let tcol = if sn.p1_is_done { theme.text_muted } else { theme.text_body };
-                            if let Some(c) = test_text(x, y, 88, uy0 + 60, 1, sn.p1, tcol, theme.bg, false) {
+                            let tcol = if sn.p1_is_done { theme.muted_ink } else { theme.body_ink };
+                            if let Some(c) = test_text(x, y, 88, uy0 + 60, 1, sn.p1, tcol, theme.fill, false) {
                                 return c;
                             }
                             if sn.p1_is_done && y == uy0 + 72 && x >= 88 && x <= 88 + sn.p1.len() * 8 {
-                                return theme.text_muted;
+                                return theme.muted_ink;
                             }
                         } else {
-                            if let Some(c) = test_text(x, y, 56, uy0 + 60, 1, sn.p1, theme.text_body, theme.bg, false) {
+                            if let Some(c) = test_text(x, y, 56, uy0 + 60, 1, sn.p1, theme.body_ink, theme.fill, false) {
                                 return c;
                             }
                         }
@@ -1177,18 +1233,27 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
                     // Preview line 2 at uy0 + 92 (ends at uy0 + 116, clean 8px gap)
                     if !sn.p2.is_empty() {
                         if sn.p2_is_chk {
-                            if let Some(c) = draw_checkbox_glyph(x, y, 56, uy0 + 92, sn.p2_is_done, theme.accent) {
+                            if let Some(c) = draw_checkbox_glyph(
+                                x,
+                                y,
+                                56,
+                                uy0 + 92,
+                                sn.p2_is_done,
+                                theme.accent,
+                                theme.muted_ink,
+                                theme.fill,
+                            ) {
                                 return c;
                             }
-                            let tcol = if sn.p2_is_done { theme.text_muted } else { theme.text_body };
-                            if let Some(c) = test_text(x, y, 88, uy0 + 92, 1, sn.p2, tcol, theme.bg, false) {
+                            let tcol = if sn.p2_is_done { theme.muted_ink } else { theme.body_ink };
+                            if let Some(c) = test_text(x, y, 88, uy0 + 92, 1, sn.p2, tcol, theme.fill, false) {
                                 return c;
                             }
                             if sn.p2_is_done && y == uy0 + 104 && x >= 88 && x <= 88 + sn.p2.len() * 8 {
-                                return theme.text_muted;
+                                return theme.muted_ink;
                             }
                         } else {
-                            if let Some(c) = test_text(x, y, 56, uy0 + 92, 1, sn.p2, theme.text_body, theme.bg, false) {
+                            if let Some(c) = test_text(x, y, 56, uy0 + 92, 1, sn.p2, theme.body_ink, theme.fill, false) {
                                 return c;
                             }
                         }
@@ -1198,19 +1263,19 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
                 // 3. Bottom Row: Category Chip & Timestamp (y: uy0 + 144..176)
                 let cat_name = CATEGORY_NAMES[note.category as usize % 5];
                 if in_rounded_rect(x, y, 56, uy0 + 144, 88, 32, 10) {
-                    if let Some(c) = test_text(x, y, 66, uy0 + 148, 1, cat_name, theme.accent, theme.chip_bg, true) {
+                    if let Some(c) = test_text(x, y, 66, uy0 + 148, 1, cat_name, theme.accent, theme.chip, true) {
                         return c;
                     }
-                    return theme.chip_bg;
+                    return theme.chip;
                 }
 
                 let mut ts_buf = [0u8; 32];
                 let ts_len = format_note_timestamp(note, state.now_civil, &mut ts_buf);
-                if let Some(c) = test_text(x, y, 510, uy0 + 166, 1, &ts_buf[..ts_len], theme.text_muted, theme.bg, false) {
+                if let Some(c) = test_text(x, y, 510, uy0 + 166, 1, &ts_buf[..ts_len], theme.muted_ink, theme.fill, false) {
                     return c;
                 }
 
-                return theme.bg;
+                return theme.fill;
             }
         }
 
@@ -1235,7 +1300,7 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
 }
 
 // -----------------------------------------------------------------------------
-// View 2: Distraction-Free Colored Note Editor (Google Keep UX)
+// View 2: Distraction-Free Note Editor (Google Keep UX)
 // -----------------------------------------------------------------------------
 
 fn render_note_editor(x: usize, y: usize, state: &AppState) -> u32 {
@@ -1243,16 +1308,16 @@ fn render_note_editor(x: usize, y: usize, state: &AppState) -> u32 {
         Some(n) => n,
         None => return THEME.surface,
     };
-    let theme = KEEP_COLORS[note.color_idx as usize % 8];
+    let theme = NOTE_TONES[note.color_idx as usize % NOTE_TONE_COUNT];
 
     // --- A. Top Navigation Bar (y: 0..84) ---
     if y < 84 {
         // Back Chevron at (50, 46, r=22)
         if in_circle(x, y, 50, 46, 22) {
-            if let Some(c) = draw_chevron_left(x, y, 50, 46, THEME.on_surface) {
+            if let Some(c) = draw_chevron_left(x, y, 50, 46, theme.title_ink) {
                 return c;
             }
-            return theme.chip_bg;
+            return theme.chip;
         }
 
         // Status metadata: "Saved", "Editing..." or "Not saved"
@@ -1267,35 +1332,37 @@ fn render_note_editor(x: usize, y: usize, state: &AppState) -> u32 {
         } else {
             b"Saved"
         };
-        let status_color = if state.save_failed { THEME.error } else { theme.text_muted };
-        if let Some(c) = test_text(x, y, 96, 38, 1, status_text, status_color, theme.bg, false) {
+        let status_color = if state.save_failed { THEME.error } else { theme.muted_ink };
+        if let Some(c) = test_text(x, y, 96, 38, 1, status_text, status_color, theme.fill, false) {
             return c;
         }
 
         // Right Tools:
         // 1. Pin Toggle Glyph (x: 520, y: 46)
         if in_circle(x, y, 520, 46, 20) {
-            let pcol = if note.is_pinned { THEME.warning } else { theme.text_muted };
+            // A pin is the note's own state, so it takes the tone's accent;
+            // `warning` would report a caution the user never set.
+            let pcol = if note.is_pinned { theme.accent } else { theme.muted_ink };
             if let Some(c) = draw_pin_glyph(x, y, 520, 46, note.is_pinned, pcol) {
                 return c;
             }
-            return theme.chip_bg;
+            return theme.chip;
         }
 
         // 2. Palette Toggle Glyph (x: 580, y: 46)
         if in_circle(x, y, 580, 46, 20) {
-            if let Some(c) = draw_palette_glyph(x, y, 580, 46, THEME.on_surface) {
+            if let Some(c) = draw_palette_glyph(x, y, 580, 46, theme.title_ink) {
                 return c;
             }
-            return theme.chip_bg;
+            return theme.chip;
         }
 
         // 3. Trash Can Glyph (x: 640, y: 46)
         if in_circle(x, y, 640, 46, 20) {
-            if let Some(c) = draw_trash_glyph(x, y, 640, 46, THEME.on_surface) {
+            if let Some(c) = draw_trash_glyph(x, y, 640, 46, THEME.error) {
                 return c;
             }
-            return theme.chip_bg;
+            return theme.chip;
         }
 
         // Subtle divider line
@@ -1303,7 +1370,7 @@ fn render_note_editor(x: usize, y: usize, state: &AppState) -> u32 {
             return theme.border;
         }
 
-        return theme.bg;
+        return theme.fill;
     }
 
     // --- B. Note Title Area (y: 96..166) ---
@@ -1311,11 +1378,11 @@ fn render_note_editor(x: usize, y: usize, state: &AppState) -> u32 {
     if y >= 96 && y < 166 {
         let title = note.title_bytes();
         if title.is_empty() {
-            if let Some(c) = test_text(x, y, 44, 116, 1, b"Title", theme.text_muted, theme.bg, true) {
+            if let Some(c) = test_text(x, y, 44, 116, 1, b"Title", theme.muted_ink, theme.fill, true) {
                 return c;
             }
         } else {
-            if let Some(c) = test_text(x, y, 44, 116, 1, title, theme.text_primary, theme.bg, true) {
+            if let Some(c) = test_text(x, y, 44, 116, 1, title, theme.title_ink, theme.fill, true) {
                 return c;
             }
         }
@@ -1329,10 +1396,10 @@ fn render_note_editor(x: usize, y: usize, state: &AppState) -> u32 {
             }
         }
 
-        return theme.bg;
+        return theme.fill;
     }
 
-    // --- C. Swatch Picker Popover Bar ---
+    // --- C. Tone Picker Popover Bar ---
     let swatch_y0 = if state.keyboard_visible { 852 } else { 1248 };
     let swatch_y1 = swatch_y0 + 62;
     if state.swatch_picker_open && y >= swatch_y0 && y <= swatch_y1 {
@@ -1342,9 +1409,9 @@ fn render_note_editor(x: usize, y: usize, state: &AppState) -> u32 {
             }
 
             let cy = swatch_y0 + 31;
-            for i in 0..8 {
+            for i in 0..NOTE_TONE_COUNT {
                 let cx = 58 + i * 82;
-                let col_theme = KEEP_COLORS[i];
+                let tone = NOTE_TONES[i];
 
                 // Active circle ring
                 if i == note.color_idx as usize {
@@ -1355,13 +1422,21 @@ fn render_note_editor(x: usize, y: usize, state: &AppState) -> u32 {
 
                 if in_circle(x, y, cx, cy, 18) {
                     if !in_circle(x, y, cx, cy, 16) {
-                        return col_theme.border;
+                        // WHY the picker's ring is the platform's secondary
+                        // ink and not the tone's own hairline: the four paper
+                        // tones are all near-white, and a near-white swatch
+                        // edged with the card hairline on a white bar is a
+                        // swatch with no edge. The ring is picker chrome, so
+                        // it is drawn in picker ink.
+                        return THEME.on_surface_variant;
                     }
-                    return col_theme.bg;
+                    return tone.fill;
                 }
             }
 
-            return THEME.surface_container;
+            // One step below the popover's card, so the white and canvas
+            // swatches have something to be white against.
+            return THEME.surface_container_low;
         }
     }
 
@@ -1375,7 +1450,16 @@ fn render_note_editor(x: usize, y: usize, state: &AppState) -> u32 {
 
             // Checkbox button at x: 44
             if in_rounded_rect(x, y, 32, 922, 54, 46, 10) {
-                if let Some(c) = draw_checkbox_glyph(x, y, 48, 934, false, THEME.primary) {
+                if let Some(c) = draw_checkbox_glyph(
+                    x,
+                    y,
+                    48,
+                    934,
+                    false,
+                    THEME.primary,
+                    THEME.on_surface_variant,
+                    THEME.surface_container,
+                ) {
                     return c;
                 }
                 return THEME.surface_container;
@@ -1398,9 +1482,14 @@ fn render_note_editor(x: usize, y: usize, state: &AppState) -> u32 {
             }
 
             // Category Cycle Pill at x: 224..340
+            //
+            // WHY the platform's ink and not the note's accent: this strip is
+            // platform chrome drawn on `surface_container`, not on the note's
+            // tone. A dark note's accent is near-white and would disappear on
+            // the strip's near-white fill.
             let cat_name = CATEGORY_NAMES[note.category as usize % 5];
             if in_rounded_rect(x, y, 224, 922, 116, 46, 10) {
-                if let Some(c) = test_text(x, y, 240, 936, 1, cat_name, theme.accent, THEME.surface_container, true) {
+                if let Some(c) = test_text(x, y, 240, 936, 1, cat_name, THEME.primary, THEME.surface_container, true) {
                     return c;
                 }
                 return THEME.surface_container;
@@ -1432,15 +1521,24 @@ fn render_note_editor(x: usize, y: usize, state: &AppState) -> u32 {
                 // Category Tag
                 let cat_name = CATEGORY_NAMES[note.category as usize % 5];
                 if in_rounded_rect(x, y, 54, 1338, 100, 40, 12) {
-                    if let Some(c) = test_text(x, y, 74, 1346, 1, cat_name, theme.accent, theme.chip_bg, true) {
+                    if let Some(c) = test_text(x, y, 74, 1346, 1, cat_name, theme.accent, theme.chip, true) {
                         return c;
                     }
-                    return theme.chip_bg;
+                    return theme.chip;
                 }
 
                 // Checklist tool
                 if in_circle(x, y, 240, 1358, 20) {
-                    if let Some(c) = draw_checkbox_glyph(x, y, 229, 1347, false, THEME.primary) {
+                    if let Some(c) = draw_checkbox_glyph(
+                        x,
+                        y,
+                        229,
+                        1347,
+                        false,
+                        THEME.primary,
+                        THEME.on_surface_variant,
+                        THEME.surface_container,
+                    ) {
                         return c;
                     }
                     return THEME.surface_container;
@@ -1499,7 +1597,7 @@ fn render_note_editor(x: usize, y: usize, state: &AppState) -> u32 {
             }
         }
         if state.editor_buf.len == 0 {
-            if let Some(c) = test_text(x, y, 44, 176, 1, b"Note", theme.text_muted, theme.bg, false) {
+            if let Some(c) = test_text(x, y, 44, 176, 1, b"Note", theme.muted_ink, theme.fill, false) {
                 return c;
             }
         } else {
@@ -1515,22 +1613,31 @@ fn render_note_editor(x: usize, y: usize, state: &AppState) -> u32 {
 
                     if is_chk {
                         // Draw Checkbox vertically centered at line_y + 7 (22px in 36px line)
-                        if let Some(c) = draw_checkbox_glyph(x, y, 44, line_y + 7, is_done, theme.accent) {
+                        if let Some(c) = draw_checkbox_glyph(
+                            x,
+                            y,
+                            44,
+                            line_y + 7,
+                            is_done,
+                            theme.accent,
+                            theme.muted_ink,
+                            theme.fill,
+                        ) {
                             return c;
                         }
                         // Text starts after "[ ] " at x: 82, vertically aligned with checkbox at line_y + 6
                         let text_slice = if line_slice.len() > 4 { &line_slice[4..] } else { b"" };
-                        let tcol = if is_done { theme.text_muted } else { theme.text_primary };
-                        if let Some(c) = test_text(x, y, 82, line_y + 6, 1, text_slice, tcol, theme.bg, false) {
+                        let tcol = if is_done { theme.muted_ink } else { theme.body_ink };
+                        if let Some(c) = test_text(x, y, 82, line_y + 6, 1, text_slice, tcol, theme.fill, false) {
                             return c;
                         }
                         // Clean horizontal strikethrough through center of lowercase x-height
                         if is_done && (y == line_y + 19 || y == line_y + 20) && x >= 82 && x <= 82 + text_slice.len() * 8 {
-                            return theme.text_muted;
+                            return theme.muted_ink;
                         }
                     } else {
                         // Normal line at x: 44, y: line_y + 6
-                        if let Some(c) = test_text(x, y, 44, line_y + 6, 1, line_slice, theme.text_primary, theme.bg, false) {
+                        if let Some(c) = test_text(x, y, 44, line_y + 6, 1, line_slice, theme.body_ink, theme.fill, false) {
                             return c;
                         }
                     }
@@ -1561,10 +1668,10 @@ fn render_note_editor(x: usize, y: usize, state: &AppState) -> u32 {
             }
         }
 
-        return theme.bg;
+        return theme.fill;
     }
 
-    theme.bg
+    theme.fill
 }
 
 // -----------------------------------------------------------------------------
@@ -1987,7 +2094,7 @@ fn handle_tap(state: &mut AppState, ux: usize, uy: usize) -> TapAction {
             let swatch_y1 = swatch_y0 + 62;
             if state.swatch_picker_open && uy >= swatch_y0 && uy <= swatch_y1 {
                 let cy = swatch_y0 + 31;
-                for i in 0..8 {
+                for i in 0..NOTE_TONE_COUNT {
                     let cx = 58 + i * 82;
                     if in_circle(ux, uy, cx, cy, 26) {
                         if let Some(note) = state.store.get_note_mut(state.selected_note_id) {

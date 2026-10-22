@@ -22,6 +22,8 @@ pub mod keyboard;
 /// The notes' documents in the shared storage area.
 pub mod library;
 
+use crate::theme::{THEME, THEME_DARK};
+
 pub const MAX_NOTES: usize = 16;
 pub const MAX_TITLE_LEN: usize = 48;
 pub const MAX_BODY_LEN: usize = 1024;
@@ -71,112 +73,102 @@ impl StorageState {
 }
 
 // =============================================================================
-// Google Keep-Style Color Palettes & Categories
+// Note Tones & Categories
 // =============================================================================
 //
-// WHY these palettes are local and not the platform's roles: a note's colour
-// theme is the *note's* palette -- one of eight the user picks, each with its
-// own seven colours -- and not the app's chrome. The platform's theme
-// describes the surface the note is drawn on and the ink on it; the note's own
-// colours are the content the user chose. The app's chrome around it comes
-// from the platform's theme; see `notes::theme` for that mapping.
+// WHY a note's palette is a neutral ladder and not a set of hues: a note used
+// to carry one of eight saturated themes -- coral, amber, mint, teal, sky,
+// lavender, rose, slate -- and those eight were the last coloured chrome in
+// the suite. The platform reserves colour for its logo, its model identity and
+// a status that means something, so a note's "colour" is now the tone of the
+// paper it is written on: four steps of the light theme's surface ladder and
+// four of the dark theme's, from white paper to black ink. Every value below
+// is a theme role; none of them is a hand-picked hex value.
 //
-// WHY eight and not one: the whole feature is that a note carries a colour.
-// Resolving all eight through the platform's roles would leave the user with
-// eight copies of the same surface, which is not a palette.
+// WHY the dark tones come from THEME_DARK: the dark half of the platform's
+// theme already pairs a surface with the ink that is legible on it. A tone
+// that invented its own greys would be a second dark theme inside the app,
+// and the ink on it would be a guess.
+//
+// WHY the ladder is still a choice: the feature is that a note carries a
+// tone, and the user picks it. Collapsing the eight tones to one surface
+// would leave the picker with eight identical swatches, which is not a
+// choice; it would also be a silent removal of a feature.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct NoteColorTheme {
-    pub bg: u32,
+pub struct NoteTone {
+    /// The card's fill.
+    pub fill: u32,
+    /// The card's hairline.
     pub border: u32,
-    pub chip_bg: u32,
+    /// The fill of the category chip on this card.
+    pub chip: u32,
+    /// The note's accent: its rail, its checkbox fill and its cursor.
+    ///
+    /// WHY the accent is an ink and not a hue: on a monochrome surface the
+    /// accent is the strongest ink the surface carries. A dark tone takes the
+    /// dark theme's primary, which is the light ink that is legible on it.
     pub accent: u32,
-    pub text_primary: u32,
-    pub text_body: u32,
-    pub text_muted: u32,
+    /// The ink of the note's title.
+    pub title_ink: u32,
+    /// The ink of the note's body.
+    pub body_ink: u32,
+    /// The ink of the note's metadata: its timestamp, its category label and
+    /// a completed checklist line.
+    pub muted_ink: u32,
 }
 
-pub const KEEP_COLORS: [NoteColorTheme; 8] = [
-    // 0: Slate / Obsidian (Clean Dark)
-    NoteColorTheme {
-        bg: 0xFF1C1F26,
-        border: 0xFF2D323E,
-        chip_bg: 0xFF282D38,
-        accent: 0xFF94A3B8,
-        text_primary: 0xFFFFFFFF,
-        text_body: 0xFFCBD5E1,
-        text_muted: 0xFF64748B,
-    },
-    // 1: Coral / Warm Terracotta
-    NoteColorTheme {
-        bg: 0xFF3D2020,
-        border: 0xFF5C2B2B,
-        chip_bg: 0xFF4D2828,
-        accent: 0xFFF87171,
-        text_primary: 0xFFFFFFFF,
-        text_body: 0xFFFECACA,
-        text_muted: 0xFFFCA5A5,
-    },
-    // 2: Warm Honey / Amber
-    NoteColorTheme {
-        bg: 0xFF382A14,
-        border: 0xFF543E1B,
-        chip_bg: 0xFF483518,
-        accent: 0xFFFBBF24,
-        text_primary: 0xFFFFFFFF,
-        text_body: 0xFFFDE68A,
-        text_muted: 0xFFFCD34D,
-    },
-    // 3: Fresh Sage / Mint
-    NoteColorTheme {
-        bg: 0xFF163324,
-        border: 0xFF224E37,
-        chip_bg: 0xFF1D422E,
-        accent: 0xFF34D399,
-        text_primary: 0xFFFFFFFF,
-        text_body: 0xFFA7F3D0,
-        text_muted: 0xFF6EE7B7,
-    },
-    // 4: Ocean Teal
-    NoteColorTheme {
-        bg: 0xFF143036,
-        border: 0xFF1E4852,
-        chip_bg: 0xFF1A3E46,
-        accent: 0xFF2DD4BF,
-        text_primary: 0xFFFFFFFF,
-        text_body: 0xFF99F6E4,
-        text_muted: 0xFF5EEAD4,
-    },
-    // 5: Dusk Sky / Cerulean
-    NoteColorTheme {
-        bg: 0xFF16263B,
-        border: 0xFF223A5B,
-        chip_bg: 0xFF1C314B,
-        accent: 0xFF60A5FA,
-        text_primary: 0xFFFFFFFF,
-        text_body: 0xFFBFDBFE,
-        text_muted: 0xFF93C5FD,
-    },
-    // 6: Royal Orchid / Lavender
-    NoteColorTheme {
-        bg: 0xFF2B1A3B,
-        border: 0xFF402758,
-        chip_bg: 0xFF36204B,
-        accent: 0xFFC084FC,
-        text_primary: 0xFFFFFFFF,
-        text_body: 0xFFE9D5FF,
-        text_muted: 0xFFD8B4FE,
-    },
-    // 7: Blossom / Rose
-    NoteColorTheme {
-        bg: 0xFF381829,
-        border: 0xFF54243E,
-        chip_bg: 0xFF461E34,
-        accent: 0xFFF472B6,
-        text_primary: 0xFFFFFFFF,
-        text_body: 0xFFFBCFE8,
-        text_muted: 0xFFF9A8D4,
-    },
+/// The number of tones a note may carry.
+pub const NOTE_TONE_COUNT: usize = 8;
+
+/// A tone cut from the light half of the platform's theme.
+///
+/// WHY the helper and not seven literals per entry: a tone's hairline and ink
+/// are decisions the platform already made, and writing them once means a
+/// palette entry cannot accidentally pair a light fill with dark-theme ink.
+const fn paper(fill: u32, chip: u32) -> NoteTone {
+    NoteTone {
+        fill,
+        border: THEME.border,
+        chip,
+        accent: THEME.primary,
+        title_ink: THEME.on_surface,
+        body_ink: THEME.on_surface,
+        muted_ink: THEME.on_surface_variant,
+    }
+}
+
+/// A tone cut from the dark half of the platform's theme.
+const fn ink(fill: u32, chip: u32) -> NoteTone {
+    NoteTone {
+        fill,
+        border: THEME_DARK.border,
+        chip,
+        accent: THEME_DARK.primary,
+        title_ink: THEME_DARK.on_surface,
+        body_ink: THEME_DARK.on_surface,
+        muted_ink: THEME_DARK.on_surface_variant,
+    }
+}
+
+/// The eight tones a note may be written on, from paper to ink.
+pub const NOTE_TONES: [NoteTone; NOTE_TONE_COUNT] = [
+    // 0: Paper -- the platform's resting card.
+    paper(THEME.surface_container, THEME.surface_container_low),
+    // 1: Canvas -- the page itself, a card that does not lift off it.
+    paper(THEME.surface, THEME.surface_container_high),
+    // 2: Mist -- the well below a card.
+    paper(THEME.surface_container_low, THEME.surface_container_high),
+    // 3: Stone -- the raised step.
+    paper(THEME.surface_container_high, THEME.surface_container_low),
+    // 4: Graphite -- the highest step of the dark theme's ladder.
+    ink(THEME_DARK.surface_container_high, THEME_DARK.surface_container_low),
+    // 5: Charcoal -- a card one step above the dark page.
+    ink(THEME_DARK.surface_container_low, THEME_DARK.surface_container_high),
+    // 6: Ink -- the dark theme's resting card.
+    ink(THEME_DARK.surface_container, THEME_DARK.surface_container_high),
+    // 7: Midnight -- the dark page itself.
+    ink(THEME_DARK.surface, THEME_DARK.surface_container_low),
 ];
 
 pub const CATEGORY_NAMES: [&[u8]; 5] = [
@@ -473,6 +465,11 @@ pub struct Note {
     pub created_at: u64,
     pub updated_at: u64,
     pub is_dirty: bool,
+    /// The tone the note is written on, as a slot in [`NOTE_TONES`].
+    ///
+    /// WHY the field still says "color": it is a slot in the on-disk record,
+    /// and renaming it would change the format for a cosmetic reason. The
+    /// value is a tone index; the name is the format's history.
     pub color_idx: u8,
     pub is_pinned: bool,
     pub category: u8,
@@ -504,8 +501,13 @@ impl Note {
         note
     }
 
+    /// Chooses the tone the note is written on.
+    ///
+    /// WHY the value is taken modulo the ladder: `color_idx` is a byte read
+    /// from the store, and an old blob may carry any value. A slot outside
+    /// the ladder must wrap to a real tone rather than panic the renderer.
     pub fn set_color(&mut self, idx: u8) {
-        self.color_idx = idx % 8;
+        self.color_idx = idx % NOTE_TONE_COUNT as u8;
         self.is_dirty = true;
     }
 

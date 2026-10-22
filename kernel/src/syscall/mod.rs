@@ -274,7 +274,13 @@ pub fn sys_yield() {
 /// The task transitions to `Zombie` state until its parent reaps the exit status
 /// via `sys_waitpid`. If no parent is waiting, the scheduler will eventually reclaim it.
 pub fn sys_exit_with_code(exit_code: i32) -> ! {
-    if let Some(id) = SCHEDULER.lock().current_task_id() {
+    // WHY the id is read before the body: a lock guard created in an
+    // `if let` scrutinee lives until the end of the statement, body
+    // included, and the body asks the scheduler which task owns the shell.
+    // Taking the id in a scoped block drops the guard first, so the lookup
+    // cannot wait on a lock this very task is holding.
+    let exiting = { SCHEDULER.lock().current_task_id() };
+    if let Some(id) = exiting {
         serial_println!("[PROC] Task {} sys_exit_with_code({}) called.", id.0, exit_code);
         let owner = id.0 as u32;
         let released = crate::net::SOCKET_TABLE.lock().release_owner(owner);
@@ -285,8 +291,18 @@ pub fn sys_exit_with_code(exit_code: i32) -> ! {
         let surfaces_cleaned = crate::drivers::display_kms::DRM_KMS.lock().destroy_surfaces_owned_by(id.0);
         if surfaces_cleaned > 0 {
             serial_println!("[KMS] Reclaimed {} display surface(s) owned by exiting task {}.", surfaces_cleaned, id.0);
-            // WHY the shell comes back: an application that was in the
-            // foreground is gone, and the shell is what is underneath it.
+        }
+        // WHY the shell is raised even when no surface was reclaimed: an
+        // application may destroy its own surface before it exits, in which
+        // case the count above is zero while the screen is still the
+        // application's. The condition that matters is not how many surfaces
+        // this path reclaimed, it is whether the thing that left was the
+        // shell. A non-shell exit always leaves the desktop as the layer
+        // underneath, and the desktop has to be shown and presented, or the
+        // compositor keeps the last frame on the panel and the person sees a
+        // blank screen that no touch can leave.
+        let exiting_is_shell = shell_task_id() == Some(id.0);
+        if !exiting_is_shell {
             show_shell_surfaces();
             let mut kms = crate::drivers::display_kms::DRM_KMS.lock();
             let mut display = crate::drivers::KmsDisplayDriver::new(&mut kms);

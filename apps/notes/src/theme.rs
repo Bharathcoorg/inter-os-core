@@ -24,6 +24,14 @@ pub use interos_std::design::spacing;
 /// The platform's theme: the roles an interface asks for.
 pub use interos_std::design::theme::Theme;
 
+/// The dark half of the platform's monochrome theme.
+///
+/// WHY the app needs it: the note-tone ladder runs from paper to ink, and the
+/// ink end must pair a dark surface with the light ink that is legible on it.
+/// Those pairings already exist in the dark theme, so the app asks for them
+/// instead of inventing a second dark palette.
+pub use interos_std::design::monochrome::THEME_DARK;
+
 /// The platform's type scale.
 pub use interos_std::design::typography;
 

@@ -151,9 +151,14 @@ const COL_X: [usize; 3] = [MARGIN, MARGIN + CELL + GUTTER, MARGIN + 2 * (CELL + 
 
 const HEADER_H: usize = 144;
 const TITLE_Y: usize = 40;
+/// The screen's one subtitle line, under the title.
+///
+/// WHY one line and not the two diagnostic lines this used to be: "Built-in
+/// catalogue: N" and "On this device: M" were status output, not a gallery's
+/// description of itself, and the second line made the header read as a
+/// console readout under the page title. `build_subtitle` puts both measured
+/// counts in one sentence, so there is still a real number for each kind.
 const SUBTITLE_Y: usize = 78;
-/// The device's own count, on the line under the catalogue's count.
-const DEVICE_LINE_Y: usize = 102;
 
 /// The filter chip row.
 ///
@@ -194,6 +199,19 @@ const GRID_BOTTOM: usize = GRID_TOP + ROWS * CELL + (ROWS - 1) * GUTTER;
 
 /// Caption strip under a thumbnail's image.
 const CAPTION_H: usize = 46;
+
+/// Clearance above and below a caption's line box inside the strip.
+///
+/// WHY this is checked at compile time rather than trusted: a caption is
+/// vertically centred by reserving `font::line_height(1)` in the strip, and that
+/// line box is the platform's own ascent plus descent. If the caption rung's
+/// metrics ever grew, the ink would be pushed into the card's bottom corner arc
+/// with no call site changing. At the current rung the line box is 22px in a
+/// 46px strip, so the ink clears the bottom edge by 12px against an 8px corner,
+/// and `storage_cell_pixel`'s run is ellipsized to `CELL - 16` and drawn 8px in,
+/// so its right edge stays at least 8px inside the card.
+const CAPTION_INSET: usize = (CAPTION_H - font::line_height(1)) / 2;
+const _: () = assert!(CAPTION_INSET >= radius::SMALL);
 
 const NAV_Y0: usize = 1290;
 const NAV_Y1: usize = 1400;
@@ -745,28 +763,47 @@ fn build_image_note(scan: &MediaScan, buf: &mut [u8; 72]) -> usize {
     n
 }
 
-/// Renders the device's real media summary into `buf`.
+/// Renders the screen's one subtitle: what this gallery holds, in the two kinds
+/// it actually holds it.
 ///
-/// WHY the two counts are two lines and not one: the built-in wallpaper
-/// catalogue is artwork this app carries, and the photographs are files on
-/// the device. Written side by side they read as two counts of the same
-/// thing, and a reader would take "3 wallpapers, 0 photos on device" to mean
-/// the device holds three photographs.
-fn build_summary(buf: &mut [u8; 48], photos_count: usize) -> usize {
-    let mut n = append(buf, 0, b"On this device: ");
-    n = append_u64(buf, n, photos_count as u64);
-    append(buf, n, if photos_count == 1 { b" photo" } else { b" photos" })
-}
-
-/// Renders the built-in catalogue's own count into `buf`.
+/// WHY the wallpaper count and the photo count share one sentence, with the
+/// wallpapers named first: the built-in catalogue is artwork this app carries
+/// (`walls::SCENES.len()`, a compile-time table) and the photographs are files
+/// the platform's document index reports, so the line has to say which kind each
+/// number counts. The two used to be separate lines -- "Built-in catalogue: N"
+/// and "On this device: M" -- which read as diagnostics under the title rather
+/// than as a gallery describing itself. This is the same two measurements in
+/// the shape a gallery subtitle has.
 ///
-/// WHY it says "built-in catalogue": the number is the length of the
-/// wallpaper table this app was built with, not a count of anything the
-/// device holds.
-fn build_catalogue_summary(buf: &mut [u8; 48]) -> usize {
-    let mut n = append(buf, 0, b"Built-in catalogue: ");
-    n = append_u64(buf, n, walls::SCENES.len() as u64);
-    append(buf, n, if walls::SCENES.len() == 1 { b" wallpaper" } else { b" wallpapers" })
+/// WHY the photo count is `device_photos_count` and not every storage item:
+/// `storage_count` includes videos, and calling a video a photo would make the
+/// subtitle say something false about the device. The Photos surface shows the
+/// non-video items, which is exactly what this number counts.
+///
+/// WHY the separator is an ASCII hyphen: the outline face encodes characters
+/// 32..126 only (`design::face::FIRST_CHAR..=LAST_CHAR`), so an en dash would
+/// refuse the outline run and drop the whole line to the coarse bitmap face.
+fn build_subtitle(buf: &mut [u8; 96], wallpapers: usize, photos: usize) -> usize {
+    let mut n = append_u64(buf, 0, wallpapers as u64);
+    n = append(
+        buf,
+        n,
+        if wallpapers == 1 {
+            b" wallpaper - "
+        } else {
+            b" wallpapers - "
+        },
+    );
+    n = append_u64(buf, n, photos as u64);
+    append(
+        buf,
+        n,
+        if photos == 1 {
+            b" photo on this device"
+        } else {
+            b" photos on this device"
+        },
+    )
 }
 
 /// Renders the wallpaper catalogue's real provenance into `buf`.
@@ -839,12 +876,10 @@ pub struct GalleryApp {
     /// Meta line of the open record, built when it was opened.
     pub detail_meta: [u8; 64],
     pub detail_meta_len: usize,
-    /// Device media summary, measured once at boot.
-    pub summary: [u8; 48],
-    pub summary_len: usize,
-    /// The built-in catalogue's own count, on its own line.
-    pub catalogue_summary: [u8; 48],
-    pub catalogue_summary_len: usize,
+    /// The screen's subtitle: the wallpaper catalogue and device photo counts
+    /// in one measured sentence, rebuilt whenever the media list changes.
+    pub subtitle: [u8; 96],
+    pub subtitle_len: usize,
     /// Where the grid is scrolled to.
     ///
     /// WHY the scroll lives on the app and not in the renderer: the renderer
@@ -962,10 +997,8 @@ impl GalleryApp {
             detail_title_len: 0,
             detail_meta: [0u8; 64],
             detail_meta_len: 0,
-            summary: [0u8; 48],
-            summary_len: 0,
-            catalogue_summary: [0u8; 48],
-            catalogue_summary_len: 0,
+            subtitle: [0u8; 96],
+            subtitle_len: 0,
             scroll: ScrollState::new(0, GRID_BOTTOM - GRID_TOP, 0),
             scan_line: [0u8; 96],
             scan_line_len: 0,
@@ -1208,11 +1241,11 @@ impl GalleryApp {
 
     /// The number of photographs on the device, not counting wallpapers.
     ///
-    /// WHY this is separate: the summary line says "N wallpapers, M photos
-    /// on device", and the old code passed it the wallpapers as well, so
-    /// the two numbers counted the same things. The honest empty state --
-    /// "no photographs on this device" -- was also unreachable, because the
-    /// grid always held the built-in wallpapers.
+    /// WHY this is separate: the header subtitle counts wallpapers and
+    /// photographs in one sentence, and the old code passed it the wallpapers
+    /// as well, so the two numbers counted the same things. The honest empty
+    /// state -- "no photographs on this device" -- was also unreachable,
+    /// because the grid always held the built-in wallpapers.
     pub fn device_photos_count(&self) -> usize {
         let mut count = PHOTOS.len();
         for i in 0..self.storage_count {
@@ -1221,6 +1254,17 @@ impl GalleryApp {
             }
         }
         count
+    }
+
+    /// Rebuilds the header subtitle from the media the gallery holds now.
+    ///
+    /// WHY this is not left at its boot value: the subtitle is a count of the
+    /// media list, and the list changes when the user deletes a document. A
+    /// sentence built once would keep quoting a photo the grid no longer has,
+    /// which is exactly the kind of stale number the truth contract forbids.
+    pub fn refresh_subtitle(&mut self) {
+        let photos = self.device_photos_count();
+        self.subtitle_len = build_subtitle(&mut self.subtitle, walls::SCENES.len(), photos);
     }
 
     /// The number of rows the current tab's grid holds.
@@ -1549,7 +1593,7 @@ fn wallpaper_cell_pixel(x: usize, y: usize, index: usize, col: usize, y0: usize)
             x,
             y,
             caption.x,
-            caption.y + (CAPTION_H - font::line_height(1)) / 2,
+            caption.y + CAPTION_INSET,
             caption.w,
             1,
             scene.name,
@@ -1633,6 +1677,35 @@ fn storage_cell_pixel(x: usize, y: usize, app: &GalleryApp, idx: usize, col: usi
             }
         };
 
+        // WHY this label exists at all: the comment above has always claimed
+        // the placeholder "says so", but nothing was ever painted on it, so a
+        // file the gallery could not decode was an unlabelled blank tile. The
+        // label is centred in the image area -- not in the caption strip,
+        // which already names the file -- and `text_centered` measures the
+        // drawn run, so 75px of ink cannot reach the card's rounded edge.
+        //
+        // WHY it is eligible only for an empty thumbnail and not for a video:
+        // `Thumbnail::sample` answers `None` exactly when no image was
+        // decoded, which is the placeholder's own condition. A video has no
+        // thumbnail by design and already carries its play control in the
+        // middle of this area, so a label there would be painted under the
+        // control and would describe the wrong absence.
+        if !thumb.valid && !item.is_video {
+            if let Some(c) = text_centered(
+                x,
+                y,
+                x0 + 1,
+                y0 + (card_img_h.saturating_sub(font::line_height(1))) / 2,
+                CELL - 2,
+                1,
+                b"No preview",
+                THEME.on_surface_variant,
+                THEME.surface_container,
+            ) {
+                return c;
+            }
+        }
+
         if item.is_favourite && x >= x0 + CELL - 28 && x < x0 + CELL - 8 && y >= y0 + 8 && y < y0 + 28 {
             let cx = x0 + CELL - 18;
             let cy = y0 + 18;
@@ -1662,7 +1735,7 @@ fn storage_cell_pixel(x: usize, y: usize, app: &GalleryApp, idx: usize, col: usi
     if y == y0 + card_img_h {
         return THEME.border;
     }
-    let text_y = y0 + card_img_h + (CAPTION_H.saturating_sub(font::line_height(1))) / 2;
+    let text_y = y0 + card_img_h + CAPTION_INSET;
     let mut buf = [0u8; 32];
     let n = font::ellipsize(&item.name[..item.name_len], 1, CELL - 16, &mut buf);
     if let Some(c) = text(x, y, x0 + 8, text_y, 1, &buf[..n], THEME.on_surface, THEME.surface_container) {
@@ -1949,8 +2022,9 @@ fn catalogue_block_y0() -> usize {
 /// WHY a note rather than empty rows: under the `Wallpapers` filter there is
 /// nothing else on this screen, and a band of blank rows would read as a
 /// rendering fault. These two lines are the measured provenance of what IS on
-/// screen - the device's summary and the resolution the scene tables were
-/// traced at - so the empty space says something true instead of nothing.
+/// screen - the same subtitle the header shows, and the resolution the scene
+/// tables were traced at - so the empty space says something true instead of
+/// nothing.
 fn catalogue_pixel(x: usize, y: usize, app: &GalleryApp) -> u32 {
     let y0 = catalogue_block_y0();
     if let Some(c) = text_centered(
@@ -1960,7 +2034,7 @@ fn catalogue_pixel(x: usize, y: usize, app: &GalleryApp) -> u32 {
         y0,
         W - 2 * MARGIN,
         1,
-        &app.summary[..app.summary_len],
+        &app.subtitle[..app.subtitle_len],
         THEME.on_surface,
         THEME.surface,
     ) {
@@ -2922,7 +2996,7 @@ fn gallery_pixel(x: usize, y: usize, app: &GalleryApp) -> u32 {
         return detail_pixel(x, y, app, media);
     }
 
-    // 1. Header: screen title + a real ledger summary + capture button
+    // 1. Header: screen title + the measured subtitle + capture button
     if y < HEADER_H {
         if let Some(c) = draw_pill(x, y, CAPTURE_BTN, THEME.surface_container_high, Some(THEME.border)) {
             if c != THEME.surface_container_high {
@@ -2940,28 +3014,18 @@ fn gallery_pixel(x: usize, y: usize, app: &GalleryApp) -> u32 {
         if let Some(c) = text_bold(x, y, MARGIN, TITLE_Y, 1, b"Photos", THEME.on_surface, THEME.surface) {
             return c;
         }
-        // WHY the two counts are on two lines: the catalogue is artwork this
-        // app carries and the photographs are files on the device. One line
-        // holding both read as two counts of the same thing.
+        // WHY one subtitle line and not the old pair: the catalogue count and
+        // the device count are both measurements, but written on two lines
+        // under the title they read as diagnostics rather than as a gallery's
+        // description of what it holds. `build_subtitle` states both in one
+        // sentence, with the device's own photo count named as such.
         if let Some(c) = text(
             x,
             y,
             MARGIN,
             SUBTITLE_Y,
             1,
-            &app.catalogue_summary[..app.catalogue_summary_len],
-            THEME.on_surface_variant,
-            THEME.surface,
-        ) {
-            return c;
-        }
-        if let Some(c) = text(
-            x,
-            y,
-            MARGIN,
-            DEVICE_LINE_Y,
-            1,
-            &app.summary[..app.summary_len],
+            &app.subtitle[..app.subtitle_len],
             THEME.on_surface_variant,
             THEME.surface,
         ) {
@@ -3182,6 +3246,9 @@ fn create_screenshot(app: &mut GalleryApp) {
         }
     }
     app.rescan_storage();
+    // The capture wrote a document and re-read the index, so the header's
+    // measured counts are rebuilt from the list as it now stands.
+    app.refresh_subtitle();
 }
 
 fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
@@ -3322,6 +3389,11 @@ fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
                         app.video_player = None;
                         app.show_info_overlay = false;
                         app.show_wallpaper_sheet = false;
+                        // WHY the subtitle is rebuilt here: it counts the
+                        // media the gallery holds, and the list just lost an
+                        // item. Leaving the boot-time count on screen would
+                        // quote a photo the grid no longer has.
+                        app.refresh_subtitle();
                         std::log("[GALLERY] Media deleted via fs_unlink.").ok();
                         return Tap::Redraw(Dirty::All);
                     }
@@ -3473,8 +3545,7 @@ pub extern "C" fn _start() -> ! {
     let mut app = GalleryApp::new();
     app.rescan_storage();
     let photos_count = app.device_photos_count();
-    app.summary_len = build_summary(&mut app.summary, photos_count);
-    app.catalogue_summary_len = build_catalogue_summary(&mut app.catalogue_summary);
+    app.subtitle_len = build_subtitle(&mut app.subtitle, walls::SCENES.len(), photos_count);
     app.catalogue_note_len = build_catalogue_note(&mut app.catalogue_note);
 
     // Measure what this device actually holds before anything is drawn, so the
