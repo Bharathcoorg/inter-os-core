@@ -14,7 +14,7 @@ interos-std = { path = "../../sdk/rust/interos-std" }
 # all daemons. A libtest harness links std and duplicates the panic_impl
 # lang item, and the crate has no unit tests, so no harness is ever built.
 [lib]
-test = false
+test = true
 bench = false
 doctest = false
 
