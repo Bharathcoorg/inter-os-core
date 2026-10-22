@@ -15,6 +15,8 @@ pub trait DisplayDriver {
     fn composite_and_flip(&mut self) -> Result<u64, &'static str>;
     fn snapshot(&self, out: &mut [SurfaceSnapshot]) -> usize;
     fn dimensions(&self) -> (u32, u32);
+    fn is_hardware_accelerated(&self) -> bool { false }
+    fn refresh_rate(&self) -> u16 { 60 }
 }
 
 /// DRM/KMS adapter implementing the neutral display-driver boundary.
@@ -25,6 +27,23 @@ pub struct KmsDisplayDriver<'a> {
 impl<'a> KmsDisplayDriver<'a> {
     pub fn new(controller: &'a mut DrmKmsController) -> Self {
         Self { controller }
+    }
+
+    pub fn is_hardware_accelerated(&self) -> bool {
+        if let Some(gpu) = crate::drivers::virtio_gpu::VIRTIO_GPU.try_lock() {
+            gpu.present && gpu.is_primary
+        } else {
+            false
+        }
+    }
+
+    pub fn refresh_rate(&self) -> u16 {
+        if let Some(gpu) = crate::drivers::virtio_gpu::VIRTIO_GPU.try_lock() {
+            if gpu.present && gpu.is_primary {
+                return gpu.target_fps;
+            }
+        }
+        self.controller.refresh_hz
     }
 }
 
@@ -77,22 +96,36 @@ impl DisplayDriver for KmsDisplayDriver<'_> {
         // untrackable changes). The full-scanout default therefore still covers
         // the first flip after boot and any flip after a geometry change.
         let dirty_rows = self.controller.take_present_dirty_rows();
+
+        // Hardware presentation path:
+        // Accelerated 2D dirty-band scanout flush when modern VirtIO-GPU is discovered and attached as primary.
+        if let Some(mut gpu) = crate::drivers::virtio_gpu::VIRTIO_GPU.try_lock() {
+            if gpu.present && gpu.is_primary {
+                let sw = self.controller.scanout_width;
+                let sh = self.controller.scanout_height;
+                if gpu.scanout_width != sw || gpu.scanout_height != sh {
+                    let res_id = gpu.active_resource_id;
+                    let _ = gpu.set_scanout(0, res_id, sw, sh);
+                }
+                if dirty_rows.1 > dirty_rows.0 {
+                    let dy0 = dirty_rows.0 as u32;
+                    let dy1 = (dirty_rows.1 as u32).min(sh);
+                    if dy1 > dy0 {
+                        let _ = gpu.submit_dirty_band(0, dy0, sw, dy1 - dy0, (dy0 as u64) * (sw as u64) * 4);
+                    }
+                }
+            }
+        }
+
+        // Software scanout blit:
+        // Maintains the linear framebuffer scanout. Falls back gracefully to this software path
+        // when VirtIO-GPU is unattached or absent.
         crate::framebuffer::present_argb8888(
             &self.controller.front_buffer,
             self.controller.scanout_width,
             self.controller.scanout_height,
             dirty_rows,
         );
-
-        // Accelerated 2D dirty-band scanout flush when modern VirtIO-GPU is discovered
-        if let Some(mut gpu) = crate::drivers::virtio_gpu::VIRTIO_GPU.try_lock() {
-            if gpu.present && dirty_rows.1 > dirty_rows.0 {
-                let dy0 = dirty_rows.0 as u32;
-                let dy1 = dirty_rows.1 as u32;
-                let sw = self.controller.scanout_width;
-                let _ = gpu.submit_dirty_band(0, dy0, sw, dy1 - dy0, (dy0 as u64) * (sw as u64) * 4);
-            }
-        }
 
         #[cfg(target_arch = "x86_64")]
         let t2 = unsafe { core::arch::x86_64::_rdtsc() };
@@ -134,6 +167,14 @@ impl DisplayDriver for KmsDisplayDriver<'_> {
     fn dimensions(&self) -> (u32, u32) {
         (self.controller.scanout_width, self.controller.scanout_height)
     }
+
+    fn is_hardware_accelerated(&self) -> bool {
+        KmsDisplayDriver::is_hardware_accelerated(self)
+    }
+
+    fn refresh_rate(&self) -> u16 {
+        KmsDisplayDriver::refresh_rate(self)
+    }
 }
 
 #[cfg(test)]
@@ -158,5 +199,13 @@ mod tests {
         let id = display.create_surface(2, 2, 0, 10).unwrap();
         assert!(display.commit_surface(id, 11).is_err());
         assert!(display.commit_surface(id, 10).is_ok());
+    }
+
+    #[test]
+    fn kms_adapter_falls_back_gracefully_when_virtio_gpu_absent() {
+        let mut kms = DrmKmsController::new(64, 64);
+        let display = KmsDisplayDriver::new(&mut kms);
+        assert!(!display.is_hardware_accelerated());
+        assert_eq!(display.refresh_rate(), 60);
     }
 }
