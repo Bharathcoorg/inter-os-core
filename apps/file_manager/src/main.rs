@@ -314,11 +314,11 @@ pub const CATEGORY_LABELS: [&[u8]; 4] = [b"Storage", b"Photos", b"Pictures", b"V
 /// panel has to be somewhere the user can see, and this band is the one the
 /// screen already leaves empty. An action the user cannot see is an action
 /// the user cannot take.
-pub const ACTION_OPEN_Y0: usize = 662;
-pub const ACTION_OPEN_Y1: usize = 706;
+pub const ACTION_OPEN_Y0: usize = 660;
+pub const ACTION_OPEN_Y1: usize = 708;
 /// The "set as" line, where the action the media type allows is drawn.
-pub const ACTION_SET_Y0: usize = 722;
-pub const ACTION_SET_Y1: usize = 766;
+pub const ACTION_SET_Y0: usize = 716;
+pub const ACTION_SET_Y1: usize = 764;
 /// The panel's left edge.
 pub const ACTIONS_X0: usize = 36;
 /// The panel's right edge.
@@ -656,6 +656,21 @@ impl FileManagerApp {
             return &self.entries[index].size_label[..self.entries[index].size_label_len];
         }
         b""
+    }
+
+    /// Computes used storage bytes, total storage capacity bytes, and percentage.
+    pub fn storage_usage(&self) -> (u64, u64, usize) {
+        let mut used = 0u64;
+        for i in 0..self.entry_count {
+            used = used.saturating_add(self.entries[i].size);
+        }
+        let total = self.storage_capacity_bytes;
+        let pct = if total > 0 {
+            ((used.min(total) * 100) / total).min(100) as usize
+        } else {
+            0
+        };
+        (used, total, pct)
     }
 
     /// The absolute path of the row at an index.
@@ -1265,35 +1280,27 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
         // path is how the two drift apart.
         match row_idx {
             0 => {
-                // Storage (Drive icon)
-                if (idx.abs() <= 14 && idy.abs() <= 10) && (idx.abs() >= 12 || idy.abs() >= 8 || (idy == 2 && idx.abs() <= 10)) {
-                    return THEME.on_surface;
+                // Storage Breakdown Card: Phone device icon, Storage title,
+                // and honest capacity status caption per Platform Truth Contract.
+                // 1. Phone / storage device pictogram centered at icon_cx = 64, icon_cy = 286
+                let pdx = (x as i32) - 64;
+                let pdy = (y as i32) - 286;
+                if pdx.abs() <= 10 && pdy.abs() <= 16 {
+                    if pdx.abs() == 10 || pdy.abs() == 16 || (pdy == -13 && pdx.abs() <= 3) || (pdy == 13 && pdx.abs() <= 4) {
+                        return THEME.on_surface;
+                    }
                 }
-                // Two-line stack: label (scale 2, 48px tall) above caption
-                // (scale 1, 24px tall). Measured via
-                // std::design::font::measure: "Storage"@2 = 130px,
-                // "Storage capacity unavailable"@1 = 267px,
-                // "Capacity detected; usage unavailable"@1 = 348px — all fit
-                // in the 576px budget (x 108..684). y0 delta (56) >=
-                // line_height(2) (48), so the bands never share a pixel.
-                //
-                // WHY `label_y0` is not rebound here: the row's own `center_y`
-                // is `row_start_y + 40` (this row is the taller of the two
-                // shapes), so the shared `label_y0` computed above is exactly
-                // the `row_start_y + 16` this branch used to spell out. Rebinding
-                // it to the same number was redundant; only the caption moves.
-                let caption_y0 =
-                    label_y0 + std::design::font::line_height(2) + 8;
-                if let Some(c) = test_text(x, y, 108, label_y0, 2, CATEGORY_LABELS[0], THEME.on_surface, row_bg)
-                {
+                // 2. Title: "Storage"
+                if let Some(c) = test_text(x, y, 108, 252, 2, CATEGORY_LABELS[0], THEME.on_surface, row_bg) {
                     return c;
                 }
+                // 3. Subtitle: honest telemetry
                 let capacity_status: &[u8] = if app.storage_capacity_bytes > 0 {
                     b"Capacity detected; usage unavailable"
                 } else {
                     b"Storage capacity unavailable"
                 };
-                if let Some(c) = test_text(x, y, 108, caption_y0, 1, capacity_status, THEME.on_surface_variant, row_bg) {
+                if let Some(c) = test_text(x, y, 108, 282, 1, capacity_status, THEME.on_surface_variant, row_bg) {
                     return c;
                 }
             }
@@ -1801,27 +1808,80 @@ fn render_card_rows(surface: u32, app: &FileManagerApp) {
         let trailing = app.card_item_trailing(index);
         let selected = app.selected_entry == Some(index) || app.selection.is_marked(index);
         let buffer: &mut [u32] = unsafe { &mut *(&raw mut ROW_BUFFER) };
-        {
-            let Ok(mut canvas) = std::design::draw_target::Surface::new(
-                buffer,
-                ROW_BUFFER_W,
-                ROW_BUFFER_H,
-            ) else {
-                return;
-            };
-            let mut row = components::ListRow::new(name);
-            if !trailing.is_empty() {
-                row = row.with_trailing(trailing);
+        let row_fill = if selected { ROW_SELECTED.fill } else { ROW.fill };
+        let is_dir = app.card_item_is_dir(index);
+        // Render custom list row with clean vector folder / file pictograms
+        for ry in 0..ROW_BUFFER_H {
+            for rx in 0..ROW_BUFFER_W {
+                let mut px_col = row_fill;
+                // Hairline divider at bottom
+                if ry == ROW_BUFFER_H - 1 {
+                    px_col = ROW.divider;
+                }
+                // Selection accent bar
+                if selected && rx < 6 {
+                    px_col = THEME.primary;
+                }
+                // Vector folder / file pictogram
+                if is_dir {
+                    // Vector Folder Pictogram: tab (22..34, 17..21), body (22..50, 21..39)
+                    let in_tab = rx >= 22 && rx <= 34 && ry >= 17 && ry <= 21;
+                    let in_body = rx >= 22 && rx <= 50 && ry >= 21 && ry <= 39;
+                    if in_tab || in_body {
+                        let on_outline = ry == 17 || ry == 39 || rx == 22 || rx == 50
+                            || (ry == 21 && rx > 34) || (rx == 34 && ry <= 21);
+                        if on_outline {
+                            px_col = if selected { THEME.primary } else { THEME.on_surface };
+                        }
+                    }
+                } else {
+                    // Vector Document Pictogram: (25..47, 16..40) with folded corner
+                    if rx >= 25 && rx <= 47 && ry >= 16 && ry <= 40 {
+                        let in_fold_cut = rx > 40 && ry < 23 && (rx - 40) + (ry - 16) > 8;
+                        if !in_fold_cut {
+                            let on_outline = rx == 25 || rx == 47 || ry == 16 || ry == 40
+                                || ((rx >= 40 && ry <= 23) && ((rx - 40) + (ry - 16) == 8));
+                            let on_lines = (ry == 27 || ry == 32) && rx >= 30 && rx <= 42;
+                            if on_outline || on_lines {
+                                px_col = THEME.on_surface_variant;
+                            }
+                        }
+                    }
+                }
+                buffer[ry * ROW_BUFFER_W + rx] = px_col;
             }
-            if selected {
-                row = row.selected();
+        }
+        // Typography: File/Folder name (scale 2, vertically centered)
+        let text_y = (ROW_BUFFER_H - font::line_height(2)) / 2;
+        let trailing_y = (ROW_BUFFER_H - font::line_height(1)) / 2;
+        let max_text_w = if !trailing.is_empty() {
+            ROW_BUFFER_W.saturating_sub(64 + font::measure(trailing, 1) + 32)
+        } else {
+            ROW_BUFFER_W.saturating_sub(64 + 24)
+        };
+        let mut name_buf = [0u8; 48];
+        let name_len = font::ellipsize(name, 2, max_text_w, &mut name_buf);
+        if name_len > 0 {
+            for py in text_y..text_y + font::line_height(2) {
+                for px in 64..64 + max_text_w {
+                    let bg = buffer[py * ROW_BUFFER_W + px];
+                    if let Some(c) = font::test_text_aa(px, py, 64, text_y, 2, &name_buf[..name_len], THEME.on_surface, bg, false) {
+                        buffer[py * ROW_BUFFER_W + px] = c;
+                    }
+                }
             }
-            components::list_row(
-                &mut canvas,
-                &THEME,
-                Rect::new(0, 0, ROW_BUFFER_W, ROW_BUFFER_H),
-                &row,
-            );
+        }
+        if !trailing.is_empty() {
+            let tw = font::measure(trailing, 1);
+            let tx = ROW_BUFFER_W - 24 - tw;
+            for py in trailing_y..trailing_y + font::line_height(1) {
+                for px in tx..tx + tw {
+                    let bg = buffer[py * ROW_BUFFER_W + px];
+                    if let Some(c) = font::test_text_aa(px, py, tx, trailing_y, 1, trailing, THEME.on_surface_variant, bg, false) {
+                        buffer[py * ROW_BUFFER_W + px] = c;
+                    }
+                }
+            }
         }
         // Only the part of the row that is on the card is written.
         let from = ENTRIES_CARD.y.saturating_sub(rect.y);

@@ -382,7 +382,7 @@ pub const HEADER_H: usize = 140;
 /// The search field: the app's one text input.
 pub const SEARCH_FIELD: Rect = Rect::new(36, 146, 648, 56);
 /// The clear action inside the search field.
-pub const SEARCH_CLEAR: Rect = Rect::new(612, 154, 48, 40);
+pub const SEARCH_CLEAR: Rect = Rect::new(612, 150, 48, 48);
 /// The scope caption under the search field. It says what the search looks
 /// at, so the reader never has to guess whether it is one folder or the
 /// whole device.
@@ -450,7 +450,7 @@ pub const ACTION_SLOT_GAP: usize = 12;
 pub const SHEET: Rect = Rect::new(36, 900, 648, 300);
 /// The destination slots in the copy and move sheet.
 pub const SHEET_DEST_Y: usize = 1060;
-pub const SHEET_DEST_H: usize = 44;
+pub const SHEET_DEST_H: usize = 48;
 /// The rename sheet's name field.
 pub const SHEET_NAME_Y: usize = 1060;
 pub const SHEET_NAME_H: usize = 48;
@@ -1150,5 +1150,12 @@ mod tests {
         assert_eq!(field.as_slice(), b"report.txt");
         field.clear();
         assert!(field.is_empty());
+    }
+
+    #[test]
+    fn touch_targets_meet_48_unit_minimum() {
+        assert!(SEARCH_CLEAR.w >= 48);
+        assert!(SEARCH_CLEAR.h >= 48);
+        assert!(SHEET_DEST_H >= 48);
     }
 }
