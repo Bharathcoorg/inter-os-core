@@ -835,7 +835,7 @@ impl Frame {
             ),
             na: lock_na_box(),
             na_r: lock_na_r_box(),
-            ink: if scene.key == b"daylight" { scene.ink } else { 0xFFFFFFFF },
+            ink: if scene.key == b"daylight" { scene.ink } else if scene.key == b"stock" { 0xFFFFFFFF } else { scene.ink },
             scene,
             wallpaper_document: state.lock_wallpaper_document,
             top: scene.top,
@@ -1584,12 +1584,35 @@ fn lock_pin_pad_pixel(
     Some(backdrop)
 }
 
-pub fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
-    let _theme = THEME;
+/// Evaluates the lock screen wallpaper backdrop at (x, y) for the given state,
+/// supporting vibrant presets (Aurora, Sunset, Cosmos), user document bitmaps,
+/// and geometric mountain backdrops.
+#[allow(dead_code)]
+pub fn get_lock_wallpaper_pixel(x: usize, y: usize, state: &LauncherState) -> u32 {
     let f = frame_for(x, y, state);
+    lock_wallpaper_pixel(f, x, y)
+}
 
-    // 1. Full-bleed wallpaper.
-    let color = lock_wallpaper_pixel(f, x, y);
+/// Evaluates a raw photographic wallpaper buffer or 32-bit ARGB backdrop at surface coordinates (x, y).
+#[allow(dead_code)]
+pub fn raw_lock_wallpaper_pixel(
+    x: usize,
+    y: usize,
+    raw_data: &[u8],
+    width: usize,
+    height: usize,
+) -> Option<u32> {
+    walls::raw_wallpaper_pixel_scaled(x, y, W, H, raw_data, width, height)
+}
+
+/// Evaluates the lock screen elements over an explicit backdrop color.
+pub fn get_lock_screen_color_over_backdrop(
+    x: usize,
+    y: usize,
+    state: &LauncherState,
+    color: u32,
+) -> u32 {
+    let f = frame_for(x, y, state);
 
     // The PIN pad is drawn only when the unlock gesture found a credential and asked
     // for it (`pin_pad_visible`).
@@ -1602,12 +1625,6 @@ pub fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         // Fast path: between the clock's own box and the hint and buttons,
         // there are NO UI elements on the lock screen when the PIN pad is
         // inactive.
-        //
-        // WHY the bound is the clock's box and not a number: the bound used
-        // to be a hardcoded two hundred and fifty, which is where the clock
-        // used to end. Move the clock and the fast path cut it in half --
-        // the screen showed the top of the digits and nothing else, and the
-        // number was in a different file from the clock.
         return color;
     }
 
@@ -1721,13 +1738,100 @@ pub fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         return 0xFFFFFFFF;
     }
 
-    // 10. Wallpaper.
-    //
-    // WHY the stock backdrop ramp is no longer sampled here: it used to be, as
-    // `let _ = get_stock_background_pixel(x, y);` -- a call whose result was thrown
-    // away, so it bought nothing and cost a ramp evaluation on every pixel. The
-    // lock backdrop tokens it read (`LOCK_BACKDROP_TOP` / `LOCK_BACKDROP_BOTTOM`)
-    // are unchanged and still describe this surface's ramp; the ramp this screen
-    // draws is the one derived from them in [`Frame::measure`].
     color
+}
+
+pub fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
+    let f = frame_for(x, y, state);
+    let color = lock_wallpaper_pixel(f, x, y);
+    get_lock_screen_color_over_backdrop(x, y, state, color)
+}
+
+/// Evaluates the lock screen pixel at (x, y), allowing an optional raw photographic wallpaper buffer
+/// or 32-bit ARGB backdrop to provide the background layer.
+#[allow(dead_code)]
+pub fn get_lock_screen_color_with_raw_wallpaper(
+    x: usize,
+    y: usize,
+    state: &LauncherState,
+    raw_wallpaper: Option<(&[u8], usize, usize)>,
+) -> u32 {
+    if let Some((raw_data, rw, rh)) = raw_wallpaper {
+        if let Some(c) = raw_lock_wallpaper_pixel(x, y, raw_data, rw, rh) {
+            return get_lock_screen_color_over_backdrop(x, y, state, c);
+        }
+    }
+    get_lock_screen_color(x, y, state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use interos_std::design::walls;
+
+    #[test]
+    fn test_lock_wallpaper_evaluates_vibrant_presets() {
+        let mut state = LauncherState::new();
+        state.clock_source_ok = true;
+
+        // Test Aurora
+        let aurora = walls::Scene::by_key(b"aurora").expect("Aurora preset exists");
+        state.lock_wallpaper = aurora;
+        let c_sky = get_lock_wallpaper_pixel(360, 100, &state);
+        let c_floor = get_lock_wallpaper_pixel(360, 1300, &state);
+        assert_eq!(c_sky >> 24, 0xFF);
+        assert_eq!(c_floor >> 24, 0xFF);
+        assert_ne!(c_sky, c_floor);
+
+        let color = get_lock_screen_color(360, 500, &state);
+        assert_eq!(color >> 24, 0xFF);
+
+        // Test Sunset
+        let sunset = walls::Scene::by_key(b"sunset").expect("Sunset preset exists");
+        state.lock_wallpaper = sunset;
+        let c_sky = get_lock_wallpaper_pixel(360, 100, &state);
+        let c_floor = get_lock_wallpaper_pixel(360, 1300, &state);
+        assert_eq!(c_sky >> 24, 0xFF);
+        assert_eq!(c_floor >> 24, 0xFF);
+        assert_ne!(c_sky, c_floor);
+
+        let color = get_lock_screen_color(360, 500, &state);
+        assert_eq!(color >> 24, 0xFF);
+
+        // Test Cosmos
+        let cosmos = walls::Scene::by_key(b"cosmos").expect("Cosmos preset exists");
+        state.lock_wallpaper = cosmos;
+        let c_sky = get_lock_wallpaper_pixel(360, 100, &state);
+        let c_floor = get_lock_wallpaper_pixel(360, 1300, &state);
+        assert_eq!(c_sky >> 24, 0xFF);
+        assert_eq!(c_floor >> 24, 0xFF);
+        assert_ne!(c_sky, c_floor);
+
+        let color = get_lock_screen_color(360, 500, &state);
+        assert_eq!(color >> 24, 0xFF);
+    }
+
+    #[test]
+    fn test_lock_raw_wallpaper_sampling() {
+        let raw = [
+            0x11, 0x22, 0x33, 0xFF,
+            0x44, 0x55, 0x66, 0xFF,
+            0x77, 0x88, 0x99, 0xFF,
+            0xAA, 0xBB, 0xCC, 0xFF,
+        ];
+        let top_left = raw_lock_wallpaper_pixel(0, 0, &raw, 2, 2);
+        assert_eq!(top_left, Some(0xFF332211));
+
+        let bottom_right = raw_lock_wallpaper_pixel(W - 1, H - 1, &raw, 2, 2);
+        assert_eq!(bottom_right, Some(0xFFCCBBAA));
+
+        let state = LauncherState::new();
+        let rendered = get_lock_screen_color_with_raw_wallpaper(
+            360,
+            600,
+            &state,
+            Some((&raw, 2, 2)),
+        );
+        assert_eq!(rendered >> 24, 0xFF);
+    }
 }

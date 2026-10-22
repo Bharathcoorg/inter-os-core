@@ -23,6 +23,9 @@ pub const SCENE_REF_H: usize = 427;
 pub const SCENE_KEY_STOCK: &[u8] = b"stock";
 pub const SCENE_KEY_DAYLIGHT: &[u8] = b"daylight";
 pub const SCENE_KEY_NIGHT: &[u8] = b"night";
+pub const PRESET_KEY_AURORA: &[u8] = b"aurora";
+pub const PRESET_KEY_SUNSET: &[u8] = b"sunset";
+pub const PRESET_KEY_COSMOS: &[u8] = b"cosmos";
 
 pub const SCENE_STOCK_FAR: [u16; SCENE_REF_W] = [
     161, 161, 161, 160, 159, 159, 160, 159, 159, 158, 158, 157,
@@ -198,6 +201,12 @@ impl Scene {
     pub fn horizon(&self) -> u32 {
         if self.key == SCENE_KEY_DAYLIGHT {
             0xFFF2E4DC
+        } else if self.key == PRESET_KEY_AURORA {
+            0xFF64FFDA
+        } else if self.key == PRESET_KEY_SUNSET {
+            0xFFFF8A65
+        } else if self.key == PRESET_KEY_COSMOS {
+            0xFF8C7AE6
         } else {
             blend(self.top, 0xFFFFFFFF, 150)
         }
@@ -208,6 +217,12 @@ impl Scene {
     pub fn shadow(&self) -> u32 {
         if self.key == SCENE_KEY_DAYLIGHT {
             0xFF4E5866
+        } else if self.key == PRESET_KEY_AURORA {
+            0xFF0A332C
+        } else if self.key == PRESET_KEY_SUNSET {
+            0xFF38121E
+        } else if self.key == PRESET_KEY_COSMOS {
+            0xFF120C28
         } else {
             blend(self.mid, self.bottom, 80)
         }
@@ -218,6 +233,12 @@ impl Scene {
     pub fn mist(&self) -> u32 {
         if self.key == SCENE_KEY_DAYLIGHT {
             0xFF707680
+        } else if self.key == PRESET_KEY_AURORA {
+            0xFF1DE9B6
+        } else if self.key == PRESET_KEY_SUNSET {
+            0xFFFF7043
+        } else if self.key == PRESET_KEY_COSMOS {
+            0xFF7D5FFF
         } else {
             blend(self.mid, 0xFFFFFFFF, 150)
         }
@@ -225,7 +246,7 @@ impl Scene {
 }
 
 /// Every wallpaper the device offers, in the order a picker lists them.
-pub const SCENES: [Scene; 3] = [
+pub const SCENES: [Scene; 6] = [
     Scene {
         key: SCENE_KEY_STOCK,
         name: b"InterOS Stock",
@@ -262,6 +283,45 @@ pub const SCENES: [Scene; 3] = [
         top: 0xFF172333,
         mid: 0xFF202A31,
         bottom: 0xFF1C2526,
+        ink: 0xFFFFFFFF,
+        horizon_y: 231,
+        mist_y: 294,
+        rock_y: 400,
+        far: &SCENE_NIGHT_FAR,
+        near: &SCENE_NIGHT_NEAR,
+    },
+    Scene {
+        key: PRESET_KEY_AURORA,
+        name: b"InterOS Aurora",
+        top: 0xFF126E5D,
+        mid: 0xFF0E453C,
+        bottom: 0xFF051412,
+        ink: 0xFFFFFFFF,
+        horizon_y: 156,
+        mist_y: 244,
+        rock_y: 330,
+        far: &SCENE_STOCK_FAR,
+        near: &SCENE_STOCK_NEAR,
+    },
+    Scene {
+        key: PRESET_KEY_SUNSET,
+        name: b"InterOS Sunset",
+        top: 0xFF6B1D38,
+        mid: 0xFF4A1828,
+        bottom: 0xFF140816,
+        ink: 0xFFFFFFFF,
+        horizon_y: 156,
+        mist_y: 244,
+        rock_y: 330,
+        far: &SCENE_STOCK_FAR,
+        near: &SCENE_STOCK_NEAR,
+    },
+    Scene {
+        key: PRESET_KEY_COSMOS,
+        name: b"InterOS Cosmos",
+        top: 0xFF22174C,
+        mid: 0xFF1B1238,
+        bottom: 0xFF080512,
         ink: 0xFFFFFFFF,
         horizon_y: 231,
         mist_y: 294,
@@ -479,6 +539,60 @@ pub fn scene_pixel(scene: &Scene, x: usize, y: usize, w: usize, h: usize) -> u32
     scene_pixel_ref(&s, x, y, w, h)
 }
 
+/// Reads a single 32-bit ARGB pixel from a raw image byte slice without heap allocation.
+///
+/// Returns `Some(0xAARRGGBB)` if `(x, y)` is within `[0, width) x [0, height)`
+/// and `raw_data` has enough bytes for the requested pixel. Otherwise returns `None`.
+pub fn raw_wallpaper_pixel(
+    x: usize,
+    y: usize,
+    raw_data: &[u8],
+    width: usize,
+    height: usize,
+) -> Option<u32> {
+    if width == 0 || height == 0 || x >= width || y >= height {
+        return None;
+    }
+    let offset = y.checked_mul(width)?.checked_add(x)?.checked_mul(4)?;
+    if offset.checked_add(4)? > raw_data.len() {
+        return None;
+    }
+    Some(u32::from_le_bytes([
+        raw_data[offset],
+        raw_data[offset + 1],
+        raw_data[offset + 2],
+        raw_data[offset + 3],
+    ]))
+}
+
+/// Samples a raw 32-bit ARGB wallpaper buffer at surface coordinates `(x, y)`
+/// for a target surface of size `(surface_w, surface_h)` using continuous fixed-point scaling,
+/// without heap allocation.
+pub fn raw_wallpaper_pixel_scaled(
+    x: usize,
+    y: usize,
+    surface_w: usize,
+    surface_h: usize,
+    raw_data: &[u8],
+    raw_w: usize,
+    raw_h: usize,
+) -> Option<u32> {
+    if surface_w == 0 || surface_h == 0 || raw_w == 0 || raw_h == 0 {
+        return None;
+    }
+    let sx = if raw_w <= 1 || surface_w <= 1 {
+        0
+    } else {
+        ((x as u64 * (raw_w as u64 - 1)) / (surface_w as u64 - 1).max(1)) as usize
+    };
+    let sy = if raw_h <= 1 || surface_h <= 1 {
+        0
+    } else {
+        ((y as u64 * (raw_h as u64 - 1)) / (surface_h as u64 - 1).max(1)) as usize
+    };
+    raw_wallpaper_pixel(sx, sy, raw_data, raw_w, raw_h)
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -549,12 +663,42 @@ mod tests {
     fn a_stored_key_resolves_or_reports_itself_missing() {
         assert!(Scene::by_key(b"stock").is_some());
         assert!(Scene::by_key(b"night").is_some());
+        assert!(Scene::by_key(b"aurora").is_some());
+        assert!(Scene::by_key(b"sunset").is_some());
+        assert!(Scene::by_key(b"cosmos").is_some());
         assert!(Scene::by_key(b"polaroid").is_none());
         assert_eq!(Scene::resolved(None).key, b"stock");
         assert_eq!(Scene::resolved(Some(b"night")).key, b"night");
+        assert_eq!(Scene::resolved(Some(b"aurora")).key, b"aurora");
+        assert_eq!(Scene::resolved(Some(b"sunset")).key, b"sunset");
+        assert_eq!(Scene::resolved(Some(b"cosmos")).key, b"cosmos");
         // An unknown key falls back to stock rather than to the first scene by
         // accident, so the two behaviours are distinguishable.
         assert_eq!(Scene::resolved(Some(b"nope")).key, b"stock");
+    }
+
+    #[test]
+    fn test_raw_wallpaper_pixel_sampling() {
+        let raw = [
+            0x12, 0x34, 0x56, 0xFF, // Pixel (0, 0): 0xFF563412
+            0xAA, 0xBB, 0xCC, 0xFF, // Pixel (1, 0): 0xFFCCBBAA
+            0x11, 0x22, 0x33, 0x80, // Pixel (0, 1): 0x80332211
+            0x44, 0x55, 0x66, 0xFE, // Pixel (1, 1): 0xFE665544
+        ];
+        assert_eq!(raw_wallpaper_pixel(0, 0, &raw, 2, 2), Some(0xFF563412));
+        assert_eq!(raw_wallpaper_pixel(1, 0, &raw, 2, 2), Some(0xFFCCBBAA));
+        assert_eq!(raw_wallpaper_pixel(0, 1, &raw, 2, 2), Some(0x80332211));
+        assert_eq!(raw_wallpaper_pixel(1, 1, &raw, 2, 2), Some(0xFE665544));
+        // Out of bounds
+        assert_eq!(raw_wallpaper_pixel(2, 0, &raw, 2, 2), None);
+        assert_eq!(raw_wallpaper_pixel(0, 2, &raw, 2, 2), None);
+        assert_eq!(raw_wallpaper_pixel(0, 0, &raw, 0, 0), None);
+        // Buffer too short
+        assert_eq!(raw_wallpaper_pixel(1, 1, &raw[..12], 2, 2), None);
+
+        // Scaled sampling
+        assert_eq!(raw_wallpaper_pixel_scaled(0, 0, 4, 4, &raw, 2, 2), Some(0xFF563412));
+        assert_eq!(raw_wallpaper_pixel_scaled(3, 3, 4, 4, &raw, 2, 2), Some(0xFE665544));
     }
 
     #[test]
