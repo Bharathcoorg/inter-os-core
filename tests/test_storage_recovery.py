@@ -291,20 +291,23 @@ def main():
         sb_sector = bytearray(f.read(512))
         assert sb_sector[0:4] == b"IOFS", f"Invalid superblock magic: {sb_sector[0:4]}"
 
-        # Read actual inode 0 (at LBA 4096 + 9 = 4105)
-        f.seek((4096 + 9) * 512)
+        # Read inode_lba and bitmap_lba from superblock
+        inode_lba = struct.unpack_from("<I", sb_sector, 32)[0]
+        bitmap_lba = struct.unpack_from("<I", sb_sector, 24)[0]
+
+        # Read actual inode 0 from inode table (at 4096 + inode_lba)
+        f.seek((4096 + inode_lba) * 512)
         inode0 = f.read(64)
         old_used = inode0[0]
-        old_size = struct.unpack_from("<I", inode0, 1)[0]
-        old_start = struct.unpack_from("<I", inode0, 5)[0]
-        old_count = struct.unpack_from("<I", inode0, 9)[0]
+        old_size = struct.unpack_from("<Q", inode0, 1)[0]
+        old_start = struct.unpack_from("<I", inode0, 9)[0]
+        old_count = struct.unpack_from("<I", inode0, 13)[0]
 
         # Allocate uncommitted sectors (start=50, count=2) in the allocation bitmap
-        # Bitmap is at LBA 4096 + 1 = 4097
-        f.seek((4096 + 1) * 512)
+        f.seek((4096 + bitmap_lba) * 512)
         bitmap_sector0 = bytearray(f.read(512))
         bitmap_sector0[6] |= 0x0C # set bits 50 and 51
-        f.seek((4096 + 1) * 512)
+        f.seek((4096 + bitmap_lba) * 512)
         f.write(bitmap_sector0)
 
         # Craft pending transaction:
@@ -314,17 +317,17 @@ def main():
         # and clear the transaction record in the superblock!
         txn_buf = bytearray(64)
         txn_buf[0:4] = b"IFTX"
-        txn_buf[4] = 1 # version
+        txn_buf[4] = 2 # version 2 (TXN_VERSION)
         txn_buf[5] = 2 # op = Write
         struct.pack_into("<I", txn_buf, 8, 0) # inode_index 0
         txn_buf[12] = old_used # old_used
-        struct.pack_into("<I", txn_buf, 13, old_size) # old_size
-        struct.pack_into("<I", txn_buf, 17, old_start) # old_start
-        struct.pack_into("<I", txn_buf, 21, old_count) # old_count
-        txn_buf[25] = 1 # new_used
-        struct.pack_into("<I", txn_buf, 26, 800) # new_size
-        struct.pack_into("<I", txn_buf, 30, 50) # new_start
-        struct.pack_into("<I", txn_buf, 34, 2) # new_count
+        struct.pack_into("<Q", txn_buf, 13, old_size) # old_size (u64, 8 bytes: 13..21)
+        struct.pack_into("<I", txn_buf, 21, old_start) # old_start (u32, 4 bytes: 21..25)
+        struct.pack_into("<I", txn_buf, 25, old_count) # old_count (u32, 4 bytes: 25..29)
+        txn_buf[29] = 1 # new_used (1 byte: 29)
+        struct.pack_into("<Q", txn_buf, 30, old_size + 800) # new_size (u64, 8 bytes: 30..38)
+        struct.pack_into("<I", txn_buf, 38, 50) # new_start (u32, 4 bytes: 38..42)
+        struct.pack_into("<I", txn_buf, 42, 2) # new_count (u32, 4 bytes: 42..46)
         h = sha256(bytes(txn_buf[:56]))
         txn_buf[56:64] = h[:8]
 

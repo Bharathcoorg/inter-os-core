@@ -4588,6 +4588,21 @@ pub extern "C" fn _start() -> ! {
                                         while std::input_event_poll(&mut drain).is_ok() {}
                                         break;
                                     }
+                                } else if y >= 1400 {
+                                    state.current_view = ViewMode::HomeScreen;
+                                    render_view(surface, &state);
+                                    surface_flip_display();
+                                    std::log("[LAUNCHER] Returned to home grid from search via home tap.").ok();
+                                    let mut drain = std::InputEvent {
+                                        kind: 0,
+                                        x: 0,
+                                        y: 0,
+                                        dx: 0,
+                                        dy: 0,
+                                        scale_milli: 1000,
+                                    };
+                                    while std::input_event_poll(&mut drain).is_ok() {}
+                                    break;
                                 }
                             }
 

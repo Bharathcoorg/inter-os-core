@@ -232,11 +232,11 @@ def main():
                 assert reader1.wait_for(marker, timeout=10.0), f"{desc} failed (logs: {reader1.captured_logs[-10:]})"
 
         send_tap_and_wait(b"TAP 100 680\n", "Keypad digit pressed.", "Keypad digit '7'")
-        send_tap_and_wait(b"TAP 598 1020\n", "Keypad operator selected.", "Operator '+'")
+        send_tap_and_wait(b"TAP 598 1130\n", "Keypad operator selected.", "Operator '+'")
         send_tap_and_wait(b"TAP 266 850\n", "Keypad digit pressed.", "Keypad digit '5'")
-        send_tap_and_wait(b"TAP 598 1190\n", "Evaluation completed.", "Calculation '='")
+        send_tap_and_wait(b"TAP 598 1290\n", "Evaluation completed.", "Calculation '='")
         print("[SESSION-1] Calculation verified. Exiting back to homescreen...")
-        reader1.sock.sendall(b"TAP 62 48\n")     # Back
+        reader1.sock.sendall(b"TAP 360 1420\n")   # Bottom gesture bar exit
         assert reader1.wait_for("Foreground application exited and was reaped", timeout=30.0)
         print("[SESSION-1] Homescreen re-established.")
         time.sleep(0.8)

@@ -178,10 +178,20 @@ def main():
     kill_proc_on_port(mon_port)
     time.sleep(0.5)
 
+    data_disk = os.environ.get("DATA_DISK_PATH", os.path.abspath(r"target\inter-os-data-master.img"))
+    if not os.path.exists(data_disk):
+        with open(data_disk, "wb") as f:
+            f.truncate(512 * 1024 * 1024)
+
     args = [
         qemu_exe,
-        "-drive", f"format=raw,file={kernel_img}",
-        "-snapshot",
+        "-machine", "q35",
+        "-cpu", "qemu64",
+        "-device", "piix3-ide,id=ide",
+        "-drive", f"file={kernel_img},format=raw,if=none,id=bootd,snapshot=on",
+        "-device", "ide-hd,bus=ide.0,unit=0,drive=bootd,bootindex=1",
+        "-drive", f"file={data_disk},format=raw,if=none,id=datad",
+        "-device", "ide-hd,bus=ide.0,unit=1,drive=datad",
         "-m", "1024M",
         "-display", "none",
         "-chardev", f"socket,id=ser0,host=127.0.0.1,port={ser_port},server=on,wait=off",

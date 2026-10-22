@@ -202,9 +202,9 @@ def main():
     print("[TEST] Settings app launched and UI presented!")
 
     time.sleep(1.0)
-    # 2. Tap Personal category card at (188, 420)
-    print("[TEST] Opening Personal section (TAP 188 420)...")
-    reader.send("TAP 188 420")
+    # 2. Tap Personal category card at (188, 550)
+    print("[TEST] Opening Personal section (TAP 188 550)...")
+    reader.send("TAP 188 550")
     assert reader.wait_for("System Space category opened", timeout=25.0, print_filter=["SETTINGS", "INPUT"]), "Personal section not opened!"
     print("[TEST] Personal category opened!")
 
@@ -229,9 +229,9 @@ def main():
     print("[TEST] Wallpaper target changed to Home!")
 
     time.sleep(1.0)
-    # 6. Tap Apply at (188, 1160)
-    print("[TEST] Applying wallpaper (TAP 188 1160)...")
-    reader.send("TAP 188 1160")
+    # 6. Tap Apply at (188, 1376) - accounts for 2 rows of 3 scenes in wallpaper gallery
+    print("[TEST] Applying wallpaper (TAP 188 1376)...")
+    reader.send("TAP 188 1376")
     assert reader.wait_for("Wallpaper written to the settings store", timeout=25.0, print_filter=["SETTINGS", "INPUT"]), "Wallpaper was not written to store!"
     print("[TEST] Wallpaper written to settings store successfully!")
 
@@ -263,9 +263,9 @@ def main():
     # For Night scene: top sky is dark (R~23, G~35, B~51 at y=50)
     # For Stock scene: top sky is bright (R~172, G~195, B~220 at y=50)
     w, h, raw = parse_ppm(ppm_home)
-    idx = (50 * w + 360) * 3
+    idx = (50 * w + 10) * 3
     r, g, b = raw[idx], raw[idx+1], raw[idx+2]
-    print(f"[TEST] Home sky pixel at (360, 50): R={r}, G={g}, B={b}")
+    print(f"[TEST] Home sky pixel at (10, 50): R={r}, G={g}, B={b}")
     assert r < 100 and g < 100 and b < 110, f"Expected dark Night sky pixel, got R={r}, G={g}, B={b}"
     print("[TEST] Night sky pixel confirmed on HomeScreen (Stock was R > 150, B > 180)!")
 
@@ -312,9 +312,9 @@ def main():
     ppm_reboot_home = ROOT / "target" / "reboot_home_night.ppm"
     screendump(mon2, ppm_reboot_home)
     w_rh, h_rh, raw_rh = parse_ppm(ppm_reboot_home)
-    idx_rh = (50 * w_rh + 360) * 3
+    idx_rh = (50 * w_rh + 10) * 3
     rh_r, rh_g, rh_b = raw_rh[idx_rh], raw_rh[idx_rh+1], raw_rh[idx_rh+2]
-    print(f"[TEST] Reboot Home screen sky pixel at (360, 50): R={rh_r}, G={rh_g}, B={rh_b}")
+    print(f"[TEST] Reboot Home screen sky pixel at (10, 50): R={rh_r}, G={rh_g}, B={rh_b}")
     assert rh_r < 100 and rh_g < 100 and rh_b < 110, f"Expected Night on reboot home screen, got R={rh_r}, G={rh_g}, B={rh_b}"
     print("[TEST] Home screen persisted Night wallpaper across reboot!")
 

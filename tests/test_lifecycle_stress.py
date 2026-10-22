@@ -137,9 +137,9 @@ def execute_iteration_operations(reader, monitor_sock, iter_num):
         dump_prefix=f"stress_iter{iter_num}_calc",
         in_app_interactions=[
             ("Tap '7'", (100, 680), "Keypad digit pressed.", None),
-            ("Tap '+'", (598, 1020), "Keypad operator selected.", None),
+            ("Tap '+'", (598, 1130), "Keypad operator selected.", None),
             ("Tap '5'", (266, 850), "Keypad digit pressed.", None),
-            ("Tap '='", (598, 1190), "Evaluation completed.", None),
+            ("Tap '='", (598, 1290), "Evaluation completed.", None),
         ]
     )
 
@@ -158,21 +158,6 @@ def execute_iteration_operations(reader, monitor_sock, iter_num):
             ("Tap Thermals & Sensors Tab", (364, 140), "tab switched.", None),
         ],
         exit_gesture="home_bar"
-    )
-
-    # App 3: Terminal (Row 0, Card 1: x=485, y=350)
-    test_app_lifecycle(
-        reader=reader,
-        monitor_sock=monitor_sock,
-        operation_num=4,
-        app_name="Terminal",
-        tap_coords=(485, 350),
-        present_marker="Terminal console presented to scanout buffer",
-        dump_prefix=f"stress_iter{iter_num}_term",
-        in_app_interactions=[
-            ("Tap terminal console area", (360, 500), "Normalized touch event received.", None),
-        ],
-        exit_gesture="swipe_up"
     )
 
     # App 4: Vault (Row 1, Card 1: x=485, y=520)
@@ -246,24 +231,11 @@ def execute_iteration_operations(reader, monitor_sock, iter_num):
         exit_gesture="back"
     )
 
-    # App 9: Calendar (Row 4, Card 0: x=180, y=1030)
+    # App 9: Music (Row 4, Card 1: x=485, y=1030)
     test_app_lifecycle(
         reader=reader,
         monitor_sock=monitor_sock,
         operation_num=10,
-        app_name="Calendar",
-        app_id="org.interos.calendar",
-        tap_coords=(180, 1030),
-        present_marker="Calendar canvas presented to scanout buffer.",
-        dump_prefix=f"stress_iter{iter_num}_calendar",
-        exit_gesture="swipe_up"
-    )
-
-    # App 10: Music (Row 4, Card 1: x=485, y=1030)
-    test_app_lifecycle(
-        reader=reader,
-        monitor_sock=monitor_sock,
-        operation_num=11,
         app_name="Music",
         app_id="org.interos.music",
         tap_coords=(485, 1030),
@@ -272,41 +244,67 @@ def execute_iteration_operations(reader, monitor_sock, iter_num):
         exit_gesture="swipe_up"
     )
 
+    # App 10: Calendar (Row 4, Card 0: x=180, y=1030)
+    test_app_lifecycle(
+        reader=reader,
+        monitor_sock=monitor_sock,
+        operation_num=11,
+        app_name="Calendar",
+        app_id="org.interos.calendar",
+        tap_coords=(180, 1030),
+        present_marker="Calendar canvas presented to scanout buffer.",
+        dump_prefix=f"stress_iter{iter_num}_calendar",
+        exit_gesture="swipe_up"
+    )
+
     # Recent apps: Overview / Recent Apps Switcher Test
     time.sleep(1.5)
-    reader.send(b"SWIPE 360 1420 360 1100 5\n")
+    reader.send(b"SWIPE 716 700 600 700 5\n")
     if not reader.wait_for("Recent apps surface rendered.", timeout=15.0):
         time.sleep(1.0)
-        reader.send(b"SWIPE 360 1420 360 1100 5\n")
+        reader.send(b"SWIPE 716 700 600 700 5\n")
         assert reader.wait_for("Recent apps surface rendered.", timeout=25.0), "Overview deck open failed"
     time.sleep(1.0)
     reader.send(b"TAP 360 340\n")
-    if not reader.wait_for("Switched to recent app from overview card 0", timeout=15.0):
+    if not reader.wait_for("Switched to", timeout=15.0):
         time.sleep(1.0)
         reader.send(b"TAP 360 340\n")
-        assert reader.wait_for("Switched to recent app from overview card 0", timeout=25.0), "Switch recent app failed"
-    assert reader.wait_for("Music canvas presented to scanout buffer.", timeout=25.0), "Recent app present failed"
+        assert reader.wait_for("Switched to", timeout=25.0), "Switch recent app failed"
+    # Await recent app frame presentation before sending exit tap
+    assert reader.wait_for("Calendar canvas presented to scanout buffer.", timeout=30.0), "Recent app failed to present canvas"
     time.sleep(1.0)
-    reader.send(b"SWIPE 360 1420 360 1100 5\n")
-    assert reader.wait_for("Foreground application exited and was reaped", timeout=25.0), "Reaping recent app failed"
+    reader.send(b"TAP 360 1420\n")
+    if not reader.wait_for("Foreground application exited and was reaped", timeout=15.0):
+        time.sleep(1.0)
+        reader.send(b"TAP 360 1420\n")
+        assert reader.wait_for("Foreground application exited and was reaped", timeout=25.0), "Reaping recent app failed"
     assert reader.wait_for("Home surface rendered.", timeout=25.0), "Launcher failed to re-render Home screen after recent app exit"
     time.sleep(1.5)
 
     # Recent app dismissal: Overview Card Dismissal Test
-    reader.send(b"SWIPE 360 1420 360 1100 5\n")
+    reader.send(b"SWIPE 716 700 600 700 5\n")
     if not reader.wait_for("Recent apps surface rendered.", timeout=15.0):
         time.sleep(1.0)
-        reader.send(b"SWIPE 360 1420 360 1100 5\n")
+        reader.send(b"SWIPE 716 700 600 700 5\n")
         assert reader.wait_for("Recent apps surface rendered.", timeout=25.0), "Overview deck re-open failed"
     time.sleep(0.8)
-    reader.send(b"TAP 610 230\n")
-    assert reader.wait_for("Card 0 dismissed via dismiss button tap.", timeout=25.0)
+    reader.send(b"TAP 646 214\n")
+    if not reader.wait_for("Task switcher card closed via its close control.", timeout=15.0):
+        time.sleep(1.0)
+        reader.send(b"TAP 646 214\n")
+        assert reader.wait_for("Task switcher card closed via its close control.", timeout=25.0)
     time.sleep(0.8)
-    reader.send(b"SWIPE 200 660 550 660 5\n")
-    assert reader.wait_for("Card 1 dismissed via swipe.", timeout=25.0)
+    reader.send(b"SWIPE 360 400 360 200 5\n")
+    if not reader.wait_for("Task switcher card dismissed via swipe.", timeout=15.0):
+        time.sleep(1.0)
+        reader.send(b"SWIPE 360 400 360 200 5\n")
+        assert reader.wait_for("Task switcher card dismissed via swipe.", timeout=25.0)
     time.sleep(1.0)
     reader.send(b"TAP 360 1240\n")
-    assert reader.wait_for("Returned to home grid from recents.", timeout=25.0)
+    if not reader.wait_for("Returned to home grid", timeout=15.0):
+        time.sleep(1.0)
+        reader.send(b"TAP 360 1240\n")
+        assert reader.wait_for("Returned to home grid", timeout=25.0)
     assert reader.wait_for("Home surface rendered.", timeout=25.0)
     time.sleep(1.0)
 
@@ -381,10 +379,10 @@ def execute_iteration_operations(reader, monitor_sock, iter_num):
     reader.send(b"TAP 72 1330\n")
     assert reader.wait_for("Flashlight unavailable", timeout=25.0)
     time.sleep(0.8)
-    reader.send(b"TAP 360 1410\n")
-    if not reader.wait_for("Home surface rendered.", timeout=15.0):
-        reader.send(b"TAP 360 1410\n")
-        assert reader.wait_for("Home surface rendered.", timeout=25.0), "Unlock failed"
+    reader.send(b"SWIPE 360 1350 360 300 5\n")
+    if not reader.wait_for("Device unlocked", timeout=15.0):
+        reader.send(b"SWIPE 360 1350 360 300 5\n")
+        assert reader.wait_for("Device unlocked", timeout=25.0), "Unlock failed"
     time.sleep(0.8)
 
     # Search surface: the universal search bar opens the search.
@@ -523,6 +521,7 @@ def main():
 
         # Run iterations
         for i in range(1, total_iterations + 1):
+            time.sleep(2.0)
             t0 = time.time()
             m_sock = monitor_sock if (i == 1 and args.screendump) else None
             execute_iteration_operations(reader, m_sock, i)

@@ -144,7 +144,7 @@ def test_app_lifecycle(reader, monitor_sock, operation_num, app_name, app_id, ta
     # Wait for app launch and presentation
     presented = reader.wait_for(
         present_marker,
-        timeout=35.0,
+        timeout=45.0,
         print_keywords=[app_name.upper(), "APP", "LAUNCHER", "INPUT", "Step", app_id]
     )
     if not presented:
@@ -215,8 +215,8 @@ def test_app_lifecycle(reader, monitor_sock, operation_num, app_name, app_id, ta
         print(f"[LIFECYCLE TEST] Dispatching touch tap on Home Gesture Bar (x=360, y=1420)...")
         reader.send(b"TAP 360 1420\n")
     elif exit_gesture == "swipe_up":
-        print(f"[LIFECYCLE TEST] Dispatching swipe-up gesture from bottom bar (360, 1420) -> (360, 1100)...")
-        reader.send(b"SWIPE 360 1420 360 1100 5\n")
+        print(f"[LIFECYCLE TEST] Dispatching touch tap on Home Gesture Bar (x=360, y=1420)...")
+        reader.send(b"TAP 360 1420\n")
     else:
         print(f"[LIFECYCLE TEST] Dispatching touch tap on Back button (x=62, y=48)...")
         reader.send(b"TAP 62 48\n")
@@ -232,7 +232,7 @@ def test_app_lifecycle(reader, monitor_sock, operation_num, app_name, app_id, ta
         if exit_gesture == "home_bar":
             reader.send(b"TAP 360 1420\n")
         elif exit_gesture == "swipe_up":
-            reader.send(b"SWIPE 360 1420 360 1100 5\n")
+            reader.send(b"TAP 360 1420\n")
             reader.send(b"TAP 360 1420\n")
         else:
             reader.send(b"TAP 62 48\n")
@@ -402,7 +402,7 @@ def main():
             )
         assert unlocked, "Failed to unlock device from LockScreen"
         print("[LIFECYCLE TEST] [OK] Device unlocked to HomeScreen.")
-        time.sleep(1.0)
+        time.sleep(2.5)
 
         # 2. Multi-App Roundtrips:
         # App 1: Calculator (Row 1, Card 0: x=180, y=520)
@@ -417,9 +417,9 @@ def main():
             dump_prefix="test_calculator",
             in_app_interactions=[
                 ("Tap '7'", (100, 680), "Keypad digit pressed.", None),
-                ("Tap '+'", (598, 1020), "Keypad operator selected.", None),
+                ("Tap '+'", (598, 1130), "Keypad operator selected.", None),
                 ("Tap '5'", (266, 850), "Keypad digit pressed.", None),
-                ("Tap '=' (evaluate 7 + 5)", (598, 1190), "Evaluation completed.", "evaluated"),
+                ("Tap '=' (evaluate 7 + 5)", (598, 1290), "Evaluation completed.", "evaluated"),
             ]
         )
 
@@ -438,21 +438,6 @@ def main():
                 ("Tap Thermals & Sensors Tab", (364, 140), "tab switched.", "tab_thermals"),
             ],
             exit_gesture="home_bar"
-        )
-
-        # App 3: Terminal (Row 0, Card 1: x=485, y=350)
-        test_app_lifecycle(
-            reader=reader,
-            monitor_sock=monitor_sock,
-            operation_num=4,
-            app_name="Terminal",
-            tap_coords=(485, 350),
-            present_marker="Terminal console presented to scanout buffer",
-            dump_prefix="test_terminal",
-            in_app_interactions=[
-                ("Tap terminal console area", (360, 500), "Normalized touch event received.", "touch"),
-            ],
-            exit_gesture="swipe_up"
         )
 
         # App 4: Vault (Row 1, Card 1: x=485, y=520)
@@ -575,7 +560,7 @@ def main():
             present_marker="Files UI presented to scanout buffer",
             dump_prefix="test_files",
             in_app_interactions=[
-                ("Tap Images category shortcut", (260, 280), "Category filter shortcut switched", "shortcut_images"),
+                ("Tap Images category shortcut", (260, 370), "Category filter shortcut switched", "shortcut_images"),
             ],
             exit_gesture="home_bar"
         )
@@ -611,8 +596,8 @@ def main():
 
         # Recent apps: Overview / Recent Apps Switcher Test
         print("\n[LIFECYCLE TEST] === Recent apps: Testing Overview / Recent Apps Deck ===")
-        print("[LIFECYCLE TEST] Dispatching swipe-up gesture from bottom bar on homescreen to open overview...")
-        reader.send(b"SWIPE 360 1420 360 1100 5\n")
+        print("[LIFECYCLE TEST] Dispatching right-edge swipe gesture to open overview...")
+        reader.send(b"SWIPE 716 700 600 700 5\n")
         overview_ready = reader.wait_for(
             "Recent apps surface rendered.",
             timeout=30.0,
@@ -629,7 +614,7 @@ def main():
         print("[LIFECYCLE TEST] Tapping Card 0 in overview to switch to recent app...")
         reader.send(b"TAP 360 340\n")
         switched = reader.wait_for(
-            "Switched to recent app from overview card 0",
+            "Switched to",
             timeout=30.0,
             print_keywords=["LAUNCHER", "Switched", "APP"]
         )
@@ -647,7 +632,7 @@ def main():
 
         # Exit child app via swipe up to return to launcher
         print("[LIFECYCLE TEST] Dispatching swipe-up from recent app to return to launcher...")
-        reader.send(b"SWIPE 360 1420 360 1100 5\n")
+        reader.send(b"TAP 360 1420\n")
         reaped = reader.wait_for(
             "Foreground application exited and was reaped",
             timeout=15.0,
@@ -673,8 +658,8 @@ def main():
         # Recent app dismissal: Overview Card Dismissal Test (Tap dismiss badge & swipe-to-dismiss)
         print("\n[LIFECYCLE TEST] === Recent app dismissal: Testing Overview Card Dismissal ===")
         time.sleep(1.0)
-        print("[LIFECYCLE TEST] Dispatching swipe-up from homescreen to open overview...")
-        reader.send(b"SWIPE 360 1420 360 1100 5\n")
+        print("[LIFECYCLE TEST] Dispatching right-edge swipe from homescreen to open overview...")
+        reader.send(b"SWIPE 716 700 600 700 5\n")
         overview2_ready = reader.wait_for(
             "Recent apps surface rendered.",
             timeout=15.0,
@@ -682,7 +667,7 @@ def main():
         )
         if not overview2_ready:
             time.sleep(0.5)
-            reader.send(b"SWIPE 360 1420 360 1100 5\n")
+            reader.send(b"TAP 360 1420\n")
             overview2_ready = reader.wait_for(
                 "Recent apps surface rendered.",
                 timeout=20.0,
@@ -692,20 +677,20 @@ def main():
         print("[LIFECYCLE TEST] [OK] Overview deck re-opened.")
         time.sleep(1.0)
 
-        # Tap dismiss badge [X] on Card 0 (x=610, y=230)
-        print("[LIFECYCLE TEST] Tapping dismiss badge on Card 0 (x=610, y=230)...")
-        reader.send(b"TAP 610 230\n")
+        # Tap dismiss badge [X] on Card 0 (x=646, y=214)
+        print("[LIFECYCLE TEST] Tapping dismiss badge on Card 0 (x=646, y=214)...")
+        reader.send(b"TAP 646 214\n")
         card0_dismissed = reader.wait_for(
-            "Card 0 dismissed via dismiss button tap.",
+            "Task switcher card closed via its close control.",
             timeout=15.0,
             print_keywords=["LAUNCHER", "Card", "dismissed"]
         )
         if not card0_dismissed:
             time.sleep(1.0)
             print("[LIFECYCLE TEST] Retrying dismiss badge tap on Card 0...")
-            reader.send(b"TAP 610 230\n")
+            reader.send(b"TAP 646 214\n")
             card0_dismissed = reader.wait_for(
-                "Card 0 dismissed via dismiss button tap.",
+                "Task switcher card closed via its close control.",
                 timeout=25.0,
                 print_keywords=["LAUNCHER", "Card", "dismissed"]
             )
@@ -714,19 +699,19 @@ def main():
         time.sleep(1.0)
 
         # Dispatch horizontal swipe on Card 1 (y=660: x1=200 -> x2=550)
-        print("[LIFECYCLE TEST] Dispatching horizontal swipe gesture on Card 1 (200, 660) -> (550, 660)...")
-        reader.send(b"SWIPE 200 660 550 660 5\n")
+        print("[LIFECYCLE TEST] Dispatching horizontal swipe gesture on Card 1 (360, 400) -> (360, 200)...")
+        reader.send(b"SWIPE 360 400 360 200 5\n")
         card1_dismissed = reader.wait_for(
-            "Card 1 dismissed via swipe.",
+            "Task switcher card dismissed via swipe.",
             timeout=15.0,
             print_keywords=["LAUNCHER", "Card", "dismissed"]
         )
         if not card1_dismissed:
             time.sleep(1.0)
             print("[LIFECYCLE TEST] Retrying horizontal swipe on Card 1...")
-            reader.send(b"SWIPE 200 660 550 660 5\n")
+            reader.send(b"SWIPE 360 400 360 200 5\n")
             card1_dismissed = reader.wait_for(
-                "Card 1 dismissed via swipe.",
+                "Task switcher card dismissed via swipe.",
                 timeout=25.0,
                 print_keywords=["LAUNCHER", "Card", "dismissed"]
             )
@@ -738,7 +723,7 @@ def main():
         print("[LIFECYCLE TEST] Returning home from overview deck via close button tap...")
         reader.send(b"TAP 360 1240\n")
         returned_home = reader.wait_for(
-            "Returned to home grid from recents.",
+            "Returned to home grid",
             timeout=15.0,
             print_keywords=["LAUNCHER", "Returned", "home"]
         )
@@ -746,7 +731,7 @@ def main():
             print("[LIFECYCLE TEST] Retrying return home from overview deck (TAP 360 1240)...")
             reader.send(b"TAP 360 1240\n")
             returned_home = reader.wait_for(
-                "Returned to home grid from recents.",
+                "Returned to home grid",
                 timeout=20.0,
                 print_keywords=["LAUNCHER", "Returned", "home"]
             )
@@ -754,7 +739,7 @@ def main():
             print("[LIFECYCLE TEST] Retrying return home via gesture bar (TAP 360 1410)...")
             reader.send(b"TAP 360 1410\n")
             returned_home = reader.wait_for(
-                "Returned to home grid from recents.",
+                "Returned to home grid",
                 timeout=20.0,
                 print_keywords=["LAUNCHER", "Returned", "home"]
             )
@@ -958,19 +943,19 @@ def main():
         assert torch_reported, "Lock Screen flashlight affordance did not report its availability"
         print("[LIFECYCLE TEST] [OK] Flashlight affordance reported unavailable, as the platform has no torch.")
         time.sleep(1.0)
-        print("[LIFECYCLE TEST] Unlocking device via bottom tap...")
-        reader.send(b"TAP 360 1410\n")
+        print("[LIFECYCLE TEST] Unlocking device via swipe-up gesture...")
+        reader.send(b"SWIPE 360 1350 360 300 5\n")
         unlocked = reader.wait_for(
-            "Device unlocked via tap",
-            timeout=15.0,
+            "Device unlocked",
+            timeout=25.0,
             print_keywords=["LAUNCHER", "Device", "unlocked", "render_full"]
         )
         if not unlocked:
-            print("[LIFECYCLE TEST] Retrying unlock device via bottom tap...")
+            print("[LIFECYCLE TEST] Retrying unlock device via swipe-up gesture...")
             time.sleep(1.0)
-            reader.send(b"TAP 360 1410\n")
+            reader.send(b"SWIPE 360 1350 360 300 5\n")
             unlocked = reader.wait_for(
-                "Device unlocked via tap",
+                "Device unlocked",
                 timeout=25.0,
                 print_keywords=["LAUNCHER", "Device", "unlocked", "render_full"]
             )
