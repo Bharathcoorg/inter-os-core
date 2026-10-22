@@ -52,7 +52,7 @@ static mut PICTURE_PACKAGE_LEN: [usize; MAX_CARDS] = [0; MAX_CARDS];
 static mut PICTURE_REASON: [&'static str; MAX_CARDS] = [""; MAX_CARDS];
 
 /// The picture slot that holds `package`'s picture, if there is one.
-fn picture_slot(package: &[u8]) -> Option<usize> {
+pub(crate) fn picture_slot(package: &[u8]) -> Option<usize> {
     for slot in 0..MAX_CARDS {
         let len = unsafe { PICTURE_PACKAGE_LEN[slot] };
         if len > 0 && len == package.len() {
@@ -641,7 +641,7 @@ pub fn get_activity_color(x: usize, y: usize, state: &LauncherState) -> u32 {
 }
 
 /// The captured pixel at (`px`, `py`) of the picture in `slot`.
-fn picture_pixel(slot: usize, px: usize, py: usize) -> Option<u32> {
+pub(crate) fn picture_pixel(slot: usize, px: usize, py: usize) -> Option<u32> {
     if px >= recents::PREVIEW_W || py >= recents::PREVIEW_H {
         return None;
     }

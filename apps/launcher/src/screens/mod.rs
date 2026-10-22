@@ -21,6 +21,7 @@ pub mod pin;
 pub mod power;
 pub mod power_transition;
 pub mod quick_controls;
+pub mod recents;
 pub mod search;
 
 pub use activity::get_activity_color;
@@ -39,3 +40,12 @@ pub use notifications::get_notifications_color;
 pub use pin::get_pin_color;
 pub use power::get_power_menu_color;
 pub use quick_controls::get_quick_controls_color;
+#[allow(unused_imports)]
+pub use recents::{get_recents_color, hit_test_recents, CarouselMotion, RecentsAction};
+
+/// Screen view mode representing the Recents multitasking carousel.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewMode {
+    Recents,
+}
