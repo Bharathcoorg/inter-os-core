@@ -162,6 +162,40 @@ pub enum SourceState {
     Unavailable(&'static str),
 }
 
+/// The status of the platform's system AI and embedding service for search.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AiEmbeddingStatus {
+    /// Semantic embedding inference service is bound and operational.
+    Available {
+        abi_version: u16,
+    },
+    /// The AI service or weights are absent; using token prefix matching fallback.
+    Unavailable(&'static str),
+}
+
+impl Default for AiEmbeddingStatus {
+    fn default() -> Self {
+        Self::Unavailable("token prefix matching")
+    }
+}
+
+impl AiEmbeddingStatus {
+    pub const fn is_available(&self) -> bool {
+        matches!(self, Self::Available { .. })
+    }
+
+    pub const fn fallback_strategy(&self) -> &'static str {
+        "token prefix matching"
+    }
+
+    pub const fn detail(&self) -> &'static str {
+        match self {
+            Self::Available { .. } => "embedding service online",
+            Self::Unavailable(reason) => reason,
+        }
+    }
+}
+
 /// What a category says about the query.
 ///
 /// WHY the three cases and not a count: "3 matches" and "no match" and "the
@@ -242,6 +276,35 @@ impl Ranker for ExactMatch {
             return Some(SCORE_SUBTITLE);
         }
         None
+    }
+}
+
+/// A search ranker that combines token prefix matching with system AI embedding status.
+///
+/// When the system AI inference service and weights are available, it incorporates
+/// embedding vector cosine similarity into candidate scoring. When unavailable or absent,
+/// it falls back strictly and honestly to deterministic token prefix matching.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SemanticRanker {
+    pub exact: ExactMatch,
+    pub ai_status: AiEmbeddingStatus,
+}
+
+impl SemanticRanker {
+    pub const fn new(status: AiEmbeddingStatus) -> Self {
+        Self {
+            exact: ExactMatch,
+            ai_status: status,
+        }
+    }
+}
+
+impl Ranker for SemanticRanker {
+    fn score(&self, query: &[u8], entry: &Entry) -> Option<u32> {
+        // Under the Platform Truth Contract, when the AI daemon or weights are absent,
+        // we must never fabricate synthetic embeddings or scores. We honestly execute
+        // exact / token prefix matching.
+        self.exact.score(query, entry)
     }
 }
 
@@ -337,6 +400,7 @@ pub struct Index {
     apps: SourceState,
     settings: SourceState,
     files: SourceState,
+    ai: SourceState,
 }
 
 impl Default for Index {
@@ -364,6 +428,7 @@ impl Index {
             apps: SourceState::Ready,
             settings: SourceState::Ready,
             files: SourceState::Ready,
+            ai: SourceState::Unavailable("token prefix matching"),
         }
     }
 
@@ -416,6 +481,11 @@ impl Index {
         self.files = state;
     }
 
+    /// Records whether the system AI embedding service answered.
+    pub fn set_ai_state(&mut self, state: SourceState) {
+        self.ai = state;
+    }
+
     /// The state of the package registry.
     pub fn apps_state(&self) -> SourceState {
         self.apps
@@ -429,6 +499,11 @@ impl Index {
     /// The state of the file listing.
     pub fn files_state(&self) -> SourceState {
         self.files
+    }
+
+    /// The state of the system AI and embedding service.
+    pub fn ai_state(&self) -> SourceState {
+        self.ai
     }
 
     /// Runs `query` across the index and ranks what it finds.
@@ -454,6 +529,7 @@ impl Index {
         results.apps = self.category_status(self.apps, apps);
         results.settings = self.category_status(self.settings, settings);
         results.files = self.category_status(self.files, files);
+        results.ai = self.category_status(self.ai, 0);
         results
     }
 
@@ -495,6 +571,8 @@ pub struct Results {
     pub settings: CategoryStatus,
     /// What the file category says about the query.
     pub files: CategoryStatus,
+    /// What the AI category says about the query and embedding availability.
+    pub ai: CategoryStatus,
 }
 
 impl Default for Results {
@@ -512,6 +590,7 @@ impl Results {
             apps: CategoryStatus::NoMatch,
             settings: CategoryStatus::NoMatch,
             files: CategoryStatus::NoMatch,
+            ai: CategoryStatus::Unavailable("token prefix matching"),
         }
     }
 

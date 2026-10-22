@@ -1073,6 +1073,85 @@ fn refresh_package_catalog(state: &mut LauncherState) {
 // The search index
 // -----------------------------------------------------------------------------
 
+/// Probes the system AI embedding service and model weights via IPC and VFS.
+///
+/// Respects the Platform Truth Contract: never fabricates runtime or vector
+/// capabilities. If the service is not in the system registry or physical
+/// model weights are absent in `/system/models`, reports unavailable honestly
+/// and activates deterministic token prefix matching fallback.
+fn probe_system_ai_status() -> launcher::search::AiEmbeddingStatus {
+    // 1. Probe the system service registry via IPC.
+    let mut has_service = false;
+    let mut abi_version = 0u16;
+
+    let mut service_buf = [0u8; 1024];
+    if let Ok(n) = std::service_list(&mut service_buf) {
+        let payload = &service_buf[..n.min(service_buf.len())];
+        for line in payload.split(|&b| b == b'\n') {
+            if line.is_empty() {
+                continue;
+            }
+            let mut parts = line.split(|&b| b == b'|');
+            let Some(id_bytes) = parts.next() else { continue };
+            let Some(state_bytes) = parts.next() else { continue };
+            let Some(abi_bytes) = parts.next() else { continue };
+
+            let Ok(id_str) = core::str::from_utf8(id_bytes) else { continue };
+            let Ok(id) = id_str.trim().parse::<u8>() else { continue };
+
+            if id == interos_std::ai::SERVICE_INFERENCE {
+                let Ok(abi_str) = core::str::from_utf8(abi_bytes) else { continue };
+                abi_version = abi_str.trim().parse::<u16>().unwrap_or(0);
+                if state_bytes == b"Running" || state_bytes == b"running" {
+                    has_service = true;
+                }
+                break;
+            }
+        }
+    }
+
+    if !has_service {
+        return launcher::search::AiEmbeddingStatus::Unavailable("token prefix matching");
+    }
+
+    if abi_version != interos_std::ai::INFERENCE_ABI_VERSION {
+        return launcher::search::AiEmbeddingStatus::Unavailable("wrong service ABI; token prefix matching");
+    }
+
+    // 2. Probe physical model weights via VFS.
+    if std::cap_lookup(std::cap_type::FILE_SYSTEM_READ, 0).is_err() {
+        return launcher::search::AiEmbeddingStatus::Unavailable("no VFS read authority; token prefix matching");
+    }
+
+    let mut model_buf = [0u8; 1024];
+    let mut has_weights = false;
+    match std::fs_list("/system/models", &mut model_buf) {
+        Ok(n) => {
+            let payload = &model_buf[..n.min(model_buf.len())];
+            for line in payload.split(|&b| b == b'\n') {
+                if line.is_empty() {
+                    continue;
+                }
+                let end = line.iter().position(|&b| b == b'|').unwrap_or(line.len());
+                let name = &line[..end];
+                if launcher::search::contains_ignore_case(name, b"embed") {
+                    has_weights = true;
+                    break;
+                }
+            }
+        }
+        Err(_) => {
+            return launcher::search::AiEmbeddingStatus::Unavailable("token prefix matching");
+        }
+    }
+
+    if !has_weights {
+        return launcher::search::AiEmbeddingStatus::Unavailable("token prefix matching");
+    }
+
+    launcher::search::AiEmbeddingStatus::Available { abi_version }
+}
+
 /// The ranker the search runs with.
 ///
 /// WHY this is a function and not a constant: this is the seam a model-backed
@@ -1085,8 +1164,8 @@ fn refresh_package_catalog(state: &mut LauncherState) {
 /// fallback, because a model that is not running has to leave the search
 /// working: a search that silently stops answering is worse than one that
 /// answers exactly.
-fn search_ranker() -> launcher::search::ExactMatch {
-    launcher::search::ExactMatch
+fn search_ranker() -> launcher::search::SemanticRanker {
+    launcher::search::SemanticRanker::new(probe_system_ai_status())
 }
 
 /// Rebuilds the search index from the platform, then ranks the query.
@@ -1177,12 +1256,32 @@ fn refresh_search_index(state: &mut LauncherState) {
         Err(reason) => state.search_index.set_files_state(SourceState::Unavailable(reason)),
     }
 
+    // 4. System AI & embedding service status (probed via IPC/VFS).
+    let ai_status = probe_system_ai_status();
+    match ai_status {
+        launcher::search::AiEmbeddingStatus::Available { .. } => {
+            state.search_index.set_ai_state(launcher::search::SourceState::Ready);
+        }
+        launcher::search::AiEmbeddingStatus::Unavailable(reason) => {
+            state.search_index.set_ai_state(launcher::search::SourceState::Unavailable(reason));
+        }
+    }
+
     rank_search_results(state);
 }
 
 /// Runs the query across the index.
 fn rank_search_results(state: &mut LauncherState) {
     let query = &state.search_query[..state.search_query_len];
+    let ai_status = probe_system_ai_status();
+    match ai_status {
+        launcher::search::AiEmbeddingStatus::Available { .. } => {
+            state.search_index.set_ai_state(launcher::search::SourceState::Ready);
+        }
+        launcher::search::AiEmbeddingStatus::Unavailable(reason) => {
+            state.search_index.set_ai_state(launcher::search::SourceState::Unavailable(reason));
+        }
+    }
     state.search_results = state.search_index.search(query, &search_ranker());
 }
 

@@ -787,6 +787,54 @@ fn the_index_holds_at_most_what_it_says_it_holds() {
     assert!(index.get(search::MAX_ENTRIES).is_none());
 }
 
+#[test]
+fn an_absent_ai_service_reports_token_prefix_matching() {
+    let index = sample_index();
+    let results = index.search(b"messages", &ExactMatch);
+    assert_eq!(
+        results.ai,
+        CategoryStatus::Unavailable("token prefix matching"),
+        "absent AI daemon or weights must honestly report token prefix matching fallback"
+    );
+    assert_eq!(results.count, 1);
+    let hit = results.hit(0).expect("hit");
+    let entry = index.get(hit.index as usize).expect("entry");
+    assert_eq!(entry.title(), b"Messages");
+}
+
+#[test]
+fn semantic_ranker_falls_back_to_exact_and_token_prefix_matching() {
+    use crate::search::{AiEmbeddingStatus, SemanticRanker};
+
+    let ranker = SemanticRanker::new(AiEmbeddingStatus::Unavailable("token prefix matching"));
+    let mut index = search::Index::new();
+    index.push(Entry::new(SearchKind::App, b"Settings", b"Tools", b"org.interos.settings"));
+    index.push(Entry::new(SearchKind::App, b"Camera", b"Media", b"org.interos.camera"));
+
+    // Prefix query: "set" matches "Settings"
+    let results = index.search(b"set", &ranker);
+    assert_eq!(results.count, 1);
+    let hit = results.hit(0).expect("hit");
+    let entry = index.get(hit.index as usize).expect("entry");
+    assert_eq!(entry.title(), b"Settings");
+
+    // Absent query matches nothing
+    let no_match = index.search(b"music", &ranker);
+    assert_eq!(no_match.count, 0);
+}
+
+#[test]
+fn search_index_ai_state_roundtrip() {
+    let mut index = search::Index::new();
+    assert_eq!(index.ai_state(), SourceState::Unavailable("token prefix matching"));
+
+    index.set_ai_state(SourceState::Ready);
+    assert_eq!(index.ai_state(), SourceState::Ready);
+
+    let results = index.search(b"test", &ExactMatch);
+    assert_eq!(results.ai, CategoryStatus::NoMatch);
+}
+
 // ---------------------------------------------------------------------------
 // The task switcher's card model
 // ---------------------------------------------------------------------------

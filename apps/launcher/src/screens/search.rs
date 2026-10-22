@@ -41,9 +41,9 @@ const ROW_H: usize = 96;
 const STATUS_X: usize = 32;
 const STATUS_Y: usize = 812;
 const STATUS_W: usize = 656;
-const STATUS_H: usize = 232;
+const STATUS_H: usize = 256;
 /// The height of one verdict line.
-const STATUS_LINE_H: usize = 68;
+const STATUS_LINE_H: usize = 56;
 
 /// One result row, resolved.
 #[derive(Clone, Copy)]
@@ -76,7 +76,7 @@ struct Plan {
     rows: [RowPlan; MAX_ROWS],
     row_count: usize,
     status_card: Rect,
-    status: [StatusPlan; 3],
+    status: [StatusPlan; 4],
     hint: Label,
     /// The state this plan was built from.
     cached_query_len: usize,
@@ -150,6 +150,10 @@ fn build(state: &LauncherState) -> Plan {
         row_count: 0,
         status_card: Rect::new(STATUS_X, STATUS_Y, STATUS_W, STATUS_H),
         status: [
+            StatusPlan {
+                name: Label::EMPTY,
+                verdict: Label::EMPTY,
+            },
             StatusPlan {
                 name: Label::EMPTY,
                 verdict: Label::EMPTY,
@@ -282,7 +286,8 @@ fn build(state: &LauncherState) -> Plan {
     // WHY an empty query says "type to search" rather than "nothing matches":
     // an empty query has not searched anything, and a category that says it
     // found nothing when nothing was asked of it is a category that is
-    // answering a question nobody asked.
+    // answering a question nobody asked. Categories that could not be read
+    // or whose service/weights are absent report their unavailable reason honestly.
     let waiting = state.search_query_len == 0;
     plan.status[0] = verdict_plan(
         b"Apps",
@@ -308,6 +313,14 @@ fn build(state: &LauncherState) -> Plan {
         &theme,
         waiting,
     );
+    plan.status[3] = verdict_plan(
+        b"AI",
+        state.search_results.ai,
+        STATUS_X + space::MD,
+        STATUS_Y + space::MD + STATUS_LINE_H * 3,
+        &theme,
+        waiting,
+    );
 
     plan.hint = Label::at(
         FIELD_X,
@@ -330,27 +343,26 @@ fn verdict_plan(
     waiting: bool,
 ) -> StatusPlan {
     let mut verdict = [0u8; 72];
-    let (len, ink) = if waiting {
-        let text = b"type to search";
-        verdict[..text.len()].copy_from_slice(text);
-        (text.len(), theme.on_surface_variant)
-    } else {
-        match status {
-            CategoryStatus::Matched(count) => {
-                let n = count_text(count, &mut verdict);
-                (n, theme.on_surface)
-            }
-            CategoryStatus::NoMatch => {
-                let text = b"nothing matches";
-                verdict[..text.len()].copy_from_slice(text);
-                (text.len(), theme.on_surface_variant)
-            }
-            CategoryStatus::Unavailable(reason) => {
-                let text = b"unavailable: ";
-                verdict[..text.len()].copy_from_slice(text);
-                let n = text.len() + reason_text(reason, &mut verdict[text.len()..]);
-                (n, theme.error)
-            }
+    let (len, ink) = match status {
+        CategoryStatus::Unavailable(reason) => {
+            let text = b"unavailable: ";
+            verdict[..text.len()].copy_from_slice(text);
+            let n = text.len() + reason_text(reason, &mut verdict[text.len()..]);
+            (n, theme.error)
+        }
+        _ if waiting => {
+            let text = b"type to search";
+            verdict[..text.len()].copy_from_slice(text);
+            (text.len(), theme.on_surface_variant)
+        }
+        CategoryStatus::Matched(count) => {
+            let n = count_text(count, &mut verdict);
+            (n, theme.on_surface)
+        }
+        CategoryStatus::NoMatch => {
+            let text = b"nothing matches";
+            verdict[..text.len()].copy_from_slice(text);
+            (text.len(), theme.on_surface_variant)
         }
     };
     // WHY the verdict is placed after the name's own width: the three

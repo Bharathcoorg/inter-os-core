@@ -78,3 +78,10 @@ path = "src/bin/wasmd.rs"
 test = false
 bench = false
 
+[[bin]]
+name = "aid"
+path = "src/bin/aid.rs"
+test = false
+bench = false
+
+
