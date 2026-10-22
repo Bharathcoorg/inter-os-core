@@ -369,7 +369,6 @@ fn icon_color(kind: Option<launcher::icons::IconKind>, index: usize, theme: &The
         Some(IconKind::Settings) => 0xFF8E8E93,
         Some(IconKind::Music) => 0xFFFF2D55,
         Some(IconKind::Calculator) => 0xFFFF9500,
-        Some(IconKind::Terminal) => 0xFF1C1C1E,
         Some(IconKind::Health) => 0xFFFF375F,
         Some(IconKind::Vault) => 0xFF5856D6,
         Some(IconKind::MeshChat) => 0xFF007AFF,

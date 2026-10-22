@@ -31,8 +31,19 @@ use crate::font;
 /// WHY a byte with no glyph still advances: it has to, or `measure` and the
 /// rasteriser disagree for any string containing one and every centred label
 /// containing one drifts. Both paths read `font::FALLBACK_ADVANCE`.
+///
+/// WHY this is the advance the run is *drawn* with and not the bitmap cell's:
+/// a run at scale two and above is drawn with the outline face, and the
+/// outline's advance is narrower than the bitmap cell's. Measuring a run with
+/// the bitmap's advance and drawing it with the outline's put every label
+/// to the left of the centre of its tile by the difference -- which is what
+/// the home deck's captions looked like.
 #[inline]
 pub fn advance(c: u8, scale: usize) -> usize {
+    if scale >= 2 {
+        let em = crate::outline_text::em_for_scale(scale);
+        return interos_std::design::typeface::text_advance_px(&[c], em) as usize;
+    }
     font::advance_of(c, false) * scale
 }
 

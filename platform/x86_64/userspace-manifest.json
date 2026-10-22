@@ -71,11 +71,6 @@
       "manifest": "apps/settings/Cargo.toml"
     },
     {
-      "name": "terminal",
-      "kind": "application",
-      "manifest": "apps/terminal/Cargo.toml"
-    },
-    {
       "name": "dialer",
       "kind": "application",
       "manifest": "apps/dialer/Cargo.toml"
