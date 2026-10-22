@@ -244,7 +244,11 @@ pub const SCENES: [Scene; 3] = [
         name: b"InterOS Daylight",
         top: 0xFFC0C8D0,
         mid: 0xFF8C95A3,
-        bottom: 0xFF0E0C0B,
+        // WHY the foreground is a deep navy and not a near-black: the
+        // reference lock wallpaper's lower half is a dark blue that still
+        // reads as part of the picture, and a near-black under a blue sky
+        // reads as a black box laid under the image.
+        bottom: 0xFF0B1220,
         ink: 0xFF111214,
         horizon_y: 138,
         mist_y: 195,
@@ -425,7 +429,19 @@ pub fn scene_pixel_ref(s: &SceneRef<'_>, x: usize, y: usize, w: usize, h: usize)
         let vert_rock = (rel.saturating_sub(mist_y) as u32 * 256 / (rock_y - mist_y).max(1) as u32).min(256);
         blend(s.mist, s.scene.bottom, band(vert_rock, across))
     } else {
-        blend(s.scene.bottom, s.mist, across)
+        // WHY the foreground below the rock line continues the near ridge's
+        // own vertical gradient instead of starting a horizontal one: the
+        // old code blended the bottom colour with the mist colour *across*
+        // the screen, so the rock line was a hard horizontal edge and the
+        // lower half of the panel was one flat block of one colour. The
+        // reference wallpaper's foreground runs into the mountains and
+        // darkens towards the bottom of the panel, and it is the mountains
+        // that stop, not a seam drawn across the picture.
+        let below = (rel.saturating_sub(rock_y) as u32 * 256
+            / (SCENE_REF_H as u32 - rock_y as u32).max(1))
+            .min(256);
+        let deep = blend(s.scene.bottom, 0xFF00_0000, 112);
+        blend(s.scene.bottom, deep, band(below, across))
     };
 
     let scale_y = ((SCENE_REF_H as u32 * 256) / h as u32).max(1);

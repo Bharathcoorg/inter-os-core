@@ -55,24 +55,45 @@ pub mod typography {
     /// `outline_text::place_run_cap` draws them.
     ///
     /// The values are the middle of each range the design document gives.
-    pub const CAPTION_CAP_PX: u32 = 13;
-    pub const BODY_CAP_PX: u32 = 16;
-    pub const SECTION_CAP_PX: u32 = 22;
-    pub const TITLE_CAP_PX: u32 = 30;
-    pub const HEADING_CAP_PX: u32 = 40;
-    pub const DISPLAY_CAP_PX: u32 = 52;
+    /// The cap heights, in pixels, of the platform's type scale.
+    ///
+    /// WHY a cap height and not a font size: measuring the reference screens
+    /// settles the reading of the document's numbers. On the reference
+    /// calculator -- a seven-hundred and twenty pixel wide screen -- the
+    /// status clock stands thirteen pixels tall, a key label fifteen, the
+    /// title twenty-three and the result thirty-one, and each of those
+    /// falls inside the range the document gives for the role it plays. A
+    /// ladder written in font sizes would have drawn every one of them a
+    /// third smaller.
+    ///
+    /// The em for a rung follows from its cap height, and the renderer
+    /// draws it with the outline face.
+    pub const CAPTION_CAP_PX: u32 = font::cap_for_scale(CAPTION_SCALE);
+    pub const BODY_CAP_PX: u32 = font::cap_for_scale(BODY_SCALE);
+    pub const SECTION_CAP_PX: u32 = font::cap_for_scale(3);
+    pub const TITLE_CAP_PX: u32 = font::cap_for_scale(4);
+    pub const HEADING_CAP_PX: u32 = font::cap_for_scale(5);
+    pub const DISPLAY_CAP_PX: u32 = font::cap_for_scale(6);
+
+    /// The size, in pixels of an em, each rung draws at.
+    pub const CAPTION_EM_PX: u32 = font::em_for_scale(CAPTION_SCALE);
+    pub const BODY_EM_PX: u32 = font::em_for_scale(BODY_SCALE);
+    pub const SECTION_EM_PX: u32 = font::em_for_scale(3);
+    pub const TITLE_EM_PX: u32 = font::em_for_scale(4);
+    pub const HEADING_EM_PX: u32 = font::em_for_scale(5);
+    pub const DISPLAY_EM_PX: u32 = font::em_for_scale(6);
 
     /// The line boxes, in pixels, that go with the cap heights above.
     ///
     /// WHY the line box is named and not derived: a line box is the space a
     /// run reserves, and it is a layout decision -- two labels on one row
     /// have to agree on it -- rather than a property of the glyphs.
-    pub const CAPTION_LINE_PX: usize = 16;
-    pub const BODY_LINE_PX: usize = 20;
-    pub const SECTION_LINE_PX: usize = 28;
-    pub const TITLE_LINE_PX: usize = 36;
-    pub const HEADING_LINE_PX: usize = 48;
-    pub const DISPLAY_LINE_PX: usize = 60;
+    pub const CAPTION_LINE_PX: usize = font::line_height(CAPTION_SCALE);
+    pub const BODY_LINE_PX: usize = font::line_height(BODY_SCALE);
+    pub const SECTION_LINE_PX: usize = font::line_height(3);
+    pub const TITLE_LINE_PX: usize = font::line_height(4);
+    pub const HEADING_LINE_PX: usize = font::line_height(5);
+    pub const DISPLAY_LINE_PX: usize = font::line_height(6);
 
     /// Badge glyphs inside an icon, e.g. a call badge.
     ///
@@ -93,26 +114,26 @@ pub mod typography {
 
     pub const CAPTION: TextStyle = TextStyle {
         scale: CAPTION_SCALE,
-        line_height_px: 16,
+        line_height_px: font::line_height(CAPTION_SCALE),
         baseline_offset_px: font::ascent_for_scale(CAPTION_SCALE),
     };
 
     pub const BODY: TextStyle = TextStyle {
         scale: BODY_SCALE,
-        line_height_px: 20,
+        line_height_px: font::line_height(BODY_SCALE),
         baseline_offset_px: font::ascent_for_scale(BODY_SCALE),
     };
 
     pub const TITLE: TextStyle = TextStyle {
         scale: TITLE_SCALE,
-        line_height_px: 36,
-        baseline_offset_px: font::ascent_for_scale(TITLE_SCALE),
+        line_height_px: font::line_height(3),
+        baseline_offset_px: font::ascent_for_scale(3),
     };
 
     pub const DISPLAY: TextStyle = TextStyle {
         scale: DISPLAY_SCALE,
-        line_height_px: 60,
-        baseline_offset_px: font::ascent_for_scale(DISPLAY_SCALE),
+        line_height_px: font::line_height(6),
+        baseline_offset_px: font::ascent_for_scale(6),
     };
 }
 

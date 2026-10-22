@@ -27,6 +27,20 @@ pub const MAX_CLIENT_SURFACES: usize = 32;
 pub const MAX_SURFACE_PIXELS: usize = 1280 * 720;
 pub const MAX_SCANOUT_PIXELS: usize = 3840 * 2160;
 
+/// The colour every composite starts from.
+///
+/// WHY the platform's paper and not the desktop-era slate: this is a phone,
+/// and a client that paints translucent cards blends them against this
+/// colour, so the platform's background is part of what every screen looks
+/// like. A slate background turned a light theme's translucent cards dark,
+/// and the screen was neither light nor dark but a third thing.
+///
+/// WHY it is a constant and not a literal at the two use sites: a client
+/// that draws a translucent card and the compositor that composites it have
+/// to agree on the colour, and a literal at each site is two chances to
+/// disagree.
+pub const PLATFORM_BACKGROUND: u32 = 0xFFFAFAFA;
+
 /// Two-dimensional damage rectangle for region invalidation and clipping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DamageRect {
@@ -970,7 +984,12 @@ impl DrmKmsController {
         // drew. A cost measured as noise cannot buy that: the platform's
         // background colour is the one pixel state that is true under every
         // foreground, so every composite starts from it.
-        self.back_buffer.fill(0xFF0B0F19u32);
+        // WHY paper and not the desktop-era slate: this platform is a phone,
+        // and the phone's stock surface is paper. A client that paints
+        // translucent cards blends them against this colour, so the platform
+        // background is part of what every screen looks like: a slate
+        // background turned a light theme's translucent cards dark.
+        self.back_buffer.fill(PLATFORM_BACKGROUND);
 
         // Sort surfaces by z_order ascending (lower z painted first)
         self.surfaces.sort_by_key(|s| s.z_order);
@@ -1912,8 +1931,11 @@ mod tests {
 
         // Composite while unlatched must skip blending the uncommitted surface
         kms.composite();
-        // Since id was skipped, back buffer remains background color (0xFF0B0F19)
-        assert_eq!(kms.back_buffer[0], 0xFF0B0F19);
+        // Since id was skipped, the back buffer is still the platform's
+        // background colour. The assertion names the constant rather than a
+        // literal: what the test is about is that the unlatched surface was
+        // not blended, not which colour the platform starts from.
+        assert_eq!(kms.back_buffer[0], PLATFORM_BACKGROUND);
 
         // Explicit commit latches frame_ready = true
         assert!(kms.commit_surface(id, Some(42)));

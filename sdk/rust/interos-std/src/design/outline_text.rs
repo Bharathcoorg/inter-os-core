@@ -131,14 +131,6 @@ fn slot_for(em: u32, x: usize, y: usize, text: &[u8], bold: bool) -> usize {
     h % SLOTS
 }
 
-/// Cap height of the bitmap face in cell rows at scale 1.
-///
-/// WHY defined here rather than in the face: the face's module documents it
-/// ("Cap height 17, x-height 12, ascender 16, descender 4") but exports no
-/// constant for it, and the derivation that needs it lives here beside the
-/// rasteriser it is used against. If the face ever names it, use that instead.
-const BITMAP_CAP_ROWS: u64 = 17;
-
 /// Pixels per em that draw the cap height the scale rung names.
 ///
 /// WHY the rung names the design document's size and not the bitmap cell's
@@ -151,7 +143,7 @@ const BITMAP_CAP_ROWS: u64 = 17;
 /// it, which is the overlap the panel showed. `cap_for_scale` carries the
 /// ladder, and the em follows from the cap it names.
 pub const fn em_for_scale(scale: usize) -> u32 {
-    em_for_cap_height(crate::font::cap_for_scale(scale))
+    crate::font::em_for_scale(scale)
 }
 
 /// The colour of (`px`, `py`) if the run placed at (`x`, `baseline`) with size
@@ -232,6 +224,9 @@ pub fn place_run_cap(
     if cap_px == 0 || text.is_empty() || text.len() > KEY_MAX {
         return None;
     }
+    // The ladder's cap heights are the ladder's own sizes rounded to whole
+    // pixels, so they resolve back to the size the rung names rather than to
+    // a slightly different one.
     let em = em_for_cap_height(cap_px);
     let (ascent, _) = typeface::line_metrics(em);
     // The baseline is placed from the cap height rather than from the

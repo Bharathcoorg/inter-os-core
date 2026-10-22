@@ -1673,16 +1673,77 @@ pub fn coverage(c: u8, col: usize, row: usize, bold: bool) -> u32 {
 ///
 /// Half-steps (4, 5) keep the ladder monotone for callers that land on
 /// them; the values are the middle of each range the document gives.
+
+
+/// The size a cap height the ladder produced was drawn at.
+///
+/// WHY a reverse map and not a division: the ladder's rungs are the design
+/// document's font sizes, and a cap height is a rounded fraction of one, so
+/// dividing back gives a different size than the rung the cap came from --
+/// a nine-pixel cap is a twelve-pixel font, not an eleven-pixel one. Every
+/// cap height a caller holds came from this ladder, so the map is exact for
+/// the sizes the platform draws, and anything else falls back to the
+/// generic conversion.
+pub const fn em_for_cap_scale(cap_px: u32) -> u32 {
+    let rungs = [1usize, 2, 3, 4, 5, 6, 7];
+    let mut i = 0;
+    while i < rungs.len() {
+        if cap_px == cap_for_scale(rungs[i]) {
+            return em_for_scale(rungs[i]);
+        }
+        i += 1;
+    }
+    crate::design::outline_text::em_for_cap_height(cap_px)
+}
+
+/// The size, in pixels of an em, a scale rung draws at.
+///
+/// WHY the rung names a font size and not a cap height: the design document
+/// writes its type scale in the sizes a reader sees -- a caption of twelve,
+/// body text of fifteen, a card title of eighteen, a title of twenty-six to
+/// thirty and a hero clock of seventy-two -- and a cap height is a smaller
+/// number for the same run (a cap is about seventy per cent of the em). A
+/// ladder written in cap heights therefore drew every run a third larger
+/// than the document asks for, and the app that reserved the document's
+/// boxes drew text that did not fit them.
+///
+/// The values are the document's own: chips and badges at twelve, body at
+/// fifteen, card and section titles at eighteen, a subheading at
+/// twenty-two, a title at twenty-six, a page title at thirty and the hero
+/// display at seventy-two.
+pub const fn em_for_scale(scale: usize) -> u32 {
+    // WHY the rung names a cap height and not a font size: the design
+    // document writes its type scale in the sizes a reader sees, and
+    // measuring the reference screens settles what those numbers are. On
+    // the reference calculator the key labels stand fifteen pixels tall, the
+    // title twenty-three and the result thirty-one, on a seven-hundred and
+    // twenty pixel screen. The document's own ranges are a caption of
+    // twelve to fourteen, a body of fifteen to eighteen and a section of
+    // twenty to twenty-four, so the numbers are cap heights.
+    //
+    // A ladder written in font sizes drew every run a third smaller than
+    // the document asks for, and an app that reserved the document's boxes
+    // drew text that did not fill them.
+    let cap = cap_for_scale(scale);
+    crate::design::outline_text::em_for_cap_height(cap)
+}
+
+/// The cap height, in pixels, that a scale rung draws at.
+///
+/// WHY the values are the document's own: a caption of thirteen, a body of
+/// sixteen, a section of twenty-two, a title of thirty, a page heading of
+/// forty and a display of fifty-two, with a hero rung above the display for
+/// a clock that is the whole point of a lock screen.
 pub const fn cap_for_scale(scale: usize) -> u32 {
     match scale {
-        1 => 13, // badge / caption
+        1 => 13, // caption
         2 => 16, // body
-        3 => 30, // title
-        4 => 32, // half-step between title and heading
-        5 => 38, // half-step
-        6 => 40, // page heading / display
-        7 => 52, // hero display
-        s => (s as u32).saturating_mul(8),
+        3 => 22, // card or section title
+        4 => 30, // title
+        5 => 40, // page heading
+        6 => 52, // display
+        7 => 72, // hero
+        s => (s as u32).saturating_mul(13),
     }
 }
 
@@ -1694,8 +1755,7 @@ pub const fn cap_for_scale(scale: usize) -> u32 {
 /// same row the renderer places the ink on. `const` because app layout
 /// constants and the `typography` styles are built in const contexts.
 pub const fn ascent_for_scale(scale: usize) -> usize {
-    let em = crate::design::outline_text::em_for_cap_height(cap_for_scale(scale));
-    let (ascent, _) = crate::design::typeface::line_metrics(em);
+    let (ascent, _) = crate::design::typeface::line_metrics(em_for_scale(scale));
     ascent as usize
 }
 
@@ -1704,7 +1764,7 @@ pub fn measure(text: &[u8], scale: usize) -> usize {
     match scale {
         0 => 0,
         s => {
-            let em = crate::design::outline_text::em_for_cap_height(cap_for_scale(s));
+            let em = em_for_scale(s);
             crate::design::typeface::text_advance_px(text, em) as usize
         }
     }
@@ -1725,14 +1785,19 @@ pub fn measure_bold(text: &[u8], scale: usize) -> usize {
 /// times the document's boxes, which is where the reserved space and the
 /// neighbouring content collided.
 pub const fn line_height(scale: usize) -> usize {
-    match scale {
-        1 => 16, // caption
-        2 => 20, // body
-        3 => 36, // title
-        6 => 48, // page heading
-        7 => 60, // hero display
-        s => (cap_for_scale(s) as usize * 5 + 3) / 4,
+    // WHY the line box is the typeface's own at the rung's size and not a
+    // fixed number per rung: a line box is the space a run reserves, and a
+    // run reserves its ascent and its descent. The fixed numbers were the
+    // bitmap cell's, and a run drawn with the outline face at a rung the
+    // bitmap's numbers belonged to was taller than the box the layout
+    // reserved for it, which is how two labels came to sit on top of one
+    // another.
+    if scale == 0 {
+        return 0;
     }
+    let em = em_for_scale(scale);
+    let (ascent, descent) = crate::design::typeface::line_metrics(em);
+    (ascent + descent) as usize
 }
 
 #[inline]
@@ -2039,7 +2104,7 @@ pub fn ellipsize<'a>(text: &[u8], scale: usize, max_w: usize, out_buf: &mut [u8]
 
     // The trim budget is spent in the outline face's advances, so the
     // truncated run's width is the width the renderer will paint.
-    let em = crate::design::outline_text::em_for_cap_height(cap_for_scale(scale));
+    let em = em_for_scale(scale);
     let budget = max_w - dots_w;
     let mut current_w = 0usize;
     let mut fit_len = 0usize;

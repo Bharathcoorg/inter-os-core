@@ -1901,17 +1901,35 @@ mod tests {
     #[test]
     fn test_the_tape_holds_the_whole_expression_and_scrolls_to_it() {
         let mut calc = CalculatorState::new();
-        calc.push_str("1 + 2 + 3 + 4 + 5 + 6 + 7 + 8 + 9 + 10 + 11 + 12 + 13 + 14 + 15 + 16 + 17 + 18 + 19 + 20");
-        calc.sync_tape();
+        // WHY the expression is long: the test is about the tape holding
+        // more than it can show, and the tape's visible area is two lines of
+        // the type scale's body size. An expression that only just overflowed
+        // at one type size stopped overflowing at the next, and the test
+        // stopped testing what it was written for.
+        // WHY the expression is built up until the tape overflows rather than
+        // written out: the tape's visible area is two lines of the type
+        // scale's body size, and an expression that only just overflowed at
+        // one type size stopped overflowing at the next, so the test stopped
+        // testing what it was written for. Building it until it overflows
+        // makes the test independent of the type size.
+        let mut pushes = 0usize;
+        while calc.tape_count <= TAPE_VISIBLE_LINES && pushes < 64 {
+            calc.push_str("1234567890 + ");
+            calc.sync_tape();
+            pushes += 1;
+        }
+        assert!(
+            calc.tape_count > TAPE_VISIBLE_LINES,
+            "the expression should be longer than the tape's visible area"
+        );
 
-        // The expression is longer than the thirty-two characters the tape
-        // used to show, and every character of it is on the tape.
+        // The expression is longer than the tape can show, and every
+        // character of it is on the tape.
         let mut on_tape = 0usize;
         for index in 0..calc.tape_count {
             on_tape += calc.tape_lens[index];
         }
         assert_eq!(on_tape, calc.expr_len);
-        assert!(calc.tape_count > TAPE_VISIBLE_LINES);
 
         // The scroll extent is the whole expression.
         assert_eq!(

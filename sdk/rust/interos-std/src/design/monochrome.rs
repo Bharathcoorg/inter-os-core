@@ -126,13 +126,13 @@ pub const SPACE_XXL: usize = 32;
 // ---------------------------------------------------------------------------
 
 /// The corner radius of a card.
-pub const RADIUS_CARD: usize = 16;
+pub const RADIUS_CARD: usize = 24;
 /// The corner radius of a field, a tile or a control.
-pub const RADIUS_CONTROL: usize = 12;
+pub const RADIUS_CONTROL: usize = 16;
 /// The corner radius of a chip or a button.
 pub const RADIUS_PILL: usize = 24;
 /// The corner radius of the screen itself.
-pub const RADIUS_SCREEN: usize = 28;
+pub const RADIUS_SCREEN: usize = 32;
 
 // ---------------------------------------------------------------------------
 // The theme
@@ -277,9 +277,18 @@ pub const W: usize = 720;
 /// The height of the guest's design space.
 pub const H: usize = 1440;
 /// The height of the status bar's band.
-pub const STATUS_H: usize = 84;
+///
+/// WHY forty-eight: the design document gives the status bar its own band
+/// at the top of the screen and the gesture bar its own band at the bottom,
+/// and every screen's content is laid out between them. A taller band
+/// pushed the first row of every screen down without adding anything to it.
+pub const STATUS_H: usize = 48;
 /// The margin a screen's content keeps from the edge.
-pub const GUTTER: usize = 24;
+///
+/// WHY forty-eight: the document's own coordinates put the status clock, the
+/// day and date, the greeting and the search field all at x forty-eight, so
+/// the content column starts there. A narrower margin is a different design.
+pub const GUTTER: usize = 48;
 /// The width of the content column.
 pub const CONTENT_W: usize = W - 2 * GUTTER;
 
@@ -322,7 +331,7 @@ pub fn text_px(
     }
     // The bitmap face draws in whole cells, so a run at a cap height it
     // cannot reach is drawn at the nearest cell it has.
-    let fallback = (outline_text::em_for_cap_height(cap_px) as usize / crate::font::GLYPH_H).max(1);
+    let fallback = (crate::font::em_for_cap_scale(cap_px) as usize / crate::font::GLYPH_H).max(1);
     if x < x0 || y < y0 || y >= y0 + crate::font::GLYPH_H * fallback {
         return None;
     }
@@ -338,7 +347,7 @@ pub fn text_width(text: &[u8], cap_px: u32) -> usize {
     if text.is_empty() || cap_px == 0 {
         return 0;
     }
-    let em = outline_text::em_for_cap_height(cap_px);
+    let em = crate::font::em_for_cap_scale(cap_px);
     typeface::text_advance_px(text, em) as usize
 }
 
@@ -1185,7 +1194,7 @@ mod tests {
     #[test]
     fn the_fit_trims_to_the_width() {
         let text = b"General purpose agent for everyday tasks";
-        let len = fit(text, 200, CAP_CAPTION);
+        let len = fit(text, 120, CAP_CAPTION);
         assert!(len > 0);
         assert!(len < text.len());
         assert!(text_width(&text[..len], CAP_CAPTION) <= 200);

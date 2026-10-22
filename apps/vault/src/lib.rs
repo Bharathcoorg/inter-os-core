@@ -357,4 +357,73 @@ mod tests {
         assert!(has_blended, "should contain anti-aliased 4-bit blended edge pixels");
         assert!(has_none, "should contain transparent (None) pixels");
     }
+    /// The outline face has to draw at the size the ladder names.
+    ///
+    /// WHY this is a test and not a print: the two faces used to disagree
+    /// about where a run's ink sits and how tall it was, and an app that
+    /// mixed them drew a label a few pixels above the line it was meant to
+    /// sit on. The vault found it, and the finding was a diagnostic that
+    /// printed its numbers and asserted nothing, so nothing held the two
+    /// faces together.
+    ///
+    /// WHY these three properties: the cap height is the size the type
+    /// scale names, the run has to fit the line box the scale reserves for
+    /// it, and the two faces have to agree about a run's width, because an
+    /// app measures a label with one of them and draws it with the other.
+    #[test]
+    fn the_outline_face_draws_at_the_size_the_ladder_names() {
+        use interos_std::design::outline_text;
+        use interos_std::design::typeface;
+        use interos_std::font;
+
+        // 1456 is the cap height in 1/2048 of an em and 2048 is the em.
+        for scale in [1usize, 2, 3, 4] {
+            let cap = font::cap_for_scale(scale);
+            let em = outline_text::em_for_scale(scale);
+            let drawn_cap = (em as u64 * 1456 + 1024) / 2048;
+            assert!(
+                drawn_cap.abs_diff(cap as u64) <= 1,
+                "scale {scale}: the outline face draws a {drawn_cap} pixel cap and the ladder names {cap}"
+            );
+
+            let run = outline_text::place_run_cap(0, 0, cap, b"Root keystore", None, false)
+                .expect("a run should place at the ladder's cap height");
+            let (_x, _y, w, h) = run.bounds();
+            let line = font::line_height(scale);
+            assert!(
+                h as usize <= line,
+                "scale {scale}: the run is {h} pixels tall and the line box reserves {line}"
+            );
+            assert!(w > 0, "scale {scale}: the run has no width");
+
+            // The two faces have to agree about a run's width, because an
+            // app measures a label with one and draws it with the other.
+            let bitmap = font::measure(b"Root keystore", scale);
+            let outline = outline_text::drawn_advance(b"Root keystore", scale, None)
+                .expect("the outline face should measure a run");
+            let drift = (bitmap as i64 - outline as i64).abs();
+            assert!(
+                drift <= (bitmap as i64 / 8).max(2),
+                "scale {scale}: the bitmap face measures {bitmap} and the outline face {outline}"
+            );
+
+            // The ascent the outline places a baseline at is the one the
+            // ladder's line box reserves above the baseline.
+            let (ascent, _descent) = typeface::line_metrics(em);
+            assert!(
+                ascent as usize <= line,
+                "scale {scale}: the ascent is {ascent} and the line box reserves {line}"
+            );
+
+            // The cap height the ladder names and the size it draws at have
+            // to be the same size, and the reverse map has to agree with the
+            // forward one: an app that asks for a cap height and a renderer
+            // that asks for a size have to arrive at the same run.
+            assert_eq!(
+                outline_text::em_for_scale(scale),
+                font::em_for_cap_scale(cap),
+                "scale {scale}: the cap height {cap} does not map back to the size the ladder names"
+            );
+        }
+    }
 }

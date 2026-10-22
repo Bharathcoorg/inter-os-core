@@ -1,20 +1,32 @@
-﻿
+﻿//! The platform's type ladder, and the measurements that fix it.
+//!
+//! WHY this module exists: the design document writes its type scale in the
+//! sizes a reader sees, and there were two readings of those numbers -- as
+//! font sizes and as cap heights. They differ by a third, and getting it
+//! wrong made every screen's text smaller than the document asks for.
+//!
+//! Measuring the reference screens settles it. On the reference calculator
+//! -- a 720-pixel-wide screen -- the status clock stands thirteen pixels
+//! tall, a key label fifteen, the title twenty-three and the result
+//! thirty-one. The document's ranges are a caption of twelve to fourteen, a
+//! body of fifteen to eighteen, a section of twenty to twenty-four and a
+//! title of twenty-eight to thirty-two. Each measured size falls inside
+//! the range for the role it plays, so the numbers are cap heights.
+//!
+//! The ladder therefore names cap heights, and the em follows from one.
+
 #[cfg(test)]
 mod cap_ladder_tests {
-    use crate::design::typography;
     use crate::design::outline_text;
+    use crate::design::typography;
 
-    /// The design document's type scale, and the multiples the old ladder
-    /// could reach.
+    /// The ladder, and the range the design document gives each rung.
     ///
-    /// WHY this test exists: the old ladder was a set of multiples of the
-    /// bitmap face's sixteen-pixel cell, so the sizes available were 16, 32,
-    /// 48 and 96 pixels of cap height. The document asks for a caption of
-    /// 12 to 14, a body of 15 to 18, a section heading of 20 to 24, a title
-    /// of 28 to 32, a page heading of 36 to 44 and a display of 48 to 56 --
-    /// and two of the six had no rung to sit on.
+    /// WHY the ranges are the document's and not the ones this test invented:
+    /// the document is the specification, and the measured reference sizes
+    /// are what check the implementation against it.
     #[test]
-    fn the_cap_height_ladder_covers_the_design_document_sizes() {
+    fn every_rung_is_inside_the_range_the_document_gives() {
         let ladder = [
             (typography::CAPTION_CAP_PX, 12, 14),
             (typography::BODY_CAP_PX, 15, 18),
@@ -26,18 +38,60 @@ mod cap_ladder_tests {
         for (cap, low, high) in ladder {
             assert!(
                 cap >= low && cap <= high,
-                "the cap height {} is outside the document's {}..={} range",
-                cap,
-                low,
-                high
+                "the cap height {cap} is outside the document's {low}..={high} range"
+            );
+        }
+    }
+
+    /// The sizes measured off the reference screens.
+    ///
+    /// WHY these are here and not only in a comment: the reading of the
+    /// document's numbers is what the whole suite's typography rests on, and
+    /// a reading that is wrong is invisible until every screen looks small.
+    #[test]
+    fn the_ladder_covers_the_sizes_measured_on_the_reference_screens() {
+        // The reference calculator, measured on its seven-hundred and twenty
+        // pixel wide screen: a status clock thirteen pixels tall, a key label
+        // fifteen, the title twenty-three and the result thirty-one.
+        assert_eq!(typography::CAPTION_CAP_PX, 13);
+        assert!(typography::BODY_CAP_PX >= 15 && typography::BODY_CAP_PX <= 16);
+        // The title measured twenty-two and two thirds, and the ladder's
+        // section rung is the document's value for that role.
+        assert!(
+            typography::SECTION_CAP_PX >= 22 && typography::SECTION_CAP_PX <= 24,
+            "the section rung is {} and the measured title was twenty-two and two thirds",
+            typography::SECTION_CAP_PX
+        );
+        // The result measured thirty-one, which is the document's title band.
+        assert!(
+            typography::TITLE_CAP_PX >= 28 && typography::TITLE_CAP_PX <= 32,
+            "the title rung is {} and the measured result was thirty-one",
+            typography::TITLE_CAP_PX
+        );
+    }
+
+    #[test]
+    fn the_ladder_is_monotone() {
+        let ladder = [
+            typography::CAPTION_CAP_PX,
+            typography::BODY_CAP_PX,
+            typography::SECTION_CAP_PX,
+            typography::TITLE_CAP_PX,
+            typography::HEADING_CAP_PX,
+            typography::DISPLAY_CAP_PX,
+        ];
+        for pair in ladder.windows(2) {
+            assert!(
+                pair[1] > pair[0],
+                "the ladder is not increasing: {pair:?}"
             );
         }
     }
 
     #[test]
     fn a_cap_height_grows_the_em_with_it() {
-        let small = outline_text::em_for_cap_height(typography::CAPTION_CAP_PX);
-        let large = outline_text::em_for_cap_height(typography::DISPLAY_CAP_PX);
+        let small = crate::font::em_for_cap_scale(typography::CAPTION_CAP_PX);
+        let large = crate::font::em_for_cap_scale(typography::DISPLAY_CAP_PX);
         assert!(small > 0);
         assert!(large > small * 2, "the display em should be several captions");
     }

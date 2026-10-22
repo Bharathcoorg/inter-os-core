@@ -2290,7 +2290,14 @@ def launch_qemu_profile(profile_key="x86_64", ram_mb=None, smp=1):
             serial_lines.append(f"[STUDIO] {message}")
             return False, message, launch_info
 
-    display_backend = os.environ.get("INTEROS_DISPLAY", "sdl")
+    # WHY headless by default: the Studio is the device's window. Every User
+    # still got a QEMU SDL window per launch -- one per boot cycle -- to look
+    # at a canvas this daemon already serves better over VNC. The display is
+    # still fully alive (the VGA device scans out to the VNC endpoint above),
+    # touch travels on COM1 and the monitor on TCP, so nothing needs the
+    # desktop window. INTEROS_DISPLAY=sdl|gtk brings a window back when it
+    # really is wanted.
+    display_backend = os.environ.get("INTEROS_DISPLAY", "none")
     cmd = [
         exe,
         "-m", f"{ram}M",
