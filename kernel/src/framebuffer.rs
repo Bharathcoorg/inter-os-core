@@ -1975,23 +1975,49 @@ pub(crate) fn present_dst_row_band(band: (usize, usize), src_h: usize, dst_h: us
 }
 
 #[inline(always)]
-fn blend_half(c0: u32, c1: u32) -> u32 {
+pub fn blend_half(c0: u32, c1: u32) -> u32 {
     if c0 == c1 {
         return c0;
     }
-    let r0 = ((c0 >> 16) & 0xFF) as u32;
-    let g0 = ((c0 >> 8) & 0xFF) as u32;
-    let b0 = (c0 & 0xFF) as u32;
+    let a0 = (c0 >> 24) & 0xFF;
+    let a1 = (c1 >> 24) & 0xFF;
 
-    let r1 = ((c1 >> 16) & 0xFF) as u32;
-    let g1 = ((c1 >> 8) & 0xFF) as u32;
-    let b1 = (c1 & 0xFF) as u32;
+    if a0 == a1 {
+        let r0 = (c0 >> 16) & 0xFF;
+        let g0 = (c0 >> 8) & 0xFF;
+        let b0 = c0 & 0xFF;
 
-    let r = (r0 + r1 + 1) >> 1;
-    let g = (g0 + g1 + 1) >> 1;
-    let b = (b0 + b1 + 1) >> 1;
+        let r1 = (c1 >> 16) & 0xFF;
+        let g1 = (c1 >> 8) & 0xFF;
+        let b1 = c1 & 0xFF;
 
-    0xFF000000 | (r << 16) | (g << 8) | b
+        let r = (r0 + r1 + 1) >> 1;
+        let g = (g0 + g1 + 1) >> 1;
+        let b = (b0 + b1 + 1) >> 1;
+
+        (a0 << 24) | (r << 16) | (g << 8) | b
+    } else {
+        let a_sum = a0 + a1;
+        if a_sum == 0 {
+            return 0;
+        }
+        let a = (a_sum + 1) >> 1;
+
+        let r0 = (c0 >> 16) & 0xFF;
+        let g0 = (c0 >> 8) & 0xFF;
+        let b0 = c0 & 0xFF;
+
+        let r1 = (c1 >> 16) & 0xFF;
+        let g1 = (c1 >> 8) & 0xFF;
+        let b1 = c1 & 0xFF;
+
+        let half = a_sum >> 1;
+        let r = (r0 * a0 + r1 * a1 + half) / a_sum;
+        let g = (g0 * a0 + g1 * a1 + half) / a_sum;
+        let b = (b0 * a0 + b1 * a1 + half) / a_sum;
+
+        (a << 24) | (r << 16) | (g << 8) | b
+    }
 }
 
 /// Presents an ARGB8888 scanout buffer to the bootloader-provided physical framebuffer.
@@ -2189,9 +2215,9 @@ pub fn present_argb8888(pixels: &[u32], width: u32, height: u32, dirty_rows: (us
                                     let p0 = row_src[sx0];
                                     let p1 = row_src[sx1];
 
-                                    let out0 = p0;
-                                    let out1 = blend_half(p0, p1);
-                                    let out2 = p1;
+                                    let out0 = p0 | 0xFF00_0000;
+                                    let out1 = blend_half(p0, p1) | 0xFF00_0000;
+                                    let out2 = p1 | 0xFF00_0000;
 
                                     core::ptr::write_unaligned(dst_ptr as *mut u32, out0);
                                     core::ptr::write_unaligned(dst_ptr.add(4) as *mut u32, out1);
@@ -2243,9 +2269,9 @@ pub fn present_argb8888(pixels: &[u32], width: u32, height: u32, dirty_rows: (us
                                     let p0 = row_src[sx0];
                                     let p1 = row_src[sx1];
 
-                                    let out0 = p0;
-                                    let out1 = blend_half(p0, p1);
-                                    let out2 = p1;
+                                    let out0 = p0 | 0xFF00_0000;
+                                    let out1 = blend_half(p0, p1) | 0xFF00_0000;
+                                    let out2 = p1 | 0xFF00_0000;
 
                                     *dst_ptr = out0 as u8;
                                     *dst_ptr.add(1) = (out0 >> 8) as u8;
@@ -2305,9 +2331,9 @@ pub fn present_argb8888(pixels: &[u32], width: u32, height: u32, dirty_rows: (us
                                     let p0 = row_src[sx0];
                                     let p1 = row_src[sx1];
 
-                                    let out0 = p0;
-                                    let out1 = blend_half(p0, p1);
-                                    let out2 = p1;
+                                    let out0 = p0 | 0xFF00_0000;
+                                    let out1 = blend_half(p0, p1) | 0xFF00_0000;
+                                    let out2 = p1 | 0xFF00_0000;
 
                                     *dst_ptr = (out0 >> 16) as u8;
                                     *dst_ptr.add(1) = (out0 >> 8) as u8;
@@ -2370,9 +2396,9 @@ pub fn present_argb8888(pixels: &[u32], width: u32, height: u32, dirty_rows: (us
                                     let p0 = row_src[sx0];
                                     let p1 = row_src[sx1];
 
-                                    let out0 = p0;
-                                    let out1 = blend_half(p0, p1);
-                                    let out2 = p1;
+                                    let out0 = p0 | 0xFF00_0000;
+                                    let out1 = blend_half(p0, p1) | 0xFF00_0000;
+                                    let out2 = p1 | 0xFF00_0000;
 
                                     *dst_ptr = (out0 >> 16) as u8;
                                     *dst_ptr.add(1) = (out0 >> 8) as u8;
@@ -2409,9 +2435,9 @@ pub fn present_argb8888(pixels: &[u32], width: u32, height: u32, dirty_rows: (us
                                     let p0 = row_src[sx0];
                                     let p1 = row_src[sx1];
 
-                                    let out0 = p0;
-                                    let out1 = blend_half(p0, p1);
-                                    let out2 = p1;
+                                    let out0 = p0 | 0xFF00_0000;
+                                    let out1 = blend_half(p0, p1) | 0xFF00_0000;
+                                    let out2 = p1 | 0xFF00_0000;
 
                                     let dx0 = k * 3;
                                     fb.set_pixel(off_x + dx0, target_y, ((out0 >> 16) as u8, (out0 >> 8) as u8, out0 as u8));

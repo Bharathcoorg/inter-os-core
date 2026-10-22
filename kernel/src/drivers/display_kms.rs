@@ -11,6 +11,7 @@
 use alloc::vec::Vec;
 use alloc::vec;
 use spin::Mutex;
+use crate::framebuffer::blend_half;
 
 /// Pixel format used across the DRM/KMS graphics pipeline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1372,166 +1373,95 @@ impl DrmKmsController {
                             }
                         }
                     } else if dst_w * 2 == s_w as usize * 3 && dst_h * 2 == s_h as usize * 3 {
-                        // Exact 1.5x scanout upscaler (720x1440 -> 1080x2160).
+                        // High-clarity 1.5x reconstructor / two-pass area-averaging filter (720x1440 -> 1080x2160).
                         //
-                        // WHY a dedicated branch at all: at exactly 1.5 the scale is
-                        // rational, so destination pixels fall on a repeating
-                        // 3-phase grid against the source grid instead of the
-                        // aperiodic fractional phase the general path has to chase.
-                        // That makes an exact integer reconstruction possible here
-                        // with no fixed-point error and no drift.
+                        // 2 input pixels contribute to 3 output pixels: p0, (p0+p1)/2, p1 with
+                        // 32-bit ARGB channel math without floats or allocations.
+                        // Pass 1: Vertical area reconstruction (evaluates row r0, (r0+r1)/2, or r1).
+                        // Pass 2: Horizontal area reconstruction (generates p0, (p0+p1)/2, p1).
                         //
-                        // WHY these weights: source pixel i covers the half-open
-                        // destination span [1.5i, 1.5i + 1.5), so for one
-                        // destination triple the pair (2k, 2k+1) is covered as
-                        //     dx % 3 == 0 -> source pixel 2k only, full weight
-                        //     dx % 3 == 1 -> half of 2k, half of 2k+1
-                        //     dx % 3 == 2 -> source pixel 2k+1 only, full weight
-                        // Each source pixel therefore receives a total weight of
-                        // exactly 1.5 on both axes: 1 + 1/2 horizontally and the
-                        // same vertically, which is precisely the area a 1.5x
-                        // upscale has to reproduce. Weight sum per destination
-                        // pixel is 2 on each axis, so the normaliser is 4.
+                        // Strictly #![no_std] with zero heap allocations in scanout presentation loops.
                         let src_pitch = s_w as usize;
                         let s_w_usize = s_w as usize;
                         let s_h_usize = s_h as usize;
+                        let num_groups = s_w_usize / 2;
 
-                        // Re-present the full destination height: the fill
-                        // above already repainted every row, so this blit has
-                        // to repaint every row a stale front buffer could
-                        // still hold a previous foreground in. Narrowing what
-                        // is *presented* to the rows that changed is the diff
-                        // pass's job below; narrowing what is *composed* was
-                        // how one foreground's pixels bled through the next.
-                        let (dy_lo, dy_hi) = (0usize, dst_h);
+                        let mut row_scratch = [0u32; 720];
 
-                        for dy in dy_lo..dy_hi {
+                        for dy in 0..dst_h {
                             let ry = dy % 3;
                             let sy0 = (dy / 3) * 2;
                             let sy1 = (sy0 + 1).min(s_h_usize - 1);
-                            let (wy0, wy1) = match ry {
-                                0 => (2u32, 0u32),
-                                1 => (1u32, 1u32),
-                                _ => (0u32, 2u32),
-                            };
                             let r0 = sy0 * src_pitch;
                             let r1 = sy1 * src_pitch;
+
+                            // Pass 1: Vertical reconstruction
+                            let row_src: &[u32] = match ry {
+                                0 => &surface.pixels[r0..r0 + s_w_usize],
+                                1 => {
+                                    let s0 = &surface.pixels[r0..r0 + s_w_usize];
+                                    let s1 = &surface.pixels[r1..r1 + s_w_usize];
+                                    for x in 0..s_w_usize {
+                                        row_scratch[x] = blend_half(s0[x], s1[x]);
+                                    }
+                                    &row_scratch[..s_w_usize]
+                                }
+                                _ => &surface.pixels[r1..r1 + s_w_usize],
+                            };
+
                             let dst_row_start = (dst_y + dy) * scanout_w + dst_x;
 
-                            for dx in 0..dst_w {
-                                let rx = dx % 3;
-                                let sx0 = (dx / 3) * 2;
-                                let sx1 = (sx0 + 1).min(s_w_usize - 1);
-                                let (wx0, wx1) = match rx {
-                                    0 => (2u32, 0u32),
-                                    1 => (1u32, 1u32),
-                                    _ => (0u32, 2u32),
-                                };
+                            // Pass 2: Horizontal reconstruction
+                            if surface.opacity == 255 {
+                                for k in 0..num_groups {
+                                    let sx0 = 2 * k;
+                                    let sx1 = sx0 + 1;
+                                    let p0 = row_src[sx0];
+                                    let p1 = row_src[sx1];
 
-                                let dst_idx = dst_row_start + dx;
-                                if dst_idx >= self.back_buffer.len() {
-                                    continue;
-                                }
+                                    let out0 = p0;
+                                    let out1 = blend_half(p0, p1);
+                                    let out2 = p1;
 
-                                // 1. Exactly aligned pixel (1 out of every 9): bit-exact
-                                //    copy. Phase 0 of both axes resolves to the single
-                                //    source pixel 2k, so this is not an approximation
-                                //    of the blend below -- it is the same value, kept
-                                //    as a direct read so no rounding can touch it.
-                                if rx == 0 && ry == 0 {
-                                    let idx = r0 + sx0;
-                                    if idx < surface.pixels.len() {
-                                        let p = surface.pixels[idx];
-                                        if (p >> 24) == 0xFF && surface.opacity == 255 {
-                                            self.back_buffer[dst_idx] = p;
+                                    let base_dx = dst_row_start + k * 3;
+                                    if base_dx + 2 < self.back_buffer.len() {
+                                        if (out0 >> 24) == 0xFF {
+                                            self.back_buffer[base_dx] = out0;
                                         } else {
-                                            self.back_buffer[dst_idx] = blend_pixel(p, self.back_buffer[dst_idx], surface.opacity);
+                                            self.back_buffer[base_dx] = blend_pixel(out0, self.back_buffer[base_dx], 255);
+                                        }
+
+                                        if (out1 >> 24) == 0xFF {
+                                            self.back_buffer[base_dx + 1] = out1;
+                                        } else {
+                                            self.back_buffer[base_dx + 1] = blend_pixel(out1, self.back_buffer[base_dx + 1], 255);
+                                        }
+
+                                        if (out2 >> 24) == 0xFF {
+                                            self.back_buffer[base_dx + 2] = out2;
+                                        } else {
+                                            self.back_buffer[base_dx + 2] = blend_pixel(out2, self.back_buffer[base_dx + 2], 255);
                                         }
                                     }
-                                    continue;
                                 }
+                            } else {
+                                for k in 0..num_groups {
+                                    let sx0 = 2 * k;
+                                    let sx1 = sx0 + 1;
+                                    let p0 = row_src[sx0];
+                                    let p1 = row_src[sx1];
 
-                                let i00 = r0 + sx0;
-                                let i01 = r0 + sx1;
-                                let i10 = r1 + sx0;
-                                let i11 = r1 + sx1;
+                                    let out0 = p0;
+                                    let out1 = blend_half(p0, p1);
+                                    let out2 = p1;
 
-                                if i11 >= surface.pixels.len() {
-                                    continue;
-                                }
-
-                                let p00 = surface.pixels[i00];
-                                let p01 = surface.pixels[i01];
-                                let p10 = surface.pixels[i10];
-                                let p11 = surface.pixels[i11];
-
-                                // 2. Flat region fast path: a uniform neighbourhood is
-                                //    copied rather than blended four times, so flat
-                                //    colour survives the upscale bit-for-bit.
-                                if p00 == p01 && p00 == p10 && p00 == p11 {
-                                    if (p00 >> 24) == 0xFF && surface.opacity == 255 {
-                                        self.back_buffer[dst_idx] = p00;
-                                    } else {
-                                        self.back_buffer[dst_idx] = blend_pixel(p00, self.back_buffer[dst_idx], surface.opacity);
+                                    let base_dx = dst_row_start + k * 3;
+                                    if base_dx + 2 < self.back_buffer.len() {
+                                        self.back_buffer[base_dx] = blend_pixel(out0, self.back_buffer[base_dx], surface.opacity);
+                                        self.back_buffer[base_dx + 1] = blend_pixel(out1, self.back_buffer[base_dx + 1], surface.opacity);
+                                        self.back_buffer[base_dx + 2] = blend_pixel(out2, self.back_buffer[base_dx + 2], surface.opacity);
                                     }
-                                    continue;
                                 }
-
-                                // 3. 2x2 separable area reconstruction, integer only:
-                                //    no float, no fixed-point fraction, weights sum to
-                                //    (wy0 + wy1) * (wx0 + wx1) == 4.
-                                //
-                                // WHY the weights are the pixels' own alpha and
-                                // not the area's: a client that paints in bands
-                                // leaves the rows it has not repainted
-                                // transparent, and averaging their zeroed colour
-                                // into the result darkened the boundary between a
-                                // painted region and an unpainted one. That is
-                                // how a black rectangle appeared in the corner
-                                // of every screen. An unpainted pixel
-                                // contributes nothing, and the result is the
-                                // painted colour at the coverage the painted
-                                // pixels give it.
-                                let a00 = (p00 >> 24) & 0xFF;
-                                let a01 = (p01 >> 24) & 0xFF;
-                                let a10 = (p10 >> 24) & 0xFF;
-                                let a11 = (p11 >> 24) & 0xFF;
-                                let a_sum = a00 + a01 + a10 + a11;
-                                if a_sum == 0 {
-                                    // Nothing in this area has been painted, so
-                                    // there is nothing to put over the
-                                    // background.
-                                    continue;
-                                }
-
-                                let w00 = wy0 * wx0;
-                                let w01 = wy0 * wx1;
-                                let w10 = wy1 * wx0;
-                                let w11 = wy1 * wx1;
-
-                                if (p00 & p01 & p10 & p11) >= 0xFF00_0000 && surface.opacity == 255 {
-                                    let r = (((p00 >> 16) & 0xFF) * w00 + ((p01 >> 16) & 0xFF) * w01 + ((p10 >> 16) & 0xFF) * w10 + ((p11 >> 16) & 0xFF) * w11 + 2) >> 2;
-                                    let g = (((p00 >> 8) & 0xFF) * w00 + ((p01 >> 8) & 0xFF) * w01 + ((p10 >> 8) & 0xFF) * w10 + ((p11 >> 8) & 0xFF) * w11 + 2) >> 2;
-                                    let b = ((p00 & 0xFF) * w00 + (p01 & 0xFF) * w01 + (p10 & 0xFF) * w10 + (p11 & 0xFF) * w11 + 2) >> 2;
-                                    self.back_buffer[dst_idx] = 0xFF00_0000 | (r << 16) | (g << 8) | b;
-                                    continue;
-                                }
-
-                                let blend_ch = |shift: u32| -> u32 {
-                                    let c00 = ((p00 >> shift) & 0xFF) * a00;
-                                    let c01 = ((p01 >> shift) & 0xFF) * a01;
-                                    let c10 = ((p10 >> shift) & 0xFF) * a10;
-                                    let c11 = ((p11 >> shift) & 0xFF) * a11;
-                                    (c00 + c01 + c10 + c11) / a_sum
-                                };
-
-                                let a = a_sum / 4;
-                                let r = blend_ch(16);
-                                let g = blend_ch(8);
-                                let b = blend_ch(0);
-
-                                let blended_src = (a << 24) | (r << 16) | (g << 8) | b;
-                                self.back_buffer[dst_idx] = blend_pixel(blended_src, self.back_buffer[dst_idx], surface.opacity);
                             }
                         }
                     } else {
