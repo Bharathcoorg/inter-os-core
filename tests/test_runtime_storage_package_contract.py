@@ -13,7 +13,17 @@ def test_userspace_process_registration_is_parent_atomic():
 def test_storage_truncate_uses_transactional_write_path():
     source = (ROOT / "kernel/src/storage/interfs.rs").read_text(encoding="utf-8")
     assert "pub fn truncate_file" in source
-    assert "self.write_file(path, &data)" in source
+    # WHY the assertion is on the transaction and not on a call spelling: the
+    # intent of the contract is that a truncate commits its change through the
+    # filesystem's transaction rather than rewriting the file in place, and
+    # the implementation now zeroes the tail extent and commits the change
+    # through a transaction rather than through a whole-file write. Pinning
+    # the old call would pin the old implementation.
+    body = source[source.index("pub fn truncate_file"):]
+    body = body[: body.index("\n    pub fn ", 1)] if "\n    pub fn " in body[1:] else body
+    assert "FsTransaction" in body
+    assert "self.write_transaction(&txn)" in body
+    assert "self.write_file(path, &data)" not in body
 
 
 def test_package_activation_is_transactional():

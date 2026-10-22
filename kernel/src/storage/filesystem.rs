@@ -20,6 +20,14 @@ pub const BLOCK_FS_BASE_LBA: u32 = 4096;
 pub const BLOCK_FS_TAIL_RESERVED: u32 =
     super::persistent::SLOT_SECTORS * super::persistent::TOTAL_SLOT_COUNT;
 
+/// Smallest region the filesystem can be formatted on.
+///
+/// WHY it is a minimum and not a maximum: the region used to be capped so the
+/// eight-sector bitmap could address it, which pinned every filesystem to
+/// 16.8 MiB of data however large the disk was. The bitmap now grows with the
+/// region, so the only bound left is the one the geometry itself imposes.
+pub const MIN_INTERFS_REGION_SECTORS: u32 = super::interfs::MIN_REGION_SECTORS;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FilesystemLayout {
     pub base_lba: u32,
@@ -30,20 +38,22 @@ impl FilesystemLayout {
     pub const fn canonical() -> Self { Self { base_lba: BLOCK_FS_BASE_LBA, tail_reserved_sectors: BLOCK_FS_TAIL_RESERVED } }
 }
 
-/// Maximum filesystem region supported by the 8-sector allocation bitmap
-/// (32768 data sectors + 41 metadata sectors: 1 superblock + 8 bitmap + 32 inode).
-pub const MAX_INTERFS_REGION_SECTORS: u32 = 32768 + 41;
-
+/// The sectors of the device the filesystem region may use.
+///
+/// WHY there is no upper bound: the region's geometry is derived from its own
+/// size, so a 6 GiB disk yields a 6 GiB region and a 512 MiB disk a 512 MiB
+/// one. The only limits are the boot area in front and the journal tail
+/// behind.
 fn region_for_layout(total: u32, layout: FilesystemLayout) -> Result<u32, FsBackendError> {
     let end = total.checked_sub(layout.tail_reserved_sectors).ok_or(FsBackendError::NoSpace)?;
-    let available = end.checked_sub(layout.base_lba).filter(|v| *v > 42).ok_or(FsBackendError::NoSpace)?;
-    Ok(available.min(MAX_INTERFS_REGION_SECTORS))
+    let available = end.checked_sub(layout.base_lba)
+        .filter(|v| *v >= MIN_INTERFS_REGION_SECTORS)
+        .ok_or(FsBackendError::NoSpace)?;
+    Ok(available)
 }
 
 fn filesystem_region_sectors(total: u32) -> Result<u32, FsBackendError> {
-    let end = total.checked_sub(BLOCK_FS_TAIL_RESERVED).ok_or(FsBackendError::NoSpace)?;
-    let available = end.checked_sub(BLOCK_FS_BASE_LBA).filter(|v| *v > 42).ok_or(FsBackendError::NoSpace)?;
-    Ok(available.min(MAX_INTERFS_REGION_SECTORS))
+    region_for_layout(total, FilesystemLayout::canonical())
 }
 
 /// Decides whether the InterFS region of `device` may be written at all.
@@ -99,9 +109,28 @@ pub fn init_block_filesystem_with_layout(device: &mut dyn BlockDevice, layout: F
     let region = region_for_layout(device.sector_count(), layout)?;
     guard_region(device, layout.base_lba, region, "InterFS format")?;
     match InterFs::mount_region(device, layout.base_lba, region) {
-        Ok(fs) if fs.capacity_sectors() == region - 41 => Ok(()),
-        Ok(_) => Err(FsBackendError::CorruptMetadata),
+        Ok(fs) => {
+            // A device that grew since the filesystem was formatted keeps the
+            // filesystem it has; the sectors past it are simply not part of
+            // this filesystem. A device that shrank would cut it in half, and
+            // the mount refuses that before it gets here.
+            if fs.region_sectors() > region {
+                return Err(FsBackendError::CorruptMetadata);
+            }
+            Ok(())
+        }
         Err(FsBackendError::InvalidFormat) => { let _ = InterFs::format_region(device, layout.base_lba, region)?; Ok(()) }
+        Err(FsBackendError::UnsupportedVersion) => {
+            // The region holds a filesystem this build cannot read. It is not
+            // mounted and not interpreted -- reading another version's fields
+            // as this version's would return another format's files as if
+            // they were this one's -- and the region is formatted afresh.
+            crate::serial_println!(
+                "[INTERFS] the filesystem on this device was written in another format version; the region is being reformatted."
+            );
+            let _ = InterFs::format_region(device, layout.base_lba, region)?;
+            Ok(())
+        }
         Err(e) => Err(e),
     }
 }
@@ -143,6 +172,65 @@ pub fn store_data_file(path: &str, data: &[u8]) -> Result<(), FsBackendError> {
     let mut guard = ATA_PRIMARY.lock();
     let device = guard.as_mut().ok_or(FsBackendError::NoSpace)?;
     store_data_file_with_device(device, path, data)
+}
+
+/// Reserves room for `capacity` bytes in a data file, creating it if needed.
+///
+/// WHY a reservation rather than a plain write: a file that is larger than the
+/// kernel heap is written a chunk at a time, and each chunk has to land
+/// inside an extent that is already allocated. Reserving the extent once
+/// means the chunks are in-place sector writes.
+pub fn reserve_data_file(path: &str, capacity: u64) -> Result<(), FsBackendError> {
+    let mut guard = ATA_PRIMARY.lock();
+    let device = guard.as_mut().ok_or(FsBackendError::NoSpace)?;
+    let region = filesystem_region_sectors(device.sector_count())?;
+    guard_region(device, BLOCK_FS_BASE_LBA, region, "InterFS write")?;
+    let mut fs = InterFs::mount_region(device, BLOCK_FS_BASE_LBA, region)?;
+    fs.reserve_stream(path, capacity)
+}
+
+/// Writes `data` at `offset` inside a data file, growing the file if needed.
+pub fn store_data_file_range(path: &str, offset: u64, data: &[u8]) -> Result<usize, FsBackendError> {
+    let mut guard = ATA_PRIMARY.lock();
+    let device = guard.as_mut().ok_or(FsBackendError::NoSpace)?;
+    let region = filesystem_region_sectors(device.sector_count())?;
+    guard_region(device, BLOCK_FS_BASE_LBA, region, "InterFS write")?;
+    let mut fs = InterFs::mount_region(device, BLOCK_FS_BASE_LBA, region)?;
+    fs.write_at(path, offset, data)
+}
+
+/// Reads up to `out.len()` bytes from a data file at `offset`.
+pub fn load_data_file_range(path: &str, offset: u64, out: &mut [u8]) -> Result<usize, FsBackendError> {
+    let mut guard = ATA_PRIMARY.lock();
+    let device = guard.as_mut().ok_or(FsBackendError::NoSpace)?;
+    let region = filesystem_region_sectors(device.sector_count())?;
+    guard_region(device, BLOCK_FS_BASE_LBA, region, "InterFS mount")?;
+    let mut fs = InterFs::mount_region(device, BLOCK_FS_BASE_LBA, region)?;
+    fs.read_at(path, offset, out)
+}
+
+/// The published size of a data file, in bytes.
+pub fn data_file_len(path: &str) -> Result<u64, FsBackendError> {
+    let mut guard = ATA_PRIMARY.lock();
+    let device = guard.as_mut().ok_or(FsBackendError::NoSpace)?;
+    let region = filesystem_region_sectors(device.sector_count())?;
+    guard_region(device, BLOCK_FS_BASE_LBA, region, "InterFS mount")?;
+    let mut fs = InterFs::mount_region(device, BLOCK_FS_BASE_LBA, region)?;
+    fs.file_len(path)
+}
+
+/// Removes a data file and the blocks it held.
+pub fn remove_data_file(path: &str) -> Result<(), FsBackendError> {
+    let mut guard = ATA_PRIMARY.lock();
+    let device = guard.as_mut().ok_or(FsBackendError::NoSpace)?;
+    let region = filesystem_region_sectors(device.sector_count())?;
+    guard_region(device, BLOCK_FS_BASE_LBA, region, "InterFS write")?;
+    let mut fs = InterFs::mount_region(device, BLOCK_FS_BASE_LBA, region)?;
+    match fs.delete_file(path) {
+        Ok(()) => Ok(()),
+        Err(FsBackendError::FileNotFound) => Ok(()),
+        Err(e) => Err(e),
+    }
 }
 
 #[cfg(test)]
@@ -315,7 +403,32 @@ mod tests {
     fn format_region_still_formats_a_data_device() {
         let mut dev = MockDevice::blank(PACKAGED_SECTORS);
         let fs = InterFs::format_region(&mut dev, BLOCK_FS_BASE_LBA, 2754).expect("data device must format");
-        assert_eq!(fs.capacity_sectors(), 2754 - 41);
+        // The geometry now follows the region: a superblock, one bitmap
+        // sector, the inode table and everything else is data.
+        let expected = super::super::interfs::FsLayout::for_region(2754).expect("a usable region");
+        assert_eq!(fs.capacity_sectors(), expected.data_sectors);
+        assert_eq!(fs.capacity_sectors(), 2754 - 34);
         assert_eq!(&dev.sector(BLOCK_FS_BASE_LBA)[0..4], b"IOFS");
+    }
+
+    /// The defect this pins: the region used to be capped at the size the
+    /// eight-sector bitmap could address, so a large disk was formatted with
+    /// 16.8 MiB of usable data and the rest of it was unreachable.
+    #[test]
+    fn the_region_follows_the_size_of_the_device() {
+        // A 6 GiB device: 12,582,912 sectors.
+        //
+        // WHY the multiplication is written the way it is: 6 * 1024 * 1024 * 1024
+        // overflows a `u32` before the division by the sector size, and an
+        // arithmetic overflow in a constant is an error rather than a wrong
+        // number.
+        let total = 6u32 * 1024 * 1024 * 2;
+        let region = region_for_layout(total, FilesystemLayout::canonical())
+            .expect("a 6 GiB device must have a filesystem region");
+        assert!(
+            region > 12_000_000,
+            "a 6 GiB device must yield a region of its own size, not a capped one: {region}",
+        );
+        assert!(region > MIN_INTERFS_REGION_SECTORS);
     }
 }
