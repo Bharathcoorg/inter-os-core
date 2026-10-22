@@ -1276,10 +1276,6 @@ fn get_calendar_pixel(
 ) -> u32 {
     // 1. Status Bar & Header (y: 0..96)
     if y < 96 {
-        if y >= 94 {
-            return THEME.border;
-        }
-
         // Standardized back button squircle (24..72, 24..72)
         if let Some(c) = std::design::back_button::pixel(x, y, THEME.on_surface, THEME.border, THEME.surface_container_high) {
             return c;
@@ -1374,7 +1370,7 @@ fn get_calendar_pixel(
     // letter was drawn.
     if y >= WEEKDAY_Y0 && y < WEEKDAY_Y0 + std::design::font::line_height(WEEKDAY_SCALE) {
         if app.date_known {
-            const HEADERS: [&[u8]; 7] = [b"S", b"M", b"T", b"W", b"T", b"F", b"S"];
+            const HEADERS: [&[u8]; 7] = [b"Sun", b"Mon", b"Tue", b"Wed", b"Thu", b"Fri", b"Sat"];
             for c in 0..7 {
                 let col_x = 22 + c * 97;
                 // WHY: the face is proportional. At scale 1 'S' advances 12px and
@@ -1448,37 +1444,8 @@ fn get_calendar_pixel(
                         // day is highlighted.
                         let is_current = app.selected_day == Some(day_num as u8);
 
-                        // Rounded squircle (radius 10)
-                        let mut on_cell_border = false;
-                        let rx = (x - col_x).min(col_x + COL_W - 1 - x);
-                        let ry = (y - cell_y).min(cell_y + ROW_H - 1 - y);
-                        if rx < R_CHIP && ry < R_CHIP {
-                            let cdx = (R_CHIP - rx) as isize;
-                            let cdy = (R_CHIP - ry) as isize;
-                            let d2 = cdx * cdx + cdy * cdy;
-                            if d2 >= (R_CHIP * R_CHIP) as isize {
-                                return THEME.surface;
-                            }
-                            if d2 >= ((R_CHIP - 2) * (R_CHIP - 2)) as isize {
-                                on_cell_border = true;
-                            }
-                        } else if rx < 2 || ry < 2 {
-                            on_cell_border = true;
-                        }
-
-                        // Day numeral text. WHY: the face is proportional, so a
-                        // one- and a two-digit numeral have different widths
-                        // (11px and 22px at scale 1) and both must be centred on
-                        // the real measurement; the old fixed -8 / -16 cell
-                        // pushed them right by 3px and 6px respectively.
                         let d = day_num as u8;
-                        let text_color = if is_current { THEME.on_primary } else { THEME.on_surface };
-                        // WHY the offset: a scale-2 run is 48 rows and the cell
-                        // is now 48 rows, so it is centred at offset 0. Before,
-                        // the cell was 44 rows and the run started at +14, which
-                        // put its last 18 rows outside the cell.
                         let text_y = cell_y + (ROW_H - std::design::font::line_height(2)) / 2;
-
                         let text: [u8; 2] = if d < 10 {
                             [b'0' + d, 0]
                         } else {
@@ -1486,21 +1453,26 @@ fn get_calendar_pixel(
                         };
                         let n = if d < 10 { 1 } else { 2 };
                         let text_x = centered_x(&text[..n], 2, col_x, COL_W);
-                        // WHY COL_W is the column: the numeral is centred in the
-                        // cell it falls in, and the widest, "31", measures 44px
-                        // on the bitmap face at scale 2 and 46px on the outline
-                        // face, so both fit.
-                        let cell_bg = if is_current { THEME.primary_container } else { THEME.surface_container };
-                        if let Some(color) = test_text(x, y, text_x, text_y, 2, &text[..n], COL_W, text_color, cell_bg) {
-                            return color;
-                        }
 
-                        // Border rim
-                        if on_cell_border {
-                            return if is_current { THEME.primary } else { THEME.border };
+                        if is_current {
+                            let cx = (col_x + COL_W / 2) as isize;
+                            let cy = (cell_y + ROW_H / 2) as isize;
+                            let dx = (x as isize) - cx;
+                            let dy = (y as isize) - cy;
+                            let rad = 22isize;
+                            if dx * dx + dy * dy <= rad * rad {
+                                if let Some(color) = test_text(x, y, text_x, text_y, 2, &text[..n], COL_W, THEME.on_primary, THEME.primary) {
+                                    return color;
+                                }
+                                return THEME.primary;
+                            }
+                            return THEME.surface;
+                        } else {
+                            if let Some(color) = test_text(x, y, text_x, text_y, 2, &text[..n], COL_W, THEME.on_surface, THEME.surface) {
+                                return color;
+                            }
+                            return THEME.surface;
                         }
-
-                        return cell_bg;
                     }
                 }
             }
