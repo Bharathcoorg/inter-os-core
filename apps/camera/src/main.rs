@@ -240,9 +240,9 @@ fn shutter_hit(dx: isize, dy: isize) -> bool {
 
 /// Whether a touch at (dx, dy) is on one of the dock's side buttons.
 fn side_button_hit(x: usize, y: usize, cx: usize) -> bool {
-    let dx = (x as isize - cx as isize).abs();
-    let dy = (y as isize - SHUTTER_CY as isize).abs();
-    dx <= DOCK_SIDEBTN_HALF as isize && dy <= DOCK_SIDEBTN_HALF as isize
+    let dx = x as isize - cx as isize;
+    let dy = y as isize - SHUTTER_CY as isize;
+    (dx * dx + dy * dy) <= (DOCK_SIDEBTN_HALF * DOCK_SIDEBTN_HALF) as isize
 }
 
 // -----------------------------------------------------------------------------
@@ -323,18 +323,24 @@ fn test_lightning(x: usize, y: usize, cx: usize, cy: usize) -> bool {
 fn test_gallery_icon(x: usize, y: usize, cx: usize, cy: usize) -> bool {
     let dx = x as isize - cx as isize;
     let dy = y as isize - cy as isize;
-    // Sun circle at (-8, -8), r=4
-    let sun_dx = dx + 8;
-    let sun_dy = dy + 8;
-    if sun_dx * sun_dx + sun_dy * sun_dy <= 16 {
-        return true;
-    }
-    // Mountain triangles
-    if (dy >= -2) && dy <= 12 {
-        let m1 = (dx + 4).abs() <= (dy + 2);
-        let m2 = (dx - 10).abs() <= (dy - 2);
-        if m1 || m2 {
+    // Outer landscape frame rounded rectangle (crisp border at inset 16px)
+    if dx.abs() <= 16 && dy.abs() <= 13 {
+        if dx.abs() == 16 || dy.abs() == 13 {
             return true;
+        }
+        // Sun circle at (-7, -5), r=3
+        let sun_dx = dx + 7;
+        let sun_dy = dy + 5;
+        if sun_dx * sun_dx + sun_dy * sun_dy <= 9 {
+            return true;
+        }
+        // Sharper mountain peaks
+        if dy >= -1 && dy <= 10 {
+            let m1 = (dx + 4).abs() * 2 <= (dy + 4);
+            let m2 = (dx - 7).abs() * 2 <= (dy + 2);
+            if m1 || m2 {
+                return true;
+            }
         }
     }
     false
@@ -348,14 +354,14 @@ fn test_gallery_icon(x: usize, y: usize, cx: usize, cy: usize) -> bool {
 fn test_settings_icon(x: usize, y: usize, cx: usize, cy: usize) -> bool {
     let dx = x as isize - cx as isize;
     let dy = y as isize - cy as isize;
-    let rows = [(-12i32, -8i32), (0i32, 8i32), (12i32, 0i32)];
+    let rows = [(-10i32, -6i32), (0i32, 6i32), (10i32, -2i32)];
     for (row_y, knob_x) in rows {
         let ry = dy - row_y as isize;
         if ry.abs() <= 1 && dx.abs() <= 14 {
             return true;
         }
         let kx = dx - knob_x as isize;
-        if ry.abs() <= 4 && kx.abs() <= 4 {
+        if kx * kx + ry * ry <= 12 {
             return true;
         }
     }
@@ -740,15 +746,19 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
         // its photos into the shared storage area and the platform's document
         // index describes them, so there is something behind it to open.
         if side_button_hit(x, y, PHOTOS_CX) {
-            if test_gallery_icon(x, y, PHOTOS_CX, SHUTTER_CY) {
-                return THEME.on_surface_variant;
+            let dx = x as isize - PHOTOS_CX as isize;
+            let dy = y as isize - SHUTTER_CY as isize;
+            let r2 = (dx * dx + dy * dy) as usize;
+            let half = DOCK_SIDEBTN_HALF;
+            if r2 <= half * half {
+                if test_gallery_icon(x, y, PHOTOS_CX, SHUTTER_CY) {
+                    return THEME.on_surface;
+                }
+                if r2 >= (half - 1) * (half - 1) {
+                    return THEME.border;
+                }
+                return THEME.surface_container_high;
             }
-            let dx = (x as isize - PHOTOS_CX as isize).abs();
-            let dy = (y as isize - SHUTTER_CY as isize).abs();
-            if dx == DOCK_SIDEBTN_HALF as isize || dy == DOCK_SIDEBTN_HALF as isize {
-                return THEME.border;
-            }
-            return THEME.surface_container;
         }
 
         // Center Shutter Button. WHY the disabled treatment: `camera_capture` is
@@ -795,15 +805,19 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
         // a control that looked armed and only pretended to be. The settings
         // surface the camera needed now has a place to live.
         if side_button_hit(x, y, SETTINGS_CX) {
-            if test_settings_icon(x, y, SETTINGS_CX, SHUTTER_CY) {
-                return THEME.on_surface_variant;
+            let dx = x as isize - SETTINGS_CX as isize;
+            let dy = y as isize - SHUTTER_CY as isize;
+            let r2 = (dx * dx + dy * dy) as usize;
+            let half = DOCK_SIDEBTN_HALF;
+            if r2 <= half * half {
+                if test_settings_icon(x, y, SETTINGS_CX, SHUTTER_CY) {
+                    return THEME.on_surface;
+                }
+                if r2 >= (half - 1) * (half - 1) {
+                    return THEME.border;
+                }
+                return THEME.surface_container_high;
             }
-            let dx = (x as isize - SETTINGS_CX as isize).abs();
-            let dy = (y as isize - SHUTTER_CY as isize).abs();
-            if dx == DOCK_SIDEBTN_HALF as isize || dy == DOCK_SIDEBTN_HALF as isize {
-                return THEME.border;
-            }
-            return THEME.surface_container;
         }
 
         return THEME.surface;
