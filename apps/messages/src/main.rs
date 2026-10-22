@@ -18,6 +18,8 @@ use interos_std as std;
 use messages::theme::{MIN_TOUCH_TARGET, THEME, radius, spacing, type_scale};
 use interos_std::design::components;
 use interos_std::design::outline_text;
+use interos_std::design::monochrome;
+use interos_std::design::primitives;
 use interos_std::design::scroll::ScrollState;
 
 use messages::gsm;
@@ -1127,25 +1129,29 @@ fn card_row_pixel(
     if x < fx || x >= fx + rect.2 || y < fy || y >= fy + rect.3 {
         return None;
     }
-    let rx = (x - fx).min(fx + rect.2 - 1 - x);
-    let ry = (y - fy).min(fy + rect.3 - 1 - y);
-    if rx < CARD.radius && ry < CARD.radius {
-        let cdx = (CARD.radius - rx) as isize;
-        let cdy = (CARD.radius - ry) as isize;
-        if cdx * cdx + cdy * cdy >= (CARD.radius * CARD.radius) as isize {
-            return Some(THEME.surface);
+    // WHY the platform's card and not a hand-drawn one: this function used
+    // to cut the corners itself and then draw the hairline as "the nearest
+    // edge is within two pixels". The cut came first and ate the hairline
+    // at the corners, so every card in this app had a broken outline, and
+    // the outline was a second implementation of what the platform already
+    // draws. The platform's card has a continuous hairline that follows the
+    // corner, and a third-party app that draws a card gets the same one.
+    if let Some(c) = monochrome::card_px(
+        x,
+        y,
+        primitives::Rect::new(fx, fy, rect.2, rect.3),
+        CARD.fill,
+        CARD.border,
+    ) {
+        if let Some(t) = test_text(x, y, fx + 24, fy + 20, 1, label, THEME.on_surface_variant, CARD.fill) {
+            return Some(t);
         }
-    }
-    if let Some(c) = test_text(x, y, fx + 24, fy + 20, 1, label, THEME.on_surface_variant, CARD.fill) {
+        if let Some(t) = test_text(x, y, fx + 24, fy + 50, 1, value, THEME.on_surface, CARD.fill) {
+            return Some(t);
+        }
         return Some(c);
     }
-    if let Some(c) = test_text(x, y, fx + 24, fy + 50, 1, value, THEME.on_surface, CARD.fill) {
-        return Some(c);
-    }
-    if rx < 2 || ry < 2 {
-        return Some(CARD_BORDER);
-    }
-    Some(CARD.fill)
+    None
 }
 
 struct Frame {
@@ -1400,15 +1406,13 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
             // Filter matched nothing
             if f.filtered.is_none() {
                 if in_rect(EMPTY_CARD, x, y) {
-                    let rx = (x - EMPTY_CARD.0).min(EMPTY_CARD.0 + EMPTY_CARD.2 - 1 - x);
-                    let ry = (y - EMPTY_CARD.1).min(EMPTY_CARD.1 + EMPTY_CARD.3 - 1 - y);
-                    if rx < R_SHEET && ry < R_SHEET {
-                        let cdx = (R_SHEET - rx) as isize;
-                        let cdy = (R_SHEET - ry) as isize;
-                        if cdx * cdx + cdy * cdy >= (R_SHEET * R_SHEET) as isize {
-                            return THEME.surface;
-                        }
-                    }
+                    // WHY the platform's card: this app drew the empty state's own
+                    // outline -- a corner cut that ate the hairline, and a rule drawn
+                    // as "the nearest edge is within two pixels". A rule drawn that
+                    // way has no corners, so the outline broke at every corner, and
+                    // it was a second implementation of a card the platform already
+                    // draws. The platform's card has one outline that follows the
+                    // corner.
 
                     let line = b"No chats match your search";
                     let sub = &messages.search[..messages.search_len];
@@ -1441,10 +1445,19 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                     ) {
                         return c;
                     }
-                    if rx < 2 || ry < 2 {
-                        return CARD_BORDER;
-                    }
-                    return CARD.fill;
+                    return monochrome::card_px(
+                        x,
+                        y,
+                        primitives::Rect::new(
+                            EMPTY_CARD.0,
+                            EMPTY_CARD.1,
+                            EMPTY_CARD.2,
+                            EMPTY_CARD.3,
+                        ),
+                        CARD.fill,
+                        CARD.border,
+                    )
+                    .unwrap_or(THEME.surface);
                 }
                 return THEME.surface;
             }
@@ -1452,15 +1465,13 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
             // Zero conversation threads: Honest Empty State Card
             if messages.ledger.thread_count == 0 {
                 if in_rect(EMPTY_CARD, x, y) {
-                    let rx = (x - EMPTY_CARD.0).min(EMPTY_CARD.0 + EMPTY_CARD.2 - 1 - x);
-                    let ry = (y - EMPTY_CARD.1).min(EMPTY_CARD.1 + EMPTY_CARD.3 - 1 - y);
-                    if rx < R_SHEET && ry < R_SHEET {
-                        let cdx = (R_SHEET - rx) as isize;
-                        let cdy = (R_SHEET - ry) as isize;
-                        if cdx * cdx + cdy * cdy >= (R_SHEET * R_SHEET) as isize {
-                            return THEME.surface;
-                        }
-                    }
+                    // WHY the platform's card: this app drew the empty state's own
+                    // outline -- a corner cut that ate the hairline, and a rule drawn
+                    // as "the nearest edge is within two pixels". A rule drawn that
+                    // way has no corners, so the outline broke at every corner, and
+                    // it was a second implementation of a card the platform already
+                    // draws. The platform's card has one outline that follows the
+                    // corner.
 
                     // Vector Chat Bubble Pictogram at cx: 360, cy: 673
                     let cx = 360;
@@ -1554,10 +1565,19 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                         return c;
                     }
 
-                    if rx < 2 || ry < 2 {
-                        return THEME.border;
-                    }
-                    return THEME.surface_container;
+                    return monochrome::card_px(
+                        x,
+                        y,
+                        primitives::Rect::new(
+                            EMPTY_CARD.0,
+                            EMPTY_CARD.1,
+                            EMPTY_CARD.2,
+                            EMPTY_CARD.3,
+                        ),
+                        THEME.surface_container,
+                        Some(THEME.border),
+                    )
+                    .unwrap_or(THEME.surface);
                 }
             } else {
                 // Render conversation thread rows
@@ -2182,10 +2202,19 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                 ) {
                     return c;
                 }
-                if rx < 2 || ry < 2 {
-                    return CARD_BORDER;
-                }
-                return CARD.fill;
+                return monochrome::card_px(
+                    x,
+                    y,
+                    primitives::Rect::new(
+                        EMPTY_CARD.0,
+                        EMPTY_CARD.1,
+                        EMPTY_CARD.2,
+                        EMPTY_CARD.3,
+                    ),
+                    CARD.fill,
+                    CARD.border,
+                )
+                .unwrap_or(THEME.surface);
             }
             return THEME.surface;
         }
@@ -2254,10 +2283,19 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                 ) {
                     return c;
                 }
-                if rx < 2 || ry < 2 {
-                    return CARD_BORDER;
-                }
-                return CARD.fill;
+                return monochrome::card_px(
+                    x,
+                    y,
+                    primitives::Rect::new(
+                        EMPTY_CARD.0,
+                        EMPTY_CARD.1,
+                        EMPTY_CARD.2,
+                        EMPTY_CARD.3,
+                    ),
+                    CARD.fill,
+                    CARD.border,
+                )
+                .unwrap_or(THEME.surface);
             }
             return THEME.surface;
         }
