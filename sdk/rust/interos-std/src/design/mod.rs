@@ -38,7 +38,12 @@ pub mod typography {
     pub const BADGE_SCALE: usize = 1;
     pub const CAPTION_SCALE: usize = 1;
     pub const BODY_SCALE: usize = 2;
-    pub const TITLE_SCALE: usize = 3;
+    /// A section heading: the card title and the heading above a group.
+    pub const SECTION_SCALE: usize = 3;
+    /// A page title: the name of the screen.
+    pub const TITLE_SCALE: usize = 4;
+    /// A page heading: the largest a title may be.
+    pub const HEADING_SCALE: usize = 5;
     pub const DISPLAY_SCALE: usize = 6;
 
     /// The cap heights, in pixels, of the platform's type scale.
@@ -126,8 +131,23 @@ pub mod typography {
 
     pub const TITLE: TextStyle = TextStyle {
         scale: TITLE_SCALE,
-        line_height_px: font::line_height(3),
-        baseline_offset_px: font::ascent_for_scale(3),
+        line_height_px: font::line_height(TITLE_SCALE),
+        baseline_offset_px: font::ascent_for_scale(TITLE_SCALE),
+    };
+
+    /// A section heading: the title of a card and the heading above a group
+    /// of rows.
+    pub const SECTION: TextStyle = TextStyle {
+        scale: SECTION_SCALE,
+        line_height_px: font::line_height(SECTION_SCALE),
+        baseline_offset_px: font::ascent_for_scale(SECTION_SCALE),
+    };
+
+    /// A page heading: the largest a title may be drawn.
+    pub const HEADING: TextStyle = TextStyle {
+        scale: HEADING_SCALE,
+        line_height_px: font::line_height(HEADING_SCALE),
+        baseline_offset_px: font::ascent_for_scale(HEADING_SCALE),
     };
 
     pub const DISPLAY: TextStyle = TextStyle {

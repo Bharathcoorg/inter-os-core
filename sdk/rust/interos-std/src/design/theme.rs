@@ -45,8 +45,12 @@ pub struct TypeScale {
     pub caption: typography::TextStyle,
     /// Body copy and list labels.
     pub body: typography::TextStyle,
-    /// Section headings.
+    /// Section headings: the title of a card and the heading above a group.
+    pub section: typography::TextStyle,
+    /// A page title: the name of the screen.
     pub title: typography::TextStyle,
+    /// A page heading: the largest a title may be.
+    pub heading: typography::TextStyle,
     /// Display type: a lock-screen clock.
     pub display: typography::TextStyle,
 }
@@ -57,7 +61,9 @@ impl TypeScale {
         badge: typography::BADGE,
         caption: typography::CAPTION,
         body: typography::BODY,
+        section: typography::SECTION,
         title: typography::TITLE,
+        heading: typography::HEADING,
         display: typography::DISPLAY,
     };
 }
@@ -779,7 +785,34 @@ mod tests {
         assert_eq!(Radii::STANDARD.pill, 999);
         assert_eq!(Spacing::STANDARD.md, 16);
         assert_eq!(Touch::STANDARD.min_target, 44);
-        assert_eq!(TypeScale::STANDARD.title.scale, 3);
+        assert_eq!(TypeScale::STANDARD.title.scale, 4);
+    }
+
+    /// The ladder's rungs are the document's cap heights, and each named
+    /// view is the rung that carries its name.
+    ///
+    /// WHY this test exists: the ladder used to be a set of multiples of the
+    /// bitmap face's cell, so the same number meant a different size once the
+    /// face changed, and a page title drawn at the title's number came out at
+    /// the section's size. The rungs are named for the role they play, and a
+    /// view that claims a name has to carry that rung.
+    #[test]
+    fn every_named_view_carries_the_rung_for_its_role() {
+        assert_eq!(TypeScale::STANDARD.caption.scale, 1);
+        assert_eq!(TypeScale::STANDARD.body.scale, 2);
+        assert_eq!(TypeScale::STANDARD.section.scale, 3);
+        assert_eq!(TypeScale::STANDARD.title.scale, 4);
+        assert_eq!(TypeScale::STANDARD.heading.scale, 5);
+        assert_eq!(TypeScale::STANDARD.display.scale, 6);
+        // And the rungs are the document's cap heights.
+        assert_eq!(
+            crate::font::cap_for_scale(TypeScale::STANDARD.title.scale),
+            crate::design::typography::TITLE_CAP_PX
+        );
+        assert_eq!(
+            crate::font::cap_for_scale(TypeScale::STANDARD.section.scale),
+            crate::design::typography::SECTION_CAP_PX
+        );
     }
 
     #[test]

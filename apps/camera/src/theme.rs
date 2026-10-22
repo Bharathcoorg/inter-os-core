@@ -38,6 +38,8 @@ pub mod type_scale {
     pub use interos_std::design::typography::CAPTION_SCALE as CAPTION;
     pub use interos_std::design::typography::BODY_SCALE as BODY;
     pub use interos_std::design::typography::TITLE_SCALE as TITLE;
+    pub use interos_std::design::typography::SECTION_SCALE as SECTION;
+    pub use interos_std::design::typography::HEADING_SCALE as HEADING;
     pub use interos_std::design::typography::DISPLAY_SCALE as DISPLAY;
 }
 
