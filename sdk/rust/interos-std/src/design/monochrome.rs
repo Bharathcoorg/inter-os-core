@@ -41,6 +41,13 @@ pub const BG: u32 = 0xFFFA_FAFA;
 pub const SURFACE: u32 = 0xFF_FFFF;
 /// A surface that is a step below white: an icon tile, a chip, a field.
 pub const SURFACE_MUTED: u32 = 0xFFF2_F2F2;
+/// A raised control: a key on a card, a button on the page.
+///
+/// WHY there is a step below the card and not only the card's own white: a
+/// key painted in the card's own white is invisible on it, and the
+/// reference calculator's keys are a step below the card. The platform
+/// already names that step -- it is the light theme's raised surface.
+pub const SURFACE_RAISED: u32 = 0xFFEF_EEE9;
 /// The hairline that separates two surfaces.
 pub const BORDER: u32 = 0xFFE5_E5E5;
 /// The text a reader reads first.
@@ -153,7 +160,7 @@ pub const THEME: super::theme::Theme = super::theme::Theme {
     // The page and the surfaces on it.
     surface: BG,
     surface_container: SURFACE,
-    surface_container_high: SURFACE,
+    surface_container_high: SURFACE_RAISED,
     surface_container_low: SURFACE_MUTED,
     surface_frosted: SURFACE,
     overlay: SURFACE,
