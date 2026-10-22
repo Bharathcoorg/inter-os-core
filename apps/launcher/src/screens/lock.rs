@@ -380,7 +380,17 @@ fn lock_wallpaper_pixel(f: &Frame, x: usize, y: usize) -> u32 {
         let vert_rock = (rel.saturating_sub(mist_y) as u32 * 256 / (rock_y - mist_y).max(1) as u32).min(256);
         Theme::blend(f.mist, f.bottom, lock_band(vert_rock, across))
     } else {
-        Theme::blend(f.bottom, f.mist, across)
+        // WHY this is the same vertical gradient the shared scene painter
+        // uses: the lock screen had its own copy of the scene maths, and the
+        // two had drifted -- the copy below the rock line blended the bottom
+        // colour with the mist colour *across* the screen, which put a hard
+        // horizontal edge along the rock line and left the lower half of the
+        // panel a flat black block under the picture.
+        let below = (rel.saturating_sub(rock_y) as u32 * 256
+            / (LOCK_REF_H as u32 - rock_y as u32).max(1))
+            .min(256);
+        let deep = Theme::blend(f.bottom, 0xFF00_0000, 112);
+        Theme::blend(f.bottom, deep, lock_band(below, across))
     };
 
     let scale_y = ((LOCK_REF_H as u32 * 256) / H as u32).max(1);

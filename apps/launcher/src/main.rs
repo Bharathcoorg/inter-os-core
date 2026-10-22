@@ -676,6 +676,16 @@ fn load_wallpaper_document(key: &str, pixels: &WallpaperPixels) -> Option<std::i
         }
     };
     let _ = std::fs_close(fd);
+    // WHY a document that filled the buffer is refused: the read is capped,
+    // so a file that filled it is longer than the shell could read, and
+    // what came back is the top of the picture. Painting that as if it
+    // were the whole wallpaper put a black block under the top of the
+    // image, and the screen showed a torn photograph rather than a
+    // wallpaper.
+    if read == file.len() {
+        std::log("[LAUNCHER] The wallpaper document is larger than the shell can read; the stock wallpaper is kept.").ok();
+        return None;
+    }
     let name = path.rsplit('/').next().unwrap_or(path);
     let decoded = {
         let buffer = unsafe { &mut *pixels.0.get() };
@@ -685,6 +695,13 @@ fn load_wallpaper_document(key: &str, pixels: &WallpaperPixels) -> Option<std::i
         std::log("[LAUNCHER] The wallpaper document is not an image the platform can read, or it is larger than the shell can paint; the stock wallpaper is kept.").ok();
         return None;
     };
+    // WHY the decoded length has to account for every pixel: an image whose
+    // data is shorter than its own header describes is a torn file, and
+    // drawing the rows that arrived leaves the rest of the panel black.
+    if len as usize != w as usize * h as usize * 4 {
+        std::log("[LAUNCHER] The wallpaper document is incomplete; the stock wallpaper is kept.").ok();
+        return None;
+    }
     if w as usize > WALLPAPER_MAX_W || h as usize > WALLPAPER_MAX_H {
         std::log("[LAUNCHER] The wallpaper document is larger than the shell can paint; the stock wallpaper is kept.").ok();
         return None;
