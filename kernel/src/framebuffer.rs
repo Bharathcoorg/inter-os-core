@@ -2070,8 +2070,17 @@ pub fn present_argb8888(pixels: &[u32], width: u32, height: u32, dirty_rows: (us
     // degenerates to the identity `[s0, s1)` it needs to be. Both loops below
     // therefore share one mapping.
     let is_2x = (src_w == dst_w * 2) && (src_h == dst_h * 2);
+    let is_1to1 = (src_w == dst_w) && (src_h == dst_h);
     let is_3_2 = (src_w * 3 == dst_w * 2) && (src_h * 3 == dst_h * 2) && (src_w <= 720) && (src_w % 2 == 0);
-    let (dy0, dy1) = if is_3_2 {
+    let (dy0, dy1) = if is_1to1 {
+        let s0 = dirty_rows.0.min(src_h);
+        let s1 = dirty_rows.1.min(src_h).max(s0);
+        if s1 <= s0 {
+            (0, 0)
+        } else {
+            (s0, s1)
+        }
+    } else if is_3_2 {
         let s0 = dirty_rows.0.min(src_h);
         let s1 = dirty_rows.1.min(src_h).max(s0);
         if s1 <= s0 {

@@ -633,6 +633,11 @@ impl DrmKmsController {
 
     /// Allocates a new client surface for application rendering.
     pub fn create_surface(&mut self, width: u32, height: u32, z_order: u32, owner_task: u64) -> u32 {
+        // Direct native 1080x2160 scanout mode without fractional scaling
+        // when apps request a full-resolution 1080x2160 surface.
+        if width == 1080 && height == 2160 && (self.scanout_width != 1080 || self.scanout_height != 2160) {
+            let _ = self.set_display_mode(1080, 2160, self.refresh_hz);
+        }
         let pixels = match (width as usize).checked_mul(height as usize) {
             // Client surfaces have a stricter per-surface budget than the
             // physical scanout buffer. This prevents a single display client
@@ -1109,7 +1114,9 @@ impl DrmKmsController {
         let sw = self.scanout_width as i32;
         let sh = self.scanout_height as i32;
 
-        let has_mobile_portrait = self.surfaces.iter().any(|s| s.visible && s.frame_ready && s.width == 720 && s.height == 1440);
+        let has_mobile_portrait = self.surfaces.iter().any(|s| {
+            s.visible && s.frame_ready && ((s.width == 720 && s.height == 1440) || (s.width == 1080 && s.height == 2160))
+        });
 
         // Scanout rows the flip will have to re-present. Seeded with whatever
         // the callers already declared dirty; the surface loop narrows it to
@@ -1129,6 +1136,8 @@ impl DrmKmsController {
             .focused_surface
             .and_then(|id| self.surfaces.iter().find(|s| s.id == id))
             .map(|s| (s.owner_task, s.z_order));
+
+        let mut base_drawn = false;
 
         for surface in self.surfaces.iter_mut() {
             // WHY a surface that holds no frame is skipped: the pixels it still
@@ -1211,10 +1220,11 @@ impl DrmKmsController {
             // below performs exactly the copy and the same row mapping the old
             // in-block identity case did, so the two are one path rather than
             // two.
-            if !matches!(
-                self.orientation,
-                DisplayOrientation::LandscapeRight | DisplayOrientation::LandscapeLeft
-            ) && s_w == sw && s_h == sh && sx == 0 && sy == 0
+            if !base_drawn
+                && !matches!(
+                    self.orientation,
+                    DisplayOrientation::LandscapeRight | DisplayOrientation::LandscapeLeft
+                ) && s_w == sw && s_h == sh && sx == 0 && sy == 0 && surface.opacity == 255
             {
                 self.back_buffer.copy_from_slice(&surface.pixels);
                 // The copy places surface row r on scanout row r, so the tracked
@@ -1224,6 +1234,7 @@ impl DrmKmsController {
                 }
                 surface.dirty = false;
                 surface.dirty_rows = (0, 0);
+                base_drawn = true;
                 continue;
             }
 
@@ -1263,21 +1274,23 @@ impl DrmKmsController {
                 let is_right = self.orientation == DisplayOrientation::LandscapeRight;
 
                 // Direct identity blit when destination matches canonical canvas
-                if ((dst_w == 720 && dst_h == 1440) || (dst_w == s_w as usize && dst_h == s_h as usize))
+                if !base_drawn
+                    && (dst_w == s_w as usize && dst_h == s_h as usize)
                     && dst_x == 0 && dst_y == 0
-                    && self.scanout_width as usize == dst_w && self.scanout_height as usize == dst_h && !landscape
+                    && self.scanout_width as usize == dst_w && self.scanout_height as usize == dst_h
+                    && !landscape && surface.opacity == 255
                 {
                     self.back_buffer.copy_from_slice(&surface.pixels);
                     // WHY the mapping is the identity here: this branch requires
-                    // the destination rect to be exactly `dst_y=0, dst_h=1440`
-                    // over a 720x1440 scanout, and the blit above is a straight
-                    // `copy_from_slice`. Surface row `r` therefore lands on
-                    // scanout row `0 + r`, so the tracked band copies 1:1.
+                    // the destination rect to match the scanout exactly, and the
+                    // blit above is a straight `copy_from_slice`. Surface row `r`
+                    // therefore lands on scanout row `0 + r`, so the tracked band copies 1:1.
                     if surface.dirty_rows.1 > surface.dirty_rows.0 {
                         union_rows(&mut present_band, surface.dirty_rows.0, surface.dirty_rows.1.min(dst_y + dst_h));
                     }
                     surface.dirty = false;
                     surface.dirty_rows = (0, 0);
+                    base_drawn = true;
                     continue;
                 }
 
@@ -1292,10 +1305,17 @@ impl DrmKmsController {
                     if landscape {
                         // Rotation swaps horizontal/vertical axes; changes span destination height.
                         union_rows(&mut present_band, dst_y, dst_y + dst_h);
-                    } else if dst_w * 2 == 720 && dst_h * 2 == 1440 {
+                    } else if dst_w * 2 == s_w as usize && dst_h * 2 == s_h as usize {
                         // Integer 2x shrink: source row r maps to destination row r / 2
                         let r0 = dst_y + surface.dirty_rows.0 / 2;
                         let r1 = (dst_y + (surface.dirty_rows.1 + 1) / 2).min(dst_y + dst_h);
+                        if r1 > r0 {
+                            union_rows(&mut present_band, r0, r1);
+                        }
+                    } else if dst_w == s_w as usize && dst_h == s_h as usize {
+                        // 1:1 direct blit: source row r maps 1:1 to destination row dst_y + r
+                        let r0 = dst_y + surface.dirty_rows.0;
+                        let r1 = (dst_y + surface.dirty_rows.1).min(dst_y + dst_h);
                         if r1 > r0 {
                             union_rows(&mut present_band, r0, r1);
                         }
@@ -1312,13 +1332,16 @@ impl DrmKmsController {
 
                 if landscape {
                     let scanout_w = self.scanout_width as usize;
+                    let src_pitch = s_w as usize;
+                    let src_last_x = (s_w as usize).saturating_sub(1);
+                    let src_last_y = (s_h as usize).saturating_sub(1);
                     if is_right {
                         for dy in 0..dst_h {
-                            let src_x = if dst_h <= 1 { 0 } else { ((dy * 719 + (dst_h - 1) / 2) / (dst_h - 1)).min(719) };
+                            let src_x = if dst_h <= 1 { 0 } else { ((dy * src_last_x + (dst_h - 1) / 2) / (dst_h - 1)).min(src_last_x) };
                             let dst_y_offset = (dst_y + dy) * scanout_w;
                             for dx in 0..dst_w {
-                                let src_y = if dst_w <= 1 { 0 } else { 1439usize.saturating_sub((dx * 1439 + (dst_w - 1) / 2) / (dst_w - 1)) };
-                                let src_idx = src_y * 720 + src_x;
+                                let src_y = if dst_w <= 1 { 0 } else { src_last_y.saturating_sub((dx * src_last_y + (dst_w - 1) / 2) / (dst_w - 1)) };
+                                let src_idx = src_y * src_pitch + src_x;
                                 let dst_idx = dst_y_offset + dst_x + dx;
                                 if src_idx < surface.pixels.len() && dst_idx < self.back_buffer.len() {
                                     self.back_buffer[dst_idx] = blend_pixel(surface.pixels[src_idx], self.back_buffer[dst_idx], surface.opacity);
@@ -1327,11 +1350,11 @@ impl DrmKmsController {
                         }
                     } else {
                         for dy in 0..dst_h {
-                            let src_x = if dst_h <= 1 { 0 } else { 719usize.saturating_sub((dy * 719 + (dst_h - 1) / 2) / (dst_h - 1)) };
+                            let src_x = if dst_h <= 1 { 0 } else { src_last_x.saturating_sub((dy * src_last_x + (dst_h - 1) / 2) / (dst_h - 1)) };
                             let dst_y_offset = (dst_y + dy) * scanout_w;
                             for dx in 0..dst_w {
-                                let src_y = if dst_w <= 1 { 0 } else { (dx * 1439 + (dst_w - 1) / 2) / (dst_w - 1) };
-                                let src_idx = src_y * 720 + src_x;
+                                let src_y = if dst_w <= 1 { 0 } else { (dx * src_last_y + (dst_w - 1) / 2) / (dst_w - 1) };
+                                let src_idx = src_y * src_pitch + src_x;
                                 let dst_idx = dst_y_offset + dst_x + dx;
                                 if src_idx < surface.pixels.len() && dst_idx < self.back_buffer.len() {
                                     self.back_buffer[dst_idx] = blend_pixel(surface.pixels[src_idx], self.back_buffer[dst_idx], surface.opacity);
@@ -1341,7 +1364,8 @@ impl DrmKmsController {
                     }
                 } else {
                     let scanout_w = self.scanout_width as usize;
-                    if dst_w * 2 == 720 && dst_h * 2 == 1440 {
+                    let src_pitch = s_w as usize;
+                    if dst_w * 2 == s_w as usize && dst_h * 2 == s_h as usize {
                         // WHY box-average instead of point sampling: this is
                         // the exact-integer 2x portrait shrink (720x1440
                         // canvas into a half-size phone slice, e.g. the
@@ -1354,8 +1378,8 @@ impl DrmKmsController {
                         // QEMU-TCG per-flip budget. Fractional ratios below
                         // keep the cheaper point sample for the same reason.
                         for dy in 0..dst_h {
-                            let r0 = (dy * 2) * 720;
-                            let r1 = r0 + 720;
+                            let r0 = (dy * 2) * src_pitch;
+                            let r1 = r0 + src_pitch;
                             let dst_row_start = (dst_y + dy) * scanout_w + dst_x;
                             let dst_slice = &mut self.back_buffer[dst_row_start..dst_row_start + dst_w];
                             for dx in 0..dst_w {
@@ -1372,7 +1396,41 @@ impl DrmKmsController {
                                 dst_slice[dx] = blend_pixel(blended, dst_slice[dx], surface.opacity);
                             }
                         }
-                    } else if dst_w * 2 == s_w as usize * 3 && dst_h * 2 == s_h as usize * 3 {
+                    } else if dst_w == s_w as usize && dst_h == s_h as usize {
+                        // Direct 1:1 blit (dst_w == s_w && dst_h == s_h at 1080x2160 or 720x1440).
+                        // Cleanly handle 1:1 direct blit without calling the 1.5x reconstructor or
+                        // fractional scaling when source is already matching the destination resolution.
+                        if surface.opacity == 255 {
+                            for dy in 0..dst_h {
+                                let src_row_start = dy * src_pitch;
+                                let dst_row_start = (dst_y + dy) * scanout_w + dst_x;
+                                for dx in 0..dst_w {
+                                    let sp = surface.pixels[src_row_start + dx];
+                                    let sa = (sp >> 24) & 0xFF;
+                                    let dst_idx = dst_row_start + dx;
+                                    if dst_idx < self.back_buffer.len() {
+                                        if sa == 255 {
+                                            self.back_buffer[dst_idx] = sp;
+                                        } else if sa > 0 {
+                                            self.back_buffer[dst_idx] = blend_pixel(sp, self.back_buffer[dst_idx], 255);
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            for dy in 0..dst_h {
+                                let src_row_start = dy * src_pitch;
+                                let dst_row_start = (dst_y + dy) * scanout_w + dst_x;
+                                for dx in 0..dst_w {
+                                    let sp = surface.pixels[src_row_start + dx];
+                                    let dst_idx = dst_row_start + dx;
+                                    if dst_idx < self.back_buffer.len() {
+                                        self.back_buffer[dst_idx] = blend_pixel(sp, self.back_buffer[dst_idx], surface.opacity);
+                                    }
+                                }
+                            }
+                        }
+                    } else if dst_w * 2 == s_w as usize * 3 && dst_h * 2 == s_h as usize * 3 && s_w as usize <= 720 {
                         // High-clarity 1.5x reconstructor / two-pass area-averaging filter (720x1440 -> 1080x2160).
                         //
                         // 2 input pixels contribute to 3 output pixels: p0, (p0+p1)/2, p1 with
@@ -2372,6 +2430,116 @@ mod tests {
         sched.record_frame(105, 110); // Met deadline
         assert_eq!(sched.total_frames, 2);
         assert_eq!(sched.missed_frames, 1);
+    }
+
+    #[test]
+    fn full_resolution_1080x2160_surface_engages_native_scanout_mode() {
+        // Starts with a 720x1440 controller
+        let mut kms = DrmKmsController::new(720, 1440);
+        assert_eq!(kms.scanout_width, 720);
+        assert_eq!(kms.scanout_height, 1440);
+
+        // App requests a full-resolution 1080x2160 surface
+        let id = kms.create_surface(1080, 2160, 200, 42);
+        assert_ne!(id, 0);
+
+        // Controller must have transitioned to direct native 1080x2160 scanout mode
+        assert_eq!(kms.scanout_width, 1080);
+        assert_eq!(kms.scanout_height, 2160);
+        assert_eq!(kms.front_buffer.len(), 1080 * 2160);
+        assert_eq!(kms.back_buffer.len(), 1080 * 2160);
+
+        // Fill with distinct test pattern
+        let surf = kms.surfaces.iter_mut().find(|s| s.id == id).unwrap();
+        surf.pixels[0] = 0xFF112233;
+        surf.pixels[1080 * 2160 - 1] = 0xFF445566;
+        surf.mark_frame_drawn();
+
+        kms.composite();
+
+        // Direct 1:1 blit without fractional scaling: pixels map bit-exact
+        assert_eq!(kms.back_buffer[0], 0xFF112233);
+        assert_eq!(kms.back_buffer[1080 * 2160 - 1], 0xFF445566);
+        assert!(kms.destroy_surface(id));
+    }
+
+    #[test]
+    fn direct_native_1080x2160_blit_preserves_alpha_blending() {
+        let mut kms = DrmKmsController::new(1080, 2160);
+        kms.set_display_mode(1080, 2160, 60).expect("mode");
+
+        // Surface 1: Opaque background green (0xFF00FF00) at z=200
+        let s1 = kms.create_surface(1080, 2160, 200, 1);
+        assert_ne!(s1, 0);
+        let s1_idx = kms.surfaces.iter().position(|s| s.id == s1).unwrap();
+        kms.surfaces[s1_idx].pixels.fill(0xFF00FF00);
+        kms.surfaces[s1_idx].mark_frame_drawn();
+
+        // Surface 2: Semi-transparent white (0x80FFFFFF) at z=201 over background
+        let s2 = kms.create_surface(1080, 2160, 201, 1);
+        assert_ne!(s2, 0);
+        let s2_idx = kms.surfaces.iter().position(|s| s.id == s2).unwrap();
+        kms.surfaces[s2_idx].pixels.fill(0x80FFFFFF);
+        kms.surfaces[s2_idx].mark_frame_drawn();
+
+        kms.composite();
+
+        // 1:1 direct blit at 1080x2160 must blend without calling 1.5x reconstructor:
+        // 50% white (128/255) over green: R = ~128, G = 255, B = ~128, A = 255
+        let pixel = kms.back_buffer[1080 * 100 + 100];
+        let a = (pixel >> 24) & 0xFF;
+        let r = (pixel >> 16) & 0xFF;
+        let g = (pixel >> 8) & 0xFF;
+        let b = pixel & 0xFF;
+
+        assert_eq!(a, 0xFF, "Alpha must remain fully opaque");
+        assert!(r >= 120 && r <= 136, "Red should be ~128 from alpha blend, got {r}");
+        assert_eq!(g, 0xFF, "Green should be 255");
+        assert!(b >= 120 && b <= 136, "Blue should be ~128 from alpha blend, got {b}");
+
+        assert!(kms.destroy_surface(s1));
+        assert!(kms.destroy_surface(s2));
+    }
+
+    #[test]
+    fn direct_native_1080x2160_blit_maps_dirty_rows_1to1() {
+        let mut kms = DrmKmsController::new(1080, 2160);
+        let id = kms.create_surface(1080, 2160, 200, 1);
+        kms.surfaces[0].mark_frame_drawn();
+        kms.composite();
+        let _ = kms.take_present_dirty_rows();
+        kms.page_flip();
+
+        // Update rows 500..600
+        kms.surfaces[0].dirty = true;
+        kms.surfaces[0].dirty_rows = (500, 600);
+        kms.surfaces[0].pixels[500 * 1080] = 0xFFFFFFFF;
+        kms.composite();
+
+        let (r0, r1) = kms.take_present_dirty_rows();
+        assert_eq!(r0, 500, "1:1 direct blit must preserve start row 500");
+        assert_eq!(r1, 600, "1:1 direct blit must preserve end row 600");
+
+        assert!(kms.destroy_surface(id));
+    }
+
+    #[test]
+    fn kms_display_driver_direct_native_1080x2160_workflow() {
+        use crate::drivers::display::{DisplayDriver, KmsDisplayDriver};
+        let mut kms = DrmKmsController::new(1080, 2160);
+        let mut display = KmsDisplayDriver::new(&mut kms);
+
+        let (w, h) = display.dimensions();
+        assert_eq!((w, h), (1080, 2160));
+
+        let id = display.create_surface(1080, 2160, 200, 10).expect("create surface");
+        let pixels = [0xFFABCDEFu32; 1080];
+        assert_eq!(display.write_surface_pixels(id, 10, 0, &pixels), Ok(1080));
+        assert!(display.commit_surface(id, 10).is_ok());
+
+        let flip_res = display.composite_and_flip();
+        assert!(flip_res.is_ok());
+        assert!(display.destroy_surface(id, 10).is_ok());
     }
 }
 
