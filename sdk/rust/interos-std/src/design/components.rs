@@ -28,6 +28,16 @@ use super::primitives::Rect;
 use super::theme::Theme;
 use super::typeface;
 
+pub mod dialog;
+pub mod nav_bar;
+pub mod snackbar;
+pub mod text_field;
+
+pub use dialog::*;
+pub use nav_bar::*;
+pub use snackbar::*;
+pub use text_field::*;
+
 /// How a card sits in the stack of surfaces.
 ///
 /// WHY this is an enum and not a colour: the elevation is a decision about
@@ -519,7 +529,7 @@ pub fn list_row(surface: &mut Surface, theme: &Theme, rect: Rect, row: &ListRow<
 /// the fallback for the smallest step, and the platform's own screens draw
 /// their body copy with the outline face, so a label drawn here has to be the
 /// same letterforms or it reads as a different app.
-fn draw_label(surface: &mut Surface, x: usize, y: usize, scale: usize, text: &[u8], ink: u32) {
+pub(crate) fn draw_label(surface: &mut Surface, x: usize, y: usize, scale: usize, text: &[u8], ink: u32) {
     if text.is_empty() || scale == 0 {
         return;
     }
@@ -541,7 +551,7 @@ fn draw_label(surface: &mut Surface, x: usize, y: usize, scale: usize, text: &[u
 }
 
 /// The colour of (`px`, `py`) if the label inks it, blended over `bg`.
-fn label_pixel(
+pub(crate) fn label_pixel(
     px: usize,
     py: usize,
     x0: usize,
