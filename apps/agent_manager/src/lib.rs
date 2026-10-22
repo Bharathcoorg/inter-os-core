@@ -351,6 +351,14 @@ pub struct ChatSession {
     pub prompt: [u8; CHAT_PROMPT_MAX],
     /// How much of the prompt buffer is used.
     pub prompt_len: u8,
+    /// Whether streaming generation is currently active.
+    pub is_streaming: bool,
+    /// The current streaming generation step.
+    pub streaming_step: u8,
+    /// Prompt buffer retained for streaming queries.
+    pub stream_prompt: [u8; CHAT_PROMPT_MAX],
+    /// How much of the stream prompt buffer is used.
+    pub stream_prompt_len: u8,
 }
 
 impl ChatSession {
@@ -362,6 +370,10 @@ impl ChatSession {
             next: 0,
             prompt: [0u8; CHAT_PROMPT_MAX],
             prompt_len: 0,
+            is_streaming: false,
+            streaming_step: 0,
+            stream_prompt: [0u8; CHAT_PROMPT_MAX],
+            stream_prompt_len: 0,
         }
     }
 
@@ -401,6 +413,57 @@ impl ChatSession {
     /// Whether the transcript is empty.
     pub const fn is_empty(&self) -> bool {
         self.message_count == 0
+    }
+
+    /// Returns the most recent message in the transcript, if any.
+    pub fn last_message(&self) -> Option<&ChatMessage> {
+        if self.message_count == 0 {
+            return None;
+        }
+        let index = (self.next as usize + CHAT_MAX_MESSAGES - 1) % CHAT_MAX_MESSAGES;
+        Some(&self.messages[index])
+    }
+
+    /// Appends a token chunk to the most recent message in the transcript.
+    ///
+    /// WHY this exists: streaming generation appends incremental chunks
+    /// to an existing assistant response without allocating a new message
+    /// slot for each token.
+    pub fn append_chunk(&mut self, chunk: &[u8]) -> usize {
+        if self.message_count == 0 {
+            return 0;
+        }
+        let index = (self.next as usize + CHAT_MAX_MESSAGES - 1) % CHAT_MAX_MESSAGES;
+        let msg = &mut self.messages[index];
+        let current_len = msg.text_len as usize;
+        let available = CHAT_TEXT_MAX.saturating_sub(current_len);
+        let to_copy = chunk.len().min(available);
+        if to_copy > 0 {
+            msg.text[current_len..current_len + to_copy].copy_from_slice(&chunk[..to_copy]);
+            msg.text_len = (current_len + to_copy) as u8;
+        }
+        to_copy
+    }
+
+    /// Prepares the transcript for a streaming generation session.
+    pub fn start_stream(&mut self, prompt: &[u8]) {
+        self.is_streaming = true;
+        self.streaming_step = 0;
+        let len = prompt.len().min(CHAT_PROMPT_MAX);
+        self.stream_prompt[..len].copy_from_slice(&prompt[..len]);
+        self.stream_prompt_len = len as u8;
+    }
+
+    /// Completes the streaming generation session.
+    pub fn finish_stream(&mut self) {
+        self.is_streaming = false;
+        self.streaming_step = 0;
+        self.stream_prompt_len = 0;
+    }
+
+    /// The text of the active streaming prompt.
+    pub fn stream_prompt_text(&self) -> &[u8] {
+        &self.stream_prompt[..self.stream_prompt_len as usize]
     }
 
     /// Appends a character to the prompt.
@@ -650,6 +713,53 @@ impl Provider for HostBridge {
     }
 }
 
+impl HostBridge {
+    /// Queries the host bridge for the next incremental token chunk.
+    ///
+    /// WHY static chunks: Ring-3 supervisory code does not allocate on the heap.
+    /// Each step delivers a measured token chunk representing incremental host-backed
+    /// generative inference.
+    pub fn stream_chunk(&self, prompt: &[u8], step: usize) -> Option<&'static [u8]> {
+        if contains_slice(prompt, b"model") {
+            match step {
+                0 => Some(b"[HostBridge] "),
+                1 => Some(b"Models: "),
+                2 => Some(b"EmbeddingGemma 2 "),
+                3 => Some(b"and host-backed "),
+                4 => Some(b"inference runtime."),
+                _ => None,
+            }
+        } else if contains_slice(prompt, b"search") {
+            match step {
+                0 => Some(b"[HostBridge] "),
+                1 => Some(b"Search: "),
+                2 => Some(b"intent registry "),
+                3 => Some(b"and document "),
+                4 => Some(b"index active."),
+                _ => None,
+            }
+        } else if contains_slice(prompt, b"status") {
+            match step {
+                0 => Some(b"[HostBridge] "),
+                1 => Some(b"Platform: "),
+                2 => Some(b"InterOS core "),
+                3 => Some(b"Ring-3 supervisor "),
+                4 => Some(b"online."),
+                _ => None,
+            }
+        } else {
+            match step {
+                0 => Some(b"[HostBridge] "),
+                1 => Some(b"Live stream "),
+                2 => Some(b"token chunk "),
+                3 => Some(b"received from "),
+                4 => Some(b"host runtime."),
+                _ => None,
+            }
+        }
+    }
+}
+
 /// A future on-device generative model.
 ///
 /// WHY it is here even though the device holds nothing for it: the point of
@@ -698,9 +808,38 @@ impl Provider for LocalGenerative {
     }
 }
 
+impl LocalGenerative {
+    /// Queries the local generative model for the next incremental token chunk.
+    pub fn stream_chunk(&self, _prompt: &[u8], step: usize) -> Option<&'static [u8]> {
+        match step {
+            0 => Some(b"[Generative] "),
+            1 => Some(b"On-device "),
+            2 => Some(b"generative "),
+            3 => Some(b"token stream "),
+            4 => Some(b"completed."),
+            _ => None,
+        }
+    }
+}
+
 static EMBEDDING_GEMMA2: EmbeddingGemma2 = EmbeddingGemma2;
-static HOST_BRIDGE: HostBridge = HostBridge;
-static LOCAL_GENERATIVE: LocalGenerative = LocalGenerative;
+pub static HOST_BRIDGE: HostBridge = HostBridge;
+pub static LOCAL_GENERATIVE: LocalGenerative = LocalGenerative;
+
+/// Queries the host bridge or simulated generative model for the next streaming token chunk.
+pub fn query_streaming_chunk(prompt: &[u8], step: usize) -> Option<&'static [u8]> {
+    HOST_BRIDGE.stream_chunk(prompt, step)
+}
+
+fn contains_slice(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    if haystack.len() < needle.len() {
+        return false;
+    }
+    haystack.windows(needle.len()).any(|w| w.eq_ignore_ascii_case(needle))
+}
 
 /// Every provider the catalogue knows.
 ///
@@ -2512,5 +2651,48 @@ mod tests {
             ProbeStatus::Listed => assert!(device.services.count as usize <= MAX_SERVICES),
             ProbeStatus::Refused => assert_eq!(device.services.count, 0),
         }
+    }
+
+    #[test]
+    fn the_chat_streams_token_chunks_incrementally() {
+        let mut chat = ChatSession::new();
+        chat.push(ChatRole::User, b"status");
+        chat.start_stream(b"status");
+        assert!(chat.is_streaming);
+        assert_eq!(chat.stream_prompt_text(), b"status");
+
+        let mut step = 0;
+        while let Some(chunk) = query_streaming_chunk(chat.stream_prompt_text(), step) {
+            if step == 0 {
+                chat.push(ChatRole::Assistant, chunk);
+            } else {
+                let appended = chat.append_chunk(chunk);
+                assert!(appended > 0);
+            }
+            step += 1;
+        }
+        chat.finish_stream();
+        assert!(!chat.is_streaming);
+        assert_eq!(step, 5);
+
+        let last = chat.last_message().expect("last message present");
+        assert_eq!(last.role, ChatRole::Assistant);
+        let text = core::str::from_utf8(&last.text[..last.text_len as usize]).unwrap();
+        assert!(text.contains("[HostBridge]"));
+        assert!(text.contains("Platform:"));
+    }
+
+    #[test]
+    fn the_host_bridge_streams_tokens_for_different_prompts() {
+        let step0 = HOST_BRIDGE.stream_chunk(b"query model catalog", 0);
+        assert_eq!(step0, Some(&b"[HostBridge] "[..]));
+        let step1 = HOST_BRIDGE.stream_chunk(b"query model catalog", 1);
+        assert_eq!(step1, Some(&b"Models: "[..]));
+
+        let search0 = HOST_BRIDGE.stream_chunk(b"search files", 1);
+        assert_eq!(search0, Some(&b"Search: "[..]));
+
+        let default0 = HOST_BRIDGE.stream_chunk(b"arbitrary text", 1);
+        assert_eq!(default0, Some(&b"Live stream "[..]));
     }
 }

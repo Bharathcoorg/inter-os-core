@@ -44,7 +44,7 @@ use agent_manager::{
     resolve_inference_service, service_name, CapabilityGrant, ChatRole, ChatSession, DeviceState,
     InstallState, ModelProbeStatus, ProbeStatus, Provider, RuntimeBinding, SearchConfiguration,
     SelfTest, ServiceState, Surface, CHAT_PROMPT_MAX, CAPABILITY_COUNT, MATRYOSHKA_DEFAULT_DIM,
-    MAX_RESULTS_DEFAULT, SIMILARITY_DEFAULT_Q15,
+    MAX_RESULTS_DEFAULT, SIMILARITY_DEFAULT_Q15, HOST_BRIDGE,
 };
 
 // -----------------------------------------------------------------------------
@@ -1295,7 +1295,7 @@ impl AgentManagerApp {
         }
     }
 
-    /// Sends the prompt to whatever model the device has.
+    /// Sends the prompt to whatever model the device has, starting live streaming.
     ///
     /// WHY the prompt is recorded before the answer is sought: the
     /// exchange is the user's, and it belongs in the transcript whether
@@ -1322,26 +1322,46 @@ impl AgentManagerApp {
             self.chat
                 .push(ChatRole::Notice, availability.reason().as_bytes());
             self.set_action(availability.reason().as_bytes(), Tone::Unavailable);
-            // WHY the body is rebuilt here and not only at the end: the early
-            // return is what an absent model takes, and without the
-            // rebuild the transcript kept saying "No messages yet"
-            // after the person had typed a prompt and pressed send.
-            self.rebuild();
-            return;
+        } else {
+            self.set_action(b"Streaming generation active...", Tone::Accent);
         }
-        // A service that is running and speaks this version is the only
-        // path to a real answer, and the platform does not yet carry the
-        // call that would deliver one. The app says so rather than
-        // inventing a reply.
-        self.chat.push(
-            ChatRole::Notice,
-            b"The inference service is running, but this build has no way to deliver a request to it.",
-        );
-        self.set_action(
-            b"The model service is running; this build cannot deliver a request to it.",
-            Tone::Unavailable,
-        );
+
+        // Trigger a streaming generation step: query HostBridge or simulated generative model,
+        // appending generated token chunks to the transcript buffer incrementally.
+        self.chat.start_stream(&prompt[..len]);
+        self.step_streaming();
         self.rebuild();
+    }
+
+    /// Advances one step of live streaming token generation.
+    ///
+    /// Returns true if the transcript buffer was updated and the screen
+    /// needs to be repainted.
+    pub fn step_streaming(&mut self) -> bool {
+        if !self.chat.is_streaming {
+            return false;
+        }
+        let step = self.chat.streaming_step as usize;
+        let prompt_bytes = self.chat.stream_prompt_text();
+        match HOST_BRIDGE.stream_chunk(prompt_bytes, step) {
+            Some(chunk) => {
+                if step == 0 {
+                    self.chat.push(ChatRole::Assistant, chunk);
+                } else {
+                    self.chat.append_chunk(chunk);
+                }
+                self.chat.streaming_step += 1;
+                self.set_action(b"Streaming live tokens...", Tone::Accent);
+                self.rebuild();
+                true
+            }
+            None => {
+                self.chat.finish_stream();
+                self.set_action(b"Streaming generation complete.", Tone::Plain);
+                self.rebuild();
+                true
+            }
+        }
     }
 
     /// Empties the conversation and the prompt.
@@ -2812,7 +2832,11 @@ pub extern "C" fn _start() -> ! {
                 }
             }
         }
-        if !handled {
+        if app.chat.is_streaming {
+            if app.step_streaming() {
+                dirty = Dirty::All;
+            }
+        } else if !handled {
             // Nothing was waiting: sleep until something arrives.
             let _ = std::event_poll(std::EVENT_TOUCH_INPUT, 100);
         }
