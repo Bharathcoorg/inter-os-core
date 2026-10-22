@@ -685,7 +685,7 @@ struct Paint {
 /// WHY they are in the plan: the old painter recomputed all five from the constants
 /// on every one of the surface's pixels, and the leftmost cell of the signal stack
 /// is derived by walking back from the battery, which the right margin moves.
-struct Telemetry {
+pub(crate) struct Telemetry {
     signal_x: usize,
     signal_w: usize,
     battery_x0: usize,
@@ -694,7 +694,7 @@ struct Telemetry {
 }
 
 /// The status bar's glyph boxes for this frame.
-fn telemetry_plan() -> Telemetry {
+pub(crate) fn telemetry_plan() -> Telemetry {
     let signal_x = telemetry_signal_x();
     let signal_w = TELEMETRY_SIGNAL_BARS * TELEMETRY_BAR_W
         + TELEMETRY_SIGNAL_BARS.saturating_sub(1) * TELEMETRY_BAR_GAP;
@@ -1292,7 +1292,7 @@ fn status_bar_pixel(x: usize, y: usize, theme: &Theme, p: &Paint) -> Option<u32>
 /// rather than as absence. The fill arithmetic is written out anyway and reached
 /// only through [`Reading::level`], so a bound sensor has one place to go rather
 /// than a colour to change.
-fn telemetry_pixel(x: usize, y: usize, t: &Telemetry, ink: u32) -> Option<u32> {
+pub(crate) fn telemetry_pixel(x: usize, y: usize, t: &Telemetry, ink: u32) -> Option<u32> {
     let top = TELEMETRY_TOP;
     let bottom = TELEMETRY_TOP + TELEMETRY_H - 1;
     if y < top || y > bottom {

@@ -1611,7 +1611,27 @@ pub fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         return color;
     }
 
-    // 2. Status bar: Mockup does not show a duplicate status bar clock on the lock screen.
+    // 2. Status bar: time top-left, cellular signal and battery top-right.
+    if y < 48 {
+        if state.clock_source_ok {
+            if let Some(c) = test_text_aa(
+                x,
+                y,
+                LOCK_STATUS_TIME_X,
+                LOCK_STATUS_TIME_Y,
+                LOCK_STATUS_TIME_SCALE,
+                &state.clock_time,
+                0xFFFFFFFF,
+                color,
+            ) {
+                return c;
+            }
+        }
+        let t = crate::screens::home::telemetry_plan();
+        if let Some(c) = crate::screens::home::telemetry_pixel(x, y, &t, 0xFFFFFFFF) {
+            return c;
+        }
+    }
 
     // 3. Date line above the clock, both left-aligned on LOCK_CONTENT_X.
     if state.clock_source_ok {

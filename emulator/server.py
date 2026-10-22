@@ -4692,12 +4692,12 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                     _deliver(f'NAV {action.upper()}')
                 elif action in ('power', 'lock'):
                     ok, msg = send_guest_serial_command('POWER_KEY', timeout=2)
+                    if not ok: raise RuntimeError(msg)
                 elif action == 'nav':
                     target = str(data.get('target', 'HOME')).upper()
                     _deliver(f'NAV {target}')
                 else:
                     raise ValueError('unsupported touch action')
-                if not ok: raise RuntimeError(msg)
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json')
                 self.end_headers()

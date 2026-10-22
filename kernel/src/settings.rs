@@ -187,6 +187,8 @@ pub fn init() {
         s.generation = generation;
     } else {
         let defaults = concat!(
+            "owner.name=Bharath\n",
+            "user.name=Bharath\n",
             "power.profile=balanced\n",
             "ui.theme=interos-default\n",
             "ui.brightness.auto=true\n",
