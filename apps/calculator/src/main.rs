@@ -32,6 +32,7 @@ use interos_std::design::primitives::Rect;
 /// platform's and not this app's.
 const R_CHIP: usize = radius::CHIP;
 const R_CONTROL: usize = radius::CONTROL;
+#[allow(dead_code)]
 const R_MAJOR: usize = radius::MAJOR;
 const R_SHEET: usize = radius::SHEET;
 const R_SOFT: usize = radius::SOFT_PILL;
@@ -358,20 +359,22 @@ fn key_edges(row: usize, col: usize, x: usize, y: usize) -> Option<(usize, usize
     }
     let rx = (x - rect.x).min(rect.x + rect.w - 1 - x);
     let ry = (y - rect.y).min(rect.y + rect.h - 1 - y);
-    // The keycap's squircle corner, the same test the renderer draws with.
-    if rx < R_MAJOR && ry < R_MAJOR {
-        let cdx = (R_MAJOR - rx) as isize;
-        let cdy = (R_MAJOR - ry) as isize;
-        if cdx * cdx + cdy * cdy > (R_MAJOR * R_MAJOR) as isize {
+    // Full stadium pill shape (radius = height / 2)
+    let r = rect.h / 2;
+    if rx < r && ry < r {
+        let cdx = (r - rx) as isize;
+        let cdy = (r - ry) as isize;
+        if cdx * cdx + cdy * cdy > (r * r) as isize {
             return None;
         }
     }
     Some((rx, ry))
 }
 
-/// Whether the pixel is on the key at (row, col).
+/// Whether the pixel is on the key at (row, col). Uses full rectangular cell for generous touch target.
 fn key_hit(row: usize, col: usize, x: usize, y: usize) -> bool {
-    key_edges(row, col, x, y).is_some()
+    let Some(rect) = key_rect(row, col) else { return false; };
+    x >= rect.x && x < rect.x + rect.w && y >= rect.y && y < rect.y + rect.h
 }
 
 /// The home indicator, in the platform's own geometry.
@@ -786,10 +789,11 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                 continue;
             };
             {
-                if rx < R_MAJOR && ry < R_MAJOR {
-                    let cdx = (R_MAJOR - rx) as isize;
-                    let cdy = (R_MAJOR - ry) as isize;
-                    if cdx * cdx + cdy * cdy > (R_MAJOR * R_MAJOR) as isize {
+                let r = rect.h / 2;
+                if rx < r && ry < r {
+                    let cdx = (r - rx) as isize;
+                    let cdy = (r - ry) as isize;
+                    if cdx * cdx + cdy * cdy > (r * r) as isize {
                         return THEME.surface;
                     }
                 }
@@ -850,7 +854,17 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                     (THEME.surface_container_high, THEME.border, THEME.on_surface)
                 };
 
-                if rx < 2 || ry < 2 {
+                let r = rect.h / 2;
+                let is_pill_border = if rx < r && ry < r {
+                    let cdx = (r - rx) as isize;
+                    let cdy = (r - ry) as isize;
+                    let d2 = cdx * cdx + cdy * cdy;
+                    d2 >= ((r - 2) * (r - 2)) as isize
+                } else {
+                    rx < 2 || ry < 2
+                };
+
+                if is_pill_border {
                     return btn_border;
                 }
 
