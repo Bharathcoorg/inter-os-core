@@ -460,6 +460,32 @@ pub struct DrmKmsController {
 }
 
 impl DrmKmsController {
+
+    /// Whether the identity full-cover blit will run for any surface.
+    ///
+    /// WHY this is asked rather than assumed: the identity path is the only
+    /// blit that replaces the baseline outright instead of compositing over
+    /// it, so a surface that matches the scanout has to take that path or the
+    /// surfaces behind it show through.
+    pub fn identity_full_cover_will_run(&self) -> bool {
+        let landscape = matches!(
+            self.orientation,
+            DisplayOrientation::LandscapeRight | DisplayOrientation::LandscapeLeft
+        );
+        if landscape || self.scanout_width == 0 || self.scanout_height == 0 {
+            return false;
+        }
+        self.surfaces.iter().any(|s| {
+            s.visible
+                && s.frame_ready
+                && s.opacity != 0
+                && s.width == self.scanout_width
+                && s.height == self.scanout_height
+                && s.x == 0
+                && s.y == 0
+        })
+    }
+
     pub fn new(width: u32, height: u32) -> Self {
         let size = (width as usize) * (height as usize);
         Self {
@@ -1039,24 +1065,6 @@ impl DrmKmsController {
     /// the fast path still belongs to whichever surface matches the scanout
     /// exactly, so the predicate asks about the scanout's dimensions instead of
     /// a hardcoded geometry.
-    fn identity_full_cover_will_run(&self) -> bool {
-        let landscape = matches!(
-            self.orientation,
-            DisplayOrientation::LandscapeRight | DisplayOrientation::LandscapeLeft
-        );
-        if landscape || self.scanout_width == 0 || self.scanout_height == 0 {
-            return false;
-        }
-        self.surfaces.iter().any(|s| {
-            s.visible
-                && s.frame_ready
-                && s.opacity != 0
-                && s.width == self.scanout_width
-                && s.height == self.scanout_height
-                && s.x == 0
-                && s.y == 0
-        })
-    }
 
     /// Composites all visible surfaces onto the back buffer in z-order.
     pub fn composite(&mut self) {
@@ -1108,7 +1116,20 @@ impl DrmKmsController {
         // `diff_present_rows` below makes the result fail-safe.
         let mut present_band = self.present_dirty_rows;
 
-        for (surf_idx, surface) in self.surfaces.iter_mut().enumerate() {
+        // WHY a surface belonging to another task is skipped: it is a task in
+        // the background, and an application that paints a translucent card
+        // would then blend against the application behind it rather than
+        // against the platform background. That is how the shell's greeting
+        // and the shell's rows showed through the browser's page.
+        //
+        // WHY the task's own surfaces are kept: a task's overlay is drawn
+        // over its own canvas, and the two are the same picture.
+        let focused = self
+            .focused_surface
+            .and_then(|id| self.surfaces.iter().find(|s| s.id == id))
+            .map(|s| (s.owner_task, s.z_order));
+
+        for surface in self.surfaces.iter_mut() {
             // WHY a surface that holds no frame is skipped: the pixels it still
             // holds are the allocator's fill (opaque black), not a picture the
             // owner drew. Blending one puts a black rectangle underneath the
@@ -1126,12 +1147,17 @@ impl DrmKmsController {
             // background, and a solid black block appears in the corner of
             // every screen.
             //
-            // WHY the guard is `has_frame` and not `frame_complete`: a
-            // surface that has never been written has no frame at all, and
-            // the two flags answer different questions -- `frame_ready` says
-            // a commit is not in flight and `frame_complete` says the
-            // surface has held a whole frame, which a partial write does
-            // not make true.
+            // WHY a surface that has not held a whole frame is skipped: the
+            // rows its owner has not written still hold the allocator's fill,
+            // and blending that put a black rectangle under the foreground
+            // application. A surface that has held a whole frame is a
+            // picture; one that has not is not.
+            //
+            // WHY the client's own write path is the other half of the rule:
+            // a client that paints in bands has to paint its whole canvas
+            // once before the compositor will publish it, and the display
+            // service -- which used to create a surface, write four pixels
+            // into it and flip -- no longer creates one at all.
             if !surface.visible
                 || surface.opacity == 0
                 || !surface.frame_ready
@@ -1139,6 +1165,18 @@ impl DrmKmsController {
                 || !surface.has_frame
             {
                 continue;
+            }
+
+            // WHY a surface behind the focused one is skipped: it belongs to a
+            // task that is in the background, and an application that paints
+            // a translucent card would then blend against the application
+            // behind it rather than against the platform background. That is
+            // how the shell's greeting and the shell's rows showed through the
+            // browser's page.
+            if let Some((focused_owner, focused_z)) = focused {
+                if surface.owner_task != focused_owner && surface.z_order < focused_z {
+                    continue;
+                }
             }
 
             if has_mobile_portrait && surface.height == 96 {
@@ -1438,6 +1476,30 @@ impl DrmKmsController {
                                 // 3. 2x2 separable area reconstruction, integer only:
                                 //    no float, no fixed-point fraction, weights sum to
                                 //    (wy0 + wy1) * (wx0 + wx1) == 4.
+                                //
+                                // WHY the weights are the pixels' own alpha and
+                                // not the area's: a client that paints in bands
+                                // leaves the rows it has not repainted
+                                // transparent, and averaging their zeroed colour
+                                // into the result darkened the boundary between a
+                                // painted region and an unpainted one. That is
+                                // how a black rectangle appeared in the corner
+                                // of every screen. An unpainted pixel
+                                // contributes nothing, and the result is the
+                                // painted colour at the coverage the painted
+                                // pixels give it.
+                                let a00 = (p00 >> 24) & 0xFF;
+                                let a01 = (p01 >> 24) & 0xFF;
+                                let a10 = (p10 >> 24) & 0xFF;
+                                let a11 = (p11 >> 24) & 0xFF;
+                                let a_sum = a00 + a01 + a10 + a11;
+                                if a_sum == 0 {
+                                    // Nothing in this area has been painted, so
+                                    // there is nothing to put over the
+                                    // background.
+                                    continue;
+                                }
+
                                 let w00 = wy0 * wx0;
                                 let w01 = wy0 * wx1;
                                 let w10 = wy1 * wx0;
@@ -1452,14 +1514,14 @@ impl DrmKmsController {
                                 }
 
                                 let blend_ch = |shift: u32| -> u32 {
-                                    let c00 = (p00 >> shift) & 0xFF;
-                                    let c01 = (p01 >> shift) & 0xFF;
-                                    let c10 = (p10 >> shift) & 0xFF;
-                                    let c11 = (p11 >> shift) & 0xFF;
-                                    (c00 * w00 + c01 * w01 + c10 * w10 + c11 * w11 + 2) / 4
+                                    let c00 = ((p00 >> shift) & 0xFF) * a00;
+                                    let c01 = ((p01 >> shift) & 0xFF) * a01;
+                                    let c10 = ((p10 >> shift) & 0xFF) * a10;
+                                    let c11 = ((p11 >> shift) & 0xFF) * a11;
+                                    (c00 + c01 + c10 + c11) / a_sum
                                 };
 
-                                let a = blend_ch(24);
+                                let a = a_sum / 4;
                                 let r = blend_ch(16);
                                 let g = blend_ch(8);
                                 let b = blend_ch(0);
@@ -2095,39 +2157,62 @@ mod tests {
     }
 
     #[test]
-    fn a_surface_that_holds_no_frame_is_never_blended() {
-        // WHY this test exists: the display service creates a 320x480 surface,
-        // writes four pixels into it and flips. Everything else in that
-        // surface is the allocator's fill (opaque black), so blending it put a
-        // solid black rectangle under every foreground application, and the
-        // application's translucent cards blended against that black instead
-        // of against the platform background. A surface that holds no frame
-        // the owner drew is not a picture, and the compositor must not blend
-        // it -- exactly as the capture path already refuses to capture it.
+    fn a_surface_the_owner_has_not_painted_at_all_is_never_blended() {
+        // WHY this test exists: a surface nobody has written into holds the
+        // allocator's fill -- opaque black -- in every pixel, and blending it
+        // put a solid black rectangle under the foreground application. A
+        // surface that holds no content from its owner is not a picture, and
+        // the compositor must not blend it -- exactly as the capture path
+        // already refuses to capture it.
         let mut kms = DrmKmsController::new(1080, 2160);
         kms.set_display_mode(1080, 2160, 60).expect("mode");
 
         let id = kms.create_surface(320, 480, 0, 2);
         assert_ne!(id, 0);
-
-        // The display service's whole write: four pixels at the origin.
-        kms.write_surface_pixels(id, 2, 0, &[0xFF202830; 4]).expect("write probe");
         // The flip commits the owner's surfaces, exactly as the surface-flip
         // syscall does.
         kms.commit_surfaces(Some(2));
 
-        assert!(kms.surfaces[0].has_frame, "the owner did write into it");
-        assert!(
-            !kms.surfaces[0].frame_complete,
-            "four pixels of a 320x480 surface is not a whole frame"
-        );
+        assert!(!kms.surfaces[0].has_frame, "the owner wrote nothing");
 
         kms.composite();
         assert_eq!(
             kms.back_buffer[0], PLATFORM_BACKGROUND,
-            "a surface that holds no frame must not be blended into the display"
+            "a surface the owner never wrote into must not be blended"
         );
         // No pixel of the scanout may carry the allocator's fill.
+        assert!(
+            !kms.back_buffer.iter().any(|&p| p == 0xFF000000),
+            "the allocator's fill reached the display"
+        );
+    }
+
+    #[test]
+    fn a_partly_painted_surface_is_not_published_and_leaves_the_background() {
+        // WHY this test exists: a client that paints in bands leaves the rows
+        // it has not repainted transparent, and the compositor's resample
+        // averaged those transparent pixels' zeroed colour into the result.
+        // That darkened the boundary between a painted region and an unpainted
+        // one, which is how a black rectangle appeared in the corner of every
+        // screen.
+        //
+        // The rule this pins: a surface that has not held a whole frame is
+        // not published at all, so the rows it has not been given cannot
+        // reach the display, and the background shows through them.
+        let mut kms = DrmKmsController::new(1080, 2160);
+        kms.set_display_mode(1080, 2160, 60).expect("mode");
+
+        let id = kms.create_surface(320, 480, 0, 2);
+        // Four painted pixels and the rest of the surface unpainted.
+        kms.write_surface_pixels(id, 2, 0, &[0xFF202830; 4]).expect("write probe");
+        kms.commit_surfaces(Some(2));
+
+        kms.composite();
+
+        assert_eq!(
+            kms.back_buffer[0], PLATFORM_BACKGROUND,
+            "a surface that has not held a whole frame is not published"
+        );
         assert!(
             !kms.back_buffer.iter().any(|&p| p == 0xFF000000),
             "the allocator's fill reached the display"
@@ -2229,7 +2314,7 @@ mod tests {
         kms.composite();
 
         // Surface 2: semi-transparent white (0x80FFFFFF) over the wallpaper
-        let s2 = kms.create_surface(720, 1440, 10, 2);
+        let s2 = kms.create_surface(720, 1440, 10, 1);
         let s2_idx = kms.surfaces.iter().position(|s| s.id == s2).unwrap();
         kms.surfaces[s2_idx].pixels.fill(0x80FFFFFF);
         kms.surfaces[s2_idx].mark_frame_drawn();

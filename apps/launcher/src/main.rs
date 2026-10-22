@@ -957,14 +957,6 @@ fn refresh_notifications(state: &mut LauncherState) {
     }
 }
 
-fn developer_terminal_enabled() -> bool {
-    let mut buf = [0u8; 8];
-    let Some(n) = read_setting("developer.terminal_enabled", &mut buf) else {
-        return false;
-    };
-    &buf[..n] == b"true"
-}
-
 /// Small stack buffer for formatting a log line without an allocator.
 ///
 /// WHY this exists rather than a `heapless::String`: the shell is `#![no_std]`
@@ -1037,11 +1029,6 @@ fn refresh_package_catalog(state: &mut LauncherState) {
             || id == b"org.interos.compositor" || id == b"compositor"
             || id == b"org.interos.init" || id == b"init" || id == b"user_init"
             || id == b"org.interos.card_demo" || id == b"card_demo" || id == b"app_card_demo"
-        {
-            continue;
-        }
-        if (id == b"terminal" || id == b"org.interos.terminal" || id == b"app_terminal")
-            && !developer_terminal_enabled()
         {
             continue;
         }
@@ -2496,8 +2483,6 @@ fn resolve_app_at_touch<'a>(state: &'a LauncherState, x: u32, y: u32) -> Option<
         if (330..=370).contains(&y) {
             if (160..=200).contains(&x) {
                 return package_id_by_suffix(state, b"settings").or(Some("org.interos.settings"));
-            } else if (465..=505).contains(&x) {
-                return package_id_by_suffix(state, b"terminal").or(Some("org.interos.terminal"));
             }
         } else if (500..=540).contains(&y) {
             if (160..=200).contains(&x) {

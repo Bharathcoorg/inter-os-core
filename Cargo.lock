@@ -144,13 +144,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "terminal"
-version = "0.1.0"
-dependencies = [
- "interos-std",
-]
-
-[[package]]
 name = "vault"
 version = "0.1.0"
 dependencies = [

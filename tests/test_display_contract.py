@@ -7,6 +7,10 @@ ROOT = Path(__file__).resolve().parents[1]
 def must(text: str, needle: str, label: str) -> None:
     assert needle in text, f"missing {label}: {needle}"
 
+def must_not(text: str, needle: str, label: str) -> None:
+    assert needle not in text, f"forbidden {label}: {needle}"
+
+
 def main() -> None:
     drivers = (ROOT / "kernel/src/drivers/display.rs").read_text(encoding="utf-8")
     driver_mod = (ROOT / "kernel/src/drivers/mod.rs").read_text(encoding="utf-8")
@@ -71,9 +75,14 @@ def main() -> None:
     # longer names a slot and the SDK's display functions take no slot
     # argument. The intent is unchanged: the display service must create a
     # surface, write pixels into it, and flip it to the scanout.
-    must(service, "std::surface_create(320, 480, 0)", "display service creates surface through ABI")
-    must(service, "std::surface_write(surface", "display service writes through ABI")
-    must(service, "std::surface_flip()", "display service flips through ABI")
+    # WHY the display service holds no surface: it used to create a
+    # 320x480 one, write four pixels into it and flip, and the
+    # unfilled part of it went under the foreground application as a
+    # black rectangle in the corner of every screen. A service that
+    # draws nothing should hold nothing, and the kernel's compositor
+    # owns the scanout.
+    must_not(service, "std::surface_create(", "display service holds no surface")
+    must_not(service, "std::surface_write(", "display service writes nothing")
     must(drivers, "crate::framebuffer::present_argb8888", "KMS-to-hardware scanout handoff")
     must(displayd, "interos_system_service::run_display()", "displayd uses dedicated implementation")
 

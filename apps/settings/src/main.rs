@@ -308,7 +308,6 @@ pub power_profile: Option<PowerProfile>,
     pub profile_feedback: ProfileFeedback,
     /// Last DVFS governor id the kernel reported, when the query answered.
     pub governor: Option<u32>,
-    pub terminal_enabled: bool,
     /// Recorded outcome of the RTC query for the About card.
     pub rtc: TelemetryState,
     /// Raw RTC payload exactly as the platform reported it.
@@ -458,8 +457,7 @@ impl SettingsApp {
             power_profile: None,
             profile_feedback: ProfileFeedback::Unattempted,
             governor: None,
-            terminal_enabled: false,
-            // WHY: Unavailable/zero until the About screen's queries answer;
+                // WHY: Unavailable/zero until the About screen's queries answer;
             // a card must never render a value that was never read.
             rtc: TelemetryState::Unavailable,
             rtc_time: [0u8; 64],
@@ -1012,65 +1010,6 @@ impl SettingsApp {
         .ok();
     }
 
-    /// Queries authoritative system settings for developer terminal availability.
-    pub fn refresh_developer_options(&mut self) {
-        let mut buf = [0u8; 16];
-        // WHY slot 3: this process holds FileSystemWrite with READ|WRITE in slot
-        // 3 (kernel/src/task/user.rs:802-807) and `sys_settings_get` accepts
-        // exactly that (kernel/src/syscall/mod.rs:4429-4430). It used to pass
-        // slot 0, which is the SerialOutput slot, so every read was refused and
-        // the Developer-terminal row could only ever show its fail-closed
-        // default. Keep the fail-closed default handling below regardless - a
-        // read that is refused must still leave the value unverified.
-        match std::settings_get("developer.terminal_enabled", &mut buf) {
-            Ok(n) => {
-                if let Ok(v) = core::str::from_utf8(&buf[..n]) {
-                    self.terminal_enabled = v == "true";
-                    std::log("[SETTINGS APP] developer.terminal_enabled read from the settings store.",
-                    )
-                    .ok();
-                    std::log(v).ok();
-                }
-            }
-            Err(_) => {
-                self.terminal_enabled = false;
-                std::log("[SETTINGS APP] developer.terminal_enabled read refused by the kernel; showing Disabled by default.",
-                )
-                .ok();
-            }
-        }
-    }
-
-    /// Toggles the developer terminal setting and updates system configuration.
-    pub fn toggle_terminal(&mut self) {
-        let desired = !self.terminal_enabled;
-        let val: &[u8] = if desired { b"true" } else { b"false" };
-        // WHY slot 3: `sys_settings_set` requires FileSystemWrite with Rights::WRITE
-        // in the given slot, and this process holds exactly that in slot 3
-        // (kernel/src/task/user.rs:802-807, checked at
-        // kernel/src/syscall/mod.rs:4446). It used to pass slot 0, the
-        // SerialOutput slot, so the kernel denied every write and the toggle
-        // could never take effect. Report the real result either way, and leave
-        // the local flag at the last observed value when the write is refused so
-        // the UI never shows an unpersisted toggle.
-        match std::settings_set("developer.terminal_enabled", val) {
-            Ok(()) => {
-                self.terminal_enabled = desired;
-                std::log(if desired {
-                        "[SETTINGS APP] Developer terminal enabled (default was: Disabled by default)."
-                    } else {
-                        "[SETTINGS APP] Developer terminal disabled."
-                    },
-                )
-                .ok();
-            }
-            Err(_) => {
-                std::log("[SETTINGS APP] Developer terminal change refused by the kernel (settings write denied). Unchanged: Disabled by default.",
-                )
-                .ok();
-            }
-        }
-    }
 
     /// Reads what the settings store holds for both surfaces.
     ///
@@ -4443,45 +4382,6 @@ fn row_pixel(
                 }
             }
             _ => {
-                // Developer terminal: a real (capability-refused) mutator, so
-                // the row stays tappable; the badge reports the last state the
-                // kernel actually persisted.
-                let (state_run, badge, badge_ink) = if app.terminal_enabled {
-                    (&b"Enabled"[..], &b"ENABLED"[..], THEME.success)
-                } else {
-                    (
-                        &b"Disabled by default"[..],
-                        &b"DISABLED"[..],
-                        THEME.on_surface_variant,
-                    )
-                };
-                let bw = badge_w(badge);
-                if let Some(c) = row_head(
-                    x,
-                    y,
-                    cy,
-                    b"Developer terminal",
-                    state_run,
-                    THEME.on_surface_variant,
-                    badge,
-                    badge_ink,
-                ) {
-                    return c;
-                }
-                if let Some(c) = run_ink(
-                    x,
-                    y,
-                    DETAIL_X + ROW_PAD,
-                    cy + ROW_CAP2_DY,
-                    TYPE_H3,
-                    b"Config key: developer.terminal_enabled",
-                    DETAIL_W - 2 * ROW_PAD - bw - BADGE_GAP,
-                    THEME.on_surface_variant,
-                    THEME.surface_container,
-                    false,
-                ) {
-                    return c;
-                }
             }
         },
     }
@@ -6026,8 +5926,7 @@ fn handle_tap(
                     ch,
                     CARD_R,
                 ) {
-                    settings.toggle_terminal();
-                }
+                            }
             }
             Section::Security => {
                 let (cy, ch) =
@@ -6133,7 +6032,6 @@ pub extern "C" fn _start() -> ! {
 
     // 7. Query About Device & Hardware RTC (System detail)
     settings.display_about_device();
-    settings.refresh_developer_options();
 
     // Initial render & presentation
     if surface > 0 {

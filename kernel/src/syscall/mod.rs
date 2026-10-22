@@ -5314,7 +5314,6 @@ fn native_first_party_app_available(package_id: &str) -> bool {
     matches!(
         package_id,
         "org.interos.settings"
-            | "org.interos.terminal"
             | "org.interos.calculator"
             | "org.interos.dialer"
             | "org.interos.vault"
@@ -5739,7 +5738,6 @@ pub fn dev_launch_app(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
     let parent = crate::task::TaskId(0);
     let tid = match app_id {
         "org.interos.settings" | "settings" | "app_settings" => crate::task::user::spawn_app_settings(parent),
-        "org.interos.terminal" | "terminal" | "app_terminal" => crate::task::user::spawn_app_terminal(parent),
         "org.interos.calculator" | "calculator" | "app_calculator" => crate::task::user::spawn_app_calculator(parent),
         "org.interos.dialer" | "dialer" | "app_dialer" => crate::task::user::spawn_app_dialer(parent),
         "org.interos.vault" | "vault" | "app_vault" => crate::task::user::spawn_app_vault(parent),
@@ -5982,12 +5980,6 @@ fn launch_registered_package(app_id: &str, parent_id: TaskId) -> Result<crate::t
     let tid = match app_id {
         "org.interos.settings" | "settings" | "app_settings" => {
             crate::task::user::spawn_app_settings(parent_id)
-        }
-        "org.interos.terminal" | "terminal" | "app_terminal" => {
-            if !crate::settings::developer_terminal_enabled() && parent_id.0 != 11 && parent_id.0 != 1 {
-                return Err(SyscallResult::PermissionDenied);
-            }
-            crate::task::user::spawn_app_terminal(parent_id)
         }
         "org.interos.calculator" | "calculator" => {
             crate::task::user::spawn_app_calculator(parent_id)

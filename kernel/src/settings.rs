@@ -177,12 +177,6 @@ impl SettingsStore {
     }
 }
 
-pub fn developer_terminal_enabled() -> bool {
-    let mut out = [0u8; 8];
-    let store = SETTINGS.lock();
-    store.get("developer.terminal_enabled", &mut out) > 0 && &out[..4] == b"true"
-}
-
 pub static SETTINGS: Mutex<SettingsStore> = Mutex::new(SettingsStore::new());
 
 pub fn init() {
@@ -203,7 +197,6 @@ pub fn init() {
             "sound.volume=75\n",
             "notifications.dnd=false\n",
             "security.lock_timeout=30\n",
-            "developer.terminal_enabled=false\n",
             "users.multiuser_enabled=true\n",
             "about.os_name=InterOS Core\n",
             "about.os_version=0.8.2\n"

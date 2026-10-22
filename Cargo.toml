@@ -1,7 +1,6 @@
 [workspace]
 members = [
     "apps/settings",
-    "apps/terminal",
     "apps/dialer",
     "apps/vault",
     "apps/camera",

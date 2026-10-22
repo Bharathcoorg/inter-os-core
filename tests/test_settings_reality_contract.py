@@ -142,24 +142,21 @@ class SettingsRealityContractTests(unittest.TestCase):
     syscall = (ROOT / "kernel/src/syscall/mod.rs").read_text(encoding="utf-8")
     launcher = (ROOT / "apps/launcher/src/main.rs").read_text(encoding="utf-8")
     app = (ROOT / "apps/settings/src/main.rs").read_text(encoding="utf-8")
-    assert "developer.terminal_enabled=false" in source
-    assert "developer_terminal_enabled()" in syscall
-    # WHY the assertion is on the key and not on a capability slot number: a
-    # slot is a *position* in the task's capability table, and the kernel now
-    # authorises by the capability's type, so the launcher names the
-    # authority it wants and the kernel finds it. Pinning a slot number
-    # would pin an accident, and the accident is what broke this read
-    # before: the launcher passed slot 0 while its FileSystemRead
-    # capability sat at slot 3, and the flag was never seen.
-    assert 'read_setting("developer.terminal_enabled"' in launcher
-    assert "developer_terminal_enabled()" in launcher
+    # WHY the terminal is asserted to be absent rather than present: it was a
+    # developer surface that shipped in the boot image, took a capability
+    # grant, appeared in the app drawer and in the shell's own quick tiles,
+    # and had a settings switch to turn it on. A person's phone does not
+    # carry a terminal, and a setting that offers one is a setting that
+    # offers the wrong thing.
+    assert "developer.terminal_enabled" not in source
+    assert "developer_terminal_enabled" not in syscall
+    assert "developer.terminal_enabled" not in launcher
+    assert "developer.terminal_enabled" not in app
+    assert "toggle_terminal" not in app
+    assert "Developer terminal" not in app
     # The shell must not name a capability slot where it reads state.
     assert "std::settings_get(0," not in launcher
     assert "std::settings_get(3," not in launcher
-    assert "toggle_terminal" in app
-    assert "Developer terminal" in app
-    assert "Disabled by default" in app
-    assert '"developer.terminal_enabled"' in app
 
 
 # WHY this is outside the class: a refactor dedented the test class but left the

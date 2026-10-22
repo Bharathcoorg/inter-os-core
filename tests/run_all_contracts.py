@@ -139,7 +139,16 @@ def run_contracts(target_files=None):
 
     if framework_tests:
         try:
-            cmd = [sys.executable, "-m", "pytest", "-v", "--tb=short"] + framework_tests
+            # WHY the collection errors are continued past: one file with a
+            # module-level assertion that fails aborts the whole collection,
+            # and every other suite then reports zero cases -- the suite
+            # stops telling the truth about the platform while looking as
+            # though it is running. A broken file must be reported as
+            # broken, and the rest must still run.
+            cmd = [
+                sys.executable, "-m", "pytest", "-v", "--tb=short",
+                "--continue-on-collection-errors",
+            ] + framework_tests
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=pytest_timeout)
 
             pt_results = {p: {"passed": 0, "failed": 0, "errors": 0, "skipped": 0} for p in framework_tests}

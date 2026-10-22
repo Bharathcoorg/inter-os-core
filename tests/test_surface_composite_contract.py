@@ -151,7 +151,7 @@ def test_the_kernel_unit_suite_pins_the_behaviour():
     """The behavioural proof is in the kernel's own tests; keep their names."""
     text = _read(KMS)
     for name in (
-        "fn a_surface_that_holds_no_frame_is_never_blended()",
+        "fn a_surface_the_owner_has_not_painted_at_all_is_never_blended()",
         "fn a_surface_the_owner_wrote_whole_is_published()",
         "fn atomic_frame_commit_latch_prevents_uncommitted_surface_composition()",
     ):

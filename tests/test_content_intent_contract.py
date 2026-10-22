@@ -270,7 +270,7 @@ def test_the_registry_is_built_from_the_packages_manifests():
 # The manifest extension, and the packer that accepts it
 # -----------------------------------------------------------------------------
 def test_the_manifest_can_declare_handlers():
-    for app in ("gallery", "music", "terminal", "browser", "settings"):
+    for app in ("gallery", "music", "browser", "settings"):
         manifest_path = APPS / app / "manifest.json"
         assert manifest_path.is_file(), f"{app} has no manifest to declare its handlers in"
         manifest = json.loads(read(manifest_path))

@@ -1701,7 +1701,6 @@ pub fn init() {
     // verified .rapp payloads; legacy /system/bin entries remain diagnostics.
     vfs.create_static_file("/system/bin/init", crate::task::USER_INIT_ELF);
     vfs.create_static_file("/system/bin/settings", crate::task::APP_SETTINGS_ELF);
-    vfs.create_static_file("/system/bin/terminal", crate::task::APP_TERMINAL_ELF);
 
     // RAPP v2 packages are signed developer artifacts. The kernel must never
     // synthesize unsigned packages during boot; provisioning occurs through the

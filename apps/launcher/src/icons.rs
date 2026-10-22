@@ -18,7 +18,6 @@ pub enum IconKind {
     Settings,
     Music,
     Calculator,
-    Terminal,
     Vault,
     Health,
     MeshChat,
@@ -76,10 +75,6 @@ pub fn match_icon_kind(id: &[u8]) -> Option<IconKind> {
         || id == b"Calculator"
     {
         Some(IconKind::Calculator)
-    } else if id == b"org.interos.terminal" || id == b"terminal" || id == b"app_terminal" || id == b"TERM" || id == b"CLI"
-        || id == b"Terminal"
-    {
-        Some(IconKind::Terminal)
     } else if id == b"org.interos.vault" || id == b"vault" || id == b"app_vault"
         || id == b"VAUL" || id == b"VAULT" || id == b"PASS"
         || id == b"Vault"
@@ -345,12 +340,6 @@ pub fn eval_icon_subpixel(kind: IconKind, fx: i32, fy: i32) -> bool {
             let btn_y = (fy >= -25 && fy <= 35) || (fy >= 65 && fy <= 125);
             in_body && !(in_lcd || (btn_x && btn_y))
         }
-        IconKind::Terminal => {
-            let d = fx - (-25 - fy.abs());
-            let chevron = fy.abs() <= 105 && d >= 0 && d <= 32 && fx <= -15;
-            let cursor = fx >= 20 && fx <= 135 && fy >= 75 && fy <= 105;
-            chevron || cursor
-        }
         IconKind::Vault => {
             let r2 = fx * fx + (fy + 30) * (fy + 30);
             let arch = r2 >= 2700 && r2 <= 7500 && fy <= -30;
@@ -477,7 +466,6 @@ mod tests {
         assert_eq!(match_icon_kind(b"org.interos.settings"), Some(IconKind::Settings));
         assert_eq!(match_icon_kind(b"org.interos.music"), Some(IconKind::Music));
         assert_eq!(match_icon_kind(b"org.interos.calculator"), Some(IconKind::Calculator));
-        assert_eq!(match_icon_kind(b"org.interos.terminal"), Some(IconKind::Terminal));
         assert_eq!(match_icon_kind(b"org.interos.vault"), Some(IconKind::Vault));
         assert_eq!(match_icon_kind(b"org.interos.health"), Some(IconKind::Health));
         assert_eq!(match_icon_kind(b"org.interos.meshchat"), Some(IconKind::MeshChat));
@@ -502,8 +490,7 @@ mod tests {
             IconKind::Settings,
             IconKind::Music,
             IconKind::Calculator,
-            IconKind::Terminal,
-            IconKind::Vault,
+                    IconKind::Vault,
             IconKind::Health,
             IconKind::MeshChat,
             IconKind::Apps,

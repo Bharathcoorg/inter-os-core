@@ -33,7 +33,7 @@ import server
 STUDIO_PORT = 4300
 STUDIO_URL = f"http://127.0.0.1:{STUDIO_PORT}"
 
-class AdversarialSecurityTests(unittest.TestCase):
+class TestAdversarialSecurity(unittest.TestCase):
     _server = None
 
     @classmethod

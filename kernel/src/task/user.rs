@@ -887,67 +887,7 @@ pub fn spawn_app_settings(id_security: TaskId) -> TaskId {
     id
 }
 
-/// Trampoline for Sovereign Intent Terminal App (Ring 3)
-pub extern "C" fn app_terminal_trampoline() -> ! {
-    user_process_entry()
-}
 
-/// Spawns the native Sovereign Intent Terminal App in Ring 3.
-pub fn spawn_app_terminal(id_security: TaskId) -> TaskId {
-    let mut caps = CapabilityTable::new(8);
-    caps.insert(Capability {
-        id: CapabilityId(1801),
-        cap_type: CapabilityType::SerialOutput,
-        rights: Rights::WRITE,
-        object_id: 0,
-    }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(1802),
-        cap_type: CapabilityType::IpcSend,
-        rights: Rights::WRITE,
-        object_id: id_security.0,
-    }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(1803),
-        cap_type: CapabilityType::TimerTickRead,
-        rights: Rights::READ,
-        object_id: 0,
-    }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(1804),
-        cap_type: CapabilityType::FileSystemRead,
-        rights: Rights::READ,
-        object_id: 0,
-    }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(1805),
-        cap_type: CapabilityType::EventPoll,
-        rights: Rights::READ.union(Rights::INVOKE),
-        object_id: 0,
-    }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(1806),
-        cap_type: CapabilityType::IpcReceive,
-        rights: Rights::READ,
-        object_id: 0,
-    }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(1807),
-        cap_type: CapabilityType::FrameBufferDirect,
-        rights: Rights::WRITE,
-        object_id: 1,
-    }).ok();
-
-    let id = spawn_user_process_with_parent(
-        "app_terminal",
-        APP_TERMINAL_ELF,
-        caps,
-        6,
-        id_security,
-    ).expect("Failed to spawn Terminal app");
-    serial_println!("[OK] Spawned Task 18: app_terminal (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
-    id
-}
 
 /// Trampoline for Sovereign Dialer App (Ring 3)
 pub extern "C" fn app_dialer_trampoline() -> ! {

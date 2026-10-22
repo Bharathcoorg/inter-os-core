@@ -150,7 +150,7 @@ foreach ($svc in @("displayd", "inputd", "storaged", "netd", "powerd", "modemd",
 
 # 3. Build UI system apps
 foreach ($app in @(
-    "compositor", "launcher", "settings", "terminal",
+        "compositor", "launcher", "settings",
     "dialer", "vault", "camera", "calculator",
     "browser", "messages", "calendar", "music",
     "file_manager", "gallery", "agent_manager",

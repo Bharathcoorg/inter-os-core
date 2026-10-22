@@ -43,7 +43,7 @@ def main():
 def test_first_party_apps_accept_canonical_system_gestures():
     from pathlib import Path
     root = Path(__file__).resolve().parents[1]
-    for name in ("settings","terminal","browser","camera","calculator","calendar","dialer","file_manager","gallery","messages","music","vault"):
+    for name in ("settings","browser","camera","calculator","calendar","dialer","file_manager","gallery","messages","music","vault"):
         source = (root / "apps" / name / "src/main.rs").read_text(encoding="utf-8")
         assert "input.kind == 6" in source, name
         assert "input.kind == 7" in source, name

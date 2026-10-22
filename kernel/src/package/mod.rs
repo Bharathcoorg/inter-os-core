@@ -42,7 +42,6 @@ pub const FIRST_PARTY_PACKAGES: &[PackageDescriptor] = &[
     PackageDescriptor { package_id: "org.interos.compositor", path: "/packages/org.interos.compositor.rapp", process_name: "compositor", display_name: "Compositor", icon: "COMP", category: "Tools", is_system: true },
     PackageDescriptor { package_id: "org.interos.launcher", path: "/packages/org.interos.launcher.rapp", process_name: "launcher", display_name: "Launcher", icon: "HOME", category: "Tools", is_system: true },
     PackageDescriptor { package_id: "org.interos.settings", path: "/packages/org.interos.settings.rapp", process_name: "app_settings", display_name: "Settings", icon: "SET", category: "Tools", is_system: false },
-    PackageDescriptor { package_id: "org.interos.terminal", path: "/packages/org.interos.terminal.rapp", process_name: "app_terminal", display_name: "Terminal", icon: "TERM", category: "Tools", is_system: false },
     PackageDescriptor { package_id: "org.interos.calculator", path: "/packages/org.interos.calculator.rapp", process_name: "app_calculator", display_name: "Calculator", icon: "CALC", category: "Tools", is_system: false },
     PackageDescriptor { package_id: "org.interos.dialer", path: "/packages/org.interos.dialer.rapp", process_name: "app_dialer", display_name: "Dialer", icon: "CALL", category: "Personal", is_system: false },
     PackageDescriptor { package_id: "org.interos.vault", path: "/packages/org.interos.vault.rapp", process_name: "app_vault", display_name: "Vault", icon: "VAULT", category: "Work", is_system: false },
@@ -98,10 +97,6 @@ pub const FIRST_PARTY_INTENTS: &[(&str, &str, &str)] = &[
     ("org.interos.music", "mime", "audio/aac"),
     ("org.interos.music", "mime", "audio/mp4"),
     // The terminal opens the text the device holds.
-    ("org.interos.terminal", "mime", "text/plain"),
-    ("org.interos.terminal", "mime", "text/markdown"),
-    ("org.interos.terminal", "mime", "text/csv"),
-    ("org.interos.terminal", "mime", "application/json"),
     // The notes app opens the notes the device holds.
     ("org.interos.notes", "mime", "text/x-interos-note"),
     // The browser opens the web.

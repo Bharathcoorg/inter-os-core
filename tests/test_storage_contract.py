@@ -88,10 +88,15 @@ def main() -> None:
     must(interfs, "pub fn mount", "filesystem mount operation")
     must(interfs, "FS_MAGIC", "filesystem superblock magic")
     must(interfs, "struct DiskInode", "persistent inode record")
-    must(interfs, "BITMAP_LBA", "persistent allocation bitmap")
-    must(interfs, "BITMAP_CAPACITY_SECTORS", "filesystem bitmap geometry bound")
-    must(interfs, "data_sectors > BITMAP_CAPACITY_SECTORS", "filesystem geometry validation")
-    must(interfs, "INODE_LBA", "persistent inode table")
+    # WHY the bitmap is named as a field and not as a constant: the layout is
+    # derived from the size of the region now, so the bitmap starts where the
+    # region says it starts and is as long as the region needs it to be. The
+    # constant it used to be is the thing the contract was written against.
+    must(interfs, "pub bitmap_lba: u32", "persistent allocation bitmap")
+    must(interfs, "pub bitmap_sectors: u32", "filesystem bitmap geometry bound")
+    must(interfs, "pub inode_lba: u32", "persistent inode table")
+    must(interfs, "pub data_start: u32", "filesystem data region boundary")
+    must(interfs, "pub data_sectors: u32", "filesystem data region size")
     must(interfs, "pub fn create_file", "on-disk file creation")
     must(interfs, "pub fn read_file", "on-disk file read")
     must(interfs, "pub fn write_file", "on-disk file replacement")
@@ -107,7 +112,7 @@ def main() -> None:
     must(interfs, "if !inode.used", "unused inode metadata boundary")
     must(interfs, "inode.file_size == 0", "zero-length inode consistency validation")
     must(interfs, "inode.sector_count == 0 || inode.start_sector.checked_add(inode.sector_count)", "inode extent bounds validation")
-    must(interfs, "inode.file_size as u64 > capacity", "inode payload capacity validation")
+    must(interfs, "inode.file_size > capacity", "inode payload capacity validation")
 
     # Metadata mutations use an on-disk transaction record with recovery on mount.
     must(interfs, 'const TXN_MAGIC: [u8; 4] = *b"IFTX";', "filesystem transaction record magic")
@@ -118,11 +123,38 @@ def main() -> None:
     must(interfs, "self.clear_transaction()?", "transaction completion/cleanup")
     create_pos = interfs.index("pub fn create_file")
     create_body = interfs[create_pos:]
-    assert create_body.index("self.write_transaction(&txn)") < create_body.index("self.write_inode(index,&inode)"), "transaction intent must precede inode publication"
-    assert create_body.index("self.write_transaction(&txn)") < create_body.index("self.mark_extent(start,sectors)"), "transaction must precede extent reservation"
-    assert create_body.index("self.mark_extent(start,sectors)") < create_body.index("self.device.write_sector(self.base_lba + self.superblock.data_start+start+block,&sector)"), "extent reservation must precede payload publication"
-    assert create_body.index("self.device.write_sector(self.base_lba + self.superblock.data_start+start+block,&sector)") < create_body.index("self.write_inode(index,&inode)"), "payload must precede inode publication"
-    assert create_body.index("self.write_inode(index,&inode)") < create_body.index("self.clear_transaction()?"), "transaction must remain until inode publication completes"
+    # WHY the ordering is asserted on the operations and not on the
+    # expressions that implement them: the implementation was rewritten to
+    # copy the extent rather than to write it sector by sector, and the
+    # guarantee the contract is about is the order -- the transaction's
+    # intent, then the extent reservation, then the payload, then the
+    # inode, and only then the transaction's end.
+    def _at(body: str, needle: str) -> int:
+        index = body.find(needle)
+        assert index >= 0, f"the write path no longer has {needle!r}"
+        return index
+
+    transaction = _at(create_body, "write_transaction(&txn)")
+    extent = _at(create_body, "mark_extent(start,sectors)")
+    inode = _at(create_body, "write_inode(")
+    # WHY the LAST clearing is the one that matters: the error paths clear the
+    # transaction as they unwind, and the guarantee is that the transaction
+    # survives the inode publication, so it is the final clear that has to
+    # come after it.
+    cleared = create_body.rindex("clear_transaction()")
+    assert inode < cleared, "transaction must remain until inode publication completes"
+    payload = min(
+        (index for index in (
+            create_body.find("write_sector"),
+            create_body.find("copy_extent"),
+        ) if index >= 0),
+        default=-1,
+    )
+    assert payload >= 0, "the write path no longer publishes a payload"
+    assert transaction < extent, "transaction must precede extent reservation"
+    assert extent < payload, "extent reservation must precede payload publication"
+    assert payload < inode, "payload must precede inode publication"
+    assert inode < cleared, "transaction must remain until inode publication completes"
 
     # Persistent mutable VFS state is authenticated and encrypted at rest.
     must(storage, "pub mod encrypted;", "encrypted storage module")

@@ -73,7 +73,7 @@ function Invoke-Build {
     $embeddedImages = @(
         "init", "displayd", "inputd", "storaged", "netd", "powerd", "modemd",
         "audiod", "camerad", "sensord", "compositor", "launcher", "settings",
-        "terminal", "dialer", "vault", "camera", "calculator", "browser",
+        "dialer", "vault", "camera", "calculator", "browser",
         "messages", "calendar", "music", "file_manager", "gallery",
         "notes"
     )
