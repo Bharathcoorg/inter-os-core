@@ -88,7 +88,7 @@ use interos_std::design::scroll::ScrollState;
 
 use core::panic::PanicInfo;
 use interos_std as std;
-use dialer::theme::{type_scale, THEME, Theme};
+use dialer::theme::{type_scale, THEME};
 use interos_std::design::color;
 use dialer::ModemCallState;
 use dialer::{
@@ -2240,6 +2240,20 @@ const SOS_SCALE: usize = type_scale::CAPTION;
 const CALL_CX: usize = 360;
 const CALL_CY: usize = 1065;
 const CALL_R: i32 = 52;
+#[allow(dead_code)]
+const CALL_PILL_W: usize = 160;
+#[allow(dead_code)]
+const CALL_PILL_H: usize = 76;
+const CALL_PILL_R: i32 = 38;
+const CALL_PILL_HALF_SPINE: i32 = 42;
+
+#[inline(always)]
+fn in_call_pill(x: usize, y: usize) -> bool {
+    let dx = (x as i32 - CALL_CX as i32).abs();
+    let dy = y as i32 - CALL_CY as i32;
+    let dx_clamped = (dx - CALL_PILL_HALF_SPINE).max(0);
+    dx_clamped * dx_clamped + dy * dy <= CALL_PILL_R * CALL_PILL_R
+}
 
 // Contacts action row editing shortcut (for contacts section edit/delete).
 const CONTACTS_CX: usize = 582;
@@ -2271,7 +2285,7 @@ const DOCK_ITEM_W: usize = 140;
 /// WHY these x positions: they are the four 140 px slots the previous renderer
 /// hard-coded its labels against, kept so the dock does not move.
 const DOCK_ITEM_X0: [usize; 4] = [48, 208, 368, 528];
-const DOCK_LABELS: [&[u8]; 4] = [b"Favorites", b"Recents", b"Keypad", b"Contacts"];
+const DOCK_LABELS: [&[u8]; 4] = [b"Recent", b"Contacts", b"Keypad", b"Voicemail"];
 const DOCK_LABEL_Y0: usize = 1340;
 const DOCK_LABEL_SCALE: usize = type_scale::CAPTION;
 /// Icon band inside the dock plate: a scale-1 label below, a 36 px glyph above.
@@ -3814,45 +3828,21 @@ fn action_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         return c;
     }
 
-    // Call / Hangup Central Button (centre 360, 1065, r 52)
+    // Call / Hangup Central Button: wide stadium pill (~160x76) in inverted surface (black)
     let c_dx = (x as i32) - CALL_CX as i32;
     let c_dy = (y as i32) - CALL_CY as i32;
-    let c_d2 = c_dx * c_dx + c_dy * c_dy;
-    if c_d2 <= CALL_R * CALL_R {
+    let dx_clamped = (c_dx.abs() - CALL_PILL_HALF_SPINE).max(0);
+    let c_d2 = dx_clamped * dx_clamped + c_dy * c_dy;
+    if c_d2 <= CALL_PILL_R * CALL_PILL_R {
         let in_call = dialer.state != CallState::Idle;
-        let can_call = in_call || dialer.active_len > 0;
-
-        // WHY the ring is derived and not a colour of its own: the ring is
-        // the key's own fill, darkened, so it follows the theme instead of
-        // being a second red and a second green the platform does not name.
-        let (bg_color, border_color, glyph) = if in_call {
-            (
-                THEME.error,
-                Theme::veil(THEME.error, 20, false),
-                THEME.ink_on_dark,
-            )
-        } else if can_call {
-            (
-                THEME.success,
-                Theme::veil(THEME.success, 20, false),
-                THEME.ink_on_dark,
-            )
+        let (bg_color, glyph) = if in_call {
+            (THEME.error, THEME.ink_on_dark)
         } else {
-            // Fresh soft mint circle with emerald icon when idle
-            (
-                THEME.success_container,
-                Theme::veil(THEME.success_container, 20, false),
-                THEME.on_success_container,
-            )
+            (THEME.inverted_surface(), THEME.ink_on_dark)
         };
-
-        if c_d2 >= (CALL_R - 2) * (CALL_R - 2) {
-            return border_color;
-        }
 
         // Vector Phone Handset
         if !in_call {
-            // Angled handset (green button)
             let n1 = (c_dx + 12) * (c_dx + 12) + (c_dy + 12) * (c_dy + 12);
             let n2 = (c_dx - 12) * (c_dx - 12) + (c_dy - 12) * (c_dy - 12);
             if n1 <= 36 || n2 <= 36 {
@@ -3863,7 +3853,6 @@ fn action_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
                 return glyph;
             }
         } else {
-            // Horizontal hangup handset (red button)
             let n1 = (c_dx + 14) * (c_dx + 14) + (c_dy - 2) * (c_dy - 2);
             let n2 = (c_dx - 14) * (c_dx - 14) + (c_dy - 2) * (c_dy - 2);
             if n1 <= 36 || n2 <= 36 {
@@ -4385,7 +4374,7 @@ fn handle_tap(dialer: &mut DialerApp, px: u32, py: u32) -> Tap<'static> {
                 }
                 return Tap::Redraw(Dirty::All);
             }
-            if in_circle(x, y, CALL_CX, CALL_CY, CALL_R) {
+            if in_call_pill(x, y) {
                 return Tap::Redraw(toggle_call(dialer));
             }
             if dialer.active_len > 0 && in_circle(x, y, BACKSPACE_CX, BACKSPACE_CY, BACKSPACE_R) {
