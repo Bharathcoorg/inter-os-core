@@ -44,7 +44,7 @@ use std::design::walls;
 
 pub use gallery::{
     decode_bmp, decode_image, decode_ppm, decode_qoi, decode_raw,
-    encode_ppm, grid_row_count, has_image_suffix, has_video_suffix, is_media_file,
+    delete_storage_item_at, encode_ppm, grid_row_count, has_image_suffix, has_video_suffix, is_media_file,
     measure_image_header, media_at_with_storage, Filter, GalleryTab, Media, StorageMediaItem,
     Thumbnail, VideoCodec, VideoPlayerState, MAX_STORAGE_ITEMS, THUMB_H, THUMB_W,
 };
@@ -150,7 +150,7 @@ const CELL: usize = 216;
 const COL_X: [usize; 3] = [MARGIN, MARGIN + CELL + GUTTER, MARGIN + 2 * (CELL + GUTTER)];
 
 const HEADER_H: usize = 144;
-const TITLE_Y: usize = 40;
+const TITLE_Y: usize = 36;
 /// The screen's one subtitle line, under the title.
 ///
 /// WHY one line and not the two diagnostic lines this used to be: "Built-in
@@ -236,7 +236,7 @@ const DETAIL_VIEW_X: usize = (W - DETAIL_VIEW_W) / 2;
 const CLOSE: Rect = Rect::new(232, 856, 256, 56);
 
 // Action buttons for CRUD & capture
-const CAPTURE_BTN: Rect = Rect::new(540, 36, 144, 44);
+const CAPTURE_BTN: Rect = Rect::new(540, 34, 144, 48);
 const DETAIL_FAV: Rect = Rect::new(W - 140, 32, 48, 48);
 const DETAIL_DEL: Rect = Rect::new(W - 80, 32, 48, 48);
 const PLAY_PAUSE_BTN: Rect = Rect::new(W / 2 - 28, DETAIL_VIEW_Y1 + 16, 56, 56);
@@ -3011,7 +3011,7 @@ fn gallery_pixel(x: usize, y: usize, app: &GalleryApp) -> u32 {
             }
             return THEME.surface_container_high;
         }
-        if let Some(c) = text_bold(x, y, MARGIN, TITLE_Y, 1, b"Photos", THEME.on_surface, THEME.surface) {
+        if let Some(c) = text_bold(x, y, MARGIN, TITLE_Y, 2, b"Photos", THEME.on_surface, THEME.surface) {
             return c;
         }
         // WHY one subtitle line and not the old pair: the catalogue count and
@@ -3383,8 +3383,26 @@ fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
             if PHOTO_DEL_BTN.contains(x, y) {
                 if let Some(Media::StorageItem(idx)) = app.open {
                     if idx < app.storage_count {
-                        app.storage_count -= 1;
-                        app.storage_items[app.storage_count] = StorageMediaItem::EMPTY;
+                        let item = &app.storage_items[idx];
+                        if let Ok(path) = core::str::from_utf8(&item.path[..item.path_len]) {
+                            // WHY fs_unlink is called here: the user explicitly
+                            // tapped the delete button for this photo. Logging that
+                            // the file was deleted without invoking the filesystem
+                            // syscall leaves the actual file on storage, so it would
+                            // resurrect on the next launch.
+                            let _ = std::fs_unlink(path);
+                        }
+
+                        // Shift items and thumbnails down so the slot index remains contiguous.
+                        unsafe {
+                            delete_storage_item_at(
+                                &mut app.storage_items,
+                                &mut *core::ptr::addr_of_mut!(STORAGE_THUMBS),
+                                &mut app.storage_count,
+                                idx,
+                            );
+                        }
+
                         app.open = None;
                         app.video_player = None;
                         app.show_info_overlay = false;

@@ -263,6 +263,34 @@ impl StorageMediaItem {
     };
 }
 
+/// Deletes the storage media item at `idx` by shifting all following items and
+/// their cached thumbnails down by one slot, resetting the trailing slot to
+/// empty, and decrementing the total count.
+///
+/// WHY the shift: items in the grid are addressed by their index in the array,
+/// and `STORAGE_THUMBS` mirrors `storage_items` one-to-one. Simply decrementing
+/// the count and clearing the last slot leaves the tapped item on screen and
+/// destroys an unrelated photo at the tail of the gallery.
+pub fn delete_storage_item_at(
+    items: &mut [StorageMediaItem],
+    thumbs: &mut [Thumbnail],
+    count: &mut usize,
+    idx: usize,
+) -> bool {
+    if idx >= *count || *count == 0 {
+        return false;
+    }
+    let n = *count;
+    for i in idx..n.saturating_sub(1) {
+        items[i] = items[i + 1];
+        thumbs[i] = thumbs[i + 1];
+    }
+    items[n - 1] = StorageMediaItem::EMPTY;
+    thumbs[n - 1] = Thumbnail::EMPTY;
+    *count -= 1;
+    true
+}
+
 /// The dimensions a document's own header carries, if the header is one the
 /// platform can read.
 ///
@@ -766,5 +794,60 @@ mod tests {
         assert!(!item.has_dimensions);
         assert_eq!(item.size, 0);
         assert_eq!(item.mtime, 0);
+    }
+
+    /// Deleting an item at a specific slot shifts all subsequent items and
+    /// thumbnails down, clears the vacated end slot, and decrements the count.
+    #[test]
+    fn test_delete_storage_item_shifts_and_clears_slot() {
+        let mut items = [StorageMediaItem::EMPTY; 4];
+        let mut thumbs = [Thumbnail::EMPTY; 4];
+
+        // Seed 3 items
+        for i in 0..3 {
+            items[i].name[0] = b'0' + i as u8;
+            items[i].name_len = 1;
+            thumbs[i].rgb[0] = (i + 1) as u8 * 10;
+            thumbs[i].valid = true;
+        }
+        let mut count = 3usize;
+
+        // Out-of-bounds deletion is rejected
+        assert!(!delete_storage_item_at(&mut items, &mut thumbs, &mut count, 3));
+        assert_eq!(count, 3);
+
+        // Delete middle item (index 1)
+        assert!(delete_storage_item_at(&mut items, &mut thumbs, &mut count, 1));
+        assert_eq!(count, 2);
+
+        // Item 0 is untouched
+        assert_eq!(items[0].name[0], b'0');
+        assert_eq!(thumbs[0].rgb[0], 10);
+        assert!(thumbs[0].valid);
+
+        // Item 1 is now former Item 2
+        assert_eq!(items[1].name[0], b'2');
+        assert_eq!(thumbs[1].rgb[0], 30);
+        assert!(thumbs[1].valid);
+
+        // Trailing slots are cleared to EMPTY
+        assert_eq!(items[2].name_len, 0);
+        assert!(!thumbs[2].valid);
+        assert_eq!(items[3].name_len, 0);
+        assert!(!thumbs[3].valid);
+
+        // Delete first item (index 0)
+        assert!(delete_storage_item_at(&mut items, &mut thumbs, &mut count, 0));
+        assert_eq!(count, 1);
+        assert_eq!(items[0].name[0], b'2');
+        assert_eq!(thumbs[0].rgb[0], 30);
+        assert_eq!(items[1].name_len, 0);
+        assert!(!thumbs[1].valid);
+
+        // Delete remaining item
+        assert!(delete_storage_item_at(&mut items, &mut thumbs, &mut count, 0));
+        assert_eq!(count, 0);
+        assert_eq!(items[0].name_len, 0);
+        assert!(!thumbs[0].valid);
     }
 }
