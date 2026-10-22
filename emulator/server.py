@@ -2838,6 +2838,18 @@ def guest_command_lines(command, end_marker, timeout=8):
         time.sleep(0.05)
     return False, lines
 
+# The last frame-timing answer and when it was taken.
+#
+# WHY it is cached: every question about the frame timing makes the guest
+# print a diagnostics dump, and the studio asks once a second. The console
+# carries the guest's commands as well as the guest's log, so the dumps were
+# filling it while the touch and navigation commands were written into it --
+# and a command written into a full console is lost, with neither side
+# noticing. The answer changes once per frame, so a second and a half of it
+# is a second and a half of a frame.
+_FRAME_TIMING_CACHE = {"at": 0.0, "value": None}
+
+
 def extract_frame_timing():
     """Ask the guest for its most recent flip and report what it actually cost.
 
@@ -2859,7 +2871,20 @@ def extract_frame_timing():
     The flip number is returned alongside the cost for the reason
     `performance::last_frame` gives: two reads showing the same flip number mean
     the second sampled the same frame again, not a cheaper one.
+
+    WHY the answer is cached: the console carries the guest's commands as well
+    as the guest's log, and every one of these questions makes the guest print
+    a diagnostics dump. The studio asks for the status once a second, and a
+    dump is hundreds of bytes, so the console was busy with the dump while the
+    touch and navigation commands were written -- and a command written into a
+    full console is lost, with neither side noticing. The answer changes once
+    per frame, so a second and a half of it is a second and a half of a
+    frame, and the console is left for the input.
     """
+    now = time.time()
+    cached = _FRAME_TIMING_CACHE.get("value")
+    if cached is not None and now - _FRAME_TIMING_CACHE.get("at", 0.0) < 1.5:
+        return cached
     ok, lines = guest_command_lines("DIAG_STATE", "[DIAG_STATE]", timeout=8)
     latest = None
     for line in lines:
@@ -2880,12 +2905,15 @@ def extract_frame_timing():
         compose = int(latest.get("last_flip_compose_cycles", 0))
         present = int(latest.get("last_flip_present_cycles", 0))
     except (TypeError, ValueError):
-        return {
+        _FRAME_TIMING_CACHE["at"] = now
+        _FRAME_TIMING_CACHE["value"] = {
             "status": "UNAVAILABLE",
             "source": "GUEST_TELEMETRY",
             "detail": "The guest published a flip record this build could not parse.",
         }
-    return {
+        return _FRAME_TIMING_CACHE["value"]
+    _FRAME_TIMING_CACHE["at"] = now
+    _FRAME_TIMING_CACHE["value"] = {
         "status": "AVAILABLE",
         "source": "GUEST_TELEMETRY",
         "last_flip": flip,
@@ -2897,6 +2925,7 @@ def extract_frame_timing():
                   "exports no wall-clock interval per frame, so these cannot be "
                   "converted to a refresh rate without inventing one.",
     }
+    return _FRAME_TIMING_CACHE["value"]
 
 
 def is_safe_guest_path(path, writable=False):
@@ -3001,7 +3030,7 @@ FIRST_PARTY_APP_IDS = frozenset({
     "org.interos.vault", "org.interos.camera", "org.interos.browser",
     "org.interos.messages", "org.interos.calendar", "org.interos.music",
     "org.interos.file_manager", "org.interos.gallery",
-    "org.interos.terminal", "org.interos.notes"
+    "org.interos.notes"
 })
 
 def guest_package_catalog():
@@ -4622,26 +4651,50 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                     raise ValueError('unknown coordinate space')
 
                 slot = int(data.get('slot', 0))
+
+                def _deliver(command: str) -> None:
+                    """Sends one input command and waits for the guest to say it arrived.
+
+                    WHY the wait: the console carries the guest's log as well
+                    as the guest's commands. A command written while the guest
+                    was printing a diagnostics dump was being dropped, and
+                    neither side noticed -- the studio was told the command
+                    was sent, and the guest never saw it. That is why a tap
+                    or a navigation command sometimes did nothing.
+
+                    Waiting for the guest's acknowledgement makes a dropped
+                    command visible, and the retry makes it not lost.
+                    """
+                    for _attempt in range(3):
+                        ok, _msg = send_guest_serial_command(
+                            command, "[COM1 INPUT]", timeout=3
+                        )
+                        if ok:
+                            return
+                    raise RuntimeError(
+                        "the guest did not acknowledge the input command"
+                    )
+
                 if action == 'down':
-                    ok, msg = send_guest_serial_command(f'INPUT_TOUCH DOWN {gx} {gy} {slot}')
+                    _deliver(f'INPUT_TOUCH DOWN {gx} {gy} {slot}')
                 elif action == 'move':
-                    ok, msg = send_guest_serial_command(f'INPUT_TOUCH MOVE {gx} {gy} {slot}')
+                    _deliver(f'INPUT_TOUCH MOVE {gx} {gy} {slot}')
                 elif action == 'up':
-                    ok, msg = send_guest_serial_command(f'INPUT_TOUCH UP {gx} {gy} {slot}')
+                    _deliver(f'INPUT_TOUCH UP {gx} {gy} {slot}')
                 elif action == 'tap':
-                    ok, msg = send_guest_serial_command(f'TAP {gx} {gy}')
+                    _deliver(f'TAP {gx} {gy}')
                 elif action == 'cancel':
-                    ok, msg = send_guest_serial_command(f'INPUT_TOUCH CANCEL {gx} {gy} {slot}')
+                    _deliver(f'INPUT_TOUCH CANCEL {gx} {gy} {slot}')
                 elif action in ('swipe', 'drag'):
                     steps = max(2, min(20, int(data.get('steps', 5))))
-                    ok, msg = send_guest_serial_command(f'SWIPE {gx} {gy} {gx2} {gy2} {steps}')
+                    _deliver(f'SWIPE {gx} {gy} {gx2} {gy2} {steps}')
                 elif action in ('home', 'back', 'recents'):
-                    ok, msg = send_guest_serial_command(f'NAV {action.upper()}')
+                    _deliver(f'NAV {action.upper()}')
                 elif action in ('power', 'lock'):
                     ok, msg = send_guest_serial_command('POWER_KEY', timeout=2)
                 elif action == 'nav':
                     target = str(data.get('target', 'HOME')).upper()
-                    ok, msg = send_guest_serial_command(f'NAV {target}')
+                    _deliver(f'NAV {target}')
                 else:
                     raise ValueError('unsupported touch action')
                 if not ok: raise RuntimeError(msg)
