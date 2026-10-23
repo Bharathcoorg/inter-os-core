@@ -265,6 +265,7 @@ const FULLSCREEN_BTN: Rect = Rect::new(W - MARGIN - 100, DETAIL_VIEW_Y1 + 114, 1
 /// WHY 44 and not 40: the design system's minimum touch target is 44 logical
 /// pixels and this button was 40.
 const ASPECT_BTN: Rect = Rect::new(W - 80, 32, 60, MIN_TOUCH_TARGET);
+const PHOTO_FULLSCREEN_BTN: Rect = Rect::new(W - 80, 32, 60, MIN_TOUCH_TARGET);
 const DETAIL_INFO: Rect = Rect::new(W / 2 - 40, H - 100, 80, 48);
 const PHOTO_FAV_BTN: Rect = Rect::new(MARGIN + 40, H - 100, 80, 48);
 const PHOTO_DEL_BTN: Rect = Rect::new(W - MARGIN - 120, H - 100, 80, 48);
@@ -912,6 +913,15 @@ pub struct GalleryApp {
     pub detail_rgba_len: usize,
     pub detail_w: u32,
     pub detail_h: u32,
+    /// Fullscreen mode for photo viewer.
+    pub photo_fullscreen: bool,
+    /// Zoom level in thousandths (1000 = 1.0x, 2000 = 2.0x, etc.).
+    pub photo_zoom: u32,
+    pub pan_x: i32,
+    pub pan_y: i32,
+    pub last_tap_tick: u64,
+    pub last_tap_x: usize,
+    pub last_tap_y: usize,
 }
 
 /// Hands an action to the package the platform's registry says owns it.
@@ -1015,6 +1025,13 @@ impl GalleryApp {
             detail_rgba_len: 0,
             detail_w: 0,
             detail_h: 0,
+            photo_fullscreen: false,
+            photo_zoom: 1000,
+            pan_x: 0,
+            pan_y: 0,
+            last_tap_tick: 0,
+            last_tap_x: 0,
+            last_tap_y: 0,
         }
     }
 
@@ -1726,6 +1743,42 @@ fn storage_cell_pixel(x: usize, y: usize, app: &GalleryApp, idx: usize, col: usi
             }
             if dx * dx + dy * dy >= 400 && dx * dx + dy * dy <= 529 {
                 return blend_argb(grad, 0xFFFFFFFF, 128);
+            }
+        }
+
+        // Format badge (PPM, RAW, MJPEG, QOI, BMP, PNG, JPG)
+        let name_slice = &item.name[..item.name_len];
+        let badge_opt: Option<&'static [u8]> = if name_slice.ends_with(b".ppm") {
+            Some(b"PPM")
+        } else if name_slice.ends_with(b".raw") {
+            Some(b"RAW")
+        } else if name_slice.ends_with(b".mjpeg") || name_slice.ends_with(b".mjpg") {
+            Some(b"MJPEG")
+        } else if name_slice.ends_with(b".qoi") {
+            Some(b"QOI")
+        } else if name_slice.ends_with(b".bmp") {
+            Some(b"BMP")
+        } else if name_slice.ends_with(b".png") {
+            Some(b"PNG")
+        } else if name_slice.ends_with(b".jpg") || name_slice.ends_with(b".jpeg") {
+            Some(b"JPG")
+        } else if name_slice.ends_with(b".mp4") {
+            Some(b"MP4")
+        } else {
+            None
+        };
+        if let Some(badge) = badge_opt {
+            let bw = font::measure(badge, 1) + 8;
+            let bx0 = x0 + 6;
+            let by0 = y0 + 6;
+            if x >= bx0 && x < bx0 + bw && y >= by0 && y < by0 + 16 {
+                if x == bx0 || x == bx0 + bw - 1 || y == by0 || y == by0 + 15 {
+                    return 0x88FFFFFF;
+                }
+                if let Some(tc) = text(x, y, bx0 + 4, by0 + 1, 1, badge, 0xFFFFFFFF, 0xCC111214) {
+                    return tc;
+                }
+                return 0xCC111214;
             }
         }
 
@@ -2466,6 +2519,69 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
         }
     }
 
+    // Fullscreen photo viewer rendering
+    if app.photo_fullscreen && app.video_player.is_none() {
+        // Floating exit back control in top-left
+        let exit_rect = Rect::new(24, 24, 48, 48);
+        if exit_rect.contains(x, y) {
+            if let Some(c) = draw_pill(x, y, exit_rect, 0xCC111214, Some(THEME.border)) {
+                if let Some(tc) = text(x, y, exit_rect.x + 16, exit_rect.y + 14, 1, b"<", 0xFFFFFFFF, 0xCC111214) {
+                    return tc;
+                }
+                return c;
+            }
+        }
+        // Zoom indicator in top-right when zoomed
+        if app.photo_zoom > 1000 {
+            let z_rect = Rect::new(W - 80, 24, 56, 32);
+            if z_rect.contains(x, y) {
+                let z_lbl: &[u8] = if app.photo_zoom >= 2500 { b"3.0x" } else if app.photo_zoom >= 1800 { b"2.0x" } else { b"1.5x" };
+                if let Some(c) = draw_pill(x, y, z_rect, 0xCC111214, Some(THEME.border)) {
+                    if let Some(tc) = text(x, y, z_rect.x + 12, z_rect.y + 8, 1, z_lbl, THEME.primary, 0xCC111214) {
+                        return tc;
+                    }
+                    return c;
+                }
+            }
+        }
+        // Fullscreen photo sampling with zoom
+        let view = Rect::new(0, 0, W, H);
+        match media {
+            Media::Wallpaper(idx) => {
+                let scene = &walls::SCENES[idx];
+                return scene_fit(scene, x, y, view);
+            }
+            Media::Photo(idx) => {
+                let Some(photo) = PHOTOS.get(idx) else {
+                    return THEME.surface;
+                };
+                let t = (y * 255 / H).min(255);
+                return blend_argb(photo.primary_color, photo.secondary_color, t);
+            }
+            Media::StorageItem(idx) => {
+                if app.storage_items.get(idx).is_none() {
+                    return THEME.surface;
+                }
+                if app.detail_rgba_len > 0 && app.detail_w > 0 && app.detail_h > 0 {
+                    let zoom = app.photo_zoom.clamp(1000, 3000) as usize;
+                    let norm_x = (x * 1000 / zoom).min(W - 1);
+                    let norm_y = (y * 1000 / zoom).min(H - 1);
+                    let img_x = (norm_x * app.detail_w as usize / W).min(app.detail_w as usize - 1);
+                    let img_y = (norm_y * app.detail_h as usize / H).min(app.detail_h as usize - 1);
+                    let offset = (img_y * app.detail_w as usize + img_x) * 4;
+                    if offset + 3 < app.detail_rgba.len() {
+                        let r = app.detail_rgba[offset] as u32;
+                        let g = app.detail_rgba[offset + 1] as u32;
+                        let b = app.detail_rgba[offset + 2] as u32;
+                        let a = app.detail_rgba[offset + 3] as u32;
+                        return (a << 24) | (r << 16) | (g << 8) | b;
+                    }
+                }
+                return THEME.surface_container;
+            }
+        }
+    }
+
     // App bar: back control + CRUD / Aspect buttons + title/meta
     if y < DETAIL_BAR_H {
         if y == DETAIL_BAR_H - 1 {
@@ -2485,6 +2601,19 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
                 let lx = ASPECT_BTN.x + (ASPECT_BTN.w.saturating_sub(lw)) / 2;
                 let ly = ASPECT_BTN.y + (ASPECT_BTN.h.saturating_sub(font::line_height(1))) / 2;
                 if let Some(tc) = text(x, y, lx, ly, 1, aspect_lbl, aspect_color, THEME.surface_container_high) { return tc; }
+                return THEME.surface_container_high;
+            }
+        }
+
+        // Fullscreen toggle button for photo viewer
+        if app.video_player.is_none() {
+            if let Some(c) = draw_pill(x, y, PHOTO_FULLSCREEN_BTN, THEME.surface_container_high, Some(THEME.border)) {
+                if c != THEME.surface_container_high { return c; }
+                let lbl = b"Full";
+                let lw = font::measure(lbl, 1);
+                let lx = PHOTO_FULLSCREEN_BTN.x + (PHOTO_FULLSCREEN_BTN.w.saturating_sub(lw)) / 2;
+                let ly = PHOTO_FULLSCREEN_BTN.y + (PHOTO_FULLSCREEN_BTN.h.saturating_sub(font::line_height(1))) / 2;
+                if let Some(tc) = text(x, y, lx, ly, 1, lbl, THEME.on_surface, THEME.surface_container_high) { return tc; }
                 return THEME.surface_container_high;
             }
         }
@@ -3254,11 +3383,40 @@ fn create_screenshot(app: &mut GalleryApp) {
 fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
     // Bottom home gesture: closes the inspection view, else leaves the app.
     if HOME_HIT.contains(x, y) {
+        if app.photo_fullscreen && app.video_player.is_none() {
+            let exit_rect = Rect::new(24, 24, 48, 48);
+            if exit_rect.contains(x, y) {
+                app.photo_fullscreen = false;
+                app.photo_zoom = 1000;
+                std::log("[GALLERY] Exited fullscreen photo viewer.").ok();
+                return Tap::Redraw(Dirty::All);
+            }
+            if app.photo_zoom <= 1000 {
+                app.photo_zoom = 2000;
+                std::log("[GALLERY] Photo zoomed in (2.0x).").ok();
+            } else {
+                app.photo_zoom = 1000;
+                std::log("[GALLERY] Photo reset to 1.0x zoom.").ok();
+            }
+            return Tap::Redraw(Dirty::All);
+        }
+
+        if app.video_player.is_none() && PHOTO_FULLSCREEN_BTN.contains(x, y) {
+            app.photo_fullscreen = true;
+            std::log("[GALLERY] Entered fullscreen photo viewer.").ok();
+            return Tap::Redraw(Dirty::All);
+        }
+
         if let Some(ref mut player) = app.video_player {
             if player.is_fullscreen {
                 player.is_fullscreen = false;
                 return Tap::Redraw(Dirty::All);
             }
+        }
+        if app.photo_fullscreen {
+            app.photo_fullscreen = false;
+            app.photo_zoom = 1000;
+            return Tap::Redraw(Dirty::All);
         }
         if app.show_info_overlay {
             app.show_info_overlay = false;
@@ -3651,6 +3809,13 @@ pub extern "C" fn _start() -> ! {
                         )
                         .ok();
                         exit_to_launcher(surface);
+                    }
+
+                    // Pinch zoom in photo view
+                    if app.open.is_some() && app.video_player.is_none() && input.scale_milli != 1000 {
+                        let new_zoom = (app.photo_zoom as u64 * input.scale_milli as u64 / 1000) as u32;
+                        app.photo_zoom = new_zoom.clamp(1000, 3000);
+                        dirty = Dirty::All;
                     }
 
                     // A pan or a fling over the grid scrolls the grid.

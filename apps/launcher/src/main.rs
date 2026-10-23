@@ -1730,6 +1730,14 @@ fn recents_label(state: &LauncherState, package_id: &[u8], buf: &mut [u8; 24]) -
     launcher::text::humanise_package_id(package_id, buf).len()
 }
 
+fn suspend_background_apps(state: &LauncherState) {
+    for card in state.recents_cards[..state.recents_count].iter() {
+        if card.task_id != 0 {
+            let _ = std::app_background_task(card.task_id);
+        }
+    }
+}
+
 fn refresh_runtime_recents(state: &mut LauncherState) {
     let mut buf = [0u8; 4096];
     let Ok(n) = std::app_runtime_list(&mut buf) else {
@@ -3047,6 +3055,7 @@ pub extern "C" fn _start() -> ! {
                     if input.kind == 8 {
                         if !matches!(state.current_view, ViewMode::LockScreen | ViewMode::PinEntry) {
                             refresh_runtime_recents(&mut state);
+                            suspend_background_apps(&state);
                             screens::activity::refresh_previews(&mut state);
                             state.current_view = ViewMode::ActivitySpace;
                             render_view(surface, &state);
@@ -4712,6 +4721,7 @@ pub extern "C" fn _start() -> ! {
                             if is_drag(input.kind) && input.dy <= -60 {
                                 if input.y >= 1000 {
                                     refresh_runtime_recents(&mut state);
+                                    suspend_background_apps(&state);
                                     screens::activity::refresh_previews(&mut state);
                                     state.current_view = ViewMode::ActivitySpace;
                                     let mut win_buf = [0u8; 1024];
@@ -5021,6 +5031,7 @@ pub extern "C" fn _start() -> ! {
                                     match target {
                                         NavTarget::Recents => {
                                             refresh_runtime_recents(&mut state);
+                                            suspend_background_apps(&state);
                                             screens::activity::refresh_previews(&mut state);
                                             state.current_view = ViewMode::ActivitySpace;
                                             let mut win_buf = [0u8; 1024];

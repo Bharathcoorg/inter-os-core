@@ -237,6 +237,7 @@ pub fn activity_close_slot(state: &mut LauncherState, slot: usize) {
     }
     let task = state.recents_cards[slot].task_id;
     if task > 0 {
+        let _ = std::app_background_task(task);
         let _ = std::app_stop(task);
     }
     let mut index = slot;

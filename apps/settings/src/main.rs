@@ -29,6 +29,7 @@ use core::panic::PanicInfo;
 use interos_std as std;
 use settings::theme::{spacing, THEME};
 use settings::{
+    UserTextScale,
     display_caption, handler_caption, parse_battery_payload, parse_hardware_availability,
     parse_sensor_payload, parse_thermal_payload, stacked_height, stacked_row_rect,
     syscall_status_name, BatteryTelemetry, DispatchOutcome, DocumentSlot, HardwareAvailability,
@@ -380,6 +381,7 @@ pub power_profile: Option<PowerProfile>,
     /// constants and the platform's own answer.
     pub display_caption: [u8; 72],
     pub display_caption_len: usize,
+    pub text_scale: UserTextScale,
     /// The scroll model of the page on screen.
     ///
     /// WHY the page owns one: the section pages and the diagnostics page
@@ -494,6 +496,7 @@ impl SettingsApp {
             display: HardwareAvailability::Unknown,
             display_caption: [0u8; 72],
             display_caption_len: 0,
+            text_scale: UserTextScale::Normal,
             scroll: ScrollState::new(0, 0, 0),
             wallpaper_slot: DocumentSlot::EMPTY,
             ringtone_slot: DocumentSlot::EMPTY,
@@ -886,6 +889,34 @@ impl SettingsApp {
     /// claim hardware the platform says it does not have. The sound, cellular
     /// and Bluetooth rows used to be hard-coded claims with a green badge on
     /// them and no query behind them at all.
+    pub fn refresh_display_settings(&mut self) {
+        let mut buf = [0u8; 32];
+        if let Ok(n) = std::settings_get("display.text_scale", &mut buf) {
+            let val = &buf[..n];
+            if val == b"0" || val == b"compact" || val == b"Compact" {
+                self.text_scale = UserTextScale::Compact;
+            } else if val == b"2" || val == b"large" || val == b"Large" {
+                self.text_scale = UserTextScale::Large;
+            } else if val == b"3" || val == b"extralarge" || val == b"extra_large" || val == b"ExtraLarge" {
+                self.text_scale = UserTextScale::ExtraLarge;
+            } else {
+                self.text_scale = UserTextScale::Normal;
+            }
+        }
+    }
+
+    pub fn apply_text_scale(&mut self, scale: UserTextScale) {
+        self.text_scale = scale;
+        let val: &[u8] = match scale {
+            UserTextScale::Compact => b"compact",
+            UserTextScale::Normal => b"normal",
+            UserTextScale::Large => b"large",
+            UserTextScale::ExtraLarge => b"extralarge",
+        };
+        let _ = std::settings_set("display.text_scale", val);
+        std::log("[SETTINGS APP] Display text scale updated.").ok();
+    }
+
     pub fn refresh_hardware_inventory(&mut self) {
         self.sound = hardware_availability("sound");
         self.cellular = hardware_availability("cellular");
@@ -1810,6 +1841,8 @@ const SEG_GAP: usize = std::design::spacing::GRID_4;
 /// division drops at most two pixels, which land as slack on the right rather
 /// than as an off-grid gap that would make the selector asymmetric.
 const SEG_W: usize = (DETAIL_W - 2 * ROW_PAD - 2 * SEG_GAP) / 3;
+const FONT_SEG_GAP: usize = std::design::spacing::GRID_4;
+const FONT_SEG_W: usize = (DETAIL_W - 2 * ROW_PAD - 3 * FONT_SEG_GAP) / 4;
 /// The DVFS feedback line's offset: one 16px step below the selector.
 const SEG_FEEDBACK_DY: usize = SEG_DY + SEG_H + CARD_GAP;
 /// The DVFS row's height: it carries the selector and its feedback line.
@@ -2296,7 +2329,7 @@ fn landing_card_at(px: u32, py: u32) -> Option<Section> {
 /// Number of rows on each section's detail screen.
 fn row_count(section: Section) -> usize {
     match section {
-        Section::Device => 5,
+        Section::Device => 6,
         Section::Network => 4,
         Section::Personal => 6,
         Section::Apps => 4,
@@ -2309,7 +2342,7 @@ fn row_count(section: Section) -> usize {
 /// Height of row `row` on `section`'s detail screen.
 fn row_h(section: Section, row: usize) -> usize {
     match (section, row) {
-        (Section::Power, 1) => ROW_TALL,
+        (Section::Power, 1) | (Section::Device, 1) => ROW_TALL,
         // WHY the fuel gauge and the thermal governor are the tall kind: the
         // platform's payloads for both carry more than one reading, and the
         // honest caption for them is two lines.
@@ -3104,6 +3137,19 @@ fn handler_row_pixel(
 }
 
 /// One segment of the DVFS profile selector.
+/// One segment of the user text scale selector.
+fn font_scale_segment_pixel(x: usize, y: usize, cy: usize, app: &SettingsApp, i: usize) -> Option<u32> {
+    let sx = DETAIL_X + ROW_PAD + i * (FONT_SEG_W + FONT_SEG_GAP);
+    let label: &[u8] = match i {
+        0 => b"Compact",
+        1 => b"Normal",
+        2 => b"Large",
+        _ => b"X-Large",
+    };
+    let active = app.text_scale.as_u8() as usize == i;
+    segment_pixel(x, y, sx, cy + SEG_DY, FONT_SEG_W, SEG_H, label, active)
+}
+
 fn profile_segment_pixel(x: usize, y: usize, cy: usize, app: &SettingsApp, i: usize) -> Option<u32> {
     let sx = DETAIL_X + ROW_PAD + i * (SEG_W + SEG_GAP);
     let label: &[u8] = match i {
@@ -3627,6 +3673,31 @@ fn row_pixel(
                 }
             }
             1 => {
+                let (cap, badge): (&[u8], &[u8]) = match app.text_scale {
+                    UserTextScale::Compact => (b"Scale: Compact (80%)", b"80%"),
+                    UserTextScale::Normal => (b"Scale: Normal (100%)", b"100%"),
+                    UserTextScale::Large => (b"Scale: Large (125%)", b"125%"),
+                    UserTextScale::ExtraLarge => (b"Scale: Extra Large (150%)", b"150%"),
+                };
+                if let Some(c) = row_head(
+                    x,
+                    y,
+                    cy,
+                    b"Font Scaling",
+                    cap,
+                    THEME.on_surface_variant,
+                    badge,
+                    THEME.primary,
+                ) {
+                    return c;
+                }
+                for i in 0..4 {
+                    if let Some(c) = font_scale_segment_pixel(x, y, cy, app, i) {
+                        return c;
+                    }
+                }
+            }
+            2 => {
                 if let Some(c) = row_head(
                     x,
                     y,
@@ -3640,7 +3711,7 @@ fn row_pixel(
                     return c;
                 }
             }
-            2 => {
+            3 => {
                 // WHY the card asks the platform instead of asserting a motor:
                 // the platform's own sound path is a PC speaker, and the row
                 // used to carry a green "REPORTED" badge on a caption no
@@ -3669,7 +3740,7 @@ fn row_pixel(
                     return c;
                 }
             }
-            3 => {
+            4 => {
                 if let Some(c) = row_head(
                     x,
                     y,
@@ -5701,6 +5772,18 @@ fn render_settings_band(surface: u32, app: &SettingsApp, y0: usize, y1: usize) {
 }
 
 /// Hit-test for the DVFS profile selector segments on the Power detail.
+/// Hit-test for the text scale selector segments on the Device detail.
+fn font_scale_segment_at(px: u32, py: u32, offset: usize) -> Option<usize> {
+    let (cy, _) = detail_row_rect_scrolled(Section::Device, 1, offset);
+    for i in 0..4 {
+        let sx = CONTENT_X + ROW_PAD + i * (FONT_SEG_W + FONT_SEG_GAP);
+        if in_round_rect(px as usize, py as usize, sx, cy + SEG_DY, FONT_SEG_W, SEG_H, CONTROL_R) {
+            return Some(i);
+        }
+    }
+    None
+}
+
 fn profile_segment_at(px: u32, py: u32) -> Option<usize> {
     let (cy, _) = detail_row_rect(Section::Power, 1);
     for i in 0..3 {
@@ -5905,23 +5988,33 @@ fn handle_tap(
     } else if let Some(section) = settings.current_section {
         match section {
             Section::Device => {
-                let (cy, ch) =
-                    detail_row_rect_scrolled(Section::Device, 4, settings.scroll.offset);
-                if in_round_rect(
-                    input.x as usize,
-                    input.y as usize,
-                    DETAIL_X,
-                    cy,
-                    DETAIL_W,
-                    ch,
-                    CARD_R,
-                ) {
-                    settings.sensors_open = true;
-                    settings.refresh_thermals_and_sensors();
-                    settings.reset_scroll();
-                    std::log("[SETTINGS APP] Sensors & Diagnostics sub-page opened.",
-                    )
-                    .ok();
+                if let Some(i) = font_scale_segment_at(input.x, input.y, settings.scroll.offset) {
+                    let scale = match i {
+                        0 => UserTextScale::Compact,
+                        1 => UserTextScale::Normal,
+                        2 => UserTextScale::Large,
+                        _ => UserTextScale::ExtraLarge,
+                    };
+                    settings.apply_text_scale(scale);
+                } else {
+                    let (cy, ch) =
+                        detail_row_rect_scrolled(Section::Device, 5, settings.scroll.offset);
+                    if in_round_rect(
+                        input.x as usize,
+                        input.y as usize,
+                        DETAIL_X,
+                        cy,
+                        DETAIL_W,
+                        ch,
+                        CARD_R,
+                    ) {
+                        settings.sensors_open = true;
+                        settings.refresh_thermals_and_sensors();
+                        settings.reset_scroll();
+                        std::log("[SETTINGS APP] Sensors & Diagnostics sub-page opened.",
+                        )
+                        .ok();
+                    }
                 }
             }
             Section::Power => {
@@ -6033,6 +6126,7 @@ pub extern "C" fn _start() -> ! {
 
     // 2. Ask the platform which hardware categories it has (Device + Network)
     settings.refresh_hardware_inventory();
+    settings.refresh_display_settings();
 
     // 2. Inspect Power & Battery State (Power detail)
     settings.refresh_power();

@@ -311,6 +311,61 @@ pub fn document_from_index(path: &str) -> Option<SelectedDocument> {
     None
 }
 
+/// Resolves a selected document and its handlers from a path, falling back to
+/// extension MIME detection and the system intent registry when unindexed.
+pub fn document_from_path(path: &str) -> Option<SelectedDocument> {
+    if let Some(doc) = document_from_index(path) {
+        return Some(doc);
+    }
+    let bytes = path.as_bytes();
+    let mime_kind = detect_mime(bytes, false);
+    let mime_str = match mime_kind {
+        FileMime::Directory => "inode/directory",
+        FileMime::Image => {
+            if has_suffix(bytes, b".ppm") {
+                "image/x-portable-pixmap"
+            } else if has_suffix(bytes, b".raw") {
+                "image/x-raw"
+            } else if has_suffix(bytes, b".qoi") {
+                "image/qoi"
+            } else if has_suffix(bytes, b".bmp") {
+                "image/bmp"
+            } else if has_suffix(bytes, b".png") {
+                "image/png"
+            } else {
+                "image/jpeg"
+            }
+        }
+        FileMime::Video => "video/mp4",
+        FileMime::Audio => "audio/wav",
+        FileMime::Document => {
+            if has_suffix(bytes, b".json") {
+                "application/json"
+            } else if has_suffix(bytes, b".pdf") {
+                "application/pdf"
+            } else if has_suffix(bytes, b".md") {
+                "text/markdown"
+            } else {
+                "text/plain"
+            }
+        }
+        FileMime::Other => "application/octet-stream",
+    };
+    let mut selected = SelectedDocument::EMPTY;
+    let plen = bytes.len().min(MAX_DOCUMENT_PATH_LEN);
+    selected.path[..plen].copy_from_slice(&bytes[..plen]);
+    selected.path_len = plen;
+    let mbytes = mime_str.as_bytes();
+    let mlen = mbytes.len().min(MAX_DOCUMENT_MIME_LEN);
+    selected.mime[..mlen].copy_from_slice(&mbytes[..mlen]);
+    selected.mime_len = mlen;
+    selected.provenance[..9].copy_from_slice(b"extension");
+    selected.provenance_len = 9;
+    let mut handler_raw = [0u8; 2048];
+    selected.handler_count = handlers_for_mime(mime_str, &mut handler_raw, &mut selected.handlers);
+    Some(selected)
+}
+
 /// The packages that declared a handler for a media type.
 ///
 /// WHY the registry and not a table in this app: "who opens this file" is a

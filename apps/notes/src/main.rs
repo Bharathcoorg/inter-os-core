@@ -50,7 +50,7 @@ const CARD_BORDER: u32 = match CARD.border {
 const W: usize = 720;
 const H: usize = 1440;
 const CHUNK: usize = 4096;
-const CHARS_PER_LINE: usize = 40;
+const CHARS_PER_LINE: usize = 56;
 
 /// The note card's height.
 const CARD_H: usize = 216;
@@ -97,7 +97,7 @@ const PIN_FILTER: (usize, usize, usize, usize) = (556, 96, 136, 44);
 const RULE_X0: usize = 44;
 
 /// The ruled page's right edge: the note's text column.
-const RULE_X1: usize = RULE_X0 + CHARS_PER_LINE * 8;
+const RULE_X1: usize = W - 44;
 
 /// The distance from a line's top to the rule drawn under it.
 const RULE_DY: usize = 30;
@@ -1180,7 +1180,7 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
 
                 // 1. Top row: Note Title (Scale 1 Bold, y: uy0 + 22 .. uy0 + 46)
                 let title = note.title_bytes();
-                if let Some(c) = test_text(x, y, 56, uy0 + 22, 1, title, theme.title_ink, theme.fill, true) {
+                if let Some(c) = test_text(x, y, 56, uy0 + 22, 2, title, theme.title_ink, theme.fill, true) {
                     return c;
                 }
 
@@ -1378,20 +1378,20 @@ fn render_note_editor(x: usize, y: usize, state: &AppState) -> u32 {
     if y >= 96 && y < 166 {
         let title = note.title_bytes();
         if title.is_empty() {
-            if let Some(c) = test_text(x, y, 44, 116, 1, b"Title", theme.muted_ink, theme.fill, true) {
+            if let Some(c) = test_text(x, y, 44, 116, 2, b"Title", theme.muted_ink, theme.fill, true) {
                 return c;
             }
         } else {
-            if let Some(c) = test_text(x, y, 44, 116, 1, title, theme.title_ink, theme.fill, true) {
+            if let Some(c) = test_text(x, y, 44, 116, 2, title, theme.title_ink, theme.fill, true) {
                 return c;
             }
         }
 
         // Title blinking cursor
         if state.focus == EditorFocus::Title && state.cursor_visible && state.keyboard_visible {
-            let tw = std::design::font::measure_bold(title, 1);
+            let tw = outline_text::drawn_advance(title, 2, None).unwrap_or_else(|| std::design::font::measure_bold(title, 2));
             let cur_x = 44 + tw;
-            if x >= cur_x && x <= cur_x + 2 && y >= 114 && y <= 140 {
+            if x >= cur_x && x <= cur_x + 2 && y >= 114 && y <= 144 {
                 return theme.accent;
             }
         }

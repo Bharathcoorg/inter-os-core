@@ -19,6 +19,7 @@ pub const PIN_MIN_DIGITS: usize = 4;
 /// `title()` is the detail screen's title ("Apps & Storage") and
 /// `short_title()` is the name the landing grid uses ("Apps").
 pub use interos_std::settings::Section;
+pub use interos_std::design::accessibility::UserTextScale;
 
 /// Dynamic Voltage and Frequency Scaling (DVFS) Governor profiles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

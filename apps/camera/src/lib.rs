@@ -29,6 +29,29 @@ pub const ERR_DEVICE_ERROR: i64 = -12;
 /// what a frame that does not fit the app's buffer comes back as.
 pub const ERR_INVALID_ARGUMENTS: i64 = -3;
 
+/// Viewfinder aspect ratio configuration (4:3 portrait vs 16:9 cinematic).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CameraAspectRatio {
+    Ratio4_3,
+    Ratio16_9,
+}
+
+impl CameraAspectRatio {
+    pub const fn label(self) -> &'static [u8] {
+        match self {
+            CameraAspectRatio::Ratio4_3 => b"4:3",
+            CameraAspectRatio::Ratio16_9 => b"16:9",
+        }
+    }
+
+    pub const fn toggle(self) -> CameraAspectRatio {
+        match self {
+            CameraAspectRatio::Ratio4_3 => CameraAspectRatio::Ratio16_9,
+            CameraAspectRatio::Ratio16_9 => CameraAspectRatio::Ratio4_3,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Modes, filters and flash.
 // ---------------------------------------------------------------------------
@@ -634,6 +657,10 @@ pub struct CameraApp {
     pub index_error: i64,
     /// Whether the framing guides are drawn over the viewfinder.
     pub guides: bool,
+    /// Viewfinder aspect ratio configuration (4:3 vs 16:9).
+    pub aspect_ratio: CameraAspectRatio,
+    /// Tactile visual feedback timer ticks remaining after shutter press.
+    pub shutter_feedback_ticks: u32,
     /// Which screen the app is showing.
     pub screen: CameraScreen,
     /// The headline the viewfinder shows.
@@ -681,6 +708,8 @@ impl CameraApp {
             capture: CaptureOutcome::None,
             index_error: 0,
             guides: false,
+            aspect_ratio: CameraAspectRatio::Ratio4_3,
+            shutter_feedback_ticks: 0,
             screen: CameraScreen::Viewfinder,
             head: [0; 48],
             head_len: 0,

@@ -1303,6 +1303,20 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                 if let Some(c) = test_text(x, y, 108, 282, 1, capacity_status, THEME.on_surface_variant, row_bg) {
                     return c;
                 }
+                // 4. Storage summary bar track (108..640, 310..318)
+                if x >= 108 && x < 640 && y >= 310 && y < 318 {
+                    let bar_w = 640 - 108;
+                    let active_w = if app.storage_capacity_bytes > 0 { bar_w / 4 } else { 0 };
+                    let on_active = x < 108 + active_w;
+                    let on_edge = y == 310 || y == 317 || x == 108 || x == 639;
+                    if on_edge {
+                        return THEME.border;
+                    }
+                    if on_active {
+                        return THEME.primary;
+                    }
+                    return THEME.surface_container_high;
+                }
             }
             1 => {
                 // Photos icon (Landscape frame)
@@ -1568,6 +1582,25 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
         return base;
     }
 
+    // 4b. The breadcrumb path bar (y: 788..826)
+    if (788..826).contains(&y) && x >= 36 && x < 684 {
+        let cur_path = &app.current_path[..app.current_path_len];
+        let is_sub = cur_path.len() > b"/storage".len() && cur_path.starts_with(b"/storage/");
+        let sub_name = if is_sub { &cur_path[b"/storage/".len()..] } else { b"" };
+        if let Some(c) = test_text(x, y, 44, 796, 1, b"Storage", if is_sub { THEME.primary } else { THEME.on_surface }, THEME.surface) {
+            return c;
+        }
+        if is_sub && !sub_name.is_empty() {
+            if let Some(c) = test_text(x, y, 104, 796, 1, b">", THEME.on_surface_variant, THEME.surface) {
+                return c;
+            }
+            if let Some(c) = test_text(x, y, 120, 796, 1, sub_name, THEME.on_surface, THEME.surface) {
+                return c;
+            }
+        }
+        return THEME.surface;
+    }
+
     // 5. The entries card (y: 836..1284)
     //
     // WHY the card is the region and not the size of the list: the card used
@@ -1822,28 +1855,59 @@ fn render_card_rows(surface: u32, app: &FileManagerApp) {
                 if selected && rx < 6 {
                     px_col = THEME.primary;
                 }
-                // Vector folder / file pictogram
-                if is_dir {
-                    // Vector Folder Pictogram: tab (22..34, 17..21), body (22..50, 21..39)
-                    let in_tab = rx >= 22 && rx <= 34 && ry >= 17 && ry <= 21;
-                    let in_body = rx >= 22 && rx <= 50 && ry >= 21 && ry <= 39;
-                    if in_tab || in_body {
-                        let on_outline = ry == 17 || ry == 39 || rx == 22 || rx == 50
-                            || (ry == 21 && rx > 34) || (rx == 34 && ry <= 21);
-                        if on_outline {
+                // Vector folder / file pictogram with MIME differentiation
+                let mime = detect_mime(name, is_dir);
+                match mime {
+                    FileMime::Directory => {
+                        let in_tab = rx >= 22 && rx <= 34 && ry >= 17 && ry <= 21;
+                        let in_body = rx >= 22 && rx <= 50 && ry >= 21 && ry <= 39;
+                        if in_tab || in_body {
+                            let on_outline = ry == 17 || ry == 39 || rx == 22 || rx == 50
+                                || (ry == 21 && rx > 34) || (rx == 34 && ry <= 21);
+                            if on_outline {
+                                px_col = if selected { THEME.primary } else { THEME.on_surface };
+                            }
+                        }
+                    }
+                    FileMime::Image => {
+                        if rx >= 24 && rx <= 48 && ry >= 16 && ry <= 40 {
+                            let on_frame = rx == 24 || rx == 48 || ry == 16 || ry == 40;
+                            let dx_sun = rx as isize - 40;
+                            let dy_sun = ry as isize - 22;
+                            let on_sun = dx_sun * dx_sun + dy_sun * dy_sun <= 4;
+                            let on_mountain = ry >= 30 && (rx as isize - 34).abs() <= (40 - ry as isize);
+                            if on_frame || on_sun || on_mountain {
+                                px_col = if selected { THEME.primary } else { THEME.on_surface };
+                            }
+                        }
+                    }
+                    FileMime::Video => {
+                        if rx >= 24 && rx <= 48 && ry >= 16 && ry <= 40 {
+                            let on_frame = rx == 24 || rx == 48 || ry == 16 || ry == 40;
+                            let in_play = rx >= 32 && rx <= 40 && (ry as isize - 28).abs() <= (rx as isize - 32);
+                            if on_frame || in_play {
+                                px_col = if selected { THEME.primary } else { THEME.on_surface };
+                            }
+                        }
+                    }
+                    FileMime::Audio => {
+                        let in_notehead = rx >= 26 && rx <= 32 && ry >= 33 && ry <= 38;
+                        let on_stem = rx == 31 && ry >= 20 && ry <= 35;
+                        let on_flag = rx >= 31 && rx <= 42 && ry >= 20 && ry <= 24;
+                        if in_notehead || on_stem || on_flag {
                             px_col = if selected { THEME.primary } else { THEME.on_surface };
                         }
                     }
-                } else {
-                    // Vector Document Pictogram: (25..47, 16..40) with folded corner
-                    if rx >= 25 && rx <= 47 && ry >= 16 && ry <= 40 {
-                        let in_fold_cut = rx > 40 && ry < 23 && (rx - 40) + (ry - 16) > 8;
-                        if !in_fold_cut {
-                            let on_outline = rx == 25 || rx == 47 || ry == 16 || ry == 40
-                                || ((rx >= 40 && ry <= 23) && ((rx - 40) + (ry - 16) == 8));
-                            let on_lines = (ry == 27 || ry == 32) && rx >= 30 && rx <= 42;
-                            if on_outline || on_lines {
-                                px_col = THEME.on_surface_variant;
+                    FileMime::Document | FileMime::Other => {
+                        if rx >= 25 && rx <= 47 && ry >= 16 && ry <= 40 {
+                            let in_fold_cut = rx > 40 && ry < 23 && (rx - 40) + (ry - 16) > 8;
+                            if !in_fold_cut {
+                                let on_outline = rx == 25 || rx == 47 || ry == 16 || ry == 40
+                                    || ((rx >= 40 && ry <= 23) && ((rx - 40) + (ry - 16) == 8));
+                                let on_lines = (ry == 27 || ry == 32) && rx >= 30 && rx <= 42;
+                                if on_outline || on_lines {
+                                    px_col = THEME.on_surface_variant;
+                                }
                             }
                         }
                     }
@@ -2481,6 +2545,16 @@ fn handle_tap(app: &mut FileManagerApp, x: usize, y: usize, surface: u32) -> Tap
         return Tap::None;
     }
 
+    // Breadcrumbs touch: tapping "Storage" navigates back to root /storage
+    if (788..826).contains(&y) && (36..100).contains(&x) {
+        if &app.current_path[..app.current_path_len] != b"/storage" {
+            app.set_path("/storage");
+            app.refresh_directory();
+            std::log("[FILE_MANAGER] Breadcrumb navigated to /storage root.").ok();
+            return Tap::Redraw(Dirty::All);
+        }
+    }
+
     // The category rows.
     //
     // WHY the row table is the library's: the renderer and this test call
@@ -2564,7 +2638,9 @@ fn handle_tap(app: &mut FileManagerApp, x: usize, y: usize, surface: u32) -> Tap
                     // where the platform holds the media type of a document and
                     // the identity of it, and a file without a media type cannot
                     // be handed to the program that declared a handler for it.
-                    match document_from_index(full_path) {
+                    let doc_opt = document_from_index(full_path)
+                        .or_else(|| file_manager::document_from_path(full_path));
+                    match doc_opt {
                         Some(document) => {
                             app.selected_document = document;
                             app.has_selected_document = true;

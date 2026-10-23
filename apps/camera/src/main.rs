@@ -37,7 +37,7 @@ use interos_std::design::components;
 use interos_std::design::outline_text;
 
 use camera::{
-    CameraApp, CameraFilter, CameraMode, CameraScreen, CameraStatus, CaptureOutcome, FlashMode,
+    CameraApp, CameraAspectRatio, CameraFilter, CameraMode, CameraScreen, CameraStatus, CaptureOutcome, FlashMode,
     SettingsRow, SETTINGS_ROW_ORDER, VIEWFINDER_TEXT_W,
 };
 
@@ -94,6 +94,8 @@ const VIEWFINDER_Y1: usize = 1120;
 /// Inner width of the viewfinder canvas, which is inset 20px from each edge of
 /// the surface (`x >= 20 && x < W - 20`).
 const VIEWFINDER_W: usize = W - 40;
+/// Aspect ratio toggle pill inside the viewfinder header (4:3 vs 16:9).
+const ASPECT_RECT: Rect = Rect::new(36, VIEWFINDER_Y0 + 16, 68, 36);
 
 const MODE_STRIP_Y0: usize = 1150;
 const MODE_STRIP_Y1: usize = 1200;
@@ -612,6 +614,20 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
             // arrives on this platform, so the guides were unreachable. They are
             // a framing aid the user turns on in the settings surface, and they
             // are painted in the platform's own ink.
+            // Aspect Ratio toggle pill (4:3 vs 16:9) in top-left of viewfinder
+            if ASPECT_RECT.contains(x, y) {
+                if let Some(c) = std::design::primitives::draw_rounded_rect(x, y, ASPECT_RECT, 12, 0xCC111214, Some(THEME.border), 1) {
+                    let lbl = camera.aspect_ratio.label();
+                    let lw = std::design::font::measure(lbl, 1);
+                    let lx = ASPECT_RECT.x + (ASPECT_RECT.w.saturating_sub(lw)) / 2;
+                    let ly = ASPECT_RECT.y + (ASPECT_RECT.h.saturating_sub(std::design::font::line_height(1))) / 2;
+                    if let Some(tc) = test_text(x, y, lx, ly, 1, lbl, ASPECT_RECT.w, THEME.primary, 0xCC111214) {
+                        return tc;
+                    }
+                    return c;
+                }
+            }
+
             if camera.guides {
                 if let Some(c) = guide_pixel(rel_x, rel_y) {
                     return c;
@@ -778,6 +794,8 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
         if dist_sq <= outer && dist_sq >= inner {
             return if camera.status == CameraStatus::AuthorityRefused {
                 DISABLED
+            } else if camera.shutter_feedback_ticks > 0 {
+                THEME.primary // Tactile visual feedback on shutter press
             } else {
                 THEME.on_surface
             };
@@ -1245,6 +1263,16 @@ fn handle_camera_touch(camera: &mut CameraApp, x: u32, y: u32) -> Tap {
         return Tap::Redraw(Dirty::TopRow);
     }
 
+    // Aspect ratio toggle pill tap
+    if camera.screen == CameraScreen::Viewfinder && ASPECT_RECT.contains(x, y) {
+        camera.aspect_ratio = match camera.aspect_ratio {
+            CameraAspectRatio::Ratio4_3 => CameraAspectRatio::Ratio16_9,
+            CameraAspectRatio::Ratio16_9 => CameraAspectRatio::Ratio4_3,
+        };
+        std::log("[CAMERA APP] Aspect ratio switched.").ok();
+        return Tap::Redraw(Dirty::All);
+    }
+
     // 5. Mode Selector Carousel: three equal 226px slots in 20..700, matching the
     //    render slots exactly (50px tall, >=48).
     if (MODE_STRIP_Y0..MODE_STRIP_Y1).contains(&y) {
@@ -1299,6 +1327,8 @@ fn handle_camera_touch(camera: &mut CameraApp, x: u32, y: u32) -> Tap {
         // press that captured nothing was indistinguishable from one that did.
         // The real `Err` code is carried through untouched - it is the kernel's
         // answer, never a constant written here.
+        camera.shutter_feedback_ticks = 4;
+        std::log("[CAMERA APP] Shutter haptic feedback pulse dispatched.").ok();
         let outcome = if camera.mode == CameraMode::Video {
             camera.stream_video_frame()
         } else {
@@ -1424,6 +1454,16 @@ pub extern "C" fn _start() -> ! {
             // could not arrive. The video mode now says so when the shutter is
             // pressed, which is the moment the user is actually asking.
             let _ = &events;
+
+            if (events & std::EVENT_TIMER_TICK) != 0 {
+                if camera.shutter_feedback_ticks > 0 {
+                    camera.shutter_feedback_ticks = camera.shutter_feedback_ticks.saturating_sub(1);
+                    if surface > 0 {
+                        render_camera_band(surface, &camera, DOCK_Y0, DOCK_Y1);
+                        let _ = std::surface_flip();
+                    }
+                }
+            }
 
             if (events & std::EVENT_TOUCH_INPUT) != 0 {
                 let mut input = std::InputEvent {
