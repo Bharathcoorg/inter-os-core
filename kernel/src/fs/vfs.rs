@@ -1685,6 +1685,8 @@ pub fn init() {
     vfs.mkdir("/storage/photos");
     vfs.mkdir("/storage/pictures");
     vfs.mkdir("/storage/videos");
+    vfs.mkdir("/storage/downloads");
+    vfs.mkdir("/storage/music");
 
     // 1. System Policy Configuration (Read-Only)
     let policy_content = br#"{

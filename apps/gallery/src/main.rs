@@ -235,60 +235,48 @@ const DETAIL_VIEW_W: usize = (W - 2 * MARGIN) / 2;
 const DETAIL_VIEW_X: usize = (W - DETAIL_VIEW_W) / 2;
 const CLOSE: Rect = Rect::new(232, 856, 256, 56);
 
-// Action buttons for CRUD & capture
+// Action buttons for CRUD & capture (meeting >= 48px touch targets)
 const CAPTURE_BTN: Rect = Rect::new(540, 34, 144, 48);
+const HEADER_BACK: Rect = Rect::new(MARGIN, 34, 48, 48);
 const DETAIL_FAV: Rect = Rect::new(W - 140, 32, 48, 48);
 const DETAIL_DEL: Rect = Rect::new(W - 80, 32, 48, 48);
 const PLAY_PAUSE_BTN: Rect = Rect::new(W / 2 - 28, DETAIL_VIEW_Y1 + 16, 56, 56);
 const SCRUB_BAR: Rect = Rect::new(MARGIN, DETAIL_VIEW_Y1 + 84, W - 2 * MARGIN, 20);
 /// The scrub track's touch region.
-///
-/// WHY it is taller than the track: the drawn groove is 20 rows because that
-/// is what a slider's groove looks like, and a 20-row groove is not a touch
-/// target. The platform's minimum is 44 logical pixels, so the region a tap
-/// lands in is 44 rows tall and centred on the groove. The fullscreen button
-/// below it is tested first, so the two rows they share go to the button.
 const SCRUB_HIT: Rect = Rect::new(
     SCRUB_BAR.x,
-    SCRUB_BAR.y + SCRUB_BAR.h / 2 - MIN_TOUCH_TARGET / 2,
+    SCRUB_BAR.y + SCRUB_BAR.h / 2 - 24,
     SCRUB_BAR.w,
-    MIN_TOUCH_TARGET,
+    48,
 );
 /// The fullscreen control.
-///
-/// WHY 44 and not 36: the design system's minimum touch target is 44 logical
-/// pixels and this button was 36. The row below the scrub bar has room for
-/// the four extra rows, so nothing else moved.
-const FULLSCREEN_BTN: Rect = Rect::new(W - MARGIN - 100, DETAIL_VIEW_Y1 + 114, 100, MIN_TOUCH_TARGET);
+const FULLSCREEN_BTN: Rect = Rect::new(W - MARGIN - 120, DETAIL_VIEW_Y1 + 112, 120, 48);
 /// The aspect-ratio control.
-///
-/// WHY 44 and not 40: the design system's minimum touch target is 44 logical
-/// pixels and this button was 40.
-const ASPECT_BTN: Rect = Rect::new(W - 80, 32, 60, MIN_TOUCH_TARGET);
-const PHOTO_FULLSCREEN_BTN: Rect = Rect::new(W - 80, 32, 60, MIN_TOUCH_TARGET);
+const ASPECT_BTN: Rect = Rect::new(W - 88, 32, 68, 48);
+const PHOTO_FULLSCREEN_BTN: Rect = Rect::new(W - 88, 32, 68, 48);
 const DETAIL_INFO: Rect = Rect::new(W / 2 - 40, H - 100, 80, 48);
 const PHOTO_FAV_BTN: Rect = Rect::new(MARGIN + 40, H - 100, 80, 48);
 const PHOTO_DEL_BTN: Rect = Rect::new(W - MARGIN - 120, H - 100, 80, 48);
 const SET_WALLPAPER_BTN: Rect = Rect::new(MARGIN + 20, H - 164, W - 2 * MARGIN - 40, 48);
+const TOAST_RECT: Rect = Rect::new(120, H - 180, 480, 48);
 /// The media information sheet's rectangle.
 const fn info_sheet_rect() -> Rect {
-    Rect::new(MARGIN, H - 470, W - 2 * MARGIN, 350)
+    Rect::new(MARGIN, H - 490, W - 2 * MARGIN, 370)
 }
 /// The sheet's "open with" button.
-///
-/// WHY the sheet and not the photo view: the sheet is where the app says what
-/// it knows about the document, and "which app opens this" is another fact
-/// about the same document. A button that appeared without the facts beside
-/// it would be an action the user cannot judge.
 const fn info_open_with_btn() -> Rect {
-    Rect::new(MARGIN + 20, H - 470 + 264, 170, 44)
+    Rect::new(MARGIN + 20, H - 490 + 306, 180, 48)
 }
-const WP_SHEET_RECT: Rect = Rect::new(MARGIN + 10, H - 340, W - 2 * MARGIN - 20, 260);
-const WP_SHEET_TITLE_Y: usize = H - 324;
-const WP_TARGET_HOME_BTN: Rect = Rect::new(MARGIN + 30, H - 280, W - 2 * MARGIN - 60, 44);
-const WP_TARGET_LOCK_BTN: Rect = Rect::new(MARGIN + 30, H - 228, W - 2 * MARGIN - 60, 44);
-const WP_TARGET_BOTH_BTN: Rect = Rect::new(MARGIN + 30, H - 176, W - 2 * MARGIN - 60, 44);
-const WP_TARGET_CANCEL_BTN: Rect = Rect::new(MARGIN + 30, H - 124, W - 2 * MARGIN - 60, 36);
+/// The sheet's dismiss button.
+const fn info_dismiss_btn() -> Rect {
+    Rect::new(W - MARGIN - 200, H - 490 + 306, 180, 48)
+}
+const WP_SHEET_RECT: Rect = Rect::new(MARGIN + 10, H - 380, W - 2 * MARGIN - 20, 320);
+const WP_SHEET_TITLE_Y: usize = H - 364;
+const WP_TARGET_HOME_BTN: Rect = Rect::new(MARGIN + 30, H - 316, W - 2 * MARGIN - 60, 48);
+const WP_TARGET_LOCK_BTN: Rect = Rect::new(MARGIN + 30, H - 256, W - 2 * MARGIN - 60, 48);
+const WP_TARGET_BOTH_BTN: Rect = Rect::new(MARGIN + 30, H - 196, W - 2 * MARGIN - 60, 48);
+const WP_TARGET_CANCEL_BTN: Rect = Rect::new(MARGIN + 30, H - 136, W - 2 * MARGIN - 60, 48);
 
 const TAB_LABELS: [&[u8]; 4] = [b"Photos", b"Videos", b"Albums", b"Screenshots"];
 /// The tab row, under the filter chips.
@@ -922,6 +910,12 @@ pub struct GalleryApp {
     pub last_tap_tick: u64,
     pub last_tap_x: usize,
     pub last_tap_y: usize,
+    pub launched_from_caller: bool,
+    pub opened_from_caller: bool,
+    pub toast_msg: [u8; 48],
+    pub toast_len: usize,
+    pub toast_ticks: u32,
+    pub toast_is_error: bool,
 }
 
 /// Hands an action to the package the platform's registry says owns it.
@@ -1032,7 +1026,66 @@ impl GalleryApp {
             last_tap_tick: 0,
             last_tap_x: 0,
             last_tap_y: 0,
+            launched_from_caller: false,
+            opened_from_caller: false,
+            toast_msg: [0u8; 48],
+            toast_len: 0,
+            toast_ticks: 0,
+            toast_is_error: false,
         }
+    }
+
+    /// Sets an ephemeral notification toast message.
+    pub fn set_toast(&mut self, msg: &[u8], is_error: bool) {
+        let len = msg.len().min(self.toast_msg.len());
+        self.toast_msg[..len].copy_from_slice(&msg[..len]);
+        self.toast_len = len;
+        self.toast_ticks = 30;
+        self.toast_is_error = is_error;
+    }
+
+    /// Checks if a caller (such as Camera or File Manager) dispatched an intent.
+    pub fn handle_pending_intent(&mut self) -> bool {
+        let mut buf = [0u8; 320];
+        let n = match std::content::intent_pending(&mut buf) {
+            Ok(n) => n,
+            Err(_) => return false,
+        };
+        if n == 0 {
+            return false;
+        }
+        let Some(pending) = std::content::parse_pending(&buf[..n]) else {
+            return false;
+        };
+        std::log("[GALLERY] Received intent dispatch from caller.").ok();
+        self.launched_from_caller = true;
+        let payload = pending.payload;
+        if payload.is_empty() {
+            return true;
+        }
+
+        let payload_bytes = payload.as_bytes();
+        for i in 0..self.storage_count {
+            if &self.storage_items[i].path[..self.storage_items[i].path_len] == payload_bytes {
+                self.opened_from_caller = true;
+                open_media(self, Media::StorageItem(i));
+                return true;
+            }
+        }
+
+        let _ = std::content::content_index_refresh();
+        self.rescan_storage();
+        self.refresh_subtitle();
+
+        for i in 0..self.storage_count {
+            if &self.storage_items[i].path[..self.storage_items[i].path_len] == payload_bytes {
+                self.opened_from_caller = true;
+                open_media(self, Media::StorageItem(i));
+                return true;
+            }
+        }
+
+        true
     }
 
     /// Hands the wallpaper the user chose to the package that owns the slot.
@@ -1046,7 +1099,7 @@ impl GalleryApp {
     /// WHY the payload is a path or a catalogue key and the target is part of
     /// the action: the settings app has to know which surface the user meant,
     /// and the surface is what the action names.
-    pub fn apply_wallpaper_target(&self, lock: bool, home: bool) {
+    pub fn apply_wallpaper_target(&mut self, lock: bool, home: bool) {
         let Some(media) = self.open else { return };
         let mut val = [0u8; 64];
         let val_len: usize = match media {
@@ -1084,10 +1137,12 @@ impl GalleryApp {
 
         if val_len == 0 {
             std::log("[GALLERY] There is no wallpaper to set.").ok();
+            self.set_toast(b"No wallpaper to set", true);
             return;
         }
         let Ok(payload) = core::str::from_utf8(&val[..val_len]) else {
             std::log("[GALLERY] The wallpaper's name is not text; nothing was changed.").ok();
+            self.set_toast(b"Invalid wallpaper name", true);
             return;
         };
         let mut dispatched = false;
@@ -1097,8 +1152,17 @@ impl GalleryApp {
         if lock {
             dispatched |= dispatch_wallpaper(std::content::ACTION_SET_LOCK_WALLPAPER, payload);
         }
-        if !dispatched {
+        if dispatched {
+            if home && lock {
+                self.set_toast(b"Applied to Both Screens", false);
+            } else if home {
+                self.set_toast(b"Applied to Home Screen", false);
+            } else if lock {
+                self.set_toast(b"Applied to Lock Screen", false);
+            }
+        } else {
             std::log("[GALLERY] No app handles the wallpaper action; the wallpaper was not changed.").ok();
+            self.set_toast(b"Failed to apply wallpaper", true);
         }
     }
 
@@ -1225,19 +1289,30 @@ impl GalleryApp {
             std::log("[GALLERY] The document could not be opened to read its header.").ok();
             return;
         };
-        let mut header = [0u8; 64];
-        let read = std::fs_read(handle, &mut header);
+        let read = {
+            let buf = unsafe { &mut *core::ptr::addr_of_mut!(FILE_SCRATCH) };
+            std::fs_read(handle, buf)
+        };
         let _ = std::fs_close(handle);
         let Ok(n) = read else {
             std::log("[GALLERY] The document's header could not be read.").ok();
             return;
         };
-        if let Some((w, h)) = measure_image_header(&header[..n], &name_buf[..name_len]) {
+        let data = unsafe { &*core::ptr::addr_of!(FILE_SCRATCH) };
+        if let Some((w, h)) = measure_image_header(&data[..n], &name_buf[..name_len]) {
             self.storage_items[idx].width = w;
             self.storage_items[idx].height = h;
             self.storage_items[idx].has_dimensions = true;
             self.detail_w = w;
             self.detail_h = h;
+        }
+        if let Ok((w, h, len)) = decode_image(&data[..n], &name_buf[..name_len], &mut self.detail_rgba) {
+            self.detail_w = w;
+            self.detail_h = h;
+            self.detail_rgba_len = len;
+            self.storage_items[idx].width = w;
+            self.storage_items[idx].height = h;
+            self.storage_items[idx].has_dimensions = true;
         }
     }
 
@@ -1818,7 +1893,7 @@ fn item_pixel(x: usize, y: usize, app: &GalleryApp, media: Media, col: usize, y0
 fn chip_rect(index: usize) -> Rect {
     let mut x = MARGIN;
     for (i, label) in CHIP_LABELS.iter().enumerate() {
-        let w = (font::measure(label, 1) + CHIP_PAD * 2).max(CHIP_MIN_W);
+        let w = (font::measure(label, 2) + CHIP_PAD * 2).max(CHIP_MIN_W);
         let rect = Rect::new(x, CHIP_Y, w, CHIP_H);
         if i == index {
             return rect;
@@ -1855,15 +1930,11 @@ fn chip_row_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
         if shape != fill {
             return Some(shape);
         }
-        // WHY `drawn_advance` here too: the label is drawn by the same
-        // `text` funnel the ledger title uses, so at scale 2 it lands on
-        // the outline face and centring on the bitmap measure would leave it off
-        // the chip's centre by the same 1-4% of its width. On the bitmap
-        // fallback the answer is the measure the rasteriser steps by.
-        let lw = outline_text::drawn_advance(label, 1, None).unwrap_or_else(|| font::measure(label, 1));
+        // Outline text rendering at Scale 2 Body
+        let lw = outline_text::drawn_advance(label, 2, None).unwrap_or_else(|| font::measure(label, 2));
         let lx = rect.x + rect.w.saturating_sub(lw) / 2;
-        let ly = CHIP_Y + (CHIP_H.saturating_sub(font::line_height(1))) / 2;
-        if let Some(c) = text(x, y, lx, ly, 1, label, ink, fill) {
+        let ly = CHIP_Y + (CHIP_H.saturating_sub(font::line_height(2))) / 2;
+        if let Some(c) = text(x, y, lx, ly, 2, label, ink, fill) {
             return Some(c);
         }
         return Some(fill);
@@ -1914,16 +1985,16 @@ fn tab_bar_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
         return Some(THEME.border);
     }
 
-    // Tab Label Text (Scale 1 with bold active state)
+    // Tab Label Text (Scale 2 Body with bold active state)
     let label = TAB_LABELS[tab_idx];
     let text_color = if is_active { THEME.on_surface } else { THEME.on_surface_variant };
-    let text_y = TAB_Y + (TAB_H.saturating_sub(font::line_height(1))) / 2;
+    let text_y = TAB_Y + (TAB_H.saturating_sub(font::line_height(2))) / 2;
     if is_active {
-        if let Some(c) = text_centered_bold(x, y, x0, text_y, tab_w, 1, label, text_color, THEME.surface_container) {
+        if let Some(c) = text_centered_bold(x, y, x0, text_y, tab_w, 2, label, text_color, THEME.surface_container) {
             return Some(c);
         }
     } else {
-        if let Some(c) = text_centered(x, y, x0, text_y, tab_w, 1, label, text_color, THEME.surface_container) {
+        if let Some(c) = text_centered(x, y, x0, text_y, tab_w, 2, label, text_color, THEME.surface_container) {
             return Some(c);
         }
     }
@@ -2506,10 +2577,10 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
                 if let Some(c) = draw_pill(x, y, FULLSCREEN_BTN, THEME.surface_container_high, Some(THEME.border)) {
                     if c != THEME.surface_container_high { return c; }
                     let lbl = b"Exit Full";
-                    let lw = font::measure(lbl, 1);
+                    let lw = outline_text::drawn_advance(lbl, 2, None).unwrap_or_else(|| font::measure(lbl, 2));
                     let lx = FULLSCREEN_BTN.x + (FULLSCREEN_BTN.w.saturating_sub(lw)) / 2;
-                    let ly = FULLSCREEN_BTN.y + (FULLSCREEN_BTN.h.saturating_sub(font::line_height(1))) / 2;
-                    if let Some(tc) = text(x, y, lx, ly, 1, lbl, THEME.on_surface, THEME.surface_container_high) { return tc; }
+                    let ly = FULLSCREEN_BTN.y + (FULLSCREEN_BTN.h.saturating_sub(font::line_height(2))) / 2;
+                    if let Some(tc) = text(x, y, lx, ly, 2, lbl, THEME.on_surface, THEME.surface_container_high) { return tc; }
                     return THEME.surface_container_high;
                 }
                 return THEME.surface_container_low;
@@ -2525,7 +2596,7 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
         let exit_rect = Rect::new(24, 24, 48, 48);
         if exit_rect.contains(x, y) {
             if let Some(c) = draw_pill(x, y, exit_rect, 0xCC111214, Some(THEME.border)) {
-                if let Some(tc) = text(x, y, exit_rect.x + 16, exit_rect.y + 14, 1, b"<", 0xFFFFFFFF, 0xCC111214) {
+                if let Some(tc) = text(x, y, exit_rect.x + 18, exit_rect.y + 12, 2, b"<", 0xFFFFFFFF, 0xCC111214) {
                     return tc;
                 }
                 return c;
@@ -2533,11 +2604,11 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
         }
         // Zoom indicator in top-right when zoomed
         if app.photo_zoom > 1000 {
-            let z_rect = Rect::new(W - 80, 24, 56, 32);
+            let z_rect = Rect::new(W - 88, 24, 64, 48);
             if z_rect.contains(x, y) {
                 let z_lbl: &[u8] = if app.photo_zoom >= 2500 { b"3.0x" } else if app.photo_zoom >= 1800 { b"2.0x" } else { b"1.5x" };
                 if let Some(c) = draw_pill(x, y, z_rect, 0xCC111214, Some(THEME.border)) {
-                    if let Some(tc) = text(x, y, z_rect.x + 12, z_rect.y + 8, 1, z_lbl, THEME.primary, 0xCC111214) {
+                    if let Some(tc) = text(x, y, z_rect.x + 14, z_rect.y + 12, 2, z_lbl, THEME.primary, 0xCC111214) {
                         return tc;
                     }
                     return c;
@@ -2577,6 +2648,15 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
                         return (a << 24) | (r << 16) | (g << 8) | b;
                     }
                 }
+                let thumb = unsafe { STORAGE_THUMBS[idx] };
+                if thumb.valid {
+                    if let Some(colour) = thumb.sample(
+                        x * THUMB_W / W,
+                        y * THUMB_H / H,
+                    ) {
+                        return colour;
+                    }
+                }
                 return THEME.surface_container;
             }
         }
@@ -2597,10 +2677,10 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
             let aspect_color = if player.is_fill { THEME.primary } else { THEME.on_surface };
             if let Some(c) = draw_pill(x, y, ASPECT_BTN, THEME.surface_container_high, Some(THEME.border)) {
                 if c != THEME.surface_container_high { return c; }
-                let lw = font::measure(aspect_lbl, 1);
+                let lw = outline_text::drawn_advance(aspect_lbl, 2, None).unwrap_or_else(|| font::measure(aspect_lbl, 2));
                 let lx = ASPECT_BTN.x + (ASPECT_BTN.w.saturating_sub(lw)) / 2;
-                let ly = ASPECT_BTN.y + (ASPECT_BTN.h.saturating_sub(font::line_height(1))) / 2;
-                if let Some(tc) = text(x, y, lx, ly, 1, aspect_lbl, aspect_color, THEME.surface_container_high) { return tc; }
+                let ly = ASPECT_BTN.y + (ASPECT_BTN.h.saturating_sub(font::line_height(2))) / 2;
+                if let Some(tc) = text(x, y, lx, ly, 2, aspect_lbl, aspect_color, THEME.surface_container_high) { return tc; }
                 return THEME.surface_container_high;
             }
         }
@@ -2610,10 +2690,10 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
             if let Some(c) = draw_pill(x, y, PHOTO_FULLSCREEN_BTN, THEME.surface_container_high, Some(THEME.border)) {
                 if c != THEME.surface_container_high { return c; }
                 let lbl = b"Full";
-                let lw = font::measure(lbl, 1);
+                let lw = outline_text::drawn_advance(lbl, 2, None).unwrap_or_else(|| font::measure(lbl, 2));
                 let lx = PHOTO_FULLSCREEN_BTN.x + (PHOTO_FULLSCREEN_BTN.w.saturating_sub(lw)) / 2;
-                let ly = PHOTO_FULLSCREEN_BTN.y + (PHOTO_FULLSCREEN_BTN.h.saturating_sub(font::line_height(1))) / 2;
-                if let Some(tc) = text(x, y, lx, ly, 1, lbl, THEME.on_surface, THEME.surface_container_high) { return tc; }
+                let ly = PHOTO_FULLSCREEN_BTN.y + (PHOTO_FULLSCREEN_BTN.h.saturating_sub(font::line_height(2))) / 2;
+                if let Some(tc) = text(x, y, lx, ly, 2, lbl, THEME.on_surface, THEME.surface_container_high) { return tc; }
                 return THEME.surface_container_high;
             }
         }
@@ -2621,17 +2701,17 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
         let text_x = std::design::back_button::X + std::design::back_button::SIZE + spacing::GRID_16;
         let text_w = W.saturating_sub(text_x + 100);
         let title_bytes = app.detail_title();
-        if y >= 28 && y < 28 + font::line_height(2) {
+        if y >= 26 && y < 26 + font::line_height(2) {
             let mut buf = [0u8; 48];
             let n = font::ellipsize(title_bytes, 2, text_w, &mut buf);
-            if let Some(c) = text(x, y, text_x, 28, 2, &buf[..n], THEME.on_surface, THEME.surface_container) {
+            if let Some(c) = text(x, y, text_x, 26, 2, &buf[..n], THEME.on_surface, THEME.surface_container) {
                 return c;
             }
         }
-        if y >= 80 && y < 80 + font::line_height(1) {
+        if y >= 64 && y < 64 + font::line_height(2) {
             let mut buf = [0u8; 64];
-            let n = font::ellipsize(&app.detail_meta[..app.detail_meta_len], 1, text_w, &mut buf);
-            if let Some(c) = text(x, y, text_x, 80, 1, &buf[..n], THEME.on_surface_variant, THEME.surface_container) {
+            let n = font::ellipsize(&app.detail_meta[..app.detail_meta_len], 2, text_w, &mut buf);
+            if let Some(c) = text(x, y, text_x, 64, 2, &buf[..n], THEME.on_surface_variant, THEME.surface_container) {
                 return c;
             }
         }
@@ -2657,14 +2737,14 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
 
                 // Line 1: File Name
                 let name_lbl = b"File: ";
-                let nw = font::measure(name_lbl, 1);
-                if let Some(c) = text(x, y, sheet.x + 20, sheet.y + 72, 1, name_lbl, THEME.on_surface_variant, THEME.surface_container) {
+                let nw = font::measure(name_lbl, 2);
+                if let Some(c) = text(x, y, sheet.x + 20, sheet.y + 70, 2, name_lbl, THEME.on_surface_variant, THEME.surface_container) {
                     return c;
                 }
                 let title_bytes = app.detail_title();
                 let mut nb = [0u8; 48];
-                let nlen = font::ellipsize(title_bytes, 1, sheet.w.saturating_sub(40 + nw), &mut nb);
-                if let Some(c) = text(x, y, sheet.x + 20 + nw, sheet.y + 72, 1, &nb[..nlen], THEME.on_surface, THEME.surface_container) {
+                let nlen = font::ellipsize(title_bytes, 2, sheet.w.saturating_sub(40 + nw), &mut nb);
+                if let Some(c) = text(x, y, sheet.x + 20 + nw, sheet.y + 70, 2, &nb[..nlen], THEME.on_surface, THEME.surface_container) {
                     return c;
                 }
 
@@ -2674,8 +2754,8 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
                 // claim, and the sheet's job is to say what is known about
                 // the document and where each fact came from.
                 let res_lbl = b"Resolution: ";
-                let rw = font::measure(res_lbl, 1);
-                if let Some(c) = text(x, y, sheet.x + 20, sheet.y + 104, 1, res_lbl, THEME.on_surface_variant, THEME.surface_container) {
+                let rw = font::measure(res_lbl, 2);
+                if let Some(c) = text(x, y, sheet.x + 20, sheet.y + 104, 2, res_lbl, THEME.on_surface_variant, THEME.surface_container) {
                     return c;
                 }
                 let mut res_buf = [0u8; 48];
@@ -2693,14 +2773,14 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
                 // header is read, and this build reads it when it can.
                     append(&mut res_buf, 0, b"not measured")
                 };
-                if let Some(c) = text(x, y, sheet.x + 20 + rw, sheet.y + 104, 1, &res_buf[..rn], THEME.on_surface, THEME.surface_container) {
+                if let Some(c) = text(x, y, sheet.x + 20 + rw, sheet.y + 104, 2, &res_buf[..rn], THEME.on_surface, THEME.surface_container) {
                     return c;
                 }
 
                 // Line 3: File Size
                 let size_lbl = b"Size: ";
-                let sw = font::measure(size_lbl, 1);
-                if let Some(c) = text(x, y, sheet.x + 20, sheet.y + 136, 1, size_lbl, THEME.on_surface_variant, THEME.surface_container) {
+                let sw = font::measure(size_lbl, 2);
+                if let Some(c) = text(x, y, sheet.x + 20, sheet.y + 138, 2, size_lbl, THEME.on_surface_variant, THEME.surface_container) {
                     return c;
                 }
                 let mut sz_buf = [0u8; 48];
@@ -2715,7 +2795,7 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
                 } else {
                     append(&mut sz_buf, 0, b"built-in artwork")
                 };
-                if let Some(c) = text(x, y, sheet.x + 20 + sw, sheet.y + 136, 1, &sz_buf[..sn], THEME.on_surface, THEME.surface_container) {
+                if let Some(c) = text(x, y, sheet.x + 20 + sw, sheet.y + 138, 2, &sz_buf[..sn], THEME.on_surface, THEME.surface_container) {
                     return c;
                 }
 
@@ -2726,8 +2806,8 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
                 // knows, and a sheet that leaves it out throws away a fact
                 // the app already has.
                 let mod_lbl = b"Modified: ";
-                let mw = font::measure(mod_lbl, 1);
-                if let Some(c) = text(x, y, sheet.x + 20, sheet.y + 168, 1, mod_lbl, THEME.on_surface_variant, THEME.surface_container) {
+                let mw = font::measure(mod_lbl, 2);
+                if let Some(c) = text(x, y, sheet.x + 20, sheet.y + 172, 2, mod_lbl, THEME.on_surface_variant, THEME.surface_container) {
                     return c;
                 }
                 let mut mod_buf = [0u8; 48];
@@ -2742,14 +2822,14 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
                 } else {
                     append(&mut mod_buf, 0, b"built-in artwork")
                 };
-                if let Some(c) = text(x, y, sheet.x + 20 + mw, sheet.y + 168, 1, &mod_buf[..modn], THEME.on_surface, THEME.surface_container) {
+                if let Some(c) = text(x, y, sheet.x + 20 + mw, sheet.y + 172, 2, &mod_buf[..modn], THEME.on_surface, THEME.surface_container) {
                     return c;
                 }
 
                 // Line 5: Path
                 let path_lbl = b"Location: ";
-                let pw = font::measure(path_lbl, 1);
-                if let Some(c) = text(x, y, sheet.x + 20, sheet.y + 200, 1, path_lbl, THEME.on_surface_variant, THEME.surface_container) {
+                let pw = font::measure(path_lbl, 2);
+                if let Some(c) = text(x, y, sheet.x + 20, sheet.y + 206, 2, path_lbl, THEME.on_surface_variant, THEME.surface_container) {
                     return c;
                 }
                 let path_bytes = if let Media::StorageItem(idx) = media {
@@ -2767,15 +2847,15 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
                     b"built-in wallpaper"
                 };
                 let mut pb = [0u8; 48];
-                let pn = font::ellipsize(path_bytes, 1, sheet.w.saturating_sub(40 + pw), &mut pb);
-                if let Some(c) = text(x, y, sheet.x + 20 + pw, sheet.y + 200, 1, &pb[..pn], THEME.on_surface, THEME.surface_container) {
+                let pn = font::ellipsize(path_bytes, 2, sheet.w.saturating_sub(40 + pw), &mut pb);
+                if let Some(c) = text(x, y, sheet.x + 20 + pw, sheet.y + 206, 2, &pb[..pn], THEME.on_surface, THEME.surface_container) {
                     return c;
                 }
 
                 // Line 6: Format
                 let fmt_lbl = b"Format: ";
-                let fw = font::measure(fmt_lbl, 1);
-                if let Some(c) = text(x, y, sheet.x + 20, sheet.y + 232, 1, fmt_lbl, THEME.on_surface_variant, THEME.surface_container) {
+                let fw = font::measure(fmt_lbl, 2);
+                if let Some(c) = text(x, y, sheet.x + 20, sheet.y + 240, 2, fmt_lbl, THEME.on_surface_variant, THEME.surface_container) {
                     return c;
                 }
                 let fmt_str: &[u8] = if let Media::StorageItem(idx) = media {
@@ -2791,38 +2871,32 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
                 } else {
                     b"Vector Silhouette Wall Reference"
                 };
-                if let Some(c) = text(x, y, sheet.x + 20 + fw, sheet.y + 232, 1, fmt_str, THEME.on_surface, THEME.surface_container) {
+                if let Some(c) = text(x, y, sheet.x + 20 + fw, sheet.y + 240, 2, fmt_str, THEME.on_surface, THEME.surface_container) {
                     return c;
                 }
 
                 // The "open with" button, which hands the document to the app
                 // that declared a handler for its media type.
-                //
-                // WHY it is here: the sheet is where the app says what it
-                // knows about the document, and "which app opens this" is
-                // another fact about the same document. A button that
-                // appeared without the facts beside it would be an action
-                // the user cannot judge.
                 let open_with_btn = info_open_with_btn();
                 if let Some(oc) = draw_pill(x, y, open_with_btn, THEME.surface_container_high, Some(THEME.border)) {
                     if oc != THEME.surface_container_high { return oc; }
                     let o_lbl = b"Open with";
-                    let ow = font::measure(o_lbl, 1);
+                    let ow = outline_text::drawn_advance(o_lbl, 2, None).unwrap_or_else(|| font::measure(o_lbl, 2));
                     let ox_pos = open_with_btn.x + (open_with_btn.w.saturating_sub(ow)) / 2;
-                    let oy_pos = open_with_btn.y + (open_with_btn.h.saturating_sub(font::line_height(1))) / 2;
-                    if let Some(tc) = text(x, y, ox_pos, oy_pos, 1, o_lbl, THEME.on_surface, THEME.surface_container_high) { return tc; }
+                    let oy_pos = open_with_btn.y + (open_with_btn.h.saturating_sub(font::line_height(2))) / 2;
+                    if let Some(tc) = text(x, y, ox_pos, oy_pos, 2, o_lbl, THEME.on_surface, THEME.surface_container_high) { return tc; }
                     return THEME.surface_container_high;
                 }
 
                 // Dismiss Button
-                let dismiss_btn = Rect::new(sheet.x + (sheet.w - 140) / 2, sheet.y + 270, 140, 44);
+                let dismiss_btn = info_dismiss_btn();
                 if let Some(dc) = draw_pill(x, y, dismiss_btn, THEME.surface_container_high, Some(THEME.border)) {
                     if dc != THEME.surface_container_high { return dc; }
                     let d_lbl = b"Dismiss";
-                    let dw = font::measure(d_lbl, 1);
+                    let dw = outline_text::drawn_advance(d_lbl, 2, None).unwrap_or_else(|| font::measure(d_lbl, 2));
                     let dx_pos = dismiss_btn.x + (dismiss_btn.w.saturating_sub(dw)) / 2;
-                    let dy_pos = dismiss_btn.y + (dismiss_btn.h.saturating_sub(font::line_height(1))) / 2;
-                    if let Some(tc) = text(x, y, dx_pos, dy_pos, 1, d_lbl, THEME.on_surface, THEME.surface_container_high) { return tc; }
+                    let dy_pos = dismiss_btn.y + (dismiss_btn.h.saturating_sub(font::line_height(2))) / 2;
+                    if let Some(tc) = text(x, y, dx_pos, dy_pos, 2, d_lbl, THEME.on_surface, THEME.surface_container_high) { return tc; }
                     return THEME.surface_container_high;
                 }
 
@@ -2921,11 +2995,15 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
                         return (a << 24) | (r << 16) | (g << 8) | b;
                     }
                 }
-                // WHY a flat fill and not a two-tone ramp: the ramp was a
-                // blend between two fixed colours, and a gradient in the
-                // shape of a picture reads as a picture of something. The
-                // grid's own tiles use a neutral placeholder for an image
-                // they cannot decode, and the detail view matches it.
+                let thumb = unsafe { STORAGE_THUMBS[idx] };
+                if thumb.valid {
+                    if let Some(colour) = thumb.sample(
+                        (x - view.x) * THUMB_W / view.w.max(1),
+                        (y - view.y) * THUMB_H / view.h.max(1),
+                    ) {
+                        return colour;
+                    }
+                }
                 return THEME.surface_container;
             }
         }
@@ -2962,11 +3040,11 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
             return THEME.border;
         }
 
-        // Timestamp readout
-        if y >= DETAIL_VIEW_Y1 + 114 && y < DETAIL_VIEW_Y1 + 114 + font::line_height(1) {
+        // Timestamp readout in Scale 2 Body
+        if y >= DETAIL_VIEW_Y1 + 114 && y < DETAIL_VIEW_Y1 + 114 + font::line_height(2) {
             let mut time_buf = [0u8; 32];
             let tn = format_video_time(player.position_ms, player.duration_ms, &mut time_buf);
-            if let Some(c) = text(x, y, MARGIN, DETAIL_VIEW_Y1 + 114, 1, &time_buf[..tn], THEME.on_surface, THEME.surface) {
+            if let Some(c) = text(x, y, MARGIN, DETAIL_VIEW_Y1 + 114, 2, &time_buf[..tn], THEME.on_surface, THEME.surface) {
                 return c;
             }
         }
@@ -2975,10 +3053,10 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
         if let Some(c) = draw_pill(x, y, FULLSCREEN_BTN, THEME.surface_container_high, Some(THEME.border)) {
             if c != THEME.surface_container_high { return c; }
             let lbl = b"Fullscreen";
-            let lw = font::measure(lbl, 1);
+            let lw = outline_text::drawn_advance(lbl, 2, None).unwrap_or_else(|| font::measure(lbl, 2));
             let lx = FULLSCREEN_BTN.x + (FULLSCREEN_BTN.w.saturating_sub(lw)) / 2;
-            let ly = FULLSCREEN_BTN.y + (FULLSCREEN_BTN.h.saturating_sub(font::line_height(1))) / 2;
-            if let Some(tc) = text(x, y, lx, ly, 1, lbl, THEME.on_surface, THEME.surface_container_high) { return tc; }
+            let ly = FULLSCREEN_BTN.y + (FULLSCREEN_BTN.h.saturating_sub(font::line_height(2))) / 2;
+            if let Some(tc) = text(x, y, lx, ly, 2, lbl, THEME.on_surface, THEME.surface_container_high) { return tc; }
             return THEME.surface_container_high;
         }
     }
@@ -2994,11 +3072,11 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
         if let Some(c) = draw_pill(x, y, PHOTO_FAV_BTN, fav_bg, Some(THEME.border)) {
             if c != fav_bg { return c; }
             let fav_lbl = b"Fav";
-            let lw = font::measure(fav_lbl, 1);
+            let lw = outline_text::drawn_advance(fav_lbl, 2, None).unwrap_or_else(|| font::measure(fav_lbl, 2));
             let lx = PHOTO_FAV_BTN.x + (PHOTO_FAV_BTN.w.saturating_sub(lw)) / 2;
-            let ly = PHOTO_FAV_BTN.y + (PHOTO_FAV_BTN.h.saturating_sub(font::line_height(1))) / 2;
+            let ly = PHOTO_FAV_BTN.y + (PHOTO_FAV_BTN.h.saturating_sub(font::line_height(2))) / 2;
             let tc_color = if is_fav { 0xFFFFFFFF } else { THEME.on_surface };
-            if let Some(tc) = text(x, y, lx, ly, 1, fav_lbl, tc_color, fav_bg) { return tc; }
+            if let Some(tc) = text(x, y, lx, ly, 2, fav_lbl, tc_color, fav_bg) { return tc; }
             return fav_bg;
         }
 
@@ -3006,21 +3084,21 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
         if let Some(c) = draw_pill(x, y, DETAIL_INFO, info_bg, Some(THEME.border)) {
             if c != info_bg { return c; }
             let info_lbl = b"Info";
-            let lw = font::measure(info_lbl, 1);
+            let lw = outline_text::drawn_advance(info_lbl, 2, None).unwrap_or_else(|| font::measure(info_lbl, 2));
             let lx = DETAIL_INFO.x + (DETAIL_INFO.w.saturating_sub(lw)) / 2;
-            let ly = DETAIL_INFO.y + (DETAIL_INFO.h.saturating_sub(font::line_height(1))) / 2;
+            let ly = DETAIL_INFO.y + (DETAIL_INFO.h.saturating_sub(font::line_height(2))) / 2;
             let tc_color = if app.show_info_overlay { 0xFFFFFFFF } else { THEME.on_surface };
-            if let Some(tc) = text(x, y, lx, ly, 1, info_lbl, tc_color, info_bg) { return tc; }
+            if let Some(tc) = text(x, y, lx, ly, 2, info_lbl, tc_color, info_bg) { return tc; }
             return info_bg;
         }
 
         if let Some(c) = draw_pill(x, y, PHOTO_DEL_BTN, THEME.surface_container_high, Some(THEME.error)) {
             if c != THEME.surface_container_high { return c; }
             let del_lbl = b"Del";
-            let lw = font::measure(del_lbl, 1);
+            let lw = outline_text::drawn_advance(del_lbl, 2, None).unwrap_or_else(|| font::measure(del_lbl, 2));
             let lx = PHOTO_DEL_BTN.x + (PHOTO_DEL_BTN.w.saturating_sub(lw)) / 2;
-            let ly = PHOTO_DEL_BTN.y + (PHOTO_DEL_BTN.h.saturating_sub(font::line_height(1))) / 2;
-            if let Some(tc) = text(x, y, lx, ly, 1, del_lbl, THEME.error, THEME.surface_container_high) { return tc; }
+            let ly = PHOTO_DEL_BTN.y + (PHOTO_DEL_BTN.h.saturating_sub(font::line_height(2))) / 2;
+            if let Some(tc) = text(x, y, lx, ly, 2, del_lbl, THEME.error, THEME.surface_container_high) { return tc; }
             return THEME.surface_container_high;
         }
 
@@ -3048,10 +3126,10 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
                 if let Some(bc) = draw_pill(x, y, WP_TARGET_HOME_BTN, THEME.surface_container_high, Some(THEME.border)) {
                     if bc != THEME.surface_container_high { return bc; }
                     let lbl = b"Home Screen";
-                    let lw = font::measure(lbl, 1);
+                    let lw = outline_text::drawn_advance(lbl, 2, None).unwrap_or_else(|| font::measure(lbl, 2));
                     let lx = WP_TARGET_HOME_BTN.x + (WP_TARGET_HOME_BTN.w.saturating_sub(lw)) / 2;
-                    let ly = WP_TARGET_HOME_BTN.y + (WP_TARGET_HOME_BTN.h.saturating_sub(font::line_height(1))) / 2;
-                    if let Some(tc) = text(x, y, lx, ly, 1, lbl, THEME.on_surface, THEME.surface_container_high) { return tc; }
+                    let ly = WP_TARGET_HOME_BTN.y + (WP_TARGET_HOME_BTN.h.saturating_sub(font::line_height(2))) / 2;
+                    if let Some(tc) = text(x, y, lx, ly, 2, lbl, THEME.on_surface, THEME.surface_container_high) { return tc; }
                     return THEME.surface_container_high;
                 }
 
@@ -3059,10 +3137,10 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
                 if let Some(bc) = draw_pill(x, y, WP_TARGET_LOCK_BTN, THEME.surface_container_high, Some(THEME.border)) {
                     if bc != THEME.surface_container_high { return bc; }
                     let lbl = b"Lock Screen";
-                    let lw = font::measure(lbl, 1);
+                    let lw = outline_text::drawn_advance(lbl, 2, None).unwrap_or_else(|| font::measure(lbl, 2));
                     let lx = WP_TARGET_LOCK_BTN.x + (WP_TARGET_LOCK_BTN.w.saturating_sub(lw)) / 2;
-                    let ly = WP_TARGET_LOCK_BTN.y + (WP_TARGET_LOCK_BTN.h.saturating_sub(font::line_height(1))) / 2;
-                    if let Some(tc) = text(x, y, lx, ly, 1, lbl, THEME.on_surface, THEME.surface_container_high) { return tc; }
+                    let ly = WP_TARGET_LOCK_BTN.y + (WP_TARGET_LOCK_BTN.h.saturating_sub(font::line_height(2))) / 2;
+                    if let Some(tc) = text(x, y, lx, ly, 2, lbl, THEME.on_surface, THEME.surface_container_high) { return tc; }
                     return THEME.surface_container_high;
                 }
 
@@ -3070,10 +3148,10 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
                 if let Some(bc) = draw_pill(x, y, WP_TARGET_BOTH_BTN, THEME.primary, None) {
                     if bc != THEME.primary { return bc; }
                     let lbl = b"Both Screens";
-                    let lw = font::measure(lbl, 1);
+                    let lw = outline_text::drawn_advance(lbl, 2, None).unwrap_or_else(|| font::measure(lbl, 2));
                     let lx = WP_TARGET_BOTH_BTN.x + (WP_TARGET_BOTH_BTN.w.saturating_sub(lw)) / 2;
-                    let ly = WP_TARGET_BOTH_BTN.y + (WP_TARGET_BOTH_BTN.h.saturating_sub(font::line_height(1))) / 2;
-                    if let Some(tc) = text(x, y, lx, ly, 1, lbl, THEME.on_primary, THEME.primary) { return tc; }
+                    let ly = WP_TARGET_BOTH_BTN.y + (WP_TARGET_BOTH_BTN.h.saturating_sub(font::line_height(2))) / 2;
+                    if let Some(tc) = text(x, y, lx, ly, 2, lbl, THEME.on_primary, THEME.primary) { return tc; }
                     return THEME.primary;
                 }
 
@@ -3081,10 +3159,10 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
                 if let Some(bc) = draw_pill(x, y, WP_TARGET_CANCEL_BTN, THEME.surface_container_high, Some(THEME.border)) {
                     if bc != THEME.surface_container_high { return bc; }
                     let lbl = b"Cancel";
-                    let lw = font::measure(lbl, 1);
+                    let lw = outline_text::drawn_advance(lbl, 2, None).unwrap_or_else(|| font::measure(lbl, 2));
                     let lx = WP_TARGET_CANCEL_BTN.x + (WP_TARGET_CANCEL_BTN.w.saturating_sub(lw)) / 2;
-                    let ly = WP_TARGET_CANCEL_BTN.y + (WP_TARGET_CANCEL_BTN.h.saturating_sub(font::line_height(1))) / 2;
-                    if let Some(tc) = text(x, y, lx, ly, 1, lbl, THEME.on_surface_variant, THEME.surface_container_high) { return tc; }
+                    let ly = WP_TARGET_CANCEL_BTN.y + (WP_TARGET_CANCEL_BTN.h.saturating_sub(font::line_height(2))) / 2;
+                    if let Some(tc) = text(x, y, lx, ly, 2, lbl, THEME.on_surface_variant, THEME.surface_container_high) { return tc; }
                     return THEME.surface_container_high;
                 }
 
@@ -3116,31 +3194,78 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
     THEME.surface
 }
 
+fn toast_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
+    if app.toast_ticks == 0 || app.toast_len == 0 {
+        return None;
+    }
+    if !TOAST_RECT.contains(x, y) {
+        return None;
+    }
+    let bg = if app.toast_is_error { 0xFF3E1A1A } else { THEME.surface_container_high };
+    let border = if app.toast_is_error { 0xFFE05050 } else { THEME.border };
+    let fg = if app.toast_is_error { 0xFFFFFFFF } else { THEME.on_surface };
+
+    if let Some(c) = draw_pill(x, y, TOAST_RECT, bg, Some(border)) {
+        if c != bg {
+            return Some(c);
+        }
+        let msg = &app.toast_msg[..app.toast_len];
+        let lw = outline_text::drawn_advance(msg, 2, None).unwrap_or_else(|| font::measure(msg, 2));
+        let lx = TOAST_RECT.x + (TOAST_RECT.w.saturating_sub(lw)) / 2;
+        let ly = TOAST_RECT.y + (TOAST_RECT.h.saturating_sub(font::line_height(2))) / 2;
+        if let Some(tc) = text(x, y, lx, ly, 2, msg, fg, bg) {
+            return Some(tc);
+        }
+        return Some(bg);
+    }
+    None
+}
+
 // -----------------------------------------------------------------------------
 // Main screen
 // -----------------------------------------------------------------------------
 #[inline(never)]
 fn gallery_pixel(x: usize, y: usize, app: &GalleryApp) -> u32 {
+    if let Some(c) = toast_pixel(x, y, app) {
+        return c;
+    }
+
     if let Some(media) = app.open {
         return detail_pixel(x, y, app, media);
     }
 
     // 1. Header: screen title + the measured subtitle + capture button
     if y < HEADER_H {
+        if app.launched_from_caller {
+            if let Some(bc) = draw_pill(x, y, HEADER_BACK, THEME.surface_container_high, Some(THEME.border)) {
+                if bc != THEME.surface_container_high {
+                    return bc;
+                }
+                let lbl = b"<";
+                let lw = outline_text::drawn_advance(lbl, 2, None).unwrap_or_else(|| font::measure(lbl, 2));
+                let lx = HEADER_BACK.x + (HEADER_BACK.w.saturating_sub(lw)) / 2;
+                let ly = HEADER_BACK.y + (HEADER_BACK.h.saturating_sub(font::line_height(2))) / 2;
+                if let Some(tc) = text(x, y, lx, ly, 2, lbl, THEME.on_surface, THEME.surface_container_high) {
+                    return tc;
+                }
+                return THEME.surface_container_high;
+            }
+        }
         if let Some(c) = draw_pill(x, y, CAPTURE_BTN, THEME.surface_container_high, Some(THEME.border)) {
             if c != THEME.surface_container_high {
                 return c;
             }
             let label = b"+ Shot";
-            let lw = font::measure(label, 1);
+            let lw = outline_text::drawn_advance(label, 2, None).unwrap_or_else(|| font::measure(label, 2));
             let lx = CAPTURE_BTN.x + (CAPTURE_BTN.w.saturating_sub(lw)) / 2;
-            let ly = CAPTURE_BTN.y + (CAPTURE_BTN.h.saturating_sub(font::line_height(1))) / 2;
-            if let Some(tc) = text(x, y, lx, ly, 1, label, THEME.on_surface, THEME.surface_container_high) {
+            let ly = CAPTURE_BTN.y + (CAPTURE_BTN.h.saturating_sub(font::line_height(2))) / 2;
+            if let Some(tc) = text(x, y, lx, ly, 2, label, THEME.on_surface, THEME.surface_container_high) {
                 return tc;
             }
             return THEME.surface_container_high;
         }
-        if let Some(c) = text_bold(x, y, MARGIN, TITLE_Y, 2, b"Photos", THEME.on_surface, THEME.surface) {
+        let title_x = if app.launched_from_caller { MARGIN + 56 } else { MARGIN };
+        if let Some(c) = text_bold(x, y, title_x, TITLE_Y, 2, b"Photos", THEME.on_surface, THEME.surface) {
             return c;
         }
         // WHY one subtitle line and not the old pair: the catalogue count and
@@ -3148,12 +3273,13 @@ fn gallery_pixel(x: usize, y: usize, app: &GalleryApp) -> u32 {
         // under the title they read as diagnostics rather than as a gallery's
         // description of what it holds. `build_subtitle` states both in one
         // sentence, with the device's own photo count named as such.
+        let sub_x = if app.launched_from_caller { MARGIN + 56 } else { MARGIN };
         if let Some(c) = text(
             x,
             y,
-            MARGIN,
+            sub_x,
             SUBTITLE_Y,
-            1,
+            2,
             &app.subtitle[..app.subtitle_len],
             THEME.on_surface_variant,
             THEME.surface,
@@ -3381,6 +3507,17 @@ fn create_screenshot(app: &mut GalleryApp) {
 }
 
 fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
+    // Ephemeral toast tap dismisses immediately.
+    if app.toast_ticks > 0 && TOAST_RECT.contains(x, y) {
+        app.toast_ticks = 0;
+        return Tap::Redraw(Dirty::All);
+    }
+
+    // Main header back button: return to caller (e.g. Camera).
+    if app.launched_from_caller && app.open.is_none() && HEADER_BACK.contains(x, y) {
+        return Tap::Leave("[GALLERY] Returning to caller.");
+    }
+
     // Bottom home gesture: closes the inspection view, else leaves the app.
     if HOME_HIT.contains(x, y) {
         if app.photo_fullscreen && app.video_player.is_none() {
@@ -3469,10 +3606,21 @@ fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
                     return Tap::Redraw(Dirty::All);
                 }
             }
-            if std::design::back_button::contains(x, y) || CLOSE.contains(x, y) {
+            if std::design::back_button::contains(x, y) {
+                if app.opened_from_caller {
+                    return Tap::Leave("[GALLERY] Returning to caller.");
+                }
                 app.open = None;
                 app.video_player = None;
                 app.show_wallpaper_sheet = false;
+                std::log("[GALLERY] Closed video player view.").ok();
+                return Tap::Redraw(Dirty::All);
+            }
+            if CLOSE.contains(x, y) {
+                app.open = None;
+                app.video_player = None;
+                app.show_wallpaper_sheet = false;
+                app.opened_from_caller = false;
                 std::log("[GALLERY] Closed video player view.").ok();
                 return Tap::Redraw(Dirty::All);
             }
@@ -3529,8 +3677,11 @@ fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
                     }
                     return Tap::Redraw(Dirty::All);
                 }
-                app.show_info_overlay = false;
-                return Tap::Redraw(Dirty::All);
+                if info_dismiss_btn().contains(x, y) || !info_sheet_rect().contains(x, y) {
+                    app.show_info_overlay = false;
+                    return Tap::Redraw(Dirty::All);
+                }
+                return Tap::None;
             }
 
             if DETAIL_INFO.contains(x, y) {
@@ -3599,11 +3750,23 @@ fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
                 }
             }
 
-            if std::design::back_button::contains(x, y) || CLOSE.contains(x, y) {
+            if std::design::back_button::contains(x, y) {
+                if app.opened_from_caller {
+                    return Tap::Leave("[GALLERY] Returning to caller.");
+                }
                 app.open = None;
                 app.video_player = None;
                 app.show_info_overlay = false;
                 app.show_wallpaper_sheet = false;
+                std::log("[GALLERY] Closed photo inspection view.").ok();
+                return Tap::Redraw(Dirty::All);
+            }
+            if CLOSE.contains(x, y) {
+                app.open = None;
+                app.video_player = None;
+                app.show_info_overlay = false;
+                app.show_wallpaper_sheet = false;
+                app.opened_from_caller = false;
                 std::log("[GALLERY] Closed photo inspection view.").ok();
                 return Tap::Redraw(Dirty::All);
             }
@@ -3724,6 +3887,8 @@ pub extern "C" fn _start() -> ! {
     app.subtitle_len = build_subtitle(&mut app.subtitle, walls::SCENES.len(), photos_count);
     app.catalogue_note_len = build_catalogue_note(&mut app.catalogue_note);
 
+    let _ = app.handle_pending_intent();
+
     // Measure what this device actually holds before anything is drawn, so the
     // first frame already carries the real answer rather than a guess.
     let scan = scan_media();
@@ -3766,15 +3931,26 @@ pub extern "C" fn _start() -> ! {
     loop {
         let interest = std::EVENT_TOUCH_INPUT | std::EVENT_TIMER_TICK;
         if let Ok(triggered) = std::event_poll(interest, 100) {
+            let mut tick_dirty = false;
             if (triggered & std::EVENT_TIMER_TICK) != 0 {
+                if app.toast_ticks > 0 {
+                    app.toast_ticks = app.toast_ticks.saturating_sub(1);
+                    if app.toast_ticks == 0 {
+                        tick_dirty = true;
+                    }
+                }
                 if let Some(ref mut player) = app.video_player {
                     if player.is_playing {
                         player.advance_ticks(2);
-                        if surface > 0 {
-                            render_gallery_ui(surface, &app);
-                            let _ = std::surface_flip();
-                        }
+                        tick_dirty = true;
                     }
+                }
+                if app.handle_pending_intent() {
+                    tick_dirty = true;
+                }
+                if tick_dirty && surface > 0 {
+                    render_gallery_ui(surface, &app);
+                    let _ = std::surface_flip();
                 }
             }
 

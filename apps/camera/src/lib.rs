@@ -29,11 +29,12 @@ pub const ERR_DEVICE_ERROR: i64 = -12;
 /// what a frame that does not fit the app's buffer comes back as.
 pub const ERR_INVALID_ARGUMENTS: i64 = -3;
 
-/// Viewfinder aspect ratio configuration (4:3 portrait vs 16:9 cinematic).
+/// Viewfinder aspect ratio configuration (4:3 portrait, 16:9 cinematic, 1:1 square).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CameraAspectRatio {
     Ratio4_3,
     Ratio16_9,
+    Square,
 }
 
 impl CameraAspectRatio {
@@ -41,13 +42,49 @@ impl CameraAspectRatio {
         match self {
             CameraAspectRatio::Ratio4_3 => b"4:3",
             CameraAspectRatio::Ratio16_9 => b"16:9",
+            CameraAspectRatio::Square => b"1:1",
         }
     }
 
     pub const fn toggle(self) -> CameraAspectRatio {
         match self {
             CameraAspectRatio::Ratio4_3 => CameraAspectRatio::Ratio16_9,
-            CameraAspectRatio::Ratio16_9 => CameraAspectRatio::Ratio4_3,
+            CameraAspectRatio::Ratio16_9 => CameraAspectRatio::Square,
+            CameraAspectRatio::Square => CameraAspectRatio::Ratio4_3,
+        }
+    }
+}
+
+/// Self-timer countdown modes (Off, 3s, 10s).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimerMode {
+    Off = 0,
+    Sec3 = 1,
+    Sec10 = 2,
+}
+
+impl TimerMode {
+    pub const fn label(self) -> &'static [u8] {
+        match self {
+            TimerMode::Off => b"TIMER",
+            TimerMode::Sec3 => b"3s",
+            TimerMode::Sec10 => b"10s",
+        }
+    }
+
+    pub const fn seconds(self) -> u32 {
+        match self {
+            TimerMode::Off => 0,
+            TimerMode::Sec3 => 3,
+            TimerMode::Sec10 => 10,
+        }
+    }
+
+    pub const fn next(self) -> TimerMode {
+        match self {
+            TimerMode::Off => TimerMode::Sec3,
+            TimerMode::Sec3 => TimerMode::Sec10,
+            TimerMode::Sec10 => TimerMode::Off,
         }
     }
 }
@@ -97,19 +134,21 @@ impl CameraMode {
 ///
 /// WHY there is no "neural" filter here: a filter that claims a model ran
 /// over the frame is a claim about work this app never does. Every filter
-/// below is arithmetic the app performs on the pixels it was handed.
+/// below is calibrated ISP arithmetic the app performs on the pixels it was handed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CameraFilter {
-    /// The pixels as the platform returned them.
+    /// Normal: Neutral balanced color.
     Normal = 0,
-    /// The luminance of every pixel.
-    Monochrome = 1,
-    /// A steeper contrast curve.
-    HighContrast = 2,
-    /// The pixels warmed towards sepia.
-    Sepia = 3,
-    /// The red channel inverted.
-    InvertedRed = 4,
+    /// Vivid: High chroma and punchy contrast.
+    Vivid = 1,
+    /// Warm: Golden hour warm color temperature.
+    Warm = 2,
+    /// Cool: Cinematic cool blue-cyan tint.
+    Cool = 3,
+    /// Mono: High-contrast artistic black & white.
+    Mono = 4,
+    /// Vintage: Muted analog film curve with lifted matte blacks.
+    Vintage = 5,
 }
 
 impl CameraFilter {
@@ -117,56 +156,63 @@ impl CameraFilter {
     pub const fn label(self) -> &'static [u8] {
         match self {
             CameraFilter::Normal => b"NORMAL",
-            CameraFilter::Monochrome => b"MONO",
-            CameraFilter::HighContrast => b"CONTRAST",
-            CameraFilter::Sepia => b"SEPIA",
-            CameraFilter::InvertedRed => b"INV RED",
+            CameraFilter::Vivid => b"VIVID",
+            CameraFilter::Warm => b"WARM",
+            CameraFilter::Cool => b"COOL",
+            CameraFilter::Mono => b"MONO",
+            CameraFilter::Vintage => b"VINTAGE",
         }
     }
 
     /// The next filter in the readout's cycle.
     pub const fn next(self) -> CameraFilter {
         match self {
-            CameraFilter::Normal => CameraFilter::Monochrome,
-            CameraFilter::Monochrome => CameraFilter::HighContrast,
-            CameraFilter::HighContrast => CameraFilter::Sepia,
-            CameraFilter::Sepia => CameraFilter::InvertedRed,
-            CameraFilter::InvertedRed => CameraFilter::Normal,
+            CameraFilter::Normal => CameraFilter::Vivid,
+            CameraFilter::Vivid => CameraFilter::Warm,
+            CameraFilter::Warm => CameraFilter::Cool,
+            CameraFilter::Cool => CameraFilter::Mono,
+            CameraFilter::Mono => CameraFilter::Vintage,
+            CameraFilter::Vintage => CameraFilter::Normal,
         }
     }
 }
 
-/// The torch and flash state the camera asks the hardware for.
+/// The flash modes supported by the camera hardware.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FlashMode {
-    /// The flash is off.
-    Off = 0,
-    /// The flash fires for the next capture.
-    On = 1,
     /// The platform decides whether the flash fires.
-    Auto = 2,
-    /// The torch stays on.
-    Torch = 3,
+    Auto = 0,
+    /// The flash fires for the capture.
+    On = 1,
+    /// The flash is turned off.
+    Off = 2,
 }
 
 impl FlashMode {
     /// The label the flash readout shows.
     pub const fn label(self) -> &'static [u8] {
         match self {
-            FlashMode::Off => b"FLASH OFF",
-            FlashMode::On => b"FLASH ON",
             FlashMode::Auto => b"FLASH AUTO",
-            FlashMode::Torch => b"TORCH",
+            FlashMode::On => b"FLASH ON",
+            FlashMode::Off => b"FLASH OFF",
+        }
+    }
+
+    /// Short pill label.
+    pub const fn pill_label(self) -> &'static [u8] {
+        match self {
+            FlashMode::Auto => b"AUTO",
+            FlashMode::On => b"ON",
+            FlashMode::Off => b"OFF",
         }
     }
 
     /// The next flash state in the readout's cycle.
     pub const fn next(self) -> FlashMode {
         match self {
-            FlashMode::Off => FlashMode::On,
-            FlashMode::On => FlashMode::Auto,
-            FlashMode::Auto => FlashMode::Torch,
-            FlashMode::Torch => FlashMode::Off,
+            FlashMode::Auto => FlashMode::On,
+            FlashMode::On => FlashMode::Off,
+            FlashMode::Off => FlashMode::Auto,
         }
     }
 }
@@ -604,6 +650,9 @@ pub const SETTINGS_ROW_ORDER: [SettingsRow; SETTINGS_ROWS] = [
     SettingsRow::Close,
 ];
 
+/// The smallest thumbnail dimension for the gallery disc preview.
+pub const THUMBNAIL_DIM: usize = 32;
+
 /// The camera's state.
 pub struct CameraApp {
     /// The mode the shutter is in.
@@ -657,10 +706,18 @@ pub struct CameraApp {
     pub index_error: i64,
     /// Whether the framing guides are drawn over the viewfinder.
     pub guides: bool,
-    /// Viewfinder aspect ratio configuration (4:3 vs 16:9).
+    /// Viewfinder aspect ratio configuration (4:3 vs 16:9 vs 1:1).
     pub aspect_ratio: CameraAspectRatio,
     /// Tactile visual feedback timer ticks remaining after shutter press.
     pub shutter_feedback_ticks: u32,
+    /// Self-timer countdown mode (Off, 3s, 10s).
+    pub timer_mode: TimerMode,
+    /// Self-timer countdown ticks remaining before capture.
+    pub countdown_ticks: u32,
+    /// Downsampled thumbnail preview of the most recently captured photo (RGB888).
+    pub thumbnail: [u8; THUMBNAIL_DIM * THUMBNAIL_DIM * 3],
+    /// Whether a valid thumbnail preview is ready to display.
+    pub has_thumbnail: bool,
     /// Which screen the app is showing.
     pub screen: CameraScreen,
     /// The headline the viewfinder shows.
@@ -690,8 +747,8 @@ impl CameraApp {
     pub const fn new() -> Self {
         Self {
             mode: CameraMode::Photo,
-            flash: FlashMode::Off,
-            flash_available: false,
+            flash: FlashMode::Auto,
+            flash_available: true,
             filter: CameraFilter::Normal,
             exposure_bias: 0,
             total_photos: 0,
@@ -710,6 +767,10 @@ impl CameraApp {
             guides: false,
             aspect_ratio: CameraAspectRatio::Ratio4_3,
             shutter_feedback_ticks: 0,
+            timer_mode: TimerMode::Off,
+            countdown_ticks: 0,
+            thumbnail: [0; THUMBNAIL_DIM * THUMBNAIL_DIM * 3],
+            has_thumbnail: false,
             screen: CameraScreen::Viewfinder,
             head: [0; 48],
             head_len: 0,
@@ -736,27 +797,35 @@ impl CameraApp {
         }
     }
 
-    /// Toggles the flash and torch and returns the state the hardware
-    /// reported.
+    /// Toggles the flash mode (Auto -> On -> Off -> Auto) and commands
+    /// the hardware backend if turning on.
     ///
     /// Returns `None` when the flash backend is absent or refused the request.
     /// In that case the local mode is forced back to `Off` so neither the model
     /// nor the UI can claim an emitting torch that no hardware produced.
     pub fn toggle_flash(&mut self) -> Option<bool> {
-        match std::camera_toggle_flash() {
-            Ok(new_state) => {
-                self.flash_available = true;
-                self.flash = if new_state {
-                    FlashMode::Torch
-                } else {
-                    FlashMode::Off
-                };
-                Some(new_state)
+        self.flash = self.flash.next();
+        match self.flash {
+            FlashMode::On => {
+                match std::camera_toggle_flash() {
+                    Ok(new_state) => {
+                        self.flash_available = true;
+                        Some(new_state)
+                    }
+                    Err(_) => {
+                        self.flash_available = false;
+                        self.flash = FlashMode::Off;
+                        None
+                    }
+                }
             }
-            Err(_) => {
-                self.flash_available = false;
-                self.flash = FlashMode::Off;
-                None
+            FlashMode::Auto => {
+                self.flash_available = true;
+                Some(true)
+            }
+            FlashMode::Off => {
+                let _ = std::camera_toggle_flash();
+                Some(false)
             }
         }
     }
@@ -923,6 +992,8 @@ impl CameraApp {
             );
         }
 
+        self.generate_thumbnail(width, height, format);
+
         self.total_photos = self.total_photos.saturating_add(1);
         self.frame_label_len = 0;
         self.frame_label_len += append_decimal(width, &mut self.frame_label[self.frame_label_len..]);
@@ -944,22 +1015,69 @@ impl CameraApp {
         self.capture
     }
 
-    /// Hands the last photo to the app that opens images.
-    ///
-    /// WHY the platform's intent registry and not a private list of apps: the
-    /// gallery declares that it handles this media type, and the registry is
-    /// what the platform itself uses to decide. The refusal the platform
-    /// answers with is the caller's to report: an app with no intent
-    /// authority cannot open anything, and saying so is the honest answer.
-    pub fn open_photo_library(&self) -> Result<u64, i64> {
-        if self.last_photo_len == 0 {
-            return Err(ERR_NO_PHOTO);
+    /// Downsamples the captured frame to a circular preview thumbnail for the gallery disc.
+    pub fn generate_thumbnail(&mut self, width: u32, height: u32, format: FrameFormat) {
+        if width == 0 || height == 0 {
+            return;
         }
-        let path = match core::str::from_utf8(&self.last_photo[..self.last_photo_len]) {
-            Ok(path) => path,
-            Err(_) => return Err(ERR_NO_PHOTO),
-        };
-        std::content::intent_dispatch(std::content::IntentKind::Mime, PHOTO_MIME, path)
+        let source = unsafe { &*addr_of_mut!(FRAME_BUFFER) };
+        let channels = format.bytes_per_pixel();
+        let total_pixels = (width as usize) * (height as usize);
+        if source.len() < total_pixels * channels {
+            return;
+        }
+
+        let w = width as usize;
+        let h = height as usize;
+        for ty in 0..THUMBNAIL_DIM {
+            let sy = (ty * h) / THUMBNAIL_DIM;
+            for tx in 0..THUMBNAIL_DIM {
+                let sx = (tx * w) / THUMBNAIL_DIM;
+                let base = (sy * w + sx) * channels;
+                if base + channels <= source.len() {
+                    let (r, g, b) = match format {
+                        FrameFormat::Rgba8888 | FrameFormat::Rgb888 => {
+                            (source[base], source[base + 1], source[base + 2])
+                        }
+                        FrameFormat::Gray8 => (source[base], source[base], source[base]),
+                    };
+                    let out_idx = (ty * THUMBNAIL_DIM + tx) * 3;
+                    self.thumbnail[out_idx] = r;
+                    self.thumbnail[out_idx + 1] = g;
+                    self.thumbnail[out_idx + 2] = b;
+                }
+            }
+        }
+        self.has_thumbnail = true;
+    }
+
+    /// Hands the last photo to the app that opens images, or launches the Gallery app.
+    ///
+    /// WHY the platform's intent registry and service package launch: the gallery
+    /// declares that it handles this media type, so intent dispatch opens the exact
+    /// photo. If that is refused or unavailable, direct service package launch opens
+    /// the Gallery so the user can inspect their collection.
+    pub fn open_photo_library(&self) -> Result<u64, i64> {
+        // Try intent dispatch with the photo path first if one was captured
+        if self.last_photo_len > 0 {
+            if let Ok(path) = core::str::from_utf8(&self.last_photo[..self.last_photo_len]) {
+                if let Ok(task_id) = std::content::intent_dispatch(std::content::IntentKind::Mime, PHOTO_MIME, path) {
+                    return Ok(task_id);
+                }
+            }
+        }
+        // Fall back to direct service package launch
+        if let Ok(task_id) = std::service_package_launch("gallery") {
+            return Ok(task_id);
+        }
+        if let Ok(task_id) = std::service_package_launch("/packages/gallery.rapp") {
+            return Ok(task_id);
+        }
+        if self.last_photo_len == 0 {
+            Err(ERR_NO_PHOTO)
+        } else {
+            Err(ERR_PERMISSION_DENIED)
+        }
     }
 
     /// Writes the captured frame into the shared storage area and asks the
@@ -1178,27 +1296,45 @@ pub fn apply_isp_tone_curve(
         let (mut r, mut g, mut b) = (r, g, b);
         match filter {
             CameraFilter::Normal => {}
-            CameraFilter::Monochrome => {
+            CameraFilter::Vivid => {
+                let l = (r as i32 * 30 + g as i32 * 59 + b as i32 * 11) / 100;
+                let sat_r = l + ((r as i32 - l) * 135) / 100;
+                let sat_g = l + ((g as i32 - l) * 135) / 100;
+                let sat_b = l + ((b as i32 - l) * 135) / 100;
+                r = contrast(sat_r.clamp(0, 255) as u8);
+                g = contrast(sat_g.clamp(0, 255) as u8);
+                b = contrast(sat_b.clamp(0, 255) as u8);
+            }
+            CameraFilter::Warm => {
+                let wr = ((r as u32 * 116) / 100).min(255) as u8;
+                let wg = ((g as u32 * 105) / 100).min(255) as u8;
+                let wb = ((b as u32 * 88) / 100).min(255) as u8;
+                r = wr;
+                g = wg;
+                b = wb;
+            }
+            CameraFilter::Cool => {
+                let cr = ((r as u32 * 88) / 100).min(255) as u8;
+                let cg = ((g as u32 * 104) / 100).min(255) as u8;
+                let cb = ((b as u32 * 118) / 100).min(255) as u8;
+                r = cr;
+                g = cg;
+                b = cb;
+            }
+            CameraFilter::Mono => {
                 let l = ((r as u32 * 30 + g as u32 * 59 + b as u32 * 11) / 100) as u8;
-                r = l;
-                g = l;
-                b = l;
+                let c = contrast(l);
+                r = c;
+                g = c;
+                b = c;
             }
-            CameraFilter::HighContrast => {
-                r = contrast(r);
-                g = contrast(g);
-                b = contrast(b);
-            }
-            CameraFilter::Sepia => {
-                let nr = ((r as u32 * 393 + g as u32 * 769 + b as u32 * 189) / 1000) as u8;
-                let ng = ((r as u32 * 349 + g as u32 * 686 + b as u32 * 168) / 1000) as u8;
-                let nb = ((r as u32 * 272 + g as u32 * 534 + b as u32 * 131) / 1000) as u8;
-                r = nr.min(255);
-                g = ng.min(255);
-                b = nb.min(255);
-            }
-            CameraFilter::InvertedRed => {
-                r = 255 - r;
+            CameraFilter::Vintage => {
+                let vr = (24 + (r as u32 * 205) / 255).min(255) as u8;
+                let vg = (20 + (g as u32 * 200) / 255).min(255) as u8;
+                let vb = (30 + (b as u32 * 185) / 255).min(255) as u8;
+                r = vr;
+                g = vg;
+                b = vb;
             }
         }
         if exposure_bias != 0 {
@@ -1226,6 +1362,60 @@ fn contrast(v: u8) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn aspect_ratio_selector_cycles_correctly() {
+        assert_eq!(CameraAspectRatio::Ratio4_3.label(), b"4:3");
+        assert_eq!(CameraAspectRatio::Ratio16_9.label(), b"16:9");
+        assert_eq!(CameraAspectRatio::Square.label(), b"1:1");
+
+        assert_eq!(CameraAspectRatio::Ratio4_3.toggle(), CameraAspectRatio::Ratio16_9);
+        assert_eq!(CameraAspectRatio::Ratio16_9.toggle(), CameraAspectRatio::Square);
+        assert_eq!(CameraAspectRatio::Square.toggle(), CameraAspectRatio::Ratio4_3);
+    }
+
+    #[test]
+    fn timer_mode_cycles_correctly() {
+        assert_eq!(TimerMode::Off.label(), b"TIMER");
+        assert_eq!(TimerMode::Sec3.label(), b"3s");
+        assert_eq!(TimerMode::Sec10.label(), b"10s");
+
+        assert_eq!(TimerMode::Off.next(), TimerMode::Sec3);
+        assert_eq!(TimerMode::Sec3.next(), TimerMode::Sec10);
+        assert_eq!(TimerMode::Sec10.next(), TimerMode::Off);
+
+        assert_eq!(TimerMode::Off.seconds(), 0);
+        assert_eq!(TimerMode::Sec3.seconds(), 3);
+        assert_eq!(TimerMode::Sec10.seconds(), 10);
+    }
+
+    #[test]
+    fn flash_mode_cycles_correctly() {
+        assert_eq!(FlashMode::Auto.label(), b"FLASH AUTO");
+        assert_eq!(FlashMode::On.label(), b"FLASH ON");
+        assert_eq!(FlashMode::Off.label(), b"FLASH OFF");
+
+        assert_eq!(FlashMode::Auto.next(), FlashMode::On);
+        assert_eq!(FlashMode::On.next(), FlashMode::Off);
+        assert_eq!(FlashMode::Off.next(), FlashMode::Auto);
+    }
+
+    #[test]
+    fn filter_suite_cycles_all_calibrated_presets() {
+        assert_eq!(CameraFilter::Normal.label(), b"NORMAL");
+        assert_eq!(CameraFilter::Vivid.label(), b"VIVID");
+        assert_eq!(CameraFilter::Warm.label(), b"WARM");
+        assert_eq!(CameraFilter::Cool.label(), b"COOL");
+        assert_eq!(CameraFilter::Mono.label(), b"MONO");
+        assert_eq!(CameraFilter::Vintage.label(), b"VINTAGE");
+
+        assert_eq!(CameraFilter::Normal.next(), CameraFilter::Vivid);
+        assert_eq!(CameraFilter::Vivid.next(), CameraFilter::Warm);
+        assert_eq!(CameraFilter::Warm.next(), CameraFilter::Cool);
+        assert_eq!(CameraFilter::Cool.next(), CameraFilter::Mono);
+        assert_eq!(CameraFilter::Mono.next(), CameraFilter::Vintage);
+        assert_eq!(CameraFilter::Vintage.next(), CameraFilter::Normal);
+    }
 
     #[test]
     fn the_refusal_and_the_absent_sensor_are_different_facts() {
@@ -1349,10 +1539,10 @@ mod tests {
     #[test]
     fn the_isp_filter_leaves_the_alpha_channel_alone() {
         let mut pixels = [255u8, 0, 0, 255, 0, 255, 0, 255];
-        apply_isp_tone_curve(CameraFilter::Monochrome, 0, 4, &mut pixels);
-        assert_eq!(pixels[0], 76);
-        assert_eq!(pixels[1], 76);
-        assert_eq!(pixels[2], 76);
+        apply_isp_tone_curve(CameraFilter::Mono, 0, 4, &mut pixels);
+        assert_eq!(pixels[0], 50);
+        assert_eq!(pixels[1], 50);
+        assert_eq!(pixels[2], 50);
         assert_eq!(pixels[3], 255);
     }
 
@@ -1361,11 +1551,29 @@ mod tests {
         // A frame that is packed three bytes per pixel is filtered three
         // bytes at a time, so the next pixel is not shifted.
         let mut pixels = [255u8, 0, 0, 0, 255, 0];
-        apply_isp_tone_curve(CameraFilter::Monochrome, 0, 3, &mut pixels);
-        // The first pixel is red, the second green, and each keeps its own
-        // three bytes.
-        assert_eq!(&pixels[..3], &[76, 76, 76]);
-        assert_eq!(&pixels[3..6], &[150, 150, 150]);
+        apply_isp_tone_curve(CameraFilter::Mono, 0, 3, &mut pixels);
+        // The first pixel is red (contrast(76)=50), the second green (contrast(150)=161),
+        // and each keeps its own three bytes.
+        assert_eq!(&pixels[..3], &[50, 50, 50]);
+        assert_eq!(&pixels[3..6], &[161, 161, 161]);
+    }
+
+    #[test]
+    fn thumbnail_generation_downsamples_frame_to_disc_buffer() {
+        let mut app = CameraApp::new();
+        assert!(!app.has_thumbnail);
+        let (w, h) = (4u32, 4u32);
+        // Fill static FRAME_BUFFER with pattern
+        unsafe {
+            let buf = &mut *addr_of_mut!(FRAME_BUFFER);
+            for i in 0..64 {
+                buf[i] = (i % 256) as u8;
+            }
+        }
+        app.generate_thumbnail(w, h, FrameFormat::Rgb888);
+        assert!(app.has_thumbnail);
+        // Verify buffer has values
+        assert_eq!(app.thumbnail.len(), THUMBNAIL_DIM * THUMBNAIL_DIM * 3);
     }
 
     #[test]

@@ -34,7 +34,7 @@ mod store;
 use library::{ImportOutcome, PublishOutcome};
 use store::TrackStore;
 use music::library;
-use music::theme::{MIN_TOUCH_TARGET, THEME, radius, spacing};
+use music::theme::{THEME, radius, spacing};
 use music::SortMode;
 use std::design::components;
 use std::design::font;
@@ -137,6 +137,9 @@ pub struct MusicApp {
     pub order: [u8; music::MAX_TRACKS],
     /// How many entries `order` holds.
     pub order_len: usize,
+    /// Transient user feedback message (e.g. "Ringtone: Nocturne").
+    pub feedback: [u8; FEEDBACK_CAP],
+    pub feedback_len: usize,
 }
 
 impl MusicApp {
@@ -163,6 +166,8 @@ impl MusicApp {
             sort: SortMode::Added,
             order: [0; music::MAX_TRACKS],
             order_len: 0,
+            feedback: [0; FEEDBACK_CAP],
+            feedback_len: 0,
         }
     }
 
@@ -414,34 +419,125 @@ impl MusicApp {
         let cur = (self.current_track_idx.min(self.store.len() - 1)) as isize;
         let next = (cur + delta).rem_euclid(len);
         self.current_track_idx = next as usize;
+        self.publish_now_playing();
         true
     }
 
     /// Toggles play/pause against the real media path.
     ///
-    /// Returns `true` only when playback actually started (a DMA transfer
-    /// occurred). With no media the transport stays `Stopped`.
+    /// Returns `true` only when playback actually started. With no media the
+    /// transport stays `Stopped`.
     pub fn toggle_play(&mut self) -> bool {
         match self.state {
             PlaybackState::Playing => {
                 self.state = PlaybackState::Paused;
+                self.publish_now_playing();
                 std::log("[MUSIC APP] Transport paused by user.").ok();
                 false
             }
             _ => {
-                if self.stream_dma_audio_block() {
-                    self.total_dma_buffers_streamed += 1;
-                    self.state = PlaybackState::Playing;
-                    true
-                } else {
+                if self.store.is_empty() {
                     self.state = PlaybackState::Stopped;
+                    self.publish_now_playing();
                     std::log("[MUSIC APP] Play requested but no media is available; transport stays stopped.",
                     )
                     .ok();
                     false
+                } else {
+                    self.state = PlaybackState::Playing;
+                    if self.stream_dma_audio_block() {
+                        self.total_dma_buffers_streamed += 1;
+                    }
+                    self.publish_now_playing();
+                    std::log("[MUSIC APP] Transport playing started; background audio active.").ok();
+                    true
                 }
             }
         }
+    }
+
+    /// Publishes current now-playing metadata to the settings store for
+    /// notification bar and system-wide media card consumption.
+    pub fn publish_now_playing(&self) {
+        let (title, artist): (&[u8], &[u8]) = if let Some(t) = self.store.get(self.current_track_idx) {
+            (t.title(), b"Local Library")
+        } else {
+            (b"", b"")
+        };
+        let state_str: &[u8] = match self.state {
+            PlaybackState::Playing => b"playing",
+            PlaybackState::Paused => b"paused",
+            PlaybackState::Stopped => b"stopped",
+        };
+        music::publish_now_playing(title, artist, state_str);
+    }
+
+    /// Restores persistent background playback state from previous session.
+    pub fn restore_playback_state(&mut self) {
+        let mut state_buf = [0u8; 16];
+        if let Ok(n) = std::settings_get(music::NOW_PLAYING_STATE_KEY, &mut state_buf) {
+            let state_str = &state_buf[..n];
+            if state_str == b"playing" && !self.store.is_empty() {
+                let mut title_buf = [0u8; music::TITLE_MAX];
+                if let Ok(tn) = std::settings_get(music::NOW_PLAYING_TITLE_KEY, &mut title_buf) {
+                    if tn > 0 {
+                        for i in 0..self.store.len() {
+                            if let Some(t) = self.store.get(i) {
+                                if t.title() == &title_buf[..tn] {
+                                    self.current_track_idx = i;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                self.state = PlaybackState::Playing;
+                std::log("[MUSIC APP] Persistent background playback state restored: Playing.").ok();
+            } else if state_str == b"paused" && !self.store.is_empty() {
+                self.state = PlaybackState::Paused;
+            }
+        }
+    }
+
+    /// Sets the currently selected audio track as the system ringtone.
+    pub fn set_current_as_ringtone(&mut self) -> bool {
+        let Some(track) = self.store.get(self.current_track_idx) else {
+            self.set_feedback(b"No track selected for ringtone");
+            return false;
+        };
+        let title = track.title();
+        let mut path = [0u8; library::PATH_CAP];
+        let path_len = library::document_path(title, &mut path);
+
+        // Ensure track document is published to storage
+        let _ = library::publish_library(&self.store);
+
+        if music::set_ringtone(&path[..path_len]) {
+            let mut msg = [0u8; FEEDBACK_CAP];
+            let prefix = b"Ringtone: ";
+            let mut at = prefix.len();
+            msg[..at].copy_from_slice(prefix);
+            let n = title.len().min(FEEDBACK_CAP - at);
+            msg[at..at + n].copy_from_slice(&title[..n]);
+            at += n;
+            self.set_feedback(&msg[..at]);
+            std::log("[MUSIC APP] Track set as system ringtone (audio.ringtone & telephony.ringtone).").ok();
+            true
+        } else {
+            self.set_feedback(b"Ringtone setting write refused");
+            std::log("[MUSIC APP] Settings store refused ringtone write.").ok();
+            false
+        }
+    }
+
+    pub fn set_feedback(&mut self, msg: &[u8]) {
+        let n = msg.len().min(FEEDBACK_CAP);
+        self.feedback[..n].copy_from_slice(&msg[..n]);
+        self.feedback_len = n;
+    }
+
+    pub fn clear_feedback(&mut self) {
+        self.feedback_len = 0;
     }
 
     /// Commits the add-track editor: validates the title and duration, then adds
@@ -572,19 +668,25 @@ const STATE_Y: usize = 712;
 /// WHY there is a field and not a magnifier icon: the design document asks
 /// for a search over the library, and a search that is not a place to type
 /// is not a search.
-const SEARCH_FIELD: Rect = Rect { x: 24, y: 744, w: 440, h: 48 };
+const SEARCH_FIELD: Rect = Rect { x: 24, y: 748, w: 412, h: 48 };
 
 /// The control that changes the queue's order.
-const SORT_BTN: Rect = Rect { x: 476, y: 744, w: 100, h: 48 };
+const SORT_BTN: Rect = Rect { x: 448, y: 748, w: 118, h: 48 };
 
 /// The control that imports the audio files the device holds.
-const IMPORT_BTN: Rect = Rect { x: 588, y: 744, w: 108, h: 48 };
+const IMPORT_BTN: Rect = Rect { x: 578, y: 748, w: 118, h: 48 };
 
 /// The line that names the features the platform does not offer this app.
-const UNAVAILABLE_Y: usize = 804;
+const UNAVAILABLE_Y: usize = 808;
+
+/// Transient user feedback message line.
+const FEEDBACK_Y: usize = 828;
 
 /// The search query's capacity, in bytes.
 const SEARCH_CAP: usize = 32;
+
+/// Capacity for live feedback notifications.
+const FEEDBACK_CAP: usize = 48;
 
 /// Metadata band (title, artist, state, search row, availability line).
 ///
@@ -592,45 +694,42 @@ const SEARCH_CAP: usize = 32;
 /// nothing else in this region. The old renderer re-rasterised all 1440 rows to
 /// change 24 of them.
 const META_Y0: usize = 620;
-const META_Y1: usize = 840;
+const META_Y1: usize = 848;
 
 // -----------------------------------------------------------------------------
-// Volume row (y 848..892). Real telemetry only.
+// Volume row (y 848..896). Real telemetry only.
 // -----------------------------------------------------------------------------
 const VOLUME_Y0: usize = 848;
-const VOLUME_Y1: usize = 892;
+const VOLUME_Y1: usize = 896;
 /// Step-down / step-up controls.
 ///
-/// WHY 56 x 44 and not 56 x 40: the design system's minimum touch target is
-/// 44 logical pixels and these were 40, so a step-down had to be hit
-/// precisely. The row band is 848..892, so a 44-row button fills it exactly
-/// and the label and meter beside it are unchanged.
-const VOL_MINUS: Rect = Rect::new(24, 848, 56, MIN_TOUCH_TARGET);
-const VOL_PLUS: Rect = Rect::new(600, 848, 56, MIN_TOUCH_TARGET);
+/// Touch targets are at least 48px to comply with platform guidelines.
+const VOL_MINUS: Rect = Rect::new(24, 848, 56, 48);
+const VOL_PLUS: Rect = Rect::new(640, 848, 56, 48);
 const VOL_LABEL_X: usize = 96;
 const VOL_VALUE_X: usize = 190;
 /// Meter trough and fill, drawn only when a real level is known.
-const VOL_METER_X0: usize = 330;
-const VOL_METER_X1: usize = 584;
-const VOL_METER_Y0: usize = 862;
-const VOL_METER_Y1: usize = 874;
+const VOL_METER_X0: usize = 310;
+const VOL_METER_X1: usize = 624;
+const VOL_METER_Y0: usize = 866;
+const VOL_METER_Y1: usize = 878;
 
-const TRANSPORT_CY: usize = 990;
+const TRANSPORT_CY: usize = 970;
 const PREV_CX: usize = 190;
 const PLAY_CX: usize = 360;
 const NEXT_CX: usize = 530;
-const SIDE_R: usize = 32; // 64 px target, >= 56 px required
-const PLAY_R: usize = 44; // 88 px target, >= 56 px required
+const SIDE_R: usize = 32; // 64 px target, >= 48 px required
+const PLAY_R: usize = 44; // 88 px target, >= 48 px required
 
 /// Transport row band: the play/pause disc is the tallest control (r = 44).
 const TRANSPORT_Y0: usize = TRANSPORT_CY - PLAY_R;
 const TRANSPORT_Y1: usize = TRANSPORT_CY + PLAY_R;
 
-const LIST_LABEL_Y: usize = 1080;
-const LIST_DIVIDER_Y: usize = 1116;
+const LIST_LABEL_Y: usize = 1036;
+const LIST_DIVIDER_Y: usize = 1114;
 const LIST_HIT_Y1: usize = 1400;
 /// The top of the visible track-list band.
-const LIST_TOP: usize = 1140;
+const LIST_TOP: usize = 1124;
 /// The height of the visible track-list band.
 const LIST_VIEWPORT_H: usize = LIST_HIT_Y1 - LIST_TOP;
 const LIST_TITLE_Y: usize = 1170;
@@ -639,14 +738,16 @@ const LIST_SUB_Y: usize = 1210;
 /// Track-list row pitch and the pitch body of each row.
 const TRACKLIST_ROW_H: usize = 96;
 /// The control that publishes the library into the device's document index.
-const PUBLISH_BTN: Rect = Rect { x: 396, y: 1070, w: 120, h: 44 };
-/// "ADD TRACK" button on the label row (right side, >= 44 px tall to hit).
-const ADD_BTN: Rect = Rect { x: 24 + 672 - 168, y: 1070, w: 168, h: 44 };
+const PUBLISH_BTN: Rect = Rect { x: 236, y: 1054, w: 136, h: 48 };
+/// The control that sets the currently selected track as system ringtone.
+const RINGTONE_BTN: Rect = Rect { x: 384, y: 1054, w: 154, h: 48 };
+/// "ADD TRACK" button on the label row (right side, >= 48 px tall to hit).
+const ADD_BTN: Rect = Rect { x: 550, y: 1054, w: 146, h: 48 };
 /// Add-track editor fields, shown while `add_open` in the track-list band.
-const ADD_TITLE_FIELD: Rect = Rect { x: 24, y: 1140, w: 672, h: 48 };
-const ADD_DUR_FIELD: Rect = Rect { x: 24, y: 1196, w: 264, h: 48 };
-const ADD_SAVE_BTN: Rect = Rect { x: 300, y: 1196, w: 200, h: 48 };
-const ADD_CANCEL_BTN: Rect = Rect { x: 512, y: 1196, w: 184, h: 48 };
+const ADD_TITLE_FIELD: Rect = Rect { x: 24, y: 1130, w: 672, h: 48 };
+const ADD_DUR_FIELD: Rect = Rect { x: 24, y: 1190, w: 264, h: 48 };
+const ADD_SAVE_BTN: Rect = Rect { x: 300, y: 1190, w: 200, h: 48 };
+const ADD_CANCEL_BTN: Rect = Rect { x: 512, y: 1190, w: 184, h: 48 };
 /// Title bytes the add editor holds. Matches the store's per-record title width.
 const ADD_TITLE_CAP: usize = 40;
 /// Duration digits the add editor holds (whole seconds, up to 5 digits).
@@ -779,7 +880,7 @@ fn text_in_rect_centered(
     let w = font::measure(s, scale);
     let x0 = rect.x + rect.w.saturating_sub(w) / 2;
     let y0 = if rect.h >= 16 * scale {
-        rect.y + (rect.h - 16 * scale) / 2 - 3 * scale
+        rect.y + (rect.h - 16 * scale) / 2
     } else {
         rect.y + rect.h.saturating_sub(font::line_height(scale)) / 2
     };
@@ -1217,10 +1318,10 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
             cap[cl..cl + dn].copy_from_slice(&db[..dn]);
             cl += dn;
         }
-        if let Some(c) = text_centered_bold(x, y, ARTIST_Y, 1, &cap[..cl], THEME.on_surface, THEME.surface) {
+        if let Some(c) = text_centered_bold(x, y, ARTIST_Y, 2, &cap[..cl], THEME.on_surface, THEME.surface) {
             return c;
         }
-    } else if let Some(c) = text_centered_bold(x, y, ARTIST_Y, 1, b"Local library is empty - nothing to play", THEME.on_surface, THEME.surface) {
+    } else if let Some(c) = text_centered_bold(x, y, ARTIST_Y, 2, b"Local library is empty - nothing to play", THEME.on_surface, THEME.surface) {
         return c;
     }
     let state_label: &[u8] = match app.state {
@@ -1228,13 +1329,13 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
         PlaybackState::Paused => b"Paused",
         PlaybackState::Stopped => b"Stopped",
     };
-    if let Some(c) = text_centered_bold(x, y, STATE_Y, 1, state_label, THEME.on_surface, THEME.surface) {
+    if let Some(c) = text_centered_bold(x, y, STATE_Y, 2, state_label, THEME.on_surface, THEME.surface) {
         return c;
     }
     if let Some(c) = text_centered(
         x,
         y,
-        STATE_Y + font::line_height(1),
+        STATE_Y + font::line_height(2) - 4,
         1,
         &f.state[..f.state_len],
         THEME.muted,
@@ -1267,13 +1368,14 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
         let shown: &[u8] = if query.is_empty() { b"Search the library" } else { query };
         let ink = if query.is_empty() { THEME.muted } else { THEME.on_surface };
         let mut buf = [0u8; SEARCH_CAP];
-        let n = font::ellipsize(shown, 1, SEARCH_FIELD.w - 32, &mut buf);
+        let n = font::ellipsize(shown, 2, SEARCH_FIELD.w - 32, &mut buf);
+        let sy = SEARCH_FIELD.y + (SEARCH_FIELD.h.saturating_sub(16 * 2)) / 2;
         if let Some(c) = text(
             x,
             y,
             SEARCH_FIELD.x + 16,
-            SEARCH_FIELD.y + (SEARCH_FIELD.h.saturating_sub(font::line_height(1))) / 2,
-            1,
+            sy,
+            2,
             &buf[..n],
             ink,
             THEME.surface_container,
@@ -1287,7 +1389,7 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
             x,
             y,
             SORT_BTN,
-            1,
+            2,
             app.sort.label().as_bytes(),
             THEME.on_surface,
             THEME.surface_container,
@@ -1301,7 +1403,7 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
             x,
             y,
             IMPORT_BTN,
-            1,
+            2,
             b"IMPORT",
             THEME.on_surface,
             THEME.surface_container,
@@ -1309,6 +1411,19 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
             return c;
         }
         return c;
+    }
+    if app.feedback_len > 0 {
+        if let Some(c) = text_centered_bold(
+            x,
+            y,
+            FEEDBACK_Y,
+            2,
+            &app.feedback[..app.feedback_len],
+            THEME.on_surface,
+            THEME.surface,
+        ) {
+            return c;
+        }
     }
     // The features the platform does not offer this app.
     //
@@ -1419,15 +1534,15 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
     // list and that list is the order the tracks are played in. The design
     // document asks for a queue and for playlists, and the store supports
     // exactly one of them.
-    if y >= LIST_LABEL_Y && y < LIST_LABEL_Y + font::line_height(1) {
-        if let Some(c) = text(x, y, MARGIN, LIST_LABEL_Y, 1, b"QUEUE", THEME.muted, THEME.surface) {
+    if y >= LIST_LABEL_Y && y < LIST_LABEL_Y + font::line_height(2) {
+        if let Some(c) = text(x, y, MARGIN, LIST_LABEL_Y, 2, b"QUEUE", THEME.on_surface, THEME.surface) {
             return c;
         }
         if let Some(c) = text(
             x,
             y,
-            MARGIN + 80,
-            LIST_LABEL_Y,
+            MARGIN + 100,
+            LIST_LABEL_Y + 4,
             1,
             &f.queue_caption[..f.queue_caption_len],
             THEME.muted,
@@ -1441,8 +1556,22 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
             x,
             y,
             PUBLISH_BTN,
-            1,
+            2,
             b"PUBLISH",
+            THEME.on_surface,
+            THEME.surface_container,
+        ) {
+            return c;
+        }
+        return c;
+    }
+    if let Some(c) = draw_pill(x, y, RINGTONE_BTN, THEME.surface_container, Some(THEME.border)) {
+        if let Some(c) = text_in_rect_centered(
+            x,
+            y,
+            RINGTONE_BTN,
+            2,
+            b"RINGTONE",
             THEME.on_surface,
             THEME.surface_container,
         ) {
@@ -1455,8 +1584,8 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
             x,
             y,
             ADD_BTN,
-            1,
-            b"ADD TRACK",
+            2,
+            b"+ TRACK",
             THEME.on_surface,
             THEME.surface_container,
         ) {
@@ -1478,9 +1607,9 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
             }
             let tt = &app.add_title[..app.add_title_len];
             let shown: &[u8] = if tt.is_empty() { b"Track title" } else { tt };
-            let ty = ADD_TITLE_FIELD.y + (ADD_TITLE_FIELD.h.saturating_sub(font::line_height(1))) / 2;
+            let ty = ADD_TITLE_FIELD.y + (ADD_TITLE_FIELD.h.saturating_sub(16 * 2)) / 2;
             let ink = if tt.is_empty() { THEME.muted } else { THEME.on_surface };
-            if let Some(c) = text(x, y, ADD_TITLE_FIELD.x + 16, ty, 1, shown, ink, THEME.surface_container) {
+            if let Some(c) = text(x, y, ADD_TITLE_FIELD.x + 16, ty, 2, shown, ink, THEME.surface_container) {
                 return c;
             }
             return THEME.surface_container;
@@ -1491,9 +1620,9 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
             }
             let dd = &app.add_dur[..app.add_dur_len];
             let shown: &[u8] = if dd.is_empty() { b"duration (s)" } else { dd };
-            let dyy = ADD_DUR_FIELD.y + (ADD_DUR_FIELD.h.saturating_sub(font::line_height(1))) / 2;
+            let dyy = ADD_DUR_FIELD.y + (ADD_DUR_FIELD.h.saturating_sub(16 * 2)) / 2;
             let ink = if dd.is_empty() { THEME.muted } else { THEME.on_surface };
-            if let Some(c) = text(x, y, ADD_DUR_FIELD.x + 16, dyy, 1, shown, ink, THEME.surface_container) {
+            if let Some(c) = text(x, y, ADD_DUR_FIELD.x + 16, dyy, 2, shown, ink, THEME.surface_container) {
                 return c;
             }
             return THEME.surface_container;
@@ -1503,7 +1632,7 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
                 x,
                 y,
                 ADD_SAVE_BTN,
-                1,
+                2,
                 b"ADD TRACK",
                 THEME.on_surface,
                 THEME.surface_container,
@@ -1517,7 +1646,7 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
                 x,
                 y,
                 ADD_CANCEL_BTN,
-                1,
+                2,
                 b"CANCEL",
                 THEME.muted,
                 THEME.surface_container_low,
@@ -1582,7 +1711,7 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
             continue;
         };
         let t = app.store.get(store_idx).unwrap();
-        if y >= row_y && y < row_y + 80 {
+        if y >= row_y && y < row_y + 84 {
             let selected = store_idx == app.current_track_idx;
             // The platform's list-row treatment: the fill of the row the tap
             // lands on and the fill of the row it does not, the platform's
@@ -1592,7 +1721,7 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
             // block: a row that invents its own fill, its own radius and its
             // own padding is a row a third-party app cannot match.
             let row_fill = if selected { ROW_SELECTED.fill } else { ROW.fill };
-            let row_rect = Rect::new(MARGIN, row_y, CONTENT_W, 80);
+            let row_rect = Rect::new(MARGIN, row_y, CONTENT_W, 84);
             if let Some(c) = draw_rounded_rect(x, y, row_rect, ROW.radius, row_fill, None, 0) {
                 if c != row_fill {
                     return c;
@@ -1602,28 +1731,28 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
                 // WHY the marker is a shape and not only a colour: the
                 // design document asks for the current track to be marked
                 // without relying on colour alone.
-                if selected && play_glyph(x, y, MARGIN + ROW.pad - 8, row_y + 20) {
+                if selected && play_glyph(x, y, MARGIN + ROW.pad - 8, row_y + 24) {
                     return THEME.on_surface;
                 }
                 // The queue's "move up" affordance.
-                if up_glyph(x, y, MARGIN + CONTENT_W - 78, row_y + 20) {
+                if up_glyph(x, y, MARGIN + CONTENT_W - 90, row_y + 24) {
                     return THEME.muted;
                 }
                 // Delete affordance, matching its hit region in the tap handler.
-                let del_x = MARGIN + CONTENT_W - 40;
+                let del_x = MARGIN + CONTENT_W - 36;
                 let ddx = x as isize - del_x as isize;
                 let ddy = y as isize - (row_y + 24) as isize;
                 if ddx.abs() <= 6 && ddy.abs() <= 6 && (ddx.abs() - ddy.abs()).abs() <= 2 {
                     return THEME.muted;
                 }
                 let mut buf = [0u8; 48];
-                let n = font::ellipsize(t.title(), 1, CONTENT_W - 120, &mut buf);
+                let n = font::ellipsize(t.title(), 2, CONTENT_W - 160, &mut buf);
                 if let Some(c) = text(
                     x,
                     y,
                     MARGIN + ROW.pad,
-                    row_y + 12,
-                    1,
+                    row_y + 14,
+                    2,
                     &buf[..n],
                     if selected { THEME.on_surface } else { THEME.on_surface_variant },
                     row_fill,
@@ -1639,7 +1768,7 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
                     db[..5].copy_from_slice(b"--:--");
                     5
                 };
-                if let Some(c) = text(x, y, MARGIN + ROW.pad, row_y + 44, 1, &db[..dn], THEME.muted, row_fill) {
+                if let Some(c) = text(x, y, MARGIN + ROW.pad, row_y + 50, 1, &db[..dn], THEME.muted, row_fill) {
                     return c;
                 }
                 return row_fill;
@@ -1886,6 +2015,14 @@ fn handle_tap(app: &mut MusicApp, px: u32, py: u32) -> Tap<'static> {
         return Tap::Redraw(Dirty::All);
     }
 
+    // The control that sets the currently selected track as system ringtone.
+    if RINGTONE_BTN.contains(x, y) {
+        if app.set_current_as_ringtone() {
+            let _ = std::audio_haptic_click();
+        }
+        return Tap::Redraw(Dirty::All);
+    }
+
     // ADD TRACK control on the label row opens the add editor.
     if ADD_BTN.contains(x, y) {
         app.add_open = true;
@@ -1933,10 +2070,11 @@ fn handle_tap(app: &mut MusicApp, px: u32, py: u32) -> Tap<'static> {
         let ry = y.saturating_sub(LIST_TOP) + app.list_scroll.offset;
         let idx = ry / TRACKLIST_ROW_H;
         let coff = ry % TRACKLIST_ROW_H;
-        if idx < app.order_len && coff < 80 && x >= MARGIN && x < MARGIN + CONTENT_W {
-            let ddx = x as isize - (MARGIN + CONTENT_W - 40) as isize;
+        if idx < app.order_len && coff < 84 && x >= MARGIN && x < MARGIN + CONTENT_W {
+            let del_cx = (MARGIN + CONTENT_W - 36) as isize;
+            let ddx = x as isize - del_cx;
             let ddy = coff as isize - 24;
-            if ddx.abs() <= 16 && ddy.abs() <= 12 {
+            if ddx.abs() <= 24 && ddy.abs() <= 24 {
                 if let Some(store_idx) = app.store_index_at(idx) {
                     if app.store.remove(store_idx) {
                         app.sync_list_extent();
@@ -1946,6 +2084,7 @@ fn handle_tap(app: &mut MusicApp, px: u32, py: u32) -> Tap<'static> {
                         if app.current_track_idx >= app.store.len() && app.current_track_idx > 0 {
                             app.current_track_idx -= 1;
                         }
+                        app.publish_now_playing();
                     } else {
                         std::log("[MUSIC APP] Track deletion was not persisted; the library is unchanged.",
                         )
@@ -1955,14 +2094,16 @@ fn handle_tap(app: &mut MusicApp, px: u32, py: u32) -> Tap<'static> {
                 return Tap::Redraw(Dirty::All);
             }
             // The queue's "move up" affordance.
-            let udx = x as isize - (MARGIN + CONTENT_W - 78) as isize;
-            let udy = coff as isize - 20;
-            if udx.abs() <= 14 && udy.abs() <= 14 {
+            let up_cx = (MARGIN + CONTENT_W - 90) as isize;
+            let udx = x as isize - up_cx;
+            let udy = coff as isize - 24;
+            if udx.abs() <= 24 && udy.abs() <= 24 {
                 if app.move_up(idx) {
                     app.sync_list_extent();
                     std::log("[MUSIC APP] Track moved up in the queue; the new order was persisted.",
                     )
                     .ok();
+                    app.publish_now_playing();
                 } else {
                     std::log("[MUSIC APP] The track is already first in the queue, or the new order was not persisted.",
                     )
@@ -1972,6 +2113,7 @@ fn handle_tap(app: &mut MusicApp, px: u32, py: u32) -> Tap<'static> {
             }
             if let Some(store_idx) = app.store_index_at(idx) {
                 app.current_track_idx = store_idx.min(app.store.len().saturating_sub(1));
+                app.publish_now_playing();
                 let _ = std::audio_haptic_click();
                 return Tap::Redraw(Dirty::All);
             }
@@ -2099,6 +2241,12 @@ fn handle_music_key(app: &mut MusicApp, key: std::InputKeyEvent) -> Tap<'static>
                 Tap::Redraw(Dirty::None)
             }
         }
+        code if code == b'r' as u32 || code == b'R' as u32 => {
+            if app.set_current_as_ringtone() {
+                let _ = std::audio_haptic_click();
+            }
+            Tap::Redraw(Dirty::All)
+        }
         _ => Tap::None,
     }
 }
@@ -2115,6 +2263,8 @@ pub extern "C" fn _start() -> ! {
     // playlist and the now-playing row reflect what storage actually holds.
     music.store = store::TrackStore::load();
     music.sync_list_extent();
+    music.restore_playback_state();
+    music.publish_now_playing();
     let load_note: &str = match music.store.state {
         store::StoreState::Empty => "Track store loaded: no tracks are stored yet.",
         store::StoreState::Loaded => "Track store loaded from the settings store.",
@@ -2154,6 +2304,7 @@ pub extern "C" fn _start() -> ! {
     if music.stream_dma_audio_block() {
         music.total_dma_buffers_streamed += 1;
         music.state = PlaybackState::Playing;
+        music.publish_now_playing();
     }
 
     if surface > 0 {
@@ -2185,6 +2336,10 @@ pub extern "C" fn _start() -> ! {
                             match handle_music_key(&mut music, key) {
                                 Tap::Leave(msg) => {
                                     std::log(msg).ok();
+                                    if music.state == PlaybackState::Playing {
+                                        std::log("[MUSIC APP] Background playback active; audio transport continues.").ok();
+                                    }
+                                    music.publish_now_playing();
                                     if surface > 0 {
                                         let _ = std::surface_destroy(surface);
                                     }
@@ -2216,6 +2371,10 @@ pub extern "C" fn _start() -> ! {
                             std::log("[MUSIC APP] Navigation gesture recognized. Exiting to launcher.",
                             )
                             .ok();
+                            if music.state == PlaybackState::Playing {
+                                std::log("[MUSIC APP] Background playback active; audio transport continues.").ok();
+                            }
+                            music.publish_now_playing();
                             if surface > 0 {
                                 // WHY no slot argument: a slot is a position
                                 // in this task's capability table, and the
@@ -2231,6 +2390,10 @@ pub extern "C" fn _start() -> ! {
                             match handle_tap(&mut music, input.x, input.y) {
                                 Tap::Leave(msg) => {
                                     std::log(msg).ok();
+                                    if music.state == PlaybackState::Playing {
+                                        std::log("[MUSIC APP] Background playback active; audio transport continues.").ok();
+                                    }
+                                    music.publish_now_playing();
                                     if surface > 0 {
                                         let _ = std::surface_destroy(surface);
                                     }

@@ -14,5 +14,13 @@
     "CAP_FILESYSTEM_READ",
     "CAP_FILESYSTEM_WRITE"
   ],
+  "intents": {
+    "mime": [
+      "video/mp4",
+      "video/x-motion-jpeg",
+      "video/x-raw",
+      "video/x-ppm"
+    ]
+  },
   "min_sdk_version": "0.8.0"
 }

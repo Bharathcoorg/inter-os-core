@@ -21,12 +21,12 @@
 
 use core::panic::PanicInfo;
 use interos_std as std;
-use file_manager::theme::{MIN_TOUCH_TARGET, THEME, spacing};
+use file_manager::theme::{THEME, spacing};
 use std::design::components;
 use std::design::font;
 use std::design::primitives::{draw_pill, draw_rounded_rect, Rect};
 pub use file_manager::{
-    action_for_mime, detect_mime, fmt_u64, parse_vfs_entries, document_from_index,
+    action_for_mime, detect_mime, fmt_u64, has_suffix, parse_vfs_entries, document_from_index,
     FileMime, RuntimeFileEntry, SelectedDocument, MAX_DOCUMENT_PATH_LEN, MAX_ENTRY_NAME_LEN,
     MAX_PARSED_ENTRIES,
 };
@@ -111,7 +111,7 @@ const BACK: Rect = Rect::new(HEADER_MARGIN, 8, 52, 52);
 /// WHY 44 and not 40: the design system's minimum touch target is 44 logical
 /// pixels and this strip was 40. It now reaches the bottom edge of the
 /// surface, which is where the indicator already was.
-const HOME_HIT: Rect = Rect::new(240, 1396, 240, MIN_TOUCH_TARGET);
+const HOME_HIT: Rect = Rect::new(240, 1392, 240, 48);
 const HOME_PILL: Rect = Rect::new(260, 1418, 200, 6);
 
 /// Right edge the header readout is aligned to (the 24px right margin).
@@ -973,8 +973,9 @@ fn open_with_handler(app: &FileManagerApp) -> bool {
             std::log("[FILE_MANAGER] The document was dispatched to its handler.").ok();
             true
         }
-        Err(_) => {
+        Err(code) => {
             std::log("[FILE_MANAGER] The document's handler could not be launched.").ok();
+            log_counted("[FILE_MANAGER] Platform launch refused, code: -", code.unsigned_abs(), "");
             false
         }
     }
@@ -1006,8 +1007,9 @@ fn set_as_action(app: &FileManagerApp) -> bool {
             std::log("[FILE_MANAGER] The document was dispatched to the slot's owner.").ok();
             true
         }
-        Err(_) => {
+        Err(code) => {
             std::log("[FILE_MANAGER] No app handles this action.").ok();
+            log_counted("[FILE_MANAGER] Platform action refused, code: -", code.unsigned_abs(), "");
             false
         }
     }
@@ -1582,19 +1584,19 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
         return base;
     }
 
-    // 4b. The breadcrumb path bar (y: 788..826)
-    if (788..826).contains(&y) && x >= 36 && x < 684 {
+    // 4b. The breadcrumb path bar (y: 780..832)
+    if (780..832).contains(&y) && x >= 36 && x < 684 {
         let cur_path = &app.current_path[..app.current_path_len];
         let is_sub = cur_path.len() > b"/storage".len() && cur_path.starts_with(b"/storage/");
         let sub_name = if is_sub { &cur_path[b"/storage/".len()..] } else { b"" };
-        if let Some(c) = test_text(x, y, 44, 796, 1, b"Storage", if is_sub { THEME.primary } else { THEME.on_surface }, THEME.surface) {
+        if let Some(c) = test_text(x, y, 44, 792, 2, b"Storage", if is_sub { THEME.primary } else { THEME.on_surface }, THEME.surface) {
             return c;
         }
         if is_sub && !sub_name.is_empty() {
-            if let Some(c) = test_text(x, y, 104, 796, 1, b">", THEME.on_surface_variant, THEME.surface) {
+            if let Some(c) = test_text(x, y, 140, 792, 2, b">", THEME.on_surface_variant, THEME.surface) {
                 return c;
             }
-            if let Some(c) = test_text(x, y, 120, 796, 1, sub_name, THEME.on_surface, THEME.surface) {
+            if let Some(c) = test_text(x, y, 164, 792, 2, sub_name, THEME.on_surface, THEME.surface) {
                 return c;
             }
         }
@@ -1856,57 +1858,64 @@ fn render_card_rows(surface: u32, app: &FileManagerApp) {
                     px_col = THEME.primary;
                 }
                 // Vector folder / file pictogram with MIME differentiation
-                let mime = detect_mime(name, is_dir);
+                let is_video_ctx = app.current_path_str().starts_with("/storage/videos");
+                let mime = if !is_dir && is_video_ctx && (file_manager::has_suffix(name, b".ppm") || file_manager::has_suffix(name, b".raw")) {
+                    FileMime::Video
+                } else {
+                    detect_mime(name, is_dir)
+                };
                 match mime {
                     FileMime::Directory => {
-                        let in_tab = rx >= 22 && rx <= 34 && ry >= 17 && ry <= 21;
-                        let in_body = rx >= 22 && rx <= 50 && ry >= 21 && ry <= 39;
+                        let in_tab = rx >= 20 && rx <= 32 && ry >= 17 && ry <= 21;
+                        let in_body = rx >= 20 && rx <= 52 && ry >= 21 && ry <= 39;
                         if in_tab || in_body {
-                            let on_outline = ry == 17 || ry == 39 || rx == 22 || rx == 50
-                                || (ry == 21 && rx > 34) || (rx == 34 && ry <= 21);
+                            let on_outline = ry == 17 || ry == 39 || rx == 20 || rx == 52
+                                || (ry == 21 && rx > 32) || (rx == 32 && ry <= 21);
                             if on_outline {
                                 px_col = if selected { THEME.primary } else { THEME.on_surface };
                             }
                         }
                     }
                     FileMime::Image => {
-                        if rx >= 24 && rx <= 48 && ry >= 16 && ry <= 40 {
-                            let on_frame = rx == 24 || rx == 48 || ry == 16 || ry == 40;
-                            let dx_sun = rx as isize - 40;
+                        if rx >= 22 && rx <= 50 && ry >= 16 && ry <= 40 {
+                            let on_frame = rx == 22 || rx == 50 || ry == 16 || ry == 40;
+                            let dx_sun = rx as isize - 42;
                             let dy_sun = ry as isize - 22;
                             let on_sun = dx_sun * dx_sun + dy_sun * dy_sun <= 4;
-                            let on_mountain = ry >= 30 && (rx as isize - 34).abs() <= (40 - ry as isize);
+                            let on_mountain = ry >= 30 && (rx as isize - 32).abs() <= (40 - ry as isize);
                             if on_frame || on_sun || on_mountain {
                                 px_col = if selected { THEME.primary } else { THEME.on_surface };
                             }
                         }
                     }
                     FileMime::Video => {
-                        if rx >= 24 && rx <= 48 && ry >= 16 && ry <= 40 {
-                            let on_frame = rx == 24 || rx == 48 || ry == 16 || ry == 40;
-                            let in_play = rx >= 32 && rx <= 40 && (ry as isize - 28).abs() <= (rx as isize - 32);
+                        if rx >= 22 && rx <= 50 && ry >= 16 && ry <= 40 {
+                            let on_frame = rx == 22 || rx == 50 || ry == 16 || ry == 40;
+                            let in_play = rx >= 32 && rx <= 42 && (ry as isize - 28).abs() <= (rx as isize - 32);
                             if on_frame || in_play {
                                 px_col = if selected { THEME.primary } else { THEME.on_surface };
                             }
                         }
                     }
                     FileMime::Audio => {
-                        let in_notehead = rx >= 26 && rx <= 32 && ry >= 33 && ry <= 38;
-                        let on_stem = rx == 31 && ry >= 20 && ry <= 35;
-                        let on_flag = rx >= 31 && rx <= 42 && ry >= 20 && ry <= 24;
-                        if in_notehead || on_stem || on_flag {
+                        let in_notehead = rx >= 24 && rx <= 30 && ry >= 33 && ry <= 38;
+                        let in_notehead2 = rx >= 36 && rx <= 42 && ry >= 30 && ry <= 35;
+                        let on_stem1 = rx == 30 && ry >= 18 && ry <= 35;
+                        let on_stem2 = rx == 42 && ry >= 18 && ry <= 32;
+                        let on_beam = rx >= 30 && rx <= 42 && ry >= 18 && ry <= 21;
+                        if in_notehead || in_notehead2 || on_stem1 || on_stem2 || on_beam {
                             px_col = if selected { THEME.primary } else { THEME.on_surface };
                         }
                     }
                     FileMime::Document | FileMime::Other => {
-                        if rx >= 25 && rx <= 47 && ry >= 16 && ry <= 40 {
-                            let in_fold_cut = rx > 40 && ry < 23 && (rx - 40) + (ry - 16) > 8;
+                        if rx >= 24 && rx <= 48 && ry >= 16 && ry <= 40 {
+                            let in_fold_cut = rx > 40 && ry < 24 && (rx - 40) + (ry - 16) > 8;
                             if !in_fold_cut {
-                                let on_outline = rx == 25 || rx == 47 || ry == 16 || ry == 40
-                                    || ((rx >= 40 && ry <= 23) && ((rx - 40) + (ry - 16) == 8));
-                                let on_lines = (ry == 27 || ry == 32) && rx >= 30 && rx <= 42;
+                                let on_outline = rx == 24 || rx == 48 || ry == 16 || ry == 40
+                                    || ((rx >= 40 && ry <= 24) && ((rx - 40) + (ry - 16) == 8));
+                                let on_lines = (ry == 27 || ry == 32) && rx >= 29 && rx <= 43;
                                 if on_outline || on_lines {
-                                    px_col = THEME.on_surface_variant;
+                                    px_col = if selected { THEME.primary } else { THEME.on_surface_variant };
                                 }
                             }
                         }
@@ -1915,13 +1924,14 @@ fn render_card_rows(surface: u32, app: &FileManagerApp) {
                 buffer[ry * ROW_BUFFER_W + rx] = px_col;
             }
         }
-        // Typography: File/Folder name (scale 2, vertically centered)
+        // Typography: File/Folder name & size (Scale 2 Body, vertically centered)
         let text_y = (ROW_BUFFER_H - font::line_height(2)) / 2;
-        let trailing_y = (ROW_BUFFER_H - font::line_height(1)) / 2;
-        let max_text_w = if !trailing.is_empty() {
-            ROW_BUFFER_W.saturating_sub(64 + font::measure(trailing, 1) + 32)
+        let trailing_y = (ROW_BUFFER_H - font::line_height(2)) / 2;
+        let tw = if !trailing.is_empty() { font::measure(trailing, 2) } else { 0 };
+        let max_text_w = if tw > 0 {
+            ROW_BUFFER_W.saturating_sub(64 + tw + 20)
         } else {
-            ROW_BUFFER_W.saturating_sub(64 + 24)
+            ROW_BUFFER_W.saturating_sub(64 + 20)
         };
         let mut name_buf = [0u8; 48];
         let name_len = font::ellipsize(name, 2, max_text_w, &mut name_buf);
@@ -1935,13 +1945,12 @@ fn render_card_rows(surface: u32, app: &FileManagerApp) {
                 }
             }
         }
-        if !trailing.is_empty() {
-            let tw = font::measure(trailing, 1);
-            let tx = ROW_BUFFER_W - 24 - tw;
-            for py in trailing_y..trailing_y + font::line_height(1) {
+        if tw > 0 {
+            let tx = ROW_BUFFER_W - 20 - tw;
+            for py in trailing_y..trailing_y + font::line_height(2) {
                 for px in tx..tx + tw {
                     let bg = buffer[py * ROW_BUFFER_W + px];
-                    if let Some(c) = font::test_text_aa(px, py, tx, trailing_y, 1, trailing, THEME.on_surface_variant, bg, false) {
+                    if let Some(c) = font::test_text_aa(px, py, tx, trailing_y, 2, trailing, THEME.on_surface_variant, bg, false) {
                         buffer[py * ROW_BUFFER_W + px] = c;
                     }
                 }
@@ -2546,7 +2555,7 @@ fn handle_tap(app: &mut FileManagerApp, x: usize, y: usize, surface: u32) -> Tap
     }
 
     // Breadcrumbs touch: tapping "Storage" navigates back to root /storage
-    if (788..826).contains(&y) && (36..100).contains(&x) {
+    if (780..832).contains(&y) && (36..140).contains(&x) {
         if &app.current_path[..app.current_path_len] != b"/storage" {
             app.set_path("/storage");
             app.refresh_directory();
@@ -2652,6 +2661,7 @@ fn handle_tap(app: &mut FileManagerApp, x: usize, y: usize, surface: u32) -> Tap
                             if app.selected_document.has_handler() {
                                 std::log("[FILE_MANAGER] Document selected. The platform's registry names its handlers.")
                                     .ok();
+                                open_with_handler(app);
                             } else {
                                 std::log("[FILE_MANAGER] Document selected. No app handles this file.").ok();
                             }

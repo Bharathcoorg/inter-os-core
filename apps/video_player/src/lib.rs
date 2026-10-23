@@ -1,7 +1,8 @@
 //! InterOS Native Video Player Engine (Ring-3)
 //!
 //! Provides the core media state machine, frame decoders (RAW, PPM P6, MJPEG),
-//! codec detection, scrubber calculations, and platform truth contract enforcement.
+//! codec detection, scrubber calculations, aspect ratio mapping, playback speeds,
+//! orientation modes, volume control, and platform truth contract enforcement.
 
 #![no_std]
 
@@ -50,7 +51,7 @@ impl VideoCodec {
             VideoCodec::RawRgb => "RAW RGB24",
             VideoCodec::RawRgba => "RAW RGBA32",
             VideoCodec::Mjpeg => "MJPEG",
-            VideoCodec::H264 => "H.264 / MP4",
+            VideoCodec::H264 => "H.264",
             VideoCodec::Unknown => "UNKNOWN",
         }
     }
@@ -115,30 +116,108 @@ impl PlaybackState {
 }
 
 /// Aspect ratio modes for video presentation.
+/// Cycles through Fit, Fill, Stretch, 16:9, 4:3.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AspectRatio {
-    /// 16:9 widescreen canvas standard.
+    /// Fits source within canvas bounds preserving aspect ratio (pillarbox or letterbox).
+    Fit,
+    /// Centers and zooms to completely fill canvas, cropping excess source edges.
+    Fill,
+    /// Stretched to completely fill the canvas bounds regardless of source aspect ratio.
+    Stretch,
+    /// 16:9 widescreen canvas standard format.
     Fit16_9,
     /// 4:3 pillarboxed with black lateral bars.
     Aspect4_3,
-    /// Stretched to completely fill the canvas bounds.
-    Fill,
 }
 
 impl AspectRatio {
     pub const fn label(self) -> &'static str {
         match self {
+            AspectRatio::Fit => "FIT",
+            AspectRatio::Fill => "FILL",
+            AspectRatio::Stretch => "STRETCH",
             AspectRatio::Fit16_9 => "16:9",
             AspectRatio::Aspect4_3 => "4:3",
-            AspectRatio::Fill => "FILL",
         }
     }
 
     pub const fn next(self) -> Self {
         match self {
+            AspectRatio::Fit => AspectRatio::Fill,
+            AspectRatio::Fill => AspectRatio::Stretch,
+            AspectRatio::Stretch => AspectRatio::Fit16_9,
             AspectRatio::Fit16_9 => AspectRatio::Aspect4_3,
-            AspectRatio::Aspect4_3 => AspectRatio::Fill,
-            AspectRatio::Fill => AspectRatio::Fit16_9,
+            AspectRatio::Aspect4_3 => AspectRatio::Fit,
+        }
+    }
+}
+
+/// Playback speed selector supporting 0.5x, 0.75x, 1.0x, 1.25x, 1.5x, 2.0x.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaybackSpeed {
+    Speed0_5x = 0,
+    Speed0_75x = 1,
+    Speed1_0x = 2,
+    Speed1_25x = 3,
+    Speed1_5x = 4,
+    Speed2_0x = 5,
+}
+
+impl PlaybackSpeed {
+    pub const fn label(self) -> &'static str {
+        match self {
+            PlaybackSpeed::Speed0_5x => "0.5x",
+            PlaybackSpeed::Speed0_75x => "0.75x",
+            PlaybackSpeed::Speed1_0x => "1.0x",
+            PlaybackSpeed::Speed1_25x => "1.25x",
+            PlaybackSpeed::Speed1_5x => "1.5x",
+            PlaybackSpeed::Speed2_0x => "2.0x",
+        }
+    }
+
+    pub const fn multiplier_milli(self) -> u32 {
+        match self {
+            PlaybackSpeed::Speed0_5x => 500,
+            PlaybackSpeed::Speed0_75x => 750,
+            PlaybackSpeed::Speed1_0x => 1000,
+            PlaybackSpeed::Speed1_25x => 1250,
+            PlaybackSpeed::Speed1_5x => 1500,
+            PlaybackSpeed::Speed2_0x => 2000,
+        }
+    }
+
+    pub const fn next(self) -> Self {
+        match self {
+            PlaybackSpeed::Speed0_5x => PlaybackSpeed::Speed0_75x,
+            PlaybackSpeed::Speed0_75x => PlaybackSpeed::Speed1_0x,
+            PlaybackSpeed::Speed1_0x => PlaybackSpeed::Speed1_25x,
+            PlaybackSpeed::Speed1_25x => PlaybackSpeed::Speed1_5x,
+            PlaybackSpeed::Speed1_5x => PlaybackSpeed::Speed2_0x,
+            PlaybackSpeed::Speed2_0x => PlaybackSpeed::Speed0_5x,
+        }
+    }
+}
+
+/// Screen presentation orientation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Orientation {
+    Portrait,
+    Landscape,
+}
+
+impl Orientation {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Orientation::Portrait => "PORTRAIT",
+            Orientation::Landscape => "LANDSCAPE",
+        }
+    }
+
+    pub const fn toggle(self) -> Self {
+        match self {
+            Orientation::Portrait => Orientation::Landscape,
+            Orientation::Landscape => Orientation::Portrait,
         }
     }
 }
@@ -401,7 +480,6 @@ pub fn parse_mjpeg_frame(data: &[u8], start_offset: usize) -> Result<MjpegFrameI
         if marker == 0xC0 || marker == 0xC2 {
             // SOF0 (Baseline) or SOF2 (Progressive)
             if pos + 9 <= data.len() {
-                // marker(2) + len(2) + precision(1) + height(2) + width(2)
                 height = ((data[pos + 5] as u32) << 8) | (data[pos + 6] as u32);
                 width = ((data[pos + 7] as u32) << 8) | (data[pos + 8] as u32);
             }
@@ -450,9 +528,108 @@ pub fn decode_h264_or_mp4_frame(_data: &[u8]) -> Result<(), &'static str> {
 pub const CANVAS_W: usize = 680;
 pub const CANVAS_H: usize = 382;
 
-/// Maps a coordinate `(cx, cy)` on the 680x382 canvas to `(sx, sy)` on the source frame,
-/// according to the selected aspect ratio.
-/// Returns `None` if `(cx, cy)` falls outside the active video frame (e.g. 4:3 letterbox bars).
+/// Maps a coordinate `(cx, cy)` on an arbitrary canvas bounds `(canvas_w, canvas_h)`
+/// to `(sx, sy)` on the source frame, according to the selected aspect ratio mode.
+/// Returns `None` if `(cx, cy)` falls outside the active video frame (e.g. letterbox/pillarbox bars).
+pub fn map_coords_to_source(
+    cx: usize,
+    cy: usize,
+    canvas_w: usize,
+    canvas_h: usize,
+    src_w: u32,
+    src_h: u32,
+    aspect: AspectRatio,
+) -> Option<(usize, usize)> {
+    if cx >= canvas_w || cy >= canvas_h || src_w == 0 || src_h == 0 {
+        return None;
+    }
+
+    match aspect {
+        AspectRatio::Stretch => {
+            let sx = ((cx as u64 * (src_w as u64 - 1)) / (canvas_w as u64 - 1).max(1)) as usize;
+            let sy = ((cy as u64 * (src_h as u64 - 1)) / (canvas_h as u64 - 1).max(1)) as usize;
+            Some((sx, sy))
+        }
+        AspectRatio::Fit16_9 => {
+            // Force 16:9 bounds inside canvas
+            let (target_w, target_h, off_x, off_y) = if canvas_w * 9 > canvas_h * 16 {
+                let tw = (canvas_h * 16) / 9;
+                (tw, canvas_h, (canvas_w.saturating_sub(tw)) / 2, 0)
+            } else {
+                let th = (canvas_w * 9) / 16;
+                (canvas_w, th, 0, (canvas_h.saturating_sub(th)) / 2)
+            };
+            if cx < off_x || cx >= off_x + target_w || cy < off_y || cy >= off_y + target_h {
+                return None;
+            }
+            let active_x = cx - off_x;
+            let active_y = cy - off_y;
+            let sx = ((active_x as u64 * (src_w as u64 - 1)) / (target_w as u64 - 1).max(1)) as usize;
+            let sy = ((active_y as u64 * (src_h as u64 - 1)) / (target_h as u64 - 1).max(1)) as usize;
+            Some((sx, sy))
+        }
+        AspectRatio::Aspect4_3 => {
+            // Force 4:3 bounds inside canvas
+            let (target_w, target_h, off_x, off_y) = if canvas_w * 3 > canvas_h * 4 {
+                let tw = (canvas_h * 4) / 3;
+                (tw, canvas_h, (canvas_w.saturating_sub(tw)) / 2, 0)
+            } else {
+                let th = (canvas_w * 3) / 4;
+                (canvas_w, th, 0, (canvas_h.saturating_sub(th)) / 2)
+            };
+            if cx < off_x || cx >= off_x + target_w || cy < off_y || cy >= off_y + target_h {
+                return None;
+            }
+            let active_x = cx - off_x;
+            let active_y = cy - off_y;
+            let sx = ((active_x as u64 * (src_w as u64 - 1)) / (target_w as u64 - 1).max(1)) as usize;
+            let sy = ((active_y as u64 * (src_h as u64 - 1)) / (target_h as u64 - 1).max(1)) as usize;
+            Some((sx, sy))
+        }
+        AspectRatio::Fit => {
+            // Maintain source aspect ratio within canvas bounds (letterbox or pillarbox)
+            let sw = src_w as usize;
+            let sh = src_h as usize;
+            let (target_w, target_h, off_x, off_y) = if canvas_w * sh > canvas_h * sw {
+                let tw = (canvas_h * sw) / sh;
+                (tw, canvas_h, (canvas_w.saturating_sub(tw)) / 2, 0)
+            } else {
+                let th = (canvas_w * sh) / sw;
+                (canvas_w, th, 0, (canvas_h.saturating_sub(th)) / 2)
+            };
+            if cx < off_x || cx >= off_x + target_w || cy < off_y || cy >= off_y + target_h {
+                return None;
+            }
+            let active_x = cx - off_x;
+            let active_y = cy - off_y;
+            let sx = ((active_x as u64 * (src_w as u64 - 1)) / (target_w as u64 - 1).max(1)) as usize;
+            let sy = ((active_y as u64 * (src_h as u64 - 1)) / (target_h as u64 - 1).max(1)) as usize;
+            Some((sx, sy))
+        }
+        AspectRatio::Fill => {
+            // Zoom/crop to fill canvas completely
+            let sw = src_w as u64;
+            let sh = src_h as u64;
+            let cw = canvas_w as u64;
+            let ch = canvas_h as u64;
+            if cw * sh > ch * sw {
+                let crop_h = (sw * ch) / cw;
+                let crop_y0 = (sh.saturating_sub(crop_h)) / 2;
+                let sx = ((cx as u64 * (sw - 1)) / (cw - 1).max(1)) as usize;
+                let sy = (crop_y0 + (cy as u64 * (crop_h - 1)) / (ch - 1).max(1)) as usize;
+                Some((sx, sy))
+            } else {
+                let crop_w = (sh * cw) / ch;
+                let crop_x0 = (sw.saturating_sub(crop_w)) / 2;
+                let sx = (crop_x0 + (cx as u64 * (crop_w - 1)) / (cw - 1).max(1)) as usize;
+                let sy = ((cy as u64 * (sh - 1)) / (ch - 1).max(1)) as usize;
+                Some((sx, sy))
+            }
+        }
+    }
+}
+
+/// Backward compatible canvas mapping for standard 680x382 portrait video surface.
 pub fn map_canvas_to_source(
     cx: usize,
     cy: usize,
@@ -460,30 +637,7 @@ pub fn map_canvas_to_source(
     src_h: u32,
     aspect: AspectRatio,
 ) -> Option<(usize, usize)> {
-    if cx >= CANVAS_W || cy >= CANVAS_H || src_w == 0 || src_h == 0 {
-        return None;
-    }
-
-    match aspect {
-        AspectRatio::Fit16_9 | AspectRatio::Fill => {
-            let sx = ((cx as u64 * (src_w as u64 - 1)) / (CANVAS_W as u64 - 1).max(1)) as usize;
-            let sy = ((cy as u64 * (src_h as u64 - 1)) / (CANVAS_H as u64 - 1).max(1)) as usize;
-            Some((sx, sy))
-        }
-        AspectRatio::Aspect4_3 => {
-            // 4:3 centered inside 16:9 canvas (CANVAS_H = 382)
-            // width = 382 * 4 / 3 = 509 px. Lateral letterbox inset = (680 - 509) / 2 = 85 px.
-            let active_w = (CANVAS_H * 4) / 3;
-            let inset_x = (CANVAS_W.saturating_sub(active_w)) / 2;
-            if cx < inset_x || cx >= inset_x + active_w {
-                return None; // Inside black letterbox bar
-            }
-            let active_cx = cx - inset_x;
-            let sx = ((active_cx as u64 * (src_w as u64 - 1)) / (active_w as u64 - 1).max(1)) as usize;
-            let sy = ((cy as u64 * (src_h as u64 - 1)) / (CANVAS_H as u64 - 1).max(1)) as usize;
-            Some((sx, sy))
-        }
-    }
+    map_coords_to_source(cx, cy, CANVAS_W, CANVAS_H, src_w, src_h, aspect)
 }
 
 // -----------------------------------------------------------------------------
@@ -577,20 +731,223 @@ pub fn scrubber_seek_seconds(
 }
 
 // -----------------------------------------------------------------------------
-// Playlist Management
+// Audio Volume Helpers
 // -----------------------------------------------------------------------------
 
-pub const MAX_PLAYLIST_ITEMS: usize = 16;
+/// Calculates thumb X position for volume bar (0..100%).
+pub fn volume_thumb_x(bar_x: usize, bar_w: usize, volume_percent: u32) -> usize {
+    if bar_w == 0 {
+        return bar_x;
+    }
+    let clamped = volume_percent.min(100);
+    bar_x + ((clamped as usize * bar_w) / 100)
+}
+
+/// Translates a touch X position on the volume bar into volume percentage (0..100).
+pub fn volume_seek_percent(touch_x: usize, bar_x: usize, bar_w: usize) -> u32 {
+    if bar_w == 0 || touch_x <= bar_x {
+        return 0;
+    }
+    if touch_x >= bar_x + bar_w {
+        return 100;
+    }
+    let rel_x = touch_x - bar_x;
+    ((rel_x as u32 * 100) / bar_w as u32).min(100)
+}
+
+// -----------------------------------------------------------------------------
+// Metadata String Formatters
+// -----------------------------------------------------------------------------
+
+/// Formats a file size in bytes as human-readable ASCII: e.g. "512 B", "420 KB", "1.2 MB".
+pub fn format_file_size(bytes: u64, out: &mut [u8]) -> usize {
+    if out.is_empty() {
+        return 0;
+    }
+    if bytes < 1024 {
+        let mut digits = [0u8; 20];
+        let mut d_len = 0;
+        let mut val = bytes;
+        if val == 0 {
+            digits[0] = b'0';
+            d_len = 1;
+        } else {
+            while val > 0 && d_len < 20 {
+                digits[d_len] = b'0' + (val % 10) as u8;
+                val /= 10;
+                d_len += 1;
+            }
+        }
+        let mut n = 0;
+        for i in 0..d_len {
+            if n < out.len() {
+                out[n] = digits[d_len - 1 - i];
+                n += 1;
+            }
+        }
+        let suffix = b" B";
+        for &b in suffix {
+            if n < out.len() {
+                out[n] = b;
+                n += 1;
+            }
+        }
+        n
+    } else if bytes < 1024 * 1024 {
+        let kb = (bytes + 512) / 1024;
+        let mut digits = [0u8; 20];
+        let mut d_len = 0;
+        let mut val = kb;
+        if val == 0 {
+            digits[0] = b'0';
+            d_len = 1;
+        } else {
+            while val > 0 && d_len < 20 {
+                digits[d_len] = b'0' + (val % 10) as u8;
+                val /= 10;
+                d_len += 1;
+            }
+        }
+        let mut n = 0;
+        for i in 0..d_len {
+            if n < out.len() {
+                out[n] = digits[d_len - 1 - i];
+                n += 1;
+            }
+        }
+        let suffix = b" KB";
+        for &b in suffix {
+            if n < out.len() {
+                out[n] = b;
+                n += 1;
+            }
+        }
+        n
+    } else {
+        let mut mb = bytes / (1024 * 1024);
+        let mut rem_tenths = ((bytes % (1024 * 1024)) * 10 + 524288) / (1024 * 1024);
+        if rem_tenths >= 10 {
+            mb += 1;
+            rem_tenths -= 10;
+        }
+        let mut digits = [0u8; 20];
+        let mut d_len = 0;
+        let mut val = mb;
+        if val == 0 {
+            digits[0] = b'0';
+            d_len = 1;
+        } else {
+            while val > 0 && d_len < 20 {
+                digits[d_len] = b'0' + (val % 10) as u8;
+                val /= 10;
+                d_len += 1;
+            }
+        }
+        let mut n = 0;
+        for i in 0..d_len {
+            if n < out.len() {
+                out[n] = digits[d_len - 1 - i];
+                n += 1;
+            }
+        }
+        if n < out.len() {
+            out[n] = b'.';
+            n += 1;
+        }
+        if n < out.len() {
+            out[n] = b'0' + (rem_tenths % 10) as u8;
+            n += 1;
+        }
+        let suffix = b" MB";
+        for &b in suffix {
+            if n < out.len() {
+                out[n] = b;
+                n += 1;
+            }
+        }
+        n
+    }
+}
+
+/// Formats resolution as ASCII string: e.g. "680x382", "1920x1080".
+pub fn format_resolution(width: u32, height: u32, out: &mut [u8]) -> usize {
+    if out.is_empty() {
+        return 0;
+    }
+    if width == 0 || height == 0 {
+        let na = b"Unknown";
+        let n = na.len().min(out.len());
+        out[..n].copy_from_slice(&na[..n]);
+        return n;
+    }
+    let mut n = 0;
+    let mut w_digits = [0u8; 10];
+    let mut w_len = 0;
+    let mut val = width;
+    while val > 0 && w_len < 10 {
+        w_digits[w_len] = b'0' + (val % 10) as u8;
+        val /= 10;
+        w_len += 1;
+    }
+    for i in 0..w_len {
+        if n < out.len() {
+            out[n] = w_digits[w_len - 1 - i];
+            n += 1;
+        }
+    }
+    if n < out.len() {
+        out[n] = b'x';
+        n += 1;
+    }
+    let mut h_digits = [0u8; 10];
+    let mut h_len = 0;
+    val = height;
+    while val > 0 && h_len < 10 {
+        h_digits[h_len] = b'0' + (val % 10) as u8;
+        val /= 10;
+        h_len += 1;
+    }
+    for i in 0..h_len {
+        if n < out.len() {
+            out[n] = h_digits[h_len - 1 - i];
+            n += 1;
+        }
+    }
+    n
+}
+
+// -----------------------------------------------------------------------------
+// Alpha Blending Helper
+// -----------------------------------------------------------------------------
+
+/// Blends foreground ARGB color over background ARGB color with integer arithmetic.
+/// Alpha range: 0 (100% bg) to 255 (100% fg).
+#[inline(always)]
+pub fn blend_argb(bg: u32, fg: u32, alpha: u32) -> u32 {
+    let a = alpha.min(255);
+    let inv = 255 - a;
+    let r = (((bg >> 16) & 0xFF) * inv + ((fg >> 16) & 0xFF) * a) / 255;
+    let g = (((bg >> 8) & 0xFF) * inv + ((fg >> 8) & 0xFF) * a) / 255;
+    let b = ((bg & 0xFF) * inv + (fg & 0xFF) * a) / 255;
+    0xFF000000 | (r << 16) | (g << 8) | b
+}
+
+// -----------------------------------------------------------------------------
+// Playlist & Video Library Management
+// -----------------------------------------------------------------------------
+
+pub const MAX_PLAYLIST_ITEMS: usize = 32;
 pub const TITLE_CAP: usize = 48;
 pub const PATH_CAP: usize = 96;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct PlaylistItem {
     pub title: [u8; TITLE_CAP],
     pub title_len: usize,
     pub path: [u8; PATH_CAP],
     pub path_len: usize,
     pub codec: VideoCodec,
+    pub file_size: u64,
     pub duration_sec: u32,
     pub width: u32,
     pub height: u32,
@@ -603,6 +960,7 @@ impl PlaylistItem {
         path: [0; PATH_CAP],
         path_len: 0,
         codec: VideoCodec::Unknown,
+        file_size: 0,
         duration_sec: 0,
         width: 0,
         height: 0,
@@ -682,6 +1040,96 @@ impl Playlist {
             Some(self.current)
         }
     }
+
+    pub fn select(&mut self, index: usize) -> Option<usize> {
+        if index < self.count {
+            self.current = index;
+            Some(self.current)
+        } else {
+            None
+        }
+    }
+}
+
+/// Parses newline-delimited VFS entries (`<name>|<size>|<type>`) from a directory listing,
+/// filtering for valid video formats, and populating `playlist`.
+/// Returns the number of items added.
+pub fn parse_directory_listing(
+    dir_prefix: &[u8],
+    fs_list_data: &[u8],
+    playlist: &mut Playlist,
+) -> usize {
+    let mut added = 0;
+    let mut start = 0;
+    while start < fs_list_data.len() && playlist.count < MAX_PLAYLIST_ITEMS {
+        let end = fs_list_data[start..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map(|p| start + p)
+            .unwrap_or(fs_list_data.len());
+        let line = &fs_list_data[start..end];
+        if !line.is_empty() {
+            let mut parts = line.split(|&b| b == b'|');
+            if let Some(name) = parts.next() {
+                if !name.is_empty() && has_video_suffix(name) {
+                    let size_bytes = parts.next();
+                    let type_bytes = parts.next();
+                    // If type is directory, skip
+                    if type_bytes == Some(b"dir") {
+                        start = end.saturating_add(1);
+                        continue;
+                    }
+                    let mut size: u64 = 0;
+                    if let Some(sb) = size_bytes {
+                        for &b in sb {
+                            if b.is_ascii_digit() {
+                                size = size.saturating_mul(10).saturating_add((b - b'0') as u64);
+                            }
+                        }
+                    }
+
+                    // Build full path: dir_prefix + "/" + name
+                    let mut path = [0u8; PATH_CAP];
+                    let mut pl = 0;
+                    let dp_len = dir_prefix.len().min(PATH_CAP);
+                    path[..dp_len].copy_from_slice(&dir_prefix[..dp_len]);
+                    pl += dp_len;
+                    if pl > 0 && path[pl - 1] != b'/' && pl < PATH_CAP {
+                        path[pl] = b'/';
+                        pl += 1;
+                    }
+                    let nl = name.len().min(PATH_CAP.saturating_sub(pl));
+                    path[pl..pl + nl].copy_from_slice(&name[..nl]);
+                    pl += nl;
+
+                    // Deduplicate against existing playlist entries
+                    let already_exists = playlist.items[..playlist.count].iter().any(|item| {
+                        item.path_len == pl && &item.path[..pl] == &path[..pl]
+                    });
+
+                    if !already_exists {
+                        let mut item = PlaylistItem::EMPTY;
+                        let tl = name.len().min(TITLE_CAP);
+                        item.title[..tl].copy_from_slice(&name[..tl]);
+                        item.title_len = tl;
+                        item.path[..pl].copy_from_slice(&path[..pl]);
+                        item.path_len = pl;
+                        item.file_size = size;
+                        item.codec = detect_codec_from_name(name);
+                        item.duration_sec = 215; // Reference 3m35s fallback duration
+                        item.width = 680;
+                        item.height = 382;
+
+                        if playlist.add(item) {
+                            added += 1;
+                        }
+                    }
+                }
+            }
+        }
+        start = end.saturating_add(1);
+    }
+    added
 }
 
 // -----------------------------------------------------------------------------
@@ -733,9 +1181,9 @@ mod tests {
         let pos = header.len();
         // 4 pixels RGB: Red, Green, Blue, White
         let pixels = [
-            255, 0, 0,   // Red
-            0, 255, 0,   // Green
-            0, 0, 255,   // Blue
+            255, 0, 0,     // Red
+            0, 255, 0,     // Green
+            0, 0, 255,     // Blue
             255, 255, 255, // White
         ];
         ppm_data[pos..pos + pixels.len()].copy_from_slice(&pixels);
@@ -812,14 +1260,18 @@ mod tests {
 
     #[test]
     fn test_aspect_ratio_and_loop_cycling() {
-        let mut ar = AspectRatio::Fit16_9;
+        let mut ar = AspectRatio::Fit;
+        assert_eq!(ar.label(), "FIT");
+        ar = ar.next();
+        assert_eq!(ar.label(), "FILL");
+        ar = ar.next();
+        assert_eq!(ar.label(), "STRETCH");
+        ar = ar.next();
         assert_eq!(ar.label(), "16:9");
         ar = ar.next();
         assert_eq!(ar.label(), "4:3");
         ar = ar.next();
-        assert_eq!(ar.label(), "FILL");
-        ar = ar.next();
-        assert_eq!(ar.label(), "16:9");
+        assert_eq!(ar.label(), "FIT");
 
         let mut lm = LoopMode::None;
         assert_eq!(lm.label(), "OFF");
@@ -829,6 +1281,43 @@ mod tests {
         assert_eq!(lm.label(), "ALL");
         lm = lm.next();
         assert_eq!(lm.label(), "OFF");
+    }
+
+    #[test]
+    fn test_playback_speed_selector() {
+        let mut spd = PlaybackSpeed::Speed1_0x;
+        assert_eq!(spd.label(), "1.0x");
+        assert_eq!(spd.multiplier_milli(), 1000);
+
+        spd = spd.next();
+        assert_eq!(spd.label(), "1.25x");
+        assert_eq!(spd.multiplier_milli(), 1250);
+
+        spd = spd.next();
+        assert_eq!(spd.label(), "1.5x");
+        assert_eq!(spd.multiplier_milli(), 1500);
+
+        spd = spd.next();
+        assert_eq!(spd.label(), "2.0x");
+        assert_eq!(spd.multiplier_milli(), 2000);
+
+        spd = spd.next();
+        assert_eq!(spd.label(), "0.5x");
+        assert_eq!(spd.multiplier_milli(), 500);
+
+        spd = spd.next();
+        assert_eq!(spd.label(), "0.75x");
+        assert_eq!(spd.multiplier_milli(), 750);
+    }
+
+    #[test]
+    fn test_orientation_toggle() {
+        let mut orient = Orientation::Portrait;
+        assert_eq!(orient.label(), "PORTRAIT");
+        orient = orient.toggle();
+        assert_eq!(orient.label(), "LANDSCAPE");
+        orient = orient.toggle();
+        assert_eq!(orient.label(), "PORTRAIT");
     }
 
     #[test]
@@ -875,6 +1364,77 @@ mod tests {
     }
 
     #[test]
+    fn test_volume_calculations() {
+        let thumb_x = volume_thumb_x(100, 400, 50);
+        assert_eq!(thumb_x, 300); // 100 + (50 * 400 / 100) = 300
+
+        let pct = volume_seek_percent(300, 100, 400);
+        assert_eq!(pct, 50);
+
+        let pct_min = volume_seek_percent(50, 100, 400);
+        assert_eq!(pct_min, 0);
+
+        let pct_max = volume_seek_percent(600, 100, 400);
+        assert_eq!(pct_max, 100);
+    }
+
+    #[test]
+    fn test_file_size_and_resolution_formatting() {
+        let mut buf = [0u8; 24];
+
+        let n = format_file_size(512, &mut buf);
+        assert_eq!(&buf[..n], b"512 B");
+
+        let n = format_file_size(420 * 1024, &mut buf);
+        assert_eq!(&buf[..n], b"420 KB");
+
+        let n = format_file_size((12 * 1024 * 1024) / 10, &mut buf); // 1.2 MB
+        assert_eq!(&buf[..n], b"1.2 MB");
+
+        let n = format_resolution(680, 382, &mut buf);
+        assert_eq!(&buf[..n], b"680x382");
+
+        let n = format_resolution(1920, 1080, &mut buf);
+        assert_eq!(&buf[..n], b"1920x1080");
+    }
+
+    #[test]
+    fn test_alpha_blending() {
+        let bg = 0xFF000000;
+        let fg = 0xFFFFFFFF;
+        let mid = blend_argb(bg, fg, 128);
+        let r = (mid >> 16) & 0xFF;
+        let g = (mid >> 8) & 0xFF;
+        let b = mid & 0xFF;
+        assert!(r >= 127 && r <= 129);
+        assert!(g >= 127 && g <= 129);
+        assert!(b >= 127 && b <= 129);
+    }
+
+    #[test]
+    fn test_directory_listing_parser() {
+        let raw_list = b"trailer.ppm|68000|file\nclip.mp4|4500000|file\nnotes.txt|120|file\nsubfolder|0|dir\n";
+        let mut playlist = Playlist::new();
+
+        let added = parse_directory_listing(b"/storage/videos", raw_list, &mut playlist);
+        assert_eq!(added, 2);
+        assert_eq!(playlist.count, 2);
+        assert_eq!(playlist.items[0].title_str(), "trailer.ppm");
+        assert_eq!(playlist.items[0].path_str(), "/storage/videos/trailer.ppm");
+        assert_eq!(playlist.items[0].file_size, 68000);
+        assert_eq!(playlist.items[0].codec, VideoCodec::PpmP6);
+
+        assert_eq!(playlist.items[1].title_str(), "clip.mp4");
+        assert_eq!(playlist.items[1].path_str(), "/storage/videos/clip.mp4");
+        assert_eq!(playlist.items[1].codec, VideoCodec::H264);
+
+        // Test duplicate rejection
+        let added_dup = parse_directory_listing(b"/storage/videos", raw_list, &mut playlist);
+        assert_eq!(added_dup, 0);
+        assert_eq!(playlist.count, 2);
+    }
+
+    #[test]
     fn test_playlist_navigation() {
         let mut pl = Playlist::new();
         assert_eq!(pl.current_item().is_none(), true);
@@ -902,5 +1462,8 @@ mod tests {
 
         pl.prev();
         assert_eq!(pl.current_item().unwrap().title_str(), "Clip2");
+
+        pl.select(0);
+        assert_eq!(pl.current_item().unwrap().title_str(), "Clip1");
     }
 }

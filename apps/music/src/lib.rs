@@ -19,6 +19,45 @@ pub const STORE_KEY: &str = "music.library.v1";
 /// Blob format version; a blob not starting with this byte is not ours.
 pub const STORE_VERSION: u8 = 1;
 
+/// Settings key for currently playing track title.
+pub const NOW_PLAYING_TITLE_KEY: &str = "audio.now_playing.title";
+/// Settings key for currently playing artist name.
+pub const NOW_PLAYING_ARTIST_KEY: &str = "audio.now_playing.artist";
+/// Settings key for playback state ("playing", "paused", "stopped").
+pub const NOW_PLAYING_STATE_KEY: &str = "audio.now_playing.state";
+/// Settings key for currently active audio app package.
+pub const NOW_PLAYING_APP_KEY: &str = "audio.now_playing.app";
+/// Settings key for system ringtone path.
+pub const RINGTONE_KEY: &str = "audio.ringtone";
+/// Legacy/telephony ringtone setting key for cross-subsystem compatibility.
+pub const TELEPHONY_RINGTONE_KEY: &str = "telephony.ringtone";
+
+/// Publishes now-playing metadata to the system settings store.
+///
+/// WHY this is published to the settings store: the Launcher Notification Shade
+/// reads these keys to present a live Now Playing media card without requiring
+/// a direct peer-to-peer IPC connection when the music player is backgrounded.
+pub fn publish_now_playing(title: &[u8], artist: &[u8], state: &[u8]) -> bool {
+    let t_ok = std::settings_set(NOW_PLAYING_TITLE_KEY, title).is_ok();
+    let a_ok = std::settings_set(NOW_PLAYING_ARTIST_KEY, artist).is_ok();
+    let s_ok = std::settings_set(NOW_PLAYING_STATE_KEY, state).is_ok();
+    let p_ok = std::settings_set(NOW_PLAYING_APP_KEY, b"org.interos.music").is_ok();
+    t_ok && a_ok && s_ok && p_ok
+}
+
+/// Sets the given audio track or document path as the system-wide ringtone.
+///
+/// Writes both `audio.ringtone` and `telephony.ringtone` for seamless
+/// cross-application compatibility with the dialer and system settings.
+pub fn set_ringtone(path_or_title: &[u8]) -> bool {
+    if path_or_title.is_empty() {
+        return false;
+    }
+    let a = std::settings_set(RINGTONE_KEY, path_or_title).is_ok();
+    let b = std::settings_set(TELEPHONY_RINGTONE_KEY, path_or_title).is_ok();
+    a || b
+}
+
 /// Title bytes one track stores.
 pub const TITLE_MAX: usize = 40;
 

@@ -126,12 +126,12 @@ pub const IMAGE_SUFFIXES: [&[u8]; 9] = [
     b".jpg", b".jpeg", b".png", b".bmp", b".gif", b".webp", b".qoi", b".ppm", b".raw",
 ];
 
-pub const VIDEO_SUFFIXES: [&[u8]; 5] = [
-    b".mp4", b".webm", b".mkv", b".avi", b".mov",
+pub const VIDEO_SUFFIXES: [&[u8]; 7] = [
+    b".mp4", b".webm", b".mkv", b".avi", b".mov", b".mjpg", b".mjpeg",
 ];
 
-pub const AUDIO_SUFFIXES: [&[u8]; 6] = [
-    b".mp3", b".wav", b".ogg", b".flac", b".aac", b".m4a",
+pub const AUDIO_SUFFIXES: [&[u8]; 7] = [
+    b".mp3", b".wav", b".ogg", b".flac", b".aac", b".m4a", b".pcm",
 ];
 
 pub const DOC_SUFFIXES: [&[u8]; 7] = [
@@ -294,18 +294,25 @@ pub fn document_from_index(path: &str) -> Option<SelectedDocument> {
         let path_len = record.path.len().min(MAX_DOCUMENT_PATH_LEN);
         selected.path[..path_len].copy_from_slice(&record.path.as_bytes()[..path_len]);
         selected.path_len = path_len;
-        let mime_len = record.mime.len().min(MAX_DOCUMENT_MIME_LEN);
-        selected.mime[..mime_len].copy_from_slice(&record.mime.as_bytes()[..mime_len]);
+        let is_video_dir = record.path.starts_with("/storage/videos") || record.path.contains("/videos/");
+        let mime_override = if is_video_dir && (record.path.ends_with(".ppm") || record.path.ends_with(".PPM")) {
+            "video/x-ppm"
+        } else if is_video_dir && (record.path.ends_with(".raw") || record.path.ends_with(".RAW")) {
+            "video/x-raw"
+        } else if is_video_dir && (record.path.ends_with(".mjpg") || record.path.ends_with(".MJPG") || record.path.ends_with(".mjpeg") || record.path.ends_with(".MJPEG")) {
+            "video/x-motion-jpeg"
+        } else {
+            record.mime
+        };
+        let mime_len = mime_override.len().min(MAX_DOCUMENT_MIME_LEN);
+        selected.mime[..mime_len].copy_from_slice(&mime_override.as_bytes()[..mime_len]);
         selected.mime_len = mime_len;
         let provenance_len = record.provenance.len().min(16);
         selected.provenance[..provenance_len]
             .copy_from_slice(&record.provenance.as_bytes()[..provenance_len]);
         selected.provenance_len = provenance_len;
         selected.size = record.length;
-        let mut mime_buf = [0u8; MAX_DOCUMENT_MIME_LEN];
-        mime_buf[..mime_len].copy_from_slice(&record.mime.as_bytes()[..mime_len]);
-        let mime = core::str::from_utf8(&mime_buf[..mime_len]).unwrap_or("");
-        selected.handler_count = handlers_for_mime(mime, &mut handler_raw, &mut selected.handlers);
+        selected.handler_count = handlers_for_mime(mime_override, &mut handler_raw, &mut selected.handlers);
         return Some(selected);
     }
     None
@@ -318,7 +325,19 @@ pub fn document_from_path(path: &str) -> Option<SelectedDocument> {
         return Some(doc);
     }
     let bytes = path.as_bytes();
-    let mime_kind = detect_mime(bytes, false);
+    let is_video_dir = path.starts_with("/storage/videos") || path.contains("/videos/");
+    let is_video_frame = is_video_dir && (has_suffix(bytes, b".ppm") || has_suffix(bytes, b".raw"));
+    let is_video_ext = has_suffix(bytes, b".mp4")
+        || has_suffix(bytes, b".mjpg")
+        || has_suffix(bytes, b".mjpeg")
+        || has_suffix(bytes, b".webm")
+        || has_suffix(bytes, b".mkv")
+        || has_suffix(bytes, b".avi");
+    let mime_kind = if is_video_frame || is_video_ext {
+        FileMime::Video
+    } else {
+        detect_mime(bytes, false)
+    };
     let mime_str = match mime_kind {
         FileMime::Directory => "inode/directory",
         FileMime::Image => {
@@ -336,8 +355,26 @@ pub fn document_from_path(path: &str) -> Option<SelectedDocument> {
                 "image/jpeg"
             }
         }
-        FileMime::Video => "video/mp4",
-        FileMime::Audio => "audio/wav",
+        FileMime::Video => {
+            if has_suffix(bytes, b".mjpg") || has_suffix(bytes, b".mjpeg") {
+                "video/x-motion-jpeg"
+            } else if has_suffix(bytes, b".ppm") {
+                "video/x-ppm"
+            } else if has_suffix(bytes, b".raw") {
+                "video/x-raw"
+            } else {
+                "video/mp4"
+            }
+        }
+        FileMime::Audio => {
+            if has_suffix(bytes, b".mp3") {
+                "audio/mpeg"
+            } else if has_suffix(bytes, b".pcm") {
+                "audio/pcm"
+            } else {
+                "audio/wav"
+            }
+        }
         FileMime::Document => {
             if has_suffix(bytes, b".json") {
                 "application/json"
@@ -993,7 +1030,11 @@ mod tests {
         assert_eq!(detect_mime(b"photo.jpg", false), FileMime::Image);
         assert_eq!(detect_mime(b"screenshot.ppm", false), FileMime::Image);
         assert_eq!(detect_mime(b"clip.mp4", false), FileMime::Video);
+        assert_eq!(detect_mime(b"stream.mjpg", false), FileMime::Video);
+        assert_eq!(detect_mime(b"movie.mjpeg", false), FileMime::Video);
         assert_eq!(detect_mime(b"song.mp3", false), FileMime::Audio);
+        assert_eq!(detect_mime(b"sound.wav", false), FileMime::Audio);
+        assert_eq!(detect_mime(b"voice.pcm", false), FileMime::Audio);
         assert_eq!(detect_mime(b"notes.txt", false), FileMime::Document);
         assert_eq!(detect_mime(b"archive.tar", false), FileMime::Other);
     }

@@ -850,4 +850,34 @@ mod tests {
         assert_eq!(items[0].name_len, 0);
         assert!(!thumbs[0].valid);
     }
+
+    #[test]
+    fn test_media_at_with_storage_resolution() {
+        // 3 wallpapers, 0 photos, 2 storage items
+        assert_eq!(media_at_with_storage(0, 3, 0, 2), Some(Media::Wallpaper(0)));
+        assert_eq!(media_at_with_storage(1, 3, 0, 2), Some(Media::Wallpaper(1)));
+        assert_eq!(media_at_with_storage(2, 3, 0, 2), Some(Media::Wallpaper(2)));
+        assert_eq!(media_at_with_storage(3, 3, 0, 2), Some(Media::StorageItem(0)));
+        assert_eq!(media_at_with_storage(4, 3, 0, 2), Some(Media::StorageItem(1)));
+        assert_eq!(media_at_with_storage(5, 3, 0, 2), None);
+    }
+
+    #[test]
+    fn test_filter_coverage() {
+        assert!(Filter::All.shows_wallpapers());
+        assert!(Filter::All.shows_ledger());
+        assert!(Filter::All.shows_videos());
+
+        assert!(Filter::Wallpapers.shows_wallpapers());
+        assert!(!Filter::Wallpapers.shows_ledger());
+        assert!(!Filter::Wallpapers.shows_videos());
+
+        assert!(!Filter::Photos.shows_wallpapers());
+        assert!(Filter::Photos.shows_ledger());
+        assert!(!Filter::Photos.shows_videos());
+
+        assert!(!Filter::Videos.shows_wallpapers());
+        assert!(!Filter::Videos.shows_ledger());
+        assert!(Filter::Videos.shows_videos());
+    }
 }
