@@ -441,10 +441,20 @@ pub fn sys_get_task_id() -> TaskId {
 }
 
 pub fn sys_app_background() -> SyscallResult {
-    let task = sys_get_task_id();
+    sys_app_background_ext(0)
+}
+
+pub fn sys_app_background_ext(target_id: u64) -> SyscallResult {
+    let caller = sys_get_task_id();
+    let task = if target_id != 0 {
+        TaskId(target_id)
+    } else {
+        caller
+    };
     if task == TaskId(0) { return SyscallResult::PermissionDenied; }
     SCHEDULER.lock().set_task_priority(task, 1);
     crate::drivers::display_kms::DRM_KMS.lock().set_surfaces_visibility_for_task(task.0, false);
+    crate::capability::revocation::suspend_ephemeral_for_task(task);
     crate::task::process::set_background(task, crate::interrupts::get_system_ticks())
         .map(|_| SyscallResult::Success).unwrap_or(SyscallResult::InvalidArgument)
 }
@@ -1168,7 +1178,7 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
         119 => crate::syscall::sys_app_wake() as i64,
         118 => crate::syscall::sys_app_suspend() as i64,
         117 => crate::syscall::sys_app_foreground() as i64,
-        116 => crate::syscall::sys_app_background() as i64,
+        116 => crate::syscall::sys_app_background_ext(a1 as u64) as i64,
         115 => {
             // AppStorageOpen: a1 = cap_slot, a2 = relative_path_ptr, a3 = path_len, a4 = rights_bits.
             let cap_slot = a1 as usize;

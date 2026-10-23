@@ -448,6 +448,20 @@ impl CapabilityTable {
         Err(CapError::TableFull)
     }
 
+    /// Returns the raw capability in `slot_idx` without access recording or revocation checks.
+    pub fn raw_slot(&self, slot_idx: usize) -> Option<&Capability> {
+        self.slots.get(slot_idx).and_then(|s| s.cap.as_ref())
+    }
+
+    /// Checks if the capability in `slot_idx` is currently suspended due to background state.
+    pub fn is_ephemeral_suspended(&self, slot_idx: usize) -> bool {
+        if let Some(cap) = self.raw_slot(slot_idx) {
+            revocation::is_ephemeral_suspended(cap.id)
+        } else {
+            false
+        }
+    }
+
     /// Retrieves a reference to a capability by slot index.
     ///
     /// WHY the revocation check lives here: every `verify*` method resolves its
@@ -1115,6 +1129,7 @@ pub fn cleanup_task(task: crate::task::TaskId) {
     let leases = revocation::revoke_grantee_delegations(task);
     delegation::prune(crate::interrupts::get_system_ticks());
     let consents = permission::cleanup_task(task);
+    revocation::cleanup_task(task);
     if leases > 0 || consents > 0 {
         crate::serial_println!(
             "[CAPABILITY] Task {} released {} delegated lease(s) and {} permission grant(s) on exit.",

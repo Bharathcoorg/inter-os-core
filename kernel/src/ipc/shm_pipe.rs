@@ -268,6 +268,13 @@ pub struct ShmPipeManager {
     pub pipes: [Option<ShmRingBuffer>; 8],
 }
 
+/// Standard system-wide SHM pipe IDs
+pub const PIPE_CAMERA_RAW: u32 = 0;
+pub const PIPE_AUDIO_PCM: u32 = 1;
+pub const PIPE_VAULT_BULK: u32 = 2;
+pub const PIPE_MESH_DMA: u32 = 3;
+pub const PIPE_COMPOSITOR_DISPLAY_LIST: u32 = 4;
+
 impl ShmPipeManager {
     pub const fn new() -> Self {
         Self {
@@ -276,7 +283,7 @@ impl ShmPipeManager {
                 Some(ShmRingBuffer::new(1, TaskId(8), TaskId(10), "audio.pcm_stream")),
                 Some(ShmRingBuffer::new(2, TaskId(4), TaskId(1), "vault.bulk_crypt")),
                 Some(ShmRingBuffer::new(3, TaskId(5), TaskId(5), "mesh.dma_pipe")),
-                None,
+                Some(ShmRingBuffer::new(4, TaskId(6), TaskId(10), "compositor.display_list")),
                 None,
                 None,
                 None,

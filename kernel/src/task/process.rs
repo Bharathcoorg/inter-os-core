@@ -135,6 +135,8 @@ pub fn set_background(task: TaskId, now: u64) -> Result<(), &'static str> {
         r.background_cpu_ticks = 0;
         r.background_ipc = 0;
         r.background_network_bytes = 0;
+        drop(table);
+        crate::capability::revocation::suspend_ephemeral_for_task(task);
         Ok(())
     } else {
         Err("process is not foreground")
@@ -154,6 +156,8 @@ pub fn set_foreground(task: TaskId) -> Result<(), &'static str> {
         r.background_cpu_ticks = 0;
         r.background_ipc = 0;
         r.background_network_bytes = 0;
+        drop(table);
+        crate::capability::revocation::reinstate_ephemeral_for_task(task);
         Ok(())
     } else { Err("process is not backgrounded") }
 }

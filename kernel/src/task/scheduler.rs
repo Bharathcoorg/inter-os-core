@@ -16,6 +16,19 @@ use crate::task::process::ReapError;
 /// Default time slice allotted to a task before preemption (in timer ticks, e.g. 5 = 50ms at 100Hz).
 pub const TIME_SLICE_TICKS: u64 = 5;
 
+/// Standard priority levels for system and user workloads.
+pub const PRIORITY_IDLE: u8 = 0;
+pub const PRIORITY_BACKGROUND: u8 = 2;
+pub const PRIORITY_SERVICE: u8 = 5;
+pub const PRIORITY_APP: u8 = 6;
+pub const PRIORITY_REALTIME: u8 = 10;
+
+/// Strict VSync frame deadline budgets.
+/// For 120Hz display modes: <8.3ms (8,333,333 ns).
+pub const VSYNC_BUDGET_120HZ_NS: u64 = 8_333_333;
+/// For 60Hz display modes: <16.6ms (16,666,666 ns).
+pub const VSYNC_BUDGET_60HZ_NS: u64 = 16_666_666;
+
 /// Global system multitasking scheduler.
 pub static SCHEDULER: Mutex<Scheduler> = Mutex::new(Scheduler::new());
 
@@ -25,6 +38,7 @@ pub struct Scheduler {
     current_idx: usize,
     ticks_in_slice: u64,
     initialized: bool,
+    active_foreground_task: Option<TaskId>,
 }
 
 /// Whether a terminated task's process and thread records are now releasable.
@@ -84,6 +98,24 @@ impl Scheduler {
             current_idx: 0,
             ticks_in_slice: 0,
             initialized: false,
+            active_foreground_task: None,
+        }
+    }
+
+    /// Automatically configures UI pipeline services to Real-Time EDF scheduling.
+    fn configure_task_ui_pipeline(&mut self, id: TaskId) {
+        if let Some(task) = self.tasks.iter_mut().find(|t| t.id == id) {
+            if task.name == "displayd"
+                || task.name == "inputd"
+                || task.name == "compositor"
+                || task.id == TaskId(2)
+                || task.id == TaskId(3)
+                || task.id == TaskId(10)
+            {
+                task.sched_class = super::SchedulingClass::RealTime;
+                task.priority = PRIORITY_REALTIME;
+                task.frame_budget_ns = VSYNC_BUDGET_60HZ_NS;
+            }
         }
     }
 
@@ -132,6 +164,7 @@ impl Scheduler {
         };
         tcb.process_id = Some(process_id);
         self.tasks.push(tcb);
+        self.configure_task_ui_pipeline(id);
         id
     }
 
@@ -153,6 +186,7 @@ impl Scheduler {
         };
         tcb.process_id = Some(process_id);
         self.tasks.push(tcb);
+        self.configure_task_ui_pipeline(id);
         crate::ipc::IPC_ROUTER.lock().register_task(id);
         id
     }
@@ -212,6 +246,7 @@ impl Scheduler {
             return Err(e);
         }
         self.tasks.push(tcb);
+        self.configure_task_ui_pipeline(id);
         let ipc_registered = crate::ipc::IPC_ROUTER.lock().register_task(id);
         if !ipc_registered {
             self.tasks.pop();
@@ -290,6 +325,65 @@ impl Scheduler {
         }
     }
 
+    /// Returns true if `task` belongs to the deterministic Real-Time UI/VSync pipeline.
+    pub fn is_realtime_ui_task(&self, task: &TaskControlBlock) -> bool {
+        task.sched_class == super::SchedulingClass::RealTime
+            || task.name == "displayd"
+            || task.name == "inputd"
+            || task.name == "compositor"
+            || task.id == TaskId(2)
+            || task.id == TaskId(3)
+            || task.id == TaskId(10)
+            || Some(task.id) == self.active_foreground_task
+    }
+
+    /// Dynamically assigns the active foreground surface task for real-time UI scheduling.
+    pub fn set_active_foreground_task(&mut self, task: Option<TaskId>) {
+        let prev = self.active_foreground_task;
+        self.active_foreground_task = task;
+        if let Some(prev_id) = prev {
+            if let Some(t) = self.tasks.iter_mut().find(|t| t.id == prev_id) {
+                if t.name != "displayd" && t.name != "inputd" && t.name != "compositor" && t.id.0 > 10 {
+                    t.priority = PRIORITY_APP;
+                    t.sched_class = super::SchedulingClass::Normal;
+                    t.deadline_ticks = 0;
+                }
+            }
+        }
+        if let Some(next_id) = task {
+            if let Some(t) = self.tasks.iter_mut().find(|t| t.id == next_id) {
+                t.priority = PRIORITY_REALTIME;
+                t.sched_class = super::SchedulingClass::RealTime;
+                t.frame_budget_ns = VSYNC_BUDGET_60HZ_NS;
+            }
+        }
+    }
+
+    /// Returns the currently designated active foreground surface task.
+    pub fn active_foreground_task(&self) -> Option<TaskId> {
+        self.active_foreground_task
+    }
+
+    /// Sets a real-time task's frame deadline and budget for Earliest-Deadline-First dispatch.
+    pub fn set_task_deadline(&mut self, id: TaskId, deadline_ticks: u64, budget_ns: u64) {
+        if let Some(t) = self.tasks.iter_mut().find(|t| t.id == id) {
+            t.sched_class = super::SchedulingClass::RealTime;
+            t.priority = t.priority.max(PRIORITY_REALTIME);
+            t.deadline_ticks = deadline_ticks;
+            t.frame_budget_ns = budget_ns;
+        }
+    }
+
+    /// Sets the task's scheduling class.
+    pub fn set_task_sched_class(&mut self, id: TaskId, class: super::SchedulingClass) {
+        if let Some(t) = self.tasks.iter_mut().find(|t| t.id == id) {
+            t.sched_class = class;
+            if class == super::SchedulingClass::RealTime {
+                t.priority = t.priority.max(PRIORITY_REALTIME);
+            }
+        }
+    }
+
 
     /// Reclaims terminated TCB resources that are no longer the current task.
     fn reap_terminated(&mut self) {
@@ -362,21 +456,47 @@ impl Scheduler {
         }
 
         let current_idx = self.current_idx;
-        let mut next_idx = (current_idx + 1) % self.tasks.len();
-        let mut best_idx = None;
-        let mut best_priority = 0u8;
-        while next_idx != current_idx {
-            if self.tasks[next_idx].state == TaskState::Ready {
-                let p = self.tasks[next_idx].priority;
-                if best_idx.is_none() || p > best_priority {
-                    best_idx = Some(next_idx);
-                    best_priority = p;
+
+        // 1. Scan for Ready tasks in the Real-Time / EDF class
+        let mut best_rt_idx = None;
+        let mut earliest_deadline = u64::MAX;
+        let mut best_rt_priority = 0u8;
+
+        for (i, task) in self.tasks.iter().enumerate() {
+            if i != current_idx && task.state == TaskState::Ready && self.is_realtime_ui_task(task) {
+                let dl = if task.deadline_ticks > 0 { task.deadline_ticks } else { u64::MAX - 1 };
+                if best_rt_idx.is_none()
+                    || dl < earliest_deadline
+                    || (dl == earliest_deadline && task.priority > best_rt_priority)
+                {
+                    best_rt_idx = Some(i);
+                    earliest_deadline = dl;
+                    best_rt_priority = task.priority;
                 }
             }
-            next_idx = (next_idx + 1) % self.tasks.len();
         }
-        let Some(next_idx) = best_idx else {
-            return (None, None);
+
+        let next_idx = if let Some(rt_idx) = best_rt_idx {
+            rt_idx
+        } else {
+            // 2. Normal round-robin with priority selection
+            let mut scan_idx = (current_idx + 1) % self.tasks.len();
+            let mut best_idx = None;
+            let mut best_priority = 0u8;
+            while scan_idx != current_idx {
+                if self.tasks[scan_idx].state == TaskState::Ready {
+                    let p = self.tasks[scan_idx].priority;
+                    if best_idx.is_none() || p > best_priority {
+                        best_idx = Some(scan_idx);
+                        best_priority = p;
+                    }
+                }
+                scan_idx = (scan_idx + 1) % self.tasks.len();
+            }
+            let Some(idx) = best_idx else {
+                return (None, None);
+            };
+            idx
         };
 
         // Verify stack canary of the departing task
@@ -520,11 +640,25 @@ impl Scheduler {
         if let Some(current) = self.tasks.get_mut(self.current_idx) {
             current.cpu_ticks = current.cpu_ticks.saturating_add(1);
             crate::task::process::account_background_cpu_tick(current.id);
+            // Real-time task frame deadline check:
+            if current.sched_class == super::SchedulingClass::RealTime && current.deadline_ticks > 0 {
+                let now = crate::interrupts::get_system_ticks();
+                if now > current.deadline_ticks {
+                    current.deadline_ticks = 0;
+                }
+            }
         }
 
         self.ticks_in_slice = self.ticks_in_slice.saturating_add(1);
 
-        if self.ticks_in_slice >= TIME_SLICE_TICKS {
+        // Real-time UI tasks get rapid low-latency 1-tick slices when other RT tasks wait
+        let has_competing_rt = self.tasks.iter().enumerate().any(|(i, t)| {
+            i != self.current_idx && t.state == TaskState::Ready && self.is_realtime_ui_task(t)
+        });
+
+        let slice_limit = if has_competing_rt { 1 } else { TIME_SLICE_TICKS };
+
+        if self.ticks_in_slice >= slice_limit {
             let suspended = crate::task::process::enforce_background_budget();
             if suspended > 0 {
                 crate::serial_println!("[LIFECYCLE] Suspended {} background application(s) after budget exhaustion.", suspended);
@@ -1083,6 +1217,69 @@ mod tests {
         // Further ticks must not re-count a zombie that is already gone.
         assert_eq!(sched.reap_orphans(), 0, "a reclaimed zombie must not be counted twice");
         assert_eq!(sched.reap_orphans(), 0, "a reclaimed zombie must not be counted twice");
+    }
+
+    #[test]
+    fn test_ui_pipeline_services_pinned_to_realtime() {
+        let _process = crate::task::process::PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut sched = Scheduler::new();
+        sched.init(CapabilityTable::new_for_task(TaskId(0), 16));
+
+        let displayd_id = sched.spawn("displayd", dummy_test_entry, CapabilityTable::new_for_task(TaskId::new(), 16), 5);
+        let inputd_id = sched.spawn("inputd", dummy_test_entry, CapabilityTable::new_for_task(TaskId::new(), 16), 5);
+        let comp_id = sched.spawn("compositor", dummy_test_entry, CapabilityTable::new_for_task(TaskId::new(), 16), 5);
+        let normal_app = sched.spawn("notes", dummy_test_entry, CapabilityTable::new_for_task(TaskId::new(), 16), 6);
+
+        // Verify that displayd, inputd, and compositor are recognized as real-time UI pipeline tasks
+        let displayd_task = sched.get_task(displayd_id).unwrap();
+        assert_eq!(displayd_task.sched_class, crate::task::SchedulingClass::RealTime);
+        assert_eq!(displayd_task.priority, PRIORITY_REALTIME);
+        assert_eq!(displayd_task.frame_budget_ns, VSYNC_BUDGET_60HZ_NS);
+        assert!(sched.is_realtime_ui_task(displayd_task));
+
+        let inputd_task = sched.get_task(inputd_id).unwrap();
+        assert_eq!(inputd_task.sched_class, crate::task::SchedulingClass::RealTime);
+        assert_eq!(inputd_task.priority, PRIORITY_REALTIME);
+        assert!(sched.is_realtime_ui_task(inputd_task));
+
+        let comp_task = sched.get_task(comp_id).unwrap();
+        assert_eq!(comp_task.sched_class, crate::task::SchedulingClass::RealTime);
+        assert_eq!(comp_task.priority, PRIORITY_REALTIME);
+        assert!(sched.is_realtime_ui_task(comp_task));
+
+        let app_task = sched.get_task(normal_app).unwrap();
+        assert_eq!(app_task.sched_class, crate::task::SchedulingClass::Normal);
+        assert_eq!(app_task.priority, 6);
+        assert!(!sched.is_realtime_ui_task(app_task));
+    }
+
+    #[test]
+    fn test_foreground_task_promoted_to_realtime_and_edf() {
+        let _process = crate::task::process::PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut sched = Scheduler::new();
+        sched.init(CapabilityTable::new_for_task(TaskId(0), 16));
+
+        let app_id = sched.spawn("vault", dummy_test_entry, CapabilityTable::new_for_task(TaskId::new(), 16), 6);
+        assert_eq!(sched.get_task(app_id).unwrap().sched_class, crate::task::SchedulingClass::Normal);
+
+        // Foregrounding promotes the app to RealTime class and priority
+        sched.set_active_foreground_task(Some(app_id));
+        let fg_task = sched.get_task(app_id).unwrap();
+        assert_eq!(fg_task.sched_class, crate::task::SchedulingClass::RealTime);
+        assert_eq!(fg_task.priority, PRIORITY_REALTIME);
+        assert!(sched.is_realtime_ui_task(fg_task));
+
+        // Test EDF deadline configuration (e.g. 120Hz VSync deadline <8.3ms)
+        sched.set_task_deadline(app_id, 100, VSYNC_BUDGET_120HZ_NS);
+        let deadline_task = sched.get_task(app_id).unwrap();
+        assert_eq!(deadline_task.deadline_ticks, 100);
+        assert_eq!(deadline_task.frame_budget_ns, VSYNC_BUDGET_120HZ_NS);
+
+        // Backgrounding demotes back to Normal class
+        sched.set_active_foreground_task(None);
+        let bg_task = sched.get_task(app_id).unwrap();
+        assert_eq!(bg_task.sched_class, crate::task::SchedulingClass::Normal);
+        assert_eq!(bg_task.priority, PRIORITY_APP);
     }
 }
 

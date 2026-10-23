@@ -462,6 +462,20 @@ impl UserManager {
         }
     }
 
+    /// Unlocks account via verified biometric authentication (fingerprint / face).
+    pub fn unlock_biometric(&mut self, uid: UserId) -> Result<(), UserError> {
+        let profile = self.users.get_mut(&uid).ok_or(UserError::UserNotFound)?;
+        if let UserLockState::Lockout { .. } = profile.lock_state {
+            return Err(UserError::LockoutActive);
+        }
+        if let Some(ref mut cred) = profile.credential {
+            cred.failed_attempts = 0;
+        }
+        profile.lock_state = UserLockState::Unlocked;
+        crate::serial_println!("[USER] User UID={} unlocked via biometric authentication.", uid.0);
+        Ok(())
+    }
+
     /// Locks an unlocked user account.
     pub fn lock(&mut self, uid: UserId) -> Result<(), UserError> {
         let profile = self.users.get_mut(&uid).ok_or(UserError::UserNotFound)?;

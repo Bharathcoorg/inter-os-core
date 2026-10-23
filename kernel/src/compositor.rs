@@ -19,6 +19,7 @@ pub enum CompositorOp {
     DestroySurface = 4,
     Commit = 5,
     Focus = 6,
+    SubmitDisplayList = 7,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,6 +67,7 @@ impl CompositorRequest {
             4 => CompositorOp::DestroySurface,
             5 => CompositorOp::Commit,
             6 => CompositorOp::Focus,
+            7 => CompositorOp::SubmitDisplayList,
             _ => return Err("unknown compositor operation"),
         };
         Ok(Self {

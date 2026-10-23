@@ -40,11 +40,18 @@
 use alloc::vec::Vec;
 use spin::Mutex;
 
-use super::{delegation, CapabilityId};
+use super::{delegation, CapabilityId, CapabilityType};
 use crate::task::TaskId;
 
 /// Revoked capability identifiers.
 static REVOKED: Mutex<Vec<CapabilityId>> = Mutex::new(Vec::new());
+
+/// Ephemeral capabilities currently suspended because their owning application/surface
+/// has moved to the background or into the task switcher.
+static EPHEMERAL_SUSPENDED: Mutex<Vec<(TaskId, CapabilityId)>> = Mutex::new(Vec::new());
+
+/// Explicit tasks granted background authorization pills/privileges.
+static BACKGROUND_PILL_TASKS: Mutex<Vec<TaskId>> = Mutex::new(Vec::new());
 
 /// Publishes a revocation for `cap_id` and kills every capability derived from
 /// it. Returns true when this call was the one that published it.
@@ -81,10 +88,117 @@ fn publish(cap_id: CapabilityId) -> bool {
     }
 }
 
-/// Returns whether `cap_id` has been revoked. This is the authoritative
-/// question every authorization check must ask.
+/// Returns whether `cap_id` has been revoked or ephemerally suspended.
+/// This is the authoritative question every authorization check must ask.
 pub fn is_revoked(cap_id: CapabilityId) -> bool {
-    REVOKED.lock().contains(&cap_id)
+    if REVOKED.lock().contains(&cap_id) {
+        return true;
+    }
+    EPHEMERAL_SUSPENDED.lock().iter().any(|(_, id)| *id == cap_id)
+}
+
+/// Returns whether `cap_id` is specifically in the ephemerally suspended state.
+pub fn is_ephemeral_suspended(cap_id: CapabilityId) -> bool {
+    EPHEMERAL_SUSPENDED.lock().iter().any(|(_, id)| *id == cap_id)
+}
+
+/// Grants or revokes an explicit background pill authorization to a task.
+pub fn set_background_pill(task: TaskId, active: bool) {
+    let mut pills = BACKGROUND_PILL_TASKS.lock();
+    if active {
+        if !pills.contains(&task) {
+            pills.push(task);
+        }
+    } else {
+        pills.retain(|t| *t != task);
+    }
+}
+
+/// Checks if a task possesses an active explicit background pill authorization.
+pub fn has_background_pill(task: TaskId) -> bool {
+    BACKGROUND_PILL_TASKS.lock().contains(&task)
+}
+
+/// Suspends ephemeral background capabilities (camera, microphone, network DMA)
+/// for `task_id` when it is moved into the background or swiped into recents.
+/// If `has_background_pill(task_id)` is true, network access may remain active,
+/// but hardware camera and microphone are always strictly suspended.
+pub fn suspend_ephemeral_for_task(task_id: TaskId) -> usize {
+    let bg_pill = has_background_pill(task_id);
+    let mut suspended_count = 0;
+    let mut caps_to_suspend = Vec::new();
+
+    // 1. Synthesize deterministic permission capability IDs
+    use crate::capability::permission::SensitivePermission;
+    caps_to_suspend.push(SensitivePermission::CameraCapture.capability_id(task_id));
+    caps_to_suspend.push(SensitivePermission::Microphone.capability_id(task_id));
+    if !bg_pill {
+        caps_to_suspend.push(SensitivePermission::NetworkSend.capability_id(task_id));
+    }
+
+    // 2. Also inspect the task's capability table for direct hardware port / net tokens
+    if let Some(sched) = crate::task::SCHEDULER.try_lock() {
+        if let Some(task) = sched.get_task(task_id) {
+            for slot in 0..task.cap_table.capacity() {
+                if let Some(cap) = task.cap_table.raw_slot(slot) {
+                    let is_target = match cap.cap_type {
+                        CapabilityType::HardwarePortIo => {
+                            // Camera (0xCA00), Microphone (0xCA01)
+                            cap.object_id == 0xCA00 || cap.object_id == 0xCA01
+                        }
+                        CapabilityType::NetworkSocket | CapabilityType::NetworkSend | CapabilityType::NetworkReceive => {
+                            !bg_pill
+                        }
+                        CapabilityType::ShmProducer | CapabilityType::ShmConsumer => {
+                            // Camera / audio DMA shm channels
+                            !bg_pill && (cap.object_id == 0xCA00 || cap.object_id == 0xCA01)
+                        }
+                        _ => false,
+                    };
+                    if is_target && !caps_to_suspend.contains(&cap.id) {
+                        caps_to_suspend.push(cap.id);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut suspended = EPHEMERAL_SUSPENDED.lock();
+    for cap_id in caps_to_suspend {
+        if !suspended.iter().any(|(t, id)| *t == task_id && *id == cap_id) {
+            suspended.push((task_id, cap_id));
+            suspended_count += 1;
+        }
+    }
+
+    if suspended_count > 0 {
+        crate::serial_println!(
+            "[PRIVACY] Suspended {} ephemeral background capability token(s) for task={}",
+            suspended_count, task_id.0
+        );
+    }
+    suspended_count
+}
+
+/// Reinstates ephemeral capabilities when `task_id` returns to the foreground.
+pub fn reinstate_ephemeral_for_task(task_id: TaskId) -> usize {
+    let mut suspended = EPHEMERAL_SUSPENDED.lock();
+    let before = suspended.len();
+    suspended.retain(|(t, _)| *t != task_id);
+    let restored = before.saturating_sub(suspended.len());
+    if restored > 0 {
+        crate::serial_println!(
+            "[PRIVACY] Reinstated {} ephemeral foreground capability token(s) for task={}",
+            restored, task_id.0
+        );
+    }
+    restored
+}
+
+/// Cleans up ephemeral state and background pills when a task terminates.
+pub fn cleanup_task(task_id: TaskId) {
+    EPHEMERAL_SUSPENDED.lock().retain(|(t, _)| *t != task_id);
+    BACKGROUND_PILL_TASKS.lock().retain(|t| *t != task_id);
 }
 
 /// Lifts a revocation. Only an explicit re-grant of consent may call this.
@@ -617,5 +731,59 @@ mod tests {
             !second.validate_invariants() || second.find_slot(CapabilityType::IpcSend, Rights::WRITE).is_none(),
             "no capability in the unrekeyed relaunch may authorize"
         );
+    }
+
+    #[test]
+    fn test_ephemeral_background_revocation_and_reinstatement() {
+        let task = TaskId(88);
+        use crate::capability::permission::SensitivePermission;
+        let cam_id = SensitivePermission::CameraCapture.capability_id(task);
+        let mic_id = SensitivePermission::Microphone.capability_id(task);
+        let net_id = SensitivePermission::NetworkSend.capability_id(task);
+
+        assert!(!is_revoked(cam_id));
+        assert!(!is_revoked(mic_id));
+        assert!(!is_revoked(net_id));
+
+        // Background the task without background pill: camera, mic, and net are suspended
+        let count = suspend_ephemeral_for_task(task);
+        assert!(count >= 3);
+        assert!(is_revoked(cam_id));
+        assert!(is_revoked(mic_id));
+        assert!(is_revoked(net_id));
+        assert!(is_ephemeral_suspended(cam_id));
+
+        // Reinstating foreground clears the ephemeral suspension
+        let restored = reinstate_ephemeral_for_task(task);
+        assert!(restored >= 3);
+        assert!(!is_revoked(cam_id));
+        assert!(!is_revoked(mic_id));
+        assert!(!is_revoked(net_id));
+        assert!(!is_ephemeral_suspended(cam_id));
+
+        cleanup_task(task);
+    }
+
+    #[test]
+    fn test_background_pill_preserves_network_while_camera_mic_suspended() {
+        let task = TaskId(89);
+        use crate::capability::permission::SensitivePermission;
+        let cam_id = SensitivePermission::CameraCapture.capability_id(task);
+        let mic_id = SensitivePermission::Microphone.capability_id(task);
+        let net_id = SensitivePermission::NetworkSend.capability_id(task);
+
+        // Grant background pill authorization
+        set_background_pill(task, true);
+        assert!(has_background_pill(task));
+
+        // Background the task: camera and mic are strictly suspended, but network remains active!
+        suspend_ephemeral_for_task(task);
+        assert!(is_revoked(cam_id));
+        assert!(is_revoked(mic_id));
+        assert!(!is_revoked(net_id), "background pill must preserve network access");
+
+        // Revoke background pill and cleanup
+        set_background_pill(task, false);
+        cleanup_task(task);
     }
 }

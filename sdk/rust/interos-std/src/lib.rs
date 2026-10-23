@@ -1995,7 +1995,13 @@ pub fn package_uninstall(package_id: &str, user_consent: bool) -> Result<(), i64
 }
 
 pub fn app_background() -> Result<(), i64> {
-    let ret = unsafe { syscall4(SyscallNumber::AppBackground, 0, 0, 0, 0) };
+    app_background_task(0)
+}
+
+/// Moves the specified application task to the background, suspending its camera,
+/// microphone, and network DMA tokens unless explicit background permission is active.
+pub fn app_background_task(task_id: u64) -> Result<(), i64> {
+    let ret = unsafe { syscall4(SyscallNumber::AppBackground, task_id, 0, 0, 0) };
     if ret == 0 {
         Ok(())
     } else {

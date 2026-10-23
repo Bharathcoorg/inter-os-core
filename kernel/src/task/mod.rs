@@ -55,6 +55,15 @@ impl TaskId {
     }
 }
 
+/// Scheduling class determining CPU execution guarantees and priority behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchedulingClass {
+    /// Normal priority-based time-sliced round-robin scheduling.
+    Normal,
+    /// Earliest-Deadline-First Real-Time class for ultra-low-latency UI/VSync pipelines.
+    RealTime,
+}
+
 /// Execution state of a task in the operating system.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskState {
@@ -166,6 +175,12 @@ pub struct TaskControlBlock {
     pub cpu_ticks: u64,
     /// Priority level (higher numbers run with precedence).
     pub priority: u8,
+    /// Scheduling class (Normal or RealTime EDF).
+    pub sched_class: SchedulingClass,
+    /// Absolute deadline in timer ticks for EDF dispatch. 0 means unspecified.
+    pub deadline_ticks: u64,
+    /// Remaining frame budget in nanoseconds (<8.3ms for 120Hz, <16.6ms for 60Hz).
+    pub frame_budget_ns: u64,
     /// Dedicated hardware virtual memory address space (CR3 Page Table).
     pub page_table: Option<SharedAddressSpace>,
     /// Cached physical frame for CR3 switch, accessible without spinlock contention.
@@ -221,6 +236,9 @@ impl TaskControlBlock {
             cap_table,
             cpu_ticks: 0,
             priority,
+            sched_class: SchedulingClass::Normal,
+            deadline_ticks: 0,
+            frame_budget_ns: 16_666_666,
             page_table: None,
             cr3_frame: None,
             user_entry: 0,
@@ -252,6 +270,9 @@ impl TaskControlBlock {
             cap_table,
             cpu_ticks: 0,
             priority: 0,
+            sched_class: SchedulingClass::Normal,
+            deadline_ticks: 0,
+            frame_budget_ns: 16_666_666,
             page_table: None,
             cr3_frame: None,
             user_entry: 0,
