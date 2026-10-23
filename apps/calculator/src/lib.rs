@@ -184,6 +184,7 @@ pub const fn button_label(action: char) -> &'static [u8] {
     match action {
         'C' => b"AC",
         'E' => b"CE",
+        'B' => b"DEL",
         'P' => b"()",
         '~' => b"+/-",
         '.' => b".",

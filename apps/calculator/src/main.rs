@@ -82,6 +82,14 @@ fn test_text(
     if cap_px == 0 || text.is_empty() {
         return None;
     }
+    let max_h = (cap_px as usize).saturating_mul(2) + 8;
+    if y < y0 || y >= y0 + max_h {
+        return None;
+    }
+    let max_w = text.len().saturating_mul((cap_px as usize).saturating_mul(2) + 4) + 16;
+    if x < x0 || x >= x0 + max_w {
+        return None;
+    }
     interos_std::design::monochrome::text_px(x, y, x0, y0, cap_px, text, color, bg, bold)
 }
 
@@ -109,29 +117,24 @@ const DISPLAY_PAD: usize = spacing::GRID_24;
 /// twenty-two -- and the reference calculator's own result stands thirty
 /// pixels of cap tall on a seven-hundred and twenty pixel screen. These
 /// are the sizes the design ladder names in the units a reader sees.
-const CAP_EXPRESSION: u32 = calculator::EXPRESSION_CAP_PX;
-const CAP_RESULT: u32 = calculator::RESULT_CAP_PX;
-const CAP_LABEL: u32 = calculator::KEY_LABEL_CAP_PX;
-const CAP_SECTION: u32 = typography::SECTION_CAP_PX;
+const CAP_EXPRESSION: u32 = typography::SECTION_CAP_PX;
+const CAP_RESULT: u32 = typography::DISPLAY_CAP_PX;
+const CAP_LABEL: u32 = typography::SECTION_CAP_PX;
+const CAP_SECTION: u32 = typography::TITLE_CAP_PX;
 
 /// The rungs the result comes down when it does not fit the card.
-///
-/// WHY a ladder of rungs and not a smaller number: a run that does not fit
-/// its column has to come down, and the rungs are the sizes the design
-/// ladder names. The result is on the top rung unless the number is too
-/// long for the card.
 const RESULT_LADDER: [u32; 4] = [
     CAP_RESULT,
+    typography::HEADING_CAP_PX,
+    typography::TITLE_CAP_PX,
     typography::SECTION_CAP_PX,
-    typography::BODY_CAP_PX,
-    typography::CAPTION_CAP_PX,
 ];
 
 /// The rungs the error line comes down when it does not fit the card.
 const ERROR_LADDER: [u32; 3] = [
+    typography::TITLE_CAP_PX,
     typography::SECTION_CAP_PX,
     typography::BODY_CAP_PX,
-    typography::CAPTION_CAP_PX,
 ];
 
 /// The gap between the expression and the result.
@@ -145,7 +148,7 @@ const VALUE_Y0: usize = TAPE_Y1 + VALUE_GAP;
 /// WHY the band ends below the result's line box and not below its cap: a
 /// result with a thousands separator has a comma that hangs below the cap,
 /// and a band that ended at the cap would cut it off.
-const DISPLAY_Y1: usize = VALUE_Y0 + typography::TITLE_LINE_PX + DISPLAY_PAD;
+const DISPLAY_Y1: usize = VALUE_Y0 + typography::DISPLAY_LINE_PX + DISPLAY_PAD;
 
 /// The top of the display band: the card that holds the expression and the
 /// result.
@@ -197,49 +200,38 @@ const WIDE_BTN_W: usize = BTN_W * 2 + (COL_X[1] - COL_X[0] - BTN_W);
 /// The x of the wide key in the last row's right half.
 const WIDE_BTN_X1: usize = COL_X[2];
 
-fn draw_calc_operator_glyph(x: usize, y: usize, cx: usize, cy: usize, op: char, color: u32) -> Option<u32> {
+fn draw_calc_badge_operator_glyph(x: usize, y: usize, cx: usize, cy: usize, op: char, color: u32) -> Option<u32> {
     let dx = (x as isize) - (cx as isize);
     let dy = (y as isize) - (cy as isize);
     match op {
         '/' => {
-            // Division '÷': horizontal bar and top/bottom dots
-            if dx.abs() <= 14 && dy.abs() <= 2 {
+            if dx.abs() <= 9 && dy.abs() <= 2 {
                 return Some(color);
             }
-            if dx * dx + (dy + 14) * (dy + 14) <= 12 {
+            if dx * dx + (dy + 8) * (dy + 8) <= 6 {
                 return Some(color);
             }
-            if dx * dx + (dy - 14) * (dy - 14) <= 12 {
+            if dx * dx + (dy - 8) * (dy - 8) <= 6 {
                 return Some(color);
             }
             None
         }
         '*' => {
-            // Multiplication '×': two crossing diagonal bars
             let d1 = (dx - dy).abs();
             let d2 = (dx + dy).abs();
-            if dx.abs() <= 12 && dy.abs() <= 12 && (d1 <= 2 || d2 <= 2) {
+            if dx.abs() <= 8 && dy.abs() <= 8 && (d1 <= 2 || d2 <= 2) {
                 return Some(color);
             }
             None
         }
         '-' => {
-            // Subtraction '-': clean horizontal bar
-            if dx.abs() <= 14 && dy.abs() <= 2 {
+            if dx.abs() <= 9 && dy.abs() <= 2 {
                 return Some(color);
             }
             None
         }
         '+' => {
-            // Addition '+': symmetric cross
-            if (dx.abs() <= 14 && dy.abs() <= 2) || (dx.abs() <= 2 && dy.abs() <= 14) {
-                return Some(color);
-            }
-            None
-        }
-        '=' => {
-            // Equals '=': two parallel horizontal bars
-            if dx.abs() <= 13 && ((dy + 6).abs() <= 2 || (dy - 6).abs() <= 2) {
+            if (dx.abs() <= 9 && dy.abs() <= 2) || (dx.abs() <= 2 && dy.abs() <= 9) {
                 return Some(color);
             }
             None
@@ -248,50 +240,57 @@ fn draw_calc_operator_glyph(x: usize, y: usize, cx: usize, cy: usize, op: char, 
     }
 }
 
-/// The size of the backspace mark's chevron, in pixels.
-///
-/// WHY the platform's shapes and not a drawn arrow: the app's own backspace
-/// was a shaft, a head and a cross, drawn by hand at a size that lost its
-/// edges -- a smudge that read as a pen. The platform draws its icons in a
-/// fixed twenty-four unit grid, so the shape is the same shape at every
-/// size, and the key carries the same chevron the shell's back button
-/// carries.
-const BACKSPACE_CHEVRON: usize = 80;
-
-/// How far the chevron's box sits to the left of the key's centre.
-const BACKSPACE_CHEVRON_X: usize = 38;
-
-/// The size of the backspace mark's cross, in pixels.
-const BACKSPACE_CROSS: usize = 22;
-
-/// How far the cross's box sits to the left of the key's centre.
-const BACKSPACE_CROSS_X: usize = 7;
-
-/// The backspace glyph: the platform's chevron with the platform's cross in
-/// its opening.
-///
-/// WHY the cross sits in the chevron's opening: that is the shape a
-/// backspace key has always had -- an arrow pointing back with a cross in
-/// it -- and the platform's icon set carries the two halves of it.
-fn draw_calc_backspace_glyph(x: usize, y: usize, cx: usize, cy: usize, color: u32) -> Option<u32> {
-    use interos_std::design::monochrome::{icon_px, Icon};
-    let chevron = Rect::new(
-        cx.saturating_sub(BACKSPACE_CHEVRON_X),
-        cy.saturating_sub(BACKSPACE_CHEVRON / 2),
-        BACKSPACE_CHEVRON,
-        BACKSPACE_CHEVRON,
-    );
-    if let Some(c) = icon_px(x, y, chevron, Icon::ChevronLeft, color) {
-        return Some(c);
+fn draw_calc_operator_glyph(x: usize, y: usize, cx: usize, cy: usize, op: char, color: u32) -> Option<u32> {
+    let dx = (x as isize) - (cx as isize);
+    let dy = (y as isize) - (cy as isize);
+    match op {
+        '/' => {
+            // Division '÷': horizontal bar and top/bottom dots
+            if dx.abs() <= 20 && dy.abs() <= 3 {
+                return Some(color);
+            }
+            if dx * dx + (dy + 18) * (dy + 18) <= 18 {
+                return Some(color);
+            }
+            if dx * dx + (dy - 18) * (dy - 18) <= 18 {
+                return Some(color);
+            }
+            None
+        }
+        '*' => {
+            // Multiplication '×': two crossing diagonal bars
+            let d1 = (dx - dy).abs();
+            let d2 = (dx + dy).abs();
+            if dx.abs() <= 18 && dy.abs() <= 18 && (d1 <= 3 || d2 <= 3) {
+                return Some(color);
+            }
+            None
+        }
+        '-' => {
+            // Subtraction '−': clean horizontal bar
+            if dx.abs() <= 20 && dy.abs() <= 3 {
+                return Some(color);
+            }
+            None
+        }
+        '+' => {
+            // Addition '+': symmetric cross
+            if (dx.abs() <= 20 && dy.abs() <= 3) || (dx.abs() <= 3 && dy.abs() <= 20) {
+                return Some(color);
+            }
+            None
+        }
+        '=' => {
+            // Equals '=': two parallel horizontal bars
+            if dx.abs() <= 20 && ((dy + 8).abs() <= 3 || (dy - 8).abs() <= 3) {
+                return Some(color);
+            }
+            None
+        }
+        _ => None,
     }
-    let cross = Rect::new(
-        cx.saturating_sub(BACKSPACE_CROSS_X),
-        cy.saturating_sub(BACKSPACE_CROSS / 2),
-        BACKSPACE_CROSS,
-        BACKSPACE_CROSS,
-    );
-    icon_px(x, y, cross, Icon::Close, color)
 }
+
 
 /// The scroll chevron on the expression tape.
 ///
@@ -502,15 +501,8 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
             return c;
         }
 
-        // Canonical App Title: "Calculator" at clean scale 1 bold with subtitle
-        if let Some(c) = test_text(x, y, 92, 34, CAP_EXPRESSION, b"Calculator", THEME.on_surface, THEME.surface, true) {
-            return c;
-        }
-        // WHY the subtitle says what the app does: it used to read
-        // "Precision Arithmetic", which is a claim about the numbers the
-        // app computes. The app adds, subtracts, multiplies and divides,
-        // and that is what the subtitle now says.
-        if let Some(c) = test_text(x, y, 92, 58, CAP_EXPRESSION, b"Add, subtract, multiply and divide", THEME.on_surface_variant, THEME.surface, false) {
+        // Canonical App Title: "Calculator" vertically centered with back button and history pill
+        if let Some(c) = test_text(x, y, 92, 36, interos_std::design::typography::TITLE_CAP_PX, b"Calculator", THEME.on_surface, THEME.surface, true) {
             return c;
         }
 
@@ -533,7 +525,10 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
             if rx < 2 || ry < 2 {
                 return border;
             }
-            if let Some(c) = test_text(x, y, 604, 46, CAP_EXPRESSION, b"History", text_c, bg, true) {
+            let hw = calculator::text_width(b"History", typography::BODY_CAP_PX);
+            let hx = 576 + (112 - hw) / 2;
+            let hy = 32 + (48 - typography::BODY_CAP_PX as usize) / 2;
+            if let Some(c) = test_text(x, y, hx, hy, typography::BODY_CAP_PX, b"History", text_c, bg, true) {
                 return c;
             }
             return bg;
@@ -558,7 +553,7 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
             // Header of History Drawer: y: 125..175
             if y >= 125 && y < 175 {
                 // "Calculation History" title
-                if let Some(c) = test_text(x, y, 48, 140, CAP_EXPRESSION, b"Calculation History", THEME.on_surface, THEME.surface_container, true) {
+                if let Some(c) = test_text(x, y, 48, 136, typography::SECTION_CAP_PX, b"Calculation History", THEME.on_surface, THEME.surface_container, true) {
                     return c;
                 }
 
@@ -576,7 +571,10 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                     if prx < 2 || pry < 2 {
                         return THEME.border;
                     }
-                    if let Some(c) = test_text(x, y, 452, 138, CAP_EXPRESSION, b"CLEAR", THEME.error, THEME.surface_container_high, true) {
+                    let cw = calculator::text_width(b"CLEAR", typography::BODY_CAP_PX);
+                    let cx0 = 440 + (90 - cw) / 2;
+                    let cy0 = 130 + (40 - typography::BODY_CAP_PX as usize) / 2;
+                    if let Some(c) = test_text(x, y, cx0, cy0, typography::BODY_CAP_PX, b"CLEAR", THEME.error, THEME.surface_container_high, true) {
                         return c;
                     }
                     return THEME.surface_container_high;
@@ -596,7 +594,10 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                     if prx < 2 || pry < 2 {
                         return THEME.border;
                     }
-                    if let Some(c) = test_text(x, y, 566, 138, CAP_EXPRESSION, b"CLOSE", THEME.on_surface, THEME.surface_container_high, true) {
+                    let cw = calculator::text_width(b"CLOSE", typography::BODY_CAP_PX);
+                    let cx0 = 550 + (110 - cw) / 2;
+                    let cy0 = 130 + (40 - typography::BODY_CAP_PX as usize) / 2;
+                    if let Some(c) = test_text(x, y, cx0, cy0, typography::BODY_CAP_PX, b"CLOSE", THEME.on_surface, THEME.surface_container_high, true) {
                         return c;
                     }
                     return THEME.surface_container_high;
@@ -616,7 +617,10 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
             // draw.
             let row_style = components::list_row_style(&THEME, false);
             if count == 0 {
-                if let Some(c) = test_text(x, y, 180, 320, CAP_LABEL, b"No recent calculations", THEME.on_surface_variant, THEME.surface_container, false) {
+                let msg = b"No recent calculations";
+                let mw = calculator::text_width(msg, typography::SECTION_CAP_PX);
+                let mx0 = DISPLAY_X0 + (DISPLAY_X1 - DISPLAY_X0 - mw) / 2;
+                if let Some(c) = test_text(x, y, mx0, 320, typography::SECTION_CAP_PX, msg, THEME.on_surface_variant, THEME.surface_container, false) {
                     return c;
                 }
             } else {
@@ -706,7 +710,7 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                         if prx < 2 || pry < 2 {
                             return THEME.warning_container;
                         }
-                        if let Some(c) = draw_calc_operator_glyph(x, y, 74, VALUE_Y0 + 17, op, THEME.warning) {
+                        if let Some(c) = draw_calc_badge_operator_glyph(x, y, 74, VALUE_Y0 + 17, op, THEME.warning) {
                             return c;
                         }
                         return THEME.surface_container_high;
@@ -715,7 +719,7 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                     if prx < 2 || pry < 2 {
                         return THEME.warning_container;
                     }
-                    if let Some(c) = draw_calc_operator_glyph(x, y, 74, VALUE_Y0 + 17, op, THEME.warning) {
+                    if let Some(c) = draw_calc_badge_operator_glyph(x, y, 74, VALUE_Y0 + 17, op, THEME.warning) {
                         return c;
                     }
                     return THEME.surface_container_high;
@@ -739,7 +743,7 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                 if line < p.tape_count {
                     let line_y = TAPE_Y0 + row * TAPE_LINE_H;
                     let text = &calc.tape_lines[line][..calc.tape_lens[line]];
-                    if let Some(c) = test_text(x, y, p.tape_xs[line], line_y, CAP_EXPRESSION, text, THEME.on_surface_variant, THEME.surface_container, false) {
+                    if let Some(c) = test_text(x, y, p.tape_xs[line], line_y, CAP_EXPRESSION, text, THEME.on_surface, THEME.surface_container, true) {
                         return c;
                     }
                 }
@@ -823,34 +827,24 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                 // screen's one accent.
                 let (btn_bg, btn_border, text_color) = if is_equals {
                     (THEME.inverted_surface(), THEME.inverted_surface(), THEME.on_inverted_surface())
-                } else if is_op {
-                    (THEME.inverted_surface(), THEME.inverted_surface(), THEME.on_inverted_surface())
                 } else if is_active_op {
                     let armed = interos_std::design::theme::Theme::blend(
-                        THEME.inverted_surface(),
-                        THEME.surface,
-                        64,
+                        THEME.surface_container_high,
+                        THEME.on_surface,
+                        48,
                     );
-                    (armed, armed, THEME.on_inverted_surface())
+                    (armed, armed, THEME.on_surface)
+                } else if is_op {
+                    (THEME.surface_container_high, THEME.border, THEME.on_surface)
                 } else if is_clear {
-                    // Clear-all: an ordinary key. Throwing away what is on
-                    // the screen is not an error, and the design gives it a
-                    // plain key.
                     (THEME.surface_container_high, THEME.border, THEME.on_surface)
                 } else if is_clear_entry {
-                    // Clear-entry: a raised key, and the only one that
-                    // throws the number being typed away.
                     (THEME.surface_container_high, THEME.border, THEME.on_surface_variant)
                 } else if is_backspace {
-                    // Backspace: a plain key, and the only one that takes
-                    // a single character back.
                     (THEME.surface_container_high, THEME.border, THEME.on_surface)
                 } else if is_fn {
-                    // Functions: a raised key with cool light text.
                     (THEME.surface_container_high, THEME.border, THEME.on_surface_variant)
                 } else {
-                    // Digits 0..9 and Decimal point: the raised fill, which
-                    // is the one the design gives a key on the page.
                     (THEME.surface_container_high, THEME.border, THEME.on_surface)
                 };
 
@@ -876,31 +870,13 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                         if let Some(c) = draw_calc_operator_glyph(x, y, center_x, center_y, act, text_color) {
                             return c;
                         }
-                    } else if act == 'B' {
-                        if let Some(c) = draw_calc_backspace_glyph(x, y, center_x, center_y, text_color) {
-                            return c;
-                        }
                     } else {
                         let label: &[u8] = match act {
-                            // WHY the label comes from the layout: the key
-                            // that says "mod" and the key that does the
-                            // modulo have to be the same key, and the
-                            // label is where the two are tied together.
-                            'C' | 'E' | 'P' | '~' | '.' | '%' => calculator::button_label(act),
+                            'C' | 'E' | 'B' | 'P' | '~' | '.' | '%' => calculator::button_label(act),
                             _ => &[act as u8],
                         };
-                        // WHY every key label is on the body rung: the
-                        // reference calculator's key labels stand fifteen
-                        // pixels tall, and the body rung is the platform's
-                        // name for that size. A key that said "mod" at a
-                        // smaller size than the key that said "7" would be
-                        // two sizes for one job.
                         let w = calculator::text_width(label, CAP_LABEL);
                         let x0 = center_x.saturating_sub(w / 2);
-                        // WHY the cap is centred and not the baseline: a
-                        // digit's cap is what the eye centres, and a
-                        // baseline centred in a key hangs the digit high in
-                        // it.
                         let y0 = center_y.saturating_sub((CAP_LABEL / 2) as usize);
                         if let Some(c) = test_text(x, y, x0, y0, CAP_LABEL, label, text_color, btn_bg, true) {
                             return c;
@@ -1210,7 +1186,12 @@ fn handle_touch_point(calc: &mut CalculatorState, x: u32, y: u32) -> Tap {
                 // the keypad and the keyboard are two ways of pressing the
                 // same key.
                 calc.press_key(action);
-                return Tap::Redraw(Dirty::Display);
+                let is_op = matches!(action, '/' | '*' | '-' | '+' | '=');
+                if is_op {
+                    return Tap::Redraw(Dirty::All);
+                } else {
+                    return Tap::Redraw(Dirty::Display);
+                }
             }
             return Tap::None;
         }
