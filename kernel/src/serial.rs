@@ -1219,9 +1219,10 @@ fn handle_serial_command(cmd: &[u8]) {
         return;
     }
 
-    if verb.eq_ignore_ascii_case("POWER_KEY") {
+    if verb.eq_ignore_ascii_case("POWER_KEY") || verb.eq_ignore_ascii_case("LOCK_KEY") {
         let mut kms = crate::drivers::display_kms::DRM_KMS.lock();
-        let on = kms.toggle_powered();
+        let _ = kms.toggle_powered();
+        kms.set_powered(true);
         let mut display = crate::drivers::KmsDisplayDriver::new(&mut kms);
         let _ = display.composite_and_flip();
         crate::input::post_key_event(crate::input::KeyEvent {
@@ -1242,7 +1243,7 @@ fn handle_serial_command(cmd: &[u8]) {
             alt: false,
             meta: false,
         });
-        crate::serial_println!("[POWER] display_on={} source=device_studio", on);
+        crate::serial_println!("[POWER] display_on=true source=device_studio");
         return;
     }
 
@@ -1394,6 +1395,76 @@ fn handle_serial_command(cmd: &[u8]) {
                 if let Some((x, y)) = coords {
                     crate::input::post_touch_event(0, x, y, 1000, crate::input::TouchPhase::Down);
                     crate::input::post_touch_event(0, x, y, 0, crate::input::TouchPhase::Up);
+                }
+            }
+        }
+    } else if verb.eq_ignore_ascii_case("NAV") {
+        if let Some(target) = parts.next() {
+            if target.eq_ignore_ascii_case("BACK") {
+                crate::serial_println!("[COM1 INPUT] Hardware NAV BACK event received.");
+                crate::drivers::input::dispatch_to_focused_window(crate::drivers::input::InputEvent {
+                    kind: crate::drivers::input::InputEventKind::Back,
+                    x: 120,
+                    y: 1416,
+                    ..crate::drivers::input::InputEvent::EMPTY
+                });
+            } else if target.eq_ignore_ascii_case("HOME") {
+                crate::serial_println!("[COM1 INPUT] Hardware NAV HOME event received.");
+                crate::drivers::input::dispatch_to_focused_window(crate::drivers::input::InputEvent {
+                    kind: crate::drivers::input::InputEventKind::Home,
+                    x: 360,
+                    y: 1416,
+                    ..crate::drivers::input::InputEvent::EMPTY
+                });
+            } else if target.eq_ignore_ascii_case("RECENTS") {
+                crate::serial_println!("[COM1 INPUT] Hardware NAV RECENTS event received.");
+                crate::drivers::input::dispatch_to_focused_window(crate::drivers::input::InputEvent {
+                    kind: crate::drivers::input::InputEventKind::Recents,
+                    x: 600,
+                    y: 1416,
+                    ..crate::drivers::input::InputEvent::EMPTY
+                });
+            }
+        }
+    } else if verb.eq_ignore_ascii_case("POWER_KEY") || verb.eq_ignore_ascii_case("LOCK_KEY") {
+        crate::serial_println!("[COM1 INPUT] Hardware POWER/LOCK key event received.");
+        let key_ev = crate::drivers::input::InputEvent {
+            kind: crate::drivers::input::InputEventKind::Key,
+            x: 0x1000F, // Power keycode
+            y: 1, // Pressed
+            ..crate::drivers::input::InputEvent::EMPTY
+        };
+        crate::drivers::input::dispatch_to_focused_window(key_ev);
+    } else if verb.eq_ignore_ascii_case("INPUT_KEYCODE") {
+        if let Some(key) = parts.next() {
+            crate::serial_println!("[COM1 INPUT] Hardware KEYCODE received: {}", key);
+            let code = match key {
+                "Power" | "Lock" => 0x1000F,
+                "Home" => 0x10008,
+                "Escape" => 0x10001,
+                "Enter" => 0x10002,
+                "Backspace" => 0x10000,
+                "ArrowUp" => 0x10004,
+                "ArrowDown" => 0x10005,
+                "ArrowLeft" => 0x10006,
+                "ArrowRight" => 0x10007,
+                _ => 0,
+            };
+            if code != 0 {
+                let key_ev = crate::drivers::input::InputEvent {
+                    kind: crate::drivers::input::InputEventKind::Key,
+                    x: code,
+                    y: 1,
+                    ..crate::drivers::input::InputEvent::EMPTY
+                };
+                crate::drivers::input::dispatch_to_focused_window(key_ev);
+            }
+        }
+    } else if verb.eq_ignore_ascii_case("INPUT_KEY") {
+        if let Some(cp_s) = parts.next() {
+            if let Ok(cp) = cp_s.parse::<u32>() {
+                if let Some(c) = char::from_u32(cp) {
+                    crate::input::post_char_event(c);
                 }
             }
         }

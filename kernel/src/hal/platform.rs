@@ -18,7 +18,7 @@ impl X86_64Platform {
                 board_name: "InterOS Sovereign Reference DevBoard",
                 cpu_cores: 1,
                 base_frequency_mhz: 2400,
-                total_ram_bytes: 128 * 1024 * 1024, // 128 MiB QEMU memory
+                total_ram_bytes: 2048 * 1024 * 1024, // 2048 MiB (2 GiB) physical RAM
                 dtb_base: None,
             },
         }

@@ -117,9 +117,8 @@ impl DisplayDriver for KmsDisplayDriver<'_> {
             }
         }
 
-        // Software scanout blit:
-        // Maintains the linear framebuffer scanout. Falls back gracefully to this software path
-        // when VirtIO-GPU is unattached or absent.
+        // Single-buffer direct scanout presentation:
+        // Maintains authentic 1:1 scanout without split-screen doubling.
         crate::framebuffer::present_argb8888(
             &self.controller.front_buffer,
             self.controller.scanout_width,

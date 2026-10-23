@@ -5,6 +5,7 @@
 
 use alloc::collections::VecDeque;
 use crate::drivers::touch_gestures::RecognizedGesture;
+use crate::drivers::DisplayDriver;
 use spin::Mutex;
 use crate::task::TaskId;
 
@@ -176,6 +177,8 @@ fn go_home() {
     };
     let mut kms = crate::drivers::display_kms::DRM_KMS.lock();
     apply_home_to_surfaces(&mut kms, shell);
+    let mut display = crate::drivers::KmsDisplayDriver::new(&mut kms);
+    let _ = display.composite_and_flip();
 }
 
 /// Brings the shell's surfaces forward and the others' back.
@@ -222,13 +225,12 @@ fn shell_owns_the_screen() -> bool {
 }
 
 pub fn dispatch_to_focused_window(event: InputEvent) {
-    // WHY the home gesture is taken here: this is the one point where the
+    // WHY the home, back and recents gestures are taken here: this is the one point where the
     // platform knows both what was recognised and who is in front. An
     // application in front that does not implement the gesture would
     // otherwise swallow it, and the person would be stuck in the app.
-    if event.kind == InputEventKind::Home && !shell_owns_the_screen() {
+    if (event.kind == InputEventKind::Home || event.kind == InputEventKind::Back || event.kind == InputEventKind::Recents) && !shell_owns_the_screen() {
         go_home();
-        return;
     }
     let owner = {
         // WHY only the power key is a system key here: the system owns the

@@ -85,6 +85,67 @@ impl TaskState {
     }
 }
 
+/// Enumerable task record for user-space system queries.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TaskRecord {
+    pub task_id: u64,
+    pub name: [u8; 16],
+    pub name_len: u8,
+    pub state: u8, // 0=Ready, 1=Running, 2=Blocked
+    pub _reserved: [u8; 6],
+    pub cpu_ticks: u64,
+    pub mem_bytes: u64,
+}
+
+/// Enumerates up to `out.len()` active tasks from the scheduler.
+pub fn enumerate_tasks(out: &mut [TaskRecord]) -> usize {
+    let mut count = 0;
+    if let Some(scheduler) = SCHEDULER.try_lock() {
+        for tcb in scheduler.tasks_iter() {
+            if count >= out.len() {
+                break;
+            }
+            let mut name_buf = [0u8; 16];
+            let name_bytes = tcb.name.as_bytes();
+            let nlen = name_bytes.len().min(16);
+            name_buf[..nlen].copy_from_slice(&name_bytes[..nlen]);
+
+            let state_code = match tcb.state {
+                TaskState::Ready => 0,
+                TaskState::Running => 1,
+                _ => 2,
+            };
+
+            let mem_bytes = if let Some(ref pt_arc) = tcb.page_table {
+                if let Some(pt) = pt_arc.try_lock() {
+                    if pt.user_mapped_bytes > 0 {
+                        pt.user_mapped_bytes as u64
+                    } else {
+                        (pt.allocated_frames.len() as u64).saturating_mul(4096)
+                    }
+                } else {
+                    0
+                }
+            } else {
+                0
+            } + (if !tcb.stack.is_empty() { TASK_STACK_SIZE as u64 } else { 0 });
+
+            out[count] = TaskRecord {
+                task_id: tcb.id.0,
+                name: name_buf,
+                name_len: nlen as u8,
+                state: state_code,
+                _reserved: [0; 6],
+                cpu_ticks: tcb.cpu_ticks,
+                mem_bytes,
+            };
+            count += 1;
+        }
+    }
+    count
+}
+
 /// Task Control Block (TCB) maintaining complete execution state and security capabilities.
 pub type SharedAddressSpace = Arc<Mutex<crate::memory::TaskPageTable>>;
 

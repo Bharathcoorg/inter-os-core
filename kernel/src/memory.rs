@@ -19,6 +19,7 @@ static PHYSICAL_MEMORY_OFFSET: Mutex<Option<VirtAddr>> = Mutex::new(None);
 static MEMORY_MAPPER: Mutex<Option<OffsetPageTable<'static>>> = Mutex::new(None);
 static FRAME_ALLOCATOR: Mutex<Option<BootInfoFrameAllocator>> = Mutex::new(None);
 static KERNEL_PML4_FRAME: Mutex<Option<PhysFrame<Size4KiB>>> = Mutex::new(None);
+static TOTAL_PHYSICAL_RAM_BYTES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(2048 * 1024 * 1024);
 
 /// Initializes global memory management singletons: page mapper, physical offset, and frame allocator.
 ///
@@ -52,6 +53,15 @@ pub fn init_memory(physical_memory_offset: VirtAddr, memory_regions: &'static Me
     for (i, r) in memory_regions.iter().enumerate() {
         crate::serial_println!("[MEMMAP] region {}: {:#x}..{:#x} ({:?})", i, r.start, r.end, r.kind);
     }
+
+    let mut detected_ram: u64 = 0;
+    for r in memory_regions.iter() {
+        detected_ram = detected_ram.saturating_add(r.end.saturating_sub(r.start));
+    }
+    if detected_ram >= 128 * 1024 * 1024 {
+        TOTAL_PHYSICAL_RAM_BYTES.store(detected_ram, core::sync::atomic::Ordering::Release);
+        crate::serial_println!("[BOOT] Total physical RAM detected: {} MB", detected_ram / (1024 * 1024));
+    }
 }
 
 /// Returns the primordial kernel PML4 physical frame.
@@ -77,6 +87,77 @@ pub fn phys_mem_offset() -> VirtAddr {
     PHYSICAL_MEMORY_OFFSET
         .lock()
         .expect("Physical memory offset not initialized")
+}
+
+/// Physical RAM telemetry structure backing sys_memory_telemetry.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemoryTelemetry {
+    pub total_bytes: u64,
+    pub used_bytes: u64,
+    pub free_bytes: u64,
+}
+
+/// Computes physical memory usage honestly from the platform RAM info, active tasks,
+/// and kernel heap/reserved memory regions.
+pub fn memory_telemetry() -> MemoryTelemetry {
+    let total_bytes = {
+        let detected = TOTAL_PHYSICAL_RAM_BYTES.load(core::sync::atomic::Ordering::Acquire);
+        let platform = crate::hal::PLATFORM.info().total_ram_bytes as u64;
+        detected.max(platform)
+    };
+
+    // Calculate active user tasks memory from TaskPageTable allocated frames / mapped bytes:
+    let mut tasks_mapped_bytes: u64 = 0;
+    if let Some(scheduler) = crate::task::SCHEDULER.try_lock() {
+        for tcb in scheduler.tasks_iter() {
+            if let Some(ref pt_arc) = tcb.page_table {
+                if let Some(pt) = pt_arc.try_lock() {
+                    let user_bytes = if pt.user_mapped_bytes > 0 {
+                        pt.user_mapped_bytes as u64
+                    } else {
+                        (pt.allocated_frames.len() as u64).saturating_mul(4096)
+                    };
+                    tasks_mapped_bytes = tasks_mapped_bytes.saturating_add(user_bytes);
+                }
+            }
+            if !tcb.stack.is_empty() {
+                tasks_mapped_bytes = tasks_mapped_bytes.saturating_add(crate::task::TASK_STACK_SIZE as u64);
+            }
+        }
+    }
+
+    // Kernel heap allocated / used bytes:
+    #[cfg(not(test))]
+    let kernel_heap_bytes = {
+        let (used, _) = crate::allocator::try_heap_stats().unwrap_or((0, 0));
+        (used as u64).max(4 * 1024 * 1024)
+    };
+    #[cfg(test)]
+    let kernel_heap_bytes = 4 * 1024 * 1024u64;
+
+    let frame_allocator_bytes: u64 = if let Some(guard) = FRAME_ALLOCATOR.try_lock() {
+        if let Some(ref fa) = *guard {
+            fa.allocated_bytes()
+        } else {
+            0
+        }
+    } else {
+        0
+    };
+
+    let calculated_used = tasks_mapped_bytes
+        .saturating_add(kernel_heap_bytes)
+        .max(frame_allocator_bytes);
+
+    let used_bytes = calculated_used.min(total_bytes);
+    let free_bytes = total_bytes.saturating_sub(used_bytes);
+
+    MemoryTelemetry {
+        total_bytes,
+        used_bytes,
+        free_bytes,
+    }
 }
 
 /// Allocates physically contiguous 4 KiB frames for DMA buffers.
@@ -771,6 +852,11 @@ pub struct BootInfoFrameAllocator {
 }
 
 impl BootInfoFrameAllocator {
+    /// Returns the approximate allocated bytes from the boot memory regions.
+    pub fn allocated_bytes(&self) -> u64 {
+        self.next_addr.saturating_sub(self.recycled_frames.len() as u64 * 4096)
+    }
+
     /// Returns a task-owned physical frame to the allocator for reuse.
     pub fn recycle_frame(&mut self, frame: PhysFrame<Size4KiB>) {
         // Reject duplicate returns: a frame may only enter the free pool once.

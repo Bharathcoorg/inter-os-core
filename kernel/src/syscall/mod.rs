@@ -213,6 +213,8 @@ pub enum SyscallNumber {
     /// WHY 134: it is the next free number above the table the dispatcher
     /// already claims, so no existing ABI number moves.
     SurfaceCapture = 134,
+    MemoryTelemetry = 135,
+    TaskEnumerate = 136,
     // The content layer: a shared document index and a system-wide intent
     // registry. 140..=145 are above every number the dispatcher already
     // claims, so no existing ABI number moves.
@@ -2126,6 +2128,57 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
                 }
                 Err(e) => e as i64,
             }
+        }
+        135 => {
+            // MemoryTelemetry: a1 = out_ptr
+            let user_slice = match UserSliceMut::new(a1, core::mem::size_of::<crate::memory::MemoryTelemetry>()) {
+                Ok(s) => s,
+                Err(_) => return SyscallResult::InvalidArguments as i64,
+            };
+            let stats = crate::memory::memory_telemetry();
+            let bytes = unsafe {
+                core::slice::from_raw_parts(
+                    &stats as *const crate::memory::MemoryTelemetry as *const u8,
+                    core::mem::size_of::<crate::memory::MemoryTelemetry>(),
+                )
+            };
+            if user_slice.copy_from_kernel(bytes).is_err() {
+                return SyscallResult::InvalidArguments as i64;
+            }
+            SyscallResult::Success as i64
+        }
+        136 => {
+            // TaskEnumerate: a1 = out_ptr, a2 = max_count
+            let max_count = (a2 as usize).min(32);
+            if max_count == 0 {
+                return 0;
+            }
+            let byte_len = max_count.saturating_mul(core::mem::size_of::<crate::task::TaskRecord>());
+            let user_slice = match UserSliceMut::new(a1, byte_len) {
+                Ok(s) => s,
+                Err(_) => return SyscallResult::InvalidArguments as i64,
+            };
+            let mut records = [crate::task::TaskRecord {
+                task_id: 0,
+                name: [0; 16],
+                name_len: 0,
+                state: 0,
+                _reserved: [0; 6],
+                cpu_ticks: 0,
+                mem_bytes: 0,
+            }; 32];
+            let actual = crate::task::enumerate_tasks(&mut records[..max_count]);
+            let copy_len = actual.saturating_mul(core::mem::size_of::<crate::task::TaskRecord>());
+            let bytes = unsafe {
+                core::slice::from_raw_parts(
+                    records.as_ptr() as *const u8,
+                    copy_len,
+                )
+            };
+            if user_slice.copy_from_kernel(bytes).is_err() {
+                return SyscallResult::InvalidArguments as i64;
+            }
+            actual as i64
         }
         140 => {
             // ContentIndexQuery: a1 = query kind, a2 = param ptr, a3 = param len,

@@ -1618,6 +1618,9 @@ const DISPI_REG_YRES: u16 = 0x02;
 const DISPI_REG_BPP: u16 = 0x03;
 const DISPI_REG_ENABLE: u16 = 0x04;
 const DISPI_REG_VIRT_WIDTH: u16 = 0x06;
+pub const DISPI_REG_VIRT_HEIGHT: u16 = 0x07;
+pub const DISPI_REG_X_OFFSET: u16 = 0x08;
+pub const DISPI_REG_Y_OFFSET: u16 = 0x09;
 const DISPI_ENABLE: u16 = 0x01;
 const DISPI_LFB_ENABLE: u16 = 0x40;
 const DISPI_ID_MIN: u16 = 0xB0C0;
@@ -1695,6 +1698,12 @@ fn kernel_translate(vaddr: VirtAddr) -> Option<PhysAddr> {
 }
 
 fn dispi_write(reg: u16, value: u16) {
+    #[cfg(test)]
+    {
+        let _ = (reg, value);
+        return;
+    }
+    #[cfg(not(test))]
     unsafe {
         let mut index = Port::<u16>::new(DISPI_INDEX_PORT);
         let mut data = Port::<u16>::new(DISPI_DATA_PORT);
@@ -1704,11 +1713,45 @@ fn dispi_write(reg: u16, value: u16) {
 }
 
 fn dispi_read(reg: u16) -> u16 {
+    #[cfg(test)]
+    {
+        let _ = reg;
+        return 0;
+    }
+    #[cfg(not(test))]
     unsafe {
         let mut index = Port::<u16>::new(DISPI_INDEX_PORT);
         let mut data = Port::<u16>::new(DISPI_DATA_PORT);
         index.write(reg);
         data.read()
+    }
+}
+
+/// Sets the Bochs DISPI vertical scanout offset register (0x09).
+///
+/// Returns true if DISPI is available and the readback matches `y`.
+pub fn dispi_set_y_offset(y: u16) -> bool {
+    let id = dispi_read(DISPI_REG_ID);
+    if !(DISPI_ID_MIN..=DISPI_ID_MAX).contains(&id) {
+        return false;
+    }
+    dispi_write(DISPI_REG_Y_OFFSET, y);
+    dispi_read(DISPI_REG_Y_OFFSET) == y
+}
+
+/// Returns true if the covered framebuffer memory supports double-buffered page flipping.
+pub fn is_dispi_double_buffer_supported() -> bool {
+    let id = dispi_read(DISPI_REG_ID);
+    if !(DISPI_ID_MIN..=DISPI_ID_MAX).contains(&id) {
+        return false;
+    }
+    let bpp = *DISPI_BPP.lock();
+    let fb = FRAMEBUFFER_WRITER.lock();
+    if let Some(info) = &fb.info {
+        let frame_bytes = info.width.saturating_mul(info.height).saturating_mul(bpp);
+        FB_COVERED_BYTES.load(Ordering::Acquire) >= 2 * frame_bytes
+    } else {
+        false
     }
 }
 
@@ -1737,13 +1780,14 @@ pub fn set_physical_mode(width: u16, height: u16) -> bool {
     }
     let bpp_hw: u16 = if bpp == 4 { 32 } else { 24 };
     // Standard Bochs sequence: disable, reprogram geometry/depth, pin the
-    // virtual width to the visible width (no panning offset), re-enable with
-    // the linear frame buffer bit.
+    // virtual width to the visible width, re-enable with the linear frame buffer bit.
     dispi_write(DISPI_REG_ENABLE, 0);
     dispi_write(DISPI_REG_XRES, width);
     dispi_write(DISPI_REG_YRES, height);
     dispi_write(DISPI_REG_BPP, bpp_hw);
     dispi_write(DISPI_REG_VIRT_WIDTH, width);
+    dispi_write(DISPI_REG_VIRT_HEIGHT, height);
+    dispi_write(DISPI_REG_Y_OFFSET, 0);
     dispi_write(DISPI_REG_ENABLE, DISPI_ENABLE | DISPI_LFB_ENABLE);
     if dispi_read(DISPI_REG_XRES) != width
         || dispi_read(DISPI_REG_YRES) != height
@@ -1896,6 +1940,7 @@ pub fn engage_native_mode() {
         FB_COVERED_BYTES.store(covered, Ordering::Release);
     }
 
+
     if covered < required_bytes {
         crate::serial_println!(
             "[DISPLAY_HAL] DISPI native scanout unavailable (covered_bytes={} < required={}); keeping firmware mode",
@@ -2029,6 +2074,11 @@ pub fn blend_half(c0: u32, c1: u32) -> u32 {
 /// copy. A narrower band skips only destination rows that provably hold the
 /// same bytes they already hold on the physical framebuffer.
 pub fn present_argb8888(pixels: &[u32], width: u32, height: u32, dirty_rows: (usize, usize)) {
+    present_argb8888_offset(pixels, width, height, dirty_rows, 0);
+}
+
+/// Presents an ARGB8888 scanout buffer at a vertical scanout offset (for DISPI double-buffering).
+pub fn present_argb8888_offset(pixels: &[u32], width: u32, height: u32, dirty_rows: (usize, usize), y_offset: usize) {
     let mut fb = FRAMEBUFFER_WRITER.lock();
     let info = match fb.info { Some(info) => info, None => return };
     let src_w = width as usize;
@@ -2104,7 +2154,7 @@ pub fn present_argb8888(pixels: &[u32], width: u32, height: u32, dirty_rows: (us
                         PixelFormat::Bgr if bpp == 4 => {
                             for dy in dy0..dy1 {
                                 let row_src = &pixels[dy * src_w..(dy + 1) * src_w];
-                                let mut dst_ptr = ptr.add(dy * stride_bytes);
+                                let mut dst_ptr = ptr.add((dy + y_offset) * stride_bytes);
                                 for &p in row_src {
                                     *dst_ptr = p as u8;
                                     *dst_ptr.add(1) = (p >> 8) as u8;
@@ -2118,7 +2168,7 @@ pub fn present_argb8888(pixels: &[u32], width: u32, height: u32, dirty_rows: (us
                         PixelFormat::Bgr if bpp == 3 => {
                             for dy in dy0..dy1 {
                                 let row_src = &pixels[dy * src_w..(dy + 1) * src_w];
-                                let mut dst_ptr = ptr.add(dy * stride_bytes);
+                                let mut dst_ptr = ptr.add((dy + y_offset) * stride_bytes);
                                 for &p in row_src {
                                     *dst_ptr = p as u8;
                                     *dst_ptr.add(1) = (p >> 8) as u8;
@@ -2131,7 +2181,7 @@ pub fn present_argb8888(pixels: &[u32], width: u32, height: u32, dirty_rows: (us
                         PixelFormat::Rgb if bpp == 4 => {
                             for dy in dy0..dy1 {
                                 let row_src = &pixels[dy * src_w..(dy + 1) * src_w];
-                                let mut dst_ptr = ptr.add(dy * stride_bytes);
+                                let mut dst_ptr = ptr.add((dy + y_offset) * stride_bytes);
                                 for &p in row_src {
                                     *dst_ptr = (p >> 16) as u8;
                                     *dst_ptr.add(1) = (p >> 8) as u8;
@@ -2145,7 +2195,7 @@ pub fn present_argb8888(pixels: &[u32], width: u32, height: u32, dirty_rows: (us
                         PixelFormat::Rgb if bpp == 3 => {
                             for dy in dy0..dy1 {
                                 let row_src = &pixels[dy * src_w..(dy + 1) * src_w];
-                                let mut dst_ptr = ptr.add(dy * stride_bytes);
+                                let mut dst_ptr = ptr.add((dy + y_offset) * stride_bytes);
                                 for &p in row_src {
                                     *dst_ptr = (p >> 16) as u8;
                                     *dst_ptr.add(1) = (p >> 8) as u8;
@@ -2168,7 +2218,7 @@ pub fn present_argb8888(pixels: &[u32], width: u32, height: u32, dirty_rows: (us
             let mut scratch = [0u32; 720];
             unsafe {
                 for dy in dy0..dy1 {
-                    let target_y = off_y + dy;
+                    let target_y = off_y + dy + y_offset;
                     let row_start_ptr = ptr.add(target_y * stride_bytes + off_x * bpp);
                     let row_src_3_2: Option<&[u32]> = if is_3_2 {
                         let j = dy / 3;

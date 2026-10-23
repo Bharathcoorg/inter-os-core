@@ -435,6 +435,7 @@ pub struct DrmKmsController {
     pub next_surface_id: u32,
     pub vsync_counter: u64,
     pub page_flips_completed: u64,
+    pub scanout_y_offset: u16,
     pub focused_surface: Option<u32>,
     pub orientation: DisplayOrientation,
     pub refresh_hz: u16,
@@ -499,6 +500,7 @@ impl DrmKmsController {
             next_surface_id: 1,
             vsync_counter: 0,
             page_flips_completed: 0,
+            scanout_y_offset: 0,
             focused_surface: None,
             orientation: DisplayOrientation::Portrait,
             refresh_hz: 60,
@@ -1790,6 +1792,7 @@ impl DrmKmsController {
         core::mem::swap(&mut self.front_buffer, &mut self.back_buffer);
         self.vsync_counter += 1;
         self.page_flips_completed += 1;
+        self.scanout_y_offset = 0;
         let now = crate::interrupts::get_system_ticks();
         self.scheduler.record_frame(now, self.frame_deadline_ticks);
         let ticks_per_frame = ((100u64 + self.refresh_hz.max(1) as u64 - 1) / self.refresh_hz.max(1) as u64).max(1);
@@ -1813,6 +1816,7 @@ pub static DRM_KMS: Mutex<DrmKmsController> = Mutex::new(DrmKmsController {
     next_surface_id: 1,
     vsync_counter: 0,
     page_flips_completed: 0,
+    scanout_y_offset: 0,
     focused_surface: None,
     orientation: DisplayOrientation::Portrait,
     refresh_hz: 60,

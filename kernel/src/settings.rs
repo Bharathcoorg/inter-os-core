@@ -201,7 +201,7 @@ pub fn init() {
             "security.lock_timeout=30\n",
             "users.multiuser_enabled=true\n",
             "about.os_name=InterOS Core\n",
-            "about.os_version=0.8.2\n"
+            "about.os_version=0.1.0\n"
         ).as_bytes();
 
         if let Ok(g) = crate::storage::persistent::commit_kind(defaults, KIND) {
