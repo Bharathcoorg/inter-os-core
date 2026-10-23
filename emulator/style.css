@@ -4094,3 +4094,410 @@ body.studio-focus-mode .emulator-side-toolbar {
   color: #EF4444;
 }
 
+/* =========================================================================
+   AVD Extended Controls Modal Styles
+   ========================================================================= */
+.extended-controls-window {
+  max-width: 760px;
+  min-height: 520px;
+}
+
+.extended-controls-layout {
+  display: flex;
+  min-height: 460px;
+}
+
+.ext-nav-sidebar {
+  width: 220px;
+  background: rgba(255, 255, 255, 0.02);
+  border-right: 1px solid rgba(255, 255, 255, 0.08);
+  padding: 16px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.ext-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  background: transparent;
+  border: 1px solid transparent;
+  color: #94A3B8;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  text-align: left;
+}
+
+.ext-nav-item:hover {
+  background: rgba(255, 255, 255, 0.04);
+  color: #F8FAFC;
+}
+
+.ext-nav-item.active {
+  background: rgba(16, 185, 129, 0.12);
+  border-color: rgba(16, 185, 129, 0.3);
+  color: #10B981;
+}
+
+.ext-tab-panes {
+  flex: 1;
+  padding: 24px 28px;
+  overflow-y: auto;
+  max-height: calc(90vh - 100px);
+}
+
+.ext-tab-pane {
+  display: none;
+}
+
+.ext-tab-pane.active {
+  display: block;
+  animation: modalFadeIn 0.2s ease forwards;
+}
+
+.ext-pane-header {
+  margin-bottom: 22px;
+}
+
+.ext-pane-header h4 {
+  font-size: 16px;
+  font-weight: 600;
+  color: #F8FAFC;
+  margin: 0 0 6px 0;
+}
+
+.ext-pane-header p {
+  font-size: 13px;
+  color: #94A3B8;
+  margin: 0;
+  line-height: 1.5;
+}
+
+.ext-control-group {
+  margin-bottom: 18px;
+}
+
+.ext-slider-label {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 13px;
+  color: #CBD5E1;
+  margin-bottom: 8px;
+}
+
+.ext-val-badge {
+  font-family: monospace;
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #38BDF8;
+}
+
+.ext-slider {
+  width: 100%;
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.1);
+  outline: none;
+  cursor: pointer;
+  accent-color: #10B981;
+}
+
+.ext-presets-wrap {
+  margin: 18px 0;
+}
+
+.ext-presets-title {
+  font-size: 12px;
+  color: #64748B;
+  display: block;
+  margin-bottom: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.ext-preset-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.ext-btn-preset {
+  padding: 6px 12px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.03);
+  color: #CBD5E1;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.ext-btn-preset:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.ext-btn-preset.active {
+  background: rgba(56, 189, 248, 0.15);
+  border-color: rgba(56, 189, 248, 0.4);
+  color: #38BDF8;
+}
+
+.ext-pane-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 24px;
+}
+
+.ext-btn-primary {
+  padding: 8px 18px;
+  border-radius: 8px;
+  background: #10B981;
+  border: none;
+  color: #064E3B;
+  font-weight: 600;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.ext-btn-primary:hover {
+  background: #34D399;
+}
+
+.ext-btn-secondary {
+  padding: 8px 16px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: #E2E8F0;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.ext-btn-secondary:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.ext-status-text {
+  font-size: 12px;
+  color: #10B981;
+}
+
+.ext-charging-options {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.ext-radio-pill {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.03);
+  color: #CBD5E1;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.ext-radio-pill:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.ext-radio-pill input[type="radio"] {
+  accent-color: #10B981;
+}
+
+.ext-info-card {
+  margin-top: 18px;
+  padding: 12px 16px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ext-info-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  color: #94A3B8;
+}
+
+.ext-info-row strong {
+  color: #F8FAFC;
+}
+
+.biometrics-card-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 24px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 12px;
+}
+
+.biometrics-sensor-visual {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 24px;
+}
+
+.sensor-caption {
+  font-size: 12px;
+  color: #64748B;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.biometrics-actions-wrap {
+  display: flex;
+  gap: 14px;
+  width: 100%;
+  max-width: 440px;
+}
+
+.ext-btn-bio {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 12px 16px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  border: 1px solid transparent;
+}
+
+.ext-bio-pass {
+  background: rgba(16, 185, 129, 0.15);
+  border-color: rgba(16, 185, 129, 0.3);
+  color: #10B981;
+}
+
+.ext-bio-pass:hover {
+  background: rgba(16, 185, 129, 0.25);
+}
+
+.ext-bio-fail {
+  background: rgba(239, 68, 68, 0.15);
+  border-color: rgba(239, 68, 68, 0.3);
+  color: #EF4444;
+}
+
+.ext-bio-fail:hover {
+  background: rgba(239, 68, 68, 0.25);
+}
+
+.ext-status-badge-box {
+  margin-top: 20px;
+  font-size: 13px;
+  color: #94A3B8;
+  display: flex;
+  gap: 8px;
+}
+
+.ext-status-badge-box strong {
+  color: #F8FAFC;
+}
+
+.ext-killswitch-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.ext-killswitch-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 14px 18px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.ks-text {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ks-text strong {
+  font-size: 13px;
+  color: #F8FAFC;
+}
+
+.ks-text span {
+  font-size: 12px;
+  color: #94A3B8;
+}
+
+.ext-switch {
+  position: relative;
+  display: inline-block;
+  width: 44px;
+  height: 24px;
+  flex-shrink: 0;
+}
+
+.ext-switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.ext-switch-slider {
+  position: absolute;
+  cursor: pointer;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: rgba(255, 255, 255, 0.15);
+  transition: 0.2s;
+  border-radius: 24px;
+}
+
+.ext-switch-slider:before {
+  position: absolute;
+  content: "";
+  height: 18px;
+  width: 18px;
+  left: 3px;
+  bottom: 3px;
+  background-color: white;
+  transition: 0.2s;
+  border-radius: 50%;
+}
+
+.ext-switch input:checked + .ext-switch-slider {
+  background-color: #EF4444;
+}
+
+.ext-switch input:checked + .ext-switch-slider:before {
+  transform: translateX(20px);
+}
+
+

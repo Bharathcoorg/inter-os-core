@@ -325,6 +325,9 @@
           <button class="emu-btn" id="emu-btn-power" title="Power / Lock Screen (Sleep / Wake)">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18.36 6.64a9 9 0 1 1-12.73 0M12 2v10"/></svg>
           </button>
+          <button class="emu-btn" id="emu-btn-unlock" title="Unlock Device (Swipe Up / Dismiss Lock Screen)">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/><path d="M12 15v3"/></svg>
+          </button>
           <button class="emu-btn" id="emu-btn-volup" title="Volume Up">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/><line x1="23" y1="12" x2="23" y2="12"/></svg>
           </button>
@@ -359,6 +362,11 @@
           </button>
           <button class="emu-btn" id="emu-btn-recents" title="Recents / App Switcher (▢)">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
+          </button>
+          <div class="emu-divider"></div>
+
+          <button class="emu-btn" id="emu-btn-extended" title="Extended Controls (Sensors, Battery, Biometrics, Killswitches)">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/><circle cx="5" cy="12" r="1.5"/></svg>
           </button>
         </div>
 
@@ -1161,6 +1169,249 @@
         <button class="perm-btn perm-btn-allow-always" id="btn-perm-allow-always">While Using App</button>
         <button class="perm-btn perm-btn-allow-once" id="btn-perm-allow-once">Only This Time</button>
         <button class="perm-btn perm-btn-deny" id="btn-perm-deny">Don't Allow</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========================================================================= -->
+  <!-- Android Studio AVD Extended Controls Modal -->
+  <!-- ========================================================================= -->
+  <div class="studio-global-modal-overlay" id="modal-extended-controls" aria-hidden="true" style="display: none;">
+    <div class="studio-global-modal-backdrop" id="backdrop-extended-controls"></div>
+    <div class="studio-global-modal-window extended-controls-window">
+      <div class="studio-global-modal-header">
+        <div class="modal-header-title-wrap">
+          <div class="modal-icon-badge" style="background: rgba(16, 185, 129, 0.12); border-color: rgba(16, 185, 129, 0.25);">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#10B981" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          </div>
+          <div>
+            <div class="modal-sub-badge" style="color: #10B981;">DEVICE STUDIO &bull; HARDWARE PERIPHERALS</div>
+            <h3 class="modal-main-title">AVD Extended Controls</h3>
+          </div>
+        </div>
+        <button class="modal-close-pill-btn" id="btn-close-extended-controls" title="Close Extended Controls">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+
+      <div class="modal-body-content" style="padding: 0;">
+        <div class="extended-controls-layout">
+          <!-- Sidebar Nav Tabs -->
+          <div class="ext-nav-sidebar">
+            <button class="ext-nav-item active" data-tab="sensors">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+              <span>Virtual Sensors</span>
+            </button>
+            <button class="ext-nav-item" data-tab="battery">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="1" y="6" width="18" height="12" rx="2"/><path d="M23 13v-2"/></svg>
+              <span>Battery Level</span>
+            </button>
+            <button class="ext-nav-item" data-tab="biometrics">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 11c0 3.517-1.009 6.799-2.753 9.571m-3.44-2.04l.054-.09A13.916 13.916 0 008 11a4 4 0 118 0c0 1.017-.07 2.019-.203 3m-2.118 6.844A21.88 21.88 0 0015.171 17m3.839 1.132c.645-2.266.99-4.659.99-7.132A8 8 0 004.07 9m5.936 8.79A13.987 13.987 0 0112 15c.67 0 1.325.047 1.966.136"/></svg>
+              <span>Biometrics Simulation</span>
+            </button>
+            <button class="ext-nav-item" data-tab="killswitches">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+              <span>Hardware Killswitches</span>
+            </button>
+          </div>
+
+          <!-- Tab Panes Content -->
+          <div class="ext-tab-panes">
+            <!-- Pane 1: Virtual Sensors -->
+            <div class="ext-tab-pane active" id="pane-ext-sensors">
+              <div class="ext-pane-header">
+                <h4>Inertial Measurement Unit (IMU)</h4>
+                <p>Inject 3-axis accelerometer gravity vectors, gyroscope angular motion, and tilt orientation into the kernel sensor subsystem.</p>
+              </div>
+
+              <div class="ext-control-group">
+                <label class="ext-slider-label">
+                  <span>Accelerometer X (Lateral / Roll)</span>
+                  <span class="ext-val-badge" id="val-accel-x">0 milli-g</span>
+                </label>
+                <input type="range" class="ext-slider" id="slider-accel-x" min="-1960" max="1960" value="0" step="10">
+              </div>
+
+              <div class="ext-control-group">
+                <label class="ext-slider-label">
+                  <span>Accelerometer Y (Longitudinal / Pitch)</span>
+                  <span class="ext-val-badge" id="val-accel-y">980 milli-g</span>
+                </label>
+                <input type="range" class="ext-slider" id="slider-accel-y" min="-1960" max="1960" value="980" step="10">
+              </div>
+
+              <div class="ext-control-group">
+                <label class="ext-slider-label">
+                  <span>Accelerometer Z (Normal / Face)</span>
+                  <span class="ext-val-badge" id="val-accel-z">0 milli-g</span>
+                </label>
+                <input type="range" class="ext-slider" id="slider-accel-z" min="-1960" max="1960" value="0" step="10">
+              </div>
+
+              <div class="ext-presets-wrap">
+                <span class="ext-presets-title">Device Orientation Presets:</span>
+                <div class="ext-preset-buttons">
+                  <button class="ext-btn-preset active" data-preset="portrait">Portrait (0, 980, 0)</button>
+                  <button class="ext-btn-preset" data-preset="landscape-right">Landscape Right (980, 0, 0)</button>
+                  <button class="ext-btn-preset" data-preset="landscape-left">Landscape Left (-980, 0, 0)</button>
+                  <button class="ext-btn-preset" data-preset="face-up">Face Up (0, 0, 980)</button>
+                </div>
+              </div>
+
+              <div class="ext-pane-actions">
+                <button class="ext-btn-primary" id="btn-apply-sensors">Inject Sensor Vector</button>
+                <button class="ext-btn-secondary" id="btn-reset-sensors">Reset to Portrait</button>
+                <span class="ext-status-text" id="status-sensors"></span>
+              </div>
+            </div>
+
+            <!-- Pane 2: Battery Level -->
+            <div class="ext-tab-pane" id="pane-ext-battery">
+              <div class="ext-pane-header">
+                <h4>Battery Fuel Gauge Telemetry</h4>
+                <p>Simulate Li-ion state of charge, voltage curve calculations, and charging hardware state.</p>
+              </div>
+
+              <div class="ext-control-group">
+                <label class="ext-slider-label">
+                  <span>Charge Level (%)</span>
+                  <span class="ext-val-badge" id="val-battery-pct">85%</span>
+                </label>
+                <input type="range" class="ext-slider" id="slider-battery-pct" min="0" max="100" value="85" step="1">
+              </div>
+
+              <div class="ext-control-group">
+                <label class="ext-slider-label">
+                  <span>Charging State</span>
+                </label>
+                <div class="ext-charging-options">
+                  <label class="ext-radio-pill">
+                    <input type="radio" name="charging-state" value="Discharging" checked>
+                    <span>Unplugged / Discharging</span>
+                  </label>
+                  <label class="ext-radio-pill">
+                    <input type="radio" name="charging-state" value="ChargingAC">
+                    <span>AC Fast Charger</span>
+                  </label>
+                  <label class="ext-radio-pill">
+                    <input type="radio" name="charging-state" value="USB">
+                    <span>USB Cable (500mA)</span>
+                  </label>
+                  <label class="ext-radio-pill">
+                    <input type="radio" name="charging-state" value="Wireless">
+                    <span>Wireless Charging</span>
+                  </label>
+                </div>
+              </div>
+
+              <div class="ext-info-card">
+                <div class="ext-info-row">
+                  <span>Calculated Voltage:</span>
+                  <strong id="info-battery-voltage">4095 mV</strong>
+                </div>
+                <div class="ext-info-row">
+                  <span>Remaining Capacity:</span>
+                  <strong id="info-battery-capacity">4250 / 5000 mAh</strong>
+                </div>
+              </div>
+
+              <div class="ext-pane-actions">
+                <button class="ext-btn-primary" id="btn-apply-battery">Set Battery Telemetry</button>
+                <span class="ext-status-text" id="status-battery"></span>
+              </div>
+            </div>
+
+            <!-- Pane 3: Biometrics Simulation -->
+            <div class="ext-tab-pane" id="pane-ext-biometrics">
+              <div class="ext-pane-header">
+                <h4>Fingerprint Sensor & Biometric Unlock</h4>
+                <p>Simulate fingerprint sensor touches to unlock device owner (UID 1000) or test authentication rejection.</p>
+              </div>
+
+              <div class="biometrics-card-container">
+                <div class="biometrics-sensor-visual">
+                  <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="#10B981" stroke-width="1.5"><path d="M12 11c0 3.517-1.009 6.799-2.753 9.571m-3.44-2.04l.054-.09A13.916 13.916 0 008 11a4 4 0 118 0c0 1.017-.07 2.019-.203 3m-2.118 6.844A21.88 21.88 0 0015.171 17m3.839 1.132c.645-2.266.99-4.659.99-7.132A8 8 0 004.07 9m5.936 8.79A13.987 13.987 0 0112 15c.67 0 1.325.047 1.966.136"/></svg>
+                  <span class="sensor-caption">Capacitive In-Display Touch Sensor</span>
+                </div>
+
+                <div class="biometrics-actions-wrap">
+                  <button class="ext-btn-bio ext-bio-pass" id="btn-bio-fingerprint-pass">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+                    <span>Simulate Fingerprint Match (PASS)</span>
+                  </button>
+                  <button class="ext-btn-bio ext-bio-fail" id="btn-bio-fingerprint-fail">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                    <span>Simulate Fingerprint Mismatch (FAIL)</span>
+                  </button>
+                </div>
+
+                <div class="ext-status-badge-box" id="box-bio-result">
+                  <span>Last Biometric Event:</span>
+                  <strong id="status-bio-result">Ready for touch</strong>
+                </div>
+              </div>
+            </div>
+
+            <!-- Pane 4: Hardware Killswitches -->
+            <div class="ext-tab-pane" id="pane-ext-killswitches">
+              <div class="ext-pane-header">
+                <h4>Hardware Privacy Killswitches</h4>
+                <p>Physically sever power lines and hardware interrupt lines for privacy-sensitive mobile peripherals.</p>
+              </div>
+
+              <div class="ext-killswitch-list">
+                <div class="ext-killswitch-row">
+                  <div class="ks-text">
+                    <strong>Camera Sensor Power Cut</strong>
+                    <span>Disables physical camera image sensor VDD rail</span>
+                  </div>
+                  <label class="ext-switch">
+                    <input type="checkbox" id="ks-camera" data-subsystem="camera">
+                    <span class="ext-switch-slider"></span>
+                  </label>
+                </div>
+
+                <div class="ext-killswitch-row">
+                  <div class="ks-text">
+                    <strong>Microphone Hardware Cut</strong>
+                    <span>Disables MEMS microphone ADC pre-amp input rail</span>
+                  </div>
+                  <label class="ext-switch">
+                    <input type="checkbox" id="ks-mic" data-subsystem="mic">
+                    <span class="ext-switch-slider"></span>
+                  </label>
+                </div>
+
+                <div class="ext-killswitch-row">
+                  <div class="ks-text">
+                    <strong>Cellular Modem Killswitch</strong>
+                    <span>Cuts baseband modem power and SIM bus clock</span>
+                  </div>
+                  <label class="ext-switch">
+                    <input type="checkbox" id="ks-cellular" data-subsystem="cellular">
+                    <span class="ext-switch-slider"></span>
+                  </label>
+                </div>
+
+                <div class="ext-killswitch-row">
+                  <div class="ks-text">
+                    <strong>GPS / GNSS Location Cut</strong>
+                    <span>Physically disconnects satellite RF front-end</span>
+                  </div>
+                  <label class="ext-switch">
+                    <input type="checkbox" id="ks-gps" data-subsystem="gps">
+                    <span class="ext-switch-slider"></span>
+                  </label>
+                </div>
+              </div>
+
+              <div class="ext-pane-actions">
+                <span class="ext-status-text" id="status-killswitch"></span>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   </div>

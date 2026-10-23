@@ -99,6 +99,28 @@ macro_rules! serial_println {
 
 use x86_64::instructions::port::Port;
 
+/// Physical hardware killswitch states for sensors, comms, and peripherals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HardwareKillswitches {
+    pub camera_cut: bool,
+    pub mic_cut: bool,
+    pub cellular_cut: bool,
+    pub gps_cut: bool,
+}
+
+impl HardwareKillswitches {
+    pub const fn new() -> Self {
+        Self {
+            camera_cut: false,
+            mic_cut: false,
+            cellular_cut: false,
+            gps_cut: false,
+        }
+    }
+}
+
+pub static HARDWARE_KILLSWITCHES: Mutex<HardwareKillswitches> = Mutex::new(HardwareKillswitches::new());
+
 static RX_BUF: Mutex<RxState> = Mutex::new(RxState::new());
 
 /// Number of completed command lines that can be queued between the COM1
@@ -1294,6 +1316,117 @@ fn handle_serial_command(cmd: &[u8]) {
         return;
     }
 
+    if verb.eq_ignore_ascii_case("SENSOR_INJECT") {
+        let x = parts.next().and_then(|v| v.parse::<i32>().ok()).unwrap_or(0);
+        let y = parts.next().and_then(|v| v.parse::<i32>().ok()).unwrap_or(980);
+        let z = parts.next().and_then(|v| v.parse::<i32>().ok()).unwrap_or(0);
+        let mut sm = crate::sensor::SENSOR_MANAGER.lock();
+        sm.imu.update_accel(crate::sensor::Vector3D::new(x, y, z));
+        if let (Some(gx), Some(gy), Some(gz)) = (
+            parts.next().and_then(|v| v.parse::<i32>().ok()),
+            parts.next().and_then(|v| v.parse::<i32>().ok()),
+            parts.next().and_then(|v| v.parse::<i32>().ok()),
+        ) {
+            sm.imu.update_gyro(crate::sensor::Vector3D::new(gx, gy, gz));
+        }
+        let orient = sm.imu.determine_orientation();
+        crate::serial_println!(
+            "[SENSOR_INJECT] accel=({}, {}, {}) orientation={:?}",
+            x, y, z, orient
+        );
+        return;
+    }
+
+    if verb.eq_ignore_ascii_case("BATTERY_SET") {
+        let pct = parts.next().and_then(|v| v.parse::<u8>().ok()).unwrap_or(80).min(100);
+        let charging_str = parts.next().unwrap_or("DISCHARGING");
+        let charging_status = match charging_str.to_ascii_uppercase().as_str() {
+            "AC" | "CHARGING" | "1" | "TRUE" | "CHARGINGAC" | "USB" => crate::resource::battery::ChargingStatus::ChargingAC,
+            "WIRELESS" | "CHARGINGWIRELESS" => crate::resource::battery::ChargingStatus::ChargingWireless,
+            "FULL" => crate::resource::battery::ChargingStatus::Full,
+            _ => crate::resource::battery::ChargingStatus::Discharging,
+        };
+        let design_capacity = 5000u32;
+        let capacity_mah = ((design_capacity as u64 * pct as u64) / 100) as u32;
+        let voltage_mv = 3500 + ((700 * pct as u32) / 100);
+        let temperature_c = 28i8;
+        let mut gauge = crate::resource::BATTERY_GAUGE.lock();
+        gauge.set_telemetry(voltage_mv, capacity_mah, temperature_c, charging_status);
+        crate::serial_println!(
+            "[BATTERY_SET] soc_percent={} charging_status={:?} voltage_mv={} capacity_mah={}",
+            pct, charging_status, voltage_mv, capacity_mah
+        );
+        return;
+    }
+
+    if verb.eq_ignore_ascii_case("FINGERPRINT_INJECT") {
+        let result_str = parts.next().unwrap_or("PASS");
+        if result_str.eq_ignore_ascii_case("PASS") {
+            let mut um = crate::user::USER_MANAGER.lock();
+            let _ = um.unlock_biometric(crate::user::UserId::OWNER);
+            drop(um);
+            crate::input::post_key_event(crate::input::KeyEvent {
+                source: crate::input::InputSource::DeviceStudio,
+                action: crate::input::KeyAction::Down,
+                code: crate::input::KeyCode::Unknown(0x1000F),
+                shift: false,
+                ctrl: false,
+                alt: false,
+                meta: false,
+            });
+            crate::input::post_key_event(crate::input::KeyEvent {
+                source: crate::input::InputSource::DeviceStudio,
+                action: crate::input::KeyAction::Up,
+                code: crate::input::KeyCode::Unknown(0x1000F),
+                shift: false,
+                ctrl: false,
+                alt: false,
+                meta: false,
+            });
+            crate::serial_println!("[FINGERPRINT_INJECT] PASS: biometric match verified, UID=1000 unlocked");
+        } else {
+            crate::serial_println!("[FINGERPRINT_INJECT] FAIL: biometric match rejected");
+        }
+        return;
+    }
+
+    if verb.eq_ignore_ascii_case("KILLSWITCH_TOGGLE") {
+        let subsystem = parts.next().unwrap_or("ALL");
+        let state_str = parts.next().unwrap_or("ON");
+        let engaged = state_str.eq_ignore_ascii_case("ON") || state_str.eq_ignore_ascii_case("1") || state_str.eq_ignore_ascii_case("TRUE") || state_str.eq_ignore_ascii_case("CUT");
+        let mut ks = HARDWARE_KILLSWITCHES.lock();
+        match subsystem.to_ascii_uppercase().as_str() {
+            "CAMERA" | "CAM" => ks.camera_cut = engaged,
+            "MIC" | "MICROPHONE" | "AUDIO" => ks.mic_cut = engaged,
+            "CELLULAR" | "CELL" | "MODEM" | "RADIO" => ks.cellular_cut = engaged,
+            "GPS" | "LOCATION" => ks.gps_cut = engaged,
+            "ALL" => {
+                ks.camera_cut = engaged;
+                ks.mic_cut = engaged;
+                ks.cellular_cut = engaged;
+                ks.gps_cut = engaged;
+            }
+            _ => {
+                crate::serial_println!("[KILLSWITCH] REJECT unknown subsystem: {}", subsystem);
+                return;
+            }
+        }
+        crate::serial_println!(
+            "[KILLSWITCH] subsystem={} engaged={} (camera_cut={} mic_cut={} cellular_cut={} gps_cut={})",
+            subsystem, engaged, ks.camera_cut, ks.mic_cut, ks.cellular_cut, ks.gps_cut
+        );
+        return;
+    }
+
+    if verb.eq_ignore_ascii_case("KILLSWITCH_STATUS") || verb.eq_ignore_ascii_case("KILLSWITCH_GET") {
+        let ks = HARDWARE_KILLSWITCHES.lock();
+        crate::serial_println!(
+            "[KILLSWITCH_STATUS] camera_cut={} mic_cut={} cellular_cut={} gps_cut={}",
+            ks.camera_cut, ks.mic_cut, ks.cellular_cut, ks.gps_cut
+        );
+        return;
+    }
+
     // Legacy convenience touch verbs. These accept the same logical portrait
     // coordinates as INPUT_TOUCH and are bounds checked identically: an
     // unchecked point here would be injected straight into the gesture router.
@@ -1497,6 +1630,38 @@ mod tests {
 
         // Macro invocation in unlocked state must succeed without panic
         serial_println!("Macro invocation test {}", 100);
+    }
+
+    #[test]
+    fn test_serial_commands_extended_controls() {
+        // Test SENSOR_INJECT
+        handle_serial_command(b"SENSOR_INJECT 123 456 789");
+        let sm = crate::sensor::SENSOR_MANAGER.lock();
+        assert_eq!(sm.imu.accel.x, 123);
+        assert_eq!(sm.imu.accel.y, 456);
+        assert_eq!(sm.imu.accel.z, 789);
+        drop(sm);
+
+        // Test BATTERY_SET
+        handle_serial_command(b"BATTERY_SET 60 AC");
+        let bg = crate::resource::BATTERY_GAUGE.lock();
+        assert_eq!(bg.soc_percent, 60);
+        assert_eq!(bg.charging_status, crate::resource::battery::ChargingStatus::ChargingAC);
+        drop(bg);
+
+        // Test FINGERPRINT_INJECT
+        handle_serial_command(b"FINGERPRINT_INJECT PASS");
+        let um = crate::user::USER_MANAGER.lock();
+        if let Ok(state) = um.get_lock_state(crate::user::UserId::OWNER) {
+            assert_eq!(state, crate::user::UserLockState::Unlocked);
+        }
+        drop(um);
+
+        // Test KILLSWITCH_TOGGLE
+        handle_serial_command(b"KILLSWITCH_TOGGLE CAMERA ON");
+        assert!(HARDWARE_KILLSWITCHES.lock().camera_cut);
+        handle_serial_command(b"KILLSWITCH_TOGGLE CAMERA OFF");
+        assert!(!HARDWARE_KILLSWITCHES.lock().camera_cut);
     }
 }
 

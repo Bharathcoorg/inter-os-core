@@ -93,6 +93,31 @@ telemetry_lock = threading.Lock()
 serial_epoch = 0
 launcher_has_booted = False
 
+extended_controls_state = {
+    'sensors': {
+        'accel': {'x': 0, 'y': 980, 'z': 0},
+        'gyro': {'x': 0, 'y': 0, 'z': 0},
+        'tilt': {'pitch': 0, 'roll': 0}
+    },
+    'battery': {
+        'percentage': 85,
+        'charging_status': 'Discharging',
+        'voltage_mv': 3950
+    },
+    'biometrics': {
+        'fingerprint_supported': True,
+        'last_result': 'NONE'
+    },
+    'killswitches': {
+        'camera': False,
+        'mic': False,
+        'cellular': False,
+        'gps': False
+    }
+}
+extended_controls_lock = threading.Lock()
+
+
 # The QEMU process this Studio launched, tracked by PID and start time.
 #
 # WHY a PID alone is not enough: PIDs are recycled, so a PID that was QEMU
@@ -3393,6 +3418,18 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             }).encode())
             return
 
+        if parsed_path.path == '/api/extended-controls/state':
+            with extended_controls_lock:
+                state_copy = json.loads(json.dumps(extended_controls_state))
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                'success': True,
+                'state': state_copy
+            }).encode())
+            return
+
         if self.path.startswith('/api/serial'):
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
@@ -4567,6 +4604,113 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 'status': 'UNAVAILABLE',
                 'source': 'UNAVAILABLE',
                 'error': 'Hardware sensor injection is disabled; Device Studio only displays guest-reported telemetry'
+            }).encode())
+            return
+
+        if self.path == '/api/sensors/inject':
+            content_length = self._bounded_content_length()
+            body = self.rfile.read(content_length) if (content_length and content_length > 0) else b'{}'
+            try:
+                data = json.loads(body.decode('utf-8'))
+            except Exception:
+                data = {}
+            x = int(data.get('x', 0))
+            y = int(data.get('y', 980))
+            z = int(data.get('z', 0))
+            gx = int(data.get('gx', 0))
+            gy = int(data.get('gy', 0))
+            gz = int(data.get('gz', 0))
+            with extended_controls_lock:
+                extended_controls_state['sensors']['accel'] = {'x': x, 'y': y, 'z': z}
+                extended_controls_state['sensors']['gyro'] = {'x': gx, 'y': gy, 'z': gz}
+                extended_controls_state['sensors']['tilt'] = {
+                    'pitch': int(data.get('pitch', 0)),
+                    'roll': int(data.get('roll', 0))
+                }
+            cmd = f"SENSOR_INJECT {x} {y} {z} {gx} {gy} {gz}"
+            ok, msg = send_guest_serial_command(cmd, "[SENSOR_INJECT]", timeout=3)
+            self.send_response(200 if ok else 500)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                'success': ok,
+                'status': 'INJECTED' if ok else 'FAILED',
+                'detail': msg
+            }).encode())
+            return
+
+        if self.path == '/api/battery/set':
+            content_length = self._bounded_content_length()
+            body = self.rfile.read(content_length) if (content_length and content_length > 0) else b'{}'
+            try:
+                data = json.loads(body.decode('utf-8'))
+            except Exception:
+                data = {}
+            pct = max(0, min(100, int(data.get('percentage', data.get('soc_percent', 80)))))
+            status = str(data.get('status', data.get('charging_status', 'Discharging'))).strip()
+            with extended_controls_lock:
+                extended_controls_state['battery']['percentage'] = pct
+                extended_controls_state['battery']['charging_status'] = status
+                extended_controls_state['battery']['voltage_mv'] = 3500 + int(700 * pct / 100)
+            cmd = f"BATTERY_SET {pct} {status}"
+            ok, msg = send_guest_serial_command(cmd, "[BATTERY_SET]", timeout=3)
+            self.send_response(200 if ok else 500)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                'success': ok,
+                'status': 'APPLIED' if ok else 'FAILED',
+                'percentage': pct,
+                'charging_status': status,
+                'detail': msg
+            }).encode())
+            return
+
+        if self.path == '/api/biometrics/fingerprint':
+            content_length = self._bounded_content_length()
+            body = self.rfile.read(content_length) if (content_length and content_length > 0) else b'{}'
+            try:
+                data = json.loads(body.decode('utf-8'))
+            except Exception:
+                data = {}
+            result = 'PASS' if str(data.get('result', 'PASS')).strip().upper() == 'PASS' else 'FAIL'
+            with extended_controls_lock:
+                extended_controls_state['biometrics']['last_result'] = result
+            cmd = f"FINGERPRINT_INJECT {result}"
+            ok, msg = send_guest_serial_command(cmd, "[FINGERPRINT_INJECT]", timeout=3)
+            self.send_response(200 if ok else 500)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                'success': ok,
+                'result': result,
+                'detail': msg
+            }).encode())
+            return
+
+        if self.path == '/api/killswitch/toggle':
+            content_length = self._bounded_content_length()
+            body = self.rfile.read(content_length) if (content_length and content_length > 0) else b'{}'
+            try:
+                data = json.loads(body.decode('utf-8'))
+            except Exception:
+                data = {}
+            subsystem = str(data.get('subsystem', 'camera')).strip().lower()
+            state = bool(data.get('state', True))
+            with extended_controls_lock:
+                if subsystem in extended_controls_state['killswitches']:
+                    extended_controls_state['killswitches'][subsystem] = state
+            state_str = "ON" if state else "OFF"
+            cmd = f"KILLSWITCH_TOGGLE {subsystem} {state_str}"
+            ok, msg = send_guest_serial_command(cmd, "[KILLSWITCH]", timeout=3)
+            self.send_response(200 if ok else 500)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                'success': ok,
+                'subsystem': subsystem,
+                'state': state,
+                'detail': msg
             }).encode())
             return
 

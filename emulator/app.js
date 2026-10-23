@@ -277,6 +277,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const emuBtnRotate = document.getElementById('emu-btn-rotate');
   const emuBtnReboot = document.getElementById('emu-btn-reboot');
   const emuBtnBack = document.getElementById('emu-btn-back');
+  const emuBtnUnlock = document.getElementById('emu-btn-unlock');
   const emuBtnHome = document.getElementById('emu-btn-home');
   const emuBtnRecents = document.getElementById('emu-btn-recents');
 
@@ -1922,6 +1923,20 @@ document.addEventListener('DOMContentLoaded', () => {
     dispatchHardwareGesture('Back', { action: 'back' });
   });
 
+  emuBtnUnlock?.addEventListener('click', () => {
+    dispatchHardwareGesture('Unlock', {
+      action: 'swipe',
+      coords: 'portrait',
+      x: 360,
+      y: 1100,
+      x2: 360,
+      y2: 400,
+      steps: 8
+    });
+    showToast('Unlock gesture dispatched');
+    setTimeout(() => refreshScanoutFrame(true), 60);
+  });
+
   emuBtnHome?.addEventListener('click', () => {
     dispatchHardwareGesture('Home', { action: 'home' });
   });
@@ -3228,6 +3243,262 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('btn-perm-allow-always')?.addEventListener('click', () => resolvePermissionPrompt(1));
   document.getElementById('btn-perm-allow-once')?.addEventListener('click', () => resolvePermissionPrompt(3));
   document.getElementById('btn-perm-deny')?.addEventListener('click', () => resolvePermissionPrompt(2));
+
+  // =========================================================================
+  // AVD Extended Controls (Sensors, Battery, Biometrics, Killswitches)
+  // =========================================================================
+  const emuBtnExtended = document.getElementById('emu-btn-extended');
+  const modalExtendedControls = document.getElementById('modal-extended-controls');
+  const btnCloseExtendedControls = document.getElementById('btn-close-extended-controls');
+  const backdropExtendedControls = document.getElementById('backdrop-extended-controls');
+
+  function openExtendedControls() {
+    if (!modalExtendedControls) return;
+    modalExtendedControls.style.display = 'flex';
+    modalExtendedControls.setAttribute('aria-hidden', 'false');
+    syncExtendedControlsState();
+  }
+
+  function closeExtendedControls() {
+    if (!modalExtendedControls) return;
+    modalExtendedControls.style.display = 'none';
+    modalExtendedControls.setAttribute('aria-hidden', 'true');
+  }
+
+  emuBtnExtended?.addEventListener('click', openExtendedControls);
+  btnCloseExtendedControls?.addEventListener('click', closeExtendedControls);
+  backdropExtendedControls?.addEventListener('click', closeExtendedControls);
+
+  // Nav Tabs switching
+  const extNavItems = document.querySelectorAll('.ext-nav-item');
+  const extTabPanes = {
+    sensors: document.getElementById('pane-ext-sensors'),
+    battery: document.getElementById('pane-ext-battery'),
+    biometrics: document.getElementById('pane-ext-biometrics'),
+    killswitches: document.getElementById('pane-ext-killswitches')
+  };
+
+  extNavItems.forEach(item => {
+    item.addEventListener('click', () => {
+      extNavItems.forEach(i => i.classList.remove('active'));
+      item.classList.add('active');
+      const tab = item.getAttribute('data-tab');
+      Object.keys(extTabPanes).forEach(k => {
+        if (extTabPanes[k]) {
+          extTabPanes[k].classList.toggle('active', k === tab);
+        }
+      });
+    });
+  });
+
+  // Tab 1: Virtual Sensors
+  const sliderAccelX = document.getElementById('slider-accel-x');
+  const sliderAccelY = document.getElementById('slider-accel-y');
+  const sliderAccelZ = document.getElementById('slider-accel-z');
+  const valAccelX = document.getElementById('val-accel-x');
+  const valAccelY = document.getElementById('val-accel-y');
+  const valAccelZ = document.getElementById('val-accel-z');
+  const btnApplySensors = document.getElementById('btn-apply-sensors');
+  const btnResetSensors = document.getElementById('btn-reset-sensors');
+  const statusSensors = document.getElementById('status-sensors');
+  const extPresetBtns = document.querySelectorAll('.ext-btn-preset');
+
+  function updateSensorLabels() {
+    if (valAccelX && sliderAccelX) valAccelX.textContent = `${sliderAccelX.value} milli-g`;
+    if (valAccelY && sliderAccelY) valAccelY.textContent = `${sliderAccelY.value} milli-g`;
+    if (valAccelZ && sliderAccelZ) valAccelZ.textContent = `${sliderAccelZ.value} milli-g`;
+  }
+
+  sliderAccelX?.addEventListener('input', updateSensorLabels);
+  sliderAccelY?.addEventListener('input', updateSensorLabels);
+  sliderAccelZ?.addEventListener('input', updateSensorLabels);
+
+  extPresetBtns.forEach(btn => {
+    btn.addEventListener('click', () => {
+      extPresetBtns.forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      const preset = btn.getAttribute('data-preset');
+      if (preset === 'portrait') {
+        if (sliderAccelX) sliderAccelX.value = 0;
+        if (sliderAccelY) sliderAccelY.value = 980;
+        if (sliderAccelZ) sliderAccelZ.value = 0;
+      } else if (preset === 'landscape-right') {
+        if (sliderAccelX) sliderAccelX.value = 980;
+        if (sliderAccelY) sliderAccelY.value = 0;
+        if (sliderAccelZ) sliderAccelZ.value = 0;
+      } else if (preset === 'landscape-left') {
+        if (sliderAccelX) sliderAccelX.value = -980;
+        if (sliderAccelY) sliderAccelY.value = 0;
+        if (sliderAccelZ) sliderAccelZ.value = 0;
+      } else if (preset === 'face-up') {
+        if (sliderAccelX) sliderAccelX.value = 0;
+        if (sliderAccelY) sliderAccelY.value = 0;
+        if (sliderAccelZ) sliderAccelZ.value = 980;
+      }
+      updateSensorLabels();
+    });
+  });
+
+  async function applySensors() {
+    const x = parseInt(sliderAccelX?.value || '0', 10);
+    const y = parseInt(sliderAccelY?.value || '980', 10);
+    const z = parseInt(sliderAccelZ?.value || '0', 10);
+    try {
+      if (statusSensors) statusSensors.textContent = 'Injecting sensor vector...';
+      const resp = await fetch('/api/sensors/inject', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ x, y, z })
+      });
+      const data = await resp.json();
+      if (statusSensors) {
+        statusSensors.textContent = data.success ? 'Vector injected successfully' : ('Error: ' + (data.detail || 'failed'));
+        setTimeout(() => { if (statusSensors) statusSensors.textContent = ''; }, 3000);
+      }
+    } catch (e) {
+      if (statusSensors) statusSensors.textContent = 'Network error injecting sensor';
+    }
+  }
+
+  btnApplySensors?.addEventListener('click', applySensors);
+  btnResetSensors?.addEventListener('click', () => {
+    if (sliderAccelX) sliderAccelX.value = 0;
+    if (sliderAccelY) sliderAccelY.value = 980;
+    if (sliderAccelZ) sliderAccelZ.value = 0;
+    updateSensorLabels();
+    applySensors();
+  });
+
+  // Tab 2: Battery Level
+  const sliderBatteryPct = document.getElementById('slider-battery-pct');
+  const valBatteryPct = document.getElementById('val-battery-pct');
+  const infoBatteryVoltage = document.getElementById('info-battery-voltage');
+  const infoBatteryCapacity = document.getElementById('info-battery-capacity');
+  const btnApplyBattery = document.getElementById('btn-apply-battery');
+  const statusBattery = document.getElementById('status-battery');
+
+  function updateBatteryLabels() {
+    const pct = parseInt(sliderBatteryPct?.value || '85', 10);
+    if (valBatteryPct) valBatteryPct.textContent = `${pct}%`;
+    const mv = 3500 + Math.round(700 * pct / 100);
+    const mah = Math.round(5000 * pct / 100);
+    if (infoBatteryVoltage) infoBatteryVoltage.textContent = `${mv} mV`;
+    if (infoBatteryCapacity) infoBatteryCapacity.textContent = `${mah} / 5000 mAh`;
+  }
+
+  sliderBatteryPct?.addEventListener('input', updateBatteryLabels);
+
+  btnApplyBattery?.addEventListener('click', async () => {
+    const pct = parseInt(sliderBatteryPct?.value || '85', 10);
+    const checkedRadio = document.querySelector('input[name="charging-state"]:checked');
+    const status = checkedRadio?.value || 'Discharging';
+    try {
+      if (statusBattery) statusBattery.textContent = 'Setting telemetry...';
+      const resp = await fetch('/api/battery/set', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ percentage: pct, status })
+      });
+      const data = await resp.json();
+      if (statusBattery) {
+        statusBattery.textContent = data.success ? 'Battery telemetry applied' : ('Error: ' + (data.detail || 'failed'));
+        setTimeout(() => { if (statusBattery) statusBattery.textContent = ''; }, 3000);
+      }
+    } catch (e) {
+      if (statusBattery) statusBattery.textContent = 'Network error applying battery telemetry';
+    }
+  });
+
+  // Tab 3: Biometrics
+  const btnBioPass = document.getElementById('btn-bio-fingerprint-pass');
+  const btnBioFail = document.getElementById('btn-bio-fingerprint-fail');
+  const statusBioResult = document.getElementById('status-bio-result');
+
+  async function injectFingerprint(result) {
+    try {
+      if (statusBioResult) statusBioResult.textContent = `Emitting fingerprint ${result}...`;
+      const resp = await fetch('/api/biometrics/fingerprint', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ result })
+      });
+      const data = await resp.json();
+      if (statusBioResult) {
+        if (result === 'PASS') {
+          statusBioResult.textContent = 'Biometric match verified (UID=1000 Unlocked)';
+          statusBioResult.style.color = '#10B981';
+          showToast('Fingerprint match verified: Device unlocked');
+          setTimeout(() => refreshScanoutFrame(true), 100);
+        } else {
+          statusBioResult.textContent = 'Biometric match rejected (Fingerprint Mismatch)';
+          statusBioResult.style.color = '#EF4444';
+          showToast('Fingerprint rejected: Biometric mismatch');
+        }
+      }
+    } catch (e) {
+      if (statusBioResult) statusBioResult.textContent = 'Failed to emit fingerprint event';
+    }
+  }
+
+  btnBioPass?.addEventListener('click', () => injectFingerprint('PASS'));
+  btnBioFail?.addEventListener('click', () => injectFingerprint('FAIL'));
+
+  // Tab 4: Hardware Killswitches
+  const ksCheckboxes = {
+    camera: document.getElementById('ks-camera'),
+    mic: document.getElementById('ks-mic'),
+    cellular: document.getElementById('ks-cellular'),
+    gps: document.getElementById('ks-gps')
+  };
+  const statusKillswitch = document.getElementById('status-killswitch');
+
+  Object.keys(ksCheckboxes).forEach(subsystem => {
+    const cb = ksCheckboxes[subsystem];
+    cb?.addEventListener('change', async (e) => {
+      const state = e.target.checked;
+      try {
+        if (statusKillswitch) statusKillswitch.textContent = `Toggling ${subsystem} killswitch...`;
+        const resp = await fetch('/api/killswitch/toggle', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ subsystem, state })
+        });
+        const data = await resp.json();
+        if (statusKillswitch) {
+          statusKillswitch.textContent = data.success ? `${subsystem} killswitch: ${state ? 'ENGAGED (CUT)' : 'DISENGAGED (ACTIVE)'}` : 'Error toggling killswitch';
+          setTimeout(() => { if (statusKillswitch) statusKillswitch.textContent = ''; }, 3000);
+        }
+      } catch (err) {
+        if (statusKillswitch) statusKillswitch.textContent = 'Failed to toggle killswitch';
+      }
+    });
+  });
+
+  async function syncExtendedControlsState() {
+    try {
+      const resp = await fetch('/api/extended-controls/state');
+      const data = await resp.json();
+      if (!data.success || !data.state) return;
+      const st = data.state;
+      if (st.sensors && st.sensors.accel) {
+        if (sliderAccelX) sliderAccelX.value = st.sensors.accel.x;
+        if (sliderAccelY) sliderAccelY.value = st.sensors.accel.y;
+        if (sliderAccelZ) sliderAccelZ.value = st.sensors.accel.z;
+        updateSensorLabels();
+      }
+      if (st.battery) {
+        if (sliderBatteryPct) sliderBatteryPct.value = st.battery.percentage;
+        updateBatteryLabels();
+        const rad = document.querySelector(`input[name="charging-state"][value="${st.battery.charging_status}"]`);
+        if (rad) rad.checked = true;
+      }
+      if (st.killswitches) {
+        Object.keys(st.killswitches).forEach(k => {
+          if (ksCheckboxes[k]) ksCheckboxes[k].checked = !!st.killswitches[k];
+        });
+      }
+    } catch (_) {}
+  }
 
 });
 
