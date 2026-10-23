@@ -2529,8 +2529,7 @@ body[data-theme="cyberdeck_hud"] .device-screen {
   cursor: pointer;
   user-select: none;
   -webkit-user-drag: none;
-  image-rendering: -webkit-optimize-contrast;
-  image-rendering: high-quality;
+  image-rendering: auto;
   transform: translateZ(0);
 }
 
@@ -2547,8 +2546,7 @@ body[data-theme="cyberdeck_hud"] .device-screen {
   max-width: none !important;
   max-height: none !important;
   object-fit: none !important;
-  image-rendering: -webkit-optimize-contrast;
-  image-rendering: high-quality;
+  image-rendering: auto;
 }
 
 /* Honest Studio-owned standby card: shown instead of the live canvas only
@@ -2752,9 +2750,9 @@ body.studio-focus-mode .phone-and-nav-container {
 }
 
 body.studio-focus-mode .device-chassis {
-  height: calc(100% - 44px) !important;
-  max-height: calc(100vh - 104px) !important;
-  max-width: 480px !important;
+  height: calc(100% - 36px) !important;
+  max-height: calc(100vh - 72px) !important;
+  max-width: min(520px, calc((100vh - 72px) / 2)) !important;
   width: auto !important;
   aspect-ratio: 1 / 2 !important;
   border-color: #3F3F46 !important;
@@ -2762,6 +2760,19 @@ body.studio-focus-mode .device-chassis {
     0 30px 100px -10px rgba(0, 0, 0, 0.98),
     0 0 50px rgba(0, 0, 0, 0.8),
     0 0 0 1px rgba(255, 255, 255, 0.15) !important;
+  transition: max-width 0.2s cubic-bezier(0.16, 1, 0.3, 1), max-height 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+body.studio-focus-mode .device-chassis.large-mode {
+  height: calc(100% - 24px) !important;
+  max-height: calc(100vh - 54px) !important;
+  max-width: min(560px, calc((100vh - 54px) / 2)) !important;
+}
+
+body.studio-focus-mode .device-chassis.retina-mode {
+  height: calc(100% - 16px) !important;
+  max-height: calc(100vh - 44px) !important;
+  max-width: min(640px, calc((100vh - 44px) / 2)) !important;
 }
 
 body.studio-focus-mode .emulator-side-toolbar {

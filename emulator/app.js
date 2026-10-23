@@ -1378,13 +1378,20 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   // 5. System Space
-  btnGestureSystem?.addEventListener('click', () => {
-    dispatchHardwareGesture('System Space', {
-      action: 'tap',
-      coords: 'portrait',
-      x: 360,
-      y: 880
-    });
+  btnGestureSystem?.addEventListener('click', async () => {
+    try {
+      await fetch('/api/apps/launch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ app_id: 'settings' })
+      });
+      showToast('Opening Settings');
+    } catch (_) {
+      dispatchHardwareGesture('Settings', { action: 'settings' });
+    }
+    setTimeout(refreshScanoutFrame, 60);
+    setTimeout(refreshScanoutFrame, 180);
+    setTimeout(refreshScanoutFrame, 320);
   });
 
   // =========================================================================
@@ -1855,14 +1862,24 @@ document.addEventListener('DOMContentLoaded', () => {
     scanout?.classList.remove('fhd-pixel-exact');
     if (currentDisplayScale === 'fit') {
       currentDisplayScale = 'large';
+      chassis.classList.remove('retina-mode');
       chassis.classList.add('large-mode');
       if (headerScaleText) headerScaleText.textContent = 'Flagship';
       btnHeaderScale?.classList.add('active');
-      showToast('Display Sizing: Flagship (470px High-Definition)');
-      logConsole('info', '[DISPLAY] Sizing set to Flagship (470px High-Definition).');
+      showToast('Display Sizing: Flagship Focus (540px High-Definition)');
+      logConsole('info', '[DISPLAY] Sizing set to Flagship Focus (540px High-Definition).');
+    } else if (currentDisplayScale === 'large') {
+      currentDisplayScale = 'retina';
+      chassis.classList.remove('large-mode');
+      chassis.classList.add('retina-mode');
+      if (headerScaleText) headerScaleText.textContent = 'Retina FHD';
+      btnHeaderScale?.classList.add('active');
+      showToast('Display Sizing: Retina Full HD (640px True Immersion)');
+      logConsole('info', '[DISPLAY] Sizing set to Retina Full HD (640px True Immersion).');
     } else {
       currentDisplayScale = 'fit';
       chassis.classList.remove('large-mode');
+      chassis.classList.remove('retina-mode');
       if (headerScaleText) headerScaleText.textContent = 'Fit';
       btnHeaderScale?.classList.remove('active');
       showToast('Display Sizing: Responsive Fit');

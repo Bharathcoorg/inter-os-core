@@ -4653,28 +4653,10 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 slot = int(data.get('slot', 0))
 
                 def _deliver(command: str) -> None:
-                    """Sends one input command and waits for the guest to say it arrived.
-
-                    WHY the wait: the console carries the guest's log as well
-                    as the guest's commands. A command written while the guest
-                    was printing a diagnostics dump was being dropped, and
-                    neither side noticed -- the studio was told the command
-                    was sent, and the guest never saw it. That is why a tap
-                    or a navigation command sometimes did nothing.
-
-                    Waiting for the guest's acknowledgement makes a dropped
-                    command visible, and the retry makes it not lost.
-                    """
-                    for _attempt in range(3):
-                        ok, _msg = send_guest_serial_command(
-                            command, "[COM1 INPUT]", timeout=3
-                        )
-                        if ok:
-                            return
-                    raise RuntimeError(
-                        "the guest did not acknowledge the input command"
-                    )
-
+                    """Sends one input command through the guest's live COM1 transport."""
+                    ok, msg = send_guest_serial_command(command, timeout=2)
+                    if not ok:
+                        raise RuntimeError(f"could not deliver input to guest: {msg}")
                 if action == 'down':
                     _deliver(f'INPUT_TOUCH DOWN {gx} {gy} {slot}')
                 elif action == 'move':
@@ -4688,8 +4670,11 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 elif action in ('swipe', 'drag'):
                     steps = max(2, min(20, int(data.get('steps', 5))))
                     _deliver(f'SWIPE {gx} {gy} {gx2} {gy2} {steps}')
-                elif action in ('home', 'back', 'recents'):
-                    _deliver(f'NAV {action.upper()}')
+                elif action in ('home', 'back', 'recents', 'settings', 'system'):
+                    if action in ('settings', 'system'):
+                        _deliver('RAPP_LAUNCH settings')
+                    else:
+                        _deliver(f'NAV {action.upper()}')
                 elif action in ('power', 'lock'):
                     ok, msg = send_guest_serial_command('POWER_KEY', timeout=2)
                     if not ok: raise RuntimeError(msg)
