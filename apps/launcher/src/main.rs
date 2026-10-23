@@ -2639,20 +2639,20 @@ fn resolve_app_at_touch<'a>(state: &'a LauncherState, x: u32, y: u32) -> Option<
         // Row 0 of Quick Action Dock: Phone, Messages, Camera
         if (795..1010).contains(&y) {
             if (30..250).contains(&x) {
-                return package_id_by_suffix(state, b"dialer");
+                return package_id_by_suffix(state, b"dialer").or(Some("org.interos.dialer"));
             } else if (250..475).contains(&x) {
-                return package_id_by_suffix(state, b"messages");
+                return package_id_by_suffix(state, b"messages").or(Some("org.interos.messages"));
             } else if (475..695).contains(&x) {
-                return package_id_by_suffix(state, b"camera");
+                return package_id_by_suffix(state, b"camera").or(Some("org.interos.camera"));
             }
         }
 
         // Row 1 of Quick Action Dock: Files, Browser (Slot 5: Apps is a view transition, not an app)
         if (1010..1225).contains(&y) {
             if (30..250).contains(&x) {
-                return package_id_by_suffix(state, b"file_manager").or_else(|| package_id_by_suffix(state, b"files"));
+                return package_id_by_suffix(state, b"file_manager").or_else(|| package_id_by_suffix(state, b"files")).or(Some("org.interos.file_manager"));
             } else if (250..475).contains(&x) {
-                return package_id_by_suffix(state, b"browser");
+                return package_id_by_suffix(state, b"browser").or(Some("org.interos.browser"));
             } else if (475..695).contains(&x) {
                 // Apps tile opens drawer
                 return None;

@@ -11,6 +11,7 @@ pub mod gsm;
 pub mod store;
 pub mod privacy;
 pub mod publish;
+pub mod contacts;
 
 pub const MAX_PHONE_LEN: usize = 32;
 pub const MAX_PEER_HANDLE_LEN: usize = 32;

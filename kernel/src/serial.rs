@@ -798,6 +798,7 @@ fn handle_rapp_command(s: &str) -> bool {
                 scale_milli: 1000,
             });
             crate::drivers::input::dispatch_to_focused_window(ev);
+            crate::event::broadcast_event(crate::event::EVENT_TOUCH_INPUT);
             serial_println!("[COM1 INPUT] NAV {:?}", kind);
         } else {
             serial_println!("[COM1 INPUT] REJECT unknown NAV action");
@@ -1541,6 +1542,7 @@ fn handle_serial_command(cmd: &[u8]) {
                     y: 1416,
                     ..crate::drivers::input::InputEvent::EMPTY
                 });
+                crate::event::broadcast_event(crate::event::EVENT_TOUCH_INPUT);
             } else if target.eq_ignore_ascii_case("HOME") {
                 crate::serial_println!("[COM1 INPUT] Hardware NAV HOME event received.");
                 crate::drivers::input::dispatch_to_focused_window(crate::drivers::input::InputEvent {
@@ -1549,6 +1551,7 @@ fn handle_serial_command(cmd: &[u8]) {
                     y: 1416,
                     ..crate::drivers::input::InputEvent::EMPTY
                 });
+                crate::event::broadcast_event(crate::event::EVENT_TOUCH_INPUT);
             } else if target.eq_ignore_ascii_case("RECENTS") {
                 crate::serial_println!("[COM1 INPUT] Hardware NAV RECENTS event received.");
                 crate::drivers::input::dispatch_to_focused_window(crate::drivers::input::InputEvent {
@@ -1557,6 +1560,7 @@ fn handle_serial_command(cmd: &[u8]) {
                     y: 1416,
                     ..crate::drivers::input::InputEvent::EMPTY
                 });
+                crate::event::broadcast_event(crate::event::EVENT_TOUCH_INPUT);
             }
         }
     } else if verb.eq_ignore_ascii_case("POWER_KEY") || verb.eq_ignore_ascii_case("LOCK_KEY") {
@@ -1568,6 +1572,7 @@ fn handle_serial_command(cmd: &[u8]) {
             ..crate::drivers::input::InputEvent::EMPTY
         };
         crate::drivers::input::dispatch_to_focused_window(key_ev);
+        crate::event::broadcast_event(crate::event::EVENT_TOUCH_INPUT);
     } else if verb.eq_ignore_ascii_case("INPUT_KEYCODE") {
         if let Some(key) = parts.next() {
             crate::serial_println!("[COM1 INPUT] Hardware KEYCODE received: {}", key);

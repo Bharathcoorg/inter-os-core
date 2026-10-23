@@ -661,7 +661,7 @@ const SEARCH_FIELD: (usize, usize, usize, usize) = (24, 106, 672, 48);
 const SEARCH_TEXT_X: usize = 82;
 const SEARCH_TEXT_MAX_W: usize = 696 - 20 - SEARCH_TEXT_X;
 const SEARCH_PLACEHOLDER: &[u8] = b"Search chats...";
-const SEARCH_TEXT_SCALE: usize = type_scale::CAPTION;
+const SEARCH_TEXT_SCALE: usize = type_scale::BODY;
 
 // Recipient ("To:") editor
 const RECIPIENT_BAND_Y0: usize = 1284;
@@ -676,7 +676,7 @@ const RECIPIENT_FIELD: (usize, usize, usize, usize) = (24, 1284, 586, MIN_TOUCH_
 const RECIPIENT_TEXT_X: usize = 76;
 const RECIPIENT_TEXT_MAX_W: usize = 490 - RECIPIENT_TEXT_X;
 const RECIPIENT_PLACEHOLDER: &[u8] = b"Recipient (name or handle)";
-const RECIPIENT_TEXT_SCALE: usize = type_scale::CAPTION;
+const RECIPIENT_TEXT_SCALE: usize = type_scale::BODY;
 
 // Compose field geometry (y 1330..1414)
 const COMPOSE_BAND_Y0: usize = 1330;
@@ -730,10 +730,10 @@ const NOTICE_CAP: usize = 96;
 // Details and recipient-picker geometry
 const DETAILS_TOP: usize = 180;
 const DETAIL_ROW_H: usize = 96;
-const DETAIL_ROWS: usize = 11;
+const DETAIL_ROWS: usize = 12;
 const RECIP_ROW_TOP: usize = 180;
 const RECIP_ROW_H: usize = 88;
-const RECIP_ROWS: usize = 8;
+const RECIP_ROWS: usize = 12;
 const PICK_CONTROL: (usize, usize, usize, usize) = (616, 1284, 80, MIN_TOUCH_TARGET);
 const PICK_LABEL: &[u8] = b"PICK";
 const INFO_LABEL: &[u8] = b"INFO";
@@ -869,6 +869,8 @@ enum DetailAction {
     HandOff,
     /// Turn the thread's previews in the list on or off.
     TogglePreviews,
+    /// Hand off phone number to Dialer and launch it.
+    CallContact,
 }
 
 /// One row of the thread details screen.
@@ -883,11 +885,26 @@ struct DetailLine {
 /// One row of the recipient picker.
 #[derive(Clone, Copy)]
 struct PickerLine {
-    title: &'static [u8],
+    title: [u8; 32],
+    title_len: usize,
     value: [u8; 72],
     value_len: usize,
     /// Whether tapping the row fills the recipient field.
     selectable: bool,
+}
+
+impl PickerLine {
+    pub const EMPTY: Self = Self {
+        title: [0; 32],
+        title_len: 0,
+        value: [0; 72],
+        value_len: 0,
+        selectable: false,
+    };
+
+    pub fn title(&self) -> &[u8] {
+        &self.title[..self.title_len]
+    }
 }
 
 /// Adds one row to the details screen.
@@ -914,7 +931,7 @@ fn detail_push(
 fn picker_push(
     out: &mut [PickerLine],
     n: &mut usize,
-    title: &'static [u8],
+    title: &[u8],
     value: &[u8],
     selectable: bool,
 ) {
@@ -922,7 +939,9 @@ fn picker_push(
         return;
     }
     let line = &mut out[*n];
-    line.title = title;
+    let t = title.len().min(line.title.len());
+    line.title[..t].copy_from_slice(&title[..t]);
+    line.title_len = t;
     let v = value.len().min(line.value.len());
     line.value[..v].copy_from_slice(&value[..v]);
     line.value_len = v;
@@ -1007,6 +1026,22 @@ fn build_detail_lines(app: &MessagesApp, out: &mut [DetailLine; DETAIL_ROWS]) ->
         b"Share the published document",
         DetailAction::HandOff,
     );
+    let peer = if app.recip_len > 0 {
+        &app.recip[..app.recip_len]
+    } else if let Some(tid) = app.active_thread_id {
+        app.ledger.get_thread(tid).map(|tr| tr.peer()).unwrap_or(&[])
+    } else {
+        &[]
+    };
+    if messages::is_dialable(peer) {
+        detail_push(
+            out,
+            &mut n,
+            b"Call via Dialer",
+            b"Launch Dialer to place cellular call",
+            DetailAction::CallContact,
+        );
+    }
     detail_push(
         out,
         &mut n,
@@ -1051,27 +1086,42 @@ fn build_picker_lines(app: &MessagesApp, out: &mut [PickerLine; RECIP_ROWS]) -> 
         picker_push(
             out,
             &mut n,
-            b"From the dialer",
+            b"From Dialer",
             &app.handoff[..app.handoff_len],
             true,
         );
     }
+    let mut saved = [messages::contacts::SavedContact::EMPTY; messages::contacts::MAX_SAVED_CONTACTS];
+    let saved_count = messages::contacts::load_saved_contacts(&mut saved);
+    for i in 0..saved_count {
+        if n >= RECIP_ROWS {
+            break;
+        }
+        let c = &saved[i];
+        picker_push(out, &mut n, c.name(), c.number(), true);
+    }
     let mut shown = 0usize;
     for i in 0..app.ledger.thread_count {
-        if shown >= 6 {
+        if n >= RECIP_ROWS || shown >= 6 {
             break;
         }
         let tr = &app.ledger.threads[i];
-        picker_push(out, &mut n, b"Recent conversation", tr.peer(), true);
-        shown += 1;
+        let peer = tr.peer();
+        let already = saved[..saved_count].iter().any(|c| messages::contacts::phone_numbers_match(c.number(), peer));
+        if !already {
+            picker_push(out, &mut n, b"Recent conversation", peer, true);
+            shown += 1;
+        }
     }
-    picker_push(
-        out,
-        &mut n,
-        b"No contacts store on this device",
-        b"Type the address in the recipient field",
-        false,
-    );
+    if n == 0 {
+        picker_push(
+            out,
+            &mut n,
+            b"No contacts saved",
+            b"Add contacts in Dialer or enter number",
+            false,
+        );
+    }
     n
 }
 
@@ -1136,10 +1186,10 @@ fn card_row_pixel(
         CARD.fill,
         CARD.border,
     ) {
-        if let Some(t) = test_text(x, y, fx + 24, fy + 20, 1, label, THEME.on_surface_variant, CARD.fill) {
+        if let Some(t) = test_text(x, y, fx + 24, fy + 16, 1, label, THEME.on_surface_variant, CARD.fill) {
             return Some(t);
         }
-        if let Some(t) = test_text(x, y, fx + 24, fy + 50, 1, value, THEME.on_surface, CARD.fill) {
+        if let Some(t) = test_text(x, y, fx + 24, fy + 44, 2, value, THEME.on_surface, CARD.fill) {
             return Some(t);
         }
         return Some(c);
@@ -1166,6 +1216,18 @@ struct Frame {
     /// The rows of the recipient picker.
     picker: [PickerLine; RECIP_ROWS],
     picker_count: usize,
+    contacts: [messages::contacts::SavedContact; messages::contacts::MAX_SAVED_CONTACTS],
+    contacts_count: usize,
+}
+
+impl Frame {
+    pub fn resolve_contact_name<'a>(&'a self, peer: &'a [u8]) -> &'a [u8] {
+        if let Some(c) = messages::contacts::find_contact_by_number(&self.contacts, self.contacts_count, peer) {
+            c.name()
+        } else {
+            peer
+        }
+    }
 }
 
 fn build_frame(messages: &MessagesApp) -> Frame {
@@ -1196,13 +1258,10 @@ fn build_frame(messages: &MessagesApp) -> Frame {
         action: DetailAction::None,
     }; DETAIL_ROWS];
     let detail_count = build_detail_lines(messages, &mut detail);
-    let mut picker = [PickerLine {
-        title: b"",
-        value: [0; 72],
-        value_len: 0,
-        selectable: false,
-    }; RECIP_ROWS];
+    let mut picker = [PickerLine::EMPTY; RECIP_ROWS];
     let picker_count = build_picker_lines(messages, &mut picker);
+    let mut contacts = [messages::contacts::SavedContact::EMPTY; messages::contacts::MAX_SAVED_CONTACTS];
+    let contacts_count = messages::contacts::load_saved_contacts(&mut contacts);
     Frame {
         pill: build_pill(messages),
         search: build_editor(
@@ -1244,6 +1303,8 @@ fn build_frame(messages: &MessagesApp) -> Frame {
         detail_count,
         picker,
         picker_count,
+        contacts,
+        contacts_count,
     }
 }
 
@@ -1290,7 +1351,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                 ViewMode::Conversation => {
                     if let Some(tid) = messages.active_thread_id {
                         if let Some(tr) = messages.ledger.get_thread(tid) {
-                            tr.peer()
+                            f.resolve_contact_name(tr.peer())
                         } else {
                             TITLE_TEXT
                         }
@@ -1364,6 +1425,15 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                     return THEME.on_surface_variant;
                 }
 
+                if messages.search_len > 0 && x >= 656 && x < 688 && y >= 116 && y < 144 {
+                    let cx = 672isize;
+                    let cy = 130isize;
+                    let dx = (x as isize - cx).abs();
+                    let dy = (y as isize - cy).abs();
+                    if dx <= 4 && dy <= 4 && dx == dy {
+                        return THEME.on_surface_variant;
+                    }
+                }
                 if let Some(c) = editor_pixel(x, y, &f.search, messages.search_focused, THEME.surface_container) {
                     return c;
                 }
@@ -1592,13 +1662,14 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                             }
 
                             // 2. Peer handle / name (Scale 1 Bold with 10px spacing above snippet)
+                            let display_peer = f.resolve_contact_name(tr.peer());
                             if let Some(c) = test_text_bold(
                                 x,
                                 y,
                                 CARD_X0 + 84,
                                 card_top + 22,
                                 2,
-                                tr.peer(),
+                                display_peer,
                                 THEME.on_surface,
                                 THEME.surface_container,
                             ) {
@@ -1709,8 +1780,18 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                 // Character count indicator (e.g. 0/160)
                 let mut count_buf = [0u8; 8];
                 let cn = format_char_count(messages.compose_len, &mut count_buf);
-                if let Some(c) = test_text(x, y, 530, f.recipient.y, 1, &count_buf[..cn], THEME.on_surface_variant, THEME.surface_container) {
+                if let Some(c) = test_text(x, y, 520, f.recipient.y, 1, &count_buf[..cn], THEME.on_surface_variant, THEME.surface_container) {
                     return c;
+                }
+                // Clear 'x' indicator when recipient has text
+                if messages.recip_len > 0 && x >= 574 && x < 606 && y >= RECIPIENT_BAND_Y0 + 6 && y < RECIPIENT_BAND_Y1 - 6 {
+                    let cx = 590isize;
+                    let cy = (RECIPIENT_BAND_Y0 + 22) as isize;
+                    let dx = (x as isize - cx).abs();
+                    let dy = (y as isize - cy).abs();
+                    if dx <= 4 && dy <= 4 && dx == dy {
+                        return THEME.on_surface_variant;
+                    }
                 }
 
                 if let Some(c) = monochrome::card_px(x, y, rect, THEME.surface_container, Some(THEME.border)) {
@@ -1727,6 +1808,16 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
         if y >= COMPOSE_BAND_Y0 && y < COMPOSE_BAND_Y1 {
             if in_rect(COMPOSE_FIELD, x, y) {
                 let rect = primitives::Rect::new(COMPOSE_FIELD.0, COMPOSE_FIELD.1, COMPOSE_FIELD.2, COMPOSE_FIELD.3);
+                // Clear 'x' indicator when compose has text
+                if messages.compose_len > 0 && x >= 574 && x < 606 && y >= 1354 && y < 1394 {
+                    let cx = 590isize;
+                    let cy = 1374isize;
+                    let dx = (x as isize - cx).abs();
+                    let dy = (y as isize - cy).abs();
+                    if dx <= 4 && dy <= 4 && dx == dy {
+                        return THEME.on_surface_variant;
+                    }
+                }
                 if let Some(c) = editor_pixel(x, y, &f.compose, messages.compose_focused, THEME.surface_container) {
                     return c;
                 }
@@ -1892,11 +1983,11 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                         if x >= bx0 && x < bx1 {
                             let bubble_rect = primitives::Rect::new(bx0, b_top, bx1 - bx0, BUBBLE_H);
 
-                            // Message body text (scale 1)
+                            // Message body text (scale 2)
                             let mut buf = [0u8; 96];
                             let n = std::design::font::ellipsize(
                                 msgs[i].text(),
-                                1,
+                                2,
                                 bx1 - bx0 - 32,
                                 &mut buf,
                             );
@@ -1904,8 +1995,8 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                                 x,
                                 y,
                                 bx0 + 16,
-                                b_top + 14,
-                                1,
+                                b_top + 10,
+                                2,
                                 &buf[..n],
                                 ink_color,
                                 fill_color,
@@ -2113,7 +2204,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                         x,
                         y,
                         rect,
-                        line.title,
+                        line.title(),
                         &line.value[..line.value_len],
                     ) {
                         return c;
@@ -2611,6 +2702,21 @@ fn handle_tap(app: &mut MessagesApp, px: u32, py: u32) -> Tap<'static> {
                     hand_off_thread(app);
                     return Tap::Redraw(Dirty::All);
                 }
+                DetailAction::CallContact => {
+                    let peer = if app.recip_len > 0 {
+                        &app.recip[..app.recip_len]
+                    } else if let Some(tid) = app.active_thread_id {
+                        app.ledger.get_thread(tid).map(|tr| tr.peer()).unwrap_or(&[])
+                    } else {
+                        &[]
+                    };
+                    if !peer.is_empty() {
+                        let _ = messages::contacts::hand_off_call_to_dialer(peer);
+                        app.set_notice(b"Calling via Dialer...");
+                        std::log("[MESSAGES APP] Handed phone number to Dialer and launched it.").ok();
+                    }
+                    return Tap::Redraw(Dirty::All);
+                }
                 DetailAction::TogglePreviews => {
                     toggle_previews(app);
                     return Tap::Redraw(Dirty::All);
@@ -2621,12 +2727,7 @@ fn handle_tap(app: &mut MessagesApp, px: u32, py: u32) -> Tap<'static> {
 
     // The recipient picker's rows.
     if app.view_mode == ViewMode::Recipients && y >= RECIP_ROW_TOP && y < RECIPIENT_BAND_Y0 {
-        let mut picker = [PickerLine {
-            title: b"",
-            value: [0; 72],
-            value_len: 0,
-            selectable: false,
-        }; RECIP_ROWS];
+        let mut picker = [PickerLine::EMPTY; RECIP_ROWS];
         let count = build_picker_lines(app, &mut picker);
         let row = (y - RECIP_ROW_TOP) / RECIP_ROW_H;
         if row < count && picker[row].selectable {
@@ -2675,24 +2776,48 @@ fn handle_tap(app: &mut MessagesApp, px: u32, py: u32) -> Tap<'static> {
 
     // Composer text field
     if in_rect(COMPOSE_FIELD, x, y) {
+        if app.compose_len > 0 && x >= 570 && x < 610 {
+            app.compose = [0; COMPOSE_CAP];
+            app.compose_len = 0;
+            app.compose_select_all = false;
+            let _ = std::audio_haptic_click();
+            std::log("[MESSAGES APP] Compose field cleared.").ok();
+            return Tap::Redraw(Dirty::Compose);
+        }
         focus_compose(app);
         let _ = std::audio_haptic_click();
         std::log("[MESSAGES APP] Compose field focused for keyboard input.").ok();
-        return Tap::Redraw(Dirty::All);
+        return Tap::Redraw(Dirty::Compose);
     }
 
     // Recipient text field
     if in_rect(RECIPIENT_FIELD, x, y) {
+        if app.recip_len > 0 && x >= 570 && x < 610 {
+            app.recip = [0; RECIP_CAP];
+            app.recip_len = 0;
+            app.recip_select_all = false;
+            let _ = std::audio_haptic_click();
+            std::log("[MESSAGES APP] Recipient cleared.").ok();
+            return Tap::Redraw(Dirty::Recipient);
+        }
         focus_recipient(app);
         let _ = std::audio_haptic_click();
         std::log("[MESSAGES APP] Recipient field focused for keyboard input.").ok();
-        return Tap::Redraw(Dirty::All);
+        return Tap::Redraw(Dirty::Recipient);
     }
 
     // ThreadListView specific touches
     if app.view_mode == ViewMode::ThreadList {
         // Search field
         if in_rect(SEARCH_FIELD, x, y) {
+            if app.search_len > 0 && x >= 650 && x < 696 {
+                app.search = [0; SEARCH_CAP];
+                app.search_len = 0;
+                app.search_select_all = false;
+                let _ = std::audio_haptic_click();
+                std::log("[MESSAGES APP] Search cleared.").ok();
+                return Tap::Redraw(Dirty::All);
+            }
             focus_search(app);
             let _ = std::audio_haptic_click();
             std::log("[MESSAGES APP] Search field focused for keyboard input.").ok();
@@ -2962,8 +3087,16 @@ pub extern "C" fn _start() -> ! {
     let interest_mask =
         std::EVENT_TOUCH_INPUT | std::EVENT_IPC_MSG | std::EVENT_MODEM_URC | std::EVENT_TIMER_TICK;
     loop {
-        match std::event_poll(interest_mask, 150) {
+        match std::event_poll(interest_mask, 30) {
             Ok(events) => {
+                if events & (std::EVENT_IPC_MSG | std::EVENT_TIMER_TICK) != 0 {
+                    let prev_recip_len = messages.recip_len;
+                    messages.take_handoff_recipient();
+                    if messages.recip_len != prev_recip_len && surface > 0 {
+                        render_messages_ui(surface, &messages);
+                        let _ = std::surface_flip();
+                    }
+                }
                 if events & std::EVENT_TOUCH_INPUT != 0 {
                     let mut input = std::InputEvent {
                         kind: 0,

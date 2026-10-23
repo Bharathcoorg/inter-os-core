@@ -1612,15 +1612,34 @@ impl DialerApp {
     pub fn backspace(&mut self) {
         if self.active_len > 0 {
             self.active_len -= 1;
-            std::audio_haptic_click().ok();
+            self.active_number[self.active_len] = 0;
+            let _ = std::audio_haptic_click();
         }
     }
 
     /// Clears the entry without placing a call.
     pub fn clear_entry(&mut self) {
         if self.active_len > 0 {
+            self.active_number.fill(0);
             self.active_len = 0;
             let _ = std::audio_haptic_click();
+        }
+    }
+
+    /// Checks for a phone number handed over by another application (e.g. Messages)
+    /// in `dialer.handoff.number.v1` and populates `active_number`.
+    pub fn take_handoff_number(&mut self) {
+        let mut buf = [0u8; 32];
+        match std::settings_get("dialer.handoff.number.v1", &mut buf) {
+            Ok(n) if n > 0 => {
+                let n = n.min(self.active_number.len()).min(buf.len());
+                self.active_number[..n].copy_from_slice(&buf[..n]);
+                self.active_len = n;
+                self.section = DialerSection::Keypad;
+                let _ = std::settings_set("dialer.handoff.number.v1", &[]);
+                std::log("[DIALER APP] Number handed off from another app; populated on keypad.").ok();
+            }
+            _ => {}
         }
     }
 
@@ -2663,6 +2682,24 @@ fn display_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
             return c;
         }
 
+        // Clear (X) disc on the right of the dialed number
+        let clear_cx = DISPLAY_X1 - 44;
+        let clear_cy = 236;
+        let clear_r = 20i32;
+        let c_dx = (x as i32) - clear_cx as i32;
+        let c_dy = (y as i32) - clear_cy as i32;
+        if c_dx * c_dx + c_dy * c_dy <= clear_r * clear_r {
+            if c_dx * c_dx + c_dy * c_dy >= (clear_r - 2) * (clear_r - 2) {
+                return THEME.border;
+            }
+            let ix = c_dx.abs();
+            let iy = c_dy.abs();
+            if ix <= 6 && iy <= 6 && (ix == iy || ix == iy + 1 || ix == iy - 1) {
+                return THEME.on_surface_variant;
+            }
+            return THEME.surface_container_high;
+        }
+
         // Action Pills: [+ Add Contact] and [Send Message]
         //
         // WHY the pills give way to the call's own state while a call is up:
@@ -2702,10 +2739,10 @@ fn display_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
                 Some(THEME.border),
             ) {
                 let label = b"+ Add Contact";
-                let lw = std::design::font::measure(label, 1);
+                let lw = std::design::font::measure(label, 2);
                 let lx = p1_x0 + (p1_w.saturating_sub(lw)) / 2;
-                let ly = p1_y0 + (p1_h.saturating_sub(run_rows(1))) / 2;
-                if let Some(c) = test_text(x, y, lx, ly, 1, label,250,  THEME.primary, fill) {
+                let ly = p1_y0 + (p1_h.saturating_sub(run_rows(2))) / 2;
+                if let Some(c) = test_text(x, y, lx, ly, 2, label, 250, THEME.primary, fill) {
                     return c;
                 }
                 return fill;
@@ -2725,10 +2762,10 @@ fn display_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
                 Some(THEME.border),
             ) {
                 let label = b"Send Message";
-                let lw = std::design::font::measure(label, 1);
+                let lw = std::design::font::measure(label, 2);
                 let lx = p2_x0 + (p2_w.saturating_sub(lw)) / 2;
-                let ly = p2_y0 + (p2_h.saturating_sub(run_rows(1))) / 2;
-                if let Some(c) = test_text(x, y, lx, ly, 1, label,250,  THEME.success, fill) {
+                let ly = p2_y0 + (p2_h.saturating_sub(run_rows(2))) / 2;
+                if let Some(c) = test_text(x, y, lx, ly, 2, label, 250, THEME.success, fill) {
                     return c;
                 }
                 return fill;
@@ -2805,11 +2842,6 @@ fn keypad_pixel_at(x: usize, y: usize, editing: Option<&DialerApp>) -> u32 {
                     // Disc border
                     if dist_sq >= (r - 2) * (r - 2) {
                         return THEME.border;
-                    }
-
-                    // Bottom lip elevation depth
-                    if dy >= r - 4 && dist_sq < (r - 2) * (r - 2) {
-                        return THEME.on_surface;
                     }
 
                     let disc_fill = THEME.surface_container;
@@ -3335,7 +3367,7 @@ fn contacts_card_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
                 }
             }
             let mut vbuf = [0u8; 64];
-            let vn = std::design::font::ellipsize(&buf[..len], 2, DISPLAY_W - 96, &mut vbuf);
+            let vn = std::design::font::ellipsize(&buf[..len], 2, DISPLAY_W - 120, &mut vbuf);
             let vy = fy + 36;
             if vn > 0 {
                 if let Some(c) = test_text(
@@ -3343,8 +3375,9 @@ fn contacts_card_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
                     y,
                     DISPLAY_X0 + 24,
                     vy,
-                    1,
-                    &vbuf[..vn],DISPLAY_W - 48, 
+                    2,
+                    &vbuf[..vn],
+                    DISPLAY_W - 120, 
                     THEME.on_surface,
                     fill,
                 ) {
@@ -3355,6 +3388,40 @@ fn contacts_card_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
                 let cx = DISPLAY_X0 + 24 + std::design::font::measure(&vbuf[..vn], 2);
                 if x >= cx && x < cx + 2 && (vy..vy + run_rows(2)).contains(&y) {
                     return THEME.primary;
+                }
+
+                // Touch Clear (X) button at DISPLAY_X1 - 88
+                let clr_cx = DISPLAY_X1 - 88;
+                let clr_cy = fy + 48;
+                let clr_dx = (x as i32) - clr_cx as i32;
+                let clr_dy = (y as i32) - clr_cy as i32;
+                if clr_dx * clr_dx + clr_dy * clr_dy <= 18 * 18 {
+                    if clr_dx * clr_dx + clr_dy * clr_dy >= 16 * 16 {
+                        return THEME.border;
+                    }
+                    let ix = clr_dx.abs();
+                    let iy = clr_dy.abs();
+                    if ix <= 5 && iy <= 5 && (ix == iy || ix == iy + 1 || ix == iy - 1) {
+                        return THEME.on_surface_variant;
+                    }
+                    return THEME.surface_container_high;
+                }
+
+                // Touch Backspace (⌫) button at DISPLAY_X1 - 44
+                let bs_cx = DISPLAY_X1 - 44;
+                let bs_cy = fy + 48;
+                let bs_dx = (x as i32) - bs_cx as i32;
+                let bs_dy = (y as i32) - bs_cy as i32;
+                if bs_dx * bs_dx + bs_dy * bs_dy <= 18 * 18 {
+                    if bs_dx * bs_dx + bs_dy * bs_dy >= 16 * 16 {
+                        return THEME.border;
+                    }
+                    let ix = bs_dx.abs();
+                    let iy = bs_dy.abs();
+                    if (ix <= 5 && iy <= 5 && (ix == iy || ix == iy + 1 || ix == iy - 1)) || (bs_dx == -6 && iy <= 3) {
+                        return THEME.on_surface;
+                    }
+                    return THEME.surface_container_high;
                 }
             }
             return fill;
@@ -3395,13 +3462,29 @@ fn contacts_card_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         return THEME.surface;
     };
 
-    // Star state, so the card agrees with the row.
-    if sel < ContactEditor::UNSAVED_BASE && rec.is_favourite() {
-        let label: &[u8] = b"Starred";
-        let lw = std::design::font::measure(label, 1);
-        let lx = DISPLAY_X1 - 24 - lw;
-        if let Some(c) = test_text(x, y, lx, 196, 1, label,120,  THEME.warning, THEME.surface) {
-            return c;
+    // Star toggle pill, so the card agrees with the row and allows direct toggling.
+    let star_rect = (DISPLAY_X1 - 130, 186, 110, 36);
+    let is_fav = sel < ContactEditor::UNSAVED_BASE && rec.is_favourite();
+    let (star_label, star_color) = if is_fav {
+        (b"Starred" as &[u8], THEME.warning)
+    } else {
+        (b"Favorite" as &[u8], THEME.on_surface_variant)
+    };
+    if (star_rect.0..star_rect.0 + star_rect.2).contains(&x) && (star_rect.1..star_rect.1 + star_rect.3).contains(&y) {
+        if let Some(fill) = std::design::primitives::draw_pill(
+            x,
+            y,
+            std::design::primitives::Rect::new(star_rect.0, star_rect.1, star_rect.2, star_rect.3),
+            THEME.surface_container,
+            Some(THEME.border),
+        ) {
+            let lw = std::design::font::measure(star_label, 1);
+            let lx = star_rect.0 + (star_rect.2.saturating_sub(lw)) / 2;
+            let ly = star_rect.1 + (star_rect.3.saturating_sub(run_rows(1))) / 2;
+            if let Some(c) = test_text(x, y, lx, ly, 1, star_label, star_rect.2, star_color, fill) {
+                return c;
+            }
+            return fill;
         }
     }
 
@@ -3423,13 +3506,14 @@ fn contacts_card_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
 
     // The three row actions, as labelled chips. WHY chips and not a menu: the app
     // has no menu surface, and a chip is a tap target the user can see.
-    let chips: [(&[u8], u32, u32); 3] = [
+    let chips: [(&[u8], u32, u32); 4] = [
         (b"CALL", THEME.success, THEME.surface_container),
-        (b"EDIT", THEME.primary, THEME.surface_container),
+        (b"MSG", THEME.primary, THEME.surface_container),
+        (b"EDIT", THEME.surface_container_high, THEME.on_surface),
         (b"DELETE", THEME.error, THEME.surface_container),
     ];
     let chip_gap = 12usize;
-    let chip_w = (DISPLAY_W - 2 * chip_gap) / 3;
+    let chip_w = (DISPLAY_W - 3 * chip_gap) / 4;
     let chip_y = 312;
     for (i, (label, fill, ink)) in chips.iter().enumerate() {
         let cx0 = DISPLAY_X0 + i * (chip_w + chip_gap);
@@ -3444,12 +3528,12 @@ fn contacts_card_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
             None,
         ) {
             let mut lbuf = [0u8; 16];
-            let ln = std::design::font::ellipsize(label, 1, chip_w - 16, &mut lbuf);
+            let ln = std::design::font::ellipsize(label, 2, chip_w - 16, &mut lbuf);
             if ln > 0 {
-                let lw = std::design::font::measure(&lbuf[..ln], 1);
+                let lw = std::design::font::measure(&lbuf[..ln], 2);
                 let lx = cx0 + (chip_w.saturating_sub(lw)) / 2;
-                let ly = chip_y + (56 - run_rows(1)) / 2;
-                if let Some(c) = test_text(x, y, lx, ly, 1, &lbuf[..ln],120,  *ink, *fill) {
+                let ly = chip_y + (56 - run_rows(2)) / 2;
+                if let Some(c) = test_text(x, y, lx, ly, 2, &lbuf[..ln], chip_w, *ink, *fill) {
                     return c;
                 }
             }
@@ -4241,6 +4325,7 @@ fn handle_tap(dialer: &mut DialerApp, px: u32, py: u32) -> Tap<'static> {
             return Tap::Redraw(Dirty::All);
         }
         if x >= TAB4_X0 && x < TAB4_X1 {
+            dialer.section = DialerSection::Settings;
             dialer.settings_view = SettingsView::Main;
             dialer.refresh_settings_values();
             let _ = std::audio_haptic_click();
@@ -4281,11 +4366,7 @@ fn handle_tap(dialer: &mut DialerApp, px: u32, py: u32) -> Tap<'static> {
         }
     }
 
-    // 4. Backspace disc: hit-tested against exactly the drawn circle.
-    if dialer.active_len > 0 && in_circle(x, y, BACKSPACE_CX, BACKSPACE_CY, BACKSPACE_R) {
-        dialer.backspace();
-        return Tap::Redraw(if dialer.active_len == 0 { Dirty::All } else { Dirty::Display });
-    }
+
 
     // 5. Section content: the keypad and action row in the Keypad section, the
     if dialer.section == DialerSection::Recents {
@@ -4321,6 +4402,11 @@ fn handle_tap(dialer: &mut DialerApp, px: u32, py: u32) -> Tap<'static> {
     }
 
     if dialer.section == DialerSection::Keypad {
+        // Clear (X) disc on dialed number card
+        if dialer.active_len > 0 && in_circle(x, y, DISPLAY_X1 - 44, 236, 24) {
+            dialer.clear_entry();
+            return Tap::Redraw(Dirty::Display);
+        }
         // Action pills in display card when active_len > 0
         if dialer.active_len > 0 && y >= 295 && y < 345 {
             if x >= 80 && x < 330 {
@@ -4353,7 +4439,7 @@ fn handle_tap(dialer: &mut DialerApp, px: u32, py: u32) -> Tap<'static> {
                             dialer.input_digit(digit);
                             std::log("[DIALER APP] Keypad digit entered.").ok();
                         }
-                        return Tap::Redraw(if dialer.active_len == 1 { Dirty::All } else { Dirty::Display });
+                        return Tap::Redraw(Dirty::Display);
                     }
                 }
             }
@@ -4379,8 +4465,7 @@ fn handle_tap(dialer: &mut DialerApp, px: u32, py: u32) -> Tap<'static> {
             }
             if dialer.active_len > 0 && in_circle(x, y, BACKSPACE_CX, BACKSPACE_CY, BACKSPACE_R) {
                 dialer.backspace();
-                let _ = std::audio_haptic_click();
-                return Tap::Redraw(Dirty::All);
+                return Tap::Redraw(Dirty::Display);
             }
         }
     }
@@ -4505,6 +4590,38 @@ fn handle_contacts_tap(dialer: &mut DialerApp, x: usize, y: usize) -> Tap<'stati
 
     // --- Editor mode -------------------------------------------------------
     if let Some(ed) = dialer.contact_edit {
+        let fy = match ed.field {
+            ContactField::Name => CARD_Y0 + 6,
+            ContactField::Number => CARD_Y0 + 108,
+        };
+        // Touch Clear (X) button at DISPLAY_X1 - 88
+        if in_circle(x, y, DISPLAY_X1 - 88, fy + 48, 22) {
+            let mut next = ed;
+            match next.field {
+                ContactField::Name => {
+                    next.name = [0; CONTACT_NAME_MAX];
+                    next.name_len = 0;
+                }
+                ContactField::Number => {
+                    next.number = [0; CONTACT_NUM_MAX];
+                    next.number_len = 0;
+                }
+            }
+            dialer.contact_edit = Some(next);
+            dialer.editor_last_cell = None;
+            let _ = std::audio_haptic_click();
+            return Tap::Redraw(Dirty::Fields);
+        }
+        // Touch Backspace (⌫) button at DISPLAY_X1 - 44
+        if in_circle(x, y, DISPLAY_X1 - 44, fy + 48, 22) {
+            let mut next = ed;
+            next.backspace();
+            dialer.contact_edit = Some(next);
+            dialer.editor_last_cell = None;
+            let _ = std::audio_haptic_click();
+            return Tap::Redraw(Dirty::Fields);
+        }
+
         // Field taps move the caret. WHY each field also picks the keypad face:
         // a name needs letters and a number needs digits, so focusing a field
         // brings up the cycle that can type into it.
@@ -4589,28 +4706,43 @@ fn handle_contacts_tap(dialer: &mut DialerApp, x: usize, y: usize) -> Tap<'stati
     }
 
     // --- Browse mode -------------------------------------------------------
-    // Card chips: CALL / EDIT / DELETE.
+    // Star toggle pill
+    if dialer.contact_sel.is_some() && (186..222).contains(&y) && x >= DISPLAY_X1 - 130 && x < DISPLAY_X1 - 20 {
+        dialer.toggle_selected_favourite();
+        let _ = std::audio_haptic_click();
+        return Tap::Redraw(Dirty::All);
+    }
+
+    // Card chips: CALL / MSG / EDIT / DELETE.
     let chip_gap = 12usize;
-    let chip_w = (DISPLAY_W - 2 * chip_gap) / 3;
+    let chip_w = (DISPLAY_W - 3 * chip_gap) / 4;
     let chip_y = 312;
     if (chip_y..chip_y + 56).contains(&y) && x >= DISPLAY_X0 && x < DISPLAY_X1 {
-        for i in 0..3 {
+        for i in 0..4 {
             let cx0 = DISPLAY_X0 + i * (chip_w + chip_gap);
             if x < cx0 || x >= cx0 + chip_w {
                 continue;
             }
             if dialer.contact_sel.is_none() {
-                // WHY a chip with no selection is inert rather than defaulting to
-                // row 0: there is no contact the user pointed at, and guessing
-                // one would call, edit or delete a contact nobody chose.
                 std::log("[DIALER APP] That action needs a selected contact; tap a row first.",
                 )
                 .ok();
                 return Tap::Redraw(Dirty::None);
             }
+            let sel = dialer.contact_sel.unwrap_or(0);
+            let rec = if sel >= ContactEditor::UNSAVED_BASE {
+                dialer.contacts.unsaved_record(sel - ContactEditor::UNSAVED_BASE)
+            } else {
+                dialer.contacts.record(sel)
+            };
             match i {
                 0 => dialer.dial_selected_contact(),
-                1 => dialer.start_edit_contact(dialer.contact_sel.unwrap_or(0)),
+                1 => {
+                    if let Some(r) = rec {
+                        let _ = hand_off_to_messaging(r.number_bytes());
+                    }
+                }
+                2 => dialer.start_edit_contact(sel),
                 _ => dialer.delete_selected_contact(),
             }
             return Tap::Redraw(Dirty::All);
@@ -4938,6 +5070,7 @@ pub extern "C" fn _start() -> ! {
     // corrected a moment later.
     dialer.refresh_scrolls();
     dialer.refresh_settings_values();
+    dialer.take_handoff_number();
 
     // 3. Allocate dedicated KMS Client Surface (z=200)
     std::log("[DIALER APP] Step 1: Allocating application surface (z=200)...",
@@ -4972,10 +5105,17 @@ pub extern "C" fn _start() -> ! {
     // 6. Interactive Event Reactor Loop
     loop {
         if let Ok(events) = std::event_poll(
-            std::EVENT_TOUCH_INPUT | std::EVENT_TIMER_TICK | std::EVENT_MODEM_URC,
-            100,
+            std::EVENT_TOUCH_INPUT | std::EVENT_TIMER_TICK | std::EVENT_MODEM_URC | std::EVENT_IPC_MSG,
+            30,
         ) {
-            if (events & std::EVENT_TIMER_TICK) != 0 {
+            if (events & (std::EVENT_TIMER_TICK | std::EVENT_IPC_MSG)) != 0 {
+                let prev_len = dialer.active_len;
+                dialer.take_handoff_number();
+                if dialer.active_len != prev_len {
+                    render_dialer_band(surface, &dialer, DISPLAY_Y0, DISPLAY_Y1);
+                    render_dialer_band(surface, &dialer, ACTION_Y0, ACTION_Y1);
+                    let _ = std::surface_flip();
+                }
                 // WHY there is no work here any more: the tick used to advance
                 // a call-duration counter the app kept itself. The platform's
                 // telephony telemetry carries no duration, so the counter was
