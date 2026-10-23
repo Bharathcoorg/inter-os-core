@@ -117,7 +117,7 @@ const DISPLAY_PAD: usize = spacing::GRID_24;
 /// twenty-two -- and the reference calculator's own result stands thirty
 /// pixels of cap tall on a seven-hundred and twenty pixel screen. These
 /// are the sizes the design ladder names in the units a reader sees.
-const CAP_EXPRESSION: u32 = typography::SECTION_CAP_PX;
+const CAP_EXPRESSION: u32 = calculator::EXPRESSION_CAP_PX;
 const CAP_RESULT: u32 = typography::DISPLAY_CAP_PX;
 const CAP_LABEL: u32 = typography::SECTION_CAP_PX;
 const CAP_SECTION: u32 = typography::TITLE_CAP_PX;

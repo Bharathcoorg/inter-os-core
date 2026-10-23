@@ -891,10 +891,10 @@ fn test_text(
     bg: u32,
 ) -> Option<u32> {
     let line_h = std::design::font::line_height(scale);
-    if y < y0 || y >= y0 + line_h.max(scale * 24) {
+    if y + 24 < y0 || y >= y0 + line_h.max(scale * 24) {
         return None;
     }
-    if x < x0 || x >= x0 + max_w.max(text.len() * (scale * 20)) {
+    if x + 16 < x0 || x >= x0 + max_w.max(text.len() * (scale * 20)) {
         return None;
     }
     let (bx, bt, bw, bh) = outline_text::run_box(x0, y0, scale, text);
@@ -920,10 +920,10 @@ fn test_text_bold(
     bg: u32,
 ) -> Option<u32> {
     let line_h = std::design::font::line_height(scale);
-    if y < y0 || y >= y0 + line_h.max(scale * 24) {
+    if y + 24 < y0 || y >= y0 + line_h.max(scale * 24) {
         return None;
     }
-    if x < x0 || x >= x0 + max_w.max(text.len() * (scale * 20)) {
+    if x + 16 < x0 || x >= x0 + max_w.max(text.len() * (scale * 20)) {
         return None;
     }
     let (bx, bt, bw, bh) = outline_text::run_box(x0, y0, scale, text);
@@ -1849,7 +1849,7 @@ fn get_calendar_pixel(
                 // date, every one of them read back out of the record.
                 let card_y = 546 + card_idx * 130;
                 let item = &agenda.items[card_idx];
-                let line_h1 = std::design::font::line_height(1);
+                let _line_h1 = std::design::font::line_height(1);
                 let line_h2 = std::design::font::line_height(2);
                 if y >= card_y + 14 && y < card_y + 14 + line_h2 {
                     if let Some(c) = test_text_bold(x, y, 48, card_y + 14, 2, item.title_bytes(), 580 - 48, THEME.on_surface, THEME.surface_container) {
@@ -1863,10 +1863,10 @@ fn get_calendar_pixel(
                         return c;
                     }
                 }
-                if y >= card_y + 80 && y < card_y + 80 + line_h1 {
+                if y >= card_y + 80 && y < card_y + 80 + line_h2 {
                     let mut date_buf = [0u8; 12];
                     let date_n = fmt_date(&mut date_buf, item.year, item.month, item.day);
-                    if let Some(c) = test_text(x, y, 48, card_y + 80, 1, &date_buf[..date_n], 580 - 48, THEME.on_surface_variant, THEME.surface_container) {
+                    if let Some(c) = test_text(x, y, 48, card_y + 80, 2, &date_buf[..date_n], 580 - 48, THEME.on_surface_variant, THEME.surface_container) {
                         return c;
                     }
                 }
