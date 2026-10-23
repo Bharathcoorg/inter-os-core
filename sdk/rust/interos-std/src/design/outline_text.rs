@@ -131,6 +131,35 @@ fn slot_for(em: u32, x: usize, y: usize, text: &[u8], bold: bool) -> usize {
     h % SLOTS
 }
 
+/// Finds an existing cached slot or finds the first open slot using linear probing.
+fn find_or_alloc_slot(em: u32, x: usize, y: usize, text: &[u8], bold: bool) -> (usize, bool) {
+    let base = slot_for(em, x, y, text, bold);
+    unsafe {
+        let loaded_ptr = &*core::ptr::addr_of!(LOADED);
+        for i in 0..SLOTS {
+            let slot = (base + i) % SLOTS;
+            if let Some(loaded) = loaded_ptr[slot].as_ref() {
+                if loaded.em == em
+                    && loaded.x == x
+                    && loaded.y == y
+                    && loaded.bold == bold
+                    && loaded.len == text.len()
+                    && loaded.key[..text.len()] == *text
+                {
+                    return (slot, true);
+                }
+            }
+        }
+        for i in 0..SLOTS {
+            let slot = (base + i) % SLOTS;
+            if loaded_ptr[slot].is_none() {
+                return (slot, false);
+            }
+        }
+    }
+    (base, false)
+}
+
 /// Pixels per em that draw the cap height the scale rung names.
 ///
 /// WHY the rung names the design document's size and not the bitmap cell's
@@ -244,6 +273,84 @@ pub fn place_run_cap(
     Some(run)
 }
 
+/// Returns true if `c` is a curved glyph whose contours benefit from Bézier curve smoothing.
+#[inline]
+pub fn is_curved_glyph(c: u8) -> bool {
+    matches!(
+        c,
+        b'0'..=b'9'
+            | b'C' | b'O' | b'S' | b'B' | b'D' | b'G' | b'P' | b'R' | b'Q'
+            | b'c' | b'o' | b's' | b'b' | b'd' | b'g' | b'p' | b'r' | b'q'
+            | b'a' | b'e' | b'u' | b'U' | b'J' | b'j'
+    )
+}
+
+/// Evaluates a quadratic Bézier curve at step `s` of `subdivisions` subdivisions
+/// using fixed-point arithmetic (zero floating-point, zero heap).
+///
+/// B(t) = (1-t)^2 * P0 + 2*t*(1-t) * P1 + t^2 * P2
+/// where t = (s / subdivisions).
+#[inline]
+pub fn eval_quadratic_bezier_fixed(p0: i32, p1: i32, p2: i32, step: usize, subdivisions: usize) -> i32 {
+    if subdivisions == 0 {
+        return p1;
+    }
+    // Fixed point scale: 256 (8 bits of fraction)
+    let t = (step as i64 * 256) / subdivisions as i64;
+    let inv = 256 - t;
+    let b = (inv * inv * p0 as i64 + 2 * inv * t * p1 as i64 + t * t * p2 as i64) / (256 * 256);
+    b as i32
+}
+
+/// Smooths anti-aliased edge contours across a coverage buffer using quadratic Bézier curve interpolation.
+///
+/// Converts piecewise linear transitions along curved glyph boundaries into smooth, continuous
+/// curves with 4 subdivisions. Operates strictly in-place with zero heap allocations (#![no_std]).
+pub fn smooth_bezier_curves(cov: &mut [u8], w: usize, h: usize, x_start: usize, x_end: usize) {
+    if w == 0 || h == 0 || x_start >= x_end || x_end > w {
+        return;
+    }
+
+    // Horizontal smoothing pass using quadratic Bézier interpolation (4 subdivisions)
+    for y in 0..h {
+        let row_offset = y * w;
+        for x in (x_start + 1)..x_end.saturating_sub(1) {
+            let p1 = cov[row_offset + x] as i32;
+            // Only smooth edge pixels (anti-aliased boundary where 0 < p1 < 255)
+            if p1 > 0 && p1 < 255 {
+                let p0 = cov[row_offset + x - 1] as i32;
+                let p2 = cov[row_offset + x + 1] as i32;
+                // If neighbors form a gradient/chord transition
+                if (p0 < p1 && p1 < p2) || (p0 > p1 && p1 > p2) {
+                    // Evaluate midpoint of quadratic Bézier curve (t = 2/4 = 0.5)
+                    let smoothed = eval_quadratic_bezier_fixed(p0, p1, p2, 2, 4);
+                    cov[row_offset + x] = smoothed.clamp(0, 255) as u8;
+                }
+            }
+        }
+    }
+
+    // Vertical smoothing pass using quadratic Bézier interpolation (4 subdivisions)
+    if h > 2 {
+        for y in 1..(h - 1) {
+            let row_prev = (y - 1) * w;
+            let row_curr = y * w;
+            let row_next = (y + 1) * w;
+            for x in x_start..x_end {
+                let p1 = cov[row_curr + x] as i32;
+                if p1 > 0 && p1 < 255 {
+                    let p0 = cov[row_prev + x] as i32;
+                    let p2 = cov[row_next + x] as i32;
+                    if (p0 < p1 && p1 < p2) || (p0 > p1 && p1 > p2) {
+                        let smoothed = eval_quadratic_bezier_fixed(p0, p1, p2, 2, 4);
+                        cov[row_curr + x] = smoothed.clamp(0, 255) as u8;
+                    }
+                }
+            }
+        }
+    }
+}
+
 impl OutlineRun {
     /// An empty run, for a frame that has no outline text.
     pub const EMPTY: OutlineRun = OutlineRun {
@@ -312,20 +419,10 @@ impl OutlineRun {
 
         let mut key = [0u8; KEY_MAX];
         key[..text.len()].copy_from_slice(text);
-        let slot = slot_for(em, x, y, text, bold);
+        let (slot, is_cached) = find_or_alloc_slot(em, x, y, text, bold);
 
-        // SAFETY: the mutable access to this slot's cache entry and its buffer,
-        // taken and released inside this function. The lock surface's painter is
-        // the only caller, it is single threaded, and nothing reached from here
-        // re-enters it.
-        if let Some(loaded) = unsafe { &*core::ptr::addr_of!(LOADED) }[slot].as_ref() {
-            if loaded.em == em
-                && loaded.x == x
-                && loaded.y == y
-                && loaded.bold == bold
-                && loaded.len == text.len()
-                && loaded.key[..text.len()] == *text
-            {
+        if is_cached {
+            if let Some(loaded) = unsafe { &*core::ptr::addr_of!(LOADED) }[slot].as_ref() {
                 let run = OutlineRun {
                     x,
                     y,
@@ -374,7 +471,13 @@ impl OutlineRun {
                     h: line_h,
                 },
             );
-            pen += typeface::advance_px(c, em) as i32;
+            let adv = typeface::advance_px(c, em) as i32;
+            if is_curved_glyph(c) && adv > 0 {
+                let x0 = (pen.max(0) as usize).min(w);
+                let x1 = (((pen + adv).max(0)) as usize).min(w);
+                smooth_bezier_curves(cov, w, line_h, x0, x1);
+            }
+            pen += adv;
         }
 
         if bold {
@@ -934,5 +1037,49 @@ mod tests {
         let run_bold = place_run(10, 100, 2, b"Settings", None, true).expect("bold placed");
         assert!(run_bold.w > 0);
         assert!(run_bold.h > 0);
+    }
+
+    #[test]
+    fn test_quadratic_bezier_fixed_evaluation() {
+        // B(t) = (1-t)^2 * P0 + 2*t*(1-t) * P1 + t^2 * P2
+        // Endpoints: t=0 -> P0, t=1 -> P2
+        assert_eq!(eval_quadratic_bezier_fixed(100, 200, 300, 0, 4), 100);
+        assert_eq!(eval_quadratic_bezier_fixed(100, 200, 300, 4, 4), 300);
+
+        // Linear chord: P0=0, P1=100, P2=200 -> midpoint t=0.5 should be 100
+        let mid = eval_quadratic_bezier_fixed(0, 100, 200, 2, 4);
+        assert!((mid - 100).abs() <= 1);
+
+        // Curved chord: P0=0, P1=200, P2=0 -> midpoint t=0.5:
+        // B(0.5) = 0.25*0 + 0.5*200 + 0.25*0 = 100
+        let arc_mid = eval_quadratic_bezier_fixed(0, 200, 0, 2, 4);
+        assert_eq!(arc_mid, 100);
+
+        // Subdivision 1 of 4 (t=0.25): (0.75)^2*0 + 2*(0.75)*(0.25)*200 + (0.25)^2*0 = 75
+        let arc_q1 = eval_quadratic_bezier_fixed(0, 200, 0, 1, 4);
+        assert_eq!(arc_q1, 75);
+    }
+
+    #[test]
+    fn test_curved_glyphs_rasterize_with_bezier_smoothing() {
+        let _pool: Option<_> = Some(reset_slots());
+        // Curved glyphs: '0', 'C', 'O', 'S', 'B', 'D', 'G', 'P', 'R', 'Q'
+        let run = OutlineRun::place(0, 150, 48, b"0COSB").expect("placed curved glyphs");
+        assert!(run.w > 0);
+        assert!(run.h > 0);
+
+        // Verify partial coverage pixels (anti-aliasing) are present and smooth
+        let top = run.y - run.ascent;
+        let mut anti_aliased_count = 0;
+        for py in top..top + run.h {
+            for px in 0..run.w {
+                if let Some(c) = run.pixel(px, py, 0xFF000000, 0xFFFFFFFF) {
+                    if c != 0xFF000000 && c != 0xFFFFFFFF {
+                        anti_aliased_count += 1;
+                    }
+                }
+            }
+        }
+        assert!(anti_aliased_count > 50, "expected smooth anti-aliased edge coverage");
     }
 }

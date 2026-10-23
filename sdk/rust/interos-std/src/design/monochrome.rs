@@ -329,6 +329,15 @@ pub fn text_px(
     if text.is_empty() || cap_px == 0 {
         return None;
     }
+    // Fast bounding box rejection to prevent expensive TTF outline evaluation on every pixel
+    let max_h = (cap_px as usize).saturating_mul(2) + 8;
+    if y < y0 || y >= y0 + max_h {
+        return None;
+    }
+    let max_w = text.len().saturating_mul((cap_px as usize).saturating_mul(2) + 4) + 16;
+    if x < x0 || x >= x0 + max_w {
+        return None;
+    }
     if let Some(run) = outline_text::place_run_cap(x0, y0, cap_px, text, None, bold) {
         let (bx, by, bw, bh) = run.bounds();
         if x >= bx && x < bx + bw && y >= by && y < by + bh {

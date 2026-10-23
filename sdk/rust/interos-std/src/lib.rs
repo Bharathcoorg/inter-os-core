@@ -228,6 +228,8 @@ pub enum SyscallNumber {
     /// see another app's screen" is a capability decision rather than a
     /// property of the caller.
     SurfaceCapture = 134,
+    MemoryTelemetry = 135,
+    TaskEnumerate = 136,
 }
 
 // -----------------------------------------------------------------------------
@@ -3029,6 +3031,74 @@ pub fn settings_hardware_status(category: &str) -> Result<i64, i64> {
     };
     if r >= 0 {
         Ok(r)
+    } else {
+        Err(r)
+    }
+}
+
+/// Physical RAM telemetry returned by `memory_telemetry()`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemoryTelemetry {
+    pub total_bytes: u64,
+    pub used_bytes: u64,
+    pub free_bytes: u64,
+}
+
+/// Enumerable task record returned by `task_enumerate()`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TaskRecord {
+    pub task_id: u64,
+    pub name: [u8; 16],
+    pub name_len: u8,
+    pub state: u8, // 0=Ready, 1=Running, 2=Blocked
+    pub _reserved: [u8; 6],
+    pub cpu_ticks: u64,
+    pub mem_bytes: u64,
+}
+
+impl TaskRecord {
+    pub fn name_str(&self) -> &str {
+        let len = (self.name_len as usize).min(16);
+        core::str::from_utf8(&self.name[..len]).unwrap_or("unknown")
+    }
+}
+
+/// Queries physical RAM telemetry from the kernel.
+pub fn memory_telemetry() -> Result<MemoryTelemetry, i64> {
+    let mut telem = MemoryTelemetry {
+        total_bytes: 0,
+        used_bytes: 0,
+        free_bytes: 0,
+    };
+    let r = unsafe {
+        syscall1(
+            SyscallNumber::MemoryTelemetry,
+            core::ptr::addr_of_mut!(telem) as u64,
+        )
+    };
+    if r == 0 {
+        Ok(telem)
+    } else {
+        Err(r)
+    }
+}
+
+/// Enumerates active running tasks from the kernel scheduler.
+pub fn task_enumerate(out: &mut [TaskRecord]) -> Result<usize, i64> {
+    if out.is_empty() {
+        return Ok(0);
+    }
+    let r = unsafe {
+        syscall2(
+            SyscallNumber::TaskEnumerate,
+            out.as_mut_ptr() as u64,
+            out.len() as u64,
+        )
+    };
+    if r >= 0 {
+        Ok(r as usize)
     } else {
         Err(r)
     }
