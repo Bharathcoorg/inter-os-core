@@ -283,6 +283,16 @@ impl EventStore {
     /// is written as a single settings value, so a valid store never splits
     /// across reads. Accepting a prefix would present a partial calendar as the
     /// stored one, so the load reports what it actually has instead.
+    pub fn has_event_on(&self, year: u16, month: u8, day: u8) -> bool {
+        for i in 0..self.len as usize {
+            let r = &self.records[i];
+            if r.year == year && r.month == month && r.day == day {
+                return true;
+            }
+        }
+        false
+    }
+
     fn load() -> Self {
         let mut store = EventStore::EMPTY;
         let mut blob = [0u8; STORE_BLOB_BYTES];
@@ -880,6 +890,13 @@ fn test_text(
     color: u32,
     bg: u32,
 ) -> Option<u32> {
+    let line_h = std::design::font::line_height(scale);
+    if y < y0 || y >= y0 + line_h.max(scale * 24) {
+        return None;
+    }
+    if x < x0 || x >= x0 + max_w.max(text.len() * (scale * 20)) {
+        return None;
+    }
     let (bx, bt, bw, bh) = outline_text::run_box(x0, y0, scale, text);
     if x < bx || x - bx >= bw || y < bt || y - bt >= bh {
         return None;
@@ -888,6 +905,35 @@ fn test_text(
         return run.pixel(x, y, color, bg);
     }
     std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, bg, false)
+}
+
+#[inline(always)]
+fn test_text_bold(
+    x: usize,
+    y: usize,
+    x0: usize,
+    y0: usize,
+    scale: usize,
+    text: &[u8],
+    max_w: usize,
+    color: u32,
+    bg: u32,
+) -> Option<u32> {
+    let line_h = std::design::font::line_height(scale);
+    if y < y0 || y >= y0 + line_h.max(scale * 24) {
+        return None;
+    }
+    if x < x0 || x >= x0 + max_w.max(text.len() * (scale * 20)) {
+        return None;
+    }
+    let (bx, bt, bw, bh) = outline_text::run_box(x0, y0, scale, text);
+    if x < bx || x - bx >= bw || y < bt || y - bt >= bh {
+        return None;
+    }
+    if let Some(run) = outline_text::place_run(x0, y0, scale, text, Some(max_w), true) {
+        return run.pixel(x, y, color, bg);
+    }
+    std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, bg, true)
 }
 
 /// Left x that centres `text` at `scale` inside `[x0, x0 + available)`.
@@ -1383,7 +1429,7 @@ fn get_calendar_pixel(
                 // measures 32px on the bitmap face at scale 2 and 36px on the
                 // outline face, so both fit an 88px column.
                 if let Some(color) =
-                    test_text(x, y, text_x, WEEKDAY_Y0, WEEKDAY_SCALE, HEADERS[c], COL_W, THEME.on_surface_variant, THEME.surface)
+                    test_text_bold(x, y, text_x, WEEKDAY_Y0, WEEKDAY_SCALE, HEADERS[c], COL_W, THEME.on_surface, THEME.surface)
                 {
                     return color;
                 }
@@ -1454,22 +1500,31 @@ fn get_calendar_pixel(
                         let n = if d < 10 { 1 } else { 2 };
                         let text_x = centered_x(&text[..n], 2, col_x, COL_W);
 
+                        let cx = (col_x + COL_W / 2) as isize;
+                        let cy = (cell_y + ROW_H / 2) as isize;
+                        let has_event = app.store.has_event_on(app.current_year as u16, app.current_month, d);
+
                         if is_current {
-                            let cx = (col_x + COL_W / 2) as isize;
-                            let cy = (cell_y + ROW_H / 2) as isize;
                             let dx = (x as isize) - cx;
                             let dy = (y as isize) - cy;
                             let rad = 22isize;
                             if dx * dx + dy * dy <= rad * rad {
-                                if let Some(color) = test_text(x, y, text_x, text_y, 2, &text[..n], COL_W, THEME.on_primary, THEME.primary) {
+                                if let Some(color) = test_text_bold(x, y, text_x, text_y, 2, &text[..n], COL_W, THEME.on_primary, THEME.primary) {
                                     return color;
                                 }
                                 return THEME.primary;
                             }
                             return THEME.surface;
                         } else {
-                            if let Some(color) = test_text(x, y, text_x, text_y, 2, &text[..n], COL_W, THEME.on_surface, THEME.surface) {
+                            if let Some(color) = test_text_bold(x, y, text_x, text_y, 2, &text[..n], COL_W, THEME.on_surface, THEME.surface) {
                                 return color;
+                            }
+                            if has_event {
+                                let dot_dx = (x as isize) - cx;
+                                let dot_dy = (y as isize) - (cy + 17);
+                                if dot_dx * dot_dx + dot_dy * dot_dy <= 5 {
+                                    return THEME.primary;
+                                }
                             }
                             return THEME.surface;
                         }
@@ -1795,23 +1850,35 @@ fn get_calendar_pixel(
                 let card_y = 546 + card_idx * 130;
                 let item = &agenda.items[card_idx];
                 let line_h1 = std::design::font::line_height(1);
-                if y >= card_y + 12 && y < card_y + 12 + line_h1 {
-                    if let Some(c) = test_text(x, y, 44, card_y + 12, 1, item.title_bytes(), 696 - 44, THEME.on_surface, THEME.surface_container) {
+                let line_h2 = std::design::font::line_height(2);
+                if y >= card_y + 14 && y < card_y + 14 + line_h2 {
+                    if let Some(c) = test_text_bold(x, y, 48, card_y + 14, 2, item.title_bytes(), 580 - 48, THEME.on_surface, THEME.surface_container) {
                         return c;
                     }
                 }
-                if y >= card_y + 44 && y < card_y + 44 + line_h1 {
+                if y >= card_y + 48 && y < card_y + 48 + line_h2 {
                     let mut time_buf = [0u8; 5];
                     let time_n = fmt_time(&mut time_buf, item.hour, item.minute);
-                    if let Some(c) = test_text(x, y, 44, card_y + 44, 1, &time_buf[..time_n], 696 - 44, THEME.primary, THEME.surface_container) {
+                    if let Some(c) = test_text_bold(x, y, 48, card_y + 48, 2, &time_buf[..time_n], 580 - 48, THEME.primary, THEME.surface_container) {
                         return c;
                     }
                 }
-                if y >= card_y + 76 && y < card_y + 76 + line_h1 {
+                if y >= card_y + 80 && y < card_y + 80 + line_h1 {
                     let mut date_buf = [0u8; 12];
                     let date_n = fmt_date(&mut date_buf, item.year, item.month, item.day);
-                    if let Some(c) = test_text(x, y, 44, card_y + 76, 1, &date_buf[..date_n], 696 - 44, THEME.on_surface_variant, THEME.surface_container) {
+                    if let Some(c) = test_text(x, y, 48, card_y + 80, 1, &date_buf[..date_n], 580 - 48, THEME.on_surface_variant, THEME.surface_container) {
                         return c;
+                    }
+                }
+
+                // Right chevron '>' (indicator to open event details)
+                if x >= 644 && x < 660 && y >= card_y + 44 && y < card_y + 64 {
+                    let cx = 650isize;
+                    let cy = (card_y + 54) as isize;
+                    let dx = (x as isize) - cx;
+                    let dy = ((y as isize) - cy).abs();
+                    if (dx - dy).abs() <= 1 && dx >= 0 && dx <= 8 {
+                        return THEME.on_surface_variant;
                     }
                 }
 
