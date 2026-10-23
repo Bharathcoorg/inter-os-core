@@ -1,0 +1,18 @@
+{
+  "id": "org.interos.video_player",
+  "name": "Video Player",
+  "version": "1.0.0",
+  "category": "media",
+  "description": "Native InterOS video and media player with banded scanout and playback controls.",
+  "entrypoint": {
+    "backend": "bin/video_player.elf"
+  },
+  "permissions": [
+    "CAP_LOGGING",
+    "CAP_FRAMEBUFFER",
+    "CAP_EVENT_POLL",
+    "CAP_FILESYSTEM_READ",
+    "CAP_FILESYSTEM_WRITE"
+  ],
+  "min_sdk_version": "0.8.0"
+}

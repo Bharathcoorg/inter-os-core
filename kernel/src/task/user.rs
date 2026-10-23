@@ -1821,3 +1821,74 @@ pub fn spawn_app_agent_manager(id_security: TaskId) -> TaskId {
     );
     id
 }
+
+/// Trampoline for Sovereign Video Player App (Ring 3)
+pub extern "C" fn app_video_player_trampoline() -> ! {
+    user_process_entry()
+}
+
+/// Spawns the native Sovereign Video Player & Media Center in Ring 3.
+pub fn spawn_app_video_player(id_security: TaskId) -> TaskId {
+    let mut caps = CapabilityTable::new(10);
+    caps.insert(Capability {
+        id: CapabilityId(2920),
+        cap_type: CapabilityType::SerialOutput,
+        rights: Rights::WRITE,
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2921),
+        cap_type: CapabilityType::IpcSend,
+        rights: Rights::WRITE,
+        object_id: id_security.0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2922),
+        cap_type: CapabilityType::TimerTickRead,
+        rights: Rights::READ,
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2923),
+        cap_type: CapabilityType::HardwarePortIo,
+        rights: Rights::READ | Rights::WRITE,
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2924),
+        cap_type: CapabilityType::FileSystemRead,
+        rights: Rights::READ,
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2925),
+        cap_type: CapabilityType::FileSystemWrite,
+        rights: Rights::WRITE,
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2926),
+        cap_type: CapabilityType::FrameBufferDirect,
+        rights: Rights::WRITE,
+        object_id: 1,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2927),
+        cap_type: CapabilityType::EventPoll,
+        rights: Rights::READ.union(Rights::INVOKE),
+        object_id: 0,
+    }).ok();
+
+    let id = spawn_user_process_with_parent(
+        "app_video_player",
+        APP_VIDEO_PLAYER_ELF,
+        caps,
+        6,
+        id_security,
+    ).expect("Failed to spawn Video Player app");
+    serial_println!(
+        "[OK] Spawned app_video_player (Ring 3 User Mode, Isolated CR3, ID: {:?})",
+        id
+    );
+    id
+}

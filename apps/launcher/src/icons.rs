@@ -31,6 +31,7 @@ pub enum IconKind {
     Sun,
     CheckCircle,
     AgentManager,
+    VideoPlayer,
 }
 
 /// Identifies if a package ID or process name maps to a first-party vector pictogram.
@@ -105,6 +106,10 @@ pub fn match_icon_kind(id: &[u8]) -> Option<IconKind> {
         || id == b"Agent Manager" || id == b"agent" || id == b"AI" || id == b"AGNT"
     {
         Some(IconKind::AgentManager)
+    } else if id == b"org.interos.video_player" || id == b"video_player" || id == b"app_video_player"
+        || id == b"Video Player" || id == b"video" || id == b"Video" || id == b"VID"
+    {
+        Some(IconKind::VideoPlayer)
     } else if id == b"briefcase" || id == b"work" || id == b"Work" || id == b"WORK" {
         Some(IconKind::Briefcase)
     } else if id == b"org.interos.card_demo" || id == b"card_demo" || id == b"app_card_demo"
@@ -463,6 +468,16 @@ pub fn eval_icon_subpixel(kind: IconKind, fx: i32, fy: i32) -> bool {
             let sat_spark = (sx + sy <= 45) && (sx * sy <= 300);
             in_core || center_node || sat_spark
         }
+        IconKind::VideoPlayer => {
+            let cx = if fx.abs() > 110 { fx.abs() - 110 } else { 0 };
+            let cy = if fy.abs() > 75 { fy.abs() - 75 } else { 0 };
+            let in_frame = fx.abs() <= 145 && fy.abs() <= 110 && (cx * cx + cy * cy <= 1225);
+            let icx = if fx.abs() > 88 { fx.abs() - 88 } else { 0 };
+            let icy = if fy.abs() > 53 { fy.abs() - 53 } else { 0 };
+            let in_cutout = fx.abs() <= 123 && fy.abs() <= 88 && (icx * icx + icy * icy <= 900);
+            let in_play = fx >= -35 && fx <= 50 && fy.abs() <= (50 - fx) * 50 / 85;
+            (in_frame && !in_cutout) || in_play
+        }
     }
 }
 
@@ -486,6 +501,7 @@ mod tests {
         assert_eq!(match_icon_kind(b"org.interos.meshchat"), Some(IconKind::MeshChat));
         assert_eq!(match_icon_kind(b"org.interos.calendar"), Some(IconKind::Calendar));
         assert_eq!(match_icon_kind(b"org.interos.notes"), Some(IconKind::Notes));
+        assert_eq!(match_icon_kind(b"org.interos.video_player"), Some(IconKind::VideoPlayer));
         assert_eq!(match_icon_kind(b"org.interos.contacts"), Some(IconKind::Contacts));
         assert_eq!(match_icon_kind(b"org.interos.maps"), Some(IconKind::Maps));
         assert_eq!(match_icon_kind(b"work"), Some(IconKind::Briefcase));
@@ -518,6 +534,7 @@ mod tests {
             IconKind::Sun,
             IconKind::CheckCircle,
             IconKind::AgentManager,
+            IconKind::VideoPlayer,
         ];
 
         for &kind in &kinds {

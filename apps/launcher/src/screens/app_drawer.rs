@@ -382,6 +382,7 @@ fn icon_color(kind: Option<launcher::icons::IconKind>, index: usize, theme: &The
         Some(IconKind::Sun) => 0xFFFF9500,
         Some(IconKind::CheckCircle) => 0xFF34C759,
         Some(IconKind::AgentManager) => 0xFF7C3AED,
+        Some(IconKind::VideoPlayer) => 0xFFFF453A,
         None => hue_for(theme, index),
     }
 }

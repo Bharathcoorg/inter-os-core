@@ -129,6 +129,11 @@
       "name": "agent_manager",
       "kind": "application",
       "manifest": "apps/agent_manager/Cargo.toml"
+    },
+    {
+      "name": "video_player",
+      "kind": "application",
+      "manifest": "apps/video_player/Cargo.toml"
     }
   ],
   "kernel": {

@@ -149,3 +149,10 @@ version = "0.1.0"
 dependencies = [
  "interos-std",
 ]
+
+[[package]]
+name = "video_player"
+version = "0.1.0"
+dependencies = [
+ "interos-std",
+]
