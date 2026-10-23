@@ -175,6 +175,10 @@ pub struct TaskControlBlock {
     pub cpu_ticks: u64,
     /// Priority level (higher numbers run with precedence).
     pub priority: u8,
+    /// Base priority before any priority inheritance elevation.
+    pub base_priority: u8,
+    /// Active priority inheritance boosts count.
+    pub priority_boosts: u8,
     /// Scheduling class (Normal or RealTime EDF).
     pub sched_class: SchedulingClass,
     /// Absolute deadline in timer ticks for EDF dispatch. 0 means unspecified.
@@ -235,7 +239,9 @@ impl TaskControlBlock {
             stack,
             cap_table,
             cpu_ticks: 0,
+            base_priority: priority,
             priority,
+            priority_boosts: 0,
             sched_class: SchedulingClass::Normal,
             deadline_ticks: 0,
             frame_budget_ns: 16_666_666,
@@ -269,7 +275,9 @@ impl TaskControlBlock {
             stack: Box::new([]),
             cap_table,
             cpu_ticks: 0,
+            base_priority: 0,
             priority: 0,
+            priority_boosts: 0,
             sched_class: SchedulingClass::Normal,
             deadline_ticks: 0,
             frame_budget_ns: 16_666_666,

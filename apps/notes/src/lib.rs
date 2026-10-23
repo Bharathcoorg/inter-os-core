@@ -1700,4 +1700,51 @@ mod tests {
         assert!(ed.toggle_checklist_at(0));
         assert_eq!(ed.as_str(), "[ ] Buy milk");
     }
+
+    #[test]
+    fn test_typography_scale_2_body_line_metrics() {
+        // WHY this matters: Scale 2 (Body) text must have sufficient line height
+        // to prevent line overlap or clipping on 360x720 / 720x1440 screens.
+        let body_scale = crate::theme::type_scale::BODY;
+        assert_eq!(body_scale, 2);
+        let cap = std::design::font::cap_for_scale(body_scale);
+        assert_eq!(cap, 16);
+        let lh = std::design::font::line_height(body_scale);
+        // Line height must comfortably encompass cap height plus ascenders and descenders.
+        assert!(lh >= 24 && lh <= 32, "line height {} must be 24..32", lh);
+    }
+
+    #[test]
+    fn test_scale_2_line_wrapping_at_column_limit() {
+        let mut ed = TextEditorBuffer::new();
+        // 36 characters per line wrapped cleanly at word boundaries
+        ed.insert_str("The quick brown fox jumps over the lazy dog and runs across the sovereign field");
+        let mut spans = [LineSpan { start: 0, end: 0 }; 16];
+        let count = ed.compute_lines(36, &mut spans);
+        assert!(count >= 3);
+        for span in &spans[..count] {
+            assert!(span.end - span.start <= 36);
+        }
+    }
+
+    #[test]
+    fn test_cursor_navigation_left_right() {
+        let mut ed = TextEditorBuffer::new();
+        ed.insert_str("InterOS");
+        assert_eq!(ed.cursor, 7);
+
+        ed.move_cursor_left();
+        assert_eq!(ed.cursor, 6);
+        ed.move_cursor_left();
+        assert_eq!(ed.cursor, 5);
+
+        ed.move_cursor_right();
+        assert_eq!(ed.cursor, 6);
+        ed.move_cursor_right();
+        assert_eq!(ed.cursor, 7);
+
+        // Cannot move past end
+        ed.move_cursor_right();
+        assert_eq!(ed.cursor, 7);
+    }
 }

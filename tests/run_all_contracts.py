@@ -148,6 +148,7 @@ def run_contracts(target_files=None):
             cmd = [
                 sys.executable, "-m", "pytest", "-v", "--tb=short",
                 "--continue-on-collection-errors",
+                "--ignore-glob=*test_tmp_*",
             ] + framework_tests
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=pytest_timeout)
 

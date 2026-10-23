@@ -225,11 +225,37 @@ pub fn key_at(
     let sheet = rows(symbols);
     for (index, row) in sheet.iter().enumerate() {
         let top = row_y(index, offset);
-        if y < top || y >= top + KB_KEY_H {
+        // Vertical hit testing with zero dead gaps:
+        // For the first row, allow margin up to KB_Y0.
+        // For internal rows, split the gap between row tops.
+        let row_top = if index == 0 {
+            top.saturating_sub(KB_TOP_MARGIN).max(KB_Y0)
+        } else {
+            top.saturating_sub((KB_ROW_STEP - KB_KEY_H) / 2)
+        };
+        let row_bottom = if index + 1 == sheet.len() {
+            (top + KB_KEY_H + 10).min(KB_Y1)
+        } else {
+            top + KB_KEY_H + (KB_ROW_STEP - KB_KEY_H) / 2
+        };
+        if y < row_top || y >= row_bottom {
             continue;
         }
-        for key in row.keys {
-            if x >= key.x && x < key.x + key.w {
+        // Horizontal hit testing with zero dead gaps:
+        for (k_idx, key) in row.keys.iter().enumerate() {
+            let left = if k_idx == 0 {
+                0
+            } else {
+                let prev = &row.keys[k_idx - 1];
+                prev.x + prev.w + (key.x.saturating_sub(prev.x + prev.w)) / 2
+            };
+            let right = if k_idx + 1 == row.keys.len() {
+                720
+            } else {
+                let next = &row.keys[k_idx + 1];
+                key.x + key.w + (next.x.saturating_sub(key.x + key.w)) / 2
+            };
+            if x >= left && x < right {
                 return Some(shifted(key.action, shift));
             }
         }
@@ -325,5 +351,29 @@ mod tests {
             key_at(15, 1240, false, false, 0),
             Some(KeyAction::Symbols)
         );
+    }
+
+    #[test]
+    fn tactile_hit_testing_eliminates_dead_zones_between_keys() {
+        // Tapping in the gap between 'Q' (15..75) and 'W' (85..145) at x=80
+        // smoothly resolves without dead zones.
+        let action = key_at(78, 994, false, false, 0);
+        assert_eq!(action, Some(KeyAction::Char(b'q')));
+        let action = key_at(82, 994, false, false, 0);
+        assert_eq!(action, Some(KeyAction::Char(b'w')));
+
+        // Tapping in the gap between row 0 (994..1066) and row 1 (1076..1148)
+        // at y=1070 resolves to the nearest row.
+        assert_eq!(key_at(15, 1070, false, false, 0), Some(KeyAction::Char(b'q')));
+        assert_eq!(key_at(46, 1073, false, false, 0), Some(KeyAction::Char(b'a')));
+    }
+
+    #[test]
+    fn backspace_has_generous_touch_target_above_48px() {
+        // Row 2 Backspace key at x=620, w=85 (620..705), top=1158, h=72.
+        // Touch target spans >= 48px in both dimensions and accepts edge touches.
+        assert_eq!(key_at(620, 1158, false, false, 0), Some(KeyAction::Backspace));
+        assert_eq!(key_at(660, 1190, false, false, 0), Some(KeyAction::Backspace));
+        assert_eq!(key_at(710, 1200, false, false, 0), Some(KeyAction::Backspace));
     }
 }

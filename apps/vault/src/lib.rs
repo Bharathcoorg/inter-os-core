@@ -203,6 +203,45 @@ pub fn key_material_row(derived: bool) -> (&'static str, &'static str) {
     }
 }
 
+/// The radius of the circular PIN pad discs in pixels.
+/// Diameter is 96px, which comfortably exceeds the 48px minimum touch target requirement.
+pub const PIN_DISC_RADIUS: usize = 48;
+
+/// Minimum touch target size in pixels on the InterOS design system.
+pub const PIN_MIN_TOUCH_TARGET: usize = 48;
+
+/// Column centers for the 3x4 circular PIN keypad on a 720px portrait screen.
+pub const PIN_COLS: [usize; 3] = [160, 360, 560];
+
+/// Row centers for the 4 rows of the circular PIN keypad.
+pub const PIN_ROWS: [usize; 4] = [360, 480, 600, 720];
+
+/// Key matrix for the circular keypad.
+/// Row 3 contains Clear ('C'), Zero ('0'), and Backspace ('B').
+pub const PIN_KEY_MATRIX: [[u8; 3]; 4] = [
+    [b'1', b'2', b'3'],
+    [b'4', b'5', b'6'],
+    [b'7', b'8', b'9'],
+    [b'C', b'0', b'B'],
+];
+
+/// Resolves whether point (x, y) lands inside any circular PIN disc.
+/// Returns Some(key) if hit-tested inside a disc.
+pub fn hit_test_pin_disc(x: usize, y: usize) -> Option<u8> {
+    for row in 0..4 {
+        for col in 0..3 {
+            let cx = PIN_COLS[col];
+            let cy = PIN_ROWS[row];
+            let dx = x as i32 - cx as i32;
+            let dy = y as i32 - cy as i32;
+            if (dx * dx + dy * dy) as usize <= PIN_DISC_RADIUS * PIN_DISC_RADIUS {
+                return Some(PIN_KEY_MATRIX[row][col]);
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -425,5 +464,71 @@ mod tests {
                 "scale {scale}: the cap height {cap} does not map back to the size the ladder names"
             );
         }
+    }
+
+    #[test]
+    fn the_pin_keypad_discs_meet_touch_target_requirements() {
+        // Requirement: Touch targets must be >= 48px, non-overlapping, with clean gaps.
+        assert!(PIN_DISC_RADIUS * 2 >= PIN_MIN_TOUCH_TARGET);
+        assert_eq!(PIN_DISC_RADIUS, 48);
+
+        // Check horizontal positioning on 720px screen:
+        for &cx in PIN_COLS.iter() {
+            assert!(cx >= PIN_DISC_RADIUS, "disc left edge extends off screen");
+            assert!(cx + PIN_DISC_RADIUS <= 720, "disc right edge extends off screen");
+        }
+
+        // Horizontal gap between columns must be generous (>= 24px)
+        for i in 0..PIN_COLS.len() - 1 {
+            let left_disc_right = PIN_COLS[i] + PIN_DISC_RADIUS;
+            let right_disc_left = PIN_COLS[i + 1] - PIN_DISC_RADIUS;
+            assert!(right_disc_left > left_disc_right, "columns collide or overlap");
+            let gap = right_disc_left - left_disc_right;
+            assert!(gap >= 24, "column gap is too small: {}", gap);
+        }
+
+        // Vertical gap between rows must be generous (>= 16px)
+        for j in 0..PIN_ROWS.len() - 1 {
+            let top_disc_bottom = PIN_ROWS[j] + PIN_DISC_RADIUS;
+            let bottom_disc_top = PIN_ROWS[j + 1] - PIN_DISC_RADIUS;
+            assert!(bottom_disc_top > top_disc_bottom, "rows collide or overlap");
+            let gap = bottom_disc_top - top_disc_bottom;
+            assert!(gap >= 16, "row gap is too small: {}", gap);
+        }
+    }
+
+    #[test]
+    fn the_pin_keypad_clear_and_backspace_discs_hit_test() {
+        // Clear disc is row 3, col 0 -> 'C'
+        let clr_cx = PIN_COLS[0];
+        let clr_cy = PIN_ROWS[3];
+        assert_eq!(hit_test_pin_disc(clr_cx, clr_cy), Some(b'C'));
+        // Edge of Clear disc (at distance PIN_DISC_RADIUS - 1)
+        assert_eq!(hit_test_pin_disc(clr_cx + PIN_DISC_RADIUS - 1, clr_cy), Some(b'C'));
+
+        // Zero disc is row 3, col 1 -> '0'
+        let zero_cx = PIN_COLS[1];
+        let zero_cy = PIN_ROWS[3];
+        assert_eq!(hit_test_pin_disc(zero_cx, zero_cy), Some(b'0'));
+
+        // Backspace disc is row 3, col 2 -> 'B'
+        let bksp_cx = PIN_COLS[2];
+        let bksp_cy = PIN_ROWS[3];
+        assert_eq!(hit_test_pin_disc(bksp_cx, bksp_cy), Some(b'B'));
+        // Edge of Backspace disc
+        assert_eq!(hit_test_pin_disc(bksp_cx, bksp_cy + PIN_DISC_RADIUS - 1), Some(b'B'));
+
+        // Point outside discs returns None
+        assert_eq!(hit_test_pin_disc(0, 0), None);
+        assert_eq!(hit_test_pin_disc(clr_cx + PIN_DISC_RADIUS + 5, clr_cy), None);
+    }
+
+    #[test]
+    fn the_typography_scale_2_body_meets_line_height() {
+        use interos_std::font;
+        let cap = font::cap_for_scale(2);
+        assert_eq!(cap, 16, "Scale 2 Body cap height must be 16px");
+        let line = font::line_height(2);
+        assert!(line >= 24, "Scale 2 line height should reserve at least 24px");
     }
 }

@@ -1,4 +1,4 @@
-//! Notifications & Events Shade: production-grade notification center.
+//! Notifications & Events Shade: production-grade sovereign notification center.
 //!
 //! Visual hierarchy:
 //! - Uniform system status bar (clock, signal bars, Wi-Fi fan, battery shell).
@@ -6,12 +6,13 @@
 //!   and clean subtitle.
 //! - Filter pills: All, Messages, System, Apps with live counts.
 //! - Notification Cards:
-//!   - Squircle app icon (28x28) with app brand color & clean vector glyph.
-//!   - Header line: App name (bold) • timestamp ("Just now", "5m ago").
-//!   - Bold title (18-20px) and clean body text.
-//!   - Action pills (e.g. "Reply", "Mark read", "Details", "Dismiss").
+//!   - Squircle app icon (32x32) with app brand color & clean vector glyph.
+//!   - Header line: App name (Scale 2 Body) • timestamp ("Just now", "5m ago").
+//!   - Individual card dismiss action (>= 48px touch target with vector 'x' glyph).
+//!   - Bold title (Scale 2 Body) and clean body text (Scale 2 Body).
+//!   - Action pills (>= 48px touch targets, Scale 2 Body, e.g. "Reply", "Mark read", "Details", "Dismiss").
 //! - Empty state: Flagship "No new notifications", "All caught up" illustration.
-//! - Bottom Clear All button & Home indicator bar.
+//! - Bottom Clear All button (>= 48px touch target) & Home indicator bar.
 
 #![allow(dead_code)]
 
@@ -36,21 +37,18 @@ pub const TITLE_Y: usize = 56;
 pub const SUBTITLE_Y: usize = 108;
 pub const SOURCE_NOTE_Y: usize = 132;
 
-/// Baseline pitch between consecutive caption lines.
-const CAPTION_PITCH: usize = 24;
-
 /// Filter note line placed below the pill row.
 pub const FILTER_NOTE_Y: usize = PILLS_Y + PILL_H;
 
 /// Height of one notification card, and the pitch its stack advances by.
-const ROW_H: usize = 120;
-const ROW_PITCH: usize = 126;
+const ROW_H: usize = 176;
+const ROW_PITCH: usize = 184;
 
 /// First row of the first section's stack.
 pub const SECTION_HEAD_Y: usize = 300;
 
 /// Bottom cutoff for feed rows above the bottom action bar.
-const FEED_BOTTOM: usize = 708 - space::SM; // 700
+const FEED_BOTTOM: usize = 700;
 
 /// Height of the pill row, and the gap between pills.
 pub const PILLS_Y: usize = 210;
@@ -58,7 +56,7 @@ pub const PILL_H: usize = 52;
 const PILL_GAP: usize = space::SM + space::XS;
 
 /// Left edge of a row's text column, past the app squircle icon.
-const ROW_TEXT_X: usize = ROW_X + 56;
+const ROW_TEXT_X: usize = ROW_X + 60;
 
 /// Guest timer ticks per second (1 kHz PIT counter).
 const TICKS_PER_SEC: u64 = 1000;
@@ -72,14 +70,14 @@ const FILTER_NAMES: [&[u8]; 4] = [b"All", b"Messages", b"System", b"Apps"];
 /// Section headers, in age order.
 const SECTION_NAMES: [&[u8]; 4] = [b"Last minute", b"Last hour", b"Since boot", b"Undated"];
 
-/// Header "Clear all" button.
-pub const HEADER_CLEAR_BTN: Rect = Rect::new(SCREEN_WIDTH - 156, 50, 120, 36);
+/// Header "Clear all" button (48px height touch target).
+pub const HEADER_CLEAR_BTN: Rect = Rect::new(SCREEN_WIDTH - 168, 44, 136, 48);
 
 /// Bottom Clear All pill: matches the hit-test and serial harness (360, 720).
-pub const CLEAR_BTN: Rect = Rect::new(SCREEN_WIDTH / 2 - 100, 708, 200, 44);
+pub const CLEAR_BTN: Rect = Rect::new(SCREEN_WIDTH / 2 - 100, 702, 200, 48);
 
 /// Home gesture indicator pill.
-const HOME_PILL: Rect = Rect::new(SCREEN_WIDTH / 2 - 90, SCREEN_HEIGHT - 20, 180, 5);
+const HOME_PILL: Rect = Rect::new(SCREEN_WIDTH / 2 - 90, SCREEN_HEIGHT - 24, 180, 6);
 
 // -----------------------------------------------------------------------------
 // Rounded Geometry Helpers
@@ -129,23 +127,23 @@ fn run_metrics(y: usize, scale: usize) -> (u32, usize, usize) {
 }
 
 #[derive(Clone, Copy)]
-struct LabelRun {
-    x: usize,
-    y: usize,
-    w: usize,
-    h: usize,
-    scale: usize,
-    len: usize,
-    ink: u32,
-    em: u32,
-    top: usize,
-    box_h: usize,
-    bytes: [u8; RUN_CAP],
-    outline: Option<launcher::outline_text::OutlineRun>,
+pub struct LabelRun {
+    pub x: usize,
+    pub y: usize,
+    pub w: usize,
+    pub h: usize,
+    pub scale: usize,
+    pub len: usize,
+    pub ink: u32,
+    pub em: u32,
+    pub top: usize,
+    pub box_h: usize,
+    pub bytes: [u8; RUN_CAP],
+    pub outline: Option<launcher::outline_text::OutlineRun>,
 }
 
 impl LabelRun {
-    const EMPTY: LabelRun = LabelRun {
+    pub const EMPTY: LabelRun = LabelRun {
         x: 0,
         y: 0,
         w: 0,
@@ -160,7 +158,7 @@ impl LabelRun {
         outline: None,
     };
 
-    fn new(x: usize, y: usize, scale: usize, bytes: &[u8], ink: u32) -> Self {
+    pub fn new(x: usize, y: usize, scale: usize, bytes: &[u8], ink: u32) -> Self {
         let mut buf = [0u8; RUN_CAP];
         let len = bytes.len().min(RUN_CAP);
         buf[..len].copy_from_slice(&bytes[..len]);
@@ -195,7 +193,7 @@ impl LabelRun {
         }
     }
 
-    fn centred(x: usize, y: usize, w: usize, scale: usize, bytes: &[u8], ink: u32) -> Self {
+    pub fn centred(x: usize, y: usize, w: usize, scale: usize, bytes: &[u8], ink: u32) -> Self {
         let mut buf = [0u8; RUN_CAP];
         let len = bytes.len().min(RUN_CAP);
         buf[..len].copy_from_slice(&bytes[..len]);
@@ -232,7 +230,7 @@ impl LabelRun {
         }
     }
 
-    fn right(x_right: usize, y: usize, scale: usize, bytes: &[u8], ink: u32) -> Self {
+    pub fn right(x_right: usize, y: usize, scale: usize, bytes: &[u8], ink: u32) -> Self {
         let mut buf = [0u8; RUN_CAP];
         let len = bytes.len().min(RUN_CAP);
         buf[..len].copy_from_slice(&bytes[..len]);
@@ -268,7 +266,7 @@ impl LabelRun {
         }
     }
 
-    fn fitted(x: usize, y: usize, scale: usize, fit: usize, bytes: &[u8], ink: u32) -> Self {
+    pub fn fitted(x: usize, y: usize, scale: usize, fit: usize, bytes: &[u8], ink: u32) -> Self {
         let (em, top, box_h) = run_metrics(y, scale);
         let mut held = [0u8; RUN_CAP + 3];
         let src_len = bytes.len().min(RUN_CAP);
@@ -327,7 +325,7 @@ impl LabelRun {
     }
 
     #[inline]
-    fn pixel_on(&self, px: usize, py: usize, bg: u32) -> Option<u32> {
+    pub fn pixel_on(&self, px: usize, py: usize, bg: u32) -> Option<u32> {
         if self.len == 0 {
             return None;
         }
@@ -403,7 +401,7 @@ fn write_age(out: &mut [u8; 16], posted: u64, now: Option<u64>) -> usize {
 // -----------------------------------------------------------------------------
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Category {
+pub enum Category {
     Messages,
     System,
     Apps,
@@ -512,6 +510,7 @@ impl StatusPlan {
     };
 }
 
+#[derive(Clone, Copy)]
 struct PillPlan {
     rect: Rect,
     label: LabelRun,
@@ -526,6 +525,7 @@ impl PillPlan {
     };
 }
 
+#[derive(Clone, Copy)]
 struct SectionPlan {
     label: LabelRun,
 }
@@ -537,27 +537,33 @@ impl SectionPlan {
 }
 
 #[derive(Clone, Copy)]
-struct RowPlan {
-    rect: Rect,
-    squircle: Rect,
-    squircle_color: u32,
-    icon_kind: usize, // 0 = messages, 1 = system, 2 = apps, 3 = unlisted
-    app_name: LabelRun,
-    time: LabelRun,
-    title: LabelRun,
-    body: LabelRun,
-    action1: Rect,
-    action1_label: LabelRun,
-    action2: Rect,
-    action2_label: LabelRun,
+pub struct RowPlan {
+    pub id: u64,
+    pub rect: Rect,
+    pub squircle: Rect,
+    pub squircle_color: u32,
+    pub icon_kind: usize, // 0 = messages, 1 = system, 2 = apps, 3 = unlisted
+    pub dismiss_btn: Rect,
+    pub app_name: LabelRun,
+    pub time: LabelRun,
+    pub title: LabelRun,
+    pub body: LabelRun,
+    pub action1: Rect,
+    pub action1_label: LabelRun,
+    pub action2: Rect,
+    pub action2_label: LabelRun,
+    pub pkg: [u8; 32],
+    pub pkg_len: usize,
 }
 
 impl RowPlan {
-    const EMPTY: RowPlan = RowPlan {
+    pub const EMPTY: RowPlan = RowPlan {
+        id: 0,
         rect: Rect::new(0, 0, 0, 0),
         squircle: Rect::new(0, 0, 0, 0),
         squircle_color: 0,
         icon_kind: 0,
+        dismiss_btn: Rect::new(0, 0, 0, 0),
         app_name: LabelRun::EMPTY,
         time: LabelRun::EMPTY,
         title: LabelRun::EMPTY,
@@ -566,9 +572,12 @@ impl RowPlan {
         action1_label: LabelRun::EMPTY,
         action2: Rect::new(0, 0, 0, 0),
         action2_label: LabelRun::EMPTY,
+        pkg: [0u8; 32],
+        pkg_len: 0,
     };
 }
 
+#[derive(Clone, Copy)]
 struct EventsFrame {
     status: StatusPlan,
     title: LabelRun,
@@ -615,6 +624,18 @@ fn row_plan(rec: &NotificationRecord, y: usize, cat: Category, now: Option<u64>,
                 b"Music"
             } else if ends_with(pkg, b"settings") {
                 b"Settings"
+            } else if ends_with(pkg, b"file_manager") {
+                b"Files"
+            } else if ends_with(pkg, b"gallery") {
+                b"Gallery"
+            } else if ends_with(pkg, b"camera") {
+                b"Camera"
+            } else if ends_with(pkg, b"calculator") {
+                b"Calculator"
+            } else if ends_with(pkg, b"browser") {
+                b"Browser"
+            } else if ends_with(pkg, b"notes") {
+                b"Notes"
             } else if rec.pkg_len > 0 {
                 pkg
             } else {
@@ -649,7 +670,7 @@ fn row_plan(rec: &NotificationRecord, y: usize, cat: Category, now: Option<u64>,
     let mut age = [0u8; 16];
     let age_len = write_age(&mut age, rec.timestamp_ticks, now);
 
-    let squircle = Rect::new(ROW_X + 16, y + 14, 28, 28);
+    let squircle = Rect::new(ROW_X + 16, y + 14, 32, 32);
     let icon_kind = match cat {
         Category::Messages => 0,
         Category::System => 1,
@@ -657,26 +678,30 @@ fn row_plan(rec: &NotificationRecord, y: usize, cat: Category, now: Option<u64>,
         Category::Unlisted => 3,
     };
 
-    let app_name = LabelRun::new(
+    // 48x48 Dismiss button at top right of card (>= 48px touch target)
+    let dismiss_btn = Rect::new(ROW_X + ROW_W - 48 - 10, y + 8, 48, 48);
+
+    let app_name = LabelRun::fitted(
         ROW_TEXT_X,
-        y + 16,
+        y + 14,
         type_scale::BODY,
+        240,
         app_name_bytes,
         theme.on_surface,
     );
 
     let time = LabelRun::right(
-        ROW_X + ROW_W - 16,
-        y + 18,
-        type_scale::CAPTION,
+        dismiss_btn.x - 12,
+        y + 14,
+        type_scale::BODY,
         &age[..age_len],
         theme.on_surface_variant,
     );
 
-    let content_w = ROW_W - 72;
+    let content_w = ROW_W - 84;
     let title = LabelRun::fitted(
         ROW_TEXT_X,
-        y + 42,
+        y + 48,
         type_scale::BODY,
         content_w,
         title_bytes,
@@ -685,45 +710,53 @@ fn row_plan(rec: &NotificationRecord, y: usize, cat: Category, now: Option<u64>,
 
     let body = LabelRun::fitted(
         ROW_TEXT_X,
-        y + 66,
-        type_scale::CAPTION,
+        y + 82,
+        type_scale::BODY,
         content_w,
         body_bytes,
         theme.on_surface_variant,
     );
 
-    // Action buttons
+    // Action buttons (>= 48px touch targets, Scale 2 Body typography)
     let (act1_name, act2_name): (&[u8], &[u8]) = match cat {
         Category::Messages => (b"Reply", b"Mark read"),
         Category::System => (b"Details", b"Dismiss"),
         _ => (b"Open", b"Dismiss"),
     };
 
-    let action1 = Rect::new(ROW_TEXT_X, y + 88, 68, 24);
+    let action1 = Rect::new(ROW_TEXT_X, y + 120, 130, 48);
     let action1_label = LabelRun::centred(
         action1.x,
-        action1.y + 3,
+        action1.y + (action1.h.saturating_sub(36)) / 2,
         action1.w,
-        type_scale::CAPTION,
+        type_scale::BODY,
         act1_name,
         theme.on_surface,
     );
 
-    let action2 = Rect::new(ROW_TEXT_X + 76, y + 88, 80, 24);
+    let action2 = Rect::new(ROW_TEXT_X + 142, y + 120, 130, 48);
     let action2_label = LabelRun::centred(
         action2.x,
-        action2.y + 3,
+        action2.y + (action2.h.saturating_sub(36)) / 2,
         action2.w,
-        type_scale::CAPTION,
+        type_scale::BODY,
         act2_name,
         theme.on_surface_variant,
     );
 
+    let mut pkg_buf = [0u8; 32];
+    let plen = (rec.pkg_len as usize).min(32);
+    if plen > 0 {
+        pkg_buf[..plen].copy_from_slice(&rec.package_id[..plen]);
+    }
+
     RowPlan {
+        id: rec.id,
         rect,
         squircle,
         squircle_color: squircle_color(cat),
         icon_kind,
+        dismiss_btn,
         app_name,
         time,
         title,
@@ -732,6 +765,8 @@ fn row_plan(rec: &NotificationRecord, y: usize, cat: Category, now: Option<u64>,
         action1_label,
         action2,
         action2_label,
+        pkg: pkg_buf,
+        pkg_len: plen,
     }
 }
 
@@ -815,9 +850,9 @@ fn build_events_frame(state: &LauncherState) -> EventsFrame {
 
     let header_clear_label = LabelRun::centred(
         HEADER_CLEAR_BTN.x,
-        HEADER_CLEAR_BTN.y + (HEADER_CLEAR_BTN.h - text::line_height(type_scale::CAPTION)) / 2,
+        HEADER_CLEAR_BTN.y + (HEADER_CLEAR_BTN.h.saturating_sub(36)) / 2,
         HEADER_CLEAR_BTN.w,
-        type_scale::CAPTION,
+        type_scale::BODY,
         b"Clear all",
         theme.on_surface,
     );
@@ -857,7 +892,7 @@ fn build_events_frame(state: &LauncherState) -> EventsFrame {
             n += 1;
         }
         n = push_dec(&mut label, n, counts[i] as u64).min(label.len());
-        let w = text::measure(&label[..n], type_scale::CAPTION) + space::XXL;
+        let w = (text::measure(&label[..n], type_scale::CAPTION) + space::XXL).max(64);
         let rect = Rect::new(pill_x, PILLS_Y, w, PILL_H);
         pills[i] = PillPlan {
             rect,
@@ -898,7 +933,7 @@ fn build_events_frame(state: &LauncherState) -> EventsFrame {
         }
         let bucket = bucket_of(rec.timestamp_ticks, now);
         let row_y = if bucket != current_bucket {
-            y + space::XL
+            y + space::MD
         } else {
             y
         };
@@ -938,16 +973,7 @@ fn build_events_frame(state: &LauncherState) -> EventsFrame {
         0
     };
 
-    let last_bottom = if row_count > 0 {
-        y - (ROW_PITCH - ROW_H)
-    } else {
-        0
-    };
-    let note_y = if last_bottom + text::line_height(type_scale::CAPTION) + space::SM <= FEED_BOTTOM {
-        last_bottom + space::MD
-    } else {
-        CLEAR_BTN.y + CLEAR_BTN.h + space::MD
-    };
+    let note_y = CLEAR_BTN.y + CLEAR_BTN.h + space::MD;
     let more_note = LabelRun::new(36, note_y, type_scale::CAPTION, &more[..more_len], theme.on_surface_variant);
 
     // 5. Empty State
@@ -969,7 +995,7 @@ fn build_events_frame(state: &LauncherState) -> EventsFrame {
 
     let clear_label = LabelRun::centred(
         CLEAR_BTN.x,
-        CLEAR_BTN.y + (CLEAR_BTN.h - text::line_height(type_scale::BODY)) / 2,
+        CLEAR_BTN.y + (CLEAR_BTN.h.saturating_sub(36)) / 2,
         CLEAR_BTN.w,
         type_scale::BODY,
         b"Clear all",
@@ -1039,7 +1065,7 @@ fn render_icon_glyph(cx: usize, cy: usize, kind: usize, x: usize, y: usize) -> b
 }
 
 // -----------------------------------------------------------------------------
-// Per-Pixel Renderer
+// Per-Pixel Renderer & Touch Target Hit Testing
 // -----------------------------------------------------------------------------
 
 static mut FRAME_CACHE: Option<EventsFrame> = None;
@@ -1060,6 +1086,47 @@ pub fn filter_pill_at(x: usize, y: usize, state: &LauncherState) -> Option<usize
     f.pills
         .iter()
         .position(|pill| pill.rect.contains(x, y))
+}
+
+/// Identifies if a tap hit an individual notification's dismiss target
+/// (either the top-right 48x48 'x' dismiss button or the Dismiss action pill).
+pub fn card_dismiss_at(x: usize, y: usize, state: &LauncherState) -> Option<u64> {
+    let f = build_events_frame(state);
+    for i in 0..f.row_count {
+        let row = &f.rows[i];
+        if row.dismiss_btn.contains(x, y) || row.action2.contains(x, y) {
+            return Some(row.id);
+        }
+    }
+    None
+}
+
+/// Identifies if a tap hit an individual notification's primary action button
+/// (e.g. "Open", "Reply", "Details").
+pub fn card_open_at(x: usize, y: usize, state: &LauncherState) -> Option<(&'static str, u64)> {
+    let f = build_events_frame(state);
+    for i in 0..f.row_count {
+        let row = &f.rows[i];
+        if row.action1.contains(x, y) {
+            let pkg_str = match &row.pkg[..row.pkg_len] {
+                b"org.interos.messages" | b"messages" => "org.interos.messages",
+                b"org.interos.dialer" | b"dialer" => "org.interos.dialer",
+                b"org.interos.calendar" | b"calendar" => "org.interos.calendar",
+                b"org.interos.vault" | b"vault" => "org.interos.vault",
+                b"org.interos.music" | b"music" => "org.interos.music",
+                b"org.interos.settings" | b"settings" => "org.interos.settings",
+                b"org.interos.file_manager" | b"file_manager" => "org.interos.file_manager",
+                b"org.interos.gallery" | b"gallery" => "org.interos.gallery",
+                b"org.interos.camera" | b"camera" => "org.interos.camera",
+                b"org.interos.calculator" | b"calculator" => "org.interos.calculator",
+                b"org.interos.browser" | b"browser" => "org.interos.browser",
+                b"org.interos.notes" | b"notes" => "org.interos.notes",
+                _ => "",
+            };
+            return Some((pkg_str, row.id));
+        }
+    }
+    None
 }
 
 pub fn get_notifications_color(x: usize, y: usize, state: &LauncherState) -> u32 {
@@ -1124,7 +1191,7 @@ pub fn get_notifications_color(x: usize, y: usize, state: &LauncherState) -> u32
         return c;
     }
 
-    // Header "Clear all" button
+    // Header "Clear all" button (48px height, radius 24)
     if f.header_clear_btn.contains(x, y) {
         let rad = f.header_clear_btn.h / 2;
         if rounded_contains(f.header_clear_btn, x, y, rad) {
@@ -1183,8 +1250,8 @@ pub fn get_notifications_color(x: usize, y: usize, state: &LauncherState) -> u32
                     return theme.border;
                 }
 
-                // App squircle icon (28x28)
-                if rounded_contains(row.squircle, x, y, 7) {
+                // App squircle icon (32x32)
+                if rounded_contains(row.squircle, x, y, 8) {
                     if render_icon_glyph(
                         row.squircle.center_x(),
                         row.squircle.center_y(),
@@ -1197,7 +1264,23 @@ pub fn get_notifications_color(x: usize, y: usize, state: &LauncherState) -> u32
                     return row.squircle_color;
                 }
 
-                // App name & time
+                // Individual Dismiss button (48x48 touch target, circular chip with 'x' vector icon)
+                if row.dismiss_btn.contains(x, y) {
+                    let d_cx = row.dismiss_btn.center_x() as i32;
+                    let d_cy = row.dismiss_btn.center_y() as i32;
+                    let d_dx = x as i32 - d_cx;
+                    let d_dy = y as i32 - d_cy;
+                    let dist2 = d_dx * d_dx + d_dy * d_dy;
+                    if dist2 <= 196 {
+                        let cross = (d_dx.abs() - d_dy.abs()).abs() <= 1 && d_dx.abs() <= 6 && d_dy.abs() <= 6;
+                        if cross {
+                            return theme.on_surface;
+                        }
+                        return theme.surface_container_high;
+                    }
+                }
+
+                // App name & timestamp
                 if let Some(c) = row.app_name.pixel_on(x, y, theme.surface_container) {
                     return c;
                 }
@@ -1205,7 +1288,7 @@ pub fn get_notifications_color(x: usize, y: usize, state: &LauncherState) -> u32
                     return c;
                 }
 
-                // Title & body
+                // Title & body (Scale 2 Body)
                 if let Some(c) = row.title.pixel_on(x, y, theme.surface_container) {
                     return c;
                 }
@@ -1213,9 +1296,9 @@ pub fn get_notifications_color(x: usize, y: usize, state: &LauncherState) -> u32
                     return c;
                 }
 
-                // Action button 1
-                if rounded_contains(row.action1, x, y, 12) {
-                    if rounded_outline(row.action1, x, y, 12) {
+                // Action button 1 (48px height, radius 24)
+                if rounded_contains(row.action1, x, y, 24) {
+                    if rounded_outline(row.action1, x, y, 24) {
                         return theme.border;
                     }
                     if let Some(c) = row.action1_label.pixel_on(x, y, theme.surface_container_high) {
@@ -1224,9 +1307,9 @@ pub fn get_notifications_color(x: usize, y: usize, state: &LauncherState) -> u32
                     return theme.surface_container_high;
                 }
 
-                // Action button 2
-                if rounded_contains(row.action2, x, y, 12) {
-                    if rounded_outline(row.action2, x, y, 12) {
+                // Action button 2 (48px height, radius 24)
+                if rounded_contains(row.action2, x, y, 24) {
+                    if rounded_outline(row.action2, x, y, 24) {
                         return theme.border;
                     }
                     if let Some(c) = row.action2_label.pixel_on(x, y, theme.surface_container_low) {
@@ -1270,10 +1353,10 @@ pub fn get_notifications_color(x: usize, y: usize, state: &LauncherState) -> u32
         }
     }
 
-    // 7. Bottom Clear All Button (CLEAR_BTN)
+    // 7. Bottom Clear All Button (CLEAR_BTN, 48px height, radius 24)
     if f.clear_btn.contains(x, y) {
-        if rounded_contains(f.clear_btn, x, y, 22) {
-            if rounded_outline(f.clear_btn, x, y, 22) {
+        if rounded_contains(f.clear_btn, x, y, 24) {
+            if rounded_outline(f.clear_btn, x, y, 24) {
                 return theme.border;
             }
             if let Some(c) = f.clear_label.pixel_on(x, y, theme.surface_container_low) {
@@ -1285,7 +1368,7 @@ pub fn get_notifications_color(x: usize, y: usize, state: &LauncherState) -> u32
     }
 
     // 8. Home Indicator Pill
-    if rounded_contains(f.home_pill, x, y, 2) {
+    if rounded_contains(f.home_pill, x, y, 3) {
         return theme.on_surface_variant;
     }
 

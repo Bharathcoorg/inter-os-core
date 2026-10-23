@@ -2416,6 +2416,8 @@ pub fn share_sheet_dispatch(
     }
 }
 
+pub use design::display_list::PIPE_COMPOSITOR_DISPLAY_LIST;
+
 /// Creates or configures a Zero-Copy Shared Memory DMA Pipe.
 pub fn shm_pipe_create(pipe_id: u32, pages: u32, peer_task: u32) -> Result<u32, i64> {
     let ret = unsafe {

@@ -45,6 +45,45 @@ pub fn cache_key(ticks: u64, windows: usize, services: usize) -> (u64, usize, us
     (sweep_phase(ticks), windows, services)
 }
 
+/// Builds the declarative DisplayList commands for the system-line overlay.
+///
+/// Records base card fill, activity progress squircle, and status indicators
+/// with zero heap allocations.
+pub fn render_system_line_display_list(ticks: u64, windows: usize, services: usize) -> interos_std::design::display_list::DisplayList<16> {
+    use interos_std::design::display_list::{DisplayList, Rect};
+    let mut dl = DisplayList::<16>::new(0xFF000000); // Platform system-line black backdrop
+
+    // 1. Base system line fill
+    dl.push_fill_rect(Rect::new(0, 0, W as usize, H as usize), 0xFF000000);
+
+    // 2. Activity sweep progress indicator squircle
+    let phase = sweep_phase(ticks) as usize;
+    let sweep_x = (phase * (W as usize - 100)) / (BAR_PERIOD as usize);
+    let sweep_w = 80;
+    let sweep_h = 4;
+    let sweep_y = (H as usize).saturating_sub(sweep_h + 4);
+    dl.push_squircle(Rect::new(sweep_x, sweep_y, sweep_w, sweep_h), 0xFF4080FF, 2, None);
+
+    // 3. Status indicator pills for active windows & services
+    if windows > 0 {
+        dl.push_fill_rect(Rect::new(16, 8, 8, 8), 0xFF00E080); // Active window green indicator
+    }
+    if services > 0 {
+        dl.push_fill_rect(Rect::new(32, 8, 8, 8), 0xFF40A0FF); // Active service blue indicator
+    }
+
+    dl
+}
+
+/// Decodes and validates an incoming declarative DisplayList frame from an SHM pipe.
+///
+/// Returns the bounding damage rectangle that requires direct scanout rasterization.
+pub fn process_shm_display_list(rx_data: &[u8]) -> Result<interos_std::design::display_list::Rect, &'static str> {
+    use interos_std::design::display_list::DisplayList;
+    let dl = DisplayList::<32>::decode_from_slice(rx_data)?;
+    dl.dirty_rect().ok_or("no damage rectangle in display list")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,5 +143,36 @@ mod tests {
         let (last_offset, last_count) = chunk_bounds_fhd(FHD_NUM_CHUNKS - 1).expect("last fhd chunk");
         assert_eq!(last_offset, 2278 * 1024); // 2,332,672
         assert_eq!(last_count, 128); // 2332800 - 2332672 = 128
+    }
+
+    #[test]
+    fn test_system_line_display_list_recording_and_rasterization() {
+        let dl = render_system_line_display_list(300, 1, 1);
+        assert_eq!(dl.len(), 4); // base fill + progress squircle + window dot + service dot
+
+        let damage = dl.dirty_rect().expect("damage rect");
+        assert_eq!(damage.w, W as usize);
+        assert_eq!(damage.h, H as usize);
+
+        let mut band = [0u32; (W * 10) as usize];
+        dl.rasterize_band(0, 10, W as usize, &mut band);
+        // Verify green indicator dot rendered at (16, 8)
+        assert_eq!(band[8 * (W as usize) + 16], 0xFF00E080);
+    }
+
+    #[test]
+    fn test_shm_pipe_display_list_processing() {
+        use interos_std::design::display_list::{DisplayList, Rect};
+        let mut client_dl = DisplayList::<8>::new(0xFF000000);
+        client_dl.push_fill_rect(Rect::new(50, 10, 200, 30), 0xFFFFFFFF);
+
+        let mut wire_buf = [0u8; 256];
+        let bytes_written = client_dl.encode_to_slice(&mut wire_buf).expect("encode client dl");
+
+        let damage = process_shm_display_list(&wire_buf[..bytes_written]).expect("process shm dl");
+        assert_eq!(damage.x, 50);
+        assert_eq!(damage.y, 10);
+        assert_eq!(damage.w, 200);
+        assert_eq!(damage.h, 30);
     }
 }

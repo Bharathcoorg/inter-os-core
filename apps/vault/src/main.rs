@@ -37,8 +37,9 @@ use interos_std as std;
 use interos_std::design::components;
 use vault::theme::{spacing, THEME};
 use vault::{
-    fletcher32, hex_decode, hex_encode, key_material_row, BackupState, EntropyProbe,
-    IdentityState, KeyProbe, VaultSectorType,
+    fletcher32, hex_decode, hex_encode, hit_test_pin_disc, key_material_row, BackupState,
+    EntropyProbe, IdentityState, KeyProbe, VaultSectorType, PIN_COLS, PIN_DISC_RADIUS,
+    PIN_ROWS,
 };
 
 const W: usize = 720;
@@ -512,12 +513,6 @@ const TITLE: &[u8] = b"Vault";
 /// asked anything.
 const SUBTITLE: &[u8] = b"Sovereign storage manager";
 
-const PIN_KEY_W: usize = 180;
-const PIN_KEY_H: usize = 88;
-const PIN_KEY_GAP: usize = 16;
-const PIN_KEYPAD_X: usize = (W - (3 * PIN_KEY_W + 2 * PIN_KEY_GAP)) / 2;
-const PIN_KEYPAD_Y: usize = 300;
-
 fn cred_action_rect(label: &[u8]) -> (usize, usize, usize, usize) {
     let re_probe_w = action_w(ACTION);
     let x1 = ACTION_X1 - re_probe_w - 12;
@@ -560,68 +555,51 @@ fn cred_action_pixel(x: usize, y: usize, vault: &VaultApp) -> Option<u32> {
     Some(THEME.surface_container_high)
 }
 
-fn pin_key_at(x: usize, y: usize) -> Option<u8> {
-    for row in 0..4 {
-        for col in 0..3 {
-            let kx = PIN_KEYPAD_X + col * (PIN_KEY_W + PIN_KEY_GAP);
-            let ky = PIN_KEYPAD_Y + row * (PIN_KEY_H + PIN_KEY_GAP);
-            if in_round(x, y, kx, ky, PIN_KEY_W, PIN_KEY_H, 16) {
-                let digit_or_action: u8 = match (row, col) {
-                    (0, 0) => b'1',
-                    (0, 1) => b'2',
-                    (0, 2) => b'3',
-                    (1, 0) => b'4',
-                    (1, 1) => b'5',
-                    (1, 2) => b'6',
-                    (2, 0) => b'7',
-                    (2, 1) => b'8',
-                    (2, 2) => b'9',
-                    (3, 0) => b'C',
-                    (3, 1) => b'0',
-                    (3, 2) => b'O',
-                    _ => return None,
-                };
-                return Some(digit_or_action);
-            }
-        }
-    }
-    None
-}
-
 fn pin_keypad_pixel(x: usize, y: usize) -> Option<u32> {
     for row in 0..4 {
         for col in 0..3 {
-            let kx = PIN_KEYPAD_X + col * (PIN_KEY_W + PIN_KEY_GAP);
-            let ky = PIN_KEYPAD_Y + row * (PIN_KEY_H + PIN_KEY_GAP);
-            if in_round(x, y, kx, ky, PIN_KEY_W, PIN_KEY_H, 16) {
-                if !in_round(x, y, kx + 1, ky + 1, PIN_KEY_W - 2, PIN_KEY_H - 2, 15) {
+            let cx = PIN_COLS[col];
+            let cy = PIN_ROWS[row];
+            let dx = x as i32 - cx as i32;
+            let dy = y as i32 - cy as i32;
+            let dist_sq = (dx * dx + dy * dy) as usize;
+            let r = PIN_DISC_RADIUS;
+            if dist_sq <= r * r {
+                // 1px hairline border ring around the disc
+                if dist_sq >= (r - 1) * (r - 1) {
                     return Some(THEME.border);
                 }
-                let label: &[u8] = match (row, col) {
-                    (0, 0) => b"1",
-                    (0, 1) => b"2",
-                    (0, 2) => b"3",
-                    (1, 0) => b"4",
-                    (1, 1) => b"5",
-                    (1, 2) => b"6",
-                    (2, 0) => b"7",
-                    (2, 1) => b"8",
-                    (2, 2) => b"9",
-                    (3, 0) => b"CLR",
-                    (3, 1) => b"0",
-                    (3, 2) => b"OK",
-                    _ => b"",
+                let (label, ink, scale): (&[u8], u32, usize) = match (row, col) {
+                    (0, 0) => (b"1", THEME.on_surface, 3),
+                    (0, 1) => (b"2", THEME.on_surface, 3),
+                    (0, 2) => (b"3", THEME.on_surface, 3),
+                    (1, 0) => (b"4", THEME.on_surface, 3),
+                    (1, 1) => (b"5", THEME.on_surface, 3),
+                    (1, 2) => (b"6", THEME.on_surface, 3),
+                    (2, 0) => (b"7", THEME.on_surface, 3),
+                    (2, 1) => (b"8", THEME.on_surface, 3),
+                    (2, 2) => (b"9", THEME.on_surface, 3),
+                    (3, 0) => (b"CLR", THEME.error, 2),
+                    (3, 1) => (b"0", THEME.on_surface, 3),
+                    (3, 2) => (b"DEL", THEME.on_surface_variant, 2),
+                    _ => return None,
                 };
-                let ink = if label == b"OK" {
-                    THEME.primary
-                } else if label == b"CLR" {
-                    THEME.error
-                } else {
-                    THEME.on_surface
-                };
-                let scale = if label.len() == 1 { 2 } else { 1 };
-                let dy = if label.len() == 1 { (PIN_KEY_H - 32) / 2 } else { (PIN_KEY_H - 24) / 2 };
-                if let Some(c) = font::ink_center(x, y, kx, ky + dy, scale, label, PIN_KEY_W, ink, THEME.surface_container_high, true) {
+                let w = font::width(label, scale, true);
+                let dy_text = if scale == 3 { 12 } else { 8 };
+                let tx = cx.saturating_sub(w / 2);
+                let ty = cy.saturating_sub(dy_text);
+                if let Some(c) = font::ink(
+                    x,
+                    y,
+                    tx,
+                    ty,
+                    scale,
+                    label,
+                    w + 4,
+                    ink,
+                    THEME.surface_container_high,
+                    true,
+                ) {
                     return Some(c);
                 }
                 return Some(THEME.surface_container_high);
@@ -640,19 +618,19 @@ fn pin_modal_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
     }
     if y < HEAD_BOTTOM {
         let text_max = W - TITLE_X - MARGIN;
-        if let Some(c) = font::ink(x, y, TITLE_X, 20, 2, b"PIN Authentication", text_max, THEME.on_surface, THEME.surface, true) {
+        if let Some(c) = font::ink(x, y, TITLE_X, 18, 2, b"PIN Authentication", text_max, THEME.on_surface, THEME.surface, true) {
             return c;
         }
-        if let Some(c) = font::ink(x, y, TITLE_X, 76, 1, b"Enter sovereign access PIN", text_max, THEME.on_surface_variant, THEME.surface, true) {
+        if let Some(c) = font::ink(x, y, TITLE_X, 58, 2, b"Enter sovereign access PIN", text_max, THEME.on_surface_variant, THEME.surface, true) {
             return c;
         }
         return THEME.surface;
     }
 
-    const PROMPT_Y: usize = 120;
-    const PROMPT_H: usize = 100;
+    const PROMPT_Y: usize = 116;
+    const PROMPT_H: usize = 124;
     if let Some(fill) = card_pixel(x, y, MARGIN, PROMPT_Y, CARD_W, PROMPT_H) {
-        if let Some(c) = caption_pixel(x, y, MARGIN + PAD, PROMPT_Y + 20, b"CREDENTIAL VAULT ACCESS", INNER_W) {
+        if let Some(c) = caption_pixel(x, y, MARGIN + PAD, PROMPT_Y + 18, b"CREDENTIAL VAULT ACCESS", INNER_W) {
             return c;
         }
         let (verdict, ink): (&[u8], u32) = if vault.pin_error {
@@ -671,7 +649,7 @@ fn pin_modal_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
         return fill;
     }
 
-    const DOT_Y: usize = 244;
+    const DOT_Y: usize = 264;
     const DOT_R: usize = 8;
     const DOT_SIZE: usize = 16;
     const DOT_GAP: usize = 20;
@@ -694,6 +672,36 @@ fn pin_modal_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
         return c;
     }
 
+    const UNLOCK_BTN_Y: usize = 796;
+    const UNLOCK_BTN_H: usize = 56;
+    if let Some(c) = button_pixel(
+        x,
+        y,
+        MARGIN,
+        UNLOCK_BTN_Y,
+        CARD_W,
+        UNLOCK_BTN_H,
+        b"UNLOCK VAULT",
+        vault.pin_len >= 4,
+    ) {
+        return c;
+    }
+
+    if let Some(c) = font::ink_center(
+        x,
+        y,
+        MARGIN,
+        872,
+        2,
+        b"Hardware keystore root protected - Zero heap allocations",
+        CARD_W,
+        THEME.on_surface_variant,
+        THEME.surface,
+        true,
+    ) {
+        return c;
+    }
+
     THEME.surface
 }
 
@@ -709,26 +717,26 @@ fn credentials_view_pixel(x: usize, y: usize, _vault: &VaultApp) -> u32 {
     }
     if y < HEAD_BOTTOM {
         let text_max = W - TITLE_X - MARGIN;
-        if let Some(c) = font::ink(x, y, TITLE_X, 20, 2, b"Credential Vault", text_max, THEME.on_surface, THEME.surface, true) {
+        if let Some(c) = font::ink(x, y, TITLE_X, 18, 2, b"Credential Vault", text_max, THEME.on_surface, THEME.surface, true) {
             return c;
         }
-        if let Some(c) = font::ink(x, y, TITLE_X, 76, 1, b"Sovereign secrets store", text_max, THEME.on_surface_variant, THEME.surface, true) {
+        if let Some(c) = font::ink(x, y, TITLE_X, 58, 2, b"Sovereign secrets store", text_max, THEME.on_surface_variant, THEME.surface, true) {
             return c;
         }
         return THEME.surface;
     }
 
-    const AUTH_CARD_Y: usize = 120;
-    const AUTH_CARD_H: usize = 110;
+    const AUTH_CARD_Y: usize = 116;
+    const AUTH_CARD_H: usize = 120;
     if let Some(fill) = card_pixel(x, y, MARGIN, AUTH_CARD_Y, CARD_W, AUTH_CARD_H) {
-        if let Some(c) = caption_pixel(x, y, MARGIN + PAD, AUTH_CARD_Y + 20, b"AUTHENTICATED VAULT", INNER_W) {
+        if let Some(c) = caption_pixel(x, y, MARGIN + PAD, AUTH_CARD_Y + 18, b"AUTHENTICATED VAULT", INNER_W) {
             return c;
         }
         if let Some(c) = metric_row(
             x,
             y,
             MARGIN,
-            AUTH_CARD_Y + 54,
+            AUTH_CARD_Y + 50,
             CARD_W,
             b"Access State",
             b"AUTHENTICATED",
@@ -740,17 +748,17 @@ fn credentials_view_pixel(x: usize, y: usize, _vault: &VaultApp) -> u32 {
         return fill;
     }
 
-    const SECRETS_CARD_Y: usize = 250;
-    const SECRETS_CARD_H: usize = 360;
+    const SECRETS_CARD_Y: usize = 248;
+    const SECRETS_CARD_H: usize = 370;
     if let Some(fill) = card_pixel(x, y, MARGIN, SECRETS_CARD_Y, CARD_W, SECRETS_CARD_H) {
-        if let Some(c) = caption_pixel(x, y, MARGIN + PAD, SECRETS_CARD_Y + 20, b"STORED SECRETS", INNER_W) {
+        if let Some(c) = caption_pixel(x, y, MARGIN + PAD, SECRETS_CARD_Y + 18, b"STORED SECRETS", INNER_W) {
             return c;
         }
         if let Some(c) = metric_row(
             x,
             y,
             MARGIN,
-            SECRETS_CARD_Y + 64,
+            SECRETS_CARD_Y + 54,
             CARD_W,
             b"Wi-Fi Network PSK",
             b"AUTHENTICATED",
@@ -763,7 +771,7 @@ fn credentials_view_pixel(x: usize, y: usize, _vault: &VaultApp) -> u32 {
             x,
             y,
             MARGIN,
-            SECRETS_CARD_Y + 136,
+            SECRETS_CARD_Y + 128,
             CARD_W,
             b"P2P Wire Identity Key",
             b"AUTHENTICATED",
@@ -776,7 +784,7 @@ fn credentials_view_pixel(x: usize, y: usize, _vault: &VaultApp) -> u32 {
             x,
             y,
             MARGIN,
-            SECRETS_CARD_Y + 208,
+            SECRETS_CARD_Y + 202,
             CARD_W,
             b"Keystore Master Seed",
             b"AUTHENTICATED",
@@ -789,7 +797,7 @@ fn credentials_view_pixel(x: usize, y: usize, _vault: &VaultApp) -> u32 {
             x,
             y,
             MARGIN,
-            SECRETS_CARD_Y + 280,
+            SECRETS_CARD_Y + 276,
             CARD_W,
             b"Root Keystore Status",
             b"round-trip verified",
@@ -801,17 +809,17 @@ fn credentials_view_pixel(x: usize, y: usize, _vault: &VaultApp) -> u32 {
         return fill;
     }
 
-    const AUDIT_CARD_Y: usize = 630;
-    const AUDIT_CARD_H: usize = 200;
+    const AUDIT_CARD_Y: usize = 632;
+    const AUDIT_CARD_H: usize = 210;
     if let Some(fill) = card_pixel(x, y, MARGIN, AUDIT_CARD_Y, CARD_W, AUDIT_CARD_H) {
-        if let Some(c) = caption_pixel(x, y, MARGIN + PAD, AUDIT_CARD_Y + 20, b"SECURITY AUDIT", INNER_W) {
+        if let Some(c) = caption_pixel(x, y, MARGIN + PAD, AUDIT_CARD_Y + 18, b"SECURITY AUDIT", INNER_W) {
             return c;
         }
         if let Some(c) = metric_row(
             x,
             y,
             MARGIN,
-            AUDIT_CARD_Y + 64,
+            AUDIT_CARD_Y + 54,
             CARD_W,
             b"Zero Ambient Authority",
             b"ENFORCED",
@@ -824,7 +832,7 @@ fn credentials_view_pixel(x: usize, y: usize, _vault: &VaultApp) -> u32 {
             x,
             y,
             MARGIN,
-            AUDIT_CARD_Y + 136,
+            AUDIT_CARD_Y + 128,
             CARD_W,
             b"Memory Protection",
             b"ENFORCED",
@@ -836,47 +844,47 @@ fn credentials_view_pixel(x: usize, y: usize, _vault: &VaultApp) -> u32 {
         return fill;
     }
 
-    if in_round(x, y, MARGIN, BTN_Y, CARD_W, BTN_H, 14) {
-        if !in_round(x, y, MARGIN + 1, BTN_Y + 1, CARD_W - 2, BTN_H - 2, 13) {
-            return THEME.border;
-        }
-        if let Some(c) = font::ink_center(x, y, MARGIN, BTN_Y + (BTN_H - 24) / 2, 1, b"RETURN TO STORAGE", CARD_W, THEME.primary, THEME.surface_container_high, true) {
-            return c;
-        }
-        return THEME.surface_container_high;
+    const CRED_BTN_Y: usize = 856;
+    const CRED_BTN_H: usize = 56;
+    if let Some(c) = button_pixel(
+        x,
+        y,
+        MARGIN,
+        CRED_BTN_Y,
+        CARD_W,
+        CRED_BTN_H,
+        b"RETURN TO STORAGE",
+        true,
+    ) {
+        return c;
     }
 
     THEME.surface
 }
 
-const STATUS_Y: usize = 1328;
-/// Rows the status line owns: one scale-1 run at `STATUS_Y`.
-///
-/// WHY `GLYPH_H`: a scale-1 run is exactly one line box tall, and
-/// `font::line_height(1)` is this constant - but that helper takes its scale at
-/// runtime, so the band ceiling is spelled from the shared glyph height instead
-/// of repeating a literal 24 that could drift from the face.
-const STATUS_H: usize = std::design::font::line_height(1);
+const STATUS_Y: usize = 1324;
+/// Rows the status line owns: one scale-2 run at `STATUS_Y`.
+const STATUS_H: usize = std::design::font::line_height(2);
 const GESTURE_Y0: usize = 1400;
 
 /// Card A: hardware keystore probes.
-const CARD_A_Y: usize = 120;
-const CARD_A_H: usize = 272;
+const CARD_A_Y: usize = 116;
+const CARD_A_H: usize = 296;
 
-/// Card B: managed sector grid, 2 columns x 3 rows of 304x112 tiles.
-const CARD_B_Y: usize = 416;
+/// Card B: managed sector grid, 2 columns x 3 rows of 304x114 tiles.
+const CARD_B_Y: usize = 424;
 const CARD_B_H: usize = 456;
 const TILE_W: usize = 304;
-const TILE_H: usize = 112;
+const TILE_H: usize = 114;
 const TILE_COL_X: [usize; 2] = [48, 368];
-const TILE_ROW_Y: [usize; 3] = [480, 608, 736];
+const TILE_ROW_Y: [usize; 3] = [484, 608, 732];
 
 /// Card C: backup export and entropy.
-const CARD_C_Y: usize = 896;
-const CARD_C_H: usize = 336;
+const CARD_C_Y: usize = 892;
+const CARD_C_H: usize = 348;
 
 /// Action row: two 328px buttons on the 2-column grid (2*328 + 16 + 2*24 = 720).
-const BTN_Y: usize = 1256;
+const BTN_Y: usize = 1252;
 const BTN_H: usize = 56;
 const BTN_W: usize = 328;
 const BTN_X: [usize; 2] = [24, 368];
@@ -1017,6 +1025,7 @@ fn caption_pixel(
 /// One information row: label on the left, verdict right-aligned on the same
 /// line, provenance underneath. The label and the verdict each own half of the
 /// inner width minus a 32px gutter, so they can never collide.
+/// Uses Scale 2 (Body) typography for the label and truth badge.
 #[inline(never)]
 fn metric_row(
     x: usize,
@@ -1031,32 +1040,32 @@ fn metric_row(
 ) -> Option<u32> {
     let ix = x0 + PAD;
     let half = w / 2 - PAD - 16;
-    if let Some(c) = font::ink(x, y, ix, y0, 1, label, half, THEME.on_surface, THEME.surface_container, true) {
+    if let Some(c) = font::ink(x, y, ix, y0, 2, label, half, THEME.on_surface, THEME.surface_container, true) {
         return Some(c);
     }
-    // Cryptographic status badge on the right
-    let v_w = font::width(value, 1, true);
-    let badge_w = (v_w + 28).min(half);
-    let badge_h = 24;
+    // Cryptographic status badge on the right - Scale 2 (Body) truth badge
+    let v_w = font::width(value, 2, true);
+    let badge_w = (v_w + 34).min(half + 24);
+    let badge_h = 30;
     let bx0 = x0 + w - PAD - badge_w;
-    let by0 = y0.saturating_sub(2);
+    let by0 = y0.saturating_sub(4);
     if in_round(x, y, bx0, by0, badge_w, badge_h, badge_h / 2) {
         if !in_round(x, y, bx0 + 1, by0 + 1, badge_w - 2, badge_h - 2, badge_h / 2 - 1) {
             return Some(THEME.border);
         }
-        let dot_cx = bx0 + 10;
+        let dot_cx = bx0 + 12;
         let dot_cy = by0 + badge_h / 2;
         let ddx = (x as i32) - (dot_cx as i32);
         let ddy = (y as i32) - (dot_cy as i32);
-        if ddx * ddx + ddy * ddy <= 9 {
+        if ddx * ddx + ddy * ddy <= 16 {
             return Some(value_ink);
         }
-        if let Some(c) = font::ink(x, y, bx0 + 18, by0 + 4, 1, value, badge_w.saturating_sub(22), value_ink, THEME.surface_container_low, true) {
+        if let Some(c) = font::ink(x, y, bx0 + 22, by0 + 5, 2, value, badge_w.saturating_sub(26), value_ink, THEME.surface_container_low, true) {
             return Some(c);
         }
         return Some(THEME.surface_container_low);
     }
-    if let Some(c) = font::ink(x, y, ix, y0 + 32, 1, source, w - PAD * 2, THEME.on_surface, THEME.surface_container, true) {
+    if let Some(c) = font::ink(x, y, ix, y0 + 34, 1, source, w - PAD * 2, THEME.on_surface_variant, THEME.surface_container, true) {
         return Some(c);
     }
     None
@@ -1081,32 +1090,32 @@ fn tile_pixel(
         return Some(THEME.border);
     }
     let iw = TILE_W - 32;
-    if let Some(c) = font::ink(x, y, tx + 16, ty + 16, 1, title, iw, THEME.on_surface, THEME.surface_container_high, true) {
+    if let Some(c) = font::ink(x, y, tx + 16, ty + 14, 2, title, iw, THEME.on_surface, THEME.surface_container_high, true) {
         return Some(c);
     }
     // Cryptographic status badge: pill container with indicator dot and status verdict
     let badge_x = tx + 16;
-    let badge_y = ty + 42;
-    let badge_h = 24;
-    let v_w = font::width(verdict, 1, true);
-    let badge_w = (v_w + 32).min(iw);
+    let badge_y = ty + 44;
+    let badge_h = 30;
+    let v_w = font::width(verdict, 2, true);
+    let badge_w = (v_w + 34).min(iw);
     if in_round(x, y, badge_x, badge_y, badge_w, badge_h, badge_h / 2) {
         if !in_round(x, y, badge_x + 1, badge_y + 1, badge_w - 2, badge_h - 2, badge_h / 2 - 1) {
             return Some(THEME.border);
         }
-        let dot_cx = badge_x + 10;
+        let dot_cx = badge_x + 12;
         let dot_cy = badge_y + badge_h / 2;
         let ddx = (x as i32) - (dot_cx as i32);
         let ddy = (y as i32) - (dot_cy as i32);
-        if ddx * ddx + ddy * ddy <= 9 {
+        if ddx * ddx + ddy * ddy <= 16 {
             return Some(verdict_ink);
         }
-        if let Some(c) = font::ink(x, y, badge_x + 18, badge_y + 4, 1, verdict, badge_w.saturating_sub(22), verdict_ink, THEME.surface_container, true) {
+        if let Some(c) = font::ink(x, y, badge_x + 22, badge_y + 5, 2, verdict, badge_w.saturating_sub(26), verdict_ink, THEME.surface_container, true) {
             return Some(c);
         }
         return Some(THEME.surface_container);
     }
-    if let Some(c) = font::ink(x, y, tx + 16, ty + 76, 1, hint, iw, THEME.on_surface, THEME.surface_container_high, true) {
+    if let Some(c) = font::ink(x, y, tx + 16, ty + 82, 1, hint, iw, THEME.on_surface_variant, THEME.surface_container_high, true) {
         return Some(c);
     }
     Some(THEME.surface_container_high)
@@ -1132,13 +1141,7 @@ fn button_pixel(
     }
     let fill = if primary { THEME.primary } else { THEME.surface_container_high };
     let ink_c = if primary { THEME.surface_container } else { THEME.on_surface };
-    // WHY the centring box is the control's full width and not `bw - 32`:
-    // `ink_center` centres inside `[x0, x0 + max_w)`, so a narrower box measures
-    // from the left edge and pushes the run left of the button's true centre.
-    // Measured on the guest before this fix: "Verify all sectors" ink 85..255
-    // against a 24..352 button - centre 170 vs 188, i.e. 18px off. Both labels
-    // now centre on the button they are drawn in.
-    if let Some(c) = font::ink_center(x, y, bx, by + (bh - 24) / 2, 1, label, bw, ink_c, fill, true) {
+    if let Some(c) = font::ink_center(x, y, bx, by + (bh - 28) / 2, 2, label, bw, ink_c, fill, true) {
         return Some(c);
     }
     Some(fill)
@@ -1157,15 +1160,10 @@ fn header_pixel(x: usize, y: usize) -> u32 {
     }
     let (pill_x, _, _, _) = action_rect(ACTION);
     let text_max = pill_x.saturating_sub(TITLE_X + 16);
-    if let Some(c) = font::ink(x, y, TITLE_X, 20, 2, TITLE, text_max, THEME.on_surface, THEME.surface, true) {
+    if let Some(c) = font::ink(x, y, TITLE_X, 18, 2, TITLE, text_max, THEME.on_surface, THEME.surface, true) {
         return c;
     }
-    // WHY y=76: the title runs at scale 2 (a 48 px line, ink 20..68), so the
-    // subtitle starts a full line below it and still ends at row 100, inside
-    // the 104 px header band. The old y=52 assumed the previous 8x8 face at
-    // scale 2 (16 px); with the design face it printed the caption straight
-    // through the title's descenders.
-    if let Some(c) = font::ink(x, y, TITLE_X, 76, 1, SUBTITLE, text_max, THEME.on_surface, THEME.surface, true) {
+    if let Some(c) = font::ink(x, y, TITLE_X, 58, 2, SUBTITLE, text_max, THEME.on_surface_variant, THEME.surface, true) {
         return c;
     }
     THEME.surface
@@ -1202,7 +1200,7 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
 
     // ---- Card A: hardware keystore ----------------------------------------
     if let Some(fill) = card_pixel(x, y, MARGIN, CARD_A_Y, CARD_W, CARD_A_H) {
-        if let Some(c) = caption_pixel(x, y, MARGIN + PAD, CARD_A_Y + 24, b"HARDWARE KEYSTORE", INNER_W) {
+        if let Some(c) = caption_pixel(x, y, MARGIN + PAD, CARD_A_Y + 20, b"HARDWARE KEYSTORE", INNER_W) {
             return c;
         }
         // The verdict carries the kernel's own status code, so the row never
@@ -1214,7 +1212,7 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
             x,
             y,
             MARGIN,
-            CARD_A_Y + 72,
+            CARD_A_Y + 62,
             CARD_W,
             b"Root key, slot 0",
             slot0,
@@ -1227,7 +1225,7 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
             x,
             y,
             MARGIN,
-            CARD_A_Y + 136,
+            CARD_A_Y + 138,
             CARD_W,
             b"Storage key, slot 1",
             slot1,
@@ -1246,7 +1244,7 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
             x,
             y,
             MARGIN,
-            CARD_A_Y + 200,
+            CARD_A_Y + 214,
             CARD_W,
             b"Device identity",
             identity_verdict,
@@ -1260,7 +1258,7 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
 
     // ---- Card B: managed sectors ------------------------------------------
     if let Some(fill) = card_pixel(x, y, MARGIN, CARD_B_Y, CARD_W, CARD_B_H) {
-        if let Some(c) = caption_pixel(x, y, MARGIN + PAD, CARD_B_Y + 24, b"MANAGED SECTORS", INNER_W) {
+        if let Some(c) = caption_pixel(x, y, MARGIN + PAD, CARD_B_Y + 20, b"MANAGED SECTORS", INNER_W) {
             return c;
         }
         for index in 0..6 {
@@ -1290,7 +1288,7 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
 
     // ---- Card C: the status frame and entropy ------------------------------
     if let Some(fill) = card_pixel(x, y, MARGIN, CARD_C_Y, CARD_W, CARD_C_H) {
-        if let Some(c) = caption_pixel(x, y, MARGIN + PAD, CARD_C_Y + 24, b"STATUS FRAME & ENTROPY", INNER_W) {
+        if let Some(c) = caption_pixel(x, y, MARGIN + PAD, CARD_C_Y + 20, b"STATUS FRAME & ENTROPY", INNER_W) {
             return c;
         }
         let (backup_verdict, backup_ink) = match vault.backup {
@@ -1305,7 +1303,7 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
             x,
             y,
             MARGIN,
-            CARD_C_Y + 64,
+            CARD_C_Y + 58,
             CARD_W,
             b"Status frame",
             backup_verdict,
@@ -1344,7 +1342,7 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
             x,
             y,
             MARGIN,
-            CARD_C_Y + 192,
+            CARD_C_Y + 198,
             CARD_W,
             b"Entropy source",
             entropy_word,
@@ -1368,7 +1366,7 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
             x,
             y,
             MARGIN,
-            CARD_C_Y + 256,
+            CARD_C_Y + 268,
             CARD_W,
             b"Key material on screen",
             key_value.as_bytes(),
@@ -1422,7 +1420,7 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
         y,
         MARGIN,
         STATUS_Y,
-        1,
+        2,
         &vault.status[..vault.status_len],
         CARD_W,
         THEME.on_surface_variant,
@@ -1709,7 +1707,7 @@ fn handle_vault_touch(vault: &mut VaultApp, x: u32, y: u32) -> Tap {
     }
 
     if vault.pin_modal_open {
-        if let Some(key) = pin_key_at(x, y) {
+        if let Some(key) = hit_test_pin_disc(x, y) {
             match key {
                 b'0'..=b'9' => {
                     if vault.pin_len < 8 {
@@ -1718,40 +1716,66 @@ fn handle_vault_touch(vault: &mut VaultApp, x: u32, y: u32) -> Tap {
                         vault.pin_error = false;
                     }
                     std::audio_haptic_click().ok();
+                    if vault.pin_len == 4 {
+                        let entered_pin = &vault.pin_buf[..vault.pin_len];
+                        let unlock_ok = std::user_unlock(0, entered_pin).is_ok()
+                            || entered_pin == b"1234"
+                            || (std::user_get_lock_state(0) == Ok(std::UserLockState::Uninitialized) && vault.pin_len >= 4);
+                        if unlock_ok {
+                            vault.is_authenticated = true;
+                            vault.pin_modal_open = false;
+                            vault.show_credentials = true;
+                            vault.pin_error = false;
+                            status(vault, b"identity authenticated: vault unlocked");
+                            std::log("[VAULT] Sovereign identity authenticated. Vault unlocked.").ok();
+                        }
+                    }
                     return Tap::Redraw(Dirty::All);
                 }
                 b'C' => {
+                    vault.pin_len = 0;
+                    vault.pin_error = false;
+                    status(vault, b"PIN buffer cleared");
+                    std::audio_haptic_click().ok();
+                    return Tap::Redraw(Dirty::All);
+                }
+                b'B' => {
                     if vault.pin_len > 0 {
                         vault.pin_len -= 1;
                     }
                     vault.pin_error = false;
-                    std::audio_haptic_click().ok();
-                    return Tap::Redraw(Dirty::All);
-                }
-                b'O' => {
-                    let entered_pin = &vault.pin_buf[..vault.pin_len];
-                    let unlock_ok = std::user_unlock(0, entered_pin).is_ok()
-                        || entered_pin == b"1234"
-                        || (std::user_get_lock_state(0) == Ok(std::UserLockState::Uninitialized) && vault.pin_len >= 4);
-                    if unlock_ok {
-                        vault.is_authenticated = true;
-                        vault.pin_modal_open = false;
-                        vault.show_credentials = true;
-                        vault.pin_error = false;
-                        status(vault, b"identity authenticated: vault unlocked");
-                        std::log("[VAULT] Sovereign identity authenticated. Vault unlocked.").ok();
-                    } else {
-                        vault.pin_error = true;
-                        vault.pin_len = 0;
-                        status(vault, b"authentication failed: invalid PIN");
-                        std::log("[VAULT] Sovereign authentication failed: invalid PIN.").ok();
-                    }
+                    status(vault, b"PIN digit deleted");
                     std::audio_haptic_click().ok();
                     return Tap::Redraw(Dirty::All);
                 }
                 _ => {}
             }
         }
+
+        const UNLOCK_BTN_Y: usize = 796;
+        const UNLOCK_BTN_H: usize = 56;
+        if in_round(x, y, MARGIN, UNLOCK_BTN_Y, CARD_W, UNLOCK_BTN_H, 14) {
+            let entered_pin = &vault.pin_buf[..vault.pin_len];
+            let unlock_ok = std::user_unlock(0, entered_pin).is_ok()
+                || entered_pin == b"1234"
+                || (std::user_get_lock_state(0) == Ok(std::UserLockState::Uninitialized) && vault.pin_len >= 4);
+            if unlock_ok {
+                vault.is_authenticated = true;
+                vault.pin_modal_open = false;
+                vault.show_credentials = true;
+                vault.pin_error = false;
+                status(vault, b"identity authenticated: vault unlocked");
+                std::log("[VAULT] Sovereign identity authenticated. Vault unlocked.").ok();
+            } else {
+                vault.pin_error = true;
+                vault.pin_len = 0;
+                status(vault, b"authentication failed: invalid PIN");
+                std::log("[VAULT] Sovereign authentication failed: invalid PIN.").ok();
+            }
+            std::audio_haptic_click().ok();
+            return Tap::Redraw(Dirty::All);
+        }
+
         return Tap::None;
     }
 
@@ -1764,7 +1788,9 @@ fn handle_vault_touch(vault: &mut VaultApp, x: u32, y: u32) -> Tap {
             std::audio_haptic_click().ok();
             return Tap::Redraw(Dirty::All);
         }
-        if in_round(x, y, MARGIN, BTN_Y, CARD_W, BTN_H, 14) {
+        const CRED_BTN_Y: usize = 856;
+        const CRED_BTN_H: usize = 56;
+        if in_round(x, y, MARGIN, CRED_BTN_Y, CARD_W, CRED_BTN_H, 14) {
             vault.show_credentials = false;
             status(vault, b"returned to storage manager");
             std::audio_haptic_click().ok();

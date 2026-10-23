@@ -486,5 +486,37 @@ mod tests {
             assert_eq!(sliced, expected, "CRC mismatch at length {}", len);
         }
     }
+
+    #[test]
+    fn compositor_display_list_pipe_roundtrip_transfer() {
+        let mut mgr = ShmPipeManager::new();
+        // Pipe 4 is compositor.display_list, producer=TaskId(6), consumer=TaskId(10)
+        let mut dplt_wire = [0u8; 32];
+        dplt_wire[0..4].copy_from_slice(b"DPLT");
+        dplt_wire[4] = 1; // version
+        dplt_wire[5] = 1; // flags (has damage rect)
+        dplt_wire[8..12].copy_from_slice(&0xFF123456u32.to_le_bytes()); // bg_color
+        dplt_wire[12] = 5; // OPCODE_FILL_RECT
+        dplt_wire[13..15].copy_from_slice(&10u16.to_le_bytes()); // x
+        dplt_wire[15..17].copy_from_slice(&20u16.to_le_bytes()); // y
+        dplt_wire[17..19].copy_from_slice(&100u16.to_le_bytes()); // w
+        dplt_wire[19..21].copy_from_slice(&50u16.to_le_bytes()); // h
+        dplt_wire[21..25].copy_from_slice(&0xFFFFFFFFu32.to_le_bytes()); // fill
+
+        let seq = mgr
+            .transfer(PIPE_COMPOSITOR_DISPLAY_LIST, TaskId(6), &dplt_wire[..25], 0, 100)
+            .expect("Transfer display list over pipe");
+        assert_eq!(seq, 1);
+
+        let mut rx_buf = [0u8; 64];
+        let (rx_len, rx_seq) = mgr
+            .receive(PIPE_COMPOSITOR_DISPLAY_LIST, TaskId(10), &mut rx_buf)
+            .expect("Receive display list from compositor pipe");
+        assert_eq!(rx_len, 25);
+        assert_eq!(rx_seq, 1);
+        assert_eq!(&rx_buf[0..4], b"DPLT");
+        assert_eq!(&rx_buf[8..12], &0xFF123456u32.to_le_bytes());
+        assert_eq!(rx_buf[12], 5); // OPCODE_FILL_RECT
+    }
 }
 

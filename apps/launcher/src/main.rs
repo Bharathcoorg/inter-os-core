@@ -4421,6 +4421,31 @@ pub extern "C" fn _start() -> ! {
                                     std::log("[LAUNCHER] Notifications cleared.").ok();
                                     break;
                                 }
+                                if let Some(notif_id) =
+                                    screens::notifications::card_dismiss_at(x, y, &state)
+                                {
+                                    let _ = std::notification_cancel("", notif_id);
+                                    refresh_notifications(&mut state);
+                                    render_view(surface, &state);
+                                    surface_flip_display();
+                                    std::log("[LAUNCHER] Notification dismissed.").ok();
+                                    break;
+                                }
+                                if let Some((pkg, notif_id)) =
+                                    screens::notifications::card_open_at(x, y, &state)
+                                {
+                                    let _ = std::notification_cancel("", notif_id);
+                                    refresh_notifications(&mut state);
+                                    if !pkg.is_empty() {
+                                        let _ = std::app_launch(pkg);
+                                    } else {
+                                        state.current_view = ViewMode::HomeScreen;
+                                    }
+                                    render_view(surface, &state);
+                                    surface_flip_display();
+                                    std::log("[LAUNCHER] Notification action activated.").ok();
+                                    break;
+                                }
                                 // WHY the filter pills are answerable here: they
                                 // were a legend with real counts that no tap
                                 // reached, so the surface printed "Filter reads
