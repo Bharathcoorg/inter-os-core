@@ -351,6 +351,42 @@ pub fn smooth_bezier_curves(cov: &mut [u8], w: usize, h: usize, x_start: usize, 
     }
 }
 
+/// Perceptual Contrast Enhancement LUT for 4-bit Alpha (0..=15)
+/// Standard linear alpha washes out black-on-ivory or white-on-dark text.
+/// This LUT applies a gamma ~1.45 curve + contrast boost so 50% coverage
+/// renders with 73% ink density, keeping thin stems crisp during 2x decimation.
+pub static INK_GAMMA_LUT_4BIT: [u8; 16] = [
+    0,   // 0/15
+    24,  // 1/15 (Boosted from 17)
+    48,  // 2/15 (Boosted from 34)
+    73,  // 3/15 (Boosted from 51)
+    99,  // 4/15
+    124, // 5/15
+    148, // 6/15
+    171, // 7/15 (Mid-tone stem edge: 171/255 instead of 119/255)
+    191, // 8/15
+    208, // 9/15
+    222, // 10/15
+    234, // 11/15
+    243, // 12/15
+    249, // 13/15
+    253, // 14/15
+    255, // 15/15
+];
+
+/// Converts linear coverage (0..255) to perceptually enhanced alpha using the gamma curve.
+#[inline(always)]
+pub fn perceptual_alpha(coverage: u8) -> u8 {
+    if coverage == 0 {
+        0
+    } else if coverage == 255 {
+        255
+    } else {
+        let idx = ((coverage as usize * 15 + 127) / 255).clamp(1, 15);
+        INK_GAMMA_LUT_4BIT[idx]
+    }
+}
+
 impl OutlineRun {
     /// An empty run, for a frame that has no outline text.
     pub const EMPTY: OutlineRun = OutlineRun {
@@ -552,7 +588,8 @@ impl OutlineRun {
         if c == 0 {
             return None;
         }
-        Some(font::blend(ink, bg, c))
+        let alpha = perceptual_alpha(c);
+        Some(font::blend(ink, bg, alpha))
     }
 
     /// The colour of (`px`, `py`) if this run inks it with binary thresholding (c >= 64).
