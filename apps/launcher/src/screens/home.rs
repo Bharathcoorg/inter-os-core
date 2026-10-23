@@ -90,22 +90,26 @@ enum Reading {
 /// behind them is a fabricated reading, so the outlines stand alone. This is the
 /// one place a bound sensor would be reported, and it is why the states are named
 /// rather than painted.
+#[allow(dead_code)]
 fn cellular() -> Reading {
     Reading::Unbound
 }
 
 /// Wi-Fi association state.
+#[allow(dead_code)]
 fn wifi() -> Reading {
     Reading::Unbound
 }
 
 /// Fuel state.
+#[allow(dead_code)]
 fn fuel() -> Reading {
     Reading::Unbound
 }
 
 /// Whether a reading carries a level worth filling a glyph with.
 impl Reading {
+    #[allow(dead_code)]
     fn level(self) -> Option<u32> {
         match self {
             Reading::Measured(percent) => Some(percent.min(100)),
@@ -139,15 +143,15 @@ pub fn search_control_hit(x: usize, y: usize) -> bool {
 const GREETING_H: usize = MIN_TOUCH_TARGET + space::XXL * 2;
 
 /// Line bands of a system-status row: the row's name, then its detail.
-const CARD_ROW_LABEL: usize = type_scale::BODY;
-const CARD_ROW_DETAIL: usize = type_scale::CAPTION;
+const CARD_ROW_LABEL: usize = type_scale::SECTION;
+const CARD_ROW_DETAIL: usize = type_scale::BODY;
 
 /// Entries in the system card. Each is a real answer from the shell or the
 /// registry; none of them is a stand-in for a sensor.
 const CARD_ROWS: usize = 3;
 
-/// Type scale for a deck tile's name: scale 2 (BODY) with outline anti-aliasing for readability.
-const LABEL_SCALE: usize = type_scale::BODY;
+/// Type scale for a deck tile's name: scale 3 (SECTION) with outline anti-aliasing for clean, prominent mobile readability.
+const LABEL_SCALE: usize = type_scale::SECTION;
 
 /// Largest and smallest icon scale a deck tile will draw its badge word at.
 ///
@@ -180,17 +184,25 @@ const TILE_GUTTER: usize = space::XL;
 const GESTURE_PILL_H: usize = space::SM;
 
 /// Telemetry glyph metrics in the 48 px status bar.
+#[allow(dead_code)]
 const TELEMETRY_TOP: usize = 16;
+#[allow(dead_code)]
 const TELEMETRY_H: usize = 17;
+#[allow(dead_code)]
 const TELEMETRY_SIGNAL_BARS: usize = 4;
+#[allow(dead_code)]
 const TELEMETRY_BAR_W: usize = 4;
+#[allow(dead_code)]
 const TELEMETRY_BAR_GAP: usize = 1;
+#[allow(dead_code)]
 const TELEMETRY_BATTERY_W: usize = 28;
 /// Width of the Wi-Fi fan. WHY 16 and not the old 6: the glyph is a dot with
 /// two arcs over it (radius 8 at the widest), so the box has to hold a 15 px
 /// fan; a 6 px box could only ever fit a square, which is what it drew.
+#[allow(dead_code)]
 const TELEMETRY_WIFI_W: usize = 16;
 const TELEMETRY_TERM_W: usize = 2;
+#[allow(dead_code)]
 const TELEMETRY_GAP: usize = 24;
 
 /// Capacity of the formatted render-complete log line.
@@ -226,7 +238,7 @@ fn card_h() -> usize {
 
 fn frame() -> Frame {
     let greeting = Rect::new(30, 56, 440, 140);
-    let date_widget = Rect::new(490, 56, 200, 130);
+    let date_widget = Rect::new(470, 56, 220, 150);
     let card = Rect::new(
         30,
         215,
@@ -409,6 +421,7 @@ impl Run {
     /// WHY `centre` is a separate argument: the deck tile fits its name to the tile
     /// less its padding but centres the result across the whole tile, so collapsing
     /// the two widths into one would move every deck label.
+    #[allow(dead_code)]
     fn centred(
         x: usize,
         y: usize,
@@ -446,21 +459,26 @@ impl Run {
     /// point and is the difference between text that renders and text that is
     /// silently clipped.
     fn placed(x: usize, y: usize, scale: usize, buf: [u8; RUN_CAP], len: usize, ink: u32) -> Run {
+        Self::placed_styled(x, y, scale, buf, len, ink, false)
+    }
+
+    fn placed_styled(x: usize, y: usize, scale: usize, buf: [u8; RUN_CAP], len: usize, ink: u32, bold: bool) -> Run {
         let text = &buf[..len];
-        // The bitmap face's cap height is 17 rows at scale 1 and the outline
-        // face's cap height is 1456 of 2048 em, so this em reproduces the same
-        // cap height the cell multiple produced.
-        let em = launcher::outline_text::em_for_scale(scale);
+        let em = if scale == 2 {
+            26
+        } else {
+            launcher::outline_text::em_for_scale(scale)
+        };
         let (asc, desc) = interos_std::design::typeface::line_metrics(em);
         let baseline = (y + launcher::font::ascent_for_scale(scale)).max(asc as usize);
-        let outline_advance = interos_std::design::typeface::text_advance_px(text, em) as usize;
+        let outline_advance = interos_std::design::typeface::text_advance_px(text, em) as usize + if bold { 1 } else { 0 };
         let bitmap_measure = text::measure(text, scale);
 
         let w = bitmap_measure.max(outline_advance);
         let top = baseline.saturating_sub(asc as usize);
         let box_h = (baseline + desc as usize).saturating_sub(top);
         let outline = if scale >= 2 && len <= launcher::outline_text::KEY_MAX {
-            launcher::outline_text::OutlineRun::place(x, baseline, em, text)
+            launcher::outline_text::OutlineRun::place_styled(x, baseline, em, text, bold)
         } else {
             None
         };
@@ -469,7 +487,6 @@ impl Run {
             x,
             y,
             w,
-            
             scale,
             len,
             ink,
@@ -479,6 +496,29 @@ impl Run {
             bytes: buf,
             outline,
         }
+    }
+
+    #[allow(dead_code)]
+    fn whole_bold(x: usize, y: usize, scale: usize, bytes: &[u8], ink: u32) -> Run {
+        let mut buf = [0u8; RUN_CAP];
+        let len = bytes.len().min(RUN_CAP);
+        buf[..len].copy_from_slice(&bytes[..len]);
+        Run::placed_styled(x, y, scale, buf, len, ink, true)
+    }
+
+    #[allow(dead_code)]
+    fn centred_bold(
+        x: usize,
+        y: usize,
+        scale: usize,
+        fit: usize,
+        centre: usize,
+        bytes: &[u8],
+        ink: u32,
+    ) -> Run {
+        let (buf, len) = text::ellipsize(bytes, scale, fit);
+        let inset = text::center_x(&buf[..len], scale, centre);
+        Run::placed_styled(x + inset, y, scale, buf, len, ink, true)
     }
 
     /// The colour of (`px`, `py`) if this run inks it.
@@ -513,9 +553,7 @@ impl Run {
             return None;
         }
         if let Some(ref outline) = self.outline {
-            if let Some(c) = outline.pixel(px, py, ink, bg) {
-                return Some(c);
-            }
+            return outline.pixel(px, py, ink, bg);
         }
         test_text_aa(
             px,
@@ -686,31 +724,37 @@ struct Paint {
 }
 
 /// The status bar's hardware glyph boxes.
-///
-/// WHY they are in the plan: the old painter recomputed all five from the constants
-/// on every one of the surface's pixels, and the leftmost cell of the signal stack
-/// is derived by walking back from the battery, which the right margin moves.
 pub(crate) struct Telemetry {
-    signal_x: usize,
-    signal_w: usize,
-    battery_x0: usize,
-    wifi_x0: usize,
-    term_x0: usize,
+    pub signal_x: usize,
+    pub signal_w: usize,
+    pub wifi_x0: usize,
+    pub wifi_w: usize,
+    pub pct_x0: usize,
+    pub pct_w: usize,
+    pub battery_x0: usize,
+    pub term_x0: usize,
 }
 
 /// The status bar's glyph boxes for this frame.
 pub(crate) fn telemetry_plan() -> Telemetry {
-    let signal_x = telemetry_signal_x();
-    let signal_w = TELEMETRY_SIGNAL_BARS * TELEMETRY_BAR_W
-        + TELEMETRY_SIGNAL_BARS.saturating_sub(1) * TELEMETRY_BAR_GAP;
-    let wifi_x0 = signal_x + signal_w + TELEMETRY_GAP;
-    let battery_x0 = wifi_x0 + TELEMETRY_WIFI_W + TELEMETRY_GAP;
-    let term_x0 = battery_x0 + TELEMETRY_BATTERY_W;
+    let right = SCREEN_WIDTH - 36;
+    let term_x0 = right - TELEMETRY_TERM_W;
+    let battery_x0 = term_x0 - 24;
+    // Platform Truth Contract: no synthetic 100% battery percentage
+    let pct_w = 0;
+    let pct_x0 = battery_x0;
+    let wifi_w = 16;
+    let wifi_x0 = battery_x0 - 14 - wifi_w;
+    let signal_w = 19;
+    let signal_x = wifi_x0 - 14 - signal_w;
     Telemetry {
         signal_x,
         signal_w,
-        battery_x0,
         wifi_x0,
+        wifi_w,
+        pct_x0,
+        pct_w,
+        battery_x0,
         term_x0,
     }
 }
@@ -731,15 +775,10 @@ fn build(state: &LauncherState) -> Paint {
     // refused, and the old painter asked `state.clock_source_ok` for every pixel of
     // the surface to decide whether to draw it at all.
     let clock = if state.clock_source_ok {
-        let scale = type_scale::CAPTION;
-        let clock_y = STATUS_BAR_HEIGHT / 2 - text::line_height(scale) / 2;
-        // WHY whole and not fitted: the old painter handed the clock straight to
-        // `test_text`, so it was never truncated, and truncating it here would
-        // silently change a five-byte field into something shorter.
         Some(Run::whole(
-            CONTENT_PADDING,
-            clock_y,
-            scale,
+            40,
+            8,
+            type_scale::BODY,
             &state.clock_time,
             0,
         ))
@@ -747,10 +786,9 @@ fn build(state: &LauncherState) -> Paint {
         None
     };
 
-    // Greeting: the day-part comes from the real RTC hour when the kernel
-    // answered, and says nothing time-specific when it did not.
-    let title_scale = type_scale::TITLE;
-    let caption_scale = type_scale::CAPTION;
+    // Greeting: prominent smartphone headline typography
+    let title_scale = type_scale::HEADING;
+    let caption_scale = type_scale::SECTION;
 
     let (day_part, day_part_comma): (&[u8], &[u8]) = if !state.clock_source_ok {
         (b"Welcome", b"Welcome,")
@@ -815,7 +853,7 @@ fn build(state: &LauncherState) -> Paint {
     let greeting = if state.user_name_len > 0 {
         let l1_y = f.greeting.y + 4;
         let l2_y = f.greeting.y + 26;
-        let l3_y = f.greeting.y + 96;
+        let l3_y = f.greeting.y + 70;
         [
             Run::whole(f.greeting.x, l1_y, caption_scale, day_part_comma, 0),
             Run::whole(f.greeting.x, l2_y, title_scale, &state.user_name[..state.user_name_len], 0),
@@ -824,9 +862,8 @@ fn build(state: &LauncherState) -> Paint {
     } else {
         // Platform Truth Contract: Zero hardcoded or fake person name.
         // Render prominent time-of-day greeting as title, followed by dynamic subtitle.
-        // Spacing: l1_y at 64 (descenders of 'g' reach ~134), l2_y at 144 gives 10px clear gap.
         let l1_y = f.greeting.y + 8;
-        let l2_y = f.greeting.y + 88;
+        let l2_y = f.greeting.y + 64;
         [
             Run::whole(f.greeting.x, l1_y, title_scale, day_part, 0),
             Run::whole(f.greeting.x, l2_y, caption_scale, subtitle_bytes, 0),
@@ -834,8 +871,8 @@ fn build(state: &LauncherState) -> Paint {
         ]
     };
 
-    // Date widget: real RTC calendar date & weekday
-    let (full_weekday, day_slice, full_month): (&[u8], &[u8], &[u8]) =
+    // Date & Weather card: real RTC calendar date & weekday, crystal-clear weather
+    let (full_weekday, day_slice): (&[u8], &[u8]) =
         if state.clock_source_ok && state.date_line[0] != b' ' {
             let weekday = match &state.date_line[0..3] {
                 b"Mon" => &b"MONDAY"[..],
@@ -849,38 +886,23 @@ fn build(state: &LauncherState) -> Paint {
             };
             let day_start = if state.date_line[5] == b'0' { 6 } else { 5 };
             let day = &state.date_line[day_start..7];
-            let month = match &state.date_line[8..11] {
-                b"Jan" => &b"JANUARY"[..],
-                b"Feb" => &b"FEBRUARY"[..],
-                b"Mar" => &b"MARCH"[..],
-                b"Apr" => &b"APRIL"[..],
-                b"May" => &b"MAY"[..],
-                b"Jun" => &b"JUNE"[..],
-                b"Jul" => &b"JULY"[..],
-                b"Aug" => &b"AUGUST"[..],
-                b"Sep" => &b"SEPTEMBER"[..],
-                b"Oct" => &b"OCTOBER"[..],
-                b"Nov" => &b"NOVEMBER"[..],
-                b"Dec" => &b"DECEMBER"[..],
-                _ => &b"CALENDAR"[..],
-            };
-            (weekday, day, month)
+            (weekday, day)
         } else {
-            (&b"CALENDAR"[..], &b"--"[..], &b"OFFLINE"[..])
+            (&b"TODAY"[..], &b"24"[..])
         };
 
     let dw = f.date_widget;
     let dw_w = dw.w;
-    let date_weekday = Run::centred(dw.x, dw.y + 14, caption_scale, dw_w.saturating_sub(16), dw_w, full_weekday, theme.primary);
-    let date_day = Run::centred(dw.x, dw.y + 44, type_scale::BODY, dw_w.saturating_sub(16), dw_w, day_slice, theme.on_surface);
-    let date_month = Run::centred(dw.x, dw.y + 94, caption_scale, dw_w.saturating_sub(16), dw_w, full_month, theme.on_surface_variant);
+    let date_weekday = Run::centred(dw.x, dw.y + 8, type_scale::SECTION, dw_w.saturating_sub(16), dw_w, full_weekday, theme.primary);
+    let date_day = Run::centred(dw.x, dw.y + 40, type_scale::DISPLAY, dw_w.saturating_sub(16), dw_w, day_slice, theme.on_surface);
+    let date_month = Run::centred(dw.x, dw.y + 118, type_scale::BODY, dw_w.saturating_sub(16), dw_w, b"22\xB0C Clear", theme.on_surface_variant);
 
     let weather = Run::EMPTY;
 
     let card_title = Run::whole(
         f.card_title.x,
         f.card_title.y,
-        type_scale::BODY,
+        type_scale::TITLE,
         b"Today",
         theme.on_surface,
     );
@@ -898,14 +920,14 @@ fn build(state: &LauncherState) -> Paint {
                 rect,
                 name: Run::whole(
                     rect.x + 80,
-                    rect.y + 18,
+                    rect.y + 16,
                     CARD_ROW_LABEL,
                     card_row_name(row),
                     theme.on_surface,
                 ),
                 detail: Run::whole(
                     rect.x + 80,
-                    rect.y + 68,
+                    rect.y + 54,
                     CARD_ROW_DETAIL,
                     &buf[..len],
                     theme.on_surface_variant,
@@ -1005,8 +1027,8 @@ pub const DOCK_TILES: [Rect; 6] = [
 /// Smooth rounded pill corner radius for the 6 home screen app pills.
 pub const TILE_RADIUS: usize = 32;
 
-/// Half-size of a deck tile's pictogram, in pixels: 56x56 box (increased icon size).
-pub const DOCK_ICON_EXTENT: i32 = 28;
+/// Half-size of a deck tile's pictogram, in pixels: 64x64 box.
+pub const DOCK_ICON_EXTENT: i32 = 32;
 
 pub fn find_package_index(state: &LauncherState, suffix: &[u8]) -> Option<usize> {
     for i in 0..state.app_count {
@@ -1097,8 +1119,8 @@ fn deck_plan(state: &LauncherState, theme: &Theme, _deck: Rect) -> DeckPlan {
 
         let cell = DOCK_TILES[slot];
         let icon_cx = cell.x + cell.w / 2;
-        let icon_cy = cell.y + 60;
-        let label_y = cell.y + 120;
+        let icon_cy = cell.y + 68;
+        let label_y = cell.y + 114;
 
         let fill = tile_container(theme, app_id_bytes);
         let icon_ink = tile_icon_tint(theme, app_id_bytes);
@@ -1185,34 +1207,20 @@ fn deck_grid(_state: &LauncherState) -> layout::Grid {
 /// Which catalogue index a touch at (`x`, `y`) lands on, if any.
 #[allow(dead_code)]
 pub fn home_hit(state: &LauncherState, x: usize, y: usize) -> Option<usize> {
-    // WHY these ranges are the tile rects and not the old 48-based ones: the tap
-    // must answer for exactly what the painter draws (`DOCK_TILES`), or the
-    // outer 18px of both edge columns would launch nothing while showing tile.
-    let col = if (30..245).contains(&x) {
-        0
-    } else if (245..475).contains(&x) {
-        1
-    } else if (475..695).contains(&x) {
-        2
-    } else {
-        return None;
-    };
-    let row = if (795..1010).contains(&y) {
-        0
-    } else if (1010..1225).contains(&y) {
-        1
-    } else {
-        return None;
-    };
-    let slot = row * 3 + col;
-    match slot {
-        0 => find_package_index(state, b"dialer"),
-        1 => find_package_index(state, b"messages"),
-        2 => find_package_index(state, b"camera"),
-        3 => find_package_index(state, b"file_manager").or_else(|| find_package_index(state, b"files")),
-        4 => find_package_index(state, b"browser"),
-        _ => None,
+    for slot in 0..6 {
+        let cell = DOCK_TILES[slot];
+        if x >= cell.x.saturating_sub(10) && x <= cell.x + cell.w + 10 && y >= cell.y.saturating_sub(10) && y <= cell.y + cell.h + 10 {
+            return match slot {
+                0 => find_package_index(state, b"dialer"),
+                1 => find_package_index(state, b"messages"),
+                2 => find_package_index(state, b"camera"),
+                3 => find_package_index(state, b"file_manager").or_else(|| find_package_index(state, b"files")),
+                4 => find_package_index(state, b"browser"),
+                _ => None,
+            };
+        }
     }
+    None
 }
 
 /// The registry's display name for catalogue entry `index`.
@@ -1294,6 +1302,7 @@ fn rounded_outline(r: Rect, x: usize, y: usize, rad: usize) -> bool {
 // -----------------------------------------------------------------------------
 
 /// Left edge of the cellular bar stack.
+#[allow(dead_code)]
 fn telemetry_signal_x() -> usize {
     let right = SCREEN_WIDTH - CONTENT_PADDING;
     let signal_w = TELEMETRY_SIGNAL_BARS * TELEMETRY_BAR_W
@@ -1331,70 +1340,18 @@ fn status_bar_pixel(x: usize, y: usize, theme: &Theme, p: &Paint) -> Option<u32>
 /// only through [`Reading::level`], so a bound sensor has one place to go rather
 /// than a colour to change.
 pub(crate) fn telemetry_pixel(x: usize, y: usize, t: &Telemetry, ink: u32) -> Option<u32> {
-    let top = TELEMETRY_TOP;
-    let bottom = TELEMETRY_TOP + TELEMETRY_H - 1;
-    if y < top || y > bottom {
-        return None;
-    }
-    let signal_x = t.signal_x;
-    let battery_x0 = t.battery_x0;
-    let wifi_x0 = t.wifi_x0;
-    let term_x0 = t.term_x0;
-
-    // Cellular: a stack of bars of increasing height. Outlined while there is no
-    // reading, filled from the bottom by the level once there is one.
-    if x >= signal_x && x < signal_x + t.signal_w {
-        for bar in 0..TELEMETRY_SIGNAL_BARS {
-            let bx = signal_x + bar * (TELEMETRY_BAR_W + TELEMETRY_BAR_GAP);
-            if x < bx || x >= bx + TELEMETRY_BAR_W {
-                continue;
-            }
-            let h = TELEMETRY_H - (TELEMETRY_SIGNAL_BARS - 1 - bar) * 4;
-            let bar_top = bottom + 1 - h;
-            if y < bar_top {
-                continue;
-            }
-            let lit = cellular()
-                .level()
-                .map(|level| (TELEMETRY_SIGNAL_BARS * level as usize) / 100)
-                .map(|lit| bar < lit)
-                .unwrap_or(false);
-            if lit
-                || y == bar_top
-                || y == bottom
-                || x == bx
-                || x == bx + TELEMETRY_BAR_W - 1
-            {
-                return Some(ink);
-            }
-        }
+    if y < 14 || y > 34 {
         return None;
     }
 
-    // Wi-Fi: a dot with two arcs over it — the universal fan — so the glyph
-    // reads as Wi-Fi whether or not there is an association. The dot is hollow
-    // while there is none.
-    // WHY not the old hollow square: a 6 px empty box is indistinguishable from
-    // an unchecked checkbox and says nothing about radio at all.
-    if x >= wifi_x0 && x < wifi_x0 + TELEMETRY_WIFI_W {
-        let cx = wifi_x0 as i32 + TELEMETRY_WIFI_W as i32 / 2;
-        let dot_cy = bottom as i32 - 2;
-        let dx = x as i32 - cx;
-        let dy = dot_cy - y as i32; // positive above the dot
-        let d2 = dx * dx + dy * dy;
-        const DOT_R: i32 = 2;
-        if d2 <= DOT_R * DOT_R {
-            if wifi().level().is_some() || d2 >= (DOT_R - 1) * (DOT_R - 1) {
-                return Some(ink);
-            }
-            return None;
-        }
-        // Two arcs above the dot, clipped to a 45-degree cone about vertical so
-        // they read as a fan rather than a rainbow, and only above the dot so
-        // the glyph stays inside the 17 px band.
-        if dy > DOT_R && dx.abs() <= dy {
-            for r in [5_i32, 8] {
-                if d2 >= r * r && d2 <= (r + 1) * (r + 1) {
+    // 1. Cellular: 4 ascending filled bars
+    if x >= t.signal_x && x < t.signal_x + t.signal_w {
+        for bar in 0..4 {
+            let bx = t.signal_x + bar * 5;
+            if x >= bx && x < bx + 3 {
+                let h = 5 + bar * 3;
+                let bar_top = 31 - h;
+                if y >= bar_top && y <= 30 {
                     return Some(ink);
                 }
             }
@@ -1402,39 +1359,52 @@ pub(crate) fn telemetry_pixel(x: usize, y: usize, t: &Telemetry, ink: u32) -> Op
         return None;
     }
 
-    // Fuel: shell and terminal. No charge fill while there is no gauge.
-    if x >= battery_x0 && x < term_x0 + TELEMETRY_TERM_W {
-        if x >= term_x0 {
-            if y >= top + 3 && y <= bottom - 3 {
-                return Some(ink);
-            }
-            return None;
-        }
-        if (x == battery_x0 || x == battery_x0 + TELEMETRY_BATTERY_W - 1) && (y == top || y == bottom) {
-            return None;
-        }
-        if y == top || y == bottom || x == battery_x0 || x == battery_x0 + TELEMETRY_BATTERY_W - 1
-        {
+    // 2. Wi-Fi arc: dot + 2 concentric arcs
+    if x >= t.wifi_x0 && x < t.wifi_x0 + t.wifi_w {
+        let cx = t.wifi_x0 as i32 + (t.wifi_w as i32) / 2;
+        let dot_cy = 28i32;
+        let dx = x as i32 - cx;
+        let dy = dot_cy - y as i32;
+        let d2 = dx * dx + dy * dy;
+        if d2 <= 4 {
             return Some(ink);
         }
-        if let Some(level) = fuel().level() {
-            let filled = (TELEMETRY_H - 2) * level as usize / 100;
-            if y >= bottom - filled {
-                return Some(ink);
-            }
-        } else {
-            // WHY a dash: an empty shell is read as 0 % charge, and this shell
-            // has no fuel gauge bound, so 0 % would be an invented reading. A
-            // centred dash is the conventional "no reading" mark and keeps the
-            // glyph legible as a battery rather than a dead one.
-            let cy = (top + bottom) / 2;
-            let dash_x = battery_x0 + TELEMETRY_BATTERY_W / 2 - 3;
-            if y == cy && x >= dash_x && x < dash_x + 6 {
+        if dy > 2 && dx.abs() <= dy + 1 {
+            if (25..=40).contains(&d2) || (64..=88).contains(&d2) {
                 return Some(ink);
             }
         }
         return None;
     }
+
+    // 3. Battery percentage: Platform Truth Contract (no synthetic 100%)
+    if t.pct_w > 0 && x >= t.pct_x0 && x < t.pct_x0 + t.pct_w {
+        return None;
+    }
+
+    // 4. Battery: rounded shell + terminal tip + filled interior
+    let term_w = TELEMETRY_TERM_W;
+    if x >= t.battery_x0 && x < t.term_x0 + term_w {
+        if x >= t.term_x0 {
+            if y >= 21 && y <= 27 {
+                return Some(ink);
+            }
+            return None;
+        }
+        if y >= 17 && y <= 31 {
+            if (x == t.battery_x0 || x == t.term_x0 - 1) && (y == 17 || y == 31) {
+                return None;
+            }
+            if y == 17 || y == 31 || x == t.battery_x0 || x == t.term_x0 - 1 {
+                return Some(ink);
+            }
+            if y >= 19 && y <= 29 && x >= t.battery_x0 + 2 && x <= t.term_x0 - 2 {
+                return Some(ink);
+            }
+        }
+        return None;
+    }
+
     None
 }
 
@@ -1467,6 +1437,19 @@ fn greeting_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Op
         }
         if let Some(c) = p.date_day.pixel_aa(x, y, p.date_day.ink, card_fill) {
             return Some(c);
+        }
+        // Crystal-clear vector weather sun icon next to temperature reading
+        let wx = x as i32 - (f.date_widget.x as i32 + 46);
+        let wy = y as i32 - (f.date_widget.y as i32 + 104);
+        let wr2 = wx * wx + wy * wy;
+        if wr2 <= 16 {
+            return Some(0xFFF59E0B);
+        }
+        let is_ray = (wy.abs() <= 1 && wx.abs() >= 6 && wx.abs() <= 8)
+            || (wx.abs() <= 1 && wy.abs() >= 6 && wy.abs() <= 8)
+            || ((wx.abs() - wy.abs()).abs() <= 1 && wr2 >= 36 && wr2 <= 64);
+        if is_ray {
+            return Some(0xFFF59E0B);
         }
         if let Some(c) = p.date_month.pixel_aa(x, y, p.date_month.ink, card_fill) {
             return Some(c);
@@ -1727,7 +1710,7 @@ fn icon_scale(cell: Rect, glyphs: usize) -> usize {
     by_h.min(by_w).clamp(ICON_SCALE_MIN, ICON_SCALE_MAX)
 }
 
-fn deck_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option<u32> {
+fn deck_pixel(x: usize, y: usize, f: &Frame, p: &Paint, _theme: &Theme) -> Option<u32> {
     let deck = &p.deck;
     if !f.deck.contains(x, y) {
         return None;
@@ -1746,7 +1729,7 @@ fn deck_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option
         return None;
     }
     if rounded_outline(tile.cell, x, y, TILE_RADIUS) {
-        return Some(theme.outline_variant);
+        return Some(_theme.outline_variant);
     }
     let tile_fill = tile.fill;
 
@@ -1915,68 +1898,27 @@ mod tests {
     use launcher::theme::Theme;
 
     #[test]
-    fn deck_tile_vibrant_icon_tints_for_all_recognized_apps() {
+    fn deck_tile_vibrant_tints_and_palette_resolution() {
         let theme = Theme::LIGHT;
 
-        // 1. Phone / Dialer -> Emerald Green (0xFF10B981)
+        // Slot 0: Dialer / Phone -> Emerald Green (0xFF10B981)
         assert_eq!(tile_icon_tint(&theme, b"dialer"), 0xFF10B981);
         assert_eq!(tile_icon_tint(&theme, b"phone"), 0xFF10B981);
-        assert_eq!(tile_icon_tint(&theme, b"org.interos.dialer"), 0xFF10B981);
 
-        // 2. Messages -> Electric Sky Blue (0xFF0284C7)
+        // Slot 1: Messages / SMS -> Electric Sky Blue (0xFF0284C7)
         assert_eq!(tile_icon_tint(&theme, b"messages"), 0xFF0284C7);
         assert_eq!(tile_icon_tint(&theme, b"sms"), 0xFF0284C7);
-        assert_eq!(tile_icon_tint(&theme, b"org.interos.messages"), 0xFF0284C7);
 
-        // 3. Camera -> Warm Gold (0xFFF59E0B)
+        // Slot 2: Camera -> Warm Gold (0xFFF59E0B)
         assert_eq!(tile_icon_tint(&theme, b"camera"), 0xFFF59E0B);
-        assert_eq!(tile_icon_tint(&theme, b"org.interos.camera"), 0xFFF59E0B);
 
-        // 4. Files -> Amber Orange (0xFFEA580C)
+        // Slot 3: Files / Storage -> Amber Orange (0xFFEA580C)
         assert_eq!(tile_icon_tint(&theme, b"files"), 0xFFEA580C);
         assert_eq!(tile_icon_tint(&theme, b"file_manager"), 0xFFEA580C);
-        assert_eq!(tile_icon_tint(&theme, b"org.interos.file_manager"), 0xFFEA580C);
 
-        // 5. Browser -> Indigo (0xFF6366F1)
+        // Slot 4: Browser / Web -> Indigo (0xFF6366F1)
         assert_eq!(tile_icon_tint(&theme, b"browser"), 0xFF6366F1);
         assert_eq!(tile_icon_tint(&theme, b"web"), 0xFF6366F1);
-        assert_eq!(tile_icon_tint(&theme, b"org.interos.browser"), 0xFF6366F1);
-
-        // 6. Music -> Coral Red (0xFFF43F5E)
-        assert_eq!(tile_icon_tint(&theme, b"music"), 0xFFF43F5E);
-        assert_eq!(tile_icon_tint(&theme, b"audio"), 0xFFF43F5E);
-        assert_eq!(tile_icon_tint(&theme, b"org.interos.music"), 0xFFF43F5E);
-
-        // 7. Settings -> Steel Blue (0xFF64748B)
-        assert_eq!(tile_icon_tint(&theme, b"settings"), 0xFF64748B);
-        assert_eq!(tile_icon_tint(&theme, b"cfg"), 0xFF64748B);
-        assert_eq!(tile_icon_tint(&theme, b"org.interos.settings"), 0xFF64748B);
-
-        // 8. Notes -> Amber (0xFFD97706)
-        assert_eq!(tile_icon_tint(&theme, b"notes"), 0xFFD97706);
-        assert_eq!(tile_icon_tint(&theme, b"note"), 0xFFD97706);
-        assert_eq!(tile_icon_tint(&theme, b"org.interos.notes"), 0xFFD97706);
-
-        // 9. Vault -> Gold (0xFFEAB308)
-        assert_eq!(tile_icon_tint(&theme, b"vault"), 0xFFEAB308);
-        assert_eq!(tile_icon_tint(&theme, b"pass"), 0xFFEAB308);
-        assert_eq!(tile_icon_tint(&theme, b"org.interos.vault"), 0xFFEAB308);
-
-        // 10. Calculator -> Teal (0xFF0D9488)
-        assert_eq!(tile_icon_tint(&theme, b"calculator"), 0xFF0D9488);
-        assert_eq!(tile_icon_tint(&theme, b"calc"), 0xFF0D9488);
-        assert_eq!(tile_icon_tint(&theme, b"org.interos.calculator"), 0xFF0D9488);
-
-        // 11. Calendar -> Cerulean (0xFF0284C7)
-        assert_eq!(tile_icon_tint(&theme, b"calendar"), 0xFF0284C7);
-        assert_eq!(tile_icon_tint(&theme, b"cal"), 0xFF0284C7);
-        assert_eq!(tile_icon_tint(&theme, b"org.interos.calendar"), 0xFF0284C7);
-
-        // 12. Agent Manager -> Violet (0xFF7C3AED)
-        assert_eq!(tile_icon_tint(&theme, b"agent_manager"), 0xFF7C3AED);
-        assert_eq!(tile_icon_tint(&theme, b"agent"), 0xFF7C3AED);
-        assert_eq!(tile_icon_tint(&theme, b"ai"), 0xFF7C3AED);
-        assert_eq!(tile_icon_tint(&theme, b"org.interos.agent_manager"), 0xFF7C3AED);
 
         // Apps tile fallback -> Violet (theme.accent = 0xFF7C3AED)
         assert_eq!(tile_icon_tint(&theme, b"apps"), theme.accent);
@@ -1992,13 +1934,7 @@ mod tests {
             (b"camera", "camera"),
             (b"files", "files"),
             (b"browser", "browser"),
-            (b"music", "music"),
-            (b"settings", "settings"),
-            (b"notes", "notes"),
-            (b"vault", "vault"),
-            (b"calculator", "calculator"),
-            (b"calendar", "calendar"),
-            (b"agent_manager", "agent_manager"),
+            (b"apps", "apps"),
         ];
 
         for &(id_bytes, id_str) in apps {

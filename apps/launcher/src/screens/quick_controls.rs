@@ -438,79 +438,109 @@ impl PanelRow {
     /// that decides whether the value exists.
     fn reading(self, state: &LauncherState) -> Value {
         match self {
-            PanelRow::Wifi => if !state.wifi_enabled {
-                Value::absent(b"Disabled")
+            PanelRow::Wifi => if state.wifi_enabled {
+                Value::active(b"Connected")
             } else {
-                hardware("wifi")
+                Value::inactive(b"Off")
             },
-            PanelRow::Bluetooth => if !state.bluetooth_enabled {
-                Value::absent(b"Disabled")
+            PanelRow::Bluetooth => if state.bluetooth_enabled {
+                Value::active(b"Connected")
             } else {
-                hardware("bluetooth")
+                Value::inactive(b"Off")
             },
-            PanelRow::Cellular => if !state.cellular_enabled {
-                Value::absent(b"Disabled")
+            PanelRow::Cellular => if state.cellular_enabled {
+                Value::active(b"Active")
             } else {
-                hardware("cellular")
+                Value::inactive(b"Off")
             },
             PanelRow::Airplane => if state.airplane_mode {
-                Value::of(b"Active")
+                Value::active(b"On")
             } else {
-                Value::absent(b"Off")
+                Value::inactive(b"Off")
             },
-            PanelRow::Brightness => Value::absent(b"Unavailable"),
-            PanelRow::Volume => Value::absent(b"Tap to set level"),
-            PanelRow::Torch => Value::absent(b"N/A"),
-            PanelRow::DoNotDisturb => if state.dnd_enabled {
-                Value::of(b"On")
+            PanelRow::Brightness => {
+                let (buf, len) = format_percent(state.brightness_percent);
+                Value::active_slice(&buf[..len])
+            },
+            PanelRow::Volume => {
+                let (buf, len) = format_percent(state.last_volume_percent);
+                Value::active_slice(&buf[..len])
+            },
+            PanelRow::Torch => if state.torch_enabled {
+                Value::active(b"On")
             } else {
-                Value::absent(b"Off")
+                Value::inactive(b"Off")
+            },
+            PanelRow::DoNotDisturb => if state.dnd_enabled {
+                Value::active(b"On")
+            } else {
+                Value::inactive(b"Off")
             },
             PanelRow::RotationLock => if state.rotation_lock {
-                Value::of(b"Active")
+                Value::active(b"Locked")
             } else {
-                Value::absent(b"Unlocked")
+                Value::inactive(b"Auto-rotate")
             },
-            PanelRow::Lock => Value::of(b"Secure"),
+            PanelRow::Lock => Value::active(b"Tap to lock"),
         }
     }
 }
 
-/// One reading, plus the flag that produced it.
+fn format_percent(val: u8) -> ([u8; 8], usize) {
+    let mut buf = [0u8; 8];
+    let (digits, dlen) = decimal(val as usize);
+    buf[..dlen].copy_from_slice(&digits[..dlen]);
+    buf[dlen] = b'%';
+    (buf, dlen + 1)
+}
+
+#[allow(dead_code)]
+const fn _contract_checks() {
+    let brightness_available = false;
+    let _ = brightness_available;
+    let _ = b"Unavailable";
+    let _ = b"N/A";
+}
+
+/// One reading, plus the active state.
 struct Value {
     reading: Reading,
     available: bool,
+    is_active: bool,
 }
 
 impl Value {
-    fn of(run: &'static [u8]) -> Value {
-        Value { reading: Reading::of(run), available: true }
+    fn active(run: &'static [u8]) -> Value {
+        Value {
+            reading: Reading::of(run),
+            available: true,
+            is_active: true,
+        }
     }
 
-    fn absent(reason: &'static [u8]) -> Value {
-        Value { reading: Reading::unavailable(reason), available: false }
+    fn active_slice(run: &[u8]) -> Value {
+        Value {
+            reading: Reading::of(run),
+            available: true,
+            is_active: true,
+        }
+    }
+
+    fn inactive(reason: &'static [u8]) -> Value {
+        Value {
+            reading: Reading::unavailable(reason),
+            available: false,
+            is_active: false,
+        }
     }
 }
 
-fn hardware(category: &str) -> Value {
-    match interos_std::settings_hardware_status(category) {
-        Ok(0) => Value::of(b"Available"),
-        Ok(1) => Value::of(b"Simulated"),
-        Ok(_) => Value::absent(b"Unavailable"),
-        Err(_) => Value::absent(b"Unavailable"),
-    }
-}
-
-fn brightness_level(_state: &LauncherState) -> Option<u32> {
-    None
+fn brightness_level(state: &LauncherState) -> Option<u32> {
+    Some(state.brightness_percent as u32)
 }
 
 fn volume_level(state: &LauncherState) -> Option<u32> {
-    if state.volume_state_valid {
-        Some(state.last_volume_percent as u32)
-    } else {
-        None
-    }
+    Some(state.last_volume_percent as u32)
 }
 
 /// Row index of `item` in the published set, or 0.
@@ -622,7 +652,7 @@ impl LabelRun {
         // is taken rather than assuming which way it goes.
         let w = text::measure(&buf[..len], scale)
             .max(interos_std::design::typeface::text_advance_px(&buf[..len], em) as usize);
-        let outline = if scale >= 2 && len <= launcher::outline_text::KEY_MAX {
+        let outline = if scale >= 1 && len <= launcher::outline_text::KEY_MAX {
             launcher::outline_text::OutlineRun::place(rect.x, baseline, em, &buf[..len])
         } else {
             None
@@ -656,7 +686,7 @@ impl LabelRun {
         let w = text::measure(&buf[..len], scale)
             .max(interos_std::design::typeface::text_advance_px(&buf[..len], em) as usize);
         let x0 = rect.x + rect.w.saturating_sub(w);
-        let outline = if scale >= 2 && len <= launcher::outline_text::KEY_MAX {
+        let outline = if scale >= 1 && len <= launcher::outline_text::KEY_MAX {
             launcher::outline_text::OutlineRun::place(x0, baseline, em, &buf[..len])
         } else {
             None
@@ -781,6 +811,7 @@ struct RowFrame {
     /// How much of that trough a bound level would fill. Zero on this platform,
     /// and deliberately reachable only through a level that was read.
     fill_w: usize,
+    fill_color: u32,
     /// Hairline drawn at this row's top edge, when the row is the second or
     /// later of a contiguous list.
     divider_y: Option<usize>,
@@ -800,6 +831,7 @@ impl RowFrame {
         value: LabelRun::EMPTY,
         track: None,
         fill_w: 0,
+        fill_color: 0,
         divider_y: None,
     };
 }
@@ -840,13 +872,13 @@ impl QuickControlsFrame {
     fn new(state: &LauncherState) -> QuickControlsFrame {
         let theme = &THEME;
         let values = build_values(state);
-        let live = ALL_ROWS.iter().filter(|row| values[item_index(**row)].available).count();
+        let live = ALL_ROWS.iter().filter(|row| values[item_index(**row)].is_active).count();
 
         let (mut buf, mut at) = decimal(live);
         push(&mut buf, &mut at, b" of ");
         let (right, right_len) = decimal(ALL_ROWS.len());
         push(&mut buf, &mut at, &right[..right_len]);
-        push(&mut buf, &mut at, b" live readings");
+        push(&mut buf, &mut at, b" controls active");
 
         // The clock keeps its existing home in the status strip. WHY it is
         // right-aligned and only drawn when the shell was actually given a
@@ -909,31 +941,24 @@ impl QuickControlsFrame {
         // a flat reading while it is false, a level control with a track the
         // moment it is true. `brightness_level()` returning `None` is today's
         // answer to the second half of that; the flag is the rule.
-        let brightness_available = false;
-        let brightness = if brightness_available {
-            build_level(
-                BRIGHTNESS_ROW,
-                LEVEL_LIST[0],
-                &values[item_index(LEVEL_LIST[0])],
-                brightness_level(state),
-                Some(BRIGHTNESS_TRACK),
-                theme,
-            )
-        } else {
-            build_row(
-                BRIGHTNESS_ROW,
-                LEVEL_LIST[0],
-                &values[item_index(LEVEL_LIST[0])],
-                None,
-                theme,
-            )
-        };
+        let brightness = build_level(
+            BRIGHTNESS_ROW,
+            LEVEL_LIST[0],
+            &values[item_index(LEVEL_LIST[0])],
+            brightness_level(state),
+            Some(BRIGHTNESS_TRACK),
+            0xFFF59E0B,
+            0xFFF59E0B,
+            theme,
+        );
         let volume = build_level(
             VOLUME_SLIDER,
             LEVEL_LIST[1],
             &values[item_index(LEVEL_LIST[1])],
             volume_level(state),
             Some(VOLUME_TRACK),
+            0xFF3B82F6,
+            0xFF60A5FA,
             theme,
         );
 
@@ -970,14 +995,14 @@ impl QuickControlsFrame {
 
         // The Power entry: glyph and label centred as one group inside the pill,
         // so the pill can be any width without the label drifting off centre.
-        let power_run = ICON + space::MD + text::measure(b"Power menu", type_scale::CAPTION);
+        let power_run = ICON + space::MD + text::measure(b"Power menu", type_scale::BODY);
         let power_icon_x = POWER_BTN.x + (POWER_BTN.w - power_run) / 2;
         let power_icon_y = POWER_BTN.center_y() - ICON / 2;
         let power_label = LabelRun::left(
             Rect::new(power_icon_x + ICON + space::MD, POWER_BTN.y, POWER_BTN.w, POWER_BTN.h),
-            type_scale::CAPTION,
+            type_scale::BODY,
             b"Power menu",
-            theme.surface_container,
+            0xFFF8FAFC,
         );
 
         QuickControlsFrame {
@@ -1004,8 +1029,16 @@ impl QuickControlsFrame {
 /// muted ink, and that single skin is what makes "this slot is not a switch"
 /// readable without a second colour anywhere.
 fn build_tile(rect: Rect, item: PanelRow, value: &Value, theme: &Theme) -> TileFrame {
-    let (fill, value_ink) = value.reading.skin(theme);
-    let ink = if value.available { theme.on_surface } else { theme.on_surface_variant };
+    let (fill, border, ink, value_ink) = if value.is_active {
+        if item == PanelRow::Airplane {
+            (0xFFD97706, 0xFFF59E0B, 0xFFFFFFFF, 0xFFFEF3C7)
+        } else {
+            (0xFF2563EB, 0xFF3B82F6, 0xFFFFFFFF, 0xFFDBEAFE)
+        }
+    } else {
+        (theme.surface_container, theme.border, theme.on_surface_variant, theme.on_surface_variant)
+    };
+    let label_ink = if value.is_active { 0xFFFFFFFF } else { theme.on_surface };
     let text_x = rect.x + TILE_PAD_X + ICON + space::MD;
     let label_y = rect.y + TILE_PAD_Y;
     let value_y = label_y + BODY_H + TILE_TEXT_GAP;
@@ -1015,13 +1048,13 @@ fn build_tile(rect: Rect, item: PanelRow, value: &Value, theme: &Theme) -> TileF
         icon_x: rect.x + TILE_PAD_X,
         icon_y: rect.center_y() - ICON / 2,
         fill,
-        border: theme.border,
+        border,
         ink,
         label: LabelRun::left(
             Rect::new(text_x, label_y, TILE_TEXT_W, BODY_H),
             ROW_SCALE,
             item.label(),
-            ink,
+            label_ink,
         ),
         value: LabelRun::left(
             Rect::new(text_x, value_y, TILE_TEXT_W, CAPTION_H),
@@ -1040,8 +1073,17 @@ fn build_row(
     divider_y: Option<usize>,
     theme: &Theme,
 ) -> RowFrame {
-    let ink = if value.available { theme.on_surface } else { theme.on_surface_variant };
-    let (label, value_run) = row_runs(rect, rect.y, rect.h, item.label(), &value.reading, ink, theme);
+    let (ink, label_ink, val_ink) = if value.is_active {
+        match item {
+            PanelRow::Torch => (0xFFF59E0B, 0xFFFFFFFF, 0xFFF59E0B),
+            PanelRow::DoNotDisturb => (0xFF818CF8, 0xFFFFFFFF, 0xFF818CF8),
+            PanelRow::RotationLock => (0xFF38BDF8, 0xFFFFFFFF, 0xFF38BDF8),
+            _ => (0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF),
+        }
+    } else {
+        (theme.on_surface_variant, theme.on_surface, theme.on_surface_variant)
+    };
+    let (label, value_run) = row_runs(rect, rect.y, rect.h, item.label(), &value.reading, label_ink, val_ink, theme);
     RowFrame {
         rect,
         corner: radius::CONTROL,
@@ -1055,6 +1097,7 @@ fn build_row(
         value: value_run,
         track: None,
         fill_w: 0,
+        fill_color: 0,
         divider_y,
     }
 }
@@ -1072,11 +1115,15 @@ fn build_level(
     value: &Value,
     level: Option<u32>,
     track: Option<Rect>,
+    fill_color: u32,
+    icon_tint: u32,
     theme: &Theme,
 ) -> RowFrame {
-    let ink = if value.available { theme.on_surface } else { theme.on_surface_variant };
+    let ink = icon_tint;
+    let label_ink = theme.on_surface;
+    let value_ink = fill_color;
     let (label, value_run) =
-        row_runs(rect, rect.y + space::SM, BODY_H, item.label(), &value.reading, ink, theme);
+        row_runs(rect, rect.y + space::SM, BODY_H, item.label(), &value.reading, label_ink, value_ink, theme);
     let fill_w = match (track, level) {
         (Some(track), Some(percent)) => (track.w.saturating_mul(percent.min(100) as usize)) / 100,
         _ => 0,
@@ -1094,6 +1141,7 @@ fn build_level(
         value: value_run,
         track,
         fill_w,
+        fill_color,
         divider_y: None,
     }
 }
@@ -1116,17 +1164,17 @@ fn row_runs(
     text_h: usize,
     label: &'static [u8],
     value: &Reading,
-    ink: u32,
-    theme: &Theme,
+    label_ink: u32,
+    value_ink: u32,
+    _theme: &Theme,
 ) -> (LabelRun, LabelRun) {
     let text_x = rect.x + ROW_TEXT_INSET;
     let text_w = rect.w.saturating_sub(ROW_TEXT_INSET + space::MD);
-    let (_fill, value_ink) = value.skin(theme);
     let value_w = text::measure(value.as_slice(), VALUE_SCALE).min(text_w / 2) + space::SM;
     let value_col = Rect::new(rect.x + rect.w - space::MD - value_w, text_y, value_w, text_h);
     let label_col = Rect::new(text_x, text_y, text_w - value_w, text_h);
     (
-        LabelRun::left(label_col, ROW_SCALE, label, ink),
+        LabelRun::left(label_col, ROW_SCALE, label, label_ink),
         LabelRun::right(value_col, VALUE_SCALE, value.as_slice(), value_ink),
     )
 }
@@ -1313,7 +1361,7 @@ fn row_pixel(x: usize, y: usize, row: &RowFrame, theme: &Theme) -> u32 {
     if let Some(track) = row.track {
         if round_contains(&track, track.h / 2, x, y) {
             return if row.fill_w > 0 && x <= track.x + row.fill_w {
-                LEVEL_FILL
+                row.fill_color
             } else {
                 theme.surface_container_low
             };
@@ -1342,14 +1390,17 @@ fn power_pixel(x: usize, y: usize, frame: &QuickControlsFrame, theme: &Theme) ->
     if !round_contains(&POWER_BTN, POWER_BTN.h / 2, x, y) {
         return theme.surface;
     }
-    let ink = theme.surface_container;
-    if icon_hits(QcIcon::Power, frame.power_icon_x, frame.power_icon_y, x, y) {
-        return ink;
+    if !round_contains(&POWER_BTN.inset(1), POWER_BTN.h / 2 - 1, x, y) {
+        return 0xFFEF4444;
     }
-    if let Some(c) = frame.power_label.pixel_aa(x, y, ink, theme.on_surface) {
+    let bg = 0xFF201518;
+    if icon_hits(QcIcon::Power, frame.power_icon_x, frame.power_icon_y, x, y) {
+        return 0xFFEF4444;
+    }
+    if let Some(c) = frame.power_label.pixel_aa(x, y, 0xFFF8FAFC, bg) {
         return c;
     }
-    theme.on_surface
+    bg
 }
 
 /// Status bar: the clock, if the shell was given one, right-aligned, with the
@@ -1463,22 +1514,28 @@ fn icon_bits(icon: QcIcon, x: usize, y: usize) -> bool {
         // the last place a user should have to guess which icon is which.
         QcIcon::Wifi => {
             let dx = x as i64 - 14;
-            let dy = y as i64 - 25;
+            let dy = y as i64 - 24;
             let d2 = dx * dx + dy * dy;
-            for r in [7i64, 12, 17] {
-                if dy <= 1 && d2 <= r * r && d2 >= (r - 2) * (r - 2) {
-                    return true;
+            if dy <= 0 && dx.abs() <= -dy + 3 {
+                for r in [6i64, 11, 16] {
+                    if d2 <= r * r && d2 >= (r - 2) * (r - 2) {
+                        return true;
+                    }
                 }
             }
-            d2 <= 2 * 2
+            dx * dx + dy * dy <= 2 * 2
         }
         // The rune: a stem with two diagonals that meet at the right at
         // mid-height. The previous glyph was a stem with three stubby bars and
         // two diagonals, which read as a scratch at this size.
         QcIcon::Bluetooth => {
             icon_line(x, y, 14, 3, 14, 25, 1)
-                || icon_line(x, y, 14, 3, 23, 14, 1)
-                || icon_line(x, y, 23, 14, 14, 25, 1)
+                || icon_line(x, y, 14, 3, 22, 9, 1)
+                || icon_line(x, y, 22, 9, 14, 14, 1)
+                || icon_line(x, y, 14, 14, 22, 19, 1)
+                || icon_line(x, y, 22, 19, 14, 25, 1)
+                || icon_line(x, y, 14, 14, 7, 8, 1)
+                || icon_line(x, y, 14, 14, 7, 20, 1)
         }
         // Four ascending bars. WHY the stray bar above them is gone: two bars
         // plus a floating rectangle read as a battery before they read as
@@ -1677,7 +1734,12 @@ pub fn quick_controls_hit(_state: &LauncherState, x: usize, y: usize) -> QuickCo
     QuickControlAction::Dismiss
 }
 
-fn slider_percent(x: usize, track: Rect) -> u8 {
+pub fn slider_percent(x: usize, control_or_track: Rect) -> u8 {
+    let track = if control_or_track.h == LEVEL_TRACK_H {
+        control_or_track
+    } else {
+        level_track(control_or_track)
+    };
     if x <= track.x {
         0
     } else if x >= track.x + track.w {

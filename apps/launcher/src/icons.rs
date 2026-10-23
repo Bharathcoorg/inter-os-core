@@ -30,6 +30,7 @@ pub enum IconKind {
     CardDemo,
     Sun,
     CheckCircle,
+    AgentManager,
 }
 
 /// Identifies if a package ID or process name maps to a first-party vector pictogram.
@@ -100,6 +101,10 @@ pub fn match_icon_kind(id: &[u8]) -> Option<IconKind> {
         Some(IconKind::Contacts)
     } else if id == b"org.interos.maps" || id == b"maps" || id == b"Maps" || id == b"MAP" {
         Some(IconKind::Maps)
+    } else if id == b"org.interos.agent_manager" || id == b"agent_manager" || id == b"app_agent_manager"
+        || id == b"Agent Manager" || id == b"agent" || id == b"AI" || id == b"AGNT"
+    {
+        Some(IconKind::AgentManager)
     } else if id == b"briefcase" || id == b"work" || id == b"Work" || id == b"WORK" {
         Some(IconKind::Briefcase)
     } else if id == b"org.interos.card_demo" || id == b"card_demo" || id == b"app_card_demo"
@@ -448,6 +453,16 @@ pub fn eval_icon_subpixel(kind: IconKind, fx: i32, fy: i32) -> bool {
             let vertex = (fx + 15) * (fx + 15) + (fy - 52) * (fy - 52) <= 225;
             is_ring || short_leg || long_leg || vertex
         }
+        IconKind::AgentManager => {
+            let ax = fx.abs();
+            let ay = fy.abs();
+            let in_core = (ax + ay <= 140) && (ax * ay <= 2800);
+            let center_node = (fx * fx + fy * fy) <= 1200;
+            let sx = (fx - 85).abs();
+            let sy = (fy + 85).abs();
+            let sat_spark = (sx + sy <= 45) && (sx * sy <= 300);
+            in_core || center_node || sat_spark
+        }
     }
 }
 
@@ -502,6 +517,7 @@ mod tests {
             IconKind::CardDemo,
             IconKind::Sun,
             IconKind::CheckCircle,
+            IconKind::AgentManager,
         ];
 
         for &kind in &kinds {

@@ -155,7 +155,7 @@ pub fn preview_rect(index: usize) -> Rect {
 /// control.
 pub fn close_rect(index: usize) -> Rect {
     let card = card_rect(index);
-    Rect::new(card.x + CARD_W - 64, card.y + 16, 44, 44)
+    Rect::new(card.x + CARD_W - 58, card.y + 18, 48, 48)
 }
 
 /// The app icon of the card at `index`.

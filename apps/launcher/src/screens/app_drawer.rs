@@ -21,7 +21,7 @@ use crate::{test_text_aa, LauncherState};
 use launcher::layout::{self, Rect};
 use launcher::text;
 use launcher::theme::{
-    radius, space, type_scale, Theme, CONTENT_PADDING, NAV_BAR_HEIGHT,
+    space, type_scale, Theme, CONTENT_PADDING, NAV_BAR_HEIGHT,
     SCREEN_HEIGHT, SCREEN_WIDTH, STATUS_BAR_HEIGHT,
 };
 
@@ -32,7 +32,7 @@ use launcher::theme::{
 /// square (196x256 at three columns) instead of letting a two-row catalogue stretch
 /// each tile to 544px. It is a viewport capacity, not a description of the
 /// catalogue: what a page holds is `columns * DRAWER_ROWS`.
-const DRAWER_ROWS: usize = 4;
+const DRAWER_ROWS: usize = 5;
 
 /// Gap between tiles, off the theme's spacing scale.
 const TILE_GUTTER: usize = 20;
@@ -42,7 +42,7 @@ const TILE_GUTTER: usize = 20;
 const APP_LABEL_CAPACITY: usize = 16;
 
 /// Type scale for an app's name, and for the badge glyph inside its icon.
-const LABEL_SCALE: usize = type_scale::CAPTION;
+const LABEL_SCALE: usize = type_scale::SECTION;
 const BADGE_SCALE: usize = type_scale::BADGE;
 
 /// Icon badge: at most three glyphs, which is what the icon field in
@@ -88,8 +88,8 @@ struct Frame {
 
 fn frame() -> Frame {
     let content = layout::content_area(CONTENT_PADDING);
-    let search = Rect::new(content.x, 46, content.w, 46);
-    let chips = Rect::new(content.x, 116, content.w, 52);
+    let search = Rect::new(content.x, 56, content.w, 48);
+    let chips = Rect::new(content.x, 116, content.w, 44);
     let dots = Rect::new(
         content.x,
         1095,
@@ -98,9 +98,9 @@ fn frame() -> Frame {
     );
     let grid = Rect::new(
         50,
-        185,
+        175,
         620,
-        885,
+        895,
     );
     let nav_top = SCREEN_HEIGHT - NAV_BAR_HEIGHT;
     let pill = Rect::new(
@@ -381,6 +381,7 @@ fn icon_color(kind: Option<launcher::icons::IconKind>, index: usize, theme: &The
         Some(IconKind::CardDemo) => 0xFF5856D6,
         Some(IconKind::Sun) => 0xFFFF9500,
         Some(IconKind::CheckCircle) => 0xFF34C759,
+        Some(IconKind::AgentManager) => 0xFF7C3AED,
         None => hue_for(theme, index),
     }
 }
@@ -425,6 +426,7 @@ fn join_count(prefix: &[u8], count: usize, suffix: &[u8], buf: &mut [u8]) -> usi
 }
 
 /// The search field's placeholder, counted rather than asserted.
+#[allow(dead_code)]
 fn search_placeholder(state: &LauncherState) -> ([u8; 32], usize) {
     let mut buf = [0u8; 32];
     let n = join_count(b"Search ", state.app_count, b" apps", &mut buf);
@@ -582,14 +584,24 @@ impl Run {
     /// advance, so the outline is the wider face on this very surface's
     /// vocabulary and a bitmap-only box would clip it.
     fn placed(x: usize, y: usize, scale: usize, buf: [u8; RUN_CAP], len: usize, ink: u32) -> Run {
+        Self::placed_styled(x, y, scale, buf, len, ink, true)
+    }
+
+    fn placed_styled(x: usize, y: usize, scale: usize, buf: [u8; RUN_CAP], len: usize, ink: u32, bold: bool) -> Run {
         let text = &buf[..len];
-        let em = launcher::outline_text::em_for_scale(scale);
+        let em = if scale >= 3 {
+            34
+        } else if scale >= 2 {
+            26
+        } else {
+            launcher::outline_text::em_for_scale(scale)
+        };
         let (asc, desc) = interos_std::design::typeface::line_metrics(em);
         let baseline = (y + launcher::font::ascent_for_scale(scale)).max(asc as usize);
-        let outline_advance = interos_std::design::typeface::text_advance_px(text, em) as usize;
+        let outline_advance = interos_std::design::typeface::text_advance_px(text, em) as usize + if bold { 1 } else { 0 };
         let top = baseline.saturating_sub(asc as usize);
-        let outline = if scale >= 2 {
-            launcher::outline_text::OutlineRun::place(x, baseline, em, text)
+        let outline = if scale >= 2 && len <= launcher::outline_text::KEY_MAX {
+            launcher::outline_text::OutlineRun::place_styled(x, baseline, em, text, bold)
         } else {
             None
         };
@@ -660,14 +672,9 @@ struct EmptyPlan {
     body_count: usize,
 }
 
-/// The status bar's chrome boxes.
+/// The status bar's chrome plan.
 struct StatusPlan {
     clock: Option<Run>,
-    battery: Rect,
-    battery_dash: Rect,
-    tip: Rect,
-    wifi_centre: (i32, i32),
-    bars: [Rect; 4],
 }
 
 /// Tiles this drawer can hold on one page.
@@ -710,40 +717,18 @@ fn build(state: &LauncherState) -> Paint {
     let theme = launcher::theme::SHELL;
     let f = frame();
 
-    // Status bar.
-    let mid = STATUS_BAR_HEIGHT / 2;
-    let battery = Rect::new(
-        SCREEN_WIDTH - CONTENT_PADDING - space::XXL - space::SM,
-        mid - 7,
-        space::XXL + space::SM,
-        14,
-    );
-    let tip = Rect::new(battery.x + battery.w + 2, mid - 3, 4, 6);
-    let wifi = Rect::new(battery.x - space::XL - space::SM, mid - 10, space::XXL, 20);
-    let bars_right = wifi.x - space::MD;
-    let mut bars = [Rect::new(0, 0, 0, 0); 4];
-    for (i, slot) in bars.iter_mut().enumerate() {
-        let h = 6 + i * 4;
-        *slot = Rect::new(bars_right - (4 - i) * 4 - (3 - i) * 4, mid + 8 - h, 4, h);
-    }
-
     let status = StatusPlan {
         clock: if state.clock_source_ok {
             Some(Run::whole(
-                CONTENT_PADDING + space::SM,
-                (STATUS_BAR_HEIGHT - text::line_height(LABEL_SCALE)) / 2,
-                LABEL_SCALE,
+                40,
+                8,
+                type_scale::SECTION,
                 &state.clock_time,
                 theme.on_surface,
             ))
         } else {
             None
         },
-        battery,
-        battery_dash: battery_dash_rect(battery),
-        tip,
-            wifi_centre: (wifi.center_x() as i32, wifi.y as i32 + 15),
-        bars,
     };
 
     // Search field: shows active query or catalogue placeholder
@@ -754,21 +739,22 @@ fn build(state: &LauncherState) -> Paint {
         q_buf[q_len] = b'|';
         (q_buf, q_len + 1, theme.on_surface)
     } else {
-        let (raw, raw_len) = search_placeholder(state);
+        let placeholder = b"Search apps...";
         let mut p_buf = [0u8; 36];
-        let p_len = raw_len.min(36);
-        p_buf[..p_len].copy_from_slice(&raw[..p_len]);
-        (p_buf, p_len, theme.on_surface_variant)
+        p_buf[..placeholder.len()].copy_from_slice(placeholder);
+        (p_buf, placeholder.len(), theme.on_surface_variant)
     };
     let search_x = f.search.x + space::XXL + space::MD;
     let search_room = f
         .search
         .w
         .saturating_sub((search_x - f.search.x) + space::MD);
+    // Optical vertical centering: glyph center aligned exactly to search.center_y()
+    let search_y = f.search.center_y().saturating_sub(9);
     let search = Run::fitted(
         search_x,
-        f.search.center_y() - text::line_height(LABEL_SCALE) / 2,
-        LABEL_SCALE,
+        search_y,
+        type_scale::BODY,
         search_room,
         &search_text[..search_text_len],
         search_color,
@@ -777,7 +763,7 @@ fn build(state: &LauncherState) -> Paint {
     // 4 Category Filter Chips: All, Work, Personal, Tools
     let gap = 10usize;
     let chip_w = (f.chips.w.saturating_sub(gap * 3)) / 4;
-    let chip_h = 36usize;
+    let chip_h = 40usize;
     let chip_y = f.chips.y + (f.chips.h.saturating_sub(chip_h)) / 2;
     let mut chips = [
         ChipPlan { rect: Rect::new(0, 0, 0, 0), label: Run::EMPTY, active: false },
@@ -790,14 +776,16 @@ fn build(state: &LauncherState) -> Paint {
         let chip_rect = Rect::new(chip_x, chip_y, chip_w, chip_h);
         let active = state.app_drawer_tab == i;
         let ink = if active {
-            theme.surface
+            0xFFFFFFFF
         } else {
-            theme.on_surface
+            theme.on_surface_variant
         };
+        // Optical vertical centering: glyph center aligned exactly to chip_rect.center_y()
+        let chip_label_y = chip_rect.center_y().saturating_sub(9);
         let label = Run::centred(
             chip_rect.x,
-            chip_rect.center_y() - text::line_height(LABEL_SCALE) / 2,
-            LABEL_SCALE,
+            chip_label_y,
+            type_scale::BODY,
             chip_rect.w.saturating_sub(space::SM * 2),
             chip_rect.w,
             label_bytes,
@@ -826,7 +814,7 @@ fn build(state: &LauncherState) -> Paint {
             continue;
         };
         let icon_d = 80usize;
-        let group_h = icon_d + 12 + text::line_height(LABEL_SCALE);
+        let group_h = icon_d + 10 + text::line_height(LABEL_SCALE);
         let top = cell.y + cell.h.saturating_sub(group_h) / 2;
         let disc = Rect::new(cell.center_x() - icon_d / 2, top, icon_d, icon_d);
         let badge = app_badge(state, index);
@@ -858,7 +846,7 @@ fn build(state: &LauncherState) -> Paint {
             badge: badge_run,
             label: Run::centred(
                 cell.x,
-                top + icon_d + 12,
+                top + icon_d + 10,
                 LABEL_SCALE,
                 cell.w.saturating_sub(8),
                 cell.w,
@@ -997,87 +985,34 @@ pub fn get_app_drawer_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     app_tile(x, y, &theme, &p.tiles[slot])
 }
 
-/// The no-reading dash centred in a battery shell.
-///
-/// WHY centred rather than filled: with no fuel gauge bound, a filled cell is a
-/// charge level this shell never measured and an empty one is read as 0%. A
-/// short centred dash says "not known" in the one way that cannot be misread as
-/// a percentage. Height is one text pixel at caption scale so it reads as a mark
-/// rather than a bar.
-fn battery_dash_rect(battery: Rect) -> Rect {
-    let inner = battery.inset(1);
-    let w = 12.min(inner.w / 2);
-    let h = 2;
-    Rect::new(
-        inner.x + (inner.w - w) / 2,
-        inner.y + (inner.h.saturating_sub(h)) / 2,
-        w,
-        h,
-    )
-}
 
-/// Status bar: clock, signal, wifi, battery, on the theme's overlay chrome.
+/// Status bar: clock, signal, wifi, battery, matching HomeScreen & LockScreen telemetry.
 fn status_bar(x: usize, y: usize, theme: &Theme, s: &StatusPlan) -> u32 {
     if y == STATUS_BAR_HEIGHT - 1 {
         return theme.border;
     }
 
-    // WHY the clock is gated on `clock_source_ok`, resolved in the plan rather than
-    // per pixel: with no RTC authority granted the read is refused, and drawing a
-    // stale or placeholder reading on chrome the user glances at would present an
-    // unmeasured value as a measurement.
     if let Some(c) = s.clock.as_ref().and_then(|r| r.pixel_on(x, y, theme.surface)) {
         return c;
     }
 
-    // Battery. WHY a dash and not a fill: there is no fuel gauge bound to this
-    // shell, so an empty shell reads as 0% charge and a filled one would be a
-    // measurement this process never took. The dash is the conventional
-    // no-reading mark, and it is the same one the home surface draws, so the
-    // two status bars cannot contradict each other.
-    if inside_rounded(s.battery, x, y, radius::CHIP) {
-        if !inside_rounded(s.battery.inset(1), x, y, radius::CHIP - 1) {
-            return theme.on_surface;
-        }
-        if s.battery_dash.contains(x, y) {
-            return theme.on_surface_variant;
-        }
-        return theme.surface_container_low;
-    }
-    if s.tip.contains(x, y) {
-        return theme.on_surface;
+    let t = crate::screens::home::telemetry_plan();
+    if let Some(c) = crate::screens::home::telemetry_pixel(x, y, &t, theme.on_surface) {
+        return c;
     }
 
-    // Wi-Fi. Two arcs and a dot, no filled segment: the radio has no level to show.
-    let wdx = x as i32 - s.wifi_centre.0;
-    let wdy = y as i32 - s.wifi_centre.1;
-    let wd2 = wdx * wdx + wdy * wdy;
-    if wdy <= 0 && ((36..=64).contains(&wd2) || (100..=144).contains(&wd2)) {
-        return theme.on_surface;
-    }
-    if wd2 <= 9 {
-        return theme.on_surface;
-    }
-
-    // Signal bars. Four ascending, hollow.
-    for bar in s.bars.iter() {
-        if bar.contains(x, y) {
-            return theme.on_surface;
-        }
-    }
     theme.surface
 }
 
 fn search_field(x: usize, y: usize, field: &Rect, theme: &Theme, p: &Paint) -> u32 {
-    if !inside_rounded(*field, x, y, radius::CONTROL) {
+    let rad = field.h / 2;
+    if !inside_rounded(*field, x, y, rad) {
         return theme.surface;
     }
-    if !inside_rounded(field.inset(1), x, y, radius::CONTROL - 1) {
+    if !inside_rounded(field.inset(1), x, y, rad - 1) {
         return theme.border;
     }
-    // Magnifier. WHY the ring's radii and slope are compared rather than drawn: a
-    // 20 px glyph's ring is two arcs, and the reference's is a ring plus a handle
-    // cut from the same two numbers.
+    // Magnifier. Ring plus handle
     let cx = field.x + space::MD + 12;
     let cy = field.center_y() as i32;
     let dx = x as i32 - cx as i32;
@@ -1089,30 +1024,30 @@ fn search_field(x: usize, y: usize, field: &Rect, theme: &Theme, p: &Paint) -> u
         return theme.on_surface_variant;
     }
 
-    // Placeholder. WHY the catalogue count is the placeholder: the count is the
-    // number the drawer's own log line reports, and a field that says how many are
-    // installed is a status line that looks like an input. The count is formatted
-    // once per frame now, rather than for every pixel of the field.
     if let Some(c) = p.search.pixel_on(x, y, theme.surface_container_high) {
         return c;
     }
     theme.surface_container_high
 }
 
-/// The filter row: 4 category chips (All, Work, Personal, Tools).
+/// The filter row: 4 category chips (All, Work, Personal, Tools) with crystal clear contrast.
 fn filter_chips(x: usize, y: usize, theme: &Theme, p: &Paint) -> u32 {
     for chip in p.chips.iter() {
         if chip.rect.contains(x, y) {
             let rad = chip.rect.h / 2;
             if inside_rounded(chip.rect, x, y, rad) {
-                if let Some(c) = chip.label.pixel_on(x, y, theme.surface_container_high) {
+                let pill_fill = if chip.active {
+                    0xFF2563EB
+                } else {
+                    theme.surface_container_high
+                };
+                if !chip.active && !inside_rounded(chip.rect.inset(1), x, y, rad.saturating_sub(1)) {
+                    return theme.border;
+                }
+                if let Some(c) = chip.label.pixel_on(x, y, pill_fill) {
                     return c;
                 }
-                if chip.active {
-                    return theme.on_surface;
-                } else {
-                    return theme.surface_container_high;
-                }
+                return pill_fill;
             }
         }
     }

@@ -79,25 +79,17 @@ const LOCK_STATUS_TIME_SCALE: usize = 1;
 /// large.
 pub const LOCK_DATE_Y: usize = 78;
 pub const LOCK_DATE_SCALE: usize = 2;
-pub const LOCK_DATE_EM: u32 = 23;
-pub const LOCK_DATE_BASELINE: usize = 100;
+pub const LOCK_DATE_EM: u32 = 28;
+pub const LOCK_DATE_BASELINE: usize = 104;
 
-/// The hero clock.
-///
-/// WHY the display rung and not a number of its own: the clock was measured
-/// at one size and drawn at another -- the label's width came from the
-/// section rung while the glyphs were drawn at the heading's em -- so the
-/// clock and its own measurement never agreed, and the block it belongs to
-/// could not be placed by the same edge. One rung for both, and the
-/// document's position for the block: the hero sits at y 280, below the
-/// date, and the screen's content column starts at the same edge.
-pub const LOCK_CLOCK_Y: usize = 232;
+/// The hero clock: cap height 76px, bold, prominent.
+pub const LOCK_CLOCK_Y: usize = 140;
 pub const LOCK_CLOCK_SCALE: usize = 5;
-pub const LOCK_CLOCK_EM: u32 = 56;
-pub const LOCK_CLOCK_BASELINE: usize = 284;
+pub const LOCK_CLOCK_EM: u32 = 107;
+pub const LOCK_CLOCK_BASELINE: usize = 240;
 
-pub const LOCK_HINT_Y: usize = 1275;
-pub const LOCK_HINT_SCALE: usize = 1;
+pub const LOCK_HINT_Y: usize = 1270;
+pub const LOCK_HINT_SCALE: usize = 2;
 pub const LOCK_HINT_TEXT: &[u8] = b"Swipe up to unlock";
 
 #[allow(dead_code)]
@@ -154,11 +146,17 @@ pub const LOCK_MONTH_ABBR: [&[u8; 3]; 12] = [
 /// The mist band behind the foreground: the same mid stop lifted toward the
 /// The lone figure standing on the near ridge, faithfully traced from the
 /// canonical design reference artwork.
+#[allow(dead_code)]
 const HIKER_W: usize = 41;
+#[allow(dead_code)]
 const HIKER_H: usize = 106;
+#[allow(dead_code)]
 const HIKER_BYTES_PER_ROW: usize = 6;
+#[allow(dead_code)]
 const HIKER_X: usize = 120;
+#[allow(dead_code)]
 const HIKER_Y: usize = 736;
+#[allow(dead_code)]
 static HIKER_BITMAP: [u8; 636] = [
     0x00, 0x00, 0x1E, 0x00, 0x00, 0x00, // row 0
     0x00, 0x00, 0x3F, 0x00, 0x00, 0x00, // row 1
@@ -268,21 +266,12 @@ static HIKER_BITMAP: [u8; 636] = [
     0x1F, 0xFF, 0x01, 0xE0, 0x00, 0x00, // row 105
 ];
 
-fn lock_figure_hit(scene: &walls::Scene, x: usize, y: usize) -> bool {
-    // The figure is only drawn when explicitly viewing the daylight landscape
-    if scene.key != b"daylight" {
-        return false;
-    }
-    if x < HIKER_X || x >= HIKER_X + HIKER_W || y < HIKER_Y || y >= HIKER_Y + HIKER_H {
-        return false;
-    }
-    let row = y - HIKER_Y;
-    let col = x - HIKER_X;
-    let byte = HIKER_BITMAP[row * HIKER_BYTES_PER_ROW + (col / 8)];
-    (byte & (0x80 >> (col % 8))) != 0
+fn lock_figure_hit(_scene: &walls::Scene, _x: usize, _y: usize) -> bool {
+    false
 }
 
 /// The figure's ink, pulled most of the way to the ramp's darkest stop.
+#[allow(dead_code)]
 fn lock_figure_ink(f: &Frame, behind: u32) -> u32 {
     Theme::blend(behind, f.ink, 245)
 }
@@ -329,8 +318,9 @@ fn geometric_mountain_fore_y(x: usize) -> usize {
 }
 
 fn geometric_mountain_sky(y: usize) -> u32 {
-    let t = ((y * 256) / 900).min(256) as u32;
-    Theme::blend(0xFFBDCCD6, 0xFF717E88, t)
+    let t = ((y * 256) / 800).min(256) as u32;
+    // Blend from atmospheric twilight navy into vibrant sky
+    Theme::blend(0xFF14243B, 0xFF4B6E94, t)
 }
 
 fn lock_geometric_mountain_pixel(x: usize, y: usize) -> u32 {
@@ -341,13 +331,15 @@ fn lock_geometric_mountain_pixel(x: usize, y: usize) -> u32 {
     if y + 1 < mid_y {
         sky
     } else if y < mid_y {
-        Theme::blend(sky, 0xFF465765, 128)
+        Theme::blend(sky, 0xFF35485E, 128)
     } else if y + 1 < fore_y {
-        0xFF465765
+        0xFF35485E
     } else if y < fore_y {
-        Theme::blend(0xFF465765, 0xFF1A2229, 128)
+        Theme::blend(0xFF35485E, 0xFF1C2C3D, 128)
     } else {
-        0xFF1A2229
+        // Blend smoothly from near mountain ridge (0xFF1C2C3D) into deep atmospheric navy (0xFF0B1220)
+        let t = (((y - fore_y) * 256) / (1440 - fore_y).max(1)).min(256) as u32;
+        Theme::blend(0xFF1C2C3D, 0xFF0B1220, t)
     }
 }
 
@@ -404,7 +396,7 @@ fn lock_wallpaper_pixel(f: &Frame, x: usize, y: usize) -> u32 {
         let below = (rel.saturating_sub(rock_y) as u32 * 256
             / (LOCK_REF_H as u32 - rock_y as u32).max(1))
             .min(256);
-        let deep = Theme::blend(f.bottom, 0xFF00_0000, 112);
+        let deep = 0xFF0B1220;
         Theme::blend(f.bottom, deep, lock_band(below, across))
     };
 
@@ -774,21 +766,23 @@ impl Frame {
         // date line's baseline is derived from the reference's own layout, not
         // from the bitmap cell's origin, so gating on the bitmap box put the
         // run entirely outside its own gate and it drew nothing at all.
-        let date_outline = launcher::outline_text::OutlineRun::place(
+        let date_outline = launcher::outline_text::OutlineRun::place_styled(
             LOCK_CONTENT_X,
             LOCK_DATE_BASELINE,
             LOCK_DATE_EM,
             &state.date_line,
+            false,
         );
-        let clock_outline = launcher::outline_text::OutlineRun::place(
+        let clock_outline = launcher::outline_text::OutlineRun::place_styled(
             LOCK_CONTENT_X,
             LOCK_CLOCK_BASELINE,
             LOCK_CLOCK_EM,
             &state.clock_time,
+            false,
         );
 
         Frame {
-            status_h: text::line_height(LOCK_STATUS_TIME_SCALE),
+            status_h: text::line_height(2),
             date: match &date_outline {
                 Some(run) => {
                     let (x, y, w, h) = run.bounds();
@@ -1634,9 +1628,9 @@ pub fn get_lock_screen_color_over_backdrop(
             if let Some(c) = test_text_aa(
                 x,
                 y,
-                LOCK_STATUS_TIME_X,
-                LOCK_STATUS_TIME_Y,
-                LOCK_STATUS_TIME_SCALE,
+                40,
+                12,
+                2,
                 &state.clock_time,
                 0xFFFFFFFF,
                 color,
@@ -1657,9 +1651,7 @@ pub fn get_lock_screen_color_over_backdrop(
                 if let Some(c) = run.pixel(x, y, 0xFFFFFFFF, color) {
                     return c;
                 }
-                return color;
-            }
-            if let Some(c) = test_text_aa(
+            } else if let Some(c) = test_text_aa(
                 x,
                 y,
                 f.date.x,
@@ -1679,9 +1671,7 @@ pub fn get_lock_screen_color_over_backdrop(
                 if let Some(c) = run.pixel(x, y, 0xFFFFFFFF, color) {
                     return c;
                 }
-                return color;
-            }
-            if let Some(c) = test_text_aa(
+            } else if let Some(c) = test_text_aa(
                 x,
                 y,
                 f.clock.x,

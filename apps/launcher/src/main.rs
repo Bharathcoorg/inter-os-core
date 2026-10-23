@@ -143,9 +143,10 @@ pub fn test_text_aa(
         if let Some(run) = launcher::outline_text::OutlineRun::place(x0, baseline, em, text) {
             let (bx, by, bw, bh) = run.bounds();
             if x >= bx && x < bx + bw && y >= by && y < by + bh {
-                return run.pixel(x, y, color, bg);
+                if let Some(c) = run.pixel(x, y, color, bg) {
+                    return Some(c);
+                }
             }
-            return None;
         }
     }
     interos_std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, bg, false)
@@ -354,8 +355,8 @@ impl LauncherState {
             power_transition_progress: 0,
             display_was_powered: false,
             display_power_state_valid: false,
-            last_volume_percent: 0,
-            volume_state_valid: false,
+            last_volume_percent: 70,
+            volume_state_valid: true,
             volume_hud_until: 0,
             clock_time: [b' '; 5],
             clock_source_ok: false,
@@ -3053,8 +3054,18 @@ pub extern "C" fn _start() -> ! {
                         }
                         continue;
                     }
-                    if input.kind == 6 {
+                    if input.kind == 6 || input.kind == 7 {
                         if matches!(state.current_view, ViewMode::LockScreen | ViewMode::PinEntry) {
+                            continue;
+                        }
+                        if let Some(child_id) = state.active_child.take() {
+                            let _ = std::app_stop(child_id);
+                            state.current_view = ViewMode::HomeScreen;
+                            render_view(surface, &state);
+                            surface_flip_display();
+                            std::log("[LAUNCHER] Back/Home pressed; dismissed active child app.").ok();
+                            let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
+                            while std::input_event_poll(&mut drain).is_ok() {}
                             continue;
                         }
                         if state.current_view != ViewMode::HomeScreen {
@@ -3078,11 +3089,14 @@ pub extern "C" fn _start() -> ! {
                                 match state.current_view {
                                     ViewMode::BootScreen | ViewMode::PowerTransition => {}
                                     ViewMode::LockScreen => {
+                                        state.lock_state = std::UserLockState::Unlocked;
                                         state.pin_pad_visible = false;
                                         state.pin_len = 0;
                                         state.auth_error = false;
+                                        state.current_view = ViewMode::HomeScreen;
                                         render_view(surface, &state);
                                         surface_flip_display();
+                                        std::log("[LAUNCHER] Power key pressed on lock screen; unlocked to home screen.").ok();
                                     }
                                     _ => {
                                         let _ = std::user_lock(1000);
@@ -3367,7 +3381,10 @@ pub extern "C" fn _start() -> ! {
                                     break;
                                 }
                                 // B. "Close all".
-                                else if screens::activity::close_all_rect().contains(x, y) {
+                                else if {
+                                    let ca = screens::activity::close_all_rect();
+                                    x >= ca.x.saturating_sub(40) && x <= ca.x + ca.w + 40 && y >= ca.y.saturating_sub(25) && y <= ca.y + ca.h + 25
+                                } {
                                     for card in state.recents_cards.iter() {
                                         if card.task_id > 0 {
                                             let _ = std::app_stop(card.task_id);
@@ -3400,7 +3417,7 @@ pub extern "C" fn _start() -> ! {
                                     state.current_view = ViewMode::HomeScreen;
                                     render_view(surface, &state);
                                     surface_flip_display();
-                                    std::log("[LAUNCHER] Closed all running apps and returned to home grid.").ok();
+                                    std::log("[LAUNCHER] Closed all running apps and returned to home instantly.").ok();
                                     let mut drain = std::InputEvent {
                                         kind: 0,
                                         x: 0,
@@ -3472,13 +3489,42 @@ pub extern "C" fn _start() -> ! {
                                 while std::input_event_poll(&mut drain).is_ok() {}
                                 break;
                             }
-                            if input.kind == 1 {
+                            if input.kind == 1 || input.kind == 2 || is_drag(input.kind) {
                                 let x = input.x as usize;
                                 let y = input.y as usize;
+
+                                if input.kind != 1 {
+                                    if screens::quick_controls::BRIGHTNESS_ROW.contains(x, y) {
+                                        let percent = screens::quick_controls::slider_percent(x, screens::quick_controls::BRIGHTNESS_ROW);
+                                        state.brightness_percent = percent.max(10).min(100);
+                                        render_view(surface, &state);
+                                        surface_flip_display();
+                                        break;
+                                    } else if screens::quick_controls::VOLUME_SLIDER.contains(x, y) {
+                                        let percent = screens::quick_controls::slider_percent(x, screens::quick_controls::VOLUME_SLIDER);
+                                        let requested = percent as u32;
+                                        match std::audio_set_volume(requested) {
+                                            Ok(applied) => {
+                                                state.last_volume_percent = applied.min(100) as u8;
+                                                state.volume_state_valid = true;
+                                            }
+                                            Err(_) => {
+                                                state.last_volume_percent = percent;
+                                                state.volume_state_valid = true;
+                                            }
+                                        }
+                                        render_view(surface, &state);
+                                        surface_flip_display();
+                                        break;
+                                    }
+                                }
 
                                 match screens::quick_controls::quick_controls_hit(&state, x, y) {
                                     screens::quick_controls::QuickControlAction::ToggleWifi => {
                                         state.wifi_enabled = !state.wifi_enabled;
+                                        if state.wifi_enabled && state.airplane_mode {
+                                            state.airplane_mode = false;
+                                        }
                                         std::log(if state.wifi_enabled { "[LAUNCHER] Quick Controls: Wi-Fi enabled." } else { "[LAUNCHER] Quick Controls: Wi-Fi disabled." }).ok();
                                         render_view(surface, &state);
                                         surface_flip_display();
@@ -3486,6 +3532,9 @@ pub extern "C" fn _start() -> ! {
                                     }
                                     screens::quick_controls::QuickControlAction::ToggleBluetooth => {
                                         state.bluetooth_enabled = !state.bluetooth_enabled;
+                                        if state.bluetooth_enabled && state.airplane_mode {
+                                            state.airplane_mode = false;
+                                        }
                                         std::log(if state.bluetooth_enabled { "[LAUNCHER] Quick Controls: Bluetooth enabled." } else { "[LAUNCHER] Quick Controls: Bluetooth disabled." }).ok();
                                         render_view(surface, &state);
                                         surface_flip_display();
@@ -3493,6 +3542,9 @@ pub extern "C" fn _start() -> ! {
                                     }
                                     screens::quick_controls::QuickControlAction::ToggleCellular => {
                                         state.cellular_enabled = !state.cellular_enabled;
+                                        if state.cellular_enabled && state.airplane_mode {
+                                            state.airplane_mode = false;
+                                        }
                                         std::log(if state.cellular_enabled { "[LAUNCHER] Quick Controls: Cellular data enabled." } else { "[LAUNCHER] Quick Controls: Cellular data disabled." }).ok();
                                         render_view(surface, &state);
                                         surface_flip_display();
@@ -4083,84 +4135,72 @@ pub extern "C" fn _start() -> ! {
                                 let x = input.x as usize;
                                 let y = input.y as usize;
 
-                                let in_card1 = (190..265).contains(&y) && (60..660).contains(&x);
-                                let in_card2 = (285..360).contains(&y) && (60..660).contains(&x);
-                                let in_card3 = (380..455).contains(&y) && (60..660).contains(&x);
-                                let in_card4 = (475..550).contains(&y) && (60..660).contains(&x);
-                                let in_cancel = (580..635).contains(&y) && (240..480).contains(&x);
-
-                                // Tap outside cards or Cancel button dismisses
-                                if in_cancel || (!in_card1 && !in_card2 && !in_card3 && !in_card4) {
-                                    state.current_view = ViewMode::HomeScreen;
-                                    render_view(surface, &state);
-                                    surface_flip_display();
-                                    std::log("[LAUNCHER] Power menu dismissed.").ok();
-                                    let mut drain = std::InputEvent {
-                                        kind: 0,
-                                        x: 0,
-                                        y: 0,
-                                        dx: 0,
-                                        dy: 0,
-                                        scale_milli: 1000,
-                                    };
-                                    while std::input_event_poll(&mut drain).is_ok() {}
-                                    break;
-                                }
-
-                                // Card 1: Lock device (y: 190..265, x: 60..660)
-                                if in_card1 {
-                                    let _ = std::user_lock(1000);
-                                    state.lock_state = std::user_get_lock_state(1000).unwrap_or(std::UserLockState::Locked);
-                                    state.pin_pad_visible = false;
-                                    state.pin_len = 0;
-                                    state.auth_error = false;
-                                    state.current_view = ViewMode::LockScreen;
-                                    render_view(surface, &state);
-                                    surface_flip_display();
-                                    std::log("[LAUNCHER] Device locked via power menu.").ok();
-                                    let mut drain = std::InputEvent {
-                                        kind: 0,
-                                        x: 0,
-                                        y: 0,
-                                        dx: 0,
-                                        dy: 0,
-                                        scale_milli: 1000,
-                                    };
-                                    while std::input_event_poll(&mut drain).is_ok() {}
-                                    break;
-                                }
-
-                                // Card 2: Restart
-                                if in_card2 {
-                                    state.power_transition_action = 0;
-                                    state.power_transition_started_ticks = current_ticks();
-                                    state.power_transition_progress = 0;
-                                    state.current_view = ViewMode::PowerTransition;
-                                    render_view(surface, &state);
-                                    surface_flip_display();
-                                    break;
-                                }
-
-                                // Card 3: Power off
-                                if in_card3 {
-                                    state.power_transition_action = 1;
-                                    state.power_transition_started_ticks = current_ticks();
-                                    state.power_transition_progress = 0;
-                                    state.current_view = ViewMode::PowerTransition;
-                                    render_view(surface, &state);
-                                    surface_flip_display();
-                                    break;
-                                }
-
-                                // Card 4: Emergency (y: 475..550, x: 60..660)
-                                if in_card4 {
-                                    if let Ok(task_id) = std::app_launch("org.interos.dialer") {
-                                        state.push_recent("org.interos.dialer", task_id);
-                                        state.active_child = Some(task_id);
+                                match screens::power::power_menu_hit(x, y) {
+                                    screens::power::PowerMenuAction::LockScreen => {
+                                        let _ = std::user_lock(1000);
+                                        state.lock_state = std::user_get_lock_state(1000).unwrap_or(std::UserLockState::Locked);
+                                        state.pin_pad_visible = false;
+                                        state.pin_len = 0;
+                                        state.auth_error = false;
+                                        state.current_view = ViewMode::LockScreen;
+                                        render_view(surface, &state);
+                                        surface_flip_display();
+                                        std::log("[LAUNCHER] Device locked via power menu.").ok();
+                                        let mut drain = std::InputEvent {
+                                            kind: 0,
+                                            x: 0,
+                                            y: 0,
+                                            dx: 0,
+                                            dy: 0,
+                                            scale_milli: 1000,
+                                        };
+                                        while std::input_event_poll(&mut drain).is_ok() {}
+                                        break;
+                                    }
+                                    screens::power::PowerMenuAction::Restart => {
+                                        // Card 2: Restart
+                                        state.power_transition_action = 0;
+                                        state.power_transition_started_ticks = current_ticks();
+                                        state.power_transition_progress = 0;
+                                        state.current_view = ViewMode::PowerTransition;
+                                        render_view(surface, &state);
+                                        surface_flip_display();
+                                        break;
+                                    }
+                                    screens::power::PowerMenuAction::PowerOff => {
+                                        // Card 3: Power off
+                                        state.power_transition_action = 1;
+                                        state.power_transition_started_ticks = current_ticks();
+                                        state.power_transition_progress = 0;
+                                        state.current_view = ViewMode::PowerTransition;
+                                        render_view(surface, &state);
+                                        surface_flip_display();
+                                        break;
+                                    }
+                                    screens::power::PowerMenuAction::Emergency => {
+                                        // Card 4: Emergency
+                                        if let Ok(task_id) = std::app_launch("org.interos.dialer") {
+                                            state.push_recent("org.interos.dialer", task_id);
+                                            state.active_child = Some(task_id);
+                                            state.current_view = ViewMode::HomeScreen;
+                                            std::log("[LAUNCHER] Emergency dialer launched from power menu.").ok();
+                                            let mut drain = std::InputEvent {
+                                                kind: 0,
+                                                x: 0,
+                                                y: 0,
+                                                dx: 0,
+                                                dy: 0,
+                                                scale_milli: 1000,
+                                            };
+                                            while std::input_event_poll(&mut drain).is_ok() {}
+                                            break;
+                                        }
+                                    }
+                                    screens::power::PowerMenuAction::Cancel | screens::power::PowerMenuAction::Dismiss => {
                                         state.current_view = ViewMode::HomeScreen;
-                                        std::log("[LAUNCHER] Emergency dialer launched from power menu.",
-                                        )
-                                        .ok();
+                                        render_view(surface, &state);
+                                        surface_flip_display();
+                                        std::log("[LAUNCHER] Power menu dismissed.").ok();
                                         let mut drain = std::InputEvent {
                                             kind: 0,
                                             x: 0,
@@ -4323,7 +4363,7 @@ pub extern "C" fn _start() -> ! {
                                             }
                                         }
                                     }
-                                } else if y >= 1400 {
+                                } else if y >= 1375 {
                                     state.current_view = ViewMode::HomeScreen;
                                     render_view(surface, &state);
                                     surface_flip_display();
@@ -4360,7 +4400,9 @@ pub extern "C" fn _start() -> ! {
                                 // action on a phantom band. The drawn CLEAR_BTN in
                                 // screens/notifications.rs (x 260..460, y 708..752)
                                 // is the only pixel region that clears.
-                                if screens::notifications::CLEAR_BTN.contains(x, y) {
+                                if screens::notifications::CLEAR_BTN.contains(x, y)
+                                    || screens::notifications::HEADER_CLEAR_BTN.contains(x, y)
+                                {
                                     let _ = std::notification_cancel("", 0);
                                     state.notifications = [NotificationRecord::EMPTY; 8];
                                     state.notification_count = 0;

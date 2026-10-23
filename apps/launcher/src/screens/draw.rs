@@ -7,6 +7,8 @@
 //! general drawing primitives rather than anything to do with settings.
 //! They are here now, which is where they belong.
 
+#![allow(dead_code)]
+
 use crate::test_text_aa;
 use launcher::layout::Rect;
 use launcher::text;

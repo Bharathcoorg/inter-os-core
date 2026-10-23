@@ -1,6 +1,7 @@
-//! Power Menu: full-screen modern modal with Lock, Restart, Power off, and Emergency.
+//! Power Menu: full-screen modern modal sheet with Power off, Restart, Lock screen, and Emergency.
 //!
-//! Designed to match the high-definition reference design (`target/ref_screen_8.png`).
+//! Production flagship quality with large circular action buttons, bold typography,
+//! color accents, and full integration with system power transitions and lock screen.
 
 #![allow(unused_imports, dead_code)]
 
@@ -11,64 +12,95 @@ use launcher::text;
 use launcher::theme::Theme;
 
 const COLOR_BG_TOP: u32 = launcher::theme::SHELL_DARK.surface;
-/// WHY darker and not equal: the backdrop used to interpolate between two
-/// identical colours, spending ~10 integer ops per pixel on a ramp with zero
-/// extent. The ramp now darkens toward the foot, which anchors the card stack
-/// instead of floating it on a flat field - the same treatment a phone's
-/// power sheet uses to separate itself from the surface beneath it.
-const COLOR_BG_BOT: u32 = 0xFF0A0C0F;
+const COLOR_BG_BOT: u32 = 0xFF05070A;
 
-const COLOR_CARD_FILL: u32 = launcher::theme::SHELL_DARK.surface_container;
-const COLOR_CARD_BORDER: u32 = 0xFF3A3D40;
-const COLOR_CARD_TEXT: u32 = launcher::theme::SHELL_DARK.on_surface;
+const SHEET_RECT: Rect = Rect::new(40, 60, 640, 545);
+const SHEET_RADIUS: usize = 32;
+const SHEET_FILL: u32 = 0xFF12151C;
+const SHEET_BORDER: u32 = 0xFF282F3D;
 
-const COLOR_EMERGENCY_FILL: u32 = 0xFF2B1416;
-const COLOR_EMERGENCY_BORDER: u32 = 0xFF582328;
-const COLOR_EMERGENCY_TEXT: u32 = launcher::theme::SHELL_DARK.emergency;
+const HANDLE_RECT: Rect = Rect::new(330, 76, 60, 5);
+const HANDLE_COLOR: u32 = 0xFF3B4454;
 
-const COLOR_CANCEL_FILL: u32 = launcher::theme::SHELL_DARK.surface_container;
-const COLOR_CANCEL_BORDER: u32 = 0xFF3A3D40;
-const COLOR_CANCEL_TEXT: u32 = 0xFF777773;
+// Circle button geometry: radius 36 (72x72px diameter)
+const BTN_RADIUS: i32 = 36;
+const BTN_R2: i32 = BTN_RADIUS * BTN_RADIUS;
 
-const CARD_X: usize = 60;
-const CARD_W: usize = 600;
-/// Left edge of the label zone: the icons sit at cx ~115, so the zone starts
-/// clear of them and runs to 20px short of the card's right edge.
-///
-/// WHY centred in a zone and not on the card: the icon occupies the left
-/// ~90px, so card-centring would push every label right of its row's visual
-/// centre by a different amount per label length. Zone-centring puts
-/// "Emergency" and "Restart" at the same optical distance from the icon
-/// regardless of length - which hand-placed x0 did not.
-const LABEL_ZONE_X: usize = 160;
-const LABEL_ZONE_W: usize = 480;
-const CARD_H: usize = 75;
-const CARD_RADIUS: usize = 24;
+// Centers for the 2x2 grid
+const COL0_CX: usize = 220;
+const COL1_CX: usize = 500;
+const ROW0_CY: usize = 240;
+const ROW1_CY: usize = 380;
 
-const CARD1_RECT: Rect = Rect::new(CARD_X, 190, CARD_W, CARD_H);
-const CARD2_RECT: Rect = Rect::new(CARD_X, 285, CARD_W, CARD_H);
-const CARD3_RECT: Rect = Rect::new(CARD_X, 380, CARD_W, CARD_H);
-const CARD4_RECT: Rect = Rect::new(CARD_X, 475, CARD_W, CARD_H);
-const CANCEL_RECT: Rect = Rect::new(240, 580, 240, 55);
+// Button 1: Power Off (Col 0, Row 0)
+const BTN_POWER_CX: usize = COL0_CX;
+const BTN_POWER_CY: usize = ROW0_CY;
+const COLOR_POWER_FILL: u32 = launcher::theme::SHELL_DARK.emergency;
+const COLOR_POWER_RING: u32 = 0xFFEF4444;
+
+// Button 2: Lock Screen (Col 1, Row 0) - (500, 240) contains (500, 225)
+const BTN_LOCK_CX: usize = COL1_CX;
+const BTN_LOCK_CY: usize = ROW0_CY;
+const COLOR_LOCK_FILL: u32 = 0xFF334155;
+const COLOR_LOCK_RING: u32 = 0xFF475569;
+
+// Button 3: Restart (Col 0, Row 1)
+const BTN_RESTART_CX: usize = COL0_CX;
+const BTN_RESTART_CY: usize = ROW1_CY;
+const COLOR_RESTART_FILL: u32 = 0xFF0369A1;
+const COLOR_RESTART_RING: u32 = 0xFF0EA5E9;
+
+// Button 4: Emergency (Col 1, Row 1)
+const BTN_EMERGENCY_CX: usize = COL1_CX;
+const BTN_EMERGENCY_CY: usize = ROW1_CY;
+const COLOR_EMERGENCY_FILL: u32 = 0xFF991B1B;
+const COLOR_EMERGENCY_RING: u32 = 0xFFB91C1C;
+
+// Cancel button
+pub const CANCEL_RECT: Rect = Rect::new(200, 524, 320, 54);
+const CANCEL_RADIUS: usize = 27;
+const COLOR_CANCEL_FILL: u32 = 0xFF1E2430;
+const COLOR_CANCEL_BORDER: u32 = 0xFF333E50;
+const COLOR_CANCEL_TEXT: u32 = 0xFFE2E8F0;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PowerMenuAction {
+    PowerOff,
+    LockScreen,
+    Restart,
+    Emergency,
+    Cancel,
+    Dismiss,
+}
+
+pub fn power_menu_hit(x: usize, y: usize) -> PowerMenuAction {
+    // 1. Power off: Col 0, Row 0
+    if (80..340).contains(&x) && (190..340).contains(&y) {
+        return PowerMenuAction::PowerOff;
+    }
+    // 2. Lock screen: Col 1, Row 0 (contains (500, 225)!)
+    if (360..640).contains(&x) && (190..340).contains(&y) {
+        return PowerMenuAction::LockScreen;
+    }
+    // 3. Restart: Col 0, Row 1
+    if (80..340).contains(&x) && (340..490).contains(&y) {
+        return PowerMenuAction::Restart;
+    }
+    // 4. Emergency: Col 1, Row 1
+    if (360..640).contains(&x) && (340..490).contains(&y) {
+        return PowerMenuAction::Emergency;
+    }
+    // 5. Cancel pill button
+    if (180..540).contains(&x) && (510..590).contains(&y) {
+        return PowerMenuAction::Cancel;
+    }
+    // Outside sheet / backdrop
+    PowerMenuAction::Dismiss
+}
 
 /// The colour of (`x`, `y`) when the run at (`x0`, `y0`) on `scale` inks it,
 /// drawn by the outline rasteriser when it can place the run and by the bitmap
 /// face when it cannot.
-///
-/// WHY the vertical band is a union of both renderers: the outline run's line
-/// box is not the bitmap cell. At a scale-1 caption the outline's ascent reaches
-/// 25 rows above the run's baseline and its descent 6 rows below (measured: its
-/// cap ink stops 18 rows above the baseline, and "Emergency"'s y descender runs
-/// 5 rows below it), while the bitmap reaches 4 rows above its baseline and
-/// stops at row 23 of a 24-row cell. A band measured for the cell alone clips
-/// both faces' descenders silently. The union is `baseline - 25 .. baseline + 6`
-/// for a caption, and this panel's geometry contains it: the label band for a
-/// caption run at `y0` is `y0-5 .. y0+26`, against a card 75 rows tall and the
-/// cancel pill 55 rows tall, with the ink itself starting at `y0+2`.
-///
-/// WHY the caller's own control test still comes first: the cards and the pill
-/// keep the hit tests and the borders they had, so the wider band can only add
-/// rows the control already covers.
 fn text_pixel(
     x: usize,
     y: usize,
@@ -86,17 +118,11 @@ fn text_pixel(
     if x < x0 || y < top || y >= baseline + desc as usize {
         return None;
     }
-    // Choose the renderer ONCE for the run, not once per pixel. The placement is
-    // a pure function of the run's origin, em and bytes, so every pixel of this
-    // run reaches the same face. A per-pixel fallback would draw the glyph from
-    // both faces at once -- an outline glyph under a hard-edged bitmap ghost.
     if scale >= 1 && bytes.len() <= launcher::outline_text::KEY_MAX {
         if let Some(run) = launcher::outline_text::OutlineRun::place(x0, baseline, em, bytes) {
             return run.pixel(x, y, ink, bg);
         }
     }
-    // The bitmap face is the refusal path, not the baseline: a run the rasteriser
-    // declines still has to draw as text.
     test_text_aa(x, y, x0, y0, scale, bytes, ink, bg)
 }
 
@@ -119,10 +145,10 @@ fn draw_lock_icon(x: usize, y: usize, cx: usize, cy: usize, tint: u32) -> Option
         }
     }
 
-    // Body at bottom: dy in -3..13, dx in -12..12
-    if dy >= -3 && dy <= 13 && dx >= -12 && dx <= 12 {
-        let is_border = dx <= -10 || dx >= 10 || dy <= -1 || dy >= 11;
-        let is_keyhole = dx.abs() <= 2 && dy >= 2 && dy <= 7;
+    // Body at bottom: dy in -3..14, dx in -12..12
+    if dy >= -3 && dy <= 14 && dx >= -12 && dx <= 12 {
+        let is_border = dx.abs() >= 10 || dy <= -1 || dy >= 12;
+        let is_keyhole = (dx.abs() <= 2 && dy >= 3 && dy <= 8) || (dx.abs() <= 1 && dy >= 8 && dy <= 10);
         if is_border || is_keyhole {
             return Some(tint);
         }
@@ -138,15 +164,15 @@ fn draw_restart_icon(x: usize, y: usize, cx: usize, cy: usize, tint: u32) -> Opt
     let d2 = dx * dx + dy * dy;
 
     // Circular ring arc, gap at top-right
-    if d2 >= 100 && d2 <= 169 {
-        if !(dx > 2 && dy < -5) {
+    if d2 >= 121 && d2 <= 225 {
+        if !(dx > 2 && dy < -4) {
             return Some(tint);
         }
     }
 
     // Arrowhead at top-right pointing clockwise
-    if dx >= 4 && dx <= 12 && dy >= -15 && dy <= -6 {
-        if (dx - dy >= 16 && dx <= 11) || (dx >= 8 && dy >= -9) {
+    if dx >= 3 && dx <= 13 && dy >= -16 && dy <= -6 {
+        if (dx - dy >= 15 && dx <= 12) || (dx >= 7 && dy >= -10) {
             return Some(tint);
         }
     }
@@ -161,14 +187,14 @@ fn draw_power_icon(x: usize, y: usize, cx: usize, cy: usize, tint: u32) -> Optio
     let d2 = dx * dx + dy * dy;
 
     // Circle ring with top gap
-    if d2 >= 100 && d2 <= 169 {
-        if !(dx.abs() <= 5 && dy < 0) {
+    if d2 >= 121 && d2 <= 225 {
+        if !(dx.abs() <= 4 && dy < 0) {
             return Some(tint);
         }
     }
 
     // Vertical line in top gap
-    if dx.abs() <= 2 && dy >= -15 && dy <= -2 {
+    if dx.abs() <= 2 && dy >= -16 && dy <= -2 {
         return Some(tint);
     }
 
@@ -182,15 +208,15 @@ fn draw_emergency_icon(x: usize, y: usize, cx: usize, cy: usize, tint: u32) -> O
     let d2 = dx * dx + dy * dy;
 
     // Central hub
-    if d2 <= 16 {
+    if d2 <= 25 {
         return Some(tint);
     }
 
     // 8-spoke medical / alert star
-    let is_v = dx.abs() <= 2 && dy.abs() <= 13;
-    let is_h = dy.abs() <= 2 && dx.abs() <= 13;
-    let is_d1 = (dx - dy).abs() <= 2 && dx.abs() <= 10 && dy.abs() <= 10;
-    let is_d2 = (dx + dy).abs() <= 2 && dx.abs() <= 10 && dy.abs() <= 10;
+    let is_v = dx.abs() <= 3 && dy.abs() <= 15;
+    let is_h = dy.abs() <= 3 && dx.abs() <= 15;
+    let is_d1 = (dx - dy).abs() <= 2 && dx.abs() <= 11 && dy.abs() <= 11;
+    let is_d2 = (dx + dy).abs() <= 2 && dx.abs() <= 11 && dy.abs() <= 11;
 
     if is_v || is_h || is_d1 || is_d2 {
         return Some(tint);
@@ -203,25 +229,17 @@ pub fn get_power_menu_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     // 1. Top status bar (y < 48)
     if y < 48 {
         if state.clock_source_ok {
-            if let Some(c) = text_pixel(x, y, 48, 14, 1, &state.clock_time, 0xFFCBD5E1, 0xFF111214) {
+            if let Some(c) = text_pixel(x, y, 48, 14, 1, &state.clock_time, 0xFFCBD5E1, COLOR_BG_TOP) {
                 return c;
             }
         }
-        // Battery glyph outline + terminal at (650, 16). WHY outline only: there
-        // is no fuel gauge bound to this shell, so a filled cell would be a
-        // measurement the shell never took.
+        // Battery glyph outline + terminal at (648..672, 17..31)
         if x >= 648 && x <= 672 && y >= 17 && y <= 31 {
             let is_body = x <= 668 && (x == 648 || x == 668 || y == 17 || y == 31);
             let is_terminal = x >= 669 && y >= 21 && y <= 27;
             if is_body || is_terminal {
                 return 0xFFCBD5E1;
             }
-            // WHY a dash inside an empty cell: the outline with a permanent
-            // terminal reads as "battery present, empty", and there is no fuel
-            // gauge bound to this shell. The centred dash is the shell's own
-            // mark for "no reading" - home draws it for unbound sensors and the
-            // lock screen prints N/A for unbound discs - so the power menu does
-            // not report 0% for a measurement it never took.
             if x >= 654 && x <= 662 && y >= 23 && y <= 25 {
                 return 0xFF777773;
             }
@@ -229,92 +247,170 @@ pub fn get_power_menu_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         return COLOR_BG_TOP;
     }
 
-    // 2. Card 1: Lock device (y: 190..265)
-    if round_contains(&CARD1_RECT, CARD_RADIUS, x, y) {
-        let inner = CARD1_RECT.inset(1);
-        if !round_contains(&inner, CARD_RADIUS.saturating_sub(1), x, y) {
-            return COLOR_CARD_BORDER;
-        }
-        // Lock vector icon at cx=115, cy=227
-        if let Some(c) = draw_lock_icon(x, y, 115, 227, COLOR_CARD_TEXT) {
-            return c;
-        }
-        // Single centered title text "Lock device" (scale 1, 24px height centered vertically at 190 + 25 = 215)
-        if let Some(c) = text_pixel(x, y, LABEL_ZONE_X + text::center_x(b"Lock device", 1, LABEL_ZONE_W), 215, 1, b"Lock device", COLOR_CARD_TEXT, 0xFF111214) {
-            return c;
-        }
-        return COLOR_CARD_FILL;
-    }
-
-    // 3. Card 2: Restart (y: 285..360)
-    if round_contains(&CARD2_RECT, CARD_RADIUS, x, y) {
-        let inner = CARD2_RECT.inset(1);
-        if !round_contains(&inner, CARD_RADIUS.saturating_sub(1), x, y) {
-            return COLOR_CARD_BORDER;
-        }
-        // Restart vector icon at cx=115, cy=322
-        if let Some(c) = draw_restart_icon(x, y, 115, 322, COLOR_CARD_TEXT) {
-            return c;
-        }
-        // Single centered title text "Restart"
-        if let Some(c) = text_pixel(x, y, LABEL_ZONE_X + text::center_x(b"Restart", 1, LABEL_ZONE_W), 310, 1, b"Restart", COLOR_CARD_TEXT, 0xFF111214) {
-            return c;
-        }
-        return COLOR_CARD_FILL;
-    }
-
-    // 4. Card 3: Power off (y: 380..455)
-    if round_contains(&CARD3_RECT, CARD_RADIUS, x, y) {
-        let inner = CARD3_RECT.inset(1);
-        if !round_contains(&inner, CARD_RADIUS.saturating_sub(1), x, y) {
-            return COLOR_CARD_BORDER;
-        }
-        // Power vector icon at cx=115, cy=417
-        if let Some(c) = draw_power_icon(x, y, 115, 417, COLOR_CARD_TEXT) {
-            return c;
-        }
-        // Single centered title text "Power off"
-        if let Some(c) = text_pixel(x, y, LABEL_ZONE_X + text::center_x(b"Power off", 1, LABEL_ZONE_W), 405, 1, b"Power off", COLOR_CARD_TEXT, 0xFF111214) {
-            return c;
-        }
-        return COLOR_CARD_FILL;
-    }
-
-    // 5. Card 4: Emergency (y: 475..550)
-    if round_contains(&CARD4_RECT, CARD_RADIUS, x, y) {
-        let inner = CARD4_RECT.inset(1);
-        if !round_contains(&inner, CARD_RADIUS.saturating_sub(1), x, y) {
-            return COLOR_EMERGENCY_BORDER;
-        }
-        // Emergency vector icon at cx=115, cy=512
-        if let Some(c) = draw_emergency_icon(x, y, 115, 512, COLOR_EMERGENCY_TEXT) {
-            return c;
-        }
-        // Single centered title text "Emergency"
-        if let Some(c) = text_pixel(x, y, LABEL_ZONE_X + text::center_x(b"Emergency", 1, LABEL_ZONE_W), 500, 1, b"Emergency", COLOR_EMERGENCY_TEXT, 0xFF111214) {
-            return c;
-        }
-        return COLOR_EMERGENCY_FILL;
-    }
-
-    // 6. Cancel pill button (y: 580..635, x: 240..480)
-    if round_contains(&CANCEL_RECT, 27, x, y) {
-        let inner = CANCEL_RECT.inset(1);
-        if !round_contains(&inner, 26, x, y) {
-            return COLOR_CANCEL_BORDER;
-        }
-        if let Some(c) = text_pixel(x, y, CANCEL_RECT.x + text::center_x(b"Cancel", 1, CANCEL_RECT.w), 595, 1, b"Cancel", COLOR_CANCEL_TEXT, 0xFF111214) {
-            return c;
-        }
-        return COLOR_CANCEL_FILL;
-    }
-
-    // 7. Home bottom gesture bar (y: 1410..1416)
+    // 2. Home bottom gesture bar (y: 1410..1416)
     if y >= 1410 && y <= 1416 && x >= 260 && x <= 460 {
         return 0x55FFFFFF;
     }
 
-    // Smooth subtle vertical backdrop gradient
+    // 3. Main Modal Sheet Drawer
+    if round_contains(&SHEET_RECT, SHEET_RADIUS, x, y) {
+        let inner = SHEET_RECT.inset(1);
+        if !round_contains(&inner, SHEET_RADIUS.saturating_sub(1), x, y) {
+            return SHEET_BORDER;
+        }
+
+        // Top drag handle pill
+        if round_contains(&HANDLE_RECT, 2, x, y) {
+            return HANDLE_COLOR;
+        }
+
+        // Header Title: "Power & Safety" (scale 2 bold white)
+        let title_bytes = b"Power & Safety";
+        let title_w = text::measure(title_bytes, 2);
+        let title_x = (720 - title_w) / 2;
+        if let Some(c) = text_pixel(x, y, title_x, 96, 2, title_bytes, 0xFFFFFFFF, SHEET_FILL) {
+            return c;
+        }
+
+        // Header Description: "Select an option or tap Cancel to return" (scale 1 crisp slate)
+        let desc_bytes = b"Select an option or tap Cancel to return";
+        let desc_w = text::measure(desc_bytes, 1);
+        let desc_x = (720 - desc_w) / 2;
+        if let Some(c) = text_pixel(x, y, desc_x, 150, 1, desc_bytes, 0xFF94A3B8, SHEET_FILL) {
+            return c;
+        }
+
+        // Button 1: Power Off (cx=220, cy=240, R=36)
+        let p_dx = (x as i32) - (BTN_POWER_CX as i32);
+        let p_dy = (y as i32) - (BTN_POWER_CY as i32);
+        let p_d2 = p_dx * p_dx + p_dy * p_dy;
+        if p_d2 <= BTN_R2 {
+            if let Some(c) = draw_power_icon(x, y, BTN_POWER_CX, BTN_POWER_CY, 0xFFFFFFFF) {
+                return c;
+            }
+            if p_d2 >= (BTN_RADIUS - 2) * (BTN_RADIUS - 2) {
+                return COLOR_POWER_RING;
+            }
+            return COLOR_POWER_FILL;
+        }
+
+        // Button 1 Labels: "Power off" (scale 2) & "Shut down" (scale 1)
+        let p_label_bytes = b"Power off";
+        let p_label_w = text::measure(p_label_bytes, 2);
+        let p_label_x = BTN_POWER_CX.saturating_sub(p_label_w / 2);
+        if let Some(c) = text_pixel(x, y, p_label_x, 288, 2, p_label_bytes, 0xFFFFFFFF, SHEET_FILL) {
+            return c;
+        }
+        let p_sub_bytes = b"Shut down";
+        let p_sub_w = text::measure(p_sub_bytes, 1);
+        let p_sub_x = BTN_POWER_CX.saturating_sub(p_sub_w / 2);
+        if let Some(c) = text_pixel(x, y, p_sub_x, 320, 1, p_sub_bytes, 0xFFCBD5E1, SHEET_FILL) {
+            return c;
+        }
+
+        // Button 2: Lock Screen (cx=500, cy=240, R=36)
+        let l_dx = (x as i32) - (BTN_LOCK_CX as i32);
+        let l_dy = (y as i32) - (BTN_LOCK_CY as i32);
+        let l_d2 = l_dx * l_dx + l_dy * l_dy;
+        if l_d2 <= BTN_R2 {
+            if let Some(c) = draw_lock_icon(x, y, BTN_LOCK_CX, BTN_LOCK_CY, 0xFFFFFFFF) {
+                return c;
+            }
+            if l_d2 >= (BTN_RADIUS - 2) * (BTN_RADIUS - 2) {
+                return COLOR_LOCK_RING;
+            }
+            return COLOR_LOCK_FILL;
+        }
+
+        // Button 2 Labels: "Lock screen" (scale 2) & "Secure device" (scale 1)
+        let l_label_bytes = b"Lock screen";
+        let l_label_w = text::measure(l_label_bytes, 2);
+        let l_label_x = BTN_LOCK_CX.saturating_sub(l_label_w / 2);
+        if let Some(c) = text_pixel(x, y, l_label_x, 288, 2, l_label_bytes, 0xFFFFFFFF, SHEET_FILL) {
+            return c;
+        }
+        let l_sub_bytes = b"Secure device";
+        let l_sub_w = text::measure(l_sub_bytes, 1);
+        let l_sub_x = BTN_LOCK_CX.saturating_sub(l_sub_w / 2);
+        if let Some(c) = text_pixel(x, y, l_sub_x, 320, 1, l_sub_bytes, 0xFFCBD5E1, SHEET_FILL) {
+            return c;
+        }
+
+        // Button 3: Restart (cx=220, cy=380, R=36)
+        let r_dx = (x as i32) - (BTN_RESTART_CX as i32);
+        let r_dy = (y as i32) - (BTN_RESTART_CY as i32);
+        let r_d2 = r_dx * r_dx + r_dy * r_dy;
+        if r_d2 <= BTN_R2 {
+            if let Some(c) = draw_restart_icon(x, y, BTN_RESTART_CX, BTN_RESTART_CY, 0xFFFFFFFF) {
+                return c;
+            }
+            if r_d2 >= (BTN_RADIUS - 2) * (BTN_RADIUS - 2) {
+                return COLOR_RESTART_RING;
+            }
+            return COLOR_RESTART_FILL;
+        }
+
+        // Button 3 Labels: "Restart" (scale 2) & "Reboot OS" (scale 1)
+        let r_label_bytes = b"Restart";
+        let r_label_w = text::measure(r_label_bytes, 2);
+        let r_label_x = BTN_RESTART_CX.saturating_sub(r_label_w / 2);
+        if let Some(c) = text_pixel(x, y, r_label_x, 428, 2, r_label_bytes, 0xFFFFFFFF, SHEET_FILL) {
+            return c;
+        }
+        let r_sub_bytes = b"Reboot OS";
+        let r_sub_w = text::measure(r_sub_bytes, 1);
+        let r_sub_x = BTN_RESTART_CX.saturating_sub(r_sub_w / 2);
+        if let Some(c) = text_pixel(x, y, r_sub_x, 460, 1, r_sub_bytes, 0xFFCBD5E1, SHEET_FILL) {
+            return c;
+        }
+
+        // Button 4: Emergency (cx=500, cy=380, R=36)
+        let e_dx = (x as i32) - (BTN_EMERGENCY_CX as i32);
+        let e_dy = (y as i32) - (BTN_EMERGENCY_CY as i32);
+        let e_d2 = e_dx * e_dx + e_dy * e_dy;
+        if e_d2 <= BTN_R2 {
+            if let Some(c) = draw_emergency_icon(x, y, BTN_EMERGENCY_CX, BTN_EMERGENCY_CY, 0xFFFFFFFF) {
+                return c;
+            }
+            if e_d2 >= (BTN_RADIUS - 2) * (BTN_RADIUS - 2) {
+                return COLOR_EMERGENCY_RING;
+            }
+            return COLOR_EMERGENCY_FILL;
+        }
+
+        // Button 4 Labels: "Emergency" (scale 2) & "SOS / Dialer" (scale 1)
+        let e_label_bytes = b"Emergency";
+        let e_label_w = text::measure(e_label_bytes, 2);
+        let e_label_x = BTN_EMERGENCY_CX.saturating_sub(e_label_w / 2);
+        if let Some(c) = text_pixel(x, y, e_label_x, 428, 2, e_label_bytes, 0xFFFFFFFF, SHEET_FILL) {
+            return c;
+        }
+        let e_sub_bytes = b"SOS / Dialer";
+        let e_sub_w = text::measure(e_sub_bytes, 1);
+        let e_sub_x = BTN_EMERGENCY_CX.saturating_sub(e_sub_w / 2);
+        if let Some(c) = text_pixel(x, y, e_sub_x, 460, 1, e_sub_bytes, 0xFFFCA5A5, SHEET_FILL) {
+            return c;
+        }
+
+        // Cancel Pill Button (y: 524..578, x: 200..520)
+        if round_contains(&CANCEL_RECT, CANCEL_RADIUS, x, y) {
+            let c_inner = CANCEL_RECT.inset(1);
+            if !round_contains(&c_inner, CANCEL_RADIUS.saturating_sub(1), x, y) {
+                return COLOR_CANCEL_BORDER;
+            }
+            let cancel_bytes = b"Cancel";
+            let c_w = text::measure(cancel_bytes, 2);
+            let c_x = CANCEL_RECT.x + (CANCEL_RECT.w - c_w) / 2;
+            if let Some(c) = text_pixel(x, y, c_x, 536, 2, cancel_bytes, COLOR_CANCEL_TEXT, COLOR_CANCEL_FILL) {
+                return c;
+            }
+            return COLOR_CANCEL_FILL;
+        }
+
+        return SHEET_FILL;
+    }
+
+    // Smooth subtle vertical backdrop gradient outside the sheet
     let t = (y.saturating_sub(48) * 255) / (1440 - 48);
     let r1 = (COLOR_BG_TOP >> 16) & 0xFF;
     let g1 = (COLOR_BG_TOP >> 8) & 0xFF;
