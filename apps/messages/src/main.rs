@@ -620,7 +620,7 @@ const HEADER_Y0: usize = 0;
 const HEADER_Y1: usize = 96;
 const TITLE_TEXT: &[u8] = b"Messages";
 const TITLE_X: usize = 116;
-const TITLE_SCALE: usize = type_scale::CAPTION;
+const TITLE_SCALE: usize = type_scale::TITLE;
 const TITLE_Y: usize = 36;
 
 const PILL_RIGHT: usize = W - 24;
@@ -1302,7 +1302,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                 ViewMode::Recipients => b"Choose a recipient",
             };
 
-            if let Some(c) = test_text_bold(
+            if let Some(c) = test_text(
                 x,
                 y,
                 TITLE_X,

@@ -2183,7 +2183,7 @@ const fn run_rows(scale: usize) -> usize {
 /// Header band height: y >= HEADER_H draws the hairline rule, so a header run
 /// has to fit inside 0..HEADER_H.
 const HEADER_H: usize = 94;
-const TITLE_SCALE: usize = type_scale::CAPTION;
+const TITLE_SCALE: usize = type_scale::TITLE;
 
 // Segmented navigation tabs (y: 104..156). Symmetrically balanced pills across
 // the 720px viewport (48px margins, 12px gaps).
@@ -2193,7 +2193,7 @@ const TITLE_SCALE: usize = type_scale::CAPTION;
 // of SIM the platform does not offer - and a section the user cannot reach is
 // not a surface. The four pills are 147px wide with 12px gaps, which still
 // leaves the longest label ("Contacts") its full width.
-const TAB_SCALE: usize = type_scale::CAPTION;
+const TAB_SCALE: usize = type_scale::BODY;
 const TAB_BAND_Y0: usize = 104;
 const TAB_BAND_H: usize = 52;
 const TAB_W: usize = 147;
@@ -2226,7 +2226,7 @@ const BACKSPACE_CY: usize = 1065;
 const BACKSPACE_R: i32 = 42;
 
 // Keypad layout metrics: scale 2 digit, scale 1 sublabel, 48px radius circular discs.
-const KEY_DIGIT_SCALE: usize = type_scale::BODY;
+const KEY_DIGIT_SCALE: usize = type_scale::SECTION;
 const KEY_SUB_SCALE: usize = type_scale::CAPTION;
 const KEY_RADIUS: usize = 48;
 
@@ -2477,7 +2477,7 @@ fn header_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     let title_rows = run_rows(TITLE_SCALE);
     let title_y0 = (HEADER_H - title_rows) / 2;
     if y >= title_y0 && y < title_y0 + title_rows {
-        if let Some(c) = test_text_bold(x, y, 120, title_y0, TITLE_SCALE, b"Phone",240,  THEME.on_surface, THEME.surface_container) {
+        if let Some(c) = test_text(x, y, 120, title_y0, TITLE_SCALE, b"Phone", 240, THEME.on_surface, THEME.surface_container) {
             return c;
         }
     }
