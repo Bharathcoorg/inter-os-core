@@ -205,12 +205,29 @@ pub fn recents_band() -> (usize, usize) {
 
 /// The close-all control: prominent flagship pill button.
 pub fn close_all_rect() -> Rect {
-    Rect::new(230, 1264, 260, 56)
+    Rect::new(230, 1160, 260, 56)
 }
 
 /// The card whose close control holds (`x`, `y`).
 pub fn activity_close_hit(state: &LauncherState, x: usize, y: usize) -> Option<usize> {
+    if state.recents_count == 1 {
+        let hero_close = Rect::new(592, 174, 48, 48);
+        if hero_close.contains(x, y) {
+            return Some(0);
+        }
+    }
     recents::close_at(x, y, state.recents_count)
+}
+
+/// Hit test for recent cards.
+pub fn card_hit_at(state: &LauncherState, x: usize, y: usize) -> Option<usize> {
+    if state.recents_count == 1 {
+        let hero_card = Rect::new(60, 150, 600, 980);
+        if hero_card.contains(x, y) {
+            return Some(0);
+        }
+    }
+    recents::card_at(x, y, state.recents_count)
 }
 
 /// Dismisses the card in `slot`.
@@ -409,8 +426,18 @@ fn build(state: &LauncherState, fingerprint: u64) -> Plan {
 
     for index in 0..count {
         let card = &state.recents_cards[index];
-        let rect = recents::card_rect(index);
-        let preview = recents::preview_rect(index);
+        let (rect, preview, close, name_x, name_y) = if count == 1 {
+            let r = Rect::new(60, 150, 600, 980);
+            let prev = Rect::new(150, 240, 420, 840);
+            let cl = Rect::new(592, 174, 48, 48);
+            (r, prev, cl, 156, 184)
+        } else {
+            let r = recents::card_rect(index);
+            let prev = recents::preview_rect(index);
+            let cl = recents::close_rect(index);
+            (r, prev, cl, r.x + 268, r.y + 36)
+        };
+
         let pkg = card.package();
         let stock_app = StockApp::from_bytes(pkg);
         let icon = icons::match_icon_kind(pkg);
@@ -436,8 +463,8 @@ fn build(state: &LauncherState, fingerprint: u64) -> Plan {
             badge_len = at;
         }
 
-        let close = recents::close_rect(index);
-        let column = close.x.saturating_sub(rect.x + 268 + 12);
+
+        let column = close.x.saturating_sub(name_x + 12);
         let (name, name_len) = launcher::text::ellipsize(card.label(), type_scale::TITLE, column);
 
         plan.cards[index] = CardPlan {
@@ -450,8 +477,8 @@ fn build(state: &LauncherState, fingerprint: u64) -> Plan {
             badge,
             badge_len,
             name: Label::at(
-                rect.x + 268,
-                rect.y + 36,
+                name_x,
+                name_y,
                 type_scale::TITLE,
                 &name[..name_len],
                 theme.on_surface,
@@ -536,8 +563,8 @@ pub fn get_activity_color(x: usize, y: usize, state: &LauncherState) -> u32 {
 
         // Preview Area: Real captured frame or rich simulated preview
         if card.preview.contains(x, y) {
-            let px = x - card.preview.x;
-            let py = y - card.preview.y;
+            let px = ((x - card.preview.x) * recents::PREVIEW_W) / card.preview.w.max(1);
+            let py = ((y - card.preview.y) * recents::PREVIEW_H) / card.preview.h.max(1);
             if let Some(slot) = card.picture {
                 if slot_has_captured_pixels(slot) {
                     if let Some(c) = picture_pixel(slot, px, py) {
@@ -551,7 +578,11 @@ pub fn get_activity_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         }
 
         // App Icon: 56px rounded squircle with app brand accent fill
-        let icon_box = Rect::new(card.rect.x + 196, card.rect.y + 22, 56, 56);
+        let icon_box = if p.card_count == 1 {
+            Rect::new(84, 168, 56, 56)
+        } else {
+            Rect::new(card.rect.x + 196, card.rect.y + 22, 56, 56)
+        };
         if icon_box.contains(x, y) && inside_rounded(icon_box, 16, x, y) {
             if !inside_rounded(icon_box.inset(1), 15, x, y) {
                 return theme.border;

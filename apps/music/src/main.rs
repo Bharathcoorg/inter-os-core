@@ -1151,7 +1151,7 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
         if let Some(c) = std::design::back_button::pixel(x, y, THEME.on_surface, THEME.border, THEME.surface_container_low) {
             return c;
         }
-        if let Some(c) = text_centered(x, y, 48, 1, b"Media player", THEME.on_surface_variant, THEME.surface) {
+        if let Some(c) = text_centered_bold(x, y, 40, 2, b"Media Player", THEME.on_surface, THEME.surface) {
             return c;
         }
         return THEME.surface;
@@ -1217,10 +1217,10 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
             cap[cl..cl + dn].copy_from_slice(&db[..dn]);
             cl += dn;
         }
-        if let Some(c) = text_centered(x, y, ARTIST_Y, 1, &cap[..cl], THEME.on_surface_variant, THEME.surface) {
+        if let Some(c) = text_centered_bold(x, y, ARTIST_Y, 1, &cap[..cl], THEME.on_surface, THEME.surface) {
             return c;
         }
-    } else if let Some(c) = text_centered(x, y, ARTIST_Y, 1, b"Local library is empty - nothing to play", THEME.on_surface_variant, THEME.surface) {
+    } else if let Some(c) = text_centered_bold(x, y, ARTIST_Y, 1, b"Local library is empty - nothing to play", THEME.on_surface, THEME.surface) {
         return c;
     }
     let state_label: &[u8] = match app.state {
@@ -1228,7 +1228,7 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
         PlaybackState::Paused => b"Paused",
         PlaybackState::Stopped => b"Stopped",
     };
-    if let Some(c) = text_centered(x, y, STATE_Y, 1, state_label, THEME.muted, THEME.surface) {
+    if let Some(c) = text_centered_bold(x, y, STATE_Y, 1, state_label, THEME.on_surface, THEME.surface) {
         return c;
     }
     if let Some(c) = text_centered(

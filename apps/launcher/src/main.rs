@@ -3436,7 +3436,7 @@ pub extern "C" fn _start() -> ! {
                                 // already running, and a card that is not there is a
                                 // task the platform says is not running.
                                 else if let Some(slot) =
-                                    launcher::recents::card_at(x, y, state.recents_count)
+                                    screens::activity::card_hit_at(&state, x, y)
                                 {
                                     if focus_recents_card(&mut state, slot) {
                                         state.current_view = ViewMode::HomeScreen;

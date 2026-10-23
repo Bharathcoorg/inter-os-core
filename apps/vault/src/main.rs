@@ -707,7 +707,7 @@ fn metric_row(
         }
         return Some(THEME.surface_container_low);
     }
-    if let Some(c) = font::ink(x, y, ix, y0 + 32, 1, source, w - PAD * 2, THEME.on_surface_variant, THEME.surface_container, false) {
+    if let Some(c) = font::ink(x, y, ix, y0 + 32, 1, source, w - PAD * 2, THEME.on_surface, THEME.surface_container, true) {
         return Some(c);
     }
     None
@@ -757,7 +757,7 @@ fn tile_pixel(
         }
         return Some(THEME.surface_container);
     }
-    if let Some(c) = font::ink(x, y, tx + 16, ty + 76, 1, hint, iw, THEME.on_surface_variant, THEME.surface_container_high, false) {
+    if let Some(c) = font::ink(x, y, tx + 16, ty + 76, 1, hint, iw, THEME.on_surface, THEME.surface_container_high, true) {
         return Some(c);
     }
     Some(THEME.surface_container_high)
@@ -816,7 +816,7 @@ fn header_pixel(x: usize, y: usize) -> u32 {
     // the 104 px header band. The old y=52 assumed the previous 8x8 face at
     // scale 2 (16 px); with the design face it printed the caption straight
     // through the title's descenders.
-    if let Some(c) = font::ink(x, y, TITLE_X, 76, 1, SUBTITLE, text_max, THEME.on_surface_variant, THEME.surface, false) {
+    if let Some(c) = font::ink(x, y, TITLE_X, 76, 1, SUBTITLE, text_max, THEME.on_surface, THEME.surface, true) {
         return c;
     }
     THEME.surface

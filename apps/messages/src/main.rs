@@ -1597,7 +1597,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                                 y,
                                 CARD_X0 + 84,
                                 card_top + 22,
-                                1,
+                                2,
                                 tr.peer(),
                                 THEME.on_surface,
                                 THEME.surface_container,
@@ -1626,7 +1626,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                                 copy_ascii(placeholder, &mut snippet)
                             };
 
-                            if let Some(c) = test_text(
+                            if let Some(c) = test_text_bold(
                                 x,
                                 y,
                                 CARD_X0 + 84,
@@ -1662,7 +1662,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                                 if x >= px0 && x < px1 && y >= py0 && y < py1 {
                                     let mut digit = [0u8; 4];
                                     let dn = put_u8(&mut digit, tr.unread_count);
-                                    if let Some(c) = test_text(
+                                    if let Some(c) = test_text_bold(
                                         x,
                                         y,
                                         px0 + 12,
@@ -1900,7 +1900,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                                 bx1 - bx0 - 32,
                                 &mut buf,
                             );
-                            if let Some(c) = test_text(
+                            if let Some(c) = test_text_bold(
                                 x,
                                 y,
                                 bx0 + 16,
@@ -1930,7 +1930,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                                 }
                             };
 
-                            if let Some(c) = test_text(
+                            if let Some(c) = test_text_bold(
                                 x,
                                 y,
                                 bx0 + 16,
