@@ -543,10 +543,12 @@ const CHUNK: usize = 4096;
 /// Draws a run of text with the sharp outline face, falling back to the
 /// bitmap face when the outline face refuses the run.
 ///
-/// WHY the outline face is tried first: the panel is 1080x2160 and this app
-/// paints at 720x1440, so the compositor magnifies a bitmap run 3:2 and the
-/// glyph edges read as soft. The outline face rasterises the real outline
-/// and reads as sharp at the panel's own resolution.
+/// WHY the outline face is tried first: the platform scanout is 720x1440,
+/// the same as the space this app paints, so composition is 1:1 and the
+/// compositor magnifies nothing. The outline face is still preferred because
+/// it rasterises the real outline at the requested cap height instead of
+/// magnifying the 16x24 bitmap fallback face, so it stays sharp at every
+/// size.
 ///
 /// WHY the box test comes first: the run's own arguments decide which face
 /// is used, so the pixel under the cursor never gets to choose. The box is

@@ -9,7 +9,8 @@ use super::draw::round_contains;
 use crate::{test_text_aa, LauncherState};
 use launcher::layout::Rect;
 use launcher::text;
-use launcher::theme::Theme;
+use launcher::theme::{type_scale, Theme};
+use crate::screens::home;
 
 const COLOR_BG_TOP: u32 = launcher::theme::SHELL_DARK.surface;
 const COLOR_BG_BOT: u32 = 0xFF05070A;
@@ -227,22 +228,30 @@ fn draw_emergency_icon(x: usize, y: usize, cx: usize, cy: usize, tint: u32) -> O
 
 pub fn get_power_menu_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     // 1. Top status bar (y < 48)
+    //
+    // WHY this screen reuses the home strip instead of painting its own: the
+    // sheet covers the surface with an opaque backdrop, so it has to draw a
+    // status bar, and a second copy is a second set of geometry and a second
+    // set of readings. `home` owns the one clock position and the one unbound
+    // telemetry glyph set.
     if y < 48 {
         if state.clock_source_ok {
-            if let Some(c) = text_pixel(x, y, 48, 14, 1, &state.clock_time, 0xFFCBD5E1, COLOR_BG_TOP) {
+            if let Some(c) = text_pixel(
+                x,
+                y,
+                40,
+                8,
+                type_scale::BODY,
+                &state.clock_time,
+                0xFFCBD5E1,
+                COLOR_BG_TOP,
+            ) {
                 return c;
             }
         }
-        // Battery glyph outline + terminal at (648..672, 17..31)
-        if x >= 648 && x <= 672 && y >= 17 && y <= 31 {
-            let is_body = x <= 668 && (x == 648 || x == 668 || y == 17 || y == 31);
-            let is_terminal = x >= 669 && y >= 21 && y <= 27;
-            if is_body || is_terminal {
-                return 0xFFCBD5E1;
-            }
-            if x >= 654 && x <= 662 && y >= 23 && y <= 25 {
-                return 0xFF777773;
-            }
+        let telemetry = home::telemetry_plan();
+        if let Some(c) = home::telemetry_pixel(x, y, &telemetry, 0xFFCBD5E1) {
+            return c;
         }
         return COLOR_BG_TOP;
     }
@@ -264,19 +273,19 @@ pub fn get_power_menu_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             return HANDLE_COLOR;
         }
 
-        // Header Title: "Power & Safety" (scale 2 bold white)
+        // Header Title: "Power & Safety" (scale 4 bold white)
         let title_bytes = b"Power & Safety";
-        let title_w = text::measure(title_bytes, 2);
+        let title_w = text::measure(title_bytes, 4);
         let title_x = (720 - title_w) / 2;
-        if let Some(c) = text_pixel(x, y, title_x, 96, 2, title_bytes, 0xFFFFFFFF, SHEET_FILL) {
+        if let Some(c) = text_pixel(x, y, title_x, 96, 4, title_bytes, 0xFFFFFFFF, SHEET_FILL) {
             return c;
         }
 
-        // Header Description: "Select an option or tap Cancel to return" (scale 1 crisp slate)
+        // Header Description: "Select an option or tap Cancel to return"
         let desc_bytes = b"Select an option or tap Cancel to return";
-        let desc_w = text::measure(desc_bytes, 1);
+        let desc_w = text::measure(desc_bytes, 2);
         let desc_x = (720 - desc_w) / 2;
-        if let Some(c) = text_pixel(x, y, desc_x, 150, 1, desc_bytes, 0xFF94A3B8, SHEET_FILL) {
+        if let Some(c) = text_pixel(x, y, desc_x, 158, 2, desc_bytes, 0xFF94A3B8, SHEET_FILL) {
             return c;
         }
 
@@ -296,15 +305,15 @@ pub fn get_power_menu_color(x: usize, y: usize, state: &LauncherState) -> u32 {
 
         // Button 1 Labels: "Power off" (scale 2) & "Shut down" (scale 1)
         let p_label_bytes = b"Power off";
-        let p_label_w = text::measure(p_label_bytes, 2);
+        let p_label_w = text::measure(p_label_bytes, 3);
         let p_label_x = BTN_POWER_CX.saturating_sub(p_label_w / 2);
-        if let Some(c) = text_pixel(x, y, p_label_x, 288, 2, p_label_bytes, 0xFFFFFFFF, SHEET_FILL) {
+        if let Some(c) = text_pixel(x, y, p_label_x, 276, 3, p_label_bytes, 0xFFFFFFFF, SHEET_FILL) {
             return c;
         }
         let p_sub_bytes = b"Shut down";
-        let p_sub_w = text::measure(p_sub_bytes, 1);
+        let p_sub_w = text::measure(p_sub_bytes, 2);
         let p_sub_x = BTN_POWER_CX.saturating_sub(p_sub_w / 2);
-        if let Some(c) = text_pixel(x, y, p_sub_x, 320, 1, p_sub_bytes, 0xFFCBD5E1, SHEET_FILL) {
+        if let Some(c) = text_pixel(x, y, p_sub_x, 312, 2, p_sub_bytes, 0xFFCBD5E1, SHEET_FILL) {
             return c;
         }
 
@@ -324,15 +333,15 @@ pub fn get_power_menu_color(x: usize, y: usize, state: &LauncherState) -> u32 {
 
         // Button 2 Labels: "Lock screen" (scale 2) & "Secure device" (scale 1)
         let l_label_bytes = b"Lock screen";
-        let l_label_w = text::measure(l_label_bytes, 2);
+        let l_label_w = text::measure(l_label_bytes, 3);
         let l_label_x = BTN_LOCK_CX.saturating_sub(l_label_w / 2);
-        if let Some(c) = text_pixel(x, y, l_label_x, 288, 2, l_label_bytes, 0xFFFFFFFF, SHEET_FILL) {
+        if let Some(c) = text_pixel(x, y, l_label_x, 276, 3, l_label_bytes, 0xFFFFFFFF, SHEET_FILL) {
             return c;
         }
         let l_sub_bytes = b"Secure device";
-        let l_sub_w = text::measure(l_sub_bytes, 1);
+        let l_sub_w = text::measure(l_sub_bytes, 2);
         let l_sub_x = BTN_LOCK_CX.saturating_sub(l_sub_w / 2);
-        if let Some(c) = text_pixel(x, y, l_sub_x, 320, 1, l_sub_bytes, 0xFFCBD5E1, SHEET_FILL) {
+        if let Some(c) = text_pixel(x, y, l_sub_x, 312, 2, l_sub_bytes, 0xFFCBD5E1, SHEET_FILL) {
             return c;
         }
 
@@ -352,15 +361,15 @@ pub fn get_power_menu_color(x: usize, y: usize, state: &LauncherState) -> u32 {
 
         // Button 3 Labels: "Restart" (scale 2) & "Reboot OS" (scale 1)
         let r_label_bytes = b"Restart";
-        let r_label_w = text::measure(r_label_bytes, 2);
+        let r_label_w = text::measure(r_label_bytes, 3);
         let r_label_x = BTN_RESTART_CX.saturating_sub(r_label_w / 2);
-        if let Some(c) = text_pixel(x, y, r_label_x, 428, 2, r_label_bytes, 0xFFFFFFFF, SHEET_FILL) {
+        if let Some(c) = text_pixel(x, y, r_label_x, 416, 3, r_label_bytes, 0xFFFFFFFF, SHEET_FILL) {
             return c;
         }
         let r_sub_bytes = b"Reboot OS";
-        let r_sub_w = text::measure(r_sub_bytes, 1);
+        let r_sub_w = text::measure(r_sub_bytes, 2);
         let r_sub_x = BTN_RESTART_CX.saturating_sub(r_sub_w / 2);
-        if let Some(c) = text_pixel(x, y, r_sub_x, 460, 1, r_sub_bytes, 0xFFCBD5E1, SHEET_FILL) {
+        if let Some(c) = text_pixel(x, y, r_sub_x, 452, 2, r_sub_bytes, 0xFFCBD5E1, SHEET_FILL) {
             return c;
         }
 
@@ -380,15 +389,15 @@ pub fn get_power_menu_color(x: usize, y: usize, state: &LauncherState) -> u32 {
 
         // Button 4 Labels: "Emergency" (scale 2) & "SOS / Dialer" (scale 1)
         let e_label_bytes = b"Emergency";
-        let e_label_w = text::measure(e_label_bytes, 2);
+        let e_label_w = text::measure(e_label_bytes, 3);
         let e_label_x = BTN_EMERGENCY_CX.saturating_sub(e_label_w / 2);
-        if let Some(c) = text_pixel(x, y, e_label_x, 428, 2, e_label_bytes, 0xFFFFFFFF, SHEET_FILL) {
+        if let Some(c) = text_pixel(x, y, e_label_x, 416, 3, e_label_bytes, 0xFFFFFFFF, SHEET_FILL) {
             return c;
         }
         let e_sub_bytes = b"SOS / Dialer";
-        let e_sub_w = text::measure(e_sub_bytes, 1);
+        let e_sub_w = text::measure(e_sub_bytes, 2);
         let e_sub_x = BTN_EMERGENCY_CX.saturating_sub(e_sub_w / 2);
-        if let Some(c) = text_pixel(x, y, e_sub_x, 460, 1, e_sub_bytes, 0xFFFCA5A5, SHEET_FILL) {
+        if let Some(c) = text_pixel(x, y, e_sub_x, 452, 2, e_sub_bytes, 0xFFFCA5A5, SHEET_FILL) {
             return c;
         }
 
@@ -399,9 +408,9 @@ pub fn get_power_menu_color(x: usize, y: usize, state: &LauncherState) -> u32 {
                 return COLOR_CANCEL_BORDER;
             }
             let cancel_bytes = b"Cancel";
-            let c_w = text::measure(cancel_bytes, 2);
+            let c_w = text::measure(cancel_bytes, 3);
             let c_x = CANCEL_RECT.x + (CANCEL_RECT.w - c_w) / 2;
-            if let Some(c) = text_pixel(x, y, c_x, 536, 2, cancel_bytes, COLOR_CANCEL_TEXT, COLOR_CANCEL_FILL) {
+            if let Some(c) = text_pixel(x, y, c_x, 533, 3, cancel_bytes, COLOR_CANCEL_TEXT, COLOR_CANCEL_FILL) {
                 return c;
             }
             return COLOR_CANCEL_FILL;
@@ -418,9 +427,17 @@ pub fn get_power_menu_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     let r2 = (COLOR_BG_BOT >> 16) & 0xFF;
     let g2 = (COLOR_BG_BOT >> 8) & 0xFF;
     let b2 = COLOR_BG_BOT & 0xFF;
-    let r = r1 + ((r2 as i32 - r1 as i32) * t as i32 / 255) as u32;
-    let g = g1 + ((g2 as i32 - g1 as i32) * t as i32 / 255) as u32;
-    let b = b1 + ((b2 as i32 - b1 as i32) * t as i32 / 255) as u32;
+    // WHY i64 and a clamp: the delta is signed, and the old i32-to-u32 cast of a
+    // negative quotient panicked on add in debug builds when the bottom stop was
+    // darker than the top. Interpolating in i64 and clamping keeps every channel
+    // inside 0..=255 for either stop order.
+    let lerp = |a: u32, b: u32| -> u32 {
+        let v = a as i64 + ((b as i64 - a as i64) * t as i64 / 255);
+        v.clamp(0, 255) as u32
+    };
+    let r = lerp(r1, r2);
+    let g = lerp(g1, g2);
+    let b = lerp(b1, b2);
 
     0xFF000000 | (r << 16) | (g << 8) | b
 }

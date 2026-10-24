@@ -19,30 +19,22 @@
 
 use core::panic::PanicInfo;
 use interos_std as std;
-use camera::theme::{THEME, Theme, radius};
+use camera::theme::{chrome, radius, spacing, typography, Theme};
 use std::design::primitives::Rect;
 
-use interos_std::design::components;
 use interos_std::design::outline_text;
 
 use camera::{
     CameraApp, CameraAspectRatio, CameraFilter, CameraMode, CameraScreen, CameraStatus, CaptureOutcome, FlashMode,
-    SettingsRow, TimerMode, SETTINGS_ROW_ORDER, THUMBNAIL_DIM, VIEWFINDER_TEXT_W,
+    SettingsRow, TimerMode, SETTINGS_ROW_ORDER, THUMBNAIL_DIM,
 };
 
 /// The platform's corner radii, under the short names the renderer uses.
 const R_CARD: usize = radius::CARD;
 
-/// The platform's card treatment for the settings sheet.
-const SHEET_CARD: components::CardStyle =
-    components::card_style(&THEME, components::Elevation::Raised);
-
 const W: usize = 720;
 const H: usize = 1440;
 const CHUNK: usize = 4096;
-
-/// Ink for a control that is painted but has nothing behind it.
-const DISABLED: u32 = THEME.border;
 
 // -----------------------------------------------------------------------------
 // Screen bands
@@ -53,18 +45,30 @@ const TOP_BAND_Y1: usize = 112;
 const VIEWFINDER_Y0: usize = 120;
 const VIEWFINDER_Y1: usize = 1120;
 
-/// Inner width of the viewfinder canvas (inset 20px from each edge).
-const VIEWFINDER_W: usize = W - 40;
+/// Every control aligns to the platform's 24px gutter.
+const GUTTER: usize = spacing::GRID_24;
+const VIEWFINDER_X0: usize = GUTTER;
+const VIEWFINDER_X1: usize = W - GUTTER;
+
+/// Inner width of the viewfinder canvas (24px gutter on each edge).
+const VIEWFINDER_W: usize = VIEWFINDER_X1 - VIEWFINDER_X0;
 
 /// Aspect ratio toggle pill inside the viewfinder header (4:3 vs 16:9 vs 1:1).
-const ASPECT_RECT: Rect = Rect::new(36, VIEWFINDER_Y0 + 16, 76, 48);
+const ASPECT_RECT: Rect = Rect::new(VIEWFINDER_X0 + 12, VIEWFINDER_Y0 + 16, 76, 48);
 /// Rule-of-Thirds 3x3 framing grid toggle pill inside the viewfinder header.
-const GRID_RECT: Rect = Rect::new(124, VIEWFINDER_Y0 + 16, 76, 48);
+const GRID_RECT: Rect = Rect::new(VIEWFINDER_X0 + 100, VIEWFINDER_Y0 + 16, 76, 48);
 /// Self-timer mode toggle pill inside the viewfinder header.
-const TIMER_RECT: Rect = Rect::new(212, VIEWFINDER_Y0 + 16, 76, 48);
+const TIMER_RECT: Rect = Rect::new(VIEWFINDER_X0 + 188, VIEWFINDER_Y0 + 16, 76, 48);
 
 const MODE_STRIP_Y0: usize = 1144;
 const MODE_STRIP_Y1: usize = 1204;
+
+/// Three equal mode slots, 12px apart, inside the 24px gutters.
+const MODE_SLOT_W: usize = 216;
+const MODE_SLOT_GAP: usize = 12;
+const MODE_X0: usize = GUTTER;
+const MODE_X1: usize = MODE_X0 + MODE_SLOT_W + MODE_SLOT_GAP;
+const MODE_X2: usize = MODE_X1 + MODE_SLOT_W + MODE_SLOT_GAP;
 
 const DOCK_Y0: usize = 1210;
 const DOCK_Y1: usize = H;
@@ -75,8 +79,8 @@ const DOCK_Y1: usize = H;
 const TOP_ROW_Y: usize = 24;
 const TOP_ROW_H: usize = 48;
 
-/// Back control, 52x48: comfortably exceeds >= 48px touch target.
-const BACK_RECT: Rect = Rect::new(20, TOP_ROW_Y, 52, TOP_ROW_H);
+/// Back control, 48x48: matches the SDK back button's painted box exactly.
+const BACK_RECT: Rect = Rect::new(GUTTER, TOP_ROW_Y, 48, TOP_ROW_H);
 /// Flash / torch pill: 116x48 (>=48px).
 const FLASH_RECT: Rect = Rect::new(80, TOP_ROW_Y, 116, TOP_ROW_H);
 /// Capture-geometry readout: 150x48. Reports platform geometry.
@@ -86,8 +90,14 @@ const FILTER_RECT: Rect = Rect::new(362, TOP_ROW_Y, 170, TOP_ROW_H);
 /// Capture counter badge: 156x48. Reports `total_photos`.
 const SHOTS_RECT: Rect = Rect::new(540, TOP_ROW_Y, 156, TOP_ROW_H);
 
-/// Corner radius of the top-row pills.
-const TOP_PILL_RADIUS: usize = 18;
+/// Corner radius of the floating pills.
+const TOP_PILL_RADIUS: usize = radius::SOFT_PILL;
+
+/// The status card that carries the platform's own verdict on the camera.
+const STATUS_CARD_W: usize = 520;
+const STATUS_CARD_H: usize = 124;
+/// The card's text column: a 64px icon gutter and a 24px right margin.
+const STATUS_TEXT_W: usize = STATUS_CARD_W - 88;
 
 /// Centre of the flash pictogram inside `FLASH_RECT`.
 const FLASH_ICON_CX: usize = FLASH_RECT.x + 24;
@@ -256,7 +266,7 @@ fn top_pill_body(x: usize, y: usize, rect: Rect) -> Option<(u32, bool)> {
     } else if rx < 2 || ry < 2 {
         on_border = true;
     }
-    Some((THEME.surface_container, on_border))
+    Some((chrome::SURFACE, on_border))
 }
 
 /// Draws a label centred in `rect`, upgrading to Scale 2 Body where it fits.
@@ -302,14 +312,108 @@ fn flash_label(x: usize, y: usize, label: &[u8], color: u32, bg: u32) -> Option<
     test_text(x, y, x0, y0, scale, label, FLASH_TEXT_W, color, bg)
 }
 
-/// The ink of the thirds grid.
+/// The ink of the thirds grid: a quiet hairline on the well.
 fn grid_ink() -> u32 {
-    Theme::blend(THEME.surface_container_low, THEME.on_surface_variant, 40)
+    Theme::blend(chrome::WELL, chrome::TEXT_MUTED, 34)
 }
 
-/// The ink of the viewfinder's border.
-fn viewfinder_border_ink() -> u32 {
-    Theme::blend(THEME.surface, THEME.on_surface, 204)
+/// The colour that states the platform's verdict, in the platform's roles.
+fn status_ink(status: CameraStatus) -> u32 {
+    match status {
+        CameraStatus::AuthorityRefused | CameraStatus::Failed => chrome::REFUSED,
+        CameraStatus::NoSensor => chrome::CAUTION,
+        CameraStatus::AuthorityHeld => chrome::READY,
+    }
+}
+
+/// The header overlay pills: aspect, grid and timer.
+///
+/// WHY this is painted after the letterbox: the pills float above the frame,
+/// so a 4:3 or 1:1 matte must not erase half of them.
+fn viewfinder_header_pixel(x: usize, y: usize, camera: &CameraApp) -> Option<u32> {
+    if ASPECT_RECT.contains(x, y) {
+        let fill = chrome::tint(chrome::SKY, 12);
+        let c = std::design::primitives::draw_rounded_rect(
+            x,
+            y,
+            ASPECT_RECT,
+            TOP_PILL_RADIUS,
+            fill,
+            Some(chrome::tint(chrome::SKY, 70)),
+            1,
+        )?;
+        let lbl = camera.aspect_ratio.label();
+        return Some(top_row_label(x, y, ASPECT_RECT, lbl, chrome::SKY, fill).unwrap_or(c));
+    }
+
+    if GRID_RECT.contains(x, y) {
+        let active = camera.guides;
+        let fill = if active { chrome::tint(chrome::SKY, 14) } else { chrome::SURFACE };
+        let ink = if active { chrome::SKY } else { chrome::TEXT_MUTED };
+        let border = if active { chrome::SKY } else { chrome::BORDER };
+        let c = std::design::primitives::draw_rounded_rect(
+            x,
+            y,
+            GRID_RECT,
+            TOP_PILL_RADIUS,
+            fill,
+            Some(border),
+            1,
+        )?;
+        return Some(top_row_label(x, y, GRID_RECT, b"GRID", ink, fill).unwrap_or(c));
+    }
+
+    if TIMER_RECT.contains(x, y) {
+        let active = camera.timer_mode != TimerMode::Off;
+        let fill = if active { chrome::tint(chrome::SKY, 14) } else { chrome::SURFACE };
+        let ink = if active { chrome::SKY } else { chrome::TEXT_MUTED };
+        let border = if active { chrome::SKY } else { chrome::BORDER };
+        let c = std::design::primitives::draw_rounded_rect(
+            x,
+            y,
+            TIMER_RECT,
+            TOP_PILL_RADIUS,
+            fill,
+            Some(border),
+            1,
+        )?;
+        let lbl = camera.timer_mode.label();
+        return Some(top_row_label(x, y, TIMER_RECT, lbl, ink, fill).unwrap_or(c));
+    }
+    None
+}
+
+/// The mode carousel: the selected mode sits in an amber capsule.
+fn mode_strip_pixel(x: usize, y: usize, camera: &CameraApp) -> Option<u32> {
+    const DOC: &[u8] = b"DOCUMENT";
+    const PHO: &[u8] = b"PHOTO";
+    const VID: &[u8] = b"VIDEO";
+    let slots = [
+        (MODE_X0, DOC, CameraMode::DocumentVision),
+        (MODE_X1, PHO, CameraMode::Photo),
+        (MODE_X2, VID, CameraMode::Video),
+    ];
+    for (x0, label, mode) in slots {
+        let rect = Rect::new(x0, MODE_STRIP_Y0 + 6, MODE_SLOT_W, 48);
+        if !rect.contains(x, y) {
+            continue;
+        }
+        let selected = camera.mode == mode;
+        let fill = if selected { chrome::tint(chrome::AMBER, 14) } else { chrome::BODY };
+        let border = if selected { chrome::tint(chrome::AMBER, 60) } else { chrome::BORDER };
+        let ink = if selected { chrome::AMBER } else { chrome::TEXT_MUTED };
+        let c = std::design::primitives::draw_rounded_rect(
+            x,
+            y,
+            rect,
+            TOP_PILL_RADIUS,
+            fill,
+            Some(border),
+            1,
+        )?;
+        return Some(top_row_label(x, y, rect, label, ink, fill).unwrap_or(c));
+    }
+    None
 }
 
 #[inline(never)]
@@ -317,11 +421,17 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
     // 1. Status Bar & Top Controls (y: 0..112)
     if y < TOP_BAND_Y1 {
         if y >= TOP_BAND_Y1 - 2 {
-            return THEME.border;
+            return chrome::BORDER;
         }
 
-        // Back control (52x48px)
-        if let Some(c) = std::design::back_button::pixel(x, y, THEME.on_surface, THEME.border, THEME.surface_container) {
+        // Back control: the SDK's 48x48 back button on the chassis.
+        if let Some(c) = std::design::back_button::pixel(
+            x,
+            y,
+            chrome::TEXT,
+            chrome::BORDER_STRONG,
+            chrome::SURFACE,
+        ) {
             return c;
         }
 
@@ -329,11 +439,11 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
         if let Some((fill, on_border)) = top_pill_body(x, y, FLASH_RECT) {
             let is_lit = camera.flash_available && camera.flash == FlashMode::On;
             let icon_color = if is_lit {
-                THEME.warning
+                chrome::AMBER
             } else if !camera.flash_available || camera.flash == FlashMode::Off {
-                THEME.on_surface_variant
+                chrome::TEXT_MUTED
             } else {
-                THEME.primary // Auto
+                chrome::SKY // Auto
             };
 
             if test_lightning(x, y, FLASH_ICON_CX, FLASH_ICON_CY) {
@@ -350,7 +460,13 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
             }
 
             if on_border {
-                return if is_lit { THEME.warning } else { THEME.border };
+                return if is_lit {
+                    chrome::AMBER
+                } else if camera.flash_available {
+                    chrome::tint(chrome::SKY, 60)
+                } else {
+                    chrome::BORDER
+                };
             }
             return fill;
         }
@@ -360,34 +476,34 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
             let (label, label_len) = camera.frame_readout();
             let label = &label[..label_len];
             let color = if camera.status == CameraStatus::AuthorityRefused {
-                THEME.error
+                chrome::REFUSED
             } else {
-                THEME.primary
+                chrome::TEXT
             };
-            if let Some(c) = top_row_label(x, y, FRAME_RECT, label, color, THEME.surface_container) {
+            if let Some(c) = top_row_label(x, y, FRAME_RECT, label, color, chrome::SURFACE) {
                 return c;
             }
             if on_border {
-                return DISABLED;
+                return chrome::BORDER;
             }
-            return THEME.surface_container;
+            return chrome::SURFACE;
         }
 
-        // ISP filter pill (170x48px)
+        // ISP filter pill (170x48px): an informational control, so sky.
         if let Some((fill, on_border)) = top_pill_body(x, y, FILTER_RECT) {
-            let (filter_name, filter_color) = match camera.filter {
-                CameraFilter::Normal => (&b"NORMAL"[..], THEME.primary),
-                CameraFilter::Vivid => (&b"VIVID"[..], THEME.error),
-                CameraFilter::Warm => (&b"WARM"[..], THEME.warning),
-                CameraFilter::Cool => (&b"COOL"[..], THEME.primary),
-                CameraFilter::Mono => (&b"MONO"[..], THEME.on_surface_variant),
-                CameraFilter::Vintage => (&b"VINTAGE"[..], THEME.warning),
+            let filter_name: &[u8] = match camera.filter {
+                CameraFilter::Normal => b"NORMAL",
+                CameraFilter::Vivid => b"VIVID",
+                CameraFilter::Warm => b"WARM",
+                CameraFilter::Cool => b"COOL",
+                CameraFilter::Mono => b"MONO",
+                CameraFilter::Vintage => b"VINTAGE",
             };
-            if let Some(c) = top_row_label(x, y, FILTER_RECT, filter_name, filter_color, fill) {
+            if let Some(c) = top_row_label(x, y, FILTER_RECT, filter_name, chrome::SKY, fill) {
                 return c;
             }
             if on_border {
-                return filter_color;
+                return chrome::tint(chrome::SKY, 60);
             }
             return fill;
         }
@@ -395,16 +511,16 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
         // Capture counter badge (156x48px)
         if let Some((_fill, on_border)) = top_pill_body(x, y, SHOTS_RECT) {
             let label = &camera.shots_label[..camera.shots_label_len];
-            if let Some(c) = top_row_label(x, y, SHOTS_RECT, label, THEME.on_surface, THEME.surface_container) {
+            if let Some(c) = top_row_label(x, y, SHOTS_RECT, label, chrome::TEXT, chrome::SURFACE) {
                 return c;
             }
             if on_border {
-                return THEME.border;
+                return chrome::BORDER;
             }
-            return THEME.surface_container;
+            return chrome::SURFACE;
         }
 
-        return THEME.surface;
+        return chrome::BODY;
     }
 
     // 2. The settings surface (when open)
@@ -412,73 +528,24 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
         return settings_pixel(x, y, camera);
     }
 
-    // 3. Viewfinder Canvas (y: VIEWFINDER_Y0..VIEWFINDER_Y1, x: 20..700)
-    if (VIEWFINDER_Y0..VIEWFINDER_Y1).contains(&y) && x >= 20 && x < W - 20 {
-        let vf = Rect::new(20, VIEWFINDER_Y0, VIEWFINDER_W, VIEWFINDER_Y1 - VIEWFINDER_Y0);
+    // 3. Viewfinder Canvas (y: VIEWFINDER_Y0..VIEWFINDER_Y1, inside gutters)
+    if (VIEWFINDER_Y0..VIEWFINDER_Y1).contains(&y) && x >= VIEWFINDER_X0 && x < VIEWFINDER_X1 {
+        let vf = Rect::new(
+            VIEWFINDER_X0,
+            VIEWFINDER_Y0,
+            VIEWFINDER_W,
+            VIEWFINDER_Y1 - VIEWFINDER_Y0,
+        );
         if let Some(c) = std::design::primitives::draw_rounded_rect(
             x,
             y,
             vf,
             R_CARD,
-            THEME.surface_container_low,
-            Some(viewfinder_border_ink()),
+            chrome::WELL,
+            Some(chrome::BORDER_STRONG),
             1,
         ) {
-            // Viewfinder top overlay pills (always accessible above matte)
-            // 3.1 Aspect Ratio toggle pill (76x48px)
-            if ASPECT_RECT.contains(x, y) {
-                if let Some(pill_c) = std::design::primitives::draw_rounded_rect(x, y, ASPECT_RECT, 14, 0xCC111214, Some(THEME.border), 1) {
-                    let lbl = camera.aspect_ratio.label();
-                    let scale = 2;
-                    let lw = std::design::font::measure(lbl, scale);
-                    let lx = ASPECT_RECT.x + (ASPECT_RECT.w.saturating_sub(lw)) / 2;
-                    let lh = std::design::font::line_height(scale);
-                    let ly = ASPECT_RECT.y + (ASPECT_RECT.h.saturating_sub(lh)) / 2;
-                    if let Some(tc) = test_text(x, y, lx, ly, scale, lbl, ASPECT_RECT.w, THEME.primary, 0xCC111214) {
-                        return tc;
-                    }
-                    return pill_c;
-                }
-            }
-
-            // 3.2 Rule-of-Thirds Grid toggle pill (76x48px)
-            if GRID_RECT.contains(x, y) {
-                let border_col = if camera.guides { THEME.primary } else { THEME.border };
-                if let Some(pill_c) = std::design::primitives::draw_rounded_rect(x, y, GRID_RECT, 14, 0xCC111214, Some(border_col), 1) {
-                    let lbl = b"GRID";
-                    let scale = 2;
-                    let lw = std::design::font::measure(lbl, scale);
-                    let lx = GRID_RECT.x + (GRID_RECT.w.saturating_sub(lw)) / 2;
-                    let lh = std::design::font::line_height(scale);
-                    let ly = GRID_RECT.y + (GRID_RECT.h.saturating_sub(lh)) / 2;
-                    let text_color = if camera.guides { THEME.primary } else { THEME.on_surface_variant };
-                    if let Some(tc) = test_text(x, y, lx, ly, scale, lbl, GRID_RECT.w, text_color, 0xCC111214) {
-                        return tc;
-                    }
-                    return pill_c;
-                }
-            }
-
-            // 3.3 Self-Timer toggle pill (76x48px)
-            if TIMER_RECT.contains(x, y) {
-                let is_active = camera.timer_mode != TimerMode::Off;
-                let border_col = if is_active { THEME.warning } else { THEME.border };
-                if let Some(pill_c) = std::design::primitives::draw_rounded_rect(x, y, TIMER_RECT, 14, 0xCC111214, Some(border_col), 1) {
-                    let lbl = camera.timer_mode.label();
-                    let scale = 2;
-                    let lw = std::design::font::measure(lbl, scale);
-                    let lx = TIMER_RECT.x + (TIMER_RECT.w.saturating_sub(lw)) / 2;
-                    let lh = std::design::font::line_height(scale);
-                    let ly = TIMER_RECT.y + (TIMER_RECT.h.saturating_sub(lh)) / 2;
-                    let text_color = if is_active { THEME.warning } else { THEME.on_surface_variant };
-                    if let Some(tc) = test_text(x, y, lx, ly, scale, lbl, TIMER_RECT.w, text_color, 0xCC111214) {
-                        return tc;
-                    }
-                    return pill_c;
-                }
-            }
-
-            // Dynamic Aspect Ratio framing bounds
+            // Dynamic aspect ratio framing bounds
             let (active_y0, active_h) = match camera.aspect_ratio {
                 CameraAspectRatio::Ratio16_9 => (VIEWFINDER_Y0, 1000),
                 CameraAspectRatio::Ratio4_3 => (VIEWFINDER_Y0 + 47, 906),
@@ -486,24 +553,44 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
             };
             let active_y1 = active_y0 + active_h;
 
-            // Translucent dark letterbox bars outside active aspect ratio frame
+            // The matte outside the active frame is darker. The header pills
+            // are painted on top of it so a 4:3 or 1:1 mask cannot eat them.
             if y < active_y0 || y >= active_y1 {
-                return 0xEE090A0C;
+                if let Some(c) = viewfinder_header_pixel(x, y, camera) {
+                    return c;
+                }
+                return chrome::LETTERBOX;
             }
 
             let rel_frame_y = y - active_y0;
-            let rel_frame_x = x - 20;
+            let rel_frame_x = x - VIEWFINDER_X0;
 
-            // 3.4 3x3 Rule-of-Thirds Grid framing lines inside active frame
+            // The pills float above the frame, including its edge hairline.
+            if let Some(c) = viewfinder_header_pixel(x, y, camera) {
+                return c;
+            }
+
+            // The active frame's edge: a hairline that separates it from the matte.
+            if y == active_y0
+                || y == active_y1 - 1
+                || x == VIEWFINDER_X0
+                || x == VIEWFINDER_X1 - 1
+            {
+                return chrome::BORDER_STRONG;
+            }
+
+            // 3.1 3x3 Rule-of-Thirds grid inside the active frame
             if camera.guides {
-                let is_third_x = rel_frame_x == 226 || rel_frame_x == 453;
-                let is_third_y = rel_frame_y == (active_h / 3) || rel_frame_y == ((active_h * 2) / 3);
+                let is_third_x =
+                    rel_frame_x == VIEWFINDER_W / 3 || rel_frame_x == (VIEWFINDER_W * 2) / 3;
+                let is_third_y =
+                    rel_frame_y == active_h / 3 || rel_frame_y == (active_h * 2) / 3;
                 if is_third_x || is_third_y {
                     return grid_ink();
                 }
 
-                // Center focus reticle
-                let ret_cx = 340;
+                // Center focus reticle, amber like the shutter
+                let ret_cx = VIEWFINDER_W / 2;
                 let ret_cy = active_h / 2;
                 let dx = (rel_frame_x as isize - ret_cx as isize).abs();
                 let dy = (rel_frame_y as isize - ret_cy as isize).abs();
@@ -511,51 +598,81 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
                     && ((dx >= 36 && dy <= 12) || (dy >= 36 && dx <= 12));
                 let is_crosshair = (dx <= 4 && dy <= 1) || (dy <= 4 && dx <= 1);
                 if is_reticle || is_crosshair {
-                    return THEME.warning;
+                    return chrome::AMBER;
                 }
             }
 
-            // 3.5 Self-Timer Countdown Readout (Scale 2 Body badge in center)
+            // 3.2 Self-Timer Countdown Readout
             if camera.countdown_ticks > 0 {
-                let center_x: usize = 360;
+                let center_x: usize = VIEWFINDER_X0 + VIEWFINDER_W / 2;
                 let center_y: usize = active_y0 + active_h / 2;
                 let c_dx = x as isize - center_x as isize;
                 let c_dy = y as isize - center_y as isize;
                 let dist_sq = (c_dx * c_dx + c_dy * c_dy) as usize;
                 if dist_sq <= 52 * 52 && dist_sq >= 44 * 44 {
-                    return THEME.warning;
+                    return chrome::AMBER;
                 }
                 if dist_sq < 44 * 44 {
                     let sec = ((camera.countdown_ticks + 9) / 10).clamp(1, 9) as u8;
                     let digit = [b'0' + sec];
-                    let lw = std::design::font::measure(&digit, 2);
-                    let lh = std::design::font::line_height(2);
+                    let lw = std::design::font::measure(&digit, typography::BODY_SCALE);
+                    let lh = std::design::font::line_height(typography::BODY_SCALE);
                     let lx = center_x.saturating_sub(lw / 2);
                     let ly = center_y.saturating_sub(lh / 2);
-                    if let Some(tc) = test_text(x, y, lx, ly, 2, &digit, 64, THEME.warning, THEME.surface_container_low) {
+                    if let Some(tc) = test_text(
+                        x,
+                        y,
+                        lx,
+                        ly,
+                        typography::BODY_SCALE,
+                        &digit,
+                        64,
+                        chrome::AMBER,
+                        chrome::SURFACE,
+                    ) {
                         return tc;
                     }
-                    return 0xCC111214;
+                    return chrome::SURFACE;
                 }
             }
 
-            // 3.6 Video Mode indicator / timer readout
+            // 3.3 Video mode indicator / readout. The readout stays 00:00:
+            // this platform exposes no video stream, so nothing is invented.
             if camera.mode == CameraMode::Video && camera.countdown_ticks == 0 {
-                let rec_rect = Rect::new(300, active_y0 + 16, 120, 36);
+                let rec_rect =
+                    Rect::new(VIEWFINDER_X0 + VIEWFINDER_W / 2 - 60, active_y0 + 16, 120, 36);
                 if rec_rect.contains(x, y) {
-                    if let Some(rc) = std::design::primitives::draw_rounded_rect(x, y, rec_rect, 10, 0xCC111214, Some(THEME.error), 1) {
+                    if let Some(rc) = std::design::primitives::draw_rounded_rect(
+                        x,
+                        y,
+                        rec_rect,
+                        radius::CHIP,
+                        chrome::SURFACE,
+                        Some(chrome::RECORD),
+                        1,
+                    ) {
                         let dot_cx = rec_rect.x + 16;
                         let dot_cy = rec_rect.y + rec_rect.h / 2;
                         let dot_dx = x as isize - dot_cx as isize;
                         let dot_dy = y as isize - dot_cy as isize;
                         if (dot_dx * dot_dx + dot_dy * dot_dy) <= 16 {
-                            return THEME.error;
+                            return chrome::RECORD;
                         }
                         let text = b"00:00";
-                        let lh = std::design::font::line_height(2);
+                        let lh = std::design::font::line_height(typography::BODY_SCALE);
                         let lx = rec_rect.x + 32;
                         let ly = rec_rect.y + (rec_rect.h.saturating_sub(lh)) / 2;
-                        if let Some(tc) = test_text(x, y, lx, ly, 2, text, rec_rect.w - 32, THEME.on_surface, 0xCC111214) {
+                        if let Some(tc) = test_text(
+                            x,
+                            y,
+                            lx,
+                            ly,
+                            typography::BODY_SCALE,
+                            text,
+                            rec_rect.w - 32,
+                            chrome::TEXT,
+                            chrome::SURFACE,
+                        ) {
                             return tc;
                         }
                         return rc;
@@ -563,104 +680,87 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
                 }
             }
 
-            // 3.7 The absence panel (when total_photos == 0 and countdown is idle)
+            // 3.4 The platform's verdict, as a status card with a status dot.
+            // WHY the strings come from the model: this demo holds no camera
+            // authority, so the card states the platform's own answer. It is
+            // not a live image, not sensor telemetry and not a capture.
             if camera.total_photos == 0 && camera.countdown_ticks == 0 {
                 let abs_mid = active_y0 + active_h / 2;
-                if y >= abs_mid.saturating_sub(40) && y < abs_mid + 60 {
-                    if y < abs_mid + 15 {
-                        if let Some(tc) = test_text(
-                            x,
-                            y,
-                            camera.head_x,
-                            abs_mid.saturating_sub(35),
-                            2,
-                            &camera.head[..camera.head_len],
-                            VIEWFINDER_TEXT_W,
-                            THEME.on_surface,
-                            THEME.surface_container_low,
-                        ) {
-                            return tc;
+                let card = Rect::new(
+                    VIEWFINDER_X0 + (VIEWFINDER_W - STATUS_CARD_W) / 2,
+                    abs_mid - STATUS_CARD_H / 2,
+                    STATUS_CARD_W,
+                    STATUS_CARD_H,
+                );
+                let ink = status_ink(camera.status);
+                if card.contains(x, y) {
+                    if let Some(card_c) = std::design::primitives::draw_rounded_rect(
+                        x,
+                        y,
+                        card,
+                        R_CARD,
+                        chrome::SURFACE,
+                        Some(chrome::tint(ink, 45)),
+                        1,
+                    ) {
+                        // Icon-like status dot with a quiet halo.
+                        let dot_cx = card.x + 30;
+                        let dot_cy = abs_mid - 19;
+                        let dot_dx = x as isize - dot_cx as isize;
+                        let dot_dy = y as isize - dot_cy as isize;
+                        let dot_r2 = dot_dx * dot_dx + dot_dy * dot_dy;
+                        if dot_r2 <= 121 {
+                            if dot_r2 <= 36 {
+                                return ink;
+                            }
+                            return chrome::tint(ink, 26);
                         }
-                    } else if y >= abs_mid + 20 {
-                        if let Some(tc) = test_text(
-                            x,
-                            y,
-                            camera.sub_x,
-                            abs_mid + 22,
-                            1,
-                            &camera.sub[..camera.sub_len],
-                            VIEWFINDER_TEXT_W,
-                            THEME.on_surface_variant,
-                            THEME.surface_container_low,
-                        ) {
-                            return tc;
+
+                        let text_x = card.x + 64;
+                        if y < abs_mid + 15 {
+                            if let Some(tc) = test_text(
+                                x,
+                                y,
+                                text_x,
+                                abs_mid.saturating_sub(35),
+                                typography::BODY_SCALE,
+                                &camera.head[..camera.head_len],
+                                STATUS_TEXT_W,
+                                chrome::TEXT,
+                                chrome::SURFACE,
+                            ) {
+                                return tc;
+                            }
+                        } else if y >= abs_mid + 20 {
+                            if let Some(tc) = test_text(
+                                x,
+                                y,
+                                text_x,
+                                abs_mid + 22,
+                                typography::CAPTION_SCALE,
+                                &camera.sub[..camera.sub_len],
+                                STATUS_TEXT_W,
+                                chrome::TEXT_MUTED,
+                                chrome::SURFACE,
+                            ) {
+                                return tc;
+                            }
                         }
+                        return card_c;
                     }
                 }
             }
+
             return c;
         }
     }
 
-    // 4. Mode Selector Carousel (y: 1144..1204, 60px tall, >=48px touch)
+    // 4. Mode Selector Carousel (three 216px slots, 60px tall, >=48px touch)
     if (MODE_STRIP_Y0..MODE_STRIP_Y1).contains(&y) {
-        const S0_X: usize = 20;
-        const S0_W: usize = 226;
-        const S1_X: usize = 247;
-        const S1_W: usize = 226;
-        const S2_X: usize = 474;
-        const S2_W: usize = 226;
-        const DOC: &[u8] = b"DOCUMENT";
-        const PHO: &[u8] = b"PHOTO";
-        const VID: &[u8] = b"VIDEO";
-
-        let mut scale = 2usize;
-        if std::design::font::measure(DOC, 2) > S0_W
-            || std::design::font::measure(PHO, 2) > S1_W
-            || std::design::font::measure(VID, 2) > S2_W
-        {
-            scale = 1;
+        if let Some(c) = mode_strip_pixel(x, y, camera) {
+            return c;
         }
-        let lh = std::design::font::line_height(scale);
-        let y0 = MODE_STRIP_Y0 + ((MODE_STRIP_Y1 - MODE_STRIP_Y0).saturating_sub(lh)) / 2;
-
-        if x < S1_X {
-            let is_doc = camera.mode == CameraMode::DocumentVision;
-            let doc_color = if is_doc { THEME.on_surface } else { THEME.on_surface_variant };
-            let doc_w = std::design::font::measure(DOC, scale);
-            let doc_x = S0_X + (S0_W.saturating_sub(doc_w)) / 2;
-            if let Some(c) = test_text(x, y, doc_x, y0, scale, DOC, S0_W, doc_color, THEME.surface) {
-                return c;
-            }
-        } else if x < S2_X {
-            let is_photo = camera.mode == CameraMode::Photo;
-            let photo_color = if is_photo { THEME.on_surface } else { THEME.on_surface_variant };
-            let pho_w = std::design::font::measure(PHO, scale);
-            let pho_x = S1_X + (S1_W.saturating_sub(pho_w)) / 2;
-            if let Some(c) = test_text(x, y, pho_x, y0, scale, PHO, S1_W, photo_color, THEME.surface) {
-                return c;
-            }
-        } else {
-            let is_vid = camera.mode == CameraMode::Video;
-            let vid_color = if is_vid { THEME.on_surface } else { THEME.on_surface_variant };
-            let vid_w = std::design::font::measure(VID, scale);
-            let vid_x = S2_X + (S2_W.saturating_sub(vid_w)) / 2;
-            if let Some(c) = test_text(x, y, vid_x, y0, scale, VID, S2_W, vid_color, THEME.surface) {
-                return c;
-            }
-        }
-
-        // Active mode indicator underline, 64px centered in active slot
-        let is_active_mode = match camera.mode {
-            CameraMode::Photo => x >= 328 && x < 392,
-            CameraMode::Video => x >= 555 && x < 619,
-            CameraMode::DocumentVision => x >= 101 && x < 165,
-        };
-        if is_active_mode && y >= MODE_STRIP_Y1 - 5 && y < MODE_STRIP_Y1 - 1 {
-            return THEME.on_surface;
-        }
-
-        return THEME.surface;
+        return chrome::BODY;
     }
 
     // 5. Bottom Shutter Dock & Hardware Controls (y: DOCK_Y0..DOCK_Y1)
@@ -672,9 +772,9 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
             let r2 = (dx * dx + dy * dy) as usize;
             let disc_r = 32usize;
             if r2 <= disc_r * disc_r {
-                // Crisp outer metallic ring
+                // Crisp outer ring
                 if r2 >= (disc_r - 2) * (disc_r - 2) {
-                    return THEME.on_surface;
+                    return chrome::BORDER_STRONG;
                 }
                 // Live preview thumbnail of recently captured photo
                 if camera.has_thumbnail {
@@ -690,9 +790,9 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
                 }
                 // Fallback landscape pictogram
                 if test_gallery_icon(x, y, PHOTOS_CX, SHUTTER_CY) {
-                    return THEME.on_surface;
+                    return chrome::SKY;
                 }
-                return THEME.surface_container_high;
+                return chrome::SURFACE;
             }
         }
 
@@ -700,36 +800,40 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
         let dx = x as isize - SHUTTER_CX as isize;
         let dy = y as isize - SHUTTER_CY as isize;
         let dist_sq = dx * dx + dy * dy;
+        let refused = camera.status == CameraStatus::AuthorityRefused;
 
         let outer = (SHUTTER_RING_OUTER * SHUTTER_RING_OUTER) as isize;
         let inner = (SHUTTER_RING_INNER * SHUTTER_RING_INNER) as isize;
         let core = (SHUTTER_R_CORE * SHUTTER_R_CORE) as isize;
 
-        // Outer white metallic ring
+        // Outer ring: white, amber on feedback, grey when refused.
         if dist_sq <= outer && dist_sq >= inner {
-            return if camera.status == CameraStatus::AuthorityRefused {
-                DISABLED
+            return if refused {
+                chrome::DISABLED
             } else if camera.shutter_feedback_ticks > 0 {
-                THEME.primary
+                chrome::AMBER
             } else {
-                THEME.on_surface
+                chrome::TEXT
             };
         }
-        // Concentric track gap
+        // Concentric track gap: the chassis shows through.
         if dist_sq < inner && dist_sq >= core {
-            return THEME.surface;
+            return chrome::BODY;
         }
         // Inner tactile shutter core (r=48)
         if dist_sq < core {
-            if camera.status == CameraStatus::AuthorityRefused {
-                return THEME.surface_container;
-            } else if camera.mode == CameraMode::Video {
-                return THEME.error;
-            } else if camera.mode == CameraMode::DocumentVision {
-                return THEME.primary;
-            } else {
-                return THEME.on_surface;
+            if refused {
+                // A red slash: the control is present, the authority is not.
+                if (dx + dy).abs() <= 2 && dx.abs() <= 34 {
+                    return chrome::REFUSED;
+                }
+                return chrome::SURFACE;
             }
+            return match camera.mode {
+                CameraMode::Video => chrome::RECORD,
+                // The shutter is the primary control, so it carries the amber.
+                CameraMode::Photo | CameraMode::DocumentVision => chrome::AMBER,
+            };
         }
 
         // 5.3 Bottom-right Settings Button (radius 32, diameter 64px >= 48px)
@@ -740,51 +844,67 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
             let disc_r = 32usize;
             if r2 <= disc_r * disc_r {
                 if test_settings_icon(x, y, SETTINGS_CX, SHUTTER_CY) {
-                    return THEME.on_surface;
+                    return chrome::SKY;
                 }
                 if r2 >= (disc_r - 2) * (disc_r - 2) {
-                    return THEME.border;
+                    return chrome::BORDER_STRONG;
                 }
-                return THEME.surface_container_high;
+                return chrome::SURFACE;
             }
         }
 
-        return THEME.surface;
+        return chrome::BODY;
     }
 
     // Home gesture bar at bottom
     if HOME_PILL.contains(x, y) {
-        return THEME.on_surface_variant;
+        return chrome::TEXT_DIM;
     }
 
-    THEME.surface
+    chrome::BODY
 }
 
-/// The settings surface.
+/// The settings surface: a dark sheet with amber-accented rows.
 fn settings_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
     if let Some(c) = std::design::primitives::draw_rounded_rect(
         x,
         y,
         SHEET_RECT,
-        SHEET_CARD.radius,
-        SHEET_CARD.fill,
-        SHEET_CARD.border,
+        radius::SHEET,
+        chrome::SURFACE,
+        Some(chrome::BORDER_STRONG),
         1,
     ) {
-        // Title upgraded to Scale 2 Body
+        // Amber accent bar beside the title.
+        if x >= SHEET_ROW_X0
+            && x < SHEET_ROW_X0 + 4
+            && y >= SHEET_TITLE_Y0 + 4
+            && y < SHEET_TITLE_Y0 + 28
+        {
+            return chrome::AMBER;
+        }
+
+        // Title, on the Body scale.
         if y >= SHEET_TITLE_Y0 && y < SHEET_TITLE_Y0 + 36 {
             if let Some(tc) = test_text(
                 x,
                 y,
                 SHEET_TEXT_X,
                 SHEET_TITLE_Y0,
-                2,
+                typography::BODY_SCALE,
                 b"CAMERA SETTINGS",
                 SHEET_TEXT_W,
-                THEME.on_surface,
-                SHEET_CARD.fill,
+                chrome::TEXT,
+                chrome::SURFACE,
             ) {
                 return tc;
+            }
+        }
+
+        // Hairline between the title and the first row.
+        if y >= SHEET_ROW_Y0 - 6 && y < SHEET_ROW_Y0 - 4 {
+            if x >= SHEET_ROW_X0 && x < SHEET_ROW_X0 + SHEET_ROW_W {
+                return chrome::BORDER;
             }
         }
 
@@ -794,7 +914,6 @@ fn settings_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
             if y < row_y || y >= row_y + SHEET_ROW_H {
                 continue;
             }
-            let style = components::list_row_style(&THEME, false);
             let plate = std::design::primitives::draw_rounded_rect(
                 x,
                 y,
@@ -804,26 +923,46 @@ fn settings_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
                     SHEET_ROW_W,
                     SHEET_ROW_H - SHEET_ROW_GAP,
                 ),
-                style.radius,
-                style.fill,
-                None,
-                0,
+                radius::CHIP,
+                chrome::SURFACE_HIGH,
+                Some(chrome::BORDER),
+                1,
             );
             let title = camera.settings_row_title(*row);
+            // WHY the bands are the line boxes themselves: the title and the
+            // value are body-scale runs (32 px) and the note is a caption
+            // (22 px), so a 34/60 split clipped the value's descenders and let
+            // the note start inside the value's box.
             if y < row_y + 34 {
                 let title_scale = if std::design::font::measure(title, 2) <= SHEET_TEXT_W { 2 } else { 1 };
-                if let Some(tc) =
-                    test_text(x, y, SHEET_TEXT_X, row_y + 4, title_scale, title, SHEET_TEXT_W, THEME.on_surface, style.fill)
-                {
+                if let Some(tc) = test_text(
+                    x,
+                    y,
+                    SHEET_TEXT_X,
+                    row_y + 2,
+                    title_scale,
+                    title,
+                    SHEET_TEXT_W,
+                    chrome::TEXT,
+                    chrome::SURFACE_HIGH,
+                ) {
                     return tc;
                 }
-            } else if y < row_y + 60 {
+            } else if y < row_y + 66 {
                 let len = camera.settings_value_lens[index];
                 let value = &camera.settings_values[index][..len];
                 let val_scale = if std::design::font::measure(value, 2) <= SHEET_TEXT_W { 2 } else { 1 };
-                if let Some(tc) =
-                    test_text(x, y, SHEET_TEXT_X, row_y + 36, val_scale, value, SHEET_TEXT_W, THEME.primary, style.fill)
-                {
+                if let Some(tc) = test_text(
+                    x,
+                    y,
+                    SHEET_TEXT_X,
+                    row_y + 34,
+                    val_scale,
+                    value,
+                    SHEET_TEXT_W,
+                    chrome::SKY,
+                    chrome::SURFACE_HIGH,
+                ) {
                     return tc;
                 }
             } else {
@@ -833,12 +972,12 @@ fn settings_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
                         x,
                         y,
                         SHEET_TEXT_X,
-                        row_y + 64,
-                        1,
+                        row_y + 66,
+                        typography::CAPTION_SCALE,
                         note,
                         SHEET_TEXT_W,
-                        THEME.on_surface_variant,
-                        style.fill,
+                        chrome::TEXT_MUTED,
+                        chrome::SURFACE_HIGH,
                     ) {
                         return tc;
                     }
@@ -850,7 +989,7 @@ fn settings_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
         }
         return c;
     }
-    THEME.surface
+    chrome::BODY
 }
 
 fn render_camera_ui(surface: u32, camera: &CameraApp) {
@@ -1117,15 +1256,15 @@ fn handle_camera_touch(camera: &mut CameraApp, x: u32, y: u32) -> Tap {
         return Tap::Redraw(Dirty::Viewfinder);
     }
 
-    // 6. Mode Selector Carousel: three equal 226px slots in 20..700 (60px tall, >=48px touch)
+    // 6. Mode Selector Carousel: three equal 216px slots in 24..696 (60px tall, >=48px touch)
     if (MODE_STRIP_Y0..MODE_STRIP_Y1).contains(&y) {
-        if x >= 20 && x < 246 {
+        if x >= MODE_X0 && x < MODE_X0 + MODE_SLOT_W {
             camera.mode = CameraMode::DocumentVision;
             std::log("[CAMERA APP] Switched to Document Vision mode.").ok();
-        } else if x >= 247 && x < 473 {
+        } else if x >= MODE_X1 && x < MODE_X1 + MODE_SLOT_W {
             camera.mode = CameraMode::Photo;
             std::log("[CAMERA APP] Switched to Photo mode.").ok();
-        } else if x >= 474 && x < 700 {
+        } else if x >= MODE_X2 && x < MODE_X2 + MODE_SLOT_W {
             camera.mode = CameraMode::Video;
             std::log("[CAMERA APP] Switched to Video mode.").ok();
         }

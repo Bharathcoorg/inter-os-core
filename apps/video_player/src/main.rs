@@ -841,7 +841,7 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
             meta_buf[ml..ml + dn].copy_from_slice(&d_buf[..dn]);
             ml += dn;
 
-            if let Some(col) = draw_text(x, y, 64, row_y0 + 40, 1, &meta_buf[..ml], COLOR_TEXT_MUTED, row_bg) {
+            if let Some(col) = draw_text(x, y, 64, row_y0 + 44, 1, &meta_buf[..ml], COLOR_TEXT_MUTED, row_bg) {
                 return col;
             }
 

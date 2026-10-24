@@ -1754,19 +1754,31 @@ fn storage_cell_pixel(x: usize, y: usize, app: &GalleryApp, idx: usize, col: usi
         // decoded thumbnail, and one it could not is drawn as a neutral
         // placeholder that says so.
         let thumb = unsafe { STORAGE_THUMBS[idx] };
-        let grad = match thumb.sample(
-            (x - x0) * THUMB_W / CELL,
-            (y - y0) * THUMB_H / card_img_h.max(1),
-        ) {
-            Some(colour) => colour,
-            None => {
-                if (x - x0) < 1 || (x - x0) >= CELL - 1 || (y - y0) < 1 || (y - y0) >= card_img_h - 1
-                {
-                    THEME.border
-                } else {
-                    THEME.surface_container
-                }
-            }
+        // WHY the picture is letterboxed: the image area is wider than it is
+        // tall, and stretching a portrait capture across all of it squashed
+        // the screen sideways. The thumbnail keeps the file's own aspect and
+        // is centred, and the tile's background shows beside it.
+        let inner_w = CELL - 2;
+        let inner_h = card_img_h.saturating_sub(2);
+        let (img_w, img_h) = thumb.fitted_size(inner_w, inner_h);
+        let img_x0 = x0 + 1 + (inner_w - img_w) / 2;
+        let img_y0 = y0 + 1 + (inner_h - img_h) / 2;
+        let grad = if thumb.valid
+            && x >= img_x0
+            && x < img_x0 + img_w
+            && y >= img_y0
+            && y < img_y0 + img_h
+        {
+            thumb
+                .sample(
+                    (x - img_x0) * THUMB_W / img_w.max(1),
+                    (y - img_y0) * THUMB_H / img_h.max(1),
+                )
+                .unwrap_or(THEME.surface_container)
+        } else if (x - x0) < 1 || (x - x0) >= CELL - 1 || (y - y0) < 1 || (y - y0) >= card_img_h - 1 {
+            THEME.border
+        } else {
+            THEME.surface_container
         };
 
         // WHY this label exists at all: the comment above has always claimed
@@ -1846,8 +1858,10 @@ fn storage_cell_pixel(x: usize, y: usize, app: &GalleryApp, idx: usize, col: usi
             let bw = font::measure(badge, 1) + 8;
             let bx0 = x0 + 6;
             let by0 = y0 + 6;
-            if x >= bx0 && x < bx0 + bw && y >= by0 && y < by0 + 16 {
-                if x == bx0 || x == bx0 + bw - 1 || y == by0 || y == by0 + 15 {
+            // WHY 24 and not 16: the badge label is a caption run (22 px), and
+            // a 16 px plate clipped the bottom rows of every letter.
+            if x >= bx0 && x < bx0 + bw && y >= by0 && y < by0 + 24 {
+                if x == bx0 || x == bx0 + bw - 1 || y == by0 || y == by0 + 23 {
                     return 0x88FFFFFF;
                 }
                 if let Some(tc) = text(x, y, bx0 + 4, by0 + 1, 1, badge, 0xFFFFFFFF, 0xCC111214) {

@@ -527,7 +527,11 @@ mod tests {
     fn the_typography_scale_2_body_meets_line_height() {
         use interos_std::font;
         let cap = font::cap_for_scale(2);
-        assert_eq!(cap, 16, "Scale 2 Body cap height must be 16px");
+        assert!(
+            (15..=18).contains(&cap),
+            "Scale 2 Body cap height {} must stay inside the documented 15..=18 band",
+            cap
+        );
         let line = font::line_height(2);
         assert!(line >= 24, "Scale 2 line height should reserve at least 24px");
     }

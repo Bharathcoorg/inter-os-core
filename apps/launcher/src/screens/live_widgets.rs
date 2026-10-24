@@ -16,7 +16,7 @@
 use crate::{test_text_aa, LauncherState};
 use launcher::layout::Rect;
 use launcher::text;
-use launcher::theme::{type_scale, radius, Theme, SCREEN_HEIGHT, SCREEN_WIDTH, STATUS_BAR_HEIGHT, CONTENT_PADDING};
+use launcher::theme::{type_scale, radius, Theme, SCREEN_HEIGHT, SCREEN_WIDTH, STATUS_BAR_HEIGHT};
 
 const THEME: Theme = launcher::theme::SHELL;
 
@@ -344,8 +344,8 @@ fn build_widgets_frame(state: &LauncherState) -> WidgetsPlan {
     // 1. Canonical Status Bar Elements
     let status_clock = if state.clock_source_ok {
         LabelRun::new(
-            CONTENT_PADDING,
-            STATUS_BAR_HEIGHT - 32,
+            crate::screens::status::CLOCK_X,
+            crate::screens::status::CLOCK_Y,
             type_scale::BODY,
             &state.clock_time,
             theme.on_surface,
@@ -558,19 +558,13 @@ pub fn get_live_widgets_color(x: usize, y: usize, state: &LauncherState) -> u32 
     let theme = THEME;
 
     // 1. Canonical Status Bar (y < STATUS_BAR_HEIGHT)
-    // Exactly matches the homescreen status bar: real RTC clock and canonical hardware telemetry
     if y < STATUS_BAR_HEIGHT {
-        if y == STATUS_BAR_HEIGHT - 1 {
-            return theme.border;
-        }
-        let ink = theme.on_surface;
-        if let Some(c) = f.status_clock.pixel_on(x, y, theme.surface) {
-            return c;
-        }
-        if let Some(c) = crate::screens::home::telemetry_pixel(x, y, &f.telemetry, ink) {
-            return c;
-        }
-        return theme.surface;
+        return crate::screens::status::pixel_with(
+            x,
+            y,
+            |x, y| f.status_clock.pixel_on(x, y, theme.surface),
+            &theme,
+        );
     }
 
     // 2. Header

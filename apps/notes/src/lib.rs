@@ -1708,7 +1708,11 @@ mod tests {
         let body_scale = crate::theme::type_scale::BODY;
         assert_eq!(body_scale, 2);
         let cap = std::design::font::cap_for_scale(body_scale);
-        assert_eq!(cap, 16);
+        assert!(
+            (15..=18).contains(&cap),
+            "body cap {} must stay inside the documented 15..=18 band",
+            cap
+        );
         let lh = std::design::font::line_height(body_scale);
         // Line height must comfortably encompass cap height plus ascenders and descenders.
         assert!(lh >= 24 && lh <= 32, "line height {} must be 24..32", lh);

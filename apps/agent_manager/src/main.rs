@@ -1750,11 +1750,13 @@ fn text(
         return None;
     }
     // WHY the outline face at every scale and not only the large ones: the
-    // panel is 1080x2160 and this app paints 720x1440, so the compositor
-    // magnifies every run by three in width and two in height. A bitmap
-    // glyph magnified by three is a soft glyph, and most of the text on
-    // this screen is a small run. The outline face is a real outline at
-    // the panel's own resolution, so it stays sharp at any size.
+    // platform scanout is 720x1440, exactly the authoring space this app
+    // paints, so composition is 1:1 and the compositor magnifies nothing.
+    // The outline face is still preferred because it rasterises the real
+    // outline at the requested cap height instead of magnifying the 16x24
+    // bitmap fallback face. Most of the text on this screen is a small run,
+    // and the outline face is a real outline rather than a scaled bitmap,
+    // so it stays sharp at any size.
     //
     // WHY the bitmap face is still here: a run the outline face refuses
     // -- a character the typeface has no outline for -- has to be drawn

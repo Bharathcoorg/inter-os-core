@@ -723,7 +723,7 @@ fn build(state: &LauncherState) -> Paint {
             Some(Run::whole(
                 40,
                 8,
-                type_scale::SECTION,
+                type_scale::BODY,
                 &state.clock_time,
                 theme.on_surface,
             ))
@@ -987,22 +987,14 @@ pub fn get_app_drawer_color(x: usize, y: usize, state: &LauncherState) -> u32 {
 }
 
 
-/// Status bar: clock, signal, wifi, battery, matching HomeScreen & LockScreen telemetry.
+/// Status bar: the shell's one canonical bar.
 fn status_bar(x: usize, y: usize, theme: &Theme, s: &StatusPlan) -> u32 {
-    if y == STATUS_BAR_HEIGHT - 1 {
-        return theme.border;
-    }
-
-    if let Some(c) = s.clock.as_ref().and_then(|r| r.pixel_on(x, y, theme.surface)) {
-        return c;
-    }
-
-    let t = crate::screens::home::telemetry_plan();
-    if let Some(c) = crate::screens::home::telemetry_pixel(x, y, &t, theme.on_surface) {
-        return c;
-    }
-
-    theme.surface
+    crate::screens::status::pixel_with(
+        x,
+        y,
+        |x, y| s.clock.as_ref().and_then(|r| r.pixel_on(x, y, theme.surface)),
+        theme,
+    )
 }
 
 fn search_field(x: usize, y: usize, field: &Rect, theme: &Theme, p: &Paint) -> u32 {

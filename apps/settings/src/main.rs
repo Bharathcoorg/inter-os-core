@@ -30,10 +30,10 @@ use interos_std as std;
 use settings::theme::{spacing, THEME};
 use settings::{
     UserTextScale,
-    display_caption, handler_caption, parse_battery_payload, parse_hardware_availability,
-    parse_sensor_payload, parse_thermal_payload, stacked_height, stacked_row_rect,
-    syscall_status_name, BatteryTelemetry, DispatchOutcome, DocumentSlot, HardwareAvailability,
-    OrbState, QueryOutcome, SensorTelemetry, ThermalTelemetry,
+    display_caption, handler_caption, json_i64, json_str, parse_battery_payload,
+    parse_hardware_availability, parse_sensor_payload, parse_thermal_payload, stacked_height,
+    stacked_row_rect, syscall_status_name, BatteryTelemetry, DispatchOutcome, DocumentSlot,
+    HardwareAvailability, OrbState, QueryOutcome, SensorTelemetry, ThermalTelemetry,
 };
 
 use interos_std::design::components;
@@ -450,6 +450,52 @@ pub power_profile: Option<PowerProfile>,
     pub uptime_ticks: u64,
     /// Continuous frame counter driven by EVENT_TIMER_TICK for vitality orb animation.
     pub frame_count: u32,
+    /// Real platform identity the HAL reports for this target (syscall 28).
+    pub platform_arch: [u8; 16],
+    pub platform_arch_len: usize,
+    pub platform_soc: [u8; 40],
+    pub platform_soc_len: usize,
+    pub platform_cores: u32,
+    pub platform_freq_mhz: u32,
+    /// Version string the kernel reports for itself, so the About card can
+    /// name the running build even when the settings journal is unavailable.
+    pub platform_version: [u8; 16],
+    pub platform_version_len: usize,
+    pub platform_reported: bool,
+    /// Real physical RAM telemetry from the kernel (syscall 135).
+    pub memory_total_mb: u64,
+    pub memory_used_mb: u64,
+    pub memory_free_mb: u64,
+    pub memory_reported: bool,
+    /// Recorded result of the keystore derivation probe.
+    pub keystore: KeystoreProbe,
+    /// Landing subtitle lines that carry live readings, so the grid never
+    /// asserts a count or a version the app did not read.
+    pub landing_apps_line: [u8; 32],
+    pub landing_apps_line_len: usize,
+    pub landing_version_line: [u8; 48],
+    pub landing_version_line_len: usize,
+    /// Frame of the last orb tap, for the ripple. Zero means none.
+    pub orb_tap_frame: u32,
+    /// Section the orb will open once its ripple has been shown. Without the
+    /// short delay the landing is replaced in the same frame as the tap, so
+    /// the ripple that makes the orb feel pressable is never drawn at all.
+    pub pending_section: Option<Section>,
+    /// Tick at which the pending section opens. Zero opens it immediately.
+    pub pending_section_at: u64,
+}
+
+/// Outcome of the one keystore call this app is allowed to attempt.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum KeystoreProbe {
+    /// The probe has not run.
+    Untested,
+    /// The kernel returned a full application key.
+    Derived,
+    /// The kernel answered, but with an unusable short result.
+    Short,
+    /// The kernel refused the derivation.
+    Refused,
 }
 
 impl SettingsApp {
@@ -529,6 +575,76 @@ impl SettingsApp {
             screen_lock_has_credential: None,
             uptime_ticks: 0,
             frame_count: 0,
+            // WHY zeroed and false: no query has run, and a fabricated identity
+            // or RAM figure is worse than an empty card.
+            platform_arch: [0u8; 16],
+            platform_arch_len: 0,
+            platform_soc: [0u8; 40],
+            platform_soc_len: 0,
+            platform_cores: 0,
+            platform_freq_mhz: 0,
+            platform_version: [0u8; 16],
+            platform_version_len: 0,
+            platform_reported: false,
+            memory_total_mb: 0,
+            memory_used_mb: 0,
+            memory_free_mb: 0,
+            memory_reported: false,
+            keystore: KeystoreProbe::Untested,
+            landing_apps_line: [0u8; 32],
+            landing_apps_line_len: 0,
+            landing_version_line: [0u8; 48],
+            landing_version_line_len: 0,
+            orb_tap_frame: 0,
+            pending_section: None,
+            pending_section_at: 0,
+        }
+    }
+
+    /// Reads the HAL's own platform identity and the kernel's RAM counters.
+    ///
+    /// WHY both are queried rather than written as literals: the About rows
+    /// used to state "x86_64 Sovereign SMP" and a "RING 0" badge from
+    /// compile-time strings, which is a claim about the running device that
+    /// nothing had measured. The HAL query returns the target the kernel was
+    /// built for and the memory syscall returns the allocator's live totals;
+    /// when either refuses, the rows say so.
+    pub fn refresh_platform(&mut self) {
+        let mut buf = [0u8; 192];
+        match std::hal_query_platform(&mut buf) {
+            Ok(n) if n > 0 => {
+                let body = &buf[..n];
+                if let Some(k) = json_str(body, b"arch", &mut self.platform_arch) {
+                    self.platform_arch_len = k;
+                }
+                if let Some(k) = json_str(body, b"soc", &mut self.platform_soc) {
+                    self.platform_soc_len = k;
+                }
+                self.platform_cores = json_i64(body, b"cores").unwrap_or(0).max(0) as u32;
+                self.platform_freq_mhz = json_i64(body, b"freq_mhz").unwrap_or(0).max(0) as u32;
+                if let Some(k) = json_str(body, b"os_version", &mut self.platform_version) {
+                    self.platform_version_len = k;
+                }
+                self.platform_reported = true;
+                std::log("[SETTINGS APP] HAL platform identity reported.").ok();
+            }
+            _ => {
+                self.platform_reported = false;
+                std::log("[SETTINGS APP] HAL platform identity not reported.").ok();
+            }
+        }
+        match std::memory_telemetry() {
+            Ok(m) => {
+                self.memory_total_mb = m.total_bytes / (1024 * 1024);
+                self.memory_used_mb = m.used_bytes / (1024 * 1024);
+                self.memory_free_mb = m.free_bytes / (1024 * 1024);
+                self.memory_reported = true;
+                std::log("[SETTINGS APP] Kernel RAM counters reported.").ok();
+            }
+            Err(_) => {
+                self.memory_reported = false;
+                std::log("[SETTINGS APP] Kernel RAM counters not reported.").ok();
+            }
         }
     }
 
@@ -870,6 +986,21 @@ impl SettingsApp {
             self.app_count = None;
         }
 
+        // Landing subtitle: the registry's own count, or the fact that it did
+        // not answer. The card used to print "14 installed apps" from a literal.
+        self.landing_apps_line_len = match self.app_count {
+            Some(count) => {
+                let n = write_decimal(count as u32, &mut self.landing_apps_line);
+                push_suffix(&mut self.landing_apps_line, n, b" installed apps")
+            }
+            None => {
+                let msg = b"App registry unavailable";
+                let n = msg.len().min(self.landing_apps_line.len());
+                self.landing_apps_line[..n].copy_from_slice(&msg[..n]);
+                n
+            }
+        };
+
         match std::storage_query() {
             Ok(bytes) => {
                 self.storage_bytes = Some(bytes);
@@ -956,16 +1087,19 @@ impl SettingsApp {
             // WHY: the derivation syscall returns a byte count; any length other
             // than a full key is not a usable key, so treat it as a failure.
             Ok(32) => {
+                self.keystore = KeystoreProbe::Derived;
                 std::log("[SETTINGS APP] Keystore derivation succeeded for the application slot.",
                 )
                 .ok();
             }
             Ok(_) => {
+                self.keystore = KeystoreProbe::Short;
                 std::log("[SETTINGS APP] Keystore derivation returned a short result; no usable application key.",
                 )
                 .ok();
             }
             Err(_) => {
+                self.keystore = KeystoreProbe::Refused;
                 std::log("[SETTINGS APP] Keystore derivation refused by the kernel; no application key is available.",
                 )
                 .ok();
@@ -1023,12 +1157,31 @@ impl SettingsApp {
                     .ok();
             }
             _ => {
-                self.os_version_len = 0;
-                std::log("[SETTINGS APP] about.os_version not reported by the settings store; version unknown.",
-                )
-                .ok();
+                // WHY the HAL is the fallback: the settings journal lives on
+                // the persistent data disk, and a boot where that disk is not
+                // attached leaves the store empty. The kernel's own package
+                // version is still authoritative for the running build, so the
+                // card names that instead of claiming no version exists.
+                if self.platform_version_len > 0 {
+                    let n = self.platform_version_len.min(self.os_version.len());
+                    self.os_version[..n].copy_from_slice(&self.platform_version[..n]);
+                    self.os_version_len = n;
+                    std::log("[SETTINGS APP] Version reported by the kernel platform query.").ok();
+                } else {
+                    self.os_version_len = 0;
+                    std::log("[SETTINGS APP] about.os_version not reported by the settings store; version unknown.",
+                    )
+                    .ok();
+                }
             }
         }
+        // The landing card's version subtitle reads the same two sources as
+        // the About row, so the grid and the detail cannot disagree.
+        self.landing_version_line_len = compose_landing_version(
+            &mut self.landing_version_line,
+            &self.os_version[..self.os_version_len],
+            &self.platform_arch[..self.platform_arch_len],
+        );
         match std::cap::timer_slot().and_then(|_| std::get_ticks().ok()).ok_or(-1) {
             Ok(ticks) => {
                 self.uptime_ticks = ticks;
@@ -1039,9 +1192,7 @@ impl SettingsApp {
                 std::log("[SETTINGS APP] Uptime ticks query refused or unavailable.").ok();
             }
         }
-        std::log("[SETTINGS APP] About: Inter OS Core (x86_64, Ring 0/Ring 3 User Separation).",
-        )
-        .ok();
+        std::log("[SETTINGS APP] About card refreshed from the settings store and the HAL.").ok();
     }
 
 
@@ -1780,14 +1931,22 @@ const ORB_CX: usize = 360;
 const ORB_CY: usize = 166;
 const ORB_R: usize = 48;
 const HALO_R: usize = 78;
+/// Frames the tap ripple takes to travel from the core edge to the halo edge.
+const ORB_RIPPLE_FRAMES: u32 = 24;
+/// How long the landing stays up after an orb press so the ripple is seen.
+const ORB_OPEN_DELAY_MS: u64 = 260;
 
 /// Landing screen identity typography positions
 const IDENTITY_TITLE_Y: usize = 264;
 #[allow(dead_code)]
 const IDENTITY_SUB_Y: usize = 296;
 
-/// Landing card height: modern spaced card proportion.
-const CARD_H: usize = 126;
+/// Landing card height: the card's own vertical rhythm — one 24px pad, the
+/// title's line box, the 16px step, both subtitle line boxes, and the pad
+/// again. WHY derived rather than a round number: the subtitle is a real body
+/// run now, and a card that reserves less than its text needs clips the second
+/// line at the bottom edge.
+const CARD_H: usize = CARD_PAD * 2 + LINE_H * 3 + CARD_LINE_GAP;
 /// Gutter between landing cards.
 ///
 /// WHY 14 and not a step of the platform's spacing scale: the scale steps in
@@ -2016,10 +2175,20 @@ fn fit_run(text: &[u8], scale: usize, max_w: usize, bold: bool, out: &mut [u8]) 
         return 0;
     }
     let budget = max_w - dots_w;
+    // WHY the typeface advance and not the bitmap cell: `run_w` measured the
+    // full string with the outline metrics, so cutting it with the bitmap's
+    // 16px cell divided the budget by roughly two and ellipsised captions
+    // less than halfway across the space they had. A byte the face has no
+    // glyph for still walks the bitmap's advance, or the cursor would never
+    // reach the end of the budget.
+    let em = std::design::font::em_for_scale(scale);
     let mut used = 0usize;
     let mut fit = 0usize;
     for (i, &c) in text.iter().enumerate() {
-        let adv = std::design::font::advance_of(c, bold) * scale;
+        let mut adv = std::design::typeface::advance_px(c, em) as usize;
+        if adv == 0 {
+            adv = std::design::font::advance_of(c, bold) * scale;
+        }
         if used + adv > budget || fit + 3 > out.len() {
             break;
         }
@@ -2274,16 +2443,23 @@ fn icon_gear(x: usize, y: usize, cx: usize, cy: usize, tint: u32) -> Option<u32>
 
 type IconFn = fn(usize, usize, usize, usize, u32) -> Option<u32>;
 
-/// Landing list entry: title, subtitle and icon for one category.
-fn category(i: usize) -> (&'static [u8], &'static [u8], IconFn) {
+/// Landing list entry: title, the two subtitle lines and the icon for one
+/// category.
+///
+/// WHY the subtitle is authored as two lines instead of one string the card
+/// wraps at draw time: `landing_card_pixel` runs once per pixel, and measuring
+/// every break candidate per pixel would cost more than the whole card fill.
+/// The break points are content, not layout, so they live with the content and
+/// each phrase stays whole.
+fn category(i: usize) -> (&'static [u8], &'static [u8], &'static [u8], IconFn) {
     match i {
-        0 => (b"Device", b"Display, brightness, sound & diagnostics", icon_device),
-        1 => (b"Network", b"Wi-Fi, cellular, flight mode & interfaces", icon_network),
-        2 => (b"Personal", b"Wallpapers, lockscreen & preferences", icon_personal),
-        3 => (b"Apps & Storage", b"14 installed apps, VFS partitions", icon_apps),
-        4 => (b"Power & Battery", b"Battery health & DVFS governor", icon_battery),
-        5 => (b"Security & Privacy", b"PIN configuration, Keystore integrity", icon_security),
-        _ => (b"About InterOS", b"Kernel v0.8.0, x86_64, uptime & memory", icon_gear),
+        0 => (b"Device", b"Display, brightness,", b"sound & diagnostics", icon_device),
+        1 => (b"Network", b"Wi-Fi, cellular,", b"flight mode & interfaces", icon_network),
+        2 => (b"Personal", b"Wallpapers, lockscreen", b"& preferences", icon_personal),
+        3 => (b"Apps & Storage", b"Installed apps", b"VFS partitions", icon_apps),
+        4 => (b"Power & Battery", b"Battery health", b"& DVFS governor", icon_battery),
+        5 => (b"Security & Privacy", b"PIN configuration,", b"Keystore probe", icon_security),
+        _ => (b"About InterOS", b"Version & target", b"uptime & memory", icon_gear),
     }
 }
 
@@ -2347,7 +2523,7 @@ fn row_h(section: Section, row: usize) -> usize {
         // platform's payloads for both carry more than one reading, and the
         // honest caption for them is two lines.
         (Section::Power, 0) | (Section::Power, 3) => ROW_TALL_ALT,
-        (Section::System, 4) => ROW_TALL_ALT,
+        (Section::System, 3) | (Section::System, 4) => ROW_TALL_ALT,
         // WHY the document rows are the list row's own height: the platform
         // says what a list row is, and its height is its padding around two
         // line boxes.
@@ -2465,9 +2641,8 @@ fn sensors_content_height() -> usize {
 /// literal; this builds the same line from `version` (capped at 16 bytes so
 /// it cannot grow into the card badge) and falls back to an explicit
 /// "not reported" line when the store did not answer.
-fn compose_version_line(out: &mut [u8], version: &[u8]) -> usize {
+fn compose_version_line(out: &mut [u8], version: &[u8], arch: &[u8]) -> usize {
     const PREFIX: &[u8] = b"Version: ";
-    const SUFFIX: &[u8] = b" (x86_64 Sovereign Microkernel)";
     const UNKNOWN: &[u8] = b"Version: not reported by the settings store";
     if version.is_empty() {
         let n = UNKNOWN.len().min(out.len());
@@ -2481,10 +2656,41 @@ fn compose_version_line(out: &mut [u8], version: &[u8]) -> usize {
             i += 1;
         }
     }
-    if i + SUFFIX.len() <= out.len() {
-        for &b in SUFFIX {
-            out[i] = b;
-            i += 1;
+    // The target name comes from the HAL query, not from a compile-time
+    // literal, so the line cannot disagree with the running kernel.
+    if !arch.is_empty() {
+        for chunk in [b" (".as_slice(), arch, b" microkernel)".as_slice()] {
+            for &b in chunk {
+                if i < out.len() {
+                    out[i] = b;
+                    i += 1;
+                }
+            }
+        }
+    }
+    i
+}
+
+/// Landing version subtitle: the store's version plus the HAL's arch.
+fn compose_landing_version(out: &mut [u8], version: &[u8], arch: &[u8]) -> usize {
+    if version.is_empty() {
+        let msg = b"Version not reported";
+        let n = msg.len().min(out.len());
+        out[..n].copy_from_slice(&msg[..n]);
+        return n;
+    }
+    let mut i = 0usize;
+    let chunks: [&[u8]; 4] = if arch.is_empty() {
+        [b"Version ".as_slice(), version, b"".as_slice(), b"".as_slice()]
+    } else {
+        [b"Version ".as_slice(), version, b", ".as_slice(), arch]
+    };
+    for chunk in chunks {
+        for &b in chunk {
+            if i < out.len() {
+                out[i] = b;
+                i += 1;
+            }
         }
     }
     i
@@ -3673,11 +3879,15 @@ fn row_pixel(
                 }
             }
             1 => {
+                // WHY the caption says "saved" and not the percentage twice:
+                // the selection is a real stored preference (`display.text_scale`)
+                // but no app in this build consumes it yet, so the row must not
+                // imply the system has already rescaled its type.
                 let (cap, badge): (&[u8], &[u8]) = match app.text_scale {
-                    UserTextScale::Compact => (b"Scale: Compact (80%)", b"80%"),
-                    UserTextScale::Normal => (b"Scale: Normal (100%)", b"100%"),
-                    UserTextScale::Large => (b"Scale: Large (125%)", b"125%"),
-                    UserTextScale::ExtraLarge => (b"Scale: Extra Large (150%)", b"150%"),
+                    UserTextScale::Compact => (b"Saved: Compact; apps do not apply it", b"STORED"),
+                    UserTextScale::Normal => (b"Saved: Normal; apps do not apply it", b"STORED"),
+                    UserTextScale::Large => (b"Saved: Large; apps do not apply it", b"STORED"),
+                    UserTextScale::ExtraLarge => (b"Saved: Extra Large; apps do not apply it", b"STORED"),
                 };
                 if let Some(c) = row_head(
                     x,
@@ -3698,26 +3908,13 @@ fn row_pixel(
                 }
             }
             2 => {
-                if let Some(c) = row_head(
-                    x,
-                    y,
-                    cy,
-                    b"Sound & Haptics",
-                    b"Hardware audio sink unavailable",
-                    THEME.on_surface_variant,
-                    b"UNAVAILABLE",
-                    THEME.on_surface_variant,
-                ) {
-                    return c;
-                }
-            }
-            3 => {
-                // WHY the card asks the platform instead of asserting a motor:
-                // the platform's own sound path is a PC speaker, and the row
-                // used to carry a green "REPORTED" badge on a caption no
-                // query had ever produced.
+                // Why this row now asks the platform: it used to print
+                // "Hardware audio sink unavailable" unconditionally, while the
+                // very next row queried the same sound path and reported it
+                // available. Two rows cannot both be readings when one is a
+                // literal.
                 let cap: &[u8] = match app.sound {
-                    HardwareAvailability::Available => b"PCM playback & tactile click feedback",
+                    HardwareAvailability::Available => b"PCM playback reported by the platform",
                     HardwareAvailability::Emulated => b"PCM playback reported as emulated",
                     HardwareAvailability::Unavailable => {
                         b"No sound path reported by the platform"
@@ -3731,11 +3928,28 @@ fn row_pixel(
                     x,
                     y,
                     cy,
-                    b"Volume & Feedback",
+                    b"Sound Output",
                     cap,
                     THEME.on_surface_variant,
                     badge,
                     badge_ink,
+                ) {
+                    return c;
+                }
+            }
+            3 => {
+                // WHY "not reported" and not "unavailable": the platform has no
+                // haptics query at all, so this app cannot know whether a motor
+                // exists. The row used to assert an absent audio sink here.
+                if let Some(c) = row_head(
+                    x,
+                    y,
+                    cy,
+                    b"Tactile Feedback",
+                    b"Haptics are not reported by the platform",
+                    THEME.on_surface_variant,
+                    b"NOT REPORTED",
+                    THEME.on_surface_variant,
                 ) {
                     return c;
                 }
@@ -3746,10 +3960,10 @@ fn row_pixel(
                     y,
                     cy,
                     b"System Gestures",
-                    b"Full-screen edge swipes & home gesture bar",
+                    b"Edge swipes are handled by the launcher",
                     THEME.on_surface_variant,
-                    b"ENABLED",
-                    THEME.success,
+                    b"BUILT IN",
+                    THEME.on_surface_variant,
                 ) {
                     return c;
                 }
@@ -3869,7 +4083,7 @@ fn row_pixel(
                         b"Bluetooth controller reported as emulated"
                     }
                     HardwareAvailability::Unavailable => {
-                        b"No Bluetooth controller reported by the platform"
+                        b"No Bluetooth radio reported by the platform"
                     }
                     HardwareAvailability::Unknown => {
                         b"Bluetooth status not reported by the platform"
@@ -4095,15 +4309,18 @@ fn row_pixel(
                 }
             }
             2 => {
+                // The badge says POLICY, not ENFORCED: capability enforcement is
+                // a kernel invariant, not a reading this app can sample. The
+                // caption states the invariant without pretending to measure it.
                 if let Some(c) = row_head(
                     x,
                     y,
                     cy,
                     b"Sandboxing & Isolation",
-                    b"Zero ambient authority & capabilities enforced",
+                    b"Zero ambient authority; capabilities gate every call",
                     THEME.on_surface_variant,
-                    b"ENFORCED",
-                    THEME.success,
+                    b"POLICY",
+                    THEME.primary,
                 ) {
                     return c;
                 }
@@ -4114,9 +4331,9 @@ fn row_pixel(
                     y,
                     cy,
                     b"App Permissions",
-                    b"Granular object-scoped capability delegation",
+                    b"Object-scoped capabilities delegated per package",
                     THEME.on_surface_variant,
-                    b"AUDITED",
+                    b"POLICY",
                     THEME.primary,
                 ) {
                     return c;
@@ -4245,15 +4462,18 @@ fn row_pixel(
                 }
             }
             2 => {
+                // WHY the row states an absence: there is no display-timeout
+                // service or syscall. The old caption ("30 seconds idle") and
+                // its green ACTIVE badge were both literals.
                 if let Some(c) = row_head(
                     x,
                     y,
                     cy,
                     b"Display Timeout & Sleep",
-                    b"Screen sleep timeout: 30 seconds idle",
+                    b"Screen timeout is not reported by the platform",
                     THEME.on_surface_variant,
-                    b"ACTIVE",
-                    THEME.success,
+                    b"NOT REPORTED",
+                    THEME.on_surface_variant,
                 ) {
                     return c;
                 }
@@ -4324,25 +4544,51 @@ fn row_pixel(
                 }
             }
             1 => {
+                // The keystore row reports the outcome of the one derivation
+                // probe this app is allowed to attempt, instead of a literal
+                // "status unavailable" that ignored the probe's result.
+                let (cap, badge, badge_ink): (&[u8], &[u8], u32) = match app.keystore {
+                    KeystoreProbe::Derived => (
+                        b"Application key derivation succeeded",
+                        b"REPORTED",
+                        THEME.success,
+                    ),
+                    KeystoreProbe::Short => (
+                        b"Derivation returned a short, unusable key",
+                        b"REPORTED",
+                        THEME.on_surface_variant,
+                    ),
+                    KeystoreProbe::Refused => (
+                        b"Derivation refused by the kernel",
+                        b"REFUSED",
+                        THEME.on_surface_variant,
+                    ),
+                    KeystoreProbe::Untested => (
+                        b"Derivation has not been attempted",
+                        b"UNTESTED",
+                        THEME.on_surface_variant,
+                    ),
+                };
                 if let Some(c) = row_head(
-                    x,
-                    y,
-                    cy,
-                    b"Hardware Keystore",
-                    b"Keystore status unavailable", THEME.on_surface_variant,
-                    b"UNAVAILABLE", THEME.on_surface_variant,
+                    x, y, cy, b"Hardware Keystore", cap, THEME.on_surface_variant, badge, badge_ink,
                 ) {
                     return c;
                 }
             }
             2 => {
+                // WHY "no query" rather than "unavailable": the platform has
+                // no encryption-status syscall for the vault, so claiming the
+                // vault is unencrypted would be as invented as claiming it is
+                // encrypted.
                 if let Some(c) = row_head(
                     x,
                     y,
                     cy,
                     b"Storage Vault Encryption",
-                    b"Vault encryption status unavailable", THEME.on_surface_variant,
-                    b"UNAVAILABLE", THEME.on_surface_variant,
+                    b"No vault encryption status query is exposed",
+                    THEME.on_surface_variant,
+                    b"NOT REPORTED",
+                    THEME.on_surface_variant,
                 ) {
                     return c;
                 }
@@ -4353,8 +4599,10 @@ fn row_pixel(
                     y,
                     cy,
                     b"Privacy Shield Filter",
-                    b"Privacy filter status unavailable", THEME.on_surface_variant,
-                    b"UNAVAILABLE", THEME.on_surface_variant,
+                    b"No privacy filter status query is exposed",
+                    THEME.on_surface_variant,
+                    b"NOT REPORTED",
+                    THEME.on_surface_variant,
                 ) {
                     return c;
                 }
@@ -4367,6 +4615,7 @@ fn row_pixel(
                 let n = compose_version_line(
                     &mut ver,
                     &app.os_version[..app.os_version_len],
+                    &app.platform_arch[..app.platform_arch_len],
                 );
                 let reported = app.os_version_len > 0;
                 let (badge, badge_ink) = if reported {
@@ -4388,15 +4637,36 @@ fn row_pixel(
                 }
             }
             1 => {
+                // Live uptime from the kernel tick counter. The row used to
+                // carry a static "RING 0" badge and no reading at all.
+                let mut ubuf = [0u8; 80];
+                let (cap, ink, badge, badge_ink): (&[u8], u32, &[u8], u32) =
+                    if app.uptime_ticks > 0 {
+                        let secs = app.uptime_ticks / 1000;
+                        let mut n = push_suffix(&mut ubuf, 0, b"Kernel uptime: ");
+                        n = write_decimal(
+                            secs.min(u32::MAX as u64) as u32,
+                            &mut ubuf[n..],
+                        ) + n;
+                        n = push_suffix(&mut ubuf, n, b" s");
+                        (&ubuf[..n], THEME.on_surface, b"REPORTED", THEME.success)
+                    } else {
+                        (
+                            b"Kernel uptime not reported",
+                            THEME.on_surface_variant,
+                            b"UNAVAILABLE",
+                            THEME.on_surface_variant,
+                        )
+                    };
                 if let Some(c) = row_head(
                     x,
                     y,
                     cy,
                     b"Platform Microkernel",
-                    b"Capability Security & VFS Block Storage",
-                    THEME.on_surface_variant,
-                    b"RING 0",
-                    THEME.primary,
+                    cap,
+                    ink,
+                    badge,
+                    badge_ink,
                 ) {
                     return c;
                 }
@@ -4433,31 +4703,136 @@ fn row_pixel(
                 }
             }
             3 => {
-                let mut ubuf = [0u8; 80];
-                let (cap, cap_ink, badge, badge_ink) = if app.uptime_ticks > 0 {
-                    let mut un = write_decimal_u64(app.uptime_ticks, &mut ubuf);
-                    un = push_suffix(&mut ubuf, un, b" ticks (x86_64 Sovereign SMP)");
-                    (&ubuf[..un], THEME.on_surface, &b"REPORTED"[..], THEME.success)
+                // WHY the identity comes from the HAL query: this row used to
+                // state "x86_64 Sovereign SMP / 64-bit Paging" from a
+                // compile-time literal, which is a claim about the running
+                // kernel that nothing had measured. The HAL reports the target
+                // it was built for, the core count and the base frequency; the
+                // row quotes those and says so when the query is refused.
+                let mut cap1 = [0u8; 64];
+                let mut cap2 = [0u8; 80];
+                let n1: usize;
+                let n2: usize;
+                let ink: u32;
+                let badge: &[u8];
+                let badge_ink: u32;
+                if app.platform_reported && app.platform_arch_len > 0 {
+                    let mut n = push_suffix(&mut cap1, 0, &app.platform_arch[..app.platform_arch_len]);
+                    n = push_suffix(&mut cap1, n, b", ");
+                    n = write_decimal(app.platform_cores, &mut cap1[n..]) + n;
+                    n = push_suffix(&mut cap1, n, if app.platform_cores == 1 { b" core" } else { b" cores" });
+                    n1 = n;
+                    let mut m = 0usize;
+                    if app.platform_soc_len > 0 {
+                        m = push_suffix(&mut cap2, m, &app.platform_soc[..app.platform_soc_len]);
+                    }
+                    if app.platform_freq_mhz > 0 {
+                        if m > 0 {
+                            m = push_suffix(&mut cap2, m, b", ");
+                        }
+                        m = write_decimal(app.platform_freq_mhz / 1000, &mut cap2[m..]) + m;
+                        m = push_suffix(&mut cap2, m, b".");
+                        let frac = (app.platform_freq_mhz % 1000) / 100;
+                        m = write_decimal(frac, &mut cap2[m..]) + m;
+                        m = push_suffix(&mut cap2, m, b" GHz base");
+                    }
+                    n2 = m;
+                    ink = THEME.on_surface;
+                    badge = b"REPORTED";
+                    badge_ink = THEME.success;
                 } else {
-                    let s = b"x86_64 Sovereign SMP / 64-bit Paging";
-                    ubuf[..s.len()].copy_from_slice(s);
-                    (&ubuf[..s.len()], THEME.on_surface_variant, &b"HARDWARE"[..], THEME.success)
-                };
+                    n1 = push_suffix(&mut cap1, 0, b"Platform identity not reported");
+                    n2 = push_suffix(&mut cap2, 0, b"HAL identity query refused or unavailable");
+                    ink = THEME.on_surface_variant;
+                    badge = b"UNAVAILABLE";
+                    badge_ink = THEME.on_surface_variant;
+                }
                 if let Some(c) = row_head(
                     x,
                     y,
                     cy,
                     b"Architecture & SMP",
-                    cap,
-                    cap_ink,
+                    &cap1[..n1],
+                    ink,
                     badge,
                     badge_ink,
                 ) {
                     return c;
                 }
+                if let Some(c) = run_ink(
+                    x,
+                    y,
+                    DETAIL_X + ROW_PAD,
+                    cy + ROW_CAP2_DY,
+                    TYPE_H3,
+                    &cap2[..n2],
+                    DETAIL_W - 2 * ROW_PAD,
+                    THEME.on_surface_variant,
+                    THEME.surface_container,
+                    false,
+                ) {
+                    return c;
+                }
             }
-            _ => {
+            4 => {
+                // Live allocator totals from the memory syscall. WHY both
+                // lines: the used figure means nothing without the total, and
+                // the free figure is the one the caller can act on.
+                const NO_MEM: &[u8] = b"Kernel RAM counters not reported";
+                let mut cap1 = [0u8; 64];
+                let mut cap2 = [0u8; 64];
+                let n1: usize;
+                let n2: usize;
+                let badge: &[u8];
+                let badge_ink: u32;
+                if app.memory_reported {
+                    let used = app.memory_used_mb.min(u32::MAX as u64) as u32;
+                    let total = app.memory_total_mb.min(u32::MAX as u64) as u32;
+                    let free = app.memory_free_mb.min(u32::MAX as u64) as u32;
+                    let mut n = write_decimal(used, &mut cap1);
+                    n = push_suffix(&mut cap1, n, b" / ");
+                    n = write_decimal(total, &mut cap1[n..]) + n;
+                    n = push_suffix(&mut cap1, n, b" MiB in use");
+                    n1 = n;
+                    let mut m = write_decimal(free, &mut cap2);
+                    m = push_suffix(&mut cap2, m, b" MiB free");
+                    n2 = m;
+                    badge = b"REPORTED";
+                    badge_ink = THEME.success;
+                } else {
+                    n1 = push_suffix(&mut cap1, 0, NO_MEM);
+                    n2 = push_suffix(&mut cap2, 0, b"memory_telemetry refused or unavailable");
+                    badge = b"UNAVAILABLE";
+                    badge_ink = THEME.on_surface_variant;
+                }
+                if let Some(c) = row_head(
+                    x,
+                    y,
+                    cy,
+                    b"Physical Memory",
+                    &cap1[..n1],
+                    if app.memory_reported { THEME.on_surface } else { THEME.on_surface_variant },
+                    badge,
+                    badge_ink,
+                ) {
+                    return c;
+                }
+                if let Some(c) = run_ink(
+                    x,
+                    y,
+                    DETAIL_X + ROW_PAD,
+                    cy + ROW_CAP2_DY,
+                    TYPE_H3,
+                    &cap2[..n2],
+                    DETAIL_W - 2 * ROW_PAD,
+                    THEME.on_surface_variant,
+                    THEME.surface_container,
+                    false,
+                ) {
+                    return c;
+                }
             }
+            _ => {}
         },
     }
     THEME.surface_container
@@ -4506,24 +4881,42 @@ fn detail_pixel(x: usize, y: usize, app: &SettingsApp, section: Section) -> u32 
     THEME.surface
 }
 
-/// One landing category card: icon, bold title, subtitle wrapped to at most
-/// two measured lines (wrapping, not ellipsis, because the phrases are short
-/// word lists that must stay whole).
+/// One landing category card: icon, bold title, and a two-line subtitle that
+/// spans the full inner card width.
 ///
 /// WHY the icon and the title share one line box: the reference System Space puts
 /// the mark beside the label rather than above it, and centring the icon on the
 /// title's line box is what makes that a column rather than a stack. WHY the
 /// title is the H3 rung: it is a card heading, which the doc sizes at H3, and it
 /// keeps the card one rank below the screen's own Display title.
-fn landing_card_pixel(x: usize, y: usize, i: usize) -> Option<u32> {
+///
+/// WHY the subtitle is the same rung as the title but starts under the icon:
+/// sharing the title's text column (about 220px) forced a body run into half a
+/// phrase. Starting at the card's own 24px inset gives the body the whole inner
+/// width, which is what lets both authored lines fit without an ellipsis.
+fn landing_card_pixel(x: usize, y: usize, i: usize, app: &SettingsApp) -> Option<u32> {
     let (cx0, cy0, cw, ch) = card_rect(i);
     if let Some(fill) = card_pixel(x, y, cx0, cy0, cw, ch, CARD_R) {
-        let (title, subtitle, icon) = category(i);
+        let (title, static_a, static_b, icon) = category(i);
+        // Two cards lead with a live reading: the registry's package count and
+        // the store's version. Everything else is descriptive copy.
+        let (sub_a, sub_b): (&[u8], &[u8]) = match i {
+            3 if app.landing_apps_line_len > 0 => (
+                &app.landing_apps_line[..app.landing_apps_line_len],
+                &b"VFS partitions"[..],
+            ),
+            6 if app.landing_version_line_len > 0 => (
+                &app.landing_version_line[..app.landing_version_line_len],
+                &b"uptime & memory"[..],
+            ),
+            _ => (static_a, static_b),
+        };
         if let Some(ic) = icon(x, y, cx0 + CARD_ICON_CX, cy0 + CARD_PAD + LINE_H / 2, THEME.on_surface) {
             return Some(ic);
         }
         let text_w = cw.saturating_sub(CARD_TEXT_X + CARD_PAD);
-        // Title owns the full remaining card width; subtitle below it.
+        // Title owns the full remaining card width; the subtitle spans the
+        // inner card width below it, one line box per authored line.
         if let Some(c) = run_ink(
             x,
             y,
@@ -4538,16 +4931,22 @@ fn landing_card_pixel(x: usize, y: usize, i: usize) -> Option<u32> {
         ) {
             return Some(c);
         }
-        let mut sub_buf = [0u8; 96];
-        let sub_len = std::design::font::ellipsize(subtitle, 1, text_w, &mut sub_buf);
+        let sub_x = cx0 + CARD_PAD;
+        let sub_w = cw.saturating_sub(CARD_PAD * 2);
+        let sub_y = cy0 + CARD_PAD + LINE_H + CARD_LINE_GAP;
+        if let Some(c) = run_ink(
+            x, y, sub_x, sub_y, TYPE_H3, sub_a, sub_w, THEME.on_surface_variant, fill, false,
+        ) {
+            return Some(c);
+        }
         if let Some(c) = run_ink(
             x,
             y,
-            cx0 + CARD_TEXT_X,
-            cy0 + CARD_PAD + LINE_H + CARD_LINE_GAP,
+            sub_x,
+            sub_y + LINE_H,
             TYPE_H3,
-            &sub_buf[..sub_len],
-            text_w,
+            sub_b,
+            sub_w,
             THEME.on_surface_variant,
             fill,
             false,
@@ -4559,9 +4958,31 @@ fn landing_card_pixel(x: usize, y: usize, i: usize) -> Option<u32> {
     None
 }
 
+/// Whether `(px, py)` lands on the vitality orb.
+///
+/// WHY wider than the painted core: the core is a 96px disc, which is a legal
+/// touch target but a small one. The halo is decorative and always present, so
+/// the target extends into it rather than demanding a hit on the gradient.
+fn orb_hit(px: u32, py: u32) -> bool {
+    let dx = px as i32 - ORB_CX as i32;
+    let dy = py as i32 - ORB_CY as i32;
+    let radius = ORB_R as i32 + 16;
+    dx * dx + dy * dy <= radius * radius
+}
+
 /// Renders a pixel of the Dynamic Device Vitality Orb at (ORB_CX, ORB_CY) with core radius ORB_R
 /// and ethereal ambient halo extending out to HALO_R.
-fn vitality_orb_pixel(x: usize, y: usize, state: OrbState, frame: u32) -> Option<u32> {
+///
+/// WHY `tap_frame` is an argument: the orb is the landing screen's one control,
+/// and a control that answers a tap without showing that it was hit reads as
+/// broken. A ripple leaves the core edge at the tap and fades at the halo edge.
+fn vitality_orb_pixel(
+    x: usize,
+    y: usize,
+    state: OrbState,
+    frame: u32,
+    tap_frame: u32,
+) -> Option<u32> {
     if x < ORB_CX.saturating_sub(HALO_R)
         || x > ORB_CX + HALO_R
         || y < ORB_CY.saturating_sub(HALO_R)
@@ -4590,31 +5011,46 @@ fn vitality_orb_pixel(x: usize, y: usize, state: OrbState, frame: u32) -> Option
     let pulse_tri = if pulse_phase < 32 { pulse_phase } else { 64 - pulse_phase };
     let r_core = (ORB_R as i32 + (pulse_tri - 16) / 8) as u32;
 
+    let mut color;
     if dist <= r_core {
-        // Inner core: radial gradient modulated by outward-traveling luminous wave
+        // Core: outward-travelling luminous wave over a smooth radial ramp.
+        // WHY the perceptual curve: a linear ramp makes the disc look flat,
+        // because most of its area sits in the middle of the gradient. The
+        // `c*(510-c)/255` curve keeps the lit centre and moves the transition
+        // towards the rim, which is where the eye reads depth.
         let wave_phase = (dist as i32 * 3 - (frame as i32 * 4)).rem_euclid(48);
         let wave_amp = if wave_phase < 24 { wave_phase } else { 48 - wave_phase };
-        let mut t = (dist * 255) / r_core;
-        t = ((t as i32) + (wave_amp - 12) * 2).clamp(0, 255) as u32;
+        let t_lin = ((dist * 255) / r_core.max(1)).min(255);
+        let t_mid = (t_lin * (510 - t_lin)) / 255;
+        let t = ((t_mid as i32 + (wave_amp - 12) * 2).clamp(0, 255)) as u32;
 
-        let r = ((r_inner * (255 - t) + r_outer * t) / 255) as u32;
-        let g = ((g_inner * (255 - t) + g_outer * t) / 255) as u32;
-        let b = ((b_inner * (255 - t) + b_outer * t) / 255) as u32;
+        let mut r = (r_inner * (255 - t) + r_outer * t) / 255;
+        let mut g = (g_inner * (255 - t) + g_outer * t) / 255;
+        let mut b = (b_inner * (255 - t) + b_outer * t) / 255;
 
-        // Specular highlight with gentle drift
-        let sx = dx + 12;
-        let sy = dy + 12;
-        let sd2 = (sx * sx + sy * sy) as u32;
-        if sd2 < 144 {
-            let s_dist = sd2.isqrt();
-            let s_factor = ((12 - s_dist) * (60 + wave_amp as u32)) / 12;
-            let sr = (r + s_factor).min(255);
-            let sg = (g + s_factor).min(255);
-            let sb = (b + s_factor).min(255);
-            return Some(0xFF000000 | (sr << 16) | (sg << 8) | sb);
+        // Rim lift: two pixels at the core edge keep a clean silhouette
+        // against the halo instead of letting the disc dissolve into it.
+        if dist + 2 >= r_core {
+            let rim = (dist + 2 - r_core) * 36;
+            r = (r + rim).min(255);
+            g = (g + rim).min(255);
+            b = (b + rim).min(255);
         }
 
-        Some(0xFF000000 | (r << 16) | (g << 8) | b)
+        // Soft specular highlight, upper-left, fading with the square of the
+        // distance rather than linearly: a linear falloff leaves a visible
+        // ring where the highlight stops.
+        let sx = dx + 14;
+        let sy = dy + 14;
+        let sd2 = (sx * sx + sy * sy) as u32;
+        if sd2 < 196 {
+            let s_factor = ((196 - sd2) * 64) / 196;
+            r = (r + s_factor).min(255);
+            g = (g + s_factor).min(255);
+            b = (b + s_factor).min(255);
+        }
+
+        color = 0xFF000000 | (r << 16) | (g << 8) | b;
     } else {
         // Ambient halo with continuous outward-pulsing wave shimmer
         let halo_span = (HALO_R as u32).saturating_sub(r_core);
@@ -4623,9 +5059,12 @@ fn vitality_orb_pixel(x: usize, y: usize, state: OrbState, frame: u32) -> Option
 
         let halo_wave_phase = (halo_d as i32 * 4 - (frame as i32 * 5)).rem_euclid(32);
         let halo_wave = if halo_wave_phase < 16 { halo_wave_phase } else { 32 - halo_wave_phase };
-        let wave_boost = (halo_wave * 40) / 16;
+        let wave_boost = (halo_wave * 32) / 16;
 
-        let base_alpha = (span_rem * span_rem * 160) / (halo_span * halo_span);
+        // WHY the squared falloff: a halo that fades linearly ends in a
+        // visible disc edge; squaring it puts the last of the light at the
+        // rim and leaves the background clean.
+        let base_alpha = (span_rem * span_rem * 150) / (halo_span * halo_span).max(1);
         let alpha = ((base_alpha as i32 + wave_boost).clamp(0, 255)) as u32;
 
         let bg_r = (THEME.surface >> 16) & 0xFF;
@@ -4635,8 +5074,37 @@ fn vitality_orb_pixel(x: usize, y: usize, state: OrbState, frame: u32) -> Option
         let r = (r_outer * alpha + bg_r * (255 - alpha)) / 255;
         let g = (g_outer * alpha + bg_g * (255 - alpha)) / 255;
         let b = (b_outer * alpha + bg_b * (255 - alpha)) / 255;
-        Some(0xFF000000 | (r << 16) | (g << 8) | b)
+        color = 0xFF000000 | (r << 16) | (g << 8) | b;
     }
+
+    // Tap ripple: one expanding ring, fading as it reaches the halo edge.
+    if tap_frame != 0 && frame >= tap_frame {
+        let elapsed = frame - tap_frame;
+        if elapsed < ORB_RIPPLE_FRAMES {
+            let span = (HALO_R as u32).saturating_sub(r_core);
+            let ring_r = r_core + (span * elapsed) / ORB_RIPPLE_FRAMES;
+            let gap = dist.abs_diff(ring_r);
+            if gap <= 2 {
+                let edge = match gap {
+                    0 => 255u32,
+                    1 => 168,
+                    _ => 84,
+                };
+                let strength = ((ORB_RIPPLE_FRAMES - elapsed) * 200) / ORB_RIPPLE_FRAMES;
+                let a = (strength * edge) / 255;
+                let inv = 255 - a;
+                let cr = (c_inner >> 16) & 0xFF;
+                let cg = (c_inner >> 8) & 0xFF;
+                let cb = c_inner & 0xFF;
+                let r = (cr * a + ((color >> 16) & 0xFF) * inv) / 255;
+                let g = (cg * a + ((color >> 8) & 0xFF) * inv) / 255;
+                let b = (cb * a + (color & 0xFF) * inv) / 255;
+                color = 0xFF000000 | (r << 16) | (g << 8) | b;
+            }
+        }
+    }
+
+    Some(color)
 }
 
 /// Landing screen pixel: Dynamic Device Vitality Orb, identity, and grouped cards.
@@ -4644,13 +5112,19 @@ fn landing_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
     // WHY the guard is the grid's own top: no card exists above it.
     if y >= GRID_Y {
         for i in 0..Section::COUNT {
-            if let Some(c) = landing_card_pixel(x, y, i) {
+            if let Some(c) = landing_card_pixel(x, y, i, app) {
                 return c;
             }
         }
     }
     // Dynamic Device Vitality Orb centered at ORB_CX, ORB_CY
-    if let Some(c) = vitality_orb_pixel(x, y, app.orb_state(), app.frame_count) {
+    if let Some(c) = vitality_orb_pixel(
+        x,
+        y,
+        app.orb_state(),
+        app.frame_count,
+        app.orb_tap_frame,
+    ) {
         return c;
     }
     // Device identity title below orb: "Settings" at TYPE_DISPLAY (scale 3)
@@ -5969,22 +6443,18 @@ fn handle_tap(
                 }
             }
         }
-    } else if (110..=170).contains(&input.y) {
-        // Gated hero/search tap region: route taps to power/thermals
-        let section = if input.x < 300 {
-            Section::Power
-        } else {
-            Section::Device
-        };
-        settings.current_section = Some(section);
-        if section == Section::System {
-            settings.display_about_device();
-        }
-        settings.refresh_wallpaper_values();
-        settings.reset_scroll();
-        std::log("[SETTINGS APP] System Space category opened; tab switched.",
-        )
-        .ok();
+    } else if settings.current_section.is_none() && orb_hit(input.x, input.y) {
+        // WHY the orb is a control: it is the landing screen's one beacon and
+        // it already summarises the device's power state, so tapping it opens
+        // the readings it summarises instead of routing a hidden band of the
+        // header to whichever section happened to sit under the tap.
+        settings.orb_tap_frame = settings.frame_count.max(1);
+        // WHY the open is deferred: the ripple is the orb's press feedback,
+        // and replacing the landing in this frame would leave it unrendered.
+        let now = std::get_ticks().unwrap_or(0);
+        settings.pending_section_at = if now > 0 { now + ORB_OPEN_DELAY_MS } else { 0 };
+        settings.pending_section = Some(Section::Power);
+        std::log("[SETTINGS APP] Vitality orb pressed; ripple shown before Power opens.").ok();
     } else if let Some(section) = settings.current_section {
         match section {
             Section::Device => {
@@ -6028,18 +6498,26 @@ fn handle_tap(
                 }
             }
             Section::System => {
-                let (cy, ch) =
-                    detail_row_rect_scrolled(Section::System, 4, settings.scroll.offset);
-                if in_round_rect(
-                    input.x as usize,
-                    input.y as usize,
-                    DETAIL_X,
-                    cy,
-                    DETAIL_W,
-                    ch,
-                    CARD_R,
-                ) {
-                            }
+                // Tapping either live-reading row re-queries it. Both come
+                // from queries that can refuse, so the tap is a retry rather
+                // than a decoration.
+                for row in [3usize, 4usize] {
+                    let (cy, ch) =
+                        detail_row_rect_scrolled(Section::System, row, settings.scroll.offset);
+                    if in_round_rect(
+                        input.x as usize,
+                        input.y as usize,
+                        DETAIL_X,
+                        cy,
+                        DETAIL_W,
+                        ch,
+                        CARD_R,
+                    ) {
+                        settings.refresh_platform();
+                        std::log("[SETTINGS APP] Platform identity & RAM re-queried.").ok();
+                        break;
+                    }
+                }
             }
             Section::Security => {
                 let (cy, ch) =
@@ -6145,6 +6623,10 @@ pub extern "C" fn _start() -> ! {
     settings.refresh_screen_lock();
 
     // 7. Query About Device & Hardware RTC (System detail)
+    // WHY before the About read: the landing card's version line and the
+    // Architecture row both quote the HAL's target name, so the identity has
+    // to be in hand before either is composed.
+    settings.refresh_platform();
     settings.display_about_device();
 
     // Initial render & presentation
@@ -6186,8 +6668,33 @@ pub extern "C" fn _start() -> ! {
             if (triggered & std::EVENT_TIMER_TICK) != 0 {
                 settings.frame_count = settings.frame_count.wrapping_add(1);
                 if settings.current_section.is_none() && !settings.sensors_open && !settings.screen_lock_open && !settings.wallpaper_open {
-                    render_settings_band(surface, &settings, 70, 262);
-                    let _ = std::surface_flip();
+                    let mut opened = false;
+                    if let Some(section) = settings.pending_section {
+                        let now = std::get_ticks().unwrap_or(0);
+                        if settings.pending_section_at == 0 || now >= settings.pending_section_at {
+                            settings.pending_section = None;
+                            settings.current_section = Some(section);
+                            if section == Section::Power {
+                                settings.refresh_power();
+                            }
+                            settings.reset_scroll();
+                            std::log("[SETTINGS APP] Vitality orb opened Power & Battery.").ok();
+                            if surface > 0 {
+                                render_settings_ui(surface, &settings);
+                                let _ = std::surface_flip();
+                            }
+                            opened = true;
+                        }
+                    }
+                    if !opened {
+                        // Replays the orb band while the ripple is pending, so
+                        // the press is animated rather than instant.
+                        render_settings_band(surface, &settings, 70, 262);
+                        let _ = std::surface_flip();
+                    }
+                } else if settings.current_section.is_some() {
+                    // A card tap navigated while the orb's open was pending.
+                    settings.pending_section = None;
                 }
             }
             if (triggered & std::EVENT_TOUCH_INPUT) != 0 {

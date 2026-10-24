@@ -281,6 +281,13 @@ pub struct LauncherState {
     pub recents_cards: [launcher::recents::Card; launcher::recents::MAX_CARDS],
     /// How many of those cards there are.
     pub recents_count: usize,
+    /// The card the task switcher shows as its large preview.
+    ///
+    /// WHY the switcher focuses one card instead of stacking three: a 720x1440
+    /// app preview keeps its 1:2 shape, and three of those stacked fit only
+    /// 150 px wide each. One card at a time shows the app's real screen at a
+    /// size where it can be read.
+    pub activity_focus: usize,
     /// The display surface each running task draws into.
     ///
     /// WHY the surface is kept beside the card: the card is what the switcher
@@ -383,6 +390,7 @@ impl LauncherState {
             search_results: launcher::search::Results::new(),
             recents_cards: [launcher::recents::Card::EMPTY; launcher::recents::MAX_CARDS],
             recents_count: 0,
+            activity_focus: 0,
             recents_surfaces: [0; launcher::recents::MAX_CARDS],
             active_child: None,
             lock_state: std::UserLockState::Uninitialized,
@@ -1727,6 +1735,12 @@ fn refresh_recents_cards(state: &mut LauncherState) {
     state.recents_cards = cards;
     state.recents_surfaces = card_surfaces;
     state.recents_count = count;
+    if count == 0 {
+        state.activity_focus = 0;
+    } else if state.activity_focus >= count {
+        state.activity_focus = count - 1;
+    }
+    screens::activity::invalidate_activity_frame();
 }
 
 /// The name a card shows for a package.
@@ -1941,7 +1955,13 @@ fn is_drag(kind: u8) -> bool {
 /// happened to start high, and a long travel that started mid-screen is a scroll
 /// or a card dismissal. A shade pull is "pressed at the very top, then dragged
 /// down a real distance".
-const EDGE_PULL_ZONE: i64 = 24;
+/// Depth of the press band that starts a status-bar pull.
+///
+/// WHY this matches the 48px tap band below: a finger that taps the status
+/// bar anywhere it can be tapped must also be able to drag from there. At 24
+/// the pull only began in the top half of the tappable band, so a press at
+/// y=40 opened nothing and the shade read as unreachable by finger.
+const EDGE_PULL_ZONE: i64 = 48;
 const EDGE_PULL_MIN: i64 = 60;
 
 /// The point a completed gesture started at.
@@ -2907,24 +2927,33 @@ pub extern "C" fn _start() -> ! {
                 }
                 if state.current_view == ViewMode::BootScreen {
                     let elapsed = current_ticks_opt().unwrap_or(state.boot_started_ticks).saturating_sub(state.boot_started_ticks);
-                    let next_progress = ((elapsed.min(180) * 1000) / 180) as u16;
-                    // WHY the band re-renders on every tick and not only when
-                    // progress steps: the ring comet reads `boot_frame`, which
-                    // advances per tick, so gating on progress would freeze the
-                    // one element whose job is to never look frozen. The band is
-                    // 350 of the 1440 rows and the present path skips unchanged
-                    // rows, so a per-tick band repaint costs a fraction of the
-                    // full-surface repaint that used to stall startup here.
+                    let boot_ticks = screens::boot::BOOT_TICKS;
+                    let next_progress = ((elapsed.min(boot_ticks) * 1000) / boot_ticks) as u16;
+                    // WHY the first boot frame paints the whole surface: the
+                    // aura and the void are full-screen, and a band-only first
+                    // frame left everything above the emblem at whatever the
+                    // lock screen or boot splash had put there. After that
+                    // frame the band is correct: every animated element lives
+                    // inside rows BAND_TOP..BAND_TOP+BAND_ROWS, and the present
+                    // path skips unchanged rows, so a per-tick band repaint
+                    // costs a fraction of a full-surface repaint under TCG.
+                    let first_frame = state.boot_frame == 0;
                     state.boot_frame = state.boot_frame.wrapping_add(1);
                     if next_progress != state.boot_progress {
                         state.boot_progress = next_progress;
                     }
-                    // The animated ring and progress indicator occupy only this band.
-                    // Redrawing the entire million-pixel portrait surface on every
-                    // timer tick made startup visibly stall under QEMU TCG.
-                    render_band(surface, &state, H / 2 - 130, (H / 2 + 220).min(H));
-                    surface_flip_display();
-                    if elapsed >= 180 {
+                    if first_frame {
+                        render_view(surface, &state);
+                    } else {
+                        render_band(
+                            surface,
+                            &state,
+                            screens::boot::BAND_TOP,
+                            (screens::boot::BAND_TOP + screens::boot::BAND_ROWS).min(H),
+                        );
+                        surface_flip_display();
+                    }
+                    if elapsed >= boot_ticks {
                         // WHY boot never demands a credential now: an owner who
                         // has not set a lock gets the plain lock screen, and the
                         // account layer already unlocks a credential-less owner
@@ -3039,6 +3068,32 @@ pub extern "C" fn _start() -> ! {
                     }
                     std::log(log_line.as_str()).ok();
                     if input.kind == 7 {
+                        // WHY the child is dismissed here and not in the
+                        // Home/Back arm further down: this branch consumes every
+                        // Home event first, so that arm never sees one. Without
+                        // the dismissal the app kept running, `active_child`
+                        // stayed set, and the guard below discarded every later
+                        // gesture — the home screen was painted and then could
+                        // not be paged or pulled.
+                        if !matches!(state.current_view, ViewMode::LockScreen | ViewMode::PinEntry) {
+                            if let Some(child_id) = state.active_child.take() {
+                                let _ = std::app_stop(child_id);
+                                state.current_view = ViewMode::HomeScreen;
+                                render_view(surface, &state);
+                                surface_flip_display();
+                                std::log("[LAUNCHER] Home pressed; dismissed active child app.").ok();
+                                let mut drain = std::InputEvent {
+                                    kind: 0,
+                                    x: 0,
+                                    y: 0,
+                                    dx: 0,
+                                    dy: 0,
+                                    scale_milli: 1000,
+                                };
+                                while std::input_event_poll(&mut drain).is_ok() {}
+                                break;
+                            }
+                        }
                         match state.current_view {
                             ViewMode::BootScreen | ViewMode::PowerTransition => {}
                             ViewMode::HomeScreen => {
@@ -3094,7 +3149,10 @@ pub extern "C" fn _start() -> ! {
                         }
                         continue;
                     }
-                    if input.kind == 6 || input.kind == 7 {
+                    // WHY only Back here: Home is fully handled above, which is
+                    // also why listing it here made the arm look live while no
+                    // kind-7 event could ever reach it.
+                    if input.kind == 6 {
                         if matches!(state.current_view, ViewMode::LockScreen | ViewMode::PinEntry) {
                             continue;
                         }
@@ -3351,15 +3409,45 @@ pub extern "C" fn _start() -> ! {
                             // painter, the hit test and this handler have to
                             // agree about it.
                             if is_drag(input.kind) {
+                                // Horizontal paging: the switcher shows one
+                                // card at a time, and a left or right drag on
+                                // the card moves the focus rather than the
+                                // stack. A vertical drag keeps its old
+                                // dismiss/home meaning.
+                                let horizontal = input.dx.abs() >= 64
+                                    && input.dx.abs() > input.dy.abs()
+                                    && state.recents_count > 1;
+                                if horizontal {
+                                    let count = state.recents_count;
+                                    state.activity_focus = if input.dx < 0 {
+                                        (state.activity_focus + 1) % count
+                                    } else {
+                                        (state.activity_focus + count - 1) % count
+                                    };
+                                    screens::activity::invalidate_activity_frame();
+                                    present_dirty(surface, &state, Dirty::ActivityCards);
+                                    std::log("[LAUNCHER] Task switcher focused the next recent app.")
+                                        .ok();
+                                    let mut drain = std::InputEvent {
+                                        kind: 0,
+                                        x: 0,
+                                        y: 0,
+                                        dx: 0,
+                                        dy: 0,
+                                        scale_milli: 1000,
+                                    };
+                                    while std::input_event_poll(&mut drain).is_ok() {}
+                                    break;
+                                }
                                 match launcher::recents::classify_swipe(input.dy) {
                                     launcher::recents::Swipe::Dismiss => {
                                         let origin_y =
                                             (input.y as i32 - input.dy as i32).max(0) as usize;
                                         let x = input.x as usize;
-                                        let slot = launcher::recents::card_at(
+                                        let slot = screens::activity::card_hit_at(
+                                            &state,
                                             x,
                                             origin_y,
-                                            state.recents_count,
                                         );
                                         if let Some(slot) = slot {
                                             screens::activity::activity_close_slot(&mut state, slot);
@@ -3403,7 +3491,28 @@ pub extern "C" fn _start() -> ! {
                                 let x = input.x as usize;
                                 let y = input.y as usize;
 
-                                // A. The close control on a card.
+                                // A. The selector rail: bring that app's card
+                                // to the front without switching to it.
+                                if let Some(slot) =
+                                    screens::activity::selector_hit(&state, x, y)
+                                {
+                                    state.activity_focus = slot;
+                                    screens::activity::invalidate_activity_frame();
+                                    present_dirty(surface, &state, Dirty::ActivityCards);
+                                    std::log("[LAUNCHER] Task switcher selector changed focus.")
+                                        .ok();
+                                    let mut drain = std::InputEvent {
+                                        kind: 0,
+                                        x: 0,
+                                        y: 0,
+                                        dx: 0,
+                                        dy: 0,
+                                        scale_milli: 1000,
+                                    };
+                                    while std::input_event_poll(&mut drain).is_ok() {}
+                                    break;
+                                }
+                                // B. The close control on the focused card.
                                 if let Some(slot) = screens::activity::activity_close_hit(&state, x, y) {
                                     screens::activity::activity_close_slot(&mut state, slot);
                                     present_dirty(surface, &state, Dirty::ActivityCards);
@@ -3420,7 +3529,7 @@ pub extern "C" fn _start() -> ! {
                                     while std::input_event_poll(&mut drain).is_ok() {}
                                     break;
                                 }
-                                // B. "Close all".
+                                // C. "Close all".
                                 else if {
                                     let ca = screens::activity::close_all_rect();
                                     x >= ca.x.saturating_sub(40) && x <= ca.x + ca.w + 40 && y >= ca.y.saturating_sub(25) && y <= ca.y + ca.h + 25
@@ -3469,7 +3578,7 @@ pub extern "C" fn _start() -> ! {
                                     while std::input_event_poll(&mut drain).is_ok() {}
                                     break;
                                 }
-                                // C. A card's body: bring that task to the front.
+                                // D. A card's body: bring that task to the front.
                                 //
                                 // WHY the card is the only thing that opens a task: the
                                 // switcher's job is to switch to something that is
@@ -3494,7 +3603,7 @@ pub extern "C" fn _start() -> ! {
                                         break;
                                     }
                                 }
-                                // D. The backdrop: back to the home surface.
+                                // E. The backdrop: back to the home surface.
                                 else {
                                     state.current_view = ViewMode::HomeScreen;
                                     render_view(surface, &state);
@@ -3529,131 +3638,18 @@ pub extern "C" fn _start() -> ! {
                                 while std::input_event_poll(&mut drain).is_ok() {}
                                 break;
                             }
-                            if input.kind == 1 || input.kind == 2 || is_drag(input.kind) {
+                            // WHY taps only: the panel has no slider any more.
+                            // Every level row is a reading of hardware this guest
+                            // does not have, so a drag over one used to store a
+                            // preference that no device consumed. A tap now
+                            // reaches `quick_controls_hit`, which returns `NoOp`
+                            // for every inert row and so leaves the shade open.
+                            if input.kind == 1 || input.kind == 2 {
                                 let x = input.x as usize;
                                 let y = input.y as usize;
 
-                                if input.kind != 1 {
-                                    if screens::quick_controls::BRIGHTNESS_ROW.contains(x, y) {
-                                        let percent = screens::quick_controls::slider_percent(x, screens::quick_controls::BRIGHTNESS_ROW);
-                                        state.brightness_percent = percent.max(10).min(100);
-                                        render_view(surface, &state);
-                                        surface_flip_display();
-                                        break;
-                                    } else if screens::quick_controls::VOLUME_SLIDER.contains(x, y) {
-                                        let percent = screens::quick_controls::slider_percent(x, screens::quick_controls::VOLUME_SLIDER);
-                                        let requested = percent as u32;
-                                        match std::audio_set_volume(requested) {
-                                            Ok(applied) => {
-                                                state.last_volume_percent = applied.min(100) as u8;
-                                                state.volume_state_valid = true;
-                                            }
-                                            Err(_) => {
-                                                state.last_volume_percent = percent;
-                                                state.volume_state_valid = true;
-                                            }
-                                        }
-                                        render_view(surface, &state);
-                                        surface_flip_display();
-                                        break;
-                                    }
-                                }
-
                                 match screens::quick_controls::quick_controls_hit(&state, x, y) {
-                                    screens::quick_controls::QuickControlAction::ToggleWifi => {
-                                        state.wifi_enabled = !state.wifi_enabled;
-                                        if state.wifi_enabled && state.airplane_mode {
-                                            state.airplane_mode = false;
-                                        }
-                                        std::log(if state.wifi_enabled { "[LAUNCHER] Quick Controls: Wi-Fi enabled." } else { "[LAUNCHER] Quick Controls: Wi-Fi disabled." }).ok();
-                                        render_view(surface, &state);
-                                        surface_flip_display();
-                                        break;
-                                    }
-                                    screens::quick_controls::QuickControlAction::ToggleBluetooth => {
-                                        state.bluetooth_enabled = !state.bluetooth_enabled;
-                                        if state.bluetooth_enabled && state.airplane_mode {
-                                            state.airplane_mode = false;
-                                        }
-                                        std::log(if state.bluetooth_enabled { "[LAUNCHER] Quick Controls: Bluetooth enabled." } else { "[LAUNCHER] Quick Controls: Bluetooth disabled." }).ok();
-                                        render_view(surface, &state);
-                                        surface_flip_display();
-                                        break;
-                                    }
-                                    screens::quick_controls::QuickControlAction::ToggleCellular => {
-                                        state.cellular_enabled = !state.cellular_enabled;
-                                        if state.cellular_enabled && state.airplane_mode {
-                                            state.airplane_mode = false;
-                                        }
-                                        std::log(if state.cellular_enabled { "[LAUNCHER] Quick Controls: Cellular data enabled." } else { "[LAUNCHER] Quick Controls: Cellular data disabled." }).ok();
-                                        render_view(surface, &state);
-                                        surface_flip_display();
-                                        break;
-                                    }
-                                    screens::quick_controls::QuickControlAction::ToggleAirplane => {
-                                        state.airplane_mode = !state.airplane_mode;
-                                        if state.airplane_mode {
-                                            state.wifi_enabled = false;
-                                            state.bluetooth_enabled = false;
-                                            state.cellular_enabled = false;
-                                        }
-                                        std::log(if state.airplane_mode { "[LAUNCHER] Quick Controls: Airplane mode enabled." } else { "[LAUNCHER] Quick Controls: Airplane mode disabled." }).ok();
-                                        render_view(surface, &state);
-                                        surface_flip_display();
-                                        break;
-                                    }
-                                    screens::quick_controls::QuickControlAction::SetBrightness(percent) => {
-                                        state.brightness_percent = percent.max(10).min(100);
-                                        std::log("[LAUNCHER] Quick Controls display brightness adjusted.").ok();
-                                        render_view(surface, &state);
-                                        surface_flip_display();
-                                        break;
-                                    }
-                                    screens::quick_controls::QuickControlAction::SetVolume(percent) => {
-                                        let requested = percent as u32;
-                                        match std::audio_set_volume(requested) {
-                                            Ok(applied) => {
-                                                state.last_volume_percent = applied.min(100) as u8;
-                                                state.volume_state_valid = true;
-                                                state.volume_hud_until = current_ticks().saturating_add(180);
-                                                if let Some(id) = volume_surface {
-                                                    render_volume_hud(id, state.last_volume_percent);
-                                                    let _ = std::window_set_geometry(id, 100, 220, 100, true);
-                                                    surface_flip_display();
-                                                }
-                                                std::log("[LAUNCHER] Quick Controls volume slider applied to guest audio manager.").ok();
-                                            }
-                                            Err(_) => {
-                                                state.last_volume_percent = percent;
-                                                state.volume_state_valid = true;
-                                                let _ = std::log("[LAUNCHER] Volume control applied to shell state.").ok();
-                                            }
-                                        }
-                                        render_view(surface, &state);
-                                        surface_flip_display();
-                                        break;
-                                    }
-                                    screens::quick_controls::QuickControlAction::ToggleTorch => {
-                                        state.torch_enabled = !state.torch_enabled;
-                                        std::log(if state.torch_enabled { "[LAUNCHER] Quick Controls: Flashlight on." } else { "[LAUNCHER] Quick Controls: Flashlight off." }).ok();
-                                        render_view(surface, &state);
-                                        surface_flip_display();
-                                        break;
-                                    }
-                                    screens::quick_controls::QuickControlAction::ToggleDnd => {
-                                        state.dnd_enabled = !state.dnd_enabled;
-                                        std::log(if state.dnd_enabled { "[LAUNCHER] Quick Controls: Do Not Disturb on." } else { "[LAUNCHER] Quick Controls: Do Not Disturb off." }).ok();
-                                        render_view(surface, &state);
-                                        surface_flip_display();
-                                        break;
-                                    }
-                                    screens::quick_controls::QuickControlAction::ToggleRotationLock => {
-                                        state.rotation_lock = !state.rotation_lock;
-                                        std::log(if state.rotation_lock { "[LAUNCHER] Quick Controls: Rotation locked." } else { "[LAUNCHER] Quick Controls: Auto-rotate enabled." }).ok();
-                                        render_view(surface, &state);
-                                        surface_flip_display();
-                                        break;
-                                    }
+                                    screens::quick_controls::QuickControlAction::NoOp => {}
                                     screens::quick_controls::QuickControlAction::LockScreen => {
                                         let _ = std::user_lock(1000);
                                         state.lock_state = std::user_get_lock_state(1000).unwrap_or(std::UserLockState::Locked);
@@ -4481,7 +4477,7 @@ pub extern "C" fn _start() -> ! {
                                 // were a legend with real counts that no tap
                                 // reached, so the surface printed "Filter reads
                                 // All" while drawing no way to change it. The
-                                // pill row sits at PILLS_Y (210) with PILL_H,
+                                // pill row sits at PILLS_Y (214) with PILL_H,
                                 // above the feed body, below the header, and
                                 // clear of the CLEAR_BTN the layout harness pins.
                                 //

@@ -1302,7 +1302,7 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                 } else {
                     b"Storage capacity unavailable"
                 };
-                if let Some(c) = test_text(x, y, 108, 282, 1, capacity_status, THEME.on_surface_variant, row_bg) {
+                if let Some(c) = test_text(x, y, 108, 284, 1, capacity_status, THEME.on_surface_variant, row_bg) {
                     return c;
                 }
                 // 4. Storage summary bar track (108..640, 310..318)
@@ -1959,10 +1959,11 @@ fn render_card_rows(surface: u32, app: &FileManagerApp) {
         // Only the part of the row that is on the card is written.
         let from = ENTRIES_CARD.y.saturating_sub(rect.y);
         let to = (ENTRIES_CARD.y + ENTRIES_CARD.h).min(rect.y + ENTRY_ROW_H) - rect.y;
-        write_pixels(
+        write_pixels_rows(
             surface,
             (rect.y + from) * W + ENTRIES_CARD.x,
             &buffer[from * ROW_BUFFER_W..to * ROW_BUFFER_W],
+            ROW_BUFFER_W,
         );
     }
     // The scroll indicator, over the rows.
@@ -2032,7 +2033,7 @@ fn render_action_bar(surface: u32, app: &FileManagerApp) {
                 draw_muted_label(buffer, PILL_BUFFER_W, PILL_BUFFER_H, label);
             }
         }
-        write_pixels(surface, rect.y * W + rect.x, &buffer[..]);
+        write_pixels_rows(surface, rect.y * W + rect.x, &buffer[..], PILL_BUFFER_W);
     }
 }
 
@@ -2062,14 +2063,29 @@ fn draw_muted_label(buffer: &mut [u32], width: usize, height: usize, label: &[u8
 }
 
 /// Writes a run of pixels to the surface, in the chunks the platform takes.
-fn write_pixels(surface: u32, offset: usize, pixels: &[u32]) {
+/// Writes a widget buffer into the surface, one row at a time.
+///
+/// WHY not one contiguous write: a widget buffer is as wide as the widget, and
+/// the surface is as wide as the screen. Copying the buffer as one run put row
+/// two of the widget at the end of row one on the surface, so every row after
+/// the first landed 72 pixels to the right -- the entry names and the action
+/// pills came out as a diagonal smear. The destination row advances by the
+/// surface stride; only the source run advances by the widget width.
+fn write_pixels_rows(surface: u32, offset: usize, pixels: &[u32], row_w: usize) {
     let mut chunk = [0u32; CHUNK];
-    let mut written = 0usize;
-    while written < pixels.len() {
-        let count = (pixels.len() - written).min(CHUNK);
-        chunk[..count].copy_from_slice(&pixels[written..written + count]);
-        let _ = std::surface_write(surface, offset + written, &chunk[..count]);
-        written += count;
+    let mut src = 0usize;
+    let mut row = 0usize;
+    let mut col = 0usize;
+    while src < pixels.len() {
+        let count = (pixels.len() - src).min(row_w - col).min(CHUNK);
+        chunk[..count].copy_from_slice(&pixels[src..src + count]);
+        let _ = std::surface_write(surface, offset + row * W + col, &chunk[..count]);
+        src += count;
+        col += count;
+        if col == row_w {
+            col = 0;
+            row += 1;
+        }
     }
 }
 

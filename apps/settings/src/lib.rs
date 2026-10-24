@@ -1092,7 +1092,7 @@ mod tests {
         let n = display_caption(&mut out, true);
         let caption = core::str::from_utf8(&out[..n]).expect("the caption is text");
         // The scanout is the platform's own constant, not this app's surface.
-        assert!(caption.starts_with("Scanout 1080x2160"), "{}", caption);
+        assert!(caption.starts_with("Scanout 720x1440"), "{}", caption);
         // And the refresh rate is named as unreported rather than invented.
         assert!(caption.contains("refresh rate not reported"), "{}", caption);
         // The old caption claimed a mode the app had never been told.

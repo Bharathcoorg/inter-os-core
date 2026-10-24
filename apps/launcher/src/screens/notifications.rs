@@ -19,7 +19,7 @@
 use crate::{test_text_aa, LauncherState, NotificationRecord};
 use launcher::layout::Rect;
 use launcher::text;
-use launcher::theme::{space, type_scale, radius, Theme, SCREEN_HEIGHT, SCREEN_WIDTH, STATUS_BAR_HEIGHT, CONTENT_PADDING};
+use launcher::theme::{space, type_scale, radius, Theme, SCREEN_HEIGHT, SCREEN_WIDTH, STATUS_BAR_HEIGHT};
 
 // -----------------------------------------------------------------------------
 // Constants & Geometry
@@ -32,10 +32,16 @@ const ROW_W: usize = SCREEN_WIDTH - 64; // 656
 /// Left edge of the header block.
 const HEADER_X: usize = 36;
 
-/// Baselines of the header block, in order.
+/// Tops of the header block's lines, in order.
+///
+/// WHY these moved down: `LabelRun` places the outline face by its baseline,
+/// and a HEADING run at 56 inks through about row 120. The old subtitle top of
+/// 108 put the two lines on top of each other. These offsets give every line
+/// its own line box plus a body-scale gap, so the title, subtitle, source note
+/// and pill row read as four separate bands.
 pub const TITLE_Y: usize = 56;
-pub const SUBTITLE_Y: usize = 108;
-pub const SOURCE_NOTE_Y: usize = 132;
+pub const SUBTITLE_Y: usize = 134;
+pub const SOURCE_NOTE_Y: usize = 170;
 
 /// Filter note line placed below the pill row.
 pub const FILTER_NOTE_Y: usize = PILLS_Y + PILL_H;
@@ -44,15 +50,15 @@ pub const FILTER_NOTE_Y: usize = PILLS_Y + PILL_H;
 const ROW_H: usize = 176;
 const ROW_PITCH: usize = 184;
 
-/// First row of the first section's stack.
-pub const SECTION_HEAD_Y: usize = 300;
+/// First row of the first section's stack: below the filter note's line box.
+pub const SECTION_HEAD_Y: usize = 312;
 
 /// Bottom cutoff for feed rows above the bottom action bar.
 const FEED_BOTTOM: usize = 700;
 
 /// Height of the pill row, and the gap between pills.
-pub const PILLS_Y: usize = 210;
-pub const PILL_H: usize = 52;
+pub const PILLS_Y: usize = 214;
+pub const PILL_H: usize = 56;
 const PILL_GAP: usize = space::SM + space::XS;
 
 /// Left edge of a row's text column, past the app squircle icon.
@@ -490,27 +496,6 @@ fn bucket_of(posted: u64, now: Option<u64>) -> usize {
 // -----------------------------------------------------------------------------
 
 #[derive(Clone, Copy)]
-struct StatusPlan {
-    clock: LabelRun,
-    battery: Rect,
-    battery_dash: Rect,
-    tip: Rect,
-    wifi_centre: (i32, i32),
-    bars: [Rect; 4],
-}
-
-impl StatusPlan {
-    const EMPTY: StatusPlan = StatusPlan {
-        clock: LabelRun::EMPTY,
-        battery: Rect::new(0, 0, 0, 0),
-        battery_dash: Rect::new(0, 0, 0, 0),
-        tip: Rect::new(0, 0, 0, 0),
-        wifi_centre: (0, 0),
-        bars: [Rect::new(0, 0, 0, 0); 4],
-    };
-}
-
-#[derive(Clone, Copy)]
 struct PillPlan {
     rect: Rect,
     label: LabelRun,
@@ -579,7 +564,10 @@ impl RowPlan {
 
 #[derive(Clone, Copy)]
 struct EventsFrame {
-    status: StatusPlan,
+    /// The shell's canonical status clock, and the same honest telemetry the
+    /// home screen draws. One geometry for every shell surface.
+    clock: LabelRun,
+    telemetry: crate::screens::home::Telemetry,
     title: LabelRun,
     subtitle: LabelRun,
     source_note: LabelRun,
@@ -777,50 +765,24 @@ fn row_plan(rec: &NotificationRecord, y: usize, cat: Category, now: Option<u64>,
 fn build_events_frame(state: &LauncherState) -> EventsFrame {
     let theme = launcher::theme::SHELL;
 
-    // 1. Status Bar Plan (uniform with app_drawer & home)
-    let mid = STATUS_BAR_HEIGHT / 2;
-    let battery = Rect::new(
-        SCREEN_WIDTH - CONTENT_PADDING - space::XXL - space::SM,
-        mid - 7,
-        space::XXL + space::SM,
-        14,
-    );
-    let tip = Rect::new(battery.x + battery.w + 2, mid - 3, 4, 6);
-    let wifi = Rect::new(battery.x - space::XL - space::SM, mid - 10, space::XXL, 20);
-    let bars_right = wifi.x - space::MD;
-    let mut bars = [Rect::new(0, 0, 0, 0); 4];
-    for (i, slot) in bars.iter_mut().enumerate() {
-        let h = 6 + i * 4;
-        *slot = Rect::new(bars_right - (4 - i) * 4 - (3 - i) * 4, mid + 8 - h, 4, h);
-    }
-    let battery_dash = Rect::new(
-        battery.x + (battery.w - 6) / 2,
-        battery.y + (battery.h - 2) / 2,
-        6,
-        2,
-    );
-
+    // 1. Status Bar Plan: the canonical shell clock at (40, 8) on the body
+    // line and the home screen's telemetry glyphs. WHY reused rather than
+    // redrawn: this screen used to paint its own filled signal bars, Wi-Fi
+    // fan and battery, which disagreed with both the home screen's geometry
+    // and the platform's honesty rule (no radio, no fuel gauge).
     let clock_slice: &[u8] = if state.clock_source_ok && state.clock_time[0] != b' ' {
         &state.clock_time
     } else {
         b""
     };
     let status_clock = LabelRun::new(
-        CONTENT_PADDING + space::SM,
-        (STATUS_BAR_HEIGHT - text::line_height(type_scale::BODY)) / 2,
+        40,
+        8,
         type_scale::BODY,
         clock_slice,
         theme.on_surface,
     );
-
-    let status = StatusPlan {
-        clock: status_clock,
-        battery,
-        battery_dash,
-        tip,
-        wifi_centre: (wifi.center_x() as i32, wifi.y as i32 + 15),
-        bars,
-    };
+    let telemetry = crate::screens::home::telemetry_plan();
 
     // 2. Header
     let now = interos_std::cap::timer_slot().and_then(|_| interos_std::get_ticks().ok());
@@ -829,7 +791,7 @@ fn build_events_frame(state: &LauncherState) -> EventsFrame {
     let subtitle = LabelRun::new(
         HEADER_X,
         SUBTITLE_Y,
-        type_scale::CAPTION,
+        type_scale::BODY,
         b"Everything in one feed",
         theme.on_surface_variant,
     );
@@ -1003,7 +965,8 @@ fn build_events_frame(state: &LauncherState) -> EventsFrame {
     );
 
     EventsFrame {
-        status,
+        clock: status_clock,
+        telemetry,
         title,
         subtitle,
         source_note,
@@ -1141,40 +1104,12 @@ pub fn get_notifications_color(x: usize, y: usize, state: &LauncherState) -> u32
 
     // 1. Status Bar (y < STATUS_BAR_HEIGHT)
     if y < STATUS_BAR_HEIGHT {
-        if y == STATUS_BAR_HEIGHT - 1 {
-            return theme.border;
-        }
-        let s = &f.status;
-        if let Some(c) = s.clock.pixel_on(x, y, theme.surface) {
-            return c;
-        }
-        if rounded_contains(s.battery, x, y, radius::CHIP) {
-            if rounded_outline(s.battery, x, y, radius::CHIP) {
-                return theme.on_surface;
-            }
-            if s.battery_dash.contains(x, y) {
-                return theme.on_surface_variant;
-            }
-            return theme.surface_container_low;
-        }
-        if s.tip.contains(x, y) {
-            return theme.on_surface;
-        }
-        let wdx = x as i32 - s.wifi_centre.0;
-        let wdy = y as i32 - s.wifi_centre.1;
-        let wd2 = wdx * wdx + wdy * wdy;
-        if wdy <= 0 && ((36..=64).contains(&wd2) || (100..=144).contains(&wd2)) {
-            return theme.on_surface;
-        }
-        if wd2 <= 9 {
-            return theme.on_surface;
-        }
-        for bar in s.bars.iter() {
-            if bar.contains(x, y) {
-                return theme.on_surface;
-            }
-        }
-        return theme.surface;
+        return crate::screens::status::pixel_with(
+            x,
+            y,
+            |x, y| f.clock.pixel_on(x, y, theme.surface),
+            &theme,
+        );
     }
 
     // 2. Header block: Title, Subtitle, Notes, and Header Clear All pill

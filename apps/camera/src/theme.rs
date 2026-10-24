@@ -45,15 +45,78 @@ pub mod type_scale {
 
 /// The theme this app draws in.
 ///
-    /// WHY this palette: the design the app showcases describe is
-    /// monochrome -- a `#FAFAFA` page, a `#FFFFFF` surface, a `#E5E5E5`
-    /// hairline, and colour reserved for a status -- and the platform's
-    /// design system now holds that palette, so every application and the
-    /// shell draw the same pixels.
+/// WHY this palette: the design the app showcases describe is
+/// monochrome -- a `#FAFAFA` page, a `#FFFFFF` surface, a `#E5E5E5`
+/// hairline, and colour reserved for a status -- and the platform's
+/// design system now holds that palette, so every application and the
+/// shell draw the same pixels.
 pub const THEME: Theme = Theme {
     name: "camera",
     ..interos_std::design::monochrome::THEME
 };
+
+/// The camera's own chassis palette.
+///
+/// WHY this sits beside [`THEME`] instead of replacing it: `THEME` is the
+/// platform's surface-and-ink language, and it stays the source of every
+/// text and surface role that must read as a platform sheet. A viewfinder
+/// app is not a sheet, though -- it is an instrument with a dark body -- so
+/// the body, the well and the ink that sits on them come from here, while
+/// the *meaning* of a colour still comes from the platform: the amber is
+/// the platform's caution role, the refusal red is its error role, and the
+/// ready emerald is its success role. Nothing here forks a [`Theme`]; these
+/// are the values the camera's painter needs and nothing else.
+pub mod chrome {
+    use super::Theme;
+
+    /// The chassis: the top band, the mode strip and the shutter dock.
+    pub const BODY: u32 = 0xFF0E0F11;
+    /// The viewfinder's active area, one step above the letterbox.
+    pub const WELL: u32 = 0xFF111417;
+    /// The bars that mask an aspect ratio narrower than the well.
+    pub const LETTERBOX: u32 = 0xFF07080A;
+    /// A floating control: a top-row pill, the status card, the sheet.
+    pub const SURFACE: u32 = 0xFF17191C;
+    /// A raised control: a settings row, a disc that carries a glyph.
+    pub const SURFACE_HIGH: u32 = 0xFF202328;
+    /// A hairline on the chassis.
+    pub const BORDER: u32 = 0xFF2C3036;
+    /// A hairline that has to be seen: the well's edge, the sheet's edge.
+    pub const BORDER_STRONG: u32 = 0xFF3D424A;
+    /// A control that is present but cannot act.
+    pub const DISABLED: u32 = 0xFF4A4F57;
+
+    /// Body ink on the chassis.
+    pub const TEXT: u32 = 0xFFF5F6F7;
+    /// Secondary ink: a reason, an unselected mode, a note.
+    pub const TEXT_MUTED: u32 = 0xFF9AA0A6;
+    /// The least prominent ink: the system gesture bar.
+    pub const TEXT_DIM: u32 = 0xFF6C7178;
+
+    /// The shutter and the selected mode. The platform's caution role is
+    /// the amber the design system already names, and it reads on charcoal.
+    pub const AMBER: u32 = super::THEME.warning;
+    /// An informational control: flash, filter, timer, aspect, grid.
+    pub const SKY: u32 = interos_std::design::color::DARK_ACCENT;
+    /// The platform refused the camera: the status card's dot and headline.
+    pub const REFUSED: u32 = super::THEME.error;
+    /// The platform granted authority and the camera is armed.
+    pub const READY: u32 = super::THEME.success;
+    /// Authorised but not usable: no sensor is bound.
+    pub const CAUTION: u32 = super::THEME.warning;
+    /// The video mode's record core.
+    pub const RECORD: u32 = super::THEME.error;
+
+    /// A low-strength wash of `ink` over the chassis surface.
+    ///
+    /// WHY this is a helper: the selected mode's fill, the status dot's halo
+    /// and the refused card's hairline are all the same decision -- a colour
+    /// said quietly on `SURFACE` -- and three copies of the blend would let
+    /// the three drift apart.
+    pub fn tint(ink: u32, percent: u32) -> u32 {
+        Theme::blend(SURFACE, ink, (percent.min(100) * 256) / 100)
+    }
+}
 
 /// The smallest edge an interactive target may have.
 pub const MIN_TOUCH_TARGET: usize = interos_std::design::touch::MIN_TARGET;

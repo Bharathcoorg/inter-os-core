@@ -23,6 +23,7 @@ pub mod power_transition;
 pub mod quick_controls;
 pub mod recents;
 pub mod search;
+pub mod status;
 
 pub use activity::get_activity_color;
 pub use app_drawer::get_app_drawer_color;

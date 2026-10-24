@@ -1607,7 +1607,24 @@ pub fn get_lock_screen_color_over_backdrop(
     color: u32,
 ) -> u32 {
     let f = frame_for(x, y, state);
+    lock_screen_over_backdrop(f, x, y, state, color)
+}
 
+/// The overlay painter itself, given the frame the caller already resolved.
+///
+/// WHY it takes the frame instead of asking for it: `get_lock_screen_color`
+/// resolves the wallpaper through the same memo slot and then delegates here.
+/// Asking `frame_for` a second time for the very same pixel always misses --
+/// `holds_next` accepts only the *next* pixel in the walk -- so both outline
+/// text runs were re-measured once per pixel, which made a full lock surface
+/// take tens of seconds to paint under QEMU.
+fn lock_screen_over_backdrop(
+    f: &Frame,
+    x: usize,
+    y: usize,
+    state: &LauncherState,
+    color: u32,
+) -> u32 {
     // The PIN pad is drawn only when the unlock gesture found a credential and asked
     // for it (`pin_pad_visible`).
     let pin_active = state.pin_pad_visible;
@@ -1734,7 +1751,7 @@ pub fn get_lock_screen_color_over_backdrop(
 pub fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     let f = frame_for(x, y, state);
     let color = lock_wallpaper_pixel(f, x, y);
-    get_lock_screen_color_over_backdrop(x, y, state, color)
+    lock_screen_over_backdrop(f, x, y, state, color)
 }
 
 /// Evaluates the lock screen pixel at (x, y), allowing an optional raw photographic wallpaper buffer

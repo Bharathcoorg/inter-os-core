@@ -1046,7 +1046,9 @@ fn metric_row(
     // Cryptographic status badge on the right - Scale 2 (Body) truth badge
     let v_w = font::width(value, 2, true);
     let badge_w = (v_w + 34).min(half + 24);
-    let badge_h = 30;
+    // WHY 36: the verdict is a body-scale run (32 px), so a 30 px pill was
+    // smaller than the line box it contained and clipped its descenders.
+    let badge_h = 36;
     let bx0 = x0 + w - PAD - badge_w;
     let by0 = y0.saturating_sub(4);
     if in_round(x, y, bx0, by0, badge_w, badge_h, badge_h / 2) {
@@ -1060,7 +1062,7 @@ fn metric_row(
         if ddx * ddx + ddy * ddy <= 16 {
             return Some(value_ink);
         }
-        if let Some(c) = font::ink(x, y, bx0 + 22, by0 + 5, 2, value, badge_w.saturating_sub(26), value_ink, THEME.surface_container_low, true) {
+        if let Some(c) = font::ink(x, y, bx0 + 22, by0 + 2, 2, value, badge_w.saturating_sub(26), value_ink, THEME.surface_container_low, true) {
             return Some(c);
         }
         return Some(THEME.surface_container_low);
@@ -1096,7 +1098,9 @@ fn tile_pixel(
     // Cryptographic status badge: pill container with indicator dot and status verdict
     let badge_x = tx + 16;
     let badge_y = ty + 44;
-    let badge_h = 30;
+    // WHY 36: the verdict is a body-scale run (32 px), so a 30 px pill was
+    // smaller than the line box it contained and clipped its descenders.
+    let badge_h = 36;
     let v_w = font::width(verdict, 2, true);
     let badge_w = (v_w + 34).min(iw);
     if in_round(x, y, badge_x, badge_y, badge_w, badge_h, badge_h / 2) {
@@ -1110,7 +1114,7 @@ fn tile_pixel(
         if ddx * ddx + ddy * ddy <= 16 {
             return Some(verdict_ink);
         }
-        if let Some(c) = font::ink(x, y, badge_x + 22, badge_y + 5, 2, verdict, badge_w.saturating_sub(26), verdict_ink, THEME.surface_container, true) {
+        if let Some(c) = font::ink(x, y, badge_x + 22, badge_y + 2, 2, verdict, badge_w.saturating_sub(26), verdict_ink, THEME.surface_container, true) {
             return Some(c);
         }
         return Some(THEME.surface_container);

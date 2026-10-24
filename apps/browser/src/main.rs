@@ -1391,6 +1391,14 @@ impl BrowserApp {
     }
 
     pub fn navigate_again(&mut self, target: &[u8]) -> bool {
+        // A hostname typed without a scheme is fetched over HTTPS, so the
+        // address bar records the address the request actually names.
+        let mut normalized = [0u8; 256];
+        let target = {
+            let n = browser::normalize_address(target, &mut normalized);
+            &normalized[..n]
+        };
+
         let n = target.len().min(self.current_url.len());
         self.current_url[..n].copy_from_slice(&target[..n]);
         self.current_url_len = n;
@@ -2491,7 +2499,7 @@ fn home_page_pixel(x: usize, y: usize, app: &BrowserApp) -> u32 {
     // 2. Favorites / Quick Access Grid (y 252..376)
     if y >= 252 && y < 376 {
         // Section label
-        if y >= 252 && y < 274 {
+        if y >= 252 && y < 252 + font::line_height(1) {
             // WHY the heading is "Quick links" and not "Favorites": the tiles
         // are a list the app shipped with, not the user's favourites. The
         // user's own bookmarks are the list below this one, and it says so
@@ -3001,7 +3009,7 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
     // lines without saying so presents a fragment as the article.
     if app.doc_total_lines > app.doc_line_count && app.doc_line_count > 0 {
         let note_y = current_y + 12;
-        if y as isize >= note_y && (y as isize) < note_y + 20 {
+        if y as isize >= note_y && (y as isize) < note_y + font::line_height(1) as isize {
             let mut buf = [0u8; 48];
             let mut n = 0usize;
             n = append_text(&mut buf, n, b"Showing the first ");
@@ -3087,14 +3095,23 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
                         }
 
                         // Tab Title
+                        //
+                        // WHY both runs are ellipsized here: the title and the
+                        // URL are stored at their full length, and drawing
+                        // them unmeasured let them run through the close glyph
+                        // and off the card.
                         let title = tab_data.title_bytes();
-                        if let Some(px) = text_px(x, y, 78, card_y + 20, 1, title, THEME.on_surface, c, true) {
+                        let mut tbuf = [0u8; 64];
+                        let tn = font::ellipsize(title, 1, 540, &mut tbuf);
+                        if let Some(px) = text_px(x, y, 78, card_y + 20, 1, &tbuf[..tn], THEME.on_surface, c, true) {
                             return Some(px);
                         }
 
                         // Tab URL
                         let url = tab_data.url();
-                        if let Some(px) = text_px(x, y, 40, card_y + 54, 1, url, THEME.on_surface_variant, c, false) {
+                        let mut ubuf = [0u8; 128];
+                        let un = font::ellipsize(url, 1, 580, &mut ubuf);
+                        if let Some(px) = text_px(x, y, 40, card_y + 54, 1, &ubuf[..un], THEME.on_surface_variant, c, false) {
                             return Some(px);
                         }
 

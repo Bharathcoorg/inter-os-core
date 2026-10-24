@@ -353,9 +353,9 @@ fn build_plan(state: &LauncherState, motion: &CarouselMotion, fp: u64) -> Plan {
 
     // Header labels
     let clock = Label::at(
-        48,
-        14,
-        type_scale::CAPTION,
+        crate::screens::status::CLOCK_X,
+        crate::screens::status::CLOCK_Y,
+        crate::screens::status::CLOCK_SCALE,
         if state.clock_source_ok { &state.clock_time } else { b"" },
         theme.on_surface,
     );
@@ -588,10 +588,7 @@ pub fn get_recents_color(x: usize, y: usize, state: &LauncherState) -> u32 {
 
     // 1. Status Bar & Clock
     if y < STATUS_BAR_HEIGHT {
-        if let Some(c) = plan.clock.pixel(x, y, theme.surface) {
-            return c;
-        }
-        return theme.surface;
+        return crate::screens::status::pixel(x, y, Some(&plan.clock), &theme);
     }
 
     // 2. Header: Title & Count

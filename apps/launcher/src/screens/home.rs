@@ -464,11 +464,7 @@ impl Run {
 
     fn placed_styled(x: usize, y: usize, scale: usize, buf: [u8; RUN_CAP], len: usize, ink: u32, bold: bool) -> Run {
         let text = &buf[..len];
-        let em = if scale == 2 {
-            26
-        } else {
-            launcher::outline_text::em_for_scale(scale)
-        };
+        let em = launcher::outline_text::em_for_scale(scale);
         let (asc, desc) = interos_std::design::typeface::line_metrics(em);
         let baseline = (y + launcher::font::ascent_for_scale(scale)).max(asc as usize);
         let outline_advance = interos_std::design::typeface::text_advance_px(text, em) as usize + if bold { 1 } else { 0 };
@@ -724,6 +720,7 @@ struct Paint {
 }
 
 /// The status bar's hardware glyph boxes.
+#[derive(Clone, Copy)]
 pub(crate) struct Telemetry {
     pub signal_x: usize,
     pub signal_w: usize,
@@ -853,7 +850,10 @@ fn build(state: &LauncherState) -> Paint {
     let greeting = if state.user_name_len > 0 {
         let l1_y = f.greeting.y + 4;
         let l2_y = f.greeting.y + 26;
-        let l3_y = f.greeting.y + 70;
+        // WHY +104 and not +70: the name is drawn at HEADING, whose descender
+        // reaches ~105 px below the line origin. A subtitle at +70 started inside
+        // that descender, so the two lines touched as soon as the cap ladder grew.
+        let l3_y = f.greeting.y + 104;
         [
             Run::whole(f.greeting.x, l1_y, caption_scale, day_part_comma, 0),
             Run::whole(f.greeting.x, l2_y, title_scale, &state.user_name[..state.user_name_len], 0),
@@ -863,7 +863,10 @@ fn build(state: &LauncherState) -> Paint {
         // Platform Truth Contract: Zero hardcoded or fake person name.
         // Render prominent time-of-day greeting as title, followed by dynamic subtitle.
         let l1_y = f.greeting.y + 8;
-        let l2_y = f.greeting.y + 64;
+        // WHY +86 and not +64: HEADING's line box carries the glyphs down to
+        // ~+88 from the run origin (cap 44 plus descender). The subtitle at +64
+        // collided with the descender of the title's first letter.
+        let l2_y = f.greeting.y + 86;
         [
             Run::whole(f.greeting.x, l1_y, title_scale, day_part, 0),
             Run::whole(f.greeting.x, l2_y, caption_scale, subtitle_bytes, 0),
@@ -871,8 +874,11 @@ fn build(state: &LauncherState) -> Paint {
         ]
     };
 
-    // Date & Weather card: real RTC calendar date & weekday, crystal-clear weather
-    let (full_weekday, day_slice): (&[u8], &[u8]) =
+    // Date card: real RTC calendar date and weekday. There is no weather
+    // sensor, weather capability or weather syscall in this platform, so the
+    // card never prints a temperature; the third line carries the month, and
+    // an absent RTC reading says so instead of showing a plausible date.
+    let (full_weekday, day_slice, month_slice): (&[u8], &[u8], &[u8]) =
         if state.clock_source_ok && state.date_line[0] != b' ' {
             let weekday = match &state.date_line[0..3] {
                 b"Mon" => &b"MONDAY"[..],
@@ -886,16 +892,31 @@ fn build(state: &LauncherState) -> Paint {
             };
             let day_start = if state.date_line[5] == b'0' { 6 } else { 5 };
             let day = &state.date_line[day_start..7];
-            (weekday, day)
+            let month = match &state.date_line[8..11] {
+                b"Jan" => &b"JANUARY"[..],
+                b"Feb" => &b"FEBRUARY"[..],
+                b"Mar" => &b"MARCH"[..],
+                b"Apr" => &b"APRIL"[..],
+                b"May" => &b"MAY"[..],
+                b"Jun" => &b"JUNE"[..],
+                b"Jul" => &b"JULY"[..],
+                b"Aug" => &b"AUGUST"[..],
+                b"Sep" => &b"SEPTEMBER"[..],
+                b"Oct" => &b"OCTOBER"[..],
+                b"Nov" => &b"NOVEMBER"[..],
+                b"Dec" => &b"DECEMBER"[..],
+                _ => &b"NO DATE"[..],
+            };
+            (weekday, day, month)
         } else {
-            (&b"TODAY"[..], &b"24"[..])
+            (&b"TODAY"[..], &b"--"[..], &b"DATE UNAVAILABLE"[..])
         };
 
     let dw = f.date_widget;
     let dw_w = dw.w;
-    let date_weekday = Run::centred(dw.x, dw.y + 8, type_scale::SECTION, dw_w.saturating_sub(16), dw_w, full_weekday, theme.primary);
+    let date_weekday = Run::centred(dw.x, dw.y + 6, type_scale::SECTION, dw_w.saturating_sub(16), dw_w, full_weekday, theme.primary);
     let date_day = Run::centred(dw.x, dw.y + 40, type_scale::DISPLAY, dw_w.saturating_sub(16), dw_w, day_slice, theme.on_surface);
-    let date_month = Run::centred(dw.x, dw.y + 118, type_scale::BODY, dw_w.saturating_sub(16), dw_w, b"22\xB0C Clear", theme.on_surface_variant);
+    let date_month = Run::centred(dw.x, dw.y + 126, type_scale::CAPTION, dw_w.saturating_sub(16), dw_w, month_slice, theme.on_surface_variant);
 
     let weather = Run::EMPTY;
 
@@ -1353,14 +1374,19 @@ pub(crate) fn telemetry_pixel(x: usize, y: usize, t: &Telemetry, ink: u32) -> Op
         return None;
     }
 
-    // 1. Cellular: 4 ascending filled bars
+    // 1. Cellular: four ascending 1 px outlines, with no fill.
+    //
+    // WHY outlines and not bars: the radio is unbound, so there is no level to
+    // fill. A solid stack is what a phone draws for "four bars of signal", and
+    // this platform has never measured one.
     if x >= t.signal_x && x < t.signal_x + t.signal_w {
         for bar in 0..4 {
             let bx = t.signal_x + bar * 5;
             if x >= bx && x < bx + 3 {
                 let h = 5 + bar * 3;
                 let bar_top = 31 - h;
-                if y >= bar_top && y <= 30 {
+                let on_edge = x == bx || x == bx + 2 || y == bar_top || y == 30;
+                if on_edge && y >= bar_top && y <= 30 {
                     return Some(ink);
                 }
             }
@@ -1368,19 +1394,29 @@ pub(crate) fn telemetry_pixel(x: usize, y: usize, t: &Telemetry, ink: u32) -> Op
         return None;
     }
 
-    // 2. Wi-Fi arc: dot + 2 concentric arcs
+    // 2. Wi-Fi: a centre dot and two continuous 1 px arcs above it.
+    //
+    // WHY a per-column arc height instead of an integer annulus: at these radii
+    // a squared-distance band lands on sparse lattice points and rendered as a
+    // dashed cloud. Resolving the arc's row for each column keeps the fan one
+    // connected curve. The dot carries no level — Wi-Fi is unbound — but the
+    // mark still has to read as Wi-Fi rather than as an indeterminate blob.
     if x >= t.wifi_x0 && x < t.wifi_x0 + t.wifi_w {
         let cx = t.wifi_x0 as i32 + (t.wifi_w as i32) / 2;
-        let dot_cy = 28i32;
+        let cy = 30i32;
         let dx = x as i32 - cx;
-        let dy = dot_cy - y as i32;
-        let d2 = dx * dx + dy * dy;
-        if d2 <= 4 {
+        if (-1..=0).contains(&dx) && (29..=30).contains(&y) {
             return Some(ink);
         }
-        if dy > 2 && dx.abs() <= dy + 1 {
-            if (25..=40).contains(&d2) || (64..=88).contains(&d2) {
-                return Some(ink);
+        let dy = cy - y as i32;
+        if dy > 0 {
+            for r in [5i32, 8] {
+                if dx.abs() <= r - 2 {
+                    let d2 = dx * dx + dy * dy;
+                    if (d2 - r * r).abs() <= r {
+                        return Some(ink);
+                    }
+                }
             }
         }
         return None;
@@ -1391,7 +1427,11 @@ pub(crate) fn telemetry_pixel(x: usize, y: usize, t: &Telemetry, ink: u32) -> Op
         return None;
     }
 
-    // 4. Battery: rounded shell + terminal tip + filled interior
+    // 4. Battery: shell + terminal tip + a centre dash, with no fill.
+    //
+    // WHY a dash and not a percentage: the fuel gauge is unbound. A filled
+    // interior would read as a charge level, which is exactly the fabricated
+    // reading this strip is meant to avoid.
     let term_w = TELEMETRY_TERM_W;
     if x >= t.battery_x0 && x < t.term_x0 + term_w {
         if x >= t.term_x0 {
@@ -1407,7 +1447,9 @@ pub(crate) fn telemetry_pixel(x: usize, y: usize, t: &Telemetry, ink: u32) -> Op
             if y == 17 || y == 31 || x == t.battery_x0 || x == t.term_x0 - 1 {
                 return Some(ink);
             }
-            if y >= 19 && y <= 29 && x >= t.battery_x0 + 2 && x <= t.term_x0 - 2 {
+            let dash_x0 = t.battery_x0 + (t.term_x0 - t.battery_x0) / 2 - 4;
+            let dash_x1 = t.battery_x0 + (t.term_x0 - t.battery_x0) / 2 + 4;
+            if (23..=24).contains(&y) && x >= dash_x0 && x <= dash_x1 {
                 return Some(ink);
             }
         }
@@ -1446,19 +1488,6 @@ fn greeting_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Op
         }
         if let Some(c) = p.date_day.pixel_aa(x, y, p.date_day.ink, card_fill) {
             return Some(c);
-        }
-        // Crystal-clear vector weather sun icon next to temperature reading
-        let wx = x as i32 - (f.date_widget.x as i32 + 46);
-        let wy = y as i32 - (f.date_widget.y as i32 + 104);
-        let wr2 = wx * wx + wy * wy;
-        if wr2 <= 16 {
-            return Some(0xFFF59E0B);
-        }
-        let is_ray = (wy.abs() <= 1 && wx.abs() >= 6 && wx.abs() <= 8)
-            || (wx.abs() <= 1 && wy.abs() >= 6 && wy.abs() <= 8)
-            || ((wx.abs() - wy.abs()).abs() <= 1 && wr2 >= 36 && wr2 <= 64);
-        if is_ray {
-            return Some(0xFFF59E0B);
         }
         if let Some(c) = p.date_month.pixel_aa(x, y, p.date_month.ink, card_fill) {
             return Some(c);

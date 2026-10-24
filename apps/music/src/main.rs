@@ -764,10 +764,12 @@ const HOME_Y1: usize = 1424;
 /// Draws a run of text with the sharp outline face, falling back to the
 /// bitmap face when the outline face refuses the run.
 ///
-/// WHY the outline face is tried first: the panel is 1080x2160 and this app
-/// paints at 720x1440, so the compositor magnifies a bitmap run 3:2 and the
-/// glyph edges read as soft. The outline face rasterises the real outline
-/// and reads as sharp at the panel's own resolution.
+/// WHY the outline face is tried first: the platform scanout is 720x1440,
+/// which is exactly the space this app paints, so composition is 1:1 and
+/// the compositor magnifies nothing. The outline face is still preferred
+/// because it rasterises the real outline at the requested cap height
+/// instead of magnifying the 16x24 bitmap fallback face, so it stays sharp
+/// at every size.
 ///
 /// WHY the box is the union of the two faces' boxes: the outline face's box
 /// sits one or two rows inside the bitmap cell's, and a bitmap fallback
@@ -1329,19 +1331,35 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
         PlaybackState::Paused => b"Paused",
         PlaybackState::Stopped => b"Stopped",
     };
-    if let Some(c) = text_centered_bold(x, y, STATE_Y, 2, state_label, THEME.on_surface, THEME.surface) {
-        return c;
-    }
-    if let Some(c) = text_centered(
-        x,
-        y,
-        STATE_Y + font::line_height(2) - 4,
-        1,
-        &f.state[..f.state_len],
-        THEME.muted,
-        THEME.surface,
-    ) {
-        return c;
+    {
+        // WHY the state and the position share one line: the position used to
+        // reserve a second line from STATE_Y + 28, which ran into the search
+        // field at 748, and the measured gap between STATE_Y + 32 and 748 is
+        // only 4 px - too small for any line box.
+        let pos = &f.state[..f.state_len];
+        // The frame stores state first and appends " - <position>" only when
+        // the transport reported one. Drawing all of it beside the bold state
+        // repeated the state ("Stopped Stopped") when there was no position,
+        // so the suffix is what goes on this line.
+        let mut suffix = pos;
+        if suffix.len() >= state_label.len() && &suffix[..state_label.len()] == state_label {
+            suffix = &suffix[state_label.len()..];
+        }
+        if suffix.len() >= 3 && &suffix[..3] == b" - " {
+            suffix = &suffix[3..];
+        }
+        let lw = font::measure_bold(state_label, 2);
+        let pw = if suffix.is_empty() { 0 } else { font::measure(suffix, 1) };
+        let gap = if pw > 0 { 8 } else { 0 };
+        let x0 = W.saturating_sub(lw + gap + pw) / 2;
+        if let Some(c) = text_bold(x, y, x0, STATE_Y, 2, state_label, THEME.on_surface, THEME.surface) {
+            return c;
+        }
+        if pw > 0 {
+            if let Some(c) = text(x, y, x0 + lw + gap, STATE_Y + 5, 1, suffix, THEME.muted, THEME.surface) {
+                return c;
+            }
+        }
     }
 
     // 3b. The library's search field, the order control and the import

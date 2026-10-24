@@ -124,9 +124,9 @@ fn build(state: &LauncherState) -> Plan {
     let theme = THEME;
     let mut plan = Plan {
         clock: Label::at(
-            48,
-            14,
-            type_scale::CAPTION,
+            crate::screens::status::CLOCK_X,
+            crate::screens::status::CLOCK_Y,
+            crate::screens::status::CLOCK_SCALE,
             if state.clock_source_ok {
                 &state.clock_time
             } else {
@@ -437,10 +437,7 @@ pub fn get_search_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     let theme = THEME;
 
     if y < STATUS_BAR_HEIGHT {
-        if let Some(c) = p.clock.pixel(x, y, theme.surface) {
-            return c;
-        }
-        return theme.surface;
+        return crate::screens::status::pixel(x, y, Some(&p.clock), &theme);
     }
 
     // The query field.

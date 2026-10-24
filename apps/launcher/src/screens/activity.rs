@@ -1,21 +1,23 @@
-//! Production-grade Recents / Activity Space switcher for InterOS.
+//! The task switcher: recent activity, one app at a time.
 //!
-//! Provides a flagship multitasking interface:
-//! 1. Authentic live previews: displays real hardware-captured surface frames
-//!    or rich, full-fidelity simulated previews showing each app's signature UI
-//!    layout and vibrant brand palette from `AccentPalette::VIBRANT_LIGHT` /
-//!    `AccentPalette::VIBRANT_DARK`.
-//! 2. Production card layout: elegant 24px rounded corners, 56px squircle brand icon
-//!    with crisp 30px vector glyph, bold large Section typography for app title,
-//!    tactile state pill badges with colored status dots, and a >=48px circular close button.
-//! 3. Flagship Close All pill button at bottom (260x56px, radius 28px) with bold high-contrast text.
-//! 4. Full system status bar: bold time, 4 filled cellular signal bars, Wi-Fi fan arcs,
-//!    and battery outline with filled level and explicit 100% label.
-//! 5. Zero heap allocations in rendering loops, strict `#![no_std]` compliance.
+//! WHY one large card and a selector rail: an app's screen is 720x1440, so a
+//! faithful preview is 1:2. Three previews stacked in the 984 px between the
+//! header and the close control can be only 150 px wide each, which is
+//! smaller than the app's own title and icon and tells nobody what the app
+//! was showing. The switcher therefore shows the focused app's real frame at
+//! 402x804, with a selector rail naming the other recent apps and their
+//! state. The rail, not a fabricated chrome, is what says there is more than
+//! one recent app.
+//!
+//! The cards come from `refresh_recents_cards`, which asks the platform which
+//! tasks are live and which surfaces belong to them; the previews are the
+//! apps' own captured pixels. A card that has no picture says why.
+//!
+//! Zero heap allocations: every plan is a fixed-size array, rebuilt in place.
 
 use crate::LauncherState;
 use interos_std as std;
-use interos_std::design::theme::{AccentPalette, StockApp};
+use interos_std::design::theme::AccentPalette;
 use launcher::icons::{self, IconKind};
 use launcher::layout::Rect;
 use launcher::recents::{self, Card, Preview, MAX_CARDS};
@@ -157,30 +159,58 @@ enum CardStateKind {
     NotRunning,
 }
 
-/// One card, resolved with flagship metrics and brand identity.
+/// The selector rail: one chip per recent app, naming it and its state.
+pub const SELECTOR_Y: usize = 132;
+pub const SELECTOR_H: usize = 72;
+pub const SELECTOR_GAP: usize = 8;
+/// The focused card's frame.
+pub const HERO_Y: usize = 220;
+pub const HERO_H: usize = 904;
+/// The header band inside the card, above the preview well.
+const HERO_HEADER_H: usize = 84;
+const HERO_PAD: usize = 16;
+
+pub const CARD_X: usize = 32;
+pub const CARD_W: usize = 656;
+
+/// One chip of the selector rail.
+#[derive(Clone, Copy)]
+struct SelectorPlan {
+    rect: Rect,
+    label: Label,
+    dot_x: usize,
+    dot_color: u32,
+    selected: bool,
+}
+
+/// The focused card's app identity, drawn in its header.
 #[derive(Clone, Copy)]
 struct CardPlan {
-    rect: Rect,
-    preview: Rect,
-    picture: Option<usize>,
+    icon_box: Rect,
     icon: Option<IconKind>,
-    #[allow(dead_code)]
-    stock_app: Option<StockApp>,
     accent_color: u32,
     badge: [u8; 4],
     badge_len: usize,
-    name: Label,
-    close: Rect,
 }
 
 /// The frame's complete layout plan.
 struct Plan {
-    clock: Label,
-    battery_pct: Label,
+    /// `None` when the RTC refused: a clock is a measurement, and a made-up
+    /// reading is exactly what the status bar must not show.
+    clock: Option<Label>,
     title: Label,
     count: Label,
-    cards: [CardPlan; MAX_CARDS],
-    card_count: usize,
+    selector: [SelectorPlan; MAX_CARDS],
+    selector_count: usize,
+    card: Option<CardPlan>,
+    focus: usize,
+    preview: Rect,
+    picture: Option<usize>,
+    preview_state: Preview,
+    name: Label,
+    status: Label,
+    status_dot: (usize, usize, u32),
+    close: Rect,
     close_all: Rect,
     close_all_label: Label,
     empty: Label,
@@ -197,37 +227,76 @@ pub fn invalidate_activity_frame() {
     unsafe { *slot = None };
 }
 
-/// The rows the cards occupy.
+/// The rows the switcher occupies.
 pub fn recents_band() -> (usize, usize) {
     let close_all = close_all_rect();
-    (recents::CARDS_Y0, close_all.y + close_all.h)
+    (SELECTOR_Y, close_all.y + close_all.h)
 }
 
-/// The close-all control: prominent flagship pill button.
+/// The close-all control: prominent pill button, below the card.
 pub fn close_all_rect() -> Rect {
     Rect::new(230, 1160, 260, 56)
 }
 
-/// The card whose close control holds (`x`, `y`).
-pub fn activity_close_hit(state: &LauncherState, x: usize, y: usize) -> Option<usize> {
-    if state.recents_count == 1 {
-        let hero_close = Rect::new(592, 174, 48, 48);
-        if hero_close.contains(x, y) {
-            return Some(0);
-        }
-    }
-    recents::close_at(x, y, state.recents_count)
+/// The frame of the focused card.
+pub fn hero_rect() -> Rect {
+    Rect::new(CARD_X, HERO_Y, CARD_W, HERO_H)
 }
 
-/// Hit test for recent cards.
-pub fn card_hit_at(state: &LauncherState, x: usize, y: usize) -> Option<usize> {
-    if state.recents_count == 1 {
-        let hero_card = Rect::new(60, 150, 600, 980);
-        if hero_card.contains(x, y) {
-            return Some(0);
+/// The close control of the focused card.
+pub fn hero_close_rect() -> Rect {
+    Rect::new(CARD_X + CARD_W - 64, HERO_Y + 16, 48, 48)
+}
+
+/// The picture well inside the focused card.
+///
+/// WHY the well is fitted by height: the app's frame is 1:2, and a preview
+/// stretched into another shape is a picture of a different screen.
+pub fn hero_preview_rect() -> Rect {
+    let top = HERO_Y + HERO_HEADER_H;
+    let avail_h = HERO_H - HERO_HEADER_H - HERO_PAD;
+    let w = avail_h / 2;
+    Rect::new(CARD_X + (CARD_W - w) / 2, top, w, avail_h)
+}
+
+/// The chip of the selector rail at `index`.
+pub fn selector_rect(index: usize) -> Rect {
+    let w = (CARD_W - (MAX_CARDS - 1) * SELECTOR_GAP) / MAX_CARDS;
+    Rect::new(CARD_X + index * (w + SELECTOR_GAP), SELECTOR_Y, w, SELECTOR_H)
+}
+
+/// The selector chip at (`x`, `y`), if any.
+pub fn selector_hit(state: &LauncherState, x: usize, y: usize) -> Option<usize> {
+    for index in 0..state.recents_count.min(MAX_CARDS) {
+        if selector_rect(index).contains(x, y) {
+            return Some(index);
         }
     }
-    recents::card_at(x, y, state.recents_count)
+    None
+}
+
+/// The focused card's close control.
+pub fn activity_close_hit(state: &LauncherState, x: usize, y: usize) -> Option<usize> {
+    if state.recents_count == 0 {
+        return None;
+    }
+    if hero_close_rect().contains(x, y) {
+        Some(state.activity_focus.min(state.recents_count - 1))
+    } else {
+        None
+    }
+}
+
+/// Hit test for the focused card's body.
+pub fn card_hit_at(state: &LauncherState, x: usize, y: usize) -> Option<usize> {
+    if state.recents_count == 0 {
+        return None;
+    }
+    if hero_rect().contains(x, y) {
+        Some(state.activity_focus.min(state.recents_count - 1))
+    } else {
+        None
+    }
 }
 
 /// Dismisses the card in `slot`.
@@ -251,6 +320,18 @@ pub fn activity_close_slot(state: &mut LauncherState, slot: usize) {
     }
     state.recents_cards[state.recents_count] = Card::EMPTY;
     state.recents_surfaces[state.recents_count] = 0;
+    // Keep the focus on a card that still exists, and on the same app when the
+    // dismissed one was below it.
+    if state.recents_count == 0 {
+        state.activity_focus = 0;
+    } else {
+        if slot < state.activity_focus {
+            state.activity_focus -= 1;
+        }
+        if state.activity_focus >= state.recents_count {
+            state.activity_focus = state.recents_count - 1;
+        }
+    }
     invalidate_activity_frame();
 }
 
@@ -307,71 +388,106 @@ fn plan(x: usize, y: usize, state: &LauncherState) -> &'static Plan {
     unsafe { (*slot).as_ref() }.expect("Plan must be populated")
 }
 
-/// A fingerprint of the card list, so a plan is rebuilt when the cards change.
+/// A fingerprint of the card list and the focused card, so a plan is rebuilt
+/// when either changes.
 fn fingerprint(state: &LauncherState) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     hash ^= state.recents_count as u64;
     hash = hash.wrapping_mul(0x1000_0000_01b3);
-    for index in 0..state.recents_count {
+    hash ^= state.activity_focus as u64;
+    hash = hash.wrapping_mul(0x1000_0000_01b3);
+    for index in 0..state.recents_count.min(MAX_CARDS) {
         let card = &state.recents_cards[index];
         for &byte in card.package() {
             hash ^= byte as u64;
             hash = hash.wrapping_mul(0x1000_0000_01b3);
         }
+        for &byte in card.label() {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(0x1000_0000_01b3);
+        }
         hash ^= card.task_id;
         hash = hash.wrapping_mul(0x1000_0000_01b3);
-        hash ^= match card.preview {
-            Preview::Live { .. } => 1u64,
-            Preview::LastFrame { .. } => 3u64,
-            Preview::Unavailable(_) => 2u64,
-        };
+        match card.preview {
+            Preview::Live { .. } => hash ^= 1u64,
+            Preview::LastFrame { .. } => hash ^= 3u64,
+            Preview::Unavailable(reason) => {
+                hash ^= 2u64;
+                for &byte in reason.as_bytes() {
+                    hash ^= byte as u64;
+                    hash = hash.wrapping_mul(0x1000_0000_01b3);
+                }
+            }
+        }
         hash = hash.wrapping_mul(0x1000_0000_01b3);
     }
     hash
 }
 
+/// The colour of a card's state dot: a live task is green, a card holding the
+/// app's last frame is amber, and a card with no task is neutral.
+fn state_color(card: &Card) -> u32 {
+    if card.task_id != 0 {
+        THEME.success
+    } else if card.preview.has_picture() {
+        THEME.warning
+    } else {
+        THEME.on_surface_variant
+    }
+}
+
+/// What a card's header says about the app, and nothing it cannot back.
+fn status_text(card: &Card) -> &'static [u8] {
+    if card.task_id != 0 {
+        if card.preview.is_live() {
+            b"Running"
+        } else {
+            b"Running \xc2\xb7 no frame yet"
+        }
+    } else if card.preview.has_picture() {
+        b"Not running \xc2\xb7 last frame"
+    } else {
+        b"Not running"
+    }
+}
+
 fn build(state: &LauncherState, fingerprint: u64) -> Plan {
     let theme = THEME;
-    let clock_bytes = if state.clock_source_ok && !state.clock_time.is_empty() {
-        &state.clock_time
-    } else {
-        b"12:00"
-    };
-
     let close_all = close_all_rect();
     let close_all_lbl_w = launcher::text::measure(b"Close all", type_scale::SECTION);
     let close_all_lbl_h = launcher::text::line_height(type_scale::SECTION);
 
     let mut plan = Plan {
-        clock: Label::at(
-            32,
-            (STATUS_BAR_HEIGHT.saturating_sub(launcher::text::line_height(type_scale::BODY))) / 2,
-            type_scale::BODY,
-            clock_bytes,
-            theme.on_surface,
-        ),
-        battery_pct: Label::at(
-            614,
-            (STATUS_BAR_HEIGHT.saturating_sub(launcher::text::line_height(type_scale::CAPTION))) / 2,
-            type_scale::CAPTION,
-            b"",
-            theme.on_surface,
-        ),
-        title: Label::at(32, 66, type_scale::TITLE, b"Recents", theme.on_surface),
+        clock: if state.clock_source_ok && !state.clock_time.is_empty() {
+            Some(Label::at(
+                crate::screens::status::CLOCK_X,
+                crate::screens::status::CLOCK_Y,
+                crate::screens::status::CLOCK_SCALE,
+                &state.clock_time,
+                theme.on_surface,
+            ))
+        } else {
+            None
+        },
+        title: Label::at(32, 62, type_scale::TITLE, b"Recents", theme.on_surface),
         count: Label::at(0, 0, type_scale::CAPTION, b"", theme.on_surface_variant),
-        cards: [CardPlan {
+        selector: [SelectorPlan {
             rect: Rect::new(0, 0, 0, 0),
-            preview: Rect::new(0, 0, 0, 0),
-            picture: None,
-            icon: None,
-            stock_app: None,
-            accent_color: 0xFF7C3AED,
-            badge: [0; 4],
-            badge_len: 0,
-            name: Label::EMPTY,
-            close: Rect::new(0, 0, 0, 0),
+            label: Label::EMPTY,
+            dot_x: 0,
+            dot_color: 0,
+            selected: false,
         }; MAX_CARDS],
-        card_count: 0,
+        selector_count: 0,
+        card: None,
+        focus: 0,
+        preview: hero_preview_rect(),
+        picture: None,
+        preview_state: Preview::Unavailable("no task"),
+        name: Label::EMPTY,
+        status: Label::EMPTY,
+        status_dot: (0, 0, 0),
+        close: hero_close_rect(),
         close_all,
         close_all_label: Label::at(
             close_all.x + (close_all.w.saturating_sub(close_all_lbl_w)) / 2,
@@ -386,18 +502,21 @@ fn build(state: &LauncherState, fingerprint: u64) -> Plan {
     };
 
     let count = state.recents_count.min(MAX_CARDS);
-    let live = state
-        .recents_cards
+    // WHY the running count asks the task ids: `Preview::Live` is only true
+    // once a capture has landed, so a running app whose first frame has not
+    // been read yet used to be reported as not running. The task id is the
+    // platform's own answer to "is this app running".
+    let running = state.recents_cards[..count]
         .iter()
-        .take(count)
-        .filter(|card| card.preview.is_live())
+        .filter(|card| card.task_id != 0)
         .count();
-    let count_text = count_label(live, count, &mut [0u8; 32]);
+    let mut summary_buf = [0u8; 32];
+    let summary = summary_label(count, running, &mut summary_buf);
     plan.count = Label::at(
-        688 - launcher::text::measure(&count_text.0[..count_text.1], type_scale::CAPTION),
-        80,
+        688 - launcher::text::measure(&summary.0[..summary.1], type_scale::CAPTION),
+        74,
         type_scale::CAPTION,
-        &count_text.0[..count_text.1],
+        &summary.0[..summary.1],
         theme.on_surface_variant,
     );
 
@@ -425,70 +544,107 @@ fn build(state: &LauncherState, fingerprint: u64) -> Plan {
         AccentPalette::VIBRANT_LIGHT
     };
 
+    let focus = state.activity_focus.min(count - 1);
+    plan.focus = focus;
+    let label_y = SELECTOR_Y + (SELECTOR_H.saturating_sub(launcher::text::line_height(type_scale::BODY))) / 2;
+
     for index in 0..count {
         let card = &state.recents_cards[index];
-        let (rect, preview, close, name_x, name_y) = if count == 1 {
-            let r = Rect::new(60, 150, 600, 980);
-            let prev = Rect::new(150, 240, 420, 840);
-            let cl = Rect::new(592, 174, 48, 48);
-            (r, prev, cl, 156, 184)
-        } else {
-            let r = recents::card_rect(index);
-            let prev = recents::preview_rect(index);
-            let cl = recents::close_rect(index);
-            (r, prev, cl, r.x + 268, r.y + 36)
-        };
-
-        let pkg = card.package();
-        let stock_app = StockApp::from_bytes(pkg);
-        let icon = icons::match_icon_kind(pkg);
-        let accent_color = palette.for_app_bytes(pkg);
-
-        let mut badge = [0u8; 4];
-        let mut badge_len = 0usize;
-        if icon.is_none() {
-            let title = card.label();
-            let mut at = 0usize;
-            let mut in_word = false;
-            for &c in title.iter() {
-                if at >= 4 {
-                    break;
-                }
-                let is_sep = c == b' ' || c == b'-' || c == b'_' || c == b'.';
-                if !is_sep && !in_word {
-                    badge[at] = c.to_ascii_uppercase();
-                    at += 1;
-                }
-                in_word = !is_sep;
-            }
-            badge_len = at;
-        }
-
-
-        let column = close.x.saturating_sub(name_x + 12);
-        let (name, name_len) = launcher::text::ellipsize(card.label(), type_scale::TITLE, column);
-
-        plan.cards[index] = CardPlan {
+        let rect = selector_rect(index);
+        // The dot takes 22 px (6 px dot plus two 8 px margins), so the label
+        // gets the rest of the chip and never runs under the rounded edge.
+        let room = rect.w.saturating_sub(40);
+        let (name, name_len) = launcher::text::ellipsize(card.label(), type_scale::BODY, room);
+        plan.selector[index] = SelectorPlan {
             rect,
-            preview,
-            picture: picture_slot(card.package()),
-            icon,
-            stock_app,
-            accent_color,
-            badge,
-            badge_len,
-            name: Label::at(
-                name_x,
-                name_y,
-                type_scale::TITLE,
+            label: Label::at(
+                rect.x + 30,
+                label_y,
+                type_scale::BODY,
                 &name[..name_len],
-                theme.on_surface,
+                if index == focus {
+                    theme.on_primary
+                } else {
+                    theme.on_surface
+                },
             ),
-            close,
+            dot_x: rect.x + 14,
+            dot_color: state_color(card),
+            selected: index == focus,
         };
     }
-    plan.card_count = count;
+    plan.selector_count = count;
+
+    let card = &state.recents_cards[focus];
+    let pkg = card.package();
+    let icon = icons::match_icon_kind(pkg);
+    let accent_color = palette.for_app_bytes(pkg);
+
+    let mut badge = [0u8; 4];
+    let mut badge_len = 0usize;
+    if icon.is_none() {
+        let title = card.label();
+        let mut at = 0usize;
+        let mut in_word = false;
+        for &c in title.iter() {
+            if at >= 4 {
+                break;
+            }
+            let is_sep = c == b' ' || c == b'-' || c == b'_' || c == b'.';
+            if !is_sep && !in_word {
+                badge[at] = c.to_ascii_uppercase();
+                at += 1;
+            }
+            in_word = !is_sep;
+        }
+        badge_len = at;
+    }
+
+    let name_x = CARD_X + HERO_PAD + 64;
+    let name_room = hero_close_rect().x.saturating_sub(name_x + 16);
+    let (name, name_len) = launcher::text::ellipsize(card.label(), type_scale::SECTION, name_room);
+    plan.name = Label::at(
+        name_x,
+        HERO_Y + 18,
+        type_scale::SECTION,
+        &name[..name_len],
+        theme.on_surface,
+    );
+    plan.status = Label::at(
+        name_x + 12,
+        HERO_Y + 52,
+        type_scale::CAPTION,
+        status_text(card),
+        theme.on_surface_variant,
+    );
+    plan.status_dot = (name_x + 1, HERO_Y + 61, state_color(card));
+    plan.card = Some(CardPlan {
+        icon_box: Rect::new(CARD_X + HERO_PAD, HERO_Y + 16, 48, 48),
+        icon,
+        accent_color,
+        badge,
+        badge_len,
+    });
+    plan.preview = hero_preview_rect();
+    plan.picture = picture_slot(pkg);
+    plan.preview_state = card.preview;
     plan
+}
+
+/// The header summary: how many recent apps, and how many of them the platform
+/// says are running. A card with only a last frame is not counted as running.
+fn summary_label(count: usize, running: usize, buf: &mut [u8; 32]) -> ([u8; 32], usize) {
+    let mut out = [0u8; 32];
+    let mut at = 0usize;
+    put_num(&mut out, &mut at, count);
+    put_bytes(&mut out, &mut at, if count == 1 { b" recent app" } else { b" recent apps" });
+    if running > 0 {
+        put_bytes(&mut out, &mut at, b" \xc2\xb7 ");
+        put_num(&mut out, &mut at, running);
+        put_bytes(&mut out, &mut at, b" running");
+    }
+    *buf = out;
+    (out, at)
 }
 
 fn put_bytes(buf: &mut [u8], at: &mut usize, bytes: &[u8]) {
@@ -518,29 +674,17 @@ fn put_num(buf: &mut [u8], at: &mut usize, val: usize) {
     }
 }
 
-fn count_label(live: usize, total: usize, buf: &mut [u8; 32]) -> ([u8; 32], usize) {
-    let mut out = *buf;
-    let mut at = 0usize;
-    put_num(&mut out, &mut at, live);
-    if live != total {
-        put_bytes(&mut out, &mut at, b"/");
-        put_num(&mut out, &mut at, total);
-    }
-    put_bytes(&mut out, &mut at, b" running");
-    (out, at)
-}
-
 /// The colour of (`x`, `y`) on the task switcher.
 pub fn get_activity_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     let p = plan(x, y, state);
     let theme = THEME;
 
-    // 1. Complete System Status Bar
+    // 1. The shell's canonical status bar.
     if y < STATUS_BAR_HEIGHT {
-        return render_status_bar(x, y, p, &theme);
+        return crate::screens::status::pixel(x, y, p.clock.as_ref(), &theme);
     }
 
-    // 2. Overview Deck Title & Running Count
+    // 2. Header: title and the honest recent/running summary.
     if let Some(c) = p.title.pixel(x, y, theme.surface) {
         return c;
     }
@@ -548,69 +692,106 @@ pub fn get_activity_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         return c;
     }
 
-    // 3. Multitasking Cards Deck
-    for index in 0..p.card_count {
-        let card = &p.cards[index];
-        if !card.rect.contains(x, y) {
+    // 3. Selector rail: one chip per recent app.
+    for index in 0..p.selector_count {
+        let chip = &p.selector[index];
+        if !chip.rect.contains(x, y) {
             continue;
         }
-        if !inside_rounded(card.rect, 24, x, y) {
-            continue;
+        if !inside_rounded(chip.rect, 18, x, y) {
+            return theme.surface;
         }
-        if !inside_rounded(card.rect.inset(1), 23, x, y) {
+        let fill = if chip.selected {
+            theme.on_surface
+        } else {
+            theme.surface_container
+        };
+        if !chip.selected && !inside_rounded(chip.rect.inset(1), 17, x, y) {
             return theme.border;
         }
-        let fill = theme.surface_container;
-
-        // Preview Area: Real captured frame or rich simulated preview
-        if card.preview.contains(x, y) {
-            let px = ((x - card.preview.x) * recents::PREVIEW_W) / card.preview.w.max(1);
-            let py = ((y - card.preview.y) * recents::PREVIEW_H) / card.preview.h.max(1);
-            if let Some(slot) = card.picture {
-                if slot_has_captured_pixels(slot) {
-                    if let Some(c) = picture_pixel(slot, px, py) {
-                        if c != 0 {
-                            return c;
-                        }
-                    }
-                }
-            }
-            return preview_placeholder(x, y, &card.preview, &theme);
+        let dx = x as i32 - (chip.dot_x + 3) as i32;
+        let dy = y as i32 - (SELECTOR_Y + SELECTOR_H / 2) as i32;
+        if dx * dx + dy * dy <= 9 {
+            return chip.dot_color;
         }
-
-        // App Icon: 56px rounded squircle with app brand accent fill
-        let icon_box = if p.card_count == 1 {
-            Rect::new(84, 168, 56, 56)
-        } else {
-            Rect::new(card.rect.x + 196, card.rect.y + 22, 56, 56)
-        };
-        if icon_box.contains(x, y) && inside_rounded(icon_box, 16, x, y) {
-            if !inside_rounded(icon_box.inset(1), 15, x, y) {
-                return theme.border;
-            }
-            if let Some(c) = card_icon_glyph(x, y, card) {
-                return c;
-            }
-            return card.accent_color;
-        }
-
-        // Close ("X") Button
-        if card.close.contains(x, y) {
-            if let Some(c) = render_close_button(x, y, &card.close, &theme) {
-                return c;
-            }
-        }
-
-        // App Title Label
-        if let Some(c) = card.name.pixel(x, y, fill) {
+        if let Some(c) = chip.label.pixel(x, y, fill) {
             return c;
         }
-
         return fill;
     }
 
-    // 4. Empty State
-    if p.card_count == 0 {
+    // 4. The focused card.
+    if let Some(card) = &p.card {
+        let hero = hero_rect();
+        if hero.contains(x, y) {
+            if !inside_rounded(hero, 24, x, y) {
+                return theme.surface;
+            }
+            if !inside_rounded(hero.inset(1), 23, x, y) {
+                return theme.border;
+            }
+            let fill = theme.surface_container;
+
+            // The preview well: the app's own pixels, or the reason there are
+            // none. The well is fitted, never stretched, to the app's shape.
+            if p.preview.contains(x, y) {
+                if !inside_rounded(p.preview, 16, x, y) {
+                    return fill;
+                }
+                if !inside_rounded(p.preview.inset(1), 15, x, y) {
+                    return theme.border;
+                }
+                let px = ((x - p.preview.x) * recents::PREVIEW_W) / p.preview.w.max(1);
+                let py = ((y - p.preview.y) * recents::PREVIEW_H) / p.preview.h.max(1);
+                if let Some(slot) = p.picture {
+                    if slot_has_captured_pixels(slot) {
+                        if let Some(c) = picture_pixel(slot, px, py) {
+                            if c != 0 {
+                                return c;
+                            }
+                        }
+                    }
+                }
+                return preview_placeholder(x, y, &p.preview, &theme, p.preview_state);
+            }
+
+            // The app's identity.
+            if card.icon_box.contains(x, y) && inside_rounded(card.icon_box, 15, x, y) {
+                if !inside_rounded(card.icon_box.inset(1), 14, x, y) {
+                    return theme.border;
+                }
+                if let Some(c) = card_icon_glyph(x, y, card) {
+                    return c;
+                }
+                return card.accent_color;
+            }
+
+            // The close control.
+            if p.close.contains(x, y) {
+                if let Some(c) = render_close_button(x, y, &p.close, &theme) {
+                    return c;
+                }
+            }
+
+            // The state dot, then the status line.
+            let (dx0, dy0, color) = p.status_dot;
+            let dx = x as i32 - (dx0 + 4) as i32;
+            let dy = y as i32 - dy0 as i32;
+            if dx * dx + dy * dy <= 16 {
+                return color;
+            }
+            if let Some(c) = p.status.pixel(x, y, fill) {
+                return c;
+            }
+            if let Some(c) = p.name.pixel(x, y, fill) {
+                return c;
+            }
+            return fill;
+        }
+    }
+
+    // 5. Empty state.
+    if p.selector_count == 0 {
         if let Some(c) = p.empty.pixel(x, y, theme.surface) {
             return c;
         }
@@ -619,79 +800,13 @@ pub fn get_activity_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         }
     }
 
-    // 5. Flagship "Close all" Pill Button
-    if p.card_count > 0 && inside_rounded(p.close_all, 28, x, y) {
+    // 6. Close-all pill.
+    if p.selector_count > 0 && inside_rounded(p.close_all, 28, x, y) {
         let fill = theme.primary;
         if let Some(c) = p.close_all_label.pixel(x, y, fill) {
             return c;
         }
         return fill;
-    }
-
-    theme.surface
-}
-
-/// Renders the complete, authentic system status bar.
-fn render_status_bar(x: usize, y: usize, p: &Plan, theme: &Theme) -> u32 {
-    // Hairline divider at status bar baseline
-    if y == STATUS_BAR_HEIGHT - 1 {
-        return theme.border;
-    }
-
-    // 1. Bold Time on the left
-    if let Some(c) = p.clock.pixel(x, y, theme.surface) {
-        return c;
-    }
-
-    // 2. Explicit "100%" on the right
-    if let Some(c) = p.battery_pct.pixel(x, y, theme.surface) {
-        return c;
-    }
-
-    // 3. Battery Outline with Terminal Nub and Filled Level
-    let bx = 654;
-    let by = 18;
-    let bw = 26;
-    let bh = 13;
-    if x >= bx + bw && x < bx + bw + 3 && y >= by + 3 && y < by + bh - 3 {
-        return theme.on_surface;
-    }
-    if x >= bx && x < bx + bw && y >= by && y < by + bh {
-        if x == bx || x == bx + bw - 1 || y == by || y == by + bh - 1 {
-            return theme.on_surface;
-        }
-        // Filled battery level
-        return PALETTE_LIGHT.phone; // Vibrant Emerald Green battery gauge
-    }
-
-    // 4. Wi-Fi Arc Fan
-    let wifi_cx = 582;
-    let wifi_cy = 30;
-    let wdx = x as i32 - wifi_cx;
-    let wdy = wifi_cy - y as i32; // positive above dot
-    let wd2 = wdx * wdx + wdy * wdy;
-    if wd2 <= 4 {
-        return theme.on_surface;
-    }
-    if wdy > 2 && wdx.abs() <= wdy {
-        if (wd2 >= 25 && wd2 <= 49) || (wd2 >= 81 && wd2 <= 121) {
-            return theme.on_surface;
-        }
-    }
-
-    // 5. Filled Cellular Signal Bars (4 ascending bars)
-    let bottom = 30;
-    if x >= 536 && x <= 540 && y >= bottom - 4 && y <= bottom {
-        return theme.on_surface;
-    }
-    if x >= 543 && x <= 547 && y >= bottom - 7 && y <= bottom {
-        return theme.on_surface;
-    }
-    if x >= 550 && x <= 554 && y >= bottom - 10 && y <= bottom {
-        return theme.on_surface;
-    }
-    if x >= 557 && x <= 561 && y >= bottom - 13 && y <= bottom {
-        return theme.on_surface;
     }
 
     theme.surface
@@ -739,8 +854,8 @@ fn state_pill_border(kind: CardStateKind) -> u32 {
 
 /// Vector glyph or proportional acronym badge inside the app icon squircle.
 fn card_icon_glyph(x: usize, y: usize, card: &CardPlan) -> Option<u32> {
-    let cx = card.rect.x + 196 + 28;
-    let cy = card.rect.y + 22 + 28;
+    let cx = card.icon_box.center_x();
+    let cy = card.icon_box.center_y();
     if let Some(kind) = card.icon {
         return icons::rasterize_icon_pixel_scaled(kind, x, y, cx, cy, 0xFFFFFFFF, 15);
     }
@@ -823,29 +938,72 @@ fn inside_rounded(rect: Rect, radius: usize, x: usize, y: usize) -> bool {
 // Preview Placeholder (Platform Truth Contract)
 // =============================================================================
 
-/// Renders an authentic, high-fidelity app skeleton preview when a live framebuffer frame
-/// has not yet been captured into the cache.
-fn preview_placeholder(x: usize, y: usize, rect: &Rect, theme: &Theme) -> u32 {
+/// The well a card shows when the platform has no picture to give.
+///
+/// WHY the reason is drawn and not a mock screen: a sketch of what the app
+/// might look like is a picture of something that was never shown, and the
+/// switcher's whole job is to answer "what was this app showing".
+fn preview_placeholder(
+    x: usize,
+    y: usize,
+    rect: &Rect,
+    theme: &Theme,
+    state: Preview,
+) -> u32 {
     let fill = theme.surface_container_low;
-    let rad = 14;
+    let rad = 16;
     if !inside_rounded(*rect, rad, x, y) {
         return theme.surface_container;
     }
     if !inside_rounded(rect.inset(1), rad.saturating_sub(1), x, y) {
         return theme.border;
     }
-    let label_w = launcher::text::measure(b"No preview", type_scale::CAPTION);
-    let lx = rect.x + (rect.w.saturating_sub(label_w)) / 2;
-    let ly = rect.center_y().saturating_sub(8);
-    let label = Label::at(
-        lx,
-        ly,
-        type_scale::CAPTION,
-        b"No preview",
-        theme.on_surface_variant,
+
+    let cx = rect.center_x();
+    let cy = rect.center_y();
+
+    // A single unbound-looking dot, not a fake app: it marks the well as
+    // holding a status, not a picture.
+    let dot_y = cy.saturating_sub(52);
+    let dx = x as i32 - cx as i32;
+    let dy = y as i32 - dot_y as i32;
+    if dx * dx + dy * dy <= 36 {
+        return theme.on_surface_variant;
+    }
+
+    let head = b"No preview";
+    let head_w = launcher::text::measure(head, type_scale::BODY);
+    let head_y = cy.saturating_sub(28);
+    let head_label = Label::at(
+        rect.x + (rect.w.saturating_sub(head_w)) / 2,
+        head_y,
+        type_scale::BODY,
+        head,
+        theme.on_surface,
     );
-    if let Some(c) = label.pixel(x, y, fill) {
+    if let Some(c) = head_label.pixel(x, y, fill) {
         return c;
+    }
+
+    let reason = state
+        .reason()
+        .unwrap_or("the app has not drawn a frame yet")
+        .as_bytes();
+    let (rbytes, rlen) =
+        launcher::text::ellipsize(reason, type_scale::CAPTION, rect.w.saturating_sub(48));
+    if rlen > 0 {
+        let reason_w = launcher::text::measure(&rbytes[..rlen], type_scale::CAPTION);
+        let reason_y = head_y + launcher::text::line_height(type_scale::BODY) + 8;
+        let reason_label = Label::at(
+            rect.x + (rect.w.saturating_sub(reason_w)) / 2,
+            reason_y,
+            type_scale::CAPTION,
+            &rbytes[..rlen],
+            theme.on_surface_variant,
+        );
+        if let Some(c) = reason_label.pixel(x, y, fill) {
+            return c;
+        }
     }
     fill
 }

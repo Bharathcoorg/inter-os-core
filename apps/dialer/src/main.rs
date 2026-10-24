@@ -2886,7 +2886,7 @@ fn keypad_pixel_at(x: usize, y: usize, editing: Option<&DialerApp>) -> u32 {
 
                     let (digit_y0, sub_y0) = if has_sub {
                         let stack_y0 = (cy as usize).saturating_sub((digit_rows + sub_rows) / 2);
-                        (stack_y0, stack_y0 + digit_rows - 4)
+                        (stack_y0, stack_y0 + digit_rows)
                     } else {
                         let offset = if digit_bytes == b"*" { 4 } else { 0 };
                         let center_y0 = (cy as usize).saturating_sub(digit_rows / 2) + offset;
@@ -3789,7 +3789,9 @@ fn contacts_notice_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
             x,
             y,
             DISPLAY_X0 + 24,
-            NOTICE_Y0 + 34,
+            // WHY +30 and not +34: the caption's 22 px box has to end at the
+            // band's bottom (NOTICE_Y1), or its descenders are never drawn.
+            NOTICE_Y0 + 30,
             1,
             &buf[..tn],DISPLAY_W - 48, 
             THEME.on_surface_variant,
@@ -5182,7 +5184,13 @@ pub extern "C" fn _start() -> ! {
                         let _ = std::surface_destroy(surface);
                         std::exit_with_code(0);
                     }
-                    if input.kind == 1 {
+                    // WHY kind 2 is answered as a tap too: the gesture router
+                    // labels the second of two quick taps at the same point a
+                    // DoubleTap, and drops it from the Tap stream. The keypad
+                    // and the backspace disc have no double-tap action, so
+                    // ignoring it silently lost a digit: typing three digits
+                    // and tapping backspace three times deleted only two.
+                    if input.kind == 1 || input.kind == 2 {
                         match handle_tap(&mut dialer, input.x, input.y) {
                             Tap::Leave(msg) => {
                                 std::log(msg).ok();

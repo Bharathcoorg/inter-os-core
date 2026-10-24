@@ -94,6 +94,14 @@ pub const THUMB_BYTES: usize = THUMB_W * THUMB_H * 3;
 pub struct Thumbnail {
     /// RGB triples, row-major.
     pub rgb: [u8; THUMB_BYTES],
+    /// The decoded image's own width and height.
+    ///
+    /// WHY the source size is kept: the grid's image area is wider than it is
+    /// tall, so a portrait capture drawn across the whole area was stretched
+    /// sideways. The tile draws the picture at its own aspect and leaves the
+    /// tile's background on the two sides.
+    pub src_w: u32,
+    pub src_h: u32,
     /// Whether the thumbnail holds a decoded image.
     pub valid: bool,
 }
@@ -102,6 +110,8 @@ impl Thumbnail {
     /// The empty thumbnail -- no image was decoded.
     pub const EMPTY: Self = Self {
         rgb: [0u8; THUMB_BYTES],
+        src_w: 0,
+        src_h: 0,
         valid: false,
     };
 
@@ -116,6 +126,8 @@ impl Thumbnail {
         }
         let mut thumb = Self {
             rgb: [0u8; THUMB_BYTES],
+            src_w,
+            src_h,
             valid: true,
         };
         for ty in 0..THUMB_H {
@@ -157,6 +169,29 @@ impl Thumbnail {
                 | ((self.rgb[i + 1] as u32) << 8)
                 | (self.rgb[i + 2] as u32),
         )
+    }
+
+    /// The size the picture occupies inside a tile area of `area_w` by `area_h`.
+    ///
+    /// The picture keeps its own aspect and is centred; the caller paints the
+    /// tile's background around it. An empty thumbnail fills the whole area,
+    /// because its placeholder belongs to the area rather than to a picture.
+    pub fn fitted_size(&self, area_w: usize, area_h: usize) -> (usize, usize) {
+        if !self.valid || self.src_w == 0 || self.src_h == 0 {
+            return (area_w, area_h);
+        }
+        let area_w = area_w as u64;
+        let area_h = area_h as u64;
+        let src_w = self.src_w as u64;
+        let src_h = self.src_h as u64;
+        if src_w * area_h <= src_h * area_w {
+            // Height-bound: a portrait picture is as tall as the area.
+            let w = ((src_w * area_h / src_h) as usize).max(1);
+            (w, area_h as usize)
+        } else {
+            let h = ((src_h * area_w / src_w) as usize).max(1);
+            (area_w as usize, h)
+        }
     }
 }
 
@@ -626,6 +661,23 @@ mod tests {
 
         // A zero-sized source is not an image.
         assert!(Thumbnail::from_rgba(&rgba, 0, 2).is_none());
+    }
+
+    #[test]
+    fn test_a_portrait_thumbnail_is_fitted_not_stretched() {
+        // WHY this matters: a capture is 36x72, and the grid's image area is
+        // wider than it is tall. Drawing the thumbnail across the whole area
+        // squashed the phone screen sideways, so the tile must keep the
+        // picture's own aspect and centre it in the area.
+        let rgba = [0xFFu8; 36 * 72 * 4];
+        let thumb = Thumbnail::from_rgba(&rgba, 36, 72).expect("thumbnail");
+        assert_eq!(thumb.fitted_size(214, 174), (87, 174));
+
+        let landscape = Thumbnail::from_rgba(&rgba, 72, 36).expect("thumbnail");
+        assert_eq!(landscape.fitted_size(214, 174), (214, 107));
+
+        // An empty thumbnail's placeholder belongs to the whole area.
+        assert_eq!(Thumbnail::EMPTY.fitted_size(214, 174), (214, 174));
     }
 
     #[test]

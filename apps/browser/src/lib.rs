@@ -2260,6 +2260,67 @@ pub fn classify_address(raw: &[u8]) -> AddressOutcome {
     AddressOutcome::Fetchable
 }
 
+/// Prepends the scheme a bare hostname is fetched with.
+///
+/// WHY: a hostname typed without a scheme (`example.com`) names a host as
+/// plainly as `https://example.com` does, but the parser saw no scheme and
+/// the browser reported the address as unrecognised. Only input that reads
+/// as a hostname is given a scheme; a bare word (`hello`) still names
+/// nothing the browser can fetch.
+pub fn normalize_address(raw: &[u8], out: &mut [u8]) -> usize {
+    let trimmed = trim_ascii(raw);
+    if !matches!(parse_uri(trimmed).scheme, UriScheme::Unknown) || !looks_like_hostname(trimmed) {
+        let n = trimmed.len().min(out.len());
+        out[..n].copy_from_slice(&trimmed[..n]);
+        return n;
+    }
+
+    const PREFIX: &[u8] = b"https://";
+    let n = PREFIX.len().min(out.len());
+    out[..n].copy_from_slice(&PREFIX[..n]);
+    let take = trimmed.len().min(out.len().saturating_sub(n));
+    out[n..n + take].copy_from_slice(&trimmed[..take]);
+    n + take
+}
+
+fn trim_ascii(raw: &[u8]) -> &[u8] {
+    let start = raw
+        .iter()
+        .position(|b| !b.is_ascii_whitespace())
+        .unwrap_or(raw.len());
+    let end = raw
+        .iter()
+        .rposition(|b| !b.is_ascii_whitespace())
+        .map(|i| i + 1)
+        .unwrap_or(start);
+    &raw[start..end]
+}
+
+fn looks_like_hostname(raw: &[u8]) -> bool {
+    if raw.is_empty() || raw.iter().any(|b| b.is_ascii_whitespace()) || raw[0] == b'/' {
+        return false;
+    }
+    let authority_end = raw
+        .iter()
+        .position(|&b| b == b'/' || b == b'?')
+        .unwrap_or(raw.len());
+    let authority = &raw[..authority_end];
+    let host = match authority.iter().rposition(|&b| b == b'@') {
+        Some(at) => &authority[at + 1..],
+        None => authority,
+    };
+    let host = match host.iter().position(|&b| b == b':') {
+        Some(colon) => &host[..colon],
+        None => host,
+    };
+    host.contains(&b'.')
+        && !host.starts_with(b".")
+        && !host.ends_with(b".")
+        && host
+            .iter()
+            .all(|&b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+}
+
 /// The directory the browser saves pages into.
 pub const DOWNLOAD_DIR: &str = "/storage/downloads";
 
@@ -3335,6 +3396,30 @@ mod tests {
             classify_address(b"file:///storage/downloads/page_0.html"),
             AddressOutcome::Fetchable
         );
+    }
+
+    /// A hostname typed without a scheme is fetched, and a bare word is not.
+    ///
+    /// WHY: the omnibox has to accept `example.com` the way a person writes
+    /// it, while `hello` still names nothing the browser can fetch.
+    #[test]
+    fn test_a_bare_hostname_is_given_the_https_scheme() {
+        let mut out = [0u8; 128];
+
+        let n = normalize_address(b"example.com", &mut out);
+        assert_eq!(&out[..n], b"https://example.com");
+        assert_eq!(classify_address(&out[..n]), AddressOutcome::Fetchable);
+
+        let n = normalize_address(b"  example.com/path?q=1  ", &mut out);
+        assert_eq!(&out[..n], b"https://example.com/path?q=1");
+        assert_eq!(parse_uri(&out[..n]).path, b"/path");
+
+        let n = normalize_address(b"http://example.com", &mut out);
+        assert_eq!(&out[..n], b"http://example.com");
+
+        let n = normalize_address(b"hello", &mut out);
+        assert_eq!(&out[..n], b"hello");
+        assert_eq!(classify_address(&out[..n]), AddressOutcome::NoScheme);
     }
 
     /// The reader's scroll extent has to cover the whole document.

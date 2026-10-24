@@ -1207,8 +1207,11 @@ fn month_view_pixel(
 
         let mut title_buf = [0u8; 16];
         let section_title = app.agenda_title_into(&mut title_buf);
-        if y >= 522 && y < 522 + std::design::font::line_height(2) {
-            if let Some(c) = test_text(x, y, 28, 522, 2, section_title, 540 - 28, THEME.on_surface_variant, THEME.surface) {
+        // WHY the header is caption scale: the band is 28 px tall and a
+        // body-scale run reserves 32 px, so a larger run could only ever be
+        // clipped by the band it is drawn in.
+        if y >= 522 && y < 522 + std::design::font::line_height(1) {
+            if let Some(c) = test_text(x, y, 28, 522, 1, section_title, 540 - 28, THEME.on_surface_variant, THEME.surface) {
                 return c;
             }
         }
@@ -1235,9 +1238,9 @@ fn month_view_pixel(
             let mut badge = [0u8; 12];
             let badge_n = fmt_count(&mut badge, agenda.len);
             let badge_str = &badge[..badge_n];
-            let badge_x = centered_x(badge_str, 2, 540, 156);
-            let badge_y = 516 + (28 - std::design::font::line_height(2)) / 2;
-            if let Some(c) = test_text(x, y, badge_x, badge_y, 2, badge_str, 156, THEME.primary, THEME.surface_container_high) {
+            let badge_x = centered_x(badge_str, 1, 540, 156);
+            let badge_y = 516 + (28 - std::design::font::line_height(1)) / 2;
+            if let Some(c) = test_text(x, y, badge_x, badge_y, 1, badge_str, 156, THEME.primary, THEME.surface_container_high) {
                 return c;
             }
 
@@ -1341,7 +1344,7 @@ fn week_view_pixel(
             let ev_count = app.store.events_on(display_year as u16, display_month, day_num, &mut day_events);
             if ev_count > 0 {
                 let first = &day_events[0];
-                if let Some(c) = test_text_bold(x, y, 150, card_y + 16, 2, first.title_bytes(), 460, THEME.on_surface, THEME.surface_container_high) {
+                if let Some(c) = test_text_bold(x, y, 150, card_y + 10, 2, first.title_bytes(), 460, THEME.on_surface, THEME.surface_container_high) {
                     return c;
                 }
                 let mut time_buf = [0u8; 5];
@@ -1614,12 +1617,12 @@ fn agenda_view_pixel(
                 dt_buf[dn + 1] = b' ';
                 let tn = fmt_time(&mut dt_buf[dn + 2..], item.hour, item.minute);
                 let full_dt = &dt_buf[..dn + 2 + tn];
-                if let Some(c) = test_text_bold(x, y, 48, card_y + 14, 2, full_dt, 550, THEME.primary, THEME.surface_container_high) {
+                if let Some(c) = test_text_bold(x, y, 48, card_y + 8, 2, full_dt, 550, THEME.primary, THEME.surface_container_high) {
                     return c;
                 }
 
                 // Title line
-                if let Some(c) = test_text_bold(x, y, 48, card_y + 44, 2, item.title_bytes(), 550, THEME.on_surface, THEME.surface_container_high) {
+                if let Some(c) = test_text_bold(x, y, 48, card_y + 40, 2, item.title_bytes(), 550, THEME.on_surface, THEME.surface_container_high) {
                     return c;
                 }
 
