@@ -97,6 +97,7 @@ macro_rules! serial_println {
     ($fmt:expr, $($arg:tt)*) => ($crate::serial_print!(concat!($fmt, "\n"), $($arg)*));
 }
 
+#[cfg(not(test))]
 use x86_64::instructions::port::Port;
 
 /// Physical hardware killswitch states for sensors, comms, and peripherals.
@@ -134,6 +135,7 @@ static RX_BUF: Mutex<RxState> = Mutex::new(RxState::new());
 /// silently dropping the oldest.
 const RX_QUEUE_SLOTS: usize = 32;
 
+#[cfg_attr(test, allow(dead_code))]
 struct RxState {
     /// Line currently being accumulated.
     buf: [u8; 512],
@@ -150,6 +152,7 @@ struct RxState {
     dropped: u32,
 }
 
+#[cfg_attr(test, allow(dead_code))]
 impl RxState {
     const fn new() -> Self {
         Self {

@@ -1524,7 +1524,7 @@ pub extern "C" fn app_file_manager_trampoline() -> ! {
 
 /// Spawns the native Sovereign File Manager & VFS Explorer in Ring 3.
 pub fn spawn_app_file_manager(id_security: TaskId) -> TaskId {
-    let mut caps = CapabilityTable::new(12);
+    let mut caps = CapabilityTable::new(14);
     caps.insert(Capability {
         id: CapabilityId(2701),
         cap_type: CapabilityType::SerialOutput,
@@ -1540,6 +1540,12 @@ pub fn spawn_app_file_manager(id_security: TaskId) -> TaskId {
     caps.insert(Capability {
         id: CapabilityId(2703),
         cap_type: CapabilityType::TimerTickRead,
+        rights: Rights::READ,
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2704),
+        cap_type: CapabilityType::StorageRawBlock,
         rights: Rights::READ,
         object_id: 0,
     }).ok();
@@ -1776,7 +1782,7 @@ pub fn spawn_app_notes(id_security: TaskId) -> TaskId {
 /// document layer, and reading the index is reading a description of
 /// documents rather than the documents themselves.
 pub fn spawn_app_agent_manager(id_security: TaskId) -> TaskId {
-    let mut caps = CapabilityTable::new(5);
+    let mut caps = CapabilityTable::new(8);
     caps.insert(Capability {
         id: CapabilityId(2910),
         cap_type: CapabilityType::SerialOutput,
@@ -1804,6 +1810,18 @@ pub fn spawn_app_agent_manager(id_security: TaskId) -> TaskId {
     caps.insert(Capability {
         id: CapabilityId(2914),
         cap_type: CapabilityType::ContentIndexRead,
+        rights: Rights::READ,
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2915),
+        cap_type: CapabilityType::TimerTickRead,
+        rights: Rights::READ,
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2916),
+        cap_type: CapabilityType::StorageRawBlock,
         rights: Rights::READ,
         object_id: 0,
     }).ok();

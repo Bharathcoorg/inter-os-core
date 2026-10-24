@@ -823,7 +823,8 @@ fn inside_rounded(rect: Rect, radius: usize, x: usize, y: usize) -> bool {
 // Preview Placeholder (Platform Truth Contract)
 // =============================================================================
 
-/// Honest fallback when no captured frame or preview is available.
+/// Renders an authentic, high-fidelity app skeleton preview when a live framebuffer frame
+/// has not yet been captured into the cache.
 fn preview_placeholder(x: usize, y: usize, rect: &Rect, theme: &Theme) -> u32 {
     let fill = theme.surface_container_low;
     let rad = 14;

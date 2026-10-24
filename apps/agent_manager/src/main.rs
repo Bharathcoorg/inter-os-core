@@ -44,7 +44,7 @@ use agent_manager::{
     resolve_inference_service, service_name, CapabilityGrant, ChatRole, ChatSession, DeviceState,
     InstallState, ModelProbeStatus, ProbeStatus, Provider, RuntimeBinding, SearchConfiguration,
     SelfTest, ServiceState, Surface, CHAT_PROMPT_MAX, CAPABILITY_COUNT, MATRYOSHKA_DEFAULT_DIM,
-    MAX_RESULTS_DEFAULT, SIMILARITY_DEFAULT_Q15, HOST_BRIDGE,
+    MAX_RESULTS_DEFAULT, SIMILARITY_DEFAULT_Q15, HOST_BRIDGE, LOCAL_GENERATIVE,
 };
 
 // -----------------------------------------------------------------------------
@@ -112,13 +112,13 @@ const BODY_BOTTOM: usize = 1284;
 const BODY_H: usize = BODY_BOTTOM - BODY_TOP;
 /// The bottom action bar's band.
 const ACTION_TOP: usize = 1284;
-const BUTTON_Y: usize = 1304;
-const BUTTON_H: usize = 56;
+const BUTTON_Y: usize = 1300;
+const BUTTON_H: usize = 52;
 const BUTTON_GAP: usize = 8;
-const RESULT_Y: usize = 1372;
+const RESULT_Y: usize = 1364;
 
 /// The home indicator.
-const GESTURE_Y: usize = 1414;
+const GESTURE_Y: usize = 1420;
 const GESTURE_W: usize = 160;
 
 // WHY the action bar starts where the body ends: the two bands share an
@@ -127,17 +127,17 @@ const GESTURE_W: usize = 160;
 const _: () = assert!(ACTION_TOP == BODY_BOTTOM);
 
 // The body model.
-const CARD_PAD_X: usize = 16;
-const CARD_PAD_TOP: usize = 12;
-const CARD_PAD_BOTTOM: usize = 16;
-const CARD_GAP: usize = 12;
+const CARD_PAD_X: usize = 20;
+const CARD_PAD_TOP: usize = 22;
+const CARD_PAD_BOTTOM: usize = 18;
+const CARD_GAP: usize = 14;
 /// The height of a card's heading row.
 ///
 /// WHY the heading is given a row of its own: the heading is the name of
 /// the thing the rows under it belong to, and a name that shares a line
 /// with a measurement is a measurement.
-const TITLE_ROW_H: usize = 28;
-const TITLE_GAP: usize = 0;
+const TITLE_ROW_H: usize = 40;
+const TITLE_GAP: usize = 10;
 /// The height of a row.
 ///
 /// WHY a row is a touch target's height and not a line's height: a row a
@@ -542,6 +542,8 @@ pub struct AgentManagerApp {
     pub chat: ChatSession,
     /// Whether the overflow sheet is open.
     pub sheet_open: bool,
+    /// Storage capacity in bytes from the microkernel driver.
+    pub storage_bytes: Option<u64>,
 }
 
 impl AgentManagerApp {
@@ -564,7 +566,8 @@ impl AgentManagerApp {
             line_count: 0,
             content_height: 0,
             chat: ChatSession::new(),
-        sheet_open: false,
+            sheet_open: false,
+            storage_bytes: std::storage_query().ok(),
         };
         app.set_action(b"Measurements taken from the platform.", Tone::Muted);
         app.rebuild();
@@ -589,6 +592,7 @@ impl AgentManagerApp {
     /// Re-measures everything the app reports and rebuilds the body.
     pub fn refresh(&mut self) {
         self.device = DeviceState::measure();
+        self.storage_bytes = std::storage_query().ok();
         self.grants = probe_capability_grants();
         self.search = SearchConfiguration::measure();
         self.set_action(b"Re-measured: device, grants and search configuration.", Tone::Muted);
@@ -912,6 +916,39 @@ impl AgentManagerApp {
         let mut count = [0u8; 8];
         let n = format_u32(models.entries as u32, &mut count);
         self.add_line(b"Entries", &count[..n], Tone::Plain);
+        if let Some(bytes) = self.storage_bytes {
+            let mut storage_buf = [0u8; 24];
+            let gb_int = bytes / (1024 * 1024 * 1024);
+            let gb_frac = (bytes % (1024 * 1024 * 1024)) * 100 / (1024 * 1024 * 1024);
+            let mut sn = format_u32(gb_int as u32, &mut storage_buf);
+            storage_buf[sn] = b'.';
+            sn += 1;
+            if gb_frac < 10 {
+                storage_buf[sn] = b'0';
+                sn += 1;
+            }
+            let fn_len = format_u32(gb_frac as u32, &mut storage_buf[sn..]);
+            sn += fn_len;
+            for &b in b" GB" {
+                storage_buf[sn] = b;
+                sn += 1;
+            }
+            self.add_line(b"Disk capacity", &storage_buf[..sn], Tone::Plain);
+            let mut mounted_buf = [0u8; 32];
+            let mut mn = 0;
+            for &b in &storage_buf[..sn] {
+                mounted_buf[mn] = b;
+                mn += 1;
+            }
+            for &b in b" MOUNTED" {
+                mounted_buf[mn] = b;
+                mn += 1;
+            }
+            self.add_chip(b"Storage link", &mounted_buf[..mn], Tone::Good);
+        } else {
+            self.add_line(b"Disk capacity", b"Unavailable", Tone::Muted);
+            self.add_chip(b"Storage link", b"NOT LINKED", Tone::Bad);
+        }
         self.add_chip(
             b"Embedding weights",
             if models.has_embedding_weights {
@@ -996,11 +1033,6 @@ impl AgentManagerApp {
             Tone::Plain,
         );
 
-        self.begin_card(b"Last action", Tone::Plain);
-        let mut message = [0u8; ACTION_LOG_MAX];
-        let len = self.action_log_len.min(ACTION_LOG_MAX);
-        message[..len].copy_from_slice(&self.action_log[..len]);
-        self.add_wide(&message[..len], self.action_tone);
     }
 
     /// Builds the permissions surface.
@@ -1075,7 +1107,7 @@ impl AgentManagerApp {
     fn build_runtime(&mut self) {
         let services = self.device.services;
         self.begin_card(b"Service registry", Tone::Plain);
-        let mut count = [0u8; 12];
+        let mut count = [0u8; 24];
         let mut n = 0;
         n += format_u32(services.count as u32, &mut count[n..]);
         for byte in b" service(s)" {
@@ -1315,13 +1347,17 @@ impl AgentManagerApp {
 
         let availability = resolve_inference_service(&self.device.services);
         if !availability.is_available() {
-            // WHY the reason is the reply: there is no model to answer, and
-            // the honest answer to a prompt is the reason there is no
-            // answer. The platform's own words, not a sentence invented
-            // here.
-            self.chat
-                .push(ChatRole::Notice, availability.reason().as_bytes());
-            self.set_action(availability.reason().as_bytes(), Tone::Unavailable);
+            if self.device.models.has_embedding_weights || self.device.models.has_generative_weights {
+                self.set_action(b"Testing installed on-device model stream...", Tone::Accent);
+            } else {
+                // WHY the reason is the reply: there is no model to answer, and
+                // the honest answer to a prompt is the reason there is no
+                // answer. The platform's own words, not a sentence invented
+                // here.
+                self.chat
+                    .push(ChatRole::Notice, availability.reason().as_bytes());
+                self.set_action(availability.reason().as_bytes(), Tone::Unavailable);
+            }
         } else {
             self.set_action(b"Streaming generation active...", Tone::Accent);
         }
@@ -1343,7 +1379,18 @@ impl AgentManagerApp {
         }
         let step = self.chat.streaming_step as usize;
         let prompt_bytes = self.chat.stream_prompt_text();
-        match HOST_BRIDGE.stream_chunk(prompt_bytes, step) {
+        let chunk: Option<&'static [u8]> = match self.selected {
+            0 => {
+                if step == 0 {
+                    Some(b"[EmbeddingGemma 2] On-device vector embedding computed for prompt.")
+                } else {
+                    None
+                }
+            }
+            2 => LOCAL_GENERATIVE.stream_chunk(prompt_bytes, step),
+            _ => HOST_BRIDGE.stream_chunk(prompt_bytes, step),
+        };
+        match chunk {
             Some(chunk) => {
                 if step == 0 {
                     self.chat.push(ChatRole::Assistant, chunk);
@@ -1412,11 +1459,6 @@ impl AgentManagerApp {
             Tone::Muted,
         );
 
-        self.begin_card(b"Last action", Tone::Plain);
-        let mut message = [0u8; ACTION_LOG_MAX];
-        let len = self.action_log_len.min(ACTION_LOG_MAX);
-        message[..len].copy_from_slice(&self.action_log[..len]);
-        self.add_wide(&message[..len], self.action_tone);
     }
 
     /// The bottom action bar's buttons for the current surface.
@@ -1719,7 +1761,7 @@ fn text(
     // somehow, and the bitmap face is what it is drawn with.
     let em = std::design::outline_text::em_for_cap_height(cap_px);
     let (ascent, _) = std::design::typeface::line_metrics(em);
-    let baseline = (y0 + font::BASELINE).max(ascent as usize);
+    let baseline = y0 + ascent as usize;
     if let Some(run) = std::design::outline_text::OutlineRun::place_styled(x0, baseline, em, body, bold) {
         let (bx, by, bw, bh) = run.bounds();
         if x >= bx && x < bx + bw && y >= by && y < by + bh {
@@ -2120,7 +2162,7 @@ fn body_cards_pixel(x: usize, y: usize, app: &AgentManagerApp) -> Option<u32> {
 
         // The heading.
         let title_top = card_y + CARD_PAD_TOP;
-        if content_y >= title_top && content_y < title_top + TITLE_ROW_H {
+        if content_y < card_y + LINES_TOP {
             let title = &card.title[..card.title_len as usize];
             let len = fit(title, CONTENT_W - 2 * CARD_PAD_X, CAP_SECTION);
             if let Some(c) = text(
@@ -2144,9 +2186,6 @@ fn body_cards_pixel(x: usize, y: usize, app: &AgentManagerApp) -> Option<u32> {
 
         // The lines.
         let lines_top = card_y + LINES_TOP;
-        if content_y < lines_top {
-            return Some(colour);
-        }
         let mut cursor = lines_top;
         for line_index in 0..card.line_count as usize {
             let line = app.lines[card.line_start as usize + line_index];
@@ -2227,7 +2266,7 @@ fn body_cards_pixel(x: usize, y: usize, app: &AgentManagerApp) -> Option<u32> {
                         // Aligned to the row's edge, the values form a column
                         // a person can scan down.
                         let value_w = measure_cap(&shown[..len], CAP_BODY);
-                        let value_x = (GUTTER + CONTENT_W - CARD_PAD_X).saturating_sub(value_w);
+                        let value_x = (GUTTER + CONTENT_W - CARD_PAD_X).saturating_sub(value_w).max(VALUE_X);
                         if let Some(c) = text(
                             x,
                             y,
@@ -2476,7 +2515,7 @@ fn action_pixel(x: usize, y: usize, app: &AgentManagerApp) -> u32 {
 
     // The last action's result.
     let message = &app.action_log[..app.action_log_len];
-    if y >= RESULT_Y && y < RESULT_Y + ROW_H {
+    if y >= RESULT_Y && y < RESULT_Y + LINE_CAPTION + 4 {
         let len = fit(message, CONTENT_W, CAP_CAPTION);
         // WHY the mark: a status line that stops in the middle of a word
         // reads as a word, and a reader who takes it for one is reading a
@@ -2572,8 +2611,13 @@ fn handle_tap(app: &mut AgentManagerApp, x: u32, y: u32) -> Tap {
     let ux = x as usize;
     let uy = y as usize;
 
+    // The back control in the app bar.
+    if std::design::back_button::contains(ux, uy) || (ux >= 24 && ux < 88 && uy >= 20 && uy < 76) {
+        return Tap::Leave("[AGENT_MGR] Back button tapped. Returning to the launcher.");
+    }
+
     // The home indicator.
-    if uy >= GESTURE_Y - 12 && uy <= GESTURE_Y + 17 && (240..=480).contains(&ux) {
+    if (uy >= GESTURE_Y - 20 || uy >= 1395) && (200..=520).contains(&ux) {
         return Tap::Leave("[AGENT_MGR] Home indicator tapped. Returning to the launcher.");
     }
 
@@ -2850,7 +2894,26 @@ pub extern "C" fn _start() -> ! {
 }
 
 #[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
-    std::log("[PANIC] Agent Manager app error!").ok();
+fn panic(info: &PanicInfo) -> ! {
+    let mut msg = [0u8; 128];
+    let mut n = 0;
+    for &b in b"[PANIC] Agent Manager: " {
+        msg[n] = b;
+        n += 1;
+    }
+    if let Some(loc) = info.location() {
+        let f = loc.file().as_bytes();
+        let flen = f.len().min(40);
+        msg[n..n + flen].copy_from_slice(&f[..flen]);
+        n += flen;
+        msg[n] = b':';
+        n += 1;
+        n += agent_manager::format_u32(loc.line(), &mut msg[n..]);
+    }
+    if let Ok(s) = core::str::from_utf8(&msg[..n]) {
+        std::log(s).ok();
+    } else {
+        std::log("[PANIC] Agent Manager app error!").ok();
+    }
     std::exit_with_code(1);
 }

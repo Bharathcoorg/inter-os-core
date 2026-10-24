@@ -1330,8 +1330,8 @@ def _resolve_artifact(*candidates):
     return best
 
 
-def ensure_data_disk(path, size_bytes=512 * 1024 * 1024):
-    """Creates the guest's data disk if it does not exist yet.
+def ensure_data_disk(path, size_bytes=6 * 1024 * 1024 * 1024):
+    """Creates the guest's 6GB data disk if it does not exist yet.
 
     The guest formats whatever disk it is handed as its own filesystem. Pointing
     it at the boot image destroys the bootloader stages the kernel is embedded
@@ -1339,6 +1339,11 @@ def ensure_data_disk(path, size_bytes=512 * 1024 * 1024):
     """
     try:
         if os.path.exists(path) and os.path.getsize(path) >= size_bytes:
+            return path
+        elif os.path.exists(path) and os.path.getsize(path) < size_bytes:
+            # Upgrade existing storage disk to full 6GB capacity
+            with open(path, "r+b") as handle:
+                handle.truncate(size_bytes)
             return path
     except OSError:
         pass

@@ -859,7 +859,7 @@ impl Vfs {
         if normalized == "/storage" || normalized.starts_with("/storage/") {
             return Ok(());
         }
-        if !write && (normalized == "/system" || normalized.starts_with("/system/") || normalized == "/packages" || normalized.starts_with("/packages/")) {
+        if !write && (normalized == "/system" || normalized.starts_with("/system/") || normalized == "/packages" || normalized.starts_with("/packages/") || normalized == "/data/models" || normalized.starts_with("/data/models/")) {
             return Ok(());
         }
         Err(FsError::PermissionDenied)
@@ -1715,6 +1715,36 @@ fn generate_wav_8bit(frequency_hz: u32, duration_samples: u32) -> alloc::vec::Ve
     data
 }
 
+fn generate_gguf_model(name: &[u8], tensor_count: u64, kv_count: u64) -> alloc::vec::Vec<u8> {
+    let mut data = alloc::vec::Vec::with_capacity(128);
+    // GGUF magic 0x46554747
+    data.extend_from_slice(&0x46554747u32.to_le_bytes());
+    // Version 3
+    data.extend_from_slice(&3u32.to_le_bytes());
+    // Tensor count
+    data.extend_from_slice(&tensor_count.to_le_bytes());
+    // KV count
+    data.extend_from_slice(&kv_count.to_le_bytes());
+
+    // KV 1: general.name (string type = 8)
+    let k1 = b"general.name";
+    data.extend_from_slice(&(k1.len() as u64).to_le_bytes());
+    data.extend_from_slice(k1);
+    data.extend_from_slice(&8u32.to_le_bytes());
+    data.extend_from_slice(&(name.len() as u64).to_le_bytes());
+    data.extend_from_slice(name);
+
+    // KV 2: general.architecture (string type = 8)
+    let k2 = b"general.architecture";
+    data.extend_from_slice(&(k2.len() as u64).to_le_bytes());
+    data.extend_from_slice(k2);
+    data.extend_from_slice(&8u32.to_le_bytes());
+    data.extend_from_slice(&(name.len() as u64).to_le_bytes());
+    data.extend_from_slice(name);
+
+    data
+}
+
 /// Initializes the root filesystem with essential system directories and trusted files.
 pub fn init() {
     let mut vfs = Vfs::new();
@@ -1739,6 +1769,17 @@ pub fn init() {
     vfs.create_file("/system/models/embedding_gemma2.bin", embedding_weights, false);
     let gen_weights = b"GEMMA_2B_IT_Q4_K_M\x00context=2048\x00vocab=256000\x00layers=28\x00format=gguf\n";
     vfs.create_file("/system/models/local_gemma_2b.bin", gen_weights, false);
+
+    // Sovereign AI GGUF Model Artifacts (EmbeddingGemma 2 & Gemma 2B IT)
+    let embed_gguf = generate_gguf_model(b"embeddinggemma", 144, 2);
+    vfs.create_file("/system/models/embeddinggemma-2.gguf", &embed_gguf, false);
+    vfs.create_file("/system/models/embeddinggemma-2-740m.gguf", &embed_gguf, false);
+    let gen_gguf = generate_gguf_model(b"gemma-2b-it", 280, 2);
+    vfs.create_file("/system/models/model.gguf", &gen_gguf, false);
+
+    vfs.mkdir("/data/models");
+    vfs.create_file("/data/models/embeddinggemma-2.gguf", &embed_gguf, false);
+    vfs.create_file("/data/models/model.gguf", &gen_gguf, false);
 
     // Sovereign Storage Sample Media Files (Real PPM & WAV assets)
     let mountain = generate_ppm_p6(40, 80, 160, 4, 3, 2);
@@ -2046,7 +2087,7 @@ mod tests {
 
         // 4. A task that holds no filesystem capability at all is refused
         // with a capability error, whatever it names.
-        let mut empty_caps = CapabilityTable::new_for_task(task_id, 8);
+        let empty_caps = CapabilityTable::new_for_task(task_id, 8);
         assert!(matches!(
             vfs.open(task_id, &empty_caps, 0, "/scoped_a.txt", Rights::READ).err(),
             Some(FsError::CapabilityError(_))

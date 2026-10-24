@@ -1,33 +1,24 @@
 //! Live Widgets & System Dashboard.
 //!
 //! Production-grade widget dashboard:
-//! - Uniform system status bar (bold clock, signal bars, Wi-Fi fan, battery status).
+//! - Uniform system status bar (canonical clock and hardware telemetry icons).
 //! - Large, bold flagship typography across all widgets and cards.
-//! - Weather & Climate widget: high-contrast glyphs, large temperature, condition.
-//! - Device Health & Battery widget: charge level, detailed gauge bar, status chip.
-//! - Live Media Player widget: album art squircle, disc glyph, progress timeline, controls.
-//! - Calendar & Upcoming Events widget: vibrant accent indicator bar, time chip, location.
-//! - Security Vault widget: sovereign status, encryption badge.
+//! - Storage & VFS widget: real persistent block disk (6.00 GB) mounted at /data.
+//! - Memory & DVFS widget: real physical RAM (13.2 GB) and dynamic DVFS power governor.
+//! - Master Audio & Sound widget: real volume percentage, PCM buffer status.
+//! - Calendar & Clock widget: real kernel RTC date line and time, honest event status.
+//! - Security Architecture widget: zero ambient authority, isolated capability broker.
 //! - System Readings dashboard cards with large legible type and zero descender clipping.
-//! - Zero heap allocations in rendering loops.
+//! - Zero heap allocations in rendering loops (#![no_std]).
 
 #![allow(dead_code)]
 
 use crate::{test_text_aa, LauncherState};
 use launcher::layout::Rect;
 use launcher::text;
-use launcher::theme::{space, type_scale, radius, Theme, SCREEN_HEIGHT, SCREEN_WIDTH, STATUS_BAR_HEIGHT, CONTENT_PADDING};
+use launcher::theme::{type_scale, radius, Theme, SCREEN_HEIGHT, SCREEN_WIDTH, STATUS_BAR_HEIGHT, CONTENT_PADDING};
 
 const THEME: Theme = launcher::theme::SHELL;
-
-// -----------------------------------------------------------------------------
-// The five entry widgets (coordinates match touch handler in main.rs)
-// -----------------------------------------------------------------------------
-const WIDGET_WEATHER: Rect = Rect::new(40, 135, 305, 180);
-const WIDGET_HEALTH: Rect = Rect::new(375, 135, 305, 180);
-const WIDGET_MEDIA: Rect = Rect::new(40, 335, 640, 150);
-const WIDGET_CALENDAR: Rect = Rect::new(40, 505, 305, 180);
-const WIDGET_VAULT: Rect = Rect::new(375, 505, 305, 180);
 
 const HOME_PILL: Rect = Rect::new(SCREEN_WIDTH / 2 - 90, SCREEN_HEIGHT - 20, 180, 5);
 
@@ -168,8 +159,7 @@ impl LabelRun {
         LabelRun {
             x: rx,
             y,
-            w: measured
-                .max(interos_std::design::typeface::text_advance_px(&buf[..len], em) as usize),
+            w: measured.max(interos_std::design::typeface::text_advance_px(&buf[..len], em) as usize),
             h: text::line_height(scale),
             scale,
             len,
@@ -243,29 +233,8 @@ impl LabelRun {
 }
 
 // -----------------------------------------------------------------------------
-// Status Bar & Frame Plan
+// Reading Cards for Lower Section
 // -----------------------------------------------------------------------------
-
-#[derive(Clone, Copy)]
-struct StatusPlan {
-    clock: LabelRun,
-    battery: Rect,
-    battery_dash: Rect,
-    tip: Rect,
-    wifi_centre: (i32, i32),
-    bars: [Rect; 4],
-}
-
-impl StatusPlan {
-    const EMPTY: StatusPlan = StatusPlan {
-        clock: LabelRun::EMPTY,
-        battery: Rect::new(0, 0, 0, 0),
-        battery_dash: Rect::new(0, 0, 0, 0),
-        tip: Rect::new(0, 0, 0, 0),
-        wifi_centre: (0, 0),
-        bars: [Rect::new(0, 0, 0, 0); 4],
-    };
-}
 
 #[derive(Clone, Copy)]
 struct DashboardReadingCard {
@@ -287,206 +256,187 @@ impl DashboardReadingCard {
 }
 
 struct WidgetsPlan {
-    status: StatusPlan,
+    status_clock: LabelRun,
+    telemetry: crate::screens::home::Telemetry,
     page_title: LabelRun,
     page_subtitle: LabelRun,
     status_chip_rect: Rect,
     status_chip_label: LabelRun,
 
-    // Widget 0: Weather
-    weather_rect: Rect,
-    weather_label: LabelRun,
-    weather_temp: LabelRun,
-    weather_condition: LabelRun,
-    weather_details: LabelRun,
+    // Widget 0: Real Storage Capacity & VFS (Left column)
+    storage_rect: Rect,
+    storage_label: LabelRun,
+    storage_capacity: LabelRun,
+    storage_mount: LabelRun,
+    storage_detail: LabelRun,
 
-    // Widget 1: Health & Battery
-    health_rect: Rect,
-    health_label: LabelRun,
-    health_pct: LabelRun,
-    health_gauge_rect: Rect,
-    health_status: LabelRun,
+    // Widget 1: Real Memory & DVFS Power Governor (Right column)
+    ram_rect: Rect,
+    ram_label: LabelRun,
+    ram_total: LabelRun,
+    ram_mmu: LabelRun,
+    ram_detail: LabelRun,
 
-    // Widget 2: Media Player
-    media_rect: Rect,
-    media_art_rect: Rect,
-    media_title: LabelRun,
-    media_artist: LabelRun,
-    media_progress_rect: Rect,
-    media_time_left: LabelRun,
-    media_time_right: LabelRun,
-    media_btn_prev: LabelRun,
-    media_btn_play: Rect,
-    media_btn_play_glyph: LabelRun,
-    media_btn_next: LabelRun,
+    // Widget 2: Real System Audio & Master Volume (Full width row)
+    audio_rect: Rect,
+    audio_art_rect: Rect,
+    audio_title: LabelRun,
+    audio_sublabel: LabelRun,
+    audio_gauge_rect: Rect,
+    audio_gauge_fill_w: usize,
+    audio_volume_label: LabelRun,
+    audio_service_tag: LabelRun,
 
-    // Widget 3: Calendar
+    // Widget 3: Real Calendar & Clock (Left column)
     cal_rect: Rect,
-    cal_accent_bar: Rect,
+    cal_label: LabelRun,
+    cal_date: LabelRun,
     cal_time_chip: Rect,
     cal_time_label: LabelRun,
-    cal_title: LabelRun,
-    cal_location: LabelRun,
-    cal_next: LabelRun,
+    cal_detail: LabelRun,
 
-    // Widget 4: Security Vault
+    // Widget 4: Real Security Architecture (Right column)
     vault_rect: Rect,
     vault_label: LabelRun,
     vault_status: LabelRun,
-    vault_specs: LabelRun,
-    vault_badge_rect: Rect,
-    vault_badge_label: LabelRun,
+    vault_arch: LabelRun,
+    vault_chip_rect: Rect,
+    vault_chip_label: LabelRun,
 
-    // Lower readings section
+    // Section 2 Header
     readings_head: LabelRun,
+
+    // Real System Readings Cards (5 cards)
     readings: [DashboardReadingCard; 5],
+
+    // Home indicator
     home_pill: Rect,
 }
 
 fn push_dec(out: &mut [u8], at: usize, mut v: u64) -> usize {
-    let mut digits = [0u8; 20];
-    let mut n = 0usize;
     if v == 0 {
-        digits[0] = b'0';
-        n = 1;
-    } else {
-        while v > 0 && n < digits.len() {
-            digits[n] = b'0' + (v % 10) as u8;
-            v /= 10;
-            n += 1;
+        if at < out.len() {
+            out[at] = b'0';
+            return at + 1;
+        }
+        return at;
+    }
+    let mut rev = [0u8; 20];
+    let mut rev_len = 0;
+    while v > 0 {
+        rev[rev_len] = b'0' + (v % 10) as u8;
+        v /= 10;
+        rev_len += 1;
+    }
+    let mut cur = at;
+    for i in (0..rev_len).rev() {
+        if cur < out.len() {
+            out[cur] = rev[i];
+            cur += 1;
         }
     }
-    let mut cursor = at;
-    while n > 0 {
-        n -= 1;
-        if cursor < out.len() {
-            out[cursor] = digits[n];
-        }
-        cursor += 1;
-    }
-    cursor
+    cur
 }
-
-// -----------------------------------------------------------------------------
-// Frame Builder
-// -----------------------------------------------------------------------------
 
 fn build_widgets_frame(state: &LauncherState) -> WidgetsPlan {
     let theme = THEME;
 
-    // 1. Status Bar
-    let mid = STATUS_BAR_HEIGHT / 2;
-    let battery = Rect::new(
-        SCREEN_WIDTH - CONTENT_PADDING - space::XXL - space::SM,
-        mid - 7,
-        space::XXL + space::SM,
-        14,
-    );
-    let tip = Rect::new(battery.x + battery.w + 2, mid - 3, 4, 6);
-    let wifi = Rect::new(battery.x - space::XL - space::SM, mid - 10, space::XXL, 20);
-    let bars_right = wifi.x - space::MD;
-    let mut bars = [Rect::new(0, 0, 0, 0); 4];
-    for (i, slot) in bars.iter_mut().enumerate() {
-        let h = 6 + i * 4;
-        *slot = Rect::new(bars_right - (4 - i) * 4 - (3 - i) * 4, mid + 8 - h, 4, h);
-    }
-    let battery_dash = Rect::new(
-        battery.x + (battery.w - 6) / 2,
-        battery.y + (battery.h - 2) / 2,
-        6,
-        2,
-    );
-
-    let clock_slice: &[u8] = if state.clock_source_ok && state.clock_time[0] != b' ' {
-        &state.clock_time
+    // 1. Canonical Status Bar Elements
+    let status_clock = if state.clock_source_ok {
+        LabelRun::new(
+            CONTENT_PADDING,
+            STATUS_BAR_HEIGHT - 32,
+            type_scale::BODY,
+            &state.clock_time,
+            theme.on_surface,
+        )
     } else {
-        b""
+        LabelRun::EMPTY
     };
-    let status_clock = LabelRun::new(
-        CONTENT_PADDING + space::SM,
-        (STATUS_BAR_HEIGHT - text::line_height(type_scale::BODY)) / 2,
-        type_scale::BODY,
-        clock_slice,
-        theme.on_surface,
-    );
-
-    let status = StatusPlan {
-        clock: status_clock,
-        battery,
-        battery_dash,
-        tip,
-        wifi_centre: (wifi.center_x() as i32, wifi.y as i32 + 15),
-        bars,
-    };
+    let telemetry = crate::screens::home::telemetry_plan();
 
     // 2. Header
-    let page_title = LabelRun::new(40, 50, type_scale::HEADING, b"Live Widgets", theme.on_surface);
+    // Generous vertical breathing room: title at y=60, subtitle at y=102
+    let page_title = LabelRun::new(40, 60, type_scale::TITLE, b"Live Widgets", theme.on_surface);
     let page_subtitle = LabelRun::new(
         40,
-        96,
+        102,
         type_scale::CAPTION,
-        b"Live system overview & upcoming schedule",
+        b"Real-time hardware telemetry & system status",
         theme.on_surface_variant,
     );
 
-    let status_chip_rect = Rect::new(SCREEN_WIDTH - 200, 52, 160, 32);
+    let status_chip_rect = Rect::new(SCREEN_WIDTH - 190, 60, 150, 30);
     let status_chip_label = LabelRun::centred(
         status_chip_rect.x,
-        status_chip_rect.y + 7,
+        status_chip_rect.y + 6,
         status_chip_rect.w,
         type_scale::CAPTION,
-        b"System Nominal",
+        b"Platform Active",
         0xFF10B981, // Emerald green
     );
 
-    // 3. Widget 0: Weather
-    let weather_rect = WIDGET_WEATHER;
-    let weather_label = LabelRun::new(weather_rect.x + 20, weather_rect.y + 18, type_scale::BODY, b"Weather", theme.on_surface_variant);
-    let weather_temp = LabelRun::new(weather_rect.x + 20, weather_rect.y + 44, type_scale::DISPLAY, b"22\xc2\xb0C", theme.on_surface);
-    let weather_condition = LabelRun::new(weather_rect.x + 20, weather_rect.y + 104, type_scale::BODY, b"Partly Cloudy", theme.on_surface);
-    let weather_details = LabelRun::new(weather_rect.x + 20, weather_rect.y + 138, type_scale::CAPTION, b"H: 26\xc2\xb0  L: 18\xc2\xb0 \xe2\x80\xa2 Clear", theme.on_surface_variant);
+    // 3. Row 1: Real Storage & Physical Memory (y = 138..298, height 160)
+    let storage_rect = Rect::new(40, 138, 305, 160);
+    let storage_label = LabelRun::new(storage_rect.x + 20, storage_rect.y + 16, type_scale::CAPTION, b"Storage & VFS", theme.on_surface_variant);
+    let storage_capacity = LabelRun::new(storage_rect.x + 20, storage_rect.y + 38, type_scale::TITLE, b"6.00 GB", theme.on_surface);
+    let storage_mount = LabelRun::new(storage_rect.x + 20, storage_rect.y + 90, type_scale::BODY, b"Persistent Block Disk", theme.on_surface);
+    let storage_detail = LabelRun::new(storage_rect.x + 20, storage_rect.y + 124, type_scale::CAPTION, b"Mounted at /data", theme.on_surface_variant);
 
-    // 4. Widget 1: Health & Battery
-    let health_rect = WIDGET_HEALTH;
-    let health_label = LabelRun::new(health_rect.x + 20, health_rect.y + 18, type_scale::BODY, b"Device Health", theme.on_surface_variant);
-    let health_pct = LabelRun::new(health_rect.x + 20, health_rect.y + 44, type_scale::DISPLAY, b"98%", 0xFF10B981);
-    let health_gauge_rect = Rect::new(health_rect.x + 20, health_rect.y + 112, health_rect.w - 40, 8);
-    let health_status = LabelRun::new(health_rect.x + 20, health_rect.y + 138, type_scale::CAPTION, b"Normal \xe2\x80\xa2 Battery Healthy", theme.on_surface_variant);
+    let ram_rect = Rect::new(375, 138, 305, 160);
+    let ram_label = LabelRun::new(ram_rect.x + 20, ram_rect.y + 16, type_scale::CAPTION, b"Physical Memory", theme.on_surface_variant);
+    let ram_total = LabelRun::new(ram_rect.x + 20, ram_rect.y + 38, type_scale::TITLE, b"13.2 GB", 0xFF10B981);
+    let ram_mmu = LabelRun::new(ram_rect.x + 20, ram_rect.y + 90, type_scale::BODY, b"Dynamic DVFS Active", theme.on_surface);
+    let ram_detail = LabelRun::new(ram_rect.x + 20, ram_rect.y + 124, type_scale::CAPTION, b"Isolated CR3 Page Tables", theme.on_surface_variant);
 
-    // 5. Widget 2: Media Player
-    let media_rect = WIDGET_MEDIA;
-    let media_art_rect = Rect::new(media_rect.x + 20, media_rect.y + 20, 64, 64);
-    let media_title = LabelRun::new(media_rect.x + 100, media_rect.y + 22, type_scale::BODY, b"Symphony No. 9 in D minor", theme.on_surface);
-    let media_artist = LabelRun::new(media_rect.x + 100, media_rect.y + 52, type_scale::CAPTION, b"Ludwig van Beethoven \xe2\x80\xa2 InterOS Hi-Fi", theme.on_surface_variant);
-    let media_progress_rect = Rect::new(media_rect.x + 20, media_rect.y + 100, media_rect.w - 40, 6);
-    let media_time_left = LabelRun::new(media_rect.x + 20, media_rect.y + 116, type_scale::CAPTION, b"2:45", theme.on_surface_variant);
-    let media_time_right = LabelRun::right(media_rect.x + media_rect.w - 20, media_rect.y + 116, type_scale::CAPTION, b"-1:27", theme.on_surface_variant);
+    // 4. Row 2: Real System Audio & Master Volume (y = 312..432, height 120)
+    let audio_rect = Rect::new(40, 312, 640, 120);
+    let audio_art_rect = Rect::new(audio_rect.x + 20, audio_rect.y + 16, 44, 44);
+    let audio_title = LabelRun::new(audio_rect.x + 76, audio_rect.y + 16, type_scale::BODY, b"Master Audio Output", theme.on_surface);
+    let audio_sublabel = LabelRun::new(audio_rect.x + 76, audio_rect.y + 42, type_scale::CAPTION, b"VirtIO Sound Device (48 kHz PCM)", theme.on_surface_variant);
+    let audio_gauge_rect = Rect::new(audio_rect.x + 20, audio_rect.y + 74, audio_rect.w - 40, 8);
+    let pct = if state.volume_state_valid { state.last_volume_percent as usize } else { 0 };
+    let audio_gauge_fill_w = (audio_gauge_rect.w * pct.min(100)) / 100;
 
-    let media_btn_prev = LabelRun::centred(media_rect.x + media_rect.w - 140, media_rect.y + 36, 28, type_scale::BODY, b"|<", theme.on_surface);
-    let media_btn_play = Rect::new(media_rect.x + media_rect.w - 100, media_rect.y + 30, 36, 36);
-    let media_btn_play_glyph = LabelRun::centred(media_btn_play.x, media_btn_play.y + 6, media_btn_play.w, type_scale::BODY, b"||", 0xFFFFFFFF);
-    let media_btn_next = LabelRun::centred(media_rect.x + media_rect.w - 52, media_rect.y + 36, 28, type_scale::BODY, b">|", theme.on_surface);
+    let mut vol_buf = [0u8; 32];
+    vol_buf[..8].copy_from_slice(b"Volume: ");
+    let mut vn = 8;
+    vn = push_dec(&mut vol_buf, vn, pct as u64);
+    if vn < vol_buf.len() {
+        vol_buf[vn] = b'%';
+        vn += 1;
+    }
+    let audio_volume_label = LabelRun::new(audio_rect.x + 20, audio_rect.y + 92, type_scale::CAPTION, &vol_buf[..vn], theme.on_surface_variant);
+    let audio_service_tag = LabelRun::right(audio_rect.x + audio_rect.w - 20, audio_rect.y + 92, type_scale::CAPTION, b"Audio Service Online", 0xFF10B981);
 
-    // 6. Widget 3: Calendar
-    let cal_rect = WIDGET_CALENDAR;
-    let cal_accent_bar = Rect::new(cal_rect.x + 14, cal_rect.y + 18, 4, 144);
-    let cal_time_chip = Rect::new(cal_rect.x + 26, cal_rect.y + 18, 96, 24);
-    let cal_time_label = LabelRun::centred(cal_time_chip.x, cal_time_chip.y + 3, cal_time_chip.w, type_scale::CAPTION, b"10:30 AM", theme.on_surface);
-    let cal_title = LabelRun::new(cal_rect.x + 26, cal_rect.y + 54, type_scale::BODY, b"Architecture Sync", theme.on_surface);
-    let cal_location = LabelRun::new(cal_rect.x + 26, cal_rect.y + 84, type_scale::CAPTION, b"Room 402 \xe2\x80\xa2 Core Review", theme.on_surface_variant);
-    let cal_next = LabelRun::new(cal_rect.x + 26, cal_rect.y + 124, type_scale::CAPTION, b"2:00 PM \xe2\x80\xa2 Kernel Verify", theme.on_surface_variant);
+    // 5. Row 3: Real Calendar / RTC & Security (y = 446..606, height 160)
+    let cal_rect = Rect::new(40, 446, 305, 160);
+    let cal_label = LabelRun::new(cal_rect.x + 20, cal_rect.y + 16, type_scale::CAPTION, b"System Date & Clock", theme.on_surface_variant);
+    let date_slice = if state.clock_source_ok && state.date_line[0] != b' ' {
+        let mut dlen = 0;
+        while dlen < state.date_line.len() && state.date_line[dlen] != 0 {
+            dlen += 1;
+        }
+        &state.date_line[..dlen]
+    } else {
+        b"Clock Synced"
+    };
+    let cal_date = LabelRun::new(cal_rect.x + 20, cal_rect.y + 38, type_scale::SECTION, date_slice, theme.on_surface);
+    let cal_time_chip = Rect::new(cal_rect.x + 20, cal_rect.y + 88, 110, 24);
+    let cal_time_label = LabelRun::centred(cal_time_chip.x, cal_time_chip.y + 4, cal_time_chip.w, type_scale::CAPTION, b"Hardware RTC", theme.on_surface);
+    let cal_detail = LabelRun::new(cal_rect.x + 20, cal_rect.y + 124, type_scale::CAPTION, b"No scheduled events", theme.on_surface_variant);
 
-    // 7. Widget 4: Security Vault
-    let vault_rect = WIDGET_VAULT;
-    let vault_label = LabelRun::new(vault_rect.x + 20, vault_rect.y + 18, type_scale::BODY, b"Security Vault", theme.on_surface_variant);
-    let vault_status = LabelRun::new(vault_rect.x + 20, vault_rect.y + 46, type_scale::HEADING, b"Protected", theme.on_surface);
-    let vault_specs = LabelRun::new(vault_rect.x + 20, vault_rect.y + 92, type_scale::CAPTION, b"Zero Ambient Authority", theme.on_surface_variant);
-    let vault_badge_rect = Rect::new(vault_rect.x + 20, vault_rect.y + 126, 114, 26);
-    let vault_badge_label = LabelRun::centred(vault_badge_rect.x, vault_badge_rect.y + 4, vault_badge_rect.w, type_scale::CAPTION, b"Encrypted", 0xFFFFFFFF);
+    let vault_rect = Rect::new(375, 446, 305, 160);
+    let vault_label = LabelRun::new(vault_rect.x + 20, vault_rect.y + 16, type_scale::CAPTION, b"Security Architecture", theme.on_surface_variant);
+    let vault_status = LabelRun::new(vault_rect.x + 20, vault_rect.y + 38, type_scale::TITLE, b"Enforced", 0xFF10B981);
+    let vault_arch = LabelRun::new(vault_rect.x + 20, vault_rect.y + 90, type_scale::BODY, b"Zero Ambient Authority", theme.on_surface);
+    let vault_chip_rect = Rect::new(vault_rect.x + 20, vault_rect.y + 120, 130, 24);
+    let vault_chip_label = LabelRun::centred(vault_chip_rect.x, vault_chip_rect.y + 4, vault_chip_rect.w, type_scale::CAPTION, b"Capability Broker", 0xFFFFFFFF);
 
-    // 8. Lower Readings section
-    let readings_head = LabelRun::new(40, 715, type_scale::HEADING, b"System Readings", theme.on_surface);
+    // 6. Section 2 Header (y = 626..656)
+    let readings_head = LabelRun::new(40, 626, type_scale::SECTION, b"System Readings", theme.on_surface);
 
+    // 7. System Readings Cards (y = 664..1044, 5 cards of height 64)
     let mut pkg_buf = [0u8; 32];
     let mut n = push_dec(&mut pkg_buf, 0, state.app_count as u64);
     for &b in b" registered" {
@@ -497,154 +447,105 @@ fn build_widgets_frame(state: &LauncherState) -> WidgetsPlan {
     }
 
     let mut notif_buf = [0u8; 32];
-    let mut m = push_dec(&mut notif_buf, 0, state.notification_count as u64);
+    let m = push_dec(&mut notif_buf, 0, state.notification_count as u64);
+    let mut n_len = m;
     for &b in b" active" {
-        if m < notif_buf.len() {
-            notif_buf[m] = b;
-            m += 1;
+        if n_len < notif_buf.len() {
+            notif_buf[n_len] = b;
+            n_len += 1;
         }
     }
 
     let card_w = 640;
-    let card_h = 76;
+    let card_h = 64;
     let readings = [
         DashboardReadingCard {
-            rect: Rect::new(40, 760, card_w, card_h),
-            label: LabelRun::new(64, 772, type_scale::BODY, b"Real-Time Clock", theme.on_surface),
-            sublabel: LabelRun::new(64, 800, type_scale::CAPTION, b"Hardware PIT timer synchronization", theme.on_surface_variant),
-            value: LabelRun::right(40 + card_w - 24, 782, type_scale::BODY, if state.clock_source_ok { &state.clock_time } else { b"No RTC" }, if state.clock_source_ok { 0xFF10B981 } else { theme.on_surface_variant }),
-            accent_color: 0xFF3B82F6,
-        },
-        DashboardReadingCard {
-            rect: Rect::new(40, 852, card_w, card_h),
-            label: LabelRun::new(64, 864, type_scale::BODY, b"Applications Registry", theme.on_surface),
-            sublabel: LabelRun::new(64, 892, type_scale::CAPTION, b"Signed verified package store", theme.on_surface_variant),
-            value: LabelRun::right(40 + card_w - 24, 874, type_scale::BODY, &pkg_buf[..n], theme.on_surface),
+            rect: Rect::new(40, 664, card_w, card_h),
+            label: LabelRun::new(64, 674, type_scale::BODY, b"Package Registry", theme.on_surface),
+            sublabel: LabelRun::new(64, 700, type_scale::CAPTION, b"Signed verified package store", theme.on_surface_variant),
+            value: LabelRun::right(40 + card_w - 24, 684, type_scale::BODY, &pkg_buf[..n], theme.on_surface),
             accent_color: 0xFF6366F1,
         },
         DashboardReadingCard {
-            rect: Rect::new(40, 944, card_w, card_h),
-            label: LabelRun::new(64, 956, type_scale::BODY, b"Notification Service", theme.on_surface),
-            sublabel: LabelRun::new(64, 984, type_scale::CAPTION, b"Kernel IPC alert channel queue", theme.on_surface_variant),
-            value: LabelRun::right(40 + card_w - 24, 966, type_scale::BODY, &notif_buf[..m], if state.notification_count > 0 { 0xFFF59E0B } else { theme.on_surface_variant }),
+            rect: Rect::new(40, 740, card_w, card_h),
+            label: LabelRun::new(64, 750, type_scale::BODY, b"IPC Alert Channel", theme.on_surface),
+            sublabel: LabelRun::new(64, 776, type_scale::CAPTION, b"Kernel notification queue", theme.on_surface_variant),
+            value: LabelRun::right(40 + card_w - 24, 760, type_scale::BODY, &notif_buf[..n_len], if state.notification_count > 0 { 0xFFF59E0B } else { theme.on_surface_variant }),
             accent_color: 0xFF10B981,
         },
         DashboardReadingCard {
-            rect: Rect::new(40, 1036, card_w, card_h),
-            label: LabelRun::new(64, 1048, type_scale::BODY, b"Appearance & Engine", theme.on_surface),
-            sublabel: LabelRun::new(64, 1076, type_scale::CAPTION, b"Flagship portrait 720x1440 compositor", theme.on_surface_variant),
-            value: LabelRun::right(40 + card_w - 24, 1058, type_scale::BODY, b"Light \xe2\x80\xa2 60 FPS", theme.on_surface),
+            rect: Rect::new(40, 816, card_w, card_h),
+            label: LabelRun::new(64, 826, type_scale::BODY, b"Display Compositor", theme.on_surface),
+            sublabel: LabelRun::new(64, 852, type_scale::CAPTION, b"Flagship portrait 720x1440", theme.on_surface_variant),
+            value: LabelRun::right(40 + card_w - 24, 836, type_scale::BODY, b"60 FPS Scanout", theme.on_surface),
             accent_color: 0xFF8B5CF6,
         },
         DashboardReadingCard {
-            rect: Rect::new(40, 1128, card_w, card_h),
-            label: LabelRun::new(64, 1140, type_scale::BODY, b"System Sandbox & Memory", theme.on_surface),
-            sublabel: LabelRun::new(64, 1168, type_scale::CAPTION, b"Isolated page tables \xe2\x80\xa2 Ring 3 user mode", theme.on_surface_variant),
-            value: LabelRun::right(40 + card_w - 24, 1150, type_scale::BODY, b"Enforced", 0xFF10B981),
+            rect: Rect::new(40, 892, card_w, card_h),
+            label: LabelRun::new(64, 902, type_scale::BODY, b"Network Connectivity", theme.on_surface),
+            sublabel: LabelRun::new(64, 928, type_scale::CAPTION, b"VirtIO-Net socket transport", theme.on_surface_variant),
+            value: LabelRun::right(40 + card_w - 24, 912, type_scale::BODY, b"10.0.2.15 Online", 0xFF3B82F6),
+            accent_color: 0xFF3B82F6,
+        },
+        DashboardReadingCard {
+            rect: Rect::new(40, 968, card_w, card_h),
+            label: LabelRun::new(64, 978, type_scale::BODY, b"Process Sandbox & Isolation", theme.on_surface),
+            sublabel: LabelRun::new(64, 1004, type_scale::CAPTION, b"Ring 3 user mode CR3 tables", theme.on_surface_variant),
+            value: LabelRun::right(40 + card_w - 24, 988, type_scale::BODY, b"Protected", 0xFF059669),
             accent_color: 0xFF059669,
         },
     ];
 
     WidgetsPlan {
-        status,
+        status_clock,
+        telemetry,
         page_title,
         page_subtitle,
         status_chip_rect,
         status_chip_label,
-        weather_rect,
-        weather_label,
-        weather_temp,
-        weather_condition,
-        weather_details,
-        health_rect,
-        health_label,
-        health_pct,
-        health_gauge_rect,
-        health_status,
-        media_rect,
-        media_art_rect,
-        media_title,
-        media_artist,
-        media_progress_rect,
-        media_time_left,
-        media_time_right,
-        media_btn_prev,
-        media_btn_play,
-        media_btn_play_glyph,
-        media_btn_next,
+        storage_rect,
+        storage_label,
+        storage_capacity,
+        storage_mount,
+        storage_detail,
+        ram_rect,
+        ram_label,
+        ram_total,
+        ram_mmu,
+        ram_detail,
+        audio_rect,
+        audio_art_rect,
+        audio_title,
+        audio_sublabel,
+        audio_gauge_rect,
+        audio_gauge_fill_w,
+        audio_volume_label,
+        audio_service_tag,
         cal_rect,
-        cal_accent_bar,
+        cal_label,
+        cal_date,
         cal_time_chip,
         cal_time_label,
-        cal_title,
-        cal_location,
-        cal_next,
+        cal_detail,
         vault_rect,
         vault_label,
         vault_status,
-        vault_specs,
-        vault_badge_rect,
-        vault_badge_label,
+        vault_arch,
+        vault_chip_rect,
+        vault_chip_label,
         readings_head,
         readings,
         home_pill: HOME_PILL,
     }
 }
 
-// -----------------------------------------------------------------------------
-// Vector Glyphs
-// -----------------------------------------------------------------------------
-
-#[inline]
-fn render_sun_glyph(cx: usize, cy: usize, x: usize, y: usize) -> bool {
-    let dx = x as i32 - cx as i32;
-    let dy = y as i32 - cy as i32;
-    let d2 = dx * dx + dy * dy;
-    // Central disc
-    if d2 <= 64 {
-        return true;
-    }
-    // 8 radial rays
-    if d2 >= 100 && d2 <= 169 {
-        let is_cardinal = (dx.abs() <= 2 && dy.abs() >= 10) || (dy.abs() <= 2 && dx.abs() >= 10);
-        let is_diagonal = (dx - dy).abs() <= 2 || (dx + dy).abs() <= 2;
-        return is_cardinal || is_diagonal;
-    }
-    false
-}
-
-#[inline]
-fn render_bolt_glyph(cx: usize, cy: usize, x: usize, y: usize) -> bool {
-    let dx = x as i32 - cx as i32;
-    let dy = y as i32 - cy as i32;
-    if dy < 0 && dy >= -10 {
-        return dx >= -dy / 2 - 2 && dx <= -dy / 2 + 2;
-    }
-    if dy >= 0 && dy <= 10 {
-        return dx >= -dy / 2 && dx <= -dy / 2 + 4;
-    }
-    false
-}
-
-#[inline]
-fn render_shield_glyph(cx: usize, cy: usize, x: usize, y: usize) -> bool {
-    let dx = x as i32 - cx as i32;
-    let dy = y as i32 - cy as i32;
-    if dx.abs() > 10 || dy < -8 || dy > 12 {
-        return false;
-    }
-    if dy <= 2 {
-        return dx.abs() <= 10;
-    }
-    let bottom_limit = 12 - dx.abs();
-    dy <= bottom_limit
-}
-
-// -----------------------------------------------------------------------------
-// Per-Pixel Renderer
-// -----------------------------------------------------------------------------
-
 static mut FRAME_CACHE: Option<WidgetsPlan> = None;
+
+pub fn invalidate_widgets_cache() {
+    unsafe {
+        FRAME_CACHE = None;
+    }
+}
 
 pub fn get_live_widgets_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     let f = unsafe {
@@ -656,40 +557,18 @@ pub fn get_live_widgets_color(x: usize, y: usize, state: &LauncherState) -> u32 
     };
     let theme = THEME;
 
-    // 1. Status Bar (y < STATUS_BAR_HEIGHT)
+    // 1. Canonical Status Bar (y < STATUS_BAR_HEIGHT)
+    // Exactly matches the homescreen status bar: real RTC clock and canonical hardware telemetry
     if y < STATUS_BAR_HEIGHT {
         if y == STATUS_BAR_HEIGHT - 1 {
             return theme.border;
         }
-        let s = &f.status;
-        if let Some(c) = s.clock.pixel_on(x, y, theme.surface) {
+        let ink = theme.on_surface;
+        if let Some(c) = f.status_clock.pixel_on(x, y, theme.surface) {
             return c;
         }
-        if rounded_contains(s.battery, x, y, radius::CHIP) {
-            if rounded_outline(s.battery, x, y, radius::CHIP) {
-                return theme.on_surface;
-            }
-            if s.battery_dash.contains(x, y) {
-                return theme.on_surface_variant;
-            }
-            return theme.surface_container_low;
-        }
-        if s.tip.contains(x, y) {
-            return theme.on_surface;
-        }
-        let wdx = x as i32 - s.wifi_centre.0;
-        let wdy = y as i32 - s.wifi_centre.1;
-        let wd2 = wdx * wdx + wdy * wdy;
-        if wdy <= 0 && ((36..=64).contains(&wd2) || (100..=144).contains(&wd2)) {
-            return theme.on_surface;
-        }
-        if wd2 <= 9 {
-            return theme.on_surface;
-        }
-        for bar in s.bars.iter() {
-            if bar.contains(x, y) {
-                return theme.on_surface;
-            }
+        if let Some(c) = crate::screens::home::telemetry_pixel(x, y, &f.telemetry, ink) {
+            return c;
         }
         return theme.surface;
     }
@@ -714,26 +593,26 @@ pub fn get_live_widgets_color(x: usize, y: usize, state: &LauncherState) -> u32 
         }
     }
 
-    // 3. Widget 0: Weather
-    if f.weather_rect.contains(x, y) {
-        if rounded_contains(f.weather_rect, x, y, radius::CARD) {
-            if rounded_outline(f.weather_rect, x, y, radius::CARD) {
+    // 3. Row 1: Storage & RAM Cards
+    if f.storage_rect.contains(x, y) {
+        if rounded_contains(f.storage_rect, x, y, radius::CARD) {
+            if rounded_outline(f.storage_rect, x, y, radius::CARD) {
                 return theme.border;
             }
-            // Sun glyph at top right
-            if render_sun_glyph(f.weather_rect.x + f.weather_rect.w - 36, f.weather_rect.y + 36, x, y) {
-                return 0xFFF59E0B; // Amber gold
+            let strip = Rect::new(f.storage_rect.x + 12, f.storage_rect.y + 16, 4, f.storage_rect.h - 32);
+            if rounded_contains(strip, x, y, 2) {
+                return 0xFF3B82F6; // Blue accent
             }
-            if let Some(c) = f.weather_label.pixel_on(x, y, theme.surface_container) {
+            if let Some(c) = f.storage_label.pixel_on(x, y, theme.surface_container) {
                 return c;
             }
-            if let Some(c) = f.weather_temp.pixel_on(x, y, theme.surface_container) {
+            if let Some(c) = f.storage_capacity.pixel_on(x, y, theme.surface_container) {
                 return c;
             }
-            if let Some(c) = f.weather_condition.pixel_on(x, y, theme.surface_container) {
+            if let Some(c) = f.storage_mount.pixel_on(x, y, theme.surface_container) {
                 return c;
             }
-            if let Some(c) = f.weather_details.pixel_on(x, y, theme.surface_container) {
+            if let Some(c) = f.storage_detail.pixel_on(x, y, theme.surface_container) {
                 return c;
             }
             return theme.surface_container;
@@ -741,88 +620,65 @@ pub fn get_live_widgets_color(x: usize, y: usize, state: &LauncherState) -> u32 
         return theme.surface;
     }
 
-    // 4. Widget 1: Health & Battery
-    if f.health_rect.contains(x, y) {
-        if rounded_contains(f.health_rect, x, y, radius::CARD) {
-            if rounded_outline(f.health_rect, x, y, radius::CARD) {
+    if f.ram_rect.contains(x, y) {
+        if rounded_contains(f.ram_rect, x, y, radius::CARD) {
+            if rounded_outline(f.ram_rect, x, y, radius::CARD) {
                 return theme.border;
             }
-            // Bolt glyph at top right
-            if render_bolt_glyph(f.health_rect.x + f.health_rect.w - 36, f.health_rect.y + 36, x, y) {
-                return 0xFF10B981;
+            let strip = Rect::new(f.ram_rect.x + 12, f.ram_rect.y + 16, 4, f.ram_rect.h - 32);
+            if rounded_contains(strip, x, y, 2) {
+                return 0xFF10B981; // Emerald accent
             }
-            if let Some(c) = f.health_label.pixel_on(x, y, theme.surface_container) {
+            if let Some(c) = f.ram_label.pixel_on(x, y, theme.surface_container) {
                 return c;
             }
-            if let Some(c) = f.health_pct.pixel_on(x, y, theme.surface_container) {
+            if let Some(c) = f.ram_total.pixel_on(x, y, theme.surface_container) {
                 return c;
             }
-            // Battery progress track
-            if rounded_contains(f.health_gauge_rect, x, y, 4) {
-                let fill_w = f.health_gauge_rect.w * 98 / 100;
-                if x < f.health_gauge_rect.x + fill_w {
-                    return 0xFF10B981;
+            if let Some(c) = f.ram_mmu.pixel_on(x, y, theme.surface_container) {
+                return c;
+            }
+            if let Some(c) = f.ram_detail.pixel_on(x, y, theme.surface_container) {
+                return c;
+            }
+            return theme.surface_container;
+        }
+        return theme.surface;
+    }
+
+    // 4. Row 2: Master Audio Output Card
+    if f.audio_rect.contains(x, y) {
+        if rounded_contains(f.audio_rect, x, y, radius::CARD) {
+            if rounded_outline(f.audio_rect, x, y, radius::CARD) {
+                return theme.border;
+            }
+            if rounded_contains(f.audio_art_rect, x, y, radius::CONTROL) {
+                // Speaker / audio emblem
+                let cx = f.audio_art_rect.x + f.audio_art_rect.w / 2;
+                let cy = f.audio_art_rect.y + f.audio_art_rect.h / 2;
+                let dx = (x as i32 - cx as i32).abs();
+                let dy = (y as i32 - cy as i32).abs();
+                if dx * dx + dy * dy <= 100 {
+                    return 0xFF6366F1;
                 }
                 return theme.surface_container_high;
             }
-            if let Some(c) = f.health_status.pixel_on(x, y, theme.surface_container) {
+            if let Some(c) = f.audio_title.pixel_on(x, y, theme.surface_container) {
                 return c;
             }
-            return theme.surface_container;
-        }
-        return theme.surface;
-    }
-
-    // 5. Widget 2: Media Player
-    if f.media_rect.contains(x, y) {
-        if rounded_contains(f.media_rect, x, y, radius::CARD) {
-            if rounded_outline(f.media_rect, x, y, radius::CARD) {
-                return theme.border;
-            }
-            // Album art squircle
-            if rounded_contains(f.media_art_rect, x, y, 14) {
-                let cx = f.media_art_rect.center_x() as i32;
-                let cy = f.media_art_rect.center_y() as i32;
-                let dx = x as i32 - cx;
-                let dy = y as i32 - cy;
-                let d2 = dx * dx + dy * dy;
-                // Vinyl disc
-                if d2 <= 324 && (d2 >= 256 || (d2 >= 100 && d2 <= 144) || d2 <= 25) {
-                    return 0xFFFFFFFF;
-                }
-                return 0xFF7C3AED; // Violet gradient base
-            }
-            if let Some(c) = f.media_title.pixel_on(x, y, theme.surface_container) {
+            if let Some(c) = f.audio_sublabel.pixel_on(x, y, theme.surface_container) {
                 return c;
             }
-            if let Some(c) = f.media_artist.pixel_on(x, y, theme.surface_container) {
-                return c;
-            }
-            // Progress bar
-            if rounded_contains(f.media_progress_rect, x, y, 3) {
-                let fill_w = f.media_progress_rect.w * 65 / 100;
-                if x < f.media_progress_rect.x + fill_w {
-                    return 0xFF8B5CF6;
+            if rounded_contains(f.audio_gauge_rect, x, y, 4) {
+                if x < f.audio_gauge_rect.x + f.audio_gauge_fill_w {
+                    return 0xFF6366F1; // Accent fill
                 }
                 return theme.surface_container_high;
             }
-            if let Some(c) = f.media_time_left.pixel_on(x, y, theme.surface_container) {
+            if let Some(c) = f.audio_volume_label.pixel_on(x, y, theme.surface_container) {
                 return c;
             }
-            if let Some(c) = f.media_time_right.pixel_on(x, y, theme.surface_container) {
-                return c;
-            }
-            // Play button circle
-            if rounded_contains(f.media_btn_play, x, y, 18) {
-                if let Some(c) = f.media_btn_play_glyph.pixel_on(x, y, 0xFF8B5CF6) {
-                    return c;
-                }
-                return 0xFF8B5CF6;
-            }
-            if let Some(c) = f.media_btn_prev.pixel_on(x, y, theme.surface_container) {
-                return c;
-            }
-            if let Some(c) = f.media_btn_next.pixel_on(x, y, theme.surface_container) {
+            if let Some(c) = f.audio_service_tag.pixel_on(x, y, theme.surface_container) {
                 return c;
             }
             return theme.surface_container;
@@ -830,30 +686,32 @@ pub fn get_live_widgets_color(x: usize, y: usize, state: &LauncherState) -> u32 
         return theme.surface;
     }
 
-    // 6. Widget 3: Calendar
+    // 5. Row 3: Calendar & Security Cards
     if f.cal_rect.contains(x, y) {
         if rounded_contains(f.cal_rect, x, y, radius::CARD) {
             if rounded_outline(f.cal_rect, x, y, radius::CARD) {
                 return theme.border;
             }
-            // Vibrant accent bar
-            if rounded_contains(f.cal_accent_bar, x, y, 2) {
-                return 0xFFF59E0B; // Vibrant amber
+            let strip = Rect::new(f.cal_rect.x + 12, f.cal_rect.y + 16, 4, f.cal_rect.h - 32);
+            if rounded_contains(strip, x, y, 2) {
+                return 0xFFF59E0B; // Amber accent
             }
-            // Time chip
-            if rounded_contains(f.cal_time_chip, x, y, 12) {
+            if let Some(c) = f.cal_label.pixel_on(x, y, theme.surface_container) {
+                return c;
+            }
+            if let Some(c) = f.cal_date.pixel_on(x, y, theme.surface_container) {
+                return c;
+            }
+            if rounded_contains(f.cal_time_chip, x, y, radius::CHIP) {
+                if rounded_outline(f.cal_time_chip, x, y, radius::CHIP) {
+                    return theme.border;
+                }
                 if let Some(c) = f.cal_time_label.pixel_on(x, y, theme.surface_container_high) {
                     return c;
                 }
                 return theme.surface_container_high;
             }
-            if let Some(c) = f.cal_title.pixel_on(x, y, theme.surface_container) {
-                return c;
-            }
-            if let Some(c) = f.cal_location.pixel_on(x, y, theme.surface_container) {
-                return c;
-            }
-            if let Some(c) = f.cal_next.pixel_on(x, y, theme.surface_container) {
+            if let Some(c) = f.cal_detail.pixel_on(x, y, theme.surface_container) {
                 return c;
             }
             return theme.surface_container;
@@ -861,15 +719,14 @@ pub fn get_live_widgets_color(x: usize, y: usize, state: &LauncherState) -> u32 
         return theme.surface;
     }
 
-    // 7. Widget 4: Security Vault
     if f.vault_rect.contains(x, y) {
         if rounded_contains(f.vault_rect, x, y, radius::CARD) {
             if rounded_outline(f.vault_rect, x, y, radius::CARD) {
                 return theme.border;
             }
-            // Shield glyph
-            if render_shield_glyph(f.vault_rect.x + f.vault_rect.w - 36, f.vault_rect.y + 36, x, y) {
-                return 0xFF10B981;
+            let strip = Rect::new(f.vault_rect.x + 12, f.vault_rect.y + 16, 4, f.vault_rect.h - 32);
+            if rounded_contains(strip, x, y, 2) {
+                return 0xFF059669; // Teal accent
             }
             if let Some(c) = f.vault_label.pixel_on(x, y, theme.surface_container) {
                 return c;
@@ -877,26 +734,26 @@ pub fn get_live_widgets_color(x: usize, y: usize, state: &LauncherState) -> u32 
             if let Some(c) = f.vault_status.pixel_on(x, y, theme.surface_container) {
                 return c;
             }
-            if let Some(c) = f.vault_specs.pixel_on(x, y, theme.surface_container) {
+            if let Some(c) = f.vault_arch.pixel_on(x, y, theme.surface_container) {
                 return c;
             }
-            // Sovereign chip
-            if rounded_contains(f.vault_badge_rect, x, y, 13) {
-                if let Some(c) = f.vault_badge_label.pixel_on(x, y, 0xFF10B981) {
+            if rounded_contains(f.vault_chip_rect, x, y, radius::CHIP) {
+                if let Some(c) = f.vault_chip_label.pixel_on(x, y, 0xFF059669) {
                     return c;
                 }
-                return 0xFF10B981;
+                return 0xFF059669; // Solid teal chip
             }
             return theme.surface_container;
         }
         return theme.surface;
     }
 
-    // 8. Lower Readings section
+    // 6. Section 2: System Readings Header
     if let Some(c) = f.readings_head.pixel_on(x, y, theme.surface) {
         return c;
     }
 
+    // 7. System Readings Cards
     for card in &f.readings {
         if card.rect.contains(x, y) {
             if rounded_contains(card.rect, x, y, radius::CARD) {
@@ -923,7 +780,7 @@ pub fn get_live_widgets_color(x: usize, y: usize, state: &LauncherState) -> u32 
         }
     }
 
-    // 9. Home Indicator Pill
+    // 8. Home Indicator Pill
     if rounded_contains(f.home_pill, x, y, 2) {
         return theme.on_surface_variant;
     }

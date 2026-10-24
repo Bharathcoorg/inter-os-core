@@ -42,7 +42,7 @@ const TILE_GUTTER: usize = 20;
 const APP_LABEL_CAPACITY: usize = 16;
 
 /// Type scale for an app's name, and for the badge glyph inside its icon.
-const LABEL_SCALE: usize = type_scale::SECTION;
+const LABEL_SCALE: usize = type_scale::BODY;
 const BADGE_SCALE: usize = type_scale::BADGE;
 
 /// Icon badge: at most three glyphs, which is what the icon field in

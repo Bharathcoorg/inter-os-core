@@ -144,7 +144,7 @@ html, body.dark-theme {
 }
 
 .brand-sub-badge {
-  font-size: 0.65rem;
+  font-size: 0.74rem;
   font-weight: 600;
   letter-spacing: 0.05em;
   text-transform: uppercase;
@@ -152,7 +152,7 @@ html, body.dark-theme {
   background: rgba(255, 255, 255, 0.06);
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 4px;
-  padding: 1px 5px;
+  padding: 1.5px 6px;
 }
 
 .header-center-actions {
@@ -279,10 +279,10 @@ html, body.dark-theme {
 
 .spec-lbl {
   font-family: var(--font-main), -apple-system, sans-serif;
-  font-size: 0.58rem;
+  font-size: 0.72rem;
   font-weight: 600;
   letter-spacing: 0.03em;
-  padding: 1px 4px;
+  padding: 1.5px 5px;
   border-radius: 3px;
   background: rgba(255, 255, 255, 0.08);
   color: #A1A1AA;
@@ -291,7 +291,7 @@ html, body.dark-theme {
 
 .spec-val {
   font-family: var(--font-main), -apple-system, sans-serif;
-  font-size: 0.67rem;
+  font-size: 0.78rem;
   font-weight: 500;
   color: #E4E4E7;
   letter-spacing: 0.01em;
@@ -314,10 +314,10 @@ html, body.dark-theme {
 
 .target-device-picker-label {
   font-family: var(--font-main), -apple-system, sans-serif;
-  font-size: 0.58rem;
+  font-size: 0.72rem;
   font-weight: 600;
   letter-spacing: 0.03em;
-  padding: 1px 4px;
+  padding: 1.5px 5px;
   border-radius: 3px;
   background: rgba(255, 255, 255, 0.08);
   color: #A1A1AA;
@@ -327,13 +327,13 @@ html, body.dark-theme {
 
 .target-device-select {
   font-family: var(--font-main), -apple-system, sans-serif;
-  font-size: 0.67rem;
+  font-size: 0.78rem;
   font-weight: 500;
   color: #E4E4E7;
   background: rgba(255, 255, 255, 0.035);
   border: 1px solid rgba(255, 255, 255, 0.06);
   border-radius: 4px;
-  padding: 1.5px 6px;
+  padding: 2px 7px;
   max-width: 220px;
   text-overflow: ellipsis;
   cursor: pointer;
@@ -393,7 +393,7 @@ html, body.dark-theme {
   color: #8E8E93;
   padding: 0 10px;
   height: 22px;
-  font-size: 0.71rem;
+  font-size: 0.74rem;
   font-weight: 500;
   font-family: inherit;
   border-radius: 4px;
@@ -423,7 +423,7 @@ html, body.dark-theme {
   align-items: center;
   gap: 7px;
   font-family: var(--font-mono), monospace;
-  font-size: 0.68rem;
+  font-size: 0.76rem;
   font-weight: 500;
   color: rgba(255, 255, 255, 0.85);
   background: #111115;
@@ -677,9 +677,9 @@ html, body.dark-theme {
 
 .hw-panel-badge {
   font-family: var(--font-mono);
-  font-size: 0.58rem;
+  font-size: 0.72rem;
   font-weight: 600;
-  padding: 1.5px 6px;
+  padding: 2px 7px;
   border-radius: 3px;
   background: rgba(255, 255, 255, 0.06);
   border: 1px solid rgba(255, 255, 255, 0.12);
@@ -692,9 +692,9 @@ html, body.dark-theme {
   border: 1px solid rgba(255, 255, 255, 0.1);
   color: #A1A1AA;
   border-radius: 4px;
-  padding: 2px 7px;
+  padding: 3px 8px;
   font-family: var(--font-mono);
-  font-size: 0.58rem;
+  font-size: 0.72rem;
   font-weight: 600;
   cursor: pointer;
   display: inline-flex;
@@ -773,7 +773,7 @@ html, body.dark-theme {
 
 .hw-card-name {
   font-family: var(--font-mono);
-  font-size: 0.62rem;
+  font-size: 0.75rem;
   font-weight: 700;
   letter-spacing: 0.06em;
   color: var(--white-muted);
@@ -781,7 +781,7 @@ html, body.dark-theme {
 
 .hw-card-val {
   font-family: var(--font-mono);
-  font-size: 0.69rem;
+  font-size: 0.84rem;
   font-weight: 600;
   color: var(--white-pure);
   /* All real telemetry values must render in full: allow natural wrapping
@@ -811,7 +811,7 @@ html, body.dark-theme {
 
 .hw-card-sub {
   font-family: var(--font-mono);
-  font-size: 0.61rem;
+  font-size: 0.72rem;
   color: var(--white-dim);
   display: flex;
   /* Wrap sub-values (heap, paging, block IO, RIP/TID, ticks) onto extra lines
@@ -888,14 +888,14 @@ html, body.dark-theme {
 }
 
 .bus-stat-lbl {
-  font-size: 0.52rem;
+  font-size: 0.72rem;
   font-family: var(--font-mono);
   color: var(--white-dim);
   font-weight: 700;
 }
 
 .bus-stat-v {
-  font-size: 0.6rem;
+  font-size: 0.78rem;
   font-family: var(--font-mono);
   color: var(--white-soft);
   font-weight: 500;
@@ -981,7 +981,7 @@ html, body.dark-theme {
   align-items: center;
   gap: 6px;
   font-family: var(--font-mono);
-  font-size: 0.71rem;
+  font-size: 0.74rem;
   font-weight: 500;
   color: var(--white-muted);
   background: transparent;
@@ -1050,7 +1050,7 @@ html, body.dark-theme {
   align-items: center;
   gap: 6px;
   font-family: var(--font-mono);
-  font-size: 0.68rem;
+  font-size: 0.76rem;
   color: var(--white-muted);
 }
 
@@ -1145,8 +1145,8 @@ html, body.dark-theme {
 }
 .badge-chip {
   font-family: var(--font-mono);
-  font-size: 0.62rem;
-  padding: 1.5px 6px;
+  font-size: 0.72rem;
+  padding: 2px 7px;
   background: rgba(255, 255, 255, 0.05);
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 4px;
@@ -1172,10 +1172,10 @@ html, body.dark-theme {
   background: #111115;
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 6px;
-  padding: 5px 8px;
+  padding: 6px 9px;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 3px;
   transition: all 0.15s ease;
 }
 
@@ -1191,7 +1191,7 @@ html, body.dark-theme {
 
 .reg-name {
   font-family: var(--font-mono);
-  font-size: 0.58rem;
+  font-size: 0.72rem;
   font-weight: 700;
   color: var(--white-muted);
 }
@@ -1202,7 +1202,7 @@ html, body.dark-theme {
 
 .reg-val {
   font-family: var(--font-mono);
-  font-size: 0.67rem;
+  font-size: 0.78rem;
   font-weight: 600;
   color: var(--white-pure);
   word-break: break-all;
@@ -1246,14 +1246,14 @@ html, body.dark-theme {
   border: 1px solid rgba(255, 255, 255, 0.07);
   border-radius: 6px;
   padding: 8px 10px;
-  font-size: 0.69rem;
+  font-size: 0.78rem;
 }
 
 .memmap-row.header {
   background: #0D0D10;
   border-color: rgba(255, 255, 255, 0.1);
   font-family: var(--font-mono);
-  font-size: 0.6rem;
+  font-size: 0.72rem;
   font-weight: 700;
   color: var(--white-muted);
   letter-spacing: 0.04em;
@@ -1268,7 +1268,7 @@ html, body.dark-theme {
 .memmap-row code {
   font-family: var(--font-mono);
   color: var(--white-soft);
-  font-size: 0.66rem;
+  font-size: 0.75rem;
 }
 /* --------------------------------------------------------------------------
    Center: Futuristic Smartphone Device Chassis
@@ -1517,12 +1517,12 @@ html, body.dark-theme {
 }
 
 .cap-badge.ok {
-  font-size: 0.6rem;
+  font-size: 0.72rem;
   font-family: var(--font-mono);
   background: rgba(255, 255, 255, 0.1);
   color: var(--white-pure);
   border: 1px solid rgba(255, 255, 255, 0.25);
-  padding: 1px 6px;
+  padding: 1.5px 6px;
   border-radius: 4px;
   box-shadow: 0 0 8px rgba(255, 255, 255, 0.15);
 }
@@ -1618,8 +1618,8 @@ html, body.dark-theme {
 }
 .pkg-badge {
   font-family: var(--font-mono, monospace);
-  font-size: 0.6rem;
-  padding: 2px 6px;
+  font-size: 0.72rem;
+  padding: 2px 7px;
   border-radius: 4px;
   background: rgba(16, 185, 129, 0.15);
   color: #10B981;
@@ -1638,7 +1638,7 @@ html, body.dark-theme {
   background: rgba(255, 255, 255, 0.1);
   border: 1px solid rgba(255, 255, 255, 0.2);
   color: #FFFFFF;
-  font-size: 0.62rem;
+  font-size: 0.74rem;
   padding: 3px 8px;
   border-radius: 6px;
   cursor: pointer;
@@ -1898,7 +1898,7 @@ html, body.dark-theme {
   padding: 8px 10px;
   color: #71717A;
   font-weight: 600;
-  font-size: 0.65rem;
+  font-size: 0.74rem;
   letter-spacing: 0.05em;
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 }
@@ -1913,7 +1913,7 @@ html, body.dark-theme {
   display: inline-block;
   padding: 2px 6px;
   border-radius: 4px;
-  font-size: 0.64rem;
+  font-size: 0.72rem;
   font-weight: 600;
   background: rgba(255, 255, 255, 0.08);
   color: #E4E4E7;
@@ -1945,21 +1945,21 @@ html, body.dark-theme {
 }
 .appdev-title strong {
   display: block;
-  font-size: 0.78rem;
+  font-size: 0.85rem;
   color: #FFFFFF;
 }
 .appdev-title span {
-  font-size: 0.62rem;
+  font-size: 0.72rem;
   color: #94A3B8;
 }
 .btn-dev-action {
   background: rgba(16, 185, 129, 0.15);
   border: 1px solid rgba(16, 185, 129, 0.35);
   color: #10B981;
-  font-size: 0.65rem;
+  font-size: 0.74rem;
   font-weight: 600;
   border-radius: 6px;
-  padding: 4px 10px;
+  padding: 5px 11px;
   display: flex;
   align-items: center;
   gap: 5px;
@@ -1982,7 +1982,7 @@ html, body.dark-theme {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  font-size: 0.62rem;
+  font-size: 0.72rem;
   font-weight: 700;
   color: #94A3B8;
 }
@@ -1994,14 +1994,14 @@ html, body.dark-theme {
   font-family: var(--font-mono);
 }
 .scaffold-box-desc {
-  font-size: 0.62rem;
+  font-size: 0.72rem;
   color: #94A3B8;
   margin-top: 4px;
 }
 
 .appdev-ipc-title {
   padding: 0 14px;
-  font-size: 0.62rem;
+  font-size: 0.72rem;
   font-weight: 700;
   color: #64748B;
   letter-spacing: 0.05em;
@@ -2014,7 +2014,7 @@ html, body.dark-theme {
   border-radius: 8px;
   padding: 8px 10px;
   font-family: var(--font-mono);
-  font-size: 0.62rem;
+  font-size: 0.74rem;
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -2049,13 +2049,13 @@ html, body.dark-theme {
   padding: 8px;
 }
 .appdev-stat-card .stat-lbl {
-  font-size: 0.55rem;
+  font-size: 0.72rem;
   font-weight: 700;
   color: #64748B;
   display: block;
 }
 .appdev-stat-card .stat-val {
-  font-size: 0.72rem;
+  font-size: 0.82rem;
   color: #FFFFFF;
   margin-top: 3px;
   display: block;
@@ -2066,7 +2066,7 @@ html, body.dark-theme {
 .appdev-stat-card .stat-note {
   display: block;
   margin-top: 3px;
-  font-size: 0.5rem;
+  font-size: 0.72rem;
   line-height: 1.35;
   color: #64748B;
 }
@@ -2148,7 +2148,7 @@ html, body.dark-theme {
   gap: 6px;
 }
 .audit-sec-lbl {
-  font-size: 0.65rem;
+  font-size: 0.74rem;
   font-family: var(--font-mono);
   color: #10B981;
   font-weight: 700;
@@ -2170,7 +2170,7 @@ html, body.dark-theme {
   gap: 2px;
 }
 .audit-cell-lbl {
-  font-size: 0.58rem;
+  font-size: 0.72rem;
   color: #71717A;
   font-family: var(--font-mono);
 }
@@ -2478,22 +2478,22 @@ body[data-theme="cyberdeck_hud"] .device-screen {
     min-width: 175px;
   }
   .hw-card-name {
-    font-size: 0.58rem;
+    font-size: 0.72rem;
   }
   .hw-card-val {
     /* Raised from 0.63rem: real telemetry values stay at the ~0.68rem
        readability floor even in compact (short-viewport) mode. */
-    font-size: 0.68rem;
+    font-size: 0.74rem;
   }
   .hw-bar-track {
     height: 4px;
   }
   .hw-card-sub {
-    font-size: 0.55rem;
+    font-size: 0.72rem;
   }
   .ide-tab-bar .panel-tab {
     padding: 5px 9px;
-    font-size: 0.67rem;
+    font-size: 0.74rem;
   }
 }
 
@@ -2522,6 +2522,8 @@ body[data-theme="cyberdeck_hud"] .device-screen {
    viewer's blur. */
 #live-scanout-img,
 #live-scanout-canvas,
+.live-scanout-canvas,
+.screen-canvas,
 .screen-live-scanout canvas {
   width: 100%;
   height: 100%;
@@ -2530,7 +2532,8 @@ body[data-theme="cyberdeck_hud"] .device-screen {
   user-select: none;
   -webkit-user-drag: none;
   image-rendering: -webkit-optimize-contrast;
-  image-rendering: auto;
+  image-rendering: crisp-edges;
+  image-rendering: pixelated;
   transform: translateZ(0);
 }
 
@@ -2541,13 +2544,17 @@ body[data-theme="cyberdeck_hud"] .device-screen {
   background: #000000;
 }
 
-.screen-live-scanout.fhd-pixel-exact #live-scanout-canvas {
+.screen-live-scanout.fhd-pixel-exact #live-scanout-canvas,
+.screen-live-scanout.fhd-pixel-exact .live-scanout-canvas,
+.screen-live-scanout.fhd-pixel-exact .screen-canvas {
   width: 1080px !important;
   height: 2160px !important;
   max-width: none !important;
   max-height: none !important;
   object-fit: none !important;
-  image-rendering: auto;
+  image-rendering: -webkit-optimize-contrast;
+  image-rendering: crisp-edges;
+  image-rendering: pixelated;
 }
 
 /* Honest Studio-owned standby card: shown instead of the live canvas only
@@ -2588,9 +2595,9 @@ body[data-theme="cyberdeck_hud"] .device-screen {
   border: 1px solid rgba(16, 185, 129, 0.35);
   color: #10B981;
   font-family: var(--font-mono, monospace);
-  font-size: 0.62rem;
+  font-size: 0.74rem;
   font-weight: 700;
-  padding: 2px 7px;
+  padding: 2.5px 8px;
   border-radius: 4px;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -2638,9 +2645,24 @@ body[data-theme="cyberdeck_hud"] .device-screen {
 
 .studio-workspace.smartphone-mode .device-chassis.large-mode,
 .device-chassis.large-mode {
-  height: min(940px, calc(100vh - 50px)) !important;
-  max-height: calc(100vh - 50px) !important;
-  max-width: 470px !important;
+  height: min(960px, calc(100vh - 40px)) !important;
+  max-height: calc(100vh - 40px) !important;
+  max-width: min(540px, calc((100vh - 40px) / 2)) !important;
+}
+
+.studio-workspace.smartphone-mode .device-chassis.retina-mode,
+.device-chassis.retina-mode {
+  height: min(1080px, calc(100vh - 30px)) !important;
+  max-height: calc(100vh - 30px) !important;
+  max-width: min(640px, calc((100vh - 30px) / 2)) !important;
+}
+
+.studio-workspace.smartphone-mode .device-chassis.exact-mode,
+.device-chassis.exact-mode {
+  height: calc(100% - 20px) !important;
+  max-height: calc(100vh - 30px) !important;
+  max-width: none !important;
+  width: auto !important;
 }
 
 /* --------------------------------------------------------------------------
@@ -2776,6 +2798,13 @@ body.studio-focus-mode .device-chassis.retina-mode {
   max-width: min(640px, calc((100vh - 44px) / 2)) !important;
 }
 
+body.studio-focus-mode .device-chassis.exact-mode {
+  height: calc(100% - 16px) !important;
+  max-height: calc(100vh - 44px) !important;
+  max-width: none !important;
+  width: auto !important;
+}
+
 body.studio-focus-mode .emulator-side-toolbar {
   background: rgba(16, 17, 22, 0.94) !important;
   border-color: rgba(255, 255, 255, 0.14) !important;
@@ -2784,8 +2813,10 @@ body.studio-focus-mode .emulator-side-toolbar {
 
 .device-stage.ide-device-pane,
 .device-chassis,
+.phone-bezel,
 .device-screen,
-.phone-and-nav-container {
+.phone-and-nav-container,
+.viewport-container {
   transform: translateZ(0);
   backface-visibility: hidden;
 }
@@ -2801,6 +2832,16 @@ body.studio-focus-mode .emulator-side-toolbar {
   display: flex;
   flex-direction: column;
   box-sizing: border-box;
+}
+
+.phone-bezel {
+  box-sizing: border-box;
+}
+
+.screen-canvas {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
 }
 /* Android Studio-Style Quick-Action Hardware Toolbar (Next to Phone) */
 .emulator-side-toolbar {
@@ -2884,7 +2925,7 @@ body.studio-focus-mode .emulator-side-toolbar {
   }
   .gesture-btn {
     padding: 4px 3px;
-    font-size: 0.62rem;
+    font-size: 0.72rem;
   }
   .device-gesture-guide {
     margin-top: 2px;
@@ -2898,7 +2939,7 @@ body.studio-focus-mode .emulator-side-toolbar {
   color: #94A3B8;
   padding: 6px 4px;
   border-radius: 8px;
-  font-size: 0.68rem;
+  font-size: 0.76rem;
   font-weight: 500;
   cursor: pointer;
   display: inline-flex;
@@ -3041,12 +3082,12 @@ body.studio-focus-mode .emulator-side-toolbar {
   align-items: center;
   column-gap: 8px;
   font-family: var(--font-mono, monospace);
-  font-size: 11px;
+  font-size: 12px;
   row-gap: 1px;
 }
 .pbs-stages .pbs-mark {
   grid-area: mark;
-  font-size: 9px;
+  font-size: 11px;
   line-height: 1;
 }
 .pbs-stages .pbs-label {
@@ -3057,7 +3098,7 @@ body.studio-focus-mode .emulator-side-toolbar {
 }
 .pbs-stages .pbs-evidence {
   grid-area: evidence;
-  font-size: 9.5px;
+  font-size: 11.5px;
   color: #10B981;
   white-space: nowrap;
   overflow: hidden;
@@ -3076,7 +3117,7 @@ body.studio-focus-mode .emulator-side-toolbar {
 }
 .pbs-elapsed {
   color: #52525B;
-  font-size: 10px;
+  font-size: 11.5px;
   font-family: var(--font-mono, monospace);
   letter-spacing: 0.4px;
   margin-top: 4px;
@@ -3165,7 +3206,7 @@ body.studio-focus-mode .emulator-side-toolbar {
 
 .volume-hud-percent {
   font-family: var(--font-mono, monospace);
-  font-size: 9px;
+  font-size: 11px;
   font-weight: 700;
   color: #FAF8F4;
   letter-spacing: -0.5px;
@@ -3262,7 +3303,7 @@ body.studio-focus-mode .emulator-side-toolbar {
 }
 
 .sound-modal-badge {
-  font-size: 0.52rem;
+  font-size: 0.72rem;
   font-weight: 700;
   letter-spacing: 0.8px;
   color: #00E5FF;
@@ -3355,14 +3396,14 @@ body.studio-focus-mode .emulator-side-toolbar {
 }
 
 .sound-slider-label {
-  font-size: 0.68rem;
+  font-size: 0.74rem;
   font-weight: 500;
   color: #94A3B8;
 }
 
 .sound-slider-value {
   font-family: var(--font-mono, monospace);
-  font-size: 0.68rem;
+  font-size: 0.74rem;
   font-weight: 700;
   color: #00E5FF;
 }
@@ -3430,7 +3471,7 @@ body.studio-focus-mode .emulator-side-toolbar {
 }
 
 .sound-routing-text {
-  font-size: 0.62rem;
+  font-size: 0.72rem;
   color: #64748B;
   font-family: var(--font-mono, monospace);
 }
@@ -3622,7 +3663,7 @@ body.studio-focus-mode .emulator-side-toolbar {
 }
 
 .modal-sub-badge {
-  font-size: 0.62rem;
+  font-size: 0.72rem;
   font-weight: 700;
   letter-spacing: 0.8px;
   color: #3B82F6;
@@ -3800,7 +3841,7 @@ body.studio-focus-mode .emulator-side-toolbar {
 }
 
 .template-desc {
-  font-size: 0.68rem;
+  font-size: 0.74rem;
   color: #94A3B8;
   line-height: 1.35;
 }
@@ -3869,7 +3910,7 @@ body.studio-focus-mode .emulator-side-toolbar {
 }
 
 .hmr-toggle-desc {
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   color: #6EE7B7;
 }
 
@@ -3931,14 +3972,14 @@ body.studio-focus-mode .emulator-side-toolbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  font-size: 0.65rem;
+  font-size: 0.72rem;
   color: #64748B;
   font-weight: 600;
   letter-spacing: 0.5px;
 }
 
 .import-status-tag {
-  font-size: 0.6rem;
+  font-size: 0.72rem;
   padding: 1px 6px;
   border-radius: 4px;
   background: rgba(59, 130, 246, 0.15);
@@ -4100,6 +4141,10 @@ body.studio-focus-mode .emulator-side-toolbar {
 .extended-controls-window {
   max-width: 760px;
   min-height: 520px;
+  background: #0D1117;
+  border: 1px solid #30363D;
+  border-radius: 12px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.8), 0 0 0 1px rgba(255, 255, 255, 0.05);
 }
 
 .extended-controls-layout {
@@ -4109,8 +4154,8 @@ body.studio-focus-mode .emulator-side-toolbar {
 
 .ext-nav-sidebar {
   width: 220px;
-  background: rgba(255, 255, 255, 0.02);
-  border-right: 1px solid rgba(255, 255, 255, 0.08);
+  background: #161B22;
+  border-right: 1px solid #30363D;
   padding: 16px 12px;
   display: flex;
   flex-direction: column;
@@ -4122,11 +4167,11 @@ body.studio-focus-mode .emulator-side-toolbar {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 10px 14px;
-  border-radius: 8px;
+  padding: 9px 12px;
+  border-radius: 6px;
   background: transparent;
   border: 1px solid transparent;
-  color: #94A3B8;
+  color: #8B949E;
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
@@ -4136,13 +4181,14 @@ body.studio-focus-mode .emulator-side-toolbar {
 
 .ext-nav-item:hover {
   background: rgba(255, 255, 255, 0.04);
-  color: #F8FAFC;
+  color: #F0F6FC;
 }
 
 .ext-nav-item.active {
-  background: rgba(16, 185, 129, 0.12);
-  border-color: rgba(16, 185, 129, 0.3);
-  color: #10B981;
+  background: rgba(56, 139, 253, 0.12);
+  border: 1px solid rgba(56, 139, 253, 0.28);
+  color: #58A6FF;
+  font-weight: 600;
 }
 
 .ext-tab-panes {
@@ -4150,6 +4196,7 @@ body.studio-focus-mode .emulator-side-toolbar {
   padding: 24px 28px;
   overflow-y: auto;
   max-height: calc(90vh - 100px);
+  background: #0D1117;
 }
 
 .ext-tab-pane {
@@ -4163,18 +4210,21 @@ body.studio-focus-mode .emulator-side-toolbar {
 
 .ext-pane-header {
   margin-bottom: 22px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
 }
 
 .ext-pane-header h4 {
-  font-size: 16px;
+  font-size: 15px;
   font-weight: 600;
-  color: #F8FAFC;
+  color: #F0F6FC;
   margin: 0 0 6px 0;
+  letter-spacing: -0.2px;
 }
 
 .ext-pane-header p {
-  font-size: 13px;
-  color: #94A3B8;
+  font-size: 12.5px;
+  color: #8B949E;
   margin: 0;
   line-height: 1.5;
 }
@@ -4187,28 +4237,29 @@ body.studio-focus-mode .emulator-side-toolbar {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  font-size: 13px;
-  color: #CBD5E1;
+  font-size: 12.5px;
+  color: #C9D1D9;
   margin-bottom: 8px;
 }
 
 .ext-val-badge {
-  font-family: monospace;
-  font-size: 12px;
-  padding: 2px 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  padding: 2px 7px;
   border-radius: 4px;
-  background: rgba(255, 255, 255, 0.08);
-  color: #38BDF8;
+  background: rgba(56, 139, 253, 0.12);
+  color: #58A6FF;
+  border: 1px solid rgba(56, 139, 253, 0.25);
 }
 
 .ext-slider {
   width: 100%;
-  height: 6px;
+  height: 5px;
   border-radius: 3px;
-  background: rgba(255, 255, 255, 0.1);
+  background: #21262D;
   outline: none;
   cursor: pointer;
-  accent-color: #10B981;
+  accent-color: #58A6FF;
 }
 
 .ext-presets-wrap {
@@ -4216,12 +4267,13 @@ body.studio-focus-mode .emulator-side-toolbar {
 }
 
 .ext-presets-title {
-  font-size: 12px;
-  color: #64748B;
+  font-size: 11.5px;
+  color: #8B949E;
   display: block;
   margin-bottom: 8px;
   text-transform: uppercase;
   letter-spacing: 0.5px;
+  font-weight: 500;
 }
 
 .ext-preset-buttons {
@@ -4231,25 +4283,27 @@ body.studio-focus-mode .emulator-side-toolbar {
 }
 
 .ext-btn-preset {
+  background: #161B22;
+  border: 1px solid #30363D;
+  color: #C9D1D9;
+  font-size: 12px;
   padding: 6px 12px;
   border-radius: 6px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  background: rgba(255, 255, 255, 0.03);
-  color: #CBD5E1;
-  font-size: 12px;
   cursor: pointer;
   transition: all 0.15s ease;
 }
 
 .ext-btn-preset:hover {
-  background: rgba(255, 255, 255, 0.08);
+  background: #21262D;
   border-color: rgba(255, 255, 255, 0.2);
+  color: #F0F6FC;
 }
 
 .ext-btn-preset.active {
-  background: rgba(56, 189, 248, 0.15);
-  border-color: rgba(56, 189, 248, 0.4);
-  color: #38BDF8;
+  background: #21262D;
+  border-color: #58A6FF;
+  color: #58A6FF;
+  box-shadow: 0 0 0 1px rgba(88, 166, 255, 0.25);
 }
 
 .ext-pane-actions {
@@ -4257,41 +4311,45 @@ body.studio-focus-mode .emulator-side-toolbar {
   align-items: center;
   gap: 12px;
   margin-top: 24px;
+  padding-top: 16px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
 }
 
 .ext-btn-primary {
-  padding: 8px 18px;
-  border-radius: 8px;
-  background: #10B981;
-  border: none;
-  color: #064E3B;
-  font-weight: 600;
-  font-size: 13px;
+  background: #1F6FEB;
+  color: #FFFFFF;
+  font-weight: 500;
+  font-size: 12.5px;
+  padding: 7px 16px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  transition: background 0.15s ease;
+  cursor: pointer;
+}
+
+.ext-btn-primary:hover {
+  background: #388BFD;
+}
+
+.ext-btn-secondary {
+  background: #21262D;
+  border: 1px solid #30363D;
+  color: #C9D1D9;
+  font-size: 12.5px;
+  padding: 7px 16px;
+  border-radius: 6px;
   cursor: pointer;
   transition: all 0.15s ease;
 }
 
-.ext-btn-primary:hover {
-  background: #34D399;
-}
-
-.ext-btn-secondary {
-  padding: 8px 16px;
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  color: #E2E8F0;
-  font-size: 13px;
-  cursor: pointer;
-}
-
 .ext-btn-secondary:hover {
-  background: rgba(255, 255, 255, 0.1);
+  background: #30363D;
+  color: #F0F6FC;
 }
 
 .ext-status-text {
   font-size: 12px;
-  color: #10B981;
+  color: #58A6FF;
 }
 
 .ext-charging-options {
@@ -4306,27 +4364,31 @@ body.studio-focus-mode .emulator-side-toolbar {
   gap: 8px;
   padding: 8px 12px;
   border-radius: 6px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  background: rgba(255, 255, 255, 0.03);
-  color: #CBD5E1;
-  font-size: 12px;
+  border: 1px solid #30363D;
+  background: #161B22;
+  color: #C9D1D9;
+  font-size: 12.5px;
   cursor: pointer;
+  transition: all 0.15s ease;
 }
 
 .ext-radio-pill:hover {
-  background: rgba(255, 255, 255, 0.06);
+  background: #21262D;
+  border-color: rgba(255, 255, 255, 0.2);
+  color: #F0F6FC;
 }
 
 .ext-radio-pill input[type="radio"] {
-  accent-color: #10B981;
+  accent-color: #58A6FF;
+  cursor: pointer;
 }
 
 .ext-info-card {
   margin-top: 18px;
   padding: 12px 16px;
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.02);
-  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: #161B22;
+  border: 1px solid #30363D;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -4336,11 +4398,11 @@ body.studio-focus-mode .emulator-side-toolbar {
   display: flex;
   justify-content: space-between;
   font-size: 12px;
-  color: #94A3B8;
+  color: #8B949E;
 }
 
 .ext-info-row strong {
-  color: #F8FAFC;
+  color: #F0F6FC;
 }
 
 .biometrics-card-container {
@@ -4348,9 +4410,9 @@ body.studio-focus-mode .emulator-side-toolbar {
   flex-direction: column;
   align-items: center;
   padding: 24px;
-  background: rgba(255, 255, 255, 0.02);
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  border-radius: 12px;
+  background: #161B22;
+  border: 1px solid #30363D;
+  border-radius: 8px;
 }
 
 .biometrics-sensor-visual {
@@ -4363,9 +4425,10 @@ body.studio-focus-mode .emulator-side-toolbar {
 
 .sensor-caption {
   font-size: 12px;
-  color: #64748B;
+  color: #8B949E;
   text-transform: uppercase;
   letter-spacing: 0.5px;
+  font-weight: 500;
 }
 
 .biometrics-actions-wrap {
@@ -4381,9 +4444,9 @@ body.studio-focus-mode .emulator-side-toolbar {
   align-items: center;
   justify-content: center;
   gap: 8px;
-  padding: 12px 16px;
-  border-radius: 8px;
-  font-size: 13px;
+  padding: 10px 14px;
+  border-radius: 6px;
+  font-size: 12.5px;
   font-weight: 600;
   cursor: pointer;
   transition: all 0.15s ease;
@@ -4391,74 +4454,94 @@ body.studio-focus-mode .emulator-side-toolbar {
 }
 
 .ext-bio-pass {
-  background: rgba(16, 185, 129, 0.15);
-  border-color: rgba(16, 185, 129, 0.3);
-  color: #10B981;
+  background: rgba(35, 134, 54, 0.15);
+  border: 1px solid rgba(35, 134, 54, 0.4);
+  color: #3FB950;
+  font-weight: 600;
+  font-size: 12.5px;
+  padding: 10px 14px;
+  border-radius: 6px;
 }
 
 .ext-bio-pass:hover {
-  background: rgba(16, 185, 129, 0.25);
+  background: rgba(35, 134, 54, 0.25);
+  border-color: rgba(35, 134, 54, 0.6);
 }
 
 .ext-bio-fail {
-  background: rgba(239, 68, 68, 0.15);
-  border-color: rgba(239, 68, 68, 0.3);
-  color: #EF4444;
+  background: rgba(248, 81, 73, 0.15);
+  border: 1px solid rgba(248, 81, 73, 0.4);
+  color: #F85149;
+  font-weight: 600;
+  font-size: 12.5px;
+  padding: 10px 14px;
+  border-radius: 6px;
 }
 
 .ext-bio-fail:hover {
-  background: rgba(239, 68, 68, 0.25);
+  background: rgba(248, 81, 73, 0.25);
+  border-color: rgba(248, 81, 73, 0.6);
 }
 
 .ext-status-badge-box {
   margin-top: 20px;
-  font-size: 13px;
-  color: #94A3B8;
+  font-size: 12.5px;
+  color: #8B949E;
   display: flex;
   gap: 8px;
+  background: #0D1117;
+  padding: 6px 14px;
+  border-radius: 6px;
+  border: 1px solid #30363D;
 }
 
 .ext-status-badge-box strong {
-  color: #F8FAFC;
+  color: #F0F6FC;
 }
 
 .ext-killswitch-list {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
 }
 
 .ext-killswitch-row {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 14px 18px;
+  padding: 12px 16px;
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.02);
-  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: #161B22;
+  border: 1px solid #30363D;
+  transition: border-color 0.15s ease;
+}
+
+.ext-killswitch-row:hover {
+  border-color: rgba(255, 255, 255, 0.15);
 }
 
 .ks-text {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 3px;
 }
 
 .ks-text strong {
   font-size: 13px;
-  color: #F8FAFC;
+  color: #F0F6FC;
+  font-weight: 500;
 }
 
 .ks-text span {
   font-size: 12px;
-  color: #94A3B8;
+  color: #8B949E;
 }
 
 .ext-switch {
   position: relative;
   display: inline-block;
-  width: 44px;
-  height: 24px;
+  width: 40px;
+  height: 22px;
   flex-shrink: 0;
 }
 
@@ -4466,6 +4549,7 @@ body.studio-focus-mode .emulator-side-toolbar {
   opacity: 0;
   width: 0;
   height: 0;
+  position: absolute;
 }
 
 .ext-switch-slider {
@@ -4475,29 +4559,39 @@ body.studio-focus-mode .emulator-side-toolbar {
   left: 0;
   right: 0;
   bottom: 0;
-  background-color: rgba(255, 255, 255, 0.15);
-  transition: 0.2s;
-  border-radius: 24px;
+  background-color: #21262D;
+  border: 1px solid #30363D;
+  transition: background-color 0.25s cubic-bezier(0.16, 1, 0.3, 1), border-color 0.25s ease;
+  border-radius: 22px;
 }
 
 .ext-switch-slider:before {
   position: absolute;
   content: "";
-  height: 18px;
-  width: 18px;
-  left: 3px;
-  bottom: 3px;
-  background-color: white;
-  transition: 0.2s;
+  height: 16px;
+  width: 16px;
+  left: 2px;
+  top: 2px;
+  background-color: #C9D1D9;
+  transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.25s ease;
   border-radius: 50%;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
 }
 
 .ext-switch input:checked + .ext-switch-slider {
-  background-color: #EF4444;
+  background-color: #F85149;
+  border-color: #F85149;
 }
 
 .ext-switch input:checked + .ext-switch-slider:before {
-  transform: translateX(20px);
+  transform: translateX(18px);
+  background-color: #FFFFFF;
 }
+
+.ext-switch input:focus-visible + .ext-switch-slider {
+  outline: 2px solid #58A6FF;
+  outline-offset: 2px;
+}
+
 
 

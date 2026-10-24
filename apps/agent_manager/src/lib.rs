@@ -866,6 +866,9 @@ pub fn provider_by_id(id: &str) -> Option<&'static dyn Provider> {
 /// The directory the platform keeps model weights in.
 pub const MODEL_DIRECTORY: &str = "/system/models";
 
+/// The candidate model directories the platform probes.
+pub const MODEL_DIRECTORIES: &[&str] = &["/system/models", "/data/models"];
+
 /// What a probe of the model directory found.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ModelProbeStatus {
@@ -930,57 +933,62 @@ impl ModelInventory {
             };
         }
 
-        let mut buf = [0u8; 1024];
-        match interos_std::fs_list(MODEL_DIRECTORY, &mut buf) {
-            Ok(n) => {
-                // WHY the length is clamped: a syscall that reports more
-                // bytes than the buffer holds must not be trusted to slice
-                // it. Clamping here keeps a bad return value from turning
-                // into a panic in the middle of a frame.
-                let payload = &buf[..n.min(buf.len())];
-                let mut entries = 0u16;
-                let mut has_embedding_weights = false;
-                let mut has_generative_weights = false;
+        let mut entries = 0u16;
+        let mut has_embedding_weights = false;
+        let mut has_generative_weights = false;
+        let mut any_listed = false;
+        let mut any_refused = false;
 
-                for line in payload.split(|&b| b == b'\n') {
-                    if line.is_empty() {
-                        continue;
-                    }
-                    let end = line.iter().position(|&b| b == b'|').unwrap_or(line.len());
-                    let name = &line[..end];
-                    if name.is_empty() {
-                        continue;
-                    }
-                    entries = entries.saturating_add(1);
+        for &dir in MODEL_DIRECTORIES {
+            let mut buf = [0u8; 1024];
+            match interos_std::fs_list(dir, &mut buf) {
+                Ok(n) => {
+                    any_listed = true;
+                    // WHY the length is clamped: a syscall that reports more
+                    // bytes than the buffer holds must not be trusted to slice
+                    // it. Clamping here keeps a bad return value from turning
+                    // into a panic in the middle of a frame.
+                    let payload = &buf[..n.min(buf.len())];
+                    for line in payload.split(|&b| b == b'\n') {
+                        if line.is_empty() {
+                            continue;
+                        }
+                        let end = line.iter().position(|&b| b == b'|').unwrap_or(line.len());
+                        let name = &line[..end];
+                        if name.is_empty() {
+                            continue;
+                        }
+                        entries = entries.saturating_add(1);
 
-                    if contains_ci(name, b"embed") {
-                        has_embedding_weights = true;
-                    }
-                    if contains_ci(name, b"gemma") || contains_ci(name, b"gen-") || contains_ci(name, b"gguf")
-                    {
-                        has_generative_weights = true;
+                        if contains_ci(name, b"embed") {
+                            has_embedding_weights = true;
+                        }
+                        if contains_ci(name, b"gemma") || contains_ci(name, b"gen-") || contains_ci(name, b"gguf")
+                        {
+                            has_generative_weights = true;
+                        }
                     }
                 }
-
-                Self {
-                    status: ModelProbeStatus::Listed,
-                    entries,
-                    has_embedding_weights,
-                    has_generative_weights,
+                Err(ERR_FILE_NOT_FOUND) => {}
+                Err(_) => {
+                    any_refused = true;
                 }
             }
-            Err(ERR_FILE_NOT_FOUND) => Self {
-                status: ModelProbeStatus::Absent,
-                entries: 0,
-                has_embedding_weights: false,
-                has_generative_weights: false,
-            },
-            Err(_) => Self {
-                status: ModelProbeStatus::Refused,
-                entries: 0,
-                has_embedding_weights: false,
-                has_generative_weights: false,
-            },
+        }
+
+        let status = if any_listed {
+            ModelProbeStatus::Listed
+        } else if any_refused {
+            ModelProbeStatus::Refused
+        } else {
+            ModelProbeStatus::Absent
+        };
+
+        Self {
+            status,
+            entries,
+            has_embedding_weights,
+            has_generative_weights,
         }
     }
 }
@@ -1105,7 +1113,7 @@ impl PackageRegistry {
 pub const SERVICE_ABI_MAX_ID: u8 = 11;
 
 /// How many services the registry measurement keeps.
-pub const MAX_SERVICES: usize = 12;
+pub const MAX_SERVICES: usize = 16;
 
 /// The state the platform's registry reports for a service.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

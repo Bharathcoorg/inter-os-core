@@ -667,8 +667,7 @@ document.addEventListener('DOMContentLoaded', () => {
       scanoutCtx = liveScanoutCanvas.getContext('2d');
     }
     if (scanoutCtx) {
-      scanoutCtx.imageSmoothingEnabled = true;
-      scanoutCtx.imageSmoothingQuality = 'high';
+      scanoutCtx.imageSmoothingEnabled = false;
     }
   }
   setSurfaceState('no-signal');
@@ -755,8 +754,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (liveScanoutCanvas.width !== width || liveScanoutCanvas.height !== height) {
         liveScanoutCanvas.width = width;
         liveScanoutCanvas.height = height;
-        scanoutCtx.imageSmoothingEnabled = true;
-        scanoutCtx.imageSmoothingQuality = 'high';
+        scanoutCtx.imageSmoothingEnabled = false;
         scanoutImageData = null;
       }
       if (!scanoutImageData || scanoutImageData.width !== width || scanoutImageData.height !== height) {
@@ -1851,7 +1849,7 @@ document.addEventListener('DOMContentLoaded', () => {
     showToast('QEMU scanout offline (Standby)');
   });
 
-  // Display Sizing: Responsive Fit vs Flagship View
+  // Display Sizing: Responsive Fit vs Flagship View vs Retina vs 1:1 Pixel-Exact
   const emuBtnScale = document.getElementById('emu-btn-scale');
   const btnHeaderScale = document.getElementById('btn-header-scale');
   const headerScaleText = document.getElementById('header-scale-text');
@@ -1861,6 +1859,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const scanout = document.getElementById('screen-live-scanout');
     if (!chassis) return;
     scanout?.classList.remove('fhd-pixel-exact');
+    chassis.classList.remove('exact-mode');
     if (currentDisplayScale === 'fit') {
       currentDisplayScale = 'large';
       chassis.classList.remove('retina-mode');
@@ -1877,6 +1876,16 @@ document.addEventListener('DOMContentLoaded', () => {
       btnHeaderScale?.classList.add('active');
       showToast('Display Sizing: Retina Full HD (640px True Immersion)');
       logConsole('info', '[DISPLAY] Sizing set to Retina Full HD (640px True Immersion).');
+    } else if (currentDisplayScale === 'retina') {
+      currentDisplayScale = 'exact';
+      chassis.classList.remove('large-mode');
+      chassis.classList.remove('retina-mode');
+      chassis.classList.add('exact-mode');
+      scanout?.classList.add('fhd-pixel-exact');
+      if (headerScaleText) headerScaleText.textContent = '1:1 Native';
+      btnHeaderScale?.classList.add('active');
+      showToast('Display Sizing: 1:1 Pixel-Exact Native (1080×2160 FHD)');
+      logConsole('info', '[DISPLAY] Sizing set to 1:1 Pixel-Exact Native (1080×2160 FHD).');
     } else {
       currentDisplayScale = 'fit';
       chassis.classList.remove('large-mode');
@@ -3426,12 +3435,12 @@ document.addEventListener('DOMContentLoaded', () => {
       if (statusBioResult) {
         if (result === 'PASS') {
           statusBioResult.textContent = 'Biometric match verified (UID=1000 Unlocked)';
-          statusBioResult.style.color = '#10B981';
+          statusBioResult.style.color = '#3FB950';
           showToast('Fingerprint match verified: Device unlocked');
           setTimeout(() => refreshScanoutFrame(true), 100);
         } else {
           statusBioResult.textContent = 'Biometric match rejected (Fingerprint Mismatch)';
-          statusBioResult.style.color = '#EF4444';
+          statusBioResult.style.color = '#F85149';
           showToast('Fingerprint rejected: Biometric mismatch');
         }
       }

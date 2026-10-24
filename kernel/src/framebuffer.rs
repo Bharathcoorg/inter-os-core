@@ -9,6 +9,7 @@
 use bootloader_api::info::{FrameBuffer, FrameBufferInfo, PixelFormat};
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use spin::Mutex;
+#[cfg(not(test))]
 use x86_64::instructions::port::Port;
 use x86_64::structures::paging::{PageTable, PageTableFlags};
 use x86_64::{PhysAddr, VirtAddr};
@@ -1610,7 +1611,9 @@ pub static FRAMEBUFFER_WRITER: Mutex<FramebufferWriter> = Mutex::new(Framebuffer
 // the root cause of the Studio display looking soft/blurry. The DISPI
 // registers are plain x86 I/O ports, so the kernel reprograms the mode
 // directly from long mode: no BIOS trampoline, no bootloader patch.
+#[cfg(not(test))]
 const DISPI_INDEX_PORT: u16 = 0x01CE;
+#[cfg(not(test))]
 const DISPI_DATA_PORT: u16 = 0x01CF;
 const DISPI_REG_ID: u16 = 0x00;
 const DISPI_REG_XRES: u16 = 0x01;

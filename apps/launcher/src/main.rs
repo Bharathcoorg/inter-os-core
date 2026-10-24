@@ -1566,7 +1566,25 @@ fn capture_foreground(state: &mut LauncherState) {
         if state.recents_cards[index].task_id != task {
             continue;
         }
-        let surface = state.recents_surfaces[index];
+        let mut surface = state.recents_surfaces[index];
+        if surface == 0 {
+            // Resolve directly from window list for active task if not yet cached
+            let mut windows = [0u8; 1024];
+            if let Ok(n) = std::window_list(&mut windows) {
+                for line in windows[..n].split(|b| *b == b'\n') {
+                    let mut fields = line.split(|b| *b == b'|');
+                    let Some(id_raw) = fields.next() else { continue; };
+                    let Some(owner_raw) = fields.next() else { continue; };
+                    let Ok(id) = core::str::from_utf8(id_raw).unwrap_or("").parse::<u32>() else { continue; };
+                    let Ok(owner) = core::str::from_utf8(owner_raw).unwrap_or("").parse::<u64>() else { continue; };
+                    if owner == task {
+                        surface = id;
+                        state.recents_surfaces[index] = id;
+                        break;
+                    }
+                }
+            }
+        }
         if surface == 0 {
             return;
         }
@@ -2513,6 +2531,7 @@ fn render_view(surface: u32, state: &LauncherState) {
     launcher::outline_text::reset_slot_pool();
     screens::home::invalidate_paint_cache();
     screens::app_drawer::invalidate_app_drawer_frame();
+    screens::live_widgets::invalidate_widgets_cache();
     if state.current_view == ViewMode::ActivitySpace {
         screens::activity::invalidate_activity_frame();
     }

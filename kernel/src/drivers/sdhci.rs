@@ -72,7 +72,7 @@ pub const INT_TIMEOUT_ERROR: u32 = 1 << 16;    // Command Timeout Error
 // Standard SD / eMMC Commands
 // -----------------------------------------------------------------------------
 
-pub const CMD0_GO_IDLE: u16 = (0 << 8) | 0x00;
+pub const CMD0_GO_IDLE: u16 = 0x0000;
 pub const CMD2_ALL_SEND_CID: u16 = (2 << 8) | 0x09; // R2 (136-bit)
 pub const CMD3_SEND_RELATIVE_ADDR: u16 = (3 << 8) | 0x1A; // R6 (48-bit with CRC)
 pub const CMD7_SELECT_CARD: u16 = (7 << 8) | 0x1B; // R1b (48-bit with busy)

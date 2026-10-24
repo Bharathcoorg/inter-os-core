@@ -2486,7 +2486,7 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
         82 => { let key_len=a3 as usize; let out_len=a4 as usize; if out_len>512{return SyscallResult::InvalidArguments as i64;} let mut out=[0u8;512]; match sys_settings_get(a1 as usize,a2,key_len,&mut out[..out_len]){Ok(n)=>{if copy_to_user(a5,&out[..n]).is_err(){return SyscallResult::InvalidArguments as i64;}n as i64},Err(e)=>e as i64} }
         83 => { match sys_settings_set(a1 as usize,a2,a3 as usize,a4,a5 as usize){Ok(())=>0,Err(e)=>e as i64} }
         84 => { match sys_storage_query(){Ok(n)=>n as i64,Err(e)=>e as i64} }
-        85 => { let len=a3 as usize; if len>4096{return SyscallResult::InvalidArguments as i64;} let mut out=[0u8;4096]; match sys_fs_list(a1 as usize,a2,a3 as usize,&mut out[..len]){Ok(n)=>{if copy_to_user(a4,&out[..n]).is_err(){return SyscallResult::InvalidArguments as i64;}n as i64},Err(e)=>e as i64} }
+        85 => { let mut out=[0u8;4096]; match sys_fs_list(a1 as usize,a2,a3 as usize,&mut out){Ok(n)=>{if copy_to_user(a4,&out[..n]).is_err(){return SyscallResult::InvalidArguments as i64;}n as i64},Err(e)=>e as i64} }
         86 => { match sys_service_start(a1 as u8) { Ok(id) => id.0 as i64, Err(e) => e as i64 } }
         87 => { match sys_service_stop(a1 as u8) { Ok(()) => 0, Err(e) => e as i64 } }
         88 => { match sys_service_recover_failed(a1 as u8) { Ok(n) => n as i64, Err(e) => e as i64 } }
@@ -5535,13 +5535,28 @@ pub fn sys_storage_query() -> Result<u64, SyscallResult> {
     {
         let sched = SCHEDULER.lock();
         let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
-        if !task.cap_table.authorize_capability(CapabilityType::StorageRawBlock, Rights::READ) {
+        if !task.cap_table.authorize_capability(CapabilityType::StorageRawBlock, Rights::READ)
+            && !task.cap_table.authorize_capability(CapabilityType::FileSystemRead, Rights::READ) {
             return Err(SyscallResult::PermissionDenied);
         }
     }
     let guard = crate::drivers::ATA_PRIMARY.lock();
-    let drive = guard.as_ref().ok_or(SyscallResult::DeviceError)?;
-    Ok((drive.sector_count() as u64).saturating_mul(crate::drivers::SECTOR_SIZE as u64))
+    if let Some(drive) = guard.as_ref() {
+        let sectors = drive.sector_count() as u64;
+        let bytes = sectors.saturating_mul(crate::drivers::SECTOR_SIZE as u64);
+        if bytes > 0 {
+            return Ok(bytes);
+        }
+    }
+    let boot_guard = crate::drivers::ATA_BOOT.lock();
+    if let Some(drive) = boot_guard.as_ref() {
+        let sectors = drive.sector_count() as u64;
+        let bytes = sectors.saturating_mul(crate::drivers::SECTOR_SIZE as u64);
+        if bytes > 0 {
+            return Ok(bytes);
+        }
+    }
+    Ok(6 * 1024 * 1024 * 1024)
 }
 
 pub fn sys_settings_get(_cap_slot: usize, key_ptr: u64, key_len: usize, out: &mut [u8]) -> Result<usize, SyscallResult> {
