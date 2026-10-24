@@ -143,10 +143,9 @@ pub fn test_text_aa(
         if let Some(run) = launcher::outline_text::OutlineRun::place(x0, baseline, em, text) {
             let (bx, by, bw, bh) = run.bounds();
             if x >= bx && x < bx + bw && y >= by && y < by + bh {
-                if let Some(c) = run.pixel(x, y, color, bg) {
-                    return Some(c);
-                }
+                return run.pixel(x, y, color, bg);
             }
+            return None;
         }
     }
     interos_std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, bg, false)
@@ -2826,6 +2825,11 @@ pub extern "C" fn _start() -> ! {
                         refresh_runtime_recents(&mut state);
                         refresh_wallpapers(&mut state);
                         refresh_user_profile(&mut state);
+                        state.current_view = if state.lock_state == std::UserLockState::Unlocked {
+                            ViewMode::HomeScreen
+                        } else {
+                            ViewMode::LockScreen
+                        };
                         let mut discard = std::InputEvent {
                             kind: 0,
                             x: 0,
@@ -2838,6 +2842,8 @@ pub extern "C" fn _start() -> ! {
                         std::log("[LAUNCHER] Foreground application no longer running; cleared active child.",
                         )
                         .ok();
+                        render_view(surface, &state);
+                        surface_flip_display();
                     }
                     _ => {}
                 }
@@ -2973,14 +2979,7 @@ pub extern "C" fn _start() -> ! {
                     if previous_count != state.app_count {
                         let _ = std::log("[LAUNCHER] Package catalogue count updated dynamically.");
                         match state.current_view {
-                        ViewMode::HomeScreen => {
-                                present_dirty(
-                                    surface,
-                                    &state,
-                                    Dirty::HomeCard.widen(Dirty::HomeDeck),
-                                );
-                            }
-                            ViewMode::AppDrawer => {
+                            ViewMode::HomeScreen | ViewMode::AppDrawer => {
                                 render_view(surface, &state);
                                 surface_flip_display();
                             }
@@ -3042,7 +3041,10 @@ pub extern "C" fn _start() -> ! {
                     if input.kind == 7 {
                         match state.current_view {
                             ViewMode::BootScreen | ViewMode::PowerTransition => {}
-                            ViewMode::HomeScreen => {}
+                            ViewMode::HomeScreen => {
+                                render_view(surface, &state);
+                                surface_flip_display();
+                            }
                             ViewMode::LockScreen => {
                                 if state.lock_state == std::UserLockState::Unlocked || std::user_unlock(shell_uid(), b"").is_ok() {
                                     state.lock_state = std::UserLockState::Unlocked;
@@ -5132,16 +5134,8 @@ pub extern "C" fn _start() -> ! {
                                         }
                                         NavTarget::Home => {
                                             state.current_view = ViewMode::HomeScreen;
-                                            // WHY `None`: this arm is only reachable
-                                            // from the HomeScreen view arm, so the
-                                            // home surface is already presented and
-                                            // assigning the view it is already in
-                                            // moves no pixel. This arm used to
-                                            // re-render the whole surface -- the
-                                            // inert-input cost -- while the log line
-                                            // above it already explained that Home
-                                            // answers nothing new here.
-                                            present_dirty(surface, &state, Dirty::None);
+                                            render_view(surface, &state);
+                                            surface_flip_display();
                                             std::log("[LAUNCHER] Home surface presented via home button.").ok();
                                         }
                                         NavTarget::Back => {
@@ -5162,26 +5156,7 @@ pub extern "C" fn _start() -> ! {
                                     break;
                                 }
 
-                                // Tapping dock 6th item (Apps) opens App Drawer
-                                if (865..1015).contains(&y) && (475..695).contains(&x) {
-                                    refresh_package_catalog(&mut state);
-                                    refresh_runtime_recents(&mut state);
-                                    state.current_view = ViewMode::AppDrawer;
-                                    render_view(surface, &state);
-                                    surface_flip_display();
-                                    std::log("[LAUNCHER] App Drawer opened from dock shortcut.")
-                                        .ok();
-                                    let mut drain = std::InputEvent {
-                                        kind: 0,
-                                        x: 0,
-                                        y: 0,
-                                        dx: 0,
-                                        dy: 0,
-                                        scale_milli: 1000,
-                                    };
-                                    while std::input_event_poll(&mut drain).is_ok() {}
-                                    break;
-                                }
+
                             }
                         }
                     }

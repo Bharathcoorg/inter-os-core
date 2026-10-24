@@ -2024,4 +2024,19 @@ mod tests {
         let outside = deck_pixel(0, 0, &p.frame, &p, &theme);
         assert_eq!(outside, None);
     }
+
+    #[test]
+    fn test_home_pixels_not_white() {
+        let state = LauncherState::new();
+        let mut white_count = 0;
+        for y in 1000..1440 {
+            for x in 0..720 {
+                let c = get_home_color(x, y, &state);
+                if c == 0xFFFAFAFA {
+                    white_count += 1;
+                }
+            }
+        }
+        assert_eq!(white_count, 0, "No pixels should be white background in bottom of HomeScreen");
+    }
 }
