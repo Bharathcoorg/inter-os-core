@@ -6,7 +6,8 @@
 //! - Multi-surface layer composition with z-ordering, position offsets, and visibility
 //! - Porter-Duff source-over alpha blending (`out = src * a + dst * (1 - a)`)
 //! - Dirty rectangle tracking to minimize memory bandwidth
-//! - Native portrait mobile scanout (1080x2160 FHD-class / 1280x720 landscape) and rotation transforms
+//! - Native portrait mobile scanout at the 720x1440 authoring size (1440x720 landscape), so
+//!   platform surfaces composite 1:1 instead of being resampled
 
 use alloc::vec::Vec;
 use alloc::vec;
@@ -635,8 +636,8 @@ impl DrmKmsController {
 
     /// Allocates a new client surface for application rendering.
     pub fn create_surface(&mut self, width: u32, height: u32, z_order: u32, owner_task: u64) -> u32 {
-        // Direct native 1080x2160 scanout mode without fractional scaling
-        // when apps request a full-resolution 1080x2160 surface.
+        // A client that explicitly requests a 1080x2160 surface is asking for
+        // that native mode; match it rather than silently resampling its frame.
         if width == 1080 && height == 2160 && (self.scanout_width != 1080 || self.scanout_height != 2160) {
             let _ = self.set_display_mode(1080, 2160, self.refresh_hz);
         }
@@ -1066,13 +1067,11 @@ impl DrmKmsController {
     /// dropping the background fill provably equivalent — a transparent pixel
     /// lands on the same colour either way.
     ///
-    /// WHY the scanout's own size rather than the 720x1440 launcher canvas: the
-    /// whole launcher canvas is only identity when the scanout *is* 720x1440.
-    /// Once the scanout is 1080x2160 the launcher surface takes the scaled blit,
-    /// which is the correct image at the cost of the fill and the interpolation;
-    /// the fast path still belongs to whichever surface matches the scanout
-    /// exactly, so the predicate asks about the scanout's dimensions instead of
-    /// a hardcoded geometry.
+    /// WHY the scanout's own size rather than a hardcoded 720x1440: the fast
+    /// path belongs to whichever surface matches the scanout exactly. The
+    /// canonical scanout now *is* 720x1440, so every platform app takes it, but
+    /// the predicate stays relative to the scanout so a client that requests a
+    /// different native mode still gets the straight copy it asked for.
 
     /// Composites all visible surfaces onto the back buffer in z-order.
     pub fn composite(&mut self) {
@@ -1241,8 +1240,8 @@ impl DrmKmsController {
             }
 
             // The canonical mobile portrait canvas has a stable 1:2 aspect ratio
-            // (720x1440 logical, or 1080x2160 Full HD). Fit that canvas to the
-            // actual scanout preserving geometry.
+            // (720x1440 logical, or an explicitly requested 1080x2160 surface).
+            // Fit that canvas to the actual scanout preserving geometry.
             if ((s_w == 720 && s_h == 1440) || (s_w == 1080 && s_h == 2160)) && sx == 0 && sy == 0 {
                 let (mut dst_w, mut dst_h) = if (s_w as i64) * sh as i64 <= (s_h as i64) * sw as i64 {
                     (
@@ -1399,9 +1398,11 @@ impl DrmKmsController {
                             }
                         }
                     } else if dst_w == s_w as usize && dst_h == s_h as usize {
-                        // Direct 1:1 blit (dst_w == s_w && dst_h == s_h at 1080x2160 or 720x1440).
-                        // Cleanly handle 1:1 direct blit without calling the 1.5x reconstructor or
-                        // fractional scaling when source is already matching the destination resolution.
+                        // Direct 1:1 blit whenever the surface matches the scanout
+                        // (720x1440 canonically, or an explicit 1080x2160 request).
+                        // Handle it without calling the 1.5x reconstructor or
+                        // fractional scaling when the source already matches the
+                        // destination resolution.
                         if surface.opacity == 255 {
                             for dy in 0..dst_h {
                                 let src_row_start = dy * src_pitch;
@@ -1433,7 +1434,9 @@ impl DrmKmsController {
                             }
                         }
                     } else if dst_w * 2 == s_w as usize * 3 && dst_h * 2 == s_h as usize * 3 && s_w as usize <= 720 {
-                        // High-clarity 1.5x reconstructor / two-pass area-averaging filter (720x1440 -> 1080x2160).
+                        // 1.5x reconstructor / two-pass area-averaging filter for an
+                        // explicit 720x1440 surface on a 1080x2160 scanout. The
+                        // canonical 720x1440 scanout never takes this branch.
                         //
                         // 2 input pixels contribute to 3 output pixels: p0, (p0+p1)/2, p1 with
                         // 32-bit ARGB channel math without floats or allocations.
@@ -1802,13 +1805,15 @@ impl DrmKmsController {
 }
 
 /// Global static instance of the DRM/KMS Controller.
-/// Canonical portrait scanout is the FHD-class 1080x2160 the physical DISPI mode
-/// and `design::viewport::SCANOUT_*` describe: the authoring space stays
-/// 720x1440 and the compositor interpolates the 1.5x gap. The boot framebuffer is
-/// a separate presentation target and may be any supported size.
+/// Canonical portrait scanout is 720x1440 -- exactly the authoring space every
+/// platform app paints in, and the size `design::viewport::SCANOUT_*` names.
+/// Keeping the two equal is what makes composition a straight copy: a larger
+/// scanout forces a 1.5x resample that turns a one-pixel stroke into a soft
+/// two-pixel ramp. The boot framebuffer is a separate presentation target and
+/// may be any supported size.
 pub static DRM_KMS: Mutex<DrmKmsController> = Mutex::new(DrmKmsController {
-    scanout_width: 1080,
-    scanout_height: 2160,
+    scanout_width: 720,
+    scanout_height: 1440,
     format: DrmPixelFormat::Argb8888,
     front_buffer: Vec::new(),
     back_buffer: Vec::new(),
@@ -1823,7 +1828,7 @@ pub static DRM_KMS: Mutex<DrmKmsController> = Mutex::new(DrmKmsController {
     frame_deadline_ticks: 0,
     frame_dirty: true,
     powered: true,
-    present_dirty_rows: (0, 2160),
+    present_dirty_rows: (0, 1440),
     scheduler: FrameScheduler::new(60),
 });
 
@@ -1917,6 +1922,44 @@ mod tests {
             .filter(|&&p| p == 0xFF0B0F19)
             .count();
         assert_eq!(untouched, 0, "scaled blit left {untouched} pixels unwritten");
+    }
+
+    #[test]
+    fn authoring_sized_scanout_copies_surface_without_resampling() {
+        // WHY this test exists: every platform app paints 720x1440. When the
+        // scanout is any other size the compositor resamples the frame, and a
+        // one-pixel stroke becomes a soft two-pixel ramp -- the display blur
+        // this change removes. This pins both halves of the fix: the canonical
+        // geometry is 720x1440, and an authoring-sized surface reaches the
+        // back buffer bit-for-bit, so an isolated one-pixel line survives with
+        // untouched neighbours instead of bleeding into them.
+        let mut kms = DrmKmsController::new(720, 1440);
+        kms.set_display_mode(720, 1440, 60).expect("mode");
+        assert_eq!((kms.scanout_width, kms.scanout_height), (720, 1440));
+
+        let id = kms.create_surface(720, 1440, 0, 1);
+        assert_ne!(id, 0);
+        let surf = kms.surfaces.iter_mut().find(|s| s.id == id).unwrap();
+        surf.pixels.fill(0xFF000000);
+        for y in 0..1440usize {
+            surf.pixels[y * 720 + 360] = 0xFFFFFFFF;
+        }
+        surf.pixels[0] = 0xFF102030;
+        surf.mark_frame_drawn();
+        kms.frame_dirty = true;
+        kms.surfaces[0].dirty = true;
+        kms.composite();
+
+        assert_eq!(kms.back_buffer.len(), 720 * 1440);
+        assert_eq!(
+            kms.back_buffer[..],
+            kms.surfaces[0].pixels[..],
+            "an authoring-sized surface must reach a same-sized scanout unchanged"
+        );
+        let row = 100 * 720;
+        assert_eq!(kms.back_buffer[row + 359], 0xFF000000, "left neighbour must stay untouched");
+        assert_eq!(kms.back_buffer[row + 360], 0xFFFFFFFF, "the stroke itself must survive");
+        assert_eq!(kms.back_buffer[row + 361], 0xFF000000, "right neighbour must stay untouched");
     }
 
     /// Total energy a 720x1440 source column contributes to the 1080-wide
@@ -2437,7 +2480,7 @@ mod tests {
     }
 
     #[test]
-    fn full_resolution_1080x2160_surface_engages_native_scanout_mode() {
+    fn explicit_1080x2160_surface_engages_matching_scanout_mode() {
         // Starts with a 720x1440 controller
         let mut kms = DrmKmsController::new(720, 1440);
         assert_eq!(kms.scanout_width, 720);
@@ -2447,7 +2490,7 @@ mod tests {
         let id = kms.create_surface(1080, 2160, 200, 42);
         assert_ne!(id, 0);
 
-        // Controller must have transitioned to direct native 1080x2160 scanout mode
+        // Controller must have transitioned to a matching 1080x2160 scanout mode
         assert_eq!(kms.scanout_width, 1080);
         assert_eq!(kms.scanout_height, 2160);
         assert_eq!(kms.front_buffer.len(), 1080 * 2160);
@@ -2468,7 +2511,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_native_1080x2160_blit_preserves_alpha_blending() {
+    fn explicit_1080x2160_blit_preserves_alpha_blending() {
         let mut kms = DrmKmsController::new(1080, 2160);
         kms.set_display_mode(1080, 2160, 60).expect("mode");
 
@@ -2506,7 +2549,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_native_1080x2160_blit_maps_dirty_rows_1to1() {
+    fn explicit_1080x2160_blit_maps_dirty_rows_1to1() {
         let mut kms = DrmKmsController::new(1080, 2160);
         let id = kms.create_surface(1080, 2160, 200, 1);
         kms.surfaces[0].mark_frame_drawn();
@@ -2528,7 +2571,7 @@ mod tests {
     }
 
     #[test]
-    fn kms_display_driver_direct_native_1080x2160_workflow() {
+    fn kms_display_driver_explicit_1080x2160_workflow() {
         use crate::drivers::display::{DisplayDriver, KmsDisplayDriver};
         let mut kms = DrmKmsController::new(1080, 2160);
         let mut display = KmsDisplayDriver::new(&mut kms);

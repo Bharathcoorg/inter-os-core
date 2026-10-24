@@ -139,7 +139,9 @@ impl<'a> Surface<'a> {
         true
     }
 
-    /// Creates a Surface targeting the canonical native physical scanout (1080x2160).
+    /// Creates a Surface targeting the canonical physical scanout (720x1440),
+    /// which is the authoring space itself: composition is a straight copy, not
+    /// a resample.
     pub fn new_scanout(pixels: &'a mut [u32]) -> Result<Self, &'static str> {
         Self::new(
             pixels,

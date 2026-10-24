@@ -57,7 +57,7 @@ See [Platform Reality Contract](docs/PLATFORM_REALITY_CONTRACT.md) and run `pyth
 | **Shared-Memory IPC** | Present | **Unit-tested / QEMU-verified** | Bounded ring buffers, atomic futex-like synchronization, capability endpoints |
 | **Cryptographic `.rapp` Packages** | Present | **Unit-tested / QEMU-verified** | `kernel/src/package/rapp.rs`; Ed25519 signatures, SHA-256 digests, RAPP v2/v3 parser |
 | **Process Lifecycle & Multitasking** | Present | **Unit-tested / QEMU-verified** | Ring-3 preemptive scheduler, PID tracking, `WaitPid` & `ExitWithCode` syscalls |
-| **DRM/KMS Multi-Surface Compositor** | Present | **QEMU-verified** | FHD+ (1080×2160) portrait scanout, 3:2 bilinear hardware upscaling from 720×1440 logical, double-buffered scanout with dirty row band present (`present_dst_row_band`), and 4-bit grayscale coverage anti-aliasing |
+| **DRM/KMS Multi-Surface Compositor** | Present | **QEMU-verified** | 720×1440 portrait scanout (ARGB8888, 32 bpp, 60 Hz) with 1:1 composition from the 720×1440 authoring space and no resampling, double-buffered scanout with dirty row band present (`present_dst_row_band`), and 4-bit grayscale coverage anti-aliasing |
 | **Native Typography & UI Primitives** | Present | **Unit-tested / QEMU-verified** | Proportional 16×24 anti-aliased font (`test_text_aa`), tabular digits, squircle cards |
 | **Native Smartphone Applications** | Present | **Unit-tested / QEMU-verified** | 15 application crates in `apps/` (`launcher`, `settings`, `messages`, `dialer`, `camera`, `gallery`, `file_manager`, `calculator`, `vault`, `calendar`, `browser`, `terminal`, `music`, `notes`, `compositor`), all `#![no_std]` and `#![no_main]` with zero runtime heap allocations in render loops |
 | **Android Compatibility Boundary (ACR)** | Experimental / Sandboxed | **Source-only / Unit-tested** | Fail-closed APK signature boundary, APK structure/manifest parsing, bounded DEX opcode subset, sandbox VFS and framework bridge; full Android app launch is not supported yet |
@@ -195,7 +195,7 @@ InterOS Core features a native smartphone UI pipeline engineered for `#![no_std]
 
 - **Logical vs. Physical Coordinate Space**:
   - **Logical Coordinate Space**: `720 × 1440` (1:2 aspect ratio) with defined safe area insets (Status bar: 48px, Nav pill: 64px).
-  - **Physical FHD+ Portrait Scanout**: Native `1080 × 2160` scanout plane. The display compositor performs double-buffered scanout with 3:2 bilinear hardware upscaling, full-bleed gamma-correct alpha blending, and dirty sub-band scanout (`present_dst_row_band`) that blits only modified row bands across the host scanout plane.
+  - **Native Portrait Scanout**: `720 × 1440` scanout plane (ARGB8888, 32 bpp, 60 Hz) identical to the authoring space, so composition is 1:1 with no resampling. The display compositor performs double-buffered scanout with full-bleed gamma-correct alpha blending and dirty sub-band scanout (`present_dst_row_band`) that blits only modified row bands across the host scanout plane. Surfaces authored at another size are still scaled by the compositor; the platform's own applications paint at `720 × 1440` and take the identity copy path.
   - **Zero Runtime Allocations**: All rasterization walks, shape drawing, and font coverage passes execute with strictly zero heap allocations (`alloc::vec::Vec`, `alloc::string::String`, `alloc::boxed::Box`), utilizing static/stack buffers (`LineBuf`, `[u32; N]`, fixed ring buffers).
 - **Typography Engine (`interos-std::design::font`)**:
   - Proportional 16×24 condensed typeface (`FONT`, `FONT_BOLD`).

@@ -93,7 +93,7 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
 
     kprintln!();
     kprintln!("============================================================");
-    kprintln!("  Inter OS â€” AArch64 Sovereign Smartphone Microkernel v4.0");
+    kprintln!("  Inter OS â€” AArch64 Sovereign Smartphone Microkernel 0.1.0");
     kprintln!("============================================================");
     kprintln!("[AArch64] Execution Level: EL1 (Drop from EL2 verified)");
     kprintln!("[AArch64] Device Tree Blob physical base: 0x{:016X}", dtb_phys_addr);

@@ -1,7 +1,8 @@
-//! InterOS Core Full HD (1080x2160) Proportional Typography Engine.
+//! InterOS Core 24x36 Proportional Typography Reference Face.
 //!
-//! Provides the native 24x36 condensed sans-serif face for Full HD mobile display scanout:
-//! - 1.5x crisp rendering without bilinear scaling artifacts
+//! Provides a 24x36 condensed sans-serif face sized for a 1080x2160 reference
+//! frame. The canonical guest scanout is 720x1440 and this face is not used
+//! there; the outline rasteriser draws at the requested size instead.
 //! - True 4-bit grayscale coverage anti-aliasing (16-step alpha ramp)
 //! - Tabular digits and proportional letterforms rasterized directly from Roboto Condensed
 //! - Bare-metal `#![no_std]` execution with zero heap allocation

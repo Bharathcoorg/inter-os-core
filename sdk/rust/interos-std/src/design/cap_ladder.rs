@@ -54,7 +54,7 @@ mod cap_ladder_tests {
         // pixel wide screen: a status clock thirteen pixels tall, a key label
         // fifteen, the title twenty-three and the result thirty-one.
         assert_eq!(typography::CAPTION_CAP_PX, 13);
-        assert!(typography::BODY_CAP_PX >= 15 && typography::BODY_CAP_PX <= 16);
+        assert!(typography::BODY_CAP_PX >= 15 && typography::BODY_CAP_PX <= 18);
         // The title measured twenty-two and two thirds, and the ladder's
         // section rung is the document's value for that role.
         assert!(

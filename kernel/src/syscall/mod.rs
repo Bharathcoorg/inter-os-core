@@ -23,6 +23,14 @@ use crate::package::{parse_rapp, RappError, RappManifest};
 use crate::serial_println;
 use crate::task::{SCHEDULER, TaskId};
 
+/// The largest buffer one `FsRead` or `FsWrite` may name.
+///
+/// WHY 64 KiB: it is the largest file buffer an application in this tree
+/// holds (the browser's document reader). The kernel still copies through a
+/// 4 KiB bounce buffer on the stack, so this bounds the caller's request, not
+/// kernel memory.
+const MAX_FS_IO_BYTES: usize = 64 * 1024;
+
 /// Object-scoped capability target reserved for the PID1 service manager.
 pub const SERVICE_MANAGER_OBJECT: u64 = 0x5345_5256_4D47_52;
 
@@ -1216,39 +1224,77 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
         }
         9 => {
             // FsRead: a1 = cap_slot, a2 = fd, a3 = buf_ptr, a4 = buf_len
+            //
+            // WHY the read continues past the bounce buffer: the kernel
+            // copies through a 4 KiB stack buffer, but a caller asking for a
+            // whole document passes its own larger buffer (the gallery reads
+            // 16 KiB, the launcher 8 KiB, the browser 64 KiB). The old guard
+            // tested that buffer's length and refused the request outright,
+            // so every one of those reads failed even when the file was
+            // smaller than 4 KiB. The descriptor keeps its own offset, so
+            // successive chunks land in the caller's buffer in order and one
+            // call behaves like a full read.
             let cap_slot = a1 as usize;
             let fd = FileDescriptor(a2 as u32);
             let buf_len = a4 as usize;
-            if buf_len > 4096 {
+            if buf_len > MAX_FS_IO_BYTES {
                 return SyscallResult::InvalidArguments as i64;
             }
             let mut kbuf = [0u8; 4096];
-            match sys_fs_read(cap_slot, fd, &mut kbuf[..buf_len]) {
-                Ok(bytes) => {
-                    if copy_to_user(a3, &kbuf[..bytes]).is_err() {
-                        return SyscallResult::InvalidArguments as i64;
+            let mut done = 0usize;
+            while done < buf_len {
+                let want = (buf_len - done).min(kbuf.len());
+                match sys_fs_read(cap_slot, fd, &mut kbuf[..want]) {
+                    Ok(0) => break,
+                    Ok(bytes) => {
+                        if copy_to_user(a3 + done as u64, &kbuf[..bytes]).is_err() {
+                            return SyscallResult::InvalidArguments as i64;
+                        }
+                        done += bytes;
                     }
-                    bytes as i64
+                    Err(err) => {
+                        if done == 0 {
+                            return err as i64;
+                        }
+                        break;
+                    }
                 }
-                Err(e) => e as i64,
             }
+            done as i64
         }
         10 => {
             // FsWrite: a1 = cap_slot, a2 = fd, a3 = buf_ptr, a4 = buf_len
+            //
+            // WHY the write is chunked: same reason as `FsRead`. A caller
+            // that hands the platform a whole document (the browser's
+            // download, the gallery's wallpaper save) names a buffer longer
+            // than the bounce buffer, and refusing it meant the document was
+            // never written. The descriptor's offset advances with each chunk.
             let cap_slot = a1 as usize;
             let fd = FileDescriptor(a2 as u32);
             let buf_len = a4 as usize;
-            if buf_len > 4096 {
+            if buf_len > MAX_FS_IO_BYTES {
                 return SyscallResult::InvalidArguments as i64;
             }
             let mut kbuf = [0u8; 4096];
-            if copy_from_user(&mut kbuf[..buf_len], a3, buf_len).is_err() {
-                return SyscallResult::InvalidArguments as i64;
+            let mut done = 0usize;
+            while done < buf_len {
+                let want = (buf_len - done).min(kbuf.len());
+                if copy_from_user(&mut kbuf[..want], a3 + done as u64, want).is_err() {
+                    return SyscallResult::InvalidArguments as i64;
+                }
+                match sys_fs_write(cap_slot, fd, &kbuf[..want]) {
+                    Ok(0) => break,
+                    Ok(bytes) => done += bytes,
+                    Err(err) => {
+                        if done == 0 {
+                            return err as i64;
+                        }
+                        break;
+                    }
+                }
             }
-            match sys_fs_write(cap_slot, fd, &kbuf[..buf_len]) {
-                Ok(bytes) => bytes as i64,
-                Err(e) => e as i64,
-            }
+            done as i64
         }
 11 => {
         // FsClose: a1 = fd
@@ -3951,8 +3997,12 @@ pub fn sys_hal_query_platform(out_buf: &mut [u8]) -> Result<usize, SyscallResult
     let mut writer = SliceWriter { buf: out_buf, pos: 0 };
     let _ = write!(
         writer,
-        r#"{{"arch":"{}","soc":"{}","cores":{},"freq_mhz":{}}}"#,
-        arch_str, info.soc_name, info.cpu_cores, info.base_frequency_mhz
+        r#"{{"arch":"{}","soc":"{}","cores":{},"freq_mhz":{},"os_version":"{}"}}"#,
+        arch_str,
+        info.soc_name,
+        info.cpu_cores,
+        info.base_frequency_mhz,
+        env!("CARGO_PKG_VERSION")
     );
     Ok(writer.pos)
 }
@@ -4349,12 +4399,12 @@ pub fn sys_display_set_orientation(cap_slot: usize, orientation: u32) -> Result<
         let mut kms = crate::drivers::display_kms::DRM_KMS.lock();
         kms.set_orientation(requested);
     }
-    // Portrait and its inversion present 1080x2160 native Full HD+; the two landscape
-    // orientations present 2160x1080. The guard is dropped first so the display
-    // driver and framebuffer locks are never held together.
+    // Portrait and its inversion present the 720x1440 native scanout; the two
+    // landscape orientations present 1440x720. The guard is dropped first so the
+    // display driver and framebuffer locks are never held together.
     let (phys_w, phys_h) = match requested {
-        DisplayOrientation::Portrait | DisplayOrientation::PortraitInverted => (1080u16, 2160u16),
-        DisplayOrientation::LandscapeRight | DisplayOrientation::LandscapeLeft => (2160u16, 1080u16),
+        DisplayOrientation::Portrait | DisplayOrientation::PortraitInverted => (720u16, 1440u16),
+        DisplayOrientation::LandscapeRight | DisplayOrientation::LandscapeLeft => (1440u16, 720u16),
     };
     if !crate::framebuffer::set_physical_mode(phys_w, phys_h) {
         crate::serial_println!(
@@ -5556,7 +5606,12 @@ pub fn sys_storage_query() -> Result<u64, SyscallResult> {
             return Ok(bytes);
         }
     }
-    Ok(6 * 1024 * 1024 * 1024)
+    // WHY no fallback capacity: neither ATA slot bound a drive, so the
+    // platform has measured no volume. Returning the size of the data disk
+    // the emulator is configured with would report a capacity no block device
+    // was found to back, and the Settings, Files and Agent Manager screens
+    // would present it as a reading.
+    Err(SyscallResult::DeviceError)
 }
 
 pub fn sys_settings_get(_cap_slot: usize, key_ptr: u64, key_len: usize, out: &mut [u8]) -> Result<usize, SyscallResult> {

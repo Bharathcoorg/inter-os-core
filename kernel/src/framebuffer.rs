@@ -3,8 +3,9 @@
 //! Renders a sleek, modern smartphone device viewport, ambient AI dynamic island,
 //! intent search bar, fluid capability cards (Android MicroVM, .rapp Engine),
 //! system telemetry, and complete native app views directly into the physical
-//! video framebuffer (native 1080x2160 FHD-class portrait scanout, or 1280x720
-//! when the device is rotated to landscape — see `set_physical_mode`).
+//! video framebuffer (native 720x1440 portrait scanout — the authoring size, so
+//! composited pixels are copied rather than resampled — or 1440x720 when the
+//! device is rotated to landscape; see `set_physical_mode`).
 
 use bootloader_api::info::{FrameBuffer, FrameBufferInfo, PixelFormat};
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -383,7 +384,7 @@ impl FramebufferWriter {
         let x = 30;
         let mut y = 40;
 
-        self.draw_string(x, y, "INTER OS v0.1", 2, COLOR_CYAN, None);
+        self.draw_string(x, y, "InterOS Core 0.1.0", 2, COLOR_CYAN, None);
         y += 24;
         self.draw_string(x, y, "AI-Native Sovereign Microkernel", 1, COLOR_MUTED, None);
         y += 28;
@@ -780,7 +781,7 @@ impl FramebufferWriter {
         let mut y = PHONE_Y + 54;
 
         self.draw_string(x, y, "SYSTEM PREFERENCES & HAL", 1, COLOR_CYAN, Some(COLOR_FRAME_BG));
-        self.draw_string(x + w - 112, y, "Inter OS v3.4", 1, COLOR_MUTED, Some(COLOR_FRAME_BG));
+        self.draw_string(x + w - 112, y, "Inter OS 0.1.0", 1, COLOR_MUTED, Some(COLOR_FRAME_BG));
         y += 24;
 
         let tabs = ["Disp", "Net", "Power", "Batt", "Sec"];
@@ -814,7 +815,7 @@ impl FramebufferWriter {
                 //
                 // WHAT IS REAL: the scanout geometry, which this module owns.
                 // Everything else is now stated as absent rather than invented.
-                self.draw_string(x + 14, py, "Scanout: 720x1440 logical, 1080x2160 native", 1, COLOR_WHITE, Some(COLOR_DARK_SLATE));
+                self.draw_string(x + 14, py, "Scanout: 720x1440 native (1:1 logical)", 1, COLOR_WHITE, Some(COLOR_DARK_SLATE));
                 py += 20;
                 self.draw_string(x + 14, py, "Display mode refresh: 60 Hz (programmed)", 1, COLOR_WHITE, Some(COLOR_DARK_SLATE));
                 py += 20;
@@ -932,7 +933,7 @@ impl FramebufferWriter {
         self.draw_rect_outline(x, y, w, box_h, 1, COLOR_CARD_BORDER);
 
         let mut ty = y + 12;
-        self.draw_string(x + 14, ty, "Inter OS Sovereign Shell v3.4 (x86_64)", 1, COLOR_CYAN, Some(COLOR_DARK_SLATE));
+        self.draw_string(x + 14, ty, "Inter OS Sovereign Shell 0.1.0 (x86_64)", 1, COLOR_CYAN, Some(COLOR_DARK_SLATE));
         ty += 18;
         self.draw_string(x + 14, ty, "Type 'help' for commands, 'exit' for home.", 1, COLOR_MUTED, Some(COLOR_DARK_SLATE));
         ty += 24;
@@ -1820,7 +1821,7 @@ pub fn set_physical_mode(width: u16, height: u16) -> bool {
 ///
 /// Deliberately does NOT reprogram the DISPI scanout: the bootloader only
 /// mapped `mapped_bytes` of the firmware's startup mode (e.g. 0x2A3000 = 675
-/// pages for the 1280x720x24 mode), which is too small for the 1080x2160
+/// pages for the 1280x720x24 mode), which is too small for the 720x1440x32
 /// native frame. Reprogramming here — before the kernel page-table mapper
 /// exists — wrote past the mapped pages and page-faulted into a silent
 /// triple-fault reset loop. Engagement is deferred to `engage_native_mode`,
@@ -1855,23 +1856,22 @@ pub fn init(framebuffer: &'static mut FrameBuffer) {
     );
 }
 
-/// Engages the phone's native 1080x2160 FHD-class DISPI scanout once paging is
-/// live.
+/// Engages the phone's native 720x1440 DISPI scanout once paging is live.
 ///
-/// WHY 1080x2160 and not the reference design's 1080x2400: the reference is
-/// authored at 9:20 while this guest's authoring space is 720x1440 (1:2), and a
-/// scale between two different aspect ratios is not uniform — it would stretch
-/// one axis more than the other, so every box on every screen would be subtly
-/// wrong and no single ratio could express it. 1080x2160 is the same 1:2 shape,
-/// so the ratio is exact on both axes (1.5), with FHD-class width and 2.33M
-/// pixels. The ratio itself lives in `design::viewport`; this file is only the
-/// hardware geometry that presents it.
+/// WHY 720x1440 and not a larger FHD-class frame: every platform app paints a
+/// 720x1440 surface. A 1080x2160 scanout therefore required the compositor to
+/// resample each frame 1.5x, which turns a rasterised one-pixel stroke into a
+/// soft two-pixel ramp -- the display blur this mode replaces. Matching the
+/// scanout to the authoring size makes composition a straight copy, so the
+/// pixels the rasteriser produced are the pixels the panel scans out. The
+/// geometry itself lives in `design::viewport`; this file is only the hardware
+/// geometry that presents it.
 ///
-/// The native 32bpp frame needs 1080x2160x4 = 9,331,200 bytes (0x8E6200). This
-/// exceeds the bootloader's startup-mode mapping *and* exceeds the 8 MiB VRAM of
-/// the `virtio-vga` device, so both the guest mapping and the QEMU device have
-/// to accommodate it: see `FB_COVERED_BYTES` for the guest half, and the
-/// `vgamem_mb` display argument for the device half.
+/// The native 32bpp frame needs 720x1440x4 = 4,147,200 bytes. That still
+/// exceeds the bootloader's startup-mode mapping (e.g. 1280x720x24 =
+/// 2,764,800), so the guest mapping has to be extended: see
+/// `FB_COVERED_BYTES`. The device half is bounded by `vgamem_mb` in the
+/// platform profile (32 MiB).
 ///
 /// This function maps ONLY the unmapped tail through the kernel page-table
 /// mapper, and refuses to reprogram DISPI unless the coverage check proves every
@@ -1881,12 +1881,12 @@ pub fn init(framebuffer: &'static mut FrameBuffer) {
 /// Must be called after `memory::init_memory` (it needs the mapper and the
 /// direct map) and before displayd's first present.
 pub fn engage_native_mode() {
-    const NATIVE_W: usize = 1080;
-    const NATIVE_H: usize = 2160;
+    const NATIVE_W: usize = 720;
+    const NATIVE_H: usize = 1440;
     const BPP: usize = 4;
 
-    let required_bytes = NATIVE_W * NATIVE_H * BPP; // 9,331,200
-    let required_rounded = align_up_4k(required_bytes as u64) as usize; // 2279 pages = 9,334,784 (0x8E7000)
+    let required_bytes = NATIVE_W * NATIVE_H * BPP; // 4,147,200 (0x3F4800)
+    let required_rounded = align_up_4k(required_bytes as u64) as usize; // 1013 pages = 4,149,248 (0x3F5000)
     let base_va = FB_BASE_VA.load(Ordering::Acquire);
     let mut covered = FB_COVERED_BYTES.load(Ordering::Acquire);
 
@@ -1953,10 +1953,9 @@ pub fn engage_native_mode() {
     }
 
     // Every mode the runtime may switch between fits inside `covered`, which is
-    // now sized for the 1080x2160x32 native frame: 720x1440x32 = 4,147,200 and
-    // 1280x720x32 = 3,686,400 are both smaller than the 9,331,200 the cover
-    // already proves. set_physical_mode re-checks coverage itself before
-    // touching any hardware register.
+    // now sized for the 720x1440x32 native frame: both portrait 720x1440x32 and
+    // landscape 1440x720x32 need exactly 4,147,200 bytes. set_physical_mode
+    // re-checks coverage itself before touching any hardware register.
     *DISPI_BPP.lock() = BPP;
     if set_physical_mode(NATIVE_W as u16, NATIVE_H as u16) {
         crate::serial_println!(
@@ -2727,11 +2726,45 @@ mod present_band_tests {
         present_argb8888(pixels, src_w as u32, src_h as u32, (0, src_h));
     }
 
-    /// Geometries exercised by the byte-level tests: the QEMU portrait case
-    /// (exact 2x downscale into a landscape framebuffer), the 1:1 fast path,
-    /// and a fractional nearest-neighbour scale.
+    /// Geometries exercised by the byte-level tests: the canonical native
+    /// 720x1440 scanout (the guest's production mode, where source and
+    /// destination are identical), the landscape 2x downscale, the 1:1 fast
+    /// path, and a fractional nearest-neighbour scale.
     fn geometries() -> Vec<(usize, usize, usize, usize)> {
-        vec![(720, 1440, 1280, 720), (64, 64, 64, 64), (64, 64, 1280, 720), (100, 50, 1280, 720)]
+        vec![
+            (720, 1440, 720, 1440),
+            (720, 1440, 1280, 720),
+            (64, 64, 64, 64),
+            (64, 64, 1280, 720),
+            (100, 50, 1280, 720),
+        ]
+    }
+
+    #[test]
+    fn native_720x1440_present_is_a_straight_copy() {
+        // WHY this test exists: the production scanout and the authoring space
+        // are both 720x1440. If the present path ever resampled that pair, a
+        // one-pixel stroke would bleed into its neighbours -- the display blur
+        // this change removes. The byte-level check pins the fast path to a
+        // straight copy: the isolated white column must stay one pixel wide and
+        // its neighbours must stay exactly black.
+        let _guard = PRESENT_LOCK.lock();
+        let (src_w, src_h) = (720usize, 1440usize);
+        let mut pixels = vec![0xFF000000u32; src_w * src_h];
+        for y in 0..src_h {
+            pixels[y * src_w + 360] = 0xFFFFFFFF;
+        }
+        let mut fb = FakeFb::new(src_w, src_h, 4);
+        fb.install();
+        warm_up(&pixels, src_w, src_h);
+        fb.poison();
+        present_argb8888(&pixels, src_w as u32, src_h as u32, (0, src_h));
+
+        let row = 100 * fb.stride * fb.bpp;
+        let px = |x: usize| &fb.bytes[row + x * 4..row + x * 4 + 4];
+        assert_eq!(px(359), &[0, 0, 0, 0xFF], "left neighbour must stay black");
+        assert_eq!(px(360), &[0xFF, 0xFF, 0xFF, 0xFF], "the stroke must survive intact");
+        assert_eq!(px(361), &[0, 0, 0, 0xFF], "right neighbour must stay black");
     }
 
     #[test]

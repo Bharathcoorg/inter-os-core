@@ -33,7 +33,14 @@ use crate::design::typeface;
 const RUN_W_MAX: usize = 640;
 
 /// Tallest run, in pixels: ascent plus descent at the largest useful em.
-const RUN_H_MAX: usize = 100;
+///
+/// WHY 144 and not 100: the display rung is a fifty-six pixel cap, whose em
+/// is 79 pixels and whose line box is 103 (ascender 82 plus descender 21).
+/// The hero rung's seventy-six pixel cap is a 107 pixel em with a 141 pixel
+/// box. At 100 the face refused both, and the caller fell back to the
+/// bitmap face at a third of the size -- the home screen's date then drew
+/// as a low-resolution cell repeated vertically, which reads as blur.
+const RUN_H_MAX: usize = 144;
 
 /// How many runs may be resident at once.
 const SLOTS: usize = 32;
@@ -273,118 +280,27 @@ pub fn place_run_cap(
     Some(run)
 }
 
-/// Returns true if `c` is a curved glyph whose contours benefit from Bézier curve smoothing.
-#[inline]
-pub fn is_curved_glyph(c: u8) -> bool {
-    matches!(
-        c,
-        b'0'..=b'9'
-            | b'C' | b'O' | b'S' | b'B' | b'D' | b'G' | b'P' | b'R' | b'Q'
-            | b'c' | b'o' | b's' | b'b' | b'd' | b'g' | b'p' | b'r' | b'q'
-            | b'a' | b'e' | b'u' | b'U' | b'J' | b'j'
-    )
-}
-
-/// Evaluates a quadratic Bézier curve at step `s` of `subdivisions` subdivisions
-/// using fixed-point arithmetic (zero floating-point, zero heap).
+/// Converts geometric coverage (0..=255) to the alpha used for compositing.
 ///
-/// B(t) = (1-t)^2 * P0 + 2*t*(1-t) * P1 + t^2 * P2
-/// where t = (s / subdivisions).
-#[inline]
-pub fn eval_quadratic_bezier_fixed(p0: i32, p1: i32, p2: i32, step: usize, subdivisions: usize) -> i32 {
-    if subdivisions == 0 {
-        return p1;
-    }
-    // Fixed point scale: 256 (8 bits of fraction)
-    let t = (step as i64 * 256) / subdivisions as i64;
-    let inv = 256 - t;
-    let b = (inv * inv * p0 as i64 + 2 * inv * t * p1 as i64 + t * t * p2 as i64) / (256 * 256);
-    b as i32
-}
-
-/// Smooths anti-aliased edge contours across a coverage buffer using quadratic Bézier curve interpolation.
+/// WHY the quadratic and not a table: `font::blend` composites in linear
+/// light, so blending straight coverage makes edge pixels far lighter than
+/// the fraction of the pixel the glyph actually covers -- a 50% edge would
+/// land near sRGB 180 instead of the mid-grey a reader expects. Shaping the
+/// coverage as `1 - (1 - c)^2` (equivalently `c * (2 - c)`) maps geometric
+/// coverage back to the perceptual mid-tone while staying smooth across all
+/// 256 levels. The previous 16-entry table produced the same mid-tone but
+/// quantised every edge to four bits, which is what left visible steps and
+/// grey halos on large glyphs.
 ///
-/// Converts piecewise linear transitions along curved glyph boundaries into smooth, continuous
-/// curves with 4 subdivisions. Operates strictly in-place with zero heap allocations (#![no_std]).
-pub fn smooth_bezier_curves(cov: &mut [u8], w: usize, h: usize, x_start: usize, x_end: usize) {
-    if w == 0 || h == 0 || x_start >= x_end || x_end > w {
-        return;
-    }
-
-    // Horizontal smoothing pass using quadratic Bézier interpolation (4 subdivisions)
-    for y in 0..h {
-        let row_offset = y * w;
-        for x in (x_start + 1)..x_end.saturating_sub(1) {
-            let p1 = cov[row_offset + x] as i32;
-            // Only smooth edge pixels (anti-aliased boundary where 0 < p1 < 255)
-            if p1 > 0 && p1 < 255 {
-                let p0 = cov[row_offset + x - 1] as i32;
-                let p2 = cov[row_offset + x + 1] as i32;
-                // If neighbors form a gradient/chord transition
-                if (p0 < p1 && p1 < p2) || (p0 > p1 && p1 > p2) {
-                    // Evaluate midpoint of quadratic Bézier curve (t = 2/4 = 0.5)
-                    let smoothed = eval_quadratic_bezier_fixed(p0, p1, p2, 2, 4);
-                    cov[row_offset + x] = smoothed.clamp(0, 255) as u8;
-                }
-            }
-        }
-    }
-
-    // Vertical smoothing pass using quadratic Bézier interpolation (4 subdivisions)
-    if h > 2 {
-        for y in 1..(h - 1) {
-            let row_prev = (y - 1) * w;
-            let row_curr = y * w;
-            let row_next = (y + 1) * w;
-            for x in x_start..x_end {
-                let p1 = cov[row_curr + x] as i32;
-                if p1 > 0 && p1 < 255 {
-                    let p0 = cov[row_prev + x] as i32;
-                    let p2 = cov[row_next + x] as i32;
-                    if (p0 < p1 && p1 < p2) || (p0 > p1 && p1 > p2) {
-                        let smoothed = eval_quadratic_bezier_fixed(p0, p1, p2, 2, 4);
-                        cov[row_curr + x] = smoothed.clamp(0, 255) as u8;
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Perceptual Contrast Enhancement LUT for 4-bit Alpha (0..=15)
-/// Standard linear alpha washes out black-on-ivory or white-on-dark text.
-/// This LUT applies a gamma ~1.45 curve + contrast boost so 50% coverage
-/// renders with 73% ink density, keeping thin stems crisp during 2x decimation.
-pub static INK_GAMMA_LUT_4BIT: [u8; 16] = [
-    0,   // 0/15
-    24,  // 1/15 (Boosted from 17)
-    48,  // 2/15 (Boosted from 34)
-    73,  // 3/15 (Boosted from 51)
-    99,  // 4/15
-    124, // 5/15
-    148, // 6/15
-    171, // 7/15 (Mid-tone stem edge: 171/255 instead of 119/255)
-    191, // 8/15
-    208, // 9/15
-    222, // 10/15
-    234, // 11/15
-    243, // 12/15
-    249, // 13/15
-    253, // 14/15
-    255, // 15/15
-];
-
-/// Converts linear coverage (0..255) to perceptually enhanced alpha using the gamma curve.
+/// The exact form in 8-bit integer arithmetic is `c * (510 - c) / 255`,
+/// which is monotonic, hits 0 and 255 exactly, and needs no table.
 #[inline(always)]
 pub fn perceptual_alpha(coverage: u8) -> u8 {
-    if coverage == 0 {
-        0
-    } else if coverage == 255 {
-        255
-    } else {
-        let idx = ((coverage as usize * 15 + 127) / 255).clamp(1, 15);
-        INK_GAMMA_LUT_4BIT[idx]
+    if coverage == 0 || coverage == 255 {
+        return coverage;
     }
+    let c = coverage as u32;
+    ((c * (510 - c) + 127) / 255) as u8
 }
 
 impl OutlineRun {
@@ -508,11 +424,6 @@ impl OutlineRun {
                 },
             );
             let adv = typeface::advance_px(c, em) as i32;
-            if is_curved_glyph(c) && adv > 0 {
-                let x0 = (pen.max(0) as usize).min(w);
-                let x1 = (((pen + adv).max(0)) as usize).min(w);
-                smooth_bezier_curves(cov, w, line_h, x0, x1);
-            }
             pen += adv;
         }
 
@@ -1077,28 +988,27 @@ mod tests {
     }
 
     #[test]
-    fn test_quadratic_bezier_fixed_evaluation() {
-        // B(t) = (1-t)^2 * P0 + 2*t*(1-t) * P1 + t^2 * P2
-        // Endpoints: t=0 -> P0, t=1 -> P2
-        assert_eq!(eval_quadratic_bezier_fixed(100, 200, 300, 0, 4), 100);
-        assert_eq!(eval_quadratic_bezier_fixed(100, 200, 300, 4, 4), 300);
-
-        // Linear chord: P0=0, P1=100, P2=200 -> midpoint t=0.5 should be 100
-        let mid = eval_quadratic_bezier_fixed(0, 100, 200, 2, 4);
-        assert!((mid - 100).abs() <= 1);
-
-        // Curved chord: P0=0, P1=200, P2=0 -> midpoint t=0.5:
-        // B(0.5) = 0.25*0 + 0.5*200 + 0.25*0 = 100
-        let arc_mid = eval_quadratic_bezier_fixed(0, 200, 0, 2, 4);
-        assert_eq!(arc_mid, 100);
-
-        // Subdivision 1 of 4 (t=0.25): (0.75)^2*0 + 2*(0.75)*(0.25)*200 + (0.25)^2*0 = 75
-        let arc_q1 = eval_quadratic_bezier_fixed(0, 200, 0, 1, 4);
-        assert_eq!(arc_q1, 75);
+    fn perceptual_alpha_is_smooth_and_monotonic() {
+        // Endpoints are exact: no ink at zero coverage, full ink at full coverage.
+        assert_eq!(perceptual_alpha(0), 0);
+        assert_eq!(perceptual_alpha(255), 255);
+        // Every adjacent step advances by at most a few levels, so edges keep
+        // all eight bits instead of collapsing onto sixteen table entries.
+        let mut prev = 0u8;
+        for c in 1..=255u8 {
+            let a = perceptual_alpha(c);
+            assert!(a >= prev, "alpha must not fall as coverage rises");
+            assert!(a as i32 - prev as i32 <= 3, "coverage {c} jumped {prev} -> {a}");
+            prev = a;
+        }
+        // Half coverage lands near the perceptual mid-tone the linear-light
+        // blend needs, not at 50% alpha.
+        let mid = perceptual_alpha(128);
+        assert!((175..=205).contains(&mid), "mid coverage alpha was {mid}");
     }
 
     #[test]
-    fn test_curved_glyphs_rasterize_with_bezier_smoothing() {
+    fn test_curved_glyphs_rasterize_with_anti_aliasing() {
         let _pool: Option<_> = Some(reset_slots());
         // Curved glyphs: '0', 'C', 'O', 'S', 'B', 'D', 'G', 'P', 'R', 'Q'
         let run = OutlineRun::place(0, 150, 48, b"0COSB").expect("placed curved glyphs");

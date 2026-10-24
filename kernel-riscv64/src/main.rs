@@ -33,7 +33,7 @@ macro_rules! println {
 pub extern "C" fn kmain(hart_id: usize, dtb_addr: usize) -> ! {
     println!("");
     println!("============================================================");
-    println!("  Inter OS — RISC-V 64 Sovereign Microkernel v0.8.2");
+    println!("  Inter OS — RISC-V 64 Sovereign Microkernel 0.1.0");
     println!("  Target: RISC-V 64 GC (QEMU Virt / Hardware Digital Twin)");
     println!("  Security: Pure Rust Microkernel with Capability Broker");
     println!("============================================================");

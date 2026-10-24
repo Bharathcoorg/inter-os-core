@@ -442,11 +442,11 @@ mod tests {
         assert_eq!(dt_large.cap_height(1), 16);   // 125%
         assert_eq!(dt_xl.cap_height(1), 20);      // 150%
 
-        // Body scale 2 (normal: 16px)
-        assert_eq!(dt_normal.cap_height(2), 16);
-        assert_eq!(dt_compact.cap_height(2), 13);
-        assert_eq!(dt_large.cap_height(2), 20);
-        assert_eq!(dt_xl.cap_height(2), 24);
+        // Body scale 2 (normal: 18px, the top of the documented 15..=18 band)
+        assert_eq!(dt_normal.cap_height(2), 18);
+        assert_eq!(dt_compact.cap_height(2), 14);
+        assert_eq!(dt_large.cap_height(2), 23);
+        assert_eq!(dt_xl.cap_height(2), 27);
 
         // Verify monotone growth across scaling levels
         assert!(dt_compact.cap_height(2) <= dt_normal.cap_height(2));

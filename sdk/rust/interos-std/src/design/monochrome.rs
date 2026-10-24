@@ -305,12 +305,11 @@ pub const CONTENT_W: usize = W - 2 * GUTTER;
 
 /// The colour of `(x, y)` if the run inks it, blended over `bg`.
 ///
-/// WHY the outline face and not the bitmap face: the guest's canvas is
-/// 720 by 1440 and the panel is 1080 by 2160, so the compositor magnifies
-/// every run by three in width and two in height. A bitmap glyph magnified
-/// by three is a soft glyph, and most of the text on these screens is small.
-/// The outline face is a real outline at the screen's own resolution, so it
-/// stays sharp at any size.
+/// WHY the outline face and not the bitmap face: the guest's canvas and the
+/// panel are both 720 by 1440, so composition is a copy. The 16x24 bitmap
+/// face would still need magnification to reach these type sizes, and a
+/// magnified glyph is a soft glyph. The outline face is a real outline at
+/// the screen's own resolution, so it stays sharp at any size.
 ///
 /// WHY the bitmap face is still here: a run the outline face refuses -- a
 /// character the typeface has no outline for -- has to be drawn somehow, and

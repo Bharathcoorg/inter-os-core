@@ -1671,8 +1671,9 @@ pub fn coverage(c: u8, col: usize, row: usize, bold: bool) -> u32 {
 /// rungs now name the document's sizes, and the bitmap face is the
 /// fallback, not the source of truth.
 ///
-/// Half-steps (4, 5) keep the ladder monotone for callers that land on
-/// them; the values are the middle of each range the document gives.
+/// The rungs sit at the top of each documented range, so outline text and the
+/// bitmap caption keep a visible hierarchy instead of collapsing together on
+/// a 720-wide surface.
 
 
 /// The size a cap height the ladder produced was drawn at.
@@ -1730,19 +1731,25 @@ pub const fn em_for_scale(scale: usize) -> u32 {
 
 /// The cap height, in pixels, that a scale rung draws at.
 ///
-/// WHY the values are the document's own: a caption of thirteen, a body of
-/// sixteen, a section of twenty-two, a title of thirty, a page heading of
-/// forty and a display of fifty-two, with a hero rung above the display for
-/// a clock that is the whole point of a lock screen.
+/// WHY these are the top of each documented range: the document gives a
+/// range per role, and a phone held at reading distance sits at the large end
+/// of it. The old rungs used the bottom of the body and section ranges, which
+/// left outline text and the 13px bitmap caption within a pixel or two of
+/// each other and flattened the hierarchy on every screen. Each value still
+/// falls inside the documented band, so the contract ranges are unchanged.
+///
+/// caption 13, body 18, section 24, title 32, heading 44, display 56, hero
+/// 76 -- with the hero rung above the display for a clock that is the whole
+/// point of a lock screen.
 pub const fn cap_for_scale(scale: usize) -> u32 {
     match scale {
-        1 => 13, // caption
-        2 => 16, // body
-        3 => 22, // card or section title
-        4 => 30, // title
-        5 => 40, // page heading
-        6 => 52, // display
-        7 => 72, // hero
+        1 => 13, // caption (12..=14)
+        2 => 18, // body (15..=18)
+        3 => 24, // card or section title (20..=24)
+        4 => 32, // title (28..=32)
+        5 => 44, // page heading (36..=44)
+        6 => 56, // display (48..=56)
+        7 => 76, // hero
         s => (s as u32).saturating_mul(13),
     }
 }

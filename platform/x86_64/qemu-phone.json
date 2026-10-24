@@ -6,17 +6,17 @@
   "cpu": "qemu64",
   "memory_mb": 1024,
   "display": {
-    "width": 1080,
-    "height": 2160,
+    "width": 720,
+    "height": 1440,
     "pixel_format": "ARGB8888",
     "backend": "std-vga-vnc",
     "vgamem_mb": 32,
-    "density_dpi": 480,
-    "scale_factor_permille": 1500,
+    "density_dpi": 320,
+    "scale_factor_permille": 1000,
     "refresh_rate_hz": 60,
     "safe_insets_px": {
-      "top": 72,
-      "bottom": 72,
+      "top": 48,
+      "bottom": 48,
       "left": 0,
       "right": 0
     },

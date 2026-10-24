@@ -26,18 +26,27 @@ The QEMU Phone profile is a reproducible virtual development target. It provides
 | **VNC Endpoint** | `127.0.0.1:5901` (`:1`, default) | RFB framebuffer and input channel; the display is configurable with `INTEROS_VNC_DISPLAY`, and a launch whose display is already taken moves to a free one and reports the display it used |
 | **WebSocket Bridge** | `127.0.0.1:6081` | noVNC WebSocket bridge for browser access |
 | **Device Studio** | `http://127.0.0.1:4300` | Developer control console |
-| **Scanout Contract** | `1080 × 2160` FHD+ (720 × 1440 logical, 3:2 bilinear hardware upscaled) | Physical display scanout plane |
-| **UI Logical Space** | `720 × 1440` (1:2 aspect) | Mobile portrait layout space |
-| **Display Device** | `virtio-vga` / stdvga with 1080×2160 native scanout | The guest KMS modesets the physical scanout |
+| **Scanout Contract** | `720 × 1440` ARGB8888, 32 bpp portrait (`1440 × 720` landscape), 60 Hz | Guest scanout plane; identical to the authoring space |
+| **UI Logical Space** | `720 × 1440` (1:2 aspect) | Mobile portrait layout space; composed 1:1 into the scanout |
+| **Display Device** | `VGA` / stdvga with EDID `720 × 1440`, `vgamem_mb=32` | The guest KMS modesets the scanout; the EDID advertises the native mode |
 
 > [!NOTE]
-> InterOS operates on a physical `1080 × 2160` FHD+ scanout buffer with a `720 × 1440`
-> logical authoring space, utilizing hardware-accelerated 3:2 bilinear upscaling
-> within the DRM/KMS pipeline (`kernel/src/drivers/display_kms.rs`). Applications
-> render `#![no_std]` UI into the 720×1440 authoring coordinate space, which the
-> compositor upsamples to retina Full HD+ during hardware presentation flips.
-> Physical and logical display parameters are pinned in `platform/x86_64/qemu-phone.json`
-> and verified by machine-checked contract tests (`tests/test_qemu_phone_profile_contract.py`).
+> The QEMU guest scanout is `720 × 1440` ARGB8888 (32 bpp) portrait — `1440 × 720` in
+> landscape — at 60 Hz, with the EDID mode and `vgamem_mb=32` set to match the device
+> profile (`platform/x86_64/qemu-phone.json`). The logical authoring space is the same
+> `720 × 1440`, so composition is **1:1**: every authored pixel maps to exactly one
+> scanout pixel and no resampling occurs. The compositor can still scale a surface
+> authored at a different size, but the platform's own applications paint at `720 × 1440`
+> and take the identity copy path (`kernel/src/drivers/display_kms.rs`).
+> This is a linear software framebuffer on a virtual display; it is not a
+> hardware-accelerated or physically verified display pipeline.
+>
+> Device Studio presents the same `720 × 1440` canvas in the browser: the canvas backing
+> store is exactly `720 × 1440` and the exact mode is 1:1. Non-integer CSS scales are
+> drawn by the browser's smooth filtering, which is host-side presentation only and is
+> not part of guest composition. Display parameters are pinned in
+> `platform/x86_64/qemu-phone.json` and verified by machine-checked contract tests
+> (`tests/test_qemu_phone_profile_contract.py`).
 
 ---
 
@@ -58,7 +67,8 @@ The QEMU Phone profile is a reproducible virtual development target. It provides
 
 The canonical QEMU input and display coordinate mapping is defined as:
 
-- **Display Scanout**: 1080×2160 pixels (physical FHD+ scanout), 720×1440 logical layout space, origin `(0, 0)` at top-left.
+- **Display Scanout**: `720×1440` pixels (`1440×720` landscape), ARGB8888 32 bpp, 60 Hz, origin `(0, 0)` at top-left.
+- **Logical Space**: `720×1440`, identical to the scanout, so guest composition is 1:1 and touch maps directly to scanout pixels.
 - **Physical Touch Coordinates**: Logical display pixels (`X: 0..=719`, `Y: 0..=1439`).
 - **Touch Transport**:
   ```text

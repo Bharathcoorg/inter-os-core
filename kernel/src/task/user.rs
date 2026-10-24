@@ -13,6 +13,17 @@ use crate::serial_println;
 use super::images::*;
 
 pub const USER_STACK_SIZE: usize = 256 * 1024;
+/// Where every user stack ends.
+///
+/// WHY 16 MiB and not the old 8 MiB: a user image's writable segment sits
+/// immediately above its text, so the shell's fixed buffers grow upward from
+/// 4 MiB. With the vector-text coverage cache sized for the hero type rung,
+/// the launcher's segment now ends at 0x806b60 and video_player's at
+/// 0x80d650 -- both past 8 MiB. The loader correctly refused them as
+/// overlapping the stack guard, which leaves the device with no shell. The
+/// stack is virtual until touched, so raising its top costs no extra pages;
+/// what it buys is headroom between static user data and the stack.
+pub const USER_STACK_TOP: usize = 0x0100_0000;
 pub const USER_ADDRESS_SPACE_LIMIT: usize = 256 * 1024 * 1024;
 
 /// User Code Segment Selector with RPL = 3 (GDT Index 4: 0x20 | 3 = 0x23)
@@ -488,7 +499,7 @@ pub fn spawn_user_process_with_limits(
     caps.rekey_all();
 
     let mut pt = crate::memory::TaskPageTable::create_user_page_table()?;
-    let stack_top = 0x0080_0000;
+    let stack_top = USER_STACK_TOP;
     let (user_entry, user_stack_top) = load_user_elf_into_page_table(elf_data, &mut pt, stack_top)?;
     let address_space_bytes = pt.user_mapped_bytes();
     if address_space_bytes as u64 > limits.max_address_space_bytes {
@@ -540,10 +551,10 @@ pub fn spawn_user_process_with_limits(
     Ok(spawned)
 }
 
-/// Loads a 64-bit ELF binary into a new page table with default stack top (0x0080_0000).
+/// Loads a 64-bit ELF binary into a new page table with the default stack top.
 pub fn load_user_elf(elf_data: &[u8]) -> Result<(usize, usize), &'static str> {
     let mut pt = crate::memory::TaskPageTable::create_user_page_table()?;
-    load_user_elf_into_page_table(elf_data, &mut pt, 0x0080_0000)
+    load_user_elf_into_page_table(elf_data, &mut pt, USER_STACK_TOP)
 }
 
 /// Maps canonical RAPP v2 capability identifiers into kernel capabilities.
@@ -812,6 +823,17 @@ pub fn spawn_app_settings(id_security: TaskId) -> TaskId {
     caps.insert(Capability {
         id: CapabilityId(1703),
         cap_type: CapabilityType::TimerTickRead,
+        rights: Rights::READ,
+        object_id: 0,
+    }).ok();
+    // WHY a separate read capability: the manifest already declares
+    // CAP_FILESYSTEM_READ, and the registry and storage-capacity gates match
+    // the capability *type*, so the READ right on FileSystemWrite does not
+    // satisfy them. Without this grant the package count and the root volume
+    // size are refused rather than reported.
+    caps.insert(Capability {
+        id: CapabilityId(1713),
+        cap_type: CapabilityType::FileSystemRead,
         rights: Rights::READ,
         object_id: 0,
     }).ok();

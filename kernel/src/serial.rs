@@ -15,13 +15,50 @@ use crate::storage::block::BlockDevice;
 /// Serial port wrapper implementing `core::fmt::Write` with terminal newline normalization.
 pub struct SerialPort(Uart16550<PioBackend>);
 
+/// How many transmit-capacity polls a single byte may cost before it is
+/// dropped.
+///
+/// WHY bounded: `Uart16550::send_bytes_exact` is documented as spinning
+/// indefinitely. `_print_internal` runs with interrupts disabled, so if the
+/// host stops draining COM1 -- QEMU's TCP chardev applies backpressure when
+/// its peer pauses, and the Studio's collector briefly stops reading while it
+/// persists each line -- the kernel used to wedge permanently inside a
+/// `serial_println!`. Diagnostics are droppable; the CPU is not. Once a byte
+/// times out the rest of that line is dropped too, so a dead console costs one
+/// bounded wait per print rather than one per character.
+const TX_POLL_BUDGET: usize = 10_000;
+
+impl SerialPort {
+    /// Writes one byte, or reports that the UART never became ready.
+    fn write_byte(&mut self, byte: u8) -> bool {
+        let mut pending: &[u8] = &[byte];
+        let mut polls = 0usize;
+        while !pending.is_empty() {
+            let written = self.0.send_bytes(pending);
+            if written > 0 {
+                pending = &pending[written..];
+                polls = 0;
+            } else if polls >= TX_POLL_BUDGET {
+                return false;
+            } else {
+                polls += 1;
+                core::hint::spin_loop();
+            }
+        }
+        true
+    }
+}
+
 impl fmt::Write for SerialPort {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         for &byte in s.as_bytes() {
-            if byte == b'\n' {
-                self.0.send_bytes_exact(b"\r\n");
+            let sent = if byte == b'\n' {
+                self.write_byte(b'\r') && self.write_byte(byte)
             } else {
-                self.0.send_bytes_exact(&[byte]);
+                self.write_byte(byte)
+            };
+            if !sent {
+                break;
             }
         }
         Ok(())
@@ -345,10 +382,17 @@ fn guest_path_is_safe(path: &str, writable: bool) -> bool {
     {
         return false;
     }
-    // WHY a write is confined to /data: that is the guest's own writable
-    // area, and a console write anywhere else would put a file where the
-    // platform's own packages live.
-    if writable && !path.starts_with("/data/") {
+    // WHY writes reach the media directories too: a Studio screenshot or a
+    // host-delivered download belongs where the Gallery and File Manager
+    // list documents. /data stays the platform's own area; media storage is
+    // the user's. Anything else is refused so the console cannot place a
+    // file among the platform's packages.
+    if writable
+        && !path.starts_with("/data/")
+        && !path.starts_with("/storage/photos/")
+        && !path.starts_with("/storage/pictures/")
+        && !path.starts_with("/storage/videos/")
+    {
         return false;
     }
     true
@@ -481,27 +525,32 @@ fn handle_guest_fs_command(parts: &mut core::str::SplitAsciiWhitespace<'_>) -> b
             return true;
         }
         let chunk_len = hex.len() / 2;
-        let mut write = GUEST_WRITE.lock();
-        let Some(ref mut state) = *write else {
-            serial_println!("[STUDIO_FS] ERROR no write in progress");
-            return true;
-        };
-        if offset.checked_add(chunk_len).map(|end| end <= state.expected_len) != Some(true) {
-            serial_println!("[STUDIO_FS] ERROR chunk out of bounds");
-            return true;
-        }
-        let raw = hex.as_bytes();
-        for i in 0..chunk_len {
-            let Some(hi) = hex_nibble(raw[i * 2]) else {
-                serial_println!("[STUDIO_FS] ERROR bad hex");
+        {
+            let mut write = GUEST_WRITE.lock();
+            let Some(ref mut state) = *write else {
+                serial_println!("[STUDIO_FS] ERROR no write in progress");
                 return true;
             };
-            let Some(lo) = hex_nibble(raw[i * 2 + 1]) else {
-                serial_println!("[STUDIO_FS] ERROR bad hex");
+            if offset.checked_add(chunk_len).map(|end| end <= state.expected_len) != Some(true) {
+                serial_println!("[STUDIO_FS] ERROR chunk out of bounds");
                 return true;
-            };
-            state.bytes[offset + i] = (hi << 4) | lo;
+            }
+            let raw = hex.as_bytes();
+            for i in 0..chunk_len {
+                let Some(hi) = hex_nibble(raw[i * 2]) else {
+                    serial_println!("[STUDIO_FS] ERROR bad hex");
+                    return true;
+                };
+                let Some(lo) = hex_nibble(raw[i * 2 + 1]) else {
+                    serial_println!("[STUDIO_FS] ERROR bad hex");
+                    return true;
+                };
+                state.bytes[offset + i] = (hi << 4) | lo;
+            }
         }
+        // WHY the guard is released first: this acknowledgement is the only
+        // serial output the host waits for per chunk, and holding the write
+        // lock across it would trade a console stall for a filesystem stall.
         serial_println!("CHUNK_OK offset={}", offset);
         return true;
     }
@@ -829,7 +878,7 @@ fn handle_rapp_command(s: &str) -> bool {
             }
             // Keep the physical scanout in lockstep with the KMS logical
             // scanout: present_argb8888 then blits 1:1 in both orientations
-            // (1080x2160 portrait, 2160x1080 landscape) with no downscale.
+            // (720x1440 portrait, 1440x720 landscape) with no resample.
             // Called after the KMS guard is dropped so the two locks are
             // never held together.
             if !crate::framebuffer::set_physical_mode(phys_w, phys_h) {
@@ -843,34 +892,34 @@ fn handle_rapp_command(s: &str) -> bool {
         };
         match opt.as_deref() {
             Some("LANDSCAPE") | Some("LANDSCAPE_RIGHT") | Some("LANDSCAPERIGHT") => {
-                if !set_kms_orientation(crate::drivers::display_kms::DisplayOrientation::LandscapeRight, 2160, 1080) {
+                if !set_kms_orientation(crate::drivers::display_kms::DisplayOrientation::LandscapeRight, 1440, 720) {
                     serial_println!("[DISPLAY_HAL] REJECT orientation controller busy");
                     return true;
                 }
                 if let Some(mut sm) = crate::sensor::SENSOR_MANAGER.try_lock() {
                     sm.imu.accel = crate::sensor::Vector3D { x: 980, y: 0, z: 0 };
                 }
-                serial_println!("[DISPLAY_HAL] Orientation changed to LandscapeRight. KMS scanout updated to 2160x1080 full landscape.");
+                serial_println!("[DISPLAY_HAL] Orientation changed to LandscapeRight. KMS scanout updated to 1440x720 landscape.");
             }
             Some("LANDSCAPE_LEFT") | Some("LANDSCAPELEFT") => {
-                if !set_kms_orientation(crate::drivers::display_kms::DisplayOrientation::LandscapeLeft, 2160, 1080) {
+                if !set_kms_orientation(crate::drivers::display_kms::DisplayOrientation::LandscapeLeft, 1440, 720) {
                     serial_println!("[DISPLAY_HAL] REJECT orientation controller busy");
                     return true;
                 }
                 if let Some(mut sm) = crate::sensor::SENSOR_MANAGER.try_lock() {
                     sm.imu.accel = crate::sensor::Vector3D { x: -980, y: 0, z: 0 };
                 }
-                serial_println!("[DISPLAY_HAL] Orientation changed to LandscapeLeft. KMS scanout updated to 2160x1080 full landscape.");
+                serial_println!("[DISPLAY_HAL] Orientation changed to LandscapeLeft. KMS scanout updated to 1440x720 landscape.");
             }
             Some("PORTRAIT") => {
-                if !set_kms_orientation(crate::drivers::display_kms::DisplayOrientation::Portrait, 1080, 2160) {
+                if !set_kms_orientation(crate::drivers::display_kms::DisplayOrientation::Portrait, 720, 1440) {
                     serial_println!("[DISPLAY_HAL] REJECT orientation controller busy");
                     return true;
                 }
                 if let Some(mut sm) = crate::sensor::SENSOR_MANAGER.try_lock() {
                     sm.imu.accel = crate::sensor::Vector3D { x: 0, y: 980, z: 0 };
                 }
-                serial_println!("[DISPLAY_HAL] Orientation changed to Portrait. KMS scanout updated to 1080x2160 centered scanout.");
+                serial_println!("[DISPLAY_HAL] Orientation changed to Portrait. KMS scanout updated to 720x1440 native scanout.");
             }
             _ => {
                 serial_println!("[DISPLAY_HAL] REJECT invalid orientation option");
@@ -914,7 +963,17 @@ fn handle_serial_command(cmd: &[u8]) {
     if s.is_empty() {
         return;
     }
-    crate::serial_println!("[CMD] {}", s);
+    // WHY bulk transfer lines are not echoed: a `STUDIO_FS_CHUNK` carries up
+    // to 512 hex characters and a file upload sends dozens of them. Echoing
+    // the payload multiplied console traffic roughly twentyfold and was the
+    // pressure that exposed the unbounded UART wait. The `CHUNK_OK`
+    // acknowledgement still proves the chunk was received.
+    let bulk = s.split_ascii_whitespace().next().is_some_and(|verb| {
+        verb.eq_ignore_ascii_case("STUDIO_FS_CHUNK") || verb.eq_ignore_ascii_case("RAPP_CHUNK")
+    });
+    if !bulk {
+        crate::serial_println!("[CMD] {}", s);
+    }
     if handle_rapp_command(s) {
         return;
     }
@@ -923,9 +982,13 @@ fn handle_serial_command(cmd: &[u8]) {
     // commands. WHY it is asked for before the rest: the Studio sends
     // these to read and write the guest's own files, and the rest of the
     // console is the platform's own diagnostics.
+    //
+    // WHY the line is handed over whole: `handle_guest_fs_command` reads the
+    // verb itself, and the Studio's transport writes `STUDIO_FS_LIST <path>`
+    // as one line. Dropping the first token here made every one of those
+    // commands start at the path, match no verb, and fall through silently.
     {
         let mut guest_parts = s.split_ascii_whitespace();
-        let _ = guest_parts.next();
         if handle_guest_fs_command(&mut guest_parts) {
             return;
         }

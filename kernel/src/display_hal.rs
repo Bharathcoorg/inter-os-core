@@ -158,19 +158,24 @@ pub struct DisplayMetrics {
 }
 
 impl DisplayMetrics {
-    /// Canonical flagship phone profile (1080x2160 FHD+ physical, 720x1440 dp logical, 480 DPI).
+    /// Canonical QEMU phone profile: 720x1440 physical at 1:1 with the
+    /// 720x1440 logical space (320 DPI). A higher-DPI scanout would need the
+    /// apps to paint at that resolution; otherwise it is an upscale.
     pub const fn canonical_phone() -> Self {
         Self {
-            physical_width_px: 1080,
-            physical_height_px: 2160,
+            physical_width_px: 720,
+            physical_height_px: 1440,
             logical_width_dp: 720,
             logical_height_dp: 1440,
-            density_dpi: 480,
-            scale_factor_permille: 1500,
+            density_dpi: 320,
+            scale_factor_permille: 1000,
             orientation: Orientation::Portrait,
+            // The status bar is 48 logical px and physical == logical, so the
+            // inset is 48 px rather than the 48 x 1.5 = 72 the retired 1080x2160
+            // scanout used.
             safe_insets_px: SafeAreaInsetsPx {
-                top: Px(72),
-                bottom: Px(72),
+                top: Px(48),
+                bottom: Px(48),
                 left: Px(0),
                 right: Px(0),
             },
