@@ -47,7 +47,7 @@ document.addEventListener('DOMContentLoaded', () => {
         return this.send(target, 0x10, { action, ...data });
       }
     },
-    version: '0.8.2',
+    version: '0.1.0',
     arch: 'x86_64 / aarch64 / riscv64'
   };
 
@@ -666,9 +666,8 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!scanoutCtx) {
       scanoutCtx = liveScanoutCanvas.getContext('2d');
     }
-    if (scanoutCtx) {
-      scanoutCtx.imageSmoothingEnabled = false;
-    }
+    // No imageSmoothingEnabled tweak here: pixel frames go in via putImageData
+    // (which ignores smoothing) and CSS owns the on-screen scale of the backing.
   }
   setSurfaceState('no-signal');
 
@@ -746,15 +745,19 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function renderScanoutPixels(pixels, width, height) {
     // Never resize the phone surface to a wrong geometry: only guest-derived
-    // frames are displayed (native portrait 720x1440, the 360x720 phone slice
-    // of a landscape desktop, or full landscape 1280x720).
-    if (!((width === 1080 && height === 2160) || (width === 720 && height === 1440) || (width === 360 && height === 720) || (width === 1280 && height === 720))) return false;
+    // frames are displayed. Native portrait is the 720x1440 authoring scanout;
+    // the 360x720 phone slice and full 1280x720 landscape desktop are legacy
+    // guest-derived geometries still accepted so a stale server publication
+    // cannot black the monitor. 1080x2160 remains decodable only for guests
+    // that still present the retired FHD scanout; it is never advertised.
+    if (!((width === 720 && height === 1440) || (width === 1080 && height === 2160) || (width === 360 && height === 720) || (width === 1280 && height === 720))) return false;
     if (!pixels || pixels.byteLength < width * height * 4) return false;
     if (scanoutCtx && liveScanoutCanvas) {
       if (liveScanoutCanvas.width !== width || liveScanoutCanvas.height !== height) {
         liveScanoutCanvas.width = width;
         liveScanoutCanvas.height = height;
-        scanoutCtx.imageSmoothingEnabled = false;
+        // putImageData ignores smoothing; the backing store is exactly the
+        // received frame, and CSS owns how that backing is displayed.
         scanoutImageData = null;
       }
       if (!scanoutImageData || scanoutImageData.width !== width || scanoutImageData.height !== height) {
@@ -766,16 +769,17 @@ document.addEventListener('DOMContentLoaded', () => {
       scanoutCtx.putImageData(scanoutImageData, 0, 0);
       displayedFrameW = width;
       displayedFrameH = height;
-      updateDisplaySpecBadge();
       setSurfaceState('live');
       return true;
     }
     return false;
   }
 
-  // Single fixed reusable buffer for FHD+ (1080 * 2160 * 4 + 16 header bytes = 9331216 bytes).
-  // Pre-allocated once so chunked stream processing never reallocates per TCP chunk (O(N) vs O(N^2)).
-  const FIXED_FRAME_BUFFER_BYTES = 9331216;
+  // Single fixed reusable buffer for the native 720x1440 scanout
+  // (720 * 1440 * 4 + 16 IOSF header bytes = 4147216 bytes). It still grows on
+  // demand if a larger legacy frame arrives, but the common case never
+  // reallocates per TCP chunk (O(N) vs O(N^2)).
+  const FIXED_FRAME_BUFFER_BYTES = 4147216;
   let streamFrameBuffer = new Uint8Array(FIXED_FRAME_BUFFER_BYTES);
   let streamWriteOffset = 0;
 
@@ -957,8 +961,8 @@ document.addEventListener('DOMContentLoaded', () => {
       img.onload = () => {
         // The canvas is the single visible surface; the hidden legacy <img>
         // element is never fed so it cannot show broken-image alt text.
-        if (!((img.naturalWidth === 1080 && img.naturalHeight === 2160)
-          || (img.naturalWidth === 720 && img.naturalHeight === 1440)
+        if (!((img.naturalWidth === 720 && img.naturalHeight === 1440)
+          || (img.naturalWidth === 1080 && img.naturalHeight === 2160)
           || (img.naturalWidth === 360 && img.naturalHeight === 720)
           || (img.naturalWidth === 1280 && img.naturalHeight === 720))) {
           resolve();
@@ -968,13 +972,17 @@ document.addEventListener('DOMContentLoaded', () => {
           if (liveScanoutCanvas.width !== img.naturalWidth || liveScanoutCanvas.height !== img.naturalHeight) {
             liveScanoutCanvas.width = img.naturalWidth;
             liveScanoutCanvas.height = img.naturalHeight;
-            scanoutCtx.imageSmoothingEnabled = true;
-        scanoutCtx.imageSmoothingQuality = 'high';
           }
+          // The PNG is drawn at its natural size into a backing of the same
+          // size, so this is a 1:1 copy and no resampling happens. Smoothing is
+          // still requested for the fallback path: if a browser has to round a
+          // fractional backing size, a high-quality filter keeps glyph edges
+          // smooth instead of dropping stems.
+          scanoutCtx.imageSmoothingEnabled = true;
+          scanoutCtx.imageSmoothingQuality = 'high';
           scanoutCtx.drawImage(img, 0, 0);
           displayedFrameW = img.naturalWidth;
           displayedFrameH = img.naturalHeight;
-          updateDisplaySpecBadge();
           setSurfaceState('live');
         }
         resolve();
@@ -1035,7 +1043,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // accounting for CSS object-fit: contain letterboxing/pillarboxing.
   function getRenderedImageRect(img) {
     const rect = img.getBoundingClientRect();
-    const natW = img.naturalWidth || (state.isLandscape ? 1280 : 720);
+    const natW = img.naturalWidth || (state.isLandscape ? 1440 : 720);
     const natH = img.naturalHeight || (state.isLandscape ? 720 : 1440);
     const imgAspect = natW / natH;
     const contAspect = rect.width / rect.height;
@@ -1064,7 +1072,11 @@ document.addEventListener('DOMContentLoaded', () => {
     const target = [liveScanoutCanvas, liveScanoutImg, screenLiveScanout].find(visible);
     if (!target) return null;
     const rect = target.getBoundingClientRect();
-    const aspect = state.isLandscape ? (1280 / 720) : (720 / 1440);
+    // Letterbox against the frame actually on screen (720x1440 native), not a
+    // hardcoded scanout size, so a legacy or rotated frame still maps.
+    const aspect = (displayedFrameW && displayedFrameH)
+      ? (displayedFrameW / displayedFrameH)
+      : (state.isLandscape ? (1440 / 720) : (720 / 1440));
     const containerAspect = rect.width / Math.max(1, rect.height);
     let width = rect.width;
     let height = rect.height;
@@ -1097,8 +1109,10 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function guestPointerGeometry() {
+    // Landscape is the rotated 720x1440 frame, so its framebuffer is 1440x720
+    // (2:1), not the legacy 1280x720 early-boot desktop.
     return state.isLandscape
-      ? { width: 1280, height: 720, coords: 'guest_framebuffer' }
+      ? { width: 1440, height: 720, coords: 'guest_framebuffer' }
       : { width: 720, height: 1440, coords: 'portrait' };
   }
 
@@ -1403,37 +1417,22 @@ document.addEventListener('DOMContentLoaded', () => {
   // These were static marketing copy ("ARM64 / RISC-V", "4 GB LPDDR4X",
   // "Guest display mode") that contradicted the guest the studio drives: the default
   // profile is x86_64 with QEMU RAM, no memory technology and no 120 Hz panel.
-  // Report what was observed and say plainly that it is virtualised. When the
-  // guest cannot be reached, leave the badges undetermined rather than inventing
-  // a specification.
-  function updateDisplaySpecBadge() {
-    const el = document.getElementById('spec-display');
-    if (!el) return;
-    if (displayedFrameW === 1080 && displayedFrameH === 2160) {
-      el.textContent = '1080x2160';
-    } else if (displayedFrameW && displayedFrameH) {
-      el.textContent = `${displayedFrameW}x${displayedFrameH} virtual framebuffer`;
-    }
-  }
-
+  // Report what was observed. The target chip already names the machine as a
+  // QEMU virtual device, so the spec values carry no second "(virtualised)"
+  // qualifier. When the guest cannot be reached, leave the badges undetermined
+  // rather than inventing a specification.
   function describeObservedTarget(data) {
     const set = (id, value) => {
       const el = document.getElementById(id);
       if (el && value) el.textContent = value;
     };
     const profile = (data && data.active_profile) || 'unknown';
-    set('spec-arch', profile === 'unknown' ? 'Undetermined' : profile + ' (virtualised)');
-    set('spec-memory', (data && data.ram_mb) ? data.ram_mb + ' MiB emulated' : 'Undetermined');
-    const w = (displayedFrameW === 1080 && displayedFrameH === 2160) ? 1080 : (data && (data.guest_width || data.display_width));
-    const h = (displayedFrameW === 1080 && displayedFrameH === 2160) ? 2160 : (data && (data.guest_height || data.display_height));
-    if (w === 1080 && h === 2160) {
-      set('spec-display', '1080x2160');
-    } else if (w && h) {
-      set('spec-display', w + 'x' + h + ' virtual framebuffer');
-    } else {
-      set('spec-display', 'Undetermined');
-    }
-    set('spec-security', 'Ring 3 capability sandbox (emulated)');
+    set('spec-arch', profile === 'unknown' ? 'Undetermined' : profile.toUpperCase());
+    const ramMb = data && data.ram_mb;
+    set('spec-memory', ramMb
+      ? (ramMb % 1024 === 0 ? (ramMb / 1024) + ' GB' : ramMb + ' MB')
+      : 'Undetermined');
+    set('spec-security', 'Ring 3 sandbox');
   }
 
   async function refreshTargetBadges() {
@@ -1827,77 +1826,80 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  // Screendump: export exactly what the guest framebuffer contains.
+  // Screenshot: capture the guest's own scanout and store it *inside* the
+  // guest, under /storage/photos/Studio. The guest Gallery and File Manager
+  // then list it like any other media file. WHY downscaled: the phone pane is
+  // a scaled mirror, and the guest Gallery decodes screenshot thumbnails at
+  // its own grid size; the whole resolution is still available by running
+  // QEMU directly.
   emuBtnScreenshot?.addEventListener('click', async () => {
+    if (emuBtnScreenshot.disabled) return;
+    emuBtnScreenshot.disabled = true;
     try {
-      const resp = await fetch('/api/screen/frame?format=png');
-      if (resp.ok) {
-        const blob = await resp.blob();
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement('a');
-        link.download = `interos_scanout_${Date.now()}.png`;
-        link.href = url;
-        link.click();
-        setTimeout(() => URL.revokeObjectURL(url), 10000);
-        logConsole('ok', '[SCREENSHOT] Authentic microkernel scanout captured and exported from QEMU DRM/KMS.');
-        showToast('Microkernel Scanout Screenshot Saved');
+      const resp = await fetch('/api/screenshot/save', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ theme: 'preview' })
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (resp.ok && data.success) {
+        logConsole('ok', `[SCREENSHOT] Guest scanout saved to ${data.path} (${data.width}x${data.height}, ${data.bytes} bytes).`);
+        showToast('Saved to Gallery › Screenshots');
         return;
       }
-    } catch (e) {}
-
-    logConsole('warn', '[SCREENSHOT] QEMU scanout buffer offline; live capture unavailable.');
-    showToast('QEMU scanout offline (Standby)');
+      const reason = data.error || 'guest scanout unavailable';
+      logConsole('warn', `[SCREENSHOT] Capture refused: ${reason}`);
+      showToast(reason);
+    } catch (e) {
+      logConsole('err', `[SCREENSHOT] Capture failed: ${e.message}`);
+      showToast('Screenshot failed');
+    } finally {
+      emuBtnScreenshot.disabled = false;
+    }
   });
 
-  // Display Sizing: Responsive Fit vs Flagship View vs Retina vs 1:1 Pixel-Exact
+  // Display presentation: Fit vs Flagship vs Focus vs 1:1 Pixel-Exact.
+  // WHY these are named presentation sizes: every mode shows the same native
+  // 720x1440 guest scanout. The modes only change how much of the window the
+  // chassis occupies, so calling one "High-Definition" would claim a guest
+  // resolution the compositor never produces.
   const emuBtnScale = document.getElementById('emu-btn-scale');
-  const btnHeaderScale = document.getElementById('btn-header-scale');
-  const headerScaleText = document.getElementById('header-scale-text');
   let currentDisplayScale = 'large';
   function cycleDisplayScale() {
     const chassis = document.getElementById('device-chassis');
     const scanout = document.getElementById('screen-live-scanout');
     if (!chassis) return;
-    scanout?.classList.remove('fhd-pixel-exact');
+    scanout?.classList.remove('pixel-exact-native');
     chassis.classList.remove('exact-mode');
     if (currentDisplayScale === 'fit') {
       currentDisplayScale = 'large';
       chassis.classList.remove('retina-mode');
       chassis.classList.add('large-mode');
-      if (headerScaleText) headerScaleText.textContent = 'Flagship';
-      btnHeaderScale?.classList.add('active');
-      showToast('Display Sizing: Flagship Focus (540px High-Definition)');
-      logConsole('info', '[DISPLAY] Sizing set to Flagship Focus (540px High-Definition).');
+      showToast('Presentation: Flagship (uses the window height)');
+      logConsole('info', '[DISPLAY] Presentation set to Flagship: chassis sized from the window height.');
     } else if (currentDisplayScale === 'large') {
       currentDisplayScale = 'retina';
       chassis.classList.remove('large-mode');
       chassis.classList.add('retina-mode');
-      if (headerScaleText) headerScaleText.textContent = 'Retina FHD';
-      btnHeaderScale?.classList.add('active');
-      showToast('Display Sizing: Retina Full HD (640px True Immersion)');
-      logConsole('info', '[DISPLAY] Sizing set to Retina Full HD (640px True Immersion).');
+      showToast('Presentation: Focus (immersive, near native size)');
+      logConsole('info', '[DISPLAY] Presentation set to Focus: immersive, near native 720x1440 size.');
     } else if (currentDisplayScale === 'retina') {
       currentDisplayScale = 'exact';
       chassis.classList.remove('large-mode');
       chassis.classList.remove('retina-mode');
       chassis.classList.add('exact-mode');
-      scanout?.classList.add('fhd-pixel-exact');
-      if (headerScaleText) headerScaleText.textContent = '1:1 Native';
-      btnHeaderScale?.classList.add('active');
-      showToast('Display Sizing: 1:1 Pixel-Exact Native (1080×2160 FHD)');
-      logConsole('info', '[DISPLAY] Sizing set to 1:1 Pixel-Exact Native (1080×2160 FHD).');
+      scanout?.classList.add('pixel-exact-native');
+      showToast('Presentation: 1:1 Native (720×1440 guest scanout)');
+      logConsole('info', '[DISPLAY] Presentation set to 1:1 Native: one CSS pixel per guest pixel (720x1440).');
     } else {
       currentDisplayScale = 'fit';
       chassis.classList.remove('large-mode');
       chassis.classList.remove('retina-mode');
-      if (headerScaleText) headerScaleText.textContent = 'Fit';
-      btnHeaderScale?.classList.remove('active');
-      showToast('Display Sizing: Responsive Fit');
-      logConsole('info', '[DISPLAY] Sizing set to Responsive Fit.');
+      showToast('Presentation: Fit (fills the available stage)');
+      logConsole('info', '[DISPLAY] Presentation set to Fit: chassis follows the available stage.');
     }
   }
   emuBtnScale?.addEventListener('click', cycleDisplayScale);
-  btnHeaderScale?.addEventListener('click', cycleDisplayScale);
 
   // Orientation is locked strictly to portrait (720x1440 canvas, CSS 360x720).
   state.isLandscape = false;
@@ -2645,15 +2647,17 @@ document.addEventListener('DOMContentLoaded', () => {
     splash.id = 'phone-boot-splash';
     splash.className = 'phone-boot-splash';
     splash.innerHTML = [
-      '<div class="pbs-logo" aria-hidden="true">',
-      '  <svg viewBox="0 0 120 120" fill="none" xmlns="http://www.w3.org/2000/svg">',
-      '    <rect x="2" y="2" width="116" height="116" rx="26" fill="#121620" stroke="#263042" stroke-width="4"/>',
-      '    <rect x="5" y="5" width="110" height="110" rx="23" fill="none" stroke="#3A4860" stroke-width="2" opacity="0.6"/>',
-      '    <rect x="24" y="24" width="20" height="72" rx="10" fill="#FAF8F4"/>',
-      '    <path d="M 50 34 A 10 10 0 0 1 70 34 V 76 H 92 A 10 10 0 0 1 92 96 H 60 A 10 10 0 0 1 50 86 Z" fill="#FAF8F4"/>',
-      '  </svg>',
+      '<div class="pbs-brand">',
+      '  <div class="pbs-logo" aria-hidden="true">',
+      '    <svg viewBox="0 0 120 120" fill="none" xmlns="http://www.w3.org/2000/svg">',
+      '      <rect x="2" y="2" width="116" height="116" rx="26" fill="#121620" stroke="#263042" stroke-width="4"/>',
+      '      <rect x="5" y="5" width="110" height="110" rx="23" fill="none" stroke="#3A4860" stroke-width="2" opacity="0.6"/>',
+      '      <rect x="24" y="24" width="20" height="72" rx="10" fill="#FAF8F4"/>',
+      '      <path d="M 50 34 A 10 10 0 0 1 70 34 V 76 H 92 A 10 10 0 0 1 92 96 H 60 A 10 10 0 0 1 50 86 Z" fill="#FAF8F4"/>',
+      '    </svg>',
+      '  </div>',
+      '  <div class="pbs-wordmark">InterOS</div>',
       '</div>',
-      '<div class="pbs-wordmark">InterOS</div>',
       '<div class="pbs-sub" id="pbs-sub">Waiting for guest serial output&hellip;</div>',
       '<ol class="pbs-stages" id="pbs-stages"></ol>',
       '<div class="pbs-elapsed" id="pbs-elapsed">elapsed unknown</div>',
@@ -2728,7 +2732,12 @@ document.addEventListener('DOMContentLoaded', () => {
   function renderBootSplash() {
     const surface = ensurePhoneFrameSurface();
     if (!surface || !surface.built || !surface.stageList) return;
-    const show = bootFacts.qemuAlive && !bootFacts.launcherReady && !hasLiveFrame;
+    // WHY `!hasLiveFrame` and not `!launcherReady`: readiness is reported by
+    // the server, but the splash sits over the bezel and must not disappear
+    // into an empty screen before the guest has actually presented a frame.
+    // The readiness gate still feeds the milestone list, so a ready guest
+    // shows every stage ticked while its first real frame is on the way.
+    const show = bootFacts.qemuAlive && !hasLiveFrame;
     surface.splash.classList.toggle('is-visible', show);
     if (!show) return;
 
@@ -2959,13 +2968,67 @@ document.addEventListener('DOMContentLoaded', () => {
   const emuBtnFullscreen = document.getElementById('emu-btn-fullscreen');
   if (emuBtnFullscreen) emuBtnFullscreen.addEventListener('click', toggleFullscreenMode);
 
-  const btnHeaderScreenshot = document.getElementById('btn-header-screenshot');
-  if (btnHeaderScreenshot) {
-    btnHeaderScreenshot.addEventListener('click', () => {
-      const emuScreenshot = document.getElementById('emu-btn-screenshot');
-      if (emuScreenshot) emuScreenshot.click();
+  // Header action visibility. WHY persisted: a person who hid an action to
+  // make room should not have to hide it again after every reload. The
+  // Options button itself is never hidden, so every action can be restored.
+  (function initHeaderOptions() {
+    const menu = document.getElementById('header-options-menu');
+    const toggle = document.getElementById('btn-header-options');
+    const reset = document.getElementById('btn-header-options-reset');
+    if (!menu || !toggle) return;
+    const STORAGE_KEY = 'interos.studio.header.hidden';
+    let hidden = [];
+    try {
+      const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+      if (Array.isArray(stored)) hidden = stored.filter((id) => typeof id === 'string');
+    } catch (e) {}
+
+    const apply = () => {
+      document.querySelectorAll('[data-header-option]').forEach((box) => {
+        const action = document.getElementById(box.dataset.headerOption);
+        if (!action) return;
+        const isHidden = hidden.includes(box.dataset.headerOption);
+        box.checked = !isHidden;
+        action.classList.toggle('header-action-hidden', isHidden);
+      });
+    };
+    const persist = () => {
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(hidden));
+      } catch (e) {}
+    };
+    apply();
+
+    toggle.addEventListener('click', (event) => {
+      event.stopPropagation();
+      menu.hidden = !menu.hidden;
     });
-  }
+    document.addEventListener('click', (event) => {
+      if (!menu.hidden && !menu.contains(event.target) && event.target !== toggle) {
+        menu.hidden = true;
+      }
+    });
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') menu.hidden = true;
+    });
+    menu.querySelectorAll('[data-header-option]').forEach((box) => {
+      box.addEventListener('change', () => {
+        const id = box.dataset.headerOption;
+        if (box.checked) {
+          hidden = hidden.filter((item) => item !== id);
+        } else if (!hidden.includes(id)) {
+          hidden.push(id);
+        }
+        persist();
+        apply();
+      });
+    });
+    reset?.addEventListener('click', () => {
+      hidden = [];
+      persist();
+      apply();
+    });
+  })();
 
   // Keyboard shortcuts: 'F' toggles Focus Mode, 'D' switches to Deck, 'Escape' exits Focus Mode
   window.addEventListener('keydown', (e) => {

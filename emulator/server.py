@@ -529,28 +529,24 @@ def select_vnc_display(preferred=None, limit=64):
 
 # Guest scanout geometry.
 #
-# The logical phone surface is 720x1440. The actual QEMU framebuffer is learned
-# from live screendumps, so Device Studio does not assume a developer has a
-# particular host resolution.
-# The guest's scanout in guest pixels, and the authoring space its shell and
-# apps lay out in. They are separate because a raised scanout only buys detail
-# if apps paint at that resolution; an app that keeps painting at the authoring
-# space gets an upscale, which is a larger surface cost and the same image.
-#
-# 1080x2160 is FHD-class width at the SAME 1:2 shape as the authoring space, so
-# the ratio between them is exactly 1.5 on both axes. The reference design's
-# 1080x2400 is 9:20 and a uniform scale to it does not exist.
-SCANOUT_W, SCANOUT_H = 1080, 2160
+# The guest scanout IS the native authoring size: 720x1440. The platform is
+# 1:1 (scale factor 1000 permille at 320 dpi), so one logical pixel is one
+# scanout pixel and nothing between the compositor and the panel resamples.
+# The earlier 1080x2160 scanout required a 1.5x upscale of the 720x1440
+# surfaces the shell and apps paint, which only softened them.
+# The actual QEMU framebuffer is learned from live screendumps, so Device
+# Studio does not assume a developer has a particular host resolution.
+SCANOUT_W, SCANOUT_H = 720, 1440
 LOGICAL_SURFACE_W, LOGICAL_SURFACE_H = 720, 1440
 guest_framebuffer_size = (SCANOUT_W, SCANOUT_H)
 
-# Canonical guest scanout geometries. The x86_64 phone profile engages a
-# native 1080x2160 FHD+ portrait scanout once paging is online; landscape
-# presents 2160x1080 (or 1280x720 during early boot / legacy modes). A VNC
-# session reporting any other desktop size is stale or transitional: publishing
-# it would crop the phone surface to the wrong geometry, so the session is
-# resynchronised instead of streaming stale pixels.
-CANONICAL_SCANOUT_SIZES = frozenset(((SCANOUT_W, SCANOUT_H), (SCANOUT_H, SCANOUT_W), (1088, 2160), (LOGICAL_SURFACE_W, LOGICAL_SURFACE_H), (1280, 720)))
+# Canonical guest scanout geometries. The x86_64 phone profile asks EDID for a
+# native 720x1440 portrait scanout; landscape presents 1440x720 (or 1280x720
+# during early boot / legacy VGA modes). A VNC session reporting any other
+# desktop size is stale or transitional: publishing it would crop the phone
+# surface to the wrong geometry, so the session is resynchronised instead of
+# streaming stale pixels.
+CANONICAL_SCANOUT_SIZES = frozenset(((SCANOUT_W, SCANOUT_H), (SCANOUT_H, SCANOUT_W), (1280, 720)))
 MAX_SCANOUT_DIM = 4096
 
 
@@ -559,13 +555,13 @@ def is_canonical_scanout(w, h):
 
 
 # Published phone-frame sizes. The VNC desktop is validated above, but the
-# published crop differs by orientation: a native 1080x2160 portrait desktop
+# published crop differs by orientation: a native 720x1440 portrait desktop
 # publishes whole, a 1280x720 landscape desktop in portrait orientation
 # publishes its centred 360x720 phone slice, and landscape orientation
-# publishes the whole 2160x1080 (or 1280x720) desktop. All are guest-derived crops,
+# publishes the whole 1440x720 (or 1280x720) desktop. All are guest-derived crops,
 # never invented pixels; the browser scales the slice to the phone chassis
 # with smoothing, exactly like a hardware emulator viewport.
-PHONE_FRAME_SIZES = frozenset(((SCANOUT_W, SCANOUT_H), (SCANOUT_H, SCANOUT_W), (720, 1440), (360, 720), (1280, 720)))
+PHONE_FRAME_SIZES = frozenset(((SCANOUT_W, SCANOUT_H), (SCANOUT_H, SCANOUT_W), (360, 720), (1280, 720)))
 
 # How long a monitor-confirmed non-native geometry keeps suppressing the resync.
 # WHY bounded: during boot the guest really does present 1280x720 until it engages
@@ -593,32 +589,34 @@ CONFIRMATION_TTL = 10.0
 # geometry. If the guest reports anything else the frame is withheld and the
 # route answers honestly (503 / standby card) rather than cropping to a
 # geometry the profile did not declare. The DEFAULT profile is the reference
-# 720x1440 phone the guest already renders by EDID, so today's behaviour is
-# reproduced exactly; a profile that declares a different geometry makes that
-# choice explicit in this table and fails closed until the guest honours it.
+# 720x1440 phone the guest renders by EDID at 1:1, so the guest's native
+# scanout and the authoring space are the same surface; a profile that declares
+# a different geometry makes that choice explicit in this table and fails
+# closed until the guest honours it.
 DEVICE_PROFILES = {
     "interos_reference": {
         "id": "interos_reference",
         "name": "InterOS Reference Phone",
         "description": (
-            "Native 1080x2160 FHD-class portrait scanout the guest KMS selects by "
-            "EDID, with 720x1440 as the authoring space the shell and apps lay "
-            "out in. This is the stock phone Device Studio displays."
+            "Native 720x1440 portrait scanout at the authoring size (1:1, "
+            "320 dpi) the guest KMS selects by EDID. The shell and apps paint "
+            "in this same 720x1440 space. This is the stock phone Device Studio "
+            "displays."
         ),
         "guest_geometry": {"width": SCANOUT_W, "height": SCANOUT_H},
         # The guest presents this landscape desktop during boot (before native
         # portrait scanout engages) and in landscape orientation. It is a guest
         # behaviour, not a Studio preference; the reference profile records it
         # so the frame geometry checks match what QEMU actually reports.
-        "landscape_geometry": {"width": 1280, "height": 720},
-        "density_dpi": 480,
+        "landscape_geometry": {"width": SCANOUT_H, "height": SCANOUT_W},
+        "density_dpi": 320,
         "presentation": {
             "css_max_width_px": 360,
             "aspect_ratio": "1 / 2",
             # The chassis is deliberately NOT resized by a profile: presentation
             # fixes belong to the guest. This documents the current chassis so
             # the DEFAULT profile reproduces it exactly rather than changing it.
-            "note": "browser nearest-neighbour scales the guest frame to the fixed chassis",
+            "note": "browser smooth filtering scales the guest frame to the fixed chassis; exact mode is 1:1",
         },
     },
 }
@@ -642,7 +640,8 @@ def device_guest_geometry(profile_key=None):
 
     This is the authoritative "expected native portrait scanout" the launch
     EDID uses and the frame/capture checks compare the live scanout against.
-    For the reference profile it is 720x1440, so every comparison is unchanged.
+    For the reference profile it is 720x1440, the 1:1 authoring surface, so
+    every comparison expects exactly the geometry the guest paints.
     """
     profile = (DEVICE_PROFILES.get(profile_key or active_device_profile_key)
                or DEVICE_PROFILES[DEFAULT_DEVICE_PROFILE])
@@ -1368,7 +1367,7 @@ SUPPORTED_PROFILES = {
         "boot_type": "BIOS/MBR Bootloader",
         "image": os.path.join(WORKSPACE_ROOT, "target", "inter-os-bios.img"),
         "status": "Primary QEMU Phone contract",
-        "display": {"backend": "vnc", "host": "127.0.0.1", "port": VNC_PORT, "display_index": VNC_DISPLAY, "websocket_port": WS_PORT, "guest_width": 1080, "guest_height": 2160},
+        "display": {"backend": "vnc", "host": "127.0.0.1", "port": VNC_PORT, "display_index": VNC_DISPLAY, "websocket_port": WS_PORT, "guest_width": 720, "guest_height": 1440, "density_dpi": 320, "scale_factor_permille": 1000, "authoring_space": {"width": 720, "height": 1440, "density_dpi": 320}},
         "serial": {"host": "127.0.0.1", "port": 4301},
         "monitor": {"host": "127.0.0.1", "port": 44445},
     },
@@ -1920,7 +1919,7 @@ class VncScanoutClient:
         # not produce the geometry it was asked for, the frame is withheld and
         # the route answers 503 rather than cropping to a wrong scanout.
         expected_w, expected_h = device_guest_geometry()
-        if not is_landscape and (w, h) != (expected_w, expected_h) and (w, h) != (1088, 2160):
+        if not is_landscape and (w, h) != (expected_w, expected_h):
             confirmed_for = now - self._portrait_mismatch_confirmed_at
             if self._portrait_mismatch_confirmed_at and confirmed_for >= CONFIRMATION_TTL:
                 self._portrait_mismatch_confirmed_at = 0.0
@@ -2332,7 +2331,7 @@ def launch_qemu_profile(profile_key="x86_64", ram_mb=None, smp=1):
         exe,
         "-m", f"{ram}M",
         "-smp", str(smp),
-        "-name", "InterOS Core — Native Full HD (1080×2160)",
+        "-name", "InterOS Core — Native 720×1440 (1:1)",
         "-monitor", f"tcp:127.0.0.1:{MONITOR_PORT},server,nowait",
         "-serial", f"tcp:127.0.0.1:{SERIAL_TCP_PORT},server,nowait",
         "-display", display_backend,
@@ -2341,9 +2340,10 @@ def launch_qemu_profile(profile_key="x86_64", ram_mb=None, smp=1):
     if arch == "x86_64":
         cmd.extend(["-machine", "q35", "-cpu", "qemu64"])
         # Real virtual display and pointer hardware for the canonical phone VM.
-        # The x86_64 profile launches with the canonical scanout declared in
-        # SUPPORTED_PROFILES: "guest_width": 720, "guest_height": 1440, wired
-        # into the EDID below so the guest KMS modesets exactly 720x1440.
+        # The x86_64 profile launches at the canonical scanout declared in
+        # SUPPORTED_PROFILES ("guest_width": 720, "guest_height": 1440) and in
+        # the reference device profile, whose geometry is wired into the EDID
+        # below so the guest KMS modesets exactly 720x1440.
         # WHY no -device pointer flag: q35 already exposes the i8042 PS/2
         # controller that the guest's ps2_mouse driver talks to, and this
         # QEMU build rejects a PS/2 mouse device flag ("expects a pluggable
@@ -2363,7 +2363,7 @@ def launch_qemu_profile(profile_key="x86_64", ram_mb=None, smp=1):
         # and keeps the guest KMS at the requested scanout.
         #
         # WHY the standard VGA device and not virtio-vga: virtio-vga's
-        # framebuffer is capped at 8MB of VRAM and cannot present the FHD-class
+        # framebuffer is capped at 8MB of VRAM and cannot present the 720x1440
         # scanout this device profile asks for -- the guest logs the DISPI mode
         # as unavailable, falls back, and the result is horizontal banding
         # because the display mode and the compositor's scanout disagree. The
@@ -2371,8 +2371,9 @@ def launch_qemu_profile(profile_key="x86_64", ram_mb=None, smp=1):
         # (`vgamem_mb`), so raising the guest's scanout is a matter of asking
         # for it here rather than hitting a device limit.
         #
-        # 32MB covers a 1080x2160 ARGB8888 front and back buffer (19.8MB) with
-        # headroom, which is the size the profile's geometry implies.
+        # 32MB covers a 720x1440 ARGB8888 front and back buffer (4,147,200
+        # bytes each, ~7.9MB total) with headroom, which is the size the
+        # profile's geometry implies.
         edid_w, edid_h = device_guest_geometry()
         cmd.extend([
             "-vga", "none",
@@ -2965,7 +2966,12 @@ def is_safe_guest_path(path, writable=False):
         return False
     if any(ord(ch) < 0x20 or ch in "|;&$'\\\"" for ch in path):
         return False
-    if writable and not path.startswith("/data/"):
+    # WHY /storage media directories are writable too: a Studio screenshot or
+    # a host-delivered download is a document the guest's Gallery and File
+    # Manager are supposed to list. Confining host writes to /data/ would put
+    # those files where no media app looks.
+    writable_roots = ("/data/", "/storage/photos/", "/storage/pictures/", "/storage/videos/")
+    if writable and not path.startswith(writable_roots):
         return False
     return all(part and part not in (".", "..") for part in path.split("/") if part)
 
@@ -3020,12 +3026,19 @@ def guest_fs_read(path):
     data = b"".join(chunks)
     return True, None, data.decode("utf-8", errors="replace")
 
-def guest_fs_write(path, content):
+MAX_GUEST_STUDIO_FILE_BYTES = 8192
+
+def guest_fs_write_bytes(path, raw):
+    """Streams opaque bytes into the guest over the COM1 filesystem channel.
+
+    WHY a bytes variant: the text writer decodes UTF-8, and a screenshot is
+    RGB bytes. The console already carries hex chunks, so the transport stays
+    the same; only the caller's buffer changes.
+    """
     if not is_safe_guest_path(path, writable=True):
-        return False, 'guest writes are restricted to safe /data paths'
-    raw = content.encode("utf-8")
-    if len(raw) > 8192:
-        return False, 'guest file exceeds 8192-byte limit'
+        return False, 'guest writes are restricted to /data and media storage'
+    if len(raw) == 0 or len(raw) > MAX_GUEST_STUDIO_FILE_BYTES:
+        return False, f'guest file exceeds {MAX_GUEST_STUDIO_FILE_BYTES}-byte limit'
     ok, lines = guest_command_lines(f"STUDIO_FS_BEGIN {path} {len(raw)}", f"WRITE_READY path={path}", timeout=5)
     if not ok:
         return False, lines[-1] if lines else "guest filesystem unavailable"
@@ -3036,6 +3049,9 @@ def guest_fs_write(path, content):
             return False, lines[-1] if lines else "guest filesystem chunk failed"
     ok, lines = guest_command_lines("STUDIO_FS_COMMIT", "WRITE_OK", timeout=8)
     return ok, None if ok else (lines[-1] if lines else "guest filesystem commit failed")
+
+def guest_fs_write(path, content):
+    return guest_fs_write_bytes(path, content.encode("utf-8"))
 
 # What this Studio actually put on the host disk, keyed by package id.
 #
@@ -3165,6 +3181,7 @@ POST_ONLY_ROUTES = frozenset({
     '/api/themes/bootloader',
     '/api/fs/read',
     '/api/fs/write',
+    '/api/screenshot/save',
     '/api/telephony/dial',
     '/api/telephony/hangup',
     '/api/telephony/data/toggle',
@@ -3612,8 +3629,8 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             # Single-shot canonical guest frame for the screenshot control and
             # the canvas polling fallback. Serves only live guest-derived frames
             # (native portrait 720x1440, portrait phone slice 360x720, or full
-            # landscape 1280x720); anything else is an honest 503 so the phone
-            # never shows a broken image.
+            # landscape 1440x720 / legacy 1280x720); anything else is an honest
+            # 503 so the phone never shows a broken image.
             #
             # WHY the device state gates this route: a frame served from a
             # stale session (or from whatever else holds the VNC port) is not
@@ -5155,6 +5172,74 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
             self.wfile.write(json.dumps({'success': ok, 'source': 'GUEST_VFS', 'path': path, 'error': err}).encode())
+            return
+
+        if self.path == '/api/screenshot/save':
+            self._drain_incoming_body_if_any()
+            device = qemu_device_state()
+            if not device["running"]:
+                self._send_json(503, {
+                    'success': False,
+                    'error': f"No guest frame available: {device['reason']}",
+                    'device_state': device['state'],
+                })
+                return
+            try:
+                # WHY bounded retries: during the first frames after a boot the
+                # VNC scanout can still be the pre-modeset geometry, which the
+                # capture path refuses as non-canonical. The guest finishes its
+                # modeset within a few hundred milliseconds; retrying is how a
+                # capture requested at that moment succeeds instead of failing
+                # on a frame that was never going to be saved.
+                img_bytes, reason = None, None
+                for attempt in range(4):
+                    img_bytes, reason = capture_qemu_screen_frame(prefer_jpeg=False)
+                    if img_bytes:
+                        break
+                    if attempt < 3:
+                        time.sleep(0.25)
+                if not img_bytes:
+                    self._send_json(503, {
+                        'success': False,
+                        'error': f"No guest frame available: {reason}",
+                    })
+                    return
+                from PIL import Image
+                with Image.open(io.BytesIO(img_bytes)) as im:
+                    # WHY this size: it is the resolution the guest Gallery's
+                    # decoder and screenshot grid were built for. The full
+                    # 720x1440 scanout remains available through QEMU directly.
+                    preview_w, preview_h = 36, 72
+                    resample = getattr(Image, 'Resampling', Image).LANCZOS
+                    rgb = im.convert('RGB').resize((preview_w, preview_h), resample=resample)
+                ppm = (
+                    f"P6\n{preview_w} {preview_h}\n255\n".encode('ascii')
+                    + rgb.tobytes()
+                )
+                path = f"/storage/photos/Studio/screenshot_studio_{int(time.time() * 1000)}.ppm"
+                ok, err = guest_fs_write_bytes(path, ppm)
+                if not ok:
+                    self._send_json(500, {
+                        'success': False,
+                        'source': 'GUEST_VFS',
+                        'path': path,
+                        'error': err or 'guest filesystem write failed',
+                    })
+                    return
+                self._send_json(200, {
+                    'success': True,
+                    'source': 'GUEST_VFS',
+                    'path': path,
+                    'width': preview_w,
+                    'height': preview_h,
+                    'bytes': len(ppm),
+                    'note': 'Downscaled Studio capture; native scanout is 720x1440.',
+                })
+            except Exception as e:
+                self._send_json(500, {
+                    'success': False,
+                    'error': f"Screenshot capture failed: {e}",
+                })
             return
 
         if self.path == '/api/themes/bootloader':

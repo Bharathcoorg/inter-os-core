@@ -91,10 +91,11 @@ def test_the_recording_count_is_written_out_in_full():
 
 
 def test_the_text_is_drawn_with_the_outline_typeface():
-    """The panel is 1080x2160 and the app paints at 720x1440.
+    """The panel and the app's surface are both 720x1440.
 
-    A bitmap run is magnified 3:2 on the way to the screen and reads as
-    soft.
+    The compositor copies the surface 1:1. The 16x24 bitmap face would be
+    magnified to the screen's type sizes and read soft, so text uses the
+    outline face rasterised at the screen's own resolution.
     """
     source = recorder_main()
     assert "use interos_std::design::outline_text;" in source

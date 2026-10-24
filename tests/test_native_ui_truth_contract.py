@@ -440,7 +440,9 @@ def test_touchpad_uses_valid_guest_contact_actions_and_reports_real_request_resu
     assert "touchSurface.focus({ preventScroll: true })" in source
     assert "document.activeElement !== touchSurface" in source
     assert "const target = [liveScanoutCanvas, liveScanoutImg, screenLiveScanout].find(visible);" in source
-    assert "state.isLandscape ? (1280 / 720) : (720 / 1440)" in source
+    assert "state.isLandscape" in source
+    assert "? { width: 1440, height: 720, coords: 'guest_framebuffer' }" in source
+    assert ": { width: 720, height: 1440, coords: 'portrait' }" in source
     assert "function guestPointerGeometry()" in source
     assert "coords: 'guest_framebuffer'" in source
 
@@ -512,9 +514,13 @@ def test_settings_security_privacy_and_rtc_are_not_assumed_successful():
         'b"RTC SYNC"',
     ):
         assert fabricated not in source
-    assert 'b"Keystore status unavailable"' in source
-    assert 'b"Vault encryption status unavailable"' in source
-    assert 'b"Privacy filter status unavailable"' in source
+    # WHY the probe outcome and the absent query, and not "status unavailable":
+    # the keystore row reports the result of the derivation probe this app is
+    # allowed to attempt, and the vault and filter rows name the missing query
+    # rather than implying a status the platform never answered.
+    assert 'b"Derivation refused by the kernel"' in source
+    assert 'b"No vault encryption status query is exposed"' in source
+    assert 'b"No privacy filter status query is exposed"' in source
 
 
 def test_native_keyboard_events_are_decoded_and_used_by_browser_and_calculator():
@@ -577,9 +583,23 @@ def test_unavailable_settings_services_use_neutral_not_success_styling():
     # under test is unchanged: an unavailable service is reported in the
     # neutral ink and never in the success ink.
     assert 'b"DVFS state unavailable", THEME.on_surface_variant' in source
-    assert 'b"Keystore status unavailable", THEME.on_surface_variant' in source
-    assert 'b"Vault encryption status unavailable", THEME.on_surface_variant' in source
-    assert 'b"Privacy filter status unavailable", THEME.on_surface_variant' in source
-    assert 'b"Keystore status unavailable", THEME.success' not in source
-    assert 'b"Vault encryption status unavailable", THEME.success' not in source
-    assert 'b"Privacy filter status unavailable", THEME.success' not in source
+    # The rows are multi-line calls, so the assertions match the argument
+    # sequence with whitespace flattened: caption, ink, badge, badge ink.
+    compact = " ".join(source.split())
+    assert (
+        'b"Derivation refused by the kernel", b"REFUSED", THEME.on_surface_variant,'
+        in compact
+    )
+    assert (
+        'b"No vault encryption status query is exposed", THEME.on_surface_variant, '
+        'b"NOT REPORTED", THEME.on_surface_variant'
+        in compact
+    )
+    assert (
+        'b"No privacy filter status query is exposed", THEME.on_surface_variant, '
+        'b"NOT REPORTED", THEME.on_surface_variant'
+        in compact
+    )
+    assert 'b"Derivation refused by the kernel", THEME.success' not in compact
+    assert 'b"No vault encryption status query is exposed", THEME.success' not in compact
+    assert 'b"No privacy filter status query is exposed", THEME.success' not in compact

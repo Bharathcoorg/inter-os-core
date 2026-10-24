@@ -75,23 +75,18 @@
         <div class="ide-target-device">
           <div class="target-chip">
             <svg class="chip-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="2" width="14" height="20" rx="3"/><circle cx="12" cy="18" r="1"/></svg>
-            <span class="target-name">InterOS &mdash; QEMU Virtual Device</span>
+            <span class="target-name">QEMU Virtual Device</span>
           </div>
           <div class="target-specs-list">
-            <span class="spec-node"><span class="spec-lbl">Arch:</span> <span class="spec-val" id="spec-arch">x86_64</span></span>
-            <span class="spec-node"><span class="spec-lbl">Memory:</span> <span class="spec-val" id="spec-memory">1024 MB</span></span>
-            <span class="spec-node"><span class="spec-lbl">Display:</span> <span class="spec-val" id="spec-display">1080&times;2160</span></span>
-            <span class="spec-node"><span class="spec-lbl">Security:</span> <span class="spec-val" id="spec-security">Zero-Trust</span></span>
+            <span class="spec-node"><span class="spec-lbl">Arch</span> <span class="spec-val" id="spec-arch">x86_64</span></span>
+            <span class="spec-node"><span class="spec-lbl">Memory</span> <span class="spec-val" id="spec-memory">2 GB</span></span>
+            <span class="spec-node"><span class="spec-lbl">Security</span> <span class="spec-val" id="spec-security">Ring 3 sandbox</span></span>
           </div>
         </div>
       </div>
 
-      <!-- Center: Action Controls (Focus Mode, Fullscreen WebApp, Screenshot, Reboot) -->
+      <!-- Center: Action Controls (Focus, Fullscreen, Web Import, Options) -->
       <div class="header-center-actions">
-        <button class="header-action-pill active" id="btn-header-scale" title="Toggle Display Sizing: Responsive Fit / Flagship">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
-          <span id="header-scale-text">Flagship</span>
-        </button>
         <button class="header-action-pill active" id="btn-focus-mode" title="Toggle Immersive Smartphone Focus Mode (Hotkey: F, Esc to exit)">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="5" y="2" width="14" height="20" rx="3"/><circle cx="12" cy="18" r="1"/></svg>
           <span>Focus Mode</span>
@@ -99,10 +94,6 @@
         <button class="header-action-pill" id="btn-fullscreen-mode" title="Fullscreen WebApp: Hide Browser Tab/URL Bar">
           <svg id="fullscreen-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>
           <span id="fullscreen-text">Fullscreen</span>
-        </button>
-        <button class="header-action-pill" id="btn-header-screenshot" title="Capture High-Res Screenshot">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
-          <span>Screenshot</span>
         </button>
         <button class="header-action-pill primary" id="btn-import-webapp" title="1-Click WebApp to .rapp Porting Engine">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
@@ -112,6 +103,17 @@
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
           <span>Reboot OS</span>
         </button>
+        <button class="header-action-pill header-options-btn" id="btn-header-options" title="Choose which header actions stay visible">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="5" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="19" r="1.6"/></svg>
+          <span>Options</span>
+        </button>
+        <div class="header-options-menu" id="header-options-menu" hidden>
+          <div class="header-options-title">Header options</div>
+          <label><input type="checkbox" data-header-option="btn-focus-mode"> <span>Focus mode</span></label>
+          <label><input type="checkbox" data-header-option="btn-fullscreen-mode"> <span>Fullscreen</span></label>
+          <label><input type="checkbox" data-header-option="btn-import-webapp"> <span>1-Click Web Import</span></label>
+          <button type="button" class="header-options-reset" id="btn-header-options-reset">Show all</button>
+        </div>
       </div>
 
       <!-- Right: Liveness Status & Mobile Switcher -->
@@ -173,7 +175,7 @@
                    POST /api/touch/event and /api/input/key.
                    ================================================================ -->
               <div class="screen-live-scanout" id="screen-live-scanout" tabindex="0" role="application" aria-label="InterOS guest display. Click to focus, then use the keyboard to interact." style="display: flex;">
-                <canvas id="live-scanout-canvas" class="live-scanout-canvas" width="1080" height="2160" style="display: none;"></canvas>
+                <canvas id="live-scanout-canvas" class="live-scanout-canvas" width="720" height="1440" style="display: none;"></canvas>
                 <img id="live-scanout-img" alt="InterOS guest framebuffer — the guest kernel renders the entire device UI into this scanout" draggable="false" style="display: none;" />
                 <div id="scanout-no-signal" class="scanout-no-signal">
                   <div class="no-signal-title">No guest frame</div>
@@ -334,7 +336,7 @@
           <button class="emu-btn" id="emu-btn-voldown" title="Volume Down">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
           </button>
-          <button class="emu-btn" id="emu-btn-screenshot" title="Take Screenshot (Download PNG)">
+          <button class="emu-btn" id="emu-btn-screenshot" title="Capture Guest Screen (saves into Gallery &rsaquo; Screenshots and Files &rsaquo; Storage/photos/Studio)">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
           </button>
           <button class="emu-btn" id="emu-btn-focus" title="Toggle Immersive Smartphone Focus Mode (Key: F)">
@@ -343,7 +345,7 @@
           <button class="emu-btn" id="emu-btn-fullscreen" title="Toggle Fullscreen WebApp (Hide Browser UI) [Key: F11]">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>
           </button>
-          <button class="emu-btn" id="emu-btn-scale" title="Cycle Display Sizing: Fit (360px) / Flagship (470px)">
+          <button class="emu-btn" id="emu-btn-scale" title="Cycle Presentation: Fit / Flagship / Focus / 1:1 Native (720×1440)">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
           </button>
           <button class="emu-btn" id="emu-btn-rotate" title="Rotate Screen (Orientation)" style="display: none !important;">
@@ -380,6 +382,21 @@
 
     <!-- Right Pane: Developer Diagnostics & Hardware Telemetry Profiler -->
     <aside class="ide-dev-pane" id="ide-right-pane">
+
+      <!-- Downscale disclosure. WHY: the phone pane is a CSS-scaled mirror of
+           the guest's own 720x1440 scanout, so its pixels are resampled before
+           they reach this window. Saying so keeps the preview from being read
+           as native-quality output. -->
+      <div class="studio-preview-notice" id="studio-preview-notice">
+        <div class="studio-preview-notice-icon" aria-hidden="true">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="2" width="14" height="20" rx="3"/><path d="M9 18h6"/></svg>
+        </div>
+        <div class="studio-preview-notice-body">
+          <strong>Studio preview is downscaled</strong>
+          <p>This pane mirrors the guest's native 720&times;1440 scanout at a smaller size. Run QEMU directly for the native-quality experience.</p>
+          <p class="studio-preview-notice-hint">Side-toolbar screenshots are captured at preview scale inside the guest: Gallery &rsaquo; Screenshots and Files &rsaquo; Storage/photos/Studio.</p>
+        </div>
+      </div>
 
       <!-- Hardware Telemetry Dashboard (RAM, Storage, CPU Heatmap, Bus) -->
       <div class="hw-telemetry-panel">
@@ -692,9 +709,9 @@
             </div>
             <div class="memmap-row">
               <span class="reg-type">VBE Linear Framebuffer</span>
-              <code>0x00000000FD000000 - 0x00000000FD8E9000</code>
-              <span>9,331,200 Bytes</span>
-              <span class="cap-badge ok">1080&times;2160 TrueColor (32-bit)</span>
+              <code>0x00000000FD000000 - 0x00000000FD3F4800</code>
+              <span>4,147,200 Bytes</span>
+              <span class="cap-badge ok">720&times;1440 TrueColor (32-bit)</span>
             </div>
           </div>
         </div>
@@ -707,7 +724,7 @@
                 <span class="cap-name">cap:display:framebuffer_scanout</span>
                 <span class="cap-badge ok">Granted</span>
               </div>
-              <span class="cap-val">Scope: Ring 3 Shared Display Memory (1080x2160)</span>
+              <span class="cap-val">Scope: Ring 3 Shared Display Memory (720x1440)</span>
             </div>
             <div class="capability-item">
               <div class="cap-header">

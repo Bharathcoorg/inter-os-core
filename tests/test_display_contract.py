@@ -36,7 +36,11 @@ def main() -> None:
     must(kms, "pub fn write_surface_pixels", "KMS pixel write backend")
     fb=(ROOT/"kernel/src/framebuffer.rs").read_text(encoding="utf-8")
     must(fb,"pub fn present_argb8888","hardware framebuffer scanout")
-    must(fb,"aspect ratio","hardware scanout scaling")
+    # The scanout keeps the source aspect ratio and centres it, rather than
+    # stretching a portrait surface across a landscape framebuffer.
+    must(fb, "src_w.saturating_mul(info.height) <= src_h.saturating_mul(info.width)",
+         "aspect-fit scanout geometry")
+    must(fb, "let off_x = (info.width - dst_w) / 2;", "centred scanout letterbox")
     must(kms, "pub fn destroy_surface_owned", "KMS owned surface destruction")
     must(kms, "pub const MAX_SCANOUT_PIXELS: usize = 3840 * 2160;", "bounded scanout budget")
     must(kms, "checked_mul(self.scanout_height as usize)", "checked scanout allocation arithmetic")

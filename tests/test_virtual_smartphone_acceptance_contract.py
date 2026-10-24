@@ -89,8 +89,22 @@ def test_quick_controls_never_present_unsupported_features_as_working():
     controls = read("apps/launcher/src/screens/quick_controls.rs")
     launcher = read("apps/launcher/src/main.rs")
     sdk = read("sdk/rust/interos-std/src/lib.rs")
-    assert "let brightness_available = false" in controls
-    assert 'b"Unavailable"' in controls
-    assert 'b"N/A"' in controls
+    # Every unsupported row names the reason in the kernel's own terms rather
+    # than showing a state, a level or a percentage.
+    for reason in (
+        'b"Unavailable"',
+        'b"Not applicable"',
+        'b"No backlight"',
+        'b"No mixer"',
+        'b"No flash"',
+        'b"Not wired"',
+    ):
+        assert reason in controls
+    # Only the rows with a real backend may act; everything else is a no-op,
+    # so a press cannot toggle fabricated state.
+    assert "QuickControlAction::NoOp" in controls
+    assert "matches!(self, PanelRow::Lock)" in controls
     assert "pub fn audio_set_volume(volume_percent: u32)" in sdk
-    assert "std::audio_set_volume(requested)" in launcher
+    # There is no mixer, so the panel must not grow a working volume control.
+    assert "slider_percent" not in controls
+    assert "std::audio_set_volume(requested)" not in launcher

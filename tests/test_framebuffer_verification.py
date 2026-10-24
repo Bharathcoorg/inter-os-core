@@ -47,7 +47,7 @@ def rendered_frame(tmpdir):
     Built at the same proportions the measured launcher frame had, so the test
     exercises the same region of the checker rather than an easy case. Rows are
     assembled by slice-multiplying whole runs rather than per-pixel in Python:
-    a per-pixel loop over 2.3 M pixels added over a minute to the contract
+    a per-pixel loop over 1.04 M pixels added over a minute to the contract
     suite, which every run pays.
     """
     accents = [(100, 116, 139), (2, 132, 199), (56, 189, 248), (30, 41, 59), (20, 27, 43)]

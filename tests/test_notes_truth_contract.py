@@ -249,10 +249,11 @@ def test_a_store_that_fails_validation_is_kept_rather_than_destroyed():
 
 
 def test_the_note_text_is_drawn_with_the_outline_typeface():
-    """The panel is 1080x2160 and the app paints at 720x1440.
+    """The panel and the app's surface are both 720x1440.
 
-    A bitmap run is magnified 3:2 on the way to the screen and reads as
-    soft. The outline face rasterises the real outline and reads as sharp.
+    The compositor copies the surface 1:1. The 16x24 bitmap face would be
+    magnified to the screen's type sizes and read soft; the outline face
+    rasterises the real outline and reads as sharp.
     """
     source = notes_main()
     assert "use interos_std::design::outline_text;" in source

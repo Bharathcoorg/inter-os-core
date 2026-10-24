@@ -76,8 +76,8 @@ def test_the_design_goals_hold_the_values_the_apps_are_measured_against():
         "pub const PRIMARY_ACTION: usize = 56;",
         "pub const LOGICAL_WIDTH: usize = 720;",
         "pub const LOGICAL_HEIGHT: usize = 1440;",
-        "pub const SCANOUT_WIDTH: usize = 1080;",
-        "pub const SCANOUT_HEIGHT: usize = 2160;",
+        "pub const SCANOUT_WIDTH: usize = LOGICAL_WIDTH;",
+        "pub const SCANOUT_HEIGHT: usize = LOGICAL_HEIGHT;",
         "pub const CONTENT_PADDING: usize = 24;",
         "pub const STATUS_BAR_HEIGHT: usize = 48;",
         "pub const NAV_BAR_HEIGHT: usize = 64;",
@@ -92,11 +92,11 @@ def test_the_design_goals_hold_the_values_the_apps_are_measured_against():
 
 
 def test_every_app_paints_the_canonical_logical_surface():
-    """An app paints 720x1440 and the panel is 1080x2160.
+    """Every app paints the 720x1440 logical surface, which is also the scanout.
 
-    WHY: the apps draw in logical pixels and the compositor magnifies.
-    An app that drew in panel pixels would be scaled by three in width and
-    two in height, and everything on it would be stretched.
+    WHY: the compositor presents the authoring space 1:1, so an app that
+    invented its own surface size would be resampled and its one-pixel
+    strokes would soften.
     """
     offenders = []
     for app_dir in sorted(APPS.iterdir()):

@@ -33,19 +33,13 @@ DATA_DISK_BYTES = 512 * 1024 * 1024
 MONITOR_PORT = 44551
 SERIAL_PORT = 43551
 
-# The x86_64 guest engages a native 1080x2160 portrait DISPI scanout once paging
+# The x86_64 guest engages a native 720x1440 portrait DISPI scanout once paging
 # is live (kernel::framebuffer::engage_native_mode). The screendump is that
 # scanout, so the phone surface is the whole frame. The legacy 1280x720
 # letterboxed landscape mode is no longer produced by the current kernel.
-FRAMEBUFFER_W, FRAMEBUFFER_H = 1080, 2160
+FRAMEBUFFER_W, FRAMEBUFFER_H = 720, 1440
 PHONE_X0 = 0
 PHONE_W = FRAMEBUFFER_W
-
-# Phone dock tile centre. The launcher authors at 720x1440 with the Phone tile at
-# x 48..238, y 700..980 (apps/launcher/src/main.rs HomeScreen dock). The guest
-# scales authoring space by 1.5 onto the 1080x2160 scanout (framebuffer.rs).
-PHONE_TILE_X = int((48 + 238) / 2 * 1.5)   # 215
-PHONE_TILE_Y = int((700 + 980) / 2 * 1.5)  # 1260
 
 BOOT_TIMEOUT = 240.0
 SETTLE = 2.5

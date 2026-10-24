@@ -1009,7 +1009,7 @@
   // 5. InterOS Sovereign Client Bridge
   // =========================================================================
   const InterOS = {
-    version: '8.2.0',
+    version: '0.1.0',
     platform: 'InterOS Sovereign Microkernel',
 
     get appId() {

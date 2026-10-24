@@ -81,12 +81,15 @@ html, body.dark-theme {
    Developer Environment IDE Header
    -------------------------------------------------------------------------- */
 .studio-header {
-  height: 42px;
+  /* WHY auto height: the action row is allowed to wrap instead of clipping.
+     A fixed 42px bar silently hid the right-hand pills on narrower desktops. */
+  min-height: 42px;
+  height: auto;
   background: rgba(12, 12, 15, 0.95);
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-  padding: 0 16px;
+  padding: 6px 16px;
   position: sticky;
   top: 0;
   z-index: 1000;
@@ -98,11 +101,13 @@ html, body.dark-theme {
 
 .studio-header-inner {
   width: 100%;
-  height: 100%;
+  min-height: 30px;
+  height: auto;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
+  flex-wrap: wrap;
 }
 
 .brand-group {
@@ -160,13 +165,19 @@ html, body.dark-theme {
   align-items: center;
   justify-content: center;
   gap: 8px;
-  flex: 1;
+  row-gap: 6px;
+  flex: 1 1 520px;
+  min-width: 0;
+  flex-wrap: wrap;
+  position: relative;
 }
 
 .header-action-pill {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  flex-shrink: 0;
+  white-space: nowrap;
   padding: 4px 12px;
   border-radius: 6px;
   background: rgba(255, 255, 255, 0.04);
@@ -204,6 +215,129 @@ html, body.dark-theme {
   background: rgba(239, 68, 68, 0.25);
   border-color: #EF4444;
   color: #FFFFFF;
+}
+
+/* Header options: a small persisted list of action visibility toggles. The
+   menu is the one header control that never hides, so a hidden action can
+   always be restored. */
+.header-options-btn {
+  color: #A1A1AA;
+}
+
+.header-options-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 1200;
+  min-width: 208px;
+  padding: 8px;
+  border-radius: 10px;
+  background: #14151B;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.55);
+}
+
+.header-options-menu[hidden] {
+  display: none;
+}
+
+.header-options-title {
+  padding: 4px 8px 6px;
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: #71717A;
+}
+
+.header-options-menu label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  border-radius: 6px;
+  font-size: 0.74rem;
+  color: #E4E4E7;
+  cursor: pointer;
+}
+
+.header-options-menu label:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.header-options-menu input[type="checkbox"] {
+  accent-color: #FFFFFF;
+  width: 13px;
+  height: 13px;
+  margin: 0;
+}
+
+.header-options-reset {
+  width: 100%;
+  margin-top: 6px;
+  padding: 7px 8px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #E4E4E7;
+  font-size: 0.72rem;
+  cursor: pointer;
+}
+
+.header-options-reset:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+/* A header action the user chose to hide. */
+.header-action-hidden {
+  display: none !important;
+}
+
+/* Downscale disclosure in the right pane. */
+.studio-preview-notice {
+  display: flex;
+  gap: 10px;
+  margin: 12px 12px 0;
+  padding: 11px 12px;
+  border-radius: 10px;
+  background: rgba(96, 165, 250, 0.08);
+  border: 1px solid rgba(96, 165, 250, 0.22);
+  color: #DBEAFE;
+}
+
+.studio-preview-notice-icon {
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 7px;
+  background: rgba(96, 165, 250, 0.16);
+  color: #93C5FD;
+}
+
+.studio-preview-notice-body {
+  min-width: 0;
+}
+
+.studio-preview-notice-body strong {
+  display: block;
+  font-size: 0.76rem;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+  color: #F8FAFC;
+}
+
+.studio-preview-notice-body p {
+  margin: 4px 0 0;
+  font-size: 0.69rem;
+  line-height: 1.45;
+  color: #A8B6CE;
+}
+
+.studio-preview-notice-body .studio-preview-notice-hint {
+  color: #7C8BA5;
 }
 
 .ide-v-sep {
@@ -349,17 +483,13 @@ html, body.dark-theme {
   background: #111115;
 }
 
-/* Progressive collapse for target device chips on narrower screens */
+/* Progressive collapse for target device chips on narrower screens.
+   Arch and Memory stay visible down to the point where the header actions
+   genuinely need the room; the security chip drops earlier. */
 @media (max-width: 1680px) {
-  .target-specs-list .spec-node:nth-child(4) { display: none; }
-}
-@media (max-width: 1500px) {
   .target-specs-list .spec-node:nth-child(3) { display: none; }
 }
-@media (max-width: 1340px) {
-  .target-specs-list .spec-node:nth-child(2) { display: none; }
-}
-@media (max-width: 1200px) {
+@media (max-width: 1240px) {
   .target-specs-list { display: none; }
 }
 @media (max-width: 960px) {
@@ -2511,15 +2641,15 @@ body[data-theme="cyberdeck_hud"] .device-screen {
   justify-content: center;
 }
 
-/* The guest scanout is a 720x1440 pixel-exact surface, and this element is the
-   only thing between it and the viewer's screen. WHY `pixelated`: the phone
-   chassis is 380px wide inside a 10px bezel, so the 720px frame is drawn at
-   roughly half size, and the browser's default smoothing was interpolating
-   every glyph edge in that halving -- which is what made the whole UI look
-   soft and slightly out of focus in Studio even though the framebuffer itself
-   was exact. Nearest-neighbour at a fractional scale preserves the guest's own
-   edges (still anti-aliased by the firmware) instead of replacing them with the
-   viewer's blur. */
+/* The guest scanout is a native 720x1440 surface and this element is the only
+   thing between it and the viewer's screen. WHY `auto` (smooth) and not
+   nearest-neighbour: the presentation modes scale the 720px-wide frame by a
+   non-integer factor (the chassis is limited by the window height, not by a
+   fixed pixel width). Nearest-neighbour at a fractional scale drops or
+   doubles glyph stems and produces visible aliasing in text; the guest
+   already anti-aliased its text at 720x1440, and the browser's box filter is
+   the correct final resample for an arbitrary CSS scale. True 1:1 inspection
+   is the dedicated pixel-exact mode below, where no resampling happens. */
 #live-scanout-img,
 #live-scanout-canvas,
 .live-scanout-canvas,
@@ -2531,30 +2661,28 @@ body[data-theme="cyberdeck_hud"] .device-screen {
   cursor: pointer;
   user-select: none;
   -webkit-user-drag: none;
-  image-rendering: -webkit-optimize-contrast;
-  image-rendering: crisp-edges;
-  image-rendering: pixelated;
+  image-rendering: auto;
   transform: translateZ(0);
 }
 
-/* 1:1 Pixel-Exact Full HD Inspection Mode inside Device Studio */
-.screen-live-scanout.fhd-pixel-exact {
+/* 1:1 Pixel-Exact Native (720x1440) Inspection Mode inside Device Studio */
+.screen-live-scanout.pixel-exact-native {
   overflow: auto !important;
   display: block !important;
   background: #000000;
 }
 
-.screen-live-scanout.fhd-pixel-exact #live-scanout-canvas,
-.screen-live-scanout.fhd-pixel-exact .live-scanout-canvas,
-.screen-live-scanout.fhd-pixel-exact .screen-canvas {
-  width: 1080px !important;
-  height: 2160px !important;
+.screen-live-scanout.pixel-exact-native #live-scanout-canvas,
+.screen-live-scanout.pixel-exact-native .live-scanout-canvas,
+.screen-live-scanout.pixel-exact-native .screen-canvas {
+  width: 720px !important;
+  height: 1440px !important;
   max-width: none !important;
   max-height: none !important;
   object-fit: none !important;
-  image-rendering: -webkit-optimize-contrast;
-  image-rendering: crisp-edges;
-  image-rendering: pixelated;
+  /* 1:1 means the backing store maps to exactly one CSS pixel per device
+     pixel; `auto` is exact here and pixelated is unnecessary. */
+  image-rendering: auto;
 }
 
 /* Honest Studio-owned standby card: shown instead of the live canvas only
@@ -2643,18 +2771,24 @@ body[data-theme="cyberdeck_hud"] .device-screen {
   max-width: 420px !important;
 }
 
+/* Presentation sizes, not resolutions: the guest scanout stays 720x1440 in
+   every mode. WHY the width caps are gone: a 540px cap turned the 720px
+   framebuffer into a ~0.75x downscale even on a tall display, which made
+   already-small guest text smaller again. With `aspect-ratio: 1 / 2` and a
+   definite height the width follows the height, so the device uses the whole
+   viewport and is only ever limited by the window it is shown in. */
 .studio-workspace.smartphone-mode .device-chassis.large-mode,
 .device-chassis.large-mode {
-  height: min(960px, calc(100vh - 40px)) !important;
-  max-height: calc(100vh - 40px) !important;
-  max-width: min(540px, calc((100vh - 40px) / 2)) !important;
+  height: min(1040px, calc(100vh - 32px)) !important;
+  max-height: calc(100vh - 32px) !important;
+  max-width: none !important;
 }
 
 .studio-workspace.smartphone-mode .device-chassis.retina-mode,
 .device-chassis.retina-mode {
-  height: min(1080px, calc(100vh - 30px)) !important;
+  height: min(1470px, calc(100vh - 30px)) !important;
   max-height: calc(100vh - 30px) !important;
-  max-width: min(640px, calc((100vh - 30px) / 2)) !important;
+  max-width: none !important;
 }
 
 .studio-workspace.smartphone-mode .device-chassis.exact-mode,
@@ -2775,7 +2909,7 @@ body.studio-focus-mode .phone-and-nav-container {
 body.studio-focus-mode .device-chassis {
   height: calc(100% - 36px) !important;
   max-height: calc(100vh - 72px) !important;
-  max-width: min(520px, calc((100vh - 72px) / 2)) !important;
+  max-width: none !important;
   width: auto !important;
   aspect-ratio: 1 / 2 !important;
   border-color: #3F3F46 !important;
@@ -2787,15 +2921,23 @@ body.studio-focus-mode .device-chassis {
 }
 
 body.studio-focus-mode .device-chassis.large-mode {
-  height: calc(100% - 24px) !important;
-  max-height: calc(100vh - 54px) !important;
-  max-width: min(560px, calc((100vh - 54px) / 2)) !important;
+  height: calc(100% - 36px) !important;
+  max-height: calc(100vh - 72px) !important;
+  max-width: none !important;
 }
 
 body.studio-focus-mode .device-chassis.retina-mode {
+  /* The immersive presentation uses the full remaining viewport height at the
+     phone's 1:2 ratio. On a tall window the derived width reaches the native
+     720x1440 geometry, so text is shown at (or close to) its designed size;
+     1:1 Native remains available for pixel-exact inspection.
+     HOW the width cap is derived: the chassis carries 20px of horizontal
+     chrome (border plus padding), so a 740px chassis is the widest one whose
+     720px scanout is still shown at 1:1. Without it a very tall window
+     upscaled the guest and softened every glyph edge. */
   height: calc(100% - 16px) !important;
   max-height: calc(100vh - 44px) !important;
-  max-width: min(640px, calc((100vh - 44px) / 2)) !important;
+  max-width: 740px !important;
 }
 
 body.studio-focus-mode .device-chassis.exact-mode {
@@ -2916,9 +3058,14 @@ body.studio-focus-mode .emulator-side-toolbar {
 }
 
 @media (max-height: 820px) {
+  /* Short viewports used to cap the phone at 580px tall regardless of how
+     much room the stage actually had. Keep a real floor instead: the chassis
+     takes the height that is there, so the device does not shrink into a
+     miniature of itself. */
   .device-chassis {
-    height: min(580px, calc(100vh - 105px)) !important;
-    max-height: calc(100vh - 105px) !important;
+    height: min(720px, calc(100vh - 96px)) !important;
+    max-height: calc(100vh - 96px) !important;
+    max-width: none !important;
   }
   .device-stage.ide-device-pane {
     padding: 2px 8px;
@@ -2979,6 +3126,23 @@ body.studio-focus-mode .emulator-side-toolbar {
   0% { background-position: 120% 0; }
   100% { background-position: -20% 0; }
 }
+/* Entrance and specular motion for the pre-scanout splash. These are pure
+   presentation: none of them advances the milestone checklist or prints a
+   percentage, so the animation can never claim boot progress that the guest
+   did not report. */
+@keyframes bootSplashRise {
+  from { opacity: 0; transform: translateY(12px) scale(0.985); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes bootSplashMarkReveal {
+  from { opacity: 0; transform: scale(0.82) rotate(-8deg); }
+  to { opacity: 1; transform: scale(1) rotate(0deg); }
+}
+@keyframes bootSpecularSweep {
+  0% { background-position: 145% 0; }
+  55% { background-position: -45% 0; }
+  100% { background-position: -45% 0; }
+}
 
 /* ==========================================================================
    Phone-frame boot surface (mounted by app.js):
@@ -3009,7 +3173,95 @@ body.studio-focus-mode .emulator-side-toolbar {
   opacity: 0;
   visibility: hidden;
   pointer-events: none;
+  overflow: hidden;
   transition: opacity 0.6s ease, visibility 0.6s ease;
+}
+.phone-boot-splash::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    115deg,
+    transparent 36%,
+    rgba(255, 255, 255, 0.055) 46%,
+    rgba(16, 185, 129, 0.10) 52%,
+    transparent 64%
+  );
+  background-size: 240% 100%;
+  background-position: 145% 0;
+  opacity: 0;
+  transition: opacity 0.5s ease;
+}
+.phone-boot-splash.is-visible::after {
+  opacity: 1;
+  animation: bootSpecularSweep 4.8s ease-in-out infinite;
+}
+.phone-boot-splash > * {
+  position: relative;
+  z-index: 1;
+}
+
+/* WHY the brand is anchored to the middle instead of the flex column being
+   centred: the milestone list is evidence, not part of the mark, and centring
+   the whole column pushed the logo above the optical middle by half the list's
+   height. The lockup now sits exactly on the centre line and the checklist
+   hangs below it. */
+.phone-boot-splash > .pbs-brand {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+}
+.phone-boot-splash > .pbs-sub {
+  position: absolute;
+  left: 0;
+  right: 0;
+  margin: 0 auto;
+  top: calc(50% + 84px);
+  width: max-content;
+  max-width: calc(100% - 36px);
+  white-space: normal;
+}
+.phone-boot-splash > .pbs-stages {
+  position: absolute;
+  left: 0;
+  right: 0;
+  margin: 0 auto;
+  top: calc(50% + 112px);
+  width: min(300px, calc(100% - 36px));
+}
+.phone-boot-splash > .pbs-elapsed {
+  position: absolute;
+  left: 0;
+  right: 0;
+  margin: 0 auto;
+  top: calc(50% + 300px);
+  width: max-content;
+}
+.phone-boot-splash.is-visible .pbs-logo svg {
+  animation:
+    bootLogoPulse 2.8s ease-in-out infinite,
+    bootSplashMarkReveal 0.9s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.phone-boot-splash.is-visible .pbs-wordmark {
+  animation:
+    bootWordmarkSweep 3.6s linear infinite,
+    bootSplashRise 0.8s 0.12s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.phone-boot-splash.is-visible .pbs-sub {
+  animation: bootSplashRise 0.8s 0.26s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.phone-boot-splash.is-visible .pbs-stages {
+  animation: bootSplashRise 0.8s 0.4s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.phone-boot-splash.is-visible .pbs-elapsed {
+  animation: bootSplashRise 0.8s 0.54s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 .phone-boot-splash.is-visible {
   opacity: 1;
@@ -3048,6 +3300,9 @@ body.studio-focus-mode .emulator-side-toolbar {
   font-size: 30px;
   font-weight: 700;
   letter-spacing: 3px;
+  /* letter-spacing also trails the final glyph, so the glyphs would sit
+     1.5px left of the box centre; this puts them back on it. */
+  padding-left: 3px;
   background: linear-gradient(100deg, #A1A1AA 20%, #FFFFFF 42%, #10B981 60%, #A1A1AA 80%);
   background-size: 220% 100%;
   -webkit-background-clip: text;
@@ -3571,6 +3826,23 @@ body.studio-focus-mode .emulator-side-toolbar {
   .emu-btn {
     width: 32px;
     height: 32px;
+  }
+}
+
+/* WHY this override: the chassis already fits its pane at these widths, so
+   the 0.85 shrink only rasterised the 720 px scanout through an extra
+   transform and made guest text softer. Keep the shrink for genuinely narrow
+   phone-width viewports, drop it as soon as the pane can hold the phone. */
+@media (min-width: 561px) and (max-width: 640px) {
+  .device-chassis {
+    transform: none;
+    transform-origin: center top;
+    margin-bottom: 0;
+    /* The unscaled phone is taller than the pane the 0.85 transform was
+       hidden by, so reserve the header and nav chrome explicitly. */
+    height: calc(100vh - 112px) !important;
+    max-height: calc(100vh - 112px) !important;
+    margin-top: 16px;
   }
 }
 

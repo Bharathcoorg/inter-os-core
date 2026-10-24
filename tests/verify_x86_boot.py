@@ -18,9 +18,9 @@ from test_interactive_lifecycle import find_qemu, SerialReader, send_monitor_cmd
 
 # The canonical portrait scanout the KMS declares (kernel/src/drivers/display_kms.rs).
 # A screendump that is not this geometry did not come from this display path.
-EXPECTED_SCANOUT = (1080, 2160)
+EXPECTED_SCANOUT = (720, 1440)
 
-# Sample every Nth pixel. A full 2,3 M-pixel pass in Python costs seconds per
+# Sample every Nth pixel. A full 1,04 M-pixel pass in Python costs seconds per
 # boot for statistics that a 7x sample resolves just as well.
 PPM_SAMPLE_STRIDE = 7
 
@@ -263,7 +263,23 @@ def main():
         if monitor_sock:
             ppm_arg = ppm_path.replace("\\", "/")
             _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_arg}")
-            time.sleep(0.5)
+            # WHY this waits for the write to finish instead of sleeping a
+            # fixed interval: a 720x1440 P6 dump is ~3.1 MB, and QEMU writes it
+            # from the monitor command's completion path. A 0.5 s sleep read a
+            # partially written file and reported it as an "abnormally small
+            # framebuffer", which failed the boot check even though the guest
+            # had presented its homescreen. Poll until the size reaches the
+            # expected payload and stops changing.
+            expected_ppm = EXPECTED_SCANOUT[0] * EXPECTED_SCANOUT[1] * 3
+            deadline = time.time() + 20.0
+            last_size = -1
+            while time.time() < deadline:
+                if os.path.exists(ppm_path):
+                    size = os.path.getsize(ppm_path)
+                    if size >= expected_ppm and size == last_size:
+                        break
+                    last_size = size
+                time.sleep(0.2)
 
         full_log = "\n".join(reader.captured_logs)
         boot_invariants = [

@@ -592,7 +592,13 @@ def test_the_haptic_motor_is_not_claimed_and_the_sound_path_is_asked_about():
 
     assert "Haptic feedback motor" not in source
     assert "settings_hardware_status" in source
-    assert "PCM playback & tactile click feedback" in source
+    # WHY two captions and not the old combined one: the platform reports a
+    # PCM playback path and does not report a haptic motor, and a single
+    # "PCM playback & tactile click feedback" line claimed both from one
+    # answer. The sound row carries only the PCM claim; the haptic row says
+    # what the platform says.
+    assert "PCM playback reported by the platform" in source
+    assert "Haptics are not reported by the platform" in source
 
     # The category names are the kernel's own category names.
     settings = _read(ROOT / "kernel/src/settings.rs")
