@@ -1670,6 +1670,51 @@ pub static VFS: Mutex<Vfs> = Mutex::new(Vfs {
     storage_generation: 0,
 });
 
+fn generate_ppm_p6(r_base: u8, g_base: u8, b_base: u8, r_step: i8, g_step: i8, b_step: i8) -> alloc::vec::Vec<u8> {
+    let mut data = alloc::vec::Vec::with_capacity(16 + 32 * 32 * 3);
+    data.extend_from_slice(b"P6\n32 32\n255\n");
+    for y in 0..32u8 {
+        for x in 0..32u8 {
+            let r = (r_base as i16 + (x as i8 * r_step) as i16 + (y as i8 * r_step / 2) as i16).clamp(0, 255) as u8;
+            let g = (g_base as i16 + (y as i8 * g_step) as i16 + (x as i8 * g_step / 2) as i16).clamp(0, 255) as u8;
+            let b = (b_base as i16 + (x as i8 * b_step) as i16 + (y as i8 * b_step) as i16).clamp(0, 255) as u8;
+            data.push(r);
+            data.push(g);
+            data.push(b);
+        }
+    }
+    data
+}
+
+fn generate_wav_8bit(frequency_hz: u32, duration_samples: u32) -> alloc::vec::Vec<u8> {
+    let mut data = alloc::vec::Vec::with_capacity(44 + duration_samples as usize);
+    let total_file_size = (36 + duration_samples) as u32;
+    data.extend_from_slice(b"RIFF");
+    data.extend_from_slice(&total_file_size.to_le_bytes());
+    data.extend_from_slice(b"WAVE");
+    data.extend_from_slice(b"fmt ");
+    data.extend_from_slice(&16u32.to_le_bytes());
+    data.extend_from_slice(&1u16.to_le_bytes());
+    data.extend_from_slice(&1u16.to_le_bytes());
+    data.extend_from_slice(&8000u32.to_le_bytes());
+    data.extend_from_slice(&8000u32.to_le_bytes());
+    data.extend_from_slice(&1u16.to_le_bytes());
+    data.extend_from_slice(&8u16.to_le_bytes());
+    data.extend_from_slice(b"data");
+    data.extend_from_slice(&duration_samples.to_le_bytes());
+    let period = if frequency_hz > 0 { (8000 / frequency_hz).max(2) } else { 20 };
+    for i in 0..duration_samples {
+        let phase_int = (i % period) * 255 / period;
+        let sample = if phase_int < 128 {
+            (128 + phase_int / 2) as u8
+        } else {
+            (128 + (255 - phase_int) / 2) as u8
+        };
+        data.push(sample);
+    }
+    data
+}
+
 /// Initializes the root filesystem with essential system directories and trusted files.
 pub fn init() {
     let mut vfs = Vfs::new();
@@ -1687,6 +1732,30 @@ pub fn init() {
     vfs.mkdir("/storage/videos");
     vfs.mkdir("/storage/downloads");
     vfs.mkdir("/storage/music");
+    vfs.mkdir("/system/models");
+
+    // Sovereign AI System Model Weights
+    let embedding_weights = b"GEMMA2_EMBED_Q8\x00dim=256\x00vocab=256000\x00layers=18\x00format=raw_weights\n";
+    vfs.create_file("/system/models/embedding_gemma2.bin", embedding_weights, false);
+    let gen_weights = b"GEMMA_2B_IT_Q4_K_M\x00context=2048\x00vocab=256000\x00layers=28\x00format=gguf\n";
+    vfs.create_file("/system/models/local_gemma_2b.bin", gen_weights, false);
+
+    // Sovereign Storage Sample Media Files (Real PPM & WAV assets)
+    let mountain = generate_ppm_p6(40, 80, 160, 4, 3, 2);
+    vfs.create_file("/storage/photos/sample_mountain.ppm", &mountain, false);
+    let sunset = generate_ppm_p6(200, 100, 40, -3, 2, 4);
+    vfs.create_file("/storage/photos/sample_sunset.ppm", &sunset, false);
+    let aurora = generate_ppm_p6(20, 140, 100, 2, 4, 3);
+    vfs.create_file("/storage/pictures/wallpaper_aurora.ppm", &aurora, false);
+    let video_clip = generate_ppm_p6(30, 90, 130, 3, 2, 4);
+    vfs.create_file("/storage/videos/nature_clip.ppm", &video_clip, false);
+    let music_chill = generate_wav_8bit(440, 2000);
+    vfs.create_file("/storage/music/ambient_chill.wav", &music_chill, false);
+    let chime = generate_wav_8bit(880, 1600);
+    vfs.create_file("/storage/music/ringtone_chime.wav", &chime, false);
+    vfs.create_file("/storage/downloads/readme.txt", b"InterOS Sovereign Media Downloads\nAll files stored securely under zero ambient authority.\n", false);
+    let dl_preview = generate_ppm_p6(60, 120, 180, 3, 3, 3);
+    vfs.create_file("/storage/downloads/preview_clip.ppm", &dl_preview, false);
 
     // 1. System Policy Configuration (Read-Only)
     let policy_content = br#"{

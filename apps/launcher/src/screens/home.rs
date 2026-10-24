@@ -1159,6 +1159,15 @@ fn deck_plan(state: &LauncherState, theme: &Theme, _deck: Rect) -> DeckPlan {
 /// there is once per frame and the plan can never lag the state it describes.
 static mut PAINT: Option<Paint> = None;
 
+/// Invalidates the Home Screen paint cache so dynamic app updates, wallpaper switches,
+/// and returning from foreground applications re-measure and re-render all runs.
+pub fn invalidate_paint_cache() {
+    unsafe {
+        let slot: *mut Option<Paint> = core::ptr::addr_of_mut!(PAINT);
+        *slot = None;
+    }
+}
+
 fn paint(x: usize, y: usize, state: &LauncherState) -> &'static Paint {
     let slot: *mut Option<Paint> = core::ptr::addr_of_mut!(PAINT);
     // SAFETY: the launcher is one bare-metal task and the paint loop is not

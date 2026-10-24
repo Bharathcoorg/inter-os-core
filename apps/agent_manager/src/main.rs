@@ -2727,6 +2727,7 @@ fn handle_tap(app: &mut AgentManagerApp, x: u32, y: u32) -> Tap {
 
 /// Paints the screen.
 fn repaint(surface: u32, app: &AgentManagerApp) {
+    std::design::outline_text::reset_slot_pool();
     let mut chunk = [0u32; CHUNK];
     let mut offset = 0usize;
     while offset < W * H {

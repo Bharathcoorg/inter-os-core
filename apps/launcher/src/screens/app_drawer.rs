@@ -849,7 +849,7 @@ fn build(state: &LauncherState) -> Paint {
                 cell.x,
                 top + icon_d + 10,
                 LABEL_SCALE,
-                cell.w.saturating_sub(8),
+                cell.w + 16,
                 cell.w,
                 label,
                 theme.on_surface,

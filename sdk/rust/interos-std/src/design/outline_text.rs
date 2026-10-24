@@ -1119,4 +1119,64 @@ mod tests {
         }
         assert!(anti_aliased_count > 50, "expected smooth anti-aliased edge coverage");
     }
+
+    #[test]
+    fn test_homescreen_dock_labels_all_render() {
+        let _pool: Option<_> = Some(reset_slots());
+
+        // Simulate all runs placed before dock in build():
+        // 1. Clock
+        OutlineRun::place_run(40, 30, 2, b"10:00", false);
+        // 2. Greeting
+        OutlineRun::place_run(30, 80, 4, b"Welcome", false);
+        OutlineRun::place_run(30, 140, 3, b"System ready", false);
+        // 3. Date widget
+        OutlineRun::place_run(500, 80, 3, b"FRIDAY", false);
+        OutlineRun::place_run(500, 140, 6, b"24", false);
+        OutlineRun::place_run(500, 180, 2, b"22 C Clear", false);
+        // 4. Today card
+        OutlineRun::place_run(50, 280, 4, b"Today", false);
+        // 5. Card rows
+        OutlineRun::place_run(120, 340, 3, b"Schedule", false);
+        OutlineRun::place_run(120, 370, 2, b"No events on this device", false);
+        OutlineRun::place_run(120, 420, 3, b"Notifications", false);
+        OutlineRun::place_run(120, 450, 2, b"0 unread", false);
+        OutlineRun::place_run(120, 500, 3, b"Activities", false);
+        OutlineRun::place_run(120, 530, 2, b"3 active tasks", false);
+
+        // 6. Dock labels
+        let labels: [&[u8]; 6] = [b"Phone", b"Messages", b"Camera", b"Files", b"Browser", b"Apps"];
+        let xs = [30, 260, 490, 30, 260, 490];
+        let ys = [805 + 114, 805 + 114, 805 + 114, 1020 + 114, 1020 + 114, 1020 + 114];
+        let em = 30;
+
+        let mut runs = [OutlineRun::EMPTY; 6];
+        for i in 0..6 {
+            let (asc, _) = typeface::line_metrics(em);
+            let baseline = (ys[i] + 51).max(asc as usize);
+            runs[i] = OutlineRun::place_styled(xs[i], baseline, em, labels[i], false)
+                .unwrap_or_else(|| panic!("failed to place dock label {}", i));
+        }
+
+        // 7. Search bar
+        OutlineRun::place_run(50, 1300, 3, b"Search apps...", false);
+
+        // Now test all 6 dock labels can still be rasterized!
+        for i in 0..6 {
+            let run = &runs[i];
+            let top = run.y - run.ascent;
+            let mut inked = 0;
+            for py in top..top + run.h {
+                for px in run.x..run.x + run.w {
+                    if let Some(c) = run.pixel(px, py, 0xFF000000, 0xFFFFFFFF) {
+                        if c != 0xFFFFFFFF {
+                            inked += 1;
+                        }
+                    }
+                }
+            }
+            assert!(inked > 0, "Dock label {} ({:?}) rendered 0 pixels! run: x={} y={} w={} h={} slot={}",
+                i, core::str::from_utf8(labels[i]), run.x, run.y, run.w, run.h, run.slot);
+        }
+    }
 }

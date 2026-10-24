@@ -2386,6 +2386,9 @@ fn present_dirty(surface: u32, state: &LauncherState, dirty: Dirty) {
     if dirty == Dirty::DrawerChips || dirty == Dirty::DrawerPages {
         screens::app_drawer::invalidate_app_drawer_frame();
     }
+    if dirty == Dirty::HomeCard || dirty == Dirty::HomeDeck {
+        screens::home::invalidate_paint_cache();
+    }
     if dirty == Dirty::All {
         render_view(surface, state);
         surface_flip_display();
@@ -2508,6 +2511,8 @@ fn log_view_rendered(state: &LauncherState) {
 /// go through [`present_dirty`].
 fn render_view(surface: u32, state: &LauncherState) {
     launcher::outline_text::reset_slot_pool();
+    screens::home::invalidate_paint_cache();
+    screens::app_drawer::invalidate_app_drawer_frame();
     if state.current_view == ViewMode::ActivitySpace {
         screens::activity::invalidate_activity_frame();
     }
@@ -2632,6 +2637,11 @@ fn resolve_app_at_touch<'a>(state: &'a LauncherState, x: u32, y: u32) -> Option<
 
     // 3. Home Screen dynamic deck and dock
     if state.current_view == ViewMode::HomeScreen {
+        // Today card Row 0 tap (outside checkbox): launches Calendar
+        if (280..385).contains(&y) && (100..680).contains(&x) {
+            return package_id_by_suffix(state, b"calendar").or(Some("org.interos.calendar"));
+        }
+
         if let Some(idx) = screens::home::home_hit(state, x, y) {
             return package_id_at(state, idx);
         }
@@ -4935,6 +4945,42 @@ pub extern "C" fn _start() -> ! {
                                     // nav bar are all untouched by this bit.
                                     present_dirty(surface, &state, Dirty::HomeCard);
                                     std::log("[LAUNCHER] Contextual task 0 toggled.").ok();
+                                    let mut drain = std::InputEvent {
+                                        kind: 0,
+                                        x: 0,
+                                        y: 0,
+                                        dx: 0,
+                                        dy: 0,
+                                        scale_milli: 1000,
+                                    };
+                                    while std::input_event_poll(&mut drain).is_ok() {}
+                                    break;
+                                }
+
+                                // Today card Row 1 tap: opens Notifications view
+                                if (385..505).contains(&y) && (60..680).contains(&x) {
+                                    state.current_view = ViewMode::Notifications;
+                                    render_view(surface, &state);
+                                    surface_flip_display();
+                                    std::log("[LAUNCHER] Notifications opened via Today card tap.").ok();
+                                    let mut drain = std::InputEvent {
+                                        kind: 0,
+                                        x: 0,
+                                        y: 0,
+                                        dx: 0,
+                                        dy: 0,
+                                        scale_milli: 1000,
+                                    };
+                                    while std::input_event_poll(&mut drain).is_ok() {}
+                                    break;
+                                }
+
+                                // Today card Row 2 tap: opens Activities / Recent Apps view
+                                if (505..625).contains(&y) && (60..680).contains(&x) {
+                                    state.current_view = ViewMode::ActivitySpace;
+                                    render_view(surface, &state);
+                                    surface_flip_display();
+                                    std::log("[LAUNCHER] Recent apps opened via Today card tap.").ok();
                                     let mut drain = std::InputEvent {
                                         kind: 0,
                                         x: 0,
