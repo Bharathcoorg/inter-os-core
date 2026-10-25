@@ -1044,5 +1044,52 @@ def test_the_file_manager_hands_a_download_to_its_registered_handler():
     )
 
 
+def test_a_saved_media_file_is_published_through_the_platform_index():
+    """A download is visible to other apps only if the index was refreshed.
+
+    WHY static: the write, the refresh and the lookup are guest syscalls.
+    The test pins the order in the success branch and checks that the
+    failure branch publishes nothing.
+    """
+    source = read(APP_MAIN)
+    save = _compact(code_only(rust_function(source, "save_media_download")))
+    ok_branch = save[save.index("Ok(written)"):save.index("Err(_)")]
+    assert "self.publish_download(path)" in ok_branch
+    assert "self.remember_download(path, content_type)" in ok_branch
+    err_branch = save[save.index("Err(_)"):]
+    assert "publish_download" not in err_branch, (
+        "a download that failed is still announced as saved"
+    )
+    assert "nothing was saved" in source
+
+    publish = _compact(code_only(rust_function(source, "publish_download")))
+    assert "std::content::content_index_refresh()" in publish
+    assert "std::content::content_index_find_path(path" in publish
+    assert "self.refresh_downloads()" in publish
+    # Both honest outcomes are logged: found in the index, or written but
+    # not yet listed.
+    assert "does not hold it yet" in publish
+    assert "could not be refreshed" in publish
+
+
+def test_media_downloads_do_not_masquerade_as_saved_pages():
+    """The page list and the media files share a directory but not a rule.
+
+    `is_download_path` accepts only `page_*.html`, so a `dl_*` media file
+    can never be listed or opened as a saved page. The media file is still
+    found by the rest of the platform through the refreshed index.
+    """
+    lib = read(APP_LIB)
+    predicate = _compact(code_only(rust_function(lib, "is_download_path")))
+    assert 'starts_with("/storage/")' in predicate
+    assert "DOWNLOAD_NAME_PREFIX" in predicate
+    assert 'ends_with(".html")' in predicate
+
+    source = read(APP_MAIN)
+    refresh = _compact(code_only(rust_function(source, "refresh_downloads")))
+    assert "if !browser::is_download_path(record.path)" in refresh
+    assert "self.download_count += 1" in refresh
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

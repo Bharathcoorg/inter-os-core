@@ -4464,6 +4464,44 @@ mod tests {
         assert!(!is_download_path(core::str::from_utf8(&out[..n]).unwrap()));
     }
 
+    /// A server-supplied name is a file name, not a path. Whatever the
+    /// origin sends, the saved file stays directly under /storage/downloads.
+    #[test]
+    fn test_a_download_name_cannot_escape_the_downloads_directory() {
+        let hostile: [&[u8]; 7] = [
+            b"../../etc/passwd",
+            b"..\\..\\windows\\system32\\cfg",
+            b"....//....//secret",
+            b"name%2F..%2Fescape",
+            b"/absolute/path.png",
+            b"..",
+            b".",
+        ];
+        for raw in hostile {
+            let mut out = [0u8; 96];
+            let n = download_filename(
+                b"https://example.com/get",
+                b"application/octet-stream",
+                Some(raw),
+                &mut out,
+            );
+            let name = core::str::from_utf8(&out[..n]).unwrap();
+            assert!(!name.contains('/'), "name {name:?} kept a slash");
+            assert!(!name.contains('\\'), "name {name:?} kept a backslash");
+            assert!(!name.is_empty(), "name from {raw:?} was empty");
+
+            let mut path = [0u8; 128];
+            let pn = media_download_path(1, name.as_bytes(), &mut path);
+            let path = core::str::from_utf8(&path[..pn]).unwrap();
+            assert!(path.starts_with("/storage/downloads/dl_1_"), "path {path:?}");
+            assert_eq!(
+                path.matches('/').count(),
+                3,
+                "path {path:?} left the downloads directory"
+            );
+        }
+    }
+
     /// The upload request carries the file as its body, and the name
     /// cannot break out of the header it travels in.
     #[test]
