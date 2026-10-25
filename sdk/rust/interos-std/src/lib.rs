@@ -9,6 +9,7 @@ pub mod ai;
 pub mod app;
 pub mod content;
 pub mod design;
+pub mod flac;
 pub mod font;
 pub mod font_fhd;
 pub mod image;
