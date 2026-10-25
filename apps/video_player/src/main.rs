@@ -25,6 +25,7 @@ use std::design::font;
 use std::design::outline_text;
 use std::design::primitives::{draw_circle, draw_rounded_rect, Rect};
 
+use video_player::avi::{self, AviError, AviInfo, AviStream};
 use video_player::theme::{
     COLOR_ACCENT, COLOR_BG, COLOR_BORDER, COLOR_PLAY_FILL, COLOR_PLAY_GLYPH,
     COLOR_PROGRESS_ACTIVE, COLOR_PROGRESS_BG, COLOR_SHEET_CARD, COLOR_SURFACE,
@@ -150,6 +151,125 @@ static mut CHUNK_BUF: [u32; CHUNK] = [0; CHUNK];
 static mut CANVAS_PIXELS: [u32; CANVAS_W * CANVAS_H] = [0; CANVAS_W * CANVAS_H];
 static mut FILE_SCRATCH: [u8; 64 * 1024] = [0; 64 * 1024];
 
+/// Holds one AVI video frame payload. Bounded because the reader must be able
+/// to refuse a frame, not grow to meet it.
+static mut AVI_FRAME_BUF: [u8; avi::MAX_FRAME_BYTES] = [0; avi::MAX_FRAME_BYTES];
+
+/// One decoded MJPEG frame at native screen resolution. The JPEG decoder
+/// writes RGBA for the whole frame, so this is the largest frame this player
+/// can decode; larger ones are reported, not scaled from a partial buffer.
+static mut AVI_RGBA_BUF: [u8; 720 * 1440 * 4] = [0; 720 * 1440 * 4];
+
+/// The kernel refuses an `FsRead` whose buffer is larger than 64 KiB.
+const FS_READ_CHUNK: usize = 64 * 1024;
+
+/// A capability-gated file as an AVI byte source.
+///
+/// WHY a wrapper and not a whole-file read: `fs_read` is sequential and capped
+/// at 64 KiB per call, so the container is pulled through it as it is parsed.
+struct FsSource {
+    fd: u32,
+}
+
+impl FsSource {
+    fn open(path: &str) -> Result<Self, AviError> {
+        std::fs_open(path, std::FS_READ)
+            .map(|fd| Self { fd })
+            .map_err(|_| AviError::Io)
+    }
+}
+
+impl avi::Source for FsSource {
+    fn read(&mut self, out: &mut [u8]) -> Result<usize, AviError> {
+        let cap = out.len().min(FS_READ_CHUNK);
+        std::fs_read(self.fd, &mut out[..cap]).map_err(|_| AviError::Io)
+    }
+}
+
+impl Drop for FsSource {
+    fn drop(&mut self) {
+        let _ = std::fs_close(self.fd);
+    }
+}
+
+/// Playback state of one open AVI file.
+pub struct AviPlayback {
+    stream: AviStream<FsSource>,
+    info: AviInfo,
+    /// Absolute tick at which the next frame is due.
+    deadline_ms: u64,
+    /// Interval currently in force, already scaled by the speed selector.
+    interval_ms: u32,
+    /// Frames consumed, including those skipped to catch up.
+    next_index: u32,
+    /// Frames decoded and put on the canvas.
+    shown: u32,
+    /// Frames skipped because the clock was more than one interval ahead.
+    skipped: u32,
+    /// The last decoded frame, kept so an aspect-ratio change can rescale it
+    /// without reopening the file and losing the position.
+    last_w: u32,
+    last_h: u32,
+    last_rgba_len: usize,
+}
+
+impl AviPlayback {
+    fn elapsed_secs(&self) -> u32 {
+        let interval = self.info.frame_interval_us() as u64;
+        if interval == 0 {
+            return 0;
+        }
+        let secs = self.next_index as u64 * interval / 1_000_000;
+        secs.min(u32::MAX as u64) as u32
+    }
+}
+
+/// What one pass over an open AVI changed.
+pub struct AviTick {
+    drawn: bool,
+    ended: bool,
+    failed: bool,
+}
+
+/// Scales a decoded RGBA frame into the app's ARGB canvas.
+fn canvas_fill_from_rgba(aspect: AspectRatio, w: u32, h: u32, rgba: &[u8]) {
+    if w == 0 || h == 0 {
+        return;
+    }
+    let canvas = unsafe { &mut *core::ptr::addr_of_mut!(CANVAS_PIXELS) };
+    for cy in 0..CANVAS_H {
+        for cx in 0..CANVAS_W {
+            canvas[cy * CANVAS_W + cx] =
+                match map_canvas_to_source(cx, cy, w, h, aspect) {
+                    Some((sx, sy)) => {
+                        let idx = (sy * w as usize + sx) * 4;
+                        if idx + 3 < rgba.len() {
+                            0xFF000000
+                                | ((rgba[idx] as u32) << 16)
+                                | ((rgba[idx + 1] as u32) << 8)
+                                | rgba[idx + 2] as u32
+                        } else {
+                            0xFF000000
+                        }
+                    }
+                    // Letterbox / pillarbox bars.
+                    None => 0xFF000000,
+                };
+        }
+    }
+}
+
+/// Decodes one MJPEG payload with the platform image service and presents it.
+fn show_avi_frame(payload: &[u8], aspect: AspectRatio) -> Result<(u32, u32, usize), ()> {
+    let rgba = unsafe { &mut *core::ptr::addr_of_mut!(AVI_RGBA_BUF) };
+    let (w, h, len) = std::image::decode_jpeg(payload, rgba)?;
+    if len == 0 {
+        return Err(());
+    }
+    canvas_fill_from_rgba(aspect, w, h, &rgba[..len]);
+    Ok((w, h, len))
+}
+
 // -----------------------------------------------------------------------------
 // Video Player Application State
 // -----------------------------------------------------------------------------
@@ -175,6 +295,9 @@ pub struct VideoApp {
     pub speed_accum_ms: u32,
     pub library_scroll: usize,
     pub frame_counter: u32,
+    /// The open AVI stream, when the loaded file is an AVI this player can
+    /// actually decode. Dropping it closes the file descriptor.
+    pub avi: Option<AviPlayback>,
     /// The token of the last dispatched intent this app handled.
     pub last_intent_token: u64,
 }
@@ -202,6 +325,7 @@ impl VideoApp {
             speed_accum_ms: 0,
             library_scroll: 0,
             frame_counter: 0,
+            avi: None,
             last_intent_token: 0,
         }
     }
@@ -235,6 +359,7 @@ impl VideoApp {
     }
 
     pub fn load_current_track(&mut self) {
+        self.close_avi();
         let Some(item) = self.playlist.current_item() else {
             self.status = DecoderStatus::Idle;
             self.has_frame = false;
@@ -261,6 +386,19 @@ impl VideoApp {
         if path.is_empty() {
             self.status = DecoderStatus::Idle;
             self.has_frame = false;
+            return;
+        }
+
+        // AVI is read as a stream, not as a whole file: the header decides the
+        // size and frame rate, and frames are pulled one at a time. The path
+        // is copied out first so opening the stream does not hold the
+        // playlist entry borrowed.
+        if item.codec == VideoCodec::Avi {
+            let mut path_buf = [0u8; video_player::PATH_CAP];
+            let len = item.path_len.min(path_buf.len());
+            path_buf[..len].copy_from_slice(&item.path[..len]);
+            let path = core::str::from_utf8(&path_buf[..len]).unwrap_or("");
+            self.open_avi(path);
             return;
         }
 
@@ -372,6 +510,308 @@ impl VideoApp {
         }
     }
 
+    /// Opens an AVI through the capability-gated filesystem and shows its
+    /// first decoded frame. The transport is left as the caller set it.
+    pub fn open_avi(&mut self, path: &str) {
+        self.close_avi();
+        self.has_frame = false;
+
+        let source = match FsSource::open(path) {
+            Ok(source) => source,
+            Err(e) => {
+                self.status = DecoderStatus::Error(e.message());
+                std::log("[VIDEO PLAYER] AVI open failed at the filesystem boundary.").ok();
+                return;
+            }
+        };
+        let stream = match AviStream::open(source) {
+            Ok(stream) => stream,
+            Err(e) => {
+                // Typed refusal: a malformed header or an undecodable codec is
+                // reported as such, never drawn as a black but "playing" frame.
+                self.status = DecoderStatus::Error(e.message());
+                std::log("[VIDEO PLAYER] AVI refused: header or codec not decodable.").ok();
+                return;
+            }
+        };
+
+        let info = stream.info();
+        if self.playlist.current < self.playlist.count {
+            let item = &mut self.playlist.items[self.playlist.current];
+            // The header is the only measured source for these values.
+            item.width = info.width;
+            item.height = info.height;
+            item.duration_sec = info.duration_secs();
+        }
+        self.duration_sec = info.duration_secs();
+        self.elapsed_sec = 0;
+        self.frame_counter = 0;
+        self.speed_accum_ms = 0;
+
+        let now = std::get_ticks().unwrap_or(0);
+        let interval = avi::scale_interval_millis(
+            info.frame_interval_us(),
+            self.speed.multiplier_milli(),
+        )
+        .max(1);
+        self.avi = Some(AviPlayback {
+            stream,
+            info,
+            deadline_ms: now,
+            interval_ms: interval,
+            next_index: 0,
+            shown: 0,
+            skipped: 0,
+            last_w: 0,
+            last_h: 0,
+            last_rgba_len: 0,
+        });
+        self.status = DecoderStatus::Ready;
+        self.show_first_avi_frame();
+
+        if let Some(pb) = self.avi.as_ref() {
+            if pb.info.audio_streams > 0 {
+                // Stated in the log and on screen (media info + canvas notice).
+                std::log("[VIDEO PLAYER] AVI has an audio stream; audio playback is unavailable and is not claimed.").ok();
+            }
+            std::log("[VIDEO PLAYER] AVI/MJPEG open: frames are pulled sequentially at the header's timing.").ok();
+        }
+    }
+
+    /// Decodes and shows the first payload without advancing the clock, so a
+    /// loaded file shows its own picture and Play resumes from a known frame.
+    fn show_first_avi_frame(&mut self) {
+        let aspect = self.aspect;
+        let mut decoded: Option<(u32, u32, usize)> = None;
+        let mut ended = false;
+        let mut error: Option<&'static str> = None;
+
+        if let Some(pb) = self.avi.as_mut() {
+            let frame_buf = unsafe { &mut *core::ptr::addr_of_mut!(AVI_FRAME_BUF) };
+            for _ in 0..4 {
+                match pb.stream.next_frame(frame_buf) {
+                    Ok(Some(len)) => {
+                        pb.next_index = pb.next_index.saturating_add(1);
+                        if let Ok(frame) = show_avi_frame(&frame_buf[..len], aspect) {
+                            decoded = Some(frame);
+                            break;
+                        }
+                        std::log("[VIDEO PLAYER] An MJPEG payload was refused by the decoder; trying the next one.").ok();
+                    }
+                    Ok(None) => {
+                        ended = true;
+                        break;
+                    }
+                    Err(AviError::FrameTooLarge) => {
+                        pb.next_index = pb.next_index.saturating_add(1);
+                        pb.skipped = pb.skipped.saturating_add(1);
+                    }
+                    Err(e) => {
+                        error = Some(e.message());
+                        break;
+                    }
+                }
+            }
+            if decoded.is_none() && !ended && error.is_none() {
+                error = Some("AVI: no frame could be decoded.");
+            }
+        }
+
+        if let Some((w, h, n)) = decoded {
+            if let Some(pb) = self.avi.as_mut() {
+                pb.last_w = w;
+                pb.last_h = h;
+                pb.last_rgba_len = n;
+                pb.shown = 1;
+            }
+            self.has_frame = true;
+            self.frame_counter = 1;
+        }
+        if ended {
+            self.close_avi();
+            self.has_frame = false;
+            self.elapsed_sec = self.duration_sec;
+            self.state = PlaybackState::Stopped;
+            std::log("[VIDEO PLAYER] AVI has no decodable video frames.").ok();
+        }
+        if let Some(msg) = error {
+            self.close_avi();
+            self.has_frame = false;
+            self.status = DecoderStatus::Error(msg);
+        }
+    }
+
+    /// Advances the open AVI once per timer wake-up.
+    ///
+    /// WHY frames are skipped instead of decoding every one: the decoder and
+    /// the compositor can be slower than the file's frame interval. Decoding
+    /// every payload would play in slow motion, so a frame whose deadline is
+    /// already more than one interval in the past is consumed and dropped.
+    pub fn tick_avi(&mut self) -> AviTick {
+        let now = std::get_ticks().unwrap_or(0);
+        let aspect = self.aspect;
+        let speed_milli = self.speed.multiplier_milli();
+        let mut drawn = false;
+        let mut ended = false;
+        let mut error: Option<&'static str> = None;
+        let elapsed: u32;
+
+        {
+            let Some(pb) = self.avi.as_mut() else {
+                return AviTick { drawn: false, ended: false, failed: false };
+            };
+            let interval =
+                avi::scale_interval_millis(pb.info.frame_interval_us(), speed_milli).max(1);
+            pb.interval_ms = interval;
+            let frame_buf = unsafe { &mut *core::ptr::addr_of_mut!(AVI_FRAME_BUF) };
+            let mut guard = 0;
+            loop {
+                if now < pb.deadline_ms {
+                    break;
+                }
+                let behind = now - pb.deadline_ms;
+                let skip = behind >= interval as u64 && pb.shown > 0;
+                match pb.stream.next_frame(frame_buf) {
+                    Ok(Some(len)) => {
+                        pb.next_index = pb.next_index.saturating_add(1);
+                        pb.deadline_ms = pb.deadline_ms.saturating_add(interval as u64);
+                        if skip {
+                            pb.skipped = pb.skipped.saturating_add(1);
+                        } else {
+                            match show_avi_frame(&frame_buf[..len], aspect) {
+                                Ok((w, h, n)) => {
+                                    pb.last_w = w;
+                                    pb.last_h = h;
+                                    pb.last_rgba_len = n;
+                                    pb.shown = pb.shown.saturating_add(1);
+                                    drawn = true;
+                                }
+                                Err(_) => {
+                                    error = Some("AVI: MJPEG frame could not be decoded.");
+                                }
+                            }
+                        }
+                    }
+                    Ok(None) => {
+                        ended = true;
+                        break;
+                    }
+                    Err(AviError::FrameTooLarge) => {
+                        pb.next_index = pb.next_index.saturating_add(1);
+                        pb.deadline_ms = pb.deadline_ms.saturating_add(interval as u64);
+                        pb.skipped = pb.skipped.saturating_add(1);
+                    }
+                    Err(e) => {
+                        error = Some(e.message());
+                        break;
+                    }
+                }
+                guard += 1;
+                if drawn || ended || error.is_some() || guard >= 32 {
+                    break;
+                }
+            }
+            elapsed = pb.elapsed_secs();
+        }
+
+        self.elapsed_sec = elapsed;
+        if drawn {
+            self.has_frame = true;
+            self.status = DecoderStatus::Ready;
+            self.frame_counter = self.frame_counter.saturating_add(1);
+        }
+        if error.is_some() {
+            self.close_avi();
+            self.has_frame = false;
+            self.state = PlaybackState::Stopped;
+            if let Some(msg) = error {
+                self.status = DecoderStatus::Error(msg);
+            }
+            std::log("[VIDEO PLAYER] AVI playback stopped on a reported frame/read error.").ok();
+        }
+        if ended {
+            self.finish_avi();
+        }
+        AviTick { drawn, ended, failed: error.is_some() }
+    }
+
+    /// Called at end of stream: honours the loop mode, or stops.
+    fn finish_avi(&mut self) {
+        self.close_avi();
+        self.speed_accum_ms = 0;
+        if self.duration_sec > 0 {
+            self.elapsed_sec = self.duration_sec;
+        }
+        std::log("[VIDEO PLAYER] AVI end of stream; the file was closed.").ok();
+        match self.loop_mode {
+            LoopMode::LoopOne => {
+                self.load_current_track();
+                self.state = if self.avi.is_some() {
+                    PlaybackState::Playing
+                } else {
+                    PlaybackState::Stopped
+                };
+            }
+            LoopMode::LoopAll => {
+                if self.playlist.next(LoopMode::LoopAll).is_some() {
+                    self.load_current_track();
+                    self.state = if self.avi.is_some() {
+                        PlaybackState::Playing
+                    } else {
+                        PlaybackState::Stopped
+                    };
+                } else {
+                    self.state = PlaybackState::Stopped;
+                }
+            }
+            LoopMode::None => {
+                self.state = PlaybackState::Stopped;
+            }
+        }
+    }
+
+    /// Adopts a new speed without replaying the frames the old rate covered.
+    pub fn retime_avi(&mut self) {
+        if let Some(pb) = self.avi.as_mut() {
+            pb.interval_ms = avi::scale_interval_millis(
+                pb.info.frame_interval_us(),
+                self.speed.multiplier_milli(),
+            )
+            .max(1);
+            pb.deadline_ms = std::get_ticks()
+                .unwrap_or(0)
+                .saturating_add(pb.interval_ms as u64);
+        }
+    }
+
+    /// Rescales the frame already decoded, e.g. after an aspect-ratio change.
+    pub fn rescale_current_avi_frame(&mut self) {
+        let Some(pb) = self.avi.as_ref() else {
+            return;
+        };
+        if pb.last_rgba_len == 0 {
+            return;
+        }
+        let (w, h, n, aspect) = (pb.last_w, pb.last_h, pb.last_rgba_len, self.aspect);
+        let rgba = unsafe { &*core::ptr::addr_of!(AVI_RGBA_BUF) };
+        canvas_fill_from_rgba(aspect, w, h, &rgba[..n]);
+        self.has_frame = true;
+    }
+
+    pub fn close_avi(&mut self) {
+        // Dropping the playback closes the descriptor through FsSource::drop.
+        self.avi = None;
+    }
+
+    /// True when the open AVI declares an audio stream, which this player
+    /// cannot play. The UI says so rather than showing a mute control as if
+    /// it were driving that audio.
+    pub fn avi_audio_unavailable(&self) -> bool {
+        self.avi
+            .as_ref()
+            .map_or(false, |pb| pb.info.audio_streams > 0)
+    }
+
     pub fn rescan_storage(&mut self) {
         let mut list_buf = [0u8; 4096];
 
@@ -403,6 +843,19 @@ impl VideoApp {
                 continue;
             }
             let path_str = item.path_str();
+            if item.codec == VideoCodec::Avi {
+                // The container header must be walked, not sniffed from 64
+                // bytes; dimensions and running time come from `strf`/`avih`.
+                if let Ok(source) = FsSource::open(path_str) {
+                    if let Ok(stream) = AviStream::open(source) {
+                        let info = stream.info();
+                        item.width = info.width;
+                        item.height = info.height;
+                        item.duration_sec = info.duration_secs();
+                    }
+                }
+                continue;
+            }
             if let Ok(fd) = std::fs_open(path_str, std::FS_READ) {
                 let mut hdr = [0u8; 64];
                 if let Ok(n) = std::fs_read(fd, &mut hdr) {
@@ -574,6 +1027,22 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
     if app.orientation == Orientation::Landscape {
         // Base: Fullscreen video rendering
         let video_pixel: u32 = if let DecoderStatus::HardwareUnavailable(msg) = app.status {
+            let mw = font::measure(msg.as_bytes(), 1);
+            let mx = (W.saturating_sub(mw)) / 2;
+            if let Some(col) = draw_text_bold(
+                x,
+                y,
+                mx,
+                H / 2 - 10,
+                1,
+                msg.as_bytes(),
+                0xFFE05A68,
+                COLOR_SURFACE_SUNKEN,
+            ) {
+                return col;
+            }
+            COLOR_SURFACE_SUNKEN
+        } else if let DecoderStatus::Error(msg) = app.status {
             let mw = font::measure(msg.as_bytes(), 1);
             let mx = (W.saturating_sub(mw)) / 2;
             if let Some(col) = draw_text_bold(
@@ -1094,6 +1563,49 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
                 return COLOR_SURFACE_SUNKEN;
             }
 
+            // A typed container/decode refusal is shown verbatim; the canvas
+            // never falls back to black while claiming to play.
+            if let DecoderStatus::Error(msg) = app.status {
+                let mw = font::measure(msg.as_bytes(), 1);
+                let mx = (W.saturating_sub(mw)) / 2;
+                if let Some(col) = draw_text_bold(
+                    x,
+                    y,
+                    mx,
+                    CANVAS_Y0 + 176,
+                    1,
+                    msg.as_bytes(),
+                    0xFFE05A68,
+                    COLOR_SURFACE_SUNKEN,
+                ) {
+                    return col;
+                }
+                return COLOR_SURFACE_SUNKEN;
+            }
+
+            // An AVI that carries audio is stated as such: this player has no
+            // audio decoder and does not pretend the volume bar drives it.
+            if app.avi_audio_unavailable() {
+                let notice = b"Audio stream: unavailable";
+                let nx = CANVAS_X0 + 12;
+                let ny = CANVAS_Y0 + CANVAS_H - 28;
+                if x >= nx && x < nx + 250 && y >= ny && y < ny + 18 {
+                    if let Some(col) = draw_text(
+                        x,
+                        y,
+                        nx,
+                        ny,
+                        1,
+                        notice,
+                        COLOR_TEXT_PRIMARY,
+                        COLOR_SURFACE_SUNKEN,
+                    ) {
+                        return col;
+                    }
+                    return COLOR_SURFACE_SUNKEN;
+                }
+            }
+
             // Real Decoded Video Frame
             if app.has_frame {
                 let cx = x - CANVAS_X0;
@@ -1112,7 +1624,7 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
                 return col;
             }
 
-            let msg2 = b"Supports PPM P6, MJPEG, RAW RGB24";
+            let msg2 = b"Supports AVI/MJPEG, PPM P6, RAW RGB24";
             let mw2 = font::measure(msg2, 1);
             let mx2 = (W.saturating_sub(mw2)) / 2;
             if let Some(col) = draw_text(x, y, mx2, CANVAS_Y0 + 190, 1, msg2, COLOR_TEXT_MUTED, COLOR_SURFACE) {
@@ -1437,9 +1949,12 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
                 // pipeline that would have to invent its output.
                 let dec_label: &[u8] = if let DecoderStatus::HardwareUnavailable(_) = app.status {
                     b"Unavailable (No HW H.264)"
+                } else if let DecoderStatus::Error(_) = app.status {
+                    b"Unavailable (refused)"
                 } else {
                     match app.current_codec() {
                         VideoCodec::Mjpeg => b"Software (MJPEG)",
+                        VideoCodec::Avi => b"Software (AVI/MJPEG)",
                         VideoCodec::PpmP6 | VideoCodec::RawRgb | VideoCodec::RawRgba => {
                             b"Software (built-in)"
                         }
@@ -1447,6 +1962,24 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
                     }
                 };
                 if let Some(t_col) = draw_text(x, y, SHEET_RECT.x + 140, SHEET_RECT.y + 132, 2, dec_label, COLOR_TEXT_PRIMARY, COLOR_SHEET_CARD) {
+                    return t_col;
+                }
+
+                // Audio: an AVI's audio stream is named but not claimed as
+                // playable; the player has no audio decoder for it.
+                if let Some(t_col) = draw_text(x, y, SHEET_RECT.x + 24, SHEET_RECT.y + 204, 2, b"Audio:", COLOR_TEXT_MUTED, COLOR_SHEET_CARD) {
+                    return t_col;
+                }
+                let audio_label: &[u8] = if app.current_codec() == VideoCodec::Avi {
+                    if app.avi_audio_unavailable() {
+                        b"Unavailable (not implemented)"
+                    } else {
+                        b"Not present in this file"
+                    }
+                } else {
+                    b"Unavailable (no decoder)"
+                };
+                if let Some(t_col) = draw_text(x, y, SHEET_RECT.x + 140, SHEET_RECT.y + 208, 1, audio_label, COLOR_TEXT_PRIMARY, COLOR_SHEET_CARD) {
                     return t_col;
                 }
 
@@ -1513,12 +2046,18 @@ fn merge_dirty(a: Dirty, b: Dirty) -> Dirty {
 ///
 /// WHY the running time gates the Playing state: the position advances only
 /// over a known duration, so a file whose duration was never read would sit
-/// in Playing without moving. Paused is the honest state for that file.
+/// in Playing without moving. Paused is the honest state for that file. An
+/// open AVI is exempt: its own frames decide when it is moving.
 fn toggle_playback(app: &mut VideoApp) {
     if app.state == PlaybackState::Playing {
         app.state = PlaybackState::Paused;
-    } else if app.duration_sec > 0 {
+    } else if app.avi.is_some() || app.duration_sec > 0 {
         app.state = PlaybackState::Playing;
+        if let Some(pb) = app.avi.as_mut() {
+            // Resume from now instead of bursting through the frames the
+            // pause covered.
+            pb.deadline_ms = std::get_ticks().unwrap_or(0);
+        }
     } else {
         app.state = PlaybackState::Paused;
         std::log("[VIDEO APP] Running time unknown; the position cannot advance.").ok();
@@ -1602,6 +2141,12 @@ fn handle_touch(app: &mut VideoApp, px: u32, py: u32) -> EventAction {
 
             // Scrubber seek in landscape (y: 1120..1150)
             if y >= 1110 && y <= 1150 && x >= 110 && x <= 590 {
+                if app.avi.is_some() {
+                    // The container is read forwards with no seek; moving the
+                    // thumb would claim a position the stream cannot reach.
+                    std::log("[VIDEO PLAYER] A sequential AVI cannot seek; position unchanged.").ok();
+                    return EventAction::None;
+                }
                 let seek_sec = scrubber_seek_seconds(x, 120, 460, app.duration_sec);
                 app.elapsed_sec = seek_sec;
                 return EventAction::Redraw(Dirty::All);
@@ -1705,6 +2250,10 @@ fn handle_touch(app: &mut VideoApp, px: u32, py: u32) -> EventAction {
 
     // Scrubber Touch / Seek
     if SEEK_HIT.contains(x, y) {
+        if app.avi.is_some() {
+            std::log("[VIDEO PLAYER] A sequential AVI cannot seek; position unchanged.").ok();
+            return EventAction::None;
+        }
         let seek_sec = scrubber_seek_seconds(x, SEEK_X, SEEK_W, app.duration_sec);
         app.elapsed_sec = seek_sec;
         return EventAction::Redraw(Dirty::Scrubber);
@@ -1719,6 +2268,18 @@ fn handle_touch(app: &mut VideoApp, px: u32, py: u32) -> EventAction {
 
     // Prev Button
     if PREV_HIT.contains(x, y) {
+        if app.avi.is_some() {
+            // Restarting reopens and re-reads the stream; it is the only
+            // "previous" a non-seekable container can honour.
+            app.load_current_track();
+            app.state = if app.avi.is_some() {
+                PlaybackState::Playing
+            } else {
+                PlaybackState::Stopped
+            };
+            let _ = std::audio_haptic_click();
+            return EventAction::Redraw(Dirty::All);
+        }
         if app.elapsed_sec > 3 {
             app.elapsed_sec = 0;
             return EventAction::Redraw(Dirty::Scrubber);
@@ -1734,6 +2295,9 @@ fn handle_touch(app: &mut VideoApp, px: u32, py: u32) -> EventAction {
     if NEXT_HIT.contains(x, y) {
         if app.playlist.next(app.loop_mode).is_some() {
             app.load_current_track();
+            if app.avi.is_some() {
+                app.state = PlaybackState::Playing;
+            }
             let _ = std::audio_haptic_click();
             return EventAction::Redraw(Dirty::All);
         }
@@ -1760,6 +2324,7 @@ fn handle_touch(app: &mut VideoApp, px: u32, py: u32) -> EventAction {
     // Secondary: Speed Toggle
     if SPEED_BTN.contains(x, y) {
         app.speed = app.speed.next();
+        app.retime_avi();
         let _ = std::audio_haptic_click();
         return EventAction::Redraw(Dirty::All);
     }
@@ -1768,7 +2333,12 @@ fn handle_touch(app: &mut VideoApp, px: u32, py: u32) -> EventAction {
     if ASPECT_BTN.contains(x, y) {
         app.aspect = app.aspect.next();
         let _ = std::audio_haptic_click();
-        app.load_current_track();
+        if app.avi.is_some() {
+            // Rescale the frame already decoded; reopening would restart.
+            app.rescale_current_avi_frame();
+        } else {
+            app.load_current_track();
+        }
         return EventAction::Redraw(Dirty::All);
     }
 
@@ -1846,7 +2416,14 @@ pub extern "C" fn _start() -> ! {
     let interest_mask = std::EVENT_TOUCH_INPUT | std::EVENT_IPC_MSG | std::EVENT_TIMER_TICK;
 
     loop {
-        match std::event_poll(interest_mask, 150) {
+        // A playing AVI needs to wake near its frame interval; idle screens
+        // keep the long timeout so the task sleeps instead of spinning.
+        let poll_timeout = if app.state == PlaybackState::Playing && app.avi.is_some() {
+            10
+        } else {
+            150
+        };
+        match std::event_poll(interest_mask, poll_timeout) {
             Ok(events) => {
                 if events & std::EVENT_TOUCH_INPUT != 0 {
                     let mut input = std::InputEvent {
@@ -1865,6 +2442,7 @@ pub extern "C" fn _start() -> ! {
                             if key.pressed {
                                 match key.code {
                                     std::input_key_code::ESCAPE => {
+                                        app.close_avi();
                                         if surface > 0 {
                                             let _ = std::surface_destroy(surface);
                                         }
@@ -1875,13 +2453,21 @@ pub extern "C" fn _start() -> ! {
                                         dirty = merge_dirty(dirty, Dirty::All);
                                     }
                                     std::input_key_code::ARROW_LEFT => {
-                                        app.elapsed_sec = app.elapsed_sec.saturating_sub(5);
-                                        dirty = merge_dirty(dirty, Dirty::Scrubber);
+                                        if app.avi.is_some() {
+                                            std::log("[VIDEO PLAYER] A sequential AVI cannot seek; position unchanged.").ok();
+                                        } else {
+                                            app.elapsed_sec = app.elapsed_sec.saturating_sub(5);
+                                            dirty = merge_dirty(dirty, Dirty::Scrubber);
+                                        }
                                     }
                                     std::input_key_code::ARROW_RIGHT => {
-                                        app.elapsed_sec =
-                                            (app.elapsed_sec + 5).min(app.duration_sec);
-                                        dirty = merge_dirty(dirty, Dirty::Scrubber);
+                                        if app.avi.is_some() {
+                                            std::log("[VIDEO PLAYER] A sequential AVI cannot seek; position unchanged.").ok();
+                                        } else {
+                                            app.elapsed_sec =
+                                                (app.elapsed_sec + 5).min(app.duration_sec);
+                                            dirty = merge_dirty(dirty, Dirty::Scrubber);
+                                        }
                                     }
                                     std::input_key_code::ARROW_UP => {
                                         app.volume_percent = (app.volume_percent + 10).min(100);
@@ -1903,6 +2489,7 @@ pub extern "C" fn _start() -> ! {
                                     }
                                     code if code == b's' as u32 || code == b'S' as u32 => {
                                         app.speed = app.speed.next();
+                                        app.retime_avi();
                                         dirty = merge_dirty(dirty, Dirty::All);
                                     }
                                     code if code == b'o' as u32 || code == b'O' as u32 => {
@@ -1927,6 +2514,7 @@ pub extern "C" fn _start() -> ! {
                             || input.kind == 10
                         {
                             if input.y >= 1400 {
+                                app.close_avi();
                                 if surface > 0 {
                                     let _ = std::surface_destroy(surface);
                                 }
@@ -1941,6 +2529,7 @@ pub extern "C" fn _start() -> ! {
                             match handle_touch(&mut app, input.x, input.y) {
                                 EventAction::Exit(msg) => {
                                     std::log(msg).ok();
+                                    app.close_avi();
                                     if surface > 0 {
                                         let _ = std::surface_destroy(surface);
                                     }
@@ -1968,7 +2557,28 @@ pub extern "C" fn _start() -> ! {
                         repaint(surface, &app, Dirty::All);
                         let _ = std::surface_flip();
                     }
-                    if app.state == PlaybackState::Playing && app.duration_sec > 0 {
+                    if app.state == PlaybackState::Playing && app.avi.is_some() {
+                        // Real frame playback: the AVI's own clock decides
+                        // which frames are shown, skipped, or the last one.
+                        let tick = app.tick_avi();
+                        if surface > 0 {
+                            if tick.drawn {
+                                if app.orientation == Orientation::Landscape
+                                    || app.library_open
+                                    || app.pip_mode
+                                {
+                                    repaint(surface, &app, Dirty::All);
+                                } else {
+                                    repaint(surface, &app, Dirty::Canvas);
+                                    repaint(surface, &app, Dirty::Scrubber);
+                                }
+                                let _ = std::surface_flip();
+                            } else if tick.ended || tick.failed {
+                                repaint(surface, &app, Dirty::All);
+                                let _ = std::surface_flip();
+                            }
+                        }
+                    } else if app.state == PlaybackState::Playing && app.duration_sec > 0 {
                         let delta_ms = (150 * app.speed.multiplier_milli()) / 1000;
                         app.speed_accum_ms += delta_ms;
 

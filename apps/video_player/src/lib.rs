@@ -1,13 +1,18 @@
 //! InterOS Native Video Player Engine (Ring-3)
 //!
 //! Provides the core media state machine, frame decoders (RAW, PPM P6, MJPEG),
-//! codec detection, scrubber calculations, aspect ratio mapping, playback speeds,
-//! orientation modes, volume control, and platform truth contract enforcement.
+//! a bounded RIFF/AVI + Motion JPEG reader, codec detection, scrubber
+//! calculations, aspect ratio mapping, playback speeds, orientation modes,
+//! volume control, and platform truth contract enforcement.
 
 #![no_std]
 
+#[cfg(test)]
+extern crate std as host_std;
+
 pub use interos_std as std;
 
+pub mod avi;
 pub mod theme;
 
 /// Exact error string required by the Platform Truth Contract when H.264 decode is requested
@@ -38,6 +43,9 @@ pub enum VideoCodec {
     RawRgba,
     /// Motion JPEG stream with SOI/SOF/EOI markers.
     Mjpeg,
+    /// RIFF AVI container. The video stream inside it is read by `avi`; only
+    /// Motion JPEG payloads in it can be decoded.
+    Avi,
     /// H.264 / AVC in MP4 or raw NAL stream (hardware decoder required).
     H264,
     /// Unknown or unsupported format.
@@ -51,6 +59,7 @@ impl VideoCodec {
             VideoCodec::RawRgb => "RAW RGB24",
             VideoCodec::RawRgba => "RAW RGBA32",
             VideoCodec::Mjpeg => "MJPEG",
+            VideoCodec::Avi => "AVI",
             VideoCodec::H264 => "H.264",
             VideoCodec::Unknown => "UNKNOWN",
         }
@@ -67,6 +76,8 @@ pub fn detect_codec_from_name(name: &[u8]) -> VideoCodec {
         || (name.len() >= 6 && name[name.len() - 6..].eq_ignore_ascii_case(b".mjpeg"))
     {
         VideoCodec::Mjpeg
+    } else if name.len() >= 4 && name[name.len() - 4..].eq_ignore_ascii_case(b".avi") {
+        VideoCodec::Avi
     } else if (name.len() >= 4 && name[name.len() - 4..].eq_ignore_ascii_case(b".mp4"))
         || (name.len() >= 5 && name[name.len() - 5..].eq_ignore_ascii_case(b".h264"))
     {
@@ -1167,6 +1178,8 @@ mod tests {
         assert_eq!(detect_codec_from_name(b"test.ppm"), VideoCodec::PpmP6);
         assert_eq!(detect_codec_from_name(b"test.raw"), VideoCodec::RawRgb);
         assert_eq!(detect_codec_from_name(b"test.mjpeg"), VideoCodec::Mjpeg);
+        assert_eq!(detect_codec_from_name(b"test.avi"), VideoCodec::Avi);
+        assert_eq!(detect_codec_from_name(b"CLIP.AVI"), VideoCodec::Avi);
         assert_eq!(detect_codec_from_name(b"test.mp4"), VideoCodec::H264);
 
         assert_eq!(detect_codec_from_bytes(b"P6\n10 10\n255\n"), VideoCodec::PpmP6);
