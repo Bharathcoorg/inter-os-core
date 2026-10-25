@@ -2401,6 +2401,251 @@ pub fn is_download_path(path: &str) -> bool {
     name.starts_with(DOWNLOAD_NAME_PREFIX) && name.ends_with(".html")
 }
 
+/// The prefix the path of a downloaded file carries.
+///
+/// WHY downloads share the directory but not the prefix: the browser's
+/// saved-pages list is its own pages, while a downloaded file belongs to
+/// the whole device and is opened by whichever app handles its type.
+pub const MEDIA_PREFIX: &str = "/storage/downloads/dl_";
+
+/// Whether a content type carries a file rather than a document.
+///
+/// WHY the decision is made here: the gateway hands media over as raw
+/// bytes, and the browser has to know before it decodes the body as text.
+/// A type it does not recognise as text is a file.
+pub fn content_type_is_binary(content_type: &[u8]) -> bool {
+    let semi = content_type
+        .iter()
+        .position(|&b| b == b';')
+        .unwrap_or(content_type.len());
+    let ct = trim_ascii(&content_type[..semi]);
+    if ct.is_empty() {
+        return false;
+    }
+    const TEXTUAL: [&[u8]; 5] = [
+        b"text/",
+        b"application/xhtml+xml",
+        b"application/xml",
+        b"application/json",
+        b"application/javascript",
+    ];
+    for needle in TEXTUAL {
+        if starts_with_ignore_case(ct, needle) {
+            return false;
+        }
+    }
+    !(ends_with_ignore_case(ct, b"+xml") || ends_with_ignore_case(ct, b"+json"))
+}
+
+/// The file extension the browser gives a payload of `content_type`.
+pub fn media_extension_for(content_type: &[u8]) -> Option<&'static str> {
+    let semi = content_type
+        .iter()
+        .position(|&b| b == b';')
+        .unwrap_or(content_type.len());
+    let ct = trim_ascii(&content_type[..semi]);
+    const TYPES: [(&[u8], &str); 17] = [
+        (b"image/png", ".png"),
+        (b"image/jpeg", ".jpg"),
+        (b"image/gif", ".gif"),
+        (b"image/webp", ".webp"),
+        (b"image/bmp", ".bmp"),
+        (b"image/x-ms-bmp", ".bmp"),
+        (b"image/avif", ".avif"),
+        (b"audio/mpeg", ".mp3"),
+        (b"audio/mp3", ".mp3"),
+        (b"audio/ogg", ".ogg"),
+        (b"audio/wav", ".wav"),
+        (b"audio/x-wav", ".wav"),
+        (b"audio/flac", ".flac"),
+        (b"audio/mp4", ".m4a"),
+        (b"video/mp4", ".mp4"),
+        (b"video/webm", ".webm"),
+        (b"application/pdf", ".pdf"),
+    ];
+    for (name, extension) in TYPES {
+        if eq_ignore_case(ct, name) {
+            return Some(extension);
+        }
+    }
+    None
+}
+
+/// The value of an HTTP header in a response, matched without case.
+///
+/// WHY the header section is bounded: a body can contain a line that looks
+/// like a header, and it is not one.
+pub fn http_header_value<'a>(raw: &'a [u8], name: &[u8]) -> Option<&'a [u8]> {
+    let header_end = raw
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .unwrap_or(raw.len());
+    for line in raw[..header_end].split(|&b| b == b'\n') {
+        let line = match line.last() {
+            Some(&b'\r') => &line[..line.len() - 1],
+            _ => line,
+        };
+        if line.len() <= name.len() || line[name.len()] != b':' {
+            continue;
+        }
+        if !eq_ignore_case(&line[..name.len()], name) {
+            continue;
+        }
+        let value = trim_ascii(&line[name.len() + 1..]);
+        return Some(value);
+    }
+    None
+}
+
+/// Builds the name a downloaded file is saved under.
+///
+/// WHY the server's name wins over the URL's: the origin may name the file
+/// in Content-Disposition, and a URL can be a query rather than a path. The
+/// extension is the content type's, so a file named `.php` that carries an
+/// image is stored as the image it is and opens in the image viewer.
+pub fn download_filename(
+    url: &[u8],
+    content_type: &[u8],
+    given: Option<&[u8]>,
+    out: &mut [u8],
+) -> usize {
+    // Leave room for an extension the name may have to be given.
+    let name_cap = out.len().saturating_sub(8);
+    let mut len = match given {
+        Some(value) if !value.is_empty() => sanitize_download_name(value, &mut out[..name_cap]),
+        _ => url_download_name(url, &mut out[..name_cap]),
+    };
+    if len == 0 {
+        let fallback = b"download";
+        len = fallback.len().min(name_cap);
+        out[..len].copy_from_slice(&fallback[..len]);
+    }
+    match media_extension_for(content_type) {
+        Some(extension) => {
+            let expected = extension.as_bytes();
+            let existing = out[..len]
+                .iter()
+                .rposition(|&b| b == b'.')
+                .filter(|&dot| dot > 0);
+            match existing {
+                Some(dot) if eq_ignore_case(&out[dot + 1..len], &expected[1..]) && dot + 1 < len => {}
+                Some(dot) => {
+                    len = dot;
+                    len = append_bytes(out, len, expected);
+                }
+                None => len = append_bytes(out, len, expected),
+            }
+        }
+        None => {
+            let has_extension = out[..len].iter().rposition(|&b| b == b'.').is_some_and(|dot| dot > 0);
+            if !has_extension {
+                len = append_bytes(out, len, b".bin");
+            }
+        }
+    }
+    len
+}
+
+/// Builds the path a downloaded file is written to.
+///
+/// WHY an index prefix: two downloads can share a name, and a second file
+/// that silently overwrote the first would not be a download. The index is
+/// the device's count of saved downloads, so the name is unique without
+/// reading the directory first.
+pub fn media_download_path(index: u32, name: &[u8], out: &mut [u8]) -> usize {
+    let mut n = append_bytes(out, 0, MEDIA_PREFIX.as_bytes());
+    let mut digits = [0u8; 10];
+    let mut len = 0usize;
+    let mut value = index;
+    loop {
+        digits[len] = b'0' + (value % 10) as u8;
+        len += 1;
+        value /= 10;
+        if value == 0 {
+            break;
+        }
+    }
+    while len > 0 {
+        len -= 1;
+        n = append_bytes(out, n, &digits[len..len + 1]);
+    }
+    n = append_bytes(out, n, b"_");
+    append_bytes(out, n, name)
+}
+
+/// Copies `bytes` into `out` at `n`, stopping at the buffer's end.
+fn append_bytes(out: &mut [u8], mut n: usize, bytes: &[u8]) -> usize {
+    for &b in bytes {
+        if n >= out.len() {
+            break;
+        }
+        out[n] = b;
+        n += 1;
+    }
+    n
+}
+
+fn eq_ignore_case(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .zip(b.iter())
+            .all(|(&x, &y)| x.to_ascii_lowercase() == y.to_ascii_lowercase())
+}
+
+fn starts_with_ignore_case(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.len() >= needle.len() && eq_ignore_case(&haystack[..needle.len()], needle)
+}
+
+fn ends_with_ignore_case(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.len() >= needle.len()
+        && eq_ignore_case(&haystack[haystack.len() - needle.len()..], needle)
+}
+
+/// Keeps the characters a file name may hold, replacing the rest.
+fn sanitize_download_name(name: &[u8], out: &mut [u8]) -> usize {
+    let mut n = 0usize;
+    for &b in name {
+        if n >= out.len() {
+            break;
+        }
+        let keep = b.is_ascii_alphanumeric() || b == b'.' || b == b'-' || b == b'_';
+        out[n] = if keep { b } else { b'_' };
+        n += 1;
+    }
+    while n > 0 && (out[n - 1] == b'.' || out[n - 1] == b'_') {
+        n -= 1;
+    }
+    while n > 0 && out[0] == b'.' {
+        out.copy_within(1..n, 0);
+        n -= 1;
+    }
+    n
+}
+
+/// The last path segment of a URL, without its query or fragment.
+fn url_download_name(url: &[u8], out: &mut [u8]) -> usize {
+    let scheme_end = url
+        .windows(3)
+        .position(|w| w == b"://")
+        .map(|i| i + 3)
+        .unwrap_or(0);
+    let path_start = url[scheme_end..]
+        .iter()
+        .position(|&b| b == b'/')
+        .map(|i| scheme_end + i + 1)
+        .unwrap_or(url.len());
+    let path = &url[path_start..];
+    let end = path
+        .iter()
+        .position(|&b| b == b'?' || b == b'#')
+        .unwrap_or(path.len());
+    let segment = match path[..end].iter().rposition(|&b| b == b'/') {
+        Some(slash) => &path[slash + 1..end],
+        None => &path[..end],
+    };
+    sanitize_download_name(segment, out)
+}
+
 /// The height one document line occupies, in logical pixels.
 ///
 /// WHY this lives here and not in the renderer: the renderer walked the
@@ -3524,5 +3769,87 @@ mod tests {
         assert!(contains_ignore_case(b"https://interos.tech", b"INTEROS.TECH"));
         assert!(!contains_ignore_case(b"https://example.org", b"interos"));
         assert!(contains_ignore_case(b"anything", b""));
+    }
+
+    /// A page is a document and an image is not; the browser has to know
+    /// which bytes to decode as text and which to keep as a file.
+    #[test]
+    fn test_binary_content_types_are_not_documents() {
+        assert!(content_type_is_binary(b"image/png"));
+        assert!(content_type_is_binary(b"image/jpeg; charset=binary"));
+        assert!(content_type_is_binary(b"audio/mpeg"));
+        assert!(content_type_is_binary(b"video/mp4"));
+        assert!(content_type_is_binary(b"application/octet-stream"));
+        assert!(content_type_is_binary(b"application/pdf"));
+        assert!(!content_type_is_binary(b"text/html; charset=utf-8"));
+        assert!(!content_type_is_binary(b"text/plain"));
+        assert!(!content_type_is_binary(b"application/json"));
+        assert!(!content_type_is_binary(b"application/xhtml+xml"));
+        assert!(!content_type_is_binary(b"image/svg+xml"));
+        assert!(!content_type_is_binary(b""));
+    }
+
+    /// The file keeps the origin's name and the type's extension, so the
+    /// app that opens it is chosen by what the file is.
+    #[test]
+    fn test_a_download_keeps_its_name_and_gets_the_types_extension() {
+        let mut out = [0u8; 96];
+
+        let n = download_filename(
+            b"https://upload.wikimedia.org/wikipedia/commons/4/47/demo.png",
+            b"image/png",
+            None,
+            &mut out,
+        );
+        assert_eq!(core::str::from_utf8(&out[..n]).unwrap(), "demo.png");
+
+        // No extension in the URL: the content type supplies it.
+        let n = download_filename(b"https://example.com/media/photo", b"image/jpeg", None, &mut out);
+        assert_eq!(core::str::from_utf8(&out[..n]).unwrap(), "photo.jpg");
+
+        // The server's own name wins, and a mismatched extension is replaced.
+        let n = download_filename(
+            b"https://example.com/image.php",
+            b"image/png",
+            Some(b"holiday.php"),
+            &mut out,
+        );
+        assert_eq!(core::str::from_utf8(&out[..n]).unwrap(), "holiday.png");
+
+        // A query is not part of the name, and unsafe characters are replaced.
+        let n = download_filename(
+            b"https://example.com/get?file=a%20b.mp3",
+            b"audio/mpeg",
+            None,
+            &mut out,
+        );
+        assert_eq!(core::str::from_utf8(&out[..n]).unwrap(), "get.mp3");
+
+        // An unknown type still produces a file with a usable name.
+        let n = download_filename(b"https://example.com/archive", b"application/x-thing", None, &mut out);
+        assert_eq!(core::str::from_utf8(&out[..n]).unwrap(), "archive.bin");
+    }
+
+    /// The header the gateway adds names the file; the body must not be
+    /// mistaken for a header.
+    #[test]
+    fn test_the_download_name_header_is_read_from_the_header_section() {
+        let raw = b"HTTP/1.0 200 OK\r\nContent-Type: image/png\r\nX-Interos-Filename: demo.png\r\n\r\nname: in-the-body.png";
+        assert_eq!(http_header_value(raw, b"x-interos-filename"), Some(&b"demo.png"[..]));
+        assert_eq!(http_header_value(raw, b"content-type"), Some(&b"image/png"[..]));
+        assert_eq!(http_header_value(raw, b"missing"), None);
+    }
+
+    /// A downloaded file lives beside the saved pages but is addressed as
+    /// its own file, never as a page.
+    #[test]
+    fn test_a_download_path_names_the_file_under_the_downloads_directory() {
+        let mut out = [0u8; 96];
+        let n = media_download_path(4, b"demo.png", &mut out);
+        assert_eq!(
+            core::str::from_utf8(&out[..n]).unwrap(),
+            "/storage/downloads/dl_4_demo.png"
+        );
+        assert!(!is_download_path(core::str::from_utf8(&out[..n]).unwrap()));
     }
 }

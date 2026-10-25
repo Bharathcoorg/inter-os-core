@@ -483,6 +483,11 @@ const BODY_LOCAL_READ_REFUSED: &[u8] = b"The address names a local document and 
 filesystem opened it, but the read itself was refused. Nothing was shown.";
 const BODY_LOCAL_NO_PATH: &[u8] = b"The address names a local document but carries no path, so \
 there is nothing for the browser to open.";
+const BODY_DOWNLOADED: &[u8] = b"The response was a file, so it was saved to the shared storage \
+area unchanged. The File Manager lists it under Downloads and opens it with the app registered \
+for its type.";
+const BODY_DOWNLOAD_FAILED: &[u8] = b"The response was a file, but the shared storage area did \
+not accept it. Nothing was saved.";
 
 /// Why a local document could not be shown.
 ///
@@ -892,6 +897,10 @@ pub enum PageStatus {
     UnsupportedScheme,
     /// The gateway received the request but its own fetch failed.
     GatewayError,
+    /// The response was a file, and its bytes were saved to storage.
+    Downloaded,
+    /// The response was a file, but storage refused the bytes.
+    DownloadFailed,
     LocalRefused,
 }
 
@@ -959,6 +968,13 @@ pub struct BrowserApp {
     /// WHY it is kept: a download is the bytes the transport delivered, and
     /// the app has to know how many there were to write them.
     pub response_len: usize,
+    /// How many bytes of the page's own document the last response held.
+    ///
+    /// WHY this is not `response_len`: the gateway wraps a page in a JSON
+    /// envelope, so the response is the envelope and the document inside it
+    /// is what a saved page has to be. Saving the envelope wrote a file that
+    /// reopened as JSON rather than as the page.
+    pub page_source_len: usize,
     /// How many pages this app has saved into the shared storage area.
     ///
     /// WHY it is counted: a saved page is named by a counter rather than by a
@@ -1002,6 +1018,42 @@ impl DownloadEntry {
     };
 }
 
+/// The largest slice one filesystem write carries.
+///
+/// WHY this is smaller than the syscall's limit: the payload is copied
+/// through a fixed kernel buffer, so steps below the limit leave room for
+/// the copy and keep the last step from depending on the remainder.
+const FILE_WRITE_CHUNK: usize = 32 * 1024;
+
+/// Writes `bytes` to `path` in buffered steps.
+///
+/// WHY a partial write is retried rather than reported: a short write is
+/// not a failure, and the next step continues where the last one stopped.
+/// A file that cannot be finished is removed, so a damaged download never
+/// looks like a complete one.
+fn write_file(path: &str, bytes: &[u8]) -> Result<usize, ()> {
+    let fd = std::fs_open(path, std::FS_WRITE).map_err(|_| ())?;
+    let mut written = 0usize;
+    while written < bytes.len() {
+        let end = (written + FILE_WRITE_CHUNK).min(bytes.len());
+        match std::fs_write(fd, &bytes[written..end]) {
+            Ok(0) => {
+                let _ = std::fs_close(fd);
+                let _ = std::fs_unlink(path);
+                return Err(());
+            }
+            Ok(n) => written += n,
+            Err(_) => {
+                let _ = std::fs_close(fd);
+                let _ = std::fs_unlink(path);
+                return Err(());
+            }
+        }
+    }
+    let _ = std::fs_close(fd);
+    Ok(written)
+}
+
 impl BrowserApp {
     pub fn new() -> Self {
         let mut app = Self {
@@ -1032,6 +1084,7 @@ impl BrowserApp {
             response_truncated: false,
             local_failure: LocalFailure::NoPath,
             response_len: 0,
+            page_source_len: 0,
             downloads_saved: 0,
             downloads: [DownloadEntry::EMPTY; MAX_DOWNLOADS],
             download_count: 0,
@@ -1179,6 +1232,17 @@ impl BrowserApp {
             return false;
         }
 
+        // The file's own bytes are what a saved copy holds, and they are
+        // kept where the save path reads from, so a local document can be
+        // saved like a page.
+        {
+            let source = unsafe { &*core::ptr::addr_of!(FILE_BUF) };
+            let page = unsafe { &mut *core::ptr::addr_of_mut!(HTML_BUF) };
+            let take = read_bytes.min(page.len());
+            page[..take].copy_from_slice(&source[..take]);
+            self.page_source_len = take;
+        }
+
         // The kind of document decides how it is read. A file whose name
         // says markup is read as markup; anything else is text, and a text
         // file keeps its lines.
@@ -1313,9 +1377,9 @@ impl BrowserApp {
             std::log("[BROWSER APP] There is no loaded page to save.").ok();
             return;
         }
-        let response = unsafe { &*core::ptr::addr_of!(RESPONSE_BUF) };
-        if self.response_len == 0 || self.response_len > response.len() {
-            std::log("[BROWSER APP] The response the transport delivered is not held; nothing was saved.").ok();
+        let response = unsafe { &*core::ptr::addr_of!(HTML_BUF) };
+        if self.page_source_len == 0 || self.page_source_len > response.len() {
+            std::log("[BROWSER APP] The page's own document is not held; nothing was saved.").ok();
             return;
         }
         let mut path_buf = [0u8; 96];
@@ -1324,32 +1388,104 @@ impl BrowserApp {
             std::log("[BROWSER APP] The download path could not be built; nothing was saved.").ok();
             return;
         };
-        match std::fs_open(path, std::FS_WRITE) {
-            Ok(fd) => {
-                let written = std::fs_write(fd, &response[..self.response_len]);
-                let _ = std::fs_close(fd);
-                match written {
-                    Ok(n) => {
-                        self.downloads_saved = self.downloads_saved.saturating_add(1);
-                        std::log("[BROWSER APP] The page was saved into the shared storage area.").ok();
-                        let _ = n;
-                        // WHY the index is refreshed here: the platform's
-                        // index is what the file manager and the launcher
-                        // read, and it is built by walking the shared
-                        // storage area. A saved page that is not in the
-                        // index is a file the rest of the device cannot
-                        // find.
-                        self.publish_download(path);
-                    }
-                    Err(_) => {
-                        std::log("[BROWSER APP] The page could not be written; nothing was saved.").ok();
-                    }
+        match write_file(path, &response[..self.page_source_len]) {
+            Ok(n) => {
+                self.downloads_saved = self.downloads_saved.saturating_add(1);
+                std::log("[BROWSER APP] The page was saved into the shared storage area.").ok();
+                let _ = n;
+                // WHY the index is refreshed here: the platform's
+                // index is what the file manager and the launcher
+                // read, and it is built by walking the shared
+                // storage area. A saved page that is not in the
+                // index is a file the rest of the device cannot
+                // find.
+                self.publish_download(path);
+            }
+            Err(_) => {
+                std::log("[BROWSER APP] The page could not be written; nothing was saved.").ok();
+            }
+        }
+    }
+
+    /// Writes a fetched file into the shared storage area.
+    ///
+    /// WHY the body is written in steps: the filesystem syscall carries at
+    /// most 64 KiB per call, so a file larger than that is written in parts
+    /// rather than refused. A refused write removes the partial file, so a
+    /// damaged download is not left where the File Manager lists it.
+    fn save_media_download(
+        &mut self,
+        url: &[u8],
+        content_type: &[u8],
+        given_name: Option<&[u8]>,
+        body: &[u8],
+        truncated: bool,
+    ) -> bool {
+        let mut name = [0u8; 72];
+        let name_len = browser::download_filename(url, content_type, given_name, &mut name);
+        let mut path_buf = [0u8; 96];
+        let Some(path_len) = self.unused_download_path(&name[..name_len], &mut path_buf) else {
+            self.status = PageStatus::DownloadFailed;
+            self.loading_progress = 0;
+            self.tabs.active_tab_mut().loading_state = LoadingState::Failed;
+            self.tabs.active_tab_mut().error_code = -17; // EEXIST
+            std::log("[BROWSER APP] No unused path could be found for the download; nothing was saved.").ok();
+            let _ = std::audio_haptic_click();
+            return false;
+        };
+        let Ok(path) = core::str::from_utf8(&path_buf[..path_len]) else {
+            self.status = PageStatus::DownloadFailed;
+            self.loading_progress = 0;
+            self.tabs.active_tab_mut().loading_state = LoadingState::Failed;
+            std::log("[BROWSER APP] The download path could not be built; nothing was saved.").ok();
+            let _ = std::audio_haptic_click();
+            return false;
+        };
+        match write_file(path, body) {
+            Ok(written) => {
+                std::log("[BROWSER APP] The response was a file and was saved into the shared storage area.").ok();
+                if truncated {
+                    std::log("[BROWSER APP] The origin's file was larger than the gateway's limit; the saved copy is truncated.").ok();
                 }
+                let _ = written;
+                self.publish_download(path);
+                self.status = PageStatus::Downloaded;
+                self.loading_progress = 100;
+                self.tabs.active_tab_mut().loading_state = LoadingState::Completed;
+                self.tabs.active_tab_mut().error_code = 0;
+                let _ = std::audio_haptic_click();
+                true
             }
             Err(_) => {
                 std::log("[BROWSER APP] The shared storage area refused the download; nothing was saved.").ok();
+                self.status = PageStatus::DownloadFailed;
+                self.loading_progress = 0;
+                self.tabs.active_tab_mut().loading_state = LoadingState::Failed;
+                self.tabs.active_tab_mut().error_code = -5; // EIO
+                let _ = std::audio_haptic_click();
+                false
             }
         }
+    }
+
+    /// Finds a download path that is not already taken.
+    ///
+    /// WHY the directory is probed: the app's own counter restarts at zero
+    /// when it is closed, and a name that overwrote yesterday's download
+    /// would lose a file the person kept. An open for reading that succeeds
+    /// is an existing file.
+    fn unused_download_path(&self, name: &[u8], out: &mut [u8]) -> Option<usize> {
+        for index in 0..1000u32 {
+            let n = browser::media_download_path(index, name, out);
+            let path = core::str::from_utf8(&out[..n]).ok()?;
+            match std::fs_open(path, std::FS_READ) {
+                Ok(fd) => {
+                    let _ = std::fs_close(fd);
+                }
+                Err(_) => return Some(n),
+            }
+        }
+        None
     }
 
     /// Publishes a saved page into the platform's content index.
@@ -1446,6 +1582,9 @@ impl BrowserApp {
         self.current_url[..n].copy_from_slice(&target[..n]);
         self.current_url_len = n;
         self.scroll = ScrollState::new(0, READER_VIEWPORT_H, 0);
+        // A navigation is a new document; the previous document's bytes must
+        // not be savable under the new address.
+        self.page_source_len = 0;
 
         let parsed = parse_uri(target);
         std::log("[BROWSER APP] Navigation target URL:").ok();
@@ -1544,6 +1683,24 @@ impl BrowserApp {
         let rx_slice = &response[..outcome.bytes];
         self.response_len = outcome.bytes;
 
+        // A payload that is a file rather than a document is kept as it
+        // arrived. The gateway hands media over as raw bytes; decoding it as
+        // text first would replace every non-ASCII byte, so the saved file
+        // would no longer be the file the origin sent.
+        if let Some(resp) = browser::parse_http_response(rx_slice) {
+            if browser::content_type_is_binary(resp.content_type) {
+                let truncated = outcome.truncated
+                    || browser::http_header_value(rx_slice, b"x-interos-truncated").is_some();
+                return self.save_media_download(
+                    target,
+                    resp.content_type,
+                    browser::http_header_value(rx_slice, b"x-interos-filename"),
+                    resp.body,
+                    truncated,
+                );
+            }
+        }
+
         let mut loaded_from_network = false;
         let key: &[u8] = b"\"html\":";
         let is_proxy_envelope = rx_slice.windows(key.len()).any(|w| w == key);
@@ -1581,6 +1738,9 @@ impl BrowserApp {
         };
 
         if html_len > 0 {
+            // The page's own document, not the envelope that carried it, is
+            // what a saved page is.
+            self.page_source_len = html_len;
             // The HTML is read from one buffer and the reader document is
             // written to another: the reader rewrites the markup in place,
             // so source and destination cannot be the same memory.
@@ -1809,6 +1969,8 @@ impl Frame {
             PageStatus::UnrecognisedAddress => (b"Address not recognised", BODY_UNRECOGNISED),
             PageStatus::UnsupportedScheme => (b"Scheme not supported", BODY_UNSUPPORTED_SCHEME),
             PageStatus::GatewayError => (b"Gateway could not fetch", BODY_GATEWAY_ERROR),
+            PageStatus::Downloaded => (b"Saved to Downloads", BODY_DOWNLOADED),
+            PageStatus::DownloadFailed => (b"Download could not be saved", BODY_DOWNLOAD_FAILED),
             PageStatus::LocalRefused => (b"Local document unavailable", match app.local_failure {
                 LocalFailure::NoPath => BODY_LOCAL_NO_PATH,
                 LocalFailure::NoCapability => BODY_LOCAL_NO_CAPABILITY,
@@ -2039,6 +2201,28 @@ fn offline_glyph(x: usize, y: usize, cx: usize, cy: usize) -> bool {
     }
     let slash = (x as isize - cx as isize) - (y as isize - cy as isize);
     if slash.abs() <= 2 && dx <= 20 && dy <= 20 {
+        return true;
+    }
+    false
+}
+
+/// Download Glyph: an arrow into a tray.
+fn download_glyph(x: usize, y: usize, cx: usize, cy: usize) -> bool {
+    let dx = x as isize - cx as isize;
+    let dy = y as isize - cy as isize;
+    if dx.abs() > 22 || dy < -20 || dy > 20 {
+        return false;
+    }
+    if dx.abs() <= 2 && dy >= -18 && dy <= 4 {
+        return true;
+    }
+    if dy >= 2 && dy <= 15 && dx.abs() <= 15 - dy {
+        return true;
+    }
+    if dy >= 16 && dy <= 19 && dx.abs() <= 20 {
+        return true;
+    }
+    if dy >= 8 && dy < 16 && (dx.abs() == 20) {
         return true;
     }
     false
@@ -2732,17 +2916,29 @@ fn home_row(app: &BrowserApp, index: usize) -> Option<HomeRow> {
 // -----------------------------------------------------------------------------
 fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
     // Error state / No transport screen
+    let download_status = app.status == PageStatus::Downloaded
+        || app.status == PageStatus::DownloadFailed;
     if app.status == PageStatus::NoTransport
         || app.status == PageStatus::InvalidAddress
         || app.status == PageStatus::UnrecognisedAddress
         || app.status == PageStatus::UnsupportedScheme
         || app.status == PageStatus::GatewayError
         || app.status == PageStatus::LocalRefused
+        || download_status
     {
         let cx = W / 2;
         let cy = f.icon_cy;
-        if offline_glyph(x, y, cx, cy) {
-            return THEME.on_surface_variant;
+        let glyph = if download_status {
+            download_glyph(x, y, cx, cy)
+        } else {
+            offline_glyph(x, y, cx, cy)
+        };
+        if glyph {
+            return if app.status == PageStatus::Downloaded {
+                THEME.primary
+            } else {
+                THEME.on_surface_variant
+            };
         }
         if f.head_len > 0 {
             if let Some(px) = text_px(
@@ -2779,6 +2975,8 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                 PageStatus::UnrecognisedAddress => b"ADDRESS NOT RECOGNISED",
                 PageStatus::UnsupportedScheme => b"SCHEME NOT SUPPORTED",
                 PageStatus::GatewayError => b"GATEWAY COULD NOT FETCH",
+                PageStatus::Downloaded => b"DOWNLOAD COMPLETE",
+                PageStatus::DownloadFailed => b"DOWNLOAD FAILED",
                 PageStatus::LocalRefused => match app.local_failure {
                     LocalFailure::NoPath => b"NO PATH GIVEN",
                     LocalFailure::NoCapability => b"NO FILESYSTEM CAPABILITY",
@@ -2788,11 +2986,21 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                 },
                 _ => b"NO RESPONSE FROM THE GATEWAY",
             };
+            let label_color = if app.status == PageStatus::Downloaded {
+                THEME.primary
+            } else {
+                THEME.error
+            };
             let lw = text_width(label, 1);
-            if let Some(px) = text_px(x, y, cx - lw / 2, err_y + 8, 1, label, THEME.error, c, false) {
+            if let Some(px) = text_px(x, y, cx - lw / 2, err_y + 8, 1, label, label_color, c, false) {
                 return px;
             }
             return c;
+        }
+
+        // A saved file is not a failure, so there is nothing to reload.
+        if download_status {
+            return THEME.surface;
         }
 
         // Reload Button Card

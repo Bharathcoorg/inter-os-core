@@ -437,8 +437,14 @@ def test_the_browsers_downloads_land_where_the_index_can_see_them():
     browser_lib = read(APPS / "browser" / "src" / "lib.rs")
     assert 'DOWNLOAD_PREFIX: &str = "/storage/downloads/' in browser_lib
     assert "download_path(" in save
-    assert "std::fs_open" in save
-    assert "std::fs_write" in save
+    assert "write_file(" in save
+    # WHY the writer may be a helper: a saved page and a fetched file reach
+    # the filesystem through the same chunked writer, and the bytes reach it
+    # through fs_write rather than a summary of them.
+    writer = browser[browser.index("fn write_file("):]
+    writer = writer[: writer.index("impl BrowserApp")]
+    assert "std::fs_open" in writer
+    assert "std::fs_write" in writer
     # The index covers the whole shared area, so a download is in it.
     content = read(CONTENT / "mod.rs")
     assert 'SHARED_STORAGE_ROOT: &str = "/storage"' in content

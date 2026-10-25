@@ -2685,6 +2685,63 @@ def query_qemu_monitor(host='127.0.0.1', port=MONITOR_PORT, timeout=0.35, force=
         return latest_telemetry
 
 
+# Media a browser cannot render as a document is delivered to the guest as its
+# origin bytes, with the type and a usable file name in the headers. The guest
+# writes those bytes to storage, so the file it keeps is the file the server
+# sent rather than a text decode of it.
+_BINARY_EXTENSIONS = {
+    'image/png': '.png', 'image/jpeg': '.jpg', 'image/gif': '.gif',
+    'image/webp': '.webp', 'image/bmp': '.bmp', 'image/x-ms-bmp': '.bmp',
+    'image/avif': '.avif', 'image/svg+xml': '.svg',
+    'audio/mpeg': '.mp3', 'audio/mp3': '.mp3', 'audio/ogg': '.ogg',
+    'audio/wav': '.wav', 'audio/x-wav': '.wav', 'audio/flac': '.flac',
+    'audio/mp4': '.m4a', 'audio/aac': '.aac', 'audio/webm': '.weba',
+    'video/mp4': '.mp4', 'video/webm': '.webm', 'video/quicktime': '.mov',
+    'video/x-msvideo': '.avi', 'application/pdf': '.pdf',
+    'application/zip': '.zip', 'application/octet-stream': '.bin',
+}
+
+
+def _is_textual_content_type(content_type):
+    """True when the payload can be carried in the JSON envelope as text.
+
+    Everything else is delivered as raw bytes: decoding an image or an audio
+    file as UTF-8 replaces every non-ASCII byte, so the envelope would carry a
+    file that is no longer the one the origin sent.
+    """
+    ct = (content_type or '').split(';', 1)[0].strip().lower()
+    if not ct:
+        return True
+    if ct.startswith('text/'):
+        return True
+    if ct in ('application/json', 'application/xhtml+xml', 'application/xml',
+              'application/javascript', 'application/ecmascript',
+              'application/x-javascript'):
+        return True
+    return ct.endswith('+json') or ct.endswith('+xml')
+
+
+def _safe_download_name(url, content_type, disposition=None):
+    """Builds a storage-safe file name from the response's own naming hints."""
+    name = ''
+    if disposition:
+        match = re.search(r"filename\*?=(?:UTF-8''|\")?([^\";]+)", disposition, re.I)
+        if match:
+            name = urllib.parse.unquote(match.group(1).strip().strip('"'))
+    if not name:
+        path = urllib.parse.urlparse(url).path
+        name = urllib.parse.unquote(path.rsplit('/', 1)[-1]) if path else ''
+    name = re.sub(r'[^A-Za-z0-9._-]+', '_', name).strip('._')[:80] or 'download'
+    expected = _BINARY_EXTENSIONS.get((content_type or '').split(';', 1)[0].strip().lower())
+    stem, extension = os.path.splitext(name)
+    if expected:
+        if extension.lower() != expected:
+            name = (stem or 'download') + expected
+    elif not extension:
+        name += '.bin'
+    return name
+
+
 def is_safe_proxy_url(url_str):
     """
     SSRF Protection: Validates that an outbound HTTP/HTTPS request does not
@@ -3733,9 +3790,31 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                     'Accept-Language': 'en-US,en;q=0.9'
                 })
                 with urllib.request.build_opener(_SsrfGuardedRedirectHandler).open(req, timeout=6) as response:
-                    raw_data = response.read(1048576) # Read up to 1MB
+                    # Read one byte past the cap so a response that fills it is
+                    # known to be truncated rather than assumed complete.
+                    raw_data = response.read(1048577)
                     content_type = response.headers.get('Content-Type', 'text/html')
-                    text_content = raw_data.decode('utf-8', errors='ignore')
+                    disposition = response.headers.get('Content-Disposition')
+                truncated = len(raw_data) > 1048576
+                if truncated:
+                    raw_data = raw_data[:1048576]
+
+                if not _is_textual_content_type(content_type):
+                    # The device cannot render this as a document, so it is
+                    # handed over as the file it is. The browser saves these
+                    # bytes to the shared storage area unchanged.
+                    self.send_response(200)
+                    self.send_header('Content-Type', content_type)
+                    self.send_header('Content-Length', str(len(raw_data)))
+                    self.send_header('X-Interos-Filename', _safe_download_name(target_url, content_type, disposition))
+                    if truncated:
+                        self.send_header('X-Interos-Truncated', '1')
+                    self.send_header('Connection', 'close')
+                    self.end_headers()
+                    self.wfile.write(raw_data)
+                    return
+
+                text_content = raw_data.decode('utf-8', errors='ignore')
 
                 # Inject base tag and viewport so modern websites render CSS, images, and fonts correctly
                 if 'html' in content_type.lower():
