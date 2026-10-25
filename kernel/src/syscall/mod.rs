@@ -3132,9 +3132,6 @@ pub fn sys_tcp_send(connection_id: u32, payload: &[u8]) -> SyscallResult {
     let task_id = current.id;
     let caps = current.cap_table.clone();
     drop(sched);
-    if crate::task::process::consume_background_network(task_id, payload.len()).is_err() {
-        return SyscallResult::NotReady;
-    }
     if payload.len() > crate::net::tcp::TCP_MAX_SEGMENT { return SyscallResult::InvalidArguments; }
     let (src_ip, src_port, dst_ip, dst_port, seq, ack, state, window) = {
         let table = crate::net::TCP_TABLE.lock();
@@ -3144,6 +3141,12 @@ pub fn sys_tcp_send(connection_id: u32, payload: &[u8]) -> SyscallResult {
     if state != crate::net::TcpState::Established { return SyscallResult::NotReady; }
     let available = crate::net::TCP_TABLE.lock().send_window(connection_id).unwrap_or(0) as usize;
     if payload.len() > available { return SyscallResult::NotReady; }
+    // Debit the process budget only once the send can actually go on the
+    // wire. A send refused for a connection that is not established yet
+    // must not spend the caller's allowance.
+    if crate::task::process::consume_background_network(task_id, payload.len()).is_err() {
+        return SyscallResult::NotReady;
+    }
     crate::net::send_tcp_payload_with_window(src_ip, src_port, dst_ip, dst_port, seq, ack, payload, window, &caps)
         .map(|n| {
             let now = crate::interrupts::get_system_ticks();
@@ -3166,11 +3169,40 @@ pub fn sys_tcp_recv(connection_id: u32, out: &mut [u8]) -> Result<usize, Syscall
         }
         (current.id.0 as u32, current.cap_table.clone())
     };
-    let n = crate::net::TCP_TABLE.lock().recv_owned(connection_id, owner, out, &caps).map_err(|e| match e {
-        NetError::CapabilityDenied => SyscallResult::PermissionDenied,
-        NetError::NoPacketAvailable => SyscallResult::NotReady,
-        _ => SyscallResult::NetworkError,
-    })?;
+    // The table guard must be dropped before the arm below takes it again
+    // for the end-of-stream check; a match scrutinee's temporary guard
+    // lives for the whole match.
+    let received = {
+        let mut table = crate::net::TCP_TABLE.lock();
+        table.recv_owned(connection_id, owner, out, &caps)
+    };
+    let n = match received {
+        Ok(n) => n,
+        Err(e) => {
+            // After a FIN is accepted with every byte delivered, the receive
+            // buffer stays empty. Reporting that terminal state as end of
+            // stream lets a reader stop at the real end of the response
+            // instead of polling until its deadline.
+            if matches!(e, NetError::NoPacketAvailable) {
+                let eof = crate::net::TCP_TABLE.lock().get(connection_id).is_some_and(|c| {
+                    matches!(
+                        c.state,
+                        crate::net::TcpState::CloseWait
+                            | crate::net::TcpState::Closed
+                            | crate::net::TcpState::TimeWait
+                    )
+                });
+                if eof {
+                    return Ok(0);
+                }
+            }
+            match e {
+                NetError::CapabilityDenied => return Err(SyscallResult::PermissionDenied),
+                NetError::NoPacketAvailable => return Err(SyscallResult::NotReady),
+                _ => return Err(SyscallResult::NetworkError),
+            }
+        }
+    };
     if n > 0 {
         let (src_ip, local_port, dst_ip, remote_port, seq, ack, window) = {
             let table = crate::net::TCP_TABLE.lock();
@@ -3192,6 +3224,15 @@ pub fn sys_tcp_recv(connection_id: u32, out: &mut [u8]) -> Result<usize, Syscall
     Ok(n)
 }
 
+/// Upper bound on wait iterations for one DNS send or receive attempt.
+///
+/// WHY a second bound exists: `syscall` entry clears the interrupt flag, and
+/// only an explicit context switch lets the timer run again. If no other task
+/// is runnable the tick counter stays frozen, so a tick-only deadline would
+/// never expire and the wait would spin forever with interrupts disabled.
+/// This count guarantees the wait ends even then.
+const DNS_MAX_WAIT_POLLS: usize = 100_000;
+
 /// Sends a UDP datagram to the DNS server, handling ARP resolution delays.
 ///
 /// The first UDP transmission can legitimately return NoPacketAvailable when
@@ -3209,6 +3250,7 @@ fn send_dns_datagram_with_arp_retry(
     deadline: u64,
     is_retransmit: bool,
 ) -> Result<(), NetError> {
+    let mut polls = 0usize;
     loop {
         match crate::net::send_udp_datagram_authorized(
             crate::net::DEFAULT_HOST_IP,
@@ -3221,9 +3263,10 @@ fn send_dns_datagram_with_arp_retry(
         ) {
             Ok(()) => return Ok(()),
             Err(NetError::NoPacketAvailable) => {
-                if crate::interrupts::get_system_ticks() >= deadline {
+                if crate::interrupts::get_system_ticks() >= deadline || polls >= DNS_MAX_WAIT_POLLS {
                     return Err(NetError::NoPacketAvailable);
                 }
+                polls += 1;
                 let _ = crate::net::poll_network_interface();
                 crate::task::yield_now();
             }
@@ -3292,21 +3335,46 @@ pub fn sys_dns_resolve(name: &str) -> Result<crate::net::Ipv4Address, SyscallRes
         crate::net::dns::DNS_RETRY_TICKS * (crate::net::dns::DNS_MAX_RETRIES as u64 + 1),
     );
     let mut rx = [0u8; 512];
+    let mut polls = 0usize;
     loop {
         let current_tick = crate::interrupts::get_system_ticks();
-        if current_tick >= deadline {
+        if current_tick >= deadline || polls >= DNS_MAX_WAIT_POLLS {
             let _ = crate::net::DNS_RESOLVER.lock().abort(query_id);
             let _ = crate::net::SOCKET_TABLE.lock().close_owned(socket, owner);
             return Err(SyscallResult::NetworkError);
         }
+        polls += 1;
         let _ = crate::net::poll_network_interface();
-        if let Ok(bytes) = crate::net::SOCKET_TABLE.lock().get_mut(socket)
-            .ok_or(NetError::NoPacketAvailable)
-            .and_then(|s| s.recv_from(&mut rx, &caps).map(|v| v.0))
-        {
-            if let Ok(addr) = crate::net::DNS_RESOLVER.lock().accept_response(&rx[..bytes], current_tick) {
-                let _ = crate::net::SOCKET_TABLE.lock().close_owned(socket, owner);
-                return Ok(addr);
+        // The receive guard must be dropped before the arms below take the
+        // socket table again to close the socket; an `if let` scrutinee's
+        // temporary guard lives for the whole body.
+        let received = {
+            let mut table = crate::net::SOCKET_TABLE.lock();
+            table.get_mut(socket)
+                .ok_or(NetError::NoPacketAvailable)
+                .and_then(|s| s.recv_from(&mut rx, &caps).map(|v| v.0))
+        };
+        if let Ok(bytes) = received {
+            let mut resolver = crate::net::DNS_RESOLVER.lock();
+            match resolver.accept_response(&rx[..bytes], current_tick) {
+                Ok(addr) => {
+                    drop(resolver);
+                    let _ = crate::net::SOCKET_TABLE.lock().close_owned(socket, owner);
+                    return Ok(addr);
+                }
+                Err(_) if bytes >= 2 && u16::from_be_bytes([rx[0], rx[1]]) == query_id => {
+                    // The server answered this query but carried no usable A
+                    // record (an error rcode, an empty answer, or a malformed
+                    // body). Retrying the same name cannot change that verdict,
+                    // so the failure is reported instead of consumed as a
+                    // timeout.
+                    drop(resolver);
+                    let _ = crate::net::DNS_RESOLVER.lock().abort(query_id);
+                    let _ = crate::net::SOCKET_TABLE.lock().close_owned(socket, owner);
+                    return Err(SyscallResult::NetworkError);
+                }
+                // A datagram for another in-flight query; keep waiting for ours.
+                Err(_) => {}
             }
         }
 
@@ -3349,6 +3417,13 @@ pub fn sys_dns_resolve(name: &str) -> Result<crate::net::Ipv4Address, SyscallRes
                 return Err(SyscallResult::NetworkError);
             }
         }
+
+        // WHY this yield: syscall entry clears the interrupt flag, so without
+        // an explicit context switch the timer never fires, `get_system_ticks()`
+        // never advances, and a resolver that stays silent would spin here and
+        // freeze every other task. Yielding lets the rest of the system run and
+        // the deadline above actually expire.
+        crate::task::yield_now();
     }
 }
 
@@ -3404,11 +3479,21 @@ pub fn sys_tcp_connect(dst_ip: crate::net::Ipv4Address, dst_port: u16, local_por
         .open(owner, local_port, dst_ip, dst_port, seq)
         .map_err(|_| SyscallResult::NetworkError)?;
     let window = crate::net::TCP_TABLE.lock().get(id).map(|c| c.rcv_wnd.min(u16::MAX as u32) as u16).unwrap_or(0);
-    if crate::net::send_tcp_syn_with_window(
+    if let Err(e) = crate::net::send_tcp_syn_with_window(
         if dst_ip.is_loopback() { crate::net::Ipv4Address::LOCALHOST } else { crate::net::DEFAULT_HOST_IP },
         local_port, dst_ip, dst_port, seq, window, &caps,
-    ).is_err() {
-        let _ = crate::net::TCP_TABLE.lock().close_owned(id, owner);
+    ) {
+        if e == NetError::NoPacketAvailable {
+            // The gateway's hardware address is not in the ARP table yet and
+            // the probe is now in flight. Keep the connection in SynSent; the
+            // bounded poll path retransmits the same SYN once the reply fills
+            // the table, so a cold cache delays the handshake instead of
+            // failing the connect.
+            return Ok(id);
+        }
+        let mut table = crate::net::TCP_TABLE.lock();
+        if let Some(c) = table.get_mut(id) { c.state = crate::net::TcpState::Closed; }
+        let _ = table.remove_closed(id, owner);
         return Err(SyscallResult::NetworkError);
     }
     Ok(id)

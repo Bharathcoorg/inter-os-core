@@ -320,6 +320,7 @@ impl TcpConnectionTable {
                 && conn.remote_port == remote_port
                 && conn.state != crate::net::TcpState::Closed
         }) {
+            if let Some(process) = process { crate::task::process::release_network_socket(process); }
             return Err(NetError::PortInUse);
         }
 
@@ -356,7 +357,12 @@ impl TcpConnectionTable {
                     fin_retries: 0,
                     syn_pending: true,
                     syn_seq: initial_seq,
-                    syn_deadline: TCP_RETRANSMIT_TICKS,
+                    // A fresh connection's first retransmission is due one
+                    // timeout from now. Using the bare timeout value made the
+                    // SYN immediately overdue once system uptime passed it,
+                    // so the poll path retransmitted on its next pass.
+                    syn_deadline: crate::interrupts::get_system_ticks()
+                        .saturating_add(TCP_RETRANSMIT_TICKS),
                     syn_retries: 0,
                     time_wait_until: 0,
                 });
