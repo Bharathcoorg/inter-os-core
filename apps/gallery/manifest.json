@@ -22,6 +22,7 @@
       "image/png",
       "image/gif",
       "image/bmp",
+      "image/jpeg",
       "image/qoi",
       "image/x-portable-pixmap",
       "video/mp4",

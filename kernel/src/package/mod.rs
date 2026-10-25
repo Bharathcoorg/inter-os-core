@@ -87,6 +87,7 @@ pub const FIRST_PARTY_INTENTS: &[(&str, &str, &str)] = &[
     ("org.interos.gallery", "mime", "image/png"),
     ("org.interos.gallery", "mime", "image/gif"),
     ("org.interos.gallery", "mime", "image/bmp"),
+    ("org.interos.gallery", "mime", "image/jpeg"),
     ("org.interos.gallery", "mime", "image/qoi"),
     ("org.interos.gallery", "mime", "image/x-portable-pixmap"),
     ("org.interos.gallery", "mime", "video/mp4"),

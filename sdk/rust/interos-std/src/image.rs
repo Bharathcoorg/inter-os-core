@@ -1963,6 +1963,1006 @@ pub fn decode_gif(data: &[u8], out_rgba: &mut [u8]) -> Result<(u32, u32, usize),
     }
 }
 
+// ---------------------------------------------------------------------------
+// JPEG (baseline sequential DCT, Huffman only)
+// ---------------------------------------------------------------------------
+
+/// The order in which the 64 coefficients of a block are transmitted.
+///
+/// Position `i` in the scan corresponds to position `ZIGZAG[i]` in the natural
+/// row-major block. Quantization tables use the same order.
+const JPEG_ZIGZAG: [usize; 64] = [
+    0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5, 12, 19, 26, 33, 40, 48, 41, 34, 27,
+    20, 13, 6, 7, 14, 21, 28, 35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51, 58,
+    59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63,
+];
+
+/// One basis vector of the 8x8 inverse DCT, already scaled by one half.
+///
+/// WHY a table: `basis[u][x] = 0.5 * C(u) * cos((2x+1)u*pi/16)`, so the 2-D
+/// inverse is simply `sum_u sum_v basis[u][x] * basis[v][y] * F[u][v]`.
+/// Hard-coding the cosine terms keeps the decoder free of libm, which a
+/// `no_std` crate does not have.
+const JPEG_IDCT_BASIS: [[f32; 8]; 8] = [
+    [0.35355339, 0.35355339, 0.35355339, 0.35355339, 0.35355339, 0.35355339, 0.35355339, 0.35355339],
+    [0.49039264, 0.41573481, 0.27778512, 0.09754516, -0.09754516, -0.27778512, -0.41573481, -0.49039264],
+    [0.46193977, 0.19134172, -0.19134172, -0.46193977, -0.46193977, -0.19134172, 0.19134172, 0.46193977],
+    [0.41573481, -0.09754516, -0.49039264, -0.27778512, 0.27778512, 0.49039264, 0.09754516, -0.41573481],
+    [0.35355339, -0.35355339, -0.35355339, 0.35355339, 0.35355339, -0.35355339, -0.35355339, 0.35355339],
+    [0.27778512, -0.49039264, 0.09754516, 0.41573481, -0.41573481, -0.09754516, 0.49039264, -0.27778512],
+    [0.19134172, -0.46193977, 0.46193977, -0.19134172, -0.19134172, 0.46193977, -0.46193977, 0.19134172],
+    [0.09754516, -0.27778512, 0.41573481, -0.49039264, 0.49039264, -0.41573481, 0.27778512, -0.09754516],
+];
+
+/// The largest Huffman symbol count a JPEG table can declare.
+const JPEG_HUFF_SYMBOLS: usize = 256;
+
+/// A canonical JPEG Huffman decoding table.
+///
+/// WHY counts and a sorted symbol list rather than a lookup tree: JPEG gives
+/// only code lengths, and the canonical construction sorts symbols by length
+/// then value. Decoding walks one bit at a time and compares against the first
+/// code of each length, which is exact and needs no table larger than the
+/// alphabet itself.
+#[derive(Clone, Copy)]
+struct JpegHuffmanTable {
+    present: bool,
+    count: [u8; 17],
+    first_code: [u32; 17],
+    first_index: [u16; 17],
+    symbol: [u8; JPEG_HUFF_SYMBOLS],
+}
+
+impl JpegHuffmanTable {
+    const EMPTY: Self = Self {
+        present: false,
+        count: [0; 17],
+        first_code: [0; 17],
+        first_index: [0; 17],
+        symbol: [0; JPEG_HUFF_SYMBOLS],
+    };
+
+    fn build(&mut self, counts: &[u8; 16], symbols: &[u8]) -> Result<(), ()> {
+        let total: usize = counts.iter().map(|&count| count as usize).sum();
+        if total == 0 || total > JPEG_HUFF_SYMBOLS || symbols.len() != total {
+            return Err(());
+        }
+        let mut count = [0u8; 17];
+        let mut first_code = [0u32; 17];
+        let mut first_index = [0u16; 17];
+        let mut symbol = [0u8; JPEG_HUFF_SYMBOLS];
+        let mut code = 0u32;
+        let mut index = 0usize;
+        for length in 1..=16 {
+            let n = counts[length - 1] as u32;
+            count[length] = n as u8;
+            first_code[length] = code;
+            first_index[length] = index as u16;
+            code = code.checked_add(n).ok_or(())?;
+            // More codes of this length than the tree has room for cannot be
+            // decoded. An incomplete tree is legal and is left alone.
+            if code > (1u32 << length) {
+                return Err(());
+            }
+            code <<= 1;
+            index += n as usize;
+        }
+        symbol[..total].copy_from_slice(symbols);
+        self.count = count;
+        self.first_code = first_code;
+        self.first_index = first_index;
+        self.symbol = symbol;
+        self.present = true;
+        Ok(())
+    }
+
+    fn decode(&self, bits: &mut JpegBitReader<'_>) -> Result<u8, ()> {
+        if !self.present {
+            return Err(());
+        }
+        let mut code = 0u32;
+        for length in 1..=16 {
+            code = (code << 1) | bits.bits(1)?;
+            let count = self.count[length] as u32;
+            if count != 0 {
+                let first = self.first_code[length];
+                if code >= first && code < first + count {
+                    let index = self.first_index[length] as usize + (code - first) as usize;
+                    return Ok(self.symbol[index]);
+                }
+            }
+        }
+        Err(())
+    }
+}
+
+/// An MSB-first reader over an entropy-coded JPEG segment.
+///
+/// The segment is not a plain byte stream: `FF 00` stands for a literal `FF`,
+/// while any other `FF xx` is a marker that ends the segment. A marker is left
+/// unconsumed so the caller can read restart intervals and the next header.
+struct JpegBitReader<'a> {
+    data: &'a [u8],
+    pos: usize,
+    buf: u64,
+    count: u32,
+}
+
+impl<'a> JpegBitReader<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        Self {
+            data,
+            pos: 0,
+            buf: 0,
+            count: 0,
+        }
+    }
+
+    fn next_entropy_byte(&mut self) -> Option<u8> {
+        if self.pos >= self.data.len() {
+            return None;
+        }
+        let byte = self.data[self.pos];
+        if byte == 0xFF {
+            if self.pos + 1 >= self.data.len() {
+                return None;
+            }
+            if self.data[self.pos + 1] == 0x00 {
+                self.pos += 2;
+                Some(0xFF)
+            } else {
+                None
+            }
+        } else {
+            self.pos += 1;
+            Some(byte)
+        }
+    }
+
+    fn bits(&mut self, n: u32) -> Result<u32, ()> {
+        if n == 0 {
+            return Ok(0);
+        }
+        while self.count < n {
+            let byte = self.next_entropy_byte().ok_or(())?;
+            self.buf = (self.buf << 8) | byte as u64;
+            self.count += 8;
+        }
+        let value = ((self.buf >> (self.count - n)) & ((1u64 << n) - 1)) as u32;
+        self.count -= n;
+        Ok(value)
+    }
+
+    /// Discards the bits that pad the current byte at a restart boundary.
+    fn align_to_byte(&mut self) {
+        self.count -= self.count % 8;
+        if self.count == 0 {
+            self.buf = 0;
+        }
+    }
+
+    /// Consumes the `RSTn` that separates two restart intervals.
+    ///
+    /// The marker is not part of the bit stream, so the partial byte before it
+    /// is discarded first. Fill bytes (`FF FF`) before the marker are allowed.
+    fn consume_restart(&mut self, expected: u8) -> Result<(), ()> {
+        self.align_to_byte();
+        while self.pos + 1 < self.data.len()
+            && self.data[self.pos] == 0xFF
+            && self.data[self.pos + 1] == 0xFF
+        {
+            self.pos += 1;
+        }
+        if self.pos + 2 > self.data.len() || self.data[self.pos] != 0xFF {
+            return Err(());
+        }
+        let marker = self.data[self.pos + 1];
+        if marker != 0xD0 + (expected & 7) {
+            return Err(());
+        }
+        self.pos += 2;
+        self.buf = 0;
+        self.count = 0;
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy)]
+struct JpegComponent {
+    id: u8,
+    h: u8,
+    v: u8,
+    tq: u8,
+}
+
+impl JpegComponent {
+    const EMPTY: Self = Self {
+        id: 0,
+        h: 1,
+        v: 1,
+        tq: 0,
+    };
+}
+
+struct JpegFrame {
+    width: u32,
+    height: u32,
+    ncomp: usize,
+    comp: [JpegComponent; 3],
+    hmax: u8,
+    vmax: u8,
+    restart_interval: u16,
+    adobe_transform: Option<u8>,
+    /// The input offset just past the SOF segment.
+    next_pos: usize,
+}
+
+struct JpegScan {
+    ncomp: usize,
+    /// Frame component indices, in the order the scan transmits them.
+    comp: [usize; 3],
+    dc_table: [u8; 3],
+    ac_table: [u8; 3],
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum JpegColorSpace {
+    Gray,
+    YCbCr,
+    Rgb,
+}
+
+/// The largest number of 8x8 blocks one component can contribute to an MCU.
+const JPEG_MAX_MCU_BLOCKS: usize = 16;
+
+/// Fixed scratch owned by the JPEG decoder.
+///
+/// WHY static and not on the stack: the Huffman tables, four quantization
+/// tables and the sample planes of one MCU are several kilobytes, and an app in
+/// this system runs on a small stack. The buffers are sized by the JPEG format
+/// (four tables, at most 16 blocks per component) rather than by any file.
+struct JpegScratch {
+    dc: [JpegHuffmanTable; 4],
+    ac: [JpegHuffmanTable; 4],
+    quant: [[u16; 64]; 4],
+    quant_present: [bool; 4],
+    samples: [[u8; JPEG_MAX_MCU_BLOCKS * 64]; 3],
+}
+
+impl JpegScratch {
+    const EMPTY: Self = Self {
+        dc: [JpegHuffmanTable::EMPTY; 4],
+        ac: [JpegHuffmanTable::EMPTY; 4],
+        quant: [[0; 64]; 4],
+        quant_present: [false; 4],
+        samples: [[0; JPEG_MAX_MCU_BLOCKS * 64]; 3],
+    };
+}
+
+static mut JPEG_SCRATCH: JpegScratch = JpegScratch::EMPTY;
+
+/// Borrows the JPEG decoder scratch for the duration of one decode.
+///
+/// SAFETY: the scratch is sound because the callers are single-threaded and
+/// non-reentrant. Every app in this system runs one event loop on one task and
+/// calls `decode_image` from that loop, never from an interrupt handler or a
+/// second thread, and `decode_jpeg` does not call any function that could
+/// decode again while it holds the borrow. The reference cannot escape: it is
+/// taken inside the decoder and dropped before it returns. The unit tests,
+/// which the Rust test harness *does* run on several threads, serialise
+/// themselves on the same mutex the PNG and GIF decoders use.
+fn jpeg_scratch() -> &'static mut JpegScratch {
+    unsafe { &mut *core::ptr::addr_of_mut!(JPEG_SCRATCH) }
+}
+
+fn jpeg_is_sof(marker: u8) -> bool {
+    matches!(
+        marker,
+        0xC0..=0xC3 | 0xC5..=0xC7 | 0xC9..=0xCB | 0xCD..=0xCF
+    )
+}
+
+/// Parses a frame header segment (SOF0 or SOF1).
+fn jpeg_parse_sof(
+    seg: &[u8],
+    adobe_transform: Option<u8>,
+    restart_interval: u16,
+    next_pos: usize,
+) -> Result<JpegFrame, ()> {
+    if seg.len() < 6 {
+        return Err(());
+    }
+    let precision = seg[0];
+    if precision != 8 {
+        return Err(());
+    }
+    let height = u16::from_be_bytes([seg[1], seg[2]]) as u32;
+    let width = u16::from_be_bytes([seg[3], seg[4]]) as u32;
+    let ncomp = seg[5] as usize;
+    if width == 0
+        || height == 0
+        || width > MAX_DECODE_DIMENSION
+        || height > MAX_DECODE_DIMENSION
+    {
+        return Err(());
+    }
+    // One component is grayscale and three are colour. Four components are
+    // CMYK/YCCK, which this decoder does not convert.
+    if ncomp != 1 && ncomp != 3 {
+        return Err(());
+    }
+    if seg.len() != 6 + ncomp * 3 {
+        return Err(());
+    }
+    let mut comp = [JpegComponent::EMPTY; 3];
+    let mut hmax = 1u8;
+    let mut vmax = 1u8;
+    for i in 0..ncomp {
+        let base = 6 + i * 3;
+        let h = seg[base + 1] >> 4;
+        let v = seg[base + 1] & 15;
+        let tq = seg[base + 2];
+        if h == 0 || h > 4 || v == 0 || v > 4 || tq > 3 {
+            return Err(());
+        }
+        comp[i] = JpegComponent {
+            id: seg[base],
+            h,
+            v,
+            tq,
+        };
+        if h > hmax {
+            hmax = h;
+        }
+        if v > vmax {
+            vmax = v;
+        }
+    }
+    if ncomp == 3 {
+        // The decoder upsamples by replication, which is well defined only
+        // when every sampling factor divides the largest one.
+        for component in comp[..3].iter() {
+            if hmax % component.h != 0 || vmax % component.v != 0 {
+                return Err(());
+            }
+        }
+        // Baseline sequential DCT limits an MCU to ten blocks.
+        let blocks: usize = comp[..3]
+            .iter()
+            .map(|component| component.h as usize * component.v as usize)
+            .sum();
+        if blocks > 10 {
+            return Err(());
+        }
+    } else {
+        // A single-component scan has one block per MCU; its frame sampling
+        // factors do not describe an interleaved layout.
+        hmax = 1;
+        vmax = 1;
+    }
+    Ok(JpegFrame {
+        width,
+        height,
+        ncomp,
+        comp,
+        hmax,
+        vmax,
+        restart_interval,
+        adobe_transform,
+        next_pos,
+    })
+}
+
+/// Walks the marker stream up to the first frame header.
+///
+/// `scratch` is `Some` when the caller is decoding pixels, in which case the
+/// quantization and Huffman tables that precede SOF are kept; a header-only
+/// caller passes `None` and the tables are skipped without interpretation.
+fn jpeg_parse_headers(
+    data: &[u8],
+    mut scratch: Option<&mut JpegScratch>,
+) -> Result<JpegFrame, ()> {
+    if data.len() < 3 || data[0] != 0xFF || data[1] != 0xD8 || data[2] != 0xFF {
+        return Err(());
+    }
+    let mut pos = 2usize;
+    let mut adobe_transform = None;
+    let mut restart_interval = 0u16;
+    loop {
+        if pos >= data.len() || data[pos] != 0xFF {
+            return Err(());
+        }
+        while pos < data.len() && data[pos] == 0xFF {
+            pos += 1;
+        }
+        if pos >= data.len() {
+            return Err(());
+        }
+        let marker = data[pos];
+        pos += 1;
+        match marker {
+            0xD8 => return Err(()), // a second start of image
+            0xD9 => return Err(()), // end of image before any frame
+            0x01 => continue,       // TEM, no length
+            0xD0..=0xD7 => continue, // stray restart before the scan
+            _ => {}
+        }
+        if pos + 2 > data.len() {
+            return Err(());
+        }
+        let length = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
+        if length < 2 || pos + length > data.len() {
+            return Err(());
+        }
+        let payload_start = pos + 2;
+        let payload_end = pos + length;
+        let payload = &data[payload_start..payload_end];
+        match marker {
+            0xEE => {
+                if payload.len() >= 12 && &payload[..5] == b"Adobe" {
+                    adobe_transform = Some(payload[11]);
+                }
+            }
+            0xC4 => {
+                if let Some(table) = scratch.as_mut() {
+                    jpeg_parse_dht(payload, *table)?;
+                }
+            }
+            0xDB => {
+                if let Some(table) = scratch.as_mut() {
+                    jpeg_parse_dqt(payload, *table)?;
+                }
+            }
+            0xDD => {
+                if payload.len() != 2 {
+                    return Err(());
+                }
+                restart_interval = u16::from_be_bytes([payload[0], payload[1]]);
+            }
+            0xC0 | 0xC1 => {
+                return jpeg_parse_sof(payload, adobe_transform, restart_interval, payload_end);
+            }
+            marker if jpeg_is_sof(marker) => {
+                // Progressive, lossless and arithmetic frames are refused.
+                return Err(());
+            }
+            _ => {}
+        }
+        pos = payload_end;
+    }
+}
+
+fn jpeg_parse_dqt(seg: &[u8], scratch: &mut JpegScratch) -> Result<(), ()> {
+    let mut pos = 0usize;
+    while pos < seg.len() {
+        let pq_tq = seg[pos];
+        pos += 1;
+        let precision = pq_tq >> 4;
+        let id = (pq_tq & 15) as usize;
+        if id >= 4 || precision > 1 {
+            return Err(());
+        }
+        if precision == 0 {
+            if pos + 64 > seg.len() {
+                return Err(());
+            }
+            for i in 0..64 {
+                let value = seg[pos + i] as u16;
+                if value == 0 {
+                    return Err(());
+                }
+                scratch.quant[id][JPEG_ZIGZAG[i]] = value;
+            }
+            pos += 64;
+        } else {
+            if pos + 128 > seg.len() {
+                return Err(());
+            }
+            for i in 0..64 {
+                let value = u16::from_be_bytes([seg[pos + i * 2], seg[pos + i * 2 + 1]]);
+                if value == 0 {
+                    return Err(());
+                }
+                scratch.quant[id][JPEG_ZIGZAG[i]] = value;
+            }
+            pos += 128;
+        }
+        scratch.quant_present[id] = true;
+    }
+    Ok(())
+}
+
+fn jpeg_parse_dht(seg: &[u8], scratch: &mut JpegScratch) -> Result<(), ()> {
+    let mut pos = 0usize;
+    while pos < seg.len() {
+        if pos + 17 > seg.len() {
+            return Err(());
+        }
+        let tc_th = seg[pos];
+        pos += 1;
+        let class = tc_th >> 4;
+        let id = (tc_th & 15) as usize;
+        if class > 1 || id >= 4 {
+            return Err(());
+        }
+        let mut counts = [0u8; 16];
+        counts.copy_from_slice(&seg[pos..pos + 16]);
+        pos += 16;
+        let total: usize = counts.iter().map(|&count| count as usize).sum();
+        if total == 0 || total > JPEG_HUFF_SYMBOLS || pos + total > seg.len() {
+            return Err(());
+        }
+        if class == 0 {
+            scratch.dc[id].build(&counts, &seg[pos..pos + total])?;
+        } else {
+            scratch.ac[id].build(&counts, &seg[pos..pos + total])?;
+        }
+        pos += total;
+    }
+    Ok(())
+}
+
+fn jpeg_parse_sos(seg: &[u8], frame: &JpegFrame) -> Result<JpegScan, ()> {
+    if seg.is_empty() {
+        return Err(());
+    }
+    let ns = seg[0] as usize;
+    // This decoder reads one complete interleaved scan, which is what baseline
+    // files carry. A non-interleaved colour scan is a different layout.
+    if ns != frame.ncomp || ns == 0 || ns > 3 {
+        return Err(());
+    }
+    if seg.len() != 1 + ns * 2 + 3 {
+        return Err(());
+    }
+    let mut scan = JpegScan {
+        ncomp: ns,
+        comp: [0; 3],
+        dc_table: [0; 3],
+        ac_table: [0; 3],
+    };
+    for i in 0..ns {
+        let id = seg[1 + i * 2];
+        let tables = seg[2 + i * 2];
+        let dc = tables >> 4;
+        let ac = tables & 15;
+        if dc > 3 || ac > 3 {
+            return Err(());
+        }
+        let mut found = None;
+        for (index, component) in frame.comp[..frame.ncomp].iter().enumerate() {
+            if component.id == id {
+                found = Some(index);
+                break;
+            }
+        }
+        let index = found.ok_or(())?;
+        for previous in 0..i {
+            if scan.comp[previous] == index {
+                return Err(());
+            }
+        }
+        scan.comp[i] = index;
+        scan.dc_table[i] = dc;
+        scan.ac_table[i] = ac;
+    }
+    // Baseline and extended-sequential Huffman scans cover every coefficient
+    // in one pass. Any other spectral selection is progressive.
+    let tail = 1 + ns * 2;
+    if seg[tail] != 0 || seg[tail + 1] != 63 || seg[tail + 2] != 0 {
+        return Err(());
+    }
+    Ok(scan)
+}
+
+fn jpeg_receive_extend(bits: &mut JpegBitReader<'_>, size: u32) -> Result<i32, ()> {
+    if size == 0 {
+        return Ok(0);
+    }
+    if size > 16 {
+        return Err(());
+    }
+    let value = bits.bits(size)? as i32;
+    let threshold = 1i32 << (size - 1);
+    if value < threshold {
+        Ok(value - (1i32 << size) + 1)
+    } else {
+        Ok(value)
+    }
+}
+
+fn jpeg_dequantize(level: i32, quant: u16) -> i32 {
+    (level as i64 * quant as i64).clamp(i32::MIN as i64, i32::MAX as i64) as i32
+}
+
+fn jpeg_idct(coeff: &[i32; 64], out: &mut [u8; 64]) {
+    let mut temp = [0f32; 64];
+    for v in 0..8 {
+        for x in 0..8 {
+            let mut sum = 0f32;
+            for u in 0..8 {
+                sum += JPEG_IDCT_BASIS[u][x] * coeff[v * 8 + u] as f32;
+            }
+            temp[v * 8 + x] = sum;
+        }
+    }
+    for y in 0..8 {
+        for x in 0..8 {
+            let mut sum = 0f32;
+            for v in 0..8 {
+                sum += JPEG_IDCT_BASIS[v][y] * temp[v * 8 + x];
+            }
+            let sample = (sum + 128.5) as i32;
+            out[y * 8 + x] = if sample < 0 {
+                0
+            } else if sample > 255 {
+                255
+            } else {
+                sample as u8
+            };
+        }
+    }
+}
+
+fn jpeg_decode_block(
+    bits: &mut JpegBitReader<'_>,
+    dc: &JpegHuffmanTable,
+    ac: &JpegHuffmanTable,
+    quant: &[u16; 64],
+    predictor: &mut i32,
+    out: &mut [u8; 64],
+) -> Result<(), ()> {
+    let mut coeff = [0i32; 64];
+
+    let category = dc.decode(bits)? as u32;
+    let difference = jpeg_receive_extend(bits, category)?;
+    *predictor = predictor.checked_add(difference).ok_or(())?;
+    coeff[0] = jpeg_dequantize(*predictor, quant[0]);
+
+    let mut k = 1usize;
+    while k < 64 {
+        let rs = ac.decode(bits)?;
+        let run = (rs >> 4) as usize;
+        let size = (rs & 15) as u32;
+        if size == 0 {
+            if run == 15 {
+                // ZRL: sixteen zero coefficients.
+                k += 16;
+                continue;
+            }
+            break; // EOB
+        }
+        k += run;
+        if k >= 64 {
+            return Err(());
+        }
+        let level = jpeg_receive_extend(bits, size)?;
+        coeff[JPEG_ZIGZAG[k]] = jpeg_dequantize(level, quant[JPEG_ZIGZAG[k]]);
+        k += 1;
+    }
+
+    jpeg_idct(&coeff, out);
+    Ok(())
+}
+
+fn jpeg_color_space(frame: &JpegFrame) -> Result<JpegColorSpace, ()> {
+    if frame.ncomp == 1 {
+        return Ok(JpegColorSpace::Gray);
+    }
+    if frame.ncomp != 3 {
+        return Err(());
+    }
+    if let Some(transform) = frame.adobe_transform {
+        return match transform {
+            0 => Ok(JpegColorSpace::Rgb),
+            1 => Ok(JpegColorSpace::YCbCr),
+            _ => Err(()), // YCCK and reserved transforms
+        };
+    }
+    let ids = [frame.comp[0].id, frame.comp[1].id, frame.comp[2].id];
+    if ids == [b'R', b'G', b'B'] {
+        Ok(JpegColorSpace::Rgb)
+    } else {
+        Ok(JpegColorSpace::YCbCr)
+    }
+}
+
+fn jpeg_sample(
+    samples: &[u8; JPEG_MAX_MCU_BLOCKS * 64],
+    h: usize,
+    v: usize,
+    dx: usize,
+    dy: usize,
+    hmax: usize,
+    vmax: usize,
+) -> u8 {
+    // Nearest-neighbour upsampling: every output pixel reads the component
+    // sample whose cell contains it. The SOF parser has already checked that
+    // the sampling factors divide the largest ones, so this is exact.
+    let sx = dx * h / hmax;
+    let sy = dy * v / vmax;
+    let bx = sx / 8;
+    let by = sy / 8;
+    samples[(by * h + bx) * 64 + (sy % 8) * 8 + (sx % 8)]
+}
+
+fn jpeg_clamp_u8(value: i32) -> u8 {
+    if value < 0 {
+        0
+    } else if value > 255 {
+        255
+    } else {
+        value as u8
+    }
+}
+
+fn jpeg_decode_scan(
+    data: &[u8],
+    entropy_start: usize,
+    frame: &JpegFrame,
+    scan: &JpegScan,
+    scratch: &mut JpegScratch,
+    out_rgba: &mut [u8],
+) -> Result<(), ()> {
+    let width = frame.width as usize;
+    let height = frame.height as usize;
+    let required = width
+        .checked_mul(height)
+        .ok_or(())?
+        .checked_mul(4)
+        .ok_or(())?;
+    if out_rgba.len() < required {
+        return Err(());
+    }
+
+    let color = jpeg_color_space(frame)?;
+    let hmax = frame.hmax as usize;
+    let vmax = frame.vmax as usize;
+    let mcu_w = 8 * hmax;
+    let mcu_h = 8 * vmax;
+    let mcu_cols = (width + mcu_w - 1) / mcu_w;
+    let mcu_rows = (height + mcu_h - 1) / mcu_h;
+    let total_mcus = mcu_cols.checked_mul(mcu_rows).ok_or(())?;
+
+    let mut bits = JpegBitReader::new(&data[entropy_start..]);
+    let mut predictors = [0i32; 3];
+    let mut next_restart = 0u8;
+    let mut mcu = 0usize;
+
+    for my in 0..mcu_rows {
+        for mx in 0..mcu_cols {
+            if frame.restart_interval != 0
+                && mcu != 0
+                && mcu % frame.restart_interval as usize == 0
+            {
+                bits.consume_restart(next_restart)?;
+                next_restart = (next_restart + 1) & 7;
+                predictors = [0; 3];
+            }
+
+            for si in 0..scan.ncomp {
+                let ci = scan.comp[si];
+                let component = &frame.comp[ci];
+                let (block_h, block_v) = if frame.ncomp == 1 {
+                    (1usize, 1usize)
+                } else {
+                    (component.h as usize, component.v as usize)
+                };
+                let dc_id = scan.dc_table[si] as usize;
+                let ac_id = scan.ac_table[si] as usize;
+                let q_id = component.tq as usize;
+                if !scratch.quant_present[q_id] {
+                    return Err(());
+                }
+                for by in 0..block_v {
+                    for bx in 0..block_h {
+                        let mut block = [0u8; 64];
+                        {
+                            let dc = &scratch.dc[dc_id];
+                            let ac = &scratch.ac[ac_id];
+                            let quant = &scratch.quant[q_id];
+                            jpeg_decode_block(
+                                &mut bits,
+                                dc,
+                                ac,
+                                quant,
+                                &mut predictors[ci],
+                                &mut block,
+                            )?;
+                        }
+                        let base = (by * block_h + bx) * 64;
+                        scratch.samples[ci][base..base + 64].copy_from_slice(&block);
+                    }
+                }
+            }
+
+            let x0 = mx * mcu_w;
+            let y0 = my * mcu_h;
+            for dy in 0..mcu_h {
+                let y = y0 + dy;
+                if y >= height {
+                    continue;
+                }
+                for dx in 0..mcu_w {
+                    let x = x0 + dx;
+                    if x >= width {
+                        continue;
+                    }
+                    let (r, g, b) = match color {
+                        JpegColorSpace::Gray => {
+                            let luma = jpeg_sample(&scratch.samples[0], 1, 1, dx, dy, 1, 1);
+                            (luma, luma, luma)
+                        }
+                        JpegColorSpace::YCbCr => {
+                            let luma = jpeg_sample(
+                                &scratch.samples[0],
+                                frame.comp[0].h as usize,
+                                frame.comp[0].v as usize,
+                                dx,
+                                dy,
+                                hmax,
+                                vmax,
+                            ) as i32;
+                            let cb = jpeg_sample(
+                                &scratch.samples[1],
+                                frame.comp[1].h as usize,
+                                frame.comp[1].v as usize,
+                                dx,
+                                dy,
+                                hmax,
+                                vmax,
+                            ) as i32
+                                - 128;
+                            let cr = jpeg_sample(
+                                &scratch.samples[2],
+                                frame.comp[2].h as usize,
+                                frame.comp[2].v as usize,
+                                dx,
+                                dy,
+                                hmax,
+                                vmax,
+                            ) as i32
+                                - 128;
+                            (
+                                jpeg_clamp_u8(luma + ((91881 * cr) >> 16)),
+                                jpeg_clamp_u8(
+                                    luma - ((22554 * cb + 46802 * cr) >> 16),
+                                ),
+                                jpeg_clamp_u8(luma + ((116130 * cb) >> 16)),
+                            )
+                        }
+                        JpegColorSpace::Rgb => (
+                            jpeg_sample(
+                                &scratch.samples[0],
+                                frame.comp[0].h as usize,
+                                frame.comp[0].v as usize,
+                                dx,
+                                dy,
+                                hmax,
+                                vmax,
+                            ),
+                            jpeg_sample(
+                                &scratch.samples[1],
+                                frame.comp[1].h as usize,
+                                frame.comp[1].v as usize,
+                                dx,
+                                dy,
+                                hmax,
+                                vmax,
+                            ),
+                            jpeg_sample(
+                                &scratch.samples[2],
+                                frame.comp[2].h as usize,
+                                frame.comp[2].v as usize,
+                                dx,
+                                dy,
+                                hmax,
+                                vmax,
+                            ),
+                        ),
+                    };
+                    let offset = (y * width + x) * 4;
+                    out_rgba[offset] = r;
+                    out_rgba[offset + 1] = g;
+                    out_rgba[offset + 2] = b;
+                    out_rgba[offset + 3] = 255;
+                }
+            }
+            mcu += 1;
+        }
+    }
+
+    // Returning after fewer MCUs would hand the caller a partially painted
+    // picture, which is the same lie as inventing the missing pixels.
+    if mcu != total_mcus {
+        return Err(());
+    }
+    Ok(())
+}
+
+/// Returns the dimensions a JPEG's frame header declares, without decoding pixels.
+///
+/// Only a frame this decoder can actually decode is reported: progressive,
+/// lossless, arithmetic, 12-bit and CMYK headers are refused here as well.
+pub fn decode_jpeg_header(data: &[u8]) -> Result<(u32, u32), ()> {
+    let frame = jpeg_parse_headers(data, None)?;
+    Ok((frame.width, frame.height))
+}
+
+/// Decodes a baseline (SOF0) or extended-sequential (SOF1) Huffman JPEG into
+/// an RGBA (4 bytes per pixel) destination buffer.
+///
+/// Grayscale and three-component YCbCr/RGB images are supported, including
+/// 4:4:4, 4:2:2 and 4:2:0 sampling and restart intervals. Progressive,
+/// lossless, arithmetic, 12-bit and four-component images are refused.
+/// Returns the number of RGBA bytes written to `out_rgba`.
+pub fn decode_jpeg(data: &[u8], out_rgba: &mut [u8]) -> Result<(u32, u32, usize), ()> {
+    let scratch = jpeg_scratch();
+    *scratch = JpegScratch::EMPTY;
+
+    let mut frame = jpeg_parse_headers(data, Some(&mut *scratch))?;
+    let mut pos = frame.next_pos;
+    loop {
+        if pos >= data.len() || data[pos] != 0xFF {
+            return Err(());
+        }
+        while pos < data.len() && data[pos] == 0xFF {
+            pos += 1;
+        }
+        if pos >= data.len() {
+            return Err(());
+        }
+        let marker = data[pos];
+        pos += 1;
+        match marker {
+            0xD8 => return Err(()),
+            0xD9 => return Err(()), // end of image before the scan
+            0x01 => continue,
+            0xD0..=0xD7 => continue,
+            _ => {}
+        }
+        if pos + 2 > data.len() {
+            return Err(());
+        }
+        let length = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
+        if length < 2 || pos + length > data.len() {
+            return Err(());
+        }
+        let payload_start = pos + 2;
+        let payload_end = pos + length;
+        let payload = &data[payload_start..payload_end];
+        match marker {
+            0xC4 => jpeg_parse_dht(payload, &mut *scratch)?,
+            0xDB => jpeg_parse_dqt(payload, &mut *scratch)?,
+            0xDD => {
+                if payload.len() != 2 {
+                    return Err(());
+                }
+                frame.restart_interval = u16::from_be_bytes([payload[0], payload[1]]);
+            }
+            0xEE => {
+                if payload.len() >= 12 && &payload[..5] == b"Adobe" {
+                    frame.adobe_transform = Some(payload[11]);
+                }
+            }
+            0xDA => {
+                let scan = jpeg_parse_sos(payload, &frame)?;
+                jpeg_decode_scan(data, payload_end, &frame, &scan, &mut *scratch, out_rgba)?;
+                let bytes = (frame.width as usize)
+                    .checked_mul(frame.height as usize)
+                    .ok_or(())?
+                    .checked_mul(4)
+                    .ok_or(())?;
+                return Ok((frame.width, frame.height, bytes));
+            }
+            0xC0 | 0xC1 => return Err(()), // a second frame header
+            marker if jpeg_is_sof(marker) => return Err(()),
+            _ => {}
+        }
+        pos = payload_end;
+    }
+}
+
 /// Decodes an image into a bitmap that borrows the caller's buffer.
 ///
 /// WHY this and not a function that allocates: the apps in this system have
@@ -2012,6 +3012,18 @@ pub fn decode_image(
             let bytes = decode_raw(data, 36, 72, 32, out_rgba)?;
             return Ok((36, 72, bytes));
         }
+    }
+    // WHY JPEG is detected by three bytes and not two: SOI (`FF D8`) is
+    // followed by a marker, so `FF D8 FF` is the honest signature; accepting a
+    // bare `FF D8` would let any two-byte prefix claim the file. The name is
+    // honoured too because a file manager may hand us a mislabelled document,
+    // and `decode_jpeg` still refuses anything that is not a complete baseline
+    // stream.
+    if (data.len() >= 3 && data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF)
+        || name_ends_with(name, b".jpg")
+        || name_ends_with(name, b".jpeg")
+    {
+        return decode_jpeg(data, out_rgba);
     }
     // WHY PNG and GIF are matched last: their detection is by signature, which
     // no other format here can imitate, and putting them after the suffix
@@ -2740,6 +3752,429 @@ mod tests {
         assert_eq!(decode_gif_header(&gif), Ok((2, 3)));
     }
 
+    // -- JPEG fixtures -----------------------------------------------------
+    //
+    // Generated once with Pillow 12 and embedded here: the suite must not
+    // depend on a fixture directory. The grayscale image uses quality 100,
+    // whose quantization tables are all ones, so a flat block reconstructs to
+    // exactly the value that was stored. The colour images cover 4:4:4, 4:2:2
+    // and 4:2:0 sampling; the restart image carries DRI=1, so its two MCUs are
+    // separated by an RST0 marker.
+
+    const JPEG_GRAY_8X8: &[u8] = &[
+        255, 216, 255, 224, 0, 16, 74, 70, 73, 70, 0, 1, 1, 0, 0, 1,
+        0, 1, 0, 0, 255, 219, 0, 67, 0, 1, 1, 1, 1, 1, 1, 1,
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 255, 192, 0, 11, 8, 0, 8,
+        0, 8, 1, 1, 17, 0, 255, 196, 0, 31, 0, 0, 1, 5, 1, 1,
+        1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4,
+        5, 6, 7, 8, 9, 10, 11, 255, 196, 0, 181, 16, 0, 2, 1, 3,
+        3, 2, 4, 3, 5, 5, 4, 4, 0, 0, 1, 125, 1, 2, 3, 0,
+        4, 17, 5, 18, 33, 49, 65, 6, 19, 81, 97, 7, 34, 113, 20, 50,
+        129, 145, 161, 8, 35, 66, 177, 193, 21, 82, 209, 240, 36, 51, 98, 114,
+        130, 9, 10, 22, 23, 24, 25, 26, 37, 38, 39, 40, 41, 42, 52, 53,
+        54, 55, 56, 57, 58, 67, 68, 69, 70, 71, 72, 73, 74, 83, 84, 85,
+        86, 87, 88, 89, 90, 99, 100, 101, 102, 103, 104, 105, 106, 115, 116, 117,
+        118, 119, 120, 121, 122, 131, 132, 133, 134, 135, 136, 137, 138, 146, 147, 148,
+        149, 150, 151, 152, 153, 154, 162, 163, 164, 165, 166, 167, 168, 169, 170, 178,
+        179, 180, 181, 182, 183, 184, 185, 186, 194, 195, 196, 197, 198, 199, 200, 201,
+        202, 210, 211, 212, 213, 214, 215, 216, 217, 218, 225, 226, 227, 228, 229, 230,
+        231, 232, 233, 234, 241, 242, 243, 244, 245, 246, 247, 248, 249, 250, 255, 218,
+        0, 8, 1, 1, 0, 0, 63, 0, 43, 255, 217,
+    ];
+
+    const JPEG_COLOR_16X16_420: &[u8] = &[
+        255, 216, 255, 224, 0, 16, 74, 70, 73, 70, 0, 1, 1, 0, 0, 1,
+        0, 1, 0, 0, 255, 219, 0, 67, 0, 2, 1, 1, 1, 1, 1, 2,
+        1, 1, 1, 2, 2, 2, 2, 2, 4, 3, 2, 2, 2, 2, 5, 4,
+        4, 3, 4, 6, 5, 6, 6, 6, 5, 6, 6, 6, 7, 9, 8, 6,
+        7, 9, 7, 6, 6, 8, 11, 8, 9, 10, 10, 10, 10, 10, 6, 8,
+        11, 12, 11, 10, 12, 9, 10, 10, 10, 255, 219, 0, 67, 1, 2, 2,
+        2, 2, 2, 2, 5, 3, 3, 5, 10, 7, 6, 7, 10, 10, 10, 10,
+        10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10,
+        10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10,
+        10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 255, 192,
+        0, 17, 8, 0, 16, 0, 16, 3, 1, 34, 0, 2, 17, 1, 3, 17,
+        1, 255, 196, 0, 31, 0, 0, 1, 5, 1, 1, 1, 1, 1, 1, 0,
+        0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
+        10, 11, 255, 196, 0, 181, 16, 0, 2, 1, 3, 3, 2, 4, 3, 5,
+        5, 4, 4, 0, 0, 1, 125, 1, 2, 3, 0, 4, 17, 5, 18, 33,
+        49, 65, 6, 19, 81, 97, 7, 34, 113, 20, 50, 129, 145, 161, 8, 35,
+        66, 177, 193, 21, 82, 209, 240, 36, 51, 98, 114, 130, 9, 10, 22, 23,
+        24, 25, 26, 37, 38, 39, 40, 41, 42, 52, 53, 54, 55, 56, 57, 58,
+        67, 68, 69, 70, 71, 72, 73, 74, 83, 84, 85, 86, 87, 88, 89, 90,
+        99, 100, 101, 102, 103, 104, 105, 106, 115, 116, 117, 118, 119, 120, 121, 122,
+        131, 132, 133, 134, 135, 136, 137, 138, 146, 147, 148, 149, 150, 151, 152, 153,
+        154, 162, 163, 164, 165, 166, 167, 168, 169, 170, 178, 179, 180, 181, 182, 183,
+        184, 185, 186, 194, 195, 196, 197, 198, 199, 200, 201, 202, 210, 211, 212, 213,
+        214, 215, 216, 217, 218, 225, 226, 227, 228, 229, 230, 231, 232, 233, 234, 241,
+        242, 243, 244, 245, 246, 247, 248, 249, 250, 255, 196, 0, 31, 1, 0, 3,
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 1,
+        2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 255, 196, 0, 181, 17, 0,
+        2, 1, 2, 4, 4, 3, 4, 7, 5, 4, 4, 0, 1, 2, 119, 0,
+        1, 2, 3, 17, 4, 5, 33, 49, 6, 18, 65, 81, 7, 97, 113, 19,
+        34, 50, 129, 8, 20, 66, 145, 161, 177, 193, 9, 35, 51, 82, 240, 21,
+        98, 114, 209, 10, 22, 36, 52, 225, 37, 241, 23, 24, 25, 26, 38, 39,
+        40, 41, 42, 53, 54, 55, 56, 57, 58, 67, 68, 69, 70, 71, 72, 73,
+        74, 83, 84, 85, 86, 87, 88, 89, 90, 99, 100, 101, 102, 103, 104, 105,
+        106, 115, 116, 117, 118, 119, 120, 121, 122, 130, 131, 132, 133, 134, 135, 136,
+        137, 138, 146, 147, 148, 149, 150, 151, 152, 153, 154, 162, 163, 164, 165, 166,
+        167, 168, 169, 170, 178, 179, 180, 181, 182, 183, 184, 185, 186, 194, 195, 196,
+        197, 198, 199, 200, 201, 202, 210, 211, 212, 213, 214, 215, 216, 217, 218, 226,
+        227, 228, 229, 230, 231, 232, 233, 234, 242, 243, 244, 245, 246, 247, 248, 249,
+        250, 255, 218, 0, 12, 3, 1, 0, 2, 17, 3, 17, 0, 63, 0, 249,
+        222, 190, 168, 175, 130, 235, 247, 226, 191, 39, 250, 87, 112, 87, 252, 75,
+        191, 246, 63, 239, 254, 189, 245, 239, 172, 125, 159, 99, 201, 236, 125, 135,
+        247, 170, 243, 115, 123, 95, 238, 242, 242, 245, 190, 158, 191, 141, 217, 143,
+        252, 77, 23, 212, 61, 223, 236, 255, 0, 236, 255, 0, 107, 215, 235, 30,
+        211, 235, 30, 207, 202, 143, 39, 39, 177, 254, 247, 55, 55, 217, 229, 215,
+        255, 217,
+    ];
+
+    const JPEG_COLOR_32X16_RESTART: &[u8] = &[
+        255, 216, 255, 224, 0, 16, 74, 70, 73, 70, 0, 1, 1, 0, 0, 1,
+        0, 1, 0, 0, 255, 219, 0, 67, 0, 2, 1, 1, 1, 1, 1, 2,
+        1, 1, 1, 2, 2, 2, 2, 2, 4, 3, 2, 2, 2, 2, 5, 4,
+        4, 3, 4, 6, 5, 6, 6, 6, 5, 6, 6, 6, 7, 9, 8, 6,
+        7, 9, 7, 6, 6, 8, 11, 8, 9, 10, 10, 10, 10, 10, 6, 8,
+        11, 12, 11, 10, 12, 9, 10, 10, 10, 255, 219, 0, 67, 1, 2, 2,
+        2, 2, 2, 2, 5, 3, 3, 5, 10, 7, 6, 7, 10, 10, 10, 10,
+        10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10,
+        10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10,
+        10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 255, 192,
+        0, 17, 8, 0, 16, 0, 32, 3, 1, 34, 0, 2, 17, 1, 3, 17,
+        1, 255, 196, 0, 31, 0, 0, 1, 5, 1, 1, 1, 1, 1, 1, 0,
+        0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
+        10, 11, 255, 196, 0, 181, 16, 0, 2, 1, 3, 3, 2, 4, 3, 5,
+        5, 4, 4, 0, 0, 1, 125, 1, 2, 3, 0, 4, 17, 5, 18, 33,
+        49, 65, 6, 19, 81, 97, 7, 34, 113, 20, 50, 129, 145, 161, 8, 35,
+        66, 177, 193, 21, 82, 209, 240, 36, 51, 98, 114, 130, 9, 10, 22, 23,
+        24, 25, 26, 37, 38, 39, 40, 41, 42, 52, 53, 54, 55, 56, 57, 58,
+        67, 68, 69, 70, 71, 72, 73, 74, 83, 84, 85, 86, 87, 88, 89, 90,
+        99, 100, 101, 102, 103, 104, 105, 106, 115, 116, 117, 118, 119, 120, 121, 122,
+        131, 132, 133, 134, 135, 136, 137, 138, 146, 147, 148, 149, 150, 151, 152, 153,
+        154, 162, 163, 164, 165, 166, 167, 168, 169, 170, 178, 179, 180, 181, 182, 183,
+        184, 185, 186, 194, 195, 196, 197, 198, 199, 200, 201, 202, 210, 211, 212, 213,
+        214, 215, 216, 217, 218, 225, 226, 227, 228, 229, 230, 231, 232, 233, 234, 241,
+        242, 243, 244, 245, 246, 247, 248, 249, 250, 255, 196, 0, 31, 1, 0, 3,
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 1,
+        2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 255, 196, 0, 181, 17, 0,
+        2, 1, 2, 4, 4, 3, 4, 7, 5, 4, 4, 0, 1, 2, 119, 0,
+        1, 2, 3, 17, 4, 5, 33, 49, 6, 18, 65, 81, 7, 97, 113, 19,
+        34, 50, 129, 8, 20, 66, 145, 161, 177, 193, 9, 35, 51, 82, 240, 21,
+        98, 114, 209, 10, 22, 36, 52, 225, 37, 241, 23, 24, 25, 26, 38, 39,
+        40, 41, 42, 53, 54, 55, 56, 57, 58, 67, 68, 69, 70, 71, 72, 73,
+        74, 83, 84, 85, 86, 87, 88, 89, 90, 99, 100, 101, 102, 103, 104, 105,
+        106, 115, 116, 117, 118, 119, 120, 121, 122, 130, 131, 132, 133, 134, 135, 136,
+        137, 138, 146, 147, 148, 149, 150, 151, 152, 153, 154, 162, 163, 164, 165, 166,
+        167, 168, 169, 170, 178, 179, 180, 181, 182, 183, 184, 185, 186, 194, 195, 196,
+        197, 198, 199, 200, 201, 202, 210, 211, 212, 213, 214, 215, 216, 217, 218, 226,
+        227, 228, 229, 230, 231, 232, 233, 234, 242, 243, 244, 245, 246, 247, 248, 249,
+        250, 255, 221, 0, 4, 0, 1, 255, 218, 0, 12, 3, 1, 0, 2, 17,
+        3, 17, 0, 63, 0, 239, 40, 162, 138, 255, 0, 63, 207, 239, 131, 255,
+        208, 199, 162, 138, 43, 251, 112, 255, 0, 61, 207, 255, 217,
+    ];
+
+    const JPEG_COLOR_8X8_444: &[u8] = &[
+        255, 216, 255, 224, 0, 16, 74, 70, 73, 70, 0, 1, 1, 0, 0, 1,
+        0, 1, 0, 0, 255, 219, 0, 67, 0, 3, 2, 2, 3, 2, 2, 3,
+        3, 3, 3, 4, 3, 3, 4, 5, 8, 5, 5, 4, 4, 5, 10, 7,
+        7, 6, 8, 12, 10, 12, 12, 11, 10, 11, 11, 13, 14, 18, 16, 13,
+        14, 17, 14, 11, 11, 16, 22, 16, 17, 19, 20, 21, 21, 21, 12, 15,
+        23, 24, 22, 20, 24, 18, 20, 21, 20, 255, 219, 0, 67, 1, 3, 4,
+        4, 5, 4, 5, 9, 5, 5, 9, 20, 13, 11, 13, 20, 20, 20, 20,
+        20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20,
+        20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20,
+        20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 255, 192,
+        0, 17, 8, 0, 8, 0, 8, 3, 1, 17, 0, 2, 17, 1, 3, 17,
+        1, 255, 196, 0, 31, 0, 0, 1, 5, 1, 1, 1, 1, 1, 1, 0,
+        0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
+        10, 11, 255, 196, 0, 181, 16, 0, 2, 1, 3, 3, 2, 4, 3, 5,
+        5, 4, 4, 0, 0, 1, 125, 1, 2, 3, 0, 4, 17, 5, 18, 33,
+        49, 65, 6, 19, 81, 97, 7, 34, 113, 20, 50, 129, 145, 161, 8, 35,
+        66, 177, 193, 21, 82, 209, 240, 36, 51, 98, 114, 130, 9, 10, 22, 23,
+        24, 25, 26, 37, 38, 39, 40, 41, 42, 52, 53, 54, 55, 56, 57, 58,
+        67, 68, 69, 70, 71, 72, 73, 74, 83, 84, 85, 86, 87, 88, 89, 90,
+        99, 100, 101, 102, 103, 104, 105, 106, 115, 116, 117, 118, 119, 120, 121, 122,
+        131, 132, 133, 134, 135, 136, 137, 138, 146, 147, 148, 149, 150, 151, 152, 153,
+        154, 162, 163, 164, 165, 166, 167, 168, 169, 170, 178, 179, 180, 181, 182, 183,
+        184, 185, 186, 194, 195, 196, 197, 198, 199, 200, 201, 202, 210, 211, 212, 213,
+        214, 215, 216, 217, 218, 225, 226, 227, 228, 229, 230, 231, 232, 233, 234, 241,
+        242, 243, 244, 245, 246, 247, 248, 249, 250, 255, 196, 0, 31, 1, 0, 3,
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 1,
+        2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 255, 196, 0, 181, 17, 0,
+        2, 1, 2, 4, 4, 3, 4, 7, 5, 4, 4, 0, 1, 2, 119, 0,
+        1, 2, 3, 17, 4, 5, 33, 49, 6, 18, 65, 81, 7, 97, 113, 19,
+        34, 50, 129, 8, 20, 66, 145, 161, 177, 193, 9, 35, 51, 82, 240, 21,
+        98, 114, 209, 10, 22, 36, 52, 225, 37, 241, 23, 24, 25, 26, 38, 39,
+        40, 41, 42, 53, 54, 55, 56, 57, 58, 67, 68, 69, 70, 71, 72, 73,
+        74, 83, 84, 85, 86, 87, 88, 89, 90, 99, 100, 101, 102, 103, 104, 105,
+        106, 115, 116, 117, 118, 119, 120, 121, 122, 130, 131, 132, 133, 134, 135, 136,
+        137, 138, 146, 147, 148, 149, 150, 151, 152, 153, 154, 162, 163, 164, 165, 166,
+        167, 168, 169, 170, 178, 179, 180, 181, 182, 183, 184, 185, 186, 194, 195, 196,
+        197, 198, 199, 200, 201, 202, 210, 211, 212, 213, 214, 215, 216, 217, 218, 226,
+        227, 228, 229, 230, 231, 232, 233, 234, 242, 243, 244, 245, 246, 247, 248, 249,
+        250, 255, 218, 0, 12, 3, 1, 0, 2, 17, 3, 17, 0, 63, 0, 169,
+        95, 135, 159, 210, 7, 255, 217,
+    ];
+
+    const JPEG_COLOR_8X8_422: &[u8] = &[
+        255, 216, 255, 224, 0, 16, 74, 70, 73, 70, 0, 1, 1, 0, 0, 1,
+        0, 1, 0, 0, 255, 219, 0, 67, 0, 3, 2, 2, 3, 2, 2, 3,
+        3, 3, 3, 4, 3, 3, 4, 5, 8, 5, 5, 4, 4, 5, 10, 7,
+        7, 6, 8, 12, 10, 12, 12, 11, 10, 11, 11, 13, 14, 18, 16, 13,
+        14, 17, 14, 11, 11, 16, 22, 16, 17, 19, 20, 21, 21, 21, 12, 15,
+        23, 24, 22, 20, 24, 18, 20, 21, 20, 255, 219, 0, 67, 1, 3, 4,
+        4, 5, 4, 5, 9, 5, 5, 9, 20, 13, 11, 13, 20, 20, 20, 20,
+        20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20,
+        20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20,
+        20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 255, 192,
+        0, 17, 8, 0, 8, 0, 8, 3, 1, 33, 0, 2, 17, 1, 3, 17,
+        1, 255, 196, 0, 31, 0, 0, 1, 5, 1, 1, 1, 1, 1, 1, 0,
+        0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
+        10, 11, 255, 196, 0, 181, 16, 0, 2, 1, 3, 3, 2, 4, 3, 5,
+        5, 4, 4, 0, 0, 1, 125, 1, 2, 3, 0, 4, 17, 5, 18, 33,
+        49, 65, 6, 19, 81, 97, 7, 34, 113, 20, 50, 129, 145, 161, 8, 35,
+        66, 177, 193, 21, 82, 209, 240, 36, 51, 98, 114, 130, 9, 10, 22, 23,
+        24, 25, 26, 37, 38, 39, 40, 41, 42, 52, 53, 54, 55, 56, 57, 58,
+        67, 68, 69, 70, 71, 72, 73, 74, 83, 84, 85, 86, 87, 88, 89, 90,
+        99, 100, 101, 102, 103, 104, 105, 106, 115, 116, 117, 118, 119, 120, 121, 122,
+        131, 132, 133, 134, 135, 136, 137, 138, 146, 147, 148, 149, 150, 151, 152, 153,
+        154, 162, 163, 164, 165, 166, 167, 168, 169, 170, 178, 179, 180, 181, 182, 183,
+        184, 185, 186, 194, 195, 196, 197, 198, 199, 200, 201, 202, 210, 211, 212, 213,
+        214, 215, 216, 217, 218, 225, 226, 227, 228, 229, 230, 231, 232, 233, 234, 241,
+        242, 243, 244, 245, 246, 247, 248, 249, 250, 255, 196, 0, 31, 1, 0, 3,
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 1,
+        2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 255, 196, 0, 181, 17, 0,
+        2, 1, 2, 4, 4, 3, 4, 7, 5, 4, 4, 0, 1, 2, 119, 0,
+        1, 2, 3, 17, 4, 5, 33, 49, 6, 18, 65, 81, 7, 97, 113, 19,
+        34, 50, 129, 8, 20, 66, 145, 161, 177, 193, 9, 35, 51, 82, 240, 21,
+        98, 114, 209, 10, 22, 36, 52, 225, 37, 241, 23, 24, 25, 26, 38, 39,
+        40, 41, 42, 53, 54, 55, 56, 57, 58, 67, 68, 69, 70, 71, 72, 73,
+        74, 83, 84, 85, 86, 87, 88, 89, 90, 99, 100, 101, 102, 103, 104, 105,
+        106, 115, 116, 117, 118, 119, 120, 121, 122, 130, 131, 132, 133, 134, 135, 136,
+        137, 138, 146, 147, 148, 149, 150, 151, 152, 153, 154, 162, 163, 164, 165, 166,
+        167, 168, 169, 170, 178, 179, 180, 181, 182, 183, 184, 185, 186, 194, 195, 196,
+        197, 198, 199, 200, 201, 202, 210, 211, 212, 213, 214, 215, 216, 217, 218, 226,
+        227, 228, 229, 230, 231, 232, 233, 234, 242, 243, 244, 245, 246, 247, 248, 249,
+        250, 255, 218, 0, 12, 3, 1, 0, 2, 17, 3, 17, 0, 63, 0, 169,
+        69, 126, 30, 127, 72, 31, 255, 217,
+    ];
+
+    const JPEG_RGB_8X8_ADOBE: &[u8] = &[
+        255, 216, 255, 238, 0, 14, 65, 100, 111, 98, 101, 0, 100, 0, 0, 0,
+        0, 0, 255, 219, 0, 67, 0, 3, 2, 2, 3, 2, 2, 3, 3, 3,
+        3, 4, 3, 3, 4, 5, 8, 5, 5, 4, 4, 5, 10, 7, 7, 6,
+        8, 12, 10, 12, 12, 11, 10, 11, 11, 13, 14, 18, 16, 13, 14, 17,
+        14, 11, 11, 16, 22, 16, 17, 19, 20, 21, 21, 21, 12, 15, 23, 24,
+        22, 20, 24, 18, 20, 21, 20, 255, 192, 0, 17, 8, 0, 8, 0, 8,
+        3, 82, 17, 0, 71, 17, 0, 66, 17, 0, 255, 196, 0, 31, 0, 0,
+        1, 5, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0,
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 255, 196, 0, 181, 16,
+        0, 2, 1, 3, 3, 2, 4, 3, 5, 5, 4, 4, 0, 0, 1, 125,
+        1, 2, 3, 0, 4, 17, 5, 18, 33, 49, 65, 6, 19, 81, 97, 7,
+        34, 113, 20, 50, 129, 145, 161, 8, 35, 66, 177, 193, 21, 82, 209, 240,
+        36, 51, 98, 114, 130, 9, 10, 22, 23, 24, 25, 26, 37, 38, 39, 40,
+        41, 42, 52, 53, 54, 55, 56, 57, 58, 67, 68, 69, 70, 71, 72, 73,
+        74, 83, 84, 85, 86, 87, 88, 89, 90, 99, 100, 101, 102, 103, 104, 105,
+        106, 115, 116, 117, 118, 119, 120, 121, 122, 131, 132, 133, 134, 135, 136, 137,
+        138, 146, 147, 148, 149, 150, 151, 152, 153, 154, 162, 163, 164, 165, 166, 167,
+        168, 169, 170, 178, 179, 180, 181, 182, 183, 184, 185, 186, 194, 195, 196, 197,
+        198, 199, 200, 201, 202, 210, 211, 212, 213, 214, 215, 216, 217, 218, 225, 226,
+        227, 228, 229, 230, 231, 232, 233, 234, 241, 242, 243, 244, 245, 246, 247, 248,
+        249, 250, 255, 218, 0, 12, 3, 82, 0, 71, 0, 66, 0, 0, 63, 0,
+        251, 2, 188, 210, 190, 47, 175, 255, 217,
+    ];
+
+    const JPEG_RGB_8X8_IDS: &[u8] = &[
+        255, 216, 255, 219, 0, 67, 0, 3, 2, 2, 3, 2, 2, 3, 3, 3,
+        3, 4, 3, 3, 4, 5, 8, 5, 5, 4, 4, 5, 10, 7, 7, 6,
+        8, 12, 10, 12, 12, 11, 10, 11, 11, 13, 14, 18, 16, 13, 14, 17,
+        14, 11, 11, 16, 22, 16, 17, 19, 20, 21, 21, 21, 12, 15, 23, 24,
+        22, 20, 24, 18, 20, 21, 20, 255, 192, 0, 17, 8, 0, 8, 0, 8,
+        3, 82, 17, 0, 71, 17, 0, 66, 17, 0, 255, 196, 0, 31, 0, 0,
+        1, 5, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0,
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 255, 196, 0, 181, 16,
+        0, 2, 1, 3, 3, 2, 4, 3, 5, 5, 4, 4, 0, 0, 1, 125,
+        1, 2, 3, 0, 4, 17, 5, 18, 33, 49, 65, 6, 19, 81, 97, 7,
+        34, 113, 20, 50, 129, 145, 161, 8, 35, 66, 177, 193, 21, 82, 209, 240,
+        36, 51, 98, 114, 130, 9, 10, 22, 23, 24, 25, 26, 37, 38, 39, 40,
+        41, 42, 52, 53, 54, 55, 56, 57, 58, 67, 68, 69, 70, 71, 72, 73,
+        74, 83, 84, 85, 86, 87, 88, 89, 90, 99, 100, 101, 102, 103, 104, 105,
+        106, 115, 116, 117, 118, 119, 120, 121, 122, 131, 132, 133, 134, 135, 136, 137,
+        138, 146, 147, 148, 149, 150, 151, 152, 153, 154, 162, 163, 164, 165, 166, 167,
+        168, 169, 170, 178, 179, 180, 181, 182, 183, 184, 185, 186, 194, 195, 196, 197,
+        198, 199, 200, 201, 202, 210, 211, 212, 213, 214, 215, 216, 217, 218, 225, 226,
+        227, 228, 229, 230, 231, 232, 233, 234, 241, 242, 243, 244, 245, 246, 247, 248,
+        249, 250, 255, 218, 0, 12, 3, 82, 0, 71, 0, 66, 0, 0, 63, 0,
+        251, 2, 188, 210, 190, 47, 175, 255, 217,
+    ];
+
+    const JPEG_PROGRESSIVE_8X8_GRAY: &[u8] = &[
+        255, 216, 255, 224, 0, 16, 74, 70, 73, 70, 0, 1, 1, 0, 0, 1,
+        0, 1, 0, 0, 255, 219, 0, 67, 0, 3, 2, 2, 3, 2, 2, 3,
+        3, 3, 3, 4, 3, 3, 4, 5, 8, 5, 5, 4, 4, 5, 10, 7,
+        7, 6, 8, 12, 10, 12, 12, 11, 10, 11, 11, 13, 14, 18, 16, 13,
+        14, 17, 14, 11, 11, 16, 22, 16, 17, 19, 20, 21, 21, 21, 12, 15,
+        23, 24, 22, 20, 24, 18, 20, 21, 20, 255, 194, 0, 11, 8, 0, 8,
+        0, 8, 1, 1, 17, 0, 255, 196, 0, 20, 0, 1, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 218, 0, 8,
+        1, 1, 0, 0, 0, 1, 127, 255, 196, 0, 20, 16, 1, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 218, 0,
+        8, 1, 1, 0, 1, 5, 2, 127, 255, 196, 0, 20, 16, 1, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 218,
+        0, 8, 1, 1, 0, 6, 63, 2, 127, 255, 196, 0, 20, 16, 1, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255,
+        218, 0, 8, 1, 1, 0, 1, 63, 33, 127, 255, 218, 0, 8, 1, 1,
+        0, 0, 0, 16, 127, 255, 196, 0, 20, 16, 1, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 218, 0, 8, 1,
+        1, 0, 1, 63, 16, 127, 255, 217,
+    ];
+
+    fn jpeg_pixel(out: &[u8], width: usize, x: usize, y: usize) -> [u8; 3] {
+        let offset = (y * width + x) * 4;
+        [out[offset], out[offset + 1], out[offset + 2]]
+    }
+
+    fn jpeg_close(actual: [u8; 3], expected: [u8; 3]) -> bool {
+        actual
+            .iter()
+            .zip(expected.iter())
+            .all(|(a, e)| (*a as i32 - *e as i32).abs() <= 24)
+    }
+
+    #[test]
+    fn jpeg_grayscale_8x8_decodes_to_uniform_grey() {
+        let _guard = scratch_guard();
+        assert_eq!(decode_jpeg_header(JPEG_GRAY_8X8), Ok((8, 8)));
+        let mut out = [0u8; 8 * 8 * 4];
+        assert_eq!(decode_jpeg(JPEG_GRAY_8X8, &mut out), Ok((8, 8, 256)));
+        for pixel in out.chunks_exact(4) {
+            assert_eq!(pixel, &[128, 128, 128, 255]);
+        }
+    }
+
+    #[test]
+    fn jpeg_color_16x16_420_decodes_plausible_rgb() {
+        let _guard = scratch_guard();
+        assert_eq!(decode_jpeg_header(JPEG_COLOR_16X16_420), Ok((16, 16)));
+        let mut out = [0u8; 16 * 16 * 4];
+        assert_eq!(
+            decode_jpeg(JPEG_COLOR_16X16_420, &mut out),
+            Ok((16, 16, 1024))
+        );
+        // Every quadrant is uniform and aligns with the chroma grid, so the
+        // decoded colours stay close to what Pillow stored.
+        assert!(jpeg_close(jpeg_pixel(&out, 16, 4, 4), [220, 40, 40]));
+        assert!(jpeg_close(jpeg_pixel(&out, 16, 12, 4), [40, 200, 60]));
+        assert!(jpeg_close(jpeg_pixel(&out, 16, 4, 12), [50, 60, 220]));
+        assert!(jpeg_close(jpeg_pixel(&out, 16, 12, 12), [230, 220, 30]));
+        assert_eq!(out[3], 255);
+    }
+
+    #[test]
+    fn jpeg_422_and_444_sampling_decode() {
+        let _guard = scratch_guard();
+        let mut out = [0u8; 8 * 8 * 4];
+        assert_eq!(decode_jpeg(JPEG_COLOR_8X8_444, &mut out), Ok((8, 8, 256)));
+        assert!(jpeg_close(jpeg_pixel(&out, 8, 0, 0), [200, 100, 50]));
+        assert!(jpeg_close(jpeg_pixel(&out, 8, 7, 7), [200, 100, 50]));
+
+        let mut out = [0u8; 8 * 8 * 4];
+        assert_eq!(decode_jpeg(JPEG_COLOR_8X8_422, &mut out), Ok((8, 8, 256)));
+        // 4:2:2 halves the chroma only horizontally; the picture is one flat
+        // colour, so nearest-neighbour replication must still land on it.
+        assert!(jpeg_close(jpeg_pixel(&out, 8, 0, 0), [200, 100, 50]));
+        assert!(jpeg_close(jpeg_pixel(&out, 8, 7, 7), [200, 100, 50]));
+    }
+
+    #[test]
+    fn jpeg_rgb_components_skip_the_ycbcr_transform() {
+        let _guard = scratch_guard();
+
+        // Pillow's keep_rgb encoder writes an Adobe APP14 with transform 0.
+        let mut out = [0u8; 8 * 8 * 4];
+        assert_eq!(decode_jpeg(JPEG_RGB_8X8_ADOBE, &mut out), Ok((8, 8, 256)));
+        assert!(jpeg_close(jpeg_pixel(&out, 8, 0, 0), [200, 100, 50]));
+        assert!(jpeg_close(jpeg_pixel(&out, 8, 7, 7), [200, 100, 50]));
+
+        // The same stream with APP14 removed is identified by its R/G/B IDs.
+        let mut out = [0u8; 8 * 8 * 4];
+        assert_eq!(decode_jpeg(JPEG_RGB_8X8_IDS, &mut out), Ok((8, 8, 256)));
+        assert!(jpeg_close(jpeg_pixel(&out, 8, 0, 0), [200, 100, 50]));
+        assert!(jpeg_close(jpeg_pixel(&out, 8, 7, 7), [200, 100, 50]));
+    }
+
+    #[test]
+    fn jpeg_restart_markers_are_consumed() {
+        let _guard = scratch_guard();
+        let mut out = [0u8; 32 * 16 * 4];
+        assert_eq!(
+            decode_jpeg(JPEG_COLOR_32X16_RESTART, &mut out),
+            Ok((32, 16, 2048))
+        );
+        // MCU 0 is orange, MCU 1 is blue; RST0 sits between them.
+        assert!(jpeg_close(jpeg_pixel(&out, 32, 8, 8), [230, 121, 30]));
+        assert!(jpeg_close(jpeg_pixel(&out, 32, 24, 8), [29, 150, 219]));
+        assert!(jpeg_close(jpeg_pixel(&out, 32, 0, 0), [230, 121, 30]));
+        assert!(jpeg_close(jpeg_pixel(&out, 32, 31, 15), [29, 150, 219]));
+    }
+
+    #[test]
+    fn jpeg_truncated_stream_is_refused() {
+        let _guard = scratch_guard();
+        let mut out = [0u8; 8 * 8 * 4];
+        // Cut before the scan: the header walk cannot reach SOS.
+        assert!(decode_jpeg(&JPEG_GRAY_8X8[..JPEG_GRAY_8X8.len() / 2], &mut out).is_err());
+        assert!(decode_jpeg(&JPEG_GRAY_8X8[..10], &mut out).is_err());
+        assert!(decode_jpeg(b"not a jpeg", &mut out).is_err());
+
+        // Cut inside the entropy-coded data: the last MCU is incomplete, so
+        // the decoder must refuse rather than leave part of the surface
+        // unpainted.
+        let mut out = [0u8; 16 * 16 * 4];
+        assert!(decode_jpeg(
+            &JPEG_COLOR_16X16_420[..JPEG_COLOR_16X16_420.len() - 10],
+            &mut out
+        )
+        .is_err());
+
+        // The final MCU is present but the RST0 that should precede it (bytes
+        // 639..641 of the fixture) was removed. That is malformed, not a
+        // complete picture.
+        let mut without_restart = JPEG_COLOR_32X16_RESTART.to_vec();
+        without_restart.drain(639..641);
+        let mut out = [0u8; 32 * 16 * 4];
+        assert!(decode_jpeg(&without_restart, &mut out).is_err());
+    }
+
+    #[test]
+    fn jpeg_progressive_is_refused() {
+        let _guard = scratch_guard();
+        let mut out = [0u8; 8 * 8 * 4];
+        assert!(decode_jpeg(JPEG_PROGRESSIVE_8X8_GRAY, &mut out).is_err());
+        assert!(decode_jpeg_header(JPEG_PROGRESSIVE_8X8_GRAY).is_err());
+    }
+
+    #[test]
+    fn jpeg_output_buffer_too_small_is_refused() {
+        let _guard = scratch_guard();
+        let mut small = [0u8; 8 * 8 * 4 - 1];
+        assert!(decode_jpeg(JPEG_GRAY_8X8, &mut small).is_err());
+        let mut out = [0u8; 8 * 8 * 4];
+        assert!(decode_image(b"not a jpeg", b"photo.jpg", &mut out).is_err());
+    }
+
+    #[test]
+    fn jpeg_header_reports_dimensions_only_for_a_decodable_frame() {
+        assert_eq!(decode_jpeg_header(JPEG_GRAY_8X8), Ok((8, 8)));
+        assert_eq!(decode_jpeg_header(JPEG_COLOR_16X16_420), Ok((16, 16)));
+        assert!(decode_jpeg_header(&JPEG_GRAY_8X8[..8]).is_err());
+        assert!(decode_jpeg_header(b"not a jpeg").is_err());
+    }
+
     // -- dispatch ----------------------------------------------------------
 
     #[test]
@@ -2762,6 +4197,31 @@ mod tests {
         let mut out = [0u8; 4];
         assert_eq!(decode_image(&gif, b"ANIM.GIF", &mut out), Ok((1, 1, 4)));
         assert_eq!(&out, &[0, 0, 255, 255]);
+    }
+
+    #[test]
+    fn decode_image_routes_jpeg_by_signature_and_suffix() {
+        let _guard = scratch_guard();
+        let mut out = [0u8; 8 * 8 * 4];
+
+        // The signature decides even when the name says nothing.
+        assert_eq!(
+            decode_image(JPEG_GRAY_8X8, b"mystery", &mut out),
+            Ok((8, 8, 256))
+        );
+        assert_eq!(&out[..4], &[128, 128, 128, 255]);
+
+        // A recognised suffix selects the decoder too, and the decoder itself
+        // still refuses data that is not a JPEG.
+        assert_eq!(
+            decode_image(JPEG_GRAY_8X8, b"photo.JPG", &mut out),
+            Ok((8, 8, 256))
+        );
+        assert_eq!(
+            decode_image(JPEG_COLOR_16X16_420, b"photo.jpeg", &mut [0u8; 1024]),
+            Ok((16, 16, 1024))
+        );
+        assert!(decode_image(b"not a jpeg", b"photo.jpg", &mut out).is_err());
     }
 }
 
