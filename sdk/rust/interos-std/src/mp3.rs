@@ -99,6 +99,13 @@ pub struct FrameInfo {
     pub main_data_begin: u16,
 }
 
+impl FrameInfo {
+    /// Total interleaved samples produced by this frame.
+    pub const fn samples(&self) -> usize {
+        self.samples_per_channel * self.channels as usize
+    }
+}
+
 /// Errors reported by [`Mp3Decoder`]. Every condition is distinct so the
 /// player can tell "skip this file" from "read more bytes".
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -150,7 +157,7 @@ pub struct Mp3Decoder {
 
 impl Mp3Decoder {
     /// Creates a decoder with cleared reservoir, overlap and synthesis state.
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             input: [0; INPUT_CAPACITY],
             input_len: 0,
@@ -164,6 +171,11 @@ impl Mp3Decoder {
             v_buf: [[0.0; 1024]; MAX_CHANNELS],
             stream_format: None,
         }
+    }
+
+    /// Number of bytes currently available in the input buffer.
+    pub const fn available(&self) -> usize {
+        INPUT_CAPACITY - self.input_len
     }
 
     /// Adds bytes to the input buffer. Returns [`Mp3Error::BufferFull`] if the
