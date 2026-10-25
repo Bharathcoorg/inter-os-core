@@ -94,6 +94,13 @@ static mut FILE_SCRATCH: [u8; FILE_SCRATCH_LEN] = [0; FILE_SCRATCH_LEN];
 /// Scratch buffer for the full RGBA decode of a stored image.
 static mut DECODE_SCRATCH: [u8; DECODE_SCRATCH_LEN] = [0; DECODE_SCRATCH_LEN];
 
+/// Scratch space used by GIF disposal method 3 (restore to previous).
+///
+/// WHY a second screen-sized buffer: restoring a frame rectangle needs the
+/// pixels that were there before it, and the animation state lives across
+/// timer ticks. It is zero-initialised BSS, so it costs no image bytes.
+static mut GIF_RESTORE_SCRATCH: [u8; DECODE_SCRATCH_LEN] = [0; DECODE_SCRATCH_LEN];
+
 /// Length of the file read scratch buffer.
 ///
 /// WHY 64 KiB: the platform's `FsRead` accepts at most 64 KiB in one call, and
@@ -109,6 +116,16 @@ const FILE_SCRATCH_LEN: usize = 64 * 1024;
 /// the grid thumbnail and the full-screen viewer share. An image whose pixels
 /// do not fit is refused by the decoder rather than drawn truncated.
 const DECODE_SCRATCH_LEN: usize = 720 * 1440 * 4;
+
+/// The millisecond deadline for the next GIF frame.
+///
+/// WHY the fallback: the format stores the delay in hundredths of a second,
+/// and zero means the document did not state one. Use the 100 ms that viewers
+/// conventionally apply rather than inventing a per-frame value.
+fn gif_frame_deadline(delay_cs: u16) -> u64 {
+    let delay_ms = if delay_cs == 0 { 100 } else { delay_cs as u64 * 10 };
+    std::get_ticks().unwrap_or(0).saturating_add(delay_ms)
+}
 
 /// Decodes a stored image file into a thumbnail.
 ///
@@ -880,6 +897,20 @@ fn build_applied_label(
     }
 }
 
+/// Playback state for an animated GIF in the inspection view.
+///
+/// WHY the animation borrows the file scratch for `'static`: the decoded
+/// canvas is a shared static buffer, so the app holds only the decoder state
+/// and re-decodes each frame into that one canvas. `load_detail_image` clears
+/// this state before it overwrites the file scratch.
+pub struct GifPlayerState {
+    animation: std::image::GifAnimation<'static>,
+    /// Timer ticks (milliseconds since boot) when the next frame is due.
+    next_frame_ms: u64,
+    /// Loops still to play; zero means the document asked for forever.
+    remaining_loops: u16,
+}
+
 pub struct GalleryApp {
     pub filter: Filter,
     /// The media record open in the inspection view.
@@ -916,6 +947,8 @@ pub struct GalleryApp {
     pub storage_count: usize,
     /// Native video player state when playing a video.
     pub video_player: Option<VideoPlayerState>,
+    /// Animated GIF playback state in the inspection view.
+    pub gif_player: Option<GifPlayerState>,
     /// Modern flagship tab selection.
     pub tab: GalleryTab,
     /// Whether info overlay sheet is visible in photo viewer.
@@ -1045,6 +1078,7 @@ impl GalleryApp {
             storage_items: [StorageMediaItem::EMPTY; MAX_STORAGE_ITEMS],
             storage_count: 0,
             video_player: None,
+            gif_player: None,
             detail_rgba_len: 0,
             detail_w: 0,
             detail_h: 0,
@@ -1229,6 +1263,8 @@ impl GalleryApp {
         self.detail_rgba_len = 0;
         self.detail_w = 0;
         self.detail_h = 0;
+        // An animation draws into that same buffer, so it cannot outlive it.
+        self.gif_player = None;
         let mut list_buf = [0u8; 4096];
         let Ok(bytes) = std::content::content_index_list(&mut list_buf) else {
             std::log("[GALLERY] The platform's document index could not be read; the gallery shows nothing it cannot name.").ok();
@@ -1312,6 +1348,9 @@ impl GalleryApp {
         self.detail_rgba_len = 0;
         self.detail_w = 0;
         self.detail_h = 0;
+        // The animation borrows the file scratch, which this function is
+        // about to overwrite, so drop it before the read.
+        self.gif_player = None;
         if idx >= self.storage_count {
             return;
         }
@@ -1358,6 +1397,52 @@ impl GalleryApp {
             self.detail_h = 0;
             return;
         }
+        // An animated GIF advances frame by frame into the shared canvas. A
+        // still GIF, and every other image, keeps the one-shot path below.
+        //
+        // WHY the source borrow is explicitly `'static`: the animation state
+        // outlives this call and points into the file scratch, so the read
+        // above is the last write to that buffer until the viewer closes.
+        let source: &'static [u8] = unsafe {
+            core::slice::from_raw_parts(
+                core::ptr::addr_of!(FILE_SCRATCH).cast::<u8>(),
+                FILE_SCRATCH_LEN,
+            )
+        };
+        if let Ok(info) = std::image::gif_animation_info(&source[..n]) {
+            if info.frame_count > 1 {
+                let required = (info.width as usize)
+                    .saturating_mul(info.height as usize)
+                    .saturating_mul(4);
+                if required <= DECODE_SCRATCH_LEN {
+                    if let Ok(mut animation) = std::image::GifAnimation::new(&source[..n]) {
+                        let (canvas, restore) = unsafe {
+                            (
+                                &mut *core::ptr::addr_of_mut!(DECODE_SCRATCH),
+                                &mut *core::ptr::addr_of_mut!(GIF_RESTORE_SCRATCH),
+                            )
+                        };
+                        canvas[..required].fill(0);
+                        if let Ok(frame) = animation.decode_next(canvas, restore) {
+                            self.detail_w = info.width;
+                            self.detail_h = info.height;
+                            self.detail_rgba_len = required;
+                            self.storage_items[idx].width = info.width;
+                            self.storage_items[idx].height = info.height;
+                            self.storage_items[idx].has_dimensions = true;
+                            self.gif_player = Some(GifPlayerState {
+                                animation,
+                                next_frame_ms: gif_frame_deadline(frame.delay_cs),
+                                remaining_loops: info.loop_count,
+                            });
+                            std::log("[GALLERY] Animated GIF opened; frames advance from their stored delays.").ok();
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+
         let decoded = {
             let buf = unsafe { &mut *core::ptr::addr_of_mut!(DECODE_SCRATCH) };
             decode_image(&data[..n], &name_buf[..name_len], buf)
@@ -3410,6 +3495,24 @@ fn render_gallery_band(surface: u32, app: &GalleryApp, y0: usize, y1: usize) {
     }
 }
 
+/// Re-rasterises only the picture rectangle of the full-screen viewer.
+///
+/// WHY this exists: an animated GIF changes nothing on screen except the
+/// picture inside the viewer, and a full-screen pass costs more than the
+/// frame's own delay, so the animation ran at the renderer's speed instead of
+/// its stored speed. Every pixel outside the rectangle is left untouched,
+/// which is what makes this correct: the header, buttons and background were
+/// already drawn and nothing in them changed.
+fn render_detail_picture(surface: u32, app: &GalleryApp) {
+    let mut row = [0u32; DETAIL_VIEW_W];
+    for y in DETAIL_VIEW_Y0..DETAIL_VIEW_Y1 {
+        for (i, pixel) in row.iter_mut().enumerate() {
+            *pixel = gallery_pixel(DETAIL_VIEW_X + i, y, app);
+        }
+        let _ = std::surface_write(surface, y * W + DETAIL_VIEW_X, &row);
+    }
+}
+
 // -----------------------------------------------------------------------------
 // Input handling. Every region below is hit-tested against the same `Rect` the
 // renderer drew, so a control is accepted exactly where it is painted.
@@ -3476,6 +3579,7 @@ fn open_media(app: &mut GalleryApp, media: Media) -> Tap {
     match media {
         Media::Wallpaper(idx) => {
             app.video_player = None;
+            app.gif_player = None;
             app.detail_title_len = 0;
             let scene = &walls::SCENES[idx];
             app.detail_title = scene.name;
@@ -3486,6 +3590,7 @@ fn open_media(app: &mut GalleryApp, media: Media) -> Tap {
         }
         Media::Photo(idx) => {
             app.video_player = None;
+            app.gif_player = None;
             app.detail_title_len = 0;
             if let Some(photo) = PHOTOS.get(idx) {
                 app.detail_title = photo.title.as_bytes();
@@ -3517,12 +3622,22 @@ fn open_media(app: &mut GalleryApp, media: Media) -> Tap {
                     std::log("[GALLERY] Storage video opened in video player.").ok();
                 } else {
                     app.video_player = None;
+                    app.gif_player = None;
                     app.load_detail_image(idx);
-                    let mut n = append(&mut app.detail_meta, 0, b"Photo, ");
+                    let kind: &[u8] = if app.gif_player.is_some() {
+                        b"Animated GIF, "
+                    } else {
+                        b"Photo, "
+                    };
+                    let mut n = append(&mut app.detail_meta, 0, kind);
                     n = append_u64(&mut app.detail_meta, n, app.detail_w as u64);
                     n = append(&mut app.detail_meta, n, b"x");
                     n = append_u64(&mut app.detail_meta, n, app.detail_h as u64);
                     n = append(&mut app.detail_meta, n, b", ");
+                    if let Some(ref gif) = app.gif_player {
+                        n = append_u64(&mut app.detail_meta, n, gif.animation.info().frame_count as u64);
+                        n = append(&mut app.detail_meta, n, b" frames, ");
+                    }
                     n = append_u64(&mut app.detail_meta, n, item.size);
                     n = append(&mut app.detail_meta, n, b" bytes");
                     app.detail_meta_len = n;
@@ -3624,6 +3739,7 @@ fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
         if app.open.is_some() {
             app.open = None;
             app.video_player = None;
+            app.gif_player = None;
             app.show_info_overlay = false;
             std::log("[GALLERY] Exited photo inspection view.").ok();
             return Tap::Redraw(Dirty::All);
@@ -3674,6 +3790,7 @@ fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
                 }
                 app.open = None;
                 app.video_player = None;
+                app.gif_player = None;
                 app.show_wallpaper_sheet = false;
                 std::log("[GALLERY] Closed video player view.").ok();
                 return Tap::Redraw(Dirty::All);
@@ -3681,6 +3798,7 @@ fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
             if CLOSE.contains(x, y) {
                 app.open = None;
                 app.video_player = None;
+                app.gif_player = None;
                 app.show_wallpaper_sheet = false;
                 app.opened_from_caller = false;
                 std::log("[GALLERY] Closed video player view.").ok();
@@ -3776,6 +3894,7 @@ fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
 
                         app.open = None;
                         app.video_player = None;
+                        app.gif_player = None;
                         app.show_info_overlay = false;
                         app.show_wallpaper_sheet = false;
                         // WHY the subtitle is rebuilt here: it counts the
@@ -3818,6 +3937,7 @@ fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
                 }
                 app.open = None;
                 app.video_player = None;
+                app.gif_player = None;
                 app.show_info_overlay = false;
                 app.show_wallpaper_sheet = false;
                 std::log("[GALLERY] Closed photo inspection view.").ok();
@@ -3826,6 +3946,7 @@ fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
             if CLOSE.contains(x, y) {
                 app.open = None;
                 app.video_player = None;
+                app.gif_player = None;
                 app.show_info_overlay = false;
                 app.show_wallpaper_sheet = false;
                 app.opened_from_caller = false;
@@ -4007,11 +4128,70 @@ pub extern "C" fn _start() -> ! {
                         tick_dirty = true;
                     }
                 }
+                let mut stop_gif = false;
+                // Set when only the animated picture changed, so the frame is
+                // painted into the viewer rectangle instead of re-rasterising
+                // the whole screen. At 720x1440 every extra pixel is a frame
+                // of animation the viewer never gets to show.
+                let mut picture_only = false;
+                if let Some(ref mut gif) = app.gif_player {
+                    if std::get_ticks().unwrap_or(0) >= gif.next_frame_ms {
+                        let (width, height) = gif.animation.dimensions();
+                        let required = (width as usize)
+                            .saturating_mul(height as usize)
+                            .saturating_mul(4);
+                        let (canvas, restore) = unsafe {
+                            (
+                                &mut *core::ptr::addr_of_mut!(DECODE_SCRATCH),
+                                &mut *core::ptr::addr_of_mut!(GIF_RESTORE_SCRATCH),
+                            )
+                        };
+                        match gif.animation.decode_next(canvas, restore) {
+                            Ok(frame) => {
+                                app.detail_rgba_len = required;
+                                gif.next_frame_ms = gif_frame_deadline(frame.delay_cs);
+                                tick_dirty = true;
+                                picture_only = true;
+                            }
+                            Err(_) if gif.animation.is_finished() => {
+                                // The trailer is a normal end of pass. Loop
+                                // count zero is forever; otherwise one pass is
+                                // consumed and the viewer stops on the last
+                                // frame when no pass remains.
+                                if gif.remaining_loops == 0 || gif.remaining_loops > 1 {
+                                    if gif.remaining_loops > 1 {
+                                        gif.remaining_loops -= 1;
+                                    }
+                                    gif.animation.rewind();
+                                    canvas[..required].fill(0);
+                                    if let Ok(frame) = gif.animation.decode_next(canvas, restore) {
+                                        gif.next_frame_ms = gif_frame_deadline(frame.delay_cs);
+                                    }
+                                    tick_dirty = true;
+                                    picture_only = true;
+                                } else {
+                                    stop_gif = true;
+                                }
+                            }
+                            // A malformed stream keeps the last good frame
+                            // on screen rather than claiming a new one.
+                            Err(_) => stop_gif = true,
+                        }
+                    }
+                }
+                if stop_gif {
+                    app.gif_player = None;
+                }
                 if app.handle_pending_intent() {
                     tick_dirty = true;
+                    picture_only = false;
                 }
                 if tick_dirty && surface > 0 {
-                    render_gallery_ui(surface, &app);
+                    if picture_only {
+                        render_detail_picture(surface, &app);
+                    } else {
+                        render_gallery_ui(surface, &app);
+                    }
                     let _ = std::surface_flip();
                 }
             }

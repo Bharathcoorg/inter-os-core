@@ -1486,6 +1486,7 @@ pub fn decode_png(data: &[u8], out_rgba: &mut [u8]) -> Result<(u32, u32, usize),
 // GIF
 // ---------------------------------------------------------------------------
 
+#[derive(Clone, Copy)]
 struct GifHeader {
     width: u32,
     height: u32,
@@ -1666,6 +1667,14 @@ struct GifSink<'a> {
     frame_w: usize,
     frame_h: usize,
     interlace: bool,
+    /// Whether a transparent index leaves the pixel already on the canvas.
+    ///
+    /// WHY the two modes: a still decode owns a cleared canvas, so a
+    /// transparent pixel must be written as alpha zero for a caller to see
+    /// that the frame does not cover it. An animation composites onto the
+    /// previous frame, where a transparent pixel means "keep what is under
+    /// it" and writing anything would erase the picture.
+    skip_transparent: bool,
     col: usize,
     row: usize,
     y: usize,
@@ -1680,13 +1689,14 @@ impl GifSink<'_> {
         if offset + 4 > self.out.len() {
             return Err(());
         }
-        let entry = index as usize * 3;
-        self.out[offset] = self.palette[entry];
-        self.out[offset + 1] = self.palette[entry + 1];
-        self.out[offset + 2] = self.palette[entry + 2];
-        // A transparent index keeps its palette colour but is not painted:
-        // alpha zero is what the compositor needs to skip it.
-        self.out[offset + 3] = if self.transparent == Some(index) { 0 } else { 255 };
+        let transparent = self.transparent == Some(index);
+        if !(transparent && self.skip_transparent) {
+            let entry = index as usize * 3;
+            self.out[offset] = self.palette[entry];
+            self.out[offset + 1] = self.palette[entry + 1];
+            self.out[offset + 2] = self.palette[entry + 2];
+            self.out[offset + 3] = if transparent { 0 } else { 255 };
+        }
         self.col += 1;
         if self.col == self.frame_w {
             self.col = 0;
@@ -1721,6 +1731,7 @@ fn gif_lzw_decode(
     palette: &[u8],
     palette_entries: usize,
     transparent: Option<u8>,
+    skip_transparent: bool,
 ) -> Result<(), ()> {
     // The spec allows 2..=8; a code size of 1 has no CLEAR code below 4.
     if !(2..=8).contains(&min_code_size) {
@@ -1754,6 +1765,7 @@ fn gif_lzw_decode(
         frame_w,
         frame_h,
         interlace,
+        skip_transparent,
         col: 0,
         row: 0,
         y: gif_row_y(0, frame_h, interlace),
@@ -1955,10 +1967,421 @@ pub fn decode_gif(data: &[u8], out_rgba: &mut [u8]) -> Result<(u32, u32, usize),
                     palette,
                     palette_entries,
                     transparent,
+                    false,
                 )?;
                 return Ok((header.width, header.height, required));
             }
             _ => return Err(()),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GIF animation
+// ---------------------------------------------------------------------------
+
+/// What a GIF stream declares before any frame is decoded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GifAnimationInfo {
+    pub width: u32,
+    pub height: u32,
+    pub frame_count: u32,
+    /// 0 means loop forever; 1 means play once.
+    ///
+    /// WHY the value is reported raw: the Netscape extension stores the count
+    /// the encoder asked for, and a decoder that translated it would be
+    /// reporting its own policy as the document's property.
+    pub loop_count: u16,
+}
+
+/// One frame's placement and timing inside a GIF's logical screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GifFrameInfo {
+    pub left: u16,
+    pub top: u16,
+    pub width: u16,
+    pub height: u16,
+    /// Delay before the next frame, in hundredths of a second, as stored.
+    /// Zero means the document did not state one.
+    pub delay_cs: u16,
+    /// Graphic Control Extension disposal method, 0..=3.
+    pub disposal: u8,
+}
+
+/// Walks a GIF's block structure without decoding pixels.
+///
+/// This is how a caller decides whether a file is an animation before it
+/// commits a canvas: the block chain is bounded by the file length and has no
+/// LZW work in it.
+pub fn gif_animation_info(data: &[u8]) -> Result<GifAnimationInfo, ()> {
+    let header = gif_parse_header(data)?;
+    let mut pos = header.pos;
+    let mut frames = 0u32;
+    let mut loop_count = 1u16;
+    loop {
+        if pos >= data.len() {
+            return Err(());
+        }
+        match data[pos] {
+            0x3B => break,
+            0x00 => pos += 1,
+            0x21 => {
+                if pos + 2 > data.len() {
+                    return Err(());
+                }
+                let label = data[pos + 1];
+                let block = pos + 2;
+                // Netscape looping extension: a 0x0B sub-block holding
+                // "NETSCAPE2.0", then a 3-byte sub-block 0x01 <lo> <hi>.
+                // Only that one sub-block is interpreted; other application
+                // extensions are skipped as opaque data.
+                if label == 0xFF
+                    && block + 17 <= data.len()
+                    && data[block] == 11
+                    && &data[block + 1..block + 12] == b"NETSCAPE2.0"
+                    && data[block + 12] == 3
+                    && data[block + 13] == 1
+                {
+                    loop_count = u16::from_le_bytes([data[block + 14], data[block + 15]]);
+                }
+                pos = gif_skip_sub_blocks(data, block)?;
+            }
+            0x2C => {
+                if pos + 10 > data.len() {
+                    return Err(());
+                }
+                let packed = data[pos + 9];
+                let mut next = pos + 10;
+                if packed & 0x80 != 0 {
+                    let entries = 2usize << (packed & 0x07);
+                    next = next.checked_add(entries * 3).ok_or(())?;
+                }
+                if next >= data.len() {
+                    return Err(());
+                }
+                next += 1; // LZW minimum code size
+                pos = gif_skip_sub_blocks(data, next)?;
+                frames = frames.checked_add(1).ok_or(())?;
+            }
+            _ => return Err(()),
+        }
+    }
+    if frames == 0 {
+        return Err(());
+    }
+    Ok(GifAnimationInfo {
+        width: header.width,
+        height: header.height,
+        frame_count: frames,
+        loop_count,
+    })
+}
+
+/// Incremental GIF animation decoder.
+///
+/// The caller owns the canvas and a restore buffer:
+///
+/// - `canvas` is the logical screen in RGBA, exactly as `decode_gif` lays it
+///   out. Clear it before decoding the first frame; a transparent pixel in a
+///   frame leaves whatever the canvas already holds.
+/// - `restore` is scratch for disposal method 3 (restore to previous). It
+///   holds one frame rectangle, contiguously, so it only has to be as large as
+///   the largest frame whose disposal is 3. Passing a screen-sized buffer is
+///   always sufficient.
+///
+/// The decoder applies the previous frame's disposal method at the start of
+/// the next call, which is the point the specification places it: after the
+/// frame has been shown for its delay and before the next frame is drawn.
+pub struct GifAnimation<'a> {
+    data: &'a [u8],
+    header: GifHeader,
+    info: GifAnimationInfo,
+    pos: usize,
+    transparent: Option<u8>,
+    disposal: u8,
+    delay_cs: u16,
+    /// Disposal method and rectangle of the frame currently on the canvas.
+    pending: Option<(u8, usize, usize, usize, usize)>,
+    frame_index: u32,
+    finished: bool,
+}
+
+impl<'a> GifAnimation<'a> {
+    pub fn new(data: &'a [u8]) -> Result<Self, ()> {
+        let header = gif_parse_header(data)?;
+        let info = gif_animation_info(data)?;
+        Ok(Self {
+            data,
+            header,
+            info,
+            pos: header.pos,
+            transparent: None,
+            disposal: 0,
+            delay_cs: 0,
+            pending: None,
+            frame_index: 0,
+            finished: false,
+        })
+    }
+
+    pub fn info(&self) -> GifAnimationInfo {
+        self.info
+    }
+
+    pub fn dimensions(&self) -> (u32, u32) {
+        (self.header.width, self.header.height)
+    }
+
+    pub fn frame_index(&self) -> u32 {
+        self.frame_index
+    }
+
+    pub fn is_finished(&self) -> bool {
+        self.finished
+    }
+
+    /// Restarts at the first frame. The caller must clear the canvas first:
+    /// a loop starts from the background, not from the last frame on screen.
+    pub fn rewind(&mut self) {
+        self.pos = self.header.pos;
+        self.transparent = None;
+        self.disposal = 0;
+        self.delay_cs = 0;
+        self.pending = None;
+        self.frame_index = 0;
+        self.finished = false;
+    }
+
+    /// Decodes the next frame onto `canvas` and returns its placement and
+    /// timing. Returns `Err` at the trailer or on a malformed stream; the two
+    /// are distinguished by `is_finished`.
+    pub fn decode_next(&mut self, canvas: &mut [u8], restore: &mut [u8]) -> Result<GifFrameInfo, ()> {
+        if self.finished {
+            return Err(());
+        }
+        let screen_w = self.header.width as usize;
+        let screen_h = self.header.height as usize;
+        let required = screen_w
+            .checked_mul(screen_h)
+            .ok_or(())?
+            .checked_mul(4)
+            .ok_or(())?;
+        if canvas.len() < required {
+            return Err(());
+        }
+        self.apply_pending(canvas, restore)?;
+
+        loop {
+            if self.pos >= self.data.len() {
+                return Err(());
+            }
+            match self.data[self.pos] {
+                0x3B => {
+                    self.finished = true;
+                    self.pending = None;
+                    return Err(());
+                }
+                0x00 => self.pos += 1,
+                0x21 => {
+                    if self.pos + 2 > self.data.len() {
+                        return Err(());
+                    }
+                    let label = self.data[self.pos + 1];
+                    self.pos += 2;
+                    if label == 0xF9 {
+                        // 0x21 0xF9 04 <packed> <delay lo> <delay hi>
+                        // <transparent index> 00.
+                        if self.pos + 6 > self.data.len()
+                            || self.data[self.pos] != 4
+                            || self.data[self.pos + 5] != 0
+                        {
+                            return Err(());
+                        }
+                        let packed = self.data[self.pos + 1];
+                        // Bits 2..=4 are the disposal method. Values 4..=7 are
+                        // reserved; treat them as "do not dispose", which is
+                        // what viewers do and keeps a malformed extension from
+                        // discarding a valid frame.
+                        self.disposal = match (packed >> 2) & 0x07 {
+                            value @ 0..=3 => value,
+                            _ => 0,
+                        };
+                        self.delay_cs =
+                            u16::from_le_bytes([self.data[self.pos + 2], self.data[self.pos + 3]]);
+                        self.transparent = if packed & 1 != 0 {
+                            Some(self.data[self.pos + 4])
+                        } else {
+                            None
+                        };
+                        self.pos += 6;
+                    } else {
+                        self.pos = gif_skip_sub_blocks(self.data, self.pos)?;
+                    }
+                }
+                0x2C => {
+                    let descriptor = self.pos;
+                    if descriptor + 10 > self.data.len() {
+                        return Err(());
+                    }
+                    let left =
+                        u16::from_le_bytes([self.data[descriptor + 1], self.data[descriptor + 2]])
+                            as usize;
+                    let top =
+                        u16::from_le_bytes([self.data[descriptor + 3], self.data[descriptor + 4]])
+                            as usize;
+                    let frame_w =
+                        u16::from_le_bytes([self.data[descriptor + 5], self.data[descriptor + 6]])
+                            as usize;
+                    let frame_h =
+                        u16::from_le_bytes([self.data[descriptor + 7], self.data[descriptor + 8]])
+                            as usize;
+                    let packed = self.data[descriptor + 9];
+                    self.pos = descriptor + 10;
+                    if frame_w == 0
+                        || frame_h == 0
+                        || frame_w > MAX_DECODE_DIMENSION as usize
+                        || frame_h > MAX_DECODE_DIMENSION as usize
+                    {
+                        return Err(());
+                    }
+                    if left + frame_w > screen_w || top + frame_h > screen_h {
+                        return Err(());
+                    }
+                    let (palette_offset, palette_entries) = if packed & 0x80 != 0 {
+                        let entries = 2usize << (packed & 0x07);
+                        if self.pos + entries * 3 > self.data.len() {
+                            return Err(());
+                        }
+                        let offset = self.pos;
+                        self.pos += entries * 3;
+                        (offset, entries)
+                    } else {
+                        match self.header.gct {
+                            Some((offset, entries)) => (offset, entries),
+                            None => return Err(()),
+                        }
+                    };
+                    if self.pos >= self.data.len() {
+                        return Err(());
+                    }
+                    let min_code_size = self.data[self.pos];
+                    self.pos += 1;
+
+                    // Disposal 3 restores the rectangle as it looked before
+                    // this frame, so the copy has to be taken first.
+                    if self.disposal == 3 {
+                        self.save_rect(canvas, restore, left, top, frame_w, frame_h)?;
+                    }
+
+                    let palette =
+                        &self.data[palette_offset..palette_offset + palette_entries * 3];
+                    gif_lzw_decode(
+                        self.data,
+                        self.pos,
+                        min_code_size,
+                        frame_w,
+                        frame_h,
+                        packed & 0x40 != 0,
+                        screen_w,
+                        left,
+                        top,
+                        &mut canvas[..required],
+                        palette,
+                        palette_entries,
+                        self.transparent,
+                        true,
+                    )?;
+                    // The LZW stream is length-prefixed; skip its chain so a
+                    // later call continues at the next block, not inside it.
+                    self.pos = gif_skip_sub_blocks(self.data, self.pos)?;
+
+                    self.pending = Some((self.disposal, left, top, frame_w, frame_h));
+                    self.frame_index += 1;
+                    let info = GifFrameInfo {
+                        left: left as u16,
+                        top: top as u16,
+                        width: frame_w as u16,
+                        height: frame_h as u16,
+                        delay_cs: self.delay_cs,
+                        disposal: self.disposal,
+                    };
+                    // A Graphic Control Extension governs one frame. A later
+                    // frame without one uses the defaults, not this frame's
+                    // transparency, disposal or delay.
+                    self.transparent = None;
+                    self.disposal = 0;
+                    self.delay_cs = 0;
+                    return Ok(info);
+                }
+                _ => return Err(()),
+            }
+        }
+    }
+
+    fn save_rect(
+        &self,
+        canvas: &[u8],
+        restore: &mut [u8],
+        left: usize,
+        top: usize,
+        frame_w: usize,
+        frame_h: usize,
+    ) -> Result<(), ()> {
+        let screen_w = self.header.width as usize;
+        let row_bytes = frame_w.checked_mul(4).ok_or(())?;
+        let needed = row_bytes.checked_mul(frame_h).ok_or(())?;
+        if restore.len() < needed {
+            return Err(());
+        }
+        for y in 0..frame_h {
+            let start = ((top + y) * screen_w + left) * 4;
+            if start + row_bytes > canvas.len() {
+                return Err(());
+            }
+            restore[y * row_bytes..(y + 1) * row_bytes]
+                .copy_from_slice(&canvas[start..start + row_bytes]);
+        }
+        Ok(())
+    }
+
+    fn apply_pending(&mut self, canvas: &mut [u8], restore: &mut [u8]) -> Result<(), ()> {
+        let Some((disposal, left, top, frame_w, frame_h)) = self.pending.take() else {
+            return Ok(());
+        };
+        let screen_w = self.header.width as usize;
+        let row_bytes = frame_w.checked_mul(4).ok_or(())?;
+        match disposal {
+            0 | 1 => Ok(()),
+            // Restore to background. The canvas starts transparent, and the
+            // gallery has no opaque media background, so the honest
+            // restoration here is the same transparent black the static
+            // decoder leaves outside a frame.
+            2 => {
+                for y in 0..frame_h {
+                    let start = ((top + y) * screen_w + left) * 4;
+                    if start + row_bytes > canvas.len() {
+                        return Err(());
+                    }
+                    canvas[start..start + row_bytes].fill(0);
+                }
+                Ok(())
+            }
+            3 => {
+                let needed = row_bytes.checked_mul(frame_h).ok_or(())?;
+                if restore.len() < needed {
+                    return Err(());
+                }
+                for y in 0..frame_h {
+                    let start = ((top + y) * screen_w + left) * 4;
+                    if start + row_bytes > canvas.len() {
+                        return Err(());
+                    }
+                    canvas[start..start + row_bytes]
+                        .copy_from_slice(&restore[y * row_bytes..(y + 1) * row_bytes]);
+                }
+                Ok(())
+            }
+            _ => Ok(()),
         }
     }
 }
@@ -4853,6 +5276,270 @@ mod tests {
     fn gif_header_reports_the_logical_screen() {
         let gif = build_gif(2, 3, None, 0, 0, 1, 1, &[1], false);
         assert_eq!(decode_gif_header(&gif), Ok((2, 3)));
+    }
+
+    struct GifTestFrame<'a> {
+        left: u16,
+        top: u16,
+        width: u16,
+        height: u16,
+        indices: &'a [u8],
+        transparent: Option<u8>,
+        disposal: u8,
+        delay_cs: u16,
+    }
+
+    fn build_gif_animation(
+        screen_w: u16,
+        screen_h: u16,
+        loop_count: Option<u16>,
+        frames: &[GifTestFrame<'_>],
+    ) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(b"GIF89a");
+        out.extend_from_slice(&screen_w.to_le_bytes());
+        out.extend_from_slice(&screen_h.to_le_bytes());
+        out.push(0x80 | 0x01); // global colour table, 4 entries
+        out.push(0);
+        out.push(0);
+        for entry in GIF_PALETTE {
+            out.extend_from_slice(&entry);
+        }
+        if let Some(loops) = loop_count {
+            out.extend_from_slice(&[0x21, 0xFF, 0x0B]);
+            out.extend_from_slice(b"NETSCAPE2.0");
+            out.extend_from_slice(&[0x03, 0x01]);
+            out.extend_from_slice(&loops.to_le_bytes());
+            out.push(0x00);
+        }
+        for frame in frames {
+            let transparent_flag = if frame.transparent.is_some() { 1 } else { 0 };
+            out.extend_from_slice(&[
+                0x21,
+                0xF9,
+                0x04,
+                (frame.disposal << 2) | transparent_flag,
+                (frame.delay_cs & 0xFF) as u8,
+                (frame.delay_cs >> 8) as u8,
+                frame.transparent.unwrap_or(0),
+                0x00,
+            ]);
+            out.push(0x2C);
+            out.extend_from_slice(&frame.left.to_le_bytes());
+            out.extend_from_slice(&frame.top.to_le_bytes());
+            out.extend_from_slice(&frame.width.to_le_bytes());
+            out.extend_from_slice(&frame.height.to_le_bytes());
+            out.push(0x00);
+            out.push(2); // LZW minimum code size
+            let lzw = gif_lzw_literals(frame.indices, 2);
+            for block in lzw.chunks(255) {
+                out.push(block.len() as u8);
+                out.extend_from_slice(block);
+            }
+            out.push(0);
+        }
+        out.push(0x3B);
+        out
+    }
+
+    fn frame(
+        left: u16,
+        top: u16,
+        width: u16,
+        height: u16,
+        indices: &[u8],
+        transparent: Option<u8>,
+        disposal: u8,
+        delay_cs: u16,
+    ) -> GifTestFrame<'_> {
+        GifTestFrame {
+            left,
+            top,
+            width,
+            height,
+            indices,
+            transparent,
+            disposal,
+            delay_cs,
+        }
+    }
+
+    #[test]
+    fn gif_animation_reports_frames_and_looping() {
+        let gif = build_gif_animation(
+            2,
+            1,
+            Some(0),
+            &[
+                frame(0, 0, 2, 1, &[1, 1], None, 1, 5),
+                frame(0, 0, 2, 1, &[1, 1], None, 1, 7),
+            ],
+        );
+        let animation = GifAnimation::new(&gif).unwrap();
+        assert_eq!(
+            animation.info(),
+            GifAnimationInfo {
+                width: 2,
+                height: 1,
+                frame_count: 2,
+                loop_count: 0,
+            }
+        );
+        assert_eq!(animation.dimensions(), (2, 1));
+
+        let still = build_gif(1, 1, None, 0, 0, 1, 1, &[1], false);
+        assert_eq!(
+            gif_animation_info(&still),
+            Ok(GifAnimationInfo {
+                width: 1,
+                height: 1,
+                frame_count: 1,
+                loop_count: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn gif_animation_composites_frames_and_reports_delay() {
+        let _guard = scratch_guard();
+        let gif = build_gif_animation(
+            2,
+            1,
+            None,
+            &[
+                frame(0, 0, 2, 1, &[1, 1], None, 1, 5),
+                frame(0, 0, 2, 1, &[2, 2], None, 1, 7),
+            ],
+        );
+        let mut animation = GifAnimation::new(&gif).unwrap();
+        let mut canvas = [0u8; 8];
+        let mut restore = [0u8; 8];
+
+        let first = animation.decode_next(&mut canvas, &mut restore).unwrap();
+        assert_eq!(first.delay_cs, 5);
+        assert_eq!(first.disposal, 1);
+        assert_eq!(&canvas, &[255, 0, 0, 255, 255, 0, 0, 255]);
+        assert_eq!(animation.frame_index(), 1);
+
+        let second = animation.decode_next(&mut canvas, &mut restore).unwrap();
+        assert_eq!(second.delay_cs, 7);
+        assert_eq!(&canvas, &[0, 255, 0, 255, 0, 255, 0, 255]);
+        assert_eq!(animation.frame_index(), 2);
+    }
+
+    #[test]
+    fn gif_animation_keeps_the_canvas_under_transparent_pixels() {
+        let _guard = scratch_guard();
+        let gif = build_gif_animation(
+            2,
+            1,
+            None,
+            &[
+                frame(0, 0, 2, 1, &[1, 1], None, 1, 0),
+                frame(0, 0, 2, 1, &[1, 2], Some(1), 1, 0),
+            ],
+        );
+        let mut animation = GifAnimation::new(&gif).unwrap();
+        let mut canvas = [0u8; 8];
+        let mut restore = [0u8; 8];
+        animation.decode_next(&mut canvas, &mut restore).unwrap();
+        animation.decode_next(&mut canvas, &mut restore).unwrap();
+        assert_eq!(
+            &canvas,
+            &[255, 0, 0, 255, 0, 255, 0, 255],
+            "the transparent pixel leaves the previous frame's colour in place"
+        );
+    }
+
+    #[test]
+    fn gif_disposal_two_clears_the_frame_rectangle() {
+        let _guard = scratch_guard();
+        let gif = build_gif_animation(
+            2,
+            1,
+            None,
+            &[
+                frame(0, 0, 2, 1, &[1, 1], None, 2, 0),
+                frame(0, 0, 1, 1, &[2], None, 1, 0),
+            ],
+        );
+        let mut animation = GifAnimation::new(&gif).unwrap();
+        let mut canvas = [0u8; 8];
+        let mut restore = [0u8; 8];
+        animation.decode_next(&mut canvas, &mut restore).unwrap();
+        animation.decode_next(&mut canvas, &mut restore).unwrap();
+        assert_eq!(
+            &canvas,
+            &[0, 255, 0, 255, 0, 0, 0, 0],
+            "the first frame's rectangle is cleared before the second is drawn"
+        );
+    }
+
+    #[test]
+    fn gif_disposal_three_restores_the_previous_rectangle() {
+        let _guard = scratch_guard();
+        let gif = build_gif_animation(
+            2,
+            1,
+            None,
+            &[
+                frame(0, 0, 2, 1, &[1, 1], None, 3, 0),
+                frame(0, 0, 2, 1, &[0, 0], Some(0), 1, 0),
+            ],
+        );
+        let mut animation = GifAnimation::new(&gif).unwrap();
+        // The canvas starts blue, so restoring the saved rectangle is
+        // observable: frame one paints red, frame two restores blue and then
+        // paints nothing because every pixel is transparent.
+        let mut canvas = [0u8, 0, 255, 255, 0, 0, 255, 255];
+        let mut restore = [0u8; 8];
+        animation.decode_next(&mut canvas, &mut restore).unwrap();
+        assert_eq!(&canvas, &[255, 0, 0, 255, 255, 0, 0, 255]);
+        animation.decode_next(&mut canvas, &mut restore).unwrap();
+        assert_eq!(&canvas, &[0, 0, 255, 255, 0, 0, 255, 255]);
+    }
+
+    #[test]
+    fn gif_disposal_three_requires_a_restore_buffer_for_the_frame() {
+        let _guard = scratch_guard();
+        let gif = build_gif_animation(
+            2,
+            1,
+            None,
+            &[frame(0, 0, 2, 1, &[1, 1], None, 3, 0)],
+        );
+        let mut animation = GifAnimation::new(&gif).unwrap();
+        let mut canvas = [0u8; 8];
+        let mut small = [0u8; 4];
+        assert!(animation.decode_next(&mut canvas, &mut small).is_err());
+    }
+
+    #[test]
+    fn gif_animation_finishes_at_the_trailer_and_rewinds() {
+        let _guard = scratch_guard();
+        let gif = build_gif_animation(1, 1, None, &[frame(0, 0, 1, 1, &[1], None, 1, 3)]);
+        let mut animation = GifAnimation::new(&gif).unwrap();
+        let mut canvas = [0u8; 4];
+        let mut restore = [0u8; 4];
+        assert!(animation.decode_next(&mut canvas, &mut restore).is_ok());
+        assert!(!animation.is_finished());
+        assert!(animation.decode_next(&mut canvas, &mut restore).is_err());
+        assert!(animation.is_finished());
+
+        animation.rewind();
+        assert!(!animation.is_finished());
+        assert_eq!(animation.frame_index(), 0);
+        assert!(animation.decode_next(&mut canvas, &mut restore).is_ok());
+    }
+
+    #[test]
+    fn gif_animation_refuses_a_canvas_that_is_not_the_screen() {
+        let _guard = scratch_guard();
+        let gif = build_gif_animation(2, 2, None, &[frame(0, 0, 2, 2, &[1; 4], None, 1, 0)]);
+        let mut animation = GifAnimation::new(&gif).unwrap();
+        let mut small = [0u8; 15];
+        let mut restore = [0u8; 16];
+        assert!(animation.decode_next(&mut small, &mut restore).is_err());
     }
 
     // -- JPEG fixtures -----------------------------------------------------
