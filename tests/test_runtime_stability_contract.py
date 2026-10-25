@@ -33,11 +33,12 @@ def main():
     must(process, "if actual_threads != record.thread_count as usize", "thread-count invariant")
     must(process, "if !table.iter().flatten().any(|record| record.id == thread.process)", "thread binding invariant")
 
-    must(scheduler, "crate::ipc::cleanup_task(task_id);", "exit IPC cleanup")
-    must(scheduler, "crate::fs::cleanup_task(task_id);", "exit filesystem cleanup")
-    must(scheduler, "crate::event::cleanup_task(task_id);", "exit event cleanup")
-    must(scheduler, "crate::net::cleanup_task(task_id);", "exit network cleanup")
-    must(scheduler, "destroy_surfaces_owned_by(task_id.0)", "exit surface cleanup")
+    must(scheduler, "crate::ipc::cleanup_task(entry.id);", "exit IPC cleanup")
+    must(scheduler, "crate::fs::cleanup_task(entry.id);", "exit filesystem cleanup")
+    must(scheduler, "crate::event::cleanup_task(entry.id);", "exit event cleanup")
+    must(scheduler, "crate::net::cleanup_task(entry.id);", "exit network cleanup")
+    must(scheduler, "destroy_surfaces_owned_by(entry.id.0)", "exit surface cleanup")
+    must(scheduler, "pub fn run_deferred_cleanup()", "reclaim runs outside the scheduler lock")
     must(scheduler, "task.parent_id = TaskId(0);", "orphan reparenting")
 
     must(kms, "MAX_CLIENT_SURFACES: usize = 32", "surface count bound")

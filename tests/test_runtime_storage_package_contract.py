@@ -468,7 +468,7 @@ def test_task_teardown_releases_network_ownership():
     # 56b363a added the u32 cast required by release_owner(owner_task_id: u32).
     assert "SOCKET_TABLE.lock().release_owner(task_id.0 as u32)" in net
     assert "TCP_TABLE.lock().release_owner(task_id.0 as u32)" in net
-    assert "crate::net::cleanup_task(task_id)" in scheduler
+    assert "crate::net::cleanup_task(entry.id)" in scheduler
 
 def test_verified_service_launch_reuses_one_generation_transition():
     services = (ROOT / "kernel/src/services.rs").read_text(encoding="utf-8")

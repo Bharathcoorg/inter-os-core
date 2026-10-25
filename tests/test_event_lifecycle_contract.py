@@ -15,11 +15,11 @@ def main() -> None:
     must(EVENT, "pub fn cleanup_task(task_id: TaskId)", "event cleanup wrapper")
     must(EVENT, "EVENT_REACTOR.lock().cleanup_task(task_id);", "global event cleanup")
 
-    must(SCHED, "crate::event::cleanup_task(task_id);", "current-task event cleanup")
-    must(SCHED, "crate::event::cleanup_task(id);", "managed-task event cleanup")
+    must(SCHED, "crate::event::cleanup_task(entry.id);", "task event cleanup")
+    assert SCHED.count("defer_cleanup(") >= 2, "both termination paths queue deferred cleanup"
 
-    assert SCHED.index("crate::ipc::cleanup_task(task_id);") < SCHED.index("crate::event::cleanup_task(task_id);"), "IPC cleanup remains before event cleanup"
-    assert SCHED.index("crate::fs::cleanup_task(task_id);") < SCHED.index("crate::event::cleanup_task(task_id);"), "VFS cleanup remains before event cleanup"
+    assert SCHED.index("crate::ipc::cleanup_task(entry.id);") < SCHED.index("crate::event::cleanup_task(entry.id);"), "IPC cleanup remains before event cleanup"
+    assert SCHED.index("crate::fs::cleanup_task(entry.id);") < SCHED.index("crate::event::cleanup_task(entry.id);"), "VFS cleanup remains before event cleanup"
     print("event lifecycle contract: PASS")
 
 
