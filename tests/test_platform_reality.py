@@ -387,15 +387,22 @@ class PlatformRealityTests(unittest.TestCase):
 
         server = self.read("emulator/server.py")
         self.assertIn("def ensure_data_disk(", server)
-        self.assertIn('f"format=raw,file={img_path},index=0"', server)
-        self.assertIn('f"format=raw,file={data_disk_path},index=1"', server)
+        # q35 boots on an AHCI controller, which the guest's legacy PIO driver
+        # does not probe. The two images must be named explicitly on a PIIX IDE
+        # controller, not handed over as bare `index=0/1` drives that land on
+        # AHCI and leave the guest with no persistent disk at all.
+        self.assertIn('"piix3-ide,id=ide"', server)
+        self.assertIn(
+            '"ide-hd,bus=ide.0,unit=0,drive=bootd,bootindex=1"', server)
+        self.assertIn('"ide-hd,bus=ide.0,unit=1,drive=datad"', server)
         self.assertIn("interos-data-{arch}.img", server)
 
         for script in ("qemu/run.ps1",):
             text = self.read(script)
             self.assertIn("inter-os-data", text)
-            self.assertIn("index=0", text)
-            self.assertIn("index=1", text)
+            self.assertIn("piix3-ide", text)
+            self.assertIn("ide.0,unit=0", text)
+            self.assertIn("ide.0,unit=1", text)
 
         interaction = self.read("tests/qemu/interaction_x86.py")
         self.assertIn("def ensure_data_disk(", interaction)

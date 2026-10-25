@@ -24,8 +24,16 @@ Write-Host "QEMU:  $qemuBin"
 $qemuArgs = @(
     "-machine", "q35",
     "-cpu", "qemu64",
-    "-drive", "format=raw,file=$imagePath,index=0",
-    "-drive", "format=raw,file=$dataPath,index=1",
+    # q35's default controller is AHCI, and the guest's legacy PIO ATA driver
+    # only probes 0x1F0/0x3F6. A bare `index=0/1` lands on an AHCI port, so the
+    # guest finds no disk and every persistent write is refused. Attaching a
+    # PIIX IDE controller and naming the bus units is what the boot verifiers
+    # and the Studio launcher use.
+    "-device", "piix3-ide,id=ide",
+    "-drive", "format=raw,file=$imagePath,if=none,id=bootd",
+    "-device", "ide-hd,bus=ide.0,unit=0,drive=bootd,bootindex=1",
+    "-drive", "format=raw,file=$dataPath,if=none,id=datad",
+    "-device", "ide-hd,bus=ide.0,unit=1,drive=datad",
     "-m", "1024M",
     "-serial", "stdio",
     "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"

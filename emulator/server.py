@@ -2385,9 +2385,25 @@ def launch_qemu_profile(profile_key="x86_64", ram_mb=None, smp=1):
         # with only one disk attached it falls back to formatting the boot image
         # itself, which overwrites the bootloader stages the kernel is embedded in
         # and leaves the next boot running a corrupted kernel.
-        cmd.extend(["-drive", f"format=raw,file={img_path},index=0"])
+        #
+        # WHY the piix3-ide controller and explicit units: q35 boots with the
+        # ich9-ahci controller by default, and a bare `index=1` drive lands on an
+        # AHCI port rather than on the primary slave. The guest's ATA driver is a
+        # legacy PIO driver on ports 0x1F0/0x3F6, so it found no drive at all and
+        # every persistent write (settings, the music library, downloaded files)
+        # was refused while the OS ran entirely from RAM. Attaching a PIIX IDE
+        # controller and putting the two images on bus ide.0 units 0 and 1 is the
+        # wiring the persistence and boot verification suites already use.
+        cmd.extend(["-device", "piix3-ide,id=ide"])
+        cmd.extend([
+            "-drive", f"format=raw,file={img_path},if=none,id=bootd",
+            "-device", "ide-hd,bus=ide.0,unit=0,drive=bootd,bootindex=1",
+        ])
         ensure_data_disk(data_disk_path)
-        cmd.extend(["-drive", f"format=raw,file={data_disk_path},index=1"])
+        cmd.extend([
+            "-drive", f"format=raw,file={data_disk_path},if=none,id=datad",
+            "-device", "ide-hd,bus=ide.0,unit=1,drive=datad",
+        ])
         # A real E1000 NIC on user-mode networking. Without one the guest has no
         # network hardware at all and every packet stays on the kernel loopback
         # path, which is not the same thing as having a network.
