@@ -85,10 +85,8 @@ pub const FIRST_PARTY_INTENTS: &[(&str, &str, &str)] = &[
     ("org.interos.video_player", "mime", "video/x-ppm"),
     // The gallery opens the images and videos the device holds.
     ("org.interos.gallery", "mime", "image/png"),
-    ("org.interos.gallery", "mime", "image/jpeg"),
     ("org.interos.gallery", "mime", "image/gif"),
     ("org.interos.gallery", "mime", "image/bmp"),
-    ("org.interos.gallery", "mime", "image/webp"),
     ("org.interos.gallery", "mime", "image/qoi"),
     ("org.interos.gallery", "mime", "image/x-portable-pixmap"),
     ("org.interos.gallery", "mime", "video/mp4"),

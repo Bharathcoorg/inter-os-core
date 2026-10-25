@@ -170,7 +170,8 @@ def main() -> None:
     assert "0x7A, 0x4B, 0x19" not in keystore, "storage root must not be a compiled-in static secret"
     must(vfs, "crate::storage::encrypted::seal", "VFS encrypted persistence")
     must(vfs, "crate::storage::encrypted::open", "VFS encrypted restoration")
-    must(vfs, "32768 + crate::storage::encrypted::ENCRYPTED_OVERHEAD", "encrypted restore buffer capacity")
+    must(vfs, "DATA_SNAPSHOT_LIMIT + crate::storage::encrypted::ENCRYPTED_OVERHEAD", "encrypted data restore buffer capacity")
+    must(vfs, "METADATA_SNAPSHOT_LIMIT + crate::storage::encrypted::ENCRYPTED_OVERHEAD", "encrypted metadata restore buffer capacity")
     must(vfs, "legacy unencrypted plaintext snapshots", "migration fallback for legacy snapshots")
     must((ROOT / "kernel/src/main.rs").read_text(encoding="utf-8"), "crypto::keystore::init();", "keystore initialized before VFS")
     assert (ROOT / "kernel/src/main.rs").read_text(encoding="utf-8").index("crypto::keystore::init();") < (ROOT / "kernel/src/main.rs").read_text(encoding="utf-8").index("fs::init();"), "storage key must exist before VFS reconstruction"
