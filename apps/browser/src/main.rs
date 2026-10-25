@@ -29,7 +29,7 @@ use interos_std::design::font;
 use interos_std::design::primitives::{draw_rounded_rect, Rect};
 
 use browser::{
-    format_http_get, format_proxy_request, into_url_field, parse_gemtext_link, parse_uri,
+    format_proxy_request, into_url_field, parse_gemtext_link, parse_uri,
     scheme_mark, DocLine, DocumentTokenizer, LineKind, LoadingState, TabSessionManager, UriScheme,
     MAX_DOC_LINES, MAX_LINE_BYTES, MAX_TABS, URL_FIELD,
 };
@@ -103,8 +103,7 @@ fn doc_line(index: usize) -> &'static DocLine {
     unsafe { &(*core::ptr::addr_of!(DOC_LINES))[index] }
 }
 
-/// How many times a send is retried while the connection finishes its
-/// handshake.
+/// How many sends are attempted if the tick counter is unavailable.
 ///
 /// WHY a retry loop and not a single send: `tcp_send` refuses with
 /// `NotReady` until the connection reaches the established state, and the
@@ -112,10 +111,30 @@ fn doc_line(index: usize) -> &'static DocLine {
 /// network and is processed by the kernel's poll path. The previous
 /// implementation issued one datagram and read once, so it read nothing
 /// and reported a transport failure for every page.
-const TCP_SEND_ATTEMPTS: usize = 200;
+const TCP_SEND_ATTEMPTS: usize = 20_000;
 
-/// How many times a receive is retried while the response arrives.
-const TCP_RECV_ATTEMPTS: usize = 200;
+/// How many receives are attempted if the tick counter is unavailable.
+const TCP_RECV_ATTEMPTS: usize = 20_000;
+
+/// How long a fetch waits for the handshake to complete.
+///
+/// WHY a time budget and not a fixed attempt count: attempts are cheap and
+/// the loop can spend them all in a few milliseconds, which is far less than
+/// a real round trip through the gateway to a site takes. The device gave up
+/// while the response was still in flight and reported zero bytes.
+const TCP_HANDSHAKE_TIMEOUT_TICKS: u64 = 5_000;
+
+/// How long a fetch waits for the gateway's response.
+const TCP_RESPONSE_TIMEOUT_TICKS: u64 = 20_000;
+
+/// The largest slice one receive may ask the kernel for.
+///
+/// WHY this is not the response buffer's length: the receive syscall carries
+/// its payload through a fixed 2 KiB kernel buffer and refuses a longer
+/// request outright. Asking for the whole 256 KiB response in one call was
+/// rejected before the kernel ever looked at the connection, and the browser
+/// reported the refusal as an empty transport. Reads advance in chunks.
+const TCP_READ_CHUNK: usize = 2048;
 
 /// The outcome of a fetch over TCP.
 struct FetchOutcome {
@@ -166,8 +185,12 @@ fn fetch_over_tcp(
     // The handshake is asynchronous, so the first sends are refused. The
     // refusal is `NotReady`, which is not a failure -- it means the
     // connection is not established yet.
+    // An absent clock is not tick zero: the loop falls back to a send
+    // budget rather than measuring against a start time it never read.
+    let handshake_start = std::get_ticks().ok();
     let mut sent = false;
-    for _ in 0..TCP_SEND_ATTEMPTS {
+    let mut attempts = 0usize;
+    loop {
         match std::tcp_send(connection, request) {
             Ok(()) => {
                 sent = true;
@@ -181,6 +204,14 @@ fn fetch_over_tcp(
                 }
             }
         }
+        attempts += 1;
+        let expired = match (std::get_ticks(), handshake_start) {
+            (Ok(now), Some(start)) => now.saturating_sub(start) >= TCP_HANDSHAKE_TIMEOUT_TICKS,
+            _ => attempts >= TCP_SEND_ATTEMPTS,
+        };
+        if expired {
+            break;
+        }
         std::yield_now();
     }
     if !sent {
@@ -192,16 +223,18 @@ fn fetch_over_tcp(
     // The response is read until the server closes the connection. The
     // gateway speaks HTTP/1.0 and sends no content length, so the end of
     // the body is the end of the stream.
+    let response_start = std::get_ticks().ok();
     let mut total = 0usize;
     let mut reads = 0usize;
-    while reads < TCP_RECV_ATTEMPTS {
+    loop {
         reads += 1;
         let buffer = unsafe { &mut *core::ptr::addr_of_mut!(RESPONSE_BUF) };
         if total >= buffer.len() {
             outcome.truncated = true;
             break;
         }
-        match std::tcp_recv(connection, &mut buffer[total..]) {
+        let want = (buffer.len() - total).min(TCP_READ_CHUNK);
+        match std::tcp_recv(connection, &mut buffer[total..total + want]) {
             Ok(0) => break,
             Ok(n) => {
                 total += n;
@@ -217,10 +250,15 @@ fn fetch_over_tcp(
                 }
             }
         }
+        let expired = match (std::get_ticks(), response_start) {
+            (Ok(now), Some(start)) => now.saturating_sub(start) >= TCP_RESPONSE_TIMEOUT_TICKS,
+            _ => reads >= TCP_RECV_ATTEMPTS,
+        };
+        if expired {
+            outcome.truncated = true;
+            break;
+        }
         std::yield_now();
-    }
-    if reads >= TCP_RECV_ATTEMPTS {
-        outcome.truncated = true;
     }
 
     let _ = std::tcp_close(connection);
@@ -432,6 +470,9 @@ const BODY_UNRECOGNISED: &[u8] = b"The address did not name a host this browser 
 so nothing was requested and no page was loaded.";
 const BODY_UNSUPPORTED_SCHEME: &[u8] = b"This browser reads pages over HTTP. The address \
 names a scheme it cannot fetch, so nothing was requested.";
+const BODY_GATEWAY_ERROR: &[u8] = b"The Device Studio gateway received the request but could \
+not fetch the page. The failure is the origin's or this host's network, not a page the browser \
+can show.";
 const BODY_LOCAL_NO_CAPABILITY: &[u8] = b"The address names a local document, but this app holds \
 no filesystem read capability, so it cannot open a guest file at all.";
 const BODY_LOCAL_REFUSED: &[u8] = b"The address names a local document, and this app holds the \
@@ -849,6 +890,8 @@ pub enum PageStatus {
     UnrecognisedAddress,
     /// The address named a scheme the browser cannot fetch.
     UnsupportedScheme,
+    /// The gateway received the request but its own fetch failed.
+    GatewayError,
     LocalRefused,
 }
 
@@ -1464,25 +1507,14 @@ impl BrowserApp {
         // general connectivity. The Device Studio gateway fetches the page
         // on the device's behalf, and the device reads the result.
         let mut req_buf = [0u8; 512];
-        let (dst_ip, dst_port, req_len) = if parsed.scheme == UriScheme::Https {
-            let r_len = format_proxy_request(target, &mut req_buf);
-            ([10, 0, 2, 2], 4300, r_len)
-        } else {
-            // WHY the host is used as it was typed: this used to fall back
-            // to `interos.tech` when the address named no host, so a
-            // request the person never made was sent to that site and the
-            // answer was shown as though it were what they asked for. The
-            // address is judged above, so by this point it names a host.
-            let host_bytes = parsed.host;
-            let mut ip = [10, 0, 2, 2];
-            if let Ok(host_str) = core::str::from_utf8(host_bytes) {
-                if let Ok(resolved) = std::dns_resolve(host_str) {
-                    ip = resolved;
-                }
-            }
-            let r_len = format_http_get(host_bytes, parsed.path, &mut req_buf);
-            (ip, parsed.port, r_len)
-        };
+        // The gateway is the destination for every navigable scheme, not only
+        // HTTPS. WHY: the guest reaches the host through slirp, and outbound
+        // TCP from the host may itself require the host's HTTP proxy; the
+        // Studio inherits that configuration, while a direct guest connect
+        // cannot. Sending every fetch to the gateway keeps both schemes on the
+        // transport this device actually has.
+        let req_len = format_proxy_request(target, &mut req_buf);
+        let (dst_ip, dst_port) = ([10, 0, 2, 2], 4300);
 
         // The local port has to be non-zero and unique for the connection.
         let local_port = 45000u16 + ((self.pages_loaded as u16) & 0x03FF);
@@ -1515,6 +1547,19 @@ impl BrowserApp {
         let mut loaded_from_network = false;
         let key: &[u8] = b"\"html\":";
         let is_proxy_envelope = rx_slice.windows(key.len()).any(|w| w == key);
+
+        // The gateway reports a failed fetch as HTTP 200 with `success: false`
+        // and no page. That body is not the site's content, so it is reported
+        // as a failure instead of being rendered as text.
+        if !is_proxy_envelope && browser::proxy_reports_failure(rx_slice) {
+            self.status = PageStatus::GatewayError;
+            self.loading_progress = 0;
+            self.tabs.active_tab_mut().loading_state = LoadingState::Failed;
+            self.tabs.active_tab_mut().error_code = -5; // EIO
+            std::log("[BROWSER APP] The gateway received the request but could not fetch the page; its error envelope is reported, not rendered.").ok();
+            let _ = std::audio_haptic_click();
+            return false;
+        }
 
         // The gateway's JSON envelope names the page's own content type, and
         // a `text/plain` page is text rather than markup.
@@ -1763,6 +1808,7 @@ impl Frame {
             PageStatus::InvalidAddress => (b"Address cannot be opened", BODY_INVALID),
             PageStatus::UnrecognisedAddress => (b"Address not recognised", BODY_UNRECOGNISED),
             PageStatus::UnsupportedScheme => (b"Scheme not supported", BODY_UNSUPPORTED_SCHEME),
+            PageStatus::GatewayError => (b"Gateway could not fetch", BODY_GATEWAY_ERROR),
             PageStatus::LocalRefused => (b"Local document unavailable", match app.local_failure {
                 LocalFailure::NoPath => BODY_LOCAL_NO_PATH,
                 LocalFailure::NoCapability => BODY_LOCAL_NO_CAPABILITY,
@@ -2690,6 +2736,7 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
         || app.status == PageStatus::InvalidAddress
         || app.status == PageStatus::UnrecognisedAddress
         || app.status == PageStatus::UnsupportedScheme
+        || app.status == PageStatus::GatewayError
         || app.status == PageStatus::LocalRefused
     {
         let cx = W / 2;
@@ -2731,6 +2778,7 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                 PageStatus::InvalidAddress => b"INVALID ADDRESS",
                 PageStatus::UnrecognisedAddress => b"ADDRESS NOT RECOGNISED",
                 PageStatus::UnsupportedScheme => b"SCHEME NOT SUPPORTED",
+                PageStatus::GatewayError => b"GATEWAY COULD NOT FETCH",
                 PageStatus::LocalRefused => match app.local_failure {
                     LocalFailure::NoPath => b"NO PATH GIVEN",
                     LocalFailure::NoCapability => b"NO FILESYSTEM CAPABILITY",
@@ -4273,6 +4321,7 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
         || app.status == PageStatus::InvalidAddress
         || app.status == PageStatus::UnrecognisedAddress
         || app.status == PageStatus::UnsupportedScheme
+        || app.status == PageStatus::GatewayError
         || app.status == PageStatus::LocalRefused)
         && ((y >= 630 && y <= 720) || (y >= 920 && y <= 968))
         && x >= (W / 2 - 90)

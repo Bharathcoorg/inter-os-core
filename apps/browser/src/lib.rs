@@ -212,7 +212,8 @@ pub fn format_http_get(host: &[u8], path: &[u8], out: &mut [u8]) -> usize {
     cursor
 }
 
-/// Formats an HTTP request to the local development gateway proxy at 10.0.2.2:4300.
+/// Formats an HTTP request to the Device Studio proxy, reached through the
+/// slirp gateway at 10.0.2.2:4300.
 pub fn format_proxy_request(target_url: &[u8], out: &mut [u8]) -> usize {
     let mut cursor = 0;
     let write_slice = |cur: &mut usize, src: &[u8], dst: &mut [u8]| {
@@ -239,7 +240,10 @@ pub fn format_proxy_request(target_url: &[u8], out: &mut [u8]) -> usize {
             }
         }
     }
-    write_slice(&mut cursor, b" HTTP/1.1\r\nHost: 10.0.2.2:4300\r\nUser-Agent: InterOS-Browser/1.0 (Mobile; Sovereign)\r\nConnection: close\r\n\r\n", out);
+    // The Studio's local-only guard accepts a loopback authority only, so the
+    // Host names the service on its own loopback even though the wire
+    // destination is the slirp gateway at 10.0.2.2.
+    write_slice(&mut cursor, b" HTTP/1.1\r\nHost: 127.0.0.1:4300\r\nUser-Agent: InterOS-Browser/1.0 (Mobile; Sovereign)\r\nConnection: close\r\n\r\n", out);
     cursor
 }
 
@@ -852,6 +856,19 @@ pub fn proxy_content_type(json: &[u8]) -> Option<&[u8]> {
     let start = key_pos + key.len();
     let end = json[start..].iter().position(|&b| b == b'"')? + start;
     Some(&json[start..end])
+}
+
+/// Returns true when the gateway's JSON envelope reports a failed fetch.
+///
+/// WHY the envelope is inspected instead of the HTTP status: the gateway
+/// answers a failed fetch with HTTP 200 and a `{"success": false, ...}`
+/// body. Rendering that body as a page showed the envelope's own JSON as
+/// if it were the site's text.
+pub fn proxy_reports_failure(json: &[u8]) -> bool {
+    const SPACED: &[u8] = b"\"success\": false";
+    const COMPACT: &[u8] = b"\"success\":false";
+    json.windows(SPACED.len()).any(|w| w == SPACED)
+        || json.windows(COMPACT.len()).any(|w| w == COMPACT)
 }
 
 /// Renders a plain-text document into the reader's line format.
@@ -2842,7 +2859,7 @@ mod tests {
         let n = format_proxy_request(b"https://interos.tech", &mut buf);
         let req = core::str::from_utf8(&buf[..n]).unwrap();
         assert!(req.starts_with("GET /api/browser/proxy?url=https%3A%2F%2Finteros.tech HTTP/1.1\r\n"));
-        assert!(req.contains("Host: 10.0.2.2:4300\r\n"));
+        assert!(req.contains("Host: 127.0.0.1:4300\r\n"));
     }
 
     #[test]
@@ -3033,6 +3050,18 @@ mod tests {
         let ct = proxy_content_type(json).expect("no content type");
         assert_eq!(ct, b"text/plain; charset=utf-8");
         assert!(content_type_is_plain(ct));
+    }
+
+    /// A failed gateway fetch is recognised by its envelope, not by its HTTP
+    /// status, and is never mistaken for a page.
+    #[test]
+    fn test_a_failed_gateway_fetch_is_recognised() {
+        let spaced = br#"{"success": false, "url": "http://neverssl.com", "error": "<urlopen error timed out>"}"#;
+        let compact = br#"{"success":false,"url":"http://example.com","error":"boom"}"#;
+        let ok = br#"{"success": true, "url": "https://example.com", "content_type": "text/html", "html": "hi"}"#;
+        assert!(proxy_reports_failure(spaced));
+        assert!(proxy_reports_failure(compact));
+        assert!(!proxy_reports_failure(ok));
     }
 
     /// A local document's address yields the path to read.
