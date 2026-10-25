@@ -246,6 +246,7 @@ impl MusicApp {
             if let Some(track) = self.store.get(i) {
                 if track.title() == &title[..title_len] {
                     self.current_track_idx = i;
+                    self.clear_feedback();
                     if self.state == PlaybackState::Playing {
                         self.start_selected();
                     }
@@ -306,18 +307,75 @@ impl MusicApp {
     ///
     /// Returns `true` only when the new order was persisted.
     pub fn move_up(&mut self, n: usize) -> bool {
-        let Some(store_idx) = self.store_index_at(n) else {
+        self.move_visible(n, -1)
+    }
+
+    /// Moves the `n`th track the list shows one place down in the queue.
+    pub fn move_down(&mut self, n: usize) -> bool {
+        self.move_visible(n, 1)
+    }
+
+    /// Moves a visible row to its neighbour's place in the queue.
+    ///
+    /// WHY the move targets the neighbouring *visible* row and not the
+    /// neighbouring store index: a search hides tracks, and swapping with a
+    /// hidden track would persist an order the person cannot see change.
+    fn move_visible(&mut self, n: usize, delta: isize) -> bool {
+        let Some(from) = self.store_index_at(n) else {
             return false;
         };
-        if store_idx == 0 {
+        let target_n = if delta < 0 {
+            if n == 0 {
+                return false;
+            }
+            n - 1
+        } else {
+            if n + 1 >= self.order_len {
+                return false;
+            }
+            n + 1
+        };
+        let Some(to) = self.store_index_at(target_n) else {
             return false;
-        }
+        };
         let current_id = self.store.get(self.current_track_idx).map(|t| t.id);
-        if !self.store.move_to(store_idx, store_idx - 1) {
+        if !self.store.move_to(from, to) {
             return false;
         }
         self.relink_current(current_id);
         self.rebuild_order();
+        true
+    }
+
+    /// Removes the `n`th track the list shows and keeps the selection honest.
+    ///
+    /// WHY the current track is stopped only when it was the one removed: the
+    /// stream is named by a store index, and deleting a different track shifts
+    /// that index. Retracking the player keeps the same file playing under its
+    /// new position; deleting the playing track has no file left to keep.
+    pub fn remove_at(&mut self, n: usize) -> bool {
+        let Some(store_idx) = self.store_index_at(n) else {
+            return false;
+        };
+        let current_id = self.store.get(self.current_track_idx).map(|t| t.id);
+        let removed_id = self.store.get(store_idx).map(|t| t.id);
+        if !self.store.remove(store_idx) {
+            return false;
+        }
+        let removed_current = removed_id.is_some() && removed_id == current_id;
+        if removed_current {
+            self.player.stop();
+            self.state = PlaybackState::Stopped;
+            self.current_track_idx = if self.store.is_empty() {
+                0
+            } else {
+                store_idx.min(self.store.len() - 1)
+            };
+        } else {
+            self.relink_current(current_id);
+        }
+        self.sync_list_extent();
+        self.publish_now_playing();
         true
     }
 
@@ -356,6 +414,7 @@ impl MusicApp {
             self.sort = next;
             self.relink_current(current_id);
             self.rebuild_order();
+            self.clear_feedback();
         }
         ok
     }
@@ -551,6 +610,10 @@ impl MusicApp {
         let cur = (self.current_track_idx.min(self.store.len() - 1)) as isize;
         let next = (cur + delta).rem_euclid(len);
         self.current_track_idx = next as usize;
+        // WHY the line is cleared here: a refusal or an "ended" notice names
+        // the track that was selected before this step, and leaving it under a
+        // different title would describe a failure that is no longer current.
+        self.clear_feedback();
         // WHY the stream is reopened: it carries the previous track's samples
         // and its position counter, so continuing it would play the rest of one
         // file under another file's name.
@@ -585,11 +648,21 @@ impl MusicApp {
         for step in 0..len {
             self.current_track_idx = (start + step) % len;
             if self.start_selected() {
+                let mut msg = [0u8; FEEDBACK_CAP];
+                let title = self
+                    .store
+                    .get(self.current_track_idx)
+                    .map(|t| t.title())
+                    .unwrap_or(b"");
+                let n = music::ended_feedback(Some(title), &mut msg);
+                self.set_feedback(&msg[..n]);
                 return true;
             }
         }
         self.state = PlaybackState::Stopped;
-        self.set_feedback(b"No track in the library can be played");
+        let mut msg = [0u8; FEEDBACK_CAP];
+        let n = music::ended_feedback(None, &mut msg);
+        self.set_feedback(&msg[..n]);
         false
     }
 
@@ -603,6 +676,7 @@ impl MusicApp {
                 self.player.pause();
                 self.player.poll();
                 self.state = PlaybackState::Paused;
+                self.clear_feedback();
                 self.publish_now_playing();
                 std::log("[MUSIC APP] Transport paused; the device keeps what it already holds.").ok();
                 false
@@ -610,6 +684,7 @@ impl MusicApp {
             PlaybackState::Paused if self.player.holds(self.current_track_idx) => {
                 self.player.resume();
                 self.state = PlaybackState::Playing;
+                self.clear_feedback();
                 self.publish_now_playing();
                 std::log("[MUSIC APP] Transport resumed from the file position it stopped at.").ok();
                 true
@@ -625,8 +700,12 @@ impl MusicApp {
     /// Publishes current now-playing metadata to the settings store for
     /// notification bar and system-wide media card consumption.
     pub fn publish_now_playing(&self) {
+        // WHY the artist can be empty: the library record keeps no artist and
+        // the platform's decoders expose no ID3/FLAC text metadata, so the
+        // player has none to name. The old code published "Local Library",
+        // which named the store rather than the performer.
         let (title, artist): (&[u8], &[u8]) = if let Some(t) = self.store.get(self.current_track_idx) {
-            (t.title(), b"Local Library")
+            (t.title(), t.artist())
         } else {
             (b"", b"")
         };
@@ -764,6 +843,7 @@ impl MusicApp {
             self.add_dur_len = 0;
             self.add_open = false;
             self.add_focus = 0;
+            self.clear_feedback();
             Dirty::All
         } else {
             // Report the store's real refusal (capacity or write refusal), never
@@ -871,7 +951,7 @@ const SEARCH_CAP: usize = 32;
 ///
 /// WHY 64: the longest refusal message is "Cannot play: " plus a reason of at
 /// most 45 bytes. A shorter buffer used to truncate the reason mid-word.
-const FEEDBACK_CAP: usize = 64;
+const FEEDBACK_CAP: usize = music::FEEDBACK_MAX;
 
 /// Metadata band (title, artist, state, search row, availability line).
 ///
@@ -1093,102 +1173,6 @@ fn put_u8(out: &mut [u8; 4], v: u8) -> usize {
     n
 }
 
-/// Formats a stored track duration as `m:ss` (or `h:mm:ss` for an hour or more)
-/// into `out`, returning the length. It is a length the user entered, never a
-/// playback position.
-fn fmt_mmss(out: &mut [u8; 12], secs: u32) -> usize {
-    let h = secs / 3600;
-    let m = (secs % 3600) / 60;
-    let s = secs % 60;
-    let mut n = 0usize;
-    if h > 0 {
-        let mut hb = [0u8; 4];
-        let hn = fmt_u32_pub(&mut hb, h);
-        out[..hn].copy_from_slice(&hb[..hn]);
-        n += hn;
-        out[n] = b':';
-        n += 1;
-        out[n] = b'0' + (m / 10) as u8;
-        out[n + 1] = b'0' + (m % 10) as u8;
-        n += 2;
-    } else {
-        let mut mb = [0u8; 4];
-        let mn = fmt_u32_pub(&mut mb, m);
-        out[..mn].copy_from_slice(&mb[..mn]);
-        n += mn;
-    }
-    out[n] = b':';
-    out[n + 1] = b'0' + (s / 10) as u8;
-    out[n + 2] = b'0' + (s % 10) as u8;
-    n + 3
-}
-
-/// Decimal `v` into a scratch buffer, no leading zeros. Returns the length.
-fn fmt_u32_pub(scratch: &mut [u8; 4], v: u32) -> usize {
-    let mut tmp = [0u8; 4];
-    let mut n = 0usize;
-    let mut x = v.min(9999);
-    loop {
-        tmp[n] = b'0' + (x % 10) as u8;
-        x /= 10;
-        n += 1;
-        if x == 0 {
-            break;
-        }
-    }
-    for i in 0..n {
-        scratch[i] = tmp[n - 1 - i];
-    }
-    n
-}
-
-/// What the line under the title says about time.
-///
-/// WHY the position comes from the device: an open stream reports the frames
-/// it took, so `0:07 / 3:12` is a fact about the sound path. Without a stream
-/// the line falls back to the length the record holds, and says the length was
-/// never read rather than claiming zero seconds.
-fn playback_caption(app: &MusicApp, track: &store::TrackRecord, out: &mut [u8; 24]) -> usize {
-    let mut at = 0usize;
-    let mut push = |bytes: &[u8], at: &mut usize| {
-        for &byte in bytes {
-            if *at >= out.len() {
-                return;
-            }
-            out[*at] = byte;
-            *at += 1;
-        }
-    };
-    if app.player.holds(app.current_track_idx) {
-        if let Some(position_ms) = app.player.position_ms() {
-            let mut buf = [0u8; 12];
-            let n = fmt_mmss(&mut buf, (position_ms / 1000).min(u32::MAX as u64) as u32);
-            push(&buf[..n], &mut at);
-            push(b" / ", &mut at);
-            let total_secs = match app.player.duration_ms() {
-                Some(total) => (total / 1000).min(u32::MAX as u64) as u32,
-                None if track.duration_known() => track.duration_sec(),
-                None => {
-                    push(b"--:--", &mut at);
-                    return at;
-                }
-            };
-            let n = fmt_mmss(&mut buf, total_secs);
-            push(&buf[..n], &mut at);
-            return at;
-        }
-    }
-    if track.duration_known() {
-        push(b"Duration ", &mut at);
-        let mut buf = [0u8; 12];
-        let n = fmt_mmss(&mut buf, track.duration_sec());
-        push(&buf[..n], &mut at);
-    } else {
-        push(b"Duration not read", &mut at);
-    }
-    at
-}
-
 // -----------------------------------------------------------------------------
 // Per-frame resolved volume text. Measured once per frame, drawn from the buffer.
 // -----------------------------------------------------------------------------
@@ -1252,12 +1236,7 @@ struct Frame {
 /// the tracks that match the search, so the current track's place in the
 /// queue is not its store index.
 fn current_position(app: &MusicApp) -> Option<(usize, usize)> {
-    for n in 0..app.order_len {
-        if app.order[n] as usize == app.current_track_idx {
-            return Some((n + 1, app.order_len));
-        }
-    }
-    None
+    music::queue_position(&app.order, app.order_len, app.current_track_idx)
 }
 
 fn build_frame(app: &MusicApp) -> Frame {
@@ -1300,6 +1279,16 @@ fn build_frame(app: &MusicApp) -> Frame {
         }
         at += push_u32(&mut f.state[at..], total as u32);
         for &byte in b" in queue" {
+            if at < f.state.len() {
+                f.state[at] = byte;
+                at += 1;
+            }
+        }
+    } else if app.search_len > 0 && !app.store.is_empty() {
+        // WHY: the visible queue holds only the matches, so a current track
+        // the search filtered out has no position to report. Saying it is
+        // hidden is better than dropping the position without explanation.
+        for &byte in b" - hidden by search" {
             if at < f.state.len() {
                 f.state[at] = byte;
                 at += 1;
@@ -1411,6 +1400,16 @@ fn up_glyph(x: usize, y: usize, cx: usize, cy: usize) -> bool {
     dx.abs() <= dy + 6
 }
 
+/// A small downward triangle: the queue's "move down" affordance.
+fn down_glyph(x: usize, y: usize, cx: usize, cy: usize) -> bool {
+    let dx = (x as isize) - (cx as isize);
+    let dy = (y as isize) - (cy as isize);
+    if dy < -6 || dy > 6 {
+        return false;
+    }
+    dx.abs() <= 6 - dy
+}
+
 /// A small right-pointing triangle: the marker on the track that is playing.
 ///
 /// WHY a shape and not only a colour: the design document asks for the
@@ -1492,12 +1491,14 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
         return THEME.surface;
     }
 
-    // 2. Album artwork: a neutral placeholder, never a fabricated cover.
+    // 2. Album artwork.
     //
-    // WHY the platform's card treatment: the artwork is a card, and a card
-    // that invents its own fill, its own hairline and its own radius is a
-    // card a third-party app cannot match. The platform already says what a
-    // card looks like, and the placeholder is drawn on it.
+    // WHAT is drawn: the platform's card treatment with a neutral note glyph.
+    // WHY there is never a cover: the platform's WAV/FLAC/MP3 decoders expose
+    // no ID3 APIC or FLAC PICTURE block, so this app has no embedded artwork
+    // it could honestly show. The caption names the missing fact instead of
+    // inventing a cover.
+    let sel: Option<&store::TrackRecord> = app.store.get(app.current_track_idx);
     const ART_CARD: components::CardStyle =
         components::card_style(&THEME, components::Elevation::Resting);
     let art = Rect::new(ART_X, ART_Y, ART_W, ART_H);
@@ -1508,23 +1509,25 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
         if note_glyph(x, y, ART_X + ART_W / 2, ART_GLYPH_CY) {
             return THEME.muted;
         }
-        if let Some(c) = text_centered(
-            x,
-            y,
-            ART_CAPTION_Y,
-            1,
-            b"No artwork - no album art in library",
-            THEME.muted,
-            ART_CARD.fill,
-        ) {
-            return c;
+        let caption = music::artwork_caption(sel.is_some(), false);
+        if !caption.is_empty() {
+            if let Some(c) = text_centered(
+                x,
+                y,
+                ART_CAPTION_Y,
+                1,
+                caption,
+                THEME.muted,
+                ART_CARD.fill,
+            ) {
+                return c;
+            }
         }
         return ART_CARD.fill;
     }
 
     // 3. Track metadata from the real, persisted library (empty -> honest idle
     //    copy). The now-playing row reads from here.
-    let sel: Option<&store::TrackRecord> = app.store.get(app.current_track_idx);
     let title: &[u8] = match sel {
         Some(t) => t.title(),
         None => b"No track selected",
@@ -1539,13 +1542,26 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
             return c;
         }
     }
-    // Honest sub-caption. With a track it states the stored duration (a length
-    // the user entered, never a playback position); with none it keeps the
-    // empty-library copy exactly as before.
+    // Honest sub-caption. While a stream is open it shows the device's frame
+    // count against the decoder's own total; stopped, it shows the length the
+    // record holds or says the length was never read. An artist is prefixed
+    // only when one is actually known.
     if let Some(t) = sel {
-        let mut cap = [0u8; 24];
-        let cl = playback_caption(app, t, &mut cap);
-        if let Some(c) = text_centered_bold(x, y, ARTIST_Y, 2, &cap[..cl], THEME.on_surface, THEME.surface) {
+        let mut cap = [0u8; music::NOW_PLAYING_MAX];
+        let holds = app.player.holds(app.current_track_idx);
+        let position = if holds { app.player.position_ms() } else { None };
+        let total = if holds { app.player.duration_ms() } else { None };
+        let cl = music::now_playing_line(
+            music::known_artist(t.artist()),
+            position,
+            total,
+            t.duration_sec(),
+            t.duration_known(),
+            &mut cap,
+        );
+        let mut ebuf = [0u8; music::NOW_PLAYING_MAX];
+        let en = font::ellipsize(&cap[..cl], 2, CONTENT_W, &mut ebuf);
+        if let Some(c) = text_centered_bold(x, y, ARTIST_Y, 2, &ebuf[..en], THEME.on_surface, THEME.surface) {
             return c;
         }
     } else if let Some(c) = text_centered_bold(x, y, ARTIST_Y, 2, b"Local library is empty - nothing to play", THEME.on_surface, THEME.surface) {
@@ -1681,7 +1697,7 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
             y,
             UNAVAILABLE_Y,
             1,
-            b"Playlists unavailable - the store holds one queue",
+            b"Playlists unavailable - no seek; stream cannot reposition",
             THEME.muted,
             THEME.surface,
         ) {
@@ -1988,19 +2004,24 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
                 if selected && play_glyph(x, y, MARGIN + ROW.pad - 8, row_y + 24) {
                     return THEME.on_surface;
                 }
-                // The queue's "move up" affordance.
-                if up_glyph(x, y, MARGIN + CONTENT_W - 90, row_y + 24) {
+                // The queue's reorder affordances. The three controls sit on
+                // 44 px centres, so each hit region is a 44 px target with no
+                // overlap (the platform's minimum is 44 px).
+                if up_glyph(x, y, MARGIN + CONTENT_W - 116, row_y + 24) {
+                    return THEME.muted;
+                }
+                if down_glyph(x, y, MARGIN + CONTENT_W - 72, row_y + 24) {
                     return THEME.muted;
                 }
                 // Delete affordance, matching its hit region in the tap handler.
-                let del_x = MARGIN + CONTENT_W - 36;
+                let del_x = MARGIN + CONTENT_W - 28;
                 let ddx = x as isize - del_x as isize;
                 let ddy = y as isize - (row_y + 24) as isize;
                 if ddx.abs() <= 6 && ddy.abs() <= 6 && (ddx.abs() - ddy.abs()).abs() <= 2 {
                     return THEME.muted;
                 }
                 let mut buf = [0u8; 48];
-                let n = font::ellipsize(t.title(), 2, CONTENT_W - 160, &mut buf);
+                let n = font::ellipsize(t.title(), 2, CONTENT_W - 220, &mut buf);
                 if let Some(c) = text(
                     x,
                     y,
@@ -2017,7 +2038,7 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
                 // measured says so; it does not claim a length of zero.
                 let mut db = [0u8; 12];
                 let dn = if t.duration_known() {
-                    fmt_mmss(&mut db, t.duration_sec())
+                    music::format_mmss(&mut db, t.duration_sec())
                 } else {
                     db[..5].copy_from_slice(b"--:--");
                     5
@@ -2170,6 +2191,7 @@ fn handle_tap(app: &mut MusicApp, px: u32, py: u32) -> Tap<'static> {
     if VOL_MINUS.contains(x, y) || VOL_PLUS.contains(x, y) {
         let up = VOL_PLUS.contains(x, y);
         if app.step_volume(up) {
+            app.clear_feedback();
             let _ = std::audio_haptic_click();
             return Tap::Redraw(Dirty::Volume);
         }
@@ -2205,6 +2227,9 @@ fn handle_tap(app: &mut MusicApp, px: u32, py: u32) -> Tap<'static> {
     // The library's search field.
     if SEARCH_FIELD.contains(x, y) {
         app.search_focused = true;
+        // The search is a new interaction; a refusal or import result from
+        // the last one must not sit under it as though it were current.
+        app.clear_feedback();
         let _ = std::audio_haptic_click();
         return Tap::Redraw(Dirty::All);
     }
@@ -2221,14 +2246,13 @@ fn handle_tap(app: &mut MusicApp, px: u32, py: u32) -> Tap<'static> {
     // The control that imports the audio files the device holds.
     if IMPORT_BTN.contains(x, y) {
         let outcome = library::import_from_storage(&mut app.store);
+        app.sync_list_extent();
         match outcome {
             ImportOutcome::Imported(n) => {
-                app.sync_list_extent();
                 std::log("[MUSIC APP] Imported audio files from the shared storage; their lengths were not read.").ok();
                 let _ = n;
             }
             ImportOutcome::PartiallyImported(n, refused) => {
-                app.sync_list_extent();
                 std::log("[MUSIC APP] Imported some audio files, but the settings store refused the rest.").ok();
                 let _ = (n, refused);
             }
@@ -2247,6 +2271,12 @@ fn handle_tap(app: &mut MusicApp, px: u32, py: u32) -> Tap<'static> {
                 .ok();
             }
         }
+        // WHY the result is put on the screen: the import used to report only
+        // in the log, so a person saw the library unchanged and could not tell
+        // an empty search from a refused write.
+        let mut msg = [0u8; FEEDBACK_CAP];
+        let n = music::import_feedback(outcome, &mut msg);
+        app.set_feedback(&msg[..n]);
         let _ = std::audio_haptic_click();
         return Tap::Redraw(Dirty::All);
     }
@@ -2272,6 +2302,7 @@ fn handle_tap(app: &mut MusicApp, px: u32, py: u32) -> Tap<'static> {
                 .ok();
             }
         }
+        app.clear_feedback();
         let _ = std::audio_haptic_click();
         return Tap::Redraw(Dirty::All);
     }
@@ -2291,6 +2322,7 @@ fn handle_tap(app: &mut MusicApp, px: u32, py: u32) -> Tap<'static> {
         app.add_title_len = 0;
         app.add_dur_len = 0;
         app.search_focused = false;
+        app.clear_feedback();
         let _ = std::audio_haptic_click();
         return Tap::Redraw(Dirty::All);
     }
@@ -2320,9 +2352,8 @@ fn handle_tap(app: &mut MusicApp, px: u32, py: u32) -> Tap<'static> {
         )
         .ok();
     } else {
-        // A real row: tap its delete affordance to remove it, tap its move-up
-        // affordance to move it up in the queue, and tap elsewhere in the row
-        // to select it as now-playing.
+        // A real row: three 44 px controls on its right reorder or remove the
+        // entry, and a tap elsewhere selects it as now-playing.
         //
         // WHY the scroll offset is added back: the rows are drawn at their
         // scrolled position, so the row under the finger is the one whose
@@ -2332,40 +2363,45 @@ fn handle_tap(app: &mut MusicApp, px: u32, py: u32) -> Tap<'static> {
         let idx = ry / TRACKLIST_ROW_H;
         let coff = ry % TRACKLIST_ROW_H;
         if idx < app.order_len && coff < 84 && x >= MARGIN && x < MARGIN + CONTENT_W {
-            let del_cx = (MARGIN + CONTENT_W - 36) as isize;
-            let ddx = x as isize - del_cx;
-            let ddy = coff as isize - 24;
-            if ddx.abs() <= 24 && ddy.abs() <= 24 {
-                if let Some(store_idx) = app.store_index_at(idx) {
-                    if app.store.remove(store_idx) {
-                        // WHY playback stops here: removing a track shifts
-                        // every later index, so an open stream would be named
-                        // by a position that now holds another track.
-                        app.player.stop();
-                        app.state = PlaybackState::Stopped;
-                        app.sync_list_extent();
-                        std::log("[MUSIC APP] Track removed; the deletion was persisted to the settings store.",
-                        )
-                        .ok();
-                        if app.current_track_idx >= app.store.len() && app.current_track_idx > 0 {
-                            app.current_track_idx -= 1;
-                        }
-                        app.publish_now_playing();
-                    } else {
-                        std::log("[MUSIC APP] Track deletion was not persisted; the library is unchanged.",
-                        )
-                        .ok();
-                    }
+            let control_y = coff as isize - 24;
+            let in_control = |centre: usize| {
+                (x as isize - centre as isize).abs() <= 22 && control_y.abs() <= 22
+            };
+            // Delete: the rightmost control.
+            if in_control(MARGIN + CONTENT_W - 28) {
+                if app.remove_at(idx) {
+                    app.clear_feedback();
+                    std::log("[MUSIC APP] Track removed; the deletion was persisted to the settings store.",
+                    )
+                    .ok();
+                } else {
+                    std::log("[MUSIC APP] Track deletion was not persisted; the library is unchanged.",
+                    )
+                    .ok();
                 }
                 return Tap::Redraw(Dirty::All);
             }
-            // The queue's "move up" affordance.
-            let up_cx = (MARGIN + CONTENT_W - 90) as isize;
-            let udx = x as isize - up_cx;
-            let udy = coff as isize - 24;
-            if udx.abs() <= 24 && udy.abs() <= 24 {
+            // Move down: toward the end of the queue.
+            if in_control(MARGIN + CONTENT_W - 72) {
+                if app.move_down(idx) {
+                    app.sync_list_extent();
+                    app.clear_feedback();
+                    std::log("[MUSIC APP] Track moved down in the queue; the new order was persisted.",
+                    )
+                    .ok();
+                    app.publish_now_playing();
+                } else {
+                    std::log("[MUSIC APP] The track is already last in the queue, or the new order was not persisted.",
+                    )
+                    .ok();
+                }
+                return Tap::Redraw(Dirty::All);
+            }
+            // Move up: toward the front of the queue.
+            if in_control(MARGIN + CONTENT_W - 116) {
                 if app.move_up(idx) {
                     app.sync_list_extent();
+                    app.clear_feedback();
                     std::log("[MUSIC APP] Track moved up in the queue; the new order was persisted.",
                     )
                     .ok();
@@ -2379,6 +2415,10 @@ fn handle_tap(app: &mut MusicApp, px: u32, py: u32) -> Tap<'static> {
             }
             if let Some(store_idx) = app.store_index_at(idx) {
                 app.current_track_idx = store_idx.min(app.store.len().saturating_sub(1));
+                // WHY the line is cleared: the previous refusal or "ended"
+                // notice belongs to the track that was selected before this
+                // tap, not to the one the screen now names.
+                app.clear_feedback();
                 // WHY the stream follows the selection: the transport is
                 // playing a file, and leaving it on the previous file while
                 // the screen names the new one would make the play control
@@ -2427,12 +2467,14 @@ fn handle_music_key(app: &mut MusicApp, key: std::InputKeyEvent) -> Tap<'static>
             }
             input_key_code::BACKSPACE => {
                 app.search_len = app.search_len.saturating_sub(1);
+                app.clear_feedback();
                 app.sync_list_extent();
                 Tap::Redraw(Dirty::All)
             }
             code if (32..=126).contains(&code) && app.search_len < SEARCH_CAP => {
                 app.search[app.search_len] = code as u8;
                 app.search_len += 1;
+                app.clear_feedback();
                 app.sync_list_extent();
                 Tap::Redraw(Dirty::All)
             }
@@ -2509,6 +2551,7 @@ fn handle_music_key(app: &mut MusicApp, key: std::InputKeyEvent) -> Tap<'static>
         }
         input_key_code::ARROW_UP => {
             if app.step_volume(true) {
+                app.clear_feedback();
                 Tap::Redraw(Dirty::Volume)
             } else {
                 Tap::Redraw(Dirty::None)
@@ -2516,6 +2559,7 @@ fn handle_music_key(app: &mut MusicApp, key: std::InputKeyEvent) -> Tap<'static>
         }
         input_key_code::ARROW_DOWN => {
             if app.step_volume(false) {
+                app.clear_feedback();
                 Tap::Redraw(Dirty::Volume)
             } else {
                 Tap::Redraw(Dirty::None)

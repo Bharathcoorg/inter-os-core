@@ -12,6 +12,17 @@ pub mod library;
 /// Streaming playback of an imported file over the platform's PCM output.
 pub mod playback;
 
+use library::ImportOutcome;
+
+/// Capacity of the now-playing time line.
+pub const CAPTION_MAX: usize = 24;
+
+/// Capacity of the now-playing line (artist prefix plus the time line).
+pub const NOW_PLAYING_MAX: usize = 64;
+
+/// Capacity of a transient feedback line.
+pub const FEEDBACK_MAX: usize = 64;
+
 /// `FileSystemRead` slot: accepted by `sys_settings_get`.
 pub const STORE_CAP_READ: usize = 4;
 /// `FileSystemWrite` slot: accepted by `sys_settings_set`.
@@ -78,6 +89,266 @@ pub const SOURCE_MAX: usize = 96;
 /// a position read from the stream rather than an estimate from wall time.
 pub fn position_millis(frames_consumed: u64) -> u64 {
     frames_consumed.saturating_mul(1_000) / interos_std::wav::OUTPUT_SAMPLE_RATE as u64
+}
+
+/// Appends `bytes` to `out` at `at`, keeping the cursor inside the buffer.
+fn push_bytes(out: &mut [u8], at: &mut usize, bytes: &[u8]) {
+    for &byte in bytes {
+        if *at >= out.len() {
+            return;
+        }
+        out[*at] = byte;
+        *at += 1;
+    }
+}
+
+/// Appends the decimal form of `value` to `out` at `at`.
+fn push_decimal(out: &mut [u8], at: &mut usize, value: u32) {
+    let mut digits = [0u8; 10];
+    let mut n = 0usize;
+    let mut rest = value;
+    loop {
+        digits[n] = b'0' + (rest % 10) as u8;
+        rest /= 10;
+        n += 1;
+        if rest == 0 {
+            break;
+        }
+    }
+    for i in 0..n {
+        if *at >= out.len() {
+            return;
+        }
+        out[*at] = digits[n - 1 - i];
+        *at += 1;
+    }
+}
+
+/// Formats `secs` as `m:ss` (or `h:mm:ss` for an hour or more).
+pub fn format_mmss(out: &mut [u8; 12], secs: u32) -> usize {
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
+    let s = secs % 60;
+    let mut n = 0usize;
+    if h > 0 {
+        let mut hb = [0u8; 4];
+        let hn = format_u32(&mut hb, h);
+        out[..hn].copy_from_slice(&hb[..hn]);
+        n += hn;
+        out[n] = b':';
+        n += 1;
+        out[n] = b'0' + (m / 10) as u8;
+        out[n + 1] = b'0' + (m % 10) as u8;
+        n += 2;
+    } else {
+        let mut mb = [0u8; 4];
+        let mn = format_u32(&mut mb, m);
+        out[..mn].copy_from_slice(&mb[..mn]);
+        n += mn;
+    }
+    out[n] = b':';
+    out[n + 1] = b'0' + (s / 10) as u8;
+    out[n + 2] = b'0' + (s % 10) as u8;
+    n + 3
+}
+
+/// Decimal `v` into a four-byte scratch buffer, no leading zeros.
+fn format_u32(scratch: &mut [u8; 4], v: u32) -> usize {
+    let mut tmp = [0u8; 4];
+    let mut n = 0usize;
+    let mut x = v.min(9999);
+    loop {
+        tmp[n] = b'0' + (x % 10) as u8;
+        x /= 10;
+        n += 1;
+        if x == 0 {
+            break;
+        }
+    }
+    for i in 0..n {
+        scratch[i] = tmp[n - 1 - i];
+    }
+    n
+}
+
+/// The time line the now-playing row draws.
+///
+/// WHY the total comes only from the decoder: a playing stream knows how many
+/// frames it holds (WAV and FLAC report a length, MP3 does not), while the
+/// track record may hold a number the person typed when the track was added.
+/// Substituting that number for a total the decoder did not report would put a
+/// length on screen the file never claimed. When the decoder has no total the
+/// line says `--:--`; when nothing is playing it reports the stored length or
+/// says the length was never read.
+pub fn playback_caption(
+    position_ms: Option<u64>,
+    total_ms: Option<u64>,
+    record_duration_sec: u32,
+    record_duration_known: bool,
+    out: &mut [u8; CAPTION_MAX],
+) -> usize {
+    let mut at = 0usize;
+    if let Some(position_ms) = position_ms {
+        let mut buf = [0u8; 12];
+        let secs = (position_ms / 1_000).min(u32::MAX as u64) as u32;
+        let n = format_mmss(&mut buf, secs);
+        push_bytes(out, &mut at, &buf[..n]);
+        push_bytes(out, &mut at, b" / ");
+        match total_ms {
+            Some(total_ms) => {
+                let secs = (total_ms / 1_000).min(u32::MAX as u64) as u32;
+                let n = format_mmss(&mut buf, secs);
+                push_bytes(out, &mut at, &buf[..n]);
+            }
+            // WHY the decoder's silence is shown as silence: an MP3 stream has
+            // no trusted total, and the record's stored number is not one.
+            None => push_bytes(out, &mut at, b"--:--"),
+        }
+        return at;
+    }
+    if record_duration_known {
+        let mut buf = [0u8; 12];
+        let n = format_mmss(&mut buf, record_duration_sec);
+        push_bytes(out, &mut at, b"Duration ");
+        push_bytes(out, &mut at, &buf[..n]);
+    } else {
+        push_bytes(out, &mut at, b"Duration not read");
+    }
+    at
+}
+
+/// Builds the now-playing line, naming an artist only when one is known.
+pub fn now_playing_line(
+    artist: Option<&[u8]>,
+    position_ms: Option<u64>,
+    total_ms: Option<u64>,
+    record_duration_sec: u32,
+    record_duration_known: bool,
+    out: &mut [u8; NOW_PLAYING_MAX],
+) -> usize {
+    let mut at = 0usize;
+    if let Some(artist) = artist {
+        push_bytes(out, &mut at, artist);
+        push_bytes(out, &mut at, b" - ");
+    }
+    let mut caption = [0u8; CAPTION_MAX];
+    let n = playback_caption(
+        position_ms,
+        total_ms,
+        record_duration_sec,
+        record_duration_known,
+        &mut caption,
+    );
+    push_bytes(out, &mut at, &caption[..n]);
+    at
+}
+
+/// The position of `current` in the queue the list shows, one-based.
+///
+/// WHY the order table: a search hides tracks, so the current track's place in
+/// the visible queue is not its index in the store.
+pub fn queue_position(order: &[u8], order_len: usize, current: usize) -> Option<(usize, usize)> {
+    let len = order_len.min(order.len());
+    for n in 0..len {
+        if order[n] as usize == current {
+            return Some((n + 1, len));
+        }
+    }
+    None
+}
+
+/// What the import did, in words the feedback line may show.
+///
+/// WHY the refused count is named: a person who put audio in shared storage and
+/// got a refused settings write must not be told that no audio was found.
+pub fn import_feedback(outcome: ImportOutcome, out: &mut [u8]) -> usize {
+    let mut at = 0usize;
+    match outcome {
+        ImportOutcome::Imported(n) => {
+            push_bytes(out, &mut at, b"Imported ");
+            push_decimal(out, &mut at, n as u32);
+            push_bytes(
+                out,
+                &mut at,
+                if n == 1 {
+                    b" track from storage"
+                } else {
+                    b" tracks from storage"
+                },
+            );
+        }
+        ImportOutcome::PartiallyImported(n, refused) => {
+            push_bytes(out, &mut at, b"Imported ");
+            push_decimal(out, &mut at, n as u32);
+            push_bytes(out, &mut at, if n == 1 { b" track; " } else { b" tracks; " });
+            push_decimal(out, &mut at, refused as u32);
+            push_bytes(out, &mut at, b" refused");
+        }
+        ImportOutcome::WriteRefused(found) => {
+            push_bytes(out, &mut at, b"Found ");
+            push_decimal(out, &mut at, found as u32);
+            push_bytes(
+                out,
+                &mut at,
+                if found == 1 {
+                    b" audio file; store refused"
+                } else {
+                    b" audio files; store refused"
+                },
+            );
+        }
+        ImportOutcome::ListRefused => {
+            push_bytes(out, &mut at, b"Storage list refused; nothing imported");
+        }
+        ImportOutcome::NoneFound => {
+            push_bytes(out, &mut at, b"No new audio files in shared storage");
+        }
+    }
+    at
+}
+
+/// What the player says when a track played out.
+///
+/// WHY the title is only appended when the next track started: the older
+/// wording said "track ended" whether or not anything followed it, which read
+/// as an auto-advance that never happened.
+pub fn ended_feedback(next_title: Option<&[u8]>, out: &mut [u8]) -> usize {
+    let mut at = 0usize;
+    match next_title {
+        Some(title) => {
+            push_bytes(out, &mut at, b"Track ended - playing: ");
+            push_bytes(out, &mut at, title);
+        }
+        None => push_bytes(out, &mut at, b"Track ended - no playable track remains"),
+    }
+    at
+}
+
+/// The artist the UI may name, or `None` when none is known.
+///
+/// WHY a control byte disqualifies the value: an artist name is text, and a
+/// run of binary would be drawn as glyph soup that claims to be a credit.
+pub fn known_artist(artist: &[u8]) -> Option<&[u8]> {
+    if artist.is_empty() || !artist.iter().all(|b| (0x20..=0x7e).contains(b)) {
+        None
+    } else {
+        Some(artist)
+    }
+}
+
+/// The caption the artwork card shows when it cannot show embedded art.
+///
+/// WHY this is a caption and not a cover: the platform's decoders expose no
+/// ID3 APIC or FLAC PICTURE block to this app, so there is no artwork to draw.
+/// The card stays a designed placeholder and says which fact it is missing.
+pub fn artwork_caption(has_track: bool, embedded_art: bool) -> &'static [u8] {
+    if embedded_art {
+        b""
+    } else if has_track {
+        b"No embedded album art"
+    } else {
+        b"No track selected"
+    }
 }
 
 /// Library capacity, chosen so the serialized blob with escapes stays safely
@@ -268,6 +539,17 @@ impl TrackRecord {
 
     pub fn title(&self) -> &[u8] {
         &self.title[..self.title_len as usize]
+    }
+
+    /// The artist this record can claim.
+    ///
+    /// WHY this is empty: the library blob has no artist field -- the 512-byte
+    /// settings limit leaves no room for one -- and the platform's decoders
+    /// expose no ID3/FLAC text metadata to this app. An empty answer is honest;
+    /// the old player published the literal "Local Library" as an artist,
+    /// which named the store rather than the performer.
+    pub fn artist(&self) -> &[u8] {
+        b""
     }
 
     /// Records the file this track plays from.
@@ -881,5 +1163,125 @@ mod tests {
         assert_eq!(dec.id, 10);
         assert_eq!(dec.title(), b"Short Jingle");
         assert_eq!(dec.duration_sec(), 10);
+    }
+
+    #[test]
+    fn the_time_caption_reads_its_total_from_the_decoder() {
+        // WHY: an imported MP3 has a record duration of zero and no trusted
+        // total from the decoder. The line must not fill the gap with a number
+        // the file never reported.
+        let mut out = [0u8; CAPTION_MAX];
+        let n = playback_caption(Some(7_000), Some(192_000), 0, false, &mut out);
+        assert_eq!(&out[..n], b"0:07 / 3:12");
+
+        let n = playback_caption(Some(7_000), None, 225, true, &mut out);
+        assert_eq!(&out[..n], b"0:07 / --:--");
+
+        // Nothing playing: the record's length is a stored fact, and an
+        // unmeasured track says so instead of claiming zero seconds.
+        let n = playback_caption(None, None, 225, true, &mut out);
+        assert_eq!(&out[..n], b"Duration 3:45");
+        let n = playback_caption(None, None, 0, false, &mut out);
+        assert_eq!(&out[..n], b"Duration not read");
+    }
+
+    #[test]
+    fn an_artist_is_named_only_when_one_is_really_known() {
+        let mut out = [0u8; NOW_PLAYING_MAX];
+        let n = now_playing_line(None, Some(7_000), Some(192_000), 0, false, &mut out);
+        assert_eq!(&out[..n], b"0:07 / 3:12");
+
+        let n = now_playing_line(Some(b"Aria"), Some(7_000), Some(192_000), 0, false, &mut out);
+        assert_eq!(&out[..n], b"Aria - 0:07 / 3:12");
+
+        // A run of control bytes is not an artist name.
+        assert!(known_artist(b"").is_none());
+        assert!(known_artist(b"Local Library").is_some());
+        assert!(known_artist(b"bad\x01name").is_none());
+    }
+
+    #[test]
+    fn the_visible_queue_position_follows_the_filtered_order() {
+        // WHY: the list shows the tracks a search matched, so a current track
+        // at store index 0 can be second in the visible queue.
+        let order = [3u8, 0, 2];
+        assert_eq!(queue_position(&order, 3, 0), Some((2, 3)));
+        assert_eq!(queue_position(&order, 3, 3), Some((1, 3)));
+        assert_eq!(queue_position(&order, 3, 1), None);
+        assert_eq!(queue_position(&order, 2, 2), None);
+        assert_eq!(queue_position(&order, 9, 0), Some((2, 3)));
+    }
+
+    #[test]
+    fn an_import_feedback_line_names_what_actually_happened() {
+        use crate::library::ImportOutcome;
+
+        let cases: [(ImportOutcome, &[u8]); 8] = [
+            (ImportOutcome::Imported(1), b"Imported 1 track from storage"),
+            (ImportOutcome::Imported(3), b"Imported 3 tracks from storage"),
+            (
+                ImportOutcome::PartiallyImported(2, 1),
+                b"Imported 2 tracks; 1 refused",
+            ),
+            (
+                ImportOutcome::PartiallyImported(1, 3),
+                b"Imported 1 track; 3 refused",
+            ),
+            (
+                ImportOutcome::WriteRefused(1),
+                b"Found 1 audio file; store refused",
+            ),
+            (
+                ImportOutcome::WriteRefused(4),
+                b"Found 4 audio files; store refused",
+            ),
+            (
+                ImportOutcome::ListRefused,
+                b"Storage list refused; nothing imported",
+            ),
+            (
+                ImportOutcome::NoneFound,
+                b"No new audio files in shared storage",
+            ),
+        ];
+        for (outcome, expected) in cases {
+            let mut out = [0u8; FEEDBACK_MAX];
+            let n = import_feedback(outcome, &mut out);
+            assert!(n <= FEEDBACK_MAX);
+            assert_eq!(&out[..n], expected, "outcome {outcome:?}");
+            assert!(!out[..n].iter().any(|&b| b == b'\n'));
+        }
+    }
+
+    #[test]
+    fn a_track_that_played_out_says_whether_anything_followed_it() {
+        let mut out = [0u8; FEEDBACK_MAX];
+        let n = ended_feedback(Some(b"Nocturne"), &mut out);
+        assert_eq!(&out[..n], b"Track ended - playing: Nocturne");
+
+        let n = ended_feedback(None, &mut out);
+        assert_eq!(&out[..n], b"Track ended - no playable track remains");
+
+        // A long title is cut at the buffer, never written past it.
+        let long = [b'x'; 60];
+        let n = ended_feedback(Some(&long), &mut out);
+        assert_eq!(n, FEEDBACK_MAX);
+        assert!(out[..n].starts_with(b"Track ended - playing: "));
+    }
+
+    #[test]
+    fn the_artwork_card_never_invents_a_cover() {
+        // WHY: the platform exposes no ID3 APIC or FLAC PICTURE block, so the
+        // card is a placeholder and says which fact is missing.
+        assert_eq!(artwork_caption(false, false), b"No track selected");
+        assert_eq!(artwork_caption(true, false), b"No embedded album art");
+        assert!(artwork_caption(true, true).is_empty());
+    }
+
+    #[test]
+    fn a_library_record_claims_no_artist_it_did_not_keep() {
+        let record = TrackRecord::from_parts(1, b"Nocturne", 225);
+        assert_eq!(record.artist(), b"");
+        assert!(known_artist(record.artist()).is_none());
     }
 }
