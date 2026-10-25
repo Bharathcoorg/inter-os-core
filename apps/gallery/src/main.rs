@@ -347,7 +347,7 @@ fn text(
     color: u32,
     bg: u32,
 ) -> Option<u32> {
-    if y < y0 || y >= y0 + font::line_height(scale) {
+    if x < x0 || x >= W || y < y0 || y >= y0 + font::line_height(scale) {
         return None;
     }
     // The outline face, chosen ONCE for the run rather than once per pixel.
@@ -392,7 +392,7 @@ fn text_bold(
     color: u32,
     bg: u32,
 ) -> Option<u32> {
-    if y < y0 || y >= y0 + font::line_height(scale) {
+    if x < x0 || x >= W || y < y0 || y >= y0 + font::line_height(scale) {
         return None;
     }
     font::test_text_aa(x, y, x0, y0, scale, s, color, bg, true)
@@ -424,11 +424,18 @@ fn text_centered(
     bg: u32,
 ) -> Option<u32> {
     let w = font::measure(s, scale);
-    if w > max_w {
-        return None;
-    }
-    let drawn = outline_text::drawn_advance(s, scale, None).unwrap_or(w);
-    text(x, y, x0 + (max_w.saturating_sub(drawn)) / 2, y0, scale, s, color, bg)
+    let mut buf = [0u8; 96];
+    let (s_disp, drawn) = if w > max_w {
+        let n = font::ellipsize(s, scale, max_w, &mut buf);
+        let el = if n > 0 { &buf[..n] } else { s };
+        let ew = font::measure(el, scale);
+        let drawn = outline_text::drawn_advance(el, scale, None).unwrap_or(ew);
+        (el, drawn)
+    } else {
+        let drawn = outline_text::drawn_advance(s, scale, None).unwrap_or(w);
+        (s, drawn)
+    };
+    text(x, y, x0 + (max_w.saturating_sub(drawn)) / 2, y0, scale, s_disp, color, bg)
 }
 
 #[inline(always)]
@@ -444,11 +451,18 @@ fn text_centered_bold(
     bg: u32,
 ) -> Option<u32> {
     let w = font::measure_bold(s, scale);
-    if w > max_w {
-        return None;
-    }
-    let drawn = outline_text::drawn_advance(s, scale, None).unwrap_or(w);
-    text_bold(x, y, x0 + (max_w.saturating_sub(drawn)) / 2, y0, scale, s, color, bg)
+    let mut buf = [0u8; 96];
+    let (s_disp, drawn) = if w > max_w {
+        let n = font::ellipsize(s, scale, max_w, &mut buf);
+        let el = if n > 0 { &buf[..n] } else { s };
+        let ew = font::measure_bold(el, scale);
+        let drawn = outline_text::drawn_advance(el, scale, None).unwrap_or(ew);
+        (el, drawn)
+    } else {
+        let drawn = outline_text::drawn_advance(s, scale, None).unwrap_or(w);
+        (s, drawn)
+    };
+    text_bold(x, y, x0 + (max_w.saturating_sub(drawn)) / 2, y0, scale, s_disp, color, bg)
 }
 
 // -----------------------------------------------------------------------------

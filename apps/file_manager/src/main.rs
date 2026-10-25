@@ -184,7 +184,7 @@ fn test_text(
     color: u32,
     bg: u32,
 ) -> Option<u32> {
-    if x < x0 || y < y0 || y >= y0 + std::design::font::line_height(scale) {
+    if x < x0 || x >= W || y < y0 || y >= y0 + std::design::font::line_height(scale) {
         return None;
     }
     if let Some(run) = outline_text::place_run(x0, y0, scale, text, None, false) {
@@ -1520,11 +1520,13 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                 let ink = if chosen { THEME.surface } else { THEME.on_surface };
                 if let Some(c) = draw_rounded_rect(x, y, rect, THEME.radii.control, fill, None, 0)
                 {
+                    let lx = centered_x(CATEGORY_LABELS[index], 1, rect.x, rect.w);
+                    let ly = rect.y + (rect.h.saturating_sub(std::design::font::line_height(1))) / 2;
                     if let Some(c2) = test_text(
                         x,
                         y,
-                        rect.x + 12,
-                        rect.y + 10,
+                        lx,
+                        ly,
                         1,
                         CATEGORY_LABELS[index],
                         ink,
@@ -1573,8 +1575,10 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                 THEME.on_surface
             };
             if let Some(c) = draw_rounded_rect(x, y, rect, THEME.radii.control, fill, None, 0) {
+                let lx = centered_x(*label, 1, rect.x, rect.w);
+                let ly = rect.y + (rect.h.saturating_sub(std::design::font::line_height(1))) / 2;
                 if let Some(c2) =
-                    test_text(x, y, rect.x + 24, rect.y + 12, 1, *label, ink, fill)
+                    test_text(x, y, lx, ly, 1, *label, ink, fill)
                 {
                     return c2;
                 }
@@ -1596,7 +1600,10 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
             if let Some(c) = test_text(x, y, 140, 792, 2, b">", THEME.on_surface_variant, THEME.surface) {
                 return c;
             }
-            if let Some(c) = test_text(x, y, 164, 792, 2, sub_name, THEME.on_surface, THEME.surface) {
+            let mut sub_buf = [0u8; 64];
+            let sub_len = font::ellipsize(sub_name, 2, 510, &mut sub_buf);
+            let sub_disp = if sub_len > 0 { &sub_buf[..sub_len] } else { sub_name };
+            if let Some(c) = test_text(x, y, 164, 792, 2, sub_disp, THEME.on_surface, THEME.surface) {
                 return c;
             }
         }

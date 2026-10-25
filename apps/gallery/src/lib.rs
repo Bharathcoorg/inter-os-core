@@ -944,4 +944,23 @@ mod tests {
         assert!(!Filter::Videos.shows_ledger());
         assert!(Filter::Videos.shows_videos());
     }
+
+    #[test]
+    fn test_gallery_ui_text_bounds_and_ellipsize() {
+        use interos_std::design::font;
+        let mut buf = [0u8; 96];
+        let long_name = b"Very_Long_Photograph_Filename_That_Would_Overflow_The_Caption_Band_Or_Centered_Text_Bounds.ppm";
+        let cell_w = 216; // typical cell width
+        let len = font::ellipsize(long_name, 1, cell_w - 16, &mut buf);
+        let disp = if len > 0 { &buf[..len] } else { long_name.as_slice() };
+        assert!(font::measure(disp, 1) <= cell_w - 16);
+        assert!(disp.ends_with(b"...") || disp == long_name.as_slice());
+
+        // Chip and filter tab labels fit within their min/allocated widths
+        let chip_labels = [b"All".as_slice(), b"Wallpapers".as_slice(), b"Photos".as_slice(), b"Videos".as_slice()];
+        for label in chip_labels {
+            assert!(font::measure(label, 2) <= 180);
+        }
+    }
 }
+

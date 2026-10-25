@@ -380,7 +380,7 @@ fn test_text(
     // A bold outline run is one pixel wider than the run the box was measured
     // from, so the box has to carry that pixel or the last glyph is cut.
     let width = bw.max(bitmap_w) + if bold { 1 } else { 0 };
-    if x < bx || x - bx >= width || y < top || y - top >= height {
+    if x < bx || x >= W || x - bx >= width || y < top || y - top >= height {
         return None;
     }
     if let Some(run) = outline_text::place_run(x0, y0, scale, text, None, bold) {
@@ -1195,7 +1195,11 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
 
                 // 1. Top row: Note Title (Scale 2 Bold, y: uy0 + 20 .. uy0 + 44)
                 let title = note.title_bytes();
-                if let Some(c) = test_text(x, y, 56, uy0 + 20, 2, title, theme.title_ink, theme.fill, true) {
+                let max_title_w = if note.is_pinned { 580 } else { 610 };
+                let mut title_buf = [0u8; 96];
+                let title_len = std::design::font::ellipsize(title, 2, max_title_w, &mut title_buf);
+                let title_disp = if title_len > 0 { &title_buf[..title_len] } else { title };
+                if let Some(c) = test_text(x, y, 56, uy0 + 20, 2, title_disp, theme.title_ink, theme.fill, true) {
                     return c;
                 }
 
@@ -1768,23 +1772,29 @@ fn render_soft_keyboard(x: usize, y: usize, state: &AppState) -> u32 {
                     }
                     KeyAction::Shift => {
                         let label: &[u8] = if state.kb_symbols { b"ABC" } else { b"^" };
-                        if let Some(c) = test_text(x, y, kx + (kw - label.len() * 8) / 2, top + 26, 1, label, THEME.on_surface, fill, true) {
+                        let lw = std::design::font::measure(label, 1);
+                        if let Some(c) = test_text(x, y, kx + (kw.saturating_sub(lw)) / 2, top + 26, 1, label, THEME.on_surface, fill, true) {
                             return c;
                         }
                     }
                     KeyAction::Symbols => {
                         let label: &[u8] = if state.kb_symbols { b"ABC" } else { b"?123" };
-                        if let Some(c) = test_text(x, y, kx + (kw - label.len() * 8) / 2, top + 26, 1, label, THEME.on_surface, fill, true) {
+                        let lw = std::design::font::measure(label, 1);
+                        if let Some(c) = test_text(x, y, kx + (kw.saturating_sub(lw)) / 2, top + 26, 1, label, THEME.on_surface, fill, true) {
                             return c;
                         }
                     }
                     KeyAction::Backspace => {
-                        if let Some(c) = test_text(x, y, kx + (kw - 24) / 2, top + 26, 1, b"<X>", THEME.on_surface, fill, true) {
+                        let label = b"<X>";
+                        let lw = std::design::font::measure(label, 1);
+                        if let Some(c) = test_text(x, y, kx + (kw.saturating_sub(lw)) / 2, top + 26, 1, label, THEME.on_surface, fill, true) {
                             return c;
                         }
                     }
                     KeyAction::Space => {
-                        if let Some(c) = test_text(x, y, kx + (kw - 40) / 2, top + 26, 1, b"Space", THEME.on_surface_variant, fill, false) {
+                        let label = b"Space";
+                        let lw = std::design::font::measure(label, 1);
+                        if let Some(c) = test_text(x, y, kx + (kw.saturating_sub(lw)) / 2, top + 26, 1, label, THEME.on_surface_variant, fill, false) {
                             return c;
                         }
                     }

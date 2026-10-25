@@ -532,4 +532,48 @@ mod tests {
         assert_eq!(all_items[2], ev_late);
         assert_eq!(all_items[3], ev_tomorrow);
     }
+
+    #[test]
+    fn test_all_calendar_strings_fit_horizontal_bands() {
+        use interos_std::design::font;
+
+        // 1. Commit status strings must fit the flow sheet width (632px) at scale 2
+        let statuses: [&[u8]; 8] = [
+            b"NO EVENT CREATED YET",
+            b"NOT SAVED: EVENT HAS NO TITLE",
+            b"NOT SAVED: NO DATE ENTERED",
+            b"NOT SAVED: NO TIME ENTERED",
+            b"NOT SAVED: STORE FULL (12)",
+            b"NOT SAVED: INVALID DATE OR TIME",
+            b"SAVED: EVENT STORED",
+            b"CANCELLED: NO EVENT WRITTEN",
+        ];
+        for s in statuses.iter() {
+            let w = font::measure(s, 2);
+            assert!(w <= 632, "Status {:?} width {} exceeds 632px", core::str::from_utf8(s).unwrap(), w);
+        }
+
+        // 2. Wizard step headers must fit sheet width (632px) at scale 2
+        let steps: [&[u8]; 3] = [
+            b"STEP 1 OF 3 - EVENT TITLE",
+            b"STEP 2 OF 3 - DATE (MANUAL)",
+            b"STEP 3 OF 3 - TIME",
+        ];
+        for s in steps.iter() {
+            let w = font::measure(s, 2);
+            assert!(w <= 632, "Step header {:?} width {} exceeds 632px", core::str::from_utf8(s).unwrap(), w);
+        }
+
+        // 3. Tab labels must fit TAB_W (147px) at scale 2
+        let tabs: [&[u8]; 4] = [b"Month", b"Week", b"Day", b"Agenda"];
+        for t in tabs.iter() {
+            let w = font::measure(t, 2);
+            assert!(w <= 147, "Tab {:?} width {} exceeds 147px", core::str::from_utf8(t).unwrap(), w);
+        }
+
+        // 4. Details storage line must fit within 600px at scale 2
+        let storage_line = b"Settings Store / Sector 203";
+        let w = font::measure(storage_line, 2);
+        assert!(w <= 600, "Storage line width {} exceeds 600px", w);
+    }
 }

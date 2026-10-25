@@ -580,17 +580,20 @@ fn test_text(
     if y + 24 < y0 || y >= y0 + line_h.max(scale * 24) {
         return None;
     }
-    if x + 16 < x0 || x >= x0 + max_w.max(text.len() * (scale * 20)) {
+    if x + 16 < x0 || x >= x0 + max_w {
         return None;
     }
-    let (bx, bt, bw, bh) = outline_text::run_box(x0, y0, scale, text);
+    let mut buf = [0u8; 96];
+    let n = std::design::font::ellipsize(text, scale, max_w, &mut buf);
+    let fitted = if n > 0 { &buf[..n] } else { text };
+    let (bx, bt, bw, bh) = outline_text::run_box(x0, y0, scale, fitted);
     if x < bx || x - bx >= bw || y < bt || y - bt >= bh {
         return None;
     }
-    if let Some(run) = outline_text::place_run(x0, y0, scale, text, Some(max_w), false) {
+    if let Some(run) = outline_text::place_run(x0, y0, scale, fitted, Some(max_w), false) {
         return run.pixel(x, y, color, bg);
     }
-    std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, bg, false)
+    std::design::font::test_text_aa(x, y, x0, y0, scale, fitted, color, bg, false)
 }
 
 #[inline(always)]
@@ -609,17 +612,20 @@ fn test_text_bold(
     if y + 24 < y0 || y >= y0 + line_h.max(scale * 24) {
         return None;
     }
-    if x + 16 < x0 || x >= x0 + max_w.max(text.len() * (scale * 20)) {
+    if x + 16 < x0 || x >= x0 + max_w {
         return None;
     }
-    let (bx, bt, bw, bh) = outline_text::run_box(x0, y0, scale, text);
+    let mut buf = [0u8; 96];
+    let n = std::design::font::ellipsize(text, scale, max_w, &mut buf);
+    let fitted = if n > 0 { &buf[..n] } else { text };
+    let (bx, bt, bw, bh) = outline_text::run_box(x0, y0, scale, fitted);
     if x < bx || x - bx >= bw || y < bt || y - bt >= bh {
         return None;
     }
-    if let Some(run) = outline_text::place_run(x0, y0, scale, text, Some(max_w), true) {
+    if let Some(run) = outline_text::place_run(x0, y0, scale, fitted, Some(max_w), true) {
         return run.pixel(x, y, color, bg);
     }
-    std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, bg, true)
+    std::design::font::test_text_aa(x, y, x0, y0, scale, fitted, color, bg, true)
 }
 
 #[inline(always)]
@@ -1960,7 +1966,7 @@ fn details_pixel(x: usize, y: usize, app: &CalendarApp, event: &EventRecord) -> 
     if let Some(c) = test_text(x, y, DETAILS_X0 + 24, 712, 2, b"SECURITY & STORAGE", 300, THEME.on_surface_variant, THEME.surface_container) {
         return c;
     }
-    if let Some(c) = test_text(x, y, DETAILS_X0 + 24, 750, 2, b"Sovereign Settings Store / Vault Sector 203", 600, THEME.on_surface, THEME.surface_container) {
+    if let Some(c) = test_text(x, y, DETAILS_X0 + 24, 750, 2, b"Settings Store / Sector 203", 600, THEME.on_surface, THEME.surface_container) {
         return c;
     }
 
@@ -2056,7 +2062,7 @@ fn flow_pixel(x: usize, y: usize, app: &CalendarApp) -> u32 {
             step_buf[..base.len()].copy_from_slice(base);
             let mut n = base.len();
             if !app.date_known {
-                let tail = b" (NO RTC: ENTER BY HAND)";
+                let tail = b" (MANUAL)";
                 if step_buf.len() >= n + tail.len() {
                     step_buf[n..n + tail.len()].copy_from_slice(tail);
                     n += tail.len();
@@ -2637,22 +2643,22 @@ fn commit_event(app: &mut CalendarApp) {
     };
     let rec = EventRecord::from_parts(year, month, day, hour, minute, &app.title[..app.title_len]);
     if app.store.is_full() {
-        app.commit_status = "NOT SAVED: STORE FULL (12 EVENTS)";
+        app.commit_status = "NOT SAVED: STORE FULL (12)";
         return;
     }
     if !rec.valid() {
-        app.commit_status = "NOT SAVED: THAT DATE OR TIME DOES NOT EXIST";
+        app.commit_status = "NOT SAVED: INVALID DATE OR TIME";
         return;
     }
     if app.store.add(rec) {
         app.total_events = app.store.len() as u32;
-        app.commit_status = "SAVED: EVENT WRITTEN TO THE SETTINGS STORE";
+        app.commit_status = "SAVED: EVENT STORED";
         app.selected_day = Some(day);
         app.flow = Flow::None;
         app.title_len = 0;
         return;
     }
-    app.commit_status = "SETTINGS WRITE REFUSED: EVENT NOT PERSISTED";
+    app.commit_status = "SETTINGS REFUSED: NOT PERSISTED";
 }
 
 fn apply_title_key(app: &mut CalendarApp, row: usize, col: usize) {
@@ -2773,7 +2779,7 @@ fn handle_flow_tap(app: &mut CalendarApp, x: usize, y: usize) -> Dirty {
         || (x >= 624 && x < 676 && y >= 538 && y < 590)
     {
         app.flow = Flow::None;
-        app.commit_status = "CREATE CANCELLED: NO EVENT WRITTEN";
+        app.commit_status = "CANCELLED: NO EVENT WRITTEN";
         return Dirty::CONTENT;
     }
 
@@ -2802,7 +2808,7 @@ fn handle_flow_tap(app: &mut CalendarApp, x: usize, y: usize) -> Dirty {
                 }
                 if x >= CANCEL_BTN_X0 && x < CANCEL_BTN_X1 {
                     app.flow = Flow::None;
-                    app.commit_status = "CREATE CANCELLED: NO EVENT WRITTEN";
+                    app.commit_status = "CANCELLED: NO EVENT WRITTEN";
                     return Dirty::CONTENT;
                 }
             }
@@ -2818,7 +2824,7 @@ fn handle_flow_tap(app: &mut CalendarApp, x: usize, y: usize) -> Dirty {
             }
             if x >= CANCEL_BTN_X0 && x < CANCEL_BTN_X1 && y >= FLOW_BTN_Y0 && y < FLOW_BTN_Y1 {
                 app.flow = Flow::None;
-                app.commit_status = "CREATE CANCELLED: NO EVENT WRITTEN";
+                app.commit_status = "CANCELLED: NO EVENT WRITTEN";
                 return Dirty::CONTENT;
             }
         }
@@ -2851,7 +2857,7 @@ fn handle_tap(app: &mut CalendarApp, x: usize, y: usize) -> Tap {
                     app.commit_status = "EVENT DELETED FROM STORAGE";
                     std::log("[CALENDAR APP] Event deleted from settings store.").ok();
                 } else {
-                    app.commit_status = "SETTINGS WRITE REFUSED: EVENT NOT DELETED";
+                    app.commit_status = "SETTINGS REFUSED: NOT DELETED";
                 }
                 app.details_event = None;
                 return Tap::Redraw(Dirty::CONTENT);
@@ -2873,7 +2879,7 @@ fn handle_tap(app: &mut CalendarApp, x: usize, y: usize) -> Tap {
     if app.flow != Flow::None {
         if is_back {
             app.flow = Flow::None;
-            app.commit_status = "CREATE CANCELLED: NO EVENT WRITTEN";
+            app.commit_status = "CANCELLED: NO EVENT WRITTEN";
             return Tap::Redraw(Dirty::CONTENT);
         }
         return Tap::Redraw(handle_flow_tap(app, x, y));

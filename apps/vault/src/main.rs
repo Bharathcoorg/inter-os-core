@@ -692,12 +692,12 @@ fn pin_modal_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
         y,
         MARGIN,
         872,
-        2,
+        1,
         b"Hardware keystore root protected - Zero heap allocations",
         CARD_W,
         THEME.on_surface_variant,
         THEME.surface,
-        true,
+        false,
     ) {
         return c;
     }
@@ -1043,11 +1043,9 @@ fn metric_row(
     if let Some(c) = font::ink(x, y, ix, y0, 2, label, half, THEME.on_surface, THEME.surface_container, true) {
         return Some(c);
     }
-    // Cryptographic status badge on the right - Scale 2 (Body) truth badge
-    let v_w = font::width(value, 2, true);
+    // Cryptographic status badge on the right - Scale 1 (Caption) bold truth badge
+    let v_w = font::width(value, 1, true);
     let badge_w = (v_w + 34).min(half + 24);
-    // WHY 36: the verdict is a body-scale run (32 px), so a 30 px pill was
-    // smaller than the line box it contained and clipped its descenders.
     let badge_h = 36;
     let bx0 = x0 + w - PAD - badge_w;
     let by0 = y0.saturating_sub(4);
@@ -1062,7 +1060,8 @@ fn metric_row(
         if ddx * ddx + ddy * ddy <= 16 {
             return Some(value_ink);
         }
-        if let Some(c) = font::ink(x, y, bx0 + 22, by0 + 2, 2, value, badge_w.saturating_sub(26), value_ink, THEME.surface_container_low, true) {
+        let text_y = by0 + (badge_h.saturating_sub(font::line_height(1))) / 2;
+        if let Some(c) = font::ink(x, y, bx0 + 22, text_y, 1, value, badge_w.saturating_sub(26), value_ink, THEME.surface_container_low, true) {
             return Some(c);
         }
         return Some(THEME.surface_container_low);
@@ -1098,10 +1097,8 @@ fn tile_pixel(
     // Cryptographic status badge: pill container with indicator dot and status verdict
     let badge_x = tx + 16;
     let badge_y = ty + 44;
-    // WHY 36: the verdict is a body-scale run (32 px), so a 30 px pill was
-    // smaller than the line box it contained and clipped its descenders.
     let badge_h = 36;
-    let v_w = font::width(verdict, 2, true);
+    let v_w = font::width(verdict, 1, true);
     let badge_w = (v_w + 34).min(iw);
     if in_round(x, y, badge_x, badge_y, badge_w, badge_h, badge_h / 2) {
         if !in_round(x, y, badge_x + 1, badge_y + 1, badge_w - 2, badge_h - 2, badge_h / 2 - 1) {
@@ -1114,7 +1111,8 @@ fn tile_pixel(
         if ddx * ddx + ddy * ddy <= 16 {
             return Some(verdict_ink);
         }
-        if let Some(c) = font::ink(x, y, badge_x + 22, badge_y + 2, 2, verdict, badge_w.saturating_sub(26), verdict_ink, THEME.surface_container, true) {
+        let text_y = badge_y + (badge_h.saturating_sub(font::line_height(1))) / 2;
+        if let Some(c) = font::ink(x, y, badge_x + 22, text_y, 1, verdict, badge_w.saturating_sub(26), verdict_ink, THEME.surface_container, true) {
             return Some(c);
         }
         return Some(THEME.surface_container);
@@ -1271,7 +1269,7 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
             let (hint_buf, hint_len) = vault::sector_tile_hint(index);
             let (verdict, verdict_ink) = match vault.sectors[index].map(|s| s.authenticated) {
                 Some(true) => (b"round-trip verified".as_slice(), THEME.success),
-                Some(false) => (b"not tested this session".as_slice(), THEME.on_surface_variant),
+                Some(false) => (b"not tested".as_slice(), THEME.on_surface_variant),
                 None => (b"no record".as_slice(), THEME.warning),
             };
             if let Some(c) = tile_pixel(

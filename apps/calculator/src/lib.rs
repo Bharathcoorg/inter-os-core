@@ -76,6 +76,39 @@ pub fn text_width(text: &[u8], cap_px: u32) -> usize {
     interos_std::design::monochrome::text_width(text, cap_px)
 }
 
+/// Truncates `text` with an ellipsis ("...") if it exceeds `max_w` at cap height `cap_px`.
+/// Writes into `out_buf` and returns the number of bytes written.
+pub fn ellipsize_cap(text: &[u8], cap_px: u32, max_w: usize, out_buf: &mut [u8]) -> usize {
+    if text.is_empty() {
+        return 0;
+    }
+    let total_w = text_width(text, cap_px);
+    if total_w <= max_w {
+        let len = text.len().min(out_buf.len());
+        out_buf[..len].copy_from_slice(&text[..len]);
+        return len;
+    }
+    let dots = b"...";
+    let dots_w = text_width(dots, cap_px);
+    if dots_w > max_w || out_buf.len() < 3 {
+        return 0;
+    }
+    let budget = max_w.saturating_sub(dots_w);
+    let mut current_w = 0usize;
+    let mut fit_len = 0usize;
+    for (i, &c) in text.iter().enumerate() {
+        let adv = char_width(c, cap_px);
+        if current_w + adv > budget || fit_len + 3 > out_buf.len() {
+            break;
+        }
+        current_w += adv;
+        fit_len = i + 1;
+    }
+    out_buf[..fit_len].copy_from_slice(&text[..fit_len]);
+    out_buf[fit_len..fit_len + 3].copy_from_slice(dots);
+    fit_len + 3
+}
+
 /// The bitmap face's step that a cap height falls back to.
 ///
 /// WHY the em and the cell and not the cap: the bitmap face draws in whole
@@ -2131,5 +2164,20 @@ mod tests {
         // A key the keypad does not carry changes nothing.
         assert!(!calc.press_key('!'));
         assert_eq!(calc.display_str(), "0");
+    }
+
+    /// Long history expressions are cleanly truncated with ellipsis to fit within row boundaries.
+    #[test]
+    fn test_ellipsize_cap_bounds_and_fits() {
+        let mut buf = [0u8; 64];
+        let short = b"123 + 456";
+        let n_short = ellipsize_cap(short, interos_std::design::typography::SECTION_CAP_PX, 590, &mut buf);
+        assert_eq!(&buf[..n_short], short);
+
+        let long = b"123456789 + 987654321 * 123456789 / 987654321 + 99999999999";
+        let n_long = ellipsize_cap(long, interos_std::design::typography::SECTION_CAP_PX, 200, &mut buf);
+        assert!(n_long > 3);
+        assert!(text_width(&buf[..n_long], interos_std::design::typography::SECTION_CAP_PX) <= 200);
+        assert!(&buf[n_long - 3..n_long] == b"...");
     }
 }

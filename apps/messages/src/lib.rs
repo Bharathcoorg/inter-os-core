@@ -716,4 +716,23 @@ mod tests {
         assert_eq!(msgs[0].status, DeliveryStatus::RefusedNoTransport);
         assert_eq!(msgs[0].status.as_str(), "Refused - No Transport");
     }
+
+    #[test]
+    fn test_messages_ui_text_bounds_and_ellipsize() {
+        use interos_std::design::font;
+        let mut buf = [0u8; 96];
+        let long_val = b"/system/state/secure_storage/messages_diagnostic_and_audit_log_record.json";
+        let card_w = 672;
+        let max_w = card_w - 48; // 624
+        let len = font::ellipsize(long_val, 2, max_w, &mut buf);
+        let disp = if len > 0 { &buf[..len] } else { long_val.as_slice() };
+        assert!(font::measure(disp, 2) <= max_w);
+        assert!(disp.ends_with(b"...") || disp == long_val.as_slice());
+
+        // Recipient / placeholder messages fit within horizontal bounds
+        for s in [INCOMING_LOCAL_LABEL, HIDDEN_PREVIEW_LABEL, b"Nothing has been published or shared yet.".as_slice()] {
+            assert!(font::measure(s, 1) <= max_w);
+        }
+    }
 }
+

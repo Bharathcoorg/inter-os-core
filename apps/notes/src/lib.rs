@@ -1751,4 +1751,28 @@ mod tests {
         ed.move_cursor_right();
         assert_eq!(ed.cursor, 7);
     }
+
+    #[test]
+    fn test_notes_ui_title_and_preview_truncation() {
+        use interos_std::design::font;
+        let mut buf = [0u8; 96];
+        let long_title = b"Very Long Sovereign Research Note Title That Exceeds Normal Card Width Limit";
+        
+        // Pinned title max width: 580px
+        let len_pinned = font::ellipsize(long_title, 2, 580, &mut buf);
+        let disp_pinned = if len_pinned > 0 { &buf[..len_pinned] } else { long_title.as_slice() };
+        assert!(font::measure(disp_pinned, 2) <= 580);
+        assert!(disp_pinned.ends_with(b"...") || disp_pinned == long_title.as_slice());
+
+        // Unpinned title max width: 610px
+        let len_unpinned = font::ellipsize(long_title, 2, 610, &mut buf);
+        let disp_unpinned = if len_unpinned > 0 { &buf[..len_unpinned] } else { long_title.as_slice() };
+        assert!(font::measure(disp_unpinned, 2) <= 610);
+
+        // Keyboard action labels fit inside typical key width (kw >= 60)
+        for label in [b"ABC".as_slice(), b"^".as_slice(), b"?123".as_slice(), b"<X>".as_slice(), b"Space".as_slice()] {
+            assert!(font::measure(label, 1) <= 50);
+        }
+    }
 }
+

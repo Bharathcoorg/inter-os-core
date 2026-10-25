@@ -535,4 +535,37 @@ mod tests {
         let line = font::line_height(2);
         assert!(line >= 24, "Scale 2 line height should reserve at least 24px");
     }
+
+    #[test]
+    fn test_vault_ui_text_bounds_and_badges() {
+        use interos_std::font;
+        let card_w = 672;
+        let footer_note = b"Hardware keystore root protected - Zero heap allocations";
+        assert!(font::measure(footer_note, 1) <= card_w);
+
+        // Managed sector verdicts must fit within sector tile inner width (iw = 292, badge text available <= 266)
+        let verdicts = [b"round-trip verified".as_slice(), b"not tested".as_slice(), b"no record".as_slice()];
+        for v in verdicts {
+            let vw = font::measure_bold(v, 1);
+            assert!(vw <= 266, "verdict {:?} exceeds badge text available space", v);
+            let badge_w = vw + 34;
+            assert!(badge_w <= 292, "badge width exceeds tile inner width");
+        }
+
+        // Status frame metric values must fit within metric row half badge capacity
+        let metric_values = [
+            b"written and validated".as_slice(),
+            b"checksum mismatch".as_slice(),
+            b"read back truncated".as_slice(),
+            b"read-back refused".as_slice(),
+            b"settings write refused".as_slice(),
+            b"not written yet".as_slice(),
+        ];
+        for mv in metric_values {
+            let mw = font::measure_bold(mv, 1);
+            let badge_w = mw + 34;
+            assert!(badge_w <= 324, "metric badge width exceeds row space");
+        }
+    }
 }
+

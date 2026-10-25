@@ -574,7 +574,7 @@ fn test_text(
     let top = bt.min(y0);
     let height = bh.max(bitmap_h);
     let width = bw.max(bitmap_w);
-    if x < bx || x - bx >= width || y < top || y - top >= height {
+    if x < bx || x >= W || x - bx >= width || y < top || y - top >= height {
         return None;
     }
     if let Some(run) = outline_text::place_run(x0, y0, scale, text, None, false) {
@@ -606,7 +606,7 @@ fn test_text_bold(
     // A bold outline run is one pixel wider than the run the box was measured
     // from, so the box has to carry that pixel or the last glyph is cut.
     let width = bw.max(bitmap_w) + 1;
-    if x < bx || x - bx >= width || y < top || y - top >= height {
+    if x < bx || x >= W || x - bx >= width || y < top || y - top >= height {
         return None;
     }
     if let Some(run) = outline_text::place_run(x0, y0, scale, text, None, true) {
@@ -1188,10 +1188,17 @@ fn card_row_pixel(
         CARD.fill,
         CARD.border,
     ) {
-        if let Some(t) = test_text(x, y, fx + 24, fy + 16, 1, label, THEME.on_surface_variant, CARD.fill) {
+        let max_w = rect.2.saturating_sub(48);
+        let mut lbl_buf = [0u8; 64];
+        let lbl_len = std::design::font::ellipsize(label, 1, max_w, &mut lbl_buf);
+        let lbl_disp = if lbl_len > 0 { &lbl_buf[..lbl_len] } else { label };
+        if let Some(t) = test_text(x, y, fx + 24, fy + 16, 1, lbl_disp, THEME.on_surface_variant, CARD.fill) {
             return Some(t);
         }
-        if let Some(t) = test_text(x, y, fx + 24, fy + 44, 2, value, THEME.on_surface, CARD.fill) {
+        let mut val_buf = [0u8; 96];
+        let val_len = std::design::font::ellipsize(value, 2, max_w, &mut val_buf);
+        let val_disp = if val_len > 0 { &val_buf[..val_len] } else { value };
+        if let Some(t) = test_text(x, y, fx + 24, fy + 44, 2, val_disp, THEME.on_surface, CARD.fill) {
             return Some(t);
         }
         return Some(c);

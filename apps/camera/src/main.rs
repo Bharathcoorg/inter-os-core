@@ -171,13 +171,16 @@ fn test_text(
     if scale < 2 {
         let w = std::design::font::measure(text, scale);
         let h = std::design::font::line_height(scale);
-        if x < x0 || x - x0 >= w || y < y0 || y - y0 >= h {
+        if x < x0 || x - x0 >= w.min(max_w) || y < y0 || y - y0 >= h {
             return None;
         }
         return std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, bg, false);
     }
     let (bx, bt, bw, bh) = outline_text::run_box(x0, y0, scale, text);
     if x < bx || x - bx >= bw || y < bt || y - bt >= bh {
+        return None;
+    }
+    if x >= x0 + max_w {
         return None;
     }
     if let Some(run) = outline_text::place_run(x0, y0, scale, text, Some(max_w), false) {

@@ -642,9 +642,11 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                             // Top line: expression
                             let expr_bytes = &entry.expr[..entry.expr_len];
                             if !expr_bytes.is_empty() {
-                                let ew = calculator::text_width(expr_bytes, CAP_LABEL);
-                                let ex0 = 650usize.saturating_sub(ew);
-                                if let Some(c) = test_text(x, y, ex0, row_y0 + 16, CAP_LABEL, expr_bytes, THEME.on_surface_variant, row_style.fill, false) {
+                                let mut ebuf = [0u8; 64];
+                                let elen = calculator::ellipsize_cap(expr_bytes, CAP_LABEL, 590, &mut ebuf);
+                                let ew = calculator::text_width(&ebuf[..elen], CAP_LABEL);
+                                let ex0 = 650usize.saturating_sub(ew).max(60);
+                                if let Some(c) = test_text(x, y, ex0, row_y0 + 16, CAP_LABEL, &ebuf[..elen], THEME.on_surface_variant, row_style.fill, false) {
                                     return c;
                                 }
                             }
@@ -653,7 +655,7 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                             let mut res_buf = [0u8; 32];
                             let rlen = entry.result.format(&mut res_buf);
                             let rw = calculator::text_width(&res_buf[..rlen], CAP_SECTION);
-                            let rx0 = 650usize.saturating_sub(rw);
+                            let rx0 = 650usize.saturating_sub(rw).max(60);
                             if let Some(c) = test_text(x, y, rx0, row_y0 + 58, CAP_SECTION, &res_buf[..rlen], THEME.on_surface, row_style.fill, true) {
                                 return c;
                             }

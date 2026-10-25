@@ -2147,7 +2147,7 @@ fn test_text(
         return None;
     }
     // Bitmap fallback box
-    if x >= x0 && y >= y0 && y < y0 + run_rows(scale) {
+    if x >= x0 && x < x0 + max_w && y >= y0 && y < y0 + run_rows(scale) {
         return std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, bg, false);
     }
     None
@@ -2175,7 +2175,7 @@ fn test_text_bold(
         }
         return None;
     }
-    if x >= x0 && y >= y0 && y < y0 + run_rows(scale) {
+    if x >= x0 && x < x0 + max_w && y >= y0 && y < y0 + run_rows(scale) {
         return std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, bg, true);
     }
     None
@@ -3748,7 +3748,6 @@ fn contacts_notice_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         n += head.len();
         n = put_u16(&mut line, n, fav_count as u16);
         let mid = b" of ";
-        n += mid.len();
         line[n..n + mid.len()].copy_from_slice(mid);
         n += mid.len();
         n = put_u16(&mut line, n, used as u16);
@@ -3763,7 +3762,6 @@ fn contacts_notice_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         // flag only appeared at twelve. The two lines disagreed about the
         // same store.
         let mid = b" of ";
-        n += mid.len();
         line[n..n + mid.len()].copy_from_slice(mid);
         n += mid.len();
         n = put_u16(&mut line, n, MAX_CONTACTS as u16);

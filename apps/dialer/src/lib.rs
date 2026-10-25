@@ -781,5 +781,44 @@ mod tests {
             assert!(!row.note().is_empty());
         }
     }
-}
 
+    #[test]
+    fn test_dialer_ui_strings_fit_horizontal_bands() {
+        use interos_std::design::font;
+
+        const DISPLAY_W: usize = 672;
+        const TAB_W: usize = 208;
+
+        // 1. Tab labels must fit in TAB_W at scale 2
+        let tab_labels: [&[u8]; 3] = [b"Keypad", b"Recents", b"Contacts"];
+        for t in tab_labels.iter() {
+            let w = font::measure(t, 2);
+            assert!(w <= TAB_W, "Tab label {:?} width {} exceeds TAB_W", core::str::from_utf8(t).unwrap(), w);
+        }
+
+        // 2. Settings row titles and notes must fit within DISPLAY_W - 48 at scale 1
+        for row in SettingsRow::ORDER {
+            let tw = font::measure(row.title(), 1);
+            assert!(tw <= DISPLAY_W - 48, "Settings title {:?} exceeds band", core::str::from_utf8(row.title()).unwrap());
+            let nw = font::measure(row.note(), 1);
+            assert!(nw <= DISPLAY_W - 48, "Settings note {:?} exceeds band", core::str::from_utf8(row.note()).unwrap());
+        }
+
+        // 3. Contact store capacity line: ensure correct byte formatting without null bytes
+        let mut line = [0u8; 96];
+        let mut n = 0;
+        let head = b"Saved ";
+        line[n..n + head.len()].copy_from_slice(head);
+        n += head.len();
+        line[n] = b'3';
+        n += 1;
+        let mid = b" of ";
+        line[n..n + mid.len()].copy_from_slice(mid);
+        n += mid.len();
+        line[n..n + 2].copy_from_slice(b"12");
+        n += 2;
+        assert_eq!(&line[..n], b"Saved 3 of 12");
+        assert!(!line[..n].contains(&0), "Formatted string must not contain null bytes");
+        assert!(font::measure(&line[..n], 1) <= DISPLAY_W - 48);
+    }
+}

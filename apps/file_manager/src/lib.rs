@@ -1358,4 +1358,23 @@ mod tests {
         assert!(SEARCH_CLEAR.h >= 48);
         assert!(SHEET_DEST_H >= 48);
     }
+
+    #[test]
+    fn test_file_manager_ui_text_bounds_and_ellipsize() {
+        use interos_std::design::font;
+        let mut buf = [0u8; 64];
+        let long_name = b"A_very_long_directory_name_that_exceeds_normal_breadcrumb_display_limits";
+        let len = font::ellipsize(long_name, 2, 510, &mut buf);
+        let disp = if len > 0 { &buf[..len] } else { long_name.as_slice() };
+        assert!(font::measure(disp, 2) <= 510);
+        assert!(disp.ends_with(b"...") || disp == long_name.as_slice());
+
+        // Test category labels and action buttons fit inside their sheet bounds
+        for label in [b"Storage".as_slice(), b"Photos".as_slice(), b"Pictures".as_slice(), b"Videos".as_slice()] {
+            assert!(font::measure(label, 1) <= 150);
+        }
+        for btn in [b"Cancel".as_slice(), b"Confirm".as_slice()] {
+            assert!(font::measure(btn, 1) <= 260);
+        }
+    }
 }
