@@ -43,10 +43,15 @@ use std::design::touch;
 use std::design::walls;
 
 pub use gallery::{
-    decode_bmp, decode_image, decode_ppm, decode_qoi, decode_raw,
-    delete_storage_item_at, encode_ppm, grid_row_count, has_image_suffix, has_video_suffix, is_media_file,
-    measure_image_header, media_at_with_storage, Filter, GalleryTab, Media, StorageMediaItem,
-    Thumbnail, VideoCodec, VideoPlayerState, MAX_STORAGE_ITEMS, THUMB_H, THUMB_W,
+    clamp_pan_value, clamp_viewer_zoom, decode_bmp, decode_image, decode_ppm, decode_qoi,
+    decode_raw, deletable_storage_index, delete_storage_item_at, double_tap_zoom, encode_ppm,
+    filter_counts, filter_from_setting, fit_size, grid_row_count, has_image_suffix,
+    has_video_suffix, is_media_file, measure_image_header, media_at_with_storage,
+    viewer_display_size, viewer_index_after_removal, viewer_pan_limit, viewer_source_pixel,
+    viewer_step_index, write_filter_label, write_zoom_label, Filter, FilterCounts, GalleryTab,
+    GridPlan, GridRow, Media, StorageMediaItem, Thumbnail, TimelineGroup, VideoCodec,
+    VideoPlayerState, GRID_CELL, GRID_COLUMNS, MAX_STORAGE_ITEMS, SECTION_ROW_H, THUMB_H, THUMB_W,
+    VIEWER_MAX_ITEMS,
 };
 
 const W: usize = 720;
@@ -302,6 +307,28 @@ const PHOTO_FAV_BTN: Rect = Rect::new(MARGIN + 40, H - 100, 80, 48);
 const PHOTO_DEL_BTN: Rect = Rect::new(W - MARGIN - 120, H - 100, 80, 48);
 const SET_WALLPAPER_BTN: Rect = Rect::new(MARGIN + 20, H - 164, W - 2 * MARGIN - 40, 48);
 const TOAST_RECT: Rect = Rect::new(120, H - 180, 480, 48);
+/// The settings key the selected filter is stored under.
+///
+/// WHY the platform's settings store and not an app-written file: the store is
+/// the device's own key/value surface, the gallery already holds both the read
+/// and write capabilities for it, and a preference kept in a file of this app's
+/// own would be a second, private notion of "stored".
+const FILTER_KEY: &str = "gallery.filter";
+/// The delete confirmation sheet and its two controls.
+///
+/// WHY a confirmation at all: the old delete ran on the first tap, so a
+/// mis-tap destroyed the document with no way to stop it. The sheet names the
+/// document and offers the two answers; nothing is unlinked until Delete.
+const DELETE_SHEET: Rect = Rect::new(MARGIN, H - 300, W - 2 * MARGIN, 250);
+const DELETE_CONFIRM_BTN: Rect = Rect::new(MARGIN + 24, H - 132, (W - 2 * MARGIN - 72) / 2, 48);
+const DELETE_CANCEL_BTN: Rect = Rect::new(
+    MARGIN + 24 + (W - 2 * MARGIN - 72) / 2 + 24,
+    H - 132,
+    (W - 2 * MARGIN - 72) / 2,
+    48,
+);
+/// The viewer's caption scrim, above the home strip.
+const VIEWER_CAPTION: Rect = Rect::new(0, H - 174, W, 78);
 /// The media information sheet's rectangle.
 const fn info_sheet_rect() -> Rect {
     Rect::new(MARGIN, H - 490, W - 2 * MARGIN, 370)
@@ -925,8 +952,45 @@ pub struct GifPlayerState {
     remaining_loops: u16,
 }
 
+/// What the last look at the document index produced.
+///
+/// WHY the state is explicit: an empty gallery and a gallery whose index could
+/// not be read look the same if both are simply "no items", and they mean
+/// opposite things. The grid paints the loading line while a scan runs, the
+/// measured contents when it succeeds, and the refusal when it fails -- it never
+/// paints a blank grid for a failure.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ScanState {
+    Loading,
+    Ready,
+    Error,
+}
+
 pub struct GalleryApp {
     pub filter: Filter,
+    /// Every filter chip's measured count, in the same units as the grid.
+    pub counts: FilterCounts,
+    /// Chip labels with their counts, built when the list changes so the render
+    /// path never formats a number.
+    pub chip_labels: [[u8; 28]; 4],
+    pub chip_lens: [usize; 4],
+    /// The Photos grid's immutable row plan for the selected filter.
+    pub grid_plan: GridPlan,
+    /// The document a pending delete confirmation names, if any.
+    pub delete_confirm: Option<Media>,
+    /// What the last index scan produced.
+    pub scan_state: ScanState,
+    /// The items the full-screen viewer can swipe between, and where it is.
+    pub viewer_items: [Media; VIEWER_MAX_ITEMS],
+    pub viewer_len: usize,
+    pub viewer_index: usize,
+    pub viewer_caption: [u8; 48],
+    pub viewer_caption_len: usize,
+    pub viewer_position: [u8; 16],
+    pub viewer_position_len: usize,
+    /// Why a video was not handed to another app, when it was not.
+    pub video_note: [u8; 96],
+    pub video_note_len: usize,
     /// The media record open in the inspection view.
     pub open: Option<Media>,
     /// Title of the open record, taken from the record itself.
@@ -1049,10 +1113,18 @@ fn dispatch_open_with(path: &str) -> bool {
         std::log("[GALLERY] No app handles this file.").ok();
         return false;
     }
-    let Ok(_package) = core::str::from_utf8(&handler[..n]) else {
+    let Ok(package) = core::str::from_utf8(&handler[..n]) else {
         std::log("[GALLERY] No app handles this file.").ok();
         return false;
     };
+    // WHY the gallery refuses to dispatch to itself: this app's manifest
+    // declares the image and video types it can list, and the registry resolves
+    // to the first declaration. Dispatching would hand the document back to
+    // this screen and claim another app opened it.
+    if package == "org.interos.gallery" {
+        std::log("[GALLERY] This gallery is the registered handler; no other app declared the format.").ok();
+        return false;
+    }
     match std::content::intent_dispatch(std::content::IntentKind::Mime, record.mime, path) {
         Ok(_) => {
             std::log("[GALLERY] The document was handed to the app that declared its type.").ok();
@@ -1070,6 +1142,26 @@ impl GalleryApp {
         Self {
             tab: GalleryTab::Photos,
             filter: Filter::All,
+            counts: FilterCounts {
+                all: 0,
+                wallpapers: 0,
+                photos: 0,
+                videos: 0,
+            },
+            chip_labels: [[0u8; 28]; 4],
+            chip_lens: [0usize; 4],
+            grid_plan: GridPlan::EMPTY,
+            delete_confirm: None,
+            scan_state: ScanState::Loading,
+            viewer_items: [Media::Photo(0); VIEWER_MAX_ITEMS],
+            viewer_len: 0,
+            viewer_index: 0,
+            viewer_caption: [0u8; 48],
+            viewer_caption_len: 0,
+            viewer_position: [0u8; 16],
+            viewer_position_len: 0,
+            video_note: [0u8; 96],
+            video_note_len: 0,
             open: None,
             show_info_overlay: false,
             show_wallpaper_sheet: false,
@@ -1159,8 +1251,8 @@ impl GalleryApp {
         }
 
         let _ = std::content::content_index_refresh();
-        self.rescan_storage();
-        self.refresh_subtitle();
+        let _ = self.rescan_storage();
+        self.refresh_media_state();
 
         for i in 0..self.storage_count {
             if &self.storage_items[i].path[..self.storage_items[i].path_len] == payload_bytes {
@@ -1270,7 +1362,8 @@ impl GalleryApp {
     /// WHY the media type comes from the index: the platform read the
     /// document's own bytes when it could, so a document named `.jpg` that
     /// holds a PNG is shown as a PNG.
-    pub fn rescan_storage(&mut self) {
+    pub fn rescan_storage(&mut self) -> bool {
+        self.scan_state = ScanState::Loading;
         self.storage_count = 0;
         // The thumbnails below reuse the decode buffer, so a picture decoded
         // for the full-screen viewer is no longer there once the scan starts.
@@ -1281,8 +1374,9 @@ impl GalleryApp {
         self.gif_player = None;
         let mut list_buf = [0u8; 4096];
         let Ok(bytes) = std::content::content_index_list(&mut list_buf) else {
+            self.scan_state = ScanState::Error;
             std::log("[GALLERY] The platform's document index could not be read; the gallery shows nothing it cannot name.").ok();
-            return;
+            return false;
         };
         let payload = &list_buf[..bytes];
         for line in payload.split(|&b| b == b'\n') {
@@ -1345,6 +1439,8 @@ impl GalleryApp {
             self.storage_items[self.storage_count] = item;
             self.storage_count += 1;
         }
+        self.scan_state = ScanState::Ready;
+        true
     }
 
     /// Reads a document's own header and measures its dimensions.
@@ -1514,6 +1610,307 @@ impl GalleryApp {
         self.subtitle_len = build_subtitle(&mut self.subtitle, walls::SCENES.len(), photos);
     }
 
+    /// Rebuilds the four counts and the chip labels that carry them.
+    ///
+    /// WHY the labels are built here and not in the renderer: the renderer runs
+    /// once per pixel, and formatting "Photos 3" at every pixel of a chip would
+    /// format the same number tens of thousands of times a frame. The counts are
+    /// measured from the same arrays the grid is planned from, so a chip cannot
+    /// promise a set the grid does not hold.
+    pub fn refresh_counts(&mut self) {
+        self.counts = filter_counts(walls::SCENES.len(), self.device_photos_count(), self.videos_count());
+        for index in 0..4 {
+            let filter = Filter::from_index(index);
+            self.chip_lens[index] =
+                write_filter_label(filter, self.counts, &mut self.chip_labels[index]);
+        }
+    }
+
+    /// Reads the stored filter. An absent or unreadable value selects All.
+    pub fn load_filter(&mut self) {
+        let mut buf = [0u8; 8];
+        if let Ok(n) = std::settings_get(FILTER_KEY, &mut buf) {
+            self.filter = filter_from_setting(&buf[..n]);
+        }
+    }
+
+    /// Stores the selected filter.
+    ///
+    /// WHY the failure is logged and not shown as an error toast: the filter
+    /// still applies to this session; only its persistence failed, and a toast
+    /// on every chip tap would report a store the user never asked about.
+    pub fn save_filter(&mut self) {
+        let byte = [self.filter.setting_byte()];
+        if std::settings_set(FILTER_KEY, &byte).is_err() {
+            std::log("[GALLERY] The filter could not be stored; it applies to this session.").ok();
+        }
+    }
+
+    /// Rebuilds the grid plan for the selected filter.
+    pub fn rebuild_plan(&mut self) {
+        self.grid_plan = GridPlan::build(
+            walls::SCENES.len(),
+            PHOTOS.len(),
+            &self.storage_items[..self.storage_count],
+            self.filter,
+        );
+    }
+
+    /// Brings counts, plan, subtitle and scroll in step with the media list.
+    pub fn refresh_media_state(&mut self) {
+        self.refresh_counts();
+        self.rebuild_plan();
+        self.refresh_subtitle();
+        self.sync_scroll();
+    }
+
+    /// Applies a filter and persists it.
+    pub fn apply_filter(&mut self, filter: Filter) {
+        self.filter = filter;
+        self.save_filter();
+        self.refresh_media_state();
+        self.reset_scroll();
+    }
+
+    /// Fills the viewer's swipe list from the plan, or from the active set when
+    /// the item was opened from a tab the plan does not describe.
+    pub fn rebuild_viewer_items(&mut self, media: Media) {
+        self.viewer_len = 0;
+        for entry in self.grid_plan.entries[..self.grid_plan.entry_count].iter() {
+            if self.viewer_len >= VIEWER_MAX_ITEMS {
+                break;
+            }
+            self.viewer_items[self.viewer_len] = *entry;
+            self.viewer_len += 1;
+        }
+        if let Some(position) = self.viewer_items[..self.viewer_len]
+            .iter()
+            .position(|entry| *entry == media)
+        {
+            self.viewer_index = position;
+            return;
+        }
+
+        // The plan does not hold this item (a video opened from the Videos tab
+        // under the Photos filter, say). The list then holds the real set it
+        // came from, never a padded copy of the plan.
+        self.viewer_len = 0;
+        if let Media::StorageItem(idx) = media {
+            if idx < self.storage_count && self.storage_items[idx].is_video {
+                for i in 0..self.storage_count {
+                    if self.storage_items[i].is_video && self.viewer_len < VIEWER_MAX_ITEMS {
+                        self.viewer_items[self.viewer_len] = Media::StorageItem(i);
+                        self.viewer_len += 1;
+                    }
+                }
+            }
+        }
+        if self.viewer_len == 0 {
+            self.viewer_items[0] = media;
+            self.viewer_len = 1;
+        }
+        self.viewer_index = self.viewer_items[..self.viewer_len]
+            .iter()
+            .position(|entry| *entry == media)
+            .unwrap_or(0);
+    }
+
+    /// Rebuilds the caption and the "n of m" line the viewer shows.
+    pub fn refresh_viewer_label(&mut self) {
+        // The title may borrow `self.detail_title` or the app's own buffer, so
+        // it is copied out before the caption buffer is written.
+        let mut title_buf = [0u8; 48];
+        let n = {
+            let title = self.detail_title();
+            let len = title.len().min(title_buf.len());
+            title_buf[..len].copy_from_slice(&title[..len]);
+            len
+        };
+        let n = n.min(self.viewer_caption.len());
+        self.viewer_caption[..n].copy_from_slice(&title_buf[..n]);
+        self.viewer_caption_len = n;
+        let mut buf = [0u8; 16];
+        let mut len = append_u64(&mut buf, 0, (self.viewer_index + 1) as u64);
+        len = append(&mut buf, len, b" of ");
+        len = append_u64(&mut buf, len, self.viewer_len as u64);
+        let len = len.min(self.viewer_position.len());
+        self.viewer_position[..len].copy_from_slice(&buf[..len]);
+        self.viewer_position_len = len;
+    }
+
+    /// Shows the viewer item at `index`.
+    pub fn show_viewer_index(&mut self, index: usize) {
+        if index >= self.viewer_len {
+            return;
+        }
+        self.viewer_index = index;
+        let media = self.viewer_items[index];
+        self.open = Some(media);
+        self.present_media(media);
+        self.refresh_viewer_label();
+    }
+
+    /// Moves the viewer one item, without wrapping past either end.
+    pub fn step_viewer(&mut self, forward: bool) -> bool {
+        let Some(next) = viewer_step_index(self.viewer_index, self.viewer_len, forward) else {
+            return false;
+        };
+        self.photo_zoom = 1000;
+        self.pan_x = 0;
+        self.pan_y = 0;
+        // A handoff note belongs to the item that was tapped, not to its
+        // neighbour. Swiping does not attempt a handoff, so it starts clear.
+        self.video_note_len = 0;
+        self.show_viewer_index(next);
+        true
+    }
+
+    /// Puts the viewer's zoom and pan back to the fitted picture.
+    pub fn reset_viewer_transform(&mut self) {
+        self.photo_zoom = 1000;
+        self.pan_x = 0;
+        self.pan_y = 0;
+    }
+
+    /// The source dimensions the viewer maps its pixels through.
+    ///
+    /// WHY the decoded length decides and not `detail_w`: a document's header
+    /// records dimensions even when its pixels were too large to decode, and a
+    /// viewer that mapped into a buffer nobody wrote would sample stale bytes.
+    pub fn viewer_source_size(&self, media: Media) -> (usize, usize) {
+        match media {
+            Media::Wallpaper(_) => (W, H),
+            Media::Photo(_) => (W, H),
+            Media::StorageItem(idx) => {
+                if idx < self.storage_count {
+                    if self.detail_rgba_len > 0 && self.detail_w > 0 && self.detail_h > 0 {
+                        (self.detail_w as usize, self.detail_h as usize)
+                    } else {
+                        let thumb = unsafe { STORAGE_THUMBS[idx] };
+                        if thumb.valid {
+                            (THUMB_W, THUMB_H)
+                        } else {
+                            (0, 0)
+                        }
+                    }
+                } else {
+                    (0, 0)
+                }
+            }
+        }
+    }
+
+    /// Applies a pan to the zoomed viewer, clamped so no gap opens at an edge.
+    pub fn pan_viewer(&mut self, dx: i32, dy: i32) {
+        let Some(media) = self.open else { return };
+        let (src_w, src_h) = self.viewer_source_size(media);
+        let (fit_w, fit_h) = fit_size(W, H, src_w, src_h);
+        let (limit_x, limit_y) = viewer_pan_limit(W, H, fit_w, fit_h, self.photo_zoom);
+        self.pan_x = clamp_pan_value(self.pan_x.saturating_add(dx), limit_x);
+        self.pan_y = clamp_pan_value(self.pan_y.saturating_add(dy), limit_y);
+    }
+
+    /// Sets a new zoom and clamps the pan it may no longer allow.
+    pub fn zoom_viewer(&mut self, zoom: u32) {
+        self.photo_zoom = clamp_viewer_zoom(zoom);
+        let Some(media) = self.open else { return };
+        let (src_w, src_h) = self.viewer_source_size(media);
+        let (fit_w, fit_h) = fit_size(W, H, src_w, src_h);
+        let (limit_x, limit_y) = viewer_pan_limit(W, H, fit_w, fit_h, self.photo_zoom);
+        self.pan_x = clamp_pan_value(self.pan_x, limit_x);
+        self.pan_y = clamp_pan_value(self.pan_y, limit_y);
+    }
+
+    /// Opens a document in the inspection view, reading its real state.
+    pub fn present_media(&mut self, media: Media) {
+        self.show_info_overlay = false;
+        self.show_wallpaper_sheet = false;
+        match media {
+            Media::Wallpaper(idx) => {
+                self.video_player = None;
+                self.gif_player = None;
+                self.video_note_len = 0;
+                self.detail_title_len = 0;
+                let scene = &walls::SCENES[idx];
+                self.detail_title = scene.name;
+                let home = stored_scene_key("ui.wallpaper.home");
+                let lock = stored_scene_key("ui.wallpaper.lock");
+                self.detail_meta_len = build_applied_label(scene, home, lock, &mut self.detail_meta);
+                std::log("[GALLERY] Wallpaper opened in inspection view.").ok();
+            }
+            Media::Photo(idx) => {
+                self.video_player = None;
+                self.gif_player = None;
+                self.video_note_len = 0;
+                self.detail_title_len = 0;
+                if let Some(photo) = PHOTOS.get(idx) {
+                    self.detail_title = photo.title.as_bytes();
+                    let mut n = append(&mut self.detail_meta, 0, b"Photo, ");
+                    n = append(&mut self.detail_meta, n, photo.date.as_bytes());
+                    n = append(&mut self.detail_meta, n, b", ");
+                    self.detail_meta_len = append(&mut self.detail_meta, n, photo.meta.as_bytes());
+                }
+            }
+            Media::StorageItem(idx) => {
+                if idx >= self.storage_count {
+                    return;
+                }
+                let item = self.storage_items[idx];
+                self.detail_title_buf = item.name;
+                self.detail_title_len = item.name_len;
+                self.detail_title = b"";
+                if item.is_video {
+                    // WHY no player is created here: this build has no video
+                    // decoder, and the old inline player advanced a position
+                    // over a surface it never decoded a frame into. A video is
+                    // handed to the package that declared its format instead;
+                    // when none can take it, the viewer says exactly that and
+                    // shows no invented frame.
+                    self.video_player = None;
+                    self.gif_player = None;
+                    let mut n = append(&mut self.detail_meta, 0, b"Video, ");
+                    n = append_u64(&mut self.detail_meta, n, item.size);
+                    n = append(&mut self.detail_meta, n, b" bytes, no frame decoded");
+                    self.detail_meta_len = n;
+                    // A note from a failed handoff names the format's own
+                    // handler; one opened without a handoff (caller intent,
+                    // or a swipe from an earlier item) gets the plain measured
+                    // reason instead of a stale format name.
+                    if self.video_note_len == 0 {
+                        note_video(
+                            self,
+                            b"This build has no video decoder; no frame is shown.",
+                        );
+                    }
+                    std::log("[GALLERY] Storage video opened; no frame can be decoded.").ok();
+                } else {
+                    self.video_player = None;
+                    self.video_note_len = 0;
+                    self.gif_player = None;
+                    self.load_detail_image(idx);
+                    let kind: &[u8] = if self.gif_player.is_some() {
+                        b"Animated GIF, "
+                    } else {
+                        b"Photo, "
+                    };
+                    let mut n = append(&mut self.detail_meta, 0, kind);
+                    n = append_u64(&mut self.detail_meta, n, self.detail_w as u64);
+                    n = append(&mut self.detail_meta, n, b"x");
+                    n = append_u64(&mut self.detail_meta, n, self.detail_h as u64);
+                    n = append(&mut self.detail_meta, n, b", ");
+                    if let Some(ref gif) = self.gif_player {
+                        n = append_u64(&mut self.detail_meta, n, gif.animation.info().frame_count as u64);
+                        n = append(&mut self.detail_meta, n, b" frames, ");
+                    }
+                    n = append_u64(&mut self.detail_meta, n, item.size);
+                    n = append(&mut self.detail_meta, n, b" bytes");
+                    self.detail_meta_len = n;
+                    std::log("[GALLERY] Storage photo opened in inspection view.").ok();
+                }
+            }
+        }
+    }
+
     /// The number of rows the current tab's grid holds.
     ///
     /// WHY it is measured and not a constant: the grid holds what the device
@@ -1521,7 +1918,10 @@ impl GalleryApp {
     /// leave an empty band under a short one.
     pub fn grid_rows(&self) -> usize {
         match self.tab {
-            GalleryTab::Photos => grid_row_count(self.photos_count(), 3),
+            // WHY the plan's row count: a timeline holds section headings and
+            // media rows of two different heights, so the old "items / 3" count
+            // named a grid the plan does not lay out.
+            GalleryTab::Photos => self.grid_plan.row_count,
             GalleryTab::Videos => grid_row_count(self.videos_count(), 2),
             GalleryTab::Albums => 2,
             GalleryTab::Screenshots => grid_row_count(self.screenshots_count(), 3),
@@ -1531,6 +1931,7 @@ impl GalleryApp {
     /// The height of the grid's content, which is what the scroll moves over.
     pub fn grid_content_height(&self) -> usize {
         match self.tab {
+            GalleryTab::Photos => self.grid_plan.content_h,
             GalleryTab::Videos => self.grid_rows() * VIDEO_ROW_H,
             GalleryTab::Albums => self.grid_rows() * 200,
             _ => self.grid_rows() * ROW_STRIDE,
@@ -2058,10 +2459,21 @@ fn item_pixel(x: usize, y: usize, app: &GalleryApp, media: Media, col: usize, y0
 // a chip that is drawn but cannot be chosen is an affordance that lies.
 // -----------------------------------------------------------------------------
 
-/// The chip at an index, from the label's own measured width.
-fn chip_rect(index: usize) -> Rect {
+/// The label a filter chip draws, with its measured count.
+fn chip_label(app: &GalleryApp, index: usize) -> &[u8] {
+    let len = app.chip_lens[index].min(app.chip_labels[index].len());
+    &app.chip_labels[index][..len]
+}
+
+/// The chip at an index, from its counted label's own measured width.
+///
+/// WHY the width is measured from the label WITH the count: the count is part
+/// of the text the chip draws, and a rectangle measured from the label alone
+/// would clip the last digit or leave a gap the pill does not fill.
+fn chip_rect(index: usize, app: &GalleryApp) -> Rect {
     let mut x = MARGIN;
-    for (i, label) in CHIP_LABELS.iter().enumerate() {
+    for i in 0..4 {
+        let label = chip_label(app, i);
         let w = (font::measure(label, 2) + CHIP_PAD * 2).max(CHIP_MIN_W);
         let rect = Rect::new(x, CHIP_Y, w, CHIP_H);
         if i == index {
@@ -2077,20 +2489,17 @@ fn chip_row_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
     if y < CHIP_Y || y >= CHIP_Y + CHIP_H {
         return None;
     }
-    let available = filters_available(app);
-    for (i, label) in CHIP_LABELS.iter().enumerate() {
-        let rect = chip_rect(i);
+    // WHY the row is always live: each chip now owns an honest empty state
+    // ("No videos", "No photos"), so a chip that selects nothing still shows
+    // the measured answer. Recessing the row would hide exactly the state the
+    // user needs to see when a filter would be empty.
+    for i in 0..4 {
+        let rect = chip_rect(i, app);
         if !rect.contains(x, y) {
             continue;
         }
-        // WHY the three-way treatment: an available row keeps the live
-        // segmented-control grammar (filled = selected, soft = at rest), and an
-        // unavailable row drops onto the page fill with a hairline and muted ink,
-        // which is how the rest of the shell paints something it cannot do.
-        // It is not hit-tested in that state, so the two agree.
-        let (fill, ink, border) = if !available {
-            (THEME.surface, THEME.on_surface_variant, Some(THEME.border))
-        } else if app.filter == Filter::from_index(i) {
+        let label = chip_label(app, i);
+        let (fill, ink, border) = if app.filter == Filter::from_index(i) {
             (THEME.on_surface, THEME.on_primary, None)
         } else {
             (THEME.surface_container_high, THEME.on_surface, Some(THEME.border))
@@ -2099,7 +2508,6 @@ fn chip_row_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
         if shape != fill {
             return Some(shape);
         }
-        // Outline text rendering at Scale 2 Body
         let lw = outline_text::drawn_advance(label, 2, None).unwrap_or_else(|| font::measure(label, 2));
         let lx = rect.x + rect.w.saturating_sub(lw) / 2;
         let ly = CHIP_Y + (CHIP_H.saturating_sub(font::line_height(2))) / 2;
@@ -2112,16 +2520,12 @@ fn chip_row_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
 }
 
 /// The chip at a point, or `None`.
-///
-/// WHY it is a function and not a table: the row is drawn from the labels'
-/// measured widths, and a hit test that used its own table would land on a
-/// different chip than the one under the finger.
-fn chip_at(x: usize, y: usize) -> Option<usize> {
+fn chip_at(x: usize, y: usize, app: &GalleryApp) -> Option<usize> {
     if y < CHIP_Y || y >= CHIP_Y + CHIP_H {
         return None;
     }
-    for (i, _) in CHIP_LABELS.iter().enumerate() {
-        if chip_rect(i).contains(x, y) {
+    for i in 0..4 {
+        if chip_rect(i, app).contains(x, y) {
             return Some(i);
         }
     }
@@ -2243,7 +2647,18 @@ fn ledger_pixel(x: usize, y: usize, app: &GalleryApp) -> u32 {
     if empty_frame(x, y, 360, y0 + 120) {
         return THEME.on_surface_variant;
     }
-    let title = b"No photos";
+    // The ledger is drawn for two different empty sets: a device that holds
+    // no photographs at all, and a filter that selected none of them. The
+    // sentence must not blame the filter for an empty device.
+    let photos_count = app.device_photos_count();
+    let device_has_no_photos = app.device_photos_count() == 0;
+    let title: &[u8] = if device_has_no_photos {
+        b"No photos"
+    } else if photos_count == 0 {
+        b"No photos"
+    } else {
+        b"No photos in this filter"
+    };
     if let Some(c) = text_centered(x, y, MARGIN, y0 + 200, W - 2 * MARGIN, 2, title, THEME.on_surface, THEME.surface) {
         return c;
     }
@@ -2492,27 +2907,150 @@ fn video_card_pixel(x: usize, y: usize, app: &GalleryApp, storage_idx: usize, co
     THEME.surface_container
 }
 
+/// One timeline section heading: the group's measured name and its count.
+fn section_header_pixel(x: usize, y: usize, app: &GalleryApp, row: usize, y0: usize) -> u32 {
+    let GridRow::Section { group, count } = app.grid_plan.rows[row] else {
+        return THEME.surface;
+    };
+    let label_y = y0 + (SECTION_ROW_H.saturating_sub(font::line_height(2))) / 2;
+    if let Some(c) = text(x, y, MARGIN, label_y, 2, group.label(), THEME.on_surface, THEME.surface) {
+        return c;
+    }
+    let mut count_buf = [0u8; 20];
+    let count_len = append_u64(&mut count_buf, 0, count as u64);
+    let count_w = font::measure(&count_buf[..count_len], 2);
+    if let Some(c) = text(
+        x,
+        y,
+        W - MARGIN - count_w,
+        label_y,
+        2,
+        &count_buf[..count_len],
+        THEME.on_surface_variant,
+        THEME.surface,
+    ) {
+        return c;
+    }
+    // The hairline that files the run under its heading.
+    if y == y0 + SECTION_ROW_H - 1 {
+        return THEME.border;
+    }
+    THEME.surface
+}
+
+/// The honest state for a filter that selects nothing.
+///
+/// WHY it names the filter: each of these sentences is about a different set,
+/// and the user chose that set. "No photos" under the Videos chip would be an
+/// answer to a question nobody asked.
+fn empty_filter_pixel(x: usize, y: usize, app: &GalleryApp) -> u32 {
+    if app.filter == Filter::Photos {
+        return ledger_pixel(x, y, app);
+    }
+    let (title, note): (&[u8], &[u8]) = match app.filter {
+        Filter::Wallpapers => (
+            b"No wallpapers",
+            b"This build holds no built-in wallpaper catalogue.",
+        ),
+        Filter::Videos => (
+            b"No videos",
+            b"Saved videos in /storage/videos will appear here.",
+        ),
+        _ => (
+            b"Nothing on this device",
+            b"Files the document index names will appear here.",
+        ),
+    };
+    let y0 = GRID_TOP + 120;
+    if let Some(c) = text_centered(x, y, MARGIN, y0, W - 2 * MARGIN, 2, title, THEME.on_surface, THEME.surface) {
+        return c;
+    }
+    if let Some(c) = text_centered(
+        x,
+        y,
+        MARGIN,
+        y0 + 40,
+        W - 2 * MARGIN,
+        1,
+        note,
+        THEME.on_surface_variant,
+        THEME.surface,
+    ) {
+        return c;
+    }
+    if app.filter == Filter::All || app.filter == Filter::Videos {
+        if let Some(c) = text_centered(
+            x,
+            y,
+            MARGIN,
+            y0 + 64,
+            W - 2 * MARGIN,
+            1,
+            &app.scan_line[..app.scan_line_len],
+            THEME.on_surface_variant,
+            THEME.surface,
+        ) {
+            return c;
+        }
+    }
+    THEME.surface
+}
+
+/// The document index's own two states: still reading, or unreadable.
+fn scan_state_pixel(x: usize, y: usize, app: &GalleryApp) -> u32 {
+    let y0 = GRID_TOP + 120;
+    let (title, note): (&[u8], &[u8]) = if app.scan_state == ScanState::Loading {
+        (
+            b"Reading the document index",
+            b"The gallery lists only documents the platform names.",
+        )
+    } else {
+        (
+            b"The document index could not be read",
+            b"Nothing is shown rather than guessing what the device holds.",
+        )
+    };
+    if let Some(c) = text_centered(x, y, MARGIN, y0, W - 2 * MARGIN, 2, title, THEME.on_surface, THEME.surface) {
+        return c;
+    }
+    if let Some(c) = text_centered(
+        x,
+        y,
+        MARGIN,
+        y0 + 40,
+        W - 2 * MARGIN,
+        1,
+        note,
+        THEME.on_surface_variant,
+        THEME.surface,
+    ) {
+        return c;
+    }
+    THEME.surface
+}
+
 fn photos_grid_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
-    if let (Some(col), Some(row)) = (col_of(x), row_of(app, y)) {
-        let index = row * 3 + col;
-        let y0 = GRID_TOP + row * ROW_STRIDE - app.scroll.offset;
-        if app.filter == Filter::Wallpapers {
-            if index < walls::SCENES.len() {
-                return Some(wallpaper_cell_pixel(x, y, index, col, y0));
+    let rel = y - GRID_TOP + app.scroll.offset;
+    if let Some((row, inside)) = app.grid_plan.row_at(rel) {
+        let y0 = GRID_TOP + app.grid_plan.tops[row] - app.scroll.offset;
+        match app.grid_plan.rows[row] {
+            GridRow::Section { .. } => return Some(section_header_pixel(x, y, app, row, y0)),
+            GridRow::Media { .. } => {
+                if let Some(col) = col_of(x) {
+                    if let Some(media) = app.grid_plan.media_at(row, col) {
+                        // `inside` is not used for the cell's top: a media row's
+                        // height is exactly the cell's, so y0 is its top.
+                        let _ = inside;
+                        return Some(item_pixel(x, y, app, media, col, y0));
+                    }
+                }
             }
-        } else if let Some(media) = app.photo_at(index) {
-            return Some(item_pixel(x, y, app, media, col, y0));
         }
     }
 
-    if app.filter == Filter::Wallpapers {
-        return Some(catalogue_pixel(x, y, app));
+    if app.grid_plan.entry_count == 0 {
+        return Some(empty_filter_pixel(x, y, app));
     }
-
-    if app.device_photos_count() == 0 {
-        return Some(ledger_pixel(x, y, app));
-    }
-
     Some(THEME.surface)
 }
 
@@ -2655,6 +3193,12 @@ fn grid_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
         return None;
     }
 
+    // The index's own state comes before any tab's list: a failed scan means
+    // no tab holds an answer, and a blank grid would be a different claim.
+    if app.scan_state != ScanState::Ready {
+        return Some(scan_state_pixel(x, y, app));
+    }
+
     // The scroll indicator, over the grid.
     //
     // WHY it is drawn here: a library larger than the band it is drawn in is
@@ -2720,6 +3264,183 @@ fn format_video_time(pos_ms: u32, dur_ms: u32, out: &mut [u8; 32]) -> usize {
     n
 }
 
+/// One pixel of the full-screen viewer's picture.
+///
+/// WHY every media kind goes through `viewer_source_pixel`: zoom and pan are
+/// geometry, and the letterbox is the same question for a wallpaper, a decoded
+/// document and a thumbnail. A kind that sampled the raw screen coordinates
+/// would ignore the gesture and stretch without preserving aspect.
+fn viewer_picture_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
+    if let Media::StorageItem(idx) = media {
+        if idx < app.storage_count && app.storage_items[idx].is_video {
+            return THEME.surface_container;
+        }
+    }
+    let (src_w, src_h) = app.viewer_source_size(media);
+    if src_w == 0 || src_h == 0 {
+        return THEME.surface_container;
+    }
+    let Some((sx, sy)) = viewer_source_pixel(
+        x,
+        y,
+        W,
+        H,
+        src_w,
+        src_h,
+        app.photo_zoom,
+        app.pan_x,
+        app.pan_y,
+    ) else {
+        // Outside the picture: the viewer's own black letterbox, not an edge
+        // pixel stretched across the gap.
+        return 0xFF000000;
+    };
+    match media {
+        Media::Wallpaper(idx) => match walls::SCENES.get(idx) {
+            Some(scene) => walls::scene_pixel(scene, sx.min(W - 1), sy.min(H - 1), W, H),
+            None => THEME.surface_container,
+        },
+        Media::Photo(idx) => match PHOTOS.get(idx) {
+            Some(photo) => {
+                let t = (sy * 255 / src_h.max(1)).min(255);
+                blend_argb(photo.primary_color, photo.secondary_color, t)
+            }
+            None => THEME.surface_container,
+        },
+        Media::StorageItem(idx) => {
+            if app.storage_items.get(idx).is_none() {
+                return THEME.surface_container;
+            }
+            if app.detail_rgba_len > 0 && app.detail_w > 0 && app.detail_h > 0 {
+                let w = app.detail_w as usize;
+                let h = app.detail_h as usize;
+                let px = sx.min(w - 1);
+                let py = sy.min(h - 1);
+                if let Some(colour) = decoded_detail_pixel((py * w + px) * 4, app.detail_rgba_len) {
+                    return colour;
+                }
+            }
+            let thumb = unsafe { STORAGE_THUMBS[idx] };
+            if thumb.valid {
+                if let Some(colour) = thumb.sample(sx.min(THUMB_W - 1), sy.min(THUMB_H - 1)) {
+                    return colour;
+                }
+            }
+            THEME.surface_container
+        }
+    }
+}
+
+/// The viewer's truthful no-frame state for a video.
+fn viewer_video_placeholder_pixel(x: usize, y: usize, app: &GalleryApp) -> u32 {
+    let y0 = H / 2 - 60;
+    if let Some(c) = text_centered(
+        x,
+        y,
+        MARGIN,
+        y0,
+        W - 2 * MARGIN,
+        2,
+        b"No frame decoded",
+        THEME.on_surface,
+        THEME.surface_container,
+    ) {
+        return c;
+    }
+    let note: &[u8] = if app.video_note_len > 0 {
+        &app.video_note[..app.video_note_len]
+    } else {
+        b"This build has no video decoder."
+    };
+    if let Some(c) = text_centered(
+        x,
+        y,
+        MARGIN,
+        y0 + 40,
+        W - 2 * MARGIN,
+        1,
+        note,
+        THEME.on_surface_variant,
+        THEME.surface_container,
+    ) {
+        return c;
+    }
+    THEME.surface_container
+}
+
+/// The delete confirmation sheet.
+///
+/// WHY it names the document: the confirmation is the last chance to notice
+/// that the wrong tile was tapped, and "this item" would not help. The name
+/// comes from the same record the delete will unlink.
+fn delete_sheet_pixel(x: usize, y: usize, app: &GalleryApp, target: Media) -> Option<u32> {
+    let shape = draw_rounded_rect(
+        x,
+        y,
+        DELETE_SHEET,
+        radius::CARD,
+        THEME.surface_container,
+        Some(THEME.error),
+        2,
+    )?;
+    if shape != THEME.surface_container {
+        return Some(shape);
+    }
+    if let Some(c) = text(x, y, DELETE_SHEET.x + 20, DELETE_SHEET.y + 16, 2, b"Delete this item?", THEME.on_surface, THEME.surface_container) {
+        return Some(c);
+    }
+    let mut name_buf = [0u8; 48];
+    let (name, name_len): (&[u8], usize) = match target {
+        Media::StorageItem(idx) if idx < app.storage_count => (
+            &app.storage_items[idx].name[..],
+            app.storage_items[idx].name_len,
+        ),
+        _ => (&b""[..], 0),
+    };
+    let n = font::ellipsize(&name[..name_len], 1, DELETE_SHEET.w.saturating_sub(40), &mut name_buf);
+    if let Some(c) = text(x, y, DELETE_SHEET.x + 20, DELETE_SHEET.y + 56, 1, &name_buf[..n], THEME.on_surface_variant, THEME.surface_container) {
+        return Some(c);
+    }
+    if let Some(c) = text(
+        x,
+        y,
+        DELETE_SHEET.x + 20,
+        DELETE_SHEET.y + 82,
+        1,
+        b"The document is removed from this device.",
+        THEME.on_surface_variant,
+        THEME.surface_container,
+    ) {
+        return Some(c);
+    }
+
+    if let Some(c) = draw_pill(x, y, DELETE_CANCEL_BTN, THEME.surface_container_high, Some(THEME.border)) {
+        if c != THEME.surface_container_high {
+            return Some(c);
+        }
+        let lw = outline_text::drawn_advance(b"Cancel", 2, None).unwrap_or_else(|| font::measure(b"Cancel", 2));
+        let lx = DELETE_CANCEL_BTN.x + (DELETE_CANCEL_BTN.w.saturating_sub(lw)) / 2;
+        let ly = DELETE_CANCEL_BTN.y + (DELETE_CANCEL_BTN.h.saturating_sub(font::line_height(2))) / 2;
+        if let Some(tc) = text(x, y, lx, ly, 2, b"Cancel", THEME.on_surface, THEME.surface_container_high) {
+            return Some(tc);
+        }
+        return Some(THEME.surface_container_high);
+    }
+    if let Some(c) = draw_pill(x, y, DELETE_CONFIRM_BTN, THEME.error, None) {
+        if c != THEME.error {
+            return Some(c);
+        }
+        let lw = outline_text::drawn_advance(b"Delete", 2, None).unwrap_or_else(|| font::measure(b"Delete", 2));
+        let lx = DELETE_CONFIRM_BTN.x + (DELETE_CONFIRM_BTN.w.saturating_sub(lw)) / 2;
+        let ly = DELETE_CONFIRM_BTN.y + (DELETE_CONFIRM_BTN.h.saturating_sub(font::line_height(2))) / 2;
+        if let Some(tc) = text(x, y, lx, ly, 2, b"Delete", THEME.on_primary, THEME.error) {
+            return Some(tc);
+        }
+        return Some(THEME.error);
+    }
+    Some(THEME.surface_container)
+}
+
 fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
     // If video is fullscreen, render fullscreen video surface and controls
     if let Some(ref player) = app.video_player {
@@ -2759,70 +3480,126 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
         }
     }
 
-    // Fullscreen photo viewer rendering
+    // Fullscreen viewer: one picture, zoomed and panned in bounds, with its
+    // caption, its position in the set, and a close control.
     if app.photo_fullscreen && app.video_player.is_none() {
-        // Floating exit back control in top-left
+        // The picture first: every chrome pixel below paints over it.
+        let picture = viewer_picture_pixel(x, y, app, media);
+
+        // Floating close control in the top-left. It is tested before the
+        // picture's placeholder text so the control is always legible.
         let exit_rect = Rect::new(24, 24, 48, 48);
         if exit_rect.contains(x, y) {
             if let Some(c) = draw_pill(x, y, exit_rect, 0xCC111214, Some(THEME.border)) {
+                if c != 0xCC111214 {
+                    return c;
+                }
                 if let Some(tc) = text(x, y, exit_rect.x + 18, exit_rect.y + 12, 2, b"<", 0xFFFFFFFF, 0xCC111214) {
                     return tc;
                 }
                 return c;
             }
         }
-        // Zoom indicator in top-right when zoomed
+
+        // Zoom readout, from the actual thousandths the viewer is using.
         if app.photo_zoom > 1000 {
             let z_rect = Rect::new(W - 88, 24, 64, 48);
             if z_rect.contains(x, y) {
-                let z_lbl: &[u8] = if app.photo_zoom >= 2500 { b"3.0x" } else if app.photo_zoom >= 1800 { b"2.0x" } else { b"1.5x" };
+                let mut z_buf = [0u8; 8];
+                let zn = write_zoom_label(app.photo_zoom, &mut z_buf);
                 if let Some(c) = draw_pill(x, y, z_rect, 0xCC111214, Some(THEME.border)) {
-                    if let Some(tc) = text(x, y, z_rect.x + 14, z_rect.y + 12, 2, z_lbl, THEME.primary, 0xCC111214) {
+                    let lw = outline_text::drawn_advance(&z_buf[..zn], 2, None)
+                        .unwrap_or_else(|| font::measure(&z_buf[..zn], 2));
+                    let lx = z_rect.x + (z_rect.w.saturating_sub(lw)) / 2;
+                    let ly = z_rect.y + (z_rect.h.saturating_sub(font::line_height(2))) / 2;
+                    if let Some(tc) = text(x, y, lx, ly, 2, &z_buf[..zn], THEME.primary, 0xCC111214) {
                         return tc;
                     }
                     return c;
                 }
             }
         }
-        // Fullscreen photo sampling with zoom
-        let view = Rect::new(0, 0, W, H);
-        match media {
-            Media::Wallpaper(idx) => {
-                let scene = &walls::SCENES[idx];
-                return scene_fit(scene, x, y, view);
-            }
-            Media::Photo(idx) => {
-                let Some(photo) = PHOTOS.get(idx) else {
-                    return THEME.surface;
+
+        // A video has no decoded frame to show; saying so is the honest
+        // picture, and it is drawn over the viewer's neutral fill.
+        if let Media::StorageItem(idx) = media {
+            if idx < app.storage_count && app.storage_items[idx].is_video {
+                if let Some(c) = text_centered(
+                    x,
+                    y,
+                    MARGIN,
+                    H / 2 - 10,
+                    W - 2 * MARGIN,
+                    2,
+                    b"No frame decoded",
+                    THEME.on_surface,
+                    THEME.surface_container,
+                ) {
+                    return c;
+                }
+                let note: &[u8] = if app.video_note_len > 0 {
+                    &app.video_note[..app.video_note_len]
+                } else {
+                    b"This build has no video decoder."
                 };
-                let t = (y * 255 / H).min(255);
-                return blend_argb(photo.primary_color, photo.secondary_color, t);
+                if let Some(c) = text_centered(
+                    x,
+                    y,
+                    MARGIN,
+                    H / 2 + 30,
+                    W - 2 * MARGIN,
+                    1,
+                    note,
+                    THEME.on_surface_variant,
+                    THEME.surface_container,
+                ) {
+                    return c;
+                }
             }
-            Media::StorageItem(idx) => {
-                if app.storage_items.get(idx).is_none() {
-                    return THEME.surface;
+        }
+
+        // Caption scrim: the title and the position line sit on a dark plate,
+        // because a caption over a photograph cannot borrow the app's surface
+        // without covering the picture it describes.
+        if VIEWER_CAPTION.contains(x, y) {
+            let scrim = 0xCC000000;
+            let inset = 12;
+            let cap_y = VIEWER_CAPTION.y + inset;
+            if app.viewer_caption_len > 0 {
+                let mut cap_buf = [0u8; 48];
+                let cap_w = W - 2 * MARGIN;
+                let n = font::ellipsize(&app.viewer_caption[..app.viewer_caption_len], 2, cap_w, &mut cap_buf);
+                if let Some(c) = text(x, y, MARGIN, cap_y, 2, &cap_buf[..n], 0xFFFFFFFF, scrim) {
+                    return c;
                 }
-                if app.detail_rgba_len > 0 && app.detail_w > 0 && app.detail_h > 0 {
-                    let zoom = app.photo_zoom.clamp(1000, 3000) as usize;
-                    let norm_x = (x * 1000 / zoom).min(W - 1);
-                    let norm_y = (y * 1000 / zoom).min(H - 1);
-                    let img_x = (norm_x * app.detail_w as usize / W).min(app.detail_w as usize - 1);
-                    let img_y = (norm_y * app.detail_h as usize / H).min(app.detail_h as usize - 1);
-                    let offset = (img_y * app.detail_w as usize + img_x) * 4;
-                    if let Some(colour) = decoded_detail_pixel(offset, app.detail_rgba_len) {
-                        return colour;
-                    }
+            }
+            if app.viewer_position_len > 0 {
+                let pos = &app.viewer_position[..app.viewer_position_len];
+                let pw = font::measure(pos, 1);
+                if let Some(c) = text(
+                    x,
+                    y,
+                    W - MARGIN - pw,
+                    cap_y + font::line_height(2) + 4,
+                    1,
+                    pos,
+                    0xD0FFFFFF,
+                    scrim,
+                ) {
+                    return c;
                 }
-                let thumb = unsafe { STORAGE_THUMBS[idx] };
-                if thumb.valid {
-                    if let Some(colour) = thumb.sample(
-                        x * THUMB_W / W,
-                        y * THUMB_H / H,
-                    ) {
-                        return colour;
-                    }
-                }
-                return THEME.surface_container;
+            }
+            return scrim;
+        }
+
+        return picture;
+    }
+
+    // Delete confirmation: the only path that unlinks a document.
+    if let Some(target) = app.delete_confirm {
+        if DELETE_SHEET.contains(x, y) {
+            if let Some(c) = delete_sheet_pixel(x, y, app, target) {
+                return c;
             }
         }
     }
@@ -2978,9 +3755,17 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
                 let mut mod_buf = [0u8; 48];
                 let modn = if let Media::StorageItem(idx) = media {
                     if idx < app.storage_count {
-                        let n = append_u64(&mut mod_buf, 0, app.storage_items[idx].mtime);
-                        let n = append(&mut mod_buf, n, b" ticks");
-                        append(&mut mod_buf, n, b" (device index)")
+                        let mtime = app.storage_items[idx].mtime;
+                        if mtime == 0 {
+                            // The platform's VFS leaves the index's modification
+                            // tick at zero for files it created without a clock
+                            // source. A single zero is not a date, and printing
+                            // "0 ticks" beside "Modified" reads as one.
+                            append(&mut mod_buf, 0, b"not recorded by the index")
+                        } else {
+                            let n = append_u64(&mut mod_buf, 0, mtime);
+                            append(&mut mod_buf, n, b" ticks (device index)")
+                        }
                     } else {
                         append(&mut mod_buf, 0, b"not in the index")
                     }
@@ -3028,10 +3813,23 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
                     // WHY the format line names the container and nothing
                     // more: the old line said "Direct Scanout", which claimed
                     // a display path this app does not own and cannot prove.
+                    // Every branch below is a format the name states; a name
+                    // this list does not know says it is unrecognised rather
+                    // than guessing a decoder from a prefix.
                     if name.ends_with(b".ppm") { b"PPM / Portable Pixmap" }
                     else if name.ends_with(b".bmp") { b"BMP / Bitmap Raster" }
                     else if name.ends_with(b".qoi") { b"QOI / Quite OK Image Format" }
+                    else if name.ends_with(b".raw") { b"RAW / Uncompressed Raster" }
+                    else if name.ends_with(b".mjpeg") || name.ends_with(b".mjpg") { b"MJPEG / Motion JPEG" }
+                    else if name.ends_with(b".png") { b"PNG / Portable Network Graphics" }
+                    else if name.ends_with(b".jpg") || name.ends_with(b".jpeg") { b"JPEG / JFIF Image" }
+                    else if name.ends_with(b".gif") { b"GIF / Graphics Interchange" }
+                    else if name.ends_with(b".webp") { b"WebP Image" }
+                    else if name.ends_with(b".avi") { b"AVI Video Container" }
                     else if name.ends_with(b".mp4") { b"MP4 Video Container" }
+                    else if name.ends_with(b".webm") { b"WebM Video Container" }
+                    else if name.ends_with(b".mkv") { b"Matroska Video Container" }
+                    else if name.ends_with(b".mov") { b"QuickTime Video Container" }
                     else { b"Unrecognised media format" }
                 } else {
                     b"Vector Silhouette Wall Reference"
@@ -3079,6 +3877,47 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
         };
         if shape == THEME.border {
             return THEME.border;
+        }
+
+        // A video has no frame this build can decode. The inspection view says
+        // so in place of the picture instead of filling the rectangle with a
+        // surface that reads as a blank photograph.
+        if let Media::StorageItem(idx) = media {
+            if idx < app.storage_count && app.storage_items[idx].is_video {
+                let cy = DETAIL_VIEW_Y0 + DETAIL_VIEW_H / 2 - 20;
+                if let Some(c) = text_centered(
+                    x,
+                    y,
+                    DETAIL_VIEW_X,
+                    cy,
+                    DETAIL_VIEW_W,
+                    2,
+                    b"No frame decoded",
+                    THEME.on_surface,
+                    THEME.surface_container,
+                ) {
+                    return c;
+                }
+                let note: &[u8] = if app.video_note_len > 0 {
+                    &app.video_note[..app.video_note_len]
+                } else {
+                    b"This build has no video decoder."
+                };
+                if let Some(c) = text_centered(
+                    x,
+                    y,
+                    DETAIL_VIEW_X,
+                    cy + 40,
+                    DETAIL_VIEW_W,
+                    1,
+                    note,
+                    THEME.on_surface_variant,
+                    THEME.surface_container,
+                ) {
+                    return c;
+                }
+                return THEME.surface_container;
+            }
         }
 
         if let Some(ref player) = app.video_player {
@@ -3229,16 +4068,22 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
         } else {
             false
         };
-        let fav_bg = if is_fav { THEME.warning } else { THEME.surface_container_high };
-        if let Some(c) = draw_pill(x, y, PHOTO_FAV_BTN, fav_bg, Some(THEME.border)) {
-            if c != fav_bg { return c; }
-            let fav_lbl = b"Fav";
-            let lw = outline_text::drawn_advance(fav_lbl, 2, None).unwrap_or_else(|| font::measure(fav_lbl, 2));
-            let lx = PHOTO_FAV_BTN.x + (PHOTO_FAV_BTN.w.saturating_sub(lw)) / 2;
-            let ly = PHOTO_FAV_BTN.y + (PHOTO_FAV_BTN.h.saturating_sub(font::line_height(2))) / 2;
-            let tc_color = if is_fav { 0xFFFFFFFF } else { THEME.on_surface };
-            if let Some(tc) = text(x, y, lx, ly, 2, fav_lbl, tc_color, fav_bg) { return tc; }
-            return fav_bg;
+        // WHY Favorite and Delete exist only for a stored document: a built-in
+        // wallpaper is not a file, so there is nothing to unlink and no stored
+        // favourite flag to flip. Painting the controls for one would offer an
+        // action the app cannot perform.
+        if matches!(media, Media::StorageItem(_)) {
+            let fav_bg = if is_fav { THEME.warning } else { THEME.surface_container_high };
+            if let Some(c) = draw_pill(x, y, PHOTO_FAV_BTN, fav_bg, Some(THEME.border)) {
+                if c != fav_bg { return c; }
+                let fav_lbl = b"Fav";
+                let lw = outline_text::drawn_advance(fav_lbl, 2, None).unwrap_or_else(|| font::measure(fav_lbl, 2));
+                let lx = PHOTO_FAV_BTN.x + (PHOTO_FAV_BTN.w.saturating_sub(lw)) / 2;
+                let ly = PHOTO_FAV_BTN.y + (PHOTO_FAV_BTN.h.saturating_sub(font::line_height(2))) / 2;
+                let tc_color = if is_fav { 0xFFFFFFFF } else { THEME.on_surface };
+                if let Some(tc) = text(x, y, lx, ly, 2, fav_lbl, tc_color, fav_bg) { return tc; }
+                return fav_bg;
+            }
         }
 
         let info_bg = if app.show_info_overlay { THEME.primary } else { THEME.surface_container_high };
@@ -3253,17 +4098,26 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
             return info_bg;
         }
 
-        if let Some(c) = draw_pill(x, y, PHOTO_DEL_BTN, THEME.surface_container_high, Some(THEME.error)) {
-            if c != THEME.surface_container_high { return c; }
-            let del_lbl = b"Del";
-            let lw = outline_text::drawn_advance(del_lbl, 2, None).unwrap_or_else(|| font::measure(del_lbl, 2));
-            let lx = PHOTO_DEL_BTN.x + (PHOTO_DEL_BTN.w.saturating_sub(lw)) / 2;
-            let ly = PHOTO_DEL_BTN.y + (PHOTO_DEL_BTN.h.saturating_sub(font::line_height(2))) / 2;
-            if let Some(tc) = text(x, y, lx, ly, 2, del_lbl, THEME.error, THEME.surface_container_high) { return tc; }
-            return THEME.surface_container_high;
+        if matches!(media, Media::StorageItem(_)) {
+            if let Some(c) = draw_pill(x, y, PHOTO_DEL_BTN, THEME.surface_container_high, Some(THEME.error)) {
+                if c != THEME.surface_container_high { return c; }
+                let del_lbl = b"Del";
+                let lw = outline_text::drawn_advance(del_lbl, 2, None).unwrap_or_else(|| font::measure(del_lbl, 2));
+                let lx = PHOTO_DEL_BTN.x + (PHOTO_DEL_BTN.w.saturating_sub(lw)) / 2;
+                let ly = PHOTO_DEL_BTN.y + (PHOTO_DEL_BTN.h.saturating_sub(font::line_height(2))) / 2;
+                if let Some(tc) = text(x, y, lx, ly, 2, del_lbl, THEME.error, THEME.surface_container_high) { return tc; }
+                return THEME.surface_container_high;
+            }
         }
 
-        if !app.show_wallpaper_sheet {
+        // A video is not a wallpaper stock: "Set as Wallpaper" is drawn only
+        // for the media the wallpaper action can actually take.
+        let can_be_wallpaper = match media {
+            Media::Wallpaper(_) => true,
+            Media::StorageItem(idx) => idx < app.storage_count && !app.storage_items[idx].is_video,
+            Media::Photo(_) => false,
+        };
+        if can_be_wallpaper && !app.show_wallpaper_sheet {
             if let Some(c) = draw_pill(x, y, SET_WALLPAPER_BTN, THEME.surface_container_high, Some(THEME.border)) {
                 if c != THEME.surface_container_high { return c; }
                 let lbl = b"Set as Wallpaper";
@@ -3273,7 +4127,7 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
                 if let Some(tc) = text(x, y, lx, ly, 2, lbl, THEME.on_surface, THEME.surface_container_high) { return tc; }
                 return THEME.surface_container_high;
             }
-        } else {
+        } else if app.show_wallpaper_sheet {
             // Target selector sheet modal (elevated surface with crisp border)
             if let Some(c) = draw_rounded_rect(x, y, WP_SHEET_RECT, radius::CARD, THEME.surface_container, Some(THEME.border), 2) {
                 if c != THEME.surface_container { return c; }
@@ -3585,81 +4439,241 @@ fn exit_to_launcher(surface: u32) -> ! {
     std::exit_with_code(0);
 }
 
+/// Hands a stored video to an installed package that declared its exact media
+/// type, and records why when none can take it.
+///
+/// WHY the exact media type and not the suffix: the platform's index read the
+/// document's own bytes, and the registry matches on what a package declared.
+/// A `.mp4` sent as `video/avi` would launch a decoder that cannot read it.
+///
+/// WHY `intent_dispatch` is not simply called: the registry resolves an intent
+/// to the FIRST declaration, which for MP4 is this gallery's own manifest. This
+/// app cannot decode a frame, so dispatching would hand the file back to
+/// itself. The listing is read in the registry's own order, and the first
+/// matching handler is checked before anything is dispatched.
+fn handoff_video(app: &mut GalleryApp, idx: usize) -> bool {
+    app.video_note_len = 0;
+    if idx >= app.storage_count {
+        return false;
+    }
+    let mut path_buf = [0u8; 64];
+    let path_len = app.storage_items[idx].path_len.min(64);
+    path_buf[..path_len].copy_from_slice(&app.storage_items[idx].path[..path_len]);
+    let Ok(path) = core::str::from_utf8(&path_buf[..path_len]) else {
+        note_video(app, b"The document's path is not text; it was not opened.");
+        return false;
+    };
+
+    let mut raw = [0u8; 2048];
+    let Some(record) = std::content::content_index_find_path(path, &mut raw) else {
+        note_video(app, b"The document index does not hold this file.");
+        return false;
+    };
+    let mime = record.mime;
+    if !mime.starts_with("video/") {
+        note_video(app, b"The index does not name this document as a video.");
+        return false;
+    }
+
+    let mut listing = [0u8; 4096];
+    let Ok(len) = std::content::intent_list(&mut listing) else {
+        note_mime(app, b"The intent registry could not be read for ", mime);
+        return false;
+    };
+    let dummy = std::content::IntentHandler {
+        kind: std::content::IntentKind::Mime,
+        value: "",
+        package_id: "",
+    };
+    let mut handlers = [dummy; 16];
+    let count = std::content::parse_intents(&listing[..len], &mut handlers);
+    let mut first: Option<&str> = None;
+    for handler in &handlers[..count] {
+        if handler.kind == std::content::IntentKind::Mime && handler.value == mime {
+            first = Some(handler.package_id);
+            break;
+        }
+    }
+
+    match first {
+        Some(package) if package != "org.interos.gallery" => {
+            match std::content::intent_dispatch(std::content::IntentKind::Mime, mime, path) {
+                Ok(_) => {
+                    std::log("[GALLERY] The video was handed to the app that declared its format.").ok();
+                    true
+                }
+                Err(_) => {
+                    note_mime(app, b"The app that declared ", mime);
+                    false
+                }
+            }
+        }
+        Some(_) => {
+            note_mime(
+                app,
+                b"Gallery is the registered handler for ",
+                mime,
+            );
+            false
+        }
+        None => {
+            note_mime(app, b"No installed app declared ", mime);
+            false
+        }
+    }
+}
+
+/// Sets the viewer's one-line note, built into its fixed buffer.
+fn note_video(app: &mut GalleryApp, note: &[u8]) {
+    let n = note.len().min(app.video_note.len());
+    app.video_note[..n].copy_from_slice(&note[..n]);
+    app.video_note_len = n;
+}
+
+/// Sets a note naming a media type and the reason it was not opened.
+fn note_mime(app: &mut GalleryApp, prefix: &[u8], mime: &str) {
+    let mut buf = [0u8; 96];
+    let mut n = append(&mut buf, 0, prefix);
+    n = append(&mut buf, n, mime.as_bytes());
+    let reason: &[u8] = if prefix.starts_with(b"Gallery is the registered handler") {
+        b"; it has no video decoder."
+    } else if prefix.starts_with(b"The app that declared") {
+        b" could not be launched."
+    } else if prefix.starts_with(b"No installed app declared") {
+        b"; no frame can be decoded here."
+    } else {
+        b"."
+    };
+    n = append(&mut buf, n, reason);
+    let n = n.min(app.video_note.len());
+    app.video_note[..n].copy_from_slice(&buf[..n]);
+    app.video_note_len = n;
+}
+
+/// Deletes the document the confirmation names, and says what happened.
+///
+/// WHY the result is checked and not assumed: `fs_unlink` is the only call that
+/// removes the bytes, and it can refuse. The old code logged "Media deleted"
+/// whether or not the syscall succeeded. A refused delete keeps the item and
+/// reports the refusal; a successful one names what left the device.
+fn confirm_delete(app: &mut GalleryApp) {
+    let Some(media) = app.delete_confirm.take() else {
+        return;
+    };
+    let Some(idx) = deletable_storage_index(media, app.storage_count) else {
+        app.set_toast(b"Built-in wallpapers cannot be deleted", true);
+        return;
+    };
+    let mut path_buf = [0u8; 64];
+    let path_len = app.storage_items[idx].path_len.min(64);
+    path_buf[..path_len].copy_from_slice(&app.storage_items[idx].path[..path_len]);
+    let mut name_buf = [0u8; 48];
+    let name_len = app.storage_items[idx].name_len.min(48);
+    name_buf[..name_len].copy_from_slice(&app.storage_items[idx].name[..name_len]);
+
+    let unlinked = match core::str::from_utf8(&path_buf[..path_len]) {
+        Ok(path) => std::fs_unlink(path).is_ok(),
+        Err(_) => false,
+    };
+    if !unlinked {
+        std::log("[GALLERY] The document could not be removed; it is still on the device.").ok();
+        app.set_toast(b"Delete failed; the file is still there", true);
+        return;
+    }
+
+    // The bytes are gone; now the in-memory list and the thumbnails must agree.
+    unsafe {
+        delete_storage_item_at(
+            &mut app.storage_items,
+            &mut *core::ptr::addr_of_mut!(STORAGE_THUMBS),
+            &mut app.storage_count,
+            idx,
+        );
+    }
+
+    // The viewer's list still names the old storage slots. Drop the deleted
+    // one and shift every later slot down to where the array moved it.
+    let removed_pos = app.viewer_items[..app.viewer_len]
+        .iter()
+        .position(|entry| *entry == media);
+    let mut out = 0usize;
+    for i in 0..app.viewer_len {
+        let entry = app.viewer_items[i];
+        if Some(i) == removed_pos {
+            continue;
+        }
+        let shifted = match entry {
+            Media::StorageItem(slot) if slot > idx => Media::StorageItem(slot - 1),
+            other => other,
+        };
+        app.viewer_items[out] = shifted;
+        out += 1;
+    }
+    app.viewer_len = out;
+
+    app.refresh_media_state();
+    app.show_info_overlay = false;
+    app.show_wallpaper_sheet = false;
+    app.reset_viewer_transform();
+
+    let mut msg = [0u8; 48];
+    let mut n = append(&mut msg, 0, b"Deleted ");
+    n = append(&mut msg, n, &name_buf[..name_len]);
+    app.set_toast(&msg[..n], false);
+    std::log("[GALLERY] Media deleted via fs_unlink.").ok();
+
+    if app.viewer_len == 0 {
+        app.open = None;
+    } else {
+        let keep = removed_pos
+            .and_then(|position| viewer_index_after_removal(position, position, app.viewer_len))
+            .unwrap_or(0)
+            .min(app.viewer_len - 1);
+        app.show_viewer_index(keep);
+    }
+}
+
+/// Handles the platform's Back input: unwinds one surface, then leaves.
+fn navigate_back(app: &mut GalleryApp) -> Tap {
+    if app.delete_confirm.is_some() {
+        app.delete_confirm = None;
+        return Tap::Redraw(Dirty::All);
+    }
+    if app.show_wallpaper_sheet {
+        app.show_wallpaper_sheet = false;
+        return Tap::Redraw(Dirty::All);
+    }
+    if app.show_info_overlay {
+        app.show_info_overlay = false;
+        return Tap::Redraw(Dirty::All);
+    }
+    if app.photo_fullscreen {
+        app.photo_fullscreen = false;
+        app.reset_viewer_transform();
+        std::log("[GALLERY] Exited fullscreen photo viewer.").ok();
+        return Tap::Redraw(Dirty::All);
+    }
+    if app.open.is_some() {
+        if app.opened_from_caller {
+            return Tap::Leave("[GALLERY] Returning to caller.");
+        }
+        app.open = None;
+        app.video_player = None;
+        app.gif_player = None;
+        std::log("[GALLERY] Closed photo inspection view.").ok();
+        return Tap::Redraw(Dirty::All);
+    }
+    Tap::Leave("[GALLERY] Back pressed. Exiting to launcher.")
+}
+
 /// Opens a media record in the inspection view, reading the real state its meta
 /// line describes.
 fn open_media(app: &mut GalleryApp, media: Media) -> Tap {
     app.open = Some(media);
-    app.show_info_overlay = false;
-    match media {
-        Media::Wallpaper(idx) => {
-            app.video_player = None;
-            app.gif_player = None;
-            app.detail_title_len = 0;
-            let scene = &walls::SCENES[idx];
-            app.detail_title = scene.name;
-            let home = stored_scene_key("ui.wallpaper.home");
-            let lock = stored_scene_key("ui.wallpaper.lock");
-            app.detail_meta_len = build_applied_label(scene, home, lock, &mut app.detail_meta);
-            std::log("[GALLERY] Wallpaper opened in inspection view.").ok();
-        }
-        Media::Photo(idx) => {
-            app.video_player = None;
-            app.gif_player = None;
-            app.detail_title_len = 0;
-            if let Some(photo) = PHOTOS.get(idx) {
-                app.detail_title = photo.title.as_bytes();
-                let mut n = append(&mut app.detail_meta, 0, b"Photo, ");
-                n = append(&mut app.detail_meta, n, photo.date.as_bytes());
-                n = append(&mut app.detail_meta, n, b", ");
-                app.detail_meta_len = append(&mut app.detail_meta, n, photo.meta.as_bytes());
-                std::log("[GALLERY] Photo tapped: inspection view opened.").ok();
-            }
-        }
-        Media::StorageItem(idx) => {
-            if idx < app.storage_count {
-                let item = app.storage_items[idx];
-                app.detail_title_buf = item.name;
-                app.detail_title_len = item.name_len;
-                app.detail_title = b"";
-                if item.is_video {
-                    // WHY the player starts with an undetermined duration
-                    // and codec: the old code opened every video with a
-                    // hardcoded thirty-second duration and a codec guessed
-                    // from the file extension, and the scrubber then showed
-                    // that duration as though it had been measured. The
-                    // gallery cannot parse a container, so both are unknown.
-                    let player = VideoPlayerState::new_undetermined();
-                    app.video_player = Some(player);
-                    let mut n = append(&mut app.detail_meta, 0, b"Video, ");
-                    n = append(&mut app.detail_meta, n, VideoCodec::Undetermined.as_str().as_bytes());
-                    app.detail_meta_len = n;
-                    std::log("[GALLERY] Storage video opened in video player.").ok();
-                } else {
-                    app.video_player = None;
-                    app.gif_player = None;
-                    app.load_detail_image(idx);
-                    let kind: &[u8] = if app.gif_player.is_some() {
-                        b"Animated GIF, "
-                    } else {
-                        b"Photo, "
-                    };
-                    let mut n = append(&mut app.detail_meta, 0, kind);
-                    n = append_u64(&mut app.detail_meta, n, app.detail_w as u64);
-                    n = append(&mut app.detail_meta, n, b"x");
-                    n = append_u64(&mut app.detail_meta, n, app.detail_h as u64);
-                    n = append(&mut app.detail_meta, n, b", ");
-                    if let Some(ref gif) = app.gif_player {
-                        n = append_u64(&mut app.detail_meta, n, gif.animation.info().frame_count as u64);
-                        n = append(&mut app.detail_meta, n, b" frames, ");
-                    }
-                    n = append_u64(&mut app.detail_meta, n, item.size);
-                    n = append(&mut app.detail_meta, n, b" bytes");
-                    app.detail_meta_len = n;
-                    std::log("[GALLERY] Storage photo opened in inspection view.").ok();
-                }
-            }
-        }
-    }
+    app.present_media(media);
+    app.rebuild_viewer_items(media);
+    app.refresh_viewer_label();
+    app.reset_viewer_transform();
     Tap::Redraw(Dirty::All)
 }
 
@@ -3691,10 +4705,11 @@ fn create_screenshot(app: &mut GalleryApp) {
             }
         }
     }
-    app.rescan_storage();
-    // The capture wrote a document and re-read the index, so the header's
-    // measured counts are rebuilt from the list as it now stands.
-    app.refresh_subtitle();
+    // The capture wrote a document and re-read the index, so the counts, the
+    // timeline plan and the header sentence are rebuilt from the list as it
+    // now stands.
+    let _ = app.rescan_storage();
+    app.refresh_media_state();
 }
 
 fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
@@ -3704,35 +4719,72 @@ fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
         return Tap::Redraw(Dirty::All);
     }
 
-    // Main header back button: return to caller (e.g. Camera).
+    // A pending delete confirmation owns the screen until it is answered.
+    // WHY it is first: it is modal, and a tap that slipped past it must not
+    // reach the delete control that opened it or any control under the sheet.
+    if app.delete_confirm.is_some() {
+        if DELETE_CONFIRM_BTN.contains(x, y) {
+            confirm_delete(app);
+            return Tap::Redraw(Dirty::All);
+        }
+        if DELETE_CANCEL_BTN.contains(x, y) || !DELETE_SHEET.contains(x, y) {
+            app.delete_confirm = None;
+            return Tap::Redraw(Dirty::All);
+        }
+        return Tap::None;
+    }
+
+    // The full-screen viewer's own controls. The close control lives here, not
+    // inside the home-strip branch it used to be nested in -- it is at the top
+    // of the screen, and a tap on it has to be reachable.
+    if app.photo_fullscreen && app.open.is_some() && app.video_player.is_none() {
+        let exit_rect = Rect::new(24, 24, 48, 48);
+        if exit_rect.contains(x, y) {
+            app.photo_fullscreen = false;
+            app.reset_viewer_transform();
+            std::log("[GALLERY] Exited fullscreen photo viewer.").ok();
+            return Tap::Redraw(Dirty::All);
+        }
+        // The picture itself is driven by pinch, pan and double-tap; a single
+        // tap on it changes nothing. The system home strip still falls through
+        // so its tap can close the viewer.
+        if !HOME_HIT.contains(x, y) {
+            return Tap::None;
+        }
+    }
+
+
+    // The inspection view's Full control. It is tested HERE and not inside the
+    // home-strip branch: it is drawn in the app bar at the top of the screen,
+    // and a control that is painted must be reachable where it is painted.
+    if app.open.is_some()
+        && !app.photo_fullscreen
+        && app.video_player.is_none()
+        && PHOTO_FULLSCREEN_BTN.contains(x, y)
+    {
+        app.photo_fullscreen = true;
+        app.reset_viewer_transform();
+        std::log("[GALLERY] Entered fullscreen photo viewer.").ok();
+        return Tap::Redraw(Dirty::All);
+    }
+
     if app.launched_from_caller && app.open.is_none() && HEADER_BACK.contains(x, y) {
         return Tap::Leave("[GALLERY] Returning to caller.");
     }
 
     // Bottom home gesture: closes the inspection view, else leaves the app.
     if HOME_HIT.contains(x, y) {
-        if app.photo_fullscreen && app.video_player.is_none() {
-            let exit_rect = Rect::new(24, 24, 48, 48);
-            if exit_rect.contains(x, y) {
-                app.photo_fullscreen = false;
-                app.photo_zoom = 1000;
-                std::log("[GALLERY] Exited fullscreen photo viewer.").ok();
-                return Tap::Redraw(Dirty::All);
-            }
-            if app.photo_zoom <= 1000 {
-                app.photo_zoom = 2000;
-                std::log("[GALLERY] Photo zoomed in (2.0x).").ok();
-            } else {
-                app.photo_zoom = 1000;
-                std::log("[GALLERY] Photo reset to 1.0x zoom.").ok();
-            }
+        if app.photo_fullscreen {
+            app.photo_fullscreen = false;
+            app.reset_viewer_transform();
+            std::log("[GALLERY] Exited fullscreen photo viewer.").ok();
             return Tap::Redraw(Dirty::All);
         }
 
         if app.video_player.is_none() && PHOTO_FULLSCREEN_BTN.contains(x, y) {
-            app.photo_fullscreen = true;
-            std::log("[GALLERY] Entered fullscreen photo viewer.").ok();
-            return Tap::Redraw(Dirty::All);
+            // Unreachable: the app-bar control is handled above. Kept out of
+            // the way rather than duplicated with a second geometry.
+            return Tap::None;
         }
 
         if let Some(ref mut player) = app.video_player {
@@ -3740,11 +4792,6 @@ fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
                 player.is_fullscreen = false;
                 return Tap::Redraw(Dirty::All);
             }
-        }
-        if app.photo_fullscreen {
-            app.photo_fullscreen = false;
-            app.photo_zoom = 1000;
-            return Tap::Redraw(Dirty::All);
         }
         if app.show_info_overlay {
             app.show_info_overlay = false;
@@ -3844,7 +4891,18 @@ fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
             }
 
             if SET_WALLPAPER_BTN.contains(x, y) {
-                app.show_wallpaper_sheet = true;
+                let can_be_wallpaper = match app.open {
+                    Some(Media::Wallpaper(_)) => true,
+                    Some(Media::StorageItem(idx)) => {
+                        idx < app.storage_count && !app.storage_items[idx].is_video
+                    }
+                    _ => false,
+                };
+                if can_be_wallpaper {
+                    app.show_wallpaper_sheet = true;
+                    return Tap::Redraw(Dirty::All);
+                }
+                app.set_toast(b"A video cannot be set as wallpaper", true);
                 return Tap::Redraw(Dirty::All);
             }
 
@@ -3863,7 +4921,12 @@ fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
                             if let Ok(path) =
                                 core::str::from_utf8(&item.path[..item.path_len])
                             {
-                                dispatch_open_with(path);
+                                let opened = dispatch_open_with(path);
+                                if opened {
+                                    app.set_toast(b"Opened in another app", false);
+                                } else {
+                                    app.set_toast(b"No other app declared this format", true);
+                                }
                             }
                         }
                     } else {
@@ -3884,42 +4947,17 @@ fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
             }
 
             if PHOTO_DEL_BTN.contains(x, y) {
-                if let Some(Media::StorageItem(idx)) = app.open {
-                    if idx < app.storage_count {
-                        let item = &app.storage_items[idx];
-                        if let Ok(path) = core::str::from_utf8(&item.path[..item.path_len]) {
-                            // WHY fs_unlink is called here: the user explicitly
-                            // tapped the delete button for this photo. Logging that
-                            // the file was deleted without invoking the filesystem
-                            // syscall leaves the actual file on storage, so it would
-                            // resurrect on the next launch.
-                            let _ = std::fs_unlink(path);
-                        }
-
-                        // Shift items and thumbnails down so the slot index remains contiguous.
-                        unsafe {
-                            delete_storage_item_at(
-                                &mut app.storage_items,
-                                &mut *core::ptr::addr_of_mut!(STORAGE_THUMBS),
-                                &mut app.storage_count,
-                                idx,
-                            );
-                        }
-
-                        app.open = None;
-                        app.video_player = None;
-                        app.gif_player = None;
-                        app.show_info_overlay = false;
-                        app.show_wallpaper_sheet = false;
-                        // WHY the subtitle is rebuilt here: it counts the
-                        // media the gallery holds, and the list just lost an
-                        // item. Leaving the boot-time count on screen would
-                        // quote a photo the grid no longer has.
-                        app.refresh_subtitle();
-                        std::log("[GALLERY] Media deleted via fs_unlink.").ok();
+                if let Some(media) = app.open {
+                    if deletable_storage_index(media, app.storage_count).is_some() {
+                        // WHY the confirmation: the actual unlink happens in
+                        // `confirm_delete`, after the sheet's Delete. A tap here
+                        // only asks the question.
+                        app.delete_confirm = Some(media);
                         return Tap::Redraw(Dirty::All);
                     }
                 }
+                app.set_toast(b"This item cannot be deleted", true);
+                return Tap::Redraw(Dirty::All);
             }
 
             if PHOTO_FAV_BTN.contains(x, y) {
@@ -3946,16 +4984,7 @@ fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
             }
 
             if std::design::back_button::contains(x, y) {
-                if app.opened_from_caller {
-                    return Tap::Leave("[GALLERY] Returning to caller.");
-                }
-                app.open = None;
-                app.video_player = None;
-                app.gif_player = None;
-                app.show_info_overlay = false;
-                app.show_wallpaper_sheet = false;
-                std::log("[GALLERY] Closed photo inspection view.").ok();
-                return Tap::Redraw(Dirty::All);
+                return navigate_back(app);
             }
             if CLOSE.contains(x, y) {
                 app.open = None;
@@ -3982,17 +5011,13 @@ fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
     // WHY the chips are tested before the tab row: the chip row is the filter
     // over the grid, and a tap on a chip has to change what the grid holds.
     // A chip that is drawn but cannot be chosen is an affordance that lies.
-    if let Some(index) = chip_at(x, y) {
-        if !filters_available(app) {
-            return Tap::None;
-        }
+    if let Some(index) = chip_at(x, y, app) {
         let filter = Filter::from_index(index);
         if filter == app.filter {
             return Tap::None;
         }
-        app.filter = filter;
-        app.reset_scroll();
-        std::log("[GALLERY] Gallery filter chip switched.").ok();
+        app.apply_filter(filter);
+        std::log("[GALLERY] Gallery filter chip switched; the selection was stored.").ok();
         return Tap::Redraw(Dirty::All);
     }
 
@@ -4002,7 +5027,9 @@ fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
         let new_tab = GalleryTab::from_index(tab_idx);
         if new_tab != app.tab {
             app.tab = new_tab;
-            app.filter = Filter::All;
+            // WHY the filter is kept: it is a stored preference, and a tab is
+            // a destination. Resetting it on every tab switch would forget the
+            // choice the user made one tap earlier.
             app.reset_scroll();
             std::log("[GALLERY] Tab switched.").ok();
             return Tap::Redraw(Dirty::All);
@@ -4014,10 +5041,24 @@ fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
     if y >= GRID_TOP && y < GRID_BOTTOM {
         match app.tab {
             GalleryTab::Photos => {
-                if let (Some(col), Some(row)) = (col_of(x), row_of(app, y)) {
-                    let index = row * 3 + col;
-                    if let Some(media) = app.photo_at(index) {
-                        return open_media(app, media);
+                // The same plan the painter used, so a tap opens the cell that
+                // is under the finger even when the row is a section heading
+                // or the last media row is short.
+                let rel = y - GRID_TOP + app.scroll.offset;
+                if let Some((row, _inside)) = app.grid_plan.row_at(rel) {
+                    if let GridRow::Media { .. } = app.grid_plan.rows[row] {
+                        if let Some(col) = col_of(x) {
+                            if let Some(media) = app.grid_plan.media_at(row, col) {
+                                if let Media::StorageItem(idx) = media {
+                                    if idx < app.storage_count && app.storage_items[idx].is_video {
+                                        if handoff_video(app, idx) {
+                                            return Tap::Redraw(Dirty::All);
+                                        }
+                                    }
+                                }
+                                return open_media(app, media);
+                            }
+                        }
                     }
                 }
             }
@@ -4025,6 +5066,9 @@ fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
                 if let (Some(col), Some(row)) = (video_col_of(x), video_row_of(app, y)) {
                     let index = row * 2 + col;
                     if let Some(storage_idx) = app.video_at(index) {
+                        if handoff_video(app, storage_idx) {
+                            return Tap::Redraw(Dirty::All);
+                        }
                         return open_media(app, Media::StorageItem(storage_idx));
                     }
                 }
@@ -4038,16 +5082,16 @@ fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
                         match album_idx {
                             0 => {
                                 app.tab = GalleryTab::Photos;
-                                app.filter = Filter::All;
+                                app.apply_filter(Filter::All);
                             }
                             1 => app.tab = GalleryTab::Screenshots,
                             2 => {
                                 app.tab = GalleryTab::Photos;
-                                app.filter = Filter::All;
+                                app.apply_filter(Filter::All);
                             }
                             3 => {
                                 app.tab = GalleryTab::Photos;
-                                app.filter = Filter::Wallpapers;
+                                app.apply_filter(Filter::Wallpapers);
                             }
                             _ => {}
                         }
@@ -4079,9 +5123,11 @@ pub extern "C" fn _start() -> ! {
     std::log("[GALLERY (Ring 3)] Gallery online.").ok();
 
     let mut app = GalleryApp::new();
-    app.rescan_storage();
-    let photos_count = app.device_photos_count();
-    app.subtitle_len = build_subtitle(&mut app.subtitle, walls::SCENES.len(), photos_count);
+    let _ = app.rescan_storage();
+    // The stored filter is read after the scan, because the counts that label
+    // the chips are measured from the list the scan produced.
+    app.load_filter();
+    app.refresh_media_state();
     app.catalogue_note_len = build_catalogue_note(&mut app.catalogue_note);
 
     let _ = app.handle_pending_intent();
@@ -4201,7 +5247,10 @@ pub extern "C" fn _start() -> ! {
                     picture_only = false;
                 }
                 if tick_dirty && surface > 0 {
-                    if picture_only {
+                    // The picture-only shortcut writes the viewer's inset
+                    // rectangle, which is not where a full-screen viewer draws.
+                    // In fullscreen the changed frame needs the whole surface.
+                    if picture_only && !app.photo_fullscreen {
                         render_detail_picture(surface, &app);
                     } else {
                         render_gallery_ui(surface, &app);
@@ -4243,11 +5292,68 @@ pub extern "C" fn _start() -> ! {
                         exit_to_launcher(surface);
                     }
 
-                    // Pinch zoom in photo view
-                    if app.open.is_some() && app.video_player.is_none() && input.scale_milli != 1000 {
-                        let new_zoom = (app.photo_zoom as u64 * input.scale_milli as u64 / 1000) as u32;
-                        app.photo_zoom = new_zoom.clamp(1000, 3000);
+                    // Platform Back unwinds one surface, then leaves.
+                    if input.kind == 6 {
+                        match navigate_back(&mut app) {
+                            Tap::Leave(msg) => {
+                                std::log(msg).ok();
+                                exit_to_launcher(surface);
+                            }
+                            Tap::Redraw(d) => dirty = dirty.widen(d),
+                            Tap::None => {}
+                        }
+                        continue;
+                    }
+
+                    // Pinch zoom, clamped to the viewer's own scale range.
+                    if app.open.is_some()
+                        && app.photo_fullscreen
+                        && app.video_player.is_none()
+                        && input.scale_milli != 1000
+                    {
+                        let new_zoom =
+                            (app.photo_zoom as u64 * input.scale_milli as u64 / 1000) as u32;
+                        app.zoom_viewer(new_zoom);
                         dirty = Dirty::All;
+                    }
+
+                    // Double-tap toggles between fit and 2x, clamped to bounds.
+                    if input.kind == 2
+                        && app.open.is_some()
+                        && app.photo_fullscreen
+                        && app.video_player.is_none()
+                    {
+                        let target = double_tap_zoom(app.photo_zoom);
+                        app.zoom_viewer(target);
+                        if target == 1000 {
+                            app.pan_x = 0;
+                            app.pan_y = 0;
+                        }
+                        std::log("[GALLERY] Double tap changed the viewer zoom.").ok();
+                        dirty = Dirty::All;
+                    }
+
+                    // In the full-screen viewer a drag pans a zoomed picture;
+                    // a horizontal fling at fit scale steps to the next item
+                    // without wrapping. A fling is the swipe gesture, so the
+                    // pan events of the same movement do not also step.
+                    if (input.kind == 4 || input.kind == 10)
+                        && app.open.is_some()
+                        && app.photo_fullscreen
+                        && app.video_player.is_none()
+                    {
+                        if app.photo_zoom > 1000 {
+                            app.pan_viewer(input.dx, input.dy);
+                            dirty = Dirty::All;
+                        } else if input.kind == 10
+                            && input.dx.abs() >= 48
+                            && input.dx.abs() > input.dy.abs()
+                        {
+                            if app.step_viewer(input.dx < 0) {
+                                std::log("[GALLERY] Viewer stepped to another item.").ok();
+                            }
+                            dirty = Dirty::All;
+                        }
                     }
 
                     // A pan or a fling over the grid scrolls the grid.

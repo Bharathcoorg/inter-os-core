@@ -222,6 +222,25 @@ impl Filter {
         }
     }
 
+    pub const fn index(self) -> usize {
+        match self {
+            Filter::All => 0,
+            Filter::Wallpapers => 1,
+            Filter::Photos => 2,
+            Filter::Videos => 3,
+        }
+    }
+
+    /// The label the filter row draws, without a count.
+    pub const fn label(self) -> &'static [u8] {
+        match self {
+            Filter::All => b"All",
+            Filter::Wallpapers => b"Wallpapers",
+            Filter::Photos => b"Photos",
+            Filter::Videos => b"Videos",
+        }
+    }
+
     pub fn shows_wallpapers(self) -> bool {
         matches!(self, Filter::All | Filter::Wallpapers)
     }
@@ -233,6 +252,517 @@ impl Filter {
     pub fn shows_videos(self) -> bool {
         matches!(self, Filter::All | Filter::Videos)
     }
+
+    /// The number of media items this filter selects.
+    pub fn count(self, counts: FilterCounts) -> usize {
+        match self {
+            Filter::All => counts.all,
+            Filter::Wallpapers => counts.wallpapers,
+            Filter::Photos => counts.photos,
+            Filter::Videos => counts.videos,
+        }
+    }
+
+    /// The value the filter is persisted as.
+    pub const fn setting_byte(self) -> u8 {
+        b'0' + self.index() as u8
+    }
+}
+
+/// How many media items each filter selects.
+///
+/// WHY this is a measured struct and not four separate counts: every filter
+/// chip shows its own count, and a chip whose count came from a different
+/// measurement than the grid behind it would be a filter that lies about what
+/// tapping it shows.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct FilterCounts {
+    pub all: usize,
+    pub wallpapers: usize,
+    pub photos: usize,
+    pub videos: usize,
+}
+
+/// The counts behind the four filter chips.
+pub const fn filter_counts(
+    wallpapers: usize,
+    photos: usize,
+    videos: usize,
+) -> FilterCounts {
+    FilterCounts {
+        all: wallpapers + photos + videos,
+        wallpapers,
+        photos,
+        videos,
+    }
+}
+
+/// Parses the stored filter. An absent or unrecognised value selects `All`,
+/// which is the only safe default: it cannot hide media the user has.
+pub fn filter_from_setting(raw: &[u8]) -> Filter {
+    for &byte in raw {
+        match byte {
+            b'0'..=b'3' => return Filter::from_index((byte - b'0') as usize),
+            b' ' | b'\t' | b'\r' | b'\n' => continue,
+            _ => return Filter::All,
+        }
+    }
+    Filter::All
+}
+
+/// Builds a chip label such as `Photos 3` into `out` and returns its length.
+pub fn write_filter_label(filter: Filter, counts: FilterCounts, out: &mut [u8]) -> usize {
+    let mut n = append(out, 0, filter.label());
+    n = append(out, n, b" ");
+    append_u64(out, n, filter.count(counts) as u64)
+}
+
+// -----------------------------------------------------------------------------
+// Timeline grouping and the grid's row plan
+// -----------------------------------------------------------------------------
+/// The width of the grid, in cells.
+pub const GRID_COLUMNS: usize = 3;
+
+/// The height of one square media cell.
+pub const GRID_CELL: usize = 216;
+
+/// The height of a timeline section heading row.
+pub const SECTION_ROW_H: usize = 40;
+
+/// The most media entries a plan can hold.
+pub const MAX_GRID_ENTRIES: usize = 48;
+
+/// The most rows a plan can hold.
+pub const MAX_GRID_ROWS: usize = 64;
+
+/// The heading a run of media is filed under.
+///
+/// WHY the only dated group is "Newest first": the platform's document index
+/// reports a modification *tick*, not a calendar date, and this app has no
+/// wall-clock capability. A heading such as "Today" or "March" would be a
+/// date the platform never supplied. `Undated` is what the index says when it
+/// holds no modification time at all -- which is the current filesystem's
+/// answer for every file it creates.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TimelineGroup {
+    BuiltIn,
+    Newest,
+    Earlier,
+    Undated,
+}
+
+impl TimelineGroup {
+    pub const fn label(self) -> &'static [u8] {
+        match self {
+            TimelineGroup::BuiltIn => b"Wallpapers",
+            TimelineGroup::Newest => b"Newest first",
+            TimelineGroup::Earlier => b"Earlier",
+            TimelineGroup::Undated => b"Time not recorded",
+        }
+    }
+}
+
+/// The group a document's modification tick belongs to.
+pub fn timeline_group(mtime: u64, newest: u64) -> TimelineGroup {
+    if mtime == 0 {
+        TimelineGroup::Undated
+    } else if mtime == newest {
+        TimelineGroup::Newest
+    } else {
+        TimelineGroup::Earlier
+    }
+}
+
+/// One row of the grid: a section heading or a run of media cells.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum GridRow {
+    Section { group: TimelineGroup, count: usize },
+    Media { first: usize, count: usize },
+}
+
+/// The immutable layout of the Photos grid for one filter.
+///
+/// WHY the plan is built once per list change: the renderer runs once per
+/// pixel, and a plan assembled there would be reassembled a million times for
+/// one frame. It holds indices, not copies of the records, so the thumbnails
+/// and the tapped media still resolve to the same storage slot.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct GridPlan {
+    pub entries: [Media; MAX_GRID_ENTRIES],
+    pub entry_count: usize,
+    pub rows: [GridRow; MAX_GRID_ROWS],
+    pub row_count: usize,
+    pub tops: [usize; MAX_GRID_ROWS],
+    pub content_h: usize,
+}
+
+impl GridPlan {
+    pub const EMPTY: Self = Self {
+        entries: [Media::Photo(0); MAX_GRID_ENTRIES],
+        entry_count: 0,
+        rows: [GridRow::Media { first: 0, count: 0 }; MAX_GRID_ROWS],
+        row_count: 0,
+        tops: [0; MAX_GRID_ROWS],
+        content_h: 0,
+    };
+
+    /// Lays out the media the filter selects.
+    ///
+    /// The wallpapers are the device's built-in artwork, so they are their own
+    /// section. The stored documents are ordered by the modification tick the
+    /// index reports, newest first; documents with no recorded time follow
+    /// under a heading that says exactly that.
+    pub fn build(
+        wallpaper_count: usize,
+        photo_count: usize,
+        items: &[StorageMediaItem],
+        filter: Filter,
+    ) -> Self {
+        let mut plan = Self::EMPTY;
+
+        if filter.shows_wallpapers() && wallpaper_count > 0 {
+            plan.begin_section(TimelineGroup::BuiltIn);
+            for index in 0..wallpaper_count.min(MAX_GRID_ENTRIES) {
+                plan.push_media(Media::Wallpaper(index));
+            }
+        }
+
+        let mut order = [0usize; MAX_STORAGE_ITEMS];
+        let mut order_len = 0usize;
+        let mut newest = 0u64;
+        let limit = items.len().min(MAX_STORAGE_ITEMS);
+        for index in 0..limit {
+            let item = &items[index];
+            let visible = if item.is_video {
+                filter.shows_videos()
+            } else {
+                filter.shows_ledger()
+            };
+            if !visible {
+                continue;
+            }
+            order[order_len] = index;
+            order_len += 1;
+            if item.mtime > newest {
+                newest = item.mtime;
+            }
+        }
+
+        // Insertion sort: at most sixteen stored items, and no heap to sort
+        // them with. Equal times keep their index order, so the grid is stable
+        // between scans.
+        for slot in 1..order_len {
+            let value = order[slot];
+            let key = items[value].mtime;
+            let mut at = slot;
+            while at > 0 && newer_than(key, items[order[at - 1]].mtime) {
+                order[at] = order[at - 1];
+                at -= 1;
+            }
+            order[at] = value;
+        }
+
+        let mut current: Option<TimelineGroup> = None;
+        for slot in 0..order_len {
+            let index = order[slot];
+            let group = timeline_group(items[index].mtime, newest);
+            if current != Some(group) {
+                plan.begin_section(group);
+                current = Some(group);
+            }
+            plan.push_media(Media::StorageItem(index));
+        }
+
+        if filter.shows_ledger() && photo_count > 0 {
+            if current != Some(TimelineGroup::Undated) {
+                plan.begin_section(TimelineGroup::Undated);
+            }
+            for index in 0..photo_count.min(MAX_GRID_ENTRIES) {
+                plan.push_media(Media::Photo(index));
+            }
+        }
+
+        plan.finish();
+        plan
+    }
+
+    fn begin_section(&mut self, group: TimelineGroup) {
+        if self.row_count > 0 {
+            if let GridRow::Section { .. } = self.rows[self.row_count - 1] {
+                self.rows[self.row_count - 1] = GridRow::Section { group, count: 0 };
+                return;
+            }
+        }
+        if self.row_count < MAX_GRID_ROWS {
+            self.rows[self.row_count] = GridRow::Section { group, count: 0 };
+            self.row_count += 1;
+        }
+    }
+
+    fn push_media(&mut self, media: Media) {
+        if self.entry_count >= MAX_GRID_ENTRIES {
+            return;
+        }
+        let entry = self.entry_count;
+        self.entries[entry] = media;
+        self.entry_count += 1;
+        if self.row_count > 0 {
+            if let GridRow::Media { first, count } = self.rows[self.row_count - 1] {
+                if count < GRID_COLUMNS {
+                    self.rows[self.row_count - 1] = GridRow::Media {
+                        first,
+                        count: count + 1,
+                    };
+                    return;
+                }
+            }
+        }
+        if self.row_count < MAX_GRID_ROWS {
+            self.rows[self.row_count] = GridRow::Media {
+                first: entry,
+                count: 1,
+            };
+            self.row_count += 1;
+        }
+    }
+
+    fn finish(&mut self) {
+        let mut top = 0usize;
+        let mut row = 0usize;
+        while row < self.row_count {
+            self.tops[row] = top;
+            match self.rows[row] {
+                GridRow::Section { group, .. } => {
+                    let mut count = 0usize;
+                    let mut next = row + 1;
+                    while next < self.row_count {
+                        match self.rows[next] {
+                            GridRow::Media { count: c, .. } => {
+                                count += c;
+                                next += 1;
+                            }
+                            GridRow::Section { .. } => break,
+                        }
+                    }
+                    self.rows[row] = GridRow::Section { group, count };
+                    top += SECTION_ROW_H;
+                }
+                GridRow::Media { .. } => top += GRID_CELL,
+            }
+            row += 1;
+        }
+        self.content_h = top;
+    }
+
+    pub fn row_height(&self, row: usize) -> usize {
+        match self.rows.get(row) {
+            Some(GridRow::Section { .. }) => SECTION_ROW_H,
+            Some(GridRow::Media { .. }) => GRID_CELL,
+            None => 0,
+        }
+    }
+
+    /// The row a content-space offset falls in, with the offset inside it.
+    pub fn row_at(&self, offset: usize) -> Option<(usize, usize)> {
+        if self.row_count == 0 || offset >= self.content_h {
+            return None;
+        }
+        let mut low = 0usize;
+        let mut high = self.row_count;
+        while low + 1 < high {
+            let mid = (low + high) / 2;
+            if self.tops[mid] <= offset {
+                low = mid;
+            } else {
+                high = mid;
+            }
+        }
+        let inside = offset - self.tops[low];
+        if inside < self.row_height(low) {
+            Some((low, inside))
+        } else {
+            None
+        }
+    }
+
+    /// The media at a cell of a media row.
+    pub fn media_at(&self, row: usize, column: usize) -> Option<Media> {
+        match self.rows.get(row) {
+            Some(GridRow::Media { first, count }) if column < *count => {
+                self.entries.get(first + column).copied()
+            }
+            _ => None,
+        }
+    }
+
+    /// Where a media item sits in the plan, for the viewer's position line.
+    pub fn media_position(&self, media: Media) -> Option<usize> {
+        self.entries[..self.entry_count]
+            .iter()
+            .position(|entry| *entry == media)
+    }
+}
+
+/// Whether `a` should sort before `b`: newest first, and an unrecorded time
+/// (`0`) after every recorded one.
+fn newer_than(a: u64, b: u64) -> bool {
+    if a == 0 {
+        return false;
+    }
+    if b == 0 {
+        return true;
+    }
+    a > b
+}
+
+/// The storage slot a delete action may remove, or `None` for built-in media.
+pub fn deletable_storage_index(media: Media, storage_count: usize) -> Option<usize> {
+    match media {
+        Media::StorageItem(index) if index < storage_count => Some(index),
+        _ => None,
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Full-screen viewer geometry
+// -----------------------------------------------------------------------------
+pub const VIEWER_MIN_ZOOM: u32 = 1000;
+pub const VIEWER_MAX_ZOOM: u32 = 3000;
+pub const VIEWER_MAX_ITEMS: usize = 32;
+
+pub fn clamp_viewer_zoom(zoom: u32) -> u32 {
+    zoom.clamp(VIEWER_MIN_ZOOM, VIEWER_MAX_ZOOM)
+}
+
+/// The item a swipe lands on. Stops at the ends rather than wrapping, because
+/// an index that jumps from the last item to the first is a jump the user did
+/// not ask for.
+pub fn viewer_step_index(current: usize, len: usize, forward: bool) -> Option<usize> {
+    if len == 0 || current >= len {
+        return None;
+    }
+    if forward {
+        if current + 1 < len {
+            Some(current + 1)
+        } else {
+            None
+        }
+    } else if current > 0 {
+        Some(current - 1)
+    } else {
+        None
+    }
+}
+
+/// The item that should be shown after the viewer's current item is removed.
+pub fn viewer_index_after_removal(
+    current: usize,
+    removed: usize,
+    remaining: usize,
+) -> Option<usize> {
+    if remaining == 0 {
+        return None;
+    }
+    if current > removed {
+        Some((current - 1).min(remaining - 1))
+    } else {
+        Some(current.min(remaining - 1))
+    }
+}
+
+/// A second double-tap at a zoomed scale returns to fit; otherwise it zooms in.
+pub fn double_tap_zoom(zoom: u32) -> u32 {
+    if zoom > VIEWER_MIN_ZOOM {
+        VIEWER_MIN_ZOOM
+    } else {
+        2000
+    }
+}
+
+/// The size an image occupies when fitted into a view, preserving its aspect.
+pub fn fit_size(view_w: usize, view_h: usize, src_w: usize, src_h: usize) -> (usize, usize) {
+    if view_w == 0 || view_h == 0 || src_w == 0 || src_h == 0 {
+        return (0, 0);
+    }
+    if src_w * view_h <= src_h * view_w {
+        (((src_w * view_h / src_h) as usize).max(1), view_h)
+    } else {
+        (view_w, ((src_h * view_w / src_w) as usize).max(1))
+    }
+}
+
+/// The on-screen size of a fitted image at a zoom.
+pub fn viewer_display_size(fit_w: usize, fit_h: usize, zoom: u32) -> (usize, usize) {
+    let zoom = clamp_viewer_zoom(zoom) as usize;
+    let disp_w = (fit_w * zoom / 1000).max(1);
+    let disp_h = (fit_h * zoom / 1000).max(1);
+    (disp_w, disp_h)
+}
+
+/// How far the zoomed image may be panned before its edge would leave a gap.
+pub fn viewer_pan_limit(
+    view_w: usize,
+    view_h: usize,
+    fit_w: usize,
+    fit_h: usize,
+    zoom: u32,
+) -> (i32, i32) {
+    let zoom = clamp_viewer_zoom(zoom) as usize;
+    let disp_w = fit_w * zoom / 1000;
+    let disp_h = fit_h * zoom / 1000;
+    let x = if disp_w > view_w { (disp_w - view_w) / 2 } else { 0 };
+    let y = if disp_h > view_h { (disp_h - view_h) / 2 } else { 0 };
+    (x as i32, y as i32)
+}
+
+pub fn clamp_pan_value(pan: i32, limit: i32) -> i32 {
+    pan.clamp(-limit, limit)
+}
+
+/// The source pixel shown at a view pixel under a zoom and pan.
+///
+/// Returns `None` when the point is outside the picture (the letterbox), so
+/// the viewer can draw its own background rather than stretching an edge
+/// pixel across the gap.
+pub fn viewer_source_pixel(
+    x: usize,
+    y: usize,
+    view_w: usize,
+    view_h: usize,
+    src_w: usize,
+    src_h: usize,
+    zoom: u32,
+    pan_x: i32,
+    pan_y: i32,
+) -> Option<(usize, usize)> {
+    let (fit_w, fit_h) = fit_size(view_w, view_h, src_w, src_h);
+    if fit_w == 0 || fit_h == 0 {
+        return None;
+    }
+    let zoom = clamp_viewer_zoom(zoom) as i64;
+    let disp_w = (fit_w as i64 * zoom / 1000).max(1);
+    let disp_h = (fit_h as i64 * zoom / 1000).max(1);
+    let left = (view_w as i64 - disp_w) / 2 + pan_x as i64;
+    let top = (view_h as i64 - disp_h) / 2 + pan_y as i64;
+    let dx = x as i64 - left;
+    let dy = y as i64 - top;
+    if dx < 0 || dy < 0 || dx >= disp_w || dy >= disp_h {
+        return None;
+    }
+    let src_x = (dx * src_w as i64 / disp_w).clamp(0, src_w as i64 - 1) as usize;
+    let src_y = (dy * src_h as i64 / disp_h).clamp(0, src_h as i64 - 1) as usize;
+    Some((src_x, src_y))
+}
+
+/// Builds a zoom label such as `1.5x` and returns its length.
+pub fn write_zoom_label(zoom: u32, out: &mut [u8; 8]) -> usize {
+    let zoom = clamp_viewer_zoom(zoom) as usize;
+    let whole = zoom / 1000;
+    let tenths = (zoom % 1000) / 100;
+    let mut n = append_u64(out, 0, whole as u64);
+    n = append(out, n, b".");
+    n = append(out, n, &[b'0' + tenths as u8]);
+    append(out, n, b"x")
 }
 
 pub const MAX_STORAGE_ITEMS: usize = 16;
@@ -961,6 +1491,193 @@ mod tests {
         for label in chip_labels {
             assert!(font::measure(label, 2) <= 180);
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // The redesigned grid: timeline, filter counts and viewer geometry.
+    // -------------------------------------------------------------------------
+
+    fn storage(name: &[u8], is_video: bool, mtime: u64) -> StorageMediaItem {
+        let mut item = StorageMediaItem::EMPTY;
+        let len = name.len().min(item.name.len());
+        item.name[..len].copy_from_slice(&name[..len]);
+        item.name_len = len;
+        item.path[0] = b'/';
+        item.path_len = 1;
+        item.is_video = is_video;
+        item.mtime = mtime;
+        item
+    }
+
+    #[test]
+    fn test_timeline_groups_are_measured_not_invented() {
+        assert_eq!(timeline_group(0, 500), TimelineGroup::Undated);
+        assert_eq!(timeline_group(500, 500), TimelineGroup::Newest);
+        assert_eq!(timeline_group(400, 500), TimelineGroup::Earlier);
+
+        // The index reports a tick, not a date, so the headings only claim an
+        // ordering and an absence; no calendar label exists here.
+        assert_eq!(TimelineGroup::Newest.label(), b"Newest first");
+        assert_eq!(TimelineGroup::Undated.label(), b"Time not recorded");
+
+        let items = [
+            storage(b"undated.ppm", false, 0),
+            storage(b"newest.ppm", false, 500),
+            storage(b"older.ppm", false, 300),
+        ];
+        let plan = GridPlan::build(0, 0, &items, Filter::All);
+        assert_eq!(plan.entry_count, 3);
+        assert_eq!(plan.entries[0], Media::StorageItem(1));
+        assert_eq!(plan.entries[1], Media::StorageItem(2));
+        assert_eq!(plan.entries[2], Media::StorageItem(0));
+
+        // Six rows: a heading and one media row for each of the three runs.
+        assert_eq!(plan.row_count, 6);
+        assert_eq!(plan.rows[0], GridRow::Section { group: TimelineGroup::Newest, count: 1 });
+        assert_eq!(plan.rows[2], GridRow::Section { group: TimelineGroup::Earlier, count: 1 });
+        assert_eq!(plan.rows[4], GridRow::Section { group: TimelineGroup::Undated, count: 1 });
+        assert_eq!(plan.content_h, 3 * SECTION_ROW_H + 3 * GRID_CELL);
+    }
+
+    #[test]
+    fn test_a_library_with_no_times_is_honestly_undated() {
+        let items = [
+            storage(b"a.ppm", false, 0),
+            storage(b"b.ppm", false, 0),
+        ];
+        let plan = GridPlan::build(0, 0, &items, Filter::All);
+        // One section heading, one row holding both cells.
+        assert_eq!(plan.row_count, 2);
+        assert_eq!(plan.rows[0], GridRow::Section { group: TimelineGroup::Undated, count: 2 });
+        assert!(plan.rows[1] == GridRow::Media { first: 0, count: 2 });
+        assert_eq!(plan.row_at(0), Some((0, 0)));
+        assert_eq!(plan.row_at(SECTION_ROW_H), Some((1, 0)));
+        assert_eq!(plan.row_at(plan.content_h), None);
+        assert_eq!(plan.media_at(1, 1), Some(Media::StorageItem(1)));
+        assert_eq!(plan.media_at(1, 2), None);
+        assert_eq!(plan.media_position(Media::StorageItem(1)), Some(1));
+        assert_eq!(plan.media_position(Media::Wallpaper(0)), None);
+    }
+
+    #[test]
+    fn test_filter_counts_label_every_chip() {
+        let counts = filter_counts(6, 2, 1);
+        assert_eq!(counts.all, 9);
+        assert_eq!(Filter::All.count(counts), 9);
+        assert_eq!(Filter::Wallpapers.count(counts), 6);
+        assert_eq!(Filter::Photos.count(counts), 2);
+        assert_eq!(Filter::Videos.count(counts), 1);
+
+        let mut buf = [0u8; 24];
+        let n = write_filter_label(Filter::Photos, counts, &mut buf);
+        assert_eq!(&buf[..n], b"Photos 2");
+        let n = write_filter_label(Filter::Videos, filter_counts(0, 0, 0), &mut buf);
+        assert_eq!(&buf[..n], b"Videos 0");
+    }
+
+    #[test]
+    fn test_filter_state_survives_the_settings_store() {
+        assert_eq!(Filter::All.setting_byte(), b'0');
+        assert_eq!(Filter::Videos.setting_byte(), b'3');
+        assert_eq!(filter_from_setting(b"0"), Filter::All);
+        assert_eq!(filter_from_setting(b"1"), Filter::Wallpapers);
+        assert_eq!(filter_from_setting(b"2"), Filter::Photos);
+        assert_eq!(filter_from_setting(b"3\n"), Filter::Videos);
+        assert_eq!(filter_from_setting(b" 2 "), Filter::Photos);
+        // A value this build does not understand cannot hide media.
+        assert_eq!(filter_from_setting(b"9"), Filter::All);
+        assert_eq!(filter_from_setting(b""), Filter::All);
+    }
+
+    #[test]
+    fn test_plan_selects_exactly_the_filtered_sets() {
+        let items = [
+            storage(b"photo.ppm", false, 10),
+            storage(b"clip.avi", true, 20),
+            storage(b"photo2.png", false, 30),
+        ];
+        let photos = GridPlan::build(2, 0, &items, Filter::Photos);
+        assert_eq!(photos.entry_count, 2);
+        assert_eq!(photos.entries[0], Media::StorageItem(2));
+        assert_eq!(photos.entries[1], Media::StorageItem(0));
+
+        let videos = GridPlan::build(2, 0, &items, Filter::Videos);
+        assert_eq!(videos.entry_count, 1);
+        assert_eq!(videos.entries[0], Media::StorageItem(1));
+
+        let walls = GridPlan::build(2, 0, &items, Filter::Wallpapers);
+        assert_eq!(walls.entry_count, 2);
+        assert_eq!(walls.entries[0], Media::Wallpaper(0));
+        assert_eq!(walls.entries[1], Media::Wallpaper(1));
+        assert_eq!(walls.rows[0], GridRow::Section { group: TimelineGroup::BuiltIn, count: 2 });
+
+        let all = GridPlan::build(2, 0, &items, Filter::All);
+        assert_eq!(all.entry_count, 5);
+        assert_eq!(all.media_at(1, 0), Some(Media::Wallpaper(0)));
+    }
+
+    #[test]
+    fn test_viewer_index_bounds_do_not_wrap() {
+        assert_eq!(viewer_step_index(0, 3, true), Some(1));
+        assert_eq!(viewer_step_index(2, 3, true), None);
+        assert_eq!(viewer_step_index(0, 3, false), None);
+        assert_eq!(viewer_step_index(2, 3, false), Some(1));
+        assert_eq!(viewer_step_index(0, 0, true), None);
+
+        // Deleting the shown item selects the one that took its place; the
+        // last item's removal selects the new last item.
+        assert_eq!(viewer_index_after_removal(1, 1, 2), Some(1));
+        assert_eq!(viewer_index_after_removal(2, 1, 2), Some(1));
+        assert_eq!(viewer_index_after_removal(0, 1, 2), Some(0));
+        assert_eq!(viewer_index_after_removal(0, 0, 0), None);
+    }
+
+    #[test]
+    fn test_viewer_zoom_pan_and_source_mapping_stay_in_bounds() {
+        assert_eq!(clamp_viewer_zoom(500), VIEWER_MIN_ZOOM);
+        assert_eq!(clamp_viewer_zoom(9000), VIEWER_MAX_ZOOM);
+        assert_eq!(double_tap_zoom(1000), 2000);
+        assert_eq!(double_tap_zoom(2000), 1000);
+
+        // A 100x50 picture fitted into a 200x200 view: 200x100, centred.
+        assert_eq!(fit_size(200, 200, 100, 50), (200, 100));
+        assert_eq!(fit_size(200, 200, 50, 100), (100, 200));
+        assert_eq!(viewer_display_size(200, 100, 2000), (400, 200));
+        assert_eq!(viewer_pan_limit(200, 200, 200, 100, 1000), (0, 0));
+        assert_eq!(viewer_pan_limit(200, 200, 200, 100, 2000), (100, 0));
+        assert_eq!(clamp_pan_value(500, 100), 100);
+        assert_eq!(clamp_pan_value(-500, 100), -100);
+
+        // At fit, the centre of the view is the centre of the picture.
+        assert_eq!(
+            viewer_source_pixel(100, 100, 200, 200, 100, 50, 1000, 0, 0),
+            Some((50, 25))
+        );
+        // Above and below the letterbox is outside the picture, not its edge.
+        assert_eq!(viewer_source_pixel(100, 0, 200, 200, 100, 50, 1000, 0, 0), None);
+        assert_eq!(viewer_source_pixel(100, 199, 200, 200, 100, 50, 1000, 0, 0), None);
+        // At 2x the picture is 400 wide with its left edge at -100.
+        assert_eq!(
+            viewer_source_pixel(0, 100, 200, 200, 100, 50, 2000, 0, 0),
+            Some((25, 25))
+        );
+
+        let mut label = [0u8; 8];
+        let n = write_zoom_label(1500, &mut label);
+        assert_eq!(&label[..n], b"1.5x");
+        let n = write_zoom_label(3000, &mut label);
+        assert_eq!(&label[..n], b"3.0x");
+        let n = write_zoom_label(1000, &mut label);
+        assert_eq!(&label[..n], b"1.0x");
+    }
+
+    #[test]
+    fn test_delete_selection_names_only_stored_media() {
+        assert_eq!(deletable_storage_index(Media::StorageItem(2), 3), Some(2));
+        assert_eq!(deletable_storage_index(Media::StorageItem(3), 3), None);
+        // A built-in wallpaper has no file to unlink.
+        assert_eq!(deletable_storage_index(Media::Wallpaper(0), 3), None);
+        assert_eq!(deletable_storage_index(Media::Photo(0), 3), None);
     }
 }
 
