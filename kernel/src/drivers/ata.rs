@@ -108,6 +108,29 @@ impl AtaDrive {
         }
     }
 
+    /// Pulses SRST once so the drive starts from a known state.
+    ///
+    /// WHY this is not done per operation: the device control register bit 1
+    /// is software reset, and holding it asserted keeps the whole channel in
+    /// reset. Asserting it before every sector read/write (as this driver used
+    /// to) makes each I/O depend on when the asynchronous reset is serviced;
+    /// a command issued before it lands is aborted, DRQ never asserts, and the
+    /// poll below spins until its timeout. The register is left at 0x00
+    /// (SRST low, interrupts enabled) and no I/O path touches it again.
+    fn soft_reset(&mut self) {
+        unsafe {
+            self._control_port.write(0x02);
+            // ATA requires SRST to be held for at least 5us.
+            for _ in 0..10_000 {
+                core::hint::spin_loop();
+            }
+            self._control_port.write(0x00);
+            // After SRST is released the device may stay busy for up to 2ms;
+            // wait_not_busy polls the status register for that window.
+            let _ = self.wait_not_busy();
+        }
+    }
+
     /// Waits until the drive clears the BSY status bit with a timeout counter.
     fn wait_not_busy(&mut self) -> Result<u8, AtaError> {
         let mut timeout = 10_000_000;
@@ -119,6 +142,8 @@ impl AtaDrive {
             core::hint::spin_loop();
             timeout -= 1;
         }
+        let status = unsafe { self.status_port.read() };
+        crate::serial_println!("[ATA] wait_not_busy timed out, status={:#04X}", status);
         Err(AtaError::Timeout)
     }
 
@@ -139,14 +164,15 @@ impl AtaDrive {
             core::hint::spin_loop();
             timeout -= 1;
         }
+        let status = unsafe { self.status_port.read() };
+        crate::serial_println!("[ATA] wait_drq timed out, status={:#04X}", status);
         Err(AtaError::Timeout)
     }
 
     /// Probes the drive using the ATA `IDENTIFY` command (0xEC).
     pub fn identify(&mut self) -> Result<(), AtaError> {
         unsafe {
-            // Suppress device interrupts in PIO mode
-            self._control_port.write(0x02);
+            self.soft_reset();
 
             // Select drive: 0xA0 for Master, 0xB0 for Slave
             let select = if self.is_master { 0xA0 } else { 0xB0 };
@@ -219,8 +245,6 @@ impl BlockDevice for AtaDrive {
         }
 
         unsafe {
-            self._control_port.write(0x02);
-
             // Select Drive/Head with LBA mode enabled (0xE0 for Master, 0xF0 for Slave) + top 4 bits of LBA
             let drive_head = (if self.is_master { 0xE0 } else { 0xF0 }) | ((lba >> 24) & 0x0F) as u8;
             self.drive_head_port.write(drive_head);
@@ -261,8 +285,6 @@ impl BlockDevice for AtaDrive {
         }
 
         unsafe {
-            self._control_port.write(0x02);
-
             // Select Drive/Head with LBA mode enabled (0xE0 for Master, 0xF0 for Slave) + top 4 bits of LBA
             let drive_head = (if self.is_master { 0xE0 } else { 0xF0 }) | ((lba >> 24) & 0x0F) as u8;
             self.drive_head_port.write(drive_head);
@@ -301,7 +323,6 @@ impl BlockDevice for AtaDrive {
 
     fn flush(&mut self) -> Result<(), BlockDeviceError> {
         unsafe {
-            self._control_port.write(0x02);
             let select = if self.is_master { 0xE0 } else { 0xF0 };
             self.drive_head_port.write(select);
             self.delay_400ns();
