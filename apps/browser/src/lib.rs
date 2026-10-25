@@ -12,6 +12,13 @@ pub mod css;
 /// and same-origin URL resolution.
 pub mod images;
 
+/// The bounded HTTP protocol layer: redirects, cookies, forms, conditional
+/// requests, charset conversion and the compressed-body decoder.
+pub mod http;
+
+/// Bounded DEFLATE, zlib and gzip decoding for response bodies.
+pub mod inflate;
+
 /// The platform's scroll model.
 use interos_std::design::scroll::ScrollState;
 

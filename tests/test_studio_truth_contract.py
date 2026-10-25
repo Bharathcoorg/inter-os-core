@@ -51,11 +51,15 @@ class StudioServerTruthTests(unittest.TestCase):
                           f"{handler} must reject cross-origin requests first")
 
     def test_proxy_redirects_are_revalidated_against_ssrf_boundary(self):
-        # urlopen follows redirects after the initial URL was validated, so a
-        # public host could bounce the proxy onto the QEMU monitor.
+        # The proxy no longer follows redirects: it returns them to the
+        # browser, which applies its own hop limit. The redirect target is
+        # still validated here, and each browser hop is a new proxy request
+        # that passes the same check again before any connection is opened.
         self.assertIn("class _SsrfGuardedRedirectHandler", self.server)
-        self.assertIn("build_opener(_SsrfGuardedRedirectHandler)", self.server)
+        self.assertIn("class _ProxyRedirectPassthrough(_SsrfGuardedRedirectHandler)", self.server)
+        self.assertIn("build_opener(_ProxyRedirectPassthrough)", self.server)
         self.assertIn("is_safe_proxy_url(newurl)", self.server)
+        self.assertIn("is_safe_proxy_url(target_url)", self.server)
 
     def test_frame_cache_purge_targets_the_keys_that_are_written(self):
         # capture_qemu_screen_frame only writes portrait/portrait_jpeg; the

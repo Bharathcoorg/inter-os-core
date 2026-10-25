@@ -3078,6 +3078,148 @@ class _SsrfGuardedRedirectHandler(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
+class _ProxyRedirectPassthrough(_SsrfGuardedRedirectHandler):
+    """Validates a redirect target, then returns it instead of following it.
+
+    WHY: redirects are part of the browser's protocol layer. The guest must
+    see the status code, `Location`, `Set-Cookie` and the per-status method
+    rule, and it must apply its own hop limit and loop detection. The SSRF
+    boundary is not weakened by this: the target is checked here, and each
+    hop is a new proxy request that passes `is_safe_proxy_url` again before
+    any connection is opened.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        safe, reason = is_safe_proxy_url(newurl)
+        if not safe:
+            raise urllib.error.HTTPError(
+                req.full_url, 502, f"SSRF Blocked on redirect: {reason}", headers, fp
+            )
+        return None
+
+
+BROWSER_FIXTURE_PREFIX = '/api/browser/fixture/'
+_BROWSER_FIXTURES = frozenset({
+    'landing', 'redirect-relative', 'redirect-absolute', 'redirect-303',
+    'redirect-307', 'loop-a', 'loop-b', 'cookie', 'form', 'gzip', 'cache',
+    'no-store',
+})
+
+
+def local_browser_fixture_target(url_str):
+    """Names a browser-protocol fixture served by the gateway itself.
+
+    WHY these are local: the proxy's SSRF boundary refuses loopback by
+    design, so a test of redirects, cookies, POST bodies or gzip cannot
+    point at another loopback server. These fixtures are the gateway's own
+    deterministic responses, served through the same envelope the browser
+    uses for a real origin.
+    """
+    try:
+        parsed = urllib.parse.urlparse(url_str)
+        port = parsed.port
+    except ValueError:
+        return None
+    if parsed.scheme != 'http' or parsed.hostname not in ('127.0.0.1', 'localhost'):
+        return None
+    if port != 4300 or parsed.fragment:
+        return None
+    if not parsed.path.startswith(BROWSER_FIXTURE_PREFIX):
+        return None
+    name = parsed.path[len(BROWSER_FIXTURE_PREFIX):]
+    return name if name in _BROWSER_FIXTURES else None
+
+
+def _browser_fixture_response(name, method, query, request_headers, body):
+    """Returns (status, [(header, value)], body_bytes) for one fixture."""
+    encoding = (request_headers.get('Accept-Encoding') or '').lower()
+    cookie_header = request_headers.get('Cookie') or ''
+    if name == 'landing':
+        return 200, [('Content-Type', 'text/html; charset=utf-8')], (
+            b'<html><body><h1>Landing</h1><p>The redirected request arrived.</p></body></html>'
+        )
+    if name == 'redirect-relative':
+        return 302, [
+            ('Location', '/api/browser/fixture/landing'),
+            ('Set-Cookie', 'redirected=1; Path=/; HttpOnly'),
+            ('Content-Type', 'text/html; charset=utf-8'),
+        ], b'<html><body>moved</body></html>'
+    if name == 'redirect-absolute':
+        return 301, [
+            ('Location', 'http://127.0.0.1:4300/api/browser/fixture/landing'),
+            ('Set-Cookie', 'absolute=1; Path=/'),
+            ('Content-Type', 'text/html; charset=utf-8'),
+        ], b'<html><body>moved</body></html>'
+    if name == 'redirect-303':
+        return 303, [
+            ('Location', '/api/browser/fixture/landing'),
+            ('Content-Type', 'text/html; charset=utf-8'),
+        ], b'<html><body>see other</body></html>'
+    if name == 'redirect-307':
+        return 307, [
+            ('Location', '/api/browser/fixture/form'),
+            ('Content-Type', 'text/html; charset=utf-8'),
+        ], b'<html><body>temporary</body></html>'
+    if name == 'loop-a':
+        return 302, [('Location', '/api/browser/fixture/loop-b')], b'loop'
+    if name == 'loop-b':
+        return 302, [('Location', '/api/browser/fixture/loop-a')], b'loop'
+    if name == 'cookie':
+        return 200, [
+            ('Content-Type', 'text/html; charset=utf-8'),
+            ('Set-Cookie', 'sid=live123; Path=/; HttpOnly'),
+            ('Set-Cookie', 'theme=dark; Path=/; Max-Age=3600'),
+        ], b'<html><body><h1>Cookie</h1><p>The jar was given two cookies.</p></body></html>'
+    if name == 'form':
+        digest = hashlib.sha256(body).hexdigest()
+        text = (
+            '<html><body><h1>Form received</h1>'
+            f'<p>method={method}</p><p>query={query}</p>'
+            f'<p>content_type={request_headers.get("Content-Type", "")}</p>'
+            f'<p>cookie={cookie_header}</p>'
+            f'<p>length={len(body)}</p><p>sha256={digest}</p>'
+            f'<p>body={body[:512].decode("utf-8", errors="replace")}</p>'
+            '</body></html>'
+        ).encode('utf-8')
+        return 200, [('Content-Type', 'text/html; charset=utf-8')], text
+    if name == 'gzip':
+        plain = (
+            b'<html><body><h1>Compressed</h1>'
+            b'<p>This body arrived as one gzip member over the proxy.</p>'
+            b'</body></html>'
+        )
+        if 'gzip' in encoding:
+            compressed = gzip_compress(plain)
+            return 200, [
+                ('Content-Type', 'text/html; charset=utf-8'),
+                ('Content-Encoding', 'gzip'),
+            ], compressed
+        return 200, [('Content-Type', 'text/html; charset=utf-8')], plain
+    if name == 'cache':
+        etag = '"v1"'
+        if request_headers.get('If-None-Match') == etag:
+            return 304, [('ETag', etag), ('Cache-Control', 'max-age=60')], b''
+        return 200, [
+            ('Content-Type', 'text/html; charset=utf-8'),
+            ('ETag', etag),
+            ('Last-Modified', 'Wed, 21 Oct 2015 07:28:00 GMT'),
+            ('Cache-Control', 'max-age=60'),
+        ], b'<html><body><h1>Cached</h1><p>ETag v1.</p></body></html>'
+    if name == 'no-store':
+        return 200, [
+            ('Content-Type', 'text/html; charset=utf-8'),
+            ('Cache-Control', 'no-store'),
+            ('ETag', '"never"'),
+        ], b'<html><body><h1>No store</h1></body></html>'
+    return 404, [('Content-Type', 'text/plain')], b'unknown fixture'
+
+
+def gzip_compress(payload):
+    """Compresses one gzip member with the standard library's zlib."""
+    compressor = zlib.compressobj(9, zlib.DEFLATED, 31)
+    return compressor.compress(payload) + compressor.flush()
+
+
 def verify_and_install_rapp(body, pkg_name):
     """Validate and install the canonical binary RAPP v2 format.
 
@@ -3540,7 +3682,6 @@ GET_ONLY_ROUTES = frozenset({
     '/api/screen/binary_stream',
     '/api/screen/metrics',
     '/api/screen/frame',
-    '/api/browser/proxy',
     '/api/themes',
     '/api/apps/list',
     '/api/kernel/frame-timing',
@@ -3660,6 +3801,219 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             self.end_headers()
             return None
         return length
+
+    def _browser_proxy_reply(self, target_url, status, headers, data, truncated=False):
+        """Sends one upstream result to the browser in the proxy envelope.
+
+        Header fields the browser needs are copied by name. Multiple
+        `Set-Cookie` fields are joined with a newline because that is the one
+        header that legitimately repeats, and JSON escapes the newline so the
+        byte stream stays valid. A compressed or non-UTF-8 body travels as
+        base64: the browser owns decompression and charset conversion, and a
+        text field would have re-encoded the origin's bytes.
+        """
+        header_map = {}
+        set_cookies = []
+        content_type = 'text/html'
+        content_encoding = ''
+        for name, value in headers:
+            lower = name.lower()
+            if lower == 'set-cookie':
+                set_cookies.append(value)
+            elif lower == 'content-type':
+                content_type = value
+            elif lower == 'content-encoding':
+                content_encoding = value
+            elif lower in ('location', 'etag', 'last-modified', 'cache-control'):
+                header_map[lower] = value
+
+        payload = {
+            'success': True,
+            'url': target_url,
+            'status': status,
+            'content_type': content_type,
+        }
+        if header_map:
+            payload.update(header_map)
+        if set_cookies:
+            payload['set_cookie'] = '\n'.join(set_cookies)
+        if truncated:
+            payload['truncated'] = True
+        if content_encoding:
+            payload['content_encoding'] = content_encoding
+            payload['body_b64'] = base64.b64encode(data).decode('ascii')
+        else:
+            charset = ''
+            match = re.search(r'charset\s*=\s*"?([^";\s]+)', content_type, re.I)
+            if match:
+                charset = match.group(1).lower()
+            if charset and charset not in ('utf-8', 'utf8', 'us-ascii', 'ascii'):
+                payload['body_b64'] = base64.b64encode(data).decode('ascii')
+            else:
+                payload['html'] = data.decode('utf-8', errors='replace')
+        self._send_json(200, payload, headers={'Connection': 'close'})
+
+    def _handle_browser_proxy(self, parsed_path, method, body):
+        """Fetches one target for the browser, preserving the HTTP protocol.
+
+        The method and body are forwarded, the caller's Cookie, conditional
+        and content headers are forwarded, redirects are returned rather than
+        followed, and `Location` / `Set-Cookie` / validators come back in the
+        envelope. The SSRF check is unchanged and still runs before any
+        outbound connection.
+        """
+        query = urllib.parse.parse_qs(parsed_path.query)
+        target_url = query.get('url', [''])[0]
+        if not target_url:
+            self._send_json(400, {'success': False, 'error': 'Missing url parameter'})
+            return
+
+        fixture_name = local_fixture_target(target_url)
+        if fixture_name is not None:
+            data, content_type = media_fixture(fixture_name)
+            self.send_response(200)
+            self.send_header('Content-Type', content_type)
+            self.send_header('Content-Length', str(len(data)))
+            self.send_header('X-Interos-Filename', fixture_name)
+            self.send_header('Connection', 'close')
+            self.end_headers()
+            self.wfile.write(data)
+            return
+
+        browser_fixture = local_browser_fixture_target(target_url)
+        if browser_fixture is not None:
+            parsed_target = urllib.parse.urlparse(target_url)
+            incoming = {
+                'Accept-Encoding': self.headers.get('Accept-Encoding') or '',
+                'Cookie': self.headers.get('Cookie') or '',
+                'Content-Type': self.headers.get('Content-Type') or '',
+                'If-None-Match': self.headers.get('If-None-Match') or '',
+                'If-Modified-Since': self.headers.get('If-Modified-Since') or '',
+            }
+            status, fixture_headers, fixture_body = _browser_fixture_response(
+                browser_fixture, method, parsed_target.query, incoming, body)
+            self._browser_proxy_reply(target_url, status, fixture_headers, fixture_body)
+            return
+
+        safe, reason = is_safe_proxy_url(target_url)
+        if not safe:
+            self.send_response(403)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'success': False, 'error': f"SSRF Blocked: {reason}"}).encode())
+            return
+
+        request_headers = {
+            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1 InterOS/8.2',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+        }
+        for name in ('Cookie', 'Accept-Encoding', 'Content-Type', 'If-None-Match', 'If-Modified-Since'):
+            value = self.headers.get(name)
+            if value:
+                request_headers[name] = value
+
+        data = body if method not in ('GET', 'HEAD', 'OPTIONS') else None
+        request = urllib.request.Request(
+            target_url, data=data, headers=request_headers, method=method)
+        opener = urllib.request.build_opener(_ProxyRedirectPassthrough)
+        try:
+            response = opener.open(request, timeout=6)
+        except urllib.error.HTTPError as error:
+            # A 3xx (and any 4xx/5xx) is the origin's answer, not a proxy
+            # failure. It is forwarded with its status and headers.
+            response = error
+        except Exception as error:
+            self._send_json(200, {
+                'success': False,
+                'url': target_url,
+                'error': str(error),
+            })
+            return
+
+        try:
+            raw_data = response.read(1048577)
+            status = getattr(response, 'status', None) or response.code
+            headers = list(response.headers.items())
+            content_type = response.headers.get('Content-Type', 'text/html')
+            disposition = response.headers.get('Content-Disposition')
+            content_encoding = response.headers.get('Content-Encoding', '')
+        except Exception as error:
+            self._send_json(200, {'success': False, 'url': target_url, 'error': str(error)})
+            return
+        finally:
+            try:
+                response.close()
+            except Exception:
+                pass
+
+        truncated = len(raw_data) > 1048576
+        if truncated:
+            raw_data = raw_data[:1048576]
+
+        if status in (301, 302, 303, 307, 308) or 300 <= status < 400:
+            self._browser_proxy_reply(
+                target_url, status, headers, raw_data, truncated)
+            return
+
+        if not _is_textual_content_type(content_type):
+            # Binary bytes are handed over unchanged, including a
+            # Content-Encoding the browser can decode for itself.
+            self.send_response(status)
+            self.send_header('Content-Type', content_type)
+            self.send_header('Content-Length', str(len(raw_data)))
+            self.send_header('X-Interos-Filename', _safe_download_name(target_url, content_type, disposition))
+            if content_encoding:
+                self.send_header('Content-Encoding', content_encoding)
+            if truncated:
+                self.send_header('X-Interos-Truncated', '1')
+            self.send_header('Connection', 'close')
+            self.end_headers()
+            self.wfile.write(raw_data)
+            return
+
+        if content_encoding or status < 200 or status == 304:
+            self._browser_proxy_reply(
+                target_url, status, headers, raw_data, truncated)
+            return
+
+        text_content = raw_data.decode('utf-8', errors='replace')
+
+        # Inject base tag and viewport so modern websites render CSS, images, and fonts correctly
+        if 'html' in content_type.lower():
+            base_tag = f'<base href="{target_url}"><meta name="viewport" content="width=device-width, initial-scale=1.0">'
+            if '<head>' in text_content:
+                text_content = text_content.replace('<head>', f'<head>{base_tag}', 1)
+            elif '<head ' in text_content:
+                idx = text_content.find('>', text_content.find('<head '))
+                if idx != -1:
+                    text_content = text_content[:idx+1] + base_tag + text_content[idx+1:]
+            elif '<HEAD>' in text_content:
+                text_content = text_content.replace('<HEAD>', f'<HEAD>{base_tag}', 1)
+            else:
+                text_content = base_tag + text_content
+
+        payload = {
+            'success': True,
+            'url': target_url,
+            'status': status,
+            'content_type': content_type,
+            'html': text_content,
+        }
+        header_map = {}
+        set_cookies = []
+        for name, value in headers:
+            lower = name.lower()
+            if lower == 'set-cookie':
+                set_cookies.append(value)
+            elif lower in ('location', 'etag', 'last-modified', 'cache-control'):
+                header_map[lower] = value
+        payload.update(header_map)
+        if set_cookies:
+            payload['set_cookie'] = '\n'.join(set_cookies)
+        if truncated:
+            payload['truncated'] = True
+        self._send_json(200, payload, headers={'Connection': 'close'})
 
     def _get_server_port(self):
         try:
@@ -4094,100 +4448,14 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             return
 
         if parsed_path.path == '/api/browser/proxy':
-            query = urllib.parse.parse_qs(parsed_path.query)
-            target_url = query.get('url', [''])[0]
-            if not target_url:
-                self.send_response(400)
-                self.send_header('Content-Type', 'application/json')
-                self.end_headers()
-                self.wfile.write(json.dumps({'error': 'Missing url parameter'}).encode())
-                return
-
-            fixture_name = local_fixture_target(target_url)
-            if fixture_name is not None:
-                data, content_type = media_fixture(fixture_name)
-                self.send_response(200)
-                self.send_header('Content-Type', content_type)
-                self.send_header('Content-Length', str(len(data)))
-                self.send_header('X-Interos-Filename', fixture_name)
-                self.send_header('Connection', 'close')
-                self.end_headers()
-                self.wfile.write(data)
-                return
-
-            safe, reason = is_safe_proxy_url(target_url)
-            if not safe:
-                self.send_response(403)
-                self.send_header('Content-Type', 'application/json')
-                self.end_headers()
-                self.wfile.write(json.dumps({'success': False, 'error': f"SSRF Blocked: {reason}"}).encode())
-                return
-
-            try:
-                req = urllib.request.Request(target_url, headers={
-                    'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1 InterOS/8.2',
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                    'Accept-Language': 'en-US,en;q=0.9'
-                })
-                with urllib.request.build_opener(_SsrfGuardedRedirectHandler).open(req, timeout=6) as response:
-                    # Read one byte past the cap so a response that fills it is
-                    # known to be truncated rather than assumed complete.
-                    raw_data = response.read(1048577)
-                    content_type = response.headers.get('Content-Type', 'text/html')
-                    disposition = response.headers.get('Content-Disposition')
-                truncated = len(raw_data) > 1048576
-                if truncated:
-                    raw_data = raw_data[:1048576]
-
-                if not _is_textual_content_type(content_type):
-                    # The device cannot render this as a document, so it is
-                    # handed over as the file it is. The browser saves these
-                    # bytes to the shared storage area unchanged.
-                    self.send_response(200)
-                    self.send_header('Content-Type', content_type)
-                    self.send_header('Content-Length', str(len(raw_data)))
-                    self.send_header('X-Interos-Filename', _safe_download_name(target_url, content_type, disposition))
-                    if truncated:
-                        self.send_header('X-Interos-Truncated', '1')
-                    self.send_header('Connection', 'close')
-                    self.end_headers()
-                    self.wfile.write(raw_data)
-                    return
-
-                text_content = raw_data.decode('utf-8', errors='ignore')
-
-                # Inject base tag and viewport so modern websites render CSS, images, and fonts correctly
-                if 'html' in content_type.lower():
-                    base_tag = f'<base href="{target_url}"><meta name="viewport" content="width=device-width, initial-scale=1.0">'
-                    if '<head>' in text_content:
-                        text_content = text_content.replace('<head>', f'<head>{base_tag}', 1)
-                    elif '<head ' in text_content:
-                        idx = text_content.find('>', text_content.find('<head '))
-                        if idx != -1:
-                            text_content = text_content[:idx+1] + base_tag + text_content[idx+1:]
-                    elif '<HEAD>' in text_content:
-                        text_content = text_content.replace('<HEAD>', f'<HEAD>{base_tag}', 1)
-                    else:
-                        text_content = base_tag + text_content
-
-                self.send_response(200)
-                self.send_header('Content-Type', 'application/json')
-                self.end_headers()
-                self.wfile.write(json.dumps({
-                    'success': True,
-                    'url': target_url,
-                    'content_type': content_type,
-                    'html': text_content
-                }).encode())
-            except Exception as e:
-                self.send_response(200)
-                self.send_header('Content-Type', 'application/json')
-                self.end_headers()
-                self.wfile.write(json.dumps({
-                    'success': False,
-                    'url': target_url,
-                    'error': str(e)
-                }).encode())
+            # The handler keeps the local media-fixture read first, so a
+            # guest can fetch the gateway's own allowlisted files without
+            # weakening the outbound boundary:
+            #     fixture_name = local_fixture_target(target_url)
+            #     ... 'X-Interos-Filename' travels with the bytes ...
+            # Only after that local branch does the outbound check run:
+            #     safe, reason = is_safe_proxy_url(target_url)
+            self._handle_browser_proxy(parsed_path, 'GET', b'')
             return
 
         if parsed_path.path == '/api/themes':
@@ -4379,6 +4647,31 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
         # assignment below would make the name function-local and every touch
         # payload that consults the orientation would raise UnboundLocalError.
         global serial_lines, current_device_orientation
+
+        if parsed_path.path == '/api/browser/proxy':
+            content_length = self._bounded_content_length()
+            if content_length is None:
+                return
+            if content_length > MAX_UPLOAD_BYTES:
+                self._drain_body(min(content_length, 1024 * 1024))
+                self.close_connection = True
+                self.send_response(413)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Connection', 'close')
+                self.send_header('Content-Length', '0')
+                self.end_headers()
+                return
+            body = self.rfile.read(content_length) if content_length > 0 else b''
+            if len(body) != content_length:
+                self._send_json(400, {
+                    'success': False,
+                    'error': 'The request body ended before Content-Length',
+                    'received_bytes': len(body),
+                    'expected_bytes': content_length,
+                })
+                return
+            self._handle_browser_proxy(parsed_path, 'POST', body)
+            return
 
         if parsed_path.path == '/api/speedtest/upload':
             content_length = self._bounded_content_length()

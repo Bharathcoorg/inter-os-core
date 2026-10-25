@@ -75,6 +75,56 @@ static mut RESPONSE_BUF: [u8; MAX_RESPONSE_BYTES] = [0; MAX_RESPONSE_BYTES];
 /// The buffer the page's HTML is extracted into.
 static mut HTML_BUF: [u8; browser::MAX_HTML_BYTES] = [0; browser::MAX_HTML_BYTES];
 
+/// The scratch buffer a decoded body is written into before charset
+/// conversion.
+///
+/// WHY it is separate from `HTML_BUF`: a compressed body has to be inflated
+/// before its charset is known, and the inflated bytes and the converted
+/// document cannot share one buffer. It is also why the envelope's JSON
+/// survives: `RESPONSE_BUF` still holds it while this buffer is written.
+static mut DECODE_BUF: [u8; browser::MAX_HTML_BYTES] = [0; browser::MAX_HTML_BYTES];
+
+/// The cookies the browser has been given, across navigations.
+///
+/// WHY a static and not a field of `BrowserApp`: the jar is bounded but
+/// larger than the task stack should carry, and `BrowserApp::new()` is
+/// built on that stack. Cookie state outlives a single navigation, which
+/// is exactly what the static's lifetime expresses.
+static mut COOKIE_JAR: browser::http::CookieJar = browser::http::CookieJar::new();
+
+/// The two-entry revalidating cache, also across navigations.
+static mut HTTP_CACHE: browser::http::HttpCache = browser::http::HttpCache::new();
+
+/// The request line and headers for one navigation hop.
+static mut REQUEST_BUF: [u8; 2048] = [0; 2048];
+
+/// The `Cookie` header emitted for one hop.
+static mut COOKIE_HEADER_BUF: [u8; 1536] = [0; 1536];
+
+/// The address one hop is being fetched for.
+static mut HOP_BUF: [u8; browser::http::MAX_URL_BYTES] = [0; browser::http::MAX_URL_BYTES];
+
+/// Copies a string field out of the gateway's envelope.
+fn envelope_field(json: &[u8], key: &[u8], out: &mut [u8]) -> usize {
+    match browser::http::proxy_string_field(json, key) {
+        Some(raw) => match browser::http::unescape_json_string(raw, out) {
+            Some(length) => length,
+            None => 0,
+        },
+        None => 0,
+    }
+}
+
+/// True when the gateway answered in its browser-proxy envelope.
+///
+/// WHY both markers: a page fetched from an origin can itself be JSON, so
+/// one field name is not enough. The envelope always carries `success`
+/// and a numeric `status`; a raw origin document is not treated as one.
+fn is_browser_envelope(raw: &[u8]) -> bool {
+    raw.windows(b"\"success\"".len()).any(|w| w == b"\"success\"")
+        && browser::http::proxy_status(raw).is_some()
+}
+
 /// The buffer a local document is read into.
 static mut FILE_BUF: [u8; MAX_FILE_BYTES] = [0; MAX_FILE_BYTES];
 
@@ -2888,115 +2938,390 @@ impl BrowserApp {
         // WHY the gateway is always the destination: the guest has no
         // general connectivity. The Device Studio gateway fetches the page
         // on the device's behalf, and the device reads the result.
-        let mut req_buf = [0u8; 512];
         // The gateway is the destination for every navigable scheme, not only
         // HTTPS. WHY: the guest reaches the host through slirp, and outbound
         // TCP from the host may itself require the host's HTTP proxy; the
         // Studio inherits that configuration, while a direct guest connect
         // cannot. Sending every fetch to the gateway keeps both schemes on the
         // transport this device actually has.
-        let req_len = format_proxy_request(target, &mut req_buf);
         let (dst_ip, dst_port) = ([10, 0, 2, 2], 4300);
 
-        // The local port has to be non-zero and unique for the connection.
-        let local_port = 45000u16 + ((self.pages_loaded as u16) & 0x03FF);
+        let jar = unsafe { &mut *core::ptr::addr_of_mut!(COOKIE_JAR) };
+        let cache = unsafe { &mut *core::ptr::addr_of_mut!(HTTP_CACHE) };
+        let request_buf = unsafe { &mut *core::ptr::addr_of_mut!(REQUEST_BUF) };
+        let hop_buf = unsafe { &mut *core::ptr::addr_of_mut!(HOP_BUF) };
+        let start_len = target.len().min(hop_buf.len());
+        hop_buf[..start_len].copy_from_slice(&target[..start_len]);
+        let mut hop_len = start_len;
 
-        std::log("[BROWSER APP] Request dispatched over TCP to the Device Studio gateway.").ok();
+        // One navigation owns one method and one hop history. The tracker is
+        // what makes "too many redirects" and "this is a loop" different
+        // answers rather than one silent truncation.
+        let mut method = browser::http::HttpMethod::Get;
+        let mut tracker = browser::http::RedirectTracker::new();
+        tracker.start(&hop_buf[..hop_len]);
 
-        let outcome = fetch_over_tcp(dst_ip, dst_port, local_port, &req_buf[..req_len]);
+        let mut document_len = 0usize;
+        let mut document_kind = browser::PayloadKind::Markup;
+        let mut final_truncated = false;
+        let mut invalid_sequences = 0usize;
+        let mut redirect_fault: Option<browser::http::RedirectFault> = None;
+        let mut protocol_fault = false;
 
-        // PLATFORM TRUTH: a page is loaded only when the transport actually
-        // delivered bytes. Nothing is synthesised, and the reason is
-        // reported as it was.
-        if outcome.bytes == 0 {
-            self.status = PageStatus::NoTransport;
-            self.loading_progress = 0;
-            self.tabs.active_tab_mut().loading_state = LoadingState::Failed;
-            self.tabs.active_tab_mut().error_code = outcome.error as i32;
-            std::log("[BROWSER APP] The gateway returned no bytes. The failure is reported as it happened; no page was synthesised.",
-            )
-            .ok();
-            let _ = std::audio_play_tone(220);
-            let _ = std::audio_silence();
-            let _ = std::audio_haptic_click();
-            return false;
+        loop {
+            // Cookies are matched to the address whose turn this is, so a
+            // cookie set by a redirect is sent on the next hop and not to
+            // the address that set it.
+            let cookie_header = unsafe { &mut *core::ptr::addr_of_mut!(COOKIE_HEADER_BUF) };
+            let cookie_len = jar.header_for(&hop_buf[..hop_len], 0, cookie_header);
+
+            // A cached document is never assumed fresh: its validator is
+            // sent and the origin decides. Without a wall clock this is the
+            // only honest conditional request the browser can make.
+            let mut conditional_etag = [0u8; 96];
+            let mut conditional_modified = [0u8; 40];
+            let (conditional_etag_len, conditional_modified_len) = cache.conditional_headers(
+                &hop_buf[..hop_len],
+                &mut conditional_etag,
+                &mut conditional_modified,
+            );
+
+            let request_len = browser::http::format_proxy_request(
+                &browser::http::ProxyRequest {
+                    method,
+                    url: &hop_buf[..hop_len],
+                    body: b"",
+                    content_type: b"",
+                    cookie: &cookie_header[..cookie_len],
+                    if_none_match: &conditional_etag[..conditional_etag_len],
+                    if_modified_since: &conditional_modified[..conditional_modified_len],
+                    accept_gzip: true,
+                },
+                request_buf,
+            );
+
+            // The local port has to be non-zero and unique for the connection.
+            let local_port = 45000u16 + ((self.pages_loaded as u16) & 0x03FF);
+
+            std::log("[BROWSER APP] Request dispatched over TCP to the Device Studio gateway.").ok();
+
+            let outcome = fetch_over_tcp(dst_ip, dst_port, local_port, &request_buf[..request_len]);
+
+            // PLATFORM TRUTH: a page is loaded only when the transport
+            // actually delivered bytes. Nothing is synthesised, and the
+            // reason is reported as it was.
+            if outcome.bytes == 0 {
+                self.status = PageStatus::NoTransport;
+                self.loading_progress = 0;
+                self.tabs.active_tab_mut().loading_state = LoadingState::Failed;
+                self.tabs.active_tab_mut().error_code = outcome.error as i32;
+                std::log("[BROWSER APP] The gateway returned no bytes. The failure is reported as it happened; no page was synthesised.",
+                )
+                .ok();
+                let _ = std::audio_play_tone(220);
+                let _ = std::audio_silence();
+                let _ = std::audio_haptic_click();
+                return false;
+            }
+
+            let response = unsafe { &*core::ptr::addr_of!(RESPONSE_BUF) };
+            let rx_slice = &response[..outcome.bytes];
+            self.response_len = outcome.bytes;
+
+            // A payload that is a file rather than a document is kept as it
+            // arrived. The gateway hands media over as raw bytes; decoding it
+            // as text first would replace every non-ASCII byte, so the saved
+            // file would no longer be the file the origin sent.
+            if let Some(resp) = browser::parse_http_response(rx_slice) {
+                if browser::content_type_is_binary(resp.content_type) {
+                    let truncated = outcome.truncated
+                        || browser::http_header_value(rx_slice, b"x-interos-truncated").is_some();
+                    return self.save_media_download(
+                        &hop_buf[..hop_len],
+                        resp.content_type,
+                        browser::http_header_value(rx_slice, b"x-interos-filename"),
+                        resp.body,
+                        truncated,
+                    );
+                }
+            }
+
+            if is_browser_envelope(rx_slice) {
+                final_truncated = outcome.truncated
+                    || rx_slice
+                        .windows(b"\"truncated\": true".len())
+                        .any(|w| w == b"\"truncated\": true")
+                    || rx_slice
+                        .windows(b"\"truncated\":true".len())
+                        .any(|w| w == b"\"truncated\":true");
+
+                let status = match browser::http::proxy_status(rx_slice) {
+                    Some(status) => status,
+                    None => 0,
+                };
+
+                // Every Set-Cookie on every hop belongs to the address that
+                // sent it, including the redirect responses themselves.
+                let mut cookie_text = [0u8; 1536];
+                let cookie_text_len = envelope_field(rx_slice, b"set_cookie", &mut cookie_text);
+                if cookie_text_len > 0 {
+                    for line in cookie_text[..cookie_text_len].split(|&b| b == b'\n') {
+                        if !line.is_empty() {
+                            let _ = jar.store(&hop_buf[..hop_len], line, 0);
+                        }
+                    }
+                }
+
+                if status == 304 {
+                    // The origin confirmed the copy the browser holds. The
+                    // body is served from the cache, not invented.
+                    if let Some(entry) = cache.lookup(&hop_buf[..hop_len]) {
+                        let html = unsafe { &mut *core::ptr::addr_of_mut!(HTML_BUF) };
+                        let body = entry.body();
+                        document_len = body.len().min(html.len());
+                        html[..document_len].copy_from_slice(&body[..document_len]);
+                        std::log("[BROWSER APP] The origin confirmed the cached copy; the revalidated document is shown.").ok();
+                        break;
+                    }
+                    protocol_fault = true;
+                    break;
+                }
+
+                if browser::http::status_is_redirect(status) {
+                    let mut location = [0u8; browser::http::MAX_URL_BYTES];
+                    let location_len = envelope_field(rx_slice, b"location", &mut location);
+                    if location_len == 0 {
+                        protocol_fault = true;
+                        break;
+                    }
+                    let mut next = [0u8; browser::http::MAX_URL_BYTES];
+                    let Some(next_len) = browser::http::resolve_url(
+                        &hop_buf[..hop_len],
+                        &location[..location_len],
+                        &mut next,
+                    ) else {
+                        protocol_fault = true;
+                        break;
+                    };
+                    match tracker.next(&next[..next_len]) {
+                        Ok(()) => {
+                            method = browser::http::method_for_redirect(status, method);
+                            hop_buf[..next_len].copy_from_slice(&next[..next_len]);
+                            hop_len = next_len;
+                            std::log("[BROWSER APP] The origin redirected; the browser follows the Location under its own hop bound.").ok();
+                            continue;
+                        }
+                        Err(fault) => {
+                            redirect_fault = Some(fault);
+                            break;
+                        }
+                    }
+                }
+
+                // The gateway's envelope names the page's own type, which is
+                // what decides markup versus plain text.
+                let mut content_type = [0u8; 160];
+                let mut content_type_len =
+                    envelope_field(rx_slice, b"content_type", &mut content_type);
+                if content_type_len == 0 {
+                    if let Some(ct) = browser::proxy_content_type(rx_slice) {
+                        content_type_len = ct.len().min(content_type.len());
+                        content_type[..content_type_len].copy_from_slice(&ct[..content_type_len]);
+                    }
+                }
+                document_kind = if browser::content_type_is_plain(
+                    &content_type[..content_type_len],
+                ) {
+                    browser::PayloadKind::PlainText
+                } else {
+                    browser::PayloadKind::Markup
+                };
+
+                let mut encoding = [0u8; 32];
+                let encoding_len = envelope_field(rx_slice, b"content_encoding", &mut encoding);
+                let charset =
+                    browser::http::charset_from_content_type(&content_type[..content_type_len]);
+
+                let html = unsafe { &mut *core::ptr::addr_of_mut!(HTML_BUF) };
+                let decoded_buf = unsafe { &mut *core::ptr::addr_of_mut!(DECODE_BUF) };
+                if let Some(encoded) = browser::http::proxy_string_field(rx_slice, b"body_b64") {
+                    // The gateway base64-encodes a body whose bytes must not
+                    // be re-encoded as JSON text: a compressed body, or one
+                    // in a charset other than UTF-8.
+                    let Some(wire_len) = browser::http::base64_decode(encoded, html) else {
+                        protocol_fault = true;
+                        break;
+                    };
+                    if encoding_len > 0 {
+                        match browser::inflate::decode_content_encoding(
+                            &encoding[..encoding_len],
+                            &html[..wire_len],
+                            decoded_buf,
+                        ) {
+                            Ok(inflated) => {
+                                let decoded = browser::http::decode_text(
+                                    &decoded_buf[..inflated],
+                                    charset,
+                                    html,
+                                );
+                                document_len = decoded.written;
+                                final_truncated |= decoded.truncated;
+                                invalid_sequences += decoded.invalid;
+                            }
+                            Err(_) => {
+                                protocol_fault = true;
+                                break;
+                            }
+                        }
+                    } else {
+                        let decoded =
+                            browser::http::decode_text(&html[..wire_len], charset, decoded_buf);
+                        document_len = decoded.written;
+                        final_truncated |= decoded.truncated;
+                        invalid_sequences += decoded.invalid;
+                        html[..document_len].copy_from_slice(&decoded_buf[..document_len]);
+                    }
+                } else {
+                    document_len = browser::extract_proxy_html(rx_slice, html);
+                    let decoded =
+                        browser::http::decode_text(&html[..document_len], charset, decoded_buf);
+                    document_len = decoded.written;
+                    final_truncated |= decoded.truncated;
+                    invalid_sequences += decoded.invalid;
+                    html[..document_len].copy_from_slice(&decoded_buf[..document_len]);
+                }
+
+                if document_len > 0
+                    && status == 200
+                    && document_kind == browser::PayloadKind::Markup
+                {
+                    let mut etag = [0u8; 96];
+                    let etag_len = envelope_field(rx_slice, b"etag", &mut etag);
+                    let mut modified = [0u8; 40];
+                    let modified_len = envelope_field(rx_slice, b"last-modified", &mut modified);
+                    let mut cache_control = [0u8; 64];
+                    let cache_control_len =
+                        envelope_field(rx_slice, b"cache-control", &mut cache_control);
+                    let _ = cache.store(
+                        &hop_buf[..hop_len],
+                        &etag[..etag_len],
+                        &modified[..modified_len],
+                        &cache_control[..cache_control_len],
+                        &html[..document_len],
+                    );
+                }
+                break;
+            }
+
+            // The gateway reports a failed fetch as HTTP 200 with
+            // `success: false` and no page. That body is not the site's
+            // content, so it is reported as a failure instead of being
+            // rendered as text.
+            if browser::proxy_reports_failure(rx_slice) {
+                self.status = PageStatus::GatewayError;
+                self.loading_progress = 0;
+                self.tabs.active_tab_mut().loading_state = LoadingState::Failed;
+                self.tabs.active_tab_mut().error_code = -5; // EIO
+                std::log("[BROWSER APP] The gateway received the request but could not fetch the page; its error envelope is reported, not rendered.").ok();
+                let _ = std::audio_haptic_click();
+                return false;
+            }
+
+            // A response outside the envelope is read as an HTTP response of
+            // its own. The binary case returned above; what is left is text.
+            let Some(resp) = browser::parse_http_response(rx_slice) else {
+                protocol_fault = true;
+                break;
+            };
+            if resp.body.is_empty() {
+                protocol_fault = true;
+                break;
+            }
+            document_kind = if browser::content_type_is_plain(resp.content_type) {
+                browser::PayloadKind::PlainText
+            } else {
+                browser::PayloadKind::Markup
+            };
+            // `parse_http_response` strips the parameters, and the charset
+            // lives there, so the raw header value is used for the decoder.
+            let full_content_type =
+                browser::http::find_header(rx_slice, b"content-type").unwrap_or(resp.content_type);
+            let charset = browser::http::charset_from_content_type(full_content_type);
+            let html = unsafe { &mut *core::ptr::addr_of_mut!(HTML_BUF) };
+            let decoded = browser::http::decode_text(resp.body, charset, html);
+            document_len = decoded.written;
+            final_truncated = outcome.truncated || decoded.truncated;
+            invalid_sequences += decoded.invalid;
+            break;
         }
 
-        let response = unsafe { &*core::ptr::addr_of!(RESPONSE_BUF) };
-        let rx_slice = &response[..outcome.bytes];
-        self.response_len = outcome.bytes;
-
-        // A payload that is a file rather than a document is kept as it
-        // arrived. The gateway hands media over as raw bytes; decoding it as
-        // text first would replace every non-ASCII byte, so the saved file
-        // would no longer be the file the origin sent.
-        if let Some(resp) = browser::parse_http_response(rx_slice) {
-            if browser::content_type_is_binary(resp.content_type) {
-                let truncated = outcome.truncated
-                    || browser::http_header_value(rx_slice, b"x-interos-truncated").is_some();
-                return self.save_media_download(
-                    target,
-                    resp.content_type,
-                    browser::http_header_value(rx_slice, b"x-interos-filename"),
-                    resp.body,
-                    truncated,
-                );
+        if let Some(fault) = redirect_fault {
+            // The fault is shown as a page of its own: it names the limit or
+            // the loop and the last address, and invents no status code.
+            let text = unsafe { &mut *core::ptr::addr_of_mut!(RESPONSE_BUF) };
+            let text_len = browser::http::redirect_error_document(
+                fault,
+                &hop_buf[..hop_len],
+                text,
+            );
+            let document = unsafe { &mut *core::ptr::addr_of_mut!(READER_BUF) };
+            let doc_len = browser::reader_text_from_plain(&text[..text_len], document);
+            if doc_len == 0 {
+                protocol_fault = true;
+            } else {
+                self.page_source_len = 0;
+                self.response_truncated = false;
+                self.load_document_content(&document[..doc_len]);
+                self.status = PageStatus::Loaded;
+                self.loading_progress = 100;
+                self.tabs.active_tab_mut().loading_state = LoadingState::Completed;
+                std::log("[BROWSER APP] The redirect bound stopped this navigation; the page states the bound and the last address.").ok();
+                let _ = std::audio_haptic_click();
+                return true;
             }
         }
 
-        let mut loaded_from_network = false;
-        let key: &[u8] = b"\"html\":";
-        let is_proxy_envelope = rx_slice.windows(key.len()).any(|w| w == key);
-
-        // The gateway reports a failed fetch as HTTP 200 with `success: false`
-        // and no page. That body is not the site's content, so it is reported
-        // as a failure instead of being rendered as text.
-        if !is_proxy_envelope && browser::proxy_reports_failure(rx_slice) {
+        if protocol_fault || document_len == 0 {
             self.status = PageStatus::GatewayError;
             self.loading_progress = 0;
             self.tabs.active_tab_mut().loading_state = LoadingState::Failed;
             self.tabs.active_tab_mut().error_code = -5; // EIO
-            std::log("[BROWSER APP] The gateway received the request but could not fetch the page; its error envelope is reported, not rendered.").ok();
+            std::log("[BROWSER APP] The response was not a document this browser could decode; no page was synthesised.").ok();
             let _ = std::audio_haptic_click();
             return false;
         }
 
-        // The gateway's JSON envelope names the page's own content type, and
-        // a `text/plain` page is text rather than markup.
-        let page_kind = match browser::proxy_content_type(rx_slice) {
-            Some(ct) if browser::content_type_is_plain(ct) => browser::PayloadKind::PlainText,
-            _ => browser::PayloadKind::Markup,
-        };
-
-        let html_len = if is_proxy_envelope {
-            let buffer = unsafe { &mut *core::ptr::addr_of_mut!(HTML_BUF) };
-            browser::extract_proxy_html(rx_slice, buffer)
-        } else {
-            // A response that is not the gateway's envelope is the page
-            // itself, so it is read in place.
-            let buffer = unsafe { &mut *core::ptr::addr_of_mut!(HTML_BUF) };
-            let take = rx_slice.len().min(buffer.len());
-            buffer[..take].copy_from_slice(&rx_slice[..take]);
-            take
-        };
-
-        if html_len > 0 {
-            // The page's own document, not the envelope that carried it, is
-            // what a saved page is.
-            self.page_source_len = html_len;
-            // The HTML is read from one buffer and the reader document is
-            // written to another: the reader rewrites the markup in place,
-            // so source and destination cannot be the same memory.
-            let source = unsafe { &*core::ptr::addr_of!(HTML_BUF) };
-            let destination = unsafe { &mut *core::ptr::addr_of_mut!(READER_BUF) };
-            let doc_len = browser::html_to_reader_document_kind(&source[..html_len], page_kind, destination);
-            if doc_len > 0 {
-                self.load_document_content(&destination[..doc_len]);
-                loaded_from_network = true;
-            }
+        if invalid_sequences > 0 {
+            // Explicit, not silent: the bytes were neither valid UTF-8 nor
+            // valid for the declared charset, and each bad sequence became
+            // U+FFFD rather than disappearing.
+            std::log("[BROWSER APP] The document held byte sequences invalid in its declared charset; they were replaced, not dropped.").ok();
         }
 
-        if outcome.truncated {
+        // The page's own document, not the envelope that carried it, is what
+        // a saved page is.
+        self.page_source_len = document_len;
+        // The HTML is read from one buffer and the reader document is written
+        // to another: the reader rewrites the markup in place, so source and
+        // destination cannot be the same memory.
+        let source = unsafe { &*core::ptr::addr_of!(HTML_BUF) };
+        let destination = unsafe { &mut *core::ptr::addr_of_mut!(READER_BUF) };
+        let doc_len = browser::html_to_reader_document_kind(
+            &source[..document_len],
+            document_kind,
+            destination,
+        );
+        if doc_len == 0 {
+            self.status = PageStatus::GatewayError;
+            self.loading_progress = 0;
+            self.tabs.active_tab_mut().loading_state = LoadingState::Failed;
+            self.tabs.active_tab_mut().error_code = -5; // EIO
+            std::log("[BROWSER APP] The page carried no readable text after decoding; no page was synthesised.").ok();
+            return false;
+        }
+        self.load_document_content(&destination[..doc_len]);
+
+        if final_truncated {
             // WHY the screen says so: the response was larger than the
             // browser's buffer, so what is on screen is the beginning of a
             // page rather than the whole of it.
@@ -3006,15 +3331,6 @@ impl BrowserApp {
             self.response_truncated = true;
         } else {
             self.response_truncated = false;
-        }
-
-        if !loaded_from_network {
-            self.status = PageStatus::NoTransport;
-            self.loading_progress = 0;
-            self.tabs.active_tab_mut().loading_state = LoadingState::Failed;
-            self.tabs.active_tab_mut().error_code = -111; // ECONNREFUSED
-            std::log("[BROWSER APP] The response carried no readable document. Truthful error status reported.").ok();
-            return false;
         }
 
         self.status = PageStatus::Loaded;
