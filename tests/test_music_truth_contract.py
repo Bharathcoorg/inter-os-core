@@ -131,6 +131,32 @@ def test_the_scrubber_is_omitted_rather_than_drawn_inert():
     assert "the scrubber stays at 0:00" not in source
 
 
+def test_the_transport_streams_the_device_s_pcm_output():
+    """The player used to claim background playback while streaming nothing.
+
+    The transport now opens the AC'97 stream, hands it converted samples, and
+    reads the position back from the device's own frame counter. The app owns
+    that stream, so leaving the screen stops it instead of claiming audio
+    continues in the background.
+    """
+    playback = read("apps/music/src/playback.rs")
+    assert "std::audio_stream_open(" in playback
+    assert "std::audio_stream_write(" in playback
+    assert "std::audio_stream_status(" in playback
+    assert "std::audio_stream_close(" in playback
+    assert "position_millis(s.frames_consumed)" in playback
+    # The file is resolved from the shared storage, never invented.
+    assert "library::resolve_source(" in playback
+    # The refusal paths say what happened instead of pretending to play.
+    assert "PlaybackError::UnsupportedFormat" in playback
+    source = music_source()
+    assert "Background playback active" not in source
+    assert "total_dma_buffers_streamed" not in source
+    assert "std::audio_stream_pause" not in source
+    manifest = read("apps/music/manifest.json")
+    assert '"CAP_AUDIO_STREAM"' in manifest
+
+
 def test_the_library_is_published_into_the_device_s_document_index():
     """The library was a record in the app's own settings store.
 

@@ -9,6 +9,9 @@ pub mod theme;
 /// reads the audio files the device holds.
 pub mod library;
 
+/// Streaming playback of an imported file over the platform's PCM output.
+pub mod playback;
+
 /// `FileSystemRead` slot: accepted by `sys_settings_get`.
 pub const STORE_CAP_READ: usize = 4;
 /// `FileSystemWrite` slot: accepted by `sys_settings_set`.
@@ -60,6 +63,22 @@ pub fn set_ringtone(path_or_title: &[u8]) -> bool {
 
 /// Title bytes one track stores.
 pub const TITLE_MAX: usize = 40;
+
+/// The longest source path one track holds.
+///
+/// WHY the path stays in the record and not in the settings blob: the store's
+/// whole value must fit the platform's 512-byte settings limit, and a path per
+/// track would push a full library past it. The path is resolved from the
+/// shared storage, which is where the file itself lives.
+pub const SOURCE_MAX: usize = 96;
+
+/// The position a stream of consumed frames represents, in milliseconds.
+///
+/// The frames are the device's count of what it took from the ring, so this is
+/// a position read from the stream rather than an estimate from wall time.
+pub fn position_millis(frames_consumed: u64) -> u64 {
+    frames_consumed.saturating_mul(1_000) / interos_std::wav::OUTPUT_SAMPLE_RATE as u64
+}
 
 /// Library capacity, chosen so the serialized blob with escapes stays safely
 /// within the kernel's 512-byte settings value cap.
@@ -220,6 +239,11 @@ pub struct TrackRecord {
     pub title: [u8; TITLE_MAX],
     pub title_len: u8,
     pub duration_sec: u32,
+    /// The file the track was imported from. Empty when the track came from a
+    /// library that predates sources, in which case the player resolves it
+    /// from the shared storage by title.
+    pub source: [u8; SOURCE_MAX],
+    pub source_len: u8,
 }
 
 impl TrackRecord {
@@ -228,6 +252,8 @@ impl TrackRecord {
         title: [0; TITLE_MAX],
         title_len: 0,
         duration_sec: 0,
+        source: [0; SOURCE_MAX],
+        source_len: 0,
     };
 
     pub fn from_parts(id: u32, title: &[u8], duration_sec: u32) -> Self {
@@ -242,6 +268,26 @@ impl TrackRecord {
 
     pub fn title(&self) -> &[u8] {
         &self.title[..self.title_len as usize]
+    }
+
+    /// Records the file this track plays from.
+    ///
+    /// Returns `false` when the path is not text the platform's filesystem
+    /// can open, so a malformed import is refused instead of stored.
+    pub fn set_source(&mut self, path: &[u8]) -> bool {
+        if path.is_empty() || path.len() > SOURCE_MAX || path[0] != b'/' {
+            return false;
+        }
+        if !path.iter().all(|b| (0x20..=0x7e).contains(b)) {
+            return false;
+        }
+        self.source[..path.len()].copy_from_slice(path);
+        self.source_len = path.len() as u8;
+        true
+    }
+
+    pub fn source(&self) -> &[u8] {
+        &self.source[..self.source_len as usize]
     }
 
     pub fn duration_sec(&self) -> u32 {
@@ -262,6 +308,7 @@ impl TrackRecord {
         self.id != 0
             && (self.title_len as usize) <= TITLE_MAX
             && self.title_len > 0
+            && (self.source_len as usize) <= SOURCE_MAX
             // A duration of zero is the "not read" marker, not a length.
             && self.duration_sec <= DUR_MAX
             && self
@@ -453,6 +500,16 @@ impl TrackStore {
     }
 
     pub fn add(&mut self, title: &[u8], duration_sec: u32) -> bool {
+        self.add_with_source(title, duration_sec, b"")
+    }
+
+    /// Adds a track together with the file it plays from.
+    pub fn add_with_source(
+        &mut self,
+        title: &[u8],
+        duration_sec: u32,
+        source: &[u8],
+    ) -> bool {
         if self.is_full() {
             self.state = StoreState::Full;
             return false;
@@ -475,7 +532,11 @@ impl TrackStore {
             self.state = StoreState::Full;
             return false;
         }
-        let r = TrackRecord::from_parts(id, title, duration_sec);
+        let mut r = TrackRecord::from_parts(id, title, duration_sec);
+        if !source.is_empty() && !r.set_source(source) {
+            self.state = StoreState::Invalid;
+            return false;
+        }
         if !r.valid() {
             self.state = StoreState::Invalid;
             return false;
@@ -767,6 +828,29 @@ mod tests {
         assert_eq!(dec.id, 1);
         assert_eq!(dec.title(), b"Nocturne in C-sharp Minor");
         assert_eq!(dec.duration_sec(), 245);
+    }
+
+    #[test]
+    fn a_track_remembers_the_file_it_was_imported_from() {
+        let mut record = TrackRecord::from_parts(1, b"Tone", 0);
+        assert_eq!(record.source(), b"");
+        assert!(record.set_source(b"/storage/audio/tone.wav"));
+        assert_eq!(record.source(), b"/storage/audio/tone.wav");
+        // A path the platform cannot open is refused rather than stored as a
+        // promise the player cannot keep.
+        assert!(!record.set_source(b"/storage/audio/\x01bad.wav"));
+        assert!(!record.set_source(&[b'a'; SOURCE_MAX + 1]));
+    }
+
+    #[test]
+    fn a_playback_position_is_derived_from_the_frames_the_device_took() {
+        // WHY the device's own counter: the player knows how many frames it
+        // handed over, and a position read from that counter is a fact about
+        // the stream rather than an estimate from wall time.
+        assert_eq!(position_millis(0), 0);
+        assert_eq!(position_millis(24_000), 500);
+        assert_eq!(position_millis(48_000), 1_000);
+        assert_eq!(position_millis(72_000), 1_500);
     }
 
     #[test]

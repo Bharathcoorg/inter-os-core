@@ -101,6 +101,40 @@ pub fn title_from_name(name: &[u8], out: &mut [u8; TITLE_MAX]) -> usize {
     n
 }
 
+/// Writes `directory/name` into `out` and returns its length.
+///
+/// Returns 0 when the path does not fit, so a caller refuses a truncated path
+/// instead of opening a file with a different name.
+pub fn audio_path(directory: &[u8], name: &[u8], out: &mut [u8]) -> usize {
+    let total = directory.len() + 1 + name.len();
+    if total > out.len() {
+        return 0;
+    }
+    out[..directory.len()].copy_from_slice(directory);
+    out[directory.len()] = b'/';
+    out[directory.len() + 1..total].copy_from_slice(name);
+    total
+}
+
+/// Whether a listing's file name is the file a track title was imported from.
+///
+/// WHY the stem and not the title text: the record keeps the title without its
+/// extension, so a library written before the source was stored can still find
+/// the file it was made from.
+pub fn name_matches_title(name: &[u8], title: &[u8]) -> bool {
+    let mut stem = name;
+    for ext in AUDIO_EXTENSIONS {
+        if stem.len() > ext.len()
+            && stem[stem.len() - ext.len()..].eq_ignore_ascii_case(ext)
+            && stem[stem.len() - ext.len() - 1] == b'.'
+        {
+            stem = &stem[..stem.len() - ext.len() - 1];
+            break;
+        }
+    }
+    stem.len() == title.len() && stem.eq_ignore_ascii_case(title)
+}
+
 /// Writes the path a track's document is published at into `out` and returns
 /// its length.
 ///
@@ -261,7 +295,7 @@ pub fn import_from_storage(store: &mut TrackStore) -> ImportOutcome {
     };
     let mut imported = 0usize;
     let mut refused = 0usize;
-    imported += import_listing(store, &buf[..listed], &mut refused);
+    imported += import_listing(store, STORAGE_ROOT.as_bytes(), &buf[..listed], &mut refused);
 
     // One level into each folder the storage holds, so the import finds the
     // files a person put in a folder and not only the ones at the top.
@@ -283,21 +317,10 @@ pub fn import_from_storage(store: &mut TrackStore) -> ImportOutcome {
             continue;
         }
         let mut path = [0u8; 48];
-        let mut at = 0usize;
-        for &byte in STORAGE_ROOT.as_bytes() {
-            if at >= path.len() {
-                break;
-            }
-            path[at] = byte;
-            at += 1;
+        let at = audio_path(STORAGE_ROOT.as_bytes(), name, &mut path);
+        if at == 0 {
+            continue;
         }
-        if at < path.len() {
-            path[at] = b'/';
-            at += 1;
-        }
-        let n = name.len().min(path.len().saturating_sub(at));
-        path[at..at + n].copy_from_slice(&name[..n]);
-        at += n;
         directories[directory_count] = (path, at);
         directory_count += 1;
     }
@@ -310,7 +333,7 @@ pub fn import_from_storage(store: &mut TrackStore) -> ImportOutcome {
         let Ok(listed) = std::fs_list(path_str, &mut inner) else {
             continue;
         };
-        imported += import_listing(store, &inner[..listed], &mut refused);
+        imported += import_listing(store, &path[..len], &inner[..listed], &mut refused);
     }
 
     import_outcome(imported, refused)
@@ -335,7 +358,12 @@ fn import_outcome(imported: usize, refused: usize) -> ImportOutcome {
 /// WHY a track the library already holds is skipped: the import runs on a
 /// button, and a person who presses it twice should not find their library
 /// full of copies.
-fn import_listing(store: &mut TrackStore, listing: &[u8], refused: &mut usize) -> usize {
+fn import_listing(
+    store: &mut TrackStore,
+    directory: &[u8],
+    listing: &[u8],
+    refused: &mut usize,
+) -> usize {
     let mut imported = 0usize;
     for line in listing.split(|b| *b == b'\n') {
         if line.is_empty() {
@@ -360,10 +388,12 @@ fn import_listing(store: &mut TrackStore, listing: &[u8], refused: &mut usize) -
         if already_held(store, &title[..n]) {
             continue;
         }
+        let mut source = [0u8; crate::SOURCE_MAX];
+        let source_len = audio_path(directory, name, &mut source);
         // WHY a duration of zero: the device reports a file's length in
         // bytes, not the length of the sound in it, and a length nobody read
         // is stored as unknown rather than guessed.
-        if store.add(&title[..n], 0) {
+        if store.add_with_source(&title[..n], 0, &source[..source_len]) {
             imported += 1;
         } else if matches!(store.state, StoreState::WriteRefused | StoreState::Full) {
             // WHY a found file is counted separately: the person did put audio
@@ -387,9 +417,107 @@ fn already_held(store: &TrackStore, title: &[u8]) -> bool {
     false
 }
 
+/// Copies the source path the track's record holds into `out`.
+///
+/// Returns `None` when the record is from a library that predates sources, so
+/// the caller knows a search of the shared storage is still needed.
+pub fn recorded_source(store: &TrackStore, index: usize, out: &mut [u8]) -> Option<usize> {
+    let track = store.get(index)?;
+    let source = track.source();
+    if source.is_empty() || source.len() > out.len() {
+        return None;
+    }
+    out[..source.len()].copy_from_slice(source);
+    Some(source.len())
+}
+
+/// Finds the file a track title names in one directory listing.
+///
+/// Returns the length of the path written into `out`.
+pub fn source_in_listing(
+    directory: &[u8],
+    listing: &[u8],
+    title: &[u8],
+    out: &mut [u8],
+) -> Option<usize> {
+    for line in listing.split(|b| *b == b'\n') {
+        if line.is_empty() {
+            continue;
+        }
+        let mut fields = line.split(|b| *b == b'|');
+        let name = fields.next()?;
+        if fields.next().is_none() {
+            continue;
+        }
+        let kind = fields.next().unwrap_or(b"file");
+        if kind == b"dir" || !is_audio_name(name) || !name_matches_title(name, title) {
+            continue;
+        }
+        let at = audio_path(directory, name, out);
+        if at > 0 {
+            return Some(at);
+        }
+    }
+    None
+}
+
+/// Resolves the file a track plays from, searching the shared storage.
+///
+/// WHY the search: a library written before records held sources has only the
+/// title, and the file it was imported from is still on the device.
+pub fn resolve_source(store: &TrackStore, index: usize, out: &mut [u8]) -> Option<usize> {
+    if let Some(n) = recorded_source(store, index, out) {
+        return Some(n);
+    }
+    let title = store.get(index)?.title();
+    let mut listing = [0u8; 4096];
+    let listed = std::fs_list(STORAGE_ROOT, &mut listing).ok()?;
+    if let Some(n) = source_in_listing(
+        STORAGE_ROOT.as_bytes(),
+        &listing[..listed],
+        title,
+        out,
+    ) {
+        return Some(n);
+    }
+    for line in listing[..listed].split(|b| *b == b'\n') {
+        if line.is_empty() {
+            continue;
+        }
+        let mut fields = line.split(|b| *b == b'|');
+        let Some(name) = fields.next() else {
+            continue;
+        };
+        if fields.next().is_none() {
+            continue;
+        }
+        let kind = fields.next().unwrap_or(b"file");
+        if kind != b"dir" || name.is_empty() {
+            continue;
+        }
+        let mut path = [0u8; 64];
+        let at = audio_path(STORAGE_ROOT.as_bytes(), name, &mut path);
+        if at == 0 {
+            continue;
+        }
+        let Ok(path_str) = core::str::from_utf8(&path[..at]) else {
+            continue;
+        };
+        let mut inner = [0u8; 4096];
+        let Ok(listed) = std::fs_list(path_str, &mut inner) else {
+            continue;
+        };
+        if let Some(n) = source_in_listing(&path[..at], &inner[..listed], title, out) {
+            return Some(n);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TrackRecord;
 
     #[test]
     fn only_a_file_with_an_audio_extension_is_audio() {
@@ -423,6 +551,59 @@ mod tests {
         let n = document_path(b"Nocturne", &mut path);
         let text = core::str::from_utf8(&path[..n]).expect("the path is text");
         assert_eq!(text, "/storage/music-Nocturne.txt");
+    }
+
+    #[test]
+    fn an_imported_file_keeps_the_directory_it_was_listed_in() {
+        let mut out = [0u8; crate::SOURCE_MAX];
+        let n = audio_path(b"/storage", b"tone.wav", &mut out);
+        assert_eq!(&out[..n], b"/storage/tone.wav");
+        let n = audio_path(b"/storage/audio", b"song.flac", &mut out);
+        assert_eq!(&out[..n], b"/storage/audio/song.flac");
+        // A path that does not fit is refused rather than truncated into a
+        // different file's name.
+        let base = [b'a'; crate::SOURCE_MAX];
+        assert_eq!(audio_path(&base, b"tone.wav", &mut out), 0);
+    }
+
+    #[test]
+    fn a_listing_entry_matches_the_track_with_the_same_stem() {
+        assert!(name_matches_title(b"tone.wav", b"Tone"));
+        assert!(name_matches_title(b"TONE.WAV", b"tone"));
+        assert!(!name_matches_title(b"tone.wav", b"tones"));
+        assert!(!name_matches_title(b"tone.wav", b"tone.wav"));
+    }
+
+    #[test]
+    fn a_library_from_before_sources_still_finds_its_file() {
+        // WHY this exists: the record keeps the title without its extension,
+        // so a library written before the source was stored has to find the
+        // file it was made from by that title.
+        let listing = b"notes.txt|12|file\ntone.wav|882|file\n";
+        let mut out = [0u8; crate::SOURCE_MAX];
+        let n = source_in_listing(b"/storage/audio", listing, b"tone", &mut out)
+            .expect("the listing holds the file");
+        assert_eq!(&out[..n], b"/storage/audio/tone.wav");
+        assert!(source_in_listing(b"/storage/audio", listing, b"missing", &mut out).is_none());
+        // A directory may not be mistaken for the file.
+        let directories = b"tone|0|dir\n";
+        assert!(source_in_listing(b"/storage", directories, b"tone", &mut out).is_none());
+    }
+
+    #[test]
+    fn a_source_the_record_holds_is_used_without_a_search() {
+        let mut store = TrackStore::EMPTY;
+        let mut imported = TrackRecord::from_parts(1, b"tone", 0);
+        assert!(imported.set_source(b"/storage/audio/tone.wav"));
+        store.records[0] = imported;
+        store.len = 1;
+        let mut out = [0u8; crate::SOURCE_MAX];
+        let n = recorded_source(&store, 0, &mut out).expect("the record holds the path");
+        assert_eq!(&out[..n], b"/storage/audio/tone.wav");
+
+        store.records[1] = TrackRecord::from_parts(2, b"nocturne", 0);
+        store.len = 2;
+        assert!(recorded_source(&store, 1, &mut out).is_none());
     }
 
     #[test]

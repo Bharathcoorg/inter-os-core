@@ -4,13 +4,15 @@
 //! - Playlist populated only from real media storage (`PLAYLIST` is honestly
 //!   empty, so the player reports an idle transport and an empty track list)
 //! - Every transport target is >= 56 px (previous/next 64 px, play/pause 88 px)
-//! - The progress bar is bound to a real playback position; no backend reports
-//!   one, so it renders the honest idle state instead of a fake fill
+//! - The transport feeds the platform's AC'97 PCM stream; the elapsed position
+//!   is the frame count the device reports, and no scrubber is drawn because
+//!   the transport cannot seek
 //! - Album artwork is a neutral placeholder glyph, never a fabricated cover
 //! - All strings are measured with `interos_std::design::font::measure` /
 //!   `ellipsize` at the coordinates they are drawn at
-//! - Hardware Keystore Slot 1 media key derivation, authenticated track record
-//!   encryption and the zero-copy DMA audio path are preserved unchanged
+//! - Hardware Keystore Slot 1 media key derivation and the track record's
+//!   authenticated form are preserved; the keystore refuses derivation to this
+//!   app and the log says so rather than claiming a key
 //! - Asynchronous event reactor loop for transport controls
 //!
 //! Typed input (mirrors `apps/browser/src/main.rs`):
@@ -32,6 +34,7 @@ use interos_std as std;
 
 mod store;
 use library::{ImportOutcome, PublishOutcome};
+use music::playback::{Player, PlayerState};
 use store::TrackStore;
 use music::library;
 use music::theme::{THEME, radius, spacing};
@@ -96,7 +99,15 @@ pub struct MusicApp {
     /// `None` when the audio service refused, which the UI draws as an
     /// unavailable meter with disabled step controls.
     pub volume_percent: Option<u8>,
-    pub total_dma_buffers_streamed: u32,
+    /// The engine that reads the selected track's file and feeds the device's
+    /// PCM stream.
+    pub player: Player,
+    /// The whole second of playback the screen last drew.
+    ///
+    /// WHY the whole second: the position is a fact that changes every tick,
+    /// and repainting the metadata band for a value the screen cannot show
+    /// would spend the frame on nothing.
+    pub shown_second: u64,
     pub keystore_derived: bool,
     pub sector_encrypted: bool,
     /// Real, persisted local track library. The playlist and the now-playing row
@@ -151,7 +162,8 @@ impl MusicApp {
             current_track_idx: 0,
             waveform: AudioWaveform::Sine,
             volume_percent: None,
-            total_dma_buffers_streamed: 0,
+            player: Player::EMPTY,
+            shown_second: 0,
             keystore_derived: false,
             sector_encrypted: false,
             store: TrackStore::EMPTY,
@@ -234,6 +246,9 @@ impl MusicApp {
             if let Some(track) = self.store.get(i) {
                 if track.title() == &title[..title_len] {
                     self.current_track_idx = i;
+                    if self.state == PlaybackState::Playing {
+                        self.start_selected();
+                    }
                     self.publish_now_playing();
                     std::log("[MUSIC APP] Opened the audio file a caller dispatched to this player.").ok();
                     return true;
@@ -297,11 +312,31 @@ impl MusicApp {
         if store_idx == 0 {
             return false;
         }
+        let current_id = self.store.get(self.current_track_idx).map(|t| t.id);
         if !self.store.move_to(store_idx, store_idx - 1) {
             return false;
         }
+        self.relink_current(current_id);
         self.rebuild_order();
         true
+    }
+
+    /// Keeps the selection on the same track after the queue was reordered.
+    ///
+    /// WHY the id: the selection is a position, and a reorder moves tracks
+    /// between positions. The id travels with the track, so it is what says
+    /// which position holds the track that was selected.
+    fn relink_current(&mut self, id: Option<u32>) {
+        let Some(id) = id else {
+            return;
+        };
+        for i in 0..self.store.len() {
+            if self.store.get(i).map(|t| t.id) == Some(id) {
+                self.current_track_idx = i;
+                self.player.retrack(i);
+                return;
+            }
+        }
     }
 
     /// Cycles the queue's order and persists the new one.
@@ -311,6 +346,7 @@ impl MusicApp {
     /// an order.
     pub fn cycle_sort(&mut self) -> bool {
         let next = self.sort.next();
+        let current_id = self.store.get(self.current_track_idx).map(|t| t.id);
         let ok = match next {
             SortMode::Added => self.store.sort_by_added(),
             SortMode::Title => self.store.sort_by_title(),
@@ -318,6 +354,7 @@ impl MusicApp {
         };
         if ok {
             self.sort = next;
+            self.relink_current(current_id);
             self.rebuild_order();
         }
         ok
@@ -331,6 +368,7 @@ impl MusicApp {
         match std::audio_query_volume() {
             Ok(v) if v <= 100 => {
                 self.volume_percent = Some(v as u8);
+                self.player.set_volume(v as u8);
                 true
             }
             Ok(_) => {
@@ -376,6 +414,7 @@ impl MusicApp {
         match std::audio_set_volume(requested) {
             Ok(v) if v <= 100 => {
                 self.volume_percent = Some(v as u8);
+                self.player.set_volume(v as u8);
                 true
             }
             Ok(_) => {
@@ -450,26 +489,42 @@ impl MusicApp {
         }
     }
 
-    /// Attempts to stream one media payload over the zero-copy DMA ring.
+    /// Starts the selected track on the device's PCM output.
     ///
-    /// Returns `true` only when a transfer actually occurred. The local playlist
-    /// is populated from real media storage, so with no media there is nothing to
-    /// hand to the DMA engine and no buffer was consumed.
-    pub fn stream_dma_audio_block(&mut self) -> bool {
-        // WHY: the transport state and the DMA counter must track real transfers.
-        // Returning false here is what stops the caller from reporting playback
-        // or counting a buffer that was never streamed.
+    /// Returns `true` only when the device accepted the stream. A refusal is
+    /// reported on the feedback line; the transport never claims a track is
+    /// playing when no samples reached the device.
+    pub fn start_selected(&mut self) -> bool {
         if self.store.is_empty() {
-            std::log("[MUSIC APP] No media payload is available for DMA streaming.").ok();
+            self.state = PlaybackState::Stopped;
+            self.set_feedback(b"Play refused: the library is empty");
+            std::log("[MUSIC APP] Play requested but the library is empty; transport stays stopped.",
+            )
+            .ok();
             return false;
         }
-        // A real library is present, but there is still no audio mixer, no DMA
-        // descriptor and no playback-position source in this guest, so fail
-        // closed: nothing streams and nothing is counted.
-        std::log("[MUSIC APP] Local library present but no DMA descriptor was obtained; no buffer streamed.",
-        )
-        .ok();
-        false
+        if self.player.start(&self.store, self.current_track_idx) {
+            self.state = PlaybackState::Playing;
+            if let Some(volume) = self.volume_percent {
+                self.player.set_volume(volume);
+            }
+            self.shown_second = u64::MAX;
+            std::log("[MUSIC APP] Transport playing over the device's PCM output.",
+            )
+            .ok();
+            true
+        } else {
+            self.state = PlaybackState::Stopped;
+            let reason = self.player.error_reason();
+            let mut msg = [0u8; FEEDBACK_CAP];
+            let prefix = b"Cannot play: ";
+            msg[..prefix.len()].copy_from_slice(prefix);
+            let n = reason.len().min(FEEDBACK_CAP - prefix.len());
+            msg[prefix.len()..prefix.len() + n].copy_from_slice(&reason.as_bytes()[..n]);
+            self.set_feedback(&msg[..prefix.len() + n]);
+            std::log("[MUSIC APP] Playback refused; the transport stays stopped.").ok();
+            false
+        }
     }
 
     /// Encrypts metadata only when a real media record exists.
@@ -492,39 +547,48 @@ impl MusicApp {
         let cur = (self.current_track_idx.min(self.store.len() - 1)) as isize;
         let next = (cur + delta).rem_euclid(len);
         self.current_track_idx = next as usize;
+        // WHY the stream is reopened: it carries the previous track's samples
+        // and its position counter, so continuing it would play the rest of one
+        // file under another file's name.
+        match self.state {
+            PlaybackState::Playing => {
+                self.start_selected();
+            }
+            PlaybackState::Paused => {
+                self.player.stop();
+                self.state = PlaybackState::Stopped;
+            }
+            _ => {}
+        }
         self.publish_now_playing();
         true
     }
 
-    /// Toggles play/pause against the real media path.
+    /// Toggles play/pause against the device's PCM stream.
     ///
-    /// Returns `true` only when playback actually started. With no media the
-    /// transport stays `Stopped`.
+    /// Returns `true` only when playback actually started. With no media or a
+    /// refused stream the transport stays `Stopped`.
     pub fn toggle_play(&mut self) -> bool {
         match self.state {
             PlaybackState::Playing => {
+                self.player.pause();
+                self.player.poll();
                 self.state = PlaybackState::Paused;
                 self.publish_now_playing();
-                std::log("[MUSIC APP] Transport paused by user.").ok();
+                std::log("[MUSIC APP] Transport paused; the device keeps what it already holds.").ok();
                 false
             }
+            PlaybackState::Paused if self.player.holds(self.current_track_idx) => {
+                self.player.resume();
+                self.state = PlaybackState::Playing;
+                self.publish_now_playing();
+                std::log("[MUSIC APP] Transport resumed from the file position it stopped at.").ok();
+                true
+            }
             _ => {
-                if self.store.is_empty() {
-                    self.state = PlaybackState::Stopped;
-                    self.publish_now_playing();
-                    std::log("[MUSIC APP] Play requested but no media is available; transport stays stopped.",
-                    )
-                    .ok();
-                    false
-                } else {
-                    self.state = PlaybackState::Playing;
-                    if self.stream_dma_audio_block() {
-                        self.total_dma_buffers_streamed += 1;
-                    }
-                    self.publish_now_playing();
-                    std::log("[MUSIC APP] Transport playing started; background audio active.").ok();
-                    true
-                }
+                let started = self.start_selected();
+                self.publish_now_playing();
+                started
             }
         }
     }
@@ -545,12 +609,18 @@ impl MusicApp {
         music::publish_now_playing(title, artist, state_str);
     }
 
-    /// Restores persistent background playback state from previous session.
+    /// Restores the track the previous session selected.
+    ///
+    /// WHY the transport is not restored as playing: this app owns the PCM
+    /// stream, and the process stopped the stream when it exited. Nothing is
+    /// playing after a relaunch, so claiming otherwise would be a state the
+    /// device cannot produce. What the previous session can still answer is
+    /// which track was selected.
     pub fn restore_playback_state(&mut self) {
         let mut state_buf = [0u8; 16];
         if let Ok(n) = std::settings_get(music::NOW_PLAYING_STATE_KEY, &mut state_buf) {
             let state_str = &state_buf[..n];
-            if state_str == b"playing" && !self.store.is_empty() {
+            if (state_str == b"playing" || state_str == b"paused") && !self.store.is_empty() {
                 let mut title_buf = [0u8; music::TITLE_MAX];
                 if let Ok(tn) = std::settings_get(music::NOW_PLAYING_TITLE_KEY, &mut title_buf) {
                     if tn > 0 {
@@ -564,10 +634,10 @@ impl MusicApp {
                         }
                     }
                 }
-                self.state = PlaybackState::Playing;
-                std::log("[MUSIC APP] Persistent background playback state restored: Playing.").ok();
-            } else if state_str == b"paused" && !self.store.is_empty() {
-                self.state = PlaybackState::Paused;
+                self.state = PlaybackState::Stopped;
+                std::log("[MUSIC APP] The previous session selected a track; the transport starts stopped because its stream ended with the process.",
+                )
+                .ok();
             }
         }
     }
@@ -1037,6 +1107,53 @@ fn fmt_u32_pub(scratch: &mut [u8; 4], v: u32) -> usize {
     n
 }
 
+/// What the line under the title says about time.
+///
+/// WHY the position comes from the device: an open stream reports the frames
+/// it took, so `0:07 / 3:12` is a fact about the sound path. Without a stream
+/// the line falls back to the length the record holds, and says the length was
+/// never read rather than claiming zero seconds.
+fn playback_caption(app: &MusicApp, track: &store::TrackRecord, out: &mut [u8; 24]) -> usize {
+    let mut at = 0usize;
+    let mut push = |bytes: &[u8], at: &mut usize| {
+        for &byte in bytes {
+            if *at >= out.len() {
+                return;
+            }
+            out[*at] = byte;
+            *at += 1;
+        }
+    };
+    if app.player.holds(app.current_track_idx) {
+        if let Some(position_ms) = app.player.position_ms() {
+            let mut buf = [0u8; 12];
+            let n = fmt_mmss(&mut buf, (position_ms / 1000).min(u32::MAX as u64) as u32);
+            push(&buf[..n], &mut at);
+            push(b" / ", &mut at);
+            let total_secs = match app.player.duration_ms() {
+                Some(total) => (total / 1000).min(u32::MAX as u64) as u32,
+                None if track.duration_known() => track.duration_sec(),
+                None => {
+                    push(b"--:--", &mut at);
+                    return at;
+                }
+            };
+            let n = fmt_mmss(&mut buf, total_secs);
+            push(&buf[..n], &mut at);
+            return at;
+        }
+    }
+    if track.duration_known() {
+        push(b"Duration ", &mut at);
+        let mut buf = [0u8; 12];
+        let n = fmt_mmss(&mut buf, track.duration_sec());
+        push(&buf[..n], &mut at);
+    } else {
+        push(b"Duration not read", &mut at);
+    }
+    at
+}
+
 // -----------------------------------------------------------------------------
 // Per-frame resolved volume text. Measured once per frame, drawn from the buffer.
 // -----------------------------------------------------------------------------
@@ -1392,14 +1509,7 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
     // empty-library copy exactly as before.
     if let Some(t) = sel {
         let mut cap = [0u8; 24];
-        cap[..9].copy_from_slice(b"Duration ");
-        let mut cl = 9usize;
-        let mut db = [0u8; 12];
-        let dn = fmt_mmss(&mut db, t.duration_sec());
-        if cl + dn <= cap.len() {
-            cap[cl..cl + dn].copy_from_slice(&db[..dn]);
-            cl += dn;
-        }
+        let cl = playback_caption(app, t, &mut cap);
         if let Some(c) = text_centered_bold(x, y, ARTIST_Y, 2, &cap[..cl], THEME.on_surface, THEME.surface) {
             return c;
         }
@@ -2190,6 +2300,11 @@ fn handle_tap(app: &mut MusicApp, px: u32, py: u32) -> Tap<'static> {
             if ddx.abs() <= 24 && ddy.abs() <= 24 {
                 if let Some(store_idx) = app.store_index_at(idx) {
                     if app.store.remove(store_idx) {
+                        // WHY playback stops here: removing a track shifts
+                        // every later index, so an open stream would be named
+                        // by a position that now holds another track.
+                        app.player.stop();
+                        app.state = PlaybackState::Stopped;
                         app.sync_list_extent();
                         std::log("[MUSIC APP] Track removed; the deletion was persisted to the settings store.",
                         )
@@ -2226,6 +2341,20 @@ fn handle_tap(app: &mut MusicApp, px: u32, py: u32) -> Tap<'static> {
             }
             if let Some(store_idx) = app.store_index_at(idx) {
                 app.current_track_idx = store_idx.min(app.store.len().saturating_sub(1));
+                // WHY the stream follows the selection: the transport is
+                // playing a file, and leaving it on the previous file while
+                // the screen names the new one would make the play control
+                // act on a track the person did not select.
+                match app.state {
+                    PlaybackState::Playing => {
+                        app.start_selected();
+                    }
+                    PlaybackState::Paused => {
+                        app.player.stop();
+                        app.state = PlaybackState::Stopped;
+                    }
+                    _ => {}
+                }
                 app.publish_now_playing();
                 let _ = std::audio_haptic_click();
                 return Tap::Redraw(Dirty::All);
@@ -2416,12 +2545,9 @@ pub extern "C" fn _start() -> ! {
     //    was never drawn and never changed.
     music.refresh_volume();
 
-    // 5. Zero-Copy DMA Audio Streaming
-    if music.stream_dma_audio_block() {
-        music.total_dma_buffers_streamed += 1;
-        music.state = PlaybackState::Playing;
-        music.publish_now_playing();
-    }
+    // 5. The transport starts stopped. Playback needs a file and the device's
+    //    PCM stream, so it begins when the person presses play and the
+    //    engine reports whether the stream was accepted.
 
     if surface > 0 {
         render_music_ui(surface, &music);
@@ -2452,9 +2578,15 @@ pub extern "C" fn _start() -> ! {
                             match handle_music_key(&mut music, key) {
                                 Tap::Leave(msg) => {
                                     std::log(msg).ok();
-                                    if music.state == PlaybackState::Playing {
-                                        std::log("[MUSIC APP] Background playback active; audio transport continues.").ok();
-                                    }
+                                    // WHY the stream is closed on the way out:
+                                    // the player owns the PCM stream and its
+                                    // task ends when it leaves the screen.
+                                    // There is no background audio service to
+                                    // keep the samples flowing, so the
+                                    // transport stops and the published state
+                                    // says exactly that.
+                                    music.player.stop();
+                                    music.state = PlaybackState::Stopped;
                                     music.publish_now_playing();
                                     if surface > 0 {
                                         let _ = std::surface_destroy(surface);
@@ -2487,9 +2619,13 @@ pub extern "C" fn _start() -> ! {
                             std::log("[MUSIC APP] Navigation gesture recognized. Exiting to launcher.",
                             )
                             .ok();
-                            if music.state == PlaybackState::Playing {
-                                std::log("[MUSIC APP] Background playback active; audio transport continues.").ok();
-                            }
+                            // WHY the stream is closed on the way out: the
+                            // player owns the PCM stream and its task ends
+                            // when it leaves the screen. There is no
+                            // background audio service to keep the samples
+                            // flowing, so the transport stops.
+                            music.player.stop();
+                            music.state = PlaybackState::Stopped;
                             music.publish_now_playing();
                             if surface > 0 {
                                 // WHY no slot argument: a slot is a position
@@ -2506,9 +2642,15 @@ pub extern "C" fn _start() -> ! {
                             match handle_tap(&mut music, input.x, input.y) {
                                 Tap::Leave(msg) => {
                                     std::log(msg).ok();
-                                    if music.state == PlaybackState::Playing {
-                                        std::log("[MUSIC APP] Background playback active; audio transport continues.").ok();
-                                    }
+                                    // WHY the stream is closed on the way out:
+                                    // the player owns the PCM stream and its
+                                    // task ends when it leaves the screen.
+                                    // There is no background audio service to
+                                    // keep the samples flowing, so the
+                                    // transport stops and the published state
+                                    // says exactly that.
+                                    music.player.stop();
+                                    music.state = PlaybackState::Stopped;
                                     music.publish_now_playing();
                                     if surface > 0 {
                                         let _ = std::surface_destroy(surface);
@@ -2537,8 +2679,40 @@ pub extern "C" fn _start() -> ! {
                         repaint(surface, &music, Dirty::All);
                         let _ = std::surface_flip();
                     }
-                    if music.state == PlaybackState::Playing && music.stream_dma_audio_block() {
-                        music.total_dma_buffers_streamed += 1;
+                    if music.state == PlaybackState::Playing {
+                        music.player.tick();
+                        if music.player.state == PlayerState::Ended {
+                            // WHY the next track starts here: the stream
+                            // reported that it took every sample it was
+                            // given, so the queue's next entry is what
+                            // follows.
+                            if !music.store.is_empty() {
+                                music.current_track_idx =
+                                    (music.current_track_idx + 1) % music.store.len();
+                                music.start_selected();
+                            } else {
+                                music.state = PlaybackState::Stopped;
+                            }
+                            music.publish_now_playing();
+                            if surface > 0 {
+                                repaint(surface, &music, Dirty::All);
+                                let _ = std::surface_flip();
+                            }
+                        } else {
+                            let second = music.player.position_ms().unwrap_or(0) / 1000;
+                            if second != music.shown_second {
+                                music.shown_second = second;
+                                if surface > 0 {
+                                    repaint(surface, &music, Dirty::Playback);
+                                    let _ = std::surface_flip();
+                                }
+                            }
+                        }
+                    } else {
+                        // A paused stream still drains what the device already
+                        // holds; polling keeps the shown position the device's
+                        // own count rather than the count at the pause.
+                        music.player.poll();
                     }
                 }
             }
