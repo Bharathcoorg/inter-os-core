@@ -52,6 +52,7 @@ pub mod service_abi;
 pub mod services;
 pub mod settings;
 pub mod storage;
+pub mod sync;
 pub mod syscall;
 pub mod task;
 pub mod telephony;

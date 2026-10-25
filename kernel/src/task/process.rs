@@ -6,7 +6,7 @@
 //! processes can be added without changing the userspace ABI.
 
 use core::sync::atomic::{AtomicU64, Ordering};
-use spin::Mutex;
+use crate::sync::Mutex;
 use crate::task::TaskId;
 
 pub const MAX_PROCESSES: usize = 128;
@@ -260,12 +260,16 @@ pub fn consume_background_network(task: TaskId, bytes: usize) -> Result<(), &'st
 }
 
 pub fn account_background_cpu_tick(task: TaskId) {
-    let Some(process) = process_for_task(task) else { return; };
-    if let Some(mut table) = PROCESS_TABLE.try_lock() {
-        if let Some(r) = table.iter_mut().flatten().find(|r| r.id == process) {
-            if r.state == ProcessState::Background {
-                r.background_cpu_ticks = r.background_cpu_ticks.saturating_add(1);
-            }
+    // Called from the timer interrupt: never spin here. A contended lock means
+    // the interrupted task is mid-critical-section, so one tick of accounting
+    // is dropped rather than burning the tick budget retrying.
+    let Some(threads) = THREAD_TABLE.try_lock() else { return; };
+    let Some(process) = threads.iter().flatten().find(|r| r.task == task).map(|r| r.process) else { return; };
+    drop(threads);
+    let Some(mut table) = PROCESS_TABLE.try_lock() else { return; };
+    if let Some(r) = table.iter_mut().flatten().find(|r| r.id == process) {
+        if r.state == ProcessState::Background {
+            r.background_cpu_ticks = r.background_cpu_ticks.saturating_add(1);
         }
     }
 }

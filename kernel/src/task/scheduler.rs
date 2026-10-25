@@ -7,7 +7,7 @@
 //! guaranteeing zero lock contention or deadlocks across tasks.
 
 use alloc::vec::Vec;
-use spin::Mutex;
+use crate::sync::Mutex;
 
 use super::{switch_context, TaskContext, TaskControlBlock, TaskId, TaskState};
 use crate::capability::CapabilityTable;
@@ -720,7 +720,14 @@ impl Scheduler {
 
         let slice_limit = if has_competing_rt { 1 } else { TIME_SLICE_TICKS };
 
-        if self.ticks_in_slice >= slice_limit {
+        // WHY preemption is deferred here: a task can hold a kernel spinlock
+        // (VFS, process table, ...) when the tick lands. Switching it out now
+        // and then marking it Blocked — which the budget path below does —
+        // would strand that lock on a task that can never run again, on a
+        // single CPU with no other core to release it. The lock wrappers in
+        // `crate::sync` raise this gate for their critical sections; the tick
+        // keeps accounting, waking and rescheduling once the gate drops.
+        if self.ticks_in_slice >= slice_limit && !crate::sync::preemption_disabled() {
             let suspended = crate::task::process::enforce_background_budget();
             if suspended > 0 {
                 crate::serial_println!("[LIFECYCLE] Suspended {} background application(s) after budget exhaustion.", suspended);
@@ -877,6 +884,11 @@ impl Scheduler {
 /// Prepares context pointers under the lock, releases the lock,
 /// and executes the hardware context switch atomically with interrupts disabled.
 pub fn yield_now() -> bool {
+    // A cooperative switch while a lock guard is alive would hand the CPU to a
+    // task that then blocks on that same lock. Refuse instead of stranding it.
+    if crate::sync::preemption_disabled() {
+        return false;
+    }
     x86_64::instructions::interrupts::without_interrupts(|| {
         let (prev, next) = {
             let mut sched = SCHEDULER.lock();

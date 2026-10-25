@@ -15,7 +15,7 @@
 //! timer tick timeout elapses.
 
 use alloc::vec::Vec;
-use spin::Mutex;
+use crate::sync::Mutex;
 use crate::task::{TaskId, SCHEDULER};
 use crate::serial_println;
 

@@ -159,18 +159,20 @@ pub struct ServiceInfo { pub id: ServiceId, pub abi_version: u16, pub state: Ser
 #[derive(Debug, Clone, Copy)]
 pub struct ServiceRecord { pub id: ServiceId, pub task: TaskId, pub state: ServiceState, pub generation: u32 }
 
-pub static SERVICE_RECORDS: spin::Mutex<[Option<ServiceRecord>; 12]> = spin::Mutex::new([None; 12]);
+pub static SERVICE_RECORDS: crate::sync::Mutex<[Option<ServiceRecord>; 12]> = crate::sync::Mutex::new([None; 12]);
 
 /// Locking convention for this registry (read before adding a blocking call).
 ///
-/// WHY every acquisition below is `try_lock`: on this uniprocessor port a
-/// syscall runs with IF masked by IA32_FMASK, so a blocking `lock()` in
-/// syscall context deadlocks permanently the moment the holder was preempted
-/// by the timer tick (observed live: a service heartbeat wedged the whole
-/// guest spinning on this mutex with RFLAGS.IF=0). Contended fast paths
-/// report `"service registry busy"` / `"scheduler busy"` and periodic work
+/// WHY every acquisition below is `try_lock`: these paths are reached from
+/// syscalls, the timer tick and supervision alike, and none of them may wait
+/// for a holder it cannot preempt. Contended fast paths report
+/// `"service registry busy"` / `"scheduler busy"` and periodic work
 /// (supervision, exit accounting) skips the round; heartbeats and supervision
 /// are idempotent across rounds, so a skipped beat is a delay, never a lie.
+///
+/// This convention is older than the syscall entry stub's `sti` (before it,
+/// a blocking wait here with `RFLAGS.IF=0` wedged the whole guest). It stays
+/// because a skipped round is still cheaper than a wait on this path.
 ///
 /// `is_contention` lets syscall wrappers report these transient errors as
 /// `NotReady` instead of misreporting them as permission or device failures.
@@ -200,7 +202,7 @@ static SERVICES_INITIALIZED: AtomicBool = AtomicBool::new(false);
 // Serializes lifecycle transitions so start/stop/recovery cannot observe and mutate
 // the same service record concurrently. Scheduler locks remain scoped inside this
 // boundary; callers never hold the lifecycle lock across context switches.
-static SERVICE_LIFECYCLE_LOCK: spin::Mutex<()> = spin::Mutex::new(());
+static SERVICE_LIFECYCLE_LOCK: crate::sync::Mutex<()> = crate::sync::Mutex::new(());
 // Restart backoff prevents a failed service from consuming the scheduler in a crash loop.
 static SERVICE_STARTED_AT: [core::sync::atomic::AtomicU64; 12] = [
     core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),

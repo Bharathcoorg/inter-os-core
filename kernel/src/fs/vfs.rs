@@ -8,7 +8,7 @@
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use spin::Mutex;
+use crate::sync::Mutex;
 
 use crate::capability::{CapError, CapabilityTable, CapabilityType, Rights};
 use crate::crypto::Sha256;
