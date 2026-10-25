@@ -219,3 +219,25 @@ signed manifests.
    treated as reserved rather than unavailable.
 4. **Installation & Storage**: `interos install <package>` transfers the signed bytes to the guest over QEMU COM1, verifies integrity and signatures inside Ring 0 against the active trust store, and commits the package blob into persistent storage.
 5. **Execution**: The launcher or PID 1 spawns an isolated Ring-3 child process with dedicated page tables (`W^X` enforced) and passes minted capability tokens.
+
+---
+
+## 5. Truthful Media & Codec Support Matrix
+
+In accordance with the **Platform Truth Contract**, first-party packages and runtime manifests must advertise only codecs and containers that are genuinely decoded by native software or verified hardware on the platform. Unsupported codecs must fail closed, return typed errors, or report unavailable rather than synthesizing frames or faking telemetry.
+
+| Category | Media Type / Container | Status | Handler Package | Notes & Constraints |
+| :--- | :--- | :--- | :--- | :--- |
+| **Audio** | `audio/wav`, `audio/x-wav` | **Supported** | `org.interos.music` | RIFF/WAVE PCM (8, 16, 24, 32-bit; mono/stereo). Resampled to AC'97 48 kHz stereo. |
+| **Audio** | `audio/flac` | **Supported** | `org.interos.music` | FLAC 16/24-bit lossless streaming. Duration read from STREAMINFO block. |
+| **Audio** | `audio/mpeg` | **Supported** | `org.interos.music` | MPEG-1 Audio Layer III (MP3), 32/44.1/48 kHz. Stream duration honestly reported as unknown (`--:--`). |
+| **Audio** | `audio/ogg`, `audio/aac`, `audio/mp4` | **Refused** | *None* | No Ogg Vorbis, AAC, or MP4 audio decoder in tree. Pruned from manifest intents. |
+| **Video** | `video/avi`, `video/x-msvideo` | **Supported** | `org.interos.video_player` | RIFF AVI container carrying MJPEG video streams. |
+| **Video** | `video/x-motion-jpeg` | **Supported** | `org.interos.video_player` | Motion JPEG video frames decoded via native baseline JPEG service. |
+| **Video** | `video/x-ppm`, `video/x-raw` | **Supported** | `org.interos.video_player` | Uncompressed frame sequences (PPM P6, RAW RGB24) for local capture/playback. |
+| **Video** | `video/mp4`, `video/webm`, `video/quicktime` | **Refused** | *None* | H.264, VP9, and AV1 decode requires physical silicon. Refused with exact contract string: `"No hardware H.264 decoder bound. Software decode unavailable."` |
+| **Video Audio** | Embedded AVI Audio | **Unavailable** | `org.interos.video_player` | Audio streams inside AVI files are detected but not decoded; UI reports `"Audio stream: unavailable"`. |
+| **Images** | `image/png`, `image/jpeg`, `image/gif` | **Supported** | `org.interos.gallery` | Decoded via native zero-heap image decoders. |
+| **Images** | `image/webp` | **Supported (Lossless)** | `org.interos.gallery` | Lossless WebP supported; lossy WebP refused as unsupported. |
+| **Images** | `image/bmp`, `image/qoi`, `image/x-portable-pixmap` | **Supported** | `org.interos.gallery` | Fully supported native raster formats. |
+

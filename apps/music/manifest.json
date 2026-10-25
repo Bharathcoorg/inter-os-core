@@ -21,11 +21,7 @@
     "mime": [
       "audio/mpeg",
       "audio/wav",
-      "audio/ogg",
-      "audio/flac",
-      "audio/aac",
-      "audio/mp4",
-      "audio/pcm"
+      "audio/flac"
     ]
   },
   "min_sdk_version": "0.8.0"

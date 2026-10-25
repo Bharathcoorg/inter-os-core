@@ -16,7 +16,6 @@
   ],
   "intents": {
     "mime": [
-      "video/mp4",
       "video/avi",
       "video/x-msvideo",
       "video/x-motion-jpeg",

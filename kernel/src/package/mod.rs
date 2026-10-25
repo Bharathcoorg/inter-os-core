@@ -79,7 +79,8 @@ pub fn first_party_package_by_process_name(process_name: &str) -> Option<&'stati
 /// broken by renumbering the ABI.
 pub const FIRST_PARTY_INTENTS: &[(&str, &str, &str)] = &[
     // The video player opens the videos the device holds.
-    ("org.interos.video_player", "mime", "video/mp4"),
+    ("org.interos.video_player", "mime", "video/avi"),
+    ("org.interos.video_player", "mime", "video/x-msvideo"),
     ("org.interos.video_player", "mime", "video/x-motion-jpeg"),
     ("org.interos.video_player", "mime", "video/x-raw"),
     ("org.interos.video_player", "mime", "video/x-ppm"),
@@ -98,11 +99,7 @@ pub const FIRST_PARTY_INTENTS: &[(&str, &str, &str)] = &[
     // The music app opens the audio the device holds.
     ("org.interos.music", "mime", "audio/mpeg"),
     ("org.interos.music", "mime", "audio/wav"),
-    ("org.interos.music", "mime", "audio/ogg"),
     ("org.interos.music", "mime", "audio/flac"),
-    ("org.interos.music", "mime", "audio/aac"),
-    ("org.interos.music", "mime", "audio/mp4"),
-    ("org.interos.music", "mime", "audio/pcm"),
     // The terminal opens the text the device holds.
     // The notes app opens the notes the device holds.
     ("org.interos.notes", "mime", "text/x-interos-note"),
