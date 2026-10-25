@@ -21,6 +21,10 @@ pub const MAX_FILE_SIZE: usize = 8192;
 pub const MAX_PATH_LEN: usize = 256;
 /// Maximum metadata snapshot capacity (32 KB).
 pub const METADATA_SNAPSHOT_LIMIT: usize = 32 * 1024;
+/// Maximum data snapshot capacity (32 KB).
+pub const DATA_SNAPSHOT_LIMIT: usize = 32 * 1024;
+/// Largest payload a single data snapshot entry can carry (8 KB).
+pub const SNAPSHOT_FILE_LIMIT: usize = 8192;
 pub const DEFAULT_FILE_MODE: u16 = 0o644;
 pub const DEFAULT_DIR_MODE: u16 = 0o755;
 pub const ROOT_UID: u32 = 0;
@@ -1339,15 +1343,33 @@ pub fn read_file_for_task(
         if crate::drivers::ATA_PRIMARY.lock().is_none() {
             return Ok(());
         }
-        let mut buf = alloc::vec![0u8; 32768];
+        let mut buf = alloc::vec![0u8; DATA_SNAPSHOT_LIMIT];
+        let pos = self.encode_data_snapshot(&mut buf);
+        let mut sealed = Vec::new();
+        crate::storage::encrypted::seal(&buf[..pos], &mut sealed)
+            .map_err(|_| FsError::IntegrityViolation)?;
+        crate::storage::persistent::commit_kind(&sealed,4).map(|_|()).map_err(|_|FsError::IntegrityViolation)?;
+        // The block-backed InterFS copy is the durable filesystem source of truth.
+        crate::storage::filesystem::store_data_file("/data/.vfs.snapshot", &sealed)
+            .map_err(|_| FsError::IntegrityViolation)
+    }
+
+    /// Encodes mutable regular-file payloads into `buf` and returns the used length.
+    ///
+    /// The entry order follows inode id order, so a full budget drops a
+    /// deterministic suffix of the mutable tree rather than an arbitrary set.
+    /// A file larger than [`SNAPSHOT_FILE_LIMIT`] is skipped whole; entries are
+    /// only committed once their complete header and payload fit.
+    fn encode_data_snapshot(&self, buf: &mut [u8]) -> usize {
+        if buf.len() < 6 { return 0; }
         buf[..4].copy_from_slice(b"DTA1");
         let mut pos=6usize;
         let mut count=0u16;
         for inode in self.inodes.values() {
-            if inode.file_type != FileType::RegularFile || !(inode.path.starts_with("/data/") || inode.path.starts_with("/user/")) { continue; }
+            if inode.file_type != FileType::RegularFile || !is_persistent_data_path(&inode.path) { continue; }
             let path=inode.path.as_bytes();
             let data=inode.data.as_slice();
-            if path.len()>255 || data.len()>8192 { continue; }
+            if path.len()>255 || data.len()>SNAPSHOT_FILE_LIMIT { continue; }
             if pos + 2 + path.len() + 4 + data.len() > buf.len() { break; }
             buf[pos..pos+2].copy_from_slice(&(path.len() as u16).to_le_bytes()); pos+=2;
             buf[pos..pos+path.len()].copy_from_slice(path); pos+=path.len();
@@ -1356,13 +1378,7 @@ pub fn read_file_for_task(
             count=count.saturating_add(1);
         }
         buf[4..6].copy_from_slice(&count.to_le_bytes());
-        let mut sealed = Vec::new();
-        crate::storage::encrypted::seal(&buf[..pos], &mut sealed)
-            .map_err(|_| FsError::IntegrityViolation)?;
-        crate::storage::persistent::commit_kind(&sealed,4).map(|_|()).map_err(|_|FsError::IntegrityViolation)?;
-        // The block-backed InterFS copy is the durable filesystem source of truth.
-        crate::storage::filesystem::store_data_file("/data/.vfs.snapshot", &sealed)
-            .map_err(|_| FsError::IntegrityViolation)
+        pos
     }
 
     /// Persists the mutable /data inode tree separately from file payloads.
@@ -1383,11 +1399,25 @@ pub fn read_file_for_task(
             return Ok(());
         }
         let mut buf = alloc::vec![0u8; METADATA_SNAPSHOT_LIMIT];
+        let pos = self.encode_metadata_snapshot(&mut buf);
+        let mut sealed = Vec::new();
+        crate::storage::encrypted::seal(&buf[..pos], &mut sealed).map_err(|_| FsError::IntegrityViolation)?;
+        crate::storage::filesystem::store_data_file("/data/.vfs.metadata", &sealed).map_err(|_| FsError::IntegrityViolation)?;
+        Ok(())
+    }
+
+    /// Encodes the persistent inode tree into `buf` and returns the used length.
+    ///
+    /// Directories and regular files under `/data`, `/user` and `/storage` are
+    /// durable, together with hard-link aliases. Entries are in inode id order
+    /// and only committed once their complete record fits.
+    fn encode_metadata_snapshot(&self, buf: &mut [u8]) -> usize {
+        if buf.len() < 6 { return 0; }
         buf[..4].copy_from_slice(b"IVM2");
         let mut pos = 6usize;
         let mut count = 0u16;
         for inode in self.inodes.values() {
-            if !(inode.path.starts_with("/data/") || inode.path.starts_with("/user/")) && inode.path != "/data" && inode.path != "/user" { continue; }
+            if !is_persistent_metadata_path(&inode.path) { continue; }
             let path = inode.path.as_bytes();
             if path.len() > 255 || pos + 8 + 1 + 2 + path.len() + 4 + 32 + 4 + 4 + 2 + 2 + 24 > buf.len() { continue; }
             buf[pos..pos + 8].copy_from_slice(&inode.id.0.to_le_bytes()); pos += 8;
@@ -1416,15 +1446,12 @@ pub fn read_file_for_task(
             count = count.saturating_add(1);
         }
         buf[4..6].copy_from_slice(&count.to_le_bytes());
-        let mut sealed = Vec::new();
-        crate::storage::encrypted::seal(&buf[..pos], &mut sealed).map_err(|_| FsError::IntegrityViolation)?;
-        crate::storage::filesystem::store_data_file("/data/.vfs.metadata", &sealed).map_err(|_| FsError::IntegrityViolation)?;
-        Ok(())
+        pos
     }
 
     /// Restores the persistent /data inode tree before restoring file payloads.
     fn restore_metadata_snapshot(&mut self) {
-        let mut sealed = alloc::vec![0u8; 32768 + crate::storage::encrypted::ENCRYPTED_OVERHEAD];
+        let mut sealed = alloc::vec![0u8; METADATA_SNAPSHOT_LIMIT + crate::storage::encrypted::ENCRYPTED_OVERHEAD];
         let Ok(len) = crate::storage::filesystem::load_data_file("/data/.vfs.metadata", &mut sealed) else {
             crate::serial_println!("[VFS RESTORE] No /data/.vfs.metadata found.");
             return;
@@ -1446,6 +1473,12 @@ pub fn read_file_for_task(
             return;
         }
         let v2 = &buf[..4] == b"IVM2";
+        self.decode_metadata_snapshot(&buf, len, v2);
+    }
+
+    /// Decodes a validated metadata snapshot into the inode tree.
+    fn decode_metadata_snapshot(&mut self, buf: &[u8], len: usize, v2: bool) {
+        if len < 6 { return; }
         let count = u16::from_le_bytes([buf[4], buf[5]]) as usize;
         let mut pos = 6usize;
         for _ in 0..count {
@@ -1478,7 +1511,7 @@ pub fn read_file_for_task(
                 let ctime = match buf[pos..pos+8].try_into() { Ok(b) => u64::from_le_bytes(b), Err(_) => break }; pos += 8;
                 (uid,gid,mode,nlink,atime,mtime,ctime)
             } else { (ROOT_UID,ROOT_UID,if kind==1 {DEFAULT_DIR_MODE} else {DEFAULT_FILE_MODE},1,0,0,0) };
-            if !(path.starts_with("/data/") || path.starts_with("/user/") || path.starts_with("/storage/")) && path != "/data" && path != "/user" && path != "/storage" { continue; }
+            if !is_persistent_metadata_path(path) { continue; }
             if kind == 1 {
                 let created=self.mkdir(path);
                 if let Some(inode)=self.inodes.get_mut(&created) { inode.id=InodeId(id); inode.uid=uid; inode.gid=gid; inode.mode=mode; inode.nlink=nlink; inode.atime=atime; inode.mtime=mtime; inode.ctime=ctime; }
@@ -1498,7 +1531,7 @@ pub fn read_file_for_task(
     /// The metadata journal remains a recovery fallback until the transactional
     /// publication protocol finalizes the write.
     fn restore_data_snapshot(&mut self) {
-        let mut sealed = alloc::vec![0u8; 32768 + crate::storage::encrypted::ENCRYPTED_OVERHEAD];
+        let mut sealed = alloc::vec![0u8; DATA_SNAPSHOT_LIMIT + crate::storage::encrypted::ENCRYPTED_OVERHEAD];
         let block_len = match crate::storage::filesystem::load_data_file("/data/.vfs.snapshot", &mut sealed) {
             Ok(len) => {
                 crate::serial_println!("[VFS RESTORE] Loaded /data/.vfs.snapshot from block fs: {} bytes", len);
@@ -1516,7 +1549,7 @@ pub fn read_file_for_task(
             crate::serial_println!("[VFS RESTORE] Loaded snapshot from journal gen {}: {} bytes", generation, len);
             len
         };
-        let mut buf = alloc::vec![0u8; 32768];
+        let mut buf = alloc::vec![0u8; DATA_SNAPSHOT_LIMIT];
         let len = match crate::storage::encrypted::open(&sealed[..len], &mut buf) {
             Ok(plain_len) => {
                 crate::serial_println!("[VFS RESTORE] Decrypted data snapshot: {} bytes", plain_len);
@@ -1535,6 +1568,16 @@ pub fn read_file_for_task(
             crate::serial_println!("[VFS RESTORE] Invalid data snapshot header magic.");
             return;
         }
+        self.decode_data_snapshot(&buf, len);
+    }
+
+    /// Decodes a validated data snapshot into the inode tree.
+    ///
+    /// Missing ancestor directories are created before the payload is written,
+    /// so a data record whose directory was absent from the metadata snapshot
+    /// still lands at its intended path instead of becoming an orphan inode.
+    fn decode_data_snapshot(&mut self, buf: &[u8], len: usize) {
+        if len < 6 { return; }
         let count=u16::from_le_bytes([buf[4],buf[5]]) as usize;
         let mut pos=6usize;
         crate::serial_println!("[VFS RESTORE] Restoring {} data files from snapshot...", count);
@@ -1544,9 +1587,25 @@ pub fn read_file_for_task(
             if plen==0 || plen>255 || pos+plen+4>len { break; }
             let path=match core::str::from_utf8(&buf[pos..pos+plen]).ok(){Some(v)=>v, None=>break}; pos+=plen;
             let dlen=u32::from_le_bytes([buf[pos],buf[pos+1],buf[pos+2],buf[pos+3]]) as usize; pos+=4;
-            if dlen>8192 || pos+dlen>len { break; }
+            if dlen>SNAPSHOT_FILE_LIMIT || pos+dlen>len { break; }
+            if !is_persistent_data_path(path) { pos+=dlen; continue; }
+            let parent = parent_path(path);
+            if parent != "/" { self.ensure_dir_path(parent); }
             crate::serial_println!("[VFS RESTORE] Restored file: {} ({} bytes)", path, dlen);
             self.create_file(path,&buf[pos..pos+dlen],false); pos+=dlen;
+        }
+    }
+
+    /// Creates each missing directory along `dir`, one component at a time.
+    fn ensure_dir_path(&mut self, dir: &str) {
+        let norm = normalize_path(dir);
+        if norm == "/" { return; }
+        let mut current = String::from("/");
+        for component in norm.split('/') {
+            if component.is_empty() { continue; }
+            if current != "/" { current.push('/'); }
+            current.push_str(component);
+            self.mkdir(&current);
         }
     }
 
@@ -1627,6 +1686,16 @@ pub fn read_file_for_task(
             );
         }
     }
+}
+
+/// Returns true for regular-file paths whose payloads belong in the data snapshot.
+fn is_persistent_data_path(path: &str) -> bool {
+    path.starts_with("/data/") || path.starts_with("/user/") || path.starts_with("/storage/")
+}
+
+/// Returns true for inode-tree paths whose metadata belongs in the metadata snapshot.
+fn is_persistent_metadata_path(path: &str) -> bool {
+    is_persistent_data_path(path) || path == "/data" || path == "/user" || path == "/storage"
 }
 
 /// Normalizes a path string.
@@ -2153,6 +2222,138 @@ mod tests {
         vfs.truncate(task_id, fd, 20480).expect("truncate beyond 8 KB must succeed");
         let stat = vfs.stat(&caps, 0, "/large_test.bin").expect("stat");
         assert_eq!(stat.size, 20480);
+    }
+
+    #[test]
+    fn vfs_storage_download_round_trips_across_snapshots() {
+        let mut source = Vfs::new();
+        source.mkdir("/storage");
+        source.mkdir("/storage/downloads");
+        let payload = b"\x89PNG\r\n\x1a\nInterOS downloaded payload\x00\xff";
+        source.create_file("/storage/downloads/file.bin", payload, false);
+
+        let mut metadata = alloc::vec![0u8; METADATA_SNAPSHOT_LIMIT];
+        let metadata_len = source.encode_metadata_snapshot(&mut metadata);
+        let mut data = alloc::vec![0u8; DATA_SNAPSHOT_LIMIT];
+        let data_len = source.encode_data_snapshot(&mut data);
+        assert_eq!(&metadata[..4], b"IVM2");
+        assert_eq!(&data[..4], b"DTA1");
+        assert!(metadata_len > 6, "the /storage directory must be persisted");
+        assert!(data_len > 6, "the /storage payload must be persisted");
+
+        // Metadata first, then payloads, as init() restores them.
+        let mut restored = Vfs::new();
+        restored.decode_metadata_snapshot(&metadata[..metadata_len], metadata_len, true);
+        restored.decode_data_snapshot(&data[..data_len], data_len);
+        restored.rebuild_children();
+
+        let dir = restored.lookup("/storage/downloads").expect("downloads directory restored");
+        assert_eq!(restored.inodes[&dir].file_type, FileType::Directory);
+        let file = restored.lookup("/storage/downloads/file.bin").expect("download restored");
+        let inode = restored.inodes.get(&file).expect("restored inode");
+        assert_eq!(inode.data.as_slice(), payload);
+        assert_eq!(inode.size, payload.len());
+        assert_eq!(inode.sha256_digest, Sha256::digest(payload));
+
+        // A payload whose parent directory is absent from the metadata snapshot
+        // must still land under /storage instead of becoming an orphan inode.
+        let mut data_only = Vfs::new();
+        data_only.decode_data_snapshot(&data[..data_len], data_len);
+        let dir = data_only.lookup("/storage/downloads").expect("data restore creates missing parent");
+        assert_eq!(data_only.inodes[&dir].file_type, FileType::Directory);
+        let file = data_only.lookup("/storage/downloads/file.bin").expect("download restored without metadata");
+        assert_eq!(data_only.inodes[&file].data.as_slice(), payload);
+    }
+
+    #[test]
+    fn vfs_storage_snapshot_skips_oversize_file_without_truncating() {
+        let mut source = Vfs::new();
+        source.mkdir("/storage");
+        source.mkdir("/storage/downloads");
+        let small_before = alloc::vec![0x11u8; 64];
+        let oversized = alloc::vec![0x22u8; SNAPSHOT_FILE_LIMIT + 1];
+        let small_after = alloc::vec![0x33u8; 32];
+        source.create_file("/storage/downloads/a_small.bin", &small_before, false);
+        source.create_file("/storage/downloads/b_oversize.bin", &oversized, false);
+        source.create_file("/storage/downloads/c_small.bin", &small_after, false);
+
+        let mut data = alloc::vec![0u8; DATA_SNAPSHOT_LIMIT];
+        let len = source.encode_data_snapshot(&mut data);
+        assert_eq!(u16::from_le_bytes([data[4], data[5]]), 2, "only the two in-limit files are encoded");
+
+        let mut restored = Vfs::new();
+        restored.decode_data_snapshot(&data[..len], len);
+        assert_eq!(restored.lookup("/storage/downloads/b_oversize.bin"), None, "oversize file must be absent, not truncated");
+        let before = restored.lookup("/storage/downloads/a_small.bin").expect("small file before skipped entry");
+        assert_eq!(restored.inodes[&before].data.as_slice(), small_before.as_slice());
+        let after = restored.lookup("/storage/downloads/c_small.bin").expect("small file after skipped entry");
+        assert_eq!(restored.inodes[&after].data.as_slice(), small_after.as_slice());
+        for inode in restored.inodes.values() {
+            assert_ne!(inode.size, SNAPSHOT_FILE_LIMIT, "no snapshot entry may be truncated to the limit");
+        }
+    }
+
+    #[test]
+    fn vfs_data_and_user_payloads_still_round_trip() {
+        let mut source = Vfs::new();
+        source.mkdir("/data");
+        source.mkdir("/user");
+        source.create_file("/data/audit.log", b"audit entry\n", false);
+        source.create_file("/user/profile.bin", b"profile bytes", false);
+
+        let mut metadata = alloc::vec![0u8; METADATA_SNAPSHOT_LIMIT];
+        let metadata_len = source.encode_metadata_snapshot(&mut metadata);
+        let mut data = alloc::vec![0u8; DATA_SNAPSHOT_LIMIT];
+        let data_len = source.encode_data_snapshot(&mut data);
+
+        let mut restored = Vfs::new();
+        restored.decode_metadata_snapshot(&metadata[..metadata_len], metadata_len, true);
+        restored.decode_data_snapshot(&data[..data_len], data_len);
+        let audit = restored.lookup("/data/audit.log").expect("/data payload restored");
+        assert_eq!(restored.inodes[&audit].data.as_slice(), b"audit entry\n");
+        let profile = restored.lookup("/user/profile.bin").expect("/user payload restored");
+        assert_eq!(restored.inodes[&profile].data.as_slice(), b"profile bytes");
+    }
+
+    #[test]
+    fn vfs_snapshot_budget_exhaustion_is_deterministic_and_whole_file() {
+        let mut source = Vfs::new();
+        source.mkdir("/storage");
+        source.mkdir("/storage/downloads");
+        let file_count = 8usize;
+        for i in 0..file_count {
+            let path = alloc::format!("/storage/downloads/chunk{}.bin", i);
+            let payload = alloc::vec![0x40u8 + i as u8; SNAPSHOT_FILE_LIMIT];
+            source.create_file(&path, &payload, false);
+        }
+
+        let mut first = alloc::vec![0u8; DATA_SNAPSHOT_LIMIT];
+        let mut second = alloc::vec![0u8; DATA_SNAPSHOT_LIMIT];
+        let first_len = source.encode_data_snapshot(&mut first);
+        let second_len = source.encode_data_snapshot(&mut second);
+        assert_eq!(first_len, second_len, "budget exhaustion must be deterministic");
+        assert_eq!(&first[..first_len], &second[..second_len], "identical trees encode identical snapshots");
+
+        let encoded = u16::from_le_bytes([first[4], first[5]]) as usize;
+        assert!(encoded > 0 && encoded < file_count, "budget must drop a suffix, encoded {}", encoded);
+
+        let mut restored = Vfs::new();
+        restored.decode_data_snapshot(&first[..first_len], first_len);
+        let mut restored_count = 0usize;
+        for i in 0..file_count {
+            let path = alloc::format!("/storage/downloads/chunk{}.bin", i);
+            match restored.lookup(&path) {
+                Some(id) => {
+                    let inode = restored.inodes.get(&id).expect("restored inode");
+                    let expected = alloc::vec![0x40u8 + i as u8; SNAPSHOT_FILE_LIMIT];
+                    assert_eq!(inode.data.as_slice(), expected.as_slice(), "restored entry must be whole");
+                    assert_eq!(inode.size, SNAPSHOT_FILE_LIMIT);
+                    restored_count += 1;
+                }
+                None => assert!(i >= encoded, "only a deterministic suffix may be dropped"),
+            }
+        }
+        assert_eq!(restored_count, encoded, "the header count must match restored entries");
     }
 }
 
