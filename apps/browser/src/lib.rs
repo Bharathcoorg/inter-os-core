@@ -19,6 +19,9 @@ pub mod http;
 /// Bounded DEFLATE, zlib and gzip decoding for response bodies.
 pub mod inflate;
 
+/// The bounded DOM and box layout engine used by the browser view.
+pub mod layout;
+
 /// The platform's scroll model.
 use interos_std::design::scroll::ScrollState;
 
