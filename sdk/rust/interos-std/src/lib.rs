@@ -10,6 +10,7 @@ pub mod app;
 pub mod content;
 pub mod design;
 pub mod flac;
+pub mod mp3;
 pub mod font;
 pub mod font_fhd;
 pub mod image;
