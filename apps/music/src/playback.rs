@@ -66,7 +66,7 @@ impl PlaybackError {
             PlaybackError::OpenRefused => "the device refused to open the track's file",
             PlaybackError::ReadRefused => "the device refused to read the track's file",
             PlaybackError::NotWav => "the file is not a WAV container",
-            PlaybackError::UnsupportedFormat => "the file's samples are not a format this player decodes",
+            PlaybackError::UnsupportedFormat => "the file's samples are not supported",
             PlaybackError::StreamUnavailable => "the device has no audio output stream",
             PlaybackError::WriteRefused => "the audio stream refused the samples",
         }
@@ -81,14 +81,25 @@ pub const fn error_for_wav(error: WavError) -> PlaybackError {
     }
 }
 
-/// Whether the device has taken every frame it was given for a track.
+/// Whether the device has finished every frame it was given for a track.
 ///
 /// WHY the device's counter and not the player's own count of what it wrote:
 /// the ring may still hold samples the controller has not read, and a track
 /// that stopped as soon as its last write was queued would cut off its own
 /// final third of a second.
-pub const fn stream_drained(frames_written: u64, frames_consumed: u64) -> bool {
-    frames_written > 0 && frames_consumed >= frames_written
+///
+/// WHY `device_running` must be clear too: `frames_consumed` counts frames
+/// copied into the controller's DMA memory, which happens when a batch is
+/// *submitted*. The last batch is therefore already counted while it is still
+/// playing. Closing the stream on that count stops the bus master mid-batch
+/// and truncates the track by up to one batch (about 170 ms), so the device
+/// must report itself idle before the track is called finished.
+pub const fn stream_drained(
+    frames_written: u64,
+    frames_consumed: u64,
+    device_running: bool,
+) -> bool {
+    frames_written > 0 && frames_consumed >= frames_written && !device_running
 }
 
 /// The read buffer shared by the header read and the streaming loop.
@@ -342,8 +353,18 @@ impl Player {
     /// Polls the device and returns what it reported.
     pub fn poll(&mut self) -> Option<AudioStreamStatus> {
         if self.stream {
-            if let Ok(status) = std::audio_stream_status(self.cap) {
-                self.status = Some(status);
+            match std::audio_stream_status(self.cap) {
+                Ok(status) => self.status = Some(status),
+                Err(code) => {
+                    // A refused status read would otherwise look exactly like a
+                    // track that never ends, so say it once.
+                    static REPORTED: core::sync::atomic::AtomicBool =
+                        core::sync::atomic::AtomicBool::new(false);
+                    if !REPORTED.swap(true, core::sync::atomic::Ordering::Relaxed) {
+                        std::log("[MUSIC APP] The device refused to report the stream's state.").ok();
+                        let _ = code;
+                    }
+                }
             }
         }
         self.status
@@ -362,7 +383,11 @@ impl Player {
             && self.out_pos >= self.out_len
         {
             if let Some(status) = self.status {
-                if stream_drained(status.frames_written, status.frames_consumed) {
+                if stream_drained(
+                    status.frames_written,
+                    status.frames_consumed,
+                    status.device_running,
+                ) {
                     self.finish();
                 }
             }
@@ -456,10 +481,13 @@ mod tests {
         // write as the end would stop the track while its tail was still
         // queued, and treating an empty stream as drained would end a track
         // before a single frame played.
-        assert!(!stream_drained(0, 0));
-        assert!(!stream_drained(48_000, 47_999));
-        assert!(stream_drained(48_000, 48_000));
-        assert!(stream_drained(48_000, 48_100));
+        assert!(!stream_drained(0, 0, false));
+        assert!(!stream_drained(48_000, 47_999, false));
+        // The last batch is counted as consumed when it is submitted, but the
+        // device is still playing it; ending here would truncate the track.
+        assert!(!stream_drained(48_000, 48_000, true));
+        assert!(stream_drained(48_000, 48_000, false));
+        assert!(stream_drained(48_000, 48_100, false));
     }
 
     #[test]
