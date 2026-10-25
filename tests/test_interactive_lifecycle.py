@@ -21,6 +21,12 @@ import os
 import shutil
 import sys
 
+# Reuse Device Studio's AC'97 probing so this boot path attaches the card
+# exactly when the host QEMU has a working audio backend, and boots unchanged
+# (with PCM output honestly unavailable) when it does not.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from emulator.server import qemu_x86_audio_args  # noqa: E402
+
 def kill_proc_on_port(p):
     try:
         import psutil
@@ -313,6 +319,10 @@ def main():
         "-mon", "chardev=mon0,mode=readline",
         "-no-reboot"
     ]
+    # A real AC'97 controller for the PCM path. The helper omits it when this
+    # QEMU has no usable audio backend, so the boot test never depends on host
+    # audio; the guest then reports PCM output unavailable.
+    args.extend(qemu_x86_audio_args(qemu_exe))
 
     print("[LIFECYCLE TEST] Launching QEMU instance...")
     proc = subprocess.Popen(args)

@@ -105,6 +105,16 @@ pub enum CapabilityType {
     /// switcher needs exactly this authority and nothing else does, so it is
     /// named, granted deliberately, and revocable on its own.
     SurfaceCapture,
+    /// Permission to open, feed, observe, and close a kernel PCM output stream.
+    ///
+    /// WHY this is its own capability and not `SystemControl`: `SystemControl`
+    /// is documented as power, crypto, telephony and device policy, and the
+    /// audio-control service that holds it exists to drive the PIT speaker and
+    /// service policy. Emitting PCM is an output side effect on shared
+    /// hardware; a media player should be able to hold exactly that authority
+    /// without acquiring authority over power or telephony. `Rights::WRITE`
+    /// authorises open/write/close; `Rights::READ` authorises status queries.
+    AudioStream,
 }
 
 impl CapabilityType {
@@ -132,6 +142,7 @@ impl CapabilityType {
             CapabilityType::ContentIndexRead => 25,
             CapabilityType::ContentIntentDispatch => 26,
             CapabilityType::SurfaceCapture => 27,
+            CapabilityType::AudioStream => 28,
         }
     }
 
@@ -159,6 +170,7 @@ impl CapabilityType {
             25 => Some(CapabilityType::ContentIndexRead),
             26 => Some(CapabilityType::ContentIntentDispatch),
             27 => Some(CapabilityType::SurfaceCapture),
+            28 => Some(CapabilityType::AudioStream),
             _ => None,
         }
     }
@@ -1091,6 +1103,26 @@ impl CapabilityTable {
         })
     }
 
+    /// Returns the generation-counted handle of the first capability matching
+    /// `expected_type`, `required_rights` and `expected_object_id`.
+    ///
+    /// WHY this exists next to [`Self::find_slot_object`]: a slot index is a
+    /// table position, while the syscall ABI for some resources (the PCM
+    /// stream) names an explicit, generation-counted `CapHandle` so a revoked
+    /// and re-inserted capability cannot be replayed by position. The handle is
+    /// minted from the caller's own table, so this confers no authority the
+    /// caller did not already hold.
+    pub fn find_handle_object(
+        &self,
+        expected_type: CapabilityType,
+        required_rights: Rights,
+        expected_object_id: u64,
+    ) -> Option<CapHandle> {
+        let slot_index = self.find_slot_object(expected_type, required_rights, expected_object_id)?;
+        let slot = self.slots.get(slot_index)?;
+        Some(CapHandle::new(slot_index as u32, slot.generation))
+    }
+
     /// Returns the total number of capabilities in this table that can still
     /// authorize something.
     pub fn count(&self) -> usize {
@@ -1506,13 +1538,13 @@ mod tests {
     #[test]
     fn capability_type_raw_encoding_roundtrips() {
         for val in [
-            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 24, 25, 26, 27,
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 24, 25, 26, 27, 28,
         ] {
             let cap_type = CapabilityType::from_raw(val).expect("valid capability type");
             assert_eq!(cap_type.to_raw(), val);
         }
         assert_eq!(CapabilityType::from_raw(0), None);
-        for invalid in [19, 20, 21, 22, 23, 28, 29, 999] {
+        for invalid in [19, 20, 21, 22, 23, 29, 30, 999] {
             assert_eq!(CapabilityType::from_raw(invalid), None);
         }
     }
@@ -1543,6 +1575,41 @@ mod tests {
         // Access telemetry incremented on discovery
         let (count, _) = table.access_stats(s0).unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn handle_lookup_names_the_grant_and_goes_stale_after_revocation() {
+        // WHY: the PCM stream calls take an explicit handle rather than
+        // authorising by type, so the handle must be the caller's own slot and
+        // generation, and must stop verifying the moment the grant is revoked.
+        let mut table = CapabilityTable::new_for_task(crate::task::TaskId(99), 2);
+        let slot = table.insert(Capability {
+            id: CapabilityId(0x3000),
+            cap_type: CapabilityType::AudioStream,
+            rights: Rights::READ | Rights::WRITE,
+            object_id: 0,
+        }).expect("insert AudioStream");
+
+        let handle = table
+            .find_handle_object(CapabilityType::AudioStream, Rights::WRITE, 0)
+            .expect("handle for the held grant");
+        assert_eq!(handle, CapHandle::new(slot as u32, 1));
+        assert!(table
+            .verify_handle(handle, CapabilityType::AudioStream, Rights::WRITE)
+            .is_ok());
+        // A different capability type must not satisfy the same handle.
+        assert!(table
+            .verify_handle(handle, CapabilityType::FileSystemRead, Rights::READ)
+            .is_err());
+
+        table.revoke_handle(handle).expect("revoke");
+        assert_eq!(
+            table.find_handle_object(CapabilityType::AudioStream, Rights::WRITE, 0),
+            None
+        );
+        assert!(table
+            .verify_handle(handle, CapabilityType::AudioStream, Rights::WRITE)
+            .is_err());
     }
 
     #[test]

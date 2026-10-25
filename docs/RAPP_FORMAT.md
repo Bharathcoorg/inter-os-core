@@ -180,8 +180,9 @@ it against this table.
 | `24` | `RealtimeClockRead` | `READ` | `0` (Global) | Read wall-clock hardware real-time clock (RTC) |
 | `25` | `ContentIndexRead` | `READ` | `0` (Global) | Read the shared document index and the intent registry |
 | `26` | `ContentIntentDispatch` | `INVOKE` | `0` (Global) | Dispatch an intent to the package that declared a handler for it |
+| `28` | `AudioStream` | `READ \| WRITE` | `0` (Global) | Open, feed, observe and close the kernel's AC'97 PCM output stream |
 
-Values outside `1..=27` (such as `0` or `28+`) are strictly unknown and rejected during package verification (`RappError::UnknownCapability`).
+Values outside `1..=28` (such as `0` or `29+`) are strictly unknown and rejected during package verification (`RappError::UnknownCapability`).
 
 **Why the content layer has its own two identifiers.** `ContentIndexRead` is
 not `FileSystemRead`: the index *describes* documents — their paths, lengths,

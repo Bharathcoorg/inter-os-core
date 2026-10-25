@@ -14,7 +14,7 @@ import subprocess
 import re
 import collections
 
-from test_interactive_lifecycle import find_qemu, SerialReader, send_monitor_cmd
+from test_interactive_lifecycle import find_qemu, SerialReader, send_monitor_cmd, qemu_x86_audio_args
 
 # The canonical portrait scanout the KMS declares (kernel/src/drivers/display_kms.rs).
 # A screendump that is not this geometry did not come from this display path.
@@ -200,6 +200,9 @@ def main():
         "-mon", "chardev=mon0,mode=readline",
         "-no-reboot"
     ]
+    # Attach the AC'97 card when the host has an audio backend; otherwise this
+    # boot verifies the guest's honest "unavailable" path unchanged.
+    args.extend(qemu_x86_audio_args(qemu_exe))
 
     print("============================================================")
     print("  InterOS Core — x86_64 QEMU Canonical Boot Verification")

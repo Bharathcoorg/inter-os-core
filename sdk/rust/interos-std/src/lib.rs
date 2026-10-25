@@ -230,6 +230,15 @@ pub enum SyscallNumber {
     SurfaceCapture = 134,
     MemoryTelemetry = 135,
     TaskEnumerate = 136,
+    /// AC'97 PCM output. Authorised by `CapabilityType::AudioStream`; WRITE
+    /// covers open/write/close and READ covers status.
+    AudioStreamOpen = 146,
+    AudioStreamWrite = 147,
+    AudioStreamStatus = 148,
+    AudioStreamClose = 149,
+    /// Resolves a capability the caller already holds to its generation-counted
+    /// handle. It grants nothing; it only names an existing slot and generation.
+    CapHandleLookup = 150,
 }
 
 // -----------------------------------------------------------------------------
@@ -1216,6 +1225,107 @@ pub fn audio_set_volume(volume_percent: u32) -> Result<u32, i64> {
     if ret >= 0 { Ok(ret as u32) } else { Err(ret) }
 }
 
+/// Packed format word meaning "the controller's native format": 48 kHz,
+/// stereo, 16-bit. This is the only format the kernel's AC'97 path accepts.
+pub const AUDIO_STREAM_FORMAT_NATIVE: u64 = 0;
+
+/// Size of the status record written by [`audio_stream_status`].
+pub const AUDIO_STREAM_STATUS_BYTES: usize = 40;
+
+/// Honest snapshot of the PCM output path.
+///
+/// The flags say whether a card answered and whether a batch is running. The
+/// counters are what the kernel moved (`frames_written`, `frames_consumed`,
+/// `queued_frames`) or observed (`underruns`), not an estimate of what the
+/// speaker produced.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct AudioStreamStatus {
+    pub device_present: bool,
+    pub device_running: bool,
+    pub stream_open: bool,
+    pub frames_written: u64,
+    pub frames_consumed: u64,
+    pub queued_frames: u64,
+    pub underruns: u32,
+    pub capacity_frames: u32,
+    pub sample_rate: u32,
+}
+
+/// Opens the AC'97 PCM output stream and returns its id.
+///
+/// `cap_handle` is the generation-counted `AudioStream` handle from
+/// [`capability_handle`]`(cap_type::AUDIO_STREAM, 0)`; the kernel refuses the
+/// call without it. `format` is [`AUDIO_STREAM_FORMAT_NATIVE`] (0) or a word
+/// packing the rate in bits 0..16, channel count in bits 16..24 and bit depth
+/// in bits 24..32. Only 48 kHz stereo 16-bit is accepted by the current driver.
+pub fn audio_stream_open(cap_handle: u64, format: u64) -> Result<u32, i64> {
+    let ret = unsafe { syscall2(SyscallNumber::AudioStreamOpen, cap_handle, format) };
+    if ret >= 0 { Ok(ret as u32) } else { Err(ret) }
+}
+
+/// Enqueues interleaved 16-bit stereo PCM frames through `cap_handle`.
+///
+/// The slice length must be a whole number of 4-byte frames. Returns the
+/// number of bytes accepted, which is short when the bounded ring filled.
+pub fn audio_stream_write(cap_handle: u64, pcm: &[u8]) -> Result<usize, i64> {
+    let ret = unsafe {
+        syscall3(
+            SyscallNumber::AudioStreamWrite,
+            cap_handle,
+            pcm.as_ptr() as u64,
+            pcm.len() as u64,
+        )
+    };
+    if ret >= 0 { Ok(ret as usize) } else { Err(ret) }
+}
+
+/// Polls the controller and returns the measured stream state.
+pub fn audio_stream_status(cap_handle: u64) -> Result<AudioStreamStatus, i64> {
+    let mut record = [0u8; AUDIO_STREAM_STATUS_BYTES];
+    let ret = unsafe {
+        syscall3(
+            SyscallNumber::AudioStreamStatus,
+            cap_handle,
+            record.as_mut_ptr() as u64,
+            record.len() as u64,
+        )
+    };
+    if ret < 0 {
+        return Err(ret);
+    }
+    if ret as usize != AUDIO_STREAM_STATUS_BYTES {
+        return Err(-3); // InvalidArguments: a short record cannot be decoded.
+    }
+    let read_u32 = |at: usize| {
+        let mut bytes = [0u8; 4];
+        bytes.copy_from_slice(&record[at..at + 4]);
+        u32::from_le_bytes(bytes)
+    };
+    let read_u64 = |at: usize| {
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(&record[at..at + 8]);
+        u64::from_le_bytes(bytes)
+    };
+    let flags = read_u32(28);
+    Ok(AudioStreamStatus {
+        device_present: flags & (1 << 0) != 0,
+        device_running: flags & (1 << 1) != 0,
+        stream_open: flags & (1 << 2) != 0,
+        frames_written: read_u64(0),
+        frames_consumed: read_u64(8),
+        queued_frames: read_u64(16),
+        underruns: read_u32(24),
+        capacity_frames: read_u32(32),
+        sample_rate: read_u32(36),
+    })
+}
+
+/// Stops the controller and drops the PCM stream.
+pub fn audio_stream_close(cap_handle: u64) -> Result<(), i64> {
+    let ret = unsafe { syscall1(SyscallNumber::AudioStreamClose, cap_handle) };
+    if ret >= 0 { Ok(()) } else { Err(ret) }
+}
+
 pub fn battery_query(out_buf: &mut [u8]) -> Result<usize, i64> {
     let ret = unsafe {
         syscall2(
@@ -1333,6 +1443,15 @@ pub mod cap_type {
     /// capability decision rather than a side effect of holding display
     /// authority.
     pub const SURFACE_CAPTURE: u64 = 27;
+    /// Permission to open, feed, observe and close the kernel's PCM output
+    /// stream.
+    ///
+    /// WHY this is not `SYSTEM_CONTROL`: emitting samples is an output side
+    /// effect, not power, telephony or device policy, so a media player can
+    /// hold exactly this authority. The stream calls take the capability's
+    /// generation-counted handle, which [`capability_handle`] resolves from
+    /// the caller's own table.
+    pub const AUDIO_STREAM: u64 = 28;
 }
 
 /// Dynamically discovers the slot index of an active capability matching `cap_type`
@@ -1347,6 +1466,27 @@ pub fn cap_lookup(cap_type: u64, object_id: u64) -> Result<usize, i64> {
     };
     if ret >= 0 {
         Ok(ret as usize)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Resolves a capability the caller already holds to its generation-counted
+/// handle, for syscalls that name an explicit `CapHandle` (the PCM stream).
+///
+/// This mints no authority: the kernel only answers with a handle for a
+/// capability already present in the calling task's table, and the returned
+/// handle becomes stale the moment that grant is revoked.
+pub fn capability_handle(cap_type: u64, object_id: u64) -> Result<u64, i64> {
+    let ret = unsafe {
+        syscall2(
+            SyscallNumber::CapHandleLookup,
+            cap_type,
+            object_id,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as u64)
     } else {
         Err(ret)
     }

@@ -600,6 +600,13 @@ pub(crate) fn capabilities_from_rapp_with_trust(
             25 => (CapabilityType::ContentIndexRead, Rights::READ, 0),
             26 => (CapabilityType::ContentIntentDispatch, Rights::INVOKE, 0),
             27 => (CapabilityType::SurfaceCapture, Rights::READ, 0),
+            // 28 is the explicit PCM-output grant: it authorises open, write
+            // and close of the kernel's single AC'97 stream and a read-only
+            // status query. It is deliberately separate from 21 (the
+            // SystemControl grant bound to the audio-control object), so a
+            // media player can emit PCM without acquiring power or telephony
+            // authority.
+            28 => (CapabilityType::AudioStream, Rights::READ | Rights::WRITE, 0),
             _ => return Err("Unknown RAPP v2 capability"),
         };
         caps.insert(Capability {
@@ -1538,6 +1545,16 @@ pub fn spawn_app_music(id_security: TaskId) -> TaskId {
         id: CapabilityId(2609),
         cap_type: CapabilityType::ContentIndexRead,
         rights: Rights::READ,
+        object_id: 0,
+    }).ok();
+    // WHY the music app gets explicit PCM authority: it is the system player,
+    // and the only way it may emit samples is to open the AC'97 stream with
+    // this capability. The grant does not include SystemControl, so it still
+    // cannot change power, telephony or device policy.
+    caps.insert(Capability {
+        id: CapabilityId(2610),
+        cap_type: CapabilityType::AudioStream,
+        rights: Rights::READ | Rights::WRITE,
         object_id: 0,
     }).ok();
 

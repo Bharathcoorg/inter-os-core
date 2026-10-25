@@ -24,7 +24,10 @@ pub mod touch_i2c;
 pub mod virtio_gpu;
 
 pub use ata::{AtaDrive, AtaError, BlockDevice, ATA_BOOT, ATA_PRIMARY, SECTOR_SIZE};
-pub use audio::{PciAudioController, PciAudioDevice};
+pub use audio::{
+    Ac97Controller, Ac97Error, Ac97Registers, Ac97Status, PciAudioController, PciAudioDevice,
+    PortAc97Io,
+};
 pub use display::{DisplayDriver, KmsDisplayDriver};
 pub use display_kms::{DrmKmsController, DrmPixelFormat, DrmSurface, DRM_KMS, test_drm_kms};
 pub use fdt::{DiscoveredDevice, FdtParser, test_fdt_parser};

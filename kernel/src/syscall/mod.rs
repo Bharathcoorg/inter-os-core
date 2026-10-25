@@ -12,7 +12,11 @@ pub use user_ptr::{
     validate_user_buffer, UserAccessError, UserPtr, UserSlice, UserSliceMut,
 };
 
-use crate::capability::{CapError, CapabilityType, Rights};
+use crate::audio::{
+    AudioStreamError, PcmChannels, PcmFormat, PcmSampleRate, AUDIO_MANAGER,
+};
+use crate::drivers::audio::AC97_FRAME_BYTES;
+use crate::capability::{CapError, CapHandle, CapabilityType, Rights};
 use crate::drivers::{BlockDevice, ATA_PRIMARY, SECTOR_SIZE};
 use crate::drivers::display::DisplayDriver;
 use crate::hal::traits::PowerController;
@@ -232,6 +236,23 @@ pub enum SyscallNumber {
     IntentList = 143,
     IntentDispatch = 144,
     IntentPending = 145,
+    // PCM output. The AC'97 stream is the first real sample-rate audio path in
+    // the kernel; 146..=149 sit above every number the dispatcher already
+    // claims, so no existing ABI number moves. All four are authorised by the
+    // `AudioStream` capability (WRITE for open/write/close, READ for status).
+    AudioStreamOpen = 146,
+    AudioStreamWrite = 147,
+    AudioStreamStatus = 148,
+    AudioStreamClose = 149,
+    /// Returns the generation-counted `CapHandle` of a capability the caller
+    /// already holds.
+    ///
+    /// WHY it exists: the PCM stream calls name an explicit capability handle
+    /// rather than authorising by type alone, and a handle includes the slot
+    /// generation. Downloading PCM must be refused after revocation even if the
+    /// slot has been reused, so userspace needs a way to obtain the handle for
+    /// its own grant that does not guess the generation.
+    CapHandleLookup = 150,
 }
 
 /// System call result status codes.
@@ -270,6 +291,12 @@ pub enum SyscallResult {
     PipeEmpty = -29,
     NotReady = -30,
     InvalidArgument = -31,
+    /// The requested hardware or service does not exist on this device.
+    ///
+    /// WHY a distinct code: "no AC'97 controller is present" is not a device
+    /// error (the controller did not fail) and not "not ready" (it may never
+    /// exist). Reporting `DeviceError` would suggest a retry could fix it.
+    Unavailable = -32,
 }
 
 /// Dispatches a cooperative scheduling yield.
@@ -2350,6 +2377,44 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
                     }
                     n as i64
                 }
+                Err(e) => e as i64,
+            }
+        }
+        146 => {
+            // AudioStreamOpen: a1 = AudioStream CapHandle, a2 = packed format
+            // (0 = 48 kHz stereo 16-bit). Returns the stream id (always 1; the
+            // kernel owns one PCM ring).
+            match sys_audio_stream_open(a1, a2) {
+                Ok(id) => id as i64,
+                Err(e) => e as i64,
+            }
+        }
+        147 => {
+            // AudioStreamWrite: a1 = AudioStream CapHandle, a2 = PCM bytes ptr,
+            // a3 = byte length.
+            match sys_audio_stream_write(a1, a2, a3 as usize) {
+                Ok(bytes) => bytes as i64,
+                Err(e) => e as i64,
+            }
+        }
+        148 => {
+            // AudioStreamStatus: a1 = AudioStream CapHandle, a2 = out ptr,
+            // a3 = out length (>= 40).
+            match sys_audio_stream_status(a1, a2, a3 as usize) {
+                Ok(bytes) => bytes as i64,
+                Err(e) => e as i64,
+            }
+        }
+        149 => match sys_audio_stream_close(a1) {
+            Ok(()) => 0,
+            Err(e) => e as i64,
+        },
+        150 => {
+            // CapHandleLookup: a1 = capability type, a2 = object id. Returns
+            // the generation-counted handle of a capability the caller already
+            // holds; it mints no new authority.
+            match sys_cap_handle_lookup(a1, a2) {
+                Ok(handle) => handle.0 as i64,
                 Err(e) => e as i64,
             }
         }
@@ -4512,6 +4577,25 @@ pub fn sys_cap_lookup(cap_type_raw: u64, object_id: u64) -> Result<usize, Syscal
         .ok_or(SyscallResult::TargetNotFound)
 }
 
+/// Resolves the caller's own capability to its generation-counted handle.
+///
+/// WHY this is not a grant: it only returns a handle for a capability already
+/// in the calling task's table, so it can never confer authority the caller
+/// does not hold. The PCM stream calls require the handle so that a stale
+/// grant (revoked and re-inserted in the same slot) is refused by generation
+/// instead of being accepted by position.
+pub fn sys_cap_handle_lookup(cap_type_raw: u64, object_id: u64) -> Result<CapHandle, SyscallResult> {
+    let cap_type = CapabilityType::from_raw(cap_type_raw)
+        .ok_or(SyscallResult::InvalidArguments)?;
+    let sched = SCHEDULER.lock();
+    let current_task = sched.current_task()
+        .ok_or(SyscallResult::PermissionDenied)?;
+    current_task
+        .cap_table
+        .find_handle_object(cap_type, Rights::NONE, object_id)
+        .ok_or(SyscallResult::TargetNotFound)
+}
+
 /// Polls the normalized userspace input event pipeline.
 pub fn sys_input_event_poll(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
     crate::serial::service_serial_commands();
@@ -4706,6 +4790,261 @@ pub fn sys_audio_control(action: u32, param: u32) -> Result<u32, SyscallResult> 
         },
         _ => Err(SyscallResult::InvalidArguments),
     }
+}
+
+/// Size of the `AudioStreamStatus` record returned to userspace.
+///
+/// Layout, all little-endian: frames_written u64 (0..8), frames_consumed u64
+/// (8..16), queued_frames u64 (16..24), underruns u32 (24..28), flags u32
+/// (28..32; bit 0 device present, bit 1 device running, bit 2 stream open),
+/// capacity_frames u32 (32..36), sample_rate u32 (36..40).
+pub const AUDIO_STREAM_STATUS_BYTES: usize = 40;
+
+/// Largest single `AudioStreamWrite` this kernel will accept.
+///
+/// WHY 64 KiB: the syscall copies through a 1 KiB stack bounce buffer, so this
+/// bounds the caller's request rather than kernel memory. A whole frame is
+/// 4 bytes, so anything larger than 64 KiB is a caller that should have
+/// chunked its buffer.
+const MAX_AUDIO_STREAM_WRITE_BYTES: usize = 64 * 1024;
+
+/// Requires the caller's task to hold `AudioStream` through the given explicit,
+/// generation-counted handle with the requested rights.
+///
+/// WHY a handle and not "any matching capability": the PCM ring is a single
+/// shared device, and a caller that names a handle proves which grant it is
+/// using. A revoked grant (stale generation) or a handle naming another task's
+/// slot is refused even if some other `AudioStream` capability is still in the
+/// caller's table, so authority taken back cannot be replayed.
+fn require_audio_stream(cap_handle: u64, rights: Rights) -> Result<(), SyscallResult> {
+    let handle = CapHandle(cap_handle);
+    if handle == CapHandle::NONE {
+        return Err(SyscallResult::PermissionDenied);
+    }
+    let sched = SCHEDULER.lock();
+    let current = sched
+        .current_task()
+        .ok_or(SyscallResult::PermissionDenied)?;
+    current
+        .cap_table
+        .verify_handle(handle, CapabilityType::AudioStream, rights)
+        .map(|_| ())
+        .map_err(|_| SyscallResult::PermissionDenied)
+}
+
+/// Maps the audio manager's typed errors onto ABI status codes.
+fn map_audio_stream_error(error: AudioStreamError) -> SyscallResult {
+    match error {
+        AudioStreamError::Unavailable => SyscallResult::Unavailable,
+        AudioStreamError::NotOpen => SyscallResult::NotReady,
+        AudioStreamError::Full => SyscallResult::PipeFull,
+        AudioStreamError::InvalidFormat => SyscallResult::InvalidArguments,
+        AudioStreamError::DeviceFault => SyscallResult::DeviceError,
+    }
+}
+
+/// Decodes the packed format word accepted by `AudioStreamOpen`.
+///
+/// `0` selects the controller's native format (48 kHz, stereo, 16-bit).
+/// Otherwise the word is rate in bits 0..16, channels in bits 16..24 and bit
+/// depth in bits 24..32; every other bit must be zero. Unknown values are
+/// refused here so the open path never silently substitutes a format.
+fn decode_audio_stream_format(raw: u64) -> Result<PcmFormat, SyscallResult> {
+    if raw == 0 {
+        return Ok(PcmFormat {
+            sample_rate: PcmSampleRate::Hz48000,
+            channels: PcmChannels::Stereo,
+            bits_per_sample: 16,
+        });
+    }
+    if raw >> 32 != 0 {
+        return Err(SyscallResult::InvalidArguments);
+    }
+    let rate = (raw & 0xFFFF) as u32;
+    let channels = ((raw >> 16) & 0xFF) as u8;
+    let bits = ((raw >> 24) & 0xFF) as u8;
+    let sample_rate = match rate {
+        8000 => PcmSampleRate::Hz8000,
+        16000 => PcmSampleRate::Hz16000,
+        22050 => PcmSampleRate::Hz22050,
+        44100 => PcmSampleRate::Hz44100,
+        48000 => PcmSampleRate::Hz48000,
+        _ => return Err(SyscallResult::InvalidArguments),
+    };
+    let channels = match channels {
+        1 => PcmChannels::Mono,
+        2 => PcmChannels::Stereo,
+        _ => return Err(SyscallResult::InvalidArguments),
+    };
+    if bits != 16 {
+        return Err(SyscallResult::InvalidArguments);
+    }
+    Ok(PcmFormat {
+        sample_rate,
+        channels,
+        bits_per_sample: bits,
+    })
+}
+
+/// Opens the single AC'97 PCM output stream.
+///
+/// `cap_handle` must name an `AudioStream` grant with `Rights::WRITE` in the
+/// caller's table. When no controller exists the call returns
+/// [`SyscallResult::Unavailable`] and opens nothing: there is no placeholder
+/// device to report state for.
+pub fn sys_audio_stream_open(cap_handle: u64, packed_format: u64) -> Result<u32, SyscallResult> {
+    require_audio_stream(cap_handle, Rights::WRITE)?;
+    let format = decode_audio_stream_format(packed_format)?;
+    let mut audio = AUDIO_MANAGER.lock();
+    if !audio.pcm_device_present() {
+        return Err(SyscallResult::Unavailable);
+    }
+    audio
+        .open_pcm_stream(format)
+        .map_err(map_audio_stream_error)?;
+    // The kernel owns one PCM ring, so the stream id is always 1. Returning a
+    // counter instead would imply multiple independent streams, which the
+    // driver does not support.
+    Ok(1)
+}
+
+/// Copies 16-bit stereo PCM frames from userspace into the bounded ring and
+/// hands whatever fits to the controller.
+///
+/// Requires an `AudioStream` handle with `Rights::WRITE`. Returns the number of
+/// bytes accepted, which may be short when the ring filled; `PipeFull` means
+/// none of the request was accepted. A length that is not a whole number of
+/// frames is refused rather than padded.
+pub fn sys_audio_stream_write(
+    cap_handle: u64,
+    user_ptr: u64,
+    byte_len: usize,
+) -> Result<usize, SyscallResult> {
+    require_audio_stream(cap_handle, Rights::WRITE)?;
+    if byte_len == 0
+        || byte_len > MAX_AUDIO_STREAM_WRITE_BYTES
+        || byte_len % AC97_FRAME_BYTES != 0
+    {
+        return Err(SyscallResult::InvalidArguments);
+    }
+    // Report absence before touching the user buffer: with no card there is
+    // nothing to enqueue for, and copying first would do work for a call that
+    // can only fail.
+    {
+        let audio = AUDIO_MANAGER.lock();
+        if !audio.pcm_device_present() {
+            return Err(SyscallResult::Unavailable);
+        }
+        if audio.pcm_stream.is_none() {
+            return Err(SyscallResult::NotReady);
+        }
+    }
+    // Validate the whole range before enqueueing anything, so a bad pointer
+    // cannot leave the caller with half its buffer accepted and an error.
+    validate_user_buffer(user_ptr, byte_len).map_err(|_| SyscallResult::InvalidArguments)?;
+
+    let mut bounce = [0u8; 1024];
+    let mut accepted_total = 0usize;
+    let mut offset = 0usize;
+    while offset < byte_len {
+        let chunk = (byte_len - offset).min(bounce.len());
+        // WHY checked_add: a caller-controlled pointer near the top of the
+        // address space must fail validation, not wrap back into a range the
+        // validator would accept.
+        let address = user_ptr
+            .checked_add(offset as u64)
+            .ok_or(SyscallResult::InvalidArguments)?;
+        if copy_from_user(&mut bounce[..chunk], address, chunk).is_err() {
+            if accepted_total == 0 {
+                return Err(SyscallResult::InvalidArguments);
+            }
+            // A page under the pointer went away after validation. The bytes
+            // already accepted are real, so return that short count instead of
+            // reporting a failure that did not undo them.
+            break;
+        }
+        let accepted = {
+            let mut audio = AUDIO_MANAGER.lock();
+            match audio.write_pcm_stream(&bounce[..chunk]) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    if accepted_total == 0 {
+                        return Err(map_audio_stream_error(error));
+                    }
+                    // The ring filled part-way through; the short count below
+                    // tells the caller exactly how much was taken.
+                    break;
+                }
+            }
+        };
+        accepted_total += accepted;
+        offset += accepted;
+        if accepted < chunk {
+            // Free space is exhausted; do not copy the rest of the request.
+            break;
+        }
+    }
+    if accepted_total == 0 {
+        return Err(SyscallResult::PipeFull);
+    }
+    Ok(accepted_total)
+}
+
+/// Polls the controller and returns the honest stream status record.
+///
+/// Requires an `AudioStream` handle with `Rights::READ`. The flags record
+/// whether a card is present and whether a batch is running; the counters are
+/// what this kernel actually moved or observed, never an estimate of speaker
+/// output.
+pub fn sys_audio_stream_status(
+    cap_handle: u64,
+    out_ptr: u64,
+    out_len: usize,
+) -> Result<usize, SyscallResult> {
+    require_audio_stream(cap_handle, Rights::READ)?;
+    if out_len < AUDIO_STREAM_STATUS_BYTES {
+        return Err(SyscallResult::InvalidArguments);
+    }
+    validate_user_buffer(out_ptr, AUDIO_STREAM_STATUS_BYTES)
+        .map_err(|_| SyscallResult::InvalidArguments)?;
+    let status = {
+        let mut audio = AUDIO_MANAGER.lock();
+        audio.poll_pcm_stream().map_err(map_audio_stream_error)?
+    };
+    let mut record = [0u8; AUDIO_STREAM_STATUS_BYTES];
+    record[0..8].copy_from_slice(&status.frames_written.to_le_bytes());
+    record[8..16].copy_from_slice(&status.frames_consumed.to_le_bytes());
+    record[16..24].copy_from_slice(&status.queued_frames.to_le_bytes());
+    record[24..28].copy_from_slice(&status.underruns.to_le_bytes());
+    let mut flags = 0u32;
+    if status.device_present {
+        flags |= 1 << 0;
+    }
+    if status.device_running {
+        flags |= 1 << 1;
+    }
+    if status.stream_open {
+        flags |= 1 << 2;
+    }
+    record[28..32].copy_from_slice(&flags.to_le_bytes());
+    record[32..36].copy_from_slice(&status.capacity_frames.to_le_bytes());
+    record[36..40].copy_from_slice(&status.sample_rate.to_le_bytes());
+    copy_to_user(out_ptr, &record).map_err(|_| SyscallResult::InvalidArguments)?;
+    Ok(AUDIO_STREAM_STATUS_BYTES)
+}
+
+/// Stops the controller and drops the PCM stream.
+///
+/// Requires an `AudioStream` handle with `Rights::WRITE`. Returns `Unavailable`
+/// when no controller exists, consistent with every other stream entry point.
+pub fn sys_audio_stream_close(cap_handle: u64) -> Result<(), SyscallResult> {
+    require_audio_stream(cap_handle, Rights::WRITE)?;
+    let mut audio = AUDIO_MANAGER.lock();
+    if !audio.pcm_device_present() {
+        return Err(SyscallResult::Unavailable);
+    }
+    audio.close_pcm_stream();
+    Ok(())
 }
 
 /// Derives an application-isolated 32-byte cryptographic key from hardware key slot.

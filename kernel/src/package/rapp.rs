@@ -224,7 +224,7 @@ pub fn parse_rapp(data:&[u8])->Result<RappManifest,RappError>{
     for i in 0..cap_count{
         let o=header_end+i*2;
         let cap=u16::from_le_bytes([data[o],data[o+1]]);
-        if !(1..=27).contains(&cap) {
+        if !(1..=28).contains(&cap) {
             return Err(RappError::UnknownCapability);
         }
         capabilities.push(cap);
@@ -416,16 +416,16 @@ mod tests {
     }
 
     #[test]
-    fn parse_rapp_accepts_all_capabilities_1_through_27() {
-        // WHY 27 and not 24: the content layer added 25 (ContentIndexRead) and
-        // 26 (ContentIntentDispatch), and the surface capture capability took
-        // 27. The table is the ABI, and a package that asks for a capability
-        // the kernel has must be installable.
-        let all_caps: alloc::vec::Vec<u16> = (1..=27).collect();
+    fn parse_rapp_accepts_all_capabilities_1_through_28() {
+        // WHY 28 and not 24: the content layer added 25 (ContentIndexRead) and
+        // 26 (ContentIntentDispatch), surface capture took 27, and the AC'97
+        // PCM stream took 28. The table is the ABI, and a package that asks
+        // for a capability the kernel has must be installable.
+        let all_caps: alloc::vec::Vec<u16> = (1..=28).collect();
         let (pkg, pub_key, _) = create_signed_test_package(&all_caps, 20);
         REVOCATION_REGISTRY.lock().grant_trust_root(pub_key, "all_caps_test").unwrap();
 
-        let manifest = parse_rapp(&pkg).expect("package requesting IDs 1..=27 must parse");
+        let manifest = parse_rapp(&pkg).expect("package requesting IDs 1..=28 must parse");
         assert_eq!(manifest.capabilities, all_caps);
     }
 
@@ -436,10 +436,10 @@ mod tests {
         REVOCATION_REGISTRY.lock().grant_trust_root(pub0, "cap_zero").unwrap();
         assert_eq!(parse_rapp(&pkg0).unwrap_err(), RappError::UnknownCapability);
 
-        // Negative test: 28 is the first identifier above the table
-        let (pkg28, pub28, _) = create_signed_test_package(&[28], 22);
-        REVOCATION_REGISTRY.lock().grant_trust_root(pub28, "cap_28").unwrap();
-        assert_eq!(parse_rapp(&pkg28).unwrap_err(), RappError::UnknownCapability);
+        // Negative test: 29 is the first identifier above the table
+        let (pkg29, pub29, _) = create_signed_test_package(&[29], 22);
+        REVOCATION_REGISTRY.lock().grant_trust_root(pub29, "cap_29").unwrap();
+        assert_eq!(parse_rapp(&pkg29).unwrap_err(), RappError::UnknownCapability);
     }
 
     #[test]
@@ -572,9 +572,18 @@ mod tests {
         assert_eq!(cap24.rights, Rights::READ);
         assert_eq!(cap24.object_id, 0);
 
+        // Verify ID 28 (AudioStream): PCM output is its own grant, not a
+        // SystemControl domain, so a player holds only what it needs.
+        let audio_table = crate::task::user::capabilities_from_rapp(&[28], 0)
+            .expect("ID 28 must map to AudioStream");
+        let cap28 = audio_table.get(0).expect("slot 0 for ID 28");
+        assert_eq!(cap28.cap_type, CapabilityType::AudioStream);
+        assert_eq!(cap28.rights, Rights::READ | Rights::WRITE);
+        assert_eq!(cap28.object_id, 0);
+
         // Negative tests: unknown IDs fail closed
         assert!(crate::task::user::capabilities_from_rapp(&[0], 0).is_err());
-        assert!(crate::task::user::capabilities_from_rapp(&[28], 0).is_err());
+        assert!(crate::task::user::capabilities_from_rapp(&[29], 0).is_err());
         assert!(crate::task::user::capabilities_from_rapp(&[999], 0).is_err());
     }
 

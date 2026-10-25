@@ -139,7 +139,15 @@ pub fn capability_policy(id: ServiceId, parent_id: TaskId) -> Result<Vec<Service
         }
         ServiceId::Power => policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::SystemControl, rights: Rights::INVOKE, object_id: SERVICE_POWER_CONTROL_OBJECT }),
         ServiceId::Modem => policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::SystemControl, rights: Rights::INVOKE, object_id: SERVICE_TELEPHONY_CONTROL_OBJECT }),
-        ServiceId::Audio => policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::SystemControl, rights: Rights::INVOKE, object_id: SERVICE_AUDIO_CONTROL_OBJECT }),
+        // The audio service owns the feedback/mixer control object and is the
+        // one service allowed to drive the AC'97 PCM ring. WHY a separate
+        // `AudioStream` grant instead of widening SystemControl: emitting PCM
+        // is an output side effect, not power or telephony policy, and a
+        // service that only plays audio must not be able to reach those.
+        ServiceId::Audio => {
+            policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::SystemControl, rights: Rights::INVOKE, object_id: SERVICE_AUDIO_CONTROL_OBJECT });
+            policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::AudioStream, rights: Rights::READ | Rights::WRITE, object_id: 0 });
+        }
         ServiceId::Camera => policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::SystemControl, rights: Rights::INVOKE, object_id: SERVICE_CAMERA_CONTROL_OBJECT }),
         ServiceId::Sensor => policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::SystemControl, rights: Rights::INVOKE, object_id: SERVICE_SENSOR_CONTROL_OBJECT }),
         ServiceId::Input => {}

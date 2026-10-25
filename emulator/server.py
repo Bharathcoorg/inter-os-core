@@ -2216,6 +2216,53 @@ def qemu_x86_accel_candidates(exe):
     return chain
 
 
+def qemu_x86_audio_args(exe):
+    """AC'97 device arguments for the x86_64 profile, or [] when unavailable.
+
+    WHY the probe: `-device AC97` still needs a host audio backend, and QEMU
+    refuses to start when the named `-audiodev` driver was not built in. Ask
+    `-audiodev help` what this binary actually offers and attach the card only
+    when the chosen driver is listed, so a host with no working backend still
+    boots the guest (the kernel then honestly reports PCM output unavailable).
+
+    Defaults: dsound on Windows, coreaudio on macOS, pa then alsa then sdl on
+    Linux. The switch is `INTEROS_DISABLE_AUDIO=1` (also true/yes/on) to omit
+    the card entirely, and `INTEROS_AUDIODEV=<driver>` to require a specific
+    backend. A failed probe is treated as "backend unavailable", because a
+    launch that dies on an unknown `-audiodev` is worse than a headless boot.
+    """
+    if os.environ.get("INTEROS_DISABLE_AUDIO", "").strip().lower() in ("1", "true", "yes", "on"):
+        return []
+    if sys.platform == "win32":
+        candidates = ("dsound",)
+    elif sys.platform == "darwin":
+        candidates = ("coreaudio",)
+    else:
+        # pa is the usual desktop backend; alsa/sdl still give a real device
+        # when that QEMU build was configured without PulseAudio.
+        candidates = ("pa", "alsa", "sdl")
+    explicit = (os.environ.get("INTEROS_AUDIODEV") or "").strip()
+    if explicit:
+        # An explicit driver is honoured or the card is omitted; falling back
+        # would silently use a backend the operator did not ask for.
+        candidates = (explicit,)
+    supported = set()
+    try:
+        probe = subprocess.run(
+            [exe, "-audiodev", "help"], capture_output=True, text=True, timeout=8)
+        for line in ((probe.stdout or "") + (probe.stderr or "")).splitlines():
+            entry = line.strip()
+            if not entry or entry.endswith(":"):
+                continue
+            supported.add(entry.split()[0].split(",")[0])
+    except Exception:
+        return []  # cannot prove a backend exists -> do not attach the card
+    driver = next((name for name in candidates if name in supported), None)
+    if driver is None:
+        return []
+    return ["-audiodev", f"{driver},id=aud0", "-device", "AC97,audiodev=aud0"]
+
+
 def qemu_process_survives_startup(proc, grace=0.5):
     """True while the process is still alive after `grace` seconds.
 
@@ -2416,6 +2463,11 @@ def launch_qemu_profile(profile_key="x86_64", ram_mb=None, smp=1):
             "-netdev", "user,id=net0",
             "-device", "e1000,netdev=net0,mac=52:54:00:12:34:56",
         ])
+        # A real AC'97 controller so the guest's PCM driver has a bus-master
+        # device to program. The helper omits both flags when the host has no
+        # usable audio backend (or INTEROS_DISABLE_AUDIO is set); the guest
+        # then reports "unavailable" rather than pretending to play.
+        cmd.extend(qemu_x86_audio_args(exe))
     elif arch == "aarch64":
         cmd.extend(["-machine", "virt", "-cpu", "cortex-a53", "-kernel", img_path])
     elif arch == "riscv64":
