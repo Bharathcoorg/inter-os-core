@@ -126,20 +126,137 @@ pub const IMAGE_SUFFIXES: [&[u8]; 9] = [
     b".jpg", b".jpeg", b".png", b".bmp", b".gif", b".webp", b".qoi", b".ppm", b".raw",
 ];
 
-pub const VIDEO_SUFFIXES: [&[u8]; 7] = [
-    b".mp4", b".webm", b".mkv", b".avi", b".mov", b".mjpg", b".mjpeg",
+pub const VIDEO_SUFFIXES: [&[u8]; 8] = [
+    b".mp4", b".m4v", b".webm", b".mkv", b".avi", b".mov", b".mjpg", b".mjpeg",
 ];
 
 pub const AUDIO_SUFFIXES: [&[u8]; 7] = [
     b".mp3", b".wav", b".ogg", b".flac", b".aac", b".m4a", b".pcm",
 ];
 
-pub const DOC_SUFFIXES: [&[u8]; 7] = [
-    b".txt", b".pdf", b".md", b".doc", b".json", b".log", b".csv",
+pub const DOC_SUFFIXES: [&[u8]; 10] = [
+    b".txt", b".pdf", b".md", b".doc", b".json", b".log", b".csv", b".htm", b".html", b".xml",
 ];
 
 pub fn has_suffix(name: &[u8], suffix: &[u8]) -> bool {
     name.len() > suffix.len() && name[name.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
+}
+
+/// The media type of a file the document index has not described yet.
+///
+/// WHY this mirrors the kernel's extension table: the index classifies a file
+/// from its own bytes, and this answers for a path the index has not reached.
+/// If the two tables disagreed, one file would be described two ways depending
+/// on when it was looked at. A type the platform cannot open is still named
+/// accurately here; the intent registry, not this table, decides who opens it.
+pub fn mime_for_name(name: &[u8], is_video_dir: bool) -> &'static str {
+    // A frame sequence recorded into the video area belongs to a video even
+    // though its bytes look like a still picture.
+    if is_video_dir {
+        if has_suffix(name, b".ppm") {
+            return "video/x-ppm";
+        }
+        if has_suffix(name, b".raw") {
+            return "video/x-raw";
+        }
+    }
+    if has_suffix(name, b".jpg") || has_suffix(name, b".jpeg") {
+        return "image/jpeg";
+    }
+    if has_suffix(name, b".png") {
+        return "image/png";
+    }
+    if has_suffix(name, b".gif") {
+        return "image/gif";
+    }
+    if has_suffix(name, b".bmp") {
+        return "image/bmp";
+    }
+    if has_suffix(name, b".webp") {
+        return "image/webp";
+    }
+    if has_suffix(name, b".qoi") {
+        return "image/qoi";
+    }
+    if has_suffix(name, b".ppm") {
+        return "image/x-portable-pixmap";
+    }
+    if has_suffix(name, b".svg") {
+        return "image/svg+xml";
+    }
+    if has_suffix(name, b".mp4") || has_suffix(name, b".m4v") {
+        return "video/mp4";
+    }
+    if has_suffix(name, b".mov") {
+        return "video/quicktime";
+    }
+    if has_suffix(name, b".webm") {
+        return "video/webm";
+    }
+    if has_suffix(name, b".mkv") {
+        return "video/x-matroska";
+    }
+    if has_suffix(name, b".avi") {
+        return "video/x-msvideo";
+    }
+    if has_suffix(name, b".mjpg") || has_suffix(name, b".mjpeg") {
+        return "video/x-motion-jpeg";
+    }
+    if has_suffix(name, b".mp3") {
+        return "audio/mpeg";
+    }
+    if has_suffix(name, b".wav") {
+        return "audio/wav";
+    }
+    if has_suffix(name, b".pcm") {
+        return "audio/pcm";
+    }
+    if has_suffix(name, b".ogg") {
+        return "audio/ogg";
+    }
+    if has_suffix(name, b".flac") {
+        return "audio/flac";
+    }
+    if has_suffix(name, b".aac") {
+        return "audio/aac";
+    }
+    if has_suffix(name, b".m4a") {
+        return "audio/mp4";
+    }
+    if has_suffix(name, b".json") {
+        return "application/json";
+    }
+    if has_suffix(name, b".pdf") {
+        return "application/pdf";
+    }
+    if has_suffix(name, b".md") {
+        return "text/markdown";
+    }
+    if has_suffix(name, b".csv") {
+        return "text/csv";
+    }
+    if has_suffix(name, b".htm") || has_suffix(name, b".html") {
+        return "text/html";
+    }
+    if has_suffix(name, b".xml") {
+        return "application/xml";
+    }
+    if has_suffix(name, b".zip") {
+        return "application/zip";
+    }
+    if has_suffix(name, b".doc") {
+        return "application/msword";
+    }
+    if has_suffix(name, b".rapp") {
+        return "application/vnd.interos.rapp";
+    }
+    if has_suffix(name, b".note") {
+        return "text/x-interos-note";
+    }
+    if has_suffix(name, b".txt") || has_suffix(name, b".log") {
+        return "text/plain";
+    }
+    "application/octet-stream"
 }
 
 pub fn detect_mime(name: &[u8], is_dir: bool) -> FileMime {
@@ -326,67 +443,10 @@ pub fn document_from_path(path: &str) -> Option<SelectedDocument> {
     }
     let bytes = path.as_bytes();
     let is_video_dir = path.starts_with("/storage/videos") || path.contains("/videos/");
-    let is_video_frame = is_video_dir && (has_suffix(bytes, b".ppm") || has_suffix(bytes, b".raw"));
-    let is_video_ext = has_suffix(bytes, b".mp4")
-        || has_suffix(bytes, b".mjpg")
-        || has_suffix(bytes, b".mjpeg")
-        || has_suffix(bytes, b".webm")
-        || has_suffix(bytes, b".mkv")
-        || has_suffix(bytes, b".avi");
-    let mime_kind = if is_video_frame || is_video_ext {
-        FileMime::Video
+    let mime_str = if path.ends_with('/') {
+        "inode/directory"
     } else {
-        detect_mime(bytes, false)
-    };
-    let mime_str = match mime_kind {
-        FileMime::Directory => "inode/directory",
-        FileMime::Image => {
-            if has_suffix(bytes, b".ppm") {
-                "image/x-portable-pixmap"
-            } else if has_suffix(bytes, b".raw") {
-                "image/x-raw"
-            } else if has_suffix(bytes, b".qoi") {
-                "image/qoi"
-            } else if has_suffix(bytes, b".bmp") {
-                "image/bmp"
-            } else if has_suffix(bytes, b".png") {
-                "image/png"
-            } else {
-                "image/jpeg"
-            }
-        }
-        FileMime::Video => {
-            if has_suffix(bytes, b".mjpg") || has_suffix(bytes, b".mjpeg") {
-                "video/x-motion-jpeg"
-            } else if has_suffix(bytes, b".ppm") {
-                "video/x-ppm"
-            } else if has_suffix(bytes, b".raw") {
-                "video/x-raw"
-            } else {
-                "video/mp4"
-            }
-        }
-        FileMime::Audio => {
-            if has_suffix(bytes, b".mp3") {
-                "audio/mpeg"
-            } else if has_suffix(bytes, b".pcm") {
-                "audio/pcm"
-            } else {
-                "audio/wav"
-            }
-        }
-        FileMime::Document => {
-            if has_suffix(bytes, b".json") {
-                "application/json"
-            } else if has_suffix(bytes, b".pdf") {
-                "application/pdf"
-            } else if has_suffix(bytes, b".md") {
-                "text/markdown"
-            } else {
-                "text/plain"
-            }
-        }
-        FileMime::Other => "application/octet-stream",
+        mime_for_name(bytes, is_video_dir)
     };
     let mut selected = SelectedDocument::EMPTY;
     let plen = bytes.len().min(MAX_DOCUMENT_PATH_LEN);
@@ -1037,6 +1097,50 @@ mod tests {
         assert_eq!(detect_mime(b"voice.pcm", false), FileMime::Audio);
         assert_eq!(detect_mime(b"notes.txt", false), FileMime::Document);
         assert_eq!(detect_mime(b"archive.tar", false), FileMime::Other);
+    }
+
+    #[test]
+    fn an_unindexed_file_is_named_by_the_format_its_extension_names() {
+        // WHY: the fallback describes files the index has not walked yet. It
+        // has to give the same answer the index would, or a document would be
+        // described one way before the walk and another way after it.
+        assert_eq!(mime_for_name(b"photo.jpg", false), "image/jpeg");
+        assert_eq!(mime_for_name(b"photo.jpeg", false), "image/jpeg");
+        assert_eq!(mime_for_name(b"photo.png", false), "image/png");
+        assert_eq!(mime_for_name(b"anim.gif", false), "image/gif");
+        assert_eq!(mime_for_name(b"still.webp", false), "image/webp");
+        assert_eq!(mime_for_name(b"icon.bmp", false), "image/bmp");
+        assert_eq!(mime_for_name(b"frame.qoi", false), "image/qoi");
+        assert_eq!(mime_for_name(b"shot.ppm", false), "image/x-portable-pixmap");
+        assert_eq!(mime_for_name(b"vector.svg", false), "image/svg+xml");
+        assert_eq!(mime_for_name(b"clip.mp4", false), "video/mp4");
+        assert_eq!(mime_for_name(b"clip.mov", false), "video/quicktime");
+        assert_eq!(mime_for_name(b"clip.webm", false), "video/webm");
+        assert_eq!(mime_for_name(b"clip.mkv", false), "video/x-matroska");
+        assert_eq!(mime_for_name(b"clip.avi", false), "video/x-msvideo");
+        assert_eq!(mime_for_name(b"capture.mjpg", false), "video/x-motion-jpeg");
+        assert_eq!(mime_for_name(b"song.mp3", false), "audio/mpeg");
+        assert_eq!(mime_for_name(b"song.wav", false), "audio/wav");
+        assert_eq!(mime_for_name(b"song.ogg", false), "audio/ogg");
+        assert_eq!(mime_for_name(b"song.flac", false), "audio/flac");
+        assert_eq!(mime_for_name(b"song.aac", false), "audio/aac");
+        assert_eq!(mime_for_name(b"song.m4a", false), "audio/mp4");
+        assert_eq!(mime_for_name(b"page.html", false), "text/html");
+        assert_eq!(mime_for_name(b"table.csv", false), "text/csv");
+        assert_eq!(mime_for_name(b"readme.md", false), "text/markdown");
+        assert_eq!(mime_for_name(b"log.txt", false), "text/plain");
+        assert_eq!(mime_for_name(b"payload.bin", false), "application/octet-stream");
+    }
+
+    #[test]
+    fn a_frame_in_the_video_area_is_a_video_and_not_a_picture() {
+        // WHY: a raw frame's bytes look like a still picture to a byte
+        // sniffer, but the file is one frame of a recording, and the video
+        // player is the package that can show it.
+        assert_eq!(mime_for_name(b"/storage/videos/clip.ppm", true), "video/x-ppm");
+        assert_eq!(mime_for_name(b"/storage/videos/clip.raw", true), "video/x-raw");
+        assert_eq!(mime_for_name(b"/storage/photos/clip.ppm", false), "image/x-portable-pixmap");
+        assert_eq!(mime_for_name(b"/storage/photos/clip.raw", false), "application/octet-stream");
     }
 
     #[test]
