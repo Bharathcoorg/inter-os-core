@@ -505,6 +505,10 @@ impl MusicApp {
         }
         if self.player.start(&self.store, self.current_track_idx) {
             self.state = PlaybackState::Playing;
+            // A track that starts playing must not leave the refusal of an
+            // earlier, unplayable entry on the screen: the line names a failure
+            // that is no longer the player's state.
+            self.clear_feedback();
             if let Some(volume) = self.volume_percent {
                 self.player.set_volume(volume);
             }
@@ -562,6 +566,31 @@ impl MusicApp {
         }
         self.publish_now_playing();
         true
+    }
+
+    /// Moves on to the next track that can actually play.
+    ///
+    /// WHY it searches instead of taking the next entry: the library persists
+    /// track records but their source paths are not guaranteed to survive a
+    /// reboot, so one unplayable entry must not stop a queue that still holds
+    /// playable tracks. Every entry is tried at most once, including a wrap
+    /// around the end of the list.
+    pub fn advance_after_end(&mut self) -> bool {
+        let len = self.store.len();
+        if len == 0 {
+            self.state = PlaybackState::Stopped;
+            return false;
+        }
+        let start = (self.current_track_idx + 1) % len;
+        for step in 0..len {
+            self.current_track_idx = (start + step) % len;
+            if self.start_selected() {
+                return true;
+            }
+        }
+        self.state = PlaybackState::Stopped;
+        self.set_feedback(b"No track in the library can be played");
+        false
     }
 
     /// Toggles play/pause against the device's PCM stream.
@@ -826,17 +855,23 @@ const SORT_BTN: Rect = Rect { x: 448, y: 748, w: 118, h: 48 };
 /// The control that imports the audio files the device holds.
 const IMPORT_BTN: Rect = Rect { x: 578, y: 748, w: 118, h: 48 };
 
-/// The line that names the features the platform does not offer this app.
+/// The line that names the features the platform does not offer this app, and
+/// carries transient feedback when there is any.
+///
+/// WHY one line and not two: the band between the search row (ends at 796) and
+/// the volume row (starts at 848) holds a single caption. A second line at
+/// y 828 ran into the volume controls, so feedback takes the caption's place
+/// while it is shown.
 const UNAVAILABLE_Y: usize = 808;
-
-/// Transient user feedback message line.
-const FEEDBACK_Y: usize = 828;
 
 /// The search query's capacity, in bytes.
 const SEARCH_CAP: usize = 32;
 
 /// Capacity for live feedback notifications.
-const FEEDBACK_CAP: usize = 48;
+///
+/// WHY 64: the longest refusal message is "Cannot play: " plus a reason of at
+/// most 45 bytes. A shorter buffer used to truncate the reason mid-word.
+const FEEDBACK_CAP: usize = 64;
 
 /// Metadata band (title, artist, state, search row, availability line).
 ///
@@ -1624,8 +1659,8 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
         if let Some(c) = text_centered_bold(
             x,
             y,
-            FEEDBACK_Y,
-            2,
+            UNAVAILABLE_Y,
+            1,
             &app.feedback[..app.feedback_len],
             THEME.on_surface,
             THEME.surface,
@@ -1638,17 +1673,20 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
     // WHY they are named: the design document asks for playlists, and the
     // library store holds one flat list. A control that promised a
     // playlist would be a control that does nothing, so the screen says
-    // what the device can do instead.
-    if let Some(c) = text_centered(
-        x,
-        y,
-        UNAVAILABLE_Y,
-        1,
-        b"Playlists unavailable - the store holds one queue",
-        THEME.muted,
-        THEME.surface,
-    ) {
-        return c;
+    // what the device can do instead. Feedback temporarily replaces this
+    // line rather than sharing a band too short for two of them.
+    if app.feedback_len == 0 {
+        if let Some(c) = text_centered(
+            x,
+            y,
+            UNAVAILABLE_Y,
+            1,
+            b"Playlists unavailable - the store holds one queue",
+            THEME.muted,
+            THEME.surface,
+        ) {
+            return c;
+        }
     }
 
     // 4b. Volume row: real audio-service telemetry, or an honest "unavailable".
@@ -2682,17 +2720,15 @@ pub extern "C" fn _start() -> ! {
                     if music.state == PlaybackState::Playing {
                         music.player.tick();
                         if music.player.state == PlayerState::Ended {
-                            // WHY the next track starts here: the stream
-                            // reported that it took every sample it was
-                            // given, so the queue's next entry is what
-                            // follows.
-                            if !music.store.is_empty() {
-                                music.current_track_idx =
-                                    (music.current_track_idx + 1) % music.store.len();
-                                music.start_selected();
-                            } else {
-                                music.state = PlaybackState::Stopped;
-                            }
+                            std::log("[MUSIC APP] Track ended; the device finished its last PCM batch.",
+                            )
+                            .ok();
+                            // WHY the next playable track starts here: the
+                            // stream reported that the device finished every
+                            // sample it was given, so the queue's next entry is
+                            // what follows. Entries that cannot play are
+                            // skipped rather than stopping the whole queue.
+                            music.advance_after_end();
                             music.publish_now_playing();
                             if surface > 0 {
                                 repaint(surface, &music, Dirty::All);
