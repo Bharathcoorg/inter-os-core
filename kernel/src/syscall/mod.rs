@@ -1227,8 +1227,8 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             //
             // WHY the read continues past the bounce buffer: the kernel
             // copies through a 4 KiB stack buffer, but a caller asking for a
-            // whole document passes its own larger buffer (the gallery reads
-            // 16 KiB, the launcher 8 KiB, the browser 64 KiB). The old guard
+            // whole document passes its own larger buffer (the gallery and
+            // the browser read 64 KiB, the launcher 8 KiB). The old guard
             // tested that buffer's length and refused the request outright,
             // so every one of those reads failed even when the file was
             // smaller than 4 KiB. The descriptor keeps its own offset, so

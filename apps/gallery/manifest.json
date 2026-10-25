@@ -20,10 +20,8 @@
   "intents": {
     "mime": [
       "image/png",
-      "image/jpeg",
       "image/gif",
       "image/bmp",
-      "image/webp",
       "image/qoi",
       "image/x-portable-pixmap",
       "video/mp4",

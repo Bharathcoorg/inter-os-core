@@ -95,13 +95,20 @@ static mut FILE_SCRATCH: [u8; FILE_SCRATCH_LEN] = [0; FILE_SCRATCH_LEN];
 static mut DECODE_SCRATCH: [u8; DECODE_SCRATCH_LEN] = [0; DECODE_SCRATCH_LEN];
 
 /// Length of the file read scratch buffer.
-const FILE_SCRATCH_LEN: usize = 16 * 1024;
+///
+/// WHY 64 KiB: the platform's `FsRead` accepts at most 64 KiB in one call, and
+/// a document larger than that is one this device cannot hold whole anyway.
+/// The header at the front still measures, so an oversized document is still
+/// listed with its real dimensions.
+const FILE_SCRATCH_LEN: usize = 64 * 1024;
 
 /// Length of the RGBA decode scratch buffer.
 ///
-/// WHY this size: it matches the largest image the gallery's decoders can
-/// produce, so a decode either fits or is refused rather than truncating.
-const DECODE_SCRATCH_LEN: usize = 36 * 72 * 4;
+/// WHY one screen at native resolution: 720 x 1440 x 4 bytes is the largest
+/// picture this device can show without scaling it down, and it is the buffer
+/// the grid thumbnail and the full-screen viewer share. An image whose pixels
+/// do not fit is refused by the decoder rather than drawn truncated.
+const DECODE_SCRATCH_LEN: usize = 720 * 1440 * 4;
 
 /// Decodes a stored image file into a thumbnail.
 ///
@@ -134,6 +141,25 @@ fn decode_thumbnail(path: &[u8], name: &[u8]) -> Option<Thumbnail> {
         Thumbnail::from_rgba(buf, w, h)?
     };
     Some(thumb)
+}
+
+/// The pixel at byte `offset` of the last successful detail decode.
+///
+/// Returns `None` when the offset falls outside the bytes that decode wrote,
+/// so a renderer never reads past the picture it is drawing. The shared buffer
+/// is read through a raw pointer rather than a reference because it is a
+/// `static mut`: forming a slice would claim an exclusive borrow for the whole
+/// buffer while the thumbnail path may later rewrite another part of it.
+fn decoded_detail_pixel(offset: usize, len: usize) -> Option<u32> {
+    if offset + 3 >= len || offset + 4 > DECODE_SCRATCH_LEN {
+        return None;
+    }
+    let bytes = core::ptr::addr_of!(DECODE_SCRATCH) as *const u8;
+    let r = unsafe { *bytes.add(offset) } as u32;
+    let g = unsafe { *bytes.add(offset + 1) } as u32;
+    let b = unsafe { *bytes.add(offset + 2) } as u32;
+    let a = unsafe { *bytes.add(offset + 3) } as u32;
+    Some((a << 24) | (r << 16) | (g << 8) | b)
 }
 
 // -----------------------------------------------------------------------------
@@ -896,8 +922,11 @@ pub struct GalleryApp {
     pub show_info_overlay: bool,
     /// Whether target selector sheet is visible in photo viewer.
     pub show_wallpaper_sheet: bool,
-    /// Decoded image buffer for detailed viewing.
-    pub detail_rgba: [u8; 36 * 72 * 4],
+    /// Bytes the full-screen viewer may read from `DECODE_SCRATCH`.
+    ///
+    /// WHY the pixels are not a field: the decoded picture is up to 4 MiB and
+    /// the app itself is moved by value, so the pixels live in the shared
+    /// static buffer and this records how much of it the last decode wrote.
     pub detail_rgba_len: usize,
     pub detail_w: u32,
     pub detail_h: u32,
@@ -1016,7 +1045,6 @@ impl GalleryApp {
             storage_items: [StorageMediaItem::EMPTY; MAX_STORAGE_ITEMS],
             storage_count: 0,
             video_player: None,
-            detail_rgba: [0u8; 36 * 72 * 4],
             detail_rgba_len: 0,
             detail_w: 0,
             detail_h: 0,
@@ -1196,6 +1224,11 @@ impl GalleryApp {
     /// holds a PNG is shown as a PNG.
     pub fn rescan_storage(&mut self) {
         self.storage_count = 0;
+        // The thumbnails below reuse the decode buffer, so a picture decoded
+        // for the full-screen viewer is no longer there once the scan starts.
+        self.detail_rgba_len = 0;
+        self.detail_w = 0;
+        self.detail_h = 0;
         let mut list_buf = [0u8; 4096];
         let Ok(bytes) = std::content::content_index_list(&mut list_buf) else {
             std::log("[GALLERY] The platform's document index could not be read; the gallery shows nothing it cannot name.").ok();
@@ -1315,7 +1348,21 @@ impl GalleryApp {
             self.detail_w = w;
             self.detail_h = h;
         }
-        if let Ok((w, h, len)) = decode_image(&data[..n], &name_buf[..name_len], &mut self.detail_rgba) {
+        // A file longer than the read buffer arrives truncated, and a decoder
+        // handed a truncated document would either refuse it (correct) or, at
+        // worst, decode a partial picture as if it were whole. Refuse it here
+        // by size, before the decoder sees it.
+        if self.storage_items[idx].size > FILE_SCRATCH_LEN as u64 {
+            std::log("[GALLERY] The document is larger than the gallery's decode buffer; showing the thumbnail instead.").ok();
+            self.detail_w = 0;
+            self.detail_h = 0;
+            return;
+        }
+        let decoded = {
+            let buf = unsafe { &mut *core::ptr::addr_of_mut!(DECODE_SCRATCH) };
+            decode_image(&data[..n], &name_buf[..name_len], buf)
+        };
+        if let Ok((w, h, len)) = decoded {
             self.detail_w = w;
             self.detail_h = h;
             self.detail_rgba_len = len;
@@ -2663,12 +2710,8 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
                     let img_x = (norm_x * app.detail_w as usize / W).min(app.detail_w as usize - 1);
                     let img_y = (norm_y * app.detail_h as usize / H).min(app.detail_h as usize - 1);
                     let offset = (img_y * app.detail_w as usize + img_x) * 4;
-                    if offset + 3 < app.detail_rgba.len() {
-                        let r = app.detail_rgba[offset] as u32;
-                        let g = app.detail_rgba[offset + 1] as u32;
-                        let b = app.detail_rgba[offset + 2] as u32;
-                        let a = app.detail_rgba[offset + 3] as u32;
-                        return (a << 24) | (r << 16) | (g << 8) | b;
+                    if let Some(colour) = decoded_detail_pixel(offset, app.detail_rgba_len) {
+                        return colour;
                     }
                 }
                 let thumb = unsafe { STORAGE_THUMBS[idx] };
@@ -3010,12 +3053,8 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
                     let img_x = ((x - view.x) * app.detail_w as usize / view.w.max(1)).min(app.detail_w as usize - 1);
                     let img_y = ((y - view.y) * app.detail_h as usize / view.h.max(1)).min(app.detail_h as usize - 1);
                     let offset = (img_y * app.detail_w as usize + img_x) * 4;
-                    if offset + 3 < app.detail_rgba.len() {
-                        let r = app.detail_rgba[offset] as u32;
-                        let g = app.detail_rgba[offset + 1] as u32;
-                        let b = app.detail_rgba[offset + 2] as u32;
-                        let a = app.detail_rgba[offset + 3] as u32;
-                        return (a << 24) | (r << 16) | (g << 8) | b;
+                    if let Some(colour) = decoded_detail_pixel(offset, app.detail_rgba_len) {
+                        return colour;
                     }
                 }
                 let thumb = unsafe { STORAGE_THUMBS[idx] };

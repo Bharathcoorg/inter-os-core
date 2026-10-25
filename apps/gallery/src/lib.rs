@@ -342,6 +342,17 @@ pub fn measure_image_header(data: &[u8], name: &[u8]) -> Option<(u32, u32)> {
     if name.ends_with(b".qoi") || (data.len() >= 4 && &data[0..4] == b"qoif") {
         return decode_qoi_header(data).ok().map(|(w, h, _, _)| (w, h));
     }
+    // WHY these two are measured before they are decoded: the sheet says how
+    // large a document is before the user opens it, and a PNG or GIF header
+    // carries that number in a few dozen bytes. The decode itself may still
+    // refuse an image beyond the app's buffer, and then the sheet keeps the
+    // measured size rather than claiming the picture was rendered.
+    if name.ends_with(b".png") || (data.len() >= 8 && &data[0..8] == b"\x89PNG\r\n\x1a\n") {
+        return decode_png_header(data).ok();
+    }
+    if name.ends_with(b".gif") || (data.len() >= 6 && (&data[0..6] == b"GIF87a" || &data[0..6] == b"GIF89a")) {
+        return decode_gif_header(data).ok();
+    }
     None
 }
 
@@ -498,8 +509,9 @@ pub fn media_at_with_storage(
 // is, and three programs that each carried their own decoder would be three programs
 // that could each be wrong about what a QOI file is. See `interos_std::image`.
 pub use interos_std::image::{
-    decode_bmp, decode_bmp_header, decode_image, decode_ppm, decode_ppm_header,
-    decode_qoi, decode_qoi_header, decode_raw, encode_ppm, qoi_color_hash,
+    decode_bmp, decode_bmp_header, decode_gif, decode_gif_header, decode_image, decode_png,
+    decode_png_header, decode_ppm, decode_ppm_header, decode_qoi, decode_qoi_header, decode_raw,
+    encode_ppm, qoi_color_hash,
 };
 
 #[cfg(test)]
