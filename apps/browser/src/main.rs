@@ -4650,7 +4650,7 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                                     }
                                 }
                                 let reason_y = band_y as usize
-                                    + if slot.map(|s| s.alt_len).unwrap_or(0) > 0 {
+                                    + if slot.map_or(0, |s| s.alt_len) > 0 {
                                         32
                                     } else {
                                         18
