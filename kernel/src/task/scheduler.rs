@@ -32,6 +32,106 @@ pub const VSYNC_BUDGET_60HZ_NS: u64 = 16_666_666;
 /// Global system multitasking scheduler.
 pub static SCHEDULER: Mutex<Scheduler> = Mutex::new(Scheduler::new());
 
+/// One departing task whose cross-subsystem state still needs reclaiming.
+#[derive(Clone, Copy)]
+struct DeferredCleanup {
+    id: TaskId,
+    name: &'static str,
+}
+
+/// Bound on terminations awaiting reclaim. The kernel main loop drains the
+/// queue on every pass, so it only has to cover exits inside a single pass.
+const DEFERRED_CLEANUP_SLOTS: usize = 64;
+static DEFERRED_CLEANUP: Mutex<[Option<DeferredCleanup>; DEFERRED_CLEANUP_SLOTS]> =
+    Mutex::new([None; DEFERRED_CLEANUP_SLOTS]);
+
+/// Queues cross-subsystem reclaim for a task that has left the run queue.
+///
+/// WHY the hooks are not run at the termination site: both termination paths
+/// execute with `SCHEDULER` held, and every hook acquires another subsystem's
+/// lock; `fs::cleanup_task` takes `VFS`. `vfs::app_package_for_task` runs the
+/// opposite order (VFS, then `SCHEDULER`). With interrupts enabled a waiter
+/// inside a syscall still cannot be preempted once it owns the scheduler, so
+/// the parallel task holding VFS never runs again and both spin forever. The
+/// task is only marked here; `run_deferred_cleanup` performs the reclaim in a
+/// context that owns no scheduler lock.
+pub fn defer_cleanup(id: TaskId, name: &'static str) {
+    let mut pending = DEFERRED_CLEANUP.lock();
+    if pending.iter().any(|slot| matches!(slot, Some(entry) if entry.id == id)) {
+        return;
+    }
+    match pending.iter_mut().find(|slot| slot.is_none()) {
+        Some(slot) => *slot = Some(DeferredCleanup { id, name }),
+        None => crate::serial_println!(
+            "[LIFECYCLE] deferred cleanup queue full; task {} resources not reclaimed",
+            id.0
+        ),
+    }
+}
+
+/// Reclaims resources of tasks that terminated since the last pass.
+///
+/// MUST be called without `SCHEDULER` held. The hooks below may block on the
+/// subsystem they own; that is safe exactly here, because the caller owns
+/// nothing the scheduler needs and the timer can preempt it.
+pub fn run_deferred_cleanup() {
+    loop {
+        let entry = {
+            let mut pending = DEFERRED_CLEANUP.lock();
+            match pending.iter_mut().find(|slot| slot.is_some()) {
+                Some(slot) => slot.take(),
+                None => return,
+            }
+        };
+        let Some(entry) = entry else { return; };
+        reclaim_task(entry);
+    }
+}
+
+/// Releases everything a departed task owned outside the scheduler.
+fn reclaim_task(entry: DeferredCleanup) {
+    crate::ipc::cleanup_task(entry.id);
+    crate::fs::cleanup_task(entry.id);
+    crate::event::cleanup_task(entry.id);
+    crate::net::cleanup_task(entry.id);
+    // Authority follows task lifetime. `capability::cleanup_task` revokes the
+    // exiting task's delegated leases, prunes them from the kernel-wide
+    // registry and drops its consent records; without this a dead task kept
+    // live delegated authority and `has_permission` kept answering for it.
+    crate::capability::cleanup_task(entry.id);
+
+    // Surface ownership follows task lifetime. Reclaim all app surfaces at
+    // the common exit path so normal std::exit() cannot leave stale windows.
+    //
+    // WHY the shell is raised at all: an application is a layer over the
+    // desktop. When the layer is gone and the desktop stays hidden, the
+    // screen composites the system band over an empty canvas, which is the
+    // blank white screen a person sees after pressing back.
+    let shell_owner = SCHEDULER
+        .lock()
+        .tasks
+        .iter()
+        .find(|t| t.name == "launcher")
+        .map(|t| t.id.0);
+    {
+        let mut kms = crate::drivers::display_kms::DRM_KMS.lock();
+        kms.destroy_surfaces_owned_by(entry.id.0);
+        // WHY not gated on a reclaimed surface: the task may have taken its
+        // own surface down before it died, and the screen still has to come
+        // back to the desktop. See the exit syscall for the same rule.
+        if let Some(shell) = shell_owner {
+            if shell != entry.id.0 {
+                kms.set_surfaces_visibility_for_task(shell, true);
+            }
+        }
+    }
+
+    let user_id = crate::task::process::user_for_task(entry.id).unwrap_or(0);
+    crate::notification::NOTIFICATION_MANAGER
+        .lock()
+        .cancel_all_for_package(entry.name, user_id);
+}
+
 /// The multitasking scheduler managing all active OS threads and processes.
 pub struct Scheduler {
     tasks: Vec<TaskControlBlock>,
@@ -564,15 +664,7 @@ impl Scheduler {
         if task_id != TaskId(0) {
             crate::task::process::mark_zombie(task_id, self.tasks[current_idx].exit_code);
         }
-        crate::ipc::cleanup_task(task_id);
-        crate::fs::cleanup_task(task_id);
-        crate::event::cleanup_task(task_id);
-        crate::net::cleanup_task(task_id);
-        // Authority follows task lifetime. `capability::cleanup_task` revokes the
-        // exiting task's delegated leases, prunes them from the kernel-wide
-        // registry and drops its consent records; without this a dead task kept
-        // live delegated authority and `has_permission` kept answering for it.
-        crate::capability::cleanup_task(task_id);
+        defer_cleanup(task_id, self.tasks[current_idx].name);
 
         // Audit capability telemetry before table revocation
         let total_cap_invocations: u64 = (0..self.tasks[current_idx].cap_table.capacity())
@@ -589,36 +681,6 @@ impl Scheduler {
         }
 
         self.tasks[current_idx].cap_table.revoke_all();
-        // Surface ownership follows task lifetime. Reclaim all app surfaces at
-        // the common exit path so normal std::exit() cannot leave stale windows.
-        //
-        // WHY the shell is found here and not by a helper that looks it up
-        // itself: this method already holds the scheduler's lock, and every
-        // helper that finds the shell goes through the scheduler. Calling one
-        // here would take the same lock twice, so the owner is read from the
-        // table that is already open, and the display is asked directly.
-        //
-        // WHY the shell is raised at all: an application is a layer over the
-        // desktop. When the layer is gone and the desktop stays hidden, the
-        // screen composits the system band over an empty canvas, which is the
-        // blank white screen a person sees after pressing back.
-        let shell_owner = self
-            .tasks
-            .iter()
-            .find(|t| t.name == "launcher")
-            .map(|t| t.id.0);
-        {
-            let mut kms = crate::drivers::display_kms::DRM_KMS.lock();
-            kms.destroy_surfaces_owned_by(task_id.0);
-            // WHY not gated on a reclaimed surface: the task may have taken its
-            // own surface down before it died, and the screen still has to come
-            // back to the desktop. See the exit syscall for the same rule.
-            if let Some(shell) = shell_owner {
-                if shell != task_id.0 {
-                    kms.set_surfaces_visibility_for_task(shell, true);
-                }
-            }
-        }
 
         // Reparent live children to primordial init so a dead parent cannot leave
         // an unreapable child/zombie subtree behind.
@@ -711,35 +773,7 @@ impl Scheduler {
         task.exit_code = exit_code;
         task.state = TaskState::Zombie;
         crate::task::process::mark_zombie(id, exit_code);
-        crate::ipc::cleanup_task(id);
-        crate::fs::cleanup_task(id);
-        crate::event::cleanup_task(id);
-        crate::net::cleanup_task(id);
-        crate::capability::cleanup_task(id);
-        // WHY the shell is raised here too: this is the other place a task's
-        // surfaces die, and a task that is terminated by someone else leaves
-        // the same blank screen the common exit path leaves. The lookup is
-        // done from the table this method already holds for the reason given
-        // at the common exit path above.
-        let shell_owner = self
-            .tasks
-            .iter()
-            .find(|t| t.name == "launcher")
-            .map(|t| t.id.0);
-        {
-            let mut kms = crate::drivers::display_kms::DRM_KMS.lock();
-            kms.destroy_surfaces_owned_by(id.0);
-            // WHY not gated on a reclaimed surface: the task may have taken its
-            // own surface down before it died, and the screen still has to come
-            // back to the desktop. See the exit syscall for the same rule.
-            if let Some(shell) = shell_owner {
-                if shell != id.0 {
-                    kms.set_surfaces_visibility_for_task(shell, true);
-                }
-            }
-        }
-        let user_id = crate::task::process::user_for_task(id).unwrap_or(0);
-        crate::notification::NOTIFICATION_MANAGER.lock().cancel_all_for_package(&task_name, user_id);
+        defer_cleanup(id, task_name);
 
         // Reparent live children to primordial init so a dead parent cannot leave
         // an unreapable child/zombie subtree behind.
@@ -879,6 +913,10 @@ pub fn on_timer_tick() {
 
 /// Terminates the current task and switches to the next available task.
 pub fn terminate_current() -> ! {
+    // This task still owns no scheduler lock, so it can advance reclaims queued
+    // by earlier exits while it is being torn down.
+    run_deferred_cleanup();
+
     let (exiting_id, exit_code) = {
         let sched = SCHEDULER.lock();
         let id = sched.current_task_id().unwrap_or(TaskId(0));

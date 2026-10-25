@@ -447,6 +447,9 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         // line buffer; the work happens here, in a normal context.
         kernel::serial::service_serial_commands();
         kernel::services::supervise();
+        // Reclaim terminated tasks here, never from inside the scheduler lock:
+        // the hooks take VFS, whose own paths take the scheduler lock.
+        kernel::task::scheduler::run_deferred_cleanup();
         if !kernel::task::yield_now() {
             x86_64::instructions::interrupts::enable_and_hlt();
         }
