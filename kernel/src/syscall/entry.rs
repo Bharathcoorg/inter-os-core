@@ -35,9 +35,19 @@ pub const PAT_VALUE_WRITE_COMBINING: u64 = 0x0007_0106_0007_0106;
 pub const EFER_SCE_BIT: u64 = 1 << 0;
 
 /// RFLAGS bits cleared automatically on `syscall` entry:
-/// - Bit 9: Interrupt Enable Flag (IF) -> enters kernel with interrupts disabled.
+/// - Bit 9: Interrupt Enable Flag (IF) -> the handler reaches the kernel stack
+///   with interrupts masked.
 /// - Bit 10: Direction Flag (DF) -> clears string direction to forward.
 /// - Bit 8: Trap Flag (TF) -> disables single-stepping.
+///
+/// WHY IF is cleared by hardware and then restored by the stub: the entry
+/// sequence must consume `USER_RSP_SCRATCH` before anything else can run, so
+/// that one instruction window stays atomic. After that the dispatch body runs
+/// with interrupts enabled, exactly like the kernel main loop. Leaving IF
+/// clear for the whole syscall made every blocking lock in syscall context
+/// uninterruptible: a timer tick cannot preempt a waiter, so if the holder was
+/// the task that had just been preempted (holding `VFS` across a disk commit),
+/// neither task could ever run again.
 pub const FMASK_SYSCALL: u64 = 0x200 | 0x400 | 0x100;
 
 /// Scratch storage for user stack pointer during kernel entry.
@@ -200,10 +210,21 @@ pub unsafe extern "C" fn syscall_entry() {
         "mov rsi, rdi", // arg1 -> rsi
         "mov rdi, rax", // syscall_number -> rdi
 
+        // 4b. Interrupts stay masked only until the user stack pointer above has
+        // been consumed. From here the dispatcher may block on a lock whose
+        // holder the timer preempted, so it has to be preemptible.
+        "sti",
+
         // 5. Call Rust unified system call dispatcher
         "call {sys_dispatch}",
 
         // Return value is in RAX (preserved as syscall return code)
+
+        // 5b. Mask interrupts again before unwinding: the final "pop rsp" moves
+        // RSP onto the user stack while still in ring 0, and an interrupt in
+        // that window would push a kernel frame onto user memory. SYSRETQ
+        // restores the user's own RFLAGS from R11, so user IF is unaffected.
+        "cli",
 
         // 6. Restore user registers from kernel stack
         "add rsp, 8",
