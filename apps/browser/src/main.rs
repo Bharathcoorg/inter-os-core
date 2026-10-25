@@ -33,6 +33,8 @@ use browser::{
     scheme_mark, DocLine, DocumentTokenizer, LineKind, LoadingState, TabSessionManager, UriScheme,
     MAX_DOC_LINES, MAX_LINE_BYTES, MAX_TABS, URL_FIELD,
 };
+use browser::css;
+use browser::images;
 use interos_std::design::outline_text;
 use interos_std::design::scroll::ScrollState;
 
@@ -110,6 +112,15 @@ static mut UPLOAD_TEST_BUF: [u8; SPEEDTEST_UPLOAD_BYTES] = [0; SPEEDTEST_UPLOAD_
 /// The buffer the reader document is parsed into.
 static mut READER_BUF: [u8; browser::MAX_READER_BYTES] = [0; browser::MAX_READER_BYTES];
 
+/// The decoded pixels of the page's inline images.
+///
+/// WHY one arena: the reader has no heap. A page may place at most
+/// `images::MAX_INLINE_IMAGES` pictures, and the arena bounds their
+/// total to two megabytes no matter how many pixels the headers claim.
+/// An image that does not fit is refused with a placeholder, never
+/// silently dropped and never truncated into a partial bitmap.
+static mut IMAGE_ARENA: [u8; images::IMAGE_ARENA_BYTES] = [0; images::IMAGE_ARENA_BYTES];
+
 /// The lines the reader holds for the document on screen.
 ///
 /// WHY a static and not a field of the app state: a thousand lines is a
@@ -127,8 +138,14 @@ static mut DOC_LINES: [DocLine; MAX_DOC_LINES] = [DocLine::EMPTY; MAX_DOC_LINES]
 /// WHY the pointer form: the app is single threaded, and taking a
 /// reference to the whole static would claim a borrow the compiler
 /// cannot check.
+static EMPTY_DOC_LINE: DocLine = DocLine::EMPTY;
+
 fn doc_line(index: usize) -> &'static DocLine {
-    unsafe { &(*core::ptr::addr_of!(DOC_LINES))[index] }
+    if index < MAX_DOC_LINES {
+        unsafe { &(*core::ptr::addr_of!(DOC_LINES))[index] }
+    } else {
+        &EMPTY_DOC_LINE
+    }
 }
 
 /// How many sends are attempted if the tick counter is unavailable.
@@ -1321,6 +1338,36 @@ const FIXTURE_URL_PREFIX: &[u8] = b"http://127.0.0.1:4300/api/media/fixture/";
 // -----------------------------------------------------------------------------
 // Browser Application State
 // -----------------------------------------------------------------------------
+/// One inline image the page placed.
+///
+/// The bitmap borrows the static arena; a refused image keeps only the
+/// typed reason and the alt text, and the renderer draws a placeholder
+/// that says why rather than a broken picture.
+#[derive(Clone, Copy)]
+pub struct PlacedImage {
+    pub bitmap: Option<std::image::Bitmap<'static>>,
+    pub status: images::ImageStatus,
+    pub display_w: usize,
+    pub display_h: usize,
+    pub alt: [u8; 64],
+    pub alt_len: usize,
+    pub margin_top: u8,
+    pub padding_left: u8,
+}
+
+impl PlacedImage {
+    const EMPTY: PlacedImage = PlacedImage {
+        bitmap: None,
+        status: images::ImageStatus::Refused(images::ImageRefusal::NoSource),
+        display_w: browser::CONTENT_WIDTH,
+        display_h: images::PLACEHOLDER_HEIGHT,
+        alt: [0; 64],
+        alt_len: 0,
+        margin_top: 0,
+        padding_left: 0,
+    };
+}
+
 pub struct BrowserApp {
     pub current_url: [u8; 64],
     pub current_url_len: usize,
@@ -1351,6 +1398,11 @@ pub struct BrowserApp {
     pub tabs: TabSessionManager,
     pub overlay: SheetOverlay,
     pub doc_line_count: usize,
+    /// The inline images this page placed, in document order.
+    pub images: [PlacedImage; images::MAX_INLINE_IMAGES],
+    pub image_count: usize,
+    /// How much of the static image arena the current page owns.
+    image_arena_used: usize,
     /// How many lines the document has, before the reader's bound.
     ///
     /// WHY it is counted: the reader holds a bounded number of lines, and
@@ -1516,6 +1568,9 @@ impl BrowserApp {
             tabs: TabSessionManager::new(),
             overlay: SheetOverlay::None,
             doc_line_count: 0,
+            images: [PlacedImage::EMPTY; images::MAX_INLINE_IMAGES],
+            image_count: 0,
+            image_arena_used: 0,
             doc_total_lines: 0,
             kb_shift: false,
             kb_symbols: false,
@@ -1742,24 +1797,305 @@ impl BrowserApp {
     /// over, and the break would not be stable while the reader scrolls.
     /// Wrapping once, when the document is loaded, gives the renderer a
     /// list of lines that are each already the right length.
+    /// Resolves, fetches and decodes one inline image.
+    ///
+    /// WHY this is synchronous: the browser already loads a page
+    /// synchronously over the same TCP path. An image is fetched only
+    /// after the page's own bytes are held, through the same gateway and
+    /// with the same transport, and its result is a bitmap or a typed
+    /// refusal. The response buffer is reused, so an image body is bounded
+    /// by the same transport buffer as a page.
+    fn fetch_inline_image(
+        &mut self,
+        url: &[u8],
+    ) -> (images::ImageStatus, Option<std::image::Bitmap<'static>>, u32, u32) {
+        let mut request = [0u8; 512];
+        let request_len = browser::format_proxy_request(url, &mut request);
+        let local_port = 45000u16.wrapping_add(
+            ((self.pages_loaded as u16) ^ (self.image_count as u16) ^ 0x0055) & 0x03FF,
+        );
+        let outcome = fetch_over_tcp([10, 0, 2, 2], 4300, local_port, &request[..request_len]);
+        if outcome.bytes == 0 {
+            return (
+                images::ImageStatus::Refused(images::ImageRefusal::FetchFailed {
+                    code: outcome.error as i32,
+                }),
+                None,
+                0,
+                0,
+            );
+        }
+        let buffer = unsafe { &*core::ptr::addr_of!(RESPONSE_BUF) };
+        let raw = &buffer[..outcome.bytes];
+        let Some(response) = browser::parse_http_response(raw) else {
+            return (
+                images::ImageStatus::Refused(images::ImageRefusal::BadHeader),
+                None,
+                0,
+                0,
+            );
+        };
+        if response.status_code != 200 {
+            return (
+                images::ImageStatus::Refused(images::ImageRefusal::FetchFailed {
+                    code: response.status_code as i32,
+                }),
+                None,
+                0,
+                0,
+            );
+        }
+        // A body the gateway or the transport had to cut is refused, not
+        // decoded: half a PNG is not a picture.
+        let truncated = outcome.truncated
+            || browser::http_header_value(raw, b"x-interos-truncated").is_some();
+        let body = response.body;
+        if truncated || body.len() > images::MAX_IMAGE_BODY_BYTES {
+            return (
+                images::ImageStatus::Refused(images::ImageRefusal::TooLarge {
+                    bytes: body.len(),
+                    limit: images::MAX_IMAGE_BODY_BYTES,
+                }),
+                None,
+                0,
+                0,
+            );
+        }
+        let admission = images::admit_image(body);
+        if matches!(admission, images::ImageAdmission::Refused(images::ImageRefusal::UnsupportedType))
+            && browser::proxy_reports_failure(raw)
+        {
+            // The gateway reports a failed upstream fetch as an HTTP 200
+            // JSON envelope. That is a fetch failure, not a file of an
+            // unknown type, and the placeholder should say so.
+            return (
+                images::ImageStatus::Refused(images::ImageRefusal::FetchFailed { code: -5 }),
+                None,
+                0,
+                0,
+            );
+        }
+        let (width, height) = match admission {
+            images::ImageAdmission::Accepted {
+                width, height, ..
+            } => (width, height),
+            images::ImageAdmission::Refused(refusal) => {
+                return (images::ImageStatus::Refused(refusal), None, 0, 0);
+            }
+        };
+        let Some(required) = images::required_rgba_bytes(width, height) else {
+            return (
+                images::ImageStatus::Refused(images::ImageRefusal::DimensionsTooLarge {
+                    width,
+                    height,
+                    limit: images::MAX_IMAGE_DIMENSION,
+                }),
+                None,
+                0,
+                0,
+            );
+        };
+        if self.image_arena_used.saturating_add(required) > images::IMAGE_ARENA_BYTES {
+            return (
+                images::ImageStatus::Refused(images::ImageRefusal::MemoryBudget),
+                None,
+                0,
+                0,
+            );
+        }
+        // The arena is a static, and each image owns a disjoint range of
+        // it for the lifetime of the page. The bitmap borrows that range;
+        // the publisher's single-threaded event loop is what makes this
+        // sound, and `image_arena_used` never hands the same bytes out
+        // twice.
+        let arena_ptr = core::ptr::addr_of_mut!(IMAGE_ARENA) as *mut u8;
+        let raster = unsafe {
+            core::slice::from_raw_parts_mut(arena_ptr.add(self.image_arena_used), required)
+        };
+        match std::image::decode_image(body, b"", raster) {
+            Ok((decoded_w, decoded_h, len)) if len <= required => {
+                let start = self.image_arena_used;
+                self.image_arena_used += len;
+                let pixels = unsafe { core::slice::from_raw_parts(arena_ptr.add(start), len) };
+                let bitmap = std::image::Bitmap {
+                    w: decoded_w,
+                    h: decoded_h,
+                    rgba: pixels,
+                };
+                (images::ImageStatus::Decoded, Some(bitmap), decoded_w, decoded_h)
+            }
+            _ => (
+                images::ImageStatus::Refused(images::ImageRefusal::DecodeFailed),
+                None,
+                0,
+                0,
+            ),
+        }
+    }
+
+    /// Places one `<img>` element in the page's image list.
+    fn place_image(&mut self, marker: images::ImageMarker<'_>, column_w: usize) -> usize {
+        if self.image_count >= images::MAX_INLINE_IMAGES {
+            return usize::MAX;
+        }
+        // Every branch below assigns the status exactly once, so the value is
+        // defined on all paths rather than defaulted to a refusal that could
+        // be mistaken for a real outcome.
+        let status: images::ImageStatus;
+        let mut bitmap = None;
+        let mut display_w = browser::CONTENT_WIDTH;
+        let mut display_h = images::PLACEHOLDER_HEIGHT;
+
+        if marker.src.is_empty() {
+            status = images::ImageStatus::Refused(images::ImageRefusal::NoSource);
+        } else if marker.src.len() > 64 {
+            // The marker cannot carry this address without cutting it,
+            // and fetching a cut address would be fetching something
+            // other than what the page named.
+            status = images::ImageStatus::Refused(images::ImageRefusal::SourceTooLong);
+        } else if matches!(
+            parse_uri(self.current_url()).scheme,
+            UriScheme::File | UriScheme::InterLayer
+        ) {
+            status = images::ImageStatus::Refused(images::ImageRefusal::LocalDocument);
+        } else {
+            let mut url = [0u8; 224];
+            match images::resolve_same_origin(self.current_url(), marker.src, &mut url) {
+                Ok(len) => {
+                    let (result, decoded, width, height) =
+                        self.fetch_inline_image(&url[..len]);
+                    status = result;
+                    bitmap = decoded;
+                    if let Some((w, h)) =
+                        bitmap.map(|bitmap| (bitmap.w, bitmap.h)).or(if width > 0 {
+                            Some((width, height))
+                        } else {
+                            None
+                        })
+                    {
+                        let (dw, dh) = images::fit_display(
+                            w.max(1),
+                            h.max(1),
+                            marker.declared_w,
+                            marker.declared_h,
+                        );
+                        // The image sits inside the block's left inset, so
+                        // the column it may use is narrower than the page's.
+                        let available = column_w.max(1);
+                        if dw > available {
+                            display_w = available;
+                            display_h = (dh.saturating_mul(available) / dw).max(1);
+                        } else {
+                            display_w = dw;
+                            display_h = dh;
+                        }
+                    }
+                }
+                Err(error) => {
+                    status = images::ImageStatus::Refused(match error {
+                        images::ResolveError::NoSource => images::ImageRefusal::NoSource,
+                        images::ResolveError::CrossOrigin => images::ImageRefusal::CrossOrigin,
+                        images::ResolveError::UnsupportedScheme => {
+                            images::ImageRefusal::UnsupportedSource
+                        }
+                        images::ResolveError::InvalidBase => {
+                            images::ImageRefusal::FetchFailed { code: -22 }
+                        }
+                        images::ResolveError::TooLong => images::ImageRefusal::SourceTooLong,
+                    });
+                }
+            }
+        }
+
+        let mut slot = PlacedImage::EMPTY;
+        slot.bitmap = bitmap;
+        slot.status = status;
+        slot.display_w = display_w;
+        slot.display_h = display_h;
+        let n = marker.alt.len().min(slot.alt.len());
+        slot.alt[..n].copy_from_slice(&marker.alt[..n]);
+        slot.alt_len = n;
+        self.images[self.image_count] = slot;
+        self.image_count += 1;
+        self.image_count - 1
+    }
+
     pub fn load_document_content(&mut self, content: &[u8]) {
         self.doc_line_count = 0;
         self.doc_total_lines = 0;
+        self.image_count = 0;
+        self.image_arena_used = 0;
         let mut tokenizer = DocumentTokenizer::new(content);
         let mut pieces: [[u8; MAX_LINE_BYTES]; browser::MAX_WRAP_PIECES] =
             [[0; MAX_LINE_BYTES]; browser::MAX_WRAP_PIECES];
         let mut piece_lens: [usize; browser::MAX_WRAP_PIECES] = [0; browser::MAX_WRAP_PIECES];
         let lines = unsafe { &mut *core::ptr::addr_of_mut!(DOC_LINES) };
+        let mut current_style = css::ComputedStyle::DEFAULT;
+        let mut style_epoch: u16 = 0;
 
         while let Some((line, kind)) = tokenizer.next_line() {
+            // A style marker is metadata, not reader text: it changes the
+            // style of the lines that follow and occupies no line itself.
+            if css::is_style_marker(line) {
+                if let Some(style) = css::parse_style_marker(line) {
+                    current_style = style;
+                    style_epoch = style_epoch.wrapping_add(1);
+                }
+                continue;
+            }
+            if kind == LineKind::Image {
+                let Some(marker) = images::parse_image_marker(line) else {
+                    continue;
+                };
+                let index = self.place_image(
+                    marker,
+                    browser::CONTENT_WIDTH
+                        .saturating_sub(current_style.padding_left as usize)
+                        .max(64),
+                );
+                if self.doc_line_count < MAX_DOC_LINES {
+                    let idx = self.doc_line_count;
+                    let mut dl = DocLine::EMPTY;
+                    dl.kind = LineKind::Image;
+                    dl.style = current_style;
+                    dl.style_epoch = style_epoch;
+                    dl.image_index = if index < 255 { index as u8 } else { 255 };
+                    if index < self.image_count {
+                        let slot = &self.images[index];
+                        let n = slot.alt_len.min(dl.bytes.len());
+                        dl.bytes[..n].copy_from_slice(&slot.alt[..n]);
+                        dl.len = n;
+                        dl.layout_h =
+                            (slot.display_h + 12).min(u16::MAX as usize) as u16;
+                    } else {
+                        dl.layout_h = images::PLACEHOLDER_HEIGHT as u16;
+                    }
+                    lines[idx] = dl;
+                    self.doc_line_count += 1;
+                }
+                self.doc_total_lines += 1;
+                continue;
+            }
+
             let scale = match kind {
                 LineKind::Heading1 => TYPE_H1_SCALE,
+                // Paragraph text is the one run the styled renderer can set
+                // on the larger rung, so its wrapping has to use that rung.
+                // Wrapping at scale 1 and drawing at scale 2 is how a styled
+                // paragraph ran off the column.
+                LineKind::Paragraph if current_style.font_scale >= 2 => 2,
                 _ => 1,
             };
+            // The text is wrapped inside the block's left inset, not the
+            // full column, or a padded paragraph would draw past the
+            // column it was measured against.
+            let wrap_width = browser::CONTENT_WIDTH
+                .saturating_sub(current_style.padding_left as usize)
+                .max(64);
             let count = browser::wrap_line(
                 line,
                 scale,
-                browser::CONTENT_WIDTH,
+                wrap_width,
                 &mut pieces,
                 &mut piece_lens,
             );
@@ -1799,6 +2135,8 @@ impl BrowserApp {
                 dl.len = n;
                 dl.kind = kind;
                 dl.continued = piece > 0;
+                dl.style = current_style;
+                dl.style_epoch = style_epoch;
                 if kind == LineKind::GemtextLink {
                     let u = tgt.len().min(64);
                     dl.link_target[..u].copy_from_slice(&tgt[..u]);
@@ -1812,6 +2150,26 @@ impl BrowserApp {
             }
         }
 
+        // A block's first line takes the top margin and its last line
+        // takes the bottom border. Both ends are only knowable once the
+        // whole document is in.
+        //
+        // WHY a blank line also ends a block: sibling paragraphs with the
+        // same computed style emit no new style marker, so their epochs
+        // match. The converter separates block elements with a blank line,
+        // and that separator is what keeps two paragraphs from becoming
+        // one block that only the first of them spaces.
+        let count = self.doc_line_count;
+        for i in 0..count {
+            let epoch = lines[i].style_epoch;
+            lines[i].block_start = i == 0
+                || lines[i - 1].style_epoch != epoch
+                || lines[i - 1].kind == LineKind::Empty;
+            lines[i].block_end = i + 1 >= count
+                || lines[i + 1].style_epoch != epoch
+                || lines[i + 1].kind == LineKind::Empty;
+        }
+
         // WHY the scroll extent is measured here: the reader can only be
         // scrolled as far as the document is long, and the document's
         // length is known only once its lines are in. A long page scrolls
@@ -1819,6 +2177,7 @@ impl BrowserApp {
         let content_h = browser::document_height_px(&lines[..self.doc_line_count]);
         self.scroll = browser::reader_scroll(content_h, READER_VIEWPORT_H);
     }
+
 
     /// Saves the page the browser is showing into the shared storage area.
     ///
@@ -3842,7 +4201,7 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                 f.head_x,
                 f.head_y,
                 f.head_scale,
-                &f.head[..f.head_len],
+                &f.head[..f.head_len.min(f.head.len())],
                 THEME.on_surface,
                 THEME.surface,
                 true,
@@ -3850,7 +4209,7 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                 return px;
             }
         }
-        for i in 0..f.body_n {
+        for i in 0..f.body_n.min(f.body.len()).min(f.body_x.len()).min(f.body_y.len()) {
             if let Some(px) = text_px(x, y, f.body_x[i], f.body_y[i], 1, f.body[i], THEME.on_surface_variant, THEME.surface, false) {
                 return px;
             }
@@ -3962,7 +4321,30 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
     let mut current_y = base_y;
     for i in 0..app.doc_line_count {
         let line = doc_line(i);
-        let bytes = &line.bytes[..line.len];
+        let bytes = &line.bytes[..line.len.min(line.bytes.len())];
+        let line_h = browser::line_box_height(line);
+        let band_y = current_y
+            + if line.block_start {
+                line.style.margin_top as isize
+            } else {
+                0
+            };
+        let text_x = pad + line.style.padding_left as usize;
+        let text_color = if line.style.has_color {
+            line.style.color
+        } else {
+            THEME.on_surface
+        };
+        let muted_color = if line.style.has_color {
+            line.style.color
+        } else {
+            THEME.on_surface_variant
+        };
+        let band_bg = if line.style.has_background {
+            line.style.background
+        } else {
+            THEME.surface
+        };
 
         match line.kind {
             LineKind::Heading1 => {
@@ -3977,11 +4359,11 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                 } else {
                     bytes
                 };
-                let h_y = current_y + 8;
+                let h_y = band_y + 8;
                 let band = font::line_height(TYPE_H1_SCALE);
                 if y as isize >= h_y && (y as isize) < h_y + band as isize {
                     if let Some(px) = text_px(
-                        x, y, pad, h_y as usize, TYPE_H1_SCALE, title, THEME.on_surface, THEME.surface, true,
+                        x, y, text_x, h_y as usize, TYPE_H1_SCALE, title, text_color, band_bg, true,
                     ) {
                         return px;
                     }
@@ -3994,7 +4376,6 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                         return THEME.outline_variant;
                     }
                 }
-                current_y += browser::doc_line_height(line.kind, bytes) as isize;
             }
             LineKind::Heading2 => {
                 // WHY the second level carries a rule above it: the type
@@ -4007,19 +4388,18 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                 } else {
                     bytes
                 };
-                let h_y = current_y + 14;
+                let h_y = band_y + 14;
                 if !line.continued {
-                    let r_y = current_y + 4;
+                    let r_y = band_y + 4;
                     if y as isize == r_y && x >= pad && x < pad + 40 {
                         return THEME.primary;
                     }
                 }
                 if y as isize >= h_y && (y as isize) < h_y + font::line_height(1) as isize {
-                    if let Some(px) = text_px(x, y, pad, h_y as usize, 1, title, THEME.on_surface, THEME.surface, true) {
+                    if let Some(px) = text_px(x, y, text_x, h_y as usize, 1, title, text_color, band_bg, true) {
                         return px;
                     }
                 }
-                current_y += browser::doc_line_height(line.kind, bytes) as isize;
             }
             LineKind::Heading3 => {
                 let title = if bytes.starts_with(b"### ") {
@@ -4029,20 +4409,20 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                 } else {
                     bytes
                 };
-                let h_y = current_y + 8;
+                let h_y = band_y + 8;
                 if y as isize >= h_y && (y as isize) < h_y + font::line_height(1) as isize {
-                    if let Some(px) = text_px(x, y, pad, h_y as usize, 1, title, THEME.primary, THEME.surface, true) {
+                    let color = if line.style.has_color { text_color } else { THEME.primary };
+                    if let Some(px) = text_px(x, y, text_x, h_y as usize, 1, title, color, band_bg, true) {
                         return px;
                     }
                 }
-                current_y += browser::doc_line_height(line.kind, bytes) as isize;
             }
             LineKind::ListItem => {
-                let l_y = current_y + 4;
+                let l_y = band_y + 4;
                 if y as isize >= l_y && (y as isize) < l_y + 24 {
                     // The bullet sits in the margin, and the text starts
                     // after it.
-                    let dx = x as isize - (pad as isize + 10);
+                    let dx = x as isize - (text_x as isize + 10);
                     let dy = (y as isize) - (l_y + 8);
                     if dx * dx + dy * dy <= 8 {
                         return THEME.primary;
@@ -4052,41 +4432,44 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                     } else {
                         bytes
                     };
-                    if let Some(px) = text_px(x, y, pad + 22, l_y as usize, 1, item_text, THEME.on_surface, THEME.surface, false) {
+                    if let Some(px) = text_px(x, y, text_x + 22, l_y as usize, 1, item_text, text_color, band_bg, false) {
                         return px;
                     }
                 }
-                current_y += browser::doc_line_height(line.kind, bytes) as isize;
             }
             LineKind::CodeBlock => {
                 if bytes.starts_with(b"```") {
                     // The fence itself is not drawn, but it still occupies
                     // the space the block needs.
-                    current_y += browser::doc_line_height(line.kind, bytes) as isize;
                 } else {
                     // WHY the box spans the whole run: each line of a code
                     // block used to get its own bordered box, so a ten-line
                     // snippet rendered as ten separate cards. The box now
                     // starts at the first line of the run and ends at the
                     // last.
-                    let c_y = current_y + 2;
+                    let c_y = band_y + 2;
                     let c_h = 30;
                     if y as isize >= c_y && (y as isize) < c_y + c_h as isize {
-                        if let Some(c) = draw_rounded_rect(x, y, Rect::new(pad, c_y as usize, column, c_h), 8, THEME.surface_container_low, Some(THEME.border), 1) {
+                        let code_bg = if line.style.has_background {
+                            band_bg
+                        } else {
+                            THEME.surface_container_low
+                        };
+                        if let Some(c) = draw_rounded_rect(x, y, Rect::new(pad, c_y as usize, column, c_h), 8, code_bg, Some(THEME.border), 1) {
                             if x >= pad && x <= pad + 3 {
                                 return THEME.primary;
                             }
-                            if let Some(px) = text_px(x, y, pad + 14, (c_y + 5) as usize, 1, bytes, THEME.success, c, false) {
+                            let color = if line.style.has_color { text_color } else { THEME.success };
+                            if let Some(px) = text_px(x, y, text_x + 14, (c_y + 5) as usize, 1, bytes, color, c, false) {
                                 return px;
                             }
                             return c;
                         }
                     }
-                    current_y += browser::doc_line_height(line.kind, bytes) as isize;
                 }
             }
             LineKind::GemtextLink => {
-                let g_y = current_y + 4;
+                let g_y = band_y + 4;
                 let g_h = 56;
                 let link_rect = Rect::new(pad, g_y as usize, column, g_h);
                 if y as isize >= g_y && (y as isize) < g_y + g_h as isize {
@@ -4101,9 +4484,9 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                         }
 
                         let label_bytes = if line.link_label_len > 0 {
-                            &line.link_label[..line.link_label_len]
+                            &line.link_label[..line.link_label_len.min(line.link_label.len())]
                         } else if line.link_target_len > 0 {
-                            &line.link_target[..line.link_target_len]
+                            &line.link_target[..line.link_target_len.min(line.link_target.len())]
                         } else {
                             bytes
                         };
@@ -4117,12 +4500,12 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                             column - 72,
                             &mut label_buf,
                         );
-                        if let Some(px) = text_px(x, y, pad + 60, (g_y + 10) as usize, 1, &label_buf[..label_len], THEME.on_surface, c, true) {
+                        if let Some(px) = text_px(x, y, pad + 60, (g_y + 10) as usize, 1, &label_buf[..label_len], text_color, c, true) {
                             return px;
                         }
 
                         if line.link_target_len > 0 {
-                            let target_bytes = &line.link_target[..line.link_target_len];
+                            let target_bytes = &line.link_target[..line.link_target_len.min(line.link_target.len())];
                             let mut target_buf = [0u8; 64];
                             let target_len = font::ellipsize(
                                 target_bytes,
@@ -4149,7 +4532,6 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                         return c;
                     }
                 }
-                current_y += browser::doc_line_height(line.kind, bytes) as isize;
             }
             LineKind::Blockquote => {
                 let quote_text = if bytes.starts_with(b"> ") {
@@ -4159,32 +4541,157 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                 } else {
                     bytes
                 };
-                let q_y = current_y + 4;
+                let q_y = band_y + 4;
                 let q_h = 28;
                 if y as isize >= q_y && (y as isize) < q_y + q_h as isize {
                     // The quote's bar sits in the margin.
                     if x >= pad && x <= pad + 3 {
                         return THEME.primary;
                     }
-                    if let Some(px) = text_px(x, y, pad + 14, (q_y + 4) as usize, 1, quote_text, THEME.on_surface_variant, THEME.surface, false) {
+                    if let Some(px) = text_px(x, y, text_x + 14, (q_y + 4) as usize, 1, quote_text, muted_color, band_bg, false) {
                         return px;
                     }
                 }
-                current_y += browser::doc_line_height(line.kind, bytes) as isize;
+            }
+            LineKind::Image => {
+                // An image occupies its placed rectangle at the block's
+                // left inset. A refused image draws a card that names the
+                // reason; nothing is drawn as though it were the picture.
+                let image_x = pad + line.style.padding_left as usize;
+                let inside = y as isize >= band_y
+                    && (y as isize) < band_y + line_h as isize
+                    && x >= pad
+                    && x < pad + column;
+                if inside {
+                    let reason = if line.image_index == 255 {
+                        Some(images::ImageRefusal::LimitReached)
+                    } else if (line.image_index as usize) < app.image_count {
+                        match app.images[line.image_index as usize].status {
+                            images::ImageStatus::Decoded => None,
+                            images::ImageStatus::Refused(refusal) => Some(refusal),
+                        }
+                    } else {
+                        Some(images::ImageRefusal::LimitReached)
+                    };
+                    let slot = if line.image_index != 255 && (line.image_index as usize) < app.image_count {
+                        Some(&app.images[line.image_index as usize])
+                    } else {
+                        None
+                    };
+                    if let (Some(slot), None) = (slot, reason) {
+                        if let Some(bitmap) = slot.bitmap {
+                            let ix = x.checked_sub(image_x);
+                            let iy = (y as isize) - band_y;
+                            if let Some(ix) = ix {
+                                if iy >= 0
+                                    && ix < slot.display_w
+                                    && (iy as usize) < slot.display_h
+                                {
+                                    let argb = bitmap.pixel(ix, iy as usize, slot.display_w, slot.display_h);
+                                    let alpha = (argb >> 24) & 0xFF;
+                                    if alpha == 0xFF {
+                                        return argb;
+                                    }
+                                    if alpha > 0 {
+                                        // The blend resolves the alpha
+                                        // against the band; the surface
+                                        // pixel is opaque.
+                                        return blend_toward(argb, band_bg, 255 - alpha)
+                                            | 0xFF00_0000;
+                                    }
+                                }
+                            }
+                        }
+                    } else if let Some(reason) = reason {
+                        // A card is positioned from its top edge. While the
+                        // image's top is scrolled above the viewport that
+                        // edge is negative, and a placeholder card cannot be
+                        // clipped into place; the band keeps its background
+                        // until the top edge is visible.
+                        let card_h = slot
+                            .map(|slot| slot.display_h)
+                            .unwrap_or(images::PLACEHOLDER_HEIGHT);
+                        if band_y >= 0 {
+                            let card_w = column
+                                .saturating_sub(line.style.padding_left as usize)
+                                .max(64);
+                            let card = Rect::new(image_x, band_y as usize, card_w, card_h);
+                            if let Some(card_bg) = draw_rounded_rect(
+                                x,
+                                y,
+                                card,
+                                R_SMALL,
+                                THEME.surface_container_low,
+                                Some(THEME.border),
+                                1,
+                            ) {
+                                if let Some(slot) = slot {
+                                    if slot.alt_len > 0 {
+                                        let mut alt_buf = [0u8; 64];
+                                        let alt_len = font::ellipsize(
+                                            &slot.alt[..slot.alt_len.min(slot.alt.len())],
+                                            1,
+                                            card_w.saturating_sub(24),
+                                            &mut alt_buf,
+                                        );
+                                        if let Some(px) = text_px(
+                                            x,
+                                            y,
+                                            image_x + 12,
+                                            band_y as usize + 8,
+                                            1,
+                                            &alt_buf[..alt_len],
+                                            text_color,
+                                            card_bg,
+                                            true,
+                                        ) {
+                                            return px;
+                                        }
+                                    }
+                                }
+                                let reason_y = band_y as usize
+                                    + if slot.map(|s| s.alt_len).unwrap_or(0) > 0 {
+                                        32
+                                    } else {
+                                        18
+                                    };
+                                if let Some(px) = text_px(
+                                    x,
+                                    y,
+                                    image_x + 12,
+                                    reason_y,
+                                    1,
+                                    reason.placeholder(),
+                                    THEME.on_surface_variant,
+                                    card_bg,
+                                    false,
+                                ) {
+                                    return px;
+                                }
+                                return card_bg;
+                            }
+                        }
+                    }
+                }
             }
             LineKind::Paragraph => {
-                let p_y = current_y + 4;
-                if y as isize >= p_y && (y as isize) < p_y + 24 {
-                    if let Some(px) = text_px(x, y, pad, p_y as usize, 1, bytes, THEME.on_surface, THEME.surface, false) {
+                let p_y = band_y + 4;
+                let scale = if line.style.font_scale >= 2 { 2 } else { 1 };
+                if y as isize >= p_y && (y as isize) < p_y + font::line_height(scale) as isize {
+                    if let Some(px) = text_px(x, y, text_x, p_y as usize, scale, bytes, text_color, band_bg, false) {
                         return px;
                     }
                 }
-                current_y += browser::doc_line_height(line.kind, bytes) as isize;
             }
-            LineKind::Empty => {
-                current_y += browser::doc_line_height(line.kind, bytes) as isize;
-            }
+            LineKind::Empty => {}
         }
+
+        // Backgrounds and borders are painted after the glyph lookup so
+        // text is never covered by the box that carries it.
+        if let Some(px) = paint_style_band(x, y, band_y, line_h, line) {
+            return px;
+        }
+        current_y += line_h as isize;
     }
 
     // The end of the document.
@@ -4226,6 +4733,49 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
     }
 
     THEME.surface
+}
+
+/// Paint the box a styled block contributes behind its text.
+///
+/// WHY this runs after the glyph lookup: a background or border drawn first
+/// would be overwritten by the text pass only where glyphs exist, so the box
+/// would hide its own label. Returning `None` outside the band keeps every
+/// other pixel of the viewport on the existing path.
+fn paint_style_band(
+    x: usize,
+    y: usize,
+    band_y: isize,
+    line_h: usize,
+    line: &DocLine,
+) -> Option<u32> {
+    let pad = browser::CONTENT_PADDING;
+    let column = browser::CONTENT_WIDTH;
+    // A blank separator carries the style of the block it follows, because
+    // the marker that restores the enclosing style comes after it. It is
+    // not part of the block's box, or the box would gain a second bottom
+    // border and a coloured gap below the text.
+    if line.kind == LineKind::Empty {
+        return None;
+    }
+    if (y as isize) < band_y || (y as isize) >= band_y + line_h as isize {
+        return None;
+    }
+    if x < pad || x >= pad + column {
+        return None;
+    }
+    if line.style.has_border {
+        let bottom = band_y + line_h as isize - 1;
+        let top_edge = line.block_start && (y as isize) == band_y;
+        let bottom_edge = line.block_end && (y as isize) == bottom;
+        let side = x == pad || x == pad + column - 1;
+        if top_edge || bottom_edge || side {
+            return Some(line.style.border_color);
+        }
+    }
+    if line.style.has_background {
+        return Some(line.style.background);
+    }
+    None
 }
 
 // -----------------------------------------------------------------------------
@@ -5956,19 +6506,23 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
         let mut clicked_target: Option<([u8; 64], usize)> = None;
         for i in 0..app.doc_line_count {
             let line = doc_line(i);
-            let bytes = &line.bytes[..line.len];
-            // WHY the height comes from the shared table: the renderer and
-            // this handler used to walk the document with two different
-            // tables, so a link a few lines down was drawn in one place
-            // and tapped in another.
-            let line_h = browser::doc_line_height(line.kind, bytes);
+            // WHY the height comes from line_box_height: the renderer and
+            // this handler walk the document using line_box_height, including margins
+            // and image heights, so link tap targets perfectly match where links are drawn.
+            let line_h = browser::line_box_height(line);
+            let band_y = cur_y
+                + if line.block_start {
+                    line.style.margin_top as isize
+                } else {
+                    0
+                };
 
             if line.kind == LineKind::GemtextLink && line.link_target_len > 0 {
-                let g_y = cur_y + 4;
+                let g_y = band_y + 4;
                 let g_h = 56;
                 if y as isize >= g_y && (y as isize) < g_y + g_h as isize && x >= 24 && x <= W - 24 {
                     let mut buf = [0u8; 64];
-                    let u = line.link_target_len.min(64);
+                    let u = line.link_target_len.min(line.link_target.len()).min(64);
                     buf[..u].copy_from_slice(&line.link_target[..u]);
                     clicked_target = Some((buf, u));
                     break;
@@ -5979,7 +6533,19 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
 
         if let Some((target_buf, target_len)) = clicked_target {
             let _ = std::audio_haptic_click();
-            app.navigate(&target_buf[..target_len]);
+            let raw_target = &target_buf[..target_len];
+            let target_uri = browser::parse_uri(raw_target);
+            if target_uri.scheme != browser::UriScheme::Unknown {
+                app.navigate(raw_target);
+            } else {
+                let mut resolved = [0u8; 128];
+                let cur = &app.current_url[..app.current_url_len.min(app.current_url.len())];
+                if let Ok(rn) = browser::images::resolve_same_origin(cur, raw_target, &mut resolved) {
+                    app.navigate(&resolved[..rn]);
+                } else {
+                    app.navigate(raw_target);
+                }
+            }
             return Tap::Redraw;
         }
 

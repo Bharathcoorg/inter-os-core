@@ -5,6 +5,13 @@ pub use interos_std as std;
 /// The app's view of the platform's design system.
 pub mod theme;
 
+/// The bounded CSS subset the reader applies to block elements.
+pub mod css;
+
+/// The bounded inline-image policy: size caps, format sniffing, markers
+/// and same-origin URL resolution.
+pub mod images;
+
 /// The platform's scroll model.
 use interos_std::design::scroll::ScrollState;
 
@@ -61,19 +68,27 @@ impl<'a> ParsedUri<'a> {
     }
 }
 
+fn strip_prefix_ignore_case<'a>(raw: &'a [u8], prefix: &[u8]) -> Option<&'a [u8]> {
+    if raw.len() >= prefix.len() && raw[..prefix.len()].eq_ignore_ascii_case(prefix) {
+        Some(&raw[prefix.len()..])
+    } else {
+        None
+    }
+}
+
 /// Parses a URI byte string into its protocol scheme, host, path, port, and query string.
 pub fn parse_uri(raw: &[u8]) -> ParsedUri<'_> {
-    let (scheme, rest) = if let Some(r) = raw.strip_prefix(b"interos://") {
+    let (scheme, rest) = if let Some(r) = strip_prefix_ignore_case(raw, b"interos://") {
         (UriScheme::InterLayer, r)
-    } else if let Some(r) = raw.strip_prefix(b"interlayer://") {
+    } else if let Some(r) = strip_prefix_ignore_case(raw, b"interlayer://") {
         (UriScheme::InterLayer, r)
-    } else if let Some(r) = raw.strip_prefix(b"file://") {
+    } else if let Some(r) = strip_prefix_ignore_case(raw, b"file://") {
         (UriScheme::File, r)
-    } else if let Some(r) = raw.strip_prefix(b"https://") {
+    } else if let Some(r) = strip_prefix_ignore_case(raw, b"https://") {
         (UriScheme::Https, r)
-    } else if let Some(r) = raw.strip_prefix(b"http://") {
+    } else if let Some(r) = strip_prefix_ignore_case(raw, b"http://") {
         (UriScheme::Http, r)
-    } else if let Some(r) = raw.strip_prefix(b"gemini://") {
+    } else if let Some(r) = strip_prefix_ignore_case(raw, b"gemini://") {
         (UriScheme::Gemini, r)
     } else {
         return ParsedUri {
@@ -108,19 +123,19 @@ pub fn parse_uri(raw: &[u8]) -> ParsedUri<'_> {
     let (host, port) = match authority.iter().rposition(|&b| b == b':') {
         Some(i) => {
             let digits = &authority[i + 1..];
-            let mut value: u16 = 0;
+            let mut value: u32 = 0;
             let mut all_digits = !digits.is_empty();
             for &b in digits {
                 if b.is_ascii_digit() {
-                    value = value.saturating_mul(10).saturating_add((b - b'0') as u16);
+                    value = value.saturating_mul(10).saturating_add((b - b'0') as u32);
                 } else {
                     all_digits = false;
                     break;
                 }
             }
-            if all_digits && value > 0 {
-                (&authority[..i], value)
-            } else if all_digits {
+            if all_digits && value > 0 && value <= 65535 {
+                (&authority[..i], value as u16)
+            } else if all_digits && value == 0 {
                 (&authority[..i], 0)
             } else {
                 (authority, scheme.default_port())
@@ -159,12 +174,17 @@ pub enum LineKind {
     Blockquote,
     CodeBlock,
     GemtextLink,
+    /// An inline image element recorded by the markup pipeline.
+    Image,
     Paragraph,
     Empty,
 }
 
 /// Classifies a single line of text for document rendering without dynamic allocation.
 pub fn classify_line(line: &[u8]) -> LineKind {
+    if images::is_image_marker(line) {
+        return LineKind::Image;
+    }
     let mut i = 0;
     while i < line.len() && (line[i] == b' ' || line[i] == b'\t' || line[i] == b'\r') {
         i += 1;
@@ -464,17 +484,40 @@ pub fn extract_proxy_html(json: &[u8], out: &mut [u8]) -> usize {
                 b'u' => {
                     let (cp, next) = read_hex4(content, r + 2);
                     match cp {
-                        Some(cp) => {
-                            let len = utf8_len(cp);
-                            if len > 0 && w + len <= out.len() {
-                                let end = w + len;
-                                w = write_utf8(out, w, cp);
-                                r = next;
-                                let _ = end;
+                        Some(high @ 0xD800..=0xDBFF) => {
+                            if next + 2 <= content.len() && content[next] == b'\\' && content[next + 1] == b'u' {
+                                let (low, low_next) = read_hex4(content, next + 2);
+                                if let Some(low @ 0xDC00..=0xDFFF) = low {
+                                    let scalar = 0x10000 + (((high - 0xD800) << 10) | (low - 0xDC00));
+                                    let len = utf8_len(scalar);
+                                    if len > 0 && w + len <= out.len() {
+                                        w = write_utf8(out, w, scalar);
+                                        r = low_next;
+                                    } else {
+                                        out[w] = b'?';
+                                        w += 1;
+                                        r = low_next;
+                                    }
+                                } else {
+                                    out[w] = b'?';
+                                    w += 1;
+                                    r = next;
+                                }
                             } else {
                                 out[w] = b'?';
                                 w += 1;
-                                r += 2;
+                                r = next;
+                            }
+                        }
+                        Some(cp) => {
+                            let len = utf8_len(cp);
+                            if len > 0 && w + len <= out.len() {
+                                w = write_utf8(out, w, cp);
+                                r = next;
+                            } else {
+                                out[w] = b'?';
+                                w += 1;
+                                r = next;
                             }
                         }
                         None => {
@@ -521,7 +564,8 @@ pub fn utf8_len(cp: u32) -> usize {
     match cp {
         0x0000..=0x007F => 1,
         0x0080..=0x07FF => 2,
-        0x0800..=0xFFFF => 3,
+        0x0800..=0xD7FF => 3,
+        0xE000..=0xFFFF => 3,
         0x10000..=0x10FFFF => 4,
         _ => 0,
     }
@@ -573,9 +617,12 @@ pub fn parse_http_response(raw: &[u8]) -> Option<HttpResponse<'_>> {
         return None;
     }
     let code_b = &status_slice[..3];
-    let status_code = (code_b[0].wrapping_sub(b'0') as u16) * 100
-        + (code_b[1].wrapping_sub(b'0') as u16) * 10
-        + (code_b[2].wrapping_sub(b'0') as u16);
+    if !code_b[0].is_ascii_digit() || !code_b[1].is_ascii_digit() || !code_b[2].is_ascii_digit() {
+        return None;
+    }
+    let status_code = ((code_b[0] - b'0') as u16) * 100
+        + ((code_b[1] - b'0') as u16) * 10
+        + ((code_b[2] - b'0') as u16);
 
     let (header_bytes, body) = if let Some(pos) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
         (&raw[..pos], &raw[pos + 4..])
@@ -842,24 +889,45 @@ fn push_decoded(out: &mut [u8], w: &mut usize, src: &[u8]) {
 fn attr_value<'a>(tag: &'a [u8], name: &[u8]) -> Option<&'a [u8]> {
     let mut i = 0usize;
     while i < tag.len() {
-        if tag[i..].starts_with(name) {
+        if i > 0 && tag[i - 1] != b' ' && tag[i - 1] != b'\t' && tag[i - 1] != b'\n' && tag[i - 1] != b'\r' {
+            i += 1;
+            continue;
+        }
+        if tag.len() - i >= name.len() && tag[i..i + name.len()].eq_ignore_ascii_case(name) {
             let mut j = i + name.len();
             while j < tag.len() && (tag[j] == b' ' || tag[j] == b'\t' || tag[j] == b'\n' || tag[j] == b'\r') {
                 j += 1;
             }
             if j < tag.len() && tag[j] == b'=' {
                 j += 1;
-                while j < tag.len() && (tag[j] == b' ' || tag[j] == b'\t') {
+                while j < tag.len() && (tag[j] == b' ' || tag[j] == b'\t' || tag[j] == b'\n' || tag[j] == b'\r') {
                     j += 1;
                 }
-                if j < tag.len() && (tag[j] == b'"' || tag[j] == b'\'') {
-                    let quote = tag[j];
-                    let start = j + 1;
-                    let mut end = start;
-                    while end < tag.len() && tag[end] != quote {
-                        end += 1;
+                if j < tag.len() {
+                    if tag[j] == b'"' || tag[j] == b'\'' {
+                        let quote = tag[j];
+                        let start = j + 1;
+                        let mut end = start;
+                        while end < tag.len() && tag[end] != quote {
+                            end += 1;
+                        }
+                        return Some(&tag[start..end.min(tag.len())]);
+                    } else {
+                        let start = j;
+                        let mut end = start;
+                        while end < tag.len()
+                            && tag[end] != b' '
+                            && tag[end] != b'\t'
+                            && tag[end] != b'\n'
+                            && tag[end] != b'\r'
+                            && tag[end] != b'>'
+                        {
+                            end += 1;
+                        }
+                        if end > start {
+                            return Some(&tag[start..end]);
+                        }
                     }
-                    return Some(&tag[start..end.min(tag.len())]);
                 }
             }
         }
@@ -1121,6 +1189,161 @@ pub fn html_to_reader_document(html: &[u8], out: &mut [u8]) -> usize {
     html_to_reader_document_kind(html, kind, out)
 }
 
+/// How many nested styled blocks the converter tracks.
+///
+/// WHY this is bounded: the stack is a fixed array, and a document that
+/// nests blocks deeper than this keeps the style of the deepest frame it
+/// could push. It never allocates and never panics.
+pub const STYLE_STACK_DEPTH: usize = 12;
+
+/// One open block element while the reader document is being built.
+#[derive(Clone, Copy)]
+struct StyleFrame<'a> {
+    tag: &'a [u8],
+    class: &'a [u8],
+    id: &'a [u8],
+    style: css::ComputedStyle,
+}
+
+impl<'a> StyleFrame<'a> {
+    const EMPTY: Self = Self {
+        tag: b"",
+        class: b"",
+        id: b"",
+        style: css::ComputedStyle::DEFAULT,
+    };
+}
+
+fn emit_style_marker(out: &mut [u8], w: &mut usize, style: &css::ComputedStyle) {
+    // A marker lives on its own line so the plain-text reader contract
+    // (one line is one run of visible text) stays true for every line
+    // that is not a marker.
+    push_newline(out, w);
+    let mut marker = [0u8; 32];
+    let n = css::encode_style_marker(style, &mut marker);
+    push_slice(out, w, &marker[..n]);
+    push_newline(out, w);
+}
+
+/// Opens a block: computes its style from the stylesheet, the inline
+/// `style` attribute and the parent's inherited colour, then records a
+/// style marker only when the effective style actually changed.
+fn open_block<'a>(
+    out: &mut [u8],
+    w: &mut usize,
+    sheet: &css::Stylesheet<'a>,
+    frames: &mut [StyleFrame<'a>; STYLE_STACK_DEPTH],
+    depth: &mut usize,
+    tag: &'a [u8],
+    tag_content: &'a [u8],
+    active: &mut css::ComputedStyle,
+) {
+    if *depth >= STYLE_STACK_DEPTH {
+        return;
+    }
+    let class = attr_value(tag_content, b"class").unwrap_or(b"");
+    let id = attr_value(tag_content, b"id").unwrap_or(b"");
+    let inline = attr_value(tag_content, b"style");
+    let mut ancestors = [css::Compound::EMPTY; STYLE_STACK_DEPTH];
+    for (slot, frame) in ancestors.iter_mut().zip(frames.iter()).take(*depth) {
+        *slot = css::Compound {
+            tag: frame.tag,
+            class: frame.class,
+            id: frame.id,
+        };
+    }
+    let element = css::Compound { tag, class, id };
+    let mut style = css::cascade(sheet, element, &ancestors[..*depth], inline);
+    // Colour and font size inherit in CSS. Background, border, margin
+    // and padding do not, and the reader does not invent that they do.
+    if !style.has_color && active.has_color {
+        style.color = active.color;
+        style.has_color = true;
+    }
+    if style.font_scale == 0 {
+        style.font_scale = active.font_scale;
+    }
+    frames[*depth] = StyleFrame {
+        tag,
+        class,
+        id,
+        style,
+    };
+    *depth += 1;
+    if style != *active {
+        emit_style_marker(out, w, &style);
+        *active = style;
+    }
+}
+
+/// Closes a block, restoring the enclosing style.
+fn close_block(
+    out: &mut [u8],
+    w: &mut usize,
+    frames: &[StyleFrame<'_>; STYLE_STACK_DEPTH],
+    depth: &mut usize,
+    tag: &[u8],
+    active: &mut css::ComputedStyle,
+) {
+    if *depth == 0 || !frames[*depth - 1].tag.eq_ignore_ascii_case(tag) {
+        // A close tag that does not match the open block is ignored,
+        // exactly as the chrome stack ignores one: the two ends of an
+        // element only agree when they name each other.
+        return;
+    }
+    *depth -= 1;
+    let restored = if *depth > 0 {
+        frames[*depth - 1].style
+    } else {
+        css::ComputedStyle::DEFAULT
+    };
+    if restored != *active {
+        emit_style_marker(out, w, &restored);
+        *active = restored;
+    }
+}
+
+/// Reads a `width` or `height` attribute as a pixel count.
+fn dimension_attr(tag: &[u8], name: &[u8]) -> Option<u16> {
+    let raw = attr_value(tag, name)?;
+    let mut value: u32 = 0;
+    let mut any = false;
+    for &b in raw {
+        if b.is_ascii_digit() {
+            value = value.saturating_mul(10).saturating_add((b - b'0') as u32);
+            any = true;
+        } else {
+            break;
+        }
+    }
+    if !any {
+        return None;
+    }
+    Some(value.min(u16::MAX as u32) as u16)
+}
+
+/// Finds the matching close tag for a raw-text container element (`script`, `style`, `textarea`).
+fn find_raw_text_close(html: &[u8], start: usize, tag: &[u8]) -> Option<(usize, usize)> {
+    let mut scan = start;
+    let n = html.len();
+    while scan + 2 < n {
+        if html[scan] == b'<' && html[scan + 1] == b'/' {
+            let rest = &html[scan + 2..];
+            if rest.len() >= tag.len() && rest[..tag.len()].eq_ignore_ascii_case(tag) {
+                let mut after = scan + 2 + tag.len();
+                while after < n && (html[after] == b' ' || html[after] == b'\t' || html[after] == b'\r' || html[after] == b'\n') {
+                    after += 1;
+                }
+                if after < n && html[after] == b'>' {
+                    return Some((scan, after + 1));
+                }
+            }
+        }
+        scan += 1;
+    }
+    None
+}
+
 /// Extracts readable editorial content from a payload of a known kind.
 pub fn html_to_reader_document_kind(html: &[u8], kind: PayloadKind, out: &mut [u8]) -> usize {
     if kind == PayloadKind::PlainText {
@@ -1129,6 +1352,18 @@ pub fn html_to_reader_document_kind(html: &[u8], kind: PayloadKind, out: &mut [u
     let mut r = 0usize;
     let mut w = 0usize;
     let n = html.len();
+
+    // The stylesheet a `<style>` element carried, and the block-style
+    // stack that gives descendant selectors their ancestors.
+    let mut sheet = css::Stylesheet::empty();
+    let mut sheet_parsed = false;
+    let mut style_frames: [StyleFrame<'_>; STYLE_STACK_DEPTH] =
+        [StyleFrame::EMPTY; STYLE_STACK_DEPTH];
+    let mut style_depth = 0usize;
+    let mut active_style = css::ComputedStyle::DEFAULT;
+    // How many `<img>` elements have been recorded. The rest keep the
+    // reader's textual alt fallback rather than growing the document.
+    let mut images_recorded = 0usize;
 
     // The open page-chrome elements. Everything inside them is furniture,
     // not article text. The stack is what makes an open and a close agree.
@@ -1165,6 +1400,8 @@ pub fn html_to_reader_document_kind(html: &[u8], kind: PayloadKind, out: &mut [u
             }
             if r + 2 < n {
                 r += 3;
+            } else {
+                r = n;
             }
             continue;
         }
@@ -1212,18 +1449,28 @@ pub fn html_to_reader_document_kind(html: &[u8], kind: PayloadKind, out: &mut [u
                     continue;
                 }
                 if !is_closing {
-                    let close: &[u8] = if tag_word.eq_ignore_ascii_case(b"script") {
-                        b"</script>"
+                    let close_tag: &[u8] = if tag_word.eq_ignore_ascii_case(b"script") {
+                        b"script"
                     } else if tag_word.eq_ignore_ascii_case(b"style") {
-                        b"</style>"
+                        b"style"
                     } else {
-                        b"</textarea>"
+                        b"textarea"
                     };
-                    let mut scan = next;
-                    while scan < n && !html[scan..].starts_with(close) {
-                        scan += 1;
+                    let (scan, next_r) = match find_raw_text_close(html, next, close_tag) {
+                        Some((s, e)) => (s, e),
+                        None => (n, n),
+                    };
+                    // An inline stylesheet is parsed before it is skipped
+                    // as raw text. Only the first one is read, and only
+                    // its first MAX_CSS_BYTES: a page that carries a
+                    // framework bundle in a second <style> does not get
+                    // to grow this app's work without bound.
+                    if !sheet_parsed && tag_word.eq_ignore_ascii_case(b"style") {
+                        let css_end = scan.min(n).min(next.saturating_add(css::MAX_CSS_BYTES));
+                        sheet = css::parse_stylesheet(&html[next..css_end]);
+                        sheet_parsed = true;
                     }
-                    r = if scan < n { scan + close.len() } else { n };
+                    r = next_r;
                     continue;
                 }
                 r = next;
@@ -1288,14 +1535,40 @@ pub fn html_to_reader_document_kind(html: &[u8], kind: PayloadKind, out: &mut [u
                 continue;
             }
             if tag_word.eq_ignore_ascii_case(b"img") {
-                if let Some(alt) = attr_value(tag_content, b"alt") {
-                    if !alt.is_empty() {
-                        push_separator(out, &mut w);
-                        push_byte(out, &mut w, b'[');
-                        push_decoded(out, &mut w, alt);
-                        push_byte(out, &mut w, b']');
-                        pending_space = true;
-                    }
+                let src = attr_value(tag_content, b"src").unwrap_or(b"");
+                let alt = attr_value(tag_content, b"alt").unwrap_or(b"");
+                // Up to MAX_INLINE_IMAGES elements become placeable
+                // markers. The rest keep the alt text, so a gallery does
+                // not consume the reader's whole document budget. A source
+                // the marker cannot carry keeps its alt text too: a cut
+                // URL would name a different resource.
+                let mut marker = [0u8; 160];
+                let n = if !src.is_empty()
+                    && src.len() <= 64
+                    && images_recorded < images::MAX_INLINE_IMAGES
+                {
+                    images::encode_image_marker(
+                        src,
+                        alt,
+                        dimension_attr(tag_content, b"width"),
+                        dimension_attr(tag_content, b"height"),
+                        &mut marker,
+                    )
+                } else {
+                    0
+                };
+                if n > 0 {
+                    push_newline(out, &mut w);
+                    push_slice(out, &mut w, &marker[..n]);
+                    push_newline(out, &mut w);
+                    images_recorded += 1;
+                    pending_space = false;
+                } else if !alt.is_empty() {
+                    push_separator(out, &mut w);
+                    push_byte(out, &mut w, b'[');
+                    push_decoded(out, &mut w, alt);
+                    push_byte(out, &mut w, b']');
+                    pending_space = true;
                 }
                 r = next;
                 continue;
@@ -1311,6 +1584,16 @@ pub fn html_to_reader_document_kind(html: &[u8], kind: PayloadKind, out: &mut [u
                 || tag_word.eq_ignore_ascii_case(b"title")
             {
                 if !is_closing {
+                    open_block(
+                        out,
+                        &mut w,
+                        &sheet,
+                        &mut style_frames,
+                        &mut style_depth,
+                        tag_word,
+                        tag_content,
+                        &mut active_style,
+                    );
                     heading_depth += 1;
                     push_newline(out, &mut w);
                     let hashes = match tag_word {
@@ -1331,6 +1614,14 @@ pub fn html_to_reader_document_kind(html: &[u8], kind: PayloadKind, out: &mut [u
                         heading_depth -= 1;
                     }
                     push_blank_line(out, &mut w);
+                    close_block(
+                        out,
+                        &mut w,
+                        &style_frames,
+                        &mut style_depth,
+                        tag_word,
+                        &mut active_style,
+                    );
                     pending_space = false;
                 }
                 r = next;
@@ -1384,11 +1675,29 @@ pub fn html_to_reader_document_kind(html: &[u8], kind: PayloadKind, out: &mut [u
             // 2e. Lists.
             if tag_word.eq_ignore_ascii_case(b"li") {
                 if !is_closing {
+                    open_block(
+                        out,
+                        &mut w,
+                        &sheet,
+                        &mut style_frames,
+                        &mut style_depth,
+                        tag_word,
+                        tag_content,
+                        &mut active_style,
+                    );
                     push_newline(out, &mut w);
                     push_slice(out, &mut w, b"* ");
                     pending_space = false;
                 } else {
                     push_newline(out, &mut w);
+                    close_block(
+                        out,
+                        &mut w,
+                        &style_frames,
+                        &mut style_depth,
+                        tag_word,
+                        &mut active_style,
+                    );
                     pending_space = false;
                 }
                 r = next;
@@ -1411,11 +1720,29 @@ pub fn html_to_reader_document_kind(html: &[u8], kind: PayloadKind, out: &mut [u
             // 2g. Quotes.
             if tag_word.eq_ignore_ascii_case(b"blockquote") {
                 if !is_closing {
+                    open_block(
+                        out,
+                        &mut w,
+                        &sheet,
+                        &mut style_frames,
+                        &mut style_depth,
+                        tag_word,
+                        tag_content,
+                        &mut active_style,
+                    );
                     push_newline(out, &mut w);
                     push_slice(out, &mut w, b"> ");
                     pending_space = false;
                 } else {
                     push_blank_line(out, &mut w);
+                    close_block(
+                        out,
+                        &mut w,
+                        &style_frames,
+                        &mut style_depth,
+                        tag_word,
+                        &mut active_style,
+                    );
                     pending_space = false;
                 }
                 r = next;
@@ -1425,9 +1752,27 @@ pub fn html_to_reader_document_kind(html: &[u8], kind: PayloadKind, out: &mut [u
             // 2h. Blocks and inline elements.
             if tag_in(&PARAGRAPH_TAGS, tag_word) {
                 if !is_closing {
+                    open_block(
+                        out,
+                        &mut w,
+                        &sheet,
+                        &mut style_frames,
+                        &mut style_depth,
+                        tag_word,
+                        tag_content,
+                        &mut active_style,
+                    );
                     push_newline(out, &mut w);
                 } else {
                     push_blank_line(out, &mut w);
+                    close_block(
+                        out,
+                        &mut w,
+                        &style_frames,
+                        &mut style_depth,
+                        tag_word,
+                        &mut active_style,
+                    );
                 }
                 pending_space = false;
                 r = next;
@@ -1530,6 +1875,9 @@ pub fn html_to_reader_document_kind(html: &[u8], kind: PayloadKind, out: &mut [u
 /// yields the byte value itself and advances by one, so the reader never
 /// loops.
 pub fn decode_utf8_at(buf: &[u8], pos: usize) -> (u32, usize) {
+    if pos >= buf.len() {
+        return (0, pos);
+    }
     let b0 = buf[pos];
     if b0 < 0x80 {
         return (b0 as u32, pos + 1);
@@ -1557,6 +1905,15 @@ pub fn decode_utf8_at(buf: &[u8], pos: usize) -> (u32, usize) {
             return (0, pos + 1);
         }
         cp = (cp << 6) | (cont & 0x3F) as u32;
+    }
+    let valid = match len {
+        2 => cp >= 0x80,
+        3 => cp >= 0x0800 && !(0xD800..=0xDFFF).contains(&cp),
+        4 => (0x10000..=0x10FFFF).contains(&cp),
+        _ => false,
+    };
+    if !valid {
+        return (0, pos + 1);
     }
     (cp, pos + len)
 }
@@ -1756,7 +2113,7 @@ pub fn wrap_line(
     while start < text.len() && pieces < MAX_WRAP_PIECES {
         // Measure the rest of the line from `start`.
         let rest = &text[start..];
-        if std::design::font::measure(rest, scale) <= max_w {
+        if std::design::font::measure(rest, scale) <= max_w && rest.len() <= MAX_LINE_BYTES {
             let n = rest.len().min(MAX_LINE_BYTES);
             out[pieces][..n].copy_from_slice(&rest[..n]);
             lens[pieces] = n;
@@ -1776,13 +2133,15 @@ pub fn wrap_line(
             let word = &rest[j..k];
             let word_w = std::design::font::measure(word, scale);
             let space_w = if j == 0 { 0 } else { std::design::font::measure(b" ", scale) };
-            if width + space_w + word_w > max_w && j > 0 {
+            if (width + space_w + word_w > max_w || k > MAX_LINE_BYTES) && j > 0 {
                 // This word does not fit. Break before it.
                 break;
             }
             width += space_w + word_w;
             if k < rest.len() {
-                last_space = Some(k);
+                if k <= MAX_LINE_BYTES {
+                    last_space = Some(k);
+                }
                 j = k + 1;
             } else {
                 break;
@@ -1798,6 +2157,9 @@ pub fn wrap_line(
                 let mut k = 0usize;
                 while k < rest.len() {
                     let step = utf8_char_len(rest[k]);
+                    if k + step > MAX_LINE_BYTES && k > 0 {
+                        break;
+                    }
                     let chunk = &rest[k..(k + step).min(rest.len())];
                     let cw = std::design::font::measure(chunk, scale);
                     if w + cw > max_w && k > 0 {
@@ -1806,11 +2168,11 @@ pub fn wrap_line(
                     w += cw;
                     k += step;
                 }
-                k.max(1)
+                k.max(1).min(MAX_LINE_BYTES)
             }
         };
 
-        let piece = &rest[..cut];
+        let piece = &rest[..cut.min(MAX_LINE_BYTES)];
         let n = piece.len().min(MAX_LINE_BYTES);
         out[pieces][..n].copy_from_slice(&piece[..n]);
         lens[pieces] = n;
@@ -1862,6 +2224,23 @@ pub struct DocLine {
     /// beside a list item once. A renderer that cannot tell a continuation
     /// from a new item draws a second rule in the middle of a title.
     pub continued: bool,
+    /// The CSS subset's computed style for the block this line belongs to.
+    pub style: css::ComputedStyle,
+    /// Whether this line opens or closes a styled block.
+    ///
+    /// WHY they are computed after the whole document is read: a top
+    /// margin belongs above the first line of a block, and a border's
+    /// bottom edge below the last, and neither end is known from one
+    /// line alone.
+    pub block_start: bool,
+    pub block_end: bool,
+    /// The placed image this line refers to, or 255 for none.
+    pub image_index: u8,
+    /// The style epoch, used to find block boundaries. Zero means the
+    /// document carried no style markers at all.
+    pub style_epoch: u16,
+    /// The height this line reserves when it is an image line.
+    pub layout_h: u16,
 }
 
 impl DocLine {
@@ -1874,6 +2253,12 @@ impl DocLine {
         link_label: [0; 64],
         link_label_len: 0,
         continued: false,
+        style: css::ComputedStyle::DEFAULT,
+        block_start: false,
+        block_end: false,
+        image_index: 255,
+        style_epoch: 0,
+        layout_h: 0,
     };
 }
 
@@ -2851,16 +3236,40 @@ pub fn doc_line_height(kind: LineKind, bytes: &[u8]) -> usize {
             }
         }
         LineKind::GemtextLink => 66,
+        LineKind::Image => images::PLACEHOLDER_HEIGHT,
         LineKind::Paragraph => 28,
         LineKind::Empty => 14,
     }
+}
+
+/// The height one document line reserves, including the style the reader
+/// applied to it.
+///
+/// WHY this is the single source of truth: the scroll extent and the
+/// renderer both walk the same list of lines, and if one of them counted
+/// a top margin or a larger font rung that the other did not, the page
+/// would end somewhere other than where it was drawn.
+pub fn line_box_height(line: &DocLine) -> usize {
+    let base = doc_line_height(line.kind, &line.bytes[..line.len.min(line.bytes.len())]);
+    let mut height = base;
+    if line.kind == LineKind::Image {
+        height = (line.layout_h as usize).max(images::PLACEHOLDER_HEIGHT);
+    } else if line.style.font_scale >= 2
+        && matches!(line.kind, LineKind::Paragraph | LineKind::ListItem | LineKind::Blockquote)
+    {
+        height = height.max(std::design::font::line_height(2) + 4);
+    }
+    if line.block_start {
+        height = height.saturating_add(line.style.margin_top as usize);
+    }
+    height
 }
 
 /// The height of a whole document, in logical pixels.
 pub fn document_height_px(lines: &[DocLine]) -> usize {
     let mut total = 0usize;
     for line in lines {
-        total = total.saturating_add(doc_line_height(line.kind, &line.bytes[..line.len]));
+        total = total.saturating_add(line_box_height(line));
     }
     total
 }
@@ -3275,6 +3684,36 @@ mod tests {
         assert!(doc.contains("=> https://interos.tech Home"));
         assert!(doc.contains("* Feature 1"));
         assert!(doc.contains("```\ncode sample\n```"));
+    }
+
+    /// The reader carries styles and images through its text pipeline as
+    /// marker lines rather than inventing a second document type.
+    ///
+    /// WHY this test exists: the CSS and image modules can each be correct
+    /// while the HTML walk never emits their markers, and then the page
+    /// renders unstyled with no picture and no explanation.
+    #[test]
+    fn test_styles_and_images_become_reader_markers() {
+        let html = b"<style>p { color: #ff0000; }</style>\
+<p>Red</p><img src=\"x.png\" alt=\"X\" width=\"40\" height=\"30\">";
+        let mut out = [0u8; 1024];
+        let n = html_to_reader_document(html, &mut out);
+        let mut style_markers = 0usize;
+        let mut image_markers = 0usize;
+        let mut saw_red = false;
+        for line in out[..n].split(|&b| b == b'\n') {
+            if css::is_style_marker(line) {
+                style_markers += 1;
+            } else if images::is_image_marker(line) {
+                image_markers += 1;
+                assert_eq!(classify_line(line), LineKind::Image);
+            } else if line == b"Red" {
+                saw_red = true;
+            }
+        }
+        assert!(style_markers >= 2, "a style marker before and after the block");
+        assert_eq!(image_markers, 1);
+        assert!(saw_red, "the paragraph text survives the markers");
     }
 
     #[test]
@@ -3883,25 +4322,11 @@ mod tests {
     fn test_the_reader_scroll_extent_covers_the_whole_document() {
         let lines = [
             DocLine {
-                bytes: [0u8; MAX_LINE_BYTES],
                 len: 3,
                 kind: LineKind::Paragraph,
-                continued: false,
-                link_target: [0u8; 64],
-                link_label: [0u8; 64],
-                link_target_len: 0,
-                link_label_len: 0,
+                ..DocLine::EMPTY
             },
-            DocLine {
-                bytes: [0u8; MAX_LINE_BYTES],
-                len: 0,
-                kind: LineKind::Empty,
-                continued: false,
-                link_target: [0u8; 64],
-                link_label: [0u8; 64],
-                link_target_len: 0,
-                link_label_len: 0,
-            },
+            DocLine::EMPTY,
         ];
         let height = document_height_px(&lines);
         assert_eq!(height, doc_line_height(LineKind::Paragraph, b"abc") + 14);
@@ -4103,5 +4528,101 @@ mod tests {
             core::str::from_utf8(&out[..n]).unwrap(),
             "application/octet-stream"
         );
+    }
+
+    #[test]
+    fn test_uri_parser_case_and_port_overflow() {
+        let uri = parse_uri(b"HTTPS://EXAMPLE.COM:8080/path");
+        assert_eq!(uri.scheme, UriScheme::Https);
+        assert_eq!(uri.host, b"EXAMPLE.COM");
+        assert_eq!(uri.port, 8080);
+        assert_eq!(uri.path, b"/path");
+
+        // Port > 65535 should fall back to scheme default port
+        let overflow = parse_uri(b"http://example.com:99999/test");
+        assert_eq!(overflow.port, 80);
+    }
+
+    #[test]
+    fn test_http_response_rejects_non_digit_status() {
+        assert_eq!(parse_http_response(b"HTTP/1.1 20a OK\r\n\r\nbody"), None);
+        assert_eq!(parse_http_response(b"HTTP/1.1 ABC OK\r\n\r\nbody"), None);
+        assert_eq!(parse_http_response(b"HTTP/1.1 200 OK\r\n\r\nbody").unwrap().status_code, 200);
+    }
+
+    #[test]
+    fn test_utf8_decode_security() {
+        // Overlong 2-byte NUL: 0xC0 0x80
+        let (cp, next) = decode_utf8_at(&[0xC0, 0x80], 0);
+        assert_eq!(cp, 0);
+        assert_eq!(next, 1);
+
+        // Surrogate 0xD800: 0xED 0xA0 0x80
+        let (cp, next) = decode_utf8_at(&[0xED, 0xA0, 0x80], 0);
+        assert_eq!(cp, 0);
+        assert_eq!(next, 1);
+
+        // Out of Unicode range > 0x10FFFF: 0xF4 0x90 0x80 0x80
+        let (cp, next) = decode_utf8_at(&[0xF4, 0x90, 0x80, 0x80], 0);
+        assert_eq!(cp, 0);
+        assert_eq!(next, 1);
+
+        // Valid 3-byte character
+        let (cp, next) = decode_utf8_at("€".as_bytes(), 0);
+        assert_eq!(cp, 0x20AC);
+        assert_eq!(next, 3);
+    }
+
+    #[test]
+    fn test_proxy_html_surrogate_pairs() {
+        let mut out = [0u8; 128];
+        let json = br#"{"html": "Hello \uD83D\uDE00 World!"}"#;
+        let n = extract_proxy_html(json, &mut out);
+        assert_eq!(core::str::from_utf8(&out[..n]).unwrap(), "Hello 😀 World!");
+
+        let unpaired = br#"{"html": "Bad \uD83D alone"}"#;
+        let n = extract_proxy_html(unpaired, &mut out);
+        assert_eq!(core::str::from_utf8(&out[..n]).unwrap(), "Bad ? alone");
+    }
+
+    #[test]
+    fn test_raw_text_case_insensitive_close_and_unclosed_comment() {
+        let mut out = [0u8; 256];
+        let html = b"<SCRIPT>var x = 1;</SCRIPT><p>Article content</p>";
+        let n = html_to_reader_document(html, &mut out);
+        let text = core::str::from_utf8(&out[..n]).unwrap();
+        assert!(text.contains("Article content"));
+
+        // Unclosed comment at EOF should not leak trailing bytes
+        let mut out2 = [0u8; 256];
+        let html2 = b"<p>Start</p><!-- Unclosed comment at EOF";
+        let n2 = html_to_reader_document(html2, &mut out2);
+        let text2 = core::str::from_utf8(&out2[..n2]).unwrap();
+        assert_eq!(text2.trim(), "Start");
+    }
+
+    #[test]
+    fn test_attr_value_boundary_and_case() {
+        let tag = b"img datasrc=\"fake.png\" SRC='real.png' width=100";
+        assert_eq!(attr_value(tag, b"src"), Some(&b"real.png"[..]));
+        assert_eq!(attr_value(tag, b"width"), Some(&b"100"[..]));
+        assert_eq!(attr_value(tag, b"datasrc"), Some(&b"fake.png"[..]));
+        assert_eq!(attr_value(tag, b"missing"), None);
+    }
+
+    #[test]
+    fn test_wrap_line_narrow_chars_no_loss() {
+        // A line with 150 'i' characters (narrow). Even if measure <= max_w,
+        // it must wrap without dropping any characters.
+        let text = [b'i'; 150];
+        let mut out = [[0u8; MAX_LINE_BYTES]; MAX_WRAP_PIECES];
+        let mut lens = [0usize; MAX_WRAP_PIECES];
+        let pieces = wrap_line(&text, 1, 1000, &mut out, &mut lens);
+        assert!(pieces >= 2);
+        let mut total_bytes = 0usize;
+        for i in 0..pieces {
+            total_bytes += lens[i];
+        }
+        assert_eq!(total_bytes, 150);
     }
 }
