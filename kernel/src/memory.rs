@@ -161,22 +161,14 @@ pub fn memory_telemetry() -> MemoryTelemetry {
 }
 
 /// Allocates physically contiguous 4 KiB frames for DMA buffers.
+///
+/// Contiguity has to be established at allocation time: the general allocator
+/// serves one frame per call and prefers recycled frames, whose addresses have no
+/// relation to each other or to the bump pointer. Assembling a run by repeated
+/// single-frame allocation therefore fails as soon as the recycle pool is non-empty,
+/// which is always the case after boot has torn down a user address space.
 pub fn allocate_dma_frames(count: usize) -> Option<alloc::vec::Vec<PhysFrame<Size4KiB>>> {
-    if count == 0 { return Some(alloc::vec::Vec::new()); }
-    let mut frames = alloc::vec::Vec::with_capacity(count);
-    let first = allocate_frame()?;
-    frames.push(first);
-    for _ in 1..count {
-        let next = allocate_frame()?;
-        let expected = frames.last()?.start_address().as_u64().checked_add(4096)?;
-        if next.start_address().as_u64() != expected {
-            for frame in frames.drain(..) { recycle_frame(frame); }
-            recycle_frame(next);
-            return None;
-        }
-        frames.push(next);
-    }
-    Some(frames)
+    FRAME_ALLOCATOR.lock().as_mut()?.allocate_contiguous_frames(count)
 }
 
 /// Converts a physical address into its bootloader-provided direct-map virtual address.
@@ -889,6 +881,64 @@ impl BootInfoFrameAllocator {
         };
         allocator.advance_to_usable_region();
         allocator
+    }
+
+    /// Allocates `count` physically adjacent zeroed frames from a single usable region.
+    ///
+    /// Unlike repeated `allocate_frame` calls, this never mixes recycled frames into
+    /// the run: the whole span is carved from the bump pointer in one step. Recycled
+    /// frames that happen to fall inside the carved span are dropped from the pool,
+    /// because that memory now belongs to the caller and must not be handed out twice.
+    pub fn allocate_contiguous_frames(
+        &mut self,
+        count: usize,
+    ) -> Option<Vec<PhysFrame<Size4KiB>>> {
+        if count == 0 {
+            return Some(Vec::new());
+        }
+        let span = (count as u64).checked_mul(4096)?;
+        loop {
+            self.advance_to_usable_region();
+            if self.region_idx >= self.memory_regions.len() {
+                return None;
+            }
+
+            let region = &self.memory_regions[self.region_idx];
+            let start = self.next_addr;
+            let end = match start.checked_add(span) {
+                Some(end) if end <= region.end => end,
+                _ => {
+                    // The run does not fit in this region; the remaining tail is too
+                    // small to ever serve a contiguous request, so retire it.
+                    self.region_idx += 1;
+                    self.next_addr = 0;
+                    continue;
+                }
+            };
+            self.next_addr = end;
+
+            self.recycled_frames
+                .retain(|frame| {
+                    let addr = frame.start_address().as_u64();
+                    addr < start || addr >= end
+                });
+
+            let mut frames = Vec::with_capacity(count);
+            for index in 0..count {
+                let frame = PhysFrame::containing_address(
+                    PhysAddr::new(start + index as u64 * 4096),
+                );
+                unsafe {
+                    core::ptr::write_bytes(
+                        (self.physical_memory_offset + frame.start_address().as_u64()).as_mut_ptr::<u8>(),
+                        0,
+                        4096,
+                    );
+                }
+                frames.push(frame);
+            }
+            return Some(frames);
+        }
     }
 
     fn advance_to_usable_region(&mut self) {
