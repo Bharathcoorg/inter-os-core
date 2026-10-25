@@ -85,9 +85,30 @@ struct Loaded {
     w: usize,
     h: usize,
     bold: bool,
+    /// The request stamp of the last time this run was asked for. It is what
+    /// the pool uses to choose a victim, so the run a pixel walk is painting
+    /// right now is never the one evicted in favour of it.
+    used: u32,
 }
 
 static mut LOADED: [Option<Loaded>; SLOTS] = [None; SLOTS];
+
+/// The request stamp handed to each placement or hit.
+///
+/// WHY a stamp and not a per-pixel frame number: the pool has no idea where a
+/// frame begins or ends, and a caller that paints one pixel at a time asks for
+/// the same few runs again and again. A monotonic stamp is enough to tell the
+/// run asked for a moment ago from the one asked for a screen ago.
+static mut CLOCK: u32 = 0;
+
+/// Hands out the next request stamp.
+fn next_stamp() -> u32 {
+    unsafe {
+        let clock = &mut *core::ptr::addr_of_mut!(CLOCK);
+        *clock = clock.wrapping_add(1);
+        *clock
+    }
+}
 
 /// Resets all slots in the outline cache pool.
 pub fn reset_slot_pool() {
@@ -138,7 +159,16 @@ fn slot_for(em: u32, x: usize, y: usize, text: &[u8], bold: bool) -> usize {
     h % SLOTS
 }
 
-/// Finds an existing cached slot or finds the first open slot using linear probing.
+/// Finds an existing cached slot, the first open slot, or the run to evict.
+///
+/// WHY the last resort is the least recently asked-for run and not the new
+/// run's hash slot: a caller walks a screen one pixel at a time, so the runs
+/// that share a row are asked for on every pixel. Choosing the new run's own
+/// base slot as the victim can pick one of those -- two runs that hash alike
+/// then erase each other once per pixel, and each erase rasterises a whole
+/// line. That is a render that never finishes rather than a cache that is full.
+/// Evicting the run nobody has asked for since keeps the pixel walk's working
+/// set resident, so a full pool costs a miss on new text, not a storm.
 fn find_or_alloc_slot(em: u32, x: usize, y: usize, text: &[u8], bold: bool) -> (usize, bool) {
     let base = slot_for(em, x, y, text, bold);
     unsafe {
@@ -163,8 +193,18 @@ fn find_or_alloc_slot(em: u32, x: usize, y: usize, text: &[u8], bold: bool) -> (
                 return (slot, false);
             }
         }
+        let mut victim = base;
+        let mut oldest = u32::MAX;
+        for slot in 0..SLOTS {
+            if let Some(loaded) = loaded_ptr[slot].as_ref() {
+                if loaded.used < oldest {
+                    oldest = loaded.used;
+                    victim = slot;
+                }
+            }
+        }
+        (victim, false)
     }
-    (base, false)
 }
 
 /// Pixels per em that draw the cap height the scale rung names.
@@ -364,6 +404,14 @@ impl OutlineRun {
                     && last.len as usize == text.len()
                     && last.key[..text.len()] == *text
                 {
+                    // WHY the hit also stamps the slot: this is the run the
+                    // pixel walk is asking for right now, so it must be the
+                    // last candidate for eviction rather than the first.
+                    if let Some(run) = last.run {
+                        if let Some(entry) = (*core::ptr::addr_of_mut!(LOADED))[run.slot].as_mut() {
+                            entry.used = next_stamp();
+                        }
+                    }
                     return last.run;
                 }
             }
@@ -384,6 +432,9 @@ impl OutlineRun {
                     slot,
                 };
                 unsafe {
+                    if let Some(entry) = (*core::ptr::addr_of_mut!(LOADED))[slot].as_mut() {
+                        entry.used = next_stamp();
+                    }
                     *core::ptr::addr_of_mut!(LAST_PLACED) = Some(LastPlaced {
                         em,
                         x,
@@ -459,6 +510,7 @@ impl OutlineRun {
                 w,
                 h: line_h,
                 bold,
+                used: next_stamp(),
             });
         }
         Some(run)
@@ -814,10 +866,11 @@ mod tests {
     #[test]
     fn a_ninth_distinct_run_cannot_have_a_private_slot() {
         let _pool: Option<_> = Some(reset_slots());
-        // Only SLOTS exist. An overflow live run reclaims one round-robin, and
-        // the honest consequence is that one of the earlier runs is no longer
-        // readable -- which the caller must not rely on. Pin the reclaim path
-        // so it is chosen deliberately rather than corrupting silently.
+        // Only SLOTS exist. An overflow live run reclaims the slot nobody has
+        // asked for since, and the honest consequence is that one of the
+        // earlier runs is no longer readable -- which the caller must not
+        // rely on. Pin the reclaim path so it is chosen deliberately rather
+        // than corrupting silently.
         for i in 0..SLOTS {
             let ch = [b'A' + (i % 26) as u8];
             let r = OutlineRun::place(75, 200 + i * 10, 18, &ch).expect("placed");
@@ -1088,5 +1141,71 @@ mod tests {
             assert!(inked > 0, "Dock label {} ({:?}) rendered 0 pixels! run: x={} y={} w={} h={} slot={}",
                 i, core::str::from_utf8(labels[i]), run.x, run.y, run.w, run.h, run.slot);
         }
+    }
+
+    /// Counts the resident runs, for tests that reason about a full pool.
+    fn loaded_len() -> usize {
+        unsafe { (*core::ptr::addr_of!(LOADED)).iter().flatten().count() }
+    }
+
+    /// True when any pixel of `run`'s box still reads the coverage it was
+    /// placed with.
+    fn still_readable(run: &OutlineRun) -> bool {
+        let top = run.y - run.ascent;
+        (top..top + run.h).any(|py| {
+            (run.x..run.x + run.w)
+                .any(|px| run.pixel(px, py, 0xFF000000, 0xFFFFFFFF).is_some())
+        })
+    }
+
+    #[test]
+    fn a_full_pool_keeps_both_runs_a_pixel_walk_asks_for() {
+        let _pool: Option<_> = Some(reset_slots());
+        let em = em_for_scale(1);
+        let (ascent, _) = typeface::line_metrics(em);
+        // Two runs the error screen asks for on the same row of pixels.
+        let a_text: &[u8] = b"Gateway could not fetch";
+        let b_text: &[u8] = b"Reload Page";
+        let a_x = (720 - typeface::text_advance_px(a_text, em) as usize) / 2;
+        let a_y = 440 + ascent as usize;
+        let a_base = slot_for(em, a_x, a_y, a_text, true);
+        // A run whose hash base is the same slot, which is the case that makes
+        // the pool's replacement policy decide whether both can stay resident.
+        let mut collision = None;
+        'search: for dx in 0..64usize {
+            for dy in 0..256usize {
+                let b_x = 100 + dx;
+                let b_y = 642 + ascent as usize + dy;
+                if slot_for(em, b_x, b_y, b_text, true) == a_base {
+                    collision = Some((b_x, b_y));
+                    break 'search;
+                }
+            }
+        }
+        let (b_x, b_y) = collision.expect("a colliding placement exists in the app's range");
+        assert!(OutlineRun::place_styled(b_x, b_y, em, b_text, true).is_some());
+
+        // Fill every remaining slot with keys the screen never asks for, which
+        // is the state a browser reaches after painting its keyboard.
+        let mut i = 0u8;
+        while loaded_len() < SLOTS && i < 200 {
+            let mut text = [b'q'; 4];
+            text[1] = b'a' + i % 26;
+            text[2] = b'0' + i / 26 % 10;
+            text[3] = b'0' + i % 10;
+            let _ = OutlineRun::place_styled(10 + (i as usize) * 7, 100 + (i as usize) * 11, em, &text, false);
+            i += 1;
+        }
+        assert_eq!(loaded_len(), SLOTS, "the pool is full");
+
+        // One row of the walk: both runs are requested for every pixel.
+        for _ in 0..8 {
+            let _ = OutlineRun::place_styled(a_x, a_y, em, a_text, true);
+            let _ = OutlineRun::place_styled(b_x, b_y, em, b_text, true);
+        }
+        let a = OutlineRun::place_styled(a_x, a_y, em, a_text, true).expect("a placed");
+        let b = OutlineRun::place_styled(b_x, b_y, em, b_text, true).expect("b placed");
+        assert!(still_readable(&a), "placing the second run evicted the first");
+        assert!(still_readable(&b), "placing the first run evicted the second");
     }
 }
