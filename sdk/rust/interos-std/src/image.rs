@@ -2963,6 +2963,1104 @@ pub fn decode_jpeg(data: &[u8], out_rgba: &mut [u8]) -> Result<(u32, u32, usize)
     }
 }
 
+// ---------------------------------------------------------------------------
+// WebP (lossless, VP8L)
+// ---------------------------------------------------------------------------
+
+/// The most prefix-code groups a stream decoded here may declare.
+///
+/// WHY a bound exists: each group carries five complete prefix codes and an
+/// entropy image may name thousands of them. This crate runs in a no-heap
+/// process with fixed scratch, so a stream that asks for more groups than the
+/// scratch holds is refused rather than decoded with an allocation.
+const WEBP_MAX_GROUPS: usize = 64;
+
+/// The total number of prefix-code symbols all groups may hold at once.
+const WEBP_MAX_SYMBOLS: usize = 1 << 15;
+
+/// The largest transform image: predictor modes or colour coefficients.
+const WEBP_MAX_TRANSFORM_PIXELS: usize = 1 << 16;
+
+/// The largest entropy image.
+const WEBP_MAX_ENTROPY_PIXELS: usize = 1 << 16;
+
+/// The largest colour cache WebP allows.
+const WEBP_MAX_CACHE_BITS: u32 = 11;
+
+/// The green prefix code also codes the 24 length prefixes and the cache.
+const WEBP_LITERAL_CODES: usize = 256;
+const WEBP_LENGTH_CODES: usize = 24;
+const WEBP_GREEN_CODES: usize = WEBP_LITERAL_CODES + WEBP_LENGTH_CODES;
+const WEBP_GREEN_ALPHABET: usize = WEBP_GREEN_CODES + (1 << WEBP_MAX_CACHE_BITS);
+
+/// The distance prefix code alphabet.
+const WEBP_DISTANCE_CODES: usize = 40;
+
+/// The longest code a WebP prefix code may use.
+const WEBP_MAX_CODE_LENGTH: usize = 15;
+
+/// The value `WebpHuffman::single` holds when a tree names more than one symbol.
+const WEBP_NO_SYMBOL: u16 = u16::MAX;
+
+/// The order in which the code-length code's own lengths are transmitted.
+const WEBP_CODE_LENGTH_ORDER: [usize; 19] = [
+    17, 18, 0, 1, 2, 3, 4, 5, 16, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+];
+
+/// The close neighbourhood a distance code below 121 names, as (left, up).
+const WEBP_DISTANCE_MAP: [(i8, i8); 120] = [
+    (0, 1), (1, 0), (1, 1), (-1, 1), (0, 2), (2, 0), (1, 2), (-1, 2), (2, 1), (-2, 1),
+    (2, 2), (-2, 2), (0, 3), (3, 0), (1, 3), (-1, 3), (3, 1), (-3, 1), (2, 3), (-2, 3),
+    (3, 2), (-3, 2), (0, 4), (4, 0), (1, 4), (-1, 4), (4, 1), (-4, 1), (3, 3), (-3, 3),
+    (2, 4), (-2, 4), (4, 2), (-4, 2), (0, 5), (3, 4), (-3, 4), (4, 3), (-4, 3), (5, 0),
+    (1, 5), (-1, 5), (5, 1), (-5, 1), (2, 5), (-2, 5), (5, 2), (-5, 2), (4, 4), (-4, 4),
+    (3, 5), (-3, 5), (5, 3), (-5, 3), (0, 6), (6, 0), (1, 6), (-1, 6), (6, 1), (-6, 1),
+    (2, 6), (-2, 6), (6, 2), (-6, 2), (4, 5), (-4, 5), (5, 4), (-5, 4), (3, 6), (-3, 6),
+    (6, 3), (-6, 3), (0, 7), (7, 0), (1, 7), (-1, 7), (5, 5), (-5, 5), (7, 1), (-7, 1),
+    (4, 6), (-4, 6), (6, 4), (-6, 4), (2, 7), (-2, 7), (7, 2), (-7, 2), (3, 7), (-3, 7),
+    (7, 3), (-7, 3), (5, 6), (-5, 6), (6, 5), (-6, 5), (8, 0), (4, 7), (-4, 7), (7, 4),
+    (-7, 4), (8, 1), (8, 2), (6, 6), (-6, 6), (8, 3), (5, 7), (-5, 7), (7, 5), (-7, 5),
+    (8, 4), (6, 7), (-6, 7), (7, 6), (-7, 6), (8, 5), (7, 7), (-7, 7), (8, 6), (8, 7),
+];
+
+/// A reader over a VP8L bitstream, least-significant bit first.
+struct WebpBits<'a> {
+    data: &'a [u8],
+    pos: usize,
+    buf: u64,
+    count: u32,
+}
+
+impl<'a> WebpBits<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        Self {
+            data,
+            pos: 0,
+            buf: 0,
+            count: 0,
+        }
+    }
+
+    fn read(&mut self, n: u32) -> Result<u32, ()> {
+        if n == 0 {
+            return Ok(0);
+        }
+        if n > 24 {
+            return Err(());
+        }
+        while self.count < n {
+            let byte = *self.data.get(self.pos).ok_or(())?;
+            self.buf |= (byte as u64) << self.count;
+            self.pos += 1;
+            self.count += 8;
+        }
+        let value = (self.buf & ((1u64 << n) - 1)) as u32;
+        self.buf >>= n;
+        self.count -= n;
+        Ok(value)
+    }
+}
+
+/// A canonical WebP prefix code.
+///
+/// WHY counts and a sorted symbol list: WebP transmits only code lengths. The
+/// canonical construction sorts symbols by length then value, so decoding walks
+/// one bit at a time and compares against the first code of each length. A
+/// single-symbol tree consumes no bits at all, which the format requires.
+#[derive(Clone, Copy)]
+struct WebpHuffman {
+    count: [u16; 16],
+    first_code: [u16; 16],
+    first_index: [u16; 16],
+    single: u16,
+}
+
+impl WebpHuffman {
+    const EMPTY: Self = Self {
+        count: [0; 16],
+        first_code: [0; 16],
+        first_index: [0; 16],
+        single: WEBP_NO_SYMBOL,
+    };
+
+    fn decode(&self, bits: &mut WebpBits<'_>, symbols: &[u16]) -> Result<usize, ()> {
+        if self.single != WEBP_NO_SYMBOL {
+            return Ok(self.single as usize);
+        }
+        let mut code = 0u32;
+        for length in 1..=WEBP_MAX_CODE_LENGTH {
+            code = (code << 1) | bits.read(1)?;
+            let count = self.count[length] as u32;
+            if count != 0 {
+                let first = self.first_code[length] as u32;
+                if code >= first && code - first < count {
+                    let index = self.first_index[length] as usize + (code - first) as usize;
+                    return symbols.get(index).map(|&symbol| symbol as usize).ok_or(());
+                }
+            }
+        }
+        Err(())
+    }
+}
+
+/// Builds a canonical prefix code from `lengths`, appending its symbols to the
+/// shared arena at `used`.
+fn webp_build_huffman(
+    lengths: &[u8],
+    symbols: &mut [u16],
+    used: &mut usize,
+) -> Result<WebpHuffman, ()> {
+    let mut count = [0u16; 16];
+    let mut total = 0usize;
+    for &length in lengths {
+        let length = length as usize;
+        if length > WEBP_MAX_CODE_LENGTH {
+            return Err(());
+        }
+        if length != 0 {
+            count[length] += 1;
+            total += 1;
+        }
+    }
+    if total == 0 {
+        return Err(());
+    }
+    let start = *used;
+    if start.checked_add(total).ok_or(())? > symbols.len() {
+        return Err(());
+    }
+
+    let mut table = WebpHuffman::EMPTY;
+    table.count = count;
+    let mut code = 0u32;
+    let mut index = start;
+    for length in 1..=WEBP_MAX_CODE_LENGTH {
+        table.first_code[length] = code as u16;
+        table.first_index[length] = index as u16;
+        code = code.checked_add(count[length] as u32).ok_or(())?;
+        // More codes of this length than the tree has room for cannot be
+        // decoded. An incomplete tree is legal and is left alone.
+        if code > (1u32 << length) {
+            return Err(());
+        }
+        code <<= 1;
+        index += count[length] as usize;
+    }
+
+    let mut write = start;
+    for length in 1..=WEBP_MAX_CODE_LENGTH {
+        for (symbol, &symbol_length) in lengths.iter().enumerate() {
+            if symbol_length as usize == length {
+                symbols[write] = symbol as u16;
+                write += 1;
+            }
+        }
+    }
+    *used = write;
+    if total == 1 {
+        table.single = symbols[start];
+    }
+    Ok(table)
+}
+
+/// Reads one prefix code: either the simple form naming one or two symbols, or
+/// the normal form whose code lengths are themselves prefix-coded.
+fn webp_read_huffman(
+    bits: &mut WebpBits<'_>,
+    lengths: &mut [u8],
+    symbols: &mut [u16],
+    used: &mut usize,
+) -> Result<WebpHuffman, ()> {
+    let alphabet = lengths.len();
+    for length in lengths.iter_mut() {
+        *length = 0;
+    }
+    if bits.read(1)? == 1 {
+        let count = bits.read(1)? + 1;
+        let first_is_byte = bits.read(1)? == 1;
+        let first = bits.read(if first_is_byte { 8 } else { 1 })? as usize;
+        if first >= alphabet {
+            return Err(());
+        }
+        lengths[first] = 1;
+        if count == 2 {
+            let second = bits.read(8)? as usize;
+            if second >= alphabet {
+                return Err(());
+            }
+            lengths[second] = 1;
+        }
+        return webp_build_huffman(&lengths[..alphabet], symbols, used);
+    }
+
+    let mut code_lengths = [0u8; 19];
+    let num_codes = bits.read(4)? as usize + 4;
+    for &slot in WEBP_CODE_LENGTH_ORDER.iter().take(num_codes) {
+        code_lengths[slot] = bits.read(3)? as u8;
+    }
+    let code_length_tree = webp_build_huffman(&code_lengths, symbols, used)?;
+
+    let mut max_symbol = alphabet;
+    if bits.read(1)? == 1 {
+        let nbits = 2 + 2 * bits.read(3)?;
+        let value = 2 + bits.read(nbits)? as usize;
+        if value > alphabet {
+            return Err(());
+        }
+        max_symbol = value;
+    }
+    let mut symbol = 0usize;
+    // Code 16 repeats the previous non-zero length, not the entry just
+    // written: a stream may emit zeros and then ask for that earlier length
+    // again. Before any non-zero length has been emitted the seed is 8.
+    let mut previous_length = 8u8;
+    while symbol < alphabet && max_symbol > 0 {
+        max_symbol -= 1;
+        let code = code_length_tree.decode(bits, symbols)?;
+        if code < 16 {
+            lengths[symbol] = code as u8;
+            if code != 0 {
+                previous_length = code as u8;
+            }
+            symbol += 1;
+            continue;
+        }
+        let (extra_bits, base) = match code {
+            16 => (2u32, 3usize),
+            17 => (3, 3),
+            18 => (7, 11),
+            _ => return Err(()),
+        };
+        let repeat = bits.read(extra_bits)? as usize + base;
+        if symbol.checked_add(repeat).ok_or(())? > alphabet {
+            return Err(());
+        }
+        let value = if code == 16 { previous_length } else { 0 };
+        for _ in 0..repeat {
+            lengths[symbol] = value;
+            symbol += 1;
+        }
+    }
+    webp_build_huffman(&lengths[..alphabet], symbols, used)
+}
+
+/// One of the four transforms a VP8L stream may carry.
+#[derive(Clone, Copy)]
+struct WebpTransform {
+    kind: u8,
+    bits: u8,
+    colors: u16,
+    xsize: u32,
+    ysize: u32,
+    data_w: u32,
+}
+
+const WEBP_NO_TRANSFORM: WebpTransform = WebpTransform {
+    kind: 0,
+    bits: 0,
+    colors: 0,
+    xsize: 0,
+    ysize: 0,
+    data_w: 0,
+};
+
+/// Fixed scratch shared by the WebP decoding.
+///
+/// WHY static and not on the stack: the transform images, the prefix codes and
+/// the colour cache are too large for an app's stack, and the crate has no
+/// heap. The buffers are sized by the constants above rather than by anything
+/// a file says, so a stream that names more groups, symbols or blocks than
+/// they hold is refused before it can write outside them.
+struct WebpScratch {
+    groups: [[WebpHuffman; 5]; WEBP_MAX_GROUPS],
+    symbols: [u16; WEBP_MAX_SYMBOLS],
+    predictor: [u8; WEBP_MAX_TRANSFORM_PIXELS],
+    cross_color: [u8; WEBP_MAX_TRANSFORM_PIXELS * 3],
+    entropy: [u8; WEBP_MAX_ENTROPY_PIXELS],
+    palette: [u32; 256],
+    color_cache: [u32; 1 << WEBP_MAX_CACHE_BITS],
+    code_lengths: [u8; WEBP_GREEN_ALPHABET],
+}
+
+const WEBP_SCRATCH_EMPTY: WebpScratch = WebpScratch {
+    groups: [[WebpHuffman::EMPTY; 5]; WEBP_MAX_GROUPS],
+    symbols: [0; WEBP_MAX_SYMBOLS],
+    predictor: [0; WEBP_MAX_TRANSFORM_PIXELS],
+    cross_color: [0; WEBP_MAX_TRANSFORM_PIXELS * 3],
+    entropy: [0; WEBP_MAX_ENTROPY_PIXELS],
+    palette: [0; 256],
+    color_cache: [0; 1 << WEBP_MAX_CACHE_BITS],
+    code_lengths: [0; WEBP_GREEN_ALPHABET],
+};
+
+static mut WEBP_SCRATCH: WebpScratch = WEBP_SCRATCH_EMPTY;
+
+/// Borrows the WebP decoder scratch for the duration of one decode.
+///
+/// SAFETY: the scratch is sound because the callers are single-threaded and
+/// non-reentrant. Every app in this system runs one event loop on one task and
+/// calls `decode_image` from that loop, never from an interrupt handler or a
+/// second thread. The VP8L decoder recurses into itself for the sub-resolution
+/// images, but it does so by reborrowing the one reference it was handed, never
+/// by taking a second one from the static, and the nested decode finishes
+/// before its caller resumes. The unit tests serialise themselves on the same
+/// mutex the other decoders use.
+fn webp_scratch() -> &'static mut WebpScratch {
+    unsafe { &mut *core::ptr::addr_of_mut!(WEBP_SCRATCH) }
+}
+
+fn webp_div_round_up(value: usize, bits: u32) -> usize {
+    (value + (1usize << bits) - 1) >> bits
+}
+
+fn webp_color_index_bits(colors: usize) -> u32 {
+    if colors > 16 {
+        0
+    } else if colors > 4 {
+        1
+    } else if colors > 2 {
+        2
+    } else {
+        3
+    }
+}
+
+fn webp_pixel(pixels: &[u8], index: usize) -> Result<u32, ()> {
+    let offset = index.checked_mul(4).ok_or(())?;
+    let end = offset.checked_add(4).ok_or(())?;
+    let bytes = pixels.get(offset..end).ok_or(())?;
+    Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+}
+
+fn webp_put_pixel(pixels: &mut [u8], index: usize, value: u32) -> Result<(), ()> {
+    let offset = index.checked_mul(4).ok_or(())?;
+    let end = offset.checked_add(4).ok_or(())?;
+    let bytes = pixels.get_mut(offset..end).ok_or(())?;
+    bytes.copy_from_slice(&value.to_le_bytes());
+    Ok(())
+}
+
+fn webp_add_pixels(a: u32, b: u32) -> u32 {
+    let mut out = 0u32;
+    for shift in [0u32, 8, 16, 24] {
+        let sum = ((a >> shift) & 0xff) + ((b >> shift) & 0xff);
+        out |= (sum & 0xff) << shift;
+    }
+    out
+}
+
+fn webp_average2(a: u32, b: u32) -> u32 {
+    let mut out = 0u32;
+    for shift in [0u32, 8, 16, 24] {
+        let average = (((a >> shift) & 0xff) + ((b >> shift) & 0xff)) >> 1;
+        out |= average << shift;
+    }
+    out
+}
+
+fn webp_select(left: u32, top: u32, top_left: u32) -> u32 {
+    let mut left_error = 0i32;
+    let mut top_error = 0i32;
+    for shift in [0u32, 8, 16, 24] {
+        let l = ((left >> shift) & 0xff) as i32;
+        let t = ((top >> shift) & 0xff) as i32;
+        let tl = ((top_left >> shift) & 0xff) as i32;
+        let estimate = l + t - tl;
+        left_error += (estimate - l).abs();
+        top_error += (estimate - t).abs();
+    }
+    if left_error < top_error {
+        left
+    } else {
+        top
+    }
+}
+
+fn webp_clamped_add_subtract_full(a: u32, b: u32, c: u32) -> u32 {
+    let mut out = 0u32;
+    for shift in [0u32, 8, 16, 24] {
+        let value = ((a >> shift) & 0xff) as i32 + ((b >> shift) & 0xff) as i32
+            - ((c >> shift) & 0xff) as i32;
+        out |= (value.clamp(0, 255) as u32) << shift;
+    }
+    out
+}
+
+fn webp_clamped_add_subtract_half(a: u32, b: u32) -> u32 {
+    let mut out = 0u32;
+    for shift in [0u32, 8, 16, 24] {
+        let value = ((a >> shift) & 0xff) as i32;
+        let other = ((b >> shift) & 0xff) as i32;
+        out |= ((value + (value - other) / 2).clamp(0, 255) as u32) << shift;
+    }
+    out
+}
+
+/// The prediction for a pixel in the selected mode, channels independently.
+fn webp_predict(mode: u32, left: u32, top: u32, top_left: u32, top_right: u32) -> u32 {
+    match mode {
+        1 => left,
+        2 => top,
+        3 => top_right,
+        4 => top_left,
+        5 => webp_average2(webp_average2(left, top_right), top),
+        6 => webp_average2(left, top_left),
+        7 => webp_average2(left, top),
+        8 => webp_average2(top_left, top),
+        9 => webp_average2(top, top_right),
+        10 => webp_average2(webp_average2(left, top_left), webp_average2(top, top_right)),
+        11 => webp_select(left, top, top_left),
+        12 => webp_clamped_add_subtract_full(left, top, top_left),
+        13 => webp_clamped_add_subtract_half(webp_average2(left, top), top_left),
+        _ => 0xff00_0000,
+    }
+}
+
+fn webp_color_delta(t: u8, c: u8) -> i32 {
+    ((t as i8 as i32) * (c as i8 as i32)) >> 5
+}
+
+fn webp_cache_index(pixel: u32, cache_bits: u32) -> usize {
+    (pixel.wrapping_mul(0x1e35_a7bd) >> (32 - cache_bits)) as usize
+}
+
+fn webp_prefix_value(prefix: u32, bits: &mut WebpBits<'_>) -> Result<u32, ()> {
+    if prefix < 4 {
+        return Ok(prefix + 1);
+    }
+    let extra_bits = (prefix - 2) >> 1;
+    if extra_bits > 18 {
+        return Err(());
+    }
+    let offset = (2 + (prefix & 1)).checked_shl(extra_bits).ok_or(())?;
+    Ok(offset + bits.read(extra_bits)? + 1)
+}
+
+/// Turns a distance code into a distance in pixels, clipped as WebP requires.
+fn webp_distance(code: usize, width: usize) -> usize {
+    if code > WEBP_DISTANCE_MAP.len() {
+        return code - WEBP_DISTANCE_MAP.len();
+    }
+    let pair = match WEBP_DISTANCE_MAP.get(code.wrapping_sub(1)) {
+        Some(pair) => *pair,
+        None => return 0,
+    };
+    let distance = pair.0 as i32 + pair.1 as i32 * width as i32;
+    if distance < 1 {
+        1
+    } else {
+        distance as usize
+    }
+}
+
+/// Decodes the entropy-coded pixels of one VP8L image stream into `dst`.
+#[allow(clippy::too_many_arguments)]
+fn webp_decode_data(
+    bits: &mut WebpBits<'_>,
+    width: usize,
+    height: usize,
+    cache_bits: u32,
+    prefix_bits: u32,
+    groups: &[[WebpHuffman; 5]],
+    symbols: &[u16],
+    entropy: &[u8],
+    entropy_width: usize,
+    cache: &mut [u32],
+    dst: &mut [u8],
+) -> Result<(), ()> {
+    let count = width.checked_mul(height).ok_or(())?;
+    if width == 0 || dst.len() < count.checked_mul(4).ok_or(())? {
+        return Err(());
+    }
+    let cache_size = if cache_bits == 0 { 0 } else { 1usize << cache_bits };
+    if cache.len() < cache_size {
+        return Err(());
+    }
+    for slot in cache[..cache_size].iter_mut() {
+        *slot = 0;
+    }
+
+    let mut pos = 0usize;
+    while pos < count {
+        let group_index = if prefix_bits == 0 {
+            0
+        } else {
+            let index = ((pos / width) >> prefix_bits) * entropy_width
+                + ((pos % width) >> prefix_bits);
+            match entropy.get(index) {
+                Some(&group) => group as usize,
+                None => {
+                    return Err(());
+                }
+            }
+        };
+        let group = match groups.get(group_index) {
+            Some(group) => group,
+            None => {
+                return Err(());
+            }
+        };
+        let code = match group[0].decode(bits, symbols) {
+            Ok(code) => code,
+            Err(()) => {
+                return Err(());
+            }
+        };
+        if code < WEBP_LITERAL_CODES {
+            let red = match group[1].decode(bits, symbols) {
+                Ok(red) => red,
+                Err(()) => {
+                    return Err(());
+                }
+            };
+            let blue = match group[2].decode(bits, symbols) {
+                Ok(blue) => blue,
+                Err(()) => {
+                    return Err(());
+                }
+            };
+            let alpha = match group[3].decode(bits, symbols) {
+                Ok(alpha) => alpha,
+                Err(()) => {
+                    return Err(());
+                }
+            };
+            let pixel = ((alpha as u32) << 24)
+                | ((red as u32) << 16)
+                | ((code as u32) << 8)
+                | blue as u32;
+            if webp_put_pixel(dst, pos, pixel).is_err() {
+                return Err(());
+            }
+            if cache_size != 0 {
+                cache[webp_cache_index(pixel, cache_bits)] = pixel;
+            }
+            pos += 1;
+        } else if code < WEBP_GREEN_CODES {
+            let length = match webp_prefix_value((code - WEBP_LITERAL_CODES) as u32, bits) {
+                Ok(length) => length as usize,
+                Err(()) => {
+                    return Err(());
+                }
+            };
+            let distance_symbol = match group[4].decode(bits, symbols) {
+                Ok(symbol) => symbol,
+                Err(()) => {
+                    return Err(());
+                }
+            };
+            let distance_code = match webp_prefix_value(distance_symbol as u32, bits) {
+                Ok(code) => code as usize,
+                Err(()) => {
+                    return Err(());
+                }
+            };
+            let distance = webp_distance(distance_code, width);
+            if distance == 0 || distance > pos {
+                return Err(());
+            }
+            let end = pos.checked_add(length).ok_or(())?;
+            if end > count {
+                return Err(());
+            }
+            let source = pos - distance;
+            for offset in 0..length {
+                let pixel = match webp_pixel(dst, source + offset) {
+                    Ok(pixel) => pixel,
+                    Err(()) => {
+                        return Err(());
+                    }
+                };
+                if webp_put_pixel(dst, pos + offset, pixel).is_err() {
+                    return Err(());
+                }
+                if cache_size != 0 {
+                    cache[webp_cache_index(pixel, cache_bits)] = pixel;
+                }
+            }
+            pos = end;
+        } else {
+            let index = code - WEBP_GREEN_CODES;
+            if index >= cache_size {
+                return Err(());
+            }
+            let pixel = match cache.get(index) {
+                Some(&pixel) => pixel,
+                None => {
+                    return Err(());
+                }
+            };
+            if webp_put_pixel(dst, pos, pixel).is_err() {
+                return Err(());
+            }
+            pos += 1;
+        }
+    }
+    Ok(())
+}
+
+fn webp_inverse_color_index(
+    dst: &mut [u8],
+    source_width: usize,
+    height: usize,
+    width: usize,
+    bits: u32,
+    palette: &[u32],
+) -> Result<(), ()> {
+    let per_pixel = 1usize << bits;
+    let bits_per_pixel = 8u32 >> bits;
+    let mask = (1u32 << bits_per_pixel) - 1;
+    let mut y = height;
+    while y > 0 {
+        y -= 1;
+        let source_row = y.checked_mul(source_width).ok_or(())?;
+        let target_row = y.checked_mul(width).ok_or(())?;
+        let mut x = width;
+        while x > 0 {
+            x -= 1;
+            let packed = webp_pixel(dst, source_row + x / per_pixel)?;
+            let green = (packed >> 8) & 0xff;
+            let index = if bits == 0 {
+                green
+            } else {
+                (green >> ((x & (per_pixel - 1)) as u32 * bits_per_pixel)) & mask
+            };
+            let color = palette.get(index as usize).copied().unwrap_or(0);
+            webp_put_pixel(dst, target_row + x, color)?;
+        }
+    }
+    Ok(())
+}
+
+fn webp_inverse_predictor(
+    dst: &mut [u8],
+    width: usize,
+    height: usize,
+    bits: u32,
+    data_width: usize,
+    modes: &[u8],
+) -> Result<(), ()> {
+    for y in 0..height {
+        let row = y.checked_mul(width).ok_or(())?;
+        for x in 0..width {
+            let index = row + x;
+            let residual = webp_pixel(dst, index)?;
+            let predicted = if y == 0 {
+                if x == 0 {
+                    0xff00_0000
+                } else {
+                    webp_pixel(dst, index - 1)?
+                }
+            } else if x == 0 {
+                webp_pixel(dst, index - width)?
+            } else {
+                let left = webp_pixel(dst, index - 1)?;
+                let top = webp_pixel(dst, index - width)?;
+                let top_left = webp_pixel(dst, index - width - 1)?;
+                let slot = (y >> bits) * data_width + (x >> bits);
+                let mode = (*modes.get(slot).ok_or(())? & 0x0f) as u32;
+                // The top-right pixel of the rightmost column is the leftmost
+                // pixel of the same row, per the format's border rule.
+                let top_right = if x + 1 < width {
+                    webp_pixel(dst, index - width + 1)?
+                } else {
+                    webp_pixel(dst, row)?
+                };
+                webp_predict(mode, left, top, top_left, top_right)
+            };
+            webp_put_pixel(dst, index, webp_add_pixels(residual, predicted))?;
+        }
+    }
+    Ok(())
+}
+
+fn webp_inverse_cross_color(
+    dst: &mut [u8],
+    width: usize,
+    height: usize,
+    bits: u32,
+    data_width: usize,
+    elements: &[u8],
+) -> Result<(), ()> {
+    for y in 0..height {
+        let row = y.checked_mul(width).ok_or(())?;
+        for x in 0..width {
+            let index = row + x;
+            let pixel = webp_pixel(dst, index)?;
+            let slot = (y >> bits) * data_width + (x >> bits);
+            let offset = slot.checked_mul(3).ok_or(())?;
+            let green_to_red = *elements.get(offset).ok_or(())?;
+            let green_to_blue = *elements.get(offset + 1).ok_or(())?;
+            let red_to_blue = *elements.get(offset + 2).ok_or(())?;
+            let green = (pixel >> 8) & 0xff;
+            let red = (((pixel >> 16) & 0xff) as i32 + webp_color_delta(green_to_red, green as u8))
+                & 0xff;
+            let blue = ((pixel & 0xff) as i32 + webp_color_delta(green_to_blue, green as u8)) & 0xff;
+            let blue = (blue + webp_color_delta(red_to_blue, red as u8)) & 0xff;
+            let value = (pixel & 0xff00_ff00) | ((red as u32) << 16) | blue as u32;
+            webp_put_pixel(dst, index, value)?;
+        }
+    }
+    Ok(())
+}
+
+fn webp_inverse_add_green(dst: &mut [u8], count: usize) -> Result<(), ()> {
+    for index in 0..count {
+        let pixel = webp_pixel(dst, index)?;
+        let green = (pixel >> 8) & 0xff;
+        let red = (((pixel >> 16) & 0xff) + green) & 0xff;
+        let blue = ((pixel & 0xff) + green) & 0xff;
+        webp_put_pixel(dst, index, (pixel & 0xff00_ff00) | (red << 16) | blue)?;
+    }
+    Ok(())
+}
+
+/// Decodes one VP8L image stream: transforms (main image only), colour cache,
+/// prefix codes and pixels, then the inverse transforms.
+fn webp_decode_argb(
+    bits: &mut WebpBits<'_>,
+    width: usize,
+    height: usize,
+    level0: bool,
+    scratch: &mut WebpScratch,
+    dst: &mut [u8],
+) -> Result<(), ()> {
+    let total = width.checked_mul(height).ok_or(())?;
+    if width == 0 || height == 0 || dst.len() < total.checked_mul(4).ok_or(())? {
+        return Err(());
+    }
+
+    let mut transforms = [WEBP_NO_TRANSFORM; 4];
+    let mut transform_count = 0usize;
+    let mut image_width = width;
+
+    if level0 {
+        let mut seen = 0u8;
+        loop {
+            if bits.read(1)? == 0 {
+                break;
+            }
+            if transform_count == transforms.len() {
+                return Err(());
+            }
+            let kind = bits.read(2)? as u8;
+            if seen & (1 << kind) != 0 {
+                return Err(());
+            }
+            seen |= 1 << kind;
+            let mut transform = WebpTransform {
+                kind,
+                bits: 0,
+                colors: 0,
+                xsize: image_width as u32,
+                ysize: height as u32,
+                data_w: 0,
+            };
+            match kind {
+                0 | 1 => {
+                    let block_bits = bits.read(3)? + 2;
+                    let data_w = webp_div_round_up(image_width, block_bits);
+                    let data_h = webp_div_round_up(height, block_bits);
+                    let area = data_w.checked_mul(data_h).ok_or(())?;
+                    if area > WEBP_MAX_TRANSFORM_PIXELS {
+                        return Err(());
+                    }
+                    let bytes = area.checked_mul(4).ok_or(())?;
+                    webp_decode_argb(bits, data_w, data_h, false, scratch, &mut dst[..bytes])?;
+                    if kind == 0 {
+                        for index in 0..area {
+                            scratch.predictor[index] =
+                                ((webp_pixel(dst, index)? >> 8) & 0xff) as u8;
+                        }
+                    } else {
+                        for index in 0..area {
+                            let pixel = webp_pixel(dst, index)?;
+                            scratch.cross_color[index * 3] = (pixel & 0xff) as u8;
+                            scratch.cross_color[index * 3 + 1] = ((pixel >> 8) & 0xff) as u8;
+                            scratch.cross_color[index * 3 + 2] = ((pixel >> 16) & 0xff) as u8;
+                        }
+                    }
+                    transform.bits = block_bits as u8;
+                    transform.data_w = data_w as u32;
+                }
+                2 => {}
+                _ => {
+                    let colors = bits.read(8)? as usize + 1;
+                    let block_bits = webp_color_index_bits(colors);
+                    let mut table = [0u8; 256 * 4];
+                    webp_decode_argb(
+                        bits,
+                        colors,
+                        1,
+                        false,
+                        scratch,
+                        &mut table[..colors * 4],
+                    )?;
+                    let mut previous = webp_pixel(&table, 0)?;
+                    scratch.palette[0] = previous;
+                    for index in 1..colors {
+                        previous = webp_add_pixels(previous, webp_pixel(&table, index)?);
+                        scratch.palette[index] = previous;
+                    }
+                    transform.bits = block_bits as u8;
+                    transform.colors = colors as u16;
+                    image_width = webp_div_round_up(image_width, block_bits);
+                }
+            }
+            transforms[transform_count] = transform;
+            transform_count += 1;
+        }
+    }
+
+    let cache_bits = if bits.read(1)? == 1 {        let cache_bits = bits.read(4)?;
+        if cache_bits < 1 || cache_bits > WEBP_MAX_CACHE_BITS {
+            return Err(());
+        }
+        cache_bits
+    } else {
+        0
+    };
+    let cache_size = if cache_bits == 0 { 0 } else { 1usize << cache_bits };
+
+    let mut group_count = 1usize;
+    let mut entropy_width = 0usize;
+    let mut prefix_bits = 0u32;
+    if level0 && bits.read(1)? == 1 {
+        prefix_bits = bits.read(3)? + 2;
+        entropy_width = webp_div_round_up(image_width, prefix_bits);
+        let entropy_height = webp_div_round_up(height, prefix_bits);
+        let area = entropy_width.checked_mul(entropy_height).ok_or(())?;
+        if area > WEBP_MAX_ENTROPY_PIXELS {
+            return Err(());
+        }
+        let bytes = area.checked_mul(4).ok_or(())?;
+        if webp_decode_argb(
+            bits,
+            entropy_width,
+            entropy_height,
+            false,
+            scratch,
+            &mut dst[..bytes],
+        )
+        .is_err()
+        {
+            return Err(());
+        }
+        let mut largest = 0u16;
+        for index in 0..area {
+            let pixel = webp_pixel(dst, index)?;
+            let group = ((pixel >> 8) & 0xffff) as u16;
+            if group as usize >= WEBP_MAX_GROUPS {
+                return Err(());
+            }
+            scratch.entropy[index] = group as u8;
+            if group > largest {
+                largest = group;
+            }
+        }
+        group_count = largest as usize + 1;
+    }
+
+    let mut used = 0usize;
+    for group in 0..group_count {
+        let alphabets = [
+            WEBP_GREEN_CODES + cache_size,
+            WEBP_LITERAL_CODES,
+            WEBP_LITERAL_CODES,
+            WEBP_LITERAL_CODES,
+            WEBP_DISTANCE_CODES,
+        ];
+        for (index, &alphabet) in alphabets.iter().enumerate() {
+            let table = match webp_read_huffman(
+                bits,
+                &mut scratch.code_lengths[..alphabet],
+                &mut scratch.symbols,
+                &mut used,
+            ) {
+                Ok(table) => table,
+                Err(()) => {
+                    return Err(());
+                }
+            };
+            scratch.groups[group][index] = table;
+        }
+    }
+
+    if webp_decode_data(
+        bits,
+        image_width,
+        height,
+        cache_bits,
+        prefix_bits,
+        &scratch.groups[..group_count],
+        &scratch.symbols,
+        &scratch.entropy,
+        entropy_width,
+        &mut scratch.color_cache,
+        dst,
+    )
+    .is_err()
+    {
+        return Err(());
+    }
+
+    let mut current_width = image_width;
+    for index in (0..transform_count).rev() {
+        let transform = transforms[index];
+        match transform.kind {
+            0 => {
+                if current_width != transform.xsize as usize || height != transform.ysize as usize {
+                    return Err(());
+                }
+                webp_inverse_predictor(
+                    dst,
+                    current_width,
+                    height,
+                    transform.bits as u32,
+                    transform.data_w as usize,
+                    &scratch.predictor,
+                )?;
+            }
+            1 => {
+                if current_width != transform.xsize as usize || height != transform.ysize as usize {
+                    return Err(());
+                }
+                webp_inverse_cross_color(
+                    dst,
+                    current_width,
+                    height,
+                    transform.bits as u32,
+                    transform.data_w as usize,
+                    &scratch.cross_color,
+                )?;
+            }
+            2 => webp_inverse_add_green(dst, total)?,
+            _ => {
+                if current_width
+                    != webp_div_round_up(transform.xsize as usize, transform.bits as u32)
+                    || height != transform.ysize as usize
+                {
+                    return Err(());
+                }
+                webp_inverse_color_index(
+                    dst,
+                    current_width,
+                    height,
+                    transform.xsize as usize,
+                    transform.bits as u32,
+                    &scratch.palette[..transform.colors as usize],
+                )?;
+                current_width = transform.xsize as usize;
+            }
+        }
+    }
+    if current_width != width {
+        return Err(());
+    }
+    Ok(())
+}
+
+/// Finds the image chunk of a WebP file and returns its VP8L payload.
+///
+/// WHY lossy VP8 is refused instead of skipped: a `VP8 ` chunk is a lossy
+/// bitstream this decoder does not implement, and an error is the honest
+/// answer rather than drawing a stand-in for a picture that was not decoded.
+fn webp_image_chunk(data: &[u8]) -> Result<&[u8], ()> {
+    if data.len() < 12 || &data[..4] != b"RIFF" || &data[8..12] != b"WEBP" {
+        return Err(());
+    }
+    let riff_size = u32::from_le_bytes([data[4], data[5], data[6], data[7]]) as usize;
+    let end = 8usize.checked_add(riff_size).ok_or(())?;
+    if riff_size < 4 || end > data.len() {
+        return Err(());
+    }
+    let mut pos = 12usize;
+    while pos.checked_add(8).ok_or(())? <= end {
+        let size = u32::from_le_bytes([data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7]])
+            as usize;
+        let start = pos + 8;
+        let payload_end = start.checked_add(size).ok_or(())?;
+        if payload_end > end {
+            return Err(());
+        }
+        let kind = &data[pos..pos + 4];
+        if kind == b"VP8L" {
+            return Ok(&data[start..payload_end]);
+        }
+        if kind == b"VP8 " {
+            return Err(());
+        }
+        pos = payload_end.checked_add(size & 1).ok_or(())?;
+    }
+    Err(())
+}
+
+fn webp_vp8l_dimensions(chunk: &[u8]) -> Result<(u32, u32, bool), ()> {
+    if chunk.len() < 5 || chunk[0] != 0x2F {
+        return Err(());
+    }
+    let packed = u32::from_le_bytes([chunk[1], chunk[2], chunk[3], chunk[4]]);
+    let width = (packed & 0x3fff) + 1;
+    let height = ((packed >> 14) & 0x3fff) + 1;
+    // The version field must be zero. Bit 28 says whether the stream carries
+    // alpha; when it is clear every pixel is opaque and the decoder returns
+    // alpha 255 regardless of the code stream.
+    if packed >> 29 != 0 {
+        return Err(());
+    }
+    if width > MAX_DECODE_DIMENSION || height > MAX_DECODE_DIMENSION {
+        return Err(());
+    }
+    Ok((width, height, packed & (1 << 28) != 0))
+}
+
+/// Returns the dimensions a WebP file's VP8L header declares, without decoding
+/// pixels. A lossy `VP8 ` image has no lossless header and is refused.
+pub fn decode_webp_header(data: &[u8]) -> Result<(u32, u32), ()> {
+    let chunk = webp_image_chunk(data)?;
+    let (width, height, _) = webp_vp8l_dimensions(chunk)?;
+    Ok((width, height))
+}
+
+/// Decodes a lossless (VP8L) WebP file into an RGBA (4 bytes per pixel)
+/// destination buffer.
+///
+/// The plain RIFF form and the extended `VP8X` form are both read, including
+/// files that carry ICC, Exif or XMP chunks ahead of the image. Lossy `VP8 `
+/// images are refused: this crate has no lossy decoder and will not pretend to
+/// have decoded one. Returns the number of RGBA bytes written.
+pub fn decode_webp(data: &[u8], out_rgba: &mut [u8]) -> Result<(u32, u32, usize), ()> {
+    let chunk = webp_image_chunk(data)?;
+    let (width, height, alpha_is_used) = webp_vp8l_dimensions(chunk)?;
+    let pixels = (width as usize).checked_mul(height as usize).ok_or(())?;
+    let required = pixels.checked_mul(4).ok_or(())?;
+    if required > out_rgba.len() {
+        return Err(());
+    }
+
+    let mut bits = WebpBits::new(&chunk[5..]);
+    webp_decode_argb(
+        &mut bits,
+        width as usize,
+        height as usize,
+        true,
+        webp_scratch(),
+        out_rgba,
+    )?;
+
+    // The decoder works in ARGB words; the platform's pixels are red first.
+    for index in 0..pixels {
+        let offset = index.checked_mul(4).ok_or(())?;
+        let end = offset.checked_add(4).ok_or(())?;
+        let pixel = out_rgba.get_mut(offset..end).ok_or(())?;
+        pixel.swap(0, 2);
+        if !alpha_is_used {
+            pixel[3] = 255;
+        }
+    }
+    Ok((width, height, required))
+}
+
 /// Decodes an image into a bitmap that borrows the caller's buffer.
 ///
 /// WHY this and not a function that allocates: the apps in this system have
@@ -3036,6 +4134,11 @@ pub fn decode_image(
         || name_ends_with(name, b".gif")
     {
         return decode_gif(data, out_rgba);
+    }
+    if (data.len() >= 12 && &data[..4] == b"RIFF" && &data[8..12] == b"WEBP")
+        || name_ends_with(name, b".webp")
+    {
+        return decode_webp(data, out_rgba);
     }
     Err(())
 }
@@ -4222,6 +5325,379 @@ mod tests {
             Ok((16, 16, 1024))
         );
         assert!(decode_image(b"not a jpeg", b"photo.jpg", &mut out).is_err());
+    }
+
+    // -- WebP builders -----------------------------------------------------
+
+    /// A least-significant-bit-first writer for synthetic VP8L streams.
+    struct Vp8lWriter {
+        bytes: Vec<u8>,
+        bit: u32,
+    }
+
+    impl Vp8lWriter {
+        fn new() -> Self {
+            Self {
+                bytes: Vec::new(),
+                bit: 0,
+            }
+        }
+
+        fn put(&mut self, value: u32, count: u32) {
+            for index in 0..count {
+                if self.bit == 0 {
+                    self.bytes.push(0);
+                }
+                if (value >> index) & 1 != 0 {
+                    let last = self.bytes.len() - 1;
+                    self.bytes[last] |= 1 << self.bit;
+                }
+                self.bit = (self.bit + 1) & 7;
+            }
+        }
+    }
+
+    /// A whole VP8L payload: the five-byte header followed by the bitstream.
+    fn vp8l_stream(width: u32, height: u32, alpha_hint: u32, body: Vp8lWriter) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.push(0x2F);
+        let packed = (width - 1) | ((height - 1) << 14) | (alpha_hint << 28);
+        out.extend_from_slice(&packed.to_le_bytes());
+        out.extend_from_slice(&body.bytes);
+        out
+    }
+
+    /// A RIFF/WEBP container around the given chunks.
+    fn riff_file(chunks: &[(&[u8; 4], &[u8])]) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(b"WEBP");
+        for (kind, payload) in chunks {
+            body.extend_from_slice(*kind);
+            body.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+            body.extend_from_slice(payload);
+            if payload.len() % 2 != 0 {
+                body.push(0);
+            }
+        }
+        let mut out = Vec::new();
+        out.extend_from_slice(b"RIFF");
+        out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        out.extend_from_slice(&body);
+        out
+    }
+
+    /// A simple prefix code naming one or two symbols of length one.
+    fn put_simple_code(writer: &mut Vp8lWriter, symbols: &[u16]) {
+        writer.put(1, 1);
+        writer.put(if symbols.len() == 2 { 1 } else { 0 }, 1);
+        if symbols[0] > 1 {
+            writer.put(1, 1);
+            writer.put(symbols[0] as u32, 8);
+        } else {
+            writer.put(0, 1);
+            writer.put(symbols[0] as u32, 1);
+        }
+        if symbols.len() == 2 {
+            writer.put(symbols[1] as u32, 8);
+        }
+    }
+
+    /// A normal prefix code with two symbols of length one, reached through a
+    /// two-symbol code-length code.
+    fn put_two_symbol_code(writer: &mut Vp8lWriter, alphabet: usize, symbols: [u16; 2]) {
+        writer.put(0, 1); // normal code
+        writer.put(0, 4); // four code-length codes
+        writer.put(0, 3); // 17: absent
+        writer.put(0, 3); // 18: absent
+        writer.put(1, 3); // 0: length one
+        writer.put(1, 3); // 1: length one
+        writer.put(0, 1); // max_symbol is the whole alphabet
+        for symbol in 0..alphabet {
+            let value = usize::from(symbols[0] as usize == symbol || symbols[1] as usize == symbol);
+            writer.put(value as u32, 1);
+        }
+    }
+
+    fn put_group(
+        writer: &mut Vp8lWriter,
+        green: &[u16],
+        red: &[u16],
+        blue: &[u16],
+        alpha: &[u16],
+        distance: &[u16],
+    ) {
+        put_simple_code(writer, green);
+        put_simple_code(writer, red);
+        put_simple_code(writer, blue);
+        put_simple_code(writer, alpha);
+        put_simple_code(writer, distance);
+    }
+
+    /// The main image header: no transforms, no cache, one prefix-code group.
+    fn put_stream_start(writer: &mut Vp8lWriter) {
+        writer.put(0, 1);
+        writer.put(0, 1);
+        writer.put(0, 1);
+    }
+
+    fn webp_one_pixel(green: u16, red: u16, blue: u16, alpha: u16, hint: u32) -> Vec<u8> {
+        let mut body = Vp8lWriter::new();
+        put_stream_start(&mut body);
+        put_group(&mut body, &[green], &[red], &[blue], &[alpha], &[0]);
+        vp8l_stream(1, 1, hint, body)
+    }
+
+    /// A plain RIFF/WEBP file holding one lossless image.
+    fn webp_file(image: &[u8]) -> Vec<u8> {
+        riff_file(&[(b"VP8L", image)])
+    }
+
+    #[test]
+    fn webp_lossless_decodes_a_single_pixel_literal() {
+        let _guard = scratch_guard();
+        let stream = webp_file(&webp_one_pixel(0x40, 0x20, 0x10, 0xFF, 0));
+        assert_eq!(decode_webp_header(&stream), Ok((1, 1)));
+        let mut out = [0u8; 4];
+        assert_eq!(decode_webp(&stream, &mut out), Ok((1, 1, 4)));
+        assert_eq!(&out, &[0x20, 0x40, 0x10, 0xFF]);
+    }
+
+    #[test]
+    fn webp_lossless_marks_pixels_opaque_when_the_alpha_hint_is_clear() {
+        let _guard = scratch_guard();
+        // The code stream says alpha zero, but the header declares that the
+        // image does not use alpha, so the output must still be opaque.
+        let stream = webp_file(&webp_one_pixel(1, 2, 3, 0, 0));
+        let mut out = [0u8; 4];
+        assert_eq!(decode_webp(&stream, &mut out), Ok((1, 1, 4)));
+        assert_eq!(&out, &[2, 1, 3, 255]);
+
+        let stream = webp_file(&webp_one_pixel(1, 2, 3, 0, 1));
+        assert_eq!(decode_webp(&stream, &mut out), Ok((1, 1, 4)));
+        assert_eq!(&out, &[2, 1, 3, 0]);
+    }
+
+    #[test]
+    fn webp_code_length_repeat_uses_the_previous_non_zero_length() {
+        let _guard = scratch_guard();
+        let mut writer = Vp8lWriter::new();
+        writer.put(0, 1); // normal prefix code
+        writer.put(5, 4); // nine code-length codes
+        // Order is 17, 18, 0, 1, 2, 3, 4, 5, 16.
+        for length in [0u32, 0, 1, 0, 0, 0, 0, 2, 2] {
+            writer.put(length, 3);
+        }
+        writer.put(0, 1); // max_symbol is the whole alphabet
+        // Symbol 0 has code 0; symbols 5 and 16 have codes 10 and 11.
+        writer.put(1, 1);
+        writer.put(0, 1); // literal length five
+        writer.put(0, 1); // literal length zero
+        writer.put(1, 1);
+        writer.put(1, 1); // repeat the previous non-zero length
+        writer.put(0, 2); // three times
+        writer.put(0, 1); // literal length zero
+
+        let mut bits = WebpBits::new(&writer.bytes);
+        let mut lengths = [0u8; 6];
+        let mut symbols = [0u16; 16];
+        let mut used = 0usize;
+        let table = webp_read_huffman(&mut bits, &mut lengths, &mut symbols, &mut used).unwrap();
+        // The zero between the two length-five runs must not become the source
+        // of the repeat: code 16 repeats the last non-zero length.
+        assert_eq!(lengths, [5, 0, 5, 5, 5, 0]);
+        assert_eq!(table.single, WEBP_NO_SYMBOL);
+    }
+
+    #[test]
+    fn webp_lossless_decodes_two_by_two_literals() {
+        let _guard = scratch_guard();
+        let mut body = Vp8lWriter::new();
+        put_stream_start(&mut body);
+        put_group(&mut body, &[10, 20], &[40, 50], &[60, 70], &[255], &[0]);
+        // Symbol order fixes the codes: the lower symbol of each tree is zero.
+        for (green, red, blue) in [(10u16, 40u16, 60u16), (20, 50, 70), (10, 40, 60), (20, 50, 70)]
+        {
+            body.put(u32::from(green == 20), 1);
+            body.put(u32::from(red == 50), 1);
+            body.put(u32::from(blue == 70), 1);
+        }
+        let stream = webp_file(&vp8l_stream(2, 2, 0, body));
+        let mut out = [0u8; 16];
+        assert_eq!(decode_webp(&stream, &mut out), Ok((2, 2, 16)));
+        assert_eq!(&out[0..4], &[40, 10, 60, 255]);
+        assert_eq!(&out[4..8], &[50, 20, 70, 255]);
+        assert_eq!(&out[8..12], &[40, 10, 60, 255]);
+        assert_eq!(&out[12..16], &[50, 20, 70, 255]);
+    }
+
+    #[test]
+    fn webp_lossless_preserves_the_alpha_channel() {
+        let _guard = scratch_guard();
+        let mut body = Vp8lWriter::new();
+        put_stream_start(&mut body);
+        put_group(&mut body, &[9], &[1], &[2], &[255, 64], &[0]);
+        // 64 sorts before 255, so its code is zero.
+        body.put(0, 1);
+        body.put(1, 1);
+        let stream = webp_file(&vp8l_stream(2, 1, 1, body));
+        let mut out = [0u8; 8];
+        assert_eq!(decode_webp(&stream, &mut out), Ok((2, 1, 8)));
+        assert_eq!(&out[0..4], &[1, 9, 2, 64]);
+        assert_eq!(&out[4..8], &[1, 9, 2, 255]);
+    }
+
+    #[test]
+    fn webp_lossless_follows_a_backward_reference() {
+        let _guard = scratch_guard();
+        let mut body = Vp8lWriter::new();
+        put_stream_start(&mut body);
+        put_two_symbol_code(&mut body, WEBP_GREEN_CODES, [5, 258]);
+        put_simple_code(&mut body, &[0x11]);
+        put_simple_code(&mut body, &[0x22]);
+        put_simple_code(&mut body, &[0xFF]);
+        put_simple_code(&mut body, &[1]);
+        // A literal pixel, then a length-three copy at distance one.
+        body.put(0, 1);
+        body.put(1, 1);
+        let stream = webp_file(&vp8l_stream(2, 2, 0, body));
+        let mut out = [0u8; 16];
+        assert_eq!(decode_webp(&stream, &mut out), Ok((2, 2, 16)));
+        for pixel in out.chunks_exact(4) {
+            assert_eq!(pixel, &[0x11, 5, 0x22, 0xFF]);
+        }
+    }
+
+    #[test]
+    fn webp_lossless_applies_subtract_green_and_predictor() {
+        let _guard = scratch_guard();
+        let mut body = Vp8lWriter::new();
+        body.put(1, 1); // a transform follows
+        body.put(2, 2); // subtract green
+        body.put(1, 1); // a transform follows
+        body.put(0, 2); // predictor
+        body.put(0, 3); // 4x4 blocks
+        body.put(0, 1); // the predictor image has no colour cache
+        put_group(&mut body, &[7], &[0], &[0], &[255], &[0]);
+        body.put(0, 1); // end of transforms
+        body.put(0, 1); // no colour cache
+        body.put(0, 1); // one prefix-code group
+        put_group(&mut body, &[0, 4], &[0, 10], &[0, 30], &[0], &[0]);
+        // Residuals below 0xff000000: the first three pixels share one colour,
+        // and the fourth adds four to green so the average is exercised.
+        for (green, red, blue) in [(1u32, 1u32, 1u32), (0, 0, 0), (0, 0, 0), (1, 0, 0)] {
+            body.put(green, 1);
+            body.put(red, 1);
+            body.put(blue, 1);
+        }
+        let stream = webp_file(&vp8l_stream(2, 2, 1, body));
+        let mut out = [0u8; 16];
+        assert_eq!(decode_webp(&stream, &mut out), Ok((2, 2, 16)));
+        assert_eq!(&out[0..4], &[14, 4, 34, 255]);
+        assert_eq!(&out[4..8], &[14, 4, 34, 255]);
+        assert_eq!(&out[8..12], &[14, 4, 34, 255]);
+        assert_eq!(&out[12..16], &[18, 8, 38, 255]);
+    }
+
+    #[test]
+    fn webp_lossless_reads_the_colour_cache() {
+        let _guard = scratch_guard();
+        let pixel = (0xFFu32 << 24) | (1 << 16) | (5 << 8) | 2;
+        let slot = (pixel.wrapping_mul(0x1e35_a7bd) >> 31) as u16;
+        let mut body = Vp8lWriter::new();
+        body.put(0, 1); // no transform
+        body.put(1, 1);
+        body.put(1, 4); // two cache entries
+        body.put(0, 1); // one prefix-code group
+        put_two_symbol_code(
+            &mut body,
+            WEBP_GREEN_CODES + 2,
+            [5, WEBP_GREEN_CODES as u16 + slot],
+        );
+        put_simple_code(&mut body, &[1]);
+        put_simple_code(&mut body, &[2]);
+        put_simple_code(&mut body, &[0xFF]);
+        put_simple_code(&mut body, &[0]);
+        body.put(0, 1); // literal green 5
+        body.put(1, 1); // the cache entry it filled
+        let stream = webp_file(&vp8l_stream(2, 1, 0, body));
+        let mut out = [0u8; 8];
+        assert_eq!(decode_webp(&stream, &mut out), Ok((2, 1, 8)));
+        assert_eq!(&out[0..4], &[1, 5, 2, 0xFF]);
+        assert_eq!(&out[4..8], &[1, 5, 2, 0xFF]);
+    }
+
+    #[test]
+    fn webp_lossless_reads_the_extended_container() {
+        let _guard = scratch_guard();
+        let image = webp_one_pixel(0x33, 0x44, 0x55, 0xFF, 0);
+        let mut vp8x = Vec::new();
+        vp8x.extend_from_slice(&[0, 0, 0, 0]);
+        vp8x.extend_from_slice(&[0, 0, 0]);
+        vp8x.extend_from_slice(&[0, 0, 0]);
+        let stream = riff_file(&[
+            (b"VP8X", &vp8x),
+            (b"ICCP", b"profile"),
+            (b"VP8L", &image),
+            (b"EXIF", b"exif"),
+        ]);
+        assert_eq!(decode_webp_header(&stream), Ok((1, 1)));
+        let mut out = [0u8; 4];
+        assert_eq!(decode_webp(&stream, &mut out), Ok((1, 1, 4)));
+        assert_eq!(&out, &[0x44, 0x33, 0x55, 0xFF]);
+    }
+
+    #[test]
+    fn webp_lossless_refuses_truncated_and_lossy_streams() {
+        let _guard = scratch_guard();
+        let mut out = [0u8; 16];
+        let image = webp_one_pixel(0x40, 0x20, 0x10, 0xFF, 0);
+        let stream = webp_file(&image);
+        assert!(decode_webp(&[], &mut out).is_err());
+        assert!(decode_webp(&stream[..11], &mut out).is_err());
+        let mut truncated = stream.clone();
+        truncated.truncate(stream.len() - 2);
+        assert!(decode_webp(&truncated, &mut out).is_err());
+
+        let mut header_only = image.clone();
+        header_only.truncate(5);
+        assert!(decode_webp(&webp_file(&header_only), &mut out).is_err());
+
+        let empty = riff_file(&[(b"VP8L", b"")]);
+        assert!(decode_webp(&empty, &mut out).is_err());
+
+        let lossy = riff_file(&[(b"VP8 ", &[0u8; 16])]);
+        assert!(decode_webp(&lossy, &mut out).is_err());
+        assert!(decode_webp_header(&lossy).is_err());
+
+        let mut bad_version = stream.clone();
+        bad_version[4] |= 0x20;
+        assert!(decode_webp(&bad_version, &mut out).is_err());
+    }
+
+    #[test]
+    fn webp_lossless_refuses_a_small_output_buffer() {
+        let _guard = scratch_guard();
+        let mut body = Vp8lWriter::new();
+        put_stream_start(&mut body);
+        put_group(&mut body, &[1], &[1], &[1], &[255], &[0]);
+        // A 2x2 image needs sixteen bytes, all four pixels being literals.
+        let stream = webp_file(&vp8l_stream(2, 2, 0, body));
+        let mut out = [0u8; 15];
+        assert!(decode_webp(&stream, &mut out).is_err());
+    }
+
+    #[test]
+    fn decode_image_routes_webp() {
+        let _guard = scratch_guard();
+        let stream = webp_file(&webp_one_pixel(0x40, 0x20, 0x10, 0xFF, 0));
+        let mut out = [0u8; 4];
+        assert_eq!(decode_image(&stream, b"mystery", &mut out), Ok((1, 1, 4)));
+        assert_eq!(&out, &[0x20, 0x40, 0x10, 0xFF]);
+        assert_eq!(
+            decode_image(&stream, b"picture.WEBP", &mut out),
+            Ok((1, 1, 4))
+        );
+        assert!(decode_image(b"not a webp", b"picture.webp", &mut out).is_err());
     }
 }
 
