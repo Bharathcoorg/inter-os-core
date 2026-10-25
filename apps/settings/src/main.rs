@@ -417,6 +417,8 @@ pub power_profile: Option<PowerProfile>,
     pub wallpaper_source: WallpaperSource,
     /// Outcome of the last write.
     pub wallpaper_write: WallpaperWrite,
+    /// The token of the last dispatched intent this app handled.
+    pub last_intent_token: u64,
     /// Whether the screen-lock panel is open instead of a section detail.
     pub screen_lock_open: bool,
     /// Which step of the credential flow is in progress.
@@ -558,6 +560,7 @@ impl SettingsApp {
             // would present an assumption as a reading.
             wallpaper_source: WallpaperSource::Unread,
             wallpaper_write: WallpaperWrite::Unattempted,
+            last_intent_token: 0,
             screen_lock_open: false,
             screen_lock_mode: ScreenLockMode::Idle,
             screen_lock_action: ScreenLockAction::Establish,
@@ -1606,6 +1609,14 @@ impl SettingsApp {
         let Some(pending) = std::content::parse_pending(&buf[..n]) else {
             return false;
         };
+        // WHY the token is remembered: the pending slot is peeked, not taken,
+        // so it stays readable until another dispatch replaces it. Without
+        // this the app would apply the same wallpaper or ringtone on every
+        // pass for as long as the dispatch remained the newest one.
+        if pending.token == self.last_intent_token {
+            return false;
+        }
+        self.last_intent_token = pending.token;
         if pending.kind != std::content::IntentKind::Action {
             return false;
         }

@@ -10,7 +10,7 @@
 
 use interos_std as std;
 
-use crate::{TrackStore, TITLE_MAX};
+use crate::{StoreState, TrackStore, TITLE_MAX};
 
 /// The shared storage area the platform's index walks.
 pub const STORAGE_ROOT: &str = "/storage";
@@ -53,6 +53,12 @@ pub enum PublishOutcome {
 pub enum ImportOutcome {
     /// `n` tracks were imported from the shared storage.
     Imported(usize),
+    /// `n` tracks were imported and `refused` audio files were found but not
+    /// persisted.
+    PartiallyImported(usize, usize),
+    /// `found` audio files were listed but the device refused to persist any
+    /// of them.
+    WriteRefused(usize),
     /// The device refused to list the shared storage.
     ListRefused,
     /// The listing held no audio files the library did not already hold.
@@ -254,7 +260,8 @@ pub fn import_from_storage(store: &mut TrackStore) -> ImportOutcome {
         Err(_) => return ImportOutcome::ListRefused,
     };
     let mut imported = 0usize;
-    imported += import_listing(store, &buf[..listed]);
+    let mut refused = 0usize;
+    imported += import_listing(store, &buf[..listed], &mut refused);
 
     // One level into each folder the storage holds, so the import finds the
     // files a person put in a folder and not only the ones at the top.
@@ -303,13 +310,23 @@ pub fn import_from_storage(store: &mut TrackStore) -> ImportOutcome {
         let Ok(listed) = std::fs_list(path_str, &mut inner) else {
             continue;
         };
-        imported += import_listing(store, &inner[..listed]);
+        imported += import_listing(store, &inner[..listed], &mut refused);
     }
 
-    if imported == 0 {
-        ImportOutcome::NoneFound
-    } else {
-        ImportOutcome::Imported(imported)
+    import_outcome(imported, refused)
+}
+
+/// Maps what the import found to what the screen may claim.
+///
+/// WHY the refusal count is separate from the search: a person who put audio
+/// in the storage and got a refused write must not be told that no audio was
+/// found.
+fn import_outcome(imported: usize, refused: usize) -> ImportOutcome {
+    match (imported, refused) {
+        (0, 0) => ImportOutcome::NoneFound,
+        (0, refused) => ImportOutcome::WriteRefused(refused),
+        (imported, 0) => ImportOutcome::Imported(imported),
+        (imported, refused) => ImportOutcome::PartiallyImported(imported, refused),
     }
 }
 
@@ -318,7 +335,7 @@ pub fn import_from_storage(store: &mut TrackStore) -> ImportOutcome {
 /// WHY a track the library already holds is skipped: the import runs on a
 /// button, and a person who presses it twice should not find their library
 /// full of copies.
-fn import_listing(store: &mut TrackStore, listing: &[u8]) -> usize {
+fn import_listing(store: &mut TrackStore, listing: &[u8], refused: &mut usize) -> usize {
     let mut imported = 0usize;
     for line in listing.split(|b| *b == b'\n') {
         if line.is_empty() {
@@ -348,6 +365,11 @@ fn import_listing(store: &mut TrackStore, listing: &[u8]) -> usize {
         // is stored as unknown rather than guessed.
         if store.add(&title[..n], 0) {
             imported += 1;
+        } else if matches!(store.state, StoreState::WriteRefused | StoreState::Full) {
+            // WHY a found file is counted separately: the person did put audio
+            // in the storage, so reporting "nothing was found" would describe
+            // a search that never happened. The store refused to keep it.
+            *refused += 1;
         }
     }
     imported
@@ -441,5 +463,16 @@ mod tests {
         let b = render_document(b"a very much longer title", true, 100_000, &mut long);
         assert_eq!(a, b);
         assert_eq!(a, DOC_BYTES);
+    }
+
+    #[test]
+    fn a_refused_write_is_not_reported_as_an_empty_search() {
+        // WHY: the old import reported both an empty listing and a refused
+        // persistence write as "nothing found", which told a person their
+        // audio was missing when the device had refused to store it.
+        assert_eq!(import_outcome(0, 0), ImportOutcome::NoneFound);
+        assert_eq!(import_outcome(0, 3), ImportOutcome::WriteRefused(3));
+        assert_eq!(import_outcome(2, 0), ImportOutcome::Imported(2));
+        assert_eq!(import_outcome(2, 1), ImportOutcome::PartiallyImported(2, 1));
     }
 }

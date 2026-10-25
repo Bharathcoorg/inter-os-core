@@ -1116,9 +1116,10 @@ pub fn parse_directory_listing(
                         item.path_len = pl;
                         item.file_size = size;
                         item.codec = detect_codec_from_name(name);
-                        item.duration_sec = 215; // Reference 3m35s fallback duration
-                        item.width = 680;
-                        item.height = 382;
+                        // A directory entry carries a name and a byte size,
+                        // not a frame size or a running time. Both stay zero
+                        // until the file's own header is read; the screen
+                        // draws an unread value as Unknown, never as a guess.
 
                         if playlist.add(item) {
                             added += 1;

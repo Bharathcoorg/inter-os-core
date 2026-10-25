@@ -6,6 +6,7 @@ development, package sideloading (.app, .rap, .wasm, .apk), real-time UART
 telemetry, and guest-backed QEMU telemetry and development controls.
 """
 
+import base64
 import http.server
 import socketserver
 import os
@@ -13,16 +14,20 @@ import sys
 import threading
 import socket
 import json
+import math
 import subprocess
 import time
 import re
 import hashlib
+import tempfile
 import urllib.parse
 import urllib.request
 import shutil
+import wave
 import zipfile
 import io
 import struct
+import zlib
 import ipaddress
 
 PORT = int(os.environ.get("STUDIO_PORT", 4300))
@@ -2758,6 +2763,214 @@ def _safe_download_name(url, content_type, disposition=None):
     return name
 
 
+# Uploads from the guest are kept outside the repository. They are a test
+# sink: the Studio proves the device sent the bytes, it does not pretend to be
+# the destination a real website would provide.
+UPLOAD_DIR = os.path.join(tempfile.gettempdir(), 'interos_uploads')
+MAX_UPLOAD_BYTES = 4 * 1024 * 1024
+SPEEDTEST_MIN_BYTES = 1024
+SPEEDTEST_MAX_BYTES = 1024 * 1024
+
+# One 1x1 baseline JPEG. It is a real JPEG stream, not a placeholder, so the
+# browser can download it and a decoder test can parse its markers.
+_JPEG_1X1 = base64.b64decode(
+    '/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0a'
+    'HBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAA'
+    'AAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AVN//2Q=='
+)
+
+
+def _png_fixture():
+    """Builds a small valid RGB PNG with no third-party encoder."""
+    width = height = 8
+    raw = bytearray()
+    for y in range(height):
+        raw.append(0)  # filter type None
+        for x in range(width):
+            raw.extend(((x * 32) & 0xFF, (y * 32) & 0xFF, 128))
+
+    def chunk(kind, data):
+        return (struct.pack('>I', len(data)) + kind + data
+                + struct.pack('>I', zlib.crc32(kind + data) & 0xFFFFFFFF))
+
+    ihdr = struct.pack('>IIBBBBB', width, height, 8, 2, 0, 0, 0)
+    return (b'\x89PNG\r\n\x1a\n'
+            + chunk(b'IHDR', ihdr)
+            + chunk(b'IDAT', zlib.compress(bytes(raw), 9))
+            + chunk(b'IEND', b''))
+
+
+def _bmp_fixture():
+    """Builds a 4x4 24-bit BMP with rows padded to four bytes."""
+    width = height = 4
+    pixels = bytearray()
+    for y in range(height):
+        row = bytearray()
+        for x in range(width):
+            row.extend((255 - x * 40, y * 40, 128))
+        while len(row) % 4:
+            row.append(0)
+        pixels.extend(row)
+    size = 14 + 40 + len(pixels)
+    header = (b'BM' + struct.pack('<IHHI', size, 0, 0, 54))
+    dib = struct.pack('<IiiHHIIiiII', 40, width, height, 1, 24, 0,
+                      len(pixels), 2835, 2835, 0, 0)
+    return header + dib + bytes(pixels)
+
+
+def _ppm_fixture():
+    width = height = 4
+    body = bytearray()
+    for y in range(height):
+        for x in range(width):
+            body.extend(((x * 60) & 0xFF, (y * 60) & 0xFF, 90))
+    return b'P6\n4 4\n255\n' + bytes(body)
+
+
+def _qoi_fixture():
+    width = height = 4
+    body = bytearray()
+    for y in range(height):
+        for x in range(width):
+            body.append(0xFE)  # QOI_OP_RGB
+            body.extend(((x * 60) & 0xFF, (y * 60) & 0xFF, 90))
+    return (b'qoif' + struct.pack('>IIBB', width, height, 3, 0)
+            + bytes(body) + b'\x00' * 7 + b'\x01')
+
+
+def _wav_fixture():
+    """Builds 0.25 s of a 440 Hz 16-bit mono tone at 8 kHz."""
+    buf = io.BytesIO()
+    rate = 8000
+    frames = rate // 4
+    with wave.open(buf, 'wb') as out:
+        out.setnchannels(1)
+        out.setsampwidth(2)
+        out.setframerate(rate)
+        samples = bytearray()
+        for i in range(frames):
+            value = int(12000 * math.sin(2 * math.pi * 440 * i / rate))
+            samples.extend(struct.pack('<h', value))
+        out.writeframes(bytes(samples))
+    return buf.getvalue()
+
+
+def _raw_fixture():
+    """36x72 RGB24 frames, the shape the video player's RAW decoder expects."""
+    width, height = 36, 72
+    body = bytearray()
+    for y in range(height):
+        for x in range(width):
+            body.extend(((x * 7) & 0xFF, (y * 3) & 0xFF, 64))
+    return bytes(body)
+
+
+def _mp3_fixture():
+    """Eight silent MPEG-1 Layer III frames at 44.1 kHz, 128 kbps.
+
+    WHY real frames: an MP3 decoder reads frame headers, so a silent stream
+    still has to be a frame stream. Zeroed main data decodes as silence,
+    and the file claims no audio content it does not carry.
+    """
+    header = bytes.fromhex('fffb9000')  # MPEG-1 Layer III, 128 kbps, 44.1 kHz
+    frame_size = 144 * 128000 // 44100  # 417 bytes, padding clear
+    return (header + bytes(frame_size - 4)) * 8
+
+
+def _mp4_box(box_type, payload):
+    return struct.pack('>I', 8 + len(payload)) + box_type + payload
+
+
+def _mp4_fixture():
+    """A structurally valid ISO BMFF container with no tracks.
+
+    WHY no tracks: a download exercises the container, and the device has
+    no H.264 decoder. A sample claiming a video track the device cannot
+    decode would be a false test.
+    """
+    ftyp = _mp4_box(b'ftyp', b'isom' + struct.pack('>I', 512) + b'isomiso2mp41')
+    mvhd = (
+        b'\x00\x00\x00\x00'                    # version 0, flags clear
+        + struct.pack('>II', 0, 0)             # creation, modification
+        + struct.pack('>I', 1000)              # timescale
+        + struct.pack('>I', 0)                 # duration
+        + struct.pack('>I', 0x00010000)        # rate 1.0
+        + struct.pack('>H', 0x0100)            # volume 1.0
+        + bytes(2)                             # reserved
+        + bytes(8)                             # reserved
+        + struct.pack('>9I', 0x00010000, 0, 0, 0, 0x00010000, 0, 0, 0, 0x40000000)
+        + bytes(24)                            # predefined
+        + struct.pack('>I', 2)                 # next track id
+    )
+    return ftyp + _mp4_box(b'moov', _mp4_box(b'mvhd', mvhd))
+
+
+# The only fixture names the gateway will serve. A name not in this table is
+# a 404; the route never reads a path from the request.
+_MEDIA_FIXTURES = {
+    'sample.png': ('image/png', _png_fixture),
+    'sample.jpg': ('image/jpeg', lambda: _JPEG_1X1),
+    'sample.gif': ('image/gif', lambda: bytes.fromhex(
+        '47494638396101000100800000000000ffffff21f90401000000002c00000000010001000002024401003b')),
+    'sample.bmp': ('image/bmp', _bmp_fixture),
+    'sample.ppm': ('image/x-portable-pixmap', _ppm_fixture),
+    'sample.qoi': ('image/qoi', _qoi_fixture),
+    'sample.wav': ('audio/wav', _wav_fixture),
+    'sample.mp3': ('audio/mpeg', _mp3_fixture),
+    'sample.mjpeg': ('video/x-motion-jpeg', lambda: _JPEG_1X1 * 2),
+    'sample.mp4': ('video/mp4', _mp4_fixture),
+    'sample.raw': ('video/x-raw', _raw_fixture),
+}
+_MEDIA_FIXTURE_CACHE = {}
+
+
+def media_fixture(name):
+    """Returns (bytes, content_type) for an allowlisted fixture, or None."""
+    entry = _MEDIA_FIXTURES.get(name)
+    if entry is None:
+        return None
+    cache_key = name
+    if cache_key not in _MEDIA_FIXTURE_CACHE:
+        content_type, builder = entry
+        _MEDIA_FIXTURE_CACHE[cache_key] = (builder(), content_type)
+    return _MEDIA_FIXTURE_CACHE[cache_key]
+
+
+def local_fixture_target(url_str):
+    """Names the fixture when `url_str` is the gateway's own fixture route.
+
+    WHY the proxy recognises this one URL: the guest browses through the
+    proxy, and the proxy's SSRF boundary refuses loopback by design. The
+    fixture table is the gateway's own data, so serving it here is a local
+    read of an allowlisted name, not an outbound request. Every other
+    loopback URL stays refused.
+    """
+    try:
+        parsed = urllib.parse.urlparse(url_str)
+        port = parsed.port
+    except ValueError:
+        return None
+    if parsed.scheme != 'http' or parsed.hostname not in ('127.0.0.1', 'localhost'):
+        return None
+    if port != 4300 or parsed.query or parsed.fragment:
+        return None
+    prefix = '/api/media/fixture/'
+    if not parsed.path.startswith(prefix):
+        return None
+    name = parsed.path[len(prefix):]
+    return name if name in _MEDIA_FIXTURES else None
+
+
+def speedtest_payload(size):
+    """Returns a deterministic payload of exactly `size` bytes.
+
+    A repeated block is fine here: this measures the transport, and the
+    response is never decompressed or rendered as a document.
+    """
+    block = bytes(range(256))
+    return (block * ((size + len(block) - 1) // len(block)))[:size]
+
+
 def is_safe_proxy_url(url_str):
     """
     SSRF Protection: Validates that an outbound HTTP/HTTPS request does not
@@ -3263,6 +3476,8 @@ POST_ONLY_ROUTES = frozenset({
     '/api/web/import',
     '/api/web/hmr/notify',
     '/api/permission/request',
+    '/api/speedtest/upload',
+    '/api/browser/upload',
 })
 
 GET_ONLY_ROUTES = frozenset({
@@ -3285,6 +3500,7 @@ GET_ONLY_ROUTES = frozenset({
     '/api/kernel/ipc',
     '/api/device/profiles',
     '/api/web/hmr',
+    '/api/speedtest/download',
 })
 
 
@@ -3781,6 +3997,50 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             }).encode())
             return
 
+        if parsed_path.path == '/api/speedtest/download':
+            query = urllib.parse.parse_qs(parsed_path.query)
+            raw_size = query.get('bytes', ['65536'])[0]
+            try:
+                size = int(raw_size)
+            except (TypeError, ValueError):
+                self._send_json(400, {'success': False, 'error': 'bytes must be an integer'})
+                return
+            if size < SPEEDTEST_MIN_BYTES or size > SPEEDTEST_MAX_BYTES:
+                self._send_json(400, {
+                    'success': False,
+                    'error': f'bytes must be between {SPEEDTEST_MIN_BYTES} and {SPEEDTEST_MAX_BYTES}',
+                })
+                return
+            payload = speedtest_payload(size)
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/octet-stream')
+            self.send_header('Content-Length', str(len(payload)))
+            self.send_header('X-Interos-Speedtest-Bytes', str(len(payload)))
+            self.send_header('Connection', 'close')
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+
+        if parsed_path.path.startswith('/api/media/fixture/'):
+            name = parsed_path.path.rsplit('/', 1)[-1]
+            fixture = media_fixture(name)
+            if fixture is None:
+                self._send_json(404, {
+                    'success': False,
+                    'error': f'Unknown fixture {name!r}',
+                    'available': sorted(_MEDIA_FIXTURES),
+                })
+                return
+            data, content_type = fixture
+            self.send_response(200)
+            self.send_header('Content-Type', content_type)
+            self.send_header('Content-Length', str(len(data)))
+            self.send_header('X-Interos-Filename', name)
+            self.send_header('Connection', 'close')
+            self.end_headers()
+            self.wfile.write(data)
+            return
+
         if parsed_path.path == '/api/browser/proxy':
             query = urllib.parse.parse_qs(parsed_path.query)
             target_url = query.get('url', [''])[0]
@@ -3789,6 +4049,18 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 self.send_header('Content-Type', 'application/json')
                 self.end_headers()
                 self.wfile.write(json.dumps({'error': 'Missing url parameter'}).encode())
+                return
+
+            fixture_name = local_fixture_target(target_url)
+            if fixture_name is not None:
+                data, content_type = media_fixture(fixture_name)
+                self.send_response(200)
+                self.send_header('Content-Type', content_type)
+                self.send_header('Content-Length', str(len(data)))
+                self.send_header('X-Interos-Filename', fixture_name)
+                self.send_header('Connection', 'close')
+                self.end_headers()
+                self.wfile.write(data)
                 return
 
             safe, reason = is_safe_proxy_url(target_url)
@@ -4055,6 +4327,76 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
         # assignment below would make the name function-local and every touch
         # payload that consults the orientation would raise UnboundLocalError.
         global serial_lines, current_device_orientation
+
+        if parsed_path.path == '/api/speedtest/upload':
+            content_length = self._bounded_content_length()
+            if content_length is None:
+                return
+            if content_length > MAX_UPLOAD_BYTES:
+                self._drain_body(min(content_length, 1024 * 1024))
+                self.close_connection = True
+                self.send_response(413)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Connection', 'close')
+                self.send_header('Content-Length', '0')
+                self.end_headers()
+                return
+            body = self.rfile.read(content_length) if content_length > 0 else b''
+            if len(body) != content_length:
+                self._send_json(400, {
+                    'success': False,
+                    'error': 'The request body ended before Content-Length',
+                    'received_bytes': len(body),
+                    'expected_bytes': content_length,
+                })
+                return
+            self._send_json(200, {
+                'success': True,
+                'received_bytes': len(body),
+                'sha256': hashlib.sha256(body).hexdigest(),
+            })
+            return
+
+        if parsed_path.path == '/api/browser/upload':
+            content_length = self._bounded_content_length()
+            if content_length is None:
+                return
+            if content_length > MAX_UPLOAD_BYTES:
+                self._drain_body(min(content_length, 1024 * 1024))
+                self.close_connection = True
+                self.send_response(413)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Connection', 'close')
+                self.send_header('Content-Length', '0')
+                self.end_headers()
+                return
+            body = self.rfile.read(content_length) if content_length > 0 else b''
+            if len(body) != content_length:
+                self._send_json(400, {
+                    'success': False,
+                    'error': 'The request body ended before Content-Length',
+                    'received_bytes': len(body),
+                    'expected_bytes': content_length,
+                })
+                return
+            declared_name = (self.headers.get('X-Interos-Filename') or 'upload.bin')[:120]
+            content_type = (self.headers.get('Content-Type') or 'application/octet-stream')[:120]
+            safe_name = _safe_download_name(
+                f'https://device.local/{declared_name}', content_type, None)
+            os.makedirs(UPLOAD_DIR, exist_ok=True)
+            stored_name = f'{time.time_ns()}_{safe_name}'
+            stored_path = os.path.join(UPLOAD_DIR, stored_name)
+            with open(stored_path, 'wb') as out:
+                out.write(body)
+            self._send_json(200, {
+                'success': True,
+                'received_bytes': len(body),
+                'sha256': hashlib.sha256(body).hexdigest(),
+                'stored_name': stored_name,
+                'stored_path': stored_path,
+                'content_type': content_type,
+            })
+            return
 
         if parsed_path.path == '/api/audio/volume':
             content_length = self._bounded_content_length()

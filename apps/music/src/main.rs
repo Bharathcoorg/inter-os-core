@@ -140,6 +140,8 @@ pub struct MusicApp {
     /// Transient user feedback message (e.g. "Ringtone: Nocturne").
     pub feedback: [u8; FEEDBACK_CAP],
     pub feedback_len: usize,
+    /// The token of the last dispatched intent this app handled.
+    pub last_intent_token: u64,
 }
 
 impl MusicApp {
@@ -168,7 +170,78 @@ impl MusicApp {
             order_len: 0,
             feedback: [0; FEEDBACK_CAP],
             feedback_len: 0,
+            last_intent_token: 0,
         }
+    }
+
+    /// Opens the audio file a caller dispatched to this player.
+    ///
+    /// WHY the import runs first: the dispatched payload is a document in the
+    /// shared storage area, and the library holds tracks rather than paths.
+    /// Importing is this app's own way of bringing a document in, so a
+    /// dispatched file and an imported one end up as the same kind of track.
+    pub fn handle_pending_intent(&mut self) -> bool {
+        let mut buf = [0u8; 320];
+        let n = match std::content::intent_pending(&mut buf) {
+            Ok(n) => n,
+            Err(_) => return false,
+        };
+        if n == 0 {
+            return false;
+        }
+        let Some(pending) = std::content::parse_pending(&buf[..n]) else {
+            return false;
+        };
+        // WHY the token is remembered: the pending slot is peeked, not taken,
+        // so it stays readable until another dispatch replaces it. Without
+        // this the player would re-import and re-select on every pass.
+        if pending.token == self.last_intent_token {
+            return false;
+        }
+        self.last_intent_token = pending.token;
+        if pending.kind != std::content::IntentKind::Mime {
+            return false;
+        }
+        let payload = pending.payload;
+        let name = payload
+            .as_bytes()
+            .rsplit(|b| *b == b'/')
+            .next()
+            .unwrap_or(b"");
+        if name.is_empty() || !library::is_audio_name(name) {
+            std::log("[MUSIC APP] A dispatched document is not audio this player can list.").ok();
+            return false;
+        }
+        match library::import_from_storage(&mut self.store) {
+            library::ImportOutcome::Imported(_) | library::ImportOutcome::PartiallyImported(_, _) => {}
+            library::ImportOutcome::WriteRefused(_) => {
+                std::log("[MUSIC APP] The dispatched audio file was found, but the settings write was refused, so it could not be added to the library.").ok();
+                return false;
+            }
+            library::ImportOutcome::ListRefused => {
+                std::log("[MUSIC APP] The device refused to list the shared storage, so the dispatched audio file could not be read.").ok();
+                return false;
+            }
+            library::ImportOutcome::NoneFound => {
+                std::log("[MUSIC APP] The dispatched audio file was not listed in the shared storage.").ok();
+                return false;
+            }
+        }
+        self.sync_list_extent();
+        let mut title = [0u8; music::TITLE_MAX];
+        let title_len = library::title_from_name(name, &mut title);
+        for i in 0..self.store.len() {
+            if let Some(track) = self.store.get(i) {
+                if track.title() == &title[..title_len] {
+                    self.current_track_idx = i;
+                    self.publish_now_playing();
+                    std::log("[MUSIC APP] Opened the audio file a caller dispatched to this player.").ok();
+                    return true;
+                }
+            }
+        }
+        std::log("[MUSIC APP] The dispatched audio file was not listed in the shared storage.").ok();
+        false
     }
 
     /// Re-derives the track list's scroll extent from the library's length.
@@ -510,7 +583,14 @@ impl MusicApp {
         let path_len = library::document_path(title, &mut path);
 
         // Ensure track document is published to storage
-        let _ = library::publish_library(&self.store);
+        if library::publish_library(&self.store) == library::PublishOutcome::WriteRefused {
+            // WHY this aborts: the ringtone setting stores a path to the
+            // document, and a path to a document that was never written would
+            // name a ringtone the device cannot play.
+            self.set_feedback(b"Ringtone not set: track document was not saved");
+            std::log("[MUSIC APP] The track document could not be written, so the ringtone was not set.").ok();
+            return false;
+        }
 
         if music::set_ringtone(&path[..path_len]) {
             let mut msg = [0u8; FEEDBACK_CAP];
@@ -1701,6 +1781,14 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
                     b"Track store not read",
                     b"The track store has not been read yet",
                 ),
+                store::StoreState::WriteRefused => (
+                    b"Tracks not saved",
+                    b"Audio was found, but the settings write was refused",
+                ),
+                store::StoreState::Full => (
+                    b"Library full",
+                    b"Audio was found, but the library holds no free slot",
+                ),
                 _ => (
                     b"No tracks",
                     b"No audio files were found in local storage",
@@ -1988,10 +2076,17 @@ fn handle_tap(app: &mut MusicApp, px: u32, py: u32) -> Tap<'static> {
         match outcome {
             ImportOutcome::Imported(n) => {
                 app.sync_list_extent();
-                std::log("[MUSIC APP] Imported a track from the shared storage; its length was not read.",
-                )
-                .ok();
+                std::log("[MUSIC APP] Imported audio files from the shared storage; their lengths were not read.").ok();
                 let _ = n;
+            }
+            ImportOutcome::PartiallyImported(n, refused) => {
+                app.sync_list_extent();
+                std::log("[MUSIC APP] Imported some audio files, but the settings store refused the rest.").ok();
+                let _ = (n, refused);
+            }
+            ImportOutcome::WriteRefused(found) => {
+                std::log("[MUSIC APP] Audio files were found, but the settings write was refused, so none were added.").ok();
+                let _ = found;
             }
             ImportOutcome::ListRefused => {
                 std::log("[MUSIC APP] The device refused to list the shared storage; nothing was imported.",
@@ -2282,6 +2377,9 @@ pub extern "C" fn _start() -> ! {
     music.store = store::TrackStore::load();
     music.sync_list_extent();
     music.restore_playback_state();
+    // A dispatch that launched this app is already waiting, so it is taken
+    // before the first frame is drawn.
+    music.handle_pending_intent();
     music.publish_now_playing();
     let load_note: &str = match music.store.state {
         store::StoreState::Empty => "Track store loaded: no tracks are stored yet.",
@@ -2433,6 +2531,12 @@ pub extern "C" fn _start() -> ! {
                     .ok();
                 }
                 if events & std::EVENT_TIMER_TICK != 0 {
+                    // A dispatch may reach this app while it is already
+                    // running, so the slot is polled rather than pushed.
+                    if music.handle_pending_intent() {
+                        repaint(surface, &music, Dirty::All);
+                        let _ = std::surface_flip();
+                    }
                     if music.state == PlaybackState::Playing && music.stream_dma_audio_block() {
                         music.total_dma_buffers_streamed += 1;
                     }

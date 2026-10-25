@@ -912,6 +912,7 @@ pub struct GalleryApp {
     pub last_tap_y: usize,
     pub launched_from_caller: bool,
     pub opened_from_caller: bool,
+    pub last_intent_token: u64,
     pub toast_msg: [u8; 48],
     pub toast_len: usize,
     pub toast_ticks: u32,
@@ -1028,6 +1029,7 @@ impl GalleryApp {
             last_tap_y: 0,
             launched_from_caller: false,
             opened_from_caller: false,
+            last_intent_token: 0,
             toast_msg: [0u8; 48],
             toast_len: 0,
             toast_ticks: 0,
@@ -1057,6 +1059,13 @@ impl GalleryApp {
         let Some(pending) = std::content::parse_pending(&buf[..n]) else {
             return false;
         };
+        // WHY the token is remembered: the pending slot is peeked, not taken,
+        // so it stays readable until another dispatch replaces it. Without
+        // this the gallery would re-open the same document on every pass.
+        if pending.token == self.last_intent_token {
+            return false;
+        }
+        self.last_intent_token = pending.token;
         std::log("[GALLERY] Received intent dispatch from caller.").ok();
         self.launched_from_caller = true;
         let payload = pending.payload;

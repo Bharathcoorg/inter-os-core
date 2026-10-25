@@ -1215,7 +1215,7 @@ pub extern "C" fn app_browser_trampoline() -> ! {
 
 /// Spawns the native Sovereign Browser & Decentralized Web Client in Ring 3.
 pub fn spawn_app_browser(id_security: TaskId) -> TaskId {
-    let mut caps = CapabilityTable::new(12);
+    let mut caps = CapabilityTable::new(16);
     caps.insert(Capability {
         id: CapabilityId(2301),
         cap_type: CapabilityType::SerialOutput,
@@ -1281,27 +1281,30 @@ pub fn spawn_app_browser(id_security: TaskId) -> TaskId {
         rights: Rights::READ,
         object_id: 0,
     }).ok();
+    // A download has to land somewhere the rest of the device can see, and the
+    // shared storage area is the one place every app may look. The browser
+    // saves into it and the file manager lists what the browser saved, through
+    // the platform's document index.
     caps.insert(Capability {
         id: CapabilityId(2310),
         cap_type: CapabilityType::FileSystemWrite,
         rights: Rights::READ | Rights::WRITE | Rights::GRANT,
         object_id: 0,
     }).ok();
-
-    // WHY the filesystem write: a download has to land somewhere the rest of
-    // the device can see, and the shared storage area is the one place every
-    // app may look. The browser saves into it and the file manager lists what
-    // the browser saved, through the platform's document index.
     caps.insert(Capability {
-        id: CapabilityId(2309),
-        cap_type: CapabilityType::FileSystemWrite,
-        rights: Rights::WRITE,
-        object_id: 0,
-    }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(2310),
+        id: CapabilityId(2311),
         cap_type: CapabilityType::ContentIndexRead,
         rights: Rights::READ,
+        object_id: 0,
+    }).ok();
+    // WHY the intent dispatch: the Downloads screen offers Open, and opening a
+    // downloaded document means handing it to the package that declared a
+    // handler for its MIME type. Without this grant the platform refuses the
+    // dispatch at runtime, so the button cannot keep the promise it makes.
+    caps.insert(Capability {
+        id: CapabilityId(2312),
+        cap_type: CapabilityType::ContentIntentDispatch,
+        rights: Rights::INVOKE,
         object_id: 0,
     }).ok();
     let id = spawn_user_process_with_parent(
@@ -1478,7 +1481,7 @@ pub extern "C" fn app_music_trampoline() -> ! {
 
 /// Spawns the native Sovereign Music & Hi-Fi Audio Synthesizer in Ring 3.
 pub fn spawn_app_music(id_security: TaskId) -> TaskId {
-    let mut caps = CapabilityTable::new(10);
+    let mut caps = CapabilityTable::new(12);
     caps.insert(Capability {
         id: CapabilityId(2601),
         cap_type: CapabilityType::SerialOutput,
@@ -1525,6 +1528,16 @@ pub fn spawn_app_music(id_security: TaskId) -> TaskId {
         id: CapabilityId(2608),
         cap_type: CapabilityType::EventPoll,
         rights: Rights::READ.union(Rights::INVOKE),
+        object_id: 0,
+    }).ok();
+    // WHY the content index: a downloaded file is handed to this player
+    // through the platform's pending-intent slot, and reading that slot is a
+    // content-index read. Without the grant the platform refuses the read and
+    // the dispatched audio never reaches the library.
+    caps.insert(Capability {
+        id: CapabilityId(2609),
+        cap_type: CapabilityType::ContentIndexRead,
+        rights: Rights::READ,
         object_id: 0,
     }).ok();
 
@@ -1869,7 +1882,7 @@ pub extern "C" fn app_video_player_trampoline() -> ! {
 
 /// Spawns the native Sovereign Video Player & Media Center in Ring 3.
 pub fn spawn_app_video_player(id_security: TaskId) -> TaskId {
-    let mut caps = CapabilityTable::new(10);
+    let mut caps = CapabilityTable::new(12);
     caps.insert(Capability {
         id: CapabilityId(2920),
         cap_type: CapabilityType::SerialOutput,
@@ -1916,6 +1929,16 @@ pub fn spawn_app_video_player(id_security: TaskId) -> TaskId {
         id: CapabilityId(2927),
         cap_type: CapabilityType::EventPoll,
         rights: Rights::READ.union(Rights::INVOKE),
+        object_id: 0,
+    }).ok();
+    // WHY the content index: a downloaded file is handed to this player
+    // through the platform's pending-intent slot, and reading that slot is a
+    // content-index read. Without the grant the platform refuses the read and
+    // the dispatched video never reaches the playlist.
+    caps.insert(Capability {
+        id: CapabilityId(2928),
+        cap_type: CapabilityType::ContentIndexRead,
+        rights: Rights::READ,
         object_id: 0,
     }).ok();
 

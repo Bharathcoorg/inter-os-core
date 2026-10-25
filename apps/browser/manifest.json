@@ -17,7 +17,8 @@
     "CAP_NETWORK_SOCKET",
     "CAP_NETWORK_SEND",
     "CAP_NETWORK_RECEIVE",
-    "CAP_CONTENT_INDEX"
+    "CAP_CONTENT_INDEX",
+    "CAP_CONTENT_INTENT"
   ],
   "intents": {
     "scheme": [

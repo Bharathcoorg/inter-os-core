@@ -175,6 +175,8 @@ pub struct VideoApp {
     pub speed_accum_ms: u32,
     pub library_scroll: usize,
     pub frame_counter: u32,
+    /// The token of the last dispatched intent this app handled.
+    pub last_intent_token: u64,
 }
 
 impl VideoApp {
@@ -200,6 +202,7 @@ impl VideoApp {
             speed_accum_ms: 0,
             library_scroll: 0,
             frame_counter: 0,
+            last_intent_token: 0,
         }
     }
 
@@ -394,9 +397,9 @@ impl VideoApp {
         for i in 0..self.playlist.count {
             let item = &mut self.playlist.items[i];
             if item.codec == VideoCodec::H264 {
-                item.width = 1920;
-                item.height = 1080;
-                item.duration_sec = 215;
+                // No box parser reads this frame size or running time yet,
+                // so both stay unread rather than being filled with a
+                // plausible-looking 1080p/3m35s.
                 continue;
             }
             let path_str = item.path_str();
@@ -432,6 +435,70 @@ impl VideoApp {
             }
         }
     }
+
+    /// Opens the video file a caller dispatched to this player.
+    ///
+    /// WHY the storage is rescanned first: the payload is a document in the
+    /// shared storage area, and the playlist is the app's list of the files
+    /// that area holds. Scanning is how a document becomes an entry that can
+    /// be selected.
+    pub fn handle_pending_intent(&mut self) -> bool {
+        let mut buf = [0u8; 320];
+        let n = match std::content::intent_pending(&mut buf) {
+            Ok(n) => n,
+            Err(_) => return false,
+        };
+        if n == 0 {
+            return false;
+        }
+        let Some(pending) = std::content::parse_pending(&buf[..n]) else {
+            return false;
+        };
+        // WHY the token is remembered: the pending slot is peeked, not taken,
+        // so it stays readable until another dispatch replaces it. Without
+        // this the player would reload the same file on every pass.
+        if pending.token == self.last_intent_token {
+            return false;
+        }
+        self.last_intent_token = pending.token;
+        if pending.kind != std::content::IntentKind::Mime {
+            return false;
+        }
+        let payload = pending.payload;
+        let name = payload
+            .as_bytes()
+            .rsplit(|b| *b == b'/')
+            .next()
+            .unwrap_or(b"");
+        if name.is_empty() || !video_player::has_video_suffix(name) {
+            std::log("[VIDEO PLAYER] A dispatched document is not a video this player can list.").ok();
+            return false;
+        }
+        self.rescan_storage();
+        for i in 0..self.playlist.count {
+            if self.playlist.items[i].path_str() == payload {
+                self.playlist.select(i);
+                self.load_current_track();
+                std::log("[VIDEO PLAYER] Opened the video file a caller dispatched to this player.").ok();
+                return true;
+            }
+        }
+        std::log("[VIDEO PLAYER] The dispatched video file was not listed in the shared storage.").ok();
+        false
+    }
+}
+
+/// In `out`, the running time a known duration names, or the unread marker.
+///
+/// WHY the marker exists: a duration of zero is what a header nobody has read
+/// yields, and drawing "0:00" for it would claim the media is empty instead of
+/// reporting that its length is unknown.
+fn duration_label(known: bool, seconds: u32, negative: bool, out: &mut [u8; 12]) -> usize {
+    if !known {
+        out[..5].copy_from_slice(b"--:--");
+        return 5;
+    }
+    format_time(seconds, negative, out)
 }
 
 // -----------------------------------------------------------------------------
@@ -603,7 +670,12 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
                 }
 
                 let mut rbuf = [0u8; 12];
-                let rlen = format_time(app.remaining_sec(), true, &mut rbuf);
+                let rlen = duration_label(
+                    app.duration_sec > 0,
+                    app.remaining_sec(),
+                    true,
+                    &mut rbuf,
+                );
                 if let Some(col) = draw_text(x, y, 600, 1120, 2, &rbuf[..rlen], COLOR_TEXT_MUTED, bg_hud) {
                     return col;
                 }
@@ -837,7 +909,7 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
 
             // Duration
             let mut d_buf = [0u8; 12];
-            let dn = format_time(item.duration_sec, false, &mut d_buf);
+            let dn = duration_label(item.duration_sec > 0, item.duration_sec, false, &mut d_buf);
             meta_buf[ml..ml + dn].copy_from_slice(&d_buf[..dn]);
             ml += dn;
 
@@ -1066,7 +1138,7 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
 
         // Remaining Time Text in Scale 2 Body
         let mut rbuf = [0u8; 12];
-        let rlen = format_time(app.remaining_sec(), true, &mut rbuf);
+        let rlen = duration_label(app.duration_sec > 0, app.remaining_sec(), true, &mut rbuf);
         if let Some(col) = draw_text(x, y, 608, 606, 2, &rbuf[..rlen], COLOR_TEXT_MUTED, COLOR_BG) {
             return col;
         }
@@ -1343,7 +1415,16 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
                 if let Some(t_col) = draw_text(x, y, SHEET_RECT.x + 24, SHEET_RECT.y + 96, 2, b"Canvas:", COLOR_TEXT_MUTED, COLOR_SHEET_CARD) {
                     return t_col;
                 }
-                if let Some(t_col) = draw_text(x, y, SHEET_RECT.x + 140, SHEET_RECT.y + 96, 2, b"680 x 382 (16:9 Display)", COLOR_TEXT_PRIMARY, COLOR_SHEET_CARD) {
+                // The frame size comes from the selected file's own header;
+                // a file whose header nobody read says Unknown.
+                let (src_w, src_h) = app
+                    .playlist
+                    .current_item()
+                    .map(|item| (item.width, item.height))
+                    .unwrap_or((0, 0));
+                let mut res_buf = [0u8; 24];
+                let res_len = format_resolution(src_w, src_h, &mut res_buf);
+                if let Some(t_col) = draw_text(x, y, SHEET_RECT.x + 140, SHEET_RECT.y + 96, 2, &res_buf[..res_len], COLOR_TEXT_PRIMARY, COLOR_SHEET_CARD) {
                     return t_col;
                 }
 
@@ -1351,10 +1432,19 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
                 if let Some(t_col) = draw_text(x, y, SHEET_RECT.x + 24, SHEET_RECT.y + 132, 2, b"Decoder:", COLOR_TEXT_MUTED, COLOR_SHEET_CARD) {
                     return t_col;
                 }
+                // Only the formats this app genuinely decodes claim a
+                // decoder. Everything else says so instead of naming a
+                // pipeline that would have to invent its output.
                 let dec_label: &[u8] = if let DecoderStatus::HardwareUnavailable(_) = app.status {
                     b"Unavailable (No HW H.264)"
                 } else {
-                    b"InterOS Native Pipeline"
+                    match app.current_codec() {
+                        VideoCodec::Mjpeg => b"Software (MJPEG)",
+                        VideoCodec::PpmP6 | VideoCodec::RawRgb | VideoCodec::RawRgba => {
+                            b"Software (built-in)"
+                        }
+                        _ => b"No decoder bound",
+                    }
                 };
                 if let Some(t_col) = draw_text(x, y, SHEET_RECT.x + 140, SHEET_RECT.y + 132, 2, dec_label, COLOR_TEXT_PRIMARY, COLOR_SHEET_CARD) {
                     return t_col;
@@ -1417,6 +1507,22 @@ fn merge_dirty(a: Dirty, b: Dirty) -> Dirty {
         return a;
     }
     Dirty::All
+}
+
+/// Toggles the transport without claiming playback on an unknown timeline.
+///
+/// WHY the running time gates the Playing state: the position advances only
+/// over a known duration, so a file whose duration was never read would sit
+/// in Playing without moving. Paused is the honest state for that file.
+fn toggle_playback(app: &mut VideoApp) {
+    if app.state == PlaybackState::Playing {
+        app.state = PlaybackState::Paused;
+    } else if app.duration_sec > 0 {
+        app.state = PlaybackState::Playing;
+    } else {
+        app.state = PlaybackState::Paused;
+        std::log("[VIDEO APP] Running time unknown; the position cannot advance.").ok();
+    }
 }
 
 fn render_video_band(surface: u32, app: &VideoApp, y0: usize, y1: usize) {
@@ -1503,11 +1609,7 @@ fn handle_touch(app: &mut VideoApp, px: u32, py: u32) -> EventAction {
 
             // Play/Pause button in landscape
             if Rect::new(320, 1170, 80, 80).contains(x, y) {
-                app.state = if app.state == PlaybackState::Playing {
-                    PlaybackState::Paused
-                } else {
-                    PlaybackState::Playing
-                };
+                toggle_playback(app);
                 let _ = std::audio_haptic_click();
                 return EventAction::Redraw(Dirty::All);
             }
@@ -1610,11 +1712,7 @@ fn handle_touch(app: &mut VideoApp, px: u32, py: u32) -> EventAction {
 
     // Play/Pause Button
     if PLAY_HIT.contains(x, y) {
-        app.state = if app.state == PlaybackState::Playing {
-            PlaybackState::Paused
-        } else {
-            PlaybackState::Playing
-        };
+        toggle_playback(app);
         let _ = std::audio_haptic_click();
         return EventAction::Redraw(Dirty::All);
     }
@@ -1723,6 +1821,9 @@ pub extern "C" fn _start() -> ! {
 
     // Scan real video storage from /storage/videos and /storage/downloads
     app.rescan_storage();
+    // A dispatch that launched this app is already waiting, so it wins over
+    // the first entry the scan happened to find.
+    app.handle_pending_intent();
     if app.playlist.count > 0 {
         app.load_current_track();
     }
@@ -1770,11 +1871,7 @@ pub extern "C" fn _start() -> ! {
                                         std::exit_with_code(0);
                                     }
                                     code if code == b' ' as u32 => {
-                                        app.state = if app.state == PlaybackState::Playing {
-                                            PlaybackState::Paused
-                                        } else {
-                                            PlaybackState::Playing
-                                        };
+                                        toggle_playback(&mut app);
                                         dirty = merge_dirty(dirty, Dirty::All);
                                     }
                                     std::input_key_code::ARROW_LEFT => {
@@ -1865,6 +1962,12 @@ pub extern "C" fn _start() -> ! {
 
                 // Timer tick for playback progression taking speed into account
                 if events & std::EVENT_TIMER_TICK != 0 {
+                    // A dispatch may reach this app while it is already
+                    // running, so the slot is polled rather than pushed.
+                    if app.handle_pending_intent() && surface > 0 {
+                        repaint(surface, &app, Dirty::All);
+                        let _ = std::surface_flip();
+                    }
                     if app.state == PlaybackState::Playing && app.duration_sec > 0 {
                         let delta_ms = (150 * app.speed.multiplier_milli()) / 1000;
                         app.speed_accum_ms += delta_ms;

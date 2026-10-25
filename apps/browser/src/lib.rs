@@ -247,6 +247,185 @@ pub fn format_proxy_request(target_url: &[u8], out: &mut [u8]) -> usize {
     cursor
 }
 
+/// The most a single browser upload will send.
+///
+/// WHY this matches the gateway's own cap: the gateway refuses a body it
+/// cannot hold, and an upload the browser knows will be refused should be
+/// refused before a byte goes on the wire.
+pub const MAX_UPLOAD_BYTES: usize = 4 * 1024 * 1024;
+
+/// Appends a decimal number to a buffer.
+fn append_decimal(out: &mut [u8], mut n: usize, mut value: u64) -> usize {
+    let mut digits = [0u8; 20];
+    let mut len = 0usize;
+    loop {
+        digits[len] = b'0' + (value % 10) as u8;
+        len += 1;
+        value /= 10;
+        if value == 0 {
+            break;
+        }
+    }
+    while len > 0 {
+        len -= 1;
+        if n >= out.len() {
+            break;
+        }
+        out[n] = digits[len];
+        n += 1;
+    }
+    n
+}
+
+/// Appends a filename that is safe to put in a request header.
+///
+/// WHY only the last path component and a small alphabet: the name is
+/// copied into an HTTP header, and a newline or a colon from the file
+/// system would end the header or start another one. The gateway turns
+/// this name back into a stored name, so the two ends agree on one
+/// spelling.
+fn append_header_filename(out: &mut [u8], mut n: usize, raw: &[u8]) -> usize {
+    if raw.is_empty() {
+        return append_bytes(out, n, b"upload.bin");
+    }
+    let name = match raw.iter().rposition(|&b| b == b'/' || b == b'\\') {
+        Some(slash) => &raw[slash + 1..],
+        None => raw,
+    };
+    let start = n;
+    for &b in name {
+        if n >= out.len() {
+            break;
+        }
+        if b.is_ascii_alphanumeric() || b == b'.' || b == b'-' || b == b'_' {
+            out[n] = b;
+            n += 1;
+        } else if b == b' ' {
+            out[n] = b'_';
+            n += 1;
+        }
+    }
+    if n == start {
+        append_bytes(out, n, b"upload.bin")
+    } else {
+        n
+    }
+}
+
+/// Appends a media type that is safe to put in a request header.
+fn append_header_mime(out: &mut [u8], mut n: usize, raw: &[u8]) -> usize {
+    let semi = raw.iter().position(|&b| b == b';').unwrap_or(raw.len());
+    let value = trim_ascii(&raw[..semi]);
+    let start = n;
+    for &b in value {
+        if n >= out.len() {
+            break;
+        }
+        if b.is_ascii_alphanumeric() || b == b'/' || b == b'+' || b == b'.' || b == b'-' {
+            out[n] = b;
+            n += 1;
+        }
+    }
+    if n == start {
+        append_bytes(out, n, b"application/octet-stream")
+    } else {
+        n
+    }
+}
+
+/// Copies a content type as the bare media type, without its parameters.
+///
+/// WHY the parameters are dropped: the platform's handler registry keys a
+/// handler by media type, and `image/png; charset=binary` is not the key
+/// `image/png`. A type that carries nothing usable becomes
+/// `application/octet-stream`, which is what the registry will also call an
+/// unknown file.
+pub fn bare_mime(raw: &[u8], out: &mut [u8]) -> usize {
+    append_header_mime(out, 0, raw)
+}
+
+/// Formats the upload the browser sends to the Studio gateway.
+///
+/// WHY the file is the request body and the name travels in a header:
+/// the gateway's upload route stores the bytes it receives and reports
+/// the count back, so there is no form syntax to get wrong and the body
+/// is exactly the file.
+pub fn format_upload_request(
+    filename: &[u8],
+    content_type: &[u8],
+    content_length: usize,
+    out: &mut [u8],
+) -> usize {
+    let mut n = append_bytes(out, 0, b"POST /api/browser/upload HTTP/1.1\r\nHost: 127.0.0.1:4300\r\nContent-Type: ");
+    n = append_header_mime(out, n, content_type);
+    n = append_bytes(out, n, b"\r\nContent-Length: ");
+    n = append_decimal(out, n, content_length as u64);
+    n = append_bytes(out, n, b"\r\nX-Interos-Filename: ");
+    n = append_header_filename(out, n, filename);
+    append_bytes(out, n, b"\r\nConnection: close\r\n\r\n")
+}
+
+/// Formats a speed-test download request for a bounded payload.
+pub fn format_speedtest_download_request(bytes: usize, out: &mut [u8]) -> usize {
+    let mut n = append_bytes(out, 0, b"GET /api/speedtest/download?bytes=");
+    n = append_decimal(out, n, bytes as u64);
+    append_bytes(
+        out,
+        n,
+        b" HTTP/1.1\r\nHost: 127.0.0.1:4300\r\nAccept: application/octet-stream\r\nConnection: close\r\n\r\n",
+    )
+}
+
+/// Formats a speed-test upload request for a body of `content_length` bytes.
+pub fn format_speedtest_upload_request(content_length: usize, out: &mut [u8]) -> usize {
+    let mut n = append_bytes(
+        out,
+        0,
+        b"POST /api/speedtest/upload HTTP/1.1\r\nHost: 127.0.0.1:4300\r\nContent-Type: application/octet-stream\r\nContent-Length: ",
+    );
+    n = append_decimal(out, n, content_length as u64);
+    append_bytes(out, n, b"\r\nConnection: close\r\n\r\n")
+}
+
+/// Reads an unsigned integer field out of the gateway's JSON reply.
+///
+/// WHY the local parser and not a document model: the replies the browser
+/// asks for are flat objects of scalars, and the one number that matters
+/// here is the byte count the gateway says it received.
+pub fn json_u64_field(json: &[u8], key: &[u8]) -> Option<u64> {
+    let mut pattern = [0u8; 48];
+    if key.len() + 2 > pattern.len() {
+        return None;
+    }
+    pattern[0] = b'"';
+    pattern[1..1 + key.len()].copy_from_slice(key);
+    pattern[1 + key.len()] = b'"';
+    let plen = key.len() + 2;
+    let mut pos = json.windows(plen).position(|w| w == &pattern[..plen])? + plen;
+    while pos < json.len() && json[pos].is_ascii_whitespace() {
+        pos += 1;
+    }
+    if pos >= json.len() || json[pos] != b':' {
+        return None;
+    }
+    pos += 1;
+    while pos < json.len() && json[pos].is_ascii_whitespace() {
+        pos += 1;
+    }
+    let mut value: u64 = 0;
+    let mut digits = 0usize;
+    while pos < json.len() && json[pos].is_ascii_digit() {
+        value = value.checked_mul(10)?.checked_add((json[pos] - b'0') as u64)?;
+        pos += 1;
+        digits += 1;
+    }
+    if digits == 0 {
+        None
+    } else {
+        Some(value)
+    }
+}
+
 /// Extracts the HTML body from a proxy JSON response `{"success": true, ..., "html": "..."}`
 /// without heap allocation, unescaping `\"`, `\n`, `\r`, `\t`, and `\/`.
 pub fn extract_proxy_html(json: &[u8], out: &mut [u8]) -> usize {
@@ -3851,5 +4030,78 @@ mod tests {
             "/storage/downloads/dl_4_demo.png"
         );
         assert!(!is_download_path(core::str::from_utf8(&out[..n]).unwrap()));
+    }
+
+    /// The upload request carries the file as its body, and the name
+    /// cannot break out of the header it travels in.
+    #[test]
+    fn test_the_upload_request_names_the_file_without_header_injection() {
+        let mut out = [0u8; 512];
+        let n = format_upload_request(
+            b"/storage/downloads/evil\r\nX-Injected: 1.png",
+            b"image/png; charset=binary",
+            12345,
+            &mut out,
+        );
+        let text = core::str::from_utf8(&out[..n]).unwrap();
+        assert!(text.starts_with("POST /api/browser/upload HTTP/1.1\r\n"));
+        assert!(text.contains("Content-Length: 12345\r\n"));
+        assert!(text.contains("Content-Type: image/png\r\n"));
+        assert!(text.contains("X-Interos-Filename: evilX-Injected_1.png\r\n"));
+        // The name introduced no second header line.
+        assert_eq!(text.matches("\r\nX-Injected:").count(), 0);
+        assert_eq!(text.matches("X-Interos-Filename:").count(), 1);
+        assert!(text.ends_with("\r\n\r\n"));
+    }
+
+    /// A name that sanitises to nothing still produces a usable file name.
+    #[test]
+    fn test_an_upload_with_no_usable_name_still_names_a_file() {
+        let mut out = [0u8; 256];
+        let n = format_upload_request(b"///", b"", 7, &mut out);
+        let text = core::str::from_utf8(&out[..n]).unwrap();
+        assert!(text.contains("X-Interos-Filename: upload.bin\r\n"));
+        assert!(text.contains("Content-Type: application/octet-stream\r\n"));
+    }
+
+    /// The speed-test requests name the exact payload the gateway will
+    /// send or expect.
+    #[test]
+    fn test_speedtest_requests_name_their_byte_count() {
+        let mut out = [0u8; 256];
+        let n = format_speedtest_download_request(131072, &mut out);
+        let text = core::str::from_utf8(&out[..n]).unwrap();
+        assert!(text.starts_with("GET /api/speedtest/download?bytes=131072 "));
+        assert!(text.contains("Host: 127.0.0.1:4300\r\n"));
+
+        let n = format_speedtest_upload_request(65536, &mut out);
+        let text = core::str::from_utf8(&out[..n]).unwrap();
+        assert!(text.starts_with("POST /api/speedtest/upload HTTP/1.1\r\n"));
+        assert!(text.contains("Content-Length: 65536\r\n"));
+    }
+
+    /// The gateway's byte count is read only when the field is a number.
+    #[test]
+    fn test_the_gateway_byte_count_is_read_from_its_reply() {
+        let json = br#"{"success": true, "received_bytes": 102400, "sha256": "ab"}"#;
+        assert_eq!(json_u64_field(json, b"received_bytes"), Some(102400));
+        assert_eq!(json_u64_field(json, b"missing"), None);
+        assert_eq!(json_u64_field(br#"{"received_bytes": "nope"}"#, b"received_bytes"), None);
+        assert_eq!(MAX_UPLOAD_BYTES, 4 * 1024 * 1024);
+    }
+
+    /// The media type handed to the handler registry carries no parameters,
+    /// because the registry keys a handler by the type itself.
+    #[test]
+    fn test_the_bare_media_type_drops_parameters() {
+        let mut out = [0u8; 64];
+        let n = bare_mime(b"image/png; charset=binary", &mut out);
+        assert_eq!(core::str::from_utf8(&out[..n]).unwrap(), "image/png");
+
+        let n = bare_mime(b"", &mut out);
+        assert_eq!(
+            core::str::from_utf8(&out[..n]).unwrap(),
+            "application/octet-stream"
+        );
     }
 }

@@ -79,6 +79,34 @@ static mut FILE_BUF: [u8; MAX_FILE_BYTES] = [0; MAX_FILE_BYTES];
 /// The largest local document the browser will read.
 const MAX_FILE_BYTES: usize = 64 * 1024;
 
+/// The payloads the built-in speed test moves in each direction.
+///
+/// WHY these sizes: the download stays inside the response buffer beside
+/// its headers, and the upload is large enough to outlast the TCP
+/// handshake and the gateway's first read. Both are the gateway's own
+/// fixed payloads, so the byte count is known before the request is sent.
+const SPEEDTEST_DOWNLOAD_BYTES: usize = 128 * 1024;
+const SPEEDTEST_UPLOAD_BYTES: usize = 64 * 1024;
+const SPEEDTEST_LATENCY_BYTES: usize = 1024;
+
+/// The largest slice one request-body send carries.
+///
+/// WHY this is below the kernel's segment cap: `tcp_send` refuses a payload
+/// above one segment, and a body longer than that is sent in steps.
+const TCP_SEND_CHUNK: usize = 1200;
+
+/// How long a request body may take to go on the wire.
+const TCP_BODY_TIMEOUT_TICKS: u64 = 60_000;
+
+/// How many files the upload picker lists.
+const MAX_PICK_FILES: usize = 8;
+
+/// The body the upload test sends.
+///
+/// WHY a static: the payload is 64 KiB, and a local of that size does not
+/// belong on the task stack. It is filled before each run.
+static mut UPLOAD_TEST_BUF: [u8; SPEEDTEST_UPLOAD_BYTES] = [0; SPEEDTEST_UPLOAD_BYTES];
+
 /// The buffer the reader document is parsed into.
 static mut READER_BUF: [u8; browser::MAX_READER_BYTES] = [0; browser::MAX_READER_BYTES];
 
@@ -144,6 +172,12 @@ struct FetchOutcome {
     truncated: bool,
     /// The last error the transport reported, if any.
     error: i64,
+    /// The tick at which the first response byte arrived.
+    ///
+    /// WHY it is kept: the speed test reports a round trip only from a
+    /// reading the clock actually gave, so the first byte's time is
+    /// measured rather than inferred from the whole transfer.
+    first_byte_tick: Option<u64>,
 }
 
 /// Fetches an HTTP response over TCP.
@@ -164,6 +198,7 @@ fn fetch_over_tcp(
         bytes: 0,
         truncated: false,
         error: 0,
+        first_byte_tick: None,
     };
 
     // The initial sequence number is the device's choice, and a fresh one
@@ -238,6 +273,9 @@ fn fetch_over_tcp(
             Ok(0) => break,
             Ok(n) => {
                 total += n;
+                if outcome.first_byte_tick.is_none() {
+                    outcome.first_byte_tick = std::get_ticks().ok();
+                }
             }
             Err(code) => {
                 if code != NOT_READY {
@@ -263,6 +301,188 @@ fn fetch_over_tcp(
 
     let _ = std::tcp_close(connection);
     outcome.bytes = total;
+    outcome
+}
+
+/// The bytes an upload sends after its request head.
+enum UploadSource<'a> {
+    /// A body already held in memory, used by the speed test.
+    Bytes(&'a [u8]),
+    /// A file read in steps, so an upload is not bounded by one buffer.
+    File { path: &'a str, length: usize },
+}
+
+/// The outcome of an upload over TCP.
+struct UploadOutcome {
+    /// The body bytes the transport accepted.
+    sent: usize,
+    /// The number of response bytes received.
+    response: usize,
+    /// The last error the transport reported, if any.
+    error: i64,
+}
+
+/// Sends `bytes` in segment-sized steps.
+///
+/// WHY the retry loop: `tcp_send` refuses with `NotReady` until the
+/// handshake completes and while the send window is full. A body longer
+/// than one segment therefore needs the same waiting the request head
+/// needs, not a single call.
+fn tcp_send_all(connection: u32, bytes: &[u8], timeout_ticks: u64) -> Result<(), i64> {
+    let start = std::get_ticks().ok();
+    let mut offset = 0usize;
+    while offset < bytes.len() {
+        let end = (offset + TCP_SEND_CHUNK).min(bytes.len());
+        let mut attempts = 0usize;
+        loop {
+            match std::tcp_send(connection, &bytes[offset..end]) {
+                Ok(()) => break,
+                Err(code) if code == NOT_READY => {}
+                Err(code) => return Err(code),
+            }
+            attempts += 1;
+            let expired = match (std::get_ticks(), start) {
+                (Ok(now), Some(start)) => now.saturating_sub(start) >= timeout_ticks,
+                _ => attempts >= TCP_SEND_ATTEMPTS,
+            };
+            if expired {
+                return Err(NOT_READY);
+            }
+            std::yield_now();
+        }
+        offset = end;
+    }
+    Ok(())
+}
+
+/// Posts a request head and a body to the gateway and reads its reply.
+///
+/// WHY a file is streamed: the upload picker sends the document the index
+/// named, and a document larger than one buffer still has to reach the
+/// gateway as the same bytes. The declared length is what the gateway
+/// expects, so a file that ends early aborts the request rather than
+/// letting the connection wait for bytes that will never come.
+fn upload_over_tcp(
+    dst_ip: [u8; 4],
+    dst_port: u16,
+    local_port: u16,
+    head: &[u8],
+    source: UploadSource<'_>,
+) -> UploadOutcome {
+    let mut outcome = UploadOutcome {
+        sent: 0,
+        response: 0,
+        error: 0,
+    };
+
+    let mut seq_bytes = [0u8; 4];
+    let seq = match std::get_random(&mut seq_bytes) {
+        Ok(n) if n == 4 => u32::from_le_bytes(seq_bytes),
+        _ => 0x2A3B_4C5D,
+    };
+
+    let connection = match std::tcp_connect(dst_ip, dst_port, local_port, seq) {
+        Ok(id) => id,
+        Err(code) => {
+            outcome.error = code;
+            return outcome;
+        }
+    };
+
+    if let Err(code) = tcp_send_all(connection, head, TCP_HANDSHAKE_TIMEOUT_TICKS) {
+        outcome.error = code;
+        let _ = std::tcp_close(connection);
+        return outcome;
+    }
+
+    match source {
+        UploadSource::Bytes(body) => {
+            if let Err(code) = tcp_send_all(connection, body, TCP_BODY_TIMEOUT_TICKS) {
+                outcome.error = code;
+                let _ = std::tcp_close(connection);
+                return outcome;
+            }
+            outcome.sent = body.len();
+        }
+        UploadSource::File { path, length } => {
+            let fd = match std::fs_open(path, std::FS_READ) {
+                Ok(fd) => fd,
+                Err(code) => {
+                    outcome.error = code;
+                    let _ = std::tcp_close(connection);
+                    return outcome;
+                }
+            };
+            let mut sent = 0usize;
+            let mut failure = None;
+            while sent < length {
+                let want = (length - sent).min(MAX_FILE_BYTES);
+                let buffer = unsafe { &mut *core::ptr::addr_of_mut!(FILE_BUF) };
+                let read = match std::fs_read(fd, &mut buffer[..want]) {
+                    Ok(0) => {
+                        failure = Some(-5i64); // EIO: shorter than the index said
+                        break;
+                    }
+                    Ok(n) => n,
+                    Err(code) => {
+                        failure = Some(code);
+                        break;
+                    }
+                };
+                if let Err(code) = tcp_send_all(connection, &buffer[..read], TCP_BODY_TIMEOUT_TICKS) {
+                    failure = Some(code);
+                    break;
+                }
+                sent += read;
+            }
+            let _ = std::fs_close(fd);
+            outcome.sent = sent;
+            if let Some(code) = failure {
+                outcome.error = code;
+                let _ = std::tcp_close(connection);
+                return outcome;
+            }
+            if sent != length {
+                outcome.error = -5;
+                let _ = std::tcp_close(connection);
+                return outcome;
+            }
+        }
+    }
+
+    let response_start = std::get_ticks().ok();
+    let mut total = 0usize;
+    let mut reads = 0usize;
+    loop {
+        reads += 1;
+        let buffer = unsafe { &mut *core::ptr::addr_of_mut!(RESPONSE_BUF) };
+        if total >= buffer.len() {
+            break;
+        }
+        let want = (buffer.len() - total).min(TCP_READ_CHUNK);
+        match std::tcp_recv(connection, &mut buffer[total..total + want]) {
+            Ok(0) => break,
+            Ok(n) => total += n,
+            Err(code) if code == NOT_READY => {}
+            Err(code) => {
+                if total == 0 {
+                    outcome.error = code;
+                }
+                break;
+            }
+        }
+        let expired = match (std::get_ticks(), response_start) {
+            (Ok(now), Some(start)) => now.saturating_sub(start) >= TCP_BODY_TIMEOUT_TICKS,
+            _ => reads >= TCP_RECV_ATTEMPTS,
+        };
+        if expired {
+            break;
+        }
+        std::yield_now();
+    }
+
+    let _ = std::tcp_close(connection);
+    outcome.response = total;
     outcome
 }
 
@@ -329,6 +549,42 @@ fn append_u64_text(buf: &mut [u8], mut n: usize, mut value: u64) -> usize {
         }
     }
     n
+}
+
+/// A byte rate over a measured elapsed time.
+///
+/// WHY zero elapsed reports zero: the tick counter has millisecond
+/// resolution, and a transfer that began and ended inside one tick was not
+/// measured. Dividing by a zero duration would invent a rate.
+fn rate_per_second(bytes: usize, ms: u64) -> u64 {
+    if ms == 0 {
+        return 0;
+    }
+    (bytes as u64).saturating_mul(1000) / ms
+}
+
+/// Appends a byte rate in the unit its size asks for.
+fn append_rate_text(buf: &mut [u8], n: usize, bps: u64) -> usize {
+    if bps >= 1024 * 1024 {
+        let n = append_u64_text(buf, n, bps / (1024 * 1024));
+        append_text(buf, n, b" MiB/s")
+    } else if bps >= 1024 {
+        let n = append_u64_text(buf, n, bps / 1024);
+        append_text(buf, n, b" KiB/s")
+    } else {
+        let n = append_u64_text(buf, n, bps);
+        append_text(buf, n, b" B/s")
+    }
+}
+
+/// Appends a signed decimal number to a small buffer.
+fn append_signed_text(buf: &mut [u8], n: usize, value: i64) -> usize {
+    if value < 0 {
+        let n = append_text(buf, n, b"-");
+        append_u64_text(buf, n, value.unsigned_abs())
+    } else {
+        append_u64_text(buf, n, value as u64)
+    }
 }
 
 /// The type scale of a document title.
@@ -877,6 +1133,11 @@ pub enum SheetOverlay {
     History,
     Downloads,
     Menu,
+    Tools,
+    UploadPicker,
+    SpeedTest,
+    CompatibilityLab,
+    TestFiles,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -910,6 +1171,152 @@ pub enum BookmarkStep {
     Title,
     Address,
 }
+
+/// What happened when the downloaded file was handed to the platform.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenState {
+    NotAttempted,
+    Dispatched,
+    NoHandler,
+    Refused,
+}
+
+/// The work the next event-loop pass performs.
+///
+/// WHY the work is deferred by one pass: a sheet can show that an upload
+/// or a test is running only if the frame is presented before the
+/// transfer begins. The tap schedules the work, the loop draws the
+/// running state, and then the transfer runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingTask {
+    None,
+    Upload(usize),
+    SpeedTest,
+    Lab,
+}
+
+/// How a transfer ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransferState {
+    Idle,
+    Running,
+    Complete,
+    Refused,
+    Failed,
+}
+
+/// A document the upload picker offers.
+#[derive(Clone, Copy)]
+struct PickEntry {
+    path: [u8; 96],
+    path_len: usize,
+    mime: [u8; 40],
+    mime_len: usize,
+    length: u64,
+}
+
+impl PickEntry {
+    const EMPTY: PickEntry = PickEntry {
+        path: [0; 96],
+        path_len: 0,
+        mime: [0; 40],
+        mime_len: 0,
+        length: 0,
+    };
+}
+
+/// The numbers one speed-test run measured.
+#[derive(Clone, Copy)]
+struct SpeedResults {
+    download: TransferState,
+    download_bytes: usize,
+    download_ms: u64,
+    download_bps: u64,
+    upload: TransferState,
+    upload_bytes: usize,
+    upload_confirmed: u64,
+    upload_ms: u64,
+    upload_bps: u64,
+    latency: TransferState,
+    latency_ms: u64,
+    error: i64,
+}
+
+impl SpeedResults {
+    const EMPTY: SpeedResults = SpeedResults {
+        download: TransferState::Idle,
+        download_bytes: 0,
+        download_ms: 0,
+        download_bps: 0,
+        upload: TransferState::Idle,
+        upload_bytes: 0,
+        upload_confirmed: 0,
+        upload_ms: 0,
+        upload_bps: 0,
+        latency: TransferState::Idle,
+        latency_ms: 0,
+        error: 0,
+    };
+}
+
+/// One address the compatibility lab checked.
+#[derive(Clone, Copy)]
+struct LabResult {
+    state: TransferState,
+    status: u16,
+    bytes: usize,
+    content_type: [u8; 40],
+    content_type_len: usize,
+    reader_lines: usize,
+    error: i64,
+}
+
+impl LabResult {
+    const EMPTY: LabResult = LabResult {
+        state: TransferState::Idle,
+        status: 0,
+        bytes: 0,
+        content_type: [0; 40],
+        content_type_len: 0,
+        reader_lines: 0,
+        error: 0,
+    };
+}
+
+/// The addresses the compatibility lab fetches.
+///
+/// WHY this fixed list: the lab reports what this browser actually did
+/// with the sites the device is asked to reach, and a list the person can
+/// read is more useful than an address bar that silently replaced their
+/// last page. The lab runs no JavaScript and saves nothing.
+const LAB_URLS: [&[u8]; 4] = [
+    b"https://www.google.com/",
+    b"https://m.youtube.com/",
+    b"https://interos.tech/",
+    b"https://www.speedtest.net/",
+];
+
+/// The gateway's built-in media samples, by name and declared type.
+///
+/// WHY this fixed list: the proxy refuses loopback addresses, and the one
+/// local URL it serves is the gateway's own allowlisted fixture route.
+/// Naming the fixtures here keeps the app from offering an address the
+/// proxy would refuse.
+const TEST_FIXTURES: [(&[u8], &[u8]); 11] = [
+    (b"sample.png", b"image/png"),
+    (b"sample.jpg", b"image/jpeg"),
+    (b"sample.gif", b"image/gif"),
+    (b"sample.bmp", b"image/bmp"),
+    (b"sample.ppm", b"image/x-portable-pixmap"),
+    (b"sample.qoi", b"image/qoi"),
+    (b"sample.wav", b"audio/wav"),
+    (b"sample.mp3", b"audio/mpeg"),
+    (b"sample.mjpeg", b"video/x-motion-jpeg"),
+    (b"sample.mp4", b"video/mp4"),
+    (b"sample.raw", b"video/x-raw"),
+];
+
+const FIXTURE_URL_PREFIX: &[u8] = b"http://127.0.0.1:4300/api/media/fixture/";
 
 // -----------------------------------------------------------------------------
 // Browser Application State
@@ -998,6 +1405,37 @@ pub struct BrowserApp {
     /// same field.
     pub filter: [u8; FILTER_MAX],
     pub filter_len: usize,
+    /// The file the last download wrote, and the type it was saved as.
+    ///
+    /// WHY the pair is kept: opening a download is a question about the
+    /// file that was just written, and the platform resolves the handler
+    /// from the file's own media type. A path without its type could only
+    /// be opened by guessing.
+    last_download_path: [u8; 96],
+    last_download_path_len: usize,
+    last_download_mime: [u8; 48],
+    last_download_mime_len: usize,
+    open_state: OpenState,
+    /// The documents the upload picker offers, as the index holds them.
+    uploads: [PickEntry; MAX_PICK_FILES],
+    upload_count: usize,
+    upload_state: TransferState,
+    upload_sent: usize,
+    upload_confirmed: u64,
+    upload_error: i64,
+    upload_name: [u8; 128],
+    upload_name_len: usize,
+    speed: SpeedResults,
+    speed_running: bool,
+    lab: [LabResult; LAB_URLS.len()],
+    lab_running: bool,
+    pending: PendingTask,
+    /// The local port the next outbound connection asks for.
+    ///
+    /// WHY a counter: two connections from the same port in quick
+    /// succession can collide with the previous connection's state, and
+    /// the browser opens a connection for every upload and every test.
+    next_local_port: u16,
 }
 
 /// A page the browser saved.
@@ -1090,6 +1528,25 @@ impl BrowserApp {
             download_count: 0,
             filter: [0; FILTER_MAX],
             filter_len: 0,
+            last_download_path: [0; 96],
+            last_download_path_len: 0,
+            last_download_mime: [0; 48],
+            last_download_mime_len: 0,
+            open_state: OpenState::NotAttempted,
+            uploads: [PickEntry::EMPTY; MAX_PICK_FILES],
+            upload_count: 0,
+            upload_state: TransferState::Idle,
+            upload_sent: 0,
+            upload_confirmed: 0,
+            upload_error: 0,
+            upload_name: [0; 128],
+            upload_name_len: 0,
+            speed: SpeedResults::EMPTY,
+            speed_running: false,
+            lab: [LabResult::EMPTY; LAB_URLS.len()],
+            lab_running: false,
+            pending: PendingTask::None,
+            next_local_port: 45000,
         };
         app.tabs.init_default();
         let start = b"about:blank";
@@ -1449,6 +1906,7 @@ impl BrowserApp {
                 }
                 let _ = written;
                 self.publish_download(path);
+                self.remember_download(path, content_type);
                 self.status = PageStatus::Downloaded;
                 self.loading_progress = 100;
                 self.tabs.active_tab_mut().loading_state = LoadingState::Completed;
@@ -1561,6 +2019,432 @@ impl BrowserApp {
             entry.length = record.length;
             self.download_count += 1;
         }
+    }
+
+    /// Asks the platform to open the file the last download wrote.
+    ///
+    /// WHY the platform resolves the handler: the registry is built from
+    /// the installed packages' manifests, so the answer is a property of
+    /// the device rather than a table this app keeps. A refusal names the
+    /// refusal: no handler and a refused launch are different answers.
+    pub fn open_last_download(&mut self) -> bool {
+        if self.last_download_path_len == 0 || self.last_download_mime_len == 0 {
+            self.open_state = OpenState::NoHandler;
+            std::log("[BROWSER APP] The download's path or type is not held; nothing was opened.").ok();
+            return false;
+        }
+        let Ok(path) = core::str::from_utf8(&self.last_download_path[..self.last_download_path_len])
+        else {
+            self.open_state = OpenState::Refused;
+            return false;
+        };
+        let Ok(mime) = core::str::from_utf8(&self.last_download_mime[..self.last_download_mime_len])
+        else {
+            self.open_state = OpenState::NoHandler;
+            return false;
+        };
+        match std::content::intent_dispatch(std::content::IntentKind::Mime, mime, path) {
+            Ok(_) => {
+                self.open_state = OpenState::Dispatched;
+                std::log("[BROWSER APP] The platform dispatched the downloaded file to its handler.").ok();
+                true
+            }
+            Err(code) if code == std::content::ERR_NO_HANDLER => {
+                self.open_state = OpenState::NoHandler;
+                std::log("[BROWSER APP] No installed app declared a handler for the download's media type.").ok();
+                false
+            }
+            Err(_) => {
+                self.open_state = OpenState::Refused;
+                std::log("[BROWSER APP] The platform refused to launch the download's handler.").ok();
+                false
+            }
+        }
+    }
+
+    /// Records the file a download wrote and the type the platform gives it.
+    ///
+    /// WHY the index's answer wins over the response header: the index
+    /// derives a document's media type from its bytes and its extension,
+    /// and that is the answer the file manager and the handler registry
+    /// use. The header is the origin's claim; the index is what this
+    /// device will actually hand to a handler.
+    fn remember_download(&mut self, path: &str, content_type: &[u8]) {
+        self.open_state = OpenState::NotAttempted;
+        let n = path.len().min(self.last_download_path.len());
+        self.last_download_path[..n].copy_from_slice(&path.as_bytes()[..n]);
+        self.last_download_path_len = n;
+        let mut buffer = [0u8; 4096];
+        self.last_download_mime_len = match std::content::content_index_find_path(path, &mut buffer) {
+            Some(record) if !record.mime.is_empty() => {
+                let m = record.mime.len().min(self.last_download_mime.len());
+                self.last_download_mime[..m].copy_from_slice(&record.mime.as_bytes()[..m]);
+                m
+            }
+            _ => browser::bare_mime(content_type, &mut self.last_download_mime),
+        };
+    }
+
+    /// Reads the documents the platform's index holds into the picker.
+    ///
+    /// WHY the whole index and not only browser downloads: an upload is a
+    /// test of this device's path and a media file in the shared area is
+    /// exactly what has to travel. The list is bounded, so a large index
+    /// offers the first entries the index holds.
+    fn refresh_uploads(&mut self) {
+        self.upload_count = 0;
+        let mut buffer = [0u8; 4096];
+        let len = match std::content::content_index_list(&mut buffer) {
+            Ok(len) => len,
+            Err(_) => {
+                std::log("[BROWSER APP] The content index could not be read; the upload picker is empty.").ok();
+                return;
+            }
+        };
+        let mut records: [std::content::DocumentRecord; MAX_PICK_FILES] =
+            [std::content::DocumentRecord {
+                id: 0,
+                path: "",
+                mime: "",
+                provenance: "",
+                length: 0,
+                mtime: 0,
+            }; MAX_PICK_FILES];
+        let count = std::content::parse_index(&buffer[..len], &mut records);
+        for record in records.iter().take(count) {
+            if self.upload_count >= MAX_PICK_FILES {
+                break;
+            }
+            if record.length == 0 {
+                continue;
+            }
+            let index = self.upload_count;
+            let entry = &mut self.uploads[index];
+            let path = record.path.as_bytes();
+            let path_len = path.len().min(entry.path.len());
+            entry.path[..path_len].copy_from_slice(&path[..path_len]);
+            entry.path_len = path_len;
+            let mime = record.mime.as_bytes();
+            let mime_len = mime.len().min(entry.mime.len());
+            entry.mime[..mime_len].copy_from_slice(&mime[..mime_len]);
+            entry.mime_len = mime_len;
+            entry.length = record.length;
+            self.upload_count += 1;
+        }
+    }
+
+    /// The local port the next outbound connection asks for.
+    fn take_local_port(&mut self) -> u16 {
+        let port = self.next_local_port;
+        self.next_local_port = if self.next_local_port >= 45_900 {
+            45_000
+        } else {
+            self.next_local_port + 1
+        };
+        port
+    }
+
+    /// Sends the picked file to the gateway and records its answer.
+    ///
+    /// WHY success is the gateway's byte count and not the write count:
+    /// the device can say how many bytes it handed the transport, but only
+    /// the gateway can say how many it received. The screen prints both,
+    /// and calls the upload complete only when they agree.
+    fn perform_upload(&mut self, index: usize) {
+        self.upload_sent = 0;
+        self.upload_confirmed = 0;
+        self.upload_error = 0;
+        if index >= self.upload_count {
+            self.upload_state = TransferState::Failed;
+            self.upload_error = -3;
+            return;
+        }
+        let entry = self.uploads[index];
+        let shown = entry.path_len.min(self.upload_name.len());
+        self.upload_name[..shown].copy_from_slice(&entry.path[..shown]);
+        self.upload_name_len = shown;
+        if entry.length == 0 || entry.length > browser::MAX_UPLOAD_BYTES as u64 {
+            self.upload_state = TransferState::Refused;
+            std::log("[BROWSER APP] The picked file is larger than the 4 MiB upload limit; nothing was sent.").ok();
+            return;
+        }
+        let Ok(path) = core::str::from_utf8(&entry.path[..entry.path_len]) else {
+            self.upload_state = TransferState::Failed;
+            self.upload_error = -3;
+            return;
+        };
+        let length = entry.length as usize;
+        let mut head = [0u8; 512];
+        let head_len = browser::format_upload_request(
+            &entry.path[..entry.path_len],
+            &entry.mime[..entry.mime_len],
+            length,
+            &mut head,
+        );
+        let local_port = self.take_local_port();
+        let outcome = upload_over_tcp(
+            [10, 0, 2, 2],
+            4300,
+            local_port,
+            &head[..head_len],
+            UploadSource::File { path, length },
+        );
+        self.upload_sent = outcome.sent;
+        if outcome.error != 0 || outcome.response == 0 {
+            self.upload_state = TransferState::Failed;
+            self.upload_error = if outcome.error != 0 { outcome.error } else { -5 };
+            std::log("[BROWSER APP] The upload did not complete; no byte count was confirmed.").ok();
+            return;
+        }
+        let response = unsafe { &*core::ptr::addr_of!(RESPONSE_BUF) };
+        let Some(parsed) = browser::parse_http_response(&response[..outcome.response]) else {
+            self.upload_state = TransferState::Failed;
+            self.upload_error = -5;
+            return;
+        };
+        if parsed.status_code != 200 {
+            self.upload_state = TransferState::Failed;
+            self.upload_error = -5;
+            return;
+        }
+        match browser::json_u64_field(parsed.body, b"received_bytes") {
+            Some(confirmed) if confirmed == entry.length => {
+                self.upload_confirmed = confirmed;
+                self.upload_state = TransferState::Complete;
+                std::log("[BROWSER APP] The gateway confirmed the uploaded byte count.").ok();
+            }
+            Some(confirmed) => {
+                self.upload_confirmed = confirmed;
+                self.upload_state = TransferState::Failed;
+                self.upload_error = -5;
+                std::log("[BROWSER APP] The gateway received fewer bytes than were sent; the upload is not complete.").ok();
+            }
+            None => {
+                self.upload_state = TransferState::Failed;
+                self.upload_error = -5;
+            }
+        }
+    }
+
+    /// Measures this device's path to the Studio gateway.
+    ///
+    /// WHY every number is measured: the test exists to tell the person
+    /// what the device did, not what a profile says it should do. A test
+    /// that cannot read the clock or does not get the gateway's own byte
+    /// count reports that instead of a rate.
+    fn perform_speed_test(&mut self) {
+        self.speed = SpeedResults::EMPTY;
+        self.speed_running = true;
+
+        // The download.
+        let mut request = [0u8; 256];
+        let request_len =
+            browser::format_speedtest_download_request(SPEEDTEST_DOWNLOAD_BYTES, &mut request);
+        let local_port = self.take_local_port();
+        let start = std::get_ticks().ok();
+        let outcome = fetch_over_tcp([10, 0, 2, 2], 4300, local_port, &request[..request_len]);
+        let end = std::get_ticks().ok();
+        match self.download_rate(start, end, outcome, SPEEDTEST_DOWNLOAD_BYTES) {
+            Ok((bytes, ms, bps)) => {
+                self.speed.download = TransferState::Complete;
+                self.speed.download_bytes = bytes;
+                self.speed.download_ms = ms;
+                self.speed.download_bps = bps;
+            }
+            Err(code) => {
+                self.speed.download = TransferState::Failed;
+                self.speed.error = code;
+            }
+        }
+
+        // The round trip to the gateway's first byte.
+        let request_len =
+            browser::format_speedtest_download_request(SPEEDTEST_LATENCY_BYTES, &mut request);
+        let local_port = self.take_local_port();
+        let start = std::get_ticks().ok();
+        let outcome = fetch_over_tcp([10, 0, 2, 2], 4300, local_port, &request[..request_len]);
+        match (start, outcome.first_byte_tick) {
+            (Some(start), Some(first)) if outcome.bytes > 0 && outcome.error == 0 => {
+                let body_ok = {
+                    let response = unsafe { &*core::ptr::addr_of!(RESPONSE_BUF) };
+                    match browser::parse_http_response(&response[..outcome.bytes]) {
+                        Some(parsed) => {
+                            parsed.status_code == 200
+                                && parsed.body.len() == SPEEDTEST_LATENCY_BYTES
+                        }
+                        None => false,
+                    }
+                };
+                if body_ok {
+                    self.speed.latency = TransferState::Complete;
+                    self.speed.latency_ms = first.saturating_sub(start);
+                } else {
+                    self.speed.latency = TransferState::Failed;
+                    self.speed.error = -5;
+                }
+            }
+            _ => {
+                self.speed.latency = TransferState::Failed;
+                self.speed.error = if start.is_none() { -1000 } else { outcome.error };
+            }
+        }
+
+        // The upload.
+        let buffer = unsafe { &mut *core::ptr::addr_of_mut!(UPLOAD_TEST_BUF) };
+        for (index, byte) in buffer.iter_mut().enumerate() {
+            *byte = (index.wrapping_mul(31).wrapping_add(7) & 0xFF) as u8;
+        }
+        let request_len =
+            browser::format_speedtest_upload_request(SPEEDTEST_UPLOAD_BYTES, &mut request);
+        let local_port = self.take_local_port();
+        let start = std::get_ticks().ok();
+        let outcome = upload_over_tcp(
+            [10, 0, 2, 2],
+            4300,
+            local_port,
+            &request[..request_len],
+            UploadSource::Bytes(&buffer[..SPEEDTEST_UPLOAD_BYTES]),
+        );
+        let end = std::get_ticks().ok();
+        let confirmed = if outcome.error == 0 && outcome.response > 0 {
+            let response = unsafe { &*core::ptr::addr_of!(RESPONSE_BUF) };
+            browser::parse_http_response(&response[..outcome.response])
+                .filter(|parsed| parsed.status_code == 200)
+                .and_then(|parsed| browser::json_u64_field(parsed.body, b"received_bytes"))
+        } else {
+            None
+        };
+        match (start, end, confirmed) {
+            (Some(start), Some(end), Some(confirmed))
+                if confirmed == SPEEDTEST_UPLOAD_BYTES as u64 && end >= start =>
+            {
+                let ms = end - start;
+                self.speed.upload = TransferState::Complete;
+                self.speed.upload_bytes = SPEEDTEST_UPLOAD_BYTES;
+                self.speed.upload_confirmed = confirmed;
+                self.speed.upload_ms = ms;
+                self.speed.upload_bps = rate_per_second(SPEEDTEST_UPLOAD_BYTES, ms);
+            }
+            (None, _, _) => {
+                self.speed.upload = TransferState::Failed;
+                self.speed.error = -1000;
+            }
+            _ => {
+                self.speed.upload = TransferState::Failed;
+                if self.speed.error == 0 {
+                    self.speed.error = if outcome.error != 0 { outcome.error } else { -5 };
+                }
+            }
+        }
+
+        self.speed_running = false;
+        std::log("[BROWSER APP] Speed test finished. Completed rows were measured on this device; failed rows are marked not measured.").ok();
+    }
+
+    /// Validates a measured download against the gateway's declared size.
+    fn download_rate(
+        &self,
+        start: Option<u64>,
+        end: Option<u64>,
+        outcome: FetchOutcome,
+        expected: usize,
+    ) -> Result<(usize, u64, u64), i64> {
+        let (Some(start), Some(end)) = (start, end) else {
+            return Err(-1000);
+        };
+        if outcome.error != 0 || outcome.bytes == 0 || outcome.truncated {
+            return Err(if outcome.error != 0 { outcome.error } else { -5 });
+        }
+        let response = unsafe { &*core::ptr::addr_of!(RESPONSE_BUF) };
+        let Some(parsed) = browser::parse_http_response(&response[..outcome.bytes]) else {
+            return Err(-5);
+        };
+        if parsed.status_code != 200 || parsed.body.len() != expected {
+            return Err(-5);
+        }
+        let ms = end.saturating_sub(start);
+        Ok((expected, ms, rate_per_second(expected, ms)))
+    }
+
+    /// Fetches the fixed lab addresses and records what happened to each.
+    ///
+    /// WHY the lab does not navigate: the person's page stays where it is,
+    /// and the lab's answers are a separate record. The reader buffers it
+    /// uses are scratch; the document on screen is not touched.
+    fn perform_lab(&mut self) {
+        self.lab = [LabResult::EMPTY; LAB_URLS.len()];
+        self.lab_running = true;
+        for index in 0..LAB_URLS.len() {
+            let result = self.check_lab_url(index);
+            self.lab[index] = result;
+        }
+        self.lab_running = false;
+        std::log("[BROWSER APP] Compatibility lab finished. Each row reports the gateway's answer or its refusal.").ok();
+    }
+
+    fn check_lab_url(&mut self, index: usize) -> LabResult {
+        let mut request = [0u8; 512];
+        let request_len = format_proxy_request(LAB_URLS[index], &mut request);
+        let local_port = self.take_local_port();
+        let outcome = fetch_over_tcp([10, 0, 2, 2], 4300, local_port, &request[..request_len]);
+        let mut result = LabResult::EMPTY;
+        if outcome.bytes == 0 || outcome.error != 0 {
+            result.state = TransferState::Failed;
+            result.error = outcome.error;
+            return result;
+        }
+        result.bytes = outcome.bytes;
+        let response = unsafe { &*core::ptr::addr_of!(RESPONSE_BUF) };
+        let slice = &response[..outcome.bytes];
+        let Some(parsed) = browser::parse_http_response(slice) else {
+            result.state = TransferState::Failed;
+            result.error = -5;
+            return result;
+        };
+        result.status = parsed.status_code;
+        let page_type = browser::proxy_content_type(slice).unwrap_or(parsed.content_type);
+        let len = page_type.len().min(result.content_type.len());
+        result.content_type[..len].copy_from_slice(&page_type[..len]);
+        result.content_type_len = len;
+        if parsed.status_code != 200 {
+            result.state = TransferState::Failed;
+            return result;
+        }
+        if browser::proxy_reports_failure(slice) {
+            result.state = TransferState::Refused;
+            result.error = -1;
+            return result;
+        }
+        // A file is a truthful answer to the lab too: the gateway
+        // delivered it, and the reader has no document to extract from it.
+        if browser::content_type_is_binary(page_type) {
+            result.state = TransferState::Refused;
+            result.error = -2;
+            return result;
+        }
+        let html = unsafe { &mut *core::ptr::addr_of_mut!(FILE_BUF) };
+        let html_len = browser::extract_proxy_html(slice, html);
+        if html_len == 0 {
+            result.state = TransferState::Failed;
+            result.error = -5;
+            return result;
+        }
+        let document = unsafe { &mut *core::ptr::addr_of_mut!(READER_BUF) };
+        let doc_len = browser::html_to_reader_document_kind(
+            &html[..html_len],
+            browser::PayloadKind::Markup,
+            document,
+        );
+        if doc_len == 0 {
+            result.state = TransferState::Failed;
+            return result;
+        }
+        result.reader_lines = document[..doc_len]
+            .split(|&b| b == b'\n')
+            .filter(|line| !line.is_empty())
+            .count();
+        result.state = TransferState::Complete;
+        result
     }
 
     pub fn navigate(&mut self, target: &[u8]) -> bool {
@@ -2914,6 +3798,17 @@ fn home_row(app: &BrowserApp, index: usize) -> Option<HomeRow> {
 // -----------------------------------------------------------------------------
 // Web Viewport / Content Area Renderer
 // -----------------------------------------------------------------------------
+/// The box the downloaded file's Open action is drawn in.
+///
+/// WHY it is derived from the frame: the badge sits below the wrapped body
+/// text, and the body's line count depends on the headline. The renderer and
+/// the tap handler both ask this function, so the control a person sees is
+/// the control they can press.
+fn open_action_rect(f: &Frame) -> Rect {
+    let err_y = f.head_y + 40 + f.body_n * 28 + 24;
+    Rect::new(W / 2 - 90, err_y + 54, 180, 48)
+}
+
 fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
     // Error state / No transport screen
     let download_status = app.status == PageStatus::Downloaded
@@ -3000,6 +3895,40 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
 
         // A saved file is not a failure, so there is nothing to reload.
         if download_status {
+            if app.status == PageStatus::Downloaded {
+                let btn = open_action_rect(f);
+                if let Some(c) = draw_rounded_rect(x, y, btn, R_CONTROL, THEME.primary, None, 0) {
+                    let label = b"Open";
+                    let lw = text_width(label, 1);
+                    if let Some(px) = text_px(x, y, W / 2 - lw / 2, btn.y + 14, 1, label, THEME.on_primary, c, true) {
+                        return px;
+                    }
+                    return c;
+                }
+                // The platform's answer is the only claim the screen makes:
+                // a file with no handler says so instead of offering a
+                // launch that would go nowhere.
+                let caption: &[u8] = match app.open_state {
+                    OpenState::NotAttempted => b"Opens with the app registered for this file's type.",
+                    OpenState::Dispatched => b"The platform launched the registered handler.",
+                    OpenState::NoHandler => b"No installed app handles this file's type.",
+                    OpenState::Refused => b"The platform refused to launch the handler.",
+                };
+                let cw = text_width(caption, 1);
+                if let Some(px) = text_px(
+                    x,
+                    y,
+                    (W.saturating_sub(cw)) / 2,
+                    btn.y + 62,
+                    1,
+                    caption,
+                    THEME.on_surface_variant,
+                    THEME.surface,
+                    false,
+                ) {
+                    return px;
+                }
+            }
             return THEME.surface;
         }
 
@@ -3575,15 +4504,431 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
             }
             Some(THEME.surface)
         }
+        SheetOverlay::Tools => {
+            if y < TOOLBAR_Y1 || y >= NAV_BAR_Y0 {
+                return None;
+            }
+            if y >= 120 && y < 170 {
+                if let Some(px) = text_px(x, y, 32, 134, 1, b"Tools", THEME.on_surface, THEME.surface, true) {
+                    return Some(px);
+                }
+                if close_glyph(x, y, 660, 145) {
+                    return Some(THEME.on_surface_variant);
+                }
+                return Some(THEME.surface);
+            }
+            let caption = b"Uploads, measurements, and samples run on this device; nothing is estimated.";
+            if let Some(px) = text_px(x, y, 32, 182, 1, caption, THEME.on_surface_variant, THEME.surface, false) {
+                return Some(px);
+            }
+            let rows: [(&[u8], &[u8]); 4] = [
+                (
+                    b"Upload a File",
+                    b"Send a document from the content index to the gateway.",
+                ),
+                (
+                    b"Speed Test",
+                    b"Measure download, upload, and first-byte time.",
+                ),
+                (
+                    b"Compatibility Lab",
+                    b"Fetch four fixed sites and record what came back.",
+                ),
+                (
+                    b"Test Files",
+                    b"Download the gateway's media samples for other apps.",
+                ),
+            ];
+            for (index, (title, body)) in rows.iter().enumerate() {
+                let top = 220 + index * 116;
+                let rect = Rect::new(24, top, W - 48, 100);
+                if let Some(c) = draw_rounded_rect(x, y, rect, CARD.radius, CARD.fill, CARD.border, 1) {
+                    if let Some(px) = text_px(x, y, 44, top + 18, 1, title, THEME.on_surface, THEME.surface, true) {
+                        return Some(px);
+                    }
+                    if let Some(px) = text_px(x, y, 44, top + 52, 1, body, THEME.on_surface_variant, THEME.surface, false) {
+                        return Some(px);
+                    }
+                    return Some(c);
+                }
+            }
+            Some(THEME.surface)
+        }
+        SheetOverlay::UploadPicker => {
+            if y < TOOLBAR_Y1 || y >= NAV_BAR_Y0 {
+                return None;
+            }
+            if y >= 120 && y < 170 {
+                if let Some(px) = text_px(x, y, 32, 134, 1, b"Upload a File", THEME.on_surface, THEME.surface, true) {
+                    return Some(px);
+                }
+                if close_glyph(x, y, 660, 145) {
+                    return Some(THEME.on_surface_variant);
+                }
+                return Some(THEME.surface);
+            }
+            let caption = b"Pick a document. An upload is complete only when the gateway confirms every byte.";
+            if let Some(px) = text_px(x, y, 32, 182, 1, caption, THEME.on_surface_variant, THEME.surface, false) {
+                return Some(px);
+            }
+            if app.upload_count == 0 {
+                if let Some(px) = text_px(
+                    x,
+                    y,
+                    32,
+                    236,
+                    1,
+                    b"The content index holds no documents yet.",
+                    THEME.on_surface_variant,
+                    THEME.surface,
+                    false,
+                ) {
+                    return Some(px);
+                }
+            } else {
+                let row_h = 84;
+                for i in 0..app.upload_count {
+                    let r_y = 220 + i * row_h;
+                    let entry = &app.uploads[i];
+                    let rect = Rect::new(24, r_y, W - 48, row_h - 10);
+                    if let Some(c) = draw_rounded_rect(x, y, rect, R_CHIP, THEME.surface_container_high, Some(THEME.border), 1) {
+                        let mut name = [0u8; 64];
+                        let n = font::ellipsize(&entry.path[..entry.path_len], 1, 600, &mut name);
+                        if let Some(px) = text_px(x, y, 44, r_y + 12, 1, &name[..n], THEME.on_surface, c, true) {
+                            return Some(px);
+                        }
+                        let mut meta = [0u8; 72];
+                        let m = append_text(&mut meta, 0, &entry.mime[..entry.mime_len]);
+                        let m = append_text(&mut meta, m, b", ");
+                        let m = append_u64_text(&mut meta, m, entry.length);
+                        let m = append_text(&mut meta, m, b" bytes");
+                        if let Some(px) = text_px(x, y, 44, r_y + 42, 1, &meta[..m], THEME.on_surface_variant, c, false) {
+                            return Some(px);
+                        }
+                        return Some(c);
+                    }
+                }
+            }
+            if app.upload_state != TransferState::Idle {
+                let panel = Rect::new(24, 1000, W - 48, 190);
+                if let Some(c) = draw_rounded_rect(x, y, panel, CARD.radius, CARD.fill, CARD.border, 1) {
+                    let state: &[u8] = match app.upload_state {
+                        TransferState::Idle => b"",
+                        TransferState::Running => b"UPLOADING",
+                        TransferState::Complete => b"UPLOAD COMPLETE",
+                        TransferState::Refused => b"UPLOAD REFUSED",
+                        TransferState::Failed => b"UPLOAD FAILED",
+                    };
+                    let state_color = if app.upload_state == TransferState::Complete {
+                        THEME.primary
+                    } else {
+                        THEME.on_surface_variant
+                    };
+                    if let Some(px) = text_px(x, y, 44, 1016, 1, state, state_color, c, true) {
+                        return Some(px);
+                    }
+                    let mut name = [0u8; 64];
+                    let n = font::ellipsize(&app.upload_name[..app.upload_name_len], 1, 600, &mut name);
+                    if let Some(px) = text_px(x, y, 44, 1050, 1, &name[..n], THEME.on_surface, c, false) {
+                        return Some(px);
+                    }
+                    let mut line = [0u8; 128];
+                    let n = match app.upload_state {
+                        TransferState::Running => {
+                            append_text(&mut line, 0, b"Sending; no byte count is confirmed yet.")
+                        }
+                        TransferState::Complete => {
+                            let n = append_text(&mut line, 0, b"Sent ");
+                            let n = append_u64_text(&mut line, n, app.upload_sent as u64);
+                            let n = append_text(&mut line, n, b" bytes. The gateway confirmed ");
+                            let n = append_u64_text(&mut line, n, app.upload_confirmed);
+                            append_text(&mut line, n, b" bytes.")
+                        }
+                        TransferState::Refused => {
+                            append_text(&mut line, 0, b"Larger than the 4 MiB limit; nothing was sent.")
+                        }
+                        TransferState::Failed | TransferState::Idle => {
+                            append_text(&mut line, 0, b"The upload did not complete; no byte count was confirmed.")
+                        }
+                    };
+                    if let Some(px) = text_px(x, y, 44, 1082, 1, &line[..n], THEME.on_surface_variant, c, false) {
+                        return Some(px);
+                    }
+                    if app.upload_state == TransferState::Failed && app.upload_error != 0 {
+                        let mut code = [0u8; 40];
+                        let n = append_text(&mut code, 0, b"Transport error ");
+                        let n = append_signed_text(&mut code, n, app.upload_error);
+                        if let Some(px) = text_px(x, y, 44, 1114, 1, &code[..n], THEME.on_surface_variant, c, false) {
+                            return Some(px);
+                        }
+                    }
+                    return Some(c);
+                }
+            }
+            Some(THEME.surface)
+        }
+        SheetOverlay::SpeedTest => {
+            if y < TOOLBAR_Y1 || y >= NAV_BAR_Y0 {
+                return None;
+            }
+            if y >= 120 && y < 170 {
+                if let Some(px) = text_px(x, y, 32, 134, 1, b"Speed Test", THEME.on_surface, THEME.surface, true) {
+                    return Some(px);
+                }
+                if close_glyph(x, y, 660, 145) {
+                    return Some(THEME.on_surface_variant);
+                }
+                return Some(THEME.surface);
+            }
+            let caption = b"Every number is measured on this device through the Studio gateway. Nothing is estimated.";
+            if let Some(px) = text_px(x, y, 32, 182, 1, caption, THEME.on_surface_variant, THEME.surface, false) {
+                return Some(px);
+            }
+            if app.speed_running {
+                if let Some(px) = text_px(
+                    x,
+                    y,
+                    32,
+                    228,
+                    1,
+                    b"Measuring download, first byte, and upload...",
+                    THEME.on_surface,
+                    THEME.surface,
+                    true,
+                ) {
+                    return Some(px);
+                }
+                return Some(THEME.surface);
+            }
+            let mut line1 = [0u8; 96];
+            let mut line2 = [0u8; 96];
+            let mut top = 228;
+            for row in 0..3usize {
+                let (title, state, bytes, ms, bps, confirmed) = match row {
+                    0 => (
+                        b"DOWNLOAD".as_slice(),
+                        app.speed.download,
+                        app.speed.download_bytes,
+                        app.speed.download_ms,
+                        app.speed.download_bps,
+                        0u64,
+                    ),
+                    1 => (
+                        b"FIRST BYTE".as_slice(),
+                        app.speed.latency,
+                        0usize,
+                        app.speed.latency_ms,
+                        0u64,
+                        0u64,
+                    ),
+                    _ => (
+                        b"UPLOAD".as_slice(),
+                        app.speed.upload,
+                        app.speed.upload_bytes,
+                        app.speed.upload_ms,
+                        app.speed.upload_bps,
+                        app.speed.upload_confirmed,
+                    ),
+                };
+                let n1;
+                let n2;
+                match state {
+                    TransferState::Complete => {
+                        if row == 1 {
+                            n1 = if ms == 0 {
+                                append_text(&mut line1, 0, b"First byte under 1 ms")
+                            } else {
+                                let n = append_text(&mut line1, 0, b"First byte in ");
+                                let n = append_u64_text(&mut line1, n, ms);
+                                append_text(&mut line1, n, b" ms")
+                            };
+                            n2 = if ms == 0 {
+                                append_text(&mut line2, 0, b"Below the clock's 1 ms resolution.")
+                            } else {
+                                append_text(&mut line2, 0, b"Round trip through the gateway.")
+                            };
+                        } else if ms == 0 {
+                            n1 = {
+                                let n = append_text(&mut line1, 0, b"");
+                                let n = append_u64_text(&mut line1, n, bytes as u64);
+                                let n = append_text(&mut line1, n, b" bytes sent");
+                                if row == 2 {
+                                    let n = append_text(&mut line1, n, b", ");
+                                    let n = append_u64_text(&mut line1, n, confirmed);
+                                    append_text(&mut line1, n, b" confirmed")
+                                } else {
+                                    n
+                                }
+                            };
+                            n2 = append_text(&mut line2, 0, b"Elapsed time was below the clock's 1 ms resolution.");
+                        } else {
+                            n1 = {
+                                let n = append_text(&mut line1, 0, b"");
+                                let n = append_u64_text(&mut line1, n, bytes as u64);
+                                let n = append_text(&mut line1, n, b" bytes in ");
+                                let n = append_u64_text(&mut line1, n, ms);
+                                let n = append_text(&mut line1, n, b" ms");
+                                if row == 2 {
+                                    let n = append_text(&mut line1, n, b", ");
+                                    let n = append_u64_text(&mut line1, n, confirmed);
+                                    append_text(&mut line1, n, b" confirmed")
+                                } else {
+                                    n
+                                }
+                            };
+                            n2 = append_rate_text(&mut line2, 0, bps);
+                        }
+                    }
+                    TransferState::Failed => {
+                        n1 = append_text(&mut line1, 0, b"Not measured.");
+                        n2 = if app.speed.error == -1000 {
+                            append_text(&mut line2, 0, b"The clock was unavailable, so no rate was computed.")
+                        } else {
+                            append_text(&mut line2, 0, b"The gateway did not complete the transfer.")
+                        };
+                    }
+                    _ => {
+                        n1 = append_text(&mut line1, 0, b"Not run.");
+                        n2 = append_text(&mut line2, 0, b"Run the test from Tools.");
+                    }
+                }
+                if let Some(px) = info_card_pixel(x, y, top, title, &line1[..n1], &line2[..n2]) {
+                    return Some(px);
+                }
+                top += 160;
+            }
+            Some(THEME.surface)
+        }
+        SheetOverlay::CompatibilityLab => {
+            if y < TOOLBAR_Y1 || y >= NAV_BAR_Y0 {
+                return None;
+            }
+            if y >= 120 && y < 170 {
+                if let Some(px) = text_px(x, y, 32, 134, 1, b"Compatibility Lab", THEME.on_surface, THEME.surface, true) {
+                    return Some(px);
+                }
+                if close_glyph(x, y, 660, 145) {
+                    return Some(THEME.on_surface_variant);
+                }
+                return Some(THEME.surface);
+            }
+            let caption = b"Each row is the gateway's answer to this reader. No JavaScript runs and nothing is saved.";
+            if let Some(px) = text_px(x, y, 32, 182, 1, caption, THEME.on_surface_variant, THEME.surface, false) {
+                return Some(px);
+            }
+            if app.lab_running {
+                if let Some(px) = text_px(x, y, 32, 228, 1, b"Fetching the fixed addresses...", THEME.on_surface, THEME.surface, true) {
+                    return Some(px);
+                }
+                return Some(THEME.surface);
+            }
+            let mut line1 = [0u8; 96];
+            let mut line2 = [0u8; 96];
+            for index in 0..LAB_URLS.len() {
+                let result = &app.lab[index];
+                let top = 220 + index * 160;
+                let mut name = [0u8; 64];
+                let n = font::ellipsize(LAB_URLS[index], 1, 600, &mut name);
+                let n1;
+                let n2;
+                match result.state {
+                    TransferState::Complete => {
+                        let mut n = append_text(&mut line1, 0, b"HTTP ");
+                        n = append_u64_text(&mut line1, n, result.status as u64);
+                        n = append_text(&mut line1, n, b", ");
+                        n = append_u64_text(&mut line1, n, result.bytes as u64);
+                        n = append_text(&mut line1, n, b" bytes, ");
+                        n1 = append_text(&mut line1, n, &result.content_type[..result.content_type_len]);
+                        let n = append_u64_text(&mut line2, 0, result.reader_lines as u64);
+                        n2 = append_text(&mut line2, n, b" reader lines extracted.");
+                    }
+                    TransferState::Refused => {
+                        n1 = if result.status != 0 {
+                            let n = append_text(&mut line1, 0, b"HTTP ");
+                            let n = append_u64_text(&mut line1, n, result.status as u64);
+                            let n = append_text(&mut line1, n, b", ");
+                            append_text(&mut line1, n, &result.content_type[..result.content_type_len])
+                        } else {
+                            append_text(&mut line1, 0, b"The gateway refused the fetch.")
+                        };
+                        n2 = if result.error == -2 {
+                            append_text(&mut line2, 0, b"The response is a file, not a reader document.")
+                        } else {
+                            append_text(&mut line2, 0, b"The origin did not return a page.")
+                        };
+                    }
+                    TransferState::Failed => {
+                        if result.status != 0 {
+                            let mut n = append_text(&mut line1, 0, b"HTTP ");
+                            n = append_u64_text(&mut line1, n, result.status as u64);
+                            n = append_text(&mut line1, n, b", ");
+                            let content_type: &[u8] = if result.content_type_len == 0 {
+                                b"no content type".as_slice()
+                            } else {
+                                &result.content_type[..result.content_type_len]
+                            };
+                            n1 = append_text(&mut line1, n, content_type);
+                            n2 = append_text(&mut line2, 0, b"The gateway answered without a document.");
+                        } else {
+                            n1 = append_text(&mut line1, 0, b"No response.");
+                            let n = append_text(&mut line2, 0, b"Transport error ");
+                            n2 = append_signed_text(&mut line2, n, result.error);
+                        }
+                    }
+                    _ => {
+                        n1 = append_text(&mut line1, 0, b"Not fetched.");
+                        n2 = append_text(&mut line2, 0, b"The gateway returned no readable answer.");
+                    }
+                }
+                if let Some(px) = info_card_pixel(x, y, top, &name[..n], &line1[..n1], &line2[..n2]) {
+                    return Some(px);
+                }
+            }
+            Some(THEME.surface)
+        }
+        SheetOverlay::TestFiles => {
+            if y < TOOLBAR_Y1 || y >= NAV_BAR_Y0 {
+                return None;
+            }
+            if y >= 120 && y < 170 {
+                if let Some(px) = text_px(x, y, 32, 134, 1, b"Test Files", THEME.on_surface, THEME.surface, true) {
+                    return Some(px);
+                }
+                if close_glyph(x, y, 660, 145) {
+                    return Some(THEME.on_surface_variant);
+                }
+                return Some(THEME.surface);
+            }
+            let caption = b"Built by the gateway. Tap one to download it into shared storage.";
+            if let Some(px) = text_px(x, y, 32, 182, 1, caption, THEME.on_surface_variant, THEME.surface, false) {
+                return Some(px);
+            }
+            let row_h = 84;
+            for (index, (name, content_type)) in TEST_FIXTURES.iter().enumerate() {
+                let r_y = 220 + index * row_h;
+                let rect = Rect::new(24, r_y, W - 48, row_h - 10);
+                if let Some(c) = draw_rounded_rect(x, y, rect, R_CHIP, THEME.surface_container_high, Some(THEME.border), 1) {
+                    if let Some(px) = text_px(x, y, 44, r_y + 12, 1, name, THEME.on_surface, c, true) {
+                        return Some(px);
+                    }
+                    if let Some(px) = text_px(x, y, 44, r_y + 42, 1, content_type, THEME.on_surface_variant, c, false) {
+                        return Some(px);
+                    }
+                    return Some(c);
+                }
+            }
+            Some(THEME.surface)
+        }
         SheetOverlay::Menu => {
-            // Kebab Overflow Menu dropdown card at top right (x 440..696, y 116..444)
-            let menu_rect = Rect::new(440, 116, 256, 328);
+            // Kebab Overflow Menu dropdown card at top right (x 440..696, y 116..488)
+            let menu_rect = Rect::new(440, 116, 256, 372);
             if let Some(c) = draw_rounded_rect(x, y, menu_rect, R_CONTROL, THEME.surface_container_high, Some(THEME.border), 2) {
-                let items: [&[u8]; 7] = [
+                let items: [&[u8]; 8] = [
                     b"New Tab",
                     b"Bookmarks",
                     b"History",
                     b"Downloads",
+                    b"Tools",
                     b"Reload Page",
                     b"Save Page",
                     b"Close Menu",
@@ -3593,7 +4938,7 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
                     if let Some(px) = text_px(x, y, 464, item_y, 1, item, THEME.on_surface, c, false) {
                         return Some(px);
                     }
-                    if idx < 6 && y == item_y + 30 {
+                    if idx < 7 && y == item_y + 30 {
                         return Some(THEME.outline_variant);
                     }
                 }
@@ -3602,6 +4947,33 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
             None
         }
     }
+}
+
+/// A card in a results sheet: a title and two lines of evidence.
+///
+/// WHY one helper: the speed test and the compatibility lab are both a
+/// list of measured rows, and a row that drew its own card would drift
+/// from the next one.
+fn info_card_pixel(
+    x: usize,
+    y: usize,
+    top: usize,
+    title: &[u8],
+    line1: &[u8],
+    line2: &[u8],
+) -> Option<u32> {
+    let rect = Rect::new(24, top, W - 48, 150);
+    let c = draw_rounded_rect(x, y, rect, CARD.radius, CARD.fill, CARD.border, 1)?;
+    if let Some(px) = text_px(x, y, 44, top + 16, 1, title, THEME.on_surface_variant, c, false) {
+        return Some(px);
+    }
+    if let Some(px) = text_px(x, y, 44, top + 52, 1, line1, THEME.on_surface, c, true) {
+        return Some(px);
+    }
+    if let Some(px) = text_px(x, y, 44, top + 90, 1, line2, THEME.on_surface_variant, c, false) {
+        return Some(px);
+    }
+    Some(c)
 }
 
 /// The pixel of the list filter row at (`x`, `y`).
@@ -4228,7 +5600,7 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
     // Handle Active Overlays Interactions
     match app.overlay {
         SheetOverlay::Menu => {
-            if x >= 440 && x <= 696 && y >= 116 && y <= 444 {
+            if x >= 440 && x <= 696 && y >= 116 && y <= 488 {
                 // WHY the row is the item's own height: the menu's items
                 // are forty-four pixels apart, and a hit test that used
                 // forty-eight put the top of an item in the row above it,
@@ -4255,15 +5627,16 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
                         app.refresh_downloads();
                         app.overlay = SheetOverlay::Downloads;
                     }
-                    4 => app.reload(),
+                    4 => app.overlay = SheetOverlay::Tools,
+                    5 => app.reload(),
                     // WHY the page is saved into the shared storage area: that is
                     // the one place every app may look, so a saved page is a
                     // document the platform's index holds and the file manager
                     // lists beside the photographs the camera wrote.
-                    5 => app.save_page_to_storage(),
+                    6 => app.save_page_to_storage(),
                     _ => app.overlay = SheetOverlay::None,
                 }
-                if row != 1 && row != 2 && row != 3 {
+                if row != 1 && row != 2 && row != 3 && row != 4 {
                     app.overlay = SheetOverlay::None;
                 }
                 // WHY the address field is released: a sheet opened from the
@@ -4422,6 +5795,107 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
                 }
             }
         }
+        SheetOverlay::Tools => {
+            if x >= 640 && y >= 120 && y <= 165 {
+                app.overlay = SheetOverlay::None;
+                return Tap::Redraw;
+            }
+            for index in 0..4usize {
+                let top = 220 + index * 116;
+                if y >= top && y < top + 100 && x >= 24 && x <= W - 24 {
+                    let _ = std::audio_haptic_click();
+                    match index {
+                        0 => {
+                            // WHY the picker is read when it opens: the
+                            // documents on the device are the index's, and
+                            // one written since the last look belongs here.
+                            app.upload_state = TransferState::Idle;
+                            app.upload_sent = 0;
+                            app.upload_confirmed = 0;
+                            app.upload_error = 0;
+                            app.upload_name_len = 0;
+                            app.refresh_uploads();
+                            app.overlay = SheetOverlay::UploadPicker;
+                        }
+                        1 => {
+                            // A previous run's numbers are not this run's,
+                            // so the sheet opens empty rather than showing
+                            // measurements from another time.
+                            app.speed = SpeedResults::EMPTY;
+                            app.speed_running = true;
+                            app.overlay = SheetOverlay::SpeedTest;
+                            app.pending = PendingTask::SpeedTest;
+                        }
+                        2 => {
+                            app.lab = [LabResult::EMPTY; LAB_URLS.len()];
+                            app.lab_running = true;
+                            app.overlay = SheetOverlay::CompatibilityLab;
+                            app.pending = PendingTask::Lab;
+                        }
+                        _ => {
+                            app.overlay = SheetOverlay::TestFiles;
+                        }
+                    }
+                    return Tap::Redraw;
+                }
+            }
+        }
+        SheetOverlay::TestFiles => {
+            if x >= 640 && y >= 120 && y <= 165 {
+                app.overlay = SheetOverlay::None;
+                return Tap::Redraw;
+            }
+            let row_h = 84;
+            for (index, (name, _)) in TEST_FIXTURES.iter().enumerate() {
+                let r_y = 220 + index * row_h;
+                if y >= r_y && y < r_y + row_h - 10 && x >= 24 && x <= W - 24 {
+                    let _ = std::audio_haptic_click();
+                    let mut url = [0u8; 96];
+                    let mut n = append_text(&mut url, 0, FIXTURE_URL_PREFIX);
+                    n = append_text(&mut url, n, name);
+                    app.overlay = SheetOverlay::None;
+                    app.navigate(&url[..n]);
+                    return Tap::Redraw;
+                }
+            }
+            // WHY the sheet consumes the rest: a tap that misses a row must not
+            // reach the page underneath the sheet.
+            return Tap::Redraw;
+        }
+        SheetOverlay::UploadPicker => {
+            if x >= 640 && y >= 120 && y <= 165 {
+                app.overlay = SheetOverlay::None;
+                return Tap::Redraw;
+            }
+            let row_h = 84;
+            for i in 0..app.upload_count {
+                let r_y = 220 + i * row_h;
+                if y >= r_y && y < r_y + row_h - 10 && x >= 24 && x <= W - 24 {
+                    let _ = std::audio_haptic_click();
+                    // WHY the work is deferred by a pass: the selected row is
+                    // drawn as running once the transfer has actually started,
+                    // so the screen never claims a transfer that has not begun.
+                    app.upload_state = TransferState::Running;
+                    app.pending = PendingTask::Upload(i);
+                    return Tap::Redraw;
+                }
+            }
+            // WHY the sheet consumes the rest: a tap that misses a row must not
+            // reach the page underneath the sheet.
+            return Tap::Redraw;
+        }
+        SheetOverlay::SpeedTest => {
+            if x >= 640 && y >= 120 && y <= 165 {
+                app.overlay = SheetOverlay::None;
+            }
+            return Tap::Redraw;
+        }
+        SheetOverlay::CompatibilityLab => {
+            if x >= 640 && y >= 120 && y <= 165 {
+                app.overlay = SheetOverlay::None;
+            }
+            return Tap::Redraw;
+        }
         SheetOverlay::None => {}
     }
 
@@ -4524,6 +5998,21 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
         }
     }
 
+    // A downloaded file's Open action.
+    //
+    // WHY the platform dispatches it: the registry is built from the
+    // installed packages' manifests, so the app that opens the file is a
+    // property of the device. The screen reports what the platform said.
+    if app.status == PageStatus::Downloaded {
+        let frame = Frame::build(app);
+        if open_action_rect(&frame).contains(x, y) {
+            let _ = std::audio_haptic_click();
+            app.open_last_download();
+            return Tap::Redraw;
+        }
+        return Tap::None;
+    }
+
     // Offline / Error screen Reload Button tap
     if (app.status == PageStatus::NoTransport
         || app.status == PageStatus::InvalidAddress
@@ -4557,6 +6046,21 @@ fn handle_browser_key(app: &mut BrowserApp, key: std::InputKeyEvent) -> Dirty {
     use std::input_key_code;
     if !key.pressed {
         return Dirty::None;
+    }
+    // A tools sheet is dismissed the same way every other sheet is.
+    if !app.address_focused
+        && key.code == input_key_code::ESCAPE
+        && matches!(
+            app.overlay,
+            SheetOverlay::Tools
+                | SheetOverlay::UploadPicker
+                | SheetOverlay::SpeedTest
+                | SheetOverlay::CompatibilityLab
+                | SheetOverlay::TestFiles
+        )
+    {
+        app.overlay = SheetOverlay::None;
+        return Dirty::All;
     }
     // WHY the open list takes the keys first: a panel that is open and
     // filtered is what the person is looking at, and the address field is
@@ -4703,6 +6207,26 @@ pub extern "C" fn _start() -> ! {
         | std::EVENT_TIMER_TICK;
 
     loop {
+        // WHY the work runs after a frame has been presented: the tap
+        // schedules it and returns, the touch branch draws the sheet's
+        // running state, and only the next pass performs the transfer. A
+        // screen that drew only the result could not say the work is
+        // happening, and a screen that drew only "running" would be a
+        // claim the transfer had actually begun.
+        if browser.pending != PendingTask::None {
+            let task = browser.pending;
+            browser.pending = PendingTask::None;
+            match task {
+                PendingTask::Upload(index) => browser.perform_upload(index),
+                PendingTask::SpeedTest => browser.perform_speed_test(),
+                PendingTask::Lab => browser.perform_lab(),
+                PendingTask::None => {}
+            }
+            if surface > 0 {
+                render_browser_ui(surface, &browser);
+                let _ = std::surface_flip();
+            }
+        }
         match std::event_poll(interest_mask, 150) {
             Ok(events) => {
                 if events & std::EVENT_TOUCH_INPUT != 0 {
