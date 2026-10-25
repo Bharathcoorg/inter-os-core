@@ -272,3 +272,13 @@ impl NetworkDevice for NetworkDeviceManager {
 
 pub static NETWORK_DEVICE: spin::Mutex<NetworkDeviceManager> =
     spin::Mutex::new(NetworkDeviceManager::new_loopback());
+
+/// Kernel loopback queue for traffic addressed to 127.0.0.1.
+///
+/// WHY this exists separately from `NETWORK_DEVICE`: once a physical controller
+/// is bound, sending a loopback datagram through the active backend puts a
+/// 127.0.0.1 frame on the wire, where nothing ever delivers it back. Loopback
+/// destinations always stay in the kernel, and `poll_network_interface` drains
+/// this queue alongside the controller's receive ring.
+pub static LOOPBACK_DEVICE: spin::Mutex<LoopbackDevice> =
+    spin::Mutex::new(LoopbackDevice::new());

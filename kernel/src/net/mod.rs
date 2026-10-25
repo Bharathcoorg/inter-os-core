@@ -19,7 +19,7 @@ pub mod wireless;
 pub mod route;
 
 pub use arp::{ArpOpcode, ArpPacket, ArpTable};
-pub use device::{LoopbackDevice, NetDeviceInfo, NetError, NetworkBackend, NetworkDevice, NetworkDeviceManager, NETWORK_DEVICE, ENABLE_E1000_BINDING};
+pub use device::{LoopbackDevice, NetDeviceInfo, NetError, NetworkBackend, NetworkDevice, NetworkDeviceManager, NETWORK_DEVICE, LOOPBACK_DEVICE, ENABLE_E1000_BINDING};
 pub use e1000::E1000Device;
 pub use dns::{encode_query as dns_encode_query, parse_a_answer, DnsAnswer, DnsQuestion, DnsResolver, DNS_SERVER};
 pub use tcp::{next_state as tcp_next_state, seq_ge, seq_gt, seq_le, seq_lt, valid_established_segment, valid_syn_ack, TcpSegment, TcpState};
@@ -124,6 +124,19 @@ fn resolve_destination_mac(dst_ip: Ipv4Address) -> Result<MacAddress, NetError> 
     drop(requests);
     transmit_arp_request(dst_ip)?;
     Err(NetError::NoPacketAvailable)
+}
+
+/// Hands one serialized Ethernet frame to the backend that owns its destination.
+///
+/// Loopback destinations must never reach the controller: the NIC would put a
+/// 127.0.0.1 frame on the wire, where nothing delivers it back. Those frames go
+/// to the kernel loopback queue, which `poll_network_interface` drains.
+fn transmit_frame(dst_ip: Ipv4Address, frame: &[u8]) -> Result<(), NetError> {
+    if dst_ip.is_loopback() {
+        LOOPBACK_DEVICE.lock().transmit(frame)
+    } else {
+        NETWORK_DEVICE.lock().transmit(frame)
+    }
 }
 
 /// Transmits one real ARP request for the default gateway through the freshly
@@ -277,8 +290,8 @@ pub fn send_udp_datagram_authorized(
     let caller_task = crate::task::SCHEDULER.lock().current_task_id();
     authorize_and_debit_network_send(caps, caller_task, eth_len, consume_quota)?;
 
-    // 7. Transmit into Loopback / Virtual NIC
-    NETWORK_DEVICE.lock().transmit(&eth_buf[0..eth_len])
+    // 7. Transmit into the loopback queue or the hardware NIC
+    transmit_frame(dst_ip, &eth_buf[0..eth_len])
 }
 
 pub fn transmit_tcp_segment(src_ip: Ipv4Address, src_port: u16, dst_ip: Ipv4Address, dst_port: u16, seq: u32, ack: u32, flags: u16) -> Result<(), NetError> {
@@ -301,7 +314,7 @@ pub fn transmit_tcp_segment_with_window(src_ip: Ipv4Address, src_port: u16, dst_
     };
     let mut eth_buf = [0u8; 1514];
     let len = frame.serialize(&mut eth_buf).map_err(|_| NetError::BufferTooSmall)?;
-    NETWORK_DEVICE.lock().transmit(&eth_buf[..len])
+    transmit_frame(dst_ip, &eth_buf[..len])
 }
 
 #[allow(dead_code)]
@@ -323,7 +336,7 @@ fn transmit_tcp_payload_with_window(src_ip: Ipv4Address, src_port: u16, dst_ip: 
         crate::task::process::consume_background_network(task, n)
             .map_err(|_| NetError::QueueFull)?;
     }
-    NETWORK_DEVICE.lock().transmit(&eth_buf[..n])?;
+    transmit_frame(dst_ip, &eth_buf[..n])?;
     Ok(payload.len())
 }
 
@@ -363,7 +376,7 @@ fn transmit_tcp_syn_with_window(src_ip: Ipv4Address, src_port: u16, dst_ip: Ipv4
     };
     let mut eth_buf = [0u8; 1514];
     let len = frame.serialize(&mut eth_buf).map_err(|_| NetError::BufferTooSmall)?;
-    NETWORK_DEVICE.lock().transmit(&eth_buf[..len])
+    transmit_frame(dst_ip, &eth_buf[..len])
 }
 
 pub fn send_tcp_syn(src_ip: Ipv4Address, src_port: u16, dst_ip: Ipv4Address, dst_port: u16, seq: u32, caps: &CapabilityTable) -> Result<(), NetError> {
@@ -382,10 +395,20 @@ pub fn poll_network_interface() -> usize {
     loop {
         let mut rx_buf = [0u8; 1514];
         let len = {
-            let mut device = NETWORK_DEVICE.lock();
-            match device.receive(&mut rx_buf) {
+            // Drain the kernel loopback queue first, then the controller's
+            // receive ring. Both feed the same demultiplexer below, so
+            // 127.0.0.1 traffic is delivered without touching the wire.
+            let mut loopback = LOOPBACK_DEVICE.lock();
+            match loopback.receive(&mut rx_buf) {
                 Ok(len) => len,
-                Err(_) => break,
+                Err(_) => {
+                    drop(loopback);
+                    let mut device = NETWORK_DEVICE.lock();
+                    match device.receive(&mut rx_buf) {
+                        Ok(len) => len,
+                        Err(_) => break,
+                    }
+                }
             }
         };
         processed += 1;

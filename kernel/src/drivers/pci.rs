@@ -243,25 +243,11 @@ pub fn initialize_e1000_network() -> Result<(), &'static str> {
     )?;
     let mac = unsafe { crate::net::E1000Device::read_mac_from_eeprom(mapped.as_u64() as usize) };
     if mac == crate::net::MacAddress::ZERO {
-        // WHY the attachment fails here, measured on the QEMU 11.1 profile
-        // this platform ships:
-        //
-        //   * the memory-mapped window answers -- the control register at
-        //     offset 0 reads back the controller's reset value -- but
-        //     offset 0x14 only latches whatever is written to it and never
-        //     completes a transfer, so it is not the EEPROM;
-        //   * the legacy I/O window (BAR1) is not assigned by the
-        //     bootloader, and when it is assigned by hand at 0xC000 every
-        //     register in it reads back zero, the control register
-        //     included;
-        //   * so the permanent station address cannot be read, a zero
-        //     address is refused, and the controller never attaches.
-        //
-        // The consequence is not confined to this driver: with no
-        // controller there is no route off the machine, every packet stays
-        // on the kernel's loopback path, and the QEMU user-mode gateway at
-        // 10.0.2.2 is unreachable -- so no application can use the
-        // network, including the browser's gateway at 10.0.2.2:4300.
+        // WHY a zero address is refused rather than replaced with a local
+        // address: zero is what an absent or erased EEPROM reads back, so
+        // attaching with it would put a forged station address on the
+        // gateway's segment. The controller stays unattached and the caller
+        // reports the network unavailable instead.
         return Err("E1000 EEPROM returned an invalid zero MAC");
     }
     // WHY check before initialize(): initialize() enables the controller and

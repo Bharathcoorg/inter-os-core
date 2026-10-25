@@ -15,6 +15,16 @@ use x86_64::structures::paging::{PhysFrame, Size4KiB};
 const CTRL: usize = 0x0000;
 const STATUS: usize = 0x0008;
 const EERD: usize = 0x0014;
+/// EERD bit 0 starts a read and bit 4 reports that the word is ready;
+/// bits 15:8 carry the word address and bits 31:16 the word itself.
+///
+/// WHY the start bit is not bit 31: 31:16 is the data field. A write that
+/// sets bit 31 instead of bit 0 never starts a transfer, the done poll never
+/// observes a completed read, and every word comes back zero.
+const EERD_START: u32 = 1 << 0;
+const EERD_DONE: u32 = 1 << 4;
+const EERD_ADDR_SHIFT: u32 = 8;
+const EERD_DATA_SHIFT: u32 = 16;
 const RCTL: usize = 0x0100;
 const TCTL: usize = 0x0400;
 const RDBAL: usize = 0x2800;
@@ -71,6 +81,24 @@ unsafe fn write32(base: usize, offset: usize, value: u32) {
     compiler_fence(Ordering::SeqCst);
     core::ptr::write_volatile((base + offset) as *mut u32, value);
     compiler_fence(Ordering::SeqCst);
+}
+
+/// Reads one EEPROM word, or returns zero if the controller never completes
+/// the transfer. The caller distinguishes "zero" from a valid word by the
+/// address it asked for: words 3..5 hold the station address.
+unsafe fn read_eeprom_word(base: usize, address: u8) -> u16 {
+    write32(
+        base,
+        EERD,
+        EERD_START | ((address as u32) << EERD_ADDR_SHIFT),
+    );
+    for _ in 0..100_000 {
+        let value = read32(base, EERD);
+        if value & EERD_DONE != 0 {
+            return (value >> EERD_DATA_SHIFT) as u16;
+        }
+    }
+    0
 }
 
 /// Minimal descriptor-ring E1000 driver.
@@ -210,46 +238,24 @@ impl E1000Device {
     }
 
     pub fn eeprom_word(&self, address: u8) -> u16 {
-        unsafe {
-            // EERD bit 31 is Start; bits 8-15 carry the address. Without the Start
-            // bit the device never begins the transfer, the polling loop below
-            // always timed out, and every EEPROM word read back as zero.
-            write32(self.base_vaddr, EERD, (1 << 31) | ((address as u32) << 8));
-            for _ in 0..100_000 {
-                let value = read32(self.base_vaddr, EERD);
-                if value & 1 != 0 { return (value >> 16) as u16; }
-            }
-        }
-        0
+        unsafe { read_eeprom_word(self.base_vaddr, address) }
     }
 
     pub fn mac_address(&self) -> MacAddress { self.mac }
 
     /// Reads the permanent station address from the E1000 EEPROM.
-pub unsafe fn read_mac_from_eeprom(base_vaddr: usize) -> MacAddress {
-    let read = |address: u8| -> u16 {
-        // EERD bit 31 is Start; bits 8-15 carry the address; bit 0 of the read
-        // value reports Done. The Start bit was previously omitted, so every
-        // read timed out and returned zero.
-        write32(base_vaddr, EERD, (1 << 31) | ((address as u32) << 8));
-        for _ in 0..100_000 {
-            let value = read32(base_vaddr, EERD);
-            if value & 1 != 0 { return (value >> 16) as u16; }
-        }
-        0
-    };
-    // The MAC address lives in EEPROM words 3, 4 and 5. Words 0..2 hold the
-    // checksum and the EEPROM signature, so reading them yields zero on real
-    // hardware and the device then refused to attach, leaving every packet on
-    // the loopback path.
-    let w3 = read(3);
-    let w4 = read(4);
-    let w5 = read(5);
-    // Byte order within each word is low byte first.
-    MacAddress([(w3 & 0xff) as u8, (w3 >> 8) as u8,
-                (w4 & 0xff) as u8, (w4 >> 8) as u8,
-                (w5 & 0xff) as u8, (w5 >> 8) as u8])
-}
+    pub unsafe fn read_mac_from_eeprom(base_vaddr: usize) -> MacAddress {
+        // Intel 8254x parts store the station address in EEPROM words 0..2,
+        // low byte first. Words 3..5 are not part of the address: on the QEMU
+        // 82540 profile they read 0x0000, 0xFFFF, 0x0000, which would attach
+        // the controller under a bogus 00:00:ff:ff:00:00 address.
+        let w0 = read_eeprom_word(base_vaddr, 0);
+        let w1 = read_eeprom_word(base_vaddr, 1);
+        let w2 = read_eeprom_word(base_vaddr, 2);
+        MacAddress([(w0 & 0xff) as u8, (w0 >> 8) as u8,
+                    (w1 & 0xff) as u8, (w1 >> 8) as u8,
+                    (w2 & 0xff) as u8, (w2 >> 8) as u8])
+    }
 }
 
 impl NetworkDevice for E1000Device {
