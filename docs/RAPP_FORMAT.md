@@ -226,18 +226,27 @@ signed manifests.
 
 In accordance with the **Platform Truth Contract**, first-party packages and runtime manifests must advertise only codecs and containers that are genuinely decoded by native software or verified hardware on the platform. Unsupported codecs must fail closed, return typed errors, or report unavailable rather than synthesizing frames or faking telemetry.
 
-| Category | Media Type / Container | Status | Handler Package | Notes & Constraints |
-| :--- | :--- | :--- | :--- | :--- |
-| **Audio** | `audio/wav`, `audio/x-wav` | **Supported** | `org.interos.music` | RIFF/WAVE PCM (8, 16, 24, 32-bit; mono/stereo). Resampled to AC'97 48 kHz stereo. |
-| **Audio** | `audio/flac` | **Supported** | `org.interos.music` | FLAC 16/24-bit lossless streaming. Duration read from STREAMINFO block. |
-| **Audio** | `audio/mpeg` | **Supported** | `org.interos.music` | MPEG-1 Audio Layer III (MP3), 32/44.1/48 kHz. Stream duration honestly reported as unknown (`--:--`). |
-| **Audio** | `audio/ogg`, `audio/aac`, `audio/mp4` | **Refused** | *None* | No Ogg Vorbis, AAC, or MP4 audio decoder in tree. Pruned from manifest intents. |
-| **Video** | `video/avi`, `video/x-msvideo` | **Supported** | `org.interos.video_player` | RIFF AVI container carrying MJPEG video streams. |
-| **Video** | `video/x-motion-jpeg` | **Supported** | `org.interos.video_player` | Motion JPEG video frames decoded via native baseline JPEG service. |
-| **Video** | `video/x-ppm`, `video/x-raw` | **Supported** | `org.interos.video_player` | Uncompressed frame sequences (PPM P6, RAW RGB24) for local capture/playback. |
-| **Video** | `video/mp4`, `video/webm`, `video/quicktime` | **Refused** | *None* | H.264, VP9, and AV1 decode requires physical silicon. Refused with exact contract string: `"No hardware H.264 decoder bound. Software decode unavailable."` |
-| **Video Audio** | Embedded AVI Audio | **Unavailable** | `org.interos.video_player` | Audio streams inside AVI files are detected but not decoded; UI reports `"Audio stream: unavailable"`. |
-| **Images** | `image/png`, `image/jpeg`, `image/gif` | **Supported** | `org.interos.gallery` | Decoded via native zero-heap image decoders. |
-| **Images** | `image/webp` | **Supported (Lossless)** | `org.interos.gallery` | Lossless WebP supported; lossy WebP refused as unsupported. |
-| **Images** | `image/bmp`, `image/qoi`, `image/x-portable-pixmap` | **Supported** | `org.interos.gallery` | Fully supported native raster formats. |
+Evidence levels used below:
+
+- **Source-only** — the code path exists but no test or QEMU run has exercised it.
+- **Unit-tested** — exercised by `cargo test` or a contract test in `tests/`.
+- **QEMU-verified** — exercised in the reference QEMU x86_64 build through the real app-launch path, with serial log and/or scanout screenshot evidence.
+
+| Category | Media Type / Container | Status | Handler Package | Evidence | Notes & Constraints |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Audio** | `audio/wav` | **Supported** | `org.interos.music` | Unit-tested | RIFF/WAVE PCM (8, 16, 24, 32-bit; mono/stereo). Resampled to AC'97 48 kHz stereo. The index emits `audio/wav`; `audio/x-wav` is not emitted by the platform, so it is not advertised. |
+| **Audio** | `audio/flac` | **Supported** | `org.interos.music` | Unit-tested | FLAC 16/24-bit lossless streaming. Duration read from STREAMINFO block. |
+| **Audio** | `audio/mpeg` | **Supported** | `org.interos.music` | Unit-tested | MPEG-1 Audio Layer III (MP3), 32/44.1/48 kHz. Stream duration honestly reported as unknown (`--:--`). |
+| **Audio** | `audio/ogg`, `audio/aac`, `audio/mp4` | **Refused** | *None* | Source-only | No Ogg Vorbis, AAC, or MP4 audio decoder in tree. Pruned from manifest intents. The importer still lists `.ogg`, `.m4a`, `.aac`, and `.opus` files, but playback refuses them rather than faking output. |
+| **Video** | `video/avi`, `video/x-msvideo` | **Supported** | `org.interos.video_player` | QEMU-verified, unit-tested | RIFF AVI carrying an MJPEG (`MJPG`/`JPEG`) video stream. Verified in the reference QEMU build by uploading `apps/video_player/tests/fixtures/mjpeg_5fps_audio.avi` (6394 bytes, 64x48, 10 frames, 2 s) to `/storage/videos/audio_tone.avi` and playing it; the serial log records the open, the audio-stream notice, and end of stream. Other codecs are refused with `UnsupportedCodec`. |
+| **Video** | `video/x-motion-jpeg` | **Supported** | `org.interos.video_player` | Unit-tested | Motion JPEG single-frame/stream parsing and baseline JPEG decode. The AVI path above also decodes MJPEG payloads through the same decoder. |
+| **Video** | `video/x-ppm` | **Supported** | `org.interos.video_player` | Unit-tested | Uncompressed PPM P6 frames in `/storage/videos`. The content index itself classifies P6 as `image/x-portable-pixmap`; File Manager maps `/storage/videos/*.ppm` to `video/x-ppm` while retaining the index provenance. Frame decoding is covered by `test_ppm_p6_frame_decode`; no QEMU run has opened a PPM through the player. |
+| **Video** | `video/x-raw` | **Supported** | `org.interos.video_player` | Source-only | Raw RGB24/RGBA frames with a header, opened by suffix from `/storage/videos`. No fixture or test covers this path yet. |
+| **Video** | `video/mp4`, `video/webm`, `video/quicktime` | **Refused** | *None* | Unit-tested | H.264, VP9, and AV1 decode requires physical silicon. Refused with exact contract string: `"No hardware H.264 decoder bound. Software decode unavailable."` The gallery does not advertise these types: it has no video decoder and its handoff refuses when the gallery itself is the first registered handler. |
+| **Video Audio** | Embedded AVI Audio | **Unavailable** | `org.interos.video_player` | QEMU-verified (log) | Audio streams inside AVI files are detected but not decoded. The player logs `"[VIDEO PLAYER] AVI has an audio stream; audio playback is unavailable and is not claimed."` and shows `"Audio stream: unavailable"` while the stream is open. |
+| **Images** | `image/png`, `image/jpeg`, `image/gif` | **Supported** | `org.interos.gallery` | Unit-tested | Decoded via native zero-heap image decoders. |
+| **Images** | `image/webp` | **Supported (Lossless)** | `org.interos.gallery` | Unit-tested | Lossless WebP supported; lossy WebP refused as unsupported. |
+| **Images** | `image/bmp`, `image/qoi`, `image/x-portable-pixmap` | **Supported** | `org.interos.gallery` | Unit-tested | Fully supported native raster formats. |
+
+AVI playback is a sequential, forward-only stream. The player cannot seek an AVI: the scrubber and seek target log `"[VIDEO PLAYER] A sequential AVI cannot seek; position unchanged."` and leave the position alone. Pacing comes from the `avih`/`strh` timing; when decoding falls behind, frames are dropped rather than played in slow motion. End of stream closes the file and logs `"[VIDEO PLAYER] AVI end of stream; the file was closed."`. Sub-second durations display as `--:--` because the player reports whole seconds.
 

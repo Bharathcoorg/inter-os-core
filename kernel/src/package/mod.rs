@@ -84,7 +84,8 @@ pub const FIRST_PARTY_INTENTS: &[(&str, &str, &str)] = &[
     ("org.interos.video_player", "mime", "video/x-motion-jpeg"),
     ("org.interos.video_player", "mime", "video/x-raw"),
     ("org.interos.video_player", "mime", "video/x-ppm"),
-    // The gallery opens the images and videos the device holds.
+    // The gallery decodes the images the device holds. It lists videos but
+    // has no video decoder, so it declares no video handler.
     ("org.interos.gallery", "mime", "image/png"),
     ("org.interos.gallery", "mime", "image/gif"),
     ("org.interos.gallery", "mime", "image/bmp"),
@@ -92,10 +93,6 @@ pub const FIRST_PARTY_INTENTS: &[(&str, &str, &str)] = &[
     ("org.interos.gallery", "mime", "image/webp"),
     ("org.interos.gallery", "mime", "image/qoi"),
     ("org.interos.gallery", "mime", "image/x-portable-pixmap"),
-    ("org.interos.gallery", "mime", "video/mp4"),
-    ("org.interos.gallery", "mime", "video/webm"),
-    ("org.interos.gallery", "mime", "video/quicktime"),
-    ("org.interos.gallery", "mime", "video/x-matroska"),
     // The music app opens the audio the device holds.
     ("org.interos.music", "mime", "audio/mpeg"),
     ("org.interos.music", "mime", "audio/wav"),

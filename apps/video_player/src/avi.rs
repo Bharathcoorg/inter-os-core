@@ -672,6 +672,11 @@ mod tests {
     /// `ffmpeg -f lavfi -i testsrc=size=64x48:rate=10:duration=1 \
     ///   -c:v mjpeg -pix_fmt yuvj420p -an fixture.avi`
     const FIXTURE: &[u8] = include_bytes!("../tests/fixtures/mjpeg_10fps.avi");
+    /// A real ffmpeg-produced AVI carrying one MJPEG stream and one PCM
+    /// stream: 64x48, 5 fps, 10 frames, 2 s. It is the fixture the QEMU
+    /// verification played, so the unit test exercises the same bytes.
+    const AUDIO_FIXTURE: &[u8] =
+        include_bytes!("../tests/fixtures/mjpeg_5fps_audio.avi");
 
     fn push_chunk(out: &mut Vec<u8>, id: &[u8; 4], payload: &[u8]) {
         out.extend_from_slice(id);
@@ -818,6 +823,30 @@ mod tests {
         for frame in &frames {
             assert_eq!(&frame[0..2], &[0xFF, 0xD8], "00dc payload must start with SOI");
             assert_eq!(&frame[frame.len() - 2..], &[0xFF, 0xD9], "payload must end at EOI");
+        }
+    }
+
+    /// The audio-bearing fixture must be reported as having audio and must
+    /// still yield every video frame, because the player states the audio is
+    /// unavailable instead of refusing the file.
+    #[test]
+    fn an_audio_stream_is_reported_and_the_video_still_decodes() {
+        let (info, frames) = read_all(AUDIO_FIXTURE, MAX_FRAME_BYTES);
+        assert_eq!(info.width, 64);
+        assert_eq!(info.height, 48);
+        assert_eq!(info.video_stream, Some(0));
+        assert_eq!(info.audio_streams, 1);
+        assert_eq!(info.micros_per_frame, 200_000);
+        assert_eq!(info.total_frames, 10);
+        assert_eq!(info.duration_secs(), 2);
+        assert_eq!(frames.len(), 10);
+        let mut rgba = host_std::vec![0u8; 64 * 48 * 4];
+        for frame in &frames {
+            assert_eq!(&frame[0..2], &[0xFF, 0xD8]);
+            assert_eq!(
+                crate::std::image::decode_jpeg(frame, &mut rgba),
+                Ok((64, 48, 64 * 48 * 4))
+            );
         }
     }
 

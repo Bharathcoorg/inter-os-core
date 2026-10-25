@@ -312,6 +312,38 @@ def test_the_kernel_table_and_the_manifests_agree():
     )
 
 
+def test_the_gallery_declares_only_the_images_it_decodes():
+    """The gallery lists videos but cannot decode one.
+
+    WHY this is a contract: a manifest is the platform's handler table. A
+    gallery that declares video/mp4 becomes the registered handler and can
+    shadow the player that would otherwise be asked, while its own handoff
+    refuses when it is first. The declaration must match the decoder.
+    """
+    manifest = json.loads(read(APPS / "gallery" / "manifest.json"))
+    mimes = manifest.get("intents", {}).get("mime", [])
+    assert mimes, "the gallery declares no handlers at all"
+    video = [m for m in mimes if m.startswith("video/")]
+    assert video == [], f"the gallery claims video handlers it cannot serve: {video}"
+    assert "image/png" in mimes
+
+    source = read(APPS / "gallery" / "src" / "main.rs")
+    handoff = source[source.index("fn handoff_video"):]
+    handoff = handoff[: handoff.index("\n}\n") + 3]
+    assert 'package != "org.interos.gallery"' in handoff, (
+        "the gallery would dispatch a video to itself"
+    )
+    assert "Gallery is the registered handler for " in handoff, (
+        "the gallery does not state its refusal to open a video"
+    )
+
+    # The player still declares the formats it decodes, so removing the
+    # gallery's claim did not remove the real handler.
+    player = json.loads(read(APPS / "video_player" / "manifest.json"))
+    player_mimes = set(player.get("intents", {}).get("mime", []))
+    assert {"video/avi", "video/x-msvideo", "video/x-motion-jpeg"} <= player_mimes
+
+
 def test_the_packer_encodes_the_declared_handlers():
     interos = read(TOOLS / "interos.py")
     assert "def _rapp_v4_encode" in interos
