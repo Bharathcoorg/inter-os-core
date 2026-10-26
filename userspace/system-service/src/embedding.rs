@@ -1,10 +1,13 @@
-//! High-performance, zero-allocation 768-dimensional text embedding computation
-//! for InterOS on-device AI service (`aid`).
+//! Lexical n-gram feature projection baseline for InterOS on-device text search
+//! and semantic indexing (`aid`).
 //!
 //! Strictly `#![no_std]` and zero heap allocation in all execution loops.
-//! Computes L2-normalized 768-dimensional float and fixed-point (Q7) embeddings
-//! compatible with EmbeddingGemma 2 Matryoshka representation dimensions
-//! (128, 256, 512, 768) and `interos_std::ai::cosine_similarity_q7`.
+//! Computes L2-normalized 768-dimensional float and fixed-point (Q7) lexical embedding
+//! vectors compatible with Matryoshka representation dimensions (128, 256, 512, 768)
+//! and `interos_std::ai::cosine_similarity_q7`.
+//!
+//! Note: This is a fast, deterministic lexical feature hashing algorithm and baseline,
+//! not physical neural EmbeddingGemma 2 model weights.
 
 #[cfg(test)]
 use interos_std as std;

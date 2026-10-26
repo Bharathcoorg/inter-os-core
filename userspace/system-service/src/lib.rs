@@ -364,7 +364,7 @@ pub fn run_ai() -> ! {
     }
 }
 
-/// Dispatches incoming IPC queries for `SERVICE_INFERENCE` (#13) with zero heap allocation.
+/// Dispatches incoming IPC queries for `SERVICE_INFERENCE` (#12) with zero heap allocation.
 pub fn handle_ipc_inference_query(
     sender_task_id: u64,
     msg_type: u32,
@@ -426,15 +426,26 @@ pub fn handle_ipc_inference_query(
         }
     }
 
+    let start_tick = std::cap_lookup(std::cap_type::TIMER_TICK_READ, 0)
+        .ok()
+        .and_then(|_| std::get_ticks().ok())
+        .unwrap_or(0);
+
     // Compute embedding directly into a stack buffer
     let mut q7_out = [0i8; embedding::EMBEDDING_DIM];
     embedding::compute_embedding_768(query_text, target_dim, None, Some(&mut q7_out));
+
+    let end_tick = std::cap_lookup(std::cap_type::TIMER_TICK_READ, 0)
+        .ok()
+        .and_then(|_| std::get_ticks().ok())
+        .unwrap_or(start_tick);
+    let latency_micros = end_tick.saturating_sub(start_tick).saturating_mul(1000);
 
     // Construct response header
     let resp = std::ai::AiInferenceResponse {
         status: 0, // Success
         output_dim: target_dim as u32,
-        latency_micros: 45,
+        latency_micros,
         output_offset: core::mem::size_of::<std::ai::AiInferenceResponse>() as u64,
     };
 
