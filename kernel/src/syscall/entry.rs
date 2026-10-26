@@ -17,6 +17,8 @@ pub mod msr {
     pub const IA32_FMASK: u32 = 0xC000_0084;
     /// Page Attribute Table (PAT) Model-Specific Register.
     pub const IA32_PAT: u32 = 0x0000_0277;
+    /// Thread-Local Storage (TLS) FS Base Model-Specific Register.
+    pub const IA32_FS_BASE: u32 = 0xC000_0100;
 }
 
 /// IA32_PAT MSR value enabling Write-Combining (WC, 0x01) at index 1 and 5.
@@ -75,30 +77,45 @@ pub fn set_current_kernel_rsp(rsp: u64) {
 /// Reads a 64-bit value from a Model-Specific Register.
 #[inline(always)]
 pub unsafe fn rdmsr(msr_id: u32) -> u64 {
-    let low: u32;
-    let high: u32;
-    core::arch::asm!(
-        "rdmsr",
-        in("ecx") msr_id,
-        out("eax") low,
-        out("edx") high,
-        options(nostack, preserves_flags)
-    );
-    ((high as u64) << 32) | (low as u64)
+    #[cfg(not(target_os = "windows"))]
+    {
+        let low: u32;
+        let high: u32;
+        core::arch::asm!(
+            "rdmsr",
+            in("ecx") msr_id,
+            out("eax") low,
+            out("edx") high,
+            options(nostack, preserves_flags)
+        );
+        ((high as u64) << 32) | (low as u64)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = msr_id;
+        0
+    }
 }
 
 /// Writes a 64-bit value to a Model-Specific Register.
 #[inline(always)]
 pub unsafe fn wrmsr(msr_id: u32, value: u64) {
-    let low = value as u32;
-    let high = (value >> 32) as u32;
-    core::arch::asm!(
-        "wrmsr",
-        in("ecx") msr_id,
-        in("eax") low,
-        in("edx") high,
-        options(nostack, preserves_flags)
-    );
+    #[cfg(not(target_os = "windows"))]
+    {
+        let low = value as u32;
+        let high = (value >> 32) as u32;
+        core::arch::asm!(
+            "wrmsr",
+            in("ecx") msr_id,
+            in("eax") low,
+            in("edx") high,
+            options(nostack, preserves_flags)
+        );
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = (msr_id, value);
+    }
 }
 
 /// Initializes hardware MSRs for fast system calls.

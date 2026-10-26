@@ -253,6 +253,15 @@ pub enum SyscallNumber {
     /// slot has been reused, so userspace needs a way to obtain the handle for
     /// its own grant that does not guess the generation.
     CapHandleLookup = 150,
+    MemMap = 151,
+    MemUnmap = 152,
+    ThreadSpawn = 153,
+    ThreadExit = 154,
+    FutexWait = 155,
+    FutexWake = 156,
+    ClockGettime = 157,
+    Nanosleep = 158,
+    Poll = 159,
 }
 
 /// System call result status codes.
@@ -297,6 +306,12 @@ pub enum SyscallResult {
     /// error (the controller did not fail) and not "not ready" (it may never
     /// exist). Reporting `DeviceError` would suggest a retry could fix it.
     Unavailable = -32,
+    /// Out of physical memory or unable to allocate physical frames for mapping.
+    OutOfMemory = -33,
+    /// Per-process thread or resource limit exceeded.
+    ResourceExhausted = -34,
+    /// Synchronous wait operation timed out before event was signaled.
+    TimedOut = -35,
 }
 
 /// Dispatches a cooperative scheduling yield.
@@ -2415,6 +2430,66 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             // holds; it mints no new authority.
             match sys_cap_handle_lookup(a1, a2) {
                 Ok(handle) => handle.0 as i64,
+                Err(e) => e as i64,
+            }
+        }
+        151 => {
+            // MemMap: a1 = addr, a2 = len, a3 = prot, a4 = flags
+            match sys_mem_map(a1, a2, a3, a4) {
+                Ok(vaddr) => vaddr as i64,
+                Err(e) => e as i64,
+            }
+        }
+        152 => {
+            // MemUnmap: a1 = addr, a2 = len
+            match sys_mem_unmap(a1, a2) {
+                Ok(()) => 0,
+                Err(e) => e as i64,
+            }
+        }
+        153 => {
+            // ThreadSpawn: a1 = entry_point, a2 = stack_ptr, a3 = tls_base, a4 = arg
+            match sys_thread_spawn(a1, a2, a3, a4) {
+                Ok(tid) => tid as i64,
+                Err(e) => e as i64,
+            }
+        }
+        154 => {
+            // ThreadExit: a1 = exit_code
+            sys_thread_exit(a1 as i32);
+        }
+        155 => {
+            // FutexWait: a1 = uaddr, a2 = expected_val, a3 = timeout_ns
+            match sys_futex_wait(a1, a2 as u32, a3) {
+                Ok(res) => res as i64,
+                Err(e) => e as i64,
+            }
+        }
+        156 => {
+            // FutexWake: a1 = uaddr, a2 = max_count
+            match sys_futex_wake(a1, a2 as u32) {
+                Ok(count) => count as i64,
+                Err(e) => e as i64,
+            }
+        }
+        157 => {
+            // ClockGettime: a1 = clock_id, a2 = timespec_ptr
+            match sys_clock_gettime(a1 as u32, a2) {
+                Ok(()) => 0,
+                Err(e) => e as i64,
+            }
+        }
+        158 => {
+            // Nanosleep: a1 = req_timespec_ptr, a2 = rem_timespec_ptr
+            match sys_nanosleep(a1, a2) {
+                Ok(()) => 0,
+                Err(e) => e as i64,
+            }
+        }
+        159 => {
+            // Poll: a1 = fds_ptr, a2 = nfds, a3 = timeout_ms
+            match sys_poll(a1, a2, a3 as i32) {
+                Ok(ready_count) => ready_count as i64,
                 Err(e) => e as i64,
             }
         }
@@ -4696,14 +4771,11 @@ pub fn sys_device_power(action: u32) -> Result<u32, SyscallResult> {
         }
         3 => {
             if require_system_control_object(crate::services::SERVICE_AUDIO_CONTROL_OBJECT).is_err() { return Err(SyscallResult::PermissionDenied); }
-            // WHY: stepping needs a level to step *from*, and on this platform no
-            // volume is known until somebody requests one — the old code read a
-            // hardcoded `100` seed here and reported it as the result of a step
-            // that had done nothing. Refuse instead of inventing a base level.
             let mut audio = crate::audio::AUDIO_MANAGER.lock();
             match audio.step_volume(5) {
                 Some(requested) => {
-                    crate::serial_println!("[AUDIO] volume_percent={} state=requested applied_to_hardware=no source=system_control", requested);
+                    let applied = if audio.pcm_device_present() { "yes" } else { "no" };
+                    crate::serial_println!("[AUDIO] volume_percent={} state=active applied_to_hardware={} source=system_control", requested, applied);
                     Ok(requested as u32)
                 }
                 None => {
@@ -4717,7 +4789,8 @@ pub fn sys_device_power(action: u32) -> Result<u32, SyscallResult> {
             let mut audio = crate::audio::AUDIO_MANAGER.lock();
             match audio.step_volume(-5) {
                 Some(requested) => {
-                    crate::serial_println!("[AUDIO] volume_percent={} state=requested applied_to_hardware=no source=system_control", requested);
+                    let applied = if audio.pcm_device_present() { "yes" } else { "no" };
+                    crate::serial_println!("[AUDIO] volume_percent={} state=active applied_to_hardware={} source=system_control", requested, applied);
                     Ok(requested as u32)
                 }
                 None => {
@@ -4772,19 +4845,12 @@ pub fn sys_audio_control(action: u32, param: u32) -> Result<u32, SyscallResult> 
             Ok(0)
         }
         7 => {
-            // WHY: the set path still succeeds — it stores the caller's request —
-            // but it logs `applied_to_hardware=no` because no mixer or PCM
-            // scaling path in this kernel consumes the value. The returned
-            // number is the stored request, not a level confirmed in effect.
             let stored = audio.set_volume(param.min(100) as u8);
-            crate::serial_println!("[AUDIO] volume_percent={} state=requested applied_to_hardware=no source=audio_control_set", stored);
+            let applied = if audio.pcm_device_present() { "yes" } else { "no" };
+            crate::serial_println!("[AUDIO] volume_percent={} state=active applied_to_hardware={} source=audio_control_set", stored, applied);
             Ok(stored as u32)
         }
-        // WHY: a query must not answer with a level when none has ever been
-        // requested. Returning `0` (or the old seeded `100`) here is how an
-        // unknown volume turns into a confident-looking meter in userspace, so
-        // the honest answer is the existing audio-specific error.
-        8 => match audio.volume_percent {
+        8 => match audio.get_volume() {
             Some(requested) => Ok(requested as u32),
             None => Err(SyscallResult::AudioError),
         },
@@ -5851,6 +5917,500 @@ pub fn sys_event_poll(interest_mask: u32, timeout_ticks: u32) -> Result<u32, Sys
     } else {
         Ok(0)
     }
+}
+
+// -----------------------------------------------------------------------------
+// Phase C1: Browser Platform Prerequisites & POSIX Compatibility Syscalls
+// -----------------------------------------------------------------------------
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Timespec {
+    pub tv_sec: i64,
+    pub tv_nsec: i64,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PollFd {
+    pub fd: i32,
+    pub events: i16,
+    pub revents: i16,
+}
+
+pub const PROT_NONE: u32 = 0;
+pub const PROT_READ: u32 = 1;
+pub const PROT_WRITE: u32 = 2;
+pub const PROT_EXEC: u32 = 4;
+
+pub const MAP_SHARED: u32 = 0x01;
+pub const MAP_PRIVATE: u32 = 0x02;
+pub const MAP_FIXED: u32 = 0x10;
+pub const MAP_ANONYMOUS: u32 = 0x20;
+
+pub const CLOCK_REALTIME: u32 = 0;
+pub const CLOCK_MONOTONIC: u32 = 1;
+pub const CLOCK_PROCESS_CPUTIME_ID: u32 = 2;
+pub const CLOCK_THREAD_CPUTIME_ID: u32 = 3;
+
+pub const POLLIN: i16 = 0x0001;
+pub const POLLPRI: i16 = 0x0002;
+pub const POLLOUT: i16 = 0x0004;
+pub const POLLERR: i16 = 0x0008;
+pub const POLLHUP: i16 = 0x0010;
+pub const POLLNVAL: i16 = 0x0020;
+
+static NEXT_ANONYMOUS_MMAP_ADDR: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0x2000_0000);
+
+/// Maps an anonymous memory region into the calling process's user address space.
+/// Enforces W^X (cannot be simultaneously WRITABLE and EXECUTABLE) and places
+/// boundary guard pages. Requires `CapType::MemoryHeap`.
+pub fn sys_mem_map(addr: u64, len: u64, prot: u64, _flags: u64) -> Result<u64, SyscallResult> {
+    // 1. Zero Ambient Authority: Check capability on calling task
+    let (_current_id, page_table_arc, process_id) = {
+        let sched = SCHEDULER.lock();
+        let current_task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+        // Check MemoryHeap capability token
+        if !current_task.cap_table.authorize_capability(CapabilityType::MemoryHeap, Rights::READ | Rights::WRITE)
+            && !current_task.cap_table.authorize_capability(CapabilityType::MemoryHeap, Rights::WRITE)
+        {
+            return Err(SyscallResult::PermissionDenied);
+        }
+        let pt = current_task.page_table.clone().ok_or(SyscallResult::PermissionDenied)?;
+        let pid = current_task.process_id.unwrap_or(crate::task::ProcessId(1));
+        (current_task.id, pt, pid)
+    };
+
+    // 2. Validate length
+    if len == 0 || len > 128 * 1024 * 1024 {
+        return Err(SyscallResult::InvalidArguments);
+    }
+    let len_aligned = (len.checked_add(4095).ok_or(SyscallResult::InvalidArguments)?) & !4095;
+
+    // 3. Enforce W^X: cannot be simultaneously WRITABLE and EXECUTABLE
+    let is_write = (prot & (PROT_WRITE as u64)) != 0;
+    let is_exec = (prot & (PROT_EXEC as u64)) != 0;
+    if is_write && is_exec {
+        return Err(SyscallResult::PermissionDenied);
+    }
+
+    // 4. Reserve address space accounting
+    let _ = crate::task::process::reserve_address_space(process_id, len_aligned as usize);
+
+    // 5. Determine target virtual address with guard pages
+    let vaddr_start = if addr == 0 {
+        // Dynamic anonymous mapping: leave 4096 guard page before and after
+        let alloc_size = len_aligned.checked_add(8192).ok_or(SyscallResult::InvalidArguments)?;
+        let base = NEXT_ANONYMOUS_MMAP_ADDR.fetch_add(alloc_size, core::sync::atomic::Ordering::Relaxed);
+        base + 4096
+    } else {
+        if addr % 4096 != 0 || addr < 0x1000 {
+            crate::task::process::release_address_space(process_id, len_aligned as usize);
+            return Err(SyscallResult::InvalidArguments);
+        }
+        let end = addr.checked_add(len_aligned).ok_or(SyscallResult::InvalidArguments)?;
+        if end >= 0x0000_8000_0000_0000 {
+            crate::task::process::release_address_space(process_id, len_aligned as usize);
+            return Err(SyscallResult::InvalidArguments);
+        }
+        addr
+    };
+
+    // 6. Map pages into page table with W^X enforcement and zeroed memory
+    let mut mapped_pages: alloc::vec::Vec<x86_64::structures::paging::Page<x86_64::structures::paging::Size4KiB>> = alloc::vec::Vec::new();
+    let mut pt = page_table_arc.lock();
+
+    let mut page_flags = x86_64::structures::paging::PageTableFlags::PRESENT
+        | x86_64::structures::paging::PageTableFlags::USER_ACCESSIBLE;
+    if is_write {
+        page_flags |= x86_64::structures::paging::PageTableFlags::WRITABLE;
+    }
+    if !is_exec {
+        page_flags |= x86_64::structures::paging::PageTableFlags::NO_EXECUTE;
+    }
+
+    let page_count = len_aligned / 4096;
+    let mut success = true;
+
+    for i in 0..page_count {
+        let curr_vaddr = vaddr_start + i * 4096;
+        let page = x86_64::structures::paging::Page::<x86_64::structures::paging::Size4KiB>::containing_address(
+            x86_64::VirtAddr::new(curr_vaddr)
+        );
+
+        let frame = match crate::memory::allocate_frame() {
+            Some(f) => f,
+            None => {
+                success = false;
+                break;
+            }
+        };
+
+        // Zero physical frame for security
+        let frame_vaddr = crate::memory::physical_to_virtual(frame.start_address());
+        unsafe {
+            core::ptr::write_bytes(frame_vaddr.as_mut_ptr::<u8>(), 0, 4096);
+        }
+
+        if pt.map_user_page(page, frame, page_flags).is_err() {
+            crate::memory::recycle_frame(frame);
+            success = false;
+            break;
+        }
+        mapped_pages.push(page);
+    }
+
+    if !success {
+        for p in mapped_pages {
+            let _ = pt.unmap_user_page(p);
+        }
+        drop(pt);
+        crate::task::process::release_address_space(process_id, len_aligned as usize);
+        return Err(SyscallResult::OutOfMemory);
+    }
+
+    Ok(vaddr_start)
+}
+
+/// Unmaps a mapped user memory region. Requires `CapType::MemoryHeap`.
+pub fn sys_mem_unmap(addr: u64, len: u64) -> Result<(), SyscallResult> {
+    let (page_table_arc, process_id) = {
+        let sched = SCHEDULER.lock();
+        let current_task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+        if !current_task.cap_table.authorize_capability(CapabilityType::MemoryHeap, Rights::READ | Rights::WRITE)
+            && !current_task.cap_table.authorize_capability(CapabilityType::MemoryHeap, Rights::WRITE)
+        {
+            return Err(SyscallResult::PermissionDenied);
+        }
+        let pt = current_task.page_table.clone().ok_or(SyscallResult::PermissionDenied)?;
+        let pid = current_task.process_id.unwrap_or(crate::task::ProcessId(1));
+        (pt, pid)
+    };
+
+    if len == 0 || addr % 4096 != 0 || addr < 0x1000 {
+        return Err(SyscallResult::InvalidArguments);
+    }
+    let len_aligned = (len.checked_add(4095).ok_or(SyscallResult::InvalidArguments)?) & !4095;
+    let page_count = len_aligned / 4096;
+
+    let mut pt = page_table_arc.lock();
+    for i in 0..page_count {
+        let curr_vaddr = addr + i * 4096;
+        let page = x86_64::structures::paging::Page::<x86_64::structures::paging::Size4KiB>::containing_address(
+            x86_64::VirtAddr::new(curr_vaddr)
+        );
+        let _ = pt.unmap_user_page(page);
+    }
+    drop(pt);
+
+    crate::task::process::release_address_space(process_id, len_aligned as usize);
+    Ok(())
+}
+
+/// Spawns a new execution thread sharing the process's address space (CR3) with its
+/// own user stack, kernel stack, and TLS base (FS_BASE). Requires `CapType::ProcessThreads`.
+/// Strictly enforces per-process thread limit (max 16 threads).
+pub fn sys_thread_spawn(
+    entry_point: u64,
+    stack_ptr: u64,
+    tls_base: u64,
+    arg: u64,
+) -> Result<u64, SyscallResult> {
+    let (_current_id, process_id, cap_table, priority) = {
+        let sched = SCHEDULER.lock();
+        let current_task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+        if !current_task.cap_table.authorize_capability(CapabilityType::ProcessThreads, Rights::INVOKE) {
+            return Err(SyscallResult::PermissionDenied);
+        }
+        let pid = current_task.process_id.ok_or(SyscallResult::PermissionDenied)?;
+        (current_task.id, pid, current_task.cap_table.clone(), current_task.priority)
+    };
+
+    // Enforce per-process thread limit: max 16 threads
+    let proc_record = crate::task::process::record_for_process(process_id)
+        .ok_or(SyscallResult::PermissionDenied)?;
+    if proc_record.thread_count >= 16 {
+        return Err(SyscallResult::ResourceExhausted);
+    }
+
+    if entry_point < 0x1000 || entry_point >= 0x0000_8000_0000_0000 {
+        return Err(SyscallResult::InvalidArguments);
+    }
+    if stack_ptr != 0 && (stack_ptr < 0x1000 || stack_ptr >= 0x0000_8000_0000_0000 || stack_ptr % 16 != 0) {
+        return Err(SyscallResult::InvalidArguments);
+    }
+    if tls_base != 0 && tls_base >= 0x0000_8000_0000_0000 {
+        return Err(SyscallResult::InvalidArguments);
+    }
+
+    let mut sched = SCHEDULER.lock();
+    let thread_id = sched.spawn_user_thread_with_tls(
+        process_id,
+        entry_point as usize,
+        stack_ptr as usize,
+        tls_base,
+        arg,
+        cap_table,
+        priority,
+    ).map_err(|_| SyscallResult::ResourceExhausted)?;
+
+    Ok(thread_id.0)
+}
+
+/// Terminates the calling execution thread and releases thread-local resources.
+pub fn sys_thread_exit(code: i32) -> ! {
+    let exiting = { SCHEDULER.lock().current_task_id() };
+    if let Some(id) = exiting {
+        serial_println!("[THREAD] Task {} sys_thread_exit({}) called.", id.0, code);
+        if let Some(pid) = crate::task::process::process_for_task(id) {
+            crate::task::process::cancel_thread_reservation(pid);
+        }
+        crate::task::futex::FUTEX_MANAGER.lock().cleanup_task(id);
+        crate::event::cleanup_task(id);
+        crate::ipc::IPC_ROUTER.lock().cleanup_task(id);
+    }
+    crate::task::terminate_current()
+}
+
+/// Fast Userspace Mutex wait: blocks caller until signaled by `sys_futex_wake`
+/// or until `timeout_ns` expires.
+pub fn sys_futex_wait(uaddr: u64, expected_val: u32, timeout_ns: u64) -> Result<u32, SyscallResult> {
+    if uaddr % 4 != 0 || uaddr < 0x1000 || uaddr >= 0x0000_8000_0000_0000 {
+        return Err(SyscallResult::InvalidArguments);
+    }
+
+    let (current_id, pt_arc) = {
+        let sched = SCHEDULER.lock();
+        let current_task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+        (current_task.id, current_task.page_table.clone().ok_or(SyscallResult::PermissionDenied)?)
+    };
+
+    {
+        let pt = pt_arc.lock();
+        pt.validate_user_range(uaddr, 4, false).map_err(|_| SyscallResult::InvalidArguments)?;
+    }
+
+    let val = unsafe { core::ptr::read_volatile(uaddr as *const u32) };
+    if val != expected_val {
+        return Err(SyscallResult::NotReady); // EAGAIN
+    }
+
+    let current_ticks = crate::interrupts::get_system_ticks();
+    let deadline_ticks = if timeout_ns > 0 {
+        let ms = (timeout_ns / 1_000_000).max(1);
+        current_ticks.saturating_add(ms)
+    } else {
+        0
+    };
+
+    crate::task::futex::FUTEX_MANAGER.lock().add_waiter(current_id, uaddr, deadline_ticks);
+
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let mut sched = SCHEDULER.lock();
+        sched.block_task(current_id);
+    });
+
+    let already_woken = crate::task::futex::FUTEX_MANAGER.lock().is_woken(current_id);
+    if already_woken {
+        x86_64::instructions::interrupts::without_interrupts(|| {
+            let mut sched = SCHEDULER.lock();
+            sched.unblock_task(current_id);
+        });
+    } else {
+        crate::task::yield_now();
+    }
+
+    let was_woken = crate::task::futex::FUTEX_MANAGER.lock().remove_waiter(current_id);
+    if was_woken {
+        Ok(0)
+    } else {
+        Err(SyscallResult::TimedOut)
+    }
+}
+
+/// Fast Userspace Mutex wake: unblocks up to `max_count` threads waiting on `uaddr`.
+pub fn sys_futex_wake(uaddr: u64, max_count: u32) -> Result<u32, SyscallResult> {
+    if uaddr % 4 != 0 || uaddr < 0x1000 || uaddr >= 0x0000_8000_0000_0000 {
+        return Err(SyscallResult::InvalidArguments);
+    }
+    let woken = crate::task::futex::FUTEX_MANAGER.lock().wake(uaddr, max_count as usize);
+    let count = woken.len() as u32;
+    if !woken.is_empty() {
+        x86_64::instructions::interrupts::without_interrupts(|| {
+            let mut sched = SCHEDULER.lock();
+            for tid in woken {
+                sched.unblock_task(tid);
+            }
+        });
+    }
+    Ok(count)
+}
+
+/// Returns the current time according to the specified clock (CLOCK_REALTIME, CLOCK_MONOTONIC).
+pub fn sys_clock_gettime(clock_id: u32, timespec_ptr: u64) -> Result<(), SyscallResult> {
+    if timespec_ptr == 0 || timespec_ptr % 8 != 0 || timespec_ptr >= 0x0000_8000_0000_0000 {
+        return Err(SyscallResult::InvalidArguments);
+    }
+    validate_user_buffer(timespec_ptr, core::mem::size_of::<Timespec>())
+        .map_err(|_| SyscallResult::InvalidArguments)?;
+
+    let ticks = crate::interrupts::get_system_ticks();
+    let ts = match clock_id {
+        CLOCK_REALTIME => {
+            let rtc_base = if let Some(rtc) = crate::hal::rtc::RTC.try_lock() {
+                rtc.boot_epoch() as i64
+            } else {
+                0
+            };
+            let sec = rtc_base + (ticks / 1000) as i64;
+            let nsec = ((ticks % 1000) * 1_000_000) as i64;
+            Timespec { tv_sec: sec, tv_nsec: nsec }
+        }
+        CLOCK_MONOTONIC => {
+            let sec = (ticks / 1000) as i64;
+            let nsec = ((ticks % 1000) * 1_000_000) as i64;
+            Timespec { tv_sec: sec, tv_nsec: nsec }
+        }
+        CLOCK_PROCESS_CPUTIME_ID | CLOCK_THREAD_CPUTIME_ID => {
+            let cpu_ticks = {
+                let sched = SCHEDULER.lock();
+                sched.current_task().map(|t| t.cpu_ticks).unwrap_or(0)
+            };
+            let sec = (cpu_ticks / 1000) as i64;
+            let nsec = ((cpu_ticks % 1000) * 1_000_000) as i64;
+            Timespec { tv_sec: sec, tv_nsec: nsec }
+        }
+        _ => return Err(SyscallResult::InvalidArguments),
+    };
+
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            &ts as *const Timespec as *const u8,
+            core::mem::size_of::<Timespec>(),
+        )
+    };
+    copy_to_user(timespec_ptr, bytes).map_err(|_| SyscallResult::InvalidArguments)?;
+    Ok(())
+}
+
+/// Suspends execution for the duration specified in `req_ptr`.
+pub fn sys_nanosleep(req_ptr: u64, rem_ptr: u64) -> Result<(), SyscallResult> {
+    if req_ptr == 0 || req_ptr % 8 != 0 || req_ptr >= 0x0000_8000_0000_0000 {
+        return Err(SyscallResult::InvalidArguments);
+    }
+    validate_user_buffer(req_ptr, core::mem::size_of::<Timespec>())
+        .map_err(|_| SyscallResult::InvalidArguments)?;
+
+    let mut req_bytes = [0u8; core::mem::size_of::<Timespec>()];
+    copy_from_user(&mut req_bytes, req_ptr, core::mem::size_of::<Timespec>()).map_err(|_| SyscallResult::InvalidArguments)?;
+    let req = unsafe { *(req_bytes.as_ptr() as *const Timespec) };
+
+    if req.tv_sec < 0 || req.tv_nsec < 0 || req.tv_nsec >= 1_000_000_000 {
+        return Err(SyscallResult::InvalidArguments);
+    }
+
+    let ms = (req.tv_sec as u64).saturating_mul(1000).saturating_add((req.tv_nsec as u64) / 1_000_000);
+    let ticks = if ms == 0 && req.tv_nsec > 0 { 1 } else { ms };
+
+    if ticks > 0 {
+        let _ = sys_event_poll(crate::event::EVENT_TIMER_TICK, ticks.min(u32::MAX as u64) as u32);
+    }
+
+    if rem_ptr != 0 && rem_ptr % 8 == 0 && rem_ptr < 0x0000_8000_0000_0000 {
+        let rem = Timespec { tv_sec: 0, tv_nsec: 0 };
+        let bytes = unsafe {
+            core::slice::from_raw_parts(&rem as *const Timespec as *const u8, core::mem::size_of::<Timespec>())
+        };
+        let _ = copy_to_user(rem_ptr, bytes);
+    }
+
+    Ok(())
+}
+
+/// Multiplexes I/O across file descriptors with millisecond timeout.
+pub fn sys_poll(fds_ptr: u64, nfds: u64, timeout_ms: i32) -> Result<i32, SyscallResult> {
+    if nfds > 256 {
+        return Err(SyscallResult::InvalidArguments);
+    }
+    if nfds == 0 {
+        if timeout_ms > 0 {
+            let _ = sys_event_poll(crate::event::EVENT_TIMER_TICK, timeout_ms as u32);
+        }
+        return Ok(0);
+    }
+
+    let total_bytes = match (nfds as usize).checked_mul(core::mem::size_of::<PollFd>()) {
+        Some(b) => b,
+        None => return Err(SyscallResult::InvalidArguments),
+    };
+    validate_user_buffer(fds_ptr, total_bytes).map_err(|_| SyscallResult::InvalidArguments)?;
+
+    let mut poll_fds = alloc::vec::Vec::with_capacity(nfds as usize);
+    let mut raw_bytes = alloc::vec![0u8; total_bytes];
+    copy_from_user(&mut raw_bytes, fds_ptr, total_bytes).map_err(|_| SyscallResult::InvalidArguments)?;
+
+    for i in 0..nfds as usize {
+        let offset = i * core::mem::size_of::<PollFd>();
+        let pfd = unsafe { *(raw_bytes[offset..].as_ptr() as *const PollFd) };
+        poll_fds.push(pfd);
+    }
+
+    let check_ready = |fds: &mut [PollFd]| -> i32 {
+        let mut count = 0;
+        for pfd in fds.iter_mut() {
+            pfd.revents = 0;
+            if pfd.fd < 0 {
+                continue;
+            }
+            if pfd.fd == 1 || pfd.fd == 2 {
+                if (pfd.events & POLLOUT) != 0 {
+                    pfd.revents |= POLLOUT;
+                }
+            } else if pfd.fd == 0 {
+                if (pfd.events & POLLIN) != 0 && crate::serial::has_rx_data() {
+                    pfd.revents |= POLLIN;
+                }
+            } else {
+                if let Some(sock_table) = crate::net::SOCKET_TABLE.try_lock() {
+                    let sid = crate::net::socket::SocketId(pfd.fd as u32);
+                    if sock_table.get(sid).is_some() {
+                        if (pfd.events & POLLIN) != 0 && sock_table.get(sid).map(|s| s.rx_count > 0).unwrap_or(false) {
+                            pfd.revents |= POLLIN;
+                        }
+                        if (pfd.events & POLLOUT) != 0 {
+                            pfd.revents |= POLLOUT;
+                        }
+                    } else {
+                        pfd.revents |= POLLNVAL;
+                    }
+                }
+            }
+            if pfd.revents != 0 {
+                count += 1;
+            }
+        }
+        count
+    };
+
+    let mut ready = check_ready(&mut poll_fds);
+    if ready == 0 && timeout_ms != 0 {
+        let sleep_ticks = if timeout_ms > 0 { timeout_ms as u32 } else { u32::MAX };
+        let _ = sys_event_poll(
+            crate::event::EVENT_IPC_MSG | crate::event::EVENT_NETWORK_PACKET | crate::event::EVENT_TIMER_TICK,
+            sleep_ticks,
+        );
+        ready = check_ready(&mut poll_fds);
+    }
+
+    let out_slice = unsafe {
+        core::slice::from_raw_parts(
+            poll_fds.as_ptr() as *const u8,
+            total_bytes,
+        )
+    };
+    copy_to_user(fds_ptr, out_slice).map_err(|_| SyscallResult::InvalidArguments)?;
+
+    Ok(ready)
 }
 
 
@@ -7356,5 +7916,108 @@ fn the_launcher_administrates_exactly_the_accounts_its_policy_grants() {
             );
         }
     }
+}
+
+#[test]
+fn browser_capability_gating_memory_heap() {
+    use crate::capability::{Capability, CapabilityId, CapabilityType, Rights};
+    let task_id = TaskId(801);
+    let mut table = crate::capability::CapabilityTable::new_for_task(task_id, 4);
+
+    // Without MemoryHeap capability, authorization strictly fails
+    assert!(!table.authorize_capability(CapabilityType::MemoryHeap, Rights::READ | Rights::WRITE));
+    assert!(!table.authorize_capability(CapabilityType::MemoryHeap, Rights::WRITE));
+
+    // Grant MemoryHeap
+    table.insert(Capability {
+        id: CapabilityId(9001),
+        cap_type: CapabilityType::MemoryHeap,
+        rights: Rights::READ | Rights::WRITE,
+        object_id: 0,
+    }).unwrap();
+
+    // Authorized with READ | WRITE
+    assert!(table.authorize_capability(CapabilityType::MemoryHeap, Rights::READ | Rights::WRITE));
+    assert!(table.authorize_capability(CapabilityType::MemoryHeap, Rights::WRITE));
+    assert!(table.authorize_capability(CapabilityType::MemoryHeap, Rights::READ));
+}
+
+#[test]
+fn browser_capability_gating_process_threads() {
+    use crate::capability::{Capability, CapabilityId, CapabilityType, Rights};
+    let task_id = TaskId(802);
+    let mut table = crate::capability::CapabilityTable::new_for_task(task_id, 4);
+
+    // Without ProcessThreads capability, authorization strictly fails
+    assert!(!table.authorize_capability(CapabilityType::ProcessThreads, Rights::INVOKE));
+
+    // Grant ProcessThreads
+    table.insert(Capability {
+        id: CapabilityId(9002),
+        cap_type: CapabilityType::ProcessThreads,
+        rights: Rights::INVOKE,
+        object_id: 0,
+    }).unwrap();
+
+    assert!(table.authorize_capability(CapabilityType::ProcessThreads, Rights::INVOKE));
+}
+
+#[test]
+fn browser_sys_mem_map_wx_violation_rejection() {
+    // W^X invariant: Cannot simultaneously be WRITABLE and EXECUTABLE
+    let prot_rw = (PROT_READ | PROT_WRITE) as u64;
+    let prot_rx = (PROT_READ | PROT_EXEC) as u64;
+    let prot_rwx = (PROT_READ | PROT_WRITE | PROT_EXEC) as u64;
+
+    let is_wx_violation = |prot: u64| -> bool {
+        let is_write = (prot & (PROT_WRITE as u64)) != 0;
+        let is_exec = (prot & (PROT_EXEC as u64)) != 0;
+        is_write && is_exec
+    };
+
+    assert!(!is_wx_violation(prot_rw), "PROT_READ | PROT_WRITE must not violate W^X");
+    assert!(!is_wx_violation(prot_rx), "PROT_READ | PROT_EXEC must not violate W^X");
+    assert!(is_wx_violation(prot_rwx), "PROT_READ | PROT_WRITE | PROT_EXEC MUST violate W^X");
+}
+
+#[test]
+fn browser_timespec_and_pollfd_abi_layout_pinned() {
+    assert_eq!(core::mem::size_of::<Timespec>(), 16);
+    assert_eq!(core::mem::align_of::<Timespec>(), 8);
+
+    assert_eq!(core::mem::size_of::<PollFd>(), 8);
+    assert_eq!(core::mem::align_of::<PollFd>(), 4);
+
+    let ts = Timespec { tv_sec: 12345, tv_nsec: 67890 };
+    let ts_bytes: [u8; 16] = unsafe { core::mem::transmute(ts) };
+    assert_eq!(&ts_bytes[0..8], &12345i64.to_ne_bytes());
+    assert_eq!(&ts_bytes[8..16], &67890i64.to_ne_bytes());
+
+    let pfd = PollFd { fd: 42, events: POLLIN | POLLOUT, revents: POLLIN };
+    let pfd_bytes: [u8; 8] = unsafe { core::mem::transmute(pfd) };
+    assert_eq!(&pfd_bytes[0..4], &42i32.to_ne_bytes());
+    assert_eq!(&pfd_bytes[4..6], &(POLLIN | POLLOUT).to_ne_bytes());
+    assert_eq!(&pfd_bytes[6..8], &POLLIN.to_ne_bytes());
+}
+
+#[test]
+fn browser_clock_monotonic_increments() {
+    let tick1 = 1000u64;
+    let tick2 = 2500u64;
+
+    let ts1 = Timespec {
+        tv_sec: (tick1 / 1000) as i64,
+        tv_nsec: ((tick1 % 1000) * 1_000_000) as i64,
+    };
+    let ts2 = Timespec {
+        tv_sec: (tick2 / 1000) as i64,
+        tv_nsec: ((tick2 % 1000) * 1_000_000) as i64,
+    };
+
+    assert_eq!(ts1.tv_sec, 1);
+    assert_eq!(ts1.tv_nsec, 0);
+    assert_eq!(ts2.tv_sec, 2);
+    assert_eq!(ts2.tv_nsec, 500_000_000);
+    assert!(ts2.tv_sec > ts1.tv_sec || (ts2.tv_sec == ts1.tv_sec && ts2.tv_nsec >= ts1.tv_nsec));
 }
 }

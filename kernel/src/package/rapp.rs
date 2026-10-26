@@ -224,7 +224,7 @@ pub fn parse_rapp(data:&[u8])->Result<RappManifest,RappError>{
     for i in 0..cap_count{
         let o=header_end+i*2;
         let cap=u16::from_le_bytes([data[o],data[o+1]]);
-        if !(1..=28).contains(&cap) {
+        if !(1..=30).contains(&cap) {
             return Err(RappError::UnknownCapability);
         }
         capabilities.push(cap);
@@ -416,16 +416,14 @@ mod tests {
     }
 
     #[test]
-    fn parse_rapp_accepts_all_capabilities_1_through_28() {
-        // WHY 28 and not 24: the content layer added 25 (ContentIndexRead) and
-        // 26 (ContentIntentDispatch), surface capture took 27, and the AC'97
-        // PCM stream took 28. The table is the ABI, and a package that asks
-        // for a capability the kernel has must be installable.
-        let all_caps: alloc::vec::Vec<u16> = (1..=28).collect();
+    fn parse_rapp_accepts_all_capabilities_1_through_30() {
+        // WHY 30: 29 is MemoryHeap and 30 is ProcessThreads. The table is the ABI,
+        // and a package that asks for a capability the kernel has must be installable.
+        let all_caps: alloc::vec::Vec<u16> = (1..=30).collect();
         let (pkg, pub_key, _) = create_signed_test_package(&all_caps, 20);
         REVOCATION_REGISTRY.lock().grant_trust_root(pub_key, "all_caps_test").unwrap();
 
-        let manifest = parse_rapp(&pkg).expect("package requesting IDs 1..=28 must parse");
+        let manifest = parse_rapp(&pkg).expect("package requesting IDs 1..=30 must parse");
         assert_eq!(manifest.capabilities, all_caps);
     }
 
@@ -436,10 +434,10 @@ mod tests {
         REVOCATION_REGISTRY.lock().grant_trust_root(pub0, "cap_zero").unwrap();
         assert_eq!(parse_rapp(&pkg0).unwrap_err(), RappError::UnknownCapability);
 
-        // Negative test: 29 is the first identifier above the table
-        let (pkg29, pub29, _) = create_signed_test_package(&[29], 22);
-        REVOCATION_REGISTRY.lock().grant_trust_root(pub29, "cap_29").unwrap();
-        assert_eq!(parse_rapp(&pkg29).unwrap_err(), RappError::UnknownCapability);
+        // Negative test: 31 is the first identifier above the table (1..=30 are valid)
+        let (pkg31, pub31, _) = create_signed_test_package(&[31], 22);
+        REVOCATION_REGISTRY.lock().grant_trust_root(pub31, "cap_31").unwrap();
+        assert_eq!(parse_rapp(&pkg31).unwrap_err(), RappError::UnknownCapability);
     }
 
     #[test]
@@ -581,9 +579,22 @@ mod tests {
         assert_eq!(cap28.rights, Rights::READ | Rights::WRITE);
         assert_eq!(cap28.object_id, 0);
 
+        // Verify ID 29 (MemoryHeap) and 30 (ProcessThreads)
+        let heap_table = crate::task::user::capabilities_from_rapp(&[29], 0)
+            .expect("ID 29 must map to MemoryHeap");
+        let cap29 = heap_table.get(0).expect("slot 0 for ID 29");
+        assert_eq!(cap29.cap_type, CapabilityType::MemoryHeap);
+        assert_eq!(cap29.rights, Rights::READ | Rights::WRITE);
+
+        let thread_table = crate::task::user::capabilities_from_rapp(&[30], 0)
+            .expect("ID 30 must map to ProcessThreads");
+        let cap30 = thread_table.get(0).expect("slot 0 for ID 30");
+        assert_eq!(cap30.cap_type, CapabilityType::ProcessThreads);
+        assert_eq!(cap30.rights, Rights::INVOKE);
+
         // Negative tests: unknown IDs fail closed
         assert!(crate::task::user::capabilities_from_rapp(&[0], 0).is_err());
-        assert!(crate::task::user::capabilities_from_rapp(&[29], 0).is_err());
+        assert!(crate::task::user::capabilities_from_rapp(&[31], 0).is_err());
         assert!(crate::task::user::capabilities_from_rapp(&[999], 0).is_err());
     }
 

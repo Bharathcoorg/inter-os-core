@@ -4,6 +4,7 @@
 //! `TaskState`, `TaskControlBlock` (TCB), stack management, and scheduling.
 
 pub mod context;
+pub mod futex;
 pub mod images;
 pub mod process;
 pub mod scheduler;
@@ -193,6 +194,10 @@ pub struct TaskControlBlock {
     pub user_entry: usize,
     /// Virtual address of userspace stack top (Ring 3 RSP).
     pub user_stack_top: usize,
+    /// Thread-Local Storage (TLS) base address loaded into IA32_FS_BASE MSR on dispatch.
+    pub tls_base: u64,
+    /// User argument passed in RDI to thread entry point.
+    pub user_arg: u64,
     /// Stable process identity owning this task. A process may later own multiple threads.
     pub process_id: Option<ProcessId>,
     /// Parent task ID (0 = init / no parent).
@@ -249,6 +254,8 @@ impl TaskControlBlock {
             cr3_frame: None,
             user_entry: 0,
             user_stack_top: 0,
+            tls_base: 0,
+            user_arg: 0,
             process_id: None,
             parent_id: TaskId(0),
             exit_code: 0,
@@ -285,6 +292,8 @@ impl TaskControlBlock {
             cr3_frame: None,
             user_entry: 0,
             user_stack_top: 0,
+            tls_base: 0,
+            user_arg: 0,
             process_id: None,
             parent_id: TaskId(0),
             exit_code: 0,

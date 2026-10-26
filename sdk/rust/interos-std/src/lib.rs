@@ -14,6 +14,7 @@ pub mod mp3;
 pub mod resample;
 pub mod font;
 pub mod font_fhd;
+pub mod heap;
 pub mod image;
 pub mod settings;
 pub mod wav;
@@ -243,6 +244,15 @@ pub enum SyscallNumber {
     /// Resolves a capability the caller already holds to its generation-counted
     /// handle. It grants nothing; it only names an existing slot and generation.
     CapHandleLookup = 150,
+    MemMap = 151,
+    MemUnmap = 152,
+    ThreadSpawn = 153,
+    ThreadExit = 154,
+    FutexWait = 155,
+    FutexWake = 156,
+    ClockGettime = 157,
+    Nanosleep = 158,
+    Poll = 159,
 }
 
 // -----------------------------------------------------------------------------
@@ -1456,6 +1466,8 @@ pub mod cap_type {
     /// generation-counted handle, which [`capability_handle`] resolves from
     /// the caller's own table.
     pub const AUDIO_STREAM: u64 = 28;
+    pub const MEMORY_HEAP: u64 = 29;
+    pub const PROCESS_THREADS: u64 = 30;
 }
 
 /// Dynamically discovers the slot index of an active capability matching `cap_type`
@@ -3256,6 +3268,198 @@ pub fn task_enumerate(out: &mut [TaskRecord]) -> Result<usize, i64> {
     }
 }
 
+
+// -----------------------------------------------------------------------------
+// Phase C1: Browser Platform Prerequisites & POSIX Compatibility Syscalls
+// -----------------------------------------------------------------------------
+
+pub const PROT_NONE: u32 = 0;
+pub const PROT_READ: u32 = 1;
+pub const PROT_WRITE: u32 = 2;
+pub const PROT_EXEC: u32 = 4;
+
+pub const MAP_SHARED: u32 = 0x01;
+pub const MAP_PRIVATE: u32 = 0x02;
+pub const MAP_FIXED: u32 = 0x10;
+pub const MAP_ANONYMOUS: u32 = 0x20;
+
+pub const CLOCK_REALTIME: u32 = 0;
+pub const CLOCK_MONOTONIC: u32 = 1;
+pub const CLOCK_PROCESS_CPUTIME_ID: u32 = 2;
+pub const CLOCK_THREAD_CPUTIME_ID: u32 = 3;
+
+pub const POLLIN: i16 = 0x0001;
+pub const POLLPRI: i16 = 0x0002;
+pub const POLLOUT: i16 = 0x0004;
+pub const POLLERR: i16 = 0x0008;
+pub const POLLHUP: i16 = 0x0010;
+pub const POLLNVAL: i16 = 0x0020;
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Timespec {
+    pub tv_sec: i64,
+    pub tv_nsec: i64,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PollFd {
+    pub fd: i32,
+    pub events: i16,
+    pub revents: i16,
+}
+
+/// Maps an anonymous memory region into the calling process address space.
+/// Enforces W^X and places guard pages. Requires CapType::MemoryHeap.
+pub fn mem_map(addr: u64, len: u64, prot: u32, flags: u32) -> Result<*mut u8, i64> {
+    let ret = unsafe {
+        syscall4(
+            SyscallNumber::MemMap,
+            addr,
+            len,
+            prot as u64,
+            flags as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as *mut u8)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Unmaps a mapped user memory region. Requires CapType::MemoryHeap.
+pub fn mem_unmap(addr: *mut u8, len: u64) -> Result<(), i64> {
+    let ret = unsafe {
+        syscall2(
+            SyscallNumber::MemUnmap,
+            addr as u64,
+            len,
+        )
+    };
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(ret)
+    }
+}
+
+/// Spawns a new user thread within the current process address space.
+/// Requires CapType::ProcessThreads.
+pub fn thread_spawn(entry_point: u64, stack_ptr: u64, tls_base: u64, arg: u64) -> Result<u64, i64> {
+    let ret = unsafe {
+        syscall4(
+            SyscallNumber::ThreadSpawn,
+            entry_point,
+            stack_ptr,
+            tls_base,
+            arg,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as u64)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Terminates the calling thread. Does not return.
+pub fn thread_exit(exit_code: i32) -> ! {
+    unsafe {
+        syscall1(SyscallNumber::ThreadExit, exit_code as u64);
+    }
+    loop {
+        core::hint::spin_loop();
+    }
+}
+
+/// Waits on a futex address if *uaddr == expected_val.
+pub fn futex_wait(uaddr: *const u32, expected_val: u32, timeout_ns: u64) -> Result<bool, i64> {
+    let ret = unsafe {
+        syscall3(
+            SyscallNumber::FutexWait,
+            uaddr as u64,
+            expected_val as u64,
+            timeout_ns,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret != 0)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Wakes up to max_count threads waiting on a futex address.
+pub fn futex_wake(uaddr: *const u32, max_count: u32) -> Result<u32, i64> {
+    let ret = unsafe {
+        syscall2(
+            SyscallNumber::FutexWake,
+            uaddr as u64,
+            max_count as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as u32)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Obtains current time for specified clock.
+pub fn clock_gettime(clock_id: u32, ts: &mut Timespec) -> Result<(), i64> {
+    let ret = unsafe {
+        syscall2(
+            SyscallNumber::ClockGettime,
+            clock_id as u64,
+            ts as *mut Timespec as u64,
+        )
+    };
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(ret)
+    }
+}
+
+/// Suspends execution for the specified duration.
+pub fn nanosleep(req: &Timespec, rem: Option<&mut Timespec>) -> Result<(), i64> {
+    let rem_ptr = match rem {
+        Some(r) => r as *mut Timespec as u64,
+        None => 0,
+    };
+    let ret = unsafe {
+        syscall2(
+            SyscallNumber::Nanosleep,
+            req as *const Timespec as u64,
+            rem_ptr,
+        )
+    };
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(ret)
+    }
+}
+
+/// Waits for events on file descriptors.
+pub fn poll(fds: &mut [PollFd], timeout_ms: i32) -> Result<usize, i64> {
+    let ret = unsafe {
+        syscall3(
+            SyscallNumber::Poll,
+            fds.as_mut_ptr() as u64,
+            fds.len() as u64,
+            timeout_ms as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as usize)
+    } else {
+        Err(ret)
+    }
+}
+
 #[cfg(test)]
 mod abi_tests {
     use super::*;
@@ -3327,5 +3531,7 @@ mod abi_tests {
         assert_eq!(cap_type::EVENT_POLL, 17);
         assert_eq!(cap_type::SYSTEM_CONTROL, 18);
         assert_eq!(cap_type::REALTIME_CLOCK_READ, 24);
+        assert_eq!(cap_type::MEMORY_HEAP, 29);
+        assert_eq!(cap_type::PROCESS_THREADS, 30);
     }
 }

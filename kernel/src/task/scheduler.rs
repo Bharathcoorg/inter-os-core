@@ -291,32 +291,40 @@ impl Scheduler {
         id
     }
 
-    /// Creates a userspace thread in an existing process and shared address space.
-    pub fn spawn_user_thread(
+    /// Creates a userspace thread in an existing process and shared address space with TLS and custom stack.
+    pub fn spawn_user_thread_with_tls(
         &mut self,
         process_id: crate::task::ProcessId,
         user_entry: usize,
+        user_stack: usize,
+        tls_base: u64,
+        user_arg: u64,
         cap_table: CapabilityTable,
         priority: u8,
     ) -> Result<TaskId, &'static str> {
         crate::task::process::reserve_thread(process_id)?;
-        crate::task::process::reserve_address_space(process_id, crate::task::user::USER_STACK_SIZE).map_err(|e| {
-            crate::task::process::cancel_thread_reservation(process_id);
-            e
-        })?;
         let shared_space = match self.tasks.iter()
             .find(|t| t.process_id == Some(process_id))
             .and_then(|t| t.page_table.clone()) {
             Some(space) => space,
             None => {
                 crate::task::process::cancel_thread_reservation(process_id);
-                crate::task::process::release_address_space(process_id, crate::task::user::USER_STACK_SIZE);
                 return Err("process has no userspace address space");
             }
         };
-        let mut tcb = TaskControlBlock::new("user_thread", crate::task::user::user_process_entry, cap_table, priority);
+
+        let mut tcb = TaskControlBlock::new("user_thread", crate::task::user::user_thread_entry, cap_table, priority);
         let id = tcb.id;
-        let (user_stack_top, cr3_frame) = {
+        let custom_stack = user_stack != 0;
+
+        let (user_stack_top, cr3_frame) = if custom_stack {
+            let pt = shared_space.lock();
+            (user_stack, pt.frame())
+        } else {
+            if let Err(e) = crate::task::process::reserve_address_space(process_id, crate::task::user::USER_STACK_SIZE) {
+                crate::task::process::cancel_thread_reservation(process_id);
+                return Err(e);
+            }
             let mut pt = shared_space.lock();
             let frame = pt.frame();
             match crate::task::user::map_user_thread_stack(&mut pt, id) {
@@ -328,35 +336,56 @@ impl Scheduler {
                 }
             }
         };
+
         tcb.process_id = Some(process_id);
         tcb.user_entry = user_entry;
         tcb.user_stack_top = user_stack_top;
+        tcb.tls_base = tls_base;
+        tcb.user_arg = user_arg;
         tcb.cr3_frame = Some(cr3_frame);
         tcb.page_table = Some(shared_space.clone());
+
         if let Err(e) = crate::task::process::bind_reserved_thread(process_id, id) {
-            let rollback = {
+            let rollback = if !custom_stack {
                 let mut pt = shared_space.lock();
-                crate::task::user::unmap_user_thread_stack(&mut pt, id)
+                let res = crate::task::user::unmap_user_thread_stack(&mut pt, id);
+                crate::task::process::release_address_space(process_id, crate::task::user::USER_STACK_SIZE);
+                res
+            } else {
+                Ok(())
             };
             crate::task::process::cancel_thread_reservation(process_id);
-            crate::task::process::release_address_space(process_id, crate::task::user::USER_STACK_SIZE);
             if rollback.is_err() {
                 return Err("thread stack rollback failed");
             }
             return Err(e);
         }
+
         self.tasks.push(tcb);
         self.configure_task_ui_pipeline(id);
         let ipc_registered = crate::ipc::IPC_ROUTER.lock().register_task(id);
         if !ipc_registered {
             self.tasks.pop();
-            let mut pt = shared_space.lock();
-            let _ = crate::task::user::unmap_user_thread_stack(&mut pt, id);
+            if !custom_stack {
+                let mut pt = shared_space.lock();
+                let _ = crate::task::user::unmap_user_thread_stack(&mut pt, id);
+                crate::task::process::release_address_space(process_id, crate::task::user::USER_STACK_SIZE);
+            }
             crate::task::process::cancel_thread_reservation(process_id);
-            crate::task::process::release_address_space(process_id, crate::task::user::USER_STACK_SIZE);
             return Err("IPC endpoint quota exceeded");
         }
         Ok(id)
+    }
+
+    /// Creates a userspace thread in an existing process and shared address space.
+    pub fn spawn_user_thread(
+        &mut self,
+        process_id: crate::task::ProcessId,
+        user_entry: usize,
+        cap_table: CapabilityTable,
+        priority: u8,
+    ) -> Result<TaskId, &'static str> {
+        self.spawn_user_thread_with_tls(process_id, user_entry, 0, 0, 0, cap_table, priority)
     }
 
     /// Returns a reference to the currently running task.
@@ -629,6 +658,14 @@ impl Scheduler {
         } else {
             // Kernel task: switch back to clean kernel PML4
             crate::memory::switch_to_kernel_page_table();
+        }
+
+        // Restore Thread-Local Storage (TLS) FS base register for incoming task
+        unsafe {
+            crate::syscall::entry::wrmsr(
+                crate::syscall::entry::msr::IA32_FS_BASE,
+                self.tasks[next_idx].tls_base,
+            );
         }
 
         (Some(prev_ctx_ptr), Some(next_ctx_ptr))
@@ -908,6 +945,18 @@ pub fn yield_now() -> bool {
 
 /// Invoked from the timer interrupt handler (IRQ 32) to perform preemptive time slicing.
 pub fn on_timer_tick() {
+    let ticks = crate::interrupts::get_system_ticks();
+    if let Some(mut fm) = crate::task::futex::FUTEX_MANAGER.try_lock() {
+        let timed_out = fm.check_timeouts(ticks);
+        if !timed_out.is_empty() {
+            if let Some(mut sched) = SCHEDULER.try_lock() {
+                for tid in timed_out {
+                    sched.unblock_task(tid);
+                }
+            }
+        }
+    }
+
     let (prev, next) = {
         if let Some(mut sched) = SCHEDULER.try_lock() {
             sched.check_timer_tick()

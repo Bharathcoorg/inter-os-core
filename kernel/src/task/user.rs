@@ -441,6 +441,77 @@ pub extern "C" fn user_process_entry() -> ! {
     }
 }
 
+/// Drops CPU execution privilege from Ring 0 to Ring 3 for a newly spawned thread,
+/// setting the thread entry point, user stack top, TLS base (via MSR FS_BASE), and entry argument in RDI.
+#[inline(never)]
+pub unsafe fn jump_to_ring3_thread(
+    user_entry: usize,
+    user_stack_top: usize,
+    tls_base: u64,
+    user_arg: u64,
+) -> ! {
+    if tls_base != 0 {
+        crate::syscall::entry::wrmsr(crate::syscall::entry::msr::IA32_FS_BASE, tls_base);
+    }
+
+    core::arch::asm!(
+        "mov ds, ax",
+        "mov es, ax",
+        "mov fs, ax",
+        "mov gs, ax",
+
+        "push {ss:r}",
+        "push {rsp}",
+        "push 0x202",
+        "push {cs:r}",
+        "push {rip}",
+
+        "xor rax, rax",
+        "xor rbx, rbx",
+        "xor rcx, rcx",
+        "xor rdx, rdx",
+        "xor rsi, rsi",
+        "mov rdi, {arg}",
+        "xor rbp, rbp",
+        "xor r8, r8",
+        "xor r9, r9",
+        "xor r10, r10",
+        "xor r11, r11",
+        "xor r12, r12",
+        "xor r13, r13",
+        "xor r14, r14",
+        "xor r15, r15",
+
+        "iretq",
+
+        ss = in(reg) USER_SS_SELECTOR,
+        rsp = in(reg) user_stack_top as u64,
+        cs = in(reg) USER_CS_SELECTOR,
+        rip = in(reg) user_entry as u64,
+        arg = in(reg) user_arg,
+        in("ax") (USER_SS_SELECTOR as u16),
+        options(noreturn)
+    );
+}
+
+/// Universal entry point for userspace threads launched in Ring 3.
+pub extern "C" fn user_thread_entry() -> ! {
+    let (user_entry, user_stack_top, tls_base, user_arg) = {
+        let sched = SCHEDULER.lock();
+        let task = sched.current_task().expect("No current task in user_thread_entry");
+        (task.user_entry, task.user_stack_top, task.tls_base, task.user_arg)
+    };
+
+    serial_println!("[THREAD ENTRY] Dropping CPU privilege level to Ring 3 (User Mode)...");
+    serial_println!("               Entry RIP: {:#010X}", user_entry);
+    serial_println!("               User RSP:  {:#010X}", user_stack_top);
+    serial_println!("               TLS Base:  {:#010X}", tls_base);
+
+    unsafe {
+        jump_to_ring3_thread(user_entry, user_stack_top, tls_base, user_arg);
+    }
+}
+
 /// Creates a new isolated userspace process with its own PML4 address space,
 /// loads its ELF binary, configures its capabilities, and registers it in the scheduler.
 pub fn spawn_user_process(
@@ -607,6 +678,10 @@ pub(crate) fn capabilities_from_rapp_with_trust(
             // media player can emit PCM without acquiring power or telephony
             // authority.
             28 => (CapabilityType::AudioStream, Rights::READ | Rights::WRITE, 0),
+            // 29 is the anonymous memory mapping and userspace heap capability ("memory.heap").
+            29 => (CapabilityType::MemoryHeap, Rights::READ | Rights::WRITE, 0),
+            // 30 is the thread spawning and thread-local storage capability ("process.threads").
+            30 => (CapabilityType::ProcessThreads, Rights::INVOKE, 0),
             _ => return Err("Unknown RAPP v2 capability"),
         };
         caps.insert(Capability {

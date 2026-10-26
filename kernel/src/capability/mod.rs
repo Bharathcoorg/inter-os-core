@@ -115,7 +115,14 @@ pub enum CapabilityType {
     /// without acquiring authority over power or telephony. `Rights::WRITE`
     /// authorises open/write/close; `Rights::READ` authorises status queries.
     AudioStream,
+    /// Permission to map anonymous memory and manage userspace heap allocations ("memory.heap").
+    MemoryHeap,
+    /// Permission to spawn execution threads and manage thread-local storage ("process.threads").
+    ProcessThreads,
 }
+
+/// Convenience alias matching system architecture specifications.
+pub type CapType = CapabilityType;
 
 impl CapabilityType {
     pub const fn to_raw(self) -> u64 {
@@ -143,6 +150,8 @@ impl CapabilityType {
             CapabilityType::ContentIntentDispatch => 26,
             CapabilityType::SurfaceCapture => 27,
             CapabilityType::AudioStream => 28,
+            CapabilityType::MemoryHeap => 29,
+            CapabilityType::ProcessThreads => 30,
         }
     }
 
@@ -171,6 +180,71 @@ impl CapabilityType {
             26 => Some(CapabilityType::ContentIntentDispatch),
             27 => Some(CapabilityType::SurfaceCapture),
             28 => Some(CapabilityType::AudioStream),
+            29 => Some(CapabilityType::MemoryHeap),
+            30 => Some(CapabilityType::ProcessThreads),
+            _ => None,
+        }
+    }
+
+    /// Canonical string representation of the capability type.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            CapabilityType::SerialOutput => "serial.output",
+            CapabilityType::FrameBufferDirect => "framebuffer.direct",
+            CapabilityType::TimerTickRead => "timer.tick",
+            CapabilityType::HardwarePortIo => "hardware.port_io",
+            CapabilityType::IpcSend => "ipc.send",
+            CapabilityType::IpcReceive => "ipc.receive",
+            CapabilityType::ProcessSpawn => "process.spawn",
+            CapabilityType::ProcessKill => "process.kill",
+            CapabilityType::FileSystemRead => "fs.read",
+            CapabilityType::FileSystemWrite => "fs.write",
+            CapabilityType::StorageRawBlock => "storage.raw_block",
+            CapabilityType::NetworkSocket => "network.socket",
+            CapabilityType::NetworkSend => "network.send",
+            CapabilityType::NetworkReceive => "network.receive",
+            CapabilityType::ShmProducer => "shm.producer",
+            CapabilityType::ShmConsumer => "shm.consumer",
+            CapabilityType::EventPoll => "event.poll",
+            CapabilityType::SystemControl => "system.control",
+            CapabilityType::RealtimeClockRead => "rtc.read",
+            CapabilityType::ContentIndexRead => "content.index_read",
+            CapabilityType::ContentIntentDispatch => "content.intent_dispatch",
+            CapabilityType::SurfaceCapture => "surface.capture",
+            CapabilityType::AudioStream => "audio.stream",
+            CapabilityType::MemoryHeap => "memory.heap",
+            CapabilityType::ProcessThreads => "process.threads",
+        }
+    }
+
+    /// Resolves canonical capability name string to CapabilityType.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "serial.output" => Some(CapabilityType::SerialOutput),
+            "framebuffer.direct" => Some(CapabilityType::FrameBufferDirect),
+            "timer.tick" => Some(CapabilityType::TimerTickRead),
+            "hardware.port_io" => Some(CapabilityType::HardwarePortIo),
+            "ipc.send" => Some(CapabilityType::IpcSend),
+            "ipc.receive" => Some(CapabilityType::IpcReceive),
+            "process.spawn" => Some(CapabilityType::ProcessSpawn),
+            "process.kill" => Some(CapabilityType::ProcessKill),
+            "fs.read" => Some(CapabilityType::FileSystemRead),
+            "fs.write" => Some(CapabilityType::FileSystemWrite),
+            "storage.raw_block" => Some(CapabilityType::StorageRawBlock),
+            "network.socket" => Some(CapabilityType::NetworkSocket),
+            "network.send" => Some(CapabilityType::NetworkSend),
+            "network.receive" => Some(CapabilityType::NetworkReceive),
+            "shm.producer" => Some(CapabilityType::ShmProducer),
+            "shm.consumer" => Some(CapabilityType::ShmConsumer),
+            "event.poll" => Some(CapabilityType::EventPoll),
+            "system.control" => Some(CapabilityType::SystemControl),
+            "rtc.read" => Some(CapabilityType::RealtimeClockRead),
+            "content.index_read" => Some(CapabilityType::ContentIndexRead),
+            "content.intent_dispatch" => Some(CapabilityType::ContentIntentDispatch),
+            "surface.capture" => Some(CapabilityType::SurfaceCapture),
+            "audio.stream" => Some(CapabilityType::AudioStream),
+            "memory.heap" => Some(CapabilityType::MemoryHeap),
+            "process.threads" => Some(CapabilityType::ProcessThreads),
             _ => None,
         }
     }
@@ -1538,15 +1612,19 @@ mod tests {
     #[test]
     fn capability_type_raw_encoding_roundtrips() {
         for val in [
-            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 24, 25, 26, 27, 28,
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 24, 25, 26, 27, 28, 29, 30,
         ] {
             let cap_type = CapabilityType::from_raw(val).expect("valid capability type");
             assert_eq!(cap_type.to_raw(), val);
         }
         assert_eq!(CapabilityType::from_raw(0), None);
-        for invalid in [19, 20, 21, 22, 23, 29, 30, 999] {
+        for invalid in [19, 20, 21, 22, 23, 31, 999] {
             assert_eq!(CapabilityType::from_raw(invalid), None);
         }
+        assert_eq!(CapabilityType::MemoryHeap.as_str(), "memory.heap");
+        assert_eq!(CapabilityType::ProcessThreads.as_str(), "process.threads");
+        assert_eq!(CapabilityType::from_name("memory.heap"), Some(CapabilityType::MemoryHeap));
+        assert_eq!(CapabilityType::from_name("process.threads"), Some(CapabilityType::ProcessThreads));
     }
 
     #[test]

@@ -288,6 +288,15 @@ pub fn poll_serial_rx() {
     });
 }
 
+/// Returns true if there is unread data in the serial RX queue or line buffer.
+pub fn has_rx_data() -> bool {
+    if let Some(state) = RX_BUF.try_lock() {
+        state.qcount > 0 || state.len > 0
+    } else {
+        false
+    }
+}
+
 /// Dispatches any complete serial command lines. Must be called from a normal
 /// (non-interrupt) context.
 pub fn service_serial_commands() {

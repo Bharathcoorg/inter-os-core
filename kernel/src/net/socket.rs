@@ -35,7 +35,7 @@ pub struct UdpSocket {
     rx_slots: [RxDatagram; SOCKET_RX_SLOTS],
     rx_read: usize,
     rx_write: usize,
-    rx_count: usize,
+    pub rx_count: usize,
     pub is_bound: bool,
 }
 
