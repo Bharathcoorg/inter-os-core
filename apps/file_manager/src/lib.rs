@@ -948,6 +948,8 @@ pub struct IndexedDocument {
     pub size_label: [u8; 20],
     pub size_label_len: usize,
     pub mtime: u64,
+    pub provenance: [u8; 64],
+    pub provenance_len: usize,
 }
 
 impl IndexedDocument {
@@ -962,6 +964,8 @@ impl IndexedDocument {
         size_label: [0; 20],
         size_label_len: 0,
         mtime: 0,
+        provenance: [0; 64],
+        provenance_len: 0,
     };
 
     /// The document's name as text.
@@ -1009,6 +1013,9 @@ pub fn parse_indexed_documents(buf: &[u8], out: &mut [IndexedDocument]) -> usize
         doc.mime_len = mime_len;
         doc.size = record.length;
         doc.mtime = record.mtime;
+        let prov_len = record.provenance.len().min(64);
+        doc.provenance[..prov_len].copy_from_slice(&record.provenance.as_bytes()[..prov_len]);
+        doc.provenance_len = prov_len;
         let label_len = fmt_u64(record.length, &mut doc.size_label);
         doc.size_label_len = label_len;
         out[count] = doc;
@@ -1134,8 +1141,8 @@ fn document_after(a: &IndexedDocument, b: &IndexedDocument, sort: SortMode) -> b
 
 /// One line of the details card.
 pub const MAX_DETAILS_LINE: usize = 96;
-/// The most lines the card holds: type, size, modified, handler and path.
-pub const MAX_DETAILS_LINES: usize = 5;
+/// The most lines the card holds: type, size, modified, handler, path, and source provenance.
+pub const MAX_DETAILS_LINES: usize = 6;
 
 /// The facts the details card shows, already formatted.
 ///
@@ -1246,6 +1253,21 @@ pub fn build_details(
     is_dir: bool,
     handler_label: &[u8],
 ) -> DetailsView {
+    build_details_with_provenance(name, path, mime, size, mtime, handler, is_dir, handler_label, None)
+}
+
+/// Builds the details card with explicit source URL / provenance tracking.
+pub fn build_details_with_provenance(
+    name: &[u8],
+    path: &[u8],
+    mime: &[u8],
+    size: u64,
+    mtime: Option<u64>,
+    handler: Option<&[u8]>,
+    is_dir: bool,
+    handler_label: &[u8],
+    provenance: Option<&[u8]>,
+) -> DetailsView {
     let mut view = DetailsView::EMPTY;
     let n = name.len().min(view.title.len());
     view.title[..n].copy_from_slice(&name[..n]);
@@ -1307,7 +1329,28 @@ pub fn build_details(
     len = append_bytes(&mut buf, 0, b"Path: ");
     len = append_bytes(&mut buf, len, path);
     push_line(&mut view, line, &buf, len);
+    line += 1;
 
+    // Source provenance.
+    if let Some(prov) = provenance {
+        buf = [0u8; MAX_DETAILS_LINE];
+        len = append_bytes(&mut buf, 0, b"Source: ");
+        if is_dir {
+            len = append_bytes(&mut buf, len, b"local folder");
+        } else if prov.is_empty() || prov == b"unknown" {
+            len = append_bytes(&mut buf, len, b"unknown / not reported");
+        } else if prov == b"bytes" {
+            len = append_bytes(&mut buf, len, b"on-device (classified from content bytes)");
+        } else if prov == b"extension" {
+            len = append_bytes(&mut buf, len, b"on-device (classified from file extension)");
+        } else {
+            len = append_bytes(&mut buf, len, prov);
+        }
+        push_line(&mut view, line, &buf, len);
+        line += 1;
+    }
+
+    view.line_count = line;
     view
 }
 
@@ -2446,6 +2489,43 @@ mod tests {
         let mut buf = [0u8; MAX_DETAILS_LINE];
         let n = format_mtime(Some(0), &mut buf);
         assert_eq!(&buf[..n], b"Modified: not reported by the platform");
+    }
+
+    #[test]
+    fn details_with_provenance_reports_download_source_or_unknown() {
+        let view_url = build_details_with_provenance(
+            b"song.flac",
+            b"/storage/downloads/song.flac",
+            b"audio/flac",
+            1048576,
+            Some(500),
+            Some(b"org.interos.music"),
+            false,
+            b"Handler: ",
+            Some(b"https://music.interos.org/dl/song.flac"),
+        );
+        assert_eq!(view_url.line_count, 6);
+        assert_eq!(
+            &view_url.lines[5][..view_url.line_lens[5]],
+            b"Source: https://music.interos.org/dl/song.flac"
+        );
+
+        let view_unknown = build_details_with_provenance(
+            b"song.flac",
+            b"/storage/downloads/song.flac",
+            b"audio/flac",
+            1048576,
+            Some(500),
+            Some(b"org.interos.music"),
+            false,
+            b"Handler: ",
+            Some(b"unknown"),
+        );
+        assert_eq!(view_unknown.line_count, 6);
+        assert_eq!(
+            &view_unknown.lines[5][..view_unknown.line_lens[5]],
+            b"Source: unknown / not reported"
+        );
     }
 
     #[test]

@@ -876,6 +876,10 @@ area unchanged. The File Manager lists it under Downloads and opens it with the 
 for its type.";
 const BODY_DOWNLOAD_FAILED: &[u8] = b"The response was a file, but the shared storage area did \
 not accept it. Nothing was saved.";
+const BODY_DOWNLOAD_PROMPT: &[u8] = b"This website wants to download a file to your device. InterOS \
+requires your explicit permission before any file can be stored.";
+const BODY_DOWNLOAD_REFUSED: &[u8] = b"The download request was declined. No data was written to storage, \
+and temporary network buffers were discarded.";
 
 /// Why a local document could not be shown.
 ///
@@ -1294,6 +1298,10 @@ pub enum PageStatus {
     Downloaded,
     /// The response was a file, but storage refused the bytes.
     DownloadFailed,
+    /// The response was a file, awaiting explicit user confirmation.
+    DownloadPrompt,
+    /// The user explicitly refused the download.
+    DownloadRefused,
     LocalRefused,
 }
 
@@ -1612,6 +1620,8 @@ pub struct BrowserApp {
     lab: [LabResult; LAB_URLS.len()],
     lab_running: bool,
     pending: PendingTask,
+    /// A download awaiting explicit user confirmation.
+    pub pending_download: browser::PendingDownload,
     /// The local port the next outbound connection asks for.
     ///
     /// WHY a counter: two connections from the same port in quick
@@ -1734,6 +1744,7 @@ impl BrowserApp {
             lab: [LabResult::EMPTY; LAB_URLS.len()],
             lab_running: false,
             pending: PendingTask::None,
+            pending_download: browser::PendingDownload::EMPTY,
             next_local_port: 45000,
         };
         app.tabs.init_default();
@@ -2790,6 +2801,74 @@ impl BrowserApp {
         }
     }
 
+    /// Stages a downloaded file, requiring user confirmation before saving.
+    pub fn stage_pending_download(
+        &mut self,
+        url: &[u8],
+        content_type: &[u8],
+        given_name: Option<&[u8]>,
+        body: &[u8],
+        truncated: bool,
+    ) {
+        let base_ptr = core::ptr::addr_of!(RESPONSE_BUF) as *const u8 as usize;
+        let body_ptr = body.as_ptr() as usize;
+        let body_offset = if body_ptr >= base_ptr && body_ptr < base_ptr + MAX_RESPONSE_BYTES {
+            body_ptr - base_ptr
+        } else {
+            0
+        };
+
+        self.pending_download = browser::PendingDownload::new(
+            url,
+            content_type,
+            given_name,
+            body.len(),
+            body_offset,
+            truncated,
+        );
+        self.status = PageStatus::DownloadPrompt;
+        self.loading_progress = 100;
+        self.tabs.active_tab_mut().loading_state = LoadingState::Completed;
+        self.tabs.active_tab_mut().error_code = 0;
+        std::log("[BROWSER APP] The origin sent a file download; staged awaiting user confirmation.").ok();
+    }
+
+    /// User confirmed the pending download; saves it to shared storage.
+    pub fn accept_pending_download(&mut self) -> bool {
+        if !self.pending_download.active {
+            return false;
+        }
+        let pending = self.pending_download;
+        self.pending_download.active = false;
+
+        let url = &pending.url[..pending.url_len];
+        let content_type = &pending.content_type[..pending.content_type_len];
+        let filename = &pending.filename[..pending.filename_len];
+        let offset = pending.body_offset;
+        let len = pending.body_len;
+        let truncated = pending.truncated;
+
+        let response = unsafe { &*core::ptr::addr_of!(RESPONSE_BUF) };
+        let body = if offset + len <= response.len() {
+            &response[offset..offset + len]
+        } else {
+            &[]
+        };
+
+        self.save_media_download(url, content_type, Some(filename), body, truncated)
+    }
+
+    /// User refused the pending download; discards staged state.
+    pub fn refuse_pending_download(&mut self) {
+        self.pending_download.cancel();
+        self.status = PageStatus::DownloadRefused;
+        self.loading_progress = 100;
+        self.tabs.active_tab_mut().loading_state = LoadingState::Completed;
+        self.tabs.active_tab_mut().error_code = 0;
+        std::log("[BROWSER APP] Download request refused by user.").ok();
+        let _ = std::audio_haptic_click();
+    }
+
     /// Writes a fetched file into the shared storage area.
     ///
     /// WHY the body is written in steps: the filesystem syscall carries at
@@ -3578,13 +3657,14 @@ impl BrowserApp {
                 if browser::content_type_is_binary(resp.content_type) {
                     let truncated = outcome.truncated
                         || browser::http_header_value(rx_slice, b"x-interos-truncated").is_some();
-                    return self.save_media_download(
+                    self.stage_pending_download(
                         &hop_buf[..hop_len],
                         resp.content_type,
                         browser::http_header_value(rx_slice, b"x-interos-filename"),
                         resp.body,
                         truncated,
                     );
+                    return true;
                 }
             }
 
@@ -4081,6 +4161,8 @@ impl Frame {
             PageStatus::GatewayError => (b"Gateway could not fetch", BODY_GATEWAY_ERROR),
             PageStatus::Downloaded => (b"Saved to Downloads", BODY_DOWNLOADED),
             PageStatus::DownloadFailed => (b"Download could not be saved", BODY_DOWNLOAD_FAILED),
+            PageStatus::DownloadPrompt => (b"Download Permission", BODY_DOWNLOAD_PROMPT),
+            PageStatus::DownloadRefused => (b"Download Refused", BODY_DOWNLOAD_REFUSED),
             PageStatus::LocalRefused => (b"Local document unavailable", match app.local_failure {
                 LocalFailure::NoPath => BODY_LOCAL_NO_PATH,
                 LocalFailure::NoCapability => BODY_LOCAL_NO_CAPABILITY,
@@ -5057,6 +5139,24 @@ fn open_action_rect(f: &Frame) -> Rect {
     Rect::new(W / 2 - 90, err_y + 54, 180, 48)
 }
 
+/// The box the download confirmation action is drawn in.
+fn download_confirm_rect(f: &Frame) -> Rect {
+    let err_y = f.head_y + 40 + f.body_n * 28 + 24;
+    Rect::new(W / 2 - 190, err_y + 54, 180, 48)
+}
+
+/// The box the download cancellation action is drawn in.
+fn download_cancel_rect(f: &Frame) -> Rect {
+    let err_y = f.head_y + 40 + f.body_n * 28 + 24;
+    Rect::new(W / 2 + 10, err_y + 54, 180, 48)
+}
+
+/// The box the dismissed state's action is drawn in.
+fn dismiss_action_rect(f: &Frame) -> Rect {
+    let err_y = f.head_y + 40 + f.body_n * 28 + 24;
+    Rect::new(W / 2 - 90, err_y + 54, 180, 48)
+}
+
 /// Paints one pixel of an HTML-formatted page using the computed display list.
 fn html_page_pixel(x: usize, y: usize, app: &BrowserApp, _f: &Frame) -> u32 {
     // 1. Scroll Position Indicator (on right edge x 712..716)
@@ -5519,7 +5619,9 @@ fn html_page_pixel(x: usize, y: usize, app: &BrowserApp, _f: &Frame) -> u32 {
 fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
     // Error state / No transport screen
     let download_status = app.status == PageStatus::Downloaded
-        || app.status == PageStatus::DownloadFailed;
+        || app.status == PageStatus::DownloadFailed
+        || app.status == PageStatus::DownloadPrompt
+        || app.status == PageStatus::DownloadRefused;
     if app.status == PageStatus::NoTransport
         || app.status == PageStatus::InvalidAddress
         || app.status == PageStatus::UnrecognisedAddress
@@ -5536,7 +5638,7 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
             offline_glyph(x, y, cx, cy)
         };
         if glyph {
-            return if app.status == PageStatus::Downloaded {
+            return if app.status == PageStatus::Downloaded || app.status == PageStatus::DownloadPrompt {
                 THEME.primary
             } else {
                 THEME.on_surface_variant
@@ -5579,6 +5681,8 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                 PageStatus::GatewayError => b"GATEWAY COULD NOT FETCH",
                 PageStatus::Downloaded => b"DOWNLOAD COMPLETE",
                 PageStatus::DownloadFailed => b"DOWNLOAD FAILED",
+                PageStatus::DownloadPrompt => b"PERMISSION REQUIRED",
+                PageStatus::DownloadRefused => b"DOWNLOAD DECLINED",
                 PageStatus::LocalRefused => match app.local_failure {
                     LocalFailure::NoPath => b"NO PATH GIVEN",
                     LocalFailure::NoCapability => b"NO FILESYSTEM CAPABILITY",
@@ -5588,7 +5692,7 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                 },
                 _ => b"NO RESPONSE FROM THE GATEWAY",
             };
-            let label_color = if app.status == PageStatus::Downloaded {
+            let label_color = if app.status == PageStatus::Downloaded || app.status == PageStatus::DownloadPrompt {
                 THEME.primary
             } else {
                 THEME.error
@@ -5600,7 +5704,7 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
             return c;
         }
 
-        // A saved file is not a failure, so there is nothing to reload.
+        // A saved file or download prompt is not a network failure, so there is nothing to reload.
         if download_status {
             if app.status == PageStatus::Downloaded {
                 let btn = open_action_rect(f);
@@ -5634,6 +5738,53 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                     false,
                 ) {
                     return px;
+                }
+            } else if app.status == PageStatus::DownloadPrompt {
+                let confirm_btn = download_confirm_rect(f);
+                if let Some(c) = draw_rounded_rect(x, y, confirm_btn, R_CONTROL, THEME.primary, None, 0) {
+                    let label = b"Download";
+                    let lw = text_width(label, 1);
+                    if let Some(px) = text_px(x, y, confirm_btn.x + (confirm_btn.w.saturating_sub(lw)) / 2, confirm_btn.y + 14, 1, label, THEME.on_primary, c, true) {
+                        return px;
+                    }
+                    return c;
+                }
+                let cancel_btn = download_cancel_rect(f);
+                if let Some(c) = draw_rounded_rect(x, y, cancel_btn, R_CONTROL, THEME.surface_container_high, Some(THEME.border), 1) {
+                    let label = b"Cancel";
+                    let lw = text_width(label, 1);
+                    if let Some(px) = text_px(x, y, cancel_btn.x + (cancel_btn.w.saturating_sub(lw)) / 2, cancel_btn.y + 14, 1, label, THEME.on_surface, c, true) {
+                        return px;
+                    }
+                    return c;
+                }
+                let info_y = confirm_btn.y + 62;
+                let filename = &app.pending_download.filename[..app.pending_download.filename_len];
+                if !filename.is_empty() {
+                    let fw = text_width(filename, 1);
+                    if let Some(px) = text_px(
+                        x,
+                        y,
+                        (W.saturating_sub(fw)) / 2,
+                        info_y,
+                        1,
+                        filename,
+                        THEME.on_surface_variant,
+                        THEME.surface,
+                        false,
+                    ) {
+                        return px;
+                    }
+                }
+            } else if app.status == PageStatus::DownloadRefused {
+                let btn = dismiss_action_rect(f);
+                if let Some(c) = draw_rounded_rect(x, y, btn, R_CONTROL, THEME.surface_container_high, Some(THEME.border), 1) {
+                    let label = b"Dismiss";
+                    let lw = text_width(label, 1);
+                    if let Some(px) = text_px(x, y, W / 2 - lw / 2, btn.y + 14, 1, label, THEME.on_surface, c, true) {
+                        return px;
+                    }
+                    return c;
                 }
             }
             return THEME.surface;
@@ -8045,6 +8196,32 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
         return Tap::None;
     }
 
+    // Download confirmation / refusal actions
+    if app.status == PageStatus::DownloadPrompt {
+        let frame = Frame::build(app);
+        if download_confirm_rect(&frame).contains(x, y) {
+            let _ = std::audio_haptic_click();
+            app.accept_pending_download();
+            return Tap::Redraw;
+        }
+        if download_cancel_rect(&frame).contains(x, y) {
+            let _ = std::audio_haptic_click();
+            app.refuse_pending_download();
+            return Tap::Redraw;
+        }
+        return Tap::None;
+    }
+
+    if app.status == PageStatus::DownloadRefused {
+        let frame = Frame::build(app);
+        if dismiss_action_rect(&frame).contains(x, y) {
+            let _ = std::audio_haptic_click();
+            app.status = PageStatus::Blank;
+            return Tap::Redraw;
+        }
+        return Tap::None;
+    }
+
     // Offline / Error screen Reload Button tap
     if (app.status == PageStatus::NoTransport
         || app.status == PageStatus::InvalidAddress
@@ -8093,6 +8270,19 @@ fn handle_browser_key(app: &mut BrowserApp, key: std::InputKeyEvent) -> Dirty {
     {
         app.overlay = SheetOverlay::None;
         return Dirty::All;
+    }
+    if app.status == PageStatus::DownloadPrompt {
+        match key.code {
+            input_key_code::ENTER => {
+                app.accept_pending_download();
+                return Dirty::All;
+            }
+            input_key_code::ESCAPE => {
+                app.refuse_pending_download();
+                return Dirty::All;
+            }
+            _ => return Dirty::None,
+        }
     }
     // WHY the open list takes the keys first: a panel that is open and
     // filtered is what the person is looking at, and the address field is

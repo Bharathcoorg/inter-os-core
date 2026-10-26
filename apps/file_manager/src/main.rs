@@ -38,7 +38,7 @@ pub use file_manager::{
 // the renderer and the hit test can call the same functions.
 use file_manager::{
     action_for_slot, action_slot_rect, action_supported, apply_search_scope, breadcrumb_crumbs,
-    build_details, category_row_at, entry_at_point, entry_row_rect, format_mtime,
+    build_details_with_provenance, category_row_at, entry_at_point, entry_row_rect, format_mtime,
     format_size_human, grid_at_point, grid_cell_rect, grid_scroll, join_path, list_scroll,
     parse_indexed_documents, problem_text, row_is_visible, search_needle_is_usable,
     sheet_button_rect, sheet_destination_rect, sort_documents, sort_entries, sort_recents,
@@ -1388,8 +1388,9 @@ fn details_for(
         }
     }
 
+    let prov = selected.as_ref().map(|d| &d.provenance[..d.provenance_len]);
     let effective_mtime = mtime.filter(|value| *value > 0);
-    let view = build_details(
+    let view = build_details_with_provenance(
         name,
         path,
         &mime[..mime_len],
@@ -1402,6 +1403,7 @@ fn details_for(
         },
         is_dir,
         OPEN_WITH_LABEL,
+        prov,
     );
     (view, selected)
 }

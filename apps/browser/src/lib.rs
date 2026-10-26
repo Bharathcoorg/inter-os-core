@@ -22,6 +22,9 @@ pub mod inflate;
 /// The bounded DOM and box layout engine used by the browser view.
 pub mod layout;
 
+/// The bounded native JavaScript AST lexer, parser and interpreter.
+pub mod js;
+
 /// The platform's scroll model.
 use interos_std::design::scroll::ScrollState;
 
@@ -3175,6 +3178,67 @@ fn ends_with_ignore_case(haystack: &[u8], needle: &[u8]) -> bool {
         && eq_ignore_case(&haystack[haystack.len() - needle.len()..], needle)
 }
 
+/// A pending download awaiting user confirmation before write to storage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PendingDownload {
+    pub active: bool,
+    pub url: [u8; 128],
+    pub url_len: usize,
+    pub content_type: [u8; 48],
+    pub content_type_len: usize,
+    pub filename: [u8; 72],
+    pub filename_len: usize,
+    pub body_len: usize,
+    pub body_offset: usize,
+    pub truncated: bool,
+}
+
+impl PendingDownload {
+    pub const EMPTY: PendingDownload = PendingDownload {
+        active: false,
+        url: [0; 128],
+        url_len: 0,
+        content_type: [0; 48],
+        content_type_len: 0,
+        filename: [0; 72],
+        filename_len: 0,
+        body_len: 0,
+        body_offset: 0,
+        truncated: false,
+    };
+
+    pub fn new(
+        url: &[u8],
+        content_type: &[u8],
+        given_name: Option<&[u8]>,
+        body_len: usize,
+        body_offset: usize,
+        truncated: bool,
+    ) -> Self {
+        let mut download = Self::EMPTY;
+        download.active = true;
+        let u_len = url.len().min(download.url.len());
+        download.url[..u_len].copy_from_slice(&url[..u_len]);
+        download.url_len = u_len;
+
+        let c_len = content_type.len().min(download.content_type.len());
+        download.content_type[..c_len].copy_from_slice(&content_type[..c_len]);
+        download.content_type_len = c_len;
+
+        let name_len = download_filename(url, content_type, given_name, &mut download.filename);
+        download.filename_len = name_len;
+
+        download.body_len = body_len;
+        download.body_offset = body_offset;
+        download.truncated = truncated;
+        download
+    }
+
+    pub fn cancel(&mut self) {
+        self.active = false;
+    }
+}
+
 /// Keeps the characters a file name may hold, replacing the rest.
 fn sanitize_download_name(name: &[u8], out: &mut [u8]) -> usize {
     let mut n = 0usize;
@@ -4732,5 +4796,27 @@ mod tests {
         assert_eq!(user_field.name.get(&dom), b"user");
         assert_eq!(user_field.value.get(&dom), b"admin");
         assert!(layout.field_at(user_field.x as usize + 1, user_field.y as usize + 1).is_some());
+    }
+
+    #[test]
+    fn test_pending_download_stage_and_cancel() {
+        let mut pd = PendingDownload::new(
+            b"https://example.com/assets/report.pdf",
+            b"application/pdf",
+            Some(b"financial_report.pdf"),
+            1024,
+            64,
+            false,
+        );
+        assert!(pd.active);
+        assert_eq!(&pd.url[..pd.url_len], b"https://example.com/assets/report.pdf");
+        assert_eq!(&pd.content_type[..pd.content_type_len], b"application/pdf");
+        assert_eq!(&pd.filename[..pd.filename_len], b"financial_report.pdf");
+        assert_eq!(pd.body_len, 1024);
+        assert_eq!(pd.body_offset, 64);
+        assert!(!pd.truncated);
+
+        pd.cancel();
+        assert!(!pd.active);
     }
 }
