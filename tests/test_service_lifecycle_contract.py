@@ -44,8 +44,8 @@ def main() -> None:
     user_task = (ROOT / "kernel/src/task/user.rs").read_text(encoding="utf-8")
     must(system_service, "pub fn run_storage() -> !", "Userspace storage service entry")
     must(system_service, 'std::service_heartbeat(3)', "storaged lifecycle heartbeat")
-    must(system_service, 'std::fs_open(4, "/data/audit.log", std::FS_WRITE)', "storaged filesystem capability usage")
-    must(system_service, "std::fs_write(4, fd", "storaged userspace filesystem write")
+    assert 'std::fs_open("/data/audit.log", std::FS_WRITE)' in system_service or 'std::fs_open(4, "/data/audit.log", std::FS_WRITE)' in system_service, "storaged filesystem capability usage"
+    assert "std::fs_write(fd," in system_service or "std::fs_write(4, fd" in system_service, "storaged userspace filesystem write"
     must(system_service, "std::fs_close(fd)", "storaged descriptor lifecycle")
     must(storaged, "interos_system_service::run_storage()", "storaged uses dedicated storage manager")
     services = SERVICES.read_text(encoding="utf-8")
@@ -105,8 +105,7 @@ def main() -> None:
          "service stop parent ownership")
     must(services, 'return Err("service is not owned by caller")',
          "cross-parent service stop rejection")
-    must(services, "static SERVICE_LIFECYCLE_LOCK: spin::Mutex<()>",
-         "serialized lifecycle transition lock")
+    assert "static SERVICE_LIFECYCLE_LOCK: crate::sync::Mutex<()>" in services or "static SERVICE_LIFECYCLE_LOCK: spin::Mutex<()>" in services, "serialized lifecycle transition lock"
     # WHY try_lock spellings below: a blocking lock in syscall context deadlocks
     # permanently on this uniprocessor port (syscalls run with IF masked by
     # IA32_FMASK, so a preempted holder can never release). Observed live: a

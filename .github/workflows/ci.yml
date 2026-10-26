@@ -51,12 +51,12 @@ jobs:
           rustup target add riscv64gc-unknown-none-elf --toolchain nightly-2026-09-15
 
       - name: Build Ring-3 system services required by kernel image embedding
-        run: cargo build --manifest-path userspace/system-service/Cargo.toml --target x86_64-unknown-none
+        run: cargo build --manifest-path userspace/system-service/Cargo.toml --target x86_64-unknown-none --bins
 
       - name: Build x86_64 userspace binaries required by kernel image embedding
         run: |
           cargo build --manifest-path userspace/init/Cargo.toml --target x86_64-unknown-none
-          for app in settings terminal compositor launcher dialer vault camera calculator browser messages calendar music; do
+          for app in compositor launcher settings dialer vault camera calculator browser messages calendar music file_manager gallery notes agent_manager video_player; do
             cargo build --manifest-path "apps/$app/Cargo.toml" --target x86_64-unknown-none
           done
 
@@ -162,11 +162,11 @@ jobs:
       - name: Install QEMU
         run: sudo apt-get update && sudo apt-get install -y qemu-system-x86
       - name: Build Ring-3 system services
-        run: cargo build --manifest-path userspace/system-service/Cargo.toml --target x86_64-unknown-none --features ci-fault-injection
+        run: cargo build --manifest-path userspace/system-service/Cargo.toml --target x86_64-unknown-none --bins --features ci-fault-injection
       - name: Build embedded x86_64 userspace binaries
         run: |
           cargo build --manifest-path userspace/init/Cargo.toml --target x86_64-unknown-none
-          for app in settings terminal compositor launcher dialer vault camera calculator browser messages calendar music; do
+          for app in compositor launcher settings dialer vault camera calculator browser messages calendar music file_manager gallery notes agent_manager video_player; do
             cargo build --manifest-path "apps/$app/Cargo.toml" --target x86_64-unknown-none
           done
       - name: Verify kernel QEMU target
