@@ -35,6 +35,10 @@ const EMBEDDED_USER_IMAGES: &[&str] = &[
     "music",
     "file_manager",
     "gallery",
+    "notes",
+    "agent_manager",
+    "video_player",
+    "aid",
 ];
 
 fn main() {

@@ -1926,7 +1926,7 @@ pub fn spawn_app_notes(id_security: TaskId) -> TaskId {
 /// document layer, and reading the index is reading a description of
 /// documents rather than the documents themselves.
 pub fn spawn_app_agent_manager(id_security: TaskId) -> TaskId {
-    let mut caps = CapabilityTable::new(8);
+    let mut caps = CapabilityTable::new(16);
     caps.insert(Capability {
         id: CapabilityId(2910),
         cap_type: CapabilityType::SerialOutput,
@@ -1960,6 +1960,24 @@ pub fn spawn_app_agent_manager(id_security: TaskId) -> TaskId {
     caps.insert(Capability {
         id: CapabilityId(2915),
         cap_type: CapabilityType::TimerTickRead,
+        rights: Rights::READ,
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2916),
+        cap_type: CapabilityType::FileSystemWrite,
+        rights: Rights::WRITE,
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2917),
+        cap_type: CapabilityType::IpcSend,
+        rights: Rights::WRITE,
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2918),
+        cap_type: CapabilityType::IpcReceive,
         rights: Rights::READ,
         object_id: 0,
     }).ok();

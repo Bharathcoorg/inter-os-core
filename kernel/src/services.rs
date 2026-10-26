@@ -274,7 +274,7 @@ pub fn init() {
     for id in [
         ServiceId::Display, ServiceId::Input, ServiceId::Storage, ServiceId::Network,
         ServiceId::Power, ServiceId::Modem, ServiceId::Audio, ServiceId::Camera, ServiceId::Sensor,
-        ServiceId::Compositor, ServiceId::Launcher,
+        ServiceId::Compositor, ServiceId::Launcher, ServiceId::Inference,
     ] {
         if let Some(mut records) = SERVICE_RECORDS.try_lock() {
             records[id as usize] = Some(ServiceRecord {

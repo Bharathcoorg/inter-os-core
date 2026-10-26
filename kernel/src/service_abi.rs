@@ -78,6 +78,7 @@ pub fn service_capability_allowed(service_id: u8, capability: u16) -> bool {
         7 => matches!(capability, 1 | 3 | 6 | 17 | 21),
         8 => matches!(capability, 1 | 3 | 6 | 17 | 22),
         11 => matches!(capability, 1 | 3 | 6 | 17 | 23),
+        12 => matches!(capability, 1 | 3 | 6 | 9 | 10 | 17),
         9 => matches!(capability, 1 | 2 | 3 | 6 | 9 | 17),
         10 => matches!(capability, 1 | 2 | 3 | 5 | 6 | 9 | 17),
         _ => false,
@@ -97,6 +98,7 @@ pub fn service_id_from_package_id(package_id: &str) -> Option<u8> {
         "org.interos.compositor" | "org.interos.service.compositor" => Some(9),
         "org.interos.launcher" | "org.interos.service.launcher" => Some(10),
         "org.interos.service.sensord" => Some(11),
+        "org.interos.service.aid" => Some(12),
         _ => None,
     }
 }

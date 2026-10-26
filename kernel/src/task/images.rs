@@ -36,6 +36,7 @@ pub static APP_GALLERY_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_
 pub static APP_NOTES_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../target/x86_64-unknown-none/debug/notes"));
 pub static APP_AGENT_MANAGER_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../target/x86_64-unknown-none/debug/agent_manager"));
 pub static APP_VIDEO_PLAYER_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../target/x86_64-unknown-none/debug/video_player"));
+pub static AID_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../target/x86_64-unknown-none/debug/aid"));
 
 // WHY the app statics above are embedded rather than loaded from the VFS: every
 // first-party app already on the launch path (settings, terminal, gallery, ...)
@@ -56,6 +57,7 @@ pub fn service_image(service_id: u8) -> Option<UserImage> {
         9 => UserImage { name: "compositor", elf: COMPOSITOR_ELF },
         10 => UserImage { name: "launcher", elf: LAUNCHER_ELF },
         11 => UserImage { name: "sensord", elf: SENSORD_ELF },
+        12 => UserImage { name: "aid", elf: AID_ELF },
         _ => return None,
     })
 }
