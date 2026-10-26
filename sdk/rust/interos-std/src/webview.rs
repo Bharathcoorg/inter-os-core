@@ -5,6 +5,8 @@
 //! native bridging under the InterOS Platform Truth Contract.
 
 use crate::design::scroll::ScrollState;
+use crate::engine::EngineCapabilities;
+use crate::font;
 use crate::{surface_write, InputEvent};
 
 pub const CAP_WEBVIEW_BRIDGE: u64 = 36;
@@ -14,10 +16,20 @@ pub const MAX_URL_BYTES: usize = 256;
 pub static TEST_BRIDGE_CAP_GRANTED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 pub const MAX_TITLE_BYTES: usize = 64;
 pub const MAX_JS_RESULT_BYTES: usize = 64;
+pub const MAX_ERROR_DESC_BYTES: usize = 96;
 pub const MAX_EVENTS: usize = 8;
 pub const MAX_TEXT_LINES: usize = 32;
 pub const LINE_STR_MAX: usize = 64;
 pub const DEFAULT_STEP_BUDGET: usize = 2000;
+
+/// Truthful lifecycle state of an InterWebView instance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WebViewState {
+    Idle,
+    Loading,
+    Loaded,
+    Error,
+}
 
 /// Bounded JavaScript evaluation result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,6 +76,8 @@ pub enum WebViewEvent {
     ConsoleMessage([u8; 64], usize),
     JsToNativeMessage([u8; 32], usize, [u8; 128], usize),
     DomMutated,
+    ReceivedError(i32, [u8; MAX_ERROR_DESC_BYTES], usize),
+    HttpError(u16, [u8; MAX_URL_BYTES], usize),
 }
 
 /// Security and sandbox policy for an InterWebView instance.
@@ -143,6 +157,7 @@ pub struct InterWebView {
     pub w: u32,
     pub h: u32,
     policy: WebViewSecurityPolicy,
+    state: WebViewState,
     scroll: ScrollState,
     can_back: bool,
     can_fwd: bool,
@@ -150,7 +165,6 @@ pub struct InterWebView {
     current_url_len: usize,
     title: [u8; MAX_TITLE_BYTES],
     title_len: usize,
-    is_loading: bool,
     bridge_authorized: bool,
 
     // Events circular buffer
@@ -192,6 +206,7 @@ impl InterWebView {
             w: config.w,
             h: config.h,
             policy: config.policy,
+            state: WebViewState::Idle,
             scroll,
             can_back: false,
             can_fwd: false,
@@ -199,7 +214,6 @@ impl InterWebView {
             current_url_len: 0,
             title: [0; MAX_TITLE_BYTES],
             title_len: 0,
-            is_loading: false,
             bridge_authorized,
             events: [None; MAX_EVENTS],
             event_head: 0,
@@ -211,6 +225,23 @@ impl InterWebView {
 
     pub fn policy(&self) -> &WebViewSecurityPolicy {
         &self.policy
+    }
+
+    pub fn state(&self) -> WebViewState {
+        self.state
+    }
+
+    /// Truthful capabilities supported by InterWebView.
+    pub fn capabilities(&self) -> EngineCapabilities {
+        EngineCapabilities {
+            supports_css_flexbox: false,
+            supports_css_grid: false,
+            supports_full_js: false,
+            supports_subframes: false,
+            supports_cookies: false,
+            supports_storage: false,
+            supports_streaming_render: false,
+        }
     }
 
     pub fn is_bridge_authorized(&self) -> bool {
@@ -225,6 +256,13 @@ impl InterWebView {
         }
     }
 
+    pub fn push_received_error(&mut self, code: i32, desc: &str) {
+        let mut buf = [0u8; MAX_ERROR_DESC_BYTES];
+        let len = desc.len().min(buf.len());
+        buf[..len].copy_from_slice(&desc.as_bytes()[..len]);
+        self.push_event(WebViewEvent::ReceivedError(code, buf, len));
+    }
+
     pub fn poll_event(&mut self) -> Option<WebViewEvent> {
         if self.event_head != self.event_tail {
             let ev = self.events[self.event_head].take();
@@ -237,36 +275,121 @@ impl InterWebView {
 
     /// Loads document from a URL byte string (http, https, file, interos).
     pub fn load_url(&mut self, url: &str) -> Result<(), &'static str> {
-        let bytes = url.as_bytes();
-        if !self.policy.network_access_enabled && (bytes.starts_with(b"http://") || bytes.starts_with(b"https://")) {
-            return Err("NetworkAccessDenied: network requests disabled by policy");
+        let trimmed = url.trim();
+        if trimmed.is_empty() {
+            self.state = WebViewState::Error;
+            self.push_received_error(-1, "ERR_INVALID_URL: empty URL");
+            return Err("ERR_INVALID_URL: empty URL");
         }
 
+        let is_http_or_https = trimmed.starts_with("http://") || trimmed.starts_with("https://");
+        let is_local = trimmed.starts_with("file://")
+            || trimmed.starts_with("interos://")
+            || trimmed.starts_with("interlayer://")
+            || trimmed == "about:blank";
+
+        if !is_http_or_https && !is_local {
+            self.state = WebViewState::Error;
+            self.push_received_error(-1, "ERR_UNKNOWN_URL_SCHEME: unsupported URL scheme");
+            return Err("ERR_UNKNOWN_URL_SCHEME: unsupported URL scheme");
+        }
+
+        let len = trimmed.len().min(self.current_url.len());
+        self.current_url[..len].copy_from_slice(&trimmed.as_bytes()[..len]);
+        self.current_url_len = len;
+
+        let mut url_buf = [0u8; MAX_URL_BYTES];
+        url_buf[..len].copy_from_slice(&trimmed.as_bytes()[..len]);
+
+        if is_http_or_https {
+            if !self.policy.network_access_enabled {
+                self.state = WebViewState::Error;
+                self.push_received_error(-10, "NetworkAccessDenied");
+                return Err("NetworkAccessDenied: network requests disabled by policy");
+            }
+
+            // In InterWebView, there is no attached network transport socket in this
+            // embedded Ring 3 component. Under the Platform Truth Contract, we truthfully
+            // transition to Error and report network transport unattached. We NEVER fake HTTP 200.
+            self.push_event(WebViewEvent::PageStarted(url_buf, len));
+            self.state = WebViewState::Error;
+            self.push_received_error(
+                -105,
+                "ERR_NAME_NOT_RESOLVED: network transport unattached in embedded webview",
+            );
+            return Err("ERR_NAME_NOT_RESOLVED: network transport unattached in embedded webview");
+        }
+
+        if trimmed == "about:blank" {
+            self.line_count = 0;
+            self.title = [0; MAX_TITLE_BYTES];
+            let title_text = b"about:blank";
+            self.title[..title_text.len()].copy_from_slice(title_text);
+            self.title_len = title_text.len();
+            self.push_event(WebViewEvent::PageStarted(url_buf, len));
+            self.state = WebViewState::Loaded;
+            self.push_event(WebViewEvent::PageFinished(url_buf, len, 200));
+            return Ok(());
+        }
+
+        // Local filesystem or sovereign schemas (file://, interos://)
+        self.push_event(WebViewEvent::PageStarted(url_buf, len));
+        self.state = WebViewState::Loading;
+        Ok(())
+    }
+
+    /// Feeds host-fetched content into the embedded webview.
+    ///
+    /// If status is 2xx, parses content into document lines and transitions to `Loaded`.
+    /// If status is >= 400, transitions to `Error` and emits `HttpError` and `ReceivedError`.
+    pub fn load_url_content(
+        &mut self,
+        url: &str,
+        status: u16,
+        content_type: &str,
+        body: &[u8],
+    ) -> Result<(), &'static str> {
+        let bytes = url.as_bytes();
         let len = bytes.len().min(self.current_url.len());
         self.current_url[..len].copy_from_slice(&bytes[..len]);
         self.current_url_len = len;
 
         let mut url_buf = [0u8; MAX_URL_BYTES];
         url_buf[..len].copy_from_slice(&bytes[..len]);
-        self.push_event(WebViewEvent::PageStarted(url_buf, len));
-        self.push_event(WebViewEvent::PageFinished(url_buf, len, 200));
-        Ok(())
-    }
 
-    /// Loads raw HTML directly from memory with an optional base URL.
-    pub fn load_html(&mut self, html: &str, base_url: Option<&str>) -> Result<(), &'static str> {
-        self.line_count = 0;
-        if let Some(base) = base_url {
-            let bytes = base.as_bytes();
-            let len = bytes.len().min(self.current_url.len());
-            self.current_url[..len].copy_from_slice(&bytes[..len]);
-            self.current_url_len = len;
+        if status >= 400 {
+            self.state = WebViewState::Error;
+            self.push_event(WebViewEvent::HttpError(status, url_buf, len));
+            self.push_received_error(status as i32, "HTTP error response");
+            return Err("HTTP error response");
         }
 
-        let mut url_buf = [0u8; MAX_URL_BYTES];
-        let u_len = self.current_url_len;
-        url_buf[..u_len].copy_from_slice(&self.current_url[..u_len]);
-        self.push_event(WebViewEvent::PageStarted(url_buf, u_len));
+        if status >= 200 && status < 300 {
+            if content_type.contains("text/html") || content_type.is_empty() || body.starts_with(b"<") {
+                let html_str = core::str::from_utf8(body).unwrap_or("");
+                self.parse_and_apply_html(html_str);
+            } else {
+                self.line_count = 0;
+                let text_str = core::str::from_utf8(body).unwrap_or("");
+                for line in text_str.lines() {
+                    if self.line_count >= MAX_TEXT_LINES {
+                        break;
+                    }
+                    self.add_render_line(line.as_bytes(), false, 0xFFCCCCCC);
+                }
+            }
+            self.state = WebViewState::Loaded;
+            self.push_event(WebViewEvent::PageFinished(url_buf, len, status));
+            return Ok(());
+        }
+
+        self.state = WebViewState::Error;
+        self.push_received_error(status as i32, "Unhandled HTTP status code");
+        Err("Unhandled HTTP status code")
+    }
+
+    fn parse_and_apply_html(&mut self, html: &str) {
+        self.line_count = 0;
 
         // Extract title tag
         if let Some(t_start) = html.find("<title>") {
@@ -315,7 +438,30 @@ impl InterWebView {
                 }
             }
         }
+    }
 
+    /// Loads raw HTML directly from memory with an optional base URL.
+    ///
+    /// NOTE: Under the InterOS Platform Truth Contract, this is a lightweight native layout
+    /// extractor for headings (`<h1>`) and paragraphs (`<p>`) with bounded AST script evaluation,
+    /// NOT a full modern browser engine (does not support flexbox, grid, subframes, or arbitrary DOM/CSS APIs).
+    pub fn load_html(&mut self, html: &str, base_url: Option<&str>) -> Result<(), &'static str> {
+        self.state = WebViewState::Loading;
+        if let Some(base) = base_url {
+            let bytes = base.as_bytes();
+            let len = bytes.len().min(self.current_url.len());
+            self.current_url[..len].copy_from_slice(&bytes[..len]);
+            self.current_url_len = len;
+        }
+
+        let mut url_buf = [0u8; MAX_URL_BYTES];
+        let u_len = self.current_url_len;
+        url_buf[..u_len].copy_from_slice(&self.current_url[..u_len]);
+        self.push_event(WebViewEvent::PageStarted(url_buf, u_len));
+
+        self.parse_and_apply_html(html);
+
+        self.state = WebViewState::Loaded;
         self.push_event(WebViewEvent::PageFinished(url_buf, u_len, 200));
         Ok(())
     }
@@ -358,7 +504,9 @@ impl InterWebView {
     }
 
     pub fn stop(&mut self) {
-        self.is_loading = false;
+        if self.state == WebViewState::Loading {
+            self.state = WebViewState::Idle;
+        }
     }
 
     pub fn can_go_back(&self) -> bool {
@@ -370,7 +518,7 @@ impl InterWebView {
     }
 
     pub fn is_loading(&self) -> bool {
-        self.is_loading
+        self.state == WebViewState::Loading
     }
 
     pub fn current_url(&self) -> &str {
@@ -463,27 +611,44 @@ impl InterWebView {
     }
 
     /// Computes pixel color at (x, y) relative to the webview viewport.
+    ///
+    /// Renders real font glyphs for headings and paragraphs with 4-bit grayscale coverage AA.
     pub fn get_pixel(&self, x: usize, y: usize) -> u32 {
         if x < self.x as usize || x >= (self.x + self.w) as usize || y < self.y as usize || y >= (self.y + self.h) as usize {
             return 0x00000000;
         }
 
-        // Simple dark neutral webview container background
+        let bg_color = 0xFF121212; // #121212 dark neutral webview container background
+        let rel_x = x.saturating_sub(self.x as usize);
         let rel_y = y.saturating_sub(self.y as usize) as i32 + self.scroll.offset as i32;
-        let line_height = 24i32;
+        if rel_y < 0 {
+            return bg_color;
+        }
+        let rel_y_u = rel_y as usize;
 
-        for (i, line) in self.lines[..self.line_count].iter().enumerate() {
-            let line_y = (i as i32) * line_height + 16;
-            if rel_y >= line_y && rel_y < line_y + line_height {
-                // If within text region (simple glyph representation)
-                let rel_x = x.saturating_sub(self.x as usize);
-                if rel_x >= 16 && rel_x < 16 + line.len * 8 {
-                    return line.color;
+        let mut current_y = 16usize;
+        for line in &self.lines[..self.line_count] {
+            let scale = if line.is_heading { 2 } else { 1 };
+            let line_h = if line.is_heading { 32 } else { 20 };
+            if rel_y_u >= current_y && rel_y_u < current_y + line_h {
+                if let Some(px) = font::test_glyph_aa(
+                    rel_x,
+                    rel_y_u,
+                    16,
+                    current_y,
+                    scale,
+                    &line.text[..line.len],
+                    line.color,
+                    bg_color,
+                    line.is_heading,
+                ) {
+                    return px;
                 }
             }
+            current_y += line_h;
         }
 
-        0xFF121212 // #121212 dark background
+        bg_color
     }
 
     /// Renders the webview contents directly into the specified surface.
@@ -566,5 +731,197 @@ mod tests {
         assert!(started);
         assert!(finished);
         assert!(title_changed);
+    }
+
+    #[test]
+    fn webview_truthful_error_on_unattached_network() {
+        let mut config = WebViewConfig::default_portrait();
+        config.policy.network_access_enabled = true; // explicitly enabled
+        let mut webview = InterWebView::create_webview(config).expect("create webview");
+        assert_eq!(webview.state(), WebViewState::Idle);
+
+        let res = webview.load_url("https://example.com/index.html");
+        assert_eq!(
+            res,
+            Err("ERR_NAME_NOT_RESOLVED: network transport unattached in embedded webview")
+        );
+        assert_eq!(webview.state(), WebViewState::Error);
+
+        let mut got_started = false;
+        let mut got_received_err = false;
+        let mut got_fake_finished = false;
+
+        while let Some(evt) = webview.poll_event() {
+            match evt {
+                WebViewEvent::PageStarted(..) => got_started = true,
+                WebViewEvent::ReceivedError(code, desc, len) => {
+                    assert_eq!(code, -105);
+                    let desc_str = core::str::from_utf8(&desc[..len]).unwrap();
+                    assert!(desc_str.contains("ERR_NAME_NOT_RESOLVED"));
+                    got_received_err = true;
+                }
+                WebViewEvent::PageFinished(..) => got_fake_finished = true,
+                _ => {}
+            }
+        }
+
+        assert!(got_started);
+        assert!(got_received_err);
+        assert!(!got_fake_finished, "Must NEVER emit fake PageFinished(200)!");
+    }
+
+    #[test]
+    fn webview_truthful_network_access_denied_policy() {
+        let mut config = WebViewConfig::default_portrait();
+        config.policy.network_access_enabled = false;
+        let mut webview = InterWebView::create_webview(config).expect("create webview");
+
+        let res = webview.load_url("http://insecure.example.com");
+        assert_eq!(
+            res,
+            Err("NetworkAccessDenied: network requests disabled by policy")
+        );
+        assert_eq!(webview.state(), WebViewState::Error);
+
+        let mut got_error = false;
+        while let Some(evt) = webview.poll_event() {
+            if let WebViewEvent::ReceivedError(code, desc, len) = evt {
+                assert_eq!(code, -10);
+                let desc_str = core::str::from_utf8(&desc[..len]).unwrap();
+                assert_eq!(desc_str, "NetworkAccessDenied");
+                got_error = true;
+            }
+        }
+        assert!(got_error);
+    }
+
+    #[test]
+    fn webview_load_url_content_success_and_events() {
+        let config = WebViewConfig::default_portrait();
+        let mut webview = InterWebView::create_webview(config).expect("create webview");
+
+        let body = b"<html><head><title>Remote Doc</title></head><body><h1>Feed Title</h1><p>Fetched Body</p></body></html>";
+        let res = webview.load_url_content("https://example.com/article", 200, "text/html", body);
+        assert!(res.is_ok());
+        assert_eq!(webview.state(), WebViewState::Loaded);
+        assert_eq!(webview.title(), "Remote Doc");
+        assert_eq!(webview.current_url(), "https://example.com/article");
+
+        let mut got_title = false;
+        let mut got_finished = false;
+        while let Some(evt) = webview.poll_event() {
+            match evt {
+                WebViewEvent::TitleChanged(..) => got_title = true,
+                WebViewEvent::PageFinished(url_buf, len, status) => {
+                    assert_eq!(status, 200);
+                    let url_str = core::str::from_utf8(&url_buf[..len]).unwrap();
+                    assert_eq!(url_str, "https://example.com/article");
+                    got_finished = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(got_title);
+        assert!(got_finished);
+    }
+
+    #[test]
+    fn webview_load_url_content_http_error_cases() {
+        let config = WebViewConfig::default_portrait();
+        let mut webview = InterWebView::create_webview(config).expect("create webview");
+
+        // 404 Not Found
+        let res404 = webview.load_url_content("https://example.com/missing", 404, "text/html", b"Not Found");
+        assert_eq!(res404, Err("HTTP error response"));
+        assert_eq!(webview.state(), WebViewState::Error);
+
+        let mut got_http_err = false;
+        let mut got_rcv_err = false;
+        while let Some(evt) = webview.poll_event() {
+            match evt {
+                WebViewEvent::HttpError(status, ..) => {
+                    assert_eq!(status, 404);
+                    got_http_err = true;
+                }
+                WebViewEvent::ReceivedError(code, ..) => {
+                    assert_eq!(code, 404);
+                    got_rcv_err = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(got_http_err);
+        assert!(got_rcv_err);
+
+        // 500 Internal Server Error
+        let res500 = webview.load_url_content("https://example.com/crash", 500, "text/html", b"Server Error");
+        assert_eq!(res500, Err("HTTP error response"));
+        assert_eq!(webview.state(), WebViewState::Error);
+    }
+
+    #[test]
+    fn webview_capabilities_truthfully_false() {
+        let config = WebViewConfig::default_portrait();
+        let webview = InterWebView::create_webview(config).expect("create webview");
+        let caps = webview.capabilities();
+        assert!(!caps.supports_css_flexbox);
+        assert!(!caps.supports_css_grid);
+        assert!(!caps.supports_full_js);
+        assert!(!caps.supports_subframes);
+        assert!(!caps.supports_cookies);
+        assert!(!caps.supports_storage);
+        assert!(!caps.supports_streaming_render);
+    }
+
+    #[test]
+    fn webview_renders_real_font_glyphs() {
+        let config = WebViewConfig::default_portrait();
+        let mut webview = InterWebView::create_webview(config).expect("create webview");
+
+        let html = "<html><body><h1>H</h1></body></html>";
+        webview.load_html(html, None).expect("load html");
+
+        // Heading starts at y = 16 (plus container y=84).
+        // For 'H' with scale=2 at (x=16 + webview.x=0, y=16 + webview.y=84):
+        // Outside the webview bounds:
+        assert_eq!(webview.get_pixel(1000, 2000), 0x00000000);
+
+        // At empty margin before heading starts:
+        assert_eq!(webview.get_pixel(8, 84 + 4), 0xFF121212);
+
+        // Within the 'H' glyph bounding area, there must be ink pixels (different from background):
+        let mut has_ink = false;
+        for dy in 0..32 {
+            for dx in 0..32 {
+                let px = webview.get_pixel(dx, 84 + 16 + dy);
+                if px != 0xFF121212 {
+                    has_ink = true;
+                    break;
+                }
+            }
+            if has_ink {
+                break;
+            }
+        }
+        assert!(has_ink, "InterWebView must render real font glyph ink, not blank or placeholder!");
+    }
+
+    #[test]
+    fn webview_about_blank_and_local_handling() {
+        let config = WebViewConfig::default_portrait();
+        let mut webview = InterWebView::create_webview(config).expect("create webview");
+
+        // about:blank
+        assert!(webview.load_url("about:blank").is_ok());
+        assert_eq!(webview.state(), WebViewState::Loaded);
+        assert_eq!(webview.title(), "about:blank");
+
+        // interos://
+        assert!(webview.load_url("interos://settings/index.html").is_ok());
+        assert_eq!(webview.state(), WebViewState::Loading);
+
+        // invalid scheme
+        assert!(webview.load_url("ftp://unsupported.org").is_err());
+        assert_eq!(webview.state(), WebViewState::Error);
     }
 }

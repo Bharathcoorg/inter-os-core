@@ -191,7 +191,7 @@ pub fn parse_uri(raw: &[u8]) -> ParsedUri<'_> {
                 } else if all_digits && value == 0 {
                     (&authority[..i], 0)
                 } else {
-                    (authority, scheme.default_port())
+                    (&authority[..i], scheme.default_port())
                 }
             }
             None => (authority, scheme.default_port()),
@@ -3544,6 +3544,82 @@ mod tests {
         assert_eq!(u4.path, b"/etc/hosts");
         assert_eq!(u4.port, 0);
         assert_eq!(u4.query, Some(&b"debug=true"[..]));
+    }
+
+    #[test]
+    fn test_uri_parser_comprehensive_matrix() {
+        // 1. Malformed URLs
+        let empty = parse_uri(b"");
+        assert_eq!(empty.scheme, UriScheme::Unknown);
+        assert_eq!(empty.host, b"");
+
+        let no_scheme = parse_uri(b"just-a-bare-word");
+        assert_eq!(no_scheme.scheme, UriScheme::Unknown);
+
+        let colon_only = parse_uri(b"://missing-scheme");
+        assert_eq!(colon_only.scheme, UriScheme::Unknown);
+
+        // 2. Unusual ports
+        let port_zero = parse_uri(b"http://example.com:0/path");
+        assert_eq!(port_zero.host, b"example.com");
+        assert_eq!(port_zero.port, 0);
+
+        let port_max = parse_uri(b"http://example.com:65535/path");
+        assert_eq!(port_max.host, b"example.com");
+        assert_eq!(port_max.port, 65535);
+
+        let port_overflow = parse_uri(b"http://example.com:70000/path");
+        assert_eq!(port_overflow.host, b"example.com");
+        assert_eq!(port_overflow.port, 80); // Falls back to default port
+
+        let port_non_digit = parse_uri(b"http://example.com:abc/path");
+        assert_eq!(port_non_digit.host, b"example.com");
+        assert_eq!(port_non_digit.port, 80);
+
+        let port_empty = parse_uri(b"http://example.com:/path");
+        assert_eq!(port_empty.host, b"example.com");
+        assert_eq!(port_empty.port, 80);
+
+        // 3. Bracketed IPv6 literals
+        let ipv6_std = parse_uri(b"http://[::1]/");
+        assert_eq!(ipv6_std.scheme, UriScheme::Http);
+        assert_eq!(ipv6_std.host, b"[::1]");
+        assert_eq!(ipv6_std.port, 80);
+        assert_eq!(ipv6_std.path, b"/");
+
+        let ipv6_port = parse_uri(b"https://[2001:db8::1]:8443/status?q=1");
+        assert_eq!(ipv6_port.scheme, UriScheme::Https);
+        assert_eq!(ipv6_port.host, b"[2001:db8::1]");
+        assert_eq!(ipv6_port.port, 8443);
+        assert_eq!(ipv6_port.path, b"/status");
+        assert_eq!(ipv6_port.query, Some(&b"q=1"[..]));
+
+        // 4. Userinfo stripping (prevents credential leakage in host component)
+        let userinfo1 = parse_uri(b"http://user:password@example.com/login");
+        assert_eq!(userinfo1.host, b"example.com");
+        assert_eq!(userinfo1.port, 80);
+        assert_eq!(userinfo1.path, b"/login");
+
+        let userinfo2 = parse_uri(b"https://admin@sub.domain.org:9000/");
+        assert_eq!(userinfo2.host, b"sub.domain.org");
+        assert_eq!(userinfo2.port, 9000);
+
+        let userinfo_ipv6 = parse_uri(b"http://user:pass@[::1]:8080/");
+        assert_eq!(userinfo_ipv6.host, b"[::1]");
+        assert_eq!(userinfo_ipv6.port, 8080);
+
+        // 5. Unsupported schemes
+        let ftp = parse_uri(b"ftp://ftp.is.co.za/rfc/rfc1808.txt");
+        assert_eq!(ftp.scheme, UriScheme::Unknown);
+
+        let gopher = parse_uri(b"gopher://gopher.floodgap.com/");
+        assert_eq!(gopher.scheme, UriScheme::Unknown);
+
+        let javascript = parse_uri(b"javascript:alert(1)");
+        assert_eq!(javascript.scheme, UriScheme::Unknown);
+
+        let mailto = parse_uri(b"mailto:admin@example.com");
+        assert_eq!(mailto.scheme, UriScheme::Unknown);
     }
 
     #[test]

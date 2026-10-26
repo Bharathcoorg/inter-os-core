@@ -746,6 +746,19 @@ impl CookieJar {
     /// Returns zero when no cookie applies. The caller decides whether to
     /// send the header at all.
     pub fn header_for(&mut self, url: &[u8], now: u64, out: &mut [u8]) -> usize {
+        self.header_for_request(url, false, true, now, out)
+    }
+
+    /// Writes the `Cookie` header value for `url`, longest path first,
+    /// enforcing SameSite policy under cross-site context and HTTP method safety.
+    pub fn header_for_request(
+        &mut self,
+        url: &[u8],
+        is_cross_site: bool,
+        is_safe_method: bool,
+        now: u64,
+        out: &mut [u8],
+    ) -> usize {
         if now > 0 {
             let mut index = 0;
             while index < self.count {
@@ -791,6 +804,13 @@ impl CookieJar {
                 }
                 if cookie.secure && !secure_request {
                     continue;
+                }
+                if is_cross_site {
+                    match cookie.same_site {
+                        SameSitePolicy::Strict => continue,
+                        SameSitePolicy::Lax if !is_safe_method => continue,
+                        _ => {}
+                    }
                 }
                 match best {
                     Some(current) if self.cookies[current].path_len >= cookie.path_len => {}
@@ -2437,5 +2457,147 @@ mod tests {
         // Request to other.org must receive NO cookies
         let n = jar.header_for(b"https://other.org/", 1001, &mut out);
         assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn test_cookie_jar_samesite_policy() {
+        let mut jar = CookieJar::new();
+        assert_eq!(
+            jar.store(b"https://service.example.com/", b"c_strict=A; SameSite=Strict", 1000),
+            CookieOutcome::Stored
+        );
+        assert_eq!(
+            jar.store(b"https://service.example.com/", b"c_lax=B; SameSite=Lax", 1000),
+            CookieOutcome::Stored
+        );
+        assert_eq!(
+            jar.store(b"https://service.example.com/", b"c_none=C; SameSite=None; Secure", 1000),
+            CookieOutcome::Stored
+        );
+
+        let mut out = [0u8; 256];
+
+        // Same-site request: all three cookies sent
+        let n = jar.header_for_request(b"https://service.example.com/api", false, true, 1000, &mut out);
+        let header = core::str::from_utf8(&out[..n]).unwrap();
+        assert!(header.contains("c_strict=A"));
+        assert!(header.contains("c_lax=B"));
+        assert!(header.contains("c_none=C"));
+
+        // Cross-site safe GET: Strict omitted, Lax and None included
+        let n = jar.header_for_request(b"https://service.example.com/api", true, true, 1000, &mut out);
+        let header = core::str::from_utf8(&out[..n]).unwrap();
+        assert!(!header.contains("c_strict="));
+        assert!(header.contains("c_lax=B"));
+        assert!(header.contains("c_none=C"));
+
+        // Cross-site unsafe POST: Strict and Lax omitted, only None included
+        let n = jar.header_for_request(b"https://service.example.com/api", true, false, 1000, &mut out);
+        let header = core::str::from_utf8(&out[..n]).unwrap();
+        assert!(!header.contains("c_strict="));
+        assert!(!header.contains("c_lax="));
+        assert!(header.contains("c_none=C"));
+    }
+
+    #[test]
+    fn test_cookie_jar_public_suffix_matching() {
+        let mut jar = CookieJar::new();
+
+        // Reject public suffixes as domain attribute
+        assert_eq!(
+            jar.store(b"https://sub.co.uk/", b"k=v; Domain=co.uk", 1000),
+            CookieOutcome::Rejected
+        );
+        assert_eq!(
+            jar.store(b"https://shop.com.au/", b"k=v; Domain=com.au", 1000),
+            CookieOutcome::Rejected
+        );
+        assert_eq!(
+            jar.store(b"https://charity.org.uk/", b"k=v; Domain=org.uk", 1000),
+            CookieOutcome::Rejected
+        );
+
+        // Valid registrable domain under public suffix is accepted
+        assert_eq!(
+            jar.store(b"https://sub.example.co.uk/", b"k=v; Domain=example.co.uk", 1000),
+            CookieOutcome::Stored
+        );
+
+        // Reject setting cookie for completely unrelated domain
+        assert_eq!(
+            jar.store(b"https://site.example.com/", b"k=v; Domain=other.com", 1000),
+            CookieOutcome::Rejected
+        );
+    }
+
+    #[test]
+    fn test_cookie_jar_secure_flag_enforcement() {
+        let mut jar = CookieJar::new();
+        assert_eq!(
+            jar.store(b"https://secure.bank.com/", b"session_id=xyz; Secure", 1000),
+            CookieOutcome::Stored
+        );
+        assert_eq!(
+            jar.store(b"https://secure.bank.com/", b"public_pref=dark", 1000),
+            CookieOutcome::Stored
+        );
+
+        let mut out = [0u8; 256];
+
+        // HTTPS request receives both cookies
+        let n = jar.header_for(b"https://secure.bank.com/dashboard", 1000, &mut out);
+        let header = core::str::from_utf8(&out[..n]).unwrap();
+        assert!(header.contains("session_id=xyz"));
+        assert!(header.contains("public_pref=dark"));
+
+        // Plain HTTP request NEVER receives the Secure session_id cookie
+        let n = jar.header_for(b"http://secure.bank.com/dashboard", 1000, &mut out);
+        let header = core::str::from_utf8(&out[..n]).unwrap();
+        assert!(!header.contains("session_id="));
+        assert!(header.contains("public_pref=dark"));
+    }
+
+    #[test]
+    fn test_cookie_jar_path_scoping_and_ordering() {
+        let mut jar = CookieJar::new();
+        assert_eq!(
+            jar.store(b"https://example.com/", b"c_root=0; Path=/", 1000),
+            CookieOutcome::Stored
+        );
+        assert_eq!(
+            jar.store(b"https://example.com/app", b"c_app=1; Path=/app", 1000),
+            CookieOutcome::Stored
+        );
+        assert_eq!(
+            jar.store(b"https://example.com/app/deep", b"c_deep=2; Path=/app/deep", 1000),
+            CookieOutcome::Stored
+        );
+
+        let mut out = [0u8; 256];
+
+        // Deepest path receives all 3, ordered by path length descending
+        let n = jar.header_for(b"https://example.com/app/deep/item", 1000, &mut out);
+        let header = core::str::from_utf8(&out[..n]).unwrap();
+        assert!(header.contains("c_deep=2"));
+        assert!(header.contains("c_app=1"));
+        assert!(header.contains("c_root=0"));
+        // Check order: c_deep must precede c_app, which must precede c_root
+        let deep_idx = header.find("c_deep=2").unwrap();
+        let app_idx = header.find("c_app=1").unwrap();
+        let root_idx = header.find("c_root=0").unwrap();
+        assert!(deep_idx < app_idx);
+        assert!(app_idx < root_idx);
+
+        // Middle path receives c_app and c_root, but not c_deep
+        let n = jar.header_for(b"https://example.com/app/other", 1000, &mut out);
+        let header = core::str::from_utf8(&out[..n]).unwrap();
+        assert!(!header.contains("c_deep="));
+        assert!(header.contains("c_app=1"));
+        assert!(header.contains("c_root=0"));
+
+        // Unrelated path receives only root
+        let n = jar.header_for(b"https://example.com/settings", 1000, &mut out);
+        let header = core::str::from_utf8(&out[..n]).unwrap();
+        assert_eq!(header, "c_root=0");
     }
 }

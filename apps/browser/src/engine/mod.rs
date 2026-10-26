@@ -18,6 +18,7 @@ pub struct NativeFlowEngine {
     current_url_len: usize,
     title: [u8; 64],
     title_len: usize,
+    status: EngineStatus,
 }
 
 impl NativeFlowEngine {
@@ -32,6 +33,7 @@ impl NativeFlowEngine {
             current_url_len: 0,
             title: [0u8; 64],
             title_len: 0,
+            status: EngineStatus::Ready,
         }
     }
 
@@ -58,19 +60,25 @@ impl BrowserEngine for NativeFlowEngine {
     }
 
     fn status(&self) -> EngineStatus {
-        EngineStatus::Ready
+        self.status
     }
 
     fn capabilities(&self) -> EngineCapabilities {
         EngineCapabilities::native_flow()
     }
 
+    /// Navigates to a remote or local URL.
+    ///
+    /// In NativeFlowEngine, URL navigation registers the target URL and enters `EngineStatus::Loading`
+    /// state, awaiting document delivery via `load_html()` or response feeder from the browser's
+    /// real network pipeline.
     fn load_url(&mut self, url: &str) -> Result<(), &'static str> {
         let bytes = url.as_bytes();
         let len = bytes.len().min(self.current_url.len());
         self.current_url[..len].copy_from_slice(&bytes[..len]);
         self.current_url_len = len;
         self.scroll_y = 0;
+        self.status = EngineStatus::Loading;
         Ok(())
     }
 
@@ -101,6 +109,7 @@ impl BrowserEngine for NativeFlowEngine {
         let width = (self.viewport_w.saturating_sub(32) as usize).max(32);
         flow::build(&self.dom, &sheet, width, &mut self.layout);
         self.scroll_y = 0;
+        self.status = EngineStatus::Ready;
         Ok(())
     }
 
@@ -119,13 +128,58 @@ impl BrowserEngine for NativeFlowEngine {
     }
 
     fn render_pixel(&self, x: usize, y: usize) -> u32 {
+        if x >= self.viewport_w as usize || y >= self.viewport_h as usize {
+            return 0x00000000;
+        }
+
         let doc_y = y as i32 + self.scroll_y;
         if doc_y < 0 {
             return 0xFF121212;
         }
 
         let doc_y_u = doc_y as usize;
-        // Check rect items (backgrounds, borders)
+
+        // 1. Text runs (ink on top of page backgrounds)
+        for i in 0..self.layout.run_count {
+            let run = &self.layout.runs[i];
+            let rx = run.x as usize;
+            let ry = run.y as usize;
+            let rw = run.w as usize;
+            let rh = (run.h as usize).max(interos_std::font::line_height(run.scale as usize));
+            if x >= rx && x < rx.saturating_add(rw) && doc_y_u >= ry && doc_y_u < ry.saturating_add(rh) {
+                let bytes = run.bytes(&self.dom);
+                if !bytes.is_empty() {
+                    let text_color = if run.link != crate::layout::NO_LINK {
+                        0xFF2563EB // Link blue
+                    } else if run.has_color {
+                        run.color
+                    } else {
+                        0xFF1E293B // Dark slate typography
+                    };
+                    if let Some(px) = interos_std::font::test_glyph_aa(
+                        x,
+                        doc_y_u,
+                        rx,
+                        ry,
+                        run.scale as usize,
+                        bytes,
+                        text_color,
+                        0xFFFFFFFF,
+                        run.bold,
+                    ) {
+                        return px;
+                    }
+                    if run.link != crate::layout::NO_LINK {
+                        let underline_y = ry + interos_std::font::line_height(run.scale as usize).saturating_sub(2);
+                        if doc_y_u == underline_y {
+                            return 0xFF2563EB;
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Check rect items (backgrounds, borders)
         for i in 0..self.layout.rect_count {
             let r = &self.layout.rects[i];
             let rx = r.x as usize;
@@ -209,5 +263,59 @@ mod tests {
         assert!(!caps.supports_css_grid);
         assert!(!caps.supports_full_js);
         assert!(caps.supports_cookies);
+    }
+
+    #[test]
+    fn native_flow_lifecycle_and_rendering_bounds() {
+        let mut engine = NativeFlowEngine::new(720, 1234);
+        assert_eq!(engine.status(), EngineStatus::Ready);
+
+        // 1. URL navigation transitions to Loading awaiting network document delivery
+        let res = engine.load_url("https://example.com/feed");
+        assert!(res.is_ok());
+        assert_eq!(engine.status(), EngineStatus::Loading);
+        assert_eq!(engine.url(), "https://example.com/feed");
+
+        // 2. Document delivery via load_html transitions to Ready
+        let html = "<html><head><title>Page Loaded</title></head><body><h1>Document Title</h1><p>Document body line</p></body></html>";
+        assert!(engine.load_html(html, None).is_ok());
+        assert_eq!(engine.status(), EngineStatus::Ready);
+        assert_eq!(engine.title(), "Page Loaded");
+
+        // 3. Viewport bounds clipping
+        assert_eq!(engine.render_pixel(720, 500), 0x00000000, "Must clip x >= viewport_w");
+        assert_eq!(engine.render_pixel(500, 1234), 0x00000000, "Must clip y >= viewport_h");
+        assert_eq!(engine.render_pixel(1000, 2000), 0x00000000);
+
+        // 4. Scrolling and bounds
+        engine.scroll(50);
+        let px_scrolled = engine.render_pixel(100, 100);
+        assert!(px_scrolled != 0x00000000);
+        engine.scroll(-100); // clamped to 0
+        let px_top = engine.render_pixel(100, 100);
+        assert!(px_top != 0x00000000);
+    }
+
+    #[test]
+    fn native_flow_render_pixel_samples_glyph_ink() {
+        let mut engine = NativeFlowEngine::new(720, 1234);
+        let html = "<html><body><h1>Hello InterOS</h1></body></html>";
+        assert!(engine.load_html(html, None).is_ok());
+
+        // Probe pixel area where heading text is laid out
+        let mut found_ink = false;
+        for y in 0..60 {
+            for x in 0..200 {
+                let px = engine.render_pixel(x, y);
+                if px != 0xFFFFFFFF && px != 0xFF121212 {
+                    found_ink = true;
+                    break;
+                }
+            }
+            if found_ink {
+                break;
+            }
+        }
+        assert!(found_ink, "render_pixel must sample font glyph ink");
     }
 }
