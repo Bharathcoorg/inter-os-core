@@ -262,6 +262,7 @@ pub enum SyscallNumber {
     ClockGettime = 157,
     Nanosleep = 158,
     Poll = 159,
+    ConsentResolve = 160,
 }
 
 /// System call result status codes.
@@ -2490,6 +2491,13 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             // Poll: a1 = fds_ptr, a2 = nfds, a3 = timeout_ms
             match sys_poll(a1, a2, a3 as i32) {
                 Ok(ready_count) => ready_count as i64,
+                Err(e) => e as i64,
+            }
+        }
+        160 => {
+            // ConsentResolve: a1 = request_id, a2 = decision (1=Granted, 2=Denied, 3=GrantedOnce)
+            match sys_consent_resolve(a1, a2 as u32) {
+                Ok(slot) => slot as i64,
                 Err(e) => e as i64,
             }
         }
@@ -5624,6 +5632,47 @@ pub fn sys_cap_request_consent(
     }
 }
 
+/// Resolves an interactive user consent request and mints capabilities upon grant.
+pub fn sys_consent_resolve(request_id: u64, decision_val: u32) -> Result<usize, SyscallResult> {
+    use crate::capability::{ConsentDecision, PERMISSION_MANAGER};
+
+    let decision = match decision_val {
+        1 => ConsentDecision::Granted,
+        2 => ConsentDecision::Denied,
+        3 => ConsentDecision::GrantedOnce,
+        _ => return Err(SyscallResult::InvalidArguments),
+    };
+
+    let mut pm = PERMISSION_MANAGER.lock();
+    let record = pm.resolve_consent(request_id, decision).ok_or(SyscallResult::TargetNotFound)?;
+    drop(pm);
+
+    if decision == ConsentDecision::Granted || decision == ConsentDecision::GrantedOnce {
+        let mut sched = SCHEDULER.lock();
+        let target = sched.get_task_mut(record.task_id).ok_or(SyscallResult::TargetNotFound)?;
+        let cap = record.permission.to_capability(record.task_id);
+        let slot = target.cap_table.insert(cap).map_err(|_| SyscallResult::InvalidSlot)?;
+        drop(sched);
+
+        serial_println!(
+            "[CONSENT] Task {} ({}) GRANTED permission '{}' -> Cap slot {}.",
+            record.task_id.0,
+            record.app_name,
+            record.permission.name(),
+            slot,
+        );
+        Ok(slot)
+    } else {
+        serial_println!(
+            "[CONSENT] Task {} ({}) DENIED permission '{}'.",
+            record.task_id.0,
+            record.app_name,
+            record.permission.name(),
+        );
+        Ok(0)
+    }
+}
+
 /// Dispatches a cross-application share request via the Sovereign Share Sheet Bus.
 /// If target_app is provided, resolves the target task and delivers a SHARE message.
 /// If target_app is None, opens the interactive ShareSheetDrawer in MobileShell and prompts the user.
@@ -6662,6 +6711,7 @@ pub fn sys_service_start(service_id: u8) -> Result<crate::task::TaskId, SyscallR
         5 => crate::services::ServiceId::Power, 6 => crate::services::ServiceId::Modem,
         7 => crate::services::ServiceId::Audio, 8 => crate::services::ServiceId::Camera,
         9 => crate::services::ServiceId::Compositor, 10 => crate::services::ServiceId::Launcher, 11 => crate::services::ServiceId::Sensor,
+        12 => crate::services::ServiceId::Inference, 13 => crate::services::ServiceId::Search, 14 => crate::services::ServiceId::Agent, 15 => crate::services::ServiceId::Voice,
         _ => return Err(SyscallResult::InvalidArguments),
     };
     let parent_id = SCHEDULER.lock().current_task_id().ok_or(SyscallResult::PermissionDenied)?;
@@ -6775,6 +6825,10 @@ pub fn sys_service_package_launch(cap_slot: usize, path: &str) -> Result<crate::
         9 => crate::services::ServiceId::Compositor,
         10 => crate::services::ServiceId::Launcher,
         11 => crate::services::ServiceId::Sensor,
+        12 => crate::services::ServiceId::Inference,
+        13 => crate::services::ServiceId::Search,
+        14 => crate::services::ServiceId::Agent,
+        15 => crate::services::ServiceId::Voice,
         _ => return Err(SyscallResult::PermissionDenied),
     };
     let task_id = crate::services::launch_verified_package(service, parent_id, &verified, payload)
@@ -6792,6 +6846,7 @@ pub fn sys_service_heartbeat(service_id: u8) -> Result<(), SyscallResult> {
         5 => crate::services::ServiceId::Power, 6 => crate::services::ServiceId::Modem,
         7 => crate::services::ServiceId::Audio, 8 => crate::services::ServiceId::Camera,
         9 => crate::services::ServiceId::Compositor, 10 => crate::services::ServiceId::Launcher, 11 => crate::services::ServiceId::Sensor,
+        12 => crate::services::ServiceId::Inference, 13 => crate::services::ServiceId::Search, 14 => crate::services::ServiceId::Agent, 15 => crate::services::ServiceId::Voice,
         _ => return Err(SyscallResult::InvalidArguments),
     };
     crate::services::heartbeat_for_task(id, task_id).map_err(|e| {
@@ -6808,6 +6863,7 @@ pub fn sys_service_recover_failed(service_id: u8) -> Result<u64, SyscallResult> 
         5 => crate::services::ServiceId::Power, 6 => crate::services::ServiceId::Modem,
         7 => crate::services::ServiceId::Audio, 8 => crate::services::ServiceId::Camera,
         9 => crate::services::ServiceId::Compositor, 10 => crate::services::ServiceId::Launcher, 11 => crate::services::ServiceId::Sensor,
+        12 => crate::services::ServiceId::Inference, 13 => crate::services::ServiceId::Search, 14 => crate::services::ServiceId::Agent, 15 => crate::services::ServiceId::Voice,
         _ => return Err(SyscallResult::InvalidArguments),
     };
     let parent_id = SCHEDULER.lock().current_task_id().ok_or(SyscallResult::PermissionDenied)?;
@@ -6822,6 +6878,7 @@ pub fn sys_service_stop(service_id: u8) -> Result<(), SyscallResult> {
         5 => crate::services::ServiceId::Power, 6 => crate::services::ServiceId::Modem,
         7 => crate::services::ServiceId::Audio, 8 => crate::services::ServiceId::Camera,
         9 => crate::services::ServiceId::Compositor, 10 => crate::services::ServiceId::Launcher, 11 => crate::services::ServiceId::Sensor,
+        12 => crate::services::ServiceId::Inference, 13 => crate::services::ServiceId::Search, 14 => crate::services::ServiceId::Agent, 15 => crate::services::ServiceId::Voice,
         _ => return Err(SyscallResult::InvalidArguments),
     };
     let parent_id = SCHEDULER.lock().current_task_id().ok_or(SyscallResult::PermissionDenied)?;

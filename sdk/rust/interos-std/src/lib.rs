@@ -253,6 +253,7 @@ pub enum SyscallNumber {
     ClockGettime = 157,
     Nanosleep = 158,
     Poll = 159,
+    ConsentResolve = 160,
 }
 
 // -----------------------------------------------------------------------------
@@ -1468,6 +1469,11 @@ pub mod cap_type {
     pub const AUDIO_STREAM: u64 = 28;
     pub const MEMORY_HEAP: u64 = 29;
     pub const PROCESS_THREADS: u64 = 30;
+    pub const INFERENCE_SERVICE: u64 = 31;
+    pub const SEARCH_SERVICE: u64 = 32;
+    pub const AGENT_TASK: u64 = 33;
+    pub const VOICE_SERVICE: u64 = 34;
+    pub const AUDIO_CAPTURE: u64 = 35;
 }
 
 /// Dynamically discovers the slot index of an active capability matching `cap_type`
@@ -3533,5 +3539,10 @@ mod abi_tests {
         assert_eq!(cap_type::REALTIME_CLOCK_READ, 24);
         assert_eq!(cap_type::MEMORY_HEAP, 29);
         assert_eq!(cap_type::PROCESS_THREADS, 30);
+        assert_eq!(cap_type::INFERENCE_SERVICE, 31);
+        assert_eq!(cap_type::SEARCH_SERVICE, 32);
+        assert_eq!(cap_type::AGENT_TASK, 33);
+        assert_eq!(cap_type::VOICE_SERVICE, 34);
+        assert_eq!(cap_type::AUDIO_CAPTURE, 35);
     }
 }

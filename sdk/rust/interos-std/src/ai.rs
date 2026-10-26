@@ -29,10 +29,10 @@ pub const INFERENCE_ABI_VERSION: u16 = 1;
 /// nothing but an id and a version to be discoverable, and it is
 /// discoverable by the same call that finds every other service.
 ///
-/// WHY the id is 13: the platform defines services 1 through 12, and an
+/// WHY the id is 12: the platform defines services 0 through 11, and an
 /// inference service is the next one. The id is a name, not a claim that
 /// such a service exists.
-pub const SERVICE_INFERENCE: u8 = 13;
+pub const SERVICE_INFERENCE: u8 = 12;
 
 /// Valid Matryoshka representation dimensions for EmbeddingGemma 2.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

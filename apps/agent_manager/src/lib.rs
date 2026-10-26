@@ -713,50 +713,21 @@ impl Provider for HostBridge {
     }
 }
 
+/// An incremental chunk produced by streaming inference or its unavailability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamChunk {
+    /// A measured chunk of token bytes.
+    Chunk(&'static [u8]),
+    /// Streaming is unavailable with an honest platform reason.
+    Unavailable(&'static str),
+    /// Streaming generation has finished.
+    Done,
+}
+
 impl HostBridge {
     /// Queries the host bridge for the next incremental token chunk.
-    ///
-    /// WHY static chunks: Ring-3 supervisory code does not allocate on the heap.
-    /// Each step delivers a measured token chunk representing incremental host-backed
-    /// generative inference.
-    pub fn stream_chunk(&self, prompt: &[u8], step: usize) -> Option<&'static [u8]> {
-        if contains_slice(prompt, b"model") {
-            match step {
-                0 => Some(b"[HostBridge] "),
-                1 => Some(b"Models: "),
-                2 => Some(b"EmbeddingGemma 2 "),
-                3 => Some(b"and host-backed "),
-                4 => Some(b"inference runtime."),
-                _ => None,
-            }
-        } else if contains_slice(prompt, b"search") {
-            match step {
-                0 => Some(b"[HostBridge] "),
-                1 => Some(b"Search: "),
-                2 => Some(b"intent registry "),
-                3 => Some(b"and document "),
-                4 => Some(b"index active."),
-                _ => None,
-            }
-        } else if contains_slice(prompt, b"status") {
-            match step {
-                0 => Some(b"[HostBridge] "),
-                1 => Some(b"Platform: "),
-                2 => Some(b"InterOS core "),
-                3 => Some(b"Ring-3 supervisor "),
-                4 => Some(b"online."),
-                _ => None,
-            }
-        } else {
-            match step {
-                0 => Some(b"[HostBridge] "),
-                1 => Some(b"Live stream "),
-                2 => Some(b"token chunk "),
-                3 => Some(b"received from "),
-                4 => Some(b"host runtime."),
-                _ => None,
-            }
-        }
+    pub fn stream_chunk(&self, _prompt: &[u8], _step: usize) -> StreamChunk {
+        StreamChunk::Unavailable("Host bridge stream unavailable: host inference runtime unbound.")
     }
 }
 
@@ -810,15 +781,8 @@ impl Provider for LocalGenerative {
 
 impl LocalGenerative {
     /// Queries the local generative model for the next incremental token chunk.
-    pub fn stream_chunk(&self, _prompt: &[u8], step: usize) -> Option<&'static [u8]> {
-        match step {
-            0 => Some(b"[Generative] "),
-            1 => Some(b"On-device "),
-            2 => Some(b"generative "),
-            3 => Some(b"token stream "),
-            4 => Some(b"completed."),
-            _ => None,
-        }
+    pub fn stream_chunk(&self, _prompt: &[u8], _step: usize) -> StreamChunk {
+        StreamChunk::Unavailable("On-device generative stream unavailable: no local model weights loaded.")
     }
 }
 
@@ -827,10 +791,11 @@ pub static HOST_BRIDGE: HostBridge = HostBridge;
 pub static LOCAL_GENERATIVE: LocalGenerative = LocalGenerative;
 
 /// Queries the host bridge or simulated generative model for the next streaming token chunk.
-pub fn query_streaming_chunk(prompt: &[u8], step: usize) -> Option<&'static [u8]> {
+pub fn query_streaming_chunk(prompt: &[u8], step: usize) -> StreamChunk {
     HOST_BRIDGE.stream_chunk(prompt, step)
 }
 
+#[allow(dead_code)]
 fn contains_slice(haystack: &[u8], needle: &[u8]) -> bool {
     if needle.is_empty() {
         return true;
@@ -898,6 +863,18 @@ impl ModelProbeStatus {
     }
 }
 
+/// The classification of a model candidate on the filesystem.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ModelClassification {
+    /// Genuine model weights meeting format and size requirements.
+    Weights,
+    /// A placeholder, empty file, sub-1 MiB stub, or invalid format.
+    Placeholder,
+}
+
+/// The minimum size (1 MiB) required for real model weights.
+pub const MIN_WEIGHTS_SIZE_BYTES: u64 = 1024 * 1024;
+
 /// A measurement of the model's weights on the device.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct ModelInventory {
@@ -905,6 +882,8 @@ pub struct ModelInventory {
     pub status: ModelProbeStatus,
     /// Number of entries the listing reported.
     pub entries: u16,
+    /// Number of placeholder entries detected.
+    pub placeholders: u16,
     /// Whether an embedding-weights file was among the entries.
     pub has_embedding_weights: bool,
     /// Whether a generative-weights file was among the entries.
@@ -912,28 +891,39 @@ pub struct ModelInventory {
 }
 
 impl ModelInventory {
+    /// Classifies a candidate by size and optional header bytes.
+    pub fn classify(name: &[u8], size: u64, header: Option<&[u8]>) -> ModelClassification {
+        if size < MIN_WEIGHTS_SIZE_BYTES {
+            return ModelClassification::Placeholder;
+        }
+        if contains_ci(name, b"gguf") {
+            match header {
+                Some(hdr) if hdr.len() >= 4 && &hdr[..4] == b"GGUF" => {}
+                _ => return ModelClassification::Placeholder,
+            }
+        }
+        ModelClassification::Weights
+    }
+
+    /// Classifies a candidate by size and header slice.
+    pub fn classify_slice(name: &[u8], size: u64, header: &[u8]) -> ModelClassification {
+        Self::classify(name, size, if header.is_empty() { None } else { Some(header) })
+    }
+
     /// Probes the device's model directory.
-    ///
-    /// WHY this is a listing and not a table: a catalogue that printed
-    /// "EmbeddingGemma 2 (740M Q7) -- Ready" had asked nothing. The answer
-    /// here comes from the device's own directory, and when the app cannot
-    /// ask, it says which of the three things happened.
     pub fn probe() -> Self {
-        // WHY the capability is asked for and not resolved: the kernel
-        // authorises a filesystem listing by the capability's *type*, so the
-        // app names the authority it wants and the kernel finds it. The
-        // lookup here is the yes/no question "does this app hold one at
-        // all?", and the answer decides whether to ask.
         if interos_std::cap_lookup(interos_std::cap_type::FILE_SYSTEM_READ, 0).is_err() {
             return Self {
                 status: ModelProbeStatus::NoAuthority,
                 entries: 0,
+                placeholders: 0,
                 has_embedding_weights: false,
                 has_generative_weights: false,
             };
         }
 
         let mut entries = 0u16;
+        let mut placeholders = 0u16;
         let mut has_embedding_weights = false;
         let mut has_generative_weights = false;
         let mut any_listed = false;
@@ -944,21 +934,53 @@ impl ModelInventory {
             match interos_std::fs_list(dir, &mut buf) {
                 Ok(n) => {
                     any_listed = true;
-                    // WHY the length is clamped: a syscall that reports more
-                    // bytes than the buffer holds must not be trusted to slice
-                    // it. Clamping here keeps a bad return value from turning
-                    // into a panic in the middle of a frame.
                     let payload = &buf[..n.min(buf.len())];
                     for line in payload.split(|&b| b == b'\n') {
                         if line.is_empty() {
                             continue;
                         }
-                        let end = line.iter().position(|&b| b == b'|').unwrap_or(line.len());
-                        let name = &line[..end];
-                        if name.is_empty() {
+                        let mut parts = line.split(|&b| b == b'|');
+                        let name = match parts.next() {
+                            Some(n) if !n.is_empty() => n,
+                            _ => continue,
+                        };
+                        let size = parts.next().and_then(parse_u64).unwrap_or(0);
+                        entries = entries.saturating_add(1);
+
+                        let mut full_path_buf = [0u8; 128];
+                        let mut pos = 0;
+                        for &b in dir.as_bytes() {
+                            if pos < full_path_buf.len() {
+                                full_path_buf[pos] = b;
+                                pos += 1;
+                            }
+                        }
+                        if pos < full_path_buf.len() && !dir.ends_with('/') {
+                            full_path_buf[pos] = b'/';
+                            pos += 1;
+                        }
+                        for &b in name {
+                            if pos < full_path_buf.len() {
+                                full_path_buf[pos] = b;
+                                pos += 1;
+                            }
+                        }
+                        let mut header_buf = [0u8; 4];
+                        let mut header_opt = None;
+                        if let Ok(full_path_str) = core::str::from_utf8(&full_path_buf[..pos]) {
+                            if let Ok(fd) = interos_std::fs_open(full_path_str, 1) {
+                                if let Ok(n_read) = interos_std::fs_read(fd, &mut header_buf) {
+                                    header_opt = Some(&header_buf[..n_read]);
+                                }
+                                let _ = interos_std::fs_close(fd);
+                            }
+                        }
+
+                        let classification = Self::classify(name, size, header_opt);
+                        if classification == ModelClassification::Placeholder {
+                            placeholders = placeholders.saturating_add(1);
                             continue;
                         }
-                        entries = entries.saturating_add(1);
 
                         if contains_ci(name, b"embed") {
                             has_embedding_weights = true;
@@ -987,10 +1009,26 @@ impl ModelInventory {
         Self {
             status,
             entries,
+            placeholders,
             has_embedding_weights,
             has_generative_weights,
         }
     }
+}
+
+fn parse_u64(bytes: &[u8]) -> Option<u64> {
+    if bytes.is_empty() {
+        return None;
+    }
+    let mut val = 0u64;
+    for &b in bytes {
+        if b >= b'0' && b <= b'9' {
+            val = val.checked_mul(10)?.checked_add((b - b'0') as u64)?;
+        } else {
+            return None;
+        }
+    }
+    Some(val)
 }
 
 /// Whether `haystack` contains `needle`, ignoring ASCII case.
@@ -2275,6 +2313,7 @@ mod tests {
                 models: ModelInventory {
                     status: ModelProbeStatus::Listed,
                     entries: 0,
+                    placeholders: 0,
                     has_embedding_weights: false,
                     has_generative_weights: false,
                 },
@@ -2346,6 +2385,7 @@ mod tests {
             models: ModelInventory {
                 status: ModelProbeStatus::Listed,
                 entries: 3,
+                placeholders: 0,
                 has_embedding_weights: false,
                 has_generative_weights: false,
             },
@@ -2388,6 +2428,7 @@ mod tests {
             models: ModelInventory {
                 status: ModelProbeStatus::Listed,
                 entries: 1,
+                placeholders: 0,
                 has_embedding_weights: true,
                 has_generative_weights: true,
             },
@@ -2427,6 +2468,7 @@ mod tests {
             models: ModelInventory {
                 status: ModelProbeStatus::Refused,
                 entries: 0,
+                placeholders: 0,
                 has_embedding_weights: false,
                 has_generative_weights: false,
             },
@@ -2470,6 +2512,7 @@ mod tests {
             models: ModelInventory {
                 status: ModelProbeStatus::Absent,
                 entries: 0,
+                placeholders: 0,
                 has_embedding_weights: false,
                 has_generative_weights: false,
             },
@@ -2669,38 +2712,47 @@ mod tests {
         assert!(chat.is_streaming);
         assert_eq!(chat.stream_prompt_text(), b"status");
 
-        let mut step = 0;
-        while let Some(chunk) = query_streaming_chunk(chat.stream_prompt_text(), step) {
-            if step == 0 {
-                chat.push(ChatRole::Assistant, chunk);
-            } else {
-                let appended = chat.append_chunk(chunk);
-                assert!(appended > 0);
+        let step = 0;
+        let chunk = query_streaming_chunk(chat.stream_prompt_text(), step);
+        match chunk {
+            StreamChunk::Unavailable(reason) => {
+                chat.push(ChatRole::Notice, reason.as_bytes());
+                chat.finish_stream();
             }
-            step += 1;
+            _ => panic!("expected unavailable stream chunk"),
         }
-        chat.finish_stream();
         assert!(!chat.is_streaming);
-        assert_eq!(step, 5);
 
         let last = chat.last_message().expect("last message present");
-        assert_eq!(last.role, ChatRole::Assistant);
+        assert_eq!(last.role, ChatRole::Notice);
         let text = core::str::from_utf8(&last.text[..last.text_len as usize]).unwrap();
-        assert!(text.contains("[HostBridge]"));
-        assert!(text.contains("Platform:"));
+        assert!(text.contains("Host bridge stream unavailable"));
     }
 
     #[test]
     fn the_host_bridge_streams_tokens_for_different_prompts() {
-        let step0 = HOST_BRIDGE.stream_chunk(b"query model catalog", 0);
-        assert_eq!(step0, Some(&b"[HostBridge] "[..]));
-        let step1 = HOST_BRIDGE.stream_chunk(b"query model catalog", 1);
-        assert_eq!(step1, Some(&b"Models: "[..]));
+        let chunk = HOST_BRIDGE.stream_chunk(b"query model catalog", 0);
+        match chunk {
+            StreamChunk::Unavailable(reason) => {
+                assert!(reason.contains("Host bridge stream unavailable"));
+            }
+            _ => panic!("expected unavailable stream chunk"),
+        }
+    }
 
-        let search0 = HOST_BRIDGE.stream_chunk(b"search files", 1);
-        assert_eq!(search0, Some(&b"Search: "[..]));
-
-        let default0 = HOST_BRIDGE.stream_chunk(b"arbitrary text", 1);
-        assert_eq!(default0, Some(&b"Live stream "[..]));
+    #[test]
+    fn model_inventory_classifies_sub_megabyte_or_invalid_gguf_as_placeholder() {
+        assert_eq!(
+            ModelInventory::classify(b"model.bin", 500 * 1024, None),
+            ModelClassification::Placeholder
+        );
+        assert_eq!(
+            ModelInventory::classify(b"model.gguf", 10 * 1024 * 1024, Some(b"BAD!")),
+            ModelClassification::Placeholder
+        );
+        assert_eq!(
+            ModelInventory::classify(b"model.gguf", 10 * 1024 * 1024, Some(b"GGUF")),
+            ModelClassification::Weights
+        );
     }
 }

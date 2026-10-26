@@ -119,6 +119,16 @@ pub enum CapabilityType {
     MemoryHeap,
     /// Permission to spawn execution threads and manage thread-local storage ("process.threads").
     ProcessThreads,
+    /// Permission to communicate with on-device AI inference service (`aid`).
+    InferenceService,
+    /// Permission to query the system semantic search service.
+    SearchService,
+    /// Permission to execute and manage agentic autonomous tasks.
+    AgentTask,
+    /// Permission to communicate with the voice assistant and speech service.
+    VoiceService,
+    /// Permission to capture live microphone audio.
+    AudioCapture,
 }
 
 /// Convenience alias matching system architecture specifications.
@@ -152,6 +162,11 @@ impl CapabilityType {
             CapabilityType::AudioStream => 28,
             CapabilityType::MemoryHeap => 29,
             CapabilityType::ProcessThreads => 30,
+            CapabilityType::InferenceService => 31,
+            CapabilityType::SearchService => 32,
+            CapabilityType::AgentTask => 33,
+            CapabilityType::VoiceService => 34,
+            CapabilityType::AudioCapture => 35,
         }
     }
 
@@ -182,6 +197,11 @@ impl CapabilityType {
             28 => Some(CapabilityType::AudioStream),
             29 => Some(CapabilityType::MemoryHeap),
             30 => Some(CapabilityType::ProcessThreads),
+            31 => Some(CapabilityType::InferenceService),
+            32 => Some(CapabilityType::SearchService),
+            33 => Some(CapabilityType::AgentTask),
+            34 => Some(CapabilityType::VoiceService),
+            35 => Some(CapabilityType::AudioCapture),
             _ => None,
         }
     }
@@ -214,6 +234,11 @@ impl CapabilityType {
             CapabilityType::AudioStream => "audio.stream",
             CapabilityType::MemoryHeap => "memory.heap",
             CapabilityType::ProcessThreads => "process.threads",
+            CapabilityType::InferenceService => "ai.inference",
+            CapabilityType::SearchService => "search.service",
+            CapabilityType::AgentTask => "agent.task",
+            CapabilityType::VoiceService => "voice.service",
+            CapabilityType::AudioCapture => "audio.capture",
         }
     }
 
@@ -245,6 +270,11 @@ impl CapabilityType {
             "audio.stream" => Some(CapabilityType::AudioStream),
             "memory.heap" => Some(CapabilityType::MemoryHeap),
             "process.threads" => Some(CapabilityType::ProcessThreads),
+            "ai.inference" => Some(CapabilityType::InferenceService),
+            "search.service" => Some(CapabilityType::SearchService),
+            "agent.task" => Some(CapabilityType::AgentTask),
+            "voice.service" => Some(CapabilityType::VoiceService),
+            "audio.capture" => Some(CapabilityType::AudioCapture),
             _ => None,
         }
     }
@@ -1613,12 +1643,13 @@ mod tests {
     fn capability_type_raw_encoding_roundtrips() {
         for val in [
             1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 24, 25, 26, 27, 28, 29, 30,
+            31, 32, 33, 34, 35,
         ] {
             let cap_type = CapabilityType::from_raw(val).expect("valid capability type");
             assert_eq!(cap_type.to_raw(), val);
         }
         assert_eq!(CapabilityType::from_raw(0), None);
-        for invalid in [19, 20, 21, 22, 23, 31, 999] {
+        for invalid in [19, 20, 21, 22, 23, 36, 999] {
             assert_eq!(CapabilityType::from_raw(invalid), None);
         }
         assert_eq!(CapabilityType::MemoryHeap.as_str(), "memory.heap");

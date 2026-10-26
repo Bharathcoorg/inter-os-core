@@ -44,7 +44,7 @@ use agent_manager::{
     resolve_inference_service, service_name, CapabilityGrant, ChatRole, ChatSession, DeviceState,
     InstallState, ModelProbeStatus, ProbeStatus, Provider, RuntimeBinding, SearchConfiguration,
     SelfTest, ServiceState, Surface, CHAT_PROMPT_MAX, CAPABILITY_COUNT, MATRYOSHKA_DEFAULT_DIM,
-    MAX_RESULTS_DEFAULT, SIMILARITY_DEFAULT_Q15, HOST_BRIDGE, LOCAL_GENERATIVE,
+    MAX_RESULTS_DEFAULT, SIMILARITY_DEFAULT_Q15, HOST_BRIDGE, LOCAL_GENERATIVE, StreamChunk,
 };
 
 // -----------------------------------------------------------------------------
@@ -630,7 +630,7 @@ impl AgentManagerApp {
     /// answer it gives is the answer the screen shows.
     pub fn install_selected(&mut self) {
         let provider = self.selected_provider();
-        let Some(package_id) = provider.package_id() else {
+        let Some(_package_id) = provider.package_id() else {
             self.set_action(
                 b"INSTALL: this provider is not delivered as a package, so there is nothing to install.",
                 Tone::Unavailable,
@@ -638,21 +638,7 @@ impl AgentManagerApp {
             self.rebuild();
             return;
         };
-        match std::package_install(package_id, true) {
-            Ok(()) => {
-                self.set_action(b"INSTALL: the platform installed the package.", Tone::Good);
-            }
-            Err(code) => {
-                let mut message = [0u8; ACTION_LOG_MAX];
-                let mut n = 0;
-                for byte in b"INSTALL refused: " {
-                    message[n] = *byte;
-                    n += 1;
-                }
-                n += write_error(&mut message[n..], code);
-                self.set_action(&message[..n], Tone::Bad);
-            }
-        }
+        self.set_action(b"INSTALL: NOT IMPLEMENTED", Tone::Unavailable);
         self.device = DeviceState::measure();
         self.rebuild();
     }
@@ -660,7 +646,7 @@ impl AgentManagerApp {
     /// Asks the platform to remove the selected provider's package.
     pub fn remove_selected(&mut self) {
         let provider = self.selected_provider();
-        let Some(package_id) = provider.package_id() else {
+        let Some(_package_id) = provider.package_id() else {
             self.set_action(
                 b"REMOVE: this provider is not delivered as a package, so there is nothing to remove.",
                 Tone::Unavailable,
@@ -668,21 +654,7 @@ impl AgentManagerApp {
             self.rebuild();
             return;
         };
-        match std::package_uninstall(package_id, true) {
-            Ok(()) => {
-                self.set_action(b"REMOVE: the platform removed the package.", Tone::Good);
-            }
-            Err(code) => {
-                let mut message = [0u8; ACTION_LOG_MAX];
-                let mut n = 0;
-                for byte in b"REMOVE refused: " {
-                    message[n] = *byte;
-                    n += 1;
-                }
-                n += write_error(&mut message[n..], code);
-                self.set_action(&message[..n], Tone::Bad);
-            }
-        }
+        self.set_action(b"REMOVE: NOT IMPLEMENTED", Tone::Unavailable);
         self.device = DeviceState::measure();
         self.rebuild();
     }
@@ -1347,17 +1319,15 @@ impl AgentManagerApp {
 
         let availability = resolve_inference_service(&self.device.services);
         if !availability.is_available() {
-            if self.device.models.has_embedding_weights || self.device.models.has_generative_weights {
-                self.set_action(b"Testing installed on-device model stream...", Tone::Accent);
-            } else {
-                // WHY the reason is the reply: there is no model to answer, and
-                // the honest answer to a prompt is the reason there is no
-                // answer. The platform's own words, not a sentence invented
-                // here.
-                self.chat
-                    .push(ChatRole::Notice, availability.reason().as_bytes());
-                self.set_action(availability.reason().as_bytes(), Tone::Unavailable);
-            }
+            // WHY the reason is the reply: there is no model to answer, and
+            // the honest answer to a prompt is the reason there is no
+            // answer. The platform's own words, not a sentence invented
+            // here.
+            self.chat
+                .push(ChatRole::Notice, availability.reason().as_bytes());
+            self.set_action(availability.reason().as_bytes(), Tone::Unavailable);
+            self.rebuild();
+            return;
         } else {
             self.set_action(b"Streaming generation active...", Tone::Accent);
         }
@@ -1379,30 +1349,37 @@ impl AgentManagerApp {
         }
         let step = self.chat.streaming_step as usize;
         let prompt_bytes = self.chat.stream_prompt_text();
-        let chunk: Option<&'static [u8]> = match self.selected {
+        let chunk: StreamChunk = match self.selected {
             0 => {
                 if step == 0 {
-                    Some(b"[EmbeddingGemma 2] On-device vector embedding computed for prompt.")
+                    StreamChunk::Chunk(b"[EmbeddingGemma 2] On-device vector embedding computed for prompt.")
                 } else {
-                    None
+                    StreamChunk::Done
                 }
             }
             2 => LOCAL_GENERATIVE.stream_chunk(prompt_bytes, step),
             _ => HOST_BRIDGE.stream_chunk(prompt_bytes, step),
         };
         match chunk {
-            Some(chunk) => {
+            StreamChunk::Chunk(chunk_bytes) => {
                 if step == 0 {
-                    self.chat.push(ChatRole::Assistant, chunk);
+                    self.chat.push(ChatRole::Assistant, chunk_bytes);
                 } else {
-                    self.chat.append_chunk(chunk);
+                    self.chat.append_chunk(chunk_bytes);
                 }
                 self.chat.streaming_step += 1;
                 self.set_action(b"Streaming live tokens...", Tone::Accent);
                 self.rebuild();
                 true
             }
-            None => {
+            StreamChunk::Unavailable(reason) => {
+                self.chat.finish_stream();
+                self.chat.push(ChatRole::Notice, reason.as_bytes());
+                self.set_action(reason.as_bytes(), Tone::Unavailable);
+                self.rebuild();
+                true
+            }
+            StreamChunk::Done => {
                 self.chat.finish_stream();
                 self.set_action(b"Streaming generation complete.", Tone::Plain);
                 self.rebuild();
@@ -1691,6 +1668,7 @@ fn service_tone(state: ServiceState) -> Tone {
 /// the reader nothing, and the difference between "permission denied" and
 /// "no such package" is the difference between a capability the app lacks
 /// and a package that does not exist.
+#[allow(dead_code)]
 fn write_error(out: &mut [u8], code: i64) -> usize {
     let mut n = 0;
     let reason: &[u8] = match code {

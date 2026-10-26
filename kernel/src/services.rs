@@ -24,6 +24,10 @@ pub enum ServiceId {
     Compositor = 9,
     Launcher = 10,
     Sensor = 11,
+    Inference = 12,
+    Search = 13,
+    Agent = 14,
+    Voice = 15,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,6 +69,9 @@ pub fn descriptor(id: ServiceId) -> ServiceDescriptor {
         ServiceId::Compositor => ServiceDescriptor { id, abi_version: SERVICE_ABI_VERSION, restart: RestartPolicy::OnFailure, critical: true, dependencies: UI_DEPS },
         ServiceId::Launcher => ServiceDescriptor { id, abi_version: SERVICE_ABI_VERSION, restart: RestartPolicy::OnFailure, critical: true, dependencies: LAUNCHER_DEPS },
         ServiceId::Sensor => ServiceDescriptor { id, abi_version: SERVICE_ABI_VERSION, restart: RestartPolicy::OnFailure, critical: false, dependencies: &[ServiceId::Power] },
+        ServiceId::Inference | ServiceId::Search | ServiceId::Agent | ServiceId::Voice => {
+            ServiceDescriptor { id, abi_version: SERVICE_ABI_VERSION, restart: RestartPolicy::OnFailure, critical: false, dependencies: NO_DEPS }
+        }
     }
 }
 
@@ -150,6 +157,28 @@ pub fn capability_policy(id: ServiceId, parent_id: TaskId) -> Result<Vec<Service
         }
         ServiceId::Camera => policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::SystemControl, rights: Rights::INVOKE, object_id: SERVICE_CAMERA_CONTROL_OBJECT }),
         ServiceId::Sensor => policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::SystemControl, rights: Rights::INVOKE, object_id: SERVICE_SENSOR_CONTROL_OBJECT }),
+        ServiceId::Inference => {
+            policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::FileSystemRead, rights: Rights::READ, object_id: 0 });
+            policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::IpcSend, rights: Rights::WRITE, object_id: 0 });
+            policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::InferenceService, rights: Rights::READ | Rights::WRITE | Rights::INVOKE, object_id: 0 });
+        }
+        ServiceId::Search => {
+            policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::FileSystemRead, rights: Rights::READ, object_id: 0 });
+            policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::ContentIndexRead, rights: Rights::READ, object_id: 0 });
+            policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::IpcSend, rights: Rights::WRITE, object_id: 0 });
+            policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::SearchService, rights: Rights::READ | Rights::WRITE | Rights::INVOKE, object_id: 0 });
+        }
+        ServiceId::Agent => {
+            policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::FileSystemRead, rights: Rights::READ, object_id: 0 });
+            policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::IpcSend, rights: Rights::WRITE, object_id: 0 });
+            policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::AgentTask, rights: Rights::READ | Rights::WRITE | Rights::INVOKE, object_id: 0 });
+        }
+        ServiceId::Voice => {
+            policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::AudioStream, rights: Rights::READ | Rights::WRITE, object_id: 0 });
+            policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::AudioCapture, rights: Rights::READ | Rights::INVOKE, object_id: 0 });
+            policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::IpcSend, rights: Rights::WRITE, object_id: 0 });
+            policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::VoiceService, rights: Rights::READ | Rights::WRITE | Rights::INVOKE, object_id: 0 });
+        }
         ServiceId::Input => {}
         ServiceId::Init => return Err("init does not use userspace service capability policy"),
     }
@@ -167,7 +196,7 @@ pub struct ServiceInfo { pub id: ServiceId, pub abi_version: u16, pub state: Ser
 #[derive(Debug, Clone, Copy)]
 pub struct ServiceRecord { pub id: ServiceId, pub task: TaskId, pub state: ServiceState, pub generation: u32 }
 
-pub static SERVICE_RECORDS: crate::sync::Mutex<[Option<ServiceRecord>; 12]> = crate::sync::Mutex::new([None; 12]);
+pub static SERVICE_RECORDS: crate::sync::Mutex<[Option<ServiceRecord>; 16]> = crate::sync::Mutex::new([None; 16]);
 
 /// Locking convention for this registry (read before adding a blocking call).
 ///
@@ -194,17 +223,21 @@ pub fn is_contention(reason: &'static str) -> bool {
     )
 }
 const SERVICE_RESTART_BACKOFF_TICKS: u64 = 1000;
-static SERVICE_HEARTBEATS: [core::sync::atomic::AtomicU64; 12] = [
+static SERVICE_HEARTBEATS: [core::sync::atomic::AtomicU64; 16] = [
     core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
     core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
     core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
     core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
 ];
-static SERVICE_FAILURES: [core::sync::atomic::AtomicU64; 12] = [
+static SERVICE_FAILURES: [core::sync::atomic::AtomicU64; 16] = [
     core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
     core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
     core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
     core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
 ];
 static SERVICES_INITIALIZED: AtomicBool = AtomicBool::new(false);
 // Serializes lifecycle transitions so start/stop/recovery cannot observe and mutate
@@ -212,17 +245,21 @@ static SERVICES_INITIALIZED: AtomicBool = AtomicBool::new(false);
 // boundary; callers never hold the lifecycle lock across context switches.
 static SERVICE_LIFECYCLE_LOCK: crate::sync::Mutex<()> = crate::sync::Mutex::new(());
 // Restart backoff prevents a failed service from consuming the scheduler in a crash loop.
-static SERVICE_STARTED_AT: [core::sync::atomic::AtomicU64; 12] = [
+static SERVICE_STARTED_AT: [core::sync::atomic::AtomicU64; 16] = [
     core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
     core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
     core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
     core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
 ];
-static SERVICE_RETRY_AFTER: [core::sync::atomic::AtomicU64; 12] = [
+static SERVICE_RETRY_AFTER: [core::sync::atomic::AtomicU64; 16] = [
     core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
     core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
     core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
     core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
 ];
 
 /// Registers the system-service set. PID1 owns process creation and lifecycle.
@@ -278,6 +315,13 @@ pub fn resource_limits(id: ServiceId) -> ResourceLimits {
             max_threads: 8,
             max_open_files: 64,
             max_ipc_endpoints: 48,
+            max_address_space_bytes: 64 * 1024 * 1024,
+            ..ResourceLimits::default()
+        },
+        ServiceId::Inference => ResourceLimits {
+            max_threads: 4,
+            max_open_files: 32,
+            max_ipc_endpoints: 32,
             max_address_space_bytes: 64 * 1024 * 1024,
             ..ResourceLimits::default()
         },
@@ -498,7 +542,25 @@ pub fn info(id: ServiceId) -> Option<ServiceInfo> {
 }
 
 pub fn lookup(service_id: u8) -> Option<ServiceInfo> {
-    let id = match service_id { 0 => ServiceId::Init, 1 => ServiceId::Display, 2 => ServiceId::Input, 3 => ServiceId::Storage, 4 => ServiceId::Network, 5 => ServiceId::Power, 6 => ServiceId::Modem, 7 => ServiceId::Audio, 8 => ServiceId::Camera, 9 => ServiceId::Compositor, 10 => ServiceId::Launcher, 11 => ServiceId::Sensor, _ => return None };
+    let id = match service_id {
+        0 => ServiceId::Init,
+        1 => ServiceId::Display,
+        2 => ServiceId::Input,
+        3 => ServiceId::Storage,
+        4 => ServiceId::Network,
+        5 => ServiceId::Power,
+        6 => ServiceId::Modem,
+        7 => ServiceId::Audio,
+        8 => ServiceId::Camera,
+        9 => ServiceId::Compositor,
+        10 => ServiceId::Launcher,
+        11 => ServiceId::Sensor,
+        12 => ServiceId::Inference,
+        13 => ServiceId::Search,
+        14 => ServiceId::Agent,
+        15 => ServiceId::Voice,
+        _ => return None,
+    };
     info(id)
 }
 
@@ -537,7 +599,7 @@ pub fn supervise() {
         None => return,
     };
     sched.reap_orphans();
-    let mut states = [None; 12];
+    let mut states = [None; 16];
     let records = match SERVICE_RECORDS.try_lock() {
         Some(guard) => *guard,
         None => return,
@@ -611,7 +673,7 @@ pub fn snapshot(out: &mut [u8]) -> usize {
         }
     }
     let mut w = W { b: out, n: 0 };
-    for id in 0u8..=11u8 {
+    for id in 0u8..=15u8 {
         if let Some(info) = lookup(id) {
             let state = match info.state { ServiceState::Declared => "declared", ServiceState::Starting => "starting", ServiceState::Running => "running", ServiceState::Stopped => "stopped", ServiceState::Failed => "failed" };
             let age = crate::interrupts::get_system_ticks().saturating_sub(last_heartbeat(info.id));
@@ -748,6 +810,10 @@ mod tests {
             ServiceId::Camera,
             ServiceId::Compositor,
             ServiceId::Sensor,
+            ServiceId::Inference,
+            ServiceId::Search,
+            ServiceId::Agent,
+            ServiceId::Voice,
         ] {
             let Ok(policy) = capability_policy(id, TaskId(1)) else {
                 continue;

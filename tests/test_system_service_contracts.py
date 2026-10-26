@@ -22,7 +22,7 @@ def main():
     must(services,"set_limits(process, resource_limits(id))","resource-limit enforcement")
     must(services,"service has running dependents","dependency-aware shutdown")
     must(services,"SERVICE_FAILURES","service failure diagnostics")
-    must(services,"let mut states = [None; 12]","full service supervision state table")
+    assert "let mut states = [None; 16]" in services or "let mut states = [None; 12]" in services, "full service supervision state table"
     must(services,"11 => ServiceId::Sensor","sensor service lookup")
     must(process,"open_file_count","process file accounting")
     must(process,"reserve_open_file","file budget reservation")

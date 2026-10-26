@@ -222,10 +222,12 @@ impl MobileShell {
                     self.touch_count = self.touch_count.saturating_add(1);
                     if modal.hit_test_allow(x, y) {
                         self.active_modal = None;
+                        let _ = crate::syscall::sys_consent_resolve(modal.request_id, 1);
                         self.last_dispatched_intent = "PERMISSION_GRANTED";
                         return Some("PERMISSION_GRANTED");
                     } else if modal.hit_test_deny(x, y) {
                         self.active_modal = None;
+                        let _ = crate::syscall::sys_consent_resolve(modal.request_id, 2);
                         self.last_dispatched_intent = "PERMISSION_DENIED";
                         return Some("PERMISSION_DENIED");
                     } else if modal.hit_test_modal(x, y) {
@@ -237,10 +239,12 @@ impl MobileShell {
                     self.touch_count = self.touch_count.saturating_add(1);
                     if modal.hit_test_allow(touch.x, touch.y) {
                         self.active_modal = None;
+                        let _ = crate::syscall::sys_consent_resolve(modal.request_id, 1);
                         self.last_dispatched_intent = "PERMISSION_GRANTED";
                         return Some("PERMISSION_GRANTED");
                     } else if modal.hit_test_deny(touch.x, touch.y) {
                         self.active_modal = None;
+                        let _ = crate::syscall::sys_consent_resolve(modal.request_id, 2);
                         self.last_dispatched_intent = "PERMISSION_DENIED";
                         return Some("PERMISSION_DENIED");
                     } else if modal.hit_test_modal(touch.x, touch.y) {

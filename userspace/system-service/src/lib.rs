@@ -294,7 +294,7 @@ pub fn run_wasm() -> ! {
 
 /// AI & Embedding inference service daemon execution path (`aid`).
 ///
-/// Designated as service id 13 (`SERVICE_INFERENCE`) in the system service ABI.
+/// Designated as service id 12 (`SERVICE_INFERENCE`) in the system service ABI.
 /// Handles on-device embedding queries and vector similarity calculation requests.
 /// Respects the Platform Truth Contract: if physical model weights in `/system/models`
 /// or NPU acceleration are absent, reports unavailable honestly over IPC.
