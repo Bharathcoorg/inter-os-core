@@ -326,10 +326,11 @@ fn accepts_input_in_small_arbitrary_chunks() {
 
 #[test]
 fn zz_debug_dump_pcm() {
-    for (name, out) in [
-        ("tone_44100_mono_64k.mp3", "C:/tmp/ours_mono.raw"),
-        ("tone_44100_stereo_128k.mp3", "C:/tmp/ours_stereo.raw"),
-        ("reservoir_44100_stereo_32k.mp3", "C:/tmp/ours_res.raw"),
+    let temp_dir = std::env::temp_dir();
+    for (name, out_name) in [
+        ("tone_44100_mono_64k.mp3", "interos_ours_mono.raw"),
+        ("tone_44100_stereo_128k.mp3", "interos_ours_stereo.raw"),
+        ("reservoir_44100_stereo_32k.mp3", "interos_ours_res.raw"),
     ] {
         let data = fixture(name);
         let decoded = decode(&data).expect("decode");
@@ -337,7 +338,8 @@ fn zz_debug_dump_pcm() {
         for v in &decoded.pcm {
             bytes.extend_from_slice(&v.to_le_bytes());
         }
-        std::fs::write(out, &bytes).unwrap();
+        let out = temp_dir.join(out_name);
+        let _ = std::fs::write(out, &bytes);
         let levels = decoded.frame_rms(0, decoded.frames);
         println!("{name}: frames={} pcm={} levels={:?}", decoded.frames, decoded.pcm.len(), levels);
     }
