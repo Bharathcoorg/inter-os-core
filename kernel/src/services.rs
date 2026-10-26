@@ -159,8 +159,10 @@ pub fn capability_policy(id: ServiceId, parent_id: TaskId) -> Result<Vec<Service
         ServiceId::Sensor => policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::SystemControl, rights: Rights::INVOKE, object_id: SERVICE_SENSOR_CONTROL_OBJECT }),
         ServiceId::Inference => {
             policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::FileSystemRead, rights: Rights::READ, object_id: 0 });
+            policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::FileSystemWrite, rights: Rights::WRITE, object_id: 0 });
             policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::IpcSend, rights: Rights::WRITE, object_id: 0 });
             policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::InferenceService, rights: Rights::READ | Rights::WRITE | Rights::INVOKE, object_id: 0 });
+            policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::MemoryHeap, rights: Rights::READ | Rights::WRITE | Rights::INVOKE, object_id: 0 });
         }
         ServiceId::Search => {
             policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::FileSystemRead, rights: Rights::READ, object_id: 0 });
@@ -322,7 +324,7 @@ pub fn resource_limits(id: ServiceId) -> ResourceLimits {
             max_threads: 4,
             max_open_files: 32,
             max_ipc_endpoints: 32,
-            max_address_space_bytes: 64 * 1024 * 1024,
+            max_address_space_bytes: 2048 * 1024 * 1024,
             ..ResourceLimits::default()
         },
         _ => ResourceLimits {

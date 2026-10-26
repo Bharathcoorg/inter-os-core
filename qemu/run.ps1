@@ -23,7 +23,10 @@ Write-Host "QEMU:  $qemuBin"
 
 $qemuArgs = @(
     "-machine", "q35",
+    "-accel", "whpx,kernel-irqchip=off",
+    "-accel", "tcg",
     "-cpu", "qemu64",
+    "-smp", "4",
     # q35's default controller is AHCI, and the guest's legacy PIO ATA driver
     # only probes 0x1F0/0x3F6. A bare `index=0/1` lands on an AHCI port, so the
     # guest finds no disk and every persistent write is refused. Attaching a
@@ -34,7 +37,7 @@ $qemuArgs = @(
     "-device", "ide-hd,bus=ide.0,unit=0,drive=bootd,bootindex=1",
     "-drive", "format=raw,file=$dataPath,if=none,id=datad",
     "-device", "ide-hd,bus=ide.0,unit=1,drive=datad",
-    "-m", "1024M",
+    "-m", "4096M",
     "-serial", "stdio",
     "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"
 )
@@ -45,8 +48,8 @@ $qemuArgs = @(
 # embedded in, so every boot after the first runs a corrupted kernel.
 if (-not (Test-Path $dataPath)) {
     $qemuImg = Resolve-QemuPath "qemu-img.exe"
-    & $qemuImg create -f raw $dataPath 512M | Out-Null
-    Write-Host "Created data disk: $dataPath" -ForegroundColor DarkGray
+    & $qemuImg create -f raw $dataPath 6G | Out-Null
+    Write-Host "Created data disk: $dataPath (6GB)" -ForegroundColor DarkGray
 }
 
 if ($NoDisplay) {
