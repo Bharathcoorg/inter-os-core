@@ -39,6 +39,108 @@ pub enum GgufError {
     NoModelsFound,
     /// Metadata corruption or unparseable value type.
     InvalidMetadata,
+    /// Arithmetic overflow in checked dimension or offset calculations.
+    ArithmeticOverflow,
+    /// Tensor descriptor or block data structure corruption.
+    CorruptedTensor,
+}
+
+/// Bounded sequential GGUF data stream reader (zero heap allocation).
+///
+/// Supports reading from either an in-memory byte slice or a streaming file descriptor
+/// with sequential chunk buffering, enabling bounded parsing of arbitrarily large models
+/// without consuming unbounded memory.
+pub enum GgufStream<'a> {
+    Slice { data: &'a [u8], pos: usize },
+    File { fd: u32, pos: usize },
+}
+
+impl<'a> GgufStream<'a> {
+    pub fn from_slice(data: &'a [u8]) -> Self {
+        Self::Slice { data, pos: 0 }
+    }
+
+    pub fn from_file(fd: u32) -> Self {
+        Self::File { fd, pos: 0 }
+    }
+
+    pub fn position(&self) -> usize {
+        match self {
+            Self::Slice { pos, .. } => *pos,
+            Self::File { pos, .. } => *pos,
+        }
+    }
+
+    pub fn read_exact(&mut self, out: &mut [u8]) -> Result<(), GgufError> {
+        let req_len = out.len();
+        if req_len == 0 {
+            return Ok(());
+        }
+        match self {
+            Self::Slice { data, pos } => {
+                let next_pos = pos.checked_add(req_len).ok_or(GgufError::BufferTooShort)?;
+                if next_pos > data.len() {
+                    return Err(GgufError::BufferTooShort);
+                }
+                out.copy_from_slice(&data[*pos..next_pos]);
+                *pos = next_pos;
+                Ok(())
+            }
+            Self::File { fd, pos } => {
+                let mut filled = 0usize;
+                while filled < req_len {
+                    let n = std::fs_read(*fd, &mut out[filled..]).map_err(|_| GgufError::ReadFailed)?;
+                    if n == 0 {
+                        return Err(GgufError::BufferTooShort);
+                    }
+                    filled = filled.checked_add(n).ok_or(GgufError::ArithmeticOverflow)?;
+                }
+                *pos = pos.checked_add(req_len).ok_or(GgufError::ArithmeticOverflow)?;
+                Ok(())
+            }
+        }
+    }
+
+    pub fn skip(&mut self, mut count: usize) -> Result<(), GgufError> {
+        if count == 0 {
+            return Ok(());
+        }
+        match self {
+            Self::Slice { data, pos } => {
+                let next_pos = pos.checked_add(count).ok_or(GgufError::BufferTooShort)?;
+                if next_pos > data.len() {
+                    return Err(GgufError::BufferTooShort);
+                }
+                *pos = next_pos;
+                Ok(())
+            }
+            Self::File { fd, pos } => {
+                let mut scratch = [0u8; 512];
+                while count > 0 {
+                    let chunk = count.min(scratch.len());
+                    let n = std::fs_read(*fd, &mut scratch[..chunk]).map_err(|_| GgufError::ReadFailed)?;
+                    if n == 0 {
+                        return Err(GgufError::BufferTooShort);
+                    }
+                    count = count.checked_sub(n).ok_or(GgufError::ArithmeticOverflow)?;
+                    *pos = pos.checked_add(n).ok_or(GgufError::ArithmeticOverflow)?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    pub fn read_u32(&mut self) -> Result<u32, GgufError> {
+        let mut b = [0u8; 4];
+        self.read_exact(&mut b)?;
+        Ok(u32::from_le_bytes(b))
+    }
+
+    pub fn read_u64(&mut self) -> Result<u64, GgufError> {
+        let mut b = [0u8; 8];
+        self.read_exact(&mut b)?;
+        Ok(u64::from_le_bytes(b))
+    }
 }
 
 /// GGUF file header prefix representation (24 bytes).
@@ -62,6 +164,13 @@ impl GgufHeader {
     /// - tensor_count: 8 bytes
     /// - kv_count: 8 bytes
     pub const HEADER_SIZE: usize = 24;
+
+    /// Parses a GGUF header prefix from a streaming reader.
+    pub fn parse_stream(stream: &mut GgufStream) -> Result<Self, GgufError> {
+        let mut buf = [0u8; Self::HEADER_SIZE];
+        stream.read_exact(&mut buf)?;
+        Self::parse(&buf)
+    }
 
     /// Parses a GGUF header prefix from a contiguous byte buffer.
     ///
@@ -389,14 +498,101 @@ pub fn parse_tensor_info(buf: &[u8], offset: &mut usize) -> Result<GgufTensorInf
     Ok(info)
 }
 
-/// Scans a GGUF byte buffer for a tensor by exact name without allocating.
-pub fn find_tensor(buf: &[u8], target_name: &[u8]) -> Result<Option<GgufTensorInfo>, GgufError> {
-    let header = GgufHeader::parse(buf)?;
-    let mut offset = GgufHeader::HEADER_SIZE;
-    skip_all_kv_pairs(buf, &mut offset, header.kv_count)?;
+/// Zero-allocation helper to skip a single metadata value in a streaming GGUF reader.
+pub fn skip_metadata_value_stream(stream: &mut GgufStream, val_type: u32) -> Result<(), GgufError> {
+    match val_type {
+        0 | 1 | 7 => stream.skip(1), // Uint8, Int8, Bool: 1 byte
+        2 | 3 => stream.skip(2),     // Uint16, Int16: 2 bytes
+        4 | 5 | 6 => stream.skip(4), // Uint32, Int32, Float32: 4 bytes
+        10 | 11 | 12 => stream.skip(8), // Uint64, Int64, Float64: 8 bytes
+        8 => {
+            // String: 8 bytes length + string bytes
+            let str_len = stream.read_u64()? as usize;
+            stream.skip(str_len)
+        }
+        9 => {
+            // Array: 4 bytes element_type + 8 bytes element_count + elements
+            let elem_type = stream.read_u32()?;
+            let elem_count = stream.read_u64()? as usize;
+            match elem_type {
+                0 | 1 | 7 => stream.skip(elem_count),
+                2 | 3 => {
+                    let total = elem_count.checked_mul(2).ok_or(GgufError::ArithmeticOverflow)?;
+                    stream.skip(total)
+                }
+                4 | 5 | 6 => {
+                    let total = elem_count.checked_mul(4).ok_or(GgufError::ArithmeticOverflow)?;
+                    stream.skip(total)
+                }
+                10 | 11 | 12 => {
+                    let total = elem_count.checked_mul(8).ok_or(GgufError::ArithmeticOverflow)?;
+                    stream.skip(total)
+                }
+                8 => {
+                    for _ in 0..elem_count {
+                        let s_len = stream.read_u64()? as usize;
+                        stream.skip(s_len)?;
+                    }
+                    Ok(())
+                }
+                _ => Err(GgufError::InvalidMetadata),
+            }
+        }
+        _ => Err(GgufError::InvalidMetadata),
+    }
+}
+
+/// Zero-allocation helper to skip all key-value pairs in a streaming GGUF reader.
+pub fn skip_all_kv_pairs_stream(stream: &mut GgufStream, kv_count: u64) -> Result<(), GgufError> {
+    for _ in 0..kv_count {
+        let key_len = stream.read_u64()? as usize;
+        stream.skip(key_len)?;
+        let val_type = stream.read_u32()?;
+        skip_metadata_value_stream(stream, val_type)?;
+    }
+    Ok(())
+}
+
+/// Parses a single GGUF tensor info entry from a streaming reader with checked arithmetic.
+pub fn parse_tensor_info_stream(stream: &mut GgufStream) -> Result<GgufTensorInfo, GgufError> {
+    let name_len = stream.read_u64()? as usize;
+    let mut info = GgufTensorInfo::empty();
+    info.name_len = name_len;
+    let copy_len = name_len.min(MAX_TENSOR_NAME_LEN);
+    stream.read_exact(&mut info.name[..copy_len])?;
+    if name_len > copy_len {
+        let rem = name_len.checked_sub(copy_len).ok_or(GgufError::ArithmeticOverflow)?;
+        stream.skip(rem)?;
+    }
+
+    let n_dims = stream.read_u32()?;
+    if n_dims > 8 {
+        return Err(GgufError::InvalidMetadata);
+    }
+    info.n_dimensions = n_dims;
+
+    for d in 0..n_dims as usize {
+        let dim = stream.read_u64()?;
+        if d < 4 {
+            info.dimensions[d] = dim;
+        }
+    }
+
+    info.tensor_type = stream.read_u32()?;
+    info.offset = stream.read_u64()?;
+    Ok(info)
+}
+
+/// Scans a streaming GGUF source for a tensor by exact name without heap allocation.
+pub fn find_tensor_stream(
+    stream: &mut GgufStream,
+    target_name: &[u8],
+) -> Result<Option<GgufTensorInfo>, GgufError> {
+    let header = GgufHeader::parse_stream(stream)?;
+    skip_all_kv_pairs_stream(stream, header.kv_count)?;
 
     for _ in 0..header.tensor_count {
-        let tensor = parse_tensor_info(buf, &mut offset)?;
+        let tensor = parse_tensor_info_stream(stream)?;
         if tensor.matches_name(target_name) {
             return Ok(Some(tensor));
         }
@@ -405,21 +601,81 @@ pub fn find_tensor(buf: &[u8], target_name: &[u8]) -> Result<Option<GgufTensorIn
     Ok(None)
 }
 
-/// Reads a model file's initial header and scans for a specific tensor name.
+/// Calculates the byte size of a tensor from its GGML type and dimensions with checked arithmetic.
+pub fn tensor_byte_size(
+    tensor_type: u32,
+    dims: &[u64; 4],
+    n_dims: u32,
+) -> Result<usize, GgufError> {
+    if n_dims == 0 || n_dims > 4 {
+        return Err(GgufError::InvalidMetadata);
+    }
+    let mut total_elements: usize = 1;
+    for d in 0..n_dims as usize {
+        let dim = dims[d] as usize;
+        total_elements = total_elements
+            .checked_mul(dim)
+            .ok_or(GgufError::ArithmeticOverflow)?;
+    }
+    match tensor_type {
+        0 => total_elements
+            .checked_mul(4)
+            .ok_or(GgufError::ArithmeticOverflow), // F32
+        1 => total_elements
+            .checked_mul(2)
+            .ok_or(GgufError::ArithmeticOverflow), // F16
+        2 => {
+            // Q4_0: 32 elements per 18 bytes
+            if total_elements % 32 != 0 {
+                return Err(GgufError::CorruptedTensor);
+            }
+            let blocks = total_elements / 32;
+            blocks
+                .checked_mul(18)
+                .ok_or(GgufError::ArithmeticOverflow)
+        }
+        8 => {
+            // Q8_0: 32 elements per 34 bytes
+            if total_elements % 32 != 0 {
+                return Err(GgufError::CorruptedTensor);
+            }
+            let blocks = total_elements / 32;
+            blocks
+                .checked_mul(34)
+                .ok_or(GgufError::ArithmeticOverflow)
+        }
+        12 => {
+            // Q4_K: 256 elements per 144 bytes
+            if total_elements % 256 != 0 {
+                return Err(GgufError::CorruptedTensor);
+            }
+            let blocks = total_elements / 256;
+            blocks
+                .checked_mul(144)
+                .ok_or(GgufError::ArithmeticOverflow)
+        }
+        _ => Err(GgufError::InvalidMetadata),
+    }
+}
+
+/// Scans a GGUF byte buffer for a tensor by exact name without allocating.
+pub fn find_tensor(buf: &[u8], target_name: &[u8]) -> Result<Option<GgufTensorInfo>, GgufError> {
+    let mut stream = GgufStream::from_slice(buf);
+    find_tensor_stream(&mut stream, target_name)
+}
+
+/// Reads a model file sequentially using bounded chunk reads and scans for a specific tensor name.
+///
+/// Eliminates fixed buffer limits: handles arbitrarily large metadata and tensor tables safely.
 pub fn scan_file_for_tensor(
     path: &str,
     target_name: &[u8],
 ) -> Result<Option<GgufTensorInfo>, GgufError> {
     let fd = std::fs_open(path, std::FS_READ).map_err(|_| GgufError::FileNotFound)?;
-    let mut buf = [0u8; 4096];
-    let read_res = std::fs_read(fd, &mut buf);
+    let mut stream = GgufStream::from_file(fd);
+    let res = find_tensor_stream(&mut stream, target_name);
     let _ = std::fs_close(fd);
-
-    let n = read_res.map_err(|_| GgufError::ReadFailed)?;
-    if n < GgufHeader::HEADER_SIZE {
-        return Err(GgufError::BufferTooShort);
-    }
-    find_tensor(&buf[..n], target_name)
+    res
 }
 
 /// Zero-allocation helper to look up a string metadata value by key in a GGUF buffer.
@@ -478,15 +734,10 @@ pub fn find_metadata_string<'a>(buf: &'a [u8], target_key: &[u8]) -> Option<&'a 
 /// Follows strict `#![no_std]` and zero-heap allocation principles.
 pub fn read_gguf_header(path: &str) -> Result<GgufHeader, GgufError> {
     let fd = std::fs_open(path, std::FS_READ).map_err(|_| GgufError::FileNotFound)?;
-    let mut buf = [0u8; GgufHeader::HEADER_SIZE];
-    let read_res = std::fs_read(fd, &mut buf);
+    let mut stream = GgufStream::from_file(fd);
+    let res = GgufHeader::parse_stream(&mut stream);
     let _ = std::fs_close(fd);
-
-    let n = read_res.map_err(|_| GgufError::ReadFailed)?;
-    if n < GgufHeader::HEADER_SIZE {
-        return Err(GgufError::BufferTooShort);
-    }
-    GgufHeader::parse(&buf)
+    res
 }
 
 /// Candidate model paths checked in priority order for general model probing.
@@ -835,5 +1086,121 @@ mod tests {
         let probed = ProbedModels::empty();
         assert!(!probed.has_embedding());
         assert!(!probed.has_generative());
+    }
+
+    #[test]
+    fn test_tensor_byte_size_calculations() {
+        // F32: 768 elements -> 768 * 4 = 3072 bytes
+        assert_eq!(tensor_byte_size(0, &[768, 1, 0, 0], 1).unwrap(), 3072);
+        // F16: 768 elements -> 768 * 2 = 1536 bytes
+        assert_eq!(tensor_byte_size(1, &[768, 1, 0, 0], 1).unwrap(), 1536);
+        // Q4_0: 768 elements -> (768 / 32) * 18 = 24 * 18 = 432 bytes
+        assert_eq!(tensor_byte_size(2, &[768, 1, 0, 0], 1).unwrap(), 432);
+        // Q8_0: 768 elements -> (768 / 32) * 34 = 24 * 34 = 816 bytes
+        assert_eq!(tensor_byte_size(8, &[768, 1, 0, 0], 1).unwrap(), 816);
+        // Q4_K: 256 elements -> (256 / 256) * 144 = 144 bytes
+        assert_eq!(tensor_byte_size(12, &[256, 1, 0, 0], 1).unwrap(), 144);
+
+        // Invalid block alignment error
+        assert_eq!(
+            tensor_byte_size(2, &[30, 1, 0, 0], 1),
+            Err(GgufError::CorruptedTensor)
+        );
+    }
+
+    #[test]
+    fn test_gguf_stream_bounded_parsing() {
+        let mut buf = [0u8; 1024];
+        let header = GgufHeader {
+            magic: GGUF_MAGIC,
+            version: 3,
+            tensor_count: 3,
+            kv_count: 2,
+        };
+        header.write_to(&mut buf).unwrap();
+
+        let mut offset = 24;
+        // KV 1: string "model.arch" = "gemma"
+        let k1 = b"model.arch";
+        let v1 = b"gemma";
+        buf[offset..offset + 8].copy_from_slice(&(k1.len() as u64).to_le_bytes());
+        offset += 8;
+        buf[offset..offset + k1.len()].copy_from_slice(k1);
+        offset += k1.len();
+        buf[offset..offset + 4].copy_from_slice(&8u32.to_le_bytes()); // string
+        offset += 4;
+        buf[offset..offset + 8].copy_from_slice(&(v1.len() as u64).to_le_bytes());
+        offset += 8;
+        buf[offset..offset + v1.len()].copy_from_slice(v1);
+        offset += v1.len();
+
+        // KV 2: uint32 "context_length" = 2048
+        let k2 = b"context_length";
+        buf[offset..offset + 8].copy_from_slice(&(k2.len() as u64).to_le_bytes());
+        offset += 8;
+        buf[offset..offset + k2.len()].copy_from_slice(k2);
+        offset += k2.len();
+        buf[offset..offset + 4].copy_from_slice(&4u32.to_le_bytes()); // uint32
+        offset += 4;
+        buf[offset..offset + 4].copy_from_slice(&2048u32.to_le_bytes());
+        offset += 4;
+
+        // Tensor 1: "blk.0.attn_q.weight", 2 dims: [64, 64], type 0 (F32), offset 0
+        let t1 = b"blk.0.attn_q.weight";
+        buf[offset..offset + 8].copy_from_slice(&(t1.len() as u64).to_le_bytes());
+        offset += 8;
+        buf[offset..offset + t1.len()].copy_from_slice(t1);
+        offset += t1.len();
+        buf[offset..offset + 4].copy_from_slice(&2u32.to_le_bytes());
+        offset += 4;
+        buf[offset..offset + 8].copy_from_slice(&64u64.to_le_bytes());
+        offset += 8;
+        buf[offset..offset + 8].copy_from_slice(&64u64.to_le_bytes());
+        offset += 8;
+        buf[offset..offset + 4].copy_from_slice(&0u32.to_le_bytes());
+        offset += 4;
+        buf[offset..offset + 8].copy_from_slice(&0u64.to_le_bytes());
+        offset += 8;
+
+        // Tensor 2: "blk.0.attn_k.weight"
+        let t2 = b"blk.0.attn_k.weight";
+        buf[offset..offset + 8].copy_from_slice(&(t2.len() as u64).to_le_bytes());
+        offset += 8;
+        buf[offset..offset + t2.len()].copy_from_slice(t2);
+        offset += t2.len();
+        buf[offset..offset + 4].copy_from_slice(&2u32.to_le_bytes());
+        offset += 4;
+        buf[offset..offset + 8].copy_from_slice(&64u64.to_le_bytes());
+        offset += 8;
+        buf[offset..offset + 8].copy_from_slice(&64u64.to_le_bytes());
+        offset += 8;
+        buf[offset..offset + 4].copy_from_slice(&0u32.to_le_bytes());
+        offset += 4;
+        buf[offset..offset + 8].copy_from_slice(&16384u64.to_le_bytes());
+        offset += 8;
+
+        // Tensor 3: "blk.0.attn_v.weight"
+        let t3 = b"blk.0.attn_v.weight";
+        buf[offset..offset + 8].copy_from_slice(&(t3.len() as u64).to_le_bytes());
+        offset += 8;
+        buf[offset..offset + t3.len()].copy_from_slice(t3);
+        offset += t3.len();
+        buf[offset..offset + 4].copy_from_slice(&2u32.to_le_bytes());
+        offset += 4;
+        buf[offset..offset + 8].copy_from_slice(&64u64.to_le_bytes());
+        offset += 8;
+        buf[offset..offset + 8].copy_from_slice(&64u64.to_le_bytes());
+        offset += 8;
+        buf[offset..offset + 4].copy_from_slice(&0u32.to_le_bytes());
+        offset += 4;
+        buf[offset..offset + 8].copy_from_slice(&32768u64.to_le_bytes());
+        offset += 8;
+
+        let mut stream = GgufStream::from_slice(&buf[..offset]);
+        let found = find_tensor_stream(&mut stream, b"blk.0.attn_k.weight").unwrap();
+        assert!(found.is_some());
+        let t = found.unwrap();
+        assert_eq!(t.name_as_bytes(), b"blk.0.attn_k.weight");
+        assert_eq!(t.offset, 16384);
     }
 }
