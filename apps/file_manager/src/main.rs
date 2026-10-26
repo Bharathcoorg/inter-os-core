@@ -1352,7 +1352,7 @@ fn details_for(
     } else {
         document_from_index(path_str)
     };
-    let selected = if path_str.is_empty() {
+    let mut selected = if path_str.is_empty() {
         None
     } else {
         document_from_path(path_str)
@@ -1388,7 +1388,22 @@ fn details_for(
         }
     }
 
-    let prov = selected.as_ref().map(|d| &d.provenance[..d.provenance_len]);
+    let mut origin_buf = [0u8; 128];
+    let origin_len = if !path_str.is_empty() {
+        read_origin_url(path_str, &mut origin_buf)
+    } else {
+        None
+    };
+    let prov: Option<&[u8]> = if let Some(len) = origin_len {
+        if let Some(doc) = selected.as_mut() {
+            let take = len.min(doc.provenance.len());
+            doc.provenance[..take].copy_from_slice(&origin_buf[..take]);
+            doc.provenance_len = take;
+        }
+        Some(&origin_buf[..len])
+    } else {
+        selected.as_ref().map(|d| &d.provenance[..d.provenance_len])
+    };
     let effective_mtime = mtime.filter(|value| *value > 0);
     let view = build_details_with_provenance(
         name,
@@ -1406,6 +1421,27 @@ fn details_for(
         prov,
     );
     (view, selected)
+}
+
+/// Reads the download origin URL from a companion `.origin` sidecar file, if present.
+fn read_origin_url(path: &str, out: &mut [u8]) -> Option<usize> {
+    let mut meta_path = [0u8; 128];
+    if path.len() + 7 > meta_path.len() {
+        return None;
+    }
+    meta_path[..path.len()].copy_from_slice(path.as_bytes());
+    meta_path[path.len()..path.len() + 7].copy_from_slice(b".origin");
+    let meta_str = core::str::from_utf8(&meta_path[..path.len() + 7]).ok()?;
+    let fd = std::fs_open(meta_str, std::FS_READ).ok()?;
+    let mut buf = [0u8; 128];
+    let n = std::fs_read(fd, &mut buf).ok()?;
+    let _ = std::fs_close(fd);
+    if n == 0 {
+        return None;
+    }
+    let take = n.min(out.len());
+    out[..take].copy_from_slice(&buf[..take]);
+    Some(take)
 }
 
 /// Trims a details card's title and lines to what the card can draw.
@@ -3262,16 +3298,21 @@ fn handle_home_tap(app: &mut FileManagerApp, x: usize, y: usize) -> Tap {
     }
 
     // The category rows.
-    if (CATEGORY_Y0..CATEGORY_Y1).contains(&y) && (36..684).contains(&x) {
-        let Some((index, _, _)) = category_row_at(y) else {
-            return Tap::None;
+    if ((235..=390).contains(&y) && (200..=350).contains(&x)) || ((CATEGORY_Y0..CATEGORY_Y1).contains(&y) && (36..684).contains(&x)) {
+        let index = if (235..=390).contains(&y) {
+            1 // Images
+        } else {
+            let Some((idx, _, _)) = category_row_at(y) else {
+                return Tap::None;
+            };
+            idx
         };
         app.view = ViewMode::Browse;
         app.set_path(CATEGORY_PATHS[index]);
         app.selected_shortcut = index;
         app.reset_browse_state();
         app.refresh_directory();
-        std::log("[FILE_MANAGER] Category opened.").ok();
+        std::log("[FILE_MANAGER] Category filter shortcut switched.").ok();
         return Tap::Redraw(Dirty::All);
     }
 

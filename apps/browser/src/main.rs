@@ -1965,9 +1965,7 @@ impl BrowserApp {
     ) -> (images::ImageStatus, Option<std::image::Bitmap<'static>>, u32, u32) {
         let mut request = [0u8; 512];
         let request_len = browser::format_proxy_request(url, &mut request);
-        let local_port = 45000u16.wrapping_add(
-            ((self.pages_loaded as u16) ^ (self.image_count as u16) ^ 0x0055) & 0x03FF,
-        );
+        let local_port = self.take_local_port();
         let outcome = fetch_over_tcp([10, 0, 2, 2], 4300, local_port, &request[..request_len]);
         if outcome.bytes == 0 {
             return (
@@ -2359,10 +2357,30 @@ impl BrowserApp {
             self.html_view = false;
             return false;
         }
+        self.execute_page_scripts();
         let out = unsafe { &mut *core::ptr::addr_of_mut!(PAGE_LAYOUT) };
         {
             let sheet = css::parse_stylesheet(dom.css());
             layout::build(dom, &sheet, browser::CONTENT_WIDTH, out);
+            for id in 0..dom.node_count() as layout::NodeId {
+                let bs = layout::style::compute(dom, id, &sheet, None);
+                if bs.has_unsupported() {
+                    for i in 0..bs.unsupported_count as usize {
+                        let prop = bs.unsupported[i].as_str();
+                        let mut log_buf = [0u8; 96];
+                        let prefix = b"[BROWSER APP] Unsupported CSS property in page: ";
+                        let plen = prefix.len();
+                        log_buf[..plen].copy_from_slice(prefix);
+                        let pbytes = prop.as_bytes();
+                        let take = pbytes.len().min(log_buf.len() - plen);
+                        log_buf[plen..plen + take].copy_from_slice(&pbytes[..take]);
+                        if let Ok(msg) = core::str::from_utf8(&log_buf[..plen + take]) {
+                            std::log(msg).ok();
+                        }
+                    }
+                    break;
+                }
+            }
         }
         if out.is_empty() {
             self.html_view = false;
@@ -2414,6 +2432,76 @@ impl BrowserApp {
             std::log("[BROWSER APP] The page reached a layout capacity; it is shown in part.").ok();
         }
         true
+    }
+
+    /// Executes an inline script or event handler with deterministic step and memory budgets,
+    /// and logs clear diagnostic messages for unsupported syntax and budget overruns.
+    pub fn run_script(code: &[u8], dom: &mut layout::Dom, context: &str) {
+        if code.is_empty() {
+            return;
+        }
+        let _ = context;
+        match browser::js::execute_script(code, dom, browser::js::DEFAULT_STEP_BUDGET) {
+            Ok(_) => {
+                std::log("[BROWSER APP] JS script executed successfully.").ok();
+            }
+            Err(browser::js::JsError::StepBudgetExhausted) => {
+                std::log("[BROWSER APP] JS execution halted: step budget exhausted (infinite loop prevention).").ok();
+            }
+            Err(browser::js::JsError::CapacityExceeded) => {
+                std::log("[BROWSER APP] JS execution halted: memory budget exceeded (AST/variable capacity limit).").ok();
+            }
+            Err(browser::js::JsError::UnsupportedSyntax(feature)) => {
+                let mut log_buf = [0u8; 128];
+                let prefix = b"[BROWSER APP] JS unsupported syntax: ";
+                let plen = prefix.len();
+                log_buf[..plen].copy_from_slice(prefix);
+                let fbytes = feature.as_bytes();
+                let flen = fbytes.len().min(log_buf.len() - plen);
+                log_buf[plen..plen + flen].copy_from_slice(&fbytes[..flen]);
+                if let Ok(msg) = core::str::from_utf8(&log_buf[..plen + flen]) {
+                    std::log(msg).ok();
+                }
+            }
+            Err(browser::js::JsError::UnexpectedToken) => {
+                std::log("[BROWSER APP] JS syntax error: unexpected token.").ok();
+            }
+            Err(browser::js::JsError::ReferenceError) => {
+                std::log("[BROWSER APP] JS runtime error: reference error (undeclared variable).").ok();
+            }
+            Err(browser::js::JsError::TypeError) => {
+                std::log("[BROWSER APP] JS runtime error: type error.").ok();
+            }
+        }
+    }
+
+    /// Finds captured script tags in the DOM and executes them in order.
+    pub fn execute_page_scripts(&mut self) {
+        let dom = unsafe { &mut *core::ptr::addr_of_mut!(PAGE_DOM) };
+        let node_count = dom.node_count();
+        let mut script_nodes: [layout::NodeId; 16] = [layout::NO_NODE; 16];
+        let mut script_count = 0usize;
+
+        for id in 0..node_count as layout::NodeId {
+            if dom.node(id).is_element() && dom.tag(id) == b"script" {
+                if script_count < script_nodes.len() {
+                    script_nodes[script_count] = id;
+                    script_count += 1;
+                }
+            }
+        }
+
+        for i in 0..script_count {
+            let nid = script_nodes[i];
+            let mut buf = [0u8; 2048];
+            let body = dom.script_body(nid);
+            let n = body.len().min(buf.len());
+            if n == 0 {
+                continue;
+            }
+            buf[..n].copy_from_slice(&body[..n]);
+            Self::run_script(&buf[..n], dom, "inline script");
+        }
     }
 
     /// Whether a keyboard is on screen.
@@ -2569,6 +2657,15 @@ impl BrowserApp {
             return;
         }
         let field = out.fields[trigger];
+        {
+            let dom_mut = unsafe { &mut *core::ptr::addr_of_mut!(PAGE_DOM) };
+            if let Some(onclick) = dom_mut.attr(field.node, b"onclick") {
+                let mut buf = [0u8; 512];
+                let n = onclick.len().min(buf.len());
+                buf[..n].copy_from_slice(&onclick[..n]);
+                Self::run_script(&buf[..n], dom_mut, "button onclick");
+            }
+        }
         if field.input == layout::InputType::Reset {
             // Reset restores the values the markup gave the controls.
             for index in 0..out.field_count {
@@ -2590,6 +2687,15 @@ impl BrowserApp {
             std::log("[BROWSER APP] The control is not inside a form; nothing was submitted.").ok();
             return;
         };
+        {
+            let dom_mut = unsafe { &mut *core::ptr::addr_of_mut!(PAGE_DOM) };
+            if let Some(onsubmit) = dom_mut.attr(form, b"onsubmit") {
+                let mut buf = [0u8; 512];
+                let n = onsubmit.len().min(buf.len());
+                buf[..n].copy_from_slice(&onsubmit[..n]);
+                Self::run_script(&buf[..n], dom_mut, "form onsubmit");
+            }
+        }
         let action = dom.attr(form, b"action").unwrap_or(b"");
         let method = if dom
             .attr(form, b"method")
@@ -2910,6 +3016,17 @@ impl BrowserApp {
                     std::log("[BROWSER APP] The origin's file was larger than the gateway's limit; the saved copy is truncated.").ok();
                 }
                 let _ = written;
+
+                // Persist the download origin URL alongside the downloaded file metadata/record.
+                let mut origin_path_buf = [0u8; 128];
+                let pbytes = path.as_bytes();
+                let otake = pbytes.len().min(origin_path_buf.len() - 8);
+                origin_path_buf[..otake].copy_from_slice(&pbytes[..otake]);
+                origin_path_buf[otake..otake + 7].copy_from_slice(b".origin");
+                if let Ok(opath) = core::str::from_utf8(&origin_path_buf[..otake + 7]) {
+                    let _ = write_file(opath, url);
+                }
+
                 self.publish_download(path);
                 self.remember_download(path, content_type);
                 self.status = PageStatus::Downloaded;
@@ -3622,7 +3739,7 @@ impl BrowserApp {
             );
 
             // The local port has to be non-zero and unique for the connection.
-            let local_port = 45000u16 + ((self.pages_loaded as u16) & 0x03FF);
+            let local_port = self.take_local_port();
 
             std::log("[BROWSER APP] Request dispatched over TCP to the Device Studio gateway.").ok();
 
@@ -8062,6 +8179,15 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
             // 1. Hit test fields first
             if let Some(index) = out.field_at(doc_x as usize, doc_y as usize) {
                 let field = out.fields[index];
+                {
+                    let dom_mut = unsafe { &mut *core::ptr::addr_of_mut!(PAGE_DOM) };
+                    if let Some(onclick) = dom_mut.attr(field.node, b"onclick") {
+                        let mut buf = [0u8; 512];
+                        let n = onclick.len().min(buf.len());
+                        buf[..n].copy_from_slice(&onclick[..n]);
+                        BrowserApp::run_script(&buf[..n], dom_mut, "field onclick");
+                    }
+                }
                 match field.kind {
                     layout::FieldKind::Select => {
                         app.cycle_select(index);
@@ -8092,6 +8218,18 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
 
             // 2. Hit test links
             if let Some(link) = out.link_at(doc_x as usize, doc_y as usize) {
+                let dom_mut = unsafe { &mut *core::ptr::addr_of_mut!(PAGE_DOM) };
+                for nid in 0..dom_mut.node_count() as layout::NodeId {
+                    if dom_mut.node(nid).link == link {
+                        if let Some(onclick) = dom_mut.attr(nid, b"onclick") {
+                            let mut buf = [0u8; 512];
+                            let n = onclick.len().min(buf.len());
+                            buf[..n].copy_from_slice(&onclick[..n]);
+                            BrowserApp::run_script(&buf[..n], dom_mut, "link onclick");
+                        }
+                        break;
+                    }
+                }
                 let dom = unsafe { &*core::ptr::addr_of!(PAGE_DOM) };
                 if let Some(href) = dom.link_href(link) {
                     app.navigate_href(href);

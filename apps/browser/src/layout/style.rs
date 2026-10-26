@@ -55,6 +55,59 @@ pub enum InputType {
     Other,
 }
 
+/// CSS text alignment.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TextAlign {
+    Left,
+    Center,
+    Right,
+}
+
+/// CSS list marker type.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ListStyleType {
+    Disc,
+    Decimal,
+    None,
+}
+
+/// CSS whitespace handling.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum WhiteSpace {
+    Normal,
+    Nowrap,
+    Pre,
+}
+
+/// CSS box positioning model.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Position {
+    Static,
+    Relative,
+    Absolute,
+}
+
+/// The maximum number of unsupported properties recorded per element.
+pub const MAX_UNSUPPORTED_NOTICES: usize = 4;
+
+/// Diagnostic notice for an unsupported CSS property.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct UnsupportedStyleNotice {
+    pub property: [u8; 32],
+    pub len: u8,
+}
+
+impl UnsupportedStyleNotice {
+    pub const EMPTY: Self = Self {
+        property: [0u8; 32],
+        len: 0,
+    };
+
+    pub fn as_str(&self) -> &str {
+        core::str::from_utf8(&self.property[..self.len as usize]).unwrap_or("")
+    }
+}
+
 /// The computed box properties for one element.
 #[derive(Clone, Copy, Debug)]
 pub struct BoxStyle {
@@ -90,6 +143,20 @@ pub struct BoxStyle {
     pub placeholder: StrRef,
     pub src: StrRef,
     pub alt: StrRef,
+    pub text_align: TextAlign,
+    pub list_style_type: ListStyleType,
+    pub white_space: WhiteSpace,
+    pub position: Position,
+    pub top: i16,
+    pub left: i16,
+    pub right: i16,
+    pub bottom: i16,
+    pub has_top: bool,
+    pub has_left: bool,
+    pub has_right: bool,
+    pub has_bottom: bool,
+    pub unsupported: [UnsupportedStyleNotice; MAX_UNSUPPORTED_NOTICES],
+    pub unsupported_count: u8,
 }
 
 impl BoxStyle {
@@ -119,7 +186,36 @@ impl BoxStyle {
         placeholder: StrRef::EMPTY,
         src: StrRef::EMPTY,
         alt: StrRef::EMPTY,
+        text_align: TextAlign::Left,
+        list_style_type: ListStyleType::Disc,
+        white_space: WhiteSpace::Normal,
+        position: Position::Static,
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: 0,
+        has_top: false,
+        has_left: false,
+        has_right: false,
+        has_bottom: false,
+        unsupported: [UnsupportedStyleNotice::EMPTY; MAX_UNSUPPORTED_NOTICES],
+        unsupported_count: 0,
     };
+
+    pub fn record_unsupported(&mut self, prop: &[u8]) {
+        if (self.unsupported_count as usize) < MAX_UNSUPPORTED_NOTICES {
+            let mut notice = UnsupportedStyleNotice::EMPTY;
+            let n = prop.len().min(notice.property.len());
+            notice.property[..n].copy_from_slice(&prop[..n]);
+            notice.len = n as u8;
+            self.unsupported[self.unsupported_count as usize] = notice;
+            self.unsupported_count += 1;
+        }
+    }
+
+    pub fn has_unsupported(&self) -> bool {
+        self.unsupported_count > 0
+    }
 
     pub fn is_inline(&self) -> bool {
         matches!(self.display, Display::Inline)
@@ -229,9 +325,15 @@ pub fn compute(
             style.scale = parent.scale;
         }
         style.bold |= parent.bold;
-        // CSS white-space inherits.
+        // CSS text-align, list-style-type, and white-space inherit.
+        style.text_align = parent.text_align;
+        style.list_style_type = parent.list_style_type;
+        style.white_space = parent.white_space;
         style.preformatted |= parent.preformatted;
     }
+
+    // Apply author inline declarations for extended box properties and record unsupported styles.
+    apply_declarations(&mut style, inline);
 
     if dom.has_attr(node, b"hidden") {
         style.hidden = true;
@@ -273,6 +375,11 @@ fn user_agent_style(dom: &Dom, node: NodeId, tag: &[u8]) -> BoxStyle {
             style.margin_top = 8;
             style.margin_bottom = 8;
             style.padding_left = 24;
+            style.list_style_type = if tag == b"ol" {
+                ListStyleType::Decimal
+            } else {
+                ListStyleType::Disc
+            };
         }
         b"li" => {
             style.margin_top = 2;
@@ -294,6 +401,7 @@ fn user_agent_style(dom: &Dom, node: NodeId, tag: &[u8]) -> BoxStyle {
             style.padding_top = 8;
             style.padding_bottom = 8;
             style.preformatted = true;
+            style.white_space = WhiteSpace::Pre;
             style.css.has_background = true;
             style.css.background = 0xFF_F2F2F2;
         }
@@ -432,6 +540,165 @@ fn dimension(raw: Option<&[u8]>) -> u16 {
     }
 }
 
+fn apply_declarations(style: &mut BoxStyle, raw: Option<&[u8]>) {
+    let Some(raw) = raw else { return };
+    for decl in raw.split(|&b| b == b';') {
+        let decl = trim_ascii(decl);
+        if decl.is_empty() {
+            continue;
+        }
+        let Some(colon) = decl.iter().position(|&b| b == b':') else {
+            continue;
+        };
+        let prop = trim_ascii(&decl[..colon]);
+        let val = trim_ascii(&decl[colon + 1..]);
+        if prop.is_empty() || val.is_empty() {
+            continue;
+        }
+        apply_single_declaration(style, prop, val);
+    }
+}
+
+fn apply_single_declaration(style: &mut BoxStyle, prop: &[u8], val: &[u8]) {
+    if prop.eq_ignore_ascii_case(b"text-align") {
+        if val.eq_ignore_ascii_case(b"left") {
+            style.text_align = TextAlign::Left;
+        } else if val.eq_ignore_ascii_case(b"center") {
+            style.text_align = TextAlign::Center;
+        } else if val.eq_ignore_ascii_case(b"right") {
+            style.text_align = TextAlign::Right;
+        } else {
+            style.record_unsupported(prop);
+        }
+    } else if prop.eq_ignore_ascii_case(b"list-style-type") || prop.eq_ignore_ascii_case(b"list-style") {
+        if val.eq_ignore_ascii_case(b"disc") {
+            style.list_style_type = ListStyleType::Disc;
+        } else if val.eq_ignore_ascii_case(b"decimal") {
+            style.list_style_type = ListStyleType::Decimal;
+        } else if val.eq_ignore_ascii_case(b"none") {
+            style.list_style_type = ListStyleType::None;
+        } else {
+            style.record_unsupported(prop);
+        }
+    } else if prop.eq_ignore_ascii_case(b"white-space") {
+        if val.eq_ignore_ascii_case(b"normal") {
+            style.white_space = WhiteSpace::Normal;
+            style.preformatted = false;
+        } else if val.eq_ignore_ascii_case(b"nowrap") {
+            style.white_space = WhiteSpace::Nowrap;
+            style.preformatted = false;
+        } else if val.eq_ignore_ascii_case(b"pre") || val.eq_ignore_ascii_case(b"pre-wrap") {
+            style.white_space = WhiteSpace::Pre;
+            style.preformatted = true;
+        } else {
+            style.record_unsupported(prop);
+        }
+    } else if prop.eq_ignore_ascii_case(b"position") {
+        if val.eq_ignore_ascii_case(b"static") {
+            style.position = Position::Static;
+        } else if val.eq_ignore_ascii_case(b"relative") {
+            style.position = Position::Relative;
+        } else if val.eq_ignore_ascii_case(b"absolute") {
+            style.position = Position::Absolute;
+        } else {
+            style.record_unsupported(prop);
+        }
+    } else if prop.eq_ignore_ascii_case(b"top") {
+        if let Some(n) = parse_css_length(val) {
+            style.top = n;
+            style.has_top = true;
+        }
+    } else if prop.eq_ignore_ascii_case(b"bottom") {
+        if let Some(n) = parse_css_length(val) {
+            style.bottom = n;
+            style.has_bottom = true;
+        }
+    } else if prop.eq_ignore_ascii_case(b"left") {
+        if let Some(n) = parse_css_length(val) {
+            style.left = n;
+            style.has_left = true;
+        }
+    } else if prop.eq_ignore_ascii_case(b"right") {
+        if let Some(n) = parse_css_length(val) {
+            style.right = n;
+            style.has_right = true;
+        }
+    } else if is_known_css_property(prop) {
+        // Standard core properties are cascaded by css::cascade or handled at the element level.
+    } else {
+        // Emit explicit unsupported notice instead of silently ignoring unknown styles.
+        style.record_unsupported(prop);
+    }
+}
+
+fn is_known_css_property(prop: &[u8]) -> bool {
+    prop.eq_ignore_ascii_case(b"color")
+        || prop.eq_ignore_ascii_case(b"background-color")
+        || prop.eq_ignore_ascii_case(b"background")
+        || prop.eq_ignore_ascii_case(b"font-size")
+        || prop.eq_ignore_ascii_case(b"font-weight")
+        || prop.eq_ignore_ascii_case(b"margin")
+        || prop.eq_ignore_ascii_case(b"margin-top")
+        || prop.eq_ignore_ascii_case(b"margin-bottom")
+        || prop.eq_ignore_ascii_case(b"margin-left")
+        || prop.eq_ignore_ascii_case(b"margin-right")
+        || prop.eq_ignore_ascii_case(b"padding")
+        || prop.eq_ignore_ascii_case(b"padding-top")
+        || prop.eq_ignore_ascii_case(b"padding-bottom")
+        || prop.eq_ignore_ascii_case(b"padding-left")
+        || prop.eq_ignore_ascii_case(b"padding-right")
+        || prop.eq_ignore_ascii_case(b"border")
+        || prop.eq_ignore_ascii_case(b"border-color")
+        || prop.eq_ignore_ascii_case(b"display")
+        || prop.eq_ignore_ascii_case(b"width")
+        || prop.eq_ignore_ascii_case(b"height")
+}
+
+fn parse_css_length(val: &[u8]) -> Option<i16> {
+    let val = trim_ascii(val);
+    if val.is_empty() {
+        return None;
+    }
+    let (neg, val) = if val[0] == b'-' {
+        (true, &val[1..])
+    } else {
+        (false, val)
+    };
+    let mut num: i32 = 0;
+    let mut any = false;
+    for &b in val {
+        if b.is_ascii_digit() {
+            num = num.saturating_mul(10).saturating_add((b - b'0') as i32);
+            any = true;
+        } else {
+            break;
+        }
+    }
+    if !any {
+        return None;
+    }
+    let res = if neg { -num } else { num };
+    Some(res.clamp(i16::MIN as i32, i16::MAX as i32) as i16)
+}
+
+fn trim_ascii(mut s: &[u8]) -> &[u8] {
+    while let Some((&first, rest)) = s.split_first() {
+        if first == b' ' || first == b'\t' || first == b'\n' || first == b'\r' {
+            s = rest;
+        } else {
+            break;
+        }
+    }
+    while let Some((&last, rest)) = s.split_last() {
+        if last == b' ' || last == b'\t' || last == b'\n' || last == b'\r' {
+            s = rest;
+        } else {
+            break;
+        }
+    }
+    s
+}
+
 #[cfg(test)]
 mod tests {
     extern crate std;
@@ -552,5 +819,117 @@ mod tests {
         let style = compute(&dom, img, &sheet, None);
         assert_eq!(style.width, 320);
         assert_eq!(style.height, 180);
+    }
+
+    #[test]
+    fn text_align_properties_are_parsed_and_inherited() {
+        let mut dom = Dom::new();
+        dom.parse(b"<div style='text-align: center;'><p style='text-align: right;'>right</p><span>inherit</span></div>");
+        let div = dom
+            .nodes()
+            .iter()
+            .enumerate()
+            .find(|(_, n)| n.is_element() && n.tag.get(&dom) == b"div")
+            .map(|(i, _)| i as NodeId)
+            .unwrap();
+        let p = dom
+            .nodes()
+            .iter()
+            .enumerate()
+            .find(|(_, n)| n.is_element() && n.tag.get(&dom) == b"p")
+            .map(|(i, _)| i as NodeId)
+            .unwrap();
+        let span = dom
+            .nodes()
+            .iter()
+            .enumerate()
+            .find(|(_, n)| n.is_element() && n.tag.get(&dom) == b"span")
+            .map(|(i, _)| i as NodeId)
+            .unwrap();
+        let sheet = css::Stylesheet::empty();
+        let div_style = compute(&dom, div, &sheet, None);
+        let p_style = compute(&dom, p, &sheet, Some(&div_style));
+        let span_style = compute(&dom, span, &sheet, Some(&div_style));
+
+        assert_eq!(div_style.text_align, TextAlign::Center);
+        assert_eq!(p_style.text_align, TextAlign::Right);
+        assert_eq!(span_style.text_align, TextAlign::Center);
+    }
+
+    #[test]
+    fn list_style_type_defaults_and_override_none() {
+        let mut dom = Dom::new();
+        dom.parse(b"<ul><li>default</li><li style='list-style-type: none;'>none</li><li style='list-style-type: decimal;'>num</li></ul>");
+        let lis: std::vec::Vec<NodeId> = dom
+            .nodes()
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.is_element() && n.tag.get(&dom) == b"li")
+            .map(|(i, _)| i as NodeId)
+            .collect();
+        let sheet = css::Stylesheet::empty();
+        let li0 = compute(&dom, lis[0], &sheet, None);
+        let li1 = compute(&dom, lis[1], &sheet, None);
+        let li2 = compute(&dom, lis[2], &sheet, None);
+
+        assert_eq!(li0.list_style_type, ListStyleType::Disc);
+        assert_eq!(li1.list_style_type, ListStyleType::None);
+        assert_eq!(li2.list_style_type, ListStyleType::Decimal);
+    }
+
+    #[test]
+    fn white_space_and_positioning_properties() {
+        let mut dom = Dom::new();
+        dom.parse(b"<div style='white-space: nowrap; position: relative; top: 12px; left: 24px;'><p style='white-space: pre; position: absolute;'>code</p></div>");
+        let div = dom
+            .nodes()
+            .iter()
+            .enumerate()
+            .find(|(_, n)| n.is_element() && n.tag.get(&dom) == b"div")
+            .map(|(i, _)| i as NodeId)
+            .unwrap();
+        let p = dom
+            .nodes()
+            .iter()
+            .enumerate()
+            .find(|(_, n)| n.is_element() && n.tag.get(&dom) == b"p")
+            .map(|(i, _)| i as NodeId)
+            .unwrap();
+        let sheet = css::Stylesheet::empty();
+        let div_style = compute(&dom, div, &sheet, None);
+        let p_style = compute(&dom, p, &sheet, Some(&div_style));
+
+        assert_eq!(div_style.white_space, WhiteSpace::Nowrap);
+        assert_eq!(div_style.position, Position::Relative);
+        assert_eq!(div_style.top, 12);
+        assert!(div_style.has_top);
+        assert_eq!(div_style.left, 24);
+        assert!(div_style.has_left);
+
+        assert_eq!(p_style.white_space, WhiteSpace::Pre);
+        assert!(p_style.preformatted);
+        assert_eq!(p_style.position, Position::Absolute);
+    }
+
+    #[test]
+    fn unsupported_styles_emit_explicit_notices() {
+        let mut dom = Dom::new();
+        dom.parse(b"<div style='transform: rotate(45deg); opacity: 0.8; color: #ff0000;'>test</div>");
+        let div = dom
+            .nodes()
+            .iter()
+            .enumerate()
+            .find(|(_, n)| n.is_element() && n.tag.get(&dom) == b"div")
+            .map(|(i, _)| i as NodeId)
+            .unwrap();
+        let sheet = css::Stylesheet::empty();
+        let style = compute(&dom, div, &sheet, None);
+
+        assert!(style.has_unsupported());
+        assert_eq!(style.unsupported_count, 2);
+        assert_eq!(style.unsupported[0].as_str(), "transform");
+        assert_eq!(style.unsupported[1].as_str(), "opacity");
+        // Supported properties are still applied
+        assert_eq!(style.css.color, 0xFFFF0000);
     }
 }

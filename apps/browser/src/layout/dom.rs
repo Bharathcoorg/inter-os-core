@@ -227,14 +227,18 @@ impl Dom {
             };
             i = next;
 
-            // Raw-text elements are not markup. A script body is skipped
-            // whole; the first stylesheet is kept because the layout
-            // needs it; a textarea's body is text.
+            // Raw-text elements are not markup. A script body is captured
+            // into the DOM so the JS engine can execute it; the first
+            // stylesheet is kept because layout needs it; a textarea's body is text.
             if tag.name_eq(b"script") {
-                if tag.has_attribute(b"src") || tag.self_closing {
-                    continue;
+                let start = i;
+                let close_idx = find_close(html, i, b"script").unwrap_or(n);
+                let end = find_close_start(html, start, b"script").unwrap_or(close_idx);
+                i = close_idx;
+                let node = self.open_element(&tag, &mut stack, &mut depth);
+                if node != NO_NODE && end > start {
+                    self.push_raw_text(node, &html[start..end]);
                 }
-                i = find_close(html, i, b"script").unwrap_or(n);
                 continue;
             }
             if tag.name_eq(b"style") {
@@ -403,6 +407,18 @@ impl Dom {
         &self.css[..self.css_len]
     }
 
+    /// The body text of a script element, or empty if none.
+    pub fn script_body<'a>(&'a self, node: NodeId) -> &'a [u8] {
+        let mut child = self.first_child(node);
+        while let Some(c) = child {
+            if self.node(c).is_text() {
+                return self.text_of(c);
+            }
+            child = self.next_sibling(c);
+        }
+        b""
+    }
+
     /// Whether any capacity was reached while parsing.
     pub fn truncated(&self) -> bool {
         self.truncated
@@ -498,6 +514,29 @@ impl Dom {
         let text = StrRef {
             start: start as u32,
             len,
+        };
+        let id = self.push_node(NodeKind::Text, StrRef::EMPTY, text);
+        self.append_child(parent, id);
+    }
+
+    fn push_raw_text(&mut self, parent: NodeId, raw: &[u8]) {
+        if parent == NO_NODE || raw.is_empty() {
+            return;
+        }
+        let start = self.text_len;
+        let room = MAX_TEXT_BYTES.saturating_sub(self.text_len);
+        let n = raw.len().min(room);
+        if n < raw.len() {
+            self.truncated = true;
+        }
+        if n == 0 {
+            return;
+        }
+        self.text[start..start + n].copy_from_slice(&raw[..n]);
+        self.text_len += n;
+        let text = StrRef {
+            start: start as u32,
+            len: n as u16,
         };
         let id = self.push_node(NodeKind::Text, StrRef::EMPTY, text);
         self.append_child(parent, id);
@@ -704,6 +743,7 @@ impl<'a> OpenTag<'a> {
         AttrParser { rest: self.rest }
     }
 
+    #[allow(dead_code)]
     fn has_attribute(&self, name: &[u8]) -> bool {
         let mut attrs = self.attrs();
         while let Some(attr) = attrs.next() {
@@ -1041,7 +1081,12 @@ fn is_layout_attribute(name: &[u8]) -> bool {
             | b"hidden"
             | b"size"
             | b"maxlength"
-    )
+            | b"onclick"
+            | b"onsubmit"
+            | b"onchange"
+            | b"oninput"
+            | b"onload"
+    ) || name.starts_with(b"on")
 }
 
 /// Decodes one character reference at the start of `raw` (which begins
@@ -1204,7 +1249,7 @@ mod tests {
     }
 
     #[test]
-    fn the_first_stylesheet_is_kept_and_a_script_is_not_text() {
+    fn the_first_stylesheet_is_kept_and_a_script_is_captured() {
         let mut dom = Dom::new();
         dom.parse(b"<style>p{color:#112233}</style><p>ok</p><script>var x='<p>no</p>';</script>");
         assert_eq!(dom.css(), b"p{color:#112233}");
@@ -1212,7 +1257,8 @@ mod tests {
         let mut text = std::vec::Vec::new();
         collect_text(&dom, p, &mut text);
         assert_eq!(text, b"ok");
-        assert!(find(&dom, b"script").is_none());
+        let script = find(&dom, b"script").expect("script element must be captured into DOM");
+        assert_eq!(dom.script_body(script), b"var x='<p>no</p>';");
     }
 
     #[test]

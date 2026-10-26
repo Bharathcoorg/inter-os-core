@@ -426,9 +426,9 @@ pub struct SelectedDocument {
     pub mime: [u8; MAX_DOCUMENT_MIME_LEN],
     /// How many bytes of the media type are meaningful.
     pub mime_len: usize,
-    /// Where the media type answer came from: `bytes`, `extension` or
-    /// `unknown`.
-    pub provenance: [u8; 16],
+    /// Where the media type answer came from: `bytes`, `extension`,
+    /// `unknown`, or an explicit download origin URL.
+    pub provenance: [u8; 128],
     /// How many bytes of the provenance are meaningful.
     pub provenance_len: usize,
     /// The document's length in bytes.
@@ -446,7 +446,7 @@ impl SelectedDocument {
         path_len: 0,
         mime: [0u8; MAX_DOCUMENT_MIME_LEN],
         mime_len: 0,
-        provenance: [0u8; 16],
+        provenance: [0u8; 128],
         provenance_len: 0,
         size: 0,
         handlers: [HandlerEntry::EMPTY; MAX_DOCUMENT_HANDLERS],
@@ -525,7 +525,7 @@ pub fn document_from_index(path: &str) -> Option<SelectedDocument> {
         let mime_len = mime_override.len().min(MAX_DOCUMENT_MIME_LEN);
         selected.mime[..mime_len].copy_from_slice(&mime_override.as_bytes()[..mime_len]);
         selected.mime_len = mime_len;
-        let provenance_len = record.provenance.len().min(16);
+        let provenance_len = record.provenance.len().min(selected.provenance.len());
         selected.provenance[..provenance_len]
             .copy_from_slice(&record.provenance.as_bytes()[..provenance_len]);
         selected.provenance_len = provenance_len;

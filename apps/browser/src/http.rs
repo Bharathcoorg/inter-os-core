@@ -1299,7 +1299,12 @@ pub fn format_proxy_request(request: &ProxyRequest<'_>, out: &mut [u8]) -> usize
             return written;
         }
     }
-    append(out, &mut written, b"Connection: close\r\n\r\n");
+    if !append(out, &mut written, b"Connection: close\r\n\r\n") {
+        return written;
+    }
+    if request.method == HttpMethod::Post && !request.body.is_empty() {
+        append(out, &mut written, request.body);
+    }
     written
 }
 
@@ -2123,6 +2128,7 @@ mod tests {
         assert!(text.contains("Cookie: sid=abc"));
         assert!(text.contains("If-None-Match: \"v1\""));
         assert!(text.contains("Accept-Encoding: gzip, deflate"));
+        assert!(text.ends_with("\r\n\r\na=1"));
     }
 
     #[test]
@@ -2314,5 +2320,83 @@ mod tests {
             &text[..decoded.written],
             b"<html><body><h1>Caf\xc3\xa9</h1></body></html>"
         );
+    }
+
+    #[test]
+    fn test_post_body_encoding_and_redirect_method_preservation() {
+        let mut out = [0u8; 512];
+        let post_body = b"user=alice&action=login";
+        let req = ProxyRequest {
+            method: HttpMethod::Post,
+            url: b"https://api.interos.org/v1/auth",
+            body: post_body,
+            content_type: b"application/x-www-form-urlencoded",
+            cookie: b"session=xyz",
+            if_none_match: b"",
+            if_modified_since: b"",
+            accept_gzip: false,
+        };
+        let len = format_proxy_request(&req, &mut out);
+        let s = core::str::from_utf8(&out[..len]).expect("valid request bytes");
+        assert!(s.starts_with("POST /api/browser/proxy?url=https%3A%2F%2Fapi.interos.org%2Fv1%2Fauth"));
+        assert!(s.contains("Content-Length: 23\r\n"));
+        assert!(s.contains("Content-Type: application/x-www-form-urlencoded\r\n"));
+        assert!(s.ends_with("\r\n\r\nuser=alice&action=login"));
+
+        // 303 must switch to GET and drop POST body
+        let m303 = method_for_redirect(303, HttpMethod::Post);
+        assert_eq!(m303, HttpMethod::Get);
+
+        // 307 must preserve POST method and body
+        let m307 = method_for_redirect(307, HttpMethod::Post);
+        assert_eq!(m307, HttpMethod::Post);
+
+        // 308 must also preserve POST method and body
+        let m308 = method_for_redirect(308, HttpMethod::Post);
+        assert_eq!(m308, HttpMethod::Post);
+    }
+
+    #[test]
+    fn test_cookie_jar_scoping_rules() {
+        let mut jar = CookieJar::new();
+        // Domain cookie: scoped to .example.com
+        assert_eq!(
+            jar.store(b"https://api.example.com/", b"global=1; Domain=example.com; Path=/", 1000),
+            CookieOutcome::Stored
+        );
+        // Host-only cookie: scoped strictly to auth.example.com
+        assert_eq!(
+            jar.store(b"https://auth.example.com/login", b"auth_token=secret; Path=/login; Secure", 1000),
+            CookieOutcome::Stored
+        );
+        // Path-scoped cookie
+        assert_eq!(
+            jar.store(b"https://example.com/app", b"app_state=active; Path=/app", 1000),
+            CookieOutcome::Stored
+        );
+
+        let mut out = [0u8; 256];
+
+        // Root request to example.com should receive global cookie, but NOT path or host-only
+        let n = jar.header_for(b"https://example.com/", 1001, &mut out);
+        let header = core::str::from_utf8(&out[..n]).unwrap();
+        assert!(header.contains("global=1"));
+        assert!(!header.contains("auth_token"));
+        assert!(!header.contains("app_state"));
+
+        // Request to auth.example.com/login (HTTPS) should receive both global and auth_token
+        let n = jar.header_for(b"https://auth.example.com/login", 1001, &mut out);
+        let header = core::str::from_utf8(&out[..n]).unwrap();
+        assert!(header.contains("global=1"));
+        assert!(header.contains("auth_token=secret"));
+
+        // Insecure HTTP request to auth.example.com/login must NOT receive Secure auth_token
+        let n = jar.header_for(b"http://auth.example.com/login", 1001, &mut out);
+        let header = core::str::from_utf8(&out[..n]).unwrap();
+        assert!(!header.contains("auth_token"));
+
+        // Request to other.org must receive NO cookies
+        let n = jar.header_for(b"https://other.org/", 1001, &mut out);
+        assert_eq!(n, 0);
     }
 }

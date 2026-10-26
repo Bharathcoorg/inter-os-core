@@ -471,10 +471,16 @@ impl<'a, 's> Builder<'a, 's> {
                     let is_item = style.display == Display::ListItem;
                     let marker = if is_item {
                         list_index += 1;
-                        if ordered {
-                            Marker::Number(list_index)
-                        } else {
-                            Marker::Bullet
+                        match style.list_style_type {
+                            style::ListStyleType::None => Marker::None,
+                            style::ListStyleType::Decimal => Marker::Number(list_index),
+                            style::ListStyleType::Disc => {
+                                if ordered {
+                                    Marker::Number(list_index)
+                                } else {
+                                    Marker::Bullet
+                                }
+                            }
                         }
                     } else {
                         Marker::None
@@ -545,8 +551,20 @@ impl<'a, 's> Builder<'a, 's> {
             - style.padding_right as i32
             - border * 2)
             .max(32) as usize;
-        let content_x = box_x + border + style.padding_left as i32;
-        let top = y + margin_top;
+        let pos_offset_x = match style.position {
+            super::style::Position::Relative if style.has_left => style.left as i32,
+            super::style::Position::Relative if style.has_right => -(style.right as i32),
+            super::style::Position::Absolute if style.has_left => style.left as i32 - box_x,
+            _ => 0,
+        };
+        let pos_offset_y = match style.position {
+            super::style::Position::Relative if style.has_top => style.top as i32,
+            super::style::Position::Relative if style.has_bottom => -(style.bottom as i32),
+            super::style::Position::Absolute if style.has_top => style.top as i32 - (y + margin_top),
+            _ => 0,
+        };
+        let content_x = box_x + border + style.padding_left as i32 + pos_offset_x;
+        let top = y + margin_top + pos_offset_y;
 
         if tag.eq_ignore_ascii_case(b"hr") {
             let rule_y = top + 6;
