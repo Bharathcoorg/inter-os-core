@@ -34,6 +34,18 @@ pub const INFERENCE_ABI_VERSION: u16 = 1;
 /// such a service exists.
 pub const SERVICE_INFERENCE: u8 = 12;
 
+/// IPC message type for vector embedding queries: `0x454D_4244` (ASCII `b"EMBD"`).
+pub const MSG_TYPE_EMBED: u32 = 0x454D_4244;
+
+/// IPC message type for GGUF model metadata / header queries: `0x4747_5546` (ASCII `b"GGUF"`).
+pub const MSG_TYPE_GGUF: u32 = 0x4747_5546;
+
+/// IPC message type for generative token stream queries: `0x4745_4E52` (ASCII `b"GENR"`).
+pub const MSG_TYPE_GENERATE: u32 = 0x4745_4E52;
+
+/// Alternate ASCII alias for generative queries: `0x4745_4E45` (ASCII `b"GENE"`).
+pub const MSG_TYPE_GENERATE_ALT: u32 = 0x4745_4E45;
+
 /// Valid Matryoshka representation dimensions for EmbeddingGemma 2.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]

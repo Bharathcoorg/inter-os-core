@@ -1,18 +1,31 @@
-//! Lightweight, zero-allocation GGUF metadata parser for InterOS AI service (`aid`).
+//! Lightweight, zero-allocation GGUF metadata & tensor parser for InterOS AI service (`aid`).
 //!
 //! Strictly `#![no_std]` and zero heap allocation.
 //! Parses GGUF file headers (magic `0x46554747`, version, tensor count, kv count)
-//! from raw byte slices and reads model headers from `/system/models/` or `/data/models/`.
+//! from raw byte slices and reads model headers & tensor descriptors from `/system/models/` or `/data/models/`.
 
 use interos_std as std;
 
 /// GGUF file format magic number: `0x46554747` (ASCII `b"GGUF"` in little-endian).
 pub const GGUF_MAGIC: u32 = 0x46554747;
 
+/// Canonical on-device path for EmbeddingGemma 2 weights in `/data/models`.
+pub const PATH_EMBEDDING_MODEL_DATA: &str = "/data/models/embeddinggemma-2.gguf";
+/// Fallback system path for EmbeddingGemma 2 weights in `/system/models`.
+pub const PATH_EMBEDDING_MODEL_SYSTEM: &str = "/system/models/embeddinggemma-2.gguf";
+
+/// Canonical on-device path for Gemma 4 2B generative weights in `/data/models`.
+pub const PATH_GENERATIVE_MODEL_DATA: &str = "/data/models/gemma4-2b.gguf";
+/// Fallback system path for Gemma 4 2B generative weights in `/system/models`.
+pub const PATH_GENERATIVE_MODEL_SYSTEM: &str = "/system/models/gemma4-2b.gguf";
+
+/// Maximum length for a tensor name in zero-allocation buffer.
+pub const MAX_TENSOR_NAME_LEN: usize = 64;
+
 /// Error types for GGUF parsing and model probing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GgufError {
-    /// Provided buffer is smaller than the minimum 24-byte header prefix.
+    /// Provided buffer is smaller than the minimum 24-byte header prefix or required record.
     BufferTooShort,
     /// Magic number did not match `0x46554747` (`b"GGUF"`).
     InvalidMagic,
@@ -24,6 +37,8 @@ pub enum GgufError {
     ReadFailed,
     /// No valid GGUF models were located in `/system/models/` or `/data/models/`.
     NoModelsFound,
+    /// Metadata corruption or unparseable value type.
+    InvalidMetadata,
 }
 
 /// GGUF file header prefix representation (24 bytes).
@@ -95,6 +110,48 @@ impl GgufHeader {
     }
 }
 
+/// GGUF tensor descriptor (zero heap allocation).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GgufTensorInfo {
+    /// Byte length of tensor name in `name`.
+    pub name_len: usize,
+    /// ASCII / UTF-8 tensor name bytes (e.g. `token_embd.weight`).
+    pub name: [u8; MAX_TENSOR_NAME_LEN],
+    /// Number of dimensions (1 to 4).
+    pub n_dimensions: u32,
+    /// Dimensions (e.g. [768, 256000, 0, 0]).
+    pub dimensions: [u64; 4],
+    /// GGML data type identifier (0 = F32, 1 = F16, 2 = Q4_0, 8 = Q8_0, etc.).
+    pub tensor_type: u32,
+    /// Offset relative to the start of binary tensor data.
+    pub offset: u64,
+}
+
+impl GgufTensorInfo {
+    pub const fn empty() -> Self {
+        Self {
+            name_len: 0,
+            name: [0u8; MAX_TENSOR_NAME_LEN],
+            n_dimensions: 0,
+            dimensions: [0u64; 4],
+            tensor_type: 0,
+            offset: 0,
+        }
+    }
+
+    pub fn name_as_bytes(&self) -> &[u8] {
+        &self.name[..self.name_len.min(MAX_TENSOR_NAME_LEN)]
+    }
+
+    pub fn name_as_str(&self) -> Result<&str, core::str::Utf8Error> {
+        core::str::from_utf8(self.name_as_bytes())
+    }
+
+    pub fn matches_name(&self, expected: &[u8]) -> bool {
+        self.name_as_bytes() == expected
+    }
+}
+
 /// GGUF metadata value types as defined in the official specification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
@@ -135,6 +192,236 @@ impl GgufMetadataValueType {
     }
 }
 
+/// Zero-allocation helper to skip a single metadata value in a GGUF byte buffer.
+pub fn skip_metadata_value(buf: &[u8], offset: &mut usize, val_type: u32) -> Result<(), GgufError> {
+    match val_type {
+        0 | 1 | 7 => {
+            // Uint8, Int8, Bool: 1 byte
+            if *offset + 1 > buf.len() {
+                return Err(GgufError::BufferTooShort);
+            }
+            *offset += 1;
+        }
+        2 | 3 => {
+            // Uint16, Int16: 2 bytes
+            if *offset + 2 > buf.len() {
+                return Err(GgufError::BufferTooShort);
+            }
+            *offset += 2;
+        }
+        4 | 5 | 6 => {
+            // Uint32, Int32, Float32: 4 bytes
+            if *offset + 4 > buf.len() {
+                return Err(GgufError::BufferTooShort);
+            }
+            *offset += 4;
+        }
+        10 | 11 | 12 => {
+            // Uint64, Int64, Float64: 8 bytes
+            if *offset + 8 > buf.len() {
+                return Err(GgufError::BufferTooShort);
+            }
+            *offset += 8;
+        }
+        8 => {
+            // String: 8 bytes length + string bytes
+            if *offset + 8 > buf.len() {
+                return Err(GgufError::BufferTooShort);
+            }
+            let str_len = u64::from_le_bytes([
+                buf[*offset], buf[*offset + 1], buf[*offset + 2], buf[*offset + 3],
+                buf[*offset + 4], buf[*offset + 5], buf[*offset + 6], buf[*offset + 7],
+            ]) as usize;
+            *offset += 8;
+            if *offset + str_len > buf.len() {
+                return Err(GgufError::BufferTooShort);
+            }
+            *offset += str_len;
+        }
+        9 => {
+            // Array: 4 bytes element_type + 8 bytes element_count + elements
+            if *offset + 12 > buf.len() {
+                return Err(GgufError::BufferTooShort);
+            }
+            let elem_type = u32::from_le_bytes([
+                buf[*offset], buf[*offset + 1], buf[*offset + 2], buf[*offset + 3],
+            ]);
+            let elem_count = u64::from_le_bytes([
+                buf[*offset + 4], buf[*offset + 5], buf[*offset + 6], buf[*offset + 7],
+                buf[*offset + 8], buf[*offset + 9], buf[*offset + 10], buf[*offset + 11],
+            ]) as usize;
+            *offset += 12;
+
+            match elem_type {
+                0 | 1 | 7 => {
+                    let total = elem_count;
+                    if *offset + total > buf.len() {
+                        return Err(GgufError::BufferTooShort);
+                    }
+                    *offset += total;
+                }
+                2 | 3 => {
+                    let total = elem_count.checked_mul(2).ok_or(GgufError::InvalidMetadata)?;
+                    if *offset + total > buf.len() {
+                        return Err(GgufError::BufferTooShort);
+                    }
+                    *offset += total;
+                }
+                4 | 5 | 6 => {
+                    let total = elem_count.checked_mul(4).ok_or(GgufError::InvalidMetadata)?;
+                    if *offset + total > buf.len() {
+                        return Err(GgufError::BufferTooShort);
+                    }
+                    *offset += total;
+                }
+                10 | 11 | 12 => {
+                    let total = elem_count.checked_mul(8).ok_or(GgufError::InvalidMetadata)?;
+                    if *offset + total > buf.len() {
+                        return Err(GgufError::BufferTooShort);
+                    }
+                    *offset += total;
+                }
+                8 => {
+                    // Array of strings
+                    for _ in 0..elem_count {
+                        if *offset + 8 > buf.len() {
+                            return Err(GgufError::BufferTooShort);
+                        }
+                        let s_len = u64::from_le_bytes([
+                            buf[*offset], buf[*offset + 1], buf[*offset + 2], buf[*offset + 3],
+                            buf[*offset + 4], buf[*offset + 5], buf[*offset + 6], buf[*offset + 7],
+                        ]) as usize;
+                        *offset += 8;
+                        if *offset + s_len > buf.len() {
+                            return Err(GgufError::BufferTooShort);
+                        }
+                        *offset += s_len;
+                    }
+                }
+                _ => return Err(GgufError::InvalidMetadata),
+            }
+        }
+        _ => return Err(GgufError::InvalidMetadata),
+    }
+    Ok(())
+}
+
+/// Zero-allocation helper to skip all key-value pairs in a GGUF buffer.
+pub fn skip_all_kv_pairs(buf: &[u8], offset: &mut usize, kv_count: u64) -> Result<(), GgufError> {
+    for _ in 0..kv_count {
+        if *offset + 8 > buf.len() {
+            return Err(GgufError::BufferTooShort);
+        }
+        let key_len = u64::from_le_bytes([
+            buf[*offset], buf[*offset + 1], buf[*offset + 2], buf[*offset + 3],
+            buf[*offset + 4], buf[*offset + 5], buf[*offset + 6], buf[*offset + 7],
+        ]) as usize;
+        *offset += 8;
+
+        if *offset + key_len + 4 > buf.len() {
+            return Err(GgufError::BufferTooShort);
+        }
+        *offset += key_len;
+
+        let val_type = u32::from_le_bytes([
+            buf[*offset], buf[*offset + 1], buf[*offset + 2], buf[*offset + 3],
+        ]);
+        *offset += 4;
+
+        skip_metadata_value(buf, offset, val_type)?;
+    }
+    Ok(())
+}
+
+/// Parses a single GGUF tensor info entry from a byte buffer at `offset`, advancing `offset`.
+pub fn parse_tensor_info(buf: &[u8], offset: &mut usize) -> Result<GgufTensorInfo, GgufError> {
+    if *offset + 8 > buf.len() {
+        return Err(GgufError::BufferTooShort);
+    }
+    let name_len = u64::from_le_bytes([
+        buf[*offset], buf[*offset + 1], buf[*offset + 2], buf[*offset + 3],
+        buf[*offset + 4], buf[*offset + 5], buf[*offset + 6], buf[*offset + 7],
+    ]) as usize;
+    *offset += 8;
+
+    if *offset + name_len + 4 > buf.len() {
+        return Err(GgufError::BufferTooShort);
+    }
+    let mut info = GgufTensorInfo::empty();
+    let copy_len = name_len.min(MAX_TENSOR_NAME_LEN);
+    info.name[..copy_len].copy_from_slice(&buf[*offset..*offset + copy_len]);
+    info.name_len = name_len;
+    *offset += name_len;
+
+    let n_dims = u32::from_le_bytes([
+        buf[*offset], buf[*offset + 1], buf[*offset + 2], buf[*offset + 3],
+    ]);
+    *offset += 4;
+    info.n_dimensions = n_dims;
+
+    let dims_bytes_len = (n_dims as usize).checked_mul(8).ok_or(GgufError::InvalidMetadata)?;
+    if *offset + dims_bytes_len + 4 + 8 > buf.len() {
+        return Err(GgufError::BufferTooShort);
+    }
+
+    for d in 0..(n_dims as usize).min(4) {
+        let dim_val = u64::from_le_bytes([
+            buf[*offset + d * 8], buf[*offset + d * 8 + 1],
+            buf[*offset + d * 8 + 2], buf[*offset + d * 8 + 3],
+            buf[*offset + d * 8 + 4], buf[*offset + d * 8 + 5],
+            buf[*offset + d * 8 + 6], buf[*offset + d * 8 + 7],
+        ]);
+        info.dimensions[d] = dim_val;
+    }
+    *offset += dims_bytes_len;
+
+    info.tensor_type = u32::from_le_bytes([
+        buf[*offset], buf[*offset + 1], buf[*offset + 2], buf[*offset + 3],
+    ]);
+    *offset += 4;
+
+    info.offset = u64::from_le_bytes([
+        buf[*offset], buf[*offset + 1], buf[*offset + 2], buf[*offset + 3],
+        buf[*offset + 4], buf[*offset + 5], buf[*offset + 6], buf[*offset + 7],
+    ]);
+    *offset += 8;
+
+    Ok(info)
+}
+
+/// Scans a GGUF byte buffer for a tensor by exact name without allocating.
+pub fn find_tensor(buf: &[u8], target_name: &[u8]) -> Result<Option<GgufTensorInfo>, GgufError> {
+    let header = GgufHeader::parse(buf)?;
+    let mut offset = GgufHeader::HEADER_SIZE;
+    skip_all_kv_pairs(buf, &mut offset, header.kv_count)?;
+
+    for _ in 0..header.tensor_count {
+        let tensor = parse_tensor_info(buf, &mut offset)?;
+        if tensor.matches_name(target_name) {
+            return Ok(Some(tensor));
+        }
+    }
+
+    Ok(None)
+}
+
+/// Reads a model file's initial header and scans for a specific tensor name.
+pub fn scan_file_for_tensor(
+    path: &str,
+    target_name: &[u8],
+) -> Result<Option<GgufTensorInfo>, GgufError> {
+    let fd = std::fs_open(path, std::FS_READ).map_err(|_| GgufError::FileNotFound)?;
+    let mut buf = [0u8; 4096];
+    let read_res = std::fs_read(fd, &mut buf);
+    let _ = std::fs_close(fd);
+
+    let n = read_res.map_err(|_| GgufError::ReadFailed)?;
+    if n < GgufHeader::HEADER_SIZE {
+        return Err(GgufError::BufferTooShort);
+    }
+    find_tensor(&buf[..n], target_name)
+}
+
 /// Zero-allocation helper to look up a string metadata value by key in a GGUF buffer.
 ///
 /// Returns the slice of UTF-8 bytes for the string value if found.
@@ -163,31 +450,23 @@ pub fn find_metadata_string<'a>(buf: &'a [u8], target_key: &[u8]) -> Option<&'a 
         ]);
         offset += 4;
 
-        match val_type {
-            8 => {
-                // String type
-                if offset + 8 > buf.len() {
-                    return None;
-                }
-                let str_len = u64::from_le_bytes([
-                    buf[offset], buf[offset + 1], buf[offset + 2], buf[offset + 3],
-                    buf[offset + 4], buf[offset + 5], buf[offset + 6], buf[offset + 7],
-                ]) as usize;
-                offset += 8;
-                if offset + str_len > buf.len() {
-                    return None;
-                }
-                let str_val = &buf[offset..offset + str_len];
-                offset += str_len;
-                if key == target_key {
-                    return Some(str_val);
-                }
+        if key == target_key && val_type == 8 {
+            if offset + 8 > buf.len() {
+                return None;
             }
-            0 | 1 | 7 => offset += 1, // u8, i8, bool
-            2 | 3 => offset += 2,     // u16, i16
-            4 | 5 | 6 => offset += 4, // u32, i32, f32
-            10 | 11 | 12 => offset += 8, // u64, i64, f64
-            _ => return None, // Unsupported or complex types (like nested array) break scanning
+            let str_len = u64::from_le_bytes([
+                buf[offset], buf[offset + 1], buf[offset + 2], buf[offset + 3],
+                buf[offset + 4], buf[offset + 5], buf[offset + 6], buf[offset + 7],
+            ]) as usize;
+            offset += 8;
+            if offset + str_len > buf.len() {
+                return None;
+            }
+            return Some(&buf[offset..offset + str_len]);
+        }
+
+        if skip_metadata_value(buf, &mut offset, val_type).is_err() {
+            return None;
         }
     }
 
@@ -210,12 +489,16 @@ pub fn read_gguf_header(path: &str) -> Result<GgufHeader, GgufError> {
     GgufHeader::parse(&buf)
 }
 
-/// Candidate model paths checked in priority order.
+/// Candidate model paths checked in priority order for general model probing.
 pub const MODEL_CANDIDATE_PATHS: &[&str] = &[
-    "/system/models/embeddinggemma-2.gguf",
+    PATH_EMBEDDING_MODEL_DATA,
+    PATH_EMBEDDING_MODEL_SYSTEM,
     "/system/models/embeddinggemma-2-740m.gguf",
+    PATH_GENERATIVE_MODEL_DATA,
+    PATH_GENERATIVE_MODEL_SYSTEM,
+    "/system/models/gemma-2b.gguf",
+    "/data/models/gemma-2b.gguf",
     "/system/models/model.gguf",
-    "/data/models/embeddinggemma-2.gguf",
     "/data/models/model.gguf",
 ];
 
@@ -262,6 +545,77 @@ pub fn probe_gguf_header() -> Result<(GgufHeader, &'static str), GgufError> {
     }
 
     Err(GgufError::NoModelsFound)
+}
+
+/// Holds probed GGUF model headers for both embedding and generative models.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ProbedModels {
+    /// Physical EmbeddingGemma 2 model header and path, if found on storage.
+    pub embedding: Option<(GgufHeader, &'static str)>,
+    /// Physical Gemma 4 2B generative model header and path, if found on storage.
+    pub generative: Option<(GgufHeader, &'static str)>,
+}
+
+impl ProbedModels {
+    pub const fn empty() -> Self {
+        Self {
+            embedding: None,
+            generative: None,
+        }
+    }
+
+    pub fn has_embedding(&self) -> bool {
+        self.embedding.is_some()
+    }
+
+    pub fn has_generative(&self) -> bool {
+        self.generative.is_some()
+    }
+}
+
+/// Probes specifically for physical EmbeddingGemma 2 model weights.
+///
+/// Priority: `/data/models/embeddinggemma-2.gguf`, then `/system/models/embeddinggemma-2.gguf`.
+pub fn probe_embedding_model() -> Result<(GgufHeader, &'static str), GgufError> {
+    const CANDIDATES: &[&str] = &[
+        PATH_EMBEDDING_MODEL_DATA,
+        PATH_EMBEDDING_MODEL_SYSTEM,
+        "/system/models/embeddinggemma-2-740m.gguf",
+        "/data/models/model.gguf",
+        "/system/models/model.gguf",
+    ];
+    for &path in CANDIDATES {
+        if let Ok(hdr) = read_gguf_header(path) {
+            return Ok((hdr, path));
+        }
+    }
+    Err(GgufError::NoModelsFound)
+}
+
+/// Probes specifically for physical Gemma 4 2B generative model weights.
+///
+/// Priority: `/data/models/gemma4-2b.gguf`, then `/system/models/gemma4-2b.gguf`.
+pub fn probe_generative_model() -> Result<(GgufHeader, &'static str), GgufError> {
+    const CANDIDATES: &[&str] = &[
+        PATH_GENERATIVE_MODEL_DATA,
+        PATH_GENERATIVE_MODEL_SYSTEM,
+        "/data/models/gemma-2b.gguf",
+        "/system/models/gemma-2b.gguf",
+    ];
+    for &path in CANDIDATES {
+        if let Ok(hdr) = read_gguf_header(path) {
+            return Ok((hdr, path));
+        }
+    }
+    Err(GgufError::NoModelsFound)
+}
+
+/// Probes all candidate locations for both embedding and generative models.
+pub fn probe_all_models() -> ProbedModels {
+    ProbedModels {
+        embedding: probe_embedding_model().ok(),
+        generative: probe_generative_model().ok(),
+    }
 }
 
 #[cfg(test)]
@@ -354,5 +708,132 @@ mod tests {
 
         let not_found = find_metadata_string(&buf, b"general.architecture");
         assert_eq!(not_found, None);
+    }
+
+    #[test]
+    fn test_find_metadata_with_array_skip() {
+        let mut buf = [0u8; 256];
+        let header = GgufHeader {
+            magic: GGUF_MAGIC,
+            version: 3,
+            tensor_count: 1,
+            kv_count: 2,
+        };
+        header.write_to(&mut buf).unwrap();
+
+        let mut offset = 24;
+        // KV 1: key "dimensions", value type Array (9) of uint32 (4 elements)
+        let key1 = b"dimensions";
+        buf[offset..offset + 8].copy_from_slice(&(key1.len() as u64).to_le_bytes());
+        offset += 8;
+        buf[offset..offset + key1.len()].copy_from_slice(key1);
+        offset += key1.len();
+
+        buf[offset..offset + 4].copy_from_slice(&9u32.to_le_bytes()); // Array
+        offset += 4;
+        buf[offset..offset + 4].copy_from_slice(&4u32.to_le_bytes()); // element type = uint32 (4)
+        offset += 4;
+        buf[offset..offset + 8].copy_from_slice(&4u64.to_le_bytes()); // 4 elements
+        offset += 8;
+        // 4 x 4 bytes = 16 bytes
+        buf[offset..offset + 16].copy_from_slice(&[1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4, 0, 0, 0]);
+        offset += 16;
+
+        // KV 2: key "architecture", value type String (8), value "gemma4"
+        let key2 = b"architecture";
+        let val2 = b"gemma4";
+        buf[offset..offset + 8].copy_from_slice(&(key2.len() as u64).to_le_bytes());
+        offset += 8;
+        buf[offset..offset + key2.len()].copy_from_slice(key2);
+        offset += key2.len();
+
+        buf[offset..offset + 4].copy_from_slice(&8u32.to_le_bytes()); // String
+        offset += 4;
+        buf[offset..offset + 8].copy_from_slice(&(val2.len() as u64).to_le_bytes());
+        offset += 8;
+        buf[offset..offset + val2.len()].copy_from_slice(val2);
+
+        // find_metadata_string should successfully skip the array and find "architecture"
+        let found = find_metadata_string(&buf, b"architecture");
+        assert_eq!(found, Some(&val2[..]));
+    }
+
+    #[test]
+    fn test_tensor_parsing_and_scanning() {
+        let mut buf = [0u8; 512];
+        let header = GgufHeader {
+            magic: GGUF_MAGIC,
+            version: 3,
+            tensor_count: 2,
+            kv_count: 0,
+        };
+        header.write_to(&mut buf).unwrap();
+
+        let mut offset = 24;
+
+        // Tensor 1: "token_embd.weight", 2 dims: [768, 256000], type 0 (F32), offset 0
+        let t1_name = b"token_embd.weight";
+        buf[offset..offset + 8].copy_from_slice(&(t1_name.len() as u64).to_le_bytes());
+        offset += 8;
+        buf[offset..offset + t1_name.len()].copy_from_slice(t1_name);
+        offset += t1_name.len();
+
+        buf[offset..offset + 4].copy_from_slice(&2u32.to_le_bytes()); // 2 dims
+        offset += 4;
+        buf[offset..offset + 8].copy_from_slice(&768u64.to_le_bytes()); // dim 0
+        offset += 8;
+        buf[offset..offset + 8].copy_from_slice(&256000u64.to_le_bytes()); // dim 1
+        offset += 8;
+        buf[offset..offset + 4].copy_from_slice(&0u32.to_le_bytes()); // type F32
+        offset += 4;
+        buf[offset..offset + 8].copy_from_slice(&0u64.to_le_bytes()); // offset 0
+        offset += 8;
+
+        // Tensor 2: "output.weight", 2 dims: [768, 256000], type 2 (Q4_0), offset 786432000
+        let t2_name = b"output.weight";
+        buf[offset..offset + 8].copy_from_slice(&(t2_name.len() as u64).to_le_bytes());
+        offset += 8;
+        buf[offset..offset + t2_name.len()].copy_from_slice(t2_name);
+        offset += t2_name.len();
+
+        buf[offset..offset + 4].copy_from_slice(&2u32.to_le_bytes()); // 2 dims
+        offset += 4;
+        buf[offset..offset + 8].copy_from_slice(&768u64.to_le_bytes()); // dim 0
+        offset += 8;
+        buf[offset..offset + 8].copy_from_slice(&256000u64.to_le_bytes()); // dim 1
+        offset += 8;
+        buf[offset..offset + 4].copy_from_slice(&2u32.to_le_bytes()); // type Q4_0
+        offset += 4;
+        buf[offset..offset + 8].copy_from_slice(&786432000u64.to_le_bytes()); // offset
+
+        // Scan for tensor 1
+        let found_t1 = find_tensor(&buf, b"token_embd.weight").expect("scan succeeds");
+        assert!(found_t1.is_some());
+        let t1 = found_t1.unwrap();
+        assert_eq!(t1.name_as_bytes(), b"token_embd.weight");
+        assert_eq!(t1.n_dimensions, 2);
+        assert_eq!(t1.dimensions[0], 768);
+        assert_eq!(t1.dimensions[1], 256000);
+        assert_eq!(t1.tensor_type, 0);
+        assert_eq!(t1.offset, 0);
+
+        // Scan for tensor 2
+        let found_t2 = find_tensor(&buf, b"output.weight").expect("scan succeeds");
+        assert!(found_t2.is_some());
+        let t2 = found_t2.unwrap();
+        assert_eq!(t2.name_as_bytes(), b"output.weight");
+        assert_eq!(t2.tensor_type, 2);
+        assert_eq!(t2.offset, 786432000);
+
+        // Scan for nonexistent tensor
+        let not_found = find_tensor(&buf, b"nonexistent.weight").expect("scan succeeds");
+        assert!(not_found.is_none());
+    }
+
+    #[test]
+    fn test_probed_models_empty() {
+        let probed = ProbedModels::empty();
+        assert!(!probed.has_embedding());
+        assert!(!probed.has_generative());
     }
 }
