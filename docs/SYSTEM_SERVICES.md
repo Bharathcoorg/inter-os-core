@@ -19,6 +19,9 @@ InterOS Core isolates hardware-facing policy outside the microkernel. System ser
 | **9** | `compositor` | Window composition and DRM/KMS presentation | Restart on failure | Present | **QEMU-verified** |
 | **10** | `launcher` | Package catalog, shell UI, gesture navigation| Restart on failure | Present | **QEMU-verified** |
 | **11** | `sensord` | Accelerometer, gyroscope, light sensor | Restart on failure | Present | **Unit-tested (emulated)** |
+| **12** | `aid` | AI inference runtime, vector embeddings, RAG retrieval | Restart on failure | Present | **QEMU-verified / Host-bridge** |
+
+> *Note: Daemons 1–8, 11, and 12 are built from `userspace/system-service/`. Compositor (9) and Launcher (10) are standalone Ring-3 applications in `apps/` with system service registration.*
 
 ---
 

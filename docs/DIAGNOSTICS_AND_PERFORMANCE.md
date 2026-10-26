@@ -52,7 +52,7 @@ In accordance with the [Platform Reality Contract](PLATFORM_REALITY_CONTRACT.md)
 InterOS provides empirical, automated benchmark verification tools under `tools/` with companion test contracts under `tests/`:
 
 - **System & Storage Benchmark (`tools/bench_interos.py`)**:
-  - Automatically verifies canonical boot image size (6.47 MB `inter-os-bios.img`), 16 Ring-3 application crates, live kernel heap usage via `[DIAG_STATE]` telemetry, and writes structured results to `target/benchmark_report.json` with fail-closed semantics.
+  - Automatically verifies canonical boot image size (~10.47 MB `inter-os-bios.img`, 10,978,304 bytes), 16 Ring-3 application crates, live kernel heap usage via `[DIAG_STATE]` telemetry, and writes structured results to `target/benchmark_report.json` with fail-closed semantics.
 - **Boot Latency Measurement (`tools/bench_boot.py`)**:
   - Measures elapsed monotonic cycles from QEMU process startup to initial scanout present (`Step 5: Initial presentation complete`).
 - **Touch-to-Scanout Latency (`tools/bench_tap_latency.py`)**:

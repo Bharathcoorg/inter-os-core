@@ -8,8 +8,7 @@
 ![Build: Reproducible](https://img.shields.io/badge/Build-Reproducible-blue.svg)
 ![Verification: Local Audit Required](https://img.shields.io/badge/Verification-Local%20Audit%20Required-yellow.svg)
 
-### **The Sovereign, Open-Source Rust Mobile Operating System Foundation**
-*A memory-safe, capability-based microkernel mobile platform for x86_64, AArch64, and RISC-V 64.*
+### **InterOS — Sovereign Rust mobile OS for AArch64, RISC-V 64, and x86_64 with native on-device Local open-model AI runtime, native Rust mobile apps, and Android compatibility.**
 
 [Quickstart](#-quickstart) • [Architecture](#-system-architecture) • [Reality Contract](#-platform-reality-contract) • [Security & Isolation](#-security-invariants--isolation-model) • [UI & Compositor](#-ui-rendering--compositor) • [Device Studio](#-universal-device-studio) • [Developer CLI](#-developer-cli-interos) • [Experimental Bring-Up](#-hardware-bring-up--experimental-status)
 
@@ -59,7 +58,7 @@ See [Platform Reality Contract](docs/PLATFORM_REALITY_CONTRACT.md) and run `pyth
 | **Process Lifecycle & Multitasking** | Present | **Unit-tested / QEMU-verified** | Ring-3 preemptive scheduler, PID tracking, `WaitPid` & `ExitWithCode` syscalls |
 | **DRM/KMS Multi-Surface Compositor** | Present | **QEMU-verified** | 720×1440 portrait scanout (ARGB8888, 32 bpp, 60 Hz) with 1:1 composition from the 720×1440 authoring space and no resampling, double-buffered scanout with dirty row band present (`present_dst_row_band`), and 4-bit grayscale coverage anti-aliasing |
 | **Native Typography & UI Primitives** | Present | **Unit-tested / QEMU-verified** | Proportional 16×24 anti-aliased font (`test_text_aa`), tabular digits, squircle cards |
-| **Native Smartphone Applications** | Present | **Unit-tested / QEMU-verified** | 15 application crates in `apps/` (`launcher`, `settings`, `messages`, `dialer`, `camera`, `gallery`, `file_manager`, `calculator`, `vault`, `calendar`, `browser`, `terminal`, `music`, `notes`, `compositor`), all `#![no_std]` and `#![no_main]` with zero runtime heap allocations in render loops |
+| **Native Smartphone Applications** | Present | **Unit-tested / QEMU-verified** | 16 application crates in `apps/` (`launcher`, `settings`, `messages`, `dialer`, `camera`, `gallery`, `file_manager`, `calculator`, `vault`, `calendar`, `browser`, `music`, `notes`, `video_player`, `agent_manager`, `compositor`), all `#![no_std]` and `#![no_main]` with zero runtime heap allocations in render loops |
 | **Android Compatibility Boundary (ACR)** | Experimental / Sandboxed | **Source-only / Unit-tested** | Fail-closed APK signature boundary, APK structure/manifest parsing, bounded DEX opcode subset, sandbox VFS and framework bridge; full Android app launch is not supported yet |
 | **Universal Device Studio** | Present | **QEMU-verified** | `emulator/server.py`; Web-based smartphone studio (`http://localhost:4300`) with persistent binary frame streaming (`/api/screen/binary_stream`), zero-overhead `ImageData` caching, live telemetry deck, and 1:1 touch/gesture pipeline |
 | **Unified Developer CLI (`interos`)** | Present | **Unit-tested** | `tools/interos.py`; `doctor`, `build`, `test`, `package`, `sign`, `verify`, `install`, `run` |
@@ -75,11 +74,13 @@ Authentic empirical measurements captured via `python tools/bench_boot.py` and `
 | Metric | Android 15 (AOSP) | iOS 18 | Ubuntu Touch | InterOS Sovereign |
 | :--- | :--- | :--- | :--- | :--- |
 | **Active Kernel Heap** | ~2,600 MB (OS RAM) | ~1,900 MB | ~850 MB | **~30 MB** (64 MiB total pool) |
-| **OS Install / Image Size** | ~18.5 GB | ~13.0 GB | ~4.2 GB | **6.47 MB** (`inter-os-bios.img`) |
-| **Cold Boot Latency** | ~28.0 s | ~21.0 s | ~19.0 s | **~20–23 s** (QEMU TCG full launcher boot) |
+| **OS Install / Image Size** | ~18.5 GB | ~13.0 GB | ~4.2 GB | **~10.47 MB** (`inter-os-bios.img`, 10,978,304 bytes) |
+| **Cold Boot Latency** | ~28.0 s (Hardware) | ~21.0 s (Hardware) | ~19.0 s (Hardware) | **~20–23 s** (QEMU TCG software emulation) |
 | **Interactive Render Allocations** | Dynamic GC Pauses | Dynamic ARC Heap | GObject / Heap | **0 bytes** (`#![no_std]` stack/static buffers) |
 | **Authority Model** | Ambient Linux Root | Mach Ports / Daemons | Ambient systemd | **Zero Ambient Authority** (`CapHandle`) |
 | **Kernel Implementation** | C / Linux kernel | C / XNU Mach-BSD | C / Linux kernel | **Rust Microkernel** (`#![no_std]`, bounded `unsafe`) |
+
+> *Note: Android, iOS, and Ubuntu Touch figures reflect total OS RAM on physical silicon devices. InterOS figures reflect active microkernel heap inside the canonical x86_64 QEMU emulator. QEMU cold boot latency is measured under unaccelerated TCG software emulation.*
 
 ---
 
@@ -120,14 +121,14 @@ python tools/interos.py run qemu
 python tools/interos.py logs -f
 ```
 Device Studio web console is accessible at `http://localhost:4300`.
-- **Focus Mode (Default)**: Clean, immersive mobile testing with instant 1:1 touch response.
+- **Focus Mode (Default)**: Clean, immersive mobile testing with responsive, direct 1:1 touch mapping.
 - **Lock Screen Interaction**: The device boots to an authentic mobile lock screen. **Swipe up** (drag upward $\ge 28\text{px}$) to unlock the device and access the home screen app grid. Single taps display an informational hint.
 - **Developer Telemetry Deck**: Press **`D`** or click **`Deck`** in the header to inspect real QEMU CPU registers, block I/O, IPC pipelines, and packages. Press **`F`** or **`Esc`** to return to Focus Mode.
 - See [DEVELOPERS.md](DEVELOPERS.md) for full developer instructions.
 
 ### 4. Execute Test Suites
 ```bash
-python tools/interos.py test --target workspace     # Run workspace unit tests
+python tools/interos.py test --target unit          # Run workspace unit tests
 python tools/interos.py contracts                  # Run static system contract tests
 python tools/interos.py test --target security      # Run adversarial security suite
 ```
@@ -162,7 +163,7 @@ InterOS Core implements a strict **Capability-Based Microkernel** architecture w
                    Launcher Shell
        ┌─────────────────┼─────────────────┐
     Lock Screen     Home Surface      App Drawer
-    Quick Controls  Activity Space    12 First-Party Apps
+    Quick Controls  Activity Space    14 First-Party Apps (16 Native Crates)
                          │
                  Applications (.rapp)
 ```
@@ -253,12 +254,12 @@ python tools/interos.py build --target aarch64  # Build AArch64 microkernel
 python tools/interos.py build --target riscv64  # Build RISC-V 64 microkernel
 
 # Testing & Contracts
-python tools/interos.py test --target workspace
+python tools/interos.py test --target unit
 python tools/interos.py contracts
 python tools/interos.py test --target security
 
 # Package Management (.rapp)
-python tools/interos.py new my_app --template authenticator
+python tools/interos.py new my_app --template basic
 python tools/interos.py package my_app
 python tools/interos.py sign dist/my_app.rapp --key dev.key
 python tools/interos.py verify dist/my_app.rapp
@@ -302,6 +303,3 @@ For experimental hardware bring-up documentation, see [docs/PHYSICAL_HARDWARE_FL
 ## 📄 License
 
 InterOS Core is free and open-source software licensed under the **GNU Affero General Public License v3.0 (AGPLv3)**. See [LICENSE](LICENSE) for the full license text.
-
-### 💼 Commercial & OEM Dual-Licensing
-For hardware manufacturers, enterprise smartphone deployments, or defense contractors requiring proprietary closed-source driver integration, custom board support packages (BSPs), or compliance terms exempt from AGPLv3 copyleft requirements, commercial licensing is available. Contact the maintainers for commercial terms.

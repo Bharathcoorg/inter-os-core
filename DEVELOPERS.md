@@ -12,7 +12,7 @@ Device Studio (`http://localhost:4300`) is the primary developer interface for I
 By default, Device Studio launches in **Focus Mode**:
 - **Distraction-Free**: Centers the native virtual smartphone with an ambient frosted glass backdrop.
 - **Flagship Aesthetic**: Optimized for responsive interactive testing, UI/UX evaluation, app navigation, and presentations.
-- **Real-Time Input**: Mouse and touchpad gestures map directly with zero-latency 1:1 coordinate scaling to the guest microkernel.
+- **Real-Time Input**: Mouse and touchpad gestures map directly with responsive 1:1 coordinate scaling to the guest microkernel.
 
 ### 2. Developer Telemetry Deck
 The **Developer Telemetry Deck** provides deep, transparent hardware and microkernel inspection tools:
@@ -20,7 +20,7 @@ The **Developer Telemetry Deck** provides deep, transparent hardware and microke
 - **Memory & VFS Block I/O**: Real QEMU RAM allocation, active block storage drive name, read ops, and sector I/O accounting.
 - **Live Process Supervisor**: Task list, Ring privilege level, thread states (`Running`, `Blocked`, `Sleeping`), and PID accounting.
 - **IPC Inspector**: Real-time shared-memory IPC ring buffer endpoints, futex events, and message router telemetry.
-- **Universal Package Sideloading**: Drag-and-drop installer supporting `.app` (Rust native), `.rap` (Cryptographic sovereign packages), and `.apk` (Android compatibility boundary).
+- **Universal Package Sideloading**: Drag-and-drop installer supporting `.app` (Rust native), `.rapp` (Cryptographic sovereign packages), and `.apk` (Android compatibility boundary).
 
 ---
 
@@ -62,7 +62,7 @@ InterOS enforces a strict mobile touch and authentication contract:
 
 Before committing changes, always verify all verification suites pass:
 ```bash
-# 1. Run full contract test suite (551/551 contracts)
+# 1. Run full contract test suite (81 active suites / 797 test cases)
 python tests/run_all_contracts.py
 
 # 2. Run kernel unit & subsystem tests
