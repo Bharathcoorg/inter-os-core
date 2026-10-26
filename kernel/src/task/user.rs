@@ -15,15 +15,16 @@ use super::images::*;
 pub const USER_STACK_SIZE: usize = 256 * 1024;
 /// Where every user stack ends.
 ///
-/// WHY 16 MiB and not the old 8 MiB: a user image's writable segment sits
+/// WHY 64 MiB and not the old 16 MiB: a user image's writable segment sits
 /// immediately above its text, so the shell's fixed buffers grow upward from
 /// 4 MiB. With the vector-text coverage cache sized for the hero type rung,
 /// the launcher's segment now ends at 0x806b60 and video_player's at
-/// 0x80d650 -- both past 8 MiB. The loader correctly refused them as
-/// overlapping the stack guard, which leaves the device with no shell. The
-/// stack is virtual until touched, so raising its top costs no extra pages;
-/// what it buys is headroom between static user data and the stack.
-pub const USER_STACK_TOP: usize = 0x0100_0000;
+/// 0x80d650. In addition, applications such as Gallery allocate static frame
+/// buffers and thumbnail caches whose writable/BSS segments extend up to ~16 MiB
+/// (0xfc694c), encroaching upon the 16 MiB stack guard. Raising the stack top
+/// to 64 MiB (0x0400_0000) provides ample headroom for user images while staying
+/// well within the userspace address limit.
+pub const USER_STACK_TOP: usize = 0x0400_0000;
 pub const USER_ADDRESS_SPACE_LIMIT: usize = 256 * 1024 * 1024;
 
 /// User Code Segment Selector with RPL = 3 (GDT Index 4: 0x20 | 3 = 0x23)
@@ -737,6 +738,10 @@ pub fn spawn_userspace_service(service_id: u8, parent_id: TaskId) -> Result<Task
         9 => crate::services::ServiceId::Compositor,
         10 => crate::services::ServiceId::Launcher,
         11 => crate::services::ServiceId::Sensor,
+        12 => crate::services::ServiceId::Inference,
+        13 => crate::services::ServiceId::Search,
+        14 => crate::services::ServiceId::Agent,
+        15 => crate::services::ServiceId::Voice,
         _ => return Err("unknown userspace service"),
     };
     let image = service_image(service_id).ok_or("unknown userspace service image")?;
@@ -1000,7 +1005,7 @@ pub extern "C" fn app_dialer_trampoline() -> ! {
 
 /// Spawns the native Sovereign Dialer App in Ring 3.
 pub fn spawn_app_dialer(id_security: TaskId) -> TaskId {
-    let mut caps = CapabilityTable::new(9);
+    let mut caps = CapabilityTable::new(12);
     caps.insert(Capability {
         id: CapabilityId(1901),
         cap_type: CapabilityType::SerialOutput,
@@ -1068,10 +1073,22 @@ pub fn spawn_app_dialer(id_security: TaskId) -> TaskId {
     // the ringtone is a document the platform holds, so the dialer reads the
     // document's own record rather than the name alone.
     caps.insert(Capability {
-        id: CapabilityId(1908),
+        id: CapabilityId(1909),
         cap_type: CapabilityType::ContentIndexRead,
         rights: Rights::READ,
         object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(1910),
+        cap_type: CapabilityType::AudioStream,
+        rights: Rights::READ | Rights::WRITE,
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(1911),
+        cap_type: CapabilityType::SystemControl,
+        rights: Rights::INVOKE,
+        object_id: crate::services::SERVICE_AUDIO_CONTROL_OBJECT,
     }).ok();
     let id = spawn_user_process_with_parent(
         "app_dialer",
@@ -1943,12 +1960,6 @@ pub fn spawn_app_agent_manager(id_security: TaskId) -> TaskId {
     caps.insert(Capability {
         id: CapabilityId(2915),
         cap_type: CapabilityType::TimerTickRead,
-        rights: Rights::READ,
-        object_id: 0,
-    }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(2916),
-        cap_type: CapabilityType::StorageRawBlock,
         rights: Rights::READ,
         object_id: 0,
     }).ok();
