@@ -58,6 +58,9 @@ pub const MSG_TYPE_SEARCH: u32 = 0x5352_4348;
 /// IPC message type for streaming generation chunks: `0x4745_4E43` (ASCII `b"GENC"`).
 pub const MSG_TYPE_GENERATE_CHUNK: u32 = 0x4745_4E43;
 
+/// IPC message type for cancelling active streaming generation: `0x4341_4E43` (ASCII `b"CANC"`).
+pub const MSG_TYPE_CANCEL: u32 = 0x4341_4E43;
+
 /// Status code: Success.
 pub const STATUS_SUCCESS: u32 = 0;
 /// Status code: Model weights unavailable or absent from storage.

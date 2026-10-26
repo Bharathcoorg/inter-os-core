@@ -18,6 +18,8 @@ pub mod heap;
 pub mod image;
 pub mod settings;
 pub mod wav;
+pub mod engine;
+pub mod webview;
 
 // WHY std under test only: the guest build of this crate is `#![no_std]` and must
 // stay that way, but the unit tests want `Vec` and the other collections to

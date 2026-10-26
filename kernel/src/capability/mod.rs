@@ -129,6 +129,11 @@ pub enum CapabilityType {
     VoiceService,
     /// Permission to capture live microphone audio.
     AudioCapture,
+    /// Permission to bind native callbacks and bidirectional message channels
+    /// to untrusted JavaScript contexts within an embedded WebView.
+    WebViewBridge,
+    /// Permission to communicate with the system webview rendering service.
+    WebViewService,
 }
 
 /// Convenience alias matching system architecture specifications.
@@ -167,6 +172,8 @@ impl CapabilityType {
             CapabilityType::AgentTask => 33,
             CapabilityType::VoiceService => 34,
             CapabilityType::AudioCapture => 35,
+            CapabilityType::WebViewBridge => 36,
+            CapabilityType::WebViewService => 37,
         }
     }
 
@@ -202,6 +209,8 @@ impl CapabilityType {
             33 => Some(CapabilityType::AgentTask),
             34 => Some(CapabilityType::VoiceService),
             35 => Some(CapabilityType::AudioCapture),
+            36 => Some(CapabilityType::WebViewBridge),
+            37 => Some(CapabilityType::WebViewService),
             _ => None,
         }
     }
@@ -239,6 +248,8 @@ impl CapabilityType {
             CapabilityType::AgentTask => "agent.task",
             CapabilityType::VoiceService => "voice.service",
             CapabilityType::AudioCapture => "audio.capture",
+            CapabilityType::WebViewBridge => "webview.bridge",
+            CapabilityType::WebViewService => "webview.service",
         }
     }
 
@@ -275,6 +286,8 @@ impl CapabilityType {
             "agent.task" => Some(CapabilityType::AgentTask),
             "voice.service" => Some(CapabilityType::VoiceService),
             "audio.capture" => Some(CapabilityType::AudioCapture),
+            "webview.bridge" => Some(CapabilityType::WebViewBridge),
+            "webview.service" => Some(CapabilityType::WebViewService),
             _ => None,
         }
     }
@@ -1643,13 +1656,13 @@ mod tests {
     fn capability_type_raw_encoding_roundtrips() {
         for val in [
             1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 24, 25, 26, 27, 28, 29, 30,
-            31, 32, 33, 34, 35,
+            31, 32, 33, 34, 35, 36, 37,
         ] {
             let cap_type = CapabilityType::from_raw(val).expect("valid capability type");
             assert_eq!(cap_type.to_raw(), val);
         }
         assert_eq!(CapabilityType::from_raw(0), None);
-        for invalid in [19, 20, 21, 22, 23, 36, 999] {
+        for invalid in [19, 20, 21, 22, 23, 38, 999] {
             assert_eq!(CapabilityType::from_raw(invalid), None);
         }
         assert_eq!(CapabilityType::MemoryHeap.as_str(), "memory.heap");
