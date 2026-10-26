@@ -1556,6 +1556,22 @@ pub struct AgentToolOutcome {
 
 impl AgentToolOutcome {
     pub fn execute(tool: AgentTool) -> Self {
+        Self::execute_with_consent(tool, true)
+    }
+
+    pub fn execute_with_consent(tool: AgentTool, consent_granted: bool) -> Self {
+        if !consent_granted {
+            let mut output = [0u8; 64];
+            let denied_msg = b"Consent denied: Action rejected by user";
+            output[..39].copy_from_slice(denied_msg);
+            return Self {
+                tool,
+                output,
+                output_len: 39,
+                ok: false,
+            };
+        }
+
         let mut output = [0u8; 64];
         let output_len;
         let mut ok = false;
@@ -3032,6 +3048,11 @@ mod tests {
 
         let probe = AgentToolOutcome::execute(AgentTool::CapabilityCheck);
         assert!(!probe.text().is_empty());
+
+        let denied = AgentToolOutcome::execute_with_consent(AgentTool::Calculator, false);
+        assert!(!denied.ok);
+        assert_eq!(denied.output_len, 39);
+        assert_eq!(denied.text(), "Consent denied: Action rejected by user");
     }
 
     #[test]

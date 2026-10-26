@@ -485,8 +485,12 @@ pub enum Action {
     Remove,
     /// Run the self-test.
     RunTest,
+    /// Run bounded agent tools.
+    RunTools,
     /// Send the prompt to whatever model the device has.
     Send,
+    /// Stop/cancel active streaming token generation.
+    CancelStream,
     /// Empty the conversation and the prompt.
     ClearChat,
     /// Go to the conversation.
@@ -546,6 +550,8 @@ pub struct AgentManagerApp {
     pub sheet_open: bool,
     /// Storage capacity in bytes from the microkernel driver.
     pub storage_bytes: Option<u64>,
+    /// User consent policy for agent tool execution.
+    pub tool_consent: bool,
     /// Bounded agent tool execution outcomes.
     pub agent_tools: [AgentToolOutcome; 5],
     /// Physical memory diagnostics from microkernel.
@@ -577,12 +583,13 @@ impl AgentManagerApp {
             chat: ChatSession::new(),
             sheet_open: false,
             storage_bytes: std::storage_query().ok(),
+            tool_consent: true,
             agent_tools: [
-                AgentToolOutcome::execute(AgentTool::Calculator),
-                AgentToolOutcome::execute(AgentTool::CalendarClock),
-                AgentToolOutcome::execute(AgentTool::StorageStats),
-                AgentToolOutcome::execute(AgentTool::SettingsQuery),
-                AgentToolOutcome::execute(AgentTool::CapabilityCheck),
+                AgentToolOutcome::execute_with_consent(AgentTool::Calculator, true),
+                AgentToolOutcome::execute_with_consent(AgentTool::CalendarClock, true),
+                AgentToolOutcome::execute_with_consent(AgentTool::StorageStats, true),
+                AgentToolOutcome::execute_with_consent(AgentTool::SettingsQuery, true),
+                AgentToolOutcome::execute_with_consent(AgentTool::CapabilityCheck, true),
             ],
             diagnostics: RuntimeDiagnostics::measure(),
             ipc_latency_ticks: 0,
@@ -615,13 +622,26 @@ impl AgentManagerApp {
         self.search = SearchConfiguration::measure();
         self.diagnostics = RuntimeDiagnostics::measure();
         self.agent_tools = [
-            AgentToolOutcome::execute(AgentTool::Calculator),
-            AgentToolOutcome::execute(AgentTool::CalendarClock),
-            AgentToolOutcome::execute(AgentTool::StorageStats),
-            AgentToolOutcome::execute(AgentTool::SettingsQuery),
-            AgentToolOutcome::execute(AgentTool::CapabilityCheck),
+            AgentToolOutcome::execute_with_consent(AgentTool::Calculator, self.tool_consent),
+            AgentToolOutcome::execute_with_consent(AgentTool::CalendarClock, self.tool_consent),
+            AgentToolOutcome::execute_with_consent(AgentTool::StorageStats, self.tool_consent),
+            AgentToolOutcome::execute_with_consent(AgentTool::SettingsQuery, self.tool_consent),
+            AgentToolOutcome::execute_with_consent(AgentTool::CapabilityCheck, self.tool_consent),
         ];
         self.set_action(b"Re-measured: device, grants and search configuration.", Tone::Muted);
+        self.rebuild();
+    }
+
+    /// Executes all bounded agent tools respecting user consent policy.
+    pub fn run_tools(&mut self) {
+        self.agent_tools = [
+            AgentToolOutcome::execute_with_consent(AgentTool::Calculator, self.tool_consent),
+            AgentToolOutcome::execute_with_consent(AgentTool::CalendarClock, self.tool_consent),
+            AgentToolOutcome::execute_with_consent(AgentTool::StorageStats, self.tool_consent),
+            AgentToolOutcome::execute_with_consent(AgentTool::SettingsQuery, self.tool_consent),
+            AgentToolOutcome::execute_with_consent(AgentTool::CapabilityCheck, self.tool_consent),
+        ];
+        self.set_action(b"Agent tools executed.", Tone::Good);
         self.rebuild();
     }
 
@@ -1347,30 +1367,86 @@ impl AgentManagerApp {
         );
 
         self.begin_card(b"Document retrieval", Tone::Plain);
-        let mut doc_buf = [0u8; 512];
-        match std::fs_list("/storage", &mut doc_buf) {
-            Ok(n) if n > 0 => {
-                let payload = &doc_buf[..n.min(doc_buf.len())];
-                let mut shown = 0;
-                for line in payload.split(|&b| b == b'\n') {
-                    if line.is_empty() || shown >= 3 {
-                        continue;
-                    }
-                    let mut parts = line.split(|&b| b == b'|');
-                    if let Some(name) = parts.next() {
-                        if !name.is_empty() {
-                            self.add_line(b"Ranked result", name, Tone::Plain);
-                            self.add_chip(b"Attribution", b"[Storage]", Tone::Good);
-                            shown += 1;
+        let _ = std::ipc_send(
+            std::ai::SERVICE_INFERENCE_TASK_ID,
+            std::ai::MSG_TYPE_SEARCH,
+            b"storage",
+        );
+        let mut doc_buf = [0u8; 1024];
+        let mut shown = 0;
+        if let Ok(n) = std::ipc_recv(&mut doc_buf) {
+            let resp_hdr_len = core::mem::size_of::<std::ai::AiInferenceResponse>();
+            let hit_hdr_len = core::mem::size_of::<std::ai::AiSearchHit>();
+            if n >= resp_hdr_len + hit_hdr_len {
+                let resp = unsafe {
+                    core::ptr::read_unaligned(doc_buf.as_ptr() as *const std::ai::AiInferenceResponse)
+                };
+                if resp.status == std::ai::STATUS_SUCCESS && resp.output_dim > 0 {
+                    let mut cursor = resp_hdr_len;
+                    let hits_count = resp.output_dim as usize;
+                    for _ in 0..hits_count {
+                        if cursor + hit_hdr_len > n || shown >= 3 {
+                            break;
                         }
+                        let hit = unsafe {
+                            core::ptr::read_unaligned(doc_buf.as_ptr().add(cursor) as *const std::ai::AiSearchHit)
+                        };
+                        cursor += hit_hdr_len;
+                        let path_len = hit.path_len as usize;
+                        let snip_len = hit.snippet_len as usize;
+                        if cursor + path_len + snip_len > n {
+                            break;
+                        }
+                        let path_bytes = &doc_buf[cursor..cursor + path_len];
+                        cursor += path_len;
+                        let snippet_bytes = &doc_buf[cursor..cursor + snip_len];
+                        cursor += snip_len;
+
+                        let path_or_snippet = if !path_bytes.is_empty() {
+                            path_bytes
+                        } else {
+                            snippet_bytes
+                        };
+                        self.add_line(b"Ranked result", path_or_snippet, Tone::Plain);
+                        self.add_chip(
+                            b"Attribution",
+                            if hit.is_neural != 0 {
+                                b"[Neural RAG]"
+                            } else {
+                                b"[Lexical RAG]"
+                            },
+                            Tone::Good,
+                        );
+                        shown += 1;
                     }
-                }
-                if shown == 0 {
-                    self.add_wide(b"Zero indexed documents reported by content service.", Tone::Muted);
                 }
             }
-            _ => {
-                self.add_wide(b"Zero indexed documents reported by content service.", Tone::Muted);
+        }
+        if shown == 0 {
+            let mut list_buf = [0u8; 512];
+            match std::fs_list("/storage", &mut list_buf) {
+                Ok(n) if n > 0 => {
+                    let payload = &list_buf[..n.min(list_buf.len())];
+                    for line in payload.split(|&b| b == b'\n') {
+                        if line.is_empty() || shown >= 3 {
+                            continue;
+                        }
+                        let mut parts = line.split(|&b| b == b'|');
+                        if let Some(name) = parts.next() {
+                            if !name.is_empty() {
+                                self.add_line(b"Ranked result", name, Tone::Plain);
+                                self.add_chip(b"Attribution", b"[Lexical RAG]", Tone::Good);
+                                shown += 1;
+                            }
+                        }
+                    }
+                    if shown == 0 {
+                        self.add_wide(b"Zero indexed documents reported by content service.", Tone::Muted);
+                    }
+                }
+                _ => {
+                    self.add_wide(b"Zero indexed documents reported by content service.", Tone::Muted);
+                }
             }
         }
     }
@@ -1478,6 +1554,19 @@ impl AgentManagerApp {
         // appending generated token chunks to the transcript buffer incrementally.
         self.chat.start_stream(&prompt[..len]);
         self.step_streaming();
+        self.rebuild();
+    }
+
+    /// Cancels active streaming token generation via IPC to SERVICE_INFERENCE.
+    pub fn cancel_streaming(&mut self) {
+        let _ = std::ipc_send(
+            std::ai::SERVICE_INFERENCE_TASK_ID,
+            std::ai::MSG_TYPE_CANCEL,
+            b"CANC",
+        );
+        self.chat.is_streaming = false;
+        self.chat.push(ChatRole::Notice, b"[Generation cancelled by user]");
+        self.set_action(b"Streaming cancelled.", Tone::Plain);
         self.rebuild();
     }
 
@@ -1609,6 +1698,15 @@ impl AgentManagerApp {
         );
 
         self.begin_card(b"Agent tools (bounded runtime)", Tone::Plain);
+        self.add_chip(
+            b"Consent policy",
+            if self.tool_consent {
+                b"[Enforced/Active]"
+            } else {
+                b"[Denied]"
+            },
+            Tone::Good,
+        );
         for i in 0..self.agent_tools.len() {
             let outcome = self.agent_tools[i];
             self.add_chip(
@@ -1704,7 +1802,7 @@ impl AgentManagerApp {
                 },
                 ActionButton {
                     label: "RUN TOOLS",
-                    action: Action::Refresh,
+                    action: Action::RunTools,
                     enabled: true,
                 },
                 ActionButton {
@@ -1714,14 +1812,22 @@ impl AgentManagerApp {
                 },
             ],
             Surface::Chat => [
-                ActionButton {
-                    label: "SEND",
-                    action: Action::Send,
-                    // WHY the button is live even when there is no model:
-                    // pressing it is how the user finds out, and the
-                    // answer is the platform's reason rather than a
-                    // button that does nothing.
-                    enabled: true,
+                if self.chat.is_streaming {
+                    ActionButton {
+                        label: "STOP",
+                        action: Action::CancelStream,
+                        enabled: true,
+                    }
+                } else {
+                    ActionButton {
+                        label: "SEND",
+                        action: Action::Send,
+                        // WHY the button is live even when there is no model:
+                        // pressing it is how the user finds out, and the
+                        // answer is the platform's reason rather than a
+                        // button that does nothing.
+                        enabled: true,
+                    }
                 },
                 ActionButton {
                     label: "CLEAR",
@@ -1796,7 +1902,11 @@ fn handle_chat_key(app: &mut AgentManagerApp, code: u32) -> ChatKey {
     use std::input_key_code;
     match code {
         input_key_code::ENTER | 13 => {
-            app.send_prompt();
+            if app.chat.is_streaming {
+                app.cancel_streaming();
+            } else {
+                app.send_prompt();
+            }
             ChatKey::Edited
         }
         input_key_code::BACKSPACE | 8 => {
@@ -2875,6 +2985,8 @@ fn handle_tap(app: &mut AgentManagerApp, x: u32, y: u32) -> Tap {
                         Action::Install => app.install_selected(),
                         Action::Remove => app.remove_selected(),
                         Action::RunTest => app.run_self_test(),
+                        Action::RunTools => app.run_tools(),
+                        Action::CancelStream => app.cancel_streaming(),
                         Action::Send => app.send_prompt(),
                         Action::ClearChat => app.clear_chat(),
                         Action::OpenChat => {
@@ -2898,7 +3010,11 @@ fn handle_tap(app: &mut AgentManagerApp, x: u32, y: u32) -> Tap {
         let dx = ux as i64 - send_cx as i64;
         let dy = uy as i64 - send_cy as i64;
         if dx * dx + dy * dy <= (COMPOSER_SEND_R * COMPOSER_SEND_R) as i64 {
-            app.send_prompt();
+            if app.chat.is_streaming {
+                app.cancel_streaming();
+            } else {
+                app.send_prompt();
+            }
             return Tap::Redraw;
         }
         return Tap::None;

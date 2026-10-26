@@ -33,9 +33,9 @@ pub use tokenizer::{
     decode_sequence, decode_token, encode, TOKEN_BOS, TOKEN_EOS, TOKEN_PAD, TOKEN_UNK,
 };
 pub use std::ai::{
-    MSG_TYPE_EMBED, MSG_TYPE_GENERATE, MSG_TYPE_GENERATE_ALT, MSG_TYPE_GENERATE_CHUNK,
-    MSG_TYPE_GGUF, MSG_TYPE_SEARCH, STATUS_CANCELLED, STATUS_ERROR, STATUS_SUCCESS,
-    STATUS_UNAVAILABLE, STATUS_UNSUPPORTED,
+    MSG_TYPE_CANCEL, MSG_TYPE_EMBED, MSG_TYPE_GENERATE, MSG_TYPE_GENERATE_ALT,
+    MSG_TYPE_GENERATE_CHUNK, MSG_TYPE_GGUF, MSG_TYPE_SEARCH, STATUS_CANCELLED,
+    STATUS_ERROR, STATUS_SUCCESS, STATUS_UNAVAILABLE, STATUS_UNSUPPORTED,
 };
 
 pub fn run(service_id: u8, name: &str) -> ! {
@@ -441,6 +441,8 @@ fn emit_inference_response(
     }
 }
 
+static CANCEL_REQUESTED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
 /// Dispatches incoming IPC queries for `SERVICE_INFERENCE` (#12) with zero heap allocation.
 pub fn handle_ipc_inference_query(
     sender_task_id: u64,
@@ -449,6 +451,16 @@ pub fn handle_ipc_inference_query(
     probed_models: &gguf::ProbedModels,
     tx_buf: &mut [u8; 1024],
 ) {
+    if msg_type == std::ai::MSG_TYPE_CANCEL || (payload.len() >= 4 && &payload[..4] == b"CANC") {
+        CANCEL_REQUESTED.store(true, core::sync::atomic::Ordering::Relaxed);
+        emit_inference_response(
+            sender_task_id,
+            std::ai::STATUS_SUCCESS,
+            b"[Cancellation acknowledged]",
+            tx_buf,
+        );
+        return;
+    }
     // 1. GGUF model header info query
     if msg_type == MSG_TYPE_GGUF || (payload.len() >= 4 && &payload[..4] == b"GGUF") {
         let req_generative = payload.windows(5).any(|w| w.eq_ignore_ascii_case(b"gemma"))
@@ -540,13 +552,14 @@ pub fn handle_ipc_inference_query(
                             let mut decoded_chunk = [0u8; 256];
                             let mut chunk_len = 0usize;
 
+                            CANCEL_REQUESTED.store(false, core::sync::atomic::Ordering::Relaxed);
                             let gen_res = inference::generate(
                                 &prompt_tokens[..num_prompt],
                                 &model,
                                 &config,
                                 8,
                                 0.0,
-                                &|| false,
+                                &|| CANCEL_REQUESTED.load(core::sync::atomic::Ordering::Relaxed),
                                 |tok| {
                                     let written = tokenizer::decode_token(tok, &mut decoded_chunk[chunk_len..]);
                                     chunk_len += written;
@@ -579,7 +592,7 @@ pub fn handle_ipc_inference_query(
                                     emit_inference_response(
                                         sender_task_id,
                                         std::ai::STATUS_ERROR,
-                                        b"Generative inference error: neural execution failed.",
+                                        b"[Inference cancelled by user]",
                                         tx_buf,
                                     );
                                 }
@@ -1090,6 +1103,44 @@ mod tests {
             core::ptr::read_unaligned(tx_buf.as_ptr() as *const std::ai::AiInferenceResponse)
         };
         assert_eq!(resp.status, std::ai::STATUS_SUCCESS);
+    }
+
+    #[test]
+    fn test_handle_ipc_cancel_query() {
+        let mut tx_buf = [0u8; 1024];
+        let empty_models = gguf::ProbedModels::empty();
+
+        // 1. By msg_type
+        handle_ipc_inference_query(
+            0,
+            MSG_TYPE_CANCEL,
+            b"",
+            &empty_models,
+            &mut tx_buf,
+        );
+        let resp = unsafe {
+            core::ptr::read_unaligned(tx_buf.as_ptr() as *const std::ai::AiInferenceResponse)
+        };
+        assert_eq!(resp.status, std::ai::STATUS_SUCCESS);
+        let payload = &tx_buf[core::mem::size_of::<std::ai::AiInferenceResponse>()..core::mem::size_of::<std::ai::AiInferenceResponse>() + resp.output_dim as usize];
+        assert_eq!(payload, b"[Cancellation acknowledged]");
+        assert!(CANCEL_REQUESTED.load(core::sync::atomic::Ordering::Relaxed));
+
+        // 2. By ASCII "CANC" prefix in payload
+        tx_buf.fill(0);
+        handle_ipc_inference_query(
+            0,
+            0,
+            b"CANC",
+            &empty_models,
+            &mut tx_buf,
+        );
+        let resp2 = unsafe {
+            core::ptr::read_unaligned(tx_buf.as_ptr() as *const std::ai::AiInferenceResponse)
+        };
+        assert_eq!(resp2.status, std::ai::STATUS_SUCCESS);
+        let payload2 = &tx_buf[core::mem::size_of::<std::ai::AiInferenceResponse>()..core::mem::size_of::<std::ai::AiInferenceResponse>() + resp2.output_dim as usize];
+        assert_eq!(payload2, b"[Cancellation acknowledged]");
     }
 }
 
