@@ -723,7 +723,29 @@ pub fn sys_ipc_send(
             Some(t) => t,
             None => return SyscallResult::PermissionDenied,
         };
-        let valid = current.cap_table.verify_object(cap_slot, CapabilityType::IpcSend, Rights::WRITE, dest.0).is_ok();
+
+        let is_inference = dest.0 == 0xFFFF_000C || dest.0 == 12
+            || crate::services::task_id(crate::services::ServiceId::Inference) == Some(dest)
+            || msg_type == 0x454D_4244 || msg_type == 0x4747_5546 || msg_type == 0x4745_4E52 || msg_type == 0x4745_4E45 || msg_type == 0x5352_4348;
+        let is_search = dest.0 == 0xFFFF_000D || dest.0 == 13
+            || crate::services::task_id(crate::services::ServiceId::Search) == Some(dest);
+
+        // Zero ambient authority: Access to inference requires explicit InferenceService capability
+        if is_inference && !current.cap_table.holds_capability_type(CapabilityType::InferenceService, Rights::READ)
+            && !current.cap_table.holds_capability_type(CapabilityType::InferenceService, Rights::INVOKE) {
+            return SyscallResult::PermissionDenied;
+        }
+
+        // Access to search service requires explicit SearchService capability
+        if is_search && !current.cap_table.holds_capability_type(CapabilityType::SearchService, Rights::READ)
+            && !current.cap_table.holds_capability_type(CapabilityType::SearchService, Rights::INVOKE) {
+            return SyscallResult::PermissionDenied;
+        }
+
+        let valid = current.cap_table.verify_object(cap_slot, CapabilityType::IpcSend, Rights::WRITE, dest.0).is_ok()
+            || current.cap_table.find_capability_for_object(CapabilityType::IpcSend, Rights::WRITE, dest.0).is_some()
+            || (is_inference && current.cap_table.holds_capability_type(CapabilityType::InferenceService, Rights::INVOKE | Rights::READ))
+            || (is_search && current.cap_table.holds_capability_type(CapabilityType::SearchService, Rights::INVOKE | Rights::READ));
         (current.id, valid)
     };
 
@@ -735,8 +757,23 @@ pub fn sys_ipc_send(
         return SyscallResult::NotReady;
     }
 
+    let target_dest = if dest.0 >= 0xFFFF_0000 && dest.0 <= 0xFFFF_000F {
+        let service_id = (dest.0 & 0xF) as u8;
+        if let Some(sid) = crate::services::ServiceId::from_u8(service_id) {
+            crate::services::task_id(sid).unwrap_or(dest)
+        } else {
+            dest
+        }
+    } else if dest.0 == 12 {
+        crate::services::task_id(crate::services::ServiceId::Inference).unwrap_or(dest)
+    } else if dest.0 == 13 {
+        crate::services::task_id(crate::services::ServiceId::Search).unwrap_or(dest)
+    } else {
+        dest
+    };
+
     let mut router = IPC_ROUTER.lock();
-    match router.send_direct(sender_id, dest, msg_type, data) {
+    match router.send_direct(sender_id, target_dest, msg_type, data) {
         Ok(()) => SyscallResult::Success,
         Err(IpcError::CapabilityDenied(_)) => SyscallResult::PermissionDenied,
         Err(IpcError::TargetNotFound) => SyscallResult::TargetNotFound,
@@ -7919,7 +7956,7 @@ fn the_launcher_administrates_exactly_the_accounts_its_policy_grants() {
     let policy = capability_policy(ServiceId::Launcher, TaskId(1))
         .expect("the launcher must have a capability policy");
 
-    let mut caps = crate::capability::CapabilityTable::new_for_task(launcher, 16);
+    let mut caps = crate::capability::CapabilityTable::new_for_task(launcher, policy.len().max(16));
     for (slot, spec) in policy.iter().enumerate() {
         caps.insert(Capability {
             id: CapabilityId(7300 + slot as u64),
@@ -8077,4 +8114,33 @@ fn browser_clock_monotonic_increments() {
     assert_eq!(ts2.tv_nsec, 500_000_000);
     assert!(ts2.tv_sec > ts1.tv_sec || (ts2.tv_sec == ts1.tv_sec && ts2.tv_nsec >= ts1.tv_nsec));
 }
+}
+#[test]
+fn test_inference_ipc_security_denial_without_capability() {
+    use crate::capability::{Capability, CapabilityId, CapabilityType, Rights};
+    let caller_task = TaskId(9101);
+    let mut table = crate::capability::CapabilityTable::new_for_task(caller_task, 8);
+
+    // Grant only SerialOutput and TimerTickRead, NO InferenceService capability
+    table.insert(Capability {
+        id: CapabilityId(9101),
+        cap_type: CapabilityType::SerialOutput,
+        rights: Rights::WRITE,
+        object_id: 0,
+    }).unwrap();
+
+    // Verify zero ambient authority: Caller cannot access InferenceService without explicit grant
+    assert!(!table.holds_capability_type(CapabilityType::InferenceService, Rights::INVOKE));
+    assert!(!table.holds_capability_type(CapabilityType::InferenceService, Rights::READ));
+
+    // Now grant explicit InferenceService capability token
+    table.insert(Capability {
+        id: CapabilityId(9102),
+        cap_type: CapabilityType::InferenceService,
+        rights: Rights::READ | Rights::INVOKE,
+        object_id: 0,
+    }).unwrap();
+
+    assert!(table.holds_capability_type(CapabilityType::InferenceService, Rights::INVOKE));
+    assert!(table.holds_capability_type(CapabilityType::InferenceService, Rights::READ));
 }

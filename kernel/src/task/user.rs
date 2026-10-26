@@ -1981,6 +1981,18 @@ pub fn spawn_app_agent_manager(id_security: TaskId) -> TaskId {
         rights: Rights::READ,
         object_id: 0,
     }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2919),
+        cap_type: CapabilityType::InferenceService,
+        rights: Rights::READ.union(Rights::INVOKE),
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2923),
+        cap_type: CapabilityType::SearchService,
+        rights: Rights::READ.union(Rights::INVOKE),
+        object_id: 0,
+    }).ok();
 
     let id = spawn_user_process_with_parent(
         "app_agent_manager",

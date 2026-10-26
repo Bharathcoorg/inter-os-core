@@ -25,7 +25,7 @@ $qemuArgs = @(
     "-machine", "q35",
     "-accel", "whpx,kernel-irqchip=off",
     "-accel", "tcg",
-    "-cpu", "qemu64",
+    "-cpu", "qemu64,-svm",
     "-smp", "4",
     # q35's default controller is AHCI, and the guest's legacy PIO ATA driver
     # only probes 0x1F0/0x3F6. A bare `index=0/1` lands on an AHCI port, so the

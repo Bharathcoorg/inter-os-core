@@ -30,6 +30,30 @@ pub enum ServiceId {
     Voice = 15,
 }
 
+impl ServiceId {
+    pub const fn from_u8(id: u8) -> Option<Self> {
+        match id {
+            0 => Some(ServiceId::Init),
+            1 => Some(ServiceId::Display),
+            2 => Some(ServiceId::Input),
+            3 => Some(ServiceId::Storage),
+            4 => Some(ServiceId::Network),
+            5 => Some(ServiceId::Power),
+            6 => Some(ServiceId::Modem),
+            7 => Some(ServiceId::Audio),
+            8 => Some(ServiceId::Camera),
+            9 => Some(ServiceId::Compositor),
+            10 => Some(ServiceId::Launcher),
+            11 => Some(ServiceId::Sensor),
+            12 => Some(ServiceId::Inference),
+            13 => Some(ServiceId::Search),
+            14 => Some(ServiceId::Agent),
+            15 => Some(ServiceId::Voice),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceState { Declared, Starting, Running, Stopped, Failed }
 
@@ -87,7 +111,7 @@ pub struct ServiceCapabilitySpec {
 // forbidden:CapabilityType::ProcessSpawn
 // NetworkSend/NetworkReceive are reserved for netd's explicit data-plane policy.
 pub fn capability_policy(id: ServiceId, parent_id: TaskId) -> Result<Vec<ServiceCapabilitySpec>, &'static str> {
-    let mut policy = Vec::with_capacity(10);
+    let mut policy = Vec::with_capacity(20);
     policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::SerialOutput, rights: Rights::WRITE, object_id: 0 });
     match id {
         ServiceId::Compositor => {
@@ -100,6 +124,7 @@ pub fn capability_policy(id: ServiceId, parent_id: TaskId) -> Result<Vec<Service
         ServiceId::Launcher => {
             policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::TimerTickRead, rights: Rights::READ, object_id: 0 });
             policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::IpcSend, rights: Rights::WRITE, object_id: parent_id.0 });
+            policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::IpcSend, rights: Rights::WRITE, object_id: 0 });
             policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::FileSystemRead, rights: Rights::READ, object_id: 0 });
             policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::FileSystemWrite, rights: Rights::WRITE, object_id: 0 });
             policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::FrameBufferDirect, rights: Rights::READ | Rights::WRITE, object_id: 1 });
@@ -132,6 +157,8 @@ pub fn capability_policy(id: ServiceId, parent_id: TaskId) -> Result<Vec<Service
             });
             policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::SystemControl, rights: Rights::INVOKE, object_id: SERVICE_POWER_CONTROL_OBJECT });
             policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::SystemControl, rights: Rights::INVOKE, object_id: SERVICE_AUDIO_CONTROL_OBJECT });
+            policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::InferenceService, rights: Rights::READ | Rights::INVOKE, object_id: 0 });
+            policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::SearchService, rights: Rights::READ | Rights::INVOKE, object_id: 0 });
         }
         ServiceId::Display => policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::FrameBufferDirect, rights: Rights::WRITE, object_id: 1 }),
         ServiceId::Storage => {
@@ -159,7 +186,6 @@ pub fn capability_policy(id: ServiceId, parent_id: TaskId) -> Result<Vec<Service
         ServiceId::Sensor => policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::SystemControl, rights: Rights::INVOKE, object_id: SERVICE_SENSOR_CONTROL_OBJECT }),
         ServiceId::Inference => {
             policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::FileSystemRead, rights: Rights::READ, object_id: 0 });
-            policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::FileSystemWrite, rights: Rights::WRITE, object_id: 0 });
             policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::IpcSend, rights: Rights::WRITE, object_id: 0 });
             policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::InferenceService, rights: Rights::READ | Rights::WRITE | Rights::INVOKE, object_id: 0 });
             policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::MemoryHeap, rights: Rights::READ | Rights::WRITE | Rights::INVOKE, object_id: 0 });
