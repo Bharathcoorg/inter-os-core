@@ -37,6 +37,7 @@ use library::{ImportOutcome, PublishOutcome};
 use music::playback::{Player, PlayerState};
 use store::TrackStore;
 use music::library;
+use music::SOURCE_MAX;
 use music::theme::{THEME, radius, spacing};
 use music::SortMode;
 use std::design::components;
@@ -83,6 +84,13 @@ pub struct AudioTrack {
 /// stays empty on purpose and is never read.
 #[allow(dead_code)]
 pub static PLAYLIST: [AudioTrack; 0] = [];
+/// Preallocated static buffer for genuine embedded album art (raw JPEG/PNG bytes up to 32 KiB).
+static mut ALBUM_ART_RAW: [u8; music::art::MAX_ART_BYTES] = [0; music::art::MAX_ART_BYTES];
+/// Preallocated static buffer for decoded RGBA cover image pixels.
+static mut ALBUM_ART_RGBA: [u8; 524_288] = [0; 524_288];
+/// Temporary scratch buffer for scanning media file header/metadata.
+static mut ART_SCAN_SCRATCH: [u8; 65536] = [0; 65536];
+
 
 /// Production Sovereign Music state manager.
 #[allow(dead_code)]
@@ -153,6 +161,11 @@ pub struct MusicApp {
     pub feedback_len: usize,
     /// The token of the last dispatched intent this app handled.
     pub last_intent_token: u64,
+    /// Genuine embedded album art state.
+    pub has_cover_art: bool,
+    pub cover_art_w: u32,
+    pub cover_art_h: u32,
+    pub cover_art_len: usize,
 }
 
 impl MusicApp {
@@ -183,6 +196,10 @@ impl MusicApp {
             feedback: [0; FEEDBACK_CAP],
             feedback_len: 0,
             last_intent_token: 0,
+            has_cover_art: false,
+            cover_art_w: 0,
+            cover_art_h: 0,
+            cover_art_len: 0,
         }
     }
 
@@ -192,6 +209,62 @@ impl MusicApp {
     /// shared storage area, and the library holds tracks rather than paths.
     /// Importing is this app's own way of bringing a document in, so a
     /// dispatched file and an imported one end up as the same kind of track.
+
+    /// Extracts and decodes genuine embedded album art from the selected track.
+    pub fn reload_current_art(&mut self) {
+        self.has_cover_art = false;
+        self.cover_art_w = 0;
+        self.cover_art_h = 0;
+        self.cover_art_len = 0;
+
+        if self.store.is_empty() {
+            return;
+        }
+        let mut path = [0u8; SOURCE_MAX];
+        let Some(path_len) = library::resolve_source(&self.store, self.current_track_idx, &mut path) else {
+            return;
+        };
+        let Ok(path_str) = core::str::from_utf8(&path[..path_len]) else {
+            return;
+        };
+        let Ok(fd) = std::fs_open(path_str, std::FS_READ) else {
+            return;
+        };
+
+        let scan_buf = unsafe { &mut *core::ptr::addr_of_mut!(ART_SCAN_SCRATCH) };
+        let mut total_read = 0;
+        while total_read < scan_buf.len() {
+            match std::fs_read(fd, &mut scan_buf[total_read..]) {
+                Ok(0) => break,
+                Ok(n) => total_read += n,
+                Err(_) => break,
+            }
+        }
+        let _ = std::fs_close(fd);
+
+        if total_read == 0 {
+            return;
+        }
+
+        let raw_art = unsafe { &mut *core::ptr::addr_of_mut!(ALBUM_ART_RAW) };
+        if let Ok(art_len) = music::art::extract_album_art(&scan_buf[..total_read], raw_art) {
+            let rgba_buf = unsafe { &mut *core::ptr::addr_of_mut!(ALBUM_ART_RGBA) };
+            let name = if music::art::is_png(&raw_art[..art_len]) {
+                b"cover.png"
+            } else {
+                b"cover.jpg"
+            };
+            if let Ok((w, h, len)) = std::image::decode_image(&raw_art[..art_len], name, rgba_buf) {
+                if len == (w as usize) * (h as usize) * 4 {
+                    self.has_cover_art = true;
+                    self.cover_art_w = w;
+                    self.cover_art_h = h;
+                    self.cover_art_len = len;
+                    std::log("[MUSIC APP] Album cover art extracted and decoded.").ok();
+                }
+            }
+        }
+    }
     pub fn handle_pending_intent(&mut self) -> bool {
         let mut buf = [0u8; 320];
         let n = match std::content::intent_pending(&mut buf) {
@@ -246,6 +319,7 @@ impl MusicApp {
             if let Some(track) = self.store.get(i) {
                 if track.title() == &title[..title_len] {
                     self.current_track_idx = i;
+                    self.reload_current_art();
                     self.clear_feedback();
                     if self.state == PlaybackState::Playing {
                         self.start_selected();
@@ -571,6 +645,7 @@ impl MusicApp {
             if let Some(volume) = self.volume_percent {
                 self.player.set_volume(volume);
             }
+            self.reload_current_art();
             self.shown_second = u64::MAX;
             std::log("[MUSIC APP] Transport playing over the device's PCM output.",
             )
@@ -610,6 +685,7 @@ impl MusicApp {
         let cur = (self.current_track_idx.min(self.store.len() - 1)) as isize;
         let next = (cur + delta).rem_euclid(len);
         self.current_track_idx = next as usize;
+        self.reload_current_art();
         // WHY the line is cleared here: a refusal or an "ended" notice names
         // the track that was selected before this step, and leaving it under a
         // different title would describe a failure that is no longer current.
@@ -736,6 +812,7 @@ impl MusicApp {
                             if let Some(t) = self.store.get(i) {
                                 if t.title() == &title_buf[..tn] {
                                     self.current_track_idx = i;
+                                    self.reload_current_art();
                                     break;
                                 }
                             }
@@ -1509,7 +1586,23 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
         if note_glyph(x, y, ART_X + ART_W / 2, ART_GLYPH_CY) {
             return THEME.muted;
         }
-        let caption = music::artwork_caption(sel.is_some(), false);
+        if app.has_cover_art {
+            let rgba = unsafe { &ALBUM_ART_RGBA[..app.cover_art_len] };
+            let bitmap = std::image::Bitmap {
+                w: app.cover_art_w,
+                h: app.cover_art_h,
+                rgba,
+            };
+            return bitmap.pixel(x - ART_X, y - ART_Y, ART_W, ART_H);
+        }
+        if note_glyph(x, y, ART_X + ART_W / 2, ART_GLYPH_CY) {
+            return THEME.muted;
+        }
+        let caption: &[u8] = if sel.is_none() {
+            b"No track selected"
+        } else {
+            b"No cover art"
+        };
         if !caption.is_empty() {
             if let Some(c) = text_centered(
                 x,
@@ -2660,20 +2753,18 @@ pub extern "C" fn _start() -> ! {
                             match handle_music_key(&mut music, key) {
                                 Tap::Leave(msg) => {
                                     std::log(msg).ok();
-                                    // WHY the stream is closed on the way out:
-                                    // the player owns the PCM stream and its
-                                    // task ends when it leaves the screen.
-                                    // There is no background audio service to
-                                    // keep the samples flowing, so the
-                                    // transport stops and the published state
-                                    // says exactly that.
-                                    music.player.stop();
-                                    music.state = PlaybackState::Stopped;
-                                    music.publish_now_playing();
-                                    if surface > 0 {
-                                        let _ = std::surface_destroy(surface);
+                                    if music.state == PlaybackState::Playing {
+                                        std::log("[MUSIC APP] App moved to background; audio playback continues.").ok();
+                                        let _ = std::app_background();
+                                    } else {
+                                        music.player.stop();
+                                        music.state = PlaybackState::Stopped;
+                                        music.publish_now_playing();
+                                        if surface > 0 {
+                                            let _ = std::surface_destroy(surface);
+                                        }
+                                        std::exit_with_code(0);
                                     }
-                                    std::exit_with_code(0);
                                 }
                                 Tap::Redraw(d) => dirty = merge(dirty, d),
                                 Tap::None => {}
@@ -2698,46 +2789,38 @@ pub extern "C" fn _start() -> ! {
                                 dirty = merge(dirty, Dirty::All);
                                 continue;
                             }
-                            std::log("[MUSIC APP] Navigation gesture recognized. Exiting to launcher.",
+                            std::log("[MUSIC APP] Navigation gesture recognized. Leaving to launcher.",
                             )
                             .ok();
-                            // WHY the stream is closed on the way out: the
-                            // player owns the PCM stream and its task ends
-                            // when it leaves the screen. There is no
-                            // background audio service to keep the samples
-                            // flowing, so the transport stops.
-                            music.player.stop();
-                            music.state = PlaybackState::Stopped;
-                            music.publish_now_playing();
-                            if surface > 0 {
-                                // WHY no slot argument: a slot is a position
-                                // in this task's capability table, and the
-                                // kernel authorises the release by the
-                                // capability's type. The surface must be
-                                // handed back or it stays a leaked KMS
-                                // surface for the life of the device.
-                                let _ = std::surface_destroy(surface);
+                            if music.state == PlaybackState::Playing {
+                                std::log("[MUSIC APP] App moved to background; audio playback continues.").ok();
+                                let _ = std::app_background();
+                            } else {
+                                music.player.stop();
+                                music.state = PlaybackState::Stopped;
+                                music.publish_now_playing();
+                                if surface > 0 {
+                                    let _ = std::surface_destroy(surface);
+                                }
+                                std::exit_with_code(0);
                             }
-                            std::exit_with_code(0);
                         }
                         if input.kind == 1 {
                             match handle_tap(&mut music, input.x, input.y) {
                                 Tap::Leave(msg) => {
                                     std::log(msg).ok();
-                                    // WHY the stream is closed on the way out:
-                                    // the player owns the PCM stream and its
-                                    // task ends when it leaves the screen.
-                                    // There is no background audio service to
-                                    // keep the samples flowing, so the
-                                    // transport stops and the published state
-                                    // says exactly that.
-                                    music.player.stop();
-                                    music.state = PlaybackState::Stopped;
-                                    music.publish_now_playing();
-                                    if surface > 0 {
-                                        let _ = std::surface_destroy(surface);
+                                    if music.state == PlaybackState::Playing {
+                                        std::log("[MUSIC APP] App moved to background; audio playback continues.").ok();
+                                        let _ = std::app_background();
+                                    } else {
+                                        music.player.stop();
+                                        music.state = PlaybackState::Stopped;
+                                        music.publish_now_playing();
+                                        if surface > 0 {
+                                            let _ = std::surface_destroy(surface);
+                                        }
+                                        std::exit_with_code(0);
                                     }
-                                    std::exit_with_code(0);
                                 }
                                 Tap::Redraw(d) => dirty = merge(dirty, d),
                                 Tap::None => {}
@@ -2776,6 +2859,17 @@ pub extern "C" fn _start() -> ! {
                             music.publish_now_playing();
                             if surface > 0 {
                                 repaint(surface, &music, Dirty::All);
+                                let _ = std::surface_flip();
+                            }
+                        } else if music.player.state == PlayerState::Stopped || music.player.state == PlayerState::Paused {
+                            music.state = if music.player.state == PlayerState::Paused {
+                                PlaybackState::Paused
+                            } else {
+                                PlaybackState::Stopped
+                            };
+                            music.publish_now_playing();
+                            if surface > 0 {
+                                repaint(surface, &music, Dirty::Playback);
                                 let _ = std::surface_flip();
                             }
                         } else {

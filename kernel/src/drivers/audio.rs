@@ -309,6 +309,43 @@ impl<I: Ac97Io> Ac97Registers<I> {
             just_idle: false,
         }
     }
+
+    /// Sets master volume attenuation on NAM register 0x02.
+    ///
+    /// Bit 15: Mute. Bits 13..8: Left attenuation. Bits 5..0: Right attenuation.
+    /// Range: 0 to 31 (0x1F), where 0 = 0 dB attenuation (max), 31 = max attenuation.
+    pub fn set_master_volume(&mut self, percent: u8) -> u8 {
+        if !self.ready {
+            return 0;
+        }
+        let percent = percent.min(100);
+        let reg_val = if percent == 0 {
+            0x8000 | (0x1F << 8) | 0x1F
+        } else {
+            let atten = ((100 - percent as u32) * 31 + 50) / 100;
+            let atten = (atten.min(31) as u16) & 0x1F;
+            (atten << 8) | atten
+        };
+        self.io.write16(self.nam_base + NAM_MASTER_VOLUME, reg_val);
+        self.get_master_volume()
+    }
+
+    /// Reads back master volume attenuation from NAM register 0x02 and converts to 0..=100%.
+    pub fn get_master_volume(&mut self) -> u8 {
+        if !self.ready {
+            return 0;
+        }
+        let reg = self.io.read16(self.nam_base + NAM_MASTER_VOLUME);
+        if reg & 0x8000 != 0 {
+            return 0;
+        }
+        let atten_l = ((reg >> 8) & 0x1F) as u32;
+        let atten_r = (reg & 0x1F) as u32;
+        let atten = (atten_l + atten_r) / 2;
+        let atten = atten.min(31);
+        let percent = 100 - (atten * 100 + 15) / 31;
+        percent.min(100) as u8
+    }
 }
 
 /// Physically contiguous DMA storage owned by the controller.
@@ -491,6 +528,14 @@ impl<I: Ac97Io> Ac97Controller<I> {
 
     pub fn is_ready(&self) -> bool {
         self.regs.is_ready()
+    }
+
+    pub fn set_master_volume(&mut self, percent: u8) -> u8 {
+        self.regs.set_master_volume(percent)
+    }
+
+    pub fn get_master_volume(&mut self) -> u8 {
+        self.regs.get_master_volume()
     }
 }
 
@@ -744,5 +789,22 @@ mod tests {
         );
         assert_eq!(regs.program_batch(0x30_000, 0, 0), Err(Ac97Error::InvalidDescriptor));
         assert!(!regs.is_running());
+    }
+
+    #[test]
+    fn master_volume_hardware_attenuation() {
+        let mut regs = initialized_registers();
+        assert_eq!(regs.set_master_volume(100), 100);
+        assert_eq!(regs.io.get16(NAM + NAM_MASTER_VOLUME), 0x0000);
+        assert_eq!(regs.get_master_volume(), 100);
+
+        assert_eq!(regs.set_master_volume(0), 0);
+        assert_ne!(regs.io.get16(NAM + NAM_MASTER_VOLUME) & 0x8000, 0);
+        assert_eq!(regs.get_master_volume(), 0);
+
+        let v50 = regs.set_master_volume(50);
+        assert!(v50 >= 45 && v50 <= 55);
+        assert_eq!(regs.io.get16(NAM + NAM_MASTER_VOLUME) & 0x8000, 0);
+        assert_eq!(regs.get_master_volume(), v50);
     }
 }

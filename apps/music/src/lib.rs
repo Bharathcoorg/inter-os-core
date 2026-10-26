@@ -12,6 +12,9 @@ pub mod library;
 /// Streaming playback of an imported file over the platform's PCM output.
 pub mod playback;
 
+/// Bounded zero-heap extraction of ID3v2 APIC and FLAC PICTURE album art.
+pub mod art;
+
 use library::ImportOutcome;
 
 /// Capacity of the now-playing time line.

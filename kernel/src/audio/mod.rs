@@ -265,8 +265,24 @@ impl AudioManager {
     /// value is "the request that was stored", not "the level in effect".
     pub fn set_volume(&mut self, percent: u8) -> u8 {
         let stored = percent.min(100);
-        self.volume_percent = Some(stored);
-        stored
+        let level = if let Some(ref mut ac97) = self.ac97 {
+            ac97.set_master_volume(stored)
+        } else {
+            stored
+        };
+        self.volume_percent = Some(level);
+        level
+    }
+
+    /// Queries the real master volume from the AC'97 hardware mixer when present.
+    pub fn get_volume(&mut self) -> Option<u8> {
+        if let Some(ref mut ac97) = self.ac97 {
+            let level = ac97.get_master_volume();
+            self.volume_percent = Some(level);
+            Some(level)
+        } else {
+            self.volume_percent
+        }
     }
 
     /// Steps the stored volume request by `delta` percentage points and returns
@@ -342,7 +358,7 @@ pub fn init() {
     // 4. Bind a real AC'97 PCM controller. Absence is reported as absence: the
     //    stream syscalls return Unavailable rather than pretending to play.
     match Ac97Controller::probe() {
-        Ok(driver) => {
+        Ok(mut driver) => {
             serial_println!(
                 "[OK] AC'97 PCM output initialized: PCI {:04x}:{:04x} at {:02x}:{:02x}.{} (16-bit stereo, {} Hz); DMA buffers bound.",
                 driver.vendor_id,
@@ -352,7 +368,10 @@ pub fn init() {
                 driver.pci_address.function,
                 AC97_SAMPLE_RATE_HZ,
             );
-            AUDIO_MANAGER.lock().ac97 = Some(driver);
+            let hw_volume = driver.get_master_volume();
+            let mut mgr = AUDIO_MANAGER.lock();
+            mgr.ac97 = Some(driver);
+            mgr.volume_percent = Some(hw_volume);
         }
         Err(Ac97Error::Unavailable) => {
             serial_println!(

@@ -407,6 +407,127 @@ impl Player {
         }
     }
 
+    /// Seeks to a position in milliseconds within the current track.
+    ///
+    /// Reopens the track and skips decoded/uncompressed frames up to `target_ms`.
+    /// Returns `true` if seek succeeded.
+    pub fn seek(&mut self, store: &TrackStore, target_ms: u64) -> bool {
+        if !self.holds(self.track) {
+            return false;
+        }
+        let track = self.track;
+        let volume = self.volume;
+        let was_playing = self.state == PlayerState::Playing;
+
+        if !self.start(store, track) {
+            return false;
+        }
+        self.set_volume(volume);
+
+        match self.format {
+            Some(AudioFormat::Wav) => {
+                let Some(info) = self.info else { return false; };
+                let frame_size = (info.channels as u64) * (info.bits_per_sample as u64 / 8);
+                if frame_size == 0 || info.sample_rate == 0 { return false; }
+                let target_frames = (target_ms * info.sample_rate as u64) / 1000;
+                let target_bytes = target_frames * frame_size;
+                let skip_bytes = target_bytes.min(info.data_len);
+
+                let from_pending = (self.pending_len as u64).min(skip_bytes);
+                self.pending_len -= from_pending as usize;
+                let mut remaining_to_skip = skip_bytes - from_pending;
+
+                let fd = match self.fd {
+                    Some(fd) => fd,
+                    None => return false,
+                };
+                let scratch = unsafe { &mut *core::ptr::addr_of_mut!(READ_SCRATCH) };
+                while remaining_to_skip > 0 {
+                    let want = (remaining_to_skip as usize).min(READ_BYTES);
+                    match std::fs_read(fd, &mut scratch[..want]) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            remaining_to_skip -= n as u64;
+                            self.data_remaining = self.data_remaining.saturating_sub(n as u64);
+                        }
+                        Err(_) => return false,
+                    }
+                }
+            }
+            Some(AudioFormat::Flac) => {
+                let Some(flac_info) = self.flac_info else { return false; };
+                if flac_info.sample_rate == 0 { return false; }
+                let target_samples = ((target_ms * flac_info.sample_rate as u64) / 1000) * flac_info.channels as u64;
+                let mut skipped = 0u64;
+                let flac = unsafe { &mut *core::ptr::addr_of_mut!(FLAC_DECODER) };
+                let decoded_buf = unsafe { &mut *core::ptr::addr_of_mut!(DECODED_SCRATCH) };
+                let fd = match self.fd {
+                    Some(fd) => fd,
+                    None => return false,
+                };
+                let read_buf = unsafe { &mut *core::ptr::addr_of_mut!(READ_SCRATCH) };
+
+                while skipped < target_samples {
+                    match flac.next_frame(decoded_buf) {
+                        Ok(Some(info)) => {
+                            skipped += info.samples as u64;
+                        }
+                        Ok(None) => {
+                            match std::fs_read(fd, read_buf) {
+                                Ok(0) => break,
+                                Ok(n) => {
+                                    flac.push(&read_buf[..n]);
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
+            Some(AudioFormat::Mp3) => {
+                let target_samples = ((target_ms * 44100) / 1000) * 2;
+                let mut skipped = 0u64;
+                let mp3 = unsafe { &mut *core::ptr::addr_of_mut!(MP3_DECODER) };
+                let decoded_buf = unsafe { &mut *core::ptr::addr_of_mut!(DECODED_SCRATCH) };
+                let fd = match self.fd {
+                    Some(fd) => fd,
+                    None => return false,
+                };
+                let read_buf = unsafe { &mut *core::ptr::addr_of_mut!(READ_SCRATCH) };
+
+                while skipped < target_samples {
+                    match mp3.next_frame(decoded_buf) {
+                        Ok(Some(info)) => {
+                            skipped += info.samples() as u64;
+                        }
+                        Ok(None) => {
+                            match std::fs_read(fd, read_buf) {
+                                Ok(0) => break,
+                                Ok(n) => {
+                                    let avail = mp3.available();
+                                    let take = n.min(avail);
+                                    let _ = mp3.push(&read_buf[..take]);
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
+            None => return false,
+        }
+
+        if was_playing {
+            self.state = PlayerState::Playing;
+            self.pump();
+        } else {
+            self.state = PlayerState::Paused;
+        }
+        true
+    }
+
     /// Closes the file and the stream and forgets the track.
     pub fn stop(&mut self) {
         if self.stream {
@@ -910,5 +1031,12 @@ mod tests {
         // MP3 stream reports None truthfully (no fake duration)
         player.format = Some(AudioFormat::Mp3);
         assert_eq!(player.duration_ms(), None);
+    }
+
+    #[test]
+    fn seek_refuses_when_not_holding_track() {
+        let mut player = Player::EMPTY;
+        let store = TrackStore::EMPTY;
+        assert!(!player.seek(&store, 1000));
     }
 }
