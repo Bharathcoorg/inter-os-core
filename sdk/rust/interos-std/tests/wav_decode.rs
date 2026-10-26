@@ -51,6 +51,7 @@ fn parses_a_pcm16_stereo_header_and_reports_the_data_window() {
     assert_eq!(
         info,
         WavInfo {
+            format_tag: 1,
             sample_rate: 44_100,
             channels: 2,
             bits_per_sample: 16,
@@ -130,6 +131,7 @@ fn the_duration_is_derived_from_the_data_length_and_the_rate() {
 #[test]
 fn native_rate_pcm_passes_through_unchanged_at_full_volume() {
     let info = WavInfo {
+        format_tag: 1,
         sample_rate: 48_000,
         channels: 2,
         bits_per_sample: 16,
@@ -147,6 +149,7 @@ fn native_rate_pcm_passes_through_unchanged_at_full_volume() {
 #[test]
 fn a_mono_frame_is_heard_on_both_channels() {
     let info = WavInfo {
+        format_tag: 1,
         sample_rate: 48_000,
         channels: 1,
         bits_per_sample: 16,
@@ -163,6 +166,7 @@ fn a_mono_frame_is_heard_on_both_channels() {
 #[test]
 fn eight_bit_pcm_is_unsigned_and_is_centred_before_it_is_scaled() {
     let info = WavInfo {
+        format_tag: 1,
         sample_rate: 48_000,
         channels: 1,
         bits_per_sample: 8,
@@ -179,6 +183,7 @@ fn eight_bit_pcm_is_unsigned_and_is_centred_before_it_is_scaled() {
 #[test]
 fn twenty_four_and_thirty_two_bit_pcm_keep_their_most_significant_bits() {
     let info = WavInfo {
+        format_tag: 1,
         sample_rate: 48_000,
         channels: 1,
         bits_per_sample: 24,
@@ -191,6 +196,7 @@ fn twenty_four_and_thirty_two_bit_pcm_keep_their_most_significant_bits() {
     assert_eq!(samples(&out[..8]), vec![32767, 32767, -32768, -32768]);
 
     let info = WavInfo {
+        format_tag: 1,
         sample_rate: 48_000,
         channels: 1,
         bits_per_sample: 32,
@@ -206,6 +212,7 @@ fn twenty_four_and_thirty_two_bit_pcm_keep_their_most_significant_bits() {
 #[test]
 fn the_volume_control_scales_the_samples_that_are_emitted() {
     let info = WavInfo {
+        format_tag: 1,
         sample_rate: 48_000,
         channels: 1,
         bits_per_sample: 16,
@@ -226,6 +233,7 @@ fn the_volume_control_scales_the_samples_that_are_emitted() {
 #[test]
 fn a_higher_rate_source_is_resampled_to_the_controller_rate() {
     let info = WavInfo {
+        format_tag: 1,
         sample_rate: 44_100,
         channels: 1,
         bits_per_sample: 16,
@@ -296,6 +304,7 @@ fn a_real_recorded_tone_parses_and_resamples_to_the_native_rate() {
 #[test]
 fn a_split_source_frame_is_left_for_the_caller_to_carry() {
     let info = WavInfo {
+        format_tag: 1,
         sample_rate: 48_000,
         channels: 2,
         bits_per_sample: 16,
@@ -311,4 +320,62 @@ fn a_split_source_frame_is_left_for_the_caller_to_carry() {
     assert_eq!(consumed, 4);
     assert_eq!(written, 4);
     assert_eq!(&input[consumed..], &[3]);
+}
+
+#[test]
+fn decodes_alaw_samples_to_pcm() {
+    let data = vec![0xD5, 0x55]; // A-law values
+    let file = riff(&[
+        (b"fmt ", fmt_chunk(6, 1, 8_000, 8)),
+        (b"data", data),
+    ]);
+    let (info, consumed) = parse_wav(&file).expect("A-law header parses");
+    assert_eq!(info.format_tag, 6);
+    assert_eq!(info.channels, 1);
+    assert_eq!(info.sample_rate, 8_000);
+    assert_eq!(info.bits_per_sample, 8);
+
+    let mut converter = PcmConverter::new(info).unwrap();
+    let mut out = vec![0u8; 100];
+    let (consumed_bytes, written_bytes) = converter.convert(&file[consumed..consumed + 2], &mut out);
+    assert!(consumed_bytes > 0);
+    assert!(written_bytes > 0);
+}
+
+#[test]
+fn decodes_mulaw_samples_to_pcm() {
+    let data = vec![0xFF, 0x7F]; // µ-law values (0xFF = 0 silence)
+    let file = riff(&[
+        (b"fmt ", fmt_chunk(7, 1, 8_000, 8)),
+        (b"data", data),
+    ]);
+    let (info, consumed) = parse_wav(&file).expect("µ-law header parses");
+    assert_eq!(info.format_tag, 7);
+    assert_eq!(info.channels, 1);
+    assert_eq!(info.sample_rate, 8_000);
+
+    let mut converter = PcmConverter::new(info).unwrap();
+    let mut out = vec![0u8; 100];
+    let (consumed_bytes, written_bytes) = converter.convert(&file[consumed..consumed + 2], &mut out);
+    assert!(consumed_bytes > 0);
+    assert!(written_bytes > 0);
+}
+
+#[test]
+fn decodes_adpcm_samples_to_pcm() {
+    // 4-bit IMA ADPCM (format tag 17)
+    let data = vec![0x00, 0x11, 0x22, 0x33];
+    let file = riff(&[
+        (b"fmt ", fmt_chunk(17, 1, 8_000, 4)),
+        (b"data", data),
+    ]);
+    let (info, consumed) = parse_wav(&file).expect("IMA ADPCM parses");
+    assert_eq!(info.format_tag, 17);
+    assert_eq!(info.bits_per_sample, 4);
+
+    let mut converter = PcmConverter::new(info).unwrap();
+    let mut out = vec![0u8; 100];
+    let (consumed_bytes, written_bytes) = converter.convert(&file[consumed..consumed + 4], &mut out);
+    assert!(consumed_bytes > 0);
+    assert!(written_bytes > 0);
 }

@@ -23,11 +23,13 @@ const Q32_ONE: u64 = 1 << 32;
 /// What a WAV header says about the samples that follow it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WavInfo {
+    /// Format tag (1 = PCM, 2 = MS ADPCM, 6 = A-law, 7 = µ-law, 17 = IMA ADPCM).
+    pub format_tag: u16,
     /// Samples per second.
     pub sample_rate: u32,
     /// One or two channels.
     pub channels: u16,
-    /// Bits per sample: 8, 16, 24 or 32.
+    /// Bits per sample: 4 (ADPCM), 8, 16, 24 or 32.
     pub bits_per_sample: u16,
     /// Byte offset of the first sample in the file.
     pub data_offset: u64,
@@ -38,7 +40,12 @@ pub struct WavInfo {
 impl WavInfo {
     /// Bytes one whole frame occupies.
     pub fn frame_bytes(&self) -> usize {
-        self.channels as usize * (self.bits_per_sample as usize / 8)
+        if self.format_tag == 2 || self.format_tag == 17 {
+            // ADPCM: 4 bits per sample
+            self.channels as usize
+        } else {
+            self.channels as usize * (self.bits_per_sample as usize / 8)
+        }
     }
 
     /// Whole frames the file claims to hold.
@@ -70,6 +77,8 @@ pub enum WavError {
     Truncated,
     /// The samples are in a format this converter does not decode.
     UnsupportedFormat,
+    /// The stream chunk structure or payload is corrupt.
+    CorruptStream,
 }
 
 /// Reads the WAV header from the bytes at the start of the file.
@@ -88,7 +97,7 @@ pub fn parse_wav(head: &[u8]) -> Result<(WavInfo, usize), WavError> {
     if &head[8..12] != b"WAVE" {
         return Err(WavError::NotWave);
     }
-    let mut format: Option<(u32, u16, u16)> = None;
+    let mut format: Option<(u16, u32, u16, u16)> = None;
     let mut at = 12usize;
     loop {
         if head.len() < at + 8 {
@@ -111,25 +120,41 @@ pub fn parse_wav(head: &[u8]) -> Result<(WavInfo, usize), WavError> {
                 head[body + 7],
             ]);
             let bits = u16::from_le_bytes([head[body + 14], head[body + 15]]);
-            if tag != 1 {
+            if !matches!(tag, 1 | 2 | 6 | 7 | 17) {
                 return Err(WavError::UnsupportedFormat);
             }
             if !(1..=2).contains(&channels) {
                 return Err(WavError::UnsupportedFormat);
             }
-            if !matches!(bits, 8 | 16 | 24 | 32) {
-                return Err(WavError::UnsupportedFormat);
-            }
             if !(8_000..=192_000).contains(&rate) {
                 return Err(WavError::UnsupportedFormat);
             }
-            format = Some((rate, channels, bits));
+            match tag {
+                1 => {
+                    if !matches!(bits, 8 | 16 | 24 | 32) {
+                        return Err(WavError::UnsupportedFormat);
+                    }
+                }
+                6 | 7 => {
+                    if bits != 8 {
+                        return Err(WavError::UnsupportedFormat);
+                    }
+                }
+                2 | 17 => {
+                    if bits != 4 {
+                        return Err(WavError::UnsupportedFormat);
+                    }
+                }
+                _ => return Err(WavError::UnsupportedFormat),
+            }
+            format = Some((tag, rate, channels, bits));
         } else if id == b"data" {
-            let Some((sample_rate, channels, bits_per_sample)) = format else {
+            let Some((format_tag, sample_rate, channels, bits_per_sample)) = format else {
                 return Err(WavError::Truncated);
             };
             return Ok((
                 WavInfo {
+                    format_tag,
                     sample_rate,
                     channels,
                     bits_per_sample,
@@ -149,6 +174,93 @@ pub fn parse_wav(head: &[u8]) -> Result<(WavInfo, usize), WavError> {
     }
 }
 
+/// Decodes an 8-bit ITU-T G.711 A-law sample into signed 16-bit linear PCM.
+pub fn decode_alaw(byte: u8) -> i16 {
+    let byte = byte ^ 0x55;
+    let sign = byte & 0x80;
+    let exponent = ((byte >> 4) & 0x07) as usize;
+    let mantissa = (byte & 0x0F) as i32;
+    let sample = if exponent == 0 {
+        (mantissa << 4) + 8
+    } else {
+        ((mantissa << 4) + 0x108) << (exponent - 1)
+    };
+    if sign != 0 {
+        sample as i16
+    } else {
+        -(sample as i16)
+    }
+}
+
+/// Decodes an 8-bit ITU-T G.711 µ-law sample into signed 16-bit linear PCM.
+pub fn decode_mulaw(byte: u8) -> i16 {
+    let u = !byte;
+    let sign = u & 0x80;
+    let exponent = ((u >> 4) & 0x07) as usize;
+    let mantissa = (u & 0x0F) as i32;
+    let sample = (((mantissa << 3) + 0x84) << exponent) - 0x84;
+    if sign != 0 {
+        sample as i16
+    } else {
+        -(sample as i16)
+    }
+}
+
+pub const IMA_STEP_TABLE: [i16; 89] = [
+    7, 8, 9, 10, 11, 12, 13, 14, 16, 17,
+    19, 21, 23, 25, 28, 31, 34, 37, 41, 45,
+    50, 55, 60, 66, 73, 80, 88, 97, 107, 118,
+    130, 143, 157, 173, 190, 209, 230, 253, 279, 307,
+    337, 371, 408, 449, 494, 544, 598, 658, 724, 796,
+    876, 963, 1060, 1166, 1282, 1411, 1552, 1707, 1878, 2066,
+    2272, 2499, 2749, 3024, 3327, 3660, 4026, 4428, 4871, 5358,
+    5894, 6484, 7132, 7845, 8630, 9493, 10442, 11487, 12635, 13899,
+    15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767
+];
+
+pub const IMA_INDEX_TABLE: [i8; 16] = [
+    -1, -1, -1, -1, 2, 4, 6, 8,
+    -1, -1, -1, -1, 2, 4, 6, 8
+];
+
+pub fn decode_ima_adpcm_nibble(nibble: u8, predictor: &mut i32, step_index: &mut i8) -> i16 {
+    let idx = (*step_index).clamp(0, 88) as usize;
+    let step = IMA_STEP_TABLE[idx] as i32;
+    let mut diff = step >> 3;
+    if (nibble & 4) != 0 { diff += step; }
+    if (nibble & 2) != 0 { diff += step >> 1; }
+    if (nibble & 1) != 0 { diff += step >> 2; }
+    if (nibble & 8) != 0 {
+        *predictor -= diff;
+    } else {
+        *predictor += diff;
+    }
+    *predictor = (*predictor).clamp(-32768, 32767);
+    *step_index = (*step_index + IMA_INDEX_TABLE[(nibble & 0x0F) as usize]).clamp(0, 88);
+    *predictor as i16
+}
+
+pub fn decode_ms_adpcm_nibble(nibble: u8, p1: &mut i32, p2: &mut i32, delta: &mut i32, coeff1: i32, coeff2: i32) -> i16 {
+    let mut signed_nibble = (nibble & 0x0F) as i32;
+    if signed_nibble >= 8 {
+        signed_nibble -= 16;
+    }
+    let mut predict = (*p1 * coeff1 + *p2 * coeff2) / 256;
+    predict += signed_nibble * *delta;
+    let sample = predict.clamp(-32768, 32767);
+    *p2 = *p1;
+    *p1 = sample;
+    const ADAPT_TABLE: [i32; 16] = [
+        230, 230, 230, 230, 307, 409, 512, 614,
+        768, 614, 512, 409, 307, 230, 230, 230
+    ];
+    *delta = (*delta * ADAPT_TABLE[(nibble & 0x0F) as usize]) / 256;
+    if *delta < 16 {
+        *delta = 16;
+    }
+    sample as i16
+}
+
 /// Converts source samples into the controller's native PCM.
 ///
 /// The converter holds the interpolation state across blocks, so a caller may
@@ -165,6 +277,11 @@ pub struct PcmConverter {
     carry: [i32; 2],
     primed: bool,
     volume: i32,
+    ima_pred: [i32; 2],
+    ima_index: [i8; 2],
+    ms_p1: [i32; 2],
+    ms_p2: [i32; 2],
+    ms_delta: [i32; 2],
 }
 
 impl PcmConverter {
@@ -185,6 +302,11 @@ impl PcmConverter {
             carry: [0; 2],
             primed: false,
             volume: 100,
+            ima_pred: [0; 2],
+            ima_index: [0; 2],
+            ms_p1: [0; 2],
+            ms_p2: [0; 2],
+            ms_delta: [16; 2],
         })
     }
 
@@ -281,19 +403,87 @@ impl PcmConverter {
     }
 
     /// Decodes one whole frame into signed 16-bit values.
-    fn frame_at(&self, src: &[u8], index: usize) -> [i32; 2] {
-        let frame_bytes = self.info.frame_bytes();
-        let at = index * frame_bytes;
-        let bytes = &src[at..at + frame_bytes];
-        let first = decode_sample(bytes, self.info.bits_per_sample);
-        if self.info.channels == 1 {
-            [first, first]
-        } else {
-            let second = decode_sample(
-                &bytes[self.info.bits_per_sample as usize / 8..],
-                self.info.bits_per_sample,
-            );
-            [first, second]
+    fn frame_at(&mut self, src: &[u8], index: usize) -> [i32; 2] {
+        match self.info.format_tag {
+            1 => {
+                let frame_bytes = self.info.frame_bytes();
+                let at = index * frame_bytes;
+                if at + frame_bytes > src.len() {
+                    return [0, 0];
+                }
+                let bytes = &src[at..at + frame_bytes];
+                let first = decode_sample(bytes, self.info.bits_per_sample);
+                if self.info.channels == 1 {
+                    [first, first]
+                } else {
+                    let second = decode_sample(
+                        &bytes[self.info.bits_per_sample as usize / 8..],
+                        self.info.bits_per_sample,
+                    );
+                    [first, second]
+                }
+            }
+            6 => {
+                // A-law (8 bits per sample)
+                let frame_bytes = self.info.channels as usize;
+                let at = index * frame_bytes;
+                if at + frame_bytes > src.len() {
+                    return [0, 0];
+                }
+                let left = decode_alaw(src[at]) as i32;
+                if self.info.channels == 1 {
+                    [left, left]
+                } else {
+                    let right = decode_alaw(src[at + 1]) as i32;
+                    [left, right]
+                }
+            }
+            7 => {
+                // µ-law (8 bits per sample)
+                let frame_bytes = self.info.channels as usize;
+                let at = index * frame_bytes;
+                if at + frame_bytes > src.len() {
+                    return [0, 0];
+                }
+                let left = decode_mulaw(src[at]) as i32;
+                if self.info.channels == 1 {
+                    [left, left]
+                } else {
+                    let right = decode_mulaw(src[at + 1]) as i32;
+                    [left, right]
+                }
+            }
+            17 => {
+                // IMA ADPCM (4-bit samples)
+                let at = index * self.info.channels as usize;
+                if at >= src.len() {
+                    return [0, 0];
+                }
+                let b = src[at];
+                let left = decode_ima_adpcm_nibble(b & 0x0F, &mut self.ima_pred[0], &mut self.ima_index[0]) as i32;
+                if self.info.channels == 1 {
+                    [left, left]
+                } else {
+                    let right = decode_ima_adpcm_nibble((b >> 4) & 0x0F, &mut self.ima_pred[1], &mut self.ima_index[1]) as i32;
+                    [left, right]
+                }
+            }
+            2 => {
+                // MS ADPCM (4-bit samples)
+                let at = index * self.info.channels as usize;
+                if at >= src.len() {
+                    return [0, 0];
+                }
+                let b = src[at];
+                let left = decode_ms_adpcm_nibble(b & 0x0F, &mut self.ms_p1[0], &mut self.ms_p2[0], &mut self.ms_delta[0], 256, 0) as i32;
+                if self.info.channels == 1 {
+                    [left, left]
+                } else {
+                    let right = decode_ms_adpcm_nibble((b >> 4) & 0x0F, &mut self.ms_p1[1], &mut self.ms_p2[1], &mut self.ms_delta[1], 256, 0) as i32;
+                    [left, right]
+                }
+            }
+            _ => [0, 0],
         }
     }
 }
@@ -322,13 +512,14 @@ mod tests {
         // A frame the header claims but the file does not hold is caught by
         // the caller shortening the slice; this pins the decoder's indexing.
         let info = WavInfo {
+            format_tag: 1,
             sample_rate: 48_000,
             channels: 1,
             bits_per_sample: 16,
             data_offset: 44,
             data_len: 4,
         };
-        let converter = PcmConverter::new(info).unwrap();
+        let mut converter = PcmConverter::new(info).unwrap();
         assert_eq!(converter.frame_at(&[0x10, 0x00, 0x20, 0x00], 1), [0x0020, 0x0020]);
     }
 }

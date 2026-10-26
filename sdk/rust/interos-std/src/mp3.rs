@@ -337,7 +337,7 @@ impl Mp3Decoder {
     ) -> Result<Option<FrameInfo>, Mp3Error> {
         let channels = header.channels as usize;
         let side_start = 4 + if header.crc { 2 } else { 0 };
-        let side_len = if channels == 1 { 17 } else { 32 };
+        let side_len = header.side_len;
         if frame.len() < side_start + side_len {
             return Err(Mp3Error::InvalidFrame);
         }
@@ -345,7 +345,7 @@ impl Mp3Decoder {
         let main_len = frame.len() - main_start;
 
         let mut side_reader = BitReader::new(&frame[side_start..main_start]);
-        let mut side = SideInfo::parse(&mut side_reader, channels)?;
+        let mut side = SideInfo::parse(&mut side_reader, channels, header.version)?;
 
         if self.main_history + main_len > MAIN_CAPACITY {
             return Err(Mp3Error::InvalidFrame);
@@ -375,7 +375,12 @@ impl Mp3Decoder {
             // The two granules share one bit stream, but `self.spec` holds only
             // one granule: decode a granule and run it through the audio path
             // before the next granule overwrites the coefficients.
-            for gr in 0..2 {
+            let granules_count = if header.version == 3 { 2 } else { 1 };
+            let samples_per_channel = if header.version == 3 { MAX_FRAME_SAMPLES } else { 576 };
+            if out.len() < samples_per_channel * channels {
+                return Err(Mp3Error::OutputTooSmall);
+            }
+            for gr in 0..granules_count {
                 for ch in 0..channels {
                     let gi = side.gr[gr][ch];
                     if gi.part2_3_length == 0 {
@@ -384,7 +389,7 @@ impl Mp3Decoder {
                         continue;
                     }
                     let part_start = bits.position();
-                    read_scalefactors(&mut bits, &mut scalefacs, &side, gr, ch, &gi)?;
+                    read_scalefactors(&mut bits, &mut scalefacs, &side, gr, ch, &gi, header.version)?;
                     read_huffman(
                         &mut bits,
                         &mut side,
@@ -431,11 +436,12 @@ impl Mp3Decoder {
         self.main_buf.copy_within(total_main - keep..total_main, 0);
         self.main_history = keep;
 
+        let samples_per_channel = if header.version == 3 { MAX_FRAME_SAMPLES } else { 576 };
         Ok(Some(FrameInfo {
             bitrate_kbps: header.bitrate_kbps,
             sample_rate: header.sample_rate,
             channels: header.channels,
-            samples_per_channel: MAX_FRAME_SAMPLES,
+            samples_per_channel,
             main_data_begin: side.main_data_begin,
         }))
     }
@@ -455,8 +461,14 @@ const BITRATE_KBPS: [u16; 15] =
     [32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0];
 const SAMPLE_RATES: [u32; 3] = [44100, 48000, 32000];
 
+const BITRATE_KBPS_MPEG2: [u16; 14] = [
+    8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160,
+];
+const SAMPLE_RATES_MPEG2: [u32; 3] = [22_050, 24_000, 16_000];
+
 #[derive(Clone, Copy)]
 struct Header {
+    version: u8,
     bitrate_kbps: u16,
     sample_rate: u32,
     sample_rate_index: usize,
@@ -464,6 +476,7 @@ struct Header {
     mode_extension: u8,
     crc: bool,
     frame_len: usize,
+    side_len: usize,
 }
 
 /// Parses the four byte header at `bytes[0..4]`.
@@ -479,7 +492,7 @@ fn parse_header(bytes: &[u8]) -> Result<Header, Mp3Error> {
     if version == 1 {
         return Err(Mp3Error::InvalidFrame);
     }
-    if version != 3 {
+    if version == 0 {
         return Err(Mp3Error::UnsupportedVersion);
     }
     if layer != 1 {
@@ -500,16 +513,30 @@ fn parse_header(bytes: &[u8]) -> Result<Header, Mp3Error> {
     let mode = (bytes[3] >> 6) & 0x03;
     let mode_extension = (bytes[3] >> 4) & 0x03;
     let crc = (bytes[1] & 0x01) == 0;
-    let bitrate_kbps = BITRATE_KBPS[bitrate_index - 1];
-    let sample_rate = SAMPLE_RATES[sample_rate_index];
+    let bitrate_kbps = if version == 3 {
+        BITRATE_KBPS[bitrate_index - 1]
+    } else {
+        BITRATE_KBPS_MPEG2[bitrate_index - 1]
+    };
+    let sample_rate = if version == 3 {
+        SAMPLE_RATES[sample_rate_index]
+    } else {
+        SAMPLE_RATES_MPEG2[sample_rate_index]
+    };
+    let coef = if version == 3 { 144 } else { 72 };
     let frame_len =
-        144 * bitrate_kbps as usize * 1000 / sample_rate as usize + padding;
+        coef * bitrate_kbps as usize * 1000 / sample_rate as usize + padding;
     let header_len = 4 + if crc { 2 } else { 0 };
-    let side_len = if mode == 3 { 17 } else { 32 };
+    let side_len = if version == 3 {
+        if mode == 3 { 17 } else { 32 }
+    } else {
+        if mode == 3 { 9 } else { 17 }
+    };
     if frame_len <= header_len + side_len {
         return Err(Mp3Error::InvalidFrame);
     }
     Ok(Header {
+        version,
         bitrate_kbps,
         sample_rate,
         sample_rate_index,
@@ -517,6 +544,7 @@ fn parse_header(bytes: &[u8]) -> Result<Header, Mp3Error> {
         mode_extension,
         crc,
         frame_len,
+        side_len,
     })
 }
 
@@ -539,7 +567,7 @@ struct GranuleInfo {
     part2_3_length: u16,
     big_values: u16,
     global_gain: u8,
-    scalefac_compress: u8,
+    scalefac_compress: u16,
     window_switching: bool,
     block_type: u8,
     mixed_block: bool,
@@ -580,23 +608,17 @@ struct SideInfo {
 }
 
 impl SideInfo {
-    fn parse(bits: &mut BitReader<'_>, channels: usize) -> Result<Self, Mp3Error> {
+    fn parse(bits: &mut BitReader<'_>, channels: usize, version: u8) -> Result<Self, Mp3Error> {
         let mut side = SideInfo {
             main_data_begin: 0,
             scfsi: [[0; 4]; 2],
             gr: [[GranuleInfo::ZERO; 2]; 2],
             count1: [[0; 2]; 2],
         };
-        side.main_data_begin = bits.read_bits(9).ok_or(Mp3Error::InvalidFrame)? as u16;
-        let private_bits = if channels == 1 { 5u32 } else { 3u32 };
-        let _ = bits.read_bits(private_bits).ok_or(Mp3Error::InvalidFrame)?;
-        for ch in 0..channels {
-            for band in 0..4 {
-                side.scfsi[ch][band] =
-                    bits.read_bits(1).ok_or(Mp3Error::InvalidFrame)? as u8;
-            }
-        }
-        for gr in 0..2 {
+        if version == 2 {
+            side.main_data_begin = bits.read_bits(8).ok_or(Mp3Error::InvalidFrame)? as u16;
+            let private_bits = if channels == 1 { 1u32 } else { 2u32 };
+            let _ = bits.read_bits(private_bits).ok_or(Mp3Error::InvalidFrame)?;
             for ch in 0..channels {
                 let mut gi = GranuleInfo::ZERO;
                 gi.part2_3_length =
@@ -608,7 +630,7 @@ impl SideInfo {
                 gi.global_gain =
                     bits.read_bits(8).ok_or(Mp3Error::InvalidFrame)? as u8;
                 gi.scalefac_compress =
-                    bits.read_bits(4).ok_or(Mp3Error::InvalidFrame)? as u8;
+                    bits.read_bits(9).ok_or(Mp3Error::InvalidFrame)? as u16;
                 gi.window_switching =
                     bits.read_bits(1).ok_or(Mp3Error::InvalidFrame)? != 0;
                 if gi.window_switching {
@@ -637,12 +659,71 @@ impl SideInfo {
                     gi.region1_count =
                         bits.read_bits(3).ok_or(Mp3Error::InvalidFrame)? as u8;
                 }
-                gi.preflag = bits.read_bits(1).ok_or(Mp3Error::InvalidFrame)? != 0;
+                gi.preflag = false;
                 gi.scalefac_scale =
                     bits.read_bits(1).ok_or(Mp3Error::InvalidFrame)? != 0;
                 gi.count1table_select =
                     bits.read_bits(1).ok_or(Mp3Error::InvalidFrame)? != 0;
-                side.gr[gr][ch] = gi;
+                side.gr[0][ch] = gi;
+            }
+        } else {
+            side.main_data_begin = bits.read_bits(9).ok_or(Mp3Error::InvalidFrame)? as u16;
+            let private_bits = if channels == 1 { 5u32 } else { 3u32 };
+            let _ = bits.read_bits(private_bits).ok_or(Mp3Error::InvalidFrame)?;
+            for ch in 0..channels {
+                for band in 0..4 {
+                    side.scfsi[ch][band] =
+                        bits.read_bits(1).ok_or(Mp3Error::InvalidFrame)? as u8;
+                }
+            }
+            for gr in 0..2 {
+                for ch in 0..channels {
+                    let mut gi = GranuleInfo::ZERO;
+                    gi.part2_3_length =
+                        bits.read_bits(12).ok_or(Mp3Error::InvalidFrame)? as u16;
+                    gi.big_values = bits.read_bits(9).ok_or(Mp3Error::InvalidFrame)? as u16;
+                    if gi.big_values > 288 {
+                        return Err(Mp3Error::InvalidFrame);
+                    }
+                    gi.global_gain =
+                        bits.read_bits(8).ok_or(Mp3Error::InvalidFrame)? as u8;
+                    gi.scalefac_compress =
+                        bits.read_bits(4).ok_or(Mp3Error::InvalidFrame)? as u16;
+                    gi.window_switching =
+                        bits.read_bits(1).ok_or(Mp3Error::InvalidFrame)? != 0;
+                    if gi.window_switching {
+                        gi.block_type =
+                            bits.read_bits(2).ok_or(Mp3Error::InvalidFrame)? as u8;
+                        gi.mixed_block =
+                            bits.read_bits(1).ok_or(Mp3Error::InvalidFrame)? != 0;
+                        gi.table_select[0] =
+                            bits.read_bits(5).ok_or(Mp3Error::InvalidFrame)? as u8;
+                        gi.table_select[1] =
+                            bits.read_bits(5).ok_or(Mp3Error::InvalidFrame)? as u8;
+                        for window in 0..3 {
+                            gi.subblock_gain[window] =
+                                bits.read_bits(3).ok_or(Mp3Error::InvalidFrame)? as u8;
+                        }
+                        gi.region0_count =
+                            if gi.block_type == 2 && !gi.mixed_block { 8 } else { 7 };
+                        gi.region1_count = 20 - gi.region0_count;
+                    } else {
+                        for region in 0..3 {
+                            gi.table_select[region] =
+                                bits.read_bits(5).ok_or(Mp3Error::InvalidFrame)? as u8;
+                        }
+                        gi.region0_count =
+                            bits.read_bits(4).ok_or(Mp3Error::InvalidFrame)? as u8;
+                        gi.region1_count =
+                            bits.read_bits(3).ok_or(Mp3Error::InvalidFrame)? as u8;
+                    }
+                    gi.preflag = bits.read_bits(1).ok_or(Mp3Error::InvalidFrame)? != 0;
+                    gi.scalefac_scale =
+                        bits.read_bits(1).ok_or(Mp3Error::InvalidFrame)? != 0;
+                    gi.count1table_select =
+                        bits.read_bits(1).ok_or(Mp3Error::InvalidFrame)? != 0;
+                    side.gr[gr][ch] = gi;
+                }
             }
         }
         Ok(side)
@@ -828,7 +909,66 @@ fn read_scalefactors(
     gr: usize,
     ch: usize,
     gi: &GranuleInfo,
+    version: u8,
 ) -> Result<(), Mp3Error> {
+    if version == 2 {
+        let sfc = gi.scalefac_compress as usize;
+        let (slen1, slen2, slen3, slen4) = if sfc < 400 {
+            let n = sfc >> 4;
+            let slen1 = (n / 5) as u32;
+            let slen2 = (n % 5) as u32;
+            let slen3 = ((sfc >> 2) & 0x03) as u32;
+            let slen4 = (sfc & 0x03) as u32;
+            (slen1, slen2, slen3, slen4)
+        } else if sfc < 500 {
+            let n = (sfc - 400) >> 2;
+            let slen1 = (n / 5) as u32;
+            let slen2 = (n % 5) as u32;
+            let slen3 = (sfc & 0x03) as u32;
+            (slen1, slen2, slen3, 0)
+        } else {
+            let n = sfc - 500;
+            let slen1 = (n / 3) as u32;
+            let slen2 = (n % 3) as u32;
+            (slen1, slen2, 0, 0)
+        };
+        if gi.window_switching && gi.block_type == 2 {
+            let widths = [slen1, slen2, slen3, slen4];
+            for sfb in 0..12 {
+                let width = widths[sfb / 3];
+                if width > 0 {
+                    for window in 0..3 {
+                        scal.short[gr][ch][sfb][window] = bits
+                            .read_bits(width)
+                            .ok_or(Mp3Error::InvalidFrame)? as u8;
+                    }
+                } else {
+                    for window in 0..3 {
+                        scal.short[gr][ch][sfb][window] = 0;
+                    }
+                }
+            }
+        } else {
+            const GROUPS: [(usize, usize); 4] = [(0, 6), (6, 11), (11, 16), (16, 21)];
+            let widths = [slen1, slen2, slen3, slen4];
+            for (group, &(first, last)) in GROUPS.iter().enumerate() {
+                let width = widths[group];
+                if width > 0 {
+                    for sfb in first..last {
+                        scal.long[gr][ch][sfb] = bits
+                            .read_bits(width)
+                            .ok_or(Mp3Error::InvalidFrame)? as u8;
+                    }
+                } else {
+                    for sfb in first..last {
+                        scal.long[gr][ch][sfb] = 0;
+                    }
+                }
+            }
+        }
+        return Ok(());
+    }
+
     let sizes = SCALEFAC_SIZES[gi.scalefac_compress as usize];
     let slen1 = sizes[0] as u32;
     let slen2 = sizes[1] as u32;
@@ -1391,9 +1531,10 @@ mod tests {
             Some(Mp3Error::UnsupportedLayer)
         );
         assert_eq!(
-            parse_header(&[0xFF, 0xF3, 0x90, 0x64]).err(),
+            parse_header(&[0xFF, 0xE3, 0x90, 0x64]).err(),
             Some(Mp3Error::UnsupportedVersion)
         );
+        assert!(parse_header(&[0xFF, 0xF3, 0x90, 0x64]).is_ok());
         assert_eq!(
             parse_header(&[0xFF, 0xEB, 0x90, 0x64]).err(),
             Some(Mp3Error::InvalidFrame)
@@ -1492,7 +1633,7 @@ mod tests {
             let header = parse_header(&audio[off..off + 4]).unwrap();
             let frame = &audio[off..off + header.frame_len];
             let mut sr = BitReader::new(&frame[4..21]);
-            let side = SideInfo::parse(&mut sr, 1).unwrap();
+            let side = SideInfo::parse(&mut sr, 1, 3).unwrap();
             std::println!(
                 "frame {} len={} mdb={}",
                 frame_no,
@@ -1513,7 +1654,7 @@ mod tests {
             if side.gr[0][0].part2_3_length != 0 {
                 let main = &frame[21..];
                 let mut sr2 = BitReader::new(&frame[4..21]);
-                let mut side2 = SideInfo::parse(&mut sr2, 1).unwrap();
+                let mut side2 = SideInfo::parse(&mut sr2, 1, 3).unwrap();
                 let mut scal = Scalefacs::zero();
                 let mut spectra = [[0.0f32; 576]; 2];
                 let mut bits = BitReader::new(main);
@@ -1523,7 +1664,7 @@ mod tests {
                         continue;
                     }
                     let part_start = bits.position();
-                    read_scalefactors(&mut bits, &mut scal, &side2, gr, 0, &gi).unwrap();
+                    read_scalefactors(&mut bits, &mut scal, &side2, gr, 0, &gi, 3).unwrap();
                     read_huffman(&mut bits, &mut side2, &mut spectra[gr], gr, 0, part_start, 0)
                         .unwrap();
                     std::println!(

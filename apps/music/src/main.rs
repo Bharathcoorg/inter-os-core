@@ -166,6 +166,7 @@ pub struct MusicApp {
     pub cover_art_w: u32,
     pub cover_art_h: u32,
     pub cover_art_len: usize,
+    pub loop_queue: bool,
 }
 
 impl MusicApp {
@@ -200,6 +201,7 @@ impl MusicApp {
             cover_art_w: 0,
             cover_art_h: 0,
             cover_art_len: 0,
+            loop_queue: true,
         }
     }
 
@@ -670,6 +672,45 @@ impl MusicApp {
         std::log("[MUSIC APP] No media record is available for encryption.").ok();
     }
 
+    /// Seeks to a position in milliseconds within the current track.
+    pub fn seek(&mut self, target_ms: u64) -> bool {
+        if self.store.is_empty() {
+            return false;
+        }
+        let ok = self.player.seek(&self.store, target_ms);
+        if ok {
+            self.state = match self.player.state {
+                PlayerState::Playing => PlaybackState::Playing,
+                PlayerState::Paused => PlaybackState::Paused,
+                _ => PlaybackState::Stopped,
+            };
+            self.shown_second = u64::MAX;
+            std::log("[MUSIC APP] Repositioned playback timeline.").ok();
+        }
+        ok
+    }
+
+    /// Toggles queue looping behavior.
+    pub fn toggle_loop_queue(&mut self) -> bool {
+        self.loop_queue = !self.loop_queue;
+        if self.loop_queue {
+            std::log("[MUSIC APP] Queue looping enabled.").ok();
+        } else {
+            std::log("[MUSIC APP] Queue looping disabled.").ok();
+        }
+        true
+    }
+
+    /// Adds a new track to the playback queue.
+    pub fn add_to_queue(&mut self, title: &[u8], duration_sec: u32) -> bool {
+        let ok = self.store.add(title, duration_sec);
+        if ok {
+            self.sync_list_extent();
+            self.publish_now_playing();
+            std::log("[MUSIC APP] Track added to queue.").ok();
+        }
+        ok
+    }
     /// Steps the playlist index, but only when there is real media to step over.
     ///
     /// Returns `true` only when the selection actually moved. A tap on prev/next
@@ -683,7 +724,22 @@ impl MusicApp {
         }
         let len = self.store.len() as isize;
         let cur = (self.current_track_idx.min(self.store.len() - 1)) as isize;
-        let next = (cur + delta).rem_euclid(len);
+        let next = if self.loop_queue {
+            (cur + delta).rem_euclid(len)
+        } else {
+            let n = cur + delta;
+            if n < 0 {
+                0
+            } else if n >= len {
+                len - 1
+            } else {
+                n
+            }
+        };
+        if !self.loop_queue && next == cur {
+            std::log("[MUSIC APP] Track step reached queue boundary with looping disabled.").ok();
+            return false;
+        }
         self.current_track_idx = next as usize;
         self.reload_current_art();
         // WHY the line is cleared here: a refusal or an "ended" notice names
@@ -720,9 +776,22 @@ impl MusicApp {
             self.state = PlaybackState::Stopped;
             return false;
         }
+        if !self.loop_queue && self.current_track_idx + 1 >= len {
+            self.state = PlaybackState::Stopped;
+            self.player.stop();
+            let mut msg = [0u8; FEEDBACK_CAP];
+            let n = music::ended_feedback(None, &mut msg);
+            self.set_feedback(&msg[..n]);
+            std::log("[MUSIC APP] Queue ended with looping disabled; transport stopped.").ok();
+            return false;
+        }
         let start = (self.current_track_idx + 1) % len;
         for step in 0..len {
-            self.current_track_idx = (start + step) % len;
+            let next_idx = (start + step) % len;
+            if !self.loop_queue && next_idx < self.current_track_idx {
+                break;
+            }
+            self.current_track_idx = next_idx;
             if self.start_selected() {
                 let mut msg = [0u8; FEEDBACK_CAP];
                 let title = self
@@ -1020,6 +1089,9 @@ const IMPORT_BTN: Rect = Rect { x: 578, y: 748, w: 118, h: 48 };
 /// y 828 ran into the volume controls, so feedback takes the caption's place
 /// while it is shown.
 const UNAVAILABLE_Y: usize = 808;
+const TIMELINE_RECT: Rect = Rect { x: 24, y: 824, w: 672, h: 6 };
+const TIMELINE_TOUCH_Y0: usize = 820;
+const TIMELINE_TOUCH_Y1: usize = 844;
 
 /// The search query's capacity, in bytes.
 const SEARCH_CAP: usize = 32;
@@ -1785,16 +1857,46 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
     // what the device can do instead. Feedback temporarily replaces this
     // line rather than sharing a band too short for two of them.
     if app.feedback_len == 0 {
+        let loop_text: &[u8] = if app.loop_queue {
+            b"Playlists unavailable - queue loop active; touch bar to seek"
+        } else {
+            b"Playlists unavailable - queue loop off; touch bar to seek"
+        };
         if let Some(c) = text_centered(
             x,
             y,
             UNAVAILABLE_Y,
             1,
-            b"Playlists unavailable - no seek; stream cannot reposition",
+            loop_text,
             THEME.muted,
             THEME.surface,
         ) {
             return c;
+        }
+    }
+
+    if y >= 822 && y <= 832 && x >= TIMELINE_RECT.x && x < TIMELINE_RECT.x + TIMELINE_RECT.w {
+        let dur = app.player.duration_ms().unwrap_or_else(|| {
+            app.store.get(app.current_track_idx).map(|t| (t.duration_sec() as u64) * 1000).unwrap_or(0)
+        });
+        let pos = app.player.position_ms().unwrap_or(0);
+        let fill_w = if dur > 0 {
+            ((pos.min(dur) * (TIMELINE_RECT.w as u64)) / dur) as usize
+        } else {
+            0
+        };
+        let thumb_cx = TIMELINE_RECT.x + fill_w;
+        let dx = (x as isize) - (thumb_cx as isize);
+        let dy = (y as isize) - 827isize;
+        if dx * dx + dy * dy <= 16 {
+            return THEME.on_surface;
+        }
+        if y >= TIMELINE_RECT.y && y < TIMELINE_RECT.y + TIMELINE_RECT.h {
+            if x < TIMELINE_RECT.x + fill_w {
+                return THEME.primary;
+            } else {
+                return THEME.surface_container_high;
+            }
         }
     }
 
@@ -2317,6 +2419,30 @@ fn handle_tap(app: &mut MusicApp, px: u32, py: u32) -> Tap<'static> {
         return Tap::Redraw(Dirty::None);
     }
 
+    // Timeline seeking hit-test
+    if y >= TIMELINE_TOUCH_Y0 && y <= TIMELINE_TOUCH_Y1 && x >= TIMELINE_RECT.x && x < TIMELINE_RECT.x + TIMELINE_RECT.w {
+        let dur = app.player.duration_ms().unwrap_or_else(|| {
+            app.store.get(app.current_track_idx).map(|t| (t.duration_sec() as u64) * 1000).unwrap_or(0)
+        });
+        if dur > 0 {
+            let offset_x = (x - TIMELINE_RECT.x) as u64;
+            let target_ms = (offset_x * dur) / (TIMELINE_RECT.w as u64);
+            if app.seek(target_ms) {
+                let _ = std::audio_haptic_click();
+                return Tap::Redraw(Dirty::Meta);
+            }
+        }
+        return Tap::Redraw(Dirty::None);
+    }
+
+    // Toggle queue looping hit-test on the unavailable line
+    if y >= 800 && y < 820 {
+        if app.toggle_loop_queue() {
+            let _ = std::audio_haptic_click();
+            return Tap::Redraw(Dirty::Meta);
+        }
+    }
+
     // The library's search field.
     if SEARCH_FIELD.contains(x, y) {
         app.search_focused = true;
@@ -2805,6 +2931,13 @@ pub extern "C" fn _start() -> ! {
                                 std::exit_with_code(0);
                             }
                         }
+                        if input.kind == 4 || input.kind == 6 || input.kind == 7 || input.kind == 8 || input.kind == 10 {
+                            std::log("[MUSIC APP] Navigation gesture recognized. Exiting to launcher.").ok();
+                            if surface > 0 {
+                                let _ = std::surface_destroy(surface);
+                            }
+                            std::exit_with_code(0);
+                        }
                         if input.kind == 1 {
                             match handle_tap(&mut music, input.x, input.y) {
                                 Tap::Leave(msg) => {
@@ -2888,6 +3021,7 @@ pub extern "C" fn _start() -> ! {
                         // own count rather than the count at the pause.
                         music.player.poll();
                     }
+                    std::yield_now();
                 }
             }
             Err(_) => {

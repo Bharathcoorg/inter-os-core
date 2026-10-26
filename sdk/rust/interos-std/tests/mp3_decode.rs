@@ -235,7 +235,9 @@ fn refuses_free_format_layer_one_two_and_corrupt_headers_with_distinct_errors() 
     let free_format = [0xFFu8, 0xFB, 0x00, 0x64];
     let layer_two = [0xFFu8, 0xFD, 0x90, 0x64];
     let layer_one = [0xFFu8, 0xFF, 0x90, 0x64];
-    // Version 10 is MPEG-2; the decoder deliberately supports MPEG-1 only.
+    // Version 00 is MPEG-2.5; unsupported version.
+    let mpeg2_5 = [0xFFu8, 0xE3, 0x90, 0x64];
+    // Version 10 is MPEG-2; supported version.
     let mpeg2 = [0xFFu8, 0xF3, 0x90, 0x64];
 
     let decode_header = |header: [u8; 4]| -> Result<Decoded, Mp3Error> {
@@ -255,8 +257,12 @@ fn refuses_free_format_layer_one_two_and_corrupt_headers_with_distinct_errors() 
     assert_eq!(decode_header(layer_two).err(), Some(Mp3Error::UnsupportedLayer));
     assert_eq!(decode_header(layer_one).err(), Some(Mp3Error::UnsupportedLayer));
     assert_eq!(
-        decode_header(mpeg2).err(),
+        decode_header(mpeg2_5).err(),
         Some(Mp3Error::UnsupportedVersion)
+    );
+    assert_eq!(
+        decode_header(mpeg2).err(),
+        Some(Mp3Error::Truncated)
     );
     // A valid header cut off after four bytes is a truncation, not a corrupt
     // frame: the decoder distinguishes "not enough bytes yet" from "garbage".

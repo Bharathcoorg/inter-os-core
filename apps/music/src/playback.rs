@@ -104,7 +104,7 @@ impl PlaybackError {
 pub const fn error_for_wav(error: WavError) -> PlaybackError {
     match error {
         WavError::UnsupportedFormat => PlaybackError::UnsupportedFormat,
-        WavError::NotRiff | WavError::NotWave | WavError::Truncated => PlaybackError::NotWav,
+        WavError::NotRiff | WavError::NotWave | WavError::Truncated | WavError::CorruptStream => PlaybackError::NotWav,
     }
 }
 
@@ -180,6 +180,7 @@ pub struct Player {
     file_eof: bool,
     /// Whether the decoder reached end-of-stream.
     decoder_done: bool,
+    pub seek_offset_ms: u64,
 }
 
 impl Player {
@@ -206,6 +207,7 @@ impl Player {
         decoded_pos: 0,
         file_eof: false,
         decoder_done: false,
+        seek_offset_ms: 0,
     };
 
     /// What the screen may say when the player refused the current track.
@@ -225,7 +227,7 @@ impl Player {
 
     /// The position the device has taken from this stream, in milliseconds.
     pub fn position_ms(&self) -> Option<u64> {
-        self.status.map(|s| position_millis(s.frames_consumed))
+        self.status.map(|s| self.seek_offset_ms.saturating_add(position_millis(s.frames_consumed)))
     }
 
     /// The length the file claims, in milliseconds.
@@ -264,6 +266,7 @@ impl Player {
         self.stop();
         self.volume = volume;
         self.track = track;
+        self.seek_offset_ms = 0;
 
         let mut path = [0u8; SOURCE_MAX];
         let Some(path_len) = library::resolve_source(store, track, &mut path) else {
@@ -434,7 +437,10 @@ impl Player {
                 let skip_bytes = target_bytes.min(info.data_len);
 
                 let from_pending = (self.pending_len as u64).min(skip_bytes);
-                self.pending_len -= from_pending as usize;
+                if from_pending > 0 {
+                    self.pending.copy_within((from_pending as usize)..self.pending_len, 0);
+                    self.pending_len -= from_pending as usize;
+                }
                 let mut remaining_to_skip = skip_bytes - from_pending;
 
                 let fd = match self.fd {
@@ -519,6 +525,7 @@ impl Player {
             None => return false,
         }
 
+        self.seek_offset_ms = target_ms;
         if was_playing {
             self.state = PlayerState::Playing;
             self.pump();
@@ -1006,6 +1013,7 @@ mod tests {
         // WAV with 48000 frames at 48000 Hz = 1000 ms
         player.format = Some(AudioFormat::Wav);
         player.info = Some(WavInfo {
+            format_tag: 1,
             sample_rate: 48_000,
             channels: 2,
             bits_per_sample: 16,
