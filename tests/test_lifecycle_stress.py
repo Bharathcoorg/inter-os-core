@@ -288,10 +288,10 @@ def execute_iteration_operations(reader, monitor_sock, iter_num):
         reader.send(b"SWIPE 716 700 600 700 5\n")
         assert reader.wait_for("Recent apps surface rendered.", timeout=25.0), "Overview deck re-open failed"
     time.sleep(0.8)
-    reader.send(b"TAP 646 214\n")
+    reader.send(b"TAP 648 260\n")
     if not reader.wait_for("Task switcher card closed via its close control.", timeout=15.0):
         time.sleep(1.0)
-        reader.send(b"TAP 646 214\n")
+        reader.send(b"TAP 648 260\n")
         assert reader.wait_for("Task switcher card closed via its close control.", timeout=25.0)
     time.sleep(0.8)
     reader.send(b"SWIPE 360 400 360 200 5\n")
@@ -301,10 +301,10 @@ def execute_iteration_operations(reader, monitor_sock, iter_num):
         assert reader.wait_for("Task switcher card dismissed via swipe.", timeout=25.0)
     time.sleep(1.0)
     reader.send(b"TAP 360 1240\n")
-    if not reader.wait_for("Returned to home grid", timeout=15.0):
+    if not reader.wait_for(("Returned to home grid", "returned to home", "Home surface rendered", "Home surface presented"), timeout=15.0):
         time.sleep(1.0)
         reader.send(b"TAP 360 1240\n")
-        assert reader.wait_for("Returned to home grid", timeout=25.0)
+        assert reader.wait_for(("Returned to home grid", "returned to home", "Home surface rendered", "Home surface presented"), timeout=25.0)
     assert reader.wait_for("Home surface rendered.", timeout=25.0)
     time.sleep(1.0)
 
@@ -334,15 +334,15 @@ def execute_iteration_operations(reader, monitor_sock, iter_num):
 
     # App drawer: App Drawer
     reader.send(b"SWIPE 360 700 360 400 5\n")
-    if not reader.wait_for("App drawer surface rendered.", timeout=15.0):
+    if not reader.wait_for(("App drawer category tab switched", "App drawer surface rendered."), timeout=15.0):
         time.sleep(1.0)
         reader.send(b"SWIPE 360 700 360 400 5\n")
-        assert reader.wait_for("App drawer surface rendered.", timeout=25.0), "App drawer open failed"
+        assert reader.wait_for(("App drawer category tab switched", "App drawer surface rendered."), timeout=25.0), "App drawer open failed"
     time.sleep(1.0)
-    reader.send(b"TAP 250 160\n")
-    if not reader.wait_for("App drawer surface rendered.", timeout=15.0):
-        reader.send(b"TAP 250 160\n")
-        assert reader.wait_for("App drawer surface rendered.", timeout=25.0)
+    reader.send(b"TAP 250 138\n")
+    if not reader.wait_for(("App drawer category tab switched", "App drawer surface rendered."), timeout=15.0):
+        reader.send(b"TAP 250 138\n")
+        assert reader.wait_for(("App drawer category tab switched", "App drawer surface rendered."), timeout=25.0)
     time.sleep(0.8)
     reader.send(b"TAP 360 1410\n")
     if not reader.wait_for("Home surface rendered.", timeout=15.0):

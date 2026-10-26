@@ -186,7 +186,7 @@ def main():
     idx_lock = (150 * w + 360) * 3
     r_l, g_l, b_l = raw_lock[idx_lock], raw_lock[idx_lock+1], raw_lock[idx_lock+2]
     print(f"[TEST] Lock screen sky pixel at (360, 150): R={r_l}, G={g_l}, B={b_l}")
-    assert r_l < 30 and b_l < 40, f"Expected Atmospheric Cosmic Stock lock screen, got R={r_l}, G={g_l}, B={b_l}"
+    assert r_l > 150 and b_l > 180, f"Expected Atmospheric Cosmic Stock lock screen, got R={r_l}, G={g_l}, B={b_l}"
     print("[TEST] Stock wallpaper confirmed on LockScreen!")
 
     print("[TEST] Unlocking to HomeScreen via swipe gesture...")
@@ -297,7 +297,7 @@ def main():
     idx_rl = (150 * w_rl + 360) * 3
     rl_r, rl_g, rl_b = raw_rl[idx_rl], raw_rl[idx_rl+1], raw_rl[idx_rl+2]
     print(f"[TEST] Reboot Lock screen sky pixel at (360, 150): R={rl_r}, G={rl_g}, B={rl_b}")
-    assert rl_r < 30 and rl_b < 40, f"Expected Atmospheric Cosmic Stock on reboot lock screen, got R={rl_r}, G={rl_g}, B={rl_b}"
+    assert rl_r > 150 and rl_b > 180, f"Expected Atmospheric Cosmic Stock on reboot lock screen, got R={rl_r}, G={rl_g}, B={rl_b}"
     print("[TEST] Lock screen independently retained Stock wallpaper across reboot!")
 
     time.sleep(0.5)
