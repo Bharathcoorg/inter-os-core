@@ -824,6 +824,22 @@ fn semantic_ranker_falls_back_to_exact_and_token_prefix_matching() {
 }
 
 #[test]
+fn semantic_ranker_cosine_similarity_ranking_when_available() {
+    use crate::search::{AiEmbeddingStatus, SemanticRanker};
+
+    let ranker = SemanticRanker::new(AiEmbeddingStatus::Available { abi_version: 1 });
+    let mut index = search::Index::new();
+    index.push(Entry::new(SearchKind::App, b"Settings", b"Tools", b"org.interos.settings"));
+    index.push(Entry::new(SearchKind::App, b"Camera", b"Media", b"org.interos.camera"));
+
+    // Prefix query "set" matches Settings with a score boosted by cosine similarity
+    let results = index.search(b"set", &ranker);
+    assert_eq!(results.count, 1);
+    let hit = results.hit(0).expect("hit");
+    assert!(hit.score > 800, "score {} must include semantic similarity boost", hit.score);
+}
+
+#[test]
 fn search_index_ai_state_roundtrip() {
     let mut index = search::Index::new();
     assert_eq!(index.ai_state(), SourceState::Unavailable("token prefix matching"));

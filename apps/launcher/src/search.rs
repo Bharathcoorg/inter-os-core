@@ -301,10 +301,35 @@ impl SemanticRanker {
 
 impl Ranker for SemanticRanker {
     fn score(&self, query: &[u8], entry: &Entry) -> Option<u32> {
-        // Under the Platform Truth Contract, when the AI daemon or weights are absent,
-        // we must never fabricate synthetic embeddings or scores. We honestly execute
-        // exact / token prefix matching.
-        self.exact.score(query, entry)
+        let base_score = self.exact.score(query, entry);
+        if !self.ai_status.is_available() {
+            // Under the Platform Truth Contract, when the AI daemon or weights are absent,
+            // we must never fabricate synthetic embeddings or scores. We honestly execute
+            // exact / token prefix matching.
+            return base_score;
+        }
+
+        // When physical weights and AI service are available, compute cosine similarity
+        // between query and entry in 128-D Matryoshka space
+        let mut query_vec = [0i8; 128];
+        let mut entry_vec = [0i8; 128];
+        interos_std::ai::compute_text_embedding_q7(query, &mut query_vec);
+        interos_std::ai::compute_text_embedding_q7(entry.title(), &mut entry_vec);
+        let sim = interos_std::ai::cosine_similarity_q7(&query_vec, &entry_vec);
+
+        if sim > 0 {
+            let sim_boost = (sim as u32 * 400) / 32767;
+            if let Some(base) = base_score {
+                Some(base.saturating_add(sim_boost))
+            } else if sim > 8000 {
+                // Semantic candidate hit for semantically close query
+                Some(250 + sim_boost)
+            } else {
+                None
+            }
+        } else {
+            base_score
+        }
     }
 }
 
@@ -529,7 +554,8 @@ impl Index {
         results.apps = self.category_status(self.apps, apps);
         results.settings = self.category_status(self.settings, settings);
         results.files = self.category_status(self.files, files);
-        results.ai = self.category_status(self.ai, 0);
+        let total_matches = apps + settings + files;
+        results.ai = self.category_status(self.ai, total_matches);
         results
     }
 

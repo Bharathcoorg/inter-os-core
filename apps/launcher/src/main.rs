@@ -1126,15 +1126,15 @@ fn probe_system_ai_status() -> launcher::search::AiEmbeddingStatus {
         return launcher::search::AiEmbeddingStatus::Unavailable("wrong service ABI; token prefix matching");
     }
 
-    // 2. Probe physical model weights via VFS.
+    // 2. Probe physical model weights via VFS across both system and user models.
     if std::cap_lookup(std::cap_type::FILE_SYSTEM_READ, 0).is_err() {
         return launcher::search::AiEmbeddingStatus::Unavailable("no VFS read authority; token prefix matching");
     }
 
     let mut model_buf = [0u8; 1024];
     let mut has_weights = false;
-    match std::fs_list("/system/models", &mut model_buf) {
-        Ok(n) => {
+    for &dir in &["/system/models", "/data/models"] {
+        if let Ok(n) = std::fs_list(dir, &mut model_buf) {
             let payload = &model_buf[..n.min(model_buf.len())];
             for line in payload.split(|&b| b == b'\n') {
                 if line.is_empty() {
@@ -1147,9 +1147,9 @@ fn probe_system_ai_status() -> launcher::search::AiEmbeddingStatus {
                     break;
                 }
             }
-        }
-        Err(_) => {
-            return launcher::search::AiEmbeddingStatus::Unavailable("token prefix matching");
+            if has_weights {
+                break;
+            }
         }
     }
 
