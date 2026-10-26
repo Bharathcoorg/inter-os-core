@@ -1564,7 +1564,7 @@ impl AgentManagerApp {
             std::ai::MSG_TYPE_CANCEL,
             b"CANC",
         );
-        self.chat.is_streaming = false;
+        self.chat.finish_stream();
         self.chat.push(ChatRole::Notice, b"[Generation cancelled by user]");
         self.set_action(b"Streaming cancelled.", Tone::Plain);
         self.rebuild();
@@ -1611,13 +1611,9 @@ impl AgentManagerApp {
         }
 
         let chunk: StreamChunk = match self.selected {
-            0 => {
-                if step == 0 {
-                    StreamChunk::Chunk(b"[EmbeddingGemma 2] On-device vector embedding computed for prompt.")
-                } else {
-                    StreamChunk::Done
-                }
-            }
+            0 => StreamChunk::Unavailable(
+                "EmbeddingGemma 2 is an embedding model and cannot generate conversational text.",
+            ),
             2 => LOCAL_GENERATIVE.stream_chunk(prompt_bytes, step),
             _ => HOST_BRIDGE.stream_chunk(prompt_bytes, step),
         };
@@ -1651,6 +1647,9 @@ impl AgentManagerApp {
 
     /// Empties the conversation and the prompt.
     pub fn clear_chat(&mut self) {
+        if self.chat.is_streaming {
+            self.cancel_streaming();
+        }
         self.chat = ChatSession::new();
         self.set_action(b"Conversation cleared.", Tone::Muted);
         self.rebuild();

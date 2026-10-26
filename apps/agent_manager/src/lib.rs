@@ -3056,6 +3056,27 @@ mod tests {
     }
 
     #[test]
+    fn agent_tools_consent_enforcement_blocks_all_tools() {
+        let tools = [
+            AgentTool::Calculator,
+            AgentTool::CalendarClock,
+            AgentTool::StorageStats,
+            AgentTool::SettingsQuery,
+            AgentTool::CapabilityCheck,
+        ];
+        for tool in tools {
+            let outcome = AgentToolOutcome::execute_with_consent(tool, false);
+            assert!(!outcome.ok);
+            assert_eq!(outcome.output_len, 39);
+            assert_eq!(
+                &outcome.output[..outcome.output_len as usize],
+                b"Consent denied: Action rejected by user"
+            );
+            assert_eq!(outcome.text(), "Consent denied: Action rejected by user");
+        }
+    }
+
+    #[test]
     fn probe_stages_derive_from_inventory_and_services() {
         let inv = ModelInventory {
             status: ModelProbeStatus::Listed,
