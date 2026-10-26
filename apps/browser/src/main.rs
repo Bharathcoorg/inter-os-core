@@ -35,6 +35,7 @@ use browser::{
 };
 use browser::css;
 use browser::images;
+use browser::layout;
 use interos_std::design::outline_text;
 use interos_std::design::scroll::ScrollState;
 
@@ -171,6 +172,43 @@ static mut READER_BUF: [u8; browser::MAX_READER_BYTES] = [0; browser::MAX_READER
 /// silently dropped and never truncated into a partial bitmap.
 static mut IMAGE_ARENA: [u8; images::IMAGE_ARENA_BYTES] = [0; images::IMAGE_ARENA_BYTES];
 
+/// The DOM of the page the HTML view is showing.
+///
+/// WHY a static and not a field of the app state: the arena is a few
+/// hundred kilobytes, and the app state is built on the task's stack.
+static mut PAGE_DOM: layout::Dom = layout::Dom::new();
+
+/// The display list the HTML view paints.
+static mut PAGE_LAYOUT: layout::TextLayout = layout::TextLayout::new();
+
+/// The longest value one form control's editor holds.
+const FIELD_TEXT_MAX: usize = 96;
+
+/// The value each form control would submit.
+///
+/// WHY these are statics: the display list is static, and the value a
+/// person typed into a control has to outlive the focus moving to the
+/// next one. A value copied only while its field is focused would be
+/// lost the moment another field took the keyboard.
+static mut FIELD_TEXT: [[u8; FIELD_TEXT_MAX]; layout::MAX_FIELDS] =
+    [[0; FIELD_TEXT_MAX]; layout::MAX_FIELDS];
+static mut FIELD_TEXT_LEN: [u8; layout::MAX_FIELDS] = [0; layout::MAX_FIELDS];
+
+/// The encoded body of a form the browser is submitting.
+///
+/// WHY one buffer: a submission is one request, and the request builder
+/// reads the body while it is still the current navigation.
+static mut FORM_BODY: [u8; 8192] = [0; 8192];
+
+/// The encoded query of a GET submission, before it becomes an address.
+static mut FORM_ENCODED: [u8; 1024] = [0; 1024];
+
+/// The address a form submission is sent to, after resolution.
+static mut FORM_URL: [u8; browser::http::MAX_URL_BYTES] = [0; browser::http::MAX_URL_BYTES];
+
+/// No form control has the keyboard.
+const NO_FIELD: u8 = u8::MAX;
+
 /// The lines the reader holds for the document on screen.
 ///
 /// WHY a static and not a field of the app state: a thousand lines is a
@@ -196,6 +234,33 @@ fn doc_line(index: usize) -> &'static DocLine {
     } else {
         &EMPTY_DOC_LINE
     }
+}
+
+/// The nearest `<form>` ancestor of a node.
+fn nearest_form(dom: &layout::Dom, node: layout::NodeId) -> Option<layout::NodeId> {
+    let mut cursor = dom.parent(node);
+    while let Some(id) = cursor {
+        if dom.tag(id) == b"form" {
+            return Some(id);
+        }
+        cursor = dom.parent(id);
+    }
+    None
+}
+
+/// The value an option submits: its `value`, or the text it shows.
+fn option_value<'a>(dom: &'a layout::Dom, node: layout::NodeId) -> &'a [u8] {
+    if let Some(value) = dom.attr(node, b"value") {
+        return value;
+    }
+    let mut child = dom.first_child(node);
+    while let Some(id) = child {
+        if dom.node(id).is_text() {
+            return dom.text_of(id);
+        }
+        child = dom.next_sibling(id);
+    }
+    b""
 }
 
 /// How many sends are attempted if the tick counter is unavailable.
@@ -1448,6 +1513,21 @@ pub struct BrowserApp {
     pub tabs: TabSessionManager,
     pub overlay: SheetOverlay,
     pub doc_line_count: usize,
+    /// Whether the page is drawn by the HTML layout engine rather than the
+    /// reader.
+    ///
+    /// WHY the app keeps this: the two views scroll in the same band but
+    /// have different coordinate systems, so the renderer and the tap
+    /// handler both have to know which one owns the content.
+    pub html_view: bool,
+    /// The form control the keyboard is editing, or [`NO_FIELD`].
+    pub field_focus: u8,
+    /// How many bytes of [`FORM_BODY`] the next navigation sends.
+    ///
+    /// WHY it is cleared when read: a POST belongs to one navigation, and
+    /// a later navigation that carried the previous body would be sending
+    /// a form the person did not submit.
+    form_post_len: usize,
     /// The inline images this page placed, in document order.
     pub images: [PlacedImage; images::MAX_INLINE_IMAGES],
     pub image_count: usize,
@@ -1618,6 +1698,9 @@ impl BrowserApp {
             tabs: TabSessionManager::new(),
             overlay: SheetOverlay::None,
             doc_line_count: 0,
+            html_view: false,
+            field_focus: NO_FIELD,
+            form_post_len: 0,
             images: [PlacedImage::EMPTY; images::MAX_INLINE_IMAGES],
             image_count: 0,
             image_arena_used: 0,
@@ -1815,20 +1898,30 @@ impl BrowserApp {
             browser::PayloadKind::PlainText
         };
 
-        let doc_len = {
+        // Markup goes through the layout engine so its blocks, tables,
+        // forms and inline images are placed; a document with nothing to
+        // place falls back to the reader, which always holds its text.
+        let mut loaded = false;
+        if kind == browser::PayloadKind::Markup {
             let source = unsafe { &*core::ptr::addr_of!(FILE_BUF) };
-            let destination = unsafe { &mut *core::ptr::addr_of_mut!(READER_BUF) };
-            browser::html_to_reader_document_kind(&source[..read_bytes], kind, destination)
-        };
-        if doc_len == 0 {
-            self.status = PageStatus::LocalRefused;
-            self.local_failure = LocalFailure::Empty;
-            self.tabs.active_tab_mut().loading_state = LoadingState::Failed;
-            return false;
+            loaded = self.load_html_document(&source[..read_bytes]);
         }
-        {
-            let document = unsafe { &*core::ptr::addr_of!(READER_BUF) };
-            self.load_document_content(&document[..doc_len]);
+        if !loaded {
+            let doc_len = {
+                let source = unsafe { &*core::ptr::addr_of!(FILE_BUF) };
+                let destination = unsafe { &mut *core::ptr::addr_of_mut!(READER_BUF) };
+                browser::html_to_reader_document_kind(&source[..read_bytes], kind, destination)
+            };
+            if doc_len == 0 {
+                self.status = PageStatus::LocalRefused;
+                self.local_failure = LocalFailure::Empty;
+                self.tabs.active_tab_mut().loading_state = LoadingState::Failed;
+                return false;
+            }
+            {
+                let document = unsafe { &*core::ptr::addr_of!(READER_BUF) };
+                self.load_document_content(&document[..doc_len]);
+            }
         }
 
         self.status = PageStatus::Loaded;
@@ -2226,6 +2319,430 @@ impl BrowserApp {
         // through all of it instead of stopping at the first screenful.
         let content_h = browser::document_height_px(&lines[..self.doc_line_count]);
         self.scroll = browser::reader_scroll(content_h, READER_VIEWPORT_H);
+        // A reader document replaced an HTML page; the content band now
+        // belongs to the reader.
+        self.html_view = false;
+        self.field_focus = NO_FIELD;
+    }
+
+    /// Parses markup into the HTML view.
+    ///
+    /// WHY this is a second path and not a rewrite of the reader: a page
+    /// that is plain text or Gemtext has no elements to lay out, and the
+    /// reader already draws those with wrapped lines. Markup is the case
+    /// the reader could not express — tables, forms, images in the flow,
+    /// and blocks whose width depends on their parent.
+    ///
+    /// Returns false when the markup holds nothing the layout engine can
+    /// place, so the caller can fall back to the reader.
+    pub fn load_html_document(&mut self, source: &[u8]) -> bool {
+        self.doc_line_count = 0;
+        self.doc_total_lines = 0;
+        self.image_count = 0;
+        self.image_arena_used = 0;
+        self.field_focus = NO_FIELD;
+
+        let dom = unsafe { &mut *core::ptr::addr_of_mut!(PAGE_DOM) };
+        dom.parse(source);
+        if dom.node_count() <= 1 {
+            self.html_view = false;
+            return false;
+        }
+        let out = unsafe { &mut *core::ptr::addr_of_mut!(PAGE_LAYOUT) };
+        {
+            let sheet = css::parse_stylesheet(dom.css());
+            layout::build(dom, &sheet, browser::CONTENT_WIDTH, out);
+        }
+        if out.is_empty() {
+            self.html_view = false;
+            return false;
+        }
+
+        // Each control starts with the value the markup gave it; from then
+        // on the value is what the person has typed.
+        let text = unsafe { &mut *core::ptr::addr_of_mut!(FIELD_TEXT) };
+        let lens = unsafe { &mut *core::ptr::addr_of_mut!(FIELD_TEXT_LEN) };
+        for index in 0..out.field_count {
+            let value = out.fields[index].value.get(dom);
+            let n = value.len().min(FIELD_TEXT_MAX);
+            text[index][..n].copy_from_slice(&value[..n]);
+            lens[index] = n as u8;
+        }
+
+        // The layout reserves the image slots in document order, so the
+        // fetches run in that same order and each result lands in the
+        // slot the display list already names.
+        let image_count = out.image_count;
+        for slot in 0..image_count {
+            let item = out.images[slot];
+            let mut src = [0u8; 64];
+            let mut alt = [0u8; 64];
+            let src_bytes = item.src.get(dom);
+            let alt_bytes = item.alt.get(dom);
+            let src_len = src_bytes.len().min(src.len());
+            let alt_len = alt_bytes.len().min(alt.len());
+            src[..src_len].copy_from_slice(&src_bytes[..src_len]);
+            alt[..alt_len].copy_from_slice(&alt_bytes[..alt_len]);
+            let marker = images::ImageMarker {
+                src: &src[..src_len],
+                alt: &alt[..alt_len],
+                declared_w: None,
+                declared_h: None,
+            };
+            self.place_image(marker, (item.w as usize).max(1));
+        }
+
+        let height = out.height as usize;
+        let note = if out.truncated { 36 } else { 0 };
+        self.scroll = browser::reader_scroll(
+            height + browser::CONTENT_PADDING + note,
+            READER_VIEWPORT_H,
+        );
+        self.html_view = true;
+        if out.truncated {
+            std::log("[BROWSER APP] The page reached a layout capacity; it is shown in part.").ok();
+        }
+        true
+    }
+
+    /// Whether a keyboard is on screen.
+    fn keyboard_open(&self) -> bool {
+        self.address_focused || self.field_focus != NO_FIELD
+    }
+
+    /// Gives the keyboard to a form control and scrolls it clear of it.
+    fn focus_field(&mut self, index: usize) {
+        let out = unsafe { &*core::ptr::addr_of!(PAGE_LAYOUT) };
+        if index >= out.field_count {
+            return;
+        }
+        self.address_focused = false;
+        self.select_all = false;
+        self.field_focus = index as u8;
+        // A field under the keyboard cannot be seen while it is typed
+        // into, so the document moves until the control's bottom edge is
+        // above the accessory bar.
+        let field = out.fields[index];
+        let bottom = field.y as isize + field.h as isize;
+        let screen_bottom =
+            READER_TOP_Y as isize + bottom - self.scroll.offset as isize;
+        let limit = KB_ACC_Y0 as isize - 16;
+        if screen_bottom > limit {
+            let moved = self.scroll.offset as isize + (screen_bottom - limit);
+            self.scroll.offset =
+                moved.clamp(0, self.scroll.max_offset() as isize) as usize;
+        }
+        let _ = std::audio_haptic_click();
+        std::log("[BROWSER APP] A form control took the keyboard.").ok();
+    }
+
+    fn blur_field(&mut self) {
+        if self.field_focus != NO_FIELD {
+            self.field_focus = NO_FIELD;
+            let _ = std::audio_haptic_click();
+        }
+    }
+
+    fn field_push(&mut self, byte: u8) {
+        let index = self.field_focus as usize;
+        if index >= layout::MAX_FIELDS {
+            return;
+        }
+        let lens = unsafe { &mut *core::ptr::addr_of_mut!(FIELD_TEXT_LEN) };
+        let len = lens[index] as usize;
+        if len < FIELD_TEXT_MAX {
+            unsafe {
+                (*core::ptr::addr_of_mut!(FIELD_TEXT))[index][len] = byte;
+            }
+            lens[index] = (len + 1) as u8;
+        }
+    }
+
+    fn field_backspace(&mut self) {
+        let index = self.field_focus as usize;
+        if index >= layout::MAX_FIELDS {
+            return;
+        }
+        let lens = unsafe { &mut *core::ptr::addr_of_mut!(FIELD_TEXT_LEN) };
+        lens[index] = lens[index].saturating_sub(1);
+    }
+
+    fn field_clear(&mut self) {
+        let index = self.field_focus as usize;
+        if index < layout::MAX_FIELDS {
+            unsafe {
+                (*core::ptr::addr_of_mut!(FIELD_TEXT_LEN))[index] = 0;
+            }
+        }
+    }
+
+    fn toggle_check(&mut self, index: usize) {
+        let out = unsafe { &mut *core::ptr::addr_of_mut!(PAGE_LAYOUT) };
+        if index >= out.field_count {
+            return;
+        }
+        let checked = !out.fields[index].checked;
+        out.fields[index].checked = checked;
+        // A radio group holds one answer: choosing one clears the others
+        // that share its name.
+        if out.fields[index].input == layout::InputType::Radio && checked {
+            let name = out.fields[index].name;
+            for other in 0..out.field_count {
+                if other != index
+                    && out.fields[other].input == layout::InputType::Radio
+                    && out.fields[other].name == name
+                {
+                    out.fields[other].checked = false;
+                }
+            }
+        }
+    }
+
+    /// Replaces a select's value with its next option.
+    fn cycle_select(&mut self, index: usize) {
+        let dom = unsafe { &*core::ptr::addr_of!(PAGE_DOM) };
+        let out = unsafe { &*core::ptr::addr_of!(PAGE_LAYOUT) };
+        if index >= out.field_count {
+            return;
+        }
+        let field = out.fields[index];
+        if field.node == layout::NO_NODE {
+            return;
+        }
+        let text = unsafe { &*core::ptr::addr_of!(FIELD_TEXT) };
+        let lens = unsafe { &*core::ptr::addr_of!(FIELD_TEXT_LEN) };
+        let selected = &text[index][..lens[index] as usize];
+        let mut first: Option<&[u8]> = None;
+        let mut next: Option<&[u8]> = None;
+        let mut seen = false;
+        let mut child = dom.first_child(field.node);
+        while let Some(id) = child {
+            if dom.node(id).is_element() && dom.tag(id) == b"option" {
+                let value = option_value(dom, id);
+                if first.is_none() {
+                    first = Some(value);
+                }
+                if seen && next.is_none() {
+                    next = Some(value);
+                }
+                if value == selected {
+                    seen = true;
+                }
+            }
+            child = dom.next_sibling(id);
+        }
+        let choice = match (seen, next) {
+            (true, Some(value)) => value,
+            _ => match first {
+                Some(value) => value,
+                None => return,
+            },
+        };
+        let n = choice.len().min(FIELD_TEXT_MAX);
+        unsafe {
+            let text = &mut *core::ptr::addr_of_mut!(FIELD_TEXT);
+            text[index][..n].copy_from_slice(&choice[..n]);
+            (*core::ptr::addr_of_mut!(FIELD_TEXT_LEN))[index] = n as u8;
+        }
+        let _ = std::audio_haptic_click();
+    }
+
+    /// Submits the form the control at `trigger` belongs to.
+    ///
+    /// The body and the address are encoded into statics first, so the
+    /// navigation that sends them does not borrow the display list.
+    pub fn submit_form(&mut self, trigger: usize) {
+        let dom = unsafe { &*core::ptr::addr_of!(PAGE_DOM) };
+        let out = unsafe { &*core::ptr::addr_of!(PAGE_LAYOUT) };
+        if trigger >= out.field_count {
+            return;
+        }
+        let field = out.fields[trigger];
+        if field.input == layout::InputType::Reset {
+            // Reset restores the values the markup gave the controls.
+            for index in 0..out.field_count {
+                if nearest_form(dom, out.fields[index].node) != nearest_form(dom, field.node) {
+                    continue;
+                }
+                let value = out.fields[index].value.get(dom);
+                let n = value.len().min(FIELD_TEXT_MAX);
+                unsafe {
+                    let text = &mut *core::ptr::addr_of_mut!(FIELD_TEXT);
+                    text[index][..n].copy_from_slice(&value[..n]);
+                    (*core::ptr::addr_of_mut!(FIELD_TEXT_LEN))[index] = n as u8;
+                }
+            }
+            let _ = std::audio_haptic_click();
+            return;
+        }
+        let Some(form) = nearest_form(dom, field.node) else {
+            std::log("[BROWSER APP] The control is not inside a form; nothing was submitted.").ok();
+            return;
+        };
+        let action = dom.attr(form, b"action").unwrap_or(b"");
+        let method = if dom
+            .attr(form, b"method")
+            .map_or(false, |m| m.eq_ignore_ascii_case(b"post"))
+        {
+            layout::FormMethod::Post
+        } else {
+            layout::FormMethod::Get
+        };
+
+        let url_out = unsafe { &mut *core::ptr::addr_of_mut!(FORM_URL) };
+        let target_len = if action.is_empty() {
+            let n = self.current_url_len.min(url_out.len());
+            url_out[..n].copy_from_slice(&self.current_url[..n]);
+            n
+        } else {
+            let base = self.current_url();
+            match browser::http::resolve_url(base, action, url_out) {
+                Some(n) => n,
+                None => {
+                    std::log("[BROWSER APP] The form's action could not be resolved; nothing was submitted.").ok();
+                    return;
+                }
+            }
+        };
+
+        // A submission carries the controls of its own form, not every
+        // control on the page.
+        let mut pairs: [(&[u8], &[u8]); layout::MAX_FIELDS] =
+            [(&b""[..], &b""[..]); layout::MAX_FIELDS];
+        let mut count = 0usize;
+        let field_text = unsafe { &*core::ptr::addr_of!(FIELD_TEXT) };
+        let field_lens = unsafe { &*core::ptr::addr_of!(FIELD_TEXT_LEN) };
+        for index in 0..out.field_count {
+            if count >= pairs.len() {
+                break;
+            }
+            let control = out.fields[index];
+            if control.name.is_empty() || nearest_form(dom, control.node) != Some(form) {
+                continue;
+            }
+            if control.kind == layout::FieldKind::Button && index != trigger {
+                continue;
+            }
+            match control.input {
+                layout::InputType::Checkbox | layout::InputType::Radio => {
+                    if !control.checked {
+                        continue;
+                    }
+                }
+                layout::InputType::Submit | layout::InputType::Reset => {
+                    if index != trigger {
+                        continue;
+                    }
+                }
+                _ => {}
+            }
+            let mut value = &field_text[index][..field_lens[index] as usize];
+            if value.is_empty()
+                && (control.input == layout::InputType::Checkbox
+                    || control.input == layout::InputType::Radio)
+            {
+                value = b"on";
+            }
+            pairs[count] = (control.name.get(dom), value);
+            count += 1;
+        }
+
+        // A hidden control is part of the form but not of the display
+        // list, so it is collected from the tree.
+        for node in 0..dom.node_count() {
+            if count >= pairs.len() {
+                break;
+            }
+            let node = node as layout::NodeId;
+            if !dom.node(node).is_element() || dom.tag(node) != b"input" {
+                continue;
+            }
+            if !dom
+                .attr(node, b"type")
+                .map_or(false, |t| t.eq_ignore_ascii_case(b"hidden"))
+            {
+                continue;
+            }
+            let name = dom.attr(node, b"name").unwrap_or(b"");
+            if name.is_empty() || nearest_form(dom, node) != Some(form) {
+                continue;
+            }
+            pairs[count] = (name, dom.attr(node, b"value").unwrap_or(b""));
+            count += 1;
+        }
+
+        match method {
+            layout::FormMethod::Get => {
+                if target_len > 220 {
+                    std::log("[BROWSER APP] The form's action is too long for the browser's address bound; nothing was submitted.").ok();
+                    return;
+                }
+                let encoded = unsafe { &mut *core::ptr::addr_of_mut!(FORM_ENCODED) };
+                let Some(n) = browser::http::form_urlencode_url(
+                    &url_out[..target_len],
+                    &pairs[..count],
+                    encoded,
+                ) else {
+                    std::log("[BROWSER APP] The form's query is larger than the browser's bound; nothing was submitted.").ok();
+                    return;
+                };
+                if n > 256 {
+                    std::log("[BROWSER APP] The form's query is longer than the browser's address bound; nothing was submitted.").ok();
+                    return;
+                }
+                let mut target = [0u8; 256];
+                target[..n].copy_from_slice(&encoded[..n]);
+                let _ = self.navigate(&target[..n]);
+            }
+            layout::FormMethod::Post => {
+                if target_len > 220 {
+                    std::log("[BROWSER APP] The form's action is too long for the browser's address bound; nothing was submitted.").ok();
+                    return;
+                }
+                let encoded = unsafe { &mut *core::ptr::addr_of_mut!(FORM_ENCODED) };
+                let Some(n) = browser::http::form_urlencode(&pairs[..count], encoded) else {
+                    std::log("[BROWSER APP] The form's data is larger than one request; nothing was submitted.").ok();
+                    return;
+                };
+                let mut target = [0u8; 256];
+                target[..target_len].copy_from_slice(&url_out[..target_len]);
+                let _ = self.navigate_post(&target[..target_len], &encoded[..n]);
+            }
+        }
+    }
+
+    /// Navigates with a form body.
+    ///
+    /// WHY the body is copied into a static: the navigation reads it while
+    /// building the request, after this call has returned, and a request
+    /// that outlived its body buffer is not a request the form asked for.
+    fn navigate_post(&mut self, target: &[u8], body: &[u8]) -> bool {
+        let body_buf = unsafe { &mut *core::ptr::addr_of_mut!(FORM_BODY) };
+        if body.len() > body_buf.len() {
+            return false;
+        }
+        body_buf[..body.len()].copy_from_slice(body);
+        self.form_post_len = body.len();
+        self.history.push(target);
+        self.tabs.navigate_to(target);
+        self.navigate_again(target)
+    }
+
+    /// Navigates to a link target, resolving relative references against
+    /// the current page address.
+    pub fn navigate_href(&mut self, href: &[u8]) -> bool {
+        let _ = std::audio_haptic_click();
+        let target_uri = browser::parse_uri(href);
+        if target_uri.scheme != browser::UriScheme::Unknown {
+            return self.navigate(href);
+        }
+        let base = self.current_url();
+        let mut resolved = [0u8; browser::http::MAX_URL_BYTES];
+        if let Some(n) = browser::http::resolve_url(base, href, &mut resolved) {
+            self.navigate(&resolved[..n])
+        } else {
+            self.navigate(href)
+        }
     }
 
 
@@ -2876,8 +3393,15 @@ impl BrowserApp {
         self.current_url_len = n;
         self.scroll = ScrollState::new(0, READER_VIEWPORT_H, 0);
         // A navigation is a new document; the previous document's bytes must
-        // not be savable under the new address.
+        // not be savable under the new address, and the previous page's
+        // keyboard must not stay attached to controls that no longer exist.
         self.page_source_len = 0;
+        self.html_view = false;
+        self.field_focus = NO_FIELD;
+        // A submitted body belongs to this navigation only. Reading and
+        // clearing it here keeps a later navigation from resending it.
+        let mut post_len = self.form_post_len;
+        self.form_post_len = 0;
 
         let parsed = parse_uri(target);
         std::log("[BROWSER APP] Navigation target URL:").ok();
@@ -2957,7 +3481,11 @@ impl BrowserApp {
         // One navigation owns one method and one hop history. The tracker is
         // what makes "too many redirects" and "this is a loop" different
         // answers rather than one silent truncation.
-        let mut method = browser::http::HttpMethod::Get;
+        let mut method = if post_len > 0 {
+            browser::http::HttpMethod::Post
+        } else {
+            browser::http::HttpMethod::Get
+        };
         let mut tracker = browser::http::RedirectTracker::new();
         tracker.start(&hop_buf[..hop_len]);
 
@@ -2986,12 +3514,26 @@ impl BrowserApp {
                 &mut conditional_modified,
             );
 
+            // A form body is carried only while the method that sent it is
+            // still POST. A redirect that turns the request into a GET
+            // drops the body, which is what the method change means.
+            let body: &[u8] = if method == browser::http::HttpMethod::Post && post_len > 0 {
+                let posted = unsafe { &*core::ptr::addr_of!(FORM_BODY) };
+                &posted[..post_len]
+            } else {
+                b""
+            };
+            let content_type: &[u8] = if body.is_empty() {
+                b""
+            } else {
+                b"application/x-www-form-urlencoded"
+            };
             let request_len = browser::http::format_proxy_request(
                 &browser::http::ProxyRequest {
                     method,
                     url: &hop_buf[..hop_len],
-                    body: b"",
-                    content_type: b"",
+                    body,
+                    content_type,
                     cookie: &cookie_header[..cookie_len],
                     if_none_match: &conditional_etag[..conditional_etag_len],
                     if_modified_since: &conditional_modified[..conditional_modified_len],
@@ -3106,6 +3648,9 @@ impl BrowserApp {
                     match tracker.next(&next[..next_len]) {
                         Ok(()) => {
                             method = browser::http::method_for_redirect(status, method);
+                            if method != browser::http::HttpMethod::Post {
+                                post_len = 0;
+                            }
                             hop_buf[..next_len].copy_from_slice(&next[..next_len]);
                             hop_len = next_len;
                             std::log("[BROWSER APP] The origin redirected; the browser follows the Location under its own hop bound.").ok();
@@ -3305,21 +3850,27 @@ impl BrowserApp {
         // to another: the reader rewrites the markup in place, so source and
         // destination cannot be the same memory.
         let source = unsafe { &*core::ptr::addr_of!(HTML_BUF) };
-        let destination = unsafe { &mut *core::ptr::addr_of_mut!(READER_BUF) };
-        let doc_len = browser::html_to_reader_document_kind(
-            &source[..document_len],
-            document_kind,
-            destination,
-        );
-        if doc_len == 0 {
-            self.status = PageStatus::GatewayError;
-            self.loading_progress = 0;
-            self.tabs.active_tab_mut().loading_state = LoadingState::Failed;
-            self.tabs.active_tab_mut().error_code = -5; // EIO
-            std::log("[BROWSER APP] The page carried no readable text after decoding; no page was synthesised.").ok();
-            return false;
+        let mut loaded = false;
+        if document_kind == browser::PayloadKind::Markup {
+            loaded = self.load_html_document(&source[..document_len]);
         }
-        self.load_document_content(&destination[..doc_len]);
+        if !loaded {
+            let destination = unsafe { &mut *core::ptr::addr_of_mut!(READER_BUF) };
+            let doc_len = browser::html_to_reader_document_kind(
+                &source[..document_len],
+                document_kind,
+                destination,
+            );
+            if doc_len == 0 {
+                self.status = PageStatus::GatewayError;
+                self.loading_progress = 0;
+                self.tabs.active_tab_mut().loading_state = LoadingState::Failed;
+                self.tabs.active_tab_mut().error_code = -5; // EIO
+                std::log("[BROWSER APP] The page carried no readable text after decoding; no page was synthesised.").ok();
+                return false;
+            }
+            self.load_document_content(&destination[..doc_len]);
+        }
 
         if final_truncated {
             // WHY the screen says so: the response was larger than the
@@ -4069,9 +4620,31 @@ fn render_browser_soft_keyboard(x: usize, y: usize, app: &BrowserApp) -> u32 {
     THEME.surface
 }
 
-fn render_accessory_bar(x: usize, y: usize, _app: &BrowserApp) -> u32 {
+fn render_accessory_bar(x: usize, y: usize, app: &BrowserApp) -> u32 {
     let bar_rect = Rect::new(16, KB_ACC_Y0, 688, 56);
     if let Some(_) = draw_rounded_rect(x, y, bar_rect, R_SOFT, THEME.surface_container, Some(THEME.border), 1) {
+        if app.field_focus != NO_FIELD {
+            // Clear button (x: 24..104)
+            let c_clear = Rect::new(24, KB_ACC_Y0 + 6, 80, 44);
+            if let Some(c) = draw_rounded_rect(x, y, c_clear, R_CHIP, THEME.surface_container_high, None, 0) {
+                if let Some(px) = text_px(x, y, 42, KB_ACC_Y0 + 16, 1, b"Clear", THEME.on_surface_variant, c, false) {
+                    return px;
+                }
+                return c;
+            }
+
+            // Done button (x: 600..694)
+            let c_done = Rect::new(600, KB_ACC_Y0 + 6, 94, 44);
+            if let Some(c) = draw_rounded_rect(x, y, c_done, R_CHIP, THEME.primary, None, 0) {
+                if let Some(px) = text_px(x, y, 630, KB_ACC_Y0 + 16, 1, b"Done", THEME.on_primary, c, true) {
+                    return px;
+                }
+                return c;
+            }
+
+            return THEME.surface_container;
+        }
+
         // Chip 1: "https://" (x 24..134)
         let c1 = Rect::new(24, KB_ACC_Y0 + 6, 110, 44);
         if let Some(c) = draw_rounded_rect(x, y, c1, R_CHIP, THEME.surface_container_high, None, 0) {
@@ -4484,6 +5057,465 @@ fn open_action_rect(f: &Frame) -> Rect {
     Rect::new(W / 2 - 90, err_y + 54, 180, 48)
 }
 
+/// Paints one pixel of an HTML-formatted page using the computed display list.
+fn html_page_pixel(x: usize, y: usize, app: &BrowserApp, _f: &Frame) -> u32 {
+    // 1. Scroll Position Indicator (on right edge x 712..716)
+    if x >= 712 && x < 716 && y >= READER_TOP_Y && y < NAV_BAR_Y0 {
+        let track_h = READER_VIEWPORT_H;
+        let min_thumb_h = 60;
+        if let Some((thumb_y, thumb_h)) = app.scroll.thumb_rect(READER_TOP_Y, track_h, min_thumb_h) {
+            if y >= thumb_y && y < thumb_y + thumb_h {
+                return THEME.on_surface_variant;
+            }
+        }
+        return THEME.outline_variant;
+    }
+
+    // 2. Clamp x to content column and y to reader viewport
+    if x < browser::CONTENT_PADDING
+        || x >= browser::CONTENT_PADDING + browser::CONTENT_WIDTH
+        || y < READER_TOP_Y
+        || y >= NAV_BAR_Y0
+    {
+        return THEME.surface;
+    }
+
+    let doc_x = (x as isize) - (browser::CONTENT_PADDING as isize);
+    let doc_y = (y as isize) - (READER_TOP_Y as isize) + (app.scroll.offset as isize);
+
+    let layout = unsafe { &*core::ptr::addr_of!(PAGE_LAYOUT) };
+    let dom = unsafe { &*core::ptr::addr_of!(PAGE_DOM) };
+    let field_text = unsafe { &*core::ptr::addr_of!(FIELD_TEXT) };
+    let field_lens = unsafe { &*core::ptr::addr_of!(FIELD_TEXT_LEN) };
+
+    // 3. Outlines: 1 px stroke (reverse order of PAGE_LAYOUT.rects where kind == RectKind::Outline)
+    for i in (0..layout.rect_count).rev() {
+        let r = layout.rects[i];
+        if r.kind == layout::RectKind::Outline {
+            let rx = r.x as isize;
+            let ry = r.y as isize;
+            let rw = r.w as isize;
+            let rh = r.h as isize;
+            if rw > 0 && rh > 0 && doc_x >= rx && doc_x < rx + rw && doc_y >= ry && doc_y < ry + rh {
+                if doc_x == rx || doc_x == rx + rw - 1 || doc_y == ry || doc_y == ry + rh - 1 {
+                    return r.color;
+                }
+            }
+        }
+    }
+
+    // 4. Form controls: PAGE_LAYOUT.fields
+    for index in 0..layout.field_count {
+        let field = layout.fields[index];
+        let fx = field.x as isize;
+        let fy = field.y as isize;
+        let fw = field.w as isize;
+        let fh = field.h as isize;
+        if fw > 0 && fh > 0 && doc_x >= fx && doc_x < fx + fw && doc_y >= fy && doc_y < fy + fh {
+            let is_focused = app.field_focus == index as u8;
+            let border_col = if is_focused {
+                THEME.primary
+            } else {
+                THEME.border
+            };
+            let on_1px_border = doc_x == fx || doc_x == fx + fw - 1 || doc_y == fy || doc_y == fy + fh - 1;
+
+            match field.kind {
+                layout::FieldKind::Input if field.input == layout::InputType::Checkbox => {
+                    if on_1px_border {
+                        return border_col;
+                    }
+                    if field.checked {
+                        if doc_x >= fx + 3 && doc_x < fx + fw - 3 && doc_y >= fy + 3 && doc_y < fy + fh - 3 {
+                            return THEME.primary;
+                        }
+                    }
+                    return THEME.surface_container_low;
+                }
+                layout::FieldKind::Input if field.input == layout::InputType::Radio => {
+                    if on_1px_border {
+                        return border_col;
+                    }
+                    if field.checked {
+                        if doc_x >= fx + 4 && doc_x < fx + fw - 4 && doc_y >= fy + 4 && doc_y < fy + fh - 4 {
+                            return THEME.primary;
+                        }
+                    }
+                    return THEME.surface_container_low;
+                }
+                layout::FieldKind::Button
+                | layout::FieldKind::Input
+                    if field.input == layout::InputType::Submit
+                        || field.input == layout::InputType::Reset =>
+                {
+                    let is_submit = field.input == layout::InputType::Submit;
+                    let bg_col = if is_submit {
+                        THEME.primary
+                    } else {
+                        THEME.surface_container_high
+                    };
+                    let fg_col = if is_submit {
+                        THEME.on_primary
+                    } else {
+                        THEME.on_surface
+                    };
+                    let btn_border = if is_submit {
+                        THEME.primary
+                    } else {
+                        THEME.border
+                    };
+
+                    let label_bytes: &[u8] = if field_lens[index] > 0 {
+                        &field_text[index][..field_lens[index] as usize]
+                    } else {
+                        let v = field.value.get(dom);
+                        if !v.is_empty() {
+                            v
+                        } else if is_submit {
+                            b"Submit"
+                        } else if field.input == layout::InputType::Reset {
+                            b"Reset"
+                        } else {
+                            b"Button"
+                        }
+                    };
+
+                    let tw = text_width(label_bytes, 1);
+                    let text_doc_x = fx + (fw - tw as isize).max(0) / 2;
+                    let text_doc_y = fy + (fh - font::line_height(1) as isize).max(0) / 2;
+                    let screen_tx = browser::CONTENT_PADDING as isize + text_doc_x;
+                    let screen_ty = READER_TOP_Y as isize + text_doc_y - app.scroll.offset as isize;
+
+                    if screen_ty >= 0 && screen_tx >= 0 {
+                        if let Some(px) = text_px(
+                            x,
+                            y,
+                            screen_tx as usize,
+                            screen_ty as usize,
+                            1,
+                            label_bytes,
+                            fg_col,
+                            bg_col,
+                            true,
+                        ) {
+                            return px;
+                        }
+                    }
+                    if on_1px_border {
+                        return btn_border;
+                    }
+                    return bg_col;
+                }
+                layout::FieldKind::Select => {
+                    let bg_col = THEME.surface_container_low;
+                    let screen_cx = browser::CONTENT_PADDING as isize + fx + fw - 16;
+                    let screen_cy = READER_TOP_Y as isize + fy + fh / 2 - app.scroll.offset as isize;
+                    if screen_cx >= 0 && screen_cy >= 0 {
+                        if let Some(c) = draw_chevron_down(
+                            x,
+                            y,
+                            screen_cx as usize,
+                            screen_cy as usize,
+                            THEME.on_surface_variant,
+                        ) {
+                            return c;
+                        }
+                    }
+
+                    let val = if field_lens[index] > 0 {
+                        &field_text[index][..field_lens[index] as usize]
+                    } else {
+                        field.value.get(dom)
+                    };
+                    if !val.is_empty() {
+                        let screen_tx = browser::CONTENT_PADDING as isize + fx + 8;
+                        let screen_ty = READER_TOP_Y as isize + fy + (fh - font::line_height(1) as isize).max(0) / 2 - app.scroll.offset as isize;
+                        if screen_tx >= 0 && screen_ty >= 0 {
+                            if let Some(px) = text_px(
+                                x,
+                                y,
+                                screen_tx as usize,
+                                screen_ty as usize,
+                                1,
+                                val,
+                                THEME.on_surface,
+                                bg_col,
+                                false,
+                            ) {
+                                return px;
+                            }
+                        }
+                    }
+
+                    if on_1px_border {
+                        return border_col;
+                    }
+                    return bg_col;
+                }
+                _ => {
+                    let bg_col = THEME.surface_container_low;
+                    let is_textarea = field.kind == layout::FieldKind::Textarea;
+
+                    let len = field_lens[index] as usize;
+                    let (val, fg_col) = if len > 0 {
+                        let bytes = &field_text[index][..len];
+                        (bytes, THEME.on_surface)
+                    } else {
+                        let ph = field.placeholder.get(dom);
+                        (ph, THEME.on_surface_variant)
+                    };
+
+                    let text_doc_y = if is_textarea {
+                        fy + 8
+                    } else {
+                        fy + (fh - font::line_height(1) as isize).max(0) / 2
+                    };
+                    let screen_tx = browser::CONTENT_PADDING as isize + fx + 8;
+                    let screen_ty = READER_TOP_Y as isize + text_doc_y - app.scroll.offset as isize;
+
+                    if !val.is_empty() && screen_tx >= 0 && screen_ty >= 0 {
+                        let masked = [b'*'; FIELD_TEXT_MAX];
+                        let render_val = if field.input == layout::InputType::Password && len > 0 {
+                            let mlen = len.min(FIELD_TEXT_MAX);
+                            &masked[..mlen]
+                        } else {
+                            val
+                        };
+                        if let Some(px) = text_px(
+                            x,
+                            y,
+                            screen_tx as usize,
+                            screen_ty as usize,
+                            1,
+                            render_val,
+                            fg_col,
+                            bg_col,
+                            false,
+                        ) {
+                            return px;
+                        }
+                    }
+
+                    if is_focused {
+                        let val_for_caret = if len > 0 {
+                            &field_text[index][..len]
+                        } else {
+                            b""
+                        };
+                        let tw = text_width(val_for_caret, 1);
+                        let caret_doc_x = fx + 8 + tw as isize;
+                        if doc_x >= caret_doc_x && doc_x < caret_doc_x + 2 && doc_y >= text_doc_y && doc_y < text_doc_y + font::line_height(1) as isize {
+                            return THEME.primary;
+                        }
+                    }
+
+                    if on_1px_border {
+                        return border_col;
+                    }
+                    return bg_col;
+                }
+            }
+        }
+    }
+
+    // 5. Text runs: PAGE_LAYOUT.runs (only runs in viewport range)
+    for i in 0..layout.run_count {
+        let run = layout.runs[i];
+        let rx = run.x as isize;
+        let ry = run.y as isize;
+        let rw = run.w as isize;
+        let rh = (run.h as isize).max(font::line_height(run.scale as usize) as isize);
+        let screen_sy = READER_TOP_Y as isize + ry - app.scroll.offset as isize;
+
+        if (y as isize) >= screen_sy && (y as isize) < screen_sy + rh {
+            let screen_sx = browser::CONTENT_PADDING as isize + rx;
+            if screen_sy >= 0 && screen_sx >= 0 {
+                let bytes = run.bytes(dom);
+                if !bytes.is_empty() {
+                    let color = if run.link != layout::NO_LINK {
+                        THEME.primary
+                    } else if run.has_color {
+                        run.color
+                    } else {
+                        THEME.on_surface
+                    };
+                    if let Some(px) = text_px(
+                        x,
+                        y,
+                        screen_sx as usize,
+                        screen_sy as usize,
+                        run.scale as usize,
+                        bytes,
+                        color,
+                        THEME.surface,
+                        run.bold,
+                    ) {
+                        return px;
+                    }
+                    if run.link != layout::NO_LINK {
+                        let underline_y = screen_sy + font::line_height(run.scale as usize) as isize - 2;
+                        if (y as isize) == underline_y && (x as isize) >= screen_sx && (x as isize) < screen_sx + rw {
+                            return THEME.primary;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 6. Images: PAGE_LAYOUT.images
+    for i in 0..layout.image_count {
+        let img = layout.images[i];
+        let ix = img.x as isize;
+        let iy = img.y as isize;
+        let iw = img.w as usize;
+        let ih = img.h as usize;
+        if iw > 0 && ih > 0 && doc_x >= ix && doc_x < ix + iw as isize && doc_y >= iy && doc_y < iy + ih as isize {
+            let slot_idx = img.slot as usize;
+            let reason = if img.slot == 255 || slot_idx >= app.image_count {
+                Some(images::ImageRefusal::LimitReached)
+            } else {
+                match app.images[slot_idx].status {
+                    images::ImageStatus::Decoded => None,
+                    images::ImageStatus::Refused(refusal) => Some(refusal),
+                }
+            };
+            let placed = if img.slot != 255 && slot_idx < app.image_count {
+                Some(&app.images[slot_idx])
+            } else {
+                None
+            };
+
+            if let (Some(slot), None) = (placed, reason) {
+                if let Some(bitmap) = slot.bitmap {
+                    let px_x = (doc_x - ix) as usize;
+                    let px_y = (doc_y - iy) as usize;
+                    if px_x < slot.display_w && px_y < slot.display_h {
+                        let argb = bitmap.pixel(px_x, px_y, slot.display_w, slot.display_h);
+                        let alpha = (argb >> 24) & 0xFF;
+                        if alpha == 0xFF {
+                            return argb;
+                        }
+                        if alpha > 0 {
+                            return blend_toward(argb, THEME.surface, 255 - alpha) | 0xFF00_0000;
+                        }
+                    }
+                }
+            } else {
+                let card_sx = browser::CONTENT_PADDING as isize + ix;
+                let card_sy = READER_TOP_Y as isize + iy - app.scroll.offset as isize;
+                if card_sy >= 0 && card_sx >= 0 {
+                    let card = Rect::new(card_sx as usize, card_sy as usize, iw, ih);
+                    if let Some(card_bg) = draw_rounded_rect(
+                        x,
+                        y,
+                        card,
+                        R_SMALL,
+                        THEME.surface_container_low,
+                        Some(THEME.border),
+                        1,
+                    ) {
+                        if let Some(slot) = placed {
+                            if slot.alt_len > 0 {
+                                let mut alt_buf = [0u8; 64];
+                                let alt_len = font::ellipsize(
+                                    &slot.alt[..slot.alt_len.min(slot.alt.len())],
+                                    1,
+                                    iw.saturating_sub(24),
+                                    &mut alt_buf,
+                                );
+                                if let Some(px) = text_px(
+                                    x,
+                                    y,
+                                    card_sx as usize + 12,
+                                    card_sy as usize + 8,
+                                    1,
+                                    &alt_buf[..alt_len],
+                                    THEME.on_surface,
+                                    card_bg,
+                                    true,
+                                ) {
+                                    return px;
+                                }
+                            }
+                        }
+                        let reason_y = card_sy as usize + if placed.map_or(0, |s| s.alt_len) > 0 { 32 } else { 18 };
+                        let refusal = reason.unwrap_or(images::ImageRefusal::LimitReached);
+                        if let Some(px) = text_px(
+                            x,
+                            y,
+                            card_sx as usize + 12,
+                            reason_y,
+                            1,
+                            refusal.placeholder(),
+                            THEME.on_surface_variant,
+                            card_bg,
+                            false,
+                        ) {
+                            return px;
+                        }
+                        return card_bg;
+                    }
+                }
+                return THEME.surface_container_low;
+            }
+        }
+    }
+
+    // 7. Rule rects: PAGE_LAYOUT.rects where kind == RectKind::Rule
+    for i in 0..layout.rect_count {
+        let r = layout.rects[i];
+        if r.kind == layout::RectKind::Rule {
+            let rx = r.x as isize;
+            let ry = r.y as isize;
+            let rw = r.w as isize;
+            let rh = r.h as isize;
+            if rw > 0 && rh > 0 && doc_x >= rx && doc_x < rx + rw && doc_y >= ry && doc_y < ry + rh {
+                return r.color;
+            }
+        }
+    }
+
+    // 8. Fills: PAGE_LAYOUT.rects where kind == RectKind::Fill (reverse order so ancestors paint first)
+    for i in (0..layout.rect_count).rev() {
+        let r = layout.rects[i];
+        if r.kind == layout::RectKind::Fill {
+            let rx = r.x as isize;
+            let ry = r.y as isize;
+            let rw = r.w as isize;
+            let rh = r.h as isize;
+            if rw > 0 && rh > 0 && doc_x >= rx && doc_x < rx + rw && doc_y >= ry && doc_y < ry + rh {
+                return r.color;
+            }
+        }
+    }
+
+    // 9. Truncation note: if PAGE_LAYOUT.truncated
+    if layout.truncated {
+        let note_doc_y = layout.height as isize + 12;
+        let note_sy = READER_TOP_Y as isize + note_doc_y - app.scroll.offset as isize;
+        let note_h = font::line_height(1) as isize;
+        if (y as isize) >= note_sy && (y as isize) < note_sy + note_h && note_sy >= 0 {
+            if let Some(px) = text_px(
+                x,
+                y,
+                browser::CONTENT_PADDING,
+                note_sy as usize,
+                1,
+                b"The page reached a layout capacity; it is shown in part.",
+                THEME.on_surface_variant,
+                THEME.surface,
+                false,
+            ) {
+                return px;
+            }
+        }
+    }
+
+    // 10. Page background
+    THEME.surface
+}
+
 fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
     // Error state / No transport screen
     let download_status = app.status == PageStatus::Downloaded
@@ -4620,6 +5652,10 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
         }
 
         return THEME.surface;
+    }
+
+    if app.html_view {
+        return html_page_pixel(x, y, app, f);
     }
 
     // Render classified document lines with smooth vertical scrolling.
@@ -5998,8 +7034,8 @@ fn get_browser_pixel_content(x: usize, y: usize, app: &BrowserApp, f: &Frame) ->
     // toward the background, so the content underneath is still visible
     // but clearly behind.
 
-    // Soft Keyboard and Accessory Strip overlay when address is focused
-    if app.address_focused && y >= KB_ACC_Y0 && y <= KB_Y1 {
+    // Soft Keyboard and Accessory Strip overlay when keyboard is open
+    if app.keyboard_open() && y >= KB_ACC_Y0 && y <= KB_Y1 {
         if y <= KB_ACC_Y1 {
             return render_accessory_bar(x, y, app);
         } else {
@@ -6422,6 +7458,57 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
         }
     }
 
+    // If a form field is focused, handle keyboard and accessory bar taps
+    if app.field_focus != NO_FIELD {
+        // 1. Accessory bar (y: KB_ACC_Y0..KB_ACC_Y1)
+        if y >= KB_ACC_Y0 && y <= KB_ACC_Y1 {
+            // Clear button (x: 24..104)
+            if x >= 24 && x <= 104 {
+                let _ = std::audio_haptic_click();
+                app.field_clear();
+                return Tap::Redraw;
+            }
+            // Done button (x: 600..694)
+            if x >= 600 && x <= 694 {
+                app.blur_field();
+                return Tap::Redraw;
+            }
+            return Tap::Redraw;
+        }
+
+        // 2. Keyboard keys (y: KB_Y0..KB_Y1)
+        if y >= KB_Y0 && y <= KB_Y1 {
+            if let Some(ch) = get_soft_keyboard_char(x, y, app.kb_shift, app.kb_symbols) {
+                let _ = std::audio_haptic_click();
+                match ch {
+                    0xFF => {
+                        app.kb_shift = !app.kb_shift;
+                    }
+                    0xFE => {
+                        app.kb_symbols = !app.kb_symbols;
+                    }
+                    8 => {
+                        app.field_backspace();
+                    }
+                    b'\n' => {
+                        let out = unsafe { &*core::ptr::addr_of!(PAGE_LAYOUT) };
+                        let idx = app.field_focus as usize;
+                        if idx < out.field_count && out.fields[idx].kind == layout::FieldKind::Textarea {
+                            app.field_push(b'\n');
+                        } else {
+                            app.submit_form(idx);
+                        }
+                    }
+                    c => {
+                        app.field_push(c);
+                    }
+                }
+                return Tap::Redraw;
+            }
+            return Tap::Redraw;
+        }
+    }
+
     // Bottom Navigation Bar Buttons
     if BACK_BTN.contains(x, y) {
         let _ = std::audio_haptic_click();
@@ -6813,6 +7900,69 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
         }
     }
 
+    // HTML Viewport Interactions
+    if app.status == PageStatus::Loaded && app.html_view && y >= READER_TOP_Y && y < NAV_BAR_Y0 {
+        let doc_x = (x as isize) - (browser::CONTENT_PADDING as isize);
+        let doc_y = (y as isize) - (READER_TOP_Y as isize) + (app.scroll.offset as isize);
+
+        if doc_x >= 0 && doc_x < browser::CONTENT_WIDTH as isize && doc_y >= 0 {
+            let out = unsafe { &*core::ptr::addr_of!(PAGE_LAYOUT) };
+
+            // 1. Hit test fields first
+            if let Some(index) = out.field_at(doc_x as usize, doc_y as usize) {
+                let field = out.fields[index];
+                match field.kind {
+                    layout::FieldKind::Select => {
+                        app.cycle_select(index);
+                    }
+                    layout::FieldKind::Button => {
+                        app.submit_form(index);
+                    }
+                    layout::FieldKind::Textarea => {
+                        app.focus_field(index);
+                    }
+                    layout::FieldKind::Input => {
+                        match field.input {
+                            layout::InputType::Checkbox | layout::InputType::Radio => {
+                                app.toggle_check(index);
+                            }
+                            layout::InputType::Submit | layout::InputType::Reset => {
+                                app.submit_form(index);
+                            }
+                            _ => {
+                                app.focus_field(index);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                return Tap::Redraw;
+            }
+
+            // 2. Hit test links
+            if let Some(link) = out.link_at(doc_x as usize, doc_y as usize) {
+                let dom = unsafe { &*core::ptr::addr_of!(PAGE_DOM) };
+                if let Some(href) = dom.link_href(link) {
+                    app.navigate_href(href);
+                    return Tap::Redraw;
+                }
+            }
+
+            // 3. Background tapped in document area: blur field
+            app.blur_field();
+        }
+
+        // Tap on content area scrolls if not a link or field
+        if y > 1000 {
+            app.scroll.offset = (app.scroll.offset + 60).min(app.scroll.max_offset());
+            return Tap::Redraw;
+        } else if y < 400 && app.scroll.offset > 0 {
+            app.scroll.offset = app.scroll.offset.saturating_sub(60);
+            return Tap::Redraw;
+        }
+        return Tap::Redraw;
+    }
+
     // Content Viewport Links Tap
     if app.status == PageStatus::Loaded && y >= 120 && y < 1340 {
         let content_start_y = READER_TOP_Y;
@@ -6966,6 +8116,34 @@ fn handle_browser_key(app: &mut BrowserApp, key: std::InputKeyEvent) -> Dirty {
             _ => return Dirty::None,
         }
     }
+    if app.field_focus != NO_FIELD {
+        match key.code {
+            input_key_code::ENTER => {
+                let out = unsafe { &*core::ptr::addr_of!(PAGE_LAYOUT) };
+                let idx = app.field_focus as usize;
+                if idx < out.field_count && out.fields[idx].kind == layout::FieldKind::Textarea {
+                    app.field_push(b'\n');
+                } else {
+                    app.submit_form(idx);
+                }
+                return Dirty::All;
+            }
+            input_key_code::ESCAPE => {
+                app.blur_field();
+                return Dirty::All;
+            }
+            input_key_code::BACKSPACE => {
+                app.field_backspace();
+                return Dirty::All;
+            }
+            code if (32..=126).contains(&code) => {
+                app.field_push(code as u8);
+                return Dirty::All;
+            }
+            _ => return Dirty::None,
+        }
+    }
+
     if !app.address_focused {
         return Dirty::None;
     }
@@ -7177,10 +8355,19 @@ pub extern "C" fn _start() -> ! {
                             if let Ok(n) = std::net_recvfrom(sock_id, &mut rx_buf) {
                                 if n > 0 {
                                     if let Some(http_resp) = browser::parse_http_response(&rx_buf[..n]) {
-                                        let mut doc_buf = [0u8; 2048];
-                                        let doc_len = browser::html_to_reader_document(http_resp.body, &mut doc_buf);
-                                        if doc_len > 0 {
-                                            browser.load_document_content(&doc_buf[..doc_len]);
+                                        let mut loaded = false;
+                                        if !http_resp.body.is_empty() {
+                                            loaded = browser.load_html_document(http_resp.body);
+                                        }
+                                        if !loaded {
+                                            let mut doc_buf = [0u8; 2048];
+                                            let doc_len = browser::html_to_reader_document(http_resp.body, &mut doc_buf);
+                                            if doc_len > 0 {
+                                                browser.load_document_content(&doc_buf[..doc_len]);
+                                                loaded = true;
+                                            }
+                                        }
+                                        if loaded {
                                             if surface > 0 {
                                                 render_browser_ui(surface, &browser);
                                                 let _ = std::surface_flip();

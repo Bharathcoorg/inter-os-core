@@ -4673,4 +4673,64 @@ mod tests {
         }
         assert_eq!(total_bytes, 150);
     }
+
+    #[test]
+    fn test_form_urlencode_get_query() {
+        let base = b"https://example.com/search";
+        let pairs: &[(&[u8], &[u8])] = &[
+            (b"q", b"hello world"),
+            (b"page", b"1"),
+        ];
+        let mut out = [0u8; 256];
+        let n = http::form_urlencode_url(base, pairs, &mut out).expect("encoding failed");
+        assert_eq!(&out[..n], b"https://example.com/search?q=hello+world&page=1");
+    }
+
+    #[test]
+    fn test_form_urlencode_post_body() {
+        let pairs: &[(&[u8], &[u8])] = &[
+            (b"user", b"john doe"),
+            (b"secret", b"a&b=c"),
+        ];
+        let mut out = [0u8; 256];
+        let n = http::form_urlencode(pairs, &mut out).expect("encoding failed");
+        assert_eq!(&out[..n], b"user=john+doe&secret=a%26b%3Dc");
+    }
+
+    #[test]
+    fn test_html_document_load_and_layout() {
+        let markup = b"<html><body>\
+            <h1>Test Document</h1>\
+            <p>Here is a paragraph with a <a href='/page2'>link</a>.</p>\
+            <form action='/login' method='post'>\
+                <input type='text' name='user' value='admin'>\
+                <input type='submit' value='Log In'>\
+            </form>\
+            </body></html>";
+
+        let mut dom = layout::Dom::new();
+        dom.parse(markup);
+        assert!(dom.node_count() > 1);
+
+        let sheet = css::parse_stylesheet(dom.css());
+        let mut layout = layout::TextLayout::new();
+        layout::build(&dom, &sheet, 672, &mut layout);
+
+        assert!(!layout.is_empty());
+        assert!(layout.height > 0);
+        assert!(!layout.truncated);
+        assert_eq!(layout.link_count, 1);
+        assert_eq!(layout.field_count, 2);
+
+        // Verify link resolves to /page2
+        let link_box = layout.links[0];
+        assert_eq!(dom.link_href(link_box.link), Some(&b"/page2"[..]));
+        assert!(layout.link_at(link_box.x as usize + 1, link_box.y as usize + 1).is_some());
+
+        // Verify form fields
+        let user_field = layout.fields[0];
+        assert_eq!(user_field.name.get(&dom), b"user");
+        assert_eq!(user_field.value.get(&dom), b"admin");
+        assert!(layout.field_at(user_field.x as usize + 1, user_field.y as usize + 1).is_some());
+    }
 }

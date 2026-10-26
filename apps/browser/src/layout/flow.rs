@@ -152,6 +152,9 @@ pub struct FieldItem {
     pub y: i16,
     pub w: u16,
     pub h: u16,
+    /// The element the control came from, so its form and options can be
+    /// found in the tree when it is used.
+    pub node: NodeId,
     pub kind: FieldKind,
     pub input: InputType,
     pub name: StrRef,
@@ -166,6 +169,7 @@ impl FieldItem {
         y: 0,
         w: 0,
         h: 0,
+        node: super::dom::NO_NODE,
         kind: FieldKind::None,
         input: InputType::Text,
         name: StrRef::EMPTY,
@@ -1130,7 +1134,7 @@ impl<'a, 's> Builder<'a, 's> {
             Marker::Bullet => {
                 self.push_run(
                     (x - 14).max(0),
-                    y + 4,
+                    y,
                     3,
                     font::line_height(style.scale as usize).max(1) as u16,
                     style.scale,
@@ -1148,7 +1152,7 @@ impl<'a, 's> Builder<'a, 's> {
                 let len = format_small_number(value, &mut lit);
                 self.push_run(
                     (x - 18).max(0),
-                    y + 2,
+                    y,
                     font::measure(&lit[..len], style.scale as usize).max(1) as u16,
                     font::line_height(style.scale as usize).max(1) as u16,
                     style.scale,
@@ -1312,6 +1316,8 @@ impl<'a, 's> Builder<'a, 's> {
         }
         let value = if style.field == FieldKind::Textarea {
             self.textarea_value(node)
+        } else if style.field == FieldKind::Select {
+            self.selected_option(node)
         } else {
             style.field_value
         };
@@ -1320,6 +1326,7 @@ impl<'a, 's> Builder<'a, 's> {
             y: y.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
             w: w.min(u16::MAX as usize) as u16,
             h: h.min(u16::MAX as usize) as u16,
+            node,
             kind: style.field,
             input: style.input_type,
             name: style.field_name,
@@ -1331,6 +1338,36 @@ impl<'a, 's> Builder<'a, 's> {
     }
 
     fn textarea_value(&self, node: NodeId) -> StrRef {
+        self.direct_text(node)
+    }
+
+    /// The value of a select's selected option.
+    ///
+    /// A select with no selected option shows its first, which is what a
+    /// browser does; an option's `value` wins over its label, and an
+    /// option with neither carries an empty value.
+    fn selected_option(&self, node: NodeId) -> StrRef {
+        let mut first = StrRef::EMPTY;
+        let mut child = self.dom.first_child(node);
+        while let Some(id) = child {
+            if self.dom.node(id).is_element() && self.dom.tag(id) == b"option" {
+                let value = self
+                    .dom
+                    .attr_ref(id, b"value")
+                    .unwrap_or_else(|| self.direct_text(id));
+                if first.is_empty() {
+                    first = value;
+                }
+                if self.dom.has_attr(id, b"selected") {
+                    return value;
+                }
+            }
+            child = self.dom.next_sibling(id);
+        }
+        first
+    }
+
+    fn direct_text(&self, node: NodeId) -> StrRef {
         let mut child = self.dom.first_child(node);
         while let Some(id) = child {
             if self.dom.node(id).is_text() {
@@ -1654,6 +1691,67 @@ mod tests {
     }
 
     #[test]
+    fn a_field_keeps_the_node_it_came_from_and_its_form() {
+        let (dom, out) = layout_html(
+            b"<form action='/one'><input name='a'></form><form action='/two'><input name='b'></form>",
+            400,
+        );
+        assert_eq!(out.field_count, 2);
+        for field in &out.fields[..out.field_count] {
+            assert_eq!(dom.tag(field.node), b"input");
+            let mut cursor = dom.parent(field.node);
+            let mut form = None;
+            while let Some(id) = cursor {
+                if dom.tag(id) == b"form" {
+                    form = Some(id);
+                    break;
+                }
+                cursor = dom.parent(id);
+            }
+            assert!(form.is_some(), "the field lost its form");
+        }
+        let second = out.fields[1];
+        let mut cursor = dom.parent(second.node);
+        while let Some(id) = cursor {
+            if dom.tag(id) == b"form" {
+                assert_eq!(dom.attr(id, b"action"), Some(&b"/two"[..]));
+                break;
+            }
+            cursor = dom.parent(id);
+        }
+    }
+
+    #[test]
+    fn a_select_shows_its_selected_option() {
+        let (dom, out) = layout_html(
+            b"<select name='size'><option value='s'>Small</option><option value='m' selected>Medium</option></select>",
+            400,
+        );
+        assert_eq!(out.field_count, 1);
+        let field = out.fields[0];
+        assert_eq!(field.kind, FieldKind::Select);
+        assert_eq!(field.value.get(&dom), b"m");
+    }
+
+    #[test]
+    fn text_runs_are_ordered_by_their_top_edge() {
+        let (_dom, out) = layout_html(
+            b"<h1>Title</h1><p>One paragraph with enough words to wrap at the column edge.</p><ul><li>item</li></ul><table><tr><td>a</td><td>b</td></tr></table>",
+            160,
+        );
+        let mut previous = i32::MIN;
+        for run in &out.runs[..out.run_count] {
+            assert!(
+                run.y as i32 >= previous,
+                "run at {} follows one at {}",
+                run.y,
+                previous
+            );
+            previous = run.y as i32;
+        }
+    }
+
+    #[test]
     fn a_background_and_border_become_rectangles() {
         let (_dom, out) = layout_html(
             b"<div style='background:#ffeeaa;border:1px solid #333333'>box</div>",
@@ -1738,5 +1836,107 @@ mod tests {
         assert!(out.is_empty());
         assert_eq!(out.height, 0);
         assert!(!out.truncated);
+    }
+
+    #[test]
+    fn a_variety_of_form_controls_are_laid_out() {
+        let (dom, out) = layout_html(
+            b"<form action='/submit' method='post'>\
+              <input type='text' name='uname' value='alice'>\
+              <input type='password' name='pass' value='secret'>\
+              <input type='checkbox' name='agree' checked>\
+              <input type='radio' name='plan' value='pro' checked>\
+              <textarea name='bio'>hello world</textarea>\
+              <select name='role'><option value='user'>User</option><option value='admin' selected>Admin</option></select>\
+              <button type='submit'>Save</button>\
+              </form>",
+            400,
+        );
+        assert!(out.form.present);
+        assert_eq!(out.form.method, FormMethod::Post);
+        assert_eq!(out.field_count, 7);
+
+        // Text input
+        let text_field = out.fields[0];
+        assert_eq!(text_field.kind, FieldKind::Input);
+        assert_eq!(text_field.input, InputType::Text);
+        assert_eq!(text_field.name.get(&dom), b"uname");
+        assert_eq!(text_field.value.get(&dom), b"alice");
+
+        // Password input
+        let pass_field = out.fields[1];
+        assert_eq!(pass_field.kind, FieldKind::Input);
+        assert_eq!(pass_field.input, InputType::Password);
+        assert_eq!(pass_field.value.get(&dom), b"secret");
+
+        // Checkbox
+        let check_field = out.fields[2];
+        assert_eq!(check_field.input, InputType::Checkbox);
+        assert!(check_field.checked);
+
+        // Radio
+        let radio_field = out.fields[3];
+        assert_eq!(radio_field.input, InputType::Radio);
+        assert!(radio_field.checked);
+
+        // Textarea
+        let area_field = out.fields[4];
+        assert_eq!(area_field.kind, FieldKind::Textarea);
+        assert_eq!(area_field.value.get(&dom), b"hello world");
+
+        // Select
+        let select_field = out.fields[5];
+        assert_eq!(select_field.kind, FieldKind::Select);
+        assert_eq!(select_field.value.get(&dom), b"admin");
+
+        // Submit Button
+        let btn_field = out.fields[6];
+        assert_eq!(btn_field.kind, FieldKind::Button);
+
+        // Hit testing for all fields
+        for (i, f) in out.fields[..out.field_count].iter().enumerate() {
+            assert_eq!(
+                out.field_at(f.x as usize + 2, f.y as usize + 2),
+                Some(i),
+                "field {} hit test failed",
+                i
+            );
+        }
+    }
+
+    #[test]
+    fn hit_testing_returns_none_outside_elements() {
+        let (_dom, out) = layout_html(
+            b"<p><a href='/link'>click</a></p><input name='test'>",
+            400,
+        );
+        assert!(out.link_count > 0);
+        assert!(out.field_count > 0);
+
+        // Points far outside the document content
+        assert_eq!(out.link_at(1000, 1000), None);
+        assert_eq!(out.field_at(1000, 1000), None);
+    }
+
+    #[test]
+    fn layout_truncation_is_recorded() {
+        let mut dom = Dom::new();
+        dom.parse(b"<p>hello</p>");
+        let sheet = css::parse_stylesheet(b"");
+        let mut out = TextLayout::new();
+        build(&dom, &sheet, 400, &mut out);
+        assert!(!out.truncated);
+
+        // If a dom is truncated, layout records truncation
+        let mut truncated_dom = Dom::new();
+        // A huge body that exceeds dom node or text bounds
+        let mut huge = [b'a'; 4000];
+        huge[0..3].copy_from_slice(b"<p>");
+        huge[3996..4000].copy_from_slice(b"</p>");
+        truncated_dom.parse(&huge);
+        let mut out2 = TextLayout::new();
+        build(&truncated_dom, &sheet, 400, &mut out2);
+        // The display list reflects whether dom or layout reached capacity
+        assert_eq!(out2.truncated, truncated_dom.truncated());
     }
 }
