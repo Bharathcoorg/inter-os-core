@@ -34,6 +34,12 @@ pub const INFERENCE_ABI_VERSION: u16 = 1;
 /// such a service exists.
 pub const SERVICE_INFERENCE: u8 = 12;
 
+/// Virtual TaskId used to route IPC directly to the system inference service (`aid`, Service #12).
+pub const SERVICE_INFERENCE_TASK_ID: u64 = 0xFFFF_000C;
+
+/// Virtual TaskId used to route IPC directly to the semantic search service (Service #13).
+pub const SERVICE_SEARCH_TASK_ID: u64 = 0xFFFF_000D;
+
 /// IPC message type for vector embedding queries: `0x454D_4244` (ASCII `b"EMBD"`).
 pub const MSG_TYPE_EMBED: u32 = 0x454D_4244;
 
@@ -45,6 +51,23 @@ pub const MSG_TYPE_GENERATE: u32 = 0x4745_4E52;
 
 /// Alternate ASCII alias for generative queries: `0x4745_4E45` (ASCII `b"GENE"`).
 pub const MSG_TYPE_GENERATE_ALT: u32 = 0x4745_4E45;
+
+/// IPC message type for semantic search & RAG queries: `0x5352_4348` (ASCII `b"SRCH"`).
+pub const MSG_TYPE_SEARCH: u32 = 0x5352_4348;
+
+/// IPC message type for streaming generation chunks: `0x4745_4E43` (ASCII `b"GENC"`).
+pub const MSG_TYPE_GENERATE_CHUNK: u32 = 0x4745_4E43;
+
+/// Status code: Success.
+pub const STATUS_SUCCESS: u32 = 0;
+/// Status code: Model weights unavailable or absent from storage.
+pub const STATUS_UNAVAILABLE: u32 = 1;
+/// Status code: Execution error (e.g. corrupted tensor or internal failure).
+pub const STATUS_ERROR: u32 = 2;
+/// Status code: Unsupported architecture or quantization format.
+pub const STATUS_UNSUPPORTED: u32 = 3;
+/// Status code: Generation cancelled or timed out.
+pub const STATUS_CANCELLED: u32 = 4;
 
 /// Valid Matryoshka representation dimensions for EmbeddingGemma 2.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,6 +154,154 @@ pub fn cosine_similarity_q7(a: &[i8], b: &[i8]) -> i16 {
     }
 }
 
+/// Software single-precision floating-point square root via Newton-Raphson.
+pub fn f32_sqrt(val: f32) -> f32 {
+    if val <= 0.0 {
+        return 0.0;
+    }
+    let i = val.to_bits();
+    let i = (i >> 1) + 0x1fbb4000;
+    let mut x = f32::from_bits(i);
+    x = 0.5 * (x + val / x);
+    x = 0.5 * (x + val / x);
+    x = 0.5 * (x + val / x);
+    x = 0.5 * (x + val / x);
+    x
+}
+
+#[inline]
+fn hash_bytes_with_seed(bytes: &[u8], seed: u64) -> u64 {
+    let mut h = seed;
+    for &b in bytes {
+        let c = b.to_ascii_lowercase();
+        h ^= c as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h ^= h >> 30;
+    h = h.wrapping_mul(0xbf58476d1ce4e5b9);
+    h ^= h >> 27;
+    h = h.wrapping_mul(0x94d049bb133111eb);
+    h ^= h >> 31;
+    h
+}
+
+const PROJECTION_SEEDS: [u64; 12] = [
+    0x517cc1b727220a95,
+    0x6c62272e07bb0142,
+    0x9e3779b97f4a7c15,
+    0x243f6a8885a308d3,
+    0x13198a2e03707344,
+    0xa4093822299f31d0,
+    0x712feb58476d1ce4,
+    0x3c6ef372fe94f82b,
+    0xbb67ae8584caa73b,
+    0x9b05688c2b3e6c1f,
+    0x1f83d9abfb41bd6b,
+    0x5be0cd19137e2179,
+];
+
+#[inline]
+fn is_token_boundary(b: u8) -> bool {
+    matches!(
+        b,
+        b' ' | b'\t' | b'\n' | b'\r' | b'.' | b',' | b';' | b':' | b'!' | b'?' | b'/' | b'\\'
+            | b'-' | b'_' | b'(' | b')' | b'[' | b']' | b'{' | b'}' | b'"' | b'\''
+    )
+}
+
+fn project_token(token: &[u8], token_idx: usize, out: &mut [f32], dim: usize) {
+    if token.is_empty() || dim == 0 {
+        return;
+    }
+    let pos_weight = 1.0f32 / (1.0f32 + 0.03f32 * (token_idx as f32));
+    for &seed in &PROJECTION_SEEDS {
+        let h = hash_bytes_with_seed(token, seed);
+        let idx = (h as usize) % dim;
+        let sign = if (h >> 32) & 1 == 0 { 1.0f32 } else { -1.0f32 };
+        out[idx] += sign * pos_weight;
+    }
+    if token.len() >= 2 {
+        for j in 0..=token.len() - 2 {
+            let bigram = &token[j..j + 2];
+            let h = hash_bytes_with_seed(bigram, 0x3c6ef372fe94f82b);
+            let idx = (h as usize) % dim;
+            let sign = if (h >> 32) & 1 == 0 { 0.35f32 } else { -0.35f32 };
+            out[idx] += sign * pos_weight;
+        }
+    }
+    if token.len() >= 3 {
+        for j in 0..=token.len() - 3 {
+            let trigram = &token[j..j + 3];
+            let h = hash_bytes_with_seed(trigram, 0x9e3779b97f4a7c15);
+            let idx = (h as usize) % dim;
+            let sign = if (h >> 32) & 1 == 0 { 0.5f32 } else { -0.5f32 };
+            out[idx] += sign * pos_weight;
+        }
+    }
+}
+
+/// Computes an L2-normalized float embedding vector for arbitrary target dimensions.
+pub fn compute_text_embedding_dim_f32(text: &[u8], out: &mut [f32], target_dim: usize) {
+    let dim = target_dim.min(out.len());
+    if dim == 0 {
+        return;
+    }
+    for v in out[..dim].iter_mut() {
+        *v = 0.0;
+    }
+    if text.is_empty() {
+        return;
+    }
+    let mut token_start = 0usize;
+    let mut in_token = false;
+    let mut token_index = 0usize;
+    let len = text.len();
+    for i in 0..=len {
+        let is_end = i == len || is_token_boundary(text[i]);
+        if is_end {
+            if in_token {
+                let token = &text[token_start..i];
+                project_token(token, token_index, out, dim);
+                token_index = token_index.saturating_add(1);
+                in_token = false;
+            }
+        } else if !in_token {
+            token_start = i;
+            in_token = true;
+        }
+    }
+    let mut sum_sq = 0.0f32;
+    for &v in out[..dim].iter() {
+        sum_sq += v * v;
+    }
+    let norm = f32_sqrt(sum_sq);
+    if norm > 1e-12 {
+        let inv_norm = 1.0 / norm;
+        for v in out[..dim].iter_mut() {
+            *v *= inv_norm;
+        }
+    }
+}
+
+/// Quantizes an L2-normalized float embedding slice into Q7 fixed-point representation (`[-127, 127]`).
+pub fn quantize_f32_to_q7(f32_vec: &[f32], q7_out: &mut [i8]) {
+    let len = f32_vec.len().min(q7_out.len());
+    for i in 0..len {
+        let scaled = f32_vec[i] * 127.0f32;
+        let rounded = if scaled >= 0.0 { scaled + 0.5f32 } else { scaled - 0.5f32 };
+        let clamped = if rounded > 127.0 { 127.0 } else if rounded < -127.0 { -127.0 } else { rounded };
+        q7_out[i] = clamped as i8;
+    }
+}
+
+/// Computes a normalized Q7 fixed-point embedding directly from input text into `out`.
+pub fn compute_text_embedding_q7(text: &[u8], out: &mut [i8]) {
+    let dim = out.len().min(768);
+    let mut temp = [0.0f32; 768];
+    compute_text_embedding_dim_f32(text, &mut temp[..dim], dim);
+    quantize_f32_to_q7(&temp[..dim], &mut out[..dim]);
+}
+
 /// Zero-copy wire descriptor for sending inference requests to Ring-3 `aid`.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -159,6 +330,42 @@ pub struct AiInferenceResponse {
     pub latency_micros: u64,
     /// Byte offset into shared memory holding the output embedding vector.
     pub output_offset: u64,
+}
+
+/// Zero-copy wire descriptor for sending semantic search & RAG queries to Ring-3 `aid`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AiSearchRequest {
+    /// Target Matryoshka dimension (128, 256, 512, 768).
+    pub target_dim: u32,
+    /// Maximum top-K matches to return (e.g. 3, 5).
+    pub top_k: u32,
+    /// Minimum similarity confidence threshold in percent (0-100%).
+    pub min_confidence: u32,
+    /// Input query byte length following this header.
+    pub query_len: u32,
+}
+
+/// Zero-copy wire descriptor for a single RAG search hit returned from `aid`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AiSearchHit {
+    /// Stable 64-bit deterministic chunk ID.
+    pub chunk_id: u64,
+    /// Start character/byte offset in source document.
+    pub start_offset: u32,
+    /// End character/byte offset in source document.
+    pub end_offset: u32,
+    /// Q15 cosine similarity score (-32768 to 32767).
+    pub score_q15: i16,
+    /// Normalized confidence percentage (0 to 100).
+    pub confidence_percent: u8,
+    /// Platform Truth Contract: 1 if physical neural weights were used, 0 if lexical fallback.
+    pub is_neural: u8,
+    /// Byte length of the source document path string following this hit.
+    pub path_len: u16,
+    /// Byte length of the text snippet following this hit.
+    pub snippet_len: u16,
 }
 
 #[cfg(test)]
