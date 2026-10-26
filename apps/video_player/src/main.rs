@@ -358,6 +358,59 @@ impl VideoApp {
         self.duration_sec.saturating_sub(self.elapsed_sec)
     }
 
+    /// Seeks to a keyframe position corresponding to `target_sec`.
+    /// For MJPEG inside AVI, every frame is an intra/keyframe, so skipping to
+    /// `target_frame` lands on a valid keyframe and displays it immediately.
+    pub fn seek_to_sec(&mut self, target_sec: u32) {
+        let clamped = target_sec.min(self.duration_sec);
+        let (is_avi, path_buf, path_len) = if let Some(item) = self.playlist.current_item() {
+            let mut buf = [0u8; video_player::PATH_CAP];
+            let len = item.path_len.min(buf.len());
+            buf[..len].copy_from_slice(&item.path[..len]);
+            (item.codec == VideoCodec::Avi, buf, len)
+        } else {
+            self.elapsed_sec = clamped;
+            return;
+        };
+
+        if is_avi {
+            let path = core::str::from_utf8(&path_buf[..path_len]).unwrap_or("");
+            if !path.is_empty() {
+                self.open_avi(path);
+                if let Some(pb) = self.avi.as_mut() {
+                    let interval_us = pb.info.frame_interval_us();
+                    let target_frame = if interval_us > 0 {
+                        (clamped as u64 * 1_000_000 / interval_us as u64) as u32
+                    } else {
+                        0
+                    };
+                    let frame_buf = unsafe { &mut *core::ptr::addr_of_mut!(AVI_FRAME_BUF) };
+                    for _ in 1..target_frame {
+                        if pb.stream.next_frame(frame_buf).is_err() {
+                            break;
+                        }
+                        pb.next_index = pb.next_index.saturating_add(1);
+                    }
+                    if target_frame > 0 {
+                        if let Ok(Some(len)) = pb.stream.next_frame(frame_buf) {
+                            pb.next_index = pb.next_index.saturating_add(1);
+                            if let Ok((w, h, n)) = show_avi_frame(&frame_buf[..len], self.aspect) {
+                                pb.last_w = w;
+                                pb.last_h = h;
+                                pb.last_rgba_len = n;
+                                pb.shown = target_frame;
+                                self.has_frame = true;
+                            }
+                        }
+                    }
+                    self.elapsed_sec = clamped;
+                }
+            }
+            return;
+        }
+        self.elapsed_sec = clamped;
+    }
+
     pub fn load_current_track(&mut self) {
         self.close_avi();
         let Some(item) = self.playlist.current_item() else {
@@ -2135,20 +2188,15 @@ fn handle_touch(app: &mut VideoApp, px: u32, py: u32) -> EventAction {
             // Orientation button in top bar -> Return to Portrait
             if Rect::new(36, 36, 52, 52).contains(x, y) {
                 app.orientation = Orientation::Portrait;
+                app.aspect = AspectRatio::Fit;
                 let _ = std::audio_haptic_click();
                 return EventAction::Redraw(Dirty::All);
             }
 
             // Scrubber seek in landscape (y: 1120..1150)
             if y >= 1110 && y <= 1150 && x >= 110 && x <= 590 {
-                if app.avi.is_some() {
-                    // The container is read forwards with no seek; moving the
-                    // thumb would claim a position the stream cannot reach.
-                    std::log("[VIDEO PLAYER] A sequential AVI cannot seek; position unchanged.").ok();
-                    return EventAction::None;
-                }
                 let seek_sec = scrubber_seek_seconds(x, 120, 460, app.duration_sec);
-                app.elapsed_sec = seek_sec;
+                app.seek_to_sec(seek_sec);
                 return EventAction::Redraw(Dirty::All);
             }
 
@@ -2250,13 +2298,9 @@ fn handle_touch(app: &mut VideoApp, px: u32, py: u32) -> EventAction {
 
     // Scrubber Touch / Seek
     if SEEK_HIT.contains(x, y) {
-        if app.avi.is_some() {
-            std::log("[VIDEO PLAYER] A sequential AVI cannot seek; position unchanged.").ok();
-            return EventAction::None;
-        }
         let seek_sec = scrubber_seek_seconds(x, SEEK_X, SEEK_W, app.duration_sec);
-        app.elapsed_sec = seek_sec;
-        return EventAction::Redraw(Dirty::Scrubber);
+        app.seek_to_sec(seek_sec);
+        return EventAction::Redraw(Dirty::All);
     }
 
     // Play/Pause Button
@@ -2345,8 +2389,16 @@ fn handle_touch(app: &mut VideoApp, px: u32, py: u32) -> EventAction {
     // Secondary: Loop Mode Toggle
     if LOOP_BTN.contains(x, y) {
         app.loop_mode = app.loop_mode.next();
+        if app.loop_mode != LoopMode::None
+            && app.state == PlaybackState::Stopped
+            && app.duration_sec > 0
+            && app.elapsed_sec >= app.duration_sec
+        {
+            app.load_current_track();
+            app.state = PlaybackState::Playing;
+        }
         let _ = std::audio_haptic_click();
-        return EventAction::Redraw(Dirty::Secondary);
+        return EventAction::Redraw(Dirty::All);
     }
 
     // Secondary: PIP Toggle

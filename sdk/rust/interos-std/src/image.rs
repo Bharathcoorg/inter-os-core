@@ -2663,19 +2663,48 @@ impl JpegScratch {
 }
 
 static mut JPEG_SCRATCH: JpegScratch = JpegScratch::EMPTY;
+static JPEG_SCRATCH_LOCK: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+struct JpegScratchGuard(&'static mut JpegScratch);
+
+impl core::ops::Deref for JpegScratchGuard {
+    type Target = JpegScratch;
+    fn deref(&self) -> &JpegScratch {
+        self.0
+    }
+}
+
+impl core::ops::DerefMut for JpegScratchGuard {
+    fn deref_mut(&mut self) -> &mut JpegScratch {
+        self.0
+    }
+}
+
+impl Drop for JpegScratchGuard {
+    fn drop(&mut self) {
+        JPEG_SCRATCH_LOCK.store(false, core::sync::atomic::Ordering::Release);
+    }
+}
 
 /// Borrows the JPEG decoder scratch for the duration of one decode.
 ///
-/// SAFETY: the scratch is sound because the callers are single-threaded and
-/// non-reentrant. Every app in this system runs one event loop on one task and
-/// calls `decode_image` from that loop, never from an interrupt handler or a
-/// second thread, and `decode_jpeg` does not call any function that could
-/// decode again while it holds the borrow. The reference cannot escape: it is
-/// taken inside the decoder and dropped before it returns. The unit tests,
-/// which the Rust test harness *does* run on several threads, serialise
-/// themselves on the same mutex the PNG and GIF decoders use.
-fn jpeg_scratch() -> &'static mut JpegScratch {
-    unsafe { &mut *core::ptr::addr_of_mut!(JPEG_SCRATCH) }
+/// SAFETY: the scratch is protected by `JPEG_SCRATCH_LOCK` spinlock, ensuring
+/// that on host multi-threaded test runners, concurrent decode operations are
+/// safely serialized, while on bare metal single-threaded guest runs the lock
+/// acquires immediately without overhead.
+fn jpeg_scratch() -> JpegScratchGuard {
+    while JPEG_SCRATCH_LOCK
+        .compare_exchange_weak(
+            false,
+            true,
+            core::sync::atomic::Ordering::Acquire,
+            core::sync::atomic::Ordering::Relaxed,
+        )
+        .is_err()
+    {
+        core::hint::spin_loop();
+    }
+    unsafe { JpegScratchGuard(&mut *core::ptr::addr_of_mut!(JPEG_SCRATCH)) }
 }
 
 fn jpeg_is_sof(marker: u8) -> bool {
@@ -3320,7 +3349,7 @@ pub fn decode_jpeg_header(data: &[u8]) -> Result<(u32, u32), ()> {
 /// lossless, arithmetic, 12-bit and four-component images are refused.
 /// Returns the number of RGBA bytes written to `out_rgba`.
 pub fn decode_jpeg(data: &[u8], out_rgba: &mut [u8]) -> Result<(u32, u32, usize), ()> {
-    let scratch = jpeg_scratch();
+    let mut scratch = jpeg_scratch();
     *scratch = JpegScratch::EMPTY;
 
     let mut frame = jpeg_parse_headers(data, Some(&mut *scratch))?;

@@ -741,6 +741,28 @@ pub fn scrubber_seek_seconds(
     ((rel_x as u64 * duration_sec as u64) / bar_w as u64) as u32
 }
 
+/// Returns true if the frame at `frame_index` is an intra/keyframe.
+/// For intra-only formats (Motion JPEG, PPM P6, RAW RGB), every frame is a keyframe.
+pub fn is_keyframe(codec: VideoCodec, _frame_index: u32) -> bool {
+    match codec {
+        VideoCodec::Mjpeg
+        | VideoCodec::Avi
+        | VideoCodec::PpmP6
+        | VideoCodec::RawRgb
+        | VideoCodec::RawRgba => true,
+        VideoCodec::H264 => false, // Inter-frame compression; requires IDR/keyframe index
+        VideoCodec::Unknown => false,
+    }
+}
+
+/// Computes the keyframe seek target second.
+/// For intra-only formats (like MJPEG and PPM), every frame is an intra/keyframe,
+/// so seeking aligns directly with the target frame.
+pub fn scrubber_seek_keyframe(seek_sec: u32, duration_sec: u32, codec: VideoCodec) -> u32 {
+    let _ = codec;
+    seek_sec.min(duration_sec)
+}
+
 // -----------------------------------------------------------------------------
 // Audio Volume Helpers
 // -----------------------------------------------------------------------------
@@ -1375,6 +1397,15 @@ mod tests {
 
         let seek_clamp_max = scrubber_seek_seconds(700, 100, 500, 120);
         assert_eq!(seek_clamp_max, 120);
+
+        // Keyframe checks: for MJPEG/PPM/RAW every frame is a keyframe
+        assert!(is_keyframe(VideoCodec::Mjpeg, 0));
+        assert!(is_keyframe(VideoCodec::Mjpeg, 42));
+        assert!(is_keyframe(VideoCodec::Avi, 10));
+        assert!(is_keyframe(VideoCodec::PpmP6, 5));
+        assert!(!is_keyframe(VideoCodec::H264, 1));
+        assert_eq!(scrubber_seek_keyframe(45, 120, VideoCodec::Mjpeg), 45);
+        assert_eq!(scrubber_seek_keyframe(200, 120, VideoCodec::Mjpeg), 120);
     }
 
     #[test]

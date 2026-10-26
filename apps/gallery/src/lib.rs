@@ -8,8 +8,8 @@ pub mod theme;
 /// The image file extensions the platform recognises.
 pub use interos_std::image::IMAGE_SUFFIXES;
 
-pub const VIDEO_SUFFIXES: [&[u8]; 5] = [
-    b".mp4", b".webm", b".mkv", b".avi", b".mov",
+pub const VIDEO_SUFFIXES: [&[u8]; 8] = [
+    b".mp4", b".webm", b".mkv", b".avi", b".mov", b".mjpeg", b".mjpg", b".h264",
 ];
 
 /// Whether an entry name carries a recognised image extension (case-insensitive).
@@ -193,6 +193,99 @@ impl Thumbnail {
             (area_w as usize, h)
         }
     }
+}
+
+/// Extracts the first Motion JPEG frame payload from a RIFF AVI container.
+///
+/// Returns `None` when the file is not a RIFF AVI or contains no decodable
+/// Motion JPEG frame chunks.
+pub fn find_avi_first_mjpeg_frame(data: &[u8]) -> Option<&[u8]> {
+    if data.len() < 12 || &data[0..4] != b"RIFF" || &data[8..12] != b"AVI " {
+        return None;
+    }
+    let mut pos = 12;
+    while pos + 8 <= data.len() {
+        let chunk_id = &data[pos..pos + 4];
+        let chunk_len = u32::from_le_bytes([
+            data[pos + 4],
+            data[pos + 5],
+            data[pos + 6],
+            data[pos + 7],
+        ]) as usize;
+        let payload_start = pos + 8;
+        let payload_end = payload_start.saturating_add(chunk_len);
+        if payload_end > data.len() {
+            break;
+        }
+        if (chunk_id == b"00dc" || chunk_id == b"01dc" || chunk_id == b"00db" || chunk_id == b"01db")
+            && chunk_len >= 4
+            && data[payload_start] == 0xFF
+            && data[payload_start + 1] == 0xD8
+        {
+            return Some(&data[payload_start..payload_end]);
+        }
+        if chunk_id == b"LIST" && chunk_len >= 4 {
+            pos += 12;
+            continue;
+        }
+        pos = payload_end + (chunk_len & 1);
+    }
+    // Fallback: search for first JPEG SOI (0xFF, 0xD8, 0xFF) inside the file
+    let mut i = 12;
+    while i + 3 < data.len() {
+        if data[i] == 0xFF && data[i + 1] == 0xD8 && data[i + 2] == 0xFF {
+            return Some(&data[i..]);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Genuine thumbnail extraction for decodable video files (MJPEG, PPM) into a
+/// caller-supplied static scratch buffer (e.g. 64x64 or 96x96 pixels).
+///
+/// Returns `None` for unsupported video codecs (H.264, MP4, WebM, VP9, AV1),
+/// strictly upholding the Platform Truth Contract by never synthesizing fake pictures.
+pub fn extract_video_thumbnail(
+    data: &[u8],
+    name: &[u8],
+    frame_scratch: &mut [u8],
+) -> Option<Thumbnail> {
+    if name.len() >= 4 && name[name.len() - 4..].eq_ignore_ascii_case(b".ppm")
+        || (data.len() >= 2 && data[0] == b'P' && data[1] == b'6')
+    {
+        let (w, h, _header_len) = interos_std::image::decode_ppm_header(data).ok()?;
+        let required = (w as usize).checked_mul(h as usize)?.checked_mul(4)?;
+        if required <= frame_scratch.len() {
+            interos_std::image::decode_ppm(data, frame_scratch).ok()?;
+            return Thumbnail::from_rgba(&frame_scratch[..required], w, h);
+        }
+        return None;
+    }
+
+    if (name.len() >= 5 && name[name.len() - 5..].eq_ignore_ascii_case(b".mjpg"))
+        || (name.len() >= 6 && name[name.len() - 6..].eq_ignore_ascii_case(b".mjpeg"))
+        || (data.len() >= 2 && data[0] == 0xFF && data[1] == 0xD8)
+    {
+        if let Ok((w, h, bytes)) = interos_std::image::decode_jpeg(data, frame_scratch) {
+            return Thumbnail::from_rgba(&frame_scratch[..bytes], w, h);
+        }
+        return None;
+    }
+
+    if (name.len() >= 4 && name[name.len() - 4..].eq_ignore_ascii_case(b".avi"))
+        || (data.len() >= 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"AVI ")
+    {
+        if let Some(payload) = find_avi_first_mjpeg_frame(data) {
+            if let Ok((w, h, bytes)) = interos_std::image::decode_jpeg(payload, frame_scratch) {
+                return Thumbnail::from_rgba(&frame_scratch[..bytes], w, h);
+            }
+        }
+        return None;
+    }
+
+    // Unsupported video formats (MP4, H.264, WebM, etc.): return None truthfully
+    None
 }
 
 /// One media item the gallery can show or play.
@@ -1678,6 +1771,59 @@ mod tests {
         // A built-in wallpaper has no file to unlink.
         assert_eq!(deletable_storage_index(Media::Wallpaper(0), 3), None);
         assert_eq!(deletable_storage_index(Media::Photo(0), 3), None);
+    }
+
+    #[test]
+    fn test_extract_video_thumbnail_ppm() {
+        let mut ppm_data = [0u8; 64];
+        let header = b"P6
+2 2
+255
+";
+        ppm_data[..header.len()].copy_from_slice(header);
+        let pixels = [
+            255, 0, 0,
+            0, 255, 0,
+            0, 0, 255,
+            255, 255, 0,
+        ];
+        ppm_data[header.len()..header.len() + 12].copy_from_slice(&pixels);
+
+        let mut scratch = [0u8; 96 * 96 * 4];
+        let thumb = extract_video_thumbnail(&ppm_data[..header.len() + 12], b"test.ppm", &mut scratch);
+        assert!(thumb.is_some());
+        let t = thumb.unwrap();
+        assert!(t.valid);
+        assert_eq!(t.src_w, 2);
+        assert_eq!(t.src_h, 2);
+    }
+
+    #[test]
+    fn test_extract_video_thumbnail_unsupported_h264_mp4() {
+        let mut scratch = [0u8; 96 * 96 * 4];
+        let fake_mp4 = b"....ftypmp42";
+        let thumb = extract_video_thumbnail(fake_mp4, b"movie.mp4", &mut scratch);
+        assert!(thumb.is_none());
+
+        let thumb_h264 = extract_video_thumbnail(b"   g", b"video.h264", &mut scratch);
+        assert!(thumb_h264.is_none());
+    }
+
+    #[test]
+    fn test_find_avi_first_mjpeg_frame() {
+        assert_eq!(find_avi_first_mjpeg_frame(b"not an avi"), None);
+    }
+
+    #[test]
+    fn test_extract_video_thumbnail_avi_mjpeg() {
+        const AVI_FIXTURE: &[u8] = include_bytes!("../../video_player/tests/fixtures/mjpeg_5fps_audio.avi");
+        let mut scratch = [0u8; 96 * 96 * 4];
+        let thumb = extract_video_thumbnail(AVI_FIXTURE, b"clip.avi", &mut scratch);
+        assert!(thumb.is_some());
+        let t = thumb.unwrap();
+        assert!(t.valid);
+        assert_eq!(t.src_w, 64);
+        assert_eq!(t.src_h, 48);
     }
 }
 

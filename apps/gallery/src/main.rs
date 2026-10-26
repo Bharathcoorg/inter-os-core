@@ -44,6 +44,7 @@ use std::design::walls;
 
 pub use gallery::{
     clamp_pan_value, clamp_viewer_zoom, decode_bmp, decode_image, decode_ppm, decode_qoi,
+    extract_video_thumbnail,
     decode_raw, deletable_storage_index, delete_storage_item_at, double_tap_zoom, encode_ppm,
     filter_counts, filter_from_setting, fit_size, grid_row_count, has_image_suffix,
     has_video_suffix, is_media_file, measure_image_header, media_at_with_storage,
@@ -98,6 +99,8 @@ static mut FILE_SCRATCH: [u8; FILE_SCRATCH_LEN] = [0; FILE_SCRATCH_LEN];
 
 /// Scratch buffer for the full RGBA decode of a stored image.
 static mut DECODE_SCRATCH: [u8; DECODE_SCRATCH_LEN] = [0; DECODE_SCRATCH_LEN];
+const VIDEO_FRAME_BUF_LEN: usize = 96 * 96 * 4;
+static mut VIDEO_FRAME_BUF: [u8; VIDEO_FRAME_BUF_LEN] = [0; VIDEO_FRAME_BUF_LEN];
 
 /// Scratch space used by GIF disposal method 3 (restore to previous).
 ///
@@ -163,6 +166,30 @@ fn decode_thumbnail(path: &[u8], name: &[u8]) -> Option<Thumbnail> {
         Thumbnail::from_rgba(buf, w, h)?
     };
     Some(thumb)
+}
+
+/// Decodes the first frame of a decodable video file (MJPEG, PPM) into a thumbnail.
+/// Returns `None` for unsupported codecs (H.264, MP4, WebM, etc.), fulfilling the
+/// Platform Truth Contract without synthesizing fake picture content.
+fn decode_video_thumbnail(path: &[u8], name: &[u8]) -> Option<Thumbnail> {
+    let path_str = core::str::from_utf8(path).ok()?;
+    let read_bytes = {
+        let buf = unsafe { &mut *core::ptr::addr_of_mut!(FILE_SCRATCH) };
+        let fd = std::fs_open(path_str, std::FS_READ).ok()?;
+        let n = std::fs_read(fd, buf).ok()?;
+        let _ = std::fs_close(fd);
+        n
+    };
+    if read_bytes == 0 {
+        return None;
+    }
+    let data = unsafe { &(&*core::ptr::addr_of!(FILE_SCRATCH))[..read_bytes.min(FILE_SCRATCH_LEN)] };
+    let scratch = unsafe { &mut *core::ptr::addr_of_mut!(VIDEO_FRAME_BUF) };
+    if let Some(thumb) = extract_video_thumbnail(data, name, scratch) {
+        return Some(thumb);
+    }
+    let big_scratch = unsafe { &mut *core::ptr::addr_of_mut!(DECODE_SCRATCH) };
+    extract_video_thumbnail(data, name, big_scratch)
 }
 
 /// The pixel at byte `offset` of the last successful detail decode.
@@ -1431,8 +1458,10 @@ impl GalleryApp {
                     STORAGE_THUMBS[slot] = thumb.unwrap_or(Thumbnail::EMPTY);
                 }
             } else {
+                let thumb =
+                    decode_video_thumbnail(&item.path[..item.path_len], &item.name[..item.name_len]);
                 unsafe {
-                    STORAGE_THUMBS[slot] = Thumbnail::EMPTY;
+                    STORAGE_THUMBS[slot] = thumb.unwrap_or(Thumbnail::EMPTY);
                 }
             }
 
@@ -2803,11 +2832,27 @@ fn video_card_pixel(x: usize, y: usize, app: &GalleryApp, storage_idx: usize, co
     let thumb_h = 140;
 
     if y < y0 + thumb_h {
-        // WHY the tile is a flat neutral and not a gradient: the gradient
-        // was a blend between two fixed colours, and a two-tone ramp in the
-        // shape of a frame read as a preview of the video. This build has no
-        // video decoder, so there is no frame to show and the tile says so.
-        let _ = item;
+        let thumb = unsafe { STORAGE_THUMBS[storage_idx] };
+        let inner_w = VIDEO_COL_W - 2;
+        let inner_h = thumb_h.saturating_sub(2);
+        let (img_w, img_h) = thumb.fitted_size(inner_w, inner_h);
+        let img_x0 = x0 + 1 + (inner_w - img_w) / 2;
+        let img_y0 = y0 + 1 + (inner_h - img_h) / 2;
+        let base_col = if thumb.valid
+            && x >= img_x0
+            && x < img_x0 + img_w
+            && y >= img_y0
+            && y < img_y0 + img_h
+        {
+            thumb
+                .sample(
+                    (x - img_x0) * THUMB_W / img_w.max(1),
+                    (y - img_y0) * THUMB_H / img_h.max(1),
+                )
+                .unwrap_or(THEME.surface_container)
+        } else {
+            THEME.surface_container
+        };
 
         // Center play button overlay
         let cx = x0 + VIDEO_COL_W / 2;
@@ -2821,14 +2866,43 @@ fn video_card_pixel(x: usize, y: usize, app: &GalleryApp, storage_idx: usize, co
             return 0xCC0F172A;
         }
 
-        // "No preview" marker, so the flat tile is not read as a broken
-        // image but as an honest absence.
-        let marker = b"No preview";
-        let mw = font::measure(marker, 1);
-        let mx = x0 + (VIDEO_COL_W.saturating_sub(mw)) / 2;
-        let my = y0 + thumb_h - font::line_height(1) - 8;
-        if let Some(c) = text(x, y, mx, my, 1, marker, THEME.on_surface_variant, THEME.surface_container) {
-            return c;
+        // If no genuine thumbnail could be extracted (e.g. unsupported MP4/H.264),
+        // display the truthful video placeholder icon with the codec name badge,
+        // never a fake picture.
+        if !thumb.valid {
+            let name_slice = &item.name[..item.name_len];
+            let codec_badge: &[u8] = if name_slice.ends_with(b".mp4") {
+                b"MP4"
+            } else if name_slice.ends_with(b".h264") {
+                b"H.264"
+            } else if name_slice.ends_with(b".webm") {
+                b"WEBM"
+            } else if name_slice.ends_with(b".mkv") {
+                b"MKV"
+            } else if name_slice.ends_with(b".mov") {
+                b"MOV"
+            } else {
+                b"VIDEO"
+            };
+            let bw = font::measure(codec_badge, 1) + 8;
+            let bx0 = x0 + 6;
+            let by0 = y0 + 6;
+            if x >= bx0 && x < bx0 + bw && y >= by0 && y < by0 + 24 {
+                if x == bx0 || x == bx0 + bw - 1 || y == by0 || y == by0 + 23 {
+                    return 0x88FFFFFF;
+                }
+                if let Some(tc) = text(x, y, bx0 + 4, by0 + 1, 1, codec_badge, 0xFFFFFFFF, 0xCC111214) {
+                    return tc;
+                }
+            }
+
+            let marker = b"No preview";
+            let mw = font::measure(marker, 1);
+            let mx = x0 + (VIDEO_COL_W.saturating_sub(mw)) / 2;
+            let my = y0 + thumb_h - font::line_height(1) - 8;
+            if let Some(c) = text(x, y, mx, my, 1, marker, THEME.on_surface_variant, THEME.surface_container) {
+                return c;
+            }
         }
 
         // Size badge in bottom-right corner.
@@ -2860,7 +2934,7 @@ fn video_card_pixel(x: usize, y: usize, app: &GalleryApp, storage_idx: usize, co
             }
         }
 
-        return THEME.surface_container;
+        return base_col;
     }
 
     if y == y0 + thumb_h {
