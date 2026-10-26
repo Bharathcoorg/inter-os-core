@@ -1,0 +1,11 @@
+[package]
+name = "servo-embed"
+version = "0.1.0"
+edition = "2021"
+license = "MPL-2.0"
+description = "Servo browser engine embedding and compositor bridge for InterOS"
+
+[features]
+default = []
+std = []
+
