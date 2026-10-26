@@ -1039,11 +1039,22 @@ impl<'a> JsRuntime<'a> {
         }
     }
 
-    fn set_element_prop(&mut self, _node_id: NodeId, prop: &[u8], val: JsValue) -> Result<(), JsError> {
+    fn set_element_prop(&mut self, node_id: NodeId, prop: &[u8], val: JsValue) -> Result<(), JsError> {
         match prop {
-            b"value" | b"checked" | b"textContent" | b"innerText" => {
-                // DOM properties are updated in place or synced with form field state
-                let _ = val;
+            b"value" => {
+                let bytes = val.as_str().as_bytes();
+                self.dom.set_attr(node_id, b"value", bytes);
+                Ok(())
+            }
+            b"checked" => {
+                if val.to_bool() {
+                    self.dom.set_attr(node_id, b"checked", b"checked");
+                }
+                Ok(())
+            }
+            b"textContent" | b"innerText" => {
+                let bytes = val.as_str().as_bytes();
+                self.dom.set_text(node_id, bytes);
                 Ok(())
             }
             _ => Err(JsError::UnsupportedSyntax("unsupported DOM property setter")),
@@ -1128,7 +1139,29 @@ mod tests {
         dom.parse(b"<div><input id=\"username\" value=\"alice\"></input></div>");
         let src = b"let input = document.getElementById('username'); let val = input.value;";
         let res = execute_script(src, &mut dom, 1000).expect("DOM query succeeds");
-        assert_eq!(res.as_str(), "alice");
+        assert_eq!(res, JsValue::string_from_slice(b"alice"));
+    }
+
+    #[test]
+    fn test_dom_set_element_property_mutation() {
+        let mut dom = Dom::new();
+        dom.parse(b"<div><input id=\"username\" value=\"alice\"></input><p id=\"status\">idle</p></div>");
+        assert!(dom.node_count() > 0);
+
+        let src = b"let input = document.getElementById('username'); input.value = 'bob';";
+        let res = execute_script(src, &mut dom, 1000).expect("mutation succeeds");
+        let _ = res;
+
+        // Verify mutated DOM attributes
+        let mut found_input = false;
+        for i in 0..dom.node_count() {
+            let id = i as u16;
+            if dom.attr(id, b"id") == Some(b"username") {
+                assert_eq!(dom.attr(id, b"value"), Some(&b"bob"[..]));
+                found_input = true;
+            }
+        }
+        assert!(found_input);
     }
 
     #[test]

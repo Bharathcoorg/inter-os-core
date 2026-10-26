@@ -2088,3 +2088,78 @@ pub fn spawn_app_video_player(id_security: TaskId) -> TaskId {
     );
     id
 }
+
+pub extern "C" fn app_webview_demo_trampoline() -> ! {
+    user_process_entry()
+}
+
+pub fn spawn_app_webview_demo(id_security: TaskId) -> TaskId {
+    let mut caps = CapabilityTable::new(12);
+    caps.insert(Capability {
+        id: CapabilityId(2930),
+        cap_type: CapabilityType::SerialOutput,
+        rights: Rights::WRITE,
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2931),
+        cap_type: CapabilityType::IpcSend,
+        rights: Rights::WRITE,
+        object_id: id_security.0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2932),
+        cap_type: CapabilityType::TimerTickRead,
+        rights: Rights::READ,
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2933),
+        cap_type: CapabilityType::HardwarePortIo,
+        rights: Rights::READ | Rights::WRITE,
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2934),
+        cap_type: CapabilityType::FileSystemRead,
+        rights: Rights::READ,
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2935),
+        cap_type: CapabilityType::FileSystemWrite,
+        rights: Rights::WRITE,
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2936),
+        cap_type: CapabilityType::FrameBufferDirect,
+        rights: Rights::WRITE,
+        object_id: 1,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2937),
+        cap_type: CapabilityType::EventPoll,
+        rights: Rights::READ.union(Rights::INVOKE),
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2938),
+        cap_type: CapabilityType::WebViewBridge,
+        rights: Rights::INVOKE,
+        object_id: 0,
+    }).ok();
+
+    let id = spawn_user_process_with_parent(
+        "app_webview_demo",
+        APP_WEBVIEW_DEMO_ELF,
+        caps,
+        6,
+        id_security,
+    ).expect("Failed to spawn WebView Demo app");
+    serial_println!(
+        "[OK] Spawned app_webview_demo (Ring 3 User Mode, Isolated CR3, ID: {:?})",
+        id
+    );
+    id
+}

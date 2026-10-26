@@ -159,7 +159,7 @@ foreach ($app in @(
     # but never built here therefore ships a stale image with no compiler error --
     # and if the file is absent the kernel build fails with a confusing message about
     # a userspace binary rather than about a build script.
-    "notes", "video_player"
+    "notes", "video_player", "webview_demo"
 )) {
     # WHY `--bin $app`: an app that also exposes a lib target makes the extra rustc
     # flags ambiguous, and cargo then refuses with "extra arguments to `rustc` can

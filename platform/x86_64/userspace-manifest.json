@@ -134,6 +134,11 @@
       "name": "video_player",
       "kind": "application",
       "manifest": "apps/video_player/Cargo.toml"
+    },
+    {
+      "name": "webview_demo",
+      "kind": "application",
+      "manifest": "apps/webview_demo/Cargo.toml"
     }
   ],
   "kernel": {

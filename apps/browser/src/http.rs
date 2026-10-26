@@ -447,6 +447,27 @@ const COOKIE_VALUE_MAX: usize = 256;
 const COOKIE_DOMAIN_MAX: usize = 128;
 const COOKIE_PATH_MAX: usize = 128;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SameSitePolicy {
+    None,
+    Lax,
+    Strict,
+}
+
+pub fn is_public_suffix(domain: &[u8]) -> bool {
+    let lower = lower_host(domain);
+    if !lower.contains(&b'.') {
+        return true;
+    }
+    matches!(
+        lower,
+        b"co.uk" | b"org.uk" | b"gov.uk" | b"ac.uk"
+            | b"com.au" | b"net.au" | b"org.au"
+            | b"co.jp" | b"ne.jp"
+            | b"com.br"
+    )
+}
+
 #[derive(Clone, Copy)]
 pub struct Cookie {
     name: [u8; COOKIE_NAME_MAX],
@@ -460,6 +481,7 @@ pub struct Cookie {
     host_only: bool,
     secure: bool,
     http_only: bool,
+    same_site: SameSitePolicy,
     /// Unix seconds; `u64::MAX` means a session cookie.
     expires: u64,
     created: u64,
@@ -478,6 +500,7 @@ impl Cookie {
         host_only: true,
         secure: false,
         http_only: false,
+        same_site: SameSitePolicy::Lax,
         expires: u64::MAX,
         created: 0,
     };
@@ -499,6 +522,9 @@ impl Cookie {
     }
     pub fn is_http_only(&self) -> bool {
         self.http_only
+    }
+    pub fn same_site(&self) -> SameSitePolicy {
+        self.same_site
     }
     pub fn expires_at(&self) -> u64 {
         self.expires
@@ -597,6 +623,7 @@ impl CookieJar {
         let mut path: &[u8] = default_cookie_path(request_path);
         let mut secure = false;
         let mut http_only = false;
+        let mut same_site = SameSitePolicy::Lax;
         let mut expires = u64::MAX;
         let mut expired_now = false;
 
@@ -616,13 +643,21 @@ impl CookieJar {
                 secure = true;
             } else if key.eq_ignore_ascii_case(b"httponly") {
                 http_only = true;
+            } else if key.eq_ignore_ascii_case(b"samesite") {
+                if value.eq_ignore_ascii_case(b"strict") {
+                    same_site = SameSitePolicy::Strict;
+                } else if value.eq_ignore_ascii_case(b"lax") {
+                    same_site = SameSitePolicy::Lax;
+                } else {
+                    same_site = SameSitePolicy::None;
+                }
             } else if key.eq_ignore_ascii_case(b"domain") {
                 let mut candidate = value;
                 if candidate.starts_with(b".") {
                     candidate = &candidate[1..];
                 }
                 let candidate = lower_host(candidate);
-                if candidate.is_empty() || !domain_matches(host, candidate) {
+                if candidate.is_empty() || is_public_suffix(candidate) || !domain_matches(host, candidate) {
                     return CookieOutcome::Rejected;
                 }
                 domain = candidate;
@@ -648,8 +683,6 @@ impl CookieJar {
                     }
                 }
             }
-            // SameSite, Priority and unknown attributes are ignored: they
-            // do not change what this single-origin jar may send.
         }
 
         let existing = self.find(name, domain, path);
@@ -672,6 +705,7 @@ impl CookieJar {
         cookie.host_only = host_only;
         cookie.secure = secure;
         cookie.http_only = http_only;
+        cookie.same_site = same_site;
         cookie.expires = expires;
         cookie.created = self.next_created;
         self.next_created = self.next_created.saturating_add(1);
@@ -2371,8 +2405,13 @@ mod tests {
         );
         // Path-scoped cookie
         assert_eq!(
-            jar.store(b"https://example.com/app", b"app_state=active; Path=/app", 1000),
+            jar.store(b"https://example.com/app", b"app_state=active; Path=/app; SameSite=Strict", 1000),
             CookieOutcome::Stored
+        );
+        // Public suffix cookie must be rejected
+        assert_eq!(
+            jar.store(b"https://evil.co.uk/", b"bad=1; Domain=co.uk", 1000),
+            CookieOutcome::Rejected
         );
 
         let mut out = [0u8; 256];

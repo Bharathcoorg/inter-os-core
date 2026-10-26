@@ -25,6 +25,10 @@ pub mod layout;
 /// The bounded native JavaScript AST lexer, parser and interpreter.
 pub mod js;
 
+/// Stable browser engine abstraction (Native Flow & Servo Embed).
+pub mod engine;
+pub use engine::{BrowserEngine, EngineAction, EngineCapabilities, EngineStatus, NativeFlowEngine};
+
 /// The platform's scroll model.
 use interos_std::design::scroll::ScrollState;
 
@@ -128,33 +132,70 @@ pub fn parse_uri(raw: &[u8]) -> ParsedUri<'_> {
     }
 
     let delim_pos = rest.iter().position(|&b| b == b'/' || b == b'?');
-    let (authority, remainder) = match delim_pos {
+    let (raw_authority, remainder) = match delim_pos {
         Some(idx) => (&rest[..idx], &rest[idx..]),
         None => (rest, &b""[..]),
     };
 
-    let (host, port) = match authority.iter().rposition(|&b| b == b':') {
-        Some(i) => {
-            let digits = &authority[i + 1..];
-            let mut value: u32 = 0;
-            let mut all_digits = !digits.is_empty();
-            for &b in digits {
-                if b.is_ascii_digit() {
-                    value = value.saturating_mul(10).saturating_add((b - b'0') as u32);
+    // Strip userinfo if present to prevent credential leakage into host
+    let authority = match raw_authority.iter().position(|&b| b == b'@') {
+        Some(at_idx) => &raw_authority[at_idx + 1..],
+        None => raw_authority,
+    };
+
+    let (host, port) = if authority.starts_with(b"[") {
+        // Bracketed IPv6 literal: [::1] or [::1]:8080
+        match authority.iter().position(|&b| b == b']') {
+            Some(close_idx) => {
+                let ipv6_host = &authority[..=close_idx];
+                let remainder_after_bracket = &authority[close_idx + 1..];
+                if let Some(colon_pos) = remainder_after_bracket.iter().position(|&b| b == b':') {
+                    let digits = &remainder_after_bracket[colon_pos + 1..];
+                    let mut value: u32 = 0;
+                    let mut all_digits = !digits.is_empty();
+                    for &b in digits {
+                        if b.is_ascii_digit() {
+                            value = value.saturating_mul(10).saturating_add((b - b'0') as u32);
+                        } else {
+                            all_digits = false;
+                            break;
+                        }
+                    }
+                    if all_digits && value <= 65535 {
+                        (ipv6_host, value as u16)
+                    } else {
+                        (ipv6_host, scheme.default_port())
+                    }
                 } else {
-                    all_digits = false;
-                    break;
+                    (ipv6_host, scheme.default_port())
                 }
             }
-            if all_digits && value > 0 && value <= 65535 {
-                (&authority[..i], value as u16)
-            } else if all_digits && value == 0 {
-                (&authority[..i], 0)
-            } else {
-                (authority, scheme.default_port())
-            }
+            None => (authority, scheme.default_port()),
         }
-        None => (authority, scheme.default_port()),
+    } else {
+        match authority.iter().rposition(|&b| b == b':') {
+            Some(i) => {
+                let digits = &authority[i + 1..];
+                let mut value: u32 = 0;
+                let mut all_digits = !digits.is_empty();
+                for &b in digits {
+                    if b.is_ascii_digit() {
+                        value = value.saturating_mul(10).saturating_add((b - b'0') as u32);
+                    } else {
+                        all_digits = false;
+                        break;
+                    }
+                }
+                if all_digits && value > 0 && value <= 65535 {
+                    (&authority[..i], value as u16)
+                } else if all_digits && value == 0 {
+                    (&authority[..i], 0)
+                } else {
+                    (authority, scheme.default_port())
+                }
+            }
+            None => (authority, scheme.default_port()),
+        }
     };
 
     let (path, query) = if remainder.starts_with(b"?") {
@@ -3424,6 +3465,28 @@ mod tests {
                 host: b"localhost",
                 path: b"/data/docs/readme.txt",
                 port: 0,
+                query: None,
+            }
+        );
+
+        assert_eq!(
+            parse_uri(b"https://user:secret@example.com/dashboard"),
+            ParsedUri {
+                scheme: UriScheme::Https,
+                host: b"example.com",
+                path: b"/dashboard",
+                port: 443,
+                query: None,
+            }
+        );
+
+        assert_eq!(
+            parse_uri(b"http://[::1]:8080/api"),
+            ParsedUri {
+                scheme: UriScheme::Http,
+                host: b"[::1]",
+                path: b"/api",
+                port: 8080,
                 query: None,
             }
         );

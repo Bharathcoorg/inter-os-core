@@ -1,0 +1,21 @@
+[package]
+name = "webview_demo"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+interos-std = { path = "../../sdk/rust/interos-std" }
+
+[lib]
+name = "webview_demo"
+path = "src/lib.rs"
+
+[[bin]]
+name = "webview_demo"
+path = "src/main.rs"
+test = false
+bench = false
+
+[lints.cargo]
+non_kebab_case_bins = "allow"
+

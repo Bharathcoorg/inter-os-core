@@ -19,7 +19,7 @@ members = [
     "apps/notes",
     "apps/agent_manager",
     "apps/video_player",
-    "engines/servo-embed",
+    "apps/webview_demo",
 ]
 exclude = [
     "boot",

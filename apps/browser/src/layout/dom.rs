@@ -341,6 +341,81 @@ impl Dom {
         self.attr(id, name).is_some()
     }
 
+    /// Sets or updates an attribute on an element node.
+    pub fn set_attr(&mut self, id: NodeId, name: &[u8], value: &[u8]) -> bool {
+        let idx = id as usize;
+        if idx >= self.node_count { return false; }
+        let start = self.nodes[idx].attr_start as usize;
+        let count = self.nodes[idx].attr_count as usize;
+        let end = (start + count).min(self.attr_count);
+        for i in start..end {
+            if self.attrs[i].name.get(self).eq_ignore_ascii_case(name) {
+                if self.text_len + value.len() <= MAX_TEXT_BYTES {
+                    let v_start = self.text_len as u32;
+                    let v_len = value.len() as u16;
+                    self.text[self.text_len..self.text_len + value.len()].copy_from_slice(value);
+                    self.text_len += value.len();
+                    self.attrs[i].value = StrRef { start: v_start, len: v_len };
+                    return true;
+                }
+                return false;
+            }
+        }
+        if self.attr_count < MAX_ATTRS && self.text_len + name.len() + value.len() <= MAX_TEXT_BYTES {
+            let n_start = self.text_len as u32;
+            let n_len = name.len() as u16;
+            self.text[self.text_len..self.text_len + name.len()].copy_from_slice(name);
+            self.text_len += name.len();
+
+            let v_start = self.text_len as u32;
+            let v_len = value.len() as u16;
+            self.text[self.text_len..self.text_len + value.len()].copy_from_slice(value);
+            self.text_len += value.len();
+
+            let attr_idx = self.attr_count;
+            self.attrs[attr_idx] = Attr {
+                name: StrRef { start: n_start, len: n_len },
+                value: StrRef { start: v_start, len: v_len },
+            };
+            self.attr_count += 1;
+            if self.nodes[idx].attr_count == 0 {
+                self.nodes[idx].attr_start = attr_idx as u16;
+            }
+            self.nodes[idx].attr_count += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Sets or replaces the text content of a node.
+    pub fn set_text(&mut self, id: NodeId, new_text: &[u8]) -> bool {
+        let idx = id as usize;
+        if idx >= self.node_count { return false; }
+        if self.text_len + new_text.len() <= MAX_TEXT_BYTES {
+            let start = self.text_len as u32;
+            let len = new_text.len() as u16;
+            self.text[self.text_len..self.text_len + new_text.len()].copy_from_slice(new_text);
+            self.text_len += new_text.len();
+            if self.nodes[idx].is_text() {
+                self.nodes[idx].text = StrRef { start, len };
+                true
+            } else if let Some(child_id) = self.first_child(id) {
+                let child_idx = child_id as usize;
+                if self.nodes[child_idx].is_text() {
+                    self.nodes[child_idx].text = StrRef { start, len };
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    }
+
     /// The stored range of an attribute value, for a caller that keeps a
     /// [`StrRef`] rather than borrowing the DOM.
     pub fn attr_ref(&self, id: NodeId, name: &[u8]) -> Option<StrRef> {

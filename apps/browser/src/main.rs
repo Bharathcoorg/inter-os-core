@@ -1270,6 +1270,7 @@ pub enum SheetOverlay {
     Downloads,
     Menu,
     Tools,
+    Settings,
     UploadPicker,
     SpeedTest,
     CompatibilityLab,
@@ -1756,6 +1757,7 @@ impl BrowserApp {
         // one that saved them, and the index is the platform's record of
         // them.
         app.refresh_downloads();
+        app.scan_downloads();
         app
     }
 
@@ -2882,6 +2884,7 @@ impl BrowserApp {
             std::log("[BROWSER APP] The page's own document is not held; nothing was saved.").ok();
             return;
         }
+        self.scan_downloads();
         let mut path_buf = [0u8; 96];
         let n = browser::download_path(self.downloads_saved, &mut path_buf);
         let Ok(path) = core::str::from_utf8(&path_buf[..n]) else {
@@ -3140,6 +3143,55 @@ impl BrowserApp {
             entry.path_len = n;
             entry.length = record.length;
             self.download_count += 1;
+        }
+        self.scan_downloads();
+    }
+
+    /// Scans `/storage/downloads` to update `downloads_saved` to avoid collisions
+    /// or overwriting existing downloaded files.
+    pub fn scan_downloads(&mut self) {
+        let mut list_buf = [0u8; 4096];
+        if let Ok(n) = std::fs_list("/storage/downloads", &mut list_buf) {
+            let text = core::str::from_utf8(&list_buf[..n]).unwrap_or("");
+            for line in text.lines() {
+                let name = line.split('|').next().unwrap_or("");
+                if let Some(rest) = name.strip_prefix(browser::DOWNLOAD_NAME_PREFIX) {
+                    if let Some(num_str) = rest.strip_suffix(".html") {
+                        if let Ok(num) = num_str.parse::<u32>() {
+                            if num >= self.downloads_saved {
+                                self.downloads_saved = num.saturating_add(1);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for entry in self.downloads.iter().take(self.download_count) {
+            if let Ok(path_str) = core::str::from_utf8(&entry.path[..entry.path_len]) {
+                if let Some(name) = path_str.rsplit('/').next() {
+                    if let Some(rest) = name.strip_prefix(browser::DOWNLOAD_NAME_PREFIX) {
+                        if let Some(num_str) = rest.strip_suffix(".html") {
+                            if let Ok(num) = num_str.parse::<u32>() {
+                                if num >= self.downloads_saved {
+                                    self.downloads_saved = num.saturating_add(1);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        while self.downloads_saved < 100_000 {
+            let mut probe_buf = [0u8; 96];
+            let n = browser::download_path(self.downloads_saved, &mut probe_buf);
+            if let Ok(p) = core::str::from_utf8(&probe_buf[..n]) {
+                if let Ok(fd) = std::fs_open(p, std::FS_READ) {
+                    let _ = std::fs_close(fd);
+                    self.downloads_saved = self.downloads_saved.saturating_add(1);
+                    continue;
+                }
+            }
+            break;
         }
     }
 
@@ -4092,6 +4144,35 @@ impl BrowserApp {
         true
     }
 
+    pub fn is_loading(&self) -> bool {
+        matches!(
+            self.tabs.active_tab().loading_state,
+            LoadingState::Connecting | LoadingState::Receiving
+        ) || self.speed_running
+            || self.lab_running
+    }
+
+    pub fn stop(&mut self) {
+        if matches!(
+            self.tabs.active_tab().loading_state,
+            LoadingState::Connecting | LoadingState::Receiving
+        ) {
+            self.tabs.active_tab_mut().loading_state = LoadingState::Completed;
+        }
+        if self.speed_running {
+            self.speed_running = false;
+            self.pending = PendingTask::None;
+        }
+        if self.lab_running {
+            self.lab_running = false;
+            self.pending = PendingTask::None;
+        }
+        if self.status == PageStatus::DownloadPrompt {
+            self.refuse_pending_download();
+        }
+        std::log("[BROWSER APP] Stop: navigation / loading stopped.").ok();
+    }
+
     pub fn reload(&mut self) {
         let mut target = [0u8; 64];
         let n = self.current_url_len.min(target.len());
@@ -4962,11 +5043,16 @@ fn toolbar_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
         return c;
     }
 
-    // Reload Button
+    // Reload / Stop Button
     if let Some(c) = draw_rounded_rect(x, y, RELOAD_BTN, BTN_R, THEME.surface, None, 0) {
         let cx = RELOAD_BTN.x + RELOAD_BTN.w / 2;
         let cy = RELOAD_BTN.y + RELOAD_BTN.h / 2;
-        return if reload_glyph(x, y, cx, cy) {
+        let active = if app.is_loading() {
+            close_glyph(x, y, cx, cy)
+        } else {
+            reload_glyph(x, y, cx, cy)
+        };
+        return if active {
             THEME.on_surface_variant
         } else {
             c
@@ -6724,6 +6810,56 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
             }
             Some(THEME.surface)
         }
+        SheetOverlay::Settings => {
+            if y < TOOLBAR_Y1 || y >= NAV_BAR_Y0 {
+                return None;
+            }
+            if y >= 120 && y < 170 {
+                if let Some(px) = text_px(x, y, 32, 134, 1, b"Settings", THEME.on_surface, THEME.surface, true) {
+                    return Some(px);
+                }
+                if close_glyph(x, y, 660, 145) {
+                    return Some(THEME.on_surface_variant);
+                }
+                return Some(THEME.surface);
+            }
+            let caption = b"Browser configuration, search engine, and device settings.";
+            if let Some(px) = text_px(x, y, 32, 182, 1, caption, THEME.on_surface_variant, THEME.surface, false) {
+                return Some(px);
+            }
+            let rows: [(&[u8], &[u8]); 4] = [
+                (
+                    b"Search Engine",
+                    b"Default search: DuckDuckGo / InterSearch.",
+                ),
+                (
+                    b"Homepage",
+                    b"Default start page: Sovereign New Tab (about:blank).",
+                ),
+                (
+                    b"Security & Sandbox",
+                    b"Zero ambient authority with explicit Ring-3 capability ladder.",
+                ),
+                (
+                    b"System Settings",
+                    b"Tap to open system-wide InterOS configuration.",
+                ),
+            ];
+            for (index, (title, body)) in rows.iter().enumerate() {
+                let top = 220 + index * 116;
+                let rect = Rect::new(24, top, W - 48, 100);
+                if let Some(c) = draw_rounded_rect(x, y, rect, CARD.radius, CARD.fill, CARD.border, 1) {
+                    if let Some(px) = text_px(x, y, 44, top + 18, 1, title, THEME.on_surface, THEME.surface, true) {
+                        return Some(px);
+                    }
+                    if let Some(px) = text_px(x, y, 44, top + 52, 1, body, THEME.on_surface_variant, THEME.surface, false) {
+                        return Some(px);
+                    }
+                    return Some(c);
+                }
+            }
+            Some(THEME.surface)
+        }
         SheetOverlay::UploadPicker => {
             if y < TOOLBAR_Y1 || y >= NAV_BAR_Y0 {
                 return None;
@@ -7090,14 +7226,15 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
             Some(THEME.surface)
         }
         SheetOverlay::Menu => {
-            // Kebab Overflow Menu dropdown card at top right (x 440..696, y 116..488)
-            let menu_rect = Rect::new(440, 116, 256, 372);
+            // Kebab Overflow Menu dropdown card at top right (x 440..696, y 116..532)
+            let menu_rect = Rect::new(440, 116, 256, 416);
             if let Some(c) = draw_rounded_rect(x, y, menu_rect, R_CONTROL, THEME.surface_container_high, Some(THEME.border), 2) {
-                let items: [&[u8]; 8] = [
+                let items: [&[u8]; 9] = [
                     b"New Tab",
                     b"Bookmarks",
                     b"History",
                     b"Downloads",
+                    b"Settings",
                     b"Tools",
                     b"Reload Page",
                     b"Save Page",
@@ -7108,7 +7245,7 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
                     if let Some(px) = text_px(x, y, 464, item_y, 1, item, THEME.on_surface, c, false) {
                         return Some(px);
                     }
-                    if idx < 7 && y == item_y + 30 {
+                    if idx < 8 && y == item_y + 30 {
                         return Some(THEME.outline_variant);
                     }
                 }
@@ -7542,9 +7679,14 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
         return Tap::Redraw;
     }
 
-    // Reload Button
+    // Reload / Stop Button
     if RELOAD_BTN.contains(x, y) {
-        app.reload();
+        let _ = std::audio_haptic_click();
+        if app.is_loading() {
+            app.stop();
+        } else {
+            app.reload();
+        }
         return Tap::Redraw;
     }
 
@@ -7821,7 +7963,7 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
     // Handle Active Overlays Interactions
     match app.overlay {
         SheetOverlay::Menu => {
-            if x >= 440 && x <= 696 && y >= 116 && y <= 488 {
+            if x >= 440 && x <= 696 && y >= 116 && y <= 532 {
                 // WHY the row is the item's own height: the menu's items
                 // are forty-four pixels apart, and a hit test that used
                 // forty-eight put the top of an item in the row above it,
@@ -7848,16 +7990,17 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
                         app.refresh_downloads();
                         app.overlay = SheetOverlay::Downloads;
                     }
-                    4 => app.overlay = SheetOverlay::Tools,
-                    5 => app.reload(),
+                    4 => app.overlay = SheetOverlay::Settings,
+                    5 => app.overlay = SheetOverlay::Tools,
+                    6 => app.reload(),
                     // WHY the page is saved into the shared storage area: that is
                     // the one place every app may look, so a saved page is a
                     // document the platform's index holds and the file manager
                     // lists beside the photographs the camera wrote.
-                    6 => app.save_page_to_storage(),
+                    7 => app.save_page_to_storage(),
                     _ => app.overlay = SheetOverlay::None,
                 }
-                if row != 1 && row != 2 && row != 3 && row != 4 {
+                if row != 1 && row != 2 && row != 3 && row != 4 && row != 5 {
                     app.overlay = SheetOverlay::None;
                 }
                 // WHY the address field is released: a sheet opened from the
@@ -8060,6 +8203,22 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
                     return Tap::Redraw;
                 }
             }
+        }
+        SheetOverlay::Settings => {
+            if x >= 640 && y >= 120 && y <= 165 {
+                app.overlay = SheetOverlay::None;
+                return Tap::Redraw;
+            }
+            // Row 3: Open system settings (top = 220 + 3*116 = 568 .. + 100)
+            let top3 = 220 + 3 * 116;
+            if y >= top3 && y < top3 + 100 && x >= 24 && x <= W - 24 {
+                let _ = std::audio_haptic_click();
+                std::log("[BROWSER APP] Launching system settings...").ok();
+                let _ = std::app_launch("settings");
+                app.overlay = SheetOverlay::None;
+                return Tap::Redraw;
+            }
+            return Tap::Redraw;
         }
         SheetOverlay::TestFiles => {
             if x >= 640 && y >= 120 && y <= 165 {
@@ -8394,12 +8553,13 @@ fn handle_browser_key(app: &mut BrowserApp, key: std::InputKeyEvent) -> Dirty {
     if !key.pressed {
         return Dirty::None;
     }
-    // A tools sheet is dismissed the same way every other sheet is.
+    // A tools/settings sheet is dismissed the same way every other sheet is.
     if !app.address_focused
         && key.code == input_key_code::ESCAPE
         && matches!(
             app.overlay,
-            SheetOverlay::Tools
+            SheetOverlay::Settings
+                | SheetOverlay::Tools
                 | SheetOverlay::UploadPicker
                 | SheetOverlay::SpeedTest
                 | SheetOverlay::CompatibilityLab
@@ -8473,6 +8633,26 @@ fn handle_browser_key(app: &mut BrowserApp, key: std::InputKeyEvent) -> Dirty {
     }
 
     if !app.address_focused {
+        if key.code == input_key_code::ESCAPE {
+            if app.is_loading() {
+                app.stop();
+                return Dirty::All;
+            }
+            if app.overlay != SheetOverlay::None {
+                app.overlay = SheetOverlay::None;
+                return Dirty::All;
+            }
+        }
+        if app.overlay == SheetOverlay::None {
+            if key.code == input_key_code::ARROW_LEFT {
+                app.go_back();
+                return Dirty::All;
+            }
+            if key.code == input_key_code::ARROW_RIGHT {
+                app.go_forward();
+                return Dirty::All;
+            }
+        }
         return Dirty::None;
     }
     match key.code {

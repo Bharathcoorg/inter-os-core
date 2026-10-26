@@ -6979,6 +6979,7 @@ pub fn dev_launch_app(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
         "org.interos.notes" | "notes" | "app_notes" => crate::task::user::spawn_app_notes(parent),
         "org.interos.agentmanager" | "agentmanager" | "agent_manager" | "app_agent_manager" => crate::task::user::spawn_app_agent_manager(parent),
         "org.interos.video_player" | "video_player" | "video" | "app_video_player" => crate::task::user::spawn_app_video_player(parent),
+        "org.interos.webview_demo" | "webview_demo" | "webview" | "app_webview_demo" => crate::task::user::spawn_app_webview_demo(parent),
         "org.interos.compositor" | "compositor" | "org.interos.launcher" | "launcher" => {
             return Err(SyscallResult::PermissionDenied);
         }
@@ -7254,6 +7255,12 @@ fn launch_registered_package(app_id: &str, parent_id: TaskId) -> Result<crate::t
         | "video"
         | "app_video_player" => {
             crate::task::user::spawn_app_video_player(parent_id)
+        }
+        "org.interos.webview_demo"
+        | "webview_demo"
+        | "webview"
+        | "app_webview_demo" => {
+            crate::task::user::spawn_app_webview_demo(parent_id)
         }
         _ => {
             crate::serial_println!("[APP_LAUNCH DEBUG] unknown app_id: '{}'", app_id);
