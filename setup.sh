@@ -24,9 +24,10 @@ echo "      Detected: $(cargo --version)"
 
 # 2. Add Cross-Compilation Targets
 echo "[2/5] Configuring bare-metal cross-compilation targets..."
+rustup target add x86_64-unknown-none 2>/dev/null || true
 rustup target add riscv64gc-unknown-none-elf 2>/dev/null || true
 rustup target add aarch64-unknown-none 2>/dev/null || true
-echo "      Targets verified (riscv64gc-unknown-none-elf, aarch64-unknown-none)"
+echo "      Targets verified (x86_64-unknown-none, riscv64gc-unknown-none-elf, aarch64-unknown-none)"
 
 # 3. Check Python 3
 echo "[3/5] Checking Python runtime..."

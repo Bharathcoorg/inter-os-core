@@ -72,3 +72,12 @@ emulator/fhd.html
 tools/launch_screen.py
 tools/launch_screen.ps1
 
+# Temporary screenshots & frame dumps
+*.png
+emulator/live_frame*.png
+emulator/frame_section_*.png
+!emulator/apple-touch-icon.png
+!emulator/favicon-*.png
+!emulator/icon-*.png
+.pytest_cache/
+

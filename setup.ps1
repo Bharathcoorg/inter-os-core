@@ -30,9 +30,10 @@ Write-Host "      Detected: $rustVersion" -ForegroundColor Green
 
 # 2. Ensure Cross-Compilation Targets
 Write-Host "[2/5] Configuring bare-metal cross-compilation targets..." -ForegroundColor Yellow
+rustup target add x86_64-unknown-none 2>$null
 rustup target add riscv64gc-unknown-none-elf 2>$null
 rustup target add aarch64-unknown-none 2>$null
-Write-Host "      Targets verified (riscv64gc-unknown-none-elf, aarch64-unknown-none)" -ForegroundColor Green
+Write-Host "      Targets verified (x86_64-unknown-none, riscv64gc-unknown-none-elf, aarch64-unknown-none)" -ForegroundColor Green
 
 # 3. Check Python 3
 Write-Host "[3/5] Checking Python runtime for Device Studio..." -ForegroundColor Yellow
