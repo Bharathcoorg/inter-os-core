@@ -1293,6 +1293,9 @@ pub struct DialerApp {
     pub ringtone: [u8; 64],
     /// How many bytes of the ringtone's name are meaningful.
     pub ringtone_len: usize,
+    /// Absolute path of the confirmed ringtone document.
+    pub ringtone_path: [u8; 128],
+    pub ringtone_path_len: usize,
     /// Which view of the settings surface is showing.
     pub settings_view: SettingsView,
     /// The audio documents the platform's index holds, which the ringtone
@@ -1356,6 +1359,8 @@ impl DialerApp {
             contacts_fav_only: false,
             ringtone: [0u8; 64],
             ringtone_len: 0,
+            ringtone_path: [0u8; 128],
+            ringtone_path_len: 0,
             settings_view: SettingsView::Main,
             ringtone_choices: [RingtoneChoice::EMPTY; RINGTONE_CHOICE_CAP],
             ringtone_choice_count: 0,
@@ -1399,7 +1404,80 @@ impl DialerApp {
         let len = name.len().min(self.ringtone.len());
         self.ringtone[..len].copy_from_slice(&name.as_bytes()[..len]);
         self.ringtone_len = len;
+        let plen = record.path.len().min(self.ringtone_path.len());
+        self.ringtone_path[..plen].copy_from_slice(&record.path.as_bytes()[..plen]);
+        self.ringtone_path_len = plen;
         std::log("[DIALER APP] The ringtone slot names a document the platform holds.").ok();
+    }
+
+    /// Plays the currently configured ringtone or fallback alert tone.
+    pub fn play_ringtone(&mut self) {
+        if self.ringtone_path_len > 0 {
+            if let Ok(path_str) = core::str::from_utf8(&self.ringtone_path[..self.ringtone_path_len]) {
+                if let Ok(cap) = std::capability_handle(std::cap_type::AUDIO_STREAM, 0) {
+                    if std::audio_stream_open(cap, std::AUDIO_STREAM_FORMAT_NATIVE).is_ok() {
+                        if let Ok(fd) = std::fs_open(path_str, std::FS_READ) {
+                            let mut buf = [0u8; 4096];
+                            for _ in 0..16 {
+                                match std::fs_read(fd, &mut buf) {
+                                    Ok(0) => break,
+                                    Ok(n) => {
+                                        let _ = std::audio_stream_write(cap, &buf[..n]);
+                                    }
+                                    Err(_) => break,
+                                }
+                            }
+                            let _ = std::fs_close(fd);
+                            std::log("[DIALER APP] Playing configured ringtone over audio stream.").ok();
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+        if std::audio_play_tone(880).is_ok() {
+            let _ = std::audio_silence();
+            std::log("[DIALER APP] Emitted fallback ringtone alert tone.").ok();
+        } else {
+            std::log("[DIALER APP] Ringtone playback skipped: audio service unavailable.").ok();
+        }
+    }
+
+    /// Plays notification audio feedback.
+    pub fn play_notification(&mut self) {
+        if let Ok(cap) = std::capability_handle(std::cap_type::AUDIO_STREAM, 0) {
+            if std::audio_stream_open(cap, std::AUDIO_STREAM_FORMAT_NATIVE).is_ok() {
+                let mut pcm = [0i16; 512];
+                for i in 0..256 {
+                    let val = if (i / 16) % 2 == 0 { 4000i16 } else { -4000i16 };
+                    pcm[i * 2] = val;
+                    pcm[i * 2 + 1] = val;
+                }
+                let bytes = unsafe {
+                    core::slice::from_raw_parts(pcm.as_ptr() as *const u8, pcm.len() * 2)
+                };
+                let _ = std::audio_stream_write(cap, bytes);
+                std::log("[DIALER APP] Notification chime streamed over audio output.").ok();
+                return;
+            }
+        }
+        if std::audio_play_tone(1046).is_ok() {
+            let _ = std::audio_silence();
+            std::log("[DIALER APP] Notification chime tone played.").ok();
+        } else {
+            std::log("[DIALER APP] Notification chime skipped: audio service unavailable.").ok();
+        }
+    }
+
+    /// Simulates an incoming phone call from caller.
+    pub fn simulate_incoming_call(&mut self, caller: &[u8]) {
+        self.state = CallState::Ringing;
+        self.active_len = 0;
+        let n = caller.len().min(self.active_number.len());
+        self.active_number[..n].copy_from_slice(&caller[..n]);
+        self.active_len = n;
+        self.play_ringtone();
+        std::log("[DIALER APP] Incoming call simulated; ringing state active.").ok();
     }
 
     /// Plays dual-tone multi-frequency acoustic feedback for a pressed keypad digit.
@@ -4555,6 +4633,7 @@ fn handle_ringtone_picker_tap(dialer: &mut DialerApp, _x: usize, y: usize) -> Ta
     let path = &choice.path[..choice.path_len];
     match dialer.set_ringtone(path) {
         Ok(()) => {
+            dialer.play_ringtone();
             dialer.settings_view = SettingsView::Main;
             dialer.refresh_settings_values();
             std::log("[DIALER APP] The device's ringtone slot now names the chosen document.")
@@ -5115,6 +5194,22 @@ pub extern "C" fn _start() -> ! {
                     render_dialer_band(surface, &dialer, DISPLAY_Y0, DISPLAY_Y1);
                     render_dialer_band(surface, &dialer, ACTION_Y0, ACTION_Y1);
                     let _ = std::surface_flip();
+                }
+                let mut sim_caller = [0u8; 32];
+                if let Ok(n) = std::settings_get("dialer.simulate_incoming", &mut sim_caller) {
+                    if n > 0 && n <= sim_caller.len() {
+                        let _ = std::settings_set("dialer.simulate_incoming", b"");
+                        dialer.simulate_incoming_call(&sim_caller[..n]);
+                        render_dialer_ui(surface, &dialer);
+                        let _ = std::surface_flip();
+                    }
+                }
+                let mut sim_notif = [0u8; 8];
+                if let Ok(n) = std::settings_get("dialer.simulate_notification", &mut sim_notif) {
+                    if n > 0 {
+                        let _ = std::settings_set("dialer.simulate_notification", b"");
+                        dialer.play_notification();
+                    }
                 }
                 // WHY there is no work here any more: the tick used to advance
                 // a call-duration counter the app kept itself. The platform's

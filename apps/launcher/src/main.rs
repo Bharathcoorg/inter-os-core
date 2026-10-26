@@ -1101,8 +1101,8 @@ fn probe_system_ai_status() -> launcher::search::AiEmbeddingStatus {
             }
             let mut parts = line.split(|&b| b == b'|');
             let Some(id_bytes) = parts.next() else { continue };
-            let Some(state_bytes) = parts.next() else { continue };
             let Some(abi_bytes) = parts.next() else { continue };
+            let Some(state_bytes) = parts.next() else { continue };
 
             let Ok(id_str) = core::str::from_utf8(id_bytes) else { continue };
             let Ok(id) = id_str.trim().parse::<u8>() else { continue };
@@ -4974,6 +4974,31 @@ pub extern "C" fn _start() -> ! {
                                     break;
                                 }
 
+                                // Launch application
+                                let target_desc = resolve_app_at_touch(&state, input.x, input.y)
+                                    .map(|s| {
+                                        let mut buf = [0u8; 32];
+                                        let len = s.len().min(32);
+                                        buf[..len].copy_from_slice(&s.as_bytes()[..len]);
+                                        (buf, len)
+                                    });
+                                if let Some((buf, len)) = target_desc {
+                                    if let Ok(target_app) = core::str::from_utf8(&buf[..len]) {
+                                        match std::app_launch(target_app) {
+                                            Ok(task_id) => {
+                                                state.push_recent(target_app, task_id);
+                                                state.active_child = Some(task_id);
+                                                std::log("[LAUNCHER] Launched application from real touch input.").ok();
+                                                break;
+                                            }
+                                            Err(_) => {
+                                                std::log("[LAUNCHER] Application launch rejected by kernel.").ok();
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+
                                 // Today card Row 1 tap: opens Notifications view
                                 if (385..505).contains(&y) && (60..680).contains(&x) {
                                     state.current_view = ViewMode::Notifications;
@@ -5008,31 +5033,6 @@ pub extern "C" fn _start() -> ! {
                                     };
                                     while std::input_event_poll(&mut drain).is_ok() {}
                                     break;
-                                }
-
-                                // Launch application
-                                let target_desc = resolve_app_at_touch(&state, input.x, input.y)
-                                    .map(|s| {
-                                        let mut buf = [0u8; 32];
-                                        let len = s.len().min(32);
-                                        buf[..len].copy_from_slice(&s.as_bytes()[..len]);
-                                        (buf, len)
-                                    });
-                                if let Some((buf, len)) = target_desc {
-                                    if let Ok(target_app) = core::str::from_utf8(&buf[..len]) {
-                                        match std::app_launch(target_app) {
-                                            Ok(task_id) => {
-                                                state.push_recent(target_app, task_id);
-                                                state.active_child = Some(task_id);
-                                                std::log("[LAUNCHER] Launched application from real touch input.").ok();
-                                                break;
-                                            }
-                                            Err(_) => {
-                                                std::log("[LAUNCHER] Application launch rejected by kernel.").ok();
-                                                break;
-                                            }
-                                        }
-                                    }
                                 }
 
                                 // Apps dock tile tap (Slot 5: row 1, col 2): opens App Drawer

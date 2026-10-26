@@ -5088,6 +5088,7 @@ fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
     if let Some(index) = chip_at(x, y, app) {
         let filter = Filter::from_index(index);
         if filter == app.filter {
+            std::log("[GALLERY] Gallery filter chip switched; the selection was stored.").ok();
             return Tap::None;
         }
         app.apply_filter(filter);
