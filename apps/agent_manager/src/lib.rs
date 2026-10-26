@@ -875,6 +875,30 @@ pub enum ModelClassification {
 /// The minimum size (1 MiB) required for real model weights.
 pub const MIN_WEIGHTS_SIZE_BYTES: u64 = 1024 * 1024;
 
+/// The lifecycle stages of an on-device model candidate.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ProbeStage {
+    /// File candidate discovered in model directory.
+    Discovered,
+    /// File header and minimum size validated.
+    Validated,
+    /// Model runtime service is active and bound.
+    Loaded,
+    /// Platform test suite passed for model type.
+    Tested,
+}
+
+impl ProbeStage {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Discovered => "DISCOVERED",
+            Self::Validated => "VALIDATED",
+            Self::Loaded => "LOADED",
+            Self::Tested => "TESTED",
+        }
+    }
+}
+
 /// A measurement of the model's weights on the device.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct ModelInventory {
@@ -888,6 +912,10 @@ pub struct ModelInventory {
     pub has_embedding_weights: bool,
     /// Whether a generative-weights file was among the entries.
     pub has_generative_weights: bool,
+    /// Size of embedding weights in KB if found.
+    pub embedding_size_kb: u64,
+    /// Size of generative weights in KB if found.
+    pub generative_size_kb: u64,
 }
 
 impl ModelInventory {
@@ -919,6 +947,8 @@ impl ModelInventory {
                 placeholders: 0,
                 has_embedding_weights: false,
                 has_generative_weights: false,
+                embedding_size_kb: 0,
+                generative_size_kb: 0,
             };
         }
 
@@ -926,6 +956,8 @@ impl ModelInventory {
         let mut placeholders = 0u16;
         let mut has_embedding_weights = false;
         let mut has_generative_weights = false;
+        let mut embedding_size_kb = 0u64;
+        let mut generative_size_kb = 0u64;
         let mut any_listed = false;
         let mut any_refused = false;
 
@@ -984,10 +1016,12 @@ impl ModelInventory {
 
                         if contains_ci(name, b"embed") {
                             has_embedding_weights = true;
+                            embedding_size_kb = size / 1024;
                         }
                         if contains_ci(name, b"gemma") || contains_ci(name, b"gen-") || contains_ci(name, b"gguf")
                         {
                             has_generative_weights = true;
+                            generative_size_kb = size / 1024;
                         }
                     }
                 }
@@ -1012,6 +1046,36 @@ impl ModelInventory {
             placeholders,
             has_embedding_weights,
             has_generative_weights,
+            embedding_size_kb,
+            generative_size_kb,
+        }
+    }
+
+    /// Evaluates the lifecycle stage of on-device embedding weights.
+    pub fn embedding_stage(&self, services: &ServiceRegistry) -> Option<ProbeStage> {
+        if !self.has_embedding_weights {
+            return None;
+        }
+        if services.contains_inference_runtime() {
+            Some(ProbeStage::Loaded)
+        } else if self.embedding_size_kb >= 1024 {
+            Some(ProbeStage::Validated)
+        } else {
+            Some(ProbeStage::Discovered)
+        }
+    }
+
+    /// Evaluates the lifecycle stage of on-device generative weights.
+    pub fn generative_stage(&self, services: &ServiceRegistry) -> Option<ProbeStage> {
+        if !self.has_generative_weights {
+            return None;
+        }
+        if services.contains_inference_runtime() {
+            Some(ProbeStage::Loaded)
+        } else if self.generative_size_kb >= 1024 {
+            Some(ProbeStage::Validated)
+        } else {
+            Some(ProbeStage::Discovered)
         }
     }
 }
@@ -1405,6 +1469,200 @@ impl DeviceState {
             packages: PackageRegistry::measure(),
             services: ServiceRegistry::measure(),
         }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// System telemetry, agent runtime and persistence
+// -----------------------------------------------------------------------------
+
+/// Physical RAM telemetry returned from the microkernel.
+#[derive(Clone, Copy, Debug)]
+pub struct RuntimeDiagnostics {
+    pub ram_total_kb: u64,
+    pub ram_used_kb: u64,
+    pub ram_free_kb: u64,
+    pub has_ram_telemetry: bool,
+}
+
+impl RuntimeDiagnostics {
+    pub fn measure() -> Self {
+        if let Ok(telem) = interos_std::memory_telemetry() {
+            Self {
+                ram_total_kb: telem.total_bytes / 1024,
+                ram_used_kb: telem.used_bytes / 1024,
+                ram_free_kb: telem.free_bytes / 1024,
+                has_ram_telemetry: true,
+            }
+        } else {
+            Self {
+                ram_total_kb: 0,
+                ram_used_kb: 0,
+                ram_free_kb: 0,
+                has_ram_telemetry: false,
+            }
+        }
+    }
+}
+
+/// An explicit system tool granted to a bounded agent execution runtime.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AgentTool {
+    Calculator,
+    CalendarClock,
+    StorageStats,
+    SettingsQuery,
+    CapabilityCheck,
+}
+
+impl AgentTool {
+    pub const ALL: [AgentTool; 5] = [
+        AgentTool::Calculator,
+        AgentTool::CalendarClock,
+        AgentTool::StorageStats,
+        AgentTool::SettingsQuery,
+        AgentTool::CapabilityCheck,
+    ];
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            AgentTool::Calculator => "Calculator",
+            AgentTool::CalendarClock => "Calendar / RTC",
+            AgentTool::StorageStats => "Storage stats",
+            AgentTool::SettingsQuery => "Settings query",
+            AgentTool::CapabilityCheck => "Capability check",
+        }
+    }
+
+    pub const fn description(self) -> &'static str {
+        match self {
+            AgentTool::Calculator => "Integer arithmetic computation",
+            AgentTool::CalendarClock => "Query hardware RTC clock",
+            AgentTool::StorageStats => "Probe disk driver capacity",
+            AgentTool::SettingsQuery => "Read search.dimension key",
+            AgentTool::CapabilityCheck => "Probe VFS read authority",
+        }
+    }
+}
+
+/// The outcome of a bounded agent tool execution calling real system APIs.
+#[derive(Clone, Copy, Debug)]
+pub struct AgentToolOutcome {
+    pub tool: AgentTool,
+    pub output: [u8; 64],
+    pub output_len: u8,
+    pub ok: bool,
+}
+
+impl AgentToolOutcome {
+    pub fn execute(tool: AgentTool) -> Self {
+        let mut output = [0u8; 64];
+        let output_len;
+        let mut ok = false;
+
+        match tool {
+            AgentTool::Calculator => {
+                let val: u32 = (1024 * 768) / 256;
+                output_len = format_u32(val, &mut output);
+                ok = true;
+            }
+            AgentTool::CalendarClock => {
+                let mut time_buf = [0u8; 64];
+                if let Ok(n) = interos_std::rtc_get_time(&mut time_buf) {
+                    let copy_len = n.min(output.len());
+                    output[..copy_len].copy_from_slice(&time_buf[..copy_len]);
+                    output_len = copy_len;
+                    ok = true;
+                } else {
+                    let err = b"RTC unavailable";
+                    output[..err.len()].copy_from_slice(err);
+                    output_len = err.len();
+                }
+            }
+            AgentTool::StorageStats => {
+                if let Ok(bytes) = interos_std::storage_query() {
+                    let kb = bytes / 1024;
+                    let n = format_u32(kb as u32, &mut output);
+                    let suffix = b" KB";
+                    output[n..n + suffix.len()].copy_from_slice(suffix);
+                    output_len = n + suffix.len();
+                    ok = true;
+                } else {
+                    let err = b"Storage unavailable";
+                    output[..err.len()].copy_from_slice(err);
+                    output_len = err.len();
+                }
+            }
+            AgentTool::SettingsQuery => {
+                let mut buf = [0u8; 32];
+                if let Ok(n) = interos_std::settings_get("search.dimension", &mut buf) {
+                    if n > 0 {
+                        let take = n.min(60);
+                        output[..take].copy_from_slice(&buf[..take]);
+                        output_len = take;
+                        ok = true;
+                    } else {
+                        let err = b"search.dimension: none";
+                        output[..err.len()].copy_from_slice(err);
+                        output_len = err.len();
+                    }
+                } else {
+                    let err = b"Settings query refused";
+                    output[..err.len()].copy_from_slice(err);
+                    output_len = err.len();
+                }
+            }
+            AgentTool::CapabilityCheck => {
+                if interos_std::cap_lookup(interos_std::cap_type::FILE_SYSTEM_READ, 0).is_ok() {
+                    let msg = b"VFS read held";
+                    output[..msg.len()].copy_from_slice(msg);
+                    output_len = msg.len();
+                    ok = true;
+                } else {
+                    let msg = b"VFS read not held";
+                    output[..msg.len()].copy_from_slice(msg);
+                    output_len = msg.len();
+                }
+            }
+        }
+
+        Self {
+            tool,
+            output,
+            output_len: output_len as u8,
+            ok,
+        }
+    }
+
+    pub fn text(&self) -> &str {
+        core::str::from_utf8(&self.output[..self.output_len as usize]).unwrap_or("")
+    }
+}
+
+/// Loads the user's preferred selected provider index from app private storage.
+pub fn load_saved_provider() -> Option<usize> {
+    let mut buf = [0u8; 1];
+    if let Ok(fd) = interos_std::app_storage_open("prefs.bin", 1) {
+        if let Ok(n) = interos_std::fs_read(fd, &mut buf) {
+            let _ = interos_std::fs_close(fd);
+            if n > 0 && (buf[0] as usize) < PROVIDERS.len() {
+                return Some(buf[0] as usize);
+            }
+        }
+        let _ = interos_std::fs_close(fd);
+    }
+    None
+}
+
+/// Persists the user's preferred selected provider index to app private storage.
+pub fn save_preferred_provider(index: usize) {
+    if index >= PROVIDERS.len() {
+        return;
+    }
+    let buf = [index as u8];
+    if let Ok(fd) = interos_std::app_storage_open("prefs.bin", 2) {
+        let _ = interos_std::fs_write(fd, &buf);
+        let _ = interos_std::fs_close(fd);
     }
 }
 
@@ -2316,6 +2574,8 @@ mod tests {
                     placeholders: 0,
                     has_embedding_weights: false,
                     has_generative_weights: false,
+                    embedding_size_kb: 0,
+                    generative_size_kb: 0,
                 },
                 packages: PackageRegistry {
                     status: ProbeStatus::Listed,
@@ -2388,6 +2648,8 @@ mod tests {
                 placeholders: 0,
                 has_embedding_weights: false,
                 has_generative_weights: false,
+                embedding_size_kb: 0,
+                generative_size_kb: 0,
             },
             packages: PackageRegistry {
                 status: ProbeStatus::Listed,
@@ -2431,6 +2693,8 @@ mod tests {
                 placeholders: 0,
                 has_embedding_weights: true,
                 has_generative_weights: true,
+                embedding_size_kb: 1024,
+                generative_size_kb: 1024,
             },
             packages: PackageRegistry {
                 status: ProbeStatus::Listed,
@@ -2471,6 +2735,8 @@ mod tests {
                 placeholders: 0,
                 has_embedding_weights: false,
                 has_generative_weights: false,
+                embedding_size_kb: 0,
+                generative_size_kb: 0,
             },
             packages: PackageRegistry {
                 status: ProbeStatus::Refused,
@@ -2515,6 +2781,8 @@ mod tests {
                 placeholders: 0,
                 has_embedding_weights: false,
                 has_generative_weights: false,
+                embedding_size_kb: 0,
+                generative_size_kb: 0,
             },
             packages: PackageRegistry {
                 status: ProbeStatus::Listed,
@@ -2754,5 +3022,42 @@ mod tests {
             ModelInventory::classify(b"model.gguf", 10 * 1024 * 1024, Some(b"GGUF")),
             ModelClassification::Weights
         );
+    }
+
+    #[test]
+    fn agent_tools_execute_bounded_runtime() {
+        let calc = AgentToolOutcome::execute(AgentTool::Calculator);
+        assert!(calc.ok);
+        assert_eq!(calc.text(), "3072");
+
+        let probe = AgentToolOutcome::execute(AgentTool::CapabilityCheck);
+        assert!(!probe.text().is_empty());
+    }
+
+    #[test]
+    fn probe_stages_derive_from_inventory_and_services() {
+        let inv = ModelInventory {
+            status: ModelProbeStatus::Listed,
+            entries: 1,
+            placeholders: 0,
+            has_embedding_weights: true,
+            has_generative_weights: true,
+            embedding_size_kb: 2048,
+            generative_size_kb: 512,
+        };
+        let srv = ServiceRegistry {
+            status: ProbeStatus::Listed,
+            count: 0,
+            highest_id: 0,
+            entries: [ServiceEntry {
+                id: 0,
+                state: ServiceState::Unknown,
+                abi_version: 0,
+                age_ticks: 0,
+                failures: 0,
+            }; MAX_SERVICES],
+        };
+        assert_eq!(inv.embedding_stage(&srv), Some(ProbeStage::Validated));
+        assert_eq!(inv.generative_stage(&srv), Some(ProbeStage::Discovered));
     }
 }

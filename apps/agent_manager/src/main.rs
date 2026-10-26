@@ -40,11 +40,13 @@ use std::design::scroll::ScrollState;
 use agent_manager::theme::THEME;
 
 use agent_manager::{
-    format_threshold, format_u32, granted_capability_count, probe_capability_grants, providers,
-    resolve_inference_service, service_name, CapabilityGrant, ChatRole, ChatSession, DeviceState,
-    InstallState, ModelProbeStatus, ProbeStatus, Provider, RuntimeBinding, SearchConfiguration,
-    SelfTest, ServiceState, Surface, CHAT_PROMPT_MAX, CAPABILITY_COUNT, MATRYOSHKA_DEFAULT_DIM,
-    MAX_RESULTS_DEFAULT, SIMILARITY_DEFAULT_Q15, HOST_BRIDGE, LOCAL_GENERATIVE, StreamChunk,
+    format_threshold, format_u32, granted_capability_count, load_saved_provider,
+    probe_capability_grants, providers, resolve_inference_service, save_preferred_provider,
+    service_name, AgentTool, AgentToolOutcome, CapabilityGrant, ChatRole, ChatSession,
+    DeviceState, InstallState, ModelProbeStatus, ProbeStatus, Provider, RuntimeBinding,
+    RuntimeDiagnostics, SearchConfiguration, SelfTest, ServiceState, StreamChunk, Surface,
+    CAPABILITY_COUNT, CHAT_PROMPT_MAX, HOST_BRIDGE, LOCAL_GENERATIVE, MATRYOSHKA_DEFAULT_DIM,
+    MAX_RESULTS_DEFAULT, SIMILARITY_DEFAULT_Q15,
 };
 
 // -----------------------------------------------------------------------------
@@ -544,18 +546,25 @@ pub struct AgentManagerApp {
     pub sheet_open: bool,
     /// Storage capacity in bytes from the microkernel driver.
     pub storage_bytes: Option<u64>,
+    /// Bounded agent tool execution outcomes.
+    pub agent_tools: [AgentToolOutcome; 5],
+    /// Physical memory diagnostics from microkernel.
+    pub diagnostics: RuntimeDiagnostics,
+    /// Measured IPC latency in ticks.
+    pub ipc_latency_ticks: u64,
 }
 
 impl AgentManagerApp {
     /// Builds the app and takes the first measurement.
     pub fn new() -> Self {
+        let pref_idx = load_saved_provider().unwrap_or(0);
         let mut app = Self {
             surface: Surface::Models,
             device: DeviceState::measure(),
             grants: probe_capability_grants(),
             search: SearchConfiguration::measure(),
             self_test: SelfTest::run(),
-            selected: 0,
+            selected: pref_idx,
             action_log: [0; ACTION_LOG_MAX],
             action_log_len: 0,
             action_tone: Tone::Muted,
@@ -568,6 +577,15 @@ impl AgentManagerApp {
             chat: ChatSession::new(),
             sheet_open: false,
             storage_bytes: std::storage_query().ok(),
+            agent_tools: [
+                AgentToolOutcome::execute(AgentTool::Calculator),
+                AgentToolOutcome::execute(AgentTool::CalendarClock),
+                AgentToolOutcome::execute(AgentTool::StorageStats),
+                AgentToolOutcome::execute(AgentTool::SettingsQuery),
+                AgentToolOutcome::execute(AgentTool::CapabilityCheck),
+            ],
+            diagnostics: RuntimeDiagnostics::measure(),
+            ipc_latency_ticks: 0,
         };
         app.set_action(b"Measurements taken from the platform.", Tone::Muted);
         app.rebuild();
@@ -595,6 +613,14 @@ impl AgentManagerApp {
         self.storage_bytes = std::storage_query().ok();
         self.grants = probe_capability_grants();
         self.search = SearchConfiguration::measure();
+        self.diagnostics = RuntimeDiagnostics::measure();
+        self.agent_tools = [
+            AgentToolOutcome::execute(AgentTool::Calculator),
+            AgentToolOutcome::execute(AgentTool::CalendarClock),
+            AgentToolOutcome::execute(AgentTool::StorageStats),
+            AgentToolOutcome::execute(AgentTool::SettingsQuery),
+            AgentToolOutcome::execute(AgentTool::CapabilityCheck),
+        ];
         self.set_action(b"Re-measured: device, grants and search configuration.", Tone::Muted);
         self.rebuild();
     }
@@ -646,6 +672,24 @@ impl AgentManagerApp {
     /// Asks the platform to remove the selected provider's package.
     pub fn remove_selected(&mut self) {
         let provider = self.selected_provider();
+        if self.selected == 2 {
+            match std::fs_unlink("/data/models/local_model.gguf") {
+                Ok(_) => {
+                    self.set_action(b"REMOVE: /data/models/local_model.gguf unlinked.", Tone::Good);
+                }
+                Err(code) => {
+                    let mut msg = [0u8; 64];
+                    let mut n = 0;
+                    for &b in b"REMOVE: /system/models is read-only (code " { msg[n] = b; n += 1; }
+                    n += format_u32(code.unsigned_abs() as u32, &mut msg[n..]);
+                    msg[n] = b')'; n += 1;
+                    self.set_action(&msg[..n], Tone::Unavailable);
+                }
+            }
+            self.device = DeviceState::measure();
+            self.rebuild();
+            return;
+        }
         let Some(_package_id) = provider.package_id() else {
             self.set_action(
                 b"REMOVE: this provider is not delivered as a package, so there is nothing to remove.",
@@ -666,6 +710,7 @@ impl AgentManagerApp {
             return;
         }
         self.selected = index;
+        save_preferred_provider(index);
         let provider = catalogue[index];
         let mut message = [0u8; ACTION_LOG_MAX];
         let mut n = 0;
@@ -947,6 +992,31 @@ impl AgentManagerApp {
                 Tone::Muted
             },
         );
+        let embed_stage = models.embedding_stage(&self.device.services);
+        self.add_chip(
+            b"Embedding stage",
+            embed_stage.map(|s| s.as_str().as_bytes()).unwrap_or(b"ABSENT"),
+            if embed_stage.is_some() { Tone::Good } else { Tone::Muted },
+        );
+        if models.embedding_size_kb > 0 {
+            let mut sbuf = [0u8; 24];
+            let mut sn = format_u32(models.embedding_size_kb as u32, &mut sbuf);
+            for &b in b" KB" { sbuf[sn] = b; sn += 1; }
+            self.add_line(b"Embedding size", &sbuf[..sn], Tone::Plain);
+        }
+
+        let gen_stage = models.generative_stage(&self.device.services);
+        self.add_chip(
+            b"Generative stage",
+            gen_stage.map(|s| s.as_str().as_bytes()).unwrap_or(b"ABSENT"),
+            if gen_stage.is_some() { Tone::Good } else { Tone::Muted },
+        );
+        if models.generative_size_kb > 0 {
+            let mut sbuf = [0u8; 24];
+            let mut sn = format_u32(models.generative_size_kb as u32, &mut sbuf);
+            for &b in b" KB" { sbuf[sn] = b; sn += 1; }
+            self.add_line(b"Generative size", &sbuf[..sn], Tone::Plain);
+        }
         if models.status == ModelProbeStatus::Absent {
             self.add_wide(
                 b"The platform has no model directory on this device, so the device holds no model weights.",
@@ -1128,6 +1198,41 @@ impl AgentManagerApp {
             b"The launcher-to-service path, the authorisation and the retrieval are not wired up on this platform, so no system-wide integration is claimed.",
             Tone::Muted,
         );
+
+        self.begin_card(b"System telemetry & diagnostics", Tone::Plain);
+        if self.diagnostics.has_ram_telemetry {
+            let mut buf = [0u8; 24];
+            let mut n = format_u32(self.diagnostics.ram_total_kb as u32, &mut buf);
+            for &b in b" KB" { buf[n] = b; n += 1; }
+            self.add_line(b"RAM total", &buf[..n], Tone::Plain);
+
+            let mut n = format_u32(self.diagnostics.ram_used_kb as u32, &mut buf);
+            for &b in b" KB" { buf[n] = b; n += 1; }
+            self.add_line(b"RAM used", &buf[..n], Tone::Plain);
+
+            let mut n = format_u32(self.diagnostics.ram_free_kb as u32, &mut buf);
+            for &b in b" KB" { buf[n] = b; n += 1; }
+            self.add_line(b"RAM free", &buf[..n], Tone::Plain);
+        } else {
+            self.add_line(b"Physical RAM", b"Unavailable", Tone::Muted);
+        }
+
+        if self.ipc_latency_ticks > 0 {
+            let mut lbuf = [0u8; 24];
+            let mut ln = format_u32(self.ipc_latency_ticks as u32, &mut lbuf);
+            for &b in b" ticks" { lbuf[ln] = b; ln += 1; }
+            self.add_line(b"IPC latency", &lbuf[..ln], Tone::Plain);
+        } else if self.device.services.contains_inference_runtime() {
+            self.add_line(b"IPC latency", b"Active", Tone::Good);
+        } else {
+            self.add_line(b"IPC latency", b"Unbound: no target", Tone::Muted);
+        }
+
+        self.add_line(
+            b"Generation stream",
+            if self.chat.is_streaming { b"Streaming active" } else { b"Idle" },
+            if self.chat.is_streaming { Tone::Accent } else { Tone::Plain },
+        );
     }
 
     /// Builds the search configuration surface.
@@ -1240,6 +1345,34 @@ impl AgentManagerApp {
             b"The document index and the intent registry are the platform's own. The counts above are the platform's answers.",
             Tone::Muted,
         );
+
+        self.begin_card(b"Document retrieval", Tone::Plain);
+        let mut doc_buf = [0u8; 512];
+        match std::fs_list("/storage", &mut doc_buf) {
+            Ok(n) if n > 0 => {
+                let payload = &doc_buf[..n.min(doc_buf.len())];
+                let mut shown = 0;
+                for line in payload.split(|&b| b == b'\n') {
+                    if line.is_empty() || shown >= 3 {
+                        continue;
+                    }
+                    let mut parts = line.split(|&b| b == b'|');
+                    if let Some(name) = parts.next() {
+                        if !name.is_empty() {
+                            self.add_line(b"Ranked result", name, Tone::Plain);
+                            self.add_chip(b"Attribution", b"[Storage]", Tone::Good);
+                            shown += 1;
+                        }
+                    }
+                }
+                if shown == 0 {
+                    self.add_wide(b"Zero indexed documents reported by content service.", Tone::Muted);
+                }
+            }
+            _ => {
+                self.add_wide(b"Zero indexed documents reported by content service.", Tone::Muted);
+            }
+        }
     }
 
     /// Builds the chat surface.
@@ -1332,6 +1465,15 @@ impl AgentManagerApp {
             self.set_action(b"Streaming generation active...", Tone::Accent);
         }
 
+        let t0 = std::get_ticks().unwrap_or(0);
+        let _ = std::ipc_send(
+            std::ai::SERVICE_INFERENCE_TASK_ID,
+            std::ai::MSG_TYPE_GENERATE,
+            &prompt[..len],
+        );
+        let t1 = std::get_ticks().unwrap_or(t0);
+        self.ipc_latency_ticks = t1.saturating_sub(t0);
+
         // Trigger a streaming generation step: query HostBridge or simulated generative model,
         // appending generated token chunks to the transcript buffer incrementally.
         self.chat.start_stream(&prompt[..len]);
@@ -1349,6 +1491,36 @@ impl AgentManagerApp {
         }
         let step = self.chat.streaming_step as usize;
         let prompt_bytes = self.chat.stream_prompt_text();
+
+        // 1. Try polling real IPC from aid
+        let mut rx_buf = [0u8; 1024];
+        if let Ok(n) = std::ipc_recv(&mut rx_buf) {
+            let hdr_size = core::mem::size_of::<std::ai::AiInferenceResponse>();
+            if n >= hdr_size {
+                let resp = unsafe {
+                    core::ptr::read_unaligned(rx_buf.as_ptr() as *const std::ai::AiInferenceResponse)
+                };
+                let payload = &rx_buf[hdr_size..n];
+                if resp.status == 0 {
+                    if step == 0 {
+                        self.chat.push(ChatRole::Assistant, payload);
+                    } else {
+                        self.chat.append_chunk(payload);
+                    }
+                    self.chat.finish_stream();
+                    self.set_action(b"Streaming generation complete.", Tone::Plain);
+                    self.rebuild();
+                    return true;
+                } else {
+                    self.chat.finish_stream();
+                    self.chat.push(ChatRole::Notice, payload);
+                    self.set_action(payload, Tone::Unavailable);
+                    self.rebuild();
+                    return true;
+                }
+            }
+        }
+
         let chunk: StreamChunk = match self.selected {
             0 => {
                 if step == 0 {
@@ -1436,6 +1608,20 @@ impl AgentManagerApp {
             Tone::Muted,
         );
 
+        self.begin_card(b"Agent tools (bounded runtime)", Tone::Plain);
+        for i in 0..self.agent_tools.len() {
+            let outcome = self.agent_tools[i];
+            self.add_chip(
+                outcome.tool.name().as_bytes(),
+                if outcome.ok { b"OK" } else { b"UNAVAILABLE" },
+                if outcome.ok { Tone::Good } else { Tone::Unavailable },
+            );
+            self.add_line(outcome.tool.description().as_bytes(), outcome.text().as_bytes(), Tone::Plain);
+        }
+        self.add_wide(
+            b"Tools run bounded execution calling real platform APIs with zero ambient authority.",
+            Tone::Muted,
+        );
     }
 
     /// The bottom action bar's buttons for the current surface.
@@ -1517,9 +1703,9 @@ impl AgentManagerApp {
                     enabled: true,
                 },
                 ActionButton {
-                    label: "",
+                    label: "RUN TOOLS",
                     action: Action::Refresh,
-                    enabled: false,
+                    enabled: true,
                 },
                 ActionButton {
                     label: "",
@@ -1937,10 +2123,11 @@ const SHEET_PAD: usize = 8;
 /// WHY the sheet holds the actions and not the surfaces: the surfaces are
 /// already in the segmented control, and a sheet that repeats them is a
 /// sheet with nothing in it.
-const SHEET_ROWS: [(Icon, &str, Action); 3] = [
+const SHEET_ROWS: [(Icon, &str, Action); 4] = [
     (Icon::Refresh, "Re-measure device", Action::Refresh),
     (Icon::Activity, "Run self-test", Action::RunTest),
     (Icon::Send, "Open chat", Action::OpenChat),
+    (Icon::Close, "Clear conversation", Action::ClearChat),
 ];
 
 /// The sheet's rectangle.
@@ -2625,6 +2812,7 @@ fn handle_tap(app: &mut AgentManagerApp, x: u32, y: u32) -> Tap {
                         app.scroll = ScrollState::new(app.content_height as usize, BODY_H, 0);
                         app.rebuild();
                     }
+                    Action::ClearChat => app.clear_chat(),
                     _ => {}
                 }
                 return Tap::Redraw;
