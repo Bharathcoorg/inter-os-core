@@ -956,13 +956,7 @@ impl ContactStore {
     /// Adds a contact. The durable list only gains it once the write is
     /// acknowledged; otherwise it lands in `unsaved` and the refusal is recorded.
     fn add(&mut self, name: &[u8], number: &[u8]) -> Result<(), i64> {
-        if name.is_empty() || number.is_empty() || self.next_id == 0 || self.next_id as usize > MAX_CONTACTS
-        {
-            return Err(-22);
-        }
-        let id = self.next_id;
-        let mut rec = ContactRecord::from_parts(id, name, number, false);
-        if !rec.valid() {
+        if name.is_empty() || number.is_empty() {
             return Err(-22);
         }
         if self.len as usize >= MAX_CONTACTS {
@@ -973,12 +967,44 @@ impl ContactStore {
             self.last_error = -28;
             return Err(-28);
         }
+        // WHY a free id is searched after the monotonic cursor runs out: the
+        // cursor only moves forward, so twelve saves over the life of the
+        // device exhausted it even after contacts were deleted, and ADD then
+        // refused forever with an empty-looking store. A deleted record's id
+        // is free, and the selection and editor are cleared on delete, so
+        // re-issuing it cannot collide with a live reference.
+        let id = if self.next_id != 0 && self.next_id as usize <= MAX_CONTACTS {
+            self.next_id
+        } else {
+            let mut free = 0u8;
+            for candidate in 1..=MAX_CONTACTS as u8 {
+                if !self.records[..self.len as usize]
+                    .iter()
+                    .any(|r| r.id == candidate)
+                {
+                    free = candidate;
+                    break;
+                }
+            }
+            if free == 0 {
+                self.state = ContactStoreState::Full;
+                self.last_error = -28;
+                return Err(-28);
+            }
+            free
+        };
+        let mut rec = ContactRecord::from_parts(id, name, number, false);
+        if !rec.valid() {
+            return Err(-22);
+        }
         // WHY the record is appended before the write: `persist` encodes the
         // durable list, so the new contact has to be in it for the write to mean
         // "this list, plus this contact, is now what storage holds".
         self.records[self.len as usize] = rec;
         self.len += 1;
-        self.next_id += 1;
+        if id == self.next_id {
+            self.next_id = self.next_id.saturating_add(1);
+        }
         match self.persist() {
             Ok(()) => Ok(()),
             Err(code) => {
@@ -1280,6 +1306,9 @@ pub struct DialerApp {
     /// does not know, and a lost timeout either duplicates a character or refuses
     /// one. "Same cell as last" is deterministic and needs no clock.
     pub editor_last_cell: Option<(usize, usize)>,
+    /// True when SAVE was pressed on an incomplete contact. Cleared on the
+    /// next keystroke or when the editor opens; drives the on-screen hint.
+    pub editor_error: bool,
     /// True when the Contacts list shows only starred contacts. Set by the dock's
     /// Favorites slot, so that slot opens something real rather than reporting
     /// that no store exists.
@@ -1356,6 +1385,7 @@ impl DialerApp {
             contact_sel: None,
             contact_edit: None,
             editor_last_cell: None,
+            editor_error: false,
             contacts_fav_only: false,
             ringtone: [0u8; 64],
             ringtone_len: 0,
@@ -1679,7 +1709,19 @@ impl DialerApp {
 
     /// Appends a dialed digit to the accumulator and plays its DTMF tone.
     pub fn input_digit(&mut self, digit: char) {
+        // WHY entry is frozen while a call is up: the keypad is a DTMF pad
+        // during a call, and appending the tones to the number on the card
+        // claimed the call's number had changed.
+        if self.state != CallState::Idle {
+            self.play_dtmf(digit);
+            return;
+        }
         if self.active_len < self.active_number.len() {
+            // WHY the last outcome is dropped on edit: a refusal caption is a
+            // fact about the number that was dialed. Once the person changes
+            // that number, leaving the caption underneath it claims the new
+            // number was the one refused. An in-call number is not editable.
+            self.outcome = CallOutcome::Idle;
             self.active_number[self.active_len] = digit as u8;
             self.active_len += 1;
             self.play_dtmf(digit);
@@ -1688,7 +1730,13 @@ impl DialerApp {
 
     /// Removes the last entered digit.
     pub fn backspace(&mut self) {
+        if self.state != CallState::Idle {
+            return;
+        }
         if self.active_len > 0 {
+            if self.state == CallState::Idle {
+                self.outcome = CallOutcome::Idle;
+            }
             self.active_len -= 1;
             self.active_number[self.active_len] = 0;
             let _ = std::audio_haptic_click();
@@ -1698,6 +1746,9 @@ impl DialerApp {
     /// Clears the entry without placing a call.
     pub fn clear_entry(&mut self) {
         if self.active_len > 0 {
+            if self.state == CallState::Idle {
+                self.outcome = CallOutcome::Idle;
+            }
             self.active_number.fill(0);
             self.active_len = 0;
             let _ = std::audio_haptic_click();
@@ -1792,7 +1843,10 @@ impl DialerApp {
                 let modem = query_modem_call_state();
                 self.state = match modem {
                     ModemCallState::Connected => CallState::ActiveCall,
-                    ModemCallState::Ended => CallState::CallEnded,
+                    // WHY an ended modem state is idle: the call is over, so
+                    // the central control has to offer a call again. CallEnded
+                    // only differed from Idle by keeping the red hangup glyph.
+                    ModemCallState::Ended => CallState::Idle,
                     _ => CallState::Dialing,
                 };
                 self.outcome = match modem {
@@ -1818,7 +1872,9 @@ impl DialerApp {
                 Ok(())
             }
             Err(err) => {
-                self.state = CallState::CallEnded;
+                // No call exists after a refusal, so the central control
+                // returns to the call glyph; the refusal stays on the card.
+                self.state = CallState::Idle;
                 self.outcome = if emergency {
                     CallOutcome::EmergencyRefused
                 } else {
@@ -1864,6 +1920,10 @@ impl DialerApp {
             )
             .ok();
         }
+        // WHY the outcome is cleared: the card returns to the keypad, and a
+        // leftover "Call ended" or refusal caption would describe a call that
+        // no longer exists. The recents ledger keeps the record.
+        self.outcome = CallOutcome::Idle;
     }
 
     /// Steps the section. All four tabs are live now.
@@ -1898,6 +1958,7 @@ impl DialerApp {
     pub fn start_add_contact(&mut self) {
         self.contact_edit = Some(ContactEditor::open_new());
         self.editor_last_cell = None;
+        self.editor_error = false;
     }
 
     /// Opens the editor for a new contact with pre-filled dialed phone number.
@@ -1905,6 +1966,7 @@ impl DialerApp {
         self.section = DialerSection::Contacts;
         self.contact_edit = Some(ContactEditor::open_with_number(number));
         self.editor_last_cell = None;
+        self.editor_error = false;
     }
 
     /// Opens the editor on an existing contact.
@@ -1913,6 +1975,7 @@ impl DialerApp {
     /// row the user tapped, and an index is the only thing that still identifies
     /// that row after a delete moves the others.
     pub fn start_edit_contact(&mut self, index: usize) {
+        self.editor_error = false;
         if index >= ContactEditor::UNSAVED_BASE {
             let inner = index - ContactEditor::UNSAVED_BASE;
             match self.contacts.unsaved_record(inner) {
@@ -1959,11 +2022,13 @@ impl DialerApp {
             return;
         };
         if ed.name_len == 0 || ed.number_len == 0 {
+            self.editor_error = true;
             std::log("[DIALER APP] Contact not saved: a contact needs both a name and a number.",
             )
             .ok();
             return;
         }
+        self.editor_error = false;
         let name = &ed.name[..ed.name_len];
         let number = &ed.number[..ed.number_len];
         let outcome = match ed.target {
@@ -1983,6 +2048,15 @@ impl DialerApp {
         self.editor_last_cell = None;
         match outcome {
             Ok(()) => {
+                // WHY the filter is cleared and the new row selected: SAVE used
+                // to close the editor with no visible change, and a new contact
+                // is never a favourite, so under the Favorites filter the list
+                // it had just been added to still looked empty.
+                self.contacts_fav_only = false;
+                if ed.target.is_none() {
+                    self.contact_sel = self.contacts.len().checked_sub(1);
+                }
+                self.refresh_scrolls();
                 std::log("[DIALER APP] Contact written to the settings store and acknowledged.",
                 )
                 .ok();
@@ -2310,6 +2384,14 @@ const DISPLAY_X1: usize = 696;
 const DISPLAY_Y0: usize = 170;
 const DISPLAY_Y1: usize = 380;
 const DISPLAY_W: usize = DISPLAY_X1 - DISPLAY_X0;
+/// The leading-plus control on the dialed-number card.
+///
+/// WHY a disc and not a keypad sublabel: the keypad has no long-press, so a
+/// "+" printed under the 0 key was a label for a key that typed 0. The disc
+/// is a real control, offered only where a leading "+" is valid.
+const PLUS_CX: usize = DISPLAY_X0 + 44;
+const PLUS_CY: usize = 236;
+const PLUS_R: i32 = 20;
 const PLACEHOLDER_SCALE: usize = type_scale::BODY;
 const PLACEHOLDER_Y0: usize = 250;
 /// Real call-outcome caption under the dialed number. A scale-1 run owns
@@ -2382,7 +2464,11 @@ const DOCK_ITEM_W: usize = 140;
 /// WHY these x positions: they are the four 140 px slots the previous renderer
 /// hard-coded its labels against, kept so the dock does not move.
 const DOCK_ITEM_X0: [usize; 4] = [48, 208, 368, 528];
-const DOCK_LABELS: [&[u8]; 4] = [b"Recent", b"Contacts", b"Keypad", b"Voicemail"];
+// WHY these four: the dock's icons are a star, a clock, a keypad grid and a
+// person, in that order. A label was once changed to "Voicemail" while the
+// person icon still opened the contact list, so the dock promised a service
+// the platform does not have and mislabeled two working destinations.
+const DOCK_LABELS: [&[u8]; 4] = [b"Favorites", b"Recents", b"Keypad", b"Contacts"];
 const DOCK_LABEL_Y0: usize = 1340;
 const DOCK_LABEL_SCALE: usize = type_scale::CAPTION;
 /// Icon band inside the dock plate: a scale-1 label below, a 36 px glyph above.
@@ -2495,7 +2581,6 @@ fn get_keypad_sublabel(row: usize, col: usize) -> &'static [u8] {
         (2, 0) => b"PQRS",
         (2, 1) => b"TUV",
         (2, 2) => b"WXYZ",
-        (3, 1) => b"+",
         _ => b"",
     }
 }
@@ -2729,6 +2814,23 @@ fn display_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         Some(c) => c,
         None => return THEME.surface,
     };
+
+    // The leading-plus control. A "+" is only valid as the first character of
+    // an international number, so the disc is offered exactly while the entry
+    // is empty and no call is up.
+    if dialer.state == CallState::Idle && dialer.active_len == 0 {
+        let p_dx = (x as i32) - PLUS_CX as i32;
+        let p_dy = (y as i32) - PLUS_CY as i32;
+        if p_dx * p_dx + p_dy * p_dy <= PLUS_R * PLUS_R {
+            if p_dx * p_dx + p_dy * p_dy >= (PLUS_R - 2) * (PLUS_R - 2) {
+                return THEME.border;
+            }
+            if (p_dx.abs() <= 1 && p_dy.abs() <= 8) || (p_dy.abs() <= 1 && p_dx.abs() <= 8) {
+                return THEME.on_surface;
+            }
+            return THEME.surface_container_high;
+        }
+    }
 
     if dialer.active_len > 0 {
         // Matched contact name
@@ -3064,6 +3166,20 @@ fn recents_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         let rec = &dialer.recents[i];
         // Text first, plate second: returning the plate colour before the runs
         // were tested would paint every row's number out of existence.
+        //
+        // WHY an emergency row inverts: its plate is the dark on-surface
+        // colour that marks the call, so its ink has to be the light ink
+        // that belongs on a dark fill. Drawing the ordinary dark ink over
+        // the dark plate made the number and outcome invisible.
+        let (ink, sub_ink, row_fill) = if rec.emergency {
+            (THEME.ink_on_dark, THEME.ink_on_dark, THEME.on_surface)
+        } else {
+            (
+                THEME.on_surface,
+                THEME.on_surface_variant,
+                THEME.surface_container,
+            )
+        };
         // Number, scale 2: run_rows(2) = 48 rows at row_y + 8.
         let mut nbuf = [0u8; 32];
         let nn = std::design::font::ellipsize(&rec.number[..rec.len], 1, DISPLAY_W - 96, &mut nbuf);
@@ -3075,8 +3191,8 @@ fn recents_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
             scrolled_y + 14,
             1,
             &nbuf[..nn],DISPLAY_W - 96, 
-            THEME.on_surface,
-            THEME.surface_container,
+            ink,
+            row_fill,
         ) {
             return c;
         }
@@ -3097,7 +3213,7 @@ fn recents_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
             }
         };
         let ox = DISPLAY_X0 + 24;
-        if let Some(c) = test_text(x, y, ox, scrolled_y + 46, 1, out,DISPLAY_W - 96,  THEME.on_surface_variant, THEME.surface_container) {
+        if let Some(c) = test_text(x, y, ox, scrolled_y + 46, 1, out,DISPLAY_W - 96,  sub_ink, row_fill) {
             return c;
         }
         // Row plate and divider, in the platform's list-row treatment.
@@ -3106,19 +3222,17 @@ fn recents_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         // its divider are the platform's, so a row in this app looks like a row
         // in the file manager or the gallery.
         let style = components::list_row_style(&THEME, false);
+        let plate_fill = if rec.emergency { row_fill } else { style.fill };
         if x >= DISPLAY_X0 && x < DISPLAY_X1 {
             if let Some(plate) = std::design::primitives::draw_rounded_rect(
                 x,
                 y,
                 std::design::primitives::Rect::new(DISPLAY_X0, scrolled_y, DISPLAY_W, RECENTS_ROW_H),
                 style.radius,
-                style.fill,
+                plate_fill,
                 None,
                 0,
             ) {
-                if rec.emergency {
-                    return THEME.on_surface;
-                }
                 return plate;
             }
         }
@@ -3272,6 +3386,37 @@ fn ringtone_picker_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     }
 
     let offset = dialer.ringtone_scroll.offset;
+    if dialer.ringtone_choice_count == 0 {
+        // An empty picker needs to say why it is empty; the title alone left
+        // the screen looking like the list had failed to load.
+        if let Some(c) = test_text(
+            x,
+            y,
+            DISPLAY_X0 + 24,
+            RINGTONE_ROW_Y0 + 8,
+            1,
+            b"No audio documents on this device",
+            DISPLAY_W - 48,
+            THEME.on_surface,
+            THEME.surface,
+        ) {
+            return c;
+        }
+        if let Some(c) = test_text(
+            x,
+            y,
+            DISPLAY_X0 + 24,
+            RINGTONE_ROW_Y0 + 40,
+            1,
+            b"The platform's index lists no audio file for this slot.",
+            DISPLAY_W - 48,
+            THEME.on_surface_variant,
+            THEME.surface,
+        ) {
+            return c;
+        }
+        return THEME.surface;
+    }
     for i in 0..dialer.ringtone_choice_count {
         let row_y = RINGTONE_ROW_Y0 + i * RINGTONE_ROW_H;
         let scrolled_y = row_y.saturating_sub(offset);
@@ -3494,9 +3639,13 @@ fn contacts_card_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
                     if bs_dx * bs_dx + bs_dy * bs_dy >= 16 * 16 {
                         return THEME.border;
                     }
-                    let ix = bs_dx.abs();
+                    // WHY a left chevron and a bar and not the clear button's
+                    // X: both discs sit inside one field, and two identical
+                    // X glyphs read as two clear buttons with no backspace.
                     let iy = bs_dy.abs();
-                    if (ix <= 5 && iy <= 5 && (ix == iy || ix == iy + 1 || ix == iy - 1)) || (bs_dx == -6 && iy <= 3) {
+                    let on_chevron = bs_dx >= -7 && bs_dx <= -2 && iy == (-2 - bs_dx);
+                    let on_bar = bs_dy == 0 && bs_dx >= -2 && bs_dx <= 7;
+                    if on_chevron || on_bar {
                         return THEME.on_surface;
                     }
                     return THEME.surface_container_high;
@@ -3745,11 +3894,23 @@ fn contacts_list_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
             let sdx = x as i32 - STAR_CX as i32;
             let sdy = y as i32 - (scrolled_y + CONTACT_ROW_H / 2) as i32;
             if sdx * sdx + sdy * sdy <= STAR_R * STAR_R {
-                return if rec.is_favourite() {
-                    THEME.warning
-                } else {
-                    THEME.border
-                };
+                // WHY a star and not a disc: this control toggles a favourite,
+                // and an unstarred contact used to be a plain grey circle that
+                // read as decoration. A filled star means starred; an outlined
+                // one is the same shape waiting to be filled.
+                let on_star = (sdy <= 0 && sdx.abs() <= 12 + sdy.abs() / 2)
+                    || (sdy > 0 && sdx.abs() <= 12 - sdy.abs());
+                if on_star {
+                    if rec.is_favourite() {
+                        return THEME.warning;
+                    }
+                    let inside = (sdy <= 0 && sdx.abs() <= 8 + sdy.abs() / 2)
+                        || (sdy > 0 && sdx.abs() <= 8 - sdy.abs());
+                    if !inside {
+                        return THEME.on_surface_variant;
+                    }
+                }
+                return style.fill;
             }
             return style.fill;
         }
@@ -3910,14 +4071,15 @@ fn emergency_dial_pixel(x: usize, y: usize, dialer: &DialerApp) -> Option<u32> {
     Some(THEME.error_container)
 }
 
-/// The contacts action row: the emergency disc is unchanged, and the other two
-/// discs carry the section's primary and secondary actions.
+/// The contacts action row: the section's primary and secondary actions.
+///
+/// WHY the emergency disc is not here: SOS belongs to the keypad where a call
+/// is being placed. Next to SAVE and CANCEL in a contact editor it read as one
+/// more editing control, and an accidental tap would dial emergency services
+/// from a screen where nobody expects a call.
 fn contacts_action_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     if !(ACTION_Y0..ACTION_Y1).contains(&y) {
         return THEME.surface;
-    }
-    if let Some(c) = emergency_dial_pixel(x, y, dialer) {
-        return c;
     }
 
     let editing = dialer.contact_edit.is_some();
@@ -3967,10 +4129,16 @@ fn contacts_action_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
             let lw = std::design::font::measure(&lbuf[..ln], 1);
             let lx = (cx as i32 - lw as i32 / 2).max(0) as usize;
             let ly = C_ACTION_Y - run_rows(1) / 2;
+            // WHY the success disc takes dark ink: the theme's green is light
+            // enough that white label text on it is about 2.3:1, below the
+            // platform's own contrast floor. The near-black ink on the same
+            // green is above 5:1.
             let text_color = if fill == color::SURFACE_RAISED {
                 THEME.on_surface
+            } else if fill == THEME.success {
+                THEME.ink_on_light
             } else {
-                THEME.surface_container
+                THEME.on_primary
             };
             if let Some(c) = test_text(x, y, lx, ly, 1, &lbuf[..ln],160,  text_color, fill) {
                 return c;
@@ -3999,8 +4167,12 @@ fn action_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         let in_call = dialer.state != CallState::Idle;
         let (bg_color, glyph) = if in_call {
             (THEME.error, THEME.ink_on_dark)
-        } else {
+        } else if dialer.active_len > 0 {
             (THEME.inverted_surface(), THEME.ink_on_dark)
+        } else {
+            // WHY the empty keypad recesses the pill: an all-black call button
+            // over an empty field promises an action the tap handler refuses.
+            (THEME.surface_container_high, THEME.muted)
         };
 
         // Vector Phone Handset
@@ -4193,6 +4365,44 @@ fn dock_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
 }
 
 #[inline(never)]
+/// The heading that owns the number band outside the keypad.
+///
+/// Recents lists its own history and Settings draws its own title below this
+/// band, so Settings leaves the band plain surface.
+fn section_band_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
+    if dialer.section != DialerSection::Recents {
+        return THEME.surface;
+    }
+    let x0 = DISPLAY_X0 + 24;
+    if let Some(c) = test_text_bold(
+        x,
+        y,
+        x0,
+        DISPLAY_Y0 + 12,
+        2,
+        b"Call history",
+        DISPLAY_W - 48,
+        THEME.on_surface,
+        THEME.surface,
+    ) {
+        return c;
+    }
+    if let Some(c) = test_text(
+        x,
+        y,
+        x0,
+        DISPLAY_Y0 + 72,
+        1,
+        b"Newest call first",
+        DISPLAY_W - 48,
+        THEME.on_surface_variant,
+        THEME.surface,
+    ) {
+        return c;
+    }
+    THEME.surface
+}
+
 fn get_dialer_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     // 1. Status bar & header (y: 0..94)
     if y < HEADER_H + 1 {
@@ -4207,10 +4417,16 @@ fn get_dialer_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     // 3. Call status & dialed number display (y: 170..380). In the Contacts
     //    section the same band is the selected-contact card or the editor's
     //    fields, so every section owns the band rather than fighting over it.
+    //    Recents and Settings get their own heading instead of the dialed
+    //    number, which used to follow the user out of the keypad. While a call
+    //    is up the card stays in every section, because it carries the only
+    //    description of that call.
     if (DISPLAY_Y0..DISPLAY_Y1).contains(&y) {
         return match dialer.section {
             DialerSection::Contacts => contacts_card_pixel(x, y, dialer),
-            _ => display_pixel(x, y, dialer),
+            DialerSection::Keypad => display_pixel(x, y, dialer),
+            _ if dialer.state != CallState::Idle => display_pixel(x, y, dialer),
+            _ => section_band_pixel(x, y, dialer),
         };
     }
 
@@ -4240,12 +4456,31 @@ fn get_dialer_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
                     }
                     return contacts_action_pixel(x, y, dialer);
                 }
-                if (LIST_Y0..NOTICE_Y0).contains(&y) {
+                if (LIST_Y0..NOTICE_Y1).contains(&y) {
                     return contacts_list_pixel(x, y, dialer);
                 }
                 contacts_action_pixel(x, y, dialer)
             }
         };
+    }
+
+    // 4b. Editor refusal hint in the free band above the dock.
+    //
+    // WHY it exists: SAVE on an incomplete contact used to refuse with a log
+    // line only, so the button looked dead. The hint names the two things the
+    // store requires and disappears on the next keystroke.
+    if dialer.section == DialerSection::Contacts
+        && dialer.contact_edit.is_some()
+        && dialer.editor_error
+        && (CONTENT_Y1..DOCK_Y0).contains(&y)
+    {
+        let msg = b"A contact needs a name and a number";
+        let w = std::design::font::measure(msg, 1);
+        let x0 = (W.saturating_sub(w)) / 2;
+        if let Some(c) = test_text(x, y, x0, 1180, 1, msg, W, THEME.error, THEME.surface) {
+            return c;
+        }
+        return THEME.surface;
     }
 
     // 5. Bottom navigation dock (y: 1260..1380)
@@ -4381,8 +4616,27 @@ fn handle_tap(dialer: &mut DialerApp, px: u32, py: u32) -> Tap<'static> {
     let y = py as usize;
 
     // 1. Back control in the header, or the home gesture bar: exit to launcher.
-    if std::design::back_button::contains(x, y) || (x >= 24 && x < 100 && y >= 28 && y < 68) || (x >= 240 && x <= 480 && y >= 1400) {
-        return Tap::Leave("[DIALER APP] Back control or home gesture pressed. Exiting to launcher.");
+    //
+    // WHY nested surfaces close first: the header control is the only Back on
+    // the screen, and leaving the app from an open contact editor or ringtone
+    // picker threw away what the user had typed or chosen. The home gesture
+    // still leaves from anywhere.
+    if x >= 240 && x <= 480 && y >= 1400 {
+        return Tap::Leave("[DIALER APP] Home gesture pressed. Exiting to launcher.");
+    }
+    if std::design::back_button::contains(x, y) || (x >= 24 && x < 100 && y >= 28 && y < 68) {
+        if dialer.section == DialerSection::Contacts && dialer.contact_edit.is_some() {
+            dialer.cancel_edit_contact();
+            return Tap::Redraw(Dirty::All);
+        }
+        if dialer.section == DialerSection::Settings
+            && dialer.settings_view == SettingsView::RingtonePicker
+        {
+            dialer.settings_view = SettingsView::Main;
+            dialer.refresh_settings_values();
+            return Tap::Redraw(Dirty::All);
+        }
+        return Tap::Leave("[DIALER APP] Back control pressed. Exiting to launcher.");
     }
 
     // 2. Segmented tabs. All four are live sections.
@@ -4398,7 +4652,11 @@ fn handle_tap(dialer: &mut DialerApp, px: u32, py: u32) -> Tap<'static> {
             return Tap::Redraw(Dirty::All);
         }
         if x >= TAB3_X0 && x < TAB3_X1 {
-            dialer.open_contacts(dialer.contacts_fav_only);
+            // WHY the Contacts tab clears the favourites filter: the tab is
+            // the unfiltered contact list, while the Favorites dock slot is
+            // the filtered one. Carrying the filter over made both controls
+            // read active and left the tab showing a subset of its own list.
+            dialer.open_contacts(false);
             let _ = std::audio_haptic_click();
             return Tap::Redraw(Dirty::All);
         }
@@ -4420,20 +4678,20 @@ fn handle_tap(dialer: &mut DialerApp, px: u32, py: u32) -> Tap<'static> {
             }
             let _ = std::audio_haptic_click();
             match slot {
+                // The slot order is the icon order: star, clock, keypad,
+                // person. Favorites and Contacts both open the contact list;
+                // Favorites filters it to the starred contacts.
+                0 => {
+                    dialer.open_contacts(true);
+                    std::log("[DIALER APP] Favorites: showing starred contacts.").ok();
+                    return Tap::Redraw(Dirty::All);
+                }
                 1 => {
                     dialer.section = DialerSection::Recents;
                     return Tap::Redraw(Dirty::All);
                 }
                 2 => {
                     dialer.section = DialerSection::Keypad;
-                    return Tap::Redraw(Dirty::All);
-                }
-                // Favorites and Contacts both open the contact list; Favorites
-                // filters it to the starred contacts, which is what the slot
-                // says it shows.
-                0 => {
-                    dialer.open_contacts(true);
-                    std::log("[DIALER APP] Favorites: showing starred contacts.").ok();
                     return Tap::Redraw(Dirty::All);
                 }
                 _ => {
@@ -4480,6 +4738,15 @@ fn handle_tap(dialer: &mut DialerApp, px: u32, py: u32) -> Tap<'static> {
     }
 
     if dialer.section == DialerSection::Keypad {
+        // Leading-plus control on the dialed-number card.
+        if dialer.state == CallState::Idle
+            && dialer.active_len == 0
+            && in_circle(x, y, PLUS_CX, PLUS_CY, 24)
+        {
+            dialer.input_digit('+');
+            let _ = std::audio_haptic_click();
+            return Tap::Redraw(Dirty::Display);
+        }
         // Clear (X) disc on dialed number card
         if dialer.active_len > 0 && in_circle(x, y, DISPLAY_X1 - 44, 236, 24) {
             dialer.clear_entry();
@@ -4739,27 +5006,15 @@ fn handle_contacts_tap(dialer: &mut DialerApp, x: usize, y: usize) -> Tap<'stati
                         continue;
                     }
                     dialer.editor_press_cell(row, col);
+                    dialer.editor_error = false;
                     return Tap::Redraw(Dirty::Fields);
                 }
             }
         }
 
-        // Action row: the emergency disc keeps its own hit test, then the two
-        // editing discs.
+        // Action row: the two editing discs. The emergency disc lives on the
+        // keypad only; it is not drawn here, so it is not hit-tested here.
         if (ACTION_Y0..ACTION_Y1).contains(&y) {
-            if in_circle(x, y, SOS_CX, SOS_CY, SOS_R) {
-                let _ = dialer.dial_emergency();
-                if dialer.outcome == CallOutcome::EmergencyRefused {
-                    std::log("[DIALER APP] Emergency call refused by the telephony service; the outcome is shown under the number.",
-                    )
-                    .ok();
-                } else {
-                    std::log("[DIALER APP] Telephony service accepted the emergency call.",
-                    )
-                    .ok();
-                }
-                return Tap::Redraw(Dirty::All);
-            }
             if in_circle(x, y, CALL_CX, CALL_CY, CALL_R) {
                 dialer.commit_edit_contact();
                 return Tap::Redraw(Dirty::All);
@@ -4828,21 +5083,8 @@ fn handle_contacts_tap(dialer: &mut DialerApp, x: usize, y: usize) -> Tap<'stati
         }
     }
 
-    // Action row: SOS unchanged, then ADD / CALL and FAVS / EDIT.
+    // Action row: ADD / CALL and FAVS / EDIT. The emergency disc is keypad-only.
     if (ACTION_Y0..ACTION_Y1).contains(&y) {
-        if in_circle(x, y, SOS_CX, SOS_CY, SOS_R) {
-            let _ = dialer.dial_emergency();
-            if dialer.outcome == CallOutcome::EmergencyRefused {
-                std::log("[DIALER APP] Emergency call refused by the telephony service; the outcome is shown under the number.",
-                )
-                .ok();
-            } else {
-                std::log("[DIALER APP] Telephony service accepted the emergency call.",
-                )
-                .ok();
-            }
-            return Tap::Redraw(Dirty::All);
-        }
         if in_circle(x, y, CALL_CX, CALL_CY, CALL_R) {
             if dialer.contact_sel.is_some() {
                 dialer.dial_selected_contact();
@@ -4856,6 +5098,10 @@ fn handle_contacts_tap(dialer: &mut DialerApp, x: usize, y: usize) -> Tap<'stati
                 dialer.start_edit_contact(dialer.contact_sel.unwrap_or(0));
             } else {
                 dialer.contacts_fav_only = !dialer.contacts_fav_only;
+                // WHY the scrolls are recomputed here: the filter changes how
+                // many rows the list has, and the extent from the other list
+                // would leave the new list scrolled past its own end.
+                dialer.refresh_scrolls();
                 std::log(if dialer.contacts_fav_only {
                         "[DIALER APP] Showing starred contacts only."
                     } else {
