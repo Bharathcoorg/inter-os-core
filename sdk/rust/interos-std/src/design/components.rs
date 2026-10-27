@@ -32,12 +32,14 @@ pub mod dialog;
 pub mod keyboard;
 pub mod nav_bar;
 pub mod snackbar;
+pub mod status_bar;
 pub mod text_field;
 
 pub use dialog::*;
 pub use keyboard::*;
 pub use nav_bar::*;
 pub use snackbar::*;
+pub use status_bar::*;
 pub use text_field::*;
 
 /// How a card sits in the stack of surfaces.
