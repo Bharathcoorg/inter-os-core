@@ -794,6 +794,14 @@ const NEW_TAB_BTN: Rect = Rect::new(530, 126, 150, MIN_TOUCH_TARGET);
 
 /// Omnibox Right Controls
 const RELOAD_BTN: Rect = Rect::new(486, 60, 44, 44);
+
+/// The square at the head of the address field that wears the page's own
+/// picture, where the padlock used to sit alone.
+const FAVICON_BOX: Rect = Rect::new(30, 74, 16, 16);
+
+/// The pixels a page's face is drawn with: one RGBA quadruple for each pixel
+/// of [`FAVICON_BOX`].
+const FAVICON_FACE_PIXELS: usize = FAVICON_BOX.w * FAVICON_BOX.h;
 const TABS_TOP_BTN: Rect = Rect::new(540, 60, 46, 44);
 const KEBAB_BTN: Rect = Rect::new(596, 60, 44, 44);
 const CLOSE_BTN: Rect = Rect::new(650, 60, 44, 44);
@@ -1722,6 +1730,16 @@ pub struct BrowserApp {
     pub image_count: usize,
     /// How much of the static image arena the current page owns.
     image_arena_used: usize,
+    /// The picture the current page asked to be known by, already reduced to
+    /// the size the address field draws it at.
+    ///
+    /// WHY it is held beside the page rather than re-fetched per frame: a
+    /// navigation is the only moment its address is known, and the pixels
+    /// belong to that page. WHY it can be `None` on a page that names an
+    /// icon: the formats a page prefers for its own picture — SVG and ICO —
+    /// are two this browser has no decoder for, and the honest answer to a
+    /// picture that cannot be drawn is the mark drawn before this one existed.
+    favicon: Option<[[u8; 4]; FAVICON_FACE_PIXELS]>,
     /// How many lines the document has, before the reader's bound.
     ///
     /// WHY it is counted: the reader holds a bounded number of lines, and
@@ -1952,6 +1970,7 @@ impl BrowserApp {
             images: [PlacedImage::EMPTY; images::MAX_INLINE_IMAGES],
             image_count: 0,
             image_arena_used: 0,
+            favicon: None,
             doc_total_lines: 0,
             kb_shift: false,
             kb_symbols: false,
@@ -2289,6 +2308,115 @@ impl BrowserApp {
         }
     }
 
+    /// Fetches the picture a page asks to be known by, keeping the first of
+    /// its offers this browser can draw.
+    ///
+    /// WHY the offers in the page's own order: it knows which of its pictures
+    /// it likes best, and the reader only steps over the ones it was built
+    /// without a decoder for. WHY the walk can end with nothing: an icon is
+    /// the one subresource a page is allowed to fail to have, and the mark
+    /// drawn here before favicons existed is what the address bar shows then.
+    fn fetch_favicon(&mut self, dom: &layout::Dom) {
+        self.favicon = None;
+        let offers = dom.icons();
+        let mut tried = 0usize;
+        let mut last_refusal = None;
+        for href in offers {
+            // Copied out before anything is fetched, for the same reason the
+            // stylesheets are: the reply lands in the buffer the page's own
+            // bytes came through.
+            let raw = href.get(dom);
+            let mut declared = [0u8; images::MAX_SRC_LEN + 1];
+            let len = raw.len().min(declared.len());
+            declared[..len].copy_from_slice(&raw[..len]);
+            let mut url = [0u8; images::MAX_SRC_LEN];
+            let Ok(len) =
+                images::resolve_subresource(self.current_url(), &declared[..len], &mut url)
+            else {
+                continue;
+            };
+            if undrawable_picture(&url[..len]) {
+                continue;
+            }
+            tried += 1;
+            let (status, bitmap, _, _) = self.fetch_inline_image(&url[..len]);
+            if let Some(picture) = bitmap {
+                let mut face = [[0u8; 4]; FAVICON_FACE_PIXELS];
+                reduce_to_face(picture, &mut face);
+                self.favicon = Some(face);
+                break;
+            }
+            if let images::ImageStatus::Refused(refusal) = status {
+                last_refusal = Some(refusal);
+            }
+        }
+        self.log_favicon(tried, self.favicon.is_some(), offers.len(), last_refusal);
+    }
+
+    /// Says whether the page's own picture arrived, how many of its offers
+    /// were fetched, and — when none did — what the reader ran into.
+    ///
+    /// WHY the reason is said at all: an icon that does not draw looks from
+    /// outside like a feature that was never built, and the difference between
+    /// "the page offered only formats this reader cannot draw", "the origin
+    /// refused the file" and "the reply stopped short" is only visible here.
+    fn log_favicon(
+        &self,
+        tried: usize,
+        drawn: bool,
+        offers: usize,
+        reason: Option<images::ImageRefusal>,
+    ) {
+        if offers == 0 {
+            return;
+        }
+        let mut log_buf = [0u8; 128];
+        let prefix = if drawn {
+            b"[BROWSER APP] Page icon drawn tries=".as_slice()
+        } else {
+            b"[BROWSER APP] Page icon not drawn tries=".as_slice()
+        };
+        let plen = prefix.len();
+        log_buf[..plen].copy_from_slice(prefix);
+        let mut lp = browser::append_decimal(&mut log_buf, plen, tried as u64);
+        log_buf[lp] = b'/';
+        lp += 1;
+        lp = browser::append_decimal(&mut log_buf, lp, offers as u64);
+        if !drawn {
+            let text = match reason {
+                Some(refusal) => refusal_reason(refusal),
+                None => b"no offer in a drawable format",
+            };
+            let p = b" reason=";
+            log_buf[lp..lp + p.len()].copy_from_slice(p);
+            lp += p.len();
+            let take = text.len().min(log_buf.len() - lp);
+            log_buf[lp..lp + take].copy_from_slice(&text[..take]);
+            lp += take;
+            // The words name the failure; only the number the transport
+            // answered with says who refused it, so the line carries both.
+            if let Some(images::ImageRefusal::FetchFailed { code }) = reason {
+                let p = b" err=";
+                if lp + p.len() + 12 <= log_buf.len() {
+                    log_buf[lp..lp + p.len()].copy_from_slice(p);
+                    lp += p.len();
+                    if code < 0 {
+                        log_buf[lp] = b'-';
+                        lp += 1;
+                    }
+                    lp = browser::append_decimal(
+                        &mut log_buf,
+                        lp,
+                        i64::from(code).unsigned_abs() as u64,
+                    );
+                }
+            }
+        }
+        if let Ok(line) = core::str::from_utf8(&log_buf[..lp]) {
+            std::log(line).ok();
+        }
+    }
+
     /// Says that a page linked a stylesheet that did not become rules.
     ///
     /// WHY this is logged at all: an unstyled page looks like a broken
@@ -2595,6 +2723,7 @@ impl BrowserApp {
         self.doc_total_lines = 0;
         self.image_count = 0;
         self.image_arena_used = 0;
+        self.favicon = None;
         let mut tokenizer = DocumentTokenizer::new(content);
         let mut pieces: [[u8; MAX_LINE_BYTES]; browser::MAX_WRAP_PIECES] =
             [[0; MAX_LINE_BYTES]; browser::MAX_WRAP_PIECES];
@@ -2887,6 +3016,12 @@ impl BrowserApp {
             let sheet = css::parse_stylesheet(dom.css());
             layout::build_with_outcomes(&*dom, &sheet, browser::CONTENT_WIDTH, &outcomes, out);
         }
+
+        // The page is laid out and its pictures are in, so the one picture it
+        // asked to be known by is fetched last: nothing about it moves a box,
+        // and holding up the first sight of the page for it would trade the
+        // article for a sixteen-pixel square.
+        self.fetch_favicon(&*dom);
 
         let height = out.height as usize;
         let note = if out.truncated { 36 } else { 0 };
@@ -4920,6 +5055,7 @@ impl BrowserApp {
         self.doc_total_lines = 0;
         self.image_count = 0;
         self.image_arena_used = 0;
+        self.favicon = None;
         self.response_truncated = false;
         self.local_failure = LocalFailure::NoPath;
         self.download_failure = DownloadFailure::None;
@@ -5344,6 +5480,105 @@ fn padlock_glyph(x: usize, y: usize) -> bool {
         return true;
     }
     false
+}
+
+/// Whether an address names a picture this browser was built without a
+/// decoder for.
+///
+/// WHY by the name rather than by asking the origin: the two formats a page
+/// most often picks for its own picture — SVG and ICO — are two the platform
+/// cannot rasterise, and fetching a file whose answer is already known costs a
+/// round trip on the way to a refusal. A name that lies about its type still
+/// reaches the decoder and is refused there, so the check only ever saves a
+/// fetch; it never hides a picture that could have been drawn.
+fn undrawable_picture(href: &[u8]) -> bool {
+    let Some(dot) = href.iter().rposition(|&b| b == b'.') else {
+        return false;
+    };
+    let tail = &href[dot + 1..];
+    tail.eq_ignore_ascii_case(b"svg") || tail.eq_ignore_ascii_case(b"ico")
+}
+
+/// The words a refusal carries, without the "Image not shown:" opening that
+/// only reads correctly inside the placeholder card on a page.
+///
+/// WHY reuse the placeholder rather than name a code: the two have to say the
+/// same thing about the same file, and a reader of the serial log who can see
+/// the card should not need a second vocabulary for what is behind it.
+fn refusal_reason(refusal: images::ImageRefusal) -> &'static [u8] {
+    let text = refusal.placeholder();
+    match text.iter().position(|&b| b == b':') {
+        Some(colon) if colon + 2 < text.len() => &text[colon + 2..],
+        _ => text,
+    }
+}
+
+/// The page's picture, averaged down to the sixteen-by-sixteen the address
+/// field has room for.
+///
+/// WHY averaged and not sampled: a page offers its face a hundred pixels
+/// across and the field shows sixteen, so taking one source pixel per drawn
+/// one keeps a hundredth of the picture and the mark arrives as a speckle.
+/// Each drawn pixel is the mean of the block it stands for, weighted by
+/// opacity so a transparent corner does not grey out its neighbours.
+///
+/// WHY once here rather than per pixel while painting: the same hundred reads
+/// would otherwise be made again on every repaint of the bar.
+fn reduce_to_face(icon: std::image::Bitmap<'_>, out: &mut [[u8; 4]]) {
+    for row in 0..FAVICON_BOX.h {
+        for column in 0..FAVICON_BOX.w {
+            let top = row * icon.h as usize / FAVICON_BOX.h;
+            let bottom = ((row + 1) * icon.h as usize / FAVICON_BOX.h).max(top + 1);
+            let left = column * icon.w as usize / FAVICON_BOX.w;
+            let right = ((column + 1) * icon.w as usize / FAVICON_BOX.w).max(left + 1);
+            let (mut red, mut green, mut blue, mut opacity) = (0u64, 0u64, 0u64, 0u64);
+            for source_y in top..bottom {
+                for source_x in left..right {
+                    let pixel = (source_y * icon.w as usize + source_x) * 4;
+                    let Some(rgba) = icon.rgba.get(pixel..pixel + 4) else {
+                        continue;
+                    };
+                    let alpha = rgba[3] as u64;
+                    opacity += alpha;
+                    red += rgba[0] as u64 * alpha;
+                    green += rgba[1] as u64 * alpha;
+                    blue += rgba[2] as u64 * alpha;
+                }
+            }
+            let cell = &mut out[row * FAVICON_BOX.w + column];
+            if opacity == 0 {
+                *cell = [0, 0, 0, 0];
+                continue;
+            }
+            let seen = ((bottom - top) * (right - left)) as u64;
+            cell[0] = (red / opacity) as u8;
+            cell[1] = (green / opacity) as u8;
+            cell[2] = (blue / opacity) as u8;
+            cell[3] = (opacity / seen).min(255) as u8;
+        }
+    }
+}
+
+/// One pixel of the page's face, over the address field's own colour.
+fn favicon_pixel(x: usize, y: usize, face: &[[u8; 4]; FAVICON_FACE_PIXELS], bg: u32) -> Option<u32> {
+    if x < FAVICON_BOX.x || y < FAVICON_BOX.y {
+        return None;
+    }
+    let px = x - FAVICON_BOX.x;
+    let py = y - FAVICON_BOX.y;
+    if px >= FAVICON_BOX.w || py >= FAVICON_BOX.h {
+        return None;
+    }
+    let [red, green, blue, alpha] = face[py * FAVICON_BOX.w + px];
+    if alpha == 0 {
+        return None;
+    }
+    let argb =
+        (alpha as u32) << 24 | (red as u32) << 16 | (green as u32) << 8 | blue as u32;
+    if alpha == 255 {
+        return Some(argb);
+    }
+    Some(blend_toward(argb, bg, 255 - alpha as u32) | 0xFF00_0000)
 }
 
 /// Close 'X' Glyph (centered at cx, cy)
@@ -5868,7 +6103,15 @@ fn toolbar_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
         }),
         if app.address_focused { 2 } else { 1 },
     ) {
-        if padlock_glyph(x, y) {
+        if let Some(face) = &app.favicon {
+            if let Some(px) = favicon_pixel(x, y, face, c) {
+                return px;
+            }
+        }
+        // WHY the lock yields to the page's own picture: both are marks about
+        // the address in the field, and a face says more about what is loaded
+        // here than a lock this app never verified does.
+        if app.favicon.is_none() && padlock_glyph(x, y) {
             // WHY the mark is muted and not green: a green padlock says
             // the connection was verified, and this browser never performs
             // a TLS handshake itself. It reads a page over plain HTTP

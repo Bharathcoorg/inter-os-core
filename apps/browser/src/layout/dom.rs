@@ -48,6 +48,14 @@ pub const MAX_CSS_BYTES: usize = 16 * 1024;
 /// so a long chain is a slow blank screen instead.
 pub const MAX_STYLESHEET_LINKS: usize = 4;
 
+/// The most `<link rel="icon">` addresses one document may name.
+///
+/// WHY more than one: a page lists its picture in the formats it likes best,
+/// and the first is often one this browser has no decoder for. Four is
+/// enough to reach a PNG past an SVG and an ICO without turning the icon into
+/// four more fetches.
+pub const MAX_ICON_LINKS: usize = 4;
+
 /// The longest tag name kept whole. A longer name is truncated, which can
 /// only make it stop matching a selector; it never splits a node.
 const MAX_TAG_BYTES: usize = 20;
@@ -181,8 +189,10 @@ pub struct DocMeta {
     pub title: StrRef,
     /// `meta[name="description"]` or `og:description`.
     pub description: StrRef,
-    /// The href of the `<link rel="icon">` the document points at.
-    pub icon: StrRef,
+    /// The hrefs of the `<link rel="icon">` tags, in the order the document
+    /// gave them. `icon_count` says how many of the four it actually named.
+    pub icons: [StrRef; MAX_ICON_LINKS],
+    pub icon_count: u8,
     /// The hrefs of the `<link rel="stylesheet">` tags, in the order the
     /// document gave them. `stylesheet_count` says how many of the four it
     /// actually named.
@@ -194,7 +204,8 @@ impl DocMeta {
     pub const EMPTY: Self = Self {
         title: StrRef::EMPTY,
         description: StrRef::EMPTY,
-        icon: StrRef::EMPTY,
+        icons: [StrRef::EMPTY; MAX_ICON_LINKS],
+        icon_count: 0,
         stylesheets: [StrRef::EMPTY; MAX_STYLESHEET_LINKS],
         stylesheet_count: 0,
     };
@@ -419,6 +430,13 @@ impl Dom {
     pub fn stylesheets(&self) -> &[StrRef] {
         let count = (self.meta.stylesheet_count as usize).min(MAX_STYLESHEET_LINKS);
         &self.meta.stylesheets[..count]
+    }
+
+    /// The pictures the document offered as its own, in the order it offered
+    /// them.
+    pub fn icons(&self) -> &[StrRef] {
+        let count = (self.meta.icon_count as usize).min(MAX_ICON_LINKS);
+        &self.meta.icons[..count]
     }
 
     /// The value of `name` on this element, or `None`.
@@ -880,13 +898,28 @@ impl Dom {
         } else if href_len > 0 {
             let rel = &rel[..rel_len];
             let href = &href[..href_len];
-            if self.meta.icon.is_empty() && (rel_contains(rel, b"icon") || rel_contains(rel, b"apple-touch-icon")) {
-                let icon = self.intern(href);
-                self.meta.icon = icon;
+            if rel_contains(rel, b"icon") || rel_contains(rel, b"apple-touch-icon") {
+                self.link_icon(href);
             } else if rel_contains(rel, b"stylesheet") {
                 self.link_stylesheet(href);
             }
         }
+    }
+
+    /// Remembers one `<link rel="icon">` address, in document order.
+    ///
+    /// WHY the list rather than the first: a page names the picture it is
+    /// known by several times over, in the formats it likes best, and the
+    /// first is very often one this browser cannot draw. The reader tries
+    /// them in the order given and takes the one that arrives as a picture.
+    fn link_icon(&mut self, href: &[u8]) {
+        let count = (self.meta.icon_count as usize).min(MAX_ICON_LINKS);
+        if count == MAX_ICON_LINKS {
+            return;
+        }
+        let icon = self.intern(href);
+        self.meta.icons[count] = icon;
+        self.meta.icon_count = count as u8 + 1;
     }
 
     /// Remembers one `<link rel="stylesheet">` address, in document order.
@@ -1822,8 +1855,23 @@ mod tests {
     fn the_icon_and_stylesheet_hrefs_are_read_as_the_page_gives_them() {
         let mut dom = Dom::new();
         dom.parse(b"<link rel=\"shortcut icon\" href=\"/f.ico\"><link REL=\"Alternate Stylesheet\" href=\"/a.css\">");
-        assert_eq!(dom.meta().icon.get(&dom), b"/f.ico");
+        assert_eq!(dom.icons()[0].get(&dom), b"/f.ico");
         assert_eq!(dom.stylesheets()[0].get(&dom), b"/a.css");
+    }
+
+    #[test]
+    fn a_page_that_offers_its_picture_in_several_formats_keeps_them_all() {
+        let mut dom = Dom::new();
+        dom.parse(b"<link rel=\"icon\" type=\"image/svg+xml\" href=\"/f.svg\"><link rel=\"icon\" type=\"image/png\" sizes=\"32x32\" href=\"/f-32.png\"><link rel=\"apple-touch-icon\" href=\"/touch.png\">");
+        let links: std::vec::Vec<_> = dom
+            .icons()
+            .iter()
+            .map(|s| s.get(&dom))
+            .collect();
+        assert_eq!(
+            links,
+            std::vec![b"/f.svg".as_slice(), b"/f-32.png".as_slice(), b"/touch.png".as_slice()]
+        );
     }
 
     #[test]
@@ -1855,7 +1903,7 @@ mod tests {
     fn a_rel_that_only_rhymes_with_icon_is_not_the_icon() {
         let mut dom = Dom::new();
         dom.parse(b"<link rel=\"next-stylesheet\" href=\"/x.css\">");
-        assert!(dom.meta().icon.is_empty());
+        assert!(dom.icons().is_empty());
         assert!(dom.stylesheets().is_empty());
     }
 
@@ -1865,7 +1913,7 @@ mod tests {
         dom.parse(b"<body><p>plain</p></body>");
         assert!(dom.meta().title.is_empty());
         assert!(dom.meta().description.is_empty());
-        assert!(dom.meta().icon.is_empty());
+        assert!(dom.icons().is_empty());
         assert!(dom.stylesheets().is_empty());
     }
 
