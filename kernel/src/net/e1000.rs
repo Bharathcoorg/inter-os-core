@@ -5,7 +5,13 @@
 //! platform mapping layer; the driver never assumes a virtual address is a
 //! physical DMA address.
 
-use core::sync::atomic::{compiler_fence, Ordering};
+use core::sync::atomic::{compiler_fence, AtomicU64, Ordering};
+
+pub static E1000_RX_COUNT: AtomicU64 = AtomicU64::new(0);
+
+pub fn rx_packet_count() -> u64 {
+    E1000_RX_COUNT.load(Ordering::Relaxed)
+}
 use super::device::{NetError, NetworkDevice, MAX_PACKET_SIZE};
 use super::ethernet::MacAddress;
 use crate::memory::{allocate_dma_frames, physical_to_virtual};
@@ -301,8 +307,6 @@ impl NetworkDevice for E1000Device {
         let idx = self.rx_index as usize;
         unsafe {
             let desc = &mut *self.rx_desc.add(idx);
-            let rdh = read32(self.base_vaddr, RDH);
-            let rdt = read32(self.base_vaddr, RDT);
             if desc.status & RX_EOP == 0 { return Err(NetError::NoPacketAvailable); }
             let len = desc.length as usize;
             // WHY recycle first: returning BufferTooSmall before reclaiming the
@@ -312,7 +316,7 @@ impl NetworkDevice for E1000Device {
             compiler_fence(Ordering::Release);
             write32(self.base_vaddr, RDT, idx as u32);
             self.rx_index = ((idx + 1) % RX_DESC_COUNT) as u16;
-            crate::serial_println!("[E1000 RX] idx={} len={} RDH={} RDT={} -> new_RDT={}", idx, len, rdh, rdt, idx);
+            E1000_RX_COUNT.fetch_add(1, Ordering::Relaxed);
 
             if len > out.len() { return Err(NetError::BufferTooSmall); }
             if len > MAX_PACKET_SIZE { return Err(NetError::InvalidPacket); }
