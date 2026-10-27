@@ -593,6 +593,27 @@ def test_the_app_says_the_launcher_path_is_not_wired_up():
         )
 
 
+def test_the_floating_button_does_not_sit_on_a_value():
+    """A button that covers a value hides the value.
+
+    The agent manager's floating button floats over the bottom-right of the
+    body, so the body has to reserve a band under the last card for that card
+    to be scrolled into. Without the band the button lands on whatever value
+    happens to be at the bottom-right, and a value under a button is a value
+    nobody can read.
+    """
+    for path, (lib, main, _theme) in SOURCES.items():
+        source = lib + main
+        radius = _const(source, "FAB_R")
+        margin = _const(source, "FAB_MARGIN")
+        assert radius > 0, f"{path} has no floating button to reserve room for"
+        assert margin >= 0, f"{path} has a negative floating button margin"
+        assert "FAB_R * 2 + FAB_MARGIN" in _code(source), (
+            f"{path} does not reserve a band under the last card for the "
+            "floating button"
+        )
+
+
 def test_the_mirrored_crate_is_the_canonical_crate():
     """The public repository's copy has to be the private one.
 

@@ -967,7 +967,20 @@ impl AgentManagerApp {
             self.cards[index].width = width as u16;
             y += height + CARD_GAP;
         }
-        let content = y.saturating_sub(CARD_GAP);
+        // WHY the band under the last card: the floating button covers the
+        // bottom-right of the body, and a value that sits under it is a
+        // value a person cannot read. The band is empty space the last card
+        // can be scrolled past, so the button never sits on a value.
+        //
+        // WHY the chat surface has no band: it has no floating button, and a
+        // composer that scrolls further than it needs to is a composer that
+        // moves under the thumb for no reason.
+        let reserved = if self.surface == Surface::Chat {
+            0
+        } else {
+            FAB_R * 2 + FAB_MARGIN
+        };
+        let content = y.saturating_sub(CARD_GAP) + reserved;
         self.content_height = content as u16;
         self.scroll = ScrollState::new(content, self.body_h(), self.scroll.offset);
     }
