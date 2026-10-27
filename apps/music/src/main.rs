@@ -1295,11 +1295,7 @@ fn text_in_rect_centered(
 ) -> Option<u32> {
     let w = font::measure(s, scale);
     let x0 = rect.x + rect.w.saturating_sub(w) / 2;
-    let y0 = if rect.h >= 16 * scale {
-        rect.y + (rect.h - 16 * scale) / 2
-    } else {
-        rect.y + rect.h.saturating_sub(font::line_height(scale)) / 2
-    };
+    let y0 = rect.y + rect.h.saturating_sub(font::line_height(scale)) / 2;
     text(x, y, x0, y0, scale, s, color, bg)
 }
 
@@ -2930,13 +2926,7 @@ pub extern "C" fn _start() -> ! {
                                 }
                                 std::exit_with_code(0);
                             }
-                        }
-                        if input.kind == 4 || input.kind == 6 || input.kind == 7 || input.kind == 8 || input.kind == 10 {
-                            std::log("[MUSIC APP] Navigation gesture recognized. Exiting to launcher.").ok();
-                            if surface > 0 {
-                                let _ = std::surface_destroy(surface);
-                            }
-                            std::exit_with_code(0);
+                            continue;
                         }
                         if input.kind == 1 {
                             match handle_tap(&mut music, input.x, input.y) {
