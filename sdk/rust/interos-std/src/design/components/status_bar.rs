@@ -574,6 +574,26 @@ mod tests {
     }
 
     #[test]
+    fn the_unbound_strip_inks_the_pixels_the_shell_has_always_shown() {
+        // WHY a count and not an image: the marks are chrome, and a shape that
+        // drifts by a row is a shape every surface inherits. This is the total
+        // the shell drew before the band moved into the SDK, so the port is
+        // checked against the pixels people already read as the status bar.
+        use crate::design::viewport::LOGICAL_WIDTH;
+        let bar = StatusBar::new(LOGICAL_WIDTH);
+        let instruments = Instruments::unmeasured();
+        let inked = ink_of(LOGICAL_WIDTH * HEIGHT, |i| {
+            bar.glyph_pixel(
+                i % LOGICAL_WIDTH,
+                i / LOGICAL_WIDTH,
+                &instruments,
+                Theme::LIGHT.on_surface,
+            )
+        });
+        assert_eq!(inked, 214);
+    }
+
+    #[test]
     fn the_band_divides_itself_from_the_page() {
         let bar = StatusBar::new(WIDTH);
         let instruments = Instruments::unmeasured();
