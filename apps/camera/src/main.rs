@@ -42,23 +42,26 @@ const CHUNK: usize = 4096;
 const TOP_BAND_Y0: usize = 0;
 const TOP_BAND_Y1: usize = 112;
 
-const VIEWFINDER_Y0: usize = 120;
-const VIEWFINDER_Y1: usize = 1120;
+/// The viewfinder and the dock take their geometry from the model, so the
+/// rectangles the renderer paints are the rectangles the touch handler taps.
+const VIEWFINDER_Y0: usize = camera::VIEWFINDER_TOP;
+const VIEWFINDER_Y1: usize = camera::VIEWFINDER_BOTTOM;
 
 /// Every control aligns to the platform's 24px gutter.
 const GUTTER: usize = spacing::GRID_24;
-const VIEWFINDER_X0: usize = GUTTER;
-const VIEWFINDER_X1: usize = W - GUTTER;
+const VIEWFINDER_X0: usize = camera::VIEWFINDER_LEFT;
+const VIEWFINDER_X1: usize = camera::VIEWFINDER_RIGHT;
 
 /// Inner width of the viewfinder canvas (24px gutter on each edge).
-const VIEWFINDER_W: usize = VIEWFINDER_X1 - VIEWFINDER_X0;
+const VIEWFINDER_W: usize = camera::VIEWFINDER_WIDTH;
 
-/// Aspect ratio toggle pill inside the viewfinder header (4:3 vs 16:9 vs 1:1).
-const ASPECT_RECT: Rect = Rect::new(VIEWFINDER_X0 + 12, VIEWFINDER_Y0 + 16, 76, 48);
-/// Rule-of-Thirds 3x3 framing grid toggle pill inside the viewfinder header.
-const GRID_RECT: Rect = Rect::new(VIEWFINDER_X0 + 100, VIEWFINDER_Y0 + 16, 76, 48);
-/// Self-timer mode toggle pill inside the viewfinder header.
-const TIMER_RECT: Rect = Rect::new(VIEWFINDER_X0 + 188, VIEWFINDER_Y0 + 16, 76, 48);
+/// The three chips over the viewfinder, in their row order.
+/// Aspect ratio toggle (4:3 vs 16:9 vs 1:1).
+const ASPECT_RECT: Rect = camera::chip_rect(0);
+/// Rule-of-Thirds 3x3 framing grid toggle.
+const GRID_RECT: Rect = camera::chip_rect(1);
+/// Self-timer mode toggle.
+const TIMER_RECT: Rect = camera::chip_rect(2);
 
 const MODE_STRIP_Y0: usize = 1144;
 const MODE_STRIP_Y1: usize = 1204;
@@ -70,7 +73,7 @@ const MODE_X0: usize = GUTTER;
 const MODE_X1: usize = MODE_X0 + MODE_SLOT_W + MODE_SLOT_GAP;
 const MODE_X2: usize = MODE_X1 + MODE_SLOT_W + MODE_SLOT_GAP;
 
-const DOCK_Y0: usize = 1210;
+const DOCK_Y0: usize = camera::DOCK_Y0;
 const DOCK_Y1: usize = H;
 
 // -----------------------------------------------------------------------------
@@ -110,12 +113,12 @@ const FLASH_TEXT_W: usize = FLASH_RECT.w.saturating_sub(44);
 const HOME_HIT: Rect = Rect::new(240, 1392, 240, 48);
 const HOME_PILL: Rect = Rect::new(260, 1418, 200, 6);
 
-// Shutter button (r=48 core, outer ring 64px)
-const SHUTTER_CX: usize = 360;
-const SHUTTER_CY: usize = 1310;
-const SHUTTER_RING_OUTER: usize = 64;
-const SHUTTER_RING_INNER: usize = 56;
-const SHUTTER_R_CORE: usize = 48;
+// Shutter button (r=48 core, outer ring 64px), as the model places it.
+const SHUTTER_CX: usize = camera::SHUTTER_CX;
+const SHUTTER_CY: usize = camera::SHUTTER_CY;
+const SHUTTER_RING_OUTER: usize = camera::SHUTTER_RING_OUTER;
+const SHUTTER_RING_INNER: usize = camera::SHUTTER_RING_INNER;
+const SHUTTER_R_CORE: usize = camera::SHUTTER_R_CORE;
 
 /// The dock's two side controls, as the centres of their pictograms.
 const PHOTOS_CX: usize = 110;
@@ -768,6 +771,13 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
 
     // 5. Bottom Shutter Dock & Hardware Controls (y: DOCK_Y0..DOCK_Y1)
     if (DOCK_Y0..DOCK_Y1 - 30).contains(&y) {
+        // 5.0 What the last press of the shutter answered, in the platform's
+        // own words, in the strip above the ring. Painted first because the
+        // caption is the answer the control owes the user.
+        if let Some(c) = camera.shutter_notice_pixel(x, y, camera.shutter_notice_ink(), chrome::BODY) {
+            return c;
+        }
+
         // 5.1 Bottom-left Gallery Thumbnail Disc (radius 32, diameter 64px >= 48px)
         if side_button_hit(x, y, PHOTOS_CX) {
             let dx = x as isize - PHOTOS_CX as isize;
@@ -1025,6 +1035,7 @@ enum Dirty {
     None,
     TopRow,
     Viewfinder,
+    Dock,
     All,
 }
 
@@ -1294,13 +1305,22 @@ fn handle_camera_touch(camera: &mut CameraApp, x: u32, y: u32) -> Tap {
     if shutter_hit(x as isize - SHUTTER_CX as isize, y as isize - SHUTTER_CY as isize) {
         if camera.status == CameraStatus::AuthorityRefused {
             std::log("[CAMERA APP] Shutter unavailable: kernel refused camera authority for this task.").ok();
-            return Tap::None;
+            // WHY the dock repaints for a press that did nothing: the press
+            // has an answer and the user has to be able to read it. Before
+            // this the refusal reached the serial log only, which left the
+            // control looking broken rather than refused.
+            camera.refuse_shutter();
+            return Tap::Redraw(Dirty::Dock);
         }
 
         // If self-timer is enabled, begin countdown
         if camera.timer_mode != TimerMode::Off && camera.countdown_ticks == 0 {
             camera.countdown_ticks = camera.timer_mode.seconds() * 10;
             camera.shutter_feedback_ticks = 4;
+            // WHY the caption goes when a countdown starts: the strip under
+            // the shutter answers the press that just happened, and a press
+            // that is counting down has not been refused.
+            camera.clear_shutter_notice();
             std::log("[CAMERA APP] Self-timer countdown initiated.").ok();
             std::audio_haptic_click().ok();
             return Tap::Redraw(Dirty::Viewfinder);
@@ -1457,6 +1477,7 @@ pub extern "C" fn _start() -> ! {
                             VIEWFINDER_Y0,
                             VIEWFINDER_Y1,
                         ),
+                        Dirty::Dock => render_camera_band(surface, &camera, DOCK_Y0, DOCK_Y1),
                         Dirty::All => render_camera_ui(surface, &camera),
                         Dirty::None => {}
                     }

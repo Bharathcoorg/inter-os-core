@@ -13,6 +13,7 @@ pub use interos_std as std;
 pub mod theme;
 
 use core::ptr::addr_of_mut;
+use interos_std::design::primitives::Rect;
 
 // ---------------------------------------------------------------------------
 // The platform's error codes the camera has to tell apart.
@@ -345,6 +346,123 @@ pub const VIEWFINDER_TEXT_W: usize = SURFACE_W - 40;
 /// its column is a label that runs into the next one, and the settings
 /// surface is where the camera states what the platform supports.
 pub const SETTINGS_TEXT_MAX: usize = 600;
+
+// ---------------------------------------------------------------------------
+// The viewfinder and the chips that float over it.
+// ---------------------------------------------------------------------------
+
+/// The gutter the viewfinder keeps from the edge of the surface.
+pub const VIEWFINDER_GUTTER: usize = interos_std::design::spacing::GRID_24;
+
+/// The viewfinder's left edge.
+pub const VIEWFINDER_LEFT: usize = VIEWFINDER_GUTTER;
+
+/// The viewfinder's top edge.
+pub const VIEWFINDER_TOP: usize = 120;
+
+/// The viewfinder's right edge.
+pub const VIEWFINDER_RIGHT: usize = SURFACE_W - VIEWFINDER_GUTTER;
+
+/// The viewfinder's bottom edge.
+pub const VIEWFINDER_BOTTOM: usize = 1120;
+
+/// The viewfinder's width.
+pub const VIEWFINDER_WIDTH: usize = VIEWFINDER_RIGHT - VIEWFINDER_LEFT;
+
+/// The viewfinder's height.
+pub const VIEWFINDER_HEIGHT: usize = VIEWFINDER_BOTTOM - VIEWFINDER_TOP;
+
+/// The viewfinder's corner radius: the platform's card radius.
+///
+/// WHY the chips are measured against it: the viewfinder's rounded corners
+/// reach `VIEWFINDER_RADIUS` pixels in from its edges, so a chip that sits
+/// inside that band is drawn inside the corner the same way a chip that
+/// hangs over the edge is cut by it. A chip has to clear the radius, not
+/// merely be inside the rectangle.
+pub const VIEWFINDER_RADIUS: usize = interos_std::design::radius::CARD;
+
+/// The width of a chip at the top of the viewfinder.
+pub const CHIP_W: usize = 72;
+
+/// The height of a chip at the top of the viewfinder.
+pub const CHIP_H: usize = 48;
+
+/// The gap between two chips.
+pub const CHIP_GAP: usize = 12;
+
+/// The chip row's left edge.
+///
+/// WHY it is a gutter in from the viewfinder's edge: the row used to start
+/// twelve pixels from it, which put the first chip inside the viewfinder's
+/// corner band, so the chip read as cut by the viewfinder's own border.
+pub const CHIP_ROW_X0: usize = VIEWFINDER_LEFT + VIEWFINDER_GUTTER;
+
+/// The chip row's top edge.
+///
+/// WHY it is clear of the viewfinder's top border by more than the corner
+/// radius: the chips float over the frame, and a chip that starts inside
+/// the corner band is drawn against the border it is supposed to float
+/// above.
+pub const CHIP_ROW_Y: usize = VIEWFINDER_TOP + 64;
+
+/// The chip at `index`: 0 is the aspect ratio, 1 the framing grid, 2 the
+/// self-timer.
+///
+/// WHY the chips live here and not in the renderer: the rectangle that is
+/// drawn and the rectangle that is tapped have to be the same rectangle, and
+/// a pair of copies of the same four numbers is a pair that can drift.
+pub const fn chip_rect(index: usize) -> Rect {
+    Rect::new(
+        CHIP_ROW_X0 + index * (CHIP_W + CHIP_GAP),
+        CHIP_ROW_Y,
+        CHIP_W,
+        CHIP_H,
+    )
+}
+
+/// How many chips the viewfinder carries.
+pub const CHIP_COUNT: usize = 3;
+
+// ---------------------------------------------------------------------------
+// The shutter, and the refusal caption that answers it.
+// ---------------------------------------------------------------------------
+
+/// The shutter's centre column.
+pub const SHUTTER_CX: usize = SURFACE_W / 2;
+
+/// The shutter's centre row.
+pub const SHUTTER_CY: usize = 1310;
+
+/// The shutter's outer ring.
+pub const SHUTTER_RING_OUTER: usize = 64;
+
+/// The shutter's inner ring.
+pub const SHUTTER_RING_INNER: usize = 56;
+
+/// The shutter's core.
+pub const SHUTTER_R_CORE: usize = 48;
+
+/// The top of the dock: the band the shutter and the refusal caption live in.
+pub const DOCK_Y0: usize = 1210;
+
+/// The refusal caption's line box: in the dock, above the shutter's ring.
+///
+/// WHY it is here and not on the viewfinder: the caption answers a press of
+/// the shutter, so it belongs next to the shutter, and the strip between
+/// the dock's top edge and the shutter's outer ring is the only free space
+/// there. The shutter's ring starts at `SHUTTER_CY - SHUTTER_RING_OUTER`,
+/// which is four pixels below the end of this line box.
+pub const SHUTTER_NOTICE_Y: usize = DOCK_Y0;
+
+/// The type scale of the refusal caption: the body scale, so a refusal the
+/// user caused cannot be missed.
+pub const SHUTTER_NOTICE_SCALE: usize = 2;
+
+/// The width the refusal caption is measured against.
+pub const SHUTTER_NOTICE_MAX_W: usize = SURFACE_W - VIEWFINDER_GUTTER * 2;
+
+/// The longest refusal caption the camera carries.
+pub const SHUTTER_NOTICE_MAX: usize = 96;
 
 /// Left x that centres `text` at `scale` inside `[x0, x0 + available)`.
 ///
@@ -710,6 +828,17 @@ pub struct CameraApp {
     pub aspect_ratio: CameraAspectRatio,
     /// Tactile visual feedback timer ticks remaining after shutter press.
     pub shutter_feedback_ticks: u32,
+    /// The refusal the last press of the shutter produced, in the platform's
+    /// own words.
+    ///
+    /// WHY it is kept: the refusal used to reach the serial log only, so a
+    /// press of the shutter that the platform refused changed nothing on the
+    /// surface and the user was left with a control that looked broken.
+    pub shutter_notice: [u8; SHUTTER_NOTICE_MAX],
+    /// How many bytes of the refusal caption are used.
+    pub shutter_notice_len: usize,
+    /// Where the refusal caption starts.
+    pub shutter_notice_x: usize,
     /// Self-timer countdown mode (Off, 3s, 10s).
     pub timer_mode: TimerMode,
     /// Self-timer countdown ticks remaining before capture.
@@ -767,6 +896,9 @@ impl CameraApp {
             guides: false,
             aspect_ratio: CameraAspectRatio::Ratio4_3,
             shutter_feedback_ticks: 0,
+            shutter_notice: [0; SHUTTER_NOTICE_MAX],
+            shutter_notice_len: 0,
+            shutter_notice_x: 0,
             timer_mode: TimerMode::Off,
             countdown_ticks: 0,
             thumbnail: [0; THUMBNAIL_DIM * THUMBNAIL_DIM * 3],
@@ -837,6 +969,7 @@ impl CameraApp {
     /// deliver. The app says so rather than pretending a frame arrived.
     pub fn stream_video_frame(&mut self) -> CaptureOutcome {
         self.capture = CaptureOutcome::NoVideoStream;
+        self.show_capture_outcome();
         CaptureOutcome::NoVideoStream
     }
 
@@ -894,6 +1027,99 @@ impl CameraApp {
         let suffix: &[u8] = if self.total_photos == 1 { b" SHOT" } else { b" SHOTS" };
         n += copy_bytes(&mut buf[n..], suffix);
         self.shots_label_len = copy_bytes(&mut self.shots_label, &buf[..n]);
+    }
+
+    /// Records the refusal the shutter produced, so the surface can show it.
+    ///
+    /// WHY the caption is measured here and not in the renderer: the renderer
+    /// is called once per pixel of the surface, and measuring a run there
+    /// would run tens of thousands of times for one line of text.
+    pub fn set_shutter_notice(&mut self, text: &[u8]) {
+        let len = copy_bytes(&mut self.shutter_notice, text);
+        self.shutter_notice_len = len;
+        self.shutter_notice_x = centred_x(
+            &self.shutter_notice[..len],
+            SHUTTER_NOTICE_SCALE,
+            VIEWFINDER_LEFT,
+            SHUTTER_NOTICE_MAX_W,
+        );
+    }
+
+    /// Clears the refusal caption.
+    pub fn clear_shutter_notice(&mut self) {
+        self.shutter_notice_len = 0;
+    }
+
+    /// The colour the caption is painted in.
+    ///
+    /// WHY it comes from the platform's verdict and not from the caption: a
+    /// refusal and a capture the index simply did not describe are different
+    /// facts, and the user reads the colour before the words. Painting the
+    /// amber line red would say the platform refused something it accepted.
+    pub fn shutter_notice_ink(&self) -> u32 {
+        use crate::theme::chrome;
+        match self.status {
+            CameraStatus::AuthorityRefused | CameraStatus::Failed => chrome::REFUSED,
+            CameraStatus::NoSensor | CameraStatus::AuthorityHeld => chrome::CAUTION,
+        }
+    }
+
+    /// Puts the answer the last press of the shutter produced onto the surface.
+    ///
+    /// WHY it is one rule over the whole outcome rather than a call at each
+    /// refusal: a caption that is only cleared by the branches that remember
+    /// to clear it is a caption that outlives the press it answered, and the
+    /// user then reads a refusal under a shutter that has since worked.
+    ///
+    /// WHY a published photo says nothing: the thumbnail disc fills with the
+    /// frame and the counter climbs, so the strip the caption uses would only
+    /// repeat what the two already show.
+    fn show_capture_outcome(&mut self) {
+        if matches!(self.capture, CaptureOutcome::Published | CaptureOutcome::None) {
+            self.clear_shutter_notice();
+        } else {
+            self.set_shutter_notice(self.capture.caption());
+        }
+    }
+
+    /// Records why the shutter refused, in the platform's own words.
+    ///
+    /// WHY the headline and not a sentence of the app's own: the platform is
+    /// what refused the capture, and the app has no more to add than the
+    /// platform said.
+    pub fn refuse_shutter(&mut self) {
+        let headline = self.status.headline();
+        self.set_shutter_notice(headline);
+    }
+
+    /// The pixel the refusal caption paints at `(x, y)`, if any.
+    ///
+    /// WHY this is a step in the model and not in the renderer: the caption is
+    /// the answer the user gets for a press of the shutter, and the answer
+    /// has to be the same on every surface the camera draws.
+    pub fn shutter_notice_pixel(&self, x: usize, y: usize, ink: u32, bg: u32) -> Option<u32> {
+        if self.shutter_notice_len == 0 {
+            return None;
+        }
+        let text = &self.shutter_notice[..self.shutter_notice_len];
+        let (bx, bt, bw, bh) = std::design::outline_text::run_box(
+            self.shutter_notice_x,
+            SHUTTER_NOTICE_Y,
+            SHUTTER_NOTICE_SCALE,
+            text,
+        );
+        if x < bx || x - bx >= bw || y < bt || y - bt >= bh {
+            return None;
+        }
+        let run = std::design::outline_text::place_run(
+            self.shutter_notice_x,
+            SHUTTER_NOTICE_Y,
+            SHUTTER_NOTICE_SCALE,
+            text,
+            Some(SHUTTER_NOTICE_MAX_W),
+            false,
+        )?;
+        run.pixel(x, y, ink, bg)
     }
 
     /// The label the capture readout carries.
@@ -967,6 +1193,7 @@ impl CameraApp {
                     self.last_error = code;
                     self.refresh_status_text();
                     self.capture = CaptureOutcome::CaptureRefused(code);
+                    self.show_capture_outcome();
                     return self.capture;
                 }
             }
@@ -979,6 +1206,7 @@ impl CameraApp {
             self.last_error = ERR_INVALID_ARGUMENTS;
             self.refresh_status_text();
             self.capture = CaptureOutcome::CaptureRefused(ERR_INVALID_ARGUMENTS);
+            self.show_capture_outcome();
             return self.capture;
         };
 
@@ -1012,7 +1240,9 @@ impl CameraApp {
             Ok(false) => CaptureOutcome::WrittenNotIndexed,
             Err(code) => CaptureOutcome::WriteRefused(code),
         };
-        self.capture
+        let outcome = self.capture;
+        self.show_capture_outcome();
+        outcome
     }
 
     /// Downsamples the captured frame to a circular preview thumbnail for the gallery disc.
@@ -1640,5 +1870,128 @@ mod tests {
             CameraStatus::AuthorityRefused.label(),
             CameraStatus::NoSensor.label()
         );
+    }
+
+    #[test]
+    fn the_chip_row_clears_the_viewfinders_own_corner() {
+        // The row used to be laid out in the renderer, twelve pixels inside a
+        // viewfinder whose corner reaches eighteen, so the first chip was cut
+        // by the frame it floats above.
+        let mut left_edge_of = [0usize; CHIP_COUNT];
+        for index in 0..CHIP_COUNT {
+            let chip = chip_rect(index);
+            assert_eq!(chip.w, CHIP_W);
+            assert_eq!(chip.h, CHIP_H);
+            assert!(chip.h >= 48, "a chip has to stay a touch target");
+            assert!(
+                chip.x >= VIEWFINDER_LEFT + VIEWFINDER_RADIUS,
+                "chip {} hangs over the viewfinder's left corner",
+                index
+            );
+            assert!(
+                chip.y >= VIEWFINDER_TOP + VIEWFINDER_RADIUS,
+                "chip {} hangs over the viewfinder's top corner",
+                index
+            );
+            assert!(chip.x + chip.w <= VIEWFINDER_RIGHT);
+            assert!(chip.y + chip.h <= VIEWFINDER_BOTTOM);
+            left_edge_of[index] = chip.x;
+        }
+        for index in 1..CHIP_COUNT {
+            assert!(
+                left_edge_of[index] > left_edge_of[index - 1] + CHIP_W,
+                "chips {} and {} overlap",
+                index - 1,
+                index
+            );
+        }
+    }
+
+    #[test]
+    fn every_shutter_answer_fits_the_strip_it_is_drawn_in() {
+        let outcomes = [
+            CaptureOutcome::Published,
+            CaptureOutcome::WrittenNotIndexed,
+            CaptureOutcome::WriteRefused(-13),
+            CaptureOutcome::CaptureRefused(-13),
+            CaptureOutcome::NoVideoStream,
+            CaptureOutcome::None,
+        ];
+        // The only room under the shutter is the strip between the dock's top
+        // edge and the outer ring.
+        let strip = SHUTTER_CY - SHUTTER_RING_OUTER - SHUTTER_NOTICE_Y;
+        assert!(strip > 0, "the dock leaves the caption no room at all");
+        for outcome in outcomes {
+            let text = outcome.caption();
+            assert!(
+                text.len() <= SHUTTER_NOTICE_MAX,
+                "the caption {:?} is cut by the buffer it is copied into",
+                core::str::from_utf8(text).unwrap()
+            );
+            assert!(
+                std::design::font::measure(text, SHUTTER_NOTICE_SCALE) <= SHUTTER_NOTICE_MAX_W,
+                "the caption {:?} does not fit between the gutters",
+                core::str::from_utf8(text).unwrap()
+            );
+            let (_, _, _, height) =
+                std::design::outline_text::run_box(0, SHUTTER_NOTICE_Y, SHUTTER_NOTICE_SCALE, text);
+            assert!(
+                height <= strip,
+                "the caption {:?} runs into the shutter",
+                core::str::from_utf8(text).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn the_caption_lands_in_the_dock_and_not_on_the_shutter() {
+        let mut app = CameraApp::new();
+        app.status = CameraStatus::AuthorityRefused;
+        app.refuse_shutter();
+        let text = &app.shutter_notice[..app.shutter_notice_len];
+        let (left, top, width, height) = std::design::outline_text::run_box(
+            app.shutter_notice_x,
+            SHUTTER_NOTICE_Y,
+            SHUTTER_NOTICE_SCALE,
+            text,
+        );
+        assert!(
+            left >= VIEWFINDER_LEFT && left + width <= VIEWFINDER_RIGHT,
+            "the caption runs past the gutters the rest of the surface is drawn inside"
+        );
+        assert!(
+            top >= DOCK_Y0 && top + height <= SHUTTER_CY - SHUTTER_RING_OUTER,
+            "the caption runs into the shutter it is answering"
+        );
+        assert_eq!(app.shutter_notice_ink(), theme::chrome::REFUSED);
+        app.status = CameraStatus::AuthorityHeld;
+        assert_eq!(app.shutter_notice_ink(), theme::chrome::CAUTION);
+    }
+
+    #[test]
+    fn the_caption_answers_the_last_press_and_not_the_first() {
+        let mut app = CameraApp::new();
+        assert_eq!(app.shutter_notice_len, 0, "no press of the shutter has happened yet");
+        assert!(
+            app.shutter_notice_pixel(100, SHUTTER_NOTICE_Y, 0xFF20_2020, 0xFF00_0000).is_none(),
+            "an empty caption must not paint over the dock"
+        );
+
+        app.status = CameraStatus::AuthorityRefused;
+        app.refuse_shutter();
+        assert_eq!(
+            app.shutter_notice_len,
+            CameraStatus::AuthorityRefused.headline().len(),
+            "the platform's own words are the answer the user gets"
+        );
+
+        app.capture = CaptureOutcome::CaptureRefused(-13);
+        app.show_capture_outcome();
+        assert_eq!(&app.shutter_notice[..app.shutter_notice_len], CaptureOutcome::CaptureRefused(-13).caption());
+
+        // A press that worked cannot leave yesterday's refusal under it.
+        app.capture = CaptureOutcome::Published;
+        app.show_capture_outcome();
+        assert_eq!(app.shutter_notice_len, 0, "a published photo needs no caption");
     }
 }
