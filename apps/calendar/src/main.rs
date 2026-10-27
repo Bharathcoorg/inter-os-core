@@ -1354,12 +1354,13 @@ fn week_view_pixel(
             }
 
             // Right chevron '>'
+            //
+            // WHY it goes through chevron_pixel: the hand-rolled arm test here
+            // measured dx to the right of a left-hand apex, which draws a '<'
+            // on a row that opens forward into the event. The shared helper
+            // puts the apex on the pointing side.
             if x >= 644 && x < 664 && y >= card_y + 26 && y < card_y + 48 {
-                let cx = 650isize;
-                let cy = (card_y + 37) as isize;
-                let dx = (x as isize) - cx;
-                let dy = ((y as isize) - cy).abs();
-                if (dx - dy).abs() <= 1 && dx >= 0 && dx <= 8 {
+                if chevron_pixel(x, y, 658, (card_y + 37) as isize, ChevronDir::Right) {
                     return THEME.on_surface_variant;
                 }
             }
@@ -1509,12 +1510,12 @@ fn day_view_pixel(
                     }
 
                     // Chevron '>'
+                    //
+                    // WHY it goes through chevron_pixel: the arm test here
+                    // measured dx to the right of a left-hand apex, which drew
+                    // a '<' on a row that opens forward.
                     if x >= 644 && x < 664 && y >= card_y + 46 && y < card_y + 70 {
-                        let cx = 650isize;
-                        let cy = (card_y + 58) as isize;
-                        let dx = (x as isize) - cx;
-                        let dy = ((y as isize) - cy).abs();
-                        if (dx - dy).abs() <= 1 && dx >= 0 && dx <= 8 {
+                        if chevron_pixel(x, y, 658, (card_y + 58) as isize, ChevronDir::Right) {
                             return THEME.on_surface_variant;
                         }
                     }
@@ -1628,12 +1629,12 @@ fn agenda_view_pixel(
                 }
 
                 // Chevron '>'
+                //
+                // WHY it goes through chevron_pixel: the arm test here measured
+                // dx to the right of a left-hand apex, which drew a '<' on a
+                // row that opens forward.
                 if x >= 644 && x < 664 && y >= card_y + 40 && y < card_y + 64 {
-                    let cx = 650isize;
-                    let cy = (card_y + 52) as isize;
-                    let dx = (x as isize) - cx;
-                    let dy = ((y as isize) - cy).abs();
-                    if (dx - dy).abs() <= 1 && dx >= 0 && dx <= 8 {
+                    if chevron_pixel(x, y, 658, (card_y + 52) as isize, ChevronDir::Right) {
                         return THEME.on_surface_variant;
                     }
                 }
@@ -1819,12 +1820,12 @@ fn event_list_pixel(x: usize, y: usize, items: &[EventRecord], len: usize) -> u3
         }
 
         // Right chevron '>' (indicator to open event details)
+        //
+        // WHY it goes through chevron_pixel: the arm test here measured dx to
+        // the right of a left-hand apex, which draws a '<' on a row that opens
+        // forward into the event's details.
         if x >= 644 && x < 660 && y >= card_y + 44 && y < card_y + 64 {
-            let cx = 650isize;
-            let cy = (card_y + 54) as isize;
-            let dx = (x as isize) - cx;
-            let dy = ((y as isize) - cy).abs();
-            if (dx - dy).abs() <= 1 && dx >= 0 && dx <= 8 {
+            if chevron_pixel(x, y, 658, (card_y + 54) as isize, ChevronDir::Right) {
                 return THEME.on_surface_variant;
             }
         }
@@ -1956,7 +1957,15 @@ fn details_pixel(x: usize, y: usize, app: &CalendarApp, event: &EventRecord) -> 
     if let Some(c) = test_text(x, y, DETAILS_X0 + 24, 712, 2, b"SECURITY & STORAGE", 300, THEME.on_surface_variant, THEME.surface_container) {
         return c;
     }
-    if let Some(c) = test_text(x, y, DETAILS_X0 + 24, 750, 2, b"Settings Store / Sector 203", 600, THEME.on_surface, THEME.surface_container) {
+    // WHY the line follows the flag: this row used to name the sealed sector
+    // whatever the vault had answered. The app only knows whether its own
+    // write of this sector was accepted, and that is all the row may say.
+    let storage_note: &[u8] = if app.sector_encrypted {
+        b"Vault accepted the sector 203 write"
+    } else {
+        b"No sector 203 write accepted by the vault"
+    };
+    if let Some(c) = test_text(x, y, DETAILS_X0 + 24, 750, 2, storage_note, 600, THEME.on_surface, THEME.surface_container) {
         return c;
     }
 
@@ -2009,7 +2018,14 @@ fn details_pixel(x: usize, y: usize, app: &CalendarApp, event: &EventRecord) -> 
 
     // Status message
     if y >= 900 && y < 932 {
-        let status = app.commit_status.as_bytes();
+        // WHY this line counts the store instead of repeating the create flow's
+        // status: the panel opens on an event that is already stored, and the
+        // create flow's string stays "NO EVENT CREATED YET" until that flow
+        // runs — so the panel denied the existence of the event it was showing.
+        let mut buf = [0u8; 32];
+        buf[..8].copy_from_slice(b"STORED: ");
+        let n = 8 + fmt_count(&mut buf[8..], app.store.len());
+        let status = &buf[..n];
         let sx = centered_x(status, 2, DETAILS_X0 + 20, DETAILS_X1 - DETAILS_X0 - 40);
         if let Some(c) = test_text(x, y, sx, 900, 2, status, DETAILS_X1 - DETAILS_X0 - 40, THEME.on_surface_variant, THEME.surface_container) {
             return c;

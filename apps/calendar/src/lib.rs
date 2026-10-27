@@ -917,4 +917,76 @@ mod tests {
         // from the record's fields, and none of them is a place.
         assert_eq!(event_location(&EventRecord::EMPTY), b"No location");
     }
+
+    /// The event panel used to name the sealed sector as though the write had
+    /// happened. It now prints the answer the vault actually gave, and both
+    /// answers have to fit the row they are drawn in.
+    #[test]
+    fn the_event_panel_reports_the_write_it_observed() {
+        use interos_std::font;
+        let main = include_str!("main.rs");
+        let start = main
+            .find("fn details_pixel")
+            .expect("the event panel is still drawn");
+        let end = main[start..]
+            .find("\nfn ")
+            .expect("the panel ends");
+        let panel = &main[start..start + end];
+        assert!(
+            !panel.contains("Settings Store / Sector 203"),
+            "the panel still names the sector as a fact"
+        );
+        assert!(panel.contains("if app.sector_encrypted"), "the panel ignores the flag");
+        assert!(panel.contains("Vault accepted the sector 203 write"));
+        assert!(panel.contains("No sector 203 write accepted by the vault"));
+
+        for note in [
+            "Vault accepted the sector 203 write",
+            "No sector 203 write accepted by the vault",
+        ] {
+            let w = font::measure(note.as_bytes(), 2);
+            assert!(w <= 600, "{note:?} measures {w} px against a 600 px row");
+        }
+    }
+
+    /// The event panel's footer counts the store, and every row chevron points
+    /// the way the row goes.
+    #[test]
+    fn the_event_panel_footer_counts_and_the_chevrons_point_forward() {
+        use interos_std::font;
+        let main = include_str!("main.rs");
+        let start = main
+            .find("fn details_pixel")
+            .expect("the event panel is still drawn");
+        let end = main[start..]
+            .find("\nfn ")
+            .expect("the panel ends");
+        let panel = &main[start..start + end];
+        assert!(
+            !panel.contains("commit_status"),
+            "the panel still prints the create flow's status under a stored event"
+        );
+        assert!(
+            panel.contains("app.store.len()"),
+            "the panel footer no longer counts what is stored"
+        );
+
+        // A left-hand apex with an arm measured to its right draws '<'.
+        assert!(
+            !main.contains("dx >= 0 && dx <= 8"),
+            "a row chevron is still drawn with a left-hand apex"
+        );
+        assert_eq!(
+            main.matches("chevron_pixel(x, y, 658,").count(),
+            4,
+            "every row chevron should go through the shared right-pointing helper"
+        );
+
+        let widest = "STORED: 999 EVENTS";
+        let w = font::measure(widest.as_bytes(), 2);
+        assert!(
+            w <= 632,
+            "{widest:?} measures {w} px against the 632 px footer"
+        );
+    }
 }

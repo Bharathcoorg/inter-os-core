@@ -454,13 +454,14 @@ def test_calendar_event_cards_do_not_name_a_location_that_was_never_stored():
 
 
 def test_calendar_day_view_arrows_point_the_way_they_move_the_day():
-    """The day-view header arrows may not be drawn mirrored.
+    """The calendar's chevrons point the way the row they sit on actually goes.
 
     WHY this needs pinning: the left chevron was drawn with its apex on the
     right and the right chevron with its apex on the left, so the arrow on
     the left pointed at the next day and the arrow on the right pointed back
     a day. The glyph direction and the day the tap handler selects now come
-    from the same named values.
+    from the same named values, and the row indicators in the month, week,
+    day and agenda views were drawn the same mirrored way.
     """
     main = read("apps/calendar/src/main.rs")
     lib = read("apps/calendar/src/lib.rs")
@@ -480,14 +481,21 @@ def test_calendar_day_view_arrows_point_the_way_they_move_the_day():
     assert "step_selected_day(d, DayArrow::Previous, max_d)" in main
     assert "step_selected_day(d, DayArrow::Next, max_d)" in main
 
-    # The month and week views carry no navigation chevron of their own, so
-    # there is nothing to mirror there.
-    assert "ChevronDir::" not in main.split("fn month_view_pixel")[1].split(
-        "fn week_view_pixel"
-    )[0]
-    assert "ChevronDir::" not in main.split("fn week_view_pixel")[1].split(
-        "fn day_view_pixel"
-    )[0]
+    # The month, week, day and agenda rows carry no navigation arrow of their
+    # own - their chevron points forward into the row it opens. Every one of
+    # them goes through the shared helper with an explicit direction, because
+    # the hand-rolled arm tests they used to carry measured dx away from a
+    # left-hand apex and drew a '<' on a row that opens forward.
+    assert "dx >= 0 && dx <= 8" not in main
+    assert main.count("chevron_pixel(x, y, 658,") == 4
+    for view in (
+        "fn week_view_pixel",
+        "fn day_view_pixel",
+        "fn agenda_view_pixel",
+        "fn event_list_pixel",
+    ):
+        body = main.split(view)[1].split("\nfn ")[0]
+        assert "ChevronDir::Right" in body, f"{view} lost its row chevron"
 
     # The shared helper keeps the direction in the signature.
     assert "pub enum ChevronDir" in lib
