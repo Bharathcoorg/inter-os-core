@@ -1429,13 +1429,29 @@ fn hex4(input: &[u8], at: usize) -> Option<u32> {
 /// the one field that can legitimately contain a newline: the gateway joins
 /// multiple `Set-Cookie` values with `\n`, which JSON escapes as `\n`.
 pub fn unescape_json_string(input: &[u8], out: &mut [u8]) -> Option<usize> {
+    let (written, stopped_early) = unescape_json_string_prefix(input, out);
+    if stopped_early {
+        None
+    } else {
+        Some(written)
+    }
+}
+
+/// The body of [`unescape_json_string`], reporting a short write instead of
+/// refusing it.
+///
+/// The flag says the text did not end here, either because `out` filled up or
+/// because an escape it cannot read was reached. A caller that wants the whole
+/// string uses the strict one; a caller with a fixed arena and a long file
+/// takes the front of it and says so.
+pub fn unescape_json_string_prefix(input: &[u8], out: &mut [u8]) -> (usize, bool) {
     let mut read = 0usize;
     let mut written = 0usize;
     while read < input.len() {
         let byte = input[read];
         if byte != b'\\' {
             if written >= out.len() {
-                return None;
+                return (written, true);
             }
             out[written] = byte;
             written += 1;
@@ -1443,81 +1459,85 @@ pub fn unescape_json_string(input: &[u8], out: &mut [u8]) -> Option<usize> {
             continue;
         }
         if read + 1 >= input.len() {
-            return None;
+            return (written, true);
         }
         let escaped = input[read + 1];
         read += 2;
         match escaped {
             b'"' | b'\\' | b'/' => {
                 if written >= out.len() {
-                    return None;
+                    return (written, true);
                 }
                 out[written] = escaped;
                 written += 1;
             }
             b'n' => {
                 if written >= out.len() {
-                    return None;
+                    return (written, true);
                 }
                 out[written] = b'\n';
                 written += 1;
             }
             b'r' => {
                 if written >= out.len() {
-                    return None;
+                    return (written, true);
                 }
                 out[written] = b'\r';
                 written += 1;
             }
             b't' => {
                 if written >= out.len() {
-                    return None;
+                    return (written, true);
                 }
                 out[written] = b'\t';
                 written += 1;
             }
             b'b' => {
                 if written >= out.len() {
-                    return None;
+                    return (written, true);
                 }
                 out[written] = 0x08;
                 written += 1;
             }
             b'f' => {
                 if written >= out.len() {
-                    return None;
+                    return (written, true);
                 }
                 out[written] = 0x0C;
                 written += 1;
             }
             b'u' => {
-                let high = hex4(input, read)?;
+                let Some(high) = hex4(input, read) else {
+                    return (written, true);
+                };
                 read += 4;
                 let scalar = if (0xD800..=0xDBFF).contains(&high) {
                     if read + 6 > input.len() || input[read] != b'\\' || input[read + 1] != b'u' {
-                        return None;
+                        return (written, true);
                     }
-                    let low = hex4(input, read + 2)?;
+                    let Some(low) = hex4(input, read + 2) else {
+                        return (written, true);
+                    };
                     read += 6;
                     if !(0xDC00..=0xDFFF).contains(&low) {
-                        return None;
+                        return (written, true);
                     }
                     0x10000 + (((high - 0xD800) << 10) | (low - 0xDC00))
                 } else if (0xDC00..=0xDFFF).contains(&high) {
-                    return None;
+                    return (written, true);
                 } else {
                     high
                 };
                 let length = crate::utf8_len(scalar);
                 if length == 0 || written + length > out.len() {
-                    return None;
+                    return (written, true);
                 }
                 written = crate::write_utf8(out, written, scalar);
             }
-            _ => return None,
+            _ => return (written, true),
         }
     }
-    Some(written)
+    (written, false)
 }
 
 /// Reads the upstream status the gateway recorded in its envelope.
@@ -2215,6 +2235,26 @@ mod tests {
         let mut cookies = [0u8; 32];
         let len = unescape_json_string(raw, &mut cookies).unwrap();
         assert_eq!(&cookies[..len], b"a=1\nb=2");
+    }
+
+    #[test]
+    fn a_field_longer_than_the_buffer_is_read_as_far_as_it_goes() {
+        let raw = proxy_string_field(br#"{"html": "abcd"}"#, b"html").unwrap();
+        let mut out = [0u8; 3];
+        let (len, stopped_early) = unescape_json_string_prefix(raw, &mut out);
+        assert_eq!(&out[..len], b"abc");
+        assert!(stopped_early);
+        assert_eq!(unescape_json_string(raw, &mut [0u8; 3]), None);
+        assert_eq!(unescape_json_string(raw, &mut [0u8; 4]), Some(4));
+    }
+
+    #[test]
+    fn an_escape_the_cut_landed_inside_is_not_written_as_half_a_character() {
+        let raw = proxy_string_field(br#"{"html": "ab\u00e9cd"}"#, b"html").unwrap();
+        let mut out = [0u8; 3];
+        let (len, stopped_early) = unescape_json_string_prefix(raw, &mut out);
+        assert!(stopped_early);
+        assert_eq!(&out[..len], b"ab");
     }
 
     #[test]

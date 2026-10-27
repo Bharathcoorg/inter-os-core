@@ -7,7 +7,7 @@
 //! tree of elements and text.
 //!
 //! Everything is fixed-capacity and zero-allocation. Nodes, attributes,
-//! decoded text and the first stylesheet live in arrays owned by [`Dom`].
+//! decoded text and the stylesheet text live in arrays owned by [`Dom`].
 //! A document that exceeds a capacity is parsed up to that capacity and
 //! reports [`Dom::truncated`]; nothing panics and nothing is invented.
 //!
@@ -36,8 +36,17 @@ pub const MAX_DEPTH: usize = 64;
 /// The most links (anchors with an href) one document may hold.
 pub const MAX_LINKS: usize = 128;
 
-/// The most bytes of the first inline stylesheet that are kept.
+/// The most bytes of stylesheet text one document may carry, from its own
+/// `<style>` tags and from the files it links.
 pub const MAX_CSS_BYTES: usize = 16 * 1024;
+
+/// The most `<link rel="stylesheet">` addresses one document may name.
+///
+/// WHY a handful rather than one: a page that chains its styles is ordinary,
+/// and the file that carries its colours and its type is not always the one
+/// it asks for first. WHY not many: each is fetched before the page is drawn,
+/// so a long chain is a slow blank screen instead.
+pub const MAX_STYLESHEET_LINKS: usize = 4;
 
 /// The longest tag name kept whole. A longer name is truncated, which can
 /// only make it stop matching a selector; it never splits a node.
@@ -174,8 +183,11 @@ pub struct DocMeta {
     pub description: StrRef,
     /// The href of the `<link rel="icon">` the document points at.
     pub icon: StrRef,
-    /// The href of the first `<link rel="stylesheet">`.
-    pub stylesheet: StrRef,
+    /// The hrefs of the `<link rel="stylesheet">` tags, in the order the
+    /// document gave them. `stylesheet_count` says how many of the four it
+    /// actually named.
+    pub stylesheets: [StrRef; MAX_STYLESHEET_LINKS],
+    pub stylesheet_count: u8,
 }
 
 impl DocMeta {
@@ -183,7 +195,8 @@ impl DocMeta {
         title: StrRef::EMPTY,
         description: StrRef::EMPTY,
         icon: StrRef::EMPTY,
-        stylesheet: StrRef::EMPTY,
+        stylesheets: [StrRef::EMPTY; MAX_STYLESHEET_LINKS],
+        stylesheet_count: 0,
     };
 }
 
@@ -402,6 +415,12 @@ impl Dom {
         &self.meta
     }
 
+    /// The stylesheets the document linked, in the order it linked them.
+    pub fn stylesheets(&self) -> &[StrRef] {
+        let count = (self.meta.stylesheet_count as usize).min(MAX_STYLESHEET_LINKS);
+        &self.meta.stylesheets[..count]
+    }
+
     /// The value of `name` on this element, or `None`.
     pub fn attr<'a>(&'a self, id: NodeId, name: &[u8]) -> Option<&'a [u8]> {
         let node = self.node(id);
@@ -555,7 +574,8 @@ impl Dom {
         }
     }
 
-    /// The first inline stylesheet, as written.
+    /// The stylesheet text this document is styled by: what it wrote between
+    /// its own `<style>` tags, then what its links brought.
     pub fn css(&self) -> &[u8] {
         &self.css[..self.css_len]
     }
@@ -589,6 +609,37 @@ impl Dom {
         if css.len() > n {
             self.note(OVERFLOW_CSS);
         }
+    }
+
+    /// Adds a linked stylesheet's rules after the ones the page carried.
+    ///
+    /// WHY appended and not swapped in: what a page writes between its own
+    /// `<style>` tags and what it links from a file are both part of how it
+    /// wants to look, and the cascade reads the two as one text. Replacing
+    /// would drop whichever arrived second.
+    ///
+    /// The arena is bounded, so rules that do not fit are not applied and
+    /// the overflow is recorded rather than hidden. Returns how many of the
+    /// given bytes were kept, which is fewer than the input once the arena
+    /// is full.
+    pub fn append_css(&mut self, css: &[u8]) -> usize {
+        if css.is_empty() {
+            return 0;
+        }
+        // The separator costs one byte and buys the parser a clean edge
+        // between two stylesheets that are being read as one.
+        if self.css_len > 0 && self.css_len < MAX_CSS_BYTES {
+            self.css[self.css_len] = b'\n';
+            self.css_len += 1;
+        }
+        let free = MAX_CSS_BYTES - self.css_len;
+        let n = css.len().min(free);
+        self.css[self.css_len..self.css_len + n].copy_from_slice(&css[..n]);
+        self.css_len += n;
+        if css.len() > n {
+            self.note(OVERFLOW_CSS);
+        }
+        n
     }
 
     fn push_node(&mut self, kind: NodeKind, tag: StrRef, text: StrRef) -> NodeId {
@@ -832,11 +883,26 @@ impl Dom {
             if self.meta.icon.is_empty() && (rel_contains(rel, b"icon") || rel_contains(rel, b"apple-touch-icon")) {
                 let icon = self.intern(href);
                 self.meta.icon = icon;
-            } else if self.meta.stylesheet.is_empty() && rel_contains(rel, b"stylesheet") {
-                let stylesheet = self.intern(href);
-                self.meta.stylesheet = stylesheet;
+            } else if rel_contains(rel, b"stylesheet") {
+                self.link_stylesheet(href);
             }
         }
+    }
+
+    /// Remembers one `<link rel="stylesheet">` address, in document order.
+    ///
+    /// WHY the list stops at [`MAX_STYLESHEET_LINKS`] rather than overwriting
+    /// the last slot: the reader fetches these before it draws anything, so
+    /// what it holds has to be what the page asked for first, not whatever it
+    /// happened to reach last.
+    fn link_stylesheet(&mut self, href: &[u8]) {
+        let count = (self.meta.stylesheet_count as usize).min(MAX_STYLESHEET_LINKS);
+        if count == MAX_STYLESHEET_LINKS {
+            return;
+        }
+        let sheet = self.intern(href);
+        self.meta.stylesheets[count] = sheet;
+        self.meta.stylesheet_count = count as u8 + 1;
     }
 
     fn close_while(&mut self, stack: &mut [NodeId; MAX_DEPTH], depth: &mut usize, name: &[u8]) {
@@ -1603,6 +1669,36 @@ mod tests {
     }
 
     #[test]
+    fn a_linked_stylesheet_lands_after_the_inline_one() {
+        let mut dom = Dom::new();
+        dom.parse(b"<style>p{color:#112233}</style>");
+        assert_eq!(dom.append_css(b"h1{font-weight:bold}"), 20);
+        assert_eq!(
+            dom.css(),
+            b"p{color:#112233}\nh1{font-weight:bold}",
+            "the two are read as one cascade, with an edge between them"
+        );
+    }
+
+    #[test]
+    fn a_page_with_no_inline_style_starts_its_arena_at_the_link() {
+        let mut dom = Dom::new();
+        dom.parse(b"<p>plain</p>");
+        assert_eq!(dom.append_css(b"p{color:red}"), 12);
+        assert_eq!(dom.css(), b"p{color:red}", "no leading separator");
+    }
+
+    #[test]
+    fn a_stylesheet_that_does_not_fit_is_said_not_to_have_fit() {
+        let mut dom = Dom::new();
+        dom.parse(b"<p>plain</p>");
+        let too_big = std::vec![b'x'; MAX_CSS_BYTES + 8];
+        assert_eq!(dom.append_css(&too_big), MAX_CSS_BYTES);
+        assert_eq!(dom.css().len(), MAX_CSS_BYTES);
+        assert_ne!(dom.overflow() & OVERFLOW_CSS, 0);
+    }
+
+    #[test]
     fn script_tag_retains_type_attribute() {
         let mut dom = Dom::new();
         dom.parse(b"<script type=\"application/ld+json\">{\"key\":\"value\"}</script>");
@@ -1727,7 +1823,32 @@ mod tests {
         let mut dom = Dom::new();
         dom.parse(b"<link rel=\"shortcut icon\" href=\"/f.ico\"><link REL=\"Alternate Stylesheet\" href=\"/a.css\">");
         assert_eq!(dom.meta().icon.get(&dom), b"/f.ico");
-        assert_eq!(dom.meta().stylesheet.get(&dom), b"/a.css");
+        assert_eq!(dom.stylesheets()[0].get(&dom), b"/a.css");
+    }
+
+    #[test]
+    fn every_stylesheet_the_page_links_is_kept_in_the_order_it_said() {
+        let mut dom = Dom::new();
+        dom.parse(b"<link rel=\"stylesheet\" href=\"/a.css\"><link rel=\"stylesheet\" href=\"/b.css\">");
+        let links: std::vec::Vec<_> = dom
+            .stylesheets()
+            .iter()
+            .map(|s| s.get(&dom))
+            .collect();
+        assert_eq!(links, std::vec![b"/a.css".as_slice(), b"/b.css".as_slice()]);
+    }
+
+    #[test]
+    fn a_link_chain_longer_than_the_reader_holds_keeps_the_front_of_it() {
+        let mut dom = Dom::new();
+        dom.parse(
+            b"<link rel=\"stylesheet\" href=\"/a.css\"><link rel=\"stylesheet\" href=\"/b.css\">\
+              <link rel=\"stylesheet\" href=\"/c.css\"><link rel=\"stylesheet\" href=\"/d.css\">\
+              <link rel=\"stylesheet\" href=\"/e.css\">",
+        );
+        assert_eq!(dom.stylesheets().len(), MAX_STYLESHEET_LINKS);
+        assert_eq!(dom.stylesheets()[0].get(&dom), b"/a.css");
+        assert_eq!(dom.stylesheets()[MAX_STYLESHEET_LINKS - 1].get(&dom), b"/d.css");
     }
 
     #[test]
@@ -1735,7 +1856,7 @@ mod tests {
         let mut dom = Dom::new();
         dom.parse(b"<link rel=\"next-stylesheet\" href=\"/x.css\">");
         assert!(dom.meta().icon.is_empty());
-        assert!(dom.meta().stylesheet.is_empty());
+        assert!(dom.stylesheets().is_empty());
     }
 
     #[test]
@@ -1745,15 +1866,16 @@ mod tests {
         assert!(dom.meta().title.is_empty());
         assert!(dom.meta().description.is_empty());
         assert!(dom.meta().icon.is_empty());
-        assert!(dom.meta().stylesheet.is_empty());
+        assert!(dom.stylesheets().is_empty());
     }
 
     #[test]
     fn the_document_metadata_does_not_survive_into_the_next_page() {
         let mut dom = Dom::new();
-        dom.parse(b"<title>Old</title><meta name=\"description\" content=\"Old.\">");
+        dom.parse(b"<title>Old</title><meta name=\"description\" content=\"Old.\"><link rel=\"stylesheet\" href=\"/old.css\">");
         dom.parse(b"<p>New</p>");
         assert!(dom.meta().title.is_empty());
         assert!(dom.meta().description.is_empty());
+        assert!(dom.stylesheets().is_empty());
     }
 }

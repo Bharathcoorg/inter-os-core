@@ -86,6 +86,14 @@ static mut HTML_BUF: [u8; browser::MAX_HTML_BYTES] = [0; browser::MAX_HTML_BYTES
 /// survives: `RESPONSE_BUF` still holds it while this buffer is written.
 static mut DECODE_BUF: [u8; browser::MAX_HTML_BYTES] = [0; browser::MAX_HTML_BYTES];
 
+/// The buffer a linked stylesheet's text is copied out of the gateway's
+/// envelope into.
+///
+/// WHY it is as large as the document's own style arena: the two hold the
+/// same kind of rules, and reading a link into anything smaller would cut a
+/// stylesheet short before the arena that would have held it ever saw it.
+static mut STYLE_BUF: [u8; css::MAX_CSS_BYTES] = [0; css::MAX_CSS_BYTES];
+
 /// The cookies the browser has been given, across navigations.
 ///
 /// WHY a static and not a field of `BrowserApp`: the jar is bounded but
@@ -2183,6 +2191,128 @@ impl BrowserApp {
         true
     }
 
+    /// Fetches the stylesheets the page links and adds their rules to the
+    /// ones the page carried between its own `<style>` tags.
+    ///
+    /// WHY before the layout: a page's colours, its type sizes and which of
+    /// its elements are hidden usually live in those files, so a page laid out
+    /// without them is the same words in a different book. This is the one
+    /// subresource that changes where every other box goes, so it is fetched
+    /// before the column is measured rather than corrected after.
+    ///
+    /// WHY the chain and not just the first link: a bundled site keeps its
+    /// design tokens in one file and its rules in another, and the one that
+    /// makes the page look like itself is often second. The walk stops where
+    /// the arena is full, because a stylesheet that cannot be kept could not
+    /// have been applied either.
+    fn fetch_linked_stylesheets(&mut self, dom: &mut layout::Dom) {
+        for index in 0..dom.stylesheets().len() {
+            let declared = dom.stylesheets()[index];
+            self.fetch_stylesheet(dom, declared);
+            if dom.css().len() == layout::dom::MAX_CSS_BYTES {
+                break;
+            }
+        }
+    }
+
+    /// Fetches one linked stylesheet and keeps whatever rules of it the
+    /// document's style arena still has room for.
+    fn fetch_stylesheet(&mut self, dom: &mut layout::Dom, declared: layout::StrRef) {
+        if declared.is_empty() {
+            return;
+        }
+        // Copied out of the document before anything is fetched: the reply
+        // lands in the same transport buffer the page's own bytes came
+        // through, and the address is read out of the text arena that buffer
+        // feeds.
+        let raw = declared.get(&*dom);
+        let mut href = [0u8; images::MAX_SRC_LEN + 1];
+        let len = raw.len().min(href.len());
+        href[..len].copy_from_slice(&raw[..len]);
+        let mut url = [0u8; images::MAX_SRC_LEN];
+        let Ok(len) = images::resolve_subresource(self.current_url(), &href[..len], &mut url)
+        else {
+            return;
+        };
+        let mut request = [0u8; 1024];
+        let request_len = browser::format_proxy_request(&url[..len], &mut request);
+        if request_len + 128 > request.len() {
+            return;
+        }
+        let local_port = self.take_local_port();
+        let outcome = fetch_over_tcp([10, 0, 2, 2], 4300, local_port, &request[..request_len]);
+        let buffer = unsafe { &*core::ptr::addr_of!(RESPONSE_BUF) };
+        let reply = &buffer[..outcome.bytes];
+        if outcome.bytes == 0 {
+            self.log_stylesheet_failed(-(outcome.error as i32));
+            return;
+        }
+        let Some(response) = browser::parse_http_response(reply) else {
+            self.log_stylesheet_failed(-1);
+            return;
+        };
+        // The gateway answers a failed upstream fetch with an HTTP 200 whose
+        // body is its own JSON envelope. That is a refusal, not a stylesheet.
+        if response.status_code != 200 || browser::proxy_reports_failure(reply) {
+            self.log_stylesheet_failed(response.status_code as i32);
+            return;
+        }
+        // A stylesheet that came through the gateway arrives as the text
+        // inside that envelope, with its newlines and quotes still escaped
+        // for JSON. Unescaped is what the rule parser reads. A file longer
+        // than the arena is read as far as it goes, because the rules at the
+        // front of a stylesheet are the page's own colours and type, and the
+        // arena says out loud that it did not hold the rest.
+        let style = unsafe { &mut *core::ptr::addr_of_mut!(STYLE_BUF) };
+        let text = if browser::is_browser_envelope(reply) {
+            let Some(escaped) = browser::http::proxy_string_field(reply, b"html") else {
+                self.log_stylesheet_failed(-2);
+                return;
+            };
+            let (kept, _) = browser::http::unescape_json_string_prefix(escaped, style);
+            if kept == 0 {
+                self.log_stylesheet_failed(-2);
+                return;
+            }
+            &style[..kept]
+        } else {
+            response.body
+        };
+        let kept = dom.append_css(text);
+        let mut log_buf = [0u8; 96];
+        let prefix = b"[BROWSER APP] Linked stylesheet applied bytes=";
+        let plen = prefix.len();
+        log_buf[..plen].copy_from_slice(prefix);
+        let lp = browser::append_decimal(&mut log_buf, plen, kept as u64);
+        if let Ok(line) = core::str::from_utf8(&log_buf[..lp]) {
+            std::log(line).ok();
+        }
+    }
+
+    /// Says that a page linked a stylesheet that did not become rules.
+    ///
+    /// WHY this is logged at all: an unstyled page looks like a broken
+    /// renderer, and the difference between "the page links nothing", "the
+    /// file arrived" and "the origin refused it" is only visible from here.
+    /// A negative code is the reader's own fault — no reply (-err), a reply
+    /// that is not HTTP at all (-1), or a reply with no stylesheet text in
+    /// it (-2); a positive one is the status the origin answered with.
+    fn log_stylesheet_failed(&self, code: i32) {
+        let mut log_buf = [0u8; 96];
+        let prefix = b"[BROWSER APP] Linked stylesheet not applied code=";
+        let plen = prefix.len();
+        log_buf[..plen].copy_from_slice(prefix);
+        let mut lp = plen;
+        if code < 0 {
+            log_buf[lp] = b'-';
+            lp += 1;
+        }
+        lp = browser::append_decimal(&mut log_buf, lp, code.unsigned_abs() as u64);
+        if let Ok(line) = core::str::from_utf8(&log_buf[..lp]) {
+            std::log(line).ok();
+        }
+    }
+
     /// Loads a reader document, wrapping every line to the reading column.
     ///
     /// WHY the wrapping happens here and not in the renderer: a renderer
@@ -2656,6 +2786,10 @@ impl BrowserApp {
             self.html_view = false;
             return false;
         }
+        // The page's own rules are read before its bytes are laid out, so
+        // the column is measured once, against the styling the author asked
+        // for, rather than measured twice and corrected on screen.
+        self.fetch_linked_stylesheets(dom);
         self.execute_page_scripts();
         let out = unsafe { &mut *core::ptr::addr_of_mut!(PAGE_LAYOUT) };
         {
