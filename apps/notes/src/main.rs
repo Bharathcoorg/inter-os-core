@@ -2038,6 +2038,21 @@ fn handle_tap(state: &mut AppState, ux: usize, uy: usize) -> TapAction {
                     state.view = ViewMode::Editor;
                     return TapAction::Redraw;
                 }
+
+                // Keyboard tool tap (x: 535..608, centred on the glyph at 560)
+                //
+                // WHY this band exists: the dock drew a keyboard glyph and its
+                // three bands stopped at x=525, so the one icon that promises a
+                // keyboard answered nothing and the person pressed an inert
+                // picture. It now does what the icon says -- it focuses the
+                // list's search field and raises the keyboard over it, the same
+                // pair the search bar itself sets. It runs to the pill's own
+                // right edge at 608 so no part of the pill is left inert.
+                if ux >= 535 && ux <= 608 {
+                    state.search_active = true;
+                    state.keyboard_visible = true;
+                    return TapAction::Redraw;
+                }
             }
 
             // Card Deck Taps (y: 162..1308)
