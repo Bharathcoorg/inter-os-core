@@ -45,12 +45,13 @@ use std::design::walls;
 pub use gallery::{
     clamp_pan_value, clamp_viewer_zoom, decode_bmp, decode_image, decode_ppm, decode_qoi,
     extract_video_thumbnail,
-    decode_raw, deletable_storage_index, delete_storage_item_at, double_tap_zoom, encode_ppm,
-    filter_counts, filter_from_setting, fit_size, grid_row_count, has_image_suffix,
+    decode_raw, deletable_storage_index, delete_storage_item_at, document_meta_line,
+    double_tap_zoom, encode_ppm,
+    filter_counts, filter_from_setting, fit_size, grid_row_count, has_image_suffix, META_LINE_MAX,
     has_video_suffix, is_media_file, measure_image_header, media_at_with_storage,
     viewer_display_size, viewer_index_after_removal, viewer_pan_limit, viewer_source_pixel,
     viewer_step_index, write_filter_label, write_zoom_label, Filter, FilterCounts, GalleryTab,
-    GridPlan, GridRow, Media, StorageMediaItem, Thumbnail, TimelineGroup, VideoCodec,
+    GridPlan, GridRow, Media, MetaSubject, StorageMediaItem, Thumbnail, TimelineGroup, VideoCodec,
     VideoPlayerState, GRID_CELL, GRID_COLUMNS, MAX_STORAGE_ITEMS, SECTION_ROW_H, THUMB_H, THUMB_W,
     VIEWER_MAX_ITEMS,
 };
@@ -954,7 +955,7 @@ fn build_applied_label(
     scene: &walls::Scene,
     home: Option<&'static walls::Scene>,
     lock: Option<&'static walls::Scene>,
-    buf: &mut [u8; 64],
+    buf: &mut [u8],
 ) -> usize {
     let n = append(buf, 0, b"Wallpaper");
     match (home == Some(scene), lock == Some(scene)) {
@@ -1025,7 +1026,7 @@ pub struct GalleryApp {
     pub detail_title_buf: [u8; 48],
     pub detail_title_len: usize,
     /// Meta line of the open record, built when it was opened.
-    pub detail_meta: [u8; 64],
+    pub detail_meta: [u8; META_LINE_MAX],
     pub detail_meta_len: usize,
     /// The screen's subtitle: the wallpaper catalogue and device photo counts
     /// in one measured sentence, rebuilt whenever the media list changes.
@@ -1195,7 +1196,7 @@ impl GalleryApp {
             detail_title: b"",
             detail_title_buf: [0u8; 48],
             detail_title_len: 0,
-            detail_meta: [0u8; 64],
+            detail_meta: [0u8; META_LINE_MAX],
             detail_meta_len: 0,
             subtitle: [0u8; 96],
             subtitle_len: 0,
@@ -1897,10 +1898,13 @@ impl GalleryApp {
                     // shows no invented frame.
                     self.video_player = None;
                     self.gif_player = None;
-                    let mut n = append(&mut self.detail_meta, 0, b"Video, ");
-                    n = append_u64(&mut self.detail_meta, n, item.size);
-                    n = append(&mut self.detail_meta, n, b" bytes, no frame decoded");
-                    self.detail_meta_len = n;
+                    self.detail_meta_len = document_meta_line(
+                        MetaSubject::Video,
+                        None,
+                        Some(item.size),
+                        None,
+                        &mut self.detail_meta,
+                    );
                     // A note from a failed handoff names the format's own
                     // handler; one opened without a handoff (caller intent,
                     // or a swipe from an earlier item) gets the plain measured
@@ -1917,23 +1921,26 @@ impl GalleryApp {
                     self.video_note_len = 0;
                     self.gif_player = None;
                     self.load_detail_image(idx);
-                    let kind: &[u8] = if self.gif_player.is_some() {
-                        b"Animated GIF, "
+                    let frames = self
+                        .gif_player
+                        .as_ref()
+                        .map(|player| player.animation.info().frame_count);
+                    let measured = if self.detail_w > 0 && self.detail_h > 0 {
+                        Some((self.detail_w, self.detail_h))
                     } else {
-                        b"Photo, "
+                        None
                     };
-                    let mut n = append(&mut self.detail_meta, 0, kind);
-                    n = append_u64(&mut self.detail_meta, n, self.detail_w as u64);
-                    n = append(&mut self.detail_meta, n, b"x");
-                    n = append_u64(&mut self.detail_meta, n, self.detail_h as u64);
-                    n = append(&mut self.detail_meta, n, b", ");
-                    if let Some(ref gif) = self.gif_player {
-                        n = append_u64(&mut self.detail_meta, n, gif.animation.info().frame_count as u64);
-                        n = append(&mut self.detail_meta, n, b" frames, ");
-                    }
-                    n = append_u64(&mut self.detail_meta, n, item.size);
-                    n = append(&mut self.detail_meta, n, b" bytes");
-                    self.detail_meta_len = n;
+                    self.detail_meta_len = document_meta_line(
+                        if self.gif_player.is_some() {
+                            MetaSubject::AnimatedGif
+                        } else {
+                            MetaSubject::Photo
+                        },
+                        measured,
+                        Some(item.size),
+                        frames,
+                        &mut self.detail_meta,
+                    );
                     std::log("[GALLERY] Storage photo opened in inspection view.").ok();
                 }
             }

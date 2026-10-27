@@ -979,6 +979,92 @@ pub fn measure_image_header(data: &[u8], name: &[u8]) -> Option<(u32, u32)> {
     None
 }
 
+/// What a media line under a title describes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MetaSubject {
+    /// A still picture.
+    Photo,
+    /// An animated picture.
+    AnimatedGif,
+    /// A video document.
+    Video,
+}
+
+/// The room a media line needs for the widest answer it can build.
+///
+/// WHY it is a constant rather than a size the call site guesses: every part
+/// of the line has a bounded width, and the worst of them together is what the
+/// buffer has to hold. A line clipped mid-word is the failure this guards.
+pub const META_LINE_MAX: usize = 88;
+
+/// Builds the line under a media title.
+///
+/// WHY words rather than zeros: the line used to print the picture's
+/// dimensions as "0x0" when its header could not be read, and to print a
+/// bare "0 bytes" when the file was empty. Both read as measurements, and
+/// neither was one. A number is printed only where it was measured, and
+/// everything else is said in words.
+///
+/// WHY the size is optional: a file the platform's index does not hold a
+/// length for has no measured size, and saying so is truer than printing a
+/// zero that reads like a weight.
+pub fn document_meta_line(
+    subject: MetaSubject,
+    dimensions: Option<(u32, u32)>,
+    size: Option<u64>,
+    frames: Option<u32>,
+    out: &mut [u8],
+) -> usize {
+    let mut n = match subject {
+        MetaSubject::Photo => append(out, 0, b"Photo, "),
+        MetaSubject::AnimatedGif => append(out, 0, b"Animated GIF, "),
+        MetaSubject::Video => append(out, 0, b"Video, "),
+    };
+
+    // WHY a video has no dimensions: this build decodes no video frame, so
+    // there is no picture whose size could have been measured.
+    if subject != MetaSubject::Video {
+        match dimensions {
+            Some((w, h)) if w > 0 && h > 0 => {
+                n = append_u64(out, n, w as u64);
+                n = append(out, n, b"x");
+                n = append_u64(out, n, h as u64);
+            }
+            _ => {
+                n = append(out, n, b"dimensions not measured");
+            }
+        }
+        n = append(out, n, b", ");
+    }
+
+    if let Some(frames) = frames {
+        n = append_u64(out, n, frames as u64);
+        n = append(out, n, b" frames, ");
+    }
+
+    match size {
+        // WHY an empty file is named rather than measured: "0 bytes" reads
+        // as a weight, and the useful fact about an empty document is that
+        // it holds nothing at all.
+        Some(0) => {
+            n = append(out, n, b"the file is empty");
+        }
+        Some(size) => {
+            n = append_u64(out, n, size);
+            n = append(out, n, b" bytes");
+        }
+        None => {
+            n = append(out, n, b"size not measured");
+        }
+    }
+
+    if subject == MetaSubject::Video {
+        n = append(out, n, b", no frame decoded");
+    }
+
+    n
+}
+
 /// The number of grid rows a library of `item_count` items takes.
 ///
 /// WHY it is a function: the grid scrolls when the library is taller than the
@@ -1469,6 +1555,61 @@ mod tests {
         assert_eq!(grid_row_count(13, 3), 5);
         // A grid of no columns holds nothing.
         assert_eq!(grid_row_count(9, 0), 0);
+    }
+
+    /// A media line says in words what it could not measure.
+    #[test]
+    fn an_unmeasured_fact_is_said_rather_than_zeroed() {
+        let mut line = [0u8; META_LINE_MAX];
+
+        // The failure this guards: a download that arrived with no bytes read
+        // as "Photo, 0x0, 0 bytes" -- two numbers, neither of them a
+        // measurement.
+        let n = document_meta_line(MetaSubject::Photo, None, Some(0), None, &mut line);
+        assert_eq!(
+            &line[..n],
+            b"Photo, dimensions not measured, the file is empty"
+        );
+
+        let n = document_meta_line(MetaSubject::Photo, Some((640, 480)), Some(20_480), None, &mut line);
+        assert_eq!(&line[..n], b"Photo, 640x480, 20480 bytes");
+
+        // A video is not measured by a decoder this build does not have, so
+        // its line says what is absent instead of printing a zero frame.
+        let n = document_meta_line(MetaSubject::Video, None, Some(4096), None, &mut line);
+        assert_eq!(&line[..n], b"Video, 4096 bytes, no frame decoded");
+
+        let n = document_meta_line(
+            MetaSubject::AnimatedGif,
+            Some((32, 32)),
+            Some(900),
+            Some(4),
+            &mut line,
+        );
+        assert_eq!(&line[..n], b"Animated GIF, 32x32, 4 frames, 900 bytes");
+
+        // A zero the header reported is not a measurement either.
+        let n = document_meta_line(MetaSubject::Photo, Some((0, 0)), Some(9), None, &mut line);
+        assert_eq!(&line[..n], b"Photo, dimensions not measured, 9 bytes");
+    }
+
+    /// The widest line the builder can form still fits its buffer.
+    #[test]
+    fn the_widest_media_line_fits_the_buffer() {
+        let mut line = [0u8; META_LINE_MAX];
+        let n = document_meta_line(
+            MetaSubject::AnimatedGif,
+            Some((u32::MAX, u32::MAX)),
+            Some(u64::MAX),
+            Some(u32::MAX),
+            &mut line,
+        );
+        assert!(
+            n < META_LINE_MAX,
+            "the widest line is {} bytes and the buffer holds {}",
+            n,
+            META_LINE_MAX
+        );
     }
 
     /// The placeholder carries no dimensions, so nothing can mistake the
