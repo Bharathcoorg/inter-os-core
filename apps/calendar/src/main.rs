@@ -70,7 +70,7 @@ pub static AGENDA: [CalendarEvent; 0] = [];
 // Event Store: bounded fixed-size records in the platform's own settings store
 // -----------------------------------------------------------------------------
 
-/// Encodes the whole store into one settings value and writes it.
+/// Encodes the used records into one settings value and writes it.
 fn write_store(records: &[EventRecord; MAX_EVENTS], len: usize) -> bool {
     let mut blob = [0u8; STORE_BLOB_BYTES];
     blob[0] = STORE_VERSION;
@@ -79,7 +79,7 @@ fn write_store(records: &[EventRecord; MAX_EVENTS], len: usize) -> bool {
         let start = 2 + i * RECORD_BYTES;
         records[i].encode(&mut blob[start..start + RECORD_BYTES]);
     }
-    std::settings_set(STORE_KEY, &blob).is_ok()
+    std::settings_set(STORE_KEY, &blob[..2 + len * RECORD_BYTES]).is_ok()
 }
 
 /// The agenda: bounded records plus an honest account of the last load or save.
@@ -108,49 +108,19 @@ impl EventStore {
     }
 
     fn load() -> Self {
-        let mut store = EventStore::EMPTY;
         let mut blob = [0u8; STORE_BLOB_BYTES];
         match std::settings_get(STORE_KEY, &mut blob) {
-            Ok(0) => store.state = StoreState::Empty,
-            Ok(n) => {
-                let mut records = [EventRecord::EMPTY; MAX_EVENTS];
-                let mut count = 0usize;
-                let mut rejected = false;
-                if n == 2 || n > STORE_BLOB_BYTES || blob[0] != STORE_VERSION {
-                    rejected = true;
-                } else {
-                    let header_count = blob[1] as usize;
-                    if header_count > MAX_EVENTS || n != 2 + header_count * RECORD_BYTES {
-                        rejected = true;
-                    } else {
-                        for i in 0..header_count {
-                            let start = 2 + i * RECORD_BYTES;
-                            match EventRecord::decode(&blob[start..start + RECORD_BYTES]) {
-                                Some(rec) => {
-                                    records[i] = rec;
-                                    count += 1;
-                                }
-                                None => {
-                                    rejected = true;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-                if rejected {
-                    store.state = StoreState::Invalid;
-                } else if count == 0 {
-                    store.state = StoreState::Empty;
-                } else {
-                    store.records = records;
-                    store.len = count as u8;
-                    store.state = StoreState::Loaded;
-                }
-            }
-            Err(_) => store.state = StoreState::ReadRefused,
+            Ok(0) => EventStore { state: StoreState::Empty, ..EventStore::EMPTY },
+            Ok(n) => match calendar::EventStore::decode_from_blob(&blob[..n]) {
+                Ok(decoded) => EventStore {
+                    records: decoded.records,
+                    len: decoded.len,
+                    state: decoded.state,
+                },
+                Err(state) => EventStore { state, ..EventStore::EMPTY },
+            },
+            Err(_) => EventStore { state: StoreState::ReadRefused, ..EventStore::EMPTY },
         }
-        store
     }
 
     fn len(&self) -> usize {
@@ -1035,7 +1005,25 @@ fn get_calendar_pixel(
 
     // 4. Create-Event Sheet Modal (if open)
     if app.flow != Flow::None {
-        return flow_pixel(x, y, app);
+        let sheet_y1 = match app.flow {
+            Flow::Title => SHEET_Y1,
+            _ => SHEET_COMPACT_Y1,
+        };
+        let over_sheet =
+            x >= SHEET_X0 && x < SHEET_X1 && y >= SHEET_Y0 && y < sheet_y1;
+        if over_sheet {
+            return flow_pixel(x, y, app);
+        }
+        // Everything outside the sheet keeps the calendar visible under a
+        // muted scrim; the old branch returned a blank page, so opening the
+        // wizard looked like a screen change rather than a modal.
+        let under = match app.view_mode {
+            ViewMode::Month => month_view_pixel(x, y, app, display_year, display_month, start_dow, num_days, agenda),
+            ViewMode::Week => week_view_pixel(x, y, app, display_year, display_month),
+            ViewMode::Day => day_view_pixel(x, y, app, display_year, display_month, agenda),
+            ViewMode::Agenda => agenda_view_pixel(x, y, app),
+        };
+        return modal_scrim(under);
     }
 
     // 5. Active View Mode Content (y: 156..1360)
@@ -2032,6 +2020,18 @@ fn details_pixel(x: usize, y: usize, app: &CalendarApp, event: &EventRecord) -> 
 // -----------------------------------------------------------------------------
 // Event Creation Sheet Renderer
 // -----------------------------------------------------------------------------
+
+/// Blends the page behind a modal 60% toward the page surface, so the sheet
+/// stays legible against a light or dark theme without a second palette.
+fn modal_scrim(pixel: u32) -> u32 {
+    let surface = THEME.surface;
+    let channel = |shift: u32| {
+        let p = (pixel >> shift) & 0xFF;
+        let s = (surface >> shift) & 0xFF;
+        (((p * 2 + s * 3) / 5) & 0xFF) << shift
+    };
+    0xFF00_0000 | channel(16) | channel(8) | channel(0)
+}
 
 fn flow_pixel(x: usize, y: usize, app: &CalendarApp) -> u32 {
     let sheet_y1 = match app.flow {

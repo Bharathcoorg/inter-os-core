@@ -9,7 +9,11 @@ pub const EVENT_TITLE_MAX: usize = 32;
 pub const MAX_EVENTS: usize = 12;
 pub const RECORD_BYTES: usize = 2 + 1 + 1 + 1 + 1 + 1 + EVENT_TITLE_MAX + 1;
 pub const STORE_BLOB_BYTES: usize = 2 + MAX_EVENTS * RECORD_BYTES;
-pub const STORE_VERSION: u8 = 1;
+/// Version 2 seals every numeric field with bit 7 set so the settings store's
+/// line format never sees a 0x0A (newline) byte: month, day, hour and minute
+/// can legitimately be 10, which version 1 stored raw.
+pub const STORE_VERSION: u8 = 2;
+pub const STORE_VERSION_LEGACY: u8 = 1;
 pub const STORE_KEY: &str = "calendar.events.v1";
 pub const STORE_YEAR_MIN: u16 = 1970;
 pub const STORE_YEAR_MAX: u16 = 9999;
@@ -142,29 +146,70 @@ impl EventRecord {
         &self.title[..self.title_len as usize]
     }
 
-    pub fn encode(&self, out: &mut [u8]) {
-        out[0] = (self.year & 0xFF) as u8;
-        out[1] = (self.year >> 8) as u8;
-        out[2] = self.month;
-        out[3] = self.day;
-        out[4] = self.hour;
-        out[5] = self.minute;
-        out[6] = self.title_len;
-        out[7..7 + EVENT_TITLE_MAX].copy_from_slice(&self.title);
+    /// Stores a value in the low 7 bits with bit 7 set, so no field byte can
+    /// collide with the settings store's 0x0A line terminator.
+    fn seal(value: u8) -> u8 {
+        (value & 0x7F) | 0x80
+    }
+
+    fn unseal(byte: u8) -> u8 {
+        byte & 0x7F
+    }
+
+    fn encode_fields(
+        year: u16,
+        month: u8,
+        day: u8,
+        hour: u8,
+        minute: u8,
+        title_len: u8,
+        title: &[u8],
+        out: &mut [u8],
+    ) {
+        out[0] = Self::seal((year & 0x7F) as u8);
+        out[1] = Self::seal(((year >> 7) & 0x7F) as u8);
+        out[2] = Self::seal(month);
+        out[3] = Self::seal(day);
+        out[4] = Self::seal(hour);
+        out[5] = Self::seal(minute);
+        out[6] = Self::seal(title_len);
+        out[7..7 + EVENT_TITLE_MAX].copy_from_slice(&title[..EVENT_TITLE_MAX]);
         out[7 + EVENT_TITLE_MAX] = 0;
     }
 
-    pub fn decode(bytes: &[u8]) -> Option<EventRecord> {
+    pub fn encode(&self, out: &mut [u8]) {
+        Self::encode_fields(
+            self.year,
+            self.month,
+            self.day,
+            self.hour,
+            self.minute,
+            self.title_len,
+            &self.title,
+            out,
+        );
+    }
+
+    fn decode_fields(bytes: &[u8], sealed: bool) -> Option<EventRecord> {
         if bytes.len() < RECORD_BYTES {
             return None;
         }
         let mut rec = EventRecord::EMPTY;
-        rec.year = bytes[0] as u16 | ((bytes[1] as u16) << 8);
-        rec.month = bytes[2];
-        rec.day = bytes[3];
-        rec.hour = bytes[4];
-        rec.minute = bytes[5];
-        rec.title_len = bytes[6];
+        if sealed {
+            rec.year = Self::unseal(bytes[0]) as u16 | ((Self::unseal(bytes[1]) as u16) << 7);
+            rec.month = Self::unseal(bytes[2]);
+            rec.day = Self::unseal(bytes[3]);
+            rec.hour = Self::unseal(bytes[4]);
+            rec.minute = Self::unseal(bytes[5]);
+            rec.title_len = Self::unseal(bytes[6]);
+        } else {
+            rec.year = bytes[0] as u16 | ((bytes[1] as u16) << 8);
+            rec.month = bytes[2];
+            rec.day = bytes[3];
+            rec.hour = bytes[4];
+            rec.minute = bytes[5];
+            rec.title_len = bytes[6];
+        }
         if rec.title_len as usize > EVENT_TITLE_MAX {
             return None;
         }
@@ -174,6 +219,14 @@ impl EventRecord {
         } else {
             None
         }
+    }
+
+    pub fn decode(bytes: &[u8]) -> Option<EventRecord> {
+        Self::decode_fields(bytes, true)
+    }
+
+    fn decode_legacy(bytes: &[u8]) -> Option<EventRecord> {
+        Self::decode_fields(bytes, false)
     }
 }
 
@@ -339,17 +392,33 @@ impl EventStore {
     /// Decodes a store from a binary blob.
     pub fn decode_from_blob(blob: &[u8]) -> Result<EventStore, StoreState> {
         let n = blob.len();
-        if n < 2 || n > STORE_BLOB_BYTES || blob[0] != STORE_VERSION {
+        if n < 2 || n > STORE_BLOB_BYTES {
+            return Err(StoreState::Invalid);
+        }
+        let version = blob[0];
+        if version != STORE_VERSION && version != STORE_VERSION_LEGACY {
             return Err(StoreState::Invalid);
         }
         let header_count = blob[1] as usize;
-        if header_count > MAX_EVENTS || n != 2 + header_count * RECORD_BYTES {
+        if header_count > MAX_EVENTS {
+            return Err(StoreState::Invalid);
+        }
+        // Version 1 writers always sent the full fixed-width array; version 2
+        // sends only the used records. Accept both shapes for legacy blobs.
+        let used_len = 2 + header_count * RECORD_BYTES;
+        let length_ok = n == used_len || (version == STORE_VERSION_LEGACY && n == STORE_BLOB_BYTES);
+        if !length_ok {
             return Err(StoreState::Invalid);
         }
         let mut store = EventStore::EMPTY;
         for i in 0..header_count {
             let start = 2 + i * RECORD_BYTES;
-            match EventRecord::decode(&blob[start..start + RECORD_BYTES]) {
+            let decoded = if version == STORE_VERSION_LEGACY {
+                EventRecord::decode_legacy(&blob[start..start + RECORD_BYTES])
+            } else {
+                EventRecord::decode(&blob[start..start + RECORD_BYTES])
+            };
+            match decoded {
                 Some(rec) => {
                     store.records[i] = rec;
                 }
@@ -486,6 +555,57 @@ mod tests {
         let mut bad_blob = blob;
         bad_blob[0] = 99;
         assert_eq!(EventStore::decode_from_blob(&bad_blob[..bytes_written]), Err(StoreState::Invalid));
+    }
+
+    #[test]
+    fn test_store_blob_is_newline_free() {
+        // The settings store is newline-delimited, so a store blob must never
+        // contain 0x0A. October (month 10) and any field set to 10 used to.
+        let mut store = EventStore::EMPTY;
+        for i in 0..MAX_EVENTS {
+            let ev = EventRecord::from_parts(
+                2058,
+                10,
+                10,
+                10,
+                10,
+                b"Ten O'clock Sync",
+            );
+            assert!(store.add_in_memory(ev), "record {} should fit", i);
+        }
+        let mut blob = [0u8; STORE_BLOB_BYTES];
+        let used = store.encode_to_blob(&mut blob);
+        assert_eq!(used, STORE_BLOB_BYTES);
+        assert!(
+            !blob[..used].contains(&b'\n'),
+            "encoded calendar blob contains a newline byte"
+        );
+        assert!(used <= 512, "settings values are capped at 512 bytes");
+    }
+
+    #[test]
+    fn test_legacy_store_version_still_decodes() {
+        let ev = EventRecord::from_parts(2026, 10, 14, 10, 0, b"Legacy Sync");
+        let mut blob = [0u8; STORE_BLOB_BYTES];
+        blob[0] = STORE_VERSION_LEGACY;
+        blob[1] = 1;
+        blob[2] = (ev.year & 0xFF) as u8;
+        blob[3] = (ev.year >> 8) as u8;
+        blob[4] = ev.month;
+        blob[5] = ev.day;
+        blob[6] = ev.hour;
+        blob[7] = ev.minute;
+        blob[8] = ev.title_len;
+        blob[9..9 + EVENT_TITLE_MAX].copy_from_slice(&ev.title);
+
+        let decoded = EventStore::decode_from_blob(&blob).expect("full-width legacy blob");
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded.records[0], ev);
+
+        let decoded_used = EventStore::decode_from_blob(&blob[..2 + RECORD_BYTES])
+            .expect("trimmed legacy blob");
+        assert_eq!(decoded_used.len(), 1);
+        assert_eq!(decoded_used.records[0], ev);
     }
 
     #[test]
