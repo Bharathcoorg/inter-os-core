@@ -56,7 +56,18 @@ pub fn init_memory(physical_memory_offset: VirtAddr, memory_regions: &'static Me
 
     let mut detected_ram: u64 = 0;
     for r in memory_regions.iter() {
-        detected_ram = detected_ram.saturating_add(r.end.saturating_sub(r.start));
+        // WHY the kind filter: the map also names the PCI MMIO aperture and the
+        // low BIOS/ACPI windows as regions, and summing every kind counted a
+        // 256 MiB hole as installed memory — a 4 GiB guest booted claiming
+        // 4351 MB, which is the figure the memory card then printed. `Usable`
+        // and `Bootloader` are the only kinds that are RAM; the bootloader's
+        // own pages are RAM the kernel simply cannot hand out.
+        match r.kind {
+            MemoryRegionKind::Usable | MemoryRegionKind::Bootloader => {
+                detected_ram = detected_ram.saturating_add(r.end.saturating_sub(r.start));
+            }
+            _ => {}
+        }
     }
     if detected_ram >= 128 * 1024 * 1024 {
         TOTAL_PHYSICAL_RAM_BYTES.store(detected_ram, core::sync::atomic::Ordering::Release);

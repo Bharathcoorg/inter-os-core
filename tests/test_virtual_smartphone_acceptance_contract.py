@@ -192,3 +192,16 @@ def test_shell_reads_ram_and_capacity_and_repaints_the_cards_they_move():
     assert "(STORAGE_ROW.y, CAL_ROW.y + CAL_ROW.h)" in widgets
     assert "let cal_rect = CAL_ROW;" in widgets
 
+
+def test_installed_ram_total_counts_ram_and_not_the_mmio_hole():
+    memory = read("kernel/src/memory.rs")
+    start = memory.index("let mut detected_ram: u64 = 0;")
+    end = memory.index("if detected_ram >=", start)
+    body = memory[start:end]
+    # WHY: the map names the 256 MiB PCI aperture and the low BIOS windows as
+    # regions too, and a sum over every kind booted a 4 GiB guest reporting
+    # 4351 MB, which the memory card then printed as its total.
+    assert "MemoryRegionKind::Usable | MemoryRegionKind::Bootloader" in body
+    assert "detected_ram = detected_ram.saturating_add(r.end.saturating_sub(r.start));" in body
+    assert "for r in memory_regions.iter() {\n        detected_ram" not in memory
+
