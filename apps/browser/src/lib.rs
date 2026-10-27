@@ -329,7 +329,7 @@ pub fn format_proxy_request(target_url: &[u8], out: &mut [u8]) -> usize {
 pub const MAX_UPLOAD_BYTES: usize = 4 * 1024 * 1024;
 
 /// Appends a decimal number to a buffer.
-fn append_decimal(out: &mut [u8], mut n: usize, mut value: u64) -> usize {
+pub fn append_decimal(out: &mut [u8], mut n: usize, mut value: u64) -> usize {
     let mut digits = [0u8; 20];
     let mut len = 0usize;
     loop {
@@ -1170,6 +1170,135 @@ pub fn proxy_reports_failure(json: &[u8]) -> bool {
     const COMPACT: &[u8] = b"\"success\":false";
     json.windows(SPACED.len()).any(|w| w == SPACED)
         || json.windows(COMPACT.len()).any(|w| w == COMPACT)
+}
+
+/// The page status states of the browser.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageStatus {
+    Blank,
+    Loaded,
+    /// The network stack or socket returned no bytes / could not reach destination / DNS failed.
+    NoTransport,
+    /// Connection to gateway was refused, timed out during handshake, or stalled.
+    ConnectionFailed,
+    /// Gateway connection succeeded and request sent, but gateway returned zero bytes (closed stream).
+    ZeroBytes,
+    /// Gateway returned bytes, but response was malformed, invalid encoding, or unparseable.
+    ProtocolFault,
+    /// The address could not be parsed or opened.
+    InvalidAddress,
+    /// The address named no host the browser could ask for.
+    UnrecognisedAddress,
+    /// The address named a scheme the browser cannot fetch.
+    UnsupportedScheme,
+    /// The gateway received the request but its own fetch failed (real proxy error envelope).
+    GatewayError,
+    /// The response was a file, and its bytes were saved to storage.
+    Downloaded,
+    /// The response was a file, but storage refused the bytes.
+    DownloadFailed,
+    /// The response was a file, awaiting explicit user confirmation.
+    DownloadPrompt,
+    /// The user explicitly refused the download.
+    DownloadRefused,
+    /// Local document access was refused.
+    LocalRefused,
+}
+
+impl PageStatus {
+    pub fn is_error(&self) -> bool {
+        matches!(
+            self,
+            PageStatus::NoTransport
+                | PageStatus::ConnectionFailed
+                | PageStatus::ZeroBytes
+                | PageStatus::ProtocolFault
+                | PageStatus::InvalidAddress
+                | PageStatus::UnrecognisedAddress
+                | PageStatus::UnsupportedScheme
+                | PageStatus::GatewayError
+                | PageStatus::LocalRefused
+        )
+    }
+}
+
+/// Why network transport was unavailable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportFailure {
+    None,
+    /// The app holds no network socket capability.
+    NoCapability,
+    /// Network interface is down or unreachable.
+    NetworkDown,
+    /// Host name could not be resolved by system DNS.
+    DnsFailed,
+}
+
+/// Why connection to the gateway failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionFailure {
+    None,
+    /// Connection was refused by the destination.
+    Refused,
+    /// Connection handshake timed out.
+    Timeout,
+    /// Connection stalled before data arrived.
+    Stall,
+}
+
+/// Why document decoding or protocol handling failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProtocolFaultKind {
+    None,
+    /// Response was not valid HTTP or gateway envelope.
+    MalformedResponse,
+    /// Content encoding or decompression failed.
+    InvalidEncoding,
+    /// Content could not be parsed into document structure.
+    UnparseableDocument,
+    /// Document contained no readable text after formatting.
+    EmptyDocument,
+}
+
+/// The truthful classification of a fetch or gateway response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResponseKind {
+    /// Upstream gateway returned a failure envelope (`{"success": false, ...}`).
+    GatewayError,
+    /// Gateway or HTTP response carried valid envelope or HTTP headers.
+    ValidResponse,
+    /// Response bytes were received, but they were neither valid HTTP nor a valid gateway envelope.
+    ProtocolFault,
+    /// Empty response body (0 bytes or empty payload).
+    EmptyResponse,
+}
+
+/// Returns true if the raw slice has the markers of a Device Studio browser proxy JSON envelope.
+pub fn is_browser_envelope(raw: &[u8]) -> bool {
+    raw.windows(b"\"success\"".len()).any(|w| w == b"\"success\"")
+        && http::proxy_status(raw).is_some()
+}
+
+/// Classifies a raw response slice received from the network / gateway.
+pub fn classify_response(raw: &[u8]) -> ResponseKind {
+    if raw.is_empty() {
+        return ResponseKind::EmptyResponse;
+    }
+    if proxy_reports_failure(raw) {
+        return ResponseKind::GatewayError;
+    }
+    if is_browser_envelope(raw) {
+        return ResponseKind::ValidResponse;
+    }
+    if let Some(resp) = parse_http_response(raw) {
+        if resp.body.is_empty() {
+            ResponseKind::EmptyResponse
+        } else {
+            ResponseKind::ValidResponse
+        }
+    } else {
+        ResponseKind::ProtocolFault
+    }
 }
 
 /// Renders a plain-text document into the reader's line format.
@@ -4370,6 +4499,44 @@ mod tests {
         assert!(proxy_reports_failure(spaced));
         assert!(proxy_reports_failure(compact));
         assert!(!proxy_reports_failure(ok));
+    }
+
+    #[test]
+    fn test_response_classification_truthfulness() {
+        let gw_err = br#"{"success": false, "error": "upstream timeout"}"#;
+        assert_eq!(classify_response(gw_err), ResponseKind::GatewayError);
+
+        let ok_env = br#"{"success": true, "status": 200, "html": "<h1>Test</h1>"}"#;
+        assert_eq!(classify_response(ok_env), ResponseKind::ValidResponse);
+
+        let ok_http = b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<p>Hello</p>";
+        assert_eq!(classify_response(ok_http), ResponseKind::ValidResponse);
+
+        assert_eq!(classify_response(b""), ResponseKind::EmptyResponse);
+        let empty_http = b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n";
+        assert_eq!(classify_response(empty_http), ResponseKind::EmptyResponse);
+
+        let garbage = b"NOT_HTTP_AND_NOT_JSON";
+        assert_eq!(classify_response(garbage), ResponseKind::ProtocolFault);
+    }
+
+    #[test]
+    fn test_page_status_is_error() {
+        assert!(PageStatus::NoTransport.is_error());
+        assert!(PageStatus::ConnectionFailed.is_error());
+        assert!(PageStatus::ZeroBytes.is_error());
+        assert!(PageStatus::ProtocolFault.is_error());
+        assert!(PageStatus::GatewayError.is_error());
+        assert!(PageStatus::InvalidAddress.is_error());
+        assert!(PageStatus::UnrecognisedAddress.is_error());
+        assert!(PageStatus::UnsupportedScheme.is_error());
+        assert!(PageStatus::LocalRefused.is_error());
+
+        assert!(!PageStatus::Blank.is_error());
+        assert!(!PageStatus::Loaded.is_error());
+        assert!(!PageStatus::Downloaded.is_error());
+        assert!(!PageStatus::DownloadPrompt.is_error());
+        assert!(!PageStatus::DownloadRefused.is_error());
     }
 
     /// A local document's address yields the path to read.

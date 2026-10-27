@@ -29,9 +29,10 @@ use interos_std::design::font;
 use interos_std::design::primitives::{draw_rounded_rect, Rect};
 
 use browser::{
-    format_proxy_request, into_url_field, link_arrow_ink, parse_gemtext_link, parse_uri,
-    scheme_mark, DocLine, DocumentTokenizer, LineKind, LoadingState, TabSessionManager, UriScheme,
-    MAX_DOC_LINES, MAX_LINE_BYTES, MAX_TABS, URL_FIELD,
+    format_proxy_request, into_url_field, is_browser_envelope, link_arrow_ink,
+    parse_gemtext_link, parse_uri, scheme_mark, ConnectionFailure, DocLine, DocumentTokenizer,
+    LineKind, LoadingState, PageStatus, ProtocolFaultKind, TabSessionManager,
+    TransportFailure, UriScheme, MAX_DOC_LINES, MAX_LINE_BYTES, MAX_TABS, URL_FIELD,
 };
 use browser::css;
 use browser::images;
@@ -114,16 +115,6 @@ fn envelope_field(json: &[u8], key: &[u8], out: &mut [u8]) -> usize {
         },
         None => 0,
     }
-}
-
-/// True when the gateway answered in its browser-proxy envelope.
-///
-/// WHY both markers: a page fetched from an origin can itself be JSON, so
-/// one field name is not enough. The envelope always carries `success`
-/// and a numeric `status`; a raw origin document is not treated as one.
-fn is_browser_envelope(raw: &[u8]) -> bool {
-    raw.windows(b"\"success\"".len()).any(|w| w == b"\"success\"")
-        && browser::http::proxy_status(raw).is_some()
 }
 
 /// The buffer a local document is read into.
@@ -309,6 +300,22 @@ const TCP_RESPONSE_STALL_TICKS: u64 = 10_000;
 /// reported the refusal as an empty transport. Reads advance in chunks.
 const TCP_READ_CHUNK: usize = 2048;
 
+/// The specific stage or nature of transport/connection failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FetchErrorKind {
+    None,
+    /// std::tcp_connect failed: no transport capability, network down, or DNS failure.
+    NoTransport,
+    /// Connection was refused by the destination.
+    ConnectionRefused,
+    /// Connection handshake timed out.
+    ConnectionTimeout,
+    /// Connection stalled during transfer.
+    ConnectionStalled,
+    /// Connection closed by remote with 0 bytes sent.
+    ZeroBytes,
+}
+
 /// The outcome of a fetch over TCP.
 struct FetchOutcome {
     /// The number of bytes received.
@@ -323,6 +330,8 @@ struct FetchOutcome {
     /// reading the clock actually gave, so the first byte's time is
     /// measured rather than inferred from the whole transfer.
     first_byte_tick: Option<u64>,
+    /// The specific stage or nature of transport/connection failure.
+    kind: FetchErrorKind,
 }
 
 /// Fetches an HTTP response over TCP.
@@ -344,6 +353,7 @@ fn fetch_over_tcp(
         truncated: false,
         error: 0,
         first_byte_tick: None,
+        kind: FetchErrorKind::None,
     };
 
     // The initial sequence number is the device's choice, and a fresh one
@@ -358,6 +368,7 @@ fn fetch_over_tcp(
         Ok(id) => id,
         Err(code) => {
             outcome.error = code;
+            outcome.kind = FetchErrorKind::NoTransport;
             return outcome;
         }
     };
@@ -379,6 +390,7 @@ fn fetch_over_tcp(
             Err(code) => {
                 if code != NOT_READY {
                     outcome.error = code;
+                    outcome.kind = FetchErrorKind::ConnectionRefused;
                     let _ = std::tcp_close(connection);
                     return outcome;
                 }
@@ -396,6 +408,7 @@ fn fetch_over_tcp(
     }
     if !sent {
         outcome.error = NOT_READY;
+        outcome.kind = FetchErrorKind::ConnectionTimeout;
         let _ = std::tcp_close(connection);
         return outcome;
     }
@@ -407,6 +420,7 @@ fn fetch_over_tcp(
     let mut last_data_tick = response_start;
     let mut total = 0usize;
     let mut reads = 0usize;
+    let mut recv_stalled = false;
     loop {
         reads += 1;
         let buffer = unsafe { &mut *core::ptr::addr_of_mut!(RESPONSE_BUF) };
@@ -430,6 +444,7 @@ fn fetch_over_tcp(
                     // already read are still the response.
                     if total == 0 {
                         outcome.error = code;
+                        outcome.kind = FetchErrorKind::ConnectionRefused;
                     }
                     break;
                 }
@@ -446,6 +461,7 @@ fn fetch_over_tcp(
         };
         if stalled || expired {
             outcome.truncated = true;
+            recv_stalled = true;
             break;
         }
         std::yield_now();
@@ -453,6 +469,13 @@ fn fetch_over_tcp(
 
     let _ = std::tcp_close(connection);
     outcome.bytes = total;
+    if total == 0 {
+        if recv_stalled {
+            outcome.kind = FetchErrorKind::ConnectionStalled;
+        } else if outcome.kind == FetchErrorKind::None {
+            outcome.kind = FetchErrorKind::ZeroBytes;
+        }
+    }
     outcome
 }
 
@@ -881,6 +904,26 @@ const BODY_BLANK: &[u8] = b"Type an address to open a page, or pick one of the q
 const BODY_LOADED: &[u8] = b"The page's text is shown here. Tap a link to open it.";
 const BODY_NO_TRANSPORT: &[u8] = b"The address was parsed and a navigation was attempted, \
 but no network transport is bound to this app: no request was sent and no page was loaded.";
+const BODY_NETWORK_DOWN: &[u8] = b"The network interface is down or unreachable. \
+The device could not route packets to the destination.";
+const BODY_DNS_FAILED: &[u8] = b"The host name could not be resolved by the system DNS \
+service. Check the address and network connection.";
+const BODY_CONNECTION_REFUSED: &[u8] = b"The connection to the gateway at 10.0.2.2:4300 \
+was refused. The proxy service may not be running on the host or the port is closed.";
+const BODY_CONNECTION_TIMEOUT: &[u8] = b"The connection to the gateway at 10.0.2.2:4300 \
+timed out during the TCP handshake. The gateway did not respond in time.";
+const BODY_CONNECTION_STALLED: &[u8] = b"The connection to the gateway was established, \
+but the transfer stalled before completion. No further bytes were received.";
+const BODY_ZERO_BYTES: &[u8] = b"The gateway connection succeeded and the request was sent, \
+but the gateway closed the connection without returning any response data.";
+const BODY_PROTOCOL_MALFORMED: &[u8] = b"The gateway returned a response that could not be \
+parsed as valid HTTP or gateway envelope data.";
+const BODY_PROTOCOL_ENCODING: &[u8] = b"The response payload had invalid encoding or \
+compression that could not be decoded by the browser.";
+const BODY_PROTOCOL_UNPARSEABLE: &[u8] = b"The gateway returned a document, but its format \
+could not be parsed into a displayable page.";
+const BODY_PROTOCOL_EMPTY: &[u8] = b"The page was received and decoded, but contained no \
+readable text or displayable elements.";
 const BODY_INVALID: &[u8] = b"Supported schemes are http, https, interlayer and file \
 followed by a host. Even a valid address loads nothing while no transport is bound.";
 const BODY_UNRECOGNISED: &[u8] = b"The address did not name a host this browser can open, \
@@ -1431,35 +1474,6 @@ pub enum SheetOverlay {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PageStatus {
-    Blank,
-    Loaded,
-    NoTransport,
-    InvalidAddress,
-    /// The address named no host the browser could ask for.
-    ///
-    /// WHY this is a state and not a substituted host: the address bar used
-    /// to stand in `interos.tech` for an address it could not parse, so a
-    /// page that named nothing was shown as though that site had been
-    /// fetched. The screen has to be able to say the address was not
-    /// recognised.
-    UnrecognisedAddress,
-    /// The address named a scheme the browser cannot fetch.
-    UnsupportedScheme,
-    /// The gateway received the request but its own fetch failed.
-    GatewayError,
-    /// The response was a file, and its bytes were saved to storage.
-    Downloaded,
-    /// The response was a file, but storage refused the bytes.
-    DownloadFailed,
-    /// The response was a file, awaiting explicit user confirmation.
-    DownloadPrompt,
-    /// The user explicitly refused the download.
-    DownloadRefused,
-    LocalRefused,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BookmarkStep {
     Idle,
     Title,
@@ -1725,6 +1739,12 @@ pub struct BrowserApp {
     /// that refused the bytes are different failures, and the screen used
     /// to print the storage refusal for both.
     pub download_failure: DownloadFailure,
+    /// Why network transport was unavailable for navigation.
+    pub transport_failure: TransportFailure,
+    /// Why connection to the gateway failed.
+    pub connection_failure: ConnectionFailure,
+    /// Why protocol handling or document decoding failed.
+    pub protocol_fault: ProtocolFaultKind,
     /// The reason the gateway gave for the last failed fetch.
     ///
     /// WHY it is kept: the gateway answers a failed fetch with an envelope
@@ -1930,6 +1950,9 @@ impl BrowserApp {
             response_truncated: false,
             local_failure: LocalFailure::NoPath,
             download_failure: DownloadFailure::None,
+            transport_failure: TransportFailure::None,
+            connection_failure: ConnectionFailure::None,
+            protocol_fault: ProtocolFaultKind::None,
             gateway_reason: [0; browser::GATEWAY_REASON_MAX],
             gateway_reason_len: 0,
             response_len: 0,
@@ -3953,6 +3976,9 @@ impl BrowserApp {
         // navigation has not failed yet, so the last reason is forgotten
         // rather than shown against a page it says nothing about.
         self.gateway_reason_len = 0;
+        self.transport_failure = TransportFailure::None;
+        self.connection_failure = ConnectionFailure::None;
+        self.protocol_fault = ProtocolFaultKind::None;
         // A navigation is a new document; the previous document's bytes must
         // not be savable under the new address, and the previous page's
         // keyboard must not stay attached to controls that no longer exist.
@@ -4111,16 +4137,43 @@ impl BrowserApp {
             let outcome = fetch_over_tcp(dst_ip, dst_port, local_port, &request_buf[..request_len]);
 
             // PLATFORM TRUTH: a page is loaded only when the transport
-            // actually delivered bytes. Nothing is synthesised, and the
-            // reason is reported as it was.
+            // actually delivered bytes. The specific failure is reported
+            // truthfully according to what stage failed.
             if outcome.bytes == 0 {
-                self.status = PageStatus::NoTransport;
                 self.loading_progress = 0;
                 self.tabs.active_tab_mut().loading_state = LoadingState::Failed;
                 self.tabs.active_tab_mut().error_code = outcome.error as i32;
-                std::log("[BROWSER APP] The gateway returned no bytes. The failure is reported as it happened; no page was synthesised.",
-                )
-                .ok();
+
+                match outcome.kind {
+                    FetchErrorKind::NoTransport => {
+                        self.status = PageStatus::NoTransport;
+                        self.transport_failure = if outcome.error == -1 {
+                            TransportFailure::NoCapability
+                        } else {
+                            TransportFailure::NetworkDown
+                        };
+                        std::log("[BROWSER APP] Network transport unavailable; no connection could be initiated.").ok();
+                    }
+                    FetchErrorKind::ConnectionRefused => {
+                        self.status = PageStatus::ConnectionFailed;
+                        self.connection_failure = ConnectionFailure::Refused;
+                        std::log("[BROWSER APP] Connection to the gateway was refused.").ok();
+                    }
+                    FetchErrorKind::ConnectionTimeout => {
+                        self.status = PageStatus::ConnectionFailed;
+                        self.connection_failure = ConnectionFailure::Timeout;
+                        std::log("[BROWSER APP] Connection to the gateway timed out during TCP handshake.").ok();
+                    }
+                    FetchErrorKind::ConnectionStalled => {
+                        self.status = PageStatus::ConnectionFailed;
+                        self.connection_failure = ConnectionFailure::Stall;
+                        std::log("[BROWSER APP] Connection to the gateway stalled before response bytes arrived.").ok();
+                    }
+                    FetchErrorKind::ZeroBytes | FetchErrorKind::None => {
+                        self.status = PageStatus::ZeroBytes;
+                        std::log("[BROWSER APP] The gateway returned zero bytes. No document data was received.").ok();
+                    }
+                }
                 let _ = std::audio_play_tone(220);
                 let _ = std::audio_silence();
                 let _ = std::audio_haptic_click();
@@ -4130,6 +4183,27 @@ impl BrowserApp {
             let response = unsafe { &*core::ptr::addr_of!(RESPONSE_BUF) };
             let rx_slice = &response[..outcome.bytes];
             self.response_len = outcome.bytes;
+
+            {
+                let mut log_buf = [0u8; 128];
+                let mut lp = 0;
+                let p1 = b"[BROWSER APP] fetch_over_tcp bytes=";
+                log_buf[lp..lp+p1.len()].copy_from_slice(p1);
+                lp += p1.len();
+                lp = browser::append_decimal(&mut log_buf, lp, outcome.bytes as u64);
+                let p2 = b" trunc=";
+                log_buf[lp..lp+p2.len()].copy_from_slice(p2);
+                lp += p2.len();
+                log_buf[lp] = if outcome.truncated { b'1' } else { b'0' };
+                lp += 1;
+                let p3 = b" err=";
+                log_buf[lp..lp+p3.len()].copy_from_slice(p3);
+                lp += p3.len();
+                lp = browser::append_decimal(&mut log_buf, lp, outcome.error.unsigned_abs());
+                if let Ok(s) = core::str::from_utf8(&log_buf[..lp]) {
+                    let _ = std::log(s);
+                }
+            }
 
             // A payload that is a file rather than a document is kept as it
             // arrived. The gateway hands media over as raw bytes; decoding it
@@ -4428,8 +4502,39 @@ impl BrowserApp {
             }
         }
 
+        {
+            let response = unsafe { &*core::ptr::addr_of!(RESPONSE_BUF) };
+            let rx_slice = &response[..self.response_len];
+            let mut log_buf2 = [0u8; 128];
+            let mut lp2 = 0;
+            let d1 = b"[BROWSER APP] decode: doc_len=";
+            log_buf2[lp2..lp2+d1.len()].copy_from_slice(d1);
+            lp2 += d1.len();
+            lp2 = browser::append_decimal(&mut log_buf2, lp2, document_len as u64);
+            let d2 = b" proto_fault=";
+            log_buf2[lp2..lp2+d2.len()].copy_from_slice(d2);
+            lp2 += d2.len();
+            log_buf2[lp2] = if protocol_fault { b'1' } else { b'0' };
+            lp2 += 1;
+            let d3 = b" is_envelope=";
+            log_buf2[lp2..lp2+d3.len()].copy_from_slice(d3);
+            lp2 += d3.len();
+            log_buf2[lp2] = if is_browser_envelope(rx_slice) { b'1' } else { b'0' };
+            lp2 += 1;
+            if let Ok(s) = core::str::from_utf8(&log_buf2[..lp2]) {
+                let _ = std::log(s);
+            }
+        }
+
         if protocol_fault || document_len == 0 {
-            self.status = PageStatus::GatewayError;
+            self.status = PageStatus::ProtocolFault;
+            if self.protocol_fault == ProtocolFaultKind::None {
+                self.protocol_fault = if protocol_fault {
+                    ProtocolFaultKind::MalformedResponse
+                } else {
+                    ProtocolFaultKind::UnparseableDocument
+                };
+            }
             self.loading_progress = 0;
             self.tabs.active_tab_mut().loading_state = LoadingState::Failed;
             self.tabs.active_tab_mut().error_code = -5; // EIO
@@ -4464,11 +4569,12 @@ impl BrowserApp {
                 destination,
             );
             if doc_len == 0 {
-                self.status = PageStatus::GatewayError;
+                self.status = PageStatus::ProtocolFault;
+                self.protocol_fault = ProtocolFaultKind::EmptyDocument;
                 self.loading_progress = 0;
                 self.tabs.active_tab_mut().loading_state = LoadingState::Failed;
                 self.tabs.active_tab_mut().error_code = -5; // EIO
-                std::log("[BROWSER APP] The page carried no readable text after decoding; no page was synthesised.").ok();
+                std::log("[BROWSER APP] The page carried no readable text after reader conversion; no page was synthesised.").ok();
                 return false;
             }
             self.load_document_content(&destination[..doc_len]);
@@ -4559,7 +4665,11 @@ impl BrowserApp {
         self.image_arena_used = 0;
         self.response_truncated = false;
         self.local_failure = LocalFailure::NoPath;
+        self.download_failure = DownloadFailure::None;
         self.gateway_reason_len = 0;
+        self.transport_failure = TransportFailure::None;
+        self.connection_failure = ConnectionFailure::None;
+        self.protocol_fault = ProtocolFaultKind::None;
         self.response_len = 0;
         self.loading_progress = 0;
         self.error_code = 0;
@@ -4775,7 +4885,25 @@ impl Frame {
         let (head_src, body_src): (&[u8], &[u8]) = match app.status {
             PageStatus::Blank => (b"InterOS Browser", BODY_BLANK),
             PageStatus::Loaded => (b"Web Documents", BODY_LOADED),
-            PageStatus::NoTransport => (b"Navigation unavailable", BODY_NO_TRANSPORT),
+            PageStatus::NoTransport => match app.transport_failure {
+                TransportFailure::NetworkDown => (b"Network unavailable", BODY_NETWORK_DOWN),
+                TransportFailure::DnsFailed => (b"Address cannot be resolved", BODY_DNS_FAILED),
+                _ => (b"Navigation unavailable", BODY_NO_TRANSPORT),
+            },
+            PageStatus::ConnectionFailed => match app.connection_failure {
+                ConnectionFailure::Refused => (b"Connection refused", BODY_CONNECTION_REFUSED),
+                ConnectionFailure::Timeout => (b"Connection timed out", BODY_CONNECTION_TIMEOUT),
+                ConnectionFailure::Stall => (b"Connection stalled", BODY_CONNECTION_STALLED),
+                ConnectionFailure::None => (b"Connection failed", BODY_CONNECTION_TIMEOUT),
+            },
+            PageStatus::ZeroBytes => (b"No data received", BODY_ZERO_BYTES),
+            PageStatus::ProtocolFault => match app.protocol_fault {
+                ProtocolFaultKind::MalformedResponse => (b"Protocol fault", BODY_PROTOCOL_MALFORMED),
+                ProtocolFaultKind::InvalidEncoding => (b"Decoding failed", BODY_PROTOCOL_ENCODING),
+                ProtocolFaultKind::UnparseableDocument => (b"Unparseable document", BODY_PROTOCOL_UNPARSEABLE),
+                ProtocolFaultKind::EmptyDocument => (b"Document empty", BODY_PROTOCOL_EMPTY),
+                ProtocolFaultKind::None => (b"Protocol fault", BODY_PROTOCOL_MALFORMED),
+            },
             PageStatus::InvalidAddress => (b"Address cannot be opened", BODY_INVALID),
             PageStatus::UnrecognisedAddress => (b"Address not recognised", BODY_UNRECOGNISED),
             PageStatus::UnsupportedScheme => (b"Scheme not supported", BODY_UNSUPPORTED_SCHEME),
@@ -6308,12 +6436,7 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
         || app.status == PageStatus::DownloadFailed
         || app.status == PageStatus::DownloadPrompt
         || app.status == PageStatus::DownloadRefused;
-    if app.status == PageStatus::NoTransport
-        || app.status == PageStatus::InvalidAddress
-        || app.status == PageStatus::UnrecognisedAddress
-        || app.status == PageStatus::UnsupportedScheme
-        || app.status == PageStatus::GatewayError
-        || app.status == PageStatus::LocalRefused
+    if app.status.is_error()
         || download_status
     {
         let cx = W / 2;
@@ -6390,6 +6513,26 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
         let err_rect = Rect::new(cx - 180, err_y, 360, 36);
         if let Some(c) = draw_rounded_rect(x, y, err_rect, R_SMALL, THEME.surface_container_high, Some(THEME.border), 1) {
             let label: &[u8] = match app.status {
+                PageStatus::NoTransport => match app.transport_failure {
+                    TransportFailure::NoCapability => b"NO TRANSPORT CAPABILITY",
+                    TransportFailure::NetworkDown => b"NETWORK DOWN",
+                    TransportFailure::DnsFailed => b"DNS RESOLUTION FAILED",
+                    TransportFailure::None => b"NO TRANSPORT",
+                },
+                PageStatus::ConnectionFailed => match app.connection_failure {
+                    ConnectionFailure::Refused => b"CONNECTION REFUSED",
+                    ConnectionFailure::Timeout => b"CONNECTION TIMED OUT",
+                    ConnectionFailure::Stall => b"CONNECTION STALLED",
+                    ConnectionFailure::None => b"CONNECTION FAILED",
+                },
+                PageStatus::ZeroBytes => b"NO RESPONSE FROM THE GATEWAY",
+                PageStatus::ProtocolFault => match app.protocol_fault {
+                    ProtocolFaultKind::MalformedResponse => b"PROTOCOL FAULT",
+                    ProtocolFaultKind::InvalidEncoding => b"INVALID ENCODING",
+                    ProtocolFaultKind::UnparseableDocument => b"UNPARSEABLE DOCUMENT",
+                    ProtocolFaultKind::EmptyDocument => b"EMPTY DOCUMENT",
+                    ProtocolFaultKind::None => b"PROTOCOL FAULT",
+                },
                 PageStatus::InvalidAddress => b"INVALID ADDRESS",
                 PageStatus::UnrecognisedAddress => b"ADDRESS NOT RECOGNISED",
                 PageStatus::UnsupportedScheme => b"SCHEME NOT SUPPORTED",
@@ -9149,12 +9292,7 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
     }
 
     // Offline / Error screen Reload Button tap
-    if (app.status == PageStatus::NoTransport
-        || app.status == PageStatus::InvalidAddress
-        || app.status == PageStatus::UnrecognisedAddress
-        || app.status == PageStatus::UnsupportedScheme
-        || app.status == PageStatus::GatewayError
-        || app.status == PageStatus::LocalRefused)
+    if app.status.is_error()
         && ((y >= 630 && y <= 720) || (y >= 920 && y <= 968))
         && x >= (W / 2 - 90)
         && x <= (W / 2 + 90)

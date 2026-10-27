@@ -335,7 +335,7 @@ fn dynamic_trees(reader: &mut BitReader<'_>) -> Result<(Huffman, Huffman), Infla
     let mut code_tree = Huffman::EMPTY;
     code_tree.build(&code_lengths)?;
 
-    let mut lengths = [0u8; MAX_LIT_CODES];
+    let mut lengths = [0u8; MAX_LIT_CODES + MAX_DIST_CODES];
     let total = literal_count + distance_count;
     if total > lengths.len() {
         return Err(InflateError::InvalidHuffman);
