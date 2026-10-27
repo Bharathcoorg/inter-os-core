@@ -870,6 +870,15 @@ impl<'a, 's> Builder<'a, 's> {
             }
             child = self.dom.next_sibling(id);
         }
+        // WHY a separator is owed on leaving an inline element too: minified and
+        // framework markup puts adjacent inline elements together with no
+        // whitespace between them, and `pending_space` was only ever set from a
+        // space inside a text node. `<span>Rust</span><span>Microkernel</span>`
+        // therefore produced two runs but no gap, and the page read
+        // "RustMicrokernel". Owing the space on both ends of the element makes
+        // the boundary itself the separator, which is what the reader path
+        // already does.
+        *pending_space = true;
     }
 
     fn collect_text(
@@ -1617,6 +1626,28 @@ mod tests {
         assert!(body.y > title.y);
         assert!(title.scale >= body.scale);
         assert!(out.height > 0);
+    }
+
+    #[test]
+    fn adjacent_inline_elements_separate_with_a_space() {
+        // Minified markup puts the two spans together with no whitespace between
+        // them, so the element boundary itself has to become the separator.
+        let (dom, out) = layout_html(b"<p><span>Rust</span><span>Microkernel</span></p>", 600);
+        let left = out.runs[..out.run_count]
+            .iter()
+            .find(|r| run_text(&dom, r) == b"Rust")
+            .expect("Rust run");
+        let right = out.runs[..out.run_count]
+            .iter()
+            .find(|r| run_text(&dom, r) == b"Microkernel")
+            .expect("Microkernel run");
+        assert_eq!(left.y, right.y, "both runs stay on one line");
+        assert!(
+            right.x > left.x + left.w as i16,
+            "adjacent inline elements must not touch: Rust ends at {}, Microkernel starts at {}",
+            left.x + left.w as i16,
+            right.x
+        );
     }
 
     #[test]
