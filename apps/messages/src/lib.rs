@@ -13,6 +13,10 @@ pub mod privacy;
 pub mod publish;
 pub mod contacts;
 
+/// The compose keyboard: the dock's geometry, the field it types into, and
+/// what a key press does to that field.
+pub mod keyboard;
+
 pub const MAX_PHONE_LEN: usize = 32;
 pub const MAX_PEER_HANDLE_LEN: usize = 32;
 pub const MAX_SNIPPET_LEN: usize = 64;
