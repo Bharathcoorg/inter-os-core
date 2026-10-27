@@ -687,13 +687,17 @@ fn pin_modal_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
         return c;
     }
 
+    // WHY the line says this and not what it used to say: the PIN path asks
+    // the system's unlock service and opens the credential list; it never
+    // causes the keystore to release a key, so the screen may not claim a
+    // hardware root of protection over the PIN.
     if let Some(c) = font::ink_center(
         x,
         y,
         MARGIN,
         872,
         1,
-        b"Hardware keystore root protected - Zero heap allocations",
+        b"The PIN opens this session; it does not release a keystore key",
         CARD_W,
         THEME.on_surface_variant,
         THEME.surface,
@@ -705,7 +709,7 @@ fn pin_modal_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
     THEME.surface
 }
 
-fn credentials_view_pixel(x: usize, y: usize, _vault: &VaultApp) -> u32 {
+fn credentials_view_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
     if y >= 1418 && y < 1424 && x >= 260 && x < 460 {
         return THEME.on_surface_variant;
     }
@@ -729,9 +733,18 @@ fn credentials_view_pixel(x: usize, y: usize, _vault: &VaultApp) -> u32 {
     const AUTH_CARD_Y: usize = 116;
     const AUTH_CARD_H: usize = 120;
     if let Some(fill) = card_pixel(x, y, MARGIN, AUTH_CARD_Y, CARD_W, AUTH_CARD_H) {
-        if let Some(c) = caption_pixel(x, y, MARGIN + PAD, AUTH_CARD_Y + 18, b"AUTHENTICATED VAULT", INNER_W) {
+        if let Some(c) = caption_pixel(x, y, MARGIN + PAD, AUTH_CARD_Y + 18, b"VAULT SESSION", INNER_W) {
             return c;
         }
+        // WHY the row reports the session and not the hardware: it used to
+        // print a fixed "authenticated, hardware protected" verdict whatever
+        // the keystore had answered. Opening this list only ever asks the
+        // system's unlock service, so that is the fact the row states.
+        let (session, session_ink): (&[u8], u32) = if vault.is_authenticated {
+            (b"SESSION OPEN", THEME.success)
+        } else {
+            (b"NO SESSION", THEME.warning)
+        };
         if let Some(c) = metric_row(
             x,
             y,
@@ -739,9 +752,9 @@ fn credentials_view_pixel(x: usize, y: usize, _vault: &VaultApp) -> u32 {
             AUTH_CARD_Y + 50,
             CARD_W,
             b"Access State",
-            b"AUTHENTICATED",
-            THEME.success,
-            b"Hardware keystore root protected credentials active",
+            session,
+            session_ink,
+            b"asked of the system unlock service; no key was released by it",
         ) {
             return c;
         }
@@ -751,19 +764,25 @@ fn credentials_view_pixel(x: usize, y: usize, _vault: &VaultApp) -> u32 {
     const SECRETS_CARD_Y: usize = 248;
     const SECRETS_CARD_H: usize = 370;
     if let Some(fill) = card_pixel(x, y, MARGIN, SECRETS_CARD_Y, CARD_W, SECRETS_CARD_H) {
-        if let Some(c) = caption_pixel(x, y, MARGIN + PAD, SECRETS_CARD_Y + 18, b"STORED SECRETS", INNER_W) {
+        // WHY the caption changed: the card used to list three secrets whose
+        // values were typed into the painter, and no code in this app ever
+        // read them. What it actually holds are the answers its own probes
+        // got back, so the card is now called what it shows.
+        if let Some(c) = caption_pixel(x, y, MARGIN + PAD, SECRETS_CARD_Y + 18, b"KEYSTORE PROBES", INNER_W) {
             return c;
         }
+        let slot0 = key_verdict(vault.key_probe[0]);
+        let slot1 = key_verdict(vault.key_probe[1]);
         if let Some(c) = metric_row(
             x,
             y,
             MARGIN,
             SECRETS_CARD_Y + 54,
             CARD_W,
-            b"Wi-Fi Network PSK",
-            b"AUTHENTICATED",
-            THEME.success,
-            b"wpa3-psk: ********9x2k",
+            b"Root key, slot 0",
+            slot0,
+            key_ink(vault.key_probe[0]),
+            b"keystore_derive(0), raw export to this app",
         ) {
             return c;
         }
@@ -773,10 +792,10 @@ fn credentials_view_pixel(x: usize, y: usize, _vault: &VaultApp) -> u32 {
             MARGIN,
             SECRETS_CARD_Y + 128,
             CARD_W,
-            b"P2P Wire Identity Key",
-            b"AUTHENTICATED",
-            THEME.success,
-            b"ed25519: 4f8a...c31b",
+            b"Storage key, slot 1",
+            slot1,
+            key_ink(vault.key_probe[1]),
+            b"keystore_derive(1), raw export to this app",
         ) {
             return c;
         }
@@ -786,23 +805,24 @@ fn credentials_view_pixel(x: usize, y: usize, _vault: &VaultApp) -> u32 {
             MARGIN,
             SECRETS_CARD_Y + 202,
             CARD_W,
-            b"Keystore Master Seed",
-            b"AUTHENTICATED",
-            THEME.success,
-            b"hsm0: ****************",
+            b"Entropy source",
+            entropy_verdict(vault.entropy_probe),
+            entropy_ink(vault.entropy_probe),
+            b"/dev/urandom probe; IVs fail closed without it",
         ) {
             return c;
         }
+        let (identity_word, identity_ink) = identity_verdict(vault.identity);
         if let Some(c) = metric_row(
             x,
             y,
             MARGIN,
             SECRETS_CARD_Y + 276,
             CARD_W,
-            b"Root Keystore Status",
-            b"round-trip verified",
-            THEME.success,
-            b"Hardware Keystore Slot 0",
+            b"Device identity",
+            identity_word,
+            identity_ink,
+            b"/system/etc/device_id, magic prefix only",
         ) {
             return c;
         }
@@ -812,32 +832,61 @@ fn credentials_view_pixel(x: usize, y: usize, _vault: &VaultApp) -> u32 {
     const AUDIT_CARD_Y: usize = 632;
     const AUDIT_CARD_H: usize = 210;
     if let Some(fill) = card_pixel(x, y, MARGIN, AUDIT_CARD_Y, CARD_W, AUDIT_CARD_H) {
-        if let Some(c) = caption_pixel(x, y, MARGIN + PAD, AUDIT_CARD_Y + 18, b"SECURITY AUDIT", INNER_W) {
+        // WHY these two rows replaced the absolutes: the card used to assert
+        // that authority and memory protection were enforced, with no probe
+        // behind either claim. This app cannot ask the kernel whether it
+        // enforced a capability; it can only count what its own calls
+        // returned, which is what these rows now print.
+        if let Some(c) = caption_pixel(x, y, MARGIN + PAD, AUDIT_CARD_Y + 18, b"WHAT THIS APP TESTED", INNER_W) {
             return c;
         }
+        let verified = vault
+            .sectors
+            .iter()
+            .filter(|record| record.map(|s| s.authenticated).unwrap_or(false))
+            .count();
+        let mut round_buf = [0u8; 24];
+        let round_len = count_label(verified, vault.sectors.len(), &mut round_buf);
         if let Some(c) = metric_row(
             x,
             y,
             MARGIN,
             AUDIT_CARD_Y + 54,
             CARD_W,
-            b"Zero Ambient Authority",
-            b"ENFORCED",
-            THEME.success,
-            b"CapHandle required for secret access",
+            b"Sector round-trips",
+            &round_buf[..round_len],
+            if verified == vault.sectors.len() {
+                THEME.success
+            } else if verified == 0 {
+                THEME.on_surface_variant
+            } else {
+                THEME.warning
+            },
+            b"encrypt then decrypt in memory; nothing stored is re-read",
         ) {
             return c;
         }
+        let derived = vault
+            .key_probe
+            .iter()
+            .filter(|probe| **probe == KeyProbe::Derived)
+            .count();
+        let mut key_buf = [0u8; 24];
+        let key_len = count_label(derived, vault.key_probe.len(), &mut key_buf);
         if let Some(c) = metric_row(
             x,
             y,
             MARGIN,
             AUDIT_CARD_Y + 128,
             CARD_W,
-            b"Memory Protection",
-            b"ENFORCED",
-            THEME.success,
-            b"Zero-heap stack isolation active",
+            b"Raw keys held here",
+            &key_buf[..key_len],
+            if derived == 0 {
+                THEME.on_surface_variant
+            } else {
+                THEME.warning
+            },
+            b"a derived key sits in this app's memory, not the hardware's",
         ) {
             return c;
         }
@@ -1236,12 +1285,7 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
         ) {
             return c;
         }
-        let (identity_verdict, identity_ink) = match vault.identity {
-            IdentityState::Present => (b"DID: prefix present".as_slice(), THEME.success),
-            IdentityState::Malformed => (b"present but malformed".as_slice(), THEME.warning),
-            IdentityState::Unreadable => (b"not readable".as_slice(), THEME.warning),
-            IdentityState::NotChecked => (b"not checked".as_slice(), THEME.on_surface_variant),
-        };
+        let (identity_word, identity_ink) = identity_verdict(vault.identity);
         if let Some(c) = metric_row(
             x,
             y,
@@ -1249,7 +1293,7 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
             CARD_A_Y + 214,
             CARD_W,
             b"Device identity",
-            identity_verdict,
+            identity_word,
             identity_ink,
             b"/system/etc/device_id, magic prefix only",
         ) {
@@ -1332,13 +1376,6 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
         ) {
             return c;
         }
-        let entropy_ink = match vault.entropy_probe {
-            EntropyProbe::Read16 => THEME.success,
-            EntropyProbe::AllZero => THEME.error,
-            EntropyProbe::Short => THEME.warning,
-            EntropyProbe::Refused(_) => THEME.warning,
-            EntropyProbe::NotRun => THEME.on_surface_variant,
-        };
         let entropy_word = entropy_verdict(vault.entropy_probe);
         if let Some(c) = metric_row(
             x,
@@ -1348,7 +1385,7 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
             CARD_W,
             b"Entropy source",
             entropy_word,
-            entropy_ink,
+            entropy_ink(vault.entropy_probe),
             b"/dev/urandom probe; IVs fail closed without it",
         ) {
             return c;
@@ -1519,6 +1556,41 @@ fn entropy_verdict(p: EntropyProbe) -> &'static [u8] {
         EntropyProbe::Refused(_) => b"read refused",
         EntropyProbe::NotRun => b"not probed",
     }
+}
+
+fn entropy_ink(p: EntropyProbe) -> u32 {
+    match p {
+        EntropyProbe::Read16 => THEME.success,
+        EntropyProbe::AllZero => THEME.error,
+        EntropyProbe::Short => THEME.warning,
+        EntropyProbe::Refused(_) => THEME.warning,
+        EntropyProbe::NotRun => THEME.on_surface_variant,
+    }
+}
+
+/// The device-identity probe's own words, with the ink that matches them.
+fn identity_verdict(p: IdentityState) -> (&'static [u8], u32) {
+    match p {
+        IdentityState::Present => (b"DID: prefix present".as_slice(), THEME.success),
+        IdentityState::Malformed => (b"present but malformed".as_slice(), THEME.warning),
+        IdentityState::Unreadable => (b"not readable".as_slice(), THEME.warning),
+        IdentityState::NotChecked => (b"not checked".as_slice(), THEME.on_surface_variant),
+    }
+}
+
+/// Writes "n of total" into the caller's buffer and returns its length.
+///
+/// WHY a count and not a word: a row that says "verified" or "ENFORCED"
+/// claims something this app cannot see, and a count is the same claim with
+/// the evidence still attached.
+fn count_label(n: usize, total: usize, buf: &mut [u8]) -> usize {
+    let mut len = write_u64(n as u64, buf);
+    let tail = b" of ";
+    let t = tail.len().min(buf.len().saturating_sub(len));
+    buf[len..len + t].copy_from_slice(&tail[..t]);
+    len += t;
+    let len2 = write_u64(total as u64, &mut buf[len..]);
+    len + len2
 }
 
 fn status(app: &mut VaultApp, text: &[u8]) {

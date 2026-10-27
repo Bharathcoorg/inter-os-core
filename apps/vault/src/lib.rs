@@ -540,7 +540,7 @@ mod tests {
     fn test_vault_ui_text_bounds_and_badges() {
         use interos_std::font;
         let card_w = 672;
-        let footer_note = b"Hardware keystore root protected - Zero heap allocations";
+        let footer_note = b"The PIN opens this session; it does not release a keystore key";
         assert!(font::measure(footer_note, 1) <= card_w);
 
         // Managed sector verdicts must fit within sector tile inner width (iw = 292, badge text available <= 266)
@@ -566,6 +566,72 @@ mod tests {
             let badge_w = mw + 34;
             assert!(badge_w <= 324, "metric badge width exceeds row space");
         }
+    }
+
+    /// The credential screen used to print a Wi-Fi PSK, an ed25519 identity
+    /// key and an hsm0 master seed that no code in this app ever read, and to
+    /// assert "ENFORCED" over capabilities it cannot query. It now prints only
+    /// what its own probes answered.
+    #[test]
+    fn the_credentials_screen_reports_probes_and_not_invented_secrets() {
+        let main = include_str!("main.rs");
+        let view = {
+            let start = main
+                .find("fn credentials_view_pixel")
+                .expect("the credentials view is still drawn");
+            let rest = &main[start..];
+            let end = rest
+                .find("\nfn cred_action_rect")
+                .or_else(|| rest.find("\nconst STATUS_Y"))
+                .expect("the credentials view ends");
+            &rest[..end]
+        };
+        for invented in [
+            "wpa3-psk",
+            "ed25519",
+            "hsm0",
+            "STORED SECRETS",
+            "SECURITY AUDIT",
+            "Zero Ambient Authority",
+            "Zero-heap stack isolation active",
+            "Hardware keystore root protected",
+            "AUTHENTICATED",
+        ] {
+            assert!(
+                !view.contains(invented),
+                "the credential screen still prints {invented:?}, which no probe reports"
+            );
+        }
+        // Every row is now derived from state the probes write.
+        for read in [
+            "vault.is_authenticated",
+            "key_verdict(vault.key_probe[0])",
+            "key_verdict(vault.key_probe[1])",
+            "entropy_verdict(vault.entropy_probe)",
+            "identity_verdict(vault.identity)",
+            "count_label(verified, vault.sectors.len()",
+            "count_label(derived, vault.key_probe.len()",
+        ] {
+            assert!(view.contains(read), "the credential screen does not read {read}");
+        }
+    }
+
+    /// The PIN modal sits in front of the keystore probe and used to claim a
+    /// hardware root of protection anyway. Nothing in the PIN path releases a
+    /// key, so the note may only say what opening the session does.
+    #[test]
+    fn the_pin_modal_claims_no_keystore_protection() {
+        let main = include_str!("main.rs");
+        let start = main
+            .find("fn pin_modal_pixel")
+            .expect("the pin modal is still drawn");
+        let end = main[start..]
+            .find("fn credentials_view_pixel")
+            .expect("the modal ends where the credential screen begins");
+        let modal = &main[start..start + end];
+        assert!(!modal.contains("Hardware keystore root protected"));
+        assert!(!modal.contains("Zero heap allocations"));
+        assert!(modal.contains("The PIN opens this session; it does not release a keystore key"));
     }
 }
 
