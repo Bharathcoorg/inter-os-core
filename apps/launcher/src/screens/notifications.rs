@@ -564,10 +564,10 @@ impl RowPlan {
 
 #[derive(Clone, Copy)]
 struct EventsFrame {
-    /// The shell's canonical status clock, and the same honest telemetry the
-    /// home screen draws. One geometry for every shell surface.
+    /// The shell's canonical status clock. The telemetry marks are the
+    /// platform's own and are drawn from the SDK, so this frame carries no
+    /// second copy of their geometry.
     clock: LabelRun,
-    telemetry: crate::screens::home::Telemetry,
     title: LabelRun,
     subtitle: LabelRun,
     source_note: LabelRun,
@@ -786,7 +786,6 @@ fn build_events_frame(state: &LauncherState) -> EventsFrame {
         clock_slice,
         theme.on_surface,
     );
-    let telemetry = crate::screens::home::telemetry_plan();
 
     // 2. Header
     let now = interos_std::cap::timer_slot().and_then(|_| interos_std::get_ticks().ok());
@@ -970,7 +969,6 @@ fn build_events_frame(state: &LauncherState) -> EventsFrame {
 
     EventsFrame {
         clock: status_clock,
-        telemetry,
         title,
         subtitle,
         source_note,

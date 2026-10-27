@@ -257,7 +257,6 @@ impl DashboardReadingCard {
 
 struct WidgetsPlan {
     status_clock: LabelRun,
-    telemetry: crate::screens::home::Telemetry,
     page_title: LabelRun,
     page_subtitle: LabelRun,
     status_chip_rect: Rect,
@@ -353,7 +352,6 @@ fn build_widgets_frame(state: &LauncherState) -> WidgetsPlan {
     } else {
         LabelRun::EMPTY
     };
-    let telemetry = crate::screens::home::telemetry_plan();
 
     // 2. Header
     // Generous vertical breathing room: title at y=60, subtitle at y=102
@@ -498,7 +496,6 @@ fn build_widgets_frame(state: &LauncherState) -> WidgetsPlan {
 
     WidgetsPlan {
         status_clock,
-        telemetry,
         page_title,
         page_subtitle,
         status_chip_rect,

@@ -1655,8 +1655,7 @@ fn lock_screen_over_backdrop(
                 return c;
             }
         }
-        let t = crate::screens::home::telemetry_plan();
-        if let Some(c) = crate::screens::home::telemetry_pixel(x, y, &t, 0xFFFFFFFF) {
+        if let Some(c) = crate::screens::status::marks(x, y, 0xFFFFFFFF) {
             return c;
         }
     }

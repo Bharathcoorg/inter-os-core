@@ -43,7 +43,7 @@ use crate::{test_text_aa, LauncherState};
 use launcher::layout::{self, Rect};
 use launcher::text;
 use launcher::theme::{
-    space, type_scale, Theme, CONTENT_PADDING, MIN_TOUCH_TARGET, NAV_BAR_HEIGHT,
+    space, type_scale, Theme, MIN_TOUCH_TARGET, NAV_BAR_HEIGHT,
     SCREEN_HEIGHT, SCREEN_WIDTH, STATUS_BAR_HEIGHT,
 };
 
@@ -58,64 +58,6 @@ use launcher::theme::{
 /// screen is already written against the struct rather than against constants.
 fn active_theme() -> Theme {
     Theme::LIGHT
-}
-
-// -----------------------------------------------------------------------------
-// Telemetry: what the shell is allowed to claim about the hardware
-// -----------------------------------------------------------------------------
-
-/// What the shell knows about one piece of hardware at the moment it draws.
-///
-/// WHY an enum rather than a colour: the previous status bar hardcoded one grey
-/// and drew three outlines, which is right today and silently wrong the day a
-/// radio is bound. Naming the states means the drawing code has to say which one
-/// it is in, so the day a `Measured` level can exist there is a place to branch
-/// rather than a colour to change.
-#[derive(Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
-enum Reading {
-    /// A real level, 0..=100 percent, from a bound sensor. Draws a fill.
-    Measured(u32),
-    /// The hardware is not bound on this platform. Draws an outline and no level.
-    Unbound,
-    /// The hardware does not exist here at all. Draws nothing.
-    Unsupported,
-}
-
-/// Cellular, Wi-Fi and fuel state for this platform.
-///
-/// WHY every one of them is [`Reading::Unbound`]: no radio, no Wi-Fi radio and
-/// no fuel gauge is bound to this shell, and the hardware query syscalls report
-/// unavailable. A filled battery glyph or four signal bars with no measurement
-/// behind them is a fabricated reading, so the outlines stand alone. This is the
-/// one place a bound sensor would be reported, and it is why the states are named
-/// rather than painted.
-#[allow(dead_code)]
-fn cellular() -> Reading {
-    Reading::Unbound
-}
-
-/// Wi-Fi association state.
-#[allow(dead_code)]
-fn wifi() -> Reading {
-    Reading::Unbound
-}
-
-/// Fuel state.
-#[allow(dead_code)]
-fn fuel() -> Reading {
-    Reading::Unbound
-}
-
-/// Whether a reading carries a level worth filling a glyph with.
-impl Reading {
-    #[allow(dead_code)]
-    fn level(self) -> Option<u32> {
-        match self {
-            Reading::Measured(percent) => Some(percent.min(100)),
-            _ => None,
-        }
-    }
 }
 
 // -----------------------------------------------------------------------------
@@ -182,28 +124,6 @@ const TILE_GUTTER: usize = space::XL;
 /// Height of the home gesture pill, and the gap above the bottom of the surface.
 #[allow(dead_code)]
 const GESTURE_PILL_H: usize = space::SM;
-
-/// Telemetry glyph metrics in the 48 px status bar.
-#[allow(dead_code)]
-const TELEMETRY_TOP: usize = 16;
-#[allow(dead_code)]
-const TELEMETRY_H: usize = 17;
-#[allow(dead_code)]
-const TELEMETRY_SIGNAL_BARS: usize = 4;
-#[allow(dead_code)]
-const TELEMETRY_BAR_W: usize = 4;
-#[allow(dead_code)]
-const TELEMETRY_BAR_GAP: usize = 1;
-#[allow(dead_code)]
-const TELEMETRY_BATTERY_W: usize = 28;
-/// Width of the Wi-Fi fan. WHY 16 and not the old 6: the glyph is a dot with
-/// two arcs over it (radius 8 at the widest), so the box has to hold a 15 px
-/// fan; a 6 px box could only ever fit a square, which is what it drew.
-#[allow(dead_code)]
-const TELEMETRY_WIFI_W: usize = 16;
-const TELEMETRY_TERM_W: usize = 2;
-#[allow(dead_code)]
-const TELEMETRY_GAP: usize = 24;
 
 /// Capacity of the formatted render-complete log line.
 pub const HOME_LOG_CAP: usize = 128;
@@ -716,44 +636,6 @@ struct Paint {
     #[allow(dead_code)]
     nav_recents: Run,
     nav_pill: Rect,
-    telemetry: Telemetry,
-}
-
-/// The status bar's hardware glyph boxes.
-#[derive(Clone, Copy)]
-pub(crate) struct Telemetry {
-    pub signal_x: usize,
-    pub signal_w: usize,
-    pub wifi_x0: usize,
-    pub wifi_w: usize,
-    pub pct_x0: usize,
-    pub pct_w: usize,
-    pub battery_x0: usize,
-    pub term_x0: usize,
-}
-
-/// The status bar's glyph boxes for this frame.
-pub(crate) fn telemetry_plan() -> Telemetry {
-    let right = SCREEN_WIDTH - 36;
-    let term_x0 = right - TELEMETRY_TERM_W;
-    let battery_x0 = term_x0 - 24;
-    // Platform Truth Contract: no synthetic 100% battery percentage
-    let pct_w = 0;
-    let pct_x0 = battery_x0;
-    let wifi_w = 16;
-    let wifi_x0 = battery_x0 - 14 - wifi_w;
-    let signal_w = 19;
-    let signal_x = wifi_x0 - 14 - signal_w;
-    Telemetry {
-        signal_x,
-        signal_w,
-        wifi_x0,
-        wifi_w,
-        pct_x0,
-        pct_w,
-        battery_x0,
-        term_x0,
-    }
 }
 
 /// Deck slots this surface will hold in one frame.
@@ -1009,7 +891,6 @@ fn build(state: &LauncherState) -> Paint {
             pill_w,
             5,
         ),
-        telemetry: telemetry_plan(),
         scene: state.home_wallpaper,
         scene_ref: interos_std::design::walls::SceneRef::new(state.home_wallpaper),
         wallpaper_document: state.home_wallpaper_document,
@@ -1321,17 +1202,6 @@ fn rounded_outline(r: Rect, x: usize, y: usize, rad: usize) -> bool {
 // Status bar
 // -----------------------------------------------------------------------------
 
-/// Left edge of the cellular bar stack.
-#[allow(dead_code)]
-fn telemetry_signal_x() -> usize {
-    let right = SCREEN_WIDTH - CONTENT_PADDING;
-    let signal_w = TELEMETRY_SIGNAL_BARS * TELEMETRY_BAR_W
-        + TELEMETRY_SIGNAL_BARS.saturating_sub(1) * TELEMETRY_BAR_GAP;
-    let battery_x0 = right - TELEMETRY_TERM_W - TELEMETRY_BATTERY_W;
-    let wifi_x0 = battery_x0 - TELEMETRY_GAP - TELEMETRY_WIFI_W;
-    wifi_x0 - TELEMETRY_GAP - signal_w
-}
-
 fn status_bar_pixel(x: usize, y: usize, theme: &Theme, p: &Paint) -> Option<u32> {
     if y >= STATUS_BAR_HEIGHT {
         return None;
@@ -1346,107 +1216,7 @@ fn status_bar_pixel(x: usize, y: usize, theme: &Theme, p: &Paint) -> Option<u32>
         return Some(c);
     }
 
-    telemetry_pixel(x, y, &p.telemetry, ink)
-}
-
-/// The status bar's hardware glyphs.
-///
-/// WHY the shapes carry no level: all three readings are [`Reading::Unbound`], so
-/// nothing is filled with a number this platform cannot measure. Each glyph still
-/// has to READ as what it stands for, though — an empty battery shell is read as
-/// 0 % and a hollow square is read as a checkbox — so the unbound state is drawn
-/// as an explicit "no reading" mark (a dash in the shell, a hollow Wi-Fi dot)
-/// rather than as absence. The fill arithmetic is written out anyway and reached
-/// only through [`Reading::level`], so a bound sensor has one place to go rather
-/// than a colour to change.
-pub(crate) fn telemetry_pixel(x: usize, y: usize, t: &Telemetry, ink: u32) -> Option<u32> {
-    if y < 14 || y > 34 {
-        return None;
-    }
-
-    // 1. Cellular: four ascending 1 px outlines, with no fill.
-    //
-    // WHY outlines and not bars: the radio is unbound, so there is no level to
-    // fill. A solid stack is what a phone draws for "four bars of signal", and
-    // this platform has never measured one.
-    if x >= t.signal_x && x < t.signal_x + t.signal_w {
-        for bar in 0..4 {
-            let bx = t.signal_x + bar * 5;
-            if x >= bx && x < bx + 3 {
-                let h = 5 + bar * 3;
-                let bar_top = 31 - h;
-                let on_edge = x == bx || x == bx + 2 || y == bar_top || y == 30;
-                if on_edge && y >= bar_top && y <= 30 {
-                    return Some(ink);
-                }
-            }
-        }
-        return None;
-    }
-
-    // 2. Wi-Fi: a centre dot and two continuous 1 px arcs above it.
-    //
-    // WHY a per-column arc height instead of an integer annulus: at these radii
-    // a squared-distance band lands on sparse lattice points and rendered as a
-    // dashed cloud. Resolving the arc's row for each column keeps the fan one
-    // connected curve. The dot carries no level — Wi-Fi is unbound — but the
-    // mark still has to read as Wi-Fi rather than as an indeterminate blob.
-    if x >= t.wifi_x0 && x < t.wifi_x0 + t.wifi_w {
-        let cx = t.wifi_x0 as i32 + (t.wifi_w as i32) / 2;
-        let cy = 30i32;
-        let dx = x as i32 - cx;
-        if (-1..=0).contains(&dx) && (29..=30).contains(&y) {
-            return Some(ink);
-        }
-        let dy = cy - y as i32;
-        if dy > 0 {
-            for r in [5i32, 8] {
-                if dx.abs() <= r - 2 {
-                    let d2 = dx * dx + dy * dy;
-                    if (d2 - r * r).abs() <= r {
-                        return Some(ink);
-                    }
-                }
-            }
-        }
-        return None;
-    }
-
-    // 3. Battery percentage: Platform Truth Contract (no synthetic 100%)
-    if t.pct_w > 0 && x >= t.pct_x0 && x < t.pct_x0 + t.pct_w {
-        return None;
-    }
-
-    // 4. Battery: shell + terminal tip + a centre dash, with no fill.
-    //
-    // WHY a dash and not a percentage: the fuel gauge is unbound. A filled
-    // interior would read as a charge level, which is exactly the fabricated
-    // reading this strip is meant to avoid.
-    let term_w = TELEMETRY_TERM_W;
-    if x >= t.battery_x0 && x < t.term_x0 + term_w {
-        if x >= t.term_x0 {
-            if y >= 21 && y <= 27 {
-                return Some(ink);
-            }
-            return None;
-        }
-        if y >= 17 && y <= 31 {
-            if (x == t.battery_x0 || x == t.term_x0 - 1) && (y == 17 || y == 31) {
-                return None;
-            }
-            if y == 17 || y == 31 || x == t.battery_x0 || x == t.term_x0 - 1 {
-                return Some(ink);
-            }
-            let dash_x0 = t.battery_x0 + (t.term_x0 - t.battery_x0) / 2 - 4;
-            let dash_x1 = t.battery_x0 + (t.term_x0 - t.battery_x0) / 2 + 4;
-            if (23..=24).contains(&y) && x >= dash_x0 && x <= dash_x1 {
-                return Some(ink);
-            }
-        }
-        return None;
-    }
-
-    None
+    crate::screens::status::marks(x, y, ink)
 }
 
 // -----------------------------------------------------------------------------

@@ -535,7 +535,6 @@ impl RowFrame {
 
 struct QuickControlsFrame {
     clock: LabelRun,
-    telemetry: crate::screens::home::Telemetry,
     heading: LabelRun,
     summary: LabelRun,
     sections: [LabelRun; 4],
@@ -551,16 +550,6 @@ struct QuickControlsFrame {
 impl QuickControlsFrame {
     const EMPTY: QuickControlsFrame = QuickControlsFrame {
         clock: LabelRun::EMPTY,
-        telemetry: crate::screens::home::Telemetry {
-            signal_x: 0,
-            signal_w: 0,
-            wifi_x0: 0,
-            wifi_w: 0,
-            pct_x0: 0,
-            pct_w: 0,
-            battery_x0: 0,
-            term_x0: 0,
-        },
         heading: LabelRun::EMPTY,
         summary: LabelRun::EMPTY,
         sections: [LabelRun::EMPTY; 4],
@@ -686,7 +675,6 @@ impl QuickControlsFrame {
 
         QuickControlsFrame {
             clock,
-            telemetry: crate::screens::home::telemetry_plan(),
             heading,
             summary,
             sections,

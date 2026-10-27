@@ -249,8 +249,7 @@ pub fn get_power_menu_color(x: usize, y: usize, state: &LauncherState) -> u32 {
                 return c;
             }
         }
-        let telemetry = home::telemetry_plan();
-        if let Some(c) = home::telemetry_pixel(x, y, &telemetry, 0xFFCBD5E1) {
+        if let Some(c) = crate::screens::status::marks(x, y, 0xFFCBD5E1) {
             return c;
         }
         return COLOR_BG_TOP;
