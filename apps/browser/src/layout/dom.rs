@@ -570,7 +570,7 @@ impl Dom {
             return;
         }
         let start = self.text_len;
-        self.decode_entities_into(raw);
+        self.decode_entities_into(raw, true);
         if self.text_len == start {
             return;
         }
@@ -728,7 +728,7 @@ impl Dom {
 
     fn intern_decode(&mut self, raw: &[u8]) -> StrRef {
         let start = self.text_len;
-        self.decode_entities_into(raw);
+        self.decode_entities_into(raw, false);
         StrRef {
             start: start as u32,
             len: (self.text_len - start) as u16,
@@ -736,39 +736,81 @@ impl Dom {
     }
 
     /// Decodes the character references a page uses and appends them.
-    fn decode_entities_into(&mut self, raw: &[u8]) {
+    ///
+    /// WHY `to_display` is a flag and not two functions: the two callers differ
+    /// only in what the bytes are for. An attribute value is a string the reader
+    /// never sees and the fetcher must send unchanged -- transliterating an `href`
+    /// would ask for `/cafe%CC%81`'s neighbour `/cafe` and quietly break the link.
+    /// Text content is drawn, so it is reduced to what the drawing face has.
+    fn decode_entities_into(&mut self, raw: &[u8], to_display: bool) {
         let mut i = 0usize;
         while i < raw.len() {
             if raw[i] == b'&' {
                 if let Some((decoded, consumed)) = decode_entity(&raw[i..]) {
-                    self.push_char(decoded);
+                    if !self.push_char(decoded, to_display) {
+                        return;
+                    }
                     i += consumed;
                     continue;
                 }
             }
-            if self.text_len < MAX_TEXT_BYTES {
-                self.text[self.text_len] = raw[i];
-                self.text_len += 1;
-            } else {
-                self.truncated = true;
+            // WHY the whole sequence is stepped over, not one byte: a UTF-8
+            // continuation byte on its own is not a character, and appending it
+            // is what drew a hollow box per fragment of an accented letter.
+            if to_display && raw[i] >= 0x80 {
+                let (cp, next) = crate::decode_utf8_at(raw, i);
+                if next > i {
+                    if cp >= 0x80 {
+                        for &b in crate::transliterate(cp) {
+                            if !self.push_byte(b) {
+                                return;
+                            }
+                        }
+                    }
+                    i = next;
+                    continue;
+                }
+            }
+            if !self.push_byte(raw[i]) {
                 return;
             }
             i += 1;
         }
     }
 
-    fn push_char(&mut self, ch: char) {
+    /// Appends one byte to the text arena, reporting whether there was room.
+    fn push_byte(&mut self, b: u8) -> bool {
+        if self.text_len < MAX_TEXT_BYTES {
+            self.text[self.text_len] = b;
+            self.text_len += 1;
+            true
+        } else {
+            self.truncated = true;
+            false
+        }
+    }
+
+    /// Appends a character reference's value.
+    ///
+    /// Returns false once the arena is full, so the caller stops rather than
+    /// silently dropping the rest of a node's text.
+    fn push_char(&mut self, ch: char, to_display: bool) -> bool {
+        if to_display && !ch.is_ascii() {
+            for &b in crate::transliterate(ch as u32) {
+                if !self.push_byte(b) {
+                    return false;
+                }
+            }
+            return true;
+        }
         let mut buf = [0u8; 4];
         let bytes = ch.encode_utf8(&mut buf).as_bytes();
         for &b in bytes {
-            if self.text_len < MAX_TEXT_BYTES {
-                self.text[self.text_len] = b;
-                self.text_len += 1;
-            } else {
-                self.truncated = true;
-                return;
+            if !self.push_byte(b) {
+                return false;
             }
         }
+        true
     }
 }
 
@@ -1284,6 +1326,30 @@ mod tests {
     }
 
     #[test]
+    fn drawn_text_is_reduced_to_glyphs_the_face_has() {
+        // "café" is 0x63 0x61 0x66 0xC3 0xA9. The drawing face is the ASCII
+        // bitmap cell, so the two bytes of the é would each paint a hollow box
+        // and the word would read "caf[]". Transliterating the code point, not
+        // the byte, is what keeps the word readable.
+        let mut dom = Dom::new();
+        dom.parse("<p>café &mdash; naïve</p>".as_bytes());
+        let p = find(&dom, b"p").unwrap();
+        let mut text = std::vec::Vec::new();
+        collect_text(&dom, p, &mut text);
+        assert_eq!(text, b"cafe -- naive");
+    }
+
+    #[test]
+    fn an_href_keeps_the_bytes_the_server_wants() {
+        // Transliterating a URL is a request for a different document, so the
+        // attribute path decodes entities and nothing else.
+        let mut dom = Dom::new();
+        dom.parse("<a href=\"/café&amp;x\">link</a>".as_bytes());
+        let a = find(&dom, b"a").unwrap();
+        assert_eq!(dom.attr(a, b"href"), Some("/café&x".as_bytes()));
+    }
+
+    #[test]
     fn a_block_closes_an_open_paragraph() {
         let mut dom = Dom::new();
         dom.parse(b"<p>alpha<div>beta</div>gamma");
@@ -1385,7 +1451,9 @@ mod tests {
         let p = find(&dom, b"p").unwrap();
         let mut text = std::vec::Vec::new();
         collect_text(&dom, p, &mut text);
-        assert_eq!(text, b"<x> A B \xc2\xa0 &unknown;");
+        // The no-break space arrives as U+00A0 and leaves as the space the face
+        // can draw; the two around it are the ones the markup already had.
+        assert_eq!(text, b"<x> A B   &unknown;");
     }
 
     #[test]
