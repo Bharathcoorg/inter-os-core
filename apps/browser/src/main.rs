@@ -4763,26 +4763,36 @@ impl BrowserApp {
                         break;
                     };
                     if encoding_len > 0 {
-                        match browser::inflate::decode_content_encoding(
+                        // A body that outgrows the buffer is a body this
+                        // browser cannot hold, not a body that failed to
+                        // decode. The decoder fills the buffer before it
+                        // reports the limit, so the beginning of the page is
+                        // real markup and is shown with the truncation the
+                        // reader is already told about; refusing it lost the
+                        // whole site over its size.
+                        let inflated = match browser::inflate::decode_content_encoding(
                             &encoding[..encoding_len],
                             &html[..wire_len],
                             decoded_buf,
                         ) {
-                            Ok(inflated) => {
-                                let decoded = browser::http::decode_text(
-                                    &decoded_buf[..inflated],
-                                    charset,
-                                    html,
-                                );
-                                document_len = decoded.written;
-                                final_truncated |= decoded.truncated;
-                                invalid_sequences += decoded.invalid;
+                            Ok(inflated) => inflated,
+                            Err(browser::inflate::InflateError::OutputLimit) => {
+                                final_truncated = true;
+                                decoded_buf.len()
                             }
                             Err(_) => {
                                 protocol_fault = true;
                                 break;
                             }
-                        }
+                        };
+                        let decoded = browser::http::decode_text(
+                            &decoded_buf[..inflated],
+                            charset,
+                            html,
+                        );
+                        document_len = decoded.written;
+                        final_truncated |= decoded.truncated;
+                        invalid_sequences += decoded.invalid;
                     } else {
                         let decoded =
                             browser::http::decode_text(&html[..wire_len], charset, decoded_buf);
@@ -4801,8 +4811,13 @@ impl BrowserApp {
                     html[..document_len].copy_from_slice(&decoded_buf[..document_len]);
                 }
 
+                // A truncated body is held in memory for this navigation and
+                // not put in the cache: the validators the origin sent describe
+                // the whole document, so revalidating against a part of it
+                // would turn a 304 into a page shown as complete.
                 if document_len > 0
                     && status == 200
+                    && !final_truncated
                     && document_kind == browser::PayloadKind::Markup
                 {
                     let mut etag = [0u8; 96];

@@ -69,6 +69,11 @@ pub enum InflateError {
     /// A distance points before the start of the output.
     InvalidDistance,
     /// The decoded body is larger than the caller's buffer.
+    ///
+    /// This is the one refusal that still fills the buffer: every byte of it
+    /// is a byte the stream produced, so a caller that can show a document
+    /// part-way has a real prefix to show rather than a buffer with a stale
+    /// tail.
     OutputLimit,
     /// The gzip header is malformed or uses a reserved flag.
     BadGzipHeader,
@@ -237,6 +242,16 @@ fn copy_match(
         return Err(InflateError::InvalidDistance);
     }
     if *written + length > out.len() {
+        // The match is cut short by the caller's buffer. Writing the part of
+        // it that fits is what keeps the promise that an OutputLimit leaves
+        // no unwritten byte behind: a stop mid-copy would strand stale bytes
+        // after the last real one.
+        let mut source = *written - distance;
+        while *written < out.len() {
+            out[*written] = out[source];
+            *written += 1;
+            source += 1;
+        }
         return Err(InflateError::OutputLimit);
     }
     // A match may overlap the bytes it is producing; copying one byte at a
@@ -268,6 +283,12 @@ fn inflate_compressed(
                     return Err(InflateError::InvalidStoredLength);
                 }
                 if written + len > out.len() {
+                    // Same rule as a match: the buffer holds the stream's own
+                    // bytes up to the last of it before the stop is reported.
+                    while written < out.len() {
+                        out[written] = reader.bits(8)? as u8;
+                        written += 1;
+                    }
                     return Err(InflateError::OutputLimit);
                 }
                 for _ in 0..len {
@@ -703,9 +724,36 @@ mod tests {
             inflate_raw(raw, &mut small),
             Err(InflateError::OutputLimit)
         );
+        // WHY the bytes are checked: the caller is allowed to show what it
+        // was given when the limit is reported, so the whole buffer has to be
+        // the stream's own output and not stale memory after a short copy.
+        assert_eq!(&small, b"hell");
+        // A match that straddles the last byte stops the same way and still
+        // fills the buffer: this stream repeats "the quick brown fox", so the
+        // copy that begins at offset 32 runs past a 40-byte output.
+        let repeated = hex(b"\x2b\xc9\x48\x55\x28\x2c\xcd\x4c\xce\x56\x48\x2a\xca\x2f\xcf\x53\x48\xcb\xaf\x50\xc8\x2a\xcd\x2d\x28\x56\xc8\x2f\x4b\x2d\x52\x28\xc1\x22\x9d\x98\x97\x02\x16\xcf\x49\xac\xaa\x54\x48\xc9\x4f\x07\x00");
+        let mut small = [0u8; 40];
+        assert_eq!(
+            inflate_raw(repeated, &mut small),
+            Err(InflateError::OutputLimit)
+        );
+        assert_eq!(&small, b"the quick brown fox jumps over the quick");
         let gz = hex(b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x02\xff\xcb\x48\xcd\xc9\xc9\x07\x00\x86\xa6\x10\x36\x05\x00\x00\x00");
         let mut small = [0u8; 2];
         assert_eq!(gunzip(gz, &mut small), Err(InflateError::OutputLimit));
+        assert_eq!(&small, b"he");
+    }
+
+    #[test]
+    fn a_stored_block_too_big_for_the_buffer_leaves_the_part_that_fit() {
+        // BFINAL=1, BTYPE=00, LEN=5, NLEN=250, then "hello".
+        let raw = hex(b"\x01\x05\x00\xfa\xffhello");
+        let mut small = [0u8; 3];
+        assert_eq!(
+            inflate_raw(raw, &mut small),
+            Err(InflateError::OutputLimit)
+        );
+        assert_eq!(&small, b"hel");
     }
 
     fn push_bit(bytes: &mut [u8; 64], position: &mut usize, bit: u8) {
