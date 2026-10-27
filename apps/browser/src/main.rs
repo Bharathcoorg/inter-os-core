@@ -5704,7 +5704,11 @@ fn home_page_pixel(x: usize, y: usize, app: &BrowserApp) -> u32 {
             if let Some(px) = text_px(x, y, 44, card_y + 48, 1, url, THEME.on_surface_variant, THEME.surface_container_high, false) {
                 return px;
             }
-            if let Some(px) = text_px(x, y, 44, card_y + card_h - 28, 1, row.meta, THEME.primary, THEME.surface_container_high, false) {
+            // WHY the category is muted and not accented: the accent is the
+            // colour this browser uses for the thing a tap acts on, and the
+            // whole card is already that one target. An accent word inside a
+            // tappable card reads as a second, narrower link that is not one.
+            if let Some(px) = text_px(x, y, 44, card_y + card_h - 28, 1, row.meta, THEME.on_surface_variant, THEME.surface_container_high, false) {
                 return px;
             }
             let thumb = Rect::new(W - 48 - 84, card_y + card_h - 88, 68, 68);
