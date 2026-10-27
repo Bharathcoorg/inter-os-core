@@ -760,96 +760,53 @@ fn refresh_user_profile(state: &mut LauncherState) {
 }
 
 fn refresh_clock(state: &mut LauncherState) {
-    // WHY 64 bytes and not more: the kernel's RtcGetTime handler rejects any
-    // requested length above 64 with InvalidArguments, so a larger buffer silently
-    // costs the whole clock read. The JSON payload begins
-    // {"year":..,"month":..,"day":..,"hour":..,"minute":.. and only reaches
-    // "second" past byte 64, and the date line needs nothing beyond "minute".
-    let mut buf = [0u8; 64];
     // WHY the refusal is reported once and the clock is left blank: every
     // surface in this shell draws `clock_time`, so a placeholder such as
     // "00:00" would present an unmeasured value as a reading. The lock screen
     // omits the clock and the date entirely when no source answered.
-    let Ok(n) = std::rtc_get_time(&mut buf) else {
+    //
+    // WHY the parse moved into the SDK: this function used to scan the kernel's
+    // JSON itself, and so did Notes, Calendar and the Agent tool -- four
+    // readers with three different rules, which is how one hardware reading came
+    // to print three different times. `rtc::Reading` is the one definition.
+    let Some(now) = std::rtc::Reading::now() else {
         state.clock_source_ok = false;
         if !state.clock_source_reported {
             state.clock_source_reported = true;
-            std::log("[LAUNCHER] Clock source unavailable: the kernel refused the hardware RTC read, so no time is displayed.",
+            std::log("[LAUNCHER] Clock source unavailable: the kernel gave no wall-clock reading, so no time is displayed.",
             )
             .ok();
         }
         return;
     };
-    let data = &buf[..n];
-    /// Reads the unsigned integer that follows `key`'s colon.
-    ///
-    /// WHY this parses a variable-width run of digits rather than exactly two:
-    /// the previous version required two consecutive digits and returned None
-    /// otherwise, so `"day":3` failed to parse, the caller returned early, and
-    /// `clock_source_ok` stayed false -- which silently suppressed the clock and
-    /// the date for every single-digit day of the month. The same two-digit reader
-    /// also truncated `"year":2026` to 20, which would have computed the weekday
-    /// from the wrong year. A fixed two-digit read is only correct for a field
-    /// that is always zero-padded, and none of these are.
-    fn field(data: &[u8], key: &[u8]) -> Option<u32> {
-        let mut i = 0usize;
-        while i + key.len() < data.len() {
-            if &data[i..i + key.len()] == key {
-                let mut j = i + key.len();
-                while j < data.len() && data[j].is_ascii_whitespace() { j += 1; }
-                if j < data.len() && data[j] == b':' { j += 1; }
-                while j < data.len() && data[j].is_ascii_whitespace() { j += 1; }
-                let start = j;
-                let mut value: u32 = 0;
-                while j < data.len() && data[j].is_ascii_digit() {
-                    // Bound the digits so a malformed value cannot overflow.
-                    if j - start >= 9 { return None; }
-                    value = value * 10 + (data[j] - b'0') as u32;
-                    j += 1;
-                }
-                if j > start {
-                    return Some(value);
-                }
-            }
-            i += 1;
-        }
-        None
-    }
-    let Some(hour) = field(data, b"\"hour\"") else { return; };
-    let Some(minute) = field(data, b"\"minute\"") else { return; };
-    if hour < 24 && minute < 60 {
-        let (hour, minute) = (hour as u8, minute as u8);
-        state.clock_time = [b'0' + hour / 10, b'0' + hour % 10, b':', b'0' + minute / 10, b'0' + minute % 10];
-    }
+    state.clock_time = now.clock_text();
     // The lock screen also shows the calendar date. The kernel RTC publishes
     // year/month/day alongside the clock, so the date line is read from the
     // same source rather than being written into the source as a literal.
-    let (Some(year), Some(month), Some(day)) = (
-        field(data, b"\"year\""),
-        field(data, b"\"month\""),
-        field(data, b"\"day\""),
-    ) else {
-        return;
-    };
-    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
-        return;
+    // WHY the clock survives on its own if the month has no name: the two come
+    // from one reading, and a time the RTC answered is worth printing even when
+    // the date line cannot be built. The blank line is the same all-spaces
+    // sentinel the field is initialised to, so a screen asks nothing of it.
+    match LOCK_MONTH_ABBR.get(now.month as usize - 1) {
+        Some(month_name) => {
+            let weekday = LOCK_WEEKDAY_ABBR[weekday_from_civil(now.year, now.month, now.day)];
+            let day = now.day as u8;
+            state.date_line = [
+                weekday[0],
+                weekday[1],
+                weekday[2],
+                b',',
+                b' ',
+                b'0' + day / 10,
+                b'0' + day % 10,
+                b' ',
+                month_name[0],
+                month_name[1],
+                month_name[2],
+            ];
+        }
+        None => state.date_line = [b' '; LOCK_DATE_TEXT_LEN],
     }
-    let Some(month_name) = LOCK_MONTH_ABBR.get(month as usize - 1) else { return; };
-    let weekday = LOCK_WEEKDAY_ABBR[weekday_from_civil(year, month, day)];
-    let day = day as u8;
-    state.date_line = [
-        weekday[0],
-        weekday[1],
-        weekday[2],
-        b',',
-        b' ',
-        b'0' + day / 10,
-        b'0' + day % 10,
-        b' ',
-        month_name[0],
-        month_name[1],
-        month_name[2],
-    ];
     state.clock_source_ok = true;
 }
 
@@ -2577,73 +2534,26 @@ fn resolve_app_at_touch<'a>(state: &'a LauncherState, x: u32, y: u32) -> Option<
 
     // 1. App Drawer Grid: strictly resolve by actual item hit geometry
     if state.current_view == ViewMode::AppDrawer {
-        if let Some(idx) = screens::app_drawer::app_drawer_hit(state, x, y) {
-            return package_id_at(state, idx);
-        }
-        let r_idx = if (180..=398).contains(&y) { 0 }
-            else if (399..=624).contains(&y) { 1 }
-            else if (625..=850).contains(&y) { 2 }
-            else if (851..=1080).contains(&y) { 3 }
-            else { 4 };
-        let c_idx = if (0..=252).contains(&x) { 0 }
-            else if (253..=467).contains(&x) { 1 }
-            else { 2 };
-        if r_idx < 4 {
-            let app_idx = state.app_drawer_page * 12 + r_idx * 3 + c_idx;
-            return package_id_at(state, app_idx);
-        }
-        return None;
-    }
+        // WHY a miss is a miss: the drawer paints and hit-tests a five-row,
+        // three-column grid at twelve per page, and this used to fall through
+        // into a second, older reading of the same screen that numbered slots
+        // four rows deep from y=180. A tap in a gutter or under the last row
+        // was therefore resolved -- against a geometry nothing draws -- and
+        // launched a different app than the icon under the finger.
+        return screens::app_drawer::app_drawer_hit(state, x, y).and_then(|idx| package_id_at(state, idx));
+    } else {
+        // 2. Home Screen dynamic deck and dock
+        //
+        // WHY this is the only routing the home screen has: fixed 40x40
+        // coordinate boxes used to run first, left over from an older
+        // automated test matrix that addressed tiles by number rather than by
+        // what was on the screen. The deck moved, the boxes did not, and so a
+        // tap on the Phone tile opened the Browser, a tap on the Apps tile
+        // opened Notes, a tap on the search field opened the Camera and a tap
+        // anywhere on the Today card opened Files, Settings or Calculator. The
+        // painted rectangles below are the tiles a person can see, so they are
+        // the only ones allowed to answer a touch.
 
-    // 2. Lifecycle and automated test matrix (targeted 40x40 coordinate taps)
-    let in_grid_view = matches!(
-        state.current_view,
-        ViewMode::AppDrawer | ViewMode::HomeScreen
-    );
-    if in_grid_view {
-        if (410..=450).contains(&x) && (240..=280).contains(&y) {
-            return package_id_by_suffix(state, b"file_manager").or_else(|| package_id_by_suffix(state, b"files")).or(Some("org.interos.file_manager"));
-        }
-        if (390..=430).contains(&x) && (1160..=1200).contains(&y) {
-            return package_id_by_suffix(state, b"gallery").or(Some("org.interos.gallery"));
-        }
-        if (530..=570).contains(&x) && (1160..=1200).contains(&y) {
-            return package_id_by_suffix(state, b"notes").or(Some("org.interos.notes"));
-        }
-
-        if (330..=370).contains(&y) {
-            if (160..=200).contains(&x) {
-                return package_id_by_suffix(state, b"settings").or(Some("org.interos.settings"));
-            }
-        } else if (500..=540).contains(&y) {
-            if (160..=200).contains(&x) {
-                return package_id_by_suffix(state, b"calculator").or(Some("org.interos.calculator"));
-            } else if (465..=505).contains(&x) {
-                return package_id_by_suffix(state, b"vault").or(Some("org.interos.vault"));
-            }
-        } else if (670..=710).contains(&y) {
-            if (160..=200).contains(&x) {
-                return package_id_by_suffix(state, b"camera").or(Some("org.interos.camera"));
-            } else if (465..=505).contains(&x) {
-                return package_id_by_suffix(state, b"dialer").or(Some("org.interos.dialer"));
-            }
-        } else if (840..=880).contains(&y) {
-            if (160..=200).contains(&x) {
-                return package_id_by_suffix(state, b"browser").or(Some("org.interos.browser"));
-            } else if (465..=505).contains(&x) {
-                return package_id_by_suffix(state, b"messages").or(Some("org.interos.messages"));
-            }
-        } else if (1010..=1050).contains(&y) {
-            if (160..=200).contains(&x) {
-                return package_id_by_suffix(state, b"calendar").or(Some("org.interos.calendar"));
-            } else if (465..=505).contains(&x) {
-                return package_id_by_suffix(state, b"music").or(Some("org.interos.music"));
-            }
-        }
-    }
-
-    // 3. Home Screen dynamic deck and dock
-    if state.current_view == ViewMode::HomeScreen {
         // Today card Row 0 tap (outside checkbox): launches Calendar
         if (280..385).contains(&y) && (100..680).contains(&x) {
             return package_id_by_suffix(state, b"calendar").or(Some("org.interos.calendar"));

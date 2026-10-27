@@ -46,7 +46,7 @@ def test_browser_studio_uses_explicit_spaces():
 def test_launcher_no_longer_uses_fixed_clock_literal():
     source = (ROOT / "apps/launcher/src/main.rs").read_text(encoding="utf-8")
     assert "CLOCK_TIME" not in source
-    assert "std::rtc_get_time" in source
+    assert "std::rtc::Reading::now()" in source
     assert 'b"Meeting with team (11:00)"' not in source
     assert 'b"2 unread messages"' not in source
     assert 'b"Mostly Sunny"' not in source
@@ -59,9 +59,28 @@ def test_studio_exposes_only_stock_theme():
 
 
 def test_launcher_clock_reads_named_rtc_fields():
+    """The shell's clock is named fields out of the kernel's RTC payload.
+
+    WHY this now reads two files: the launcher, Notes, Calendar and the Agent
+    tool each carried their own scan of the same payload, with three different
+    sets of bounds, so one hardware reading printed three different times. The
+    scan moved into `interos_std::rtc`, which is where the named-field rule and
+    the no-default rule are pinned today. The launcher half of the assertion is
+    that it asks that reader and nothing else.
+    """
+    reader = (ROOT / "sdk/rust/interos-std/src/lib.rs").read_text(encoding="utf-8")
+    for name in ("year", "month", "day", "hour", "minute"):
+        assert f'field(data, b"\\"{name}\\"")?,' in reader, (
+            f"the shared clock reader must demand \"{name}\" and refuse the "
+            "whole reading without it"
+        )
+    assert "rtc_get_time(&mut buf)" in reader
+    # The defect this replaces: a reader that defaulted an absent field to zero
+    # printed 00:00 for a payload that never reported a time at all.
+    assert "unwrap_or(0)" not in reader[reader.index("fn parse(data"):reader.index("fn field(data")]
+
     source = (ROOT / "apps/launcher/src/main.rs").read_text(encoding="utf-8")
-    assert 'field(data, b"\\\"hour\\\"")' in source
-    assert 'field(data, b"\\\"minute\\\"")' in source
+    assert "std::rtc::Reading::now()" in source
     assert 'for &b in data' not in source[source.index("fn refresh_clock"):source.index("fn refresh_notifications")]
 
 
@@ -110,7 +129,7 @@ def test_launcher_uses_live_system_state_not_fake_home_state():
         assert field not in source
     assert "notification_count" in source
     assert "refresh_notifications" in source
-    assert "std::rtc_get_time" in source
+    assert "std::rtc::Reading::now()" in source
     assert "System status" in source
     assert "InterOS Stock" in source
 
@@ -159,9 +178,15 @@ def test_system_gesture_directions_are_explicit():
 
 def test_launcher_uses_real_registry_for_drawer_and_recent_surfaces():
     source = (ROOT / "apps/launcher/src/main.rs").read_text(encoding="utf-8")
+    drawer = (ROOT / "apps/launcher/src/screens/app_drawer.rs").read_text(encoding="utf-8")
     assert "fn package_id_at" in source
     assert "fn recent_label" in source
-    assert "let app_idx = state.app_drawer_page * 12 + r_idx * 3 + c_idx;" in source
+    # The shell no longer re-derives the drawer grid: a tap is answered by the
+    # same geometry the screen paints with, and that hit test resolves the slot
+    # through the installed-package catalogue.
+    assert "app_drawer_hit(state, x, y).and_then(|idx| package_id_at(state, idx))" in source
+    assert "let (start, end) = layout::page_slice(count, capacity, app_drawer_page(state));" in drawer
+    assert "Some(filtered[start + slot])" in drawer
     assert "resolve_app_in_drawer" not in source
     assert "4 apps . 2 tasks" not in source
     assert "Mail" not in source
@@ -171,9 +196,35 @@ def test_launcher_uses_real_registry_for_drawer_and_recent_surfaces():
 
 def test_launcher_drawer_pagination_is_registry_backed():
     source = (ROOT / "apps/launcher/src/main.rs").read_text(encoding="utf-8")
+    drawer = (ROOT / "apps/launcher/src/screens/app_drawer.rs").read_text(encoding="utf-8")
     assert "let pages = (state.app_count + 11) / 12" in source
     assert "state.app_drawer_page += 1" in source
-    assert "let app_idx = state.app_drawer_page * 12" in source
+    # Page extent and the index range shown on it are counted from the registry,
+    # not from a fixed twelve-item assumption inside the hit test.
+    assert "layout::pages(count, app_drawer_per_page(state))" in drawer
+    assert "state.app_drawer_page.min(pages - 1)" in drawer
+
+
+def test_launcher_home_taps_are_answered_only_by_painted_tiles():
+    source = (ROOT / "apps/launcher/src/main.rs").read_text(encoding="utf-8")
+    routing = source[source.index("fn resolve_app_at_touch"):source.index("fn resolve_app_at_touch") + 6_000]
+    # WHY this pins absence rather than presence: a fixed 40x40 coordinate
+    # matrix, left over from a harness that addressed tiles by number, ran ahead
+    # of the painted geometry. The deck moved and the boxes did not, so a tap on
+    # Phone opened the Browser and a tap on the Today card opened Settings. The
+    # boxes are gone; nothing that addresses a slot by number may return.
+    for stale in (
+        "(410..=450).contains(&x) && (240..=280).contains(&y)",
+        "(390..=430).contains(&x) && (1160..=1200).contains(&y)",
+        "(530..=570).contains(&x) && (1160..=1200).contains(&y)",
+        "(840..=880).contains(&y)",
+        "let r_idx = if (180..=398).contains(&y)",
+        "automated test matrix (targeted",
+    ):
+        assert stale not in routing
+    # The two readings that remain are the painted deck and the painted dock.
+    assert "screens::home::home_hit(state, x, y)" in routing
+    assert "(795..1010).contains(&y)" in routing
 
 
 def test_first_party_media_and_browser_surfaces_do_not_bundle_demo_content():
