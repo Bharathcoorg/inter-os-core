@@ -685,7 +685,11 @@ const COMPOSE_BAND_Y0: usize = 1330;
 const COMPOSE_BAND_Y1: usize = 1414;
 const COMPOSE_FIELD: (usize, usize, usize, usize) = (24, 1344, 586, 60);
 const COMPOSE_TEXT_X: usize = 52;
-const COMPOSE_TEXT_MAX_W: usize = 610 - 20 - COMPOSE_TEXT_X;
+// WHY the text stops before the field's right edge: the last ~60 px of the
+// field are the character counter and the clear control, and text that ran
+// underneath them made both unreadable.
+const COMPOSE_COUNT_RIGHT: usize = 572;
+const COMPOSE_TEXT_MAX_W: usize = COMPOSE_COUNT_RIGHT - 56 - COMPOSE_TEXT_X;
 const COMPOSE_PLACEHOLDER: &[u8] = b"Type a message...";
 const COMPOSE_TEXT_SCALE: usize = type_scale::BODY;
 const SEND_CX: usize = 662;
@@ -704,6 +708,14 @@ const CARD_Y0: usize = 180;
 const CARD_H: usize = 120;
 const CARD_BODY_H: usize = 104;
 
+/// The width a thread row's bold peer name may use.
+///
+/// The run starts at `CARD_X0 + 84` and has to clear the unread pill's left
+/// edge at `CARD_X1 - 92`; the 12 px slack absorbs bold advances being wider
+/// than the regular advances the trim is measured with.
+const PEER_NAME_CAP: usize = 96;
+const PEER_NAME_MAX_W: usize = (CARD_X1 - 92) - (CARD_X0 + 84) - 12;
+
 /// The height of the thread list's visible band.
 ///
 /// WHY it is derived from the band's edges and not typed in: the band is
@@ -719,6 +731,14 @@ const CONVO_VIEWPORT_H: usize = RECIPIENT_BAND_Y0 - CONVO_TOP;
 
 /// The height of a chat bubble.
 const BUBBLE_H: usize = 76;
+
+/// The narrowest a bubble may be drawn, so a one-word message still reads as
+/// a bubble and not as a floating chip.
+const BUBBLE_MIN_W: usize = 168;
+
+/// The widest a bubble may be drawn. Long messages still wrap short of the
+/// screen edge instead of touching it.
+const BUBBLE_MAX_W: usize = 488;
 
 /// The gap between two chat bubbles.
 const BUBBLE_GAP: usize = 14;
@@ -1206,8 +1226,18 @@ fn card_row_pixel(
     None
 }
 
+/// Capacity of the header title buffer. A contact name is at most
+/// `contacts::CONTACT_NAME_MAX` bytes; a raw peer handle is what remains.
+const TITLE_CAP: usize = 96;
+
 struct Frame {
     pill: PillFrame,
+    /// The header title, already cut to the space left of the status pill.
+    ///
+    /// WHY it is cut here and not while drawing: the limit is the pill's left
+    /// edge, and that edge only exists once the pill has been measured.
+    title: [u8; TITLE_CAP],
+    title_len: usize,
     search: EditorFrame,
     recipient: EditorFrame,
     compose: EditorFrame,
@@ -1236,6 +1266,39 @@ impl Frame {
         } else {
             peer
         }
+    }
+}
+
+/// The header line of the current view, before it is cut to the pill.
+///
+/// WHY it takes the contacts table instead of `&Frame`: the title is measured
+/// against the pill, and the pill is built before the frame exists.
+fn header_title<'a>(
+    messages: &'a MessagesApp,
+    contacts: &'a [messages::contacts::SavedContact],
+    contacts_count: usize,
+) -> &'a [u8] {
+    match messages.view_mode {
+        ViewMode::ThreadList => TITLE_TEXT,
+        ViewMode::Conversation => {
+            if let Some(tid) = messages.active_thread_id {
+                if let Some(tr) = messages.ledger.get_thread(tid) {
+                    if let Some(c) =
+                        messages::contacts::find_contact_by_number(contacts, contacts_count, tr.peer())
+                    {
+                        c.name()
+                    } else {
+                        tr.peer()
+                    }
+                } else {
+                    TITLE_TEXT
+                }
+            } else {
+                TITLE_TEXT
+            }
+        }
+        ViewMode::Details => b"Thread details",
+        ViewMode::Recipients => b"Choose a recipient",
     }
 }
 
@@ -1271,8 +1334,18 @@ fn build_frame(messages: &MessagesApp) -> Frame {
     let picker_count = build_picker_lines(messages, &mut picker);
     let mut contacts = [messages::contacts::SavedContact::EMPTY; messages::contacts::MAX_SAVED_CONTACTS];
     let contacts_count = messages::contacts::load_saved_contacts(&mut contacts);
+    let pill = build_pill(messages);
+    let mut title = [0u8; TITLE_CAP];
+    let title_len = std::design::font::ellipsize(
+        header_title(messages, &contacts, contacts_count),
+        TITLE_SCALE,
+        pill.left.saturating_sub(TITLE_X + 12),
+        &mut title,
+    );
     Frame {
-        pill: build_pill(messages),
+        pill,
+        title,
+        title_len,
         search: build_editor(
             &messages.search,
             messages.search_len,
@@ -1353,32 +1426,15 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
             return THEME.error;
         }
 
-        // Header Title: In ThreadList mode, "Messages"; in Conversation mode, peer handle or "Messages"
+        // Header Title: already cut to the space left of the status pill.
         if y >= TITLE_Y && y < TITLE_Y + std::design::font::line_height(TITLE_SCALE) {
-            let title: &[u8] = match messages.view_mode {
-                ViewMode::ThreadList => TITLE_TEXT,
-                ViewMode::Conversation => {
-                    if let Some(tid) = messages.active_thread_id {
-                        if let Some(tr) = messages.ledger.get_thread(tid) {
-                            f.resolve_contact_name(tr.peer())
-                        } else {
-                            TITLE_TEXT
-                        }
-                    } else {
-                        TITLE_TEXT
-                    }
-                }
-                ViewMode::Details => b"Thread details",
-                ViewMode::Recipients => b"Choose a recipient",
-            };
-
             if let Some(c) = test_text(
                 x,
                 y,
                 TITLE_X,
                 TITLE_Y,
                 TITLE_SCALE,
-                title,
+                &f.title[..f.title_len],
                 THEME.on_surface,
                 THEME.surface_container,
             ) {
@@ -1455,7 +1511,12 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
         }
 
         // 3. Thread List / Empty State (y 168..1288)
-        if y >= 168 && y < RECIPIENT_BAND_Y0 {
+        //
+        // WHY the list band starts at the first card and not at 168: the row
+        // math below subtracts CARD_Y0, so a pixel in the 12-row gap above the
+        // first card underflowed and killed the task on the first paint of a
+        // list that had a thread in it.
+        if y >= CARD_Y0 && y < RECIPIENT_BAND_Y0 {
             // Filter matched nothing
             if f.filtered.is_none() {
                 if in_rect(EMPTY_CARD, x, y) {
@@ -1672,13 +1733,20 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
 
                             // 2. Peer handle / name (Scale 1 Bold with 10px spacing above snippet)
                             let display_peer = f.resolve_contact_name(tr.peer());
+                            let mut peer_name = [0u8; PEER_NAME_CAP];
+                            let peer_len = std::design::font::ellipsize(
+                                display_peer,
+                                2,
+                                PEER_NAME_MAX_W,
+                                &mut peer_name,
+                            );
                             if let Some(c) = test_text_bold(
                                 x,
                                 y,
                                 CARD_X0 + 84,
                                 card_top + 22,
                                 2,
-                                display_peer,
+                                &peer_name[..peer_len],
                                 THEME.on_surface,
                                 THEME.surface_container,
                             ) {
@@ -1726,11 +1794,20 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                             // truncated and, for a thread whose previews are
                             // hidden, it is not the message at all. The badge
                             // describes the message.
+                            //
+                            // WHY only a non-clean message is badged: a green
+                            // dot in the avatar's corner is read as "online"
+                            // or "unread", so marking every clean thread with
+                            // one made the safe case the noise and the warning
+                            // case invisible. A clean thread carries no dot;
+                            // the details view still reports VERIFIED CLEAN.
                             let threat = f.threat[ledger_idx];
-                            let s_dx = x as isize - (CARD_X0 + 20) as isize;
-                            let s_dy = y as isize - (card_top + 24) as isize;
-                            if s_dx * s_dx + s_dy * s_dy <= 16 {
-                                return threat.color();
+                            if threat != gsm::ThreatLevel::Safe {
+                                let s_dx = x as isize - (CARD_X0 + 20) as isize;
+                                let s_dy = y as isize - (card_top + 24) as isize;
+                                if s_dx * s_dx + s_dy * s_dy <= 16 {
+                                    return threat.color();
+                                }
                             }
 
                             // 5. Unread counter pill (if unread_count > 0)
@@ -1763,7 +1840,11 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                             let dyc = card_top + 50;
                             let gx = x as isize - dxc as isize;
                             let gy = y as isize - dyc as isize;
-                            if gx.abs() <= 6 && gy.abs() <= 6 && (gx - gy).abs() <= 2 {
+                            // WHY both diagonals: a single stroke is a slash,
+                            // not an X, and a slash at the end of a row reads
+                            // as a stray mark rather than a delete control.
+                            let on_stroke = (gx - gy).abs() <= 2 || (gx + gy).abs() <= 2;
+                            if gx.abs() <= 6 && gy.abs() <= 6 && on_stroke {
                                 return THEME.primary;
                             }
 
@@ -1786,12 +1867,6 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                     return c;
                 }
 
-                // Character count indicator (e.g. 0/160)
-                let mut count_buf = [0u8; 8];
-                let cn = format_char_count(messages.compose_len, &mut count_buf);
-                if let Some(c) = test_text(x, y, 520, f.recipient.y, 1, &count_buf[..cn], THEME.on_surface_variant, THEME.surface_container) {
-                    return c;
-                }
                 // Clear 'x' indicator when recipient has text
                 if messages.recip_len > 0 && x >= 574 && x < 606 && y >= RECIPIENT_BAND_Y0 + 6 && y < RECIPIENT_BAND_Y1 - 6 {
                     let cx = 590isize;
@@ -1829,6 +1904,26 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                 }
                 if let Some(c) = editor_pixel(x, y, &f.compose, messages.compose_focused, THEME.surface_container) {
                     return c;
+                }
+                // The count belongs to the composer it counts, not to the
+                // recipient row above it, and belongs to nothing while the
+                // composer is empty.
+                if messages.compose_len > 0 {
+                    let mut count_buf = [0u8; 8];
+                    let cn = format_char_count(messages.compose_len, &mut count_buf);
+                    let cw = std::design::font::measure(&count_buf[..cn], 1);
+                    if let Some(c) = test_text(
+                        x,
+                        y,
+                        COMPOSE_COUNT_RIGHT.saturating_sub(cw),
+                        f.compose.y,
+                        1,
+                        &count_buf[..cn],
+                        THEME.on_surface_variant,
+                        THEME.surface_container,
+                    ) {
+                        return c;
+                    }
                 }
                 if let Some(c) = monochrome::card_px(x, y, rect, THEME.surface_container, Some(THEME.border)) {
                     return c;
@@ -1983,10 +2078,44 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                     let b_bot = b_top + BUBBLE_H;
                     if y >= b_top && y < b_bot {
                         let is_incoming = msgs[i].direction == MessageDirection::Incoming;
-                        let (bx0, bx1, fill_color, border_color, ink_color) = if is_incoming {
-                            (32usize, 520usize, THEME.surface_container_high, THEME.border, THEME.on_surface)
+                        let (fill_color, border_color, ink_color) = if is_incoming {
+                            (THEME.surface_container_high, THEME.border, THEME.on_surface)
                         } else {
-                            (200usize, 688usize, THEME.inverted_surface(), THEME.inverted_surface(), THEME.ink_on_dark)
+                            (THEME.inverted_surface(), THEME.inverted_surface(), THEME.ink_on_dark)
+                        };
+
+                        // Subline / Status indicator
+                        let (status_label, status_color) = if is_incoming {
+                            (INCOMING_LOCAL_LABEL, THEME.on_surface_variant)
+                        } else {
+                            match msgs[i].status {
+                                DeliveryStatus::RefusedNoTransport => {
+                                    (b"Refused - No Transport" as &[u8], THEME.warning)
+                                }
+                                DeliveryStatus::Sent => (b"Sent" as &[u8], THEME.success),
+                                DeliveryStatus::Failed => (b"Failed" as &[u8], THEME.error),
+                                DeliveryStatus::LocalOnly => {
+                                    (b"Local only - not sent" as &[u8], THEME.muted)
+                                }
+                                DeliveryStatus::Pending => (b"Not sent" as &[u8], THEME.muted),
+                            }
+                        };
+
+                        // WHY the bubble hugs its content: a fixed 488 px slab
+                        // turned a five-letter message into a full-width black
+                        // bar, so the thread read as bars instead of a
+                        // conversation. The bubble is the wider of the body
+                        // and the status line, clamped to the band.
+                        let mut bubble_w = std::design::font::measure_bold(msgs[i].text(), 2) + 32;
+                        let status_w = std::design::font::measure_bold(status_label, 1) + 32;
+                        if status_w > bubble_w {
+                            bubble_w = status_w;
+                        }
+                        bubble_w = bubble_w.clamp(BUBBLE_MIN_W, BUBBLE_MAX_W);
+                        let (bx0, bx1) = if is_incoming {
+                            (32usize, 32 + bubble_w)
+                        } else {
+                            (688 - bubble_w, 688usize)
                         };
 
                         if x >= bx0 && x < bx1 {
@@ -2012,23 +2141,6 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                             ) {
                                 return c;
                             }
-
-                            // Subline / Status indicator
-                            let (status_label, status_color) = if is_incoming {
-                                (INCOMING_LOCAL_LABEL, THEME.on_surface_variant)
-                            } else {
-                                match msgs[i].status {
-                                    DeliveryStatus::RefusedNoTransport => {
-                                        (b"Refused - No Transport" as &[u8], THEME.warning)
-                                    }
-                                    DeliveryStatus::Sent => (b"Sent" as &[u8], THEME.success),
-                                    DeliveryStatus::Failed => (b"Failed" as &[u8], THEME.error),
-                                    DeliveryStatus::LocalOnly => {
-                                        (b"Local only - not sent" as &[u8], THEME.muted)
-                                    }
-                                    DeliveryStatus::Pending => (b"Not sent" as &[u8], THEME.muted),
-                                }
-                            };
 
                             if let Some(c) = test_text_bold(
                                 x,
@@ -2073,11 +2185,15 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                     return c;
                 }
 
-                // Character count indicator (e.g. 0/160)
-                let mut count_buf = [0u8; 8];
-                let cn = format_char_count(messages.compose_len, &mut count_buf);
-                if let Some(c) = test_text(x, y, 530, f.recipient.y, 1, &count_buf[..cn], THEME.on_surface_variant, THEME.surface_container) {
-                    return c;
+                // Clear 'x' indicator when recipient has text
+                if messages.recip_len > 0 && x >= 574 && x < 606 && y >= RECIPIENT_BAND_Y0 + 6 && y < RECIPIENT_BAND_Y1 - 6 {
+                    let cx = 590isize;
+                    let cy = (RECIPIENT_BAND_Y0 + 22) as isize;
+                    let dx = (x as isize - cx).abs();
+                    let dy = (y as isize - cy).abs();
+                    if dx <= 4 && dy <= 4 && dx == dy {
+                        return THEME.on_surface_variant;
+                    }
                 }
 
                 if let Some(c) = monochrome::card_px(x, y, rect, THEME.surface_container, Some(THEME.border)) {
@@ -2094,8 +2210,35 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
         if y >= COMPOSE_BAND_Y0 && y < COMPOSE_BAND_Y1 {
             if in_rect(COMPOSE_FIELD, x, y) {
                 let rect = primitives::Rect::new(COMPOSE_FIELD.0, COMPOSE_FIELD.1, COMPOSE_FIELD.2, COMPOSE_FIELD.3);
+                // Clear 'x' indicator when compose has text
+                if messages.compose_len > 0 && x >= 574 && x < 606 && y >= 1354 && y < 1394 {
+                    let cx = 590isize;
+                    let cy = 1374isize;
+                    let dx = (x as isize - cx).abs();
+                    let dy = (y as isize - cy).abs();
+                    if dx <= 4 && dy <= 4 && dx == dy {
+                        return THEME.on_surface_variant;
+                    }
+                }
                 if let Some(c) = editor_pixel(x, y, &f.compose, messages.compose_focused, THEME.surface_container) {
                     return c;
+                }
+                if messages.compose_len > 0 {
+                    let mut count_buf = [0u8; 8];
+                    let cn = format_char_count(messages.compose_len, &mut count_buf);
+                    let cw = std::design::font::measure(&count_buf[..cn], 1);
+                    if let Some(c) = test_text(
+                        x,
+                        y,
+                        COMPOSE_COUNT_RIGHT.saturating_sub(cw),
+                        f.compose.y,
+                        1,
+                        &count_buf[..cn],
+                        THEME.on_surface_variant,
+                        THEME.surface_container,
+                    ) {
+                        return c;
+                    }
                 }
                 if let Some(c) = monochrome::card_px(x, y, rect, THEME.surface_container, Some(THEME.border)) {
                     return c;
@@ -2720,9 +2863,15 @@ fn handle_tap(app: &mut MessagesApp, px: u32, py: u32) -> Tap<'static> {
                         &[]
                     };
                     if !peer.is_empty() {
-                        let _ = messages::contacts::hand_off_call_to_dialer(peer);
-                        app.set_notice(b"Calling via Dialer...");
-                        std::log("[MESSAGES APP] Handed phone number to Dialer and launched it.").ok();
+                        if messages::contacts::hand_off_call_to_dialer(peer) {
+                            app.set_notice(b"Calling via Dialer...");
+                            std::log("[MESSAGES APP] Handed phone number to Dialer and launched it.").ok();
+                        } else {
+                            // The helper reports false for a refused number,
+                            // a failed settings write or a refused launch.
+                            app.set_notice(b"Could not open Dialer for this contact.");
+                            std::log("[MESSAGES APP] Dialer hand-off was refused.").ok();
+                        }
                     }
                     return Tap::Redraw(Dirty::All);
                 }
@@ -2847,9 +2996,21 @@ fn handle_tap(app: &mut MessagesApp, px: u32, py: u32) -> Tap<'static> {
                 if let Some(ledger_idx) = app.filtered_index(idx) {
                     if let Some(tr) = app.ledger.get_thread_by_idx(ledger_idx) {
                         // Delete affordance tap on card's right edge
+                        //
+                        // WHY the target is a 44 px square around a 6 px glyph:
+                        // the glyph is the only sign of the action and the old
+                        // 33 px box was under the platform's minimum. The part
+                        // of the square over the unread pill is left to the row,
+                        // so a tap on the counter still opens the thread.
                         let ddx = x as isize - (CARD_X1 - 38) as isize;
                         let ddy = coff as isize - 50;
-                        if ddx.abs() <= 16 && ddy.abs() <= 16 {
+                        let reach = (MIN_TOUCH_TARGET / 2) as isize;
+                        let on_unread_pill = tr.unread_count > 0
+                            && x >= CARD_X1 - 92
+                            && x < CARD_X1 - 56
+                            && coff >= 34
+                            && coff < 68;
+                        if ddx.abs() <= reach && ddy.abs() <= reach && !on_unread_pill {
                             let tid = tr.id;
                             app.ledger.remove_thread(tid);
                             app.store.remove(ledger_idx);
