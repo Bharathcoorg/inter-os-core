@@ -7,7 +7,7 @@
 //! - Start Page / New Tab:
 //!   - Sovereign browser emblem
 //!   - Quick Search Pill
-//!   - "Your pages": saved bookmarks and session visit history
+//!   - "Your pages": saved bookmarks and the saved visit history
 //! - Web Viewport / Content Area:
 //!   - Classified document lines (H1, H2, H3, bullet lists, code blocks, gemtext links)
 //!   - Smooth vertical scrolling with scroll position indicator
@@ -1195,7 +1195,7 @@ impl BookmarkStore {
 }
 
 // -----------------------------------------------------------------------------
-// History Stack
+// History
 // -----------------------------------------------------------------------------
 const HISTORY_CAP: usize = 16;
 
@@ -1206,75 +1206,61 @@ const HISTORY_CAP: usize = 16;
 /// that was visited.
 const HISTORY_ENTRY_BYTES: usize = 256;
 
+/// The app-private file the visit log is kept in.
+///
+/// WHY a file and not a setting: a setting value is capped at 512 bytes, and
+/// a log that held two addresses would not be a history.
+const HISTORY_FILE: &str = "history.bin";
+
+/// The first byte of the file names the format.
+const HISTORY_VERSION: u8 = 1;
+
+/// One version byte, one count byte, then `HISTORY_CAP` entries of one
+/// length byte plus at most 255 address bytes.
+const HISTORY_BLOB_BYTES: usize = 2 + HISTORY_CAP * HISTORY_ENTRY_BYTES;
+
 #[derive(Debug, Clone, Copy)]
 pub struct History {
     entries: [[u8; HISTORY_ENTRY_BYTES]; HISTORY_CAP],
     len: usize,
-    pos: usize,
 }
 
 impl History {
     const EMPTY: History = History {
         entries: [[0; HISTORY_ENTRY_BYTES]; HISTORY_CAP],
         len: 0,
-        pos: 0,
     };
 
     pub fn len(&self) -> usize {
         self.len
     }
 
+    /// Appends one visit. A full log drops its oldest entry.
     pub fn push(&mut self, target: &[u8]) {
-        if self.pos + 1 < self.len {
-            self.len = self.pos + 1;
+        if target.is_empty() {
+            return;
+        }
+        // WHY a repeated address is not appended twice: reloading the page a
+        // person is already on is not a new visit, and the list would fill
+        // with copies of one address.
+        if self.len > 0 {
+            let n = self.entries[self.len - 1]
+                .iter()
+                .position(|&b| b == 0)
+                .unwrap_or(HISTORY_ENTRY_BYTES);
+            if &self.entries[self.len - 1][..n] == target {
+                return;
+            }
         }
         if self.len >= HISTORY_CAP {
             for i in 0..self.len - 1 {
                 self.entries[i] = self.entries[i + 1];
             }
             self.len -= 1;
-            self.pos = self.pos.saturating_sub(1);
         }
-        let n = target.len().min(self.entries[self.len].len());
+        let n = target.len().min(HISTORY_ENTRY_BYTES - 1);
         self.entries[self.len][..n].copy_from_slice(&target[..n]);
         self.len += 1;
-        self.pos = self.len - 1;
-    }
-
-    pub fn back(&mut self) -> Option<[u8; HISTORY_ENTRY_BYTES]> {
-        if self.pos == 0 {
-            return None;
-        }
-        self.pos -= 1;
-        let mut out = [0u8; HISTORY_ENTRY_BYTES];
-        let n = self.entries[self.pos]
-            .iter()
-            .position(|&b| b == 0)
-            .unwrap_or(self.entries[self.pos].len());
-        out[..n].copy_from_slice(&self.entries[self.pos][..n]);
-        Some(out)
-    }
-
-    pub fn forward(&mut self) -> Option<[u8; HISTORY_ENTRY_BYTES]> {
-        if self.pos + 1 >= self.len {
-            return None;
-        }
-        self.pos += 1;
-        let mut out = [0u8; HISTORY_ENTRY_BYTES];
-        let n = self.entries[self.pos]
-            .iter()
-            .position(|&b| b == 0)
-            .unwrap_or(self.entries[self.pos].len());
-        out[..n].copy_from_slice(&self.entries[self.pos][..n]);
-        Some(out)
-    }
-
-    pub fn can_back(&self) -> bool {
-        self.pos > 0
-    }
-
-    pub fn can_forward(&self) -> bool {
-        self.pos + 1 < self.len
     }
 
     pub fn entry(&self, index: usize) -> Option<&[u8]> {
@@ -1288,6 +1274,100 @@ impl History {
         } else {
             Some(&raw[..n])
         }
+    }
+
+    /// Reads the log the previous session saved.
+    ///
+    /// An absent file is a first run, not a failure. A file that does not
+    /// match the format is discarded whole, because a log whose count and
+    /// entries disagree cannot be read honestly in part.
+    pub fn load() -> Self {
+        let mut history = Self::EMPTY;
+        let Ok(fd) = std::app_storage_open(HISTORY_FILE, 1) else {
+            return history;
+        };
+        let mut blob = [0u8; HISTORY_BLOB_BYTES];
+        let mut filled = 0;
+        loop {
+            match std::fs_read(fd, &mut blob[filled..]) {
+                Ok(0) => break,
+                Ok(n) => {
+                    filled += n;
+                    if filled == blob.len() {
+                        break;
+                    }
+                }
+                Err(_) => {
+                    let _ = std::fs_close(fd);
+                    return Self::EMPTY;
+                }
+            }
+        }
+        let _ = std::fs_close(fd);
+        if filled < 2 || blob[0] != HISTORY_VERSION {
+            return Self::EMPTY;
+        }
+        let count = blob[1] as usize;
+        if count > HISTORY_CAP {
+            return Self::EMPTY;
+        }
+        let mut offset = 2;
+        for i in 0..count {
+            if offset >= filled {
+                return Self::EMPTY;
+            }
+            let n = blob[offset] as usize;
+            offset += 1;
+            if n == 0 || n >= HISTORY_ENTRY_BYTES || offset + n > filled {
+                return Self::EMPTY;
+            }
+            history.entries[i][..n].copy_from_slice(&blob[offset..offset + n]);
+            offset += n;
+        }
+        history.len = count;
+        history
+    }
+
+    /// Saves the log to app-private storage.
+    ///
+    /// Returns whether the platform accepted the write, so the caller can
+    /// tell a saved history from a session-only one.
+    pub fn persist(&self) -> bool {
+        let mut blob = [0u8; HISTORY_BLOB_BYTES];
+        blob[0] = HISTORY_VERSION;
+        blob[1] = self.len as u8;
+        let mut offset = 2;
+        for i in 0..self.len {
+            let raw = &self.entries[i];
+            let n = raw
+                .iter()
+                .position(|&b| b == 0)
+                .unwrap_or(raw.len())
+                .min(HISTORY_ENTRY_BYTES - 1);
+            blob[offset] = n as u8;
+            offset += 1;
+            blob[offset..offset + n].copy_from_slice(&raw[..n]);
+            offset += n;
+        }
+        let Ok(fd) = std::app_storage_open(HISTORY_FILE, 2) else {
+            return false;
+        };
+        let mut written = 0;
+        while written < offset {
+            match std::fs_write(fd, &blob[written..offset]) {
+                Ok(0) => {
+                    let _ = std::fs_close(fd);
+                    return false;
+                }
+                Ok(n) => written += n,
+                Err(_) => {
+                    let _ = std::fs_close(fd);
+                    return false;
+                }
+            }
+        }
+        let _ = std::fs_close(fd);
+        true
     }
 }
 
@@ -1599,6 +1679,20 @@ pub struct BrowserApp {
     pub response_truncated: bool,
     /// Why the last local document could not be shown.
     pub local_failure: LocalFailure,
+    /// The reason the gateway gave for the last failed fetch.
+    ///
+    /// WHY it is kept: the gateway answers a failed fetch with an envelope
+    /// that names the reason, and the screen used to throw that reason
+    /// away and print a generic failure instead. The reason is the host's
+    /// own account of what happened, and it is both more useful and more
+    /// honest than a message the browser made up.
+    ///
+    /// WHY it is empty when the gateway named no reason: the screen then
+    /// shows the generic failure, which is true. Nothing is put in the
+    /// gateway's mouth.
+    pub gateway_reason: [u8; browser::GATEWAY_REASON_MAX],
+    /// How many bytes of the gateway's reason are held.
+    pub gateway_reason_len: usize,
     /// How many bytes of the last response the transport delivered.
     ///
     /// WHY it is kept: a download is the bytes the transport delivered, and
@@ -1759,7 +1853,7 @@ impl BrowserApp {
             address_len: 0,
             address_focused: false,
             select_all: false,
-            history: History::EMPTY,
+            history: History::load(),
             bookmarks: BookmarkStore::load(),
             bm_step: BookmarkStep::Idle,
             bm_title: [0; BM_TITLE_MAX],
@@ -1781,6 +1875,8 @@ impl BrowserApp {
             kb_symbols: false,
             response_truncated: false,
             local_failure: LocalFailure::NoPath,
+            gateway_reason: [0; browser::GATEWAY_REASON_MAX],
+            gateway_reason_len: 0,
             response_len: 0,
             page_source_len: 0,
             downloads_saved: 0,
@@ -2906,6 +3002,7 @@ impl BrowserApp {
         body_buf[..body.len()].copy_from_slice(body);
         self.form_post_len = body.len();
         self.history.push(target);
+        let _ = self.history.persist();
         self.tabs.navigate_to(target);
         self.navigate_again(target)
     }
@@ -3196,8 +3293,9 @@ impl BrowserApp {
             }; MAX_DOWNLOADS];
         let count = std::content::parse_index(&buffer[..len], &mut records);
         for record in records.iter().take(count) {
-            let is_page = browser::is_download_path(record.path);
-            if !is_page && !browser::is_media_download_path(record.path) {
+            if !browser::is_download_path(record.path)
+                && !browser::is_media_download_path(record.path)
+            {
                 continue;
             }
             if self.download_count >= MAX_DOWNLOADS {
@@ -3212,7 +3310,7 @@ impl BrowserApp {
             let m = record.mime.len().min(entry.mime.len());
             entry.mime[..m].copy_from_slice(&record.mime.as_bytes()[..m]);
             entry.mime_len = m;
-            entry.is_page = is_page;
+            entry.is_page = browser::is_download_path(record.path);
             self.download_count += 1;
         }
         self.scan_downloads();
@@ -3694,8 +3792,33 @@ impl BrowserApp {
 
     pub fn navigate(&mut self, target: &[u8]) -> bool {
         self.history.push(target);
+        let _ = self.history.persist();
         self.tabs.navigate_to(target);
         self.navigate_again(target)
+    }
+
+    /// Keeps the reason the gateway gave for a failed fetch.
+    ///
+    /// WHY the reason is kept and not summarised: it is the host's own
+    /// account of what happened, and a summary would be a claim the browser
+    /// cannot back. A gateway that named no reason leaves the screen with
+    /// the generic failure, which is true.
+    fn record_gateway_reason(&mut self, envelope: &[u8]) {
+        let mut buffer = [0u8; browser::GATEWAY_REASON_MAX + 3];
+        let n = browser::gateway_failure_reason(envelope, &mut buffer);
+        if n == 0 {
+            self.gateway_reason_len = 0;
+            return;
+        }
+        // A control character would break the line the reason is drawn on,
+        // so it is written as a space rather than as a break.
+        let mut written = 0usize;
+        for &byte in &buffer[..n] {
+            let byte = if byte < 0x20 { b' ' } else { byte };
+            self.gateway_reason[written] = byte;
+            written += 1;
+        }
+        self.gateway_reason_len = written;
     }
 
     pub fn navigate_again(&mut self, target: &[u8]) -> bool {
@@ -3711,6 +3834,10 @@ impl BrowserApp {
         self.current_url[..n].copy_from_slice(&target[..n]);
         self.current_url_len = n;
         self.scroll = ScrollState::new(0, READER_VIEWPORT_H, 0);
+        // The gateway's reason belongs to the fetch that failed. A new
+        // navigation has not failed yet, so the last reason is forgotten
+        // rather than shown against a page it says nothing about.
+        self.gateway_reason_len = 0;
         // A navigation is a new document; the previous document's bytes must
         // not be savable under the new address, and the previous page's
         // keyboard must not stay attached to controls that no longer exist.
@@ -4087,6 +4214,10 @@ impl BrowserApp {
                 self.loading_progress = 0;
                 self.tabs.active_tab_mut().loading_state = LoadingState::Failed;
                 self.tabs.active_tab_mut().error_code = -5; // EIO
+                // The envelope names the reason the fetch failed. It is the
+                // host's own account of what happened, and the screen shows
+                // it instead of a message the browser made up.
+                self.record_gateway_reason(rx_slice);
                 std::log("[BROWSER APP] The gateway received the request but could not fetch the page; its error envelope is reported, not rendered.").ok();
                 let _ = std::audio_haptic_click();
                 return false;
@@ -4251,19 +4382,49 @@ impl BrowserApp {
         self.navigate_again(&target[..n]);
     }
 
+    /// Returns the browser to its start page and forgets the document.
+    ///
+    /// WHY this is a state of its own rather than a navigation: the tab
+    /// stack begins at `about:blank`, so Back from the first page reaches
+    /// it. Sending `about:blank` through the address classifier made the
+    /// browser report "Address not recognised" for the start page and kept
+    /// the previous document's address in the bar.
+    fn show_home(&mut self) {
+        let start = b"about:blank";
+        self.current_url[..start.len()].copy_from_slice(start);
+        self.current_url_len = start.len();
+        self.address_len = 0;
+        self.address_focused = false;
+        self.select_all = false;
+        self.status = PageStatus::Blank;
+        self.scroll = ScrollState::new(0, READER_VIEWPORT_H, 0);
+        self.page_source_len = 0;
+        self.html_view = false;
+        self.field_focus = NO_FIELD;
+        self.form_post_len = 0;
+        self.doc_line_count = 0;
+        self.doc_total_lines = 0;
+        self.image_count = 0;
+        self.image_arena_used = 0;
+        self.response_truncated = false;
+        self.local_failure = LocalFailure::NoPath;
+        self.gateway_reason_len = 0;
+        self.response_len = 0;
+        self.loading_progress = 0;
+        self.error_code = 0;
+    }
+
     pub fn go_back(&mut self) {
         if let Some(url) = self.tabs.go_back() {
             let mut target = [0u8; 256];
             let n = url.len().min(target.len());
             target[..n].copy_from_slice(&url[..n]);
+            if n == 0 || &target[..n] == b"about:blank" {
+                self.show_home();
+                return;
+            }
             std::log("[BROWSER APP] Back: re-issuing navigation attempt.").ok();
             self.navigate_again(&target[..n]);
-            return;
-        }
-        if let Some(entry) = self.history.back() {
-            let n = entry.iter().position(|&b| b == 0).unwrap_or(entry.len());
-            std::log("[BROWSER APP] Back: re-issuing the navigation attempt for the previous address.").ok();
-            self.navigate_again(&entry[..n]);
             return;
         }
         std::log("[BROWSER APP] Back is unavailable: the history holds no earlier address.").ok();
@@ -4274,14 +4435,12 @@ impl BrowserApp {
             let mut target = [0u8; 256];
             let n = url.len().min(target.len());
             target[..n].copy_from_slice(&url[..n]);
+            if n == 0 || &target[..n] == b"about:blank" {
+                self.show_home();
+                return;
+            }
             std::log("[BROWSER APP] Forward: re-issuing navigation attempt.").ok();
             self.navigate_again(&target[..n]);
-            return;
-        }
-        if let Some(entry) = self.history.forward() {
-            let n = entry.iter().position(|&b| b == 0).unwrap_or(entry.len());
-            std::log("[BROWSER APP] Forward: re-issuing the navigation attempt for the next address.").ok();
-            self.navigate_again(&entry[..n]);
             return;
         }
         std::log("[BROWSER APP] Forward is unavailable: the history holds no later address.").ok();
@@ -4368,6 +4527,25 @@ struct Frame {
     body_n: usize,
     body_x: [usize; 6],
     body_y: [usize; 6],
+    /// The typed address as the suggestion cards show it.
+    ///
+    /// WHY it is fitted here and not where it is drawn: the renderer
+    /// answers one pixel at a time, and a string that is cut to a row's
+    /// width needs that width, which is a constant of the row and not a
+    /// per-pixel decision.
+    suggest: [u8; 256],
+    suggest_len: usize,
+    /// The gateway's own reason for the failure, as one marked line.
+    detail: [u8; browser::GATEWAY_REASON_LINE_MAX],
+    detail_len: usize,
+    detail_y: usize,
+    /// Where the failure badge is drawn.
+    ///
+    /// WHY it is in the frame: the badge sits below the body text, and a
+    /// gateway failure puts the server's own reason between the two, so the
+    /// badge's place depends on the frame rather than on a formula each
+    /// place repeats.
+    err_y: usize,
     icon_cy: usize,
     is_home: bool,
 }
@@ -4390,6 +4568,12 @@ impl Frame {
             body_n: 0,
             body_x: [0; 6],
             body_y: [0; 6],
+            suggest: [0; 256],
+            suggest_len: 0,
+            detail: [0; browser::GATEWAY_REASON_LINE_MAX],
+            detail_len: 0,
+            detail_y: 0,
+            err_y: 0,
             icon_cy: 0,
             is_home: app.status == PageStatus::Blank,
         };
@@ -4471,6 +4655,35 @@ impl Frame {
         f.head_y = 440;
         for i in 0..f.body_n {
             f.body_y[i] = f.head_y + 40 + i * 28;
+        }
+
+        // The candidate the suggestion cards offer.
+        //
+        // WHY it is fitted and not truncated: a candidate that stops at the
+        // edge of the row with no mark reads as a whole address, and the
+        // address a person is about to open would not be the address they
+        // were shown.
+        f.suggest_len = browser::fit_suggestion(&app.address[..app.address_len], &mut f.suggest);
+
+        // The gateway's own reason for the failure, when it gave one.
+        //
+        // WHY it is a line of its own: the body says what the browser
+        // knows and this says what the server said, and a reader has to be
+        // able to tell the two apart.
+        f.detail_len = if app.status == PageStatus::GatewayError && app.gateway_reason_len > 0 {
+            browser::gateway_reason_line(
+                &app.gateway_reason[..app.gateway_reason_len],
+                &mut f.detail,
+            )
+        } else {
+            0
+        };
+        f.detail_y = f.head_y + 40 + f.body_n * 28 + 16;
+        // The badge sits below the body, and below the reason when there
+        // is one.
+        f.err_y = f.head_y + 40 + f.body_n * 28 + 24;
+        if f.detail_len > 0 {
+            f.err_y = f.detail_y + 28 + 20;
         }
 
         f
@@ -5405,7 +5618,7 @@ fn home_row(app: &BrowserApp, index: usize) -> Option<HomeRow> {
     Some(HomeRow {
         title: b"Visited",
         url_len: shown,
-        meta: b"From this session",
+        meta: b"History",
         scheme_mark: scheme_mark(entry),
         url: field,
     })
@@ -5421,26 +5634,22 @@ fn home_row(app: &BrowserApp, index: usize) -> Option<HomeRow> {
 /// the tap handler both ask this function, so the control a person sees is
 /// the control they can press.
 fn open_action_rect(f: &Frame) -> Rect {
-    let err_y = f.head_y + 40 + f.body_n * 28 + 24;
-    Rect::new(W / 2 - 90, err_y + 54, 180, 48)
+    Rect::new(W / 2 - 90, f.err_y + 54, 180, 48)
 }
 
 /// The box the download confirmation action is drawn in.
 fn download_confirm_rect(f: &Frame) -> Rect {
-    let err_y = f.head_y + 40 + f.body_n * 28 + 24;
-    Rect::new(W / 2 - 190, err_y + 54, 180, 48)
+    Rect::new(W / 2 - 190, f.err_y + 54, 180, 48)
 }
 
 /// The box the download cancellation action is drawn in.
 fn download_cancel_rect(f: &Frame) -> Rect {
-    let err_y = f.head_y + 40 + f.body_n * 28 + 24;
-    Rect::new(W / 2 + 10, err_y + 54, 180, 48)
+    Rect::new(W / 2 + 10, f.err_y + 54, 180, 48)
 }
 
 /// The box the dismissed state's action is drawn in.
 fn dismiss_action_rect(f: &Frame) -> Rect {
-    let err_y = f.head_y + 40 + f.body_n * 28 + 24;
-    Rect::new(W / 2 - 90, err_y + 54, 180, 48)
+    Rect::new(W / 2 - 90, f.err_y + 54, 180, 48)
 }
 
 /// Paints one pixel of an HTML-formatted page using the computed display list.
@@ -5952,13 +6161,41 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
             }
         }
 
+        // The gateway's own reason for the failure, when it gave one.
+        //
+        // WHY it is shown: the body says what the browser knows and the
+        // badge says that the fetch failed, but neither says why. The
+        // reason is the host's own account of the failure, and the screen
+        // used to throw it away, which made the browser look broken rather
+        // than telling the person what happened.
+        //
+        // WHY it is a line of its own: a reader has to be able to tell what
+        // the server said from what the browser knows.
+        if f.detail_len > 0 {
+            let detail = &f.detail[..f.detail_len];
+            let dw = text_width(detail, 1);
+            if let Some(px) = text_px(
+                x,
+                y,
+                (W.saturating_sub(dw)) / 2,
+                f.detail_y,
+                1,
+                detail,
+                THEME.on_surface,
+                THEME.surface,
+                false,
+            ) {
+                return px;
+            }
+        }
+
         // The failure is named, not stamped with one code.
         //
         // WHY: the screen used to print "ERR_NETWORK_TRANSPORT_REFUSED"
         // for every failure -- an invalid address, a refused local
         // connection and a gateway that answered nothing all produced the
         // same badge, so the badge was decoration rather than a report.
-        let err_y = f.head_y + 40 + f.body_n * 28 + 24;
+        let err_y = f.err_y;
         let err_rect = Rect::new(cx - 180, err_y, 360, 36);
         if let Some(c) = draw_rounded_rect(x, y, err_rect, R_SMALL, THEME.surface_container_high, Some(THEME.border), 1) {
             let label: &[u8] = match app.status {
@@ -6799,7 +7036,7 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
             let count = app.history.len();
             let filter = app.filter_bytes();
             if count == 0 {
-                let empty_msg = b"No history recorded for this session.";
+                let empty_msg = b"No history recorded yet.";
                 if let Some(px) = text_px(x, y, 32, 250, 1, empty_msg, THEME.on_surface_variant, THEME.surface, false) {
                     return Some(px);
                 }
@@ -7486,7 +7723,7 @@ fn bottom_bar_pixel(x: usize, y: usize, app: &BrowserApp) -> u32 {
     if let Some(_) = draw_rounded_rect(x, y, BACK_BTN, BTN_R, THEME.surface, None, 0) {
         let cx = BACK_BTN.x + BACK_BTN.w / 2;
         let cy = BACK_BTN.y + BACK_BTN.h / 2;
-        let active = app.tabs.can_go_back() || app.history.can_back();
+        let active = app.tabs.can_go_back();
         let col = if active { THEME.on_surface } else { THEME.border };
         if let Some(c) = std::design::back_button::chevron_ink(x, y, cx, cy, col) {
             return c;
@@ -7497,7 +7734,7 @@ fn bottom_bar_pixel(x: usize, y: usize, app: &BrowserApp) -> u32 {
     if let Some(_) = draw_rounded_rect(x, y, FWD_BTN, BTN_R, THEME.surface, None, 0) {
         let cx = FWD_BTN.x + FWD_BTN.w / 2;
         let cy = FWD_BTN.y + FWD_BTN.h / 2;
-        let active = app.tabs.can_go_forward() || app.history.can_forward();
+        let active = app.tabs.can_go_forward();
         let col = if active { THEME.on_surface } else { THEME.border };
         let mirrored_x = if (x as isize) <= cx as isize {
             cx + (cx - x)
@@ -7624,7 +7861,13 @@ fn get_browser_pixel_content(x: usize, y: usize, app: &BrowserApp, f: &Frame) ->
                 if let Some(px) = text_px(x, y, 92, 144, 1, browser::SEARCH_LABEL, THEME.on_surface_variant, c, false) {
                     return px;
                 }
-                let q = &app.address[..app.address_len.min(32)];
+                // The candidate is the string the card offers, and it is
+                // fitted to the row with the platform's mark.
+                //
+                // WHY it was cut to thirty-two bytes and drawn as it was:
+                // the candidate stopped at the edge of the row with nothing
+                // to say that it continued, so it read as a whole address.
+                let q = &f.suggest[..f.suggest_len];
                 if let Some(px) = text_px(x, y, 92, 168, 1, q, THEME.primary, c, true) {
                     return px;
                 }
@@ -7646,7 +7889,7 @@ fn get_browser_pixel_content(x: usize, y: usize, app: &BrowserApp, f: &Frame) ->
                 if let Some(px) = text_px(x, y, 92, 222, 1, b"Open Address", THEME.on_surface_variant, c, false) {
                     return px;
                 }
-                let q = &app.address[..app.address_len.min(32)];
+                let q = &f.suggest[..f.suggest_len];
                 if let Some(px) = text_px(x, y, 92, 246, 1, q, THEME.on_surface, c, true) {
                     return px;
                 }

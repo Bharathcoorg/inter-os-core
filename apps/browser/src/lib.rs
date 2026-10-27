@@ -3434,6 +3434,115 @@ pub fn contains_ignore_case(haystack: &[u8], needle: &[u8]) -> bool {
     false
 }
 
+// -----------------------------------------------------------------------------
+// The text the screen shows for a candidate address and for a failure
+// -----------------------------------------------------------------------------
+
+/// The width the address bar's suggestion row gives its candidate string.
+///
+/// WHY a constant and not the screen's width: the suggestion card is 48 px
+/// from each edge of the screen and its text starts 92 px in, so the string
+/// owns 604 px. A string that does not fit is cut inside that budget and
+/// marked, never past the edge of the row.
+pub const SUGGESTION_TEXT_MAX: usize = 604;
+
+/// Fits a candidate string into the suggestion row's width.
+///
+/// WHY the string is cut and not dropped: a candidate that stops mid-word
+/// with no mark reads as a whole address, and a reader who cannot tell
+/// that the address they are about to open is not the address they were
+/// shown will open the wrong thing. The platform's ellipsis says the text
+/// continues.
+///
+/// WHY the platform's helper and not a hand-rolled cut: the other
+/// applications in this repository mark a string that does not fit with
+/// `font::ellipsize`, and a second way of marking a cut string would be a
+/// second way of getting it wrong.
+///
+/// WHY the caller's buffer must hold the whole string: the helper copies a
+/// string that fits the width byte for byte, so a buffer smaller than the
+/// string would cut it with no mark. A buffer of 256 bytes holds the
+/// longest address the address bar accepts.
+pub fn fit_suggestion(text: &[u8], out: &mut [u8]) -> usize {
+    std::design::font::ellipsize(text, 1, SUGGESTION_TEXT_MAX, out)
+}
+
+/// The largest gateway reason the screen keeps.
+pub const GATEWAY_REASON_MAX: usize = 256;
+
+/// The label the screen puts in front of the gateway's own reason.
+///
+/// WHY the reason is named and not paraphrased: the reason is the host's
+/// account of the failure, and a paraphrase would be a claim the browser
+/// cannot back.
+pub const GATEWAY_REASON_LABEL: &[u8] = b"Gateway said: ";
+
+/// The width the gateway's reason line may occupy.
+///
+/// WHY it is the body's width: the reason is a line of the same block the
+/// explanation is, so it is cut to the same measure the body is wrapped
+/// to.
+pub const GATEWAY_REASON_WIDTH: usize = 560;
+
+/// The bytes the gateway's reason line may hold.
+///
+/// WHY it is larger than the reason itself: the line is the label and the
+/// reason, and the helper that cuts it needs room for the mark it adds.
+pub const GATEWAY_REASON_LINE_MAX: usize = GATEWAY_REASON_LABEL.len() + GATEWAY_REASON_MAX + 4;
+
+/// Reads the reason the gateway gave for a failed fetch.
+///
+/// WHY the reason is read and not invented: the gateway answers a failed
+/// fetch with `{"success": false, "error": "<reason>"}`, and that reason is
+/// the host's own account of what happened. The screen used to print a
+/// generic failure and throw the reason away, which made the browser look
+/// broken instead of telling the person what happened.
+///
+/// WHY an envelope with no reason gives no reason: the screen then shows
+/// the generic failure, which is true. Nothing is put in the gateway's
+/// mouth.
+///
+/// WHY the caller's buffer must hold the reason and three more bytes: the
+/// helper copies a reason that fits the width byte for byte, and a buffer
+/// smaller than the reason would cut it with no mark.
+pub fn gateway_failure_reason(json: &[u8], out: &mut [u8]) -> usize {
+    let Some(raw) = http::proxy_string_field(json, b"error") else {
+        return 0;
+    };
+    // The reason is cut at a byte that does not split a JSON escape, so the
+    // text that is decoded is text the gateway wrote.
+    let mut cut = raw.len().min(GATEWAY_REASON_MAX);
+    while cut > 0 && raw[cut - 1] == b'\\' {
+        cut -= 1;
+    }
+    let mut decoded = [0u8; GATEWAY_REASON_MAX];
+    let Some(n) = http::unescape_json_string(&raw[..cut], &mut decoded) else {
+        return 0;
+    };
+    std::design::font::ellipsize(&decoded[..n], 1, GATEWAY_REASON_WIDTH, out)
+}
+
+/// The line the screen shows for the reason the gateway gave.
+///
+/// WHY the reason is on a line of its own and not inside the explanation:
+/// the explanation is what the browser knows and the reason is what the
+/// server said, and a reader has to be able to tell the two apart.
+///
+/// WHY the line is cut with the platform's mark: a reason that stops
+/// mid-word with no mark reads as the whole reason, which is the same lie
+/// as showing no reason at all.
+pub fn gateway_reason_line(reason: &[u8], out: &mut [u8]) -> usize {
+    let mut composed = [0u8; GATEWAY_REASON_LINE_MAX];
+    let label = GATEWAY_REASON_LABEL;
+    let take = label.len().min(composed.len());
+    composed[..take].copy_from_slice(&label[..take]);
+    let mut n = take;
+    let take = reason.len().min(composed.len() - n);
+    composed[n..n + take].copy_from_slice(&reason[..take]);
+    n += take;
+    std::design::font::ellipsize(&composed[..n], 1, GATEWAY_REASON_WIDTH, out)
+}
+
 #[cfg(test)]
 mod tests {
     // WHY this is declared here: the crate is `#![no_std]` and aliases the
@@ -4966,5 +5075,90 @@ mod tests {
 
         pd.cancel();
         assert!(!pd.active);
+    }
+
+    // -------------------------------------------------------------------------
+    // The candidate string and the failure detail
+    // -------------------------------------------------------------------------
+    #[test]
+    fn test_a_candidate_that_fits_is_shown_whole() {
+        let mut buf = [0u8; 256];
+        let n = fit_suggestion(b"https://interos.tech", &mut buf);
+        assert_eq!(&buf[..n], b"https://interos.tech");
+    }
+
+    #[test]
+    fn test_a_candidate_that_does_not_fit_is_marked_as_continuing() {
+        let mut buf = [0u8; 256];
+        let long = b"https://example.com/a/path/that/keeps/going/and/going/until/it/no/longer/\
+fits/in/the/row/and/the/row/is/still/not/wide/enough/to/be/cut/at/all/by/the/row/it/owns";
+        let n = fit_suggestion(long, &mut buf);
+        assert!(n < long.len(), "the whole candidate was drawn past the row");
+        assert_eq!(
+            &buf[n - 3..n],
+            b"...",
+            "a cut candidate carries no mark, so it reads as a whole address"
+        );
+        assert!(
+            crate::std::design::font::measure(&buf[..n], 1) <= SUGGESTION_TEXT_MAX,
+            "the marked candidate is still wider than the row"
+        );
+    }
+
+    #[test]
+    fn test_the_gateway_reason_is_read_out_of_its_envelope() {
+        let mut buf = [0u8; GATEWAY_REASON_MAX + 3];
+        let envelope =
+            br#"{"success": false, "url": "https://example.com", "error": "SSRF Blocked: host is not public"}"#;
+        let n = gateway_failure_reason(envelope, &mut buf);
+        assert_eq!(&buf[..n], b"SSRF Blocked: host is not public");
+    }
+
+    #[test]
+    fn test_an_envelope_that_names_no_reason_gives_no_reason() {
+        let mut buf = [0u8; GATEWAY_REASON_MAX + 3];
+        let envelope = br#"{"success": false, "url": "https://example.com"}"#;
+        assert_eq!(gateway_failure_reason(envelope, &mut buf), 0);
+    }
+
+    #[test]
+    fn test_a_reason_that_does_not_fit_is_marked_as_continuing() {
+        let mut envelope = [0u8; 512];
+        let mut n = 0usize;
+        for &byte in br#"{"success": false, "error": ""#.iter() {
+            envelope[n] = byte;
+            n += 1;
+        }
+        for _ in 0..400 {
+            envelope[n] = b'x';
+            n += 1;
+        }
+        envelope[n] = b'"';
+        n += 1;
+
+        let mut buf = [0u8; GATEWAY_REASON_MAX + 3];
+        let written = gateway_failure_reason(&envelope[..n], &mut buf);
+        assert!(written > 0, "a reason the gateway gave was thrown away");
+        assert_eq!(
+            &buf[written - 3..written],
+            b"...",
+            "a cut reason carries no mark, so it reads as the whole reason"
+        );
+    }
+
+    #[test]
+    fn test_the_reason_line_names_the_gateway_and_marks_a_cut_reason() {
+        let mut buf = [0u8; GATEWAY_REASON_LINE_MAX + 3];
+        let n = gateway_reason_line(b"SSRF Blocked: host is not public", &mut buf);
+        assert_eq!(&buf[..n], b"Gateway said: SSRF Blocked: host is not public");
+
+        let long = b"a reason that is far longer than the line the screen gives it can ever hold";
+        let n = gateway_reason_line(long, &mut buf);
+        assert!(n < long.len() + GATEWAY_REASON_LABEL.len());
+        assert_eq!(&buf[n - 3..n], b"...", "a cut reason line carries no mark");
+        assert!(
+            crate::std::design::font::measure(&buf[..n], 1) <= GATEWAY_REASON_WIDTH,
+            "the reason line is wider than the block it belongs to"
+        );
     }
 }
