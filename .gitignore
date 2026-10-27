@@ -27,6 +27,7 @@ emulator/data/themes/custom_*.theme
 emulator/data/qemu_launch_state.json
 
 # Agent & IDE caches and rules
+.qoder-tmp/
 .kilo/
 scratch/
 .worktrees/

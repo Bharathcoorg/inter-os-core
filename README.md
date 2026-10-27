@@ -2,6 +2,11 @@
 
 <div align="center">
 
+[![Website: interos.tech](https://img.shields.io/badge/Website-interos.tech-0f172a.svg?style=flat&logo=firefoxbrowser&logoColor=white)](https://interos.tech)
+[![Live Demo: demo.interos.tech](https://img.shields.io/badge/Live%20Demo-demo.interos.tech-2563eb.svg?style=flat)](https://demo.interos.tech)
+[![Sponsor: GitHub Sponsors](https://img.shields.io/badge/Sponsor-GitHub%20Sponsors-ea4aaa.svg?style=flat&logo=githubsponsors&logoColor=white)](https://github.com/sponsors/Bharathcoorg)
+[![Sponsor: Direct](https://img.shields.io/badge/Sponsor-interos.tech%2Fsponsors-7c3aed.svg?style=flat)](https://interos.tech/sponsors)
+
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPLv3-blue.svg)](LICENSE)
 ![Language: Pure Rust](https://img.shields.io/badge/Language-Pure%20Rust%20%23!%5Bno__std%5D-orange.svg)
 ![Architectures: x86_64 / AArch64 / RISC-V 64](https://img.shields.io/badge/Architectures-x86__64%20%7C%20AArch64%20%7C%20RISC--V%2064-success.svg)
@@ -10,7 +15,9 @@
 
 ### **InterOS — Sovereign Rust mobile OS for AArch64, RISC-V 64, and x86_64 with native on-device Local open-model AI runtime, native Rust mobile apps, and Android compatibility.**
 
-[Quickstart](#-quickstart) • [Architecture](#-system-architecture) • [Reality Contract](#-platform-reality-contract) • [Security & Isolation](#-security-invariants--isolation-model) • [UI & Compositor](#-ui-rendering--compositor) • [Device Studio](#-universal-device-studio) • [Developer CLI](#-developer-cli-interos) • [Experimental Bring-Up](#-hardware-bring-up--experimental-status)
+**[🌐 Official Website](https://interos.tech)** • **[🚀 Live Demo](https://demo.interos.tech)** • **[💖 Sponsor InterOS](https://interos.tech/sponsors)**
+
+[Quickstart](#-quickstart) • [Architecture](#-system-architecture) • [Reality Contract](#-platform-reality-contract) • [Security & Isolation](#-security-invariants--isolation-model) • [UI & Compositor](#-ui-rendering--compositor) • [Device Studio](#-universal-device-studio) • [Developer CLI](#-developer-cli-interos) • [Experimental Bring-Up](#-hardware-bring-up--experimental-status) • [Sponsors](#-sponsoring-interos)
 
 </div>
 
@@ -299,6 +306,17 @@ For experimental hardware bring-up documentation, see [docs/PHYSICAL_HARDWARE_FL
 - [Recovery and Secure Updates](docs/RECOVERY_AND_UPDATES.md) — authenticated A/B transactions and rollback.
 - [Diagnostics and Performance](docs/DIAGNOSTICS_AND_PERFORMANCE.md) — bounded diagnostics and telemetry.
 - [Developer Guide](docs/DEVELOPER_GUIDE.md) — comprehensive CLI and workflow manual.
+
+---
+
+## 💖 Sponsoring InterOS
+
+InterOS is an independent, sovereign, open-source mobile operating system engineered from bare-metal Rust. If you find InterOS valuable or wish to support continuous hardware bring-up, compiler development, local AI acceleration, and browser engine porting, consider becoming a sponsor!
+
+- **GitHub Sponsors**: [github.com/sponsors/Bharathcoorg](https://github.com/sponsors/Bharathcoorg)
+- **Direct Sponsorship & Tiers**: [interos.tech/sponsors](https://interos.tech/sponsors)
+- **Official Website**: [interos.tech](https://interos.tech)
+- **Live Interactive Web Demo**: [demo.interos.tech](https://demo.interos.tech)
 
 ---
 
