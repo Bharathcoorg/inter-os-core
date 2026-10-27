@@ -899,12 +899,21 @@ the saved copy is incomplete. A partial file may not open. The transfer ended ea
 file is larger than this browser's response buffer, or because the origin stopped sending.";
 const BODY_DOWNLOAD_FAILED: &[u8] = b"The response was a file, but the shared storage area did \
 not accept it. Nothing was saved.";
+const BODY_DOWNLOAD_NO_BYTES: &[u8] = b"The origin sent no bytes, so there was no file to save. \
+Nothing was written to the shared storage area, and the File Manager lists no new document.";
+const BODY_DOWNLOAD_NO_PATH: &[u8] = b"The response was a file, but the shared storage area has \
+no free name for it. Nothing was saved.";
+const BODY_DOWNLOAD_LOST: &[u8] = b"The bytes of the response could not be found again when the \
+download was confirmed. Nothing was saved.";
+const BODY_DOWNLOAD_REFUSED: &[u8] = b"The origin did not return the file. Its answer was an \
+error rather than the document that was asked for, so the error text was not saved as a file. \
+Nothing was written to the shared storage area.";
 const BODY_DOWNLOAD_PROMPT: &[u8] = b"This website wants to download a file to your device. InterOS \
 requires your explicit permission before any file can be stored.";
 const BODY_DOWNLOAD_PROMPT_PARTIAL: &[u8] = b"This website wants to download a file, but the \
 transfer already ended early: only part of it arrived. If you allow it, the incomplete part is \
 saved.";
-const BODY_DOWNLOAD_REFUSED: &[u8] = b"The download request was declined. No data was written to storage, \
+const BODY_DOWNLOAD_DECLINED: &[u8] = b"The download request was declined. No data was written to storage, \
 and temporary network buffers were discarded.";
 
 /// Why a local document could not be shown.
@@ -925,6 +934,28 @@ pub enum LocalFailure {
     Empty,
     /// The document opened and the read itself was refused.
     ReadRefused,
+}
+
+/// Why a download was not saved.
+///
+/// WHY this is carried rather than inferred: the download screen used to
+/// print one paragraph for every failed download, so a response that
+/// carried no bytes at all was reported as a storage area that refused
+/// the write. The screen has to state the failure that happened.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum DownloadFailure {
+    /// The download was saved.
+    None,
+    /// The origin sent no bytes at all.
+    NoBytes,
+    /// The shared storage area refused the write.
+    StorageRefused,
+    /// No free name could be found for the file.
+    NoPath,
+    /// The response's bytes could not be found again.
+    Lost,
+    /// The origin's answer was an error rather than the file.
+    OriginRefused,
 }
 
 // -----------------------------------------------------------------------------
@@ -1679,6 +1710,12 @@ pub struct BrowserApp {
     pub response_truncated: bool,
     /// Why the last local document could not be shown.
     pub local_failure: LocalFailure,
+    /// Why the last download was not saved.
+    ///
+    /// WHY it is kept: a response that carried no bytes and a storage area
+    /// that refused the bytes are different failures, and the screen used
+    /// to print the storage refusal for both.
+    pub download_failure: DownloadFailure,
     /// The reason the gateway gave for the last failed fetch.
     ///
     /// WHY it is kept: the gateway answers a failed fetch with an envelope
@@ -1817,7 +1854,15 @@ const FILE_WRITE_CHUNK: usize = 32 * 1024;
 /// not a failure, and the next step continues where the last one stopped.
 /// A file that cannot be finished is removed, so a damaged download never
 /// looks like a complete one.
+///
+/// WHY an empty body is refused before the file is opened: opening a file
+/// creates it, so a write of no bytes would leave an empty document in the
+/// shared storage area that the File Manager and the Gallery list as a
+/// real file. A download that wrote nothing is not a download.
 fn write_file(path: &str, bytes: &[u8]) -> Result<usize, ()> {
+    if bytes.is_empty() {
+        return Err(());
+    }
     let fd = std::fs_open(path, std::FS_WRITE).map_err(|_| ())?;
     let mut written = 0usize;
     while written < bytes.len() {
@@ -1875,6 +1920,7 @@ impl BrowserApp {
             kb_symbols: false,
             response_truncated: false,
             local_failure: LocalFailure::NoPath,
+            download_failure: DownloadFailure::None,
             gateway_reason: [0; browser::GATEWAY_REASON_MAX],
             gateway_reason_len: 0,
             response_len: 0,
@@ -3079,12 +3125,32 @@ impl BrowserApp {
         body: &[u8],
         truncated: bool,
     ) {
+        // WHY an empty body is refused before the prompt: the response
+        // carried headers and no bytes, so there is no file to offer. A
+        // prompt for a file that does not exist asks the person to confirm
+        // a download that can only produce an empty document.
+        if body.is_empty() {
+            self.fail_download(
+                DownloadFailure::NoBytes,
+                "[BROWSER APP] The origin sent no bytes; there was no file to save and nothing was saved.",
+            );
+            return;
+        }
+
         let base_ptr = core::ptr::addr_of!(RESPONSE_BUF) as *const u8 as usize;
         let body_ptr = body.as_ptr() as usize;
         let body_offset = if body_ptr >= base_ptr && body_ptr < base_ptr + MAX_RESPONSE_BYTES {
             body_ptr - base_ptr
         } else {
-            0
+            // WHY this is refused rather than defaulted to zero: an offset
+            // of zero points at the response's own headers, so the file that
+            // was written would begin "HTTP/1.0 200 OK" instead of holding
+            // the picture the origin sent.
+            self.fail_download(
+                DownloadFailure::Lost,
+                "[BROWSER APP] The bytes of the response could not be located in the response buffer; nothing was saved.",
+            );
+            return;
         };
 
         self.pending_download = browser::PendingDownload::new(
@@ -3095,11 +3161,27 @@ impl BrowserApp {
             body_offset,
             truncated,
         );
+        self.download_failure = DownloadFailure::None;
         self.status = PageStatus::DownloadPrompt;
         self.loading_progress = 100;
         self.tabs.active_tab_mut().loading_state = LoadingState::Completed;
         self.tabs.active_tab_mut().error_code = 0;
         std::log("[BROWSER APP] The origin sent a file download; staged awaiting user confirmation.").ok();
+    }
+
+    /// Records a download that could not be saved, and says why.
+    ///
+    /// WHY the reason is carried rather than implied: the screen prints one
+    /// paragraph per failure, and a response that carried no bytes is a
+    /// different failure from a storage area that refused the bytes.
+    fn fail_download(&mut self, reason: DownloadFailure, message: &str) {
+        self.download_failure = reason;
+        self.status = PageStatus::DownloadFailed;
+        self.loading_progress = 0;
+        self.tabs.active_tab_mut().loading_state = LoadingState::Failed;
+        self.tabs.active_tab_mut().error_code = -5; // EIO
+        std::log(message).ok();
+        let _ = std::audio_haptic_click();
     }
 
     /// User confirmed the pending download; saves it to shared storage.
@@ -3118,11 +3200,17 @@ impl BrowserApp {
         let truncated = pending.truncated;
 
         let response = unsafe { &*core::ptr::addr_of!(RESPONSE_BUF) };
-        let body = if offset + len <= response.len() {
-            &response[offset..offset + len]
-        } else {
-            &[]
-        };
+        // WHY the staged bytes are looked for again: the response buffer is
+        // shared, and a body that is no longer where it was left would
+        // otherwise be written as the headers at the start of the buffer.
+        if offset + len > response.len() {
+            self.fail_download(
+                DownloadFailure::Lost,
+                "[BROWSER APP] The bytes of the response were no longer in the response buffer; nothing was saved.",
+            );
+            return false;
+        }
+        let body = &response[offset..offset + len];
 
         self.save_media_download(url, content_type, Some(filename), body, truncated)
     }
@@ -3144,6 +3232,12 @@ impl BrowserApp {
     /// most 64 KiB per call, so a file larger than that is written in parts
     /// rather than refused. A refused write removes the partial file, so a
     /// damaged download is not left where the File Manager lists it.
+    ///
+    /// WHY an empty body is refused before the file is opened: opening a
+    /// file creates it, so writing nothing would leave an empty document in
+    /// the shared storage area under a download's name. The person would
+    /// find a file that is not the file the origin sent, and the File
+    /// Manager and the Gallery would list it as a real document.
     fn save_media_download(
         &mut self,
         url: &[u8],
@@ -3152,10 +3246,19 @@ impl BrowserApp {
         body: &[u8],
         truncated: bool,
     ) -> bool {
+        if body.is_empty() {
+            self.fail_download(
+                DownloadFailure::NoBytes,
+                "[BROWSER APP] The origin sent no bytes; there was no file to save and nothing was saved.",
+            );
+            return false;
+        }
+
         let mut name = [0u8; 72];
         let name_len = browser::download_filename(url, content_type, given_name, &mut name);
         let mut path_buf = [0u8; 96];
         let Some(path_len) = self.unused_download_path(&name[..name_len], &mut path_buf) else {
+            self.download_failure = DownloadFailure::NoPath;
             self.status = PageStatus::DownloadFailed;
             self.loading_progress = 0;
             self.tabs.active_tab_mut().loading_state = LoadingState::Failed;
@@ -3165,6 +3268,7 @@ impl BrowserApp {
             return false;
         };
         let Ok(path) = core::str::from_utf8(&path_buf[..path_len]) else {
+            self.download_failure = DownloadFailure::NoPath;
             self.status = PageStatus::DownloadFailed;
             self.loading_progress = 0;
             self.tabs.active_tab_mut().loading_state = LoadingState::Failed;
@@ -3179,6 +3283,7 @@ impl BrowserApp {
                     std::log("[BROWSER APP] The transfer ended before the whole file arrived; the saved copy is partial.").ok();
                 }
                 self.last_download_truncated = truncated;
+                self.download_failure = DownloadFailure::None;
                 let _ = written;
 
                 // Persist the download origin URL alongside the downloaded file metadata/record.
@@ -3201,6 +3306,7 @@ impl BrowserApp {
                 true
             }
             Err(_) => {
+                self.download_failure = DownloadFailure::StorageRefused;
                 std::log("[BROWSER APP] The shared storage area refused the download; nothing was saved.").ok();
                 self.status = PageStatus::DownloadFailed;
                 self.loading_progress = 0;
@@ -4022,16 +4128,52 @@ impl BrowserApp {
             // file would no longer be the file the origin sent.
             if let Some(resp) = browser::parse_http_response(rx_slice) {
                 if browser::content_type_is_binary(resp.content_type) {
+                    // WHY the status is checked before the bytes are weighed:
+                    // an error answer arrives with a body of its own, and a
+                    // browser that saves whatever arrived stores the error
+                    // text under the name of the file that was asked for.
+                    if !browser::status_carries_file(resp.status_code) {
+                        self.fail_download(
+                            DownloadFailure::OriginRefused,
+                            "[BROWSER APP] The origin answered with an error instead of the file; nothing was saved.",
+                        );
+                        return true;
+                    }
+                    // WHY the body is weighed against the origin's own
+                    // number: the headers can arrive without the bytes they
+                    // announce, and a file written from what arrived would
+                    // then be an empty document that the File Manager and
+                    // the Gallery list as a real file. The origin's declared
+                    // length is the only statement about how long the file
+                    // should have been.
+                    let body_state = browser::classify_download_body(rx_slice, resp.body.len());
                     let truncated = outcome.truncated
-                        || browser::http_header_value(rx_slice, b"x-interos-truncated").is_some();
-                    self.stage_pending_download(
-                        &hop_buf[..hop_len],
-                        resp.content_type,
-                        browser::http_header_value(rx_slice, b"x-interos-filename"),
-                        resp.body,
-                        truncated,
-                    );
-                    return true;
+                        || browser::http_header_value(rx_slice, b"x-interos-truncated").is_some()
+                        || matches!(body_state, browser::DownloadBody::Short { .. });
+                    match body_state {
+                        // WHY the empty body is refused here and not offered:
+                        // the response carried headers and no bytes, so
+                        // there is no file to download. Nothing is written,
+                        // and the screen says the origin sent no bytes
+                        // rather than reporting a storage refusal.
+                        browser::DownloadBody::Empty { .. } => {
+                            self.fail_download(
+                                DownloadFailure::NoBytes,
+                                "[BROWSER APP] The origin sent a file with no bytes in it; there was no file to save and nothing was saved.",
+                            );
+                            return true;
+                        }
+                        _ => {
+                            self.stage_pending_download(
+                                &hop_buf[..hop_len],
+                                resp.content_type,
+                                browser::http_header_value(rx_slice, b"x-interos-filename"),
+                                resp.body,
+                                truncated,
+                            );
+                            return true;
+                        }
+                    }
                 }
             }
 
@@ -4619,7 +4761,15 @@ impl Frame {
                     (b"Saved to Downloads", BODY_DOWNLOADED)
                 }
             }
-            PageStatus::DownloadFailed => (b"Download could not be saved", BODY_DOWNLOAD_FAILED),
+            PageStatus::DownloadFailed => match app.download_failure {
+                DownloadFailure::NoBytes => (b"Download Not Saved", BODY_DOWNLOAD_NO_BYTES),
+                DownloadFailure::NoPath => (b"Download could not be saved", BODY_DOWNLOAD_NO_PATH),
+                DownloadFailure::Lost => (b"Download could not be saved", BODY_DOWNLOAD_LOST),
+                DownloadFailure::OriginRefused => (b"Download Not Saved", BODY_DOWNLOAD_REFUSED),
+                DownloadFailure::StorageRefused | DownloadFailure::None => {
+                    (b"Download could not be saved", BODY_DOWNLOAD_FAILED)
+                }
+            },
             PageStatus::DownloadPrompt => {
                 if app.pending_download.truncated {
                     (b"Download Permission", BODY_DOWNLOAD_PROMPT_PARTIAL)
@@ -4627,7 +4777,7 @@ impl Frame {
                     (b"Download Permission", BODY_DOWNLOAD_PROMPT)
                 }
             }
-            PageStatus::DownloadRefused => (b"Download Refused", BODY_DOWNLOAD_REFUSED),
+            PageStatus::DownloadRefused => (b"Download Refused", BODY_DOWNLOAD_DECLINED),
             PageStatus::LocalRefused => (b"Local document unavailable", match app.local_failure {
                 LocalFailure::NoPath => BODY_LOCAL_NO_PATH,
                 LocalFailure::NoCapability => BODY_LOCAL_NO_CAPABILITY,
@@ -6210,7 +6360,13 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                         b"DOWNLOAD COMPLETE"
                     }
                 }
-                PageStatus::DownloadFailed => b"DOWNLOAD FAILED",
+                PageStatus::DownloadFailed => match app.download_failure {
+                    DownloadFailure::NoBytes => b"NO BYTES RECEIVED",
+                    DownloadFailure::NoPath => b"NO FREE NAME",
+                    DownloadFailure::Lost => b"BYTES LOST",
+                    DownloadFailure::OriginRefused => b"ORIGIN REFUSED",
+                    DownloadFailure::StorageRefused | DownloadFailure::None => b"DOWNLOAD FAILED",
+                },
                 PageStatus::DownloadPrompt => b"PERMISSION REQUIRED",
                 PageStatus::DownloadRefused => b"DOWNLOAD DECLINED",
                 PageStatus::LocalRefused => match app.local_failure {

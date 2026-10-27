@@ -3124,6 +3124,110 @@ pub fn http_header_value<'a>(raw: &'a [u8], name: &[u8]) -> Option<&'a [u8]> {
     None
 }
 
+/// The header section of a raw HTTP response.
+///
+/// WHY the section is found again here: the body of a response can hold a
+/// line that looks like a header, and a length read out of the body would
+/// be a number the origin never promised.
+fn response_header_section(raw: &[u8]) -> &[u8] {
+    if let Some(pos) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+        &raw[..pos]
+    } else if let Some(pos) = raw.windows(2).position(|w| w == b"\n\n") {
+        &raw[..pos]
+    } else {
+        raw
+    }
+}
+
+/// The length the origin said the body of the response would hold.
+///
+/// WHY this is read at all: a response can arrive with its headers and
+/// without its body, and a browser that writes what it has leaves an empty
+/// file in the shared storage area and calls it a download. The origin's
+/// own number is the only statement about how long the file should have
+/// been, so it is the only thing a saved copy can be checked against.
+///
+/// WHY a non-numeric value is no value: a length that cannot be read is
+/// not a measurement, and reporting a guess would be a claim the origin
+/// never made.
+pub fn declared_content_length(raw: &[u8]) -> Option<u64> {
+    const NAME: &[u8] = b"content-length";
+    for line in response_header_section(raw).split(|&b| b == b'\n') {
+        let line = match line.last() {
+            Some(&b'\r') => &line[..line.len() - 1],
+            _ => line,
+        };
+        if line.len() <= NAME.len() || line[NAME.len()] != b':' {
+            continue;
+        }
+        if !eq_ignore_case(&line[..NAME.len()], NAME) {
+            continue;
+        }
+        let value = trim_ascii(&line[NAME.len() + 1..]);
+        let mut length: u64 = 0;
+        let mut digits = 0usize;
+        for &b in value {
+            if !b.is_ascii_digit() {
+                return None;
+            }
+            length = length.checked_mul(10)?.checked_add((b - b'0') as u64)?;
+            digits += 1;
+        }
+        if digits == 0 {
+            return None;
+        }
+        return Some(length);
+    }
+    None
+}
+
+/// How the bytes of a file response compare with what the origin promised.
+///
+/// WHY this is a type rather than a number: the three cases are reported
+/// to the person differently, and a count of the bytes that arrived cannot
+/// say whether the file is whole, partial, or absent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DownloadBody {
+    /// Every byte the origin declared arrived.
+    Complete { bytes: usize },
+    /// The origin declared more bytes than arrived.
+    Short { declared: u64, received: usize },
+    /// The origin sent no bytes at all.
+    Empty { declared: Option<u64> },
+}
+
+/// Whether an origin's answer carries the file that was asked for.
+///
+/// WHY the status decides this and not the body: a 404 and a 403 arrive
+/// with a body of their own, and a browser that saves whatever arrived
+/// stores the error text under the name of the file that was asked for.
+/// The status is the origin's own word about whether the file is in the
+/// response.
+pub fn status_carries_file(status_code: u16) -> bool {
+    (200..300).contains(&status_code)
+}
+
+/// Classifies the body of a file response against the length the origin
+/// declared.
+///
+/// WHY the empty case is checked first: a response that carried headers
+/// and no body is the case that produced a zero-byte file the File Manager
+/// and the Gallery listed as a real document, and it has to be recognised
+/// before anything is written.
+pub fn classify_download_body(raw: &[u8], body_len: usize) -> DownloadBody {
+    let declared = declared_content_length(raw);
+    if body_len == 0 {
+        return DownloadBody::Empty { declared };
+    }
+    match declared {
+        Some(declared) if declared > body_len as u64 => DownloadBody::Short {
+            declared,
+            received: body_len,
+        },
+        _ => DownloadBody::Complete { bytes: body_len },
+    }
+}
+
 /// Builds the name a downloaded file is saved under.
 ///
 /// WHY the server's name wins over the URL's: the origin may name the file
@@ -5075,6 +5179,92 @@ mod tests {
 
         pd.cancel();
         assert!(!pd.active);
+    }
+
+    // -------------------------------------------------------------------------
+    // What the origin sent, against what it promised
+    // -------------------------------------------------------------------------
+    #[test]
+    fn test_a_response_that_declared_a_length_is_read_from_its_headers() {
+        let raw = b"HTTP/1.0 200 OK\r\nContent-Type: image/png\r\nContent-Length: 87\r\n\r\n";
+        assert_eq!(declared_content_length(raw), Some(87));
+
+        // The name is matched without case, as HTTP requires.
+        let lower = b"HTTP/1.0 200 OK\r\ncontent-length: 12\r\n\r\n";
+        assert_eq!(declared_content_length(lower), Some(12));
+
+        // A response that states no length states none.
+        assert_eq!(declared_content_length(b"HTTP/1.0 200 OK\r\n\r\n"), None);
+
+        // A length that is not a number is not a length.
+        let broken = b"HTTP/1.0 200 OK\r\nContent-Length: many\r\n\r\n";
+        assert_eq!(declared_content_length(broken), None);
+    }
+
+    #[test]
+    fn test_a_length_in_the_body_is_not_the_origins_length() {
+        // The body holds a line that looks like a header. It is not one, and
+        // a length read out of it would be a number the origin never gave.
+        let raw = b"HTTP/1.0 200 OK\r\nContent-Type: image/png\r\n\r\nContent-Length: 9999";
+        assert_eq!(declared_content_length(raw), None);
+    }
+
+    #[test]
+    fn test_a_body_with_no_bytes_is_refused_rather_than_saved() {
+        let raw = b"HTTP/1.0 200 OK\r\nContent-Type: image/png\r\nContent-Length: 87\r\n\r\n";
+        assert_eq!(
+            classify_download_body(raw, 0),
+            DownloadBody::Empty { declared: Some(87) }
+        );
+
+        // A response that states no length and carries no bytes is empty too.
+        let bare = b"HTTP/1.0 200 OK\r\nContent-Type: image/png\r\n\r\n";
+        assert_eq!(
+            classify_download_body(bare, 0),
+            DownloadBody::Empty { declared: None }
+        );
+    }
+
+    #[test]
+    fn test_a_body_shorter_than_the_origin_promised_is_partial() {
+        let raw = b"HTTP/1.0 200 OK\r\nContent-Type: image/png\r\nContent-Length: 87\r\n\r\n";
+        assert_eq!(
+            classify_download_body(raw, 40),
+            DownloadBody::Short {
+                declared: 87,
+                received: 40
+            }
+        );
+    }
+
+    #[test]
+    fn test_a_body_that_matches_the_origin_promise_is_whole() {
+        let raw = b"HTTP/1.0 200 OK\r\nContent-Type: image/png\r\nContent-Length: 87\r\n\r\n";
+        assert_eq!(
+            classify_download_body(raw, 87),
+            DownloadBody::Complete { bytes: 87 }
+        );
+
+        // A response with no declared length is whole when it carries bytes.
+        let bare = b"HTTP/1.0 200 OK\r\nContent-Type: image/png\r\n\r\n";
+        assert_eq!(
+            classify_download_body(bare, 12),
+            DownloadBody::Complete { bytes: 12 }
+        );
+    }
+
+    #[test]
+    fn test_an_error_answer_does_not_carry_the_file() {
+        // A 404 arrives with a body of its own. Saving it would put the
+        // error text in the shared storage area under the name of the file
+        // that was asked for.
+        assert!(!status_carries_file(404));
+        assert!(!status_carries_file(403));
+        assert!(!status_carries_file(500));
+        assert!(!status_carries_file(304));
+
+        assert!(status_carries_file(200));
+        assert!(status_carries_file(206));
     }
 
     // -------------------------------------------------------------------------
