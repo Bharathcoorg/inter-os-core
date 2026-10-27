@@ -1369,6 +1369,9 @@ pub fn read_file_for_task(
             if inode.file_type != FileType::RegularFile || !is_persistent_data_path(&inode.path) { continue; }
             let path=inode.path.as_bytes();
             let data=inode.data.as_slice();
+            // A size that no bytes back is a record from a boot that lost the
+            // payload; persisting it again would keep the lie alive.
+            if data.is_empty() && inode.size > 0 { continue; }
             if path.len()>255 || data.len()>SNAPSHOT_FILE_LIMIT { continue; }
             if pos + 2 + path.len() + 4 + data.len() > buf.len() { break; }
             buf[pos..pos+2].copy_from_slice(&(path.len() as u16).to_le_bytes()); pos+=2;
@@ -1499,8 +1502,12 @@ pub fn read_file_for_task(
                 }
                 continue;
             }
-            let size = u32::from_le_bytes([buf[pos],buf[pos+1],buf[pos+2],buf[pos+3]]) as usize; pos += 4;
-            let mut digest=[0u8;32]; digest.copy_from_slice(&buf[pos..pos+32]); pos += 32;
+            // The persisted size and digest describe the bytes as they were
+            // when the snapshot was taken. The bytes this boot actually holds
+            // come from the seeds or the data snapshot, so neither field is
+            // applied to the inode here.
+            pos += 4;
+            let mut persisted_digest=[0u8;32]; persisted_digest.copy_from_slice(&buf[pos..pos+32]); pos += 32;
             let (uid,gid,mode,nlink,atime,mtime,ctime) = if v2 {
                 let uid = match buf[pos..pos+4].try_into() { Ok(b) => u32::from_le_bytes(b), Err(_) => break }; pos += 4;
                 let gid = match buf[pos..pos+4].try_into() { Ok(b) => u32::from_le_bytes(b), Err(_) => break }; pos += 4;
@@ -1516,11 +1523,47 @@ pub fn read_file_for_task(
                 let created=self.mkdir(path);
                 if let Some(inode)=self.inodes.get_mut(&created) { inode.id=InodeId(id); inode.uid=uid; inode.gid=gid; inode.mode=mode; inode.nlink=nlink; inode.atime=atime; inode.mtime=mtime; inode.ctime=ctime; }
             } else if kind == 2 {
-                let created=self.create_file(path,&[],false);
-                if let Some(mut inode)=self.inodes.remove(&created) {
-                    inode.id=InodeId(id); inode.size=size; inode.sha256_digest=digest; inode.data=InodeData::Dynamic(Vec::new());
-                    inode.uid=uid; inode.gid=gid; inode.mode=mode; inode.nlink=nlink; inode.atime=atime; inode.mtime=mtime; inode.ctime=ctime;
-                    self.inodes.insert(InodeId(id),inode); self.path_to_inode.insert(path.to_string(),InodeId(id));
+                // A persisted record whose path already exists is a file the
+                // boot seeds recreated before the snapshot was read. Its bytes
+                // are the honest content of this boot; the record only carries
+                // metadata. Replacing them with an empty buffer made every
+                // seeded track and photo unreadable after the first reboot.
+                let existing = self.path_to_inode.get(path).copied().filter(|inode_id| {
+                    self.inodes
+                        .get(inode_id)
+                        .map(|inode| inode.file_type == FileType::RegularFile)
+                        .unwrap_or(false)
+                });
+                if let Some(existing_id) = existing {
+                    if let Some(inode) = self.inodes.get_mut(&existing_id) {
+                        inode.uid=uid; inode.gid=gid; inode.mode=mode; inode.nlink=nlink;
+                        inode.atime=atime; inode.mtime=mtime; inode.ctime=ctime;
+                    }
+                    // Keep the record's inode id when it is free so recorded
+                    // hard links still resolve. Never take an id another path
+                    // owns: that would silently merge two files.
+                    if id != existing_id.0 && !self.inodes.contains_key(&InodeId(id)) {
+                        if let Some(mut inode) = self.inodes.remove(&existing_id) {
+                            inode.id = InodeId(id);
+                            self.inodes.insert(InodeId(id), inode);
+                            self.path_to_inode.insert(path.to_string(), InodeId(id));
+                        }
+                    }
+                } else {
+                    let created=self.create_file(path,&[],false);
+                    let target = if id != created.0 && !self.inodes.contains_key(&InodeId(id)) {
+                        InodeId(id)
+                    } else {
+                        created
+                    };
+                    if let Some(mut inode)=self.inodes.remove(&created) {
+                        // The persisted size describes bytes this boot has not
+                        // restored yet. Until the data snapshot supplies them,
+                        // the file is honestly empty.
+                        inode.id=target; inode.size=0; inode.data=InodeData::Dynamic(Vec::new());
+                        inode.uid=uid; inode.gid=gid; inode.mode=mode; inode.nlink=nlink; inode.atime=atime; inode.mtime=mtime; inode.ctime=ctime;
+                        self.inodes.insert(target,inode); self.path_to_inode.insert(path.to_string(),target);
+                    }
                 }
             }
             if id>=self.next_inode { self.next_inode=id.saturating_add(1); }
@@ -1589,6 +1632,18 @@ pub fn read_file_for_task(
             let dlen=u32::from_le_bytes([buf[pos],buf[pos+1],buf[pos+2],buf[pos+3]]) as usize; pos+=4;
             if dlen>SNAPSHOT_FILE_LIMIT || pos+dlen>len { break; }
             if !is_persistent_data_path(path) { pos+=dlen; continue; }
+            // A zero-length payload for a path that already holds bytes is a
+            // snapshot recorded while the file was empty, not an instruction
+            // to erase the seed this boot restored. Keeping the seed makes the
+            // record recoverable on the next persist; overwriting it with zero
+            // bytes made every seeded track and photo 0 bytes after reboot.
+            if dlen == 0 {
+                if self.path_to_inode.get(path).is_some() {
+                    crate::serial_println!("[VFS RESTORE] Kept existing bytes for {} (empty record)", path);
+                    pos += dlen;
+                    continue;
+                }
+            }
             let parent = parent_path(path);
             if parent != "/" { self.ensure_dir_path(parent); }
             crate::serial_println!("[VFS RESTORE] Restored file: {} ({} bytes)", path, dlen);
@@ -2245,6 +2300,73 @@ mod tests {
         for inode in restored.inodes.values() {
             assert_ne!(inode.size, SNAPSHOT_FILE_LIMIT, "no snapshot entry may be truncated to the limit");
         }
+    }
+
+    #[test]
+    fn vfs_restore_keeps_boot_seed_bytes_when_a_record_has_no_payload() {
+        // The seeds are recreated before the snapshot is read, so a record
+        // whose payload is missing or empty must not erase them. This is the
+        // bug that made every seeded track and photo zero bytes after the
+        // first reboot.
+        let seed = b"RIFF\x24\x00\x00\x00WAVEfmt seed payload";
+        let mut restored = Vfs::new();
+        restored.mkdir("/storage");
+        restored.mkdir("/storage/music");
+        restored.create_file("/storage/music/ambient_chill.wav", seed, false);
+
+        let mut source = Vfs::new();
+        source.mkdir("/storage");
+        source.mkdir("/storage/music");
+        source.create_file("/storage/music/ambient_chill.wav", &[], false);
+        let mut metadata = alloc::vec![0u8; METADATA_SNAPSHOT_LIMIT];
+        let metadata_len = source.encode_metadata_snapshot(&mut metadata);
+
+        restored.decode_metadata_snapshot(&metadata[..metadata_len], metadata_len, true);
+        let inode_id = restored.lookup("/storage/music/ambient_chill.wav").expect("seed path survives metadata restore");
+        let inode = &restored.inodes[&inode_id];
+        assert_eq!(inode.data.as_slice(), seed, "metadata restore must not empty a seeded file");
+        assert_eq!(inode.size, seed.len(), "a seeded file reports the bytes it holds");
+
+        // An explicit zero-length data record is the same instruction not to
+        // erase what the boot already restored.
+        let path = b"/storage/music/ambient_chill.wav";
+        let mut data = alloc::vec![0u8; 64];
+        data[..4].copy_from_slice(b"DTA1");
+        data[4..6].copy_from_slice(&1u16.to_le_bytes());
+        let mut pos = 6usize;
+        data[pos..pos + 2].copy_from_slice(&(path.len() as u16).to_le_bytes()); pos += 2;
+        data[pos..pos + path.len()].copy_from_slice(path); pos += path.len();
+        data[pos..pos + 4].copy_from_slice(&0u32.to_le_bytes()); pos += 4;
+        restored.decode_data_snapshot(&data[..pos], pos);
+        let inode_id = restored.lookup("/storage/music/ambient_chill.wav").expect("seed path survives data restore");
+        assert_eq!(restored.inodes[&inode_id].data.as_slice(), seed);
+    }
+
+    #[test]
+    fn vfs_restore_does_not_let_a_persisted_id_take_another_paths_inode() {
+        // Persisted ids come from an older boot and can collide with the ids
+        // the seeds were given this boot. A collision must leave both paths
+        // readable instead of merging them into one inode.
+        let mut restored = Vfs::new();
+        restored.mkdir("/storage");
+        restored.create_file("/storage/keep.bin", b"keep", false);
+        let keep_id = restored.lookup("/storage/keep.bin").expect("seed");
+
+        let mut source = Vfs::new();
+        source.mkdir("/storage");
+        source.create_file("/storage/other.bin", b"other", false);
+        let mut metadata = alloc::vec![0u8; METADATA_SNAPSHOT_LIMIT];
+        let metadata_len = source.encode_metadata_snapshot(&mut metadata);
+
+        restored.decode_metadata_snapshot(&metadata[..metadata_len], metadata_len, true);
+        let keep_after = restored.lookup("/storage/keep.bin").expect("existing path must survive");
+        let other = restored.lookup("/storage/other.bin").expect("incoming path must survive");
+        assert_ne!(keep_after, other, "two paths must not share one inode");
+        assert_eq!(restored.inodes[&keep_after].data.as_slice(), b"keep");
+        // The incoming file has no payload yet, so it is honestly empty until
+        // the data snapshot supplies one.
+        assert_eq!(restored.inodes[&other].size, 0);
+        let _ = keep_id;
     }
 
     #[test]
