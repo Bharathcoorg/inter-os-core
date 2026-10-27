@@ -1184,7 +1184,7 @@ const IMPORT_BTN: Rect = Rect { x: 578, y: 748, w: 118, h: 48 };
 /// carries transient feedback when there is any.
 ///
 /// WHY one line and not two: the band between the search row (ends at 796) and
-/// the volume row (starts at 848) holds a single caption. A second line at
+/// the volume row (starts at 860) holds a single caption. A second line at
 /// y 828 ran into the volume controls, so feedback takes the caption's place
 /// while it is shown.
 ///
@@ -1210,11 +1210,13 @@ const TIMELINE_THUMB_CY: usize = 831;
 
 /// The rows a touch on the bar is read from.
 ///
-/// WHY they bracket the bar: the band starts above the bar's first row and
-/// ends below its last, and it stays clear of the caption's band above and
-/// the volume row below.
-const TIMELINE_TOUCH_Y0: usize = 824;
-const TIMELINE_TOUCH_Y1: usize = 844;
+/// WHY forty-four of them: the bar is drawn six rows tall and its thumb reaches
+/// nine, and a band of twenty-one rows (824..844) asked a person to hit a strip
+/// thinner than the floor the platform sets for any control you can move. The
+/// band now runs from below the caption's ink to the row above the volume
+/// controls, which is the whole space the bar owns.
+const TIMELINE_TOUCH_Y0: usize = 816;
+const TIMELINE_TOUCH_Y1: usize = 859;
 
 /// The search query's capacity, in bytes.
 const SEARCH_CAP: usize = 32;
@@ -1231,25 +1233,29 @@ const FEEDBACK_CAP: usize = music::FEEDBACK_MAX;
 /// nothing else in this region. The old renderer re-rasterised all 1440 rows to
 /// change 24 of them.
 const META_Y0: usize = 620;
-const META_Y1: usize = 848;
+const META_Y1: usize = 860;
 
 // -----------------------------------------------------------------------------
-// Volume row (y 848..896). Real telemetry only.
+// Volume row (y 860..908). Real telemetry only.
+//
+// WHY it starts at 860 and not 848: the seek bar's touch band needs the platform
+// minimum of forty-four rows and the bar sits at 828, so the band reaches to row
+// 859. At 848 the row below answered taps that belonged to the bar.
 // -----------------------------------------------------------------------------
-const VOLUME_Y0: usize = 848;
-const VOLUME_Y1: usize = 896;
+const VOLUME_Y0: usize = 860;
+const VOLUME_Y1: usize = 908;
 /// Step-down / step-up controls.
 ///
 /// Touch targets are at least 48px to comply with platform guidelines.
-const VOL_MINUS: Rect = Rect::new(24, 848, 56, 48);
-const VOL_PLUS: Rect = Rect::new(640, 848, 56, 48);
+const VOL_MINUS: Rect = Rect::new(24, 860, 56, 48);
+const VOL_PLUS: Rect = Rect::new(640, 860, 56, 48);
 const VOL_LABEL_X: usize = 96;
 const VOL_VALUE_X: usize = 190;
 /// Meter trough and fill, drawn only when a real level is known.
 const VOL_METER_X0: usize = 310;
 const VOL_METER_X1: usize = 624;
-const VOL_METER_Y0: usize = 866;
-const VOL_METER_Y1: usize = 878;
+const VOL_METER_Y0: usize = 878;
+const VOL_METER_Y1: usize = 890;
 
 const TRANSPORT_CY: usize = 970;
 const PREV_CX: usize = 190;
@@ -2445,7 +2451,7 @@ enum Dirty {
     None,
     /// Track title / artist / state / times moved: the y 620..840 band.
     Meta,
-    /// The volume meter moved: the y 848..892 band.
+    /// The volume meter moved: the VOLUME_Y0..VOLUME_Y1 band.
     Volume,
     /// Transport state moved: the metadata band (state label) AND the transport
     /// row. These are disjoint, so `repaint` walks two bands rather than
