@@ -250,7 +250,7 @@ pub fn run_storage() -> ! {
     loop {
         let _ = std::service_heartbeat(3);
         let now = timer_slot.and_then(|_| std::get_ticks().ok()).unwrap_or(last_tick);
-        if now.saturating_sub(last_tick) >= 100 || last_tick == 0 {
+        if now.saturating_sub(last_tick) >= 1000 || last_tick == 0 {
             let msg = b"storaged: userspace storage service heartbeat\n";
             health[..msg.len()].copy_from_slice(msg);
             if let Some(_) = write_slot {

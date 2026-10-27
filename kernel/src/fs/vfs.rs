@@ -1500,17 +1500,22 @@ pub fn read_file_for_task(
         }
 
         // Extend buffer if necessary
+        let mut data_changed = false;
         match &mut inode.data {
             InodeData::Dynamic(vec) => {
                 let end = offset.checked_add(buf.len()).ok_or(FsError::FileTooLarge)?;
                 // Artificial per-file limit removed while preserving capability and quota validation.
                 // Contract pin compatibility: if end > MAX_FILE_SIZE { return Err(FsError::FileTooLarge); }
-                if end > vec.len() {
-                    vec.resize(end, 0);
+                let is_idempotent = end <= vec.len() && &vec[offset..end] == buf;
+                if !is_idempotent {
+                    if end > vec.len() {
+                        vec.resize(end, 0);
+                    }
+                    vec[offset..offset + buf.len()].copy_from_slice(buf);
+                    inode.size = vec.len();
+                    inode.sha256_digest = Sha256::digest(vec);
+                    data_changed = true;
                 }
-                vec[offset..offset + buf.len()].copy_from_slice(buf);
-                inode.size = vec.len();
-                inode.sha256_digest = Sha256::digest(vec);
             }
             InodeData::Static(_) => return Err(FsError::ReadOnlyFileSystem),
         }
@@ -1520,21 +1525,23 @@ pub fn read_file_for_task(
         let handle = table.get_mut(fd.0 as usize).and_then(|h| h.as_mut()).ok_or(FsError::InvalidFd)?;
         handle.offset += buf.len();
 
-        // WHY the shared area's generation moves on a write and not only on a
-        // create: a file the platform already indexed has just changed, and an
-        // index that still describes the old bytes is a stale index.
-        if let Some(inode) = self.inodes.get(&inode_id) {
-            let path = inode.path.clone();
-            self.bump_storage_generation(&path);
+        if data_changed {
+            // WHY the shared area's generation moves on a write and not only on a
+            // create: a file the platform already indexed has just changed, and an
+            // index that still describes the old bytes is a stale index.
+            if let Some(inode) = self.inodes.get(&inode_id) {
+                let path = inode.path.clone();
+                self.bump_storage_generation(&path);
+            }
+
+            self.bump_data_generation();
+            self.bump_metadata_generation();
+
+            // Publish the mutation immediately. Closing an FD is not the commit
+            // point: a process may write and crash before close().
+            self.persist_data_snapshot()?;
+            self.persist_metadata_snapshot()?;
         }
-
-        self.bump_data_generation();
-        self.bump_metadata_generation();
-
-        // Publish the mutation immediately. Closing an FD is not the commit
-        // point: a process may write and crash before close().
-        self.persist_data_snapshot()?;
-        self.persist_metadata_snapshot()?;
         Ok(buf.len())
     }
 
@@ -3224,6 +3231,57 @@ mod tests {
         assert_eq!(vfs.metadata_generation.get(), gen_before_close_meta);
         assert_eq!(vfs.data_generation.get(), vfs.persisted_data_generation.get());
         assert_eq!(vfs.metadata_generation.get(), vfs.persisted_metadata_generation.get());
+    }
+
+    #[test]
+    fn vfs_idempotent_write_does_not_dirty_generations_or_persist() {
+        let mut vfs = Vfs::new();
+        let task_id = TaskId(888);
+
+        let initial_payload = b"idempotent test content";
+        let inode_id = vfs.create_file("/test_idempotent.txt", initial_payload, false);
+
+        // Synchronize persisted generations to simulate clean post-commit state
+        vfs.persisted_data_generation.set(vfs.data_generation.get());
+        vfs.persisted_metadata_generation.set(vfs.metadata_generation.get());
+
+        let clean_data_gen = vfs.data_generation.get();
+        let clean_meta_gen = vfs.metadata_generation.get();
+
+        let mut caps = CapabilityTable::new_for_task(task_id, 8);
+        caps.insert(crate::capability::Capability {
+            id: crate::capability::CapabilityId(8801),
+            cap_type: CapabilityType::FileSystemWrite,
+            rights: Rights::WRITE,
+            object_id: 0,
+        }).expect("insert cap");
+
+        let fd = vfs.allocate_fd(task_id, inode_id, Rights::WRITE).expect("alloc write fd");
+
+        // 1. Idempotent write: write identical payload at offset 0
+        let written = vfs.write(task_id, &caps, 0, fd, initial_payload).expect("write identical bytes");
+        assert_eq!(written, initial_payload.len());
+
+        // Generations must NOT change on idempotent writes
+        assert_eq!(vfs.data_generation.get(), clean_data_gen, "idempotent write must not bump data generation");
+        assert_eq!(vfs.metadata_generation.get(), clean_meta_gen, "idempotent write must not bump metadata generation");
+        assert_eq!(vfs.data_generation.get(), vfs.persisted_data_generation.get());
+        assert_eq!(vfs.metadata_generation.get(), vfs.persisted_metadata_generation.get());
+
+        // Reset handle offset to 0 for a mutating write
+        {
+            let handle = vfs.task_file_tables.get_mut(&task_id).unwrap()[fd.0 as usize].as_mut().unwrap();
+            handle.offset = 0;
+        }
+
+        // 2. Mutating write: write changed payload
+        let mutated_payload = b"mutated content bytes!!";
+        let written2 = vfs.write(task_id, &caps, 0, fd, mutated_payload).expect("write mutated bytes");
+        assert_eq!(written2, mutated_payload.len());
+
+        // Generations MUST advance on mutating writes
+        assert!(vfs.data_generation.get() > clean_data_gen, "mutating write must advance data generation");
+        assert!(vfs.metadata_generation.get() > clean_meta_gen, "mutating write must advance metadata generation");
     }
 }
 
