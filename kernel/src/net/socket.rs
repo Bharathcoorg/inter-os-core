@@ -399,7 +399,7 @@ impl TcpConnectionTable {
     pub fn accept_rx_segment(&mut self, id: u32, seq: u32, payload: &[u8], fin: bool) -> Result<usize, NetError> {
         let conn = self.get_mut(id).ok_or(NetError::NoPacketAvailable)?;
         if conn.state != crate::net::TcpState::Established { return Err(NetError::NoPacketAvailable); }
-        let end = seq.wrapping_add(payload.len() as u32);
+        let end = seq.wrapping_add(payload.len() as u32).wrapping_add(if fin { 1 } else { 0 });
         if !crate::net::tcp::seq_gt(end, conn.recv_seq) {
             return Ok(0);
         }
@@ -412,7 +412,11 @@ impl TcpConnectionTable {
         if seq.wrapping_add(offset as u32) != conn.recv_seq {
             return Err(NetError::NoPacketAvailable);
         }
-        let new_payload = &payload[offset..];
+        let new_payload = if offset >= payload.len() {
+            &[]
+        } else {
+            &payload[offset..]
+        };
         let room = TCP_RX_BUF_SIZE.saturating_sub(conn.rx_len);
         let n = new_payload.len().min(room);
         if n != new_payload.len() && !new_payload.is_empty() { return Err(NetError::QueueFull); }
@@ -1244,5 +1248,96 @@ mod tcp_reliability_tests {
         let n = res_a.unwrap();
         assert_eq!(&out[..n], b"PAYLOAD_A");
     }
-}
 
+    #[test]
+    fn accept_rx_segment_fin_and_overlap_handling() {
+        let mut table = TcpConnectionTable::new();
+        let id = table
+            .open(7, 42000, Ipv4Address::LOCALHOST, 42001, 100)
+            .expect("connection should open");
+
+        let initial_recv_seq = 5000u32;
+        {
+            let conn = table.get_mut(id).expect("connection exists");
+            conn.state = crate::net::TcpState::Established;
+            conn.recv_seq = initial_recv_seq;
+        }
+
+        // (d) overlapping segment with leading trim -> correct byte count
+        // Send segment at seq 4995 with 10 bytes (bytes 4995..5005).
+        // Bytes 4995..5000 should be trimmed; only 5 bytes (5000..5005) accepted.
+        let payload = [10, 11, 12, 13, 14, 15, 16, 17, 18, 19];
+        let n = table
+            .accept_rx_segment(id, 4995, &payload, false)
+            .expect("overlapping segment should succeed");
+        assert_eq!(n, 5, "leading overlap should be trimmed to 5 bytes");
+        {
+            let conn = table.get(id).expect("connection exists");
+            assert_eq!(conn.recv_seq, 5005);
+            assert_eq!(conn.rx_len, 5);
+            assert_eq!(&conn.rx[..5], &[15, 16, 17, 18, 19]);
+            assert_eq!(conn.state, crate::net::TcpState::Established);
+        }
+
+        // (c) fully duplicate segment -> Ok(0), state unchanged
+        // Retransmission of seq 4995 with 10 bytes (now entirely <= recv_seq 5005)
+        let dup_n = table
+            .accept_rx_segment(id, 4995, &payload, false)
+            .expect("duplicate segment should return Ok(0)");
+        assert_eq!(dup_n, 0, "duplicate segment must yield 0 bytes");
+        {
+            let conn = table.get(id).expect("connection exists");
+            assert_eq!(conn.recv_seq, 5005, "recv_seq must not advance on duplicate");
+            assert_eq!(conn.rx_len, 5, "rx_len must not change on duplicate");
+            assert_eq!(conn.state, crate::net::TcpState::Established, "state must remain Established");
+        }
+
+        // Fully duplicate empty segment without FIN -> Ok(0), state unchanged
+        let dup_empty = table
+            .accept_rx_segment(id, 5005, &[], false)
+            .expect("empty duplicate segment should return Ok(0)");
+        assert_eq!(dup_empty, 0);
+        {
+            let conn = table.get(id).expect("connection exists");
+            assert_eq!(conn.recv_seq, 5005);
+            assert_eq!(conn.state, crate::net::TcpState::Established);
+        }
+
+        // (b) FIN appended to in-order payload -> CloseWait
+        // Send 4 bytes at seq 5005 with fin=true.
+        let in_order_payload = [20, 21, 22, 23];
+        let n_b = table
+            .accept_rx_segment(id, 5005, &in_order_payload, true)
+            .expect("payload + FIN should succeed");
+        assert_eq!(n_b, 4);
+        {
+            let conn = table.get(id).expect("connection exists");
+            // recv_seq should advance by 4 (payload) + 1 (FIN) = 5010
+            assert_eq!(conn.recv_seq, 5010);
+            assert_eq!(conn.rx_len, 9);
+            assert_eq!(&conn.rx[5..9], &[20, 21, 22, 23]);
+            assert_eq!(conn.state, crate::net::TcpState::CloseWait, "state must transition to CloseWait");
+        }
+
+        // (a) zero-length FIN at seq == recv_seq -> CloseWait and recv_seq + 1
+        let id2 = table
+            .open(7, 43000, Ipv4Address::LOCALHOST, 43001, 100)
+            .expect("connection 2 should open");
+        let initial_recv_seq_2 = 8000u32;
+        {
+            let conn = table.get_mut(id2).expect("connection exists");
+            conn.state = crate::net::TcpState::Established;
+            conn.recv_seq = initial_recv_seq_2;
+        }
+
+        let n_a = table
+            .accept_rx_segment(id2, initial_recv_seq_2, &[], true)
+            .expect("zero-length FIN should succeed");
+        assert_eq!(n_a, 0);
+        {
+            let conn = table.get(id2).expect("connection exists");
+            assert_eq!(conn.recv_seq, initial_recv_seq_2.wrapping_add(1), "recv_seq must advance by 1 for zero-length FIN");
+            assert_eq!(conn.state, crate::net::TcpState::CloseWait, "state must transition to CloseWait on zero-length FIN");
+        }
+    }
+}
