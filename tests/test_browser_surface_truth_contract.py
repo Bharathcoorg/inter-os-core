@@ -226,3 +226,39 @@ def test_the_top_band_is_the_platforms_and_its_clock_is_read_once_a_frame():
     assert "rtc::Reading" not in band, (
         "the per-pixel renderer reads the clock, so one frame costs a syscall per pixel"
     )
+
+
+def test_a_tap_answers_the_control_the_painter_drew_under_it():
+    """Two screens addressed their own geometry by literal, and the two
+    readings of the same pixels disagreed.
+
+    WHY this matters: the overflow menu painted its rows from y=130 and counted
+    them from the card's top edge at y=116, so the fourteen pixels at the top of
+    every row belonged to the item above -- "New Tab" opened Bookmarks and "Save
+    Page" reloaded the page. The tab switcher asked only `x >= 630`, which is the
+    whole right edge of a 672-pixel card, so a tap on the padding beside a title
+    closed the tab instead of switching to it, while the glyph itself was only
+    seventeen pixels across.
+
+    Both now read the same constant the painter does, and the close target is
+    drawn as the box that answers the tap.
+    """
+    source = read("apps/browser/src/main.rs")
+    code = _code_only(source)
+
+    # Menu: one origin and one row height, shared by the painter and the tap.
+    assert "const MENU_ROW_Y0: usize = 130;" in code
+    assert "const MENU_ROW_H: usize = 44;" in code
+    assert "MENU_ROW_Y0 + idx * MENU_ROW_H" in code
+    assert "y.saturating_sub(MENU_ROW_Y0)) / MENU_ROW_H" in code
+    assert "130 + idx * 44" not in code, "the menu painter went back to its own literal"
+    assert "(y - 116) / 44" not in code, "the menu tap counter went back to the card's top edge"
+
+    # Tab switcher: the painted target and the hit box are the same rectangle.
+    assert "fn tab_close_rect(card_y: usize) -> Rect" in code
+    assert "let close_rect = tab_close_rect(card_y);" in code
+    assert "tab_close_rect(card_y).contains(x, y)" in code
+    assert "if x >= 630 {" not in code, (
+        "the tab card closes a tab for a tap anywhere along its right edge"
+    )
+    assert "MIN_TOUCH_TARGET," in code, "the close target is not sized to the platform's floor"

@@ -768,6 +768,15 @@ const KEBAB_BTN: Rect = Rect::new(596, 60, 44, 44);
 const CLOSE_BTN: Rect = Rect::new(650, 60, 44, 44);
 const BTN_R: usize = 12;
 
+/// The kebab menu's rows: where the first row's ink sits and how tall a row is.
+///
+/// WHY one pair of constants: the painter counted its rows from y=130 and the hit
+/// test counted the same rows from y=116, so the top fourteen pixels of every row
+/// belonged to the item above it -- a tap on "New Tab" opened Bookmarks, and a tap
+/// on "Save Page" reloaded the page.
+const MENU_ROW_Y0: usize = 130;
+const MENU_ROW_H: usize = 44;
+
 /// Start Page Favorites / Quick Access Geometry (4 columns)
 #[allow(dead_code)]
 const QA_ROW_Y: usize = 282;
@@ -4962,6 +4971,25 @@ fn close_glyph(x: usize, y: usize, cx: usize, cy: usize) -> bool {
     (dx + dy).abs() <= 1 || (dx - dy).abs() <= 1
 }
 
+/// The close target inside the tab card at `card_y`.
+///
+/// WHY a named box instead of `x >= 630`: the glyph is seventeen pixels across
+/// and the hit test took everything from 630 to the card's right edge and the
+/// full height of the card, so a tap on empty padding beside the title closed
+/// the tab rather than switching to it. This is the floor the platform sets for
+/// a touch target, and the paint fills the same box the tap reads.
+const TAB_CLOSE_CENTER_X: usize = 646;
+const TAB_CLOSE_CENTER_Y: usize = 32;
+
+fn tab_close_rect(card_y: usize) -> Rect {
+    Rect::new(
+        TAB_CLOSE_CENTER_X - MIN_TOUCH_TARGET / 2,
+        card_y + TAB_CLOSE_CENTER_Y - MIN_TOUCH_TARGET / 2,
+        MIN_TOUCH_TARGET,
+        MIN_TOUCH_TARGET,
+    )
+}
+
 /// Star Glyph for Bookmarks
 fn star_glyph(x: usize, y: usize, cx: usize, cy: usize, filled: bool) -> bool {
     let dx = x as isize - cx as isize;
@@ -7091,13 +7119,15 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
                             return Some(px);
                         }
 
-                        // Close button 'X' (x 630..662, y card_y+16..card_y+48)
-                        let close_cx = 646;
-                        let close_cy = card_y + 32;
-                        if close_glyph(x, y, close_cx, close_cy) {
-                            return Some(THEME.on_surface_variant);
+                        // Close button: the target is painted, so the box a
+                        // person can see is the box that answers the tap.
+                        let close_rect = tab_close_rect(card_y);
+                        if let Some(cc) = draw_rounded_rect(x, y, close_rect, R_SMALL, THEME.surface_container, None, 0) {
+                            if close_glyph(x, y, close_rect.x + close_rect.w / 2, close_rect.y + close_rect.h / 2) {
+                                return Some(THEME.on_surface_variant);
+                            }
+                            return Some(cc);
                         }
-
                         return Some(c);
                     }
                 } else {
@@ -7808,7 +7838,7 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
                     b"Close Menu",
                 ];
                 for (idx, item) in items.iter().enumerate() {
-                    let item_y = 130 + idx * 44;
+                    let item_y = MENU_ROW_Y0 + idx * MENU_ROW_H;
                     if let Some(px) = text_px(x, y, 464, item_y, 1, item, THEME.on_surface, c, false) {
                         return Some(px);
                     }
@@ -8547,12 +8577,12 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
     match app.overlay {
         SheetOverlay::Menu => {
             if x >= 440 && x <= 696 && y >= 116 && y <= 532 {
-                // WHY the row is the item's own height: the menu's items
-                // are forty-four pixels apart, and a hit test that used
-                // forty-eight put the top of an item in the row above it,
-                // so "Save Page" could be reached by tapping "Reload
-                // Page".
-                let row = (y - 116) / 44;
+                // WHY the row is counted from the painted row origin: the menu's
+                // items are MENU_ROW_H apart and the first is drawn at MENU_ROW_Y0,
+                // and this used to divide by the same height from the card's top
+                // edge at 116. The two origins are fourteen pixels apart, so every
+                // row answered the item above the one under the finger.
+                let row = (y.saturating_sub(MENU_ROW_Y0)) / MENU_ROW_H;
                 let _ = std::audio_haptic_click();
                 match row {
                     0 => {
@@ -8616,8 +8646,8 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
                 let card_y = 180 + i * (card_h + card_gap);
                 if y >= card_y && y < card_y + card_h && x >= 24 && x <= W - 24 {
                     let _ = std::audio_haptic_click();
-                    // Close button tapped? (x 630..670)
-                    if x >= 630 {
+                    // Close target tapped?
+                    if tab_close_rect(card_y).contains(x, y) {
                         app.tabs.close_tab(i);
                         let cur = app.tabs.active_tab().url();
                         let n = cur.len().min(app.current_url.len());
