@@ -2087,6 +2087,24 @@ fn fit(body: &[u8], max_px: usize, cap_px: u32) -> usize {
     len
 }
 
+/// The number of bytes of `body` that fit in `max_px`, copied into `out` and
+/// marked when the run was cut.
+///
+/// WHY the mark belongs here and not in `fit`: `fit` is a measurement and has
+/// nowhere to put the mark, so the mark is written while the bytes are being
+/// copied, and the two can never disagree about where the run ends.
+fn fit_marked(body: &[u8], max_px: usize, cap_px: u32, out: &mut [u8]) -> usize {
+    let len = fit(body, max_px, cap_px);
+    // WHY the clamp: a destination too small for the run must not be written
+    // past, and the returned length is what the caller slices with.
+    let len = len.min(out.len());
+    out[..len].copy_from_slice(&body[..len]);
+    if len < body.len() && len >= 3 {
+        out[len - 3..len].copy_from_slice(b"...");
+    }
+    len
+}
+
 // -----------------------------------------------------------------------------
 // Painting
 // -----------------------------------------------------------------------------
@@ -2440,14 +2458,15 @@ fn body_cards_pixel(x: usize, y: usize, app: &AgentManagerApp) -> Option<u32> {
         let title_top = card_y + CARD_PAD_TOP;
         if content_y < card_y + LINES_TOP {
             let title = &card.title[..card.title_len as usize];
-            let len = fit(title, CONTENT_W - 2 * CARD_PAD_X, CAP_SECTION);
+            let mut shown = [0u8; 256];
+            let len = fit_marked(title, CONTENT_W - 2 * CARD_PAD_X, CAP_SECTION, &mut shown);
             if let Some(c) = text(
                 x,
                 y,
                 GUTTER + CARD_PAD_X,
                 BODY_TOP + title_top - offset,
                 CAP_SECTION,
-                &title[..len],
+                &shown[..len],
                 card.title_tone.colour(),
                 THEME.surface_container,
                 // WHY the heading is bold: the heading is the name of the
@@ -2473,7 +2492,8 @@ fn body_cards_pixel(x: usize, y: usize, app: &AgentManagerApp) -> Option<u32> {
                     let (start, end) = line.row_range(row);
                     if start < end {
                         let body = &line.value[start..end];
-                        let len = fit(body, WIDE_W, CAP_CAPTION);
+                        let mut shown = [0u8; 256];
+                        let len = fit_marked(body, WIDE_W, CAP_CAPTION, &mut shown);
                         // WHY the row's own y and not the line's: a wide
                         // line that wraps has more than one physical row, and
                         // every one of them is a row of its own.
@@ -2483,7 +2503,7 @@ fn body_cards_pixel(x: usize, y: usize, app: &AgentManagerApp) -> Option<u32> {
                             GUTTER + CARD_PAD_X,
                             screen_y + row * ROW_H,
                             CAP_CAPTION,
-                            &body[..len],
+                            &shown[..len],
                             line.tone.colour(),
                             THEME.surface_container,
                             false,
@@ -2493,14 +2513,15 @@ fn body_cards_pixel(x: usize, y: usize, app: &AgentManagerApp) -> Option<u32> {
                     }
                 } else {
                     let label = &line.label[..line.label_len as usize];
-                    let len = fit(label, LABEL_W - LABEL_GAP, CAP_CAPTION);
+                    let mut shown = [0u8; 256];
+                    let len = fit_marked(label, LABEL_W - LABEL_GAP, CAP_CAPTION, &mut shown);
                     if let Some(c) = text(
                         x,
                         y,
                         GUTTER + CARD_PAD_X,
                         screen_y + (ROW_H - LINE_CAPTION) / 2,
                         CAP_CAPTION,
-                        &label[..len],
+                        &shown[..len],
                         THEME.on_surface_variant,
                         THEME.surface_container,
                         false,
@@ -2524,18 +2545,13 @@ fn body_cards_pixel(x: usize, y: usize, app: &AgentManagerApp) -> Option<u32> {
                             colour = c;
                         }
                     } else {
-                        let len = fit(value, VALUE_W, CAP_BODY);
-                        // WHY the mark: a value cut in the middle of a word
-                        // reads as a word, and the reader is left with a
-                        // different name for the thing than the platform gave.
                         let mut shown = [0u8; 256];
-                        shown[..len].copy_from_slice(&value[..len]);
-                        let len = if len < value.len() && len >= 3 {
-                            shown[len - 3..len].copy_from_slice(b"...");
-                            len
-                        } else {
-                            len
-                        };
+                        // WHY the mark is not written here: a value cut in
+                        // the middle of a word reads as a word, and the
+                        // reader is left with a different name for the thing
+                        // than the platform gave, so the cut and the mark are
+                        // decided in one place.
+                        let len = fit_marked(value, VALUE_W, CAP_BODY, &mut shown);
                         // WHY the value is right-aligned: a value that starts
                         // at a fixed column leaves a ragged edge, and a list of
                         // ragged values reads as a table of unrelated things.
@@ -2601,14 +2617,20 @@ fn bubble_pixel(
         for row in 0..line.rows() {
             let (start, end) = line.row_range(row);
             let body = &line.value[start..end];
-            let len = fit(body, width.saturating_sub(2 * BUBBLE_PAD), CAP_CAPTION);
+            let mut shown = [0u8; 256];
+            let len = fit_marked(
+                body,
+                width.saturating_sub(2 * BUBBLE_PAD),
+                CAP_CAPTION,
+                &mut shown,
+            );
             if let Some(c) = text(
                 x,
                 y,
                 left + BUBBLE_PAD,
                 cursor,
                 CAP_CAPTION,
-                &body[..len],
+                &shown[..len],
                 ink,
                 fill,
                 false,
@@ -2693,14 +2715,15 @@ fn composer_pixel(x: usize, y: usize, app: &AgentManagerApp) -> u32 {
         } else {
             (prompt, THEME.on_surface)
         };
-        let len = fit(body, field.w.saturating_sub(28), CAP_BODY);
+        let mut shown = [0u8; 256];
+        let len = fit_marked(body, field.w.saturating_sub(28), CAP_BODY, &mut shown);
         if let Some(c) = text(
             x,
             y,
             field.x + 14,
             field_y + (COMPOSER_FIELD_H - LINE_BODY) / 2,
             CAP_BODY,
-            &body[..len],
+            &shown[..len],
             ink,
             THEME.surface_container,
             false,
