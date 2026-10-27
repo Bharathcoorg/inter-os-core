@@ -245,6 +245,10 @@ pub struct Vfs {
     /// back, release it with the path that owns it -- and that lifecycle has
     /// to be observable without a block device.
     spill: SpillStore,
+    pub data_generation: core::cell::Cell<u64>,
+    pub persisted_data_generation: core::cell::Cell<u64>,
+    pub metadata_generation: core::cell::Cell<u64>,
+    pub persisted_metadata_generation: core::cell::Cell<u64>,
 }
 
 /// The refusal a filesystem operation gives when the caller holds no usable
@@ -279,11 +283,43 @@ impl Vfs {
             persist_unavailable: core::cell::Cell::new(false),
             storage_generation: 0,
             spill: SpillStore::device(),
+            data_generation: core::cell::Cell::new(0),
+            persisted_data_generation: core::cell::Cell::new(0),
+            metadata_generation: core::cell::Cell::new(0),
+            persisted_metadata_generation: core::cell::Cell::new(0),
         };
 
         // Create root directory "/"
         vfs.mkdir("/");
         vfs
+    }
+
+    /// Creates a new, completely empty VFS instance without default directories.
+    pub fn empty() -> Self {
+        Self {
+            inodes: BTreeMap::new(),
+            path_to_inode: BTreeMap::new(),
+            hard_links: BTreeMap::new(),
+            next_inode: 1,
+            task_file_tables: BTreeMap::new(),
+            persist_unavailable: core::cell::Cell::new(false),
+            storage_generation: 0,
+            spill: SpillStore::device(),
+            data_generation: core::cell::Cell::new(0),
+            persisted_data_generation: core::cell::Cell::new(0),
+            metadata_generation: core::cell::Cell::new(0),
+            persisted_metadata_generation: core::cell::Cell::new(0),
+        }
+    }
+
+    #[inline]
+    fn bump_data_generation(&self) {
+        self.data_generation.set(self.data_generation.get().wrapping_add(1));
+    }
+
+    #[inline]
+    fn bump_metadata_generation(&self) {
+        self.metadata_generation.set(self.metadata_generation.get().wrapping_add(1));
     }
 
     /// Builds a filesystem whose spills land in the given store.
@@ -302,6 +338,10 @@ impl Vfs {
             persist_unavailable: core::cell::Cell::new(false),
             storage_generation: 0,
             spill,
+            data_generation: core::cell::Cell::new(0),
+            persisted_data_generation: core::cell::Cell::new(0),
+            metadata_generation: core::cell::Cell::new(0),
+            persisted_metadata_generation: core::cell::Cell::new(0),
         };
         vfs.mkdir("/");
         vfs
@@ -352,6 +392,7 @@ impl Vfs {
                 }
             }
         }
+        self.bump_metadata_generation();
         inode_id
     }
 
@@ -367,6 +408,7 @@ impl Vfs {
         self.path_to_inode.remove(&norm);
         self.inodes.remove(&inode_id);
         self.rebuild_children();
+        self.bump_metadata_generation();
         let _ = self.persist_metadata_snapshot();
         Ok(())
     }
@@ -382,7 +424,9 @@ impl Vfs {
         if self.inodes.get(&id).map(|i| i.file_type == FileType::Directory && !i.children.is_empty()).unwrap_or(false) { return Err(FsError::DirectoryNotEmpty); }
         self.path_to_inode.remove(&old);
         if let Some(inode) = self.inodes.get_mut(&id) { inode.path=new.clone(); inode.name=path_filename(&new); }
-        self.path_to_inode.insert(new,id); self.rebuild_children(); Ok(())
+        self.path_to_inode.insert(new,id); self.rebuild_children();
+        self.bump_metadata_generation();
+        Ok(())
     }
 
     /// Truncates a writable regular file and publishes the mutation immediately.
@@ -403,6 +447,8 @@ impl Vfs {
         if was_spilled && length <= SNAPSHOT_FILE_LIMIT {
             (self.spill.remove)(&spill_path_for(&path));
         }
+        self.bump_data_generation();
+        self.bump_metadata_generation();
         self.persist_data_snapshot()?; self.persist_metadata_snapshot()?; Ok(())
     }
 
@@ -543,6 +589,8 @@ impl Vfs {
             if was_spilled && content_size <= SNAPSHOT_FILE_LIMIT {
                 (self.spill.remove)(&spill_path_for(&norm_path));
             }
+            self.bump_data_generation();
+            self.bump_metadata_generation();
             return existing_id;
         }
 
@@ -575,6 +623,8 @@ impl Vfs {
                 parent_inode.children.push(inode_id);
             }
         }
+        self.bump_data_generation();
+        self.bump_metadata_generation();
         inode_id
     }
 
@@ -594,6 +644,7 @@ impl Vfs {
                 inode.sha256_digest = digest;
                 inode.file_type = FileType::ReadOnlySystem;
             }
+            self.bump_metadata_generation();
             return existing_id;
         }
 
@@ -626,6 +677,7 @@ impl Vfs {
                 parent_inode.children.push(inode_id);
             }
         }
+        self.bump_metadata_generation();
         inode_id
     }
 
@@ -665,6 +717,7 @@ impl Vfs {
                 parent_inode.children.push(inode_id);
             }
         }
+        self.bump_metadata_generation();
         inode_id
     }
 
@@ -863,6 +916,7 @@ impl Vfs {
             inode.nlink = inode.nlink.saturating_add(1);
             inode.ctime = crate::interrupts::get_system_ticks();
         }
+        self.bump_metadata_generation();
 
         if self.persist_metadata_snapshot().is_err() {
             self.hard_links.remove(&new);
@@ -884,6 +938,7 @@ impl Vfs {
                 inode.nlink = inode.nlink.saturating_sub(1);
                 inode.ctime = crate::interrupts::get_system_ticks();
             }
+            self.bump_metadata_generation();
             if self.persist_metadata_snapshot().is_err() {
                 self.hard_links.insert(norm, inode_id);
                 self.inodes.insert(inode_id, previous);
@@ -908,6 +963,9 @@ impl Vfs {
         // A payload that no path names must not outlive the path: leaving it
         // would hold disk blocks no file can reach.
         (self.spill.remove)(&spill_path_for(&norm));
+
+        self.bump_data_generation();
+        self.bump_metadata_generation();
 
         if self.persist_metadata_snapshot().is_err() {
             self.path_to_inode.insert(norm, inode_id);
@@ -947,6 +1005,7 @@ impl Vfs {
         let inode = self.inodes.get_mut(&id).ok_or(FsError::FileNotFound)?;
         inode.mode = mode & 0o7777;
         inode.ctime = crate::interrupts::get_system_ticks();
+        self.bump_metadata_generation();
         self.persist_metadata_snapshot().map_err(|_| FsError::IntegrityViolation)
     }
 
@@ -961,6 +1020,7 @@ impl Vfs {
         inode.uid = uid;
         inode.gid = gid;
         inode.ctime = crate::interrupts::get_system_ticks();
+        self.bump_metadata_generation();
         self.persist_metadata_snapshot().map_err(|_| FsError::IntegrityViolation)
     }
 
@@ -1053,6 +1113,8 @@ impl Vfs {
             }
         }
 
+        self.bump_data_generation();
+        self.bump_metadata_generation();
         self.persist_metadata_snapshot().map_err(|_| FsError::IntegrityViolation)?;
         let _ = self.persist_data_snapshot();
         Ok(())
@@ -1466,6 +1528,9 @@ pub fn read_file_for_task(
             self.bump_storage_generation(&path);
         }
 
+        self.bump_data_generation();
+        self.bump_metadata_generation();
+
         // Publish the mutation immediately. Closing an FD is not the commit
         // point: a process may write and crash before close().
         self.persist_data_snapshot()?;
@@ -1486,6 +1551,9 @@ pub fn read_file_for_task(
     }
 
     fn persist_data_snapshot_attempt(&self) -> Result<(), FsError> {
+        if self.data_generation.get() == self.persisted_data_generation.get() {
+            return Ok(());
+        }
         if crate::drivers::ATA_PRIMARY.lock().is_none() {
             return Ok(());
         }
@@ -1501,7 +1569,9 @@ pub fn read_file_for_task(
         crate::storage::persistent::commit_kind(&sealed,4).map(|_|()).map_err(|_|FsError::IntegrityViolation)?;
         // The block-backed InterFS copy is the durable filesystem source of truth.
         crate::storage::filesystem::store_data_file("/data/.vfs.snapshot", &sealed)
-            .map_err(|_| FsError::IntegrityViolation)
+            .map_err(|_| FsError::IntegrityViolation)?;
+        self.persisted_data_generation.set(self.data_generation.get());
+        Ok(())
     }
 
     /// Writes every oversized payload to the block store and returns the
@@ -1651,6 +1721,9 @@ pub fn read_file_for_task(
     }
 
     fn persist_metadata_snapshot_attempt(&self) -> Result<(), FsError> {
+        if self.metadata_generation.get() == self.persisted_metadata_generation.get() {
+            return Ok(());
+        }
         if crate::drivers::ATA_PRIMARY.lock().is_none() {
             return Ok(());
         }
@@ -1659,6 +1732,7 @@ pub fn read_file_for_task(
         let mut sealed = Vec::new();
         crate::storage::encrypted::seal(&buf[..pos], &mut sealed).map_err(|_| FsError::IntegrityViolation)?;
         crate::storage::filesystem::store_data_file("/data/.vfs.metadata", &sealed).map_err(|_| FsError::IntegrityViolation)?;
+        self.persisted_metadata_generation.set(self.metadata_generation.get());
         Ok(())
     }
 
@@ -2143,6 +2217,10 @@ pub static VFS: Mutex<Vfs> = Mutex::new(Vfs {
     persist_unavailable: core::cell::Cell::new(false),
     storage_generation: 0,
     spill: SpillStore::device(),
+    data_generation: core::cell::Cell::new(0),
+    persisted_data_generation: core::cell::Cell::new(0),
+    metadata_generation: core::cell::Cell::new(0),
+    persisted_metadata_generation: core::cell::Cell::new(0),
 });
 
 fn generate_ppm_p6(r_base: u8, g_base: u8, b_base: u8, r_step: i8, g_step: i8, b_step: i8) -> alloc::vec::Vec<u8> {
@@ -2277,6 +2355,8 @@ pub fn init() {
     vfs.restore_data_snapshot();
     vfs.rebuild_children();
     let _ = vfs.persist_metadata_snapshot();
+    vfs.persisted_data_generation.set(vfs.data_generation.get());
+    vfs.persisted_metadata_generation.set(vfs.metadata_generation.get());
     *VFS.lock() = vfs;
 }
 
@@ -3093,6 +3173,57 @@ mod tests {
             }
         }
         assert_eq!(restored_count, encoded, "the header count must match restored entries");
+    }
+
+    #[test]
+    fn vfs_empty_and_new_initialize_generation_tracking() {
+        let empty_vfs = Vfs::empty();
+        assert_eq!(empty_vfs.data_generation.get(), 0);
+        assert_eq!(empty_vfs.persisted_data_generation.get(), 0);
+        assert_eq!(empty_vfs.metadata_generation.get(), 0);
+        assert_eq!(empty_vfs.persisted_metadata_generation.get(), 0);
+
+        let new_vfs = Vfs::new();
+        // Vfs::new creates "/" so metadata_generation is bumped
+        assert!(new_vfs.metadata_generation.get() > 0);
+        assert_eq!(new_vfs.data_generation.get(), 0);
+        assert_eq!(new_vfs.persisted_data_generation.get(), 0);
+        assert_eq!(new_vfs.persisted_metadata_generation.get(), 0);
+    }
+
+    #[test]
+    fn vfs_generation_dirty_tracking_and_close_no_op() {
+        let mut vfs = Vfs::new();
+        let task_id = TaskId(777);
+
+        // Synchronize initial generations
+        vfs.persisted_data_generation.set(vfs.data_generation.get());
+        vfs.persisted_metadata_generation.set(vfs.metadata_generation.get());
+
+        // Create file bumps both data and metadata generations
+        let cur_data_gen = vfs.data_generation.get();
+        let cur_meta_gen = vfs.metadata_generation.get();
+        let inode_id = vfs.create_file("/test_gen.txt", b"generation test", false);
+        assert!(vfs.data_generation.get() > cur_data_gen);
+        assert!(vfs.metadata_generation.get() > cur_meta_gen);
+
+        // Simulate successful persist
+        vfs.persisted_data_generation.set(vfs.data_generation.get());
+        vfs.persisted_metadata_generation.set(vfs.metadata_generation.get());
+
+        // Allocate read-only handle
+        let fd = vfs.allocate_fd(task_id, inode_id, Rights::READ).expect("alloc fd");
+
+        let gen_before_close_data = vfs.data_generation.get();
+        let gen_before_close_meta = vfs.metadata_generation.get();
+
+        // Close file: since neither data nor metadata is dirty, persist attempts are instant no-ops
+        vfs.close(task_id, fd).expect("close fd");
+
+        assert_eq!(vfs.data_generation.get(), gen_before_close_data);
+        assert_eq!(vfs.metadata_generation.get(), gen_before_close_meta);
+        assert_eq!(vfs.data_generation.get(), vfs.persisted_data_generation.get());
+        assert_eq!(vfs.metadata_generation.get(), vfs.persisted_metadata_generation.get());
     }
 }
 
