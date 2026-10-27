@@ -6331,22 +6331,6 @@ fn handle_tap(
             let _ = std::surface_destroy(surface);
         }
         std::exit_with_code(0);
-    } else if (120..=160).contains(&input.y) && ((200..=260).contains(&input.x) || (330..=390).contains(&input.x)) {
-        if (200..=260).contains(&input.x) {
-            settings.sensors_open = false;
-            settings.screen_lock_open = false;
-            settings.wallpaper_open = false;
-            settings.current_section = Some(Section::Power);
-        } else {
-            settings.screen_lock_open = false;
-            settings.wallpaper_open = false;
-            settings.sensors_open = true;
-            settings.refresh_thermals_and_sensors();
-        }
-        settings.reset_scroll();
-        std::log("[SETTINGS APP] System Space category opened; tab switched.",
-        )
-        .ok();
     } else if settings.sensors_open {
         // Any tap on Sensors surface refreshes live sensor telemetry
         settings.refresh_thermals_and_sensors();
