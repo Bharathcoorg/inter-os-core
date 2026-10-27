@@ -29,6 +29,7 @@ import io
 import struct
 import zlib
 import ipaddress
+import ssl
 
 PORT = int(os.environ.get("STUDIO_PORT", 4300))
 SERIAL_TCP_PORT = int(os.environ.get("SERIAL_PORT", 4301))
@@ -3078,6 +3079,25 @@ class _SsrfGuardedRedirectHandler(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
+def _proxy_ssl_context():
+    """Returns the CA set the browser proxy verifies origins against.
+
+    WHY certifi is preferred over the default context: on Windows the default
+    context loads the system trust store, which on this host rejects the
+    cross-signed Let's Encrypt chain Wikimedia serves as expired, while the
+    current certifi bundle verifies the same chain. Verification stays on in
+    both paths; only the CA set changes.
+    """
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        return ssl.create_default_context()
+
+
+_PROXY_SSL_CONTEXT = _proxy_ssl_context()
+
+
 class _ProxyRedirectPassthrough(_SsrfGuardedRedirectHandler):
     """Validates a redirect target, then returns it instead of following it.
 
@@ -3916,7 +3936,10 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
         data = body if method not in ('GET', 'HEAD', 'OPTIONS') else None
         request = urllib.request.Request(
             target_url, data=data, headers=request_headers, method=method)
-        opener = urllib.request.build_opener(_ProxyRedirectPassthrough)
+        opener = urllib.request.build_opener(
+            _ProxyRedirectPassthrough,
+            urllib.request.HTTPSHandler(context=_PROXY_SSL_CONTEXT),
+        )
         try:
             response = opener.open(request, timeout=6)
         except urllib.error.HTTPError as error:
