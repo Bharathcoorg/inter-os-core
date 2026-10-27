@@ -7,8 +7,8 @@
 //! says when the answer is no.
 //!
 //! It also carries the reader-document marker that records an `<img>`
-//! element and the same-origin URL resolution the browser uses before it
-//! will fetch an image.
+//! element and the URL resolution the browser uses before it will fetch
+//! an image.
 //!
 //! The policy is deliberately narrow:
 //! - bodies above [`MAX_IMAGE_BODY_BYTES`] are refused, never truncated
@@ -18,36 +18,52 @@
 //!   by `std::image` and is named as unsupported here);
 //! - a declared width or height above [`MAX_IMAGE_DIMENSION`] is refused
 //!   before a byte of RGBA is allocated;
-//! - images from another origin are not fetched at all.
+//! - an image is fetched from whatever http(s) address the page names,
+//!   including another host, because a page's pictures are the page's
+//!   content. `data:` addresses are not decoded and say so.
 
 /// The largest image body the browser will accept.
 ///
 /// WHY this cap: an inline picture is decoded into a static arena and
-/// drawn in a scrolling column, so a body larger than a hundred
-/// kilobytes is already far beyond what a phone reader can show well.
-/// The response is refused rather than cut, because half a PNG is not a
-/// PNG.
-pub const MAX_IMAGE_BODY_BYTES: usize = 96 * 1024;
+/// drawn in a scrolling column, and the transport that carries it holds a
+/// quarter of a megabyte, so a body is only whole while it fits under
+/// that. The response is refused rather than cut, because half a PNG is
+/// not a PNG.
+pub const MAX_IMAGE_BODY_BYTES: usize = 224 * 1024;
 
 /// The largest width or height an inline image may declare.
-pub const MAX_IMAGE_DIMENSION: u32 = 512;
+///
+/// WHY this number: it is the page's own width, so a hero image can be
+/// shown at the size the page drew it, and nothing wider can be displayed
+/// without scaling it down first.
+pub const MAX_IMAGE_DIMENSION: u32 = 720;
 
 /// The most pixels one inline image may declare.
 pub const MAX_IMAGE_PIXELS: usize = (MAX_IMAGE_DIMENSION as usize) * (MAX_IMAGE_DIMENSION as usize);
 
 /// How many inline images a page may place.
-pub const MAX_INLINE_IMAGES: usize = 4;
+pub const MAX_INLINE_IMAGES: usize = 8;
 
 /// The decoded-pixel arena, in bytes.
 ///
-/// WHY a shared arena: four images at the per-image cap would be four
-/// megabytes. A single arena bounds the total a page can make the
-/// browser hold, and an image that does not fit is reported as refused
+/// WHY a shared arena: eight images at the per-image cap would be
+/// twenty-three megabytes. A single arena bounds the total a page can make
+/// the browser hold, and an image that does not fit is reported as refused
 /// rather than silently dropped.
-pub const IMAGE_ARENA_BYTES: usize = 2 * 1024 * 1024;
+pub const IMAGE_ARENA_BYTES: usize = 4 * 1024 * 1024;
 
 /// The widest an inline image is displayed, in logical pixels.
 pub const MAX_DISPLAY_WIDTH: usize = 672;
+
+/// The longest source address the browser will carry to the fetcher.
+///
+/// WHY this is a name and not a literal in two places: a content host's
+/// address is routinely longer than a path on the page's own host, so the
+/// copy that hands a source to the resolver has to be at least as wide as
+/// the buffer the resolved address lands in. Anything longer is refused
+/// as what it is rather than fetched cut short, which would be asking for
+/// different bytes than the page named.
+pub const MAX_SRC_LEN: usize = 224;
 
 /// The tallest an inline image is displayed, in logical pixels.
 pub const MAX_DISPLAY_HEIGHT: usize = 720;
@@ -86,14 +102,15 @@ pub enum ImageRefusal {
     BadHeader,
     /// The decoder refused the body after it was admitted.
     DecodeFailed,
-    /// The image named another origin.
-    CrossOrigin,
     /// The page is a local document, so no network fetch is made.
     LocalDocument,
     /// The decoder or the page's arena is full.
     MemoryBudget,
     /// The response did not arrive, or was not a successful one.
     FetchFailed { code: i32 },
+    /// The reply stopped short of the file's own length, so the bytes in
+    /// hand are the beginning of a picture and not a picture.
+    CutShort { bytes: usize },
     /// More images than the page is allowed to place.
     LimitReached,
 }
@@ -110,10 +127,10 @@ impl ImageRefusal {
             ImageRefusal::DimensionsTooLarge { .. } => b"Image not shown: dimensions too large",
             ImageRefusal::BadHeader => b"Image not shown: unsupported format variant",
             ImageRefusal::DecodeFailed => b"Image not shown: decode failed",
-            ImageRefusal::CrossOrigin => b"Image not shown: different origin",
             ImageRefusal::LocalDocument => b"Image not shown: local document",
             ImageRefusal::MemoryBudget => b"Image not shown: memory budget",
             ImageRefusal::FetchFailed { .. } => b"Image not shown: fetch failed",
+            ImageRefusal::CutShort { .. } => b"Image not shown: reply cut short",
             ImageRefusal::LimitReached => b"Image not shown: too many images",
         }
     }
@@ -285,14 +302,9 @@ pub fn fit_display(
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ResolveError {
     NoSource,
-    CrossOrigin,
     UnsupportedScheme,
     InvalidBase,
     TooLong,
-}
-
-fn eq_ignore_ascii(a: &[u8], b: &[u8]) -> bool {
-    a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x.eq_ignore_ascii_case(y))
 }
 
 fn authority_end(url: &[u8]) -> Option<usize> {
@@ -311,13 +323,16 @@ fn split_fragment(src: &[u8]) -> &[u8] {
     }
 }
 
-/// Resolves an `<img src>` against the page URL, refusing a different
-/// origin.
+/// Resolves an `<img src>`, `<link href>` or other subresource address
+/// against the page URL.
 ///
-/// WHY same-origin only: the browser's capability grant is for a page a
-/// person opened, not for every host that page mentions. A cross-origin
-/// image is drawn as a placeholder and never requested.
-pub fn resolve_same_origin(base: &[u8], src: &[u8], out: &mut [u8]) -> Result<usize, ResolveError> {
+/// WHY another host is allowed: a page's pictures and stylesheets live
+/// wherever its author put them, and refusing the ones on a content host
+/// left the reader with a page of holes. The request is still only ever
+/// made through the gateway, carries no cookie for the page it was
+/// browsing from, and is refused outright for schemes this transport does
+/// not speak.
+pub fn resolve_subresource(base: &[u8], src: &[u8], out: &mut [u8]) -> Result<usize, ResolveError> {
     let mut source = src;
     while let Some((&first, rest)) = source.split_first() {
         if first == b' ' || first == b'\t' || first == b'\n' || first == b'\r' {
@@ -372,14 +387,14 @@ pub fn resolve_same_origin(base: &[u8], src: &[u8], out: &mut [u8]) -> Result<us
         Ok(())
     };
 
-    if let Some(scheme_end) = source.windows(3).position(|w| w == b"://") {
-        let absolute = &source[..scheme_end + 3];
-        let src_uri = crate::parse_uri(source);
-        if crate::parse_uri(absolute).scheme != base_uri.scheme {
-            return Err(ResolveError::CrossOrigin);
-        }
-        if !eq_ignore_ascii(src_uri.host, base_uri.host) || src_uri.port != base_uri.port {
-            return Err(ResolveError::CrossOrigin);
+    if source.windows(3).any(|w| w == b"://") {
+        // An absolute address is used as the page wrote it, on this host or
+        // another. Only the two schemes the transport speaks get through.
+        if !matches!(
+            crate::parse_uri(source).scheme,
+            crate::UriScheme::Http | crate::UriScheme::Https
+        ) {
+            return Err(ResolveError::UnsupportedScheme);
         }
         write(source)?;
     } else if source.starts_with(b"//") {
@@ -389,34 +404,20 @@ pub fn resolve_same_origin(base: &[u8], src: &[u8], out: &mut [u8]) -> Result<us
             .position(|&b| b == b'/' || b == b'?' || b == b'#')
             .unwrap_or(rest.len());
         let authority = &rest[..end];
-        let (host, port) = match authority.iter().rposition(|&b| b == b':') {
-            Some(i) => {
-                let digits = &authority[i + 1..];
-                let mut value: u16 = 0;
-                let mut ok = !digits.is_empty();
-                for &b in digits {
-                    if b.is_ascii_digit() {
-                        value = value.saturating_mul(10).saturating_add((b - b'0') as u16);
-                    } else {
-                        ok = false;
-                        break;
-                    }
-                }
-                if ok {
-                    (&authority[..i], value)
-                } else {
-                    (authority, base_uri.scheme.default_port())
-                }
-            }
-            None => (authority, base_uri.scheme.default_port()),
-        };
-        if !eq_ignore_ascii(host, base_uri.host) || port != base_uri.port {
-            return Err(ResolveError::CrossOrigin);
+        if authority.is_empty() {
+            return Err(ResolveError::NoSource);
         }
-        // The origin is the base's scheme and authority, so only the
-        // protocol-relative source's path and query are appended. Writing
-        // the source whole would repeat the host inside the path.
-        write(origin)?;
+        // A protocol-relative address borrows the page's scheme and keeps
+        // the host it names, which need not be the page's own. Writing the
+        // source whole would drop the scheme; writing the page's origin
+        // would replace the host the page asked for.
+        let scheme: &[u8] = if matches!(base_uri.scheme, crate::UriScheme::Https) {
+            b"https://"
+        } else {
+            b"http://"
+        };
+        write(scheme)?;
+        write(authority)?;
         let tail = &rest[end..];
         if tail.is_empty() {
             write(b"/")?;
@@ -765,15 +766,16 @@ mod tests {
 
     #[test]
     fn a_header_that_declares_too_many_pixels_is_refused_before_decoding() {
+        let limit = MAX_IMAGE_DIMENSION;
         assert!(check_dimensions(4096, 4096).is_err());
         assert!(check_dimensions(0, 10).is_err());
-        assert_eq!(check_dimensions(512, 512), Ok((512, 512)));
+        assert_eq!(check_dimensions(limit, limit), Ok((limit, limit)));
         assert_eq!(
-            check_dimensions(600, 10),
+            check_dimensions(limit + 1, 10),
             Err(ImageRefusal::DimensionsTooLarge {
-                width: 600,
+                width: limit + 1,
                 height: 10,
-                limit: MAX_IMAGE_DIMENSION,
+                limit,
             })
         );
     }
@@ -824,15 +826,15 @@ mod tests {
     fn non_hierarchical_schemes_are_unsupported() {
         let mut out = [0u8; 224];
         assert_eq!(
-            resolve_same_origin(b"https://example.com/a", b"blob:https://example.com/uuid", &mut out),
+            resolve_subresource(b"https://example.com/a", b"blob:https://example.com/uuid", &mut out),
             Err(ResolveError::UnsupportedScheme)
         );
         assert_eq!(
-            resolve_same_origin(b"https://example.com/a", b"about:blank", &mut out),
+            resolve_subresource(b"https://example.com/a", b"about:blank", &mut out),
             Err(ResolveError::UnsupportedScheme)
         );
         assert_eq!(
-            resolve_same_origin(b"https://example.com/a", b"file:/local/path", &mut out),
+            resolve_subresource(b"https://example.com/a", b"file:/local/path", &mut out),
             Err(ResolveError::UnsupportedScheme)
         );
     }
@@ -849,7 +851,7 @@ mod tests {
     #[test]
     fn a_relative_source_resolves_against_the_page() {
         let mut out = [0u8; 224];
-        let n = resolve_same_origin(
+        let n = resolve_subresource(
             b"https://example.com/docs/page.html",
             b"../img/logo.png",
             &mut out,
@@ -857,35 +859,50 @@ mod tests {
         .unwrap();
         assert_eq!(&out[..n], b"https://example.com/img/logo.png");
 
-        let n = resolve_same_origin(b"https://example.com/a/b", b"/x.png", &mut out).unwrap();
+        let n = resolve_subresource(b"https://example.com/a/b", b"/x.png", &mut out).unwrap();
         assert_eq!(&out[..n], b"https://example.com/x.png");
 
-        let n = resolve_same_origin(b"https://example.com/a/b", b"pic.png", &mut out).unwrap();
+        let n = resolve_subresource(b"https://example.com/a/b", b"pic.png", &mut out).unwrap();
         assert_eq!(&out[..n], b"https://example.com/a/pic.png");
     }
 
     #[test]
-    fn a_cross_origin_source_is_refused() {
+    fn a_source_on_another_host_is_resolved_rather_than_refused() {
         let mut out = [0u8; 224];
-        assert_eq!(
-            resolve_same_origin(b"https://example.com/a", b"https://cdn.example.net/x.png", &mut out),
-            Err(ResolveError::CrossOrigin)
-        );
-        assert_eq!(
-            resolve_same_origin(b"https://example.com/a", b"//cdn.example.net/x.png", &mut out),
-            Err(ResolveError::CrossOrigin)
-        );
-        assert_eq!(
-            resolve_same_origin(b"https://example.com/a", b"data:image/png;base64,AA", &mut out),
-            Err(ResolveError::UnsupportedScheme)
-        );
+        let n = resolve_subresource(
+            b"https://example.com/a",
+            b"https://cdn.example.net/x.png",
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(&out[..n], b"https://cdn.example.net/x.png");
+        // A protocol-relative address borrows the page's scheme, and keeps
+        // the host it names for itself.
+        let n = resolve_subresource(b"https://example.com/a", b"//cdn.example.net/x.png", &mut out)
+            .unwrap();
+        assert_eq!(&out[..n], b"https://cdn.example.net/x.png");
+        let n = resolve_subresource(b"http://example.com/a", b"//cdn.example.net/x.png", &mut out)
+            .unwrap();
+        assert_eq!(&out[..n], b"http://cdn.example.net/x.png");
+        let n = resolve_subresource(b"https://example.com/a", b"//example.com:8443/x.png", &mut out)
+            .unwrap();
+        assert_eq!(&out[..n], b"https://example.com:8443/x.png");
     }
 
     #[test]
-    fn a_protocol_relative_source_on_the_same_origin_resolves() {
+    fn a_source_that_names_nothing_fetchable_is_refused_for_its_own_reason() {
         let mut out = [0u8; 224];
-        let n = resolve_same_origin(b"https://example.com/a", b"//example.com/x.png", &mut out)
-            .unwrap();
-        assert_eq!(&out[..n], b"https://example.com/x.png");
+        assert_eq!(
+            resolve_subresource(b"https://example.com/a", b"//", &mut out),
+            Err(ResolveError::NoSource)
+        );
+        assert_eq!(
+            resolve_subresource(b"https://example.com/a", b"data:image/png;base64,AA", &mut out),
+            Err(ResolveError::UnsupportedScheme)
+        );
+        assert_eq!(
+            resolve_subresource(b"https://example.com/a", b"ftp://host/x.png", &mut out),
+            Err(ResolveError::UnsupportedScheme)
+        );
     }
 }

@@ -2202,8 +2202,23 @@ impl BrowserApp {
         &mut self,
         url: &[u8],
     ) -> (images::ImageStatus, Option<std::image::Bitmap<'static>>, u32, u32) {
-        let mut request = [0u8; 512];
+        // WHY this is wide: the address goes on the wire percent-encoded,
+        // and a query string of separators alone triples it. A request
+        // buffer that ran out would send half an address and be answered
+        // with half a picture, so an address that cannot be sent whole is
+        // refused for its own reason before a byte is written. The rest of
+        // the request — method line, Host, User-Agent, Close — is 108
+        // bytes, which is what the margin below is sized against.
+        let mut request = [0u8; 1024];
         let request_len = browser::format_proxy_request(url, &mut request);
+        if request_len + 128 > request.len() {
+            return (
+                images::ImageStatus::Refused(images::ImageRefusal::SourceTooLong),
+                None,
+                0,
+                0,
+            );
+        }
         let local_port = self.take_local_port();
         let outcome = fetch_over_tcp([10, 0, 2, 2], 4300, local_port, &request[..request_len]);
         if outcome.bytes == 0 {
@@ -2238,10 +2253,23 @@ impl BrowserApp {
         }
         // A body the gateway or the transport had to cut is refused, not
         // decoded: half a PNG is not a picture.
+        //
+        // WHY this is not reported as "too large": the file was never
+        // measured against this browser's own cap here. What happened is
+        // that the reply stopped short of the length the origin promised,
+        // and the placeholder has to say which of the two it ran into.
         let truncated = outcome.truncated
             || browser::http_header_value(raw, b"x-interos-truncated").is_some();
         let body = response.body;
-        if truncated || body.len() > images::MAX_IMAGE_BODY_BYTES {
+        if truncated {
+            return (
+                images::ImageStatus::Refused(images::ImageRefusal::CutShort { bytes: body.len() }),
+                None,
+                0,
+                0,
+            );
+        }
+        if body.len() > images::MAX_IMAGE_BODY_BYTES {
             return (
                 images::ImageStatus::Refused(images::ImageRefusal::TooLarge {
                     bytes: body.len(),
@@ -2339,7 +2367,7 @@ impl BrowserApp {
 
         if marker.src.is_empty() {
             status = images::ImageStatus::Refused(images::ImageRefusal::NoSource);
-        } else if marker.src.len() > 64 {
+        } else if marker.src.len() > images::MAX_SRC_LEN {
             // The marker cannot carry this address without cutting it,
             // and fetching a cut address would be fetching something
             // other than what the page named.
@@ -2350,8 +2378,8 @@ impl BrowserApp {
         ) {
             status = images::ImageStatus::Refused(images::ImageRefusal::LocalDocument);
         } else {
-            let mut url = [0u8; 224];
-            match images::resolve_same_origin(self.current_url(), marker.src, &mut url) {
+            let mut url = [0u8; images::MAX_SRC_LEN];
+            match images::resolve_subresource(self.current_url(), marker.src, &mut url) {
                 Ok(len) => {
                     let (result, decoded, width, height) =
                         self.fetch_inline_image(&url[..len]);
@@ -2385,7 +2413,6 @@ impl BrowserApp {
                 Err(error) => {
                     status = images::ImageStatus::Refused(match error {
                         images::ResolveError::NoSource => images::ImageRefusal::NoSource,
-                        images::ResolveError::CrossOrigin => images::ImageRefusal::CrossOrigin,
                         images::ResolveError::UnsupportedScheme => {
                             images::ImageRefusal::UnsupportedSource
                         }
@@ -2643,7 +2670,10 @@ impl BrowserApp {
         let image_count = out.image_count;
         for slot in 0..image_count {
             let item = out.images[slot];
-            let mut src = [0u8; 64];
+            // One byte wider than the limit, so an address the browser
+            // cannot carry still arrives wider than the limit and is
+            // refused instead of quietly fetched cut short.
+            let mut src = [0u8; images::MAX_SRC_LEN + 1];
             let mut alt = [0u8; 64];
             let src_bytes = item.src.get(dom);
             let alt_bytes = item.alt.get(dom);
@@ -9255,7 +9285,7 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
             } else {
                 let mut resolved = [0u8; 128];
                 let cur = &app.current_url[..app.current_url_len.min(app.current_url.len())];
-                if let Ok(rn) = browser::images::resolve_same_origin(cur, raw_target, &mut resolved) {
+                if let Ok(rn) = browser::images::resolve_subresource(cur, raw_target, &mut resolved) {
                     app.navigate(&resolved[..rn]);
                 } else {
                     app.navigate(raw_target);

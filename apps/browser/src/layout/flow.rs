@@ -21,9 +21,10 @@ use super::style::{self, BoxStyle, Display, FieldKind, InputType};
 pub const MAX_TEXT_RUNS: usize = 4096;
 /// The most rectangles (backgrounds, borders, rules) one list holds.
 pub const MAX_RECTS: usize = 768;
-/// The most images the layout places. This matches the image arena the
-/// browser fetches into.
-pub const MAX_IMAGES: usize = 4;
+/// The most images the layout places. This is the image policy's own
+/// number, because the display list and the placer are two halves of one
+/// promise: a page that reserves six slots and fetches eight is neither.
+pub const MAX_IMAGES: usize = crate::images::MAX_INLINE_IMAGES;
 /// The most form controls one page holds.
 pub const MAX_FIELDS: usize = 48;
 /// The most link boxes one page holds.
