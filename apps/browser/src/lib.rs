@@ -3026,6 +3026,15 @@ pub fn is_download_path(path: &str) -> bool {
 /// the whole device and is opened by whichever app handles its type.
 pub const MEDIA_PREFIX: &str = "/storage/downloads/dl_";
 
+/// Whether a path in the shared document index is a file the browser downloaded.
+///
+/// WHY the `.origin` sidecar is excluded: the browser records the address a
+/// file came from in a neighbouring document, and that record is the app's
+/// own bookkeeping rather than something the person downloaded.
+pub fn is_media_download_path(path: &str) -> bool {
+    path.starts_with(MEDIA_PREFIX) && !path.ends_with(".origin")
+}
+
 /// Whether a content type carries a file rather than a document.
 ///
 /// WHY the decision is made here: the gateway hands media over as raw

@@ -284,8 +284,21 @@ const TCP_RECV_ATTEMPTS: usize = 20_000;
 /// while the response was still in flight and reported zero bytes.
 const TCP_HANDSHAKE_TIMEOUT_TICKS: u64 = 5_000;
 
-/// How long a fetch waits for the gateway's response.
-const TCP_RESPONSE_TIMEOUT_TICKS: u64 = 20_000;
+/// How long a fetch waits for the gateway's response, in total.
+///
+/// WHY the budget is not one round trip: the gateway fetches the origin on
+/// the host and then relays the body over SLIRP, whose receive window
+/// advances in 2 KiB steps. A body of a few dozen kilobytes can take longer
+/// than the old 20 s budget while bytes are still arriving, so a real
+/// download was saved as a partial file.
+const TCP_RESPONSE_TIMEOUT_TICKS: u64 = 240_000;
+
+/// How long the reader tolerates silence before the transfer is treated as over.
+///
+/// WHY a stall budget exists beside the total: a connection that has stopped
+/// delivering must not hold the app for the whole four-minute budget, while a
+/// slow but healthy transfer must not be cut off.
+const TCP_RESPONSE_STALL_TICKS: u64 = 10_000;
 
 /// The largest slice one receive may ask the kernel for.
 ///
@@ -391,6 +404,7 @@ fn fetch_over_tcp(
     // gateway speaks HTTP/1.0 and sends no content length, so the end of
     // the body is the end of the stream.
     let response_start = std::get_ticks().ok();
+    let mut last_data_tick = response_start;
     let mut total = 0usize;
     let mut reads = 0usize;
     loop {
@@ -405,6 +419,7 @@ fn fetch_over_tcp(
             Ok(0) => break,
             Ok(n) => {
                 total += n;
+                last_data_tick = std::get_ticks().ok();
                 if outcome.first_byte_tick.is_none() {
                     outcome.first_byte_tick = std::get_ticks().ok();
                 }
@@ -420,11 +435,16 @@ fn fetch_over_tcp(
                 }
             }
         }
-        let expired = match (std::get_ticks(), response_start) {
-            (Ok(now), Some(start)) => now.saturating_sub(start) >= TCP_RESPONSE_TIMEOUT_TICKS,
+        let now = std::get_ticks().ok();
+        let stalled = match (now, last_data_tick) {
+            (Some(now), Some(mark)) => now.saturating_sub(mark) >= TCP_RESPONSE_STALL_TICKS,
+            _ => false,
+        };
+        let expired = match (now, response_start) {
+            (Some(now), Some(start)) => now.saturating_sub(start) >= TCP_RESPONSE_TIMEOUT_TICKS,
             _ => reads >= TCP_RECV_ATTEMPTS,
         };
-        if expired {
+        if stalled || expired {
             outcome.truncated = true;
             break;
         }
@@ -874,10 +894,16 @@ there is nothing for the browser to open.";
 const BODY_DOWNLOADED: &[u8] = b"The response was a file, so it was saved to the shared storage \
 area unchanged. The File Manager lists it under Downloads and opens it with the app registered \
 for its type.";
+const BODY_DOWNLOADED_PARTIAL: &[u8] = b"The response was a file, but only part of it arrived, so \
+the saved copy is incomplete. A partial file may not open. The transfer ended early because the \
+file is larger than this browser's response buffer, or because the origin stopped sending.";
 const BODY_DOWNLOAD_FAILED: &[u8] = b"The response was a file, but the shared storage area did \
 not accept it. Nothing was saved.";
 const BODY_DOWNLOAD_PROMPT: &[u8] = b"This website wants to download a file to your device. InterOS \
 requires your explicit permission before any file can be stored.";
+const BODY_DOWNLOAD_PROMPT_PARTIAL: &[u8] = b"This website wants to download a file, but the \
+transfer already ended early: only part of it arrived. If you allow it, the incomplete part is \
+saved.";
 const BODY_DOWNLOAD_REFUSED: &[u8] = b"The download request was declined. No data was written to storage, \
 and temporary network buffers were discarded.";
 
@@ -1173,16 +1199,23 @@ impl BookmarkStore {
 // -----------------------------------------------------------------------------
 const HISTORY_CAP: usize = 16;
 
+/// The largest address a history entry holds.
+///
+/// WHY this is not 64 bytes: real page and media addresses are longer than
+/// that, and a truncated entry navigated to a different address than the one
+/// that was visited.
+const HISTORY_ENTRY_BYTES: usize = 256;
+
 #[derive(Debug, Clone, Copy)]
 pub struct History {
-    entries: [[u8; 64]; HISTORY_CAP],
+    entries: [[u8; HISTORY_ENTRY_BYTES]; HISTORY_CAP],
     len: usize,
     pos: usize,
 }
 
 impl History {
     const EMPTY: History = History {
-        entries: [[0; 64]; HISTORY_CAP],
+        entries: [[0; HISTORY_ENTRY_BYTES]; HISTORY_CAP],
         len: 0,
         pos: 0,
     };
@@ -1208,12 +1241,12 @@ impl History {
         self.pos = self.len - 1;
     }
 
-    pub fn back(&mut self) -> Option<[u8; 64]> {
+    pub fn back(&mut self) -> Option<[u8; HISTORY_ENTRY_BYTES]> {
         if self.pos == 0 {
             return None;
         }
         self.pos -= 1;
-        let mut out = [0u8; 64];
+        let mut out = [0u8; HISTORY_ENTRY_BYTES];
         let n = self.entries[self.pos]
             .iter()
             .position(|&b| b == 0)
@@ -1222,12 +1255,12 @@ impl History {
         Some(out)
     }
 
-    pub fn forward(&mut self) -> Option<[u8; 64]> {
+    pub fn forward(&mut self) -> Option<[u8; HISTORY_ENTRY_BYTES]> {
         if self.pos + 1 >= self.len {
             return None;
         }
         self.pos += 1;
-        let mut out = [0u8; 64];
+        let mut out = [0u8; HISTORY_ENTRY_BYTES];
         let n = self.entries[self.pos]
             .iter()
             .position(|&b| b == 0)
@@ -1493,7 +1526,12 @@ impl PlacedImage {
 }
 
 pub struct BrowserApp {
-    pub current_url: [u8; 64],
+    /// The address of the document on screen.
+    ///
+    /// WHY this is longer than 64 bytes: real addresses are, and a truncated
+    /// address made Reload, Back and Forward fetch a different resource than
+    /// the one on screen.
+    pub current_url: [u8; 256],
     pub current_url_len: usize,
     /// How far the reader has been scrolled, and how far it can be.
     ///
@@ -1507,7 +1545,7 @@ pub struct BrowserApp {
     pub pages_loaded: usize,
     pub trackers_blocked: usize,
     pub active_socket_id: Option<u32>,
-    pub address: [u8; 64],
+    pub address: [u8; 256],
     pub address_len: usize,
     pub address_focused: bool,
     pub select_all: bool,
@@ -1586,8 +1624,13 @@ pub struct BrowserApp {
     /// what is in the shared storage area, so the list survives the app
     /// being closed and agrees with what the file manager shows.
     pub downloads: [DownloadEntry; MAX_DOWNLOADS],
-    /// How many of the saved pages the list holds.
+    /// How many of the saved pages and downloaded files the list holds.
     pub download_count: usize,
+    /// Whether the last tap on a downloaded file found no handler.
+    ///
+    /// WHY the sheet keeps its own answer: a file the platform cannot open
+    /// has to say so where the person tapped it, not in a log.
+    pub downloads_error: bool,
     /// The text the open list is filtered by.
     ///
     /// WHY the panel has its own filter and not the address bar: the
@@ -1606,6 +1649,12 @@ pub struct BrowserApp {
     last_download_path_len: usize,
     last_download_mime: [u8; 48],
     last_download_mime_len: usize,
+    /// Whether the file the last download wrote is only part of the origin's file.
+    ///
+    /// WHY the flag is kept: the completion screen used to report every saved
+    /// file as complete, so a transfer that ended early was presented as the
+    /// whole file and the person only found out when it failed to open.
+    last_download_truncated: bool,
     open_state: OpenState,
     /// The documents the upload picker offers, as the index holds them.
     uploads: [PickEntry; MAX_PICK_FILES],
@@ -1631,14 +1680,23 @@ pub struct BrowserApp {
     next_local_port: u16,
 }
 
-/// A page the browser saved.
+/// A page the browser saved or a file it downloaded.
 #[derive(Clone, Copy)]
 pub struct DownloadEntry {
-    /// The path of the saved page in the shared storage area.
+    /// The path of the file in the shared storage area.
     pub path: [u8; 96],
     pub path_len: usize,
-    /// The size of the saved page in bytes.
+    /// The size of the file in bytes.
     pub length: u64,
+    /// The media type the platform's index gives the file.
+    ///
+    /// WHY the type travels with the entry: opening a downloaded file asks
+    /// the platform for the handler registered for its type, and a list
+    /// that held only paths could only open a page.
+    pub mime: [u8; 48],
+    pub mime_len: usize,
+    /// Whether the entry is a page the browser saved rather than a file it downloaded.
+    pub is_page: bool,
 }
 
 impl DownloadEntry {
@@ -1646,6 +1704,9 @@ impl DownloadEntry {
         path: [0; 96],
         path_len: 0,
         length: 0,
+        mime: [0; 48],
+        mime_len: 0,
+        is_page: false,
     };
 }
 
@@ -1688,13 +1749,13 @@ fn write_file(path: &str, bytes: &[u8]) -> Result<usize, ()> {
 impl BrowserApp {
     pub fn new() -> Self {
         let mut app = Self {
-            current_url: [0; 64],
+            current_url: [0; 256],
             current_url_len: 0,
             scroll: ScrollState::new(0, READER_VIEWPORT_H, 0),
             pages_loaded: 0,
             trackers_blocked: 0,
             active_socket_id: None,
-            address: [0; 64],
+            address: [0; 256],
             address_len: 0,
             address_focused: false,
             select_all: false,
@@ -1725,12 +1786,14 @@ impl BrowserApp {
             downloads_saved: 0,
             downloads: [DownloadEntry::EMPTY; MAX_DOWNLOADS],
             download_count: 0,
+            downloads_error: false,
             filter: [0; FILTER_MAX],
             filter_len: 0,
             last_download_path: [0; 96],
             last_download_path_len: 0,
             last_download_mime: [0; 48],
             last_download_mime_len: 0,
+            last_download_truncated: false,
             open_state: OpenState::NotAttempted,
             uploads: [PickEntry::EMPTY; MAX_PICK_FILES],
             upload_count: 0,
@@ -3016,8 +3079,9 @@ impl BrowserApp {
             Ok(written) => {
                 std::log("[BROWSER APP] The response was a file and was saved into the shared storage area.").ok();
                 if truncated {
-                    std::log("[BROWSER APP] The origin's file was larger than the gateway's limit; the saved copy is truncated.").ok();
+                    std::log("[BROWSER APP] The transfer ended before the whole file arrived; the saved copy is partial.").ok();
                 }
+                self.last_download_truncated = truncated;
                 let _ = written;
 
                 // Persist the download origin URL alongside the downloaded file metadata/record.
@@ -3103,7 +3167,8 @@ impl BrowserApp {
         self.refresh_downloads();
     }
 
-    /// Reads the pages the browser saved from the platform's content index.
+    /// Reads the pages the browser saved and the files it downloaded from
+    /// the platform's content index.
     ///
     /// WHY the index and not a list the app keeps: the index is the
     /// platform's record of what is in the shared storage area, so the
@@ -3111,6 +3176,7 @@ impl BrowserApp {
     /// with what the file manager shows.
     pub fn refresh_downloads(&mut self) {
         self.download_count = 0;
+        self.downloads_error = false;
         let mut buffer = [0u8; 4096];
         let len = match std::content::content_index_list(&mut buffer) {
             Ok(len) => len,
@@ -3130,7 +3196,8 @@ impl BrowserApp {
             }; MAX_DOWNLOADS];
         let count = std::content::parse_index(&buffer[..len], &mut records);
         for record in records.iter().take(count) {
-            if !browser::is_download_path(record.path) {
+            let is_page = browser::is_download_path(record.path);
+            if !is_page && !browser::is_media_download_path(record.path) {
                 continue;
             }
             if self.download_count >= MAX_DOWNLOADS {
@@ -3142,6 +3209,10 @@ impl BrowserApp {
             entry.path[..n].copy_from_slice(&bytes[..n]);
             entry.path_len = n;
             entry.length = record.length;
+            let m = record.mime.len().min(entry.mime.len());
+            entry.mime[..m].copy_from_slice(&record.mime.as_bytes()[..m]);
+            entry.mime_len = m;
+            entry.is_page = is_page;
             self.download_count += 1;
         }
         self.scan_downloads();
@@ -4174,7 +4245,7 @@ impl BrowserApp {
     }
 
     pub fn reload(&mut self) {
-        let mut target = [0u8; 64];
+        let mut target = [0u8; 256];
         let n = self.current_url_len.min(target.len());
         target[..n].copy_from_slice(&self.current_url[..n]);
         self.navigate_again(&target[..n]);
@@ -4182,7 +4253,7 @@ impl BrowserApp {
 
     pub fn go_back(&mut self) {
         if let Some(url) = self.tabs.go_back() {
-            let mut target = [0u8; 64];
+            let mut target = [0u8; 256];
             let n = url.len().min(target.len());
             target[..n].copy_from_slice(&url[..n]);
             std::log("[BROWSER APP] Back: re-issuing navigation attempt.").ok();
@@ -4200,7 +4271,7 @@ impl BrowserApp {
 
     pub fn go_forward(&mut self) {
         if let Some(url) = self.tabs.go_forward() {
-            let mut target = [0u8; 64];
+            let mut target = [0u8; 256];
             let n = url.len().min(target.len());
             target[..n].copy_from_slice(&url[..n]);
             std::log("[BROWSER APP] Forward: re-issuing navigation attempt.").ok();
@@ -4357,9 +4428,21 @@ impl Frame {
             PageStatus::UnrecognisedAddress => (b"Address not recognised", BODY_UNRECOGNISED),
             PageStatus::UnsupportedScheme => (b"Scheme not supported", BODY_UNSUPPORTED_SCHEME),
             PageStatus::GatewayError => (b"Gateway could not fetch", BODY_GATEWAY_ERROR),
-            PageStatus::Downloaded => (b"Saved to Downloads", BODY_DOWNLOADED),
+            PageStatus::Downloaded => {
+                if app.last_download_truncated {
+                    (b"Saved to Downloads (partial)", BODY_DOWNLOADED_PARTIAL)
+                } else {
+                    (b"Saved to Downloads", BODY_DOWNLOADED)
+                }
+            }
             PageStatus::DownloadFailed => (b"Download could not be saved", BODY_DOWNLOAD_FAILED),
-            PageStatus::DownloadPrompt => (b"Download Permission", BODY_DOWNLOAD_PROMPT),
+            PageStatus::DownloadPrompt => {
+                if app.pending_download.truncated {
+                    (b"Download Permission", BODY_DOWNLOAD_PROMPT_PARTIAL)
+                } else {
+                    (b"Download Permission", BODY_DOWNLOAD_PROMPT)
+                }
+            }
             PageStatus::DownloadRefused => (b"Download Refused", BODY_DOWNLOAD_REFUSED),
             PageStatus::LocalRefused => (b"Local document unavailable", match app.local_failure {
                 LocalFailure::NoPath => BODY_LOCAL_NO_PATH,
@@ -5841,10 +5924,11 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
             offline_glyph(x, y, cx, cy)
         };
         if glyph {
-            return if app.status == PageStatus::Downloaded || app.status == PageStatus::DownloadPrompt {
-                THEME.primary
-            } else {
-                THEME.on_surface_variant
+            return match app.status {
+                PageStatus::Downloaded if app.last_download_truncated => THEME.warning,
+                PageStatus::DownloadPrompt if app.pending_download.truncated => THEME.warning,
+                PageStatus::Downloaded | PageStatus::DownloadPrompt => THEME.primary,
+                _ => THEME.on_surface_variant,
             };
         }
         if f.head_len > 0 {
@@ -5882,7 +5966,13 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                 PageStatus::UnrecognisedAddress => b"ADDRESS NOT RECOGNISED",
                 PageStatus::UnsupportedScheme => b"SCHEME NOT SUPPORTED",
                 PageStatus::GatewayError => b"GATEWAY COULD NOT FETCH",
-                PageStatus::Downloaded => b"DOWNLOAD COMPLETE",
+                PageStatus::Downloaded => {
+                    if app.last_download_truncated {
+                        b"DOWNLOAD PARTIAL"
+                    } else {
+                        b"DOWNLOAD COMPLETE"
+                    }
+                }
                 PageStatus::DownloadFailed => b"DOWNLOAD FAILED",
                 PageStatus::DownloadPrompt => b"PERMISSION REQUIRED",
                 PageStatus::DownloadRefused => b"DOWNLOAD DECLINED",
@@ -5895,10 +5985,11 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                 },
                 _ => b"NO RESPONSE FROM THE GATEWAY",
             };
-            let label_color = if app.status == PageStatus::Downloaded || app.status == PageStatus::DownloadPrompt {
-                THEME.primary
-            } else {
-                THEME.error
+            let label_color = match app.status {
+                PageStatus::Downloaded if app.last_download_truncated => THEME.warning,
+                PageStatus::DownloadPrompt if app.pending_download.truncated => THEME.warning,
+                PageStatus::Downloaded | PageStatus::DownloadPrompt => THEME.primary,
+                _ => THEME.error,
             };
             let lw = text_width(label, 1);
             if let Some(px) = text_px(x, y, cx - lw / 2, err_y + 8, 1, label, label_color, c, false) {
@@ -5977,6 +6068,28 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                         false,
                     ) {
                         return px;
+                    }
+                }
+                if app.pending_download.truncated {
+                    let warning: [&[u8]; 2] = [
+                        b"Only part of the file arrived; the transfer ended early.",
+                        b"If you allow it, the incomplete part is saved.",
+                    ];
+                    for (i, line) in warning.iter().enumerate() {
+                        let lw = text_width(line, 1);
+                        if let Some(px) = text_px(
+                            x,
+                            y,
+                            (W.saturating_sub(lw)) / 2,
+                            info_y + 30 + i * 24,
+                            1,
+                            line,
+                            THEME.warning,
+                            THEME.surface,
+                            false,
+                        ) {
+                            return px;
+                        }
                     }
                 }
             } else if app.status == PageStatus::DownloadRefused {
@@ -6487,6 +6600,14 @@ fn paint_style_band(
 // -----------------------------------------------------------------------------
 // Sheet Overlays Renderer (Tab Switcher, Bookmarks, History, Menu)
 // -----------------------------------------------------------------------------
+/// The file name a download is listed under, without its directory.
+fn download_name(path: &[u8]) -> &[u8] {
+    match path.iter().rposition(|&b| b == b'/') {
+        Some(slash) => &path[slash + 1..],
+        None => path,
+    }
+}
+
 fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
     match app.overlay {
         SheetOverlay::None => None,
@@ -6693,7 +6814,14 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
                         let r_y = LIST_Y + shown * row_h;
                         let r_rect = Rect::new(24, r_y, W - 48, row_h - 8);
                         if let Some(c) = draw_rounded_rect(x, y, r_rect, R_SMALL, THEME.surface_container_high, Some(THEME.border), 1) {
-                            if let Some(px) = text_px(x, y, 40, r_y + 18, 1, entry, THEME.on_surface, c, false) {
+                            // WHY the address is ellipsized: a recorded address
+                            // fills its buffer, and drawing it unmeasured ran it
+                            // through the card edge and off the screen. The width
+                            // is the card's inner width: sixteen pixels of inset
+                            // on each side of the text at x 40.
+                            let mut line = [0u8; 128];
+                            let n = font::ellipsize(entry, 1, r_rect.w - 32, &mut line);
+                            if let Some(px) = text_px(x, y, 40, r_y + 18, 1, &line[..n], THEME.on_surface, c, false) {
                                 return Some(px);
                             }
                             return Some(c);
@@ -6726,13 +6854,13 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
                 return Some(THEME.surface);
             }
 
-            // The list of pages the browser saved.
+            // The pages the browser saved and the files it downloaded.
             //
             // WHY the list is the platform's index and not the app's own
             // counter: the index is what the file manager and the launcher
             // read, so this list and theirs name the same files.
             if app.download_count == 0 {
-                let empty_msg = b"No pages saved yet. Save a page to keep it here.";
+                let empty_msg = b"Nothing downloaded yet. Save a page or download a file.";
                 if let Some(px) = text_px(x, y, 32, 220, 1, empty_msg, THEME.on_surface_variant, THEME.surface, false) {
                     return Some(px);
                 }
@@ -6743,18 +6871,43 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
                     let r_rect = Rect::new(24, r_y, W - 48, row_h - 10);
                     let entry = &app.downloads[i];
                     if let Some(c) = draw_rounded_rect(x, y, r_rect, R_CHIP, THEME.surface_container_high, Some(THEME.border), 1) {
-                        if let Some(px) = text_px(x, y, 44, r_y + 12, 1, &entry.path[..entry.path_len], THEME.on_surface, c, true) {
+                        // WHY the path is ellipsized: the saved path fills its
+                        // buffer, and drawing it unmeasured ran it through the
+                        // card and off the screen. The width is the card's inner
+                        // width: twenty pixels of inset on each side of the text
+                        // at x 44.
+                        // WHY only the file name is shown: the directory is the
+                        // same for every row, and printing it pushed the part
+                        // that tells downloads apart into the ellipsis.
+                        let shown = download_name(&entry.path[..entry.path_len]);
+                        let mut path = [0u8; 96];
+                        let n = font::ellipsize(shown, 1, r_rect.w - 40, &mut path);
+                        if let Some(px) = text_px(x, y, 44, r_y + 12, 1, &path[..n], THEME.on_surface, c, true) {
                             return Some(px);
                         }
-                        let mut size_buf = [0u8; 32];
+                        let mut size_buf = [0u8; 48];
                         let mut n = 0usize;
-                        n = append_text(&mut size_buf, n, b"Published to the content index, ");
+                        n = append_text(
+                            &mut size_buf,
+                            n,
+                            if entry.is_page {
+                                b"Saved page, "
+                            } else {
+                                b"Downloaded file, "
+                            },
+                        );
                         n = append_u64_text(&mut size_buf, n, entry.length);
                         n = append_text(&mut size_buf, n, b" bytes");
                         if let Some(px) = text_px(x, y, 44, r_y + 40, 1, &size_buf[..n], THEME.on_surface_variant, c, false) {
                             return Some(px);
                         }
                         return Some(c);
+                    }
+                }
+                if app.downloads_error {
+                    let msg = b"No installed app handles this file's type.";
+                    if let Some(px) = text_px(x, y, 32, 180 + app.download_count * 72 + 12, 1, msg, THEME.error, THEME.surface, false) {
+                        return Some(px);
                     }
                 }
             }
@@ -8122,7 +8275,7 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
                     let r_y = LIST_Y + shown * row_h;
                     if y >= r_y && y < r_y + row_h && x >= 24 && x <= W - 24 {
                         let _ = std::audio_haptic_click();
-                        let mut url = [0u8; 64];
+                        let mut url = [0u8; HISTORY_ENTRY_BYTES];
                         let n = entry.len().min(url.len());
                         url[..n].copy_from_slice(&entry[..n]);
                         app.overlay = SheetOverlay::None;
@@ -8139,22 +8292,46 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
                 app.overlay = SheetOverlay::None;
                 return Tap::Redraw;
             }
-            // The saved pages.
+            // The saved pages and downloaded files.
             //
             // WHY tapping one opens it: a download the person cannot open
-            // is a download they did not keep.
+            // is a download they did not keep. A page is the browser's own
+            // document and navigates; a file belongs to the device and is
+            // handed to whichever app registered for its type.
             let row_h = 72;
             for i in 0..app.download_count {
                 let r_y = 180 + i * row_h;
                 if y >= r_y && y < r_y + row_h && x >= 24 && x <= W - 24 {
                     let _ = std::audio_haptic_click();
                     let entry = app.downloads[i];
-                    let mut url = [0u8; 128];
-                    url[..7].copy_from_slice(b"file://");
-                    let n = 7 + entry.path_len.min(url.len() - 7);
-                    url[7..n].copy_from_slice(&entry.path[..n - 7]);
-                    app.overlay = SheetOverlay::None;
-                    app.navigate(&url[..n]);
+                    if entry.is_page {
+                        let mut url = [0u8; 128];
+                        url[..7].copy_from_slice(b"file://");
+                        let n = 7 + entry.path_len.min(url.len() - 7);
+                        url[7..n].copy_from_slice(&entry.path[..n - 7]);
+                        app.overlay = SheetOverlay::None;
+                        app.navigate(&url[..n]);
+                    } else if entry.mime_len > 0 {
+                        let Ok(path) = core::str::from_utf8(&entry.path[..entry.path_len]) else {
+                            app.downloads_error = true;
+                            return Tap::Redraw;
+                        };
+                        let Ok(mime) = core::str::from_utf8(&entry.mime[..entry.mime_len]) else {
+                            app.downloads_error = true;
+                            return Tap::Redraw;
+                        };
+                        match std::content::intent_dispatch(std::content::IntentKind::Mime, mime, path) {
+                            Ok(_) => {
+                                app.downloads_error = false;
+                                app.overlay = SheetOverlay::None;
+                            }
+                            Err(_) => {
+                                app.downloads_error = true;
+                            }
+                        }
+                    } else {
+                        app.downloads_error = true;
+                    }
                     return Tap::Redraw;
                 }
             }
@@ -8569,7 +8746,11 @@ fn handle_browser_key(app: &mut BrowserApp, key: std::InputKeyEvent) -> Dirty {
         app.overlay = SheetOverlay::None;
         return Dirty::All;
     }
-    if app.status == PageStatus::DownloadPrompt {
+    // WHY the prompt does not own the keys while the address field is
+    // focused: Escape closes the on-screen keyboard, and the prompt used to
+    // read that same Escape as a refusal, silently discarding a download the
+    // person had not answered yet.
+    if app.status == PageStatus::DownloadPrompt && !app.address_focused {
         match key.code {
             input_key_code::ENTER => {
                 app.accept_pending_download();
@@ -8661,7 +8842,7 @@ fn handle_browser_key(app: &mut BrowserApp, key: std::InputKeyEvent) -> Dirty {
             app.select_all = false;
             if app.bm_step == BookmarkStep::Idle {
                 if app.address_len > 0 {
-                    let mut target = [0u8; 64];
+                    let mut target = [0u8; 256];
                     let n = app.address_len.min(target.len());
                     target[..n].copy_from_slice(&app.address[..n]);
                     app.navigate(&target[..n]);
