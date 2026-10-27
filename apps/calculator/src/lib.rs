@@ -1152,9 +1152,13 @@ impl CalculatorState {
             '0'..='9' => self.push_digit((action as u8 - b'0') as i64),
             '+' | '-' | '*' | '/' | '%' => self.set_operation(action),
             'P' => self.push_parenthesis(),
-            '.' => self.push_char('.'),
+            '.' => self.push_point(),
             '=' => {
-                self.evaluate();
+                // The keypad types an expression, so the answer is the
+                // expression's value with the platform's decimal
+                // arithmetic. The legacy integer accumulator truncated
+                // 1 / 2 to 0 and could not hold the point at all.
+                self.evaluate_expression();
             }
             'C' => self.clear(),
             'E' => self.clear_entry(),
@@ -1163,6 +1167,67 @@ impl CalculatorState {
             _ => return false,
         }
         true
+    }
+
+    /// Types the decimal point into the number being entered.
+    pub fn push_point(&mut self) {
+        if self.error {
+            self.clear();
+        }
+        if self.result_mode {
+            self.expr_len = 0;
+            self.current_operand = 0;
+            self.result_mode = false;
+        }
+        // A point belongs to one number: a second point in the same
+        // number is not a number the parser can read.
+        let mut start = self.expr_len;
+        while start > 0 {
+            let ch = self.expr_buf[start - 1];
+            if ch.is_ascii_digit() {
+                start -= 1;
+            } else if ch == b'.' {
+                return;
+            } else {
+                break;
+            }
+        }
+        // "12 + ." is not a number, and neither is a bare ".". A point
+        // with no digits before it is the start of "0.".
+        if start == self.expr_len {
+            self.push_char('0');
+        }
+        self.push_char('.');
+        self.update_display_from_expr_tail();
+    }
+
+    /// Evaluates the expression the keypad typed, dropping a trailing
+    /// operator first so "5 + =" answers 5 instead of a syntax error.
+    fn evaluate_expression(&mut self) {
+        if self.error {
+            return;
+        }
+        if self.expr_len == 0 {
+            self.evaluate();
+            return;
+        }
+        let mut end = self.expr_len;
+        while end > 0 && self.expr_buf[end - 1] == b' ' {
+            end -= 1;
+        }
+        if end > 0 && matches!(self.expr_buf[end - 1], b'+' | b'-' | b'*' | b'/' | b'%' | b'^') {
+            if end >= 2 && self.expr_buf[end - 2] == b' ' {
+                end -= 1;
+            }
+            end -= 1;
+        }
+        if end == 0 {
+            self.display_buf[0] = b'0';
+            self.display_len = 1;
+            return;
+        }
+        self.expr_len = end;
+        let _ = self.evaluate_decimal();
     }
 
     pub fn push_char(&mut self, c: char) {
@@ -1200,8 +1265,10 @@ impl CalculatorState {
         let digit_char = (b'0' + (digit as u8 % 10)) as char;
         self.push_char(digit_char);
 
-        // Update display buffer
-        self.update_display_from_operand();
+        // The display shows the number as typed, point and all. The
+        // legacy integer operand above cannot hold a point, so deriving
+        // the display from it turned "1.5" into "15".
+        self.update_display_from_expr_tail();
     }
 
     pub fn set_operation(&mut self, op: char) {
@@ -1215,7 +1282,35 @@ impl CalculatorState {
         }
         self.current_operand = 0;
         self.active_operation = Some(op);
+
+        // An operator pressed after a result starts a new expression from
+        // that result. Appending to the expression that produced it made
+        // "1 + 2 =" then "× 4 =" evaluate the stale "1 + 2 × 4".
+        if self.result_mode {
+            let shown = self
+                .display_len
+                .min(self.display_buf.len())
+                .min(self.expr_buf.len());
+            self.expr_buf[..shown].copy_from_slice(&self.display_buf[..shown]);
+            self.expr_len = shown;
+        }
         self.result_mode = false;
+
+        // One operator at a time: a second operator replaces the first
+        // instead of queueing two in a row, which the parser rejects.
+        let mut last = self.expr_len;
+        while last > 0 && self.expr_buf[last - 1] == b' ' {
+            last -= 1;
+        }
+        if last > 0 && matches!(self.expr_buf[last - 1], b'+' | b'-' | b'*' | b'/' | b'%' | b'^') {
+            self.expr_len = last;
+            self.expr_buf[last - 1] = op as u8;
+            if self.expr_len < self.expr_buf.len() {
+                self.expr_buf[self.expr_len] = b' ';
+                self.expr_len += 1;
+            }
+            return;
+        }
 
         // Append operator with spaces to expression if not trailing operator
         if self.expr_len > 0 && self.expr_buf[self.expr_len - 1] != b' ' {
@@ -1278,6 +1373,12 @@ impl CalculatorState {
             self.clear();
             return;
         }
+        if self.result_mode {
+            // A result is not the expression that produced it. Editing
+            // the hidden expression would change a number nobody can see.
+            self.clear();
+            return;
+        }
         if self.expr_len > 0 {
             // If trailing space, remove trailing space too
             if self.expr_buf[self.expr_len - 1] == b' ' {
@@ -1296,7 +1397,7 @@ impl CalculatorState {
             self.display_buf[0] = b'0';
             self.display_len = 1;
         } else {
-            self.update_display_from_operand();
+            self.update_display_from_expr_tail();
         }
     }
 
@@ -1504,6 +1605,12 @@ impl CalculatorState {
             self.clear();
             return;
         }
+        if self.result_mode {
+            // Clear-entry after a result clears the result, which is the
+            // number being shown.
+            self.clear();
+            return;
+        }
         // The trailing operator and its spaces are part of the pending
         // operation, so they stay.
         let mut end = self.expr_len;
@@ -1528,7 +1635,7 @@ impl CalculatorState {
             self.display_buf[0] = b'0';
             self.display_len = 1;
         } else {
-            self.update_display_from_operand();
+            self.update_display_from_expr_tail();
         }
     }
 
@@ -1579,7 +1686,7 @@ impl CalculatorState {
         } else {
             self.push_char('-');
         }
-        self.update_display_from_operand();
+        self.update_display_from_expr_tail();
     }
 
     pub fn toggle_history(&mut self) {
@@ -1630,6 +1737,51 @@ impl CalculatorState {
         }
         let copy_len = count.min(self.display_buf.len());
         self.display_buf[..copy_len].copy_from_slice(&digits[..copy_len]);
+        self.display_len = copy_len;
+    }
+
+    /// Shows the number currently being typed, which is the text after
+    /// the last operator.
+    ///
+    /// WHY the expression and not the legacy operand: the operand is an
+    /// integer, so a point typed into it is lost -- "1.5" was shown as
+    /// "15" and then fed to the old integer engine. The expression is
+    /// where every typed character actually lives.
+    fn update_display_from_expr_tail(&mut self) {
+        let mut end = self.expr_len;
+        while end > 0 && self.expr_buf[end - 1] == b' ' {
+            end -= 1;
+        }
+        let mut start = end;
+        while start > 0 {
+            let ch = self.expr_buf[start - 1];
+            if ch.is_ascii_digit() || ch == b'.' {
+                start -= 1;
+            } else {
+                break;
+            }
+        }
+        if start == end {
+            // The expression does not end in a number (it ends in an
+            // operator or a parenthesis), so the display keeps the last
+            // number it showed.
+            return;
+        }
+        // A minus in front of the number is its sign, not the
+        // subtraction to its left: "12 - 5" shows "5", "12 + -5" shows
+        // "-5", and "-5" at the start shows "-5".
+        if start > 0 && self.expr_buf[start - 1] == b'-' {
+            let is_sign = start == 1
+                || matches!(
+                    self.expr_buf[start - 2],
+                    b'(' | b'+' | b'-' | b'*' | b'/' | b'%' | b'^'
+                );
+            if is_sign {
+                start -= 1;
+            }
+        }
+        let copy_len = (end - start).min(self.display_buf.len());
+        self.display_buf[..copy_len].copy_from_slice(&self.expr_buf[start..start + copy_len]);
         self.display_len = copy_len;
     }
 }
@@ -2179,5 +2331,71 @@ mod tests {
         assert!(n_long > 3);
         assert!(text_width(&buf[..n_long], interos_std::design::typography::SECTION_CAP_PX) <= 200);
         assert!(&buf[n_long - 3..n_long] == b"...");
+    }
+
+    /// The equals key answers with decimal arithmetic: a half is a half,
+    /// not zero.
+    ///
+    /// WHY: the keypad used to hand the expression to the legacy integer
+    /// accumulator, which truncated every division to a whole number.
+    #[test]
+    fn test_the_equals_key_keeps_the_fraction() {
+        let mut calc = CalculatorState::new();
+        calc.clear();
+        for key in ['1', '/', '2', '='] {
+            assert!(calc.press_key(key));
+        }
+        assert!(!calc.error);
+        assert_eq!(calc.display_str(), "0.5");
+    }
+
+    /// A point typed on the keypad is shown while it is typed and is part
+    /// of the answer.
+    #[test]
+    fn test_a_point_is_shown_and_evaluated() {
+        let mut calc = CalculatorState::new();
+        calc.clear();
+        calc.press_key('1');
+        calc.press_key('.');
+        assert_eq!(calc.display_str(), "1.");
+        calc.press_key('5');
+        assert_eq!(calc.display_str(), "1.5");
+
+        calc.press_key('+');
+        calc.press_key('2');
+        calc.press_key('.');
+        calc.press_key('2');
+        calc.press_key('5');
+        assert_eq!(calc.display_str(), "2.25");
+        calc.press_key('=');
+        assert_eq!(calc.display_str(), "3.75");
+
+        // A point at the start of a number is "0.", and a second point in
+        // the same number is ignored.
+        calc.clear();
+        calc.press_key('.');
+        assert_eq!(calc.display_str(), "0.");
+        calc.press_key('5');
+        calc.press_key('.');
+        calc.press_key('2');
+        assert_eq!(calc.display_str(), "0.52");
+    }
+
+    /// One operator at a time, and a result is a fresh operand.
+    #[test]
+    fn test_operators_replace_and_a_result_starts_a_new_expression() {
+        let mut calc = CalculatorState::new();
+        calc.clear();
+        for key in ['1', '+', '-', '2', '='] {
+            calc.press_key(key);
+        }
+        assert_eq!(calc.display_str(), "-1");
+
+        // A result followed by an operator must not append to the hidden
+        // expression that produced it.
+        calc.press_key('*');
+        calc.press_key('4');
+        calc.press_key('=');
+        assert_eq!(calc.display_str(), "-4");
     }
 }
