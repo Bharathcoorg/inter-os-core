@@ -142,6 +142,8 @@ const HOME_RECT: Rect = Rect::new(260, 1418, 200, 6);
 // Video Library Drawer / Sheet Layout
 const LIB_LIST_Y0: usize = 108;
 const LIB_ROW_H: usize = 68;
+/// The bottom of the library list's viewport.
+const LIB_VIEW_Y1: usize = 1390;
 
 // -----------------------------------------------------------------------------
 // Static Bounded Buffers (Zero Dynamic Allocations)
@@ -292,6 +294,9 @@ pub struct VideoApp {
     pub volume_percent: u32,
     pub is_muted: bool,
     pub saved_volume: u32,
+    /// Whether the system actually reported its volume. Until it does, the
+    /// bar shows an unknown state instead of inventing a level.
+    pub volume_known: bool,
     pub speed_accum_ms: u32,
     pub library_scroll: usize,
     pub frame_counter: u32,
@@ -319,9 +324,10 @@ impl VideoApp {
             info_open: false,
             pip_mode: false,
             hud_visible: true,
-            volume_percent: 80,
+            volume_percent: 0,
             is_muted: false,
-            saved_volume: 80,
+            saved_volume: 0,
+            volume_known: false,
             speed_accum_ms: 0,
             library_scroll: 0,
             frame_counter: 0,
@@ -1124,7 +1130,7 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
             }
         } else {
             // Idle state in landscape
-            let msg = b"VLC MEDIA PLAYER - LANDSCAPE";
+            let msg = b"NO MEDIA OPEN";
             let mw = font::measure_bold(msg, 2);
             let mx = (W.saturating_sub(mw)) / 2;
             if let Some(col) = draw_text_bold(x, y, mx, H / 2 - 20, 2, msg, COLOR_TEXT_PRIMARY, COLOR_SURFACE) {
@@ -1258,7 +1264,11 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
                 // Volume Bar in Landscape (y: 1290)
                 let l_vol_x = 120;
                 let l_vol_w = 460;
-                let l_vol_thumb = volume_thumb_x(l_vol_x, l_vol_w, if app.is_muted { 0 } else { app.volume_percent });
+                let l_vol_thumb = volume_thumb_x(
+                    l_vol_x,
+                    l_vol_w,
+                    if app.is_muted || !app.volume_known { 0 } else { app.volume_percent },
+                );
                 let vdx = (x as i32) - (l_vol_thumb as i32);
                 let vdy = (y as i32) - ((1290 + 4) as i32);
                 if vdx * vdx + vdy * vdy <= 36 {
@@ -1353,11 +1363,15 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
         }
 
         // Playlist Rows (y: 108..1390)
-        let list_y = y - LIB_LIST_Y0;
-        let row_idx = (list_y / LIB_ROW_H) + app.library_scroll;
+        //
+        // WHY the offset is in pixels: a drag delivers a few pixels per event,
+        // and a row-quantised offset discarded every drag shorter than a row,
+        // so a list longer than the screen could not be scrolled at all.
+        let content_y = (y - LIB_LIST_Y0) + app.library_scroll;
+        let row_idx = content_y / LIB_ROW_H;
 
         if row_idx < app.playlist.count {
-            let row_y0 = LIB_LIST_Y0 + (row_idx - app.library_scroll) * LIB_ROW_H;
+            let row_y0 = LIB_LIST_Y0 + row_idx * LIB_ROW_H - app.library_scroll;
             let is_current = row_idx == app.playlist.current;
             let row_bg = if is_current { COLOR_SURFACE } else { COLOR_BG };
 
@@ -1378,8 +1392,11 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
             let icon_cy = row_y0 + 32;
             let idx_x = (x as i32) - (icon_cx as i32);
             let idx_y = (y as i32) - (icon_cy as i32);
-            if is_current {
-                // Play triangle
+            if is_current && app.state == PlaybackState::Playing {
+                // Play triangle, only while the decoder is actually playing:
+                // the accent bar already marks the current row, and a
+                // triangle on a refused file claimed playback that was not
+                // happening.
                 if idx_x >= -4 && idx_x <= 6 && idx_y.abs() <= (6 - idx_x) * 6 / 10 {
                     return COLOR_TEXT_PRIMARY;
                 }
@@ -1670,14 +1687,14 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
             }
 
             // Idle Placeholder
-            let msg1 = b"VLC MEDIA PLAYER SURFACE";
+            let msg1 = b"NO MEDIA OPEN";
             let mw1 = font::measure_bold(msg1, 2);
             let mx1 = (W.saturating_sub(mw1)) / 2;
             if let Some(col) = draw_text_bold(x, y, mx1, CANVAS_Y0 + 150, 2, msg1, COLOR_TEXT_PRIMARY, COLOR_SURFACE) {
                 return col;
             }
 
-            let msg2 = b"Supports AVI/MJPEG, PPM P6, RAW RGB24";
+            let msg2 = b"Supported: AVI (MJPEG), PPM P6, RAW RGB24";
             let mw2 = font::measure(msg2, 1);
             let mx2 = (W.saturating_sub(mw2)) / 2;
             if let Some(col) = draw_text(x, y, mx2, CANVAS_Y0 + 190, 1, msg2, COLOR_TEXT_MUTED, COLOR_SURFACE) {
@@ -1806,8 +1823,8 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
                 return COLOR_TEXT_PRIMARY;
             }
 
-            if app.is_muted {
-                // Cross mark on muted
+            if app.is_muted || !app.volume_known {
+                // Cross mark on muted, and on a level the system never reported.
                 if dx >= 6 && dx <= 14 && dy.abs() <= 6 && ((dx - 10) - dy).abs() <= 1 {
                     return 0xFFE05A68;
                 }
@@ -1825,7 +1842,7 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
         }
 
         // Volume Bar
-        let eff_vol = if app.is_muted { 0 } else { app.volume_percent };
+        let eff_vol = if app.is_muted || !app.volume_known { 0 } else { app.volume_percent };
         let thumb_x = volume_thumb_x(VOL_BAR_X, VOL_BAR_W, eff_vol);
 
         // Circular Thumb (r=7)
@@ -1849,6 +1866,9 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
         if app.is_muted {
             vbuf[..4].copy_from_slice(b"MUTE");
             vn = 4;
+        } else if !app.volume_known {
+            vbuf[..2].copy_from_slice(b"--");
+            vn = 2;
         } else {
             let mut v = app.volume_percent;
             let mut digits = [0u8; 4];
@@ -2207,11 +2227,46 @@ fn handle_touch(app: &mut VideoApp, px: u32, py: u32) -> EventAction {
                 return EventAction::Redraw(Dirty::All);
             }
 
+            // Previous and Next controls in landscape. They are drawn beside
+            // the play control, so a tap on one has to do what it looks like.
+            if Rect::new(206, 1186, 48, 48).contains(x, y) {
+                if app.avi.is_some() {
+                    app.load_current_track();
+                    app.state = if app.has_frame {
+                        PlaybackState::Playing
+                    } else {
+                        PlaybackState::Stopped
+                    };
+                } else if app.playlist.prev().is_some() {
+                    app.load_current_track();
+                    app.state = if app.has_frame {
+                        PlaybackState::Playing
+                    } else {
+                        PlaybackState::Stopped
+                    };
+                }
+                let _ = std::audio_haptic_click();
+                return EventAction::Redraw(Dirty::All);
+            }
+            if Rect::new(466, 1186, 48, 48).contains(x, y) {
+                if app.playlist.next(app.loop_mode).is_some() {
+                    app.load_current_track();
+                    app.state = if app.has_frame {
+                        PlaybackState::Playing
+                    } else {
+                        PlaybackState::Stopped
+                    };
+                }
+                let _ = std::audio_haptic_click();
+                return EventAction::Redraw(Dirty::All);
+            }
+
             // Volume bar in landscape (y: 1280..1310)
             if y >= 1280 && y <= 1310 && x >= 110 && x <= 590 {
                 let pct = volume_seek_percent(x, 120, 460);
                 app.volume_percent = pct;
                 app.is_muted = false;
+                app.volume_known = true;
                 let _ = std::audio_set_volume(pct);
                 return EventAction::Redraw(Dirty::All);
             }
@@ -2219,6 +2274,7 @@ fn handle_touch(app: &mut VideoApp, px: u32, py: u32) -> EventAction {
             // Speaker mute in landscape
             if Rect::new(40, 1274, 52, 52).contains(x, y) {
                 app.is_muted = !app.is_muted;
+                app.volume_known = true;
                 let eff_vol = if app.is_muted { 0 } else { app.volume_percent };
                 let _ = std::audio_set_volume(eff_vol);
                 let _ = std::audio_haptic_click();
@@ -2257,12 +2313,21 @@ fn handle_touch(app: &mut VideoApp, px: u32, py: u32) -> EventAction {
         }
 
         // Video row selection
-        if y >= LIB_LIST_Y0 && y < LIB_LIST_Y0 + app.playlist.count * LIB_ROW_H {
-            let row_idx = ((y - LIB_LIST_Y0) / LIB_ROW_H) + app.library_scroll;
+        if y >= LIB_LIST_Y0 && y < LIB_VIEW_Y1 {
+            let row_idx = ((y - LIB_LIST_Y0) + app.library_scroll) / LIB_ROW_H;
             if row_idx < app.playlist.count {
                 app.playlist.select(row_idx);
                 app.load_current_track();
-                app.state = PlaybackState::Playing;
+                // WHY the state follows the decoder: selecting a row used to
+                // claim playback even when the file was refused (an H.264
+                // stream with no hardware decoder, or a malformed container),
+                // so the screen read "playing" over an error canvas. A row
+                // is playing only when a frame was actually decoded.
+                app.state = if app.has_frame {
+                    PlaybackState::Playing
+                } else {
+                    PlaybackState::Stopped
+                };
                 let _ = std::audio_haptic_click();
                 if !app.pip_mode {
                     app.library_open = false;
@@ -2350,6 +2415,7 @@ fn handle_touch(app: &mut VideoApp, px: u32, py: u32) -> EventAction {
     // Volume HUD: Speaker Mute Toggle
     if VOL_MUTE_BTN.contains(x, y) {
         app.is_muted = !app.is_muted;
+        app.volume_known = true;
         let eff_vol = if app.is_muted { 0 } else { app.volume_percent };
         let _ = std::audio_set_volume(eff_vol);
         let _ = std::audio_haptic_click();
@@ -2361,6 +2427,7 @@ fn handle_touch(app: &mut VideoApp, px: u32, py: u32) -> EventAction {
         let pct = volume_seek_percent(x, VOL_BAR_X, VOL_BAR_W);
         app.volume_percent = pct;
         app.is_muted = false;
+        app.volume_known = true;
         let _ = std::audio_set_volume(pct);
         return EventAction::Redraw(Dirty::Volume);
     }
@@ -2435,10 +2502,12 @@ pub extern "C" fn _start() -> ! {
 
     let mut app = VideoApp::new();
 
-    // Query system volume
+    // Query system volume. A failed query leaves the level unknown rather
+    // than showing a made-up 80%.
     if let Ok(vol) = std::audio_query_volume() {
         app.volume_percent = vol.min(100);
         app.saved_volume = app.volume_percent;
+        app.volume_known = true;
     }
 
     // Scan real video storage from /storage/videos and /storage/downloads
@@ -2524,16 +2593,19 @@ pub extern "C" fn _start() -> ! {
                                     std::input_key_code::ARROW_UP => {
                                         app.volume_percent = (app.volume_percent + 10).min(100);
                                         app.is_muted = false;
+                                        app.volume_known = true;
                                         let _ = std::audio_set_volume(app.volume_percent);
                                         dirty = merge_dirty(dirty, Dirty::Volume);
                                     }
                                     std::input_key_code::ARROW_DOWN => {
                                         app.volume_percent = app.volume_percent.saturating_sub(10);
+                                        app.volume_known = true;
                                         let _ = std::audio_set_volume(app.volume_percent);
                                         dirty = merge_dirty(dirty, Dirty::Volume);
                                     }
                                     code if code == b'm' as u32 || code == b'M' as u32 => {
                                         app.is_muted = !app.is_muted;
+                                        app.volume_known = true;
                                         let eff_vol =
                                             if app.is_muted { 0 } else { app.volume_percent };
                                         let _ = std::audio_set_volume(eff_vol);
@@ -2565,6 +2637,28 @@ pub extern "C" fn _start() -> ! {
                             || input.kind == 8
                             || input.kind == 10
                         {
+                            // A drag over the open library is the list's own
+                            // gesture; only a drag anywhere else is the system
+                            // navigation gesture.
+                            let over_library = app.library_open
+                                && (input.y as usize) >= LIB_LIST_Y0
+                                && (input.y as usize) < LIB_VIEW_Y1;
+                            if (input.kind == 4 || input.kind == 10) && over_library {
+                                let content_h = app.playlist.count * LIB_ROW_H;
+                                let viewport_h = LIB_VIEW_Y1 - LIB_LIST_Y0;
+                                let max = content_h.saturating_sub(viewport_h);
+                                if input.dy < 0 {
+                                    app.library_scroll = app
+                                        .library_scroll
+                                        .saturating_add((-input.dy) as usize)
+                                        .min(max);
+                                } else {
+                                    app.library_scroll =
+                                        app.library_scroll.saturating_sub(input.dy as usize);
+                                }
+                                dirty = merge_dirty(dirty, Dirty::All);
+                                continue;
+                            }
                             if input.y >= 1400 {
                                 app.close_avi();
                                 if surface > 0 {
