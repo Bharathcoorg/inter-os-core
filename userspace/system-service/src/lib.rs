@@ -263,7 +263,15 @@ pub fn run_storage() -> ! {
             } else {
                 let _ = std::log("[storaged] filesystem write capability missing.");
             }
-            last_tick = now;
+            // WHY the interval is stamped after the burst rather than before it: the
+            // gate is measured in the same ticks the burst consumes, and every one of
+            // fs_open/fs_write/fs_close persists the whole filesystem, so a burst can
+            // cost far more than the interval it is checked against. Stamping the tick
+            // read before the work let such a burst re-satisfy `>= 100` on the very
+            // next iteration, which kept the gate permanently open: storaged then ran
+            // a full snapshot commit every pass and held ~98% of all scheduler ticks,
+            // so an app task only saw the taps that landed in the gaps.
+            last_tick = timer_slot.and_then(|_| std::get_ticks().ok()).unwrap_or(now);
         }
         if has_epoll {
             let _ = std::event_poll(std::EVENT_TIMER_TICK, 20);
