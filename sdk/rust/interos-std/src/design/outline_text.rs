@@ -372,15 +372,31 @@ impl OutlineRun {
         if em == 0 || text.is_empty() || text.len() > KEY_MAX {
             return None;
         }
-        // An unencodable character advances by zero. Refuse the whole run
-        // rather than draw a partly overlapping one.
-        if text.iter().any(|&c| typeface::advance_px(c, em) == 0) {
-            return None;
+        // WHY one walk covers the gate, the width and the pen: the face is
+        // indexed by code point, and a walk of bytes reads the continuation
+        // bytes of a multi-byte sequence as characters the face has not got.
+        // The advance of such a byte is zero, and refusing on it discarded a
+        // run this face can draw -- the accented word in a heading fell to the
+        // bitmap cell, so the heading came out in two sizes. Measuring and
+        // drawing from the same walk also means the width a caller lays out
+        // with cannot disagree with the glyphs that land on the surface.
+        let mut pen = 0u32;
+        let mut i = 0usize;
+        while i < text.len() {
+            let (cp, next) = codepoint_at(text, i);
+            let adv = typeface::advance_codepoint(cp, em);
+            // An unencodable character advances by zero. Refuse the whole run
+            // rather than draw a partly overlapping one.
+            if adv == 0 {
+                return None;
+            }
+            pen += adv;
+            i = next;
         }
 
         let (ascent, descent) = typeface::line_metrics(em);
         let line_h = (ascent + descent) as usize;
-        let w = typeface::text_advance_px(text, em) as usize + if bold { 1 } else { 0 };
+        let w = pen as usize + if bold { 1 } else { 0 };
         if w == 0 || w > RUN_W_MAX || line_h > RUN_H_MAX {
             return None;
         }
@@ -455,16 +471,19 @@ impl OutlineRun {
             *p = 0;
         }
 
-        // WHY the pen is walked in pixels and not in 16.16: `raster` takes an
-        // integer pixel origin and scales internally, and the face's advances
-        // are rounded to whole pixels by `advance_px`. A sub-pixel pen would
-        // need a fractional origin, which this signature does not offer, and at
-        // the sizes this module serves the rounding is below the visible error
-        // of a 16x24 bitmap cell -- but it is a known limit, not an oversight.
+        // WHY the pen is walked in pixels and not in 16.16: `raster_codepoint`
+        // takes an integer pixel origin and scales internally, and the face's
+        // advances are rounded to whole pixels by `advance_codepoint`. A
+        // sub-pixel pen would need a fractional origin, which this signature
+        // does not offer, and at the sizes this module serves the rounding is
+        // below the visible error of a 16x24 bitmap cell -- but it is a known
+        // limit, not an oversight.
         let mut pen = 0i32;
-        for &c in text {
-            let _ = typeface::raster(
-                c,
+        let mut i = 0usize;
+        while i < text.len() {
+            let (cp, next) = codepoint_at(text, i);
+            let _ = typeface::raster_codepoint(
+                cp,
                 em,
                 pen,
                 ascent as i32,
@@ -474,8 +493,8 @@ impl OutlineRun {
                     h: line_h,
                 },
             );
-            let adv = typeface::advance_px(c, em) as i32;
-            pen += adv;
+            pen += typeface::advance_codepoint(cp, em) as i32;
+            i = next;
         }
 
         if bold {
@@ -654,11 +673,22 @@ pub fn drawn_advance(text: &[u8], scale: usize, max_w: Option<usize>) -> Option<
         return None;
     }
     let em = em_for_scale(scale);
-    if text.iter().any(|&c| typeface::advance_px(c, em) == 0) {
-        return None;
+    // WHY the same walk as `place_styled`: this is the width a caller reserves
+    // before asking for the run, so a gate here that reads bytes would refuse a
+    // run the placement accepts, and the caller would measure it with the bitmap
+    // face while the surface draws it with the outline one.
+    let mut total = 0usize;
+    let mut i = 0usize;
+    while i < text.len() {
+        let (cp, next) = codepoint_at(text, i);
+        let adv = typeface::advance_codepoint(cp, em);
+        if adv == 0 {
+            return None;
+        }
+        total += adv as usize;
+        i = next;
     }
-    let w = typeface::text_advance_px(text, em) as usize;
-    if w == 0 || w > RUN_W_MAX {
+    if total == 0 || total > RUN_W_MAX {
         return None;
     }
     let (ascent, descent) = typeface::line_metrics(em);
@@ -666,11 +696,52 @@ pub fn drawn_advance(text: &[u8], scale: usize, max_w: Option<usize>) -> Option<
         return None;
     }
     if let Some(mw) = max_w {
-        if w > mw {
+        if total > mw {
             return None;
         }
     }
-    Some(w)
+    Some(total)
+}
+
+/// The code point starting at byte `i`, and the index of the byte after it.
+///
+/// WHY hand-decoded rather than `core::str::from_utf8`: `from_utf8` validates
+/// the whole remaining slice, and this is called for every character of every
+/// run, so a per-character validate would make measuring a run quadratic.
+///
+/// WHY the lead byte on a broken sequence: a lone `0xC3` is what the byte walk
+/// this replaces already drew, and a decoder that invented `U+FFFD` here would
+/// silently rewrite text a caller is comparing against.
+fn codepoint_at(text: &[u8], i: usize) -> (u32, usize) {
+    let lead = text[i];
+    let len = if lead < 0x80 {
+        1
+    } else if lead & 0xE0 == 0xC0 {
+        2
+    } else if lead & 0xF0 == 0xE0 {
+        3
+    } else if lead & 0xF8 == 0xF0 {
+        4
+    } else {
+        0
+    };
+    if len == 0 || i + len > text.len() {
+        return (lead as u32, i + 1);
+    }
+    let mut cp = match len {
+        1 => return (lead as u32, i + 1),
+        2 => (lead & 0x1F) as u32,
+        3 => (lead & 0x0F) as u32,
+        _ => (lead & 0x07) as u32,
+    };
+    for k in 1..len {
+        let c = text[i + k];
+        if c & 0xC0 != 0x80 {
+            return (lead as u32, i + 1);
+        }
+        cp = (cp << 6) | (c & 0x3F) as u32;
+    }
+    (cp, i + len)
 }
 
 #[cfg(test)]
@@ -723,6 +794,51 @@ mod tests {
         // The baseline is `ascent` rows below the top of the line box, so the
         // run reaches exactly `ascent` above its baseline and no further.
         assert_eq!(run.y.saturating_sub(run.ascent), 200 - ascent as usize);
+    }
+
+    #[test]
+    fn a_multibyte_word_the_face_has_is_not_refused() {
+        let _pool: Option<_> = Some(reset_slots());
+        // "café" ends in U+00E9, which the face maps, written as 0xC3 0xA9.
+        // Walking bytes rather than code points measured each half of that
+        // pair as an absent character with a zero advance and threw the run
+        // away, so the accented word in an otherwise outline line was handed
+        // to the bitmap cell -- one line, two sizes.
+        let cafe = "café".as_bytes();
+        let run = placed(40, cafe);
+        assert_eq!(
+            run.w,
+            typeface::text_advance_px(cafe, 40) as usize,
+            "the width the run was measured with is the width the pen walked"
+        );
+        assert!(run.w > 0);
+    }
+
+    #[test]
+    fn drawn_advance_agrees_with_the_run_it_predicts() {
+        let _pool: Option<_> = Some(reset_slots());
+        // WHY this matters on its own: `drawn_advance` is what a caller
+        // reserves before it asks for the run. If it refused the multi-byte
+        // word that `place_styled` accepts, the caller would centre or clip
+        // the string at the bitmap face's width and the drawn glyphs would
+        // spill past it.
+        for text in ["café".as_bytes(), "Zoö".as_bytes(), b"plain"] {
+            for scale in [1usize, 2, 3] {
+                let em = em_for_scale(scale);
+                let run = OutlineRun::place(0, 200, em, text).expect("run placed");
+                assert_eq!(drawn_advance(text, scale, None), Some(run.w));
+            }
+        }
+    }
+
+    #[test]
+    fn a_codepoint_outside_the_face_still_refuses_the_whole_run() {
+        let _pool: Option<_> = Some(reset_slots());
+        // The refusal is the point: a character with no outline advances by
+        // nothing, and drawing it would stack every later glyph on its
+        // neighbour. Dropping to the other face for the run is the honest
+        // answer, so the gate must stay -- it just has to test characters.
+        assert!(OutlineRun::place(0, 200, 40, "你好".as_bytes()).is_none());
     }
 
     #[test]
