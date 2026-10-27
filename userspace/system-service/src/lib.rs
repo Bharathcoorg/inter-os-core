@@ -975,6 +975,7 @@ mod tests {
 
     #[test]
     fn test_handle_ipc_generate_when_absent_reports_truthful_unavailable() {
+        let _lock = TEST_CANCEL_LOCK.lock().unwrap();
         let mut tx_buf = [0u8; 1024];
         let empty_models = gguf::ProbedModels::empty();
         handle_ipc_inference_query(
@@ -1000,6 +1001,7 @@ mod tests {
 
     #[test]
     fn test_handle_ipc_generate_when_weights_unreadable_reports_truthful_unavailable() {
+        let _lock = TEST_CANCEL_LOCK.lock().unwrap();
         let mut tx_buf = [0u8; 1024];
         let hdr = gguf::GgufHeader {
             magic: gguf::GGUF_MAGIC,
