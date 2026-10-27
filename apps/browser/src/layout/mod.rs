@@ -14,8 +14,8 @@ pub mod style;
 
 pub use dom::{DocMeta, Dom, NodeId, NO_LINK, NO_NODE, StrRef};
 pub use flow::{
-    build, overflow_note, FieldItem, FormInfo, FormMethod, ImageItem, LinkBox, RectItem, RectKind,
-    TextLayout, TextRun, MAX_FIELDS, MAX_IMAGES, MAX_LINK_BOXES, MAX_RECTS, MAX_TEXT_RUNS,
-    OVERFLOW_BUDGETS,
+    build, build_with_outcomes, overflow_note, FieldItem, FormInfo, FormMethod, ImageItem,
+    ImageOutcome, LinkBox, RectItem, RectKind, TextLayout, TextRun, MAX_FIELDS, MAX_IMAGES,
+    MAX_LINK_BOXES, MAX_RECTS, MAX_TEXT_RUNS, OVERFLOW_BUDGETS, UNKNOWN_OUTCOMES,
 };
 pub use style::{BoxStyle, Display, FieldKind, InputType};

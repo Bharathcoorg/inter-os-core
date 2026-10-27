@@ -231,6 +231,11 @@ pub struct ImageItem {
     pub src: StrRef,
     pub alt: StrRef,
     pub link: u8,
+    /// The size the markup asked for, zero where it asked for nothing. The
+    /// fetched picture is scaled into this box; the width the layout had to
+    /// assume in its place is not a size the author named.
+    pub declared_w: u16,
+    pub declared_h: u16,
 }
 
 impl ImageItem {
@@ -243,8 +248,28 @@ impl ImageItem {
         src: StrRef::EMPTY,
         alt: StrRef::EMPTY,
         link: NO_LINK,
+        declared_w: 0,
+        declared_h: 0,
     };
 }
+
+/// What an earlier pass learned about one image slot.
+///
+/// WHY the layout needs to be told: whether a picture can be shown, and how
+/// large it lands, is only known once its bytes have been fetched, and that
+/// is after the column has already been laid out. The second pass uses what
+/// was learned so nothing reserves room the page never fills.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ImageOutcome {
+    /// Nothing is known yet, so the box the markup declared is kept.
+    Unknown,
+    /// The box the placed image needs, in pixels.
+    Placed { w: usize, h: usize },
+}
+
+/// Every slot unknown: what a page is laid out with before its images have
+/// been fetched.
+pub const UNKNOWN_OUTCOMES: [ImageOutcome; MAX_IMAGES] = [ImageOutcome::Unknown; MAX_IMAGES];
 
 /// One form control. The fields are what a submission would send.
 #[derive(Clone, Copy, Debug)]
@@ -426,11 +451,34 @@ impl Default for TextLayout {
 
 /// Lays `dom` out in a column `width` pixels wide.
 pub fn build(dom: &Dom, sheet: &css::Stylesheet<'_>, width: usize, out: &mut TextLayout) {
+    build_with_outcomes(dom, sheet, width, &UNKNOWN_OUTCOMES, out);
+}
+
+/// Lays `dom` out again, with the boxes its fetched images ended up needing.
+///
+/// WHY a second pass and not a patch: everything below an image sits where
+/// the column put it, so when a picture lands at a different size than the
+/// markup declared — or cannot be shown at all — only re-flowing moves the
+/// text back under it. A patched box would leave the notice's card small and
+/// the hole it was drawn in behind.
+///
+/// The slots keep their numbers between passes: they are handed out in
+/// document order under the same cap, so the images already fetched still
+/// line up with the display list that names them, and the second pass fetches
+/// nothing.
+pub fn build_with_outcomes(
+    dom: &Dom,
+    sheet: &css::Stylesheet<'_>,
+    width: usize,
+    outcomes: &[ImageOutcome],
+    out: &mut TextLayout,
+) {
     out.clear();
     let width = width.max(32);
     let mut builder = Builder {
         dom,
         sheet,
+        outcomes,
         out,
         segs: Segs::new(),
         overflow: dom.overflow(),
@@ -460,6 +508,8 @@ fn find_body(dom: &Dom, root: NodeId) -> NodeId {
 struct Builder<'a, 's> {
     dom: &'a Dom,
     sheet: &'s css::Stylesheet<'s>,
+    /// What the images of an earlier pass turned out to be, by slot.
+    outcomes: &'a [ImageOutcome],
     out: &'a mut TextLayout,
     /// The inline segments collected but not yet laid into lines. One list
     /// for the whole page, emptied whenever it fills.
@@ -1248,32 +1298,15 @@ impl<'a, 's> Builder<'a, 's> {
                 }
                 Seg::Image { node, link } => {
                     let style = style::compute(dom, node, self.sheet, None);
-                    let w = if style.width > 0 {
-                        (style.width as usize).min(width)
-                    } else {
-                        160.min(width)
-                    };
-                    let h = if style.height > 0 {
-                        style.height as usize
-                    } else {
-                        120
-                    };
+                    let slot = self.place_image(style.src);
+                    let (w, h) = self.image_box(slot, &style, width);
                     if line_x > left && line_x + w as i32 > right {
                         line_y += line_h.max(1);
                         line_x = left;
                         line_h = 0;
                     }
-                    let slot = self.place_image(style.src);
-                    let (used_w, used_h) = self.push_image(
-                        line_x,
-                        line_y,
-                        w.max(1),
-                        h.max(1),
-                        slot,
-                        style.src,
-                        style.alt,
-                        link,
-                    );
+                    let (used_w, used_h) =
+                        self.push_image(line_x, line_y, w, h, slot, &style, link);
                     line_x += used_w;
                     line_h = line_h.max(used_h.max(1));
                     emitted = true;
@@ -1326,6 +1359,36 @@ impl<'a, 's> Builder<'a, 's> {
                 );
             }
         }
+    }
+
+    /// The box an image is given before its bytes are known.
+    ///
+    /// WHY the column for an undeclared width: a picture's own size is not
+    /// known yet, and a narrow guess would be fitted to and keep the picture
+    /// small. The second pass, which knows, shrinks the box to what landed.
+    fn image_box(&self, slot: u8, style: &BoxStyle, column: usize) -> (usize, usize) {
+        if let Some(ImageOutcome::Placed { w, h }) = self.outcome(slot) {
+            return (w.min(column).max(1), h.max(1));
+        }
+        let w = if style.width > 0 {
+            (style.width as usize).min(column)
+        } else {
+            column
+        };
+        let h = if style.height > 0 {
+            style.height as usize
+        } else {
+            120
+        };
+        (w.max(1), h.max(1))
+    }
+
+    /// What the earlier pass left behind for this slot, if anything.
+    fn outcome(&self, slot: u8) -> Option<ImageOutcome> {
+        if slot == 255 {
+            return None;
+        }
+        self.outcomes.get(slot as usize).copied()
     }
 
     /// Reserves an image slot for `src`, or returns 255 when there is no
@@ -1415,10 +1478,10 @@ impl<'a, 's> Builder<'a, 's> {
         w: usize,
         h: usize,
         slot: u8,
-        src: StrRef,
-        alt: StrRef,
+        style: &BoxStyle,
         link: u8,
     ) -> (i32, i32) {
+        let (src, alt) = (style.src, style.alt);
         if slot != 255 {
             self.out.images[slot as usize] = ImageItem {
                 x: x.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
@@ -1429,6 +1492,8 @@ impl<'a, 's> Builder<'a, 's> {
                 src,
                 alt,
                 link,
+                declared_w: style.width,
+                declared_h: style.height,
             };
             self.expand_link(link, x, y, w as i32, h as i32);
             return (w as i32, h as i32);
@@ -2001,6 +2066,83 @@ mod tests {
         assert_eq!(image.h, 80);
         assert_eq!(image.src.get(&dom), b"/a.png");
         assert_eq!(image.alt.get(&dom), b"A picture");
+    }
+
+    #[test]
+    fn a_declared_image_size_is_carried_for_the_fetch_to_fit_into() {
+        let (_dom, out) = layout_html(
+            b"<p><img src='/a.png' alt='A picture' width='120' height='80'></p>",
+            300,
+        );
+        assert_eq!(out.images[0].declared_w, 120);
+        assert_eq!(out.images[0].declared_h, 80);
+        assert_eq!(out.images[0].w, 120);
+        assert_eq!(out.images[0].h, 80);
+    }
+
+    #[test]
+    fn an_image_that_declares_no_size_is_offered_the_whole_column() {
+        // WHY not a small guess: the bytes are not in yet, and a picture is
+        // fitted to the width it is offered. A guessed 160 made a hero that
+        // could fill the page arrive as a thumbnail, and no later pass could
+        // widen what had already been scaled down.
+        let (_dom, out) = layout_html(b"<p><img src='/hero.png'></p>", 600);
+        assert_eq!(out.images[0].w, 600);
+        assert_eq!(out.images[0].declared_w, 0);
+        assert_eq!(out.images[0].declared_h, 0);
+    }
+
+    #[test]
+    fn the_second_pass_gives_an_image_the_box_it_ended_up_needing() {
+        let (dom, first) = layout_html(b"<p><img src='/a.png'></p><p>Under</p>", 600);
+        let sheet = css::parse_stylesheet(dom.css());
+        let outcomes = [ImageOutcome::Placed { w: 200, h: 90 }; MAX_IMAGES];
+        let mut out = TextLayout::new();
+        build_with_outcomes(&dom, &sheet, 600, &outcomes, &mut out);
+        assert_eq!(out.images[0].w, 200);
+        assert_eq!(out.images[0].h, 90);
+        assert!(
+            out.height < first.height,
+            "the text below moves up into the room the guess wasted: {} against {}",
+            out.height,
+            first.height
+        );
+    }
+
+    #[test]
+    fn a_slot_with_no_outcome_keeps_the_box_the_markup_declared() {
+        let (dom, _first) = layout_html(b"<img src='/a.png' width='120' height='80'>", 600);
+        let sheet = css::parse_stylesheet(dom.css());
+        let mut out = TextLayout::new();
+        build_with_outcomes(&dom, &sheet, 600, &UNKNOWN_OUTCOMES, &mut out);
+        assert_eq!(out.images[0].w, 120);
+        assert_eq!(out.images[0].h, 80);
+    }
+
+    #[test]
+    fn the_second_pass_hands_out_the_same_slots_in_the_same_order() {
+        // The fetched pictures are indexed by slot, so a second pass that
+        // renumbered them would draw the wrong picture under the right box.
+        let (dom, _first) = layout_html(b"<img src='/a.png'><img src='/b.png'><img>", 600);
+        let sheet = css::parse_stylesheet(dom.css());
+        let outcomes = [
+            ImageOutcome::Placed { w: 100, h: 40 },
+            ImageOutcome::Placed { w: 120, h: 60 },
+            ImageOutcome::Unknown,
+            ImageOutcome::Unknown,
+            ImageOutcome::Unknown,
+            ImageOutcome::Unknown,
+            ImageOutcome::Unknown,
+            ImageOutcome::Unknown,
+        ];
+        let mut out = TextLayout::new();
+        build_with_outcomes(&dom, &sheet, 600, &outcomes, &mut out);
+        assert_eq!(out.image_count, 2);
+        assert_eq!(out.images[0].slot, 0);
+        assert_eq!(out.images[1].slot, 1);
+        assert_eq!(out.images[0].src.get(&dom), b"/a.png");
+        assert_eq!(out.images[1].src.get(&dom), b"/b.png");
+        assert_eq!(out.images[1].w, 120);
     }
 
     #[test]

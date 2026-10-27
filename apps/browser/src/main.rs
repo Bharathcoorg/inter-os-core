@@ -2438,6 +2438,28 @@ impl BrowserApp {
         self.image_count - 1
     }
 
+    /// The box one placed image needs: its own size when it decoded, and
+    /// the notice's strip when it did not.
+    ///
+    /// WHY the notice is measured and not given the markup's box: a page
+    /// whose hero is too large for the reader would otherwise open a hole
+    /// the height of the screen around the one line that says so.
+    fn placed_image_box(slot: &PlacedImage) -> (usize, usize) {
+        match slot.status {
+            images::ImageStatus::Decoded => (
+                slot.display_w.max(1).min(browser::CONTENT_WIDTH),
+                slot.display_h.max(1),
+            ),
+            images::ImageStatus::Refused(refusal) => {
+                let notice = font::measure(refusal.placeholder(), 1) as usize + 24;
+                (
+                    notice.min(browser::CONTENT_WIDTH).max(64),
+                    images::PLACEHOLDER_HEIGHT,
+                )
+            }
+        }
+    }
+
     pub fn load_document_content(&mut self, content: &[u8]) {
         self.doc_line_count = 0;
         self.doc_total_lines = 0;
@@ -2695,10 +2717,41 @@ impl BrowserApp {
             let marker = images::ImageMarker {
                 src: &src[..src_len],
                 alt: &alt[..alt_len],
-                declared_w: None,
-                declared_h: None,
+                declared_w: if item.declared_w > 0 {
+                    Some(item.declared_w)
+                } else {
+                    None
+                },
+                declared_h: if item.declared_h > 0 {
+                    Some(item.declared_h)
+                } else {
+                    None
+                },
             };
             self.place_image(marker, (item.w as usize).max(1));
+        }
+
+        // The bytes are in, and a picture does not always land in the box
+        // the markup drew. Re-flow so the text sits under the image that
+        // actually arrived, and so an image that could not be shown keeps
+        // the notice's strip instead of the whole hole.
+        //
+        // WHY this cannot fetch again: layout hands out slots in document
+        // order under a fixed cap, so the second pass names the same slots
+        // the fetches already filled.
+        let mut outcomes = [layout::ImageOutcome::Unknown; layout::MAX_IMAGES];
+        let mut reflow = false;
+        for slot in 0..image_count {
+            let (w, h) = Self::placed_image_box(&self.images[slot]);
+            let item = out.images[slot];
+            if w != item.w as usize || h != item.h as usize {
+                outcomes[slot] = layout::ImageOutcome::Placed { w, h };
+                reflow = true;
+            }
+        }
+        if reflow {
+            let sheet = css::parse_stylesheet(dom.css());
+            layout::build_with_outcomes(&*dom, &sheet, browser::CONTENT_WIDTH, &outcomes, out);
         }
 
         let height = out.height as usize;
