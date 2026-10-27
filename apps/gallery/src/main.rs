@@ -4061,10 +4061,31 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
                 if app.storage_items.get(idx).is_none() {
                     return THEME.surface;
                 }
+                let (src_w, src_h) = if app.detail_rgba_len > 0 && app.detail_w > 0 && app.detail_h > 0 {
+                    (app.detail_w as usize, app.detail_h as usize)
+                } else {
+                    let thumb = unsafe { STORAGE_THUMBS[idx] };
+                    if thumb.valid {
+                        (THUMB_W, THUMB_H)
+                    } else {
+                        (0, 0)
+                    }
+                };
+                if src_w == 0 || src_h == 0 {
+                    return THEME.surface_container;
+                }
+                // The preview keeps the picture's aspect; the spare space stays
+                // the view's own surface so the rounded corners stay clean.
+                let (fit_w, fit_h) = fit_size(view.w, view.h, src_w, src_h);
+                let left = view.x + (view.w - fit_w) / 2;
+                let top = view.y + (view.h - fit_h) / 2;
+                if x < left || y < top || x >= left + fit_w || y >= top + fit_h {
+                    return THEME.surface;
+                }
+                let img_x = ((x - left) * src_w / fit_w.max(1)).min(src_w - 1);
+                let img_y = ((y - top) * src_h / fit_h.max(1)).min(src_h - 1);
                 if app.detail_rgba_len > 0 && app.detail_w > 0 && app.detail_h > 0 {
-                    let img_x = ((x - view.x) * app.detail_w as usize / view.w.max(1)).min(app.detail_w as usize - 1);
-                    let img_y = ((y - view.y) * app.detail_h as usize / view.h.max(1)).min(app.detail_h as usize - 1);
-                    let offset = (img_y * app.detail_w as usize + img_x) * 4;
+                    let offset = (img_y * src_w + img_x) * 4;
                     if let Some(colour) = decoded_detail_pixel(offset, app.detail_rgba_len) {
                         return colour;
                     }
@@ -4072,8 +4093,8 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
                 let thumb = unsafe { STORAGE_THUMBS[idx] };
                 if thumb.valid {
                     if let Some(colour) = thumb.sample(
-                        (x - view.x) * THUMB_W / view.w.max(1),
-                        (y - view.y) * THUMB_H / view.h.max(1),
+                        img_x * THUMB_W / src_w.max(1),
+                        img_y * THUMB_H / src_h.max(1),
                     ) {
                         return colour;
                     }
@@ -4764,6 +4785,7 @@ fn create_screenshot(app: &mut GalleryApp) {
             rgb_data[offset + 2] = (argb & 0xFF) as u8;
         }
     }
+    let mut saved = false;
     let mut ppm_buf = [0u8; 8192];
     if let Ok(ppm_len) = encode_ppm(36, 72, &rgb_data, false, &mut ppm_buf) {
         let ticks = std::get_ticks().unwrap_or(0);
@@ -4773,17 +4795,25 @@ fn create_screenshot(app: &mut GalleryApp) {
         n = append(&mut path_buf, n, b".ppm");
         if let Ok(path_str) = core::str::from_utf8(&path_buf[..n]) {
             if let Ok(fd) = std::fs_open(path_str, std::FS_WRITE) {
-                let _ = std::fs_write(fd, &ppm_buf[..ppm_len]);
+                let wrote = std::fs_write(fd, &ppm_buf[..ppm_len]).is_ok();
                 let _ = std::fs_close(fd);
-                std::log("[GALLERY] Screenshot saved to /storage/photos.").ok();
+                saved = wrote;
             }
         }
     }
     // The capture wrote a document and re-read the index, so the counts, the
     // timeline plan and the header sentence are rebuilt from the list as it
-    // now stands.
+    // now stands. The toast reports what actually happened: a capture the
+    // platform refused is not announced as saved.
     let _ = app.rescan_storage();
     app.refresh_media_state();
+    if saved {
+        std::log("[GALLERY] Screenshot saved to /storage/photos.").ok();
+        app.set_toast(b"Screenshot saved to Photos", false);
+    } else {
+        std::log("[GALLERY] Screenshot could not be written to /storage/photos.").ok();
+        app.set_toast(b"Screenshot could not be saved", true);
+    }
 }
 
 fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
@@ -5055,6 +5085,10 @@ fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
                         }
                     }
                 }
+                // WHY the tap returns a redraw: toggling the flag is the whole
+                // effect, and falling through to `Tap::None` left the heart
+                // showing the old state until some unrelated tap repainted.
+                return Tap::Redraw(Dirty::All);
             }
 
             if std::design::back_button::contains(x, y) {
