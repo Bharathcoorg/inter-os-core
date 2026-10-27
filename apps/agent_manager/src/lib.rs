@@ -2711,6 +2711,24 @@ pub fn format_u32(value: u32, buf: &mut [u8]) -> usize {
 mod tests {
     use super::*;
 
+    /// An authority the kernel granted, without asking the kernel.
+    ///
+    /// WHY it is built rather than probed: `probe` is a syscall, so on the
+    /// test host it always answers that nothing was granted, and a tool's own
+    /// arithmetic could never be exercised.
+    fn granted_authority() -> ToolAuthority {
+        ToolAuthority {
+            inner: AuthorityInner::Granted { handle: 1 },
+        }
+    }
+
+    /// An authority the kernel refused.
+    fn refused_authority() -> ToolAuthority {
+        ToolAuthority {
+            inner: AuthorityInner::Refused,
+        }
+    }
+
     /// A registry that reported the given services.
     fn registry(status: ProbeStatus, entries: &[ServiceEntry]) -> ServiceRegistry {
         let mut reg = ServiceRegistry {
@@ -3209,14 +3227,24 @@ mod tests {
                 failures: 0,
             }; MAX_SERVICES],
         };
-        assert!(listed.unbound_reason().contains("1..=11"));
+        // WHY the reason names the missing service and not the range it
+        // searched: `unbound_reason` returns a `&'static str`, so a range read
+        // from the platform cannot be carried in it. The listing's own bounds
+        // are their own row on the surface, drawn from `highest_id`.
+        assert!(listed
+            .unbound_reason()
+            .contains("names no inference service"));
         assert!(!listed.inference_runtime_binding().is_bound());
         assert!(!listed.contains_inference_runtime());
 
-        let beyond = ServiceRegistry {
+        // WHY the inference id is placed in an entry rather than counted off
+        // `highest_id`: a registry that listed twelve services without naming
+        // the inference id among them does not hold a runtime, and counting
+        // positions is how the binding used to claim one it had never seen.
+        let mut named = ServiceRegistry {
             status: ProbeStatus::Listed,
             count: 12,
-            highest_id: 12,
+            highest_id: interos_std::ai::SERVICE_INFERENCE,
             entries: [ServiceEntry {
                 id: 0,
                 state: ServiceState::Unknown,
@@ -3225,8 +3253,21 @@ mod tests {
                 failures: 0,
             }; MAX_SERVICES],
         };
-        assert!(beyond.contains_inference_runtime());
-        assert!(beyond.inference_runtime_binding().is_bound());
+        named.entries[11] = ServiceEntry {
+            id: interos_std::ai::SERVICE_INFERENCE,
+            state: ServiceState::Running,
+            abi_version: interos_std::ai::INFERENCE_ABI_VERSION,
+            age_ticks: 0,
+            failures: 0,
+        };
+        assert!(named.contains_inference_runtime());
+        assert!(named.inference_runtime_binding().is_bound());
+
+        // A named service that is not running is a different fact from one
+        // that was never named, and the reason has to say which.
+        named.entries[11].state = ServiceState::Stopped;
+        assert!(!named.contains_inference_runtime());
+        assert!(named.unbound_reason().contains("not running"));
     }
 
     #[test]
@@ -3399,13 +3440,22 @@ mod tests {
         assert_eq!(evaluate_integer_expression(b"-3+10"), Some(7));
         assert_eq!(evaluate_integer_expression(b"100/7"), Some(14));
 
-        let outcome = AgentToolOutcome::execute_expression_with_consent(b"12*12", true);
+        let outcome = AgentToolOutcome::execute_expression_with_authority(
+            b"12*12",
+            &granted_authority(),
+        );
         assert!(outcome.ok);
         assert_eq!(outcome.text(), "144");
 
-        let denied = AgentToolOutcome::execute_expression_with_consent(b"12*12", false);
-        assert!(!denied.ok);
-        assert_eq!(denied.text(), "Consent denied: Action rejected by user");
+        let refused = AgentToolOutcome::execute_expression_with_authority(
+            b"12*12",
+            &refused_authority(),
+        );
+        assert!(!refused.ok);
+        assert_eq!(
+            refused.text(),
+            core::str::from_utf8(TOOL_REFUSED_MESSAGE).unwrap()
+        );
     }
 
     #[test]
@@ -3416,7 +3466,10 @@ mod tests {
         assert_eq!(evaluate_integer_expression(b"7 + 7"), Some(14));
         assert_eq!(evaluate_integer_expression(b"two"), None);
 
-        let outcome = AgentToolOutcome::execute_expression_with_consent(b"8/0", true);
+        let outcome = AgentToolOutcome::execute_expression_with_authority(
+            b"8/0",
+            &granted_authority(),
+        );
         assert!(!outcome.ok);
         assert_eq!(outcome.text(), "Calculator: expression not evaluable");
     }
