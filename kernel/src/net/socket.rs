@@ -15,6 +15,17 @@ pub const TCP_TX_BUF_SIZE: usize = crate::net::tcp::TCP_MAX_SEGMENT;
 pub const TCP_RETRANSMIT_TICKS: u64 = 500;
 pub const TCP_MAX_RETRIES: u8 = 3;
 
+/// How many TCP connections the device holds at once.
+///
+/// WHY this is not eight: one web page is not one connection. Every request
+/// the browser makes -- the document, each image, each stylesheet -- is its
+/// own short connection, and each leaves a TIME-WAIT entry behind for the
+/// protocol hold. A portal page that asked for eight files in two seconds
+/// filled an eight-slot table, and the ninth request -- the page's own icon --
+/// was refused by the transport rather than by the network. Sixteen covers a
+/// page's burst with room for the document still being read.
+pub const MAX_TCP_CONNECTIONS: usize = 16;
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct SocketId(pub u32);
 
@@ -289,13 +300,13 @@ pub struct TcpConnection {
 }
 
 pub struct TcpConnectionTable {
-    entries: [Option<TcpConnection>; 8],
+    entries: [Option<TcpConnection>; MAX_TCP_CONNECTIONS],
     next_id: u32,
 }
 
 impl TcpConnectionTable {
     pub const fn new() -> Self {
-        Self { entries: [None; 8], next_id: 1 }
+        Self { entries: [None; MAX_TCP_CONNECTIONS], next_id: 1 }
     }
 
     pub fn open(
@@ -324,56 +335,69 @@ impl TcpConnectionTable {
             return Err(NetError::PortInUse);
         }
 
-        for slot in self.entries.iter_mut() {
-            if slot.is_none() {
-                let id = self.next_id;
-                self.next_id = self.next_id.wrapping_add(1).max(1);
-                *slot = Some(TcpConnection {
-                    id,
-                    owner_task_id,
-                    local_port,
-                    remote_ip,
-                    remote_port,
-                    state: crate::net::TcpState::SynSent,
-                    send_seq: initial_seq,
-                    snd_una: initial_seq,
-                    snd_wnd: 65535,
-                    cwnd: crate::net::tcp::TCP_MAX_SEGMENT as u32,
-                    ssthresh: 65535,
-                    dup_acks: 0,
-                    recv_seq: 0,
-                    rcv_wnd: TCP_RX_BUF_SIZE as u32,
-                    rx: [0u8; TCP_RX_BUF_SIZE],
-                    rx_len: 0,
-                    tx: [0u8; TCP_TX_BUF_SIZE],
-                    tx_len: 0,
-                    tx_seq: initial_seq,
-                    tx_deadline: 0,
-                    tx_retries: 0,
-                    tx_pending: false,
-                    fin_pending: false,
-                    fin_seq: initial_seq,
-                    fin_deadline: 0,
-                    fin_retries: 0,
-                    syn_pending: true,
-                    syn_seq: initial_seq,
-                    // A fresh connection's first retransmission is due one
-                    // timeout from now. Using the bare timeout value made the
-                    // SYN immediately overdue once system uptime passed it,
-                    // so the poll path retransmitted on its next pass.
-                    syn_deadline: crate::interrupts::get_system_ticks()
-                        .saturating_add(TCP_RETRANSMIT_TICKS),
-                    syn_retries: 0,
-                    time_wait_until: 0,
-                });
-                return Ok(id);
+        let mut reclaimed = false;
+        loop {
+            for slot in self.entries.iter_mut() {
+                if slot.is_none() {
+                    let id = self.next_id;
+                    self.next_id = self.next_id.wrapping_add(1).max(1);
+                    *slot = Some(TcpConnection {
+                        id,
+                        owner_task_id,
+                        local_port,
+                        remote_ip,
+                        remote_port,
+                        state: crate::net::TcpState::SynSent,
+                        send_seq: initial_seq,
+                        snd_una: initial_seq,
+                        snd_wnd: 65535,
+                        cwnd: crate::net::tcp::TCP_MAX_SEGMENT as u32,
+                        ssthresh: 65535,
+                        dup_acks: 0,
+                        recv_seq: 0,
+                        rcv_wnd: TCP_RX_BUF_SIZE as u32,
+                        rx: [0u8; TCP_RX_BUF_SIZE],
+                        rx_len: 0,
+                        tx: [0u8; TCP_TX_BUF_SIZE],
+                        tx_len: 0,
+                        tx_seq: initial_seq,
+                        tx_deadline: 0,
+                        tx_retries: 0,
+                        tx_pending: false,
+                        fin_pending: false,
+                        fin_seq: initial_seq,
+                        fin_deadline: 0,
+                        fin_retries: 0,
+                        syn_pending: true,
+                        syn_seq: initial_seq,
+                        // A fresh connection's first retransmission is due one
+                        // timeout from now. Using the bare timeout value made the
+                        // SYN immediately overdue once system uptime passed it,
+                        // so the poll path retransmitted on its next pass.
+                        syn_deadline: crate::interrupts::get_system_ticks()
+                            .saturating_add(TCP_RETRANSMIT_TICKS),
+                        syn_retries: 0,
+                        time_wait_until: 0,
+                    });
+                    return Ok(id);
+                }
             }
+            if reclaimed {
+                break;
+            }
+            // Nothing was free. Reclaim what the protocol has already finished
+            // with and look again, so a connecting app is not made to wait for
+            // whenever the bounded poll next happens to run.
+            reclaimed = true;
+            let now = crate::interrupts::get_system_ticks();
+            self.reap_time_wait(now);
+            self.reap_closed();
         }
         if let Some(process) = process { crate::task::process::release_network_socket(process); }
         Err(NetError::QueueFull)
     }
 
-    pub fn entries(&self) -> &[Option<TcpConnection>; 8] { &self.entries }
+    pub fn entries(&self) -> &[Option<TcpConnection>] { &self.entries }
     pub fn entries_mut(&mut self) -> core::slice::IterMut<'_, Option<TcpConnection>> { self.entries.iter_mut() }
 
     pub fn get(&self, id: u32) -> Option<&TcpConnection> {
@@ -675,7 +699,7 @@ impl TcpConnectionTable {
 
     pub fn reap_closed(&mut self) -> usize {
         let mut reaped = 0;
-        let mut owners = [0u32; 8];
+        let mut owners = [0u32; MAX_TCP_CONNECTIONS];
         for slot in self.entries.iter_mut() {
             if slot.as_ref().map(|conn| conn.state == crate::net::TcpState::Closed && !conn.fin_pending).unwrap_or(false) {
                 if reaped < owners.len() {
@@ -790,6 +814,44 @@ mod tcp_reliability_tests {
         assert_eq!(table.reap_time_wait(until), 1);
         assert_eq!(table.reap_closed(), 1);
         assert!(table.get(id).is_none());
+    }
+
+    /// A page load is a burst of short connections, and each one leaves a
+    /// TIME-WAIT entry behind. The table has to hold that burst, and a slot
+    /// whose protocol hold has already run out has to reach the next
+    /// requester without waiting for the bounded network poll to notice.
+    #[test]
+    fn connection_table_holds_a_page_burst_and_reclaims_a_finished_hold() {
+        let mut table = TcpConnectionTable::new();
+        let mut ids = [0u32; MAX_TCP_CONNECTIONS];
+        for index in 0..MAX_TCP_CONNECTIONS {
+            ids[index] = table
+                .open(7, 41_000 + index as u16, Ipv4Address::LOCALHOST, 4300, 100)
+                .expect("a page's worth of connections fits the table");
+        }
+        assert_eq!(
+            table.open(7, 42_000, Ipv4Address::LOCALHOST, 4300, 100).err(),
+            Some(NetError::QueueFull),
+            "one past the table is still refused"
+        );
+
+        let now = crate::interrupts::get_system_ticks();
+        let finished = table.get_mut(ids[0]).expect("connection exists");
+        finished.state = crate::net::TcpState::TimeWait;
+        finished.time_wait_until = now;
+
+        table
+            .open(7, 42_000, Ipv4Address::LOCALHOST, 4300, 100)
+            .expect("an expired TIME-WAIT slot is reclaimed by the connect itself");
+        assert_eq!(
+            table
+                .entries()
+                .first()
+                .and_then(|slot| slot.as_ref())
+                .map(|conn| conn.local_port),
+            Some(42_000),
+            "the reclaimed slot is the one whose hold had run out"
+        );
     }
 
     #[test]
