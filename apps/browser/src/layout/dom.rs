@@ -51,9 +51,9 @@ pub const MAX_STYLESHEET_LINKS: usize = 4;
 /// The most `<link rel="icon">` addresses one document may name.
 ///
 /// WHY more than one: a page lists its picture in the formats it likes best,
-/// and the first is often one this browser has no decoder for. Four is
-/// enough to reach a PNG past an SVG and an ICO without turning the icon into
-/// four more fetches.
+/// and the first is often one this browser has no decoder for. Four reaches
+/// a drawable file past the vector variant and the sizes the page names for
+/// other screens, without turning the icon into four more fetches.
 pub const MAX_ICON_LINKS: usize = 4;
 
 /// The longest tag name kept whole. A longer name is truncated, which can

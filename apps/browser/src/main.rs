@@ -1736,9 +1736,10 @@ pub struct BrowserApp {
     /// WHY it is held beside the page rather than re-fetched per frame: a
     /// navigation is the only moment its address is known, and the pixels
     /// belong to that page. WHY it can be `None` on a page that names an
-    /// icon: the formats a page prefers for its own picture — SVG and ICO —
-    /// are two this browser has no decoder for, and the honest answer to a
-    /// picture that cannot be drawn is the mark drawn before this one existed.
+    /// icon: the picture a page prefers to be known by is often drawn from
+    /// paths rather than pixels, and this platform has no vector rasteriser;
+    /// the honest answer to a picture that cannot be drawn is the mark drawn
+    /// before this one existed.
     favicon: Option<[[u8; 4]; FAVICON_FACE_PIXELS]>,
     /// How many lines the document has, before the reader's bound.
     ///
@@ -5485,9 +5486,9 @@ fn padlock_glyph(x: usize, y: usize) -> bool {
 /// Whether an address names a picture this browser was built without a
 /// decoder for.
 ///
-/// WHY by the name rather than by asking the origin: the two formats a page
-/// most often picks for its own picture — SVG and ICO — are two the platform
-/// cannot rasterise, and fetching a file whose answer is already known costs a
+/// WHY by the name rather than by asking the origin: the format a page most
+/// often picks for its own picture that this platform cannot rasterise is a
+/// vector one, and fetching a file whose answer is already known costs a
 /// round trip on the way to a refusal. A name that lies about its type still
 /// reaches the decoder and is refused there, so the check only ever saves a
 /// fetch; it never hides a picture that could have been drawn.
@@ -5495,8 +5496,7 @@ fn undrawable_picture(href: &[u8]) -> bool {
     let Some(dot) = href.iter().rposition(|&b| b == b'.') else {
         return false;
     };
-    let tail = &href[dot + 1..];
-    tail.eq_ignore_ascii_case(b"svg") || tail.eq_ignore_ascii_case(b"ico")
+    href[dot + 1..].eq_ignore_ascii_case(b"svg")
 }
 
 /// The words a refusal carries, without the "Image not shown:" opening that

@@ -78,6 +78,10 @@ pub enum ImageType {
     Jpeg,
     Gif,
     WebP,
+    /// A Windows icon container: a directory of pictures, each a PNG or a
+    /// device-independent bitmap, which is the form a page most often names
+    /// its own picture in.
+    Ico,
     Unsupported,
 }
 
@@ -178,6 +182,13 @@ pub fn sniff_image_type(body: &[u8]) -> ImageType {
     if body.len() >= 12 && &body[..4] == b"RIFF" && &body[8..12] == b"WEBP" {
         return ImageType::WebP;
     }
+    // An icon container says what it is with two zero bytes, a type of one
+    // and a non-empty directory. The signature is weaker than the others
+    // here, so it is only the opening: `decode_ico_header` walks the
+    // directory and refuses the file if none of its entries is a picture.
+    if body.len() >= 22 && body[..4] == [0, 0, 1, 0] && body[4..6] != [0, 0] {
+        return ImageType::Ico;
+    }
     ImageType::Unsupported
 }
 
@@ -214,6 +225,7 @@ fn probe_dimensions(kind: ImageType, body: &[u8]) -> Result<(u32, u32), ImageRef
             }
             image::decode_webp_header(body).map_err(|_| ImageRefusal::BadHeader)
         }
+        ImageType::Ico => image::decode_ico_header(body).map_err(|_| ImageRefusal::BadHeader),
         ImageType::Unsupported => Err(ImageRefusal::UnsupportedType),
     }
 }
@@ -748,6 +760,56 @@ mod tests {
         assert_eq!(
             admit_image(&body),
             ImageAdmission::Refused(ImageRefusal::UnsupportedType)
+        );
+    }
+
+    /// A one-entry icon container around a 2x2 thirty-two-bit bitmap: the
+    /// header, the directory, and the bitmap whose height counts the pixels
+    /// and the mask under them.
+    fn icon_two_by_two() -> std::vec::Vec<u8> {
+        let mut body = vec![0u8; 6 + 16 + 40 + 16];
+        body[..4].copy_from_slice(&[0, 0, 1, 0]);
+        body[4..6].copy_from_slice(&1u16.to_le_bytes());
+        body[6] = 2;
+        body[7] = 2;
+        body[10..12].copy_from_slice(&1u16.to_le_bytes());
+        body[12..14].copy_from_slice(&32u16.to_le_bytes());
+        body[14..18].copy_from_slice(&56u32.to_le_bytes());
+        body[18..22].copy_from_slice(&22u32.to_le_bytes());
+        body[22..26].copy_from_slice(&40u32.to_le_bytes());
+        body[26..30].copy_from_slice(&2i32.to_le_bytes());
+        body[30..34].copy_from_slice(&4i32.to_le_bytes());
+        body[34..36].copy_from_slice(&1u16.to_le_bytes());
+        body[36..38].copy_from_slice(&32u16.to_le_bytes());
+        body
+    }
+
+    #[test]
+    fn an_icon_container_is_admitted_at_the_size_of_its_picture() {
+        let body = icon_two_by_two();
+        assert_eq!(sniff_image_type(&body), ImageType::Ico);
+        assert_eq!(
+            admit_image(&body),
+            ImageAdmission::Accepted {
+                kind: ImageType::Ico,
+                width: 2,
+                height: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn a_file_that_only_rhymes_with_an_icon_header_is_not_admitted() {
+        // The signature is four bytes; the directory behind it has to name a
+        // picture that is actually in the file. This one points its only
+        // entry at its own header, and the reader says so rather than
+        // drawing whatever those bytes happen to look like.
+        let mut body = icon_two_by_two();
+        body[18..22].copy_from_slice(&0u32.to_le_bytes());
+        assert_eq!(sniff_image_type(&body), ImageType::Ico);
+        assert_eq!(
+            admit_image(&body),
+            ImageAdmission::Refused(ImageRefusal::BadHeader)
         );
     }
 

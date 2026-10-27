@@ -404,6 +404,206 @@ pub fn decode_bmp(data: &[u8], out_rgba: &mut [u8]) -> Result<usize, ()> {
     Ok(required_rgba)
 }
 
+/// The largest side an `.ico` entry may claim.
+///
+/// WHY this is far below [`MAX_DECODE_DIMENSION`]: an icon container holds
+/// the same mark at a handful of sizes between sixteen and fifty-one-two
+/// pixels, and it is the file a page points at for its own picture. Without
+/// its own bound, one directory entry could ask the reader for a picture
+/// large enough to fill the whole image arena for a decoration.
+const MAX_ICO_DIMENSION: u32 = 512;
+
+/// The most entries read out of one `.ico` directory.
+///
+/// WHY a bound at all: the count is a sixteen-bit number the file chooses,
+/// and every entry is sixteen bytes of a buffer the reader has to trust.
+/// Twenty is more than a real icon file has ever carried.
+const MAX_ICO_ENTRIES: usize = 20;
+
+/// One picture inside an `.ico` container, already checked against the file.
+#[derive(Clone, Copy)]
+struct IcoEntry {
+    width: u32,
+    height: u32,
+    offset: usize,
+    length: usize,
+}
+
+/// The width or height an `.ico` directory records: a zero byte means the
+/// two-fifty-sixth size, because the field is eight bits and cannot say it.
+fn ico_dimension(byte: u8) -> u32 {
+    if byte == 0 {
+        256
+    } else {
+        byte as u32
+    }
+}
+
+/// The size of the picture behind one directory entry, read from the payload
+/// rather than from the directory.
+///
+/// WHY the payload decides: the directory's own dimensions are a summary the
+/// writer fills in by hand, and a file whose two accounts disagree is a file
+/// that would have the reader size its buffer wrong.
+fn ico_payload_size(payload: &[u8]) -> Option<(u32, u32)> {
+    if payload.len() >= 8 && payload[..8] == PNG_SIGNATURE {
+        let (width, height) = decode_png_header(payload).ok()?;
+        return Some((width, height));
+    }
+    if payload.len() < 40
+        || u32::from_le_bytes(payload[0..4].try_into().ok()?) != 40
+        || u16::from_le_bytes(payload[12..14].try_into().ok()?) != 1
+    {
+        return None;
+    }
+    let width = i32::from_le_bytes(payload[4..8].try_into().ok()?).try_into().ok()?;
+    // The header's height counts the pixels and the AND mask under them, so
+    // the picture itself is half of it.
+    let doubled = i32::from_le_bytes(payload[8..12].try_into().ok()?);
+    if doubled <= 0 || doubled % 2 != 0 {
+        return None;
+    }
+    let height = (doubled / 2) as u32;
+    let depth = u16::from_le_bytes(payload[14..16].try_into().ok()?);
+    let compression = u32::from_le_bytes(payload[16..20].try_into().ok()?);
+    if (depth != 24 && depth != 32) || compression != 0 {
+        return None;
+    }
+    Some((width, height))
+}
+
+/// The largest picture in an `.ico` container that this reader can rasterise.
+///
+/// WHY the largest and not the first: a favicon file carries the same mark at
+/// sixteen, thirty-two and forty-eight pixels so that the reader can pick the
+/// one nearest the size it has, and the entries are not ordered by size.
+///
+/// WHY an unreadable entry is passed over rather than failed on: a directory
+/// that also holds a format this reader was built without -- four-bit colour,
+/// a bit-field header -- is an ordinary icon file, and the picture it does
+/// carry should still draw.
+fn ico_pick(data: &[u8]) -> Result<IcoEntry, ()> {
+    if data.len() < 22 || data[..4] != [0, 0, 1, 0] || data[4..6] == [0, 0] {
+        return Err(());
+    }
+    let count = u16::from_le_bytes([data[4], data[5]]) as usize;
+    if count > MAX_ICO_ENTRIES || data.len() < 6 + count * 16 {
+        return Err(());
+    }
+    let mut best: Option<IcoEntry> = None;
+    for index in 0..count {
+        let directory = 6 + index * 16;
+        let length = u32::from_le_bytes(data[directory + 8..directory + 12].try_into().map_err(|_| ())?) as usize;
+        let offset = u32::from_le_bytes(data[directory + 12..directory + 16].try_into().map_err(|_| ())?) as usize;
+        let Some(end) = offset.checked_add(length) else {
+            continue;
+        };
+        if end > data.len() || length == 0 {
+            continue;
+        }
+        let payload = &data[offset..end];
+        let Some((width, height)) = ico_payload_size(payload) else {
+            continue;
+        };
+        if width == 0
+            || height == 0
+            || width > MAX_ICO_DIMENSION
+            || height > MAX_ICO_DIMENSION
+            || width > ico_dimension(data[directory])
+            || height > ico_dimension(data[directory + 1])
+        {
+            continue;
+        }
+        let candidate = IcoEntry {
+            width,
+            height,
+            offset,
+            length,
+        };
+        if best
+            .map(|held| width * height > held.width * held.height)
+            .unwrap_or(true)
+        {
+            best = Some(candidate);
+        }
+    }
+    best.ok_or(())
+}
+
+/// Reads the size of the picture an `.ico` container would be drawn from.
+pub fn decode_ico_header(data: &[u8]) -> Result<(u32, u32), ()> {
+    let entry = ico_pick(data)?;
+    Ok((entry.width, entry.height))
+}
+
+/// Decodes the largest picture inside an `.ico` container.
+///
+/// WHY a container needs its own reader: the icon form is a directory of
+/// device-independent bitmaps, and the bitmaps drop the file header the
+/// `.bmp` reader starts from, double their own height to make room for a
+/// one-bit mask underneath, and sometimes leave that mask as the only place
+/// transparency was ever written.
+pub fn decode_ico(data: &[u8], out_rgba: &mut [u8]) -> Result<(u32, u32, usize), ()> {
+    let entry = ico_pick(data)?;
+    let payload = data
+        .get(entry.offset..entry.offset + entry.length)
+        .ok_or(())?;
+    if payload.len() >= 8 && payload[..8] == PNG_SIGNATURE {
+        return decode_png(payload, out_rgba);
+    }
+    decode_ico_dib(payload, entry.width, entry.height, out_rgba)
+}
+
+/// Rasterises one device-independent bitmap held inside an `.ico` entry.
+fn decode_ico_dib(
+    payload: &[u8],
+    width: u32,
+    height: u32,
+    out_rgba: &mut [u8],
+) -> Result<(u32, u32, usize), ()> {
+    let (width, height) = (width as usize, height as usize);
+    let depth = u16::from_le_bytes(payload[14..16].try_into().map_err(|_| ())?) as usize;
+    let bytes = depth / 8;
+    let stride = (width * bytes + 3) / 4 * 4;
+    let pixels = width.checked_mul(height).ok_or(())?;
+    let xor_len = height.checked_mul(stride).ok_or(())?;
+    if payload.len() < 40 + xor_len || out_rgba.len() < pixels * 4 {
+        return Err(());
+    }
+    // A thirty-two-bit entry can carry opacity in its fourth byte, and many
+    // writers leave that byte zero and put the shape in the mask alone. Which
+    // of the two this file means is answered by the file: an alpha byte used
+    // anywhere is an alpha channel, and none is a mask.
+    let uses_alpha = depth == 32 && payload[40..40 + xor_len].chunks_exact(4).any(|p| p[3] != 0);
+    let mask_stride = (width + 31) / 32 * 4;
+    let mask_start = 40 + xor_len;
+    let has_mask = payload.len() >= mask_start + height * mask_stride;
+    for row in 0..height {
+        // Both arrays are stored bottom-up, as a positive header height says.
+        let source = 40 + (height - 1 - row) * stride;
+        let mask_row = if has_mask { mask_start + (height - 1 - row) * mask_stride } else { 0 };
+        let target = row * width * 4;
+        for column in 0..width {
+            let pixel = source + column * bytes;
+            let erased = has_mask
+                && payload[mask_row + column / 8] >> (7 - column % 8) & 1 == 1;
+            let alpha = if erased {
+                0
+            } else if uses_alpha {
+                payload[pixel + 3]
+            } else {
+                255
+            };
+            let out = target + column * 4;
+            out_rgba[out] = payload[pixel + 2];
+            out_rgba[out + 1] = payload[pixel + 1];
+            out_rgba[out + 2] = payload[pixel];
+            out_rgba[out + 3] = alpha;
+        }
+    }
+    Ok((width as u32, height as u32, pixels * 4))
+}
+
 /// Decodes raw pixel data into an RGBA (4 bytes per pixel) destination buffer.
 pub fn decode_raw(
     data: &[u8],
@@ -4553,6 +4753,15 @@ pub fn decode_image(
         let bytes = decode_qoi(data, out_rgba)?;
         return Ok((w, h, bytes));
     }
+    // An `.ico` is a directory rather than a picture, and its signature is
+    // correspondingly weak -- two zero bytes, a type of one, and a count --
+    // so it is only claimed when the header, the entry count and the first
+    // entry's own bytes all line up. A file that merely starts with those
+    // four bytes fails the walk and is refused, which is the same answer the
+    // older code gave by not recognising it at all.
+    if name_ends_with(name, b".ico") || data.len() >= 22 && data[..4] == [0, 0, 1, 0] {
+        return decode_ico(data, out_rgba);
+    }
     if name.ends_with(b".raw") {
         let len = data.len();
         if len == 36 * 72 * 3 {
@@ -4605,6 +4814,7 @@ fn name_ends_with(name: &[u8], suffix: &[u8]) -> bool {
 mod tests {
     use super::*;
     use std::sync::{Mutex, MutexGuard};
+    use std::vec;
     use std::vec::Vec;
 
     /// The decoders share one static scratch buffer, so the tests that use it
@@ -6414,6 +6624,131 @@ mod tests {
             Ok((1, 1, 4))
         );
         assert!(decode_image(b"not a webp", b"picture.webp", &mut out).is_err());
+    }
+
+    // -- ICO ---------------------------------------------------------------
+
+    /// A device-independent bitmap as an `.ico` entry stores one: no file
+    /// header, a height that counts the pixels and the mask beneath them, and
+    /// rows written bottom-up. `rows` is given top-down, as a reader thinks
+    /// of a picture.
+    fn ico_dib(rows: &[&[[u8; 4]]], mask: &[u8]) -> Vec<u8> {
+        let width = rows[0].len() as u32;
+        let height = rows.len() as u32;
+        let mut out = Vec::new();
+        out.extend_from_slice(&40u32.to_le_bytes());
+        out.extend_from_slice(&(width as i32).to_le_bytes());
+        out.extend_from_slice(&((height * 2) as i32).to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&32u16.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&[0u8; 16]);
+        for row in rows.iter().rev() {
+            for pixel in row.iter() {
+                out.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
+            }
+        }
+        out.extend_from_slice(mask);
+        out
+    }
+
+    /// Wraps payloads in an `.ico` header and directory, laying them out at
+    /// the offsets the directory names.
+    fn ico_container(entries: &[(u32, u32, Vec<u8>)]) -> Vec<u8> {
+        let mut out = vec![0u8, 0, 1, 0];
+        out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        let mut offset = out.len() + entries.len() * 16;
+        for (width, height, payload) in entries {
+            out.push(if *width == 256 { 0 } else { *width as u8 });
+            out.push(if *height == 256 { 0 } else { *height as u8 });
+            out.extend_from_slice(&[0, 0]);
+            out.extend_from_slice(&1u16.to_le_bytes());
+            out.extend_from_slice(&32u16.to_le_bytes());
+            out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+            out.extend_from_slice(&(offset as u32).to_le_bytes());
+            offset += payload.len();
+        }
+        for (_, _, payload) in entries {
+            out.extend_from_slice(payload);
+        }
+        out
+    }
+
+    #[test]
+    fn an_icon_container_is_read_from_its_largest_picture() {
+        let small = ico_dib(&[&[[10, 20, 30, 255]]], &[]);
+        let large = ico_dib(
+            &[
+                &[[10, 20, 30, 255], [40, 50, 60, 255]],
+                &[[70, 80, 90, 255], [100, 110, 120, 255]],
+            ],
+            &[],
+        );
+        // The small entry is listed first: the directory is not ordered by
+        // size, and a reader that took the first entry would blur.
+        let file = ico_container(&[(1, 1, small), (2, 2, large)]);
+        assert_eq!(decode_ico_header(&file), Ok((2, 2)));
+
+        let mut out = [0u8; 2 * 2 * 4];
+        assert_eq!(decode_ico(&file, &mut out), Ok((2, 2, 16)));
+        assert_eq!(
+            out,
+            [
+                10, 20, 30, 255, 40, 50, 60, 255, 70, 80, 90, 255, 100, 110, 120, 255
+            ]
+        );
+    }
+
+    #[test]
+    fn an_icon_that_never_filled_its_alpha_takes_its_shape_from_the_mask() {
+        // Every alpha byte is zero, so the fourth byte says nothing, and the
+        // one-bit mask under the pixels is the only account of the shape. It
+        // is stored bottom-up with them, so the top row is the second one.
+        let pixels: Vec<[u8; 4]> = vec![[1, 2, 3, 0]; 4];
+        let dib = ico_dib(&[&pixels[..2], &pixels[2..]], &[0x00, 0, 0, 0, 0x80, 0, 0, 0]);
+        let file = ico_container(&[(2, 2, dib)]);
+        let mut out = [0u8; 2 * 2 * 4];
+        assert_eq!(decode_ico(&file, &mut out), Ok((2, 2, 16)));
+        assert_eq!(out[3], 0, "the masked pixel is transparent");
+        assert_eq!(out[7], 255);
+        assert_eq!(out[11], 255);
+        assert_eq!(&out[..3], &[1, 2, 3], "the colour survives");
+    }
+
+    #[test]
+    fn a_png_inside_an_icon_goes_to_the_png_reader() {
+        let _guard = scratch_guard();
+        let png = build_png(1, 1, 6, 0, None, None, &[0, 0x20, 0x40, 0x10, 0xFF]);
+        let file = ico_container(&[(1, 1, png)]);
+        let mut out = [0u8; 4];
+        assert_eq!(decode_ico(&file, &mut out), Ok((1, 1, 4)));
+        assert_eq!(out, [0x20, 0x40, 0x10, 0xFF]);
+    }
+
+    #[test]
+    fn an_icon_directory_that_does_not_hold_a_picture_is_refused() {
+        // A file that starts with the signature and then describes a picture
+        // whose bytes are not in the file.
+        let mut file = vec![0u8, 0, 1, 0, 1, 0];
+        file.extend_from_slice(&[2, 2, 0, 0, 1, 0, 32, 0]);
+        file.extend_from_slice(&200u32.to_le_bytes());
+        file.extend_from_slice(&999_999u32.to_le_bytes());
+        assert_eq!(decode_ico_header(&file), Err(()));
+        assert!(decode_ico(&file, &mut [0u8; 64]).is_err());
+
+        // Four bytes that rhyme with the signature are not an icon.
+        assert!(decode_image(&[0, 0, 1, 0, 0, 0, 0, 0], b"mystery", &mut [0u8; 4]).is_err());
+    }
+
+    #[test]
+    fn decode_image_routes_an_icon_by_signature_and_by_name() {
+        let dib = ico_dib(&[&[[7, 8, 9, 255]]], &[]);
+        let file = ico_container(&[(1, 1, dib)]);
+        let mut out = [0u8; 4];
+        assert_eq!(decode_image(&file, b"mystery", &mut out), Ok((1, 1, 4)));
+        assert_eq!(out, [7, 8, 9, 255]);
+        assert_eq!(decode_image(&file, b"favicon.ICO", &mut out), Ok((1, 1, 4)));
     }
 }
 
