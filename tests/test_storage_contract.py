@@ -75,7 +75,9 @@ def main() -> None:
     must(vfs, 'vfs.rebuild_children();', "persistent parent-child inode reconstruction")
     must(vfs, 'fn parent_path(path: &str)', "hierarchical parent path helper")
     must(vfs, 'inode.id=InodeId(id);', "stable persisted inode identity")
-    must(vfs, 'inode.sha256_digest=digest;', "persisted inode integrity metadata")
+    # 56b363a rustfmt-reformatted the inode writes: the digest assignment is
+    # the same statement, now spelled with spaces around the equals sign.
+    must(vfs, 'inode.sha256_digest = digest;', "persisted inode integrity metadata")
 
     # A real on-disk filesystem backend exists above BlockDevice.
     must(interfs, "pub struct InterFs", "block-backed filesystem controller")

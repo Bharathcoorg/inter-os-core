@@ -25,6 +25,32 @@ pub const METADATA_SNAPSHOT_LIMIT: usize = 32 * 1024;
 pub const DATA_SNAPSHOT_LIMIT: usize = 32 * 1024;
 /// Largest payload a single data snapshot entry can carry (8 KB).
 pub const SNAPSHOT_FILE_LIMIT: usize = 8192;
+/// The unit a spilled payload is read back in.
+///
+/// WHY a chunk and not the whole payload at once: the restore assembles a
+/// payload that can be several megabytes, and it assembles it in bounded
+/// pieces so that the read buffer never has to hold a second copy of the
+/// file.
+pub const SPILL_CHUNK_SIZE: usize = 64 * 1024;
+/// Largest payload the VFS spills into the block-backed store.
+///
+/// WHY it is derived from the kernel heap: the VFS keeps a file's bytes
+/// whole in memory, so the ceiling a payload can have is the heap's, not a
+/// number picked for convenience. A quarter of the heap leaves room for the
+/// inode tree, the two snapshots and the applications that share it, so a
+/// 64 MiB heap allows a 16 MiB payload -- five times the 2.9 MiB a
+/// full-screen 720x1440 screenshot needs.
+///
+/// WHY the old 512 KiB figure was wrong: it was not the limit of anything in
+/// the platform. Not of the heap, which is 64 MiB. Not of the block device,
+/// which refuses a payload it cannot hold. Not of the snapshot, which
+/// carries a reference and not the bytes. So every payload above it was
+/// dropped on persist and came back as a 0-byte file after a reboot.
+pub const SPILL_FILE_LIMIT: usize = crate::allocator::HEAP_SIZE / 4;
+/// The data-snapshot entry flag marking a payload kept in the block store.
+const DATA_ENTRY_EXTERNAL: u32 = 0x8000_0000;
+/// The prefix of every block-backed payload name.
+const SPILL_PREFIX: &str = "/data/.vfs.s.";
 pub const DEFAULT_FILE_MODE: u16 = 0o644;
 pub const DEFAULT_DIR_MODE: u16 = 0o755;
 pub const ROOT_UID: u32 = 0;
@@ -132,6 +158,59 @@ pub enum FsError {
     InvalidPath,
 }
 
+/// The block-store operations the VFS uses for the payloads that are too
+/// large to travel inside the data snapshot.
+///
+/// WHY function pointers and not a trait object: the VFS is a `no_std`
+/// structure with a small heap, and a plain pointer costs nothing where a
+/// boxed trait object would allocate. It also lets a test install an
+/// in-memory store and observe exactly what the VFS asked the device to do,
+/// which is the only way the spill lifecycle can be tested honestly without
+/// a block device.
+#[derive(Clone, Copy)]
+pub struct SpillStore {
+    /// Publishes `data` as the whole content of the named file.
+    pub write: fn(&str, &[u8]) -> bool,
+    /// Reads up to `out.len()` bytes from `offset` of the named file.
+    pub read_at: fn(&str, u64, &mut [u8]) -> Option<usize>,
+    /// The published length of the named file.
+    pub file_len: fn(&str) -> Option<u64>,
+    /// Removes the named file.
+    pub remove: fn(&str) -> bool,
+}
+
+/// Writes a whole payload into a block-store file.
+fn device_write(name: &str, data: &[u8]) -> bool {
+    crate::storage::filesystem::store_data_file(name, data).is_ok()
+}
+
+/// Reads up to `out.len()` bytes from `offset` of a block-store file.
+fn device_read_at(name: &str, offset: u64, out: &mut [u8]) -> Option<usize> {
+    crate::storage::filesystem::load_data_file_range(name, offset, out).ok()
+}
+
+/// The published length of a block-store file.
+fn device_file_len(name: &str) -> Option<u64> {
+    crate::storage::filesystem::data_file_len(name).ok()
+}
+
+/// Removes a block-store file.
+fn device_remove(name: &str) -> bool {
+    crate::storage::filesystem::remove_data_file(name).is_ok()
+}
+
+impl SpillStore {
+    /// The store that talks to the real block device.
+    pub const fn device() -> Self {
+        Self {
+            write: device_write,
+            read_at: device_read_at,
+            file_len: device_file_len,
+            remove: device_remove,
+        }
+    }
+}
+
 /// Virtual Filesystem Controller.
 pub struct Vfs {
     inodes: BTreeMap<InodeId, Inode>,
@@ -159,6 +238,13 @@ pub struct Vfs {
     /// a filesystem that has moved on. A counter says which walk the index was
     /// built from, so a stale index is detected rather than assumed.
     storage_generation: u64,
+    /// The block store the VFS spills oversized payloads into.
+    ///
+    /// WHY it is a field: whether a payload survives a reboot is decided by
+    /// the spill lifecycle -- write it out, name it in the snapshot, read it
+    /// back, release it with the path that owns it -- and that lifecycle has
+    /// to be observable without a block device.
+    spill: SpillStore,
 }
 
 /// The refusal a filesystem operation gives when the caller holds no usable
@@ -192,9 +278,31 @@ impl Vfs {
             task_file_tables: BTreeMap::new(),
             persist_unavailable: core::cell::Cell::new(false),
             storage_generation: 0,
+            spill: SpillStore::device(),
         };
 
         // Create root directory "/"
+        vfs.mkdir("/");
+        vfs
+    }
+
+    /// Builds a filesystem whose spills land in the given store.
+    ///
+    /// WHY it exists: the spill lifecycle decides whether a payload survives
+    /// a reboot, and it can only be tested honestly against a store the test
+    /// can look into.
+    #[cfg(test)]
+    fn with_spill_store(spill: SpillStore) -> Self {
+        let mut vfs = Self {
+            inodes: BTreeMap::new(),
+            path_to_inode: BTreeMap::new(),
+            hard_links: BTreeMap::new(),
+            next_inode: 1,
+            task_file_tables: BTreeMap::new(),
+            persist_unavailable: core::cell::Cell::new(false),
+            storage_generation: 0,
+            spill,
+        };
         vfs.mkdir("/");
         vfs
     }
@@ -284,9 +392,17 @@ impl Vfs {
         let handle=table.get_mut(fd.0 as usize).and_then(|x|x.as_mut()).ok_or(FsError::InvalidFd)?;
         if !handle.rights.contains(Rights::WRITE) { return Err(FsError::PermissionDenied); }
         let inode_id=handle.inode_id;
+        let was_spilled = self.inodes.get(&inode_id).map(|i| i.size > SNAPSHOT_FILE_LIMIT).unwrap_or(false);
+        let path = self.inodes.get(&inode_id).map(|i| i.path.clone()).unwrap_or_default();
         let inode=self.inodes.get_mut(&inode_id).ok_or(FsError::FileNotFound)?;
         match &mut inode.data { InodeData::Dynamic(data)=>{data.resize(length,0);inode.size=length;inode.sha256_digest=Sha256::digest(data)}, InodeData::Static(_)=>return Err(FsError::ReadOnlyFileSystem) }
         if handle.offset>length { handle.offset=length; }
+        // A payload that now fits inside a snapshot entry travels in the
+        // snapshot, so the block-store copy it used to live in has to go:
+        // nothing would name it again.
+        if was_spilled && length <= SNAPSHOT_FILE_LIMIT {
+            (self.spill.remove)(&spill_path_for(&path));
+        }
         self.persist_data_snapshot()?; self.persist_metadata_snapshot()?; Ok(())
     }
 
@@ -388,18 +504,44 @@ impl Vfs {
         content: &[u8],
         read_only: bool,
     ) -> InodeId {
+        self.create_file_owned(path, content.to_vec(), read_only)
+    }
+
+    /// Creates or updates a file node with content the caller already owns.
+    ///
+    /// WHY an owning variant: the restore path assembles a payload that can
+    /// be several megabytes, and copying it a second time would double the
+    /// memory one file needs at boot.
+    fn create_file_owned(
+        &mut self,
+        path: &str,
+        content: Vec<u8>,
+        read_only: bool,
+    ) -> InodeId {
         let norm_path = normalize_path(path);
-        let digest = Sha256::digest(content);
+        let digest = Sha256::digest(&content);
+        let content_size = content.len();
         self.bump_storage_generation(&norm_path);
 
         if let Some(&existing_id) = self.path_to_inode.get(&norm_path) {
+            let was_spilled = self
+                .inodes
+                .get(&existing_id)
+                .map(|inode| inode.size > SNAPSHOT_FILE_LIMIT)
+                .unwrap_or(false);
             if let Some(inode) = self.inodes.get_mut(&existing_id) {
-                inode.data = InodeData::Dynamic(content.to_vec());
-                inode.size = content.len();
+                inode.data = InodeData::Dynamic(content);
+                inode.size = content_size;
                 inode.sha256_digest = digest;
                 if read_only {
                     inode.file_type = FileType::ReadOnlySystem;
                 }
+            }
+            // A payload that now travels inside the snapshot must not leave
+            // its block-store copy behind: nothing would name that copy
+            // again, and it would hold blocks no file can reach.
+            if was_spilled && content_size <= SNAPSHOT_FILE_LIMIT {
+                (self.spill.remove)(&spill_path_for(&norm_path));
             }
             return existing_id;
         }
@@ -419,8 +561,8 @@ impl Vfs {
             name,
             path: norm_path.clone(),
             file_type: if read_only { FileType::ReadOnlySystem } else { FileType::RegularFile },
-            size: content.len(),
-            data: InodeData::Dynamic(content.to_vec()),
+            size: content_size,
+            data: InodeData::Dynamic(content),
             sha256_digest: digest,
             children: Vec::new(),
         };
@@ -762,6 +904,10 @@ impl Vfs {
         if self.inodes.get(&inode_id).map(|i| i.nlink == 0).unwrap_or(false) {
             self.inodes.remove(&inode_id);
         }
+
+        // A payload that no path names must not outlive the path: leaving it
+        // would hold disk blocks no file can reach.
+        (self.spill.remove)(&spill_path_for(&norm));
 
         if self.persist_metadata_snapshot().is_err() {
             self.path_to_inode.insert(norm, inode_id);
@@ -1343,8 +1489,12 @@ pub fn read_file_for_task(
         if crate::drivers::ATA_PRIMARY.lock().is_none() {
             return Ok(());
         }
+        // The payloads that do not fit an entry are written to the block store
+        // first, so the snapshot never records a payload the store does not
+        // hold yet.
+        let spilled = self.store_spilled_payloads();
         let mut buf = alloc::vec![0u8; DATA_SNAPSHOT_LIMIT];
-        let pos = self.encode_data_snapshot(&mut buf);
+        let pos = self.encode_data_snapshot_with(&mut buf, &spilled);
         let mut sealed = Vec::new();
         crate::storage::encrypted::seal(&buf[..pos], &mut sealed)
             .map_err(|_| FsError::IntegrityViolation)?;
@@ -1354,13 +1504,100 @@ pub fn read_file_for_task(
             .map_err(|_| FsError::IntegrityViolation)
     }
 
+    /// Writes every oversized payload to the block store and returns the
+    /// block-store names it actually wrote.
+    ///
+    /// A payload the store refused is left out of the returned names, so the
+    /// snapshot marks as external only what a restore can read back. The
+    /// refusal is reported: a file that cannot be persisted must not look
+    /// persisted.
+    fn store_spilled_payloads(&self) -> Vec<String> {
+        let mut stored = Vec::new();
+        for inode in self.inodes.values() {
+            if inode.file_type != FileType::RegularFile || !is_persistent_data_path(&inode.path) {
+                continue;
+            }
+            let data = inode.data.as_slice();
+            if data.len() <= SNAPSHOT_FILE_LIMIT {
+                continue;
+            }
+            if data.len() > SPILL_FILE_LIMIT {
+                crate::serial_println!(
+                    "[VFS PERSIST] {} is {} bytes, above the {}-byte ceiling the kernel heap allows; it does not survive a reboot",
+                    inode.path,
+                    data.len(),
+                    SPILL_FILE_LIMIT
+                );
+                continue;
+            }
+            let name = spill_path_for(&inode.path);
+            if self.spill_payload(&name, data) {
+                crate::serial_println!(
+                    "[VFS PERSIST] Spilled {} ({} bytes) to {}",
+                    inode.path,
+                    data.len(),
+                    name
+                );
+                stored.push(name);
+            } else {
+                crate::serial_println!(
+                    "[VFS PERSIST] Spill failed for {} ({} bytes); the payload does not survive a reboot",
+                    inode.path,
+                    data.len()
+                );
+            }
+        }
+        stored
+    }
+
+    /// Writes a payload to the block store and reports whether the whole of
+    /// it landed.
+    ///
+    /// WHY the write publishes the whole payload at once rather than
+    /// streaming it over the old one in place: the block store's commit
+    /// point for a file is its published length, and an in-place rewrite of
+    /// a payload of the SAME length never moves that commit point -- the
+    /// new bytes are laid over the old ones while the file still claims to
+    /// be the old length. A reset in the middle of such a rewrite would
+    /// leave the first half of the new payload in front of the second half
+    /// of the old one, and the restore, which checks the length, would
+    /// accept that mixture as the payload. The whole-file write publishes
+    /// the new bytes only after every one of them is down, so a reset
+    /// leaves the payload that was there before, intact and complete.
+    ///
+    /// WHY the length is checked at the end: the published length is the
+    /// commit point, so a spill that did not reach the payload's length is a
+    /// short payload. It must not be named by the snapshot, because a
+    /// restore would hand back a truncated file.
+    ///
+    /// WHY the payload is not copied: the write moves the bytes out of the
+    /// VFS's own buffer a sector at a time, so a payload of several
+    /// megabytes costs no second copy of itself.
+    fn spill_payload(&self, name: &str, data: &[u8]) -> bool {
+        if !(self.spill.write)(name, data) {
+            return false;
+        }
+        matches!((self.spill.file_len)(name), Some(len) if len == data.len() as u64)
+    }
+
     /// Encodes mutable regular-file payloads into `buf` and returns the used length.
+    ///
+    /// Used by the snapshot tests, which encode a tree the block store cannot
+    /// hold; the save path calls [`Self::encode_data_snapshot_with`].
+    #[cfg(test)]
+    fn encode_data_snapshot(&self, buf: &mut [u8]) -> usize {
+        self.encode_data_snapshot_with(buf, &[])
+    }
+
+    /// Encodes the data snapshot, marking as external each payload named in
+    /// `spilled` rather than carrying its bytes.
     ///
     /// The entry order follows inode id order, so a full budget drops a
     /// deterministic suffix of the mutable tree rather than an arbitrary set.
-    /// A file larger than [`SNAPSHOT_FILE_LIMIT`] is skipped whole; entries are
-    /// only committed once their complete header and payload fit.
-    fn encode_data_snapshot(&self, buf: &mut [u8]) -> usize {
+    /// A payload larger than [`SNAPSHOT_FILE_LIMIT`] is either named as
+    /// external (when the store holds it) or skipped whole; entries are only
+    /// committed once their complete header and payload fit.
+    fn encode_data_snapshot_with(&self, buf: &mut [u8], spilled: &[String]) -> usize {
         if buf.len() < 6 { return 0; }
         buf[..4].copy_from_slice(b"DTA1");
         let mut pos=6usize;
@@ -1372,7 +1609,23 @@ pub fn read_file_for_task(
             // A size that no bytes back is a record from a boot that lost the
             // payload; persisting it again would keep the lie alive.
             if data.is_empty() && inode.size > 0 { continue; }
-            if path.len()>255 || data.len()>SNAPSHOT_FILE_LIMIT { continue; }
+            if path.len()>255 { continue; }
+            if data.len()>SNAPSHOT_FILE_LIMIT {
+                let name = spill_path_for(&inode.path);
+                if !spilled.iter().any(|s| s == &name) { continue; }
+                // WHY the length is bounded here: the entry's top bit is the
+                // flag that says "the bytes live in the block store", so a
+                // length that reaches it would be read back as a payload of
+                // the wrong size.
+                if data.len() > 0x7FFF_FFFFusize { continue; }
+                if pos + 2 + path.len() + 4 > buf.len() { break; }
+                buf[pos..pos+2].copy_from_slice(&(path.len() as u16).to_le_bytes()); pos+=2;
+                buf[pos..pos+path.len()].copy_from_slice(path); pos+=path.len();
+                let marked = (data.len() as u32) | DATA_ENTRY_EXTERNAL;
+                buf[pos..pos+4].copy_from_slice(&marked.to_le_bytes()); pos+=4;
+                count=count.saturating_add(1);
+                continue;
+            }
             if pos + 2 + path.len() + 4 + data.len() > buf.len() { break; }
             buf[pos..pos+2].copy_from_slice(&(path.len() as u16).to_le_bytes()); pos+=2;
             buf[pos..pos+path.len()].copy_from_slice(path); pos+=path.len();
@@ -1620,6 +1873,17 @@ pub fn read_file_for_task(
     /// so a data record whose directory was absent from the metadata snapshot
     /// still lands at its intended path instead of becoming an orphan inode.
     fn decode_data_snapshot(&mut self, buf: &[u8], len: usize) {
+        let store = self.spill;
+        self.decode_data_snapshot_with(buf, len, store);
+    }
+
+    /// Decodes a validated data snapshot, reading spilled payloads from
+    /// `store`.
+    ///
+    /// WHY the store is a parameter: the restore is the half of the spill
+    /// lifecycle that has to be observable without a block device, and the
+    /// only code that names the device is the one that builds the store.
+    fn decode_data_snapshot_with(&mut self, buf: &[u8], len: usize, store: SpillStore) {
         if len < 6 { return; }
         let count=u16::from_le_bytes([buf[4],buf[5]]) as usize;
         let mut pos=6usize;
@@ -1629,7 +1893,44 @@ pub fn read_file_for_task(
             let plen=u16::from_le_bytes([buf[pos],buf[pos+1]]) as usize; pos+=2;
             if plen==0 || plen>255 || pos+plen+4>len { break; }
             let path=match core::str::from_utf8(&buf[pos..pos+plen]).ok(){Some(v)=>v, None=>break}; pos+=plen;
-            let dlen=u32::from_le_bytes([buf[pos],buf[pos+1],buf[pos+2],buf[pos+3]]) as usize; pos+=4;
+            let raw=u32::from_le_bytes([buf[pos],buf[pos+1],buf[pos+2],buf[pos+3]]) as u32; pos+=4;
+            let external = raw & DATA_ENTRY_EXTERNAL != 0;
+            let dlen=(raw & !DATA_ENTRY_EXTERNAL) as usize;
+            if external {
+                if dlen == 0 { continue; }
+                if dlen > SPILL_FILE_LIMIT {
+                    // A record the ceiling forbids is skipped, not obeyed:
+                    // breaking here would throw away every record after it
+                    // as well.
+                    crate::serial_println!(
+                        "[VFS RESTORE] {} names a {} byte payload, above the {}-byte ceiling; it is not restored",
+                        path,
+                        dlen,
+                        SPILL_FILE_LIMIT
+                    );
+                    continue;
+                }
+                if !is_persistent_data_path(path) { continue; }
+                let name = spill_path_for(path);
+                match load_spilled_payload(&store, &name, dlen) {
+                    Some(payload) => {
+                        let parent = parent_path(path);
+                        if parent != "/" { self.ensure_dir_path(parent); }
+                        crate::serial_println!("[VFS RESTORE] Restored spilled file: {} ({} bytes)", path, dlen);
+                        self.create_file_owned(path, payload, false);
+                    }
+                    None => {
+                        // A snapshot that names a payload the store cannot
+                        // produce is reported, not quietly half-restored.
+                        crate::serial_println!(
+                            "[VFS RESTORE] Spilled payload unavailable for {} ({} bytes)",
+                            path,
+                            dlen
+                        );
+                    }
+                }
+                continue;
+            }
             if dlen>SNAPSHOT_FILE_LIMIT || pos+dlen>len { break; }
             if !is_persistent_data_path(path) { pos+=dlen; continue; }
             // A zero-length payload for a path that already holds bytes is a
@@ -1753,6 +2054,55 @@ fn is_persistent_metadata_path(path: &str) -> bool {
     is_persistent_data_path(path) || path == "/data" || path == "/user" || path == "/storage"
 }
 
+/// Reads a spilled payload back from the block store in bounded chunks.
+///
+/// WHY chunked: the payload can be several megabytes, and it is assembled in
+/// bounded pieces so that no single platform call carries the whole file.
+///
+/// WHY the published length is checked first: the snapshot says how long the
+/// payload is, and a store holding a different length holds a different
+/// payload. Restoring the first `len` bytes of that one would hand back a
+/// file whose contents are not the contents that were written.
+///
+/// WHY the reservation is fallible: a payload the heap cannot hold has to be
+/// reported as unavailable, not abort the boot.
+fn load_spilled_payload(store: &SpillStore, name: &str, len: usize) -> Option<Vec<u8>> {
+    if (store.file_len)(name)? != len as u64 {
+        return None;
+    }
+    let mut payload = Vec::new();
+    payload.try_reserve(len).ok()?;
+    let mut chunk = alloc::vec![0u8; core::cmp::min(SPILL_CHUNK_SIZE, len)];
+    let mut offset = 0usize;
+    while offset < len {
+        let want = core::cmp::min(chunk.len(), len - offset);
+        let read = (store.read_at)(name, offset as u64, &mut chunk[..want])?;
+        if read == 0 || read > want {
+            return None;
+        }
+        payload.extend_from_slice(&chunk[..read]);
+        offset += read;
+    }
+    Some(payload)
+}
+
+/// The block-store name an oversized payload is kept at.
+///
+/// WHY the name is a digest and not the path: the block store names a file in
+/// 46 bytes, and a VFS path does not fit. The first eight bytes of the SHA-256
+/// of the path name the file, so the same path always resolves to the same
+/// name across boots.
+fn spill_path_for(vfs_path: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let digest = Sha256::digest(vfs_path.as_bytes());
+    let mut out = String::from(SPILL_PREFIX);
+    for byte in &digest[..8] {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
 /// Normalizes a path string.
 fn normalize_path(path: &str) -> String {
     let mut out = String::from("/");
@@ -1792,6 +2142,7 @@ pub static VFS: Mutex<Vfs> = Mutex::new(Vfs {
     task_file_tables: BTreeMap::new(),
     persist_unavailable: core::cell::Cell::new(false),
     storage_generation: 0,
+    spill: SpillStore::device(),
 });
 
 fn generate_ppm_p6(r_base: u8, g_base: u8, b_base: u8, r_step: i8, g_step: i8, b_step: i8) -> alloc::vec::Vec<u8> {
@@ -1933,6 +2284,69 @@ pub fn init() {
 mod tests {
     use super::*;
     use crate::capability::{delegation, Capability, CapabilityId};
+
+    /// A block-store file the in-memory store holds.
+    struct StoredFile {
+        bytes: Vec<u8>,
+        published: u64,
+    }
+
+    /// The in-memory block store the spill tests run against.
+    ///
+    /// WHY a static and not a per-test value: the store is reached through
+    /// function pointers, which cannot capture, so the state has to live
+    /// somewhere the pointers can name. Every test uses paths of its own,
+    /// and the names the store holds are digests of those paths, so no two
+    /// tests touch the same file.
+    static MEMORY_STORE: Mutex<BTreeMap<String, StoredFile>> = Mutex::new(BTreeMap::new());
+
+    /// Writes a whole payload into the in-memory store.
+    ///
+    /// WHY the whole file at once: the block store publishes a file's bytes
+    /// as a whole, and a test store that modelled an in-place rewrite would
+    /// prove a guarantee the device does not make.
+    fn memory_write(name: &str, data: &[u8]) -> bool {
+        let mut files = MEMORY_STORE.lock();
+        files.insert(
+            String::from(name),
+            StoredFile { bytes: data.to_vec(), published: data.len() as u64 },
+        );
+        true
+    }
+
+    /// Reads bytes at an offset from the in-memory store.
+    fn memory_read_at(name: &str, offset: u64, out: &mut [u8]) -> Option<usize> {
+        let files = MEMORY_STORE.lock();
+        let file = files.get(name)?;
+        if offset >= file.published || out.is_empty() { return Some(0); }
+        let start = offset as usize;
+        let take = core::cmp::min(out.len(), file.published as usize - start);
+        out[..take].copy_from_slice(&file.bytes[start..start + take]);
+        Some(take)
+    }
+
+    /// The published length of a file in the in-memory store.
+    fn memory_file_len(name: &str) -> Option<u64> {
+        let files = MEMORY_STORE.lock();
+        files.get(name).map(|file| file.published)
+    }
+
+    /// Removes a file from the in-memory store.
+    fn memory_remove(name: &str) -> bool {
+        let mut files = MEMORY_STORE.lock();
+        files.remove(name);
+        true
+    }
+
+    /// The store the spill tests install in place of the block device.
+    fn memory_store() -> SpillStore {
+        SpillStore {
+            write: memory_write,
+            read_at: memory_read_at,
+            file_len: memory_file_len,
+            remove: memory_remove,
+        }
+    }
 
     #[test]
     fn delegated_lease_single_invocation_vfs_open_read_stat() {
@@ -2275,6 +2689,199 @@ mod tests {
     }
 
     #[test]
+    fn vfs_multi_megabyte_payload_survives_a_reboot() {
+        // The defect this pins: a full-screen screenshot is a 720x1440 PPM --
+        // 3,108,864 bytes -- and the old 512 KiB spill ceiling dropped it on
+        // persist, so it came back as a 0-byte file after the reboot.
+        const SCREENSHOT_BYTES: usize = 720 * 1440 * 3;
+        assert!(
+            SCREENSHOT_BYTES > 512 * 1024,
+            "the payload is above the ceiling that used to drop it"
+        );
+        assert!(
+            SCREENSHOT_BYTES <= SPILL_FILE_LIMIT,
+            "the payload fits the ceiling the kernel heap allows"
+        );
+
+        let mut source = Vfs::with_spill_store(memory_store());
+        source.mkdir("/storage");
+        source.mkdir("/storage/photos");
+        let mut payload = alloc::vec![0u8; SCREENSHOT_BYTES];
+        for (index, byte) in payload.iter_mut().enumerate() {
+            *byte = (index % 251) as u8;
+        }
+        source.create_file("/storage/photos/screenshot_536730.ppm", &payload, false);
+
+        let spilled = source.store_spilled_payloads();
+        assert_eq!(spilled.len(), 1, "a 2.9 MiB payload is spilled, not dropped");
+
+        // The snapshot still fits: it names the payload, it does not carry it.
+        let mut data = alloc::vec![0u8; DATA_SNAPSHOT_LIMIT];
+        let len = source.encode_data_snapshot_with(&mut data, &spilled);
+        assert!(len <= DATA_SNAPSHOT_LIMIT, "the snapshot still fits ({} bytes)", len);
+        assert!(
+            len < 6 + 2 + 48 + 4,
+            "the entry names the payload instead of carrying it ({} bytes)",
+            len
+        );
+
+        let mut restored = Vfs::with_spill_store(memory_store());
+        restored.decode_data_snapshot_with(&data[..len], len, memory_store());
+        let file = restored
+            .lookup("/storage/photos/screenshot_536730.ppm")
+            .expect("the screenshot is restored");
+        let inode = &restored.inodes[&file];
+        assert_eq!(inode.size, SCREENSHOT_BYTES, "the restored file reports its bytes");
+        assert_eq!(inode.data.as_slice(), payload.as_slice(), "the restored bytes are the written bytes");
+    }
+
+    #[test]
+    fn vfs_a_payload_at_the_snapshot_entry_limit_is_carried_and_one_above_it_is_spilled() {
+        let mut source = Vfs::with_spill_store(memory_store());
+        source.mkdir("/storage");
+        source.mkdir("/storage/downloads");
+        let at_limit = alloc::vec![0xA5u8; SNAPSHOT_FILE_LIMIT];
+        let over_limit = alloc::vec![0x5Au8; SNAPSHOT_FILE_LIMIT + 1];
+        source.create_file("/storage/downloads/at_limit.bin", &at_limit, false);
+        source.create_file("/storage/downloads/over_limit.bin", &over_limit, false);
+
+        let spilled = source.store_spilled_payloads();
+        assert!(
+            !spilled.contains(&spill_path_for("/storage/downloads/at_limit.bin")),
+            "a payload that exactly fills an entry travels inside the snapshot"
+        );
+        assert!(
+            spilled.contains(&spill_path_for("/storage/downloads/over_limit.bin")),
+            "a payload one byte over an entry is spilled"
+        );
+
+        let mut data = alloc::vec![0u8; DATA_SNAPSHOT_LIMIT];
+        let len = source.encode_data_snapshot_with(&mut data, &spilled);
+        let mut restored = Vfs::with_spill_store(memory_store());
+        restored.decode_data_snapshot_with(&data[..len], len, memory_store());
+
+        let at = restored
+            .lookup("/storage/downloads/at_limit.bin")
+            .expect("the payload that fills an entry is restored");
+        assert_eq!(restored.inodes[&at].data.as_slice(), at_limit.as_slice());
+        let over = restored
+            .lookup("/storage/downloads/over_limit.bin")
+            .expect("the spilled payload is restored");
+        assert_eq!(restored.inodes[&over].data.as_slice(), over_limit.as_slice());
+    }
+
+    #[test]
+    fn vfs_a_payload_at_the_spill_ceiling_is_spilled_and_one_above_it_is_refused() {
+        let mut vfs = Vfs::with_spill_store(memory_store());
+        vfs.mkdir("/storage");
+        vfs.mkdir("/storage/downloads");
+        let at_limit = alloc::vec![0xA5u8; SPILL_FILE_LIMIT];
+        let over_limit = alloc::vec![0x5Au8; SPILL_FILE_LIMIT + 1];
+        vfs.create_file("/storage/downloads/at_ceiling.bin", &at_limit, false);
+        vfs.create_file("/storage/downloads/above_ceiling.bin", &over_limit, false);
+
+        let spilled = vfs.store_spilled_payloads();
+        assert!(
+            spilled.contains(&spill_path_for("/storage/downloads/at_ceiling.bin")),
+            "a payload exactly at the ceiling is spilled"
+        );
+        assert!(
+            !spilled.contains(&spill_path_for("/storage/downloads/above_ceiling.bin")),
+            "a payload above the ceiling is refused, not silently dropped"
+        );
+
+        let mut data = alloc::vec![0u8; DATA_SNAPSHOT_LIMIT];
+        let len = vfs.encode_data_snapshot_with(&mut data, &spilled);
+        let mut restored = Vfs::with_spill_store(memory_store());
+        restored.decode_data_snapshot_with(&data[..len], len, memory_store());
+        let at = restored
+            .lookup("/storage/downloads/at_ceiling.bin")
+            .expect("the payload at the ceiling is restored");
+        assert_eq!(restored.inodes[&at].data.as_slice(), at_limit.as_slice());
+        assert_eq!(
+            restored.lookup("/storage/downloads/above_ceiling.bin"),
+            None,
+            "a payload the ceiling refuses must not come back as a 0-byte file"
+        );
+    }
+
+    #[test]
+    fn vfs_a_re_spilled_payload_of_the_same_length_replaces_it_wholesale() {
+        // The payload that was in the store and the one that replaces it have
+        // the same length, which is the case a rewrite made in place got
+        // wrong: the store publishes a file's length as its commit point, so
+        // an in-place rewrite of the same length never moves it, and a reset
+        // in the middle of the rewrite leaves the two payloads mixed
+        // together under a length that still looks right.
+        let mut source = Vfs::with_spill_store(memory_store());
+        source.mkdir("/storage");
+        source.mkdir("/storage/photos");
+        let first = alloc::vec![0x11u8; 1024 * 1024];
+        let second = alloc::vec![0x22u8; 1024 * 1024];
+        source.create_file("/storage/photos/shot.ppm", &first, false);
+        assert_eq!(source.store_spilled_payloads().len(), 1, "the payload is spilled");
+
+        source.create_file("/storage/photos/shot.ppm", &second, false);
+        assert_eq!(source.store_spilled_payloads().len(), 1, "the payload is spilled again");
+
+        let name = spill_path_for("/storage/photos/shot.ppm");
+        let mut stored = alloc::vec![0u8; 1024 * 1024];
+        let read = memory_read_at(&name, 0, &mut stored).expect("the payload is in the store");
+        assert_eq!(read, 1024 * 1024);
+        assert_eq!(
+            stored, second,
+            "the store holds the payload that replaced the old one, not a mixture of the two"
+        );
+    }
+
+    #[test]
+    fn vfs_unlinked_payload_leaves_no_spill_file_behind() {
+        let mut vfs = Vfs::with_spill_store(memory_store());
+        vfs.mkdir("/storage");
+        vfs.mkdir("/storage/photos");
+        vfs.create_file(
+            "/storage/photos/screenshot_deleted.ppm",
+            &alloc::vec![0x3Cu8; 3 * 1024 * 1024],
+            false,
+        );
+        let spilled = vfs.store_spilled_payloads();
+        assert_eq!(spilled.len(), 1);
+        let name = spilled[0].clone();
+        assert!(memory_file_len(&name).is_some(), "the payload reached the block store");
+
+        vfs.unlink("/storage/photos/screenshot_deleted.ppm").expect("unlink");
+        assert_eq!(vfs.lookup("/storage/photos/screenshot_deleted.ppm"), None);
+        assert!(
+            memory_file_len(&name).is_none(),
+            "a payload no path names must not outlive the path"
+        );
+    }
+
+    #[test]
+    fn vfs_a_payload_that_shrinks_releases_its_spill_file() {
+        let mut vfs = Vfs::with_spill_store(memory_store());
+        vfs.mkdir("/storage");
+        vfs.mkdir("/storage/photos");
+        vfs.create_file(
+            "/storage/photos/screenshot_shrunk.ppm",
+            &alloc::vec![0x9Eu8; 2 * 1024 * 1024],
+            false,
+        );
+        let spilled = vfs.store_spilled_payloads();
+        assert_eq!(spilled.len(), 1);
+        let name = spilled[0].clone();
+        assert!(memory_file_len(&name).is_some());
+
+        // The file now carries a payload that travels inside the snapshot, so
+        // the block-store copy has to go with it.
+        vfs.create_file("/storage/photos/screenshot_shrunk.ppm", b"small", false);
+        assert!(
+            memory_file_len(&name).is_none(),
+            "a payload that no longer needs the block store must not leave it behind"
+        );
+    }
+
+    #[test]
     fn vfs_storage_snapshot_skips_oversize_file_without_truncating() {
         let mut source = Vfs::new();
         source.mkdir("/storage");
@@ -2300,6 +2907,62 @@ mod tests {
         for inode in restored.inodes.values() {
             assert_ne!(inode.size, SNAPSHOT_FILE_LIMIT, "no snapshot entry may be truncated to the limit");
         }
+    }
+
+    #[test]
+    fn vfs_large_payloads_round_trip_through_the_block_store() {
+        // A payload bigger than one entry cannot travel in the snapshot, so it
+        // travels beside it: the entry names the block-store file, and the
+        // bytes come back from there. Before this, every download above 8 KB
+        // came back as a 0-byte file.
+        let mut source = Vfs::with_spill_store(memory_store());
+        source.mkdir("/storage");
+        source.mkdir("/storage/downloads");
+        let large = alloc::vec![0x5Au8; SNAPSHOT_FILE_LIMIT + 4096];
+        source.create_file("/storage/downloads/big.wav", &large, false);
+
+        let spilled = source.store_spilled_payloads();
+        assert_eq!(spilled.len(), 1, "the oversized payload is spilled");
+        assert_eq!(spilled[0], spill_path_for("/storage/downloads/big.wav"));
+
+        let mut data = alloc::vec![0u8; DATA_SNAPSHOT_LIMIT];
+        let len = source.encode_data_snapshot_with(&mut data, &spilled);
+        assert_eq!(u16::from_le_bytes([data[4], data[5]]), 1, "the spilled payload is recorded once");
+        assert!(
+            len < 6 + 2 + 32 + 4 + 16,
+            "an external entry names the payload instead of carrying it ({} bytes)",
+            len
+        );
+
+        let mut restored = Vfs::with_spill_store(memory_store());
+        restored.decode_data_snapshot_with(&data[..len], len, memory_store());
+        let file = restored.lookup("/storage/downloads/big.wav").expect("spilled payload restored");
+        assert_eq!(restored.inodes[&file].data.as_slice(), large.as_slice());
+    }
+
+    #[test]
+    fn vfs_spilled_payload_missing_from_the_store_is_not_half_restored() {
+        let mut source = Vfs::with_spill_store(memory_store());
+        source.mkdir("/storage");
+        source.mkdir("/storage/downloads");
+        source.create_file(
+            "/storage/downloads/gone.bin",
+            &alloc::vec![0x77u8; SNAPSHOT_FILE_LIMIT + 64],
+            false,
+        );
+        // The payload never reached the store, so the snapshot names a file
+        // that is not there.
+        let names = alloc::vec![spill_path_for("/storage/downloads/gone.bin")];
+        let mut data = alloc::vec![0u8; DATA_SNAPSHOT_LIMIT];
+        let len = source.encode_data_snapshot_with(&mut data, &names);
+
+        let mut restored = Vfs::with_spill_store(memory_store());
+        restored.decode_data_snapshot_with(&data[..len], len, memory_store());
+        assert_eq!(
+            restored.lookup("/storage/downloads/gone.bin"),
+            None,
+            "a payload the store cannot produce must not become a 0-byte file"
+        );
     }
 
     #[test]
