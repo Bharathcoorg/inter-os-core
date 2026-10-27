@@ -92,7 +92,7 @@ pub enum DrawCmd {
         radius: usize,
         border: Option<u32>,
     },
-    /// High-performance pre-measured glyph run with font weighting and subpixel AA.
+    /// High-performance pre-measured glyph run with font weighting and grayscale coverage AA.
     DrawGlyphRun {
         x: usize,
         y: usize,
@@ -292,7 +292,7 @@ impl<const CAP: usize> DisplayList<CAP> {
         true
     }
 
-    /// Pushes a glyph run with typographic weighting and subpixel AA.
+    /// Pushes a glyph run with typographic weighting and grayscale coverage AA.
     pub fn push_glyph_run(&mut self, x: usize, y: usize, scale: usize, text: &[u8], color: u32, bold: bool) -> bool {
         if self.len >= CAP {
             return false;
