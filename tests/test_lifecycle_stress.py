@@ -30,7 +30,7 @@ TESTS_DIR = Path(__file__).resolve().parent
 ROOT = TESTS_DIR.parent
 sys.path.insert(0, str(TESTS_DIR))
 
-from test_interactive_lifecycle import find_qemu, send_monitor_cmd, test_app_lifecycle, SerialReader
+from test_interactive_lifecycle import find_qemu, send_monitor_cmd, run_app_lifecycle, SerialReader
 
 def kill_proc_on_port(p):
     try:
@@ -126,7 +126,7 @@ def execute_iteration_operations(reader, monitor_sock, iter_num):
     print(f"{'='*64}")
 
     # App 1: Calculator (Row 1, Card 0: x=180, y=520)
-    test_app_lifecycle(
+    run_app_lifecycle(
         reader=reader,
         monitor_sock=monitor_sock,
         operation_num=2,
@@ -144,7 +144,7 @@ def execute_iteration_operations(reader, monitor_sock, iter_num):
     )
 
     # App 2: Settings (Row 0, Card 0: x=180, y=350)
-    test_app_lifecycle(
+    run_app_lifecycle(
         reader=reader,
         monitor_sock=monitor_sock,
         operation_num=3,
@@ -161,7 +161,7 @@ def execute_iteration_operations(reader, monitor_sock, iter_num):
     )
 
     # App 4: Vault (Row 1, Card 1: x=485, y=520)
-    test_app_lifecycle(
+    run_app_lifecycle(
         reader=reader,
         monitor_sock=monitor_sock,
         operation_num=5,
@@ -177,7 +177,7 @@ def execute_iteration_operations(reader, monitor_sock, iter_num):
     )
 
     # App 5: Camera (Row 2, Card 0: x=180, y=690)
-    test_app_lifecycle(
+    run_app_lifecycle(
         reader=reader,
         monitor_sock=monitor_sock,
         operation_num=6,
@@ -190,7 +190,7 @@ def execute_iteration_operations(reader, monitor_sock, iter_num):
     )
 
     # App 6: Dialer (Row 2, Card 1: x=485, y=690)
-    test_app_lifecycle(
+    run_app_lifecycle(
         reader=reader,
         monitor_sock=monitor_sock,
         operation_num=7,
@@ -206,7 +206,7 @@ def execute_iteration_operations(reader, monitor_sock, iter_num):
     )
 
     # App 7: Browser (Row 3, Card 0: x=180, y=860)
-    test_app_lifecycle(
+    run_app_lifecycle(
         reader=reader,
         monitor_sock=monitor_sock,
         operation_num=8,
@@ -219,7 +219,7 @@ def execute_iteration_operations(reader, monitor_sock, iter_num):
     )
 
     # App 8: Messages (Row 3, Card 1: x=485, y=860)
-    test_app_lifecycle(
+    run_app_lifecycle(
         reader=reader,
         monitor_sock=monitor_sock,
         operation_num=9,
@@ -232,7 +232,7 @@ def execute_iteration_operations(reader, monitor_sock, iter_num):
     )
 
     # App 9: Music (Row 4, Card 1: x=485, y=1030)
-    test_app_lifecycle(
+    run_app_lifecycle(
         reader=reader,
         monitor_sock=monitor_sock,
         operation_num=10,
@@ -245,7 +245,7 @@ def execute_iteration_operations(reader, monitor_sock, iter_num):
     )
 
     # App 10: Calendar (Row 4, Card 0: x=180, y=1030)
-    test_app_lifecycle(
+    run_app_lifecycle(
         reader=reader,
         monitor_sock=monitor_sock,
         operation_num=11,

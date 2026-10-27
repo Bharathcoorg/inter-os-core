@@ -147,7 +147,7 @@ class SerialReader:
                 continue
         return False
 
-def test_app_lifecycle(reader, monitor_sock, operation_num, app_name, app_id, tap_coords, present_marker, dump_prefix, in_app_interactions=None, exit_gesture="back"):
+def run_app_lifecycle(reader, monitor_sock, operation_num, app_name, app_id, tap_coords, present_marker, dump_prefix, in_app_interactions=None, exit_gesture="back"):
     print(f"\n[LIFECYCLE TEST] === Operation {operation_num}: Testing {app_name} ({app_id}) ===")
     print(f"[LIFECYCLE TEST] Dispatching touch tap on {app_name} card at {tap_coords}...")
     time.sleep(1.0)
@@ -427,7 +427,7 @@ def main():
 
         # 2. Multi-App Roundtrips:
         # App 1: Calculator (Row 1, Card 0: x=180, y=520)
-        test_app_lifecycle(
+        run_app_lifecycle(
             reader=reader,
             monitor_sock=monitor_sock,
             operation_num=2,
@@ -445,7 +445,7 @@ def main():
         )
 
         # App 2: Settings (Row 0, Card 0: x=180, y=350)
-        test_app_lifecycle(
+        run_app_lifecycle(
             reader=reader,
             monitor_sock=monitor_sock,
             operation_num=3,
@@ -462,7 +462,7 @@ def main():
         )
 
         # App 4: Vault (Row 1, Card 1: x=485, y=520)
-        test_app_lifecycle(
+        run_app_lifecycle(
             reader=reader,
             monitor_sock=monitor_sock,
             operation_num=5,
@@ -478,7 +478,7 @@ def main():
         )
 
         # App 5: Camera (Row 2, Card 0: x=180, y=690)
-        test_app_lifecycle(
+        run_app_lifecycle(
             reader=reader,
             monitor_sock=monitor_sock,
             operation_num=6,
@@ -494,7 +494,7 @@ def main():
         )
 
         # App 6: Dialer (Row 2, Card 1: x=485, y=690)
-        test_app_lifecycle(
+        run_app_lifecycle(
             reader=reader,
             monitor_sock=monitor_sock,
             operation_num=7,
@@ -510,7 +510,7 @@ def main():
         )
 
         # App 7: Browser (Row 3, Card 0: x=180, y=860)
-        test_app_lifecycle(
+        run_app_lifecycle(
             reader=reader,
             monitor_sock=monitor_sock,
             operation_num=8,
@@ -526,7 +526,7 @@ def main():
         )
 
         # App 8: Messages (Row 3, Card 1: x=485, y=860)
-        test_app_lifecycle(
+        run_app_lifecycle(
             reader=reader,
             monitor_sock=monitor_sock,
             operation_num=9,
@@ -542,7 +542,7 @@ def main():
         )
 
         # App 9: Calendar (Row 4, Card 0: x=180, y=1030)
-        test_app_lifecycle(
+        run_app_lifecycle(
             reader=reader,
             monitor_sock=monitor_sock,
             operation_num=10,
@@ -555,7 +555,7 @@ def main():
         )
 
         # App 10: Music (Row 4, Card 1: x=485, y=1030)
-        test_app_lifecycle(
+        run_app_lifecycle(
             reader=reader,
             monitor_sock=monitor_sock,
             operation_num=11,
@@ -571,7 +571,7 @@ def main():
         )
 
         # App 11: Files (App Drawer / Grid View: x=430, y=260)
-        test_app_lifecycle(
+        run_app_lifecycle(
             reader=reader,
             monitor_sock=monitor_sock,
             operation_num=12,
@@ -587,7 +587,7 @@ def main():
         )
 
         # App 12: Gallery (Grid View / Dock: x=410, y=1180)
-        test_app_lifecycle(
+        run_app_lifecycle(
             reader=reader,
             monitor_sock=monitor_sock,
             operation_num=13,
@@ -603,7 +603,7 @@ def main():
         )
 
         # App 13: Notes (Grid View target: x=550, y=1180)
-        test_app_lifecycle(
+        run_app_lifecycle(
             reader=reader,
             monitor_sock=monitor_sock,
             operation_num=14,
