@@ -358,8 +358,8 @@ impl LauncherState {
             power_transition_progress: 0,
             display_was_powered: false,
             display_power_state_valid: false,
-            last_volume_percent: 70,
-            volume_state_valid: true,
+            last_volume_percent: 0,
+            volume_state_valid: false,
             volume_hud_until: 0,
             clock_time: [b' '; 5],
             clock_source_ok: false,
@@ -2211,6 +2211,64 @@ fn render_volume_hud(surface: u32, volume: u8) {
     }
 }
 
+/// Steps the mixer's master volume by one notch through the audio service and
+/// redraws whatever actually displays the level.
+///
+/// WHY the reading is taken from the reply and not from the request: the kernel
+/// answers with the level the AC'97 register holds after the write, which is the
+/// number this surface is allowed to print. Drawing the requested value would let
+/// a refused or attenuated change look like one that happened.
+///
+/// WHY it refuses before it has ever read a level: with no known level there is
+/// nothing to step *from*, and asking for `0 + 10` would put a number on the
+/// screen that came from the panel rather than from the device.
+fn step_master_volume(state: &mut LauncherState, hud_surface: Option<u32>, ticks: u64, up: bool) {
+    if !state.volume_state_valid {
+        match std::audio_query_volume() {
+            Ok(volume) if volume <= 100 => {
+                state.last_volume_percent = volume as u8;
+                state.volume_state_valid = true;
+            }
+            _ => {
+                let _ = std::log("[LAUNCHER] Quick Controls volume step refused: the audio service reports no level.").ok();
+                return;
+            }
+        }
+    }
+    let requested = if up {
+        (state.last_volume_percent as u32).saturating_add(10).min(100)
+    } else {
+        (state.last_volume_percent as u32).saturating_sub(10)
+    };
+    match std::audio_set_volume(requested) {
+        Ok(volume) if volume <= 100 => {
+            state.last_volume_percent = volume as u8;
+            state.volume_hud_until = ticks.saturating_add(180);
+            if let Some(id) = hud_surface {
+                render_volume_hud(id, state.last_volume_percent);
+                let _ = std::window_set_geometry(id, 100, 220, 100, true);
+            }
+            let mut line = LineBuf::<96>::new();
+            {
+                use core::fmt::Write;
+                let _ = write!(
+                    line,
+                    "[LAUNCHER] Quick Controls set master volume to {}%.",
+                    state.last_volume_percent
+                );
+            }
+            std::log(line.as_str()).ok();
+        }
+        Ok(_) => {
+            state.volume_state_valid = false;
+            let _ = std::log("[LAUNCHER] Audio service returned an out-of-range level; volume reading hidden.").ok();
+        }
+        Err(_) => {
+            let _ = std::log("[LAUNCHER] Quick Controls volume step refused by the audio service.").ok();
+        }
+    }
+}
+
 // -----------------------------------------------------------------------------
 // Banded rendering: which rows an input actually changed
 //
@@ -2272,6 +2330,9 @@ pub enum Dirty {
     /// together. Marking only the pills would leave the old subset on screen
     /// under a new active pill.
     EventsFilter,
+    /// Quick Controls: the volume row, whose reading and step squares both move
+    /// when the mixer is asked for a new level.
+    ShadeLevel,
     /// The union of two regions, as row extents.
     ///
     /// WHY this variant exists at all: `widen` has to be able to answer "these
@@ -2306,6 +2367,7 @@ impl Dirty {
             Dirty::PinEntryDots => Some(screens::pin::dots_band()),
             Dirty::PinEntryStatus => Some(screens::pin::status_band()),
             Dirty::EventsFilter => Some(screens::notifications::filter_band()),
+            Dirty::ShadeLevel => Some(screens::quick_controls::level_band()),
             Dirty::Band(y0, y1) => Some((y0, y1)),
             Dirty::All => None,
         }
@@ -2351,6 +2413,9 @@ fn present_dirty(surface: u32, state: &LauncherState, dirty: Dirty) {
     }
     if dirty == Dirty::HomeCard || dirty == Dirty::HomeDeck {
         screens::home::invalidate_paint_cache();
+    }
+    if dirty == Dirty::ShadeLevel {
+        screens::quick_controls::invalidate_frame_cache();
     }
     if dirty == Dirty::All {
         render_view(surface, state);
@@ -3517,18 +3582,39 @@ pub extern "C" fn _start() -> ! {
                                 while std::input_event_poll(&mut drain).is_ok() {}
                                 break;
                             }
-                            // WHY taps only: the panel has no slider any more.
-                            // Every level row is a reading of hardware this guest
-                            // does not have, so a drag over one used to store a
-                            // preference that no device consumed. A tap now
-                            // reaches `quick_controls_hit`, which returns `NoOp`
-                            // for every inert row and so leaves the shade open.
+                            // WHY taps only: the kernel reports one event per
+                            // finished gesture, with the release position and the
+                            // total displacement, so a drag over this panel
+                            // arrives once rather than tracking the finger. A
+                            // trough you could scrub is therefore not something
+                            // this input path can drive honestly; the level is
+                            // stepped by two squares instead, and every inert row
+                            // still answers `NoOp` so the shade stays open.
                             if input.kind == 1 || input.kind == 2 {
                                 let x = input.x as usize;
                                 let y = input.y as usize;
 
                                 match screens::quick_controls::quick_controls_hit(&state, x, y) {
                                     screens::quick_controls::QuickControlAction::NoOp => {}
+                                    action @ (screens::quick_controls::QuickControlAction::VolumeDown
+                                    | screens::quick_controls::QuickControlAction::VolumeUp) => {
+                                        let up = matches!(
+                                            action,
+                                            screens::quick_controls::QuickControlAction::VolumeUp
+                                        );
+                                        step_master_volume(
+                                            &mut state,
+                                            volume_surface,
+                                            current_ticks(),
+                                            up,
+                                        );
+                                        // WHY only the volume row moves: a step
+                                        // changes that row's reading and nothing
+                                        // else on the shade, and the rest of the
+                                        // surface is the same pixels either way.
+                                        present_dirty(surface, &state, Dirty::ShadeLevel);
+                                        break;
+                                    }
                                     screens::quick_controls::QuickControlAction::LockScreen => {
                                         let _ = std::user_lock(1000);
                                         state.lock_state = std::user_get_lock_state(1000).unwrap_or(std::UserLockState::Locked);

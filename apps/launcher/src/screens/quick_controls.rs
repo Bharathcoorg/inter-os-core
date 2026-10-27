@@ -8,18 +8,25 @@
 //!
 //! WHY every tile here says what is missing instead of a state: the guest has no
 //! radio controller (`kernel/src/net/wireless.rs` reports `hardware_present:
-//! false` for every band and telephony is forced to PowerDown/NoSim), no
-//! backlight to dim, no flash, and no output level to read (`kernel/src/audio/mod.rs`
-//! records volume as a stored request that no mixer consumes). A tile that said
-//! "Connected", or a trough filled to 100%, would be indistinguishable on screen
-//! from a radio that works. So every unavailable row prints the reason in the
-//! kernel's own terms and none of them is tappable.
+//! false` for every band and telephony is forced to PowerDown/NoSim), no backlight
+//! register it can program, and no flash. A tile that said "Connected", or a
+//! trough filled to 100%, would be indistinguishable on screen from a radio that
+//! works. So every unavailable row prints the reason in the kernel's own terms and
+//! none of them is tappable.
 //!
-//! WHY only two controls answer a tap: Screen lock and the Power menu have real
-//! backends (`std::user_lock` and the guest power controller). Every other row
-//! returns `QuickControlAction::NoOp`, so a press can never change a preference
-//! that no hardware would honour. The panel is still fully drawn so the feature
-//! remains discoverable; it simply never pretends to act.
+//! WHY volume is the exception: it is the one level on this surface the guest can
+//! both read and write. `AudioManager::set_volume` programs the AC'97 master volume
+//! register when the controller is bound and `get_volume` reads that register back,
+//! so the percentage here is the mixer's own level and not a stored request -- the
+//! same number the volume HUD and the Music app's meter already use. The row is
+//! drawn and answered as the control it is.
+//!
+//! WHY three controls answer a tap: the volume steps, screen lock and the Power
+//! menu each have a real backend (`std::audio_set_volume`, `std::user_lock` and the
+//! guest power controller). Every other row returns `QuickControlAction::NoOp`, so
+//! a press can never change a preference that no hardware would honour. The panel
+//! is still fully drawn so the feature remains discoverable; it simply never
+//! pretends to act.
 //!
 //! WHY the type is larger here than the settings rows elsewhere: this shade is
 //! read at a glance while the phone is held at arm's length, and it carries only
@@ -190,6 +197,53 @@ pub const BRIGHTNESS_ROW: Rect = Rect::new(PANEL_X, LEVEL_TOP, PANEL_W, ROW_H);
 /// The volume reading's row.
 pub const VOLUME_ROW: Rect = Rect::new(PANEL_X, LEVEL_TOP + ROW_H, PANEL_W, ROW_H);
 
+/// Side of a volume step square.
+///
+/// WHY the touch floor rather than the icon box: these are the two smallest
+/// things a hand has to hit on this surface, and a square that is 32 px drawn
+/// and 44 px answered is the defect this platform has already fixed everywhere
+/// else.
+const STEP_W: usize = MIN_TOUCH_TARGET;
+
+/// Gap between the two step squares.
+const STEP_GAP: usize = space::SM;
+
+/// The volume row's step squares, as `[down, up]`.
+///
+/// WHY one function owns both the painting and the hit test: the recurring
+/// failure on this surface has been a painter and a hit box that each carry
+/// their own copy of the arithmetic and drift a few rows apart. Here there is
+/// one definition and two callers, so they cannot disagree.
+const fn volume_steps() -> [Rect; 2] {
+    let up_x = VOLUME_ROW.x + VOLUME_ROW.w - space::MD - STEP_W;
+    let down_x = up_x - STEP_GAP - STEP_W;
+    let y = VOLUME_ROW.y + (VOLUME_ROW.h - STEP_W) / 2;
+    [
+        Rect::new(down_x, y, STEP_W, STEP_W),
+        Rect::new(up_x, y, STEP_W, STEP_W),
+    ]
+}
+
+const VOLUME_STEPS: [Rect; 2] = volume_steps();
+
+/// The rows a volume step moves: the row carrying the reading and its squares.
+///
+/// WHY the whole row and not the two squares: the percentage sits in the same
+/// card, so repainting only the wells would leave the old number next to the new
+/// one.
+pub const fn level_band() -> (usize, usize) {
+    (VOLUME_ROW.y, VOLUME_ROW.y + VOLUME_ROW.h)
+}
+
+const _: () = assert!(
+    VOLUME_STEPS[1].x + STEP_W <= VOLUME_ROW.x + VOLUME_ROW.w - space::MD,
+    "the step squares must stay inside the row's right inset",
+);
+const _: () = assert!(
+    VOLUME_STEPS[0].x > PANEL_X + ROW_TEXT_INSET,
+    "the step squares must not land on the row's label column",
+);
+
 /// The Power entry pill.
 pub const POWER_BTN: Rect = Rect::new(PANEL_X + (PANEL_W - POWER_BTN_W) / 2, POWER_Y, POWER_BTN_W, POWER_H);
 
@@ -233,7 +287,7 @@ const CONNECTIVITY_LIST: [PanelRow; 4] = [
     PanelRow::Airplane,
 ];
 
-/// The two level readings. Both are read-only on this platform.
+/// The two level readings: one flat, one with a control.
 const LEVEL_LIST: [PanelRow; 2] = [PanelRow::Brightness, PanelRow::Volume];
 
 /// The secondary controls.
@@ -301,14 +355,26 @@ impl PanelRow {
     /// this surface must not break is printing a value for hardware the platform
     /// cannot produce, and the only reliable place to enforce that is the line
     /// that decides whether the value exists.
-    fn reading(self, _state: &LauncherState) -> Value {
+    fn reading(self, state: &LauncherState) -> Value {
         match self {
             PanelRow::Wifi => Value::inactive(b"Unavailable"),
             PanelRow::Bluetooth => Value::inactive(b"Unavailable"),
             PanelRow::Cellular => Value::inactive(b"Unavailable"),
             PanelRow::Airplane => Value::inactive(b"Not applicable"),
             PanelRow::Brightness => Value::inactive(b"No backlight"),
-            PanelRow::Volume => Value::inactive(b"No mixer"),
+            // WHY this one is a real number: the mixer is the level control this
+            // guest actually has -- the AC'97 master volume is programmed by the
+            // kernel and the shell already polls it for the volume HUD. Saying "no
+            // mixer" here was an under-claim of a device the platform does have.
+            PanelRow::Volume => {
+                if state.volume_state_valid {
+                    let mut buf = [0u8; 5];
+                    let run = percent_run(state.last_volume_percent, &mut buf);
+                    Value::active(run)
+                } else {
+                    Value::inactive(b"Unavailable")
+                }
+            }
             PanelRow::Torch => Value::inactive(b"No flash"),
             PanelRow::DoNotDisturb => Value::inactive(b"Not wired"),
             PanelRow::RotationLock => Value::inactive(b"Not wired"),
@@ -318,7 +384,7 @@ impl PanelRow {
 
     /// Whether a tap on this row may change anything.
     fn actionable(self) -> bool {
-        matches!(self, PanelRow::Lock)
+        matches!(self, PanelRow::Lock | PanelRow::Volume)
     }
 }
 
@@ -329,19 +395,41 @@ struct Value {
 }
 
 impl Value {
-    fn active(run: &'static [u8]) -> Value {
+    fn active(run: &[u8]) -> Value {
         Value {
             reading: Reading::of(run),
             is_active: true,
         }
     }
 
-    fn inactive(reason: &'static [u8]) -> Value {
+    fn inactive(reason: &[u8]) -> Value {
         Value {
             reading: Reading::unavailable(reason),
             is_active: false,
         }
     }
+}
+
+/// Writes `NN%` into `buf` and returns the run it holds.
+fn percent_run<'a>(percent: u8, buf: &'a mut [u8; 5]) -> &'a [u8] {
+    let value = percent.min(100) as u16;
+    let mut at = 0usize;
+    if value >= 100 {
+        buf[at] = b'1';
+        at += 1;
+        buf[at] = b'0';
+        at += 1;
+        buf[at] = b'0';
+    } else if value >= 10 {
+        buf[at] = b'0' + (value / 10) as u8;
+        at += 1;
+        buf[at] = b'0' + (value % 10) as u8;
+    } else {
+        buf[at] = b'0' + value as u8;
+    }
+    at += 1;
+    buf[at] = b'%';
+    &buf[..at + 1]
 }
 
 /// Row index of `item` in the published set, or 0.
@@ -515,6 +603,8 @@ struct RowFrame {
     label: LabelRun,
     value: LabelRun,
     divider_y: Option<usize>,
+    /// The row's step-down and step-up squares, when it has them.
+    steps: Option<[Rect; 2]>,
 }
 
 impl RowFrame {
@@ -530,6 +620,7 @@ impl RowFrame {
         label: LabelRun::EMPTY,
         value: LabelRun::EMPTY,
         divider_y: None,
+        steps: None,
     };
 }
 
@@ -589,7 +680,7 @@ impl QuickControlsFrame {
         let summary = LabelRun::left(
             Rect::new(PANEL_X, SUMMARY_Y, PANEL_W, VALUE_H),
             VALUE_SCALE,
-            b"Only screen lock and power are wired here.",
+            b"Volume, screen lock and power answer here.",
             theme.on_surface_variant,
         );
         let sections = [
@@ -617,15 +708,17 @@ impl QuickControlsFrame {
             out
         };
 
-        // Brightness and volume are flat readings: with no backlight and no
-        // mixer there is no level to draw a trough for, so neither row is a
-        // control and neither answers a tap.
+        // Brightness stays a flat reading: there is no backlight register this
+        // guest can program, so there is no level to draw a trough for and no
+        // square worth tapping. Volume gets the pair, because it is the one
+        // reading here the device both reports and accepts.
         const LEVEL_DIVIDER: usize = LEVEL_TOP + ROW_H;
         let levels = [
             build_row(
                 BRIGHTNESS_ROW,
                 LEVEL_LIST[0],
                 &values[item_index(LEVEL_LIST[0])],
+                None,
                 None,
                 theme,
             ),
@@ -634,6 +727,7 @@ impl QuickControlsFrame {
                 LEVEL_LIST[1],
                 &values[item_index(LEVEL_LIST[1])],
                 Some(LEVEL_DIVIDER),
+                Some(VOLUME_STEPS),
                 theme,
             ),
         ];
@@ -648,6 +742,7 @@ impl QuickControlsFrame {
                     SYSTEM_LIST[i],
                     &values[item_index(SYSTEM_LIST[i])],
                     (i > 0).then_some(y),
+                    None,
                     theme,
                 );
                 i += 1;
@@ -659,6 +754,7 @@ impl QuickControlsFrame {
             Rect::new(PANEL_X, FOOTER_Y, PANEL_W, FOOTER_H),
             FOOTER_LIST[0],
             &values[item_index(FOOTER_LIST[0])],
+            None,
             None,
             theme,
         );
@@ -724,21 +820,31 @@ fn build_tile(rect: Rect, item: PanelRow, value: &Value, theme: &Theme) -> TileF
 }
 
 /// Builds a flat reading row: icon, label and value on the page background.
+///
+/// `steps` is the pair of squares a level row is adjusted with. Only the mixer
+/// has them: it is the one reading on this surface the device can both report and
+/// change, so the row that shows it is also the row that answers a tap on either
+/// end of it.
 fn build_row(
     rect: Rect,
     item: PanelRow,
     value: &Value,
     divider_y: Option<usize>,
+    steps: Option<[Rect; 2]>,
     theme: &Theme,
 ) -> RowFrame {
-    // The Screen lock row is the only row here with a backend, so it is the
-    // only one raised into a card. Everything else is a reading.
+    // A raised card is what tells a reading apart from a control, so any row
+    // with steps is drawn as one whether or not its value arrived.
     let (fill, border) = if item.actionable() {
         (Some(theme.surface_container), Some(theme.border))
     } else {
         (None, None)
     };
-    let (label, value_run) = row_runs(rect, rect.y, rect.h, item.label(), &value.reading, theme);
+    // WHY the reserve is measured here: the value is right-aligned inside what
+    // is left of the squares, and a value that ran under a square would be a
+    // number and a button answering the same pixel.
+    let reserve = steps.map_or(0, |s| rect.x + rect.w - s[0].x + space::SM);
+    let (label, value_run) = row_runs(rect, rect.y, rect.h, item.label(), &value.reading, reserve, theme);
     RowFrame {
         rect,
         corner: radius::CONTROL,
@@ -751,6 +857,7 @@ fn build_row(
         label,
         value: value_run,
         divider_y,
+        steps,
     }
 }
 
@@ -761,10 +868,11 @@ fn row_runs(
     text_h: usize,
     label: &'static [u8],
     value: &Reading,
+    reserve: usize,
     theme: &Theme,
 ) -> (LabelRun, LabelRun) {
     let text_x = rect.x + ROW_TEXT_INSET;
-    let text_w = rect.w.saturating_sub(ROW_TEXT_INSET + space::MD);
+    let text_w = rect.w.saturating_sub(ROW_TEXT_INSET + space::MD + reserve);
     let value_w = text::measure(value.as_slice(), VALUE_SCALE).min(text_w / 2) + space::SM;
     let label_h = launcher::font::line_height(ROW_SCALE);
     let value_h = launcher::font::line_height(VALUE_SCALE);
@@ -776,8 +884,11 @@ fn row_runs(
     let baseline_delta = launcher::font::ascent_for_scale(ROW_SCALE)
         .saturating_sub(launcher::font::ascent_for_scale(VALUE_SCALE));
     let value_y = label_y + baseline_delta;
-    let value_col = Rect::new(rect.x + rect.w - space::MD - value_w, value_y, value_w, value_h);
-    let label_col = Rect::new(text_x, label_y, text_w - value_w, label_h);
+    // WHY the value ends where the reserve begins: a number that ran under the
+    // square beside it would be a reading and a button answering the same pixel.
+    let content_right = rect.x + rect.w - space::MD - reserve;
+    let value_col = Rect::new(content_right - value_w, value_y, value_w, value_h);
+    let label_col = Rect::new(text_x, label_y, content_right - value_w - text_x, label_h);
     (
         LabelRun::left(label_col, ROW_SCALE, label, theme.on_surface),
         LabelRun::right(value_col, VALUE_SCALE, value.as_slice(), theme.on_surface_variant),
@@ -789,6 +900,19 @@ fn row_runs(
 // ---------------------------------------------------------------------------
 
 static mut FRAME_CACHE: Option<QuickControlsFrame> = None;
+
+/// Drops the cached frame so the next read rebuilds it from the current state.
+///
+/// WHY this has to be callable: the cache rebuilds when a pixel read starts at
+/// (0,0), which is what a whole-surface pass always does and a single band never
+/// does. A volume step moves one row, and without this the shade would keep
+/// drawing the number from before the step.
+pub fn invalidate_frame_cache() {
+    unsafe {
+        let slot: *mut Option<QuickControlsFrame> = core::ptr::addr_of_mut!(FRAME_CACHE);
+        *slot = None;
+    }
+}
 
 #[inline(never)]
 pub fn get_quick_controls_color(x: usize, y: usize, state: &LauncherState) -> u32 {
@@ -927,6 +1051,20 @@ fn row_pixel(x: usize, y: usize, row: &RowFrame, theme: &Theme) -> u32 {
         None => theme.surface,
     };
 
+    // WHY the squares are recessed wells on a raised card: the row's reading is
+    // a number and these two are something a hand can press, and the only way
+    // a flat surface says that without a label is the fill.
+    if let Some(steps) = row.steps {
+        let mut i = 0;
+        while i < steps.len() {
+            let square = steps[i];
+            if round_contains(&square, radius::CONTROL, x, y) {
+                return step_pixel(i, square, x, y, theme);
+            }
+            i += 1;
+        }
+    }
+
     if icon_hits(row.icon, row.icon_x, row.icon_y, x, y) {
         return row.ink;
     }
@@ -937,6 +1075,26 @@ fn row_pixel(x: usize, y: usize, row: &RowFrame, theme: &Theme) -> u32 {
         return c;
     }
     base
+}
+
+/// One volume step square: `index` 0 is the minus, 1 the plus.
+///
+/// WHY the stroke is 5 px and 25 px across: it matches the weight and the reach
+/// of the row's own glyphs, so a minus here and a minus in the status bar read
+/// as the same mark rather than as two different alphabets.
+fn step_pixel(index: usize, square: Rect, x: usize, y: usize, theme: &Theme) -> u32 {
+    let fill = theme.surface_container_low;
+    let cx = square.center_x();
+    let cy = square.center_y();
+    let within = |centre: usize, extent: usize, value: usize| {
+        value >= centre.saturating_sub(extent) && value < centre + extent + 1
+    };
+    let bar = within(cx, space::LG / 2, x) && within(cy, 2, y);
+    let stem = index == 1 && within(cx, 2, x) && within(cy, space::LG / 2, y);
+    if bar || stem {
+        return theme.on_surface;
+    }
+    fill
 }
 
 fn power_pixel(x: usize, y: usize, frame: &QuickControlsFrame, theme: &Theme) -> u32 {
@@ -1183,6 +1341,10 @@ fn icon_bits(icon: QcIcon, x: usize, y: usize) -> bool {
 pub enum QuickControlAction {
     LockScreen,
     PowerMenu,
+    /// One 10-point notch off the mixer's master volume.
+    VolumeDown,
+    /// One 10-point notch onto the mixer's master volume.
+    VolumeUp,
     /// A tap on a row with no backend. Deliberately not a dismiss: pressing a
     /// control that cannot act must leave the shade where the user found it.
     NoOp,
@@ -1205,7 +1367,18 @@ pub fn quick_controls_hit(_state: &LauncherState, x: usize, y: usize) -> QuickCo
         }
     }
 
-    // 2. Brightness and volume readings
+    // 2. Brightness and volume readings.
+    //
+    // WHY the squares are tested before their own row: the row is a reading and
+    // the squares are controls, and a tap inside the row that lands on a square
+    // must change the level rather than be swallowed by the row's no-op.
+    if let Some(square) = VOLUME_STEPS.iter().position(|s| s.contains(x, y)) {
+        return if square == 1 {
+            QuickControlAction::VolumeUp
+        } else {
+            QuickControlAction::VolumeDown
+        };
+    }
     if BRIGHTNESS_ROW.contains(x, y) || VOLUME_ROW.contains(x, y) {
         return QuickControlAction::NoOp;
     }

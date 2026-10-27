@@ -89,22 +89,58 @@ def test_quick_controls_never_present_unsupported_features_as_working():
     controls = read("apps/launcher/src/screens/quick_controls.rs")
     launcher = read("apps/launcher/src/main.rs")
     sdk = read("sdk/rust/interos-std/src/lib.rs")
-    # Every unsupported row names the reason in the kernel's own terms rather
-    # than showing a state, a level or a percentage.
+    # Every row without a backend names the reason in the kernel's own terms
+    # rather than showing a state, a level or a percentage.
     for reason in (
         'b"Unavailable"',
         'b"Not applicable"',
         'b"No backlight"',
-        'b"No mixer"',
         'b"No flash"',
         'b"Not wired"',
     ):
         assert reason in controls
-    # Only the rows with a real backend may act; everything else is a no-op,
-    # so a press cannot toggle fabricated state.
+    # Volume is the exception, and it is one because the device is real: the
+    # kernel programs the AC'97 master volume register and answers a query from
+    # that register, so the row that shows the number is drawn and answered as
+    # the control it is. The panel used to print "No mixer" over it, which
+    # under-claimed hardware the guest has.
+    assert "state.volume_state_valid" in controls
+    assert "QuickControlAction::VolumeUp" in controls
+    assert "QuickControlAction::VolumeDown" in controls
+    assert "std::audio_set_volume(requested)" in launcher
+    assert 'b"No mixer"' not in controls
+    # Only the rows with a real backend may act; everything else is a no-op, so
+    # a press cannot toggle fabricated state.
     assert "QuickControlAction::NoOp" in controls
-    assert "matches!(self, PanelRow::Lock)" in controls
+    assert "matches!(self, PanelRow::Lock | PanelRow::Volume)" in controls
     assert "pub fn audio_set_volume(volume_percent: u32)" in sdk
-    # There is no mixer, so the panel must not grow a working volume control.
-    assert "slider_percent" not in controls
-    assert "std::audio_set_volume(requested)" not in launcher
+
+
+def test_quick_controls_squares_are_painted_and_hit_from_one_geometry():
+    controls = read("apps/launcher/src/screens/quick_controls.rs")
+    # One definition, two callers: a painter and a hit box that each hold their
+    # own arithmetic is how this surface has come to answer a control several
+    # rows away from the one under the finger.
+    assert "const fn volume_steps() -> [Rect; 2]" in controls
+    assert "const VOLUME_STEPS: [Rect; 2] = volume_steps();" in controls
+    assert "Some(VOLUME_STEPS)" in controls
+    assert "VOLUME_STEPS.iter().position(|s| s.contains(x, y))" in controls
+    # The squares are cleared at the platform's touch floor, not at the icon box.
+    assert "const STEP_W: usize = MIN_TOUCH_TARGET;" in controls
+    # A step repaints the row that moved, and its cached frame, rather than
+    # leaving the shade drawing the number from before the step.
+    launcher = read("apps/launcher/src/main.rs")
+    assert "Dirty::ShadeLevel" in launcher
+    assert "screens::quick_controls::invalidate_frame_cache()" in launcher
+
+
+def test_shell_volume_state_starts_unread_not_assumed():
+    launcher = read("apps/launcher/src/main.rs")
+    start = launcher.index("pub const fn new() -> Self {")
+    end = launcher.index("\n    }\n", start)
+    body = launcher[start:end]
+    # WHY: the shell used to seed 70% and mark it valid before any query, so a
+    # refused audio service still printed a confident level on the shade, the
+    # volume HUD and the audio widget.
+    assert "volume_state_valid: false" in body
+    assert "volume_state_valid: true" not in body
