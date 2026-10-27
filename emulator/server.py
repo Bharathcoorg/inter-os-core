@@ -3098,6 +3098,18 @@ def _proxy_ssl_context():
 _PROXY_SSL_CONTEXT = _proxy_ssl_context()
 
 
+class _ProxyTLSHandler(urllib.request.HTTPSHandler):
+    """The TLS handler the proxy verifies origins with.
+
+    WHY a subclass: urllib installs an HTTPS handler of its own, and the
+    handler with the lower order is the one that answers an https request.
+    This one carries the CA set the proxy trusts, so the default handler
+    never gets the chance to verify with a different store.
+    """
+
+    handler_order = 400
+
+
 class _ProxyRedirectPassthrough(_SsrfGuardedRedirectHandler):
     """Validates a redirect target, then returns it instead of following it.
 
@@ -3936,10 +3948,8 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
         data = body if method not in ('GET', 'HEAD', 'OPTIONS') else None
         request = urllib.request.Request(
             target_url, data=data, headers=request_headers, method=method)
-        opener = urllib.request.build_opener(
-            _ProxyRedirectPassthrough,
-            urllib.request.HTTPSHandler(context=_PROXY_SSL_CONTEXT),
-        )
+        opener = urllib.request.build_opener(_ProxyRedirectPassthrough)
+        opener.add_handler(_ProxyTLSHandler(context=_PROXY_SSL_CONTEXT))
         try:
             response = opener.open(request, timeout=6)
         except urllib.error.HTTPError as error:
