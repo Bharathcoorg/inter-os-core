@@ -825,7 +825,7 @@ fn build(state: &LauncherState) -> Paint {
                     &buf[..len],
                     theme.on_surface_variant,
                 ),
-                done: row == 0 && state.task0_done,
+                done: row == 2 && state.task0_done,
             };
         }
     }
@@ -1318,8 +1318,10 @@ fn push_decimal(out: &mut [u8], at: usize, value: usize) -> usize {
 fn card_row_text(state: &LauncherState, row: usize, out: &mut [u8; CARD_DETAIL_CAP]) -> usize {
     match row {
         0 => {
-            if state.task0_done {
-                put(out, 0, b"All tasks completed")
+            if state.schedule_has_event && state.schedule_detail_len > 0 {
+                put(out, 0, &state.schedule_detail[..state.schedule_detail_len])
+            } else if state.schedule_state == interos_std::calendar::StoreState::ReadRefused {
+                put(out, 0, b"Schedule unavailable (read refused)")
             } else {
                 put(out, 0, b"No events on this device")
             }
@@ -1341,35 +1343,10 @@ fn card_row_text(state: &LauncherState, row: usize, out: &mut [u8; CARD_DETAIL_C
             }
         }
         _ => {
-            // WHY the registry label and not the raw id: recents hold package
-            // ids ("org.interos.messages"), which are developer strings, not
-            // something a user should read. `recent_label` resolves the id to
-            // the registry display name ("Messages"); the raw id remains only
-            // as the fallback for an id the registry no longer names.
-            if let Some(label) = state.recent_label(0) {
-                let mut at = put(out, 0, b"Recent: ");
-                let len = label.len().min(out.len().saturating_sub(at));
-                at = put(out, at, &label[..len]);
-                at
-            } else if state.recent_app_lens[0] > 0 {
-                // WHY this fallback is still a name and not the id: the branch is
-                // reached exactly when `recent_label` failed, which means the
-                // registry does not describe this package. Printing the id here
-                // is what put `org.interos.messages` on the home screen.
-                let len = (state.recent_app_lens[0] as usize).min(24);
-                let mut at = put(out, 0, b"Recent: ");
-                let mut name = [0u8; CARD_DETAIL_CAP];
-                let readable = text::humanise_package_id(&state.recent_apps[0][..len], &mut name);
-                at = put(out, at, readable);
-                at
+            if state.task0_done {
+                put(out, 0, b"All tasks completed")
             } else {
-                let mut at = push_decimal(out, 0, state.app_count);
-                if state.app_count == 1 {
-                    at = put(out, at, b" app installed");
-                } else {
-                    at = put(out, at, b" apps installed");
-                }
-                at
+                put(out, 0, b"1 task pending")
             }
         }
     }
@@ -1382,7 +1359,7 @@ fn card_row_name(row: usize) -> &'static [u8] {
         // Matches the notification-count detail line above: the row reports
         // system notifications, so it is named for them.
         1 => b"Notifications",
-        _ => b"Activities",
+        _ => b"Tasks",
     }
 }
 
@@ -1432,23 +1409,15 @@ fn card_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option
 
         match row_idx {
             0 => {
-                // Task checkbox for the pinned Today toggle (main.rs hit
-                // x60..100, y300..340, centred on the pinned tap at 78,318):
-                // outline always; accent fill with a surface tick only when
-                // the toggle's state bit is set, so the control on screen
-                // visibly reports what the toggle log claims.
-                let cbx = x as i32 - 78;
-                let cby = y as i32 - 322;
-                if cbx.abs() <= 12 && cby.abs() <= 12 {
-                    if cbx.abs() == 12 || cby.abs() == 12 {
-                        return Some(theme.on_surface_variant);
+                // Schedule: vector calendar page icon
+                let r = 7i32;
+                if idx.abs() <= r && idy >= -r && idy <= r {
+                    let outline = idx.abs() == r || idy == -r || idy == r || idy == -2;
+                    let loops = idy == -r - 1 && (idx == -3 || idx == 3);
+                    let grid_dot = (idy == 1 || idy == 4) && (idx == -3 || idx == 0 || idx == 3);
+                    if outline || loops || grid_dot {
+                        return Some(theme.primary);
                     }
-                    if row.done {
-                        let tick = (cbx >= -6 && cbx <= -1 && cby == cbx + 6)
-                            || (cbx >= 0 && cbx <= 6 && cby == 6 - cbx);
-                        return Some(if tick { card_fill } else { theme.primary });
-                    }
-                    return Some(card_fill);
                 }
             }
             1 => {
@@ -1464,15 +1433,19 @@ fn card_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option
                 }
             }
             _ => {
-                // Activities: vector activity badge icon
-                let r2 = idx * idx + idy * idy;
-                if r2 <= 72 && r2 >= 36 {
-                    return Some(theme.primary);
-                }
-                let tick = (idx >= -4 && idx <= -1 && idy == idx + 2)
-                    || (idx >= -1 && idx <= 4 && idy == -idx);
-                if tick {
-                    return Some(theme.primary);
+                // Tasks: checkbox for the pinned Today toggle
+                let cbx = x as i32 - 78;
+                let cby = y as i32 - icon_cy;
+                if cbx.abs() <= 12 && cby.abs() <= 12 {
+                    if cbx.abs() == 12 || cby.abs() == 12 {
+                        return Some(theme.on_surface_variant);
+                    }
+                    if row.done {
+                        let tick = (cbx >= -6 && cbx <= -1 && cby == cbx + 6)
+                            || (cbx >= 0 && cbx <= 6 && cby == 6 - cbx);
+                        return Some(if tick { card_fill } else { theme.primary });
+                    }
+                    return Some(card_fill);
                 }
             }
         }

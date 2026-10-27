@@ -7,6 +7,7 @@
 
 pub mod ai;
 pub mod app;
+pub mod calendar;
 pub mod content;
 pub mod design;
 pub mod flac;

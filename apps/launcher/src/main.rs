@@ -347,6 +347,10 @@ pub struct LauncherState {
     /// Dynamic user status phrase read from the settings store ("user.status" / "owner.status").
     pub user_status: [u8; 48],
     pub user_status_len: usize,
+    pub schedule_detail: [u8; 48],
+    pub schedule_detail_len: usize,
+    pub schedule_has_event: bool,
+    pub schedule_state: interos_std::calendar::StoreState,
     /// Contextual task 0 on the HomeScreen Today card. WHY carried as state: the
     /// tap handler used to log "toggled" without flipping anything, so the log
     /// described a change that never happened. The log below fires only because
@@ -431,6 +435,10 @@ impl LauncherState {
             pin_setup_mode: false,
             user_status: [0u8; 48],
             user_status_len: 0,
+            schedule_detail: [0u8; 48],
+            schedule_detail_len: 0,
+            schedule_has_event: false,
+            schedule_state: interos_std::calendar::StoreState::Untouched,
             task0_done: false,
             wifi_enabled: true,
             bluetooth_enabled: true,
@@ -482,6 +490,8 @@ impl LauncherState {
         self.recent_task_ids[0] = task_id;
     }
 
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     fn recent_id(&self, index: usize) -> Option<&str> {
         if index >= 3 {
             return None;
@@ -493,6 +503,8 @@ impl LauncherState {
         core::str::from_utf8(&self.recent_apps[index][..len]).ok()
     }
 
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     fn recent_label(&self, index: usize) -> Option<&[u8]> {
         let id = self.recent_id(index)?;
         for i in 0..self.app_count {
@@ -778,6 +790,99 @@ fn refresh_user_profile(state: &mut LauncherState) {
             }
         }
     }
+}
+
+fn refresh_schedule(state: &mut LauncherState) {
+    let store = interos_std::calendar::load();
+    match store.state {
+        interos_std::calendar::StoreState::ReadRefused => {
+            state.schedule_state = interos_std::calendar::StoreState::ReadRefused;
+            state.schedule_has_event = false;
+            state.schedule_detail_len = 0;
+            return;
+        }
+        interos_std::calendar::StoreState::Invalid => {
+            state.schedule_state = interos_std::calendar::StoreState::Invalid;
+            state.schedule_has_event = false;
+            state.schedule_detail_len = 0;
+            return;
+        }
+        _ => {}
+    }
+
+    if store.len() == 0 {
+        state.schedule_state = interos_std::calendar::StoreState::Empty;
+        state.schedule_has_event = false;
+        state.schedule_detail_len = 0;
+        return;
+    }
+
+    let mut events = [interos_std::calendar::EventRecord::EMPTY; interos_std::calendar::MAX_EVENTS];
+    let count = store.all_events_sorted(&mut events);
+    if count == 0 {
+        state.schedule_state = interos_std::calendar::StoreState::Empty;
+        state.schedule_has_event = false;
+        state.schedule_detail_len = 0;
+        return;
+    }
+
+    let now_opt = std::rtc::Reading::now();
+    let mut selected_idx = None;
+
+    if let Some(now) = now_opt {
+        // Find upcoming event for today:
+        for i in 0..count {
+            let ev = &events[i];
+            if ev.year == now.year as u16 && ev.month == now.month as u8 && ev.day == now.day as u8 {
+                if (ev.hour, ev.minute) >= (now.hour as u8, now.minute as u8) {
+                    selected_idx = Some(i);
+                    break;
+                }
+            }
+        }
+        // Next upcoming event:
+        if selected_idx.is_none() {
+            let now_tuple = (
+                now.year as u16,
+                now.month as u8,
+                now.day as u8,
+                now.hour as u8,
+                now.minute as u8,
+            );
+            for i in 0..count {
+                let ev = &events[i];
+                let ev_tuple = (ev.year, ev.month, ev.day, ev.hour, ev.minute);
+                if ev_tuple >= now_tuple {
+                    selected_idx = Some(i);
+                    break;
+                }
+            }
+        }
+    }
+
+    let ev = match selected_idx {
+        Some(idx) => &events[idx],
+        None => &events[0],
+    };
+
+    let mut buf = [0u8; 48];
+    buf[0] = b'0' + ev.hour / 10;
+    buf[1] = b'0' + ev.hour % 10;
+    buf[2] = b':';
+    buf[3] = b'0' + ev.minute / 10;
+    buf[4] = b'0' + ev.minute % 10;
+    buf[5] = b' ';
+
+    let title = ev.title_bytes();
+    let max_title = 48 - 6;
+    let title_len = title.len().min(max_title);
+    buf[6..6 + title_len].copy_from_slice(&title[..title_len]);
+    let total_len = 6 + title_len;
+
+    state.schedule_detail[..total_len].copy_from_slice(&buf[..total_len]);
+    state.schedule_detail_len = total_len;
+    state.schedule_has_event = true;
+    state.schedule_state = interos_std::calendar::StoreState::Loaded;
 }
 
 fn refresh_clock(state: &mut LauncherState) {
@@ -2787,6 +2892,7 @@ pub extern "C" fn _start() -> ! {
     // app on a previous boot is therefore on the very first lock screen.
     refresh_wallpapers(&mut state);
     refresh_user_profile(&mut state);
+    refresh_schedule(&mut state);
     // WHY the count is reported: an empty catalogue is indistinguishable from a
     // refused read at the call site, because `refresh_package_catalog` maps a
     // permission error to `app_count = 0` and returns. That made a kernel-side
@@ -2842,6 +2948,7 @@ pub extern "C" fn _start() -> ! {
                         // and it costs nothing in the steady state.
                         refresh_wallpapers(&mut state);
                         refresh_user_profile(&mut state);
+    refresh_schedule(&mut state);
                         if let Ok(lock_st) = std::user_get_lock_state(1000) {
                             state.lock_state = lock_st;
                         }
@@ -2876,6 +2983,7 @@ pub extern "C" fn _start() -> ! {
                         refresh_runtime_recents(&mut state);
                         refresh_wallpapers(&mut state);
                         refresh_user_profile(&mut state);
+    refresh_schedule(&mut state);
                         state.current_view = if state.lock_state == std::UserLockState::Unlocked {
                             ViewMode::HomeScreen
                         } else {
@@ -3005,6 +3113,9 @@ pub extern "C" fn _start() -> ! {
                 }
                 let old_clock = state.clock_time;
                 refresh_clock(&mut state);
+                if old_clock != state.clock_time || refresh_ticks % 10 == 0 {
+                                        refresh_schedule(&mut state);
+                }
                 refresh_notifications(&mut state);
                 if refresh_ticks % 10 == 0 {
                     if let Ok(volume) = std::audio_query_volume() {
@@ -5014,7 +5125,7 @@ pub extern "C" fn _start() -> ! {
                                 }
 
                                 // Today card / System status card task checkbox (x: 60..100, y: 300..340)
-                                if (60..100).contains(&x) && (300..340).contains(&y) {
+                                if (60..100).contains(&x) && ((300..340).contains(&y) || (550..600).contains(&y)) {
                                     // WHY flip real state: the log below used to fire
                                     // with no state behind it. `task0_done` is the
                                     // bit this control owns, so the log reports an
@@ -5084,12 +5195,11 @@ pub extern "C" fn _start() -> ! {
                                     break;
                                 }
 
-                                // Today card Row 2 tap: opens Activities / Recent Apps view
+                                // Today card Row 2 tap: toggles task
                                 if (505..625).contains(&y) && (60..680).contains(&x) {
-                                    state.current_view = ViewMode::ActivitySpace;
-                                    render_view(surface, &state);
-                                    surface_flip_display();
-                                    std::log("[LAUNCHER] Recent apps opened via Today card tap.").ok();
+                                    state.task0_done = !state.task0_done;
+                                    present_dirty(surface, &state, Dirty::HomeCard);
+                                    std::log("[LAUNCHER] Contextual task 0 toggled.").ok();
                                     let mut drain = std::InputEvent {
                                         kind: 0,
                                         x: 0,
