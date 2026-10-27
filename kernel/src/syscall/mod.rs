@@ -3318,12 +3318,32 @@ pub fn sys_tcp_send(connection_id: u32, payload: &[u8]) -> SyscallResult {
     let caps = current.cap_table.clone();
     drop(sched);
     if payload.len() > crate::net::tcp::TCP_MAX_SEGMENT { return SyscallResult::InvalidArguments; }
-    let (src_ip, src_port, dst_ip, dst_port, seq, ack, state, window) = {
+    let (src_ip, src_port, dst_ip, dst_port, mut seq, mut ack, mut state, mut window) = {
         let table = crate::net::TCP_TABLE.lock();
         let conn = match table.get(connection_id) { Some(c) if c.owner_task_id == owner => c, Some(_) => return SyscallResult::PermissionDenied, None => return SyscallResult::InvalidArguments };
         (if conn.remote_ip.is_loopback() { crate::net::Ipv4Address::LOCALHOST } else { crate::net::DEFAULT_HOST_IP }, conn.local_port, conn.remote_ip, conn.remote_port, conn.send_seq, conn.recv_seq, conn.state, conn.rcv_wnd.min(u16::MAX as u32) as u16)
     };
-    if state != crate::net::TcpState::Established { return SyscallResult::NotReady; }
+    if state != crate::net::TcpState::Established {
+        // WHY the waiting sender drains the card itself: poll_network_interface()
+        // is the only code that reads the NIC's receive ring, and it was reached
+        // from the boot self-test, the DNS resolver and netd's own sys_network_poll
+        // -- never from a connection waiting for its own SYN/ACK. IRQ 11 is an
+        // EOI-only stub, the E1000's IMS/ICR/IVAR are never programmed so the card
+        // cannot interrupt at all, and EVENT_NETWORK_PACKET is declared but never
+        // posted. An app polling for the handshake therefore only saw the reply if
+        // netd happened to poll on its timer, and the connection closed after its
+        // retries with no reset and no log line.
+        if crate::net::poll_network_interface() > 0 {
+            let table = crate::net::TCP_TABLE.lock();
+            if let Some(c) = table.get(connection_id) {
+                seq = c.send_seq;
+                ack = c.recv_seq;
+                state = c.state;
+                window = c.rcv_wnd.min(u16::MAX as u32) as u16;
+            }
+        }
+        if state != crate::net::TcpState::Established { return SyscallResult::NotReady; }
+    }
     let available = crate::net::TCP_TABLE.lock().send_window(connection_id).unwrap_or(0) as usize;
     if payload.len() > available { return SyscallResult::NotReady; }
     // Debit the process budget only once the send can actually go on the
@@ -3357,10 +3377,22 @@ pub fn sys_tcp_recv(connection_id: u32, out: &mut [u8]) -> Result<usize, Syscall
     // The table guard must be dropped before the arm below takes it again
     // for the end-of-stream check; a match scrutinee's temporary guard
     // lives for the whole match.
-    let received = {
+    let mut received = {
         let mut table = crate::net::TCP_TABLE.lock();
         table.recv_owned(connection_id, owner, out, &caps)
     };
+    if matches!(received, Err(NetError::NoPacketAvailable)) {
+        // WHY the reader drains the card before it gives up: for the same reason
+        // the sender does. Nothing between this call and the wire lifted the
+        // segment off the NIC's receive ring, so an empty connection buffer was
+        // not evidence that no data had arrived -- only that no one had looked.
+        if crate::net::poll_network_interface() > 0 {
+            received = {
+                let mut table = crate::net::TCP_TABLE.lock();
+                table.recv_owned(connection_id, owner, out, &caps)
+            };
+        }
+    }
     let n = match received {
         Ok(n) => n,
         Err(e) => {
