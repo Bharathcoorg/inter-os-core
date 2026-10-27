@@ -414,9 +414,15 @@ impl Scheduler {
             .map(|task| task.id)
     }
 
+    pub fn find_live_task_named(&self, name: &str) -> Option<TaskId> {
+        self.tasks.iter()
+            .find(|task| task.name == name
+                && !matches!(task.state, TaskState::Zombie | TaskState::Terminated))
+            .map(|task| task.id)
+    }
+
     pub fn has_live_task_named(&self, name: &str) -> bool {
-        self.tasks.iter().any(|task| task.name == name
-            && !matches!(task.state, TaskState::Zombie | TaskState::Terminated))
+        self.find_live_task_named(name).is_some()
     }
 
     /// Returns a reference to a task by its TaskId.

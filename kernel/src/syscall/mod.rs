@@ -3999,6 +3999,10 @@ pub fn sys_app_focus(task_id: TaskId) -> SyscallResult {
     match crate::task::process::set_foreground(task_id) {
         Ok(()) => {
             SCHEDULER.lock().unblock_task(task_id);
+            // Focusing a task from the task switcher must also bring its
+            // surfaces to the top; otherwise the launcher's home surface
+            // stays in front and the switch looks like it did nothing.
+            crate::drivers::display_kms::DRM_KMS.lock().raise_surfaces_for_task(task_id.0);
             SyscallResult::Success
         }
         Err(_) => SyscallResult::TargetNotFound,
@@ -7096,6 +7100,33 @@ pub fn sys_app_launch(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
 /// a handler are different grants. The intent dispatcher holds the second and calls
 /// this, so a dispatch never borrows the caller's spawn authority and a launch never
 /// borrows the dispatcher's.
+/// The task name a first-party package runs under.
+///
+/// WHY this table exists: launch requests name a package (`org.interos.gallery`),
+/// while the task is registered as `app_gallery`. A single-instance check that
+/// compared the package id to task names therefore never matched, and every
+/// intent or shell tap spawned another copy of the app.
+fn first_party_process_name(app_id: &str) -> Option<&'static str> {
+    Some(match app_id {
+        "org.interos.settings" | "settings" | "app_settings" => "app_settings",
+        "org.interos.calculator" | "calculator" | "app_calculator" => "app_calculator",
+        "org.interos.dialer" | "dialer" | "app_dialer" => "app_dialer",
+        "org.interos.vault" | "vault" | "app_vault" => "app_vault",
+        "org.interos.camera" | "camera" | "app_camera" => "app_camera",
+        "org.interos.browser" | "browser" | "app_browser" => "app_browser",
+        "org.interos.messages" | "messages" | "app_messages" => "app_messages",
+        "org.interos.calendar" | "calendar" | "app_calendar" => "app_calendar",
+        "org.interos.music" | "music" | "app_music" => "app_music",
+        "org.interos.file_manager" | "file_manager" | "files" | "app_file_manager" => "app_file_manager",
+        "org.interos.gallery" | "gallery" | "photos" | "app_gallery" => "app_gallery",
+        "org.interos.notes" | "notes" | "app_notes" => "app_notes",
+        "org.interos.agentmanager" | "agentmanager" | "agent_manager" | "app_agent_manager" => "app_agent_manager",
+        "org.interos.video_player" | "video_player" | "video" | "app_video_player" => "app_video_player",
+        "org.interos.webview_demo" | "webview_demo" | "webview" | "app_webview_demo" => "app_webview_demo",
+        _ => return None,
+    })
+}
+
 fn launch_registered_package(app_id: &str, parent_id: TaskId) -> Result<crate::task::TaskId, SyscallResult> {
     // The persistent registry is the launch authority. A package blob or
     // native built-in is not executable merely because a caller knows its ID.
@@ -7110,10 +7141,12 @@ fn launch_registered_package(app_id: &str, parent_id: TaskId) -> Result<crate::t
         return Err(SyscallResult::PermissionDenied);
     }
 
-    // Launch is single-instance per parent/package. Returning the live child
-    // keeps repeated home-screen taps from creating duplicate processes and
-    // surfaces; explicit restart/force-stop remains the lifecycle escape hatch.
-    if let Some(existing) = SCHEDULER.lock().find_child_by_name(parent_id, app_id) {
+    // Launch is single-instance per device, not per caller: the same package
+    // reached from the shell, an intent, or a second caller is one running app.
+    // WHY the process name and not the package id: first-party built-ins run as
+    // `app_<name>` while verified RAPPs run under their package id.
+    let process_name = first_party_process_name(app_id).unwrap_or(app_id);
+    if let Some(existing) = SCHEDULER.lock().find_live_task_named(process_name) {
         crate::drivers::display_kms::DRM_KMS.lock().raise_surfaces_for_task(existing.0);
         return Ok(existing);
     }
@@ -8150,4 +8183,15 @@ fn test_inference_ipc_security_denial_without_capability() {
 
     assert!(table.holds_capability_type(CapabilityType::InferenceService, Rights::INVOKE));
     assert!(table.holds_capability_type(CapabilityType::InferenceService, Rights::READ));
+}
+
+#[test]
+fn first_party_launches_resolve_to_the_running_task_name() {
+    // A package id and its alias must both find the one task the app runs as,
+    // or every intent and shell tap spawns another copy of the app.
+    assert_eq!(first_party_process_name("org.interos.gallery"), Some("app_gallery"));
+    assert_eq!(first_party_process_name("photos"), Some("app_gallery"));
+    assert_eq!(first_party_process_name("org.interos.file_manager"), Some("app_file_manager"));
+    assert_eq!(first_party_process_name("files"), Some("app_file_manager"));
+    assert_eq!(first_party_process_name("org.example.external"), None);
 }
