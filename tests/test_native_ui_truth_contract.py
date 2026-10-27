@@ -430,6 +430,71 @@ def test_calendar_browser_and_gallery_do_not_draw_sample_status_values():
     assert 'Fill level ~70%' not in browser
 
 
+def test_calendar_event_cards_do_not_name_a_location_that_was_never_stored():
+    """An event card may not print a venue the platform never recorded.
+
+    WHY this needs pinning: every card used to print the invented string
+    "Vault Sector 203 Encrypted" as its subtitle, in every view, so a made-up
+    place was presented as real event data. The stored record carries a civil
+    date, a wall-clock time and a title, and no location field at all, so the
+    card has to report the absence of one instead.
+    """
+    main = read("apps/calendar/src/main.rs")
+    lib = read("apps/calendar/src/lib.rs")
+
+    # The fabricated venue is gone from the renderer, and the app source
+    # holds no literal of it at all.
+    assert 'b"Vault Sector 203 Encrypted"' not in main
+    assert "Vault Sector 203 Encrypted" not in lib
+
+    # The card draws its subtitle from the record, so the renderer holds no
+    # literal of its own there.
+    assert "event_location(item)" in main
+    assert 'b"No location"' in lib
+
+
+def test_calendar_day_view_arrows_point_the_way_they_move_the_day():
+    """The day-view header arrows may not be drawn mirrored.
+
+    WHY this needs pinning: the left chevron was drawn with its apex on the
+    right and the right chevron with its apex on the left, so the arrow on
+    the left pointed at the next day and the arrow on the right pointed back
+    a day. The glyph direction and the day the tap handler selects now come
+    from the same named values.
+    """
+    main = read("apps/calendar/src/main.rs")
+    lib = read("apps/calendar/src/lib.rs")
+
+    # The header arrows are drawn through the shared chevron helper with an
+    # explicit direction.
+    assert (
+        "chevron_pixel(x, y, DAY_PREV_ARROW_APEX_X, DAY_PREV_ARROW_APEX_Y, ChevronDir::Left)"
+        in main
+    )
+    assert (
+        "chevron_pixel(x, y, DAY_NEXT_ARROW_APEX_X, DAY_NEXT_ARROW_APEX_Y, ChevronDir::Right)"
+        in main
+    )
+
+    # The tap handler steps the day with the same directions.
+    assert "step_selected_day(d, DayArrow::Previous, max_d)" in main
+    assert "step_selected_day(d, DayArrow::Next, max_d)" in main
+
+    # The month and week views carry no navigation chevron of their own, so
+    # there is nothing to mirror there.
+    assert "ChevronDir::" not in main.split("fn month_view_pixel")[1].split(
+        "fn week_view_pixel"
+    )[0]
+    assert "ChevronDir::" not in main.split("fn week_view_pixel")[1].split(
+        "fn day_view_pixel"
+    )[0]
+
+    # The shared helper keeps the direction in the signature.
+    assert "pub enum ChevronDir" in lib
+    assert "pub fn chevron_pixel" in lib
+    assert "pub fn step_selected_day" in lib
+
+
 def test_touchpad_uses_valid_guest_contact_actions_and_reports_real_request_result():
     source = read("emulator/app.js")
     assert "action: 'down', coords: point.coords" in source

@@ -86,6 +86,79 @@ pub fn json_field(payload: &[u8], key: &[u8]) -> Option<u32> {
     None
 }
 
+// -----------------------------------------------------------------------------
+// Day-view header navigation arrows
+// -----------------------------------------------------------------------------
+
+/// How far a chevron's arms reach away from its apex, in pixels.
+pub const CHEVRON_ARM: isize = 8;
+
+/// The direction a chevron glyph points.
+///
+/// WHY this is a value and not a convention: the day-view header once drew
+/// both of its chevrons mirrored, so the arrow on the left pointed forward
+/// and the arrow on the right pointed back. The direction is part of the
+/// glyph contract now, and a unit test pins it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ChevronDir {
+    /// The apex is the leftmost point of the glyph: it reads "back".
+    Left,
+    /// The apex is the rightmost point of the glyph: it reads "forward".
+    Right,
+}
+
+/// Tests whether the pixel at (x, y) lies on a chevron glyph whose apex sits
+/// at (apex_x, apex_y).
+///
+/// WHY the arms are diagonal: the horizontal distance from the apex equals the
+/// vertical distance from the centre line, so the glyph is a thin "<" or ">"
+/// that is drawn from its apex outwards.
+#[inline]
+pub fn chevron_pixel(x: usize, y: usize, apex_x: isize, apex_y: isize, dir: ChevronDir) -> bool {
+    let dx = match dir {
+        ChevronDir::Left => x as isize - apex_x,
+        ChevronDir::Right => apex_x - x as isize,
+    };
+    let dy = ((y as isize) - apex_y).abs();
+    dx >= 0 && dx <= CHEVRON_ARM && (dx - dy).abs() <= 1
+}
+
+// The day-view header band and the two arrow buttons inside it.
+pub const DAY_ARROW_BAND_Y0: usize = 160;
+pub const DAY_ARROW_BAND_Y1: usize = 208;
+pub const DAY_PREV_ARROW_X0: usize = 24;
+pub const DAY_PREV_ARROW_X1: usize = 72;
+pub const DAY_NEXT_ARROW_X0: usize = 648;
+pub const DAY_NEXT_ARROW_X1: usize = 696;
+/// The previous-day chevron's apex: the leftmost point of its glyph.
+pub const DAY_PREV_ARROW_APEX_X: isize = 44;
+pub const DAY_PREV_ARROW_APEX_Y: isize = 184;
+/// The next-day chevron's apex: the rightmost point of its glyph.
+pub const DAY_NEXT_ARROW_APEX_X: isize = 676;
+pub const DAY_NEXT_ARROW_APEX_Y: isize = 184;
+
+/// Which way a day-view header arrow moves the selected day.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DayArrow {
+    /// The left chevron: back to the previous day.
+    Previous,
+    /// The right chevron: forward to the next day.
+    Next,
+}
+
+/// The day the arrow selects, or `None` when the arrow would leave the month.
+///
+/// WHY this lives beside the glyphs: the chevron that points back and the
+/// chevron that steps back are the same control, so the direction is decided
+/// once and the renderer and the tap handler read the same answer.
+pub fn step_selected_day(day: u8, arrow: DayArrow, days_in_month: u8) -> Option<u8> {
+    match arrow {
+        DayArrow::Previous if day > 1 => Some(day - 1),
+        DayArrow::Next if day < days_in_month => Some(day + 1),
+        _ => None,
+    }
+}
+
 /// One calendar event as it is stored: a civil date, a wall-clock time and a
 /// bounded title.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -228,6 +301,17 @@ impl EventRecord {
     fn decode_legacy(bytes: &[u8]) -> Option<EventRecord> {
         Self::decode_fields(bytes, false)
     }
+}
+
+/// The location line an event card draws under the event title.
+///
+/// WHY the record is an argument and the answer is the same for every
+/// record: `EventRecord` stores a civil date, a wall-clock time and a title.
+/// It has no location, section or calendar field, so the platform holds no
+/// place for the event and the app must not name one. The card reports that
+/// the location is absent instead of showing a venue that was never stored.
+pub fn event_location(_rec: &EventRecord) -> &'static [u8] {
+    b"No location"
 }
 
 /// What the store's last contact with the platform storage actually did.
@@ -695,5 +779,178 @@ mod tests {
         let storage_line = b"Settings Store / Sector 203";
         let w = font::measure(storage_line, 2);
         assert!(w <= 600, "Storage line width {} exceeds 600px", w);
+    }
+
+    /// The horizontal extent of the ink a chevron glyph lays down.
+    fn chevron_ink_bounds(
+        apex_x: isize,
+        apex_y: isize,
+        dir: ChevronDir,
+        x0: usize,
+        x1: usize,
+        y0: usize,
+        y1: usize,
+    ) -> (usize, usize) {
+        let mut min_x = usize::MAX;
+        let mut max_x = 0usize;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                if chevron_pixel(x, y, apex_x, apex_y, dir) {
+                    if x < min_x {
+                        min_x = x;
+                    }
+                    if x > max_x {
+                        max_x = x;
+                    }
+                }
+            }
+        }
+        (min_x, max_x)
+    }
+
+    #[test]
+    fn test_day_header_chevrons_point_the_way_they_move() {
+        // WHY this is pinned: the day-view header drew both chevrons mirrored,
+        // so the arrow on the left pointed forward and the arrow on the right
+        // pointed back. The glyph and the control it belongs to have to agree.
+
+        // The previous-day chevron is a "<": its apex is the leftmost point of
+        // the ink and the arms run up and down to the right of it.
+        let prev_apex_x = DAY_PREV_ARROW_APEX_X as usize;
+        let prev_apex_y = DAY_PREV_ARROW_APEX_Y as usize;
+        assert!(chevron_pixel(
+            prev_apex_x,
+            prev_apex_y,
+            DAY_PREV_ARROW_APEX_X,
+            DAY_PREV_ARROW_APEX_Y,
+            ChevronDir::Left
+        ));
+        assert!(chevron_pixel(
+            prev_apex_x + CHEVRON_ARM as usize,
+            prev_apex_y - CHEVRON_ARM as usize,
+            DAY_PREV_ARROW_APEX_X,
+            DAY_PREV_ARROW_APEX_Y,
+            ChevronDir::Left
+        ));
+        assert!(chevron_pixel(
+            prev_apex_x + CHEVRON_ARM as usize,
+            prev_apex_y + CHEVRON_ARM as usize,
+            DAY_PREV_ARROW_APEX_X,
+            DAY_PREV_ARROW_APEX_Y,
+            ChevronDir::Left
+        ));
+        // Nothing is inked to the left of the apex: the glyph points back.
+        assert!(!chevron_pixel(
+            prev_apex_x - 1,
+            prev_apex_y,
+            DAY_PREV_ARROW_APEX_X,
+            DAY_PREV_ARROW_APEX_Y,
+            ChevronDir::Left
+        ));
+
+        // The next-day chevron is the mirror image: its apex is the rightmost
+        // point of the ink and the arms run up and down to the left of it.
+        let next_apex_x = DAY_NEXT_ARROW_APEX_X as usize;
+        let next_apex_y = DAY_NEXT_ARROW_APEX_Y as usize;
+        assert!(chevron_pixel(
+            next_apex_x,
+            next_apex_y,
+            DAY_NEXT_ARROW_APEX_X,
+            DAY_NEXT_ARROW_APEX_Y,
+            ChevronDir::Right
+        ));
+        assert!(chevron_pixel(
+            next_apex_x - CHEVRON_ARM as usize,
+            next_apex_y - CHEVRON_ARM as usize,
+            DAY_NEXT_ARROW_APEX_X,
+            DAY_NEXT_ARROW_APEX_Y,
+            ChevronDir::Right
+        ));
+        assert!(chevron_pixel(
+            next_apex_x - CHEVRON_ARM as usize,
+            next_apex_y + CHEVRON_ARM as usize,
+            DAY_NEXT_ARROW_APEX_X,
+            DAY_NEXT_ARROW_APEX_Y,
+            ChevronDir::Right
+        ));
+        // Nothing is inked to the right of the apex: the glyph points forward.
+        assert!(!chevron_pixel(
+            next_apex_x + 1,
+            next_apex_y,
+            DAY_NEXT_ARROW_APEX_X,
+            DAY_NEXT_ARROW_APEX_Y,
+            ChevronDir::Right
+        ));
+
+        // Each glyph stays inside its own button, and the previous glyph ends
+        // where the next one begins: the two arrows are mirror images.
+        let (prev_min, prev_max) = chevron_ink_bounds(
+            DAY_PREV_ARROW_APEX_X,
+            DAY_PREV_ARROW_APEX_Y,
+            ChevronDir::Left,
+            DAY_PREV_ARROW_X0,
+            DAY_PREV_ARROW_X1,
+            DAY_ARROW_BAND_Y0,
+            DAY_ARROW_BAND_Y1,
+        );
+        let (next_min, next_max) = chevron_ink_bounds(
+            DAY_NEXT_ARROW_APEX_X,
+            DAY_NEXT_ARROW_APEX_Y,
+            ChevronDir::Right,
+            DAY_NEXT_ARROW_X0,
+            DAY_NEXT_ARROW_X1,
+            DAY_ARROW_BAND_Y0,
+            DAY_ARROW_BAND_Y1,
+        );
+        assert_eq!(prev_min, DAY_PREV_ARROW_APEX_X as usize);
+        assert_eq!(prev_max, DAY_PREV_ARROW_APEX_X as usize + CHEVRON_ARM as usize);
+        assert_eq!(next_min, DAY_NEXT_ARROW_APEX_X as usize - CHEVRON_ARM as usize);
+        assert_eq!(next_max, DAY_NEXT_ARROW_APEX_X as usize);
+        assert!(prev_max < next_min, "the two header chevrons overlap");
+    }
+
+    #[test]
+    fn test_day_arrows_move_the_selected_day_in_their_own_direction() {
+        // The left chevron goes back to the previous day and the right chevron
+        // goes forward to the next day.
+        assert_eq!(step_selected_day(14, DayArrow::Previous, 31), Some(13));
+        assert_eq!(step_selected_day(14, DayArrow::Next, 31), Some(15));
+
+        // The first and the last day of the month do not wrap around.
+        assert_eq!(step_selected_day(1, DayArrow::Previous, 31), None);
+        assert_eq!(step_selected_day(31, DayArrow::Next, 31), None);
+
+        // Every day in between moves the way its chevron points.
+        for day in 2..=30u8 {
+            let back = step_selected_day(day, DayArrow::Previous, 31).expect("a day before the last");
+            let forward = step_selected_day(day, DayArrow::Next, 31).expect("a day after the first");
+            assert!(back < day, "the previous-day arrow moved forward");
+            assert!(forward > day, "the next-day arrow moved backward");
+        }
+
+        // A short month clamps on its own last day.
+        assert_eq!(step_selected_day(28, DayArrow::Next, 28), None);
+        assert_eq!(step_selected_day(28, DayArrow::Previous, 28), Some(27));
+    }
+
+    #[test]
+    fn test_event_card_location_reports_the_absent_field_instead_of_a_venue() {
+        // The stored record holds a civil date, a wall-clock time and a title.
+        // It has no location, section or calendar field, so an event card has
+        // no real place to show and must not name one.
+        let rec = EventRecord::from_parts(2026, 10, 14, 9, 30, b"Team Sync");
+        let label = event_location(&rec);
+        assert_eq!(label, b"No location");
+
+        // The card used to name a sealed vault sector as the place of every
+        // event. The label must not name a place again, so the whole app
+        // source stays free of the invented venue.
+        let text = core::str::from_utf8(label).expect("ascii label");
+        assert!(!text.contains("Sector"), "the location names a vault sector");
+        assert!(!text.contains("Encrypted"), "the location names an encrypted venue");
+
+        // A record with no title is reported the same way: the location comes
+        // from the record's fields, and none of them is a place.
+        assert_eq!(event_location(&EventRecord::EMPTY), b"No location");
     }
 }

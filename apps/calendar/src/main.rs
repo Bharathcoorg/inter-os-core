@@ -27,8 +27,12 @@ use interos_std::design::components;
 use interos_std::design::outline_text;
 
 pub use calendar::{
-    days_in_month, day_of_week, is_leap_year, json_field,
+    chevron_pixel, days_in_month, day_of_week, event_location, is_leap_year, json_field,
+    step_selected_day, ChevronDir, DayArrow,
     EventRecord, StoreState,
+    DAY_ARROW_BAND_Y0, DAY_ARROW_BAND_Y1,
+    DAY_NEXT_ARROW_APEX_X, DAY_NEXT_ARROW_APEX_Y, DAY_NEXT_ARROW_X0, DAY_NEXT_ARROW_X1,
+    DAY_PREV_ARROW_APEX_X, DAY_PREV_ARROW_APEX_Y, DAY_PREV_ARROW_X0, DAY_PREV_ARROW_X1,
     EVENT_TITLE_MAX, MAX_EVENTS, RECORD_BYTES, STORE_BLOB_BYTES, STORE_KEY, STORE_VERSION,
     STORE_YEAR_MAX, STORE_YEAR_MIN,
 };
@@ -1392,25 +1396,22 @@ fn day_view_pixel(
 ) -> u32 {
     // Day hero header (y: 160..240)
     if y >= 160 && y < 240 {
-        // Prev button `<` (x: 24..72, y: 160..208)
-        if x >= 24 && x < 72 && y >= 160 && y < 208 {
-            let cx = 48isize;
-            let cy = 184isize;
-            let dx = cx - (x as isize);
-            let dy = ((y as isize) - cy).abs();
-            if (dx - dy).abs() <= 1 && dx >= 0 && dx <= 8 {
+        // Prev button '<' (x: 24..72, y: 160..208)
+        //
+        // WHY the direction is named: the glyph used to be drawn mirrored, so
+        // the arrow on the left pointed forward and the arrow on the right
+        // pointed back. The apex now sits on the pointing side, and the
+        // direction is the same value the tap handler steps the day with.
+        if x >= DAY_PREV_ARROW_X0 && x < DAY_PREV_ARROW_X1 && y >= DAY_ARROW_BAND_Y0 && y < DAY_ARROW_BAND_Y1 {
+            if chevron_pixel(x, y, DAY_PREV_ARROW_APEX_X, DAY_PREV_ARROW_APEX_Y, ChevronDir::Left) {
                 return THEME.primary;
             }
             return THEME.surface_container_high;
         }
 
-        // Next button `>` (x: 648..696, y: 160..208)
-        if x >= 648 && x < 696 && y >= 160 && y < 208 {
-            let cx = 672isize;
-            let cy = 184isize;
-            let dx = (x as isize) - cx;
-            let dy = ((y as isize) - cy).abs();
-            if (dx - dy).abs() <= 1 && dx >= 0 && dx <= 8 {
+        // Next button '>' (x: 648..696, y: 160..208)
+        if x >= DAY_NEXT_ARROW_X0 && x < DAY_NEXT_ARROW_X1 && y >= DAY_ARROW_BAND_Y0 && y < DAY_ARROW_BAND_Y1 {
+            if chevron_pixel(x, y, DAY_NEXT_ARROW_APEX_X, DAY_NEXT_ARROW_APEX_Y, ChevronDir::Right) {
                 return THEME.primary;
             }
             return THEME.surface_container_high;
@@ -1502,7 +1503,11 @@ fn day_view_pixel(
                     }
 
                     // Subtitle (Scale 2 Body)
-                    if let Some(c) = test_text(x, y, 168, card_y + 54, 2, b"Vault Sector 203 Encrypted", 450, THEME.on_surface_variant, THEME.surface_container_high) {
+                    //
+                    // WHY the line is derived from the record: the card used
+                    // to print an invented venue for every event. The stored
+                    // record carries no location, so the card says so.
+                    if let Some(c) = test_text(x, y, 168, card_y + 54, 2, event_location(item), 450, THEME.on_surface_variant, THEME.surface_container_high) {
                         return c;
                     }
 
@@ -2974,21 +2979,22 @@ fn handle_tap(app: &mut CalendarApp, x: usize, y: usize) -> Tap {
             }
         }
         ViewMode::Day => {
-            // Prev day '<'
-            if x >= 24 && x < 72 && y >= 160 && y < 208 {
+            // Prev day '<' (the left chevron points back to the previous day)
+            if x >= DAY_PREV_ARROW_X0 && x < DAY_PREV_ARROW_X1 && y >= DAY_ARROW_BAND_Y0 && y < DAY_ARROW_BAND_Y1 {
                 if let Some(d) = app.selected_day {
-                    if d > 1 {
-                        app.selected_day = Some(d - 1);
+                    let max_d = days_in_month(app.current_year, app.current_month);
+                    if let Some(day) = step_selected_day(d, DayArrow::Previous, max_d) {
+                        app.selected_day = Some(day);
                         return Tap::Redraw(Dirty::CONTENT);
                     }
                 }
             }
-            // Next day '>'
-            if x >= 648 && x < 696 && y >= 160 && y < 208 {
+            // Next day '>' (the right chevron points forward to the next day)
+            if x >= DAY_NEXT_ARROW_X0 && x < DAY_NEXT_ARROW_X1 && y >= DAY_ARROW_BAND_Y0 && y < DAY_ARROW_BAND_Y1 {
                 if let Some(d) = app.selected_day {
                     let max_d = days_in_month(app.current_year, app.current_month);
-                    if d < max_d {
-                        app.selected_day = Some(d + 1);
+                    if let Some(day) = step_selected_day(d, DayArrow::Next, max_d) {
+                        app.selected_day = Some(day);
                         return Tap::Redraw(Dirty::CONTENT);
                     }
                 }
