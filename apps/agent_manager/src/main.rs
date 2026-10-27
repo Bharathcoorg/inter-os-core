@@ -43,10 +43,10 @@ use agent_manager::{
     format_threshold, format_u32, granted_capability_count, load_saved_provider,
     probe_capability_grants, providers, resolve_inference_service, save_preferred_provider,
     service_name, AgentTool, AgentToolOutcome, CapabilityGrant, ChatRole, ChatSession,
-    DeviceState, InstallState, ModelProbeStatus, ProbeStatus, Provider, RuntimeBinding,
-    RuntimeDiagnostics, SearchConfiguration, SelfTest, ServiceState, StreamChunk, Surface,
-    CAPABILITY_COUNT, CHAT_PROMPT_MAX, HOST_BRIDGE, LOCAL_GENERATIVE, MATRYOSHKA_DEFAULT_DIM,
-    MAX_RESULTS_DEFAULT, SIMILARITY_DEFAULT_Q15,
+    ConsentOutcome, DeviceState, InstallState, ModelProbeStatus, ProbeStatus, Provider,
+    RuntimeBinding, RuntimeDiagnostics, SearchConfiguration, SelfTest, ServiceState, StreamChunk,
+    Surface, ToolAuthority, CAPABILITY_COUNT, CHAT_PROMPT_MAX, HOST_BRIDGE, LOCAL_GENERATIVE,
+    MATRYOSHKA_DEFAULT_DIM, MAX_RESULTS_DEFAULT, SIMILARITY_DEFAULT_Q15, TOOL_LABEL_MAX,
 };
 
 // -----------------------------------------------------------------------------
@@ -218,7 +218,7 @@ const MAX_CARDS: usize = 16;
 /// How many lines the body can hold.
 const MAX_LINES: usize = 64;
 /// The longest label a line carries.
-const LABEL_MAX: usize = 30;
+const LABEL_MAX: usize = TOOL_LABEL_MAX;
 /// The longest value a line carries.
 const VALUE_MAX: usize = 44;
 /// The longest value a wide line carries.
@@ -550,8 +550,10 @@ pub struct AgentManagerApp {
     pub sheet_open: bool,
     /// Storage capacity in bytes from the microkernel driver.
     pub storage_bytes: Option<u64>,
-    /// User consent policy for agent tool execution.
-    pub tool_consent: bool,
+    /// The platform's answer about this app's authority to run agent tools.
+    pub tool_authority: ToolAuthority,
+    /// What the platform said the last time this app asked for that authority.
+    pub tool_consent: ConsentOutcome,
     /// Bounded agent tool execution outcomes.
     pub agent_tools: [AgentToolOutcome; 5],
     /// Physical memory diagnostics from microkernel.
@@ -564,6 +566,7 @@ impl AgentManagerApp {
     /// Builds the app and takes the first measurement.
     pub fn new() -> Self {
         let pref_idx = load_saved_provider().unwrap_or(0);
+        let authority = ToolAuthority::probe();
         let mut app = Self {
             surface: Surface::Models,
             device: DeviceState::measure(),
@@ -583,13 +586,14 @@ impl AgentManagerApp {
             chat: ChatSession::new(),
             sheet_open: false,
             storage_bytes: std::storage_query().ok(),
-            tool_consent: true,
+            tool_authority: authority,
+            tool_consent: ConsentOutcome::Refused,
             agent_tools: [
-                AgentToolOutcome::execute_with_consent(AgentTool::Calculator, true),
-                AgentToolOutcome::execute_with_consent(AgentTool::CalendarClock, true),
-                AgentToolOutcome::execute_with_consent(AgentTool::StorageStats, true),
-                AgentToolOutcome::execute_with_consent(AgentTool::SettingsQuery, true),
-                AgentToolOutcome::execute_with_consent(AgentTool::CapabilityCheck, true),
+                AgentToolOutcome::execute_with_authority(AgentTool::Calculator, &authority),
+                AgentToolOutcome::execute_with_authority(AgentTool::CalendarClock, &authority),
+                AgentToolOutcome::execute_with_authority(AgentTool::StorageStats, &authority),
+                AgentToolOutcome::execute_with_authority(AgentTool::SettingsQuery, &authority),
+                AgentToolOutcome::execute_with_authority(AgentTool::CapabilityCheck, &authority),
             ],
             diagnostics: RuntimeDiagnostics::measure(),
             ipc_latency_ticks: 0,
@@ -621,27 +625,52 @@ impl AgentManagerApp {
         self.grants = probe_capability_grants();
         self.search = SearchConfiguration::measure();
         self.diagnostics = RuntimeDiagnostics::measure();
+        let authority = ToolAuthority::probe();
+        self.tool_authority = authority;
         self.agent_tools = [
-            AgentToolOutcome::execute_with_consent(AgentTool::Calculator, self.tool_consent),
-            AgentToolOutcome::execute_with_consent(AgentTool::CalendarClock, self.tool_consent),
-            AgentToolOutcome::execute_with_consent(AgentTool::StorageStats, self.tool_consent),
-            AgentToolOutcome::execute_with_consent(AgentTool::SettingsQuery, self.tool_consent),
-            AgentToolOutcome::execute_with_consent(AgentTool::CapabilityCheck, self.tool_consent),
+            AgentToolOutcome::execute_with_authority(AgentTool::Calculator, &authority),
+            AgentToolOutcome::execute_with_authority(AgentTool::CalendarClock, &authority),
+            AgentToolOutcome::execute_with_authority(AgentTool::StorageStats, &authority),
+            AgentToolOutcome::execute_with_authority(AgentTool::SettingsQuery, &authority),
+            AgentToolOutcome::execute_with_authority(AgentTool::CapabilityCheck, &authority),
         ];
         self.set_action(b"Re-measured: device, grants and search configuration.", Tone::Muted);
         self.rebuild();
     }
 
-    /// Executes all bounded agent tools respecting user consent policy.
+    /// Runs the bounded agent tools under the platform's authority.
+    ///
+    /// WHY the app asks the platform before it runs anything: the platform is
+    /// the only party that can mint the agent-task capability, and a tool that
+    /// ran without it would be the app deciding on its own that it may.
     pub fn run_tools(&mut self) {
+        self.tool_consent = ToolAuthority::request();
+        let authority = ToolAuthority::probe();
+        self.tool_authority = authority;
         self.agent_tools = [
-            AgentToolOutcome::execute_with_consent(AgentTool::Calculator, self.tool_consent),
-            AgentToolOutcome::execute_with_consent(AgentTool::CalendarClock, self.tool_consent),
-            AgentToolOutcome::execute_with_consent(AgentTool::StorageStats, self.tool_consent),
-            AgentToolOutcome::execute_with_consent(AgentTool::SettingsQuery, self.tool_consent),
-            AgentToolOutcome::execute_with_consent(AgentTool::CapabilityCheck, self.tool_consent),
+            AgentToolOutcome::execute_with_authority(AgentTool::Calculator, &authority),
+            AgentToolOutcome::execute_with_authority(AgentTool::CalendarClock, &authority),
+            AgentToolOutcome::execute_with_authority(AgentTool::StorageStats, &authority),
+            AgentToolOutcome::execute_with_authority(AgentTool::SettingsQuery, &authority),
+            AgentToolOutcome::execute_with_authority(AgentTool::CapabilityCheck, &authority),
         ];
-        self.set_action(b"Agent tools executed.", Tone::Good);
+        match self.tool_consent {
+            ConsentOutcome::Granted => {
+                self.set_action(b"Agent tools ran under the platform's grant.", Tone::Good);
+            }
+            ConsentOutcome::Pending => {
+                self.set_action(
+                    b"Consent requested: the platform is waiting for your decision.",
+                    Tone::Muted,
+                );
+            }
+            ConsentOutcome::Refused => {
+                self.set_action(
+                    b"Consent refused: the platform holds no agent task capability.",
+                    Tone::Bad,
+                );
+            }
+        }
         self.rebuild();
     }
 
@@ -857,6 +886,13 @@ impl AgentManagerApp {
         let mut line = Line::empty();
         let label_len = label.len().min(LABEL_MAX);
         line.label[..label_len].copy_from_slice(&label[..label_len]);
+        if label.len() > LABEL_MAX {
+            // WHY an ellipsis: a cut that looks like a whole label is a label
+            // that changed the meaning. This one carried the expression the
+            // number beside it came from, and half an expression reads as a
+            // different expression. The mark says the text continues.
+            line.label[LABEL_MAX - 3..LABEL_MAX].copy_from_slice(b"...");
+        }
         line.label_len = label_len as u8;
         let value_len = value.len();
         let kept = value_len.min(WIDE_MAX);
@@ -1697,14 +1733,22 @@ impl AgentManagerApp {
         );
 
         self.begin_card(b"Agent tools (bounded runtime)", Tone::Plain);
+        // WHY the chip reports the platform's answer and not the app's own
+        // setting: the app has no setting to report. What it holds is the
+        // kernel's answer, and a chip that said "active" while the kernel
+        // held nothing would be a claim the screen cannot back up.
         self.add_chip(
-            b"Consent policy",
-            if self.tool_consent {
-                b"[Enforced/Active]"
+            b"Tool authority",
+            if self.tool_authority.is_granted() {
+                b"[Granted]"
             } else {
-                b"[Denied]"
+                b"[Not held]"
             },
-            Tone::Good,
+            if self.tool_authority.is_granted() {
+                Tone::Good
+            } else {
+                Tone::Unavailable
+            },
         );
         for i in 0..self.agent_tools.len() {
             let outcome = self.agent_tools[i];

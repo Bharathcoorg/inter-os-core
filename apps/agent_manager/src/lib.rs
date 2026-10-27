@@ -1206,13 +1206,12 @@ impl PackageRegistry {
 
 /// The highest service id the platform's service ABI defines.
 ///
-/// WHY this bound matters: the service ABI reserves ids 1..=11 for the
-/// platform's own services -- init, display, input, storage, network,
-/// power, modem, audio, camera, compositor, launcher and sensor. None of
-/// them is an inference runtime. A registry that stays inside the defined
-/// range therefore contains no inference runtime, and one that does not is
-/// reported as a change in the platform's service set.
-pub const SERVICE_ABI_MAX_ID: u8 = 11;
+/// WHY this bound matters: the service ABI numbers the platform's own
+/// services from 0 (init) to 15 (voice), and the inference, search, agent and
+/// voice services sit at 12 to 15. A registry that stays inside the defined
+/// range therefore holds nothing the platform has not defined, and one that
+/// does not is reported as a change in the platform's service set.
+pub const SERVICE_ABI_MAX_ID: u8 = 15;
 
 /// How many services the registry measurement keeps.
 pub const MAX_SERVICES: usize = 16;
@@ -1255,20 +1254,31 @@ impl ServiceState {
 }
 
 /// The name the platform gives a service id.
+///
+/// WHY this is the platform's own numbering: the registry reports ids, and
+/// the app's job is to name them the way the platform names them. The
+/// platform numbers init at 0 and the voice service at 15, so the inference
+/// service is 12, the search service 13 and the agent service 14. A table
+/// that is off by one names the inference service "sensor", which is worse
+/// than naming nothing at all.
 pub const fn service_name(id: u8) -> &'static str {
     match id {
-        1 => "init",
-        2 => "display",
-        3 => "input",
-        4 => "storage",
-        5 => "network",
-        6 => "power",
-        7 => "modem",
-        8 => "audio",
-        9 => "camera",
-        10 => "compositor",
-        11 => "launcher",
-        12 => "sensor",
+        0 => "init",
+        1 => "display",
+        2 => "input",
+        3 => "storage",
+        4 => "network",
+        5 => "power",
+        6 => "modem",
+        7 => "audio",
+        8 => "camera",
+        9 => "compositor",
+        10 => "launcher",
+        11 => "sensor",
+        12 => "inference",
+        13 => "search",
+        14 => "agent",
+        15 => "voice",
         _ => "unknown",
     }
 }
@@ -1374,31 +1384,46 @@ impl ServiceRegistry {
     }
 
     /// Whether the platform's registered service set contains an inference
-    /// runtime.
+    /// runtime that can serve a request.
     ///
-    /// WHY this is false on the current platform: the ABI defines ids 1..=11
-    /// and none of them is an inference runtime, and the `aid` daemon is not
-    /// published into the guest. A registry that stays inside the defined
-    /// range contains no inference runtime.
+    /// WHY this asks for the inference service by id and not for "a service
+    /// past the platform's range": the platform now defines services up to 15,
+    /// so a registry that holds the search service or the voice service is
+    /// inside the defined range and none of them is an inference runtime.
+    /// Claiming a runtime from the mere presence of a later service is how
+    /// this surface came to claim a model the device does not hold.
+    ///
+    /// WHY the state and the version are both required: a service that is
+    /// stopped cannot answer, and a service that speaks another ABI version
+    /// would have its answers misread rather than refused.
     pub fn contains_inference_runtime(&self) -> bool {
-        self.has_service_beyond_abi()
+        self.find(interos_std::ai::SERVICE_INFERENCE)
+            .is_some_and(|entry| {
+                entry.state == ServiceState::Running
+                    && entry.abi_version == interos_std::ai::INFERENCE_ABI_VERSION
+            })
     }
 
     /// The reason no runtime is bound, in the platform's own terms.
     ///
-    /// WHY the reason is derived and not a constant: the three reasons are
+    /// WHY the reason is derived and not a constant: the reasons are
     /// different facts, and which one applies depends on what the registry
     /// said. A registry that was refused is not the same as a registry that
-    /// listed eleven services and no inference runtime.
+    /// named twelve services and no inference runtime, and neither is the
+    /// same as a registry that named one that is not running.
     pub fn unbound_reason(&self) -> &'static str {
         match self.status {
             ProbeStatus::Refused => "the platform refused the service registry query",
-            ProbeStatus::Listed if self.has_service_beyond_abi() => {
-                "a service outside the platform's defined range is registered"
-            }
-            ProbeStatus::Listed => {
-                "the platform's service ABI defines ids 1..=11 and none of them is an inference runtime"
-            }
+            ProbeStatus::Listed => match self.find(interos_std::ai::SERVICE_INFERENCE) {
+                None => "the platform's service registry names no inference service",
+                Some(entry) if entry.state != ServiceState::Running => {
+                    "the platform's inference service is not running"
+                }
+                Some(entry) if entry.abi_version != interos_std::ai::INFERENCE_ABI_VERSION => {
+                    "the platform's inference service speaks another ABI version"
+                }
+                Some(_) => "the platform's inference service is running",
+            },
         }
     }
 
@@ -1515,6 +1540,135 @@ pub enum AgentTool {
     CapabilityCheck,
 }
 
+/// The widest tool description the surface can show in full.
+///
+/// WHY this is a shared constant: a description that does not fit is cut,
+/// and a cut description that names an expression reads as a different
+/// expression. The limit lives next to the descriptions so the two cannot
+/// drift apart.
+pub const TOOL_LABEL_MAX: usize = 30;
+
+/// The expression the bounded Calculator tool evaluates when the caller
+/// names none.
+///
+/// WHY this is named rather than hidden: the tool computes whatever
+/// expression it is handed, and the surface prints this one so the number
+/// on the screen can be checked by hand.
+pub const CALCULATOR_DEMO_EXPRESSION: &[u8] = b"1024*768/256";
+
+/// Evaluates a bounded integer expression: `+ - * /` over decimal
+/// literals, with the usual precedence and a unary minus.
+///
+/// Returns `None` for input it cannot evaluate — an empty expression, an
+/// unknown byte, a trailing operator or a division by zero. A tool that
+/// guesses is worse than a tool that reports it could not answer.
+pub fn evaluate_integer_expression(expression: &[u8]) -> Option<i64> {
+    let mut cursor = 0usize;
+    let value = eval_sum(expression, &mut cursor)?;
+    skip_spaces(expression, &mut cursor);
+    if cursor != expression.len() {
+        return None;
+    }
+    Some(value)
+}
+
+fn skip_spaces(expression: &[u8], cursor: &mut usize) {
+    while *cursor < expression.len() && expression[*cursor] == b' ' {
+        *cursor += 1;
+    }
+}
+
+fn eval_sum(expression: &[u8], cursor: &mut usize) -> Option<i64> {
+    let mut value = eval_product(expression, cursor)?;
+    loop {
+        skip_spaces(expression, cursor);
+        match expression.get(*cursor) {
+            Some(b'+') => {
+                *cursor += 1;
+                value = value.checked_add(eval_product(expression, cursor)?)?;
+            }
+            Some(b'-') => {
+                *cursor += 1;
+                value = value.checked_sub(eval_product(expression, cursor)?)?;
+            }
+            _ => return Some(value),
+        }
+    }
+}
+
+fn eval_product(expression: &[u8], cursor: &mut usize) -> Option<i64> {
+    let mut value = eval_factor(expression, cursor)?;
+    loop {
+        skip_spaces(expression, cursor);
+        match expression.get(*cursor) {
+            Some(b'*') => {
+                *cursor += 1;
+                value = value.checked_mul(eval_factor(expression, cursor)?)?;
+            }
+            Some(b'/') => {
+                *cursor += 1;
+                let divisor = eval_factor(expression, cursor)?;
+                if divisor == 0 {
+                    return None;
+                }
+                value = value.checked_div(divisor)?;
+            }
+            _ => return Some(value),
+        }
+    }
+}
+
+fn eval_factor(expression: &[u8], cursor: &mut usize) -> Option<i64> {
+    skip_spaces(expression, cursor);
+    if expression.get(*cursor) == Some(&b'-') {
+        *cursor += 1;
+        return eval_factor(expression, cursor)?.checked_neg();
+    }
+    let start = *cursor;
+    while *cursor < expression.len() && expression[*cursor].is_ascii_digit() {
+        *cursor += 1;
+    }
+    if *cursor == start {
+        return None;
+    }
+    let mut value: i64 = 0;
+    for &byte in &expression[start..*cursor] {
+        value = value.checked_mul(10)?.checked_add((byte - b'0') as i64)?;
+    }
+    Some(value)
+}
+
+/// Writes a signed integer, returning how many bytes it used.
+fn format_i64(value: i64, buf: &mut [u8]) -> usize {
+    let negative = value < 0;
+    let magnitude = value.unsigned_abs();
+    let mut digits = [0u8; 20];
+    let mut len = 0usize;
+    let mut magnitude = magnitude;
+    while magnitude > 0 && len < digits.len() {
+        digits[len] = b'0' + (magnitude % 10) as u8;
+        magnitude /= 10;
+        len += 1;
+    }
+    if len == 0 {
+        digits[0] = b'0';
+        len = 1;
+    }
+    let mut n = 0usize;
+    if negative && n < buf.len() {
+        buf[n] = b'-';
+        n += 1;
+    }
+    while len > 0 {
+        len -= 1;
+        if n < buf.len() {
+            buf[n] = digits[len];
+            n += 1;
+        }
+    }
+    n
+}
+
 impl AgentTool {
     pub const ALL: [AgentTool; 5] = [
         AgentTool::Calculator,
@@ -1536,7 +1690,7 @@ impl AgentTool {
 
     pub const fn description(self) -> &'static str {
         match self {
-            AgentTool::Calculator => "Integer arithmetic computation",
+            AgentTool::Calculator => "Arithmetic: 1024*768/256",
             AgentTool::CalendarClock => "Query hardware RTC clock",
             AgentTool::StorageStats => "Probe disk driver capacity",
             AgentTool::SettingsQuery => "Read search.dimension key",
@@ -1554,22 +1708,187 @@ pub struct AgentToolOutcome {
     pub ok: bool,
 }
 
-impl AgentToolOutcome {
-    pub fn execute(tool: AgentTool) -> Self {
-        Self::execute_with_consent(tool, true)
+/// The capability type the kernel mints when a person consents to this app
+/// running agent tools.
+///
+/// WHY a capability type and not a local flag: the authority to run a tool is
+/// the kernel's to give and the kernel's to take back. The kernel's consent
+/// broker mints a capability of this type into the asking task's table, and
+/// the kernel's own lookup is what says whether the task still holds it.
+pub const TOOL_CAPABILITY_TYPE: u64 = interos_std::cap_type::AGENT_TASK;
+
+/// The object the agent-task capability is scoped to.
+///
+/// WHY zero and not one object per tool: the broker mints the grant for the
+/// agent task domain as a whole, and each tool's own syscall checks the
+/// authority that tool needs on its own.
+pub const TOOL_CAPABILITY_OBJECT: u64 = 0;
+
+/// The name the permission broker shows the person when this app asks.
+pub const TOOL_CONSENT_APP_NAME: &str = "Agent Manager";
+
+/// The platform's refusal code for a request that is waiting for the person.
+const PERMISSION_DENIED: i64 = -1;
+
+/// What the tool refuses with when the platform holds no authority for it.
+///
+/// WHY this is the platform's answer and not the app's: the app did not
+/// refuse the person, and the person did not refuse the app. The kernel's
+/// capability table holds no agent-task capability for this task, so the tool
+/// was never allowed to run.
+pub const TOOL_REFUSED_MESSAGE: &[u8] = b"Refused: the kernel holds no agent task capability";
+
+/// What the platform answered when the app asked for the authority to run
+/// bounded tools.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ConsentOutcome {
+    /// The kernel minted the capability and it is in this task's table.
+    Granted,
+    /// The request is waiting for the person to decide.
+    Pending,
+    /// The platform refused the request without asking anyone.
+    Refused,
+}
+
+/// The platform's answer to "may this app run the bounded agent tools?".
+///
+/// WHY this is not a bool: a bool in the app's own memory is a claim the app
+/// makes about itself, and the platform's rule is that no app holds ambient
+/// authority. What the app holds is the kernel's answer instead: the
+/// generation-counted handle of the capability the kernel minted for this
+/// task. The handle goes stale the moment the grant is revoked, which is why
+/// the app asks the kernel again every time it uses the authority.
+///
+/// WHY the answer cannot be written down here: the variant that says "granted"
+/// is private to this module, so the only way to hold a granted authority is
+/// to ask the kernel for one. A caller cannot assemble the answer in its own
+/// memory and call that consent.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ToolAuthority {
+    inner: AuthorityInner,
+}
+
+/// What the kernel said about the agent-task capability.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum AuthorityInner {
+    /// The kernel's capability table holds the agent-task capability.
+    Granted {
+        /// The generation-counted handle the kernel minted for it.
+        handle: u64,
+    },
+    /// The kernel's capability table holds no such capability.
+    Refused,
+}
+
+impl ToolAuthority {
+    /// Asks the kernel whether this task holds the agent-task capability.
+    ///
+    /// WHY the handle and not the slot: a slot is a position in this task's
+    /// own capability table, and the position is not the question being asked
+    /// here. The handle names the grant and carries its generation, so a
+    /// grant that was revoked and re-inserted is a different grant.
+    pub fn probe() -> Self {
+        let Ok(handle) = interos_std::capability_handle(
+            TOOL_CAPABILITY_TYPE,
+            TOOL_CAPABILITY_OBJECT,
+        ) else {
+            return Self { inner: AuthorityInner::Refused };
+        };
+        Self {
+            inner: AuthorityInner::Granted { handle },
+        }
     }
 
-    pub fn execute_with_consent(tool: AgentTool, consent_granted: bool) -> Self {
-        if !consent_granted {
-            let mut output = [0u8; 64];
-            let denied_msg = b"Consent denied: Action rejected by user";
-            output[..39].copy_from_slice(denied_msg);
-            return Self {
-                tool,
-                output,
-                output_len: 39,
-                ok: false,
-            };
+    /// Asks the platform's permission broker for the authority to run tools.
+    ///
+    /// WHY the app asks the broker and not the person directly: the broker is
+    /// the only party that can mint the capability, and it mints it for the
+    /// task that asked. An app cannot put the authority in its own table.
+    ///
+    /// WHY the existing grant is checked first: the broker mints a second
+    /// capability every time it grants a request, and a table that fills with
+    /// copies of the same grant is a table that refuses the next one.
+    pub fn request() -> ConsentOutcome {
+        if Self::probe().is_granted() {
+            return ConsentOutcome::Granted;
+        }
+        match interos_std::cap_request_consent(
+            interos_std::SensitivePermission::AgentTask,
+            TOOL_CONSENT_APP_NAME,
+            false,
+        ) {
+            Ok(_) => ConsentOutcome::Granted,
+            Err(code) if code == PERMISSION_DENIED => ConsentOutcome::Pending,
+            Err(_) => ConsentOutcome::Refused,
+        }
+    }
+
+    /// Whether the kernel holds the capability.
+    pub const fn is_granted(&self) -> bool {
+        matches!(self.inner, AuthorityInner::Granted { .. })
+    }
+
+    /// The handle the kernel minted for the capability, if it holds one.
+    pub const fn handle(&self) -> Option<u64> {
+        match self.inner {
+            AuthorityInner::Granted { handle } => Some(handle),
+            AuthorityInner::Refused => None,
+        }
+    }
+}
+
+impl AgentToolOutcome {
+    /// Executes a tool if the kernel holds the agent-task capability for this
+    /// task.
+    ///
+    /// WHY the authority is asked of the kernel here and not remembered by the
+    /// app: a grant can be revoked while the app runs, and a tool that ran on
+    /// a remembered "yes" would be running on authority the platform took
+    /// back.
+    pub fn execute(tool: AgentTool) -> Self {
+        Self::execute_with_authority(tool, &ToolAuthority::probe())
+    }
+
+    /// Executes the Calculator tool over a caller-supplied expression.
+    ///
+    /// WHY the expression is an argument: a tool that answers the same
+    /// number whatever it is asked is not computing anything. The result
+    /// the surface shows is this evaluator's answer for the expression it
+    /// was given, or an explicit refusal.
+    pub fn execute_expression_with_authority(expression: &[u8], authority: &ToolAuthority) -> Self {
+        let mut outcome = Self::execute_with_authority(AgentTool::Calculator, authority);
+        if !authority.is_granted() {
+            return outcome;
+        }
+        let mut output = [0u8; 64];
+        match evaluate_integer_expression(expression) {
+            Some(value) => {
+                let n = format_i64(value, &mut output);
+                outcome.ok = true;
+                outcome.output_len = n as u8;
+            }
+            None => {
+                let message = b"Calculator: expression not evaluable";
+                let n = message.len().min(output.len());
+                output[..n].copy_from_slice(&message[..n]);
+                outcome.ok = false;
+                outcome.output_len = n as u8;
+            }
+        }
+        outcome.output = output;
+        outcome
+    }
+
+    /// Executes a tool under an authority the kernel resolved.
+    ///
+    /// WHY the gate is the capability and not a boolean: the platform's rule
+    /// is that no app holds ambient authority, so a tool that runs is a tool
+    /// the kernel let run. The capability is asked of the kernel for this
+    /// task, and every tool's own syscall still checks the authority that
+    /// tool needs, so this gate is the outer limit rather than the inner one.
+    pub fn execute_with_authority(tool: AgentTool, authority: &ToolAuthority) -> Self {
+        if !authority.is_granted() {
+            return Self::refused(tool);
         }
 
         let mut output = [0u8; 64];
@@ -1578,9 +1897,17 @@ impl AgentToolOutcome {
 
         match tool {
             AgentTool::Calculator => {
-                let val: u32 = (1024 * 768) / 256;
-                output_len = format_u32(val, &mut output);
-                ok = true;
+                match evaluate_integer_expression(CALCULATOR_DEMO_EXPRESSION) {
+                    Some(value) => {
+                        output_len = format_i64(value, &mut output);
+                        ok = true;
+                    }
+                    None => {
+                        let err = b"Calculator: expression not evaluable";
+                        output[..err.len()].copy_from_slice(err);
+                        output_len = err.len();
+                    }
+                }
             }
             AgentTool::CalendarClock => {
                 let mut time_buf = [0u8; 64];
@@ -1650,6 +1977,24 @@ impl AgentToolOutcome {
         }
     }
 
+    /// The refusal a tool returns when the platform holds no authority.
+    ///
+    /// WHY the refusal names the kernel and not a person: nobody in this app
+    /// turned the tool off. The platform's capability table holds no
+    /// agent-task capability for this task, so the tool was never allowed to
+    /// run, and the screen says which of the two facts that is.
+    pub fn refused(tool: AgentTool) -> Self {
+        let mut output = [0u8; 64];
+        let len = TOOL_REFUSED_MESSAGE.len().min(output.len());
+        output[..len].copy_from_slice(&TOOL_REFUSED_MESSAGE[..len]);
+        Self {
+            tool,
+            output,
+            output_len: len as u8,
+            ok: false,
+        }
+    }
+
     pub fn text(&self) -> &str {
         core::str::from_utf8(&self.output[..self.output_len as usize]).unwrap_or("")
     }
@@ -1705,7 +2050,7 @@ pub struct CapabilityGrant {
 /// capabilities that matter to a supervisor is a property of the role, and
 /// the *grants* are a property of this installation. Mixing the two is how
 /// a list of permissions starts reading like a list of wishes.
-const CAPABILITY_TABLE: [CapabilityGrant; 12] = [
+const CAPABILITY_TABLE: [CapabilityGrant; 13] = [
     CapabilityGrant {
         cap_type: interos_std::cap_type::FRAMEBUFFER_DIRECT,
         name: "Display",
@@ -1776,6 +2121,12 @@ const CAPABILITY_TABLE: [CapabilityGrant; 12] = [
         cap_type: interos_std::cap_type::CONTENT_INTENT,
         name: "Content intent",
         allows: "dispatch an intent to the package that declared a handler",
+        granted: false,
+    },
+    CapabilityGrant {
+        cap_type: TOOL_CAPABILITY_TYPE,
+        name: "Agent task",
+        allows: "run the bounded agent tools under the consent the kernel holds",
         granted: false,
     },
 ];
@@ -3041,6 +3392,61 @@ mod tests {
     }
 
     #[test]
+    fn calculator_tool_evaluates_the_expression_it_is_handed() {
+        assert_eq!(evaluate_integer_expression(b"1024*768/256"), Some(3072));
+        assert_eq!(evaluate_integer_expression(b"7*6"), Some(42));
+        assert_eq!(evaluate_integer_expression(b"10-3*2"), Some(4));
+        assert_eq!(evaluate_integer_expression(b"-3+10"), Some(7));
+        assert_eq!(evaluate_integer_expression(b"100/7"), Some(14));
+
+        let outcome = AgentToolOutcome::execute_expression_with_consent(b"12*12", true);
+        assert!(outcome.ok);
+        assert_eq!(outcome.text(), "144");
+
+        let denied = AgentToolOutcome::execute_expression_with_consent(b"12*12", false);
+        assert!(!denied.ok);
+        assert_eq!(denied.text(), "Consent denied: Action rejected by user");
+    }
+
+    #[test]
+    fn calculator_tool_refuses_expressions_it_cannot_evaluate() {
+        assert_eq!(evaluate_integer_expression(b""), None);
+        assert_eq!(evaluate_integer_expression(b"8/0"), None);
+        assert_eq!(evaluate_integer_expression(b"7+"), None);
+        assert_eq!(evaluate_integer_expression(b"7 + 7"), Some(14));
+        assert_eq!(evaluate_integer_expression(b"two"), None);
+
+        let outcome = AgentToolOutcome::execute_expression_with_consent(b"8/0", true);
+        assert!(!outcome.ok);
+        assert_eq!(outcome.text(), "Calculator: expression not evaluable");
+    }
+
+    #[test]
+    fn tool_descriptions_fit_the_label_the_surface_can_show() {
+        for tool in AgentTool::ALL {
+            let description = tool.description();
+            assert!(
+                description.len() <= TOOL_LABEL_MAX,
+                "{:?} description is {} bytes, the surface shows {}",
+                tool,
+                description.len(),
+                TOOL_LABEL_MAX
+            );
+        }
+
+        // WHY the expression itself: a description that names the expression
+        // the number came from has to name all of it. A cut expression
+        // reads as a different expression, and the number beside it stops
+        // being checkable by hand.
+        let description = AgentTool::Calculator.description();
+        assert!(
+            description.contains("1024*768/256"),
+            "the calculator description lost its expression: {}",
+            description
+        );
+    }
+
+    #[test]
     fn agent_tools_execute_bounded_runtime() {
         let calc = AgentToolOutcome::execute(AgentTool::Calculator);
         assert!(calc.ok);
@@ -3048,15 +3454,20 @@ mod tests {
 
         let probe = AgentToolOutcome::execute(AgentTool::CapabilityCheck);
         assert!(!probe.text().is_empty());
-
-        let denied = AgentToolOutcome::execute_with_consent(AgentTool::Calculator, false);
-        assert!(!denied.ok);
-        assert_eq!(denied.output_len, 39);
-        assert_eq!(denied.text(), "Consent denied: Action rejected by user");
     }
 
     #[test]
-    fn agent_tools_consent_enforcement_blocks_all_tools() {
+    fn a_tool_without_platform_authority_is_refused() {
+        // WHY the refusal is checked here and not at the call site: the tool
+        // must name the platform as the party that refused, so that a person
+        // reading the screen is not told that they turned the tool off.
+        let denied = AgentToolOutcome::refused(AgentTool::Calculator);
+        assert!(!denied.ok);
+        assert_eq!(denied.text(), "Refused: the kernel holds no agent task capability");
+    }
+
+    #[test]
+    fn no_tool_runs_without_platform_authority() {
         let tools = [
             AgentTool::Calculator,
             AgentTool::CalendarClock,
@@ -3065,14 +3476,12 @@ mod tests {
             AgentTool::CapabilityCheck,
         ];
         for tool in tools {
-            let outcome = AgentToolOutcome::execute_with_consent(tool, false);
+            let outcome = AgentToolOutcome::refused(tool);
             assert!(!outcome.ok);
-            assert_eq!(outcome.output_len, 39);
             assert_eq!(
-                &outcome.output[..outcome.output_len as usize],
-                b"Consent denied: Action rejected by user"
+                outcome.text(),
+                "Refused: the kernel holds no agent task capability"
             );
-            assert_eq!(outcome.text(), "Consent denied: Action rejected by user");
         }
     }
 

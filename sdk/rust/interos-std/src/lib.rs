@@ -2513,6 +2513,12 @@ pub fn dex_invoke_method(dex_data: &[u8], method_spec: &str) -> Result<u32, i64>
 }
 
 /// Sensitive hardware and system resource categories requiring user capability consent.
+///
+/// WHY this list carries only the permissions the SDK's apps ask for: the
+/// kernel's permission broker knows more categories than the SDK names, and
+/// a category the SDK cannot name is a category no app can ask for. The
+/// values are the kernel's own numbering, so a request that names one here
+/// reaches the broker as the category the broker knows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum SensitivePermission {
@@ -2522,6 +2528,15 @@ pub enum SensitivePermission {
     CameraCapture = 4,
     AudioSynthesis = 5,
     RtcClock = 6,
+    /// Permission to run bounded agent tool executions.
+    ///
+    /// WHY this is here: a consent decision has to resolve to something the
+    /// kernel checks, and the kernel mints the `agent.task` capability for
+    /// the asking task when a person approves this request. An app that
+    /// wants to run a tool asks the broker for this and then asks the
+    /// kernel whether the capability is in its table; it cannot grant itself
+    /// the authority to run one.
+    AgentTask = 15,
 }
 
 /// Requests dynamic capability consent from the kernel Permission Manager and Mobile Shell.

@@ -60,6 +60,15 @@ pub enum SensitivePermission {
     Bluetooth = 13,
     /// Permission to post system notifications and badges.
     Notifications = 14,
+    /// Permission to run bounded agent tool executions on the caller's behalf.
+    ///
+    /// WHY this is its own permission and not the agent service's own
+    /// capability: the agent service (service 14) holds `AgentTask` so it can
+    /// do agent work of its own. An app that wants to run a tool under a
+    /// person's consent needs the same capability type, but it has to be
+    /// minted for that app by the consent broker rather than handed to it at
+    /// spawn time, or every app would hold tool authority it never asked for.
+    AgentTask = 15,
 }
 
 impl SensitivePermission {
@@ -101,6 +110,7 @@ impl SensitivePermission {
             12 => Some(Self::Sensors),
             13 => Some(Self::Bluetooth),
             14 => Some(Self::Notifications),
+            15 => Some(Self::AgentTask),
             _ => None,
         }
     }
@@ -122,6 +132,7 @@ impl SensitivePermission {
             Self::Sensors => "Sensors & Biometrics",
             Self::Bluetooth => "Bluetooth & BLE Controller",
             Self::Notifications => "System Notifications",
+            Self::AgentTask => "Agent Tool Execution",
         }
     }
 
@@ -142,6 +153,7 @@ impl SensitivePermission {
             Self::Sensors => "Allows reading accelerometer, gyroscope, and biometric sensors.",
             Self::Bluetooth => "Allows pairing and transferring data over Bluetooth/BLE.",
             Self::Notifications => "Allows dispatching status and alert notifications to the user.",
+            Self::AgentTask => "Allows running bounded agent tools that ask the platform for hardware, storage and service access.",
         }
     }
 
@@ -217,6 +229,16 @@ impl SensitivePermission {
                 CapabilityType::IpcSend,
                 Rights::WRITE.union(Rights::INVOKE),
                 0x9071, // Notification manager IPC object
+            ),
+            Self::AgentTask => (
+                // WHY `INVOKE` and nothing else: this grant says "this app may
+                // ask the platform to run a bounded tool". It is not authority
+                // over the clock, the disk or the services; every one of those
+                // is a separate capability the kernel checks on its own, and
+                // the tool's own syscall still refuses without it.
+                CapabilityType::AgentTask,
+                Rights::INVOKE,
+                0, // The agent task domain
             ),
         };
 
