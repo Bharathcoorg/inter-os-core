@@ -421,68 +421,24 @@ fn contains_ignore_case(haystack: &[u8], needle: &[u8]) -> bool {
 /// answer away, and returned a hardcoded epoch constant -- so every note on
 /// the device carried an edit time the device never observed. A note must
 /// either be stamped with what the clock said or carry no timestamp at all.
+///
+/// WHY the reading comes from the SDK: the note used to scan the kernel's JSON
+/// itself, with its own bounds and its own idea of when a payload was whole, so
+/// a note stamp and the lock-screen clock disagreed about the same second.
 fn current_civil_time() -> Option<CivilTime> {
-    let mut buf = [0u8; 64];
-    let n = std::rtc_get_time(&mut buf).ok()?;
-    if n == 0 {
-        return None;
-    }
-    let payload = &buf[..n];
-
-    let year = json_field(payload, b"\"year\":")?;
-    let month = json_field(payload, b"\"month\":")?;
-    let day = json_field(payload, b"\"day\":")?;
+    let now = std::rtc::Reading::now()?;
     // WHY the hour and the minute are required and not defaulted: a payload
     // that carried a date but no time would otherwise be stamped as
     // midnight, and midnight is a time the clock never reported. The note
-    // carries no timestamp instead.
-    let hour = json_field(payload, b"\"hour\":")?;
-    let minute = json_field(payload, b"\"minute\":")?;
-
-    if !(1970..=9999).contains(&year)
-        || !(1..=12).contains(&month)
-        || !(1..=31).contains(&day)
-        || hour > 23
-        || minute > 59
-    {
-        return None;
-    }
+    // carries no timestamp instead. `Reading::now` asks for all five fields
+    // and refuses the whole reading if any is missing or out of range.
     Some(CivilTime {
-        year,
-        month,
-        day,
-        hour,
-        minute,
+        year: now.year,
+        month: now.month,
+        day: now.day,
+        hour: now.hour,
+        minute: now.minute,
     })
-}
-
-/// Reads a numeric field out of the RTC's JSON payload.
-///
-/// WHY a parser and not a fixed offset: the kernel writes the fields in a
-/// fixed order today, but the length of the year and the presence of a
-/// leading zero are not fixed, so only reading the field can be correct.
-fn json_field(payload: &[u8], key: &[u8]) -> Option<u32> {
-    if key.is_empty() || key.len() > payload.len() {
-        return None;
-    }
-    for i in 0..=(payload.len() - key.len()) {
-        if &payload[i..i + key.len()] != key {
-            continue;
-        }
-        let mut j = i + key.len();
-        let mut value: u32 = 0;
-        let mut digits = 0;
-        while j < payload.len() && payload[j].is_ascii_digit() {
-            value = value.saturating_mul(10).saturating_add((payload[j] - b'0') as u32);
-            digits += 1;
-            j += 1;
-        }
-        if digits > 0 {
-            return Some(value);
-        }
-        return None;
-    }
-    None
 }
 
 /// Formats a note's caption timestamp from the clock, never from a constant.

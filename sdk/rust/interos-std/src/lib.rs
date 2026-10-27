@@ -1397,6 +1397,254 @@ pub fn rtc_get_time(out_buf: &mut [u8]) -> Result<usize, i64> {
     }
 }
 
+/// The wall clock, read and interpreted the same way by every client.
+///
+/// WHY this lives beside [`rtc_get_time`] instead of inside each app: the reply
+/// is a JSON string the kernel truncates to the length it was offered, so a
+/// client that wants a number has to scan for it. Four did, and they disagreed
+/// -- two required the key to carry its colon and one tolerated whitespace, one
+/// saturated an over-long value and two refused it, and only the launcher
+/// checked that a "minute" was under 60. So a note, a calendar cell and the
+/// lock screen could print three different times from one hardware reading.
+/// The scan, the bounds and the 24-hour format now have one definition here,
+/// and an app that displays a time cannot quietly invent its own rules.
+pub mod rtc {
+    /// One wall-clock reading, with only the fields the platform publishes.
+    ///
+    /// The seconds are not carried: the kernel answers at most 64 bytes and a
+    /// two-digit year, month, day, hour and minute push `"second"` past that,
+    /// so a client that asked for seconds would sometimes receive a truncated
+    /// digit run. A clock face does not need them and no screen prints them.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct Reading {
+        pub year: u32,
+        pub month: u32,
+        pub day: u32,
+        pub hour: u32,
+        pub minute: u32,
+    }
+
+    impl Reading {
+        /// Reads the hardware clock and returns what it answered.
+        ///
+        /// WHY the answer is an `Option` with no fallback: the read needs the
+        /// `RealtimeClockRead` capability, so a client that does not hold it is
+        /// refused outright, and a payload can arrive without the field a
+        /// screen wanted. Either way the caller has no time, and the only
+        /// honest render is a blank lane -- a placeholder such as `00:00` is
+        /// read by a person as a measurement the device never took.
+        pub fn now() -> Option<Reading> {
+            // WHY 64 bytes and not more: the kernel's RtcGetTime handler
+            // rejects any requested length above 64 with InvalidArguments, so a
+            // larger buffer silently costs the whole clock read.
+            let mut buf = [0u8; 64];
+            let n = super::rtc_get_time(&mut buf).ok()?;
+            parse(&buf[..n])
+        }
+
+        /// The reading as the 24-hour `HH:MM` a clock face prints.
+        pub fn clock_text(&self) -> [u8; 5] {
+            let (hour, minute) = (self.hour as u8, self.minute as u8);
+            [
+                b'0' + hour / 10,
+                b'0' + hour % 10,
+                b':',
+                b'0' + minute / 10,
+                b'0' + minute % 10,
+            ]
+        }
+    }
+
+    /// Reads a civil time out of the kernel's own payload bytes.
+    ///
+    /// WHY an app would call this instead of [`Reading::now`]: a client that
+    /// shows the bytes the kernel sent -- the calendar logs the payload to the
+    /// serial console -- has to hold them first, and taking a second reading to
+    /// interpret the first could report a time the device never answered for
+    /// those bytes. One read, one parse, the same bounds either way.
+    pub fn from_payload(data: &[u8]) -> Option<Reading> {
+        parse(data)
+    }
+
+    /// Turns the kernel's payload into a reading, or refuses it.
+    fn parse(data: &[u8]) -> Option<Reading> {
+        let (year, month, day, hour, minute) = (
+            field(data, b"\"year\"")?,
+            field(data, b"\"month\"")?,
+            field(data, b"\"day\"")?,
+            field(data, b"\"hour\"")?,
+            field(data, b"\"minute\"")?,
+        );
+        // WHY every field is bounded here: an out-of-range value is not a
+        // reading, and printing one is worse than printing nothing. `41`
+        // minutes would land in the ones column of a two-digit clock and
+        // read as `4`.
+        if !(1970..=9999).contains(&year)
+            || !(1..=12).contains(&month)
+            || !(1..=31).contains(&day)
+            || hour > 23
+            || minute > 59
+        {
+            return None;
+        }
+        Some(Reading {
+            year,
+            month,
+            day,
+            hour,
+            minute,
+        })
+    }
+
+    /// Reads the unsigned integer that follows `key`'s colon.
+    ///
+    /// WHY this parses a variable-width run of digits rather than exactly two:
+    /// a two-digit reader returns nothing for `"day":3`, which silently
+    /// suppressed a whole date for every single-digit day of the month, and it
+    /// truncated `"year":2026` to `20`, which computed the weekday from the
+    /// wrong year. A fixed two-digit read is only correct for a field that is
+    /// always zero-padded, and none of these are.
+    fn field(data: &[u8], key: &[u8]) -> Option<u32> {
+        let mut i = 0usize;
+        while i + key.len() < data.len() {
+            if &data[i..i + key.len()] == key {
+                let mut j = i + key.len();
+                while j < data.len() && data[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                if j < data.len() && data[j] == b':' {
+                    j += 1;
+                }
+                while j < data.len() && data[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                let start = j;
+                let mut value: u32 = 0;
+                while j < data.len() && data[j].is_ascii_digit() {
+                    // Bound the digits so a malformed value cannot overflow.
+                    if j - start >= 9 {
+                        return None;
+                    }
+                    value = value * 10 + (data[j] - b'0') as u32;
+                    j += 1;
+                }
+                if j > start {
+                    return Some(value);
+                }
+            }
+            i += 1;
+        }
+        None
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{field, parse};
+
+        /// The kernel's reply shape, copied from the `write!` in
+        /// `sys_rtc_get_time`, so a payload test cannot drift from the handler.
+        const TYPICAL: &[u8] = br#"{"year":2026,"month":10,"day":27,"hour":9,"minute":41,"second":30,"unix_epoch":1760000000,"tz_offset_min":330,"tz":"Asia/Kolkata"}"#;
+
+        #[test]
+        fn the_reading_is_what_the_kernel_reported() {
+            let r = parse(TYPICAL).expect("the full payload reads");
+            assert_eq!(
+                (r.year, r.month, r.day, r.hour, r.minute),
+                (2026, 10, 27, 9, 41)
+            );
+            assert_eq!(&r.clock_text(), b"09:41");
+        }
+
+        #[test]
+        fn a_single_digit_field_is_not_missed_for_wanting_a_zero() {
+            // The first reader required two consecutive digits, so every
+            // single-digit day and hour was reported as no time at all.
+            let data = br#"{"year":2026,"month":3,"day":4,"hour":7,"minute":5}"#;
+            let r = parse(data).expect("unpadded digits still read");
+            assert_eq!((r.month, r.day, r.hour, r.minute), (3, 4, 7, 5));
+            assert_eq!(&r.clock_text(), b"07:05");
+        }
+
+        #[test]
+        fn a_four_digit_year_is_not_read_as_two_digits() {
+            // A two-digit reader truncated "year":2026 to 20, which is the year
+            // the lock screen's weekday table would have been asked about.
+            let data = br#"{"year":2026,"month":1,"day":2,"hour":3,"minute":4}"#;
+            assert_eq!(parse(data).expect("reads").year, 2026);
+        }
+
+        #[test]
+        fn a_payload_cut_before_a_field_is_not_a_reading() {
+            // The kernel truncates to the length it was offered, so a short
+            // buffer can stop mid-sentence. The clock must then be blank, not
+            // carried over from the last frame that happened to read well.
+            for cut in [0usize, 8, 32, 42, 50, 51] {
+                assert_eq!(
+                    parse(&TYPICAL[..cut]),
+                    None,
+                    "a payload truncated to {cut} bytes cannot report a time"
+                );
+            }
+        }
+
+        #[test]
+        fn the_clock_fields_survive_the_kernels_sixty_four_byte_answer() {
+            // The bound the reader has to work inside: at 64 bytes the fields
+            // through "minute" are whole, and "second" is the one that is cut.
+            let at_64 = &TYPICAL[..64];
+            assert_eq!(parse(at_64).map(|r| r.clock_text()), Some(*b"09:41"));
+            // WHY the reading carries no seconds: the cut leaves a single digit
+            // of `"second":30`, and a reader that asked would report 09:41:03.
+            assert_eq!(field(at_64, b"\"second\""), Some(3));
+        }
+
+        #[test]
+        fn an_out_of_range_field_is_refused_rather_than_printed() {
+            const CASES: &[&[u8]] = &[
+                br#"{"year":2026,"month":10,"day":27,"hour":9,"minute":60}"#,
+                br#"{"year":2026,"month":10,"day":27,"hour":24,"minute":0}"#,
+                br#"{"year":2026,"month":13,"day":27,"hour":9,"minute":0}"#,
+                br#"{"year":2026,"month":10,"day":32,"hour":9,"minute":0}"#,
+                br#"{"year":2026,"month":0,"day":27,"hour":9,"minute":0}"#,
+                br#"{"year":1969,"month":10,"day":27,"hour":9,"minute":0}"#,
+            ];
+            for &data in CASES {
+                let shown = core::str::from_utf8(data).unwrap_or("<not utf-8>");
+                assert!(parse(data).is_none(), "{shown} is not a civil time");
+            }
+        }
+
+        #[test]
+        fn a_run_of_digits_too_long_to_be_a_date_is_refused() {
+            // Eleven digits would overflow the accumulator; the reader gives up
+            // rather than saturating into a number that looks plausible.
+            let data = br#"{"year":12345678901,"month":10,"day":27,"hour":9,"minute":41}"#;
+            assert!(parse(data).is_none());
+        }
+
+        #[test]
+        fn the_clock_text_is_the_24_hour_time_the_rtc_answered() {
+            const CASES: &[(&[u8], &[u8; 5])] = &[
+                (
+                    br#"{"year":2026,"month":10,"day":27,"hour":0,"minute":0}"#,
+                    b"00:00",
+                ),
+                (
+                    br#"{"year":2026,"month":10,"day":27,"hour":13,"minute":5}"#,
+                    b"13:05",
+                ),
+                (
+                    br#"{"year":2026,"month":10,"day":27,"hour":23,"minute":59}"#,
+                    b"23:59",
+                ),
+            ];
+            for &(data, text) in CASES {
+                assert_eq!(parse(data).expect("reads").clock_text(), *text);
+            }
+        }
+    }
+}
+
 /// Queries multi-zone mobile thermal temperatures and cooling policy JSON string.
 pub fn thermal_query(out_buf: &mut [u8]) -> Result<usize, i64> {
     let ret = unsafe {

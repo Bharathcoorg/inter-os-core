@@ -61,31 +61,6 @@ pub fn day_of_week(mut year: u32, mut month: u8, day: u8) -> u8 {
     ((h + 6) % 7) as u8
 }
 
-/// Reads the unsigned decimal integer that follows `key` in a JSON payload.
-pub fn json_field(payload: &[u8], key: &[u8]) -> Option<u32> {
-    if key.is_empty() || key.len() > payload.len() {
-        return None;
-    }
-    for i in 0..=(payload.len() - key.len()) {
-        if &payload[i..i + key.len()] != key {
-            continue;
-        }
-        let mut j = i + key.len();
-        let mut value: u32 = 0;
-        let mut digits = 0;
-        while j < payload.len() && payload[j].is_ascii_digit() {
-            value = value.saturating_mul(10).saturating_add((payload[j] - b'0') as u32);
-            digits += 1;
-            j += 1;
-        }
-        if digits > 0 {
-            return Some(value);
-        }
-        return None;
-    }
-    None
-}
-
 // -----------------------------------------------------------------------------
 // Day-view header navigation arrows
 // -----------------------------------------------------------------------------
@@ -547,17 +522,6 @@ mod tests {
         assert_eq!(day_of_week(2024, 2, 29), 4);
         // 2026-01-01 is Thursday (4)
         assert_eq!(day_of_week(2026, 1, 1), 4);
-    }
-
-    #[test]
-    fn test_json_field_parser() {
-        let payload = b"{\"year\":2026,\"month\":10,\"day\":14,\"hour\":9,\"minute\":30}";
-        assert_eq!(json_field(payload, b"\"year\":"), Some(2026));
-        assert_eq!(json_field(payload, b"\"month\":"), Some(10));
-        assert_eq!(json_field(payload, b"\"day\":"), Some(14));
-        assert_eq!(json_field(payload, b"\"hour\":"), Some(9));
-        assert_eq!(json_field(payload, b"\"minute\":"), Some(30));
-        assert_eq!(json_field(payload, b"\"second\":"), None);
     }
 
     #[test]

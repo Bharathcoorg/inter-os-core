@@ -197,12 +197,25 @@ def test_a_clock_payload_without_a_time_is_not_stamped_as_midnight():
     A payload that carried a date but no time was therefore stamped as
     midnight -- a time the clock never reported. The note has to carry no
     timestamp instead.
+
+    WHY the assertion looks in the SDK now: the app stopped scanning the
+    kernel's payload itself, because the launcher, Calendar and the Agent tool
+    each scanned it differently and disagreed about one reading. `Notes` asks
+    `interos_std::rtc` for a reading, and the rule that a missing field is a
+    refused reading rather than a zero lives with the reader.
     """
     source = notes_main()
     assert 'json_field(payload, b"\\"hour\\":").unwrap_or(0)' not in source
     assert 'json_field(payload, b"\\"minute\\":").unwrap_or(0)' not in source
-    assert 'let hour = json_field(payload, b"\\"hour\\":")?;' in source
-    assert 'let minute = json_field(payload, b"\\"minute\\":")?;' in source
+    assert "std::rtc::Reading::now()?" in source
+    assert "fn current_civil_time() -> Option<CivilTime>" in source
+
+    reader = (ROOT / "sdk/rust/interos-std/src/lib.rs").read_text(encoding="utf-8")
+    for name in ("hour", "minute"):
+        assert f'field(data, b"\\"{name}\\"")?,' in reader, (
+            f"the shared clock reader must demand \"{name}\" rather than default it"
+        )
+    assert "unwrap_or(0)" not in reader[reader.index("fn parse(data"):reader.index("fn field(data")]
 
 
 def test_an_unreadable_store_is_not_reported_as_an_empty_one():

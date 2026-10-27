@@ -27,7 +27,7 @@ use interos_std::design::components;
 use interos_std::design::outline_text;
 
 pub use calendar::{
-    chevron_pixel, days_in_month, day_of_week, event_location, is_leap_year, json_field,
+    chevron_pixel, days_in_month, day_of_week, event_location, is_leap_year,
     step_selected_day, ChevronDir, DayArrow,
     EventRecord, StoreState,
     DAY_ARROW_BAND_Y0, DAY_ARROW_BAND_Y1,
@@ -396,24 +396,21 @@ impl CalendarApp {
                 std::log("[CALENDAR APP] RTC payload as reported by the kernel:").ok();
                 std::log(core::str::from_utf8(payload).unwrap_or("<non-utf8>")).ok();
 
-                let y = json_field(payload, b"\"year\":");
-                let m = json_field(payload, b"\"month\":");
-                let d = json_field(payload, b"\"day\":");
-                let h = json_field(payload, b"\"hour\":");
-                let min = json_field(payload, b"\"minute\":");
-                match (y, m, d) {
-                    (Some(y), Some(m), Some(d))
-                        if y >= 1970 && (1..=12).contains(&m) && (1..=31).contains(&d) =>
-                    {
-                        self.current_year = y;
-                        self.current_month = m as u8;
-                        self.current_day = d as u8;
-                        if let Some(h) = h {
-                            self.current_hour = (h & 0xFF) as u8;
-                        }
-                        if let Some(min) = min {
-                            self.current_minute = (min & 0xFF) as u8;
-                        }
+                // WHY the SDK reads the fields and not this app: the calendar
+                // used to scan the payload itself and then mask each time field
+                // into a byte with `& 0xFF`, so an hour the clock never
+                // reported -- 25, or 300 -- became 01 or 44 and was printed as
+                // a time. Worse, a reminder stored at 08:30 could then never
+                // match a `current_minute` of 286. The shared reader bounds
+                // every field, and refuses the whole reading if any of them is
+                // out of range, so a partial time is no longer shown as one.
+                match std::rtc::from_payload(payload) {
+                    Some(now) => {
+                        self.current_year = now.year;
+                        self.current_month = now.month as u8;
+                        self.current_day = now.day as u8;
+                        self.current_hour = now.hour as u8;
+                        self.current_minute = now.minute as u8;
                         self.date_known = true;
                         self.rtc_synchronized = true;
                         std::log("[CALENDAR APP] Hardware RTC synchronized: civil date read from the RTC payload.",
@@ -421,7 +418,7 @@ impl CalendarApp {
                         .ok();
                         return true;
                     }
-                    _ => {
+                    None => {
                         std::log("[CALENDAR APP] RTC payload carried no usable civil date; current date unknown.",
                         )
                         .ok();
