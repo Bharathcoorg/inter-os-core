@@ -466,7 +466,7 @@ impl FramebufferWriter {
         y += 18;
         self.draw_string(x, y, "PIC Remapping:  IRQs 32..47 Active", 1, COLOR_GREEN, None);
         y += 18;
-        self.draw_string(x, y, "PIT Timer:      100 Hz Clock Online", 1, COLOR_GREEN, None);
+        self.draw_string(x, y, "PIT Timer:      Programmed to 1 kHz", 1, COLOR_GREEN, None);
         y += 18;
         if let Some(inf) = self.info {
             let res = alloc::format!("Resolution:     {}x{} TrueColor", inf.width, inf.height);

@@ -37,7 +37,11 @@ impl PlatformTimer for X86Timer {
     }
 
     fn frequency_hz(&self) -> u64 {
-        100 // 100 Hz PIT timer tick
+        // WHY read from the timer's own definition rather than written here:
+        // this number is a claim about how fast the counter the line above
+        // just read advances, and the PIT divisor that decides it is computed
+        // from one constant. Copying it here is how the two came to disagree.
+        crate::interrupts::SYSTEM_TICK_HZ as u64
     }
 }
 
