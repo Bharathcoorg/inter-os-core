@@ -75,13 +75,6 @@ const NO_HANDLER_NOTICE: &[u8] = b"no app handles this file";
 /// it. Saying "no app handles this file" there would be false.
 const HANDLER_REFUSED_NOTICE: &[u8] = b"the app for this file could not launch";
 
-/// What happened when a document was handed to its registered handler.
-enum OpenOutcome {
-    Opened,
-    NoHandler,
-    Refused,
-}
-
 // -----------------------------------------------------------------------------
 // Header geometry - single source of truth for drawing and hit-testing
 // -----------------------------------------------------------------------------
@@ -1502,11 +1495,14 @@ fn fit_details(view: &mut DetailsView) {
 /// built from the installed packages' signed manifests, so the answer to
 /// "who opens this" is a property of the device. An app that kept its own
 /// table would be able to hand a file to a program that never asked for it.
-fn open_with_handler(app: &FileManagerApp) -> OpenOutcome {
+///
+/// The answer is a yes or a no. Which of the two refusals it was is read
+/// from the document's own handler list, which the card already shows.
+fn open_with_handler(app: &FileManagerApp) -> bool {
     let document = &app.selected_document;
     if !document.has_handler() {
         std::log("[FILE_MANAGER] No app handles this file.").ok();
-        return OpenOutcome::NoHandler;
+        return false;
     }
     match std::content::intent_dispatch(
         std::content::IntentKind::Mime,
@@ -1515,12 +1511,12 @@ fn open_with_handler(app: &FileManagerApp) -> OpenOutcome {
     ) {
         Ok(_) => {
             std::log("[FILE_MANAGER] The document was dispatched to its handler.").ok();
-            OpenOutcome::Opened
+            true
         }
         Err(code) => {
             std::log("[FILE_MANAGER] The document's handler could not be launched.").ok();
             log_counted("[FILE_MANAGER] Platform launch refused, code: -", code.unsigned_abs(), "");
-            OpenOutcome::Refused
+            false
         }
     }
 }
@@ -2443,6 +2439,13 @@ fn details_color(x: usize, y: usize, app: &FileManagerApp) -> Option<u32> {
         (DETAILS_OPEN, b"Open".as_slice(), true),
         (DETAILS_CLOSE, b"Close".as_slice(), false),
     ] {
+        if primary && !app.details.is_dir && !app.details.has_handler {
+            // WHY the button is absent rather than greyed out: a button that
+            // opens nothing is a promise the device cannot keep. The card
+            // names the missing handler in its own line, so the reason is
+            // still on the screen.
+            continue;
+        }
         if !rect.contains(x, y) {
             continue;
         }
@@ -3609,7 +3612,11 @@ fn handle_sheet_tap(
 }
 
 fn handle_details_tap(app: &mut FileManagerApp, x: usize, y: usize) -> Tap {
-    if DETAILS_OPEN.contains(x, y) {
+    // WHY the Open action waits for the registry: the card offers it only
+    // when the device named a handler, and the launch asks the platform
+    // again before it hands anything over.
+    let open_offered = app.details.is_dir || app.details.has_handler;
+    if open_offered && DETAILS_OPEN.contains(x, y) {
         if app.details.is_dir {
             let row = app.selected_entry;
             app.close_details();
@@ -3617,12 +3624,12 @@ fn handle_details_tap(app: &mut FileManagerApp, x: usize, y: usize) -> Tap {
                 app.navigate_into(row);
                 std::log("[FILE_MANAGER] Navigated into directory.").ok();
             }
+        } else if open_with_handler(app) {
+            app.set_notice(b"Opened with the platform's handler");
+        } else if app.details.has_handler {
+            app.set_notice(HANDLER_REFUSED_NOTICE);
         } else {
-            match open_with_handler(app) {
-                OpenOutcome::Opened => app.set_notice(b"Opened with the platform's handler"),
-                OpenOutcome::NoHandler => app.set_notice(NO_HANDLER_NOTICE),
-                OpenOutcome::Refused => app.set_notice(HANDLER_REFUSED_NOTICE),
-            }
+            app.set_notice(NO_HANDLER_NOTICE);
         }
         return Tap::Redraw(Dirty::All);
     }
