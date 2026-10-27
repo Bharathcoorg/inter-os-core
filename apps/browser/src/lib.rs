@@ -2074,6 +2074,16 @@ pub fn into_url_field(url: &[u8]) -> ([u8; URL_FIELD], usize) {
     (out, end)
 }
 
+/// The link row's `→` mark, in pixels relative to the mark's centre.
+///
+/// WHY the head is measured back from its tip: the barbs used to widen as dx
+/// grew, which put the vertex on the left and drew a `<` beside a row that
+/// opens forward into a page.
+pub fn link_arrow_ink(dx: isize, dy: isize) -> bool {
+    (dy.abs() <= 1 && dx >= -5 && dx <= 5)
+        || (dx >= 2 && dx <= 5 && (dy.abs() == 5 - dx || dy.abs() == 4 - dx))
+}
+
 /// A one-character mark for the scheme a page was opened under.
 pub fn scheme_mark(url: &[u8]) -> &'static [u8] {
     if url.starts_with(b"https://") {
@@ -5349,6 +5359,26 @@ fits/in/the/row/and/the/row/is/still/not/wide/enough/to/be/cut/at/all/by/the/row
         assert!(
             crate::std::design::font::measure(&buf[..n], 1) <= GATEWAY_REASON_WIDTH,
             "the reason line is wider than the block it belongs to"
+        );
+    }
+
+    /// The link row's mark has to read as "this goes somewhere", not as "back".
+    #[test]
+    fn the_link_arrow_points_forward_off_its_shaft() {
+        assert!(link_arrow_ink(5, 0), "the tip is not inked");
+        assert!(link_arrow_ink(-5, 0), "the shaft has no tail");
+        assert!(link_arrow_ink(2, 3) && link_arrow_ink(2, -3), "no barb");
+        assert!(
+            !link_arrow_ink(5, 3) && !link_arrow_ink(4, 3),
+            "ink sits past the tip, which reads as a left arrow"
+        );
+        assert!(
+            !link_arrow_ink(0, 3) && !link_arrow_ink(-5, 3),
+            "ink sits behind the shaft, which reads as a left arrow"
+        );
+        assert!(
+            !link_arrow_ink(-6, 0) && !link_arrow_ink(6, 0) && !link_arrow_ink(3, 4),
+            "the glyph grows past the box it is drawn in"
         );
     }
 }

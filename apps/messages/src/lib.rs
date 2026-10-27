@@ -122,6 +122,17 @@ pub fn is_dialable(recipient: &[u8]) -> bool {
     })
 }
 
+/// The send control's arrow, in pixels relative to the control's centre.
+///
+/// WHY the barbs are measured back from the tip: they used to widen as `dx`
+/// grew, which put the vertex on the left and drew a back arrow on the control
+/// that sends. Both composer layouts ask this one predicate so the direction
+/// has one owner and the test below can ask which way it points.
+pub fn send_arrow_ink(dx: isize, dy: isize) -> bool {
+    let a = dy.abs();
+    (a <= 10 && dx >= 4 - a && dx <= 8 - a) || (a <= 2 && dx >= -10 && dx <= 8)
+}
+
 /// Truthful delivery status for SMS and P2P messaging.
 ///
 /// WHY `LocalOnly` exists: a thread may be addressed to a name or a handle
@@ -736,6 +747,45 @@ mod tests {
         // Recipient / placeholder messages fit within horizontal bounds
         for s in [INCOMING_LOCAL_LABEL, HIDDEN_PREVIEW_LABEL, b"Nothing has been published or shared yet.".as_slice()] {
             assert!(font::measure(s, 1) <= max_w);
+        }
+    }
+
+    /// The send control's glyph has to read as "go", not as "back".
+    ///
+    /// WHY this asks the predicate rather than the screen: the arrow is drawn
+    /// from two composer layouts and used to be written out twice, both times
+    /// with its barbs widening away from the tip, which is a left arrow. The
+    /// direction is now one function and this is where it is checked.
+    #[test]
+    fn the_send_arrow_points_forward_out_of_the_circle() {
+        let inked = |dy: isize| -> std::vec::Vec<isize> {
+            (-29isize..=29).filter(|dx| send_arrow_ink(*dx, dy)).collect()
+        };
+
+        let centre = inked(0);
+        assert_eq!(centre.last(), Some(&8), "the vertex is not on the centre row");
+        assert_eq!(
+            inked(-8).last(),
+            inked(8).last(),
+            "the barbs are not symmetric about the centre row"
+        );
+
+        // Off the shaft the ink must recede to the left: barbs that open away
+        // from the tip are what make this a '>' rather than a '<'.
+        for dy in 3..=8 {
+            let off = inked(dy);
+            assert!(!off.is_empty(), "the barb stops before the circle's edge");
+            assert!(
+                off.last() < centre.last(),
+                "the barb at dy={dy} reaches {:?}, past the vertex",
+                off.last()
+            );
+        }
+
+        for dy in -29..=29 {
+            for dx in inked(dy) {
+                assert!(dx * dx + dy * dy <= 29 * 29, "ink escapes the control");
+            }
         }
     }
 }

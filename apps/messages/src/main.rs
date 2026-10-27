@@ -32,8 +32,8 @@ use messages::publish;
 use messages::store;
 use messages::store::ThreadStore;
 use messages::{
-    DeliveryStatus, HIDDEN_PREVIEW_LABEL, INCOMING_LOCAL_LABEL, MessageDirection, MessageRecord,
-    ThreadLedger, ThreadStatus,
+    send_arrow_ink, DeliveryStatus, HIDDEN_PREVIEW_LABEL, INCOMING_LOCAL_LABEL, MessageDirection,
+    MessageRecord, ThreadLedger, ThreadStatus,
 };
 
 /// Conversation thread summary.
@@ -2050,11 +2050,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                     let live = messages.compose_len > 0;
                     let bg = if live { THEME.primary } else { THEME.surface_container_low };
                     let ink = if live { THEME.ink_on_dark } else { THEME.on_surface_variant };
-                    let rel_x = dx;
-                    let rel_y = dy;
-                    let is_arrow = (rel_y.abs() <= 10 && rel_x >= -8 + rel_y.abs() && rel_x <= -4 + rel_y.abs())
-                        || (rel_y.abs() <= 2 && rel_x >= -12 && rel_x <= 6);
-                    if is_arrow {
+                    if send_arrow_ink(dx, dy) {
                         return ink;
                     }
                     return bg;
@@ -2367,11 +2363,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                     let live = messages.compose_len > 0;
                     let bg = if live { THEME.primary } else { THEME.surface_container_low };
                     let ink = if live { THEME.ink_on_dark } else { THEME.on_surface_variant };
-                    let rel_x = dx;
-                    let rel_y = dy;
-                    let is_arrow = (rel_y.abs() <= 10 && rel_x >= -8 + rel_y.abs() && rel_x <= -4 + rel_y.abs())
-                        || (rel_y.abs() <= 2 && rel_x >= -12 && rel_x <= 6);
-                    if is_arrow {
+                    if send_arrow_ink(dx, dy) {
                         return ink;
                     }
                     return bg;

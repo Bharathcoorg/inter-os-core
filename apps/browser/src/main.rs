@@ -29,7 +29,7 @@ use interos_std::design::font;
 use interos_std::design::primitives::{draw_rounded_rect, Rect};
 
 use browser::{
-    format_proxy_request, into_url_field, parse_gemtext_link, parse_uri,
+    format_proxy_request, into_url_field, link_arrow_ink, parse_gemtext_link, parse_uri,
     scheme_mark, DocLine, DocumentTokenizer, LineKind, LoadingState, TabSessionManager, UriScheme,
     MAX_DOC_LINES, MAX_LINE_BYTES, MAX_TABS, URL_FIELD,
 };
@@ -5055,15 +5055,7 @@ fn tab_badge_pixel(x: usize, y: usize, cx: usize, cy: usize, count: usize) -> Op
 
 /// Link Arrow Glyph (`→`)
 fn link_arrow_glyph(x: usize, y: usize, cx: usize, cy: usize) -> bool {
-    let dx = x as isize - cx as isize;
-    let dy = y as isize - cy as isize;
-    if dy.abs() <= 1 && dx >= -5 && dx <= 5 {
-        return true;
-    }
-    if dx >= 2 && dx <= 5 && (dy.abs() == dx - 2 || dy.abs() == dx - 3) {
-        return true;
-    }
-    false
+    link_arrow_ink(x as isize - cx as isize, y as isize - cy as isize)
 }
 
 /// Offline Beacon Glyph
