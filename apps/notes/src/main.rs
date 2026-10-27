@@ -492,7 +492,10 @@ fn json_field(payload: &[u8], key: &[u8]) -> Option<u32> {
 /// reading in one place.
 fn format_note_timestamp(note: &Note, now: Option<CivilTime>, buf: &mut [u8; 32]) -> usize {
     if note.is_dirty {
-        let s = b"Editing now";
+        // WHY the list says "Unsaved changes" and not "Editing now": this
+        // caption is drawn on the card in the list, where the user is not
+        // editing, so it may only report the note's state.
+        let s = b"Unsaved changes";
         let take = s.len().min(buf.len());
         buf[..take].copy_from_slice(&s[..take]);
         return take;
@@ -509,6 +512,10 @@ fn in_rounded_rect(x: usize, y: usize, rx: usize, ry: usize, rw: usize, rh: usiz
     if x < rx || x >= rx + rw || y < ry || y >= ry + rh {
         return false;
     }
+    // A stadium radius (the platform's pill token) is 999 and must be clamped
+    // to half the shape, otherwise the corner-distance test fails at every
+    // pixel and the shape disappears.
+    let r = r.min(rw / 2).min(rh / 2);
     let dx = if x < rx + r {
         rx + r - x
     } else if x >= rx + rw - r {
@@ -913,6 +920,12 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
             // Search Query Text or Placeholder (Scale 2 Body)
             if state.search_len > 0 {
                 let q = &state.search_query[..state.search_len];
+                // WHY the query is ellipsized: the buffer holds up to 30
+                // bytes, which at scale 2 is wider than the pill's inner
+                // width, so the run has to be measured before it is drawn.
+                let mut q_buf = [0u8; 40];
+                let q_len = std::design::font::ellipsize(q, 2, 696 - 20 - 88, &mut q_buf);
+                let q = &q_buf[..q_len];
                 if let Some(c) = test_text(x, y, 88, 38, 2, q, THEME.on_surface, THEME.surface_container, false) {
                     return c;
                 }
@@ -1188,9 +1201,13 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
 
                 let uy0 = cy0 as usize;
 
-                // Left Accent Pill Indicator
-                if in_rounded_rect(x, y, 32, uy0 + 18, 6, card_h - 36, 3) {
-                    return theme.accent;
+                // Left Accent Rail
+                //
+                // WHY it is inset and muted: a full-height pure-black bar on
+                // a white card reads as a rendering stripe, not as the note's
+                // mark, so only a pinned note may carry the tone's accent.
+                if in_rounded_rect(x, y, 32, uy0 + 26, 4, card_h - 52, 2) {
+                    return if note.is_pinned { theme.accent } else { theme.muted_ink };
                 }
 
                 // 1. Top row: Note Title (Scale 2 Bold, y: uy0 + 20 .. uy0 + 44)
@@ -1217,6 +1234,14 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
 
                     // Preview line 1 at uy0 + 56 (ends at uy0 + 82)
                     if !sn.p1.is_empty() {
+                        // WHY the snippet is ellipsized at draw time: the
+                        // extractor cuts by byte count, and a wide run at
+                        // scale 2 runs past the card's inner edge, so the
+                        // measured run is the one that gets painted.
+                        let mut p1_buf = [0u8; 48];
+                        let p1_max = if sn.p1_is_chk { 588 } else { 620 };
+                        let p1_len = std::design::font::ellipsize(sn.p1, 2, p1_max, &mut p1_buf);
+                        let p1 = &p1_buf[..p1_len];
                         if sn.p1_is_chk {
                             if let Some(c) = draw_checkbox_glyph(
                                 x,
@@ -1231,15 +1256,15 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
                                 return c;
                             }
                             let tcol = if sn.p1_is_done { theme.muted_ink } else { theme.body_ink };
-                            if let Some(c) = test_text(x, y, 88, uy0 + 56, 2, sn.p1, tcol, theme.fill, false) {
+                            if let Some(c) = test_text(x, y, 88, uy0 + 56, 2, p1, tcol, theme.fill, false) {
                                 return c;
                             }
-                            let p1_w = std::design::font::measure(sn.p1, 2);
+                            let p1_w = std::design::font::measure(p1, 2);
                             if sn.p1_is_done && (y == uy0 + 69 || y == uy0 + 70) && x >= 88 && x <= 88 + p1_w {
                                 return theme.muted_ink;
                             }
                         } else {
-                            if let Some(c) = test_text(x, y, 56, uy0 + 56, 2, sn.p1, theme.body_ink, theme.fill, false) {
+                            if let Some(c) = test_text(x, y, 56, uy0 + 56, 2, p1, theme.body_ink, theme.fill, false) {
                                 return c;
                             }
                         }
@@ -1247,6 +1272,10 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
 
                     // Preview line 2 at uy0 + 90 (ends at uy0 + 116, clean 8px gap)
                     if !sn.p2.is_empty() {
+                        let mut p2_buf = [0u8; 48];
+                        let p2_max = if sn.p2_is_chk { 588 } else { 620 };
+                        let p2_len = std::design::font::ellipsize(sn.p2, 2, p2_max, &mut p2_buf);
+                        let p2 = &p2_buf[..p2_len];
                         if sn.p2_is_chk {
                             if let Some(c) = draw_checkbox_glyph(
                                 x,
@@ -1261,15 +1290,15 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
                                 return c;
                             }
                             let tcol = if sn.p2_is_done { theme.muted_ink } else { theme.body_ink };
-                            if let Some(c) = test_text(x, y, 88, uy0 + 90, 2, sn.p2, tcol, theme.fill, false) {
+                            if let Some(c) = test_text(x, y, 88, uy0 + 90, 2, p2, tcol, theme.fill, false) {
                                 return c;
                             }
-                            let p2_w = std::design::font::measure(sn.p2, 2);
+                            let p2_w = std::design::font::measure(p2, 2);
                             if sn.p2_is_done && (y == uy0 + 103 || y == uy0 + 104) && x >= 88 && x <= 88 + p2_w {
                                 return theme.muted_ink;
                             }
                         } else {
-                            if let Some(c) = test_text(x, y, 56, uy0 + 90, 2, sn.p2, theme.body_ink, theme.fill, false) {
+                            if let Some(c) = test_text(x, y, 56, uy0 + 90, 2, p2, theme.body_ink, theme.fill, false) {
                                 return c;
                             }
                         }
@@ -1395,19 +1424,25 @@ fn render_note_editor(x: usize, y: usize, state: &AppState) -> u32 {
     // Clean, unruled modern typography with ample negative whitespace
     if y >= 96 && y < 166 {
         let title = note.title_bytes();
+        // WHY the title is ellipsized to 460 px: the pin, palette and trash
+        // tools start at x=520, so an unbounded title runs under them and
+        // off-screen -- and the caret, placed from the same run, with it.
+        let mut title_buf = [0u8; 64];
+        let title_len = std::design::font::ellipsize(title, 2, 460, &mut title_buf);
+        let title_disp = &title_buf[..title_len];
         if title.is_empty() {
             if let Some(c) = test_text(x, y, 44, 116, 2, b"Title", theme.muted_ink, theme.fill, true) {
                 return c;
             }
         } else {
-            if let Some(c) = test_text(x, y, 44, 116, 2, title, theme.title_ink, theme.fill, true) {
+            if let Some(c) = test_text(x, y, 44, 116, 2, title_disp, theme.title_ink, theme.fill, true) {
                 return c;
             }
         }
 
         // Title blinking cursor
         if state.focus == EditorFocus::Title && state.cursor_visible && state.keyboard_visible {
-            let tw = outline_text::drawn_advance(title, 2, None).unwrap_or_else(|| std::design::font::measure_bold(title, 2));
+            let tw = outline_text::drawn_advance(title_disp, 2, None).unwrap_or_else(|| std::design::font::measure_bold(title_disp, 2));
             let cur_x = 44 + tw;
             if x >= cur_x && x <= cur_x + 2 && y >= 114 && y <= 144 {
                 return theme.accent;
@@ -2455,7 +2490,34 @@ fn quarantine_failed_store(bytes: &[u8]) {
 /// blob, and the loader restores it. The read-back is what turns "the write
 /// was accepted" into "the write landed".
 fn save_notes_to_storage(store: &mut NotesStore) -> bool {
+    // WHY the flags are cleared before the blob is built: `is_dirty` is part
+    // of the serialized record, so a blob written while the flags were still
+    // set would persist "unsaved" for the very edit this call is saving, and
+    // the next launch would misreport a saved note. A failed write restores
+    // the flags so the in-memory state still tells the truth.
+    let mut was_dirty = [false; MAX_NOTES];
+    for i in 0..store.count() {
+        if let Some(note) = store.get_by_index_mut(i) {
+            was_dirty[i] = note.is_dirty;
+            note.is_dirty = false;
+        }
+    }
 
+    if persist_store(store) {
+        return true;
+    }
+
+    for i in 0..store.count() {
+        if was_dirty[i] {
+            if let Some(note) = store.get_by_index_mut(i) {
+                note.is_dirty = true;
+            }
+        }
+    }
+    false
+}
+
+fn persist_store(store: &NotesStore) -> bool {
     let mut buf = [0u8; STORE_BLOB_MAX];
     let nbytes = match store.serialize(&mut buf) {
         Ok(n) => n,
@@ -2485,12 +2547,6 @@ fn save_notes_to_storage(store: &mut NotesStore) -> bool {
     let mut verify = NotesStore::new();
     if verify.deserialize(&check[..n]).is_err() {
         return false;
-    }
-
-    for i in 0..store.count() {
-        if let Some(note) = store.get_by_index_mut(i) {
-            note.is_dirty = false;
-        }
     }
     true
 }
