@@ -34,7 +34,7 @@ use interos_std as std;
 
 mod store;
 use library::{ImportOutcome, PublishOutcome};
-use music::playback::{Player, PlayerState};
+use music::playback::{PlaybackError, Player, PlayerState};
 use store::TrackStore;
 use music::library;
 use music::SOURCE_MAX;
@@ -107,6 +107,12 @@ pub struct MusicApp {
     /// `None` when the audio service refused, which the UI draws as an
     /// unavailable meter with disabled step controls.
     pub volume_percent: Option<u8>,
+    /// What the platform's service registry last said about the audio service.
+    ///
+    /// WHY it is cached here: the registry is a syscall and the renderer runs
+    /// once per pixel, so the answer is fetched on the timer and read from
+    /// here when the surface state is derived.
+    pub audio_service: music::ServiceReport,
     /// The engine that reads the selected track's file and feeds the device's
     /// PCM stream.
     pub player: Player,
@@ -176,6 +182,7 @@ impl MusicApp {
             current_track_idx: 0,
             waveform: AudioWaveform::Sine,
             volume_percent: None,
+            audio_service: music::ServiceReport::Unknown,
             player: Player::EMPTY,
             shown_second: 0,
             keystore_derived: false,
@@ -624,6 +631,57 @@ impl MusicApp {
         }
     }
 
+    /// Reads the platform's answer about the audio service's lifecycle.
+    ///
+    /// WHY it is fetched here and not in the renderer: the service registry is
+    /// a syscall and the renderer runs once per pixel, so the answer is read
+    /// on the timer and cached.
+    pub fn refresh_audio_service(&mut self) {
+        let mut record = [0u8; 12];
+        self.audio_service = match std::service_query(music::AUDIO_SERVICE_ID, &mut record) {
+            Ok(n) if n >= 2 => music::service_report(record[1]),
+            _ => music::ServiceReport::Unknown,
+        };
+    }
+
+    /// What the platform's audio path reported about the current stream.
+    ///
+    /// WHY the refusal and the finished track come first: a stream the
+    /// platform refused can never be playing, and a player that closed its
+    /// stream has already read the status that said the track was over. The
+    /// status the kernel keeps for a closed stream is the last one the
+    /// device gave, so it cannot answer for a track that was never opened.
+    pub fn stream_report(&self) -> music::StreamReport {
+        match self.player.error {
+            PlaybackError::StreamUnavailable | PlaybackError::WriteRefused => {
+                return music::StreamReport::Absent;
+            }
+            _ => {}
+        }
+        if self.player.state == PlayerState::Ended {
+            return music::StreamReport::Ended;
+        }
+        match self.player.status {
+            Some(status) => music::report_from_status(&status),
+            None => music::StreamReport::Unknown,
+        }
+    }
+
+    /// The state the now-playing surface may claim.
+    ///
+    /// WHY it is derived from the platform and not from this app's own state:
+    /// the app's state says what the transport *meant* to do, and the screen
+    /// used to show that intent. The device's own status says what the
+    /// hardware is doing, so the screen shows that.
+    pub fn surface_state(&self) -> music::SurfaceState {
+        let intent = match self.state {
+            PlaybackState::Playing => music::TransportIntent::Playing,
+            PlaybackState::Paused => music::TransportIntent::Paused,
+            PlaybackState::Stopped => music::TransportIntent::Stopped,
+        };
+        music::surface_state(intent, self.stream_report(), self.audio_service)
+    }
+
     /// Starts the selected track on the device's PCM output.
     ///
     /// Returns `true` only when the device accepted the stream. A refusal is
@@ -649,9 +707,31 @@ impl MusicApp {
             }
             self.reload_current_art();
             self.shown_second = u64::MAX;
-            std::log("[MUSIC APP] Transport playing over the device's PCM output.",
-            )
-            .ok();
+            // WHY the log names the platform's answer and not the intent: the
+            // stream was accepted, but the device may already have finished
+            // the last batch it was given. Logging "playing" here is what
+            // put "Playing" on the screen while the device had stopped.
+            match self.surface_state() {
+                music::SurfaceState::Playing => {
+                    std::log("[MUSIC APP] Transport playing over the device's PCM output.",
+                    )
+                    .ok();
+                }
+                music::SurfaceState::Ended => {
+                    std::log("[MUSIC APP] Transport opened; the device finished the track before the screen could show it playing.",
+                    )
+                    .ok();
+                }
+                music::SurfaceState::NotRunning => {
+                    std::log("[MUSIC APP] Transport opened; the device is not running the stream.").ok();
+                }
+                music::SurfaceState::Unavailable => {
+                    std::log("[MUSIC APP] Transport opened; the platform will not confirm any output.").ok();
+                }
+                _ => {
+                    std::log("[MUSIC APP] Transport opened.").ok();
+                }
+            }
             true
         } else {
             self.state = PlaybackState::Stopped;
@@ -778,9 +858,15 @@ impl MusicApp {
         }
         if !self.loop_queue && self.current_track_idx + 1 >= len {
             self.state = PlaybackState::Stopped;
-            self.player.stop();
+            // WHY the player is not stopped here: it has already closed its
+            // stream and its file, and its state is the platform's last
+            // answer about the track that just ended. Stopping it would
+            // erase that answer and put "Stopped" on the screen.
+            if self.player.state != PlayerState::Ended {
+                self.player.stop();
+            }
             let mut msg = [0u8; FEEDBACK_CAP];
-            let n = music::ended_feedback(None, &mut msg);
+            let n = music::ended_feedback(None, false, &mut msg);
             self.set_feedback(&msg[..n]);
             std::log("[MUSIC APP] Queue ended with looping disabled; transport stopped.").ok();
             return false;
@@ -799,14 +885,19 @@ impl MusicApp {
                     .get(self.current_track_idx)
                     .map(|t| t.title())
                     .unwrap_or(b"");
-                let n = music::ended_feedback(Some(title), &mut msg);
+                // WHY the device decides what the line says: the queue moved
+                // on, but only the platform can say that the next track is
+                // being streamed. The old wording claimed "playing" for a
+                // track the device had already finished.
+                let next_playing = self.surface_state() == music::SurfaceState::Playing;
+                let n = music::ended_feedback(Some(title), next_playing, &mut msg);
                 self.set_feedback(&msg[..n]);
                 return true;
             }
         }
         self.state = PlaybackState::Stopped;
         let mut msg = [0u8; FEEDBACK_CAP];
-        let n = music::ended_feedback(None, &mut msg);
+        let n = music::ended_feedback(None, false, &mut msg);
         self.set_feedback(&msg[..n]);
         false
     }
@@ -816,8 +907,12 @@ impl MusicApp {
     /// Returns `true` only when playback actually started. With no media or a
     /// refused stream the transport stays `Stopped`.
     pub fn toggle_play(&mut self) -> bool {
-        match self.state {
-            PlaybackState::Playing => {
+        // WHY the platform's state decides and not the app's: the control has
+        // to act on what the device is doing. A transport that intended to
+        // play while the device had already finished its track would pause a
+        // stream that is not there, and the button would do nothing.
+        match self.surface_state() {
+            music::SurfaceState::Playing => {
                 self.player.pause();
                 self.player.poll();
                 self.state = PlaybackState::Paused;
@@ -826,7 +921,7 @@ impl MusicApp {
                 std::log("[MUSIC APP] Transport paused; the device keeps what it already holds.").ok();
                 false
             }
-            PlaybackState::Paused if self.player.holds(self.current_track_idx) => {
+            music::SurfaceState::Paused if self.player.holds(self.current_track_idx) => {
                 self.player.resume();
                 self.state = PlaybackState::Playing;
                 self.clear_feedback();
@@ -854,11 +949,11 @@ impl MusicApp {
         } else {
             (b"", b"")
         };
-        let state_str: &[u8] = match self.state {
-            PlaybackState::Playing => b"playing",
-            PlaybackState::Paused => b"paused",
-            PlaybackState::Stopped => b"stopped",
-        };
+        // WHY the publication carries the platform's answer and not the app's
+        // intent: the launcher and the notification shade read this key, and
+        // a shade that says "playing" while the device is silent is the same
+        // lie on another surface.
+        let state_str: &[u8] = music::surface_state_name(self.surface_state());
         music::publish_now_playing(title, artist, state_str);
     }
 
@@ -873,7 +968,11 @@ impl MusicApp {
         let mut state_buf = [0u8; 16];
         if let Ok(n) = std::settings_get(music::NOW_PLAYING_STATE_KEY, &mut state_buf) {
             let state_str = &state_buf[..n];
-            if (state_str == b"playing" || state_str == b"paused") && !self.store.is_empty() {
+            // WHY every state but "stopped" counts: the truth fix added
+            // "ended", "unavailable" and "not_running", and a session that
+            // ended still selected the track the screen should show. Only a
+            // stopped session has no track to restore.
+            if !state_str.is_empty() && state_str != b"stopped" && !self.store.is_empty() {
                 let mut title_buf = [0u8; music::TITLE_MAX];
                 if let Ok(tn) = std::settings_get(music::NOW_PLAYING_TITLE_KEY, &mut title_buf) {
                     if tn > 0 {
@@ -1088,9 +1187,33 @@ const IMPORT_BTN: Rect = Rect { x: 578, y: 748, w: 118, h: 48 };
 /// the volume row (starts at 848) holds a single caption. A second line at
 /// y 828 ran into the volume controls, so feedback takes the caption's place
 /// while it is shown.
-const UNAVAILABLE_Y: usize = 808;
-const TIMELINE_RECT: Rect = Rect { x: 24, y: 824, w: 672, h: 6 };
-const TIMELINE_TOUCH_Y0: usize = 820;
+///
+/// WHY the caption sits at 800 and not at 808: a size-1 run draws its ink
+/// from y0 + 5, so the caption at 808 put its ink on rows 813..823 while the
+/// timeline bar was drawn on rows 824..829. The caption and the bar shared
+/// the bottom of the band. At 800 the caption's ink ends on row 815 and the
+/// bar's ink starts on row 827, so the two never touch.
+const CAPTION_Y: usize = 800;
+
+/// The rows the caption is drawn on, and the rows a touch on it reads.
+const CAPTION_TOUCH_Y0: usize = 800;
+const CAPTION_TOUCH_Y1: usize = 820;
+
+/// The progress bar under the caption.
+///
+/// WHY it is at 828 and not at 824: the caption's ink ends on row 815, so
+/// the bar and its thumb (rows 827..835) sit clear of it.
+const TIMELINE_RECT: Rect = Rect { x: 24, y: 828, w: 672, h: 6 };
+
+/// The thumb's centre row on the bar.
+const TIMELINE_THUMB_CY: usize = 831;
+
+/// The rows a touch on the bar is read from.
+///
+/// WHY they bracket the bar: the band starts above the bar's first row and
+/// ends below its last, and it stays clear of the caption's band above and
+/// the volume row below.
+const TIMELINE_TOUCH_Y0: usize = 824;
 const TIMELINE_TOUCH_Y1: usize = 844;
 
 /// The search query's capacity, in bytes.
@@ -1367,6 +1490,11 @@ impl VolumeFrame {
 
 struct Frame {
     vol: VolumeFrame,
+    /// The state the platform reported, resolved once per frame.
+    ///
+    /// WHY it is resolved once: the renderer runs once per pixel, and the
+    /// state has to be the same answer on every pixel of the frame.
+    surface: music::SurfaceState,
     /// The state line: the transport's own state and the queue's position.
     state: [u8; 56],
     state_len: usize,
@@ -1387,16 +1515,17 @@ fn current_position(app: &MusicApp) -> Option<(usize, usize)> {
 fn build_frame(app: &MusicApp) -> Frame {
     let mut f = Frame {
         vol: VolumeFrame::build(app),
+        surface: app.surface_state(),
         state: [0; 56],
         state_len: 0,
         queue_caption: [0; 32],
         queue_caption_len: 0,
     };
-    let state_label: &[u8] = match app.state {
-        PlaybackState::Playing => b"Playing",
-        PlaybackState::Paused => b"Paused",
-        PlaybackState::Stopped => b"Stopped",
-    };
+    // WHY the label comes from the platform's report and not from the app's
+    // own state: the screen must say what the device is doing. The old
+    // mapping read the app's intent, so the screen said "Playing" while the
+    // device had already finished the track.
+    let state_label: &[u8] = music::surface_label(f.surface);
     let mut at = 0usize;
     for &byte in state_label {
         if at < f.state.len() {
@@ -1728,11 +1857,10 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
     } else if let Some(c) = text_centered_bold(x, y, ARTIST_Y, 2, b"Local library is empty - nothing to play", THEME.on_surface, THEME.surface) {
         return c;
     }
-    let state_label: &[u8] = match app.state {
-        PlaybackState::Playing => b"Playing",
-        PlaybackState::Paused => b"Paused",
-        PlaybackState::Stopped => b"Stopped",
-    };
+    // WHY the label comes from the frame: the state is resolved once per
+    // frame from the platform's report, so every pixel of the line shows the
+    // same answer and the label can never disagree with the transport glyph.
+    let state_label: &[u8] = music::surface_label(f.surface);
     {
         // WHY the state and the position share one line: the position used to
         // reserve a second line from STATE_Y + 28, which ran into the search
@@ -1836,7 +1964,7 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
         if let Some(c) = text_centered_bold(
             x,
             y,
-            UNAVAILABLE_Y,
+            CAPTION_Y,
             1,
             &app.feedback[..app.feedback_len],
             THEME.on_surface,
@@ -1861,7 +1989,7 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
         if let Some(c) = text_centered(
             x,
             y,
-            UNAVAILABLE_Y,
+            CAPTION_Y,
             1,
             loop_text,
             THEME.muted,
@@ -1871,7 +1999,9 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
         }
     }
 
-    if y >= 822 && y <= 832 && x >= TIMELINE_RECT.x && x < TIMELINE_RECT.x + TIMELINE_RECT.w {
+    // WHY the band is 826..836: the bar is drawn on rows 828..833 and its
+    // thumb reaches rows 827..835, so the band has to cover both of them.
+    if y >= 826 && y <= 836 && x >= TIMELINE_RECT.x && x < TIMELINE_RECT.x + TIMELINE_RECT.w {
         let dur = app.player.duration_ms().unwrap_or_else(|| {
             app.store.get(app.current_track_idx).map(|t| (t.duration_sec() as u64) * 1000).unwrap_or(0)
         });
@@ -1883,7 +2013,7 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
         };
         let thumb_cx = TIMELINE_RECT.x + fill_w;
         let dx = (x as isize) - (thumb_cx as isize);
-        let dy = (y as isize) - 827isize;
+        let dy = (y as isize) - (TIMELINE_THUMB_CY as isize);
         if dx * dx + dy * dy <= 16 {
             return THEME.on_surface;
         }
@@ -1942,7 +2072,11 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
             let glyph = if active { THEME.on_primary } else { THEME.muted };
             let dx = (x as isize) - PLAY_CX as isize;
             let dy = (y as isize) - TRANSPORT_CY as isize;
-            if app.state == PlaybackState::Playing && active {
+            // WHY the glyph follows the platform and not the app's intent:
+            // the pause bars mean "the device is streaming right now", and
+            // drawing them while nothing was playing was the other half of
+            // the same lie the state label told.
+            if f.surface == music::SurfaceState::Playing && active {
                 if ((-14..=-6).contains(&dx) || (6..=14).contains(&dx)) && dy.abs() <= 16 {
                     return glyph;
                 }
@@ -2431,8 +2565,13 @@ fn handle_tap(app: &mut MusicApp, px: u32, py: u32) -> Tap<'static> {
         return Tap::Redraw(Dirty::None);
     }
 
-    // Toggle queue looping hit-test on the unavailable line
-    if y >= 800 && y < 820 {
+    // Toggle queue looping hit-test on the caption's band.
+    //
+    // WHY the band is the caption's own rows: the caption line doubles as
+    // the queue loop control, so the hit band has to be the rows the caption
+    // is drawn on. It ends above the timeline's band, so the two controls
+    // cannot both answer the same touch.
+    if y >= CAPTION_TOUCH_Y0 && y < CAPTION_TOUCH_Y1 {
         if app.toggle_loop_queue() {
             let _ = std::audio_haptic_click();
             return Tap::Redraw(Dirty::Meta);

@@ -392,6 +392,11 @@ impl Player {
         self.stream = true;
         self.state = PlayerState::Playing;
         self.pump();
+        // WHY the device is asked before the caller is told the track
+        // started: opening the stream says the kernel accepted the samples,
+        // not that the card is playing them. The status is the device's own
+        // answer, so it is read here and the screen is built from it.
+        self.poll();
         true
     }
 

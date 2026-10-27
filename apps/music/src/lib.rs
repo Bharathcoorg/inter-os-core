@@ -62,6 +62,171 @@ pub fn publish_now_playing(title: &[u8], artist: &[u8], state: &[u8]) -> bool {
     t_ok && a_ok && s_ok && p_ok
 }
 
+/// The audio service's id in the platform's service registry.
+pub const AUDIO_SERVICE_ID: u8 = 7;
+
+/// The registry's state byte for a service that is running.
+pub const SERVICE_STATE_RUNNING: u8 = 2;
+
+/// What the transport intends to do, before the platform is asked.
+///
+/// WHY the intent is not the state: the app's own state says what it *meant*
+/// to do. Only the platform can say what the device is doing, and a screen
+/// that shows the intent shows the app's wishes instead of the device's
+/// facts. That is how a player ends up claiming "Playing" while the device
+/// has already finished the last batch it was given.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TransportIntent {
+    Stopped,
+    Playing,
+    Paused,
+}
+
+/// What the platform's audio output reported when it was asked.
+///
+/// WHY these are the platform's words and not the app's: every one of them
+/// comes from the kernel's measured status of the output path, so the screen
+/// can be built from what the device did instead of what the app assumed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum StreamReport {
+    /// A card answered, the stream is open and a batch is running.
+    Running,
+    /// A card answered and the stream is open, but nothing is playing.
+    Idle,
+    /// The card took every frame it was given: the track is over.
+    Ended,
+    /// There is no card, or the platform refused the stream.
+    Absent,
+    /// The platform did not answer.
+    Unknown,
+}
+
+/// What the platform's service registry says about the audio service.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ServiceReport {
+    Running,
+    NotRunning,
+    Unknown,
+}
+
+/// The state the now-playing surface may claim.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SurfaceState {
+    Stopped,
+    Playing,
+    Paused,
+    Ended,
+    Unavailable,
+    NotRunning,
+}
+
+/// Reads the platform's answer about the output path.
+///
+/// WHY the device's own status decides this: the app's intent says a stream
+/// was opened; only the status says whether the card is playing it right now.
+/// The status is the platform's measurement, so it is the only thing that may
+/// decide what the screen claims.
+pub const fn report_from_status(status: &std::AudioStreamStatus) -> StreamReport {
+    if !status.device_present {
+        return StreamReport::Absent;
+    }
+    if status.device_running {
+        return StreamReport::Running;
+    }
+    // WHY the drained test comes before "idle": a card that took every frame
+    // it was given and then went idle finished the track, which is a
+    // different fact from a card that is sitting there with samples waiting.
+    if playback::stream_drained(
+        status.frames_written,
+        status.frames_consumed,
+        status.device_running,
+    ) {
+        return StreamReport::Ended;
+    }
+    StreamReport::Idle
+}
+
+/// Reads the service registry's state byte for the audio service.
+pub const fn service_report(state_byte: u8) -> ServiceReport {
+    if state_byte == SERVICE_STATE_RUNNING {
+        ServiceReport::Running
+    } else if state_byte <= 4 {
+        // Declared, Starting, Stopped and Failed are all "not running".
+        ServiceReport::NotRunning
+    } else {
+        ServiceReport::Unknown
+    }
+}
+
+/// The state the surface may claim, given the transport's intent, the
+/// device's answer and the audio service's lifecycle state.
+///
+/// WHY the device's answer outranks the intent: the screen must report what
+/// the platform is doing, not what the app hoped it would do. "Playing" is
+/// therefore only ever the answer to a card that is running a batch.
+pub const fn surface_state(
+    intent: TransportIntent,
+    report: StreamReport,
+    service: ServiceReport,
+) -> SurfaceState {
+    match intent {
+        TransportIntent::Playing => match report {
+            StreamReport::Running => SurfaceState::Playing,
+            StreamReport::Ended => SurfaceState::Ended,
+            StreamReport::Absent => SurfaceState::Unavailable,
+            StreamReport::Idle => SurfaceState::NotRunning,
+            // WHY the service decides here: the platform did not answer, and
+            // a service that is down explains why nothing can be playing.
+            StreamReport::Unknown => match service {
+                ServiceReport::NotRunning => SurfaceState::NotRunning,
+                _ => SurfaceState::Unavailable,
+            },
+        },
+        TransportIntent::Paused => match report {
+            // WHY there is no device to pause: the platform has no output at
+            // all, so "Paused" would name a stream that does not exist.
+            StreamReport::Absent => SurfaceState::Unavailable,
+            _ => SurfaceState::Paused,
+        },
+        TransportIntent::Stopped => match report {
+            StreamReport::Absent => SurfaceState::Unavailable,
+            // WHY the finished track is still named: the last thing the
+            // device did was play the track out, and "Stopped" alone would
+            // hide the one fact the person needs.
+            StreamReport::Ended => SurfaceState::Ended,
+            _ => SurfaceState::Stopped,
+        },
+    }
+}
+
+/// The words the now-playing state label shows.
+pub const fn surface_label(state: SurfaceState) -> &'static [u8] {
+    match state {
+        SurfaceState::Playing => b"Playing",
+        SurfaceState::Paused => b"Paused",
+        SurfaceState::Stopped => b"Stopped",
+        SurfaceState::Ended => b"Track ended",
+        SurfaceState::Unavailable => b"Audio unavailable",
+        SurfaceState::NotRunning => b"Audio not running",
+    }
+}
+
+/// The word the now-playing publication carries.
+///
+/// WHY the publication carries the same truth as the label: the launcher and
+/// the notification shade read this key, and a shade that says "playing"
+/// while the device is silent is the same lie on another surface.
+pub const fn surface_state_name(state: SurfaceState) -> &'static [u8] {
+    match state {
+        SurfaceState::Playing => b"playing",
+        SurfaceState::Paused => b"paused",
+        SurfaceState::Stopped => b"stopped",
+        SurfaceState::Ended => b"ended",
+        SurfaceState::Unavailable => b"unavailable",
+        SurfaceState::NotRunning => b"not_running",
+    }
+}
+
 /// Sets the given audio track or document path as the system-wide ringtone.
 ///
 /// Writes both `audio.ringtone` and `telephony.ringtone` for seamless
@@ -315,11 +480,23 @@ pub fn import_feedback(outcome: ImportOutcome, out: &mut [u8]) -> usize {
 /// WHY the title is only appended when the next track started: the older
 /// wording said "track ended" whether or not anything followed it, which read
 /// as an auto-advance that never happened.
-pub fn ended_feedback(next_title: Option<&[u8]>, out: &mut [u8]) -> usize {
+///
+/// WHY "playing" is conditional: the queue moved on, but only the platform
+/// can say that the next track is actually being streamed. The old wording
+/// claimed "playing" for a track the device had already finished, which is
+/// the same lie the state label used to tell.
+pub fn ended_feedback(next_title: Option<&[u8]>, next_playing: bool, out: &mut [u8]) -> usize {
     let mut at = 0usize;
     match next_title {
-        Some(title) => {
+        Some(title) if next_playing => {
             push_bytes(out, &mut at, b"Track ended - playing: ");
+            push_bytes(out, &mut at, title);
+        }
+        Some(title) => {
+            // WHY no "playing" here: the device did not confirm that the
+            // next track is streaming, so the line names the track and lets
+            // the state label carry the platform's answer.
+            push_bytes(out, &mut at, b"Track ended - next: ");
             push_bytes(out, &mut at, title);
         }
         None => push_bytes(out, &mut at, b"Track ended - no playable track remains"),
@@ -1259,15 +1436,20 @@ mod tests {
     #[test]
     fn a_track_that_played_out_says_whether_anything_followed_it() {
         let mut out = [0u8; FEEDBACK_MAX];
-        let n = ended_feedback(Some(b"Nocturne"), &mut out);
+        let n = ended_feedback(Some(b"Nocturne"), true, &mut out);
         assert_eq!(&out[..n], b"Track ended - playing: Nocturne");
 
-        let n = ended_feedback(None, &mut out);
+        // WHY a separate case: the device did not confirm that the next
+        // track is streaming, so the line must not claim it is playing.
+        let n = ended_feedback(Some(b"Nocturne"), false, &mut out);
+        assert_eq!(&out[..n], b"Track ended - next: Nocturne");
+
+        let n = ended_feedback(None, false, &mut out);
         assert_eq!(&out[..n], b"Track ended - no playable track remains");
 
         // A long title is cut at the buffer, never written past it.
         let long = [b'x'; 60];
-        let n = ended_feedback(Some(&long), &mut out);
+        let n = ended_feedback(Some(&long), true, &mut out);
         assert_eq!(n, FEEDBACK_MAX);
         assert!(out[..n].starts_with(b"Track ended - playing: "));
     }
