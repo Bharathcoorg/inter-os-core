@@ -12,7 +12,7 @@ pub mod dom;
 pub mod flow;
 pub mod style;
 
-pub use dom::{Dom, NodeId, NO_LINK, NO_NODE, StrRef};
+pub use dom::{DocMeta, Dom, NodeId, NO_LINK, NO_NODE, StrRef};
 pub use flow::{
     build, overflow_note, FieldItem, FormInfo, FormMethod, ImageItem, LinkBox, RectItem, RectKind,
     TextLayout, TextRun, MAX_FIELDS, MAX_IMAGES, MAX_LINK_BOXES, MAX_RECTS, MAX_TEXT_RUNS,

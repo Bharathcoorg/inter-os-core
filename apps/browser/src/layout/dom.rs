@@ -156,6 +156,37 @@ pub const OVERFLOW_ATTRS: u32 = 1 << 2;
 pub const OVERFLOW_CSS: u32 = 1 << 3;
 pub const OVERFLOW_DEPTH: u32 = 1 << 4;
 
+/// What a document says about itself.
+///
+/// WHY this is kept beside the tree instead of in it: none of it is body
+/// content, so the reader never draws it -- but the tab, the history list, the
+/// download sheet and the start page all need a name for the page, and until
+/// now the only name any of them had was the URL it was fetched from.
+///
+/// Every field is a range in the document's text pool, already entity-decoded
+/// and reduced to the glyphs the face can draw. An empty range means the
+/// document did not say, which is reported as such rather than guessed.
+#[derive(Clone, Copy, Debug)]
+pub struct DocMeta {
+    /// The text of the first `<title>`, or of `og:title` when it has none.
+    pub title: StrRef,
+    /// `meta[name="description"]` or `og:description`.
+    pub description: StrRef,
+    /// The href of the `<link rel="icon">` the document points at.
+    pub icon: StrRef,
+    /// The href of the first `<link rel="stylesheet">`.
+    pub stylesheet: StrRef,
+}
+
+impl DocMeta {
+    pub const EMPTY: Self = Self {
+        title: StrRef::EMPTY,
+        description: StrRef::EMPTY,
+        icon: StrRef::EMPTY,
+        stylesheet: StrRef::EMPTY,
+    };
+}
+
 /// The bounded document tree.
 pub struct Dom {
     pub(super) nodes: [Node; MAX_NODES],
@@ -168,6 +199,7 @@ pub struct Dom {
     link_count: usize,
     css: [u8; MAX_CSS_BYTES],
     css_len: usize,
+    meta: DocMeta,
     root: NodeId,
     truncated: bool,
     overflow: u32,
@@ -186,6 +218,7 @@ impl Dom {
             link_count: 0,
             css: [0; MAX_CSS_BYTES],
             css_len: 0,
+            meta: DocMeta::EMPTY,
             root: NO_NODE,
             truncated: false,
             overflow: 0,
@@ -273,7 +306,23 @@ impl Dom {
                 if tag.self_closing {
                     continue;
                 }
+                let start = i;
                 i = find_close(html, i, b"title").unwrap_or(n);
+                let end = find_close_start(html, start, b"title").unwrap_or(i);
+                // WHY the title is kept on the document instead of in the tree:
+                // it is not body content, so the reader must never draw it --
+                // but the tab, the history entry and the download sheet are all
+                // asking what this page is called, and nothing but this ever
+                // knew. The first title wins, which is what the markup's own
+                // order asks for.
+                if end > start && self.meta.title.is_empty() {
+                    let mut line = [0u8; 256];
+                    let len = one_line(&html[start..end], &mut line);
+                    if len > 0 {
+                        let title = self.decode_display(&line[..len]);
+                        self.meta.title = title;
+                    }
+                }
                 continue;
             }
             if tag.name_eq(b"textarea") {
@@ -311,6 +360,7 @@ impl Dom {
         self.attr_count = 0;
         self.link_count = 0;
         self.css_len = 0;
+        self.meta = DocMeta::EMPTY;
         self.root = NO_NODE;
         self.truncated = false;
         self.overflow = 0;
@@ -345,6 +395,11 @@ impl Dom {
 
     pub fn text_of<'a>(&'a self, id: NodeId) -> &'a [u8] {
         self.node(id).text.get(self)
+    }
+
+    /// What the document said about itself.
+    pub fn meta(&self) -> &DocMeta {
+        &self.meta
     }
 
     /// The value of `name` on this element, or `None`.
@@ -726,9 +781,62 @@ impl Dom {
                 self.nodes[id as usize].link = link as u8;
             }
         }
+        self.read_document_meta(id);
         let parent = stack[*depth - 1];
         self.append_child(parent, id);
         id
+    }
+
+    /// Records what a `<meta>` or `<link>` says about the document.
+    ///
+    /// WHY the attribute values are copied into local buffers first: `attr`
+    /// lends a slice of the text pool, and storing what it says needs to write
+    /// into that same pool.
+    fn read_document_meta(&mut self, node: NodeId) {
+        let tag = self.tag(node);
+        let is_meta = tag.eq_ignore_ascii_case(b"meta");
+        let is_link = !is_meta && tag.eq_ignore_ascii_case(b"link");
+        if !is_meta && !is_link {
+            return;
+        }
+        let mut key = [0u8; 32];
+        let mut rel = [0u8; 64];
+        let mut content = [0u8; 256];
+        let mut href = [0u8; 256];
+        let mut key_len = attr_into(self, node, b"name", &mut key);
+        if key_len == 0 {
+            // Open Graph and the other social dialects spell their key
+            // `property` instead of `name`; either one means the same thing here.
+            key_len = attr_into(self, node, b"property", &mut key);
+        }
+        let rel_len = attr_into(self, node, b"rel", &mut rel);
+        let content_len = attr_into(self, node, b"content", &mut content);
+        let href_len = attr_into(self, node, b"href", &mut href);
+
+        if is_meta {
+            if content_len == 0 {
+                return;
+            }
+            let key = &key[..key_len];
+            let content = &content[..content_len];
+            if key.eq_ignore_ascii_case(b"description") || key.eq_ignore_ascii_case(b"og:description") {
+                let description = self.decode_display(content);
+                self.meta.description = description;
+            } else if key.eq_ignore_ascii_case(b"og:title") && self.meta.title.is_empty() {
+                let title = self.decode_display(content);
+                self.meta.title = title;
+            }
+        } else if href_len > 0 {
+            let rel = &rel[..rel_len];
+            let href = &href[..href_len];
+            if self.meta.icon.is_empty() && (rel_contains(rel, b"icon") || rel_contains(rel, b"apple-touch-icon")) {
+                let icon = self.intern(href);
+                self.meta.icon = icon;
+            } else if self.meta.stylesheet.is_empty() && rel_contains(rel, b"stylesheet") {
+                let stylesheet = self.intern(href);
+                self.meta.stylesheet = stylesheet;
+            }
+        }
     }
 
     fn close_while(&mut self, stack: &mut [NodeId; MAX_DEPTH], depth: &mut usize, name: &[u8]) {
@@ -760,6 +868,16 @@ impl Dom {
         StrRef {
             start: start as u32,
             len: (self.text_len - start) as u16,
+        }
+    }
+
+    /// Appends `raw` to the end of the pool as text a person will read.
+    fn decode_display(&mut self, raw: &[u8]) -> StrRef {
+        let start = self.text_len;
+        self.decode_entities_into(raw, true);
+        StrRef {
+            start: start as u32,
+            len: (self.text_len - start).min(u16::MAX as usize) as u16,
         }
     }
 
@@ -1196,6 +1314,56 @@ pub(super) fn is_block_name(name: &[u8]) -> bool {
     )
 }
 
+/// Copies one attribute's value into a fixed buffer and returns how much of it
+/// fitted. A missing or empty attribute reads as zero bytes.
+fn attr_into(dom: &Dom, node: NodeId, name: &[u8], dst: &mut [u8]) -> usize {
+    match dom.attr(node, name) {
+        Some(value) if !value.is_empty() => {
+            let n = value.len().min(dst.len());
+            dst[..n].copy_from_slice(&value[..n]);
+            n
+        }
+        _ => 0,
+    }
+}
+
+/// Copies `raw` into `dst` as a single line: the whitespace a page's authors
+/// put around the title is dropped and the runs inside it become one space,
+/// because the tab and the history row have exactly one line to show it on.
+fn one_line(raw: &[u8], dst: &mut [u8]) -> usize {
+    let mut len = 0usize;
+    let mut pending_space = false;
+    for &byte in raw {
+        if byte == b' ' || byte == b'\t' || byte == b'\n' || byte == b'\r' || byte == b'\x0c' {
+            pending_space = len > 0;
+            continue;
+        }
+        if pending_space {
+            if len == dst.len() {
+                break;
+            }
+            dst[len] = b' ';
+            len += 1;
+            pending_space = false;
+        }
+        if len == dst.len() {
+            break;
+        }
+        dst[len] = byte;
+        len += 1;
+    }
+    len
+}
+
+/// Whether a `rel` list names `keyword` as one of its space-separated tokens.
+///
+/// WHY tokens and not a substring: `rel="alternate stylesheet"` has to match,
+/// and a plain contains() would also let `rel="next-stylesheet"` claim it.
+fn rel_contains(rel: &[u8], keyword: &[u8]) -> bool {
+    rel.split(|&byte| byte == b' ' || byte == b'\t' || byte == b'\n')
+        .any(|token| token.eq_ignore_ascii_case(keyword))
+}
+
 /// Only the attributes the layout engine consumes are kept. Keeping every
 /// attribute of a framework-heavy page would spend the attribute arena on
 /// data the renderer never reads.
@@ -1220,6 +1388,10 @@ fn is_layout_attribute(name: &[u8]) -> bool {
             | b"rowspan"
             | b"title"
             | b"label"
+            | b"content"
+            | b"rel"
+            | b"property"
+            | b"charset"
             | b"checked"
             | b"selected"
             | b"disabled"
@@ -1503,5 +1675,85 @@ mod tests {
         dom.parse(&html);
         assert!(dom.truncated());
         assert_eq!(dom.node_count(), MAX_NODES);
+    }
+
+    #[test]
+    fn the_title_is_read_off_the_document_and_never_drawn() {
+        let mut dom = Dom::new();
+        dom.parse(b"<head><title>Weather &amp; Tides</title></head><body><p>sea</p></body>");
+        assert_eq!(dom.meta().title.get(&dom), b"Weather & Tides");
+        // The body of the title is not content: nothing in the tree may show it.
+        assert!(find(&dom, b"title").is_none());
+        let mut text = std::vec::Vec::new();
+        collect_text(&dom, dom.root(), &mut text);
+        assert_eq!(text, b"sea");
+    }
+
+    #[test]
+    fn a_title_the_authors_indented_still_fits_one_line() {
+        let mut dom = Dom::new();
+        dom.parse(b"<title>\n   InterOS\n   Core\n</title>");
+        assert_eq!(dom.meta().title.get(&dom), b"InterOS Core");
+    }
+
+    #[test]
+    fn the_first_title_wins() {
+        let mut dom = Dom::new();
+        dom.parse(b"<title>First</title><title>Second</title>");
+        assert_eq!(dom.meta().title.get(&dom), b"First");
+    }
+
+    #[test]
+    fn a_social_title_names_the_page_when_it_says_none() {
+        let mut dom = Dom::new();
+        dom.parse(b"<meta property=\"og:title\" content=\"Shared page\">");
+        assert_eq!(dom.meta().title.get(&dom), b"Shared page");
+        // A real title is the page's own word on itself, so it is not overwritten.
+        dom.parse(b"<title>Named</title><meta property=\"og:title\" content=\"Shared\">");
+        assert_eq!(dom.meta().title.get(&dom), b"Named");
+    }
+
+    #[test]
+    fn the_description_is_read_from_either_spelling() {
+        let mut dom = Dom::new();
+        dom.parse(b"<meta name=\"description\" content=\"A short summary.\">");
+        assert_eq!(dom.meta().description.get(&dom), b"A short summary.");
+        dom.parse(b"<meta property=\"og:description\" content=\"Another summary.\">");
+        assert_eq!(dom.meta().description.get(&dom), b"Another summary.");
+    }
+
+    #[test]
+    fn the_icon_and_stylesheet_hrefs_are_read_as_the_page_gives_them() {
+        let mut dom = Dom::new();
+        dom.parse(b"<link rel=\"shortcut icon\" href=\"/f.ico\"><link REL=\"Alternate Stylesheet\" href=\"/a.css\">");
+        assert_eq!(dom.meta().icon.get(&dom), b"/f.ico");
+        assert_eq!(dom.meta().stylesheet.get(&dom), b"/a.css");
+    }
+
+    #[test]
+    fn a_rel_that_only_rhymes_with_icon_is_not_the_icon() {
+        let mut dom = Dom::new();
+        dom.parse(b"<link rel=\"next-stylesheet\" href=\"/x.css\">");
+        assert!(dom.meta().icon.is_empty());
+        assert!(dom.meta().stylesheet.is_empty());
+    }
+
+    #[test]
+    fn a_page_that_says_nothing_about_itself_is_reported_as_saying_nothing() {
+        let mut dom = Dom::new();
+        dom.parse(b"<body><p>plain</p></body>");
+        assert!(dom.meta().title.is_empty());
+        assert!(dom.meta().description.is_empty());
+        assert!(dom.meta().icon.is_empty());
+        assert!(dom.meta().stylesheet.is_empty());
+    }
+
+    #[test]
+    fn the_document_metadata_does_not_survive_into_the_next_page() {
+        let mut dom = Dom::new();
+        dom.parse(b"<title>Old</title><meta name=\"description\" content=\"Old.\">");
+        dom.parse(b"<p>New</p>");
+        assert!(dom.meta().title.is_empty());
+        assert!(dom.meta().description.is_empty());
     }
 }
