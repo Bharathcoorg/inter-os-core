@@ -28,15 +28,23 @@ pub const MAX_IMAGES: usize = 4;
 pub const MAX_FIELDS: usize = 48;
 /// The most link boxes one page holds.
 pub const MAX_LINK_BOXES: usize = 128;
-/// The most inline segments collected for one line flow.
-const MAX_SEGMENTS: usize = 128;
+/// How many inline segments are buffered before they are laid into lines.
+///
+/// WHY a buffer that is emptied as it fills: the list is one per page, not one
+/// per block, so this bounds how much of a paragraph is held at a time and not
+/// how long a paragraph can be. It used to be one list per block level, which
+/// made the same number a bound on every paragraph on the page and a charge
+/// against the app's stack at every level of nesting.
+const MAX_SEGMENTS: usize = 512;
 /// The deepest block nesting the layout descends.
 ///
-/// This is a stack bound, not a document bound: the DOM keeps up to 64
-/// levels, but every block level costs a segment list on the app's stack.
-/// A deeper block is laid out through its nearest tracked ancestor and the
-/// display list reports truncation instead of overflowing the stack.
-const MAX_LAYOUT_DEPTH: usize = 16;
+/// This is a stack bound, not a document bound. Every block level costs a
+/// frame holding a computed style (240 bytes) and a few cursors, so the app's
+/// 256 KiB user stack carries this depth with room to spare now that the
+/// segment list is one buffer for the page rather than one per level. A
+/// deeper block is laid out through its nearest tracked ancestor and the
+/// display list reports the block depth it ran out of.
+const MAX_LAYOUT_DEPTH: usize = 32;
 /// The width a form control takes when neither markup nor style names one.
 const DEFAULT_FIELD_W: usize = 260;
 /// The side of a checkbox or radio button.
@@ -423,6 +431,7 @@ pub fn build(dom: &Dom, sheet: &css::Stylesheet<'_>, width: usize, out: &mut Tex
         dom,
         sheet,
         out,
+        segs: Segs::new(),
         overflow: dom.overflow(),
         max_bottom: 0,
     };
@@ -451,8 +460,34 @@ struct Builder<'a, 's> {
     dom: &'a Dom,
     sheet: &'s css::Stylesheet<'s>,
     out: &'a mut TextLayout,
+    /// The inline segments collected but not yet laid into lines. One list
+    /// for the whole page, emptied whenever it fills.
+    segs: Segs,
     overflow: u32,
     max_bottom: i32,
+}
+
+/// The column inline content is being collected into, and where it will land.
+///
+/// WHY this travels with the collector: a paragraph longer than the segment
+/// list has to be laid into lines from inside the walk that is reading it, so
+/// the walk needs the column and the line cursor, not just the list.
+struct Flow {
+    x: i32,
+    width: usize,
+    y: i32,
+    pending_space: bool,
+}
+
+impl Flow {
+    const fn new(x: i32, y: i32, width: usize) -> Self {
+        Self {
+            x,
+            width,
+            y,
+            pending_space: false,
+        }
+    }
 }
 
 /// One piece of inline content.
@@ -515,6 +550,10 @@ impl Segs {
         self.overflowed = false;
     }
 
+    fn is_full(&self) -> bool {
+        self.len >= MAX_SEGMENTS
+    }
+
     fn is_empty(&self) -> bool {
         self.len == 0
     }
@@ -535,9 +574,7 @@ impl<'a, 's> Builder<'a, 's> {
             self.note(OVERFLOW_BLOCK_DEPTH);
             return y;
         }
-        let mut cursor_y = y;
-        let mut segs = Segs::new();
-        let mut pending_space = false;
+        let mut flow = Flow::new(x, y, width);
         let ordered = self.dom.tag(parent).eq_ignore_ascii_case(b"ol");
         let mut list_index = 0usize;
 
@@ -546,22 +583,16 @@ impl<'a, 's> Builder<'a, 's> {
             let is_text = self.dom.node(node).is_text();
             let is_element = self.dom.node(node).is_element();
             if is_text {
-                self.collect_text(node, parent_style, NO_LINK, &mut segs, &mut pending_space);
+                self.collect_text(node, parent_style, NO_LINK, &mut flow);
             } else if is_element {
                 let style = style::compute(self.dom, node, self.sheet, Some(parent_style));
                 if style.display == Display::None {
                 } else if style.is_inline_level() {
-                    self.collect_inline(
-                        node,
-                        parent_style,
-                        NO_LINK,
-                        &mut segs,
-                        &mut pending_space,
-                    );
+                    self.collect_inline(node, parent_style, NO_LINK, &mut flow);
                 } else {
-                    self.note_overflow(&segs);
-                    self.flush_inline(&mut segs, x, &mut cursor_y, width);
-                    pending_space = false;
+                    self.note_overflow();
+                    self.flush_inline(&mut flow);
+                    flow.pending_space = false;
                     let is_item = style.display == Display::ListItem;
                     let marker = if is_item {
                         list_index += 1;
@@ -579,10 +610,10 @@ impl<'a, 's> Builder<'a, 's> {
                     } else {
                         Marker::None
                     };
-                    cursor_y = self.layout_block(
+                    flow.y = self.layout_block(
                         node,
                         x,
-                        cursor_y,
+                        flow.y,
                         width,
                         parent_style,
                         depth + 1,
@@ -592,9 +623,9 @@ impl<'a, 's> Builder<'a, 's> {
             }
             child = self.dom.next_sibling(node);
         }
-        self.note_overflow(&segs);
-        self.flush_inline(&mut segs, x, &mut cursor_y, width);
-        cursor_y
+        self.note_overflow();
+        self.flush_inline(&mut flow);
+        flow.y
     }
 
     /// Lays out one block-level element and returns the bottom edge.
@@ -744,22 +775,20 @@ impl<'a, 's> Builder<'a, 's> {
             self.note(OVERFLOW_BLOCK_DEPTH);
             return y;
         }
-        let mut segs = Segs::new();
-        let mut pending_space = false;
+        let mut flow = Flow::new(x, y, width);
         let mut child = self.dom.first_child(node);
         while let Some(child_id) = child {
             let is_text = self.dom.node(child_id).is_text();
             if is_text {
-                self.collect_text(child_id, style, NO_LINK, &mut segs, &mut pending_space);
+                self.collect_text(child_id, style, NO_LINK, &mut flow);
             } else {
-                self.collect_inline(child_id, style, NO_LINK, &mut segs, &mut pending_space);
+                self.collect_inline(child_id, style, NO_LINK, &mut flow);
             }
             child = self.dom.next_sibling(child_id);
         }
-        let mut bottom = y;
-        self.note_overflow(&segs);
-        self.flush_inline(&mut segs, x, &mut bottom, width);
-        bottom
+        self.note_overflow();
+        self.flush_inline(&mut flow);
+        flow.y
     }
 
     fn has_only_inline_children(&self, node: NodeId) -> bool {
@@ -915,8 +944,7 @@ impl<'a, 's> Builder<'a, 's> {
         node: NodeId,
         parent_style: &BoxStyle,
         parent_link: u8,
-        segs: &mut Segs,
-        pending_space: &mut bool,
+        flow: &mut Flow,
     ) {
         let style = style::compute(self.dom, node, self.sheet, Some(parent_style));
         if style.display == Display::None {
@@ -927,18 +955,18 @@ impl<'a, 's> Builder<'a, 's> {
         let tag = self.dom.tag(node);
 
         if tag.eq_ignore_ascii_case(b"br") {
-            segs.push(Seg::Break);
-            *pending_space = false;
+            self.push_seg(flow, Seg::Break);
+            flow.pending_space = false;
             return;
         }
         if tag.eq_ignore_ascii_case(b"img") {
-            segs.push(Seg::Image { node, link });
-            *pending_space = false;
+            self.push_seg(flow, Seg::Image { node, link });
+            flow.pending_space = false;
             return;
         }
         if style.display == Display::Field {
-            segs.push(Seg::Field { node, link });
-            *pending_space = false;
+            self.push_seg(flow, Seg::Field { node, link });
+            flow.pending_space = false;
             return;
         }
         if style.preformatted {
@@ -946,9 +974,9 @@ impl<'a, 's> Builder<'a, 's> {
             while let Some(id) = child {
                 let is_text = self.dom.node(id).is_text();
                 if is_text {
-                    self.collect_preformatted(id, &style, link, segs);
+                    self.collect_preformatted(id, &style, link, flow);
                 } else {
-                    self.collect_inline(id, &style, link, segs, pending_space);
+                    self.collect_inline(id, &style, link, flow);
                 }
                 child = self.dom.next_sibling(id);
             }
@@ -958,9 +986,9 @@ impl<'a, 's> Builder<'a, 's> {
         while let Some(id) = child {
             let is_text = self.dom.node(id).is_text();
             if is_text {
-                self.collect_text(id, &style, link, segs, pending_space);
+                self.collect_text(id, &style, link, flow);
             } else {
-                self.collect_inline(id, &style, link, segs, pending_space);
+                self.collect_inline(id, &style, link, flow);
             }
             child = self.dom.next_sibling(id);
         }
@@ -972,24 +1000,17 @@ impl<'a, 's> Builder<'a, 's> {
         // "RustMicrokernel". Owing the space on both ends of the element makes
         // the boundary itself the separator, which is what the reader path
         // already does.
-        *pending_space = true;
+        flow.pending_space = true;
     }
 
-    fn collect_text(
-        &mut self,
-        node: NodeId,
-        style: &BoxStyle,
-        link: u8,
-        segs: &mut Segs,
-        pending_space: &mut bool,
-    ) {
+    fn collect_text(&mut self, node: NodeId, style: &BoxStyle, link: u8, flow: &mut Flow) {
         let text_ref = self.dom.node(node).text;
         let bytes = text_ref.get(self.dom);
         if bytes.is_empty() {
             return;
         }
         if style.preformatted {
-            self.collect_preformatted(node, style, link, segs);
+            self.collect_preformatted(node, style, link, flow);
             return;
         }
         let mut i = 0usize;
@@ -997,8 +1018,8 @@ impl<'a, 's> Builder<'a, 's> {
         while i < n {
             let b = bytes[i];
             if is_html_space(b) {
-                if !segs.is_empty() {
-                    *pending_space = true;
+                if !self.segs.is_empty() {
+                    flow.pending_space = true;
                 }
                 i += 1;
                 continue;
@@ -1011,76 +1032,90 @@ impl<'a, 's> Builder<'a, 's> {
                 start: text_ref.start + start as u32,
                 len: (i - start).min(u16::MAX as usize) as u16,
             };
-            let space_before = *pending_space && !segs.is_empty();
-            *pending_space = false;
-            segs.push(Seg::Word {
-                text: word,
-                scale: style.scale,
-                bold: style.bold,
-                color: style.css.color,
-                has_color: style.css.has_color,
-                space_before,
-                link,
-            });
+            let space_before = flow.pending_space && !self.segs.is_empty();
+            flow.pending_space = false;
+            self.push_seg(
+                flow,
+                Seg::Word {
+                    text: word,
+                    scale: style.scale,
+                    bold: style.bold,
+                    color: style.css.color,
+                    has_color: style.css.has_color,
+                    space_before,
+                    link,
+                },
+            );
         }
     }
 
-    fn collect_preformatted(&mut self, node: NodeId, style: &BoxStyle, link: u8, segs: &mut Segs) {
+    fn collect_preformatted(&mut self, node: NodeId, style: &BoxStyle, link: u8, flow: &mut Flow) {
         let text_ref = self.dom.node(node).text;
         let bytes = text_ref.get(self.dom);
         let mut start = 0usize;
         for (index, &b) in bytes.iter().enumerate() {
             if b == b'\n' {
                 if index > start {
-                    segs.push(Seg::Word {
-                        text: StrRef {
-                            start: text_ref.start + start as u32,
-                            len: (index - start).min(u16::MAX as usize) as u16,
+                    self.push_seg(
+                        flow,
+                        Seg::Word {
+                            text: StrRef {
+                                start: text_ref.start + start as u32,
+                                len: (index - start).min(u16::MAX as usize) as u16,
+                            },
+                            scale: style.scale,
+                            bold: style.bold,
+                            color: style.css.color,
+                            has_color: style.css.has_color,
+                            space_before: false,
+                            link,
                         },
-                        scale: style.scale,
-                        bold: style.bold,
-                        color: style.css.color,
-                        has_color: style.css.has_color,
-                        space_before: false,
-                        link,
-                    });
+                    );
                 }
-                segs.push(Seg::Break);
+                self.push_seg(flow, Seg::Break);
                 start = index + 1;
             }
         }
         if start < bytes.len() {
-            segs.push(Seg::Word {
-                text: StrRef {
-                    start: text_ref.start + start as u32,
-                    len: (bytes.len() - start).min(u16::MAX as usize) as u16,
+            self.push_seg(
+                flow,
+                Seg::Word {
+                    text: StrRef {
+                        start: text_ref.start + start as u32,
+                        len: (bytes.len() - start).min(u16::MAX as usize) as u16,
+                    },
+                    scale: style.scale,
+                    bold: style.bold,
+                    color: style.css.color,
+                    has_color: style.css.has_color,
+                    space_before: false,
+                    link,
                 },
-                scale: style.scale,
-                bold: style.bold,
-                color: style.css.color,
-                has_color: style.css.has_color,
-                space_before: false,
-                link,
-            });
+            );
         }
     }
 
     /// Places collected inline segments into lines and clears the list.
-    fn flush_inline(&mut self, segs: &mut Segs, x: i32, y: &mut i32, width: usize) -> i32 {
-        if segs.is_empty() {
-            return *y;
+    ///
+    /// WHY this is the only place the line cursor moves: a collector that runs
+    /// out of room mid-paragraph calls it, and the next collection resumes from
+    /// the line this one ended, so a paragraph of any length flows.
+    fn flush_inline(&mut self, flow: &mut Flow) -> i32 {
+        if self.segs.is_empty() {
+            return flow.y;
         }
         let dom = self.dom;
-        let left = x;
-        let right = x + width as i32;
+        let width = flow.width;
+        let left = flow.x;
+        let right = flow.x + width as i32;
         let mut line_x = left;
-        let mut line_y = *y;
+        let mut line_y = flow.y;
         let mut line_h = 0i32;
         let mut emitted = false;
 
         let mut index = 0usize;
-        while index < segs.len {
-            let seg = segs.items[index];
+        while index < self.segs.len {
+            let seg = self.segs.items[index];
             index += 1;
             match seg {
                 Seg::Break => {
@@ -1244,9 +1279,12 @@ impl<'a, 's> Builder<'a, 's> {
                 }
             }
         }
-        segs.clear();
-        *y = if emitted { line_y + line_h.max(1) } else { *y };
-        *y
+        self.segs.clear();
+        if emitted {
+            flow.y = line_y + line_h.max(1);
+        }
+        flow.pending_space = false;
+        flow.y
     }
 
     fn push_marker(&mut self, marker: Marker, x: i32, y: i32, style: &BoxStyle) {
@@ -1545,8 +1583,20 @@ impl<'a, 's> Builder<'a, 's> {
         self.out.link_count += 1;
     }
 
-    fn note_overflow(&mut self, segs: &Segs) {
-        if segs.overflowed {
+    /// Adds one segment, laying out what is already buffered when the buffer
+    /// is full. This is what lets a paragraph of any length flow.
+    fn push_seg(&mut self, flow: &mut Flow, seg: Seg) {
+        if self.segs.is_full() {
+            self.flush_inline(flow);
+        }
+        self.segs.push(seg);
+    }
+
+    /// Reports a segment the list still could not hold. The flush above makes
+    /// this unreachable today; it stays because a dropped segment is a page
+    /// quietly missing words, and that is not something to discover later.
+    fn note_overflow(&mut self) {
+        if self.segs.overflowed {
             self.note(OVERFLOW_SEGMENTS);
         }
     }
@@ -2114,6 +2164,54 @@ mod tests {
         assert!(overflow_note(out.overflow).contains("nests deeper"));
     }
 
+    /// WHY: a paragraph longer than the segment buffer used to lose every word
+    /// after the last one the buffer could hold, which is what a real article
+    /// is. The buffer is emptied as it fills now, so the paragraph flows to its
+    /// end and nothing is reported.
+    #[test]
+    fn a_paragraph_longer_than_the_segment_buffer_flows_to_the_end() {
+        let words = MAX_SEGMENTS * 4;
+        let mut html = std::vec::Vec::new();
+        html.extend_from_slice(b"<p>");
+        for index in 0..words {
+            if index > 0 {
+                html.push(b' ');
+            }
+            html.extend_from_slice(b"word");
+        }
+        html.extend_from_slice(b"</p>");
+        let (dom, out) = layout_html(&html, 300);
+        assert_eq!(out.overflow, 0, "reported: {}", overflow_note(out.overflow));
+        let laid_out = out
+            .runs
+            .iter()
+            .take(out.run_count)
+            .filter(|r| run_text(&dom, r) == b"word")
+            .count();
+        assert_eq!(laid_out, words);
+        let first = out.runs.iter().take(out.run_count).next().unwrap();
+        let last = out.runs.iter().take(out.run_count).last().unwrap();
+        assert!(last.y > first.y, "the paragraph never wrapped");
+    }
+
+    /// WHY: component markup nests twenty and thirty levels deep, and the bound
+    /// this engine held itself to was sixteen. It went up because the segment
+    /// list stopped costing a buffer at every level, not because the stack grew.
+    #[test]
+    fn a_page_nested_past_the_previous_bound_is_laid_out() {
+        let mut html = std::vec::Vec::new();
+        // A block level costs two frames, the element and its child walk, so
+        // twelve divs sit past the sixteen this engine used to hold itself to.
+        for _ in 0..MAX_LAYOUT_DEPTH / 2 - 4 {
+            html.extend_from_slice(b"<div>");
+        }
+        html.extend_from_slice(b"<p>deep</p>");
+        let (dom, out) = layout_html(&html, 300);
+        assert_eq!(out.overflow, 0, "reported: {}", overflow_note(out.overflow));
+        let text = all_text(&dom, &out);
+        assert!(text.windows(4).any(|w| w == b"deep"));
+    }
+
     #[test]
     fn a_document_that_ran_out_is_reported_by_the_display_list() {
         let mut dom = Dom::new();
@@ -2175,3 +2273,4 @@ mod tests {
         }
     }
 }
+
