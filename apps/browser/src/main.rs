@@ -4690,6 +4690,10 @@ struct Frame {
     err_y: usize,
     icon_cy: usize,
     is_home: bool,
+    /// The band's clock, as the platform's RTC answered it for this frame.
+    clock: [u8; 5],
+    /// Whether that answer came at all, and so whether the lane is inked.
+    clock_ok: bool,
 }
 
 impl Frame {
@@ -4718,7 +4722,20 @@ impl Frame {
             err_y: 0,
             icon_cy: 0,
             is_home: app.status == PageStatus::Blank,
+            clock: [b' '; 5],
+            clock_ok: false,
         };
+
+        // WHY the clock is read once for the frame and carried in it: the
+        // renderer answers one pixel at a time, and a band that asked the RTC
+        // for each of the thirty-four thousand pixels it covers would spend the
+        // whole frame in syscalls. WHY the read is not hoisted further: the
+        // frame is built once per repaint, so the clock the band prints is the
+        // one the platform gave for this frame.
+        if let Some(now) = std::rtc::Reading::now() {
+            f.clock = now.clock_text();
+            f.clock_ok = true;
+        }
 
         let src: &[u8] = if app.address_len > 0 {
             &app.address[..app.address_len]
@@ -7965,7 +7982,17 @@ fn get_browser_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
 /// to be renderable on its own.
 fn get_browser_pixel_content(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
     if y < STATUS_H {
-        return THEME.surface;
+        // WHY the band is the SDK's and not the browser's own: the clock's
+        // place, its type rung and the three instrument marks have to be the
+        // same on every screen or they are not chrome. This app had forty-eight
+        // blank rows here, which read as a layout fault rather than as the
+        // platform's inset, and left the person using the browser with no way
+        // to see the time.
+        let band = components::StatusBar::new(W);
+        let clock = if f.clock_ok { Some(&f.clock[..]) } else { None };
+        return band
+            .pixel(x, y, clock, &components::Instruments::unmeasured(), &THEME)
+            .unwrap_or(THEME.surface);
     }
     if y < TOOLBAR_Y1 {
         return toolbar_pixel(x, y, app, f);

@@ -1406,6 +1406,18 @@ pub fn spawn_app_browser(id_security: TaskId) -> TaskId {
         rights: Rights::INVOKE,
         object_id: 0,
     }).ok();
+    // WHY the clock: the band across the top of the screen belongs to the
+    // platform, but on this kernel the app that owns the screen is the one that
+    // paints it, so a browser drawing the band has to read the clock to fill
+    // its lane. Read-only, and the same narrow authority the launcher, Notes
+    // and Calendar already hold; with it the lane shows the time the platform
+    // reported, and without it the band is drawn with the lane left blank.
+    caps.insert(Capability {
+        id: CapabilityId(2313),
+        cap_type: CapabilityType::RealtimeClockRead,
+        rights: Rights::READ,
+        object_id: 0,
+    }).ok();
     let id = spawn_user_process_with_parent(
         "app_browser",
         APP_BROWSER_ELF,

@@ -185,3 +185,44 @@ def test_a_local_failure_is_reported_as_the_failure_that_happened():
         "the local read discards its error, so a refused read is reported as an empty file"
     )
     assert "LocalFailure::ReadRefused" in code, "a refused local read is not distinguished"
+
+
+def _one_fn(source: str, header: str) -> str:
+    """The body of one function, from its `fn` line to the next one.
+
+    WHY: several of these rules are about where a call happens rather than
+    whether it happens at all, and scanning the whole file cannot tell a read
+    taken once per frame from one taken once per pixel.
+    """
+    start = source.index(header)
+    end = source.find("\nfn ", start + 1)
+    return source[start:] if end == -1 else source[start:end]
+
+
+def test_the_top_band_is_the_platforms_and_its_clock_is_read_once_a_frame():
+    """The browser used to paint forty-eight blank rows above its toolbar.
+
+    WHY this matters: a blank inset reads as a layout fault, and it left the
+    person using the browser with no way to see the time. The band belongs to
+    the platform, so the app draws it through the SDK's component rather than
+    keeping its own copy of the clock's place and the glyphs' geometry -- the
+    copy that let four screens disagree about one bar.
+
+    The second half is the cost of doing it: the renderer answers one pixel at
+    a time, so a band that asked the RTC where it paints would take thousands
+    of system calls to draw a frame. The reading is taken once, in the frame.
+    """
+    source = read("apps/browser/src/main.rs")
+    code = _code_only(source)
+
+    band = _one_fn(code, "fn get_browser_pixel_content")
+    assert "components::StatusBar::new(W)" in band
+    assert "components::Instruments::unmeasured()" in band
+    assert "if y < STATUS_H {" in band
+
+    frame = _one_fn(code, "fn build(app: &BrowserApp)")
+    assert "std::rtc::Reading::now()" in frame, "the frame carries no clock reading"
+    assert "now.clock_text()" in frame
+    assert "rtc::Reading" not in band, (
+        "the per-pixel renderer reads the clock, so one frame costs a syscall per pixel"
+    )
