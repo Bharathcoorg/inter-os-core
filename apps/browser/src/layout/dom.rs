@@ -1337,6 +1337,15 @@ mod tests {
     }
 
     #[test]
+    fn script_tag_retains_type_attribute() {
+        let mut dom = Dom::new();
+        dom.parse(b"<script type=\"application/ld+json\">{\"key\":\"value\"}</script>");
+        let script = find(&dom, b"script").expect("script element must be captured into DOM");
+        assert_eq!(dom.attr(script, b"type"), Some(&b"application/ld+json"[..]));
+        assert_eq!(dom.script_body(script), b"{\"key\":\"value\"}");
+    }
+
+    #[test]
     fn a_textarea_body_is_text_with_markup_inside_it() {
         let mut dom = Dom::new();
         dom.parse(b"<textarea><b>not bold</b></textarea>");

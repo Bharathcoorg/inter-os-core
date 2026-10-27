@@ -2722,7 +2722,17 @@ impl BrowserApp {
         let mut script_count = 0usize;
 
         for id in 0..node_count as layout::NodeId {
-            if dom.node(id).is_element() && dom.tag(id) == b"script" {
+            if dom.node(id).is_element() && dom.tag(id).eq_ignore_ascii_case(b"script") {
+                if let Some(t) = dom.attr(id, b"type") {
+                    let is_js = t.eq_ignore_ascii_case(b"text/javascript")
+                        || t.eq_ignore_ascii_case(b"application/javascript")
+                        || t.eq_ignore_ascii_case(b"text/ecmascript")
+                        || t.eq_ignore_ascii_case(b"application/ecmascript")
+                        || t.eq_ignore_ascii_case(b"module");
+                    if !is_js {
+                        continue;
+                    }
+                }
                 if script_count < script_nodes.len() {
                     script_nodes[script_count] = id;
                     script_count += 1;
@@ -3985,6 +3995,8 @@ impl BrowserApp {
         self.page_source_len = 0;
         self.html_view = false;
         self.field_focus = NO_FIELD;
+        self.address_focused = false;
+        self.select_all = false;
         // A submitted body belongs to this navigation only. Reading and
         // clearing it here keeps a later navigation from resending it.
         let mut post_len = self.form_post_len;
