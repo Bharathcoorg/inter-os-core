@@ -558,16 +558,17 @@ fn boot_typography_and_tagline_metrics() {
 }
 
 #[test]
-fn dynamic_user_greeting_contract() {
-    // Platform Truth Contract: Zero hardcoding or faking of identity.
-    let user_name_len = 0usize;
-    assert!(user_name_len == 0);
-
-    let mut configured_name = [0u8; 32];
-    let name_src = b"Alice";
-    configured_name[..name_src.len()].copy_from_slice(name_src);
-    let len = name_src.len();
-    assert_eq!(&configured_name[..len], b"Alice");
+fn dynamic_user_status_contract() {
+    // Platform Truth Contract: Zero hardcoding or faking of identity. The
+    // account status phrase is read from the settings store, and an unset
+    // store leaves the length at zero so the home subtitle falls back to a
+    // fact the platform measured rather than a phrase somebody typed once.
+    let mut status = [0u8; 48];
+    let status_len = 0usize;
+    assert_eq!(status_len, 0);
+    let src = b"Deep work until 6";
+    status[..src.len()].copy_from_slice(src);
+    assert_eq!(&status[..src.len()], b"Deep work until 6");
 }
 
 

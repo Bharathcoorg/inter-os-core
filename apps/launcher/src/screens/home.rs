@@ -787,21 +787,21 @@ fn build(state: &LauncherState) -> Paint {
     let title_scale = type_scale::HEADING;
     let caption_scale = type_scale::SECTION;
 
-    let (day_part, day_part_comma): (&[u8], &[u8]) = if !state.clock_source_ok {
-        (b"Welcome", b"Welcome,")
+    let day_part: &[u8] = if !state.clock_source_ok {
+        b"Welcome"
     } else if state.clock_time[0].is_ascii_digit() && state.clock_time[1].is_ascii_digit() {
         let hour = (state.clock_time[0] - b'0') * 10 + (state.clock_time[1] - b'0');
         if (5..12).contains(&hour) {
-            (b"Good morning", b"Good morning,")
+            b"Good morning"
         } else if (12..17).contains(&hour) {
-            (b"Good afternoon", b"Good afternoon,")
+            b"Good afternoon"
         } else if (17..22).contains(&hour) {
-            (b"Good evening", b"Good evening,")
+            b"Good evening"
         } else {
-            (b"Good night", b"Good night,")
+            b"Good night"
         }
     } else {
-        (b"Welcome", b"Welcome,")
+        b"Welcome"
     };
 
     // Dynamic Contextual Subtitle: Platform Truth Contract (no hardcoded/fictitious state).
@@ -847,21 +847,11 @@ fn build(state: &LauncherState) -> Paint {
         b"System ready"
     };
 
-    let greeting = if state.user_name_len > 0 {
-        let l1_y = f.greeting.y + 4;
-        let l2_y = f.greeting.y + 26;
-        // WHY +104 and not +70: the name is drawn at HEADING, whose descender
-        // reaches ~105 px below the line origin. A subtitle at +70 started inside
-        // that descender, so the two lines touched as soon as the cap ladder grew.
-        let l3_y = f.greeting.y + 104;
-        [
-            Run::whole(f.greeting.x, l1_y, caption_scale, day_part_comma, 0),
-            Run::whole(f.greeting.x, l2_y, title_scale, &state.user_name[..state.user_name_len], 0),
-            Run::whole(f.greeting.x, l3_y, caption_scale, subtitle_bytes, 0),
-        ]
-    } else {
-        // Platform Truth Contract: Zero hardcoded or fake person name.
-        // Render prominent time-of-day greeting as title, followed by dynamic subtitle.
+    // WHY the greeting never carries the account name: the home screen is the
+    // one surface every glance lands on, and a personal name set in Settings
+    // for the account card should not become the headline of the device. The
+    // time of day is the fact worth the largest type on the surface.
+    let greeting = {
         let l1_y = f.greeting.y + 8;
         // WHY +86 and not +64: HEADING's line box carries the glyphs down to
         // ~+88 from the run origin (cap 44 plus descender). The subtitle at +64

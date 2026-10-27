@@ -328,16 +328,13 @@ pub struct LauncherState {
     pub auth_error: bool,
     pub pin_error: u8,
     pub pin_setup_mode: bool,
+    /// Dynamic user status phrase read from the settings store ("user.status" / "owner.status").
+    pub user_status: [u8; 48],
+    pub user_status_len: usize,
     /// Contextual task 0 on the HomeScreen Today card. WHY carried as state: the
     /// tap handler used to log "toggled" without flipping anything, so the log
     /// described a change that never happened. The log below fires only because
     /// this bit actually moved.
-    /// Dynamic user display name read from the settings store. Zero hardcoding or faking.
-    pub user_name: [u8; 32],
-    pub user_name_len: usize,
-    /// Dynamic user status phrase read from the settings store ("user.status" / "owner.status").
-    pub user_status: [u8; 48],
-    pub user_status_len: usize,
     pub task0_done: bool,
     pub wifi_enabled: bool,
     pub bluetooth_enabled: bool,
@@ -411,8 +408,6 @@ impl LauncherState {
             auth_error: false,
             pin_error: 0,
             pin_setup_mode: false,
-            user_name: [0u8; 32],
-            user_name_len: 0,
             user_status: [0u8; 48],
             user_status_len: 0,
             task0_done: false,
@@ -732,38 +727,12 @@ fn refresh_wallpaper_document(state: &mut LauncherState) {
     }
 }
 
-/// Reads the owner/user display name dynamically from the settings store.
+/// Reads the owner's status line dynamically from the settings store.
 ///
-/// WHY: The Platform Truth Contract. Zero hardcoding or faking of user identity.
-/// If the owner configured "user.name" or "owner.name", it is loaded dynamically
-/// through capability slot 3. When empty or unset, `user_name_len` remains 0 so
-/// the home screen greeting renders a clean impersonal greeting without a mock name.
+/// WHY: The Platform Truth Contract. Zero hardcoding or faking of identity.
+/// When "user.status" is unset, `user_status_len` stays 0 and the home
+/// subtitle falls back to a fact the platform actually measured.
 fn refresh_user_profile(state: &mut LauncherState) {
-    let mut buf = [0u8; 32];
-    state.user_name_len = 0;
-    for key in ["user.name", "owner.name"] {
-        if let Some(n) = read_setting(key, &mut buf) {
-            if n > 0 && n <= buf.len() {
-                let raw = &buf[..n];
-                let start = raw.iter().position(|b| *b != b' ' && *b != b'\n' && *b != b'\r');
-                if let Some(start) = start {
-                    let end = raw[start..]
-                        .iter()
-                        .rposition(|b| *b != b' ' && *b != b'\n' && *b != b'\r')
-                        .map(|p| start + p + 1)
-                        .unwrap_or(start);
-                    let trimmed = &raw[start..end];
-                    if !trimmed.is_empty() {
-                        let copy_len = trimmed.len().min(32);
-                        state.user_name[..copy_len].copy_from_slice(&trimmed[..copy_len]);
-                        state.user_name_len = copy_len;
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
     let mut status_buf = [0u8; 48];
     state.user_status_len = 0;
     for key in ["user.status", "owner.status"] {
