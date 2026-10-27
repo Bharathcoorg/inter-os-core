@@ -3,9 +3,9 @@
 //! Production-grade widget dashboard:
 //! - Uniform system status bar (canonical clock and hardware telemetry icons).
 //! - Large, bold flagship typography across all widgets and cards.
-//! - Storage & VFS widget: real persistent block disk (6.00 GB) mounted at /data.
-//! - Memory & DVFS widget: real physical RAM (13.2 GB) and dynamic DVFS power governor.
-//! - Master Audio & Sound widget: real volume percentage, PCM buffer status.
+//! - Storage & VFS widget: the block capacity the kernel reports, or no figure.
+//! - Physical Memory widget: RAM totals read from the kernel's own counters.
+//! - Master Audio widget: the master level the mixer register answers with.
 //! - Calendar & Clock widget: real kernel RTC date line and time, honest event status.
 //! - Security Architecture widget: zero ambient authority, isolated capability broker.
 //! - System Readings dashboard cards with large legible type and zero descender clipping.
@@ -21,6 +21,23 @@ use launcher::theme::{type_scale, radius, Theme, SCREEN_HEIGHT, SCREEN_WIDTH, ST
 const THEME: Theme = launcher::theme::SHELL;
 
 const HOME_PILL: Rect = Rect::new(SCREEN_WIDTH / 2 - 90, SCREEN_HEIGHT - 20, 180, 5);
+
+/// The cards whose figures are device readings.
+///
+/// WHY they are consts and not literals inside the painter: the shell repaints a
+/// band named by the screen that draws it, and a band written down separately
+/// from the rows it covers is a band that can drift away from them.
+const STORAGE_ROW: Rect = Rect::new(40, 138, 305, 160);
+const RAM_ROW: Rect = Rect::new(375, 138, 305, 160);
+const AUDIO_ROW: Rect = Rect::new(40, 312, 640, 120);
+const CAL_ROW: Rect = Rect::new(40, 446, 305, 160);
+
+/// First row the dashboard draws a queried figure into, and the row after the
+/// last one. Covers the calendar card because its date line is read from the
+/// RTC rather than written here.
+pub const fn readings_band() -> (usize, usize) {
+    (STORAGE_ROW.y, CAL_ROW.y + CAL_ROW.h)
+}
 
 // -----------------------------------------------------------------------------
 // Rounded Geometry Helpers
@@ -312,6 +329,38 @@ struct WidgetsPlan {
     home_pill: Rect,
 }
 
+/// Appends `extra` to a label buffer, stopping at its end rather than wrapping.
+fn push_text(out: &mut [u8], at: usize, extra: &[u8]) -> usize {
+    let mut cur = at;
+    for &b in extra {
+        if cur < out.len() {
+            out[cur] = b;
+            cur += 1;
+        }
+    }
+    cur
+}
+
+/// A byte count written with the binary unit that fits it.
+///
+/// WHY the unit is spelled GiB and MiB: the kernel answers these queries in
+/// bytes, and a line that said "GB" over a 1024-based divisor would report one
+/// number and name another.
+fn push_capacity(out: &mut [u8], bytes: u64) -> usize {
+    const MIB: u64 = 1024 * 1024;
+    const GIB: u64 = 1024 * MIB;
+    if bytes >= GIB {
+        let hundredths = (bytes % GIB) * 100 / GIB;
+        let mut n = push_dec(out, 0, bytes / GIB);
+        n = push_text(out, n, b".");
+        n = push_text(out, n, &[(b'0' + (hundredths / 10) as u8), (b'0' + (hundredths % 10) as u8)]);
+        push_text(out, n, b" GiB")
+    } else {
+        let n = push_dec(out, 0, bytes / MIB);
+        push_text(out, n, b" MiB")
+    }
+}
+
 fn push_dec(out: &mut [u8], at: usize, mut v: u64) -> usize {
     if v == 0 {
         if at < out.len() {
@@ -354,17 +403,23 @@ fn build_widgets_frame(state: &LauncherState) -> WidgetsPlan {
     };
 
     // 2. Header
-    // Generous vertical breathing room: title at y=60, subtitle at y=102
+    // WHY the subtitle sits a whole title descender below the rung: the page
+    // title is a cap-height label whose 'g' drops under its own box, and at the
+    // old y the subtitle's ink began one pixel below that tail, so the two lines
+    // read as one smeared row on the device.
     let page_title = LabelRun::new(40, 60, type_scale::TITLE, b"Live Widgets", theme.on_surface);
     let page_subtitle = LabelRun::new(
         40,
-        102,
+        112,
         type_scale::CAPTION,
         b"Real-time hardware telemetry & system status",
         theme.on_surface_variant,
     );
 
-    let status_chip_rect = Rect::new(SCREEN_WIDTH - 190, 60, 150, 30);
+    // WHY the chip is as wide as it is: the caption run measures ~135 px and the
+    // old 150 px pill left the label touching its own border, which reads as a
+    // clipped control rather than a status.
+    let status_chip_rect = Rect::new(SCREEN_WIDTH - 214, 60, 174, 30);
     let status_chip_label = LabelRun::centred(
         status_chip_rect.x,
         status_chip_rect.y + 6,
@@ -374,42 +429,103 @@ fn build_widgets_frame(state: &LauncherState) -> WidgetsPlan {
         0xFF10B981, // Emerald green
     );
 
-    // 3. Row 1: Real Storage & Physical Memory (y = 138..298, height 160)
-    let storage_rect = Rect::new(40, 138, 305, 160);
+    // 3. Row 1: Storage & Physical Memory (y = 138..298, height 160)
+    //
+    // WHY both figures are read from the kernel: a capacity is a property of the
+    // machine the guest happens to be running on, and the same image boots with
+    // 1 GiB in Device Studio and with whatever a developer's QEMU line says. The
+    // card printed "6.00 GB" and "13.2 GB" as source literals, so it reported
+    // hardware the device never confirmed.
+    let storage_rect = STORAGE_ROW;
     let storage_label = LabelRun::new(storage_rect.x + 20, storage_rect.y + 16, type_scale::CAPTION, b"Storage & VFS", theme.on_surface_variant);
-    let storage_capacity = LabelRun::new(storage_rect.x + 20, storage_rect.y + 38, type_scale::TITLE, b"6.00 GB", theme.on_surface);
-    let storage_mount = LabelRun::new(storage_rect.x + 20, storage_rect.y + 90, type_scale::BODY, b"Persistent Block Disk", theme.on_surface);
-    let storage_detail = LabelRun::new(storage_rect.x + 20, storage_rect.y + 124, type_scale::CAPTION, b"Mounted at /data", theme.on_surface_variant);
+    let mut cap_buf = [0u8; 24];
+    let cap_len = if state.storage_state_valid {
+        push_capacity(&mut cap_buf, state.storage_total_bytes)
+    } else {
+        push_text(&mut cap_buf, 0, b"Unavailable")
+    };
+    let storage_ink = if state.storage_state_valid { theme.on_surface } else { theme.on_surface_variant };
+    let storage_capacity = LabelRun::new(storage_rect.x + 20, storage_rect.y + 38, type_scale::TITLE, &cap_buf[..cap_len], storage_ink);
+    let storage_mount = if state.storage_state_valid {
+        LabelRun::new(storage_rect.x + 20, storage_rect.y + 90, type_scale::BODY, b"Persistent Block Disk", theme.on_surface)
+    } else {
+        LabelRun::new(storage_rect.x + 20, storage_rect.y + 90, type_scale::BODY, b"No block device bound", theme.on_surface_variant)
+    };
+    let storage_detail = LabelRun::new(storage_rect.x + 20, storage_rect.y + 124, type_scale::CAPTION, b"/data, /user, /storage persist", theme.on_surface_variant);
 
-    let ram_rect = Rect::new(375, 138, 305, 160);
+    let ram_rect = RAM_ROW;
     let ram_label = LabelRun::new(ram_rect.x + 20, ram_rect.y + 16, type_scale::CAPTION, b"Physical Memory", theme.on_surface_variant);
-    let ram_total = LabelRun::new(ram_rect.x + 20, ram_rect.y + 38, type_scale::TITLE, b"13.2 GB", 0xFF10B981);
-    let ram_mmu = LabelRun::new(ram_rect.x + 20, ram_rect.y + 90, type_scale::BODY, b"Dynamic DVFS Active", theme.on_surface);
+    let mut ram_buf = [0u8; 24];
+    let ram_len = if state.memory_state_valid {
+        push_capacity(&mut ram_buf, state.memory_total_bytes)
+    } else {
+        push_text(&mut ram_buf, 0, b"Unavailable")
+    };
+    let ram_total = LabelRun::new(
+        ram_rect.x + 20,
+        ram_rect.y + 38,
+        type_scale::TITLE,
+        &ram_buf[..ram_len],
+        if state.memory_state_valid { 0xFF10B981 } else { theme.on_surface_variant },
+    );
+    // WHY the second line is the used counter and not a governor claim: nothing
+    // in this kernel feeds the DVFS governor a load sample and no CPU frequency
+    // is under its control, so "Dynamic DVFS Active" described behaviour the
+    // device does not perform. Bytes in use are measured.
+    let mut used_buf = [0u8; 32];
+    let used_len = if state.memory_state_valid {
+        let n = push_dec(&mut used_buf, 0, state.memory_used_bytes / (1024 * 1024));
+        push_text(&mut used_buf, n, b" MiB in use")
+    } else {
+        push_text(&mut used_buf, 0, b"No counters reported")
+    };
+    let ram_mmu = LabelRun::new(ram_rect.x + 20, ram_rect.y + 90, type_scale::BODY, &used_buf[..used_len], theme.on_surface);
     let ram_detail = LabelRun::new(ram_rect.x + 20, ram_rect.y + 124, type_scale::CAPTION, b"Isolated CR3 Page Tables", theme.on_surface_variant);
 
     // 4. Row 2: Real System Audio & Master Volume (y = 312..432, height 120)
-    let audio_rect = Rect::new(40, 312, 640, 120);
+    //
+    // WHY the device line changes with the reading: the mixer level is the AC'97
+    // master-volume register, so a reading is the only evidence this shell has
+    // that a codec is bound at all. Without one the card says it was not told,
+    // instead of naming a sound device the platform never answered for.
+    let audio_rect = AUDIO_ROW;
     let audio_art_rect = Rect::new(audio_rect.x + 20, audio_rect.y + 16, 44, 44);
     let audio_title = LabelRun::new(audio_rect.x + 76, audio_rect.y + 16, type_scale::BODY, b"Master Audio Output", theme.on_surface);
-    let audio_sublabel = LabelRun::new(audio_rect.x + 76, audio_rect.y + 42, type_scale::CAPTION, b"VirtIO Sound Device (48 kHz PCM)", theme.on_surface_variant);
+    let audio_sublabel = if state.volume_state_valid {
+        LabelRun::new(audio_rect.x + 76, audio_rect.y + 42, type_scale::CAPTION, b"AC'97 codec, 48 kHz PCM", theme.on_surface_variant)
+    } else {
+        LabelRun::new(audio_rect.x + 76, audio_rect.y + 42, type_scale::CAPTION, b"No volume reported by the mixer", theme.on_surface_variant)
+    };
     let audio_gauge_rect = Rect::new(audio_rect.x + 20, audio_rect.y + 74, audio_rect.w - 40, 8);
     let pct = if state.volume_state_valid { state.last_volume_percent as usize } else { 0 };
     let audio_gauge_fill_w = (audio_gauge_rect.w * pct.min(100)) / 100;
 
     let mut vol_buf = [0u8; 32];
-    vol_buf[..8].copy_from_slice(b"Volume: ");
-    let mut vn = 8;
-    vn = push_dec(&mut vol_buf, vn, pct as u64);
-    if vn < vol_buf.len() {
-        vol_buf[vn] = b'%';
-        vn += 1;
-    }
+    let vn = if state.volume_state_valid {
+        vol_buf[..8].copy_from_slice(b"Volume: ");
+        let mut n = 8;
+        n = push_dec(&mut vol_buf, n, pct as u64);
+        if n < vol_buf.len() {
+            vol_buf[n] = b'%';
+            n += 1;
+        }
+        n
+    } else {
+        push_text(&mut vol_buf, 0, b"Volume: not reported")
+    };
     let audio_volume_label = LabelRun::new(audio_rect.x + 20, audio_rect.y + 92, type_scale::CAPTION, &vol_buf[..vn], theme.on_surface_variant);
-    let audio_service_tag = LabelRun::right(audio_rect.x + audio_rect.w - 20, audio_rect.y + 92, type_scale::CAPTION, b"Audio Service Online", 0xFF10B981);
+    let audio_service_tag = if state.volume_state_valid {
+        LabelRun::right(audio_rect.x + audio_rect.w - 20, audio_rect.y + 92, type_scale::CAPTION, b"Mixer register live", 0xFF10B981)
+    } else {
+        LabelRun::right(audio_rect.x + audio_rect.w - 20, audio_rect.y + 92, type_scale::CAPTION, b"Audio unread", theme.on_surface_variant)
+    };
 
-    // 5. Row 3: Real Calendar / RTC & Security (y = 446..606, height 160)
-    let cal_rect = Rect::new(40, 446, 305, 160);
+    // 5. Row 3: Calendar / RTC & Security (y = 446..606, height 160)
+    let cal_rect = CAL_ROW;
     let cal_label = LabelRun::new(cal_rect.x + 20, cal_rect.y + 16, type_scale::CAPTION, b"System Date & Clock", theme.on_surface_variant);
+    // WHY "No clock reading" and not "Clock Synced": the two say opposite things
+    // and the old literal was printed whenever the RTC refused, so the card
+    // claimed a synchronisation this shell had just been told did not happen.
     let date_slice = if state.clock_source_ok && state.date_line[0] != b' ' {
         let mut dlen = 0;
         while dlen < state.date_line.len() && state.date_line[dlen] != 0 {
@@ -417,12 +533,28 @@ fn build_widgets_frame(state: &LauncherState) -> WidgetsPlan {
         }
         &state.date_line[..dlen]
     } else {
-        b"Clock Synced"
+        b"No clock reading"
     };
     let cal_date = LabelRun::new(cal_rect.x + 20, cal_rect.y + 38, type_scale::SECTION, date_slice, theme.on_surface);
     let cal_time_chip = Rect::new(cal_rect.x + 20, cal_rect.y + 88, 110, 24);
-    let cal_time_label = LabelRun::centred(cal_time_chip.x, cal_time_chip.y + 4, cal_time_chip.w, type_scale::CAPTION, b"Hardware RTC", theme.on_surface);
-    let cal_detail = LabelRun::new(cal_rect.x + 20, cal_rect.y + 124, type_scale::CAPTION, b"No scheduled events", theme.on_surface_variant);
+    let cal_time_label = if state.clock_source_ok {
+        LabelRun::centred(cal_time_chip.x, cal_time_chip.y + 4, cal_time_chip.w, type_scale::CAPTION, b"Hardware RTC", theme.on_surface)
+    } else {
+        LabelRun::centred(cal_time_chip.x, cal_time_chip.y + 4, cal_time_chip.w, type_scale::CAPTION, b"RTC refused", theme.on_surface_variant)
+    };
+    // WHY the detail names the reading it shows: the chip above it already says
+    // where the date came from, and a static "No calendar source queried" under
+    // a live "Hardware RTC" chip is the same contradiction the old literals
+    // carried, only inverted.
+    let mut cal_buf = [0u8; 32];
+    let cal_len = if state.clock_source_ok && state.clock_time[0] != 0 {
+        let mut n = push_text(&mut cal_buf, 0, b"Time ");
+        n = push_text(&mut cal_buf, n, &state.clock_time);
+        push_text(&mut cal_buf, n, b" from the RTC")
+    } else {
+        push_text(&mut cal_buf, 0, b"No calendar source queried")
+    };
+    let cal_detail = LabelRun::new(cal_rect.x + 20, cal_rect.y + 124, type_scale::CAPTION, &cal_buf[..cal_len], theme.on_surface_variant);
 
     let vault_rect = Rect::new(375, 446, 305, 160);
     let vault_label = LabelRun::new(vault_rect.x + 20, vault_rect.y + 16, type_scale::CAPTION, b"Security Architecture", theme.on_surface_variant);
@@ -475,14 +607,37 @@ fn build_widgets_frame(state: &LauncherState) -> WidgetsPlan {
             rect: Rect::new(40, 816, card_w, card_h),
             label: LabelRun::new(64, 826, type_scale::BODY, b"Display Compositor", theme.on_surface),
             sublabel: LabelRun::new(64, 852, type_scale::CAPTION, b"Flagship portrait 720x1440", theme.on_surface_variant),
-            value: LabelRun::right(40 + card_w - 24, 836, type_scale::BODY, b"60 FPS Scanout", theme.on_surface),
+            // WHY the panel state and not a frame rate: nothing in this kernel measures
+            // a flip interval - the scanout deadline is computed from a configured
+            // refresh figure - so "60 FPS" reported a number no clock had observed.
+            // Whether the panel has power is something the platform does answer.
+            value: LabelRun::right(
+                40 + card_w - 24,
+                836,
+                type_scale::BODY,
+                if !state.display_power_state_valid {
+                    b"Power state unread"
+                } else if state.display_was_powered {
+                    b"Scanout on"
+                } else {
+                    b"Display off"
+                },
+                if state.display_power_state_valid && state.display_was_powered {
+                    theme.on_surface
+                } else {
+                    theme.on_surface_variant
+                },
+            ),
             accent_color: 0xFF8B5CF6,
         },
         DashboardReadingCard {
             rect: Rect::new(40, 892, card_w, card_h),
             label: LabelRun::new(64, 902, type_scale::BODY, b"Network Connectivity", theme.on_surface),
-            sublabel: LabelRun::new(64, 928, type_scale::CAPTION, b"VirtIO-Net socket transport", theme.on_surface_variant),
-            value: LabelRun::right(40 + card_w - 24, 912, type_scale::BODY, b"10.0.2.15 Online", 0xFF3B82F6),
+            // WHY this names the address as a configuration: the stack sends from a
+            // fixed address and nothing probes a link, so the old line's "Online"
+            // claimed a measured connection that no code here could observe.
+            sublabel: LabelRun::new(64, 928, type_scale::CAPTION, b"E1000 IPv4, addr 10.0.2.15", theme.on_surface_variant),
+            value: LabelRun::right(40 + card_w - 24, 912, type_scale::BODY, b"Link unverified", theme.on_surface_variant),
             accent_color: 0xFF3B82F6,
         },
         DashboardReadingCard {

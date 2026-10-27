@@ -227,6 +227,22 @@ pub struct LauncherState {
     pub last_volume_percent: u8,
     pub volume_state_valid: bool,
     pub volume_hud_until: u64,
+    /// Physical RAM counters as the kernel last reported them.
+    ///
+    /// WHY they are read rather than written: the widgets dashboard used to print
+    /// a literal "13.2 GB" while the guest was booted with 1 GiB, and a size the
+    /// device never reported is fabricated telemetry on the one surface the user
+    /// reads as their own hardware. `memory_state_valid` is the only thing that
+    /// distinguishes "the kernel answered 0" from "the kernel never answered".
+    pub memory_total_bytes: u64,
+    pub memory_used_bytes: u64,
+    pub memory_state_valid: bool,
+    /// Capacity of the block device backing persistent storage, as the kernel
+    /// last reported it. WHY it can be invalid: `sys_storage_query` answers with
+    /// an error when neither ATA slot bound a drive, and the card must then say
+    /// there is no reading instead of repeating a guessed figure.
+    pub storage_total_bytes: u64,
+    pub storage_state_valid: bool,
     pub clock_time: [u8; 5],
     /// True only while `clock_time` and `date_line` hold a reading the kernel
     /// actually returned. WHY it exists: with no RTC authority granted to this
@@ -361,6 +377,11 @@ impl LauncherState {
             last_volume_percent: 0,
             volume_state_valid: false,
             volume_hud_until: 0,
+            memory_total_bytes: 0,
+            memory_used_bytes: 0,
+            memory_state_valid: false,
+            storage_total_bytes: 0,
+            storage_state_valid: false,
             clock_time: [b' '; 5],
             clock_source_ok: false,
             clock_source_reported: false,
@@ -808,6 +829,61 @@ fn refresh_clock(state: &mut LauncherState) {
         None => state.date_line = [b' '; LOCK_DATE_TEXT_LEN],
     }
     state.clock_source_ok = true;
+}
+
+/// Reads the two device figures the widgets dashboard prints as numbers.
+///
+/// Returns whether any reading moved, so the caller can repaint only when the
+/// screen would actually show something different.
+///
+/// WHY these are queried and not written into the painter: RAM size and disk
+/// capacity are properties of the machine the guest is running on, and the same
+/// image boots with 1 GiB in Device Studio and with whatever a developer's QEMU
+/// line says. A literal in the source can only ever be right by luck, and the
+/// dashboard printed "13.2 GB" and "6.00 GB" while the kernel was reporting
+/// neither.
+///
+/// WHY a refused query clears the validity flag instead of leaving the last
+/// number up: the card claims to show what the device has. A number that might
+/// belong to a query that no longer answers is not a reading, so the card falls
+/// back to saying it has none.
+fn refresh_system_readings(state: &mut LauncherState) -> bool {
+    let mut moved = false;
+    match std::memory_telemetry() {
+        Ok(telem) => {
+            if state.memory_total_bytes != telem.total_bytes
+                || state.memory_used_bytes != telem.used_bytes
+                || !state.memory_state_valid
+            {
+                state.memory_total_bytes = telem.total_bytes;
+                state.memory_used_bytes = telem.used_bytes;
+                state.memory_state_valid = true;
+                moved = true;
+            }
+        }
+        Err(_) => {
+            if state.memory_state_valid {
+                state.memory_state_valid = false;
+                moved = true;
+            }
+        }
+    }
+    match std::storage_query() {
+        Ok(bytes) => {
+            if state.storage_total_bytes != bytes || !state.storage_state_valid {
+                state.storage_total_bytes = bytes;
+                state.storage_state_valid = true;
+                moved = true;
+            }
+        }
+        Err(_) => {
+            if state.storage_state_valid {
+                state.storage_state_valid = false;
+                moved = true;
+            }
+        }
+    }
+    moved
 }
 
 /// Days-from-civil (Howard Hinnant's `days_from_civil`), re-expressed here so the
@@ -2333,6 +2409,12 @@ pub enum Dirty {
     /// Quick Controls: the volume row, whose reading and step squares both move
     /// when the mixer is asked for a new level.
     ShadeLevel,
+    /// LiveWidgets: the cards that print a figure queried from the kernel.
+    ///
+    /// WHY they form one band: RAM, disk capacity, the mixer level and the clock
+    /// are read in the same refresh, and a reading that moved moves all of the
+    /// cards drawn from it. The band is read from the screen that paints them.
+    WidgetsReadings,
     /// The union of two regions, as row extents.
     ///
     /// WHY this variant exists at all: `widen` has to be able to answer "these
@@ -2368,6 +2450,7 @@ impl Dirty {
             Dirty::PinEntryStatus => Some(screens::pin::status_band()),
             Dirty::EventsFilter => Some(screens::notifications::filter_band()),
             Dirty::ShadeLevel => Some(screens::quick_controls::level_band()),
+            Dirty::WidgetsReadings => Some(screens::live_widgets::readings_band()),
             Dirty::Band(y0, y1) => Some((y0, y1)),
             Dirty::All => None,
         }
@@ -2416,6 +2499,9 @@ fn present_dirty(surface: u32, state: &LauncherState, dirty: Dirty) {
     }
     if dirty == Dirty::ShadeLevel {
         screens::quick_controls::invalidate_frame_cache();
+    }
+    if dirty == Dirty::WidgetsReadings {
+        screens::live_widgets::invalidate_widgets_cache();
     }
     if dirty == Dirty::All {
         render_view(surface, state);
@@ -2694,6 +2780,7 @@ pub extern "C" fn _start() -> ! {
     refresh_package_catalog(&mut state);
     refresh_runtime_recents(&mut state);
     refresh_clock(&mut state);
+    refresh_system_readings(&mut state);
     refresh_notifications(&mut state);
     // WHY here and not in the loop: the wallpaper belongs to the surface, so it is
     // resolved before the first frame is drawn. A preference stored by the Settings
@@ -2983,7 +3070,22 @@ pub extern "C" fn _start() -> ! {
                 if refresh_ticks % 50 == 0 {
                     capture_foreground(&mut state);
                 }
-                if state.current_view == ViewMode::HomeScreen && state.clock_time != old_clock {
+                // The dashboard's numbers are readings, so the screen that shows
+                // them re-reads them while it is up.
+                //
+                // WHY it is not read once at entry: capacity changes when a disk
+                // is attached or a task dies, and a card that keeps whatever the
+                // entry happened to see is a photograph of the device rather than
+                // a report from it.
+                if state.current_view == ViewMode::LiveWidgets
+                    && refresh_ticks % 10 == 0
+                    && refresh_system_readings(&mut state)
+                {
+                    present_dirty(surface, &state, Dirty::WidgetsReadings);
+                }
+                if matches!(state.current_view, ViewMode::HomeScreen | ViewMode::LiveWidgets)
+                    && state.clock_time != old_clock
+                {
                     render_band(surface, &state, 0, 48);
                     surface_flip_display();
                 }

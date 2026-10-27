@@ -144,3 +144,51 @@ def test_shell_volume_state_starts_unread_not_assumed():
     # volume HUD and the audio widget.
     assert "volume_state_valid: false" in body
     assert "volume_state_valid: true" not in body
+
+
+def test_widgets_dashboard_prints_queried_readings_not_invented_ones():
+    widgets = read("apps/launcher/src/screens/live_widgets.rs")
+    # WHY the absence list is the assertion: every one of these was a painted
+    # label while the card presented it as a reading from the device. The RAM
+    # figure was a literal against a guest booted with 1 GiB, "60 FPS" named a
+    # refresh the kernel only ever configures and never measures, "Dynamic DVFS
+    # Active" described a governor nothing feeds a load sample to, and the sound
+    # line named a controller this kernel has no driver for (the PCM path is
+    # AC'97). Matched as label literals so a comment may still name them.
+    for claim in (
+        'b"13.2 GB"',
+        'b"6.00 GB"',
+        'b"60 FPS Scanout"',
+        'b"Dynamic DVFS Active"',
+        'b"VirtIO Sound Device',
+        'b"10.0.2.15 Online"',
+        'b"Clock Synced"',
+        'b"Audio Service Online"',
+    ):
+        assert claim not in widgets
+    # The figures that remain are read: capacity and RAM come from the kernel,
+    # and the audio line changes with whether the mixer answered at all.
+    assert "push_capacity(&mut cap_buf, state.storage_total_bytes)" in widgets
+    assert "push_capacity(&mut ram_buf, state.memory_total_bytes)" in widgets
+    assert 'b"No counters reported"' in widgets
+    assert 'b"Volume: not reported"' in widgets
+    assert "b\"AC'97 codec, 48 kHz PCM\"" in widgets
+
+
+def test_shell_reads_ram_and_capacity_and_repaints_the_cards_they_move():
+    launcher = read("apps/launcher/src/main.rs")
+    assert "fn refresh_system_readings(state: &mut LauncherState) -> bool" in launcher
+    assert "std::memory_telemetry()" in launcher
+    assert "std::storage_query()" in launcher
+    # A refused query must not leave the last number standing, and the cards that
+    # did move get repainted by a band the painter itself names.
+    assert "!state.memory_state_valid" in launcher
+    assert "Dirty::WidgetsReadings => Some(screens::live_widgets::readings_band())" in launcher
+    assert "screens::live_widgets::invalidate_widgets_cache()" in launcher
+    widgets = read("apps/launcher/src/screens/live_widgets.rs")
+    # One geometry owner for the band and the cards inside it: a band retyped
+    # away from the rows it covers is how a reading ends up stale on screen.
+    assert "pub const fn readings_band() -> (usize, usize)" in widgets
+    assert "(STORAGE_ROW.y, CAL_ROW.y + CAL_ROW.h)" in widgets
+    assert "let cal_rect = CAL_ROW;" in widgets
+
