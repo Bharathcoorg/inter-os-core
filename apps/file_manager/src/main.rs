@@ -71,6 +71,16 @@ const CHUNK: usize = 4096;
 /// answers that no installed package declared the document's type.
 const OPEN_WITH_LABEL: &[u8] = b"Open with: ";
 const NO_HANDLER_NOTICE: &[u8] = b"no app handles this file";
+/// Shown when the registry named a handler but the platform refused to launch
+/// it. Saying "no app handles this file" there would be false.
+const HANDLER_REFUSED_NOTICE: &[u8] = b"the app for this file could not launch";
+
+/// What happened when a document was handed to its registered handler.
+enum OpenOutcome {
+    Opened,
+    NoHandler,
+    Refused,
+}
 
 // -----------------------------------------------------------------------------
 // Header geometry - single source of truth for drawing and hit-testing
@@ -578,20 +588,10 @@ impl FileManagerApp {
     pub fn record_probe(&mut self, result: Result<usize, i64>) {
         let mut buf = [0u8; 40];
         let n = match result {
-            Ok(bytes) => {
-                let prefix = b"received ";
-                let p = prefix.len();
-                buf[..p].copy_from_slice(prefix);
-                let mut n = p + fmt_u64(bytes as u64, &mut buf[p..]);
-                let suffix = b" bytes";
-                for &b in suffix {
-                    if n < buf.len() {
-                        buf[n] = b;
-                        n += 1;
-                    }
-                }
-                n
-            }
+            // The header summarizes what the folder holds, not how many
+            // bytes the listing answer happened to occupy. The entry count
+            // is written once the answer has been parsed.
+            Ok(_) => 0,
             Err(code) => {
                 self.listing_state = ListingState::Refused;
                 self.listing_error = code;
@@ -605,6 +605,29 @@ impl FileManagerApp {
                 }
                 n
             }
+        };
+        self.probe_label = [0u8; 40];
+        self.probe_label[..n].copy_from_slice(&buf[..n]);
+        self.probe_label_len = n;
+    }
+
+    /// Writes the folder's item count into the header.
+    fn set_probe_count(&mut self, count: usize) {
+        let mut buf = [0u8; 40];
+        let n = if count == 0 {
+            let message = b"Empty folder";
+            buf[..message.len()].copy_from_slice(message);
+            message.len()
+        } else {
+            let mut n = fmt_u64(count as u64, &mut buf);
+            let suffix: &[u8] = if count == 1 { b" item" } else { b" items" };
+            for &b in suffix {
+                if n < buf.len() {
+                    buf[n] = b;
+                    n += 1;
+                }
+            }
+            n
         };
         self.probe_label = [0u8; 40];
         self.probe_label[..n].copy_from_slice(&buf[..n]);
@@ -626,6 +649,7 @@ impl FileManagerApp {
             } else {
                 ListingState::Listed
             };
+            self.set_probe_count(self.entry_count);
         } else {
             self.entry_count = 0;
         }
@@ -1228,7 +1252,10 @@ impl FileManagerApp {
 
     pub fn close_details(&mut self) {
         self.has_details = false;
-        self.selected_entry = None;
+        // WHY the selected row is kept: the details card is how a single file
+        // is selected, and clearing the selection here muted every single-file
+        // action. Copy, Move, Delete and Rename are enabled by the selection,
+        // and the card's action bar is the row's own Open control.
         self.set_status();
     }
 
@@ -1475,11 +1502,11 @@ fn fit_details(view: &mut DetailsView) {
 /// built from the installed packages' signed manifests, so the answer to
 /// "who opens this" is a property of the device. An app that kept its own
 /// table would be able to hand a file to a program that never asked for it.
-fn open_with_handler(app: &FileManagerApp) -> bool {
+fn open_with_handler(app: &FileManagerApp) -> OpenOutcome {
     let document = &app.selected_document;
     if !document.has_handler() {
         std::log("[FILE_MANAGER] No app handles this file.").ok();
-        return false;
+        return OpenOutcome::NoHandler;
     }
     match std::content::intent_dispatch(
         std::content::IntentKind::Mime,
@@ -1488,12 +1515,12 @@ fn open_with_handler(app: &FileManagerApp) -> bool {
     ) {
         Ok(_) => {
             std::log("[FILE_MANAGER] The document was dispatched to its handler.").ok();
-            true
+            OpenOutcome::Opened
         }
         Err(code) => {
             std::log("[FILE_MANAGER] The document's handler could not be launched.").ok();
             log_counted("[FILE_MANAGER] Platform launch refused, code: -", code.unsigned_abs(), "");
-            false
+            OpenOutcome::Refused
         }
     }
 }
@@ -1642,7 +1669,9 @@ fn header_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
     // path really passed to `fs_list`; line 2 is the real outcome, including
     // a refusal.
     let path = &app.current_path[..app.current_path_len];
-    let path_w = font::measure(path, 1);
+    let mut path_buf = [0u8; MAX_PATH_LEN];
+    let path_len = font::ellipsize(path, 1, READOUT_MAX_W, &mut path_buf);
+    let path_w = font::measure(&path_buf[..path_len], 1);
     if path_w <= READOUT_MAX_W {
         if let Some(color) = test_text(
             x,
@@ -1650,7 +1679,7 @@ fn header_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
             READOUT_X1 - path_w,
             READOUT_LINE1_Y0,
             1,
-            path,
+            &path_buf[..path_len],
             THEME.on_surface_variant,
             THEME.surface,
         ) {
@@ -1791,10 +1820,24 @@ fn home_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
             ) {
                 return ink;
             }
-            if let Some(color) =
-                test_text(x, y, 100, top + 8, 1, name, THEME.on_surface, THEME.surface)
-            {
-                return color;
+            // The name column ends at the row's right edge; the 24px inset
+            // matches the browse rows so a long name cannot reach the border.
+            let max_w = 684 - 100 - 24;
+            let mut name_buf = [0u8; 48];
+            let name_len = font::ellipsize(name, 1, max_w, &mut name_buf);
+            if name_len > 0 {
+                if let Some(color) = test_text(
+                    x,
+                    y,
+                    100,
+                    top + 8,
+                    1,
+                    &name_buf[..name_len],
+                    THEME.on_surface,
+                    THEME.surface,
+                ) {
+                    return color;
+                }
             }
             if let Some(color) = test_text(
                 x,
@@ -3230,8 +3273,19 @@ fn handle_tap(app: &mut FileManagerApp, x: usize, y: usize, surface: u32) -> Tap
     if app.has_pending {
         return handle_sheet_tap(app, x, y, surface);
     }
-    // The details card owns every touch while it is up.
+    // The details card owns every touch while it is up, except the action bar
+    // beneath it: that bar stays visible, and a single tap there both closes
+    // the card and runs the action. `close_details` keeps the row selected,
+    // so Copy, Move, Delete and Rename still know which file they mean.
     if app.has_details {
+        if (ACTION_BAR_Y0..ACTION_BAR_Y1).contains(&y) {
+            for slot in 0..7usize {
+                if action_slot_rect(slot).contains(x, y) {
+                    app.close_details();
+                    return handle_action_slot(app, slot);
+                }
+            }
+        }
         return handle_details_tap(app, x, y);
     }
     app.clear_notice();
@@ -3298,14 +3352,9 @@ fn handle_home_tap(app: &mut FileManagerApp, x: usize, y: usize) -> Tap {
     }
 
     // The category rows.
-    if ((235..=390).contains(&y) && (200..=350).contains(&x)) || ((CATEGORY_Y0..CATEGORY_Y1).contains(&y) && (36..684).contains(&x)) {
-        let index = if (235..=390).contains(&y) {
-            1 // Images
-        } else {
-            let Some((idx, _, _)) = category_row_at(y) else {
-                return Tap::None;
-            };
-            idx
+    if (CATEGORY_Y0..CATEGORY_Y1).contains(&y) && (36..684).contains(&x) {
+        let Some((index, _, _)) = category_row_at(y) else {
+            return Tap::None;
         };
         app.view = ViewMode::Browse;
         app.set_path(CATEGORY_PATHS[index]);
@@ -3568,10 +3617,12 @@ fn handle_details_tap(app: &mut FileManagerApp, x: usize, y: usize) -> Tap {
                 app.navigate_into(row);
                 std::log("[FILE_MANAGER] Navigated into directory.").ok();
             }
-        } else if open_with_handler(app) {
-            app.set_notice(b"Opened with the platform's handler");
         } else {
-            app.set_notice(NO_HANDLER_NOTICE);
+            match open_with_handler(app) {
+                OpenOutcome::Opened => app.set_notice(b"Opened with the platform's handler"),
+                OpenOutcome::NoHandler => app.set_notice(NO_HANDLER_NOTICE),
+                OpenOutcome::Refused => app.set_notice(HANDLER_REFUSED_NOTICE),
+            }
         }
         return Tap::Redraw(Dirty::All);
     }

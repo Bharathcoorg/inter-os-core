@@ -180,6 +180,13 @@ pub fn parse_vfs_entries(data: &[u8], entries: &mut [RuntimeFileEntry; MAX_PARSE
             if let (Some(name_bytes), Some(size_bytes), Some(type_bytes)) =
                 (parts.next(), parts.next(), parts.next())
             {
+                // The browser writes the origin URL of a download into a
+                // `.origin` companion file. That file is metadata, not
+                // something the person downloaded, so it is not listed.
+                if name_bytes.ends_with(b".origin") {
+                    start = end.saturating_add(1);
+                    continue;
+                }
                 let mut entry = RuntimeFileEntry::EMPTY;
                 let n = name_bytes.len().min(MAX_ENTRY_NAME_LEN);
                 entry.name[..n].copy_from_slice(&name_bytes[..n]);
@@ -1951,6 +1958,17 @@ mod tests {
         assert!(!entries[2].is_dir);
         assert_eq!(entries[2].size, 512);
         assert_eq!(&entries[2].size_label[..entries[2].size_label_len], b"512 B");
+    }
+
+    /// A download's origin sidecar is metadata, not a file the person saved.
+    #[test]
+    fn test_download_origin_sidecars_are_not_listed() {
+        let raw = b"dl_1_photo.png|4096|file\ndl_1_photo.png.origin|52|file\ndl_2_song.wav|8192|file\n";
+        let mut entries = [RuntimeFileEntry::EMPTY; MAX_PARSED_ENTRIES];
+        let count = parse_vfs_entries(raw, &mut entries);
+        assert_eq!(count, 2);
+        assert_eq!(&entries[0].name[..entries[0].name_len], b"dl_1_photo.png");
+        assert_eq!(&entries[1].name[..entries[1].name_len], b"dl_2_song.wav");
     }
 
     #[test]
