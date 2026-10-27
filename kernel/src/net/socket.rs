@@ -10,7 +10,7 @@ use crate::capability::{CapabilityTable, CapabilityType, Rights};
 pub const MAX_SOCKETS: usize = 8;
 pub const SOCKET_RX_SLOTS: usize = 4;
 pub const SOCKET_RX_BUF_SIZE: usize = 512;
-pub const TCP_RX_BUF_SIZE: usize = 2048;
+pub const TCP_RX_BUF_SIZE: usize = 16384;
 pub const TCP_TX_BUF_SIZE: usize = crate::net::tcp::TCP_MAX_SEGMENT;
 pub const TCP_RETRANSMIT_TICKS: u64 = 500;
 pub const TCP_MAX_RETRIES: u8 = 3;
@@ -399,16 +399,28 @@ impl TcpConnectionTable {
     pub fn accept_rx_segment(&mut self, id: u32, seq: u32, payload: &[u8], fin: bool) -> Result<usize, NetError> {
         let conn = self.get_mut(id).ok_or(NetError::NoPacketAvailable)?;
         if conn.state != crate::net::TcpState::Established { return Err(NetError::NoPacketAvailable); }
-        if crate::net::tcp::seq_lt(seq, conn.recv_seq) { return Ok(0); }
-        if seq != conn.recv_seq { return Err(NetError::NoPacketAvailable); }
+        let end = seq.wrapping_add(payload.len() as u32);
+        if !crate::net::tcp::seq_gt(end, conn.recv_seq) {
+            return Ok(0);
+        }
+        let offset = if crate::net::tcp::seq_lt(seq, conn.recv_seq) {
+            conn.recv_seq.wrapping_sub(seq) as usize
+        } else {
+            0
+        };
+        // Sequence check: seq != conn.recv_seq enforcement (offset-aware for TCP overlaps)
+        if seq.wrapping_add(offset as u32) != conn.recv_seq {
+            return Err(NetError::NoPacketAvailable);
+        }
+        let new_payload = &payload[offset..];
         let room = TCP_RX_BUF_SIZE.saturating_sub(conn.rx_len);
-        let n = payload.len().min(room);
-        if n != payload.len() && !payload.is_empty() { return Err(NetError::QueueFull); }
-        conn.rx[conn.rx_len..conn.rx_len + n].copy_from_slice(payload);
+        let n = new_payload.len().min(room);
+        if n != new_payload.len() && !new_payload.is_empty() { return Err(NetError::QueueFull); }
+        conn.rx[conn.rx_len..conn.rx_len + n].copy_from_slice(new_payload);
         conn.rx_len += n;
         conn.recv_seq = conn.recv_seq.wrapping_add(n as u32);
         conn.rcv_wnd = TCP_RX_BUF_SIZE.saturating_sub(conn.rx_len) as u32;
-        if fin && n == payload.len() {
+        if fin && n == new_payload.len() {
             conn.recv_seq = conn.recv_seq.wrapping_add(1);
             conn.state = crate::net::TcpState::CloseWait;
         }
@@ -477,6 +489,10 @@ impl TcpConnectionTable {
                         // Exhaustion is a terminal transport failure. Do not
                         // silently discard the payload while leaving the
                         // connection Established and usable.
+                        crate::serial_println!(
+                            "[TCP TX TIMEOUT] Connection {} to {}.{}.{}.{}:{} closed: max retries ({}) exhausted",
+                            conn.id, conn.remote_ip.0[0], conn.remote_ip.0[1], conn.remote_ip.0[2], conn.remote_ip.0[3], conn.remote_port, conn.tx_retries
+                        );
                         conn.tx_pending = false;
                         conn.tx_len = 0;
                         conn.tx_retries = 0;
@@ -486,6 +502,11 @@ impl TcpConnectionTable {
                     }
                     conn.tx_retries += 1;
                     conn.tx_deadline = now.saturating_add(TCP_RETRANSMIT_TICKS << conn.tx_retries);
+                    crate::serial_println!(
+                        "[TCP TX RETRY] Connection {} retry {}/{} to {}.{}.{}.{}:{}",
+                        conn.id, conn.tx_retries, TCP_MAX_RETRIES,
+                        conn.remote_ip.0[0], conn.remote_ip.0[1], conn.remote_ip.0[2], conn.remote_ip.0[3], conn.remote_port
+                    );
                     return Some((conn.id, conn.remote_ip, conn.local_port, conn.remote_port, conn.tx_seq, conn.recv_seq, conn.tx_len));
                 }
             }
@@ -516,12 +537,21 @@ impl TcpConnectionTable {
             if let Some(conn) = slot.as_mut() {
                 if conn.syn_pending && conn.state == crate::net::TcpState::SynSent && now >= conn.syn_deadline {
                     if conn.syn_retries >= TCP_MAX_RETRIES {
+                        crate::serial_println!(
+                            "[TCP SYN TIMEOUT] Connection {} to {}.{}.{}.{}:{} closed: SYN retries ({}) exhausted",
+                            conn.id, conn.remote_ip.0[0], conn.remote_ip.0[1], conn.remote_ip.0[2], conn.remote_ip.0[3], conn.remote_port, conn.syn_retries
+                        );
                         conn.syn_pending = false;
                         conn.state = crate::net::TcpState::Closed;
                         continue;
                     }
                     conn.syn_retries += 1;
                     conn.syn_deadline = now.saturating_add(TCP_RETRANSMIT_TICKS << conn.syn_retries);
+                    crate::serial_println!(
+                        "[TCP SYN RETRY] Connection {} retry {}/{} to {}.{}.{}.{}:{}",
+                        conn.id, conn.syn_retries, TCP_MAX_RETRIES,
+                        conn.remote_ip.0[0], conn.remote_ip.0[1], conn.remote_ip.0[2], conn.remote_ip.0[3], conn.remote_port
+                    );
                     return Some((conn.id, conn.remote_ip, conn.local_port, conn.remote_port, conn.syn_seq, conn.rcv_wnd.min(u16::MAX as u32) as u16));
                 }
             }

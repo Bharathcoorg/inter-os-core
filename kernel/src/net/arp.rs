@@ -97,7 +97,7 @@ impl ArpPacket {
 }
 
 pub const MAX_ARP_ENTRIES: usize = 16;
-pub const ARP_CACHE_TICKS: u64 = 30_000;
+pub const ARP_CACHE_TICKS: u64 = 600_000;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 struct ArpEntry {

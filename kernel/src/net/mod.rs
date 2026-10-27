@@ -33,9 +33,22 @@ pub use wireless::{WifiState, WirelessManager, WIRELESS_MANAGER};
 pub use route::{Ipv4Cidr, Route, RoutingTable, MAX_ROUTES};
 
 use spin::Mutex;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::capability::{Capability, CapabilityId, CapabilityTable, CapabilityType, Rights};
 use crate::serial_println;
+
+static NET_DROP_COUNT: AtomicU64 = AtomicU64::new(0);
+static LAST_DROP_LOG_TICK: AtomicU64 = AtomicU64::new(0);
+
+pub fn log_net_drop(reason: &str) {
+    let count = NET_DROP_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    let now = crate::interrupts::get_system_ticks();
+    let last = LAST_DROP_LOG_TICK.load(Ordering::Relaxed);
+    if now.saturating_sub(last) >= 1000 || last == 0 {
+        LAST_DROP_LOG_TICK.store(now, Ordering::Relaxed);
+        serial_println!("[NET DROP] reason='{}' total_dropped={}", reason, count);
+    }
+}
 
 pub const DEFAULT_HOST_IP: Ipv4Address = Ipv4Address([10, 0, 2, 15]);
 pub const DEFAULT_HOST_MAC: MacAddress = MacAddress([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]);
@@ -111,6 +124,11 @@ fn resolve_destination_mac(dst_ip: Ipv4Address) -> Result<MacAddress, NetError> 
     }
     let now = crate::interrupts::get_system_ticks();
     if let Some(mac) = ARP_TABLE.lock().lookup_at(dst_ip, now) {
+        return Ok(mac);
+    }
+    // Fall back to existing cached mapping while triggering background refresh
+    if let Some(mac) = ARP_TABLE.lock().lookup(dst_ip) {
+        let _ = transmit_arp_request(dst_ip);
         return Ok(mac);
     }
     let mut requests = ARP_REQUESTS.lock();
@@ -463,6 +481,10 @@ pub fn poll_network_interface() -> usize {
                     }
                 }
                 EtherType::Ipv4 => {
+                    if frame.payload.len() >= 8 && (u16::from_be_bytes([frame.payload[6], frame.payload[7]]) & 0x3FFF != 0) {
+                        log_net_drop("ipv4_fragment_discarded_no_reassembly");
+                        continue;
+                    }
                     if let Ok(ip_pkt) = Ipv4Packet::parse(frame.payload) {
                         if ip_pkt.protocol == IpProtocol::Tcp {
                             if let Ok(segment) = TcpSegment::parse(ip_pkt.payload) {
@@ -490,6 +512,10 @@ pub fn poll_network_interface() -> usize {
                                                         conn.state = TcpState::Established;
                                                         conn.syn_pending = false;
                                                         conn.syn_retries = 0;
+                                                        serial_println!(
+                                                            "[TCP ESTABLISHED] Connection {} established with {}.{}.{}.{}:{} (local port {})",
+                                                            id, conn.remote_ip.0[0], conn.remote_ip.0[1], conn.remote_ip.0[2], conn.remote_ip.0[3], conn.remote_port, conn.local_port
+                                                        );
                                                         to_ack_syn = Some((conn.local_port, conn.remote_port, conn.send_seq, conn.recv_seq, conn.rcv_wnd.min(u16::MAX as u32) as u16));
                                                     }
                                                 } else if old_state == TcpState::Established {
@@ -521,17 +547,25 @@ pub fn poll_network_interface() -> usize {
                                                 0x10,
                                                 ack_window,
                                             );
-                                        } else if let Some((c_id, fin, before)) = to_process_est {
-                                            let accepted = TCP_TABLE.lock().accept_rx_segment(c_id, segment.seq, segment.payload, fin).unwrap_or(0);
+                                        } else if let Some((c_id, fin, _before)) = to_process_est {
+                                            let _accepted = TCP_TABLE.lock().accept_rx_segment(c_id, segment.seq, segment.payload, fin).unwrap_or(0);
                                             let table2 = TCP_TABLE.lock();
                                             if let Some(c) = table2.get(c_id) {
-                                                if accepted > 0 || (fin && c.recv_seq != before) {
-                                                    let _ = transmit_tcp_segment_with_window(ip_pkt.dst, c.local_port, ip_pkt.src, c.remote_port, c.send_seq, c.recv_seq, 0x10, c.rcv_wnd.min(u16::MAX as u32) as u16);
-                                                }
+                                                // Always send ACK for valid received segments so peer window advances
+                                                let _ = transmit_tcp_segment_with_window(
+                                                    ip_pkt.dst, c.local_port, ip_pkt.src, c.remote_port,
+                                                    c.send_seq, c.recv_seq, 0x10, c.rcv_wnd.min(u16::MAX as u32) as u16,
+                                                );
                                             }
                                         }
+                                    } else {
+                                        log_net_drop("tcp_no_matching_connection");
                                     }
+                                } else {
+                                    log_net_drop("tcp_checksum_mismatch");
                                 }
+                            } else {
+                                log_net_drop("tcp_parse_failed");
                             }
                         } else if ip_pkt.protocol == IpProtocol::Udp {
                             if let Ok(udp_dg) = UdpDatagram::parse(ip_pkt.payload) {
@@ -541,8 +575,12 @@ pub fn poll_network_interface() -> usize {
                                     udp_dg.src_port,
                                     udp_dg.payload,
                                 );
+                            } else {
+                                log_net_drop("udp_parse_failed");
                             }
                         }
+                    } else {
+                        log_net_drop("ipv4_parse_failed");
                     }
                 }
                 _ => {}

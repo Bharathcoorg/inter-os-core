@@ -37,6 +37,9 @@ const TDBAH: usize = 0x3804;
 const TDLEN: usize = 0x3808;
 const TDH: usize = 0x3810;
 const TDT: usize = 0x3818;
+const RAL0: usize = 0x5400;
+const RAH0: usize = 0x5404;
+const RAH_AV: u32 = 1 << 31;
 const RX_DESC_COUNT: usize = 16;
 const TX_DESC_COUNT: usize = 16;
 
@@ -225,7 +228,18 @@ impl E1000Device {
             write32(self.base_vaddr, TDLEN, (TX_DESC_COUNT * 16) as u32);
             write32(self.base_vaddr, TDH, 0);
             write32(self.base_vaddr, TDT, 0);
-            write32(self.base_vaddr, RCTL, (1 << 1) | (1 << 15) | (1 << 26) | (1 << 30));
+            // Program station address into Receive Address 0 (RAL0/RAH0) with Address Valid (AV) bit
+            let ral = (self.mac.0[0] as u32)
+                | ((self.mac.0[1] as u32) << 8)
+                | ((self.mac.0[2] as u32) << 16)
+                | ((self.mac.0[3] as u32) << 24);
+            let rah = (self.mac.0[4] as u32)
+                | ((self.mac.0[5] as u32) << 8)
+                | RAH_AV;
+            write32(self.base_vaddr, RAL0, ral);
+            write32(self.base_vaddr, RAH0, rah);
+            // RCTL: EN(1<<1) | UPE(1<<3) | MPE(1<<4) | BAM(1<<15) | SECRC(1<<26)
+            write32(self.base_vaddr, RCTL, (1 << 1) | (1 << 3) | (1 << 4) | (1 << 15) | (1 << 26) | (1 << 30));
             write32(self.base_vaddr, TCTL, (1 << 1) | (1 << 3) | (0x10 << 4) | (0x40 << 12));
             write32(self.base_vaddr, CTRL, read32(self.base_vaddr, CTRL) | (1 << 1));
             self.link_up = true;
@@ -287,6 +301,8 @@ impl NetworkDevice for E1000Device {
         let idx = self.rx_index as usize;
         unsafe {
             let desc = &mut *self.rx_desc.add(idx);
+            let rdh = read32(self.base_vaddr, RDH);
+            let rdt = read32(self.base_vaddr, RDT);
             if desc.status & RX_EOP == 0 { return Err(NetError::NoPacketAvailable); }
             let len = desc.length as usize;
             // WHY recycle first: returning BufferTooSmall before reclaiming the
@@ -296,6 +312,7 @@ impl NetworkDevice for E1000Device {
             compiler_fence(Ordering::Release);
             write32(self.base_vaddr, RDT, idx as u32);
             self.rx_index = ((idx + 1) % RX_DESC_COUNT) as u16;
+            crate::serial_println!("[E1000 RX] idx={} len={} RDH={} RDT={} -> new_RDT={}", idx, len, rdh, rdt, idx);
 
             if len > out.len() { return Err(NetError::BufferTooSmall); }
             if len > MAX_PACKET_SIZE { return Err(NetError::InvalidPacket); }

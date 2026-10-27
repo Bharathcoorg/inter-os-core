@@ -132,7 +132,7 @@ pub fn valid_established_segment(
     const RST: u16 = 0x04;
     const ACK: u16 = 0x10;
     if segment.flags & RST != 0 || segment.flags & ACK == 0 { return false; }
-    if segment.seq != expected_seq { return false; }
+    if seq_gt(segment.seq, expected_seq) { return false; }
     if seq_lt(segment.ack, snd_una) || seq_gt(segment.ack, snd_nxt) { return false; }
     true
 }
