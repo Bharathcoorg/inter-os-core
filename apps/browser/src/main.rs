@@ -2619,6 +2619,17 @@ impl BrowserApp {
 
         let dom = unsafe { &mut *core::ptr::addr_of_mut!(PAGE_DOM) };
         dom.parse(source);
+        // The tab is renamed to what the page calls itself.
+        //
+        // WHY here and not when the address was entered: before the bytes
+        // arrive the URL is the only name there is, so the tab starts out
+        // wearing it, and the document replaces that as soon as it is read.
+        // A page that states no title keeps the URL, which is the truth:
+        // nothing named it.
+        let stated_title = dom.meta().title.get(dom);
+        if !stated_title.is_empty() {
+            self.tabs.active_tab_mut().set_title(stated_title);
+        }
         if dom.node_count() <= 1 {
             self.html_view = false;
             return false;
