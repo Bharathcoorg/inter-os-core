@@ -37,17 +37,81 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::capability::{Capability, CapabilityId, CapabilityTable, CapabilityType, Rights};
 use crate::serial_println;
 
-static NET_DROP_COUNT: AtomicU64 = AtomicU64::new(0);
-static LAST_DROP_LOG_TICK: AtomicU64 = AtomicU64::new(0);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetDropKind {
+    NonIpv4Ethertype = 0,
+    MalformedChecksumOrLength = 1,
+    UnknownL4Protocol = 2,
+    PortOrConnectionMismatch = 3,
+    RxRingBackpressure = 4,
+    Ipv4Fragment = 5,
+}
+
+pub struct NetDropStats {
+    pub non_ipv4_ethertype: AtomicU64,
+    pub malformed_checksum_length: AtomicU64,
+    pub unknown_l4_protocol: AtomicU64,
+    pub port_conn_mismatch: AtomicU64,
+    pub rx_backpressure: AtomicU64,
+    pub ipv4_fragment: AtomicU64,
+    logged_mask: core::sync::atomic::AtomicU32,
+}
+
+impl NetDropStats {
+    pub const fn new() -> Self {
+        Self {
+            non_ipv4_ethertype: AtomicU64::new(0),
+            malformed_checksum_length: AtomicU64::new(0),
+            unknown_l4_protocol: AtomicU64::new(0),
+            port_conn_mismatch: AtomicU64::new(0),
+            rx_backpressure: AtomicU64::new(0),
+            ipv4_fragment: AtomicU64::new(0),
+            logged_mask: core::sync::atomic::AtomicU32::new(0),
+        }
+    }
+
+    pub fn record_drop(&self, kind: NetDropKind, detail: &str) {
+        let counter = match kind {
+            NetDropKind::NonIpv4Ethertype => &self.non_ipv4_ethertype,
+            NetDropKind::MalformedChecksumOrLength => &self.malformed_checksum_length,
+            NetDropKind::UnknownL4Protocol => &self.unknown_l4_protocol,
+            NetDropKind::PortOrConnectionMismatch => &self.port_conn_mismatch,
+            NetDropKind::RxRingBackpressure => &self.rx_backpressure,
+            NetDropKind::Ipv4Fragment => &self.ipv4_fragment,
+        };
+        let prev = counter.fetch_add(1, Ordering::Relaxed);
+        let bit = 1 << (kind as u32);
+        if prev == 0 && (self.logged_mask.fetch_or(bit, Ordering::Relaxed) & bit) == 0 {
+            serial_println!("[NET DROP FIRST] kind={:?} detail='{}'", kind, detail);
+        }
+    }
+}
+
+pub static DROP_STATS: NetDropStats = NetDropStats::new();
+
+pub fn record_net_drop(kind: NetDropKind, detail: &str) {
+    DROP_STATS.record_drop(kind, detail);
+}
 
 pub fn log_net_drop(reason: &str) {
-    let count = NET_DROP_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-    let now = crate::interrupts::get_system_ticks();
-    let last = LAST_DROP_LOG_TICK.load(Ordering::Relaxed);
-    if now.saturating_sub(last) >= 1000 || last == 0 {
-        LAST_DROP_LOG_TICK.store(now, Ordering::Relaxed);
-        serial_println!("[NET DROP] reason='{}' total_dropped={}", reason, count);
-    }
+    let kind = match reason {
+        "ipv4_fragment_discarded_no_reassembly" => NetDropKind::Ipv4Fragment,
+        "tcp_checksum_mismatch" | "tcp_parse_failed" | "udp_parse_failed" | "ipv4_parse_failed" => NetDropKind::MalformedChecksumOrLength,
+        "tcp_no_matching_connection" => NetDropKind::PortOrConnectionMismatch,
+        _ => NetDropKind::UnknownL4Protocol,
+    };
+    record_net_drop(kind, reason);
+}
+
+pub fn net_drop_stats() -> (u64, u64, u64, u64, u64, u64) {
+    (
+        DROP_STATS.non_ipv4_ethertype.load(Ordering::Relaxed),
+        DROP_STATS.malformed_checksum_length.load(Ordering::Relaxed),
+        DROP_STATS.unknown_l4_protocol.load(Ordering::Relaxed),
+        DROP_STATS.port_conn_mismatch.load(Ordering::Relaxed),
+        DROP_STATS.rx_backpressure.load(Ordering::Relaxed),
+        DROP_STATS.ipv4_fragment.load(Ordering::Relaxed),
+    )
 }
 
 pub const DEFAULT_HOST_IP: Ipv4Address = Ipv4Address([10, 0, 2, 15]);
@@ -424,7 +488,12 @@ pub fn poll_network_interface() -> usize {
                     let mut device = NETWORK_DEVICE.lock();
                     match device.receive(&mut rx_buf) {
                         Ok(len) => len,
-                        Err(_) => break,
+                        Err(e) => {
+                            if matches!(e, NetError::QueueFull | NetError::BufferTooSmall) {
+                                record_net_drop(NetDropKind::RxRingBackpressure, "rx_ring_backpressure");
+                            }
+                            break;
+                        }
                     }
                 }
             }
@@ -578,13 +647,19 @@ pub fn poll_network_interface() -> usize {
                             } else {
                                 log_net_drop("udp_parse_failed");
                             }
+                        } else {
+                            record_net_drop(NetDropKind::UnknownL4Protocol, "unsupported_ip_protocol");
                         }
                     } else {
                         log_net_drop("ipv4_parse_failed");
                     }
                 }
-                _ => {}
+                _ => {
+                    record_net_drop(NetDropKind::NonIpv4Ethertype, "non_ipv4_or_arp_ethertype");
+                }
             }
+        } else {
+            record_net_drop(NetDropKind::MalformedChecksumOrLength, "ethernet_frame_parse_failed");
         }
     }
     processed
@@ -993,6 +1068,30 @@ mod tests {
         // so a caller can tell "no authority" from "no allowance left".
         let exhausted = authorize_and_debit_network_send(&caps, Some(grantee), usize::MAX, false);
         assert_eq!(exhausted.err(), Some(NetError::QueueFull));
+    }
+
+    #[test]
+    fn test_net_drop_stats_accounting() {
+        let prev_non_ip = DROP_STATS.non_ipv4_ethertype.load(Ordering::Relaxed);
+        let prev_malformed = DROP_STATS.malformed_checksum_length.load(Ordering::Relaxed);
+        let prev_unknown_l4 = DROP_STATS.unknown_l4_protocol.load(Ordering::Relaxed);
+        let prev_mismatch = DROP_STATS.port_conn_mismatch.load(Ordering::Relaxed);
+        let prev_backpressure = DROP_STATS.rx_backpressure.load(Ordering::Relaxed);
+        let prev_fragment = DROP_STATS.ipv4_fragment.load(Ordering::Relaxed);
+
+        record_net_drop(NetDropKind::NonIpv4Ethertype, "test_lldp");
+        record_net_drop(NetDropKind::MalformedChecksumOrLength, "test_cksum");
+        record_net_drop(NetDropKind::UnknownL4Protocol, "test_gre");
+        record_net_drop(NetDropKind::PortOrConnectionMismatch, "test_port");
+        record_net_drop(NetDropKind::RxRingBackpressure, "test_bp");
+        record_net_drop(NetDropKind::Ipv4Fragment, "test_frag");
+
+        assert_eq!(DROP_STATS.non_ipv4_ethertype.load(Ordering::Relaxed), prev_non_ip + 1);
+        assert_eq!(DROP_STATS.malformed_checksum_length.load(Ordering::Relaxed), prev_malformed + 1);
+        assert_eq!(DROP_STATS.unknown_l4_protocol.load(Ordering::Relaxed), prev_unknown_l4 + 1);
+        assert_eq!(DROP_STATS.port_conn_mismatch.load(Ordering::Relaxed), prev_mismatch + 1);
+        assert_eq!(DROP_STATS.rx_backpressure.load(Ordering::Relaxed), prev_backpressure + 1);
+        assert_eq!(DROP_STATS.ipv4_fragment.load(Ordering::Relaxed), prev_fragment + 1);
     }
 }
 
