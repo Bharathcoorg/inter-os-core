@@ -143,6 +143,19 @@ impl Node {
     }
 }
 
+/// Which of the tree's own budgets was reached while parsing.
+///
+/// WHY named rather than folded into `truncated`: the flag says the document
+/// is not all here, and that is the honest thing to tell a reader. It is not
+/// the thing to tell anyone trying to fix it, because the budgets fail for
+/// different reasons -- a page with ten thousand elements and a page with one
+/// enormous stylesheet both say `true`.
+pub const OVERFLOW_NODES: u32 = 1 << 0;
+pub const OVERFLOW_TEXT: u32 = 1 << 1;
+pub const OVERFLOW_ATTRS: u32 = 1 << 2;
+pub const OVERFLOW_CSS: u32 = 1 << 3;
+pub const OVERFLOW_DEPTH: u32 = 1 << 4;
+
 /// The bounded document tree.
 pub struct Dom {
     pub(super) nodes: [Node; MAX_NODES],
@@ -157,6 +170,7 @@ pub struct Dom {
     css_len: usize,
     root: NodeId,
     truncated: bool,
+    overflow: u32,
 }
 
 impl Dom {
@@ -174,6 +188,7 @@ impl Dom {
             css_len: 0,
             root: NO_NODE,
             truncated: false,
+            overflow: 0,
         }
     }
 
@@ -283,7 +298,7 @@ impl Dom {
             } else if !self_closing {
                 // Deeper than the parser tracks: the element exists, but
                 // what follows belongs to the nearest tracked ancestor.
-                self.truncated = true;
+                self.note(OVERFLOW_DEPTH);
             }
         }
 
@@ -298,6 +313,14 @@ impl Dom {
         self.css_len = 0;
         self.root = NO_NODE;
         self.truncated = false;
+        self.overflow = 0;
+    }
+
+    /// Records which budget was reached. Every call is also a truncation, so
+    /// the readers that only ask `truncated` keep working.
+    fn note(&mut self, budget: u32) {
+        self.overflow |= budget;
+        self.truncated = true;
     }
 
     pub fn root(&self) -> NodeId {
@@ -499,18 +522,23 @@ impl Dom {
         self.truncated
     }
 
+    /// Which capacities were reached, as `OVERFLOW_*` for this module.
+    pub fn overflow(&self) -> u32 {
+        self.overflow
+    }
+
     fn capture_css(&mut self, css: &[u8]) {
         let n = css.len().min(MAX_CSS_BYTES);
         self.css[..n].copy_from_slice(&css[..n]);
         self.css_len = n;
         if css.len() > n {
-            self.truncated = true;
+            self.note(OVERFLOW_CSS);
         }
     }
 
     fn push_node(&mut self, kind: NodeKind, tag: StrRef, text: StrRef) -> NodeId {
         if self.node_count >= MAX_NODES {
-            self.truncated = true;
+            self.note(OVERFLOW_NODES);
             return NO_NODE;
         }
         let id = self.node_count as NodeId;
@@ -551,7 +579,7 @@ impl Dom {
         let room = MAX_TEXT_BYTES - self.text_len;
         let n = bytes.len().min(room).min(u16::MAX as usize);
         if n < bytes.len() {
-            self.truncated = true;
+            self.note(OVERFLOW_TEXT);
         }
         if n == 0 {
             return StrRef::EMPTY;
@@ -602,7 +630,7 @@ impl Dom {
         let room = MAX_TEXT_BYTES.saturating_sub(self.text_len);
         let n = raw.len().min(room);
         if n < raw.len() {
-            self.truncated = true;
+            self.note(OVERFLOW_TEXT);
         }
         if n == 0 {
             return;
@@ -666,7 +694,7 @@ impl Dom {
                 continue;
             }
             if self.attr_count >= MAX_ATTRS {
-                self.truncated = true;
+                self.note(OVERFLOW_ATTRS);
                 break;
             }
             let name = self.intern(attr.name());
@@ -785,7 +813,7 @@ impl Dom {
             self.text_len += 1;
             true
         } else {
-            self.truncated = true;
+            self.note(OVERFLOW_TEXT);
             false
         }
     }

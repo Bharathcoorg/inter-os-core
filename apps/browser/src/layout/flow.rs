@@ -44,6 +44,98 @@ const TOGGLE_FIELD_W: usize = 24;
 /// The bullet a list item shows when its parent is not an ordered list.
 const BULLET: &[u8] = "•".as_bytes();
 
+/// Which of the layout's own budgets was reached.
+///
+/// WHY per budget and not one flag: `truncated` is the honest thing to show a
+/// reader and the useless thing to show whoever has to fix the page. A page
+/// that ran out of text runs and a page nested deeper than the layout descends
+/// both say `true` today, and they need different budgets raised.
+///
+/// The low bits belong to the document tree and are ORed in from
+/// [`super::dom`], so one value names every budget a page can hit.
+pub const OVERFLOW_SEGMENTS: u32 = 1 << 8;
+pub const OVERFLOW_BLOCK_DEPTH: u32 = 1 << 9;
+pub const OVERFLOW_RUNS: u32 = 1 << 10;
+pub const OVERFLOW_RECTS: u32 = 1 << 11;
+pub const OVERFLOW_IMAGES: u32 = 1 << 12;
+pub const OVERFLOW_FIELDS: u32 = 1 << 13;
+pub const OVERFLOW_LINKS: u32 = 1 << 14;
+pub const OVERFLOW_COORDS: u32 = 1 << 15;
+
+/// Every budget a page can hit, with what ran out, ranked worst first.
+///
+/// WHY a table and not an `if` chain: the sentence drawn on the page and the
+/// lines written to the serial log have to name the same budgets, and two
+/// spellings of one list drift apart. The order is the ranking -- the first
+/// entry whose bit is set is the one a reader hears about, because missing
+/// content matters more than missing decoration.
+pub const OVERFLOW_BUDGETS: &[(u32, &str)] = &[
+    (
+        super::dom::OVERFLOW_NODES,
+        "The document is larger than this browser holds; the rest of it was not read.",
+    ),
+    (
+        super::dom::OVERFLOW_TEXT,
+        "The document has more words than this browser holds; some of them are missing.",
+    ),
+    (
+        super::dom::OVERFLOW_DEPTH,
+        "The page nests deeper than this browser reads; some elements are missing.",
+    ),
+    (
+        OVERFLOW_BLOCK_DEPTH,
+        "The page nests deeper than this browser lays out; some blocks are missing.",
+    ),
+    (
+        OVERFLOW_SEGMENTS,
+        "A paragraph here is longer than this browser measures; part of it is missing.",
+    ),
+    (
+        OVERFLOW_RUNS,
+        "The page has more text than this browser holds; some of it is missing.",
+    ),
+    (
+        OVERFLOW_COORDS,
+        "The page is longer than this browser can address; the rest is off the end.",
+    ),
+    (
+        OVERFLOW_IMAGES,
+        "The page has more images than this browser fetches; some are missing.",
+    ),
+    (
+        OVERFLOW_LINKS,
+        "The page has more links than this browser tracks; some cannot be tapped.",
+    ),
+    (
+        OVERFLOW_FIELDS,
+        "The page has more form controls than this browser holds; some are missing.",
+    ),
+    (
+        super::dom::OVERFLOW_ATTRS,
+        "The document has more attributes than this browser holds; some tags are unread.",
+    ),
+    (
+        super::dom::OVERFLOW_CSS,
+        "The document has more styling than this browser holds; some of it is unread.",
+    ),
+    (
+        OVERFLOW_RECTS,
+        "The page has more panels and borders than this browser paints.",
+    ),
+];
+
+/// What to tell a reader about a page that did not all fit.
+///
+/// WHY one sentence: the note is drawn on the page, in a single line, and a
+/// list of bit flags is not a sentence. When several budgets were hit the
+/// reader hears about the worst one; the serial log carries every one.
+pub fn overflow_note(overflow: u32) -> &'static str {
+    match OVERFLOW_BUDGETS.iter().find(|(bit, _)| overflow & *bit != 0) {
+        Some((_, reason)) => reason,
+        None => "The page reached a layout capacity; it is shown in part.",
+    }
+}
+
 /// What a rectangle means to the renderer.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RectKind {
@@ -247,6 +339,9 @@ pub struct TextLayout {
     pub height: u32,
     /// Whether a display-list, DOM or layout-depth capacity was reached.
     pub truncated: bool,
+    /// Which capacities were reached, as the `OVERFLOW_*` bits of this module
+    /// and [`super::dom`]. Zero exactly when `truncated` is false.
+    pub overflow: u32,
 }
 
 impl TextLayout {
@@ -265,6 +360,7 @@ impl TextLayout {
             form: FormInfo::EMPTY,
             height: 0,
             truncated: false,
+            overflow: 0,
         }
     }
 
@@ -277,6 +373,7 @@ impl TextLayout {
         self.form = FormInfo::EMPTY;
         self.height = 0;
         self.truncated = false;
+        self.overflow = 0;
     }
 
     pub fn is_empty(&self) -> bool {
@@ -326,22 +423,19 @@ pub fn build(dom: &Dom, sheet: &css::Stylesheet<'_>, width: usize, out: &mut Tex
         dom,
         sheet,
         out,
-        truncated: dom.truncated(),
+        overflow: dom.overflow(),
         max_bottom: 0,
     };
     let root = dom.root();
     if root == super::dom::NO_NODE {
-        out.truncated = builder.truncated;
+        builder.finish(0);
         return;
     }
     let body = find_body(dom, root);
     let body_style = style::compute(dom, body, sheet, None);
     builder.layout_children(body, 0, 0, width, &body_style, 0);
     let height = builder.max_bottom.clamp(0, i32::MAX) as u32;
-    let truncated = builder.truncated;
-    drop(builder);
-    out.height = height;
-    out.truncated = truncated;
+    builder.finish(height);
 }
 
 fn find_body(dom: &Dom, root: NodeId) -> NodeId {
@@ -357,7 +451,7 @@ struct Builder<'a, 's> {
     dom: &'a Dom,
     sheet: &'s css::Stylesheet<'s>,
     out: &'a mut TextLayout,
-    truncated: bool,
+    overflow: u32,
     max_bottom: i32,
 }
 
@@ -438,7 +532,7 @@ impl<'a, 's> Builder<'a, 's> {
         depth: usize,
     ) -> i32 {
         if depth > MAX_LAYOUT_DEPTH {
-            self.truncated = true;
+            self.note(OVERFLOW_BLOCK_DEPTH);
             return y;
         }
         let mut cursor_y = y;
@@ -515,7 +609,7 @@ impl<'a, 's> Builder<'a, 's> {
         marker: Marker,
     ) -> i32 {
         if depth > MAX_LAYOUT_DEPTH {
-            self.truncated = true;
+            self.note(OVERFLOW_BLOCK_DEPTH);
             return y;
         }
         let style = style::compute(self.dom, node, self.sheet, Some(parent_style));
@@ -647,7 +741,7 @@ impl<'a, 's> Builder<'a, 's> {
         depth: usize,
     ) -> i32 {
         if depth > MAX_LAYOUT_DEPTH {
-            self.truncated = true;
+            self.note(OVERFLOW_BLOCK_DEPTH);
             return y;
         }
         let mut segs = Segs::new();
@@ -712,7 +806,7 @@ impl<'a, 's> Builder<'a, 's> {
         depth: usize,
     ) -> i32 {
         if depth > MAX_LAYOUT_DEPTH {
-            self.truncated = true;
+            self.note(OVERFLOW_BLOCK_DEPTH);
             return y;
         }
         let mut rows = [super::dom::NO_NODE; 64];
@@ -782,7 +876,7 @@ impl<'a, 's> Builder<'a, 's> {
         depth: usize,
     ) -> i32 {
         if depth > MAX_LAYOUT_DEPTH {
-            self.truncated = true;
+            self.note(OVERFLOW_BLOCK_DEPTH);
             return y;
         }
         let mut column = 0usize;
@@ -1223,11 +1317,11 @@ impl<'a, 's> Builder<'a, 's> {
         link: u8,
     ) {
         if x < i16::MIN as i32 || y < i16::MIN as i32 || y > i16::MAX as i32 {
-            self.truncated = true;
+            self.note(OVERFLOW_COORDS);
             return;
         }
         if self.out.run_count >= MAX_TEXT_RUNS {
-            self.truncated = true;
+            self.note(OVERFLOW_RUNS);
             return;
         }
         let run = TextRun {
@@ -1254,11 +1348,11 @@ impl<'a, 's> Builder<'a, 's> {
             return;
         }
         if self.out.rect_count >= MAX_RECTS {
-            self.truncated = true;
+            self.note(OVERFLOW_RECTS);
             return;
         }
         if x > i16::MAX as i32 || y > i16::MAX as i32 || y < i16::MIN as i32 {
-            self.truncated = true;
+            self.note(OVERFLOW_COORDS);
             return;
         }
         self.out.rects[self.out.rect_count] = RectItem {
@@ -1301,7 +1395,7 @@ impl<'a, 's> Builder<'a, 's> {
             return (w as i32, h as i32);
         }
         if !src.is_empty() {
-            self.truncated = true;
+            self.note(OVERFLOW_IMAGES);
         }
         if alt.is_empty() {
             return (0, 0);
@@ -1338,7 +1432,7 @@ impl<'a, 's> Builder<'a, 's> {
         checked: bool,
     ) {
         if self.out.field_count >= MAX_FIELDS {
-            self.truncated = true;
+            self.note(OVERFLOW_FIELDS);
             return;
         }
         let value = if style.field == FieldKind::Textarea {
@@ -1438,7 +1532,7 @@ impl<'a, 's> Builder<'a, 's> {
             }
         }
         if self.out.link_count >= MAX_LINK_BOXES {
-            self.truncated = true;
+            self.note(OVERFLOW_LINKS);
             return;
         }
         self.out.links[self.out.link_count] = LinkBox {
@@ -1453,8 +1547,23 @@ impl<'a, 's> Builder<'a, 's> {
 
     fn note_overflow(&mut self, segs: &Segs) {
         if segs.overflowed {
-            self.truncated = true;
+            self.note(OVERFLOW_SEGMENTS);
         }
+    }
+
+    /// Records a budget that ran out. Every one of them is also a truncation.
+    fn note(&mut self, budget: u32) {
+        self.overflow |= budget;
+    }
+
+    /// Publishes the display list. `truncated` is kept as the one-bit answer
+    /// every existing reader asks for, and it stays true exactly when the
+    /// per-budget record says something ran out.
+    fn finish(self, height: u32) {
+        let overflow = self.overflow;
+        self.out.height = height;
+        self.out.overflow = overflow;
+        self.out.truncated = overflow != 0;
     }
 
     fn bump(&mut self, bottom: i32) {
@@ -1987,5 +2096,82 @@ mod tests {
         build(&truncated_dom, &sheet, 400, &mut out2);
         // The display list reflects whether dom or layout reached capacity
         assert_eq!(out2.truncated, truncated_dom.truncated());
+    }
+
+    /// WHY this is the test for the whole feature: `truncated` alone told a
+    /// reader "shown in part" and told whoever maintains the engine nothing
+    /// about which of thirteen budgets ran out, so no budget ever got raised.
+    #[test]
+    fn a_deeper_page_than_the_layout_descends_names_the_block_depth() {
+        let mut html = std::vec::Vec::new();
+        for _ in 0..40 {
+            html.extend_from_slice(b"<div>");
+        }
+        html.extend_from_slice(b"bottom");
+        let (_dom, out) = layout_html(&html, 300);
+        assert!(out.truncated);
+        assert_eq!(out.overflow & OVERFLOW_BLOCK_DEPTH, OVERFLOW_BLOCK_DEPTH);
+        assert!(overflow_note(out.overflow).contains("nests deeper"));
+    }
+
+    #[test]
+    fn a_document_that_ran_out_is_reported_by_the_display_list() {
+        let mut dom = Dom::new();
+        // Longer than the document text arena holds, so the tree reports
+        // before the layout has any reason to.
+        let mut huge = std::vec::Vec::new();
+        huge.extend_from_slice(b"<p>");
+        huge.resize(b"<p>".len() + crate::layout::dom::MAX_TEXT_BYTES + 4096, b'a');
+        huge.extend_from_slice(b"</p>");
+        dom.parse(&huge);
+        assert_eq!(dom.overflow() & crate::layout::dom::OVERFLOW_TEXT, crate::layout::dom::OVERFLOW_TEXT);
+        let sheet = css::parse_stylesheet(dom.css());
+        let mut out = TextLayout::new();
+        build(&dom, &sheet, 300, &mut out);
+        assert_eq!(out.overflow & dom.overflow(), dom.overflow());
+        assert!(overflow_note(out.overflow).contains("more words"));
+    }
+
+    /// WHY the width is checked for every reason: the note is drawn on one
+    /// line of the page, and a reason wider than the column is cut mid-word --
+    /// the exact failure the note exists to avoid.
+    #[test]
+    fn every_overflow_reason_fits_the_line_it_is_drawn_on() {
+        // The reader's column at the narrowest phone it runs on.
+        let column = 720 - 2 * crate::CONTENT_PADDING;
+        for (bit, reason) in OVERFLOW_BUDGETS {
+            let width = font::measure(reason.as_bytes(), 1) as usize;
+            assert!(width <= column, "budget {:#x} needs {} px", bit, width);
+        }
+        let width = font::measure(
+            b"The page reached a layout capacity; it is shown in part.",
+            1,
+        ) as usize;
+        assert!(width <= column);
+    }
+
+    #[test]
+    fn the_note_names_the_worst_budget_and_only_that_one() {
+        let worst = crate::layout::dom::OVERFLOW_NODES;
+        let several = worst | OVERFLOW_RECTS | OVERFLOW_COORDS;
+        assert!(overflow_note(several).starts_with("The document is larger"));
+        assert!(overflow_note(OVERFLOW_RECTS).starts_with("The page has more panels"));
+        assert_eq!(
+            overflow_note(0),
+            "The page reached a layout capacity; it is shown in part."
+        );
+    }
+
+    /// WHY: the table is hand-written from two modules' constants. Two
+    /// budgets sharing a bit would make one of them unraisable, silently.
+    #[test]
+    fn each_budget_owns_its_own_bit() {
+        for (index, (bit, reason)) in OVERFLOW_BUDGETS.iter().enumerate() {
+            assert!(*bit != 0, "budget {} names no bit", index);
+            assert!(!reason.is_empty());
+            for (other, _) in &OVERFLOW_BUDGETS[index + 1..] {
+                assert_eq!(bit & other, 0, "budget {:#x} is claimed twice", bit);
+            }
+        }
     }
 }

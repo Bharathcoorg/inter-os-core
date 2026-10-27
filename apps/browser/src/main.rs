@@ -2668,7 +2668,24 @@ impl BrowserApp {
         );
         self.html_view = true;
         if out.truncated {
-            std::log("[BROWSER APP] The page reached a layout capacity; it is shown in part.").ok();
+            // WHY one line per budget: a page can run out of more than one
+            // thing at once, and the reader only needs the worst while whoever
+            // raises a budget needs all of them.
+            for (bit, reason) in layout::OVERFLOW_BUDGETS {
+                if out.overflow & bit == 0 {
+                    continue;
+                }
+                let mut log_buf = [0u8; 112];
+                let prefix = b"[BROWSER APP] ";
+                let plen = prefix.len();
+                let msg = reason.as_bytes();
+                let take = msg.len().min(log_buf.len() - plen);
+                log_buf[..plen].copy_from_slice(prefix);
+                log_buf[plen..plen + take].copy_from_slice(&msg[..take]);
+                if let Ok(line) = core::str::from_utf8(&log_buf[..plen + take]) {
+                    std::log(line).ok();
+                }
+            }
         }
         true
     }
@@ -6428,7 +6445,7 @@ fn html_page_pixel(x: usize, y: usize, app: &BrowserApp, _f: &Frame) -> u32 {
                 browser::CONTENT_PADDING,
                 note_sy as usize,
                 1,
-                b"The page reached a layout capacity; it is shown in part.",
+                layout::overflow_note(layout.overflow).as_bytes(),
                 THEME.on_surface_variant,
                 THEME.surface,
                 false,

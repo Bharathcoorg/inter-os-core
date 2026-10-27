@@ -14,7 +14,8 @@ pub mod style;
 
 pub use dom::{Dom, NodeId, NO_LINK, NO_NODE, StrRef};
 pub use flow::{
-    build, FieldItem, FormInfo, FormMethod, ImageItem, LinkBox, RectItem, RectKind, TextLayout,
-    TextRun, MAX_FIELDS, MAX_IMAGES, MAX_LINK_BOXES, MAX_RECTS, MAX_TEXT_RUNS,
+    build, overflow_note, FieldItem, FormInfo, FormMethod, ImageItem, LinkBox, RectItem, RectKind,
+    TextLayout, TextRun, MAX_FIELDS, MAX_IMAGES, MAX_LINK_BOXES, MAX_RECTS, MAX_TEXT_RUNS,
+    OVERFLOW_BUDGETS,
 };
 pub use style::{BoxStyle, Display, FieldKind, InputType};
