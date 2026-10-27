@@ -10,7 +10,7 @@
 //!   - Header line: App name (Scale 2 Body) • timestamp ("Just now", "5m ago").
 //!   - Individual card dismiss action (>= 48px touch target with vector 'x' glyph).
 //!   - Bold title (Scale 2 Body) and clean body text (Scale 2 Body).
-//!   - Action pills (>= 48px touch targets, Scale 2 Body, e.g. "Reply", "Mark read", "Details", "Dismiss").
+//!   - Action pills (>= 48px touch targets, Scale 2 Body, e.g. "Reply", "Details", "Dismiss").
 //! - Empty state: Flagship "No new notifications", "All caught up" illustration.
 //! - Bottom Clear All button (>= 48px touch target) & Home indicator bar.
 
@@ -707,7 +707,11 @@ fn row_plan(rec: &NotificationRecord, y: usize, cat: Category, now: Option<u64>,
 
     // Action buttons (>= 48px touch targets, Scale 2 Body typography)
     let (act1_name, act2_name): (&[u8], &[u8]) = match cat {
-        Category::Messages => (b"Reply", b"Mark read"),
+        // WHY the second action says "Dismiss" rather than "Mark read": the
+        // platform's notification record has no read flag, and this button has
+        // always cancelled the notification. A label the handler does not
+        // perform is worse than a smaller action.
+        Category::Messages => (b"Reply", b"Dismiss"),
         Category::System => (b"Details", b"Dismiss"),
         _ => (b"Open", b"Dismiss"),
     };

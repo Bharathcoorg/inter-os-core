@@ -639,7 +639,10 @@ fn summary_label(count: usize, running: usize, buf: &mut [u8; 32]) -> ([u8; 32],
     put_num(&mut out, &mut at, count);
     put_bytes(&mut out, &mut at, if count == 1 { b" recent app" } else { b" recent apps" });
     if running > 0 {
-        put_bytes(&mut out, &mut at, b" \xc2\xb7 ");
+        // WHY ASCII and not a UTF-8 middle dot: the bitmap face maps one byte
+        // per glyph, so a two-byte sequence renders as two glyphs ("Â·") and
+        // its measured advance no longer matches what is drawn.
+        put_bytes(&mut out, &mut at, b", ");
         put_num(&mut out, &mut at, running);
         put_bytes(&mut out, &mut at, b" running");
     }

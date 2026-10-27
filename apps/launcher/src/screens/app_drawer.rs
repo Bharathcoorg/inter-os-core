@@ -302,21 +302,31 @@ pub fn app_drawer_dot_at(state: &LauncherState, x: usize, y: usize) -> Option<us
     None
 }
 
-/// Grid slot under a point, computed with touch slop across the entire drawer grid band
-/// so taps near cell borders or margins resolve accurately to the nearest tile.
+/// Grid slot under a point, restricted to the drawn cells.
+///
+/// WHY the gutters are not rounded to a neighbour: the old hit test shifted
+/// the origin by the touch-slop tokens and clamped every point to a cell, so a
+/// tap in the gap between two tiles launched an app the user did not touch.
+/// A gutter is empty space and now answers with nothing.
 fn slot_at(g: &layout::Grid, x: usize, y: usize) -> Option<usize> {
     let pitch_x = g.cell.w + g.gutter;
     let pitch_y = g.cell.h + g.gutter;
     if pitch_x == 0 || pitch_y == 0 {
         return None;
     }
-    if y < 170 || y > 1085 {
+    if x < g.origin_x || y < g.origin_y {
         return None;
     }
-    let eff_x = x.saturating_sub(g.origin_x.saturating_sub(space::MD));
-    let eff_y = y.saturating_sub(g.origin_y.saturating_sub(space::SM));
-    let col = (eff_x / pitch_x).min(g.columns.saturating_sub(1));
-    let row = (eff_y / pitch_y).min(g.rows.saturating_sub(1));
+    let rel_x = x - g.origin_x;
+    let rel_y = y - g.origin_y;
+    let col = rel_x / pitch_x;
+    let row = rel_y / pitch_y;
+    if col >= g.columns || row >= g.rows {
+        return None;
+    }
+    if rel_x % pitch_x >= g.cell.w || rel_y % pitch_y >= g.cell.h {
+        return None;
+    }
     Some(row * g.columns + col)
 }
 
@@ -711,6 +721,10 @@ struct Paint {
     cached_page: usize,
     cached_app_count: usize,
     cached_query_len: usize,
+    /// The query bytes the plan was built from. Length alone is not enough:
+    /// replacing "browel" with "browser" keeps the length and would otherwise
+    /// reuse a stale result page.
+    cached_query: [u8; 32],
 }
 
 /// Builds this frame's plan.
@@ -858,16 +872,26 @@ fn build(state: &LauncherState) -> Paint {
     }
 
     let empty = if filtered_count == 0 {
-        let (head_bytes, body_bytes) = match state.app_drawer_tab {
-            1 => (&b"No Work Apps"[..], &b"No work applications installed"[..]),
-            2 => (&b"No Personal Apps"[..], &b"No personal applications installed"[..]),
-            3 => (&b"No Tool Apps"[..], &b"No tool applications installed"[..]),
-            _ => (&b"No apps installed"[..], &b"The package registry is empty"[..]),
+        let searching = state.search_query_len > 0;
+        let (head_bytes, body_bytes) = if searching {
+            (
+                &b"No matching apps"[..],
+                &b"Try another name or clear the tab filter"[..],
+            )
+        } else {
+            match state.app_drawer_tab {
+                1 => (&b"No Work Apps"[..], &b"No work applications in this category"[..]),
+                2 => (&b"No Personal Apps"[..], &b"No personal applications in this category"[..]),
+                3 => (&b"No Tool Apps"[..], &b"No tool applications in this category"[..]),
+                _ => (&b"No apps installed"[..], &b"The app catalogue is empty"[..]),
+            }
         };
+        let head_y = f.grid.y + 32;
+        let body_y = head_y + text::line_height(type_scale::TITLE) + 20;
         Some(EmptyPlan {
-            head: Run::whole(f.grid.x, f.grid.y + 40, type_scale::TITLE, head_bytes, theme.on_surface),
+            head: Run::whole(f.grid.x, head_y, type_scale::TITLE, head_bytes, theme.on_surface),
             body: [
-                Run::whole(f.grid.x, f.grid.y + 80, type_scale::BODY, body_bytes, theme.on_surface_variant),
+                Run::whole(f.grid.x, body_y, type_scale::BODY, body_bytes, theme.on_surface_variant),
                 Run::EMPTY,
             ],
             body_count: 1,
@@ -894,6 +918,7 @@ fn build(state: &LauncherState) -> Paint {
         cached_page: page,
         cached_app_count: state.app_count,
         cached_query_len: state.search_query_len,
+        cached_query: state.search_query,
     }
 }
 
@@ -921,6 +946,7 @@ fn paint(x: usize, y: usize, state: &LauncherState) -> &'static Paint {
                     || p.cached_tab != state.app_drawer_tab
                     || p.cached_app_count != state.app_count
                     || p.cached_query_len != state.search_query_len
+                    || p.cached_query != state.search_query
             }
         }
     };
