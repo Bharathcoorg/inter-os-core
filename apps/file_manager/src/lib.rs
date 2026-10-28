@@ -1553,7 +1553,7 @@ pub enum OpProblem {
     NameUnchanged,
     /// Something already holds the target name.
     NameTaken,
-    /// The platform has no call that performs this operation.
+    /// The platform does not support this operation.
     UnsupportedByPlatform,
 }
 
@@ -1620,7 +1620,7 @@ pub fn problem_text(problem: OpProblem) -> &'static [u8] {
         OpProblem::NameUnchanged => b"the name is unchanged",
         OpProblem::NameTaken => b"that name is already taken",
         OpProblem::UnsupportedByPlatform => {
-            b"NOT IMPLEMENTED: the platform has no directory-creation call"
+            b"NOT IMPLEMENTED: the platform does not support this operation"
         }
     }
 }
@@ -1636,9 +1636,8 @@ pub enum FileAction {
     Move = 1,
     Delete = 2,
     Rename = 3,
-    /// A new folder. The platform has no directory-creation call, so this
-    /// action always ends in a reported NOT IMPLEMENTED outcome; see
-    /// [`NEW_FOLDER_SUPPORTED`].
+    /// A new folder. The platform supports directory creation via `fs_mkdir`;
+    /// see [`NEW_FOLDER_SUPPORTED`].
     NewFolder = 4,
 }
 
@@ -2654,6 +2653,32 @@ mod tests {
             Ok(())
         );
         assert!(action_supported(FileAction::NewFolder, false));
+        // The refusal text for an unsupported operation does not claim a missing syscall.
+        assert_eq!(
+            problem_text(OpProblem::UnsupportedByPlatform),
+            b"NOT IMPLEMENTED: the platform does not support this operation"
+        );
+        // Genuine refusals: unusable name (e.g. empty or containing slash) or taken name.
+        assert_eq!(
+            validate_operation(FileAction::NewFolder, 0, false, b"", b"", false),
+            Err(OpProblem::NameUnusable)
+        );
+        assert_eq!(
+            validate_operation(FileAction::NewFolder, 0, false, b"invalid/slash", b"", false),
+            Err(OpProblem::NameUnusable)
+        );
+        assert_eq!(
+            problem_text(OpProblem::NameUnusable),
+            b"that name cannot be stored"
+        );
+        assert_eq!(
+            validate_operation(FileAction::NewFolder, 0, false, b"notes", b"", true),
+            Err(OpProblem::NameTaken)
+        );
+        assert_eq!(
+            problem_text(OpProblem::NameTaken),
+            b"that name is already taken"
+        );
     }
 
     #[test]

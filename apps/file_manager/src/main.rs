@@ -2374,9 +2374,8 @@ fn action_slot_state(app: &FileManagerApp, slot: usize) -> (&'static [u8], bool,
         _ => match action_for_slot(slot) {
             Some(action) => {
                 let enabled = if action == FileAction::NewFolder {
-                    // The control exists so the refusal can be reported; the
-                    // platform has no directory-creation call.
-                    true
+                    // The control is enabled when the platform supports new folder creation.
+                    file_manager::NEW_FOLDER_SUPPORTED
                 } else {
                     app.action_is_possible(action)
                 };
@@ -3506,10 +3505,10 @@ fn handle_action_slot(app: &mut FileManagerApp, slot: usize) -> Tap {
                 return Tap::None;
             };
             if action == FileAction::NewFolder {
-                // The platform exposes no directory-creation call, so the
-                // control reports the refusal instead of pretending.
+                // Interactive folder creation is not implemented in the UI yet,
+                // so the control reports the refusal instead of pretending.
                 app.set_notice(problem_text(OpProblem::UnsupportedByPlatform));
-                std::log("[FILE_MANAGER] New folder refused: the platform has no directory-creation call.").ok();
+                std::log("[FILE_MANAGER] New folder refused: interactive folder creation is not implemented.").ok();
                 return Tap::Redraw(Dirty::All);
             }
             let mut rows = [0usize; MAX_PARSED_ENTRIES];
