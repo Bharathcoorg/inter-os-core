@@ -2887,6 +2887,23 @@ body[data-theme="cyberdeck_hud"] .device-screen {
 }
 
 /* --------------------------------------------------------------------------
+   CSS Variables & Responsive Header Dimensions
+   -------------------------------------------------------------------------- */
+:root {
+  --studio-header-height: 42px;
+}
+@media (max-width: 640px) {
+  :root {
+    --studio-header-height: 78px;
+  }
+}
+@media (max-height: 750px) {
+  :root {
+    --studio-header-height: 36px;
+  }
+}
+
+/* --------------------------------------------------------------------------
    Immersive Smartphone Focus Mode (Centered Full-Viewport with Blurred Background)
    -------------------------------------------------------------------------- */
 body.studio-focus-mode #ide-right-pane {
@@ -2896,70 +2913,75 @@ body.studio-focus-mode #ide-right-pane {
 body.studio-focus-mode .device-stage.ide-device-pane {
   position: fixed !important;
   inset: 0 !important;
-  top: 42px !important;
+  top: var(--studio-header-height) !important;
   width: 100vw !important;
   max-width: 100vw !important;
-  height: calc(100vh - 42px) !important;
-  max-height: calc(100vh - 42px) !important;
+  height: calc(100vh - var(--studio-header-height)) !important;
+  max-height: calc(100vh - var(--studio-header-height)) !important;
   z-index: 500 !important;
   background: #08090C !important;
   display: flex !important;
   align-items: center !important;
   justify-content: center !important;
-  padding: 8px 16px !important;
+  padding: 6px 8px !important;
+  overflow: hidden !important;
+  box-sizing: border-box !important;
 }
 
 body.studio-focus-mode .emulator-stage-wrapper {
-  gap: 20px !important;
+  gap: 16px !important;
   height: 100% !important;
   max-height: 100% !important;
+  max-width: 100% !important;
+  justify-content: center !important;
+  align-items: center !important;
+  box-sizing: border-box !important;
 }
 
 body.studio-focus-mode .phone-and-nav-container {
-  height: 100% !important;
-  max-height: calc(100vh - 58px) !important;
-  gap: 8px !important;
+  height: auto !important;
+  max-height: 100% !important;
+  max-width: calc(100vw - 44px) !important;
+  gap: 6px !important;
+  justify-content: center !important;
+  align-items: center !important;
+  box-sizing: border-box !important;
+  flex-shrink: 1 !important;
 }
 
-body.studio-focus-mode .device-chassis {
-  height: calc(100% - 36px) !important;
-  max-height: calc(100vh - 72px) !important;
-  max-width: none !important;
+body.studio-focus-mode .device-chassis,
+body.studio-focus-mode .device-chassis.large-mode,
+body.studio-focus-mode .device-chassis.retina-mode,
+body.studio-focus-mode .device-chassis.exact-mode {
+  transform: none !important;
+  margin-bottom: 0 !important;
+  margin-top: 0 !important;
+  height: auto !important;
   width: auto !important;
   aspect-ratio: 1 / 2 !important;
+  max-height: calc(100vh - var(--studio-header-height) - 52px) !important;
+  max-width: calc((100vh - var(--studio-header-height) - 52px) / 2) !important;
   border-color: #3F3F46 !important;
   box-shadow:
     0 30px 100px -10px rgba(0, 0, 0, 0.98),
     0 0 50px rgba(0, 0, 0, 0.8),
     0 0 0 1px rgba(255, 255, 255, 0.15) !important;
   transition: max-width 0.2s cubic-bezier(0.16, 1, 0.3, 1), max-height 0.2s cubic-bezier(0.16, 1, 0.3, 1);
-}
-
-body.studio-focus-mode .device-chassis.large-mode {
-  height: calc(100% - 36px) !important;
-  max-height: calc(100vh - 72px) !important;
-  max-width: none !important;
+  box-sizing: border-box !important;
 }
 
 body.studio-focus-mode .device-chassis.retina-mode {
-  /* The immersive presentation uses the full remaining viewport height at the
-     phone's 1:2 ratio. On a tall window the derived width reaches the native
-     720x1440 geometry, so text is shown at (or close to) its designed size;
-     1:1 Native remains available for pixel-exact inspection.
-     HOW the width cap is derived: the chassis carries 20px of horizontal
-     chrome (border plus padding), so a 740px chassis is the widest one whose
-     720px scanout is still shown at 1:1. Without it a very tall window
-     upscaled the guest and softened every glyph edge. */
-  height: calc(100% - 16px) !important;
-  max-height: calc(100vh - 44px) !important;
-  max-width: 740px !important;
+  max-width: min(740px, calc((100vh - var(--studio-header-height) - 44px) / 2)) !important;
 }
 
-body.studio-focus-mode .device-chassis.exact-mode {
-  height: calc(100% - 16px) !important;
-  max-height: calc(100vh - 44px) !important;
-  max-width: none !important;
-  width: auto !important;
+@media (max-width: 640px) {
+  body.studio-focus-mode .device-chassis,
+  body.studio-focus-mode .device-chassis.large-mode,
+  body.studio-focus-mode .device-chassis.retina-mode,
+  body.studio-focus-mode .device-chassis.exact-mode {
+    max-width: min(calc(100vw - 64px), calc((100vh - var(--studio-header-height) - 52px) / 2)) !important;
+    max-height: min(calc((100vw - 64px) * 2), calc(100vh - var(--studio-header-height) - 52px)) !important;
+  }
 }
 
 body.studio-focus-mode .emulator-side-toolbar {
@@ -3908,14 +3930,67 @@ body.studio-focus-mode .emulator-side-toolbar {
     transform-origin: top center;
     margin-bottom: -100px;
   }
+  .emulator-stage-wrapper {
+    gap: 6px;
+    width: 100%;
+    max-width: 100%;
+    justify-content: center;
+  }
   .emulator-side-toolbar {
-    margin-left: 6px;
-    padding: 4px;
-    gap: 4px;
+    margin-left: 0;
+    padding: 2px;
+    gap: 3px;
+    flex-shrink: 0;
   }
   .emu-btn {
-    width: 32px;
-    height: 32px;
+    width: 28px;
+    height: 28px;
+  }
+  .emu-btn svg {
+    width: 14px;
+    height: 14px;
+  }
+  .gesture-btn {
+    padding: 4px 6px;
+    font-size: 0.68rem;
+    gap: 3px;
+  }
+  .gesture-btn svg {
+    width: 10px;
+    height: 10px;
+  }
+}
+
+/* Compact landscape & short viewports (<= 500px height) */
+@media (max-height: 500px) {
+  .emulator-side-toolbar {
+    flex-direction: column !important;
+    flex-wrap: wrap !important;
+    max-height: calc(100vh - var(--studio-header-height) - 12px) !important;
+    padding: 2px !important;
+    gap: 2px !important;
+  }
+  .emu-btn {
+    width: 26px !important;
+    height: 26px !important;
+  }
+  .emu-btn svg {
+    width: 13px !important;
+    height: 13px !important;
+  }
+  body.studio-focus-mode .device-chassis,
+  body.studio-focus-mode .device-chassis.large-mode,
+  body.studio-focus-mode .device-chassis.retina-mode,
+  body.studio-focus-mode .device-chassis.exact-mode {
+    max-height: calc(100vh - var(--studio-header-height) - 38px) !important;
+    max-width: calc((100vh - var(--studio-header-height) - 38px) / 2) !important;
+  }
+  .device-gesture-guide {
+    height: 26px !important;
+  }
+  .gesture-btn {
+    padding: 2px 5px !important;
+    font-size: 0.65rem !important;
   }
 }
 

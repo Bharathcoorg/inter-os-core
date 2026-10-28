@@ -368,10 +368,15 @@ document.addEventListener('DOMContentLoaded', () => {
   btnShowTelemetry?.addEventListener('click', () => {
     if (document.body.classList.contains('studio-focus-mode')) {
       toggleFocusMode(false);
+      btnShowTelemetry.classList.add('active');
+      btnShowPhone?.classList.remove('active');
+      studioWorkspace?.classList.remove('smartphone-mode');
+    } else {
+      toggleFocusMode(true);
+      btnShowTelemetry.classList.remove('active');
+      btnShowPhone?.classList.add('active');
+      studioWorkspace?.classList.add('smartphone-mode');
     }
-    btnShowTelemetry.classList.add('active');
-    btnShowPhone?.classList.remove('active');
-    studioWorkspace?.classList.remove('smartphone-mode');
   });
 
 
