@@ -42,17 +42,17 @@ use file_manager::{
     format_size_human, grid_at_point, grid_cell_rect, grid_scroll, join_path, list_scroll,
     parse_indexed_documents, problem_text, row_is_visible, search_needle_is_usable,
     sheet_button_rect, sheet_destination_rect, sort_documents, sort_entries, sort_recents,
-    validate_operation, Crumb, DetailsView, FileAction, IndexedDocument, LayoutMode,
-    MAX_DETAILS_LINE, MAX_PATH_LEN, MAX_SEARCH_RESULTS, OpProblem, SearchScope, Selection,
-    SortMode, TypedField, ViewMode, ACTION_BAR_Y0, ACTION_BAR_Y1, ACTION_LABELS,
-    BREADCRUMB_HIT_Y0, BREADCRUMB_HIT_Y1, BREADCRUMB_Y, CATEGORY_COUNT, CATEGORY_Y0, CATEGORY_Y1,
-    DETAILS_CARD, DETAILS_CLOSE, DETAILS_LINE_H, DETAILS_LINE_Y0, DETAILS_OPEN, DETAILS_TITLE_Y,
-    ENTRIES_CARD, GRID_CELL_H, GRID_CELL_W, HEADER_H, HOME_BROWSE_BTN,
-    HOME_CATEGORY_TITLE_Y, HOME_NOTE_Y, HOME_RECENTS_CAPTION_Y, HOME_RECENTS_TITLE_Y,
-    HOME_RECENT_ROW_H, HOME_RECENTS_VISIBLE, HOME_RECENTS_Y0, HOME_STORAGE_CARD, LINE_LEN,
-    LIST_PILL, GRID_PILL, SCOPE_ALL_PILL, SCOPE_CAPTION_MAX_W, SCOPE_THIS_PILL, SCOPE_Y,
-    SEARCH_CLEAR, SEARCH_FIELD, SHEET, SHEET_NAME_H, SHEET_NAME_Y, SORT_PILL,
-    STATUS_Y, TOOLBAR_Y,
+    validate_operation, ActionTapOutcome, Crumb, DetailsView, evaluate_action_tap, FileAction,
+    IndexedDocument, LayoutMode, MAX_DETAILS_LINE, MAX_PATH_LEN, MAX_SEARCH_RESULTS, OpProblem,
+    SearchScope, Selection, SortMode, TypedField, ViewMode, ACTION_BAR_Y0, ACTION_BAR_Y1,
+    ACTION_LABELS, BREADCRUMB_HIT_Y0, BREADCRUMB_HIT_Y1, BREADCRUMB_Y, CATEGORY_COUNT,
+    CATEGORY_Y0, CATEGORY_Y1, DETAILS_CARD, DETAILS_CLOSE, DETAILS_LINE_H, DETAILS_LINE_Y0,
+    DETAILS_OPEN, DETAILS_TITLE_Y, ENTRIES_CARD, GRID_CELL_H, GRID_CELL_W, HEADER_H,
+    HOME_BROWSE_BTN, HOME_CATEGORY_TITLE_Y, HOME_NOTE_Y, HOME_RECENTS_CAPTION_Y,
+    HOME_RECENTS_TITLE_Y, HOME_RECENT_ROW_H, HOME_RECENTS_VISIBLE, HOME_RECENTS_Y0,
+    HOME_STORAGE_CARD, LINE_LEN, LIST_PILL, GRID_PILL, SCOPE_ALL_PILL, SCOPE_CAPTION_MAX_W,
+    SCOPE_THIS_PILL, SCOPE_Y, SEARCH_CLEAR, SEARCH_FIELD, SHEET, SHEET_NAME_H, SHEET_NAME_Y,
+    SORT_PILL, STATUS_Y, TOOLBAR_Y,
 };
 
 /// The platform's list-row treatment, at the two states the file list uses.
@@ -952,25 +952,31 @@ impl FileManagerApp {
     /// Opens the confirmation sheet for an action over the current selection.
     pub fn open_confirmation(&mut self, action: FileAction) -> bool {
         let mut rows = [0usize; MAX_PARSED_ENTRIES];
-        let count = self.action_rows(&mut rows);
-        if count == 0 {
-            self.set_notice(problem_text(OpProblem::NoSelection));
-            return false;
-        }
-        let mut any_dir = false;
-        for &row in &rows[..count] {
-            if self.card_item_is_dir(row) {
-                any_dir = true;
-                break;
+        let count = if action == FileAction::NewFolder {
+            0
+        } else {
+            self.action_rows(&mut rows)
+        };
+        if action != FileAction::NewFolder {
+            if count == 0 {
+                self.set_notice(problem_text(OpProblem::NoSelection));
+                return false;
             }
-        }
-        if any_dir {
-            self.set_notice(problem_text(OpProblem::FolderNotSupported));
-            return false;
-        }
-        if action == FileAction::Rename && count != 1 {
-            self.set_notice(problem_text(OpProblem::RenameNeedsOne));
-            return false;
+            let mut any_dir = false;
+            for &row in &rows[..count] {
+                if self.card_item_is_dir(row) {
+                    any_dir = true;
+                    break;
+                }
+            }
+            if any_dir {
+                self.set_notice(problem_text(OpProblem::FolderNotSupported));
+                return false;
+            }
+            if action == FileAction::Rename && count != 1 {
+                self.set_notice(problem_text(OpProblem::RenameNeedsOne));
+                return false;
+            }
         }
         self.notice_len = 0;
         self.pending = PendingAction {
@@ -981,39 +987,48 @@ impl FileManagerApp {
         self.has_pending = true;
 
         self.sheet_title = [0u8; 64];
-        let mut len = append(&mut self.sheet_title, 0, ACTION_LABELS[action as usize]);
-        len = append(&mut self.sheet_title, len, b" ");
-        len = append_u64(&mut self.sheet_title, len, count as u64);
-        len = append(
-            &mut self.sheet_title,
-            len,
-            if count == 1 { b" file?" } else { b" files?" },
-        );
-        self.sheet_title_len = len;
+        if action == FileAction::NewFolder {
+            let title = b"New folder?";
+            let len = title.len().min(self.sheet_title.len());
+            self.sheet_title[..len].copy_from_slice(&title[..len]);
+            self.sheet_title_len = len;
+        } else {
+            let mut len = append(&mut self.sheet_title, 0, ACTION_LABELS[action as usize]);
+            len = append(&mut self.sheet_title, len, b" ");
+            len = append_u64(&mut self.sheet_title, len, count as u64);
+            len = append(
+                &mut self.sheet_title,
+                len,
+                if count == 1 { b" file?" } else { b" files?" },
+            );
+            self.sheet_title_len = len;
+        }
 
         // The names of the files the action will touch, and only those: the
         // sheet holds three lines, and a list of forty names would not fit.
         self.sheet_name_count = 0;
-        let shown = count.min(3);
-        for index in 0..shown {
-            let mut copy = [0u8; MAX_ENTRY_NAME_LEN];
-            let name = self.card_item_name(rows[index]);
-            let take = name.len().min(MAX_ENTRY_NAME_LEN);
-            copy[..take].copy_from_slice(&name[..take]);
-            self.sheet_names[index] = copy;
-            self.sheet_name_lens[index] = take;
-            self.sheet_name_count = index + 1;
-        }
-        if count > 3 {
-            let mut more = [0u8; 64];
-            let mut len = append(&mut more, 0, b"and ");
-            len = append_u64(&mut more, len, (count - 3) as u64);
-            len = append(&mut more, len, b" more");
-            let take = len.min(MAX_ENTRY_NAME_LEN);
-            self.sheet_names[2] = [0u8; MAX_ENTRY_NAME_LEN];
-            self.sheet_names[2][..take].copy_from_slice(&more[..take]);
-            self.sheet_name_lens[2] = take;
-            self.sheet_name_count = 3;
+        if action != FileAction::NewFolder {
+            let shown = count.min(3);
+            for index in 0..shown {
+                let mut copy = [0u8; MAX_ENTRY_NAME_LEN];
+                let name = self.card_item_name(rows[index]);
+                let take = name.len().min(MAX_ENTRY_NAME_LEN);
+                copy[..take].copy_from_slice(&name[..take]);
+                self.sheet_names[index] = copy;
+                self.sheet_name_lens[index] = take;
+                self.sheet_name_count = index + 1;
+            }
+            if count > 3 {
+                let mut more = [0u8; 64];
+                let mut len = append(&mut more, 0, b"and ");
+                len = append_u64(&mut more, len, (count - 3) as u64);
+                len = append(&mut more, len, b" more");
+                let take = len.min(MAX_ENTRY_NAME_LEN);
+                self.sheet_names[2] = [0u8; MAX_ENTRY_NAME_LEN];
+                self.sheet_names[2][..take].copy_from_slice(&more[..take]);
+                self.sheet_name_lens[2] = take;
+                self.sheet_name_count = 3;
+            }
         }
 
         if action == FileAction::Rename {
@@ -1024,6 +1039,9 @@ impl FileManagerApp {
             let take = name.len().min(MAX_ENTRY_NAME_LEN);
             copy[..take].copy_from_slice(&name[..take]);
             self.rename_field.set(&copy[..take]);
+            self.rename_field.focus();
+        } else if action == FileAction::NewFolder {
+            self.rename_field.clear();
             self.rename_field.focus();
         } else {
             self.rename_field.clear();
@@ -2545,7 +2563,7 @@ fn sheet_color(x: usize, y: usize, app: &FileManagerApp) -> Option<u32> {
             return Some(button);
         }
     }
-    if app.pending.action == FileAction::Rename {
+    if app.pending.action == FileAction::Rename || app.pending.action == FileAction::NewFolder {
         let field = Rect::new(SHEET.x + 20, SHEET_NAME_Y, SHEET.w - 40, SHEET_NAME_H);
         if field.contains(x, y) {
             let fill = THEME.surface_container_high;
@@ -3039,6 +3057,10 @@ fn delete_file(path: &str) -> Result<(), i64> {
 
 /// Whether something already holds a file at a path.
 fn file_exists(path: &str) -> bool {
+    let mut stat_buf = [0u8; std::FILE_STAT_BYTES];
+    if std::fs_stat(path, &mut stat_buf).is_ok() {
+        return true;
+    }
     match std::fs_open(path, std::FS_READ) {
         Ok(handle) => {
             let _ = std::fs_close(handle);
@@ -3084,7 +3106,83 @@ fn perform_action(app: &mut FileManagerApp, surface: u32) {
     app.fail_reason_len = 0;
 
     if action == FileAction::NewFolder {
-        app.set_notice(problem_text(OpProblem::UnsupportedByPlatform));
+        let mut target = [0u8; MAX_PATH_LEN];
+        let Some(target_len) = join_path(app.current_path_str(), &typed[..typed_len], &mut target) else {
+            record_failure(app, &typed[..typed_len], b"the target path is too long");
+            let mut line = [0u8; LINE_LEN];
+            let len = append(&mut line, 0, b"New: 0 done, 1 failed - first: the target path is too long");
+            app.notice = line;
+            app.notice_len = len;
+            return;
+        };
+        let Ok(target_str) = core::str::from_utf8(&target[..target_len]) else {
+            record_failure(app, &typed[..typed_len], b"the target path is not text");
+            let mut line = [0u8; LINE_LEN];
+            let len = append(&mut line, 0, b"New: 0 done, 1 failed - first: the target path is not text");
+            app.notice = line;
+            app.notice_len = len;
+            return;
+        };
+        let target_exists = file_exists(target_str);
+        if let Err(problem) = validate_operation(
+            action,
+            0,
+            false,
+            &typed[..typed_len],
+            b"",
+            target_exists,
+        ) {
+            record_failure(app, &typed[..typed_len], problem_text(problem));
+            let mut line = [0u8; LINE_LEN];
+            let mut len = append(&mut line, 0, b"New: 0 done, 1 failed - first: ");
+            let take = typed_len.min(line.len().saturating_sub(len + 32));
+            len = append(&mut line, len, &typed[..take]);
+            len = append(&mut line, len, b" (");
+            let reason = problem_text(problem);
+            let rtake = reason.len().min(line.len().saturating_sub(len + 1));
+            len = append(&mut line, len, &reason[..rtake]);
+            len = append(&mut line, len, b")");
+            app.notice = line;
+            app.notice_len = len;
+            return;
+        }
+
+        let outcome = std::fs_mkdir(target_str);
+        match outcome {
+            Ok(()) => {
+                let mut line = [0u8; LINE_LEN];
+                let len = append(&mut line, 0, b"New: 1 done, 0 failed");
+                app.notice = line;
+                app.notice_len = len;
+            }
+            Err(code) => {
+                let mut reason = [0u8; 32];
+                let mut rlen = append(&mut reason, 0, b"platform code -");
+                rlen = append_u64(&mut reason, rlen, code.unsigned_abs());
+                record_failure(app, &typed[..typed_len], &reason[..rlen]);
+
+                let mut line = [0u8; LINE_LEN];
+                let mut len = append(&mut line, 0, b"New: 0 done, 1 failed - first: ");
+                let take = typed_len.min(line.len().saturating_sub(len + 32));
+                len = append(&mut line, len, &typed[..take]);
+                len = append(&mut line, len, b" (");
+                let rtake = rlen.min(line.len().saturating_sub(len + 1));
+                len = append(&mut line, len, &reason[..rtake]);
+                len = append(&mut line, len, b")");
+                app.notice = line;
+                app.notice_len = len;
+            }
+        }
+
+        app.selection.clear();
+        app.multi_select = false;
+        app.selected_entry = None;
+        app.refresh_directory();
+        app.load_recents();
+        if surface > 0 {
+            render_file_manager_ui(surface, app);
+            let _ = std::surface_flip();
+        }
         return;
     }
 
@@ -3504,19 +3602,12 @@ fn handle_action_slot(app: &mut FileManagerApp, slot: usize) -> Tap {
             let Some(action) = action_for_slot(slot) else {
                 return Tap::None;
             };
-            if action == FileAction::NewFolder {
-                // Interactive folder creation is not implemented in the UI yet,
-                // so the control reports the refusal instead of pretending.
-                app.set_notice(problem_text(OpProblem::UnsupportedByPlatform));
-                std::log("[FILE_MANAGER] New folder refused: interactive folder creation is not implemented.").ok();
-                return Tap::Redraw(Dirty::All);
-            }
             let mut rows = [0usize; MAX_PARSED_ENTRIES];
-            let count = app.action_rows(&mut rows);
-            if count == 0 {
-                app.set_notice(problem_text(OpProblem::NoSelection));
-                return Tap::Redraw(Dirty::All);
-            }
+            let count = if action == FileAction::NewFolder {
+                0
+            } else {
+                app.action_rows(&mut rows)
+            };
             let mut any_dir = false;
             for &row in &rows[..count] {
                 if app.card_item_is_dir(row) {
@@ -3524,16 +3615,16 @@ fn handle_action_slot(app: &mut FileManagerApp, slot: usize) -> Tap {
                     break;
                 }
             }
-            if any_dir {
-                app.set_notice(problem_text(OpProblem::FolderNotSupported));
-                return Tap::Redraw(Dirty::All);
-            }
-            if action == FileAction::Rename && count != 1 {
-                app.set_notice(problem_text(OpProblem::RenameNeedsOne));
-                return Tap::Redraw(Dirty::All);
-            }
-            if set_as_action(app, action) {
-                return Tap::Redraw(Dirty::All);
+            match evaluate_action_tap(action, count, any_dir) {
+                ActionTapOutcome::Refused(problem) => {
+                    app.set_notice(problem_text(problem));
+                    return Tap::Redraw(Dirty::All);
+                }
+                ActionTapOutcome::OpenConfirmation(act) => {
+                    if set_as_action(app, act) {
+                        return Tap::Redraw(Dirty::All);
+                    }
+                }
             }
             Tap::Redraw(Dirty::All)
         }
@@ -3556,7 +3647,7 @@ fn handle_sheet_tap(
         }
     }
     // The name field, for a rename.
-    if app.pending.action == FileAction::Rename {
+    if app.pending.action == FileAction::Rename || app.pending.action == FileAction::NewFolder {
         let field = Rect::new(SHEET.x + 20, SHEET_NAME_Y, SHEET.w - 40, SHEET_NAME_H);
         if field.contains(x, y) {
             app.rename_field.focus();
@@ -3591,13 +3682,27 @@ fn handle_sheet_tap(
         } else {
             ([0u8; MAX_ENTRY_NAME_LEN], 0)
         };
+        let target_exists = if action == FileAction::NewFolder {
+            let mut target = [0u8; MAX_PATH_LEN];
+            if let Some(target_len) = join_path(app.current_path_str(), app.rename_field.as_slice(), &mut target) {
+                if let Ok(target_str) = core::str::from_utf8(&target[..target_len]) {
+                    file_exists(target_str)
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        };
         if let Err(problem) = validate_operation(
             action,
             count,
             any_dir,
             app.rename_field.as_slice(),
             &current_name.0[..current_name.1],
-            false,
+            target_exists,
         ) {
             // The sheet stays open so the user can correct the name or
             // cancel; the reason is written where the status line goes.

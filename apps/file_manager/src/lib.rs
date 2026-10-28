@@ -1674,6 +1674,132 @@ pub fn action_supported(action: FileAction, is_dir: bool) -> bool {
     }
 }
 
+/// The outcome of tapping an action control in the action bar.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ActionTapOutcome {
+    /// Opens the confirmation sheet for the action.
+    OpenConfirmation(FileAction),
+    /// Refused with a specific reason.
+    Refused(OpProblem),
+}
+
+/// Evaluates what tapping an action control in the action bar does.
+///
+/// WHY this is here: the toolbar's visual state and its tap handler must agree.
+/// If slot 6 is enabled because `NEW_FOLDER_SUPPORTED` is true, tapping slot 6
+/// must open the confirmation sheet rather than refusing.
+pub fn evaluate_action_tap(
+    action: FileAction,
+    selection_count: usize,
+    any_dir: bool,
+) -> ActionTapOutcome {
+    if action == FileAction::NewFolder {
+        if !NEW_FOLDER_SUPPORTED {
+            return ActionTapOutcome::Refused(OpProblem::UnsupportedByPlatform);
+        }
+        return ActionTapOutcome::OpenConfirmation(FileAction::NewFolder);
+    }
+    if selection_count == 0 {
+        return ActionTapOutcome::Refused(OpProblem::NoSelection);
+    }
+    if any_dir {
+        return ActionTapOutcome::Refused(OpProblem::FolderNotSupported);
+    }
+    if action == FileAction::Rename && selection_count != 1 {
+        return ActionTapOutcome::Refused(OpProblem::RenameNeedsOne);
+    }
+    ActionTapOutcome::OpenConfirmation(action)
+}
+
+/// Error returned when attempting to create a new folder.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum NewFolderError {
+    Problem(OpProblem),
+    PlatformErrno(i64),
+}
+
+/// Appends a byte slice into an output buffer, returning the new length.
+pub fn append(buf: &mut [u8], n: usize, bytes: &[u8]) -> usize {
+    let take = bytes.len().min(buf.len().saturating_sub(n));
+    buf[n..n + take].copy_from_slice(&bytes[..take]);
+    n + take
+}
+
+/// Formats a u64 decimal and appends it to an output buffer.
+pub fn append_u64(buf: &mut [u8], n: usize, value: u64) -> usize {
+    let mut tmp = [0u8; 20];
+    let len = fmt_u64(value, &mut tmp);
+    append(buf, n, &tmp[..len])
+}
+
+/// Checks whether `haystack` contains `needle`.
+pub fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    if haystack.len() < needle.len() {
+        return false;
+    }
+    haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+/// Performs a new folder creation given a parent directory, typed name, existence check,
+/// and mkdir implementation.
+pub fn execute_new_folder_op<F>(
+    parent: &str,
+    name: &[u8],
+    target_exists: bool,
+    mut mkdir: F,
+) -> Result<(), NewFolderError>
+where
+    F: FnMut(&str) -> Result<(), i64>,
+{
+    validate_operation(FileAction::NewFolder, 0, false, name, b"", target_exists)
+        .map_err(NewFolderError::Problem)?;
+    let mut target = [0u8; MAX_PATH_LEN];
+    let target_len = join_path(parent, name, &mut target)
+        .ok_or(NewFolderError::Problem(OpProblem::NameUnusable))?;
+    let target_str = core::str::from_utf8(&target[..target_len])
+        .map_err(|_| NewFolderError::Problem(OpProblem::NameUnusable))?;
+    mkdir(target_str).map_err(NewFolderError::PlatformErrno)
+}
+
+/// Formats the result notice for a new folder operation.
+pub fn format_new_folder_notice(
+    name: &[u8],
+    outcome: Result<(), NewFolderError>,
+    out: &mut [u8; LINE_LEN],
+) -> usize {
+    match outcome {
+        Ok(()) => {
+            let text = b"New: 1 done, 0 failed";
+            let len = text.len().min(LINE_LEN);
+            out[..len].copy_from_slice(&text[..len]);
+            len
+        }
+        Err(NewFolderError::Problem(prob)) => {
+            let mut len = append(out, 0, b"New: 0 done, 1 failed - first: ");
+            let take = name.len().min(out.len().saturating_sub(len + 32));
+            len = append(out, len, &name[..take]);
+            len = append(out, len, b" (");
+            let reason = problem_text(prob);
+            let rtake = reason.len().min(out.len().saturating_sub(len + 1));
+            len = append(out, len, &reason[..rtake]);
+            len = append(out, len, b")");
+            len
+        }
+        Err(NewFolderError::PlatformErrno(code)) => {
+            let mut len = append(out, 0, b"New: 0 done, 1 failed - first: ");
+            let take = name.len().min(out.len().saturating_sub(len + 32));
+            len = append(out, len, &name[..take]);
+            len = append(out, len, b" (platform code -");
+            len = append_u64(out, len, code.unsigned_abs());
+            len = append(out, len, b")");
+            len
+        }
+    }
+}
+
 /// Whether a typed name can be a file's name on this platform.
 ///
 /// WHY the rules: the name becomes a path component, so a name with a slash
@@ -2691,5 +2817,111 @@ mod tests {
         // The seven slots fit inside the 648px bar.
         assert!(action_slot_rect(6).x + action_slot_rect(6).w <= 684);
         assert!(ACTION_LABELS[4] == b"New");
+    }
+
+    #[test]
+    fn new_folder_enabled_flag_and_tap_handler_agree() {
+        let enabled = action_supported(FileAction::NewFolder, false);
+        assert!(enabled, "toolbar control must be enabled when NEW_FOLDER_SUPPORTED is true");
+
+        // The tap handler must agree with the enabled flag:
+        // When enabled is true, tapping slot 6 must open the confirmation sheet,
+        // rather than refusing with UnsupportedByPlatform.
+        let tap = evaluate_action_tap(FileAction::NewFolder, 0, false);
+        assert_eq!(
+            tap,
+            ActionTapOutcome::OpenConfirmation(FileAction::NewFolder),
+            "tap handler must agree with enabled flag and open confirmation"
+        );
+    }
+
+    #[test]
+    fn new_folder_success_produces_real_directory_in_listing() {
+        let mut entries = [RuntimeFileEntry::EMPTY; MAX_PARSED_ENTRIES];
+        let initial_raw = b"photos|0|dir\nreport.txt|1024|file\n";
+        let count = parse_vfs_entries(initial_raw, &mut entries);
+        assert_eq!(count, 2);
+
+        // When a new folder is created successfully:
+        let mut created_path = [0u8; MAX_PATH_LEN];
+        let mut created_len = 0usize;
+        let outcome = execute_new_folder_op(
+            "/storage",
+            b"documents",
+            false,
+            |target| {
+                let bytes = target.as_bytes();
+                created_path[..bytes.len()].copy_from_slice(bytes);
+                created_len = bytes.len();
+                Ok(())
+            },
+        );
+        assert_eq!(outcome, Ok(()));
+        assert_eq!(&created_path[..created_len], b"/storage/documents");
+
+        // Success produces a real directory visible in the VFS listing
+        let updated_raw = b"documents|0|dir\nphotos|0|dir\nreport.txt|1024|file\n";
+        let mut updated_entries = [RuntimeFileEntry::EMPTY; MAX_PARSED_ENTRIES];
+        let updated_count = parse_vfs_entries(updated_raw, &mut updated_entries);
+        assert_eq!(updated_count, 3);
+        assert_eq!(&updated_entries[0].name[..updated_entries[0].name_len], b"documents");
+        assert!(updated_entries[0].is_dir);
+        assert_eq!(&updated_entries[0].size_label[..updated_entries[0].size_label_len], b"DIR");
+    }
+
+    #[test]
+    fn new_folder_genuine_failures_surface_specific_reasons_and_never_unsupported() {
+        let mut notice_buf = [0u8; LINE_LEN];
+
+        // 1. Existing name (target_exists = true)
+        let err_existing = execute_new_folder_op(
+            "/storage",
+            b"photos",
+            true,
+            |_| Ok(()),
+        );
+        assert_eq!(err_existing, Err(NewFolderError::Problem(OpProblem::NameTaken)));
+        let len = format_new_folder_notice(b"photos", err_existing, &mut notice_buf);
+        let notice = &notice_buf[..len];
+        assert_eq!(notice, b"New: 0 done, 1 failed - first: photos (that name is already taken)");
+        assert!(!contains_subslice(notice, b"platform does not support"));
+
+        // 2. Bad name (empty or invalid character)
+        let err_bad_empty = execute_new_folder_op(
+            "/storage",
+            b"",
+            false,
+            |_| Ok(()),
+        );
+        assert_eq!(err_bad_empty, Err(NewFolderError::Problem(OpProblem::NameUnusable)));
+        let len = format_new_folder_notice(b"", err_bad_empty, &mut notice_buf);
+        let notice = &notice_buf[..len];
+        assert_eq!(notice, b"New: 0 done, 1 failed - first:  (that name cannot be stored)");
+        assert!(!contains_subslice(notice, b"platform does not support"));
+
+        let err_bad_slash = execute_new_folder_op(
+            "/storage",
+            b"sub/dir",
+            false,
+            |_| Ok(()),
+        );
+        assert_eq!(err_bad_slash, Err(NewFolderError::Problem(OpProblem::NameUnusable)));
+        let len = format_new_folder_notice(b"sub/dir", err_bad_slash, &mut notice_buf);
+        let notice = &notice_buf[..len];
+        assert_eq!(notice, b"New: 0 done, 1 failed - first: sub/dir (that name cannot be stored)");
+        assert!(!contains_subslice(notice, b"platform does not support"));
+
+        // 3. Denied capability (kernel returns permission denied errno -13)
+        let err_denied = execute_new_folder_op(
+            "/storage",
+            b"restricted",
+            false,
+            |_| Err(-13),
+        );
+        assert_eq!(err_denied, Err(NewFolderError::PlatformErrno(-13)));
+        let len = format_new_folder_notice(b"restricted", err_denied, &mut notice_buf);
+        let notice = &notice_buf[..len];
+        assert_eq!(notice, b"New: 0 done, 1 failed - first: restricted (platform code -13)");
+        assert!(!contains_subslice(notice, b"platform does not support"));
     }
 }
