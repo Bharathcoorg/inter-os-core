@@ -94,6 +94,20 @@ static mut DECODE_BUF: [u8; browser::MAX_HTML_BYTES] = [0; browser::MAX_HTML_BYT
 /// stylesheet short before the arena that would have held it ever saw it.
 static mut STYLE_BUF: [u8; css::MAX_CSS_BYTES] = [0; css::MAX_CSS_BYTES];
 
+/// The reply bytes one linked stylesheet may ask the wire for.
+///
+/// WHY not the whole response buffer: a stylesheet is read as far as the
+/// document's style window, and the text kept from it is then cut to the rules
+/// this engine applies, so anything past that window is paid for in wire time
+/// and thrown away where it lands. A page that chains a dozen colour-token
+/// files, each twice the size of the window, pays that dozen times over
+/// before the file holding its own type is reached.
+///
+/// WHY sixteen kilobytes above the window: the reply is the stylesheet inside
+/// an HTTP head and a JSON envelope, and the envelope escapes quotes and
+/// newlines, so the bytes on the wire are more than the text they carry.
+const STYLESHEET_WINDOW_BYTES: usize = css::MAX_CSS_BYTES + 16 * 1024;
+
 /// The cookies the browser has been given, across navigations.
 ///
 /// WHY a static and not a field of `BrowserApp`: the jar is bounded but
@@ -350,11 +364,18 @@ struct FetchOutcome {
 /// response could have arrived. The device therefore reported a transport
 /// failure for every page, including the ones the gateway would have
 /// served.
+///
+/// WHY the caller names the window: a subresource is often bigger than the
+/// room the reader has for it, and bytes past that room are dropped where
+/// they land. Stopping the transfer at the room saves the wire and the time
+/// for the fetches behind it -- a page that chains twenty stylesheets pays
+/// for every one of them.
 fn fetch_over_tcp(
     dst_ip: [u8; 4],
     dst_port: u16,
     local_port: u16,
     request: &[u8],
+    window: usize,
 ) -> FetchOutcome {
     let mut outcome = FetchOutcome {
         bytes: 0,
@@ -429,14 +450,15 @@ fn fetch_over_tcp(
     let mut total = 0usize;
     let mut reads = 0usize;
     let mut recv_stalled = false;
+    let cap = window.min(MAX_RESPONSE_BYTES);
     loop {
         reads += 1;
         let buffer = unsafe { &mut *core::ptr::addr_of_mut!(RESPONSE_BUF) };
-        if total >= buffer.len() {
+        if total >= cap {
             outcome.truncated = true;
             break;
         }
-        let want = (buffer.len() - total).min(TCP_READ_CHUNK);
+        let want = (cap - total).min(TCP_READ_CHUNK);
         match std::tcp_recv(connection, &mut buffer[total..total + want]) {
             Ok(0) => break,
             Ok(n) => {
@@ -2222,24 +2244,48 @@ impl BrowserApp {
     ///
     /// WHY the chain and not just the first link: a bundled site keeps its
     /// design tokens in one file and its rules in another, and the one that
-    /// makes the page look like itself is often second. The walk stops where
-    /// the arena is full, because a stylesheet that cannot be kept could not
-    /// have been applied either.
+    /// makes the page look like itself is often behind a dozen files that
+    /// carry colour names for a script to read. The walk therefore runs to
+    /// the end of what the page links, and stops at the two budgets that
+    /// actually bind: the rules the reader can hold, and the style text
+    /// those rules need.
     fn fetch_linked_stylesheets(&mut self, dom: &mut layout::Dom) {
+        // The page's own `<style>` blocks are already in the arena, so the
+        // room left for the files it links is what is left of the rule budget.
+        let mut held = css::parse_stylesheet(dom.css()).len;
         for index in 0..dom.stylesheets().len() {
-            let declared = dom.stylesheets()[index];
-            self.fetch_stylesheet(dom, declared);
-            if dom.css().len() == layout::dom::MAX_CSS_BYTES {
+            if held >= css::MAX_RULES || dom.css().len() == layout::dom::MAX_CSS_BYTES {
                 break;
             }
+            let declared = dom.stylesheets()[index];
+            held += self.fetch_stylesheet(dom, declared, css::MAX_RULES - held);
         }
     }
 
-    /// Fetches one linked stylesheet and keeps whatever rules of it the
-    /// document's style arena still has room for.
-    fn fetch_stylesheet(&mut self, dom: &mut layout::Dom, declared: layout::StrRef) {
-        if declared.is_empty() {
-            return;
+    /// Fetches one linked stylesheet and keeps the rules of it this engine can
+    /// apply, in as few bytes as those rules need.
+    ///
+    /// WHY the file is cut down on the way into the arena: a page's colour
+    /// tokens, its icon paths and its animation curves are ordinary CSS that
+    /// this reader paints nothing from, and a site that ships them as separate
+    /// files fills the arena with text before the file holding the page's own
+    /// type is reached. What cannot change a pixel is not kept, so that what
+    /// can has somewhere to live.
+    ///
+    /// WHY a reply that stops short is still read: the gateway holds a body as
+    /// far as its own buffer, and a stylesheet longer than that has its front
+    /// on the wire. The front is where a bundled file keeps the page's own
+    /// colours, so it is unescaped and parsed rather than refused.
+    ///
+    /// Returns how many rules the file contributed.
+    fn fetch_stylesheet(
+        &mut self,
+        dom: &mut layout::Dom,
+        declared: layout::StrRef,
+        room: usize,
+    ) -> usize {
+        if declared.is_empty() || room == 0 {
+            return 0;
         }
         // Copied out of the document before anything is fetched: the reply
         // lands in the same transport buffer the page's own bytes came
@@ -2252,61 +2298,82 @@ impl BrowserApp {
         let mut url = [0u8; images::MAX_SRC_LEN];
         let Ok(len) = images::resolve_subresource(self.current_url(), &href[..len], &mut url)
         else {
-            return;
+            return 0;
         };
         let mut request = [0u8; 1024];
         let request_len = browser::format_proxy_request(&url[..len], &mut request);
         if request_len + 128 > request.len() {
-            return;
+            return 0;
         }
         let local_port = self.take_local_port();
-        let outcome = fetch_over_tcp([10, 0, 2, 2], 4300, local_port, &request[..request_len]);
+        let outcome = fetch_over_tcp(
+            [10, 0, 2, 2],
+            4300,
+            local_port,
+            &request[..request_len],
+            STYLESHEET_WINDOW_BYTES,
+        );
         let buffer = unsafe { &*core::ptr::addr_of!(RESPONSE_BUF) };
         let reply = &buffer[..outcome.bytes];
         if outcome.bytes == 0 {
             self.log_stylesheet_failed(-(outcome.error as i32));
-            return;
+            return 0;
         }
         let Some(response) = browser::parse_http_response(reply) else {
             self.log_stylesheet_failed(-1);
-            return;
+            return 0;
         };
         // The gateway answers a failed upstream fetch with an HTTP 200 whose
         // body is its own JSON envelope. That is a refusal, not a stylesheet.
         if response.status_code != 200 || browser::proxy_reports_failure(reply) {
             self.log_stylesheet_failed(response.status_code as i32);
-            return;
+            return 0;
         }
         // A stylesheet that came through the gateway arrives as the text
         // inside that envelope, with its newlines and quotes still escaped
-        // for JSON. Unescaped is what the rule parser reads. A file longer
-        // than the arena is read as far as it goes, because the rules at the
-        // front of a stylesheet are the page's own colours and type, and the
-        // arena says out loud that it did not hold the rest.
+        // for JSON. Unescaped is what the rule parser reads. The style buffer
+        // is the window this browser can read, so a file longer than it is
+        // taken as far as the window goes.
         let style = unsafe { &mut *core::ptr::addr_of_mut!(STYLE_BUF) };
         let text = if browser::is_browser_envelope(reply) {
-            let Some(escaped) = browser::http::proxy_string_field(reply, b"html") else {
+            let Some(escaped) = browser::http::proxy_string_field_prefix(reply, b"html") else {
                 self.log_stylesheet_failed(-2);
-                return;
+                return 0;
             };
             let (kept, _) = browser::http::unescape_json_string_prefix(escaped, style);
             if kept == 0 {
                 self.log_stylesheet_failed(-2);
-                return;
+                return 0;
             }
-            &style[..kept]
+            kept
         } else {
-            response.body
+            let len = response.body.len().min(style.len());
+            style[..len].copy_from_slice(&response.body[..len]);
+            len
         };
-        let kept = dom.append_css(text);
+        let (carries_bytes, carries_rules) = css::keep_readable_rules(&mut style[..text], room);
+        if carries_bytes == 0 {
+            // Every selector in the file is one this engine skips. Its text is
+            // not kept, because keeping it would leave the page looking the
+            // way it looked before the file was fetched at all.
+            std::log("[BROWSER APP] Linked stylesheet carries no rule this browser reads; its bytes are not held.")
+                .ok();
+            return 0;
+        }
+        let kept = dom.append_css(&style[..carries_bytes]);
         let mut log_buf = [0u8; 96];
         let prefix = b"[BROWSER APP] Linked stylesheet applied bytes=";
         let plen = prefix.len();
         log_buf[..plen].copy_from_slice(prefix);
-        let lp = browser::append_decimal(&mut log_buf, plen, kept as u64);
+        let mut lp = browser::append_decimal(&mut log_buf, plen, kept as u64);
+        let suffix = b" rules=";
+        log_buf[lp..lp + suffix.len()].copy_from_slice(suffix);
+        lp += suffix.len();
+        lp = browser::append_decimal(&mut log_buf, lp, carries_rules as u64);
         if let Ok(line) = core::str::from_utf8(&log_buf[..lp]) {
             std::log(line).ok();
         }
+        carries_rules
     }
 
     /// Fetches the picture a page asks to be known by, keeping the first of
@@ -2479,7 +2546,13 @@ impl BrowserApp {
             );
         }
         let local_port = self.take_local_port();
-        let outcome = fetch_over_tcp([10, 0, 2, 2], 4300, local_port, &request[..request_len]);
+        let outcome = fetch_over_tcp(
+            [10, 0, 2, 2],
+            4300,
+            local_port,
+            &request[..request_len],
+            MAX_RESPONSE_BYTES,
+        );
         if outcome.bytes == 0 {
             return (
                 images::ImageStatus::Refused(images::ImageRefusal::FetchFailed {
@@ -4114,7 +4187,13 @@ impl BrowserApp {
             browser::format_speedtest_download_request(SPEEDTEST_DOWNLOAD_BYTES, &mut request);
         let local_port = self.take_local_port();
         let start = std::get_ticks().ok();
-        let outcome = fetch_over_tcp([10, 0, 2, 2], 4300, local_port, &request[..request_len]);
+        let outcome = fetch_over_tcp(
+            [10, 0, 2, 2],
+            4300,
+            local_port,
+            &request[..request_len],
+            MAX_RESPONSE_BYTES,
+        );
         let end = std::get_ticks().ok();
         match self.download_rate(start, end, outcome, SPEEDTEST_DOWNLOAD_BYTES) {
             Ok((bytes, ms, bps)) => {
@@ -4134,7 +4213,13 @@ impl BrowserApp {
             browser::format_speedtest_download_request(SPEEDTEST_LATENCY_BYTES, &mut request);
         let local_port = self.take_local_port();
         let start = std::get_ticks().ok();
-        let outcome = fetch_over_tcp([10, 0, 2, 2], 4300, local_port, &request[..request_len]);
+        let outcome = fetch_over_tcp(
+            [10, 0, 2, 2],
+            4300,
+            local_port,
+            &request[..request_len],
+            MAX_RESPONSE_BYTES,
+        );
         match (start, outcome.first_byte_tick) {
             (Some(start), Some(first)) if outcome.bytes > 0 && outcome.error == 0 => {
                 let body_ok = {
@@ -4258,7 +4343,13 @@ impl BrowserApp {
         let mut request = [0u8; 512];
         let request_len = format_proxy_request(LAB_URLS[index], &mut request);
         let local_port = self.take_local_port();
-        let outcome = fetch_over_tcp([10, 0, 2, 2], 4300, local_port, &request[..request_len]);
+        let outcome = fetch_over_tcp(
+            [10, 0, 2, 2],
+            4300,
+            local_port,
+            &request[..request_len],
+            MAX_RESPONSE_BYTES,
+        );
         let mut result = LabResult::EMPTY;
         if outcome.bytes == 0 || outcome.error != 0 {
             result.state = TransferState::Failed;
@@ -4527,7 +4618,13 @@ impl BrowserApp {
 
             std::log("[BROWSER APP] Request dispatched over TCP to the Device Studio gateway.").ok();
 
-            let outcome = fetch_over_tcp(dst_ip, dst_port, local_port, &request_buf[..request_len]);
+            let outcome = fetch_over_tcp(
+                dst_ip,
+                dst_port,
+                local_port,
+                &request_buf[..request_len],
+                MAX_RESPONSE_BYTES,
+            );
 
             // PLATFORM TRUTH: a page is loaded only when the transport
             // actually delivered bytes. The specific failure is reported

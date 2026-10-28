@@ -38,15 +38,29 @@ pub const MAX_LINKS: usize = 128;
 
 /// The most bytes of stylesheet text one document may carry, from its own
 /// `<style>` tags and from the files it links.
-pub const MAX_CSS_BYTES: usize = 16 * 1024;
+///
+/// WHY so much of it: the bytes kept here are rules rather than files -- a
+/// linked stylesheet is cut to what this engine can apply before it lands --
+/// and a page that chains its styles needs the rules of every file it reaches
+/// to sit side by side.
+pub const MAX_CSS_BYTES: usize = 32 * 1024;
 
 /// The most `<link rel="stylesheet">` addresses one document may name.
 ///
-/// WHY a handful rather than one: a page that chains its styles is ordinary,
-/// and the file that carries its colours and its type is not always the one
-/// it asks for first. WHY not many: each is fetched before the page is drawn,
-/// so a long chain is a slow blank screen instead.
-pub const MAX_STYLESHEET_LINKS: usize = 4;
+/// WHY a chain rather than one: a page that splits its styles is ordinary,
+/// and the file that carries its colours and its type is not always the one it
+/// asks for first.
+///
+/// WHY twenty-four: a site that ships one file per colour theme names eighteen
+/// token sheets -- hundreds of declarations of custom properties, none of them
+/// a rule this engine reads -- before the first file with a selector in it. A
+/// walk that stops short of them styles nothing, and the reader measures the
+/// chain once, at parse time, so the room is for the whole of it.
+///
+/// WHY not more: each link is fetched before the page is drawn, so the walk
+/// also stops where the rule budget is spent, and the links past that are the
+/// page's own business.
+pub const MAX_STYLESHEET_LINKS: usize = 24;
 
 /// The most `<link rel="icon">` addresses one document may name.
 ///
@@ -928,10 +942,21 @@ impl Dom {
     /// the last slot: the reader fetches these before it draws anything, so
     /// what it holds has to be what the page asked for first, not whatever it
     /// happened to reach last.
+    ///
+    /// WHY a repeated address is not remembered twice: a bundler that names
+    /// the same component stylesheet once per component is ordinary, and the
+    /// file applies the same either way. Holding it once leaves the slot to a
+    /// file the reader has not seen.
     fn link_stylesheet(&mut self, href: &[u8]) {
         let count = (self.meta.stylesheet_count as usize).min(MAX_STYLESHEET_LINKS);
         if count == MAX_STYLESHEET_LINKS {
             return;
+        }
+        for index in 0..count {
+            let held = self.meta.stylesheets[index];
+            if held.get(self) == href {
+                return;
+            }
         }
         let sheet = self.intern(href);
         self.meta.stylesheets[count] = sheet;
@@ -1888,15 +1913,39 @@ mod tests {
 
     #[test]
     fn a_link_chain_longer_than_the_reader_holds_keeps_the_front_of_it() {
+        let mut page = std::vec::Vec::new();
+        for letter in b'a'..=b'z' {
+            page.extend_from_slice(b"<link rel=\"stylesheet\" href=\"/");
+            page.push(letter);
+            page.extend_from_slice(b".css\">");
+        }
         let mut dom = Dom::new();
-        dom.parse(
-            b"<link rel=\"stylesheet\" href=\"/a.css\"><link rel=\"stylesheet\" href=\"/b.css\">\
-              <link rel=\"stylesheet\" href=\"/c.css\"><link rel=\"stylesheet\" href=\"/d.css\">\
-              <link rel=\"stylesheet\" href=\"/e.css\">",
-        );
+        dom.parse(&page);
         assert_eq!(dom.stylesheets().len(), MAX_STYLESHEET_LINKS);
         assert_eq!(dom.stylesheets()[0].get(&dom), b"/a.css");
-        assert_eq!(dom.stylesheets()[MAX_STYLESHEET_LINKS - 1].get(&dom), b"/d.css");
+        let mut last = std::vec::Vec::new();
+        last.push(b'/');
+        last.push(b'a' + (MAX_STYLESHEET_LINKS - 1) as u8);
+        last.extend_from_slice(b".css");
+        assert_eq!(
+            dom.stylesheets()[MAX_STYLESHEET_LINKS - 1].get(&dom),
+            last.as_slice()
+        );
+    }
+
+    #[test]
+    fn a_stylesheet_linked_twice_holds_one_place_in_the_chain() {
+        let mut dom = Dom::new();
+        dom.parse(
+            b"<link rel=\"stylesheet\" href=\"/a.css\"><link rel=\"stylesheet\" href=\"/a.css\">\
+              <link rel=\"stylesheet\" href=\"/b.css\">",
+        );
+        let links: std::vec::Vec<_> = dom
+            .stylesheets()
+            .iter()
+            .map(|s| s.get(&dom))
+            .collect();
+        assert_eq!(links, std::vec![b"/a.css".as_slice(), b"/b.css".as_slice()]);
     }
 
     #[test]

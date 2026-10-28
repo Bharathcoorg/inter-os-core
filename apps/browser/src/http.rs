@@ -1362,12 +1362,9 @@ pub fn format_proxy_request(request: &ProxyRequest<'_>, out: &mut [u8]) -> usize
     written
 }
 
-/// Reads a string field from the gateway's JSON envelope.
-///
-/// The gateway only emits ASCII header values in these fields. The returned
-/// slice is the raw text between the quotes; callers that need JSON unescape
-/// (`html`) use the reader's existing extractor.
-pub fn proxy_string_field<'a>(json: &'a [u8], key: &[u8]) -> Option<&'a [u8]> {
+/// Where a string field's value begins, and where it ends if the reply held
+/// that far.
+fn string_field_span(json: &[u8], key: &[u8]) -> Option<(usize, Option<usize>)> {
     if key.len() > 40 {
         return None;
     }
@@ -1399,11 +1396,33 @@ pub fn proxy_string_field<'a>(json: &'a [u8], key: &[u8]) -> Option<&'a [u8]> {
             continue;
         }
         if json[cursor] == b'"' {
-            return Some(&json[start..cursor]);
+            return Some((start, Some(cursor)));
         }
         cursor += 1;
     }
-    None
+    Some((start, None))
+}
+
+/// Reads a string field from the gateway's JSON envelope.
+///
+/// The gateway only emits ASCII header values in these fields. The returned
+/// slice is the raw text between the quotes; callers that need JSON unescape
+/// (`html`) use the reader's existing extractor.
+pub fn proxy_string_field<'a>(json: &'a [u8], key: &[u8]) -> Option<&'a [u8]> {
+    let (start, end) = string_field_span(json, key)?;
+    Some(&json[start..end?])
+}
+
+/// Reads a string field as far as the reply holds it.
+///
+/// WHY this sits beside the exact reader: a reply longer than the transport
+/// buffer ends in the middle of its last field, and a caller that can use a
+/// prefix of the text — a stylesheet, which is read as far as its own budget
+/// anyway — loses the whole file to a missing quote. A caller that needs the
+/// complete value asks [`proxy_string_field`] and is refused.
+pub fn proxy_string_field_prefix<'a>(json: &'a [u8], key: &[u8]) -> Option<&'a [u8]> {
+    let (start, _) = string_field_span(json, key)?;
+    Some(&json[start..])
 }
 
 fn hex4(input: &[u8], at: usize) -> Option<u32> {
@@ -2246,6 +2265,21 @@ mod tests {
         assert!(stopped_early);
         assert_eq!(unescape_json_string(raw, &mut [0u8; 3]), None);
         assert_eq!(unescape_json_string(raw, &mut [0u8; 4]), Some(4));
+    }
+
+    #[test]
+    fn a_field_cut_by_the_transport_buffer_still_gives_up_its_front() {
+        // A reply longer than the bytes the browser holds ends in the middle of
+        // its last field, so that field has no closing quote on the wire. The
+        // exact reader refuses it; a caller that can use a prefix gets it.
+        let json = br#"{"success": true, "html": "p{color:red}body{margin"#;
+        assert_eq!(proxy_string_field(json, b"html"), None);
+        let raw = proxy_string_field_prefix(json, b"html").unwrap();
+        let mut out = [0u8; 64];
+        let (len, stopped_early) = unescape_json_string_prefix(raw, &mut out);
+        assert!(!stopped_early);
+        assert_eq!(&out[..len], b"p{color:red}body{margin");
+        assert_eq!(proxy_string_field_prefix(json, b"missing"), None);
     }
 
     #[test]

@@ -19,7 +19,11 @@
 //! `>`, `+`, `~`, `:`, `::`, `[` or `*` is skipped.
 
 /// The most rules a stylesheet may contribute.
-pub const MAX_RULES: usize = 32;
+///
+/// WHY it is a count and not only a byte window: the rules a page writes for
+/// properties this engine does not read are still walked to reach the ones it
+/// can apply, so the budget is what that walk is allowed to cost.
+pub const MAX_RULES: usize = 96;
 
 /// The most compounds in one descendant selector.
 pub const MAX_SELECTOR_PARTS: usize = 3;
@@ -30,8 +34,12 @@ pub const MAX_SELECTOR_LEN: usize = 64;
 /// The longest single declaration parsed (`property: value`).
 pub const MAX_DECLARATION_LEN: usize = 96;
 
-/// The most bytes of a `<style>` document that are read.
-pub const MAX_CSS_BYTES: usize = 16 * 1024;
+/// The most bytes of stylesheet text that are read.
+///
+/// WHY it matches the document's own budget: the rules are collected into one
+/// text and parsed from it as a whole, so a smaller window here would stop
+/// the reader short of the file it just made room for.
+pub const MAX_CSS_BYTES: usize = crate::layout::dom::MAX_CSS_BYTES;
 
 /// The most declarations read from one inline `style` attribute.
 pub const MAX_INLINE_DECLARATIONS: usize = 16;
@@ -531,18 +539,33 @@ fn is_selector_space(b: u8) -> bool {
     b == b' ' || b == b'\t' || b == b'\n' || b == b'\r'
 }
 
-/// Parses a stylesheet into a bounded rule list.
+/// Where one rule sits inside the stylesheet text, as byte positions.
 ///
-/// A rule that cannot be parsed is skipped; a comment, an at-rule and a
-/// declaration that is not understood simply contribute nothing. The
-/// scan reads at most [`MAX_CSS_BYTES`] and keeps at most [`MAX_RULES`]
-/// rules.
-pub fn parse_stylesheet(css: &[u8]) -> Stylesheet<'_> {
-    let mut sheet = Stylesheet::empty();
-    let limit = css.len().min(MAX_CSS_BYTES);
-    let mut i = 0usize;
-    while i < limit && sheet.len < MAX_RULES {
-        // Comments.
+/// WHY positions and not slices: the same bytes are read by the parser, which
+/// only looks, and by the compactor, which moves them. A borrow held across
+/// the move would be a borrow of bytes being rewritten.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct RulePos {
+    selector_start: usize,
+    selector_end: usize,
+    body_start: usize,
+    body_end: usize,
+    /// Where the walk continues once this rule has been dealt with.
+    next: usize,
+}
+
+/// Finds the next rule a page means for the document, at or after `from`.
+///
+/// A comment contributes nothing, and an at-rule is skipped to its block's
+/// closing brace or to the semicolon of a statement form because nothing in
+/// this engine reads a media query, a font face or a keyframe set. A stray
+/// closing brace is stepped over rather than taken as the end of the file: one
+/// unbalanced brace is still a stylesheet.
+fn next_rule(css: &[u8], limit: usize, mut i: usize) -> Option<RulePos> {
+    loop {
+        if i >= limit {
+            return None;
+        }
         if css[i..].starts_with(b"/*") {
             i += 2;
             while i + 1 < limit && !css[i..].starts_with(b"*/") {
@@ -553,10 +576,8 @@ pub fn parse_stylesheet(css: &[u8]) -> Stylesheet<'_> {
         }
         i = skip_ws(css, i);
         if i >= limit {
-            break;
+            return None;
         }
-        // An at-rule is skipped to its block's closing brace, or to the
-        // semicolon of a statement form.
         if css[i] == b'@' {
             i += 1;
             while i < limit && css[i] != b'{' && css[i] != b';' {
@@ -583,23 +604,47 @@ pub fn parse_stylesheet(css: &[u8]) -> Stylesheet<'_> {
             i += 1;
         }
         if i >= limit {
-            break;
+            return None;
         }
         if css[i] == b'}' {
-            // A stray closing brace does not abort the stylesheet; skip it.
             i += 1;
             continue;
         }
-        let selector_text = &css[selector_start..i];
+        let selector_end = i;
         i += 1;
         let body_start = i;
         while i < limit && css[i] != b'}' {
             i += 1;
         }
-        let body = &css[body_start..i.min(limit)];
-        if i < limit {
-            i += 1;
-        }
+        let body_end = i.min(limit);
+        let next = if i < limit { i + 1 } else { i };
+        return Some(RulePos {
+            selector_start,
+            selector_end,
+            body_start,
+            body_end,
+            next,
+        });
+    }
+}
+
+/// Parses a stylesheet into a bounded rule list.
+///
+/// A rule that cannot be parsed is skipped; a comment, an at-rule and a
+/// declaration that is not understood simply contribute nothing. The
+/// scan reads at most [`MAX_CSS_BYTES`] and keeps at most [`MAX_RULES`]
+/// rules.
+pub fn parse_stylesheet(css: &[u8]) -> Stylesheet<'_> {
+    let mut sheet = Stylesheet::empty();
+    let limit = css.len().min(MAX_CSS_BYTES);
+    let mut at = 0usize;
+    while at < limit && sheet.len < MAX_RULES {
+        let Some(pos) = next_rule(css, limit, at) else {
+            break;
+        };
+        at = pos.next;
+        let selector_text = &css[pos.selector_start..pos.selector_end];
+        let body = &css[pos.body_start..pos.body_end];
 
         let style = parse_declarations(body, ComputedStyle::DEFAULT);
         if style.is_default() {
@@ -622,6 +667,85 @@ pub fn parse_stylesheet(css: &[u8]) -> Stylesheet<'_> {
         }
     }
     sheet
+}
+
+/// Whether any name in a selector list is one this engine can match.
+///
+/// WHY the whole list is tested: a rule is kept for its declarations, and one
+/// readable name among several is enough for those declarations to reach an
+/// element. A list of `:root` and `--token` names alone never will.
+fn readable_selector(css: &[u8], start: usize, end: usize) -> bool {
+    let text = &css[start..end];
+    let mut at = 0usize;
+    while at < text.len() {
+        let comma = text[at..]
+            .iter()
+            .position(|&b| b == b',')
+            .map(|p| at + p)
+            .unwrap_or(text.len());
+        if parse_selector(&text[at..comma]).is_some() {
+            return true;
+        }
+        at = comma.saturating_add(1);
+    }
+    false
+}
+
+/// Rewrites a stylesheet, in place, to the rules this engine can apply.
+///
+/// WHY a file is cut down before the document keeps it: a bundled site leads
+/// its head with colour-token sheets and one of them is bigger than the room a
+/// page has for style text. Keeping whole text spent that room on declarations
+/// the reader ignores and starved the file behind them that carries the page's
+/// own colours and type.
+///
+/// WHY a rule is moved whole rather than once per selector: `a,b{color:red}`
+/// names both elements either way, and writing a copy per name would make the
+/// kept text larger than the bytes it came from -- which, in a buffer being
+/// rewritten in place, would run over the rules the walk had not reached. As
+/// written, the bytes placed are always a subset of the bytes walked, so the
+/// write cursor never overtakes the read cursor.
+///
+/// WHY the declarations are copied verbatim: what the reader does not
+/// understand it drops while parsing, so the text that reaches the parser has
+/// to be the text the page wrote.
+///
+/// Returns how many bytes the kept rules occupy and how many rules they are.
+pub fn keep_readable_rules(css: &mut [u8], max_rules: usize) -> (usize, usize) {
+    let limit = css.len().min(MAX_CSS_BYTES);
+    let mut read = 0usize;
+    let mut written = 0usize;
+    let mut kept = 0usize;
+    while kept < max_rules {
+        let Some(pos) = next_rule(css, limit, read) else {
+            break;
+        };
+        let style = parse_declarations(&css[pos.body_start..pos.body_end], ComputedStyle::DEFAULT);
+        let carries = !style.is_default()
+            && readable_selector(css, pos.selector_start, pos.selector_end);
+        read = pos.next;
+        if !carries {
+            continue;
+        }
+        let mut source = pos.selector_start;
+        while source < pos.selector_end {
+            css[written] = css[source];
+            written += 1;
+            source += 1;
+        }
+        css[written] = b'{';
+        written += 1;
+        let mut source = pos.body_start;
+        while source < pos.body_end {
+            css[written] = css[source];
+            written += 1;
+            source += 1;
+        }
+        css[written] = b'}';
+        written += 1;
+        kept += 1;
+    }
+    (written, kept)
 }
 
 fn class_contains(attr: &[u8], wanted: &[u8]) -> bool {
@@ -1068,5 +1192,68 @@ mod tests {
         let style = cascade(&sheet, element(b"p", b"", b""), &[], None);
         // The oversized declaration should be dropped, but the subsequent valid one parsed
         assert_eq!(style.font_scale, 2);
+    }
+
+    #[test]
+    fn a_file_is_cut_down_to_the_rules_the_reader_can_apply() {
+        let whole_text = b":root{--color-accent-fg:#0969da;color-scheme:light}\
+@media (prefers-color-scheme:dark){:root{color:red}}/* tokens */\
+a{color:#0969da;text-decoration:underline}h1{font-size:large;margin-top:24px}";
+        let mut css = [0u8; 256];
+        css[..whole_text.len()].copy_from_slice(whole_text);
+        let (written, kept) = keep_readable_rules(&mut css, MAX_RULES);
+        assert_eq!(kept, 2);
+        assert_eq!(
+            &css[..written],
+            b"a{color:#0969da;text-decoration:underline}h1{font-size:large;margin-top:24px}"
+        );
+        // What the kept text says is what the whole file said, for the rules
+        // this engine reads.
+        let compacted = parse_stylesheet(&css[..written]);
+        let whole = parse_stylesheet(whole_text);
+        assert_eq!(compacted.len, whole.len);
+        assert_eq!(compacted.rules[0].style, whole.rules[0].style);
+        assert_eq!(compacted.rules[1].style, whole.rules[1].style);
+    }
+
+    #[test]
+    fn a_rule_naming_two_elements_is_kept_once() {
+        // WHY the list is not split: one copy per name would write more bytes
+        // than the rule occupied, and the extra would land on rules the walk
+        // had not reached yet.
+        let mut css = *b"a,b{color:#ff0000}";
+        let (written, kept) = keep_readable_rules(&mut css, MAX_RULES);
+        assert_eq!(kept, 1);
+        assert_eq!(&css[..written], b"a,b{color:#ff0000}");
+        assert_eq!(parse_stylesheet(&css[..written]).len, 2);
+    }
+
+    #[test]
+    fn a_token_sheet_keeps_nothing_and_holds_no_room() {
+        let mut css = *b":root{--color-canvas-default:#ffffff;--color-fg-default:#1f2328}";
+        assert_eq!(keep_readable_rules(&mut css, MAX_RULES), (0, 0));
+    }
+
+    #[test]
+    fn compaction_stops_where_the_rule_budget_is_spent() {
+        let mut css = *b"p{color:#ff0000}a{color:#00ff00}h1{color:#0000ff}";
+        let (written, kept) = keep_readable_rules(&mut css, 2);
+        assert_eq!(kept, 2);
+        assert_eq!(&css[..written], b"p{color:#ff0000}a{color:#00ff00}");
+    }
+
+    #[test]
+    fn a_rule_behind_a_wall_of_tokens_survives_the_move() {
+        let mut css = [b' '; 600];
+        let head = b":root{--color-accent-fg:";
+        css[..head.len()].copy_from_slice(head);
+        let rule = b";}a{color:#0969da}";
+        css[560..560 + rule.len()].copy_from_slice(rule);
+        let (written, kept) = keep_readable_rules(&mut css, MAX_RULES);
+        assert_eq!(kept, 1);
+        assert_eq!(&css[..written], b"a{color:#0969da}");
+        let sheet = parse_stylesheet(&css[..written]);
+        let style = cascade(&sheet, element(b"a", b"", b""), &[], None);
+        assert_eq!(style.color, 0xFF0969DA);
     }
 }
