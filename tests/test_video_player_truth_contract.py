@@ -17,9 +17,12 @@ Enforces:
 4. Typography & Touch Affordances:
    - Scale 2 Body typography for track title, timestamps, playlist rows, and options.
    - All touch targets meet or exceed >= 48px.
+5. Real execution evidence:
+   - Executes apps/video_player cargo test suite (33 unit tests) over real AVI and image fixtures.
 """
 
 from pathlib import Path
+import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -179,6 +182,29 @@ def test_audio_stream_truth_contract():
     assert "is_pcm_audio" in avi, "avi.rs must define is_pcm_audio"
 
 
+def test_video_player_suite_executes_and_passes():
+    """Execute real video player unit tests in apps/video_player.
+
+    Platform Truth Contract:
+    Requires exit 0 for the cargo test suite cited by the contract.
+    Verifies real behavior on actual binary fixtures:
+    - Exact H.264 rejection string: 'No hardware H.264 decoder bound. Software decode unavailable.'
+    - AVI PCM audio chunk demuxing ('01wb') and playback decoding
+    - AVI MJPEG frame decoding using platform JPEG service
+    - Raw and PPM P6 frame decoders
+    - Translucent HUD ARGB alpha blending and canvas mapping
+    - Touch seek, volume, speed, orientation, and aspect ratio controls
+    """
+    res = subprocess.run(
+        ["cargo", "test", "--manifest-path", "apps/video_player/Cargo.toml"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert res.returncode == 0, f"video_player cargo test suite failed:\n{res.stdout}\n{res.stderr}"
+    assert "33 passed" in res.stdout, f"Expected 33 video_player tests to pass, got:\n{res.stdout}"
+
+
 if __name__ == "__main__":
     test_platform_truth_contract_exact_string()
     test_userspace_no_std_and_zero_heap()
@@ -190,4 +216,5 @@ if __name__ == "__main__":
     test_aspect_ratio_and_repeat_modes()
     test_typography_and_touch_affordances()
     test_audio_stream_truth_contract()
+    test_video_player_suite_executes_and_passes()
     print("All video player truth contract tests PASSED!")

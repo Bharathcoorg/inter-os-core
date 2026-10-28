@@ -13,6 +13,7 @@ Every top-of-screen status band rendered by an application must:
 
 from pathlib import Path
 import re
+import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
 APPS_DIR = ROOT / "apps"
@@ -51,6 +52,27 @@ def test_sdk_exports_status_band():
     assert "fn status_band()" in code, (
         "interos-std must export status_band() extent helper"
     )
+
+
+def test_status_band_behavior_and_pixels_pass():
+    """Execute real status bar unit tests in interos-std to verify pixel and telemetry behavior.
+
+    Platform Truth Contract:
+    - Zero inked pixels when instruments are unsupported
+    - Unbound instruments draw outlines only, never filled levels
+    - Clock lane draws zero inked pixels when RTC is unavailable (None)
+    - Fuel gauge and radio bars draw solid pixels only when backed by measured readings
+    - Status band paints into real Surface and divides itself with border line
+    - Unbound strip inks exactly 214 pixels (canonical shell geometry)
+    """
+    res = subprocess.run(
+        ["cargo", "test", "--manifest-path", "sdk/rust/interos-std/Cargo.toml", "status_bar"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert res.returncode == 0, f"status_bar unit tests failed:\n{res.stdout}\n{res.stderr}"
+    assert "10 passed" in res.stdout, f"Expected 10 status_bar tests to pass, got:\n{res.stdout}"
 
 
 def test_all_target_apps_adopt_status_band():
@@ -128,3 +150,12 @@ def test_every_app_treats_unavailable_as_unavailable():
         assert "clock_ok" in code or "clock.is_some()" in code or "Some(&" in code, (
             f"app '{app_name}' must explicitly check clock availability before rendering clock lane"
         )
+
+
+if __name__ == "__main__":
+    test_sdk_exports_status_band()
+    test_status_band_behavior_and_pixels_pass()
+    test_all_target_apps_adopt_status_band()
+    test_band_renders_no_state_without_backing_query()
+    test_every_app_treats_unavailable_as_unavailable()
+    print("Status band truth contract: PASS")
