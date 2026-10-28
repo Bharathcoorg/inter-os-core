@@ -48,6 +48,25 @@ DIST_DIR = WORKSPACE_ROOT / "dist"
 PACKAGES_DIR = WORKSPACE_ROOT / "packages"
 TARGET_DIR = WORKSPACE_ROOT / "target"
 
+SDK_MANIFEST = WORKSPACE_ROOT / "sdk" / "rust" / "interos-std" / "Cargo.toml"
+
+
+def sdk_version() -> str:
+    """The version the platform's own SDK crate publishes.
+
+    WHY it is read rather than written here: a scaffold that stamps a minimum
+    SDK version the platform never published describes a requirement no device
+    can satisfy, and a number copied into two places drifts the first time only
+    one of them is updated.
+    """
+    for line in SDK_MANIFEST.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("version"):
+            _, _, value = stripped.partition("=")
+            return value.strip().strip('"')
+    raise RuntimeError(f"no version field in {SDK_MANIFEST}")
+
+
 RAPP_CAPABILITY_IDS = {
     "CAP_LOGGING": 1, "CAP_FRAMEBUFFER": 2, "CAP_TIMER": 3, "CAP_HARDWARE_IO": 4,
     "CAP_IPC_SEND": 5, "CAP_IPC_RECEIVE": 6, "CAP_PROCESS_SPAWN": 7, "CAP_PROCESS_KILL": 8,
@@ -1228,7 +1247,7 @@ path = "src/main.rs"
             "backend": f"bin/{app_name}.elf"
         },
         "permissions": tmpl["permissions"],
-        "min_sdk_version": "0.8.0"
+        "min_sdk_version": sdk_version()
     }
     (app_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 

@@ -15,5 +15,5 @@
     "CAP_FILESYSTEM_READ",
     "CAP_WEBVIEW_BRIDGE"
   ],
-  "min_sdk_version": "0.8.0"
+  "min_sdk_version": "0.1.0"
 }

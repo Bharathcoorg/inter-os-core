@@ -134,6 +134,28 @@ def main():
         "no template may request capability 18, which is reserved for the system supervisor",
     )
 
+    # 7. A package's minimum SDK version is a promise about the device it can
+    #    run on, so it may not name a version the platform never published.
+    sdk = interos.sdk_version()
+    must(
+        re.fullmatch(r"\d+\.\d+\.\d+", sdk) is not None,
+        f"the SDK crate's version is {sdk!r}, which is not a version a manifest can require",
+    )
+    manifests = sorted((ROOT / "apps").glob("*/manifest.json"))
+    must(manifests, "no manifests found -- the scan has stopped testing anything")
+    for path in manifests:
+        declared = re.search(r'"min_sdk_version":\s*"([^"]+)"', path.read_text(encoding="utf-8"))
+        if declared is None:
+            continue
+        must(
+            declared.group(1) == sdk,
+            f"{path.name} requires SDK {declared.group(1)!r} but the platform's SDK is {sdk!r}",
+        )
+    must(
+        f'min_sdk_version": "0.8.0' not in (ROOT / "tools" / "interos.py").read_text(encoding="utf-8"),
+        "the scaffold still stamps an SDK version literal instead of the published one",
+    )
+
     print(f"RAPP capability ABI contract: PASS ({len(table)} documented capabilities, {len(template_permissions)} template permissions)")
 
 

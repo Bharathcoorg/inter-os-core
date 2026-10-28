@@ -23,5 +23,5 @@
       "org.interos.action.set_ringtone"
     ]
   },
-  "min_sdk_version": "0.8.0"
+  "min_sdk_version": "0.1.0"
 }
