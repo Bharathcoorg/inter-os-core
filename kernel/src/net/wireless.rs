@@ -1,9 +1,12 @@
 //! Mobile Wireless Subsystem: Bluetooth Low Energy (BLE 5.0) & Wi-Fi Station
 //!
-//! Implements hardware abstractions for mobile short-range wireless communication.
-//! Generates 31-byte Generic Access Profile (GAP) BLE advertising beacons for
-//! decentralized peer-to-peer InterLayer mesh discovery, and maintains 802.11
-//! Wi-Fi Station WPA3 connection state machines.
+//! PLATFORM TRUTH:
+//! No wireless silicon is bound on this target platform. The `hardware_present`
+//! flag is a static constant (`false`), not a hardware detection probe. Because
+//! no physical radio hardware exists, no link rates, RSSI, or SSIDs are measured
+//! or fabricated. All wireless operations fail closed. State machines generate
+//! 31-byte GAP BLE advertising frames and maintain station state models for
+//! future hardware bindings.
 
 use spin::Mutex;
 
@@ -33,7 +36,14 @@ pub const BLE_AD_TYPE_MANUFACTURER_SPECIFIC: u8 = 0xFF;
 /// Flags bitmask for LE General Discoverable Mode, BR/EDR Not Supported.
 pub const BLE_FLAGS_LE_GENERAL_DISCOVERABLE: u8 = 0x06;
 
-/// Mobile Wireless Controller managing Wi-Fi and BLE beaconing.
+/// Mobile Wireless Subsystem state manager.
+///
+/// PLATFORM TRUTH:
+/// No wireless silicon (Wi-Fi PHY/MAC, Bluetooth HCI controller) is bound on this
+/// platform. The `hardware_present` flag is a static constant (`false`) set at
+/// construction; it is NOT the result of dynamic hardware probing or silicon
+/// detection. Because no physical radio is bound, no real RSSI, SSID, frequency,
+/// or link rates can be measured or reported. All wireless operations fail closed.
 pub struct WirelessManager {
     pub ble_advertising: bool,
     pub ble_beacon_frame: [u8; 31],
@@ -42,6 +52,8 @@ pub struct WirelessManager {
     pub wifi_ssid_len: usize,
     pub wifi_rssi_dbm: i8,
     pub wifi_freq_mhz: u16,
+    /// Static flag indicating whether physical wireless silicon is bound.
+    /// Permanently `false` on this platform (static constant, not a dynamic probe).
     pub hardware_present: bool,
     pub bluetooth_state: BluetoothState,
     pub paired_devices: [Option<PairedDevice>; 8],
@@ -132,6 +144,10 @@ impl WirelessManager {
     }
 
     /// Serializes wireless state telemetry into a standardized JSON representation.
+    ///
+    /// When no wireless silicon is bound (`hardware_present: false`), states plainly
+    /// that no silicon is bound and that the flag is static. Does not fabricate
+    /// RSSI, SSID, or frequency telemetry.
     pub fn format_json(&self, out: &mut [u8]) -> usize {
         use core::fmt::Write;
         struct SliceWriter<'a> {
@@ -149,12 +165,20 @@ impl WirelessManager {
             }
         }
         let mut writer = SliceWriter { buf: out, pos: 0 };
-        let ssid_str = core::str::from_utf8(&self.wifi_ssid[..self.wifi_ssid_len]).unwrap_or("None");
-        let _ = write!(
-            writer,
-            r#"{{"hardware_present":{},"wifi_state":"{:?}","ssid":"{}","rssi_dbm":{},"freq_mhz":{},"ble_adv":{}}}"#,
-            self.hardware_present, self.wifi_state, ssid_str, self.wifi_rssi_dbm, self.wifi_freq_mhz, self.ble_advertising
-        );
+        if !self.hardware_present {
+            let _ = write!(
+                writer,
+                r#"{{"hardware_present":false,"silicon_bound":false,"flag":"static","wifi_state":"{:?}","ble_adv":{}}}"#,
+                self.wifi_state, self.ble_advertising
+            );
+        } else {
+            let ssid_str = core::str::from_utf8(&self.wifi_ssid[..self.wifi_ssid_len]).unwrap_or("None");
+            let _ = write!(
+                writer,
+                r#"{{"hardware_present":true,"silicon_bound":true,"flag":"bound","wifi_state":"{:?}","ssid":"{}","rssi_dbm":{},"freq_mhz":{},"ble_adv":{}}}"#,
+                self.wifi_state, ssid_str, self.wifi_rssi_dbm, self.wifi_freq_mhz, self.ble_advertising
+            );
+        }
         writer.pos
     }
 }
@@ -203,11 +227,18 @@ mod tests {
         wm.build_ble_beacon(&[0x42; 16]);
         assert!(!wm.ble_advertising);
 
-        // format_json must truthfully reflect absent hardware and disabled wifi
+        // format_json must truthfully reflect absent hardware and disabled wifi,
+        // stating plainly that no silicon is bound and the flag is static.
+        // It must not fabricate RSSI, SSID, or frequency telemetry.
         let mut buf = [0u8; 128];
         let len = wm.format_json(&mut buf);
         let s = core::str::from_utf8(&buf[..len]).unwrap();
         assert!(s.contains("\"wifi_state\":\"Disabled\""));
         assert!(s.contains("\"hardware_present\":false"));
+        assert!(s.contains("\"silicon_bound\":false"), "status JSON must state no silicon is bound");
+        assert!(s.contains("\"flag\":\"static\""), "status JSON must state flag is static");
+        assert!(!s.contains("\"rssi_dbm\""), "must not fabricate RSSI telemetry when hardware is absent");
+        assert!(!s.contains("\"freq_mhz\""), "must not fabricate frequency telemetry when hardware is absent");
+        assert!(!s.contains("\"ssid\""), "must not fabricate SSID telemetry when hardware is absent");
     }
 }
