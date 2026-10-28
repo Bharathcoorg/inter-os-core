@@ -68,13 +68,39 @@ pub struct TlsConfig<'a> {
     pub verifier: &'a dyn CertificateVerifier,
 }
 
+impl<'a> TlsConfig<'a> {
+    /// Creates a validated TLS 1.3 client configuration.
+    /// Fails with Unavailable if required entropy, keys, or peer name are missing or static defaults.
+    pub fn new(
+        server_name: &'a str,
+        random: [u8; 32],
+        private_key: [u8; 32],
+        verifier: &'a dyn CertificateVerifier,
+    ) -> Result<Self, TlsError> {
+        if server_name.is_empty()
+            || random == [0u8; 32]
+            || random == [0x42u8; 32]
+            || private_key == [0u8; 32]
+            || private_key == [0x24u8; 32]
+        {
+            return Err(TlsError::Unavailable);
+        }
+        Ok(Self {
+            server_name: Some(server_name),
+            random,
+            private_key,
+            verifier,
+        })
+    }
+}
+
 impl<'a> Default for TlsConfig<'a> {
     fn default() -> Self {
         static DEFAULT_VERIFIER: DefaultCertVerifier<'static> = DefaultCertVerifier::new();
         Self {
             server_name: None,
-            random: [0x42; 32],
-            private_key: [0x24; 32],
+            random: [0u8; 32],
+            private_key: [0u8; 32],
             verifier: &DEFAULT_VERIFIER,
         }
     }
@@ -111,11 +137,27 @@ impl<'a> TlsClientSession<'a> {
 
     /// Emits ClientHello into `out`. Returns total record length.
     pub fn start_handshake(&mut self, out: &mut [u8]) -> Result<usize, TlsError> {
+        if self.config.server_name.is_none()
+            || self.config.private_key == [0u8; 32]
+            || self.config.private_key == [0x24u8; 32]
+            || self.config.random == [0u8; 32]
+            || self.config.random == [0x42u8; 32]
+        {
+            return Err(TlsError::Unavailable);
+        }
         self.handshake.encode_client_hello(&self.config.random, self.config.server_name, out)
     }
 
     /// Feeds ServerHello record.
     pub fn handle_server_hello(&mut self, record: &[u8]) -> Result<(), TlsError> {
+        if self.config.server_name.is_none()
+            || self.config.private_key == [0u8; 32]
+            || self.config.private_key == [0x24u8; 32]
+            || self.config.random == [0u8; 32]
+            || self.config.random == [0x42u8; 32]
+        {
+            return Err(TlsError::Unavailable);
+        }
         if record.len() < RECORD_HEADER_LEN {
             return Err(TlsError::BadRecordLength);
         }

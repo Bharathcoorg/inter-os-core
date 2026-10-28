@@ -1,8 +1,12 @@
 //! TLS 1.3 Client and Certificate Trust Unit Tests
 
 use super::certificate::{
-    CertificateVerifier, DefaultCertVerifier, ParsedCertificate, INTEROS_ROOT_CA_DER,
-    SIG_SCHEME_ECDSA_SECP256R1_SHA256, SIG_SCHEME_ED25519,
+    AllowAnyCertVerifier, CertificateVerifier, DefaultCertVerifier, ParsedCertificate,
+    INTEROS_ROOT_CA_DER, SIG_SCHEME_ECDSA_SECP256R1_SHA256, SIG_SCHEME_ED25519,
+};
+use super::client::{TlsClientSession, TlsConfig};
+use super::handshake::{
+    HandshakeClient, HandshakeState, HANDSHAKE_CERTIFICATE_VERIFY,
 };
 use super::ed25519::Sha512;
 use super::TlsError;
@@ -190,11 +194,11 @@ fn tls_reject_unknown_signature_scheme() {
         b"message",
         &sig,
     );
-    assert_eq!(res, Err(TlsError::InvalidSignature));
+    assert_eq!(res, Err(TlsError::UnsupportedSignatureScheme));
 
     // Unknown code point 0xffff
     let res2 = verifier.verify_server_signature(&cert, 0xffff, b"message", &sig);
-    assert_eq!(res2, Err(TlsError::InvalidSignature));
+    assert_eq!(res2, Err(TlsError::UnsupportedSignatureScheme));
 }
 
 #[test]
@@ -208,4 +212,117 @@ fn tls_sha512_standard_test_vector() {
     ];
     let actual = Sha512::digest(b"abc");
     assert_eq!(actual, expected);
+}
+
+#[test]
+fn tls_reject_wronghost_on_default_path() {
+    // A certificate for "InterOS" must NOT be accepted when expected hostname is absent/mismatched.
+    // The default path must enforce hostname verification and fail rather than silently skip.
+    let verifier = DefaultCertVerifier::new();
+    let root = ParsedCertificate::parse(INTEROS_ROOT_CA_DER).unwrap();
+    let res = verifier.verify_certificate(&root);
+    assert_eq!(res, Err(TlsError::CertificateVerificationFailed));
+}
+
+#[test]
+fn tls_reject_server_choosing_unsupported_scheme_0x0403() {
+    // A server choosing 0x0403 (ECDSA_SECP256R1_SHA256) must fail with UnsupportedSignatureScheme,
+    // not silently accept or report generic InvalidSignature.
+    let mut hs = HandshakeClient::new([0x11u8; 32]);
+    hs.state = HandshakeState::CertificateReceived;
+    let cert = ParsedCertificate::parse(RFC8032_CERT_DER).unwrap();
+    let verifier = AllowAnyCertVerifier;
+    let cv_payload = [
+        HANDSHAKE_CERTIFICATE_VERIFY,
+        0, 0, 6,
+        0x04, 0x03, // SIG_SCHEME_ECDSA_SECP256R1_SHA256
+        0, 2,       // sig len = 2
+        0xaa, 0xbb, // dummy signature
+    ];
+    let res = hs.process_certificate_verify(&cv_payload, &cert, &verifier);
+    assert_eq!(res, Err(TlsError::UnsupportedSignatureScheme));
+}
+
+#[test]
+fn tls_session_built_from_default_reports_unavailable() {
+    // A session built from DefaultConfig carries static dummy keys and no peer name;
+    // it must refuse to proceed with the handshake and report Unavailable.
+    let mut session = TlsClientSession::new(TlsConfig::default());
+    let mut out = [0u8; 512];
+    let res = session.start_handshake(&mut out);
+    assert_eq!(res, Err(TlsError::Unavailable));
+}
+
+#[test]
+fn tls_client_hello_advertises_only_ed25519() {
+    // Verify ClientHello advertises only SIG_SCHEME_ED25519 in signature_algorithms extension
+    let verifier = DefaultCertVerifier::for_host("example.com");
+    let mut session = TlsClientSession::new(TlsConfig {
+        server_name: Some("example.com"),
+        random: [0x55; 32],
+        private_key: [0x77; 32],
+        verifier: &verifier,
+    });
+    let mut out = [0u8; 512];
+    let len = session.start_handshake(&mut out).unwrap();
+    assert!(len > 0);
+
+    // Scan for signature_algorithms extension (0x000d) in the ClientHello record
+    let record = &out[..len];
+    let mut found = false;
+    for i in 0..record.len() - 8 {
+        if record[i] == 0x00 && record[i + 1] == 0x0d {
+            // Found extension 0x000d
+            let ext_len = u16::from_be_bytes([record[i + 2], record[i + 3]]);
+            let list_len = u16::from_be_bytes([record[i + 4], record[i + 5]]);
+            let scheme = u16::from_be_bytes([record[i + 6], record[i + 7]]);
+            assert_eq!(ext_len, 4, "ext length must be 4");
+            assert_eq!(list_len, 2, "algorithms list length must be 2");
+            assert_eq!(scheme, SIG_SCHEME_ED25519, "advertised scheme must be ED25519");
+            found = true;
+            break;
+        }
+    }
+    assert!(found, "signature_algorithms extension must be present in ClientHello");
+}
+
+#[test]
+fn tls_handshake_rejects_wronghost_explicit() {
+    let verifier = DefaultCertVerifier::for_host("wronghost.test");
+    let root = ParsedCertificate::parse(INTEROS_ROOT_CA_DER).unwrap();
+    // INTEROS_ROOT_CA_DER has CN="InterOS", not "wronghost.test"
+    let res = verifier.verify_certificate(&root);
+    assert_eq!(res, Err(TlsError::CertificateVerificationFailed));
+}
+
+#[test]
+fn tls_config_new_rejects_dummy_or_empty_values() {
+    let verifier = DefaultCertVerifier::for_host("example.com");
+    // Empty server name
+    assert_eq!(
+        TlsConfig::new("", [0x11; 32], [0x22; 32], &verifier).err(),
+        Some(TlsError::Unavailable)
+    );
+    // All-zero random
+    assert_eq!(
+        TlsConfig::new("example.com", [0u8; 32], [0x22; 32], &verifier).err(),
+        Some(TlsError::Unavailable)
+    );
+    // Static dummy random 0x42
+    assert_eq!(
+        TlsConfig::new("example.com", [0x42; 32], [0x22; 32], &verifier).err(),
+        Some(TlsError::Unavailable)
+    );
+    // All-zero private key
+    assert_eq!(
+        TlsConfig::new("example.com", [0x11; 32], [0u8; 32], &verifier).err(),
+        Some(TlsError::Unavailable)
+    );
+    // Static dummy private key 0x24
+    assert_eq!(
+        TlsConfig::new("example.com", [0x11; 32], [0x24; 32], &verifier).err(),
+        Some(TlsError::Unavailable)
+    );
+    // Valid configuration
+    assert!(TlsConfig::new("example.com", [0x11; 32], [0x22; 32], &verifier).is_ok());
 }

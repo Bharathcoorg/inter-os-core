@@ -8,6 +8,7 @@ use super::TlsError;
 pub const SIG_SCHEME_ED25519: u16 = 0x0807;
 pub const SIG_SCHEME_ECDSA_SECP256R1_SHA256: u16 = 0x0403;
 pub const SIG_SCHEME_RSA_PSS_RSAE_SHA256: u16 = 0x0804;
+#[doc(hidden)]
 pub const SIG_SCHEME_MOCK_TEST: u16 = 0xff01;
 
 /// ASN.1 DER Tag constants
@@ -412,6 +413,17 @@ pub trait CertificateVerifier {
     ) -> Result<(), TlsError>;
 }
 
+/// Synthetic bootstrap InterOS root CA certificate (RFC 5280 DER format).
+///
+/// **Platform Trust Scope:**
+/// - **Allows:** Self-signed root matching for the synthetic InterOS test root CA in local
+///   offline test harnesses when matched by exact DER or subject/SPKI.
+/// - **Does NOT allow:** Real-world public internet PKI or production CA chains (e.g.
+///   WebPKI / Let's Encrypt / DigiCert) cannot validate against this synthetic root because
+///   its SubjectPublicKeyInfo carries placeholder keys (0x09 repeated) and dummy signature
+///   bytes (0x55 repeated).
+/// - Production client deployments connecting to external services must supply real trusted
+///   root CA DER certificates via [`DefaultCertVerifier::with_roots`].
 pub const INTEROS_ROOT_CA_DER: &[u8] = &[
     0x30, 0x81, 0xc6, 0x30, 0x7a, 0x02, 0x01, 0x01, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x30,
     0x10, 0x30, 0x0e, 0x06, 0x03, 0x55, 0x04, 0x03, 0x0c, 0x07, 0x49, 0x6e, 0x74, 0x65, 0x72, 0x4f,
@@ -428,10 +440,11 @@ pub const INTEROS_ROOT_CA_DER: &[u8] = &[
     0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55,
 ];
 
+/// Default trusted root store pointing to the synthetic local test root.
 pub static DEFAULT_TRUSTED_ROOTS: &[&[u8]] = &[INTEROS_ROOT_CA_DER];
 
 /// Default certificate verifier: enforces DER structure, validity dates,
-/// SubjectPublicKeyInfo presence, and verifies standard handshake signatures.
+/// SubjectPublicKeyInfo presence, reference hostname match, and standard handshake signatures.
 #[derive(Clone, Copy, Debug)]
 pub struct DefaultCertVerifier<'a> {
     pub expected_hostname: Option<&'a str>,
@@ -442,6 +455,14 @@ impl<'a> DefaultCertVerifier<'a> {
     pub const fn new() -> Self {
         Self {
             expected_hostname: None,
+            trusted_roots: DEFAULT_TRUSTED_ROOTS,
+        }
+    }
+
+    /// Creates a default certificate verifier configured for a specific peer hostname.
+    pub const fn for_host(hostname: &'a str) -> Self {
+        Self {
+            expected_hostname: Some(hostname),
             trusted_roots: DEFAULT_TRUSTED_ROOTS,
         }
     }
@@ -467,11 +488,12 @@ impl<'a> CertificateVerifier for DefaultCertVerifier<'a> {
     fn verify_certificate(&self, cert: &ParsedCertificate) -> Result<(), TlsError> {
         cert.check_validity()?;
 
-        // Hostname validation against reference identifier (SNI)
-        if let Some(expected_host) = self.expected_hostname {
-            if !cert.matches_hostname(expected_host) {
-                return Err(TlsError::CertificateVerificationFailed);
-            }
+        // Hostname validation against reference identifier (SNI).
+        // Must fail closed if expected_hostname is missing or fails to match;
+        // no silent skipping via an unverified Option path.
+        let expected_host = self.expected_hostname.ok_or(TlsError::CertificateVerificationFailed)?;
+        if !cert.matches_hostname(expected_host) {
+            return Err(TlsError::CertificateVerificationFailed);
         }
 
         // Validate certificate trust against embedded trusted root store
@@ -532,12 +554,14 @@ impl<'a> CertificateVerifier for DefaultCertVerifier<'a> {
             SIG_SCHEME_ED25519 => {
                 crate::tls::ed25519::verify_ed25519(cert.spki_public_key, context_and_hash, signature)
             }
-            _ => Err(TlsError::InvalidSignature),
+            _ => Err(TlsError::UnsupportedSignatureScheme),
         }
     }
 }
 
-/// Permissive verifier for test fixtures and mock handshakes.
+/// Permissive verifier reserved strictly for internal test fixtures and mock handshakes.
+/// Not part of the public sovereign TLS API.
+#[doc(hidden)]
 pub struct AllowAnyCertVerifier;
 
 impl CertificateVerifier for AllowAnyCertVerifier {

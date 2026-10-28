@@ -18,8 +18,7 @@ pub mod record;
 mod tests;
 
 pub use certificate::{
-    AllowAnyCertVerifier, CertificateVerifier, DefaultCertVerifier, ParsedCertificate,
-    SIG_SCHEME_ED25519, SIG_SCHEME_MOCK_TEST,
+    CertificateVerifier, DefaultCertVerifier, ParsedCertificate, SIG_SCHEME_ED25519,
 };
 pub use client::{MemoryStream, TlsClient, TlsClientSession, TlsConfig, TlsStream};
 pub use handshake::{
@@ -49,4 +48,6 @@ pub enum TlsError {
     VerifyDataMismatch,
     IoError,
     KeyDerivationError,
+    UnsupportedSignatureScheme,
+    Unavailable,
 }

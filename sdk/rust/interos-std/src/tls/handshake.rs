@@ -12,10 +12,7 @@ use crate::crypto::hkdf::{derive_secret, empty_hash, hkdf_expand_label, hkdf_ext
 use crate::crypto::hmac::HmacSha256;
 use crate::crypto::sha256::Sha256;
 use crate::crypto::x25519::{x25519, x25519_base};
-use super::certificate::{
-    CertificateVerifier, ParsedCertificate, SIG_SCHEME_ECDSA_SECP256R1_SHA256, SIG_SCHEME_ED25519,
-    SIG_SCHEME_RSA_PSS_RSAE_SHA256,
-};
+use super::certificate::{CertificateVerifier, ParsedCertificate, SIG_SCHEME_ED25519};
 use super::record::{ContentType, RecordCipher, RECORD_HEADER_LEN};
 use super::TlsError;
 
@@ -162,17 +159,14 @@ impl HandshakeClient {
         pos += 2;
 
         // 3. signature_algorithms: 0x000d
+        // Only advertise algorithms supported by our sovereign verifier (RFC 8446 Section 4.2.3): Ed25519.
         body[pos..pos + 2].copy_from_slice(&EXT_SIGNATURE_ALGORITHMS.to_be_bytes());
         pos += 2;
-        body[pos..pos + 2].copy_from_slice(&8u16.to_be_bytes()); // length = 8
+        body[pos..pos + 2].copy_from_slice(&4u16.to_be_bytes()); // length = 4
         pos += 2;
-        body[pos..pos + 2].copy_from_slice(&6u16.to_be_bytes()); // list length = 6
+        body[pos..pos + 2].copy_from_slice(&2u16.to_be_bytes()); // list length = 2
         pos += 2;
         body[pos..pos + 2].copy_from_slice(&SIG_SCHEME_ED25519.to_be_bytes());
-        pos += 2;
-        body[pos..pos + 2].copy_from_slice(&SIG_SCHEME_ECDSA_SECP256R1_SHA256.to_be_bytes());
-        pos += 2;
-        body[pos..pos + 2].copy_from_slice(&SIG_SCHEME_RSA_PSS_RSAE_SHA256.to_be_bytes());
         pos += 2;
 
         // 4. key_share: 0x0033
@@ -462,6 +456,9 @@ impl HandshakeClient {
         }
 
         let algorithm = u16::from_be_bytes([body[0], body[1]]);
+        if algorithm != SIG_SCHEME_ED25519 {
+            return Err(TlsError::UnsupportedSignatureScheme);
+        }
         let sig_len = u16::from_be_bytes([body[2], body[3]]) as usize;
         if body.len() < 4 + sig_len {
             return Err(TlsError::BadHandshakeMessage);
