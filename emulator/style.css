@@ -166,10 +166,19 @@ html, body.dark-theme {
   justify-content: center;
   gap: 8px;
   row-gap: 6px;
-  flex: 1 1 520px;
+  flex: 0 1 auto;
   min-width: 0;
-  flex-wrap: wrap;
   position: relative;
+}
+
+/* WHY: scroll container for live action pills; separates horizontal scrolling
+   from .header-center-actions so the absolute Options dropdown is never clipped. */
+.header-actions-scroll {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-width: 0;
 }
 
 .header-action-pill {
@@ -493,7 +502,8 @@ html, body.dark-theme {
   .target-specs-list { display: none; }
 }
 @media (max-width: 960px) {
-  .ide-target-device { display: none; }
+  .ide-target-device,
+  .ide-v-sep { display: none; }
 }
 
 .studio-controls {
@@ -2470,14 +2480,19 @@ html, body.dark-theme {
     display: flex;
   }
 
+  /* WHY: .studio-header-inner is the single flex owner; .studio-header acts
+     as the outer chrome wrapper. Keep padding compact. */
   .studio-header {
-    flex-wrap: wrap;
-    gap: 10px;
     height: auto;
-    padding: 10px 14px;
+    padding: 6px 14px;
   }
 
-  .ide-target-device {
+  .studio-header-inner {
+    gap: 10px;
+  }
+
+  .ide-target-device,
+  .ide-v-sep {
     display: none;
   }
 
@@ -3759,26 +3774,12 @@ body.studio-focus-mode .emulator-side-toolbar {
 }
 
 /* =========================================================================
-   Device Studio Mobile Viewport Responsiveness (< 1024px & < 640px)
+   Device Studio Mobile Viewport Responsiveness (< 1024px, < 768px, < 640px)
    ========================================================================= */
 @media (max-width: 1024px) {
-  .studio-header {
-    flex-wrap: wrap;
-    height: auto;
-    padding: 10px 14px;
-    gap: 10px;
-  }
   .brand-group {
     flex-wrap: wrap;
     gap: 8px;
-  }
-  .ide-target-device {
-    flex-wrap: wrap;
-    gap: 6px;
-  }
-  .target-specs-list {
-    flex-wrap: wrap;
-    gap: 4px;
   }
   .studio-workspace.ide-split-screen {
     flex-direction: column;
@@ -3800,18 +3801,107 @@ body.studio-focus-mode .emulator-side-toolbar {
   }
 }
 
+/* WHY: below ~768px action pills stay on ONE horizontally scrollable track
+   without wrapping onto two lines. Scroll-snap and hidden scrollbars keep it
+   clean and touch-friendly. */
+@media (max-width: 768px) {
+  .header-actions-scroll {
+    justify-content: flex-start;
+    overflow-x: auto;
+    overflow-y: hidden;
+    flex-wrap: nowrap;
+    max-width: 100%;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+    scroll-snap-type: x proximity;
+    -webkit-overflow-scrolling: touch;
+    padding: 2px 0;
+    gap: 6px;
+  }
+  .header-actions-scroll::-webkit-scrollbar {
+    display: none;
+  }
+  .header-action-pill {
+    padding: 4px 10px;
+    font-size: 0.72rem;
+    scroll-snap-align: start;
+    flex-shrink: 0;
+  }
+}
+
+/* WHY: on phone viewports <= 640px, .studio-header-inner organizes into two
+   disciplined bands: row 1 holds Brand (left) and Studio Controls (right),
+   row 2 holds the 100% width scrollable actions track. Status text truncates
+   gracefully so the row never wraps to a 3rd line. Options menu stays unclipped
+   at right: 0. Header height stays <= 88px. */
 @media (max-width: 640px) {
   .studio-header {
-    flex-direction: column;
-    align-items: stretch;
-    padding: 8px 10px;
+    padding: 6px 10px;
+  }
+  .studio-header-inner {
+    flex-direction: row;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    align-items: center;
+    gap: 6px 8px;
+    min-height: 28px;
   }
   .brand-group {
-    justify-content: space-between;
+    order: 1;
+    flex: 0 0 auto;
+    gap: 8px;
   }
   .studio-controls {
-    justify-content: space-between;
+    order: 2;
+    margin-left: auto;
+    flex: 0 1 auto;
+    min-width: 0;
+    justify-content: flex-end;
+    gap: 6px;
+  }
+  .status-indicator {
+    min-width: 0;
+    flex-shrink: 1;
+    padding: 0 8px;
+    font-size: 0.72rem;
+  }
+  #qemu-global-text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+  }
+  .header-center-actions {
+    order: 3;
+    flex: 0 0 100%;
     width: 100%;
+    justify-content: flex-start;
+  }
+  .header-actions-scroll {
+    justify-content: flex-start;
+    overflow-x: auto;
+    overflow-y: hidden;
+    flex-wrap: nowrap;
+    width: 100%;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+    scroll-snap-type: x proximity;
+    -webkit-overflow-scrolling: touch;
+    padding: 2px 0;
+    gap: 6px;
+  }
+  .header-actions-scroll::-webkit-scrollbar {
+    display: none;
+  }
+  .header-action-pill {
+    padding: 4px 8px;
+    font-size: 0.72rem;
+    scroll-snap-align: start;
+    flex-shrink: 0;
+  }
+  .header-options-menu {
+    right: 0;
+    max-width: calc(100vw - 20px);
   }
   .device-chassis {
     transform: scale(0.85);
@@ -3826,6 +3916,82 @@ body.studio-focus-mode .emulator-side-toolbar {
   .emu-btn {
     width: 32px;
     height: 32px;
+  }
+}
+
+/* WHY max-height 750px: in landscape phones (e.g. 844x390) and short viewports,
+   vertical space is precious. Keep the studio header to a single compact band
+   so the phone chassis remains fully reachable without page scrolling. */
+@media (max-height: 750px) {
+  .studio-header {
+    min-height: 36px;
+    padding: 3px 12px;
+  }
+  .studio-header-inner {
+    min-height: 28px;
+    flex-direction: row !important;
+    flex-wrap: nowrap !important;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+  }
+  .brand-group {
+    order: 1 !important;
+    flex: 0 0 auto !important;
+    gap: 6px;
+  }
+  .brand-logo-wrap {
+    width: 24px;
+    height: 24px;
+  }
+  .brand-title {
+    font-size: 0.85rem;
+  }
+  .header-center-actions {
+    order: 2 !important;
+    flex: 1 1 auto !important;
+    width: auto !important;
+    min-width: 0 !important;
+    justify-content: center;
+  }
+  .header-actions-scroll {
+    justify-content: flex-start;
+    overflow-x: auto;
+    overflow-y: hidden;
+    flex-wrap: nowrap;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+    gap: 5px;
+    padding: 1px 0;
+  }
+  .header-actions-scroll::-webkit-scrollbar {
+    display: none;
+  }
+  .header-action-pill {
+    padding: 3px 8px;
+    font-size: 0.70rem;
+    gap: 4px;
+    height: 24px;
+    box-sizing: border-box;
+  }
+  .studio-controls {
+    order: 3 !important;
+    margin-left: auto;
+    flex: 0 0 auto !important;
+    gap: 6px;
+  }
+  .mobile-pane-switcher {
+    height: 24px;
+  }
+  .mobile-switch-btn {
+    font-size: 0.70rem;
+    padding: 0 6px;
+  }
+  .status-indicator {
+    height: 24px;
+    font-size: 0.70rem;
+    padding: 0 8px;
+    gap: 5px;
   }
 }
 

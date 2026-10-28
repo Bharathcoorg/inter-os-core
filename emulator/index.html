@@ -18,7 +18,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="style.css?v=20261019c">
+  <link rel="stylesheet" href="style.css?v=20261028a">
 </head>
 <body class="dark-theme studio-focus-mode">
   <!-- Mobile / Small Viewport Desktop Recommendation Banner -->
@@ -87,26 +87,28 @@
 
       <!-- Center: Action Controls (Focus, Fullscreen, Web Import, Options) -->
       <div class="header-center-actions">
-        <button class="header-action-pill active" id="btn-focus-mode" title="Toggle Immersive Smartphone Focus Mode (Hotkey: F, Esc to exit)">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="5" y="2" width="14" height="20" rx="3"/><circle cx="12" cy="18" r="1"/></svg>
-          <span>Focus Mode</span>
-        </button>
-        <button class="header-action-pill" id="btn-fullscreen-mode" title="Fullscreen WebApp: Hide Browser Tab/URL Bar">
-          <svg id="fullscreen-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>
-          <span id="fullscreen-text">Fullscreen</span>
-        </button>
-        <button class="header-action-pill primary" id="btn-import-webapp" title="1-Click WebApp to .rapp Porting Engine">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
-          <span>1-Click Web Import</span>
-        </button>
-        <button class="header-action-pill danger" id="btn-reboot-kernel" title="Warm Reboot Sovereign Microkernel" style="display: none !important;">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
-          <span>Reboot OS</span>
-        </button>
-        <button class="header-action-pill header-options-btn" id="btn-header-options" title="Choose which header actions stay visible">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="5" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="19" r="1.6"/></svg>
-          <span>Options</span>
-        </button>
+        <div class="header-actions-scroll">
+          <button class="header-action-pill active" id="btn-focus-mode" title="Toggle Immersive Smartphone Focus Mode (Hotkey: F, Esc to exit)">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="5" y="2" width="14" height="20" rx="3"/><circle cx="12" cy="18" r="1"/></svg>
+            <span>Focus Mode</span>
+          </button>
+          <button class="header-action-pill" id="btn-fullscreen-mode" title="Fullscreen WebApp: Hide Browser Tab/URL Bar">
+            <svg id="fullscreen-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>
+            <span id="fullscreen-text">Fullscreen</span>
+          </button>
+          <button class="header-action-pill primary" id="btn-import-webapp" title="1-Click WebApp to .rapp Porting Engine">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
+            <span>1-Click Web Import</span>
+          </button>
+          <button class="header-action-pill danger" id="btn-reboot-kernel" title="Warm Reboot Sovereign Microkernel" style="display: none !important;">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+            <span>Reboot OS</span>
+          </button>
+          <button class="header-action-pill header-options-btn" id="btn-header-options" title="Choose which header actions stay visible">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="5" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="19" r="1.6"/></svg>
+            <span>Options</span>
+          </button>
+        </div>
         <div class="header-options-menu" id="header-options-menu" hidden>
           <div class="header-options-title">Header options</div>
           <label><input type="checkbox" data-header-option="btn-focus-mode"> <span>Focus mode</span></label>
@@ -1435,6 +1437,6 @@
 
   <!-- Official Lucide Vector Icon Library (Fork & Evolution of Feather Icons) -->
   <script src="/node_modules/lucide/dist/umd/lucide.min.js" onerror="this.onerror=null;this.src='https://unpkg.com/lucide@latest/dist/umd/lucide.js'"></script>
-  <script src="app.js?v=20261019b"></script>
+  <script src="app.js?v=20261028a"></script>
 </body>
 </html>
