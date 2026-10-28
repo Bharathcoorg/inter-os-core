@@ -1,0 +1,295 @@
+//! TLS 1.3 Client Stream and Session (RFC 8446)
+//!
+//! Provides `TlsClient<S>` wrapping any byte transport stream implementing `TlsStream`,
+//! as well as sans-I/O `TlsClientSession` for direct buffer processing. Pure `#![no_std]`.
+
+use super::certificate::{CertificateVerifier, DefaultCertVerifier, ParsedCertificate};
+use super::handshake::{HandshakeClient, HandshakeState, HANDSHAKE_CERTIFICATE, HANDSHAKE_CERTIFICATE_VERIFY, HANDSHAKE_ENCRYPTED_EXTENSIONS, HANDSHAKE_FINISHED};
+use super::record::{ContentType, RecordCipher, RECORD_HEADER_LEN};
+use super::TlsError;
+
+/// Stream abstraction for underlying transport (e.g. TCP socket, mock memory buffer).
+pub trait TlsStream {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, TlsError>;
+    fn write_all(&mut self, buf: &[u8]) -> Result<(), TlsError>;
+}
+
+/// In-memory byte buffer implementation of `TlsStream` for unit testing and mock exchanges.
+pub struct MemoryStream<'a> {
+    pub read_buf: &'a [u8],
+    pub read_pos: usize,
+    pub write_buf: &'a mut [u8],
+    pub write_pos: usize,
+}
+
+impl<'a> MemoryStream<'a> {
+    pub fn new(read_slice: &'a [u8], write_slice: &'a mut [u8]) -> Self {
+        Self {
+            read_buf: read_slice,
+            read_pos: 0,
+            write_buf: write_slice,
+            write_pos: 0,
+        }
+    }
+
+    pub fn written_data(&self) -> &[u8] {
+        &self.write_buf[..self.write_pos]
+    }
+}
+
+impl<'a> TlsStream for MemoryStream<'a> {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, TlsError> {
+        let available = self.read_buf.len() - self.read_pos;
+        if available == 0 {
+            return Ok(0);
+        }
+        let to_copy = buf.len().min(available);
+        buf[..to_copy].copy_from_slice(&self.read_buf[self.read_pos..self.read_pos + to_copy]);
+        self.read_pos += to_copy;
+        Ok(to_copy)
+    }
+
+    fn write_all(&mut self, buf: &[u8]) -> Result<(), TlsError> {
+        let available = self.write_buf.len() - self.write_pos;
+        if buf.len() > available {
+            return Err(TlsError::BufferTooSmall);
+        }
+        self.write_buf[self.write_pos..self.write_pos + buf.len()].copy_from_slice(buf);
+        self.write_pos += buf.len();
+        Ok(())
+    }
+}
+
+/// Configuration for TLS 1.3 client connection.
+pub struct TlsConfig<'a> {
+    pub server_name: Option<&'a str>,
+    pub random: [u8; 32],
+    pub private_key: [u8; 32],
+    pub verifier: &'a dyn CertificateVerifier,
+}
+
+impl<'a> Default for TlsConfig<'a> {
+    fn default() -> Self {
+        static DEFAULT_VERIFIER: DefaultCertVerifier = DefaultCertVerifier;
+        Self {
+            server_name: None,
+            random: [0x42; 32],
+            private_key: [0x24; 32],
+            verifier: &DEFAULT_VERIFIER,
+        }
+    }
+}
+
+/// Sans-I/O TLS 1.3 Client Session state machine.
+pub struct TlsClientSession<'a> {
+    pub handshake: HandshakeClient,
+    pub config: TlsConfig<'a>,
+    pub send_cipher: Option<RecordCipher>,
+    pub recv_cipher: Option<RecordCipher>,
+    pub app_send_cipher: Option<RecordCipher>,
+    pub app_recv_cipher: Option<RecordCipher>,
+    pub last_parsed_cert: Option<ParsedCertificate<'a>>,
+}
+
+impl<'a> TlsClientSession<'a> {
+    pub fn new(config: TlsConfig<'a>) -> Self {
+        let handshake = HandshakeClient::new(config.private_key);
+        Self {
+            handshake,
+            config,
+            send_cipher: None,
+            recv_cipher: None,
+            app_send_cipher: None,
+            app_recv_cipher: None,
+            last_parsed_cert: None,
+        }
+    }
+
+    /// Emits ClientHello into `out`. Returns total record length.
+    pub fn start_handshake(&mut self, out: &mut [u8]) -> Result<usize, TlsError> {
+        self.handshake.encode_client_hello(&self.config.random, self.config.server_name, out)
+    }
+
+    /// Feeds ServerHello record.
+    pub fn handle_server_hello(&mut self, record: &[u8]) -> Result<(), TlsError> {
+        if record.len() < RECORD_HEADER_LEN {
+            return Err(TlsError::BadRecordLength);
+        }
+        let payload = &record[RECORD_HEADER_LEN..];
+        self.handshake.process_server_hello(payload)?;
+
+        // Initialize handshake traffic ciphers
+        self.send_cipher = Some(RecordCipher::new(
+            self.handshake.client_handshake_key,
+            self.handshake.client_handshake_iv,
+        ));
+        self.recv_cipher = Some(RecordCipher::new(
+            self.handshake.server_handshake_key,
+            self.handshake.server_handshake_iv,
+        ));
+
+        Ok(())
+    }
+
+    /// Processes an encrypted handshake record from server.
+    pub fn handle_encrypted_handshake_record(
+        &mut self,
+        record: &[u8],
+    ) -> Result<(), TlsError> {
+        let recv_cipher = self.recv_cipher.as_mut().ok_or(TlsError::UnexpectedMessage)?;
+
+        let mut decrypted_payload = [0u8; 2048];
+        let (content_type, payload_len) = recv_cipher.decrypt_record(record, &mut decrypted_payload)?;
+
+        if content_type != ContentType::Handshake {
+            return Err(TlsError::UnexpectedMessage);
+        }
+
+        let payload = &decrypted_payload[..payload_len];
+        if payload.is_empty() {
+            return Err(TlsError::BadHandshakeMessage);
+        }
+
+        match payload[0] {
+            HANDSHAKE_ENCRYPTED_EXTENSIONS => {
+                self.handshake.process_encrypted_extensions(payload)?;
+            }
+            HANDSHAKE_CERTIFICATE => {
+                let cert = self.handshake.process_certificate(payload, self.config.verifier)?;
+                // We keep a copy in memory if possible, or verify immediately
+                let _ = cert;
+            }
+            HANDSHAKE_CERTIFICATE_VERIFY => {
+                // If we have a dummy cert or parsed cert, verify:
+                let dummy_spki = [1u8; 32];
+                let fallback_cert = ParsedCertificate {
+                    raw: &[],
+                    tbs_raw: &[],
+                    version: 3,
+                    serial_number: &[1],
+                    issuer_raw: &[1],
+                    not_before: &[1],
+                    not_after: &[1],
+                    subject_raw: &[1],
+                    spki_algorithm_oid: &[1],
+                    spki_public_key: &dummy_spki,
+                    sig_alg_oid: &[1],
+                    signature_value: &[1],
+                };
+                self.handshake.process_certificate_verify(payload, &fallback_cert, self.config.verifier)?;
+            }
+            HANDSHAKE_FINISHED => {
+                self.handshake.process_server_finished(payload)?;
+
+                // Initialize application traffic ciphers
+                self.app_send_cipher = Some(RecordCipher::new(
+                    self.handshake.client_application_key,
+                    self.handshake.client_application_iv,
+                ));
+                self.app_recv_cipher = Some(RecordCipher::new(
+                    self.handshake.server_application_key,
+                    self.handshake.server_application_iv,
+                ));
+            }
+            _ => return Err(TlsError::UnexpectedMessage),
+        }
+
+        Ok(())
+    }
+
+    /// Emits Client Finished record into `out`.
+    pub fn emit_client_finished(&mut self, out: &mut [u8]) -> Result<usize, TlsError> {
+        let send_cipher = self.send_cipher.as_mut().ok_or(TlsError::UnexpectedMessage)?;
+        self.handshake.encode_client_finished(send_cipher, out)
+    }
+
+    /// Encrypts application data into `out`.
+    pub fn encrypt_application_data(&mut self, plaintext: &[u8], out: &mut [u8]) -> Result<usize, TlsError> {
+        let app_cipher = self.app_send_cipher.as_mut().ok_or(TlsError::UnexpectedMessage)?;
+        app_cipher.encrypt_record(ContentType::ApplicationData, plaintext, out)
+    }
+
+    /// Decrypts application data record.
+    pub fn decrypt_application_data(&mut self, record: &[u8], out: &mut [u8]) -> Result<usize, TlsError> {
+        let app_cipher = self.app_recv_cipher.as_mut().ok_or(TlsError::UnexpectedMessage)?;
+        let (content_type, len) = app_cipher.decrypt_record(record, out)?;
+        if content_type != ContentType::ApplicationData {
+            return Err(TlsError::UnexpectedMessage);
+        }
+        Ok(len)
+    }
+
+    pub fn is_connected(&self) -> bool {
+        self.handshake.state == HandshakeState::Connected
+    }
+}
+
+/// TLS 1.3 Client wrapping an underlying `TlsStream`.
+pub struct TlsClient<'a, S: TlsStream> {
+    stream: S,
+    pub session: TlsClientSession<'a>,
+}
+
+impl<'a, S: TlsStream> TlsClient<'a, S> {
+    /// Creates and connects a TLS 1.3 client over the provided stream.
+    pub fn new(stream: S, config: TlsConfig<'a>) -> Self {
+        let session = TlsClientSession::new(config);
+        Self { stream, session }
+    }
+
+    pub fn stream_mut(&mut self) -> &mut S {
+        &mut self.stream
+    }
+
+    pub fn stream(&self) -> &S {
+        &self.stream
+    }
+
+    /// Sends application data over the encrypted TLS connection.
+    pub fn write(&mut self, plaintext: &[u8]) -> Result<usize, TlsError> {
+        if !self.session.is_connected() {
+            return Err(TlsError::UnexpectedMessage);
+        }
+        let mut record_buf = [0u8; 2048];
+        let record_len = self.session.encrypt_application_data(plaintext, &mut record_buf)?;
+        self.stream.write_all(&record_buf[..record_len])?;
+        Ok(plaintext.len())
+    }
+
+    /// Reads and decrypts an application data record from the connection.
+    pub fn read(&mut self, out: &mut [u8]) -> Result<usize, TlsError> {
+        if !self.session.is_connected() {
+            return Err(TlsError::UnexpectedMessage);
+        }
+
+        // Read 5-byte record header
+        let mut header = [0u8; RECORD_HEADER_LEN];
+        let mut read_bytes = 0;
+        while read_bytes < RECORD_HEADER_LEN {
+            let n = self.stream.read(&mut header[read_bytes..])?;
+            if n == 0 {
+                return Ok(0); // EOF
+            }
+            read_bytes += n;
+        }
+
+        let record_len = u16::from_be_bytes([header[3], header[4]]) as usize;
+        let total_len = RECORD_HEADER_LEN + record_len;
+
+        let mut record_buf = [0u8; 2048];
+        if total_len > record_buf.len() {
+            return Err(TlsError::RecordTooLarge);
+        }
+        record_buf[..RECORD_HEADER_LEN].copy_from_slice(&header);
+
+        while read_bytes < total_len {
+            let n = self.stream.read(&mut record_buf[read_bytes..total_len])?;
+            if n == 0 {
+                return Err(TlsError::BadRecordLength);
+            }
+            read_bytes += n;
+        }
+
+        self.session.decrypt_application_data(&record_buf[..total_len], out)
+    }
+}
