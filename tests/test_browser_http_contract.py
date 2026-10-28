@@ -506,10 +506,11 @@ def test_no_screen_claims_a_trusted_connection_the_verifier_cannot_back():
 
     WHY this is pinned: the browser's verifier checks the certificate's
     structure, its validity dates, the name match against the address dialled
-    and a signature chain to the roots the browser ships -- today one synthetic
-    local test root. Until that store holds a real trust anchor, no string drawn
-    by the browser may say a connection is trusted or secured; it reports an
-    encrypted channel that completed a handshake.
+    and a signature chain to the roots the browser ships. The shipped store
+    holds no root at all, so every chain is refused; until a real trust anchor
+    is provisioned, no string drawn by the browser may say a connection is
+    trusted or secured; it reports an encrypted channel that completed a
+    handshake.
     """
     code = code_only((ROOT / "apps/browser/src/main.rs").read_text(encoding="utf-8"))
     drawn = re.findall(r'b"((?:[^"\\]|\\.)*)"', code)
@@ -519,6 +520,97 @@ def test_no_screen_claims_a_trusted_connection_the_verifier_cannot_back():
         for overclaim in ("trusted", "secured", "fully verified", "end-to-end encrypted"):
             assert overclaim not in lowered, (
                 f"the screen says {overclaim!r} in {text[:80]!r} while the verifier's "
-                "root store is a local test root"
+                "root store holds no anchor"
             )
+
+
+def test_a_server_name_the_browser_cannot_pin_is_refused_not_truncated():
+    """The name sent in SNI and the name the verifier pins are one whole name.
+
+    WHY this is pinned: the address bar and the handshake are two places that
+    must agree on the host. A name that does not fit the buffer, or that is not
+    text, cannot be agreed on -- a truncated name is a prefix, and a
+    certificate issued for the prefix is not a certificate for the host that
+    was dialled. The browser refuses such a name before it opens a connection
+    instead of quietly shortening it.
+    """
+    code = code_only((ROOT / "apps/browser/src/main.rs").read_text(encoding="utf-8"))
+
+    assert "from_utf8_unchecked" not in code, (
+        "the server name is turned into a string without checking that it is text"
+    )
+    setter = code.split("pub fn set_current_server_name", 1)[1].split("\n}", 1)[0]
+    assert ".min(" not in setter, (
+        "the server name is truncated to fit the buffer instead of being refused"
+    )
+    assert not re.search(
+        r"\.min\(\s*(?:TLS_HOSTNAME_CAPACITY|name\.len\(\)|name_bytes\.len\(\))", code
+    ), "the server name is truncated to fit the buffer instead of being refused"
+    assert "buf[..name.len()].copy_from_slice(name);" in code, (
+        "the whole server name is not copied into the buffer"
+    )
+
+    assert "TLS_HOSTNAME_CAPACITY" in code, (
+        "the buffer capacity is not named, so the refusal has nothing to compare against"
+    )
+    assert "name.len() > TLS_HOSTNAME_CAPACITY" in code, (
+        "a name longer than the buffer is not refused"
+    )
+    assert "core::str::from_utf8(name).is_err()" in code, (
+        "a server name that is not text is not refused"
+    )
+    assert "TLS_HOSTNAME_REFUSED = true" in code, (
+        "a refused server name is not remembered, so the fetch path cannot see it"
+    )
+
+    # The refusal has to reach the screen as its own outcome, not as a
+    # generic handshake failure: the two mean different things to the user.
+    assert "FetchErrorKind::TlsNameRefused" in code, (
+        "a refused server name is not carried to the screen as its own kind"
+    )
+    assert "ConnectionFailure::TlsNameRefused" in code, (
+        "a refused server name is not carried to the screen as its own failure"
+    )
+    assert "BODY_TLS_NAME_REFUSED" in code, (
+        "a refused server name is not explained on the screen"
+    )
+
+
+def test_the_screen_separates_a_missing_trust_anchor_from_a_refused_certificate():
+    """A device with no root and a device that rejected a certificate are not the same fault.
+
+    WHY this is pinned: the shipped verifier holds no trust anchor, so every
+    certificate chain is refused. If the screen said "the certificate was
+    rejected" for that, it would be describing a fault the device never
+    observed -- the device never had a root to accept the certificate with.
+    """
+    code = code_only((ROOT / "apps/browser/src/main.rs").read_text(encoding="utf-8"))
+
+    assert "fn tls_trust_store_is_empty() -> bool" in code, (
+        "the browser does not ask its own store whether it holds a trust anchor"
+    )
+    assert "tls_trust_store_is_empty()" in code, (
+        "the trust anchor state is never consulted when reporting a TLS failure"
+    )
+    assert "ConnectionFailure::TlsNoTrustAnchor" in code, (
+        "a missing trust anchor is not a distinct failure on the screen"
+    )
+    assert "BODY_TLS_NO_TRUST_ANCHOR" in code, (
+        "a missing trust anchor is not explained on the screen"
+    )
+    bodies = dict(
+        re.findall(r'const (BODY_TLS_\w+): &\[u8\] = b"((?:[^"\\]|\\[\s\S])*)"', code)
+    )
+    assert bodies.get("BODY_TLS_NO_TRUST_ANCHOR") != bodies.get(
+        "BODY_TLS_HANDSHAKE_FAILED"
+    ), "the missing anchor and the failed handshake say the same thing"
+    assert "trust anchor" in bodies.get("BODY_TLS_NO_TRUST_ANCHOR", ""), (
+        "the missing-anchor body does not name the missing anchor"
+    )
+    assert "ConnectionFailure::TlsNoTrustAnchor => (b\"No trust anchor\"" in code, (
+        "the status line does not name the missing trust anchor"
+    )
+    assert "ConnectionFailure::TlsNameRefused => (b\"Address refused\"" in code, (
+        "the status line does not name the refused address"
+    )
 

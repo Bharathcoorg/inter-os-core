@@ -334,14 +334,53 @@ static mut TLS_VERIFIER: tls::DefaultCertVerifier<'static> = tls::DefaultCertVer
 static mut TLS_HOSTNAME_BUF: [u8; 128] = [0; 128];
 static mut TLS_HOSTNAME_LEN: usize = 0;
 
+/// How many bytes of server name the buffer holds.
+///
+/// WHY this is a constant rather than the buffer's own length: reading the
+/// length of a mutable static takes a shared reference to it, which the
+/// compiler rightly refuses to do.
+const TLS_HOSTNAME_CAPACITY: usize = 128;
+
+/// Whether the last server name was refused rather than stored.
+///
+/// WHY this is remembered instead of being reported once: the name is set on
+/// the navigation path and read on the fetch path, and a name that was
+/// refused must not turn into a different name on the way to the handshake.
+static mut TLS_HOSTNAME_REFUSED: bool = false;
+
 /// Sets the active server name for TLS 1.3 connections.
+///
+/// WHY a name that does not fit is refused instead of truncated: the name the
+/// client advertises in SNI and the identity the verifier pins have to be the
+/// whole name. A truncated name is a prefix, and a certificate issued for the
+/// prefix is not a certificate for the host that was dialled.
+///
+/// WHY a name that is not text is refused: the name is a host label, and a
+/// byte string that is not text cannot be compared against a certificate's
+/// name honestly.
 pub fn set_current_server_name(name: &[u8]) {
     unsafe {
         let buf = &mut *core::ptr::addr_of_mut!(TLS_HOSTNAME_BUF);
-        let len = name.len().min(buf.len());
-        buf[..len].copy_from_slice(&name[..len]);
-        TLS_HOSTNAME_LEN = len;
+        if name.len() > TLS_HOSTNAME_CAPACITY || core::str::from_utf8(name).is_err() {
+            TLS_HOSTNAME_REFUSED = true;
+            TLS_HOSTNAME_LEN = 0;
+            return;
+        }
+        buf[..name.len()].copy_from_slice(name);
+        TLS_HOSTNAME_LEN = name.len();
+        TLS_HOSTNAME_REFUSED = false;
     }
+}
+
+/// Whether the browser's certificate verifier holds no trust anchor at all.
+///
+/// WHY the browser asks its own store: the shipped verifier starts with an
+/// empty root list, so every certificate chain is refused. That is a fact
+/// about the device, and a screen that says "the certificate was rejected"
+/// when the device never had a root to accept it with is describing a fault
+/// it did not observe.
+fn tls_trust_store_is_empty() -> bool {
+    unsafe { (&(*core::ptr::addr_of!(TLS_VERIFIER)).trusted_roots).is_empty() }
 }
 
 /// The outcome of a fetch over TCP.
@@ -446,16 +485,33 @@ fn fetch_over_tls(
     }
 
     // Prepare TLS 1.3 configuration in static .bss
-    unsafe {
-        let name_bytes = server_name.as_bytes();
-        let buf = &mut *core::ptr::addr_of_mut!(TLS_HOSTNAME_BUF);
-        let len = name_bytes.len().min(buf.len());
-        buf[..len].copy_from_slice(&name_bytes[..len]);
-        TLS_HOSTNAME_LEN = len;
-    }
+    //
+    // WHY the name is checked rather than truncated: the name the client
+    // advertises in SNI and the identity the verifier pins have to be the
+    // whole name. The buffer holds 128 bytes, so a longer name is refused
+    // here instead of being cut to a prefix, because a certificate issued
+    // for the prefix is not a certificate for the host that was dialled.
     let host_str: &'static str = unsafe {
+        let name_bytes = server_name.as_bytes();
+        if name_bytes.len() > TLS_HOSTNAME_CAPACITY {
+            outcome.kind = FetchErrorKind::TlsNameRefused;
+            return outcome;
+        }
+        let buf = &mut *core::ptr::addr_of_mut!(TLS_HOSTNAME_BUF);
+        buf[..name_bytes.len()].copy_from_slice(name_bytes);
+        TLS_HOSTNAME_LEN = name_bytes.len();
         let buf = &*core::ptr::addr_of!(TLS_HOSTNAME_BUF);
-        core::str::from_utf8_unchecked(&buf[..TLS_HOSTNAME_LEN])
+        // WHY this is a checked conversion: the bytes came from a `&str`, so
+        // they are text, and an unchecked conversion over a buffer another
+        // path may have written would be undefined behaviour rather than a
+        // wrong answer.
+        match core::str::from_utf8(&buf[..TLS_HOSTNAME_LEN]) {
+            Ok(name) => name,
+            Err(_) => {
+                outcome.kind = FetchErrorKind::TlsNameRefused;
+                return outcome;
+            }
+        }
     };
 
     unsafe {
@@ -579,8 +635,29 @@ fn fetch_over_tcp(
     use_tls: bool,
 ) -> FetchOutcome {
     if use_tls {
-        let host_str = unsafe {
-            core::str::from_utf8(&TLS_HOSTNAME_BUF[..TLS_HOSTNAME_LEN]).unwrap_or("localhost")
+        // WHY a refused name ends the fetch here: the name is what the
+        // peer's certificate is checked against, and a name the browser would
+        // not store is a name it cannot honestly pin. Falling back to another
+        // name would check the certificate against something the user never
+        // asked for.
+        let host = unsafe {
+            if TLS_HOSTNAME_REFUSED {
+                None
+            } else {
+                core::str::from_utf8(&TLS_HOSTNAME_BUF[..TLS_HOSTNAME_LEN]).ok()
+            }
+        };
+        let Some(host_str) = host else {
+            let mut outcome = FetchOutcome {
+                tls_verified: false,
+                bytes: 0,
+                truncated: false,
+                error: 0,
+                first_byte_tick: None,
+                kind: FetchErrorKind::None,
+            };
+            outcome.kind = FetchErrorKind::TlsNameRefused;
+            return outcome;
         };
         return fetch_over_tls(dst_ip, dst_port, local_port, host_str, request, window);
     }
@@ -1163,6 +1240,12 @@ but the transfer stalled before completion. No further bytes were received.";
 const BODY_TLS_HANDSHAKE_FAILED: &[u8] = b"The TLS 1.3 secure connection could not be established. \
 The peer's certificate was rejected or the cryptographic handshake failed. \
 The browser failed closed to protect your data.";
+const BODY_TLS_NO_TRUST_ANCHOR: &[u8] = b"The TLS 1.3 secure connection could not be established. \
+This browser holds no trust anchor for a certificate chain, so it cannot accept \
+the peer's certificate. The browser failed closed: no plaintext was sent.";
+const BODY_TLS_NAME_REFUSED: &[u8] = b"The host name in the address was refused before the secure \
+connection was opened, so no certificate could be checked against it. The browser \
+failed closed: no plaintext was sent.";
 const BODY_ZERO_BYTES: &[u8] = b"The gateway connection succeeded and the request was sent, \
 but the gateway closed the connection without returning any response data.";
 const BODY_PROTOCOL_MALFORMED: &[u8] = b"The gateway returned a response that could not be \
@@ -5047,8 +5130,23 @@ impl BrowserApp {
                     }
                     FetchErrorKind::TlsHandshakeFailed => {
                         self.status = PageStatus::ConnectionFailed;
-                        self.connection_failure = ConnectionFailure::TlsFailed;
+                        // WHY the browser distinguishes the two cases: it can
+                        // observe that its own trust store is empty, and "no
+                        // trust anchor" is a different fact from "the peer's
+                        // certificate was refused". Reporting the one it can
+                        // prove keeps the screen from describing a fault it
+                        // did not observe.
+                        self.connection_failure = if tls_trust_store_is_empty() {
+                            ConnectionFailure::TlsNoTrustAnchor
+                        } else {
+                            ConnectionFailure::TlsFailed
+                        };
                         std::log("[BROWSER APP] TLS 1.3 handshake failed; connection terminated securely without sending plaintext.").ok();
+                    }
+                    FetchErrorKind::TlsNameRefused => {
+                        self.status = PageStatus::ConnectionFailed;
+                        self.connection_failure = ConnectionFailure::TlsNameRefused;
+                        std::log("[BROWSER APP] The server name in the address was refused before the TLS handshake; no connection was opened.").ok();
                     }
                     FetchErrorKind::ZeroBytes | FetchErrorKind::None => {
                         self.status = PageStatus::ZeroBytes;
@@ -5792,6 +5890,8 @@ impl Frame {
                 ConnectionFailure::Timeout => (b"Connection timed out", BODY_CONNECTION_TIMEOUT),
                 ConnectionFailure::Stall => (b"Connection stalled", BODY_CONNECTION_STALLED),
                 ConnectionFailure::TlsFailed => (b"Security check failed", BODY_TLS_HANDSHAKE_FAILED),
+                ConnectionFailure::TlsNoTrustAnchor => (b"No trust anchor", BODY_TLS_NO_TRUST_ANCHOR),
+                ConnectionFailure::TlsNameRefused => (b"Address refused", BODY_TLS_NAME_REFUSED),
                 ConnectionFailure::None => (b"Connection failed", BODY_CONNECTION_TIMEOUT),
             },
             PageStatus::ZeroBytes => (b"No data received", BODY_ZERO_BYTES),
@@ -7587,6 +7687,8 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                     ConnectionFailure::Timeout => b"CONNECTION TIMED OUT",
                     ConnectionFailure::Stall => b"CONNECTION STALLED",
                     ConnectionFailure::TlsFailed => b"TLS HANDSHAKE FAILED",
+                    ConnectionFailure::TlsNoTrustAnchor => b"NO TRUST ANCHOR",
+                    ConnectionFailure::TlsNameRefused => b"ADDRESS REFUSED",
                     ConnectionFailure::None => b"CONNECTION FAILED",
                 },
                 PageStatus::ZeroBytes => b"NO RESPONSE FROM THE GATEWAY",

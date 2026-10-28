@@ -1251,6 +1251,15 @@ pub enum ConnectionFailure {
     Stall,
     /// TLS 1.3 handshake or certificate verification failed.
     TlsFailed,
+    /// The TLS handshake failed because this browser holds no trust anchor.
+    ///
+    /// WHY this is a separate state: it is a different fact from a rejected
+    /// certificate. The browser can observe that its own trust store is
+    /// empty, and it cannot observe why a chain it does hold was refused, so
+    /// the screen reports the one it can prove.
+    TlsNoTrustAnchor,
+    /// The server name was refused before the handshake began.
+    TlsNameRefused,
 }
 
 /// Why document decoding or protocol handling failed.

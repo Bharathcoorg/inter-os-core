@@ -32,6 +32,14 @@ pub enum FetchErrorKind {
     ZeroBytes,
     /// TLS 1.3 handshake failed (certificate rejected, unsupported cipher, verify mismatch, bad record).
     TlsHandshakeFailed,
+    /// The server name was refused before the handshake began.
+    ///
+    /// WHY this is not a handshake failure: the handshake never started. The
+    /// name was one the browser would not store -- too long for the buffer it
+    /// advertises in SNI, or not text -- so there was nothing to verify
+    /// against, and reporting it as a rejected certificate would describe a
+    /// fault that did not happen.
+    TlsNameRefused,
 }
 
 /// A `TlsStream` transport adapter wrapping an InterOS kernel TCP connection socket.
