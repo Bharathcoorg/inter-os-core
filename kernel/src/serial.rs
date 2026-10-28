@@ -968,6 +968,10 @@ fn handle_rapp_command(s: &str) -> bool {
             serial_println!("[RAPP_HOST] REJECT trust hex");
             return true;
         }
+        if crate::package::revocation::is_system_publisher_identity(publisher) {
+            serial_println!("[RAPP_HOST] REJECT system publisher cannot be provisioned via serial");
+            return true;
+        }
         let mut reg = crate::package::REVOCATION_REGISTRY.lock();
         let res = reg.trust_key(key, publisher).or_else(|_| {
             reg.grant_trust_root(key, publisher)

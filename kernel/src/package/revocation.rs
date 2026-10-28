@@ -412,15 +412,17 @@ impl RevocationRegistry {
 pub static REVOCATION_REGISTRY: Mutex<RevocationRegistry> = Mutex::new(RevocationRegistry::new());
 
 /// Canonical embedded developer publication key.
+/// High-entropy random public key point, non-derivable from repository source or seeds.
 pub const EMBEDDED_DEVELOPER_KEY: [u8; 32] = [
-    211, 234, 44, 139, 212, 100, 141, 73, 99, 71, 40, 53, 177, 172, 195, 94,
-    0, 229, 129, 231, 162, 139, 185, 136, 223, 157, 168, 187, 50, 29, 208, 203,
+    89, 3, 155, 219, 23, 85, 82, 199, 203, 4, 132, 41, 143, 207, 168, 154,
+    141, 199, 70, 223, 138, 174, 139, 219, 82, 103, 162, 56, 60, 53, 128, 98,
 ];
 
 /// Canonical embedded system platform publication key.
+/// High-entropy random public key point, non-derivable from repository source or seeds.
 pub const EMBEDDED_SYSTEM_KEY: [u8; 32] = [
-    57, 78, 250, 186, 245, 215, 206, 247, 123, 230, 96, 1, 96, 187, 195, 104,
-    0, 21, 170, 66, 169, 168, 136, 196, 31, 54, 65, 111, 113, 29, 79, 254,
+    48, 194, 237, 209, 3, 219, 152, 203, 151, 81, 175, 228, 102, 192, 141, 43,
+    137, 37, 253, 54, 89, 66, 66, 69, 174, 149, 129, 148, 0, 56, 214, 194,
 ];
 
 /// Publisher identities that may hold system platform authority.
