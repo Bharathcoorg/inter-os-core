@@ -91,13 +91,13 @@ impl WirelessManager {
     }
 
     /// Connects to a Wi-Fi WPA3 network.
-    pub fn connect_wifi(&mut self, ssid: &str, rssi_dbm: i8) {
+    pub fn connect_wifi(&mut self, ssid: &str, rssi_dbm: i8) -> Result<(), &'static str> {
         if !self.hardware_present {
             self.wifi_state = WifiState::Disabled;
             self.wifi_ssid_len = 0;
             self.wifi_rssi_dbm = 0;
             self.wifi_freq_mhz = 0;
-            return;
+            return Err("wifi hardware unavailable");
         }
         let bytes = ssid.as_bytes();
         let copy_len = bytes.len().min(32);
@@ -105,14 +105,21 @@ impl WirelessManager {
         self.wifi_ssid_len = copy_len;
         self.wifi_rssi_dbm = rssi_dbm;
         self.wifi_state = WifiState::ConnectedWpa3;
-}
+        Ok(())
+    }
 
     pub fn set_bluetooth_available(&mut self, available: bool) {
+        if !self.hardware_present {
+            self.bluetooth_state = BluetoothState::Disabled;
+            return;
+        }
         self.bluetooth_state = if available { BluetoothState::Scanning } else { BluetoothState::Disabled };
     }
 
     pub fn pair_bluetooth(&mut self, address: [u8; 6], profile_mask: u8) -> Result<(), &'static str> {
-        if self.bluetooth_state == BluetoothState::Disabled { return Err("bluetooth hardware unavailable"); }
+        if !self.hardware_present || self.bluetooth_state == BluetoothState::Disabled {
+            return Err("bluetooth hardware unavailable");
+        }
         if let Some(slot) = self.paired_devices.iter_mut().find(|d| d.map(|v| v.address) == Some(address)) {
             *slot = Some(PairedDevice { address, profile_mask });
             self.bluetooth_state = BluetoothState::Connected;
@@ -145,8 +152,8 @@ impl WirelessManager {
         let ssid_str = core::str::from_utf8(&self.wifi_ssid[..self.wifi_ssid_len]).unwrap_or("None");
         let _ = write!(
             writer,
-            r#"{{"wifi_state":"{:?}","ssid":"{}","rssi_dbm":{},"freq_mhz":{},"ble_adv":{}}}"#,
-            self.wifi_state, ssid_str, self.wifi_rssi_dbm, self.wifi_freq_mhz, self.ble_advertising
+            r#"{{"hardware_present":{},"wifi_state":"{:?}","ssid":"{}","rssi_dbm":{},"freq_mhz":{},"ble_adv":{}}}"#,
+            self.hardware_present, self.wifi_state, ssid_str, self.wifi_rssi_dbm, self.wifi_freq_mhz, self.ble_advertising
         );
         writer.pos
     }
@@ -166,4 +173,41 @@ pub fn init() {
         wm.wifi_state,
         str_view
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn absent_hardware_fails_closed_for_all_wireless_operations() {
+        let mut wm = WirelessManager::new();
+        assert!(!wm.hardware_present);
+        assert_eq!(wm.wifi_state, WifiState::Disabled);
+        assert_eq!(wm.bluetooth_state, BluetoothState::Disabled);
+
+        // Wi-Fi connect must fail when hardware is absent
+        assert_eq!(wm.connect_wifi("TestSSID", -60), Err("wifi hardware unavailable"));
+        assert_eq!(wm.wifi_state, WifiState::Disabled);
+
+        // Bluetooth scanning/enabling must fail when hardware is absent
+        wm.set_bluetooth_available(true);
+        assert_eq!(wm.bluetooth_state, BluetoothState::Disabled, "Bluetooth cannot be enabled without hardware");
+
+        // Bluetooth pairing must fail when hardware is absent
+        let res = wm.pair_bluetooth([0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC], 0x01);
+        assert_eq!(res, Err("bluetooth hardware unavailable"));
+        assert_eq!(wm.bluetooth_state, BluetoothState::Disabled);
+
+        // BLE beaconing must fail when hardware is absent
+        wm.build_ble_beacon(&[0x42; 16]);
+        assert!(!wm.ble_advertising);
+
+        // format_json must truthfully reflect absent hardware and disabled wifi
+        let mut buf = [0u8; 128];
+        let len = wm.format_json(&mut buf);
+        let s = core::str::from_utf8(&buf[..len]).unwrap();
+        assert!(s.contains("\"wifi_state\":\"Disabled\""));
+        assert!(s.contains("\"hardware_present\":false"));
+    }
 }

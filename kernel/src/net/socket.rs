@@ -921,6 +921,70 @@ mod tcp_reliability_tests {
         );
     }
 
+    /// Measures an end-to-end 22-connection page load burst (e.g. github.com)
+    /// against the 16-slot table, verifying observed slot allocation, saturation
+    /// rejection, peer reset / FIN reclamation, and completion counts.
+    #[test]
+    fn page_load_burst_twenty_two_connections_observed_metrics() {
+        let mut table = TcpConnectionTable::new();
+        let mut active_ids = [0u32; 22];
+        let mut total_opened = 0;
+        let mut rejected_at_saturation = 0;
+
+        // Phase 1: Rapid subresource burst fills table to capacity (16 slots)
+        for i in 0..16 {
+            let id = table.open(7, 45_000 + i as u16, Ipv4Address::LOCALHOST, 443, 1000 + i as u32)
+                .expect("connection fits within 16-slot table");
+            active_ids[i] = id;
+            total_opened += 1;
+            table.get_mut(id).unwrap().state = crate::net::TcpState::Established;
+        }
+        assert_eq!(total_opened, 16);
+        assert_eq!(table.entries().iter().filter(|s| s.is_some()).count(), 16, "all 16 slots occupied");
+
+        // Attempting connection #17 while all 16 are unclosed MUST be refused
+        let saturated_res = table.open(7, 46_000, Ipv4Address::LOCALHOST, 443, 2000);
+        assert_eq!(saturated_res.err(), Some(NetError::QueueFull));
+        rejected_at_saturation += 1;
+
+        // Phase 2: First 6 subresources complete and close
+        // - 3 closed by peer reset (abort_by_peer)
+        for i in 0..3 {
+            assert!(table.abort_by_peer(active_ids[i]));
+        }
+        // - 3 closed by active close (FIN armed and acknowledged)
+        for i in 3..6 {
+            let fin_seq = table.arm_fin(active_ids[i], 0).expect("arm FIN");
+            assert!(table.acknowledge_fin(active_ids[i], fin_seq.wrapping_add(1)));
+        }
+
+        // Fast-forward time past TIME-WAIT hold for the 3 active closes
+        let now = crate::interrupts::get_system_ticks().saturating_add(crate::net::tcp::TCP_TIME_WAIT + 1);
+        assert_eq!(table.reap_time_wait(now), 3, "3 TIME-WAIT entries expired");
+
+        // Phase 3: Browser issues remaining 6 subresource requests (#17..#22)
+        // open() must automatically reclaim the 6 closed slots and succeed
+        for i in 16..22 {
+            let id = table.open(7, 45_000 + i as u16, Ipv4Address::LOCALHOST, 443, 1000 + i as u32)
+                .expect("reclaimed slots accommodate remaining subresource burst");
+            active_ids[i] = id;
+            total_opened += 1;
+            table.get_mut(id).unwrap().state = crate::net::TcpState::Established;
+        }
+
+        // Verify observed metrics:
+        assert_eq!(total_opened, 22, "exactly 22 distinct connections successfully opened across burst");
+        assert_eq!(rejected_at_saturation, 1, "exactly 1 connection rejected when table was saturated at 16");
+        assert_eq!(table.entries().iter().filter(|s| s.is_some()).count(), 16, "peak capacity bounded at 16");
+
+        // Phase 4: Remaining 16 in-flight connections finish (peer reset / close)
+        for i in 6..22 {
+            assert!(table.abort_by_peer(active_ids[i]));
+        }
+        assert_eq!(table.reap_closed(), 16, "all 16 remaining slots reaped");
+        assert_eq!(table.entries().iter().filter(|s| s.is_some()).count(), 0, "table completely clean after burst");
+    }
+
     #[test]
     fn payload_retransmit_exhaustion_closes_connection_and_releases_slot() {
         let mut table = TcpConnectionTable::new();
