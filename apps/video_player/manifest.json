@@ -12,7 +12,8 @@
     "CAP_FRAMEBUFFER",
     "CAP_EVENT_POLL",
     "CAP_FILESYSTEM_READ",
-    "CAP_FILESYSTEM_WRITE"
+    "CAP_FILESYSTEM_WRITE",
+    "CAP_AUDIO_STREAM"
   ],
   "intents": {
     "mime": [

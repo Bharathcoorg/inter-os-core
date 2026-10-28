@@ -120,6 +120,16 @@ pub struct AviInfo {
     pub codec: [u8; 4],
     /// Interval derived from the video `strh` when `avih` omits one.
     strh_interval_us: u32,
+    /// Zero-based index of the first `auds` stream in `hdrl`.
+    pub audio_stream: Option<u8>,
+    /// Audio format tag from `strf` (1 = WAVE_FORMAT_PCM).
+    pub audio_format_tag: u16,
+    /// Number of audio channels (e.g. 1 for mono, 2 for stereo).
+    pub audio_channels: u16,
+    /// Audio sample rate in Hz (e.g. 2000, 8000, 44100, 48000).
+    pub audio_sample_rate: u32,
+    /// Bits per audio sample (e.g. 8, 16).
+    pub audio_bits_per_sample: u16,
 }
 
 impl AviInfo {
@@ -133,7 +143,17 @@ impl AviInfo {
             audio_streams: 0,
             codec: [0; 4],
             strh_interval_us: 0,
+            audio_stream: None,
+            audio_format_tag: 0,
+            audio_channels: 0,
+            audio_sample_rate: 0,
+            audio_bits_per_sample: 0,
         }
+    }
+
+    /// True when the movie carries an uncompressed PCM audio stream.
+    pub fn is_pcm_audio(&self) -> bool {
+        self.audio_streams > 0 && self.audio_format_tag == 1
     }
 
     /// The frame interval the header states, in microseconds; `0` if unknown.
@@ -189,6 +209,19 @@ fn is_frame_chunk(id: &[u8; 4], stream: u8) -> bool {
         && id[1] == expected[1]
         && id[2] == b'd'
         && (id[3] == b'c' || id[3] == b'b')
+}
+
+/// The chunk id an audio chunk of `stream` carries: `00wb`, `01wb`, ...
+fn audio_chunk_id(stream: u8) -> [u8; 4] {
+    [b'0' + stream / 10, b'0' + stream % 10, b'w', b'b']
+}
+
+fn is_audio_chunk(id: &[u8; 4], stream: u8) -> bool {
+    let expected = audio_chunk_id(stream);
+    id[0] == expected[0]
+        && id[1] == expected[1]
+        && id[2] == b'w'
+        && id[3] == b'b'
 }
 
 fn upper(b: u8) -> u8 {
@@ -333,6 +366,10 @@ fn parse_strl<S: Source>(
     let mut strf_w = 0u32;
     let mut strf_h = 0u32;
     let mut strf_comp = [0u8; 4];
+    let mut audio_tag = 0u16;
+    let mut audio_channels = 0u16;
+    let mut audio_rate = 0u32;
+    let mut audio_bits = 0u16;
 
     while reader.pos + 8 <= end {
         let id = reader.fourcc()?;
@@ -357,13 +394,26 @@ fn parse_strl<S: Source>(
                 scale = le32(&timing, 0);
                 rate = le32(&timing, 4);
             }
-        } else if &id == b"strf" && size >= 20 {
-            let mut buf = [0u8; 20];
-            reader.read_exact(&mut buf)?;
-            strf_w = le32(&buf, 4);
-            let height = le32(&buf, 8) as i32;
-            strf_h = height.unsigned_abs();
-            strf_comp.copy_from_slice(&buf[16..20]);
+        } else if &id == b"strf" {
+            if size >= 14 {
+                let mut buf = [0u8; 40];
+                let take = cmp::min(size as usize, buf.len());
+                reader.read_exact(&mut buf[..take])?;
+                if take >= 20 {
+                    strf_w = le32(&buf, 4);
+                    let height = le32(&buf, 8) as i32;
+                    strf_h = height.unsigned_abs();
+                    strf_comp.copy_from_slice(&buf[16..20]);
+                }
+                if take >= 14 {
+                    audio_tag = (buf[0] as u16) | ((buf[1] as u16) << 8);
+                    audio_channels = (buf[2] as u16) | ((buf[3] as u16) << 8);
+                    audio_rate = le32(&buf, 4);
+                }
+                if take >= 16 {
+                    audio_bits = (buf[14] as u16) | ((buf[15] as u16) << 8);
+                }
+            }
         }
         if reader.pos < payload_end {
             reader.skip(payload_end - reader.pos)?;
@@ -402,6 +452,25 @@ fn parse_strl<S: Source>(
         }
     } else if &fcc_type == b"auds" {
         info.audio_streams = info.audio_streams.saturating_add(1);
+        if info.audio_stream.is_none() && index <= 99 {
+            info.audio_stream = Some(index as u8);
+            let tag = if audio_tag != 0 {
+                audio_tag
+            } else {
+                let h_tag = (handler[0] as u16) | ((handler[1] as u16) << 8);
+                if h_tag == 1 { 1 } else { 0 }
+            };
+            info.audio_format_tag = tag;
+            info.audio_channels = audio_channels;
+            info.audio_sample_rate = if audio_rate > 0 {
+                audio_rate
+            } else if rate > 0 && scale > 0 {
+                rate / scale
+            } else {
+                0
+            };
+            info.audio_bits_per_sample = audio_bits;
+        }
     }
     Ok(())
 }
@@ -453,6 +522,15 @@ fn parse_hdrl<S: Source>(
         reader.skip(end - reader.pos)?;
     }
     Ok(())
+}
+
+/// The kind of chunk yielded by [`AviStream::next_chunk`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AviChunk {
+    /// A video frame payload (JPEG / MJPEG).
+    Video(usize),
+    /// An uncompressed PCM audio chunk (`##wb`).
+    Audio(usize),
 }
 
 /// An open AVI, positioned at the first chunk of its `movi` list.
@@ -555,18 +633,19 @@ impl<S: Source> AviStream<S> {
         self.ended
     }
 
-    /// Copies the next video frame payload into `out`.
+    /// Demuxes and yields the next payload chunk (`Video` or `Audio`) into `out`.
     ///
-    /// Returns `Ok(None)` at end of stream. A frame larger than `out` is
+    /// Returns `Ok(None)` at end of stream. A chunk larger than `out` is
     /// consumed and reported as `FrameTooLarge`, leaving the reader aligned on
     /// the next chunk so a caller can go on.
-    pub fn next_frame(&mut self, out: &mut [u8]) -> Result<Option<usize>, AviError> {
+    pub fn next_chunk(&mut self, out: &mut [u8]) -> Result<Option<AviChunk>, AviError> {
         if self.ended {
             return Ok(None);
         }
-        let Some(stream) = self.info.video_stream else {
+        let Some(video_stream) = self.info.video_stream else {
             return Ok(None);
         };
+        let audio_stream = self.info.audio_stream;
 
         loop {
             while self.depth > 0 && self.limits[self.depth - 1] == 0 {
@@ -615,8 +694,6 @@ impl<S: Source> AviStream<S> {
                     return Err(AviError::BadChunkSize);
                 }
                 let parent = self.limits[self.depth - 1];
-                // The list's own pad byte is counted as trailing content of
-                // the list, so it is skipped by the branch above when reached.
                 let child = inner + (size & 1);
                 if parent != UNKNOWN_LIMIT && child > parent {
                     return Err(AviError::BadChunkSize);
@@ -627,7 +704,7 @@ impl<S: Source> AviStream<S> {
             }
 
             let padded = size + (size & 1);
-            if is_frame_chunk(&id, stream) {
+            if is_frame_chunk(&id, video_stream) {
                 if size as usize > out.len() {
                     self.reader.skip(padded)?;
                     self.consume(padded)?;
@@ -640,13 +717,44 @@ impl<S: Source> AviStream<S> {
                     self.consume(1)?;
                 }
                 self.frames_read = self.frames_read.saturating_add(1);
-                return Ok(Some(size as usize));
+                return Ok(Some(AviChunk::Video(size as usize)));
             }
 
-            // Not a video frame (an audio chunk, an unknown stream, a JUNK
-            // block): consume it and keep scanning.
+            if let Some(astream) = audio_stream {
+                if is_audio_chunk(&id, astream) {
+                    if size as usize > out.len() {
+                        self.reader.skip(padded)?;
+                        self.consume(padded)?;
+                        return Err(AviError::FrameTooLarge);
+                    }
+                    self.reader.read_exact(&mut out[..size as usize])?;
+                    self.consume(size)?;
+                    if size & 1 == 1 {
+                        self.reader.skip(1)?;
+                        self.consume(1)?;
+                    }
+                    return Ok(Some(AviChunk::Audio(size as usize)));
+                }
+            }
+
+            // Not a video frame or audio chunk: consume it and keep scanning.
             self.reader.skip(padded)?;
             self.consume(padded)?;
+        }
+    }
+
+    /// Copies the next video frame payload into `out`, skipping any audio or junk chunks.
+    ///
+    /// Returns `Ok(None)` at end of stream. A frame larger than `out` is
+    /// consumed and reported as `FrameTooLarge`, leaving the reader aligned on
+    /// the next chunk so a caller can go on.
+    pub fn next_frame(&mut self, out: &mut [u8]) -> Result<Option<usize>, AviError> {
+        loop {
+            match self.next_chunk(out)? {
+                Some(AviChunk::Video(len)) => return Ok(Some(len)),
+                Some(AviChunk::Audio(_)) => continue,
+                None => return Ok(None),
+            }
         }
     }
 
@@ -848,6 +956,41 @@ mod tests {
                 Ok((64, 48, 64 * 48 * 4))
             );
         }
+    }
+
+    #[test]
+    fn pcm_audio_chunks_are_demuxed_and_decoded() {
+        let mut stream = AviStream::open(SliceSource::new(AUDIO_FIXTURE)).expect("open");
+        let info = stream.info();
+        assert!(info.is_pcm_audio(), "fixture must report PCM audio stream");
+        assert_eq!(info.audio_stream, Some(1));
+        assert_eq!(info.audio_format_tag, 1);
+        assert_eq!(info.audio_channels, 1);
+        assert_eq!(info.audio_sample_rate, 2000);
+        assert_eq!(info.audio_bits_per_sample, 8);
+
+        let mut buf = host_std::vec![0u8; MAX_FRAME_BYTES];
+        let mut video_frames = 0;
+        let mut audio_chunks = 0;
+        let mut total_audio_bytes = 0;
+
+        while let Some(chunk) = stream.next_chunk(&mut buf).expect("next_chunk") {
+            match chunk {
+                AviChunk::Video(len) => {
+                    video_frames += 1;
+                    assert_eq!(&buf[0..2], &[0xFF, 0xD8]);
+                    assert!(len > 0);
+                }
+                AviChunk::Audio(len) => {
+                    audio_chunks += 1;
+                    total_audio_bytes += len;
+                }
+            }
+        }
+
+        assert_eq!(video_frames, 10);
+        assert_eq!(audio_chunks, 6);
+        assert_eq!(total_audio_bytes, 200);
     }
 
     #[test]

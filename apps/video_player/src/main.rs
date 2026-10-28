@@ -25,7 +25,7 @@ use std::design::font;
 use std::design::outline_text;
 use std::design::primitives::{draw_circle, draw_rounded_rect, Rect};
 
-use video_player::avi::{self, AviError, AviInfo, AviStream};
+use video_player::avi::{self, AviChunk, AviError, AviInfo, AviStream};
 use video_player::theme::{
     COLOR_ACCENT, COLOR_BG, COLOR_BORDER, COLOR_PLAY_FILL, COLOR_PLAY_GLYPH,
     COLOR_PROGRESS_ACTIVE, COLOR_PROGRESS_BG, COLOR_SHEET_CARD, COLOR_SURFACE,
@@ -213,6 +213,8 @@ pub struct AviPlayback {
     last_w: u32,
     last_h: u32,
     last_rgba_len: usize,
+    audio_cap: Option<u64>,
+    pcm_conv: Option<interos_std::wav::PcmConverter>,
 }
 
 impl AviPlayback {
@@ -607,6 +609,27 @@ impl VideoApp {
         self.frame_counter = 0;
         self.speed_accum_ms = 0;
 
+        let mut audio_cap = None;
+        let mut pcm_conv = None;
+        if info.is_pcm_audio() {
+            let wav_info = interos_std::wav::WavInfo {
+                format_tag: info.audio_format_tag,
+                sample_rate: info.audio_sample_rate,
+                channels: info.audio_channels,
+                bits_per_sample: info.audio_bits_per_sample,
+                data_offset: 0,
+                data_len: 0,
+            };
+            if let Ok(conv) = interos_std::wav::PcmConverter::new(wav_info) {
+                pcm_conv = Some(conv);
+            }
+            if let Ok(cap) = std::capability_handle(std::cap_type::AUDIO_STREAM, 0) {
+                if std::audio_stream_open(cap, std::AUDIO_STREAM_FORMAT_NATIVE).is_ok() {
+                    audio_cap = Some(cap);
+                }
+            }
+        }
+
         let now = std::get_ticks().unwrap_or(0);
         let interval = avi::scale_interval_millis(
             info.frame_interval_us(),
@@ -624,12 +647,16 @@ impl VideoApp {
             last_w: 0,
             last_h: 0,
             last_rgba_len: 0,
+            audio_cap,
+            pcm_conv,
         });
         self.status = DecoderStatus::Ready;
         self.show_first_avi_frame();
 
         if let Some(pb) = self.avi.as_ref() {
-            if pb.info.audio_streams > 0 {
+            if pb.info.is_pcm_audio() {
+                std::log("[VIDEO PLAYER] AVI has PCM audio stream; software audio decode active.").ok();
+            } else if pb.info.audio_streams > 0 {
                 // Stated in the log and on screen (media info + canvas notice).
                 std::log("[VIDEO PLAYER] AVI has an audio stream; audio playback is unavailable and is not claimed.").ok();
             }
@@ -730,8 +757,22 @@ impl VideoApp {
                 }
                 let behind = now - pb.deadline_ms;
                 let skip = behind >= interval as u64 && pb.shown > 0;
-                match pb.stream.next_frame(frame_buf) {
-                    Ok(Some(len)) => {
+                match pb.stream.next_chunk(frame_buf) {
+                    Ok(Some(AviChunk::Audio(len))) => {
+                        if let (Some(cap), Some(conv)) = (pb.audio_cap, pb.pcm_conv.as_mut()) {
+                            let mut native_pcm = [0u8; 4096];
+                            let (_, out_n) = conv.convert(&frame_buf[..len], &mut native_pcm);
+                            if out_n > 0 {
+                                let _ = std::audio_stream_write(cap, &native_pcm[..out_n]);
+                            }
+                        }
+                        guard += 1;
+                        if guard >= 64 {
+                            break;
+                        }
+                        continue;
+                    }
+                    Ok(Some(AviChunk::Video(len))) => {
                         pb.next_index = pb.next_index.saturating_add(1);
                         pb.deadline_ms = pb.deadline_ms.saturating_add(interval as u64);
                         if skip {
@@ -858,17 +899,28 @@ impl VideoApp {
     }
 
     pub fn close_avi(&mut self) {
-        // Dropping the playback closes the descriptor through FsSource::drop.
-        self.avi = None;
+        // Dropping the playback closes the descriptor through FsSource::drop and audio stream.
+        if let Some(pb) = self.avi.take() {
+            if let Some(cap) = pb.audio_cap {
+                let _ = std::audio_stream_close(cap);
+            }
+        }
     }
 
-    /// True when the open AVI declares an audio stream, which this player
-    /// cannot play. The UI says so rather than showing a mute control as if
+    /// True when the open AVI declares an uncompressed PCM audio stream.
+    pub fn avi_audio_pcm(&self) -> bool {
+        self.avi
+            .as_ref()
+            .map_or(false, |pb| pb.info.is_pcm_audio())
+    }
+
+    /// True when the open AVI declares an audio stream that cannot be decoded.
+    /// The UI says so rather than showing a mute control as if
     /// it were driving that audio.
     pub fn avi_audio_unavailable(&self) -> bool {
         self.avi
             .as_ref()
-            .map_or(false, |pb| pb.info.audio_streams > 0)
+            .map_or(false, |pb| pb.info.audio_streams > 0 && !pb.info.is_pcm_audio())
     }
 
     pub fn rescan_storage(&mut self) {
@@ -2044,7 +2096,9 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
                     return t_col;
                 }
                 let audio_label: &[u8] = if app.current_codec() == VideoCodec::Avi {
-                    if app.avi_audio_unavailable() {
+                    if app.avi_audio_pcm() {
+                        b"Software (PCM)"
+                    } else if app.avi_audio_unavailable() {
                         b"Unavailable (not implemented)"
                     } else {
                         b"Not present in this file"

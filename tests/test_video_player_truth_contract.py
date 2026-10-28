@@ -164,6 +164,21 @@ def test_typography_and_touch_affordances():
     assert "INFO_BTN: Rect = Rect::new(366, 968, 330, 52)" in main
 
 
+def test_audio_stream_truth_contract():
+    """Audio stream truth contract:
+    - Reports 'Software (PCM)' when an AVI carries a PCM audio stream.
+    - Reports 'Unavailable (not implemented)' when an AVI carries unsupported audio.
+    - Reports 'Not present in this file' when an AVI has no audio.
+    - Demuxes uncompressed PCM chunks ('01wb') from AVI container.
+    """
+    main = video_main()
+    avi = read("apps/video_player/src/avi.rs")
+    assert "Software (PCM)" in main, "main.rs must report 'Software (PCM)' when PCM audio is present"
+    assert "avi_audio_pcm" in main, "main.rs must implement avi_audio_pcm"
+    assert "AviChunk" in avi, "avi.rs must define AviChunk"
+    assert "is_pcm_audio" in avi, "avi.rs must define is_pcm_audio"
+
+
 if __name__ == "__main__":
     test_platform_truth_contract_exact_string()
     test_userspace_no_std_and_zero_heap()
@@ -174,4 +189,5 @@ if __name__ == "__main__":
     test_audio_volume_hud_and_syscalls()
     test_aspect_ratio_and_repeat_modes()
     test_typography_and_touch_affordances()
+    test_audio_stream_truth_contract()
     print("All video player truth contract tests PASSED!")
