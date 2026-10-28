@@ -455,7 +455,10 @@ impl DalvikVmState {
                                 self.last_return_value = 0;
                                 self.last_return_string = Some(alloc::string::String::from(s));
                             }
-                            Ok(super::framework::AndroidFrameworkResult::Service(_)) => return Err(DalvikVmError::UnsupportedFrameworkApi),
+                            Ok(super::framework::AndroidFrameworkResult::Service(svc)) => {
+                                self.last_return_value = svc.handle();
+                                self.last_return_string = None;
+                            }
                             Err(super::framework::AndroidFrameworkError::UnsupportedApi) => return Err(DalvikVmError::UnsupportedFrameworkApi),
                             Err(_) => return Err(DalvikVmError::SecurityViolationForbiddenApi),
                         }
@@ -636,5 +639,52 @@ mod tests {
         }
         assert_eq!(vm.last_return_value, 0);
         assert_eq!(vm.last_return_string.as_deref(), Some("00000000-0000-0000-0000-000000000000"));
+    }
+
+    #[test]
+    fn framework_service_and_lifecycle_dispatch_updates_vm_state() {
+        let mut vm = DalvikVmState::new();
+
+        // 1. Context getSystemService returns service handle
+        let res = super::super::framework::dispatch(
+            "Landroid/content/Context;",
+            "getSystemService",
+            &[Some("window")],
+            &mut vm.captured_logs,
+        ).unwrap();
+        match res {
+            super::super::framework::AndroidFrameworkResult::Service(svc) => {
+                vm.last_return_value = svc.handle();
+                vm.last_return_string = None;
+            }
+            _ => panic!("Expected Service"),
+        }
+        assert_eq!(vm.last_return_value, 2); // Window handle is 2
+        assert_eq!(vm.last_return_string, None);
+
+        // 2. Activity lifecycle dispatch
+        let res = super::super::framework::dispatch(
+            "Landroid/app/Activity;",
+            "onCreate",
+            &[],
+            &mut vm.captured_logs,
+        ).unwrap();
+        match res {
+            super::super::framework::AndroidFrameworkResult::Return(v) => {
+                vm.last_return_value = v;
+                vm.last_return_string = None;
+            }
+            _ => panic!("Expected Return"),
+        }
+        assert_eq!(vm.last_return_value, 0);
+
+        // 3. Unimplemented method fails closed
+        let res = super::super::framework::dispatch(
+            "Landroid/widget/TextView;",
+            "setText",
+            &[],
+            &mut vm.captured_logs,
+        );
+        assert_eq!(res, Err(super::super::framework::AndroidFrameworkError::UnsupportedApi));
     }
 }
