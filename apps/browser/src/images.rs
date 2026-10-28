@@ -13,9 +13,8 @@
 //! The policy is deliberately narrow:
 //! - bodies above [`MAX_IMAGE_BODY_BYTES`] are refused, never truncated
 //!   into a half-image;
-//! - only PNG, JPEG, GIF and lossless WebP are accepted, because those
-//!   are the decoders the platform actually has (lossy WebP is refused
-//!   by `std::image` and is named as unsupported here);
+//! - only PNG, JPEG, GIF and WebP are accepted, because those
+//!   are the decoders the platform actually has;
 //! - a declared width or height above [`MAX_IMAGE_DIMENSION`] is refused
 //!   before a byte of RGBA is allocated;
 //! - an image is fetched from whatever http(s) address the page names,
@@ -217,12 +216,6 @@ fn probe_dimensions(kind: ImageType, body: &[u8]) -> Result<(u32, u32), ImageRef
         ImageType::Jpeg => image::decode_jpeg_header(body).map_err(|_| ImageRefusal::BadHeader),
         ImageType::Gif => image::decode_gif_header(body).map_err(|_| ImageRefusal::BadHeader),
         ImageType::WebP => {
-            // The platform decoder handles lossless (VP8L) WebP only. A
-            // lossy `VP8 ` chunk is named as an unsupported type rather
-            // than reported as a corrupt file.
-            if body.len() < 16 || &body[12..16] != b"VP8L" {
-                return Err(ImageRefusal::UnsupportedType);
-            }
             image::decode_webp_header(body).map_err(|_| ImageRefusal::BadHeader)
         }
         ImageType::Ico => image::decode_ico_header(body).map_err(|_| ImageRefusal::BadHeader),
@@ -751,15 +744,25 @@ mod tests {
     }
 
     #[test]
-    fn a_lossy_webp_is_named_unsupported_not_corrupt() {
-        let mut body = [0u8; 32];
+    fn a_lossy_webp_is_admitted() {
+        let mut body = [0u8; 30];
         body[..4].copy_from_slice(b"RIFF");
+        body[4..8].copy_from_slice(&22u32.to_le_bytes());
         body[8..12].copy_from_slice(b"WEBP");
         body[12..16].copy_from_slice(b"VP8 ");
+        body[16..20].copy_from_slice(&10u32.to_le_bytes());
+        body[20..23].copy_from_slice(&[0x10, 0x00, 0x00]);
+        body[23..26].copy_from_slice(&[0x9D, 0x01, 0x2A]);
+        body[26..28].copy_from_slice(&64u16.to_le_bytes());
+        body[28..30].copy_from_slice(&64u16.to_le_bytes());
         assert_eq!(sniff_image_type(&body), ImageType::WebP);
         assert_eq!(
             admit_image(&body),
-            ImageAdmission::Refused(ImageRefusal::UnsupportedType)
+            ImageAdmission::Accepted {
+                kind: ImageType::WebP,
+                width: 64,
+                height: 64,
+            }
         );
     }
 
