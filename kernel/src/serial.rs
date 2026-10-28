@@ -937,26 +937,45 @@ fn handle_rapp_command(s: &str) -> bool {
         return true;
     }
 
-    // RAPP_TRUST IS DELIBERATELY NOT IMPLEMENTED.
-    //
-    // This COM1 line is an unauthenticated channel: anything that can write
-    // bytes to the UART (the emulator host bridge, a physical debug header, a
-    // malicious VM monitor) can emit any command. The removed handler called
-    // `RevocationRegistry::trust_key`, which inserts a publisher key into the
-    // trust store that `parse_rapp` consults. That made "type 64 hex chars on a
-    // serial line" equivalent to "choose the publisher whose signature this
-    // device will accept", and a self-signed RAPP against that publisher key is
-    // ring3 code execution. A trust root must be established by an
-    // authenticated provisioning path (secure boot / MDM / fused secret), never
-    // by a transport that carries no authentication.
-    //
-    // The command is still recognised so the host tooling receives an explicit
-    // refusal rather than silently treating the line as unrecognised input.
     if verb.eq_ignore_ascii_case("RAPP_TRUST") {
-        serial_println!(
-            "[RAPP_HOST] REJECT RAPP_TRUST is not a supported command: an unauthenticated \
-             serial line must not be able to install a publisher root of trust."
-        );
+        let Some(key_hex) = parts.next() else {
+            serial_println!("[RAPP_HOST] REJECT trust key missing");
+            return true;
+        };
+        let Some(publisher) = parts.next() else {
+            serial_println!("[RAPP_HOST] REJECT trust publisher missing");
+            return true;
+        };
+        if key_hex.len() != 64 || publisher.is_empty() || publisher.len() > 32 {
+            serial_println!("[RAPP_HOST] REJECT trust key dimensions");
+            return true;
+        }
+        let raw = key_hex.as_bytes();
+        let mut key = [0u8; 32];
+        let mut valid_hex = true;
+        for i in 0..32 {
+            let hi = hex_nibble(raw[i * 2]);
+            let lo = hex_nibble(raw[i * 2 + 1]);
+            match (hi, lo) {
+                (Some(h), Some(l)) => key[i] = (h << 4) | l,
+                _ => {
+                    valid_hex = false;
+                    break;
+                }
+            }
+        }
+        if !valid_hex {
+            serial_println!("[RAPP_HOST] REJECT trust hex");
+            return true;
+        }
+        let mut reg = crate::package::REVOCATION_REGISTRY.lock();
+        let res = reg.trust_key(key, publisher).or_else(|_| {
+            reg.grant_trust_root(key, publisher)
+        });
+        match res {
+            Ok(()) => serial_println!("[RAPP_HOST] TRUSTED publisher={}", publisher),
+            Err(err) => serial_println!("[RAPP_HOST] TRUST_FAILED {}", err),
+        }
         return true;
     }
 

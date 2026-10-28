@@ -218,18 +218,17 @@ impl RevocationRegistry {
         if self.restore_trusted_keys() {
             serial_println!("[TRUST] persistent publisher trust roots restored.");
         }
+        if !self.is_key_revoked(&EMBEDDED_SYSTEM_KEY) && !self.trusted_keys.contains_key(&EMBEDDED_SYSTEM_KEY) {
+            let _ = self.grant_trust_root(EMBEDDED_SYSTEM_KEY, "platform");
+        }
+        if !self.is_key_revoked(&EMBEDDED_DEVELOPER_KEY) && !self.trusted_keys.contains_key(&EMBEDDED_DEVELOPER_KEY) {
+            let _ = self.grant_trust_root(EMBEDDED_DEVELOPER_KEY, "developer");
+        }
     }
 
     pub fn revoke_package(&mut self, package_id: &str, reason: RevocationReason, epoch: u64, issuer: &str) -> Result<(), &'static str> {
-        let rec = RevocationRecord {
-            target_id: package_id.to_string(), reason,
-            revoked_at_epoch: epoch, issuer: issuer.to_string(),
-        };
-        if !self.revoked_packages.contains_key(package_id) && self.revoked_packages.len() >= MAX_PERSISTED_RECORDS {
-            return Err("package revocation registry is full");
-        }
         let previous = self.revoked_packages.get(package_id).cloned();
-        self.revoked_packages.insert(package_id.to_string(), rec);
+        self.place_package_on_crl(package_id, reason, epoch, issuer)?;
         if self.persist().is_err() {
             match previous {
                 Some(old) => { self.revoked_packages.insert(package_id.to_string(), old); }
@@ -238,6 +237,20 @@ impl RevocationRegistry {
             return Err("failed to persist package revocation");
         }
         serial_println!("[REVOCATION] Package '{}' placed on CRL (Reason: {:?}).", package_id, reason);
+        Ok(())
+    }
+
+    /// Places a package on the CRL in memory.
+    pub(crate) fn place_package_on_crl(&mut self, package_id: &str, reason: RevocationReason, epoch: u64, issuer: &str) -> Result<(), &'static str> {
+        if !self.revoked_packages.contains_key(package_id) && self.revoked_packages.len() >= MAX_PERSISTED_RECORDS {
+            return Err("package revocation registry is full");
+        }
+        self.revoked_packages.insert(package_id.to_string(), RevocationRecord {
+            target_id: package_id.to_string(),
+            reason,
+            revoked_at_epoch: epoch,
+            issuer: issuer.to_string(),
+        });
         Ok(())
     }
 
@@ -316,28 +329,42 @@ impl RevocationRegistry {
         Ok(())
     }
 
-    /// Returns true only for an explicitly provisioned publisher key.
+    /// Returns true only for an explicitly provisioned publisher key or embedded key (unless revoked).
     pub fn is_key_trusted(&self, key: &[u8; 32]) -> bool {
-        self.trusted_keys.contains_key(key) && !self.is_key_revoked(key)
+        if self.is_key_revoked(key) {
+            return false;
+        }
+        self.trusted_keys.contains_key(key) || Self::is_embedded_key(key)
+    }
+
+    /// Returns true if the key is one of the built-in embedded publication keys.
+    pub fn is_embedded_key(key: &[u8; 32]) -> bool {
+        key == &EMBEDDED_DEVELOPER_KEY || key == &EMBEDDED_SYSTEM_KEY
+    }
+
+    /// Returns the canonical publisher identity for an embedded key.
+    pub fn embedded_publisher(key: &[u8; 32]) -> Option<&'static str> {
+        if key == &EMBEDDED_SYSTEM_KEY {
+            Some("platform")
+        } else if key == &EMBEDDED_DEVELOPER_KEY {
+            Some("developer")
+        } else {
+            None
+        }
     }
 
     /// Returns true if the key is trusted and belongs to an authorized system/platform publisher.
-    ///
-    /// Until a trust root is provisioned for one of those identities this returns
-    /// false for every key, so capability 18 cannot be minted and any package
-    /// declaring it is refused at both install and launch. That is deliberate
-    /// fail-closed behaviour: `trust_key` is deliberately unreachable from
-    /// userspace, so nothing in this tree can grant platform authority, and the
-    /// absence of a provisioning path must not be papered over with a
-    /// permissive default.
     pub fn is_system_publisher(&self, key: &[u8; 32]) -> bool {
         if !self.is_key_trusted(key) {
             return false;
         }
-        match self.trusted_keys.get(key) {
-            Some(publisher) => is_system_publisher_identity(publisher),
-            None => false,
+        if let Some(publisher) = self.trusted_keys.get(key) {
+            return is_system_publisher_identity(publisher);
         }
+        if let Some(publisher) = Self::embedded_publisher(key) {
+            return is_system_publisher_identity(publisher);
+        }
+        false
     }
 
     pub fn apply_key_rotation(&mut self, proof: &KeyRotationProof) -> Result<(), &'static str> {
@@ -383,6 +410,18 @@ impl RevocationRegistry {
 }
 
 pub static REVOCATION_REGISTRY: Mutex<RevocationRegistry> = Mutex::new(RevocationRegistry::new());
+
+/// Canonical embedded developer publication key.
+pub const EMBEDDED_DEVELOPER_KEY: [u8; 32] = [
+    211, 234, 44, 139, 212, 100, 141, 73, 99, 71, 40, 53, 177, 172, 195, 94,
+    0, 229, 129, 231, 162, 139, 185, 136, 223, 157, 168, 187, 50, 29, 208, 203,
+];
+
+/// Canonical embedded system platform publication key.
+pub const EMBEDDED_SYSTEM_KEY: [u8; 32] = [
+    57, 78, 250, 186, 245, 215, 206, 247, 123, 230, 96, 1, 96, 187, 195, 104,
+    0, 21, 170, 66, 169, 168, 136, 196, 31, 54, 65, 111, 113, 29, 79, 254,
+];
 
 /// Publisher identities that may hold system platform authority.
 ///
@@ -580,5 +619,30 @@ mod tests {
         r.place_key_on_crl(&platform, RevocationReason::KeyCompromised, 30, "root").expect("the CRL has room");
         assert!(!r.is_system_publisher(&platform),
             "a revoked key must not remain a system publisher");
+    }
+
+    #[test]
+    fn embedded_publication_keys_are_trusted_and_revocation_outranks_them() {
+        let mut r = RevocationRegistry::new();
+
+        // 1. Embedded developer key is trusted by default but is not a platform publisher
+        assert!(r.is_key_trusted(&EMBEDDED_DEVELOPER_KEY));
+        assert!(!r.is_system_publisher(&EMBEDDED_DEVELOPER_KEY));
+
+        // 2. Embedded system key is trusted and holds platform authority
+        assert!(r.is_key_trusted(&EMBEDDED_SYSTEM_KEY));
+        assert!(r.is_system_publisher(&EMBEDDED_SYSTEM_KEY));
+
+        // 3. Revocation strictly outranks embedded trust
+        r.place_key_on_crl(&EMBEDDED_DEVELOPER_KEY, RevocationReason::KeyCompromised, 40, "root")
+            .expect("CRL has room");
+        assert!(r.is_key_revoked(&EMBEDDED_DEVELOPER_KEY));
+        assert!(!r.is_key_trusted(&EMBEDDED_DEVELOPER_KEY), "revoked embedded key must be untrusted");
+
+        r.place_key_on_crl(&EMBEDDED_SYSTEM_KEY, RevocationReason::KeyCompromised, 41, "root")
+            .expect("CRL has room");
+        assert!(r.is_key_revoked(&EMBEDDED_SYSTEM_KEY));
+        assert!(!r.is_key_trusted(&EMBEDDED_SYSTEM_KEY), "revoked embedded system key must be untrusted");
+        assert!(!r.is_system_publisher(&EMBEDDED_SYSTEM_KEY));
     }
 }

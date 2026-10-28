@@ -26,6 +26,35 @@ pub const RAPP_MAX_INTENTS: usize = 64;
 pub const RAPP_MAX_INTENT_VALUE_LEN: usize = 96;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrustState {
+    Trusted,
+    Untrusted,
+    Revoked,
+    Tampered,
+}
+
+impl TrustState {
+    pub const fn as_u8(&self) -> u8 {
+        match *self {
+            TrustState::Trusted => 0,
+            TrustState::Untrusted => 1,
+            TrustState::Revoked => 2,
+            TrustState::Tampered => 3,
+        }
+    }
+
+    pub const fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(TrustState::Trusted),
+            1 => Some(TrustState::Untrusted),
+            2 => Some(TrustState::Revoked),
+            3 => Some(TrustState::Tampered),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
 pub enum RappArch { X86_64=0, Aarch64=1, Riscv64=2, Wasm=3 }
 impl RappArch { pub fn from_u16(v:u16)->Option<Self>{match v{0=>Some(Self::X86_64),1=>Some(Self::Aarch64),2=>Some(Self::Riscv64),3=>Some(Self::Wasm),_=>None}} }
@@ -59,6 +88,8 @@ pub struct RappManifest {
     /// handles image/png" is a claim the device acts on, and a claim that
     /// could be edited after signing would be no claim at all.
     pub intents: Vec<IntentDeclaration>,
+    /// The discrete cryptographic trust state of this container.
+    pub trust_state: TrustState,
 }
 
 fn fixed_utf8(data:&[u8])->Result<String,RappError>{
@@ -254,7 +285,24 @@ pub fn parse_rapp(data:&[u8])->Result<RappManifest,RappError>{
     let mut policy=PackagePolicy::from_rapp_capabilities(&capabilities);
     policy.dependencies=dependencies.clone();
     if !policy.validate(){return Err(RappError::InvalidDependency)}
-    Ok(RappManifest{format_version,package_id,publisher_key,version,arch,policy,dependencies,intents,capabilities,payload_digest:digest,signature,payload_offset,payload_len})
+    Ok(RappManifest{format_version,package_id,publisher_key,version,arch,policy,dependencies,intents,capabilities,payload_digest:digest,signature,payload_offset,payload_len,trust_state:TrustState::Trusted})
+}
+
+/// Inspects the discrete trust state of a `.rapp` container.
+///
+/// Returns a typed `TrustState` enum rather than a UI string:
+/// - `TrustState::Trusted`: Valid structure, authentic Ed25519 signature, trusted publisher key, valid payload digest.
+/// - `TrustState::Untrusted`: Container is structured properly but publisher key is not in the trust store.
+/// - `TrustState::Revoked`: Package ID or publisher key is recorded on the CRL.
+/// - `TrustState::Tampered`: Payload digest mismatch, invalid cryptographic signature, or corrupted container structure.
+pub fn inspect_rapp_trust(data: &[u8]) -> TrustState {
+    match parse_rapp(data) {
+        Ok(manifest) => manifest.trust_state,
+        Err(RappError::PublisherUntrusted) => TrustState::Untrusted,
+        Err(RappError::PackageRevoked | RappError::PublisherRevoked) => TrustState::Revoked,
+        Err(RappError::DigestMismatch | RappError::SignatureInvalid) => TrustState::Tampered,
+        Err(_) => TrustState::Tampered,
+    }
 }
 
 
@@ -372,13 +420,17 @@ mod tests {
     use crate::package::revocation::{REVOCATION_REGISTRY, RevocationReason};
 
     fn create_signed_test_package(caps: &[u16], seed: u8) -> (Vec<u8>, [u8; 32], SigningKey) {
+        create_signed_test_package_with_id("org.interos.clock", caps, seed)
+    }
+
+    fn create_signed_test_package_with_id(package_id: &str, caps: &[u16], seed: u8) -> (Vec<u8>, [u8; 32], SigningKey) {
         let signing_key = SigningKey::from_bytes(&[seed; 32]);
         let pub_key = signing_key.verifying_key().to_bytes();
         let payload = b"\x7fELF_USER_BINARY_SAMPLE";
         let placeholder_sig = [0u8; 64];
 
         let mut pkg = build_rapp(
-            "org.interos.clock",
+            package_id,
             &pub_key,
             (1, 0, 0),
             RappArch::X86_64,
@@ -607,11 +659,91 @@ mod tests {
 
     #[test]
     fn parse_rapp_rejects_revoked_key() {
-        let (pkg, pub_key, _) = create_signed_test_package(&[1], 13);
+        let pkg_id = "org.interos.revoked_key_test";
+        let (pkg, pub_key, _) = create_signed_test_package_with_id(pkg_id, &[1], 13);
         REVOCATION_REGISTRY.lock().grant_trust_root(pub_key, "revoked_pub").unwrap();
         REVOCATION_REGISTRY.lock().place_key_on_crl(&pub_key, RevocationReason::KeyCompromised, 1, "root").unwrap();
 
         let res = parse_rapp(&pkg);
         assert_eq!(res.unwrap_err(), RappError::PublisherRevoked);
+        assert_eq!(inspect_rapp_trust(&pkg), TrustState::Revoked);
+
+        REVOCATION_REGISTRY.lock().revoked_keys.remove(&pub_key);
+        REVOCATION_REGISTRY.lock().trusted_keys.remove(&pub_key);
+    }
+
+    #[test]
+    fn parse_rapp_accepts_valid_signed_package_with_trusted_key() {
+        let pkg_id = "org.interos.trusted_test";
+        let (pkg, pub_key, _) = create_signed_test_package_with_id(pkg_id, &[1, 24], 50);
+        REVOCATION_REGISTRY.lock().grant_trust_root(pub_key, "trusted_dev").unwrap();
+
+        let manifest = parse_rapp(&pkg).expect("trusted package must parse successfully");
+        assert_eq!(manifest.trust_state, TrustState::Trusted);
+        assert_eq!(manifest.package_id, pkg_id);
+        assert_eq!(inspect_rapp_trust(&pkg), TrustState::Trusted);
+
+        REVOCATION_REGISTRY.lock().trusted_keys.remove(&pub_key);
+    }
+
+    #[test]
+    fn parse_rapp_rejects_revoked_package() {
+        let pkg_id = "org.interos.revoked_pkg_test";
+        let (pkg, pub_key, _) = create_signed_test_package_with_id(pkg_id, &[1], 51);
+        REVOCATION_REGISTRY.lock().grant_trust_root(pub_key, "revoked_pkg_test").unwrap();
+        REVOCATION_REGISTRY.lock().place_package_on_crl(pkg_id, RevocationReason::MaliciousBehavior, 1, "root").unwrap();
+
+        let res = parse_rapp(&pkg);
+        assert_eq!(res.unwrap_err(), RappError::PackageRevoked);
+        assert_eq!(inspect_rapp_trust(&pkg), TrustState::Revoked);
+
+        REVOCATION_REGISTRY.lock().revoked_packages.remove(pkg_id);
+        REVOCATION_REGISTRY.lock().trusted_keys.remove(&pub_key);
+    }
+
+    #[test]
+    fn parse_rapp_rejects_tampered_payload_digest_mismatch() {
+        let (mut pkg, pub_key, _) = create_signed_test_package(&[1], 52);
+        REVOCATION_REGISTRY.lock().grant_trust_root(pub_key, "tamper_test").unwrap();
+
+        // Tamper with payload byte
+        let last_idx = pkg.len() - 1;
+        pkg[last_idx] ^= 0xAA;
+
+        let res = parse_rapp(&pkg);
+        assert_eq!(res.unwrap_err(), RappError::DigestMismatch);
+        assert_eq!(inspect_rapp_trust(&pkg), TrustState::Tampered);
+        REVOCATION_REGISTRY.lock().trusted_keys.remove(&pub_key);
+    }
+
+    #[test]
+    fn parse_rapp_rejects_tampered_header_signature_invalid() {
+        let (mut pkg, pub_key, _) = create_signed_test_package(&[1], 53);
+        REVOCATION_REGISTRY.lock().grant_trust_root(pub_key, "sig_tamper_test").unwrap();
+
+        // Tamper with signature
+        pkg[RAPP_SIGNATURE_OFFSET] ^= 0x55;
+
+        let res = parse_rapp(&pkg);
+        assert_eq!(res.unwrap_err(), RappError::SignatureInvalid);
+        assert_eq!(inspect_rapp_trust(&pkg), TrustState::Tampered);
+        REVOCATION_REGISTRY.lock().trusted_keys.remove(&pub_key);
+    }
+
+    #[test]
+    fn inspect_rapp_trust_reports_discrete_typed_states() {
+        // Untrusted
+        let (pkg_untrusted, _, _) = create_signed_test_package(&[1], 54);
+        assert_eq!(inspect_rapp_trust(&pkg_untrusted), TrustState::Untrusted);
+
+        // Corrupted container
+        assert_eq!(inspect_rapp_trust(b"NOT_A_RAPP_FILE"), TrustState::Tampered);
+
+        // State conversions as_u8 and from_u8
+        assert_eq!(TrustState::from_u8(TrustState::Trusted.as_u8()), Some(TrustState::Trusted));
+        assert_eq!(TrustState::from_u8(TrustState::Untrusted.as_u8()), Some(TrustState::Untrusted));
+        assert_eq!(TrustState::from_u8(TrustState::Revoked.as_u8()), Some(TrustState::Revoked));
+        assert_eq!(TrustState::from_u8(TrustState::Tampered.as_u8()), Some(TrustState::Tampered));
+        assert_eq!(TrustState::from_u8(4), None);
     }
 }
