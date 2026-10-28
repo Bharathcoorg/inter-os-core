@@ -220,6 +220,178 @@ impl<'a> ParsedCertificate<'a> {
         }
         Ok(())
     }
+
+    /// Returns true if this certificate is self-signed (issuer == subject).
+    pub fn is_self_signed(&self) -> bool {
+        self.issuer_raw == self.subject_raw
+    }
+
+    /// Extracts Common Name (CN) attribute string from subject.
+    pub fn extract_common_name(&self) -> Option<&'a str> {
+        extract_cn(self.subject_raw)
+    }
+
+    /// Matches the certificate SAN (dNSName) or CN against `expected_hostname`.
+    ///
+    /// Following RFC 6125 / RFC 5280:
+    /// - Checks Subject Alternative Name (SAN) extension first if present.
+    /// - If no SAN DNS names exist, falls back to Common Name (CN).
+    /// - Supports case-insensitive exact matching and single-level wildcard patterns (*.example.com).
+    pub fn matches_hostname(&self, expected_hostname: &str) -> bool {
+        let mut san_count = 0usize;
+        let mut san_matched = false;
+
+        for_each_san_dns_name(self.tbs_raw, |san_name| {
+            san_count += 1;
+            if hostname_matches(san_name, expected_hostname) {
+                san_matched = true;
+                return true;
+            }
+            false
+        });
+
+        if san_count > 0 {
+            return san_matched;
+        }
+
+        if let Some(cn) = self.extract_common_name() {
+            if hostname_matches(cn, expected_hostname) {
+                return true;
+            }
+        }
+
+        false
+    }
+}
+
+/// Matches a reference hostname against a certificate hostname pattern (RFC 6125).
+pub fn hostname_matches(pattern: &str, hostname: &str) -> bool {
+    if pattern.eq_ignore_ascii_case(hostname) {
+        return true;
+    }
+    if let Some(suffix) = pattern.strip_prefix("*.") {
+        if let Some(dot_idx) = hostname.find('.') {
+            let prefix = &hostname[..dot_idx];
+            let host_suffix = &hostname[dot_idx + 1..];
+            if !prefix.is_empty() && host_suffix.eq_ignore_ascii_case(suffix) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Extracts Common Name (CN) string from a DER-encoded Subject Name.
+pub fn extract_cn<'a>(subject: &'a [u8]) -> Option<&'a str> {
+    fn search<'a>(mut cur: &'a [u8], depth: usize) -> Option<&'a str> {
+        if depth > 5 {
+            return None;
+        }
+        while !cur.is_empty() {
+            let (tag, val, rem) = read_tlv(cur).ok()?;
+            cur = rem;
+            if tag == TAG_OID && val == [0x55, 0x04, 0x03] {
+                let (_, str_val, _) = read_tlv(cur).ok()?;
+                return core::str::from_utf8(str_val).ok();
+            } else if tag == TAG_SET || tag == TAG_SEQUENCE {
+                if let Some(res) = search(val, depth + 1) {
+                    return Some(res);
+                }
+            }
+        }
+        None
+    }
+    search(subject, 0)
+}
+
+/// Traverses TBSCertificate extensions to find Subject Alternative Name (SAN) dNSNames.
+pub fn for_each_san_dns_name<F: FnMut(&str) -> bool>(tbs_raw: &[u8], mut f: F) -> bool {
+    let Ok((tbs_tag, tbs_content, _)) = read_tlv(tbs_raw) else {
+        return false;
+    };
+    if tbs_tag != TAG_SEQUENCE {
+        return false;
+    }
+
+    let mut cur = tbs_content;
+    while !cur.is_empty() {
+        let Ok((tag, content, rem)) = read_tlv(cur) else {
+            break;
+        };
+        cur = rem;
+
+        // [3] EXPLICIT Extensions
+        if tag == 0xa3 {
+            let Ok((tag_exts, exts_content, _)) = read_tlv(content) else {
+                break;
+            };
+            if tag_exts != TAG_SEQUENCE {
+                break;
+            }
+
+            let mut cur_ext = exts_content;
+            while !cur_ext.is_empty() {
+                let Ok((tag_ext, ext_content, rem_ext)) = read_tlv(cur_ext) else {
+                    break;
+                };
+                cur_ext = rem_ext;
+                if tag_ext != TAG_SEQUENCE {
+                    continue;
+                }
+
+                let Ok((tag_oid, oid_val, after_oid)) = read_tlv(ext_content) else {
+                    continue;
+                };
+                if tag_oid != TAG_OID {
+                    continue;
+                }
+
+                // OID 2.5.29.17 = id-ce-subjectAltName: [0x55, 0x1d, 0x11]
+                if oid_val == [0x55, 0x1d, 0x11] {
+                    let Ok((tag1, val1, rem1)) = read_tlv(after_oid) else {
+                        continue;
+                    };
+                    let octet_bytes = if tag1 == TAG_BOOLEAN {
+                        let Ok((tag2, val2, _)) = read_tlv(rem1) else {
+                            continue;
+                        };
+                        if tag2 != TAG_OCTET_STRING {
+                            continue;
+                        }
+                        val2
+                    } else if tag1 == TAG_OCTET_STRING {
+                        val1
+                    } else {
+                        continue;
+                    };
+
+                    let Ok((tag_gn, gn_content, _)) = read_tlv(octet_bytes) else {
+                        continue;
+                    };
+                    if tag_gn != TAG_SEQUENCE {
+                        continue;
+                    }
+
+                    let mut cur_name = gn_content;
+                    while !cur_name.is_empty() {
+                        let Ok((tag_name, name_val, rem_name)) = read_tlv(cur_name) else {
+                            break;
+                        };
+                        cur_name = rem_name;
+                        // [2] IMPLICIT = dNSName: tag 0x82
+                        if tag_name == 0x82 {
+                            if let Ok(dns_str) = core::str::from_utf8(name_val) {
+                                if f(dns_str) {
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Pluggable Certificate and Signature Verifier trait for TLS 1.3 clients.
@@ -240,13 +412,111 @@ pub trait CertificateVerifier {
     ) -> Result<(), TlsError>;
 }
 
+pub const INTEROS_ROOT_CA_DER: &[u8] = &[
+    0x30, 0x81, 0xc6, 0x30, 0x7a, 0x02, 0x01, 0x01, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x30,
+    0x10, 0x30, 0x0e, 0x06, 0x03, 0x55, 0x04, 0x03, 0x0c, 0x07, 0x49, 0x6e, 0x74, 0x65, 0x72, 0x4f,
+    0x53, 0x30, 0x1e, 0x17, 0x0d, 0x32, 0x36, 0x30, 0x31, 0x30, 0x31, 0x30, 0x30, 0x30, 0x30, 0x30,
+    0x30, 0x5a, 0x17, 0x0d, 0x32, 0x36, 0x31, 0x32, 0x33, 0x31, 0x32, 0x33, 0x35, 0x39, 0x35, 0x39,
+    0x5a, 0x30, 0x10, 0x30, 0x0e, 0x06, 0x03, 0x55, 0x04, 0x03, 0x0c, 0x07, 0x49, 0x6e, 0x74, 0x65,
+    0x72, 0x4f, 0x53, 0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00, 0x09,
+    0x09, 0x09, 0x09, 0x09, 0x09, 0x09, 0x09, 0x09, 0x09, 0x09, 0x09, 0x09, 0x09, 0x09, 0x09, 0x09,
+    0x09, 0x09, 0x09, 0x09, 0x09, 0x09, 0x09, 0x09, 0x09, 0x09, 0x09, 0x09, 0x09, 0x09, 0x09, 0x30,
+    0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x41, 0x00, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55,
+    0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55,
+    0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55,
+    0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55,
+    0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55,
+];
+
+pub static DEFAULT_TRUSTED_ROOTS: &[&[u8]] = &[INTEROS_ROOT_CA_DER];
+
 /// Default certificate verifier: enforces DER structure, validity dates,
 /// SubjectPublicKeyInfo presence, and verifies standard handshake signatures.
-pub struct DefaultCertVerifier;
+#[derive(Clone, Copy, Debug)]
+pub struct DefaultCertVerifier<'a> {
+    pub expected_hostname: Option<&'a str>,
+    pub trusted_roots: &'a [&'a [u8]],
+}
 
-impl CertificateVerifier for DefaultCertVerifier {
+impl<'a> DefaultCertVerifier<'a> {
+    pub const fn new() -> Self {
+        Self {
+            expected_hostname: None,
+            trusted_roots: DEFAULT_TRUSTED_ROOTS,
+        }
+    }
+
+    pub const fn with_hostname(mut self, hostname: &'a str) -> Self {
+        self.expected_hostname = Some(hostname);
+        self
+    }
+
+    pub const fn with_roots(mut self, roots: &'a [&'a [u8]]) -> Self {
+        self.trusted_roots = roots;
+        self
+    }
+}
+
+impl<'a> Default for DefaultCertVerifier<'a> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<'a> CertificateVerifier for DefaultCertVerifier<'a> {
     fn verify_certificate(&self, cert: &ParsedCertificate) -> Result<(), TlsError> {
-        cert.check_validity()
+        cert.check_validity()?;
+
+        // Hostname validation against reference identifier (SNI)
+        if let Some(expected_host) = self.expected_hostname {
+            if !cert.matches_hostname(expected_host) {
+                return Err(TlsError::CertificateVerificationFailed);
+            }
+        }
+
+        // Validate certificate trust against embedded trusted root store
+        if cert.is_self_signed() {
+            let mut trusted = false;
+            for root_der in self.trusted_roots {
+                if *root_der == cert.raw {
+                    trusted = true;
+                    break;
+                }
+                if let Ok(root_cert) = ParsedCertificate::parse(root_der) {
+                    if root_cert.subject_raw == cert.subject_raw
+                        && root_cert.spki_public_key == cert.spki_public_key
+                    {
+                        trusted = true;
+                        break;
+                    }
+                }
+            }
+            if !trusted {
+                return Err(TlsError::CertificateVerificationFailed);
+            }
+        } else {
+            let mut issuer_matched = false;
+            for root_der in self.trusted_roots {
+                if let Ok(root_cert) = ParsedCertificate::parse(root_der) {
+                    if root_cert.subject_raw == cert.issuer_raw {
+                        if cert.spki_algorithm_oid == [0x2b, 0x65, 0x70] {
+                            crate::tls::ed25519::verify_ed25519(
+                                root_cert.spki_public_key,
+                                cert.tbs_raw,
+                                cert.signature_value,
+                            ).map_err(|_| TlsError::CertificateVerificationFailed)?;
+                        }
+                        issuer_matched = true;
+                        break;
+                    }
+                }
+            }
+            if !issuer_matched {
+                return Err(TlsError::CertificateVerificationFailed);
+            }
+        }
+
+        Ok(())
     }
 
     fn verify_server_signature(
@@ -259,33 +529,10 @@ impl CertificateVerifier for DefaultCertVerifier {
         cert.check_validity()?;
 
         match algorithm {
-            SIG_SCHEME_MOCK_TEST => {
-                // In mock test mode: signature is HMAC-SHA256(spki_public_key, context_and_hash)
-                use crate::crypto::hmac::HmacSha256;
-                let expected = HmacSha256::compute(cert.spki_public_key, context_and_hash);
-                if signature.len() == 32 && HmacSha256::verify(cert.spki_public_key, context_and_hash, &expected) {
-                    let mut diff = 0u8;
-                    for i in 0..32 {
-                        diff |= signature[i] ^ expected[i];
-                    }
-                    if diff == 0 {
-                        return Ok(());
-                    }
-                }
-                Err(TlsError::InvalidSignature)
-            }
             SIG_SCHEME_ED25519 => {
-                // Ed25519 signature verification: public key must be 32 bytes, signature 64 bytes
-                if cert.spki_public_key.len() != 32 || signature.len() != 64 {
-                    return Err(TlsError::InvalidSignature);
-                }
-                // Check non-zero
-                if signature.iter().all(|&b| b == 0) {
-                    return Err(TlsError::InvalidSignature);
-                }
-                Ok(())
+                crate::tls::ed25519::verify_ed25519(cert.spki_public_key, context_and_hash, signature)
             }
-            _ => Ok(()),
+            _ => Err(TlsError::InvalidSignature),
         }
     }
 }

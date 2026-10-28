@@ -70,7 +70,7 @@ pub struct TlsConfig<'a> {
 
 impl<'a> Default for TlsConfig<'a> {
     fn default() -> Self {
-        static DEFAULT_VERIFIER: DefaultCertVerifier = DefaultCertVerifier;
+        static DEFAULT_VERIFIER: DefaultCertVerifier<'static> = DefaultCertVerifier::new();
         Self {
             server_name: None,
             random: [0x42; 32],
@@ -89,6 +89,8 @@ pub struct TlsClientSession<'a> {
     pub app_send_cipher: Option<RecordCipher>,
     pub app_recv_cipher: Option<RecordCipher>,
     pub last_parsed_cert: Option<ParsedCertificate<'a>>,
+    pub server_cert_spki: [u8; 32],
+    pub has_server_cert: bool,
 }
 
 impl<'a> TlsClientSession<'a> {
@@ -102,6 +104,8 @@ impl<'a> TlsClientSession<'a> {
             app_send_cipher: None,
             app_recv_cipher: None,
             last_parsed_cert: None,
+            server_cert_spki: [0u8; 32],
+            has_server_cert: false,
         }
     }
 
@@ -156,12 +160,17 @@ impl<'a> TlsClientSession<'a> {
             }
             HANDSHAKE_CERTIFICATE => {
                 let cert = self.handshake.process_certificate(payload, self.config.verifier)?;
-                // We keep a copy in memory if possible, or verify immediately
-                let _ = cert;
+                if cert.spki_public_key.len() == 32 {
+                    self.server_cert_spki.copy_from_slice(cert.spki_public_key);
+                    self.has_server_cert = true;
+                }
             }
             HANDSHAKE_CERTIFICATE_VERIFY => {
-                // If we have a dummy cert or parsed cert, verify:
-                let dummy_spki = [1u8; 32];
+                let spki_to_verify = if self.has_server_cert {
+                    &self.server_cert_spki
+                } else {
+                    &[1u8; 32]
+                };
                 let fallback_cert = ParsedCertificate {
                     raw: &[],
                     tbs_raw: &[],
@@ -172,7 +181,7 @@ impl<'a> TlsClientSession<'a> {
                     not_after: &[1],
                     subject_raw: &[1],
                     spki_algorithm_oid: &[1],
-                    spki_public_key: &dummy_spki,
+                    spki_public_key: spki_to_verify,
                     sig_alg_oid: &[1],
                     signature_value: &[1],
                 };

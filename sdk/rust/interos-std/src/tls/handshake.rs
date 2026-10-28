@@ -12,7 +12,10 @@ use crate::crypto::hkdf::{derive_secret, empty_hash, hkdf_expand_label, hkdf_ext
 use crate::crypto::hmac::HmacSha256;
 use crate::crypto::sha256::Sha256;
 use crate::crypto::x25519::{x25519, x25519_base};
-use super::certificate::{CertificateVerifier, ParsedCertificate, SIG_SCHEME_ED25519, SIG_SCHEME_MOCK_TEST};
+use super::certificate::{
+    CertificateVerifier, ParsedCertificate, SIG_SCHEME_ECDSA_SECP256R1_SHA256, SIG_SCHEME_ED25519,
+    SIG_SCHEME_RSA_PSS_RSAE_SHA256,
+};
 use super::record::{ContentType, RecordCipher, RECORD_HEADER_LEN};
 use super::TlsError;
 
@@ -161,13 +164,15 @@ impl HandshakeClient {
         // 3. signature_algorithms: 0x000d
         body[pos..pos + 2].copy_from_slice(&EXT_SIGNATURE_ALGORITHMS.to_be_bytes());
         pos += 2;
-        body[pos..pos + 2].copy_from_slice(&6u16.to_be_bytes()); // length = 6
+        body[pos..pos + 2].copy_from_slice(&8u16.to_be_bytes()); // length = 8
         pos += 2;
-        body[pos..pos + 2].copy_from_slice(&4u16.to_be_bytes()); // list length = 4
+        body[pos..pos + 2].copy_from_slice(&6u16.to_be_bytes()); // list length = 6
         pos += 2;
         body[pos..pos + 2].copy_from_slice(&SIG_SCHEME_ED25519.to_be_bytes());
         pos += 2;
-        body[pos..pos + 2].copy_from_slice(&SIG_SCHEME_MOCK_TEST.to_be_bytes());
+        body[pos..pos + 2].copy_from_slice(&SIG_SCHEME_ECDSA_SECP256R1_SHA256.to_be_bytes());
+        pos += 2;
+        body[pos..pos + 2].copy_from_slice(&SIG_SCHEME_RSA_PSS_RSAE_SHA256.to_be_bytes());
         pos += 2;
 
         // 4. key_share: 0x0033

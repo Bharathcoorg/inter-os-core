@@ -10,8 +10,12 @@
 
 pub mod certificate;
 pub mod client;
+pub mod ed25519;
 pub mod handshake;
 pub mod record;
+
+#[cfg(test)]
+mod tests;
 
 pub use certificate::{
     AllowAnyCertVerifier, CertificateVerifier, DefaultCertVerifier, ParsedCertificate,
