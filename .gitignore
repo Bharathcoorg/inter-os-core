@@ -73,6 +73,14 @@ emulator/fhd.html
 tools/launch_screen.py
 tools/launch_screen.ps1
 
+# Temporary & scratch files
+tmp/
+temp/
+.temp/
+*.tmp
+*.temp
+records/
+
 # Temporary screenshots & frame dumps
 *.png
 emulator/live_frame*.png
