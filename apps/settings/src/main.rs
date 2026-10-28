@@ -485,6 +485,8 @@ pub power_profile: Option<PowerProfile>,
     pub pending_section: Option<Section>,
     /// Tick at which the pending section opens. Zero opens it immediately.
     pub pending_section_at: u64,
+    pub clock: [u8; 5],
+    pub clock_ok: bool,
 }
 
 /// Outcome of the one keystore call this app is allowed to attempt.
@@ -601,6 +603,8 @@ impl SettingsApp {
             orb_tap_frame: 0,
             pending_section: None,
             pending_section_at: 0,
+            clock: [b' '; 5],
+            clock_ok: false,
         }
     }
 
@@ -6183,8 +6187,41 @@ fn screen_lock_at(px: u32, py: u32, app: &SettingsApp) -> Option<ScreenLockHit> 
     None
 }
 
+const STATUS_BAR_HEIGHT: usize = interos_std::design::viewport::STATUS_BAR_HEIGHT;
+
+pub fn status_band() -> (usize, usize) {
+    (0, STATUS_BAR_HEIGHT)
+}
+
+fn refresh_clock(app: &mut SettingsApp) {
+    if let Some(now) = std::rtc::Reading::now() {
+        app.clock = now.clock_text();
+        app.clock_ok = true;
+    } else {
+        app.clock_ok = false;
+    }
+}
+
 #[inline(never)]
 fn get_settings_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
+    // Status band: platform chrome across 0..STATUS_BAR_HEIGHT
+    if y < STATUS_BAR_HEIGHT {
+        let band = interos_std::design::components::StatusBand::new(W);
+        let clock = if app.clock_ok { Some(&app.clock[..]) } else { None };
+        let battery = if app.battery_telemetry.present && app.battery_telemetry.telemetry_valid {
+            interos_std::design::components::Reading::Measured(app.battery_telemetry.soc as u32)
+        } else {
+            interos_std::design::components::Reading::Unbound
+        };
+        let instruments = interos_std::design::components::Instruments {
+            cellular: interos_std::design::components::Reading::Unbound,
+            wifi: interos_std::design::components::Reading::Unbound,
+            battery,
+        };
+        return band
+            .pixel(x, y, clock, &instruments, &THEME)
+            .unwrap_or(THEME.surface);
+    }
     // Home gesture pill (matches the touch handler's exit region).
     if y >= GESTURE_Y
         && y < GESTURE_Y + GESTURE_H
@@ -6596,6 +6633,7 @@ pub extern "C" fn _start() -> ! {
     };
 
     let mut settings = SettingsApp::new();
+    refresh_clock(&mut settings);
 
     // 0. Open the section the launcher asked for, if it asked for one.
     //

@@ -1507,6 +1507,8 @@ struct Frame {
     /// The queue's caption: how many tracks the queue holds.
     queue_caption: [u8; 32],
     queue_caption_len: usize,
+    clock: [u8; 5],
+    clock_ok: bool,
 }
 
 /// The position of the current track in the queue the list shows.
@@ -1519,6 +1521,12 @@ fn current_position(app: &MusicApp) -> Option<(usize, usize)> {
 }
 
 fn build_frame(app: &MusicApp) -> Frame {
+    let mut clock = [b' '; 5];
+    let mut clock_ok = false;
+    if let Some(now) = std::rtc::Reading::now() {
+        clock = now.clock_text();
+        clock_ok = true;
+    }
     let mut f = Frame {
         vol: VolumeFrame::build(app),
         surface: app.surface_state(),
@@ -1526,6 +1534,8 @@ fn build_frame(app: &MusicApp) -> Frame {
         state_len: 0,
         queue_caption: [0; 32],
         queue_caption_len: 0,
+        clock,
+        clock_ok,
     };
     // WHY the label comes from the platform's report and not from the app's
     // own state: the screen must say what the device is doing. The old
@@ -1749,8 +1759,22 @@ fn volume_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> Option<u32> {
 // -----------------------------------------------------------------------------
 // Pixel Color Resolution Engine (dark minimal player)
 // -----------------------------------------------------------------------------
+const STATUS_BAR_HEIGHT: usize = interos_std::design::viewport::STATUS_BAR_HEIGHT;
+
+pub fn status_band() -> (usize, usize) {
+    (0, STATUS_BAR_HEIGHT)
+}
+
 #[inline(never)]
 fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
+    // Status Band (y < STATUS_BAR_HEIGHT)
+    if y < STATUS_BAR_HEIGHT {
+        let band = interos_std::design::components::StatusBand::new(W);
+        let clock = if f.clock_ok { Some(&f.clock[..]) } else { None };
+        return band
+            .pixel(x, y, clock, &interos_std::design::components::Instruments::unmeasured(), &THEME)
+            .unwrap_or(THEME.surface);
+    }
     // 0. Home Gesture Pill (x: 260..460, y: 1418..1424).
     if y >= HOME_Y0 && y < HOME_Y1 && x >= 260 && x < 460 {
         return THEME.on_surface_variant;

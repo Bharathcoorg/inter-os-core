@@ -1085,6 +1085,8 @@ pub struct GalleryApp {
     pub toast_len: usize,
     pub toast_ticks: u32,
     pub toast_is_error: bool,
+    pub clock: [u8; 5],
+    pub clock_ok: bool,
 }
 
 /// Hands an action to the package the platform's registry says owns it.
@@ -1230,6 +1232,8 @@ impl GalleryApp {
             toast_len: 0,
             toast_ticks: 0,
             toast_is_error: false,
+            clock: [b' '; 5],
+            clock_ok: false,
         }
     }
 
@@ -4341,8 +4345,30 @@ fn toast_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
 // -----------------------------------------------------------------------------
 // Main screen
 // -----------------------------------------------------------------------------
+const STATUS_BAR_HEIGHT: usize = interos_std::design::viewport::STATUS_BAR_HEIGHT;
+
+pub fn status_band() -> (usize, usize) {
+    (0, STATUS_BAR_HEIGHT)
+}
+
+fn refresh_clock(app: &mut GalleryApp) {
+    if let Some(now) = std::rtc::Reading::now() {
+        app.clock = now.clock_text();
+        app.clock_ok = true;
+    } else {
+        app.clock_ok = false;
+    }
+}
+
 #[inline(never)]
 fn gallery_pixel(x: usize, y: usize, app: &GalleryApp) -> u32 {
+    if y < STATUS_BAR_HEIGHT {
+        let band = interos_std::design::components::StatusBand::new(W);
+        let clock = if app.clock_ok { Some(&app.clock[..]) } else { None };
+        return band
+            .pixel(x, y, clock, &interos_std::design::components::Instruments::unmeasured(), &THEME)
+            .unwrap_or(THEME.surface);
+    }
     if let Some(c) = toast_pixel(x, y, app) {
         return c;
     }
@@ -5239,6 +5265,7 @@ pub extern "C" fn _start() -> ! {
     std::log("[GALLERY (Ring 3)] Gallery online.").ok();
 
     let mut app = GalleryApp::new();
+    refresh_clock(&mut app);
     let _ = app.rescan_storage();
     // The stored filter is read after the scan, because the counts that label
     // the chips are measured from the list the scan produced.

@@ -195,6 +195,8 @@ pub struct AppState {
     /// carried no usable civil date, and the app says so rather than
     /// substituting a time.
     pub now_civil: Option<CivilTime>,
+    pub clock: [u8; 5],
+    pub clock_ok: bool,
 }
 
 impl AppState {
@@ -719,7 +721,31 @@ const KB_Y1: usize = keyboard::KB_Y1;
 // Pixel Rendering Engine (Zero Allocation Shader)
 // -----------------------------------------------------------------------------
 
+const STATUS_BAR_HEIGHT: usize = interos_std::design::viewport::STATUS_BAR_HEIGHT;
+
+pub fn status_band() -> (usize, usize) {
+    (0, STATUS_BAR_HEIGHT)
+}
+
+fn refresh_clock(state: &mut AppState) {
+    if let Some(now) = std::rtc::Reading::now() {
+        state.clock = now.clock_text();
+        state.clock_ok = true;
+    } else {
+        state.clock_ok = false;
+    }
+}
+
 fn render_pixel(x: usize, y: usize, state: &AppState) -> u32 {
+    // 0. Status Band (y < STATUS_BAR_HEIGHT)
+    if y < STATUS_BAR_HEIGHT {
+        let band = interos_std::design::components::StatusBand::new(W);
+        let clock = if state.clock_ok { Some(&state.clock[..]) } else { None };
+        return band
+            .pixel(x, y, clock, &interos_std::design::components::Instruments::unmeasured(), &THEME)
+            .unwrap_or(THEME.surface);
+    }
+
     // 1. Android / InterOS Bottom Home Gesture Bar (y: 1416..1440)
     //
     // WHY the indicator is ink and not a translucent white: the bar is drawn
@@ -2568,6 +2594,8 @@ pub extern "C" fn _start() -> ! {
         kb_shift: false,
         kb_symbols: false,
         now_civil: None,
+        clock: [b' '; 5],
+        clock_ok: false,
     };
 
     // WHY nothing is seeded here: a notes app whose contents are the user's
@@ -2597,6 +2625,7 @@ pub extern "C" fn _start() -> ! {
     // document index can find them.
     state.sync_list_extent();
     state.sync_kb_extent();
+    refresh_clock(&mut state);
     state.publish_notes();
 
     // Initial frame presentation

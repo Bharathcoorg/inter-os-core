@@ -869,6 +869,8 @@ pub struct CameraApp {
     pub settings_values: [[u8; 64]; SETTINGS_ROWS],
     /// How many bytes of each settings value are used.
     pub settings_value_lens: [usize; SETTINGS_ROWS],
+    pub clock: [u8; 5],
+    pub clock_ok: bool,
 }
 
 impl CameraApp {
@@ -912,6 +914,8 @@ impl CameraApp {
             sub_x: 0,
             settings_values: [[0; 64]; SETTINGS_ROWS],
             settings_value_lens: [0; SETTINGS_ROWS],
+            clock: [b' '; 5],
+            clock_ok: false,
         }
     }
 

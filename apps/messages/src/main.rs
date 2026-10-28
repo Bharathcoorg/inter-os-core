@@ -1352,6 +1352,8 @@ struct Frame {
     picker_count: usize,
     contacts: [messages::contacts::SavedContact; messages::contacts::MAX_SAVED_CONTACTS],
     contacts_count: usize,
+    clock: [u8; 5],
+    clock_ok: bool,
 }
 
 impl Frame {
@@ -1398,6 +1400,12 @@ fn header_title<'a>(
 }
 
 fn build_frame(messages: &MessagesApp) -> Frame {
+    let mut clock = [b' '; 5];
+    let mut clock_ok = false;
+    if let Some(now) = std::rtc::Reading::now() {
+        clock = now.clock_text();
+        clock_ok = true;
+    }
     let search_y = (SEARCH_FIELD.1 + SEARCH_FIELD.3 / 2)
         .saturating_sub(std::design::font::line_height(SEARCH_TEXT_SCALE) / 2);
     let recipient_rect = recipient_field(messages);
@@ -1484,6 +1492,8 @@ fn build_frame(messages: &MessagesApp) -> Frame {
         picker_count,
         contacts,
         contacts_count,
+        clock,
+        clock_ok,
     }
 }
 
@@ -1503,8 +1513,32 @@ fn thread_matches(tr: &messages::ThreadRecord, query: &[u8]) -> bool {
 }
 
 /// Master pixel scanout pipeline (zero heap allocations).
+const STATUS_BAR_HEIGHT: usize = interos_std::design::viewport::STATUS_BAR_HEIGHT;
+
+pub fn status_band() -> (usize, usize) {
+    (0, STATUS_BAR_HEIGHT)
+}
+
 #[inline(never)]
 fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> u32 {
+    // Status Band (y < STATUS_BAR_HEIGHT)
+    if y < STATUS_BAR_HEIGHT {
+        let band = interos_std::design::components::StatusBand::new(W);
+        let clock = if f.clock_ok { Some(&f.clock[..]) } else { None };
+        let cellular = if messages.modem_present {
+            interos_std::design::components::Reading::Measured(100)
+        } else {
+            interos_std::design::components::Reading::Unbound
+        };
+        let instruments = interos_std::design::components::Instruments {
+            cellular,
+            wifi: interos_std::design::components::Reading::Unbound,
+            battery: interos_std::design::components::Reading::Unbound,
+        };
+        return band
+            .pixel(x, y, clock, &instruments, &THEME)
+            .unwrap_or(THEME.surface);
+    }
     // 0. The on-screen keyboard, docked at the bottom of the screen.
     //
     // WHY the keyboard is drawn here and not under the bands: the keyboard

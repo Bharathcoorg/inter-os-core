@@ -41,6 +41,21 @@ const W: usize = 720;
 const H: usize = 1440;
 const CHUNK: usize = 4096;
 
+const STATUS_BAR_HEIGHT: usize = interos_std::design::viewport::STATUS_BAR_HEIGHT;
+
+pub fn status_band() -> (usize, usize) {
+    (0, STATUS_BAR_HEIGHT)
+}
+
+fn refresh_clock(calc: &mut CalculatorState) {
+    if let Some(now) = std::rtc::Reading::now() {
+        calc.clock = now.clock_text();
+        calc.clock_ok = true;
+    } else {
+        calc.clock_ok = false;
+    }
+}
+
 pub use calculator::{CalcError, CalculatorState, Decimal};
 // -----------------------------------------------------------------------------
 // Visual Design Tokens
@@ -494,6 +509,15 @@ fn prepare_calc_plan(calc: &CalculatorState) {
 // -----------------------------------------------------------------------------
 #[inline(never)]
 fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
+    // 0. Status Band (y < STATUS_BAR_HEIGHT)
+    if y < STATUS_BAR_HEIGHT {
+        let band = components::StatusBand::new(W);
+        let clock = if calc.clock_ok { Some(&calc.clock[..]) } else { None };
+        return band
+            .pixel(x, y, clock, &components::Instruments::unmeasured(), &THEME)
+            .unwrap_or(THEME.surface);
+    }
+
     // 1. Status Bar & Header Title with Back Chevron Disc (y: 0..110)
     if y < HEADER_H {
         // Standardized back button squircle (24..72, 24..72)
@@ -1270,6 +1294,7 @@ pub extern "C" fn _start() -> ! {
     .ok();
 
     let mut calc = CalculatorState::new();
+    refresh_clock(&mut calc);
 
     // 1. Allocate dedicated KMS Client Surface (z=200)
     std::log("[CALCULATOR] Step 1: Allocating application surface (z=200)...",

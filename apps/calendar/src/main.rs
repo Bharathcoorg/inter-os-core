@@ -304,6 +304,8 @@ pub struct CalendarApp {
     edit_minute: Option<u8>,
     /// What the last commit actually did, in words.
     commit_status: &'static str,
+    clock: [u8; 5],
+    clock_ok: bool,
 }
 
 impl CalendarApp {
@@ -332,6 +334,8 @@ impl CalendarApp {
             edit_hour: None,
             edit_minute: None,
             commit_status: "NO EVENT CREATED YET",
+            clock: [b' '; 5],
+            clock_ok: false,
         }
     }
 
@@ -389,6 +393,19 @@ impl CalendarApp {
     }
 
     pub fn sync_rtc(&mut self) -> bool {
+        if let Some(now) = std::rtc::Reading::now() {
+            self.current_year = now.year;
+            self.current_month = now.month as u8;
+            self.current_day = now.day as u8;
+            self.current_hour = now.hour as u8;
+            self.current_minute = now.minute as u8;
+            self.clock = now.clock_text();
+            self.clock_ok = true;
+            self.date_known = true;
+            self.rtc_synchronized = true;
+        } else {
+            self.clock_ok = false;
+        }
         let mut time_buf = [0u8; 64];
         match std::rtc_get_time(&mut time_buf) {
             Ok(n) if n > 0 => {
@@ -917,6 +934,12 @@ fn keyboard_key_at(x: usize, y: usize) -> Option<(usize, usize)> {
 // Pixel Rendering Engine
 // -----------------------------------------------------------------------------
 
+const STATUS_BAR_HEIGHT: usize = interos_std::design::viewport::STATUS_BAR_HEIGHT;
+
+pub fn status_band() -> (usize, usize) {
+    (0, STATUS_BAR_HEIGHT)
+}
+
 #[inline(never)]
 fn get_calendar_pixel(
     x: usize,
@@ -928,6 +951,15 @@ fn get_calendar_pixel(
     num_days: u8,
     agenda: &AgendaView,
 ) -> u32 {
+    // 0. Status Band (y < STATUS_BAR_HEIGHT)
+    if y < STATUS_BAR_HEIGHT {
+        let band = interos_std::design::components::StatusBand::new(W);
+        let clock = if app.clock_ok { Some(&app.clock[..]) } else { None };
+        return band
+            .pixel(x, y, clock, &interos_std::design::components::Instruments::unmeasured(), &THEME)
+            .unwrap_or(THEME.surface);
+    }
+
     // 1. Status Bar & Header (y: 0..96)
     if y < 96 {
         // Standardized back button squircle (24..72, 24..72)

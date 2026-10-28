@@ -88,6 +88,8 @@ pub struct VaultApp {
     pub pin_buf: [u8; 8],
     pub pin_len: usize,
     pub pin_error: bool,
+    pub clock: [u8; 5],
+    pub clock_ok: bool,
 }
 
 /// The hardware keystore slot holding the root master key.
@@ -163,6 +165,8 @@ impl VaultApp {
             pin_buf: [0u8; 8],
             pin_len: 0,
             pin_error: false,
+            clock: [b' '; 5],
+            clock_ok: false,
         }
     }
 
@@ -1224,8 +1228,31 @@ fn header_pixel(x: usize, y: usize) -> u32 {
 // Screen
 // -----------------------------------------------------------------------------
 
+const STATUS_BAR_HEIGHT: usize = interos_std::design::viewport::STATUS_BAR_HEIGHT;
+
+pub fn status_band() -> (usize, usize) {
+    (0, STATUS_BAR_HEIGHT)
+}
+
+fn refresh_clock(vault: &mut VaultApp) {
+    if let Some(now) = std::rtc::Reading::now() {
+        vault.clock = now.clock_text();
+        vault.clock_ok = true;
+    } else {
+        vault.clock_ok = false;
+    }
+}
+
 #[inline(never)]
 fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
+    // 0. Status Band (y < STATUS_BAR_HEIGHT)
+    if y < STATUS_BAR_HEIGHT {
+        let band = interos_std::design::components::StatusBand::new(W);
+        let clock = if vault.clock_ok { Some(&vault.clock[..]) } else { None };
+        return band
+            .pixel(x, y, clock, &interos_std::design::components::Instruments::unmeasured(), &THEME)
+            .unwrap_or(THEME.surface);
+    }
     if vault.pin_modal_open {
         return pin_modal_pixel(x, y, vault);
     }
@@ -2011,6 +2038,7 @@ pub extern "C" fn _start() -> ! {
     .ok();
 
     let mut vault = VaultApp::new();
+    refresh_clock(&mut vault);
 
     // 1. Probe every platform service this screen reports on.
     vault.reprobe();

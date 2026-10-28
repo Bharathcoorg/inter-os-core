@@ -19,7 +19,22 @@
 
 use core::panic::PanicInfo;
 use interos_std as std;
-use camera::theme::{chrome, radius, spacing, typography, Theme};
+use camera::theme::{chrome, radius, spacing, typography, Theme, THEME};
+
+const STATUS_BAR_HEIGHT: usize = interos_std::design::viewport::STATUS_BAR_HEIGHT;
+
+pub fn status_band() -> (usize, usize) {
+    (0, STATUS_BAR_HEIGHT)
+}
+
+fn refresh_clock(camera: &mut CameraApp) {
+    if let Some(now) = std::rtc::Reading::now() {
+        camera.clock = now.clock_text();
+        camera.clock_ok = true;
+    } else {
+        camera.clock_ok = false;
+    }
+}
 use std::design::primitives::Rect;
 
 use interos_std::design::outline_text;
@@ -424,6 +439,15 @@ fn mode_strip_pixel(x: usize, y: usize, camera: &CameraApp) -> Option<u32> {
 
 #[inline(never)]
 fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
+    // 0. Status Band (y < STATUS_BAR_HEIGHT)
+    if y < STATUS_BAR_HEIGHT {
+        let band = interos_std::design::components::StatusBand::new(W);
+        let clock = if camera.clock_ok { Some(&camera.clock[..]) } else { None };
+        return band
+            .pixel(x, y, clock, &interos_std::design::components::Instruments::unmeasured(), &THEME)
+            .unwrap_or(THEME.surface);
+    }
+
     // 1. Status Bar & Top Controls (y: 0..112)
     if y < TOP_BAND_Y1 {
         if y >= TOP_BAND_Y1 - 2 {
@@ -1368,6 +1392,7 @@ pub extern "C" fn _start() -> ! {
     std::log("[CAMERA APP (Ring 3)] Camera online.").ok();
 
     let mut camera = CameraApp::new();
+    refresh_clock(&mut camera);
     camera.refresh_shots_label();
     camera.refresh_status_text();
 

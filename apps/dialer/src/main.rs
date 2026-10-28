@@ -1283,6 +1283,8 @@ pub struct DialerApp {
     /// State of charge as `battery_query` reported it. `None` when the kernel
     /// refused or reported no fuel gauge, in which case nothing is drawn.
     pub battery_soc: Option<u8>,
+    pub clock: [u8; 5],
+    pub clock_ok: bool,
     /// Real ledger of dial attempts, newest first.
     pub recents: [CallRecord; RECENTS_CAP],
     pub recents_len: usize,
@@ -1366,6 +1368,8 @@ impl DialerApp {
             outcome: CallOutcome::Idle,
             signal_bars: 0,
             battery_soc: None,
+            clock: [b' '; 5],
+            clock_ok: false,
             recents: [CallRecord {
                 number: [0; 32],
                 len: 0,
@@ -2642,7 +2646,43 @@ fn json_present_true(json: &[u8]) -> bool {
 // -----------------------------------------------------------------------------
 
 /// Header band: back control, title, real signal bars, real battery.
+const STATUS_BAR_HEIGHT: usize = interos_std::design::viewport::STATUS_BAR_HEIGHT;
+
+pub fn status_band() -> (usize, usize) {
+    (0, STATUS_BAR_HEIGHT)
+}
+
+fn refresh_clock(dialer: &mut DialerApp) {
+    if let Some(now) = std::rtc::Reading::now() {
+        dialer.clock = now.clock_text();
+        dialer.clock_ok = true;
+    } else {
+        dialer.clock_ok = false;
+    }
+}
+
 fn header_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
+    if y < STATUS_BAR_HEIGHT {
+        let band = interos_std::design::components::StatusBand::new(W);
+        let clock = if dialer.clock_ok { Some(&dialer.clock[..]) } else { None };
+        let cellular = if dialer.signal_bars > 0 {
+            interos_std::design::components::Reading::Measured((dialer.signal_bars as u32) * 25)
+        } else {
+            interos_std::design::components::Reading::Unbound
+        };
+        let battery = match dialer.battery_soc {
+            Some(soc) => interos_std::design::components::Reading::Measured(soc as u32),
+            None => interos_std::design::components::Reading::Unbound,
+        };
+        let instruments = interos_std::design::components::Instruments {
+            cellular,
+            wifi: interos_std::design::components::Reading::Unbound,
+            battery,
+        };
+        return band
+            .pixel(x, y, clock, &instruments, &THEME)
+            .unwrap_or(THEME.surface);
+    }
     if y >= HEADER_H {
         return THEME.border;
     }
@@ -5257,6 +5297,7 @@ pub extern "C" fn _start() -> ! {
     .ok();
 
     let mut dialer = DialerApp::new();
+    refresh_clock(&mut dialer);
 
     // WHY the ringtone is read here: the ringtone slot is a device-wide
     // choice that the file manager and the gallery fill, and this app plays

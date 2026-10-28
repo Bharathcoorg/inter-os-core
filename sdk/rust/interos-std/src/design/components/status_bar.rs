@@ -124,6 +124,15 @@ impl Instruments {
             battery: Reading::Unbound,
         }
     }
+
+    /// Constructs an Instruments reading with real telemetry from queries.
+    pub const fn from_readings(cellular: Reading, wifi: Reading, battery: Reading) -> Self {
+        Instruments {
+            cellular,
+            wifi,
+            battery,
+        }
+    }
 }
 
 /// Where each instrument is drawn in a band of a given width.
@@ -161,6 +170,14 @@ pub struct StatusBar {
     pub bounds: Rect,
     /// Where this band's instruments sit.
     pub strip: Strip,
+}
+
+/// Canonical type alias for StatusBar: the status band at the top of every screen.
+pub type StatusBand = StatusBar;
+
+/// The vertical extent of the canonical status band on this display.
+pub const fn status_band() -> (usize, usize) {
+    (0, HEIGHT)
 }
 
 impl StatusBar {

@@ -1047,6 +1047,10 @@ pub struct CalculatorState {
     pub tape_lens: [usize; TAPE_MAX_LINES],
     /// How many lines the expression wraps into.
     pub tape_count: usize,
+    /// The band's clock, as the platform's RTC answered it for this frame.
+    pub clock: [u8; 5],
+    /// Whether that answer came at all, and so whether the lane is inked.
+    pub clock_ok: bool,
 }
 
 impl CalculatorState {
@@ -1070,6 +1074,8 @@ impl CalculatorState {
             tape_lines: [[0; 128]; TAPE_MAX_LINES],
             tape_lens: [0; TAPE_MAX_LINES],
             tape_count: 0,
+            clock: [b' '; 5],
+            clock_ok: false,
         }
     }
 
