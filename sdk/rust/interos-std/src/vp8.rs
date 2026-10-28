@@ -42,6 +42,12 @@ pub struct Vp8Scratch {
     pub left_token_ctx: [u8; 9],
     pub coeffs: [i16; 25 * 16 * MAX_MB_COLS],
     pub coeff_probs: [[[[u8; 11]; 3]; 8]; 4],
+    pub tmp_y: [u8; MAX_MB_COLS * 16],
+    pub tmp_u: [u8; MAX_MB_COLS * 8],
+    pub tmp_v: [u8; MAX_MB_COLS * 8],
+    pub top_pred_y: [u8; MAX_MB_COLS * 16 + 4],
+    pub top_pred_u: [u8; MAX_MB_COLS * 8 + 4],
+    pub top_pred_v: [u8; MAX_MB_COLS * 8 + 4],
 }
 
 const VP8_SCRATCH_EMPTY: Vp8Scratch = Vp8Scratch {
@@ -68,6 +74,12 @@ const VP8_SCRATCH_EMPTY: Vp8Scratch = Vp8Scratch {
     left_token_ctx: [0; 9],
     coeffs: [0; 25 * 16 * MAX_MB_COLS],
     coeff_probs: [[[[0; 11]; 3]; 8]; 4],
+    tmp_y: [0; MAX_MB_COLS * 16],
+    tmp_u: [0; MAX_MB_COLS * 8],
+    tmp_v: [0; MAX_MB_COLS * 8],
+    top_pred_y: [0; MAX_MB_COLS * 16 + 4],
+    top_pred_u: [0; MAX_MB_COLS * 8 + 4],
+    top_pred_v: [0; MAX_MB_COLS * 8 + 4],
 };
 
 /// Scratch arena for VP8 keyframe decoding.
@@ -858,33 +870,41 @@ fn decode_mb_tokens(
     let (mut i, mut stop, mut block_type, mut curr_dq) = if mode != B_PRED {
         (24usize, 24usize, 1usize, dqf.y2)
     } else {
-        (0usize, 16usize, 3usize, dqf.y1)
+        (0usize, 15usize, 3usize, dqf.y1)
     };
 
     loop {
         let mut t = (left[LEFT_CONTEXT_INDEX[i]] + above[ABOVE_CONTEXT_INDEX[i]]) as usize;
-        let mut c = if block_type == 0 { 1usize } else { 0usize };
+        let first_c = if block_type == 0 { 1usize } else { 0usize };
         let b_tokens = &mut tokens[i * 16..(i + 1) * 16];
 
         // Zero out block coefficients
         b_tokens.fill(0);
 
-        'block: loop {
-            let band = COEFF_BANDS[c];
+        let mut c = first_c;
+        let mut skip = false;
+        let mut had_data = false;
+        'block: while c < 16 {
+            let band = COEFF_BANDS[c] as usize;
             let prob = &coeff_probs[block_type][band][t];
 
             // EOB test
-            if bool_dec.get(prob[0]) == 0 {
-                break 'block;
-            }
-
-            // Zero test loop
-            while bool_dec.get(prob[1]) == 0 {
-                c += 1;
-                if c >= 16 {
+            if !skip {
+                if bool_dec.get(prob[0]) == 0 {
                     break 'block;
                 }
             }
+
+            // Zero test
+            if bool_dec.get(prob[1]) == 0 {
+                skip = true;
+                had_data = true;
+                t = 0;
+                c += 1;
+                continue;
+            }
+            skip = false;
+            had_data = true;
 
             // Decode token value
             let val = if bool_dec.get(prob[2]) == 0 {
@@ -901,34 +921,34 @@ fn decode_mb_tokens(
                 if bool_dec.get(prob[7]) == 0 {
                     5i32 + (bool_dec.get(159) as i32)
                 } else {
-                    let b0 = bool_dec.get(145) as i32;
                     let b1 = bool_dec.get(165) as i32;
-                    7i32 + (b0 << 1) + b1
+                    let b0 = bool_dec.get(145) as i32;
+                    7i32 + (b1 << 1) + b0
                 }
             } else if bool_dec.get(prob[8]) == 0 {
                 if bool_dec.get(prob[9]) == 0 {
-                    let b0 = bool_dec.get(140) as i32;
-                    let b1 = bool_dec.get(148) as i32;
                     let b2 = bool_dec.get(173) as i32;
-                    11i32 + (b0 << 2) + (b1 << 1) + b2
+                    let b1 = bool_dec.get(148) as i32;
+                    let b0 = bool_dec.get(140) as i32;
+                    11i32 + (b2 << 2) + (b1 << 1) + b0
                 } else {
-                    let b0 = bool_dec.get(135) as i32;
-                    let b1 = bool_dec.get(140) as i32;
-                    let b2 = bool_dec.get(155) as i32;
                     let b3 = bool_dec.get(176) as i32;
-                    19i32 + (b0 << 3) + (b1 << 2) + (b2 << 1) + b3
+                    let b2 = bool_dec.get(155) as i32;
+                    let b1 = bool_dec.get(140) as i32;
+                    let b0 = bool_dec.get(135) as i32;
+                    19i32 + (b3 << 3) + (b2 << 2) + (b1 << 1) + b0
                 }
             } else if bool_dec.get(prob[10]) == 0 {
-                let b0 = bool_dec.get(130) as i32;
-                let b1 = bool_dec.get(134) as i32;
-                let b2 = bool_dec.get(141) as i32;
-                let b3 = bool_dec.get(157) as i32;
                 let b4 = bool_dec.get(180) as i32;
-                35i32 + (b0 << 4) + (b1 << 3) + (b2 << 2) + (b3 << 1) + b4
+                let b3 = bool_dec.get(157) as i32;
+                let b2 = bool_dec.get(141) as i32;
+                let b1 = bool_dec.get(134) as i32;
+                let b0 = bool_dec.get(130) as i32;
+                35i32 + (b4 << 4) + (b3 << 3) + (b2 << 2) + (b1 << 1) + b0
             } else {
                 let mut extra = 0i32;
                 for b_idx in 0..11 {
-                    extra = (extra << 1) | (bool_dec.get(EXTRABITS_CAT6[b_idx]) as i32);
+                    extra = (extra << 1) | (bool_dec.get(EXTRABITS_CAT6[10 - b_idx]) as i32);
                 }
                 67i32 + extra
             };
@@ -940,12 +960,8 @@ fn decode_mb_tokens(
 
             t = if val == 1 { 1 } else { 2 };
             c += 1;
-            if c >= 16 {
-                break 'block;
-            }
         }
 
-        let had_data = c != (if block_type == 0 { 1 } else { 0 });
         if c > 1 {
             eob_mask |= 1 << i;
         }
@@ -1202,6 +1218,9 @@ fn filter_h_edge_simple(src: &mut [u8], offset: usize, stride: usize, filter_lim
 
 
 
+pub const YUV_FIX2: i32 = 6;
+pub const YUV_MASK2: i32 = (256 << YUV_FIX2) - 1;
+
 #[inline(always)]
 fn mult_hi(v: i32, coeff: i32) -> i32 {
     (v * coeff) >> 8
@@ -1209,8 +1228,8 @@ fn mult_hi(v: i32, coeff: i32) -> i32 {
 
 #[inline(always)]
 fn vp8_clip8(v: i32) -> u8 {
-    if (v & !16383) == 0 {
-        (v >> 6) as u8
+    if (v & !YUV_MASK2) == 0 {
+        (v >> YUV_FIX2) as u8
     } else if v < 0 {
         0
     } else {
@@ -1223,9 +1242,10 @@ fn vp8_yuv_to_rgba(y: u8, u: u8, v: u8, rgba: &mut [u8]) {
     let y = y as i32;
     let u = u as i32;
     let v = v as i32;
-    let r = vp8_clip8(mult_hi(y, 19077) + mult_hi(v, 26149) - 14234);
-    let g = vp8_clip8(mult_hi(y, 19077) - mult_hi(u, 6419) - mult_hi(v, 13320) + 8708);
-    let b = vp8_clip8(mult_hi(y, 19077) + mult_hi(u, 33050) - 17685);
+    let y_scaled = mult_hi(y, 19077);
+    let r = vp8_clip8(y_scaled + mult_hi(v, 26149) - 14234);
+    let g = vp8_clip8(y_scaled - mult_hi(u, 6419) - mult_hi(v, 13320) + 8708);
+    let b = vp8_clip8(y_scaled + mult_hi(u, 33050) - 17685);
     rgba[0] = r;
     rgba[1] = g;
     rgba[2] = b;
@@ -1317,30 +1337,129 @@ fn upsample_rgba_line_pair(
 }
 
 
-fn flush_mb_row(
-    y_band: &[u8],
-    u_band: &[u8],
-    v_band: &[u8],
+fn emit_fancy_rgba(
+    cur_y_band: &[u8],
+    cur_u_band: &[u8],
+    cur_v_band: &[u8],
     mb_row: usize,
     width: usize,
     height: usize,
+    tmp_y: &mut [u8],
+    tmp_u: &mut [u8],
+    tmp_v: &mut [u8],
     out_rgba: &mut [u8],
 ) {
-    let start_y = mb_row * 16;
-    let end_y = (start_y + 16).min(height);
+    let mb_y = mb_row * 16;
+    let mb_h = 16.min(height - mb_y);
+    let y_end = mb_y + mb_h;
     let out_stride = width * 4;
 
-    for y in start_y..end_y {
-        let local_y = y - start_y;
-        let local_uv_y = local_y >> 1;
-        let y_line = &y_band[Y_OFFSET + local_y * Y_STRIDE..];
-        let u_line = &u_band[UV_OFFSET + local_uv_y * UV_STRIDE..];
-        let v_line = &v_band[UV_OFFSET + local_uv_y * UV_STRIDE..];
-        let dst = &mut out_rgba[y * out_stride..(y + 1) * out_stride];
+    let mut y = mb_y;
+    let mut local_y = 0usize;
+    let mut local_uv_y = 0usize;
 
-        for x in 0..width {
-            let uv_x = x >> 1;
-            vp8_yuv_to_rgba(y_line[x], u_line[uv_x], v_line[uv_x], &mut dst[x * 4..]);
+    if y == 0 {
+        let cur_y_line = &cur_y_band[Y_OFFSET..Y_OFFSET + width];
+        let cur_u_line = &cur_u_band[UV_OFFSET..UV_OFFSET + (width + 1) / 2];
+        let cur_v_line = &cur_v_band[UV_OFFSET..UV_OFFSET + (width + 1) / 2];
+        let dst_line = &mut out_rgba[0..out_stride];
+        upsample_rgba_line_pair(
+            cur_y_line,
+            None,
+            cur_u_line,
+            cur_v_line,
+            cur_u_line,
+            cur_v_line,
+            dst_line,
+            None,
+            width,
+        );
+    } else {
+        let cur_y_line = &cur_y_band[Y_OFFSET..Y_OFFSET + width];
+        let cur_u_line = &cur_u_band[UV_OFFSET..UV_OFFSET + (width + 1) / 2];
+        let cur_v_line = &cur_v_band[UV_OFFSET..UV_OFFSET + (width + 1) / 2];
+        let prev_dst_start = (y - 1) * out_stride;
+        let cur_dst_start = y * out_stride;
+        let (top_slice, bot_slice) = out_rgba.split_at_mut(cur_dst_start);
+        let top_dst = &mut top_slice[prev_dst_start..prev_dst_start + out_stride];
+        let bot_dst = &mut bot_slice[0..out_stride];
+        upsample_rgba_line_pair(
+            &tmp_y[..width],
+            Some(cur_y_line),
+            &tmp_u[..(width + 1) / 2],
+            &tmp_v[..(width + 1) / 2],
+            cur_u_line,
+            cur_v_line,
+            top_dst,
+            Some(bot_dst),
+            width,
+        );
+    }
+
+    while y + 2 < y_end {
+        let top_uv_y = local_uv_y;
+        local_uv_y += 1;
+        let cur_uv_y = local_uv_y;
+
+        let top_y_idx = local_y + 1;
+        let bot_y_idx = local_y + 2;
+        local_y += 2;
+
+        let top_y_line = &cur_y_band[Y_OFFSET + top_y_idx * Y_STRIDE..Y_OFFSET + top_y_idx * Y_STRIDE + width];
+        let bot_y_line = &cur_y_band[Y_OFFSET + bot_y_idx * Y_STRIDE..Y_OFFSET + bot_y_idx * Y_STRIDE + width];
+
+        let top_u_line = &cur_u_band[UV_OFFSET + top_uv_y * UV_STRIDE..UV_OFFSET + top_uv_y * UV_STRIDE + (width + 1) / 2];
+        let top_v_line = &cur_v_band[UV_OFFSET + top_uv_y * UV_STRIDE..UV_OFFSET + top_uv_y * UV_STRIDE + (width + 1) / 2];
+        let cur_u_line = &cur_u_band[UV_OFFSET + cur_uv_y * UV_STRIDE..UV_OFFSET + cur_uv_y * UV_STRIDE + (width + 1) / 2];
+        let cur_v_line = &cur_v_band[UV_OFFSET + cur_uv_y * UV_STRIDE..UV_OFFSET + cur_uv_y * UV_STRIDE + (width + 1) / 2];
+
+        let top_dst_y = y + 1;
+        let bot_dst_y = y + 2;
+        y += 2;
+
+        let (first_part, second_part) = out_rgba.split_at_mut(bot_dst_y * out_stride);
+        let top_dst = &mut first_part[top_dst_y * out_stride..(top_dst_y + 1) * out_stride];
+        let bot_dst = &mut second_part[0..out_stride];
+
+        upsample_rgba_line_pair(
+            top_y_line,
+            Some(bot_y_line),
+            top_u_line,
+            top_v_line,
+            cur_u_line,
+            cur_v_line,
+            top_dst,
+            Some(bot_dst),
+            width,
+        );
+    }
+
+    local_y += 1;
+    if y_end < height {
+        let last_y_line = &cur_y_band[Y_OFFSET + local_y * Y_STRIDE..Y_OFFSET + local_y * Y_STRIDE + width];
+        let last_u_line = &cur_u_band[UV_OFFSET + local_uv_y * UV_STRIDE..UV_OFFSET + local_uv_y * UV_STRIDE + (width + 1) / 2];
+        let last_v_line = &cur_v_band[UV_OFFSET + local_uv_y * UV_STRIDE..UV_OFFSET + local_uv_y * UV_STRIDE + (width + 1) / 2];
+        tmp_y[..width].copy_from_slice(last_y_line);
+        tmp_u[..(width + 1) / 2].copy_from_slice(last_u_line);
+        tmp_v[..(width + 1) / 2].copy_from_slice(last_v_line);
+    } else {
+        if (y_end & 1) == 0 {
+            let last_y_line = &cur_y_band[Y_OFFSET + local_y * Y_STRIDE..Y_OFFSET + local_y * Y_STRIDE + width];
+            let last_u_line = &cur_u_band[UV_OFFSET + local_uv_y * UV_STRIDE..UV_OFFSET + local_uv_y * UV_STRIDE + (width + 1) / 2];
+            let last_v_line = &cur_v_band[UV_OFFSET + local_uv_y * UV_STRIDE..UV_OFFSET + local_uv_y * UV_STRIDE + (width + 1) / 2];
+            let last_dst_y = y_end - 1;
+            let dst_line = &mut out_rgba[last_dst_y * out_stride..(last_dst_y + 1) * out_stride];
+            upsample_rgba_line_pair(
+                last_y_line,
+                None,
+                last_u_line,
+                last_v_line,
+                last_u_line,
+                last_v_line,
+                dst_line,
+                None,
+                width,
+            );
         }
     }
 }
@@ -1615,6 +1734,9 @@ pub fn decode(chunk: &[u8], out_rgba: &mut [u8]) -> Result<(u32, u32, usize), ()
                 y_cur[dst_y - 1..dst_y + mb_cols * 16 + 4]
                     .copy_from_slice(&y_prev[src_y - 1..src_y + mb_cols * 16 + 4]);
             }
+            let dst_pred_y = Y_OFFSET - Y_STRIDE;
+            y_cur[dst_pred_y..dst_pred_y + mb_cols * 16 + 4]
+                .copy_from_slice(&scratch.top_pred_y[..mb_cols * 16 + 4]);
 
             let (u_first, u_second) = scratch.u_bands.split_at_mut(1);
             let (u_cur, u_prev) = if cur_band == 0 {
@@ -1628,6 +1750,9 @@ pub fn decode(chunk: &[u8], out_rgba: &mut [u8]) -> Result<(u32, u32, usize), ()
                 u_cur[dst_uv - 1..dst_uv + mb_cols * 8 + 4]
                     .copy_from_slice(&u_prev[src_uv - 1..src_uv + mb_cols * 8 + 4]);
             }
+            let dst_pred_uv = UV_OFFSET - UV_STRIDE;
+            u_cur[dst_pred_uv..dst_pred_uv + mb_cols * 8 + 4]
+                .copy_from_slice(&scratch.top_pred_u[..mb_cols * 8 + 4]);
 
             let (v_first, v_second) = scratch.v_bands.split_at_mut(1);
             let (v_cur, v_prev) = if cur_band == 0 {
@@ -1641,6 +1766,8 @@ pub fn decode(chunk: &[u8], out_rgba: &mut [u8]) -> Result<(u32, u32, usize), ()
                 v_cur[dst_uv - 1..dst_uv + mb_cols * 8 + 4]
                     .copy_from_slice(&v_prev[src_uv - 1..src_uv + mb_cols * 8 + 4]);
             }
+            v_cur[dst_pred_uv..dst_pred_uv + mb_cols * 8 + 4]
+                .copy_from_slice(&scratch.top_pred_v[..mb_cols * 8 + 4]);
         }
 
         // Reconstruct each macroblock
@@ -1668,6 +1795,13 @@ pub fn decode(chunk: &[u8], out_rgba: &mut [u8]) -> Result<(u32, u32, usize), ()
 
             // Luma Prediction & IDCT
             if mb.y_mode == B_PRED {
+                let top_right_off = y_off + 16 - Y_STRIDE;
+                if row == 0 {
+                    scratch.y_bands[cur_band][top_right_off..top_right_off + 4].fill(127);
+                } else if col >= mb_cols - 1 {
+                    let last_top_val = scratch.y_bands[cur_band][top_right_off - 1];
+                    scratch.y_bands[cur_band][top_right_off..top_right_off + 4].fill(last_top_val);
+                }
                 copy_down(&mut scratch.y_bands[cur_band], y_off, Y_STRIDE);
                 for b in 0..16 {
                     let bx = b & 3;
@@ -1755,12 +1889,63 @@ pub fn decode(chunk: &[u8], out_rgba: &mut [u8]) -> Result<(u32, u32, usize), ()
         let last_val = scratch.y_bands[cur_band][end_y - 1];
         scratch.y_bands[cur_band][end_y..end_y + 4].fill(last_val);
 
-        // 4. Loop filter row - 1 (if row > 0)
-        if lf.level > 0 && row > 0 {
-            let filter_row = row - 1;
-            let filter_band = (filter_row) & 1;
+        // Stash away unfiltered bottom samples for next row's intra prediction
+        let y_last_row = Y_OFFSET + 15 * Y_STRIDE;
+        scratch.top_pred_y[..mb_cols * 16]
+            .copy_from_slice(&scratch.y_bands[cur_band][y_last_row..y_last_row + mb_cols * 16]);
+        scratch.top_pred_y[mb_cols * 16..mb_cols * 16 + 4].fill(last_val);
+
+        let uv_last_row = UV_OFFSET + 7 * UV_STRIDE;
+        scratch.top_pred_u[..mb_cols * 8]
+            .copy_from_slice(&scratch.u_bands[cur_band][uv_last_row..uv_last_row + mb_cols * 8]);
+        let end_u = scratch.top_pred_u[mb_cols * 8 - 1];
+        scratch.top_pred_u[mb_cols * 8..mb_cols * 8 + 4].fill(end_u);
+
+        scratch.top_pred_v[..mb_cols * 8]
+            .copy_from_slice(&scratch.v_bands[cur_band][uv_last_row..uv_last_row + mb_cols * 8]);
+        let end_v = scratch.top_pred_v[mb_cols * 8 - 1];
+        scratch.top_pred_v[mb_cols * 8..mb_cols * 8 + 4].fill(end_v);
+
+        // Restore vertically-filtered row -1 from previous band for loop filtering
+        if row > 0 {
+            let (y_first, y_second) = scratch.y_bands.split_at_mut(1);
+            let (y_cur, y_prev) = if cur_band == 0 {
+                (&mut y_first[0], &y_second[0])
+            } else {
+                (&mut y_second[0], &y_first[0])
+            };
+            let src_y = Y_OFFSET + 15 * Y_STRIDE;
+            let dst_y = Y_OFFSET - Y_STRIDE;
+            y_cur[dst_y - 1..dst_y + mb_cols * 16 + 4]
+                .copy_from_slice(&y_prev[src_y - 1..src_y + mb_cols * 16 + 4]);
+
+            if !lf.use_simple {
+                let (u_first, u_second) = scratch.u_bands.split_at_mut(1);
+                let (u_cur, u_prev) = if cur_band == 0 {
+                    (&mut u_first[0], &u_second[0])
+                } else {
+                    (&mut u_second[0], &u_first[0])
+                };
+                let src_uv = UV_OFFSET + 7 * UV_STRIDE;
+                let dst_uv = UV_OFFSET - UV_STRIDE;
+                u_cur[dst_uv - 1..dst_uv + mb_cols * 8 + 4]
+                    .copy_from_slice(&u_prev[src_uv - 1..src_uv + mb_cols * 8 + 4]);
+
+                let (v_first, v_second) = scratch.v_bands.split_at_mut(1);
+                let (v_cur, v_prev) = if cur_band == 0 {
+                    (&mut v_first[0], &v_second[0])
+                } else {
+                    (&mut v_second[0], &v_first[0])
+                };
+                v_cur[dst_uv - 1..dst_uv + mb_cols * 8 + 4]
+                    .copy_from_slice(&v_prev[src_uv - 1..src_uv + mb_cols * 8 + 4]);
+            }
+        }
+
+        // 4. Loop filter row
+        if lf.level > 0 {
             for col in 0..mb_cols {
-                let mbi = scratch.mb_info_prev[col + 1];
+                let mbi = scratch.mb_info_curr[col + 1];
                 let mut edge_limit = 0i32;
                 let mut interior_limit = 0i32;
                 let mut hev_threshold = 0i32;
@@ -1775,129 +1960,123 @@ pub fn decode(chunk: &[u8], out_rgba: &mut [u8]) -> Result<(u32, u32, usize), ()
                         let mb_limit = (edge_limit + 2) * 2 + interior_limit;
                         let b_limit = edge_limit * 2 + interior_limit;
                         if col > 0 {
-                            filter_v_edge_simple(&mut scratch.y_bands[filter_band], y_ptr, Y_STRIDE, mb_limit);
+                            filter_v_edge_simple(&mut scratch.y_bands[cur_band], y_ptr, Y_STRIDE, mb_limit);
                         }
                         if filter_subblocks {
-                            filter_v_edge_simple(&mut scratch.y_bands[filter_band], y_ptr + 4, Y_STRIDE, b_limit);
-                            filter_v_edge_simple(&mut scratch.y_bands[filter_band], y_ptr + 8, Y_STRIDE, b_limit);
-                            filter_v_edge_simple(&mut scratch.y_bands[filter_band], y_ptr + 12, Y_STRIDE, b_limit);
+                            filter_v_edge_simple(&mut scratch.y_bands[cur_band], y_ptr + 4, Y_STRIDE, b_limit);
+                            filter_v_edge_simple(&mut scratch.y_bands[cur_band], y_ptr + 8, Y_STRIDE, b_limit);
+                            filter_v_edge_simple(&mut scratch.y_bands[cur_band], y_ptr + 12, Y_STRIDE, b_limit);
                         }
-                        if filter_row > 0 {
-                            filter_h_edge_simple(&mut scratch.y_bands[filter_band], y_ptr, Y_STRIDE, mb_limit);
+                        if row > 0 {
+                            filter_h_edge_simple(&mut scratch.y_bands[cur_band], y_ptr, Y_STRIDE, mb_limit);
                         }
                         if filter_subblocks {
-                            filter_h_edge_simple(&mut scratch.y_bands[filter_band], y_ptr + 4 * Y_STRIDE, Y_STRIDE, b_limit);
-                            filter_h_edge_simple(&mut scratch.y_bands[filter_band], y_ptr + 8 * Y_STRIDE, Y_STRIDE, b_limit);
-                            filter_h_edge_simple(&mut scratch.y_bands[filter_band], y_ptr + 12 * Y_STRIDE, Y_STRIDE, b_limit);
+                            filter_h_edge_simple(&mut scratch.y_bands[cur_band], y_ptr + 4 * Y_STRIDE, Y_STRIDE, b_limit);
+                            filter_h_edge_simple(&mut scratch.y_bands[cur_band], y_ptr + 8 * Y_STRIDE, Y_STRIDE, b_limit);
+                            filter_h_edge_simple(&mut scratch.y_bands[cur_band], y_ptr + 12 * Y_STRIDE, Y_STRIDE, b_limit);
                         }
                     } else {
                         if col > 0 {
-                            filter_mb_v_edge(&mut scratch.y_bands[filter_band], y_ptr, Y_STRIDE, edge_limit + 2, interior_limit, hev_threshold, 2);
-                            filter_mb_v_edge(&mut scratch.u_bands[filter_band], uv_ptr, UV_STRIDE, edge_limit + 2, interior_limit, hev_threshold, 1);
-                            filter_mb_v_edge(&mut scratch.v_bands[filter_band], uv_ptr, UV_STRIDE, edge_limit + 2, interior_limit, hev_threshold, 1);
+                            filter_mb_v_edge(&mut scratch.y_bands[cur_band], y_ptr, Y_STRIDE, edge_limit + 2, interior_limit, hev_threshold, 2);
+                            filter_mb_v_edge(&mut scratch.u_bands[cur_band], uv_ptr, UV_STRIDE, edge_limit + 2, interior_limit, hev_threshold, 1);
+                            filter_mb_v_edge(&mut scratch.v_bands[cur_band], uv_ptr, UV_STRIDE, edge_limit + 2, interior_limit, hev_threshold, 1);
                         }
                         if filter_subblocks {
-                            filter_subblock_v_edge(&mut scratch.y_bands[filter_band], y_ptr + 4, Y_STRIDE, edge_limit, interior_limit, hev_threshold, 2);
-                            filter_subblock_v_edge(&mut scratch.y_bands[filter_band], y_ptr + 8, Y_STRIDE, edge_limit, interior_limit, hev_threshold, 2);
-                            filter_subblock_v_edge(&mut scratch.y_bands[filter_band], y_ptr + 12, Y_STRIDE, edge_limit, interior_limit, hev_threshold, 2);
-                            filter_subblock_v_edge(&mut scratch.u_bands[filter_band], uv_ptr + 4, UV_STRIDE, edge_limit, interior_limit, hev_threshold, 1);
-                            filter_subblock_v_edge(&mut scratch.v_bands[filter_band], uv_ptr + 4, UV_STRIDE, edge_limit, interior_limit, hev_threshold, 1);
+                            filter_subblock_v_edge(&mut scratch.y_bands[cur_band], y_ptr + 4, Y_STRIDE, edge_limit, interior_limit, hev_threshold, 2);
+                            filter_subblock_v_edge(&mut scratch.y_bands[cur_band], y_ptr + 8, Y_STRIDE, edge_limit, interior_limit, hev_threshold, 2);
+                            filter_subblock_v_edge(&mut scratch.y_bands[cur_band], y_ptr + 12, Y_STRIDE, edge_limit, interior_limit, hev_threshold, 2);
+                            filter_subblock_v_edge(&mut scratch.u_bands[cur_band], uv_ptr + 4, UV_STRIDE, edge_limit, interior_limit, hev_threshold, 1);
+                            filter_subblock_v_edge(&mut scratch.v_bands[cur_band], uv_ptr + 4, UV_STRIDE, edge_limit, interior_limit, hev_threshold, 1);
                         }
-                        if filter_row > 0 {
-                            filter_mb_h_edge(&mut scratch.y_bands[filter_band], y_ptr, Y_STRIDE, edge_limit + 2, interior_limit, hev_threshold, 2);
-                            filter_mb_h_edge(&mut scratch.u_bands[filter_band], uv_ptr, UV_STRIDE, edge_limit + 2, interior_limit, hev_threshold, 1);
-                            filter_mb_h_edge(&mut scratch.v_bands[filter_band], uv_ptr, UV_STRIDE, edge_limit + 2, interior_limit, hev_threshold, 1);
+                        if row > 0 {
+                            filter_mb_h_edge(&mut scratch.y_bands[cur_band], y_ptr, Y_STRIDE, edge_limit + 2, interior_limit, hev_threshold, 2);
+                            filter_mb_h_edge(&mut scratch.u_bands[cur_band], uv_ptr, UV_STRIDE, edge_limit + 2, interior_limit, hev_threshold, 1);
+                            filter_mb_h_edge(&mut scratch.v_bands[cur_band], uv_ptr, UV_STRIDE, edge_limit + 2, interior_limit, hev_threshold, 1);
                         }
                         if filter_subblocks {
-                            filter_subblock_h_edge(&mut scratch.y_bands[filter_band], y_ptr + 4 * Y_STRIDE, Y_STRIDE, edge_limit, interior_limit, hev_threshold, 2);
-                            filter_subblock_h_edge(&mut scratch.y_bands[filter_band], y_ptr + 8 * Y_STRIDE, Y_STRIDE, edge_limit, interior_limit, hev_threshold, 2);
-                            filter_subblock_h_edge(&mut scratch.y_bands[filter_band], y_ptr + 12 * Y_STRIDE, Y_STRIDE, edge_limit, interior_limit, hev_threshold, 2);
-                            filter_subblock_h_edge(&mut scratch.u_bands[filter_band], uv_ptr + 4 * UV_STRIDE, UV_STRIDE, edge_limit, interior_limit, hev_threshold, 1);
-                            filter_subblock_h_edge(&mut scratch.v_bands[filter_band], uv_ptr + 4 * UV_STRIDE, UV_STRIDE, edge_limit, interior_limit, hev_threshold, 1);
+                            filter_subblock_h_edge(&mut scratch.y_bands[cur_band], y_ptr + 4 * Y_STRIDE, Y_STRIDE, edge_limit, interior_limit, hev_threshold, 2);
+                            filter_subblock_h_edge(&mut scratch.y_bands[cur_band], y_ptr + 8 * Y_STRIDE, Y_STRIDE, edge_limit, interior_limit, hev_threshold, 2);
+                            filter_subblock_h_edge(&mut scratch.y_bands[cur_band], y_ptr + 12 * Y_STRIDE, Y_STRIDE, edge_limit, interior_limit, hev_threshold, 2);
+                            filter_subblock_h_edge(&mut scratch.u_bands[cur_band], uv_ptr + 4 * UV_STRIDE, UV_STRIDE, edge_limit, interior_limit, hev_threshold, 1);
+                            filter_subblock_h_edge(&mut scratch.v_bands[cur_band], uv_ptr + 4 * UV_STRIDE, UV_STRIDE, edge_limit, interior_limit, hev_threshold, 1);
                         }
                     }
                 }
             }
         }
 
-                if lf.level > 0 && row > 0 {
-            flush_mb_row(&scratch.y_bands[(row - 1) & 1], &scratch.u_bands[(row - 1) & 1], &scratch.v_bands[(row - 1) & 1], row - 1, w, h, out_rgba);
-        } else if lf.level == 0 {
-            flush_mb_row(&scratch.y_bands[cur_band], &scratch.u_bands[cur_band], &scratch.v_bands[cur_band], row, w, h, out_rgba);
+        if row > 0 {
+            let (y_first, y_second) = scratch.y_bands.split_at_mut(1);
+            let (y_cur, y_prev) = if cur_band == 0 {
+                (&y_first[0], &mut y_second[0])
+            } else {
+                (&y_second[0], &mut y_first[0])
+            };
+            for r in 1..=3 {
+                let src_y = Y_OFFSET - r * Y_STRIDE;
+                let dst_y = Y_OFFSET + (16 - r) * Y_STRIDE;
+                y_prev[dst_y..dst_y + mb_cols * 16]
+                    .copy_from_slice(&y_cur[src_y..src_y + mb_cols * 16]);
+            }
+            if !lf.use_simple {
+                let (u_first, u_second) = scratch.u_bands.split_at_mut(1);
+                let (u_cur, u_prev) = if cur_band == 0 {
+                    (&u_first[0], &mut u_second[0])
+                } else {
+                    (&u_second[0], &mut u_first[0])
+                };
+                let (v_first, v_second) = scratch.v_bands.split_at_mut(1);
+                let (v_cur, v_prev) = if cur_band == 0 {
+                    (&v_first[0], &mut v_second[0])
+                } else {
+                    (&v_second[0], &mut v_first[0])
+                };
+                for r in 1..=3 {
+                    let src_uv = UV_OFFSET - r * UV_STRIDE;
+                    let dst_uv = UV_OFFSET + (8 - r) * UV_STRIDE;
+                    u_prev[dst_uv..dst_uv + mb_cols * 8]
+                        .copy_from_slice(&u_cur[src_uv..src_uv + mb_cols * 8]);
+                    v_prev[dst_uv..dst_uv + mb_cols * 8]
+                        .copy_from_slice(&v_cur[src_uv..src_uv + mb_cols * 8]);
+                }
+            }
+        }
+
+        if row > 0 {
+            let prev_band = (row - 1) & 1;
+            emit_fancy_rgba(
+                &scratch.y_bands[prev_band],
+                &scratch.u_bands[prev_band],
+                &scratch.v_bands[prev_band],
+                row - 1,
+                w,
+                h,
+                &mut scratch.tmp_y,
+                &mut scratch.tmp_u,
+                &mut scratch.tmp_v,
+                out_rgba,
+            );
         }
         scratch.mb_info_prev = scratch.mb_info_curr;
     }
 
-    // Loop filter last row
-    if lf.level > 0 {
-        let filter_row = mb_rows - 1;
-        let filter_band = (filter_row) & 1;
-        for col in 0..mb_cols {
-            let mbi = scratch.mb_info_prev[col + 1];
-            let mut edge_limit = 0i32;
-            let mut interior_limit = 0i32;
-            let mut hev_threshold = 0i32;
-            calculate_filter_parameters(&lf, &seg, &mbi, &mut edge_limit, &mut interior_limit, &mut hev_threshold);
-
-            if edge_limit > 0 {
-                let y_ptr = Y_OFFSET + col * 16;
-                let uv_ptr = UV_OFFSET + col * 8;
-                let filter_subblocks = mbi.eob_mask != 0 || mbi.y_mode == B_PRED;
-
-                if lf.use_simple {
-                    let mb_limit = (edge_limit + 2) * 2 + interior_limit;
-                    let b_limit = edge_limit * 2 + interior_limit;
-                    if col > 0 {
-                        filter_v_edge_simple(&mut scratch.y_bands[filter_band], y_ptr, Y_STRIDE, mb_limit);
-                    }
-                    if filter_subblocks {
-                        filter_v_edge_simple(&mut scratch.y_bands[filter_band], y_ptr + 4, Y_STRIDE, b_limit);
-                        filter_v_edge_simple(&mut scratch.y_bands[filter_band], y_ptr + 8, Y_STRIDE, b_limit);
-                        filter_v_edge_simple(&mut scratch.y_bands[filter_band], y_ptr + 12, Y_STRIDE, b_limit);
-                    }
-                    if filter_row > 0 {
-                        filter_h_edge_simple(&mut scratch.y_bands[filter_band], y_ptr, Y_STRIDE, mb_limit);
-                    }
-                    if filter_subblocks {
-                        filter_h_edge_simple(&mut scratch.y_bands[filter_band], y_ptr + 4 * Y_STRIDE, Y_STRIDE, b_limit);
-                        filter_h_edge_simple(&mut scratch.y_bands[filter_band], y_ptr + 8 * Y_STRIDE, Y_STRIDE, b_limit);
-                        filter_h_edge_simple(&mut scratch.y_bands[filter_band], y_ptr + 12 * Y_STRIDE, Y_STRIDE, b_limit);
-                    }
-                } else {
-                    if col > 0 {
-                        filter_mb_v_edge(&mut scratch.y_bands[filter_band], y_ptr, Y_STRIDE, edge_limit + 2, interior_limit, hev_threshold, 2);
-                        filter_mb_v_edge(&mut scratch.u_bands[filter_band], uv_ptr, UV_STRIDE, edge_limit + 2, interior_limit, hev_threshold, 1);
-                        filter_mb_v_edge(&mut scratch.v_bands[filter_band], uv_ptr, UV_STRIDE, edge_limit + 2, interior_limit, hev_threshold, 1);
-                    }
-                    if filter_subblocks {
-                        filter_subblock_v_edge(&mut scratch.y_bands[filter_band], y_ptr + 4, Y_STRIDE, edge_limit, interior_limit, hev_threshold, 2);
-                        filter_subblock_v_edge(&mut scratch.y_bands[filter_band], y_ptr + 8, Y_STRIDE, edge_limit, interior_limit, hev_threshold, 2);
-                        filter_subblock_v_edge(&mut scratch.y_bands[filter_band], y_ptr + 12, Y_STRIDE, edge_limit, interior_limit, hev_threshold, 2);
-                        filter_subblock_v_edge(&mut scratch.u_bands[filter_band], uv_ptr + 4, UV_STRIDE, edge_limit, interior_limit, hev_threshold, 1);
-                        filter_subblock_v_edge(&mut scratch.v_bands[filter_band], uv_ptr + 4, UV_STRIDE, edge_limit, interior_limit, hev_threshold, 1);
-                    }
-                    if filter_row > 0 {
-                        filter_mb_h_edge(&mut scratch.y_bands[filter_band], y_ptr, Y_STRIDE, edge_limit + 2, interior_limit, hev_threshold, 2);
-                        filter_mb_h_edge(&mut scratch.u_bands[filter_band], uv_ptr, UV_STRIDE, edge_limit + 2, interior_limit, hev_threshold, 1);
-                        filter_mb_h_edge(&mut scratch.v_bands[filter_band], uv_ptr, UV_STRIDE, edge_limit + 2, interior_limit, hev_threshold, 1);
-                    }
-                    if filter_subblocks {
-                        filter_subblock_h_edge(&mut scratch.y_bands[filter_band], y_ptr + 4 * Y_STRIDE, Y_STRIDE, edge_limit, interior_limit, hev_threshold, 2);
-                        filter_subblock_h_edge(&mut scratch.y_bands[filter_band], y_ptr + 8 * Y_STRIDE, Y_STRIDE, edge_limit, interior_limit, hev_threshold, 2);
-                        filter_subblock_h_edge(&mut scratch.y_bands[filter_band], y_ptr + 12 * Y_STRIDE, Y_STRIDE, edge_limit, interior_limit, hev_threshold, 2);
-                        filter_subblock_h_edge(&mut scratch.u_bands[filter_band], uv_ptr + 4 * UV_STRIDE, UV_STRIDE, edge_limit, interior_limit, hev_threshold, 1);
-                        filter_subblock_h_edge(&mut scratch.v_bands[filter_band], uv_ptr + 4 * UV_STRIDE, UV_STRIDE, edge_limit, interior_limit, hev_threshold, 1);
-                    }
-                }
-            }
-        }
-    }
-
-    if lf.level > 0 {
-        flush_mb_row(&scratch.y_bands[(mb_rows - 1) & 1], &scratch.u_bands[(mb_rows - 1) & 1], &scratch.v_bands[(mb_rows - 1) & 1], mb_rows - 1, w, h, out_rgba);
-    }
+    // Emit the last macroblock row
+    let last_band = (mb_rows - 1) & 1;
+    emit_fancy_rgba(
+        &scratch.y_bands[last_band],
+        &scratch.u_bands[last_band],
+        &scratch.v_bands[last_band],
+        mb_rows - 1,
+        w,
+        h,
+        &mut scratch.tmp_y,
+        &mut scratch.tmp_u,
+        &mut scratch.tmp_v,
+        out_rgba,
+    );
 
     Ok((width, height, required_len))
 }
+
 
 

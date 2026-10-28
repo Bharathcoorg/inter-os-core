@@ -4,17 +4,22 @@ use interos_std::vp8::{dimensions, decode};
 #[test]
 fn decodes_vp8_fixtures_or_checks_header() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/vp8");
-    let mut seen = 0;
-    for entry in std::fs::read_dir(&dir).unwrap() {
-        let path = entry.unwrap().path();
-        if path.extension().and_then(|s| s.to_str()) != Some("webp") {
-            continue;
-        }
-        seen += 1;
-        let data = std::fs::read(&path).unwrap();
+    let mut entries: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("webp"))
+        .collect();
+    entries.sort();
+
+    let mut total_diffs = 0;
+    let mut failures = Vec::new();
+    for path in &entries {
+        let name = path.file_stem().unwrap().to_str().unwrap();
+        let data = std::fs::read(path).unwrap();
         let expected = std::fs::read(path.with_extension("rgba")).unwrap();
         let width = u32::from_le_bytes(expected[0..4].try_into().unwrap());
         let height = u32::from_le_bytes(expected[4..8].try_into().unwrap());
+        let exp_pixels = &expected[8..];
 
         // Test decode_webp_header
         assert_eq!(decode_webp_header(&data), Ok((width, height)), "{path:?}");
@@ -27,8 +32,25 @@ fn decodes_vp8_fixtures_or_checks_header() {
         assert_eq!(dec_w, width);
         assert_eq!(dec_h, height);
         assert_eq!(dec_len, out.len());
+
+        let mut diff_count = 0;
+        for (_i, (&actual, &exp)) in out.iter().zip(exp_pixels.iter()).enumerate() {
+            if actual != exp {
+                diff_count += 1;
+            }
+        }
+        eprintln!(
+            "Fixture {:<12} {:>3}x{:<3} {:>5} / {:>5} differing bytes",
+            name, width, height, diff_count, exp_pixels.len()
+        );
+        if diff_count > 0 {
+            failures.push(name.to_string());
+        }
+        total_diffs += diff_count;
     }
-    assert!(seen >= 5, "Expected at least 5 fixtures, saw {seen}");
+    assert!(entries.len() >= 5, "Expected at least 5 fixtures, saw {}", entries.len());
+    assert_eq!(failures, Vec::<String>::new(), "Pixel mismatch in fixtures: {failures:?}");
+    assert_eq!(total_diffs, 0, "All fixture pixels must match exactly");
 }
 
 #[test]
