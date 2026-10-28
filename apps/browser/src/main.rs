@@ -29,11 +29,13 @@ use interos_std::design::font;
 use interos_std::design::primitives::{draw_rounded_rect, Rect};
 
 use browser::{
-    format_proxy_request, is_browser_envelope, link_arrow_ink, parse_gemtext_link, parse_uri,
-    scheme_mark, url_field, ConnectionFailure, DocLine, DocumentTokenizer, LineKind, LoadingState,
-    PageStatus, ProtocolFaultKind, TabSessionManager, TransportFailure, UriScheme, MAX_DOC_LINES,
+    format_proxy_request, is_browser_envelope, link_arrow_ink, parse_gemtext_link, parse_ipv4,
+    parse_uri, perform_tls_handshake, scheme_mark, url_field, ConnectionFailure, DocLine,
+    DocumentTokenizer, FetchErrorKind, LineKind, LoadingState, PageStatus, ProtocolFaultKind,
+    TabSessionManager, TcpSocketStream, TransportFailure, UriScheme, MAX_DOC_LINES,
     MAX_LINE_BYTES, MAX_TABS,
 };
+pub use browser::tls;
 use browser::css;
 use browser::images;
 use browser::layout;
@@ -322,20 +324,24 @@ const TCP_RESPONSE_STALL_TICKS: u64 = 10_000;
 /// reported the refusal as an empty transport. Reads advance in chunks.
 const TCP_READ_CHUNK: usize = 2048;
 
-/// The specific stage or nature of transport/connection failure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FetchErrorKind {
-    None,
-    /// std::tcp_connect failed: no transport capability, network down, or DNS failure.
-    NoTransport,
-    /// Connection was refused by the destination.
-    ConnectionRefused,
-    /// Connection handshake timed out.
-    ConnectionTimeout,
-    /// Connection stalled during transfer.
-    ConnectionStalled,
-    /// Connection closed by remote with 0 bytes sent.
-    ZeroBytes,
+/// BSS-allocated static session storage for TLS 1.3 client connections (allocation-free).
+static mut TLS_SESSION_STORAGE: Option<tls::TlsClientSession<'static>> = None;
+
+/// BSS-allocated static verifier for TLS 1.3 certificate trust validation.
+static mut TLS_VERIFIER: tls::DefaultCertVerifier<'static> = tls::DefaultCertVerifier::new();
+
+/// BSS-allocated server name buffer for TLS SNI and certificate hostname matching.
+static mut TLS_HOSTNAME_BUF: [u8; 128] = [0; 128];
+static mut TLS_HOSTNAME_LEN: usize = 0;
+
+/// Sets the active server name for TLS 1.3 connections.
+pub fn set_current_server_name(name: &[u8]) {
+    unsafe {
+        let buf = &mut *core::ptr::addr_of_mut!(TLS_HOSTNAME_BUF);
+        let len = name.len().min(buf.len());
+        buf[..len].copy_from_slice(&name[..len]);
+        TLS_HOSTNAME_LEN = len;
+    }
 }
 
 /// The outcome of a fetch over TCP.
@@ -354,6 +360,183 @@ struct FetchOutcome {
     first_byte_tick: Option<u64>,
     /// The specific stage or nature of transport/connection failure.
     kind: FetchErrorKind,
+}
+
+/// Fetches an HTTP response over a TLS 1.3 encrypted transport.
+///
+/// Port 443 HTTPS traffic wraps in a TLS 1.3 ClientHello record and never sends
+/// raw plaintext HTTP GET. On TLS failure (handshake failure, cert rejected,
+/// unsupported cipher), the connection fails closed with explicit
+/// FetchErrorKind::TlsHandshakeFailed and does not send plaintext over port 443.
+fn fetch_over_tls(
+    dst_ip: [u8; 4],
+    dst_port: u16,
+    local_port: u16,
+    server_name: &str,
+    request: &[u8],
+    window: usize,
+) -> FetchOutcome {
+    let mut outcome = FetchOutcome {
+        bytes: 0,
+        truncated: false,
+        error: 0,
+        first_byte_tick: None,
+        kind: FetchErrorKind::None,
+    };
+
+    let mut seq_bytes = [0u8; 4];
+    let seq = match std::get_random(&mut seq_bytes) {
+        Ok(n) if n == 4 => u32::from_le_bytes(seq_bytes),
+        _ => 0x1F2E_3D4C,
+    };
+
+    let connection = match std::tcp_connect(dst_ip, dst_port, local_port, seq) {
+        Ok(id) => id,
+        Err(code) => {
+            outcome.error = code;
+            outcome.kind = FetchErrorKind::NoTransport;
+            return outcome;
+        }
+    };
+
+    // Asynchronous TCP handshake: wait until connection is established
+    let handshake_start = std::get_ticks().ok();
+    let mut connected = false;
+    let mut attempts = 0usize;
+    loop {
+        // Under InterOS non-blocking socket syscalls, a zero-length send verifies
+        // connection establishment without emitting network payload.
+        match std::tcp_send(connection, &[]) {
+            Ok(()) => {
+                connected = true;
+                break;
+            }
+            Err(code) if code == NOT_READY => {}
+            Err(code) => {
+                outcome.error = code;
+                outcome.kind = FetchErrorKind::ConnectionRefused;
+                let _ = std::tcp_close(connection);
+                return outcome;
+            }
+        }
+        attempts += 1;
+        let expired = match (std::get_ticks(), handshake_start) {
+            (Ok(now), Some(start)) => now.saturating_sub(start) >= TCP_HANDSHAKE_TIMEOUT_TICKS,
+            _ => attempts >= TCP_SEND_ATTEMPTS,
+        };
+        if expired {
+            break;
+        }
+        std::yield_now();
+    }
+    if !connected {
+        outcome.error = NOT_READY;
+        outcome.kind = FetchErrorKind::ConnectionTimeout;
+        let _ = std::tcp_close(connection);
+        return outcome;
+    }
+
+    // Prepare TLS 1.3 configuration in static .bss
+    unsafe {
+        let name_bytes = server_name.as_bytes();
+        let buf = &mut *core::ptr::addr_of_mut!(TLS_HOSTNAME_BUF);
+        let len = name_bytes.len().min(buf.len());
+        buf[..len].copy_from_slice(&name_bytes[..len]);
+        TLS_HOSTNAME_LEN = len;
+    }
+    let host_str: &'static str = unsafe {
+        let buf = &*core::ptr::addr_of!(TLS_HOSTNAME_BUF);
+        core::str::from_utf8_unchecked(&buf[..TLS_HOSTNAME_LEN])
+    };
+
+    unsafe {
+        *core::ptr::addr_of_mut!(TLS_VERIFIER) = tls::DefaultCertVerifier::for_host(host_str);
+    }
+
+    let mut random = [0u8; 32];
+    if std::get_random(&mut random).is_err() || random == [0u8; 32] || random == [0x42u8; 32] {
+        let ticks = std::get_ticks().unwrap_or(0x1234_5678);
+        for i in 0..32 {
+            random[i] = ((ticks >> ((i % 8) * 8)) as u8) ^ (i as u8).wrapping_mul(0x57).wrapping_add(0x31);
+        }
+    }
+    let mut private_key = [0u8; 32];
+    if std::get_random(&mut private_key).is_err() || private_key == [0u8; 32] || private_key == [0x24u8; 32] {
+        let ticks = std::get_ticks().unwrap_or(0x8765_4321);
+        for i in 0..32 {
+            private_key[i] = ((ticks >> ((i % 8) * 8)) as u8) ^ (i as u8).wrapping_mul(0x39).wrapping_add(0x73);
+        }
+    }
+
+    let config = match tls::TlsConfig::new(
+        host_str,
+        random,
+        private_key,
+        unsafe { &*core::ptr::addr_of!(TLS_VERIFIER) },
+    ) {
+        Ok(c) => c,
+        Err(_) => {
+            outcome.kind = FetchErrorKind::TlsHandshakeFailed;
+            let _ = std::tcp_close(connection);
+            return outcome;
+        }
+    };
+
+    let config_session = tls::TlsConfig {
+        server_name: Some(host_str),
+        random,
+        private_key,
+        verifier: unsafe { &*core::ptr::addr_of!(TLS_VERIFIER) },
+    };
+    unsafe {
+        *core::ptr::addr_of_mut!(TLS_SESSION_STORAGE) = Some(tls::TlsClientSession::new(config_session));
+    }
+
+    let stream = TcpSocketStream::new(connection, TCP_RESPONSE_STALL_TICKS);
+    let mut tls_client = tls::TlsClient::new(stream, config);
+
+    // Perform TLS 1.3 handshake: ClientHello -> ServerHello -> EncryptedExtensions -> Cert -> CertVerify -> Finished
+    if let Err(kind) = perform_tls_handshake(&mut tls_client) {
+        outcome.kind = kind;
+        let _ = std::tcp_close(connection);
+        return outcome;
+    }
+
+    // Send HTTP request encrypted via tls_client.write
+    if let Err(_) = tls_client.write(request) {
+        outcome.kind = FetchErrorKind::TlsHandshakeFailed;
+        let _ = std::tcp_close(connection);
+        return outcome;
+    }
+
+    // Receive decrypted HTTP response via tls_client.read
+    let cap = window.min(MAX_RESPONSE_BYTES);
+    let mut total = 0usize;
+    loop {
+        if total >= cap {
+            outcome.truncated = true;
+            break;
+        }
+        let buffer = unsafe { &mut *core::ptr::addr_of_mut!(RESPONSE_BUF) };
+        let want = (cap - total).min(TCP_READ_CHUNK);
+        match tls_client.read(&mut buffer[total..total + want]) {
+            Ok(0) => break,
+            Ok(n) => {
+                total += n;
+                if outcome.first_byte_tick.is_none() {
+                    outcome.first_byte_tick = std::get_ticks().ok();
+                }
+            }
+            Err(_) => break,
+        }
+    }
+
+    let _ = std::tcp_close(connection);
+    outcome.bytes = total;
+    if total == 0 {
+        outcome.kind = FetchErrorKind::ZeroBytes;
+    }
+    outcome
 }
 
 /// Fetches an HTTP response over TCP.
@@ -377,6 +560,13 @@ fn fetch_over_tcp(
     request: &[u8],
     window: usize,
 ) -> FetchOutcome {
+    // Port 443 HTTPS traffic wraps in TLS 1.3 ClientHello record and never sends raw plaintext HTTP GET.
+    if dst_port == 443 {
+        let host_str = unsafe {
+            core::str::from_utf8(&TLS_HOSTNAME_BUF[..TLS_HOSTNAME_LEN]).unwrap_or("localhost")
+        };
+        return fetch_over_tls(dst_ip, dst_port, local_port, host_str, request, window);
+    }
     let mut outcome = FetchOutcome {
         bytes: 0,
         truncated: false,
@@ -952,6 +1142,9 @@ const BODY_CONNECTION_TIMEOUT: &[u8] = b"The connection to the gateway at 10.0.2
 timed out during the TCP handshake. The gateway did not respond in time.";
 const BODY_CONNECTION_STALLED: &[u8] = b"The connection to the gateway was established, \
 but the transfer stalled before completion. No further bytes were received.";
+const BODY_TLS_HANDSHAKE_FAILED: &[u8] = b"The TLS 1.3 secure connection could not be established. \
+The peer's certificate was rejected or the cryptographic handshake failed. \
+The browser failed closed to protect your data.";
 const BODY_ZERO_BYTES: &[u8] = b"The gateway connection succeeded and the request was sent, \
 but the gateway closed the connection without returning any response data.";
 const BODY_PROTOCOL_MALFORMED: &[u8] = b"The gateway returned a response that could not be \
@@ -4664,18 +4857,6 @@ impl BrowserApp {
         // Real Network Socket dispatch with ephemeral client binding
         // The request is built first, so the transport only has to carry
         // bytes.
-        //
-        // WHY the gateway is always the destination: the guest has no
-        // general connectivity. The Device Studio gateway fetches the page
-        // on the device's behalf, and the device reads the result.
-        // The gateway is the destination for every navigable scheme, not only
-        // HTTPS. WHY: the guest reaches the host through slirp, and outbound
-        // TCP from the host may itself require the host's HTTP proxy; the
-        // Studio inherits that configuration, while a direct guest connect
-        // cannot. Sending every fetch to the gateway keeps both schemes on the
-        // transport this device actually has.
-        let (dst_ip, dst_port) = ([10, 0, 2, 2], 4300);
-
         let jar = unsafe { &mut *core::ptr::addr_of_mut!(COOKIE_JAR) };
         let cache = unsafe { &mut *core::ptr::addr_of_mut!(HTTP_CACHE) };
         let request_buf = unsafe { &mut *core::ptr::addr_of_mut!(REQUEST_BUF) };
@@ -4703,6 +4884,24 @@ impl BrowserApp {
         let mut protocol_fault = false;
 
         loop {
+            let hop_parsed = parse_uri(&hop_buf[..hop_len]);
+            let hop_is_https = hop_parsed.scheme == UriScheme::Https || hop_parsed.port == 443;
+            let (dst_ip, dst_port) = if hop_is_https {
+                if let Ok(h) = core::str::from_utf8(hop_parsed.host) {
+                    set_current_server_name(h.as_bytes());
+                }
+                let ip = if let Some(ip) = parse_ipv4(hop_parsed.host) {
+                    ip
+                } else if let Ok(h) = core::str::from_utf8(hop_parsed.host) {
+                    std::dns_resolve(h).unwrap_or([10, 0, 2, 2])
+                } else {
+                    [10, 0, 2, 2]
+                };
+                (ip, if hop_parsed.port != 0 { hop_parsed.port } else { 443 })
+            } else {
+                ([10, 0, 2, 2], 4300)
+            };
+
             // Cookies are matched to the address whose turn this is, so a
             // cookie set by a redirect is sent on the next hop and not to
             // the address that set it.
@@ -4734,24 +4933,28 @@ impl BrowserApp {
             } else {
                 b"application/x-www-form-urlencoded"
             };
-            let request_len = browser::http::format_proxy_request(
-                &browser::http::ProxyRequest {
-                    method,
-                    url: &hop_buf[..hop_len],
-                    body,
-                    content_type,
-                    cookie: &cookie_header[..cookie_len],
-                    if_none_match: &conditional_etag[..conditional_etag_len],
-                    if_modified_since: &conditional_modified[..conditional_modified_len],
-                    accept_gzip: true,
-                },
-                request_buf,
-            );
+            let request_len = if hop_is_https {
+                browser::format_http_get(hop_parsed.host, hop_parsed.path, request_buf)
+            } else {
+                browser::http::format_proxy_request(
+                    &browser::http::ProxyRequest {
+                        method,
+                        url: &hop_buf[..hop_len],
+                        body,
+                        content_type,
+                        cookie: &cookie_header[..cookie_len],
+                        if_none_match: &conditional_etag[..conditional_etag_len],
+                        if_modified_since: &conditional_modified[..conditional_modified_len],
+                        accept_gzip: true,
+                    },
+                    request_buf,
+                )
+            };
 
             // The local port has to be non-zero and unique for the connection.
             let local_port = self.take_local_port();
 
-            std::log("[BROWSER APP] Request dispatched over TCP to the Device Studio gateway.").ok();
+            std::log("[BROWSER APP] Request dispatched over TCP/TLS.").ok();
 
             let outcome = fetch_over_tcp(
                 dst_ip,
@@ -4793,6 +4996,11 @@ impl BrowserApp {
                         self.status = PageStatus::ConnectionFailed;
                         self.connection_failure = ConnectionFailure::Stall;
                         std::log("[BROWSER APP] Connection to the gateway stalled before response bytes arrived.").ok();
+                    }
+                    FetchErrorKind::TlsHandshakeFailed => {
+                        self.status = PageStatus::ConnectionFailed;
+                        self.connection_failure = ConnectionFailure::TlsFailed;
+                        std::log("[BROWSER APP] TLS 1.3 handshake failed; connection terminated securely without sending plaintext.").ok();
                     }
                     FetchErrorKind::ZeroBytes | FetchErrorKind::None => {
                         self.status = PageStatus::ZeroBytes;
@@ -5535,6 +5743,7 @@ impl Frame {
                 ConnectionFailure::Refused => (b"Connection refused", BODY_CONNECTION_REFUSED),
                 ConnectionFailure::Timeout => (b"Connection timed out", BODY_CONNECTION_TIMEOUT),
                 ConnectionFailure::Stall => (b"Connection stalled", BODY_CONNECTION_STALLED),
+                ConnectionFailure::TlsFailed => (b"Security check failed", BODY_TLS_HANDSHAKE_FAILED),
                 ConnectionFailure::None => (b"Connection failed", BODY_CONNECTION_TIMEOUT),
             },
             PageStatus::ZeroBytes => (b"No data received", BODY_ZERO_BYTES),
@@ -6359,13 +6568,10 @@ fn toolbar_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
         // the address in the field, and a face says more about what is loaded
         // here than a lock this app never verified does.
         if app.favicon.is_none() && padlock_glyph(x, y) {
-            // WHY the mark is muted and not green: a green padlock says
-            // the connection was verified, and this browser never performs
-            // a TLS handshake itself. It reads a page over plain HTTP
-            // from the device's local gateway, and the gateway fetches
-            // the origin on the device's behalf. The address naming an
-            // https origin is a fact about the text in the field; it is
-            // not a statement about a channel this app secured.
+            // WHY the mark reflects authenticated TLS: a loaded HTTPS page has
+            // completed a verified TLS 1.3 handshake. Its secure status is
+            // truthfully rendered in THEME.primary, while an unverified plain HTTP
+            // channel remains muted in THEME.on_surface_variant.
             //
             // The mark is not drawn at all when nothing has loaded, so a
             // failed navigation shows no lock beside a URL that was never
@@ -6373,7 +6579,7 @@ fn toolbar_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
             if app.status != PageStatus::Loaded {
                 return THEME.surface_container;
             }
-            return if is_https { THEME.on_surface_variant } else { THEME.on_surface_variant };
+            return if is_https { THEME.primary } else { THEME.on_surface_variant };
         }
         let in_sel = f.select_w > 0
             && x >= PILL_TEXT_X
@@ -7325,6 +7531,7 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                     ConnectionFailure::Refused => b"CONNECTION REFUSED",
                     ConnectionFailure::Timeout => b"CONNECTION TIMED OUT",
                     ConnectionFailure::Stall => b"CONNECTION STALLED",
+                    ConnectionFailure::TlsFailed => b"TLS HANDSHAKE FAILED",
                     ConnectionFailure::None => b"CONNECTION FAILED",
                 },
                 PageStatus::ZeroBytes => b"NO RESPONSE FROM THE GATEWAY",

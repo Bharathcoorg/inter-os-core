@@ -10,6 +10,223 @@
 //! pipeline in `lib.rs` owns that, and this module hands it bytes in UTF-8.
 
 use crate::{parse_uri, UriScheme};
+use interos_std::tls::{TlsClient, TlsError, TlsStream};
+
+// =============================================================================
+// Transport and TLS 1.3 Client Integration
+// =============================================================================
+
+/// The specific stage or nature of transport/connection failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FetchErrorKind {
+    None,
+    /// std::tcp_connect failed: no transport capability, network down, or DNS failure.
+    NoTransport,
+    /// Connection was refused by the destination.
+    ConnectionRefused,
+    /// Connection handshake timed out.
+    ConnectionTimeout,
+    /// Connection stalled during transfer.
+    ConnectionStalled,
+    /// Connection closed by remote with 0 bytes sent.
+    ZeroBytes,
+    /// TLS 1.3 handshake failed (certificate rejected, unsupported cipher, verify mismatch, bad record).
+    TlsHandshakeFailed,
+}
+
+/// A `TlsStream` transport adapter wrapping an InterOS kernel TCP connection socket.
+pub struct TcpSocketStream {
+    pub connection: u32,
+    pub timeout_ticks: u64,
+}
+
+impl TcpSocketStream {
+    pub const fn new(connection: u32, timeout_ticks: u64) -> Self {
+        Self {
+            connection,
+            timeout_ticks,
+        }
+    }
+}
+
+impl TlsStream for TcpSocketStream {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, TlsError> {
+        let start = interos_std::get_ticks().ok();
+        let mut attempts = 0usize;
+        loop {
+            match interos_std::tcp_recv(self.connection, buf) {
+                Ok(n) => return Ok(n),
+                Err(code) if code == -30 /* NOT_READY */ => {}
+                Err(_) => return Err(TlsError::IoError),
+            }
+            attempts += 1;
+            let expired = match (interos_std::get_ticks(), start) {
+                (Ok(now), Some(start)) => now.saturating_sub(start) >= self.timeout_ticks,
+                _ => attempts >= 20_000,
+            };
+            if expired {
+                return Err(TlsError::IoError);
+            }
+            interos_std::yield_now();
+        }
+    }
+
+    fn write_all(&mut self, buf: &[u8]) -> Result<(), TlsError> {
+        let start = interos_std::get_ticks().ok();
+        let mut offset = 0usize;
+        while offset < buf.len() {
+            let end = (offset + 1200).min(buf.len());
+            let mut attempts = 0usize;
+            loop {
+                match interos_std::tcp_send(self.connection, &buf[offset..end]) {
+                    Ok(()) => break,
+                    Err(code) if code == -30 /* NOT_READY */ => {}
+                    Err(_) => return Err(TlsError::IoError),
+                }
+                attempts += 1;
+                let expired = match (interos_std::get_ticks(), start) {
+                    (Ok(now), Some(start)) => now.saturating_sub(start) >= self.timeout_ticks,
+                    _ => attempts >= 20_000,
+                };
+                if expired {
+                    return Err(TlsError::IoError);
+                }
+                interos_std::yield_now();
+            }
+            offset = end;
+        }
+        Ok(())
+    }
+}
+
+/// Performs a complete TLS 1.3 client handshake over `client.stream`.
+///
+/// Sends ClientHello, reads ServerHello and encrypted handshake records,
+/// processes peer certificate and signature verification, and sends
+/// Client Finished. On any failure, fails closed with `FetchErrorKind::TlsHandshakeFailed`.
+pub fn perform_tls_handshake<S: TlsStream>(
+    client: &mut TlsClient<'_, S>,
+) -> Result<(), FetchErrorKind> {
+    let mut record_buf = [0u8; 2048];
+
+    // 1. Emit and send ClientHello
+    let hello_len = client
+        .session
+        .start_handshake(&mut record_buf)
+        .map_err(|_| FetchErrorKind::TlsHandshakeFailed)?;
+    client
+        .stream_mut()
+        .write_all(&record_buf[..hello_len])
+        .map_err(|_| FetchErrorKind::TlsHandshakeFailed)?;
+
+    // Helper to read a complete TLS record (5-byte header + payload)
+    fn read_record<S: TlsStream>(
+        stream: &mut S,
+        buf: &mut [u8],
+    ) -> Result<usize, FetchErrorKind> {
+        let mut header = [0u8; 5];
+        let mut n = 0;
+        while n < 5 {
+            let r = stream.read(&mut header[n..]).map_err(|_| FetchErrorKind::TlsHandshakeFailed)?;
+            if r == 0 {
+                return Err(FetchErrorKind::TlsHandshakeFailed);
+            }
+            n += r;
+        }
+        let payload_len = u16::from_be_bytes([header[3], header[4]]) as usize;
+        let total_len = 5 + payload_len;
+        if total_len > buf.len() {
+            return Err(FetchErrorKind::TlsHandshakeFailed);
+        }
+        buf[..5].copy_from_slice(&header);
+        while n < total_len {
+            let r = stream.read(&mut buf[n..total_len]).map_err(|_| FetchErrorKind::TlsHandshakeFailed)?;
+            if r == 0 {
+                return Err(FetchErrorKind::TlsHandshakeFailed);
+            }
+            n += r;
+        }
+        Ok(total_len)
+    }
+
+    // 2. Read ServerHello record
+    let mut sh_len = read_record(client.stream_mut(), &mut record_buf)?;
+    // If middlebox compatibility ChangeCipherSpec arrived before ServerHello, skip it
+    if record_buf[0] == 20 {
+        sh_len = read_record(client.stream_mut(), &mut record_buf)?;
+    }
+    client
+        .session
+        .handle_server_hello(&record_buf[..sh_len])
+        .map_err(|_| FetchErrorKind::TlsHandshakeFailed)?;
+
+    // 3. Process encrypted handshake records until Finished
+    let mut loops = 0;
+    while client.session.app_send_cipher.is_none() {
+        loops += 1;
+        if loops > 16 {
+            return Err(FetchErrorKind::TlsHandshakeFailed);
+        }
+        let rec_len = read_record(client.stream_mut(), &mut record_buf)?;
+        if record_buf[0] == 20 {
+            // Middlebox compatibility ChangeCipherSpec; skip
+            continue;
+        }
+        client
+            .session
+            .handle_encrypted_handshake_record(&record_buf[..rec_len])
+            .map_err(|_| FetchErrorKind::TlsHandshakeFailed)?;
+    }
+
+    // 4. Emit and send Client Finished
+    let fin_len = client
+        .session
+        .emit_client_finished(&mut record_buf)
+        .map_err(|_| FetchErrorKind::TlsHandshakeFailed)?;
+    client
+        .stream_mut()
+        .write_all(&record_buf[..fin_len])
+        .map_err(|_| FetchErrorKind::TlsHandshakeFailed)?;
+
+    if !client.session.is_connected() {
+        return Err(FetchErrorKind::TlsHandshakeFailed);
+    }
+
+    Ok(())
+}
+
+/// Parses an IPv4 literal like "10.0.2.2" or "127.0.0.1".
+pub fn parse_ipv4(host: &[u8]) -> Option<[u8; 4]> {
+    let mut octets = [0u8; 4];
+    let mut octet_idx = 0;
+    let mut current_val: u16 = 0;
+    let mut has_digit = false;
+
+    for &b in host {
+        if b == b'.' {
+            if !has_digit || octet_idx >= 3 || current_val > 255 {
+                return None;
+            }
+            octets[octet_idx] = current_val as u8;
+            octet_idx += 1;
+            current_val = 0;
+            has_digit = false;
+        } else if b.is_ascii_digit() {
+            has_digit = true;
+            current_val = current_val.saturating_mul(10).saturating_add((b - b'0') as u16);
+            if current_val > 255 {
+                return None;
+            }
+        } else {
+            return None;
+        }
+    }
+    if !has_digit || octet_idx != 3 || current_val > 255 {
+        return None;
+    }
+    octets[3] = current_val as u8;
+    Some(octets)
+}
 
 // =============================================================================
 // Header access
@@ -2673,5 +2890,55 @@ mod tests {
         let n = jar.header_for(b"https://example.com/settings", 1000, &mut out);
         let header = core::str::from_utf8(&out[..n]).unwrap();
         assert_eq!(header, "c_root=0");
+    }
+
+    #[test]
+    fn test_tls_stream_client_hello_record_begins_with_handshake_header() {
+        use interos_std::tls::{DefaultCertVerifier, MemoryStream, TlsClient, TlsConfig};
+        let verifier = DefaultCertVerifier::for_host("interos.org");
+        let config = TlsConfig::new("interos.org", [0x33; 32], [0x55; 32], &verifier).unwrap();
+
+        let read_buf = [0u8; 64];
+        let mut write_buf = [0u8; 512];
+        let stream = MemoryStream::new(&read_buf, &mut write_buf);
+        let mut client = TlsClient::new(stream, config);
+
+        let mut out = [0u8; 512];
+        let len = client.session.start_handshake(&mut out).unwrap();
+        assert!(len >= 5);
+        // TLS record header: content type 0x16 (Handshake), legacy version 0x0301 or 0x0303
+        assert_eq!(out[0], 0x16);
+        assert_eq!(out[1], 0x03);
+        // Handshake type 0x01 = ClientHello
+        assert_eq!(out[5], 0x01);
+    }
+
+    #[test]
+    fn test_tls_handshake_fails_closed_on_corrupt_data() {
+        use interos_std::tls::{DefaultCertVerifier, MemoryStream, TlsClient, TlsConfig};
+        let verifier = DefaultCertVerifier::for_host("interos.org");
+        let config = TlsConfig::new("interos.org", [0x33; 32], [0x55; 32], &verifier).unwrap();
+
+        // Server sends corrupt/truncated record
+        let server_reply = [0x16, 0x03, 0x03, 0x00, 0x02, 0xff, 0xff];
+        let mut write_buf = [0u8; 512];
+        let stream = MemoryStream::new(&server_reply, &mut write_buf);
+        let mut client = TlsClient::new(stream, config);
+
+        let res = perform_tls_handshake(&mut client);
+        assert_eq!(res, Err(FetchErrorKind::TlsHandshakeFailed));
+    }
+
+    #[test]
+    fn test_parse_ipv4_matrix() {
+        assert_eq!(parse_ipv4(b"127.0.0.1"), Some([127, 0, 0, 1]));
+        assert_eq!(parse_ipv4(b"10.0.2.2"), Some([10, 0, 2, 2]));
+        assert_eq!(parse_ipv4(b"255.255.255.255"), Some([255, 255, 255, 255]));
+        assert_eq!(parse_ipv4(b"0.0.0.0"), Some([0, 0, 0, 0]));
+        assert_eq!(parse_ipv4(b"256.0.0.1"), None);
+        assert_eq!(parse_ipv4(b"1.2.3"), None);
+        assert_eq!(parse_ipv4(b"1.2.3.4.5"), None);
+        assert_eq!(parse_ipv4(b"example.com"), None);
+        assert_eq!(parse_ipv4(b""), None);
     }
 }

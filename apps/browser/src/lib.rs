@@ -1,6 +1,11 @@
 #![no_std]
 
 pub use interos_std as std;
+pub use interos_std::tls;
+
+pub use http::{
+    parse_ipv4, perform_tls_handshake, FetchErrorKind, TcpSocketStream,
+};
 
 /// The app's view of the platform's design system.
 pub mod theme;
@@ -1244,6 +1249,8 @@ pub enum ConnectionFailure {
     Timeout,
     /// Connection stalled before data arrived.
     Stall,
+    /// TLS 1.3 handshake or certificate verification failed.
+    TlsFailed,
 }
 
 /// Why document decoding or protocol handling failed.
