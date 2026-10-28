@@ -2361,6 +2361,10 @@ impl BrowserApp {
     /// actually bind: the rules the reader can hold, and the style text
     /// those rules need.
     fn fetch_linked_stylesheets(&mut self, dom: &mut layout::Dom) {
+        // What the document is made of is settled before a single file is
+        // asked for: each one is cut down to the rules that can reach an
+        // element of this page, and a rule dropped on the way in is gone.
+        dom.collect_names();
         // The page's own `<style>` blocks are already in the arena, so the
         // room left for the files it links is what is left of the rule budget.
         let mut held = css::parse_stylesheet(dom.css(), dom.token_store()).len;
@@ -2467,8 +2471,12 @@ impl BrowserApp {
         // legible once the theme file that names it has been heard, and the
         // theme file's own rules are exactly the kind this compaction drops.
         dom.stow_tokens_from(&style[..text]);
-        let (carries_bytes, carries_rules) =
-            css::keep_readable_rules(&mut style[..text], room, dom.token_store());
+        let (carries_bytes, carries_rules) = css::keep_readable_rules(
+            &mut style[..text],
+            room,
+            dom.token_store(),
+            dom.name_set(),
+        );
         if carries_bytes == 0 {
             // Every selector in the file is one this engine skips. Its text is
             // not kept, because keeping it would leave the page looking the

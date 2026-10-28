@@ -339,6 +339,16 @@ pub fn compute(
         style.hidden = true;
         style.display = Display::None;
     }
+    // Ask the colour one last time against the band this node paints, which
+    // is not the band the colour was chosen for: an ink inherited out of a
+    // dark panel arrives on a node that carries no panel, and the reader fills
+    // that with its own surface. `css::parse_declarations` guarded the pair
+    // while both were in one block; inheritance is where they come apart.
+    if style.css.has_color && !css::ink_shows(style.css.color, css::band_surface(&style.css)) {
+        style.css.has_color = false;
+        style.css.color = 0;
+    }
+
     if style.scale == 0 {
         style.scale = 1;
     }
@@ -765,6 +775,34 @@ mod tests {
         assert_eq!(child.css.color, 0xFF112233);
         assert!(child.css.has_color);
         assert_eq!(child.scale, 2);
+    }
+
+    #[test]
+    fn an_ink_inherited_from_a_dark_band_does_not_reach_a_light_one() {
+        // The panel and its ink are both the page's and the pair reads. A child
+        // inherits the ink but paints no panel of its own -- the band under it
+        // is the reader's surface, and white on that is no words at all.
+        let mut dom = Dom::new();
+        dom.parse(b"<div class='bar'>a<span>b</span></div>");
+        let sheet = css::parse_stylesheet(b".bar{color:#ffffff;background:#0969da}", css::TokenStore::NONE);
+        let div = dom
+            .nodes()
+            .iter()
+            .enumerate()
+            .find(|(_, n)| n.is_element() && n.tag.get(&dom) == b"div")
+            .map(|(i, _)| i as NodeId)
+            .unwrap();
+        let span = dom
+            .nodes()
+            .iter()
+            .enumerate()
+            .find(|(_, n)| n.is_element() && n.tag.get(&dom) == b"span")
+            .map(|(i, _)| i as NodeId)
+            .unwrap();
+        let bar = compute(&dom, div, &sheet, None);
+        assert!(bar.css.has_color && bar.css.has_background);
+        let child = compute(&dom, span, &sheet, Some(&bar));
+        assert!(!child.css.has_color);
     }
 
     #[test]

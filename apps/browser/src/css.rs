@@ -116,6 +116,89 @@ impl<'a> TokenStore<'a> {
     }
 }
 
+/// Which part of a selector a name in the document is.
+///
+/// WHY the kind is asked for: `nav` is a tag on one page, a class on the next
+/// and an id in the markup beside both, and a document that holds one of those
+/// does not hold the others.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum NameKind {
+    Tag,
+    Class,
+    Id,
+}
+
+/// How many names a document's bits answer for.
+///
+/// WHY this many: a live page counted on 2026-10-28 -- github.com's front door,
+/// as far as one read of it reaches -- carries 25 distinct tags, 116 classes and
+/// 19 ids. At that population the bits are barely filled, and a page that ships
+/// its classes by the thousand still marks a name the document holds.
+pub const NAME_BITS: usize = 8192;
+
+/// How many words [`NAME_BITS`] bits occupy.
+pub const NAME_WORDS: usize = NAME_BITS / 64;
+
+/// Which bit a name is marked in.
+///
+/// WHY the case is folded: the reader matches tags, classes and ids without
+/// regard to it, so `<div class="Hero">` and `.HERO` are the same name here as
+/// they are there.
+fn name_bit(kind: NameKind, name: &[u8]) -> (usize, u64) {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    hash = (hash ^ (kind as u64)).wrapping_mul(0x0000_0100_0000_01b3);
+    let mut at = 0usize;
+    while at < name.len() {
+        hash = (hash ^ (name[at].to_ascii_lowercase() as u64)).wrapping_mul(0x0000_0100_0000_01b3);
+        at += 1;
+    }
+    let index = (hash as usize) & (NAME_BITS - 1);
+    (index / 64, 1u64 << (index % 64))
+}
+
+/// Marks a name the document carries.
+pub fn mark_name(bits: &mut [u64], kind: NameKind, name: &[u8]) {
+    if name.is_empty() {
+        return;
+    }
+    let (word, bit) = name_bit(kind, name);
+    if word < bits.len() {
+        bits[word] |= bit;
+    }
+}
+
+/// The names a document's elements carry, as one bit per name.
+///
+/// WHY bits and not the names: the only question ever asked of these is
+/// whether the document holds a given one. An answer that is wrong in the
+/// keeping direction costs a rule the reader would have ignored for another
+/// reason; wrong in the dropping direction it costs a colour the page asked
+/// for. A table of the names would have to be bounded, and a bound drops what
+/// overflows it -- so the cheap one-way answer gets the room instead.
+#[derive(Clone, Copy)]
+pub struct NameSet<'a> {
+    pub bits: &'a [u64],
+    /// Whether a document was read into these bits at all.
+    pub known: bool,
+}
+
+impl<'a> NameSet<'a> {
+    pub const NONE: Self = Self { bits: &[], known: false };
+
+    /// Whether the document carries this name.
+    ///
+    /// WHY an unknown document holds anything: a caller that never collected
+    /// the names is not pruning, it is only asking whether a selector is
+    /// readable. Refusing a name it never looked at would drop rules on a guess.
+    pub fn holds(&self, kind: NameKind, name: &[u8]) -> bool {
+        if !self.known || name.is_empty() {
+            return true;
+        }
+        let (word, bit) = name_bit(kind, name);
+        word < self.bits.len() && (self.bits[word] & bit) != 0
+    }
+}
+
 /// Whether a declaration names a custom property, and the name it gives it.
 fn custom_property(property: &[u8]) -> Option<&[u8]> {
     let property = trim(property);
@@ -581,7 +664,93 @@ fn apply_border(style: &mut ComputedStyle, value: &[u8]) {
     style.has_border = true;
 }
 
+/// The surface a document line is painted on when neither that line nor the
+/// page names one.
+///
+/// WHY it comes from the theme and is not a number kept here: the renderer
+/// fills every band that carries no background with exactly this colour, so a
+/// shade measured against it is asked the question the pixels will answer.
+pub const PAGE_SURFACE: u32 = crate::theme::THEME.surface;
+
+/// The ink the reader writes with when no rule named one.
+pub const PAGE_INK: u32 = crate::theme::THEME.on_surface;
+
+/// How much light a colour carries, on the reader's measure.
+///
+/// WHY the channels are squared rather than raised to the sRGB power: the real
+/// curve is a power of 2.4 and this engine keeps no floating point. A square
+/// orders the lights the same way and is close enough at the ends of the scale,
+/// which is where the only question this answers -- is this ink near the colour
+/// it sits on -- is asked.
+const fn light_of(color: u32) -> u32 {
+    let r = (color >> 16) & 0xFF;
+    let g = (color >> 8) & 0xFF;
+    let b = color & 0xFF;
+    (54 * r * r + 183 * g * g + 18 * b * b) >> 8
+}
+
+/// The step added to both lights before they are compared, so that two fields
+/// a little apart are not read as one.
+const LIGHT_STEP: u32 = light_of(0x00FF_FFFF) / 20;
+
+/// Whether `color` can be read on `surface`.
+///
+/// WHY the bar sits where it does: it asks the lighter field to be twice the
+/// darker one above [`LIGHT_STEP`] -- near a 2:1 contrast ratio, which is where
+/// a colour stops being a shade of what lies behind it. It is not a WCAG check
+/// and is not offered as one: the decision here is only whether to paint a
+/// colour at all, and a colour this surface cannot show is one the page has to
+/// do without.
+pub fn ink_shows(color: u32, surface: u32) -> bool {
+    let ink = light_of(color);
+    let behind = light_of(surface);
+    let (higher, lower) = if ink >= behind { (ink, behind) } else { (behind, ink) };
+    higher + LIGHT_STEP >= 2 * (lower + LIGHT_STEP)
+}
+
+/// The colour a style's own text is written on.
+pub fn band_surface(style: &ComputedStyle) -> u32 {
+    if style.has_background {
+        style.background
+    } else {
+        PAGE_SURFACE
+    }
+}
+
+/// Clears a colour this reader cannot show, and the panel it would have sat on.
+///
+/// WHY the pair is asked together: a site written for two themes carries the ink
+/// of one and the surface of the other, and the file that reaches a reader
+/// painting light may be the dark one. `github.com`'s near-white
+/// `--fgColor-default` landed on this engine's white page and whole paragraphs
+/// disappeared -- the colour was in the stylesheet, was right on the screen it
+/// was written for, and was invisible on the one it was drawn on.
+///
+/// WHY a failed ink leaves the text rather than losing it: the reader falls back
+/// to its own colour, and the words are the point of a page while a shade is not.
+///
+/// WHY a panel is asked too: an ink dropped above leaves the reader's own, and a
+/// panel dark enough that it cannot be written on is the same failure in
+/// reverse. An author's dark panel survives when the same block carries light
+/// ink, because then the pair answers for itself.
+fn drop_unshown(style: &mut ComputedStyle) {
+    if style.has_color && !ink_shows(style.color, band_surface(style)) {
+        style.has_color = false;
+        style.color = 0;
+    }
+    if style.has_background {
+        let ink = if style.has_color { style.color } else { PAGE_INK };
+        if !ink_shows(ink, style.background) {
+            style.has_background = false;
+            style.background = 0;
+        }
+    }
+}
+
 /// Parses a declaration list (`a: b; c: d`) onto `base`.
+///
+/// A colour is kept only while the surface it lands on can show it: see
+/// [`drop_unshown`].
 pub fn parse_declarations<'a>(
     bytes: &'a [u8],
     base: ComputedStyle,
@@ -605,6 +774,7 @@ pub fn parse_declarations<'a>(
         }
         start = end.saturating_add(1);
     }
+    drop_unshown(&mut style);
     style
 }
 
@@ -719,13 +889,32 @@ struct RulePos {
     next: usize,
 }
 
+/// The at-rule whose block holds rules the page means for the document.
+const LAYER_NAME: &[u8] = b"layer";
+
+/// Whether the at-rule beginning at `at` is a `@layer`.
+///
+/// WHY the letters after the word are asked: `@layered-things` is not a layer,
+/// and treating its prelude as a selector would invent a rule the page never
+/// wrote.
+fn is_layer_at_rule(css: &[u8], limit: usize, at: usize) -> bool {
+    if at + LAYER_NAME.len() > limit || !css[at..limit].starts_with(LAYER_NAME) {
+        return false;
+    }
+    let after = at + LAYER_NAME.len();
+    after >= limit
+        || !(css[after].is_ascii_alphanumeric() || css[after] == b'-' || css[after] == b'_')
+}
+
 /// Finds the next rule a page means for the document, at or after `from`.
 ///
-/// A comment contributes nothing, and an at-rule is skipped to its block's
-/// closing brace or to the semicolon of a statement form because nothing in
-/// this engine reads a media query, a font face or a keyframe set. A stray
-/// closing brace is stepped over rather than taken as the end of the file: one
-/// unbalanced brace is still a stylesheet.
+/// A comment contributes nothing. A `@layer` block is walked into, because it
+/// states no condition -- its rules apply whenever the file does, and a bundled
+/// site keeps the page's own colours inside one -- while a media query, a font
+/// face or a keyframe set is skipped to its block's closing brace or to the
+/// semicolon of a statement form, since nothing in this engine reads them. A
+/// stray closing brace is stepped over rather than taken as the end of the
+/// file: one unbalanced brace is still a stylesheet.
 fn next_rule(css: &[u8], limit: usize, mut i: usize) -> Option<RulePos> {
     loop {
         if i >= limit {
@@ -745,6 +934,23 @@ fn next_rule(css: &[u8], limit: usize, mut i: usize) -> Option<RulePos> {
         }
         if css[i] == b'@' {
             i += 1;
+            let name = skip_ws(css, i);
+            if is_layer_at_rule(css, limit, name) {
+                // The prelude names the layer; its block holds rules the page
+                // means for the document, so the walk goes through the brace
+                // and reads them. A statement form (`@layer base, theme;`)
+                // only orders layers and contributes nothing.
+                i = name + LAYER_NAME.len();
+                while i < limit && css[i] != b'{' && css[i] != b';' {
+                    i += 1;
+                }
+                i = if i < limit && css[i] == b'{' {
+                    i + 1
+                } else {
+                    (i + 1).min(limit)
+                };
+                continue;
+            }
             while i < limit && css[i] != b'{' && css[i] != b';' {
                 i += 1;
             }
@@ -877,12 +1083,19 @@ pub fn for_each_custom_property(css: &[u8], visit: &mut dyn FnMut(&[u8], &[u8]))
     }
 }
 
-/// Whether any name in a selector list is one this engine can match.
+/// Whether a selector list could reach an element of this document.
 ///
-/// WHY the whole list is tested: a rule is kept for its declarations, and one
-/// readable name among several is enough for those declarations to reach an
-/// element. A list of `:root` and `--token` names alone never will.
-fn readable_selector(css: &[u8], start: usize, end: usize) -> bool {
+/// WHY every part of a selector is asked and not only its last: `.cm-keyword a`
+/// colours nothing unless the page carries `.cm-keyword`, and a bundled site
+/// writes its utility sheets for markup a reader's page does not contain --
+/// github.com's front door spent its whole rule budget on `.pl-*` and `.cm-*`
+/// names that appear nowhere in the document, so the file holding the page's own
+/// colours never reached it.
+///
+/// WHY a name that merely might be there is enough: this is a filter for
+/// keeping, and holding a rule that turns out to match nothing costs a little
+/// room while dropping one that colours the page costs the page.
+fn selector_reaches(css: &[u8], start: usize, end: usize, names: NameSet<'_>) -> bool {
     let text = &css[start..end];
     let mut at = 0usize;
     while at < text.len() {
@@ -891,8 +1104,19 @@ fn readable_selector(css: &[u8], start: usize, end: usize) -> bool {
             .position(|&b| b == b',')
             .map(|p| at + p)
             .unwrap_or(text.len());
-        if parse_selector(&text[at..comma]).is_some() {
-            return true;
+        if let Some(selector) = parse_selector(&text[at..comma]) {
+            let mut reaches = true;
+            let mut part = 0usize;
+            while part < selector.count && reaches {
+                let compound = selector.parts[part];
+                reaches = names.holds(NameKind::Tag, compound.tag)
+                    && names.holds(NameKind::Class, compound.class)
+                    && names.holds(NameKind::Id, compound.id);
+                part += 1;
+            }
+            if reaches {
+                return true;
+            }
         }
         at = comma.saturating_add(1);
     }
@@ -918,11 +1142,24 @@ fn readable_selector(css: &[u8], start: usize, end: usize) -> bool {
 /// understand it drops while parsing, so the text that reaches the parser has
 /// to be the text the page wrote.
 ///
+/// WHY a rule whose selector reaches nothing is not kept: the budget is spent
+/// by the first files that carry readable rules, and on a bundled site those are
+/// the utility sheets -- a rule budget of ninety-six was filled by two of them
+/// while the page's own colours waited behind. A name the document never used
+/// cannot be coloured by anything, so the room it would take goes to a rule that
+/// can.
+///
+/// WHY an unshowable colour leaves a rule out as well: [`drop_unshown`] has
+/// already taken the ink away, so nothing in the rule changes a pixel the reader
+/// would otherwise paint, and keeping the text of it would charge the room to a
+/// rule that cannot pay for it.
+///
 /// Returns how many bytes the kept rules occupy and how many rules they are.
 pub fn keep_readable_rules(
     css: &mut [u8],
     max_rules: usize,
     tokens: TokenStore<'_>,
+    names: NameSet<'_>,
 ) -> (usize, usize) {
     let limit = css.len().min(MAX_CSS_BYTES);
     let mut read = 0usize;
@@ -935,7 +1172,7 @@ pub fn keep_readable_rules(
         let style =
             parse_declarations(&css[pos.body_start..pos.body_end], ComputedStyle::DEFAULT, tokens);
         let carries = !style.is_default()
-            && readable_selector(css, pos.selector_start, pos.selector_end);
+            && selector_reaches(css, pos.selector_start, pos.selector_end, names);
         read = pos.next;
         if !carries {
             continue;
@@ -1221,7 +1458,7 @@ mod tests {
 
     #[test]
     fn the_inline_style_wins_over_a_tag_rule() {
-        let sheet = parse_stylesheet(b"p { color: #00ff00; margin: 8px; }", TokenStore::NONE);
+        let sheet = parse_stylesheet(b"p { color: #0a7d0a; margin: 8px; }", TokenStore::NONE);
         let style = cascade(&sheet, element(b"p", b"", b""), &[], Some(b"color: #0000ff"));
         assert_eq!(style.color, 0xFF0000FF);
         // A property the inline attribute does not name still comes from
@@ -1385,7 +1622,7 @@ mod tests {
 
     #[test]
     fn stray_closing_brace_does_not_abort_parsing() {
-        let css = b"div { color: #ff0000; } } p { color: #00ff00; }";
+        let css = b"div { color: #ff0000; } } p { color: #0000ff; }";
         let sheet = parse_stylesheet(css, TokenStore::NONE);
         assert_eq!(rule_count(&sheet), 2);
     }
@@ -1417,7 +1654,7 @@ mod tests {
 a{color:#0969da;text-decoration:underline}h1{font-size:large;margin-top:24px}";
         let mut css = [0u8; 256];
         css[..whole_text.len()].copy_from_slice(whole_text);
-        let (written, kept) = keep_readable_rules(&mut css, MAX_RULES, TokenStore::NONE);
+        let (written, kept) = keep_readable_rules(&mut css, MAX_RULES, TokenStore::NONE, NameSet::NONE);
         assert_eq!(kept, 2);
         assert_eq!(
             &css[..written],
@@ -1438,7 +1675,7 @@ a{color:#0969da;text-decoration:underline}h1{font-size:large;margin-top:24px}";
         // than the rule occupied, and the extra would land on rules the walk
         // had not reached yet.
         let mut css = *b"a,b{color:#ff0000}";
-        let (written, kept) = keep_readable_rules(&mut css, MAX_RULES, TokenStore::NONE);
+        let (written, kept) = keep_readable_rules(&mut css, MAX_RULES, TokenStore::NONE, NameSet::NONE);
         assert_eq!(kept, 1);
         assert_eq!(&css[..written], b"a,b{color:#ff0000}");
         assert_eq!(parse_stylesheet(&css[..written], TokenStore::NONE).len, 2);
@@ -1447,15 +1684,15 @@ a{color:#0969da;text-decoration:underline}h1{font-size:large;margin-top:24px}";
     #[test]
     fn a_token_sheet_keeps_nothing_and_holds_no_room() {
         let mut css = *b":root{--color-canvas-default:#ffffff;--color-fg-default:#1f2328}";
-        assert_eq!(keep_readable_rules(&mut css, MAX_RULES, TokenStore::NONE), (0, 0));
+        assert_eq!(keep_readable_rules(&mut css, MAX_RULES, TokenStore::NONE, NameSet::NONE), (0, 0));
     }
 
     #[test]
     fn compaction_stops_where_the_rule_budget_is_spent() {
-        let mut css = *b"p{color:#ff0000}a{color:#00ff00}h1{color:#0000ff}";
-        let (written, kept) = keep_readable_rules(&mut css, 2, TokenStore::NONE);
+        let mut css = *b"p{color:#ff0000}a{color:#0a7d0a}h1{color:#0000ff}";
+        let (written, kept) = keep_readable_rules(&mut css, 2, TokenStore::NONE, NameSet::NONE);
         assert_eq!(kept, 2);
-        assert_eq!(&css[..written], b"p{color:#ff0000}a{color:#00ff00}");
+        assert_eq!(&css[..written], b"p{color:#ff0000}a{color:#0a7d0a}");
     }
 
     #[test]
@@ -1465,7 +1702,7 @@ a{color:#0969da;text-decoration:underline}h1{font-size:large;margin-top:24px}";
         css[..head.len()].copy_from_slice(head);
         let rule = b";}a{color:#0969da}";
         css[560..560 + rule.len()].copy_from_slice(rule);
-        let (written, kept) = keep_readable_rules(&mut css, MAX_RULES, TokenStore::NONE);
+        let (written, kept) = keep_readable_rules(&mut css, MAX_RULES, TokenStore::NONE, NameSet::NONE);
         assert_eq!(kept, 1);
         assert_eq!(&css[..written], b"a{color:#0969da}");
         let sheet = parse_stylesheet(&css[..written], TokenStore::NONE);
@@ -1528,7 +1765,7 @@ a{color:#0969da;text-decoration:underline}h1{font-size:large;margin-top:24px}";
         let whole_text = b":root{--a:#111111}a{color:var(--a)}p{color:#000000}";
         let mut css = [0u8; 64];
         css[..whole_text.len()].copy_from_slice(whole_text);
-        let (written, kept) = keep_readable_rules(&mut css, MAX_RULES, tokens);
+        let (written, kept) = keep_readable_rules(&mut css, MAX_RULES, tokens, NameSet::NONE);
         assert_eq!(kept, 2);
         assert_eq!(&css[..written], b"a{color:var(--a)}p{color:#000000}");
         let sheet = parse_stylesheet(&css[..written], tokens);
@@ -1540,7 +1777,7 @@ a{color:#0969da;text-decoration:underline}h1{font-size:large;margin-top:24px}";
     #[test]
     fn a_colour_asked_of_a_name_nobody_declared_is_not_painted() {
         let mut css = *b"a{color:var(--missing)}";
-        let (written, kept) = keep_readable_rules(&mut css, MAX_RULES, TokenStore::NONE);
+        let (written, kept) = keep_readable_rules(&mut css, MAX_RULES, TokenStore::NONE, NameSet::NONE);
         assert_eq!((written, kept), (0, 0));
     }
 
@@ -1562,5 +1799,183 @@ a{color:#0969da;text-decoration:underline}h1{font-size:large;margin-top:24px}";
         let sheet = parse_stylesheet(b"a { color: #222222; }", tokens);
         let style = cascade(&sheet, element(b"a", b"", b""), &[], Some(b"color: var(--a)"));
         assert_eq!(style.color, 0xFF111111);
+    }
+
+    /// The bits a document carrying only these names would answer with.
+    fn document_names(tags: &[&[u8]], classes: &[&[u8]], ids: &[&[u8]]) -> [u64; NAME_WORDS] {
+        let mut bits = [0u64; NAME_WORDS];
+        for tag in tags {
+            mark_name(&mut bits, NameKind::Tag, tag);
+        }
+        for class in classes {
+            mark_name(&mut bits, NameKind::Class, class);
+        }
+        for id in ids {
+            mark_name(&mut bits, NameKind::Id, id);
+        }
+        bits
+    }
+
+    #[test]
+    fn a_rule_for_a_class_the_document_never_used_is_not_kept() {
+        let bits = document_names(&[b"div"], &[b"card"], &[]);
+        let names = NameSet { bits: &bits, known: true };
+        let mut css = *b".cm-keyword{color:#aa0000}.card{color:#00aa00}";
+        let (written, kept) = keep_readable_rules(&mut css, MAX_RULES, TokenStore::NONE, names);
+        assert_eq!(kept, 1);
+        assert_eq!(&css[..written], b".card{color:#00aa00}");
+    }
+
+    #[test]
+    fn a_name_the_document_holds_is_answered_whatever_way_it_is_written() {
+        let bits = document_names(&[b"div"], &[b"Hero"], &[]);
+        let names = NameSet { bits: &bits, known: true };
+        // The reader matches without regard to case, so a page that writes its
+        // markup `<DIV CLASS="hero">` and its style `.HERO div` is the same page.
+        let mut css = *b"DIV{color:#0000ff}.HERO{color:#ff0000}";
+        let (written, kept) = keep_readable_rules(&mut css, MAX_RULES, TokenStore::NONE, names);
+        assert_eq!(kept, 2);
+        assert_eq!(&css[..written], b"DIV{color:#0000ff}.HERO{color:#ff0000}");
+    }
+
+    #[test]
+    fn a_rule_needs_every_name_it_asks_for_to_be_in_the_page() {
+        // `.card a` colours no link unless the page carries a `.card`, so a
+        // sheet written for markup this document does not contain contributes
+        // nothing -- while a name the document does hold keeps its rule.
+        let bits = document_names(&[b"a", b"nav"], &[], &[]);
+        let names = NameSet { bits: &bits, known: true };
+        let mut css = *b".card a{color:#aa0000}nav a{color:#00aa00}";
+        let (written, kept) = keep_readable_rules(&mut css, MAX_RULES, TokenStore::NONE, names);
+        assert_eq!(kept, 1);
+        assert_eq!(&css[..written], b"nav a{color:#00aa00}");
+    }
+
+    #[test]
+    fn a_utility_sheet_does_not_spend_the_room_the_page_needs() {
+        // The shape that cost github.com its colours: a file of names the
+        // document never used arrived first and took the whole budget.
+        let bits = document_names(&[b"a"], &[b"Link"], &[]);
+        let names = NameSet { bits: &bits, known: true };
+        let mut utility = *b".pl-c{color:#999999}.pl-s{color:#0969da}.cm-keyword{color:#aa0000}";
+        assert_eq!(keep_readable_rules(&mut utility, 2, TokenStore::NONE, names), (0, 0));
+
+        let mut own = *b"a{color:#0969da}.Link{color:#0969da}";
+        let (written, kept) = keep_readable_rules(&mut own, 2, TokenStore::NONE, names);
+        assert_eq!(kept, 2);
+        assert_eq!(&own[..written], b"a{color:#0969da}.Link{color:#0969da}");
+    }
+
+    #[test]
+    fn a_rule_inside_a_layer_is_read_because_the_layer_asks_nothing() {
+        // A bundled site writes `@layer base { a { color: … } }` to keep its own
+        // rules ahead of the page's, and the block states no condition: the rule
+        // applies whenever the file does.
+        let sheet = parse_stylesheet(b"@layer primer-css-base{a{color:#0969da}}", TokenStore::NONE);
+        assert_eq!(sheet.len, 1);
+        let style = cascade(&sheet, element(b"a", b"", b""), &[], None);
+        assert_eq!(style.color, 0xFF0969DA);
+        let mut css = *b"@layer base{a{color:#0969da}}@layer theme{p{color:#111111}}";
+        let (written, kept) =
+            keep_readable_rules(&mut css, MAX_RULES, TokenStore::NONE, NameSet::NONE);
+        assert_eq!(kept, 2);
+        assert_eq!(&css[..written], b"a{color:#0969da}p{color:#111111}");
+    }
+
+    #[test]
+    fn a_layer_statement_and_a_rule_behind_a_media_query_are_still_skipped() {
+        // `@layer a, b;` only orders layers, and a media query is a condition
+        // this reader cannot evaluate, so neither contributes a rule.
+        let mut css = *b"@layer base, theme;@media (prefers-color-scheme:dark){a{color:#ffffff}}h1{color:#111111}";
+        let (written, kept) =
+            keep_readable_rules(&mut css, MAX_RULES, TokenStore::NONE, NameSet::NONE);
+        assert_eq!(kept, 1);
+        assert_eq!(&css[..written], b"h1{color:#111111}");
+    }
+
+    #[test]
+    fn an_at_rule_whose_name_only_begins_like_layer_is_not_walked_into() {
+        let sheet = parse_stylesheet(b"@layered-things{a{color:#0969da}}p{color:#111111}", TokenStore::NONE);
+        assert_eq!(sheet.len, 1);
+        let style = cascade(&sheet, element(b"p", b"", b""), &[], None);
+        assert_eq!(style.color, 0xFF111111);
+    }
+
+    #[test]
+    fn a_document_nobody_read_keeps_every_readable_rule() {
+        // WHY: a caller with no tree in hand is only asking whether a selector
+        // is readable, and refusing every name it never looked at would drop
+        // the rules of a page it could still paint.
+        let mut css = *b".whatever{color:#0969da}";
+        let (written, kept) = keep_readable_rules(&mut css, MAX_RULES, TokenStore::NONE, NameSet::NONE);
+        assert_eq!(kept, 1);
+        assert_eq!(&css[..written], b".whatever{color:#0969da}");
+    }
+
+    #[test]
+    fn an_ink_the_surface_cannot_show_is_left_to_the_reader() {
+        // The failure a dark theme's file brings to a page this engine paints
+        // light: the ink is the stylesheet's own and is near the colour of the
+        // surface, so the words it colours go missing with the colour.
+        let sheet = parse_stylesheet(b"body{color:#f0f6fc}", TokenStore::NONE);
+        assert_eq!(sheet.len, 0);
+        let style = cascade(&sheet, element(b"body", b"", b""), &[], None);
+        assert!(!style.has_color);
+    }
+
+    #[test]
+    fn a_colour_the_page_wrote_for_this_surface_still_colours() {
+        // github.com's own link blue on a white page: enough apart to read, and
+        // the whole point of keeping the page's rules.
+        let sheet = parse_stylesheet(b"a{color:#0969da}", TokenStore::NONE);
+        assert_eq!(sheet.len, 1);
+        let style = cascade(&sheet, element(b"a", b"", b""), &[], None);
+        assert_eq!(style.color, 0xFF0969DA);
+        // A shade a page uses for secondary text is dim by intent and stays.
+        let muted = parse_stylesheet(b"p{color:#8b949e}", TokenStore::NONE);
+        assert_eq!(muted.len, 1);
+    }
+
+    #[test]
+    fn a_light_ink_on_the_dark_panel_that_names_it_is_kept() {
+        // The pair answers for itself: the rule states both halves, and the
+        // reader paints the panel it was written against.
+        let sheet = parse_stylesheet(b".btn{color:#ffffff;background:#0969da}", TokenStore::NONE);
+        let style = cascade(&sheet, element(b"div", b"btn", b""), &[], None);
+        assert!(style.has_color && style.has_background);
+        assert_eq!(style.color, 0xFFFFFFFF);
+        assert_eq!(style.background, 0xFF0969DA);
+    }
+
+    #[test]
+    fn a_panel_the_readers_own_ink_cannot_be_written_on_is_not_painted() {
+        // The same failure in reverse: a dark theme's body background, with the
+        // reader's dark ink on it, is a page of unreadable words.
+        let mut css = *b"body{background:#0d1117}";
+        let (written, kept) =
+            keep_readable_rules(&mut css, MAX_RULES, TokenStore::NONE, NameSet::NONE);
+        assert_eq!((written, kept), (0, 0));
+    }
+
+    #[test]
+    fn an_unshowable_colour_costs_no_room() {
+        // The utility sheet of near-white inks is cut out of the budget, and the
+        // rule behind it that this surface can show is the one kept.
+        let mut css = *b"a{color:#f0f6fc}p{color:#0969da}";
+        let (written, kept) =
+            keep_readable_rules(&mut css, MAX_RULES, TokenStore::NONE, NameSet::NONE);
+        assert_eq!(kept, 1);
+        assert_eq!(&css[..written], b"p{color:#0969da}");
+    }
+
+    #[test]
+    fn a_rule_keeping_its_padding_keeps_its_text_too() {
+        // Only the ink is refused: what the rule still changes is a pixel the
+        // reader does paint, so the bytes stay.
+        let mut css = *b"p{color:#f0f6fc;padding-left:4px}";
+        let (written, kept) =
+            keep_readable_rules(&mut css, MAX_RULES, TokenStore::NONE, NameSet::NONE);
+        assert_eq!(kept, 1);
+        assert_eq!(&css[..written], b"p{color:#f0f6fc;padding-left:4px}");
     }
 }

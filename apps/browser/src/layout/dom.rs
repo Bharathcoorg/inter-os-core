@@ -256,6 +256,8 @@ pub struct Dom {
     token_len: usize,
     token_text: [u8; MAX_TOKEN_TEXT_BYTES],
     token_text_len: usize,
+    name_bits: [u64; crate::css::NAME_WORDS],
+    names_known: bool,
     meta: DocMeta,
     root: NodeId,
     truncated: bool,
@@ -279,6 +281,8 @@ impl Dom {
             token_len: 0,
             token_text: [0; MAX_TOKEN_TEXT_BYTES],
             token_text_len: 0,
+            name_bits: [0; crate::css::NAME_WORDS],
+            names_known: false,
             meta: DocMeta::EMPTY,
             root: NO_NODE,
             truncated: false,
@@ -423,6 +427,8 @@ impl Dom {
         self.css_len = 0;
         self.token_len = 0;
         self.token_text_len = 0;
+        self.name_bits = [0; crate::css::NAME_WORDS];
+        self.names_known = false;
         self.meta = DocMeta::EMPTY;
         self.root = NO_NODE;
         self.truncated = false;
@@ -667,6 +673,77 @@ impl Dom {
         if css.len() > n {
             self.note(OVERFLOW_CSS);
         }
+    }
+
+    /// The names this document's elements carry, for the files that are cut
+    /// down to the rules which can reach one of them.
+    pub fn name_set(&self) -> crate::css::NameSet<'_> {
+        crate::css::NameSet { bits: &self.name_bits, known: self.names_known }
+    }
+
+    /// Marks every tag, class and id the document's elements carry.
+    ///
+    /// WHY before the chain of stylesheets and not during it: a file is cut
+    /// down as it is read, so a rule that has been dropped is gone -- and the
+    /// second file of a page would otherwise be asked about a tree the first
+    /// had not finished describing.
+    ///
+    /// WHY a class is cut at its spaces: `class="a b c"` is three names to a
+    /// selector and one string to the parser, and marking the string would
+    /// answer for none of them.
+    pub fn collect_names(&mut self) {
+        let mut node_index = 0usize;
+        while node_index < self.node_count {
+            let node = self.nodes[node_index];
+            if node.kind == NodeKind::Element {
+                let (at, len) = (node.tag.start as usize, node.tag.len as usize);
+                if len > 0 && at + len <= self.text_len {
+                    crate::css::mark_name(
+                        &mut self.name_bits,
+                        crate::css::NameKind::Tag,
+                        &self.text[at..at + len],
+                    );
+                }
+                let start = node.attr_start as usize;
+                let end = (start + node.attr_count as usize).min(self.attr_count);
+                let mut index = start;
+                while index < end {
+                    let attr = self.attrs[index];
+                    let name = attr.name.get(self);
+                    let is_class = name.eq_ignore_ascii_case(b"class");
+                    let is_id = !is_class && name.eq_ignore_ascii_case(b"id");
+                    if is_class || is_id {
+                        let (at, len) = (attr.value.start as usize, attr.value.len as usize);
+                        if at + len <= self.text_len {
+                            let mut word = at;
+                            while word < at + len {
+                                let space = self.text[word..at + len]
+                                    .iter()
+                                    .position(|b| b.is_ascii_whitespace())
+                                    .map(|p| word + p)
+                                    .unwrap_or(at + len);
+                                if space > word {
+                                    let kind = if is_class {
+                                        crate::css::NameKind::Class
+                                    } else {
+                                        crate::css::NameKind::Id
+                                    };
+                                    crate::css::mark_name(
+                                        &mut self.name_bits,
+                                        kind,
+                                        &self.text[word..space],
+                                    );
+                                }
+                                word = space + 1;
+                            }
+                        }
+                    }
+                    index += 1;
+                }
+            }
+            node_index += 1;
+        }
+        self.names_known = true;
     }
 
     /// The `--token` names this document's styles declared, for the rules that
@@ -2140,5 +2217,38 @@ mod tests {
         assert_eq!(tokens.value(b"--next"), Some(&b"var(--fg)"[..]));
         assert_eq!(tokens.value(b"--shadow"), None);
         assert_eq!(tokens.value(b"--stack"), None);
+    }
+
+    #[test]
+    fn the_document_names_what_its_elements_carry() {
+        let mut dom = Dom::new();
+        dom.parse(b"<div class='card hidden' id='main'><a>Link</a></div>");
+        // Before the names are read the document has answered no question about
+        // itself, and a caller that asked one would be told nothing is there.
+        assert!(!dom.name_set().known);
+        dom.collect_names();
+        let names = dom.name_set();
+        assert!(names.known);
+        assert!(names.holds(crate::css::NameKind::Tag, b"div"));
+        assert!(names.holds(crate::css::NameKind::Tag, b"a"));
+        assert!(names.holds(crate::css::NameKind::Id, b"main"));
+        // A class attribute is read as the words it carries, because a selector
+        // names one of them and never the string beside the rest.
+        assert!(names.holds(crate::css::NameKind::Class, b"card"));
+        assert!(names.holds(crate::css::NameKind::Class, b"hidden"));
+        assert!(!names.holds(crate::css::NameKind::Class, b"card hidden"));
+        assert!(!names.holds(crate::css::NameKind::Class, b"nav"));
+    }
+
+    #[test]
+    fn a_pages_names_are_gone_when_the_next_page_is_read() {
+        let mut dom = Dom::new();
+        dom.parse(b"<div class='from-the-first'>one</div>");
+        dom.collect_names();
+        assert!(dom.name_set().holds(crate::css::NameKind::Class, b"from-the-first"));
+        dom.parse(b"<p>two</p>");
+        assert!(!dom.name_set().known);
+        dom.collect_names();
+        assert!(!dom.name_set().holds(crate::css::NameKind::Class, b"from-the-first"));
     }
 }
