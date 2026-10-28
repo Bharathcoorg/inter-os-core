@@ -39,6 +39,48 @@ def normalize_path(p: str) -> str:
     return p_abs.replace("\\", "/")
 
 
+def run_framework_suite(path: str, timeout: int):
+    """Runs one framework contract suite on its own and reports it like the batch.
+
+    WHY this exists: the suite gate runs every framework file in one pytest
+    process, and a process that outlasts its budget takes the results of every
+    suite in it with it. When the machine is busy -- several agents building at
+    once -- that erased the whole report. Each suite gets its own process and
+    its own budget here, so a slow suite costs only its own result.
+
+    Returns (passed, detail, cases_passed) in the same shape the batch uses.
+    """
+    cmd = [
+        sys.executable, "-m", "pytest", "-v", "--tb=short",
+        "--continue-on-collection-errors",
+        "--ignore-glob=*test_tmp_*",
+        path,
+    ]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return False, f"NOT RUN: the suite timed out after {timeout}s", 0
+
+    passed = failed = errors = 0
+    for line in r.stdout.splitlines():
+        m = re.match(r"^([^\s:]+\.py)::([^\s]+)\s+([A-Z]+)", line)
+        if not m:
+            continue
+        status = m.group(3)
+        if status == "PASSED":
+            passed += 1
+        elif status == "FAILED":
+            failed += 1
+        elif status not in ("SKIPPED",):
+            errors += 1
+
+    if failed or errors:
+        return False, f"FAILED: {failed} failed, {passed} passed, {errors} errors", 0
+    if passed == 0:
+        return False, "FAILED: 0 test cases executed", 0
+    return True, f"Ran {passed} cases", passed
+
+
 def is_framework_test(path: str) -> bool:
     """Inspects file AST to determine if it defines pytest test functions or unittest classes."""
     try:
@@ -135,6 +177,7 @@ def run_contracts(target_files=None):
 
     # 1. Execute framework tests (pytest/unittest) via pytest
     pytest_timeout = int(os.environ.get("INTEROS_PYTEST_TIMEOUT", "900"))
+    file_timeout = int(os.environ.get("INTEROS_FILE_TIMEOUT", "300"))
     script_timeout = int(os.environ.get("INTEROS_SCRIPT_TIMEOUT", "90"))
 
     if framework_tests:
@@ -194,15 +237,26 @@ def run_contracts(target_files=None):
                     print(r.stderr)
                 print("---------------------\n")
         except subprocess.TimeoutExpired:
-            failures.append("pytest_timeout")
-            # WHY every framework file is reported: a batch that timed out ran
-            # no suite to completion, and a file with no report was printed
-            # as "NOT EXECUTED" -- which reads as a broken suite rather than
-            # as a gate that ran out of time.
-            for p in framework_tests:
-                file_reports[p] = (False, "NOT RUN: the pytest batch timed out")
+            # WHY the batch is re-run one suite at a time instead of every suite
+            # being reported as "NOT RUN": the batch is a single pytest process
+            # over every suite, so a batch that outlasts its budget loses the
+            # results of the suites that had already passed. Under a loaded
+            # machine -- several agents building at once -- that turned sixty
+            # green suites into sixty "NOT RUN" lines, which says less about
+            # the platform than the gate that ran them one at a time. Each
+            # suite now gets its own budget and its own report, so a suite
+            # that is genuinely slow is the only one that is lost.
             print("ERROR: Pytest framework execution timed out after "
-                  f"{pytest_timeout}s!", file=sys.stderr)
+                  f"{pytest_timeout}s; re-running each suite on its own.",
+                  file=sys.stderr)
+            for p in framework_tests:
+                ok, detail, cases = run_framework_suite(p, file_timeout)
+                if ok:
+                    framework_cases_passed += cases
+                    file_reports[p] = (True, detail)
+                else:
+                    failures.append(p)
+                    file_reports[p] = (False, detail)
 
     # 2. Execute script-based contract tests directly
     for p in script_tests:
