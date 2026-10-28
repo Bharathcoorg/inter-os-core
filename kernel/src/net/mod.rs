@@ -182,29 +182,52 @@ fn transmit_arp_request(target_ip: Ipv4Address) -> Result<(), NetError> {
     NETWORK_DEVICE.lock().transmit(&frame_buf[..len])
 }
 
+/// Whether one address is reachable without a router, on the prefix this host
+/// itself is configured on.
+fn is_on_local_link(ip: Ipv4Address) -> bool {
+    ip.0[..3] == DEFAULT_HOST_IP.0[..3]
+}
+
+/// The address a packet is handed to on the wire, which is the peer itself on
+/// the local link and the router for everything else.
+fn next_hop_for(dst_ip: Ipv4Address) -> Ipv4Address {
+    if is_on_local_link(dst_ip) { dst_ip } else { GATEWAY_IP }
+}
+
+/// Resolves the Ethernet address a packet is handed to, arming a background ARP
+/// request when that address is not yet known.
+///
+/// WHY the router answers for addresses outside this host's own prefix: QEMU's
+/// user-mode network replies to ARP only for its gateway, so a `who-has` for a
+/// public address can never be answered. While the destination address itself
+/// was the only thing asked about, every off-link packet died in this function
+/// and no SYN to any host beyond the virtual router ever left the kernel. The
+/// IP header still names the real peer; only the Ethernet address is the
+/// router's.
 fn resolve_destination_mac(dst_ip: Ipv4Address) -> Result<MacAddress, NetError> {
     if dst_ip.is_loopback() {
         return Ok(MacAddress([0, 0, 0, 0, 0, 1]));
     }
+    let next_hop = next_hop_for(dst_ip);
     let now = crate::interrupts::get_system_ticks();
-    if let Some(mac) = ARP_TABLE.lock().lookup_at(dst_ip, now) {
+    if let Some(mac) = ARP_TABLE.lock().lookup_at(next_hop, now) {
         return Ok(mac);
     }
     // Fall back to existing cached mapping while triggering background refresh
-    if let Some(mac) = ARP_TABLE.lock().lookup(dst_ip) {
-        let _ = transmit_arp_request(dst_ip);
+    if let Some(mac) = ARP_TABLE.lock().lookup(next_hop) {
+        let _ = transmit_arp_request(next_hop);
         return Ok(mac);
     }
     let mut requests = ARP_REQUESTS.lock();
-    if let Some(entry) = requests.iter().find(|entry| entry.valid && entry.ip == dst_ip) {
+    if let Some(entry) = requests.iter().find(|entry| entry.valid && entry.ip == next_hop) {
         if now.saturating_sub(entry.requested_at) < ARP_REQUEST_RETRY_TICKS {
             return Err(NetError::NoPacketAvailable);
         }
     }
-    let slot_index = requests.iter().position(|entry| !entry.valid || entry.ip == dst_ip).unwrap_or(0);
-    requests[slot_index] = ArpRequestState { ip: dst_ip, requested_at: now, valid: true };
+    let slot_index = requests.iter().position(|entry| !entry.valid || entry.ip == next_hop).unwrap_or(0);
+    requests[slot_index] = ArpRequestState { ip: next_hop, requested_at: now, valid: true };
     drop(requests);
-    transmit_arp_request(dst_ip)?;
+    transmit_arp_request(next_hop)?;
     Err(NetError::NoPacketAvailable)
 }
 
@@ -866,6 +889,24 @@ mod tests {
     use crate::capability::{Capability, CapabilityId, CapabilityType, Rights, CapabilityTable, DelegatedLease};
     use crate::capability::delegation::{allocate_lease_id, register_lease};
     use crate::task::TaskId;
+
+    #[test]
+    fn off_link_destination_is_handed_to_the_router() {
+        assert!(is_on_local_link(GATEWAY_IP));
+        assert!(is_on_local_link(DEFAULT_HOST_IP));
+        assert!(!is_on_local_link(Ipv4Address::new(172, 67, 162, 196)));
+
+        // The user-mode network answers ARP only for its own gateway, so a
+        // public address has to be given to the router to leave the kernel at
+        // all.
+        assert_eq!(next_hop_for(Ipv4Address::new(172, 67, 162, 196)), GATEWAY_IP);
+        // A peer on the same prefix is still asked about by name; the router
+        // does not answer for hosts that share the wire with us.
+        assert_eq!(
+            next_hop_for(Ipv4Address::new(10, 0, 2, 3)),
+            Ipv4Address::new(10, 0, 2, 3)
+        );
+    }
 
     #[test]
     fn test_send_udp_datagram_authorized_quota_policy() {
