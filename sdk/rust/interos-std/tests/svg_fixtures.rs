@@ -373,3 +373,167 @@ fn test_porter_duff_alpha_compositing() {
     assert!((out[p + 2] as i32 - 128).abs() <= 2, "B channel should be ~128");
     assert_eq!(out[p + 3], 255);
 }
+
+#[test]
+fn test_render_ellipse() {
+    let svg = br#"<svg width="40" height="30">
+        <ellipse cx="20" cy="15" rx="15" ry="8" fill="red"/>
+    </svg>"#;
+    let mut out = [0u8; 40 * 30 * 4];
+    decode_svg(svg, &mut out).expect("ellipse decode failed");
+
+    // Center (20, 15) must be red
+    let center_idx = (15 * 40 + 20) * 4;
+    assert_eq!(&out[center_idx..center_idx + 4], &[255, 0, 0, 255]);
+
+    // (20, 2) is distance 13 along y-axis > ry=8 -> transparent
+    let out_y = (2 * 40 + 20) * 4;
+    assert_eq!(&out[out_y..out_y + 4], &[0, 0, 0, 0]);
+
+    // (2, 15) is distance 18 along x-axis > rx=15 -> transparent
+    let out_x = (15 * 40 + 2) * 4;
+    assert_eq!(&out[out_x..out_x + 4], &[0, 0, 0, 0]);
+}
+
+#[test]
+fn test_render_line() {
+    let svg = br#"<svg width="30" height="30">
+        <line x1="5" y1="15" x2="25" y2="15" stroke="blue" stroke-width="2"/>
+    </svg>"#;
+    let mut out = [0u8; 30 * 30 * 4];
+    decode_svg(svg, &mut out).expect("line decode failed");
+
+    // Middle of line (15, 15) must have blue
+    let mid_idx = (15 * 30 + 15) * 4;
+    assert!(out[mid_idx + 2] > 200, "Blue channel on line");
+    assert!(out[mid_idx + 3] > 200, "Alpha channel on line");
+
+    // Away from line (15, 5) must be transparent
+    let away_idx = (5 * 30 + 15) * 4;
+    assert_eq!(&out[away_idx..away_idx + 4], &[0, 0, 0, 0]);
+}
+
+#[test]
+fn test_render_polyline_and_polygon() {
+    // Polyline stroke
+    let polyline_svg = br#"<svg width="40" height="40">
+        <polyline points="5,5 35,5 35,35" fill="none" stroke="green" stroke-width="2"/>
+    </svg>"#;
+    let mut out_pl = [0u8; 40 * 40 * 4];
+    decode_svg(polyline_svg, &mut out_pl).expect("polyline decode failed");
+
+    let top_idx = (5 * 40 + 20) * 4;
+    assert!(out_pl[top_idx + 1] > 100, "Green channel on top segment");
+
+    // For polyline, the closing diagonal (5,5 to 35,35) should NOT be stroked
+    let mid_idx = (20 * 40 + 20) * 4;
+    assert_eq!(&out_pl[mid_idx..mid_idx + 4], &[0, 0, 0, 0]);
+
+    // Polygon fill and stroke (closed)
+    let polygon_svg = br#"<svg width="40" height="40">
+        <polygon points="5,5 35,5 35,35 5,35" fill="yellow" stroke="red" stroke-width="2"/>
+    </svg>"#;
+    let mut out_pg = [0u8; 40 * 40 * 4];
+    decode_svg(polygon_svg, &mut out_pg).expect("polygon decode failed");
+
+    let center_idx = (20 * 40 + 20) * 4;
+    assert_eq!(&out_pg[center_idx..center_idx + 4], &[255, 255, 0, 255]);
+
+    // Closing edge from (5,35) to (5,5) should have red stroke
+    let close_edge = (20 * 40 + 5) * 4;
+    assert!(out_pg[close_edge] > 200, "Red channel on closing edge");
+}
+
+#[test]
+fn test_fill_rule_evenodd_vs_nonzero() {
+    // Two concentric squares clockwise:
+    // Outer: 0,0 to 30,30
+    // Inner: 10,10 to 20,20
+    let nonzero_svg = br#"<svg width="30" height="30">
+        <path d="M 0 0 H 30 V 30 H 0 Z M 10 10 H 20 V 20 H 10 Z" fill="red" fill-rule="nonzero"/>
+    </svg>"#;
+    let mut out_nz = [0u8; 30 * 30 * 4];
+    decode_svg(nonzero_svg, &mut out_nz).expect("nonzero decode failed");
+    let center_idx = (15 * 30 + 15) * 4;
+    // With nonzero, center is filled (winding = 2)
+    assert_eq!(&out_nz[center_idx..center_idx + 4], &[255, 0, 0, 255]);
+
+    let evenodd_svg = br#"<svg width="30" height="30">
+        <path d="M 0 0 H 30 V 30 H 0 Z M 10 10 H 20 V 20 H 10 Z" fill="red" fill-rule="evenodd"/>
+    </svg>"#;
+    let mut out_eo = [0u8; 30 * 30 * 4];
+    decode_svg(evenodd_svg, &mut out_eo).expect("evenodd decode failed");
+    // With evenodd, center is hollow / transparent (crossings = 2, which is even)
+    assert_eq!(&out_eo[center_idx..center_idx + 4], &[0, 0, 0, 0]);
+
+    // Outer region (5, 5) is still filled with evenodd
+    let outer_idx = (5 * 30 + 5) * 4;
+    assert_eq!(&out_eo[outer_idx..outer_idx + 4], &[255, 0, 0, 255]);
+}
+
+#[test]
+fn test_transforms() {
+    // Translate
+    let tr_svg = br#"<svg width="40" height="40">
+        <rect x="0" y="0" width="10" height="10" transform="translate(15, 15)" fill="blue"/>
+    </svg>"#;
+    let mut out_tr = [0u8; 40 * 40 * 4];
+    decode_svg(tr_svg, &mut out_tr).expect("translate decode failed");
+    let in_idx = (20 * 40 + 20) * 4;
+    assert_eq!(&out_tr[in_idx..in_idx + 4], &[0, 0, 255, 255]);
+    let out_idx = (5 * 40 + 5) * 4;
+    assert_eq!(&out_tr[out_idx..out_idx + 4], &[0, 0, 0, 0]);
+
+    // Scale
+    let sc_svg = br#"<svg width="40" height="40">
+        <rect x="0" y="0" width="10" height="10" transform="scale(2)" fill="green"/>
+    </svg>"#;
+    let mut out_sc = [0u8; 40 * 40 * 4];
+    decode_svg(sc_svg, &mut out_sc).expect("scale decode failed");
+    let sc_in = (15 * 40 + 15) * 4;
+    assert_eq!(&out_sc[sc_in..sc_in + 4], &[0, 128, 0, 255]);
+    let sc_out = (25 * 40 + 25) * 4;
+    assert_eq!(&out_sc[sc_out..sc_out + 4], &[0, 0, 0, 0]);
+
+    // Matrix
+    let mat_svg = br#"<svg width="40" height="40">
+        <rect x="0" y="0" width="10" height="10" transform="matrix(2, 0, 0, 2, 5, 5)" fill="yellow"/>
+    </svg>"#;
+    let mut out_mat = [0u8; 40 * 40 * 4];
+    decode_svg(mat_svg, &mut out_mat).expect("matrix decode failed");
+    let mat_in = (10 * 40 + 10) * 4;
+    assert_eq!(&out_mat[mat_in..mat_in + 4], &[255, 255, 0, 255]);
+
+    // Group transform inheritance
+    let g_svg = br#"<svg width="40" height="40">
+        <g transform="translate(10, 10)">
+            <rect x="0" y="0" width="10" height="10" transform="translate(5, 5)" fill="cyan"/>
+        </g>
+    </svg>"#;
+    let mut out_g = [0u8; 40 * 40 * 4];
+    decode_svg(g_svg, &mut out_g).expect("g transform decode failed");
+    let g_in = (20 * 40 + 20) * 4;
+    assert_eq!(&out_g[g_in..g_in + 4], &[0, 255, 255, 255]);
+}
+
+#[test]
+fn test_security_and_reject_paths() {
+    let mut out = [0u8; 20 * 20 * 4];
+
+    // Script tag rejection
+    let script_svg = br#"<svg width="20" height="20"><script>alert(1)</script></svg>"#;
+    assert_eq!(decode_svg(script_svg, &mut out), Err(()));
+
+    // External href rejection
+    let ext_svg = br#"<svg width="20" height="20"><image href="http://evil.com/x.png"/></svg>"#;
+    assert_eq!(decode_svg(ext_svg, &mut out), Err(()));
+
+    // Malformed odd points polygon
+    let odd_pts = br#"<svg width="20" height="20"><polygon points="5,5 10"/></svg>"#;
+    assert_eq!(decode_svg(odd_pts, &mut out), Err(()));
+
+    // Unknown elements skipped, not rejected
+    let unk_svg = br#"<svg width="20" height="20"><foreignObject/><rect width="20" height="20" fill="red"/></svg>"#;
+    assert_eq!(decode_svg(unk_svg, &mut out).map(|(w, h, _)| (w, h)), Ok((20, 20)));
+    assert_eq!(&out[0..4], &[255, 0, 0, 255]);
+}

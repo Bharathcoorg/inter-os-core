@@ -493,13 +493,129 @@ fn user_agent_style(dom: &Dom, node: NodeId, tag: &[u8]) -> BoxStyle {
     } else {
         dimension(dom.attr(node, b"height"))
     };
+    if tag.eq_ignore_ascii_case(b"svg") {
+        let mut w = dimension(dom.attr(node, b"width"));
+        let mut h = dimension(dom.attr(node, b"height"));
+        if let Some((vb_w, vb_h)) = parse_viewbox(get_viewbox_attr(dom, node)) {
+            if vb_w > 0 && vb_h > 0 {
+                if w > 0 && h == 0 {
+                    h = (((w as u64) * (vb_h as u64)) / (vb_w as u64)).max(1).min(u16::MAX as u64) as u16;
+                } else if w == 0 && h > 0 {
+                    w = (((h as u64) * (vb_w as u64)) / (vb_h as u64)).max(1).min(u16::MAX as u64) as u16;
+                } else if w == 0 && h == 0 {
+                    w = vb_w.min(u16::MAX as u32) as u16;
+                    h = vb_h.min(u16::MAX as u32) as u16;
+                }
+            }
+        }
+        style.width = w;
+        style.height = h;
+    }
+    if is_inside_svg(dom, node) {
+        style.display = Display::None;
+        style.hidden = true;
+    }
     style
+}
+
+fn get_viewbox_attr<'a>(dom: &'a Dom, node: NodeId) -> Option<&'a [u8]> {
+    if let Some(vb) = dom.attr(node, b"viewBox").or_else(|| dom.attr(node, b"viewbox")) {
+        return Some(vb);
+    }
+    if let Some(style) = dom.attr(node, b"style") {
+        let key = b"viewbox";
+        let mut i = 0;
+        while i + key.len() <= style.len() {
+            if style[i..i + key.len()].eq_ignore_ascii_case(key) {
+                let mut j = i + key.len();
+                while j < style.len() && style[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                if j < style.len() && style[j] == b':' {
+                    j += 1;
+                    while j < style.len() && style[j].is_ascii_whitespace() {
+                        j += 1;
+                    }
+                    let val_start = j;
+                    while j < style.len() && style[j] != b';' {
+                        j += 1;
+                    }
+                    let mut val_end = j;
+                    while val_end > val_start && style[val_end - 1].is_ascii_whitespace() {
+                        val_end -= 1;
+                    }
+                    return Some(&style[val_start..val_end]);
+                }
+            }
+            i += 1;
+        }
+    }
+    None
+}
+
+fn is_inside_svg(dom: &Dom, node: NodeId) -> bool {
+    let mut cur = dom.parent(node);
+    while let Some(p) = cur {
+        if dom.tag(p).eq_ignore_ascii_case(b"svg") {
+            return true;
+        }
+        cur = dom.parent(p);
+    }
+    false
+}
+
+fn parse_viewbox(raw: Option<&[u8]>) -> Option<(u32, u32)> {
+    let raw = raw?;
+    let mut numbers = [0u32; 4];
+    let mut count = 0;
+    let mut i = 0;
+    while i < raw.len() && count < 4 {
+        while i < raw.len() && (raw[i].is_ascii_whitespace() || raw[i] == b',') {
+            i += 1;
+        }
+        if i >= raw.len() {
+            break;
+        }
+        let neg = if raw[i] == b'-' {
+            i += 1;
+            true
+        } else if raw[i] == b'+' {
+            i += 1;
+            false
+        } else {
+            false
+        };
+        let mut val: u32 = 0;
+        let mut has_digit = false;
+        while i < raw.len() && raw[i].is_ascii_digit() {
+            val = val.saturating_mul(10).saturating_add((raw[i] - b'0') as u32);
+            has_digit = true;
+            i += 1;
+        }
+        if i < raw.len() && raw[i] == b'.' {
+            i += 1;
+            while i < raw.len() && raw[i].is_ascii_digit() {
+                has_digit = true;
+                i += 1;
+            }
+        }
+        if !has_digit {
+            break;
+        }
+        numbers[count] = if neg { 0 } else { val };
+        count += 1;
+    }
+    if count == 4 && numbers[2] > 0 && numbers[3] > 0 {
+        Some((numbers[2], numbers[3]))
+    } else {
+        None
+    }
 }
 
 fn display_for(tag: &[u8]) -> Display {
     match tag {
         b"head" | b"script" | b"style" | b"title" | b"meta" | b"link" | b"base" | b"template"
-        | b"noscript" | b"iframe" | b"canvas" | b"svg" => Display::None,
+        | b"noscript" | b"iframe" | b"canvas" => Display::None,
         b"html" | b"body" | b"div" | b"p" | b"h1" | b"h2" | b"h3" | b"h4" | b"h5" | b"h6"
         | b"ul" | b"ol" | b"dl" | b"dt" | b"dd" | b"blockquote" | b"pre" | b"hr" | b"figure"
         | b"figcaption" | b"form" | b"fieldset" | b"header" | b"footer" | b"main" | b"nav"
@@ -969,5 +1085,60 @@ mod tests {
         assert_eq!(style.unsupported[1].as_str(), "opacity");
         // Supported properties are still applied
         assert_eq!(style.css.color, 0xFFFF0000);
+    }
+
+    #[test]
+    fn inline_svg_participates_in_layout_with_dimensions_and_viewbox() {
+        let mut dom = Dom::new();
+        dom.parse(b"<svg width='100' height='50'><rect width='100' height='50'/></svg>");
+        let svg = dom
+            .nodes()
+            .iter()
+            .enumerate()
+            .find(|(_, n)| n.is_element() && n.tag.get(&dom) == b"svg")
+            .map(|(i, _)| i as NodeId)
+            .unwrap();
+        let rect = dom
+            .nodes()
+            .iter()
+            .enumerate()
+            .find(|(_, n)| n.is_element() && n.tag.get(&dom) == b"rect")
+            .map(|(i, _)| i as NodeId)
+            .unwrap();
+        let sheet = css::Stylesheet::empty();
+        let svg_style = compute(&dom, svg, &sheet, None);
+        let rect_style = compute(&dom, rect, &sheet, Some(&svg_style));
+
+        assert_eq!(svg_style.display, Display::Inline);
+        assert!(svg_style.is_inline_level());
+        assert_eq!(svg_style.width, 100);
+        assert_eq!(svg_style.height, 50);
+        assert_eq!(rect_style.display, Display::None);
+
+        let mut dom2 = Dom::new();
+        dom2.parse(b"<svg style='viewbox: 0 0 200 100'></svg>");
+        let svg2 = dom2
+            .nodes()
+            .iter()
+            .enumerate()
+            .find(|(_, n)| n.is_element() && n.tag.get(&dom2) == b"svg")
+            .map(|(i, _)| i as NodeId)
+            .unwrap();
+        let svg2_style = compute(&dom2, svg2, &sheet, None);
+        assert_eq!(svg2_style.width, 200);
+        assert_eq!(svg2_style.height, 100);
+
+        let mut dom3 = Dom::new();
+        dom3.parse(b"<svg width='60' style='viewbox: 0 0 200 100'></svg>");
+        let svg3 = dom3
+            .nodes()
+            .iter()
+            .enumerate()
+            .find(|(_, n)| n.is_element() && n.tag.get(&dom3) == b"svg")
+            .map(|(i, _)| i as NodeId)
+            .unwrap();
+        let svg3_style = compute(&dom3, svg3, &sheet, None);
+        assert_eq!(svg3_style.width, 60);
+        assert_eq!(svg3_style.height, 30);
     }
 }

@@ -23,6 +23,214 @@ pub enum Color {
     Rgba(u8, u8, u8, u8),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FillRule {
+    NonZero,
+    EvenOdd,
+}
+
+pub fn parse_fill_rule(val: &[u8]) -> Option<FillRule> {
+    let mut s = val;
+    while !s.is_empty() && s[0].is_ascii_whitespace() {
+        s = &s[1..];
+    }
+    while !s.is_empty() && s[s.len() - 1].is_ascii_whitespace() {
+        s = &s[..s.len() - 1];
+    }
+    if s.eq_ignore_ascii_case(b"evenodd") {
+        Some(FillRule::EvenOdd)
+    } else if s.eq_ignore_ascii_case(b"nonzero") {
+        Some(FillRule::NonZero)
+    } else {
+        None
+    }
+}
+
+const SIN_TABLE_90: [i32; 91] = [
+    0, 1144, 2287, 3430, 4572, 5712, 6850, 7987, 9121, 10252, 11380, 12505, 13626, 14742, 15855,
+    16962, 18064, 19161, 20252, 21336, 22415, 23486, 24550, 25607, 26656, 27697, 28729, 29753,
+    30767, 31772, 32768, 33754, 34729, 35693, 36647, 37590, 38521, 39441, 40348, 41243, 42126,
+    42995, 43852, 44695, 45525, 46341, 47143, 47930, 48703, 49461, 50203, 50931, 51643, 52339,
+    53020, 53684, 54332, 54963, 55578, 56175, 56756, 57319, 57865, 58393, 58903, 59396, 59870,
+    60326, 60764, 61183, 61584, 61966, 62328, 62672, 62997, 63303, 63589, 63856, 64104, 64332,
+    64540, 64729, 64898, 65048, 65177, 65287, 65376, 65446, 65496, 65526, 65536,
+];
+
+pub fn sin_fixed(deg_16: i32) -> i32 {
+    let mut deg = deg_16 % (360 * ONE);
+    if deg < 0 {
+        deg += 360 * ONE;
+    }
+    let d = (deg >> 16) as usize;
+    let frac = deg & 0xFFFF;
+    let sample = |deg_idx: usize| -> i32 {
+        let idx = deg_idx % 360;
+        if idx <= 90 {
+            SIN_TABLE_90[idx]
+        } else if idx <= 180 {
+            SIN_TABLE_90[180 - idx]
+        } else if idx <= 270 {
+            -SIN_TABLE_90[idx - 180]
+        } else {
+            -SIN_TABLE_90[360 - idx]
+        }
+    };
+    let s0 = sample(d);
+    let s1 = sample(d + 1);
+    s0 + (((s1 - s0) as i64 * frac as i64) >> 16) as i32
+}
+
+pub fn cos_fixed(deg_16: i32) -> i32 {
+    sin_fixed(deg_16 + 90 * ONE)
+}
+
+pub fn sin_cos_fixed(deg_16: i32) -> (i32, i32) {
+    (sin_fixed(deg_16), cos_fixed(deg_16))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Transform2D {
+    pub a: i32,
+    pub b: i32,
+    pub c: i32,
+    pub d: i32,
+    pub e: i32,
+    pub f: i32,
+}
+
+impl Transform2D {
+    pub const IDENTITY: Self = Self {
+        a: ONE,
+        b: 0,
+        c: 0,
+        d: ONE,
+        e: 0,
+        f: 0,
+    };
+
+    #[inline]
+    pub fn is_identity(&self) -> bool {
+        self.a == ONE && self.b == 0 && self.c == 0 && self.d == ONE && self.e == 0 && self.f == 0
+    }
+
+    #[inline]
+    pub fn apply(&self, x: i32, y: i32) -> (i32, i32) {
+        if self.is_identity() {
+            return (x, y);
+        }
+        let nx = ((self.a as i64 * x as i64 + self.c as i64 * y as i64) >> 16) + self.e as i64;
+        let ny = ((self.b as i64 * x as i64 + self.d as i64 * y as i64) >> 16) + self.f as i64;
+        (nx as i32, ny as i32)
+    }
+
+    #[inline]
+    pub fn multiply(&self, rhs: &Self) -> Self {
+        let a = ((self.a as i64 * rhs.a as i64 + self.c as i64 * rhs.b as i64) >> 16) as i32;
+        let b = ((self.b as i64 * rhs.a as i64 + self.d as i64 * rhs.b as i64) >> 16) as i32;
+        let c = ((self.a as i64 * rhs.c as i64 + self.c as i64 * rhs.d as i64) >> 16) as i32;
+        let d = ((self.b as i64 * rhs.c as i64 + self.d as i64 * rhs.d as i64) >> 16) as i32;
+        let e = (((self.a as i64 * rhs.e as i64 + self.c as i64 * rhs.f as i64) >> 16) + self.e as i64) as i32;
+        let f = (((self.b as i64 * rhs.e as i64 + self.d as i64 * rhs.f as i64) >> 16) + self.f as i64) as i32;
+        Self { a, b, c, d, e, f }
+    }
+
+    pub fn translate(tx: i32, ty: i32) -> Self {
+        Self {
+            a: ONE,
+            b: 0,
+            c: 0,
+            d: ONE,
+            e: tx,
+            f: ty,
+        }
+    }
+
+    pub fn scale(sx: i32, sy: i32) -> Self {
+        Self {
+            a: sx,
+            b: 0,
+            c: 0,
+            d: sy,
+            e: 0,
+            f: 0,
+        }
+    }
+
+    pub fn rotate(deg: i32) -> Self {
+        let (s, c) = sin_cos_fixed(deg);
+        Self {
+            a: c,
+            b: s,
+            c: -s,
+            d: c,
+            e: 0,
+            f: 0,
+        }
+    }
+}
+
+pub fn parse_transform(mut val: &[u8]) -> Option<Transform2D> {
+    let mut result = Transform2D::IDENTITY;
+    while !val.is_empty() {
+        while !val.is_empty() && (val[0].is_ascii_whitespace() || val[0] == b',') {
+            val = &val[1..];
+        }
+        if val.is_empty() {
+            break;
+        }
+        let open_paren = val.iter().position(|&b| b == b'(')?;
+        let mut cmd = &val[..open_paren];
+        while !cmd.is_empty() && cmd[0].is_ascii_whitespace() {
+            cmd = &cmd[1..];
+        }
+        while !cmd.is_empty() && cmd[cmd.len() - 1].is_ascii_whitespace() {
+            cmd = &cmd[..cmd.len() - 1];
+        }
+        let after_paren = &val[open_paren + 1..];
+        let close_paren = after_paren.iter().position(|&b| b == b')')?;
+        let args_bytes = &after_paren[..close_paren];
+        val = &after_paren[close_paren + 1..];
+
+        let mut scanner = NumberScanner::new(args_bytes);
+        if cmd.eq_ignore_ascii_case(b"translate") {
+            let tx = scanner.next_fixed()?;
+            let ty = scanner.next_fixed().unwrap_or(0);
+            result = result.multiply(&Transform2D::translate(tx, ty));
+        } else if cmd.eq_ignore_ascii_case(b"scale") {
+            let sx = scanner.next_fixed()?;
+            let sy = scanner.next_fixed().unwrap_or(sx);
+            result = result.multiply(&Transform2D::scale(sx, sy));
+        } else if cmd.eq_ignore_ascii_case(b"rotate") {
+            let deg = scanner.next_fixed()?;
+            let center = if let Some(cx) = scanner.next_fixed() {
+                let cy = scanner.next_fixed()?;
+                Some((cx, cy))
+            } else {
+                None
+            };
+            let rot = if let Some((cx, cy)) = center {
+                Transform2D::translate(cx, cy)
+                    .multiply(&Transform2D::rotate(deg))
+                    .multiply(&Transform2D::translate(-cx, -cy))
+            } else {
+                Transform2D::rotate(deg)
+            };
+            result = result.multiply(&rot);
+        } else if cmd.eq_ignore_ascii_case(b"matrix") {
+            let a = scanner.next_fixed()?;
+            let b = scanner.next_fixed()?;
+            let c = scanner.next_fixed()?;
+            let d = scanner.next_fixed()?;
+            let e = scanner.next_fixed()?;
+            let f = scanner.next_fixed()?;
+            result = result.multiply(&Transform2D { a, b, c, d, e, f });
+        } else {
+            return None;
+        }
+    }
+    Some(result)
+}
+
 /// Helper to scan numbers from byte streams without allocation.
 pub struct NumberScanner<'a> {
     pub data: &'a [u8],
@@ -457,6 +665,7 @@ impl SvgRasterizer {
         target_w: usize,
         target_h: usize,
         color: (u8, u8, u8, u8),
+        fill_rule: FillRule,
         out_rgba: &mut [u8],
     ) {
         if segments.len == 0 || target_w == 0 || target_h == 0 {
@@ -525,15 +734,28 @@ impl SvgRasterizer {
                         b -= 1;
                     }
                 }
-                let mut winding = 0i32;
-                let mut span_start = 0i32;
-                for k in 0..n_cross {
-                    let prev = winding;
-                    winding += self.cross_dir[k] as i32;
-                    if prev == 0 && winding != 0 {
-                        span_start = self.cross_x[k];
-                    } else if prev != 0 && winding == 0 {
-                        add_span(&mut self.acc[..span], span_start, self.cross_x[k]);
+                if fill_rule == FillRule::EvenOdd {
+                    let mut inside = false;
+                    let mut span_start = 0i32;
+                    for k in 0..n_cross {
+                        inside = !inside;
+                        if inside {
+                            span_start = self.cross_x[k];
+                        } else {
+                            add_span(&mut self.acc[..span], span_start, self.cross_x[k]);
+                        }
+                    }
+                } else {
+                    let mut winding = 0i32;
+                    let mut span_start = 0i32;
+                    for k in 0..n_cross {
+                        let prev = winding;
+                        winding += self.cross_dir[k] as i32;
+                        if prev == 0 && winding != 0 {
+                            span_start = self.cross_x[k];
+                        } else if prev != 0 && winding == 0 {
+                            add_span(&mut self.acc[..span], span_start, self.cross_x[k]);
+                        }
                     }
                 }
             }
@@ -873,6 +1095,89 @@ pub fn emit_circle_stroke(
         let s2 = transform(cx + kr, cy - r_in);
         let s3 = p0;
         flatten_cubic(s0, s1, s2, s3, segments)?;
+    }
+    Ok(())
+}
+
+pub fn emit_ellipse(
+    cx: i32,
+    cy: i32,
+    rx: i32,
+    ry: i32,
+    transform: &impl Fn(i32, i32) -> (i32, i32),
+    segments: &mut SegmentBuffer,
+) -> Result<(), ()> {
+    if rx <= 0 || ry <= 0 {
+        return Ok(());
+    }
+    let kx = ((rx as i64 * KAPPA as i64) >> 16) as i32;
+    let ky = ((ry as i64 * KAPPA as i64) >> 16) as i32;
+
+    let p0 = transform(cx, cy - ry);
+    let p1 = transform(cx + kx, cy - ry);
+    let p2 = transform(cx + rx, cy - ky);
+    let p3 = transform(cx + rx, cy);
+    flatten_cubic(p0, p1, p2, p3, segments)?;
+
+    let q0 = p3;
+    let q1 = transform(cx + rx, cy + ky);
+    let q2 = transform(cx + kx, cy + ry);
+    let q3 = transform(cx, cy + ry);
+    flatten_cubic(q0, q1, q2, q3, segments)?;
+
+    let r0 = q3;
+    let r1 = transform(cx - kx, cy + ry);
+    let r2 = transform(cx - rx, cy + ky);
+    let r3 = transform(cx - rx, cy);
+    flatten_cubic(r0, r1, r2, r3, segments)?;
+
+    let s0 = r3;
+    let s1 = transform(cx - rx, cy - ky);
+    let s2 = transform(cx - kx, cy - ry);
+    let s3 = p0;
+    flatten_cubic(s0, s1, s2, s3, segments)?;
+
+    Ok(())
+}
+
+pub fn emit_line(
+    x1: i32,
+    y1: i32,
+    x2: i32,
+    y2: i32,
+    transform: &impl Fn(i32, i32) -> (i32, i32),
+    segments: &mut SegmentBuffer,
+) -> Result<(), ()> {
+    let p0 = transform(x1, y1);
+    let p1 = transform(x2, y2);
+    segments.push(p0.0, p0.1, p1.0, p1.1)
+}
+
+pub fn emit_points(
+    points_bytes: &[u8],
+    close: bool,
+    transform: &impl Fn(i32, i32) -> (i32, i32),
+    segments: &mut SegmentBuffer,
+) -> Result<(), ()> {
+    let mut scanner = NumberScanner::new(points_bytes);
+    let mut first_pt: Option<(i32, i32)> = None;
+    let mut prev_pt: Option<(i32, i32)> = None;
+    while let Some(x) = scanner.next_fixed() {
+        let y = scanner.next_fixed().ok_or(())?;
+        let pt = transform(x, y);
+        if let Some(prev) = prev_pt {
+            segments.push(prev.0, prev.1, pt.0, pt.1)?;
+        } else {
+            first_pt = Some(pt);
+        }
+        prev_pt = Some(pt);
+    }
+    if close {
+        if let (Some(first), Some(prev)) = (first_pt, prev_pt) {
+            if prev != first {
+                segments.push(prev.0, prev.1, first.0, first.1)?;
+            }
+        }
     }
     Ok(())
 }
@@ -1273,6 +1578,8 @@ struct StyleState {
     fill: Option<Color>,
     stroke: Option<Color>,
     stroke_width: Option<i32>,
+    fill_rule: FillRule,
+    transform: Transform2D,
 }
 
 /// Decodes an SVG image into the supplied RGBA buffer.
@@ -1319,6 +1626,8 @@ pub fn decode_svg(data: &[u8], out_rgba: &mut [u8]) -> Result<(u32, u32, usize),
         fill: None,
         stroke: None,
         stroke_width: None,
+        fill_rule: FillRule::NonZero,
+        transform: Transform2D::IDENTITY,
     }; 8];
     let mut style_depth = 0usize;
 
@@ -1354,108 +1663,224 @@ pub fn decode_svg(data: &[u8], out_rgba: &mut [u8]) -> Result<(u32, u32, usize),
                 }
                 let elem = &tag_trimmed[..elem_end];
 
+                if elem.eq_ignore_ascii_case(b"script") || elem.eq_ignore_ascii_case(b"/script") {
+                    return Err(());
+                }
+                if let Some(href) = get_attr(tag, b"href").or_else(|| get_attr(tag, b"xlink:href")) {
+                    let mut h = href;
+                    while !h.is_empty() && h[0].is_ascii_whitespace() {
+                        h = &h[1..];
+                    }
+                    if !h.is_empty() && !h.starts_with(b"#") {
+                        return Err(());
+                    }
+                }
+
                 if elem == b"g" {
                     if style_depth + 1 < style_stack.len() {
                         let cur = style_stack[style_depth];
                         let new_fill = get_attr_or_style(tag, b"fill").and_then(parse_color).or(cur.fill);
                         let new_stroke = get_attr_or_style(tag, b"stroke").and_then(parse_color).or(cur.stroke);
                         let new_sw = get_attr_or_style(tag, b"stroke-width").and_then(parse_fixed).or(cur.stroke_width);
+                        let new_fr = get_attr_or_style(tag, b"fill-rule").and_then(parse_fill_rule).unwrap_or(cur.fill_rule);
+                        let new_transform = if let Some(t_attr) = get_attr_or_style(tag, b"transform") {
+                            if let Some(t) = parse_transform(t_attr) {
+                                cur.transform.multiply(&t)
+                            } else {
+                                cur.transform
+                            }
+                        } else {
+                            cur.transform
+                        };
                         style_depth += 1;
                         style_stack[style_depth] = StyleState {
                             fill: new_fill,
                             stroke: new_stroke,
                             stroke_width: new_sw,
+                            fill_rule: new_fr,
+                            transform: new_transform,
                         };
                     }
                 } else if elem == b"/g" {
                     if style_depth > 0 {
                         style_depth -= 1;
                     }
-                } else if elem == b"rect" {
+                } else if elem == b"rect" || elem == b"circle" || elem == b"ellipse" || elem == b"line" || elem == b"polyline" || elem == b"polygon" || elem == b"path" {
                     let cur = style_stack[style_depth];
                     let fill = get_attr_or_style(tag, b"fill").and_then(parse_color).or(cur.fill).unwrap_or(Color::Rgba(0, 0, 0, 255));
                     let stroke = get_attr_or_style(tag, b"stroke").and_then(parse_color).or(cur.stroke).unwrap_or(Color::None);
                     let stroke_width = get_attr_or_style(tag, b"stroke-width").and_then(parse_fixed).or(cur.stroke_width).unwrap_or(ONE);
+                    let fill_rule = get_attr_or_style(tag, b"fill-rule").and_then(parse_fill_rule).unwrap_or(cur.fill_rule);
 
-                    let x = get_attr(tag, b"x").and_then(parse_fixed).unwrap_or(0);
-                    let y = get_attr(tag, b"y").and_then(parse_fixed).unwrap_or(0);
-                    let w = get_attr(tag, b"width").and_then(parse_fixed).unwrap_or(0);
-                    let h = get_attr(tag, b"height").and_then(parse_fixed).unwrap_or(0);
-                    let rx = get_attr(tag, b"rx").and_then(parse_fixed).unwrap_or(0);
-                    let ry = get_attr(tag, b"ry").and_then(parse_fixed).unwrap_or(rx);
-                    let rx = if rx == 0 && ry > 0 { ry } else { rx };
-
-                    if w > 0 && h > 0 {
-                        if rx == 0 && ry == 0 {
-                            if let Color::Rgba(r, g, b, a) = fill {
-                                fill_buf.clear();
-                                emit_rect(x, y, w, h, 0, 0, &transform, &mut fill_buf)?;
-                                rasterizer.rasterize(&fill_buf, target_w as usize, target_h as usize, (r, g, b, a), out_rgba);
-                            }
-                            if let Color::Rgba(r, g, b, a) = stroke {
-                                if stroke_width > 0 {
-                                    stroke_buf.clear();
-                                    emit_rect_stroke(x, y, w, h, stroke_width, &transform, &mut stroke_buf)?;
-                                    rasterizer.rasterize(&stroke_buf, target_w as usize, target_h as usize, (r, g, b, a), out_rgba);
-                                }
-                            }
+                    let elem_transform = if let Some(t_attr) = get_attr_or_style(tag, b"transform") {
+                        if let Some(t) = parse_transform(t_attr) {
+                            cur.transform.multiply(&t)
                         } else {
-                            fill_buf.clear();
-                            emit_rect(x, y, w, h, rx, ry, &transform, &mut fill_buf)?;
-                            if let Color::Rgba(r, g, b, a) = fill {
-                                rasterizer.rasterize(&fill_buf, target_w as usize, target_h as usize, (r, g, b, a), out_rgba);
-                            }
-                            if let Color::Rgba(r, g, b, a) = stroke {
-                                if stroke_width > 0 {
-                                    let sw_screen = ((stroke_width as i64 * scale_stroke) >> 16) as i32;
-                                    generate_stroke_segments(&fill_buf, sw_screen, &mut stroke_buf)?;
-                                    rasterizer.rasterize(&stroke_buf, target_w as usize, target_h as usize, (r, g, b, a), out_rgba);
+                            cur.transform
+                        }
+                    } else {
+                        cur.transform
+                    };
+
+                    let xform = |x: i32, y: i32| -> (i32, i32) {
+                        let (tx, ty) = elem_transform.apply(x, y);
+                        transform(tx, ty)
+                    };
+
+                    let elem_scale_x = isqrt64((elem_transform.a as i64 * elem_transform.a as i64 + elem_transform.b as i64 * elem_transform.b as i64) as u64) as i32;
+                    let elem_scale_y = isqrt64((elem_transform.c as i64 * elem_transform.c as i64 + elem_transform.d as i64 * elem_transform.d as i64) as u64) as i32;
+                    let elem_scale = (elem_scale_x + elem_scale_y) / 2;
+                    let sw_user = ((stroke_width as i64 * elem_scale as i64) >> 16) as i32;
+                    let sw_screen = ((sw_user as i64 * scale_stroke) >> 16) as i32;
+
+                    if elem == b"rect" {
+                        let x = get_attr(tag, b"x").and_then(parse_fixed).unwrap_or(0);
+                        let y = get_attr(tag, b"y").and_then(parse_fixed).unwrap_or(0);
+                        let w = get_attr(tag, b"width").and_then(parse_fixed).unwrap_or(0);
+                        let h = get_attr(tag, b"height").and_then(parse_fixed).unwrap_or(0);
+                        let rx = get_attr(tag, b"rx").and_then(parse_fixed).unwrap_or(0);
+                        let ry = get_attr(tag, b"ry").and_then(parse_fixed).unwrap_or(rx);
+                        let rx = if rx == 0 && ry > 0 { ry } else { rx };
+
+                        if w > 0 && h > 0 {
+                            if rx == 0 && ry == 0 && elem_transform.b == 0 && elem_transform.c == 0 {
+                                if let Color::Rgba(r, g, b, a) = fill {
+                                    fill_buf.clear();
+                                    emit_rect(x, y, w, h, 0, 0, &xform, &mut fill_buf)?;
+                                    rasterizer.rasterize(&fill_buf, target_w as usize, target_h as usize, (r, g, b, a), fill_rule, out_rgba);
+                                }
+                                if let Color::Rgba(r, g, b, a) = stroke {
+                                    if stroke_width > 0 {
+                                        stroke_buf.clear();
+                                        emit_rect_stroke(x, y, w, h, stroke_width, &xform, &mut stroke_buf)?;
+                                        rasterizer.rasterize(&stroke_buf, target_w as usize, target_h as usize, (r, g, b, a), FillRule::NonZero, out_rgba);
+                                    }
+                                }
+                            } else {
+                                fill_buf.clear();
+                                emit_rect(x, y, w, h, rx, ry, &xform, &mut fill_buf)?;
+                                if let Color::Rgba(r, g, b, a) = fill {
+                                    rasterizer.rasterize(&fill_buf, target_w as usize, target_h as usize, (r, g, b, a), fill_rule, out_rgba);
+                                }
+                                if let Color::Rgba(r, g, b, a) = stroke {
+                                    if stroke_width > 0 {
+                                        generate_stroke_segments(&fill_buf, sw_screen, &mut stroke_buf)?;
+                                        rasterizer.rasterize(&stroke_buf, target_w as usize, target_h as usize, (r, g, b, a), FillRule::NonZero, out_rgba);
+                                    }
                                 }
                             }
                         }
-                    }
-                } else if elem == b"circle" {
-                    let cur = style_stack[style_depth];
-                    let fill = get_attr_or_style(tag, b"fill").and_then(parse_color).or(cur.fill).unwrap_or(Color::Rgba(0, 0, 0, 255));
-                    let stroke = get_attr_or_style(tag, b"stroke").and_then(parse_color).or(cur.stroke).unwrap_or(Color::None);
-                    let stroke_width = get_attr_or_style(tag, b"stroke-width").and_then(parse_fixed).or(cur.stroke_width).unwrap_or(ONE);
+                    } else if elem == b"circle" {
+                        let cx = get_attr(tag, b"cx").and_then(parse_fixed).unwrap_or(0);
+                        let cy = get_attr(tag, b"cy").and_then(parse_fixed).unwrap_or(0);
+                        let r = get_attr(tag, b"r").and_then(parse_fixed).unwrap_or(0);
 
-                    let cx = get_attr(tag, b"cx").and_then(parse_fixed).unwrap_or(0);
-                    let cy = get_attr(tag, b"cy").and_then(parse_fixed).unwrap_or(0);
-                    let r = get_attr(tag, b"r").and_then(parse_fixed).unwrap_or(0);
-
-                    if r > 0 {
-                        if let Color::Rgba(cr, cg, cb, ca) = fill {
-                            fill_buf.clear();
-                            emit_circle(cx, cy, r, &transform, &mut fill_buf)?;
-                            rasterizer.rasterize(&fill_buf, target_w as usize, target_h as usize, (cr, cg, cb, ca), out_rgba);
-                        }
-                        if let Color::Rgba(cr, cg, cb, ca) = stroke {
-                            if stroke_width > 0 {
-                                stroke_buf.clear();
-                                emit_circle_stroke(cx, cy, r, stroke_width, &transform, &mut stroke_buf)?;
-                                rasterizer.rasterize(&stroke_buf, target_w as usize, target_h as usize, (cr, cg, cb, ca), out_rgba);
+                        if r > 0 {
+                            if let Color::Rgba(cr, cg, cb, ca) = fill {
+                                fill_buf.clear();
+                                emit_circle(cx, cy, r, &xform, &mut fill_buf)?;
+                                rasterizer.rasterize(&fill_buf, target_w as usize, target_h as usize, (cr, cg, cb, ca), fill_rule, out_rgba);
+                            }
+                            if let Color::Rgba(cr, cg, cb, ca) = stroke {
+                                if stroke_width > 0 {
+                                    if elem_transform.is_identity() {
+                                        stroke_buf.clear();
+                                        emit_circle_stroke(cx, cy, r, stroke_width, &xform, &mut stroke_buf)?;
+                                        rasterizer.rasterize(&stroke_buf, target_w as usize, target_h as usize, (cr, cg, cb, ca), FillRule::NonZero, out_rgba);
+                                    } else {
+                                        fill_buf.clear();
+                                        emit_circle(cx, cy, r, &xform, &mut fill_buf)?;
+                                        generate_stroke_segments(&fill_buf, sw_screen, &mut stroke_buf)?;
+                                        rasterizer.rasterize(&stroke_buf, target_w as usize, target_h as usize, (cr, cg, cb, ca), FillRule::NonZero, out_rgba);
+                                    }
+                                }
                             }
                         }
-                    }
-                } else if elem == b"path" {
-                    let cur = style_stack[style_depth];
-                    let fill = get_attr_or_style(tag, b"fill").and_then(parse_color).or(cur.fill).unwrap_or(Color::Rgba(0, 0, 0, 255));
-                    let stroke = get_attr_or_style(tag, b"stroke").and_then(parse_color).or(cur.stroke).unwrap_or(Color::None);
-                    let stroke_width = get_attr_or_style(tag, b"stroke-width").and_then(parse_fixed).or(cur.stroke_width).unwrap_or(ONE);
+                    } else if elem == b"ellipse" {
+                        let cx = get_attr(tag, b"cx").and_then(parse_fixed).unwrap_or(0);
+                        let cy = get_attr(tag, b"cy").and_then(parse_fixed).unwrap_or(0);
+                        let rx = get_attr(tag, b"rx").and_then(parse_fixed).unwrap_or(0);
+                        let ry = get_attr(tag, b"ry").and_then(parse_fixed).unwrap_or(0);
 
-                    if let Some(d_bytes) = get_attr(tag, b"d") {
-                        fill_buf.clear();
-                        emit_path_d(d_bytes, &transform, &mut fill_buf)?;
-
-                        if let Color::Rgba(r, g, b, a) = fill {
-                            rasterizer.rasterize(&fill_buf, target_w as usize, target_h as usize, (r, g, b, a), out_rgba);
+                        if rx > 0 && ry > 0 {
+                            fill_buf.clear();
+                            emit_ellipse(cx, cy, rx, ry, &xform, &mut fill_buf)?;
+                            if let Color::Rgba(r, g, b, a) = fill {
+                                rasterizer.rasterize(&fill_buf, target_w as usize, target_h as usize, (r, g, b, a), fill_rule, out_rgba);
+                            }
+                            if let Color::Rgba(r, g, b, a) = stroke {
+                                if stroke_width > 0 {
+                                    generate_stroke_segments(&fill_buf, sw_screen, &mut stroke_buf)?;
+                                    rasterizer.rasterize(&stroke_buf, target_w as usize, target_h as usize, (r, g, b, a), FillRule::NonZero, out_rgba);
+                                }
+                            }
                         }
+                    } else if elem == b"line" {
+                        let x1 = get_attr(tag, b"x1").and_then(parse_fixed).unwrap_or(0);
+                        let y1 = get_attr(tag, b"y1").and_then(parse_fixed).unwrap_or(0);
+                        let x2 = get_attr(tag, b"x2").and_then(parse_fixed).unwrap_or(0);
+                        let y2 = get_attr(tag, b"y2").and_then(parse_fixed).unwrap_or(0);
+
+                        fill_buf.clear();
+                        emit_line(x1, y1, x2, y2, &xform, &mut fill_buf)?;
                         if let Color::Rgba(r, g, b, a) = stroke {
                             if stroke_width > 0 {
-                                let sw_screen = ((stroke_width as i64 * scale_stroke) >> 16) as i32;
                                 generate_stroke_segments(&fill_buf, sw_screen, &mut stroke_buf)?;
-                                rasterizer.rasterize(&stroke_buf, target_w as usize, target_h as usize, (r, g, b, a), out_rgba);
+                                rasterizer.rasterize(&stroke_buf, target_w as usize, target_h as usize, (r, g, b, a), FillRule::NonZero, out_rgba);
+                            }
+                        }
+                    } else if elem == b"polyline" {
+                        if let Some(pts_bytes) = get_attr(tag, b"points") {
+                            fill_buf.clear();
+                            emit_points(pts_bytes, false, &xform, &mut fill_buf)?;
+                            let open_len = fill_buf.len;
+                            if let Color::Rgba(r, g, b, a) = fill {
+                                if open_len > 0 {
+                                    let x_start = fill_buf.sx0[0];
+                                    let y_start = fill_buf.sy0[0];
+                                    let x_end = fill_buf.sx1[open_len - 1];
+                                    let y_end = fill_buf.sy1[open_len - 1];
+                                    if x_start != x_end || y_start != y_end {
+                                        fill_buf.push(x_end, y_end, x_start, y_start)?;
+                                    }
+                                    rasterizer.rasterize(&fill_buf, target_w as usize, target_h as usize, (r, g, b, a), fill_rule, out_rgba);
+                                    fill_buf.len = open_len;
+                                }
+                            }
+                            if let Color::Rgba(r, g, b, a) = stroke {
+                                if stroke_width > 0 {
+                                    generate_stroke_segments(&fill_buf, sw_screen, &mut stroke_buf)?;
+                                    rasterizer.rasterize(&stroke_buf, target_w as usize, target_h as usize, (r, g, b, a), FillRule::NonZero, out_rgba);
+                                }
+                            }
+                        }
+                    } else if elem == b"polygon" {
+                        if let Some(pts_bytes) = get_attr(tag, b"points") {
+                            fill_buf.clear();
+                            emit_points(pts_bytes, true, &xform, &mut fill_buf)?;
+                            if let Color::Rgba(r, g, b, a) = fill {
+                                rasterizer.rasterize(&fill_buf, target_w as usize, target_h as usize, (r, g, b, a), fill_rule, out_rgba);
+                            }
+                            if let Color::Rgba(r, g, b, a) = stroke {
+                                if stroke_width > 0 {
+                                    generate_stroke_segments(&fill_buf, sw_screen, &mut stroke_buf)?;
+                                    rasterizer.rasterize(&stroke_buf, target_w as usize, target_h as usize, (r, g, b, a), FillRule::NonZero, out_rgba);
+                                }
+                            }
+                        }
+                    } else if elem == b"path" {
+                        if let Some(d_bytes) = get_attr(tag, b"d") {
+                            fill_buf.clear();
+                            emit_path_d(d_bytes, &xform, &mut fill_buf)?;
+
+                            if let Color::Rgba(r, g, b, a) = fill {
+                                rasterizer.rasterize(&fill_buf, target_w as usize, target_h as usize, (r, g, b, a), fill_rule, out_rgba);
+                            }
+                            if let Color::Rgba(r, g, b, a) = stroke {
+                                if stroke_width > 0 {
+                                    generate_stroke_segments(&fill_buf, sw_screen, &mut stroke_buf)?;
+                                    rasterizer.rasterize(&stroke_buf, target_w as usize, target_h as usize, (r, g, b, a), FillRule::NonZero, out_rgba);
+                                }
                             }
                         }
                     }
