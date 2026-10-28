@@ -6,10 +6,31 @@
 use super::TlsError;
 
 pub const SIG_SCHEME_ED25519: u16 = 0x0807;
+/// Code points the client knows the name of but explicitly does NOT verify.
+/// They are never advertised and never accepted; kept only so rejection can be
+/// named precisely in diagnostics and tests.
 pub const SIG_SCHEME_ECDSA_SECP256R1_SHA256: u16 = 0x0403;
 pub const SIG_SCHEME_RSA_PSS_RSAE_SHA256: u16 = 0x0804;
-#[doc(hidden)]
-pub const SIG_SCHEME_MOCK_TEST: u16 = 0xff01;
+
+/// Ed25519 `SubjectPublicKeyInfo` algorithm OID (`1.3.101.112`) body bytes.
+pub const ED25519_SPKI_OID: [u8; 3] = [0x2b, 0x65, 0x70];
+
+/// The ONLY signature schemes this client advertises in its ClientHello and the
+/// only ones the verifier can actually check. Advertised set and accepted set
+/// are this single list; nothing else may add or drop a code point.
+pub const SUPPORTED_SIG_SCHEMES: [u16; 1] = [SIG_SCHEME_ED25519];
+
+/// True when `scheme` is in [`SUPPORTED_SIG_SCHEMES`].
+pub const fn is_supported_sig_scheme(scheme: u16) -> bool {
+    let mut i = 0;
+    while i < SUPPORTED_SIG_SCHEMES.len() {
+        if SUPPORTED_SIG_SCHEMES[i] == scheme {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
 
 /// ASN.1 DER Tag constants
 pub const TAG_BOOLEAN: u8 = 0x01;
@@ -235,51 +256,83 @@ impl<'a> ParsedCertificate<'a> {
     /// Matches the certificate SAN (dNSName) or CN against `expected_hostname`.
     ///
     /// Following RFC 6125 / RFC 5280:
-    /// - Checks Subject Alternative Name (SAN) extension first if present.
-    /// - If no SAN DNS names exist, falls back to Common Name (CN).
-    /// - Supports case-insensitive exact matching and single-level wildcard patterns (*.example.com).
+    /// - A subjectAltName extension of any type disables the Common Name fallback:
+    ///   once a SAN extension is present, only its dNSNames can authorize identity.
+    /// - Only when the certificate carries no SAN extension at all does the CN
+    ///   become the identifier.
+    /// - Exact and single-label wildcard (`*.example.com`) matching, case-insensitive.
+    /// - An empty reference identity never matches; this fails closed.
     pub fn matches_hostname(&self, expected_hostname: &str) -> bool {
-        let mut san_count = 0usize;
-        let mut san_matched = false;
-
-        for_each_san_dns_name(self.tbs_raw, |san_name| {
-            san_count += 1;
-            if hostname_matches(san_name, expected_hostname) {
-                san_matched = true;
-                return true;
-            }
-            false
-        });
-
-        if san_count > 0 {
-            return san_matched;
+        if expected_hostname.is_empty() {
+            return false;
         }
 
-        if let Some(cn) = self.extract_common_name() {
-            if hostname_matches(cn, expected_hostname) {
-                return true;
-            }
+        let san = SubjectAltNames::scan(self.tbs_raw, expected_hostname);
+        if san.extension_present {
+            // SAN dominates: a non-matching or DNS-name-free SAN is a rejection,
+            // never a reason to consult the Common Name.
+            return san.matched;
         }
 
-        false
+        match self.extract_common_name() {
+            Some(cn) => hostname_matches(cn, expected_hostname),
+            None => false,
+        }
     }
 }
 
 /// Matches a reference hostname against a certificate hostname pattern (RFC 6125).
+///
+/// Rejects: empty names on either side, wildcards outside the leftmost label,
+/// a wildcard whose suffix is empty or a bare top-level label (so `*.com` can
+/// never authorize `evil.com`), and any prefix/truncated acceptance.
 pub fn hostname_matches(pattern: &str, hostname: &str) -> bool {
+    if pattern.is_empty() || hostname.is_empty() {
+        return false;
+    }
+
+    // A reference identity that itself carries a wildcard is not a name to
+    // match: it can only ever arrive from a malformed SNI/URL, so it is
+    // refused before any comparison (including exact equality).
+    if hostname.bytes().any(|b| b == b'*') {
+        return false;
+    }
+
     if pattern.eq_ignore_ascii_case(hostname) {
+        // An exact match must be the whole name; this is byte-for-byte equality
+        // modulo case, so no prefix of either side can be accepted here.
         return true;
     }
-    if let Some(suffix) = pattern.strip_prefix("*.") {
-        if let Some(dot_idx) = hostname.find('.') {
-            let prefix = &hostname[..dot_idx];
-            let host_suffix = &hostname[dot_idx + 1..];
-            if !prefix.is_empty() && host_suffix.eq_ignore_ascii_case(suffix) {
-                return true;
-            }
-        }
+
+    // RFC 6125 wildcard form: "*." followed by a multi-label suffix. A pattern
+    // that embeds '*' anywhere else is not a wildcard we are allowed to apply.
+    let suffix = match pattern.strip_prefix("*.") {
+        Some(s) => s,
+        None => return false,
+    };
+    if suffix.is_empty() || suffix.bytes().any(|b| b == b'*') {
+        return false;
     }
-    false
+    // The wildcard may cover exactly one label of the reference identity.
+    let (prefix, host_suffix) = match split_first_label(hostname) {
+        Some(pair) => pair,
+        None => return false,
+    };
+    if prefix.is_empty() || host_suffix.is_empty() {
+        return false;
+    }
+    // The remaining suffix must itself be a fully qualified name (at least one
+    // dot), otherwise "*.com" would authorize any registrable ".com" host.
+    if !host_suffix.contains('.') {
+        return false;
+    }
+    host_suffix.eq_ignore_ascii_case(suffix)
+}
+
+/// Splits `hostname` into its first label and the remainder after the first dot.
+fn split_first_label(hostname: &str) -> Option<(&str, &str)> {
+    let dot_idx = hostname.find('.')?;
+    Some((&hostname[..dot_idx], &hostname[dot_idx + 1..]))
 }
 
 /// Extracts Common Name (CN) string from a DER-encoded Subject Name.
@@ -305,24 +358,56 @@ pub fn extract_cn<'a>(subject: &'a [u8]) -> Option<&'a str> {
     search(subject, 0)
 }
 
-/// Traverses TBSCertificate extensions to find Subject Alternative Name (SAN) dNSNames.
-pub fn for_each_san_dns_name<F: FnMut(&str) -> bool>(tbs_raw: &[u8], mut f: F) -> bool {
-    let Ok((tbs_tag, tbs_content, _)) = read_tlv(tbs_raw) else {
-        return false;
-    };
-    if tbs_tag != TAG_SEQUENCE {
-        return false;
-    }
+/// Upper bound for a reference identity this client may advertise (SNI) and
+/// verify. Both the ClientHello ServerName length field and the DER dNSName
+/// length are bounded by this, so a longer name is rejected outright rather
+/// than silently truncated or dropped from the ClientHello.
+pub const MAX_REFERENCE_IDENTITY_LEN: usize = 255;
 
-    let mut cur = tbs_content;
-    while !cur.is_empty() {
-        let Ok((tag, content, rem)) = read_tlv(cur) else {
-            break;
+/// Result of the single shared pass over a TBSCertificate's subjectAltName
+/// extensions. One walk feeds both the "is a SAN present" decision and the
+/// dNSName match, so no two callers can disagree about the SAN's meaning.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SubjectAltNames {
+    /// A subjectAltName extension was found, whatever name types it carries.
+    pub extension_present: bool,
+    /// Number of decodable dNSNames found.
+    pub dns_name_count: usize,
+    /// At least one dNSName authorizes the reference identity.
+    pub matched: bool,
+}
+
+impl SubjectAltNames {
+    /// Scans TBSCertificate extensions for `id-ce-subjectAltName` (OID 2.5.29.17)
+    /// and matches each dNSName against `reference_identity`.
+    pub fn scan(tbs_raw: &[u8], reference_identity: &str) -> Self {
+        let mut out = Self {
+            extension_present: false,
+            dns_name_count: 0,
+            matched: false,
         };
-        cur = rem;
+        if reference_identity.is_empty() || reference_identity.len() > MAX_REFERENCE_IDENTITY_LEN {
+            return out;
+        }
 
-        // [3] EXPLICIT Extensions
-        if tag == 0xa3 {
+        let Ok((tbs_tag, tbs_content, _)) = read_tlv(tbs_raw) else {
+            return out;
+        };
+        if tbs_tag != TAG_SEQUENCE {
+            return out;
+        }
+
+        let mut cur = tbs_content;
+        while !cur.is_empty() {
+            let Ok((tag, content, rem)) = read_tlv(cur) else {
+                break;
+            };
+            cur = rem;
+
+            // [3] EXPLICIT Extensions
+            if tag != 0xa3 {
+                continue;
+            }
             let Ok((tag_exts, exts_content, _)) = read_tlv(content) else {
                 break;
             };
@@ -348,51 +433,59 @@ pub fn for_each_san_dns_name<F: FnMut(&str) -> bool>(tbs_raw: &[u8], mut f: F) -
                 }
 
                 // OID 2.5.29.17 = id-ce-subjectAltName: [0x55, 0x1d, 0x11]
-                if oid_val == [0x55, 0x1d, 0x11] {
-                    let Ok((tag1, val1, rem1)) = read_tlv(after_oid) else {
-                        continue;
-                    };
-                    let octet_bytes = if tag1 == TAG_BOOLEAN {
-                        let Ok((tag2, val2, _)) = read_tlv(rem1) else {
-                            continue;
-                        };
-                        if tag2 != TAG_OCTET_STRING {
-                            continue;
-                        }
-                        val2
-                    } else if tag1 == TAG_OCTET_STRING {
-                        val1
-                    } else {
-                        continue;
-                    };
+                if oid_val != [0x55, 0x1d, 0x11] {
+                    continue;
+                }
+                out.extension_present = true;
 
-                    let Ok((tag_gn, gn_content, _)) = read_tlv(octet_bytes) else {
+                let Ok((tag1, val1, rem1)) = read_tlv(after_oid) else {
+                    continue;
+                };
+                let octet_bytes = if tag1 == TAG_BOOLEAN {
+                    let Ok((tag2, val2, _)) = read_tlv(rem1) else {
                         continue;
                     };
-                    if tag_gn != TAG_SEQUENCE {
+                    if tag2 != TAG_OCTET_STRING {
                         continue;
                     }
+                    val2
+                } else if tag1 == TAG_OCTET_STRING {
+                    val1
+                } else {
+                    continue;
+                };
 
-                    let mut cur_name = gn_content;
-                    while !cur_name.is_empty() {
-                        let Ok((tag_name, name_val, rem_name)) = read_tlv(cur_name) else {
-                            break;
-                        };
-                        cur_name = rem_name;
-                        // [2] IMPLICIT = dNSName: tag 0x82
-                        if tag_name == 0x82 {
-                            if let Ok(dns_str) = core::str::from_utf8(name_val) {
-                                if f(dns_str) {
-                                    return true;
-                                }
-                            }
+                let Ok((tag_gn, gn_content, _)) = read_tlv(octet_bytes) else {
+                    continue;
+                };
+                if tag_gn != TAG_SEQUENCE {
+                    continue;
+                }
+
+                let mut cur_name = gn_content;
+                while !cur_name.is_empty() {
+                    let Ok((tag_name, name_val, rem_name)) = read_tlv(cur_name) else {
+                        break;
+                    };
+                    cur_name = rem_name;
+                    // [2] IMPLICIT = dNSName: tag 0x82
+                    if tag_name != 0x82 {
+                        continue;
+                    }
+                    // An undecodable or over-long dNSName still counts as a SAN
+                    // entry (it suppresses the CN fallback) but can never match.
+                    out.dns_name_count += 1;
+                    if let Ok(dns_str) = core::str::from_utf8(name_val) {
+                        if hostname_matches(dns_str, reference_identity) {
+                            out.matched = true;
+                            return out;
                         }
                     }
                 }
             }
         }
+        out
     }
-    false
 }
 
 /// Pluggable Certificate and Signature Verifier trait for TLS 1.3 clients.
@@ -400,13 +493,31 @@ pub trait CertificateVerifier {
     /// Validates the certificate structure, chain, and validity period.
     fn verify_certificate(&self, cert: &ParsedCertificate) -> Result<(), TlsError>;
 
-    /// Verifies the TLS 1.3 `CertificateVerify` signature.
+    /// Validates a chain entry occupying the trust-anchor position: it must be
+    /// self-signed and a member of this verifier's trust store. No hostname
+    /// policy applies at this position — only the end-entity certificate carries
+    /// a reference identity.
+    fn verify_trust_anchor(&self, cert: &ParsedCertificate) -> Result<(), TlsError>;
+
+    /// The reference identity (RFC 6125) this verifier pins names against.
+    ///
+    /// `None` means the verifier declares no identity, so it can never drive a
+    /// live handshake: the client refuses to emit a ClientHello whose advertised
+    /// SNI has no pinned counterpart.
+    fn reference_identity(&self) -> Option<&str>;
+
+    /// Verifies the TLS 1.3 `CertificateVerify` signature against the leaf
+    /// certificate's public key.
+    ///
+    /// `public_key` is the leaf `subjectPublicKey` bytes, taken from the
+    /// certificate the client actually validated — never a caller-supplied
+    /// substitute.
     ///
     /// `context_and_hash` is the exact message specified in RFC 8446 Section 4.4.3:
     ///   64 spaces (0x20) || "TLS 1.3, server CertificateVerify" || 0x00 || transcript_hash
     fn verify_server_signature(
         &self,
-        cert: &ParsedCertificate,
+        public_key: &[u8],
         algorithm: u16,
         context_and_hash: &[u8],
         signature: &[u8],
@@ -415,15 +526,18 @@ pub trait CertificateVerifier {
 
 /// Synthetic bootstrap InterOS root CA certificate (RFC 5280 DER format).
 ///
-/// **Platform Trust Scope:**
-/// - **Allows:** Self-signed root matching for the synthetic InterOS test root CA in local
-///   offline test harnesses when matched by exact DER or subject/SPKI.
-/// - **Does NOT allow:** Real-world public internet PKI or production CA chains (e.g.
-///   WebPKI / Let's Encrypt / DigiCert) cannot validate against this synthetic root because
-///   its SubjectPublicKeyInfo carries placeholder keys (0x09 repeated) and dummy signature
-///   bytes (0x55 repeated).
-/// - Production client deployments connecting to external services must supply real trusted
-///   root CA DER certificates via [`DefaultCertVerifier::with_roots`].
+/// **TEST FIXTURE ONLY — NOT A TRUST ANCHOR.**
+///
+/// This certificate carries placeholder material: its `SubjectPublicKeyInfo`
+/// public key is 32 bytes of `0x09` and its signature is 64 bytes of `0x55`.
+/// It cannot sign anything and no private key for it exists, so it is a
+/// *shape* fixture for the parser, not a credential.
+///
+/// It is therefore compiled out of every non-test build (`#[cfg(test)]`), so
+/// no shipped image exports a mock CA and no production handshake can ever
+/// treat this blob as "verified". A platform that wants a trust anchor must
+/// install real root DER through [`DefaultCertVerifier::with_roots`].
+#[cfg(test)]
 pub const INTEROS_ROOT_CA_DER: &[u8] = &[
     0x30, 0x81, 0xc6, 0x30, 0x7a, 0x02, 0x01, 0x01, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x30,
     0x10, 0x30, 0x0e, 0x06, 0x03, 0x55, 0x04, 0x03, 0x0c, 0x07, 0x49, 0x6e, 0x74, 0x65, 0x72, 0x4f,
@@ -440,11 +554,26 @@ pub const INTEROS_ROOT_CA_DER: &[u8] = &[
     0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55,
 ];
 
-/// Default trusted root store pointing to the synthetic local test root.
-pub static DEFAULT_TRUSTED_ROOTS: &[&[u8]] = &[INTEROS_ROOT_CA_DER];
+/// The trust store a shipped client starts with: **empty**.
+///
+/// WHY this is empty and not a bundled CA: a trust anchor is a claim that a
+/// key holder is allowed to vouch for the world. The InterOS tree has no
+/// public root CA, so bundling one would be a fabricated credential that a
+/// server could present and have "verified".
+///
+/// Consequences, stated plainly:
+/// - A default [`DefaultCertVerifier`] validates **nothing**. Every handshake
+///   against it fails closed with [`TlsError::CertificateVerificationFailed`].
+/// - A platform that installs real roots must do so explicitly with
+///   [`DefaultCertVerifier::with_roots`]; there is no implicit fallback.
+pub const DEFAULT_TRUSTED_ROOTS: &[&[u8]] = &[];
 
 /// Default certificate verifier: enforces DER structure, validity dates,
 /// SubjectPublicKeyInfo presence, reference hostname match, and standard handshake signatures.
+///
+/// The trust store it starts with is [`DEFAULT_TRUSTED_ROOTS`], which is
+/// **empty**: a default verifier therefore trusts no certificate at all until
+/// a platform installs real roots with [`DefaultCertVerifier::with_roots`].
 #[derive(Clone, Copy, Debug)]
 pub struct DefaultCertVerifier<'a> {
     pub expected_hostname: Option<&'a str>,
@@ -488,6 +617,12 @@ impl<'a> CertificateVerifier for DefaultCertVerifier<'a> {
     fn verify_certificate(&self, cert: &ParsedCertificate) -> Result<(), TlsError> {
         cert.check_validity()?;
 
+        // Only Ed25519 keys are accepted: that is the single scheme the client
+        // advertises and the single signature path implemented here.
+        if cert.spki_algorithm_oid != ED25519_SPKI_OID {
+            return Err(TlsError::UnsupportedSignatureScheme);
+        }
+
         // Hostname validation against reference identifier (SNI).
         // Must fail closed if expected_hostname is missing or fails to match;
         // no silent skipping via an unverified Option path.
@@ -496,86 +631,84 @@ impl<'a> CertificateVerifier for DefaultCertVerifier<'a> {
             return Err(TlsError::CertificateVerificationFailed);
         }
 
-        // Validate certificate trust against embedded trusted root store
+        // Validate certificate trust against the pinned trust store.
+        //
+        // A self-issued certificate is only trusted when its exact DER (or its
+        // subject + SPKI) is pinned in the store — there is no signature to
+        // check, so the pin IS the proof. An issued certificate must be
+        // *actually* signed by a pinned self-signed anchor, verified with the
+        // one scheme the ClientHello advertised. That verification is never
+        // skipped for an inconvenient algorithm and its result is never
+        // discarded: any failure aborts here.
         if cert.is_self_signed() {
-            let mut trusted = false;
-            for root_der in self.trusted_roots {
-                if *root_der == cert.raw {
-                    trusted = true;
-                    break;
-                }
-                if let Ok(root_cert) = ParsedCertificate::parse(root_der) {
-                    if root_cert.subject_raw == cert.subject_raw
-                        && root_cert.spki_public_key == cert.spki_public_key
-                    {
-                        trusted = true;
-                        break;
-                    }
-                }
-            }
-            if !trusted {
-                return Err(TlsError::CertificateVerificationFailed);
-            }
-        } else {
-            let mut issuer_matched = false;
-            for root_der in self.trusted_roots {
-                if let Ok(root_cert) = ParsedCertificate::parse(root_der) {
-                    if root_cert.subject_raw == cert.issuer_raw {
-                        if cert.spki_algorithm_oid == [0x2b, 0x65, 0x70] {
-                            crate::tls::ed25519::verify_ed25519(
-                                root_cert.spki_public_key,
-                                cert.tbs_raw,
-                                cert.signature_value,
-                            ).map_err(|_| TlsError::CertificateVerificationFailed)?;
-                        }
-                        issuer_matched = true;
-                        break;
-                    }
-                }
-            }
-            if !issuer_matched {
-                return Err(TlsError::CertificateVerificationFailed);
-            }
+            return self.verify_trust_anchor(cert);
         }
 
-        Ok(())
+        for root_der in self.trusted_roots {
+            let Ok(root_cert) = ParsedCertificate::parse(root_der) else {
+                continue;
+            };
+            if !root_cert.is_self_signed() || root_cert.spki_algorithm_oid != ED25519_SPKI_OID {
+                continue;
+            }
+            if root_cert.subject_raw != cert.issuer_raw {
+                continue;
+            }
+            if cert.sig_alg_oid != ED25519_SPKI_OID {
+                return Err(TlsError::UnsupportedSignatureScheme);
+            }
+            super::ed25519::verify_ed25519(
+                root_cert.spki_public_key,
+                cert.tbs_raw,
+                cert.signature_value,
+            )
+            .map_err(|_| TlsError::CertificateVerificationFailed)?;
+            return Ok(());
+        }
+
+        Err(TlsError::CertificateVerificationFailed)
+    }
+
+    fn reference_identity(&self) -> Option<&str> {
+        self.expected_hostname.filter(|host| !host.is_empty())
+    }
+
+    fn verify_trust_anchor(&self, cert: &ParsedCertificate) -> Result<(), TlsError> {
+        cert.check_validity()?;
+        if !cert.is_self_signed() {
+            return Err(TlsError::CertificateVerificationFailed);
+        }
+        if cert.spki_algorithm_oid != ED25519_SPKI_OID {
+            return Err(TlsError::UnsupportedSignatureScheme);
+        }
+        for root_der in self.trusted_roots {
+            if *root_der == cert.raw {
+                return Ok(());
+            }
+            if let Ok(root_cert) = ParsedCertificate::parse(root_der) {
+                if root_cert.subject_raw == cert.subject_raw
+                    && root_cert.spki_public_key == cert.spki_public_key
+                {
+                    return Ok(());
+                }
+            }
+        }
+        Err(TlsError::CertificateVerificationFailed)
     }
 
     fn verify_server_signature(
         &self,
-        cert: &ParsedCertificate,
+        public_key: &[u8],
         algorithm: u16,
         context_and_hash: &[u8],
         signature: &[u8],
     ) -> Result<(), TlsError> {
-        cert.check_validity()?;
-
-        match algorithm {
-            SIG_SCHEME_ED25519 => {
-                crate::tls::ed25519::verify_ed25519(cert.spki_public_key, context_and_hash, signature)
-            }
-            _ => Err(TlsError::UnsupportedSignatureScheme),
+        // Accepted set is the advertised set: nothing outside
+        // SUPPORTED_SIG_SCHEMES can be verified here, and nothing advertised
+        // falls through unverified.
+        if !is_supported_sig_scheme(algorithm) {
+            return Err(TlsError::UnsupportedSignatureScheme);
         }
-    }
-}
-
-/// Permissive verifier reserved strictly for internal test fixtures and mock handshakes.
-/// Not part of the public sovereign TLS API.
-#[doc(hidden)]
-pub struct AllowAnyCertVerifier;
-
-impl CertificateVerifier for AllowAnyCertVerifier {
-    fn verify_certificate(&self, _cert: &ParsedCertificate) -> Result<(), TlsError> {
-        Ok(())
-    }
-
-    fn verify_server_signature(
-        &self,
-        _cert: &ParsedCertificate,
-        _algorithm: u16,
-        _context_and_hash: &[u8],
-        _signature: &[u8],
-    ) -> Result<(), TlsError> {
-        Ok(())
+        crate::tls::ed25519::verify_ed25519(public_key, context_and_hash, signature)
     }
 }

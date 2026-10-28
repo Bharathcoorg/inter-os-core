@@ -3,8 +3,13 @@
 //! Provides `TlsClient<S>` wrapping any byte transport stream implementing `TlsStream`,
 //! as well as sans-I/O `TlsClientSession` for direct buffer processing. Pure `#![no_std]`.
 
-use super::certificate::{CertificateVerifier, DefaultCertVerifier, ParsedCertificate};
-use super::handshake::{HandshakeClient, HandshakeState, HANDSHAKE_CERTIFICATE, HANDSHAKE_CERTIFICATE_VERIFY, HANDSHAKE_ENCRYPTED_EXTENSIONS, HANDSHAKE_FINISHED};
+use super::certificate::{
+    CertificateVerifier, DefaultCertVerifier, ParsedCertificate, MAX_REFERENCE_IDENTITY_LEN,
+};
+use super::handshake::{
+    HandshakeClient, HandshakeState, HANDSHAKE_CERTIFICATE, HANDSHAKE_CERTIFICATE_VERIFY,
+    HANDSHAKE_ENCRYPTED_EXTENSIONS, HANDSHAKE_FINISHED,
+};
 use super::record::{ContentType, RecordCipher, RECORD_HEADER_LEN};
 use super::TlsError;
 
@@ -70,7 +75,8 @@ pub struct TlsConfig<'a> {
 
 impl<'a> TlsConfig<'a> {
     /// Creates a validated TLS 1.3 client configuration.
-    /// Fails with Unavailable if required entropy, keys, or peer name are missing or static defaults.
+    /// Fails with Unavailable if required entropy, keys, or peer name are missing or static defaults,
+    /// or if the verifier does not pin exactly the name this client will advertise in SNI.
     pub fn new(
         server_name: &'a str,
         random: [u8; 32],
@@ -78,11 +84,17 @@ impl<'a> TlsConfig<'a> {
         verifier: &'a dyn CertificateVerifier,
     ) -> Result<Self, TlsError> {
         if server_name.is_empty()
+            || server_name.len() > MAX_REFERENCE_IDENTITY_LEN
             || random == [0u8; 32]
             || random == [0x42u8; 32]
             || private_key == [0u8; 32]
             || private_key == [0x24u8; 32]
         {
+            return Err(TlsError::Unavailable);
+        }
+        // What the ClientHello advertises and what the verifier checks must be
+        // the same identity, otherwise the handshake proves a name nobody asked for.
+        if verifier.reference_identity() != Some(server_name) {
             return Err(TlsError::Unavailable);
         }
         Ok(Self {
@@ -135,29 +147,41 @@ impl<'a> TlsClientSession<'a> {
         }
     }
 
-    /// Emits ClientHello into `out`. Returns total record length.
-    pub fn start_handshake(&mut self, out: &mut [u8]) -> Result<usize, TlsError> {
-        if self.config.server_name.is_none()
-            || self.config.private_key == [0u8; 32]
+    /// The reference identity this session is allowed to use, or nothing.
+    ///
+    /// Enforces, on every live handshake entry point (so a hand-built `TlsConfig`
+    /// through the public fields cannot bypass it):
+    /// - a non-empty, wire-length peer name is configured,
+    /// - the key material is not a static/default value,
+    /// - the verifier pins exactly that name, so the identity advertised in the
+    ///   ClientHello is the identity the certificate is checked against.
+    fn require_live_identity(&self) -> Result<&'a str, TlsError> {
+        let host = self.config.server_name.ok_or(TlsError::Unavailable)?;
+        if host.is_empty() || host.len() > MAX_REFERENCE_IDENTITY_LEN {
+            return Err(TlsError::Unavailable);
+        }
+        if self.config.private_key == [0u8; 32]
             || self.config.private_key == [0x24u8; 32]
             || self.config.random == [0u8; 32]
             || self.config.random == [0x42u8; 32]
         {
             return Err(TlsError::Unavailable);
         }
-        self.handshake.encode_client_hello(&self.config.random, self.config.server_name, out)
+        if self.config.verifier.reference_identity() != Some(host) {
+            return Err(TlsError::Unavailable);
+        }
+        Ok(host)
+    }
+
+    /// Emits ClientHello into `out`. Returns total record length.
+    pub fn start_handshake(&mut self, out: &mut [u8]) -> Result<usize, TlsError> {
+        let host = self.require_live_identity()?;
+        self.handshake.encode_client_hello(&self.config.random, Some(host), out)
     }
 
     /// Feeds ServerHello record.
     pub fn handle_server_hello(&mut self, record: &[u8]) -> Result<(), TlsError> {
-        if self.config.server_name.is_none()
-            || self.config.private_key == [0u8; 32]
-            || self.config.private_key == [0x24u8; 32]
-            || self.config.random == [0u8; 32]
-            || self.config.random == [0x42u8; 32]
-        {
-            return Err(TlsError::Unavailable);
-        }
+        self.require_live_identity()?;
         if record.len() < RECORD_HEADER_LEN {
             return Err(TlsError::BadRecordLength);
         }
@@ -182,6 +206,8 @@ impl<'a> TlsClientSession<'a> {
         &mut self,
         record: &[u8],
     ) -> Result<(), TlsError> {
+        let identity = self.require_live_identity()?;
+        let verifier: &'a dyn CertificateVerifier = self.config.verifier;
         let recv_cipher = self.recv_cipher.as_mut().ok_or(TlsError::UnexpectedMessage)?;
 
         let mut decrypted_payload = [0u8; 2048];
@@ -201,33 +227,27 @@ impl<'a> TlsClientSession<'a> {
                 self.handshake.process_encrypted_extensions(payload)?;
             }
             HANDSHAKE_CERTIFICATE => {
-                let cert = self.handshake.process_certificate(payload, self.config.verifier)?;
-                if cert.spki_public_key.len() == 32 {
-                    self.server_cert_spki.copy_from_slice(cert.spki_public_key);
-                    self.has_server_cert = true;
+                let cert = self.handshake.process_certificate(payload, verifier, identity)?;
+                // Pin the verified leaf key for CertificateVerify. An
+                // unexpected key length can never be pinned, so the handshake
+                // stops here instead of carrying a partial identity forward.
+                if cert.spki_public_key.len() != self.server_cert_spki.len() {
+                    self.has_server_cert = false;
+                    return Err(TlsError::CertificateVerificationFailed);
                 }
+                self.server_cert_spki.copy_from_slice(cert.spki_public_key);
+                self.has_server_cert = true;
             }
             HANDSHAKE_CERTIFICATE_VERIFY => {
-                let spki_to_verify = if self.has_server_cert {
-                    &self.server_cert_spki
-                } else {
-                    &[1u8; 32]
-                };
-                let fallback_cert = ParsedCertificate {
-                    raw: &[],
-                    tbs_raw: &[],
-                    version: 3,
-                    serial_number: &[1],
-                    issuer_raw: &[1],
-                    not_before: &[1],
-                    not_after: &[1],
-                    subject_raw: &[1],
-                    spki_algorithm_oid: &[1],
-                    spki_public_key: spki_to_verify,
-                    sig_alg_oid: &[1],
-                    signature_value: &[1],
-                };
-                self.handshake.process_certificate_verify(payload, &fallback_cert, self.config.verifier)?;
+                // The signature is only ever checked against the leaf key the
+                // client validated in the Certificate step. There is no
+                // substitute key and no synthetic certificate on this path.
+                if !self.has_server_cert {
+                    return Err(TlsError::UnexpectedMessage);
+                }
+                let leaf_public_key = self.server_cert_spki;
+                self.handshake
+                    .process_certificate_verify(payload, &leaf_public_key, verifier)?;
             }
             HANDSHAKE_FINISHED => {
                 self.handshake.process_server_finished(payload)?;

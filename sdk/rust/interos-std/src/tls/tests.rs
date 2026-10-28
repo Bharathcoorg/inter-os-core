@@ -1,15 +1,145 @@
 //! TLS 1.3 Client and Certificate Trust Unit Tests
 
 use super::certificate::{
-    AllowAnyCertVerifier, CertificateVerifier, DefaultCertVerifier, ParsedCertificate,
-    INTEROS_ROOT_CA_DER, SIG_SCHEME_ECDSA_SECP256R1_SHA256, SIG_SCHEME_ED25519,
+    hostname_matches, is_supported_sig_scheme, CertificateVerifier, DefaultCertVerifier,
+    ParsedCertificate, SubjectAltNames, INTEROS_ROOT_CA_DER, SIG_SCHEME_ECDSA_SECP256R1_SHA256,
+    SIG_SCHEME_ED25519, SIG_SCHEME_RSA_PSS_RSAE_SHA256, SUPPORTED_SIG_SCHEMES,
 };
 use super::client::{TlsClientSession, TlsConfig};
 use super::handshake::{
-    HandshakeClient, HandshakeState, HANDSHAKE_CERTIFICATE_VERIFY,
+    HandshakeClient, HandshakeState, MAX_CHAIN_DEPTH, HANDSHAKE_CERTIFICATE,
+    HANDSHAKE_CERTIFICATE_VERIFY, SUPPORTED_GROUPS, TLS_CIPHER_CHACHA20_POLY1305_SHA256,
+    TLS_VERSION_1_3,
 };
 use super::ed25519::Sha512;
 use super::TlsError;
+
+/// Test-only permissive verifier. It lives here, inside `#[cfg(test)]`, and is
+/// therefore NOT linked into any guest/userspace build: no production handshake
+/// path can reach it. It also declares no reference identity, which the client
+/// refuses on a live handshake, so it can never report "verified" end-to-end.
+struct AnyPassVerifier;
+
+impl CertificateVerifier for AnyPassVerifier {
+    fn verify_certificate(&self, _cert: &ParsedCertificate) -> Result<(), TlsError> {
+        Ok(())
+    }
+    fn verify_trust_anchor(&self, _cert: &ParsedCertificate) -> Result<(), TlsError> {
+        Ok(())
+    }
+    fn reference_identity(&self) -> Option<&str> {
+        None
+    }
+    fn verify_server_signature(
+        &self,
+        _public_key: &[u8],
+        _algorithm: u16,
+        _context_and_hash: &[u8],
+        _signature: &[u8],
+    ) -> Result<(), TlsError> {
+        Ok(())
+    }
+}
+
+/// A name longer than any ClientHello ServerName / DER dNSName field can carry.
+const OVER_LONG_HOST: &[u8; 300] = &[b'a'; 300];
+
+/// The longest name the ClientHello may still advertise (255-byte bound), used
+/// to prove the record no longer overruns a caller's buffer.
+const LONG_SNI_NAME: &str = "a.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.test";
+static LONG_HOST_VERIFIER: DefaultCertVerifier<'static> =
+    DefaultCertVerifier::for_host(LONG_SNI_NAME);
+
+/// Builds a TLS 1.3 Certificate handshake message from raw DER chain entries.
+/// Each entry is framed as: cert length (3) || der || entry extensions (2 bytes, zero).
+fn build_certificate_message(entries: &[&[u8]], out: &mut [u8]) -> usize {
+    let mut list_len = 0usize;
+    for entry in entries {
+        list_len += 3 + entry.len() + 2;
+    }
+    let body_len = 1 + 3 + list_len; // request context length + list length + list
+    let mut pos = 0;
+    out[pos] = HANDSHAKE_CERTIFICATE;
+    pos += 1;
+    out[1] = (body_len >> 16) as u8;
+    out[2] = (body_len >> 8) as u8;
+    out[3] = (body_len & 0xff) as u8;
+    pos += 3;
+    out[pos] = 0; // certificate_request_context: empty
+    pos += 1;
+    out[pos] = (list_len >> 16) as u8;
+    out[pos + 1] = (list_len >> 8) as u8;
+    out[pos + 2] = (list_len & 0xff) as u8;
+    pos += 3;
+    for entry in entries {
+        let n = entry.len();
+        out[pos] = (n >> 16) as u8;
+        out[pos + 1] = (n >> 8) as u8;
+        out[pos + 2] = (n & 0xff) as u8;
+        pos += 3;
+        out[pos..pos + n].copy_from_slice(entry);
+        pos += n;
+        out[pos] = 0;
+        out[pos + 1] = 0;
+        pos += 2;
+    }
+    pos
+}
+
+/// Assembles a ServerHello handshake message body for parser tests.
+fn build_server_hello(group: u16) -> ([u8; 180], usize) {
+    build_server_hello_with(group, TLS_CIPHER_CHACHA20_POLY1305_SHA256, TLS_VERSION_1_3)
+}
+
+/// Assembles a ServerHello with an explicit cipher suite and negotiated
+/// version, so the "accepted set == advertised set" gate can be exercised
+/// with values this client never advertised.
+fn build_server_hello_with(group: u16, cipher_suite: u16, version: u16) -> ([u8; 180], usize) {
+    let mut body = [0u8; 176];
+    let mut pos = 0;
+    body[pos..pos + 2].copy_from_slice(&0x0303u16.to_be_bytes());
+    pos += 2;
+    body[pos..pos + 32].fill(0x11);
+    pos += 32;
+    body[pos] = 0; // session id length
+    pos += 1;
+    body[pos..pos + 2].copy_from_slice(&cipher_suite.to_be_bytes());
+    pos += 2;
+    body[pos] = 0; // compression
+    pos += 1;
+
+    let ext_start = pos;
+    pos += 2; // extensions length
+    // supported_versions
+    body[pos..pos + 2].copy_from_slice(&0x002bu16.to_be_bytes());
+    pos += 2;
+    body[pos..pos + 2].copy_from_slice(&2u16.to_be_bytes());
+    pos += 2;
+    body[pos..pos + 2].copy_from_slice(&version.to_be_bytes());
+    pos += 2;
+    // key_share
+    body[pos..pos + 2].copy_from_slice(&0x0033u16.to_be_bytes());
+    pos += 2;
+    body[pos..pos + 2].copy_from_slice(&36u16.to_be_bytes());
+    pos += 2;
+    body[pos..pos + 2].copy_from_slice(&group.to_be_bytes());
+    pos += 2;
+    body[pos..pos + 2].copy_from_slice(&32u16.to_be_bytes());
+    pos += 2;
+    body[pos..pos + 32].fill(0x22);
+    pos += 32;
+    let ext_len = pos - ext_start - 2;
+    body[ext_start..ext_start + 2].copy_from_slice(&(ext_len as u16).to_be_bytes());
+
+    let total = pos;
+    let mut msg = [0u8; 180];
+    msg[0] = 2;
+    msg[1] = (total >> 16) as u8;
+    msg[2] = (total >> 8) as u8;
+    msg[3] = (total & 0xff) as u8;
+    msg[4..4 + total].copy_from_slice(&body[..total]);
+    (msg, 4 + total)
+}
 
 // 219-byte valid DER X.509 Certificate with CN="example.com"
 const EXAMPLE_COM_CERT_DER: &[u8] = &[
@@ -96,13 +226,95 @@ const RFC8032_TEST1_SIG: [u8; 64] = [
     0xd2, 0x5b, 0xf5, 0xf0, 0x59, 0x5b, 0xbe, 0x24, 0x65, 0x51, 0x41, 0x43, 0x8e, 0x7a, 0x10, 0x0b,
 ];
 
+/* CA_ED25519_DER: 249 bytes. Self-signed Ed25519 CA, CN "InterOS Test CA".
+   Unlike the placeholder-key fixtures above, this carries a REAL RFC 8032
+   signature, so a chain built from it exercises the actual verify path. */
+const CA_ED25519_DER: &[u8] = &[
+    0x30, 0x81, 0xf6, 0x30, 0x81, 0xa9, 0xa0, 0x03, 0x02, 0x01, 0x02, 0x02,
+    0x02, 0x03, 0xe7, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x30, 0x1a,
+    0x31, 0x18, 0x30, 0x16, 0x06, 0x03, 0x55, 0x04, 0x03, 0x0c, 0x0f, 0x49,
+    0x6e, 0x74, 0x65, 0x72, 0x4f, 0x53, 0x20, 0x54, 0x65, 0x73, 0x74, 0x20,
+    0x43, 0x41, 0x30, 0x1e, 0x17, 0x0d, 0x32, 0x36, 0x30, 0x31, 0x30, 0x31,
+    0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x5a, 0x17, 0x0d, 0x33, 0x35, 0x31,
+    0x32, 0x33, 0x31, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x5a, 0x30, 0x1a,
+    0x31, 0x18, 0x30, 0x16, 0x06, 0x03, 0x55, 0x04, 0x03, 0x0c, 0x0f, 0x49,
+    0x6e, 0x74, 0x65, 0x72, 0x4f, 0x53, 0x20, 0x54, 0x65, 0x73, 0x74, 0x20,
+    0x43, 0x41, 0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03,
+    0x21, 0x00, 0x03, 0x5f, 0x01, 0x27, 0x9c, 0x47, 0x62, 0x05, 0x7a, 0x89,
+    0xd5, 0x9b, 0x1f, 0xfa, 0xf1, 0x69, 0x1b, 0xab, 0x34, 0xf2, 0xd5, 0xf0,
+    0xa7, 0x26, 0x55, 0x8f, 0xab, 0x57, 0x2e, 0x6b, 0xfd, 0xec, 0xa3, 0x13,
+    0x30, 0x11, 0x30, 0x0f, 0x06, 0x03, 0x55, 0x1d, 0x13, 0x01, 0x01, 0xff,
+    0x04, 0x05, 0x30, 0x03, 0x01, 0x01, 0xff, 0x30, 0x05, 0x06, 0x03, 0x2b,
+    0x65, 0x70, 0x03, 0x41, 0x00, 0x3d, 0x8d, 0xb1, 0x9e, 0xb2, 0xb8, 0x26,
+    0xfc, 0x04, 0x41, 0x21, 0x8f, 0x1c, 0x7c, 0x40, 0x6e, 0xf7, 0x18, 0xf8,
+    0xff, 0xfe, 0x28, 0xaf, 0x73, 0xfc, 0x32, 0xbc, 0xfa, 0x9c, 0x97, 0xbf,
+    0xba, 0xb9, 0xfd, 0xc3, 0xdf, 0x4b, 0x78, 0x70, 0x68, 0x30, 0x1a, 0x3a,
+    0xc2, 0x98, 0x3e, 0xed, 0xec, 0x12, 0x8a, 0x61, 0xc4, 0xba, 0x3f, 0x5d,
+    0x49, 0x87, 0xdb, 0xea, 0xd8, 0xfc, 0x27, 0x92, 0x05,
+];
+
+/* LEAF_GOOD_DER: 277 bytes. Signed by CA_ED25519_DER, SAN dNSName "docs.interos.dev". */
+const LEAF_GOOD_DER: &[u8] = &[
+    0x30, 0x82, 0x01, 0x11, 0x30, 0x81, 0xc4, 0xa0, 0x03, 0x02, 0x01, 0x02,
+    0x02, 0x02, 0x30, 0x39, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x30,
+    0x1a, 0x31, 0x18, 0x30, 0x16, 0x06, 0x03, 0x55, 0x04, 0x03, 0x0c, 0x0f,
+    0x49, 0x6e, 0x74, 0x65, 0x72, 0x4f, 0x53, 0x20, 0x54, 0x65, 0x73, 0x74,
+    0x20, 0x43, 0x41, 0x30, 0x1e, 0x17, 0x0d, 0x32, 0x36, 0x30, 0x31, 0x30,
+    0x31, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x5a, 0x17, 0x0d, 0x33, 0x35,
+    0x31, 0x32, 0x33, 0x31, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x5a, 0x30,
+    0x1b, 0x31, 0x19, 0x30, 0x17, 0x06, 0x03, 0x55, 0x04, 0x03, 0x0c, 0x10,
+    0x64, 0x6f, 0x63, 0x73, 0x2e, 0x69, 0x6e, 0x74, 0x65, 0x72, 0x6f, 0x73,
+    0x2e, 0x64, 0x65, 0x76, 0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65,
+    0x70, 0x03, 0x21, 0x00, 0xc6, 0xc9, 0x6c, 0xd2, 0x71, 0xe2, 0xb5, 0xdd,
+    0xfe, 0x2d, 0x6a, 0x1e, 0xc8, 0xfd, 0x68, 0xbb, 0x76, 0x47, 0xab, 0x11,
+    0xf7, 0x9a, 0x7e, 0x1b, 0x94, 0x78, 0x15, 0x71, 0xec, 0xd0, 0x57, 0x67,
+    0xa3, 0x2d, 0x30, 0x2b, 0x30, 0x1b, 0x06, 0x03, 0x55, 0x1d, 0x11, 0x04,
+    0x14, 0x30, 0x12, 0x82, 0x10, 0x64, 0x6f, 0x63, 0x73, 0x2e, 0x69, 0x6e,
+    0x74, 0x65, 0x72, 0x6f, 0x73, 0x2e, 0x64, 0x65, 0x76, 0x30, 0x0c, 0x06,
+    0x03, 0x55, 0x1d, 0x13, 0x01, 0x01, 0xff, 0x04, 0x02, 0x30, 0x00, 0x30,
+    0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x41, 0x00, 0x5d, 0xfa, 0x68,
+    0xe1, 0x95, 0x70, 0x6d, 0x5d, 0xee, 0x8c, 0x53, 0x48, 0x73, 0xc8, 0xa5,
+    0x3d, 0xee, 0xbf, 0xc9, 0x5a, 0x36, 0x1f, 0x32, 0xe3, 0x60, 0x3e, 0xd6,
+    0x39, 0xd5, 0x3c, 0x07, 0x3c, 0x2b, 0xfa, 0x7d, 0x82, 0xd5, 0xe9, 0x3c,
+    0x97, 0x18, 0xda, 0x9c, 0x45, 0x6b, 0x2b, 0xdb, 0x5e, 0xde, 0xe4, 0xf0,
+    0x3d, 0xcc, 0xce, 0x24, 0x4e, 0x23, 0x34, 0x71, 0x19, 0x48, 0x2b, 0x17,
+    0x0b,
+];
+
+/* LEAF_EVIL_DER: 269 bytes. Same CA and serial, SAN dNSName "evil.example". */
+const LEAF_EVIL_DER: &[u8] = &[
+    0x30, 0x82, 0x01, 0x09, 0x30, 0x81, 0xbc, 0xa0, 0x03, 0x02, 0x01, 0x02,
+    0x02, 0x02, 0x30, 0x39, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x30,
+    0x1a, 0x31, 0x18, 0x30, 0x16, 0x06, 0x03, 0x55, 0x04, 0x03, 0x0c, 0x0f,
+    0x49, 0x6e, 0x74, 0x65, 0x72, 0x4f, 0x53, 0x20, 0x54, 0x65, 0x73, 0x74,
+    0x20, 0x43, 0x41, 0x30, 0x1e, 0x17, 0x0d, 0x32, 0x36, 0x30, 0x31, 0x30,
+    0x31, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x5a, 0x17, 0x0d, 0x33, 0x35,
+    0x31, 0x32, 0x33, 0x31, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x5a, 0x30,
+    0x17, 0x31, 0x15, 0x30, 0x13, 0x06, 0x03, 0x55, 0x04, 0x03, 0x0c, 0x0c,
+    0x65, 0x76, 0x69, 0x6c, 0x2e, 0x65, 0x78, 0x61, 0x6d, 0x70, 0x6c, 0x65,
+    0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+    0x09, 0xb7, 0x22, 0x35, 0x68, 0x15, 0x48, 0xda, 0xae, 0x79, 0x48, 0x7b,
+    0x4a, 0xea, 0x7b, 0x1d, 0x18, 0xdb, 0x4f, 0x76, 0x81, 0x6d, 0x83, 0xd4,
+    0x71, 0xb8, 0x62, 0xb6, 0xa5, 0xe9, 0xce, 0xf0, 0xa3, 0x29, 0x30, 0x27,
+    0x30, 0x17, 0x06, 0x03, 0x55, 0x1d, 0x11, 0x04, 0x10, 0x30, 0x0e, 0x82,
+    0x0c, 0x65, 0x76, 0x69, 0x6c, 0x2e, 0x65, 0x78, 0x61, 0x6d, 0x70, 0x6c,
+    0x65, 0x30, 0x0c, 0x06, 0x03, 0x55, 0x1d, 0x13, 0x01, 0x01, 0xff, 0x04,
+    0x02, 0x30, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x41,
+    0x00, 0xd5, 0x35, 0xb7, 0x24, 0x93, 0xff, 0xe5, 0x4c, 0x6c, 0x08, 0x25,
+    0x49, 0x27, 0x4c, 0x3a, 0xc8, 0x65, 0x11, 0x7e, 0x4c, 0x4d, 0x89, 0xf9,
+    0x81, 0x47, 0x1f, 0x73, 0x7a, 0xda, 0x12, 0x73, 0x37, 0x23, 0xfe, 0xe1,
+    0x02, 0x63, 0xcd, 0x50, 0xcd, 0x0e, 0xb4, 0x32, 0x13, 0xa8, 0x88, 0xb0,
+    0x3a, 0xfc, 0x6d, 0x79, 0xad, 0x3f, 0x41, 0xf7, 0xe1, 0xc5, 0x8a, 0x49,
+    0x29, 0xc3, 0x0d, 0x8a, 0x01,
+];
+
 #[test]
 fn tls_reject_garbage_signature() {
     let verifier = DefaultCertVerifier::new();
     let cert = ParsedCertificate::parse(INTEROS_ROOT_CA_DER).unwrap();
     let garbage_sig = [0x55u8; 64]; // Non-zero 64-byte garbage signature
     let res = verifier.verify_server_signature(
-        &cert,
+        cert.spki_public_key,
         SIG_SCHEME_ED25519,
         b"TLS 1.3, server CertificateVerify context and transcript hash",
         &garbage_sig,
@@ -131,7 +343,7 @@ fn tls_accept_valid_rfc8032_signature() {
     let verifier = DefaultCertVerifier::new();
     let cert = ParsedCertificate::parse(RFC8032_CERT_DER).unwrap();
     let res = verifier.verify_server_signature(
-        &cert,
+        cert.spki_public_key,
         SIG_SCHEME_ED25519,
         b"",
         &RFC8032_TEST1_SIG,
@@ -146,7 +358,7 @@ fn tls_reject_tampered_signature() {
     let mut tampered = RFC8032_TEST1_SIG;
     tampered[0] ^= 0x01; // Tamper 1 bit
     let res = verifier.verify_server_signature(
-        &cert,
+        cert.spki_public_key,
         SIG_SCHEME_ED25519,
         b"",
         &tampered,
@@ -176,7 +388,10 @@ fn tls_san_wildcard_matching() {
 
 #[test]
 fn tls_accept_trusted_root() {
-    let verifier = DefaultCertVerifier::new().with_hostname("InterOS");
+    // The synthetic CA is a fixture, not a shipped anchor: it is trusted only
+    // because this test pins it explicitly.
+    static ROOTS: [&[u8]; 1] = [INTEROS_ROOT_CA_DER];
+    let verifier = DefaultCertVerifier::new().with_hostname("InterOS").with_roots(&ROOTS);
     let root = ParsedCertificate::parse(INTEROS_ROOT_CA_DER).unwrap();
     assert!(verifier.verify_certificate(&root).is_ok());
 }
@@ -189,7 +404,7 @@ fn tls_reject_unknown_signature_scheme() {
 
     // ECDSA secp256r1 not supported by Ed25519 verifier
     let res = verifier.verify_server_signature(
-        &cert,
+        cert.spki_public_key,
         SIG_SCHEME_ECDSA_SECP256R1_SHA256,
         b"message",
         &sig,
@@ -197,7 +412,7 @@ fn tls_reject_unknown_signature_scheme() {
     assert_eq!(res, Err(TlsError::UnsupportedSignatureScheme));
 
     // Unknown code point 0xffff
-    let res2 = verifier.verify_server_signature(&cert, 0xffff, b"message", &sig);
+    let res2 = verifier.verify_server_signature(cert.spki_public_key, 0xffff, b"message", &sig);
     assert_eq!(res2, Err(TlsError::UnsupportedSignatureScheme));
 }
 
@@ -227,11 +442,13 @@ fn tls_reject_wronghost_on_default_path() {
 #[test]
 fn tls_reject_server_choosing_unsupported_scheme_0x0403() {
     // A server choosing 0x0403 (ECDSA_SECP256R1_SHA256) must fail with UnsupportedSignatureScheme,
-    // not silently accept or report generic InvalidSignature.
+    // not silently accept or report generic InvalidSignature. The stub verifier
+    // below would have answered Ok to anything: the advertised-scheme gate runs
+    // before it, so the stub cannot turn an unadvertised scheme into a pass.
     let mut hs = HandshakeClient::new([0x11u8; 32]);
     hs.state = HandshakeState::CertificateReceived;
     let cert = ParsedCertificate::parse(RFC8032_CERT_DER).unwrap();
-    let verifier = AllowAnyCertVerifier;
+    let verifier = AnyPassVerifier;
     let cv_payload = [
         HANDSHAKE_CERTIFICATE_VERIFY,
         0, 0, 6,
@@ -239,8 +456,31 @@ fn tls_reject_server_choosing_unsupported_scheme_0x0403() {
         0, 2,       // sig len = 2
         0xaa, 0xbb, // dummy signature
     ];
-    let res = hs.process_certificate_verify(&cv_payload, &cert, &verifier);
+    let res = hs.process_certificate_verify(&cv_payload, cert.spki_public_key, &verifier);
     assert_eq!(res, Err(TlsError::UnsupportedSignatureScheme));
+    assert_eq!(hs.state, HandshakeState::CertificateReceived);
+}
+
+#[test]
+fn tls_reject_server_choosing_unadvertised_rsa_pss_scheme() {
+    let mut hs = HandshakeClient::new([0x11u8; 32]);
+    hs.state = HandshakeState::CertificateReceived;
+    let cert = ParsedCertificate::parse(RFC8032_CERT_DER).unwrap();
+    let verifier = AnyPassVerifier;
+    let cv_payload = [
+        HANDSHAKE_CERTIFICATE_VERIFY,
+        0, 0, 6,
+        0x08, 0x04, // SIG_SCHEME_RSA_PSS_RSAE_SHA256
+        0, 2,
+        0xaa, 0xbb,
+    ];
+    assert_eq!(
+        hs.process_certificate_verify(&cv_payload, cert.spki_public_key, &verifier),
+        Err(TlsError::UnsupportedSignatureScheme)
+    );
+    assert_eq!(SIG_SCHEME_RSA_PSS_RSAE_SHA256, 0x0804);
+    assert!(!is_supported_sig_scheme(SIG_SCHEME_RSA_PSS_RSAE_SHA256));
+    assert!(!is_supported_sig_scheme(SIG_SCHEME_ECDSA_SECP256R1_SHA256));
 }
 
 #[test]
@@ -326,3 +566,818 @@ fn tls_config_new_rejects_dummy_or_empty_values() {
     // Valid configuration
     assert!(TlsConfig::new("example.com", [0x11; 32], [0x22; 32], &verifier).is_ok());
 }
+
+// ---------------------------------------------------------------------------
+// Advertised == accepted: one source of truth for schemes, groups, suites
+// ---------------------------------------------------------------------------
+
+#[test]
+fn tls_advertised_schemes_are_all_verifiable() {
+    // Every advertised scheme must be a scheme the verifier actually attempts
+    // (a garbage signature yields InvalidSignature, never Unsupported).
+    assert_eq!(SUPPORTED_SIG_SCHEMES, [SIG_SCHEME_ED25519]);
+    let verifier = DefaultCertVerifier::new();
+    let cert = ParsedCertificate::parse(RFC8032_CERT_DER).unwrap();
+    for scheme in SUPPORTED_SIG_SCHEMES.iter() {
+        let res = verifier.verify_server_signature(cert.spki_public_key, *scheme, b"msg", &[0x55u8; 64]);
+        assert_eq!(res, Err(TlsError::InvalidSignature), "scheme {scheme:#06x} must be checked, not skipped");
+    }
+}
+
+#[test]
+fn tls_client_hello_advertises_exactly_the_verifiable_sets() {
+    let verifier = DefaultCertVerifier::for_host("interos.org");
+    let mut session = TlsClientSession::new(TlsConfig {
+        server_name: Some("interos.org"),
+        random: [0x55; 32],
+        private_key: [0x77; 32],
+        verifier: &verifier,
+    });
+    let mut out = [0u8; 1024];
+    let len = session.start_handshake(&mut out).unwrap();
+    let record = &out[..len];
+
+    // signature_algorithms: exactly SUPPORTED_SIG_SCHEMES
+    let mut checked_scheme = false;
+    let mut i = 0;
+    while i + 8 <= record.len() {
+        if record[i] == 0x00 && record[i + 1] == 0x0d {
+            let ext_len = u16::from_be_bytes([record[i + 2], record[i + 3]]) as usize;
+            let list_len = u16::from_be_bytes([record[i + 4], record[i + 5]]) as usize;
+            assert_eq!(ext_len, 2 + list_len);
+            assert_eq!(list_len, SUPPORTED_SIG_SCHEMES.len() * 2);
+            for (n, scheme) in SUPPORTED_SIG_SCHEMES.iter().enumerate() {
+                assert_eq!(
+                    u16::from_be_bytes([record[i + 6 + n * 2], record[i + 7 + n * 2]]),
+                    *scheme
+                );
+            }
+            checked_scheme = true;
+            break;
+        }
+        i += 1;
+    }
+    assert!(checked_scheme, "signature_algorithms extension must be present");
+
+    // supported_groups: exactly SUPPORTED_GROUPS
+    let mut checked_group = false;
+    i = 0;
+    while i + 8 <= record.len() {
+        if record[i] == 0x00 && record[i + 1] == 0x0a {
+            let list_len = u16::from_be_bytes([record[i + 4], record[i + 5]]) as usize;
+            assert_eq!(list_len, SUPPORTED_GROUPS.len() * 2);
+            for (n, group) in SUPPORTED_GROUPS.iter().enumerate() {
+                assert_eq!(u16::from_be_bytes([record[i + 6 + n * 2], record[i + 7 + n * 2]]), *group);
+            }
+            checked_group = true;
+            break;
+        }
+        i += 1;
+    }
+    assert!(checked_group, "supported_groups extension must be present");
+
+    // Cipher suites: exactly SUPPORTED_CIPHER_SUITES (offset 2+32+1+32 = 67 into body)
+    let cs_offset = 5 + 4 + 2 + 32 + 1 + 32;
+    let cs_len = u16::from_be_bytes([record[cs_offset], record[cs_offset + 1]]) as usize;
+    assert_eq!(cs_len, super::handshake::SUPPORTED_CIPHER_SUITES.len() * 2);
+    assert_eq!(
+        u16::from_be_bytes([record[cs_offset + 2], record[cs_offset + 3]]),
+        super::handshake::TLS_CIPHER_CHACHA20_POLY1305_SHA256
+    );
+}
+
+#[test]
+fn tls_rejects_server_key_share_for_unadvertised_group() {
+    let mut hs = HandshakeClient::new([0x11u8; 32]);
+    hs.state = HandshakeState::ClientHelloSent;
+    let (msg, len) = build_server_hello(0x001e); // x448: never advertised
+    assert_eq!(
+        hs.process_server_hello(&msg[..len]),
+        Err(TlsError::BadHandshakeMessage)
+    );
+}
+
+#[test]
+fn tls_accepts_server_key_share_for_advertised_group() {
+    let mut hs = HandshakeClient::new([0x11u8; 32]);
+    hs.state = HandshakeState::ClientHelloSent;
+    let (msg, len) = build_server_hello(SUPPORTED_GROUPS[0]);
+    assert!(hs.process_server_hello(&msg[..len]).is_ok());
+}
+
+#[test]
+fn tls_server_hello_short_body_is_rejected_without_overflow() {
+    // A ServerHello whose body stops exactly at the session-id length field must
+    // be rejected: reading that byte requires one more byte than declared.
+    let mut msg = [0u8; 64];
+    msg[0] = 2; // HANDSHAKE_SERVER_HELLO
+    msg[1] = 0;
+    msg[2] = 0;
+    msg[3] = 34;
+    for i in 4..4 + 34 {
+        msg[i] = 0x03;
+    }
+    let mut hs = HandshakeClient::new([0x11u8; 32]);
+    hs.state = HandshakeState::ClientHelloSent;
+    assert_eq!(
+        hs.process_server_hello(&msg[..4 + 34]),
+        Err(TlsError::BadHandshakeMessage)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Reference identity (hostname) enforcement on the live handshake path
+// ---------------------------------------------------------------------------
+
+#[test]
+fn tls_leaf_position_hostname_mismatch_fails_closed_even_against_stub() {
+    let mut hs = HandshakeClient::new([0x11u8; 32]);
+    hs.state = HandshakeState::EncryptedExtensionsReceived;
+    let mut msg = [0u8; 1024];
+    let len = build_certificate_message(&[LEAF_GOOD_DER], &mut msg);
+    // The stub answers Ok to every policy question; the transport must still
+    // reject a certificate that does not carry the advertised identity.
+    let res = hs.process_certificate(&msg[..len], &AnyPassVerifier, "evil.example").err();
+    assert_eq!(res, Some(TlsError::CertificateVerificationFailed));
+    assert_eq!(hs.state, HandshakeState::EncryptedExtensionsReceived);
+
+    // ...and at the exact-match position too: a near-miss prefix never passes.
+    let mut hs2 = HandshakeClient::new([0x11u8; 32]);
+    hs2.state = HandshakeState::EncryptedExtensionsReceived;
+    assert_eq!(
+        hs2.process_certificate(&msg[..len], &AnyPassVerifier, "docs.interos.dev.evil.test").err(),
+        Some(TlsError::CertificateVerificationFailed)
+    );
+}
+
+#[test]
+fn tls_leaf_position_empty_reference_identity_fails_closed() {
+    let mut hs = HandshakeClient::new([0x11u8; 32]);
+    hs.state = HandshakeState::EncryptedExtensionsReceived;
+    let mut msg = [0u8; 1024];
+    let len = build_certificate_message(&[LEAF_GOOD_DER], &mut msg);
+    assert_eq!(
+        hs.process_certificate(&msg[..len], &AnyPassVerifier, "").err(),
+        Some(TlsError::CertificateVerificationFailed)
+    );
+    assert_eq!(hs.state, HandshakeState::EncryptedExtensionsReceived);
+}
+
+#[test]
+fn tls_leaf_position_oversized_reference_identity_fails_closed() {
+    let cert = ParsedCertificate::parse(SAN_INTEROS_CERT_DER).unwrap();
+    let long = core::str::from_utf8(OVER_LONG_HOST).unwrap();
+    assert!(!cert.matches_hostname(long));
+    // And the SAN scan refuses to treat it as an identity at all.
+    let san = SubjectAltNames::scan(cert.tbs_raw, long);
+    assert!(!san.matched);
+}
+
+#[test]
+fn tls_non_leaf_positions_are_not_trusted_without_a_proved_link() {
+    let mut hs = HandshakeClient::new([0x11u8; 32]);
+    hs.state = HandshakeState::EncryptedExtensionsReceived;
+    let mut msg = [0u8; 1024];
+
+    // Positive control: this pair DOES chain (real CA signature over the leaf),
+    // so the walk must accept it. Anything else below removes one proof only.
+    let len = build_certificate_message(&[LEAF_GOOD_DER, CA_ED25519_DER], &mut msg);
+    let leaf = hs
+        .process_certificate(&msg[..len], &AnyPassVerifier, "docs.interos.dev")
+        .expect("leaf + real issuing CA must walk");
+    assert_eq!(leaf.extract_common_name(), Some("docs.interos.dev"));
+
+    // Identity removed: the same chain is refused at the leaf position.
+    let mut hs2 = HandshakeClient::new([0x11u8; 32]);
+    hs2.state = HandshakeState::EncryptedExtensionsReceived;
+    assert_eq!(
+        hs2.process_certificate(&msg[..len], &AnyPassVerifier, "evil.example").err(),
+        Some(TlsError::CertificateVerificationFailed)
+    );
+
+    // Second entry does not continue the chain (its subject is not the leaf's issuer).
+    let mut hs3 = HandshakeClient::new([0x11u8; 32]);
+    hs3.state = HandshakeState::EncryptedExtensionsReceived;
+    let len3 = build_certificate_message(&[LEAF_GOOD_DER, SAN_INTEROS_CERT_DER], &mut msg);
+    assert_eq!(
+        hs3.process_certificate(&msg[..len3], &AnyPassVerifier, "docs.interos.dev").err(),
+        Some(TlsError::CertificateVerificationFailed)
+    );
+
+    // Chain by name, but the issuer signature over the leaf is corrupted: the
+    // link proof is actually computed and must fail closed (never discarded).
+    let mut tampered = [0u8; 512];
+    tampered[..LEAF_GOOD_DER.len()].copy_from_slice(LEAF_GOOD_DER);
+    let last = LEAF_GOOD_DER.len() - 1;
+    tampered[last] ^= 0x01;
+    let mut hs4 = HandshakeClient::new([0x11u8; 32]);
+    hs4.state = HandshakeState::EncryptedExtensionsReceived;
+    let len4 = build_certificate_message(&[&tampered[..LEAF_GOOD_DER.len()], CA_ED25519_DER], &mut msg);
+    assert_eq!(
+        hs4.process_certificate(&msg[..len4], &AnyPassVerifier, "docs.interos.dev").err(),
+        Some(TlsError::CertificateVerificationFailed)
+    );
+    assert_eq!(hs4.state, HandshakeState::EncryptedExtensionsReceived);
+}
+
+#[test]
+fn tls_chain_deeper_than_the_cap_is_refused() {
+    let mut hs = HandshakeClient::new([0x11u8; 32]);
+    hs.state = HandshakeState::EncryptedExtensionsReceived;
+    let mut msg = [0u8; 4096];
+    // leaf + CA x4: every link is provable (the CA self-signs), but the list is
+    // longer than MAX_CHAIN_DEPTH, so the walk refuses instead of truncating.
+    let entries = [
+        LEAF_GOOD_DER,
+        CA_ED25519_DER,
+        CA_ED25519_DER,
+        CA_ED25519_DER,
+        CA_ED25519_DER,
+    ];
+    assert_eq!(entries.len(), MAX_CHAIN_DEPTH + 1);
+    let len = build_certificate_message(&entries, &mut msg);
+    assert_eq!(
+        hs.process_certificate(&msg[..len], &AnyPassVerifier, "docs.interos.dev").err(),
+        Some(TlsError::CertificateVerificationFailed)
+    );
+    assert_eq!(hs.state, HandshakeState::EncryptedExtensionsReceived);
+
+    // Exactly at the cap the walk is allowed to finish.
+    let at_cap = [LEAF_GOOD_DER, CA_ED25519_DER, CA_ED25519_DER, CA_ED25519_DER];
+    let mut hs2 = HandshakeClient::new([0x11u8; 32]);
+    hs2.state = HandshakeState::EncryptedExtensionsReceived;
+    let len2 = build_certificate_message(&at_cap, &mut msg);
+    assert!(hs2.process_certificate(&msg[..len2], &AnyPassVerifier, "docs.interos.dev").is_ok());
+}
+
+#[test]
+fn tls_certificate_list_declared_longer_than_payload_is_rejected() {
+    let mut msg = [0u8; 1024];
+    let len = build_certificate_message(&[LEAF_GOOD_DER], &mut msg);
+    // Inflate the certificate_list length beyond the record.
+    let list_len_field = 4 + 1;
+    msg[list_len_field] = 0xff;
+    msg[list_len_field + 1] = 0xff;
+    msg[list_len_field + 2] = 0xff;
+    let mut hs = HandshakeClient::new([0x11u8; 32]);
+    hs.state = HandshakeState::EncryptedExtensionsReceived;
+    assert_eq!(
+        hs.process_certificate(&msg[..len], &AnyPassVerifier, "docs.interos.dev").err(),
+        Some(TlsError::BadHandshakeMessage)
+    );
+}
+
+#[test]
+fn tls_message_order_is_enforced() {
+    let cert = ParsedCertificate::parse(RFC8032_CERT_DER).unwrap();
+    let mut hs = HandshakeClient::new([0x11u8; 32]);
+    hs.state = HandshakeState::ClientHelloSent;
+    // CertificateVerify before a Certificate has been accepted.
+    let cv = [HANDSHAKE_CERTIFICATE_VERIFY, 0, 0, 6, 0x08, 0x07, 0, 2, 0xaa, 0xbb];
+    assert_eq!(
+        hs.process_certificate_verify(&cv, cert.spki_public_key, &AnyPassVerifier),
+        Err(TlsError::UnexpectedMessage)
+    );
+    // Finished before CertificateVerify.
+    let fin = [20u8, 0, 0, 32];
+    assert_eq!(hs.process_server_finished(&fin), Err(TlsError::UnexpectedMessage));
+}
+
+#[test]
+fn tls_real_ca_signed_leaf_passes_identity_and_trust() {
+    // Nothing permissive here: DefaultCertVerifier plus a real CA fixture.
+    static ROOTS: [&[u8]; 1] = [CA_ED25519_DER];
+    let verifier = DefaultCertVerifier::for_host("docs.interos.dev").with_roots(&ROOTS);
+    let mut hs = HandshakeClient::new([0x11u8; 32]);
+    hs.state = HandshakeState::EncryptedExtensionsReceived;
+    let mut msg = [0u8; 1024];
+    let len = build_certificate_message(&[LEAF_GOOD_DER], &mut msg);
+    let leaf = hs
+        .process_certificate(&msg[..len], &verifier, "docs.interos.dev")
+        .expect("CA-signed leaf with a matching SAN must pass real verification");
+    assert!(leaf.matches_hostname("docs.interos.dev"));
+    assert!(!leaf.matches_hostname("evil.example"));
+    assert_eq!(hs.state, HandshakeState::CertificateReceived);
+
+    // The same leaf against the wrong identity must fail closed.
+    let mut hs2 = HandshakeClient::new([0x11u8; 32]);
+    hs2.state = HandshakeState::EncryptedExtensionsReceived;
+    assert_eq!(
+        hs2.process_certificate(&msg[..len], &verifier, "evil.example").err(),
+        Some(TlsError::CertificateVerificationFailed)
+    );
+}
+
+#[test]
+fn tls_leaf_signed_by_untrusted_root_fails_closed() {
+    // LEAF_GOOD really is signed by CA_ED25519_DER; pinning a different anchor
+    // must refuse it even though the name matches.
+    static ROOTS: [&[u8]; 1] = [SAN_INTEROS_CERT_DER];
+    let verifier = DefaultCertVerifier::for_host("docs.interos.dev").with_roots(&ROOTS);
+    let cert = ParsedCertificate::parse(LEAF_GOOD_DER).unwrap();
+    assert_eq!(
+        verifier.verify_certificate(&cert),
+        Err(TlsError::CertificateVerificationFailed)
+    );
+}
+
+#[test]
+fn tls_pinned_self_issued_leaf_passes_only_when_der_pinned() {
+    static ROOTS: [&[u8]; 1] = [SAN_INTEROS_CERT_DER];
+    let verifier = DefaultCertVerifier::for_host("interos.org").with_roots(&ROOTS);
+    let cert = ParsedCertificate::parse(SAN_INTEROS_CERT_DER).unwrap();
+    assert!(cert.is_self_signed());
+    assert_eq!(verifier.verify_certificate(&cert), Ok(()));
+
+    // Same name, but the anchor is not pinned in the store: refused.
+    let unpinned = DefaultCertVerifier::for_host("interos.org");
+    assert_eq!(
+        unpinned.verify_certificate(&cert),
+        Err(TlsError::CertificateVerificationFailed)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Name comparison hardening
+// ---------------------------------------------------------------------------
+
+#[test]
+fn tls_hostname_match_rejects_empty_names_and_bare_suffix_wildcards() {
+    assert!(!hostname_matches("", ""));
+    assert!(!hostname_matches("", "interos.org"));
+    assert!(!hostname_matches("interos.org", ""));
+    assert!(!hostname_matches("*", "interos.org"));
+    assert!(!hostname_matches("*.", "a.interos.org"));
+    assert!(!hostname_matches("*.com", "evil.com"));
+    assert!(!hostname_matches("*.org", "a.interos.org"));
+    assert!(!hostname_matches("interos.org", "interos.org.evil.test"));
+    assert!(!hostname_matches("interos.org", "xinteros.org"));
+    assert!(!hostname_matches("sub.interos.org", "interos.org"));
+    // A wildcard never covers more than exactly one label.
+    assert!(!hostname_matches("*.interos.org", "a.b.interos.org"));
+    assert!(!hostname_matches("*.interos.org", "*.interos.org"));
+    assert!(!hostname_matches("*.interos.org", "interos.org"));
+    // Legitimate forms still match.
+    assert!(hostname_matches("interos.org", "INTEROS.ORG"));
+    assert!(hostname_matches("*.interos.org", "docs.interos.org"));
+    assert!(hostname_matches("*.interos.org", "DOCS.INTEROS.ORG"));
+    // KNOWN LIMITATION, pinned by test: this zero-alloc build carries no public
+    // suffix list, so a wildcard whose suffix is itself multi-label is honoured
+    // verbatim. A CA-issued "*.co.uk" pattern would therefore match "evil.co.uk".
+    // Only the platform's own anchors are in the trust store today, so this is
+    // not reachable from a real WebPKI name; it is recorded rather than hidden.
+    assert!(hostname_matches("*.co.uk", "evil.co.uk"));
+}
+
+#[test]
+fn tls_san_present_disables_common_name_fallback() {
+    // Same certificate as SAN_INTEROS_CERT_DER but with both dNSNames replaced;
+    // the CN still reads "interos.org", which must NOT authorize the identity.
+    let mut buf = [0u8; 512];
+    let der = SAN_INTEROS_CERT_DER;
+    buf[..der.len()].copy_from_slice(der);
+    let bytes = &mut buf[..der.len()];
+
+    let wildcard_at = bytes
+        .windows(13)
+        .position(|w| w == b"*.interos.org")
+        .expect("wildcard SAN present in fixture");
+    bytes[wildcard_at..wildcard_at + 13].copy_from_slice(b"*.bad.test.cc");
+
+    // The bare dNSName is the one encoded as 0x82 0x0b "interos.org".
+    let mut bare_at: Option<usize> = None;
+    for i in 0..bytes.len().saturating_sub(13) {
+        if bytes[i] == 0x82
+            && bytes[i + 1] == 0x0b
+            && &bytes[i + 2..i + 13] == b"interos.org"
+        {
+            bare_at = Some(i + 2);
+            break;
+        }
+    }
+    let bare_at = bare_at.expect("dns SAN present in fixture");
+    bytes[bare_at..bare_at + 11].copy_from_slice(b"bad.test.cc");
+
+    let cert = ParsedCertificate::parse(&buf[..der.len()]).unwrap();
+    assert_eq!(cert.extract_common_name(), Some("interos.org"));
+    let san = SubjectAltNames::scan(cert.tbs_raw, "interos.org");
+    assert!(san.extension_present && san.dns_name_count == 2 && !san.matched);
+    assert!(!cert.matches_hostname("interos.org"));
+    assert!(cert.matches_hostname("www.bad.test.cc"));
+}
+
+// ---------------------------------------------------------------------------
+// Stub / mock containment
+// ---------------------------------------------------------------------------
+
+#[test]
+fn tls_stub_verifier_without_identity_cannot_start_a_handshake() {
+    static STUB: AnyPassVerifier = AnyPassVerifier;
+    // A verifier that declares no reference identity is refused at configuration.
+    assert_eq!(
+        TlsConfig::new("interos.org", [0x11; 32], [0x22; 32], &STUB).err(),
+        Some(TlsError::Unavailable)
+    );
+    // ...and refused again on the live path even when the struct is built by hand.
+    let mut session = TlsClientSession::new(TlsConfig {
+        server_name: Some("interos.org"),
+        random: [0x11; 32],
+        private_key: [0x22; 32],
+        verifier: &STUB,
+    });
+    let mut out = [0u8; 1024];
+    assert_eq!(session.start_handshake(&mut out), Err(TlsError::Unavailable));
+    assert_eq!(session.handle_server_hello(&[0u8; 8]), Err(TlsError::Unavailable));
+    assert_eq!(
+        session.handle_encrypted_handshake_record(&[0u8; 8]),
+        Err(TlsError::Unavailable)
+    );
+    assert!(!session.is_connected());
+}
+
+#[test]
+fn tls_advertised_sni_must_equal_the_pinned_identity() {
+    // Verifier pins a different name than the one advertised in SNI.
+    let mismatched = DefaultCertVerifier::for_host("other.test");
+    assert_eq!(
+        TlsConfig::new("interos.org", [0x11; 32], [0x22; 32], &mismatched).err(),
+        Some(TlsError::Unavailable)
+    );
+    // A verifier with no identity at all cannot be used either.
+    let unbound = DefaultCertVerifier::new();
+    assert_eq!(
+        TlsConfig::new("interos.org", [0x11; 32], [0x22; 32], &unbound).err(),
+        Some(TlsError::Unavailable)
+    );
+    // Same failure through the public struct fields, on the handshake entry point.
+    static UNBOUND: DefaultCertVerifier<'static> = DefaultCertVerifier::new();
+    let mut session = TlsClientSession::new(TlsConfig {
+        server_name: Some("interos.org"),
+        random: [0x11; 32],
+        private_key: [0x22; 32],
+        verifier: &UNBOUND,
+    });
+    let mut out = [0u8; 1024];
+    assert_eq!(session.start_handshake(&mut out), Err(TlsError::Unavailable));
+}
+
+#[test]
+fn tls_client_hello_rejects_empty_and_oversized_peer_name() {
+    let long = core::str::from_utf8(OVER_LONG_HOST).unwrap();
+    let verifier = DefaultCertVerifier::for_host(long);
+    let mut session = TlsClientSession::new(TlsConfig {
+        server_name: Some(long),
+        random: [0x55; 32],
+        private_key: [0x77; 32],
+        verifier: &verifier,
+    });
+    let mut out = [0u8; 1024];
+    assert_eq!(session.start_handshake(&mut out), Err(TlsError::Unavailable));
+
+    // A verifier pinned to an empty name is rejected as having no identity.
+    static EMPTY_VERIFIER: DefaultCertVerifier<'static> = DefaultCertVerifier {
+        expected_hostname: Some(""),
+        trusted_roots: super::certificate::DEFAULT_TRUSTED_ROOTS,
+    };
+    let mut empty_session = TlsClientSession::new(TlsConfig {
+        server_name: Some("interos.org"),
+        random: [0x55; 32],
+        private_key: [0x77; 32],
+        verifier: &EMPTY_VERIFIER,
+    });
+    assert_eq!(
+        empty_session.start_handshake(&mut out),
+        Err(TlsError::Unavailable)
+    );
+}
+
+#[test]
+fn tls_client_hello_requires_the_whole_record_to_fit_the_buffer() {
+    let verifier = DefaultCertVerifier::for_host("interos.org");
+    let mut session = TlsClientSession::new(TlsConfig {
+        server_name: Some("interos.org"),
+        random: [0x55; 32],
+        private_key: [0x77; 32],
+        verifier: &verifier,
+    });
+    let mut buf = [0u8; 1024];
+    let needed = session
+        .start_handshake(&mut buf)
+        .expect("a full-size buffer must emit a ClientHello");
+    assert_eq!(session.handshake.state, HandshakeState::ClientHelloSent);
+
+    // The guard is the length actually produced, not a placeholder minimum:
+    // one byte short fails closed, exactly enough succeeds.
+    let mut s2 = TlsClientSession::new(TlsConfig {
+        server_name: Some("interos.org"),
+        random: [0x55; 32],
+        private_key: [0x77; 32],
+        verifier: &verifier,
+    });
+    let mut scratch = [0u8; 1024];
+    assert_eq!(
+        s2.start_handshake(&mut scratch[..needed - 1]),
+        Err(TlsError::BufferTooSmall)
+    );
+    // No partial transcript state may survive a rejected emit.
+    assert_eq!(s2.handshake.state, HandshakeState::Initial);
+    assert_eq!(s2.start_handshake(&mut scratch[..needed]), Ok(needed));
+
+    // A maximally long advertised name still has to fit the same record.
+    let mut s3 = TlsClientSession::new(TlsConfig {
+        server_name: Some(LONG_SNI_NAME),
+        random: [0x55; 32],
+        private_key: [0x77; 32],
+        verifier: &LONG_HOST_VERIFIER,
+    });
+    let mut small = [0u8; 256];
+    // The old guard accepted any buffer >= 256 bytes, then wrote the whole
+    // record anyway: with an advertisable 192-byte name the record is ~350
+    // bytes, so those bytes went past the end of the caller's slice.
+    assert!(LONG_SNI_NAME.len() <= super::certificate::MAX_REFERENCE_IDENTITY_LEN);
+    assert!(LONG_SNI_NAME.len() > 100);
+    assert_eq!(s3.start_handshake(&mut small), Err(TlsError::BufferTooSmall));
+    assert_eq!(s3.handshake.state, HandshakeState::Initial);
+}
+
+#[test]
+fn tls_certificate_verify_without_a_validated_leaf_is_rejected() {
+    static ROOTS: [&[u8]; 1] = [SAN_INTEROS_CERT_DER];
+    let verifier = DefaultCertVerifier::for_host("interos.org").with_roots(&ROOTS);
+    let mut session = TlsClientSession::new(TlsConfig {
+        server_name: Some("interos.org"),
+        random: [0x55; 32],
+        private_key: [0x77; 32],
+        verifier: &verifier,
+    });
+    // Force the post-ServerHello state without ever receiving a Certificate.
+    session.handshake.state = HandshakeState::CertificateReceived;
+    session.has_server_cert = false;
+    let cv = [HANDSHAKE_CERTIFICATE_VERIFY, 0, 0, 6, 0x08, 0x07, 0, 2, 0xaa, 0xbb];
+    let mut enc_buf = [0u8; 256];
+    // Without a pinned leaf key the session must refuse, never substitute a key.
+    let record_len = {
+        use super::record::{ContentType, RecordCipher};
+        let mut cipher = RecordCipher::new([0x01u8; 32], [0x02u8; 12]);
+        cipher
+            .encrypt_record(ContentType::Handshake, &cv, &mut enc_buf)
+            .unwrap()
+    };
+    session.recv_cipher = Some({
+        use super::record::RecordCipher;
+        RecordCipher::new([0x01u8; 32], [0x02u8; 12])
+    });
+    assert_eq!(
+        session.handle_encrypted_handshake_record(&enc_buf[..record_len]),
+        Err(TlsError::UnexpectedMessage)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Closure 1: the reference identity is enforced at every chain position
+// ---------------------------------------------------------------------------
+
+#[test]
+fn tls_hostname_mismatch_fails_closed_at_every_chain_position() {
+    let mut msg = [0u8; 1024];
+
+    // Position 0 (end-entity): the leaf must carry the advertised identity.
+    let mut hs = HandshakeClient::new([0x11u8; 32]);
+    hs.state = HandshakeState::EncryptedExtensionsReceived;
+    let evil_len = build_certificate_message(&[LEAF_EVIL_DER], &mut msg);
+    assert_eq!(
+        hs.process_certificate(&msg[..evil_len], &AnyPassVerifier, "docs.interos.dev").err(),
+        Some(TlsError::CertificateVerificationFailed)
+    );
+    assert_eq!(hs.state, HandshakeState::EncryptedExtensionsReceived);
+
+    // Position 0 holding the CA instead of the leaf: the CA's own name is not
+    // the advertised identity, so the walk refuses at the first position
+    // instead of accepting the CA as the end-entity.
+    let mut hs2 = HandshakeClient::new([0x11u8; 32]);
+    hs2.state = HandshakeState::EncryptedExtensionsReceived;
+    let flipped_len = build_certificate_message(&[CA_ED25519_DER, LEAF_GOOD_DER], &mut msg);
+    assert_eq!(
+        hs2.process_certificate(&msg[..flipped_len], &AnyPassVerifier, "docs.interos.dev").err(),
+        Some(TlsError::CertificateVerificationFailed)
+    );
+    assert_eq!(hs2.state, HandshakeState::EncryptedExtensionsReceived);
+
+    // Position 1 (issuer): an issuer carries no reference identity of its
+    // own, so what decides the chain there is the proved link. The same
+    // two certificates, with the identity the leaf really carries, are
+    // accepted -- the rejections above are the name, not the chain shape.
+    let mut hs3 = HandshakeClient::new([0x11u8; 32]);
+    hs3.state = HandshakeState::EncryptedExtensionsReceived;
+    let good_len = build_certificate_message(&[LEAF_GOOD_DER, CA_ED25519_DER], &mut msg);
+    assert!(hs3
+        .process_certificate(&msg[..good_len], &AnyPassVerifier, "docs.interos.dev")
+        .is_ok());
+
+    // ...and asking for the issuer's name instead of the leaf's still fails
+    // closed at position 0.
+    let mut hs4 = HandshakeClient::new([0x11u8; 32]);
+    hs4.state = HandshakeState::EncryptedExtensionsReceived;
+    assert_eq!(
+        hs4.process_certificate(&msg[..good_len], &AnyPassVerifier, "InterOS Test CA").err(),
+        Some(TlsError::CertificateVerificationFailed)
+    );
+}
+
+#[test]
+fn tls_empty_and_oversized_reference_identity_fail_closed_at_every_position() {
+    let long = core::str::from_utf8(OVER_LONG_HOST).unwrap();
+    let mut msg = [0u8; 1024];
+    let len = build_certificate_message(&[LEAF_GOOD_DER, CA_ED25519_DER], &mut msg);
+
+    for identity in ["", long] {
+        let mut hs = HandshakeClient::new([0x11u8; 32]);
+        hs.state = HandshakeState::EncryptedExtensionsReceived;
+        assert_eq!(
+            hs.process_certificate(&msg[..len], &AnyPassVerifier, identity).err(),
+            Some(TlsError::CertificateVerificationFailed),
+            "identity {identity:?} must fail closed"
+        );
+        assert_eq!(hs.state, HandshakeState::EncryptedExtensionsReceived);
+    }
+
+    // The verifier itself refuses an empty pinned name: it declares no
+    // identity, so it can never be used to check a name.
+    static EMPTY: DefaultCertVerifier<'static> = DefaultCertVerifier {
+        expected_hostname: Some(""),
+        trusted_roots: super::certificate::DEFAULT_TRUSTED_ROOTS,
+    };
+    assert_eq!(EMPTY.reference_identity(), None);
+    let cert = ParsedCertificate::parse(LEAF_GOOD_DER).unwrap();
+    assert_eq!(
+        EMPTY.verify_certificate(&cert),
+        Err(TlsError::CertificateVerificationFailed)
+    );
+
+    // An oversized pinned name is refused by the verifier as well.
+    static LONG: DefaultCertVerifier<'static> = DefaultCertVerifier {
+        expected_hostname: Some(LONG_SNI_NAME),
+        trusted_roots: super::certificate::DEFAULT_TRUSTED_ROOTS,
+    };
+    assert_eq!(LONG.reference_identity(), Some(LONG_SNI_NAME));
+    assert_eq!(
+        LONG.verify_certificate(&cert),
+        Err(TlsError::CertificateVerificationFailed)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Closure 2: advertised set == accepted set, for every value on the wire
+// ---------------------------------------------------------------------------
+
+#[test]
+fn tls_rejects_server_hello_for_an_unadvertised_cipher_suite_or_version() {
+    // 0x1302 (TLS_AES_128_GCM_SHA256) was never advertised.
+    let mut hs = HandshakeClient::new([0x11u8; 32]);
+    hs.state = HandshakeState::ClientHelloSent;
+    let (msg, len) = build_server_hello_with(SUPPORTED_GROUPS[0], 0x1302, TLS_VERSION_1_3);
+    assert_eq!(
+        hs.process_server_hello(&msg[..len]),
+        Err(TlsError::UnsupportedCipherSuite)
+    );
+
+    // 0x0303 (TLS 1.2) was never advertised.
+    let mut hs2 = HandshakeClient::new([0x11u8; 32]);
+    hs2.state = HandshakeState::ClientHelloSent;
+    let (msg2, len2) =
+        build_server_hello_with(SUPPORTED_GROUPS[0], TLS_CIPHER_CHACHA20_POLY1305_SHA256, 0x0303);
+    assert_eq!(
+        hs2.process_server_hello(&msg2[..len2]),
+        Err(TlsError::BadHandshakeMessage)
+    );
+
+    // Control: the advertised suite and version are accepted.
+    let mut hs3 = HandshakeClient::new([0x11u8; 32]);
+    hs3.state = HandshakeState::ClientHelloSent;
+    let (msg3, len3) =
+        build_server_hello_with(SUPPORTED_GROUPS[0], TLS_CIPHER_CHACHA20_POLY1305_SHA256, TLS_VERSION_1_3);
+    assert!(hs3.process_server_hello(&msg3[..len3]).is_ok());
+}
+
+#[test]
+fn tls_certificate_declaring_an_unadvertised_signature_algorithm_is_refused() {
+    // The outer `signatureAlgorithm` of a certificate is NOT covered by the
+    // certificate's own signature, so it can be rewritten without breaking
+    // the Ed25519 signature over the TBS. A chain entry that declares a
+    // scheme this client never advertised must still be refused.
+    const SIG_ALG_PATTERN: &[u8] = b"\x30\x05\x06\x03\x2b\x65\x70";
+
+    let mut leaf = [0u8; 512];
+    leaf[..LEAF_GOOD_DER.len()].copy_from_slice(LEAF_GOOD_DER);
+    let leaf_at = leaf[..LEAF_GOOD_DER.len()]
+        .windows(SIG_ALG_PATTERN.len())
+        .rposition(|w| w == SIG_ALG_PATTERN)
+        .expect("the outer signatureAlgorithm is present in the fixture");
+    // The OID content sits after SEQUENCE header + length + OID tag + length.
+    leaf[leaf_at + 4..leaf_at + 7].copy_from_slice(&[0x2a, 0x86, 0x48]); // OID 1.2.840
+
+    let mut hs = HandshakeClient::new([0x11u8; 32]);
+    hs.state = HandshakeState::EncryptedExtensionsReceived;
+    let mut msg = [0u8; 1024];
+    let len = build_certificate_message(&[&leaf[..LEAF_GOOD_DER.len()]], &mut msg);
+    assert_eq!(
+        hs.process_certificate(&msg[..len], &AnyPassVerifier, "docs.interos.dev").err(),
+        Some(TlsError::UnsupportedSignatureScheme)
+    );
+    assert_eq!(hs.state, HandshakeState::EncryptedExtensionsReceived);
+
+    // The same rewrite on an issuer position is refused as well.
+    let mut ca = [0u8; 512];
+    ca[..CA_ED25519_DER.len()].copy_from_slice(CA_ED25519_DER);
+    let ca_at = ca[..CA_ED25519_DER.len()]
+        .windows(SIG_ALG_PATTERN.len())
+        .rposition(|w| w == SIG_ALG_PATTERN)
+        .expect("the outer signatureAlgorithm is present in the fixture");
+    ca[ca_at + 4..ca_at + 7].copy_from_slice(&[0x2a, 0x86, 0x48]);
+    let mut hs2 = HandshakeClient::new([0x11u8; 32]);
+    hs2.state = HandshakeState::EncryptedExtensionsReceived;
+    let len2 = build_certificate_message(&[LEAF_GOOD_DER, &ca[..CA_ED25519_DER.len()]], &mut msg);
+    assert_eq!(
+        hs2.process_certificate(&msg[..len2], &AnyPassVerifier, "docs.interos.dev").err(),
+        Some(TlsError::UnsupportedSignatureScheme)
+    );
+    assert_eq!(hs2.state, HandshakeState::EncryptedExtensionsReceived);
+}
+
+// ---------------------------------------------------------------------------
+// Closure 3: no mock may be reported as "verified"
+// ---------------------------------------------------------------------------
+
+#[test]
+fn tls_shipped_default_trust_store_verifies_nothing() {
+    // The synthetic bootstrap CA is a fixture, not a shipped anchor: it is
+    // compiled out of every non-test build and the shipped trust store is
+    // empty, so this blob can never be reported as "verified" in production.
+    assert!(super::certificate::DEFAULT_TRUSTED_ROOTS.is_empty());
+    let root = ParsedCertificate::parse(INTEROS_ROOT_CA_DER).unwrap();
+
+    let shipped = DefaultCertVerifier::for_host("InterOS");
+    assert_eq!(
+        shipped.verify_certificate(&root),
+        Err(TlsError::CertificateVerificationFailed)
+    );
+    assert_eq!(
+        shipped.verify_trust_anchor(&root),
+        Err(TlsError::CertificateVerificationFailed)
+    );
+
+    // It is trusted only when a platform pins it explicitly.
+    static ROOTS: [&[u8]; 1] = [INTEROS_ROOT_CA_DER];
+    let pinned = DefaultCertVerifier::for_host("InterOS").with_roots(&ROOTS);
+    assert_eq!(pinned.verify_certificate(&root), Ok(()));
+}
+
+#[test]
+fn tls_stub_return_path_cannot_turn_a_failed_check_into_a_verified_handshake() {
+    // The stub answers Ok to every policy question it is asked, including
+    // the trust-anchor position. Every gate below is enforced by the
+    // transport itself, so each one still refuses with the stub in place and
+    // the stub never gets to say "verified" on its own.
+    let mut evil_msg = [0u8; 1024];
+    let evil_len = build_certificate_message(&[LEAF_EVIL_DER], &mut evil_msg);
+    let mut good_msg = [0u8; 1024];
+    let good_len = build_certificate_message(&[LEAF_GOOD_DER], &mut good_msg);
+
+    // 1. Name mismatch at the leaf position.
+    let mut hs = HandshakeClient::new([0x11u8; 32]);
+    hs.state = HandshakeState::EncryptedExtensionsReceived;
+    assert_eq!(
+        hs.process_certificate(&evil_msg[..evil_len], &AnyPassVerifier, "docs.interos.dev").err(),
+        Some(TlsError::CertificateVerificationFailed)
+    );
+
+    // 2. Empty reference identity.
+    let mut hs2 = HandshakeClient::new([0x11u8; 32]);
+    hs2.state = HandshakeState::EncryptedExtensionsReceived;
+    assert_eq!(
+        hs2.process_certificate(&good_msg[..good_len], &AnyPassVerifier, "").err(),
+        Some(TlsError::CertificateVerificationFailed)
+    );
+
+    // 3. A signature scheme that was never advertised.
+    let mut hs3 = HandshakeClient::new([0x11u8; 32]);
+    hs3.state = HandshakeState::CertificateReceived;
+    let cert = ParsedCertificate::parse(RFC8032_CERT_DER).unwrap();
+    let cv = [HANDSHAKE_CERTIFICATE_VERIFY, 0, 0, 6, 0x08, 0x04, 0, 2, 0xaa, 0xbb];
+    assert_eq!(
+        hs3.process_certificate_verify(&cv, cert.spki_public_key, &AnyPassVerifier),
+        Err(TlsError::UnsupportedSignatureScheme)
+    );
+    assert_eq!(hs3.state, HandshakeState::CertificateReceived);
+
+    // 4. A chain whose issuer does not prove the link.
+    let mut hs4 = HandshakeClient::new([0x11u8; 32]);
+    hs4.state = HandshakeState::EncryptedExtensionsReceived;
+    let mut mixed = [0u8; 1024];
+    let mixed_len = build_certificate_message(&[LEAF_GOOD_DER, SAN_INTEROS_CERT_DER], &mut mixed);
+    assert_eq!(
+        hs4.process_certificate(&mixed[..mixed_len], &AnyPassVerifier, "docs.interos.dev").err(),
+        Some(TlsError::CertificateVerificationFailed)
+    );
+}
+

@@ -12,7 +12,10 @@ use crate::crypto::hkdf::{derive_secret, empty_hash, hkdf_expand_label, hkdf_ext
 use crate::crypto::hmac::HmacSha256;
 use crate::crypto::sha256::Sha256;
 use crate::crypto::x25519::{x25519, x25519_base};
-use super::certificate::{CertificateVerifier, ParsedCertificate, SIG_SCHEME_ED25519};
+use super::certificate::{
+    is_supported_sig_scheme, CertificateVerifier, ParsedCertificate, ED25519_SPKI_OID,
+    MAX_REFERENCE_IDENTITY_LEN, SUPPORTED_SIG_SCHEMES,
+};
 use super::record::{ContentType, RecordCipher, RECORD_HEADER_LEN};
 use super::TlsError;
 
@@ -32,6 +35,63 @@ pub const EXT_KEY_SHARE: u16 = 0x0033;
 pub const TLS_CIPHER_CHACHA20_POLY1305_SHA256: u16 = 0x1303;
 pub const GROUP_X25519: u16 = 0x001d;
 pub const TLS_VERSION_1_3: u16 = 0x0304;
+
+/// One source of truth for the groups: this exact list is what the ClientHello
+/// writes into `supported_groups` and what a ServerHello `key_share` is checked
+/// against. A group here is a group we can do X25519 math for, and vice versa.
+pub const SUPPORTED_GROUPS: [u16; 1] = [GROUP_X25519];
+
+/// One source of truth for the cipher suites: advertised and accepted from the
+/// same list.
+pub const SUPPORTED_CIPHER_SUITES: [u16; 1] = [TLS_CIPHER_CHACHA20_POLY1305_SHA256];
+
+/// One source of truth for the supported versions written into `supported_versions`
+/// and required of a ServerHello.
+pub const SUPPORTED_VERSIONS: [u16; 1] = [TLS_VERSION_1_3];
+
+/// The ClientHello carries exactly one `key_share` entry, derived from the
+/// single X25519 private key of this client. Adding a group to the advertised
+/// list requires a matching key share, so it is refused at compile time.
+const _: () = assert!(SUPPORTED_GROUPS.len() == 1);
+
+/// Worst-case ClientHello body length: every fixed field, every extension
+/// this client writes, and a maximum-length SNI name.
+///
+/// WHY this exists: the body is written into a fixed 512-byte stack buffer. A
+/// future extension that pushed the encoding past that buffer would panic the
+/// guest mid-handshake instead of refusing the connection, so the bound is
+/// checked at compile time rather than discovered on a device.
+const MAX_CLIENT_HELLO_BODY_LEN: usize = 2 /* legacy_version */
+    + 32 /* random */
+    + 1 /* legacy_session_id length */
+    + 32 /* legacy_session_id */
+    + 2 /* cipher_suites length */
+    + 2 * SUPPORTED_CIPHER_SUITES.len()
+    + 1 /* compression methods length */
+    + 1 /* compression method */
+    + 2 /* extensions length */
+    + 4 /* supported_versions extension */
+    + 2 * SUPPORTED_VERSIONS.len()
+    + 4 /* supported_groups extension */
+    + 2 * SUPPORTED_GROUPS.len()
+    + 4 /* signature_algorithms extension */
+    + 2 * SUPPORTED_SIG_SCHEMES.len()
+    + 4 /* key_share extension */
+    + 2 /* key_share list length */
+    + 2 /* key_share group */
+    + 2 /* key_share key length */
+    + 32 /* key_share key */
+    + 4 /* server_name extension */
+    + 2 /* server_name list length */
+    + 1 /* host_name type */
+    + 2 /* host_name length */
+    + MAX_REFERENCE_IDENTITY_LEN;
+
+/// The ClientHello body buffer must be able to hold the worst case.
+const _: () = assert!(MAX_CLIENT_HELLO_BODY_LEN <= 512);
+
+/// Deepest certificate chain this client will walk before failing closed.
+pub const MAX_CHAIN_DEPTH: usize = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HandshakeState {
@@ -95,15 +155,27 @@ impl HandshakeClient {
     ///
     /// Writes the 5-byte record header followed by ClientHello.
     /// Returns total record length.
+    ///
+    /// Every list written here (cipher suites, versions, groups, signature
+    /// algorithms) comes from the same constants the response parsers enforce,
+    /// so the client can never advertise a scheme it cannot verify nor accept
+    /// one it did not advertise. A hostname that is empty or longer than the
+    /// wire field allows is rejected instead of being silently dropped from SNI.
     pub fn encode_client_hello(
         &mut self,
         random: &[u8; 32],
         sni_hostname: Option<&str>,
         out: &mut [u8],
     ) -> Result<usize, TlsError> {
-        if out.len() < 256 {
-            return Err(TlsError::BufferTooSmall);
-        }
+        let host_bytes: &[u8] = match sni_hostname {
+            Some(host) => {
+                if host.is_empty() || host.len() > MAX_REFERENCE_IDENTITY_LEN {
+                    return Err(TlsError::BufferTooSmall);
+                }
+                host.as_bytes()
+            }
+            None => &[],
+        };
 
         let mut body = [0u8; 512];
         let mut pos = 0;
@@ -122,11 +194,14 @@ impl HandshakeClient {
         body[pos..pos + 32].copy_from_slice(random); // echo random as session id
         pos += 32;
 
-        // cipher_suites: length 2, TLS_CHACHA20_POLY1305_SHA256 (0x1303)
-        body[pos..pos + 2].copy_from_slice(&2u16.to_be_bytes());
+        // cipher_suites: the advertised set itself
+        let cipher_suite_list_len = SUPPORTED_CIPHER_SUITES.len() * 2;
+        body[pos..pos + 2].copy_from_slice(&(cipher_suite_list_len as u16).to_be_bytes());
         pos += 2;
-        body[pos..pos + 2].copy_from_slice(&TLS_CIPHER_CHACHA20_POLY1305_SHA256.to_be_bytes());
-        pos += 2;
+        for suite in SUPPORTED_CIPHER_SUITES.iter() {
+            body[pos..pos + 2].copy_from_slice(&suite.to_be_bytes());
+            pos += 2;
+        }
 
         // legacy_compression_methods: length 1, 0x00
         body[pos] = 1;
@@ -138,70 +213,80 @@ impl HandshakeClient {
         let ext_len_offset = pos;
         pos += 2; // leave room for 2-byte extensions length
 
-        // 1. supported_versions: 0x002b
+        // 1. supported_versions
+        let versions_list_len = SUPPORTED_VERSIONS.len() * 2;
+        let versions_ext_len = 1 + versions_list_len;
         body[pos..pos + 2].copy_from_slice(&EXT_SUPPORTED_VERSIONS.to_be_bytes());
         pos += 2;
-        body[pos..pos + 2].copy_from_slice(&3u16.to_be_bytes()); // ext length = 3
+        body[pos..pos + 2].copy_from_slice(&(versions_ext_len as u16).to_be_bytes());
         pos += 2;
-        body[pos] = 2; // versions list length = 2
+        body[pos] = versions_list_len as u8;
         pos += 1;
-        body[pos..pos + 2].copy_from_slice(&TLS_VERSION_1_3.to_be_bytes());
-        pos += 2;
+        for version in SUPPORTED_VERSIONS.iter() {
+            body[pos..pos + 2].copy_from_slice(&version.to_be_bytes());
+            pos += 2;
+        }
 
-        // 2. supported_groups: 0x000a
+        // 2. supported_groups
+        let groups_list_len = SUPPORTED_GROUPS.len() * 2;
         body[pos..pos + 2].copy_from_slice(&EXT_SUPPORTED_GROUPS.to_be_bytes());
         pos += 2;
-        body[pos..pos + 2].copy_from_slice(&4u16.to_be_bytes());
+        body[pos..pos + 2].copy_from_slice(&(2 + groups_list_len as u16).to_be_bytes());
         pos += 2;
-        body[pos..pos + 2].copy_from_slice(&2u16.to_be_bytes()); // list length = 2
+        body[pos..pos + 2].copy_from_slice(&(groups_list_len as u16).to_be_bytes());
         pos += 2;
-        body[pos..pos + 2].copy_from_slice(&GROUP_X25519.to_be_bytes());
-        pos += 2;
+        for group in SUPPORTED_GROUPS.iter() {
+            body[pos..pos + 2].copy_from_slice(&group.to_be_bytes());
+            pos += 2;
+        }
 
-        // 3. signature_algorithms: 0x000d
-        // Only advertise algorithms supported by our sovereign verifier (RFC 8446 Section 4.2.3): Ed25519.
+        // 3. signature_algorithms: only schemes this verifier can actually check
+        // (certificate::SUPPORTED_SIG_SCHEMES is the same list the CertificateVerify
+        // parser and the verifier consume). RFC 8446 Section 4.2.3.
+        let schemes_list_len = super::certificate::SUPPORTED_SIG_SCHEMES.len() * 2;
         body[pos..pos + 2].copy_from_slice(&EXT_SIGNATURE_ALGORITHMS.to_be_bytes());
         pos += 2;
-        body[pos..pos + 2].copy_from_slice(&4u16.to_be_bytes()); // length = 4
+        body[pos..pos + 2].copy_from_slice(&(2 + schemes_list_len as u16).to_be_bytes());
         pos += 2;
-        body[pos..pos + 2].copy_from_slice(&2u16.to_be_bytes()); // list length = 2
+        body[pos..pos + 2].copy_from_slice(&(schemes_list_len as u16).to_be_bytes());
         pos += 2;
-        body[pos..pos + 2].copy_from_slice(&SIG_SCHEME_ED25519.to_be_bytes());
-        pos += 2;
+        for scheme in super::certificate::SUPPORTED_SIG_SCHEMES.iter() {
+            body[pos..pos + 2].copy_from_slice(&scheme.to_be_bytes());
+            pos += 2;
+        }
 
-        // 4. key_share: 0x0033
+        // 4. key_share: exactly one entry for the single advertised group
+        let ks_entry_len = 2 + 2 + self.client_public_key.len();
+        let client_shares_len = 2 + ks_entry_len;
         body[pos..pos + 2].copy_from_slice(&EXT_KEY_SHARE.to_be_bytes());
         pos += 2;
-        let ks_ext_len = 2 + 2 + 2 + 32; // list_len (2) + group (2) + key_len (2) + key (32) = 38
-        body[pos..pos + 2].copy_from_slice(&(ks_ext_len as u16).to_be_bytes());
+        body[pos..pos + 2].copy_from_slice(&(2 + client_shares_len as u16).to_be_bytes());
         pos += 2;
-        body[pos..pos + 2].copy_from_slice(&36u16.to_be_bytes()); // client_shares list length = 36
+        body[pos..pos + 2].copy_from_slice(&(client_shares_len as u16).to_be_bytes());
         pos += 2;
-        body[pos..pos + 2].copy_from_slice(&GROUP_X25519.to_be_bytes());
+        body[pos..pos + 2].copy_from_slice(&SUPPORTED_GROUPS[0].to_be_bytes());
         pos += 2;
-        body[pos..pos + 2].copy_from_slice(&32u16.to_be_bytes());
+        body[pos..pos + 2].copy_from_slice(&(self.client_public_key.len() as u16).to_be_bytes());
         pos += 2;
-        body[pos..pos + 32].copy_from_slice(&self.client_public_key);
-        pos += 32;
+        body[pos..pos + self.client_public_key.len()].copy_from_slice(&self.client_public_key);
+        pos += self.client_public_key.len();
 
-        // 5. Optional SNI: 0x0000
-        if let Some(host) = sni_hostname {
-            let host_bytes = host.as_bytes();
-            if host_bytes.len() < 256 {
-                body[pos..pos + 2].copy_from_slice(&EXT_SERVER_NAME.to_be_bytes());
-                pos += 2;
-                let sni_len = 2 + 1 + 2 + host_bytes.len();
-                body[pos..pos + 2].copy_from_slice(&(sni_len as u16).to_be_bytes());
-                pos += 2;
-                body[pos..pos + 2].copy_from_slice(&((host_bytes.len() + 3) as u16).to_be_bytes());
-                pos += 2;
-                body[pos] = 0; // host_name type
-                pos += 1;
-                body[pos..pos + 2].copy_from_slice(&(host_bytes.len() as u16).to_be_bytes());
-                pos += 2;
-                body[pos..pos + host_bytes.len()].copy_from_slice(host_bytes);
-                pos += host_bytes.len();
-            }
+        // 5. Optional SNI: the reference identity we will verify names against
+        if !host_bytes.is_empty() {
+            let server_name_list_len = 3 + host_bytes.len(); // type (1) + host length (2) + host
+            let sni_ext_len = 2 + server_name_list_len;
+            body[pos..pos + 2].copy_from_slice(&EXT_SERVER_NAME.to_be_bytes());
+            pos += 2;
+            body[pos..pos + 2].copy_from_slice(&(sni_ext_len as u16).to_be_bytes());
+            pos += 2;
+            body[pos..pos + 2].copy_from_slice(&(server_name_list_len as u16).to_be_bytes());
+            pos += 2;
+            body[pos] = 0; // host_name type
+            pos += 1;
+            body[pos..pos + 2].copy_from_slice(&(host_bytes.len() as u16).to_be_bytes());
+            pos += 2;
+            body[pos..pos + host_bytes.len()].copy_from_slice(host_bytes);
+            pos += host_bytes.len();
         }
 
         // Fill total extensions length
@@ -220,6 +305,13 @@ impl HandshakeClient {
 
         let total_hs_len = 4 + body_len;
 
+        // The record must fit the caller's buffer in full: check the length this
+        // encode actually produced, not a placeholder minimum.
+        let record_len = RECORD_HEADER_LEN + total_hs_len;
+        if record_len > out.len() || total_hs_len > u16::MAX as usize {
+            return Err(TlsError::BufferTooSmall);
+        }
+
         // Add to transcript
         self.transcript.update(&hs_msg[..total_hs_len]);
 
@@ -230,7 +322,7 @@ impl HandshakeClient {
         out[5..5 + total_hs_len].copy_from_slice(&hs_msg[..total_hs_len]);
 
         self.state = HandshakeState::ClientHelloSent;
-        Ok(RECORD_HEADER_LEN + total_hs_len)
+        Ok(record_len)
     }
 
     /// Processes a ServerHello message, performs X25519 key exchange, and derives handshake traffic secrets.
@@ -245,7 +337,9 @@ impl HandshakeClient {
         }
 
         let body = &payload[4..4 + hs_len];
-        if body.len() < 34 {
+        // legacy_version (2) + random (32) + at least the session_id length byte.
+        // Reading body[34] requires 35 bytes, so the guard is 35, not 34.
+        if body.len() < 35 {
             return Err(TlsError::BadHandshakeMessage);
         }
 
@@ -263,9 +357,9 @@ impl HandshakeClient {
             return Err(TlsError::BadHandshakeMessage);
         }
 
-        // cipher_suite
+        // cipher_suite: must be one of the suites this client advertised.
         let cipher_suite = u16::from_be_bytes([body[cur], body[cur + 1]]);
-        if cipher_suite != TLS_CIPHER_CHACHA20_POLY1305_SHA256 {
+        if !SUPPORTED_CIPHER_SUITES.contains(&cipher_suite) {
             return Err(TlsError::UnsupportedCipherSuite);
         }
         cur += 2;
@@ -304,7 +398,8 @@ impl HandshakeClient {
             cur += ext_data_len;
 
             if ext_type == EXT_SUPPORTED_VERSIONS {
-                if ext_data.len() == 2 && u16::from_be_bytes([ext_data[0], ext_data[1]]) == TLS_VERSION_1_3 {
+                // The negotiated version must be one this client advertised.
+                if ext_data.len() == 2 && SUPPORTED_VERSIONS.contains(&u16::from_be_bytes([ext_data[0], ext_data[1]])) {
                     found_version = true;
                 }
             } else if ext_type == EXT_KEY_SHARE {
@@ -312,11 +407,17 @@ impl HandshakeClient {
                 if ext_data.len() >= 36 {
                     let group = u16::from_be_bytes([ext_data[0], ext_data[1]]);
                     let key_len = u16::from_be_bytes([ext_data[2], ext_data[3]]) as usize;
-                    if group == GROUP_X25519 && key_len == 32 {
-                        self.server_public_key.copy_from_slice(&ext_data[4..36]);
+                    // A server picking a group we never advertised is a hard
+                    // rejection: accepted groups == advertised groups.
+                    if SUPPORTED_GROUPS.contains(&group) && key_len == self.server_public_key.len() {
+                        self.server_public_key
+                            .copy_from_slice(&ext_data[4..4 + key_len]);
                         found_key_share = true;
                     }
                 }
+            } else {
+                // Unknown/unsolicited extensions in a ServerHello are not
+                // negotiated by this client; ignore but never credit them.
             }
         }
 
@@ -386,12 +487,28 @@ impl HandshakeClient {
         Ok(())
     }
 
-    /// Processes Certificate message and validates the server certificate with `verifier`.
+    /// Processes the Certificate message and validates the chain with `verifier`.
+    ///
+    /// Positions that need identity/chain checks get them, and every position
+    /// that fails one fails the whole handshake closed:
+    /// - position 0 (end-entity): reference-identity (SAN/CN) match against
+    ///   `reference_identity` — the name this client advertised in SNI — plus the
+    ///   verifier's trust policy.
+    /// - positions 1..: must parse, pass structural validity, carry an Ed25519
+    ///   key, continue the chain (`previous.issuer == subject`) and actually sign
+    ///   the previous entry; the final entry must be a member of the trust store
+    ///   via [`CertificateVerifier::verify_trust_anchor`].
+    /// - a chain longer than [`MAX_CHAIN_DEPTH`] is refused, not truncated, and
+    ///   the declared `certificate_list` must be consumed exactly.
     pub fn process_certificate<'a>(
         &mut self,
         payload: &'a [u8],
         verifier: &dyn CertificateVerifier,
+        reference_identity: &str,
     ) -> Result<ParsedCertificate<'a>, TlsError> {
+        if self.state != HandshakeState::EncryptedExtensionsReceived {
+            return Err(TlsError::UnexpectedMessage);
+        }
         if payload.len() < 4 || payload[0] != HANDSHAKE_CERTIFICATE {
             return Err(TlsError::BadHandshakeMessage);
         }
@@ -415,33 +532,115 @@ impl HandshakeClient {
         // certificate_list length (3 bytes)
         let list_len = ((body[cur] as usize) << 16) | ((body[cur + 1] as usize) << 8) | (body[cur + 2] as usize);
         cur += 3;
-        if body.len() < cur + list_len || list_len < 3 {
+        if list_len < 3 || body.len() < cur + list_len {
             return Err(TlsError::BadHandshakeMessage);
         }
 
-        // First certificate entry length (3 bytes)
-        let cert_len = ((body[cur] as usize) << 16) | ((body[cur + 1] as usize) << 8) | (body[cur + 2] as usize);
-        cur += 3;
-        if body.len() < cur + cert_len {
-            return Err(TlsError::BadHandshakeMessage);
+        // Walk only inside the declared list: an entry can never read past it.
+        let mut chain = &body[cur..cur + list_len];
+        let mut leaf: Option<ParsedCertificate<'a>> = None;
+        let mut previous: Option<ParsedCertificate<'a>> = None;
+        let mut depth = 0usize;
+
+        while !chain.is_empty() {
+            if depth >= MAX_CHAIN_DEPTH {
+                return Err(TlsError::CertificateVerificationFailed);
+            }
+            depth += 1;
+
+            // entry length (3 bytes)
+            if chain.len() < 3 {
+                return Err(TlsError::BadHandshakeMessage);
+            }
+            let cert_len = ((chain[0] as usize) << 16) | ((chain[1] as usize) << 8) | (chain[2] as usize);
+            chain = &chain[3..];
+            if cert_len == 0 || chain.len() < cert_len {
+                return Err(TlsError::BadHandshakeMessage);
+            }
+            let cert_der = &chain[..cert_len];
+            chain = &chain[cert_len..];
+
+            // per-entry extensions: 2-byte length that must be inside the list
+            if chain.len() < 2 {
+                return Err(TlsError::BadHandshakeMessage);
+            }
+            let ext_len = u16::from_be_bytes([chain[0], chain[1]]) as usize;
+            chain = &chain[2..];
+            if chain.len() < ext_len {
+                return Err(TlsError::BadHandshakeMessage);
+            }
+            chain = &chain[ext_len..];
+
+            let parsed = ParsedCertificate::parse(cert_der)?;
+            parsed.check_validity()?;
+
+            // Only the advertised key type is usable at any chain position.
+            if parsed.spki_algorithm_oid != ED25519_SPKI_OID {
+                return Err(TlsError::UnsupportedSignatureScheme);
+            }
+            // The signature algorithm the certificate *declares* must also be
+            // one this client advertised. The outer `signatureAlgorithm` field
+            // is NOT covered by the certificate's own signature, so a chain
+            // entry could otherwise declare a scheme this client never
+            // advertised (and never checked) while its bytes still verify
+            // under Ed25519. Advertised set == accepted set, here too.
+            if parsed.sig_alg_oid != ED25519_SPKI_OID {
+                return Err(TlsError::UnsupportedSignatureScheme);
+            }
+
+            match previous {
+                None => {
+                    // End-entity position carries the reference identity check.
+                    if reference_identity.is_empty()
+                        || !parsed.matches_hostname(reference_identity)
+                    {
+                        return Err(TlsError::CertificateVerificationFailed);
+                    }
+                    verifier.verify_certificate(&parsed)?;
+                    leaf = Some(parsed);
+                }
+                Some(prev) => {
+                    // Issuer position: continue the chain and prove the link.
+                    if prev.issuer_raw != parsed.subject_raw {
+                        return Err(TlsError::CertificateVerificationFailed);
+                    }
+                    super::ed25519::verify_ed25519(
+                        parsed.spki_public_key,
+                        prev.tbs_raw,
+                        prev.signature_value,
+                    )
+                    .map_err(|_| TlsError::CertificateVerificationFailed)?;
+                    if chain.is_empty() {
+                        // Last entry must be a trust anchor from the store.
+                        verifier.verify_trust_anchor(&parsed)?;
+                    }
+                }
+            }
+            previous = Some(parsed);
         }
 
-        let cert_der = &body[cur..cur + cert_len];
-        let parsed = ParsedCertificate::parse(cert_der)?;
-        verifier.verify_certificate(&parsed)?;
+        let leaf = leaf.ok_or(TlsError::BadHandshakeMessage)?;
 
         self.transcript.update(&payload[..4 + hs_len]);
         self.state = HandshakeState::CertificateReceived;
-        Ok(parsed)
+        Ok(leaf)
     }
 
-    /// Processes CertificateVerify message and checks the digital signature.
+    /// Processes CertificateVerify message and checks the digital signature
+    /// against the leaf certificate's public key.
+    ///
+    /// The scheme is only accepted when it is in the advertised list
+    /// (`certificate::SUPPORTED_SIG_SCHEMES`); the verification result is
+    /// consumed and any failure aborts the handshake.
     pub fn process_certificate_verify(
         &mut self,
         payload: &[u8],
-        cert: &ParsedCertificate,
+        leaf_public_key: &[u8],
         verifier: &dyn CertificateVerifier,
     ) -> Result<(), TlsError> {
+        if self.state != HandshakeState::CertificateReceived {
+            return Err(TlsError::UnexpectedMessage);
+        }
         if payload.len() < 4 || payload[0] != HANDSHAKE_CERTIFICATE_VERIFY {
             return Err(TlsError::BadHandshakeMessage);
         }
@@ -456,7 +655,8 @@ impl HandshakeClient {
         }
 
         let algorithm = u16::from_be_bytes([body[0], body[1]]);
-        if algorithm != SIG_SCHEME_ED25519 {
+        // Advertised set == accepted set; never silently try another scheme.
+        if !is_supported_sig_scheme(algorithm) {
             return Err(TlsError::UnsupportedSignatureScheme);
         }
         let sig_len = u16::from_be_bytes([body[2], body[3]]) as usize;
@@ -475,7 +675,9 @@ impl HandshakeClient {
         context_and_hash[64 + ctx.len()] = 0;
         context_and_hash[65 + ctx.len()..65 + ctx.len() + 32].copy_from_slice(&th);
 
-        verifier.verify_server_signature(cert, algorithm, &context_and_hash, signature)?;
+        // A discarded result here would silently downgrade to an unverified
+        // channel, so the signature outcome gates the state transition.
+        verifier.verify_server_signature(leaf_public_key, algorithm, &context_and_hash, signature)?;
 
         self.transcript.update(&payload[..4 + hs_len]);
         self.state = HandshakeState::CertificateVerifyReceived;
@@ -484,6 +686,9 @@ impl HandshakeClient {
 
     /// Processes Server Finished message and verifies server verify_data.
     pub fn process_server_finished(&mut self, payload: &[u8]) -> Result<(), TlsError> {
+        if self.state != HandshakeState::CertificateVerifyReceived {
+            return Err(TlsError::UnexpectedMessage);
+        }
         if payload.len() < 4 || payload[0] != HANDSHAKE_FINISHED {
             return Err(TlsError::BadHandshakeMessage);
         }

@@ -15,7 +15,7 @@ use interos_std::crypto::hkdf::{derive_secret, hkdf_expand, hkdf_expand_label, h
 use interos_std::crypto::hmac::HmacSha256;
 use interos_std::crypto::sha256::Sha256;
 use interos_std::crypto::x25519::{x25519, x25519_base};
-use interos_std::tls::certificate::{AllowAnyCertVerifier, ParsedCertificate};
+use interos_std::tls::certificate::{CertificateVerifier, ParsedCertificate};
 use interos_std::tls::client::{TlsClientSession, TlsConfig};
 use interos_std::tls::handshake::{
     HANDSHAKE_CERTIFICATE_VERIFY, HANDSHAKE_CLIENT_HELLO,
@@ -30,6 +30,36 @@ fn hex_to_bytes(hex: &str) -> Vec<u8> {
         .step_by(2)
         .map(|i| u8::from_str_radix(&clean[i..i + 2], 16).unwrap())
         .collect()
+}
+
+/// Test-only permissive verifier, defined inside this test target so it exists
+/// in no shipped build. It stands in for a trust store during the mock
+/// handshake below; it is NOT a claim that anything was verified, and the
+/// transport still enforces the reference identity, the advertised scheme list,
+/// message order, and the leaf key pinning independently of it.
+struct MockTrustStoreVerifier {
+    identity: &'static str,
+}
+
+impl CertificateVerifier for MockTrustStoreVerifier {
+    fn verify_certificate(&self, _cert: &ParsedCertificate) -> Result<(), interos_std::tls::TlsError> {
+        Ok(())
+    }
+    fn verify_trust_anchor(&self, _cert: &ParsedCertificate) -> Result<(), interos_std::tls::TlsError> {
+        Ok(())
+    }
+    fn reference_identity(&self) -> Option<&str> {
+        Some(self.identity)
+    }
+    fn verify_server_signature(
+        &self,
+        _public_key: &[u8],
+        _algorithm: u16,
+        _context_and_hash: &[u8],
+        _signature: &[u8],
+    ) -> Result<(), interos_std::tls::TlsError> {
+        Ok(())
+    }
 }
 
 // ==========================================
@@ -279,9 +309,9 @@ fn test_mock_tls13_handshake_and_traffic() {
     let client_priv = [0x11u8; 32];
     let client_rand = [0x22u8; 32];
 
-    static VERIFIER: AllowAnyCertVerifier = AllowAnyCertVerifier;
+    static VERIFIER: MockTrustStoreVerifier = MockTrustStoreVerifier { identity: "InterOS" };
     let config = TlsConfig {
-        server_name: Some("test.interos.local"),
+        server_name: Some("InterOS"),
         random: client_rand,
         private_key: client_priv,
         verifier: &VERIFIER,
@@ -426,7 +456,7 @@ fn test_mock_tls13_handshake_and_traffic() {
     assert!(client_session.is_connected());
 
     // 7. Verify encrypted Application Data exchange
-    let request_data = b"GET / HTTP/1.1\r\nHost: test.interos.local\r\n\r\n";
+    let request_data = b"GET / HTTP/1.1\r\nHost: InterOS\r\n\r\n";
     let mut app_record = [0u8; 256];
     let app_len = client_session.encrypt_application_data(request_data, &mut app_record).unwrap();
 
@@ -449,4 +479,65 @@ fn test_mock_tls13_handshake_and_traffic() {
 
     assert_eq!(c_type, ContentType::ApplicationData);
     assert_eq!(&decrypted_req[..dec_req_len], request_data);
+}
+
+/// The mock store above is a test fixture, not a trust decision: the client
+/// refuses to run any handshake whose advertised name is not the name the
+/// verifier pins, so a permissive stub can never carry a session to `Connected`
+/// under a borrowed identity.
+#[test]
+fn test_stub_verifier_cannot_borrow_another_identity() {
+    static MISMATCH: MockTrustStoreVerifier = MockTrustStoreVerifier { identity: "someone.else" };
+    let mut session = TlsClientSession::new(TlsConfig {
+        server_name: Some("InterOS"),
+        random: [0x22u8; 32],
+        private_key: [0x11u8; 32],
+        verifier: &MISMATCH,
+    });
+    let mut ch_record = [0u8; 1024];
+    assert_eq!(
+        session.start_handshake(&mut ch_record),
+        Err(interos_std::tls::TlsError::Unavailable)
+    );
+    assert!(!session.is_connected());
+
+    // And TlsConfig::new refuses the same mismatch up front.
+    assert!(
+        TlsConfig::new("InterOS", [0x22u8; 32], [0x11u8; 32], &MISMATCH).is_err()
+    );
+}
+
+/// A shipped consumer must find NO trust anchor and NO mock CA.
+///
+/// This test target compiles against the library *without* `cfg(test)`, so it
+/// sees exactly what a guest image sees. The synthetic bootstrap CA is a
+/// fixture (placeholder key, dummy signature) and must not be reachable from
+/// a production build: the shipped trust store is empty, so a verifier that
+/// was not given real roots fails closed instead of reporting "verified".
+#[test]
+fn test_shipped_build_has_no_trust_anchor_and_no_mock_ca() {
+    use interos_std::tls::certificate::DEFAULT_TRUSTED_ROOTS;
+    use interos_std::tls::DefaultCertVerifier;
+
+    assert!(
+        DEFAULT_TRUSTED_ROOTS.is_empty(),
+        "a shipped client must start with no trust anchor"
+    );
+
+    // The synthetic InterOS bootstrap CA, byte for byte, as it used to be the
+    // shipped default. A default verifier must refuse it.
+    let synthetic_root = hex_to_bytes(
+        "3081c6307a020101300506032b65703010300e06035504030c07496e7465724f53301e170d3236303130313030303030305a170d3236313233313233353935395a3010300e06035504030c07496e7465724f53302a300506032b65700321000909090909090909090909090909090909090909090909090909090909090909300506032b657003410055555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555"
+    );
+    let cert = ParsedCertificate::parse(&synthetic_root).unwrap();
+    let verifier = DefaultCertVerifier::for_host("InterOS");
+    assert_eq!(
+        verifier.verify_certificate(&cert),
+        Err(interos_std::tls::TlsError::CertificateVerificationFailed),
+        "the mock CA must never be reported as verified"
+    );
+    assert_eq!(
+        verifier.verify_trust_anchor(&cert),
+        Err(interos_std::tls::TlsError::CertificateVerificationFailed)
+    );
 }
