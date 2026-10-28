@@ -279,7 +279,10 @@ def test_browser_start_page_does_not_render_a_hardcoded_news_feed_or_ranking():
     assert 'b"Your pages"' in source
     # The real sources of rows must stay wired to real state.
     assert "app.bookmarks.record(index)" in source
-    assert "app.history.entry(" in source
+    # WHY the visit log is read through `visit` rather than the older `entry`:
+    # a row now shows what the page called itself beside where it was, and the
+    # accessor that hands out only an address cannot feed that row.
+    assert "app.history.visit(" in source
 
 
 def _code_only(source: str) -> str:

@@ -29,10 +29,10 @@ use interos_std::design::font;
 use interos_std::design::primitives::{draw_rounded_rect, Rect};
 
 use browser::{
-    format_proxy_request, into_url_field, is_browser_envelope, link_arrow_ink,
-    parse_gemtext_link, parse_uri, scheme_mark, ConnectionFailure, DocLine, DocumentTokenizer,
-    LineKind, LoadingState, PageStatus, ProtocolFaultKind, TabSessionManager,
-    TransportFailure, UriScheme, MAX_DOC_LINES, MAX_LINE_BYTES, MAX_TABS, URL_FIELD,
+    format_proxy_request, is_browser_envelope, link_arrow_ink, parse_gemtext_link, parse_uri,
+    scheme_mark, url_field, ConnectionFailure, DocLine, DocumentTokenizer, LineKind, LoadingState,
+    PageStatus, ProtocolFaultKind, TabSessionManager, TransportFailure, UriScheme, MAX_DOC_LINES,
+    MAX_LINE_BYTES, MAX_TABS,
 };
 use browser::css;
 use browser::images;
@@ -1320,12 +1320,27 @@ impl BookmarkStore {
 // -----------------------------------------------------------------------------
 const HISTORY_CAP: usize = 16;
 
-/// The largest address a history entry holds.
+/// The largest address a visit holds.
 ///
 /// WHY this is not 64 bytes: real page and media addresses are longer than
 /// that, and a truncated entry navigated to a different address than the one
 /// that was visited.
 const HISTORY_ENTRY_BYTES: usize = 256;
+
+/// The largest name a visit holds.
+///
+/// WHY it is the tab's own width: the same page names itself one title, and a
+/// log that kept more of it than the tab shows would list a name the person
+/// never saw anywhere else.
+const HISTORY_TITLE_BYTES: usize = browser::MAX_TITLE_LEN;
+
+/// The largest summary a visit holds, from the page's own description.
+///
+/// WHY a hundred and twenty-eight bytes: a `<meta name="description">` is
+/// written to be read in the line under a search result, and the line a card
+/// gives it is one line. Longer is a paragraph the card cannot draw and every
+/// visit in the file pays for.
+const HISTORY_SUMMARY_BYTES: usize = 128;
 
 /// The app-private file the visit log is kept in.
 ///
@@ -1334,21 +1349,95 @@ const HISTORY_ENTRY_BYTES: usize = 256;
 const HISTORY_FILE: &str = "history.bin";
 
 /// The first byte of the file names the format.
-const HISTORY_VERSION: u8 = 1;
+///
+/// WHY two and not one: version one recorded only the address, and a record
+/// from it read as version two would hand the address's bytes to the name. A
+/// log in the older format is discarded whole rather than half-understood.
+const HISTORY_VERSION: u8 = 2;
 
-/// One version byte, one count byte, then `HISTORY_CAP` entries of one
-/// length byte plus at most 255 address bytes.
-const HISTORY_BLOB_BYTES: usize = 2 + HISTORY_CAP * HISTORY_ENTRY_BYTES;
+/// The longest field one length byte can describe.
+const HISTORY_FIELD_BYTES: usize = u8::MAX as usize;
+
+/// One version byte, one count byte, then `HISTORY_CAP` records of one length
+/// byte plus that many bytes, once each for the address, the name and the
+/// summary.
+const HISTORY_BLOB_BYTES: usize = 2
+    + HISTORY_CAP * (HISTORY_ENTRY_BYTES + HISTORY_TITLE_BYTES + HISTORY_SUMMARY_BYTES + 3);
+
+/// The whole log, as one file read.
+///
+/// WHY a static and not a local: the log is larger than the task stack should
+/// carry, and `BrowserApp::new()` — which reads it — is built on that stack.
+static mut HISTORY_BLOB: [u8; HISTORY_BLOB_BYTES] = [0; HISTORY_BLOB_BYTES];
+
+/// The text a fixed slot holds: everything up to its first zero.
+fn slot_text(slot: &[u8]) -> &[u8] {
+    let n = slot.iter().position(|&b| b == 0).unwrap_or(slot.len());
+    &slot[..n]
+}
+
+/// Puts text into a fixed slot, clearing whatever the slot held before.
+fn slot_put(slot: &mut [u8], text: &[u8]) {
+    let n = text.len().min(slot.len()).min(HISTORY_FIELD_BYTES);
+    for byte in slot.iter_mut() {
+        *byte = 0;
+    }
+    slot[..n].copy_from_slice(&text[..n]);
+}
+
+/// Reads one length-prefixed field of a history record into a fixed slot and
+/// moves the cursor past it. `None` is a field the file does not hold.
+fn read_record_field(
+    blob: &[u8],
+    filled: usize,
+    cursor: &mut usize,
+    out: &mut [u8],
+) -> Option<usize> {
+    if *cursor >= filled {
+        return None;
+    }
+    let n = blob[*cursor] as usize;
+    *cursor += 1;
+    if n > out.len() || *cursor + n > filled {
+        return None;
+    }
+    for byte in out.iter_mut() {
+        *byte = 0;
+    }
+    out[..n].copy_from_slice(&blob[*cursor..*cursor + n]);
+    *cursor += n;
+    Some(n)
+}
+
+/// Writes one length-prefixed field of a history record, in bytes used.
+fn write_record_field(out: &mut [u8], text: &[u8]) -> usize {
+    let n = text.len().min(out.len() - 1).min(HISTORY_FIELD_BYTES);
+    out[0] = n as u8;
+    out[1..1 + n].copy_from_slice(&text[..n]);
+    n + 1
+}
+
+/// One recorded visit: where it was, and what the page called itself.
+#[derive(Debug, Clone, Copy)]
+pub struct Visit<'a> {
+    pub url: &'a [u8],
+    pub title: &'a [u8],
+    pub description: &'a [u8],
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct History {
     entries: [[u8; HISTORY_ENTRY_BYTES]; HISTORY_CAP],
+    names: [[u8; HISTORY_TITLE_BYTES]; HISTORY_CAP],
+    summaries: [[u8; HISTORY_SUMMARY_BYTES]; HISTORY_CAP],
     len: usize,
 }
 
 impl History {
     const EMPTY: History = History {
         entries: [[0; HISTORY_ENTRY_BYTES]; HISTORY_CAP],
+        names: [[0; HISTORY_TITLE_BYTES]; HISTORY_CAP],
+        summaries: [[0; HISTORY_SUMMARY_BYTES]; HISTORY_CAP],
         len: 0,
     };
 
@@ -1364,37 +1453,63 @@ impl History {
         // WHY a repeated address is not appended twice: reloading the page a
         // person is already on is not a new visit, and the list would fill
         // with copies of one address.
-        if self.len > 0 {
-            let n = self.entries[self.len - 1]
-                .iter()
-                .position(|&b| b == 0)
-                .unwrap_or(HISTORY_ENTRY_BYTES);
-            if &self.entries[self.len - 1][..n] == target {
-                return;
-            }
+        if self.len > 0 && slot_text(&self.entries[self.len - 1]) == target {
+            return;
         }
         if self.len >= HISTORY_CAP {
             for i in 0..self.len - 1 {
                 self.entries[i] = self.entries[i + 1];
+                self.names[i] = self.names[i + 1];
+                self.summaries[i] = self.summaries[i + 1];
             }
             self.len -= 1;
         }
-        let n = target.len().min(HISTORY_ENTRY_BYTES - 1);
-        self.entries[self.len][..n].copy_from_slice(&target[..n]);
+        slot_put(&mut self.entries[self.len], target);
+        // WHY the name is cleared with the address: the slot this visit lands
+        // in held an earlier page, and a visit wearing another page's name
+        // records a visit nobody made.
+        self.names[self.len] = [0; HISTORY_TITLE_BYTES];
+        self.summaries[self.len] = [0; HISTORY_SUMMARY_BYTES];
         self.len += 1;
     }
 
-    pub fn entry(&self, index: usize) -> Option<&[u8]> {
+    /// Gives the newest visit the name and summary the page stated for itself.
+    ///
+    /// WHY the newest entry and not a search by address: the page being read
+    /// is the visit just recorded, and a page reached through a redirect or a
+    /// canonical address names itself over bytes stored under a different
+    /// address. Searching by address would leave those pages unnamed.
+    ///
+    /// Returns whether the log changed, so the caller rewrites the file only
+    /// when a name actually arrived.
+    pub fn name_newest(&mut self, title: &[u8], description: &[u8]) -> bool {
+        if self.len == 0 {
+            return false;
+        }
+        let last = self.len - 1;
+        if slot_text(&self.names[last]) == title
+            && slot_text(&self.summaries[last]) == description
+        {
+            return false;
+        }
+        slot_put(&mut self.names[last], title);
+        slot_put(&mut self.summaries[last], description);
+        true
+    }
+
+    pub fn visit(&self, index: usize) -> Option<Visit<'_>> {
         if index >= self.len {
             return None;
         }
-        let raw = &self.entries[index];
-        let n = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
-        if n == 0 {
-            None
-        } else {
-            Some(&raw[..n])
+        let url = slot_text(&self.entries[index]);
+        if url.is_empty() {
+            return None;
         }
+        Some(Visit {
+            url,
+            title: slot_text(&self.names[index]),
+            description: slot_text(&self.summaries[index]),
+        })
     }
 
     /// Reads the log the previous session saved.
@@ -1407,7 +1522,7 @@ impl History {
         let Ok(fd) = std::app_storage_open(HISTORY_FILE, 1) else {
             return history;
         };
-        let mut blob = [0u8; HISTORY_BLOB_BYTES];
+        let blob = unsafe { &mut *core::ptr::addr_of_mut!(HISTORY_BLOB) };
         let mut filled = 0;
         loop {
             match std::fs_read(fd, &mut blob[filled..]) {
@@ -1434,16 +1549,19 @@ impl History {
         }
         let mut offset = 2;
         for i in 0..count {
-            if offset >= filled {
+            // WHY a name of none is allowed and an address of none is not: a
+            // page that stated no title is an ordinary page, and the card
+            // gives it its address. A visit with no address says nothing
+            // happened, and a file that says that is not a log.
+            let address = read_record_field(blob, filled, &mut offset, &mut history.entries[i]);
+            let name = read_record_field(blob, filled, &mut offset, &mut history.names[i]);
+            let summary = read_record_field(blob, filled, &mut offset, &mut history.summaries[i]);
+            if !matches!(address, Some(length) if length > 0)
+                || name.is_none()
+                || summary.is_none()
+            {
                 return Self::EMPTY;
             }
-            let n = blob[offset] as usize;
-            offset += 1;
-            if n == 0 || n >= HISTORY_ENTRY_BYTES || offset + n > filled {
-                return Self::EMPTY;
-            }
-            history.entries[i][..n].copy_from_slice(&blob[offset..offset + n]);
-            offset += n;
         }
         history.len = count;
         history
@@ -1454,21 +1572,14 @@ impl History {
     /// Returns whether the platform accepted the write, so the caller can
     /// tell a saved history from a session-only one.
     pub fn persist(&self) -> bool {
-        let mut blob = [0u8; HISTORY_BLOB_BYTES];
+        let blob = unsafe { &mut *core::ptr::addr_of_mut!(HISTORY_BLOB) };
         blob[0] = HISTORY_VERSION;
         blob[1] = self.len as u8;
         let mut offset = 2;
         for i in 0..self.len {
-            let raw = &self.entries[i];
-            let n = raw
-                .iter()
-                .position(|&b| b == 0)
-                .unwrap_or(raw.len())
-                .min(HISTORY_ENTRY_BYTES - 1);
-            blob[offset] = n as u8;
-            offset += 1;
-            blob[offset..offset + n].copy_from_slice(&raw[..n]);
-            offset += n;
+            offset += write_record_field(&mut blob[offset..], slot_text(&self.entries[i]));
+            offset += write_record_field(&mut blob[offset..], slot_text(&self.names[i]));
+            offset += write_record_field(&mut blob[offset..], slot_text(&self.summaries[i]));
         }
         let Ok(fd) = std::app_storage_open(HISTORY_FILE, 2) else {
             return false;
@@ -2984,6 +3095,16 @@ impl BrowserApp {
         let stated_title = dom.meta().title.get(dom);
         if !stated_title.is_empty() {
             self.tabs.active_tab_mut().set_title(stated_title);
+        }
+        // WHY the visit is named here: the log records the address the moment
+        // the navigation is asked for, because a page that never arrived was
+        // still a visit. What the page calls itself, and the line it wrote
+        // under that name, are only known once its bytes have been read — so
+        // the entry is dressed when the document arrives, and stays bare when
+        // it does not.
+        let stated_summary = dom.meta().description.get(dom);
+        if self.history.name_newest(stated_title, stated_summary) {
+            let _ = self.history.persist();
         }
         if dom.node_count() <= 1 {
             self.html_view = false;
@@ -6474,21 +6595,28 @@ fn home_page_pixel(x: usize, y: usize, app: &BrowserApp) -> u32 {
         };
 
         if let Some(c) = draw_rounded_rect(x, y, card_rect, CARD.radius, CARD.fill, CARD.border, 1) {
-            if let Some(px) = text_px(x, y, 44, card_y + 20, 1, row.title, THEME.on_surface, THEME.surface_container_high, true) {
+            let thumb = Rect::new(W - 48 - 84, card_y + card_h - 88, 68, 68);
+            // WHY the card's three lines are trimmed to the picture's edge: a
+            // page names itself as long as it likes, and the last words of a
+            // name that outgrew the card would land under its icon.
+            let line_w = thumb.x - 56;
+            let mut line = [0u8; 128];
+            let n = font::ellipsize(row.title, 1, line_w, &mut line);
+            if let Some(px) = text_px(x, y, 44, card_y + 20, 1, &line[..n], THEME.on_surface, THEME.surface_container_high, true) {
                 return px;
             }
-            let url = &row.url[..row.url_len];
-            if let Some(px) = text_px(x, y, 44, card_y + 48, 1, url, THEME.on_surface_variant, THEME.surface_container_high, false) {
+            let n = font::ellipsize(row.url, 1, line_w, &mut line);
+            if let Some(px) = text_px(x, y, 44, card_y + 48, 1, &line[..n], THEME.on_surface_variant, THEME.surface_container_high, false) {
                 return px;
             }
             // WHY the category is muted and not accented: the accent is the
             // colour this browser uses for the thing a tap acts on, and the
             // whole card is already that one target. An accent word inside a
             // tappable card reads as a second, narrower link that is not one.
-            if let Some(px) = text_px(x, y, 44, card_y + card_h - 28, 1, row.meta, THEME.on_surface_variant, THEME.surface_container_high, false) {
+            let n = font::ellipsize(row.meta, 1, line_w, &mut line);
+            if let Some(px) = text_px(x, y, 44, card_y + card_h - 28, 1, &line[..n], THEME.on_surface_variant, THEME.surface_container_high, false) {
                 return px;
             }
-            let thumb = Rect::new(W - 48 - 84, card_y + card_h - 88, 68, 68);
             if let Some(tc) = draw_rounded_rect(x, y, thumb, R_CHIP, THEME.surface_container, None, 0) {
                 let tw = text_width(row.scheme_mark, 1);
                 if let Some(px) = text_px(
@@ -6513,26 +6641,33 @@ fn home_page_pixel(x: usize, y: usize, app: &BrowserApp) -> u32 {
     THEME.surface
 }
 
-struct HomeRow {
-    title: &'static [u8],
-    url: [u8; URL_FIELD],
-    url_len: usize,
-    meta: &'static [u8],
-    scheme_mark: &'static [u8],
+/// One card of the start page's "Your pages" list.
+///
+/// WHY every field borrows: the start page is painted one pixel at a time and
+/// this is built for each of those pixels. A row that owned its name and
+/// address would copy both once per pixel of every card.
+struct HomeRow<'a> {
+    title: &'a [u8],
+    url: &'a [u8],
+    /// The address a tap on this card opens, which is the recorded one rather
+    /// than the shortened text the card shows.
+    target: &'a [u8],
+    meta: &'a [u8],
+    scheme_mark: &'a [u8],
 }
 
-fn home_row(app: &BrowserApp, index: usize) -> Option<HomeRow> {
+fn home_row(app: &BrowserApp, index: usize) -> Option<HomeRow<'_>> {
     let saved = app.bookmarks.len();
     if index < saved {
         let rec = app.bookmarks.record(index)?;
         let url = rec.url_bytes();
-        let (field, shown) = into_url_field(url);
+        let title = rec.title_bytes();
         return Some(HomeRow {
-            title: b"Saved",
-            url_len: shown,
+            title: if title.is_empty() { b"Saved" } else { title },
+            url: url_field(url),
+            target: url,
             meta: b"Bookmark",
             scheme_mark: scheme_mark(url),
-            url: field,
         });
     }
 
@@ -6541,18 +6676,59 @@ fn home_row(app: &BrowserApp, index: usize) -> Option<HomeRow> {
     if from_history >= visited {
         return None;
     }
-    let entry = app.history.entry(visited - 1 - from_history)?;
-    if entry == b"about:blank" {
+    let visit = app.history.visit(visited - 1 - from_history)?;
+    if visit.url == b"about:blank" {
         return None;
     }
-    let (field, shown) = into_url_field(entry);
+    // WHY the page's own name and line, with the labels behind them: a card
+    // that says "Visited" over an address tells the person the browser kept a
+    // record, which they already knew. The page named itself, and that name is
+    // what they scanned the log for. A page that stated no name keeps the
+    // label, because nothing else is true of it.
     Some(HomeRow {
-        title: b"Visited",
-        url_len: shown,
-        meta: b"History",
-        scheme_mark: scheme_mark(entry),
-        url: field,
+        title: if visit.title.is_empty() { b"Visited" } else { visit.title },
+        url: url_field(visit.url),
+        target: visit.url,
+        meta: if visit.description.is_empty() {
+            b"History"
+        } else {
+            visit.description
+        },
+        scheme_mark: scheme_mark(visit.url),
     })
+}
+
+/// The visit the history sheet shows in its `row`-th slot.
+///
+/// WHY the painter and the tap handler share one walk: the row a person sees
+/// is the row their tap opens, and two walks of the same log that ever
+/// disagree — about the filter, or about how far back the sheet looks — send a
+/// tap to a page other than the one under the finger.
+///
+/// WHY eight: the sheet is a screen of rows, and a walk that went further back
+/// drew rows no pixel reached.
+fn history_row(app: &BrowserApp, row: usize) -> Option<Visit<'_>> {
+    let count = app.history.len();
+    let filter = app.filter_bytes();
+    let mut skipped = row;
+    for i in 0..count.min(8) {
+        let Some(visit) = app.history.visit(count - 1 - i) else {
+            continue;
+        };
+        // WHY the name is searched as well as the address: the sheet now shows
+        // both, and a page found by the words in its own title is a page the
+        // person was looking for.
+        if !browser::contains_ignore_case(visit.url, filter)
+            && !browser::contains_ignore_case(visit.title, filter)
+        {
+            continue;
+        }
+        if skipped == 0 {
+            return Some(visit);
+        }
+        skipped -= 1;
+    }
+    None
 }
 
 // -----------------------------------------------------------------------------
@@ -7988,7 +8164,6 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
             }
 
             let count = app.history.len();
-            let filter = app.filter_bytes();
             if count == 0 {
                 let empty_msg = b"No history recorded yet.";
                 if let Some(px) = text_px(x, y, 32, 250, 1, empty_msg, THEME.on_surface_variant, THEME.surface, false) {
@@ -7996,32 +8171,46 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
                 }
             } else {
                 let row_h = 60;
-                let mut shown = 0usize;
-                for i in 0..count.min(8) {
-                    if let Some(entry) = app.history.entry(count - 1 - i) {
-                        if !browser::contains_ignore_case(entry, filter) {
-                            continue;
-                        }
-                        let r_y = LIST_Y + shown * row_h;
-                        let r_rect = Rect::new(24, r_y, W - 48, row_h - 8);
-                        if let Some(c) = draw_rounded_rect(x, y, r_rect, R_SMALL, THEME.surface_container_high, Some(THEME.border), 1) {
-                            // WHY the address is ellipsized: a recorded address
-                            // fills its buffer, and drawing it unmeasured ran it
-                            // through the card edge and off the screen. The width
-                            // is the card's inner width: sixteen pixels of inset
-                            // on each side of the text at x 40.
-                            let mut line = [0u8; 128];
-                            let n = font::ellipsize(entry, 1, r_rect.w - 32, &mut line);
+                let mut drawn = false;
+                for row in 0..8 {
+                    let Some(visit) = history_row(app, row) else {
+                        break;
+                    };
+                    drawn = true;
+                    let r_y = LIST_Y + row * row_h;
+                    let r_rect = Rect::new(24, r_y, W - 48, row_h - 8);
+                    if let Some(c) = draw_rounded_rect(x, y, r_rect, R_SMALL, THEME.surface_container_high, Some(THEME.border), 1) {
+                        // WHY the address is ellipsized: a recorded address
+                        // fills its buffer, and drawing it unmeasured ran it
+                        // through the card edge and off the screen. The width
+                        // is the card's inner width: sixteen pixels of inset
+                        // on each side of the text at x 40.
+                        let mut line = [0u8; 128];
+                        // WHY a page that named itself gets two lines: the
+                        // name is what the person remembers and the address is
+                        // what the log was kept under. A page that named
+                        // nothing has only the address to show, so it keeps the
+                        // one line it always had.
+                        if visit.title.is_empty() {
+                            let n = font::ellipsize(visit.url, 1, r_rect.w - 32, &mut line);
                             if let Some(px) = text_px(x, y, 40, r_y + 18, 1, &line[..n], THEME.on_surface, c, false) {
                                 return Some(px);
                             }
-                            return Some(c);
+                        } else {
+                            let n = font::ellipsize(visit.title, 1, r_rect.w - 32, &mut line);
+                            if let Some(px) = text_px(x, y, 40, r_y + 8, 1, &line[..n], THEME.on_surface, c, true) {
+                                return Some(px);
+                            }
+                            let n = font::ellipsize(visit.url, 1, r_rect.w - 32, &mut line);
+                            if let Some(px) = text_px(x, y, 40, r_y + 32, 1, &line[..n], THEME.on_surface_variant, c, false) {
+                                return Some(px);
+                            }
                         }
-                        shown += 1;
+                        return Some(c);
                     }
                 }
-                if shown == 0 {
-                    let empty_msg = b"No address matches the filter.";
+                if !drawn {
+                    let empty_msg = b"No page matches the filter.";
                     if let Some(px) = text_px(x, y, 32, 250, 1, empty_msg, THEME.on_surface_variant, THEME.surface, false) {
                         return Some(px);
                     }
@@ -9471,26 +9660,24 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
                 return Tap::Redraw;
             }
             let row_h = 60;
-            let count = app.history.len();
-            let filter = app.filter_bytes();
-            let mut shown = 0usize;
-            for i in 0..count.min(8) {
-                if let Some(entry) = app.history.entry(count - 1 - i) {
-                    if !browser::contains_ignore_case(entry, filter) {
-                        continue;
-                    }
-                    let r_y = LIST_Y + shown * row_h;
-                    if y >= r_y && y < r_y + row_h && x >= 24 && x <= W - 24 {
-                        let _ = std::audio_haptic_click();
-                        let mut url = [0u8; HISTORY_ENTRY_BYTES];
-                        let n = entry.len().min(url.len());
-                        url[..n].copy_from_slice(&entry[..n]);
-                        app.overlay = SheetOverlay::None;
-                        app.filter_clear();
-                        app.navigate(&url[..n]);
-                        return Tap::Redraw;
-                    }
-                    shown += 1;
+            for row in 0..8 {
+                let Some(visit) = history_row(app, row) else {
+                    break;
+                };
+                let r_y = LIST_Y + row * row_h;
+                if y >= r_y && y < r_y + row_h && x >= 24 && x <= W - 24 {
+                    let _ = std::audio_haptic_click();
+                    // WHY the address is copied before the navigation: the row
+                    // borrows the log that this navigation is about to append
+                    // to, and a page cannot be opened from an address held in
+                    // the record being written.
+                    let mut url = [0u8; HISTORY_ENTRY_BYTES];
+                    let n = visit.url.len().min(url.len());
+                    url[..n].copy_from_slice(&visit.url[..n]);
+                    app.overlay = SheetOverlay::None;
+                    app.filter_clear();
+                    app.navigate(&url[..n]);
+                    return Tap::Redraw;
                 }
             }
         }
@@ -9700,11 +9887,17 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
             if y >= card_y && y < card_y + card_h {
                 if let Some(row) = home_row(app, i) {
                     let _ = std::audio_haptic_click();
+                    // WHY the record's address and not the card's text: the
+                    // line shown is shortened to fit the card, and opening a
+                    // truncation of an address is a different navigation from
+                    // the one the card names.
+                    let mut url = [0u8; HISTORY_ENTRY_BYTES];
+                    let n = row.target.len().min(url.len());
+                    url[..n].copy_from_slice(&row.target[..n]);
                     app.address_focused = false;
                     app.select_all = false;
                     app.address_len = 0;
-                    let url = &row.url[..row.url_len];
-                    app.navigate(url);
+                    app.navigate(&url[..n]);
                     return Tap::Redraw;
                 }
             }

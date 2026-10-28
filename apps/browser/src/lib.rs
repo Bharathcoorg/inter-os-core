@@ -2190,17 +2190,20 @@ impl<'a> DocumentTokenizer<'a> {
 /// Width of the URL the start page's page list shows one row at.
 pub const URL_FIELD: usize = 64;
 
-/// Copies a URL into the start page's fixed-width field, dropping one trailing
-/// `/` so a bare origin does not render as `host./`.
-pub fn into_url_field(url: &[u8]) -> ([u8; URL_FIELD], usize) {
+/// The address one row shows, cut from the address itself.
+///
+/// WHY this returns part of the address and not a copy of it: a row is drawn
+/// by a painter that runs once per pixel, and a field that copied the address
+/// into a fixed buffer paid that copy for every pixel of the card.
+///
+/// WHY one trailing `/` is dropped: a bare origin otherwise renders as
+/// `host./`.
+pub fn url_field(url: &[u8]) -> &[u8] {
     let mut end = url.len();
     if end > 1 && url[end - 1] == b'/' {
         end -= 1;
     }
-    let end = end.min(URL_FIELD);
-    let mut out = [0u8; URL_FIELD];
-    out[..end].copy_from_slice(&url[..end]);
-    (out, end)
+    &url[..end.min(URL_FIELD)]
 }
 
 /// The link row's `→` mark, in pixels relative to the mark's centre.
@@ -4045,23 +4048,19 @@ mod tests {
 
     #[test]
     fn a_url_field_drops_a_trailing_slash_from_a_bare_origin() {
-        let (field, len) = into_url_field(b"https://example.org/");
-        assert_eq!(&field[..len], b"https://example.org");
+        assert_eq!(url_field(b"https://example.org/"), b"https://example.org");
     }
 
     #[test]
     fn a_url_field_keeps_a_lone_slash_as_a_path() {
-        let (_, len) = into_url_field(b"/");
-        assert_eq!(len, 1);
+        assert_eq!(url_field(b"/"), b"/");
     }
 
     #[test]
     fn a_url_field_is_truncated_to_the_row_width() {
         let long = b"https://example.org/a/very/long/path/that/keeps/going/and/going/beyond/the/field";
         assert!(long.len() > URL_FIELD);
-        let (field, len) = into_url_field(long);
-        assert_eq!(len, URL_FIELD);
-        assert_eq!(&field[..len], &long[..URL_FIELD]);
+        assert_eq!(url_field(long), &long[..URL_FIELD]);
     }
 
     #[test]
