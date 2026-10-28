@@ -10856,7 +10856,52 @@ pub extern "C" fn _start() -> ! {
 }
 
 #[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
-    std::log("[BROWSER APP] Panic detected! Terminating task...").ok();
+fn panic(info: &PanicInfo) -> ! {
+    // WHY the site is logged: the task exits either way, but a panic that says
+    // only "a panic happened" leaves the person watching a device that closed
+    // with nothing to trace. The file and line are what the build already
+    // knows, and naming them costs no heap.
+    let mut msg = [0u8; 128];
+    let mut n = 0;
+    for &b in b"[BROWSER APP] Panic at " {
+        msg[n] = b;
+        n += 1;
+    }
+    if let Some(loc) = info.location() {
+        let file = loc.file().as_bytes();
+        let skip = file.len().saturating_sub(48);
+        let kept = file.len() - skip;
+        msg[n..n + kept].copy_from_slice(&file[skip..]);
+        n += kept;
+        msg[n] = b':';
+        n += 1;
+        let mut digits = [0u8; 10];
+        let mut dlen = 0;
+        let mut line = loc.line();
+        if line == 0 {
+            digits[0] = b'0';
+            dlen = 1;
+        }
+        while line > 0 {
+            digits[dlen] = b'0' + (line % 10) as u8;
+            dlen += 1;
+            line /= 10;
+        }
+        while dlen > 0 {
+            dlen -= 1;
+            msg[n] = digits[dlen];
+            n += 1;
+        }
+    } else {
+        for &b in b"unknown site" {
+            msg[n] = b;
+            n += 1;
+        }
+    }
+    if let Ok(s) = core::str::from_utf8(&msg[..n]) {
+        std::log(s).ok();
+    } else {
+        std::log("[BROWSER APP] Panic detected! Terminating task...").ok();
+    }
     std::exit();
 }
