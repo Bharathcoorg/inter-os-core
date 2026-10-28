@@ -2713,20 +2713,21 @@ body[data-theme="cyberdeck_hud"] .device-screen {
   background: #000000;
   color: #71717A;
   text-align: center;
-  padding: 24px;
+  padding: clamp(10px, 3.4cqw, 24px);
   user-select: none;
   pointer-events: none;
 }
 
 .scanout-no-signal .no-signal-title {
-  font-size: 0.95rem;
+  font-size: clamp(0.7rem, 1.7cqw, 0.95rem);
   font-weight: 600;
   letter-spacing: 0.04em;
   color: #A1A1AA;
 }
 
 .scanout-no-signal .no-signal-sub {
-  font-size: 0.75rem;
+  font-size: clamp(0.62rem, 1.4cqw, 0.75rem);
+  max-width: 100%;
   color: #71717A;
 }
 
@@ -2949,38 +2950,64 @@ body.studio-focus-mode .phone-and-nav-container {
   flex-shrink: 1 !important;
 }
 
+/* WHY the height comes from the viewport and not from the frame: the chassis is
+   the phone's only geometry owner, and `height: auto` made it a function of the
+   live canvas' intrinsic size. setSurfaceState('no-signal') hides that canvas —
+   which is the standby state every reload passes through and the state a stalled
+   stream falls back to — and the measured result at 390x844 was a 18x37 chassis
+   with a 2x20 screen, i.e. the device disappeared while the chrome stayed. A
+   viewport-derived height keeps the phone on screen whether or not the guest has
+   presented a pixel. Width is half of it because the scanout is fixed at 1:2.
+   The reserves are what else shares the stage: pane padding (6x2) + gesture guide
+   (34) + its gap (6) vertically, and the side toolbar (~49) + wrapper gap (16) +
+   pane padding (16) horizontally. */
 body.studio-focus-mode .device-chassis,
 body.studio-focus-mode .device-chassis.large-mode,
 body.studio-focus-mode .device-chassis.retina-mode,
 body.studio-focus-mode .device-chassis.exact-mode {
+  --focus-phone-reserve-h: 52px;
+  --focus-phone-reserve-w: 96px;
+  --focus-phone-h: max(
+      160px,
+      min(
+        calc(100vh - var(--studio-header-height) - var(--focus-phone-reserve-h)),
+        calc((100vw - var(--focus-phone-reserve-w)) * 2)));
   transform: none !important;
   margin-bottom: 0 !important;
   margin-top: 0 !important;
-  height: auto !important;
-  width: auto !important;
+  height: var(--focus-phone-h) !important;
+  width: calc(var(--focus-phone-h) / 2) !important;
   aspect-ratio: 1 / 2 !important;
-  max-height: calc(100vh - var(--studio-header-height) - 52px) !important;
-  max-width: calc((100vh - var(--studio-header-height) - 52px) / 2) !important;
+  max-height: none !important;
+  max-width: none !important;
   border-color: #3F3F46 !important;
   box-shadow:
     0 30px 100px -10px rgba(0, 0, 0, 0.98),
     0 0 50px rgba(0, 0, 0, 0.8),
     0 0 0 1px rgba(255, 255, 255, 0.15) !important;
-  transition: max-width 0.2s cubic-bezier(0.16, 1, 0.3, 1), max-height 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  transition: height 0.2s cubic-bezier(0.16, 1, 0.3, 1), width 0.2s cubic-bezier(0.16, 1, 0.3, 1);
   box-sizing: border-box !important;
 }
 
+/* 1:1 never means upscale: a 740px chassis is the widest one whose 720px scanout
+   is still shown at native size, so the cap becomes a 1480px height cap here. */
 body.studio-focus-mode .device-chassis.retina-mode {
-  max-width: min(740px, calc((100vh - var(--studio-header-height) - 44px) / 2)) !important;
+  height: min(var(--focus-phone-h), 1480px) !important;
+  width: calc(min(var(--focus-phone-h), 1480px) / 2) !important;
 }
 
+/* Narrow phones and short landscape both shrink the *reserves*, never the
+   geometry formula: overriding max-height/max-width here would fight the
+   definite --focus-phone-h above and reintroduce the content-derived collapse.
+   At <=640px the side toolbar wraps under the phone, so the horizontal reserve
+   drops from 96 to 64; at <=500px tall the gesture guide is compressed to 26px,
+   so the vertical reserve drops from 52 to 38. */
 @media (max-width: 640px) {
   body.studio-focus-mode .device-chassis,
   body.studio-focus-mode .device-chassis.large-mode,
   body.studio-focus-mode .device-chassis.retina-mode,
   body.studio-focus-mode .device-chassis.exact-mode {
-    max-width: min(calc(100vw - 64px), calc((100vh - var(--studio-header-height) - 52px) / 2)) !important;
-    max-height: min(calc((100vw - 64px) * 2), calc(100vh - var(--studio-header-height) - 52px)) !important;
+    --focus-phone-reserve-w: 64px;
   }
 }
 
@@ -3011,6 +3038,14 @@ body.studio-focus-mode .emulator-side-toolbar {
   display: flex;
   flex-direction: column;
   box-sizing: border-box;
+  /* WHY a size container: the boot splash and the standby card are Studio-owned
+     layers painted onto a preview whose size is set by the viewport, so their
+     geometry has to be expressed against the screen, not against the window.
+     inline-size containment is the safe axis here — it never size-contains the
+     block direction, and because the screen is locked at 1:2, 1cqw is exactly
+     2cqh, so the cqw scales below stay proportional at every preview size. */
+  container-type: inline-size;
+  container-name: guest-screen;
 }
 
 .phone-bezel {
@@ -3202,7 +3237,7 @@ body.studio-focus-mode .emulator-side-toolbar {
   align-items: center;
   justify-content: center;
   gap: 10px;
-  padding: 24px 18px;
+  padding: clamp(10px, 3.4cqw, 24px) clamp(8px, 2.5cqw, 18px);
   text-align: center;
   background:
     radial-gradient(120% 60% at 50% 18%, rgba(16, 185, 129, 0.08), transparent 62%),
@@ -3253,16 +3288,16 @@ body.studio-focus-mode .emulator-side-toolbar {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 14px;
+  gap: clamp(6px, 1.95cqw, 14px);
 }
 .phone-boot-splash > .pbs-sub {
   position: absolute;
   left: 0;
   right: 0;
   margin: 0 auto;
-  top: calc(50% + 84px);
+  top: calc(50% + clamp(40px, 11.7cqw, 84px));
   width: max-content;
-  max-width: calc(100% - 36px);
+  max-width: calc(100% - 24px);
   white-space: normal;
 }
 .phone-boot-splash > .pbs-stages {
@@ -3270,16 +3305,26 @@ body.studio-focus-mode .emulator-side-toolbar {
   left: 0;
   right: 0;
   margin: 0 auto;
-  top: calc(50% + 112px);
-  width: min(300px, calc(100% - 36px));
+  top: calc(50% + clamp(52px, 15.6cqw, 112px));
+  width: min(300px, calc(100% - 24px));
+  max-height: calc(50% - clamp(52px, 15.6cqw, 112px) - clamp(24px, 5.5cqw, 42px));
+  overflow: hidden;
 }
+/* WHY bottom-anchored instead of `top: calc(50% + 300px)`: that offset was
+   measured on a 1440px-tall native preview. Every clamp above keeps text
+   legible on a small preview by staying *relatively* bigger, so a fixed
+   distance from the centre pushed the elapsed line past the frame edge and
+   the splash silently lost its one live number. The bottom of the screen is
+   the only anchor that cannot leave the frame. */
 .phone-boot-splash > .pbs-elapsed {
   position: absolute;
   left: 0;
   right: 0;
   margin: 0 auto;
-  top: calc(50% + 300px);
+  top: auto;
+  bottom: clamp(6px, 2.8cqw, 20px);
   width: max-content;
+  max-width: calc(100% - 24px);
 }
 .phone-boot-splash.is-visible .pbs-logo svg {
   animation:
@@ -3307,16 +3352,16 @@ body.studio-focus-mode .emulator-side-toolbar {
 
 .pbs-logo {
   position: relative;
-  width: 74px;
-  height: 74px;
+  width: clamp(40px, 10.3cqw, 74px);
+  height: clamp(40px, 10.3cqw, 74px);
   display: flex;
   align-items: center;
   justify-content: center;
   color: #10B981;
 }
 .pbs-logo svg {
-  width: 52px;
-  height: 52px;
+  width: clamp(28px, 7.2cqw, 52px);
+  height: clamp(28px, 7.2cqw, 52px);
   animation: bootLogoPulse 2.8s ease-in-out infinite;
 }
 .pbs-logo::before {
@@ -3334,12 +3379,12 @@ body.studio-focus-mode .emulator-side-toolbar {
 }
 .pbs-wordmark {
   font-family: 'Outfit', 'Inter', sans-serif;
-  font-size: 30px;
+  font-size: clamp(15px, 4.2cqw, 30px);
   font-weight: 700;
-  letter-spacing: 3px;
+  letter-spacing: clamp(1.5px, 0.42cqw, 3px);
   /* letter-spacing also trails the final glyph, so the glyphs would sit
-     1.5px left of the box centre; this puts them back on it. */
-  padding-left: 3px;
+     half a tracking-width left of the box centre; this puts them back on it. */
+  padding-left: clamp(1.5px, 0.42cqw, 3px);
   background: linear-gradient(100deg, #A1A1AA 20%, #FFFFFF 42%, #10B981 60%, #A1A1AA 80%);
   background-size: 220% 100%;
   -webkit-background-clip: text;
@@ -3349,19 +3394,19 @@ body.studio-focus-mode .emulator-side-toolbar {
 }
 .pbs-sub {
   color: #94A3B8;
-  font-size: 11.5px;
+  font-size: clamp(9px, 1.6cqw, 11.5px);
   font-family: var(--font-mono, monospace);
   letter-spacing: 0.3px;
 }
 .pbs-stages {
   list-style: none;
   margin: 6px 0 0;
-  padding: 10px 12px;
+  padding: clamp(5px, 1.4cqw, 10px) clamp(6px, 1.7cqw, 12px);
   width: 100%;
   max-width: 300px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: clamp(3px, 0.85cqw, 6px);
   background: rgba(255, 255, 255, 0.03);
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 12px;
@@ -3374,12 +3419,12 @@ body.studio-focus-mode .emulator-side-toolbar {
   align-items: center;
   column-gap: 8px;
   font-family: var(--font-mono, monospace);
-  font-size: 12px;
+  font-size: clamp(9px, 1.67cqw, 12px);
   row-gap: 1px;
 }
 .pbs-stages .pbs-mark {
   grid-area: mark;
-  font-size: 11px;
+  font-size: clamp(8.5px, 1.53cqw, 11px);
   line-height: 1;
 }
 .pbs-stages .pbs-label {
@@ -3390,7 +3435,7 @@ body.studio-focus-mode .emulator-side-toolbar {
 }
 .pbs-stages .pbs-evidence {
   grid-area: evidence;
-  font-size: 11.5px;
+  font-size: clamp(8.5px, 1.6cqw, 11.5px);
   color: #10B981;
   white-space: nowrap;
   overflow: hidden;
@@ -3409,7 +3454,7 @@ body.studio-focus-mode .emulator-side-toolbar {
 }
 .pbs-elapsed {
   color: #52525B;
-  font-size: 11.5px;
+  font-size: clamp(9px, 1.6cqw, 11.5px);
   font-family: var(--font-mono, monospace);
   letter-spacing: 0.4px;
   margin-top: 4px;
@@ -3961,6 +4006,38 @@ body.studio-focus-mode .emulator-side-toolbar {
   }
 }
 
+/* WHY the phone yields to the toolbar and not the other way round: in deck mode
+   .emulator-stage-wrapper is a non-wrapping row of [phone | side toolbar], and
+   the toolbar is the only place the power, screenshot, back, home and recents
+   buttons exist. Measured at 390x844 the chassis took min(720px, 100vh-96px) =
+   720px, i.e. 360px wide, so the row needed ~421px of a 390px viewport and
+   emu-btn-back fell off the right edge (outX > innerWidth). Bounding the phone
+   by the width that is left over keeps every control tappable. The 0.85 scale
+   hack is dropped here because this cap already does its job honestly, and a
+   scaled chassis silently shrinks guest text that would otherwise fit. */
+@media (max-width: 720px) {
+  body:not(.studio-focus-mode) .device-chassis,
+  body:not(.studio-focus-mode) .device-chassis.large-mode,
+  body:not(.studio-focus-mode) .device-chassis.retina-mode,
+  body:not(.studio-focus-mode) .device-chassis.exact-mode {
+    --deck-phone-reserve-h: 72px;
+    --deck-phone-reserve-w: 78px;
+    --deck-phone-h: max(
+        160px,
+        min(
+          calc(100vh - var(--studio-header-height) - var(--deck-phone-reserve-h)),
+          calc((100vw - var(--deck-phone-reserve-w)) * 2)));
+    transform: none !important;
+    margin-bottom: 0 !important;
+    height: var(--deck-phone-h) !important;
+    max-height: none !important;
+    width: calc(var(--deck-phone-h) / 2) !important;
+    max-width: none !important;
+    aspect-ratio: 1 / 2 !important;
+    box-sizing: border-box !important;
+  }
+}
+
 /* Compact landscape & short viewports (<= 500px height) */
 @media (max-height: 500px) {
   .emulator-side-toolbar {
@@ -3982,8 +4059,7 @@ body.studio-focus-mode .emulator-side-toolbar {
   body.studio-focus-mode .device-chassis.large-mode,
   body.studio-focus-mode .device-chassis.retina-mode,
   body.studio-focus-mode .device-chassis.exact-mode {
-    max-height: calc(100vh - var(--studio-header-height) - 38px) !important;
-    max-width: calc((100vh - var(--studio-header-height) - 38px) / 2) !important;
+    --focus-phone-reserve-h: 38px;
   }
   .device-gesture-guide {
     height: 26px !important;
@@ -5108,3 +5184,71 @@ body.studio-focus-mode .emulator-side-toolbar {
 
 
 
+/* ==========================================================================
+   Full-page ready gate (mounted in index.html, revealed by app.js)
+   ========================================================================== */
+.studio-boot-veil {
+  position: fixed;
+  inset: 0;
+  z-index: 4000;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  background: #08090C;
+  /* WHY a CSS failsafe as well as a JS deadline: if app.js never runs (a hard
+     reload that dies mid-fetch), a gate that can only be opened by JS would
+     strand the visitor on a black page. The animation reveals the real studio
+     after 8s whatever the script did; JS normally gets there in a few frames. */
+  animation: studioVeilFailsafe 1ms linear 8s forwards;
+}
+.studio-boot-veil.is-hidden {
+  animation: none;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 0.28s ease, visibility 0.28s ease;
+}
+@keyframes studioVeilFailsafe {
+  to {
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+  }
+}
+.studio-boot-veil-mark {
+  width: 58px;
+  height: 58px;
+  animation: studioVeilBreath 2.2s ease-in-out infinite;
+}
+.studio-boot-veil-mark svg {
+  width: 100%;
+  height: 100%;
+}
+.studio-boot-veil-word {
+  font-family: 'Outfit', 'Inter', sans-serif;
+  font-size: 1.02rem;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: #EDEDED;
+}
+.studio-boot-veil-note {
+  font-family: var(--font-mono, monospace);
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+  color: #52525B;
+}
+@keyframes studioVeilBreath {
+  0%, 100% { opacity: 0.55; transform: scale(0.97); }
+  50% { opacity: 1; transform: scale(1); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .studio-boot-veil-mark {
+    animation: none;
+  }
+  .studio-boot-veil.is-hidden {
+    transition: none;
+  }
+}

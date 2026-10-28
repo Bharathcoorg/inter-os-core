@@ -676,6 +676,80 @@ document.addEventListener('DOMContentLoaded', () => {
   }
   setSurfaceState('no-signal');
 
+  // WHY measured instead of declared: .studio-header is content-height and its
+  // action row wraps, so the stylesheet's --studio-header-height is a guess that
+  // is wrong wherever the wrap changes. At 641-739px wide the header measured
+  // 81px while CSS said 42px, and focus mode pinned its stage pane 24px *under*
+  // the sticky bar — which is what hid the guest status strip and the back
+  // gesture on tablets. The CSS values stay as the pre-JS fallback.
+  const studioHeader = document.querySelector('.studio-header');
+  function publishStudioHeaderHeight() {
+    if (!studioHeader) return;
+    const measured = Math.ceil(studioHeader.getBoundingClientRect().height);
+    if (measured > 0) {
+      document.documentElement.style.setProperty('--studio-header-height', `${measured}px`);
+    }
+  }
+  publishStudioHeaderHeight();
+  if (typeof ResizeObserver === 'function') {
+    // Observing the header itself also catches pills being added or removed by
+    // the status poller, which re-wraps the row and changes the height again.
+    new ResizeObserver(publishStudioHeaderHeight).observe(studioHeader);
+  } else {
+    window.addEventListener('resize', publishStudioHeaderHeight);
+  }
+
+  // Full-page ready gate. Every condition here is a defect that was measured,
+  // not imagined: a chassis that collapsed to 18x37 while no guest frame had
+  // ever arrived, a control rail whose back button hung past the right edge at
+  // 390px wide, and a focus stage pinned 24px under a header that wrapped to two
+  // rows. Until all of them are clean the veil stays up, so a reload never shows
+  // a studio header standing over an absent device.
+  const studioVeil = document.getElementById('studio-boot-veil');
+  const studioVeilDeadline = performance.now() + 6000;
+
+  function studioLayoutIsReady() {
+    // Webfonts re-measure the header and can re-wrap the action row; waiting for
+    // them means the reveal is not followed by a visible layout jump.
+    if (document.fonts && document.fonts.status === 'loading') return false;
+    const chassis = document.querySelector('.device-chassis');
+    const screen = document.getElementById('device-screen');
+    if (!chassis || !screen) return false;
+    const chassisRect = chassis.getBoundingClientRect();
+    const screenRect = screen.getBoundingClientRect();
+    if (chassisRect.height < 150 || chassisRect.width < 70) return false;
+    if (screenRect.height < 120 || screenRect.width < 50) return false;
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    for (const el of [chassis, screen, document.querySelector('.device-gesture-guide')]) {
+      if (!el) continue;
+      const rect = el.getBoundingClientRect();
+      if (rect.left < -1 || rect.right > vw + 1 || rect.top < -1 || rect.bottom > vh + 1) return false;
+    }
+    const toolbar = document.querySelector('.emulator-side-toolbar');
+    if (toolbar) {
+      // The rail may legitimately wrap or scroll on a very short viewport, so
+      // only its horizontal position is a gate; off screen means untappable.
+      const rect = toolbar.getBoundingClientRect();
+      if (rect.left < -1 || rect.right > vw + 1) return false;
+    }
+    if (studioHeader && screenRect.top < studioHeader.getBoundingClientRect().bottom - 1) return false;
+    return true;
+  }
+
+  function revealStudioWhenReady() {
+    if (!studioVeil) return;
+    // The deadline is not a pass: it is the refusal to trap a visitor behind a
+    // gate that some unforeseen layout never opens. The stylesheet mirrors it
+    // with an 8s CSS-only failsafe in case this script never ran at all.
+    if (studioLayoutIsReady() || performance.now() > studioVeilDeadline) {
+      studioVeil.classList.add('is-hidden');
+      return;
+    }
+    requestAnimationFrame(revealStudioWhenReady);
+  }
+  requestAnimationFrame(revealStudioWhenReady);
+
   // Gesture button handles are declared once with the other toolbar controls above.
 
   let cropMode = 'portrait'; // Canonical guest scanout is native 720x1440 portrait.
@@ -692,9 +766,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
   let transportFps = 0;
   let guestFps = 'Unknown';
-  let measuredFps = 0;
-  let frameCount = 0;
-  let fpsTimer = performance.now();
   let streamRafId = null;
   // The stream is off until a live status starts it. Starting in the active
   // state made the first startScanoutStream() return early, so a page loaded
@@ -715,22 +786,47 @@ document.addEventListener('DOMContentLoaded', () => {
   setInterval(queryMetrics, 1000);
 
   const renderHzBadge = document.getElementById('render-hz-badge');
+  // Timestamps of the last few frames actually painted onto the monitor, so the
+  // badge can measure a rate over a window instead of a single one-second
+  // bucket. A guest that presents one frame per second is a real 1 FPS stream,
+  // and a bucket that closes empty used to print "0 Browser FPS" for it.
+  const drawStamps = [];
+
+  function trailingFps(now) {
+    const cutoff = now - 3000;
+    let first = drawStamps.length;
+    while (first > 0 && drawStamps[first - 1] >= cutoff) first--;
+    const recent = drawStamps.slice(first);
+    if (recent.length < 2) return 1;
+    const spanSeconds = (recent[recent.length - 1] - recent[0]) / 1000;
+    return spanSeconds > 0 ? (recent.length - 1) / spanSeconds : 1;
+  }
+
+  function fpsBadgeText() {
+    // WHY the idle branch: the counter only advances when a frame is actually
+    // drawn, and a guest sitting on a static screen draws nothing. Leaving the
+    // badge on "Measuring FPS..." made an idle device look like a loading one,
+    // which is the failure this Studio promises never to present.
+    if (drawStamps.length === 0) return 'Measuring FPS...';
+    const now = performance.now();
+    if (now - drawStamps[drawStamps.length - 1] < 2500) {
+      const fps = trailingFps(now);
+      const label = fps >= 10 ? String(Math.round(fps)) : fps.toFixed(1);
+      return `${label} Browser FPS • ${transportFps || label} Transport FPS`;
+    }
+    if (hasLiveFrame) return '0 FPS • guest frame unchanged';
+    if (isStreamActive) return 'Measuring FPS...';
+    return 'Scanout stream stopped';
+  }
 
   function updateFpsCounter() {
-    frameCount++;
     const now = performance.now();
-    if (now - fpsTimer >= 1000) {
-      measuredFps = Math.round((frameCount * 1000) / (now - fpsTimer));
-      frameCount = 0;
-      fpsTimer = now;
-      if (renderHzBadge) {
-        const displayHz = measuredFps > 0
-          ? `${measuredFps} Browser FPS • ${transportFps || measuredFps} Transport FPS`
-          : 'Measuring FPS...';
-        renderHzBadge.textContent = displayHz;
-      }
-    }
+    drawStamps.push(now);
+    while (drawStamps.length > 2 && now - drawStamps[0] > 5000) drawStamps.shift();
+    if (renderHzBadge) renderHzBadge.textContent = fpsBadgeText();
   }
+
+  if (renderHzBadge) setInterval(() => { renderHzBadge.textContent = fpsBadgeText(); }, 1000);
 
   let lastFallbackPollTime = 0;
   function runHighRefreshLoop() {
@@ -938,7 +1034,9 @@ document.addEventListener('DOMContentLoaded', () => {
             if (!hasLiveFrame || seq !== lastFrameSeq) {
               lastFrameSeq = seq;
               const pixels = new Uint8ClampedArray(buffer, 16, width * height * 4);
-              renderScanoutPixels(pixels, width, height);
+              if (renderScanoutPixels(pixels, width, height)) {
+                updateFpsCounter();
+              }
             }
           }
         }
@@ -951,7 +1049,6 @@ document.addEventListener('DOMContentLoaded', () => {
       await fallbackRefreshFrame();
     } finally {
       scanoutInFlight = false;
-      updateFpsCounter();
       if (isStreamActive && !binaryStreamActive && streamRafId === null) {
         streamRafId = requestAnimationFrame(runHighRefreshLoop);
       }
@@ -989,6 +1086,7 @@ document.addEventListener('DOMContentLoaded', () => {
           displayedFrameW = img.naturalWidth;
           displayedFrameH = img.naturalHeight;
           setSurfaceState('live');
+          updateFpsCounter();
         }
         resolve();
       };

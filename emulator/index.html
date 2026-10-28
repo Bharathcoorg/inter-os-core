@@ -18,9 +18,28 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="style.css?v=20261028b">
+  <link rel="stylesheet" href="style.css?v=20261028f">
 </head>
 <body class="dark-theme studio-focus-mode">
+  <!-- Full-page ready gate. A reload used to paint the header and the control
+       rail while the device was still zero-sized or off screen, so the first
+       thing a visitor saw was a studio with no phone in it. Nothing at all is
+       revealed until app.js measures the real layout and reports the device
+       present, sized, on screen and clear of the header. Studio-owned pixels
+       only: no guest state is claimed here. -->
+  <div id="studio-boot-veil" class="studio-boot-veil" role="status" aria-live="polite">
+    <div class="studio-boot-veil-mark" aria-hidden="true">
+      <svg viewBox="0 0 120 120" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <rect x="2" y="2" width="116" height="116" rx="26" fill="#121620" stroke="#263042" stroke-width="4"/>
+        <rect x="5" y="5" width="110" height="110" rx="23" fill="none" stroke="#3A4860" stroke-width="2" opacity="0.6"/>
+        <rect x="24" y="24" width="20" height="72" rx="10" fill="#FAF8F4"/>
+        <path d="M 50 34 A 10 10 0 0 1 70 34 V 76 H 92 A 10 10 0 0 1 92 96 H 60 A 10 10 0 0 1 50 86 Z" fill="#FAF8F4"/>
+      </svg>
+    </div>
+    <div class="studio-boot-veil-word">InterOS Device Studio</div>
+    <div class="studio-boot-veil-note">Preparing the workspace</div>
+  </div>
+
   <!-- Mobile / Small Viewport Desktop Recommendation Banner -->
   <div id="mobile-warning-banner" class="mobile-warning-banner" style="display: none;">
     <div class="mobile-warning-content">
@@ -1437,6 +1456,6 @@
 
   <!-- Official Lucide Vector Icon Library (Fork & Evolution of Feather Icons) -->
   <script src="/node_modules/lucide/dist/umd/lucide.min.js" onerror="this.onerror=null;this.src='https://unpkg.com/lucide@latest/dist/umd/lucide.js'"></script>
-  <script src="app.js?v=20261028b"></script>
+  <script src="app.js?v=20261028f"></script>
 </body>
 </html>
