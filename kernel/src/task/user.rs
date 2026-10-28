@@ -985,6 +985,15 @@ pub fn spawn_app_settings(id_security: TaskId) -> TaskId {
         rights: Rights::READ,
         object_id: 0,
     }).ok();
+    // WHY the clock: the app paints the platform's status band, and the band's
+    // clock lane is the RTC's answer -- the band across the top of every screen shows the platform's time, and settings draws it. Read-only, and without it the
+    // lane is refused and stays blank rather than showing an invented time.
+    caps.insert(Capability {
+        id: CapabilityId(1714),
+        cap_type: CapabilityType::RealtimeClockRead,
+        rights: Rights::READ,
+        object_id: 0,
+    }).ok();
     let id = spawn_user_process_with_parent(
         "app_settings",
         APP_SETTINGS_ELF,
@@ -1090,6 +1099,15 @@ pub fn spawn_app_dialer(id_security: TaskId) -> TaskId {
         rights: Rights::INVOKE,
         object_id: crate::services::SERVICE_AUDIO_CONTROL_OBJECT,
     }).ok();
+    // WHY the clock: the app paints the platform's status band, and the band's
+    // clock lane is the RTC's answer -- the band across the top of every screen shows the platform's time, and the dialer draws it. Read-only, and without it the
+    // lane is refused and stays blank rather than showing an invented time.
+    caps.insert(Capability {
+        id: CapabilityId(1912),
+        cap_type: CapabilityType::RealtimeClockRead,
+        rights: Rights::READ,
+        object_id: 0,
+    }).ok();
     let id = spawn_user_process_with_parent(
         "app_dialer",
         APP_DIALER_ELF,
@@ -1165,6 +1183,15 @@ pub fn spawn_app_vault(id_security: TaskId) -> TaskId {
         object_id: crate::syscall::vault_object_for_user(active_uid),
     }).ok();
 
+    // WHY the clock: the app paints the platform's status band, and the band's
+    // clock lane is the RTC's answer -- the band across the top of every screen shows the platform's time, and the vault draws it. Read-only, and without it the
+    // lane is refused and stays blank rather than showing an invented time.
+    caps.insert(Capability {
+        id: CapabilityId(2010),
+        cap_type: CapabilityType::RealtimeClockRead,
+        rights: Rights::READ,
+        object_id: 0,
+    }).ok();
     let id = spawn_user_process_with_parent(
         "app_vault",
         APP_VAULT_ELF,
@@ -1234,6 +1261,15 @@ pub fn spawn_app_camera(id_security: TaskId) -> TaskId {
         object_id: crate::syscall::vault_object_for_user(active_uid),
     }).ok();
 
+    // WHY the clock: the app paints the platform's status band, and the band's
+    // clock lane is the RTC's answer -- the band across the top of every screen shows the platform's time, and the camera draws it. Read-only, and without it the
+    // lane is refused and stays blank rather than showing an invented time.
+    caps.insert(Capability {
+        id: CapabilityId(2109),
+        cap_type: CapabilityType::RealtimeClockRead,
+        rights: Rights::READ,
+        object_id: 0,
+    }).ok();
     let id = spawn_user_process_with_parent(
         "app_camera",
         APP_CAMERA_ELF,
@@ -1296,6 +1332,15 @@ pub fn spawn_app_calculator(id_security: TaskId) -> TaskId {
         object_id: 1,
     }).ok();
 
+    // WHY the clock: the app paints the platform's status band, and the band's
+    // clock lane is the RTC's answer -- the band across the top of every screen shows the platform's time, and the calculator draws it. Read-only, and without it the
+    // lane is refused and stays blank rather than showing an invented time.
+    caps.insert(Capability {
+        id: CapabilityId(2208),
+        cap_type: CapabilityType::RealtimeClockRead,
+        rights: Rights::READ,
+        object_id: 0,
+    }).ok();
     let id = spawn_user_process_with_parent(
         "app_calculator",
         APP_CALCULATOR_ELF,
@@ -1493,6 +1538,15 @@ pub fn spawn_app_messages(id_security: TaskId) -> TaskId {
         object_id: crate::syscall::vault_object_for_user(active_uid),
     }).ok();
 
+    // WHY the clock: the app paints the platform's status band, and the band's
+    // clock lane is the RTC's answer -- the band across the top of every screen shows the platform's time, and messages draws it. Read-only, and without it the
+    // lane is refused and stays blank rather than showing an invented time.
+    caps.insert(Capability {
+        id: CapabilityId(2410),
+        cap_type: CapabilityType::RealtimeClockRead,
+        rights: Rights::READ,
+        object_id: 0,
+    }).ok();
     let id = spawn_user_process_with_parent(
         "app_messages",
         APP_MESSAGES_ELF,
@@ -1662,6 +1716,15 @@ pub fn spawn_app_music(id_security: TaskId) -> TaskId {
         object_id: 0,
     }).ok();
 
+    // WHY the clock: the app paints the platform's status band, and the band's
+    // clock lane is the RTC's answer -- the band across the top of every screen shows the platform's time, and music draws it. Read-only, and without it the
+    // lane is refused and stays blank rather than showing an invented time.
+    caps.insert(Capability {
+        id: CapabilityId(2611),
+        cap_type: CapabilityType::RealtimeClockRead,
+        rights: Rights::READ,
+        object_id: 0,
+    }).ok();
     let id = spawn_user_process_with_parent(
         "app_music",
         APP_MUSIC_ELF,
@@ -1757,6 +1820,15 @@ pub fn spawn_app_file_manager(id_security: TaskId) -> TaskId {
         rights: Rights::INVOKE,
         object_id: 0,
     }).ok();
+    // WHY the clock: the app paints the platform's status band, and the band's
+    // clock lane is the RTC's answer -- the band across the top of every screen shows the platform's time, and the file manager draws it. Read-only, and without it the
+    // lane is refused and stays blank rather than showing an invented time.
+    caps.insert(Capability {
+        id: CapabilityId(2711),
+        cap_type: CapabilityType::RealtimeClockRead,
+        rights: Rights::READ,
+        object_id: 0,
+    }).ok();
     let id = spawn_user_process_with_parent(
         "app_file_manager",
         APP_FILE_MANAGER_ELF,
@@ -1839,6 +1911,15 @@ pub fn spawn_app_gallery(id_security: TaskId) -> TaskId {
         id: CapabilityId(2810),
         cap_type: CapabilityType::ContentIntentDispatch,
         rights: Rights::INVOKE,
+        object_id: 0,
+    }).ok();
+    // WHY the clock: the app paints the platform's status band, and the band's
+    // clock lane is the RTC's answer -- the band across the top of every screen shows the platform's time, and the gallery draws it. Read-only, and without it the
+    // lane is refused and stays blank rather than showing an invented time.
+    caps.insert(Capability {
+        id: CapabilityId(2811),
+        cap_type: CapabilityType::RealtimeClockRead,
+        rights: Rights::READ,
         object_id: 0,
     }).ok();
     let id = spawn_user_process_with_parent(

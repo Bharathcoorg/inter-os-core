@@ -152,10 +152,130 @@ def test_every_app_treats_unavailable_as_unavailable():
         )
 
 
+def test_cellular_mark_requires_measured_level_not_modem_presence():
+    """Platform Truth Contract: a filled cellular mark is a measured level.
+
+    The messages band used to answer `Reading::Measured(100)` from the
+    `modem_present` boolean alone, so a modem merely being attached drew four
+    full bars -- a level no instrument took. A cellular mark may be `Measured`
+    only where the telephony payload's own `"bars"` count drove it, the way the
+    dialer already does it; presence on its own has to leave the mark unbound.
+    """
+    messages = code_only(read_source("apps/messages/src/main.rs"))
+
+    # The dishonest shape must be gone: no full-strength mark keyed off presence.
+    assert "Reading::Measured(100)" not in messages, (
+        "messages must not draw a cellular mark of 100 that no instrument measured"
+    )
+    cellular_start = messages.index("let cellular =")
+    cellular_lane = messages[cellular_start: messages.index("let instruments", cellular_start)]
+    assert "modem_present" not in cellular_lane, (
+        "messages' cellular mark must not be gated on modem presence alone"
+    )
+    assert "signal_bars" in cellular_lane, (
+        "messages' cellular mark must be driven by the measured bar count"
+    )
+
+    # The measured mark comes from the baseband's own bar count.
+    assert '\\"bars\\"' in messages and "json_u8(payload," in messages, (
+        "messages must read the measured bar count out of the telephony payload"
+    )
+
+    # No reading stays an explicit unbound outline.
+    assert "Reading::Unbound" in messages, (
+        "messages must report an unbound cellular mark when the radio gave no level"
+    )
+
+
+def test_file_manager_adopts_band_with_only_obtainable_instruments():
+    """file_manager draws the platform band and asks the platform for its clock.
+
+    The band is the shell's chrome, so the file manager takes the top inset from
+    the platform rather than its own header; and because the app obtains no
+    radio, Wi-Fi or fuel-gauge reading, its instruments stay unbound -- the
+    storage figure it does measure lives on its own storage card, where it has
+    always been.
+    """
+    fm = code_only(read_source("apps/file_manager/src/main.rs"))
+
+    assert "components::StatusBand::new(W)" in fm, "file_manager must adopt the platform band"
+    assert "y < STATUS_BAR_HEIGHT" in fm, "file_manager must reserve the platform's top inset"
+    assert "std::design::viewport::STATUS_BAR_HEIGHT" in fm, (
+        "file_manager must take the inset from the platform, not retype it"
+    )
+    assert "std::rtc::Reading::now()" in fm, (
+        "file_manager's clock lane must be backed by the RTC"
+    )
+    assert "components::Instruments::unmeasured()" in fm, (
+        "file_manager has no radio/fuel instrument, so its band marks stay unbound"
+    )
+    # The clock is read on the loop's tick, never inside the rasteriser.
+    band_fn = fm[fm.index("fn get_file_manager_color"): fm.index("fn refresh_clock")]
+    assert "rtc::Reading::now()" not in band_fn, (
+        "file_manager must not read the RTC per pixel"
+    )
+    # Its honest storage line stays.
+    assert "storage_status" in fm, "file_manager must keep its measured storage line"
+
+
+def _kernel_spawn_bodies() -> dict:
+    """Each first-party app's capability table as the kernel builds it."""
+    src = read_source("kernel/src/task/user.rs")
+    return {
+        match.group(1).removeprefix("spawn_app_"): match.group(2)
+        for match in re.finditer(
+            r"pub fn (spawn_app_\w+)\(id_security: TaskId\) -> TaskId \{(.*?)\n\}\n",
+            src,
+            flags=re.S,
+        )
+    }
+
+
+def test_an_app_that_draws_the_band_clock_lane_holds_the_clock_read():
+    """The band's clock lane and the kernel's authority for it are one decision.
+
+    WHY this crosses the app/kernel boundary: an app that calls
+    `rtc::Reading::now()` without `RealtimeClockRead` is refused by the syscall,
+    and by contract it must draw a blank lane rather than an invented time. So a
+    band that reaches for the clock on an app the kernel never authorised looks
+    correct in the app's own source and is wrong on the device -- the drift this
+    pins is exactly the one where the rendering half lands and the authority
+    half is forgotten.
+    """
+    spawns = _kernel_spawn_bodies()
+    assert spawns, "no app spawn tables found in the kernel -- the scan tests nothing"
+
+    checked = []
+    for app_dir in sorted(APPS_DIR.iterdir()):
+        main = app_dir / "src" / "main.rs"
+        if not main.is_file() or app_dir.name not in spawns:
+            continue
+        code = code_only(main.read_text(encoding="utf-8"))
+        draws_band_clock = (
+            "StatusBand::new(" in code and "rtc::Reading::now()" in code
+        )
+        if not draws_band_clock:
+            continue
+        checked.append(app_dir.name)
+        assert "CapabilityType::RealtimeClockRead" in spawns[app_dir.name], (
+            f"{app_dir.name} paints the band's clock lane from the RTC but the kernel "
+            f"grants it no RealtimeClockRead, so the lane is always refused and blank"
+        )
+
+    # The scan has to actually be looking at the apps that adopted the band.
+    assert len(checked) >= 10, (
+        f"only {len(checked)} apps were checked; the band is adopted by at least ten, "
+        "so the adoption markers this scan reads have moved"
+    )
+
+
 if __name__ == "__main__":
     test_sdk_exports_status_band()
     test_status_band_behavior_and_pixels_pass()
     test_all_target_apps_adopt_status_band()
     test_band_renders_no_state_without_backing_query()
     test_every_app_treats_unavailable_as_unavailable()
+    test_cellular_mark_requires_measured_level_not_modem_presence()
+    test_file_manager_adopts_band_with_only_obtainable_instruments()
+    test_an_app_that_draws_the_band_clock_lane_holds_the_clock_read()
     print("Status band truth contract: PASS")

@@ -165,6 +165,12 @@ pub struct MessagesApp {
     pub sector_encrypted: bool,
     /// Whether a cellular baseband was actually reported present by the kernel.
     pub modem_present: bool,
+    /// Signal bars the baseband actually measured, 0..4; 0 means no reading.
+    ///
+    /// WHY this is separate from `modem_present`: presence says a radio is
+    /// attached, it says nothing about the level, and a full set of bars from a
+    /// boolean is a reading no instrument took.
+    pub signal_bars: u8,
     /// Real outcome of the last compose attempt, drawn in the header pill.
     pub header_status: HeaderStatus,
     /// Compose editor buffer and its length.
@@ -235,6 +241,7 @@ impl MessagesApp {
             keystore_derived: false,
             sector_encrypted: false,
             modem_present: false,
+            signal_bars: 0,
             header_status: HeaderStatus::NoTransport,
             compose: [0; COMPOSE_CAP],
             compose_len: 0,
@@ -510,6 +517,38 @@ fn put_usize(out: &mut [u8; 8], v: usize) -> usize {
         out[i] = tmp[n - 1 - i];
     }
     n
+}
+
+/// One unsigned integer out of a telemetry payload, keyed exactly as `key`.
+///
+/// WHY the app parses rather than assumes: the only honest cellular mark is
+/// one the baseband actually measured. The dialer reads the same `"bars"` field
+/// out of the same `telephony_query` payload, so both apps draw the radio's
+/// level from the one number the HAL reported instead of the `present` boolean.
+fn json_u8(json: &[u8], key: &str) -> Option<u8> {
+    let pat = key.as_bytes();
+    let mut i = 0usize;
+    while i + pat.len() < json.len() {
+        if &json[i..i + pat.len()] == pat
+            && json[i + pat.len()] == b':'
+            && i + pat.len() > 0
+            && json[i + pat.len() - 1] == b'"'
+        {
+            let mut j = i + pat.len() + 1;
+            let mut v: u32 = 0;
+            let mut any = false;
+            while j < json.len() && json[j].is_ascii_digit() {
+                v = v.saturating_mul(10).saturating_add((json[j] - b'0') as u32);
+                any = true;
+                j += 1;
+            }
+            if any && v <= 255 {
+                return Some(v as u8);
+            }
+        }
+        i += 1;
+    }
+    None
 }
 
 // -----------------------------------------------------------------------------
@@ -1525,9 +1564,13 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
     if y < STATUS_BAR_HEIGHT {
         let band = interos_std::design::components::StatusBand::new(W);
         let clock = if f.clock_ok { Some(&f.clock[..]) } else { None };
-        let cellular = if messages.modem_present {
-            interos_std::design::components::Reading::Measured(100)
+        let cellular = if messages.signal_bars > 0 {
+            interos_std::design::components::Reading::Measured(
+                (messages.signal_bars as u32) * 25,
+            )
         } else {
+            // No bars measured: the radio's presence is not a level, so the mark
+            // stays an outline that says so.
             interos_std::design::components::Reading::Unbound
         };
         let instruments = interos_std::design::components::Instruments {
@@ -3504,7 +3547,8 @@ pub extern "C" fn _start() -> ! {
     let mut modem_buf = [0u8; 256];
     match std::telephony_query(&mut modem_buf) {
         Ok(modem_len) if modem_len > 0 => {
-            let present = core::str::from_utf8(&modem_buf[..modem_len])
+            let payload = &modem_buf[..modem_len];
+            let present = core::str::from_utf8(payload)
                 .map(|s| s.contains("\"present\":true"))
                 .unwrap_or(false);
             if present {
@@ -3516,6 +3560,21 @@ pub extern "C" fn _start() -> ! {
                 std::log("[MESSAGES APP] Telephony telemetry did not report a present modem; no cellular channel is in use.",
                 )
                 .ok();
+            }
+            // WHY the level comes from `"bars"` and not from `present`: the
+            // status band used to draw four filled bars off the presence
+            // boolean, a full-strength reading for a radio that may be idle.
+            // This is the same field the dialer's meter reads.
+            match json_u8(payload, "\"bars\"") {
+                Some(bars) => {
+                    messages.signal_bars = if bars > 4 { 4 } else { bars };
+                }
+                None => {
+                    messages.signal_bars = 0;
+                    std::log("[MESSAGES APP] Modem telemetry carried no signal bar count; the band draws no bars.",
+                    )
+                    .ok();
+                }
             }
         }
         Ok(_) => {

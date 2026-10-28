@@ -67,6 +67,20 @@ const W: usize = 720;
 const H: usize = 1440;
 const CHUNK: usize = 4096;
 
+/// The platform's own inset at the top of every screen.
+///
+/// WHY the app asks the platform for it rather than writing 48: the number is
+/// the shell's, and a bar that retypes it keeps the old number the day the
+/// inset moves.
+const STATUS_BAR_HEIGHT: usize = std::design::viewport::STATUS_BAR_HEIGHT;
+
+/// The clock lane's text: the RTC's `HH:MM`, or blanks when it did not answer.
+const CLOCK_LEN: usize = 5;
+
+/// The platform's minimum touch target, the size the back control is drawn and
+/// hit-tested at.
+const MIN_TOUCH: usize = std::design::touch::MIN_TARGET;
+
 /// The details card's handler line, and the notice shown when the registry
 /// answers that no installed package declared the document's type.
 const OPEN_WITH_LABEL: &[u8] = b"Open with: ";
@@ -82,11 +96,16 @@ const HANDLER_REFUSED_NOTICE: &[u8] = b"the app for this file could not launch";
 /// the right inset the storage readout is aligned to.
 const HEADER_MARGIN: usize = spacing::GRID_24;
 
-/// The header's back control: a 52x52 pill in the strip above the title.
+/// The header's back control: a 44x44 pill in the strip below the status band.
 ///
 /// WHY the back control exists at all: it is painted from the same rectangle
 /// the tap handler tests, so the region that leaves the screen is visible.
-const BACK: Rect = Rect::new(HEADER_MARGIN, 8, 52, 52);
+///
+/// WHY it sits at the header's foot: the platform band owns rows 0..48, and the
+/// header's title line box is pinned at row 64, so a 44px control standing at
+/// the band's foot is the only one that clears both the band and the title. It
+/// is the platform's minimum target, and it stays the tap handler's own rect.
+const BACK: Rect = Rect::new(HEADER_MARGIN, STATUS_BAR_HEIGHT + 48, MIN_TOUCH, MIN_TOUCH);
 
 /// The system home indicator, and the strip that contains it.
 const HOME_HIT: Rect = Rect::new(240, 1392, 240, 48);
@@ -335,6 +354,14 @@ pub struct FileManagerApp {
     pub sort_label_len: usize,
     /// Whether the next tap is the one a long press already handled.
     pub suppress_tap: bool,
+    /// The status band's clock lane, as the RTC answered it.
+    ///
+    /// WHY it is cached on the app: the read is a syscall and the band is
+    /// rasterised per pixel, so a band that asked per pixel would ask 34,560
+    /// times a frame. The loop reads it once per tick and hands the bytes down.
+    pub clock: [u8; CLOCK_LEN],
+    /// Whether the RTC answered at all. When it did not, the lane stays blank.
+    pub clock_ok: bool,
 }
 
 impl FileManagerApp {
@@ -409,6 +436,8 @@ impl FileManagerApp {
             sort_label: [0u8; 24],
             sort_label_len: 0,
             suppress_tap: false,
+            clock: [b' '; CLOCK_LEN],
+            clock_ok: false,
         }
     }
 
@@ -1637,6 +1666,19 @@ fn glyph_ink(mime: FileMime, dx: isize, dy: isize, ink: u32) -> Option<u32> {
 
 #[inline(never)]
 fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
+    // The platform's band owns the top inset; the app's own chrome starts below it.
+    //
+    // WHY the instruments are unmeasured: this app holds no radio, no fuel
+    // gauge and no Wi-Fi association -- what it measures is the filesystem, and
+    // that reading is on the storage card, not in the band. A filled bar here
+    // would be a level no instrument of this app took.
+    if y < STATUS_BAR_HEIGHT {
+        let band = components::StatusBand::new(W);
+        let clock = if app.clock_ok { Some(&app.clock[..]) } else { None };
+        return band
+            .pixel(x, y, clock, &components::Instruments::unmeasured(), &THEME)
+            .unwrap_or(THEME.surface);
+    }
     if y < HEADER_H {
         return header_color(x, y, app);
     }
@@ -1646,8 +1688,40 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
     }
 }
 
-/// The header: the back control, the title and the measured readout.
+/// Reads the wall clock once and says whether the band's lane changed.
+///
+/// WHY it returns the change rather than redrawing: the loop repaints only what
+/// actually moved, and a clock that answers the same minute costs no frame.
+/// WHY an unanswered RTC leaves the lane blank: the read needs the
+/// `RealtimeClockRead` capability, and a placeholder time is a measurement the
+/// device never took.
+fn refresh_clock(app: &mut FileManagerApp) -> bool {
+    let mut clock = [b' '; CLOCK_LEN];
+    let mut clock_ok = false;
+    if let Some(now) = std::rtc::Reading::now() {
+        clock = now.clock_text();
+        clock_ok = true;
+    }
+    let changed = clock_ok != app.clock_ok || (clock_ok && clock != app.clock);
+    app.clock = clock;
+    app.clock_ok = clock_ok;
+    changed
+}
+
+/// The header: the platform band above, then the back control, the title and the measured readout.
 fn header_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
+    // Title: "Files" at x: 48, y: 64 (scale 3).
+    //
+    // WHY the coordinates are written out instead of pulled from constants:
+    // the native-UI truth contract pins this exact call so the title's line
+    // box cannot be narrowed again.
+    //
+    // WHY it is drawn before the back control: the control now stands below the
+    // band, where the title's stem reaches, and a pinned run keeps its ink.
+    if let Some(color) = test_text(x, y, 48, 64, 3, b"Files", THEME.on_surface, THEME.surface) {
+        return color;
+    }
+
     // Back control, painted from the same rectangle the tap handler tests.
     if BACK.contains(x, y) {
         if let Some(color) =
@@ -1668,15 +1742,6 @@ fn header_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
             return THEME.surface_container_high;
         }
         return THEME.surface;
-    }
-
-    // Title: "Files" at x: 48, y: 64 (scale 3).
-    //
-    // WHY the coordinates are written out instead of pulled from constants:
-    // the native-UI truth contract pins this exact call so the title's line
-    // box cannot be narrowed again.
-    if let Some(color) = test_text(x, y, 48, 64, 3, b"Files", THEME.on_surface, THEME.surface) {
-        return color;
     }
 
     // The path the app asked, and the platform's own answer. Line 1 is the
@@ -3806,6 +3871,10 @@ pub extern "C" fn _start() -> ! {
 
     let mut app = FileManagerApp::new();
 
+    // The band's clock lane, read before the first frame so the first paint
+    // shows the time the platform answered with and not a blank lane.
+    refresh_clock(&mut app);
+
     // Query physical block storage capacity from the driver.
     if let Ok(bytes) = std::storage_query() {
         app.storage_capacity_bytes = bytes;
@@ -3834,7 +3903,12 @@ pub extern "C" fn _start() -> ! {
     }
 
     loop {
+        // WHY before the poll: the poll blocks up to its timeout, so this is one
+        // clock read per wake -- never one per pixel, and never inside the
+        // rasteriser.
+        let clock_moved = refresh_clock(&mut app);
         let interest = std::EVENT_TOUCH_INPUT | std::EVENT_TIMER_TICK;
+        let mut repainted_wholly = false;
         if let Ok(triggered) = std::event_poll(interest, 100) {
             if (triggered & std::EVENT_TOUCH_INPUT) != 0 {
                 let mut input = std::InputEvent {
@@ -3932,7 +4006,14 @@ pub extern "C" fn _start() -> ! {
                 if dirty != Dirty::None && surface > 0 {
                     render_file_manager_ui(surface, &app);
                     let _ = std::surface_flip();
+                    repainted_wholly = true;
                 }
+            }
+            // The band alone is re-rasterised when the minute turned, so a
+            // clock tick costs 48 rows instead of the whole screen.
+            if clock_moved && !repainted_wholly && surface > 0 {
+                render_file_manager_band(surface, &app, 0, STATUS_BAR_HEIGHT);
+                let _ = std::surface_flip();
             }
         }
         std::yield_now();
