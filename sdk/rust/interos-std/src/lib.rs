@@ -260,6 +260,7 @@ pub enum SyscallNumber {
     Nanosleep = 158,
     Poll = 159,
     ConsentResolve = 160,
+    FsMkdir = 161,
 }
 
 // -----------------------------------------------------------------------------
@@ -2539,6 +2540,24 @@ pub fn fs_unlink(path: &str) -> Result<(), i64> {
     let ret = unsafe {
         syscall4(
             SyscallNumber::FsUnlink,
+            RESERVED_CAP_SLOT,
+            path.as_ptr() as u64,
+            path.len() as u64,
+            0,
+        )
+    };
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(ret)
+    }
+}
+
+/// Creates a new directory in the Virtual Filesystem.
+pub fn fs_mkdir(path: &str) -> Result<(), i64> {
+    let ret = unsafe {
+        syscall4(
+            SyscallNumber::FsMkdir,
             RESERVED_CAP_SLOT,
             path.as_ptr() as u64,
             path.len() as u64,

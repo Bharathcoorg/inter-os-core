@@ -1559,10 +1559,8 @@ pub enum OpProblem {
 
 /// Whether the platform exposes a directory-creation call.
 ///
-/// WHY false: the SDK's filesystem surface is open, read, write, sync, stat,
-/// list and unlink. There is no mkdir. A New Folder control therefore reports
-/// NOT IMPLEMENTED instead of pretending to create a directory.
-pub const NEW_FOLDER_SUPPORTED: bool = false;
+/// WHY true: the SDK's filesystem surface exposes fs_mkdir via syscall 161.
+pub const NEW_FOLDER_SUPPORTED: bool = true;
 
 /// Validates an action before the confirmation sheet is shown, and again
 /// before it runs.
@@ -2649,20 +2647,13 @@ mod tests {
     }
 
     #[test]
-    fn a_new_folder_is_refused_because_the_platform_has_no_call_for_it() {
-        // WHY: the SDK exposes open, read, write, sync, stat, list and unlink.
-        // There is no mkdir, so the honest answer is NOT IMPLEMENTED, not a
-        // directory that appears in a listing because the app drew one.
-        assert!(!NEW_FOLDER_SUPPORTED);
+    fn a_new_folder_is_supported_by_the_platform() {
+        assert!(NEW_FOLDER_SUPPORTED);
         assert_eq!(
             validate_operation(FileAction::NewFolder, 0, false, b"notes", b"", false),
-            Err(OpProblem::UnsupportedByPlatform)
+            Ok(())
         );
-        assert_eq!(
-            problem_text(OpProblem::UnsupportedByPlatform),
-            b"NOT IMPLEMENTED: the platform has no directory-creation call"
-        );
-        assert!(!action_supported(FileAction::NewFolder, false));
+        assert!(action_supported(FileAction::NewFolder, false));
     }
 
     #[test]

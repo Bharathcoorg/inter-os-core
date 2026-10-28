@@ -705,7 +705,7 @@ impl AgentManagerApp {
     /// answer it gives is the answer the screen shows.
     pub fn install_selected(&mut self) {
         let provider = self.selected_provider();
-        let Some(_package_id) = provider.package_id() else {
+        let Some(package_id) = provider.package_id() else {
             self.set_action(
                 b"INSTALL: this provider is not delivered as a package, so there is nothing to install.",
                 Tone::Unavailable,
@@ -713,7 +713,26 @@ impl AgentManagerApp {
             self.rebuild();
             return;
         };
-        self.set_action(b"INSTALL: NOT IMPLEMENTED", Tone::Unavailable);
+        match std::package_install(package_id, true) {
+            Ok(()) => {
+                let mut msg = [0u8; 96];
+                let mut n = 0;
+                for &b in b"INSTALL: " { msg[n] = b; n += 1; }
+                for &b in package_id.as_bytes() { msg[n] = b; n += 1; }
+                for &b in b" installed successfully." { msg[n] = b; n += 1; }
+                self.set_action(&msg[..n], Tone::Good);
+            }
+            Err(code) => {
+                let mut msg = [0u8; 96];
+                let mut n = 0;
+                for &b in b"INSTALL: failed for " { msg[n] = b; n += 1; }
+                for &b in package_id.as_bytes() { msg[n] = b; n += 1; }
+                for &b in b" (error " { msg[n] = b; n += 1; }
+                n += format_u32(code.unsigned_abs() as u32, &mut msg[n..]);
+                msg[n] = b')'; n += 1;
+                self.set_action(&msg[..n], Tone::Unavailable);
+            }
+        }
         self.device = DeviceState::measure();
         self.rebuild();
     }
@@ -739,7 +758,7 @@ impl AgentManagerApp {
             self.rebuild();
             return;
         }
-        let Some(_package_id) = provider.package_id() else {
+        let Some(package_id) = provider.package_id() else {
             self.set_action(
                 b"REMOVE: this provider is not delivered as a package, so there is nothing to remove.",
                 Tone::Unavailable,
@@ -747,7 +766,26 @@ impl AgentManagerApp {
             self.rebuild();
             return;
         };
-        self.set_action(b"REMOVE: NOT IMPLEMENTED", Tone::Unavailable);
+        match std::package_uninstall(package_id, true) {
+            Ok(()) => {
+                let mut msg = [0u8; 96];
+                let mut n = 0;
+                for &b in b"REMOVE: " { msg[n] = b; n += 1; }
+                for &b in package_id.as_bytes() { msg[n] = b; n += 1; }
+                for &b in b" uninstalled." { msg[n] = b; n += 1; }
+                self.set_action(&msg[..n], Tone::Good);
+            }
+            Err(code) => {
+                let mut msg = [0u8; 96];
+                let mut n = 0;
+                for &b in b"REMOVE: failed for " { msg[n] = b; n += 1; }
+                for &b in package_id.as_bytes() { msg[n] = b; n += 1; }
+                for &b in b" (error " { msg[n] = b; n += 1; }
+                n += format_u32(code.unsigned_abs() as u32, &mut msg[n..]);
+                msg[n] = b')'; n += 1;
+                self.set_action(&msg[..n], Tone::Unavailable);
+            }
+        }
         self.device = DeviceState::measure();
         self.rebuild();
     }

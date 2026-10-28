@@ -3177,7 +3177,7 @@ fn perform_action(app: &mut FileManagerApp, surface: u32) {
                     }
                 }
             }
-            FileAction::NewFolder => Err(-38),
+            FileAction::NewFolder => std::fs_mkdir(target_str),
         };
         match outcome {
             Ok(()) => done += 1,

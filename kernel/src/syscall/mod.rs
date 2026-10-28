@@ -263,6 +263,7 @@ pub enum SyscallNumber {
     Nanosleep = 158,
     Poll = 159,
     ConsentResolve = 160,
+    FsMkdir = 161,
 }
 
 /// System call result status codes.
@@ -1051,6 +1052,30 @@ pub fn sys_fs_unlink(cap_slot: usize, path: &str) -> Result<(), SyscallResult> {
 
     let mut vfs = VFS.lock();
     vfs.unlink_for_task(task_id, &cap_table, cap_slot, path)
+        .map_err(|e| match e {
+            FsError::CapabilityError(_) | FsError::PermissionDenied => SyscallResult::PermissionDenied,
+            FsError::FileNotFound => SyscallResult::FileNotFound,
+            FsError::ReadOnlyFileSystem => SyscallResult::ReadOnlyFs,
+            FsError::IntegrityViolation => SyscallResult::IntegrityViolation,
+            _ => SyscallResult::InvalidArguments,
+        })?;
+    let _ = vfs.sync();
+    Ok(())
+}
+
+/// Creates a new directory node in the VFS.
+pub fn sys_fs_mkdir(cap_slot: usize, path: &str) -> Result<(), SyscallResult> {
+    let sched = SCHEDULER.lock();
+    let current = match sched.current_task() {
+        Some(t) => t,
+        None => return Err(SyscallResult::PermissionDenied),
+    };
+    let task_id = current.id;
+    let cap_table = current.cap_table.clone();
+    drop(sched);
+
+    let mut vfs = VFS.lock();
+    vfs.mkdir_for_task(task_id, &cap_table, cap_slot, path)
         .map_err(|e| match e {
             FsError::CapabilityError(_) | FsError::PermissionDenied => SyscallResult::PermissionDenied,
             FsError::FileNotFound => SyscallResult::FileNotFound,
@@ -2535,6 +2560,27 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             // ConsentResolve: a1 = request_id, a2 = decision (1=Granted, 2=Denied, 3=GrantedOnce)
             match sys_consent_resolve(a1, a2 as u32) {
                 Ok(slot) => slot as i64,
+                Err(e) => e as i64,
+            }
+        }
+        161 => {
+            // FsMkdir: a1 = cap_slot, a2 = path_ptr, a3 = path_len
+            let cap_slot = a1 as usize;
+            let path_ptr = a2;
+            let path_len = a3 as usize;
+            if path_len == 0 || path_len > 256 {
+                return SyscallResult::InvalidArguments as i64;
+            }
+            let mut kpath = [0u8; 256];
+            if copy_from_user(&mut kpath[..path_len], path_ptr, path_len).is_err() {
+                return SyscallResult::InvalidArguments as i64;
+            }
+            let path = match core::str::from_utf8(&kpath[..path_len]) {
+                Ok(s) => s,
+                Err(_) => return SyscallResult::InvalidArguments as i64,
+            };
+            match sys_fs_mkdir(cap_slot, path) {
+                Ok(()) => SyscallResult::Success as i64,
                 Err(e) => e as i64,
             }
         }

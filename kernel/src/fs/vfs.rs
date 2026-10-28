@@ -995,6 +995,48 @@ impl Vfs {
         Ok(())
     }
 
+    pub fn mkdir_for_task(
+        &mut self,
+        task_id: TaskId,
+        task_caps: &CapabilityTable,
+        _cap_slot: usize,
+        path: &str,
+    ) -> Result<InodeId, FsError> {
+        if path.is_empty() || path.len() > MAX_PATH_LEN { return Err(FsError::PathTooLong); }
+        self.enforce_app_path(task_id, path, true)?;
+        if !task_caps.has_capability(CapabilityType::FileSystemWrite, Rights::WRITE)
+            && !task_caps.has_capability(CapabilityType::FileSystemRead, Rights::WRITE)
+        {
+            return Err(no_filesystem_authority(task_caps));
+        }
+        let normalized = normalize_path(path);
+        if self.lookup(&normalized).is_some() {
+            return Err(FsError::InvalidPath);
+        }
+        let is_storage = normalized.starts_with("/storage/");
+        if !is_storage {
+            let Some(root) = Self::app_storage_root(task_id) else {
+                return Err(FsError::FileNotFound);
+            };
+            if normalized == root || !normalized.starts_with(&(root.clone() + "/")) {
+                return Err(FsError::PermissionDenied);
+            }
+        }
+        let parent = parent_path(&normalized);
+        let parent_inode = self.lookup(parent).ok_or(FsError::FileNotFound)?;
+        if self.inodes.get(&parent_inode).map(|i| i.file_type != FileType::Directory).unwrap_or(true) {
+            return Err(FsError::NotADirectory);
+        }
+        let _cap = task_caps
+            .find_capability_for_object(CapabilityType::FileSystemWrite, Rights::WRITE, parent_inode.0)
+            .or_else(|| task_caps.find_capability_for_object(CapabilityType::FileSystemRead, Rights::WRITE, parent_inode.0))
+            .ok_or(FsError::PermissionDenied)?;
+        let id = self.mkdir(&normalized);
+        self.bump_metadata_generation();
+        let _ = self.persist_metadata_snapshot();
+        Ok(id)
+    }
+
     pub fn chmod(&mut self, task_caps: &CapabilityTable, _cap_slot: usize, path: &str, mode: u16) -> Result<(), FsError> {
         let id = self.lookup(path).ok_or(FsError::FileNotFound)?;
         // WHY the capability is matched to the object: a capability scoped to
