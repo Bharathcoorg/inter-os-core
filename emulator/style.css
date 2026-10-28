@@ -4006,6 +4006,31 @@ body.studio-focus-mode .emulator-side-toolbar {
   }
 }
 
+/* WHY the phone's cap has to pay for the rail at this width and not at 390px:
+   measured at 320x568 the stage row was [276 phone | 16 gap | 34 rail] inside a
+   304px stage in focus mode, and the gesture row below the phone asked for 325px
+   in deck mode -- either way the chassis sat past the left edge and the rail,
+   which is the only place the power, screenshot, back, home and recents buttons
+   exist, hung past the right. Reserving the rail and the gap, and letting the
+   gesture row shrink with the phone it belongs to, keeps every control on the
+   screen the visitor is looking at. */
+@media (max-width: 380px) {
+  /* The focus-mode selectors are repeated because they are !important too, and
+     a plain selector loses to `body.studio-focus-mode ...` on specificity: the
+     phone would keep its 44px cap and still overflow. */
+  .emulator-stage-wrapper,
+  body.studio-focus-mode .emulator-stage-wrapper {
+    gap: 6px !important;
+  }
+  .phone-and-nav-container,
+  body.studio-focus-mode .phone-and-nav-container {
+    max-width: calc(100vw - 60px) !important;
+  }
+  .device-gesture-guide {
+    max-width: 100% !important;
+  }
+}
+
 /* WHY the phone yields to the toolbar and not the other way round: in deck mode
    .emulator-stage-wrapper is a non-wrapping row of [phone | side toolbar], and
    the toolbar is the only place the power, screenshot, back, home and recents
