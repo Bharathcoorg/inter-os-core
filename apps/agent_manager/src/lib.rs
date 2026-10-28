@@ -48,6 +48,10 @@ pub const ERR_PERMISSION_DENIED: i64 = -1;
 pub const ERR_INVALID_ARGUMENTS: i64 = -3;
 /// The kernel refused the call: the path does not exist.
 pub const ERR_FILE_NOT_FOUND: i64 = -8;
+/// The kernel refused the call: the filesystem is mounted read-only.
+pub const ERR_READ_ONLY_FS: i64 = -10;
+/// The kernel refused the call: the resource is not ready or a process is currently in use.
+pub const ERR_NOT_READY: i64 = -30;
 
 /// The outcome of a query against the platform.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -612,6 +616,18 @@ pub trait Provider: Sync {
 
     /// Whether a runtime that can serve the provider is bound.
     fn runtime_binding(&self, device: &DeviceState) -> RuntimeBinding;
+
+    /// Returns the installed package version from the registry if available.
+    fn package_version(&self, device: &DeviceState) -> Option<(u16, u16, u16)> {
+        let pkg_id = self.package_id()?;
+        device.packages.version_of(pkg_id)
+    }
+
+    /// Returns the package lifecycle state from the registry if available.
+    fn package_lifecycle_state(&self, device: &DeviceState) -> Option<RegistryPackageState> {
+        let pkg_id = self.package_id()?;
+        device.packages.state_of(pkg_id)
+    }
 }
 
 /// EmbeddingGemma 2: the on-device vector embedding model.
@@ -644,6 +660,11 @@ impl Provider for EmbeddingGemma2 {
     }
 
     fn install_state(&self, device: &DeviceState) -> InstallState {
+        if let Some(pkg_id) = self.package_id() {
+            if device.packages.is_active(pkg_id) {
+                return InstallState::Installed;
+            }
+        }
         match device.models.status {
             ModelProbeStatus::Listed => {
                 if device.models.has_embedding_weights {
@@ -652,7 +673,13 @@ impl Provider for EmbeddingGemma2 {
                     InstallState::NotInstalled
                 }
             }
-            ModelProbeStatus::Absent => InstallState::NotInstalled,
+            ModelProbeStatus::Absent => {
+                if device.packages.status == ProbeStatus::Refused {
+                    InstallState::Unavailable
+                } else {
+                    InstallState::NotInstalled
+                }
+            }
             ModelProbeStatus::Refused | ModelProbeStatus::NoAuthority => InstallState::Unavailable,
         }
     }
@@ -761,6 +788,11 @@ impl Provider for LocalGenerative {
     }
 
     fn install_state(&self, device: &DeviceState) -> InstallState {
+        if let Some(pkg_id) = self.package_id() {
+            if device.packages.is_active(pkg_id) {
+                return InstallState::Installed;
+            }
+        }
         match device.models.status {
             ModelProbeStatus::Listed => {
                 if device.models.has_generative_weights {
@@ -769,7 +801,13 @@ impl Provider for LocalGenerative {
                     InstallState::NotInstalled
                 }
             }
-            ModelProbeStatus::Absent => InstallState::NotInstalled,
+            ModelProbeStatus::Absent => {
+                if device.packages.status == ProbeStatus::Refused {
+                    InstallState::Unavailable
+                } else {
+                    InstallState::NotInstalled
+                }
+            }
             ModelProbeStatus::Refused | ModelProbeStatus::NoAuthority => InstallState::Unavailable,
         }
     }
@@ -1095,6 +1133,24 @@ fn parse_u64(bytes: &[u8]) -> Option<u64> {
     Some(val)
 }
 
+fn parse_u16(bytes: &[u8]) -> Option<u16> {
+    parse_u64(bytes).and_then(|v| {
+        if v <= u16::MAX as u64 {
+            Some(v as u16)
+        } else {
+            None
+        }
+    })
+}
+
+fn parse_version(bytes: &[u8]) -> (u16, u16, u16) {
+    let mut parts = bytes.split(|&b| b == b'.');
+    let maj = parts.next().and_then(parse_u16).unwrap_or(0);
+    let min = parts.next().and_then(parse_u16).unwrap_or(0);
+    let pat = parts.next().and_then(parse_u16).unwrap_or(0);
+    (maj, min, pat)
+}
+
 /// Whether `haystack` contains `needle`, ignoring ASCII case.
 fn contains_ci(haystack: &[u8], needle: &[u8]) -> bool {
     if needle.len() > haystack.len() {
@@ -1124,6 +1180,58 @@ pub const MAX_PACKAGE_IDS: usize = 12;
 /// The longest package id the registry measurement keeps.
 pub const MAX_PACKAGE_ID_LEN: usize = 32;
 
+/// Lifecycle state of an installed package reported by the platform registry.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RegistryPackageState {
+    /// Package is active and launchable.
+    Active,
+    /// Package is staged but not yet activated.
+    Staged,
+    /// Package has been rolled back / quarantined.
+    RolledBack,
+    /// State could not be identified or unrecognized.
+    Unknown,
+}
+
+impl RegistryPackageState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "ACTIVE",
+            Self::Staged => "STAGED",
+            Self::RolledBack => "ROLLED_BACK",
+            Self::Unknown => "UNKNOWN",
+        }
+    }
+}
+
+/// An entry in the platform's package registry.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct RegistryPackageEntry {
+    /// Identifier of the package.
+    pub id: [u8; MAX_PACKAGE_ID_LEN],
+    /// Length of the package identifier.
+    pub id_len: u8,
+    /// Version (major, minor, patch) parsed from the registry record.
+    pub version: (u16, u16, u16),
+    /// Lifecycle state of the package.
+    pub state: RegistryPackageState,
+}
+
+impl RegistryPackageEntry {
+    pub const fn empty() -> Self {
+        Self {
+            id: [0u8; MAX_PACKAGE_ID_LEN],
+            id_len: 0,
+            version: (0, 0, 0),
+            state: RegistryPackageState::Unknown,
+        }
+    }
+
+    pub fn id_str(&self) -> &str {
+        core::str::from_utf8(&self.id[..self.id_len as usize]).unwrap_or("")
+    }
+}
+
 /// A measurement of the platform's package registry.
 #[derive(Clone, Copy, Debug)]
 pub struct PackageRegistry {
@@ -1135,50 +1243,94 @@ pub struct PackageRegistry {
     pub ids: [[u8; MAX_PACKAGE_ID_LEN]; MAX_PACKAGE_IDS],
     /// The length of each kept id.
     pub id_lens: [u8; MAX_PACKAGE_IDS],
+    /// Structured entries holding version and lifecycle state.
+    pub entries: [RegistryPackageEntry; MAX_PACKAGE_IDS],
 }
 
 impl PackageRegistry {
-    /// Measures the platform's package registry.
-    pub fn measure() -> Self {
+    /// Constructs an empty package registry measurement.
+    pub const fn empty() -> Self {
+        Self {
+            status: ProbeStatus::Listed,
+            count: 0,
+            ids: [[0u8; MAX_PACKAGE_ID_LEN]; MAX_PACKAGE_IDS],
+            id_lens: [0; MAX_PACKAGE_IDS],
+            entries: [RegistryPackageEntry::empty(); MAX_PACKAGE_IDS],
+        }
+    }
+
+    /// Constructs a refused package registry measurement.
+    pub const fn refused() -> Self {
+        Self {
+            status: ProbeStatus::Refused,
+            count: 0,
+            ids: [[0u8; MAX_PACKAGE_ID_LEN]; MAX_PACKAGE_IDS],
+            id_lens: [0; MAX_PACKAGE_IDS],
+            entries: [RegistryPackageEntry::empty(); MAX_PACKAGE_IDS],
+        }
+    }
+
+    /// Parses a raw newline-delimited, pipe-separated package registry payload.
+    pub fn parse_payload(payload: &[u8]) -> Self {
         let mut ids = [[0u8; MAX_PACKAGE_ID_LEN]; MAX_PACKAGE_IDS];
         let mut id_lens = [0u8; MAX_PACKAGE_IDS];
+        let mut entries = [RegistryPackageEntry::empty(); MAX_PACKAGE_IDS];
         let mut count = 0u16;
 
+        for line in payload.split(|&b| b == b'\n') {
+            if line.is_empty() {
+                continue;
+            }
+            let mut parts = line.split(|&b| b == b'|');
+            let id = match parts.next() {
+                Some(id) if !id.is_empty() => id,
+                _ => continue,
+            };
+            let _process = parts.next();
+            let version_bytes = parts.next().unwrap_or(&[]);
+            let state_bytes = parts.next().unwrap_or(&[]);
+
+            let version = parse_version(version_bytes);
+            let state = match state_bytes {
+                b"active" => RegistryPackageState::Active,
+                b"staged" => RegistryPackageState::Staged,
+                b"rolled-back" | b"rolled_back" => RegistryPackageState::RolledBack,
+                _ => RegistryPackageState::Unknown,
+            };
+
+            count = count.saturating_add(1);
+            let slot = (count as usize).saturating_sub(1);
+            if slot < MAX_PACKAGE_IDS {
+                let take = id.len().min(MAX_PACKAGE_ID_LEN);
+                ids[slot][..take].copy_from_slice(&id[..take]);
+                id_lens[slot] = take as u8;
+
+                let mut entry_id = [0u8; MAX_PACKAGE_ID_LEN];
+                entry_id[..take].copy_from_slice(&id[..take]);
+                entries[slot] = RegistryPackageEntry {
+                    id: entry_id,
+                    id_len: take as u8,
+                    version,
+                    state,
+                };
+            }
+        }
+
+        Self {
+            status: ProbeStatus::Listed,
+            count,
+            ids,
+            id_lens,
+            entries,
+        }
+    }
+
+    /// Measures the platform's package registry.
+    pub fn measure() -> Self {
         let mut buf = [0u8; 1024];
         match interos_std::package_registry(&mut buf) {
-            Ok(n) => {
-                let payload = &buf[..n.min(buf.len())];
-                for line in payload.split(|&b| b == b'\n') {
-                    if line.is_empty() {
-                        continue;
-                    }
-                    let end = line.iter().position(|&b| b == b'|').unwrap_or(line.len());
-                    let id = &line[..end];
-                    if id.is_empty() {
-                        continue;
-                    }
-                    count = count.saturating_add(1);
-                    let slot = (count as usize).saturating_sub(1);
-                    if slot >= MAX_PACKAGE_IDS {
-                        break;
-                    }
-                    let take = id.len().min(MAX_PACKAGE_ID_LEN);
-                    ids[slot][..take].copy_from_slice(&id[..take]);
-                    id_lens[slot] = take as u8;
-                }
-                Self {
-                    status: ProbeStatus::Listed,
-                    count,
-                    ids,
-                    id_lens,
-                }
-            }
-            Err(_) => Self {
-                status: ProbeStatus::Refused,
-                count: 0,
-                ids,
-                id_lens,
-            },
+            Ok(n) => Self::parse_payload(&buf[..n.min(buf.len())]),
+            Err(_) => Self::refused(),
         }
     }
 
@@ -1197,6 +1349,152 @@ impl PackageRegistry {
             }
         }
         false
+    }
+
+    /// Whether the registry holds an active package with this identifier.
+    pub fn is_active(&self, id: &str) -> bool {
+        if let Some(entry) = self.find_entry(id) {
+            entry.state == RegistryPackageState::Active
+        } else {
+            false
+        }
+    }
+
+    /// Finds a package entry by identifier.
+    pub fn find_entry(&self, id: &str) -> Option<RegistryPackageEntry> {
+        if self.status != ProbeStatus::Listed {
+            return None;
+        }
+        for slot in 0..MAX_PACKAGE_IDS {
+            let len = self.entries[slot].id_len as usize;
+            if len == 0 {
+                continue;
+            }
+            if self.entries[slot].id[..len] == *id.as_bytes() {
+                return Some(self.entries[slot]);
+            }
+        }
+        None
+    }
+
+    /// Returns the version of the package with this identifier, if active or present.
+    pub fn version_of(&self, id: &str) -> Option<(u16, u16, u16)> {
+        self.find_entry(id).map(|e| e.version)
+    }
+
+    /// Returns the lifecycle state of the package with this identifier.
+    pub fn state_of(&self, id: &str) -> Option<RegistryPackageState> {
+        self.find_entry(id).map(|e| e.state)
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Package Transactions
+// -----------------------------------------------------------------------------
+
+/// The outcome of an install transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackageInstallOutcome {
+    /// The package installed and activated successfully.
+    Installed,
+    /// The package is already active in the registry; idempotent install was refused.
+    AlreadyInstalled,
+    /// Partial installation failed and was rolled back by the platform.
+    RolledBack(i64),
+    /// Caller does not have FileSystemWrite authority.
+    PermissionDenied,
+    /// Provider does not have a package delivery mechanism.
+    NoPackage,
+}
+
+/// The outcome of a removal transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackageRemoveOutcome {
+    /// Package uninstalled successfully from the registry and storage freed.
+    Uninstalled,
+    /// Package removal was refused because a live process of the package is running (in-use).
+    InUse,
+    /// Package was not found in the registry.
+    NotFound,
+    /// Provider model weights were stored as loose file on writable storage and unlinked.
+    ModelFileUnlinked,
+    /// Model file is stored on a read-only filesystem (/system) and cannot be unlinked.
+    ReadOnlyFileSystem(i64),
+    /// Model file unlinking failed with an error.
+    ModelFileFailed(i64),
+    /// Platform permission denied.
+    PermissionDenied,
+    /// Provider is not removable (e.g. host-bridge has no package or local files).
+    NotRemovable,
+    /// Uninstall failed.
+    Failed(i64),
+}
+
+/// Evaluates and performs an install transaction for the given provider against the device's registry.
+pub fn transact_package_install<F>(
+    provider: &dyn Provider,
+    device: &DeviceState,
+    mut install_syscall: F,
+) -> PackageInstallOutcome
+where
+    F: FnMut(&str, bool) -> Result<(), i64>,
+{
+    let Some(pkg_id) = provider.package_id() else {
+        return PackageInstallOutcome::NoPackage;
+    };
+
+    if device.packages.is_active(pkg_id) {
+        return PackageInstallOutcome::AlreadyInstalled;
+    }
+
+    match install_syscall(pkg_id, true) {
+        Ok(()) => PackageInstallOutcome::Installed,
+        Err(ERR_PERMISSION_DENIED) => PackageInstallOutcome::PermissionDenied,
+        Err(code) => PackageInstallOutcome::RolledBack(code),
+    }
+}
+
+/// Evaluates and performs a remove transaction for the given provider against the device's registry.
+pub fn transact_package_remove<F, U>(
+    provider: &dyn Provider,
+    device: &DeviceState,
+    provider_index: usize,
+    mut uninstall_syscall: F,
+    mut unlink_syscall: U,
+) -> PackageRemoveOutcome
+where
+    F: FnMut(&str, bool) -> Result<(), i64>,
+    U: FnMut(&str) -> Result<(), i64>,
+{
+    if let Some(pkg_id) = provider.package_id() {
+        if device.packages.contains(pkg_id) {
+            match uninstall_syscall(pkg_id, true) {
+                Ok(()) => return PackageRemoveOutcome::Uninstalled,
+                Err(ERR_NOT_READY) => return PackageRemoveOutcome::InUse,
+                Err(ERR_PERMISSION_DENIED) => return PackageRemoveOutcome::PermissionDenied,
+                Err(ERR_FILE_NOT_FOUND) => return PackageRemoveOutcome::NotFound,
+                Err(code) => return PackageRemoveOutcome::Failed(code),
+            }
+        }
+    }
+
+    // Loose model weights contract:
+    // When on-device generative models are placed as standalone weights
+    // at `/data/models/local_model.gguf`, unlinking is the removal contract.
+    if provider.id() == "local-generative" || provider_index == 2 {
+        if device.models.has_generative_weights {
+            match unlink_syscall("/data/models/local_model.gguf") {
+                Ok(_) => return PackageRemoveOutcome::ModelFileUnlinked,
+                Err(ERR_READ_ONLY_FS) => return PackageRemoveOutcome::ReadOnlyFileSystem(ERR_READ_ONLY_FS),
+                Err(code) => return PackageRemoveOutcome::ReadOnlyFileSystem(code),
+            }
+        }
+    }
+
+    if let Some(_pkg_id) = provider.package_id() {
+        PackageRemoveOutcome::NotFound
+    } else {
+        PackageRemoveOutcome::NotRemovable
     }
 }
 
@@ -2962,12 +3260,7 @@ mod tests {
                     embedding_size_kb: 0,
                     generative_size_kb: 0,
                 },
-                packages: PackageRegistry {
-                    status: ProbeStatus::Listed,
-                    count: 0,
-                    ids: [[0u8; MAX_PACKAGE_ID_LEN]; MAX_PACKAGE_IDS],
-                    id_lens: [0; MAX_PACKAGE_IDS],
-                },
+                packages: PackageRegistry::empty(),
                 services: ServiceRegistry {
                     status: ProbeStatus::Listed,
                     count: 0,
@@ -3036,12 +3329,7 @@ mod tests {
                 embedding_size_kb: 0,
                 generative_size_kb: 0,
             },
-            packages: PackageRegistry {
-                status: ProbeStatus::Listed,
-                count: 0,
-                ids: [[0u8; MAX_PACKAGE_ID_LEN]; MAX_PACKAGE_IDS],
-                id_lens: [0; MAX_PACKAGE_IDS],
-            },
+            packages: PackageRegistry::empty(),
             services: ServiceRegistry {
                 status: ProbeStatus::Listed,
                 count: 11,
@@ -3081,12 +3369,7 @@ mod tests {
                 embedding_size_kb: 1024,
                 generative_size_kb: 1024,
             },
-            packages: PackageRegistry {
-                status: ProbeStatus::Listed,
-                count: 0,
-                ids: [[0u8; MAX_PACKAGE_ID_LEN]; MAX_PACKAGE_IDS],
-                id_lens: [0; MAX_PACKAGE_IDS],
-            },
+            packages: PackageRegistry::empty(),
             services: ServiceRegistry {
                 status: ProbeStatus::Listed,
                 count: 11,
@@ -3123,12 +3406,7 @@ mod tests {
                 embedding_size_kb: 0,
                 generative_size_kb: 0,
             },
-            packages: PackageRegistry {
-                status: ProbeStatus::Refused,
-                count: 0,
-                ids: [[0u8; MAX_PACKAGE_ID_LEN]; MAX_PACKAGE_IDS],
-                id_lens: [0; MAX_PACKAGE_IDS],
-            },
+            packages: PackageRegistry::refused(),
             services: ServiceRegistry {
                 status: ProbeStatus::Refused,
                 count: 0,
@@ -3169,12 +3447,7 @@ mod tests {
                 embedding_size_kb: 0,
                 generative_size_kb: 0,
             },
-            packages: PackageRegistry {
-                status: ProbeStatus::Listed,
-                count: 0,
-                ids: [[0u8; MAX_PACKAGE_ID_LEN]; MAX_PACKAGE_IDS],
-                id_lens: [0; MAX_PACKAGE_IDS],
-            },
+            packages: PackageRegistry::empty(),
             services: ServiceRegistry {
                 status: ProbeStatus::Listed,
                 count: 11,
@@ -3563,5 +3836,343 @@ mod tests {
         };
         assert_eq!(inv.embedding_stage(&srv), Some(ProbeStage::Validated));
         assert_eq!(inv.generative_stage(&srv), Some(ProbeStage::Discovered));
+    }
+
+    #[test]
+    fn idempotent_install_is_refused_when_package_is_already_active() {
+        let mut device = DeviceState {
+            models: ModelInventory {
+                status: ModelProbeStatus::Listed,
+                entries: 0,
+                placeholders: 0,
+                has_embedding_weights: false,
+                has_generative_weights: false,
+                embedding_size_kb: 0,
+                generative_size_kb: 0,
+            },
+            packages: PackageRegistry::empty(),
+            services: ServiceRegistry {
+                status: ProbeStatus::Listed,
+                count: 0,
+                highest_id: 0,
+                entries: [ServiceEntry {
+                    id: 0,
+                    state: ServiceState::Unknown,
+                    abi_version: 0,
+                    age_ticks: 0,
+                    failures: 0,
+                }; MAX_SERVICES],
+            },
+        };
+
+        let pkg_id = b"org.interos.localgenerative";
+        device.packages.count = 1;
+        device.packages.ids[0][..pkg_id.len()].copy_from_slice(pkg_id);
+        device.packages.id_lens[0] = pkg_id.len() as u8;
+        device.packages.entries[0] = RegistryPackageEntry {
+            id: device.packages.ids[0],
+            id_len: pkg_id.len() as u8,
+            version: (1, 0, 0),
+            state: RegistryPackageState::Active,
+        };
+
+        let provider = provider_by_id("local-generative").expect("local-generative provider");
+        let mut install_called = false;
+        let outcome = transact_package_install(provider, &device, |_pkg, _consent| {
+            install_called = true;
+            Ok(())
+        });
+
+        assert_eq!(outcome, PackageInstallOutcome::AlreadyInstalled);
+        assert!(!install_called, "install syscall must not be invoked for an already active package");
+    }
+
+    #[test]
+    fn failed_package_install_rolls_back_partial_state() {
+        let device = DeviceState {
+            models: ModelInventory {
+                status: ModelProbeStatus::Listed,
+                entries: 0,
+                placeholders: 0,
+                has_embedding_weights: false,
+                has_generative_weights: false,
+                embedding_size_kb: 0,
+                generative_size_kb: 0,
+            },
+            packages: PackageRegistry::empty(),
+            services: ServiceRegistry {
+                status: ProbeStatus::Listed,
+                count: 0,
+                highest_id: 0,
+                entries: [ServiceEntry {
+                    id: 0,
+                    state: ServiceState::Unknown,
+                    abi_version: 0,
+                    age_ticks: 0,
+                    failures: 0,
+                }; MAX_SERVICES],
+            },
+        };
+
+        let provider = provider_by_id("local-generative").expect("local-generative provider");
+        let outcome = transact_package_install(provider, &device, |_pkg, _consent| {
+            Err(-12)
+        });
+
+        assert_eq!(outcome, PackageInstallOutcome::RolledBack(-12));
+    }
+
+    #[test]
+    fn package_removal_of_in_use_package_is_refused_per_contract() {
+        // WHY this test matters: The kernel documented contract (sys_package_uninstall)
+        // explicitly refuses removal while an installed package process is still alive,
+        // returning SyscallResult::NotReady (-30). The agent manager must handle this
+        // contract honestly and report the in-use state rather than a generic error code.
+        let mut device = DeviceState {
+            models: ModelInventory {
+                status: ModelProbeStatus::Listed,
+                entries: 0,
+                placeholders: 0,
+                has_embedding_weights: false,
+                has_generative_weights: false,
+                embedding_size_kb: 0,
+                generative_size_kb: 0,
+            },
+            packages: PackageRegistry::empty(),
+            services: ServiceRegistry {
+                status: ProbeStatus::Listed,
+                count: 0,
+                highest_id: 0,
+                entries: [ServiceEntry {
+                    id: 0,
+                    state: ServiceState::Unknown,
+                    abi_version: 0,
+                    age_ticks: 0,
+                    failures: 0,
+                }; MAX_SERVICES],
+            },
+        };
+
+        let pkg_id = b"org.interos.localgenerative";
+        device.packages.count = 1;
+        device.packages.ids[0][..pkg_id.len()].copy_from_slice(pkg_id);
+        device.packages.id_lens[0] = pkg_id.len() as u8;
+        device.packages.entries[0] = RegistryPackageEntry {
+            id: device.packages.ids[0],
+            id_len: pkg_id.len() as u8,
+            version: (1, 0, 0),
+            state: RegistryPackageState::Active,
+        };
+
+        let provider = provider_by_id("local-generative").expect("local-generative provider");
+        let outcome = transact_package_remove(
+            provider,
+            &device,
+            2,
+            |_pkg, _consent| Err(ERR_NOT_READY),
+            |_path| Ok(()),
+        );
+
+        assert_eq!(outcome, PackageRemoveOutcome::InUse);
+    }
+
+    #[test]
+    fn package_removal_uninstalls_active_package_from_registry() {
+        let mut device = DeviceState {
+            models: ModelInventory {
+                status: ModelProbeStatus::Listed,
+                entries: 0,
+                placeholders: 0,
+                has_embedding_weights: false,
+                has_generative_weights: false,
+                embedding_size_kb: 0,
+                generative_size_kb: 0,
+            },
+            packages: PackageRegistry::empty(),
+            services: ServiceRegistry {
+                status: ProbeStatus::Listed,
+                count: 0,
+                highest_id: 0,
+                entries: [ServiceEntry {
+                    id: 0,
+                    state: ServiceState::Unknown,
+                    abi_version: 0,
+                    age_ticks: 0,
+                    failures: 0,
+                }; MAX_SERVICES],
+            },
+        };
+
+        let pkg_id = b"org.interos.localgenerative";
+        device.packages.count = 1;
+        device.packages.ids[0][..pkg_id.len()].copy_from_slice(pkg_id);
+        device.packages.id_lens[0] = pkg_id.len() as u8;
+        device.packages.entries[0] = RegistryPackageEntry {
+            id: device.packages.ids[0],
+            id_len: pkg_id.len() as u8,
+            version: (1, 0, 0),
+            state: RegistryPackageState::Active,
+        };
+
+        let provider = provider_by_id("local-generative").expect("local-generative provider");
+        let mut uninstalled_pkg = "";
+        let outcome = transact_package_remove(
+            provider,
+            &device,
+            2,
+            |pkg, _consent| {
+                if pkg == "org.interos.localgenerative" {
+                    uninstalled_pkg = "org.interos.localgenerative";
+                    Ok(())
+                } else {
+                    Err(-8)
+                }
+            },
+            |_path| Ok(()),
+        );
+
+        assert_eq!(outcome, PackageRemoveOutcome::Uninstalled);
+        assert_eq!(uninstalled_pkg, "org.interos.localgenerative");
+    }
+
+    #[test]
+    fn unlinking_local_model_file_is_contract_for_standalone_weights_removal() {
+        // WHY this test matters: The platform contract for removal distinguishes between
+        // packaged providers and standalone weight files. When local generative weights are
+        // deployed as a standalone model file at `/data/models/local_model.gguf` without a
+        // package in the package registry, unlinking `/data/models/local_model.gguf` genuinely
+        // IS the documented removal contract. This test proves that contract explicitly
+        // instead of leaving it implied.
+        let device = DeviceState {
+            models: ModelInventory {
+                status: ModelProbeStatus::Listed,
+                entries: 1,
+                placeholders: 0,
+                has_embedding_weights: false,
+                has_generative_weights: true,
+                embedding_size_kb: 0,
+                generative_size_kb: 4096,
+            },
+            packages: PackageRegistry::empty(),
+            services: ServiceRegistry {
+                status: ProbeStatus::Listed,
+                count: 0,
+                highest_id: 0,
+                entries: [ServiceEntry {
+                    id: 0,
+                    state: ServiceState::Unknown,
+                    abi_version: 0,
+                    age_ticks: 0,
+                    failures: 0,
+                }; MAX_SERVICES],
+            },
+        };
+
+        let provider = provider_by_id("local-generative").expect("local-generative provider");
+        let mut unlinked_path = "";
+        let outcome = transact_package_remove(
+            provider,
+            &device,
+            2,
+            |_pkg, _consent| Err(-8),
+            |path| {
+                if path == "/data/models/local_model.gguf" {
+                    unlinked_path = "/data/models/local_model.gguf";
+                    Ok(())
+                } else {
+                    Err(-8)
+                }
+            },
+        );
+
+        assert_eq!(outcome, PackageRemoveOutcome::ModelFileUnlinked);
+        assert_eq!(unlinked_path, "/data/models/local_model.gguf");
+    }
+
+    #[test]
+    fn unlinking_model_file_on_read_only_system_reports_error() {
+        let device = DeviceState {
+            models: ModelInventory {
+                status: ModelProbeStatus::Listed,
+                entries: 1,
+                placeholders: 0,
+                has_embedding_weights: false,
+                has_generative_weights: true,
+                embedding_size_kb: 0,
+                generative_size_kb: 4096,
+            },
+            packages: PackageRegistry::empty(),
+            services: ServiceRegistry {
+                status: ProbeStatus::Listed,
+                count: 0,
+                highest_id: 0,
+                entries: [ServiceEntry {
+                    id: 0,
+                    state: ServiceState::Unknown,
+                    abi_version: 0,
+                    age_ticks: 0,
+                    failures: 0,
+                }; MAX_SERVICES],
+            },
+        };
+
+        let provider = provider_by_id("local-generative").expect("local-generative provider");
+        let outcome = transact_package_remove(
+            provider,
+            &device,
+            2,
+            |_pkg, _consent| Err(-8),
+            |_path| Err(ERR_READ_ONLY_FS),
+        );
+
+        assert_eq!(outcome, PackageRemoveOutcome::ReadOnlyFileSystem(ERR_READ_ONLY_FS));
+    }
+
+    #[test]
+    fn package_version_and_lifecycle_state_surfaced_from_registry() {
+        let payload = b"org.interos.localgenerative|localgen|2.4.1|active|/data/apps/localgen|Local Generative|AI|Tools\n";
+        let registry = PackageRegistry::parse_payload(payload);
+
+        assert_eq!(registry.status, ProbeStatus::Listed);
+        assert_eq!(registry.count, 1);
+        assert!(registry.contains("org.interos.localgenerative"));
+        assert!(registry.is_active("org.interos.localgenerative"));
+        assert_eq!(registry.version_of("org.interos.localgenerative"), Some((2, 4, 1)));
+        assert_eq!(registry.state_of("org.interos.localgenerative"), Some(RegistryPackageState::Active));
+
+        let entry = registry.find_entry("org.interos.localgenerative").expect("entry found");
+        assert_eq!(entry.id_str(), "org.interos.localgenerative");
+        assert_eq!(entry.version, (2, 4, 1));
+        assert_eq!(entry.state, RegistryPackageState::Active);
+
+        let device = DeviceState {
+            models: ModelInventory {
+                status: ModelProbeStatus::Listed,
+                entries: 0,
+                placeholders: 0,
+                has_embedding_weights: false,
+                has_generative_weights: false,
+                embedding_size_kb: 0,
+                generative_size_kb: 0,
+            },
+            packages: registry,
+            services: ServiceRegistry {
+                status: ProbeStatus::Listed,
+                count: 0,
+                highest_id: 0,
+                entries: [ServiceEntry {
+                    id: 0,
+                    state: ServiceState::Unknown,
+                    abi_version: 0,
+                    age_ticks: 0,
+                    failures: 0,
+                }; MAX_SERVICES],
+            },
+        };
+
+        let provider = provider_by_id("local-generative").expect("local-generative provider");
+        assert_eq!(provider.package_version(&device), Some((2, 4, 1)));
+        assert_eq!(provider.package_lifecycle_state(&device), Some(RegistryPackageState::Active));
+        assert_eq!(provider.install_state(&device), InstallState::Installed);
     }
 }

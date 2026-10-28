@@ -43,9 +43,11 @@ use agent_manager::{
     format_threshold, format_u32, granted_capability_count, load_saved_provider,
     probe_capability_grants, providers, resolve_inference_service, save_preferred_provider,
     service_name, AgentTool, AgentToolOutcome, CapabilityGrant, ChatRole, ChatSession,
-    ConsentOutcome, DeviceState, InstallState, ModelProbeStatus, ProbeStatus, Provider,
-    RuntimeBinding, RuntimeDiagnostics, SearchConfiguration, SelfTest, ServiceState, StreamChunk,
-    Surface, ToolAuthority, CAPABILITY_COUNT, CHAT_PROMPT_MAX, HOST_BRIDGE, LOCAL_GENERATIVE,
+    ConsentOutcome, DeviceState, InstallState, ModelProbeStatus, PackageInstallOutcome,
+    PackageRemoveOutcome, ProbeStatus, Provider, RegistryPackageState, RuntimeBinding,
+    RuntimeDiagnostics, SearchConfiguration, SelfTest, ServiceState, StreamChunk,
+    Surface, ToolAuthority, transact_package_install, transact_package_remove,
+    CAPABILITY_COUNT, CHAT_PROMPT_MAX, HOST_BRIDGE, LOCAL_GENERATIVE,
     MATRYOSHKA_DEFAULT_DIM, MAX_RESULTS_DEFAULT, SIMILARITY_DEFAULT_Q15, TOOL_LABEL_MAX,
 };
 
@@ -705,32 +707,51 @@ impl AgentManagerApp {
     /// answer it gives is the answer the screen shows.
     pub fn install_selected(&mut self) {
         let provider = self.selected_provider();
-        let Some(package_id) = provider.package_id() else {
-            self.set_action(
-                b"INSTALL: this provider is not delivered as a package, so there is nothing to install.",
-                Tone::Unavailable,
-            );
-            self.rebuild();
-            return;
-        };
-        match std::package_install(package_id, true) {
-            Ok(()) => {
+        let outcome = transact_package_install(provider, &self.device, std::package_install);
+        match outcome {
+            PackageInstallOutcome::Installed => {
                 let mut msg = [0u8; 96];
                 let mut n = 0;
                 for &b in b"INSTALL: " { msg[n] = b; n += 1; }
-                for &b in package_id.as_bytes() { msg[n] = b; n += 1; }
+                if let Some(package_id) = provider.package_id() {
+                    for &b in package_id.as_bytes() { msg[n] = b; n += 1; }
+                }
                 for &b in b" installed successfully." { msg[n] = b; n += 1; }
                 self.set_action(&msg[..n], Tone::Good);
             }
-            Err(code) => {
+            PackageInstallOutcome::AlreadyInstalled => {
+                let mut msg = [0u8; 96];
+                let mut n = 0;
+                for &b in b"INSTALL: " { msg[n] = b; n += 1; }
+                if let Some(package_id) = provider.package_id() {
+                    for &b in package_id.as_bytes() { msg[n] = b; n += 1; }
+                }
+                for &b in b" is already installed." { msg[n] = b; n += 1; }
+                self.set_action(&msg[..n], Tone::Plain);
+            }
+            PackageInstallOutcome::RolledBack(code) => {
                 let mut msg = [0u8; 96];
                 let mut n = 0;
                 for &b in b"INSTALL: failed for " { msg[n] = b; n += 1; }
-                for &b in package_id.as_bytes() { msg[n] = b; n += 1; }
-                for &b in b" (error " { msg[n] = b; n += 1; }
+                if let Some(package_id) = provider.package_id() {
+                    for &b in package_id.as_bytes() { msg[n] = b; n += 1; }
+                }
+                for &b in b" (rolled back, error " { msg[n] = b; n += 1; }
                 n += format_u32(code.unsigned_abs() as u32, &mut msg[n..]);
                 msg[n] = b')'; n += 1;
                 self.set_action(&msg[..n], Tone::Unavailable);
+            }
+            PackageInstallOutcome::PermissionDenied => {
+                self.set_action(
+                    b"INSTALL: permission denied (requires FileSystemWrite capability).",
+                    Tone::Unavailable,
+                );
+            }
+            PackageInstallOutcome::NoPackage => {
+                self.set_action(
+                    b"INSTALL: this provider is not delivered as a package, so there is nothing to install.",
+                    Tone::Unavailable,
+                );
             }
         }
         self.device = DeviceState::measure();
@@ -740,46 +761,82 @@ impl AgentManagerApp {
     /// Asks the platform to remove the selected provider's package.
     pub fn remove_selected(&mut self) {
         let provider = self.selected_provider();
-        if self.selected == 2 {
-            match std::fs_unlink("/data/models/local_model.gguf") {
-                Ok(_) => {
-                    self.set_action(b"REMOVE: /data/models/local_model.gguf unlinked.", Tone::Good);
-                }
-                Err(code) => {
-                    let mut msg = [0u8; 64];
-                    let mut n = 0;
-                    for &b in b"REMOVE: /system/models is read-only (code " { msg[n] = b; n += 1; }
-                    n += format_u32(code.unsigned_abs() as u32, &mut msg[n..]);
-                    msg[n] = b')'; n += 1;
-                    self.set_action(&msg[..n], Tone::Unavailable);
-                }
-            }
-            self.device = DeviceState::measure();
-            self.rebuild();
-            return;
-        }
-        let Some(package_id) = provider.package_id() else {
-            self.set_action(
-                b"REMOVE: this provider is not delivered as a package, so there is nothing to remove.",
-                Tone::Unavailable,
-            );
-            self.rebuild();
-            return;
-        };
-        match std::package_uninstall(package_id, true) {
-            Ok(()) => {
+        let outcome = transact_package_remove(
+            provider,
+            &self.device,
+            self.selected,
+            std::package_uninstall,
+            std::fs_unlink,
+        );
+        match outcome {
+            PackageRemoveOutcome::Uninstalled => {
                 let mut msg = [0u8; 96];
                 let mut n = 0;
                 for &b in b"REMOVE: " { msg[n] = b; n += 1; }
-                for &b in package_id.as_bytes() { msg[n] = b; n += 1; }
+                if let Some(package_id) = provider.package_id() {
+                    for &b in package_id.as_bytes() { msg[n] = b; n += 1; }
+                }
                 for &b in b" uninstalled." { msg[n] = b; n += 1; }
                 self.set_action(&msg[..n], Tone::Good);
             }
-            Err(code) => {
+            PackageRemoveOutcome::InUse => {
+                let mut msg = [0u8; 96];
+                let mut n = 0;
+                for &b in b"REMOVE: refused - " { msg[n] = b; n += 1; }
+                if let Some(package_id) = provider.package_id() {
+                    for &b in package_id.as_bytes() { msg[n] = b; n += 1; }
+                }
+                for &b in b" is currently in use." { msg[n] = b; n += 1; }
+                self.set_action(&msg[..n], Tone::Unavailable);
+            }
+            PackageRemoveOutcome::NotFound => {
+                let mut msg = [0u8; 96];
+                let mut n = 0;
+                for &b in b"REMOVE: " { msg[n] = b; n += 1; }
+                if let Some(package_id) = provider.package_id() {
+                    for &b in package_id.as_bytes() { msg[n] = b; n += 1; }
+                }
+                for &b in b" was not found in registry." { msg[n] = b; n += 1; }
+                self.set_action(&msg[..n], Tone::Unavailable);
+            }
+            PackageRemoveOutcome::ModelFileUnlinked => {
+                self.set_action(b"REMOVE: /data/models/local_model.gguf unlinked.", Tone::Good);
+            }
+            PackageRemoveOutcome::ReadOnlyFileSystem(code) => {
+                let mut msg = [0u8; 64];
+                let mut n = 0;
+                for &b in b"REMOVE: /system/models is read-only (code " { msg[n] = b; n += 1; }
+                n += format_u32(code.unsigned_abs() as u32, &mut msg[n..]);
+                msg[n] = b')'; n += 1;
+                self.set_action(&msg[..n], Tone::Unavailable);
+            }
+            PackageRemoveOutcome::ModelFileFailed(code) => {
+                let mut msg = [0u8; 64];
+                let mut n = 0;
+                for &b in b"REMOVE: unlinking model file failed (code " { msg[n] = b; n += 1; }
+                n += format_u32(code.unsigned_abs() as u32, &mut msg[n..]);
+                msg[n] = b')'; n += 1;
+                self.set_action(&msg[..n], Tone::Unavailable);
+            }
+            PackageRemoveOutcome::PermissionDenied => {
+                self.set_action(
+                    b"REMOVE: permission denied (requires FileSystemWrite capability).",
+                    Tone::Unavailable,
+                );
+            }
+            PackageRemoveOutcome::NotRemovable => {
+                self.set_action(
+                    b"REMOVE: this provider is not delivered as a package, so there is nothing to remove.",
+                    Tone::Unavailable,
+                );
+            }
+            PackageRemoveOutcome::Failed(code) => {
                 let mut msg = [0u8; 96];
                 let mut n = 0;
                 for &b in b"REMOVE: failed for " { msg[n] = b; n += 1; }
-                for &b in package_id.as_bytes() { msg[n] = b; n += 1; }
+                if let Some(package_id) = provider.package_id() {
+                    for &b in package_id.as_bytes() { msg[n] = b; n += 1; }
+                }
                 for &b in b" (error " { msg[n] = b; n += 1; }
                 n += format_u32(code.unsigned_abs() as u32, &mut msg[n..]);
                 msg[n] = b')'; n += 1;
@@ -1181,6 +1238,27 @@ impl AgentManagerApp {
             selected.package_id().unwrap_or("none").as_bytes(),
             Tone::Plain,
         );
+        if let Some(version) = selected.package_version(&self.device) {
+            let mut ver_buf = [0u8; 32];
+            let mut n = 0;
+            n += format_u32(version.0 as u32, &mut ver_buf[n..]);
+            ver_buf[n] = b'.'; n += 1;
+            n += format_u32(version.1 as u32, &mut ver_buf[n..]);
+            ver_buf[n] = b'.'; n += 1;
+            n += format_u32(version.2 as u32, &mut ver_buf[n..]);
+            self.add_line(b"Pkg version", &ver_buf[..n], Tone::Plain);
+        }
+        if let Some(pkg_state) = selected.package_lifecycle_state(&self.device) {
+            self.add_chip(
+                b"Pkg state",
+                pkg_state.as_str().as_bytes(),
+                if pkg_state == RegistryPackageState::Active {
+                    Tone::Good
+                } else {
+                    Tone::Unavailable
+                },
+            );
+        }
 
     }
 
