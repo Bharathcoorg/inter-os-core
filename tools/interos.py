@@ -1108,10 +1108,10 @@ def cmd_verify(args):
     pkg_id = data[8:40].split(b"\0", 1)[0].decode("utf-8", errors="strict")
     version = (int.from_bytes(data[0x48:0x4A], "little"), int.from_bytes(data[0x4A:0x4C], "little"), int.from_bytes(data[0x4C:0x4E], "little"))
     log_success(f"RAPP v2 '{pkg_id}' cryptographically verified")
-    log(f"  Ã¢â‚¬Â¢ Publisher key: {pub.hex()}")
-    log(f"  Ã¢â‚¬Â¢ Version: {version[0]}.{version[1]}.{version[2]}")
-    log(f"  Ã¢â‚¬Â¢ Payload: {payload_len} bytes")
-    log("  Ã¢â‚¬Â¢ Device trust: must be provisioned by the kernel trust store")
+    log(f"  • Publisher key: {pub.hex()}")
+    log(f"  • Version: {version[0]}.{version[1]}.{version[2]}")
+    log(f"  • Payload: {payload_len} bytes")
+    log("  • Device trust: must be provisioned by the kernel trust store")
     return 0
 
 
@@ -1477,6 +1477,14 @@ def cmd_contracts(args):
 # =============================================================================
 # COMMAND: list, uninstall, install
 # =============================================================================
+def _refusal_reason(error):
+    """The reason the Studio gave alongside an HTTP error, if it gave one."""
+    try:
+        return json.loads(error.read().decode("utf-8")).get("error")
+    except Exception:
+        return None
+
+
 def cmd_list(args):
     port = getattr(args, "port", 4300)
     url = f"http://127.0.0.1:{port}/api/rapp/list"
@@ -1485,15 +1493,40 @@ def cmd_list(args):
         req = urllib.request.Request(url, method="GET")
         with urllib.request.urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read().decode("utf-8"))
-            apps = data.get("apps", [])
-            print(f"\nFound {len(apps)} installed packages:")
-            for a in apps:
-                print(f"  Ã¢â‚¬Â¢ {a.get('name', 'Unknown')} ({a.get('id')}) v{a.get('version')} [{a.get('category')}]")
-                print(f"    Permissions: {', '.join(a.get('permissions', []))}")
-            print()
+    except urllib.error.HTTPError as e:
+        # WHY the body is read: the Studio refuses with 503 and says in the
+        # body which half of the path did not answer -- the device, the guest
+        # registry or the bridge -- and "HTTP Error 503" alone throws that
+        # away.
+        log_error(_refusal_reason(e) or f"Failed to query emulator: {e}")
+        return 1
     except Exception as e:
         log_error(f"Failed to query emulator: {e}")
         return 1
+    # WHY an unconfirmed query is not an empty list: a device that refused,
+    # timed out or answered in a shape the tool does not recognise is not
+    # evidence that nothing is installed, and reporting zero packages would be
+    # a claim about the guest that the guest never made.
+    if not data.get("success"):
+        log_error(f"The device did not confirm the query: {data.get('error', 'no reason given')}")
+        return 1
+    apps = data.get("apps")
+    if apps is None:
+        log_error("The device answered without a package list.")
+        return 1
+    print(f"\nFound {len(apps)} installed packages:")
+    for a in apps:
+        # WHY the optional fields: the guest registry reports the packages it
+        # holds, and for a system app that is a name and an id with no category
+        # and no permission list. Printing the missing values as "[None]" and an
+        # empty list would read as a device that declared none, which the device
+        # never said.
+        category = a.get("category")
+        print(f"  • {a.get('name', 'Unknown')} ({a.get('id')}) v{a.get('version')}"
+              + (f" [{category}]" if category else ""))
+        permissions = a.get("permissions") or []
+        print("    Permissions: " + (", ".join(permissions) if permissions else "not reported by the device"))
+    print()
     return 0
 
 
@@ -1654,8 +1687,8 @@ def cmd_sign(args):
     }
     sig_out.write_text(json.dumps(sig_doc, indent=2), encoding="utf-8")
     log_success(f"Signature written to {sig_out}")
-    log(f"  Ã¢â‚¬Â¢ SHA-256: {file_sha}")
-    log(f"  Ã¢â‚¬Â¢ Ed25519: {sig_bytes.hex()[:24]}...")
+    log(f"  • SHA-256: {file_sha}")
+    log(f"  • Ed25519: {sig_bytes.hex()[:24]}...")
     return 0
 
 
